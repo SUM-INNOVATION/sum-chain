@@ -6,7 +6,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::Result;
-use sumchain_consensus::{ConsensusEngine, ConsensusEvent, PoAEngine};
+use sumchain_consensus::{
+    bft::{Proposal, Vote, VoteType},
+    ConsensusEngine, ConsensusEvent,
+};
 use sumchain_crypto::KeyPair;
 use sumchain_genesis::Genesis;
 use sumchain_p2p::{NetworkCommand, NetworkConfig, NetworkEvent, NetworkService, SyncState, MAX_BLOCKS_PER_REQUEST};
@@ -17,6 +20,8 @@ use sumchain_storage::Database;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
+use crate::consensus_wrapper::ConsensusWrapper;
+
 /// Full node
 pub struct Node {
     /// Database
@@ -26,7 +31,7 @@ pub struct Node {
     /// Transaction mempool
     mempool: Arc<Mempool>,
     /// Consensus engine
-    consensus: Arc<PoAEngine>,
+    consensus: ConsensusWrapper,
     /// Network service
     network: Arc<NetworkService>,
     /// Network command receiver
@@ -79,6 +84,7 @@ impl Node {
         network_config: NetworkConfig,
         rpc_addr: SocketAddr,
         rpc_auth_config: RpcAuthConfig,
+        consensus_config: crate::config::ConsensusSettings,
     ) -> Result<Self> {
         Self::with_rpc_config(
             data_dir,
@@ -88,6 +94,7 @@ impl Node {
             rpc_addr,
             rpc_auth_config,
             RateLimitConfig::disabled(),
+            consensus_config,
         )
     }
 
@@ -100,6 +107,7 @@ impl Node {
         rpc_addr: SocketAddr,
         rpc_auth_config: RpcAuthConfig,
         rpc_rate_limit_config: RateLimitConfig,
+        consensus_config: crate::config::ConsensusSettings,
     ) -> Result<Self> {
         // Create data directory
         std::fs::create_dir_all(&data_dir)?;
@@ -116,14 +124,31 @@ impl Node {
             ..Default::default()
         }));
 
-        // Create consensus engine
-        let consensus = Arc::new(PoAEngine::new(
-            db.clone(),
-            state.clone(),
-            mempool.clone(),
-            &genesis,
-            validator_key,
-        )?);
+        // Create consensus engine based on config
+        use crate::config::ConsensusEngine as ConsensusEngineType;
+        let consensus = match consensus_config.engine {
+            ConsensusEngineType::Poa => {
+                ConsensusWrapper::new_poa(
+                    db.clone(),
+                    state.clone(),
+                    mempool.clone(),
+                    &genesis,
+                    validator_key,
+                )?
+            }
+            ConsensusEngineType::Bft => {
+                if validator_key.is_none() {
+                    return Err(anyhow::anyhow!("BFT consensus requires validator key"));
+                }
+                ConsensusWrapper::new_bft(
+                    db.clone(),
+                    state.clone(),
+                    mempool.clone(),
+                    &genesis,
+                    validator_key,
+                )?
+            }
+        };
 
         // Create network service
         let (network, network_command_rx) = NetworkService::new(network_config);
@@ -364,6 +389,55 @@ impl Node {
                         NetworkEvent::SyncRequestFailed { peer, error } => {
                             warn!("Sync request to {} failed: {}", peer, error);
                             // Could try another peer here
+                        }
+
+                        // BFT consensus messages
+                        NetworkEvent::BftProposalReceived(data) => {
+                            if let Ok(proposal) = Proposal::from_bytes(&data) {
+                                info!("Received BFT proposal for height {}", proposal.view.height);
+
+                                // Handle proposal and create prevote
+                                if let Ok(Some(prevote)) = self.consensus.handle_proposal(proposal) {
+                                    // Broadcast prevote
+                                    let vote_data = prevote.to_bytes();
+                                    let _ = command_sender
+                                        .send(NetworkCommand::BroadcastBftPrevote(vote_data))
+                                        .await;
+                                }
+                            }
+                        }
+
+                        NetworkEvent::BftPrevoteReceived(data) => {
+                            if let Ok(vote) = Vote::from_bytes(&data) {
+                                if vote.vote_type == VoteType::Prevote {
+                                    debug!("Received BFT prevote for height {}", vote.view.height);
+
+                                    // Handle prevote and create precommit if quorum reached
+                                    if let Ok(Some(precommit)) = self.consensus.handle_prevote(vote) {
+                                        // Broadcast precommit
+                                        let vote_data = precommit.to_bytes();
+                                        let _ = command_sender
+                                            .send(NetworkCommand::BroadcastBftPrecommit(vote_data))
+                                            .await;
+                                    }
+                                }
+                            }
+                        }
+
+                        NetworkEvent::BftPrecommitReceived(data) => {
+                            if let Ok(vote) = Vote::from_bytes(&data) {
+                                if vote.vote_type == VoteType::Precommit {
+                                    debug!("Received BFT precommit for height {}", vote.view.height);
+
+                                    // Handle precommit and commit block if quorum reached
+                                    if let Ok(Some(block_hash)) = self.consensus.handle_precommit(vote) {
+                                        info!("BFT consensus reached for block {}", block_hash);
+                                        // Block should already be in cache from proposal
+                                        // Execute and commit it
+                                        // (This integrates with existing block execution code)
+                                    }
+                                }
+                            }
                         }
                     }
                 }

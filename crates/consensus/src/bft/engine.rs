@@ -249,6 +249,82 @@ impl BftEngine {
             // In real implementation, we'd have proper timeout logic here
         }
     }
+
+    // Public methods for Node integration
+
+    /// Get current view
+    pub fn current_view(&self) -> View {
+        self.consensus_state.read().view
+    }
+
+    /// Create a prevote for a block
+    pub fn create_prevote(&self, view: View, block_hash: Option<Hash>) -> Result<Vote> {
+        if let Some(ref keypair) = self.validator_key {
+            Ok(Vote::new(view, VoteType::Prevote, block_hash, keypair))
+        } else {
+            Err(ConsensusError::NotValidator)
+        }
+    }
+
+    /// Create a precommit for a block
+    pub fn create_precommit(&self, view: View, block_hash: Option<Hash>) -> Result<Vote> {
+        if let Some(ref keypair) = self.validator_key {
+            Ok(Vote::new(view, VoteType::Precommit, block_hash, keypair))
+        } else {
+            Err(ConsensusError::NotValidator)
+        }
+    }
+
+    /// Add a prevote and return true if quorum reached
+    pub fn add_prevote(&self, vote: Vote) -> Result<bool> {
+        let view = vote.view;
+        let mut prevotes = self.prevotes.write();
+
+        let vote_set = prevotes
+            .entry(view)
+            .or_insert_with(|| VoteSet::new(view, VoteType::Prevote, self.validators.len()));
+
+        vote_set.add_vote(vote)?;
+        Ok(vote_set.has_two_thirds_majority().is_some())
+    }
+
+    /// Add a precommit and return true if quorum reached
+    pub fn add_precommit(&self, vote: Vote) -> Result<bool> {
+        let view = vote.view;
+        let mut precommits = self.precommits.write();
+
+        let vote_set = precommits
+            .entry(view)
+            .or_insert_with(|| VoteSet::new(view, VoteType::Precommit, self.validators.len()));
+
+        vote_set.add_vote(vote)?;
+        Ok(vote_set.has_two_thirds_majority().is_some())
+    }
+
+    /// Get prevote quorum block hash if it exists
+    pub fn get_prevote_quorum(&self, view: &View) -> Option<Hash> {
+        self.prevotes.read().get(view)?.has_two_thirds_majority()
+    }
+
+    /// Get precommit quorum block hash if it exists
+    pub fn get_precommit_quorum(&self, view: &View) -> Option<Hash> {
+        self.precommits.read().get(view)?.has_two_thirds_majority()
+    }
+
+    /// Get leader public key (make public)
+    pub fn get_leader(&self, view: &View) -> PublicKey {
+        let index = (view.height + view.round as u64) % self.validators.len() as u64;
+        self.validators[index as usize]
+    }
+
+    /// Check if this node is the leader (make public)
+    pub fn is_leader_for_view(&self, view: &View) -> bool {
+        if let Some(ref keypair) = self.validator_key {
+            self.get_leader(view) == *keypair.public_key()
+        } else {
+            false
+        }
+    }
 }
 
 #[async_trait]

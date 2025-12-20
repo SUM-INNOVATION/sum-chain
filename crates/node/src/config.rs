@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 pub struct NodeConfig {
     /// Node identity and basic settings
     pub node: NodeSettings,
+    /// Consensus settings
+    pub consensus: ConsensusSettings,
     /// Network/P2P settings
     pub network: NetworkSettings,
     /// RPC server settings
@@ -25,6 +27,7 @@ impl Default for NodeConfig {
     fn default() -> Self {
         Self {
             node: NodeSettings::default(),
+            consensus: ConsensusSettings::default(),
             network: NetworkSettings::default(),
             rpc: RpcSettings::default(),
             logging: LoggingSettings::default(),
@@ -69,6 +72,17 @@ data_dir = "data"
 
 # Path to validator key file (optional, only for validators)
 # validator_key = "validator.key"
+
+[consensus]
+# Consensus engine: "poa" or "bft"
+engine = "poa"
+
+# BFT consensus settings (only used if engine = "bft")
+[consensus.bft]
+propose_timeout_ms = 3000
+prevote_timeout_ms = 1000
+precommit_timeout_ms = 1000
+timeout_multiplier = 1.5
 
 [network]
 # P2P listen address
@@ -199,6 +213,66 @@ impl Default for LoggingSettings {
         Self {
             level: "info".to_string(),
             json: false,
+        }
+    }
+}
+
+/// Consensus engine type
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ConsensusEngine {
+    /// Proof of Authority (simple round-robin)
+    Poa,
+    /// Byzantine Fault Tolerant consensus
+    Bft,
+}
+
+impl Default for ConsensusEngine {
+    fn default() -> Self {
+        Self::Poa
+    }
+}
+
+/// Consensus configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ConsensusSettings {
+    /// Consensus engine type
+    pub engine: ConsensusEngine,
+    /// BFT-specific settings
+    pub bft: BftSettings,
+}
+
+impl Default for ConsensusSettings {
+    fn default() -> Self {
+        Self {
+            engine: ConsensusEngine::Poa,
+            bft: BftSettings::default(),
+        }
+    }
+}
+
+/// BFT consensus settings
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BftSettings {
+    /// Timeout for propose step (milliseconds)
+    pub propose_timeout_ms: u64,
+    /// Timeout for prevote step (milliseconds)
+    pub prevote_timeout_ms: u64,
+    /// Timeout for precommit step (milliseconds)
+    pub precommit_timeout_ms: u64,
+    /// Timeout multiplier for each round
+    pub timeout_multiplier: f64,
+}
+
+impl Default for BftSettings {
+    fn default() -> Self {
+        Self {
+            propose_timeout_ms: 3000,
+            prevote_timeout_ms: 1000,
+            precommit_timeout_ms: 1000,
+            timeout_multiplier: 1.5,
         }
     }
 }

@@ -20,10 +20,12 @@ use tracing::{error, info};
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 mod config;
+mod consensus_wrapper;
 mod node;
 mod tx_broadcaster;
 
 use config::NodeConfig;
+use consensus_wrapper::ConsensusWrapper;
 use node::Node;
 pub use tx_broadcaster::{TxBroadcaster, TxBroadcasterConfig, TxBroadcasterStats};
 
@@ -308,6 +310,7 @@ async fn main() -> Result<()> {
                 cfg.rpc.addr.parse().context("Invalid RPC address")?,
                 rpc_auth_config,
                 rpc_rate_limit_config,
+                cfg.consensus,
             )?;
 
             // Run node
