@@ -1,0 +1,22 @@
+[package]
+name = "sumchain-integration-tests"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+sumchain-primitives = { path = "../primitives" }
+sumchain-crypto = { path = "../crypto" }
+sumchain-storage = { path = "../storage" }
+sumchain-genesis = { path = "../genesis" }
+sumchain-state = { path = "../state" }
+sumchain-consensus = { path = "../consensus" }
+sumchain-p2p = { path = "../p2p" }
+sumchain-rpc = { path = "../rpc" }
+
+tokio = { workspace = true }
+tempfile = "3.10"
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

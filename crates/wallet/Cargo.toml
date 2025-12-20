@@ -1,0 +1,35 @@
+[package]
+name = "sumchain-wallet"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "CLI wallet for SUM Chain"
+
+[[bin]]
+name = "sumchain-wallet"
+path = "src/main.rs"
+
+[dependencies]
+sumchain-primitives = { path = "../primitives" }
+sumchain-crypto = { path = "../crypto" }
+sumchain-rpc = { path = "../rpc" }
+tokio = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+jsonrpsee = { workspace = true }
+argon2 = { workspace = true }
+aes-gcm = { workspace = true }
+zeroize = { workspace = true }
+rand = { workspace = true }
+rpassword = "7.3"
+colored = "2.1"
+dialoguer = "0.11"
+chrono = "0.4"
+
+[dev-dependencies]
+tempfile = "3.10"

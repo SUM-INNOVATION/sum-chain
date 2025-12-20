@@ -1,0 +1,23 @@
+[package]
+name = "sumchain-consensus"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Proof of Authority consensus for SUM Chain"
+
+[dependencies]
+sumchain-primitives = { path = "../primitives" }
+sumchain-crypto = { path = "../crypto" }
+sumchain-storage = { path = "../storage" }
+sumchain-genesis = { path = "../genesis" }
+sumchain-state = { path = "../state" }
+tokio = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+parking_lot = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.10"

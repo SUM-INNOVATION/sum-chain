@@ -1,0 +1,114 @@
+//! Setup script for local testnet.
+//! Generates validator keys and creates a genesis file.
+
+use std::collections::HashMap;
+use std::fs;
+
+use anyhow::Result;
+use sumchain_crypto::KeyPair;
+use sumchain_genesis::{ChainParams, Genesis};
+
+fn main() -> Result<()> {
+    println!("=== SUM Chain Local Testnet Setup ===\n");
+
+    // Create directories
+    fs::create_dir_all("keys")?;
+    fs::create_dir_all("genesis")?;
+
+    // Generate validator keys
+    println!("Generating validator keys...");
+    let mut validators = Vec::new();
+    let mut alloc = HashMap::new();
+
+    for i in 1..=3 {
+        let keypair = KeyPair::generate();
+        let pubkey = keypair.public_key().to_base58();
+        let address = keypair.address().to_base58();
+
+        // Save private key
+        let key_path = format!("keys/validator{}.json", i);
+        let key_json = serde_json::to_string_pretty(keypair.private_key().as_bytes())?;
+        fs::write(&key_path, &key_json)?;
+
+        println!("  Validator {}: {}", i, pubkey);
+        println!("    Address: {}", address);
+        println!("    Key saved to: {}", key_path);
+
+        validators.push(pubkey);
+        alloc.insert(address, 1_000_000_000_000_000_000u128); // 1e18 SUM tokens
+    }
+
+    // Generate an extra account for testing
+    println!("\nGenerating test account...");
+    let test_keypair = KeyPair::generate();
+    let _test_pubkey = test_keypair.public_key().to_base58();
+    let test_address = test_keypair.address().to_base58();
+
+    let key_json = serde_json::to_string_pretty(test_keypair.private_key().as_bytes())?;
+    fs::write("keys/test_account.json", &key_json)?;
+
+    println!("  Test account: {}", test_address);
+    println!("    Key saved to: keys/test_account.json");
+
+    alloc.insert(test_address, 1_000_000_000_000_000_000u128);
+
+    // Create genesis
+    println!("\nCreating genesis file...");
+    let genesis = Genesis::new(
+        1337, // Local testnet chain ID
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64,
+        validators,
+        alloc,
+        ChainParams {
+            block_time_ms: 2000,
+            max_block_bytes: 1_000_000,
+            max_txs_per_block: 1000,
+            min_fee: 1,
+            finality_depth: 3, // 3 block confirmations for finality
+        },
+    );
+
+    genesis.to_file("genesis/local_genesis.json")?;
+    println!("  Genesis saved to: genesis/local_genesis.json");
+
+    println!("\n=== Setup Complete ===");
+    println!("\nTo start the testnet, run:");
+    println!("  # Terminal 1 - Validator 1");
+    println!("  cargo run --bin sumchain -- run \\");
+    println!("    --genesis genesis/local_genesis.json \\");
+    println!("    --data-dir data/validator1 \\");
+    println!("    --validator-key keys/validator1.json \\");
+    println!("    --p2p-addr /ip4/0.0.0.0/tcp/30301 \\");
+    println!("    --rpc-addr 127.0.0.1:8545");
+    println!();
+    println!("  # Terminal 2 - Validator 2");
+    println!("  cargo run --bin sumchain -- run \\");
+    println!("    --genesis genesis/local_genesis.json \\");
+    println!("    --data-dir data/validator2 \\");
+    println!("    --validator-key keys/validator2.json \\");
+    println!("    --p2p-addr /ip4/0.0.0.0/tcp/30302 \\");
+    println!("    --rpc-addr 127.0.0.1:8546 \\");
+    println!("    --bootnodes /ip4/127.0.0.1/tcp/30301");
+    println!();
+    println!("  # Terminal 3 - Validator 3");
+    println!("  cargo run --bin sumchain -- run \\");
+    println!("    --genesis genesis/local_genesis.json \\");
+    println!("    --data-dir data/validator3 \\");
+    println!("    --validator-key keys/validator3.json \\");
+    println!("    --p2p-addr /ip4/0.0.0.0/tcp/30303 \\");
+    println!("    --rpc-addr 127.0.0.1:8547 \\");
+    println!("    --bootnodes /ip4/127.0.0.1/tcp/30301");
+    println!();
+    println!("  # Terminal 4 - Full Node (non-validator)");
+    println!("  cargo run --bin sumchain -- run \\");
+    println!("    --genesis genesis/local_genesis.json \\");
+    println!("    --data-dir data/fullnode \\");
+    println!("    --p2p-addr /ip4/0.0.0.0/tcp/30304 \\");
+    println!("    --rpc-addr 127.0.0.1:8548 \\");
+    println!("    --bootnodes /ip4/127.0.0.1/tcp/30301");
+
+    Ok(())
+}

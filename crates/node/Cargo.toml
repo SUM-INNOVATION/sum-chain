@@ -1,0 +1,36 @@
+[package]
+name = "sumchain-node"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "SUM Chain full node"
+
+[[bin]]
+name = "sumchain"
+path = "src/main.rs"
+
+[dependencies]
+sumchain-primitives = { path = "../primitives" }
+sumchain-crypto = { path = "../crypto" }
+sumchain-storage = { path = "../storage" }
+sumchain-genesis = { path = "../genesis" }
+sumchain-state = { path = "../state" }
+sumchain-consensus = { path = "../consensus" }
+sumchain-p2p = { path = "../p2p" }
+sumchain-rpc = { path = "../rpc" }
+jsonrpsee = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+parking_lot = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.10"

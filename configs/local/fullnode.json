@@ -1,0 +1,16 @@
+{
+  "name": "fullnode",
+  "data_dir": "data/fullnode",
+  "listen_addr": "/ip4/0.0.0.0/tcp/30304",
+  "bootnodes": [
+    "/ip4/127.0.0.1/tcp/30301",
+    "/ip4/127.0.0.1/tcp/30302",
+    "/ip4/127.0.0.1/tcp/30303"
+  ],
+  "node_key_path": null,
+  "is_validator": false,
+  "validator_key_path": null,
+  "rpc_addr": "127.0.0.1:8548",
+  "rpc_enabled": true,
+  "log_level": "info"
+}

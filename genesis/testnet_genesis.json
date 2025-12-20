@@ -1,0 +1,20 @@
+{
+  "chain_id": 1337,
+  "genesis_time": 1704067200000,
+  "validators": [
+    "TESTNET_VALIDATOR1_PUBKEY",
+    "TESTNET_VALIDATOR2_PUBKEY",
+    "TESTNET_VALIDATOR3_PUBKEY"
+  ],
+  "alloc": {
+    "FAUCET_ADDRESS": 1000000000000000000,
+    "TEST_ACCOUNT_1": 100000000000000000,
+    "TEST_ACCOUNT_2": 100000000000000000
+  },
+  "params": {
+    "block_time_ms": 2000,
+    "max_block_bytes": 1000000,
+    "max_txs_per_block": 1000,
+    "min_fee": 100000
+  }
+}

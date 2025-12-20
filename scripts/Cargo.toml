@@ -1,0 +1,20 @@
+[package]
+name = "sumchain-scripts"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "setup-local-testnet"
+path = "src/setup_local_testnet.rs"
+
+[[bin]]
+name = "generate-genesis"
+path = "src/generate_genesis.rs"
+
+[dependencies]
+sumchain-crypto = { path = "../crates/crypto" }
+sumchain-primitives = { path = "../crates/primitives" }
+sumchain-genesis = { path = "../crates/genesis" }
+serde_json = "1.0"
+anyhow = "1.0"

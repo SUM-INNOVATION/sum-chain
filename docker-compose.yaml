@@ -1,0 +1,157 @@
+# SUM Chain Docker Compose for Local Development/Testing
+#
+# Usage:
+#   docker-compose up -d      # Start all services
+#   docker-compose logs -f    # Follow logs
+#   docker-compose down -v    # Stop and remove volumes
+#
+version: '3.8'
+
+services:
+  # Validator Node 1
+  validator-1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sumchain-validator-1
+    hostname: validator-1
+    command:
+      - "--config"
+      - "/config/node.toml"
+      - "--validator"
+    volumes:
+      - validator-1-data:/data
+      - ./deploy/config/validator-1:/config:ro
+      - ./deploy/keys/validator-1:/secrets:ro
+    ports:
+      - "30303:30303"
+      - "8545:8545"
+      - "9090:9090"
+    environment:
+      - RUST_LOG=info,sumchain=debug
+    networks:
+      - sumchain
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8545/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  # Validator Node 2
+  validator-2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sumchain-validator-2
+    hostname: validator-2
+    command:
+      - "--config"
+      - "/config/node.toml"
+      - "--validator"
+    volumes:
+      - validator-2-data:/data
+      - ./deploy/config/validator-2:/config:ro
+      - ./deploy/keys/validator-2:/secrets:ro
+    ports:
+      - "30304:30303"
+      - "8546:8545"
+      - "9091:9090"
+    environment:
+      - RUST_LOG=info,sumchain=debug
+    networks:
+      - sumchain
+    depends_on:
+      - validator-1
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8545/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  # Validator Node 3
+  validator-3:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sumchain-validator-3
+    hostname: validator-3
+    command:
+      - "--config"
+      - "/config/node.toml"
+      - "--validator"
+    volumes:
+      - validator-3-data:/data
+      - ./deploy/config/validator-3:/config:ro
+      - ./deploy/keys/validator-3:/secrets:ro
+    ports:
+      - "30305:30303"
+      - "8547:8545"
+      - "9092:9090"
+    environment:
+      - RUST_LOG=info,sumchain=debug
+    networks:
+      - sumchain
+    depends_on:
+      - validator-1
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8545/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  # Prometheus for metrics
+  prometheus:
+    image: prom/prometheus:v2.47.0
+    container_name: sumchain-prometheus
+    volumes:
+      - ./deploy/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9099:9090"
+    networks:
+      - sumchain
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"
+    restart: unless-stopped
+
+  # Grafana for dashboards
+  grafana:
+    image: grafana/grafana:10.1.0
+    container_name: sumchain-grafana
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./deploy/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=sumchain
+      - GF_USERS_ALLOW_SIGN_UP=false
+    networks:
+      - sumchain
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+networks:
+  sumchain:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+volumes:
+  validator-1-data:
+  validator-2-data:
+  validator-3-data:
+  prometheus-data:
+  grafana-data:

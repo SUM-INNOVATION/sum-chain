@@ -1,0 +1,8 @@
+# SUM Chain Namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sumchain
+  labels:
+    app.kubernetes.io/name: sumchain
+    app.kubernetes.io/part-of: sumchain-network

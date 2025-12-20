@@ -1,0 +1,65 @@
+# SUM Chain Services
+---
+# Headless service for StatefulSet DNS
+apiVersion: v1
+kind: Service
+metadata:
+  name: sumchain-validator
+  namespace: sumchain
+  labels:
+    app.kubernetes.io/name: sumchain
+    app.kubernetes.io/component: validator
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: sumchain
+    app.kubernetes.io/component: validator
+  ports:
+    - name: p2p
+      port: 30303
+      targetPort: p2p
+    - name: rpc
+      port: 8545
+      targetPort: rpc
+    - name: metrics
+      port: 9090
+      targetPort: metrics
+---
+# External service for RPC access
+apiVersion: v1
+kind: Service
+metadata:
+  name: sumchain-rpc
+  namespace: sumchain
+  labels:
+    app.kubernetes.io/name: sumchain
+    app.kubernetes.io/component: rpc
+spec:
+  type: LoadBalancer
+  selector:
+    app.kubernetes.io/name: sumchain
+    app.kubernetes.io/component: validator
+  ports:
+    - name: rpc
+      port: 8545
+      targetPort: rpc
+      protocol: TCP
+---
+# Service for Prometheus scraping
+apiVersion: v1
+kind: Service
+metadata:
+  name: sumchain-metrics
+  namespace: sumchain
+  labels:
+    app.kubernetes.io/name: sumchain
+    app.kubernetes.io/component: metrics
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: sumchain
+    app.kubernetes.io/component: validator
+  ports:
+    - name: metrics
+      port: 9090
+      targetPort: metrics

@@ -1,0 +1,21 @@
+[package]
+name = "sumchain-crypto"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Cryptographic operations for SUM Chain"
+
+[dependencies]
+sumchain-primitives = { path = "../primitives" }
+ed25519-dalek = { workspace = true }
+blake3 = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+zeroize = { workspace = true }
+hex = { workspace = true }
+bs58 = { workspace = true }
+serde-big-array = "0.5"
+
+[dev-dependencies]

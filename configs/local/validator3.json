@@ -1,0 +1,14 @@
+{
+  "name": "validator3",
+  "data_dir": "data/validator3",
+  "listen_addr": "/ip4/0.0.0.0/tcp/30303",
+  "bootnodes": [
+    "/ip4/127.0.0.1/tcp/30301"
+  ],
+  "node_key_path": null,
+  "is_validator": true,
+  "validator_key_path": "keys/validator3.json",
+  "rpc_addr": "127.0.0.1:8547",
+  "rpc_enabled": true,
+  "log_level": "info"
+}

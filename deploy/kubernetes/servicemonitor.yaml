@@ -1,0 +1,23 @@
+# Prometheus ServiceMonitor for SUM Chain
+# Requires Prometheus Operator to be installed
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: sumchain
+  namespace: sumchain
+  labels:
+    app.kubernetes.io/name: sumchain
+    app.kubernetes.io/component: monitoring
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sumchain
+      app.kubernetes.io/component: metrics
+  namespaceSelector:
+    matchNames:
+      - sumchain
+  endpoints:
+    - port: metrics
+      interval: 15s
+      path: /metrics
+      scheme: http

@@ -1,0 +1,95 @@
+# SUM Chain BFT Consensus Configuration
+#
+# This file demonstrates how to configure a validator node to use
+# Byzantine Fault Tolerant (BFT) consensus instead of the default PoA.
+
+[node]
+# Node type - must be "validator" to participate in BFT consensus
+node_type = "validator"
+
+# Path to validator private key (Ed25519)
+validator_key_file = "./validator-key.pem"
+
+# Chain ID to connect to
+chain_id = 1
+
+[consensus]
+# Consensus engine: "poa" or "bft"
+engine = "bft"
+
+[consensus.bft]
+# Timeout for propose step (milliseconds)
+# Increase this if your network has high latency
+propose_timeout_ms = 3000
+
+# Timeout for prevote step (milliseconds)
+prevote_timeout_ms = 1000
+
+# Timeout for precommit step (milliseconds)
+precommit_timeout_ms = 1000
+
+# Timeout multiplier for each successive round
+# Round R timeout = base_timeout * multiplier^R
+# Default 1.5 means timeouts increase: 3s, 4.5s, 6.75s, ...
+timeout_multiplier = 1.5
+
+# Maximum number of rounds before giving up on a height
+# Set to 0 for unlimited rounds (recommended for production)
+max_rounds = 0
+
+[network]
+# P2P listen address
+listen_addr = "0.0.0.0"
+listen_port = 9933
+
+# Bootstrap nodes to connect to
+# These should be stable validator nodes in the network
+bootnodes = [
+    "/ip4/10.0.1.10/tcp/9933/p2p/12D3KooWBootNode1...",
+    "/ip4/10.0.1.11/tcp/9933/p2p/12D3KooWBootNode2...",
+]
+
+# Enable mDNS for local peer discovery (disable in production)
+enable_mdns = false
+
+# Maximum connections
+max_inbound = 50
+max_outbound = 50
+
+[storage]
+# Database path
+db_path = "./data/chain.db"
+
+# Enable state pruning (keep only recent states)
+enable_pruning = false
+
+# How many historical states to keep if pruning is enabled
+pruning_history = 256
+
+[rpc]
+# JSON-RPC listen address
+listen_addr = "127.0.0.1"
+listen_port = 8545
+
+# Enable specific RPC modules
+# Available: sum, net, web3, debug
+enabled_modules = ["sum", "net", "web3"]
+
+[metrics]
+# Enable Prometheus metrics endpoint
+enabled = true
+listen_addr = "127.0.0.1"
+listen_port = 9615
+
+# Metrics update interval (seconds)
+update_interval = 10
+
+[logging]
+# Log level: trace, debug, info, warn, error
+level = "info"
+
+# Log format: text, json
+format = "text"
+
+# Log to file (optional)
+# log_file = "./logs/validator.log"
