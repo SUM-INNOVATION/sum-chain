@@ -65,7 +65,7 @@ impl PoAEngine {
             .validator_pubkeys()
             .map_err(|e| ConsensusError::Genesis(e.to_string()))?;
 
-        let executor = Arc::new(BlockExecutor::new(state.clone(), genesis.params.clone()));
+        let executor = Arc::new(BlockExecutor::new(state.clone(), db.clone(), genesis.params.clone()));
         let (event_tx, _) = broadcast::channel(100);
 
         Ok(Self {

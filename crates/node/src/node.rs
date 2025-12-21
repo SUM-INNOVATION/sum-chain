@@ -63,6 +63,7 @@ impl Node {
         validator_key: Option<KeyPair>,
         network_config: NetworkConfig,
         rpc_addr: SocketAddr,
+        consensus_config: crate::config::ConsensusSettings,
     ) -> Result<Self> {
         Self::with_rpc_config(
             data_dir,
@@ -72,6 +73,7 @@ impl Node {
             rpc_addr,
             RpcAuthConfig::disabled(),
             RateLimitConfig::disabled(),
+            consensus_config,
         )
     }
 
@@ -526,7 +528,7 @@ impl Node {
             self.db.clone(),
             self.state.clone(),
             self.mempool.clone(),
-            self.consensus.clone(),
+            self.consensus.as_consensus_engine(),
             self.tx_sender.clone(),
             peer_count,
             peer_id,

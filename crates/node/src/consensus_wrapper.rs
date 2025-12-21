@@ -4,12 +4,12 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use sumchain_consensus::{
-    bft::{BftEngine, Proposal, Vote, VoteType},
+    bft::{BftEngine, Proposal, Vote},
     ConsensusEngine, ConsensusEvent, PoAEngine,
 };
 use sumchain_crypto::KeyPair;
 use sumchain_genesis::Genesis;
-use sumchain_primitives::{Block, BlockHeight, PublicKey};
+use sumchain_primitives::{Block, BlockHeight};
 use sumchain_state::{Mempool, StateManager};
 use sumchain_storage::Database;
 
@@ -50,7 +50,7 @@ impl ConsensusWrapper {
     pub fn is_validator(&self) -> bool {
         match self {
             Self::Poa(engine) => engine.is_validator(),
-            Self::Bft(_) => true, // BFT requires validator key
+            Self::Bft(engine) => engine.is_validator(),
         }
     }
 
@@ -59,28 +59,6 @@ impl ConsensusWrapper {
         match self {
             Self::Poa(_) => "PoA",
             Self::Bft(_) => "BFT",
-        }
-    }
-
-    /// Propose a new block (validator only)
-    pub async fn propose_block(
-        &self,
-        parent_hash: sumchain_primitives::Hash,
-        height: BlockHeight,
-        transactions: Vec<sumchain_primitives::SignedTransaction>,
-        state_root: sumchain_primitives::Hash,
-    ) -> Result<Option<Block>> {
-        match self {
-            Self::Poa(engine) => {
-                engine
-                    .propose_block(parent_hash, height, transactions, state_root)
-                    .await
-            }
-            Self::Bft(_engine) => {
-                // BFT proposal happens in consensus loop
-                // This is called from block builder, not directly
-                Ok(None)
-            }
         }
     }
 
@@ -111,20 +89,21 @@ impl ConsensusWrapper {
         match self {
             Self::Poa(_) => Ok(None),
             Self::Bft(engine) => {
+                let view = vote.view;
                 let has_quorum = engine.add_prevote(vote)?;
 
                 if has_quorum {
                     // Check if we have >2/3 prevotes for a block
-                    if let Some(block_hash) = engine.get_prevote_quorum(&vote.view) {
+                    if let Some(block_hash) = engine.get_prevote_quorum(&view) {
                         // Create precommit
                         let precommit = engine.create_precommit(
-                            vote.view,
+                            view,
                             Some(block_hash),
                         )?;
                         return Ok(Some(precommit));
                     } else {
                         // No quorum, send nil precommit
-                        let precommit = engine.create_precommit(vote.view, None)?;
+                        let precommit = engine.create_precommit(view, None)?;
                         return Ok(Some(precommit));
                     }
                 }
@@ -139,11 +118,12 @@ impl ConsensusWrapper {
         match self {
             Self::Poa(_) => Ok(None),
             Self::Bft(engine) => {
+                let view = vote.view;
                 let has_quorum = engine.add_precommit(vote)?;
 
                 if has_quorum {
                     // Check if we have >2/3 precommits for a block
-                    if let Some(block_hash) = engine.get_precommit_quorum(&vote.view) {
+                    if let Some(block_hash) = engine.get_precommit_quorum(&view) {
                         return Ok(Some(block_hash));
                     }
                 }
@@ -174,16 +154,16 @@ impl ConsensusWrapper {
     /// Start consensus engine
     pub async fn start(&self) -> Result<()> {
         match self {
-            Self::Poa(engine) => engine.start().await,
-            Self::Bft(engine) => engine.start().await,
+            Self::Poa(engine) => Ok(engine.start().await?),
+            Self::Bft(engine) => Ok(engine.start().await?),
         }
     }
 
     /// Stop consensus engine
     pub async fn stop(&self) -> Result<()> {
         match self {
-            Self::Poa(engine) => engine.stop().await,
-            Self::Bft(engine) => engine.stop().await,
+            Self::Poa(engine) => Ok(engine.stop().await?),
+            Self::Bft(engine) => Ok(engine.stop().await?),
         }
     }
 
@@ -214,8 +194,8 @@ impl ConsensusWrapper {
     /// Import block
     pub async fn import_block(&self, block: Block) -> Result<()> {
         match self {
-            Self::Poa(engine) => engine.import_block(block).await,
-            Self::Bft(engine) => engine.import_block(block).await,
+            Self::Poa(engine) => Ok(engine.import_block(block).await?),
+            Self::Bft(engine) => Ok(engine.import_block(block).await?),
         }
     }
 
@@ -227,19 +207,33 @@ impl ConsensusWrapper {
         }
     }
 
+    /// Get block by height
+    pub fn get_block_by_height(&self, height: BlockHeight) -> Option<Block> {
+        match self {
+            Self::Poa(engine) => engine.get_block_by_height(height),
+            Self::Bft(engine) => engine.get_block_by_height(height),
+        }
+    }
+
     /// Load chain from storage
     pub fn load_chain(&self) -> Result<Option<Block>> {
         match self {
-            Self::Poa(engine) => engine.load_chain(),
-            Self::Bft(engine) => engine.load_chain(),
+            Self::Poa(engine) => Ok(engine.load_chain()?),
+            Self::Bft(engine) => Ok(engine.load_chain()?),
         }
     }
 
     /// Initialize genesis
     pub fn init_genesis(&self, genesis: &Genesis) -> Result<()> {
         match self {
-            Self::Poa(engine) => engine.init_genesis(genesis),
-            Self::Bft(engine) => engine.init_genesis(genesis),
+            Self::Poa(engine) => {
+                engine.init_genesis(genesis)?;
+                Ok(())
+            }
+            Self::Bft(engine) => {
+                engine.init_genesis(genesis)?;
+                Ok(())
+            }
         }
     }
 
@@ -264,6 +258,14 @@ impl ConsensusWrapper {
                     tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
                 }
             }
+        }
+    }
+
+    /// Get inner engine as trait object for RPC
+    pub fn as_consensus_engine(&self) -> Arc<dyn ConsensusEngine> {
+        match self {
+            Self::Poa(engine) => Arc::clone(engine) as Arc<dyn ConsensusEngine>,
+            Self::Bft(engine) => Arc::clone(engine) as Arc<dyn ConsensusEngine>,
         }
     }
 }

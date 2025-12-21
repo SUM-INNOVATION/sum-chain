@@ -395,6 +395,76 @@ validatorSet.validators.forEach((v, i) => {
 });
 ```
 
+## NFT (SUM-721) Support
+
+The SDK includes full support for the SUM-721 native NFT standard.
+
+### Get Collection Info
+
+```typescript
+import { Provider } from '@sumchain/sdk';
+
+const provider = new Provider('http://localhost:8545');
+
+const collection = await provider.getNftCollection('0x1234...');
+if (collection) {
+  console.log(`Collection: ${collection.name} (${collection.symbol})`);
+  console.log(`Total supply: ${collection.total_supply}/${collection.max_supply || 'unlimited'}`);
+  console.log(`Transferable: ${collection.transferable}`);
+  console.log(`Royalty: ${collection.royalty_bps / 100}%`);
+}
+```
+
+### Get Token Info
+
+```typescript
+const token = await provider.getNftToken('0x1234...', 42);
+if (token) {
+  console.log(`Token #${token.token_id}`);
+  console.log(`Owner: ${token.owner}`);
+  console.log(`Creator: ${token.creator}`);
+  console.log(`Metadata: ${token.metadata}`);
+  console.log(`Is Document: ${token.is_document}`);
+}
+```
+
+### List Owned NFTs
+
+```typescript
+const owned = await provider.getNftsByOwner('SUM1abc...');
+console.log(`Address owns ${owned.count} NFTs:`);
+
+for (const ref of owned.tokens) {
+  const token = await provider.getNftToken(ref.collection_id, ref.token_id);
+  console.log(`  - ${token?.metadata || 'Unknown'}`);
+}
+```
+
+### Check NFT Balance
+
+```typescript
+const balance = await provider.getNftBalance('SUM1abc...');
+console.log(`NFT Balance: ${balance} tokens`);
+```
+
+### Verify Document Certificate
+
+```typescript
+// Check if a certified document NFT exists and is valid
+const collectionId = '0x...'; // University degree collection
+const tokenId = 42;
+
+const exists = await provider.nftTokenExists(collectionId, tokenId);
+if (exists) {
+  const token = await provider.getNftToken(collectionId, tokenId);
+  if (token?.is_document) {
+    console.log('Valid certified document');
+    console.log(`Issued to: ${token.owner}`);
+    console.log(`Metadata: ${token.metadata}`);
+  }
+}
+```
+
 ## TypeScript Support
 
 The SDK is written in TypeScript and includes full type definitions:

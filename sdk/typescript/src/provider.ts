@@ -14,6 +14,9 @@ import type {
   KoppaAmount,
   Address,
   Hash,
+  NftCollectionInfo,
+  NftTokenInfo,
+  NftOwnerTokens,
 } from './types';
 
 /**
@@ -243,5 +246,135 @@ export class Provider {
     }
 
     throw new Error(`Confirmation timeout after ${timeout}ms`);
+  }
+
+  // ==========================================================================
+  // NFT (SUM-721) Methods
+  // ==========================================================================
+
+  /**
+   * Get NFT collection by ID
+   *
+   * @param collectionId - Collection ID (hex string with or without 0x prefix)
+   * @returns Collection info or null if not found
+   *
+   * @example
+   * ```ts
+   * const collection = await provider.getNftCollection('0x1234...');
+   * if (collection) {
+   *   console.log(`Collection: ${collection.name} (${collection.symbol})`);
+   *   console.log(`Total supply: ${collection.total_supply}`);
+   * }
+   * ```
+   */
+  async getNftCollection(collectionId: string): Promise<NftCollectionInfo | null> {
+    return this.request<NftCollectionInfo | null>('nft_getCollection', [collectionId]);
+  }
+
+  /**
+   * Get NFT token by collection ID and token ID
+   *
+   * @param collectionId - Collection ID (hex string)
+   * @param tokenId - Token ID
+   * @returns Token info or null if not found
+   *
+   * @example
+   * ```ts
+   * const token = await provider.getNftToken('0x1234...', 42);
+   * if (token) {
+   *   console.log(`Owner: ${token.owner}`);
+   *   console.log(`Metadata: ${token.metadata}`);
+   * }
+   * ```
+   */
+  async getNftToken(collectionId: string, tokenId: number): Promise<NftTokenInfo | null> {
+    return this.request<NftTokenInfo | null>('nft_getToken', [collectionId, tokenId]);
+  }
+
+  /**
+   * Get all NFT tokens owned by an address
+   *
+   * @param owner - Owner address
+   * @returns Object with owner, count, and list of token references
+   *
+   * @example
+   * ```ts
+   * const owned = await provider.getNftsByOwner('SUM1abc...');
+   * console.log(`Owns ${owned.count} NFTs`);
+   * for (const token of owned.tokens) {
+   *   console.log(`  Collection ${token.collection_id}, Token #${token.token_id}`);
+   * }
+   * ```
+   */
+  async getNftsByOwner(owner: Address): Promise<NftOwnerTokens> {
+    return this.request<NftOwnerTokens>('nft_getTokensByOwner', [owner]);
+  }
+
+  /**
+   * Get NFT balance (count of tokens) for an address
+   *
+   * @param owner - Owner address
+   * @returns Number of NFTs owned
+   *
+   * @example
+   * ```ts
+   * const count = await provider.getNftBalance('SUM1abc...');
+   * console.log(`Owns ${count} NFTs`);
+   * ```
+   */
+  async getNftBalance(owner: Address): Promise<number> {
+    return this.request<number>('nft_balanceOf', [owner]);
+  }
+
+  /**
+   * Get owner of a specific NFT token
+   *
+   * @param collectionId - Collection ID (hex string)
+   * @param tokenId - Token ID
+   * @returns Owner address or null if token doesn't exist
+   *
+   * @example
+   * ```ts
+   * const owner = await provider.getNftOwner('0x1234...', 42);
+   * if (owner) {
+   *   console.log(`Token owner: ${owner}`);
+   * }
+   * ```
+   */
+  async getNftOwner(collectionId: string, tokenId: number): Promise<Address | null> {
+    return this.request<Address | null>('nft_ownerOf', [collectionId, tokenId]);
+  }
+
+  /**
+   * Check if an NFT token exists
+   *
+   * @param collectionId - Collection ID (hex string)
+   * @param tokenId - Token ID
+   * @returns True if token exists
+   *
+   * @example
+   * ```ts
+   * const exists = await provider.nftTokenExists('0x1234...', 42);
+   * console.log(`Token exists: ${exists}`);
+   * ```
+   */
+  async nftTokenExists(collectionId: string, tokenId: number): Promise<boolean> {
+    return this.request<boolean>('nft_tokenExists', [collectionId, tokenId]);
+  }
+
+  /**
+   * Get all token IDs in a collection
+   *
+   * @param collectionId - Collection ID (hex string)
+   * @returns Array of token IDs
+   *
+   * @example
+   * ```ts
+   * const tokenIds = await provider.getTokensInCollection('0x1234...');
+   * console.log(`Collection has ${tokenIds.length} tokens`);
+   * ```
+   */
+  async getTokensInCollection(collectionId: string): Promise<number[]> {
+    return this.request<number[]>('nft_getTokensInCollection', [collectionId]);
   }
 }

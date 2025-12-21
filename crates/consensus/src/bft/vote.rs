@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use sumchain_crypto::{sign, verify_signature, KeyPair};
-use sumchain_primitives::{Block, BlockHeight, Hash, PublicKey, Signature};
+use sumchain_crypto::{sign, verify, KeyPair, PublicKey, Signature};
+use sumchain_primitives::{Block, Hash};
 
 use super::types::{Round, View, VoteType};
 use crate::{ConsensusError, Result};
@@ -32,14 +32,14 @@ impl Proposal {
             view,
             block,
             valid_round,
-            signature: *signature.as_bytes(),
+            signature,
         }
     }
 
     /// Verify proposal signature
     pub fn verify(&self, proposer: &PublicKey) -> bool {
         let signing_data = Self::signing_data(&self.view, self.block.hash(), self.valid_round);
-        verify_signature(proposer, &signing_data, &self.signature)
+        verify(&signing_data, &self.signature, proposer).is_ok()
     }
 
     /// Generate signing data
@@ -98,14 +98,14 @@ impl Vote {
             vote_type,
             block_hash,
             validator: *keypair.public_key(),
-            signature: *signature.as_bytes(),
+            signature,
         }
     }
 
     /// Verify vote signature
     pub fn verify(&self) -> bool {
         let signing_data = Self::signing_data(&self.view, &self.vote_type, &self.block_hash);
-        verify_signature(&self.validator, &signing_data, &self.signature)
+        verify(&signing_data, &self.signature, &self.validator).is_ok()
     }
 
     /// Generate signing data

@@ -12,9 +12,10 @@ pub mod node_key;
 pub mod peer_manager;
 pub mod sync;
 
+pub use behaviour::{NetworkSecurityConfig, SumChainBehaviour};
 pub use block_syncer::{BlockSyncer, BlockSyncerConfig, SyncPeerInfo, SyncStats, SyncerState};
 pub use config::NetworkConfig;
-pub use network::{NetworkCommand, NetworkEvent, NetworkService, SyncRequestId};
+pub use network::{NetworkCommand, NetworkEvent, NetworkService, RateLimitConfig, SyncRequestId};
 pub use node_key::load_or_generate_keypair;
 pub use peer_manager::{
     ConnectionDirection, ConnectionLimits, ConnectionStats, PeerInfo, PeerManager, PeerState,

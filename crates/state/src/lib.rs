@@ -6,12 +6,14 @@
 pub mod cache;
 pub mod executor;
 pub mod mempool;
+pub mod nft_executor;
 pub mod snapshot;
 pub mod state;
 
 pub use cache::{CacheStats, CachedAccount, StateCache};
 pub use executor::{BlockExecutor, TxExecutionResult};
 pub use mempool::{Mempool, MempoolConfig, MempoolStats};
+pub use nft_executor::{NftExecutionResult, NftExecutor};
 pub use snapshot::{Snapshot, SnapshotHeader, SnapshotManager, SnapshotSyncConfig, RestoreResult};
 pub use state::StateManager;
 
@@ -52,6 +54,9 @@ pub enum StateError {
 
     #[error("Genesis error: {0}")]
     Genesis(String),
+
+    #[error("NFT error: {0}")]
+    NftError(String),
 }
 
 pub type Result<T> = std::result::Result<T, StateError>;

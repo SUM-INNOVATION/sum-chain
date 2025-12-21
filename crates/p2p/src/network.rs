@@ -1,11 +1,16 @@
 //! Network service for SUM Chain.
 //!
 //! Manages the libp2p swarm and handles message routing.
+//!
+//! ## Security Features
+//! - Per-peer rate limiting to prevent message flooding
+//! - Connection limits via PeerManager
+//! - Message validation and deduplication via gossipsub
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use libp2p::{
@@ -27,6 +32,112 @@ use crate::{P2pError, Result};
 
 /// Unique ID for sync requests
 pub type SyncRequestId = u64;
+
+/// Rate limiting configuration
+#[derive(Debug, Clone)]
+pub struct RateLimitConfig {
+    /// Maximum transactions per second per peer
+    pub max_tx_per_second: u32,
+    /// Maximum blocks per second per peer
+    pub max_blocks_per_second: u32,
+    /// Maximum BFT messages per second per peer
+    pub max_bft_per_second: u32,
+    /// Window size for rate limiting (in seconds)
+    pub window_secs: u64,
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            max_tx_per_second: 100,      // 100 tx/s per peer
+            max_blocks_per_second: 10,    // 10 blocks/s per peer
+            max_bft_per_second: 50,       // 50 BFT msgs/s per peer
+            window_secs: 1,
+        }
+    }
+}
+
+impl RateLimitConfig {
+    /// Stricter limits for production
+    pub fn production() -> Self {
+        Self {
+            max_tx_per_second: 50,
+            max_blocks_per_second: 5,
+            max_bft_per_second: 30,
+            window_secs: 1,
+        }
+    }
+}
+
+/// Per-peer rate limiter using sliding window
+#[derive(Debug)]
+struct PeerRateLimiter {
+    /// Message counts per peer per topic: (peer_id, topic) -> (count, window_start)
+    counters: RwLock<HashMap<(PeerId, MessageType), (u32, Instant)>>,
+    config: RateLimitConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum MessageType {
+    Transaction,
+    Block,
+    BftMessage,
+}
+
+impl PeerRateLimiter {
+    fn new(config: RateLimitConfig) -> Self {
+        Self {
+            counters: RwLock::new(HashMap::new()),
+            config,
+        }
+    }
+
+    /// Check if a message from a peer should be rate limited
+    /// Returns true if the message should be ALLOWED, false if it should be DROPPED
+    fn check_rate_limit(&self, peer: PeerId, msg_type: MessageType) -> bool {
+        let max_per_second = match msg_type {
+            MessageType::Transaction => self.config.max_tx_per_second,
+            MessageType::Block => self.config.max_blocks_per_second,
+            MessageType::BftMessage => self.config.max_bft_per_second,
+        };
+
+        let window = Duration::from_secs(self.config.window_secs);
+        let now = Instant::now();
+        let key = (peer, msg_type);
+
+        let mut counters = self.counters.write();
+
+        if let Some((count, window_start)) = counters.get_mut(&key) {
+            if now.duration_since(*window_start) >= window {
+                // Window expired, reset counter
+                *count = 1;
+                *window_start = now;
+                true
+            } else if *count < max_per_second {
+                // Within window and under limit
+                *count += 1;
+                true
+            } else {
+                // Rate limited
+                false
+            }
+        } else {
+            // First message from this peer for this topic
+            counters.insert(key, (1, now));
+            true
+        }
+    }
+
+    /// Clean up expired entries (call periodically)
+    fn cleanup(&self) {
+        let window = Duration::from_secs(self.config.window_secs * 10); // Keep for 10 windows
+        let now = Instant::now();
+
+        self.counters.write().retain(|_, (_, window_start)| {
+            now.duration_since(*window_start) < window
+        });
+    }
+}
 
 /// Network events
 #[derive(Debug, Clone)]
@@ -136,11 +247,18 @@ pub struct NetworkService {
     sync_state: RwLock<SyncState>,
     /// Peer manager for connection pool management
     peer_manager: Arc<PeerManager>,
+    /// Rate limiter for incoming messages
+    rate_limiter: PeerRateLimiter,
 }
 
 impl NetworkService {
     /// Create a new network service
     pub fn new(config: NetworkConfig) -> (Self, mpsc::Receiver<NetworkCommand>) {
+        Self::with_rate_limit(config, RateLimitConfig::default())
+    }
+
+    /// Create a new network service with custom rate limiting
+    pub fn with_rate_limit(config: NetworkConfig, rate_limit: RateLimitConfig) -> (Self, mpsc::Receiver<NetworkCommand>) {
         let (event_tx, _) = broadcast::channel(1000);
         let (command_tx, command_rx) = mpsc::channel(1000);
 
@@ -162,6 +280,7 @@ impl NetworkService {
             running: RwLock::new(false),
             sync_state: RwLock::new(SyncState::Initializing),
             peer_manager,
+            rate_limiter: PeerRateLimiter::new(rate_limit),
         };
 
         (service, command_rx)
@@ -183,6 +302,7 @@ impl NetworkService {
             running: RwLock::new(false),
             sync_state: RwLock::new(SyncState::Initializing),
             peer_manager,
+            rate_limiter: PeerRateLimiter::new(RateLimitConfig::default()),
         };
 
         (service, command_rx)
@@ -657,11 +777,18 @@ impl NetworkService {
         }
     }
 
-    /// Handle incoming gossip message
+    /// Handle incoming gossip message with rate limiting
     fn handle_gossip_message(&self, topic: &gossipsub::TopicHash, data: &[u8], source: PeerId) {
         let topic_str = topic.to_string();
 
         if topic_str.contains(topics::TRANSACTIONS) {
+            // Apply rate limiting for transactions
+            if !self.rate_limiter.check_rate_limit(source, MessageType::Transaction) {
+                debug!("Rate limited transaction from {}", source);
+                self.peer_manager.report_invalid_tx(&source); // Penalize for flooding
+                return;
+            }
+
             match SignedTransaction::from_bytes(data) {
                 Ok(tx) => {
                     debug!("Received transaction {} from {}", tx.hash(), source);
@@ -669,9 +796,17 @@ impl NetworkService {
                 }
                 Err(e) => {
                     warn!("Failed to decode transaction from {}: {}", source, e);
+                    self.peer_manager.report_invalid_tx(&source);
                 }
             }
         } else if topic_str.contains(topics::BLOCKS) {
+            // Apply rate limiting for blocks
+            if !self.rate_limiter.check_rate_limit(source, MessageType::Block) {
+                debug!("Rate limited block from {}", source);
+                self.peer_manager.report_invalid_block(&source);
+                return;
+            }
+
             match Block::from_bytes(data) {
                 Ok(block) => {
                     debug!(
@@ -684,15 +819,29 @@ impl NetworkService {
                 }
                 Err(e) => {
                     warn!("Failed to decode block from {}: {}", source, e);
+                    self.peer_manager.report_invalid_block(&source);
                 }
             }
         } else if topic_str.contains("bft/proposal") {
+            // Apply rate limiting for BFT messages
+            if !self.rate_limiter.check_rate_limit(source, MessageType::BftMessage) {
+                debug!("Rate limited BFT proposal from {}", source);
+                return;
+            }
             debug!("Received BFT proposal from {}", source);
             let _ = self.event_tx.send(NetworkEvent::BftProposalReceived(data.to_vec()));
         } else if topic_str.contains("bft/prevote") {
+            if !self.rate_limiter.check_rate_limit(source, MessageType::BftMessage) {
+                debug!("Rate limited BFT prevote from {}", source);
+                return;
+            }
             debug!("Received BFT prevote from {}", source);
             let _ = self.event_tx.send(NetworkEvent::BftPrevoteReceived(data.to_vec()));
         } else if topic_str.contains("bft/precommit") {
+            if !self.rate_limiter.check_rate_limit(source, MessageType::BftMessage) {
+                debug!("Rate limited BFT precommit from {}", source);
+                return;
+            }
             debug!("Received BFT precommit from {}", source);
             let _ = self.event_tx.send(NetworkEvent::BftPrecommitReceived(data.to_vec()));
         }

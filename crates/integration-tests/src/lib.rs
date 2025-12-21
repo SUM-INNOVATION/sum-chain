@@ -2,6 +2,9 @@
 //!
 //! These tests verify end-to-end functionality across multiple components.
 
+mod nft_tests;
+mod stress_tests;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 

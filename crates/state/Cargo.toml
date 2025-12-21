@@ -11,11 +11,14 @@ sumchain-primitives = { path = "../primitives" }
 sumchain-crypto = { path = "../crypto" }
 sumchain-storage = { path = "../storage" }
 sumchain-genesis = { path = "../genesis" }
+sumchain-nft = { path = "../nft" }
 serde = { workspace = true }
 bincode = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 parking_lot = { workspace = true }
+hex = { workspace = true }
+lru = "0.12"
 
 [dev-dependencies]
 tempfile = "3.10"

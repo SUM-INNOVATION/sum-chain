@@ -50,4 +50,9 @@ export type {
   JsonRpcResponse,
   ProviderConfig,
   TransactionOptions,
+  // NFT (SUM-721) Types
+  NftCollectionInfo,
+  NftTokenInfo,
+  NftTokenRef,
+  NftOwnerTokens,
 } from './types';

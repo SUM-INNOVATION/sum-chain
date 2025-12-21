@@ -7,11 +7,14 @@ use std::sync::Arc;
 use sumchain_crypto::verify_bytes;
 use sumchain_genesis::ChainParams;
 use sumchain_primitives::{
-    Address, Balance, Block, BlockHeader, Hash, Receipt, SignedTransaction, TxStatus,
+    Address, Balance, Block, BlockHeader, Hash, Receipt, SignedTransaction,
+    TransactionV2, TxPayload, TxStatus,
 };
 use sumchain_storage::schema::StateDiff;
-use tracing::{debug, info};
+use sumchain_storage::Database;
+use tracing::{debug, info, warn};
 
+use crate::nft_executor::NftExecutor;
 use crate::{Result, StateError, StateManager};
 
 /// Result of executing a transaction
@@ -25,13 +28,21 @@ pub struct TxExecutionResult {
 /// Block executor
 pub struct BlockExecutor {
     state: Arc<StateManager>,
+    db: Arc<Database>,
     params: ChainParams,
+    nft_executor: NftExecutor,
 }
 
 impl BlockExecutor {
     /// Create a new block executor
-    pub fn new(state: Arc<StateManager>, params: ChainParams) -> Self {
-        Self { state, params }
+    pub fn new(state: Arc<StateManager>, db: Arc<Database>, params: ChainParams) -> Self {
+        let nft_executor = NftExecutor::new(db.clone());
+        Self {
+            state,
+            db,
+            params,
+            nft_executor,
+        }
     }
 
     /// Validate a transaction without executing it
@@ -133,6 +144,140 @@ impl BlockExecutor {
             status: TxStatus::Success,
             fee_paid: tx.tx.fee,
         })
+    }
+
+    /// Execute a V2 transaction (supports both transfers and NFT operations)
+    pub fn execute_tx_v2(
+        &self,
+        tx: &TransactionV2,
+        signature: &[u8; 64],
+        public_key: &[u8; 32],
+        proposer: &Address,
+    ) -> Result<TxExecutionResult> {
+        let tx_hash = tx.signing_hash();
+
+        // 1. Verify chain ID
+        if tx.chain_id != self.state.chain_id() {
+            return Ok(TxExecutionResult {
+                tx_hash,
+                status: TxStatus::InvalidChainId,
+                fee_paid: 0,
+            });
+        }
+
+        // 2. Verify signer matches from address
+        let signer_address = Address::from_public_key(public_key);
+        if signer_address != tx.from {
+            return Ok(TxExecutionResult {
+                tx_hash,
+                status: TxStatus::InvalidSignature,
+                fee_paid: 0,
+            });
+        }
+
+        // 3. Verify signature
+        if verify_bytes(tx_hash.as_bytes(), signature, public_key).is_err() {
+            return Ok(TxExecutionResult {
+                tx_hash,
+                status: TxStatus::InvalidSignature,
+                fee_paid: 0,
+            });
+        }
+
+        // 4. Verify nonce
+        let expected_nonce = self.state.get_nonce(&tx.from)?;
+        if tx.nonce != expected_nonce {
+            return Ok(TxExecutionResult {
+                tx_hash,
+                status: TxStatus::InvalidNonce,
+                fee_paid: 0,
+            });
+        }
+
+        // 5. Verify minimum fee
+        if tx.fee < self.params.min_fee {
+            return Ok(TxExecutionResult {
+                tx_hash,
+                status: TxStatus::Failed(1), // Fee too low
+                fee_paid: 0,
+            });
+        }
+
+        // 6. Execute based on payload type
+        match &tx.payload {
+            TxPayload::Transfer { to, amount } => {
+                // Check balance for transfer
+                let total_cost = amount.saturating_add(tx.fee);
+                let balance = self.state.get_balance(&tx.from)?;
+                if balance < total_cost {
+                    return Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::InsufficientBalance,
+                        fee_paid: 0,
+                    });
+                }
+
+                // Execute transfer
+                self.state.transfer(&tx.from, to, *amount, tx.fee, proposer)?;
+
+                debug!(
+                    "V2 Transfer {} executed: {} -> {} amount={}",
+                    tx_hash, tx.from, to, amount
+                );
+
+                Ok(TxExecutionResult {
+                    tx_hash,
+                    status: TxStatus::Success,
+                    fee_paid: tx.fee,
+                })
+            }
+            TxPayload::Nft(nft_data) => {
+                // Check balance for fee
+                let balance = self.state.get_balance(&tx.from)?;
+                if balance < tx.fee {
+                    return Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::InsufficientBalance,
+                        fee_paid: 0,
+                    });
+                }
+
+                // Execute NFT operation
+                let result = self.nft_executor.execute(
+                    &tx.from,
+                    nft_data,
+                    &self.state,
+                    proposer,
+                    tx.fee,
+                )?;
+
+                if result.success {
+                    debug!(
+                        "V2 NFT {} executed: {:?}",
+                        tx_hash,
+                        nft_data.operation
+                    );
+
+                    Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::Success,
+                        fee_paid: tx.fee,
+                    })
+                } else {
+                    warn!(
+                        "V2 NFT {} failed: {}",
+                        tx_hash,
+                        result.error.as_deref().unwrap_or("Unknown error")
+                    );
+
+                    Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::Failed(2), // NFT operation failed
+                        fee_paid: 0,
+                    })
+                }
+            }
+        }
     }
 
     /// Execute a block and return receipts
@@ -342,11 +487,11 @@ mod tests {
     use sumchain_storage::Database;
     use tempfile::TempDir;
 
-    fn setup() -> (Arc<StateManager>, TempDir) {
+    fn setup() -> (Arc<StateManager>, Arc<Database>, TempDir) {
         let dir = TempDir::new().unwrap();
         let db = Arc::new(Database::open_default(dir.path()).unwrap());
-        let state = Arc::new(StateManager::new(db, 1));
-        (state, dir)
+        let state = Arc::new(StateManager::new(db.clone(), 1));
+        (state, db, dir)
     }
 
     fn create_signed_tx(
@@ -365,8 +510,8 @@ mod tests {
 
     #[test]
     fn test_validate_tx_success() {
-        let (state, _dir) = setup();
-        let executor = BlockExecutor::new(state.clone(), ChainParams::default());
+        let (state, db, _dir) = setup();
+        let executor = BlockExecutor::new(state.clone(), db, ChainParams::default());
 
         let sender = KeyPair::generate();
         let recipient = KeyPair::generate();
@@ -388,8 +533,8 @@ mod tests {
 
     #[test]
     fn test_validate_tx_wrong_nonce() {
-        let (state, _dir) = setup();
-        let executor = BlockExecutor::new(state.clone(), ChainParams::default());
+        let (state, db, _dir) = setup();
+        let executor = BlockExecutor::new(state.clone(), db, ChainParams::default());
 
         let sender = KeyPair::generate();
         let recipient = KeyPair::generate();
@@ -411,8 +556,8 @@ mod tests {
 
     #[test]
     fn test_execute_tx() {
-        let (state, _dir) = setup();
-        let executor = BlockExecutor::new(state.clone(), ChainParams::default());
+        let (state, db, _dir) = setup();
+        let executor = BlockExecutor::new(state.clone(), db, ChainParams::default());
 
         let sender = KeyPair::generate();
         let recipient = KeyPair::generate();

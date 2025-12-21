@@ -25,7 +25,6 @@ mod node;
 mod tx_broadcaster;
 
 use config::NodeConfig;
-use consensus_wrapper::ConsensusWrapper;
 use node::Node;
 pub use tx_broadcaster::{TxBroadcaster, TxBroadcasterConfig, TxBroadcasterStats};
 

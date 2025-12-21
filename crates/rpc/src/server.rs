@@ -8,7 +8,7 @@ use jsonrpsee::server::{Server, ServerHandle};
 use sumchain_consensus::ConsensusEngine;
 use sumchain_primitives::{Address, Block, Hash, SignedTransaction};
 use sumchain_state::{Mempool, StateManager};
-use sumchain_storage::{BlockStore, Database, ReceiptStore, TxStore};
+use sumchain_storage::{BlockStore, Database, NftStore, ReceiptStore, TxStore};
 use tokio::sync::mpsc;
 use tracing::info;
 
@@ -343,6 +343,22 @@ impl RpcServer {
     fn parse_hash(&self, s: &str) -> Result<Hash> {
         Hash::from_hex(s)
             .map_err(|e| RpcError::InvalidParams(format!("Invalid hash: {}", e)))
+    }
+
+    /// Parse collection ID from hex string
+    fn parse_collection_id(&self, s: &str) -> Result<[u8; 32]> {
+        let s = s.strip_prefix("0x").unwrap_or(s);
+        let bytes = hex::decode(s)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid collection ID: {}", e)))?;
+        if bytes.len() != 32 {
+            return Err(RpcError::InvalidParams(format!(
+                "Invalid collection ID length: expected 32, got {}",
+                bytes.len()
+            )));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Ok(arr)
     }
 }
 
@@ -685,5 +701,156 @@ impl SumChainApiServer for RpcServer {
                 })
             }
         }
+    }
+
+    // ========================================================================
+    // NFT (SUM-721) Endpoints
+    // ========================================================================
+
+    async fn nft_get_collection(
+        &self,
+        collection_id: String,
+    ) -> std::result::Result<Option<NftCollectionInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let collection_bytes = self.parse_collection_id(&collection_id)?;
+        let nft_store = NftStore::new(&self.db);
+
+        let collection = nft_store
+            .get_collection(&collection_bytes)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        Ok(collection.map(|c| NftCollectionInfo {
+            collection_id: format!("0x{}", hex::encode(collection_bytes)),
+            name: c.name,
+            symbol: c.symbol,
+            description: c.description,
+            owner: c.owner.to_base58(),
+            max_supply: c.max_supply,
+            total_supply: c.total_supply,
+            transferable: c.transferable,
+            burnable: c.burnable,
+            metadata_updatable: c.metadata_updatable,
+            royalty_bps: c.royalty_bps,
+            royalty_recipient: c.royalty_recipient.to_base58(),
+            base_uri: c.base_uri,
+            created_at: c.created_at,
+        }))
+    }
+
+    async fn nft_get_token(
+        &self,
+        collection_id: String,
+        token_id: u64,
+    ) -> std::result::Result<Option<NftTokenInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let collection_bytes = self.parse_collection_id(&collection_id)?;
+        let nft_store = NftStore::new(&self.db);
+
+        let token = nft_store
+            .get_token(&collection_bytes, token_id)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        Ok(token.map(|t| NftTokenInfo {
+            collection_id: format!("0x{}", hex::encode(t.collection_id)),
+            token_id: t.token_id,
+            owner: t.owner.to_base58(),
+            creator: t.creator.to_base58(),
+            metadata: if t.metadata.is_empty() {
+                String::new()
+            } else {
+                // Try to parse as JSON, otherwise hex encode
+                String::from_utf8(t.metadata.clone())
+                    .unwrap_or_else(|_| format!("0x{}", hex::encode(&t.metadata)))
+            },
+            is_document: t.is_document,
+            uri_type: t.uri_type,
+            uri_value: t.uri_value,
+            approved: t.approved.map(|a| a.to_base58()),
+            locked: t.locked,
+            transfer_count: t.transfer_count,
+            minted_at: t.minted_at,
+        }))
+    }
+
+    async fn nft_get_tokens_by_owner(
+        &self,
+        owner: String,
+    ) -> std::result::Result<NftOwnerTokens, jsonrpsee::types::ErrorObjectOwned> {
+        let addr = self.parse_address(&owner)?;
+        let nft_store = NftStore::new(&self.db);
+
+        let tokens = nft_store
+            .get_owner_tokens(&addr)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        let token_refs: Vec<NftTokenRef> = tokens
+            .iter()
+            .map(|(cid, tid)| NftTokenRef {
+                collection_id: format!("0x{}", hex::encode(cid)),
+                token_id: *tid,
+            })
+            .collect();
+
+        Ok(NftOwnerTokens {
+            owner: addr.to_base58(),
+            count: token_refs.len() as u64,
+            tokens: token_refs,
+        })
+    }
+
+    async fn nft_get_tokens_in_collection(
+        &self,
+        collection_id: String,
+    ) -> std::result::Result<Vec<u64>, jsonrpsee::types::ErrorObjectOwned> {
+        let collection_bytes = self.parse_collection_id(&collection_id)?;
+        let nft_store = NftStore::new(&self.db);
+
+        let tokens = nft_store
+            .get_collection_tokens(&collection_bytes)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        Ok(tokens)
+    }
+
+    async fn nft_balance_of(
+        &self,
+        owner: String,
+    ) -> std::result::Result<u64, jsonrpsee::types::ErrorObjectOwned> {
+        let addr = self.parse_address(&owner)?;
+        let nft_store = NftStore::new(&self.db);
+
+        let count = nft_store
+            .get_owner_token_count(&addr)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        Ok(count)
+    }
+
+    async fn nft_owner_of(
+        &self,
+        collection_id: String,
+        token_id: u64,
+    ) -> std::result::Result<Option<String>, jsonrpsee::types::ErrorObjectOwned> {
+        let collection_bytes = self.parse_collection_id(&collection_id)?;
+        let nft_store = NftStore::new(&self.db);
+
+        let token = nft_store
+            .get_token(&collection_bytes, token_id)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        Ok(token.map(|t| t.owner.to_base58()))
+    }
+
+    async fn nft_token_exists(
+        &self,
+        collection_id: String,
+        token_id: u64,
+    ) -> std::result::Result<bool, jsonrpsee::types::ErrorObjectOwned> {
+        let collection_bytes = self.parse_collection_id(&collection_id)?;
+        let nft_store = NftStore::new(&self.db);
+
+        let exists = nft_store
+            .token_exists(&collection_bytes, token_id)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        Ok(exists)
     }
 }

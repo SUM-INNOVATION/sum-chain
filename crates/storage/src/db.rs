@@ -55,6 +55,14 @@ pub mod cf {
     pub const META: &str = "meta";
     /// State diffs for reorgs
     pub const STATE_DIFFS: &str = "state_diffs";
+    /// NFT collections
+    pub const NFT_COLLECTIONS: &str = "nft_collections";
+    /// NFT tokens (indexed by collection_id + token_id)
+    pub const NFT_TOKENS: &str = "nft_tokens";
+    /// NFT owner index (owner -> collection_id:token_id list)
+    pub const NFT_OWNER_INDEX: &str = "nft_owner_index";
+    /// NFT collection index (collection_id -> token_id list)
+    pub const NFT_COLLECTION_INDEX: &str = "nft_collection_index";
 }
 
 /// All column families used by the database
@@ -66,6 +74,10 @@ pub const ALL_CFS: &[&str] = &[
     cf::RECEIPTS,
     cf::META,
     cf::STATE_DIFFS,
+    cf::NFT_COLLECTIONS,
+    cf::NFT_TOKENS,
+    cf::NFT_OWNER_INDEX,
+    cf::NFT_COLLECTION_INDEX,
 ];
 
 /// Database configuration

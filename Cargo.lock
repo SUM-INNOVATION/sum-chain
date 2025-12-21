@@ -3523,6 +3523,7 @@ name = "sumchain-consensus"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bincode",
  "parking_lot",
  "serde",
  "sumchain-crypto",
@@ -3570,9 +3571,12 @@ dependencies = [
 name = "sumchain-integration-tests"
 version = "0.1.0"
 dependencies = [
+ "bincode",
+ "serde",
  "sumchain-consensus",
  "sumchain-crypto",
  "sumchain-genesis",
+ "sumchain-nft",
  "sumchain-p2p",
  "sumchain-primitives",
  "sumchain-rpc",
@@ -3582,6 +3586,21 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "sumchain-nft"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "hex",
+ "serde",
+ "serde-big-array",
+ "serde_json",
+ "sumchain-crypto",
+ "sumchain-primitives",
+ "tempfile",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -3689,10 +3708,13 @@ name = "sumchain-state"
 version = "0.1.0"
 dependencies = [
  "bincode",
+ "hex",
+ "lru",
  "parking_lot",
  "serde",
  "sumchain-crypto",
  "sumchain-genesis",
+ "sumchain-nft",
  "sumchain-primitives",
  "sumchain-storage",
  "tempfile",

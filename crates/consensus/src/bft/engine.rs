@@ -6,16 +6,16 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use parking_lot::RwLock;
-use sumchain_crypto::KeyPair;
+use sumchain_crypto::{KeyPair, PublicKey};
 use sumchain_genesis::{ChainParams, Genesis};
-use sumchain_primitives::{Block, BlockHeight, Hash, PublicKey, SignedTransaction};
+use sumchain_primitives::{Block, BlockHeight, Hash, SignedTransaction};
 use sumchain_state::{BlockExecutor, Mempool, StateManager};
 use sumchain_storage::{BlockStore, Database};
 use tokio::sync::broadcast;
-use tokio::time::{interval, sleep};
+use tokio::time::interval;
 use tracing::{debug, info, warn};
 
-use super::types::{ConsensusState, Round, Step, TimeoutConfig, View, VoteType};
+use super::types::{ConsensusState, Step, TimeoutConfig, View, VoteType};
 use super::vote::{Vote, VoteSet};
 use crate::engine::{ConsensusEngine, ConsensusEvent};
 use crate::{ConsensusError, Result};
@@ -61,11 +61,17 @@ impl BftEngine {
         genesis: &Genesis,
         validator_key: Option<KeyPair>,
     ) -> Result<Self> {
-        let validators = genesis
+        let validator_bytes = genesis
             .validator_pubkeys()
             .map_err(|e| ConsensusError::Genesis(e.to_string()))?;
 
-        let executor = Arc::new(BlockExecutor::new(state.clone(), genesis.params.clone()));
+        // Convert [u8; 32] to PublicKey
+        let validators: Vec<PublicKey> = validator_bytes
+            .iter()
+            .map(|bytes| PublicKey::from_bytes(*bytes))
+            .collect();
+
+        let executor = Arc::new(BlockExecutor::new(state.clone(), db.clone(), genesis.params.clone()));
         let (event_tx, _) = broadcast::channel(100);
 
         let consensus_state = ConsensusState::new(0);
@@ -76,7 +82,7 @@ impl BftEngine {
             executor,
             mempool,
             params: genesis.params.clone(),
-            validators: validators.clone(),
+            validators,
             validator_key,
             consensus_state: RwLock::new(consensus_state),
             best_block: RwLock::new(None),
@@ -88,13 +94,7 @@ impl BftEngine {
         })
     }
 
-    /// Get leader for a given view
-    fn get_leader(&self, view: &View) -> PublicKey {
-        let index = (view.height + view.round as u64) % self.validators.len() as u64;
-        self.validators[index as usize]
-    }
-
-    /// Check if this node is the leader for a view
+    /// Check if this node is the leader for a view (private helper)
     fn is_leader(&self, view: &View) -> bool {
         if let Some(ref keypair) = self.validator_key {
             self.get_leader(view) == *keypair.public_key()
@@ -191,7 +191,8 @@ impl BftEngine {
         info!("Proposing block for height {}, round {}", view.height, view.round);
 
         // Get transactions from mempool
-        let txs = self.mempool.get_pending(1000); // Max 1000 txs per block
+        let _txs = self.mempool.get_all(); // Get all pending txs
+        // TODO: Limit to max transactions per block
 
         // Create block proposal
         // In real implementation, we'd build a proper block here
@@ -333,11 +334,8 @@ impl ConsensusEngine for BftEngine {
         info!("Starting BFT consensus engine");
         *self.running.write() = true;
 
-        // Spawn consensus loop
-        let engine = self.clone(); // Would need Clone impl
-        tokio::spawn(async move {
-            // engine.consensus_loop().await;
-        });
+        // Note: Consensus loop is handled by Node's run_block_producer
+        // BFT message handling happens in the Node event loop
 
         Ok(())
     }
@@ -365,7 +363,7 @@ impl ConsensusEngine for BftEngine {
     }
 
     fn validators(&self) -> Vec<[u8; 32]> {
-        self.validators.clone()
+        self.validators.iter().map(|pk| *pk.as_bytes()).collect()
     }
 
     async fn import_block(&self, block: Block) -> Result<()> {
@@ -375,7 +373,7 @@ impl ConsensusEngine for BftEngine {
         Ok(())
     }
 
-    async fn propose_block(&self, transactions: Vec<SignedTransaction>) -> Result<Block> {
+    async fn propose_block(&self, _transactions: Vec<SignedTransaction>) -> Result<Block> {
         // Create block (simplified)
         Err(ConsensusError::NotImplemented)
     }
@@ -387,7 +385,7 @@ impl ConsensusEngine for BftEngine {
 
     fn get_proposer(&self, height: BlockHeight) -> [u8; 32] {
         let view = View::new(height, 0);
-        self.get_leader(&view)
+        *self.get_leader(&view).as_bytes()
     }
 
     fn subscribe(&self) -> tokio::sync::broadcast::Receiver<ConsensusEvent> {

@@ -128,4 +128,60 @@ pub trait SumChainApi {
     /// Get P2P network statistics
     #[method(name = "get_p2p_stats")]
     async fn get_p2p_stats(&self) -> Result<P2pStats, jsonrpsee::types::ErrorObjectOwned>;
+
+    // ========================================================================
+    // NFT (SUM-721) Endpoints
+    // ========================================================================
+
+    /// Get NFT collection by ID
+    #[method(name = "nft_getCollection")]
+    async fn nft_get_collection(
+        &self,
+        collection_id: String,
+    ) -> Result<Option<NftCollectionInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get NFT token by collection ID and token ID
+    #[method(name = "nft_getToken")]
+    async fn nft_get_token(
+        &self,
+        collection_id: String,
+        token_id: u64,
+    ) -> Result<Option<NftTokenInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get all tokens owned by an address
+    #[method(name = "nft_getTokensByOwner")]
+    async fn nft_get_tokens_by_owner(
+        &self,
+        owner: String,
+    ) -> Result<NftOwnerTokens, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get all token IDs in a collection
+    #[method(name = "nft_getTokensInCollection")]
+    async fn nft_get_tokens_in_collection(
+        &self,
+        collection_id: String,
+    ) -> Result<Vec<u64>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get the number of tokens owned by an address
+    #[method(name = "nft_balanceOf")]
+    async fn nft_balance_of(
+        &self,
+        owner: String,
+    ) -> Result<u64, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get the owner of a specific token
+    #[method(name = "nft_ownerOf")]
+    async fn nft_owner_of(
+        &self,
+        collection_id: String,
+        token_id: u64,
+    ) -> Result<Option<String>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Check if a token exists
+    #[method(name = "nft_tokenExists")]
+    async fn nft_token_exists(
+        &self,
+        collection_id: String,
+        token_id: u64,
+    ) -> Result<bool, jsonrpsee::types::ErrorObjectOwned>;
 }

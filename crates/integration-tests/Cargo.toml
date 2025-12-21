@@ -15,8 +15,11 @@ sumchain-state = { path = "../state" }
 sumchain-consensus = { path = "../consensus" }
 sumchain-p2p = { path = "../p2p" }
 sumchain-rpc = { path = "../rpc" }
+sumchain-nft = { path = "../nft" }
 
 tokio = { workspace = true }
 tempfile = "3.10"
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+bincode = { workspace = true }
+serde = { workspace = true }

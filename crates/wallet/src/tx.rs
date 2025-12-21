@@ -166,6 +166,104 @@ pub async fn get_health(rpc_url: &str) -> Result<sumchain_rpc::types::HealthResp
     Ok(health)
 }
 
+// ============================================================================
+// NFT (SUM-721) RPC Functions
+// ============================================================================
+
+/// Get NFT collection by ID
+pub async fn nft_get_collection(
+    rpc_url: &str,
+    collection_id: &str,
+) -> Result<Option<sumchain_rpc::types::NftCollectionInfo>> {
+    let client = create_client(rpc_url).await?;
+    let collection = client
+        .nft_get_collection(collection_id.to_string())
+        .await
+        .context("Failed to get NFT collection")?;
+
+    Ok(collection)
+}
+
+/// Get NFT token by collection ID and token ID
+pub async fn nft_get_token(
+    rpc_url: &str,
+    collection_id: &str,
+    token_id: u64,
+) -> Result<Option<sumchain_rpc::types::NftTokenInfo>> {
+    let client = create_client(rpc_url).await?;
+    let token = client
+        .nft_get_token(collection_id.to_string(), token_id)
+        .await
+        .context("Failed to get NFT token")?;
+
+    Ok(token)
+}
+
+/// Get all tokens owned by an address
+pub async fn nft_get_tokens_by_owner(
+    rpc_url: &str,
+    owner: &str,
+) -> Result<sumchain_rpc::types::NftOwnerTokens> {
+    let client = create_client(rpc_url).await?;
+    let tokens = client
+        .nft_get_tokens_by_owner(owner.to_string())
+        .await
+        .context("Failed to get owner tokens")?;
+
+    Ok(tokens)
+}
+
+/// Get NFT balance (count of tokens) for an address
+pub async fn nft_balance_of(rpc_url: &str, owner: &str) -> Result<u64> {
+    let client = create_client(rpc_url).await?;
+    let count = client
+        .nft_balance_of(owner.to_string())
+        .await
+        .context("Failed to get NFT balance")?;
+
+    Ok(count)
+}
+
+/// Get owner of a specific token
+pub async fn nft_owner_of(
+    rpc_url: &str,
+    collection_id: &str,
+    token_id: u64,
+) -> Result<Option<String>> {
+    let client = create_client(rpc_url).await?;
+    let owner = client
+        .nft_owner_of(collection_id.to_string(), token_id)
+        .await
+        .context("Failed to get token owner")?;
+
+    Ok(owner)
+}
+
+/// Check if a token exists
+pub async fn nft_token_exists(rpc_url: &str, collection_id: &str, token_id: u64) -> Result<bool> {
+    let client = create_client(rpc_url).await?;
+    let exists = client
+        .nft_token_exists(collection_id.to_string(), token_id)
+        .await
+        .context("Failed to check token existence")?;
+
+    Ok(exists)
+}
+
+/// Get all tokens in a collection
+pub async fn nft_get_tokens_in_collection(
+    rpc_url: &str,
+    collection_id: &str,
+) -> Result<Vec<u64>> {
+    let client = create_client(rpc_url).await?;
+    let tokens = client
+        .nft_get_tokens_in_collection(collection_id.to_string())
+        .await
+        .context("Failed to get collection tokens")?;
+
+    Ok(tokens)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

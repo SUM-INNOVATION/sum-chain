@@ -168,3 +168,104 @@ pub struct P2pStats {
     /// Maximum outbound connections allowed
     pub max_outbound: usize,
 }
+
+// ============================================================================
+// NFT (SUM-721) Types
+// ============================================================================
+
+/// NFT collection info for RPC responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NftCollectionInfo {
+    /// Collection ID (hex)
+    pub collection_id: String,
+    /// Collection name
+    pub name: String,
+    /// Collection symbol
+    pub symbol: String,
+    /// Collection description
+    pub description: String,
+    /// Owner address
+    pub owner: String,
+    /// Maximum supply (0 = unlimited)
+    pub max_supply: u64,
+    /// Current total supply
+    pub total_supply: u64,
+    /// Whether tokens can be transferred
+    pub transferable: bool,
+    /// Whether tokens can be burned
+    pub burnable: bool,
+    /// Whether metadata can be updated
+    pub metadata_updatable: bool,
+    /// Royalty in basis points (100 = 1%)
+    pub royalty_bps: u16,
+    /// Royalty recipient address
+    pub royalty_recipient: String,
+    /// Base URI for metadata
+    pub base_uri: Option<String>,
+    /// Creation timestamp (milliseconds)
+    pub created_at: u64,
+}
+
+/// NFT token info for RPC responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NftTokenInfo {
+    /// Collection ID (hex)
+    pub collection_id: String,
+    /// Token ID
+    pub token_id: u64,
+    /// Current owner address
+    pub owner: String,
+    /// Original creator address
+    pub creator: String,
+    /// Token metadata (JSON string or hex for binary)
+    pub metadata: String,
+    /// Whether this is a certified document
+    pub is_document: bool,
+    /// Token URI type (onchain, ipfs, url)
+    pub uri_type: String,
+    /// Token URI value
+    pub uri_value: Option<String>,
+    /// Approved address for transfer
+    pub approved: Option<String>,
+    /// Whether token is locked
+    pub locked: bool,
+    /// Number of transfers
+    pub transfer_count: u32,
+    /// Minting timestamp (milliseconds)
+    pub minted_at: u64,
+}
+
+/// List of tokens owned by an address
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NftOwnerTokens {
+    /// Owner address
+    pub owner: String,
+    /// Total count of tokens owned
+    pub count: u64,
+    /// List of (collection_id, token_id) pairs
+    pub tokens: Vec<NftTokenRef>,
+}
+
+/// Reference to an NFT token
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NftTokenRef {
+    /// Collection ID (hex)
+    pub collection_id: String,
+    /// Token ID
+    pub token_id: u64,
+}
+
+/// NFT operation result
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NftOperationResult {
+    /// Transaction hash
+    pub tx_hash: String,
+    /// Whether operation succeeded
+    pub success: bool,
+    /// Collection ID (if applicable)
+    pub collection_id: Option<String>,
+    /// Token ID (if applicable)
+    pub token_id: Option<u64>,
+    /// Error message if failed
+    pub error: Option<String>,
+}

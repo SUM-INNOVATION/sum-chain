@@ -51,10 +51,24 @@ pub struct ChainParams {
     /// For PoA, this should be at least 2/3 of validator count
     #[serde(default = "default_finality_depth")]
     pub finality_depth: u64,
+    /// Storage fee per byte for NFT metadata (prevents state bloat attacks)
+    #[serde(default = "default_storage_fee_per_byte")]
+    pub storage_fee_per_byte: Balance,
+    /// Maximum metadata size in bytes for NFT tokens
+    #[serde(default = "default_max_metadata_bytes")]
+    pub max_metadata_bytes: u64,
 }
 
 fn default_finality_depth() -> u64 {
     3 // Default: 3 blocks for finality
+}
+
+fn default_storage_fee_per_byte() -> Balance {
+    100 // 100 base units per byte (~0.0000001 Koppa per byte)
+}
+
+fn default_max_metadata_bytes() -> u64 {
+    16384 // 16 KB max metadata size
 }
 
 impl Default for ChainParams {
@@ -65,7 +79,23 @@ impl Default for ChainParams {
             max_txs_per_block: 1000,
             min_fee: 1,
             finality_depth: default_finality_depth(),
+            storage_fee_per_byte: default_storage_fee_per_byte(),
+            max_metadata_bytes: default_max_metadata_bytes(),
         }
+    }
+}
+
+impl ChainParams {
+    /// Calculate required fee for storing NFT metadata
+    /// Returns base_fee + (metadata_bytes * storage_fee_per_byte)
+    pub fn calculate_nft_storage_fee(&self, metadata_bytes: usize) -> Balance {
+        let storage_fee = (metadata_bytes as u64).saturating_mul(self.storage_fee_per_byte);
+        self.min_fee.saturating_add(storage_fee)
+    }
+
+    /// Validate metadata size against limits
+    pub fn validate_metadata_size(&self, metadata_bytes: usize) -> bool {
+        metadata_bytes as u64 <= self.max_metadata_bytes
     }
 }
 

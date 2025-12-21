@@ -232,6 +232,73 @@ enum Commands {
 
     /// Show wallet info (banner and version)
     Info,
+
+    // ========================================================================
+    // NFT (SUM-721) Commands
+    // ========================================================================
+
+    /// Get NFT collection info
+    NftCollection {
+        /// RPC URL
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+
+        /// Collection ID (hex, with or without 0x prefix)
+        #[arg(long)]
+        id: String,
+    },
+
+    /// Get NFT token info
+    NftToken {
+        /// RPC URL
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+
+        /// Collection ID (hex)
+        #[arg(long)]
+        collection: String,
+
+        /// Token ID
+        #[arg(long)]
+        token_id: u64,
+    },
+
+    /// List all NFTs owned by an address
+    NftList {
+        /// RPC URL
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+
+        /// Owner address
+        #[arg(long)]
+        owner: String,
+    },
+
+    /// Get NFT balance (count of tokens) for an address
+    NftBalance {
+        /// RPC URL
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+
+        /// Owner address
+        #[arg(long)]
+        owner: String,
+    },
+
+    /// Get owner of a specific NFT token
+    NftOwner {
+        /// RPC URL
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+
+        /// Collection ID (hex)
+        #[arg(long)]
+        collection: String,
+
+        /// Token ID
+        #[arg(long)]
+        token_id: u64,
+    },
 }
 
 #[tokio::main]
@@ -614,6 +681,125 @@ async fn main() -> Result<()> {
             print_field("Peer Count", &health.peer_count.to_string());
             print_status_indicator("Validator", health.is_validator);
             print_status_indicator("Synced", health.is_synced);
+        }
+
+        // ====================================================================
+        // NFT (SUM-721) Commands
+        // ====================================================================
+
+        Commands::NftCollection { rpc, id } => {
+            let collection = tx::nft_get_collection(&rpc, &id).await?;
+
+            match collection {
+                Some(c) => {
+                    print_header(&format!("NFT Collection: {}", c.name));
+                    println!();
+                    print_field("Collection ID", &c.collection_id);
+                    print_field("Name", &c.name);
+                    print_field("Symbol", &c.symbol);
+                    print_field("Description", &c.description);
+                    print_field("Owner", &c.owner);
+                    print_separator();
+                    print_field("Max Supply", &if c.max_supply == 0 {
+                        "Unlimited".to_string()
+                    } else {
+                        c.max_supply.to_string()
+                    });
+                    print_field("Total Supply", &c.total_supply.to_string());
+                    print_separator();
+                    print_status_indicator("Transferable", c.transferable);
+                    print_status_indicator("Burnable", c.burnable);
+                    print_status_indicator("Metadata Updatable", c.metadata_updatable);
+                    print_separator();
+                    if c.royalty_bps > 0 {
+                        print_field("Royalty", &format!("{}% ({})", c.royalty_bps as f64 / 100.0, c.royalty_recipient));
+                    } else {
+                        print_field("Royalty", "None");
+                    }
+                    if let Some(uri) = &c.base_uri {
+                        print_field("Base URI", uri);
+                    }
+                    print_field("Created", &format_timestamp(c.created_at));
+                }
+                None => print_warning("Collection not found"),
+            }
+        }
+
+        Commands::NftToken { rpc, collection, token_id } => {
+            let token = tx::nft_get_token(&rpc, &collection, token_id).await?;
+
+            match token {
+                Some(t) => {
+                    print_header(&format!("NFT Token #{}", t.token_id));
+                    println!();
+                    print_field("Collection", &t.collection_id);
+                    print_field("Token ID", &t.token_id.to_string());
+                    print_separator();
+                    print_field("Owner", &t.owner);
+                    print_field("Creator", &t.creator);
+                    if let Some(approved) = &t.approved {
+                        print_field("Approved", approved);
+                    }
+                    print_separator();
+                    print_status_indicator("Document", t.is_document);
+                    print_status_indicator("Locked", t.locked);
+                    print_field("Transfer Count", &t.transfer_count.to_string());
+                    print_separator();
+                    print_field("URI Type", &t.uri_type);
+                    if let Some(uri) = &t.uri_value {
+                        print_field("URI Value", uri);
+                    }
+                    if !t.metadata.is_empty() && t.metadata.len() < 200 {
+                        print_field("Metadata", &t.metadata);
+                    } else if !t.metadata.is_empty() {
+                        print_field("Metadata", &format!("[{} bytes]", t.metadata.len()));
+                    }
+                    print_field("Minted", &format_timestamp(t.minted_at));
+                }
+                None => print_warning("Token not found"),
+            }
+        }
+
+        Commands::NftList { rpc, owner } => {
+            let result = tx::nft_get_tokens_by_owner(&rpc, &owner).await?;
+
+            if result.tokens.is_empty() {
+                print_info(&format!("No NFTs found for {}", owner));
+            } else {
+                print_header(&format!("NFTs owned by {}", format_address_short(&owner)));
+                println!();
+                print_field("Owner", &result.owner);
+                print_field("Total NFTs", &result.count.to_string());
+                println!();
+
+                for (i, token) in result.tokens.iter().enumerate() {
+                    println!(
+                        "  {} {}:{}",
+                        format!("[{}]", i + 1).dimmed(),
+                        format_address_short(&token.collection_id).cyan(),
+                        token.token_id.to_string().yellow()
+                    );
+                }
+            }
+        }
+
+        Commands::NftBalance { rpc, owner } => {
+            let count = tx::nft_balance_of(&rpc, &owner).await?;
+            print_field("Address", &owner);
+            print_field("NFT Balance", &count.to_string().cyan().to_string());
+        }
+
+        Commands::NftOwner { rpc, collection, token_id } => {
+            let owner = tx::nft_owner_of(&rpc, &collection, token_id).await?;
+
+            match owner {
+                Some(o) => {
+                    print_field("Collection", &collection);
+                    print_field("Token ID", &token_id.to_string());
+                    print_field("Owner", &o.cyan().to_string());
+                }
+                None => print_warning("Token not found"),
+            }
         }
     }
 

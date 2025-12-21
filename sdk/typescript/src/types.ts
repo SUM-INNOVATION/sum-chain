@@ -134,3 +134,62 @@ export interface TransactionOptions {
   nonce?: number;
   chainId: number;
 }
+
+// ============================================================================
+// NFT (SUM-721) Types
+// ============================================================================
+
+/**
+ * NFT Collection information
+ */
+export interface NftCollectionInfo {
+  collection_id: string;
+  name: string;
+  symbol: string;
+  description: string;
+  owner: Address;
+  max_supply: number;
+  total_supply: number;
+  transferable: boolean;
+  burnable: boolean;
+  metadata_updatable: boolean;
+  royalty_bps: number;
+  royalty_recipient: Address;
+  base_uri?: string;
+  created_at: number;
+}
+
+/**
+ * NFT Token information
+ */
+export interface NftTokenInfo {
+  collection_id: string;
+  token_id: number;
+  owner: Address;
+  creator: Address;
+  metadata: string;
+  is_document: boolean;
+  uri_type: string;
+  uri_value?: string;
+  approved?: Address;
+  locked: boolean;
+  transfer_count: number;
+  minted_at: number;
+}
+
+/**
+ * NFT Token reference (collection + token ID)
+ */
+export interface NftTokenRef {
+  collection_id: string;
+  token_id: number;
+}
+
+/**
+ * NFT tokens owned by an address
+ */
+export interface NftOwnerTokens {
+  owner: Address;
+  count: number;
+  tokens: NftTokenRef[];
+}
