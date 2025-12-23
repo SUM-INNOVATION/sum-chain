@@ -14,7 +14,8 @@ pub use block::{Block, BlockHeader};
 pub use hash::Hash;
 pub use receipt::{Receipt, TxStatus};
 pub use transaction::{
-    NftOperation, NftTxData, SignedTransaction, Transaction, TransactionV2, TxPayload, TxType,
+    NftOperation, NftTxData, SignedTransaction, Transaction, TransactionV2, TxInner, TxPayload,
+    TxType,
 };
 
 /// Chain ID type - identifies the network

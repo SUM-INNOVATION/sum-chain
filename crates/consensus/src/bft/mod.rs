@@ -1,6 +1,18 @@
 //! Byzantine Fault Tolerant (BFT) consensus implementation.
 //!
-//! Implements a Tendermint-style consensus algorithm with:
+//! **STATUS: EXPERIMENTAL - NOT PRODUCTION READY**
+//!
+//! This module contains an incomplete Tendermint-style BFT implementation.
+//! For production use, use the [`PoAEngine`](super::PoAEngine) instead.
+//!
+//! ## Limitations
+//!
+//! - `propose_block()` returns `NotImplemented`
+//! - P2P vote broadcasting is stubbed (local processing only)
+//! - Timeout handling is incomplete
+//!
+//! ## Design Goals (when complete)
+//!
 //! - Immediate finality (no confirmations needed)
 //! - Byzantine fault tolerance (up to 1/3 malicious validators)
 //! - Two-phase voting (prevote + precommit)

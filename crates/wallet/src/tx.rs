@@ -275,11 +275,11 @@ mod tests {
 
         let signed = sign_transaction(&keystore, to, 100, 10, 0, 1).unwrap();
 
-        assert_eq!(signed.tx.from, keystore.address());
-        assert_eq!(signed.tx.to, to);
-        assert_eq!(signed.tx.amount, 100);
-        assert_eq!(signed.tx.fee, 10);
-        assert_eq!(signed.tx.nonce, 0);
+        assert_eq!(signed.sender(), keystore.address());
+        assert_eq!(signed.recipient(), Some(to));
+        assert_eq!(signed.amount(), 100);
+        assert_eq!(signed.fee(), 10);
+        assert_eq!(signed.nonce(), 0);
         assert!(signed.verify_signer());
     }
 }

@@ -36,7 +36,7 @@ pub struct BlockExecutor {
 impl BlockExecutor {
     /// Create a new block executor
     pub fn new(state: Arc<StateManager>, db: Arc<Database>, params: ChainParams) -> Self {
-        let nft_executor = NftExecutor::new(db.clone());
+        let nft_executor = NftExecutor::new(db.clone(), params.clone());
         Self {
             state,
             db,
@@ -48,17 +48,17 @@ impl BlockExecutor {
     /// Validate a transaction without executing it
     pub fn validate_tx(&self, tx: &SignedTransaction) -> Result<()> {
         // 1. Verify chain ID
-        if tx.tx.chain_id != self.state.chain_id() {
+        if tx.chain_id() != self.state.chain_id() {
             return Err(StateError::InvalidChainId {
                 expected: self.state.chain_id(),
-                got: tx.tx.chain_id,
+                got: tx.chain_id(),
             });
         }
 
         // 2. Verify signer matches from address
         if !tx.verify_signer() {
             return Err(StateError::SignerMismatch {
-                from: tx.tx.from.to_base58(),
+                from: tx.sender().to_base58(),
                 signer: tx.signer_address().to_base58(),
             });
         }
@@ -69,17 +69,17 @@ impl BlockExecutor {
             .map_err(|_| StateError::InvalidSignature)?;
 
         // 4. Verify nonce
-        let expected_nonce = self.state.get_nonce(&tx.tx.from)?;
-        if tx.tx.nonce != expected_nonce {
+        let expected_nonce = self.state.get_nonce(&tx.sender())?;
+        if tx.nonce() != expected_nonce {
             return Err(StateError::InvalidNonce {
                 expected: expected_nonce,
-                got: tx.tx.nonce,
+                got: tx.nonce(),
             });
         }
 
-        // 5. Verify balance
-        let balance = self.state.get_balance(&tx.tx.from)?;
-        let total_cost = tx.tx.total_cost();
+        // 5. Verify balance (for legacy transfers, check total_cost; for V2, check fee at minimum)
+        let balance = self.state.get_balance(&tx.sender())?;
+        let total_cost = tx.amount().saturating_add(tx.fee());
         if balance < total_cost {
             return Err(StateError::InsufficientBalance {
                 required: total_cost,
@@ -88,17 +88,17 @@ impl BlockExecutor {
         }
 
         // 6. Verify minimum fee
-        if tx.tx.fee < self.params.min_fee {
+        if tx.fee() < self.params.min_fee {
             return Err(StateError::FeeTooLow {
                 minimum: self.params.min_fee,
-                got: tx.tx.fee,
+                got: tx.fee(),
             });
         }
 
         Ok(())
     }
 
-    /// Execute a single transaction
+    /// Execute a single transaction (supports both legacy and V2 formats)
     pub fn execute_tx(
         &self,
         tx: &SignedTransaction,
@@ -125,25 +125,91 @@ impl BlockExecutor {
             });
         }
 
-        // Execute the transfer
-        self.state.transfer(
-            &tx.tx.from,
-            &tx.tx.to,
-            tx.tx.amount,
-            tx.tx.fee,
-            proposer,
-        )?;
+        // Handle based on transaction type
+        match tx.inner() {
+            sumchain_primitives::TxInner::Legacy(legacy_tx) => {
+                // Execute legacy transfer
+                self.state.transfer(
+                    &legacy_tx.from,
+                    &legacy_tx.to,
+                    legacy_tx.amount,
+                    legacy_tx.fee,
+                    proposer,
+                )?;
 
-        debug!(
-            "Transaction {} executed: {} -> {} amount={}",
-            tx_hash, tx.tx.from, tx.tx.to, tx.tx.amount
-        );
+                debug!(
+                    "Transaction {} executed: {} -> {} amount={}",
+                    tx_hash, legacy_tx.from, legacy_tx.to, legacy_tx.amount
+                );
 
-        Ok(TxExecutionResult {
-            tx_hash,
-            status: TxStatus::Success,
-            fee_paid: tx.tx.fee,
-        })
+                Ok(TxExecutionResult {
+                    tx_hash,
+                    status: TxStatus::Success,
+                    fee_paid: legacy_tx.fee,
+                })
+            }
+            sumchain_primitives::TxInner::V2(v2_tx) => {
+                // Execute V2 transaction
+                match &v2_tx.payload {
+                    TxPayload::Transfer { to, amount } => {
+                        self.state.transfer(
+                            &v2_tx.from,
+                            to,
+                            *amount,
+                            v2_tx.fee,
+                            proposer,
+                        )?;
+
+                        debug!(
+                            "V2 Transfer {} executed: {} -> {} amount={}",
+                            tx_hash, v2_tx.from, to, amount
+                        );
+
+                        Ok(TxExecutionResult {
+                            tx_hash,
+                            status: TxStatus::Success,
+                            fee_paid: v2_tx.fee,
+                        })
+                    }
+                    TxPayload::Nft(nft_data) => {
+                        // Execute NFT operation
+                        let result = self.nft_executor.execute(
+                            &v2_tx.from,
+                            &nft_data,
+                            &self.state,
+                            proposer,
+                            v2_tx.fee,
+                        )?;
+
+                        if result.success {
+                            debug!(
+                                "V2 NFT {} executed: {:?}",
+                                tx_hash,
+                                nft_data.operation
+                            );
+
+                            Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Success,
+                                fee_paid: v2_tx.fee,
+                            })
+                        } else {
+                            warn!(
+                                "V2 NFT {} failed: {}",
+                                tx_hash,
+                                result.error.as_deref().unwrap_or("Unknown error")
+                            );
+
+                            Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Failed(2), // NFT operation failed
+                                fee_paid: 0,
+                            })
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Execute a V2 transaction (supports both transfers and NFT operations)
@@ -298,21 +364,33 @@ impl BlockExecutor {
 
         for (idx, tx) in block.transactions.iter().enumerate() {
             // Record pre-execution state for diff
-            let sender_before = self.state.get_account(&tx.tx.from)?;
-            let recipient_before = self.state.get_account(&tx.tx.to)?;
+            let sender = tx.sender();
+            let recipient = tx.recipient();
+            let sender_before = self.state.get_account(&sender)?;
+            let recipient_before = if let Some(ref r) = recipient {
+                Some(self.state.get_account(r)?)
+            } else {
+                None
+            };
             let proposer_before = self.state.get_account(&proposer)?;
 
             let result = self.execute_tx(tx, &proposer)?;
 
             // Record post-execution state for diff
-            let sender_after = self.state.get_account(&tx.tx.from)?;
-            let recipient_after = self.state.get_account(&tx.tx.to)?;
+            let sender_after = self.state.get_account(&sender)?;
+            let recipient_after = if let Some(ref r) = recipient {
+                Some(self.state.get_account(r)?)
+            } else {
+                None
+            };
             let proposer_after = self.state.get_account(&proposer)?;
 
             // Add to state diff
-            state_diff.add_change(tx.tx.from, Some(sender_before), sender_after);
-            state_diff.add_change(tx.tx.to, Some(recipient_before), recipient_after);
-            if !proposer.is_zero() && proposer != tx.tx.from && proposer != tx.tx.to {
+            state_diff.add_change(sender, Some(sender_before), sender_after);
+            if let (Some(r), Some(before), Some(after)) = (recipient, recipient_before, recipient_after) {
+                state_diff.add_change(r, Some(before), after);
+            }
+            if !proposer.is_zero() && proposer != sender && recipient.map_or(true, |r| proposer != r) {
                 state_diff.add_change(proposer, Some(proposer_before), proposer_after);
             }
 

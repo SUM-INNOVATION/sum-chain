@@ -5,14 +5,21 @@
 //! - Token minting (standard and document)
 //! - Transfers, approvals, burns
 //! - Metadata updates
+//!
+//! ## Security Features
+//!
+//! - **Per-byte storage pricing**: Metadata size affects transaction fees to prevent state bloat
+//! - **Issuer registry**: Only registered issuers can mint certified document NFTs
+//! - **Metadata size limits**: Maximum metadata size enforced per chain params
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use sumchain_genesis::ChainParams;
 use sumchain_nft::collection::{CollectionConfig, CollectionId};
 use sumchain_primitives::{Address, Balance, NftOperation, NftTxData};
-use sumchain_storage::{Database, NftCollectionData, NftStore, NftTokenData};
-use tracing::{debug, info};
+use sumchain_storage::{Database, IssuerStore, NftCollectionData, NftStore, NftTokenData};
+use tracing::{debug, info, warn};
 
 use crate::{Result, StateError, StateManager};
 
@@ -70,12 +77,13 @@ impl NftExecutionResult {
 /// NFT Executor for processing NFT transactions
 pub struct NftExecutor {
     db: Arc<Database>,
+    params: ChainParams,
 }
 
 impl NftExecutor {
     /// Create a new NFT executor
-    pub fn new(db: Arc<Database>) -> Self {
-        Self { db }
+    pub fn new(db: Arc<Database>, params: ChainParams) -> Self {
+        Self { db, params }
     }
 
     /// Get current timestamp in milliseconds
@@ -105,10 +113,10 @@ impl NftExecutor {
                 self.execute_create_collection(&store, sender, &nft_data.data)
             }
             NftOperation::Mint => {
-                self.execute_mint(&store, sender, &nft_data.collection_id, &nft_data.data, false)
+                self.execute_mint(&store, sender, &nft_data.collection_id, &nft_data.data, false, fee)
             }
             NftOperation::MintDocument => {
-                self.execute_mint(&store, sender, &nft_data.collection_id, &nft_data.data, true)
+                self.execute_mint(&store, sender, &nft_data.collection_id, &nft_data.data, true, fee)
             }
             NftOperation::BatchMint => {
                 self.execute_batch_mint(&store, sender, &nft_data.collection_id, &nft_data.data)
@@ -283,6 +291,7 @@ impl NftExecutor {
         collection_id: &[u8; 32],
         data: &[u8],
         is_document: bool,
+        fee: Balance,
     ) -> Result<NftExecutionResult> {
         // Get collection
         let mut collection = store.get_collection(collection_id)?.ok_or_else(|| {
@@ -312,6 +321,45 @@ impl NftExecutor {
 
         let mint_data: MintData = bincode::deserialize(data)
             .map_err(|e| StateError::BlockValidation(format!("Invalid mint data: {}", e)))?;
+
+        // Security: Validate metadata size
+        let metadata_size = mint_data.metadata.len();
+        if !self.params.validate_metadata_size(metadata_size) {
+            return Ok(NftExecutionResult::failure(format!(
+                "Metadata too large: {} bytes exceeds maximum of {} bytes",
+                metadata_size, self.params.max_metadata_bytes
+            )));
+        }
+
+        // Security: Validate storage fee (per-byte pricing)
+        let required_fee = self.params.calculate_nft_storage_fee(metadata_size);
+        if fee < required_fee {
+            return Ok(NftExecutionResult::failure(format!(
+                "Insufficient storage fee: {} required for {} bytes of metadata, got {}",
+                required_fee, metadata_size, fee
+            )));
+        }
+
+        // Security: For document minting, verify issuer is registered
+        if is_document {
+            let issuer_store = IssuerStore::new(&self.db);
+            let current_time = Self::now_ms();
+
+            if !issuer_store.can_mint_documents(sender, None, current_time)? {
+                warn!(
+                    "Unauthorized document minting attempt by {} - not a registered issuer",
+                    sender
+                );
+                return Ok(NftExecutionResult::failure(
+                    "Sender is not a registered document issuer. Only verified issuers can mint certified documents.".to_string(),
+                ));
+            }
+
+            debug!(
+                "Verified issuer {} for document minting",
+                sender
+            );
+        }
 
         let token_id = collection.next_token_id;
 
@@ -344,10 +392,12 @@ impl NftExecutor {
         store.put_collection(collection_id, &collection)?;
 
         debug!(
-            "Minted token {} in collection {:?} to {}",
+            "Minted token {} in collection {:?} to {} (metadata: {} bytes, fee: {})",
             token_id,
             hex::encode(collection_id),
-            mint_data.to
+            mint_data.to,
+            metadata_size,
+            fee
         );
 
         Ok(NftExecutionResult::success_with_token(*collection_id, token_id))
@@ -799,16 +849,17 @@ mod tests {
     use sumchain_storage::Database;
     use tempfile::TempDir;
 
-    fn setup() -> (Arc<Database>, TempDir) {
+    fn setup() -> (Arc<Database>, ChainParams, TempDir) {
         let dir = TempDir::new().unwrap();
         let db = Arc::new(Database::open_default(dir.path()).unwrap());
-        (db, dir)
+        let params = ChainParams::default();
+        (db, params, dir)
     }
 
     #[test]
     fn test_create_collection() {
-        let (db, _dir) = setup();
-        let executor = NftExecutor::new(db.clone());
+        let (db, params, _dir) = setup();
+        let executor = NftExecutor::new(db.clone(), params);
         let store = NftStore::new(&db);
 
         let sender = Address::from_hex("0x0000000000000000000000000000000000000001").unwrap();

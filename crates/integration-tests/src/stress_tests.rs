@@ -288,6 +288,7 @@ fn stress_account_writes() {
 
 #[test]
 fn stress_nft_minting() {
+    use sumchain_genesis::ChainParams;
     use sumchain_nft::collection::CollectionConfig;
     use sumchain_primitives::{NftOperation, NftTxData};
     use sumchain_state::NftExecutor;
@@ -296,7 +297,8 @@ fn stress_nft_minting() {
     let data_dir = TempDir::new().expect("Failed to create temp dir");
     let db = Arc::new(Database::open_default(data_dir.path()).expect("Failed to open database"));
     let state = Arc::new(StateManager::new(db.clone(), 1));
-    let nft_executor = NftExecutor::new(db.clone());
+    let params = ChainParams::default();
+    let nft_executor = NftExecutor::new(db.clone(), params.clone());
 
     let validator_key = KeyPair::from_bytes(validator_bytes);
     let validator_addr = validator_key.address();
@@ -339,7 +341,7 @@ fn stress_nft_minting() {
     };
 
     let result = nft_executor
-        .execute(&validator_addr, &nft_data, &state, &Address::ZERO, 0)
+        .execute(&validator_addr, &nft_data, &state, &Address::ZERO, params.min_fee)
         .expect("Should create collection");
     let collection_id = result.collection_id.unwrap();
 
@@ -364,6 +366,10 @@ fn stress_nft_minting() {
         };
         let serialized = bincode::serialize(&mint_data).expect("Failed to serialize");
 
+        // Calculate fee based on metadata size
+        let metadata_size = format!("{{\"id\":{}}}", i).len();
+        let fee = params.calculate_nft_storage_fee(metadata_size);
+
         let nft_data = NftTxData {
             collection_id,
             token_id: 0,
@@ -372,9 +378,9 @@ fn stress_nft_minting() {
         };
 
         let result = nft_executor
-            .execute(&validator_addr, &nft_data, &state, &Address::ZERO, 0)
+            .execute(&validator_addr, &nft_data, &state, &Address::ZERO, fee)
             .expect("Should mint");
-        assert!(result.success);
+        assert!(result.success, "Mint failed: {:?}", result.error);
     }
     let elapsed = start.elapsed();
 

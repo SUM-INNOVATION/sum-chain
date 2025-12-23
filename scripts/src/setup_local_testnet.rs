@@ -68,6 +68,8 @@ fn main() -> Result<()> {
             max_txs_per_block: 1000,
             min_fee: 1,
             finality_depth: 3, // 3 block confirmations for finality
+            storage_fee_per_byte: 100, // 100 base units per byte
+            max_metadata_bytes: 16384, // 16 KB max metadata
         },
     );
 

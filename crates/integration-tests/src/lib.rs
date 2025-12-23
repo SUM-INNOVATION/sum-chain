@@ -3,6 +3,7 @@
 //! These tests verify end-to-end functionality across multiple components.
 
 mod nft_tests;
+mod security_tests;
 mod stress_tests;
 
 use std::collections::HashMap;
@@ -551,8 +552,8 @@ async fn test_transaction_storage() {
     let stored_tx = tx_store.get(&tx_hash).expect("Should get tx").expect("Tx exists");
 
     assert_eq!(stored_tx.hash(), tx_hash);
-    assert_eq!(stored_tx.tx.amount, 1000);
-    assert_eq!(stored_tx.tx.fee, 10);
+    assert_eq!(stored_tx.amount(), 1000);
+    assert_eq!(stored_tx.fee(), 10);
 }
 
 #[tokio::test]

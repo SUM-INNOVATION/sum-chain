@@ -5,6 +5,7 @@
 use std::sync::Arc;
 
 use sumchain_crypto::KeyPair;
+use sumchain_genesis::ChainParams;
 use sumchain_nft::collection::CollectionConfig;
 use sumchain_primitives::{Address, NftOperation, NftTxData};
 use sumchain_state::{NftExecutor, StateManager};
@@ -32,7 +33,8 @@ impl NftTestNode {
         let data_dir = TempDir::new().expect("Failed to create temp dir");
         let db = Arc::new(Database::open_default(data_dir.path()).expect("Failed to open database"));
         let state = Arc::new(StateManager::new(db.clone(), chain_id));
-        let nft_executor = NftExecutor::new(db.clone());
+        let params = ChainParams::default();
+        let nft_executor = NftExecutor::new(db.clone(), params);
 
         // Create validator key from bytes
         let validator_key = KeyPair::from_bytes(validator_key_bytes);

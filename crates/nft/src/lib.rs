@@ -27,12 +27,18 @@
 pub mod collection;
 pub mod error;
 pub mod metadata;
+pub mod registry;
 pub mod token;
 pub mod transaction;
 
 pub use collection::{Collection, CollectionConfig, CollectionId};
 pub use error::{NftError, Result};
-pub use metadata::{DocumentMetadata, Metadata, MetadataType};
+pub use metadata::{
+    DocumentMetadata, Metadata, MetadataType, MetadataValidationError,
+    MAX_ATTRIBUTES, MAX_ATTRIBUTE_NAME_BYTES, MAX_ATTRIBUTE_VALUE_BYTES,
+    MAX_DESCRIPTION_BYTES, MAX_NAME_BYTES, MAX_URI_BYTES,
+};
+pub use registry::{IssuerOrgType, IssuerStatus, IssuerValidation, RegisteredIssuer, RegistryOperation};
 pub use token::{Token, TokenId, TokenUri};
 pub use transaction::{NftAction, NftTransaction};
 

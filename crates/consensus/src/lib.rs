@@ -1,17 +1,47 @@
 //! # SUM Chain Consensus
 //!
-//! Two consensus implementations are available:
+//! ## Production Consensus: Proof of Authority (PoA)
 //!
-//! ## Proof of Authority (PoA)
-//! Simple round-robin validator rotation. Fast and deterministic,
-//! but assumes honest majority of validators.
+//! SUM Chain uses Proof of Authority (PoA) consensus with:
 //!
-//! ## Byzantine Fault Tolerant (BFT)
-//! Tendermint-style consensus with immediate finality and tolerance
-//! for up to 1/3 Byzantine (malicious) validators.
+//! - **Round-robin proposer selection**: Validators take turns proposing blocks
+//!   based on `validators[height % N]` where N is the validator count.
 //!
-//! The consensus interface is designed to be swappable, allowing
-//! easy migration from PoA to BFT or future PoS implementation.
+//! - **Probabilistic finality**: Blocks become finalized after `finality_depth`
+//!   confirmations (default: 6 blocks). This provides high confidence against
+//!   reorganization while allowing fast block times.
+//!
+//! - **Longest chain fork choice**: In case of competing forks, the chain with
+//!   the most blocks wins, with ties broken by lower block hash.
+//!
+//! - **Trusted validator set**: Assumes an honest majority of validators.
+//!   Validator set is defined in genesis and currently static.
+//!
+//! ## Finality Model
+//!
+//! Unlike BFT consensus with instant finality, PoA uses depth-based finality:
+//!
+//! - A block at height H is finalized when the chain reaches height H + finality_depth
+//! - Finalized blocks cannot be reverted by reorganization
+//! - The `finalized_height()` and `is_finalized()` methods track finality state
+//! - Finality state is persisted to storage for crash recovery
+//!
+//! ## Experimental: Byzantine Fault Tolerant (BFT)
+//!
+//! A Tendermint-style BFT implementation exists in the `bft` module but is
+//! **not yet production-ready**. It includes:
+//!
+//! - Two-phase voting (prevote + precommit)
+//! - View change mechanism for liveness
+//! - Theoretical tolerance for up to 1/3 Byzantine validators
+//!
+//! Note: The BFT module is incomplete (`propose_block` returns `NotImplemented`).
+//! Use PoA for production deployments.
+//!
+//! ## Architecture
+//!
+//! The `ConsensusEngine` trait provides a common interface for both implementations,
+//! allowing future migration to BFT or PoS when ready.
 
 pub mod bft;
 pub mod engine;

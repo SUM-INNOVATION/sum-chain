@@ -257,7 +257,7 @@ mod tests {
     fn test_vote_creation_and_verification() {
         let keypair = KeyPair::generate();
         let view = View::new(1, 0);
-        let block_hash = Some(Hash::from_bytes(&[1; 32]));
+        let block_hash = Some(Hash::new([1; 32]));
 
         let vote = Vote::new(view, VoteType::Prevote, block_hash, &keypair);
 
@@ -272,7 +272,7 @@ mod tests {
         let view = View::new(1, 0);
         let mut vote_set = VoteSet::new(view, VoteType::Prevote, 4); // 4 validators
 
-        let block_hash = Some(Hash::from_bytes(&[1; 32]));
+        let block_hash = Some(Hash::new([1; 32]));
 
         // Add 3 votes (3/4 = 75% > 66.6%)
         for _ in 0..3 {
@@ -290,7 +290,7 @@ mod tests {
         let view = View::new(1, 0);
         let mut vote_set = VoteSet::new(view, VoteType::Prevote, 4);
 
-        let block_hash = Some(Hash::from_bytes(&[1; 32]));
+        let block_hash = Some(Hash::new([1; 32]));
 
         // Add 2 votes (2/4 = 50% < 66.6%)
         for _ in 0..2 {

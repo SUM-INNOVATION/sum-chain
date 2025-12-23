@@ -149,7 +149,7 @@ mod tests {
     #[test]
     fn test_account_cache() {
         let cache = StateCache::new(100, 1000);
-        let addr = Address::from_bytes(&[1; 20]);
+        let addr = Address::new([1; 20]);
 
         // Cache miss
         assert!(cache.get_account(&addr).is_none());
@@ -158,7 +158,7 @@ mod tests {
         let account = CachedAccount {
             balance: 1000,
             nonce: 5,
-            state_root: Hash::from_bytes(&[0; 32]),
+            state_root: Hash::new([0; 32]),
         };
         cache.put_account(addr, account.clone());
 
@@ -177,8 +177,8 @@ mod tests {
     #[test]
     fn test_storage_cache() {
         let cache = StateCache::new(100, 1000);
-        let addr = Address::from_bytes(&[1; 20]);
-        let key = Hash::from_bytes(&[2; 32]);
+        let addr = Address::new([1; 20]);
+        let key = Hash::new([2; 32]);
         let value = vec![3, 4, 5];
 
         // Cache miss
@@ -195,12 +195,12 @@ mod tests {
     #[test]
     fn test_cache_invalidation() {
         let cache = StateCache::new(100, 1000);
-        let addr = Address::from_bytes(&[1; 20]);
+        let addr = Address::new([1; 20]);
 
         let account = CachedAccount {
             balance: 1000,
             nonce: 5,
-            state_root: Hash::from_bytes(&[0; 32]),
+            state_root: Hash::new([0; 32]),
         };
         cache.put_account(addr, account);
 
@@ -220,12 +220,12 @@ mod tests {
         let cache = StateCache::new(2, 10);
 
         // Fill cache beyond capacity
-        for i in 0..5 {
-            let addr = Address::from_bytes(&[i; 20]);
+        for i in 0..5u8 {
+            let addr = Address::new([i; 20]);
             let account = CachedAccount {
                 balance: i as u128,
                 nonce: i as u64,
-                state_root: Hash::from_bytes(&[0; 32]),
+                state_root: Hash::new([0; 32]),
             };
             cache.put_account(addr, account);
         }
@@ -235,11 +235,11 @@ mod tests {
         assert_eq!(stats.account_entries, 2);
 
         // Oldest entries should be evicted
-        let addr_0 = Address::from_bytes(&[0; 20]);
+        let addr_0 = Address::new([0; 20]);
         assert!(cache.get_account(&addr_0).is_none());
 
         // Most recent should be present
-        let addr_4 = Address::from_bytes(&[4; 20]);
+        let addr_4 = Address::new([4; 20]);
         assert!(cache.get_account(&addr_4).is_some());
     }
 }

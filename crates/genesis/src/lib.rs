@@ -89,7 +89,7 @@ impl ChainParams {
     /// Calculate required fee for storing NFT metadata
     /// Returns base_fee + (metadata_bytes * storage_fee_per_byte)
     pub fn calculate_nft_storage_fee(&self, metadata_bytes: usize) -> Balance {
-        let storage_fee = (metadata_bytes as u64).saturating_mul(self.storage_fee_per_byte);
+        let storage_fee = (metadata_bytes as u128).saturating_mul(self.storage_fee_per_byte);
         self.min_fee.saturating_add(storage_fee)
     }
 

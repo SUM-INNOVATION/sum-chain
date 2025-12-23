@@ -320,12 +320,12 @@ impl RpcServer {
     fn tx_to_info(&self, tx: &SignedTransaction, receipt: Option<&sumchain_primitives::Receipt>) -> TransactionInfo {
         TransactionInfo {
             hash: tx.hash().to_hex(),
-            from: tx.tx.from.to_base58(),
-            to: tx.tx.to.to_base58(),
-            amount: tx.tx.amount.to_string(),
-            fee: tx.tx.fee.to_string(),
-            nonce: tx.tx.nonce,
-            chain_id: tx.tx.chain_id,
+            from: tx.sender().to_base58(),
+            to: tx.recipient().map(|r| r.to_base58()).unwrap_or_default(),
+            amount: tx.amount().to_string(),
+            fee: tx.fee().to_string(),
+            nonce: tx.nonce(),
+            chain_id: tx.chain_id(),
             signature: hex::encode(tx.signature),
             block_height: receipt.map(|r| r.block_height),
             status: receipt.map(|r| r.status.description().to_string()),

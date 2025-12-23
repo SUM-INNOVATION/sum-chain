@@ -70,7 +70,7 @@ impl Mempool {
     pub fn add(&self, tx: SignedTransaction) -> Result<Hash> {
         let hash = tx.hash();
         let sender = tx.sender();
-        let fee = tx.tx.fee;
+        let fee = tx.fee();
 
         // Check if already exists
         if self.txs.read().contains_key(&hash) {
@@ -257,22 +257,24 @@ impl Mempool {
         for hash in hashes {
             if let Some(tx) = self.get(&hash) {
                 // Check basic validity
-                if tx.tx.chain_id != chain_id {
+                if tx.chain_id() != chain_id {
                     to_remove.push(hash);
                     continue;
                 }
 
                 // Check nonce
-                if let Ok(current_nonce) = state.get_nonce(&tx.tx.from) {
-                    if tx.tx.nonce < current_nonce {
+                let sender = tx.sender();
+                if let Ok(current_nonce) = state.get_nonce(&sender) {
+                    if tx.nonce() < current_nonce {
                         to_remove.push(hash);
                         continue;
                     }
                 }
 
                 // Check balance
-                if let Ok(balance) = state.get_balance(&tx.tx.from) {
-                    if balance < tx.tx.total_cost() {
+                if let Ok(balance) = state.get_balance(&sender) {
+                    let total_cost = tx.amount().saturating_add(tx.fee());
+                    if balance < total_cost {
                         to_remove.push(hash);
                     }
                 }
@@ -446,7 +448,7 @@ mod tests {
 
         let selected = mempool.select_for_block(1);
         assert_eq!(selected.len(), 1);
-        assert_eq!(selected[0].tx.fee, 20); // Highest fee first
+        assert_eq!(selected[0].fee(), 20); // Highest fee first
     }
 
     #[test]

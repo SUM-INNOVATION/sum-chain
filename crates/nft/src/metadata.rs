@@ -1,9 +1,82 @@
 //! NFT Metadata types
 //!
 //! Supports both general NFT metadata and specialized document certification metadata.
+//! All metadata is validated against strict byte limits to prevent state bloat attacks.
 
 use serde::{Deserialize, Serialize};
 use sumchain_primitives::{Address, Hash, Timestamp};
+
+/// Maximum length for metadata name field (in bytes)
+pub const MAX_NAME_BYTES: usize = 256;
+
+/// Maximum length for metadata description field (in bytes)
+pub const MAX_DESCRIPTION_BYTES: usize = 2048;
+
+/// Maximum length for URI fields (image, animation_url, external_url) (in bytes)
+pub const MAX_URI_BYTES: usize = 512;
+
+/// Maximum number of attributes per token
+pub const MAX_ATTRIBUTES: usize = 32;
+
+/// Maximum length for attribute trait_type (in bytes)
+pub const MAX_ATTRIBUTE_NAME_BYTES: usize = 64;
+
+/// Maximum length for attribute string value (in bytes)
+pub const MAX_ATTRIBUTE_VALUE_BYTES: usize = 256;
+
+/// Metadata validation error
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MetadataValidationError {
+    /// Name exceeds maximum length
+    NameTooLong { max: usize, actual: usize },
+    /// Description exceeds maximum length
+    DescriptionTooLong { max: usize, actual: usize },
+    /// Image URI exceeds maximum length
+    ImageUriTooLong { max: usize, actual: usize },
+    /// Animation URL exceeds maximum length
+    AnimationUrlTooLong { max: usize, actual: usize },
+    /// External URL exceeds maximum length
+    ExternalUrlTooLong { max: usize, actual: usize },
+    /// Too many attributes
+    TooManyAttributes { max: usize, actual: usize },
+    /// Attribute trait name too long
+    AttributeNameTooLong { index: usize, max: usize, actual: usize },
+    /// Attribute value too long
+    AttributeValueTooLong { index: usize, max: usize, actual: usize },
+}
+
+impl std::fmt::Display for MetadataValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NameTooLong { max, actual } => {
+                write!(f, "Name too long: {} bytes (max: {})", actual, max)
+            }
+            Self::DescriptionTooLong { max, actual } => {
+                write!(f, "Description too long: {} bytes (max: {})", actual, max)
+            }
+            Self::ImageUriTooLong { max, actual } => {
+                write!(f, "Image URI too long: {} bytes (max: {})", actual, max)
+            }
+            Self::AnimationUrlTooLong { max, actual } => {
+                write!(f, "Animation URL too long: {} bytes (max: {})", actual, max)
+            }
+            Self::ExternalUrlTooLong { max, actual } => {
+                write!(f, "External URL too long: {} bytes (max: {})", actual, max)
+            }
+            Self::TooManyAttributes { max, actual } => {
+                write!(f, "Too many attributes: {} (max: {})", actual, max)
+            }
+            Self::AttributeNameTooLong { index, max, actual } => {
+                write!(f, "Attribute[{}] name too long: {} bytes (max: {})", index, actual, max)
+            }
+            Self::AttributeValueTooLong { index, max, actual } => {
+                write!(f, "Attribute[{}] value too long: {} bytes (max: {})", index, actual, max)
+            }
+        }
+    }
+}
+
+impl std::error::Error for MetadataValidationError {}
 
 /// Type of metadata storage
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,6 +186,94 @@ impl Metadata {
     /// Compute content hash
     pub fn compute_hash(&self) -> Hash {
         Hash::hash(&self.to_bytes())
+    }
+
+    /// Validate metadata against size limits to prevent state bloat attacks.
+    /// Returns Ok(()) if valid, or Err with the first validation error found.
+    pub fn validate(&self) -> Result<(), MetadataValidationError> {
+        // Validate name
+        if self.name.len() > MAX_NAME_BYTES {
+            return Err(MetadataValidationError::NameTooLong {
+                max: MAX_NAME_BYTES,
+                actual: self.name.len(),
+            });
+        }
+
+        // Validate description
+        if self.description.len() > MAX_DESCRIPTION_BYTES {
+            return Err(MetadataValidationError::DescriptionTooLong {
+                max: MAX_DESCRIPTION_BYTES,
+                actual: self.description.len(),
+            });
+        }
+
+        // Validate image URI
+        if let Some(ref image) = self.image {
+            if image.len() > MAX_URI_BYTES {
+                return Err(MetadataValidationError::ImageUriTooLong {
+                    max: MAX_URI_BYTES,
+                    actual: image.len(),
+                });
+            }
+        }
+
+        // Validate animation URL
+        if let Some(ref url) = self.animation_url {
+            if url.len() > MAX_URI_BYTES {
+                return Err(MetadataValidationError::AnimationUrlTooLong {
+                    max: MAX_URI_BYTES,
+                    actual: url.len(),
+                });
+            }
+        }
+
+        // Validate external URL
+        if let Some(ref url) = self.external_url {
+            if url.len() > MAX_URI_BYTES {
+                return Err(MetadataValidationError::ExternalUrlTooLong {
+                    max: MAX_URI_BYTES,
+                    actual: url.len(),
+                });
+            }
+        }
+
+        // Validate attribute count
+        if self.attributes.len() > MAX_ATTRIBUTES {
+            return Err(MetadataValidationError::TooManyAttributes {
+                max: MAX_ATTRIBUTES,
+                actual: self.attributes.len(),
+            });
+        }
+
+        // Validate individual attributes
+        for (i, attr) in self.attributes.iter().enumerate() {
+            if attr.trait_type.len() > MAX_ATTRIBUTE_NAME_BYTES {
+                return Err(MetadataValidationError::AttributeNameTooLong {
+                    index: i,
+                    max: MAX_ATTRIBUTE_NAME_BYTES,
+                    actual: attr.trait_type.len(),
+                });
+            }
+
+            // Check string value length
+            if let AttributeValue::String(ref s) = attr.value {
+                if s.len() > MAX_ATTRIBUTE_VALUE_BYTES {
+                    return Err(MetadataValidationError::AttributeValueTooLong {
+                        index: i,
+                        max: MAX_ATTRIBUTE_VALUE_BYTES,
+                        actual: s.len(),
+                    });
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Validate and return self, for builder-pattern chaining
+    pub fn validated(self) -> Result<Self, MetadataValidationError> {
+        self.validate()?;
+        Ok(self)
     }
 }
 
@@ -361,5 +522,77 @@ mod tests {
         doc.expires_at = Some(1750000000000);
         assert!(!doc.is_expired(1740000000000));
         assert!(doc.is_expired(1760000000000));
+    }
+
+    #[test]
+    fn test_metadata_validation_valid() {
+        let metadata = Metadata::simple("Test NFT".to_string(), "A test NFT".to_string())
+            .add_attribute("rarity", "common")
+            .add_attribute("level", "1");
+
+        assert!(metadata.validate().is_ok());
+    }
+
+    #[test]
+    fn test_metadata_validation_name_too_long() {
+        let long_name = "x".repeat(MAX_NAME_BYTES + 1);
+        let metadata = Metadata::simple(long_name, "Description".to_string());
+
+        let result = metadata.validate();
+        assert!(matches!(result, Err(MetadataValidationError::NameTooLong { .. })));
+    }
+
+    #[test]
+    fn test_metadata_validation_description_too_long() {
+        let long_desc = "x".repeat(MAX_DESCRIPTION_BYTES + 1);
+        let metadata = Metadata::simple("Name".to_string(), long_desc);
+
+        let result = metadata.validate();
+        assert!(matches!(result, Err(MetadataValidationError::DescriptionTooLong { .. })));
+    }
+
+    #[test]
+    fn test_metadata_validation_too_many_attributes() {
+        let mut metadata = Metadata::simple("Name".to_string(), "Desc".to_string());
+        for i in 0..MAX_ATTRIBUTES + 1 {
+            metadata = metadata.add_attribute(&format!("attr{}", i), "value");
+        }
+
+        let result = metadata.validate();
+        assert!(matches!(result, Err(MetadataValidationError::TooManyAttributes { .. })));
+    }
+
+    #[test]
+    fn test_metadata_validation_attribute_name_too_long() {
+        let long_attr_name = "x".repeat(MAX_ATTRIBUTE_NAME_BYTES + 1);
+        let metadata = Metadata::simple("Name".to_string(), "Desc".to_string())
+            .add_attribute(&long_attr_name, "value");
+
+        let result = metadata.validate();
+        assert!(matches!(result, Err(MetadataValidationError::AttributeNameTooLong { .. })));
+    }
+
+    #[test]
+    fn test_metadata_validation_attribute_value_too_long() {
+        let long_value = "x".repeat(MAX_ATTRIBUTE_VALUE_BYTES + 1);
+        let metadata = Metadata::simple("Name".to_string(), "Desc".to_string())
+            .add_attribute("attr", &long_value);
+
+        let result = metadata.validate();
+        assert!(matches!(result, Err(MetadataValidationError::AttributeValueTooLong { .. })));
+    }
+
+    #[test]
+    fn test_metadata_validated_builder() {
+        // Valid metadata
+        let valid = Metadata::simple("Name".to_string(), "Desc".to_string())
+            .validated();
+        assert!(valid.is_ok());
+
+        // Invalid metadata
+        let long_name = "x".repeat(MAX_NAME_BYTES + 1);
+        let invalid = Metadata::simple(long_name, "Desc".to_string())
+            .validated();
+        assert!(invalid.is_err());
     }
 }

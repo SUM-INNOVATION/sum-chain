@@ -686,6 +686,132 @@ impl<'a> NftStore<'a> {
     }
 }
 
+// ============================================================================
+// Issuer Registry Storage
+// ============================================================================
+
+/// Stored issuer data for the registry
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct IssuerData {
+    /// Issuer's address (signing key)
+    pub address: Address,
+    /// Official name of the issuing organization
+    pub name: String,
+    /// Verified domain (e.g., "university.edu")
+    pub domain: String,
+    /// Organization type code
+    pub org_type: u8,
+    /// Country code (ISO 3166-1 alpha-2)
+    pub country_code: String,
+    /// Status (0=Active, 1=Suspended, 2=Revoked)
+    pub status: u8,
+    /// Document types this issuer can mint
+    pub allowed_doc_types: Vec<String>,
+    /// When the issuer was registered (timestamp ms)
+    pub registered_at: u64,
+    /// When the issuer was last updated (timestamp ms)
+    pub updated_at: u64,
+    /// Registration expiry (0 = no expiry)
+    pub expires_at: u64,
+    /// Additional metadata (JSON)
+    pub metadata: Option<String>,
+}
+
+impl IssuerData {
+    /// Check if issuer is active
+    pub fn is_active(&self) -> bool {
+        self.status == 0
+    }
+
+    /// Check if issuer can mint documents
+    pub fn can_mint(&self, current_time: u64) -> bool {
+        self.is_active() && (self.expires_at == 0 || current_time <= self.expires_at)
+    }
+
+    /// Check if issuer can mint a specific document type
+    pub fn can_mint_doc_type(&self, doc_type: &str, current_time: u64) -> bool {
+        if !self.can_mint(current_time) {
+            return false;
+        }
+        // Empty list means all types allowed
+        if self.allowed_doc_types.is_empty() {
+            return true;
+        }
+        self.allowed_doc_types.iter().any(|t| t == doc_type || t == "*")
+    }
+}
+
+/// Issuer registry storage operations
+pub struct IssuerStore<'a> {
+    db: &'a Database,
+}
+
+impl<'a> IssuerStore<'a> {
+    pub fn new(db: &'a Database) -> Self {
+        Self { db }
+    }
+
+    /// Register a new issuer
+    pub fn put_issuer(&self, address: &Address, data: &IssuerData) -> Result<()> {
+        let bytes = bincode::serialize(data)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        self.db.put(cf::ISSUER_REGISTRY, address.as_bytes(), &bytes)
+    }
+
+    /// Get an issuer by address
+    pub fn get_issuer(&self, address: &Address) -> Result<Option<IssuerData>> {
+        match self.db.get(cf::ISSUER_REGISTRY, address.as_bytes())? {
+            Some(bytes) => {
+                let data: IssuerData = bincode::deserialize(&bytes)
+                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                Ok(Some(data))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Check if an address is a registered issuer
+    pub fn is_registered(&self, address: &Address) -> Result<bool> {
+        self.db.contains(cf::ISSUER_REGISTRY, address.as_bytes())
+    }
+
+    /// Check if an address can mint certified documents
+    pub fn can_mint_documents(&self, address: &Address, doc_type: Option<&str>, current_time: u64) -> Result<bool> {
+        match self.get_issuer(address)? {
+            Some(issuer) => {
+                if let Some(dtype) = doc_type {
+                    Ok(issuer.can_mint_doc_type(dtype, current_time))
+                } else {
+                    Ok(issuer.can_mint(current_time))
+                }
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Delete an issuer (for complete removal)
+    pub fn delete_issuer(&self, address: &Address) -> Result<()> {
+        self.db.delete(cf::ISSUER_REGISTRY, address.as_bytes())
+    }
+
+    /// Get all registered issuers
+    pub fn get_all_issuers(&self) -> Result<Vec<IssuerData>> {
+        let mut issuers = Vec::new();
+        for (_, value) in self.db.prefix_iter(cf::ISSUER_REGISTRY, &[])? {
+            let issuer: IssuerData = bincode::deserialize(&value)
+                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            issuers.push(issuer);
+        }
+        Ok(issuers)
+    }
+
+    /// Get all active issuers
+    pub fn get_active_issuers(&self) -> Result<Vec<IssuerData>> {
+        let all = self.get_all_issuers()?;
+        Ok(all.into_iter().filter(|i| i.is_active()).collect())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

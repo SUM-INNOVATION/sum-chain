@@ -311,11 +311,21 @@ impl Transaction {
     }
 }
 
+/// Transaction inner payload - supports both legacy and V2 formats
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TxInner {
+    /// Legacy transfer transaction (backwards compatible)
+    Legacy(Transaction),
+    /// V2 transaction with extended payload support (NFT, etc.)
+    V2(TransactionV2),
+}
+
 /// Signed transaction (transaction + signature)
+/// Supports both legacy transfers and V2 transactions (NFT operations)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignedTransaction {
-    /// The unsigned transaction
-    pub tx: Transaction,
+    /// The unsigned transaction (legacy or V2)
+    pub inner: TxInner,
     /// Ed25519 signature (64 bytes)
     #[serde(with = "BigArray")]
     pub signature: [u8; 64],
@@ -324,12 +334,45 @@ pub struct SignedTransaction {
 }
 
 impl SignedTransaction {
-    /// Create a new signed transaction
+    /// Create a new signed legacy transaction (backwards compatible)
     pub fn new(tx: Transaction, signature: [u8; 64], public_key: [u8; 32]) -> Self {
         Self {
-            tx,
+            inner: TxInner::Legacy(tx),
             signature,
             public_key,
+        }
+    }
+
+    /// Create a new signed V2 transaction (for NFT and extended operations)
+    pub fn new_v2(tx: TransactionV2, signature: [u8; 64], public_key: [u8; 32]) -> Self {
+        Self {
+            inner: TxInner::V2(tx),
+            signature,
+            public_key,
+        }
+    }
+
+    /// Get the transaction type
+    pub fn tx_type(&self) -> TxType {
+        match &self.inner {
+            TxInner::Legacy(_) => TxType::Transfer,
+            TxInner::V2(tx) => tx.tx_type(),
+        }
+    }
+
+    /// Check if this is an NFT transaction
+    pub fn is_nft(&self) -> bool {
+        self.tx_type() == TxType::Nft
+    }
+
+    /// Get NFT data if this is an NFT transaction
+    pub fn nft_data(&self) -> Option<&NftTxData> {
+        match &self.inner {
+            TxInner::V2(tx) => match &tx.payload {
+                TxPayload::Nft(data) => Some(data),
+                _ => None,
+            },
+            _ => None,
         }
     }
 
@@ -342,7 +385,10 @@ impl SignedTransaction {
 
     /// Get the transaction signing hash
     pub fn signing_hash(&self) -> Hash {
-        self.tx.signing_hash()
+        match &self.inner {
+            TxInner::Legacy(tx) => tx.signing_hash(),
+            TxInner::V2(tx) => tx.signing_hash(),
+        }
     }
 
     /// Serialize to bytes
@@ -369,7 +415,50 @@ impl SignedTransaction {
 
     /// Get sender address
     pub fn sender(&self) -> Address {
-        self.tx.from
+        match &self.inner {
+            TxInner::Legacy(tx) => tx.from,
+            TxInner::V2(tx) => tx.from,
+        }
+    }
+
+    /// Get chain ID
+    pub fn chain_id(&self) -> ChainId {
+        match &self.inner {
+            TxInner::Legacy(tx) => tx.chain_id,
+            TxInner::V2(tx) => tx.chain_id,
+        }
+    }
+
+    /// Get transaction fee
+    pub fn fee(&self) -> Balance {
+        match &self.inner {
+            TxInner::Legacy(tx) => tx.fee,
+            TxInner::V2(tx) => tx.fee,
+        }
+    }
+
+    /// Get transaction nonce
+    pub fn nonce(&self) -> Nonce {
+        match &self.inner {
+            TxInner::Legacy(tx) => tx.nonce,
+            TxInner::V2(tx) => tx.nonce,
+        }
+    }
+
+    /// Get transfer amount (0 for NFT transactions)
+    pub fn amount(&self) -> Balance {
+        match &self.inner {
+            TxInner::Legacy(tx) => tx.amount,
+            TxInner::V2(tx) => tx.amount(),
+        }
+    }
+
+    /// Get recipient address (None for NFT transactions)
+    pub fn recipient(&self) -> Option<Address> {
+        match &self.inner {
+            TxInner::Legacy(tx) => Some(tx.to),
+            TxInner::V2(tx) => tx.recipient(),
+        }
     }
 
     /// Get the expected address from the public key
@@ -379,7 +468,35 @@ impl SignedTransaction {
 
     /// Verify that the signer matches the from address
     pub fn verify_signer(&self) -> bool {
-        self.signer_address() == self.tx.from
+        self.signer_address() == self.sender()
+    }
+
+    /// Get legacy transaction reference (for backwards compatibility)
+    /// Returns None if this is a V2 NFT transaction
+    pub fn legacy_tx(&self) -> Option<&Transaction> {
+        match &self.inner {
+            TxInner::Legacy(tx) => Some(tx),
+            TxInner::V2(_) => None,
+        }
+    }
+
+    /// Access the inner transaction data
+    /// Use tx_type() to determine which variant is active
+    pub fn inner(&self) -> &TxInner {
+        &self.inner
+    }
+}
+
+// Backwards compatibility: provide access to legacy `tx` field
+impl SignedTransaction {
+    /// Get legacy transaction (DEPRECATED: use sender(), fee(), nonce() etc. or inner() instead)
+    /// Panics if this is a V2 NFT transaction
+    #[deprecated(note = "Use sender(), fee(), nonce() etc. or inner() instead")]
+    pub fn tx(&self) -> &Transaction {
+        match &self.inner {
+            TxInner::Legacy(tx) => tx,
+            TxInner::V2(_) => panic!("Cannot access legacy tx field on V2 transaction"),
+        }
     }
 }
 

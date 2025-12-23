@@ -63,6 +63,8 @@ pub mod cf {
     pub const NFT_OWNER_INDEX: &str = "nft_owner_index";
     /// NFT collection index (collection_id -> token_id list)
     pub const NFT_COLLECTION_INDEX: &str = "nft_collection_index";
+    /// Issuer registry for certified documents
+    pub const ISSUER_REGISTRY: &str = "issuer_registry";
 }
 
 /// All column families used by the database
@@ -78,6 +80,7 @@ pub const ALL_CFS: &[&str] = &[
     cf::NFT_TOKENS,
     cf::NFT_OWNER_INDEX,
     cf::NFT_COLLECTION_INDEX,
+    cf::ISSUER_REGISTRY,
 ];
 
 /// Database configuration
