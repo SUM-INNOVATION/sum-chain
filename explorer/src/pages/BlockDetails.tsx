@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { provider } from '../utils/provider';
-import { formatKoppa, formatHash, formatTimestamp, copyToClipboard } from '../utils/formatters';
+import { formatHash, formatTimestamp, copyToClipboard } from '../utils/formatters';
 import type { BlockInfo } from '@sumchain/sdk';
 
 export default function BlockDetails() {

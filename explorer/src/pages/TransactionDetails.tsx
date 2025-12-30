@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { provider } from '../utils/provider';
-import { formatKoppa, formatHash, copyToClipboard } from '../utils/formatters';
+import { formatKoppa } from '../utils/formatters';
 import type { TransactionInfo, TransactionReceipt } from '@sumchain/sdk';
 
 export default function TransactionDetails() {
