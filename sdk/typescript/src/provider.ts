@@ -84,7 +84,7 @@ export class Provider {
         throw new Error(`HTTP error: ${response.status} ${response.statusText}`);
       }
 
-      const json: JsonRpcResponse<T> = await response.json();
+      const json = (await response.json()) as JsonRpcResponse<T>;
 
       if (json.error) {
         throw new Error(`RPC error ${json.error.code}: ${json.error.message}`);
