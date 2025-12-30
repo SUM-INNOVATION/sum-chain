@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { KOPPA_SYMBOL } from '@sumchain/sdk';
+
+const KOPPA_SYMBOL = 'Ϙ';
 
 interface LayoutProps {
   children: React.ReactNode;
