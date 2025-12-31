@@ -115,15 +115,20 @@ cargo run --release --bin sumchain -- run \
 ### 4. Query the Chain
 
 ```bash
-# Check health
+# Check node info
 curl -X POST http://127.0.0.1:8545 \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"health","params":[],"id":1}'
+  -d '{"jsonrpc":"2.0","method":"node_info","params":[],"id":1}'
 
 # Get latest block
 curl -X POST http://127.0.0.1:8545 \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"get_latest_block","params":[],"id":1}'
+
+# Get block number (Ethereum-compatible, returns hex)
+curl -X POST http://127.0.0.1:8545 \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
 
 # Get balance (replace ADDRESS with actual address)
 curl -X POST http://127.0.0.1:8545 \
@@ -197,40 +202,38 @@ For detailed API documentation, see [docs/api-reference.md](docs/api-reference.m
 | Method | Description |
 |--------|-------------|
 | `chain_id` | Get chain ID |
-| `sum_blockNumber` | Get current block height |
-| `sum_getLatestBlock` | Get the latest block |
-| `sum_getBlockByHeight` | Get block by height |
+| `get_latest_block` | Get the latest block |
+| `get_block_by_height` | Get block by height |
 | `get_block_by_hash` | Get block by hash |
 | `get_blocks` | Get multiple blocks in a range |
 
 ### Account Methods
 | Method | Description |
 |--------|-------------|
-| `sum_getBalance` | Get account balance (base units) |
-| `sum_getNonce` | Get account nonce |
+| `get_balance` | Get account balance (base units) |
+| `get_nonce` | Get account nonce |
 | `get_account` | Get full account info |
 
 ### Transaction Methods
 | Method | Description |
 |--------|-------------|
-| `sum_sendRawTransaction` | Submit a signed transaction |
-| `sum_getTransaction` | Get transaction by hash |
-| `sum_getReceipt` | Get transaction receipt |
-| `sum_getPendingTransactions` | Get all pending transactions |
+| `send_raw_transaction` | Submit a signed transaction |
+| `get_transaction` | Get transaction by hash |
+| `get_receipt` | Get transaction receipt |
+| `get_pending_transactions` | Get all pending transactions |
 | `pending_tx_count` | Get mempool size |
 
 ### Validator Methods
 | Method | Description |
 |--------|-------------|
-| `sum_getValidators` | Get current validator set |
+| `get_validators` | Get current validator set |
 | `get_finality` | Get finality information |
 | `is_block_finalized` | Check if block is finalized |
 
 ### P2P & Network Methods
 | Method | Description |
 |--------|-------------|
-| `p2p_peers` | Get connected peer information |
-| `p2p_localPeerId` | Get local peer ID |
+| `get_peers` | Get connected peer information |
 | `get_p2p_stats` | Get P2P network statistics |
 
 ### Health & Monitoring Methods
@@ -238,13 +241,24 @@ For detailed API documentation, see [docs/api-reference.md](docs/api-reference.m
 |--------|-------------|
 | `health` | Health check with node status |
 | `node_info` | Get node version, peer info, etc. |
-| `get_metrics` | Get node metrics (JSON) |
+| `get_metrics` | Get node metrics (Prometheus format) |
 
 ### Ethereum-Compatible Methods
 | Method | Description |
 |--------|-------------|
-| `eth_blockNumber` | Get block number (hex) |
-| `eth_chainId` | Get chain ID (hex) |
+| `eth_blockNumber` | Get block number (hex format, for wallet compatibility) |
+| `eth_getBalance` | Get balance (hex format, for wallet compatibility) |
+
+### NFT (SUM-721) Methods
+| Method | Description |
+|--------|-------------|
+| `nft_getCollection` | Get NFT collection by ID |
+| `nft_getToken` | Get NFT token by collection and token ID |
+| `nft_getTokensByOwner` | Get all NFTs owned by address |
+| `nft_balanceOf` | Get NFT count for address |
+| `nft_ownerOf` | Get owner of specific NFT |
+| `nft_tokenExists` | Check if NFT exists |
+| `nft_getTokensInCollection` | Get all token IDs in collection |
 
 ## Wallet CLI
 

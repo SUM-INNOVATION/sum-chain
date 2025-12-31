@@ -34,39 +34,23 @@ Examples:
 
 ### Chain Methods
 
-#### `sum_blockNumber`
+#### `chain_id`
 
-Returns the current block height.
+Returns the chain ID.
 
 **Parameters:** None
 
-**Returns:** `string` - Hex-encoded block number
-
-**Example:**
-```bash
-curl -X POST http://localhost:8545 \
-    -H "Content-Type: application/json" \
-    -d '{"jsonrpc":"2.0","method":"sum_blockNumber","id":1}'
-```
-
-```json
-{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "result": "0x1a4"
-}
-```
+**Returns:** `integer` - Chain ID
 
 ---
 
-#### `sum_getBlockByHeight`
+#### `get_latest_block`
 
-Returns block information by height.
+Returns the latest block.
 
-**Parameters:**
-1. `height` (integer) - Block height
+**Parameters:** None
 
-**Returns:** Block object or `null`
+**Returns:** Block object
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -84,24 +68,55 @@ Returns block information by height.
 ```bash
 curl -X POST http://localhost:8545 \
     -H "Content-Type: application/json" \
-    -d '{"jsonrpc":"2.0","method":"sum_getBlockByHeight","params":[100],"id":1}'
+    -d '{"jsonrpc":"2.0","method":"get_latest_block","id":1}'
 ```
 
 ---
 
-#### `sum_getLatestBlock`
+#### `get_block_by_height`
 
-Returns the latest block.
+Returns block information by height.
 
-**Parameters:** None
+**Parameters:**
+1. `height` (integer) - Block height
 
-**Returns:** Block object (same as `sum_getBlockByHeight`)
+**Returns:** Block object or `null`
+
+**Example:**
+```bash
+curl -X POST http://localhost:8545 \
+    -H "Content-Type: application/json" \
+    -d '{"jsonrpc":"2.0","method":"get_block_by_height","params":[100],"id":1}'
+```
+
+---
+
+#### `get_block_by_hash`
+
+Returns block information by hash.
+
+**Parameters:**
+1. `hash` (string) - Block hash (hex)
+
+**Returns:** Block object or `null`
+
+---
+
+#### `get_blocks`
+
+Returns multiple blocks in a range.
+
+**Parameters:**
+1. `start_height` (integer) - Start height
+2. `end_height` (integer) - End height
+
+**Returns:** Array of block objects
 
 ---
 
 ### Account Methods
 
-#### `sum_getBalance`
+#### `get_balance`
 
 Returns the account balance in base units.
 
@@ -114,7 +129,7 @@ Returns the account balance in base units.
 ```bash
 curl -X POST http://localhost:8545 \
     -H "Content-Type: application/json" \
-    -d '{"jsonrpc":"2.0","method":"sum_getBalance","params":["5Hq8...]","id":1}'
+    -d '{"jsonrpc":"2.0","method":"get_balance","params":["SUM1abc..."],"id":1}'
 ```
 
 ```json
@@ -129,7 +144,7 @@ This represents `1.5 Ϙ` (1,500,000,000 base units).
 
 ---
 
-#### `sum_getNonce`
+#### `get_nonce`
 
 Returns the account nonce (transaction count).
 
@@ -140,9 +155,26 @@ Returns the account nonce (transaction count).
 
 ---
 
+#### `get_account`
+
+Returns full account information.
+
+**Parameters:**
+1. `address` (string) - Account address
+
+**Returns:** Account object
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `address` | string | Account address |
+| `balance` | string | Balance in base units |
+| `nonce` | integer | Current nonce |
+
+---
+
 ### Transaction Methods
 
-#### `sum_sendRawTransaction`
+#### `send_raw_transaction`
 
 Broadcasts a signed transaction.
 
@@ -159,12 +191,12 @@ Broadcasts a signed transaction.
 ```bash
 curl -X POST http://localhost:8545 \
     -H "Content-Type: application/json" \
-    -d '{"jsonrpc":"2.0","method":"sum_sendRawTransaction","params":["0x..."],"id":1}'
+    -d '{"jsonrpc":"2.0","method":"send_raw_transaction","params":["0x..."],"id":1}'
 ```
 
 ---
 
-#### `sum_getTransaction`
+#### `get_transaction`
 
 Returns transaction details by hash.
 
@@ -187,7 +219,7 @@ Returns transaction details by hash.
 
 ---
 
-#### `sum_getReceipt`
+#### `get_receipt`
 
 Returns transaction receipt (for confirmed transactions).
 
@@ -206,7 +238,7 @@ Returns transaction receipt (for confirmed transactions).
 
 ---
 
-#### `sum_getPendingTransactions`
+#### `get_pending_transactions`
 
 Returns pending transactions in the mempool.
 
@@ -216,9 +248,19 @@ Returns pending transactions in the mempool.
 
 ---
 
+#### `pending_tx_count`
+
+Returns number of pending transactions.
+
+**Parameters:** None
+
+**Returns:** `integer` - Mempool size
+
+---
+
 ### Validator Methods
 
-#### `sum_getValidators`
+#### `get_validators`
 
 Returns the current validator set.
 
@@ -242,9 +284,30 @@ Each validator object:
 
 ---
 
+#### `get_finality`
+
+Returns finality information.
+
+**Parameters:** None
+
+**Returns:** Finality object
+
+---
+
+#### `is_block_finalized`
+
+Checks if a block is finalized.
+
+**Parameters:**
+1. `height` (integer) - Block height
+
+**Returns:** `boolean` - Is finalized
+
+---
+
 ### P2P Methods
 
-#### `p2p_peers`
+#### `get_peers`
 
 Returns connected peers.
 
@@ -259,13 +322,13 @@ Returns connected peers.
 
 ---
 
-#### `p2p_localPeerId`
+#### `get_p2p_stats`
 
-Returns the local peer ID.
+Returns P2P network statistics.
 
 **Parameters:** None
 
-**Returns:** `string` - Local peer ID
+**Returns:** P2P stats object
 
 ---
 
@@ -273,26 +336,38 @@ Returns the local peer ID.
 
 #### `health`
 
-Returns node health status.
+Returns basic health check.
 
 **Parameters:** None
 
 **Returns:** Health object
 
+---
+
+#### `node_info`
+
+Returns detailed node information.
+
+**Parameters:** None
+
+**Returns:** Node info object
+
 | Field | Type | Description |
 |-------|------|-------------|
-| `status` | string | "healthy" or "unhealthy" |
-| `chain_id` | integer | Chain ID |
-| `height` | integer | Current block height |
-| `peer_count` | integer | Connected peers |
+| `version` | string | Node version |
+| `chain_id` | string | Chain ID |
+| `peer_id` | string | Local peer ID |
 | `is_validator` | boolean | Running as validator |
-| `is_synced` | boolean | Fully synced |
+| `current_height` | integer | Current block height |
+| `peer_count` | integer | Connected peers |
+| `mempool_size` | integer | Pending transactions |
+| `uptime_seconds` | integer | Node uptime |
 
 **Example:**
 ```bash
 curl -X POST http://localhost:8545 \
     -H "Content-Type: application/json" \
-    -d '{"jsonrpc":"2.0","method":"health","id":1}'
+    -d '{"jsonrpc":"2.0","method":"node_info","id":1}'
 ```
 
 ```json
@@ -300,33 +375,169 @@ curl -X POST http://localhost:8545 \
     "jsonrpc": "2.0",
     "id": 1,
     "result": {
-        "status": "healthy",
-        "chain_id": 1,
-        "height": 420,
-        "peer_count": 5,
+        "version": "0.1.0",
+        "chain_id": "sumchain-1",
+        "peer_id": "12D3KooW...",
         "is_validator": true,
-        "is_synced": true
+        "current_height": 420,
+        "peer_count": 7,
+        "mempool_size": 0,
+        "uptime_seconds": 19122
     }
 }
 ```
 
 ---
 
-### Ethereum-Compatible Methods
+#### `get_metrics`
 
-For wallet compatibility, these Ethereum-style methods are supported:
+Returns Prometheus-format metrics.
 
-#### `eth_blockNumber`
+**Parameters:** None
 
-Alias for `sum_blockNumber`.
+**Returns:** Metrics object (JSON)
 
 ---
 
-#### `eth_chainId`
+### Ethereum-Compatible Methods
 
-Returns the chain ID in hex format.
+For wallet compatibility (MetaMask, etc.), these Ethereum-style methods are supported:
 
-**Returns:** `string` - Hex-encoded chain ID
+#### `eth_blockNumber`
+
+Returns the current block number in hex format.
+
+**Parameters:** None
+
+**Returns:** `string` - Hex-encoded block number (e.g., `"0x1a4"`)
+
+**Example:**
+```bash
+curl -X POST http://localhost:8545 \
+    -H "Content-Type: application/json" \
+    -d '{"jsonrpc":"2.0","method":"eth_blockNumber","id":1}'
+```
+
+---
+
+#### `eth_getBalance`
+
+Returns account balance in hex format.
+
+**Parameters:**
+1. `address` (string) - Account address
+2. `block` (string) - Block number or "latest" (optional)
+
+**Returns:** `string` - Hex-encoded balance
+
+---
+
+### NFT (SUM-721) Methods
+
+#### `nft_getCollection`
+
+Returns NFT collection information.
+
+**Parameters:**
+1. `collection_id` (string) - Collection ID (hex)
+
+**Returns:** Collection object or `null`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `collection_id` | string | Collection ID |
+| `name` | string | Collection name |
+| `symbol` | string | Collection symbol |
+| `description` | string | Description |
+| `owner` | string | Owner address |
+| `max_supply` | integer | Maximum supply |
+| `total_supply` | integer | Current supply |
+| `transferable` | boolean | Can be transferred |
+| `burnable` | boolean | Can be burned |
+
+---
+
+#### `nft_getToken`
+
+Returns NFT token information.
+
+**Parameters:**
+1. `collection_id` (string) - Collection ID
+2. `token_id` (integer) - Token ID
+
+**Returns:** Token object or `null`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `collection_id` | string | Collection ID |
+| `token_id` | integer | Token ID |
+| `owner` | string | Owner address |
+| `creator` | string | Creator address |
+| `metadata` | string | Token metadata |
+| `minted_at` | integer | Mint timestamp |
+
+---
+
+#### `nft_getTokensByOwner`
+
+Returns all NFTs owned by an address.
+
+**Parameters:**
+1. `owner` (string) - Owner address
+
+**Returns:** Owner tokens object
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `owner` | string | Owner address |
+| `count` | integer | Number of NFTs |
+| `tokens` | array | Token references |
+
+---
+
+#### `nft_balanceOf`
+
+Returns NFT count for an address.
+
+**Parameters:**
+1. `owner` (string) - Owner address
+
+**Returns:** `integer` - Number of NFTs owned
+
+---
+
+#### `nft_ownerOf`
+
+Returns owner of a specific NFT.
+
+**Parameters:**
+1. `collection_id` (string) - Collection ID
+2. `token_id` (integer) - Token ID
+
+**Returns:** `string` - Owner address or `null`
+
+---
+
+#### `nft_tokenExists`
+
+Checks if an NFT exists.
+
+**Parameters:**
+1. `collection_id` (string) - Collection ID
+2. `token_id` (integer) - Token ID
+
+**Returns:** `boolean` - Exists
+
+---
+
+#### `nft_getTokensInCollection`
+
+Returns all token IDs in a collection.
+
+**Parameters:**
+1. `collection_id` (string) - Collection ID
+
+**Returns:** Array of token IDs
 
 ---
 
@@ -365,32 +576,6 @@ Returns the chain ID in hex format.
 
 ---
 
-## WebSocket Support
-
-WebSocket connections are supported on the same port for subscriptions:
-
-```javascript
-const ws = new WebSocket('ws://localhost:8545');
-
-// Subscribe to new blocks
-ws.send(JSON.stringify({
-    jsonrpc: '2.0',
-    method: 'subscribe',
-    params: ['newBlocks'],
-    id: 1
-}));
-
-// Subscribe to pending transactions
-ws.send(JSON.stringify({
-    jsonrpc: '2.0',
-    method: 'subscribe',
-    params: ['pendingTransactions'],
-    id: 2
-}));
-```
-
----
-
 ## Rate Limiting
 
 Default rate limits (configurable):
@@ -409,12 +594,12 @@ Default rate limits (configurable):
 
 ```bash
 # Check balance
-sumchain-wallet balance --address 5Hq8... --rpc http://localhost:8545
+sumchain-wallet balance --address SUM1abc... --rpc http://localhost:8545
 
 # Transfer tokens (1.5 Koppa)
 sumchain-wallet transfer \
     --key wallet.key \
-    --to 5Hq8... \
+    --to SUM1abc... \
     --amount 1.5 \
     --fee 0.001 \
     --chain-id 1
@@ -429,46 +614,54 @@ sumchain-wallet status
 ### Using curl
 
 ```bash
+# Get node info
+curl -X POST http://localhost:8545 \
+    -H "Content-Type: application/json" \
+    -d '{"jsonrpc":"2.0","method":"node_info","id":1}'
+
 # Get balance
 curl -X POST http://localhost:8545 \
     -H "Content-Type: application/json" \
-    -d '{"jsonrpc":"2.0","method":"sum_getBalance","params":["5Hq8..."],"id":1}'
+    -d '{"jsonrpc":"2.0","method":"get_balance","params":["SUM1abc..."],"id":1}'
+
+# Get block number (Ethereum-compatible)
+curl -X POST http://localhost:8545 \
+    -H "Content-Type: application/json" \
+    -d '{"jsonrpc":"2.0","method":"eth_blockNumber","id":1}'
 
 # Send transaction
 curl -X POST http://localhost:8545 \
     -H "Content-Type: application/json" \
-    -d '{"jsonrpc":"2.0","method":"sum_sendRawTransaction","params":["0x..."],"id":1}'
+    -d '{"jsonrpc":"2.0","method":"send_raw_transaction","params":["0x..."],"id":1}'
 ```
 
 ---
 
 ## SDK Support
 
-### JavaScript/TypeScript
+### TypeScript
 
 ```typescript
-import { JsonRpcProvider } from 'sumchain-sdk';
+import { Provider } from '@sumchain/sdk';
 
-const provider = new JsonRpcProvider('http://localhost:8545');
+const provider = new Provider('http://localhost:8545');
+
+// Get node info
+const info = await provider.getHealth();
+console.log(`Height: ${info.current_height}, Peers: ${info.peer_count}`);
 
 // Get balance (returns BigInt in base units)
-const balance = await provider.getBalance('5Hq8...');
-console.log(`Balance: ${balance / 1_000_000_000n} Ϙ`);
+const balance = await provider.getBalance('SUM1abc...');
+console.log(`Balance: ${Number(balance) / 1_000_000_000} Ϙ`);
 
-// Send transaction
-const txHash = await provider.sendTransaction(signedTx);
-```
+// Get block number (Ethereum-compatible)
+const blockNumber = await provider.getBlockNumber();
 
-### Rust
+// Get latest block
+const block = await provider.getLatestBlock();
 
-```rust
-use sumchain_rpc::api::SumChainApiClient;
-use jsonrpsee::http_client::HttpClientBuilder;
-
-let client = HttpClientBuilder::default()
-    .build("http://localhost:8545")?;
-
-let balance = client.get_balance("5Hq8...".to_string()).await?;
+// Wait for transaction
+const receipt = await provider.waitForReceipt(txHash);
 ```
 
 ### Python
@@ -476,16 +669,24 @@ let balance = client.get_balance("5Hq8...".to_string()).await?;
 ```python
 import requests
 
-def get_balance(address):
+def rpc_call(method, params=None):
     response = requests.post('http://localhost:8545', json={
         'jsonrpc': '2.0',
-        'method': 'sum_getBalance',
-        'params': [address],
+        'method': method,
+        'params': params or [],
         'id': 1
     })
-    return int(response.json()['result'])
+    return response.json()['result']
 
-# Convert to Koppa
-balance_koppa = get_balance('5Hq8...') / 1_000_000_000
-print(f'Balance: {balance_koppa} Ϙ')
+# Get node info
+info = rpc_call('node_info')
+print(f"Height: {info['current_height']}, Version: {info['version']}")
+
+# Get balance
+balance = int(rpc_call('get_balance', ['SUM1abc...']))
+print(f'Balance: {balance / 1_000_000_000} Ϙ')
+
+# Get block number (Ethereum-compatible, returns hex)
+block_hex = rpc_call('eth_blockNumber')
+block_number = int(block_hex, 16)
 ```
