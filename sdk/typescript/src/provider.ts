@@ -108,7 +108,7 @@ export class Provider {
    * Get current block height
    */
   async getBlockNumber(): Promise<number> {
-    const hex = await this.request<string>('sum_blockNumber');
+    const hex = await this.request<string>('eth_blockNumber');
     return parseInt(hex.replace('0x', ''), 16);
   }
 
@@ -116,21 +116,21 @@ export class Provider {
    * Get block by height
    */
   async getBlockByHeight(height: number): Promise<BlockInfo | null> {
-    return this.request<BlockInfo | null>('sum_getBlockByHeight', [height]);
+    return this.request<BlockInfo | null>('get_block_by_height', [height]);
   }
 
   /**
    * Get latest block
    */
   async getLatestBlock(): Promise<BlockInfo> {
-    return this.request<BlockInfo>('sum_getLatestBlock');
+    return this.request<BlockInfo>('get_latest_block');
   }
 
   /**
    * Get account balance in base units
    */
   async getBalance(address: Address): Promise<bigint> {
-    const balance = await this.request<string>('sum_getBalance', [address]);
+    const balance = await this.request<string>('get_balance', [address]);
     return BigInt(balance);
   }
 
@@ -138,14 +138,14 @@ export class Provider {
    * Get account nonce
    */
   async getNonce(address: Address): Promise<number> {
-    return this.request<number>('sum_getNonce', [address]);
+    return this.request<number>('get_nonce', [address]);
   }
 
   /**
    * Send raw signed transaction
    */
   async sendRawTransaction(rawTx: string): Promise<Hash> {
-    const result = await this.request<{ tx_hash: string }>('sum_sendRawTransaction', [rawTx]);
+    const result = await this.request<{ tx_hash: string }>('send_raw_transaction', [rawTx]);
     return result.tx_hash;
   }
 
@@ -153,43 +153,42 @@ export class Provider {
    * Get transaction by hash
    */
   async getTransaction(txHash: Hash): Promise<TransactionInfo | null> {
-    return this.request<TransactionInfo | null>('sum_getTransaction', [txHash]);
+    return this.request<TransactionInfo | null>('get_transaction', [txHash]);
   }
 
   /**
    * Get transaction receipt
    */
   async getReceipt(txHash: Hash): Promise<TransactionReceipt | null> {
-    return this.request<TransactionReceipt | null>('sum_getReceipt', [txHash]);
+    return this.request<TransactionReceipt | null>('get_receipt', [txHash]);
   }
 
   /**
    * Get pending transactions
    */
   async getPendingTransactions(): Promise<TransactionInfo[]> {
-    return this.request<TransactionInfo[]>('sum_getPendingTransactions');
+    return this.request<TransactionInfo[]>('get_pending_transactions');
   }
 
   /**
    * Get validator set
    */
   async getValidators(): Promise<ValidatorSetInfo> {
-    return this.request<ValidatorSetInfo>('sum_getValidators');
+    return this.request<ValidatorSetInfo>('get_validators');
   }
 
   /**
    * Get node health
    */
   async getHealth(): Promise<HealthResponse> {
-    return this.request<HealthResponse>('health');
+    return this.request<HealthResponse>('node_info');
   }
 
   /**
    * Get chain ID
    */
   async getChainId(): Promise<number> {
-    const hex = await this.request<string>('eth_chainId');
-    return parseInt(hex.replace('0x', ''), 16);
+    return this.request<number>('chain_id');
   }
 
   /**

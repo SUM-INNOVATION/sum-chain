@@ -78,77 +78,76 @@ export class Provider {
      * Get current block height
      */
     async getBlockNumber() {
-        const hex = await this.request('sum_blockNumber');
+        const hex = await this.request('eth_blockNumber');
         return parseInt(hex.replace('0x', ''), 16);
     }
     /**
      * Get block by height
      */
     async getBlockByHeight(height) {
-        return this.request('sum_getBlockByHeight', [height]);
+        return this.request('get_block_by_height', [height]);
     }
     /**
      * Get latest block
      */
     async getLatestBlock() {
-        return this.request('sum_getLatestBlock');
+        return this.request('get_latest_block');
     }
     /**
      * Get account balance in base units
      */
     async getBalance(address) {
-        const balance = await this.request('sum_getBalance', [address]);
+        const balance = await this.request('get_balance', [address]);
         return BigInt(balance);
     }
     /**
      * Get account nonce
      */
     async getNonce(address) {
-        return this.request('sum_getNonce', [address]);
+        return this.request('get_nonce', [address]);
     }
     /**
      * Send raw signed transaction
      */
     async sendRawTransaction(rawTx) {
-        const result = await this.request('sum_sendRawTransaction', [rawTx]);
+        const result = await this.request('send_raw_transaction', [rawTx]);
         return result.tx_hash;
     }
     /**
      * Get transaction by hash
      */
     async getTransaction(txHash) {
-        return this.request('sum_getTransaction', [txHash]);
+        return this.request('get_transaction', [txHash]);
     }
     /**
      * Get transaction receipt
      */
     async getReceipt(txHash) {
-        return this.request('sum_getReceipt', [txHash]);
+        return this.request('get_receipt', [txHash]);
     }
     /**
      * Get pending transactions
      */
     async getPendingTransactions() {
-        return this.request('sum_getPendingTransactions');
+        return this.request('get_pending_transactions');
     }
     /**
      * Get validator set
      */
     async getValidators() {
-        return this.request('sum_getValidators');
+        return this.request('get_validators');
     }
     /**
      * Get node health
      */
     async getHealth() {
-        return this.request('health');
+        return this.request('node_info');
     }
     /**
      * Get chain ID
      */
     async getChainId() {
-        const hex = await this.request('eth_chainId');
-        return parseInt(hex.replace('0x', ''), 16);
+        return this.request('chain_id');
     }
     /**
      * Wait for transaction receipt with polling
