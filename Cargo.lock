@@ -3738,6 +3738,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sumchain-token"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "hex",
+ "serde",
+ "sumchain-primitives",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "sumchain-wallet"
 version = "0.1.0"
 dependencies = [

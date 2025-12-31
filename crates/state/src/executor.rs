@@ -15,6 +15,7 @@ use sumchain_storage::Database;
 use tracing::{debug, info, warn};
 
 use crate::nft_executor::NftExecutor;
+use crate::token_executor::TokenExecutor;
 use crate::{Result, StateError, StateManager};
 
 /// Result of executing a transaction
@@ -31,17 +32,20 @@ pub struct BlockExecutor {
     db: Arc<Database>,
     params: ChainParams,
     nft_executor: NftExecutor,
+    token_executor: TokenExecutor,
 }
 
 impl BlockExecutor {
     /// Create a new block executor
     pub fn new(state: Arc<StateManager>, db: Arc<Database>, params: ChainParams) -> Self {
         let nft_executor = NftExecutor::new(db.clone(), params.clone());
+        let token_executor = TokenExecutor::new(db.clone(), params.clone());
         Self {
             state,
             db,
             params,
             nft_executor,
+            token_executor,
         }
     }
 
@@ -207,6 +211,45 @@ impl BlockExecutor {
                             })
                         }
                     }
+                    TxPayload::Token(token_data) => {
+                        // Execute Token (SRC-20) operation
+                        // Note: block_height is not available here, use 0 for now
+                        // This will be updated when execute_block is called
+                        let result = self.token_executor.execute(
+                            &v2_tx.from,
+                            &token_data,
+                            &self.state,
+                            proposer,
+                            v2_tx.fee,
+                            0, // block_height placeholder
+                        )?;
+
+                        if result.success {
+                            debug!(
+                                "V2 Token {} executed: {:?}",
+                                tx_hash,
+                                token_data.operation
+                            );
+
+                            Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Success,
+                                fee_paid: v2_tx.fee,
+                            })
+                        } else {
+                            warn!(
+                                "V2 Token {} failed: {}",
+                                tx_hash,
+                                result.error.as_deref().unwrap_or("Unknown error")
+                            );
+
+                            Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Failed(3), // Token operation failed
+                                fee_paid: 0,
+                            })
+                        }
+                    }
                 }
             }
         }
@@ -339,6 +382,53 @@ impl BlockExecutor {
                     Ok(TxExecutionResult {
                         tx_hash,
                         status: TxStatus::Failed(2), // NFT operation failed
+                        fee_paid: 0,
+                    })
+                }
+            }
+            TxPayload::Token(token_data) => {
+                // Check balance for fee
+                let balance = self.state.get_balance(&tx.from)?;
+                if balance < tx.fee {
+                    return Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::InsufficientBalance,
+                        fee_paid: 0,
+                    });
+                }
+
+                // Execute Token (SRC-20) operation
+                let result = self.token_executor.execute(
+                    &tx.from,
+                    token_data,
+                    &self.state,
+                    proposer,
+                    tx.fee,
+                    0, // block_height placeholder
+                )?;
+
+                if result.success {
+                    debug!(
+                        "V2 Token {} executed: {:?}",
+                        tx_hash,
+                        token_data.operation
+                    );
+
+                    Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::Success,
+                        fee_paid: tx.fee,
+                    })
+                } else {
+                    warn!(
+                        "V2 Token {} failed: {}",
+                        tx_hash,
+                        result.error.as_deref().unwrap_or("Unknown error")
+                    );
+
+                    Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::Failed(3), // Token operation failed
                         fee_paid: 0,
                     })
                 }

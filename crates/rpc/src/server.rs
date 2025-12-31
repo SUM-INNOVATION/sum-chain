@@ -360,6 +360,22 @@ impl RpcServer {
         arr.copy_from_slice(&bytes);
         Ok(arr)
     }
+
+    /// Parse token ID from hex string
+    fn parse_token_id(&self, s: &str) -> Result<[u8; 32]> {
+        let s = s.strip_prefix("0x").unwrap_or(s);
+        let bytes = hex::decode(s)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid token ID: {}", e)))?;
+        if bytes.len() != 32 {
+            return Err(RpcError::InvalidParams(format!(
+                "Invalid token ID length: expected 32, got {}",
+                bytes.len()
+            )));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Ok(arr)
+    }
 }
 
 #[async_trait::async_trait]
@@ -956,8 +972,7 @@ impl SumChainApiServer for RpcServer {
         owner: String,
     ) -> std::result::Result<String, jsonrpsee::types::ErrorObjectOwned> {
         let token_bytes = self.parse_token_id(&token_id)?;
-        let owner_addr = Address::from_string(&owner)
-            .map_err(|e| RpcError::InvalidParams(format!("Invalid owner address: {}", e)))?;
+        let owner_addr = self.parse_address(&owner)?;
 
         let token_store = TokenStore::new(&self.db);
         let balance = token_store
@@ -971,8 +986,7 @@ impl SumChainApiServer for RpcServer {
         &self,
         owner: String,
     ) -> std::result::Result<TokenHoldings, jsonrpsee::types::ErrorObjectOwned> {
-        let owner_addr = Address::from_string(&owner)
-            .map_err(|e| RpcError::InvalidParams(format!("Invalid owner address: {}", e)))?;
+        let owner_addr = self.parse_address(&owner)?;
 
         let token_store = TokenStore::new(&self.db);
         let token_ids = token_store
@@ -1013,10 +1027,8 @@ impl SumChainApiServer for RpcServer {
         spender: String,
     ) -> std::result::Result<String, jsonrpsee::types::ErrorObjectOwned> {
         let token_bytes = self.parse_token_id(&token_id)?;
-        let owner_addr = Address::from_string(&owner)
-            .map_err(|e| RpcError::InvalidParams(format!("Invalid owner address: {}", e)))?;
-        let spender_addr = Address::from_string(&spender)
-            .map_err(|e| RpcError::InvalidParams(format!("Invalid spender address: {}", e)))?;
+        let owner_addr = self.parse_address(&owner)?;
+        let spender_addr = self.parse_address(&spender)?;
 
         let token_store = TokenStore::new(&self.db);
         let allowance = token_store
@@ -1055,21 +1067,3 @@ impl SumChainApiServer for RpcServer {
     }
 }
 
-impl<C: ConsensusEngine> RpcHandler<C> {
-    /// Parse token ID from hex string
-    fn parse_token_id(&self, token_id: &str) -> std::result::Result<[u8; 32], jsonrpsee::types::ErrorObjectOwned> {
-        let token_id = token_id.strip_prefix("0x").unwrap_or(token_id);
-        let bytes = hex::decode(token_id)
-            .map_err(|e| RpcError::InvalidParams(format!("Invalid token ID hex: {}", e)))?;
-        if bytes.len() != 32 {
-            return Err(RpcError::InvalidParams(format!(
-                "Token ID must be 32 bytes, got {}",
-                bytes.len()
-            ))
-            .into());
-        }
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(&bytes);
-        Ok(arr)
-    }
-}
