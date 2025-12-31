@@ -77,7 +77,7 @@ pub trait SumChainApi {
     #[method(name = "pending_tx_count")]
     async fn pending_tx_count(&self) -> Result<usize, jsonrpsee::types::ErrorObjectOwned>;
 
-    /// Get latest block number (Ethereum-compatible)
+    /// Get latest block number (Ethereum-compatible, hex format)
     #[method(name = "eth_blockNumber")]
     async fn eth_block_number(&self) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
 
@@ -88,6 +88,66 @@ pub trait SumChainApi {
         address: String,
         block: Option<String>,
     ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    // ========================================================================
+    // SUM Chain Native Aliases (sum_* prefix for brand consistency)
+    // These mirror the unprefixed methods but with sum_ prefix
+    // ========================================================================
+
+    /// Get block number (SUM native alias)
+    #[method(name = "sum_blockNumber")]
+    async fn sum_block_number(&self) -> Result<u64, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get latest block (SUM native alias)
+    #[method(name = "sum_getLatestBlock")]
+    async fn sum_get_latest_block(&self) -> Result<BlockInfo, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get block by height (SUM native alias)
+    #[method(name = "sum_getBlockByHeight")]
+    async fn sum_get_block_by_height(
+        &self,
+        height: u64,
+    ) -> Result<Option<BlockInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get account balance (SUM native alias)
+    #[method(name = "sum_getBalance")]
+    async fn sum_get_balance(
+        &self,
+        address: String,
+    ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get account nonce (SUM native alias)
+    #[method(name = "sum_getNonce")]
+    async fn sum_get_nonce(&self, address: String) -> Result<u64, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Send raw transaction (SUM native alias)
+    #[method(name = "sum_sendRawTransaction")]
+    async fn sum_send_raw_transaction(
+        &self,
+        raw_tx: String,
+    ) -> Result<SendTxResponse, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get transaction by hash (SUM native alias)
+    #[method(name = "sum_getTransaction")]
+    async fn sum_get_transaction(
+        &self,
+        tx_hash: String,
+    ) -> Result<Option<TransactionInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get transaction receipt (SUM native alias)
+    #[method(name = "sum_getReceipt")]
+    async fn sum_get_receipt(
+        &self,
+        tx_hash: String,
+    ) -> Result<Option<ReceiptInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get pending transactions (SUM native alias)
+    #[method(name = "sum_getPendingTransactions")]
+    async fn sum_get_pending_transactions(&self) -> Result<Vec<TransactionInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get validators (SUM native alias)
+    #[method(name = "sum_getValidators")]
+    async fn sum_get_validators(&self) -> Result<ValidatorSetInfo, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Get pending transactions from mempool
     #[method(name = "get_pending_transactions")]

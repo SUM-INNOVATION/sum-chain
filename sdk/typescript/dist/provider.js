@@ -188,6 +188,94 @@ export class Provider {
         throw new Error(`Confirmation timeout after ${timeout}ms`);
     }
     // ==========================================================================
+    // SUM Chain Native Methods (sum_* prefix)
+    // These use the SUM Chain branded RPC method names
+    // ==========================================================================
+    /**
+     * Get current block number using SUM native method
+     * @returns Block height as number
+     */
+    async sumBlockNumber() {
+        return this.request('sum_blockNumber');
+    }
+    /**
+     * Get latest block using SUM native method
+     */
+    async sumGetLatestBlock() {
+        return this.request('sum_getLatestBlock');
+    }
+    /**
+     * Get block by height using SUM native method
+     */
+    async sumGetBlockByHeight(height) {
+        return this.request('sum_getBlockByHeight', [height]);
+    }
+    /**
+     * Get account balance using SUM native method
+     * @returns Balance in base units as bigint
+     */
+    async sumGetBalance(address) {
+        const balance = await this.request('sum_getBalance', [address]);
+        return BigInt(balance);
+    }
+    /**
+     * Get account nonce using SUM native method
+     */
+    async sumGetNonce(address) {
+        return this.request('sum_getNonce', [address]);
+    }
+    /**
+     * Send raw transaction using SUM native method
+     */
+    async sumSendRawTransaction(rawTx) {
+        const result = await this.request('sum_sendRawTransaction', [rawTx]);
+        return result.tx_hash;
+    }
+    /**
+     * Get transaction by hash using SUM native method
+     */
+    async sumGetTransaction(txHash) {
+        return this.request('sum_getTransaction', [txHash]);
+    }
+    /**
+     * Get transaction receipt using SUM native method
+     */
+    async sumGetReceipt(txHash) {
+        return this.request('sum_getReceipt', [txHash]);
+    }
+    /**
+     * Get pending transactions using SUM native method
+     */
+    async sumGetPendingTransactions() {
+        return this.request('sum_getPendingTransactions');
+    }
+    /**
+     * Get validators using SUM native method
+     */
+    async sumGetValidators() {
+        return this.request('sum_getValidators');
+    }
+    // ==========================================================================
+    // Ethereum-Compatible Methods (eth_* prefix)
+    // These use Ethereum-style RPC method names for wallet compatibility
+    // ==========================================================================
+    /**
+     * Get block number in hex format (Ethereum-compatible)
+     * @returns Block number as hex string (e.g., "0x1a4")
+     */
+    async ethBlockNumber() {
+        return this.request('eth_blockNumber');
+    }
+    /**
+     * Get balance in hex format (Ethereum-compatible)
+     * @param address - Account address
+     * @param block - Block number or "latest" (optional, ignored)
+     * @returns Balance as hex string
+     */
+    async ethGetBalance(address, block) {
+        return this.request('eth_getBalance', [address, block || 'latest']);
+    }
+    // ==========================================================================
     // NFT (SUM-721) Methods
     // ==========================================================================
     /**

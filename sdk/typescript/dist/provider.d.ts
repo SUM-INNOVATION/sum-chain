@@ -93,6 +93,60 @@ export declare class Provider {
      */
     waitForConfirmation(txHash: Hash, confirmations?: number, timeout?: number): Promise<TransactionReceipt>;
     /**
+     * Get current block number using SUM native method
+     * @returns Block height as number
+     */
+    sumBlockNumber(): Promise<number>;
+    /**
+     * Get latest block using SUM native method
+     */
+    sumGetLatestBlock(): Promise<BlockInfo>;
+    /**
+     * Get block by height using SUM native method
+     */
+    sumGetBlockByHeight(height: number): Promise<BlockInfo | null>;
+    /**
+     * Get account balance using SUM native method
+     * @returns Balance in base units as bigint
+     */
+    sumGetBalance(address: Address): Promise<bigint>;
+    /**
+     * Get account nonce using SUM native method
+     */
+    sumGetNonce(address: Address): Promise<number>;
+    /**
+     * Send raw transaction using SUM native method
+     */
+    sumSendRawTransaction(rawTx: string): Promise<Hash>;
+    /**
+     * Get transaction by hash using SUM native method
+     */
+    sumGetTransaction(txHash: Hash): Promise<TransactionInfo | null>;
+    /**
+     * Get transaction receipt using SUM native method
+     */
+    sumGetReceipt(txHash: Hash): Promise<TransactionReceipt | null>;
+    /**
+     * Get pending transactions using SUM native method
+     */
+    sumGetPendingTransactions(): Promise<TransactionInfo[]>;
+    /**
+     * Get validators using SUM native method
+     */
+    sumGetValidators(): Promise<ValidatorSetInfo>;
+    /**
+     * Get block number in hex format (Ethereum-compatible)
+     * @returns Block number as hex string (e.g., "0x1a4")
+     */
+    ethBlockNumber(): Promise<string>;
+    /**
+     * Get balance in hex format (Ethereum-compatible)
+     * @param address - Account address
+     * @param block - Block number or "latest" (optional, ignored)
+     * @returns Balance as hex string
+     */
+    ethGetBalance(address: Address, block?: string): Promise<string>;
+    /**
      * Get NFT collection by ID
      *
      * @param collectionId - Collection ID (hex string with or without 0x prefix)

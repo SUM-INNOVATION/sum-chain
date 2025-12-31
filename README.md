@@ -199,36 +199,41 @@ Example: A balance of `"1500000000"` = 1.5 Ϙ
 For detailed API documentation, see [docs/api-reference.md](docs/api-reference.md).
 
 ### Chain & Block Methods
-| Method | Description |
-|--------|-------------|
-| `chain_id` | Get chain ID |
-| `get_latest_block` | Get the latest block |
-| `get_block_by_height` | Get block by height |
-| `get_block_by_hash` | Get block by hash |
-| `get_blocks` | Get multiple blocks in a range |
+
+| Generic Method | SUM Native | ETH Compatible | Description |
+|---------------|------------|----------------|-------------|
+| `chain_id` | - | - | Get chain ID |
+| `get_latest_block` | `sum_getLatestBlock` | - | Get the latest block |
+| `get_block_by_height` | `sum_getBlockByHeight` | - | Get block by height |
+| `get_block_by_hash` | - | - | Get block by hash |
+| `get_blocks` | - | - | Get multiple blocks in a range |
+| - | `sum_blockNumber` | `eth_blockNumber` | Get current block height |
 
 ### Account Methods
-| Method | Description |
-|--------|-------------|
-| `get_balance` | Get account balance (base units) |
-| `get_nonce` | Get account nonce |
-| `get_account` | Get full account info |
+
+| Generic Method | SUM Native | ETH Compatible | Description |
+|---------------|------------|----------------|-------------|
+| `get_balance` | `sum_getBalance` | `eth_getBalance` | Get account balance |
+| `get_nonce` | `sum_getNonce` | - | Get account nonce |
+| `get_account` | - | - | Get full account info |
 
 ### Transaction Methods
-| Method | Description |
-|--------|-------------|
-| `send_raw_transaction` | Submit a signed transaction |
-| `get_transaction` | Get transaction by hash |
-| `get_receipt` | Get transaction receipt |
-| `get_pending_transactions` | Get all pending transactions |
-| `pending_tx_count` | Get mempool size |
+
+| Generic Method | SUM Native | Description |
+|---------------|------------|-------------|
+| `send_raw_transaction` | `sum_sendRawTransaction` | Submit a signed transaction |
+| `get_transaction` | `sum_getTransaction` | Get transaction by hash |
+| `get_receipt` | `sum_getReceipt` | Get transaction receipt |
+| `get_pending_transactions` | `sum_getPendingTransactions` | Get all pending transactions |
+| `pending_tx_count` | - | Get mempool size |
 
 ### Validator Methods
-| Method | Description |
-|--------|-------------|
-| `get_validators` | Get current validator set |
-| `get_finality` | Get finality information |
-| `is_block_finalized` | Check if block is finalized |
+
+| Generic Method | SUM Native | Description |
+|---------------|------------|-------------|
+| `get_validators` | `sum_getValidators` | Get current validator set |
+| `get_finality` | - | Get finality information |
+| `is_block_finalized` | - | Check if block is finalized |
 
 ### P2P & Network Methods
 | Method | Description |
@@ -243,12 +248,6 @@ For detailed API documentation, see [docs/api-reference.md](docs/api-reference.m
 | `node_info` | Get node version, peer info, etc. |
 | `get_metrics` | Get node metrics (Prometheus format) |
 
-### Ethereum-Compatible Methods
-| Method | Description |
-|--------|-------------|
-| `eth_blockNumber` | Get block number (hex format, for wallet compatibility) |
-| `eth_getBalance` | Get balance (hex format, for wallet compatibility) |
-
 ### NFT (SUM-721) Methods
 | Method | Description |
 |--------|-------------|
@@ -259,6 +258,11 @@ For detailed API documentation, see [docs/api-reference.md](docs/api-reference.m
 | `nft_ownerOf` | Get owner of specific NFT |
 | `nft_tokenExists` | Check if NFT exists |
 | `nft_getTokensInCollection` | Get all token IDs in collection |
+
+**Note:** All methods have three naming styles:
+- **Generic** (`get_balance`): Standard snake_case, recommended for most use cases
+- **SUM Native** (`sum_getBalance`): Branded methods with `sum_` prefix
+- **ETH Compatible** (`eth_getBalance`): Ethereum-style for wallet compatibility (hex responses)
 
 ## Wallet CLI
 

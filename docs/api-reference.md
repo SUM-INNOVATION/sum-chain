@@ -399,7 +399,95 @@ Returns Prometheus-format metrics.
 
 ---
 
-### Ethereum-Compatible Methods
+### SUM Chain Native Methods (sum_* prefix)
+
+These methods use the SUM Chain branded prefix for brand consistency. They return the same data as the generic methods.
+
+#### `sum_blockNumber`
+
+Returns the current block number as an integer.
+
+**Parameters:** None
+
+**Returns:** `integer` - Block height
+
+---
+
+#### `sum_getLatestBlock`
+
+Alias for `get_latest_block`. Returns the latest block.
+
+---
+
+#### `sum_getBlockByHeight`
+
+Alias for `get_block_by_height`. Returns block by height.
+
+**Parameters:**
+1. `height` (integer) - Block height
+
+---
+
+#### `sum_getBalance`
+
+Alias for `get_balance`. Returns account balance in base units.
+
+**Parameters:**
+1. `address` (string) - Account address
+
+**Returns:** `string` - Balance in base units
+
+---
+
+#### `sum_getNonce`
+
+Alias for `get_nonce`. Returns account nonce.
+
+**Parameters:**
+1. `address` (string) - Account address
+
+---
+
+#### `sum_sendRawTransaction`
+
+Alias for `send_raw_transaction`. Broadcasts a signed transaction.
+
+**Parameters:**
+1. `raw_tx` (string) - Hex-encoded signed transaction
+
+---
+
+#### `sum_getTransaction`
+
+Alias for `get_transaction`. Returns transaction by hash.
+
+**Parameters:**
+1. `tx_hash` (string) - Transaction hash
+
+---
+
+#### `sum_getReceipt`
+
+Alias for `get_receipt`. Returns transaction receipt.
+
+**Parameters:**
+1. `tx_hash` (string) - Transaction hash
+
+---
+
+#### `sum_getPendingTransactions`
+
+Alias for `get_pending_transactions`. Returns pending transactions.
+
+---
+
+#### `sum_getValidators`
+
+Alias for `get_validators`. Returns validator set.
+
+---
+
+### Ethereum-Compatible Methods (eth_* prefix)
 
 For wallet compatibility (MetaMask, etc.), these Ethereum-style methods are supported:
 

@@ -704,6 +704,66 @@ impl SumChainApiServer for RpcServer {
     }
 
     // ========================================================================
+    // SUM Chain Native Aliases (sum_* prefix)
+    // These delegate to the unprefixed methods for brand consistency
+    // ========================================================================
+
+    async fn sum_block_number(&self) -> std::result::Result<u64, jsonrpsee::types::ErrorObjectOwned> {
+        Ok(self.consensus.current_height())
+    }
+
+    async fn sum_get_latest_block(&self) -> std::result::Result<BlockInfo, jsonrpsee::types::ErrorObjectOwned> {
+        self.get_latest_block().await
+    }
+
+    async fn sum_get_block_by_height(
+        &self,
+        height: u64,
+    ) -> std::result::Result<Option<BlockInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        self.get_block_by_height(height).await
+    }
+
+    async fn sum_get_balance(
+        &self,
+        address: String,
+    ) -> std::result::Result<String, jsonrpsee::types::ErrorObjectOwned> {
+        self.get_balance(address).await
+    }
+
+    async fn sum_get_nonce(&self, address: String) -> std::result::Result<u64, jsonrpsee::types::ErrorObjectOwned> {
+        self.get_nonce(address).await
+    }
+
+    async fn sum_send_raw_transaction(
+        &self,
+        raw_tx: String,
+    ) -> std::result::Result<SendTxResponse, jsonrpsee::types::ErrorObjectOwned> {
+        self.send_raw_transaction(raw_tx).await
+    }
+
+    async fn sum_get_transaction(
+        &self,
+        tx_hash: String,
+    ) -> std::result::Result<Option<TransactionInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        self.get_transaction(tx_hash).await
+    }
+
+    async fn sum_get_receipt(
+        &self,
+        tx_hash: String,
+    ) -> std::result::Result<Option<ReceiptInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        self.get_receipt(tx_hash).await
+    }
+
+    async fn sum_get_pending_transactions(&self) -> std::result::Result<Vec<TransactionInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        self.get_pending_transactions().await
+    }
+
+    async fn sum_get_validators(&self) -> std::result::Result<ValidatorSetInfo, jsonrpsee::types::ErrorObjectOwned> {
+        self.get_validators().await
+    }
+
+    // ========================================================================
     // NFT (SUM-721) Endpoints
     // ========================================================================
 

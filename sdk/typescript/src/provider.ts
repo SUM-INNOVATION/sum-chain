@@ -248,6 +248,108 @@ export class Provider {
   }
 
   // ==========================================================================
+  // SUM Chain Native Methods (sum_* prefix)
+  // These use the SUM Chain branded RPC method names
+  // ==========================================================================
+
+  /**
+   * Get current block number using SUM native method
+   * @returns Block height as number
+   */
+  async sumBlockNumber(): Promise<number> {
+    return this.request<number>('sum_blockNumber');
+  }
+
+  /**
+   * Get latest block using SUM native method
+   */
+  async sumGetLatestBlock(): Promise<BlockInfo> {
+    return this.request<BlockInfo>('sum_getLatestBlock');
+  }
+
+  /**
+   * Get block by height using SUM native method
+   */
+  async sumGetBlockByHeight(height: number): Promise<BlockInfo | null> {
+    return this.request<BlockInfo | null>('sum_getBlockByHeight', [height]);
+  }
+
+  /**
+   * Get account balance using SUM native method
+   * @returns Balance in base units as bigint
+   */
+  async sumGetBalance(address: Address): Promise<bigint> {
+    const balance = await this.request<string>('sum_getBalance', [address]);
+    return BigInt(balance);
+  }
+
+  /**
+   * Get account nonce using SUM native method
+   */
+  async sumGetNonce(address: Address): Promise<number> {
+    return this.request<number>('sum_getNonce', [address]);
+  }
+
+  /**
+   * Send raw transaction using SUM native method
+   */
+  async sumSendRawTransaction(rawTx: string): Promise<Hash> {
+    const result = await this.request<{ tx_hash: string }>('sum_sendRawTransaction', [rawTx]);
+    return result.tx_hash;
+  }
+
+  /**
+   * Get transaction by hash using SUM native method
+   */
+  async sumGetTransaction(txHash: Hash): Promise<TransactionInfo | null> {
+    return this.request<TransactionInfo | null>('sum_getTransaction', [txHash]);
+  }
+
+  /**
+   * Get transaction receipt using SUM native method
+   */
+  async sumGetReceipt(txHash: Hash): Promise<TransactionReceipt | null> {
+    return this.request<TransactionReceipt | null>('sum_getReceipt', [txHash]);
+  }
+
+  /**
+   * Get pending transactions using SUM native method
+   */
+  async sumGetPendingTransactions(): Promise<TransactionInfo[]> {
+    return this.request<TransactionInfo[]>('sum_getPendingTransactions');
+  }
+
+  /**
+   * Get validators using SUM native method
+   */
+  async sumGetValidators(): Promise<ValidatorSetInfo> {
+    return this.request<ValidatorSetInfo>('sum_getValidators');
+  }
+
+  // ==========================================================================
+  // Ethereum-Compatible Methods (eth_* prefix)
+  // These use Ethereum-style RPC method names for wallet compatibility
+  // ==========================================================================
+
+  /**
+   * Get block number in hex format (Ethereum-compatible)
+   * @returns Block number as hex string (e.g., "0x1a4")
+   */
+  async ethBlockNumber(): Promise<string> {
+    return this.request<string>('eth_blockNumber');
+  }
+
+  /**
+   * Get balance in hex format (Ethereum-compatible)
+   * @param address - Account address
+   * @param block - Block number or "latest" (optional, ignored)
+   * @returns Balance as hex string
+   */
+  async ethGetBalance(address: Address, block?: string): Promise<string> {
+    return this.request<string>('eth_getBalance', [address, block || 'latest']);
+  }
+
+  // ==========================================================================
   // NFT (SUM-721) Methods
   // ==========================================================================
 
