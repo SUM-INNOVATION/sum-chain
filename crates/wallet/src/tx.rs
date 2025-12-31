@@ -240,6 +240,7 @@ pub async fn nft_owner_of(
 }
 
 /// Check if a token exists
+#[allow(dead_code)]
 pub async fn nft_token_exists(rpc_url: &str, collection_id: &str, token_id: u64) -> Result<bool> {
     let client = create_client(rpc_url).await?;
     let exists = client
@@ -251,6 +252,7 @@ pub async fn nft_token_exists(rpc_url: &str, collection_id: &str, token_id: u64)
 }
 
 /// Get all tokens in a collection
+#[allow(dead_code)]
 pub async fn nft_get_tokens_in_collection(
     rpc_url: &str,
     collection_id: &str,
@@ -262,6 +264,118 @@ pub async fn nft_get_tokens_in_collection(
         .context("Failed to get collection tokens")?;
 
     Ok(tokens)
+}
+
+// ============================================================================
+// Smart Contract (SUMC) RPC Functions
+// ============================================================================
+
+/// Get contract info by address
+pub async fn contract_get_info(
+    rpc_url: &str,
+    address: &str,
+) -> Result<Option<sumchain_rpc::types::ContractInfo>> {
+    let client = create_client(rpc_url).await?;
+    let info = client
+        .contract_get_contract(address.to_string())
+        .await
+        .context("Failed to get contract info")?;
+
+    Ok(info)
+}
+
+/// Check if an address is a contract
+pub async fn contract_is_contract(rpc_url: &str, address: &str) -> Result<bool> {
+    let client = create_client(rpc_url).await?;
+    let is_contract = client
+        .contract_is_contract(address.to_string())
+        .await
+        .context("Failed to check if address is contract")?;
+
+    Ok(is_contract)
+}
+
+/// Call a contract method (read-only view call)
+pub async fn contract_call(
+    rpc_url: &str,
+    contract: &str,
+    method: &str,
+    args: &str,
+    from: Option<&str>,
+) -> Result<sumchain_rpc::types::ContractCallResult> {
+    let client = create_client(rpc_url).await?;
+    let request = sumchain_rpc::types::ViewCallRequest {
+        contract: contract.to_string(),
+        method: method.to_string(),
+        args: args.to_string(),
+        from: from.map(|s| s.to_string()),
+    };
+    let result = client
+        .contract_call(request)
+        .await
+        .context("Failed to call contract")?;
+
+    Ok(result)
+}
+
+/// Estimate gas for a contract call
+pub async fn contract_estimate_gas(
+    rpc_url: &str,
+    contract: &str,
+    method: &str,
+    args: &str,
+    from: Option<&str>,
+) -> Result<sumchain_rpc::types::GasEstimateResult> {
+    let client = create_client(rpc_url).await?;
+    let request = sumchain_rpc::types::ViewCallRequest {
+        contract: contract.to_string(),
+        method: method.to_string(),
+        args: args.to_string(),
+        from: from.map(|s| s.to_string()),
+    };
+    let result = client
+        .contract_estimate_gas(request)
+        .await
+        .context("Failed to estimate gas")?;
+
+    Ok(result)
+}
+
+/// Get contract code hash
+pub async fn contract_get_code_hash(rpc_url: &str, address: &str) -> Result<Option<String>> {
+    let client = create_client(rpc_url).await?;
+    let hash = client
+        .contract_get_code_hash(address.to_string())
+        .await
+        .context("Failed to get code hash")?;
+
+    Ok(hash)
+}
+
+/// Get contract storage at a specific key
+pub async fn contract_get_storage(
+    rpc_url: &str,
+    address: &str,
+    key: &str,
+) -> Result<Option<String>> {
+    let client = create_client(rpc_url).await?;
+    let value = client
+        .contract_get_storage_at(address.to_string(), key.to_string())
+        .await
+        .context("Failed to get storage")?;
+
+    Ok(value)
+}
+
+/// Get contract balance
+pub async fn contract_get_balance(rpc_url: &str, address: &str) -> Result<String> {
+    let client = create_client(rpc_url).await?;
+    let balance = client
+        .contract_get_balance(address.to_string())
+        .await
+        .context("Failed to get contract balance")?;
+
+    Ok(balance)
 }
 
 #[cfg(test)]

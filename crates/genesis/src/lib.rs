@@ -57,6 +57,12 @@ pub struct ChainParams {
     /// Maximum metadata size in bytes for NFT tokens
     #[serde(default = "default_max_metadata_bytes")]
     pub max_metadata_bytes: u64,
+    /// Minimum gas limit for contract transactions
+    #[serde(default = "default_min_contract_gas")]
+    pub min_contract_gas: u64,
+    /// Maximum gas limit for contract transactions
+    #[serde(default = "default_max_contract_gas")]
+    pub max_contract_gas: u64,
 }
 
 fn default_finality_depth() -> u64 {
@@ -71,6 +77,14 @@ fn default_max_metadata_bytes() -> u64 {
     16384 // 16 KB max metadata size
 }
 
+fn default_min_contract_gas() -> u64 {
+    21000 // Similar to Ethereum's base gas
+}
+
+fn default_max_contract_gas() -> u64 {
+    10_000_000 // 10M gas limit per transaction
+}
+
 impl Default for ChainParams {
     fn default() -> Self {
         Self {
@@ -81,6 +95,8 @@ impl Default for ChainParams {
             finality_depth: default_finality_depth(),
             storage_fee_per_byte: default_storage_fee_per_byte(),
             max_metadata_bytes: default_max_metadata_bytes(),
+            min_contract_gas: default_min_contract_gas(),
+            max_contract_gas: default_max_contract_gas(),
         }
     }
 }

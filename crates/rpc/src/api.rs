@@ -4,9 +4,10 @@ use jsonrpsee::proc_macros::rpc;
 
 use crate::metrics::MetricsSnapshot;
 use crate::types::{
-    AccountInfo, BlockInfo, FinalityInfo, HealthResponse, NftCollectionInfo, NftOwnerTokens,
-    NftTokenInfo, NodeInfo, P2pStats, ReceiptInfo, RpcPeerInfo, SendTxResponse, TokenHoldings,
-    TokenInfo, TransactionInfo, ValidatorSetInfo,
+    AccountInfo, BlockInfo, ContractCallResult, ContractInfo, FinalityInfo, GasEstimateResult,
+    HealthResponse, NftCollectionInfo, NftOwnerTokens, NftTokenInfo, NodeInfo, P2pStats,
+    ReceiptInfo, RpcPeerInfo, SendTxResponse, TokenHoldings, TokenInfo, TransactionInfo,
+    ValidatorSetInfo, ViewCallRequest,
 };
 
 /// SUM Chain RPC API
@@ -297,4 +298,58 @@ pub trait SumChainApi {
         &self,
         token_id: String,
     ) -> Result<bool, jsonrpsee::types::ErrorObjectOwned>;
+
+    // ========================================================================
+    // Smart Contract (SUMC) Endpoints
+    // ========================================================================
+
+    /// Get contract info by address
+    #[method(name = "contract_getContract")]
+    async fn contract_get_contract(
+        &self,
+        address: String,
+    ) -> Result<Option<ContractInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Check if an address is a contract
+    #[method(name = "contract_isContract")]
+    async fn contract_is_contract(
+        &self,
+        address: String,
+    ) -> Result<bool, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Execute a view call (read-only, no state changes)
+    #[method(name = "contract_call")]
+    async fn contract_call(
+        &self,
+        request: ViewCallRequest,
+    ) -> Result<ContractCallResult, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Estimate gas for a contract call
+    #[method(name = "contract_estimateGas")]
+    async fn contract_estimate_gas(
+        &self,
+        request: ViewCallRequest,
+    ) -> Result<GasEstimateResult, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get contract code hash
+    #[method(name = "contract_getCodeHash")]
+    async fn contract_get_code_hash(
+        &self,
+        address: String,
+    ) -> Result<Option<String>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get contract storage at a specific key
+    #[method(name = "contract_getStorageAt")]
+    async fn contract_get_storage_at(
+        &self,
+        address: String,
+        key: String,
+    ) -> Result<Option<String>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get contract balance
+    #[method(name = "contract_getBalance")]
+    async fn contract_get_balance(
+        &self,
+        address: String,
+    ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
 }

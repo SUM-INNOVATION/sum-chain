@@ -164,6 +164,30 @@ impl StateManager {
         Ok(())
     }
 
+    /// Deduct balance from an account
+    pub fn deduct(&self, address: &Address, amount: Balance) -> Result<()> {
+        let store = StateStore::new(&self.db);
+        let mut state = store.get_account(address)?;
+        if state.balance < amount {
+            return Err(StateError::InsufficientBalance {
+                required: amount,
+                available: state.balance,
+            });
+        }
+        state.balance = state.balance.saturating_sub(amount);
+        store.put_account(address, &state)?;
+        Ok(())
+    }
+
+    /// Credit balance to an account
+    pub fn credit(&self, address: &Address, amount: Balance) -> Result<()> {
+        let store = StateStore::new(&self.db);
+        let mut state = store.get_account(address)?;
+        state.balance = state.balance.saturating_add(amount);
+        store.put_account(address, &state)?;
+        Ok(())
+    }
+
     /// Store a state diff for potential reorg
     pub fn save_state_diff(
         &self,

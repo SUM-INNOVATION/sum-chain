@@ -21,6 +21,10 @@ pub enum TxType {
     Nft = 1,
     /// Token operation (SRC-20)
     Token = 2,
+    /// Smart contract deployment
+    ContractDeploy = 3,
+    /// Smart contract call
+    ContractCall = 4,
 }
 
 impl TxType {
@@ -30,6 +34,8 @@ impl TxType {
             0 => Some(TxType::Transfer),
             1 => Some(TxType::Nft),
             2 => Some(TxType::Token),
+            3 => Some(TxType::ContractDeploy),
+            4 => Some(TxType::ContractCall),
             _ => None,
         }
     }
@@ -173,6 +179,36 @@ pub struct TokenTxData {
     pub data: Vec<u8>,
 }
 
+/// Smart contract deployment data
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContractDeployData {
+    /// WASM bytecode
+    pub code: Vec<u8>,
+    /// Init method name (usually "new" or "init")
+    pub init_method: String,
+    /// Init method arguments (serialized)
+    pub init_args: Vec<u8>,
+    /// Initial Koppa to send to contract
+    pub value: Balance,
+    /// Gas limit for deployment
+    pub gas_limit: u64,
+}
+
+/// Smart contract call data
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContractCallData {
+    /// Contract address to call
+    pub contract: Address,
+    /// Method name to call
+    pub method: String,
+    /// Method arguments (serialized)
+    pub args: Vec<u8>,
+    /// Koppa to send with call
+    pub value: Balance,
+    /// Gas limit for call
+    pub gas_limit: u64,
+}
+
 impl NftOperation {
     /// Convert from byte
     pub fn from_byte(b: u8) -> Option<Self> {
@@ -240,7 +276,7 @@ pub struct TransactionV2 {
     pub payload: TxPayload,
 }
 
-/// Transaction payload - transfer, NFT, or Token operation
+/// Transaction payload - transfer, NFT, Token, or Contract operation
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TxPayload {
     /// Native token transfer
@@ -254,6 +290,10 @@ pub enum TxPayload {
     Nft(NftTxData),
     /// Token operation (SRC-20)
     Token(TokenTxData),
+    /// Smart contract deployment
+    ContractDeploy(ContractDeployData),
+    /// Smart contract call
+    ContractCall(ContractCallData),
 }
 
 impl TransactionV2 {
@@ -309,12 +349,48 @@ impl TransactionV2 {
         }
     }
 
+    /// Create a new contract deployment transaction
+    pub fn contract_deploy(
+        chain_id: ChainId,
+        from: Address,
+        fee: Balance,
+        nonce: Nonce,
+        deploy_data: ContractDeployData,
+    ) -> Self {
+        Self {
+            chain_id,
+            from,
+            fee,
+            nonce,
+            payload: TxPayload::ContractDeploy(deploy_data),
+        }
+    }
+
+    /// Create a new contract call transaction
+    pub fn contract_call(
+        chain_id: ChainId,
+        from: Address,
+        fee: Balance,
+        nonce: Nonce,
+        call_data: ContractCallData,
+    ) -> Self {
+        Self {
+            chain_id,
+            from,
+            fee,
+            nonce,
+            payload: TxPayload::ContractCall(call_data),
+        }
+    }
+
     /// Get the transaction type
     pub fn tx_type(&self) -> TxType {
         match &self.payload {
             TxPayload::Transfer { .. } => TxType::Transfer,
             TxPayload::Nft(_) => TxType::Nft,
             TxPayload::Token(_) => TxType::Token,
+            TxPayload::ContractDeploy(_) => TxType::ContractDeploy,
+            TxPayload::ContractCall(_) => TxType::ContractCall,
         }
     }
 
@@ -334,19 +410,23 @@ impl TransactionV2 {
         bincode::deserialize(bytes)
     }
 
-    /// Get recipient address (for transfers) or None (for NFT/Token ops)
+    /// Get recipient address (for transfers) or contract address (for calls)
     pub fn recipient(&self) -> Option<Address> {
         match &self.payload {
             TxPayload::Transfer { to, .. } => Some(*to),
+            TxPayload::ContractCall(data) => Some(data.contract),
             TxPayload::Nft(_) => None,
             TxPayload::Token(_) => None,
+            TxPayload::ContractDeploy(_) => None,
         }
     }
 
-    /// Get transfer amount (for transfers) or 0 (for NFT/Token ops)
+    /// Get transfer amount (for transfers) or value (for contract calls)
     pub fn amount(&self) -> Balance {
         match &self.payload {
             TxPayload::Transfer { amount, .. } => *amount,
+            TxPayload::ContractDeploy(data) => data.value,
+            TxPayload::ContractCall(data) => data.value,
             TxPayload::Nft(_) => 0,
             TxPayload::Token(_) => 0,
         }
@@ -363,9 +443,32 @@ impl TransactionV2 {
                 fee: self.fee,
                 nonce: self.nonce,
             }),
-            TxPayload::Nft(_) => None,
-            TxPayload::Token(_) => None,
+            _ => None,
         }
+    }
+
+    /// Get contract deploy data if this is a deploy transaction
+    pub fn deploy_data(&self) -> Option<&ContractDeployData> {
+        match &self.payload {
+            TxPayload::ContractDeploy(data) => Some(data),
+            _ => None,
+        }
+    }
+
+    /// Get contract call data if this is a call transaction
+    pub fn call_data(&self) -> Option<&ContractCallData> {
+        match &self.payload {
+            TxPayload::ContractCall(data) => Some(data),
+            _ => None,
+        }
+    }
+
+    /// Check if this is a contract transaction
+    pub fn is_contract(&self) -> bool {
+        matches!(
+            self.payload,
+            TxPayload::ContractDeploy(_) | TxPayload::ContractCall(_)
+        )
     }
 
     /// Get token data if this is a Token transaction

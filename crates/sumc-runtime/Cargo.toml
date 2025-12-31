@@ -1,25 +1,27 @@
 [package]
-name = "sumchain-state"
+name = "sumc-runtime"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "State management and transaction execution for SUM Chain"
+description = "WASM runtime for SUM Chain smart contracts"
 
 [dependencies]
 sumchain-primitives = { path = "../primitives" }
 sumchain-crypto = { path = "../crypto" }
 sumchain-storage = { path = "../storage" }
-sumchain-genesis = { path = "../genesis" }
-sumchain-nft = { path = "../nft" }
-sumc-runtime = { path = "../sumc-runtime" }
+
+wasmer = { workspace = true }
+wasmer-compiler-singlepass = { workspace = true }
+
 serde = { workspace = true }
+serde_json = { workspace = true }
 bincode = { workspace = true }
+hex = { workspace = true }
+blake3 = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 parking_lot = { workspace = true }
-hex = { workspace = true }
-lru = "0.12"
 
 [dev-dependencies]
 tempfile = "3.10"

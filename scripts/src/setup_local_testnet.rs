@@ -70,6 +70,8 @@ fn main() -> Result<()> {
             finality_depth: 3, // 3 block confirmations for finality
             storage_fee_per_byte: 100, // 100 base units per byte
             max_metadata_bytes: 16384, // 16 KB max metadata
+            min_contract_gas: 21000, // Minimum gas for contract transactions
+            max_contract_gas: 10_000_000, // Maximum gas limit per transaction
         },
     );
 

@@ -99,6 +99,8 @@ pub struct RpcServer {
     p2p_stats_provider: Option<P2pStatsProvider>,
     /// Timeout configuration
     timeout_config: RpcTimeoutConfig,
+    /// Contract executor for smart contract RPCs
+    contract_executor: Option<Arc<sumchain_state::ContractExecutorState>>,
 }
 
 impl RpcServer {
@@ -223,6 +225,7 @@ impl RpcServer {
             peer_info_provider: None,
             p2p_stats_provider: None,
             timeout_config: RpcTimeoutConfig::default(),
+            contract_executor: None,
         }
     }
 
@@ -241,6 +244,12 @@ impl RpcServer {
     /// Set the timeout configuration
     pub fn with_timeout(mut self, config: RpcTimeoutConfig) -> Self {
         self.timeout_config = config;
+        self
+    }
+
+    /// Set the contract executor for smart contract RPCs
+    pub fn with_contract_executor(mut self, executor: Arc<sumchain_state::ContractExecutorState>) -> Self {
+        self.contract_executor = Some(executor);
         self
     }
 
@@ -1064,6 +1073,172 @@ impl SumChainApiServer for RpcServer {
             .map_err(|e| RpcError::Internal(e.to_string()))?;
 
         Ok(exists)
+    }
+
+    // ========================================================================
+    // Smart Contract (SUMC) Endpoints
+    // ========================================================================
+
+    async fn contract_get_contract(
+        &self,
+        address: String,
+    ) -> std::result::Result<Option<ContractInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let addr = self.parse_address(&address)?;
+
+        // Get contract executor if available
+        if let Some(ref executor) = self.contract_executor {
+            if let Some(metadata) = executor.get_metadata(&addr) {
+                let balance = self.state.get_balance(&addr)
+                    .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+                return Ok(Some(ContractInfo {
+                    address: addr.to_base58(),
+                    code_hash: format!("0x{}", hex::encode(metadata.code_hash)),
+                    owner: metadata.owner.to_base58(),
+                    balance: balance.to_string(),
+                    upgradeable: metadata.upgradeable,
+                    deployed_at: metadata.deployed_at,
+                    deployed_at_block: metadata.deployed_block,
+                }));
+            }
+        }
+
+        Ok(None)
+    }
+
+    async fn contract_is_contract(
+        &self,
+        address: String,
+    ) -> std::result::Result<bool, jsonrpsee::types::ErrorObjectOwned> {
+        let addr = self.parse_address(&address)?;
+
+        if let Some(ref executor) = self.contract_executor {
+            let exists = executor.contract_exists(&addr)
+                .map_err(|e| RpcError::Internal(e.to_string()))?;
+            return Ok(exists);
+        }
+
+        Ok(false)
+    }
+
+    async fn contract_call(
+        &self,
+        request: ViewCallRequest,
+    ) -> std::result::Result<ContractCallResult, jsonrpsee::types::ErrorObjectOwned> {
+        let contract_addr = self.parse_address(&request.contract)?;
+        let from_addr = if let Some(ref from) = request.from {
+            Some(self.parse_address(from)?)
+        } else {
+            None
+        };
+
+        let args = hex::decode(request.args.trim_start_matches("0x"))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid args hex: {}", e)))?;
+
+        if let Some(ref executor) = self.contract_executor {
+            // Get current block info
+            let block_store = BlockStore::new(&self.db);
+            let height = block_store.get_latest_height()
+                .map_err(|e| RpcError::Internal(e.to_string()))?
+                .unwrap_or(0);
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+
+            match executor.view_call(
+                &contract_addr,
+                &request.method,
+                args,
+                from_addr,
+                height,
+                timestamp,
+                self.state.chain_id(),
+            ) {
+                Ok(return_data) => {
+                    return Ok(ContractCallResult {
+                        tx_hash: None,
+                        return_data: format!("0x{}", hex::encode(&return_data)),
+                        gas_used: 0, // View calls don't consume gas
+                        success: true,
+                        error: None,
+                        events: Vec::new(),
+                    });
+                }
+                Err(e) => {
+                    return Ok(ContractCallResult {
+                        tx_hash: None,
+                        return_data: String::new(),
+                        gas_used: 0,
+                        success: false,
+                        error: Some(e.to_string()),
+                        events: Vec::new(),
+                    });
+                }
+            }
+        }
+
+        Err(RpcError::Internal("Contract executor not available".to_string()).into())
+    }
+
+    async fn contract_estimate_gas(
+        &self,
+        request: ViewCallRequest,
+    ) -> std::result::Result<GasEstimateResult, jsonrpsee::types::ErrorObjectOwned> {
+        // For now, return a fixed estimate - in production this would actually run the call
+        // and measure gas consumption
+        let base_gas: u64 = 21000;
+        let per_byte_gas: u64 = 16;
+
+        let args = hex::decode(request.args.trim_start_matches("0x"))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid args hex: {}", e)))?;
+
+        let estimated_gas = base_gas + (args.len() as u64 * per_byte_gas);
+        let gas_price: u128 = 1_000_000; // 0.001 Koppa per gas unit
+        let total_cost = (estimated_gas as u128) * gas_price;
+
+        Ok(GasEstimateResult {
+            gas_estimate: estimated_gas,
+            gas_price: gas_price.to_string(),
+            total_cost: total_cost.to_string(),
+        })
+    }
+
+    async fn contract_get_code_hash(
+        &self,
+        address: String,
+    ) -> std::result::Result<Option<String>, jsonrpsee::types::ErrorObjectOwned> {
+        let addr = self.parse_address(&address)?;
+
+        if let Some(ref executor) = self.contract_executor {
+            if let Some(metadata) = executor.get_metadata(&addr) {
+                return Ok(Some(format!("0x{}", hex::encode(metadata.code_hash))));
+            }
+        }
+
+        Ok(None)
+    }
+
+    async fn contract_get_storage_at(
+        &self,
+        _address: String,
+        _key: String,
+    ) -> std::result::Result<Option<String>, jsonrpsee::types::ErrorObjectOwned> {
+        // Contract storage reading would require direct access to the contract storage backend
+        // This is a placeholder implementation
+        Err(RpcError::Internal("Storage querying not yet implemented".to_string()).into())
+    }
+
+    async fn contract_get_balance(
+        &self,
+        address: String,
+    ) -> std::result::Result<String, jsonrpsee::types::ErrorObjectOwned> {
+        let addr = self.parse_address(&address)?;
+
+        let balance = self.state.get_balance(&addr)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        Ok(balance.to_string())
     }
 }
 

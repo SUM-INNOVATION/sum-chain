@@ -14,6 +14,7 @@ use sumchain_storage::schema::StateDiff;
 use sumchain_storage::Database;
 use tracing::{debug, info, warn};
 
+use crate::contract_executor::ContractExecutorState;
 use crate::nft_executor::NftExecutor;
 use crate::token_executor::TokenExecutor;
 use crate::{Result, StateError, StateManager};
@@ -33,6 +34,7 @@ pub struct BlockExecutor {
     params: ChainParams,
     nft_executor: NftExecutor,
     token_executor: TokenExecutor,
+    contract_executor: ContractExecutorState,
 }
 
 impl BlockExecutor {
@@ -40,12 +42,14 @@ impl BlockExecutor {
     pub fn new(state: Arc<StateManager>, db: Arc<Database>, params: ChainParams) -> Self {
         let nft_executor = NftExecutor::new(db.clone(), params.clone());
         let token_executor = TokenExecutor::new(db.clone(), params.clone());
+        let contract_executor = ContractExecutorState::new(db.clone(), params.clone());
         Self {
             state,
             db,
             params,
             nft_executor,
             token_executor,
+            contract_executor,
         }
     }
 
@@ -250,6 +254,80 @@ impl BlockExecutor {
                             })
                         }
                     }
+                    TxPayload::ContractDeploy(deploy_data) => {
+                        // Execute contract deployment
+                        let result = self.contract_executor.deploy(
+                            &v2_tx.from,
+                            &deploy_data,
+                            &self.state,
+                            proposer,
+                            v2_tx.fee,
+                            0, // block_height placeholder
+                            0, // block_timestamp placeholder
+                        )?;
+
+                        if result.success {
+                            debug!(
+                                "V2 Contract Deploy {} executed: contract at {}",
+                                tx_hash, result.contract_address
+                            );
+
+                            Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Success,
+                                fee_paid: v2_tx.fee,
+                            })
+                        } else {
+                            warn!(
+                                "V2 Contract Deploy {} failed: {}",
+                                tx_hash,
+                                result.error.as_deref().unwrap_or("Unknown error")
+                            );
+
+                            Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Failed(4), // Contract deploy failed
+                                fee_paid: 0,
+                            })
+                        }
+                    }
+                    TxPayload::ContractCall(call_data) => {
+                        // Execute contract call
+                        let result = self.contract_executor.call(
+                            &v2_tx.from,
+                            &call_data,
+                            &self.state,
+                            proposer,
+                            v2_tx.fee,
+                            0, // block_height placeholder
+                            0, // block_timestamp placeholder
+                        )?;
+
+                        if result.success {
+                            debug!(
+                                "V2 Contract Call {} executed: {} on {}",
+                                tx_hash, call_data.method, call_data.contract
+                            );
+
+                            Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Success,
+                                fee_paid: v2_tx.fee,
+                            })
+                        } else {
+                            warn!(
+                                "V2 Contract Call {} failed: {}",
+                                tx_hash,
+                                result.error.as_deref().unwrap_or("Unknown error")
+                            );
+
+                            Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Failed(5), // Contract call failed
+                                fee_paid: 0,
+                            })
+                        }
+                    }
                 }
             }
         }
@@ -429,6 +507,102 @@ impl BlockExecutor {
                     Ok(TxExecutionResult {
                         tx_hash,
                         status: TxStatus::Failed(3), // Token operation failed
+                        fee_paid: 0,
+                    })
+                }
+            }
+            TxPayload::ContractDeploy(deploy_data) => {
+                // Check balance for fee + value
+                let total_cost = tx.fee.saturating_add(deploy_data.value);
+                let balance = self.state.get_balance(&tx.from)?;
+                if balance < total_cost {
+                    return Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::InsufficientBalance,
+                        fee_paid: 0,
+                    });
+                }
+
+                // Execute contract deployment
+                let result = self.contract_executor.deploy(
+                    &tx.from,
+                    deploy_data,
+                    &self.state,
+                    proposer,
+                    tx.fee,
+                    0, // block_height placeholder
+                    0, // block_timestamp placeholder
+                )?;
+
+                if result.success {
+                    debug!(
+                        "V2 Contract Deploy {} executed: contract at {}",
+                        tx_hash, result.contract_address
+                    );
+
+                    Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::Success,
+                        fee_paid: tx.fee,
+                    })
+                } else {
+                    warn!(
+                        "V2 Contract Deploy {} failed: {}",
+                        tx_hash,
+                        result.error.as_deref().unwrap_or("Unknown error")
+                    );
+
+                    Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::Failed(4), // Contract deploy failed
+                        fee_paid: 0,
+                    })
+                }
+            }
+            TxPayload::ContractCall(call_data) => {
+                // Check balance for fee + value
+                let total_cost = tx.fee.saturating_add(call_data.value);
+                let balance = self.state.get_balance(&tx.from)?;
+                if balance < total_cost {
+                    return Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::InsufficientBalance,
+                        fee_paid: 0,
+                    });
+                }
+
+                // Execute contract call
+                let result = self.contract_executor.call(
+                    &tx.from,
+                    call_data,
+                    &self.state,
+                    proposer,
+                    tx.fee,
+                    0, // block_height placeholder
+                    0, // block_timestamp placeholder
+                )?;
+
+                if result.success {
+                    debug!(
+                        "V2 Contract Call {} executed: {} on {}",
+                        tx_hash, call_data.method, call_data.contract
+                    );
+
+                    Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::Success,
+                        fee_paid: tx.fee,
+                    })
+                } else {
+                    warn!(
+                        "V2 Contract Call {} failed: {}",
+                        tx_hash,
+                        result.error.as_deref().unwrap_or("Unknown error")
+                    );
+
+                    Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::Failed(5), // Contract call failed
                         fee_paid: 0,
                     })
                 }
