@@ -65,6 +65,14 @@ pub mod cf {
     pub const NFT_COLLECTION_INDEX: &str = "nft_collection_index";
     /// Issuer registry for certified documents
     pub const ISSUER_REGISTRY: &str = "issuer_registry";
+    /// SRC-20 fungible tokens
+    pub const TOKENS: &str = "tokens";
+    /// SRC-20 token balances (token_id + owner -> balance)
+    pub const TOKEN_BALANCES: &str = "token_balances";
+    /// SRC-20 token allowances (token_id + owner + spender -> allowance)
+    pub const TOKEN_ALLOWANCES: &str = "token_allowances";
+    /// SRC-20 token holder index (owner -> token_id list)
+    pub const TOKEN_HOLDER_INDEX: &str = "token_holder_index";
 }
 
 /// All column families used by the database
@@ -81,6 +89,10 @@ pub const ALL_CFS: &[&str] = &[
     cf::NFT_OWNER_INDEX,
     cf::NFT_COLLECTION_INDEX,
     cf::ISSUER_REGISTRY,
+    cf::TOKENS,
+    cf::TOKEN_BALANCES,
+    cf::TOKEN_ALLOWANCES,
+    cf::TOKEN_HOLDER_INDEX,
 ];
 
 /// Database configuration

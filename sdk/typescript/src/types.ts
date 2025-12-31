@@ -195,3 +195,45 @@ export interface NftOwnerTokens {
   count: number;
   tokens: NftTokenRef[];
 }
+
+// ============================================================================
+// SRC-20 Token Types
+// ============================================================================
+
+/**
+ * SRC-20 Token information
+ */
+export interface Src20TokenInfo {
+  token_id: string;
+  name: string;
+  symbol: string;
+  decimals: number;
+  owner: Address;
+  total_supply: string;
+  max_supply: string;
+  mintable: boolean;
+  burnable: boolean;
+  pausable: boolean;
+  paused: boolean;
+  created_at: number;
+  created_at_block: number;
+}
+
+/**
+ * SRC-20 Token balance
+ */
+export interface Src20TokenBalance {
+  token_id: string;
+  symbol: string;
+  decimals: number;
+  balance: string;
+}
+
+/**
+ * SRC-20 tokens held by an address
+ */
+export interface Src20TokenHoldings {
+  owner: Address;
+  count: number;
+  tokens: Src20TokenBalance[];
+}

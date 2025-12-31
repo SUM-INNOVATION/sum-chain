@@ -12,6 +12,7 @@ members = [
     "crates/node",
     "crates/wallet",
     "crates/nft",
+    "crates/token",
     "crates/integration-tests",
     "scripts",
 ]

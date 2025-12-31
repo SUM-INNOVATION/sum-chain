@@ -19,6 +19,8 @@ pub enum TxType {
     Transfer = 0,
     /// NFT operation (SUM-721)
     Nft = 1,
+    /// Token operation (SRC-20)
+    Token = 2,
 }
 
 impl TxType {
@@ -27,6 +29,7 @@ impl TxType {
         match b {
             0 => Some(TxType::Transfer),
             1 => Some(TxType::Nft),
+            2 => Some(TxType::Token),
             _ => None,
         }
     }
@@ -92,6 +95,82 @@ pub enum NftOperation {
     LockToken = 11,
     /// Unlock a token
     UnlockToken = 12,
+}
+
+/// SRC-20 Token operation codes
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum TokenOperation {
+    /// Create a new token
+    Create = 0,
+    /// Mint new tokens
+    Mint = 1,
+    /// Burn tokens
+    Burn = 2,
+    /// Transfer tokens
+    Transfer = 3,
+    /// Approve spending allowance
+    Approve = 4,
+    /// Transfer using allowance
+    TransferFrom = 5,
+    /// Pause token transfers
+    Pause = 6,
+    /// Unpause token transfers
+    Unpause = 7,
+    /// Transfer token ownership
+    TransferOwnership = 8,
+    /// Add a minter
+    AddMinter = 9,
+    /// Remove a minter
+    RemoveMinter = 10,
+}
+
+impl TokenOperation {
+    /// Convert from byte
+    pub fn from_byte(b: u8) -> Option<Self> {
+        match b {
+            0 => Some(TokenOperation::Create),
+            1 => Some(TokenOperation::Mint),
+            2 => Some(TokenOperation::Burn),
+            3 => Some(TokenOperation::Transfer),
+            4 => Some(TokenOperation::Approve),
+            5 => Some(TokenOperation::TransferFrom),
+            6 => Some(TokenOperation::Pause),
+            7 => Some(TokenOperation::Unpause),
+            8 => Some(TokenOperation::TransferOwnership),
+            9 => Some(TokenOperation::AddMinter),
+            10 => Some(TokenOperation::RemoveMinter),
+            _ => None,
+        }
+    }
+
+    /// Check if this operation requires token ownership
+    pub fn requires_ownership(&self) -> bool {
+        matches!(
+            self,
+            TokenOperation::Pause
+                | TokenOperation::Unpause
+                | TokenOperation::TransferOwnership
+                | TokenOperation::AddMinter
+                | TokenOperation::RemoveMinter
+        )
+    }
+
+    /// Check if this operation requires minter role
+    pub fn requires_minter(&self) -> bool {
+        matches!(self, TokenOperation::Mint)
+    }
+}
+
+/// SRC-20 Token-specific transaction data
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenTxData {
+    /// Token ID (32 bytes) - zero for Create operation
+    pub token_id: [u8; 32],
+    /// Token operation code
+    pub operation: TokenOperation,
+    /// Operation-specific data (serialized)
+    pub data: Vec<u8>,
 }
 
 impl NftOperation {
@@ -161,7 +240,7 @@ pub struct TransactionV2 {
     pub payload: TxPayload,
 }
 
-/// Transaction payload - either a transfer or NFT operation
+/// Transaction payload - transfer, NFT, or Token operation
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TxPayload {
     /// Native token transfer
@@ -171,8 +250,10 @@ pub enum TxPayload {
         /// Amount to transfer
         amount: Balance,
     },
-    /// NFT operation
+    /// NFT operation (SUM-721)
     Nft(NftTxData),
+    /// Token operation (SRC-20)
+    Token(TokenTxData),
 }
 
 impl TransactionV2 {
@@ -211,11 +292,29 @@ impl TransactionV2 {
         }
     }
 
+    /// Create a new Token (SRC-20) transaction
+    pub fn token(
+        chain_id: ChainId,
+        from: Address,
+        fee: Balance,
+        nonce: Nonce,
+        token_data: TokenTxData,
+    ) -> Self {
+        Self {
+            chain_id,
+            from,
+            fee,
+            nonce,
+            payload: TxPayload::Token(token_data),
+        }
+    }
+
     /// Get the transaction type
     pub fn tx_type(&self) -> TxType {
         match &self.payload {
             TxPayload::Transfer { .. } => TxType::Transfer,
             TxPayload::Nft(_) => TxType::Nft,
+            TxPayload::Token(_) => TxType::Token,
         }
     }
 
@@ -235,19 +334,21 @@ impl TransactionV2 {
         bincode::deserialize(bytes)
     }
 
-    /// Get recipient address (for transfers) or None (for NFT ops)
+    /// Get recipient address (for transfers) or None (for NFT/Token ops)
     pub fn recipient(&self) -> Option<Address> {
         match &self.payload {
             TxPayload::Transfer { to, .. } => Some(*to),
             TxPayload::Nft(_) => None,
+            TxPayload::Token(_) => None,
         }
     }
 
-    /// Get transfer amount (for transfers) or 0 (for NFT ops)
+    /// Get transfer amount (for transfers) or 0 (for NFT/Token ops)
     pub fn amount(&self) -> Balance {
         match &self.payload {
             TxPayload::Transfer { amount, .. } => *amount,
             TxPayload::Nft(_) => 0,
+            TxPayload::Token(_) => 0,
         }
     }
 
@@ -263,6 +364,15 @@ impl TransactionV2 {
                 nonce: self.nonce,
             }),
             TxPayload::Nft(_) => None,
+            TxPayload::Token(_) => None,
+        }
+    }
+
+    /// Get token data if this is a Token transaction
+    pub fn token_data(&self) -> Option<&TokenTxData> {
+        match &self.payload {
+            TxPayload::Token(data) => Some(data),
+            _ => None,
         }
     }
 }
@@ -365,11 +475,27 @@ impl SignedTransaction {
         self.tx_type() == TxType::Nft
     }
 
+    /// Check if this is a Token (SRC-20) transaction
+    pub fn is_token(&self) -> bool {
+        self.tx_type() == TxType::Token
+    }
+
     /// Get NFT data if this is an NFT transaction
     pub fn nft_data(&self) -> Option<&NftTxData> {
         match &self.inner {
             TxInner::V2(tx) => match &tx.payload {
                 TxPayload::Nft(data) => Some(data),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Get Token data if this is a Token transaction
+    pub fn token_data(&self) -> Option<&TokenTxData> {
+        match &self.inner {
+            TxInner::V2(tx) => match &tx.payload {
+                TxPayload::Token(data) => Some(data),
                 _ => None,
             },
             _ => None,

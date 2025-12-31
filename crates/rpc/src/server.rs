@@ -8,7 +8,7 @@ use jsonrpsee::server::{Server, ServerHandle};
 use sumchain_consensus::ConsensusEngine;
 use sumchain_primitives::{Address, Block, Hash, SignedTransaction};
 use sumchain_state::{Mempool, StateManager};
-use sumchain_storage::{BlockStore, Database, NftStore, ReceiptStore, TxStore};
+use sumchain_storage::{BlockStore, Database, NftStore, ReceiptStore, TokenStore, TxStore};
 use tokio::sync::mpsc;
 use tracing::info;
 
@@ -912,5 +912,164 @@ impl SumChainApiServer for RpcServer {
             .map_err(|e| RpcError::Internal(e.to_string()))?;
 
         Ok(exists)
+    }
+
+    // ========================================================================
+    // SRC-20 Token Endpoints
+    // ========================================================================
+
+    async fn token_get_token(
+        &self,
+        token_id: String,
+    ) -> std::result::Result<Option<TokenInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let token_bytes = self.parse_token_id(&token_id)?;
+        let token_store = TokenStore::new(&self.db);
+
+        match token_store.get_token(&token_bytes) {
+            Ok(Some(data)) => Ok(Some(TokenInfo {
+                token_id: format!("0x{}", hex::encode(token_bytes)),
+                name: data.name,
+                symbol: data.symbol,
+                decimals: data.decimals,
+                owner: Address::new({
+                    let mut arr = [0u8; 20];
+                    arr.copy_from_slice(data.owner.as_bytes());
+                    arr
+                }).to_base58(),
+                total_supply: data.total_supply.to_string(),
+                max_supply: data.max_supply.to_string(),
+                mintable: data.mintable,
+                burnable: data.burnable,
+                pausable: data.pausable,
+                paused: data.paused,
+                created_at: data.created_at,
+                created_at_block: data.created_at_block,
+            })),
+            Ok(None) => Ok(None),
+            Err(e) => Err(RpcError::Internal(e.to_string()).into()),
+        }
+    }
+
+    async fn token_balance_of(
+        &self,
+        token_id: String,
+        owner: String,
+    ) -> std::result::Result<String, jsonrpsee::types::ErrorObjectOwned> {
+        let token_bytes = self.parse_token_id(&token_id)?;
+        let owner_addr = Address::from_string(&owner)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid owner address: {}", e)))?;
+
+        let token_store = TokenStore::new(&self.db);
+        let balance = token_store
+            .get_balance(&token_bytes, &owner_addr)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        Ok(balance.to_string())
+    }
+
+    async fn token_get_tokens_by_owner(
+        &self,
+        owner: String,
+    ) -> std::result::Result<TokenHoldings, jsonrpsee::types::ErrorObjectOwned> {
+        let owner_addr = Address::from_string(&owner)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid owner address: {}", e)))?;
+
+        let token_store = TokenStore::new(&self.db);
+        let token_ids = token_store
+            .get_holder_tokens(&owner_addr)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        let mut tokens = Vec::new();
+        for token_id_vec in &token_ids {
+            if token_id_vec.len() != 32 {
+                continue;
+            }
+            let mut token_bytes = [0u8; 32];
+            token_bytes.copy_from_slice(token_id_vec);
+
+            if let Ok(Some(token_data)) = token_store.get_token(&token_bytes) {
+                if let Ok(balance) = token_store.get_balance(&token_bytes, &owner_addr) {
+                    tokens.push(TokenBalance {
+                        token_id: format!("0x{}", hex::encode(token_bytes)),
+                        symbol: token_data.symbol,
+                        decimals: token_data.decimals,
+                        balance: balance.to_string(),
+                    });
+                }
+            }
+        }
+
+        Ok(TokenHoldings {
+            owner: owner_addr.to_base58(),
+            count: tokens.len() as u64,
+            tokens,
+        })
+    }
+
+    async fn token_allowance(
+        &self,
+        token_id: String,
+        owner: String,
+        spender: String,
+    ) -> std::result::Result<String, jsonrpsee::types::ErrorObjectOwned> {
+        let token_bytes = self.parse_token_id(&token_id)?;
+        let owner_addr = Address::from_string(&owner)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid owner address: {}", e)))?;
+        let spender_addr = Address::from_string(&spender)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid spender address: {}", e)))?;
+
+        let token_store = TokenStore::new(&self.db);
+        let allowance = token_store
+            .get_allowance(&token_bytes, &owner_addr, &spender_addr)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        Ok(allowance.to_string())
+    }
+
+    async fn token_total_supply(
+        &self,
+        token_id: String,
+    ) -> std::result::Result<String, jsonrpsee::types::ErrorObjectOwned> {
+        let token_bytes = self.parse_token_id(&token_id)?;
+        let token_store = TokenStore::new(&self.db);
+
+        match token_store.get_token(&token_bytes) {
+            Ok(Some(data)) => Ok(data.total_supply.to_string()),
+            Ok(None) => Err(RpcError::NotFound("Token not found".to_string()).into()),
+            Err(e) => Err(RpcError::Internal(e.to_string()).into()),
+        }
+    }
+
+    async fn token_exists(
+        &self,
+        token_id: String,
+    ) -> std::result::Result<bool, jsonrpsee::types::ErrorObjectOwned> {
+        let token_bytes = self.parse_token_id(&token_id)?;
+        let token_store = TokenStore::new(&self.db);
+
+        let exists = token_store
+            .token_exists(&token_bytes)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        Ok(exists)
+    }
+}
+
+impl<C: ConsensusEngine> RpcHandler<C> {
+    /// Parse token ID from hex string
+    fn parse_token_id(&self, token_id: &str) -> std::result::Result<[u8; 32], jsonrpsee::types::ErrorObjectOwned> {
+        let token_id = token_id.strip_prefix("0x").unwrap_or(token_id);
+        let bytes = hex::decode(token_id)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid token ID hex: {}", e)))?;
+        if bytes.len() != 32 {
+            return Err(RpcError::InvalidParams(format!(
+                "Token ID must be 32 bytes, got {}",
+                bytes.len()
+            ))
+            .into());
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Ok(arr)
     }
 }

@@ -3,7 +3,11 @@
 use jsonrpsee::proc_macros::rpc;
 
 use crate::metrics::MetricsSnapshot;
-use crate::types::*;
+use crate::types::{
+    AccountInfo, BlockInfo, FinalityInfo, HealthResponse, NftCollectionInfo, NftOwnerTokens,
+    NftTokenInfo, NodeInfo, P2pStats, ReceiptInfo, RpcPeerInfo, SendTxResponse, TokenHoldings,
+    TokenInfo, TransactionInfo, ValidatorSetInfo,
+};
 
 /// SUM Chain RPC API
 #[rpc(server, client)]
@@ -243,5 +247,54 @@ pub trait SumChainApi {
         &self,
         collection_id: String,
         token_id: u64,
+    ) -> Result<bool, jsonrpsee::types::ErrorObjectOwned>;
+
+    // ========================================================================
+    // SRC-20 Token Endpoints
+    // ========================================================================
+
+    /// Get SRC-20 token by ID
+    #[method(name = "token_getToken")]
+    async fn token_get_token(
+        &self,
+        token_id: String,
+    ) -> Result<Option<TokenInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get SRC-20 token balance for an address
+    #[method(name = "token_balanceOf")]
+    async fn token_balance_of(
+        &self,
+        token_id: String,
+        owner: String,
+    ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get all SRC-20 tokens held by an address
+    #[method(name = "token_getTokensByOwner")]
+    async fn token_get_tokens_by_owner(
+        &self,
+        owner: String,
+    ) -> Result<TokenHoldings, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get SRC-20 token allowance
+    #[method(name = "token_allowance")]
+    async fn token_allowance(
+        &self,
+        token_id: String,
+        owner: String,
+        spender: String,
+    ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get total supply of an SRC-20 token
+    #[method(name = "token_totalSupply")]
+    async fn token_total_supply(
+        &self,
+        token_id: String,
+    ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Check if an SRC-20 token exists
+    #[method(name = "token_exists")]
+    async fn token_exists(
+        &self,
+        token_id: String,
     ) -> Result<bool, jsonrpsee::types::ErrorObjectOwned>;
 }

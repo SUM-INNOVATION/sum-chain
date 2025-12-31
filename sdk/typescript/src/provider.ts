@@ -11,12 +11,13 @@ import type {
   TransactionReceipt,
   ValidatorSetInfo,
   HealthResponse,
-  KoppaAmount,
   Address,
   Hash,
   NftCollectionInfo,
   NftTokenInfo,
   NftOwnerTokens,
+  Src20TokenInfo,
+  Src20TokenHoldings,
 } from './types';
 
 /**
@@ -477,5 +478,114 @@ export class Provider {
    */
   async getTokensInCollection(collectionId: string): Promise<number[]> {
     return this.request<number[]>('nft_getTokensInCollection', [collectionId]);
+  }
+
+  // ==========================================================================
+  // SRC-20 Token Methods
+  // ==========================================================================
+
+  /**
+   * Get SRC-20 token by ID
+   *
+   * @param tokenId - Token ID (hex string with or without 0x prefix)
+   * @returns Token info or null if not found
+   *
+   * @example
+   * ```ts
+   * const token = await provider.getSrc20Token('0x1234...');
+   * if (token) {
+   *   console.log(`Token: ${token.name} (${token.symbol})`);
+   *   console.log(`Total supply: ${token.total_supply}`);
+   * }
+   * ```
+   */
+  async getSrc20Token(tokenId: string): Promise<Src20TokenInfo | null> {
+    return this.request<Src20TokenInfo | null>('token_getToken', [tokenId]);
+  }
+
+  /**
+   * Get SRC-20 token balance for an address
+   *
+   * @param tokenId - Token ID (hex string)
+   * @param owner - Owner address
+   * @returns Balance in base units as string
+   *
+   * @example
+   * ```ts
+   * const balance = await provider.getSrc20Balance('0x1234...', 'SUM1abc...');
+   * console.log(`Balance: ${balance}`);
+   * ```
+   */
+  async getSrc20Balance(tokenId: string, owner: Address): Promise<string> {
+    return this.request<string>('token_balanceOf', [tokenId, owner]);
+  }
+
+  /**
+   * Get all SRC-20 tokens held by an address
+   *
+   * @param owner - Owner address
+   * @returns Object with owner, count, and list of token balances
+   *
+   * @example
+   * ```ts
+   * const holdings = await provider.getSrc20TokensByOwner('SUM1abc...');
+   * console.log(`Holds ${holdings.count} different tokens`);
+   * for (const token of holdings.tokens) {
+   *   console.log(`  ${token.symbol}: ${token.balance}`);
+   * }
+   * ```
+   */
+  async getSrc20TokensByOwner(owner: Address): Promise<Src20TokenHoldings> {
+    return this.request<Src20TokenHoldings>('token_getTokensByOwner', [owner]);
+  }
+
+  /**
+   * Get SRC-20 token allowance
+   *
+   * @param tokenId - Token ID (hex string)
+   * @param owner - Token owner address
+   * @param spender - Spender address
+   * @returns Allowance amount in base units as string
+   *
+   * @example
+   * ```ts
+   * const allowance = await provider.getSrc20Allowance('0x1234...', 'SUM1abc...', 'SUM1def...');
+   * console.log(`Allowance: ${allowance}`);
+   * ```
+   */
+  async getSrc20Allowance(tokenId: string, owner: Address, spender: Address): Promise<string> {
+    return this.request<string>('token_allowance', [tokenId, owner, spender]);
+  }
+
+  /**
+   * Get total supply of an SRC-20 token
+   *
+   * @param tokenId - Token ID (hex string)
+   * @returns Total supply in base units as string
+   *
+   * @example
+   * ```ts
+   * const supply = await provider.getSrc20TotalSupply('0x1234...');
+   * console.log(`Total supply: ${supply}`);
+   * ```
+   */
+  async getSrc20TotalSupply(tokenId: string): Promise<string> {
+    return this.request<string>('token_totalSupply', [tokenId]);
+  }
+
+  /**
+   * Check if an SRC-20 token exists
+   *
+   * @param tokenId - Token ID (hex string)
+   * @returns True if token exists
+   *
+   * @example
+   * ```ts
+   * const exists = await provider.src20TokenExists('0x1234...');
+   * console.log(`Token exists: ${exists}`);
+   * ```
+   */
+  async src20TokenExists(tokenId: string): Promise<boolean> {
+    return this.request<boolean>('token_exists', [tokenId]);
   }
 }

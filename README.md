@@ -11,8 +11,10 @@ A Layer-1 blockchain built entirely in Rust (stable toolchain). No C/C++, Python
 - **Ed25519 Signatures**: Secure digital signatures for transactions and blocks
 - **Account-Based State Model**: Simple balance and nonce tracking
 - **Koppa Currency**: Native token with symbol Ϙ (1 Koppa = 1,000,000,000 base units)
+- **SUM-721 NFTs**: Native NFT standard for digital assets and certified documents
+- **SRC-20 Tokens**: Native fungible token standard (ERC-20 compatible interface)
 - **libp2p Networking**: Gossipsub for transaction/block propagation, mDNS for local discovery
-- **JSON-RPC API**: HTTP server for chain queries and transaction submission
+- **JSON-RPC API**: HTTP server for chain queries and transaction submission (ETH + SUM compatible)
 - **RocksDB Storage**: Persistent key-value storage for blocks and state
 - **Enhanced CLI Wallet**: Colored output, human-readable amounts, interactive confirmations
 
@@ -30,7 +32,12 @@ sum-chain/
 │   ├── p2p/            # libp2p networking
 │   ├── rpc/            # JSON-RPC server
 │   ├── node/           # Full node binary
-│   └── wallet/         # CLI wallet
+│   ├── wallet/         # CLI wallet
+│   ├── nft/            # SUM-721 NFT standard
+│   └── token/          # SRC-20 fungible token standard
+├── sdk/
+│   └── typescript/     # TypeScript SDK
+├── explorer/           # Block explorer (React)
 ├── scripts/            # Setup scripts (Rust)
 ├── configs/            # Node configuration files
 └── genesis/            # Genesis file templates
@@ -258,6 +265,16 @@ For detailed API documentation, see [docs/api-reference.md](docs/api-reference.m
 | `nft_ownerOf` | Get owner of specific NFT |
 | `nft_tokenExists` | Check if NFT exists |
 | `nft_getTokensInCollection` | Get all token IDs in collection |
+
+### SRC-20 Token Methods
+| Method | Description |
+|--------|-------------|
+| `token_getToken` | Get SRC-20 token info by ID |
+| `token_balanceOf` | Get token balance for address |
+| `token_getTokensByOwner` | Get all tokens held by address |
+| `token_allowance` | Get spending allowance |
+| `token_totalSupply` | Get token total supply |
+| `token_exists` | Check if token exists |
 
 **Note:** All methods have three naming styles:
 - **Generic** (`get_balance`): Standard snake_case, recommended for most use cases

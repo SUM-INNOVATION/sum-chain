@@ -629,6 +629,117 @@ Returns all token IDs in a collection.
 
 ---
 
+### SRC-20 Token Methods
+
+SUM Chain's native fungible token standard, similar to ERC-20.
+
+#### `token_getToken`
+
+Returns SRC-20 token information by ID.
+
+**Parameters:**
+1. `token_id` (string) - Token ID (hex)
+
+**Returns:** Token object or `null`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `token_id` | string | Token ID (hex) |
+| `name` | string | Token name |
+| `symbol` | string | Token symbol |
+| `decimals` | integer | Decimal places |
+| `owner` | string | Owner address |
+| `total_supply` | string | Current total supply |
+| `max_supply` | string | Maximum supply (0 = unlimited) |
+| `mintable` | boolean | Can mint new tokens |
+| `burnable` | boolean | Can burn tokens |
+| `pausable` | boolean | Can pause transfers |
+| `paused` | boolean | Currently paused |
+| `created_at` | integer | Creation timestamp (ms) |
+| `created_at_block` | integer | Creation block height |
+
+---
+
+#### `token_balanceOf`
+
+Returns SRC-20 token balance for an address.
+
+**Parameters:**
+1. `token_id` (string) - Token ID (hex)
+2. `owner` (string) - Owner address
+
+**Returns:** `string` - Balance in base units
+
+**Example:**
+```bash
+curl -X POST http://localhost:8545 \
+    -H "Content-Type: application/json" \
+    -d '{"jsonrpc":"2.0","method":"token_balanceOf","params":["0x1234...","SUM1abc..."],"id":1}'
+```
+
+---
+
+#### `token_getTokensByOwner`
+
+Returns all SRC-20 tokens held by an address.
+
+**Parameters:**
+1. `owner` (string) - Owner address
+
+**Returns:** Token holdings object
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `owner` | string | Owner address |
+| `count` | integer | Number of different tokens |
+| `tokens` | array | List of token balances |
+
+Each token balance:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `token_id` | string | Token ID (hex) |
+| `symbol` | string | Token symbol |
+| `decimals` | integer | Decimal places |
+| `balance` | string | Balance in base units |
+
+---
+
+#### `token_allowance`
+
+Returns SRC-20 token allowance for a spender.
+
+**Parameters:**
+1. `token_id` (string) - Token ID (hex)
+2. `owner` (string) - Token owner address
+3. `spender` (string) - Spender address
+
+**Returns:** `string` - Allowance in base units
+
+---
+
+#### `token_totalSupply`
+
+Returns total supply of an SRC-20 token.
+
+**Parameters:**
+1. `token_id` (string) - Token ID (hex)
+
+**Returns:** `string` - Total supply in base units
+
+---
+
+#### `token_exists`
+
+Checks if an SRC-20 token exists.
+
+**Parameters:**
+1. `token_id` (string) - Token ID (hex)
+
+**Returns:** `boolean` - Exists
+
+---
+
 ## REST Endpoints
 
 ### Health Checks

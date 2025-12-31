@@ -269,3 +269,105 @@ pub struct NftOperationResult {
     /// Error message if failed
     pub error: Option<String>,
 }
+
+// ============================================================================
+// SRC-20 Token Types
+// ============================================================================
+
+/// SRC-20 token info for RPC responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenInfo {
+    /// Token ID (hex)
+    pub token_id: String,
+    /// Token name
+    pub name: String,
+    /// Token symbol
+    pub symbol: String,
+    /// Decimal places
+    pub decimals: u8,
+    /// Token owner address
+    pub owner: String,
+    /// Current total supply
+    pub total_supply: String,
+    /// Maximum supply (0 = unlimited)
+    pub max_supply: String,
+    /// Whether new tokens can be minted
+    pub mintable: bool,
+    /// Whether tokens can be burned
+    pub burnable: bool,
+    /// Whether the token can be paused
+    pub pausable: bool,
+    /// Whether token transfers are currently paused
+    pub paused: bool,
+    /// Creation timestamp (milliseconds)
+    pub created_at: u64,
+    /// Creation block height
+    pub created_at_block: u64,
+}
+
+/// Token balance for a specific holder
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenBalance {
+    /// Token ID (hex)
+    pub token_id: String,
+    /// Token symbol
+    pub symbol: String,
+    /// Decimal places
+    pub decimals: u8,
+    /// Balance in base units
+    pub balance: String,
+}
+
+/// Token allowance info
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenAllowance {
+    /// Token ID (hex)
+    pub token_id: String,
+    /// Owner address
+    pub owner: String,
+    /// Spender address
+    pub spender: String,
+    /// Allowance amount in base units
+    pub allowance: String,
+}
+
+/// List of tokens owned by an address
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenHoldings {
+    /// Owner address
+    pub owner: String,
+    /// Total count of different tokens held
+    pub count: u64,
+    /// List of token balances
+    pub tokens: Vec<TokenBalance>,
+}
+
+/// Token transfer event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenTransferEvent {
+    /// Token ID (hex)
+    pub token_id: String,
+    /// From address
+    pub from: String,
+    /// To address
+    pub to: String,
+    /// Amount transferred
+    pub amount: String,
+    /// Block height
+    pub block_height: u64,
+    /// Transaction hash
+    pub tx_hash: String,
+}
+
+/// Token operation result
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenOperationResult {
+    /// Transaction hash
+    pub tx_hash: String,
+    /// Whether operation succeeded
+    pub success: bool,
+    /// Token ID (if applicable)
+    pub token_id: Option<String>,
+    /// Error message if failed
+    pub error: Option<String>,
+}

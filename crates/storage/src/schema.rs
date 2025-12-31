@@ -812,6 +812,268 @@ impl<'a> IssuerStore<'a> {
     }
 }
 
+// ============================================================================
+// SRC-20 Token Storage
+// ============================================================================
+
+/// SRC-20 token stored data
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Src20TokenData {
+    /// Token name
+    pub name: String,
+    /// Token symbol
+    pub symbol: String,
+    /// Decimal places
+    pub decimals: u8,
+    /// Token owner
+    pub owner: Address,
+    /// Current total supply
+    pub total_supply: u128,
+    /// Maximum supply (0 = unlimited)
+    pub max_supply: u128,
+    /// Whether new tokens can be minted
+    pub mintable: bool,
+    /// Whether tokens can be burned
+    pub burnable: bool,
+    /// Whether the token can be paused
+    pub pausable: bool,
+    /// Whether transfers are currently paused
+    pub paused: bool,
+    /// List of minter addresses
+    pub minters: Vec<Address>,
+    /// Creation timestamp
+    pub created_at: u64,
+    /// Creation block height
+    pub created_at_block: u64,
+}
+
+/// SRC-20 token storage operations
+pub struct TokenStore<'a> {
+    db: &'a Database,
+}
+
+impl<'a> TokenStore<'a> {
+    pub fn new(db: &'a Database) -> Self {
+        Self { db }
+    }
+
+    // ========================================================================
+    // Token operations
+    // ========================================================================
+
+    /// Store a token
+    pub fn put_token(&self, token_id: &[u8; 32], data: &Src20TokenData) -> Result<()> {
+        let bytes = bincode::serialize(data)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        self.db.put(cf::TOKENS, token_id, &bytes)
+    }
+
+    /// Get a token
+    pub fn get_token(&self, token_id: &[u8; 32]) -> Result<Option<Src20TokenData>> {
+        match self.db.get(cf::TOKENS, token_id)? {
+            Some(bytes) => {
+                let data: Src20TokenData = bincode::deserialize(&bytes)
+                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                Ok(Some(data))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Check if token exists
+    pub fn token_exists(&self, token_id: &[u8; 32]) -> Result<bool> {
+        self.db.contains(cf::TOKENS, token_id)
+    }
+
+    // ========================================================================
+    // Balance operations
+    // ========================================================================
+
+    /// Create balance key from token_id and owner
+    fn balance_key(token_id: &[u8; 32], owner: &Address) -> Vec<u8> {
+        let mut key = Vec::with_capacity(52);
+        key.extend_from_slice(token_id);
+        key.extend_from_slice(owner.as_bytes());
+        key
+    }
+
+    /// Get balance for a token holder
+    pub fn get_balance(&self, token_id: &[u8; 32], owner: &Address) -> Result<u128> {
+        let key = Self::balance_key(token_id, owner);
+        match self.db.get(cf::TOKEN_BALANCES, &key)? {
+            Some(bytes) => {
+                if bytes.len() != 16 {
+                    return Err(StorageError::InvalidData("Invalid balance bytes".to_string()));
+                }
+                let mut arr = [0u8; 16];
+                arr.copy_from_slice(&bytes);
+                Ok(u128::from_be_bytes(arr))
+            }
+            None => Ok(0),
+        }
+    }
+
+    /// Set balance for a token holder
+    pub fn set_balance(&self, token_id: &[u8; 32], owner: &Address, balance: u128) -> Result<()> {
+        let key = Self::balance_key(token_id, owner);
+        if balance == 0 {
+            // Remove from balance storage if zero
+            self.db.delete(cf::TOKEN_BALANCES, &key)?;
+            // Also remove from holder index
+            self.remove_from_holder_index(owner, token_id)?;
+        } else {
+            self.db.put(cf::TOKEN_BALANCES, &key, &balance.to_be_bytes())?;
+            // Add to holder index if not already there
+            self.add_to_holder_index(owner, token_id)?;
+        }
+        Ok(())
+    }
+
+    // ========================================================================
+    // Allowance operations
+    // ========================================================================
+
+    /// Create allowance key from token_id, owner, and spender
+    fn allowance_key(token_id: &[u8; 32], owner: &Address, spender: &Address) -> Vec<u8> {
+        let mut key = Vec::with_capacity(72);
+        key.extend_from_slice(token_id);
+        key.extend_from_slice(owner.as_bytes());
+        key.extend_from_slice(spender.as_bytes());
+        key
+    }
+
+    /// Get allowance
+    pub fn get_allowance(&self, token_id: &[u8; 32], owner: &Address, spender: &Address) -> Result<u128> {
+        let key = Self::allowance_key(token_id, owner, spender);
+        match self.db.get(cf::TOKEN_ALLOWANCES, &key)? {
+            Some(bytes) => {
+                if bytes.len() != 16 {
+                    return Err(StorageError::InvalidData("Invalid allowance bytes".to_string()));
+                }
+                let mut arr = [0u8; 16];
+                arr.copy_from_slice(&bytes);
+                Ok(u128::from_be_bytes(arr))
+            }
+            None => Ok(0),
+        }
+    }
+
+    /// Set allowance
+    pub fn set_allowance(&self, token_id: &[u8; 32], owner: &Address, spender: &Address, allowance: u128) -> Result<()> {
+        let key = Self::allowance_key(token_id, owner, spender);
+        if allowance == 0 {
+            self.db.delete(cf::TOKEN_ALLOWANCES, &key)
+        } else {
+            self.db.put(cf::TOKEN_ALLOWANCES, &key, &allowance.to_be_bytes())
+        }
+    }
+
+    // ========================================================================
+    // Holder index operations
+    // ========================================================================
+
+    /// Add token to holder's token list
+    fn add_to_holder_index(&self, owner: &Address, token_id: &[u8; 32]) -> Result<()> {
+        let mut tokens = self.get_holder_tokens(owner)?;
+        if !tokens.iter().any(|t| t == token_id) {
+            tokens.push(token_id.to_vec());
+            let bytes = bincode::serialize(&tokens)
+                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            self.db.put(cf::TOKEN_HOLDER_INDEX, owner.as_bytes(), &bytes)?;
+        }
+        Ok(())
+    }
+
+    /// Remove token from holder's token list
+    fn remove_from_holder_index(&self, owner: &Address, token_id: &[u8; 32]) -> Result<()> {
+        let mut tokens = self.get_holder_tokens(owner)?;
+        tokens.retain(|t| t.as_slice() != token_id);
+        if tokens.is_empty() {
+            self.db.delete(cf::TOKEN_HOLDER_INDEX, owner.as_bytes())?;
+        } else {
+            let bytes = bincode::serialize(&tokens)
+                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            self.db.put(cf::TOKEN_HOLDER_INDEX, owner.as_bytes(), &bytes)?;
+        }
+        Ok(())
+    }
+
+    /// Get all tokens held by an address
+    pub fn get_holder_tokens(&self, owner: &Address) -> Result<Vec<Vec<u8>>> {
+        match self.db.get(cf::TOKEN_HOLDER_INDEX, owner.as_bytes())? {
+            Some(bytes) => {
+                let tokens: Vec<Vec<u8>> = bincode::deserialize(&bytes)
+                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                Ok(tokens)
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+
+    // ========================================================================
+    // Transfer operations
+    // ========================================================================
+
+    /// Transfer tokens between addresses
+    pub fn transfer(
+        &self,
+        token_id: &[u8; 32],
+        from: &Address,
+        to: &Address,
+        amount: u128,
+    ) -> Result<()> {
+        // Get current balances
+        let from_balance = self.get_balance(token_id, from)?;
+        let to_balance = self.get_balance(token_id, to)?;
+
+        // Check sufficient balance
+        if from_balance < amount {
+            return Err(StorageError::InvalidData(format!(
+                "Insufficient balance: have {}, need {}",
+                from_balance, amount
+            )));
+        }
+
+        // Update balances
+        let new_from = from_balance - amount;
+        let new_to = to_balance.checked_add(amount)
+            .ok_or_else(|| StorageError::InvalidData("Overflow in transfer".to_string()))?;
+
+        self.set_balance(token_id, from, new_from)?;
+        self.set_balance(token_id, to, new_to)?;
+
+        Ok(())
+    }
+
+    /// Transfer tokens using allowance
+    pub fn transfer_from(
+        &self,
+        token_id: &[u8; 32],
+        spender: &Address,
+        from: &Address,
+        to: &Address,
+        amount: u128,
+    ) -> Result<()> {
+        // Check allowance
+        let allowance = self.get_allowance(token_id, from, spender)?;
+        if allowance < amount {
+            return Err(StorageError::InvalidData(format!(
+                "Insufficient allowance: have {}, need {}",
+                allowance, amount
+            )));
+        }
+
+        // Transfer
+        self.transfer(token_id, from, to, amount)?;
+
+        // Reduce allowance
+        let new_allowance = allowance - amount;
+        self.set_allowance(token_id, from, spender, new_allowance)?;
+
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
