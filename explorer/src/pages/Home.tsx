@@ -56,13 +56,13 @@ export default function Home() {
     <div className="space-y-8">
       {/* Network Stats */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard title="Block Height" value={health?.height.toLocaleString() || '0'} />
-        <StatCard title="Chain ID" value={health?.chain_id.toString() || '0'} />
-        <StatCard title="Peers" value={health?.peer_count.toString() || '0'} />
+        <StatCard title="Block Height" value={health?.current_height?.toLocaleString() || '0'} />
+        <StatCard title="Chain ID" value={health?.chain_id || 'Unknown'} />
+        <StatCard title="Peers" value={health?.peer_count?.toString() || '0'} />
         <StatCard
-          title="Status"
-          value={health?.status || 'Unknown'}
-          className={health?.status === 'healthy' ? 'text-green-400' : 'text-red-400'}
+          title="Version"
+          value={health?.version || 'Unknown'}
+          className="text-green-400"
         />
       </div>
 

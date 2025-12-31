@@ -79,15 +79,17 @@ export interface ValidatorSetInfo {
 }
 
 /**
- * Node health response
+ * Node health/info response
  */
 export interface HealthResponse {
-  status: 'healthy' | 'unhealthy';
-  chain_id: number;
-  height: number;
-  peer_count: number;
+  version: string;
+  chain_id: string;
+  peer_id: string;
   is_validator: boolean;
-  is_synced: boolean;
+  current_height: number;
+  peer_count: number;
+  mempool_size: number;
+  uptime_seconds: number;
 }
 
 /**
