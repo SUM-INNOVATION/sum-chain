@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 #[allow(unused_imports)]
 use sumchain_consensus::ConsensusEngine; // Used via trait object
-use sumchain_crypto::KeyPair;
+use sumchain_crypto::{sign, KeyPair};
 use sumchain_genesis::Genesis;
 use sumchain_p2p::NetworkConfig;
 use sumchain_rpc::{RateLimitConfig, RpcAuthConfig};
@@ -175,6 +175,36 @@ enum Commands {
         /// Data directory
         #[arg(short, long, default_value = "data")]
         data_dir: PathBuf,
+    },
+
+    /// Show key info (public key and address) from a key file
+    KeyInfo {
+        /// Path to key file
+        #[arg(short, long)]
+        key: PathBuf,
+    },
+
+    /// Transfer Koppa to another address
+    Transfer {
+        /// Sender's key file
+        #[arg(short, long)]
+        key: PathBuf,
+
+        /// Recipient address (base58)
+        #[arg(short, long)]
+        to: String,
+
+        /// Amount in Koppa (e.g., "100" or "1.5")
+        #[arg(short, long)]
+        amount: String,
+
+        /// RPC endpoint URL
+        #[arg(long, default_value = "http://localhost:8545")]
+        rpc: String,
+
+        /// Transaction fee in base units (default: 1000000 = 0.001 Koppa)
+        #[arg(long, default_value = "1000000")]
+        fee: u128,
     },
 }
 
@@ -489,6 +519,151 @@ async fn main() -> Result<()> {
                     size_before.saturating_sub(size_after)
                 );
             }
+        }
+
+        Commands::KeyInfo { key } => {
+            let key_json = std::fs::read_to_string(&key)
+                .with_context(|| format!("Failed to read key file: {:?}", key))?;
+            let key_bytes: [u8; 32] = serde_json::from_str(&key_json)
+                .with_context(|| "Failed to parse key file (expected JSON array of 32 bytes)")?;
+
+            let keypair = KeyPair::from_bytes(key_bytes);
+
+            println!("Key Info:");
+            println!("  File:       {:?}", key);
+            println!("  Public Key: {}", keypair.public_key().to_base58());
+            println!("  Address:    {}", keypair.address().to_base58());
+        }
+
+        Commands::Transfer {
+            key,
+            to,
+            amount,
+            rpc,
+            fee,
+        } => {
+            use sumchain_primitives::{Address, SignedTransaction, TransactionV2};
+
+            // Load sender key
+            let key_json = std::fs::read_to_string(&key)
+                .with_context(|| format!("Failed to read key file: {:?}", key))?;
+            let key_bytes: [u8; 32] = serde_json::from_str(&key_json)
+                .with_context(|| "Failed to parse key file")?;
+            let keypair = KeyPair::from_bytes(key_bytes);
+
+            // Parse recipient address
+            let to_addr = Address::from_base58(&to)
+                .or_else(|_| Address::from_hex(&to))
+                .with_context(|| format!("Invalid recipient address: {}", to))?;
+
+            // Parse amount (Koppa to base units, 9 decimals)
+            let amount_base: u128 = if amount.contains('.') {
+                let parts: Vec<&str> = amount.split('.').collect();
+                let whole: u128 = parts[0].parse().with_context(|| "Invalid amount")?;
+                let frac_str = parts.get(1).unwrap_or(&"0");
+                let frac_padded = format!("{:0<9}", frac_str);
+                let frac: u128 = frac_padded[..9].parse().with_context(|| "Invalid amount")?;
+                whole * 1_000_000_000 + frac
+            } else {
+                let whole: u128 = amount.parse().with_context(|| "Invalid amount")?;
+                whole * 1_000_000_000
+            };
+
+            println!("Transfer Details:");
+            println!("  From:   {}", keypair.address().to_base58());
+            println!("  To:     {}", to_addr.to_base58());
+            println!("  Amount: {} Koppa ({} base units)", amount, amount_base);
+            println!("  Fee:    {} base units", fee);
+            println!("  RPC:    {}", rpc);
+            println!();
+
+            // Query chain ID and nonce from RPC
+            let client = reqwest::blocking::Client::new();
+
+            // Get chain ID
+            let chain_id_resp: serde_json::Value = client
+                .post(&rpc)
+                .json(&serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "chain_id",
+                    "params": [],
+                    "id": 1
+                }))
+                .send()
+                .with_context(|| "Failed to connect to RPC")?
+                .json()
+                .with_context(|| "Failed to parse chain_id response")?;
+
+            let chain_id = chain_id_resp["result"]
+                .as_u64()
+                .with_context(|| "Invalid chain_id response")?;
+
+            // Get nonce
+            let nonce_resp: serde_json::Value = client
+                .post(&rpc)
+                .json(&serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "get_nonce",
+                    "params": [keypair.address().to_base58()],
+                    "id": 2
+                }))
+                .send()
+                .with_context(|| "Failed to get nonce")?
+                .json()
+                .with_context(|| "Failed to parse nonce response")?;
+
+            let nonce = nonce_resp["result"]
+                .as_u64()
+                .with_context(|| "Invalid nonce response")?;
+
+            println!("  Chain ID: {}", chain_id);
+            println!("  Nonce:    {}", nonce);
+            println!();
+
+            // Build transaction
+            let tx = TransactionV2::transfer(
+                chain_id,
+                keypair.address(),
+                to_addr,
+                amount_base,
+                fee,
+                nonce,
+            );
+
+            // Sign transaction
+            let signing_hash = tx.signing_hash();
+            let signature = sign(signing_hash.as_bytes(), keypair.private_key());
+            let signed_tx = SignedTransaction::new_v2(
+                tx,
+                signature.to_bytes(),
+                *keypair.public_key().as_bytes(),
+            );
+
+            // Send transaction
+            let tx_hex = signed_tx.to_hex();
+            let send_resp: serde_json::Value = client
+                .post(&rpc)
+                .json(&serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "send_raw_transaction",
+                    "params": [tx_hex],
+                    "id": 3
+                }))
+                .send()
+                .with_context(|| "Failed to send transaction")?
+                .json()
+                .with_context(|| "Failed to parse send response")?;
+
+            if let Some(error) = send_resp.get("error") {
+                anyhow::bail!("Transaction failed: {}", error);
+            }
+
+            let tx_hash = send_resp["result"]["tx_hash"]
+                .as_str()
+                .with_context(|| "Missing tx_hash in response")?;
+
+            println!("Transaction sent successfully!");
+            println!("  TX Hash: {}", tx_hash);
         }
     }
 
