@@ -70,6 +70,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Utilities
 parking_lot = "0.12"
+home = "=0.5.9"  # Pin to avoid edition2024 requirement
 bytes = "1.5"
 futures = "0.3"
 async-trait = "0.1"
