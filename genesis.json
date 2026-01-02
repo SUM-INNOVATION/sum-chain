@@ -1,0 +1,21 @@
+{
+	"chain_id": 1,
+	"genesis_time": 0,
+	"validators": [
+		"GW1pJKzqDmmHczMGz5g7CV51RgDuR6kKw76yZ1cVbEv8",
+		"7jUZxm5rJ5PazGYkrtJ4sUJj7ztib2VHEoM2Yc4Liydy"
+	],
+	"alloc": {
+		"8zZ1pfbpUcAmoByWKYgJgiFZWpmhWQKJ4": 500000000000000000,
+		"D7Ls8H7Y2jCqYEEUUxWUcgQkF9cKhHxjV": 500000000000000000
+	},
+	"params": {
+		"block_time_ms": 3000,
+		"max_block_bytes": 2000000,
+		"max_txs_per_block": 1000,
+		"min_fee": 1000,
+		"finality_depth": 6,
+		"max_metadata_bytes": 16384,
+		"storage_fee_per_byte": 100
+	}
+}
