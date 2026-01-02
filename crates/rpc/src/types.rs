@@ -371,3 +371,106 @@ pub struct TokenOperationResult {
     /// Error message if failed
     pub error: Option<String>,
 }
+
+// ============================================================================
+// Smart Contract (SUMC) Types
+// ============================================================================
+
+/// Contract info for RPC responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContractInfo {
+    /// Contract address
+    pub address: String,
+    /// Code hash (hex)
+    pub code_hash: String,
+    /// Owner address
+    pub owner: String,
+    /// Contract balance in Koppa
+    pub balance: String,
+    /// Whether the contract is upgradeable
+    pub upgradeable: bool,
+    /// Deployment timestamp (milliseconds)
+    pub deployed_at: u64,
+    /// Deployment block height
+    pub deployed_at_block: u64,
+}
+
+/// Contract deployment result
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContractDeployResult {
+    /// Transaction hash
+    pub tx_hash: String,
+    /// Deployed contract address
+    pub contract_address: String,
+    /// Code hash (hex)
+    pub code_hash: String,
+    /// Gas used
+    pub gas_used: u64,
+    /// Whether deployment succeeded
+    pub success: bool,
+    /// Error message if failed
+    pub error: Option<String>,
+}
+
+/// Contract call result
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContractCallResult {
+    /// Transaction hash (for write calls)
+    pub tx_hash: Option<String>,
+    /// Return data (hex encoded)
+    pub return_data: String,
+    /// Gas used
+    pub gas_used: u64,
+    /// Whether call succeeded
+    pub success: bool,
+    /// Error message if failed
+    pub error: Option<String>,
+    /// Events emitted during execution
+    pub events: Vec<ContractEventInfo>,
+}
+
+/// Contract event info
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContractEventInfo {
+    /// Contract that emitted the event
+    pub contract: String,
+    /// Event topics (hex encoded)
+    pub topics: Vec<String>,
+    /// Event data (hex encoded)
+    pub data: String,
+}
+
+/// View call request
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ViewCallRequest {
+    /// Contract address
+    pub contract: String,
+    /// Method name to call
+    pub method: String,
+    /// Arguments (hex encoded)
+    pub args: String,
+    /// Optional caller address (for access control)
+    pub from: Option<String>,
+}
+
+/// Contract storage query result
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContractStorageResult {
+    /// Contract address
+    pub contract: String,
+    /// Storage key (hex)
+    pub key: String,
+    /// Storage value (hex), None if not found
+    pub value: Option<String>,
+}
+
+/// Gas estimation result
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GasEstimateResult {
+    /// Estimated gas needed
+    pub gas_estimate: u64,
+    /// Gas price in Koppa per gas unit
+    pub gas_price: String,
+    /// Total estimated cost in Koppa
+    pub total_cost: String,
+}

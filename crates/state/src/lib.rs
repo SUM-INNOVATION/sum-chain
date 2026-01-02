@@ -4,6 +4,7 @@
 //! Handles account balances, nonces, and transaction application.
 
 pub mod cache;
+pub mod contract_executor;
 pub mod executor;
 pub mod mempool;
 pub mod nft_executor;
@@ -12,6 +13,7 @@ pub mod state;
 pub mod token_executor;
 
 pub use cache::{CacheStats, CachedAccount, StateCache};
+pub use contract_executor::{ContractCallResult, ContractDeployResult, ContractExecutorState, ContractEvent, ContractMetadata};
 pub use executor::{BlockExecutor, TxExecutionResult};
 pub use mempool::{Mempool, MempoolConfig, MempoolStats};
 pub use nft_executor::{NftExecutionResult, NftExecutor};
@@ -59,6 +61,15 @@ pub enum StateError {
 
     #[error("NFT error: {0}")]
     NftError(String),
+
+    #[error("Contract error: {0}")]
+    ContractError(String),
 }
 
 pub type Result<T> = std::result::Result<T, StateError>;
+
+impl From<sumc_runtime::RuntimeError> for StateError {
+    fn from(e: sumc_runtime::RuntimeError) -> Self {
+        StateError::ContractError(e.to_string())
+    }
+}

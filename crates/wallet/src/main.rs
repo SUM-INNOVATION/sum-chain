@@ -299,6 +299,115 @@ enum Commands {
         #[arg(long)]
         token_id: u64,
     },
+
+    // ========================================================================
+    // Smart Contract (SUMC) Commands
+    // ========================================================================
+
+    /// Get smart contract info by address
+    Contract {
+        /// RPC URL
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+
+        /// Contract address
+        #[arg(long)]
+        address: String,
+    },
+
+    /// Check if an address is a smart contract
+    IsContract {
+        /// RPC URL
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+
+        /// Address to check
+        #[arg(long)]
+        address: String,
+    },
+
+    /// Call a contract method (read-only view call)
+    ContractCall {
+        /// RPC URL
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+
+        /// Contract address
+        #[arg(long)]
+        contract: String,
+
+        /// Method name to call
+        #[arg(long)]
+        method: String,
+
+        /// Arguments (hex encoded, with or without 0x prefix)
+        #[arg(long, default_value = "")]
+        args: String,
+
+        /// Optional caller address (for access control checks)
+        #[arg(long)]
+        from: Option<String>,
+    },
+
+    /// Estimate gas for a contract call
+    ContractEstimateGas {
+        /// RPC URL
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+
+        /// Contract address
+        #[arg(long)]
+        contract: String,
+
+        /// Method name to call
+        #[arg(long)]
+        method: String,
+
+        /// Arguments (hex encoded)
+        #[arg(long, default_value = "")]
+        args: String,
+
+        /// Optional caller address
+        #[arg(long)]
+        from: Option<String>,
+    },
+
+    /// Get contract code hash
+    ContractCodeHash {
+        /// RPC URL
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+
+        /// Contract address
+        #[arg(long)]
+        address: String,
+    },
+
+    /// Get contract storage at a specific key
+    ContractStorage {
+        /// RPC URL
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+
+        /// Contract address
+        #[arg(long)]
+        address: String,
+
+        /// Storage key (hex encoded)
+        #[arg(long)]
+        key: String,
+    },
+
+    /// Get contract balance
+    ContractBalance {
+        /// RPC URL
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+
+        /// Contract address
+        #[arg(long)]
+        address: String,
+    },
 }
 
 #[tokio::main]
@@ -800,6 +909,138 @@ async fn main() -> Result<()> {
                 }
                 None => print_warning("Token not found"),
             }
+        }
+
+        // ====================================================================
+        // Smart Contract (SUMC) Commands
+        // ====================================================================
+
+        Commands::Contract { rpc, address } => {
+            let info = tx::contract_get_info(&rpc, &address).await?;
+
+            match info {
+                Some(c) => {
+                    print_header("Smart Contract");
+                    println!();
+                    print_field("Address", &c.address);
+                    print_field("Code Hash", &c.code_hash);
+                    print_field("Owner", &c.owner);
+                    print_separator();
+                    let balance: u128 = c.balance.parse().unwrap_or(0);
+                    print_koppa_field("Balance", balance);
+                    print_status_indicator("Upgradeable", c.upgradeable);
+                    print_separator();
+                    print_field("Deployed At", &format_timestamp(c.deployed_at));
+                    print_field("Deployed Block", &c.deployed_at_block.to_string());
+                }
+                None => print_warning("Contract not found at this address"),
+            }
+        }
+
+        Commands::IsContract { rpc, address } => {
+            let is_contract = tx::contract_is_contract(&rpc, &address).await?;
+
+            print_field("Address", &address);
+            if is_contract {
+                println!("  {}: {}", "Is Contract".dimmed(), "Yes".green().bold());
+            } else {
+                println!("  {}: {}", "Is Contract".dimmed(), "No".yellow());
+            }
+        }
+
+        Commands::ContractCall { rpc, contract, method, args, from } => {
+            let from_ref = from.as_deref();
+            let result = tx::contract_call(&rpc, &contract, &method, &args, from_ref).await?;
+
+            print_header("Contract Call Result");
+            println!();
+            print_field("Contract", &contract);
+            print_field("Method", &method);
+            if !args.is_empty() {
+                print_field("Args", &args);
+            }
+            print_separator();
+
+            if result.success {
+                println!("  {}: {}", "Status".dimmed(), "Success".green().bold());
+                if !result.return_data.is_empty() {
+                    print_field("Return Data", &result.return_data);
+                }
+            } else {
+                println!("  {}: {}", "Status".dimmed(), "Failed".red().bold());
+                if let Some(err) = &result.error {
+                    print_field("Error", err);
+                }
+            }
+
+            print_field("Gas Used", &result.gas_used.to_string());
+
+            if !result.events.is_empty() {
+                println!();
+                println!("  {}:", "Events".dimmed());
+                for (i, event) in result.events.iter().enumerate() {
+                    print_list_item(i, &format!("Contract: {}", event.contract));
+                    for topic in &event.topics {
+                        println!("      Topic: {}", topic);
+                    }
+                    if !event.data.is_empty() {
+                        println!("      Data: {}", event.data);
+                    }
+                }
+            }
+        }
+
+        Commands::ContractEstimateGas { rpc, contract, method, args, from } => {
+            let from_ref = from.as_deref();
+            let result = tx::contract_estimate_gas(&rpc, &contract, &method, &args, from_ref).await?;
+
+            print_header("Gas Estimate");
+            println!();
+            print_field("Contract", &contract);
+            print_field("Method", &method);
+            print_separator();
+            print_field("Estimated Gas", &result.gas_estimate.to_string());
+            print_field("Gas Price", &result.gas_price);
+            let total: u128 = result.total_cost.parse().unwrap_or(0);
+            print_koppa_field("Total Cost", total);
+        }
+
+        Commands::ContractCodeHash { rpc, address } => {
+            let hash = tx::contract_get_code_hash(&rpc, &address).await?;
+
+            match hash {
+                Some(h) => {
+                    print_field("Address", &address);
+                    print_field("Code Hash", &h.cyan().to_string());
+                }
+                None => {
+                    print_field("Address", &address);
+                    print_warning("No contract found at this address");
+                }
+            }
+        }
+
+        Commands::ContractStorage { rpc, address, key } => {
+            let value = tx::contract_get_storage(&rpc, &address, &key).await?;
+
+            print_field("Contract", &address);
+            print_field("Key", &key);
+            match value {
+                Some(v) => {
+                    print_field("Value", &v.cyan().to_string());
+                }
+                None => {
+                    print_info("Storage slot is empty or not set");
+                }
+            }
+        }
+
+        Commands::ContractBalance { rpc, address } => {
+            let balance_str = tx::contract_get_balance(&rpc, &address).await?;
+            let balance: u128 = balance_str.parse().unwrap_or(0);
+
+            print_field("Contract", &address);
+            print_koppa_field("Balance", balance);
         }
     }
 

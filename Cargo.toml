@@ -13,6 +13,10 @@ members = [
     "crates/wallet",
     "crates/nft",
     "crates/token",
+    "crates/sumc-runtime",
+    "crates/sumc-sdk",
+    "crates/sumc-sdk-macros",
+    "crates/bridge",
     "crates/integration-tests",
     "scripts",
 ]
@@ -66,6 +70,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Utilities
 parking_lot = "0.12"
+home = "0.5"
 bytes = "1.5"
 futures = "0.3"
 async-trait = "0.1"
@@ -75,6 +80,14 @@ derive_more = "0.99"
 argon2 = "0.5"
 aes-gcm = "0.10"
 zeroize = { version = "1.7", features = ["derive"] }
+
+# WASM runtime for smart contracts
+wasmer = "4.2"
+wasmer-compiler-singlepass = "4.2"
+
+# Ethereum bridge
+ethers = { version = "2.0", features = ["legacy"] }
+k256 = "0.13"
 
 [profile.release]
 lto = true
