@@ -7,12 +7,20 @@ pub mod address;
 pub mod block;
 pub mod hash;
 pub mod receipt;
+pub mod staking;
 pub mod transaction;
 
 pub use address::Address;
 pub use block::{Block, BlockHeader};
 pub use hash::Hash;
 pub use receipt::{Receipt, TxStatus};
+pub use staking::{
+    AddStakeData, ClaimDelegationRewardsData, CreateValidatorData, DelegateData, DelegationInfo,
+    DoubleSignEvidence, DowntimeEvidence, EvidenceType, SlashingRecord, StakingOperation,
+    StakingParams, StakingTxData, SubmitEvidenceData, UnbondingDelegation, UndelegateData,
+    UnstakeData, UpdateValidatorData, ValidatorInfo, ValidatorSet, ValidatorSetEntry,
+    ValidatorSigningInfo, ValidatorStatus, WithdrawUnbondedData,
+};
 pub use transaction::{
     NftOperation, NftTxData, SignedTransaction, TokenOperation, TokenTxData, Transaction,
     TransactionV2, TxInner, TxPayload, TxType,

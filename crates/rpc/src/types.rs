@@ -474,3 +474,254 @@ pub struct GasEstimateResult {
     /// Total estimated cost in Koppa
     pub total_cost: String,
 }
+
+// ============================================================================
+// Staking Types
+// ============================================================================
+
+/// Staking validator info for RPC responses (includes stake info)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StakingValidatorInfo {
+    /// Validator's public key (hex)
+    pub pubkey: String,
+    /// Validator's address (base58)
+    pub address: String,
+    /// Self-staked amount in base units
+    pub stake: String,
+    /// Commission rate in basis points (100 = 1%)
+    pub commission_bps: u16,
+    /// Validator status (Active, Inactive, Jailed, Unbonding)
+    pub status: String,
+    /// Block height when validator joined
+    pub joined_at: u64,
+    /// Block height when validator can unjail (0 if not jailed)
+    pub jailed_until: u64,
+    /// Number of times this validator has been slashed
+    pub slash_count: u32,
+    /// Accumulated rewards (not yet claimed)
+    pub pending_rewards: String,
+    /// Optional metadata (e.g., name, website)
+    pub metadata: Option<String>,
+}
+
+/// Staking summary for RPC responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StakingSummary {
+    /// Total number of validators
+    pub total_validators: usize,
+    /// Number of active validators
+    pub active_validators: usize,
+    /// Total staked amount across all validators
+    pub total_stake: String,
+    /// Minimum stake required to be a validator
+    pub min_validator_stake: String,
+    /// Maximum number of validators allowed
+    pub max_validators: u32,
+    /// Current unbonding period in blocks
+    pub unbonding_period: u64,
+}
+
+/// Staking parameters info for RPC responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StakingParamsInfo {
+    /// Minimum stake required to be a validator
+    pub min_validator_stake: String,
+    /// Maximum number of active validators
+    pub max_validators: u32,
+    /// Unbonding period in blocks
+    pub unbonding_period: u64,
+    /// Maximum commission rate in basis points
+    pub max_commission_bps: u16,
+    /// Slash penalty for double signing (basis points)
+    pub double_sign_slash_bps: u16,
+    /// Slash penalty for downtime (basis points)
+    pub downtime_slash_bps: u16,
+    /// Jail duration for double signing (blocks)
+    pub double_sign_jail_duration: u64,
+    /// Jail duration for downtime (blocks)
+    pub downtime_jail_duration: u64,
+    /// Number of missed blocks before downtime slash
+    pub downtime_threshold: u64,
+}
+
+// ============================================================================
+// Delegation Types
+// ============================================================================
+
+/// Delegation info for RPC responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DelegationRpcInfo {
+    /// Delegator address (base58)
+    pub delegator: String,
+    /// Validator address (base58)
+    pub validator_address: String,
+    /// Validator public key (hex)
+    pub validator_pubkey: String,
+    /// Delegated amount in base units
+    pub amount: String,
+    /// Pending rewards in base units
+    pub pending_rewards: String,
+    /// Block height when delegation started
+    pub delegated_at: u64,
+}
+
+/// Unbonding delegation info for RPC responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnbondingDelegationRpcInfo {
+    /// Delegator address (base58)
+    pub delegator: String,
+    /// Validator address (base58)
+    pub validator_address: String,
+    /// Validator public key (hex)
+    pub validator_pubkey: String,
+    /// Amount being unbonded in base units
+    pub amount: String,
+    /// Block height when unbonding completes
+    pub completion_height: u64,
+    /// Whether unbonding is complete
+    pub is_complete: bool,
+}
+
+/// Delegator summary for RPC responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DelegatorSummary {
+    /// Delegator address (base58)
+    pub delegator: String,
+    /// Total amount delegated across all validators
+    pub total_delegated: String,
+    /// Total pending rewards across all validators
+    pub total_pending_rewards: String,
+    /// Total amount in unbonding
+    pub total_unbonding: String,
+    /// Number of active delegations
+    pub delegation_count: usize,
+    /// Number of pending unbondings
+    pub unbonding_count: usize,
+}
+
+/// Validator delegation summary for RPC responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidatorDelegationSummary {
+    /// Validator public key (hex)
+    pub validator_pubkey: String,
+    /// Validator address (base58)
+    pub validator_address: String,
+    /// Total delegated to this validator
+    pub total_delegated: String,
+    /// Number of delegators
+    pub delegator_count: usize,
+}
+
+// ============================================================================
+// Slashing Types
+// ============================================================================
+
+/// Slashing record info for RPC responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlashingRecordRpcInfo {
+    /// Validator public key (hex)
+    pub validator_pubkey: String,
+    /// Validator address (base58)
+    pub validator_address: String,
+    /// Evidence type (DoubleSign or Downtime)
+    pub evidence_type: String,
+    /// Block height when slashing occurred
+    pub slashed_at: u64,
+    /// Amount slashed from validator stake
+    pub validator_slash_amount: String,
+    /// Amount slashed from delegations
+    pub delegation_slash_amount: String,
+    /// Block height until validator is jailed
+    pub jailed_until: u64,
+    /// Whether validator is permanently jailed (tombstoned)
+    pub tombstoned: bool,
+    /// Slash fraction in basis points (100 = 1%)
+    pub slash_fraction_bps: u16,
+}
+
+/// Validator signing info for RPC responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidatorSigningRpcInfo {
+    /// Validator public key (hex)
+    pub validator_pubkey: String,
+    /// Validator address (base58)
+    pub validator_address: String,
+    /// Block height when validator started signing
+    pub start_height: u64,
+    /// Index offset for missed blocks tracking
+    pub index_offset: u64,
+    /// Number of missed blocks in current window
+    pub missed_blocks_counter: u64,
+    /// Whether validator is tombstoned (permanently jailed)
+    pub tombstoned: bool,
+    /// Block height until validator is jailed (0 if not jailed)
+    pub jailed_until: u64,
+}
+
+/// Slashing summary for RPC responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlashingSummary {
+    /// Total number of slashing events
+    pub total_slashing_events: usize,
+    /// Total amount slashed from validators
+    pub total_validator_slashed: String,
+    /// Total amount slashed from delegations
+    pub total_delegation_slashed: String,
+    /// Number of tombstoned validators
+    pub tombstoned_count: usize,
+    /// Number of currently jailed validators
+    pub jailed_count: usize,
+}
+
+// ============================================================================
+// Validator Set Types
+// ============================================================================
+
+/// Validator entry in a validator set for RPC responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidatorSetEntryRpcInfo {
+    /// Validator public key (hex)
+    pub pubkey: String,
+    /// Validator address (base58)
+    pub address: String,
+    /// Total voting power (stake + delegations)
+    pub voting_power: String,
+    /// Commission rate in basis points
+    pub commission_bps: u16,
+    /// Voting power percentage in basis points (100 = 1%)
+    pub power_percentage_bps: u16,
+}
+
+/// Active validator set for RPC responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidatorSetRpcInfo {
+    /// Epoch number
+    pub epoch: u64,
+    /// Block height when set became active
+    pub active_from: u64,
+    /// List of validators
+    pub validators: Vec<ValidatorSetEntryRpcInfo>,
+    /// Total voting power in the set
+    pub total_voting_power: String,
+    /// Proposer seed (hex)
+    pub proposer_seed: String,
+}
+
+/// Epoch info for RPC responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EpochInfo {
+    /// Current epoch number
+    pub current_epoch: u64,
+    /// Current block height
+    pub current_height: u64,
+    /// Epoch length in blocks
+    pub epoch_length: u64,
+    /// First block of current epoch
+    pub epoch_start_height: u64,
+    /// Last block of current epoch
+    pub epoch_end_height: u64,
+    /// Blocks remaining in current epoch
+    pub blocks_remaining: u64,
+    /// Whether stake-weighted selection is enabled
+    pub stake_weighted_selection: bool,
+}

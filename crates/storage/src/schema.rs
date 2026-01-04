@@ -3,7 +3,11 @@
 //! Provides typed access to blocks, state, transactions, and receipts.
 
 
-use sumchain_primitives::{Address, Balance, Block, BlockHeight, Hash, Nonce, Receipt, SignedTransaction};
+use sumchain_primitives::{
+    Address, Balance, Block, BlockHeight, DelegationInfo, EvidenceType, Hash, Nonce, Receipt,
+    SignedTransaction, SlashingRecord, UnbondingDelegation, ValidatorInfo, ValidatorSigningInfo,
+    ValidatorStatus,
+};
 
 use crate::db::{cf, Database};
 use crate::{Result, StorageError};
@@ -1071,6 +1075,860 @@ impl<'a> TokenStore<'a> {
         self.set_allowance(token_id, from, spender, new_allowance)?;
 
         Ok(())
+    }
+}
+
+// ============================================================================
+// Validator/Staking Storage
+// ============================================================================
+
+/// Validator storage operations
+pub struct StakingStore<'a> {
+    db: &'a Database,
+}
+
+impl<'a> StakingStore<'a> {
+    pub fn new(db: &'a Database) -> Self {
+        Self { db }
+    }
+
+    // ========================================================================
+    // Validator operations
+    // ========================================================================
+
+    /// Store a validator by their public key
+    pub fn put_validator(&self, validator: &ValidatorInfo) -> Result<()> {
+        let bytes = bincode::serialize(validator)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        self.db.put(cf::VALIDATORS, &validator.pubkey, &bytes)
+    }
+
+    /// Get a validator by public key
+    pub fn get_validator(&self, pubkey: &[u8; 32]) -> Result<Option<ValidatorInfo>> {
+        match self.db.get(cf::VALIDATORS, pubkey)? {
+            Some(bytes) => {
+                let validator: ValidatorInfo = bincode::deserialize(&bytes)
+                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                Ok(Some(validator))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Check if a validator exists
+    pub fn validator_exists(&self, pubkey: &[u8; 32]) -> Result<bool> {
+        self.db.contains(cf::VALIDATORS, pubkey)
+    }
+
+    /// Delete a validator
+    pub fn delete_validator(&self, pubkey: &[u8; 32]) -> Result<()> {
+        self.db.delete(cf::VALIDATORS, pubkey)
+    }
+
+    /// Get all validators
+    pub fn get_all_validators(&self) -> Result<Vec<ValidatorInfo>> {
+        let mut validators = Vec::new();
+        for (_, value) in self.db.prefix_iter(cf::VALIDATORS, &[])? {
+            let validator: ValidatorInfo = bincode::deserialize(&value)
+                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            validators.push(validator);
+        }
+        Ok(validators)
+    }
+
+    /// Get all active validators (those that can participate in consensus)
+    pub fn get_active_validators(&self) -> Result<Vec<ValidatorInfo>> {
+        let all = self.get_all_validators()?;
+        Ok(all.into_iter().filter(|v| v.status == ValidatorStatus::Active).collect())
+    }
+
+    /// Get validators sorted by stake (descending)
+    pub fn get_validators_by_stake(&self) -> Result<Vec<ValidatorInfo>> {
+        let mut validators = self.get_all_validators()?;
+        validators.sort_by(|a, b| b.stake.cmp(&a.stake));
+        Ok(validators)
+    }
+
+    /// Get total staked amount across all validators
+    pub fn get_total_stake(&self) -> Result<Balance> {
+        let validators = self.get_all_validators()?;
+        Ok(validators.iter().map(|v| v.stake).sum())
+    }
+
+    /// Get the number of validators
+    pub fn get_validator_count(&self) -> Result<usize> {
+        Ok(self.get_all_validators()?.len())
+    }
+
+    /// Get the number of active validators
+    pub fn get_active_validator_count(&self) -> Result<usize> {
+        Ok(self.get_active_validators()?.len())
+    }
+
+    /// Update validator stake
+    pub fn update_stake(&self, pubkey: &[u8; 32], new_stake: Balance) -> Result<()> {
+        match self.get_validator(pubkey)? {
+            Some(mut validator) => {
+                validator.stake = new_stake;
+                self.put_validator(&validator)
+            }
+            None => Err(StorageError::InvalidData("Validator not found".to_string())),
+        }
+    }
+
+    /// Update validator status
+    pub fn update_status(&self, pubkey: &[u8; 32], status: ValidatorStatus) -> Result<()> {
+        match self.get_validator(pubkey)? {
+            Some(mut validator) => {
+                validator.status = status;
+                self.put_validator(&validator)
+            }
+            None => Err(StorageError::InvalidData("Validator not found".to_string())),
+        }
+    }
+
+    /// Jail a validator until a specific block height
+    pub fn jail_validator(&self, pubkey: &[u8; 32], until_height: BlockHeight) -> Result<()> {
+        match self.get_validator(pubkey)? {
+            Some(mut validator) => {
+                validator.jail(until_height);
+                self.put_validator(&validator)
+            }
+            None => Err(StorageError::InvalidData("Validator not found".to_string())),
+        }
+    }
+
+    /// Unjail a validator
+    pub fn unjail_validator(&self, pubkey: &[u8; 32]) -> Result<()> {
+        match self.get_validator(pubkey)? {
+            Some(mut validator) => {
+                validator.unjail();
+                self.put_validator(&validator)
+            }
+            None => Err(StorageError::InvalidData("Validator not found".to_string())),
+        }
+    }
+
+    /// Apply slash to a validator
+    pub fn slash_validator(&self, pubkey: &[u8; 32], penalty_bps: u16) -> Result<Balance> {
+        match self.get_validator(pubkey)? {
+            Some(mut validator) => {
+                let old_stake = validator.stake;
+                validator.apply_slash(penalty_bps);
+                let slashed_amount = old_stake - validator.stake;
+                self.put_validator(&validator)?;
+                Ok(slashed_amount)
+            }
+            None => Err(StorageError::InvalidData("Validator not found".to_string())),
+        }
+    }
+
+    /// Add pending rewards to a validator
+    pub fn add_rewards(&self, pubkey: &[u8; 32], amount: Balance) -> Result<()> {
+        match self.get_validator(pubkey)? {
+            Some(mut validator) => {
+                validator.pending_rewards = validator.pending_rewards.saturating_add(amount);
+                self.put_validator(&validator)
+            }
+            None => Err(StorageError::InvalidData("Validator not found".to_string())),
+        }
+    }
+
+    /// Claim pending rewards (returns amount claimed and resets pending_rewards to 0)
+    pub fn claim_rewards(&self, pubkey: &[u8; 32]) -> Result<Balance> {
+        match self.get_validator(pubkey)? {
+            Some(mut validator) => {
+                let rewards = validator.pending_rewards;
+                validator.pending_rewards = 0;
+                self.put_validator(&validator)?;
+                Ok(rewards)
+            }
+            None => Err(StorageError::InvalidData("Validator not found".to_string())),
+        }
+    }
+}
+
+// ============================================================================
+// Delegation Storage
+// ============================================================================
+
+/// Delegation storage operations
+pub struct DelegationStore<'a> {
+    db: &'a Database,
+}
+
+impl<'a> DelegationStore<'a> {
+    pub fn new(db: &'a Database) -> Self {
+        Self { db }
+    }
+
+    // ========================================================================
+    // Key generation helpers
+    // ========================================================================
+
+    /// Create delegation key from delegator address and validator pubkey
+    /// Format: delegator (32 bytes) + validator_pubkey (32 bytes)
+    fn delegation_key(delegator: &[u8; 32], validator_pubkey: &[u8; 32]) -> Vec<u8> {
+        let mut key = Vec::with_capacity(64);
+        key.extend_from_slice(delegator);
+        key.extend_from_slice(validator_pubkey);
+        key
+    }
+
+    /// Create unbonding delegation key
+    /// Format: delegator (32 bytes) + completion_height (8 bytes BE) + validator_pubkey (32 bytes)
+    fn unbonding_key(delegator: &[u8; 32], completion_height: BlockHeight, validator_pubkey: &[u8; 32]) -> Vec<u8> {
+        let mut key = Vec::with_capacity(72);
+        key.extend_from_slice(delegator);
+        key.extend_from_slice(&completion_height.to_be_bytes());
+        key.extend_from_slice(validator_pubkey);
+        key
+    }
+
+    // ========================================================================
+    // Delegation operations
+    // ========================================================================
+
+    /// Store a delegation
+    pub fn put_delegation(&self, delegation: &DelegationInfo) -> Result<()> {
+        let key = Self::delegation_key(&delegation.delegator, &delegation.validator_pubkey);
+        let bytes = bincode::serialize(delegation)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        self.db.put(cf::DELEGATIONS, &key, &bytes)?;
+
+        // Update validator index
+        self.add_to_validator_index(&delegation.validator_pubkey, &delegation.delegator)?;
+
+        Ok(())
+    }
+
+    /// Get a delegation
+    pub fn get_delegation(&self, delegator: &[u8; 32], validator_pubkey: &[u8; 32]) -> Result<Option<DelegationInfo>> {
+        let key = Self::delegation_key(delegator, validator_pubkey);
+        match self.db.get(cf::DELEGATIONS, &key)? {
+            Some(bytes) => {
+                let delegation: DelegationInfo = bincode::deserialize(&bytes)
+                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                Ok(Some(delegation))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Check if delegation exists
+    pub fn delegation_exists(&self, delegator: &[u8; 32], validator_pubkey: &[u8; 32]) -> Result<bool> {
+        let key = Self::delegation_key(delegator, validator_pubkey);
+        self.db.contains(cf::DELEGATIONS, &key)
+    }
+
+    /// Delete a delegation
+    pub fn delete_delegation(&self, delegator: &[u8; 32], validator_pubkey: &[u8; 32]) -> Result<()> {
+        let key = Self::delegation_key(delegator, validator_pubkey);
+        self.db.delete(cf::DELEGATIONS, &key)?;
+
+        // Update validator index
+        self.remove_from_validator_index(validator_pubkey, delegator)?;
+
+        Ok(())
+    }
+
+    /// Get all delegations for a delegator
+    pub fn get_delegations_by_delegator(&self, delegator: &[u8; 32]) -> Result<Vec<DelegationInfo>> {
+        let mut delegations = Vec::new();
+
+        for (key, value) in self.db.prefix_iter(cf::DELEGATIONS, delegator)? {
+            // Only match keys that start with this delegator
+            if key.len() == 64 && &key[..32] == delegator {
+                let delegation: DelegationInfo = bincode::deserialize(&value)
+                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                delegations.push(delegation);
+            }
+        }
+
+        Ok(delegations)
+    }
+
+    /// Get all delegations to a validator
+    pub fn get_delegations_by_validator(&self, validator_pubkey: &[u8; 32]) -> Result<Vec<DelegationInfo>> {
+        let delegator_list = self.get_validator_delegators(validator_pubkey)?;
+        let mut delegations = Vec::new();
+
+        for delegator in delegator_list {
+            if let Some(delegation) = self.get_delegation(&delegator, validator_pubkey)? {
+                delegations.push(delegation);
+            }
+        }
+
+        Ok(delegations)
+    }
+
+    /// Get total delegated amount to a validator
+    pub fn get_total_delegated_to_validator(&self, validator_pubkey: &[u8; 32]) -> Result<Balance> {
+        let delegations = self.get_delegations_by_validator(validator_pubkey)?;
+        Ok(delegations.iter().map(|d| d.amount).sum())
+    }
+
+    /// Get total delegated amount from a delegator
+    pub fn get_total_delegated_by_delegator(&self, delegator: &[u8; 32]) -> Result<Balance> {
+        let delegations = self.get_delegations_by_delegator(delegator)?;
+        Ok(delegations.iter().map(|d| d.amount).sum())
+    }
+
+    // ========================================================================
+    // Unbonding delegation operations
+    // ========================================================================
+
+    /// Store an unbonding delegation
+    pub fn put_unbonding(&self, unbonding: &UnbondingDelegation) -> Result<()> {
+        let key = Self::unbonding_key(&unbonding.delegator, unbonding.completion_height, &unbonding.validator_pubkey);
+        let bytes = bincode::serialize(unbonding)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        self.db.put(cf::UNBONDING_DELEGATIONS, &key, &bytes)
+    }
+
+    /// Delete an unbonding delegation
+    pub fn delete_unbonding(&self, delegator: &[u8; 32], completion_height: BlockHeight, validator_pubkey: &[u8; 32]) -> Result<()> {
+        let key = Self::unbonding_key(delegator, completion_height, validator_pubkey);
+        self.db.delete(cf::UNBONDING_DELEGATIONS, &key)
+    }
+
+    /// Get all unbonding delegations for a delegator
+    pub fn get_unbondings_by_delegator(&self, delegator: &[u8; 32]) -> Result<Vec<UnbondingDelegation>> {
+        let mut unbondings = Vec::new();
+
+        for (key, value) in self.db.prefix_iter(cf::UNBONDING_DELEGATIONS, delegator)? {
+            // Only match keys that start with this delegator (72 bytes: delegator + height + validator)
+            if key.len() == 72 && &key[..32] == delegator {
+                let unbonding: UnbondingDelegation = bincode::deserialize(&value)
+                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                unbondings.push(unbonding);
+            }
+        }
+
+        Ok(unbondings)
+    }
+
+    /// Get completed unbonding delegations (ready to withdraw)
+    pub fn get_completed_unbondings(&self, delegator: &[u8; 32], current_height: BlockHeight) -> Result<Vec<UnbondingDelegation>> {
+        let unbondings = self.get_unbondings_by_delegator(delegator)?;
+        Ok(unbondings.into_iter().filter(|u| u.is_complete(current_height)).collect())
+    }
+
+    /// Get completed unbondings for a specific validator
+    pub fn get_completed_unbondings_for_validator(
+        &self,
+        delegator: &[u8; 32],
+        validator_pubkey: &[u8; 32],
+        current_height: BlockHeight,
+    ) -> Result<Vec<UnbondingDelegation>> {
+        let unbondings = self.get_unbondings_by_delegator(delegator)?;
+        Ok(unbondings
+            .into_iter()
+            .filter(|u| u.validator_pubkey == *validator_pubkey && u.is_complete(current_height))
+            .collect())
+    }
+
+    /// Get total unbonding amount for a delegator
+    pub fn get_total_unbonding(&self, delegator: &[u8; 32]) -> Result<Balance> {
+        let unbondings = self.get_unbondings_by_delegator(delegator)?;
+        Ok(unbondings.iter().map(|u| u.amount).sum())
+    }
+
+    // ========================================================================
+    // Validator index operations (validator -> list of delegators)
+    // ========================================================================
+
+    /// Add delegator to validator's index
+    fn add_to_validator_index(&self, validator_pubkey: &[u8; 32], delegator: &[u8; 32]) -> Result<()> {
+        let mut delegators = self.get_validator_delegators(validator_pubkey)?;
+
+        if !delegators.iter().any(|d| d == delegator) {
+            delegators.push(*delegator);
+            let bytes = bincode::serialize(&delegators)
+                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            self.db.put(cf::DELEGATION_VALIDATOR_INDEX, validator_pubkey, &bytes)?;
+        }
+
+        Ok(())
+    }
+
+    /// Remove delegator from validator's index
+    fn remove_from_validator_index(&self, validator_pubkey: &[u8; 32], delegator: &[u8; 32]) -> Result<()> {
+        let mut delegators = self.get_validator_delegators(validator_pubkey)?;
+        delegators.retain(|d| d != delegator);
+
+        if delegators.is_empty() {
+            self.db.delete(cf::DELEGATION_VALIDATOR_INDEX, validator_pubkey)?;
+        } else {
+            let bytes = bincode::serialize(&delegators)
+                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            self.db.put(cf::DELEGATION_VALIDATOR_INDEX, validator_pubkey, &bytes)?;
+        }
+
+        Ok(())
+    }
+
+    /// Get list of delegators for a validator
+    pub fn get_validator_delegators(&self, validator_pubkey: &[u8; 32]) -> Result<Vec<[u8; 32]>> {
+        match self.db.get(cf::DELEGATION_VALIDATOR_INDEX, validator_pubkey)? {
+            Some(bytes) => {
+                let delegators: Vec<[u8; 32]> = bincode::deserialize(&bytes)
+                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                Ok(delegators)
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Get number of delegators for a validator
+    pub fn get_delegator_count(&self, validator_pubkey: &[u8; 32]) -> Result<usize> {
+        Ok(self.get_validator_delegators(validator_pubkey)?.len())
+    }
+
+    // ========================================================================
+    // Reward distribution helpers
+    // ========================================================================
+
+    /// Distribute rewards proportionally to all delegators of a validator
+    /// Returns total amount distributed
+    pub fn distribute_rewards(
+        &self,
+        validator_pubkey: &[u8; 32],
+        total_rewards: Balance,
+        commission_bps: u16,
+    ) -> Result<Balance> {
+        // Calculate validator's commission
+        let validator_commission = (total_rewards * commission_bps as u128) / 10000;
+        let delegator_rewards = total_rewards.saturating_sub(validator_commission);
+
+        // Get total delegated to this validator
+        let total_delegated = self.get_total_delegated_to_validator(validator_pubkey)?;
+
+        if total_delegated == 0 {
+            return Ok(0);
+        }
+
+        // Distribute proportionally to each delegator
+        let delegations = self.get_delegations_by_validator(validator_pubkey)?;
+        let mut distributed = 0u128;
+
+        for delegation in delegations {
+            // Calculate this delegator's share
+            let share = (delegator_rewards * delegation.amount) / total_delegated;
+
+            if share > 0 {
+                // Update delegation with new rewards
+                let mut updated = delegation.clone();
+                updated.add_rewards(share);
+                self.put_delegation(&updated)?;
+                distributed += share;
+            }
+        }
+
+        Ok(distributed)
+    }
+
+    /// Claim rewards for a delegation
+    pub fn claim_delegation_rewards(&self, delegator: &[u8; 32], validator_pubkey: &[u8; 32]) -> Result<Balance> {
+        match self.get_delegation(delegator, validator_pubkey)? {
+            Some(mut delegation) => {
+                let rewards = delegation.claim_rewards();
+                if delegation.amount == 0 {
+                    // If no stake left, remove the delegation
+                    self.delete_delegation(delegator, validator_pubkey)?;
+                } else {
+                    self.put_delegation(&delegation)?;
+                }
+                Ok(rewards)
+            }
+            None => Err(StorageError::NotFound("Delegation not found".to_string())),
+        }
+    }
+
+    // ========================================================================
+    // Slash helpers
+    // ========================================================================
+
+    /// Apply slash to all delegations of a validator
+    /// Returns total slashed amount
+    pub fn slash_delegations(&self, validator_pubkey: &[u8; 32], penalty_bps: u16) -> Result<Balance> {
+        let delegations = self.get_delegations_by_validator(validator_pubkey)?;
+        let mut total_slashed = 0u128;
+
+        for delegation in delegations {
+            let old_amount = delegation.amount;
+            let mut updated = delegation.clone();
+            updated.apply_slash(penalty_bps);
+            let slashed = old_amount.saturating_sub(updated.amount);
+
+            if updated.amount == 0 {
+                // Remove empty delegation
+                self.delete_delegation(&delegation.delegator, validator_pubkey)?;
+            } else {
+                self.put_delegation(&updated)?;
+            }
+
+            total_slashed += slashed;
+        }
+
+        Ok(total_slashed)
+    }
+}
+
+// ============================================================================
+// Slashing Storage
+// ============================================================================
+
+/// Slashing storage operations
+pub struct SlashingStore<'a> {
+    db: &'a Database,
+}
+
+impl<'a> SlashingStore<'a> {
+    pub fn new(db: &'a Database) -> Self {
+        Self { db }
+    }
+
+    // ========================================================================
+    // Key generation helpers
+    // ========================================================================
+
+    /// Create slashing record key
+    /// Format: validator_pubkey (32 bytes) + slashed_at (8 bytes BE)
+    fn slashing_key(validator_pubkey: &[u8; 32], slashed_at: BlockHeight) -> Vec<u8> {
+        let mut key = Vec::with_capacity(40);
+        key.extend_from_slice(validator_pubkey);
+        key.extend_from_slice(&slashed_at.to_be_bytes());
+        key
+    }
+
+    // ========================================================================
+    // Slashing record operations
+    // ========================================================================
+
+    /// Store a slashing record
+    pub fn put_slashing_record(&self, record: &SlashingRecord) -> Result<()> {
+        let key = Self::slashing_key(&record.validator_pubkey, record.slashed_at);
+        let bytes = bincode::serialize(record)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        self.db.put(cf::SLASHING_RECORDS, &key, &bytes)
+    }
+
+    /// Get slashing records for a validator
+    pub fn get_slashing_records(&self, validator_pubkey: &[u8; 32]) -> Result<Vec<SlashingRecord>> {
+        let mut records = Vec::new();
+
+        for (key, value) in self.db.prefix_iter(cf::SLASHING_RECORDS, validator_pubkey)? {
+            if key.len() == 40 && &key[..32] == validator_pubkey {
+                let record: SlashingRecord = bincode::deserialize(&value)
+                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                records.push(record);
+            }
+        }
+
+        Ok(records)
+    }
+
+    /// Get slash count for a validator
+    pub fn get_slash_count(&self, validator_pubkey: &[u8; 32]) -> Result<u32> {
+        let records = self.get_slashing_records(validator_pubkey)?;
+        Ok(records.len() as u32)
+    }
+
+    /// Check if validator was slashed for a specific evidence type at a height
+    pub fn was_slashed_at(
+        &self,
+        validator_pubkey: &[u8; 32],
+        slashed_at: BlockHeight,
+    ) -> Result<bool> {
+        let key = Self::slashing_key(validator_pubkey, slashed_at);
+        self.db.contains(cf::SLASHING_RECORDS, &key)
+    }
+
+    // ========================================================================
+    // Validator signing info operations
+    // ========================================================================
+
+    /// Store validator signing info
+    pub fn put_signing_info(&self, info: &ValidatorSigningInfo) -> Result<()> {
+        let bytes = bincode::serialize(info)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        self.db.put(cf::VALIDATOR_SIGNING_INFO, &info.validator_pubkey, &bytes)
+    }
+
+    /// Get validator signing info
+    pub fn get_signing_info(&self, validator_pubkey: &[u8; 32]) -> Result<Option<ValidatorSigningInfo>> {
+        match self.db.get(cf::VALIDATOR_SIGNING_INFO, validator_pubkey)? {
+            Some(bytes) => {
+                let info: ValidatorSigningInfo = bincode::deserialize(&bytes)
+                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                Ok(Some(info))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Get or create signing info for a validator
+    pub fn get_or_create_signing_info(
+        &self,
+        validator_pubkey: &[u8; 32],
+        current_height: BlockHeight,
+    ) -> Result<ValidatorSigningInfo> {
+        match self.get_signing_info(validator_pubkey)? {
+            Some(info) => Ok(info),
+            None => {
+                let info = ValidatorSigningInfo::new(*validator_pubkey, current_height);
+                self.put_signing_info(&info)?;
+                Ok(info)
+            }
+        }
+    }
+
+    /// Delete signing info
+    pub fn delete_signing_info(&self, validator_pubkey: &[u8; 32]) -> Result<()> {
+        self.db.delete(cf::VALIDATOR_SIGNING_INFO, validator_pubkey)
+    }
+
+    /// Get all validators' signing info
+    pub fn get_all_signing_info(&self) -> Result<Vec<ValidatorSigningInfo>> {
+        let mut infos = Vec::new();
+
+        for (_, value) in self.db.iter(cf::VALIDATOR_SIGNING_INFO)? {
+            let info: ValidatorSigningInfo = bincode::deserialize(&value)
+                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            infos.push(info);
+        }
+
+        Ok(infos)
+    }
+
+    // ========================================================================
+    // Missed blocks tracking
+    // ========================================================================
+
+    /// Record a missed block for a validator
+    pub fn record_missed_block(
+        &self,
+        validator_pubkey: &[u8; 32],
+        height: BlockHeight,
+    ) -> Result<()> {
+        // Get current signing info
+        let mut info = self.get_or_create_signing_info(validator_pubkey, height)?;
+        info.increment_missed();
+        self.put_signing_info(&info)?;
+
+        // Store in missed blocks bitmap for detailed tracking
+        let height_bytes = height.to_be_bytes();
+        let mut key = Vec::with_capacity(40);
+        key.extend_from_slice(validator_pubkey);
+        key.extend_from_slice(&height_bytes);
+        self.db.put(cf::MISSED_BLOCKS, &key, &[1])
+    }
+
+    /// Record a signed block for a validator (clears the missed block if any)
+    pub fn record_signed_block(
+        &self,
+        validator_pubkey: &[u8; 32],
+        height: BlockHeight,
+    ) -> Result<()> {
+        // Just delete from missed blocks if it exists
+        let height_bytes = height.to_be_bytes();
+        let mut key = Vec::with_capacity(40);
+        key.extend_from_slice(validator_pubkey);
+        key.extend_from_slice(&height_bytes);
+        self.db.delete(cf::MISSED_BLOCKS, &key)
+    }
+
+    /// Check if a validator missed a specific block
+    pub fn missed_block(&self, validator_pubkey: &[u8; 32], height: BlockHeight) -> Result<bool> {
+        let height_bytes = height.to_be_bytes();
+        let mut key = Vec::with_capacity(40);
+        key.extend_from_slice(validator_pubkey);
+        key.extend_from_slice(&height_bytes);
+        self.db.contains(cf::MISSED_BLOCKS, &key)
+    }
+
+    /// Get missed block count in a range
+    pub fn get_missed_block_count(
+        &self,
+        validator_pubkey: &[u8; 32],
+        start_height: BlockHeight,
+        end_height: BlockHeight,
+    ) -> Result<u64> {
+        let mut count = 0u64;
+
+        for height in start_height..=end_height {
+            if self.missed_block(validator_pubkey, height)? {
+                count += 1;
+            }
+        }
+
+        Ok(count)
+    }
+
+    /// Clear old missed blocks (before a certain height)
+    pub fn clear_old_missed_blocks(
+        &self,
+        validator_pubkey: &[u8; 32],
+        before_height: BlockHeight,
+    ) -> Result<u64> {
+        let mut cleared = 0u64;
+
+        // Iterate with prefix and delete old entries
+        for (key, _) in self.db.prefix_iter(cf::MISSED_BLOCKS, validator_pubkey)? {
+            if key.len() == 40 && &key[..32] == validator_pubkey {
+                let height_bytes: [u8; 8] = key[32..40].try_into()
+                    .map_err(|_| StorageError::InvalidData("Invalid height in key".to_string()))?;
+                let height = BlockHeight::from_be_bytes(height_bytes);
+
+                if height < before_height {
+                    self.db.delete(cf::MISSED_BLOCKS, &key)?;
+                    cleared += 1;
+                }
+            }
+        }
+
+        Ok(cleared)
+    }
+
+    // ========================================================================
+    // Slashing summary helpers
+    // ========================================================================
+
+    /// Get total slashed amount for a validator
+    pub fn get_total_slashed(&self, validator_pubkey: &[u8; 32]) -> Result<Balance> {
+        let records = self.get_slashing_records(validator_pubkey)?;
+        Ok(records.iter().map(|r| r.total_slashed()).sum())
+    }
+
+    /// Check if validator is tombstoned
+    pub fn is_tombstoned(&self, validator_pubkey: &[u8; 32]) -> Result<bool> {
+        match self.get_signing_info(validator_pubkey)? {
+            Some(info) => Ok(info.tombstoned),
+            None => Ok(false),
+        }
+    }
+
+    /// Get recent slashing records (last N)
+    pub fn get_recent_slashing_records(&self, limit: usize) -> Result<Vec<SlashingRecord>> {
+        let mut all_records = Vec::new();
+
+        for (_, value) in self.db.iter(cf::SLASHING_RECORDS)? {
+            let record: SlashingRecord = bincode::deserialize(&value)
+                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            all_records.push(record);
+        }
+
+        // Sort by slashed_at descending
+        all_records.sort_by(|a, b| b.slashed_at.cmp(&a.slashed_at));
+        all_records.truncate(limit);
+
+        Ok(all_records)
+    }
+}
+
+// ============================================================================
+// Validator Set Storage
+// ============================================================================
+
+use sumchain_primitives::ValidatorSet;
+
+/// Validator set storage operations (for epoch-based validator management)
+pub struct ValidatorSetStore<'a> {
+    db: &'a Database,
+}
+
+impl<'a> ValidatorSetStore<'a> {
+    pub fn new(db: &'a Database) -> Self {
+        Self { db }
+    }
+
+    /// Store a validator set for an epoch
+    pub fn put_validator_set(&self, validator_set: &ValidatorSet) -> Result<()> {
+        let key = validator_set.epoch.to_be_bytes();
+        let bytes = bincode::serialize(validator_set)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        self.db.put(cf::VALIDATOR_SETS, &key, &bytes)
+    }
+
+    /// Get the validator set for a specific epoch
+    pub fn get_validator_set(&self, epoch: u64) -> Result<Option<ValidatorSet>> {
+        let key = epoch.to_be_bytes();
+        match self.db.get(cf::VALIDATOR_SETS, &key)? {
+            Some(bytes) => {
+                let set: ValidatorSet = bincode::deserialize(&bytes)
+                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                Ok(Some(set))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Get the current (latest) validator set
+    pub fn get_current_validator_set(&self) -> Result<Option<ValidatorSet>> {
+        let mut latest: Option<ValidatorSet> = None;
+
+        for (_, value) in self.db.iter(cf::VALIDATOR_SETS)? {
+            let set: ValidatorSet = bincode::deserialize(&value)
+                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            if latest.is_none() || set.epoch > latest.as_ref().unwrap().epoch {
+                latest = Some(set);
+            }
+        }
+
+        Ok(latest)
+    }
+
+    /// Get the validator set for a given block height
+    pub fn get_validator_set_for_height(
+        &self,
+        height: BlockHeight,
+        epoch_length: BlockHeight,
+    ) -> Result<Option<ValidatorSet>> {
+        if epoch_length == 0 {
+            return self.get_current_validator_set();
+        }
+        let epoch = height / epoch_length;
+        self.get_validator_set(epoch)
+    }
+
+    /// Delete a validator set (for pruning old epochs)
+    pub fn delete_validator_set(&self, epoch: u64) -> Result<()> {
+        let key = epoch.to_be_bytes();
+        self.db.delete(cf::VALIDATOR_SETS, &key)
+    }
+
+    /// Get all validator sets
+    pub fn get_all_validator_sets(&self) -> Result<Vec<ValidatorSet>> {
+        let mut sets = Vec::new();
+
+        for (_, value) in self.db.iter(cf::VALIDATOR_SETS)? {
+            let set: ValidatorSet = bincode::deserialize(&value)
+                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            sets.push(set);
+        }
+
+        // Sort by epoch ascending
+        sets.sort_by(|a, b| a.epoch.cmp(&b.epoch));
+
+        Ok(sets)
+    }
+
+    /// Prune old validator sets, keeping only the latest N epochs
+    pub fn prune_old_sets(&self, keep_epochs: u64) -> Result<u64> {
+        let sets = self.get_all_validator_sets()?;
+        if sets.len() <= keep_epochs as usize {
+            return Ok(0);
+        }
+
+        let mut pruned = 0;
+        let cutoff = sets.len() - keep_epochs as usize;
+        for set in sets.iter().take(cutoff) {
+            self.delete_validator_set(set.epoch)?;
+            pruned += 1;
+        }
+
+        Ok(pruned)
     }
 }
 

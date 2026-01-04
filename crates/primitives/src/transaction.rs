@@ -9,6 +9,7 @@
 use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
 
+use crate::staking::StakingTxData;
 use crate::{Address, Balance, ChainId, Hash, Nonce};
 
 /// Transaction type identifier
@@ -25,6 +26,8 @@ pub enum TxType {
     ContractDeploy = 3,
     /// Smart contract call
     ContractCall = 4,
+    /// Staking operation
+    Staking = 5,
 }
 
 impl TxType {
@@ -36,6 +39,7 @@ impl TxType {
             2 => Some(TxType::Token),
             3 => Some(TxType::ContractDeploy),
             4 => Some(TxType::ContractCall),
+            5 => Some(TxType::Staking),
             _ => None,
         }
     }
@@ -276,7 +280,7 @@ pub struct TransactionV2 {
     pub payload: TxPayload,
 }
 
-/// Transaction payload - transfer, NFT, Token, or Contract operation
+/// Transaction payload - transfer, NFT, Token, Contract, or Staking operation
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TxPayload {
     /// Native token transfer
@@ -294,6 +298,8 @@ pub enum TxPayload {
     ContractDeploy(ContractDeployData),
     /// Smart contract call
     ContractCall(ContractCallData),
+    /// Staking operation
+    Staking(StakingTxData),
 }
 
 impl TransactionV2 {
@@ -383,6 +389,23 @@ impl TransactionV2 {
         }
     }
 
+    /// Create a new staking transaction
+    pub fn staking(
+        chain_id: ChainId,
+        from: Address,
+        fee: Balance,
+        nonce: Nonce,
+        staking_data: StakingTxData,
+    ) -> Self {
+        Self {
+            chain_id,
+            from,
+            fee,
+            nonce,
+            payload: TxPayload::Staking(staking_data),
+        }
+    }
+
     /// Get the transaction type
     pub fn tx_type(&self) -> TxType {
         match &self.payload {
@@ -391,6 +414,7 @@ impl TransactionV2 {
             TxPayload::Token(_) => TxType::Token,
             TxPayload::ContractDeploy(_) => TxType::ContractDeploy,
             TxPayload::ContractCall(_) => TxType::ContractCall,
+            TxPayload::Staking(_) => TxType::Staking,
         }
     }
 
@@ -418,6 +442,7 @@ impl TransactionV2 {
             TxPayload::Nft(_) => None,
             TxPayload::Token(_) => None,
             TxPayload::ContractDeploy(_) => None,
+            TxPayload::Staking(_) => None,
         }
     }
 
@@ -429,6 +454,7 @@ impl TransactionV2 {
             TxPayload::ContractCall(data) => data.value,
             TxPayload::Nft(_) => 0,
             TxPayload::Token(_) => 0,
+            TxPayload::Staking(_) => 0,
         }
     }
 
@@ -477,6 +503,19 @@ impl TransactionV2 {
             TxPayload::Token(data) => Some(data),
             _ => None,
         }
+    }
+
+    /// Get staking data if this is a Staking transaction
+    pub fn staking_data(&self) -> Option<&StakingTxData> {
+        match &self.payload {
+            TxPayload::Staking(data) => Some(data),
+            _ => None,
+        }
+    }
+
+    /// Check if this is a staking transaction
+    pub fn is_staking(&self) -> bool {
+        matches!(self.payload, TxPayload::Staking(_))
     }
 }
 
@@ -603,6 +642,22 @@ impl SignedTransaction {
             },
             _ => None,
         }
+    }
+
+    /// Get Staking data if this is a Staking transaction
+    pub fn staking_data(&self) -> Option<&StakingTxData> {
+        match &self.inner {
+            TxInner::V2(tx) => match &tx.payload {
+                TxPayload::Staking(data) => Some(data),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Check if this is a Staking transaction
+    pub fn is_staking(&self) -> bool {
+        self.tx_type() == TxType::Staking
     }
 
     /// Compute the transaction hash (unique identifier)

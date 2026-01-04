@@ -9,7 +9,7 @@ use std::fs;
 use std::path::Path;
 
 use sumchain_crypto::PublicKey;
-use sumchain_primitives::{Address, Balance, Block, ChainId, Hash, Timestamp};
+use sumchain_primitives::{Address, Balance, Block, ChainId, Hash, StakingParams, Timestamp};
 use thiserror::Error;
 
 /// Genesis configuration errors
@@ -63,6 +63,9 @@ pub struct ChainParams {
     /// Maximum gas limit for contract transactions
     #[serde(default = "default_max_contract_gas")]
     pub max_contract_gas: u64,
+    /// Staking parameters (optional - uses defaults if not specified)
+    #[serde(default)]
+    pub staking: Option<StakingParams>,
 }
 
 fn default_finality_depth() -> u64 {
@@ -97,6 +100,7 @@ impl Default for ChainParams {
             max_metadata_bytes: default_max_metadata_bytes(),
             min_contract_gas: default_min_contract_gas(),
             max_contract_gas: default_max_contract_gas(),
+            staking: Some(StakingParams::default()),
         }
     }
 }

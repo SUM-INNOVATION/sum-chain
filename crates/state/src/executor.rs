@@ -16,6 +16,7 @@ use tracing::{debug, info, warn};
 
 use crate::contract_executor::ContractExecutorState;
 use crate::nft_executor::NftExecutor;
+use crate::staking_executor::StakingExecutor;
 use crate::token_executor::TokenExecutor;
 use crate::{Result, StateError, StateManager};
 
@@ -35,6 +36,7 @@ pub struct BlockExecutor {
     nft_executor: NftExecutor,
     token_executor: TokenExecutor,
     contract_executor: ContractExecutorState,
+    staking_executor: StakingExecutor,
 }
 
 impl BlockExecutor {
@@ -43,6 +45,7 @@ impl BlockExecutor {
         let nft_executor = NftExecutor::new(db.clone(), params.clone());
         let token_executor = TokenExecutor::new(db.clone(), params.clone());
         let contract_executor = ContractExecutorState::new(db.clone(), params.clone());
+        let staking_executor = StakingExecutor::new(db.clone(), params.clone());
         Self {
             state,
             db,
@@ -50,6 +53,7 @@ impl BlockExecutor {
             nft_executor,
             token_executor,
             contract_executor,
+            staking_executor,
         }
     }
 
@@ -324,6 +328,43 @@ impl BlockExecutor {
                             Ok(TxExecutionResult {
                                 tx_hash,
                                 status: TxStatus::Failed(5), // Contract call failed
+                                fee_paid: 0,
+                            })
+                        }
+                    }
+                    TxPayload::Staking(staking_data) => {
+                        // Execute staking operation
+                        let result = self.staking_executor.execute(
+                            &v2_tx.from,
+                            &staking_data,
+                            &self.state,
+                            proposer,
+                            v2_tx.fee,
+                            0, // block_height placeholder
+                        )?;
+
+                        if result.success {
+                            debug!(
+                                "V2 Staking {} executed: {:?}",
+                                tx_hash,
+                                staking_data.operation
+                            );
+
+                            Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Success,
+                                fee_paid: v2_tx.fee,
+                            })
+                        } else {
+                            warn!(
+                                "V2 Staking {} failed: {}",
+                                tx_hash,
+                                result.error.as_deref().unwrap_or("Unknown error")
+                            );
+
+                            Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Failed(6), // Staking operation failed
                                 fee_paid: 0,
                             })
                         }
@@ -603,6 +644,53 @@ impl BlockExecutor {
                     Ok(TxExecutionResult {
                         tx_hash,
                         status: TxStatus::Failed(5), // Contract call failed
+                        fee_paid: 0,
+                    })
+                }
+            }
+            TxPayload::Staking(staking_data) => {
+                // Check balance for fee
+                let balance = self.state.get_balance(&tx.from)?;
+                if balance < tx.fee {
+                    return Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::InsufficientBalance,
+                        fee_paid: 0,
+                    });
+                }
+
+                // Execute staking operation
+                let result = self.staking_executor.execute(
+                    &tx.from,
+                    staking_data,
+                    &self.state,
+                    proposer,
+                    tx.fee,
+                    0, // block_height placeholder
+                )?;
+
+                if result.success {
+                    debug!(
+                        "V2 Staking {} executed: {:?}",
+                        tx_hash,
+                        staking_data.operation
+                    );
+
+                    Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::Success,
+                        fee_paid: tx.fee,
+                    })
+                } else {
+                    warn!(
+                        "V2 Staking {} failed: {}",
+                        tx_hash,
+                        result.error.as_deref().unwrap_or("Unknown error")
+                    );
+
+                    Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::Failed(6), // Staking operation failed
                         fee_paid: 0,
                     })
                 }

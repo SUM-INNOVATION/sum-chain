@@ -8,7 +8,7 @@ use jsonrpsee::server::{Server, ServerHandle};
 use sumchain_consensus::ConsensusEngine;
 use sumchain_primitives::{Address, Block, Hash, SignedTransaction};
 use sumchain_state::{Mempool, StateManager};
-use sumchain_storage::{BlockStore, Database, NftStore, ReceiptStore, TokenStore, TxStore};
+use sumchain_storage::{BlockStore, Database, DelegationStore, NftStore, ReceiptStore, SlashingStore, StakingStore, TokenStore, TxStore, ValidatorSetStore};
 use tokio::sync::mpsc;
 use tracing::info;
 
@@ -384,6 +384,36 @@ impl RpcServer {
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&bytes);
         Ok(arr)
+    }
+
+    /// Parse public key from hex string
+    fn parse_pubkey(&self, s: &str) -> Result<[u8; 32]> {
+        let s = s.strip_prefix("0x").unwrap_or(s);
+        let bytes = hex::decode(s)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid public key: {}", e)))?;
+        if bytes.len() != 32 {
+            return Err(RpcError::InvalidParams(format!(
+                "Invalid public key length: expected 32, got {}",
+                bytes.len()
+            )));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Ok(arr)
+    }
+
+    /// Convert Address (20 bytes) to delegator key format (32 bytes, padded with zeros)
+    fn address_to_delegator_key(&self, addr: &Address) -> [u8; 32] {
+        let mut key = [0u8; 32];
+        key[..20].copy_from_slice(addr.as_bytes());
+        key
+    }
+
+    /// Convert delegator key (32 bytes) back to Address (first 20 bytes)
+    fn delegator_key_to_address(&self, key: &[u8; 32]) -> Address {
+        let mut arr = [0u8; 20];
+        arr.copy_from_slice(&key[..20]);
+        Address::new(arr)
     }
 }
 
@@ -1239,6 +1269,677 @@ impl SumChainApiServer for RpcServer {
             .map_err(|e| RpcError::Internal(e.to_string()))?;
 
         Ok(balance.to_string())
+    }
+
+    // ========================================================================
+    // Staking Endpoints
+    // ========================================================================
+
+    async fn staking_get_validator(
+        &self,
+        pubkey: String,
+    ) -> std::result::Result<Option<StakingValidatorInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let pubkey_bytes = self.parse_pubkey(&pubkey)?;
+        let staking_store = StakingStore::new(&self.db);
+
+        match staking_store.get_validator(&pubkey_bytes) {
+            Ok(Some(validator)) => {
+                let address = Address::from_public_key(&validator.pubkey);
+                Ok(Some(StakingValidatorInfo {
+                    pubkey: format!("0x{}", hex::encode(validator.pubkey)),
+                    address: address.to_base58(),
+                    stake: validator.stake.to_string(),
+                    commission_bps: validator.commission_bps,
+                    status: format!("{:?}", validator.status),
+                    joined_at: validator.joined_at,
+                    jailed_until: validator.jailed_until,
+                    slash_count: validator.slash_count,
+                    pending_rewards: validator.pending_rewards.to_string(),
+                    metadata: if validator.metadata.is_empty() {
+                        None
+                    } else {
+                        String::from_utf8(validator.metadata).ok()
+                    },
+                }))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(RpcError::Internal(e.to_string()).into()),
+        }
+    }
+
+    async fn staking_get_validators(
+        &self,
+    ) -> std::result::Result<Vec<StakingValidatorInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let staking_store = StakingStore::new(&self.db);
+
+        let validators = staking_store
+            .get_all_validators()
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        Ok(validators
+            .into_iter()
+            .map(|v| {
+                let address = Address::from_public_key(&v.pubkey);
+                StakingValidatorInfo {
+                    pubkey: format!("0x{}", hex::encode(v.pubkey)),
+                    address: address.to_base58(),
+                    stake: v.stake.to_string(),
+                    commission_bps: v.commission_bps,
+                    status: format!("{:?}", v.status),
+                    joined_at: v.joined_at,
+                    jailed_until: v.jailed_until,
+                    slash_count: v.slash_count,
+                    pending_rewards: v.pending_rewards.to_string(),
+                    metadata: if v.metadata.is_empty() {
+                        None
+                    } else {
+                        String::from_utf8(v.metadata).ok()
+                    },
+                }
+            })
+            .collect())
+    }
+
+    async fn staking_get_active_validators(
+        &self,
+    ) -> std::result::Result<Vec<StakingValidatorInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let staking_store = StakingStore::new(&self.db);
+
+        let validators = staking_store
+            .get_active_validators()
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        Ok(validators
+            .into_iter()
+            .map(|v| {
+                let address = Address::from_public_key(&v.pubkey);
+                StakingValidatorInfo {
+                    pubkey: format!("0x{}", hex::encode(v.pubkey)),
+                    address: address.to_base58(),
+                    stake: v.stake.to_string(),
+                    commission_bps: v.commission_bps,
+                    status: format!("{:?}", v.status),
+                    joined_at: v.joined_at,
+                    jailed_until: v.jailed_until,
+                    slash_count: v.slash_count,
+                    pending_rewards: v.pending_rewards.to_string(),
+                    metadata: if v.metadata.is_empty() {
+                        None
+                    } else {
+                        String::from_utf8(v.metadata).ok()
+                    },
+                }
+            })
+            .collect())
+    }
+
+    async fn staking_get_summary(
+        &self,
+    ) -> std::result::Result<StakingSummary, jsonrpsee::types::ErrorObjectOwned> {
+        let staking_store = StakingStore::new(&self.db);
+
+        let all_validators = staking_store
+            .get_all_validators()
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        let active_validators = staking_store
+            .get_active_validators()
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        let total_stake = staking_store
+            .get_total_stake()
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        // Get staking params from consensus/genesis
+        let min_stake = 1_000_000_000_000_000_000u128; // Default 1000 Koppa
+        let max_validators = 100u32;
+        let unbonding_period = 100_800u64;
+
+        Ok(StakingSummary {
+            total_validators: all_validators.len(),
+            active_validators: active_validators.len(),
+            total_stake: total_stake.to_string(),
+            min_validator_stake: min_stake.to_string(),
+            max_validators,
+            unbonding_period,
+        })
+    }
+
+    async fn staking_get_params(
+        &self,
+    ) -> std::result::Result<StakingParamsInfo, jsonrpsee::types::ErrorObjectOwned> {
+        // These are the default staking params - in production would come from genesis
+        Ok(StakingParamsInfo {
+            min_validator_stake: "1000000000000000000".to_string(), // 1000 Koppa
+            max_validators: 100,
+            unbonding_period: 100_800, // ~7 days
+            max_commission_bps: 10000, // 100%
+            double_sign_slash_bps: 500, // 5%
+            downtime_slash_bps: 10, // 0.1%
+            double_sign_jail_duration: 14400, // ~24 hours
+            downtime_jail_duration: 2400, // ~4 hours
+            downtime_threshold: 500,
+        })
+    }
+
+    async fn staking_get_total_stake(
+        &self,
+    ) -> std::result::Result<String, jsonrpsee::types::ErrorObjectOwned> {
+        let staking_store = StakingStore::new(&self.db);
+
+        let total_stake = staking_store
+            .get_total_stake()
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        Ok(total_stake.to_string())
+    }
+
+    async fn staking_get_validator_by_address(
+        &self,
+        address: String,
+    ) -> std::result::Result<Option<StakingValidatorInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let addr = self.parse_address(&address)?;
+        let staking_store = StakingStore::new(&self.db);
+
+        // Get all validators and find by address
+        let validators = staking_store
+            .get_all_validators()
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        for v in validators {
+            let validator_address = Address::from_public_key(&v.pubkey);
+            if validator_address == addr {
+                return Ok(Some(StakingValidatorInfo {
+                    pubkey: format!("0x{}", hex::encode(v.pubkey)),
+                    address: validator_address.to_base58(),
+                    stake: v.stake.to_string(),
+                    commission_bps: v.commission_bps,
+                    status: format!("{:?}", v.status),
+                    joined_at: v.joined_at,
+                    jailed_until: v.jailed_until,
+                    slash_count: v.slash_count,
+                    pending_rewards: v.pending_rewards.to_string(),
+                    metadata: if v.metadata.is_empty() {
+                        None
+                    } else {
+                        String::from_utf8(v.metadata).ok()
+                    },
+                }));
+            }
+        }
+
+        Ok(None)
+    }
+
+    // ========================================================================
+    // Delegation Endpoints
+    // ========================================================================
+
+    async fn delegation_get_delegation(
+        &self,
+        delegator: String,
+        validator_pubkey: String,
+    ) -> std::result::Result<Option<DelegationRpcInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let delegator_addr = self.parse_address(&delegator)?;
+        let delegator_key = self.address_to_delegator_key(&delegator_addr);
+        let validator_bytes = self.parse_pubkey(&validator_pubkey)?;
+        let delegation_store = DelegationStore::new(&self.db);
+
+        match delegation_store.get_delegation(&delegator_key, &validator_bytes) {
+            Ok(Some(delegation)) => {
+                let validator_address = Address::from_public_key(&delegation.validator_pubkey);
+                Ok(Some(DelegationRpcInfo {
+                    delegator: delegator_addr.to_base58(),
+                    validator_address: validator_address.to_base58(),
+                    validator_pubkey: format!("0x{}", hex::encode(delegation.validator_pubkey)),
+                    amount: delegation.amount.to_string(),
+                    pending_rewards: delegation.pending_rewards.to_string(),
+                    delegated_at: delegation.delegated_at,
+                }))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(RpcError::Internal(e.to_string()).into()),
+        }
+    }
+
+    async fn delegation_get_delegations_by_delegator(
+        &self,
+        delegator: String,
+    ) -> std::result::Result<Vec<DelegationRpcInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let delegator_addr = self.parse_address(&delegator)?;
+        let delegator_key = self.address_to_delegator_key(&delegator_addr);
+        let delegation_store = DelegationStore::new(&self.db);
+
+        let delegations = delegation_store
+            .get_delegations_by_delegator(&delegator_key)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        Ok(delegations
+            .into_iter()
+            .map(|d| {
+                let validator_address = Address::from_public_key(&d.validator_pubkey);
+                let del_addr = self.delegator_key_to_address(&d.delegator);
+                DelegationRpcInfo {
+                    delegator: del_addr.to_base58(),
+                    validator_address: validator_address.to_base58(),
+                    validator_pubkey: format!("0x{}", hex::encode(d.validator_pubkey)),
+                    amount: d.amount.to_string(),
+                    pending_rewards: d.pending_rewards.to_string(),
+                    delegated_at: d.delegated_at,
+                }
+            })
+            .collect())
+    }
+
+    async fn delegation_get_delegations_by_validator(
+        &self,
+        validator_pubkey: String,
+    ) -> std::result::Result<Vec<DelegationRpcInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let validator_bytes = self.parse_pubkey(&validator_pubkey)?;
+        let delegation_store = DelegationStore::new(&self.db);
+
+        let delegations = delegation_store
+            .get_delegations_by_validator(&validator_bytes)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        let validator_address = Address::from_public_key(&validator_bytes);
+
+        Ok(delegations
+            .into_iter()
+            .map(|d| {
+                let del_addr = self.delegator_key_to_address(&d.delegator);
+                DelegationRpcInfo {
+                    delegator: del_addr.to_base58(),
+                    validator_address: validator_address.to_base58(),
+                    validator_pubkey: format!("0x{}", hex::encode(d.validator_pubkey)),
+                    amount: d.amount.to_string(),
+                    pending_rewards: d.pending_rewards.to_string(),
+                    delegated_at: d.delegated_at,
+                }
+            })
+            .collect())
+    }
+
+    async fn delegation_get_delegator_summary(
+        &self,
+        delegator: String,
+    ) -> std::result::Result<DelegatorSummary, jsonrpsee::types::ErrorObjectOwned> {
+        let delegator_addr = self.parse_address(&delegator)?;
+        let delegator_key = self.address_to_delegator_key(&delegator_addr);
+        let delegation_store = DelegationStore::new(&self.db);
+
+        let delegations = delegation_store
+            .get_delegations_by_delegator(&delegator_key)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        let unbondings = delegation_store
+            .get_unbondings_by_delegator(&delegator_key)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        let total_delegated: u128 = delegations.iter().map(|d| d.amount).sum();
+        let total_pending_rewards: u128 = delegations.iter().map(|d| d.pending_rewards).sum();
+        let total_unbonding: u128 = unbondings.iter().map(|u| u.amount).sum();
+
+        Ok(DelegatorSummary {
+            delegator: delegator_addr.to_base58(),
+            total_delegated: total_delegated.to_string(),
+            total_pending_rewards: total_pending_rewards.to_string(),
+            total_unbonding: total_unbonding.to_string(),
+            delegation_count: delegations.len(),
+            unbonding_count: unbondings.len(),
+        })
+    }
+
+    async fn delegation_get_unbonding_delegations(
+        &self,
+        delegator: String,
+    ) -> std::result::Result<Vec<UnbondingDelegationRpcInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let delegator_addr = self.parse_address(&delegator)?;
+        let delegator_key = self.address_to_delegator_key(&delegator_addr);
+        let delegation_store = DelegationStore::new(&self.db);
+        let current_height = self.consensus.current_height();
+
+        let unbondings = delegation_store
+            .get_unbondings_by_delegator(&delegator_key)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        Ok(unbondings
+            .into_iter()
+            .map(|u| {
+                let validator_address = Address::from_public_key(&u.validator_pubkey);
+                let del_addr = self.delegator_key_to_address(&u.delegator);
+                UnbondingDelegationRpcInfo {
+                    delegator: del_addr.to_base58(),
+                    validator_address: validator_address.to_base58(),
+                    validator_pubkey: format!("0x{}", hex::encode(u.validator_pubkey)),
+                    amount: u.amount.to_string(),
+                    completion_height: u.completion_height,
+                    is_complete: current_height >= u.completion_height,
+                }
+            })
+            .collect())
+    }
+
+    async fn delegation_get_validator_delegation_summary(
+        &self,
+        validator_pubkey: String,
+    ) -> std::result::Result<ValidatorDelegationSummary, jsonrpsee::types::ErrorObjectOwned> {
+        let validator_bytes = self.parse_pubkey(&validator_pubkey)?;
+        let delegation_store = DelegationStore::new(&self.db);
+
+        let delegations = delegation_store
+            .get_delegations_by_validator(&validator_bytes)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        let total_delegated: u128 = delegations.iter().map(|d| d.amount).sum();
+        let validator_address = Address::from_public_key(&validator_bytes);
+
+        Ok(ValidatorDelegationSummary {
+            validator_pubkey: format!("0x{}", hex::encode(validator_bytes)),
+            validator_address: validator_address.to_base58(),
+            total_delegated: total_delegated.to_string(),
+            delegator_count: delegations.len(),
+        })
+    }
+
+    // ========================================================================
+    // Slashing Endpoints
+    // ========================================================================
+
+    async fn slashing_get_records(
+        &self,
+        validator_pubkey: String,
+    ) -> std::result::Result<Vec<SlashingRecordRpcInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let pubkey_bytes = self.parse_pubkey(&validator_pubkey)?;
+        let slashing_store = SlashingStore::new(&self.db);
+
+        let records = slashing_store
+            .get_slashing_records(&pubkey_bytes)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        let validator_address = Address::from_public_key(&pubkey_bytes);
+
+        Ok(records
+            .into_iter()
+            .map(|r| SlashingRecordRpcInfo {
+                validator_pubkey: format!("0x{}", hex::encode(r.validator_pubkey)),
+                validator_address: validator_address.to_base58(),
+                evidence_type: format!("{:?}", r.evidence_type),
+                slashed_at: r.slashed_at,
+                validator_slash_amount: r.validator_slash_amount.to_string(),
+                delegation_slash_amount: r.delegation_slash_amount.to_string(),
+                jailed_until: r.jailed_until,
+                tombstoned: r.tombstoned,
+                slash_fraction_bps: r.slash_fraction_bps,
+            })
+            .collect())
+    }
+
+    async fn slashing_get_signing_info(
+        &self,
+        validator_pubkey: String,
+    ) -> std::result::Result<Option<ValidatorSigningRpcInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let pubkey_bytes = self.parse_pubkey(&validator_pubkey)?;
+        let slashing_store = SlashingStore::new(&self.db);
+
+        match slashing_store.get_signing_info(&pubkey_bytes) {
+            Ok(Some(info)) => {
+                let validator_address = Address::from_public_key(&pubkey_bytes);
+                Ok(Some(ValidatorSigningRpcInfo {
+                    validator_pubkey: format!("0x{}", hex::encode(info.validator_pubkey)),
+                    validator_address: validator_address.to_base58(),
+                    start_height: info.start_height,
+                    index_offset: info.index_offset,
+                    missed_blocks_counter: info.missed_blocks_counter,
+                    tombstoned: info.tombstoned,
+                    jailed_until: info.jailed_until,
+                }))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(RpcError::Internal(e.to_string()).into()),
+        }
+    }
+
+    async fn slashing_get_all_signing_info(
+        &self,
+    ) -> std::result::Result<Vec<ValidatorSigningRpcInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let slashing_store = SlashingStore::new(&self.db);
+
+        let all_info = slashing_store
+            .get_all_signing_info()
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        Ok(all_info
+            .into_iter()
+            .map(|info| {
+                let validator_address = Address::from_public_key(&info.validator_pubkey);
+                ValidatorSigningRpcInfo {
+                    validator_pubkey: format!("0x{}", hex::encode(info.validator_pubkey)),
+                    validator_address: validator_address.to_base58(),
+                    start_height: info.start_height,
+                    index_offset: info.index_offset,
+                    missed_blocks_counter: info.missed_blocks_counter,
+                    tombstoned: info.tombstoned,
+                    jailed_until: info.jailed_until,
+                }
+            })
+            .collect())
+    }
+
+    async fn slashing_get_summary(
+        &self,
+    ) -> std::result::Result<SlashingSummary, jsonrpsee::types::ErrorObjectOwned> {
+        let slashing_store = SlashingStore::new(&self.db);
+        let staking_store = StakingStore::new(&self.db);
+
+        // Get all slashing records
+        let recent_records = slashing_store
+            .get_recent_slashing_records(1000) // Get up to 1000 records for summary
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        let total_slashing_events = recent_records.len();
+        let mut total_validator_slashed: u128 = 0;
+        let mut total_delegation_slashed: u128 = 0;
+
+        for record in &recent_records {
+            total_validator_slashed += record.validator_slash_amount;
+            total_delegation_slashed += record.delegation_slash_amount;
+        }
+
+        // Count tombstoned and jailed validators
+        let all_signing_info = slashing_store
+            .get_all_signing_info()
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        let tombstoned_count = all_signing_info.iter().filter(|info| info.tombstoned).count();
+
+        // Get jailed count from validators
+        let all_validators = staking_store
+            .get_all_validators()
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        let current_height = self.consensus.current_height();
+        let jailed_count = all_validators
+            .iter()
+            .filter(|v| v.jailed_until > current_height)
+            .count();
+
+        Ok(SlashingSummary {
+            total_slashing_events,
+            total_validator_slashed: total_validator_slashed.to_string(),
+            total_delegation_slashed: total_delegation_slashed.to_string(),
+            tombstoned_count,
+            jailed_count,
+        })
+    }
+
+    async fn slashing_is_tombstoned(
+        &self,
+        validator_pubkey: String,
+    ) -> std::result::Result<bool, jsonrpsee::types::ErrorObjectOwned> {
+        let pubkey_bytes = self.parse_pubkey(&validator_pubkey)?;
+        let slashing_store = SlashingStore::new(&self.db);
+
+        let is_tombstoned = slashing_store
+            .is_tombstoned(&pubkey_bytes)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        Ok(is_tombstoned)
+    }
+
+    async fn slashing_get_recent_records(
+        &self,
+        limit: u32,
+    ) -> std::result::Result<Vec<SlashingRecordRpcInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let slashing_store = SlashingStore::new(&self.db);
+
+        let records = slashing_store
+            .get_recent_slashing_records(limit as usize)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        Ok(records
+            .into_iter()
+            .map(|r| {
+                let validator_address = Address::from_public_key(&r.validator_pubkey);
+                SlashingRecordRpcInfo {
+                    validator_pubkey: format!("0x{}", hex::encode(r.validator_pubkey)),
+                    validator_address: validator_address.to_base58(),
+                    evidence_type: format!("{:?}", r.evidence_type),
+                    slashed_at: r.slashed_at,
+                    validator_slash_amount: r.validator_slash_amount.to_string(),
+                    delegation_slash_amount: r.delegation_slash_amount.to_string(),
+                    jailed_until: r.jailed_until,
+                    tombstoned: r.tombstoned,
+                    slash_fraction_bps: r.slash_fraction_bps,
+                }
+            })
+            .collect())
+    }
+
+    // ========================================================================
+    // Epoch & Validator Set Endpoints
+    // ========================================================================
+
+    async fn epoch_get_info(
+        &self,
+    ) -> std::result::Result<EpochInfo, jsonrpsee::types::ErrorObjectOwned> {
+        let current_height = self.consensus.current_height();
+
+        // Get staking params - use defaults for now
+        // In production, this would come from genesis/state
+        let epoch_length: u64 = 14400; // ~24 hours at 6s blocks
+        let stake_weighted_selection = true;
+
+        let current_epoch = current_height / epoch_length;
+        let epoch_start_height = current_epoch * epoch_length;
+        let epoch_end_height = epoch_start_height + epoch_length - 1;
+        let blocks_remaining = if current_height <= epoch_end_height {
+            epoch_end_height - current_height
+        } else {
+            0
+        };
+
+        Ok(EpochInfo {
+            current_epoch,
+            current_height,
+            epoch_length,
+            epoch_start_height,
+            epoch_end_height,
+            blocks_remaining,
+            stake_weighted_selection,
+        })
+    }
+
+    async fn validator_set_get_current(
+        &self,
+    ) -> std::result::Result<Option<ValidatorSetRpcInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let validator_set_store = ValidatorSetStore::new(&self.db);
+
+        match validator_set_store.get_current_validator_set() {
+            Ok(Some(set)) => {
+                let total_vp = set.total_voting_power;
+                let validators: Vec<ValidatorSetEntryRpcInfo> = set
+                    .validators
+                    .iter()
+                    .map(|v| {
+                        let address = Address::from_public_key(&v.pubkey);
+                        let power_pct_bps = if total_vp > 0 {
+                            ((v.voting_power as u128 * 10000) / total_vp) as u16
+                        } else {
+                            0
+                        };
+                        ValidatorSetEntryRpcInfo {
+                            pubkey: format!("0x{}", hex::encode(v.pubkey)),
+                            address: address.to_base58(),
+                            voting_power: v.voting_power.to_string(),
+                            commission_bps: v.commission_bps,
+                            power_percentage_bps: power_pct_bps,
+                        }
+                    })
+                    .collect();
+
+                Ok(Some(ValidatorSetRpcInfo {
+                    epoch: set.epoch,
+                    active_from: set.active_from,
+                    validators,
+                    total_voting_power: total_vp.to_string(),
+                    proposer_seed: format!("0x{}", hex::encode(set.proposer_seed)),
+                }))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(RpcError::Internal(e.to_string()).into()),
+        }
+    }
+
+    async fn validator_set_get_by_epoch(
+        &self,
+        epoch: u64,
+    ) -> std::result::Result<Option<ValidatorSetRpcInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let validator_set_store = ValidatorSetStore::new(&self.db);
+
+        match validator_set_store.get_validator_set(epoch) {
+            Ok(Some(set)) => {
+                let total_vp = set.total_voting_power;
+                let validators: Vec<ValidatorSetEntryRpcInfo> = set
+                    .validators
+                    .iter()
+                    .map(|v| {
+                        let address = Address::from_public_key(&v.pubkey);
+                        let power_pct_bps = if total_vp > 0 {
+                            ((v.voting_power as u128 * 10000) / total_vp) as u16
+                        } else {
+                            0
+                        };
+                        ValidatorSetEntryRpcInfo {
+                            pubkey: format!("0x{}", hex::encode(v.pubkey)),
+                            address: address.to_base58(),
+                            voting_power: v.voting_power.to_string(),
+                            commission_bps: v.commission_bps,
+                            power_percentage_bps: power_pct_bps,
+                        }
+                    })
+                    .collect();
+
+                Ok(Some(ValidatorSetRpcInfo {
+                    epoch: set.epoch,
+                    active_from: set.active_from,
+                    validators,
+                    total_voting_power: total_vp.to_string(),
+                    proposer_seed: format!("0x{}", hex::encode(set.proposer_seed)),
+                }))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(RpcError::Internal(e.to_string()).into()),
+        }
+    }
+
+    async fn validator_set_get_proposer(
+        &self,
+        height: u64,
+    ) -> std::result::Result<String, jsonrpsee::types::ErrorObjectOwned> {
+        let proposer = self.consensus.get_proposer(height);
+        let address = Address::from_public_key(&proposer);
+        Ok(address.to_base58())
     }
 }
 

@@ -72,6 +72,7 @@ fn main() -> Result<()> {
             max_metadata_bytes: 16384, // 16 KB max metadata
             min_contract_gas: 21000, // Minimum gas for contract transactions
             max_contract_gas: 10_000_000, // Maximum gas limit per transaction
+            staking: None, // Use default staking params
         },
     );
 

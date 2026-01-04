@@ -73,6 +73,22 @@ pub mod cf {
     pub const TOKEN_ALLOWANCES: &str = "token_allowances";
     /// SRC-20 token holder index (owner -> token_id list)
     pub const TOKEN_HOLDER_INDEX: &str = "token_holder_index";
+    /// Validator staking info (pubkey -> ValidatorInfo)
+    pub const VALIDATORS: &str = "validators";
+    /// Delegations (delegator + validator_pubkey -> DelegationInfo)
+    pub const DELEGATIONS: &str = "delegations";
+    /// Unbonding delegations (delegator + completion_height + validator_pubkey -> UnbondingDelegation)
+    pub const UNBONDING_DELEGATIONS: &str = "unbonding_delegations";
+    /// Delegation index by validator (validator_pubkey -> list of delegator addresses)
+    pub const DELEGATION_VALIDATOR_INDEX: &str = "delegation_validator_index";
+    /// Slashing records (validator_pubkey + slashed_at -> SlashingRecord)
+    pub const SLASHING_RECORDS: &str = "slashing_records";
+    /// Validator signing info for liveness tracking (validator_pubkey -> ValidatorSigningInfo)
+    pub const VALIDATOR_SIGNING_INFO: &str = "validator_signing_info";
+    /// Missed blocks bitmap per validator (validator_pubkey -> bitmap)
+    pub const MISSED_BLOCKS: &str = "missed_blocks";
+    /// Validator sets by epoch (epoch -> ValidatorSet)
+    pub const VALIDATOR_SETS: &str = "validator_sets";
 }
 
 /// All column families used by the database
@@ -93,6 +109,14 @@ pub const ALL_CFS: &[&str] = &[
     cf::TOKEN_BALANCES,
     cf::TOKEN_ALLOWANCES,
     cf::TOKEN_HOLDER_INDEX,
+    cf::VALIDATORS,
+    cf::DELEGATIONS,
+    cf::UNBONDING_DELEGATIONS,
+    cf::DELEGATION_VALIDATOR_INDEX,
+    cf::SLASHING_RECORDS,
+    cf::VALIDATOR_SIGNING_INFO,
+    cf::MISSED_BLOCKS,
+    cf::VALIDATOR_SETS,
 ];
 
 /// Database configuration

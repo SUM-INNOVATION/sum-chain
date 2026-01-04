@@ -408,6 +408,127 @@ enum Commands {
         #[arg(long)]
         address: String,
     },
+
+    // ========================================================================
+    // Staking Commands
+    // ========================================================================
+
+    /// Get staking validators list
+    StakingValidators {
+        /// RPC URL
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+
+        /// Show only active validators
+        #[arg(long)]
+        active_only: bool,
+    },
+
+    /// Get staking validator info by public key or address
+    StakingValidator {
+        /// RPC URL
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+
+        /// Validator public key (hex) or address (base58)
+        #[arg(long)]
+        validator: String,
+    },
+
+    /// Get staking summary
+    StakingSummary {
+        /// RPC URL
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+    },
+
+    /// Get staking parameters
+    StakingParams {
+        /// RPC URL
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+    },
+
+    /// Get total staked amount
+    StakingTotalStake {
+        /// RPC URL
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+    },
+
+    // ========================================================================
+    // Delegation Commands
+    // ========================================================================
+
+    /// Get all delegations for a delegator address
+    Delegations {
+        /// RPC URL
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+
+        /// Delegator address (base58)
+        #[arg(long)]
+        delegator: String,
+    },
+
+    /// Get specific delegation to a validator
+    Delegation {
+        /// RPC URL
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+
+        /// Delegator address (base58)
+        #[arg(long)]
+        delegator: String,
+
+        /// Validator public key (hex)
+        #[arg(long)]
+        validator: String,
+    },
+
+    /// Get delegator summary (total delegated, rewards, unbonding)
+    DelegatorSummary {
+        /// RPC URL
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+
+        /// Delegator address (base58)
+        #[arg(long)]
+        delegator: String,
+    },
+
+    /// Get unbonding delegations for a delegator
+    Unbondings {
+        /// RPC URL
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+
+        /// Delegator address (base58)
+        #[arg(long)]
+        delegator: String,
+    },
+
+    /// Get all delegations to a validator
+    ValidatorDelegations {
+        /// RPC URL
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+
+        /// Validator public key (hex)
+        #[arg(long)]
+        validator: String,
+    },
+
+    /// Get validator delegation summary (total delegated, delegator count)
+    ValidatorDelegationSummary {
+        /// RPC URL
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+
+        /// Validator public key (hex)
+        #[arg(long)]
+        validator: String,
+    },
 }
 
 #[tokio::main]
@@ -1041,6 +1162,293 @@ async fn main() -> Result<()> {
 
             print_field("Contract", &address);
             print_koppa_field("Balance", balance);
+        }
+
+        // ====================================================================
+        // Staking Commands
+        // ====================================================================
+
+        Commands::StakingValidators { rpc, active_only } => {
+            let validators = if active_only {
+                tx::staking_get_active_validators(&rpc).await?
+            } else {
+                tx::staking_get_validators(&rpc).await?
+            };
+
+            if validators.is_empty() {
+                print_info("No validators found");
+            } else {
+                let title = if active_only {
+                    format!("Active Staking Validators ({})", validators.len())
+                } else {
+                    format!("All Staking Validators ({})", validators.len())
+                };
+                print_header(&title);
+                println!();
+
+                for (i, v) in validators.iter().enumerate() {
+                    let stake: u128 = v.stake.parse().unwrap_or(0);
+                    let status_color = match v.status.as_str() {
+                        "Active" => v.status.green().to_string(),
+                        "Jailed" => v.status.red().to_string(),
+                        "Inactive" => v.status.yellow().to_string(),
+                        "Unbonding" => v.status.yellow().to_string(),
+                        _ => v.status.clone(),
+                    };
+
+                    println!(
+                        "  {} {} [{}]",
+                        format!("[{}]", i + 1).dimmed(),
+                        format_address_short(&v.address).cyan(),
+                        status_color
+                    );
+                    println!(
+                        "      {}: {} | {}: {}%",
+                        "Stake".dimmed(),
+                        format_koppa(stake),
+                        "Commission".dimmed(),
+                        v.commission_bps as f64 / 100.0
+                    );
+                }
+            }
+        }
+
+        Commands::StakingValidator { rpc, validator } => {
+            // Try to get by address first, then by pubkey
+            let v = if validator.starts_with("0x") {
+                tx::staking_get_validator(&rpc, &validator).await?
+            } else {
+                tx::staking_get_validator_by_address(&rpc, &validator).await?
+            };
+
+            match v {
+                Some(v) => {
+                    let stake: u128 = v.stake.parse().unwrap_or(0);
+                    let rewards: u128 = v.pending_rewards.parse().unwrap_or(0);
+
+                    let status_color = match v.status.as_str() {
+                        "Active" => v.status.green().to_string(),
+                        "Jailed" => v.status.red().to_string(),
+                        "Inactive" => v.status.yellow().to_string(),
+                        "Unbonding" => v.status.yellow().to_string(),
+                        _ => v.status.clone(),
+                    };
+
+                    print_header("Staking Validator");
+                    println!();
+                    print_field("Address", &v.address);
+                    print_field("Public Key", &v.pubkey);
+                    print_separator();
+                    println!("  {}: {}", "Status".dimmed(), status_color);
+                    print_koppa_field("Stake", stake);
+                    print_field("Commission", &format!("{}%", v.commission_bps as f64 / 100.0));
+                    print_separator();
+                    print_field("Joined At Block", &v.joined_at.to_string());
+                    if v.jailed_until > 0 {
+                        print_field("Jailed Until Block", &v.jailed_until.to_string());
+                    }
+                    print_field("Slash Count", &v.slash_count.to_string());
+                    print_koppa_field("Pending Rewards", rewards);
+                    if let Some(metadata) = &v.metadata {
+                        if !metadata.is_empty() {
+                            print_field("Metadata", metadata);
+                        }
+                    }
+                }
+                None => print_warning("Validator not found"),
+            }
+        }
+
+        Commands::StakingSummary { rpc } => {
+            let summary = tx::staking_get_summary(&rpc).await?;
+            let total_stake: u128 = summary.total_stake.parse().unwrap_or(0);
+            let min_stake: u128 = summary.min_validator_stake.parse().unwrap_or(0);
+
+            print_header("Staking Summary");
+            println!();
+            print_field("Total Validators", &summary.total_validators.to_string());
+            print_field("Active Validators", &summary.active_validators.to_string().green().to_string());
+            print_koppa_field("Total Staked", total_stake);
+            print_separator();
+            print_koppa_field("Min Validator Stake", min_stake);
+            print_field("Max Validators", &summary.max_validators.to_string());
+            print_field("Unbonding Period", &format!("{} blocks (~{:.1} days)",
+                summary.unbonding_period,
+                summary.unbonding_period as f64 * 6.0 / 86400.0 // Assuming 6s blocks
+            ));
+        }
+
+        Commands::StakingParams { rpc } => {
+            let params = tx::staking_get_params(&rpc).await?;
+            let min_stake: u128 = params.min_validator_stake.parse().unwrap_or(0);
+
+            print_header("Staking Parameters");
+            println!();
+            print_koppa_field("Min Validator Stake", min_stake);
+            print_field("Max Validators", &params.max_validators.to_string());
+            print_field("Unbonding Period", &format!("{} blocks", params.unbonding_period));
+            print_field("Max Commission", &format!("{}%", params.max_commission_bps as f64 / 100.0));
+            print_separator();
+            println!("  {}:", "Slashing Penalties".dimmed());
+            print_field("  Double Sign Slash", &format!("{}%", params.double_sign_slash_bps as f64 / 100.0));
+            print_field("  Downtime Slash", &format!("{}%", params.downtime_slash_bps as f64 / 100.0));
+            print_separator();
+            println!("  {}:", "Jail Durations".dimmed());
+            print_field("  Double Sign Jail", &format!("{} blocks", params.double_sign_jail_duration));
+            print_field("  Downtime Jail", &format!("{} blocks", params.downtime_jail_duration));
+            print_field("  Downtime Threshold", &format!("{} missed blocks", params.downtime_threshold));
+        }
+
+        Commands::StakingTotalStake { rpc } => {
+            let total_stake_str = tx::staking_get_total_stake(&rpc).await?;
+            let total_stake: u128 = total_stake_str.parse().unwrap_or(0);
+
+            print_koppa_field("Total Staked", total_stake);
+        }
+
+        // ====================================================================
+        // Delegation Commands
+        // ====================================================================
+
+        Commands::Delegations { rpc, delegator } => {
+            let delegations = tx::delegation_get_delegations_by_delegator(&rpc, &delegator).await?;
+
+            if delegations.is_empty() {
+                print_info(&format!("No delegations found for {}", delegator));
+            } else {
+                print_header(&format!("Delegations for {}", format_address_short(&delegator)));
+                println!();
+
+                for (i, d) in delegations.iter().enumerate() {
+                    let amount: u128 = d.amount.parse().unwrap_or(0);
+                    let rewards: u128 = d.pending_rewards.parse().unwrap_or(0);
+
+                    println!(
+                        "  {} → {}",
+                        format!("[{}]", i + 1).dimmed(),
+                        format_address_short(&d.validator_address).cyan()
+                    );
+                    println!(
+                        "      {}: {} | {}: {}",
+                        "Delegated".dimmed(),
+                        format_koppa(amount),
+                        "Rewards".dimmed(),
+                        format_koppa(rewards).green()
+                    );
+                }
+            }
+        }
+
+        Commands::Delegation { rpc, delegator, validator } => {
+            let delegation = tx::delegation_get_delegation(&rpc, &delegator, &validator).await?;
+
+            match delegation {
+                Some(d) => {
+                    let amount: u128 = d.amount.parse().unwrap_or(0);
+                    let rewards: u128 = d.pending_rewards.parse().unwrap_or(0);
+
+                    print_header("Delegation");
+                    println!();
+                    print_field("Delegator", &d.delegator);
+                    print_field("Validator Address", &d.validator_address);
+                    print_field("Validator Pubkey", &d.validator_pubkey);
+                    print_separator();
+                    print_koppa_field("Delegated Amount", amount);
+                    print_koppa_field("Pending Rewards", rewards);
+                    print_field("Delegated At Block", &d.delegated_at.to_string());
+                }
+                None => print_warning("Delegation not found"),
+            }
+        }
+
+        Commands::DelegatorSummary { rpc, delegator } => {
+            let summary = tx::delegation_get_delegator_summary(&rpc, &delegator).await?;
+            let total_delegated: u128 = summary.total_delegated.parse().unwrap_or(0);
+            let total_rewards: u128 = summary.total_pending_rewards.parse().unwrap_or(0);
+            let total_unbonding: u128 = summary.total_unbonding.parse().unwrap_or(0);
+
+            print_header("Delegator Summary");
+            println!();
+            print_field("Delegator", &summary.delegator);
+            print_separator();
+            print_koppa_field("Total Delegated", total_delegated);
+            print_koppa_field("Pending Rewards", total_rewards);
+            print_koppa_field("Total Unbonding", total_unbonding);
+            print_separator();
+            print_field("Active Delegations", &summary.delegation_count.to_string());
+            print_field("Pending Unbondings", &summary.unbonding_count.to_string());
+        }
+
+        Commands::Unbondings { rpc, delegator } => {
+            let unbondings = tx::delegation_get_unbonding_delegations(&rpc, &delegator).await?;
+
+            if unbondings.is_empty() {
+                print_info(&format!("No unbonding delegations for {}", delegator));
+            } else {
+                print_header(&format!("Unbonding Delegations for {}", format_address_short(&delegator)));
+                println!();
+
+                for (i, u) in unbondings.iter().enumerate() {
+                    let amount: u128 = u.amount.parse().unwrap_or(0);
+                    let status = if u.is_complete {
+                        "Ready to withdraw".green().to_string()
+                    } else {
+                        format!("Completes at block {}", u.completion_height).yellow().to_string()
+                    };
+
+                    println!(
+                        "  {} → {}",
+                        format!("[{}]", i + 1).dimmed(),
+                        format_address_short(&u.validator_address).cyan()
+                    );
+                    println!(
+                        "      {}: {} | {}",
+                        "Amount".dimmed(),
+                        format_koppa(amount),
+                        status
+                    );
+                }
+            }
+        }
+
+        Commands::ValidatorDelegations { rpc, validator } => {
+            let delegations = tx::delegation_get_delegations_by_validator(&rpc, &validator).await?;
+
+            if delegations.is_empty() {
+                print_info("No delegations to this validator");
+            } else {
+                print_header(&format!("Delegations to Validator ({})", delegations.len()));
+                println!();
+
+                let mut total: u128 = 0;
+                for (i, d) in delegations.iter().enumerate() {
+                    let amount: u128 = d.amount.parse().unwrap_or(0);
+                    total += amount;
+
+                    println!(
+                        "  {} {} delegated {}",
+                        format!("[{}]", i + 1).dimmed(),
+                        format_address_short(&d.delegator).cyan(),
+                        format_koppa(amount)
+                    );
+                }
+
+                println!();
+                print_koppa_field("Total Delegated", total);
+            }
+        }
+
+        Commands::ValidatorDelegationSummary { rpc, validator } => {
+            let summary = tx::delegation_get_validator_delegation_summary(&rpc, &validator).await?;
+            let total_delegated: u128 = summary.total_delegated.parse().unwrap_or(0);
+
+            print_header("Validator Delegation Summary");
+            println!();
+            print_field("Validator Pubkey", &summary.validator_pubkey);
+            print_field("Validator Address", &summary.validator_address);
+            print_separator();
+            print_koppa_field("Total Delegated", total_delegated);
+            print_field("Delegator Count", &summary.delegator_count.to_string());
         }
     }
 

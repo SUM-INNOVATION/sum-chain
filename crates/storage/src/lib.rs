@@ -10,8 +10,9 @@ pub mod schema;
 pub use db::{BackupInfo, Database, DatabaseConfig};
 pub use pruner::{DbStats, PruneStats, Pruner, PrunerConfig};
 pub use schema::{
-    BlockStore, IssuerData, IssuerStore, NftCollectionData, NftStore, NftTokenData, ReceiptStore,
-    Src20TokenData, StateStore, TokenStore, TxStore,
+    BlockStore, DelegationStore, IssuerData, IssuerStore, NftCollectionData, NftStore,
+    NftTokenData, ReceiptStore, SlashingStore, Src20TokenData, StakingStore, StateStore,
+    TokenStore, TxStore, ValidatorSetStore,
 };
 
 use thiserror::Error;

@@ -378,6 +378,190 @@ pub async fn contract_get_balance(rpc_url: &str, address: &str) -> Result<String
     Ok(balance)
 }
 
+// ============================================================================
+// Staking RPC Functions
+// ============================================================================
+
+/// Get staking validator by public key
+pub async fn staking_get_validator(
+    rpc_url: &str,
+    pubkey: &str,
+) -> Result<Option<sumchain_rpc::types::StakingValidatorInfo>> {
+    let client = create_client(rpc_url).await?;
+    let validator = client
+        .staking_get_validator(pubkey.to_string())
+        .await
+        .context("Failed to get staking validator")?;
+
+    Ok(validator)
+}
+
+/// Get staking validator by address
+pub async fn staking_get_validator_by_address(
+    rpc_url: &str,
+    address: &str,
+) -> Result<Option<sumchain_rpc::types::StakingValidatorInfo>> {
+    let client = create_client(rpc_url).await?;
+    let validator = client
+        .staking_get_validator_by_address(address.to_string())
+        .await
+        .context("Failed to get staking validator by address")?;
+
+    Ok(validator)
+}
+
+/// Get all staking validators
+pub async fn staking_get_validators(
+    rpc_url: &str,
+) -> Result<Vec<sumchain_rpc::types::StakingValidatorInfo>> {
+    let client = create_client(rpc_url).await?;
+    let validators = client
+        .staking_get_validators()
+        .await
+        .context("Failed to get staking validators")?;
+
+    Ok(validators)
+}
+
+/// Get active staking validators only
+pub async fn staking_get_active_validators(
+    rpc_url: &str,
+) -> Result<Vec<sumchain_rpc::types::StakingValidatorInfo>> {
+    let client = create_client(rpc_url).await?;
+    let validators = client
+        .staking_get_active_validators()
+        .await
+        .context("Failed to get active staking validators")?;
+
+    Ok(validators)
+}
+
+/// Get staking summary
+pub async fn staking_get_summary(
+    rpc_url: &str,
+) -> Result<sumchain_rpc::types::StakingSummary> {
+    let client = create_client(rpc_url).await?;
+    let summary = client
+        .staking_get_summary()
+        .await
+        .context("Failed to get staking summary")?;
+
+    Ok(summary)
+}
+
+/// Get staking parameters
+pub async fn staking_get_params(
+    rpc_url: &str,
+) -> Result<sumchain_rpc::types::StakingParamsInfo> {
+    let client = create_client(rpc_url).await?;
+    let params = client
+        .staking_get_params()
+        .await
+        .context("Failed to get staking params")?;
+
+    Ok(params)
+}
+
+/// Get total staked amount
+pub async fn staking_get_total_stake(rpc_url: &str) -> Result<String> {
+    let client = create_client(rpc_url).await?;
+    let total = client
+        .staking_get_total_stake()
+        .await
+        .context("Failed to get total stake")?;
+
+    Ok(total)
+}
+
+// ============================================================================
+// Delegation RPC Functions
+// ============================================================================
+
+/// Get delegation info for a delegator to a specific validator
+pub async fn delegation_get_delegation(
+    rpc_url: &str,
+    delegator: &str,
+    validator_pubkey: &str,
+) -> Result<Option<sumchain_rpc::types::DelegationRpcInfo>> {
+    let client = create_client(rpc_url).await?;
+    let delegation = client
+        .delegation_get_delegation(delegator.to_string(), validator_pubkey.to_string())
+        .await
+        .context("Failed to get delegation")?;
+
+    Ok(delegation)
+}
+
+/// Get all delegations for a delegator
+pub async fn delegation_get_delegations_by_delegator(
+    rpc_url: &str,
+    delegator: &str,
+) -> Result<Vec<sumchain_rpc::types::DelegationRpcInfo>> {
+    let client = create_client(rpc_url).await?;
+    let delegations = client
+        .delegation_get_delegations_by_delegator(delegator.to_string())
+        .await
+        .context("Failed to get delegations by delegator")?;
+
+    Ok(delegations)
+}
+
+/// Get all delegations to a validator
+pub async fn delegation_get_delegations_by_validator(
+    rpc_url: &str,
+    validator_pubkey: &str,
+) -> Result<Vec<sumchain_rpc::types::DelegationRpcInfo>> {
+    let client = create_client(rpc_url).await?;
+    let delegations = client
+        .delegation_get_delegations_by_validator(validator_pubkey.to_string())
+        .await
+        .context("Failed to get delegations by validator")?;
+
+    Ok(delegations)
+}
+
+/// Get delegator summary
+pub async fn delegation_get_delegator_summary(
+    rpc_url: &str,
+    delegator: &str,
+) -> Result<sumchain_rpc::types::DelegatorSummary> {
+    let client = create_client(rpc_url).await?;
+    let summary = client
+        .delegation_get_delegator_summary(delegator.to_string())
+        .await
+        .context("Failed to get delegator summary")?;
+
+    Ok(summary)
+}
+
+/// Get unbonding delegations for a delegator
+pub async fn delegation_get_unbonding_delegations(
+    rpc_url: &str,
+    delegator: &str,
+) -> Result<Vec<sumchain_rpc::types::UnbondingDelegationRpcInfo>> {
+    let client = create_client(rpc_url).await?;
+    let unbondings = client
+        .delegation_get_unbonding_delegations(delegator.to_string())
+        .await
+        .context("Failed to get unbonding delegations")?;
+
+    Ok(unbondings)
+}
+
+/// Get validator delegation summary
+pub async fn delegation_get_validator_delegation_summary(
+    rpc_url: &str,
+    validator_pubkey: &str,
+) -> Result<sumchain_rpc::types::ValidatorDelegationSummary> {
+    let client = create_client(rpc_url).await?;
+    let summary = client
+        .delegation_get_validator_delegation_summary(validator_pubkey.to_string())
+        .await
+        .context("Failed to get validator delegation summary")?;
+
+    Ok(summary)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

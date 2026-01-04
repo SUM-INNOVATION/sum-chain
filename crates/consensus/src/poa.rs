@@ -2,6 +2,11 @@
 //!
 //! Validators take turns proposing blocks in round-robin order.
 //! The proposer for height H is validators[H % N] where N is validator count.
+//!
+//! Supports dynamic validator sets with epoch-based transitions:
+//! - Validator set is recalculated at each epoch boundary
+//! - Active validators are selected by stake (self-stake + delegations)
+//! - Proposer selection can be round-robin or stake-weighted
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,9 +17,10 @@ use sumchain_crypto::{sign, KeyPair};
 use sumchain_genesis::{ChainParams, Genesis};
 use sumchain_primitives::{
     Block, BlockHeader, BlockHeight, Hash, SignedTransaction, Timestamp,
+    ValidatorSet, ValidatorSetEntry, ValidatorStatus,
 };
 use sumchain_state::{BlockExecutor, Mempool, StateManager};
-use sumchain_storage::{BlockStore, Database, ReceiptStore, TxStore};
+use sumchain_storage::{BlockStore, Database, DelegationStore, ReceiptStore, StakingStore, TxStore, ValidatorSetStore};
 use tokio::sync::broadcast;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
@@ -34,8 +40,10 @@ pub struct PoAEngine {
     mempool: Arc<Mempool>,
     /// Chain parameters
     params: ChainParams,
-    /// Validator public keys
-    validators: Vec<[u8; 32]>,
+    /// Genesis validator public keys (fallback when no staking)
+    genesis_validators: Vec<[u8; 32]>,
+    /// Current active validator set (dynamic, updated at epoch boundaries)
+    active_validator_set: RwLock<Option<ValidatorSet>>,
     /// This node's validator key (if validator)
     validator_key: Option<KeyPair>,
     /// Current best block
@@ -61,7 +69,7 @@ impl PoAEngine {
         genesis: &Genesis,
         validator_key: Option<KeyPair>,
     ) -> Result<Self> {
-        let validators = genesis
+        let genesis_validators = genesis
             .validator_pubkeys()
             .map_err(|e| ConsensusError::Genesis(e.to_string()))?;
 
@@ -74,7 +82,8 @@ impl PoAEngine {
             executor,
             mempool,
             params: genesis.params.clone(),
-            validators,
+            genesis_validators,
+            active_validator_set: RwLock::new(None),
             validator_key,
             best_block: RwLock::new(None),
             fork_choice: LongestChainForkChoice,
@@ -83,6 +92,165 @@ impl PoAEngine {
             last_finalized_height: RwLock::new(0),
             last_finalized_hash: RwLock::new(Hash::ZERO),
         })
+    }
+
+    /// Get the active validator set, computing it if necessary
+    fn get_active_validator_set(&self) -> Vec<[u8; 32]> {
+        // Check if we have an active set
+        if let Some(set) = self.active_validator_set.read().as_ref() {
+            return set.pubkeys();
+        }
+
+        // Fall back to genesis validators
+        self.genesis_validators.clone()
+    }
+
+    /// Compute the validator set for a new epoch based on staking state
+    pub fn compute_validator_set_for_epoch(&self, epoch: u64, active_from: BlockHeight, proposer_seed: [u8; 32]) -> Result<ValidatorSet> {
+        let staking_store = StakingStore::new(&self.db);
+        let delegation_store = DelegationStore::new(&self.db);
+
+        // Get all validators from staking
+        let all_validators = staking_store.get_all_validators()?;
+
+        // Filter and sort validators
+        let min_stake = self.params.staking.as_ref()
+            .map(|s| s.min_validator_stake)
+            .unwrap_or(0);
+        let max_validators = self.params.staking.as_ref()
+            .map(|s| s.max_validators)
+            .unwrap_or(100) as usize;
+
+        let mut eligible_validators: Vec<ValidatorSetEntry> = all_validators
+            .iter()
+            .filter(|v| {
+                // Must be active and not jailed
+                v.status == ValidatorStatus::Active && !v.is_jailed()
+            })
+            .filter_map(|v| {
+                // Get total voting power (self-stake + delegations)
+                let delegated = delegation_store
+                    .get_total_delegated_to_validator(&v.pubkey)
+                    .unwrap_or(0);
+                let voting_power = v.stake.saturating_add(delegated);
+
+                // Must meet minimum stake requirement
+                if voting_power >= min_stake {
+                    Some(ValidatorSetEntry::new(v.pubkey, voting_power, v.commission_bps))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Sort by voting power descending
+        eligible_validators.sort_by(|a, b| b.voting_power.cmp(&a.voting_power));
+
+        // Take top N validators
+        eligible_validators.truncate(max_validators);
+
+        // If no staking validators, use genesis validators
+        if eligible_validators.is_empty() {
+            eligible_validators = self.genesis_validators
+                .iter()
+                .map(|pubkey| ValidatorSetEntry::new(*pubkey, 1, 0))
+                .collect();
+        }
+
+        Ok(ValidatorSet::new(epoch, active_from, eligible_validators, proposer_seed))
+    }
+
+    /// Update the validator set if at an epoch boundary
+    fn maybe_update_validator_set(&self, height: BlockHeight, block_hash: &Hash) {
+        let epoch_length = self.params.staking.as_ref()
+            .map(|s| s.epoch_length)
+            .unwrap_or(0);
+
+        // Skip if epoch transitions are disabled
+        if epoch_length == 0 {
+            return;
+        }
+
+        // Check if this is an epoch boundary
+        let is_epoch_boundary = height > 0 && height % epoch_length == 0;
+        if !is_epoch_boundary {
+            return;
+        }
+
+        let new_epoch = height / epoch_length;
+
+        // Use the block hash as the proposer seed for the new epoch
+        let proposer_seed: [u8; 32] = *block_hash.as_bytes();
+
+        // Compute new validator set
+        match self.compute_validator_set_for_epoch(new_epoch, height, proposer_seed) {
+            Ok(new_set) => {
+                let validator_count = new_set.len();
+                let total_power = new_set.total_voting_power;
+
+                // Store the validator set
+                let set_store = ValidatorSetStore::new(&self.db);
+                if let Err(e) = set_store.put_validator_set(&new_set) {
+                    warn!("Failed to store validator set for epoch {}: {}", new_epoch, e);
+                    return;
+                }
+
+                // Update active set
+                *self.active_validator_set.write() = Some(new_set);
+
+                info!(
+                    "Epoch {} started at height {}: {} validators, total voting power {}",
+                    new_epoch, height, validator_count, total_power
+                );
+            }
+            Err(e) => {
+                warn!("Failed to compute validator set for epoch {}: {}", new_epoch, e);
+            }
+        }
+    }
+
+    /// Get the proposer for a given height
+    fn compute_proposer(&self, height: BlockHeight) -> [u8; 32] {
+        let use_stake_weighted = self.params.staking.as_ref()
+            .map(|s| s.stake_weighted_selection)
+            .unwrap_or(false);
+
+        // Check if we have an active validator set
+        if let Some(set) = self.active_validator_set.read().as_ref() {
+            if use_stake_weighted {
+                if let Some(proposer) = set.get_stake_weighted_proposer(height) {
+                    return proposer;
+                }
+            } else {
+                if let Some(proposer) = set.get_round_robin_proposer(height) {
+                    return proposer;
+                }
+            }
+        }
+
+        // Fall back to genesis validators with round-robin
+        let validators = &self.genesis_validators;
+        if validators.is_empty() {
+            return [0u8; 32];
+        }
+        let idx = (height as usize) % validators.len();
+        validators[idx]
+    }
+
+    /// Load or initialize the active validator set from storage
+    fn load_active_validator_set(&self) -> Result<()> {
+        let set_store = ValidatorSetStore::new(&self.db);
+
+        // Try to load the current validator set
+        if let Some(current_set) = set_store.get_current_validator_set()? {
+            info!(
+                "Loaded validator set for epoch {} ({} validators)",
+                current_set.epoch, current_set.len()
+            );
+            *self.active_validator_set.write() = Some(current_set);
+        }
+
+        Ok(())
     }
 
     /// Initialize from genesis
@@ -139,6 +307,11 @@ impl PoAEngine {
                         "Restored finality state: height {} finalized",
                         finalized_height
                     );
+                }
+
+                // Load active validator set
+                if let Err(e) = self.load_active_validator_set() {
+                    warn!("Failed to load validator set: {}", e);
                 }
 
                 Ok(Some(block))
@@ -306,6 +479,9 @@ impl PoAEngine {
         // Check if any blocks can be finalized
         self.check_finality();
 
+        // Check if we need to update the validator set (epoch boundary)
+        self.maybe_update_validator_set(height, &block.hash());
+
         Ok(block)
     }
 
@@ -332,8 +508,9 @@ impl PoAEngine {
         };
 
         // Validate block
+        let active_validators = self.get_active_validator_set();
         self.executor
-            .validate_block(&block, parent.as_ref(), &self.validators)?;
+            .validate_block(&block, parent.as_ref(), &active_validators)?;
 
         // Execute block
         let (receipts, state_root, state_diff) = self
@@ -401,6 +578,9 @@ impl PoAEngine {
 
         // Check if any blocks can be finalized
         self.check_finality();
+
+        // Check if we need to update the validator set (epoch boundary)
+        self.maybe_update_validator_set(height, &hash);
 
         Ok(())
     }
@@ -541,7 +721,7 @@ impl ConsensusEngine for PoAEngine {
     }
 
     fn validators(&self) -> Vec<[u8; 32]> {
-        self.validators.clone()
+        self.get_active_validator_set()
     }
 
     async fn import_block(&self, block: Block) -> Result<()> {
@@ -562,8 +742,7 @@ impl ConsensusEngine for PoAEngine {
     }
 
     fn get_proposer(&self, height: BlockHeight) -> [u8; 32] {
-        let idx = (height as usize) % self.validators.len();
-        self.validators[idx]
+        self.compute_proposer(height)
     }
 
     fn subscribe(&self) -> broadcast::Receiver<ConsensusEvent> {

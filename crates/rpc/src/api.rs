@@ -4,10 +4,13 @@ use jsonrpsee::proc_macros::rpc;
 
 use crate::metrics::MetricsSnapshot;
 use crate::types::{
-    AccountInfo, BlockInfo, ContractCallResult, ContractInfo, FinalityInfo, GasEstimateResult,
-    HealthResponse, NftCollectionInfo, NftOwnerTokens, NftTokenInfo, NodeInfo, P2pStats,
-    ReceiptInfo, RpcPeerInfo, SendTxResponse, TokenHoldings, TokenInfo, TransactionInfo,
-    ValidatorSetInfo, ViewCallRequest,
+    AccountInfo, BlockInfo, ContractCallResult, ContractInfo, DelegationRpcInfo,
+    DelegatorSummary, EpochInfo, FinalityInfo, GasEstimateResult, HealthResponse,
+    NftCollectionInfo, NftOwnerTokens, NftTokenInfo, NodeInfo, P2pStats, ReceiptInfo,
+    RpcPeerInfo, SendTxResponse, SlashingRecordRpcInfo, SlashingSummary, StakingParamsInfo,
+    StakingSummary, StakingValidatorInfo, TokenHoldings, TokenInfo, TransactionInfo,
+    UnbondingDelegationRpcInfo, ValidatorDelegationSummary, ValidatorSetInfo,
+    ValidatorSetRpcInfo, ValidatorSigningRpcInfo, ViewCallRequest,
 };
 
 /// SUM Chain RPC API
@@ -351,5 +354,174 @@ pub trait SumChainApi {
     async fn contract_get_balance(
         &self,
         address: String,
+    ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    // ========================================================================
+    // Staking Endpoints
+    // ========================================================================
+
+    /// Get staking validator by public key (hex)
+    #[method(name = "staking_getValidator")]
+    async fn staking_get_validator(
+        &self,
+        pubkey: String,
+    ) -> Result<Option<StakingValidatorInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get all staking validators
+    #[method(name = "staking_getValidators")]
+    async fn staking_get_validators(
+        &self,
+    ) -> Result<Vec<StakingValidatorInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get active staking validators only
+    #[method(name = "staking_getActiveValidators")]
+    async fn staking_get_active_validators(
+        &self,
+    ) -> Result<Vec<StakingValidatorInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get staking summary (totals and parameters)
+    #[method(name = "staking_getSummary")]
+    async fn staking_get_summary(
+        &self,
+    ) -> Result<StakingSummary, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get staking parameters
+    #[method(name = "staking_getParams")]
+    async fn staking_get_params(
+        &self,
+    ) -> Result<StakingParamsInfo, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get total staked amount
+    #[method(name = "staking_getTotalStake")]
+    async fn staking_get_total_stake(
+        &self,
+    ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get validator by address (base58)
+    #[method(name = "staking_getValidatorByAddress")]
+    async fn staking_get_validator_by_address(
+        &self,
+        address: String,
+    ) -> Result<Option<StakingValidatorInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    // ========================================================================
+    // Delegation Endpoints
+    // ========================================================================
+
+    /// Get delegation info for a delegator to a specific validator
+    #[method(name = "delegation_getDelegation")]
+    async fn delegation_get_delegation(
+        &self,
+        delegator: String,
+        validator_pubkey: String,
+    ) -> Result<Option<DelegationRpcInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get all delegations for a delegator
+    #[method(name = "delegation_getDelegationsByDelegator")]
+    async fn delegation_get_delegations_by_delegator(
+        &self,
+        delegator: String,
+    ) -> Result<Vec<DelegationRpcInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get all delegations to a validator
+    #[method(name = "delegation_getDelegationsByValidator")]
+    async fn delegation_get_delegations_by_validator(
+        &self,
+        validator_pubkey: String,
+    ) -> Result<Vec<DelegationRpcInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get delegator summary (total delegated, rewards, unbonding)
+    #[method(name = "delegation_getDelegatorSummary")]
+    async fn delegation_get_delegator_summary(
+        &self,
+        delegator: String,
+    ) -> Result<DelegatorSummary, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get unbonding delegations for a delegator
+    #[method(name = "delegation_getUnbondingDelegations")]
+    async fn delegation_get_unbonding_delegations(
+        &self,
+        delegator: String,
+    ) -> Result<Vec<UnbondingDelegationRpcInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get validator delegation summary (total delegated, delegator count)
+    #[method(name = "delegation_getValidatorDelegationSummary")]
+    async fn delegation_get_validator_delegation_summary(
+        &self,
+        validator_pubkey: String,
+    ) -> Result<ValidatorDelegationSummary, jsonrpsee::types::ErrorObjectOwned>;
+
+    // ========================================================================
+    // Slashing Endpoints
+    // ========================================================================
+
+    /// Get slashing records for a validator
+    #[method(name = "slashing_getRecords")]
+    async fn slashing_get_records(
+        &self,
+        validator_pubkey: String,
+    ) -> Result<Vec<SlashingRecordRpcInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get validator signing info (liveness tracking)
+    #[method(name = "slashing_getSigningInfo")]
+    async fn slashing_get_signing_info(
+        &self,
+        validator_pubkey: String,
+    ) -> Result<Option<ValidatorSigningRpcInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get all signing info for all validators
+    #[method(name = "slashing_getAllSigningInfo")]
+    async fn slashing_get_all_signing_info(
+        &self,
+    ) -> Result<Vec<ValidatorSigningRpcInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get slashing summary (totals across all validators)
+    #[method(name = "slashing_getSummary")]
+    async fn slashing_get_summary(
+        &self,
+    ) -> Result<SlashingSummary, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Check if a validator is tombstoned (permanently jailed)
+    #[method(name = "slashing_isTombstoned")]
+    async fn slashing_is_tombstoned(
+        &self,
+        validator_pubkey: String,
+    ) -> Result<bool, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get recent slashing records across all validators
+    #[method(name = "slashing_getRecentRecords")]
+    async fn slashing_get_recent_records(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<SlashingRecordRpcInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    // ========================================================================
+    // Validator Set Endpoints
+    // ========================================================================
+
+    /// Get current epoch info
+    #[method(name = "epoch_getInfo")]
+    async fn epoch_get_info(
+        &self,
+    ) -> Result<EpochInfo, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get current active validator set
+    #[method(name = "validatorSet_getCurrent")]
+    async fn validator_set_get_current(
+        &self,
+    ) -> Result<Option<ValidatorSetRpcInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get validator set for a specific epoch
+    #[method(name = "validatorSet_getByEpoch")]
+    async fn validator_set_get_by_epoch(
+        &self,
+        epoch: u64,
+    ) -> Result<Option<ValidatorSetRpcInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get the proposer for a given height
+    #[method(name = "validatorSet_getProposer")]
+    async fn validator_set_get_proposer(
+        &self,
+        height: u64,
     ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
 }
