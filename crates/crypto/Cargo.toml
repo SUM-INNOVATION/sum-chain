@@ -17,5 +17,9 @@ zeroize = { workspace = true }
 hex = { workspace = true }
 bs58 = { workspace = true }
 serde-big-array = "0.5"
+x25519-dalek = { workspace = true }
+chacha20poly1305 = { workspace = true }
+curve25519-dalek = "4.1"
+sha2 = { workspace = true }
 
 [dev-dependencies]

@@ -5842,13 +5842,17 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "bs58",
+ "chacha20poly1305",
+ "curve25519-dalek",
  "ed25519-dalek",
  "hex",
  "rand 0.8.5",
  "serde",
  "serde-big-array",
+ "sha2",
  "sumchain-primitives",
  "thiserror 1.0.69",
+ "x25519-dalek",
  "zeroize",
 ]
 
@@ -5969,6 +5973,7 @@ name = "sumchain-rpc"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "blake3",
  "hex",
  "http-body-util",
  "hyper 1.8.1",
@@ -6056,6 +6061,7 @@ dependencies = [
  "aes-gcm",
  "anyhow",
  "argon2",
+ "blake3",
  "chrono",
  "clap",
  "colored",

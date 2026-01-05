@@ -28,10 +28,22 @@ struct PerfNode {
 
 impl PerfNode {
     fn new(validator_key_bytes: [u8; 32], chain_id: u64, initial_balance: u128) -> Self {
+        Self::with_mempool_config(validator_key_bytes, chain_id, initial_balance, 10000, 100)
+    }
+
+    fn with_mempool_size(validator_key_bytes: [u8; 32], chain_id: u64, initial_balance: u128, max_size: usize) -> Self {
+        Self::with_mempool_config(validator_key_bytes, chain_id, initial_balance, max_size, 100)
+    }
+
+    fn with_mempool_config(validator_key_bytes: [u8; 32], chain_id: u64, initial_balance: u128, max_size: usize, max_per_sender: usize) -> Self {
         let data_dir = TempDir::new().expect("Failed to create temp dir");
         let db = Arc::new(Database::open_default(data_dir.path()).expect("Failed to open database"));
         let state = Arc::new(StateManager::new(db.clone(), chain_id));
-        let mempool = Arc::new(Mempool::new(MempoolConfig::default()));
+        let mempool = Arc::new(Mempool::new(MempoolConfig {
+            max_size,
+            max_per_sender,
+            ..Default::default()
+        }));
 
         let validator_key = KeyPair::from_bytes(validator_key_bytes);
 
@@ -127,7 +139,8 @@ impl PerfNode {
 #[test]
 fn stress_mempool_insertion_throughput() {
     let validator_bytes = *KeyPair::generate().private_key().as_bytes();
-    let node = PerfNode::new(validator_bytes, 1, u128::MAX / 2);
+    // Use larger mempool and higher per-sender limit to accommodate all test transactions
+    let node = PerfNode::with_mempool_config(validator_bytes, 1, u128::MAX / 2, 15_000, 15_000);
 
     const TX_COUNT: u64 = 10_000;
 
@@ -406,7 +419,8 @@ fn stress_concurrent_mempool_access() {
     use std::thread;
 
     let validator_bytes = *KeyPair::generate().private_key().as_bytes();
-    let node = Arc::new(PerfNode::new(validator_bytes, 1, u128::MAX / 2));
+    // Use larger mempool and higher per-sender limit to accommodate all concurrent transactions
+    let node = Arc::new(PerfNode::with_mempool_config(validator_bytes, 1, u128::MAX / 2, 5000, 1000));
 
     const THREAD_COUNT: usize = 4;
     const TX_PER_THREAD: u64 = 500;

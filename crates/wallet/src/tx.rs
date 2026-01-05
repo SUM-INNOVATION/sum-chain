@@ -562,6 +562,139 @@ pub async fn delegation_get_validator_delegation_summary(
     Ok(summary)
 }
 
+// ============================================================================
+// SRC-201 Messaging Functions
+// ============================================================================
+
+/// Get messaging configuration
+pub async fn messaging_get_config(rpc_url: &str) -> Result<sumchain_rpc::types::MessagingConfigInfo> {
+    let client = create_client(rpc_url).await?;
+    let config = client
+        .messaging_get_config()
+        .await
+        .context("Failed to get messaging config")?;
+
+    Ok(config)
+}
+
+/// Get sender's messaging quota
+pub async fn messaging_get_quota(
+    rpc_url: &str,
+    address: &str,
+) -> Result<sumchain_rpc::types::MessagingQuotaInfo> {
+    let client = create_client(rpc_url).await?;
+    let quota = client
+        .messaging_get_quota(address.to_string())
+        .await
+        .context("Failed to get messaging quota")?;
+
+    Ok(quota)
+}
+
+/// Get inbox filter for an address
+pub async fn messaging_get_inbox_filter(
+    rpc_url: &str,
+    address: &str,
+) -> Result<Option<sumchain_rpc::types::InboxFilterInfo>> {
+    let client = create_client(rpc_url).await?;
+    let filter = client
+        .messaging_get_inbox_filter(address.to_string())
+        .await
+        .context("Failed to get inbox filter")?;
+
+    Ok(filter)
+}
+
+/// Get messages for a recipient
+pub async fn messaging_get_messages(
+    rpc_url: &str,
+    recipient: &str,
+    limit: u32,
+) -> Result<Vec<sumchain_rpc::types::MessageEventInfo>> {
+    let client = create_client(rpc_url).await?;
+
+    // Check if recipient is an address (base58) and convert to hash
+    let recipient_hash = if recipient.starts_with("0x") || recipient.len() == 64 {
+        // Already a hash
+        recipient.to_string()
+    } else {
+        // Try to parse as address and hash it
+        let addr = sumchain_primitives::Address::from_base58(recipient)
+            .or_else(|_| sumchain_primitives::Address::from_hex(recipient))
+            .context("Invalid recipient address")?;
+        let hash = blake3::hash(addr.as_bytes());
+        format!("0x{}", hex::encode(hash.as_bytes()))
+    };
+
+    let messages = client
+        .messaging_get_messages(recipient_hash, Some(limit), None)
+        .await
+        .context("Failed to get messages")?;
+
+    Ok(messages)
+}
+
+/// Get trust stake for an address
+pub async fn messaging_get_trust_stake(rpc_url: &str, address: &str) -> Result<String> {
+    let client = create_client(rpc_url).await?;
+    let stake = client
+        .messaging_get_trust_stake(address.to_string())
+        .await
+        .context("Failed to get trust stake")?;
+
+    Ok(stake)
+}
+
+/// Get spam score for an address
+pub async fn messaging_get_spam_score(
+    rpc_url: &str,
+    address: &str,
+) -> Result<sumchain_rpc::types::SpamReportInfo> {
+    let client = create_client(rpc_url).await?;
+    let info = client
+        .messaging_get_spam_score(address.to_string())
+        .await
+        .context("Failed to get spam score")?;
+
+    Ok(info)
+}
+
+/// Check if an address is a contact
+pub async fn messaging_is_contact(rpc_url: &str, owner: &str, contact: &str) -> Result<bool> {
+    let client = create_client(rpc_url).await?;
+    let is_contact = client
+        .messaging_is_contact(owner.to_string(), contact.to_string())
+        .await
+        .context("Failed to check contact status")?;
+
+    Ok(is_contact)
+}
+
+/// Check if an address is blocked
+pub async fn messaging_is_blocked(rpc_url: &str, owner: &str, sender: &str) -> Result<bool> {
+    let client = create_client(rpc_url).await?;
+    let is_blocked = client
+        .messaging_is_blocked(owner.to_string(), sender.to_string())
+        .await
+        .context("Failed to check blocked status")?;
+
+    Ok(is_blocked)
+}
+
+/// Get pending payment for a message
+pub async fn messaging_get_pending_payment(
+    rpc_url: &str,
+    message_id: &str,
+) -> Result<Option<sumchain_rpc::types::PendingPaymentInfo>> {
+    let client = create_client(rpc_url).await?;
+    let payment = client
+        .messaging_get_pending_payment(message_id.to_string())
+        .await
+        .context("Failed to get pending payment")?;
+
+    Ok(payment)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

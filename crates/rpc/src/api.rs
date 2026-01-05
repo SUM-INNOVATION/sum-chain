@@ -6,9 +6,11 @@ use crate::metrics::MetricsSnapshot;
 use crate::types::{
     AccountInfo, BlockInfo, ContractCallResult, ContractInfo, DelegationRpcInfo,
     DelegatorSummary, EpochInfo, FinalityInfo, GasEstimateResult, HealthResponse,
-    NftCollectionInfo, NftOwnerTokens, NftTokenInfo, NodeInfo, P2pStats, ReceiptInfo,
-    RpcPeerInfo, SendTxResponse, SlashingRecordRpcInfo, SlashingSummary, StakingParamsInfo,
-    StakingSummary, StakingValidatorInfo, TokenHoldings, TokenInfo, TransactionInfo,
+    InboxFilterInfo, MessageEventInfo, MessagingConfigInfo, MessagingQuotaInfo,
+    NftCollectionInfo, NftOwnerTokens, NftTokenInfo, NodeInfo, P2pStats, PendingPaymentInfo,
+    ReceiptInfo, RpcPeerInfo, SendTxResponse, SlashingRecordRpcInfo, SlashingSummary,
+    SpamReportInfo, StakingParamsInfo, StakingSummary, StakingValidatorInfo,
+    SubmitSponsoredMessageRequest, TokenHoldings, TokenInfo, TransactionInfo,
     UnbondingDelegationRpcInfo, ValidatorDelegationSummary, ValidatorSetInfo,
     ValidatorSetRpcInfo, ValidatorSigningRpcInfo, ViewCallRequest,
 };
@@ -524,4 +526,97 @@ pub trait SumChainApi {
         &self,
         height: u64,
     ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    // ========================================================================
+    // SRC-201 Messaging Endpoints
+    // ========================================================================
+
+    /// Get messaging configuration
+    #[method(name = "messaging_getConfig")]
+    async fn messaging_get_config(
+        &self,
+    ) -> Result<MessagingConfigInfo, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get sender's messaging quota
+    #[method(name = "messaging_getQuota")]
+    async fn messaging_get_quota(
+        &self,
+        address: String,
+    ) -> Result<MessagingQuotaInfo, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get recipient's inbox filter
+    #[method(name = "messaging_getInboxFilter")]
+    async fn messaging_get_inbox_filter(
+        &self,
+        address: String,
+    ) -> Result<Option<InboxFilterInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get messages for a recipient (by recipient hash)
+    #[method(name = "messaging_getMessages")]
+    async fn messaging_get_messages(
+        &self,
+        recipient_hash: String,
+        limit: Option<u32>,
+        offset: Option<u32>,
+    ) -> Result<Vec<MessageEventInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get messages sent by an address
+    #[method(name = "messaging_getSentMessages")]
+    async fn messaging_get_sent_messages(
+        &self,
+        sender: String,
+        limit: Option<u32>,
+        offset: Option<u32>,
+    ) -> Result<Vec<MessageEventInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get pending payment by message ID
+    #[method(name = "messaging_getPendingPayment")]
+    async fn messaging_get_pending_payment(
+        &self,
+        message_id: String,
+    ) -> Result<Option<PendingPaymentInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get all pending payments for a recipient
+    #[method(name = "messaging_getPendingPayments")]
+    async fn messaging_get_pending_payments(
+        &self,
+        recipient: String,
+    ) -> Result<Vec<PendingPaymentInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get sender's trust stake
+    #[method(name = "messaging_getTrustStake")]
+    async fn messaging_get_trust_stake(
+        &self,
+        address: String,
+    ) -> Result<String, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get sender's spam score
+    #[method(name = "messaging_getSpamScore")]
+    async fn messaging_get_spam_score(
+        &self,
+        address: String,
+    ) -> Result<SpamReportInfo, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Check if an address is a contact of another
+    #[method(name = "messaging_isContact")]
+    async fn messaging_is_contact(
+        &self,
+        owner: String,
+        contact: String,
+    ) -> Result<bool, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Check if an address is blocked by another
+    #[method(name = "messaging_isBlocked")]
+    async fn messaging_is_blocked(
+        &self,
+        owner: String,
+        sender: String,
+    ) -> Result<bool, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Submit a sponsored message (meta-transaction)
+    #[method(name = "messaging_submitSponsored")]
+    async fn messaging_submit_sponsored(
+        &self,
+        request: SubmitSponsoredMessageRequest,
+    ) -> Result<SendTxResponse, jsonrpsee::types::ErrorObjectOwned>;
 }

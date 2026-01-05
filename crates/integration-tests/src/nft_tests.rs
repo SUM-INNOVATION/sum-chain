@@ -22,7 +22,9 @@ struct NftTestNode {
     db: Arc<Database>,
     state: Arc<StateManager>,
     nft_executor: NftExecutor,
+    params: ChainParams,
     validator_key_bytes: [u8; 32],
+    #[allow(dead_code)]
     chain_id: u64,
     #[allow(dead_code)]
     data_dir: TempDir,
@@ -34,7 +36,7 @@ impl NftTestNode {
         let db = Arc::new(Database::open_default(data_dir.path()).expect("Failed to open database"));
         let state = Arc::new(StateManager::new(db.clone(), chain_id));
         let params = ChainParams::default();
-        let nft_executor = NftExecutor::new(db.clone(), params);
+        let nft_executor = NftExecutor::new(db.clone(), params.clone());
 
         // Create validator key from bytes
         let validator_key = KeyPair::from_bytes(validator_key_bytes);
@@ -54,6 +56,7 @@ impl NftTestNode {
             db,
             state,
             nft_executor,
+            params,
             validator_key_bytes,
             chain_id,
             data_dir,
@@ -154,6 +157,9 @@ impl NftTestNode {
             data: serialized,
         };
 
+        // Calculate the required storage fee for the metadata
+        let storage_fee = self.params.calculate_nft_storage_fee(metadata.len());
+
         let result = self
             .nft_executor
             .execute(
@@ -161,7 +167,7 @@ impl NftTestNode {
                 &nft_data,
                 &self.state,
                 &Address::ZERO,
-                0,
+                storage_fee,
             )
             .map_err(|e| e.to_string())?;
 

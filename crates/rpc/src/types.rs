@@ -725,3 +725,112 @@ pub struct EpochInfo {
     /// Whether stake-weighted selection is enabled
     pub stake_weighted_selection: bool,
 }
+
+// ============================================================================
+// SRC-201 Messaging RPC Types
+// ============================================================================
+
+/// Messaging quota info for RPC responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessagingQuotaInfo {
+    /// Sender address
+    pub address: String,
+    /// Daily quota limit
+    pub daily_quota: u32,
+    /// Messages used today
+    pub used_today: u32,
+    /// Remaining messages
+    pub remaining: u32,
+    /// Whether sender has trust stake
+    pub has_trust_stake: bool,
+    /// Trust stake amount (if any)
+    pub trust_stake: Option<String>,
+}
+
+/// Messaging configuration info for RPC responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessagingConfigInfo {
+    /// Daily message quota per sender
+    pub daily_quota: u32,
+    /// Maximum message size in bytes
+    pub max_message_size: u32,
+    /// Minimum trust stake amount
+    pub min_trust_stake: String,
+    /// Whether gas sponsorship is enabled
+    pub sponsorship_enabled: bool,
+}
+
+/// Inbox filter info for RPC responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InboxFilterInfo {
+    /// Filter mode: "accept_all", "contacts_only", "staked_only"
+    pub mode: String,
+}
+
+/// Message event info for RPC responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageEventInfo {
+    /// Transaction hash that created this message
+    pub tx_hash: String,
+    /// Block height
+    pub block_height: u64,
+    /// Sender address
+    pub sender: String,
+    /// Recipient hash (BLAKE3 of recipient address)
+    pub recipient_hash: String,
+    /// Content type code
+    pub content_type: u8,
+    /// Message flags
+    pub flags: u16,
+    /// Whether message has payment attached
+    pub has_payment: bool,
+    /// Payment amount (if has_payment)
+    pub payment_amount: Option<String>,
+}
+
+/// Pending payment info for RPC responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingPaymentInfo {
+    /// Message ID (tx hash)
+    pub message_id: String,
+    /// Sender address
+    pub sender: String,
+    /// Recipient hash (hex)
+    pub recipient_hash: String,
+    /// Payment amount
+    pub amount: String,
+    /// Expiry timestamp
+    pub expiry: u64,
+}
+
+/// Submit sponsored message request
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubmitSponsoredMessageRequest {
+    /// Encoded SRC-201 message (hex)
+    pub message_data: String,
+    /// Recipient hash (hex)
+    pub recipient_hash: String,
+    /// Sender's signature (hex)
+    pub signature: String,
+    /// Sender's public key (hex)
+    pub sender_pubkey: String,
+    /// Sender's message nonce
+    pub nonce: u64,
+    /// Expiry timestamp
+    pub expiry: u64,
+    /// Optional koppa amount
+    pub koppa_amount: Option<String>,
+}
+
+/// Spam report info for RPC responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpamReportInfo {
+    /// Address of the reported sender
+    pub sender: String,
+    /// Current spam score
+    pub spam_score: u32,
+    /// Number of reports
+    pub report_count: u32,
+    /// Whether sender is restricted
+    pub is_restricted: bool,
+}

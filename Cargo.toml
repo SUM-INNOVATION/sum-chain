@@ -41,9 +41,12 @@ hex = "0.4"
 bs58 = "0.5"
 
 # Cryptography
-ed25519-dalek = { version = "2.1", features = ["serde", "rand_core"] }
+ed25519-dalek = { version = "2.1", features = ["serde", "rand_core", "hazmat"] }
 blake3 = "1.5"
 rand = "0.8"
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }
+chacha20poly1305 = "0.10"
+sha2 = "0.10"
 
 # Storage
 rocksdb = "0.22"

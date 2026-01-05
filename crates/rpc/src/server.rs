@@ -8,7 +8,7 @@ use jsonrpsee::server::{Server, ServerHandle};
 use sumchain_consensus::ConsensusEngine;
 use sumchain_primitives::{Address, Block, Hash, SignedTransaction};
 use sumchain_state::{Mempool, StateManager};
-use sumchain_storage::{BlockStore, Database, DelegationStore, NftStore, ReceiptStore, SlashingStore, StakingStore, TokenStore, TxStore, ValidatorSetStore};
+use sumchain_storage::{BlockStore, Database, DelegationStore, MessagingStore, NftStore, ReceiptStore, SlashingStore, StakingStore, TokenStore, TxStore, ValidatorSetStore};
 use tokio::sync::mpsc;
 use tracing::info;
 
@@ -1940,6 +1940,269 @@ impl SumChainApiServer for RpcServer {
         let proposer = self.consensus.get_proposer(height);
         let address = Address::from_public_key(&proposer);
         Ok(address.to_base58())
+    }
+
+    // ========================================================================
+    // SRC-201 Messaging Endpoints Implementation
+    // ========================================================================
+
+    async fn messaging_get_config(
+        &self,
+    ) -> std::result::Result<MessagingConfigInfo, jsonrpsee::types::ErrorObjectOwned> {
+        let store = MessagingStore::new(&self.db);
+        let daily_quota = store.get_daily_quota().map_err(|e| RpcError::Internal(e.to_string()))?;
+        let max_message_size = store.get_max_message_size().map_err(|e| RpcError::Internal(e.to_string()))?;
+        let min_trust_stake = store.get_min_trust_stake().map_err(|e| RpcError::Internal(e.to_string()))?;
+        let sponsorship_enabled = store.is_sponsorship_enabled().map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        Ok(MessagingConfigInfo {
+            daily_quota,
+            max_message_size,
+            min_trust_stake: min_trust_stake.to_string(),
+            sponsorship_enabled,
+        })
+    }
+
+    async fn messaging_get_quota(
+        &self,
+        address: String,
+    ) -> std::result::Result<MessagingQuotaInfo, jsonrpsee::types::ErrorObjectOwned> {
+        let addr = Address::from_base58(&address)
+            .or_else(|_| Address::from_hex(&address))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid address: {}", e)))?;
+
+        let store = MessagingStore::new(&self.db);
+        let base_quota = store.get_daily_quota().map_err(|e| RpcError::Internal(e.to_string()))?;
+        let min_trust_stake = store.get_min_trust_stake().map_err(|e| RpcError::Internal(e.to_string()))?;
+        let trust_stake = store.get_stake_balance(&addr).map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        // Get today's day number
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let today = (now / 86400) as u32;
+        let used_today = store.get_daily_message_count(&addr, today).map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        // Staked senders get 5x quota
+        let daily_quota = if trust_stake >= min_trust_stake {
+            base_quota.saturating_mul(5)
+        } else {
+            base_quota
+        };
+
+        let remaining = daily_quota.saturating_sub(used_today);
+
+        Ok(MessagingQuotaInfo {
+            address: addr.to_base58(),
+            daily_quota,
+            used_today,
+            remaining,
+            has_trust_stake: trust_stake >= min_trust_stake,
+            trust_stake: if trust_stake > 0 {
+                Some(trust_stake.to_string())
+            } else {
+                None
+            },
+        })
+    }
+
+    async fn messaging_get_inbox_filter(
+        &self,
+        address: String,
+    ) -> std::result::Result<Option<InboxFilterInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let addr = Address::from_base58(&address)
+            .or_else(|_| Address::from_hex(&address))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid address: {}", e)))?;
+
+        // Compute recipient hash from address
+        let recipient_hash = *blake3::hash(addr.as_bytes()).as_bytes();
+
+        let store = MessagingStore::new(&self.db);
+        let filter = store.get_inbox_filter(&recipient_hash).map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        let mode = match filter {
+            sumchain_primitives::InboxFilter::AcceptAll => "accept_all",
+            sumchain_primitives::InboxFilter::ContactsOnly => "contacts_only",
+            sumchain_primitives::InboxFilter::StakedOnly => "staked_only",
+        };
+
+        Ok(Some(InboxFilterInfo {
+            mode: mode.to_string(),
+        }))
+    }
+
+    async fn messaging_get_messages(
+        &self,
+        recipient_hash: String,
+        limit: Option<u32>,
+        _offset: Option<u32>,
+    ) -> std::result::Result<Vec<MessageEventInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let hash_bytes = hex::decode(recipient_hash.strip_prefix("0x").unwrap_or(&recipient_hash))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid recipient hash: {}", e)))?;
+
+        if hash_bytes.len() != 32 {
+            return Err(RpcError::InvalidParams("Recipient hash must be 32 bytes".to_string()).into());
+        }
+
+        let mut hash_arr = [0u8; 32];
+        hash_arr.copy_from_slice(&hash_bytes);
+
+        let store = MessagingStore::new(&self.db);
+        // Get messages from block 0 to latest (u64::MAX)
+        let events = store
+            .get_messages_by_recipient(&hash_arr, 0, u64::MAX, limit.unwrap_or(100) as usize)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        let results: Vec<MessageEventInfo> = events
+            .into_iter()
+            .map(|e| MessageEventInfo {
+                tx_hash: format!("0x{}", hex::encode(e.message_id.as_bytes())),
+                block_height: e.block_height,
+                sender: e.sender.to_base58(),
+                recipient_hash: format!("0x{}", hex::encode(e.recipient_hash)),
+                content_type: 0, // Not stored in MessageEvent
+                flags: 0, // Not stored in MessageEvent
+                has_payment: e.has_payment,
+                payment_amount: None, // Amount not stored in MessageEvent
+            })
+            .collect();
+
+        Ok(results)
+    }
+
+    async fn messaging_get_sent_messages(
+        &self,
+        _sender: String,
+        _limit: Option<u32>,
+        _offset: Option<u32>,
+    ) -> std::result::Result<Vec<MessageEventInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        // Sender-based indexing is not yet implemented in MessagingStore
+        // Would require iterating all events which is expensive
+        Err(RpcError::Internal("Sender-based message indexing not yet implemented".to_string()).into())
+    }
+
+    async fn messaging_get_pending_payment(
+        &self,
+        message_id: String,
+    ) -> std::result::Result<Option<PendingPaymentInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let hash = Hash::from_hex(&message_id)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid message ID: {}", e)))?;
+
+        let store = MessagingStore::new(&self.db);
+        match store.get_pending_payment(&hash) {
+            Ok(Some(payment)) => Ok(Some(PendingPaymentInfo {
+                message_id: format!("0x{}", hex::encode(hash.as_bytes())),
+                sender: payment.sender.to_base58(),
+                recipient_hash: format!("0x{}", hex::encode(payment.recipient_hash)),
+                amount: payment.amount.to_string(),
+                expiry: payment.expiry,
+            })),
+            Ok(None) => Ok(None),
+            Err(e) => Err(RpcError::Internal(e.to_string()).into()),
+        }
+    }
+
+    async fn messaging_get_pending_payments(
+        &self,
+        _recipient: String,
+    ) -> std::result::Result<Vec<PendingPaymentInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        // Recipient-based pending payment listing is not yet implemented
+        // Would require iterating all payments which is expensive
+        Err(RpcError::Internal("Pending payment listing not yet implemented".to_string()).into())
+    }
+
+    async fn messaging_get_trust_stake(
+        &self,
+        address: String,
+    ) -> std::result::Result<String, jsonrpsee::types::ErrorObjectOwned> {
+        let addr = Address::from_base58(&address)
+            .or_else(|_| Address::from_hex(&address))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid address: {}", e)))?;
+
+        let store = MessagingStore::new(&self.db);
+        let stake = store.get_stake_balance(&addr).map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        Ok(stake.to_string())
+    }
+
+    async fn messaging_get_spam_score(
+        &self,
+        address: String,
+    ) -> std::result::Result<SpamReportInfo, jsonrpsee::types::ErrorObjectOwned> {
+        let addr = Address::from_base58(&address)
+            .or_else(|_| Address::from_hex(&address))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid address: {}", e)))?;
+
+        let store = MessagingStore::new(&self.db);
+        let spam_score = store.get_spam_score(&addr).map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        // Consider sender restricted if spam score is 50 or higher
+        let is_restricted = spam_score >= 50;
+
+        Ok(SpamReportInfo {
+            sender: addr.to_base58(),
+            spam_score,
+            report_count: 0, // Not tracked separately in current implementation
+            is_restricted,
+        })
+    }
+
+    async fn messaging_is_contact(
+        &self,
+        owner: String,
+        contact: String,
+    ) -> std::result::Result<bool, jsonrpsee::types::ErrorObjectOwned> {
+        let owner_addr = Address::from_base58(&owner)
+            .or_else(|_| Address::from_hex(&owner))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid owner address: {}", e)))?;
+
+        let contact_addr = Address::from_base58(&contact)
+            .or_else(|_| Address::from_hex(&contact))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid contact address: {}", e)))?;
+
+        // Compute hashes
+        let owner_hash = *blake3::hash(owner_addr.as_bytes()).as_bytes();
+        let contact_hash = *blake3::hash(contact_addr.as_bytes()).as_bytes();
+
+        let store = MessagingStore::new(&self.db);
+        store
+            .is_contact(&owner_hash, &contact_hash)
+            .map_err(|e| RpcError::Internal(e.to_string()).into())
+    }
+
+    async fn messaging_is_blocked(
+        &self,
+        owner: String,
+        sender: String,
+    ) -> std::result::Result<bool, jsonrpsee::types::ErrorObjectOwned> {
+        let owner_addr = Address::from_base58(&owner)
+            .or_else(|_| Address::from_hex(&owner))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid owner address: {}", e)))?;
+
+        let sender_addr = Address::from_base58(&sender)
+            .or_else(|_| Address::from_hex(&sender))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid sender address: {}", e)))?;
+
+        // Compute owner hash
+        let owner_hash = *blake3::hash(owner_addr.as_bytes()).as_bytes();
+
+        let store = MessagingStore::new(&self.db);
+        store
+            .is_blocked(&owner_hash, &sender_addr)
+            .map_err(|e| RpcError::Internal(e.to_string()).into())
+    }
+
+    async fn messaging_submit_sponsored(
+        &self,
+        _request: SubmitSponsoredMessageRequest,
+    ) -> std::result::Result<SendTxResponse, jsonrpsee::types::ErrorObjectOwned> {
+        // Sponsored message submission requires a relay service
+        // For now, return an error indicating this endpoint requires additional setup
+        Err(RpcError::Internal(
+            "Sponsored message submission requires a relay service configuration".to_string(),
+        )
+        .into())
     }
 }
 

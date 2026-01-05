@@ -529,6 +529,117 @@ enum Commands {
         #[arg(long)]
         validator: String,
     },
+
+    // ========================================================================
+    // SRC-201 Messaging Commands
+    // ========================================================================
+
+    /// Get messaging configuration
+    MsgConfig {
+        /// RPC URL
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+    },
+
+    /// Get sender's messaging quota
+    MsgQuota {
+        /// RPC URL
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+
+        /// Address to check quota for
+        #[arg(long)]
+        address: String,
+    },
+
+    /// Get inbox filter for an address
+    MsgInbox {
+        /// RPC URL
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+
+        /// Address to check filter for
+        #[arg(long)]
+        address: String,
+    },
+
+    /// Get messages for a recipient (by hash)
+    MsgList {
+        /// RPC URL
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+
+        /// Recipient hash (hex) or address (calculates hash)
+        #[arg(long)]
+        recipient: String,
+
+        /// Maximum number of messages to fetch
+        #[arg(long, default_value = "20")]
+        limit: u32,
+    },
+
+    /// Get trust stake for an address
+    MsgStake {
+        /// RPC URL
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+
+        /// Address to check stake for
+        #[arg(long)]
+        address: String,
+    },
+
+    /// Get spam score for an address
+    MsgSpamScore {
+        /// RPC URL
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+
+        /// Address to check spam score for
+        #[arg(long)]
+        address: String,
+    },
+
+    /// Check if an address is a contact
+    MsgIsContact {
+        /// RPC URL
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+
+        /// Owner address
+        #[arg(long)]
+        owner: String,
+
+        /// Contact address to check
+        #[arg(long)]
+        contact: String,
+    },
+
+    /// Check if an address is blocked
+    MsgIsBlocked {
+        /// RPC URL
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+
+        /// Owner address
+        #[arg(long)]
+        owner: String,
+
+        /// Sender address to check if blocked
+        #[arg(long)]
+        sender: String,
+    },
+
+    /// Get pending payment info for a message
+    MsgPendingPayment {
+        /// RPC URL
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+
+        /// Message ID (transaction hash, hex)
+        #[arg(long)]
+        message_id: String,
+    },
 }
 
 #[tokio::main]
@@ -1449,6 +1560,160 @@ async fn main() -> Result<()> {
             print_separator();
             print_koppa_field("Total Delegated", total_delegated);
             print_field("Delegator Count", &summary.delegator_count.to_string());
+        }
+
+        // ====================================================================
+        // SRC-201 Messaging Commands
+        // ====================================================================
+
+        Commands::MsgConfig { rpc } => {
+            let config = tx::messaging_get_config(&rpc).await?;
+
+            print_header("Messaging Configuration");
+            println!();
+            print_field("Daily Quota", &config.daily_quota.to_string());
+            print_field("Max Message Size", &format!("{} bytes", config.max_message_size));
+            let min_stake: u128 = config.min_trust_stake.parse().unwrap_or(0);
+            print_koppa_field("Min Trust Stake", min_stake);
+            print_field(
+                "Sponsorship",
+                if config.sponsorship_enabled { "Enabled" } else { "Disabled" },
+            );
+        }
+
+        Commands::MsgQuota { rpc, address } => {
+            let quota = tx::messaging_get_quota(&rpc, &address).await?;
+
+            print_header("Messaging Quota");
+            println!();
+            print_field("Address", &quota.address);
+            print_separator();
+            print_field("Daily Quota", &quota.daily_quota.to_string());
+            print_field("Used Today", &quota.used_today.to_string());
+            print_field("Remaining", &quota.remaining.to_string());
+            print_separator();
+            print_field(
+                "Trust Stake Status",
+                if quota.has_trust_stake {
+                    "Staked (5x quota)"
+                } else {
+                    "Not staked"
+                },
+            );
+            if let Some(stake) = quota.trust_stake {
+                let stake_amount: u128 = stake.parse().unwrap_or(0);
+                print_koppa_field("Stake Amount", stake_amount);
+            }
+        }
+
+        Commands::MsgInbox { rpc, address } => {
+            let filter = tx::messaging_get_inbox_filter(&rpc, &address).await?;
+
+            print_header("Inbox Filter");
+            println!();
+            print_field("Address", &address);
+            match filter {
+                Some(f) => {
+                    print_field("Mode", &f.mode);
+                }
+                None => {
+                    print_field("Mode", "accept_all (default)");
+                }
+            }
+        }
+
+        Commands::MsgList { rpc, recipient, limit } => {
+            let messages = tx::messaging_get_messages(&rpc, &recipient, limit).await?;
+
+            if messages.is_empty() {
+                print_info("No messages found for this recipient");
+            } else {
+                print_header(&format!("Messages ({} found)", messages.len()));
+                println!();
+
+                for (i, msg) in messages.iter().enumerate() {
+                    println!(
+                        "  {} Block {} | {}",
+                        format!("[{}]", i + 1).dimmed(),
+                        msg.block_height,
+                        format_address_short(&msg.sender).cyan()
+                    );
+                    println!(
+                        "      {}: {} | Payment: {}",
+                        "TX".dimmed(),
+                        format_address_short(&msg.tx_hash),
+                        if msg.has_payment { "Yes".green().to_string() } else { "No".dimmed().to_string() }
+                    );
+                }
+            }
+        }
+
+        Commands::MsgStake { rpc, address } => {
+            let stake = tx::messaging_get_trust_stake(&rpc, &address).await?;
+            let stake_amount: u128 = stake.parse().unwrap_or(0);
+
+            print_header("Trust Stake");
+            println!();
+            print_field("Address", &address);
+            print_koppa_field("Stake Amount", stake_amount);
+        }
+
+        Commands::MsgSpamScore { rpc, address } => {
+            let info = tx::messaging_get_spam_score(&rpc, &address).await?;
+
+            print_header("Spam Score");
+            println!();
+            print_field("Address", &info.sender);
+            print_field("Score", &info.spam_score.to_string());
+            print_field("Report Count", &info.report_count.to_string());
+            print_field(
+                "Status",
+                if info.is_restricted {
+                    "Restricted".red().to_string()
+                } else {
+                    "Good".green().to_string()
+                }.as_str(),
+            );
+        }
+
+        Commands::MsgIsContact { rpc, owner, contact } => {
+            let is_contact = tx::messaging_is_contact(&rpc, &owner, &contact).await?;
+
+            if is_contact {
+                print_success(&format!("{} is a contact of {}", contact, owner));
+            } else {
+                print_info(&format!("{} is NOT a contact of {}", contact, owner));
+            }
+        }
+
+        Commands::MsgIsBlocked { rpc, owner, sender } => {
+            let is_blocked = tx::messaging_is_blocked(&rpc, &owner, &sender).await?;
+
+            if is_blocked {
+                print_warning(&format!("{} is BLOCKED by {}", sender, owner));
+            } else {
+                print_info(&format!("{} is not blocked by {}", sender, owner));
+            }
+        }
+
+        Commands::MsgPendingPayment { rpc, message_id } => {
+            let payment = tx::messaging_get_pending_payment(&rpc, &message_id).await?;
+
+            match payment {
+                Some(p) => {
+                    let amount: u128 = p.amount.parse().unwrap_or(0);
+
+                    print_header("Pending Payment");
+                    println!();
+                    print_field("Message ID", &p.message_id);
+                    print_field("Sender", &p.sender);
+                    print_field("Recipient Hash", &p.recipient_hash);
+                    print_separator();
+                    print_koppa_field("Amount", amount);
+                    print_field("Expiry", &format!("Timestamp {}", p.expiry));
+                }
+                None => print_info("No pending payment found for this message"),
+            }
         }
     }
 

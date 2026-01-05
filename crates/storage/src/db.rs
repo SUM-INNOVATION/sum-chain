@@ -89,6 +89,28 @@ pub mod cf {
     pub const MISSED_BLOCKS: &str = "missed_blocks";
     /// Validator sets by epoch (epoch -> ValidatorSet)
     pub const VALIDATOR_SETS: &str = "validator_sets";
+
+    // SRC-201 Messaging column families
+    /// Messaging configuration
+    pub const MESSAGING_CONFIG: &str = "messaging_config";
+    /// Message sender nonces (sender -> nonce)
+    pub const MESSAGING_SENDER_NONCES: &str = "messaging_sender_nonces";
+    /// Daily message counts (sender + day -> count)
+    pub const MESSAGING_DAILY_COUNTS: &str = "messaging_daily_counts";
+    /// Anti-spam stakes (address -> balance)
+    pub const MESSAGING_STAKES: &str = "messaging_stakes";
+    /// Spam scores (address -> score)
+    pub const MESSAGING_SPAM_SCORES: &str = "messaging_spam_scores";
+    /// Inbox filters (recipient_hash -> mode)
+    pub const MESSAGING_INBOX_FILTERS: &str = "messaging_inbox_filters";
+    /// Contacts (recipient_hash + sender_hash -> bool)
+    pub const MESSAGING_CONTACTS: &str = "messaging_contacts";
+    /// Blocked senders (recipient_hash + sender -> bool)
+    pub const MESSAGING_BLOCKED: &str = "messaging_blocked";
+    /// Pending payments (message_id -> PendingPayment)
+    pub const MESSAGING_PENDING_PAYMENTS: &str = "messaging_pending_payments";
+    /// Message events for indexing (recipient_hash + block_height + idx -> MessageEvent)
+    pub const MESSAGING_EVENTS: &str = "messaging_events";
 }
 
 /// All column families used by the database
@@ -117,6 +139,17 @@ pub const ALL_CFS: &[&str] = &[
     cf::VALIDATOR_SIGNING_INFO,
     cf::MISSED_BLOCKS,
     cf::VALIDATOR_SETS,
+    // SRC-201 Messaging
+    cf::MESSAGING_CONFIG,
+    cf::MESSAGING_SENDER_NONCES,
+    cf::MESSAGING_DAILY_COUNTS,
+    cf::MESSAGING_STAKES,
+    cf::MESSAGING_SPAM_SCORES,
+    cf::MESSAGING_INBOX_FILTERS,
+    cf::MESSAGING_CONTACTS,
+    cf::MESSAGING_BLOCKED,
+    cf::MESSAGING_PENDING_PAYMENTS,
+    cf::MESSAGING_EVENTS,
 ];
 
 /// Database configuration

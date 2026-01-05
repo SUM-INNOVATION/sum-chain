@@ -9,6 +9,7 @@
 use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
 
+use crate::messaging::MessagingTxData;
 use crate::staking::StakingTxData;
 use crate::{Address, Balance, ChainId, Hash, Nonce};
 
@@ -28,6 +29,8 @@ pub enum TxType {
     ContractCall = 4,
     /// Staking operation
     Staking = 5,
+    /// Messaging operation (SRC-201)
+    Messaging = 6,
 }
 
 impl TxType {
@@ -40,6 +43,7 @@ impl TxType {
             3 => Some(TxType::ContractDeploy),
             4 => Some(TxType::ContractCall),
             5 => Some(TxType::Staking),
+            6 => Some(TxType::Messaging),
             _ => None,
         }
     }
@@ -280,7 +284,7 @@ pub struct TransactionV2 {
     pub payload: TxPayload,
 }
 
-/// Transaction payload - transfer, NFT, Token, Contract, or Staking operation
+/// Transaction payload - transfer, NFT, Token, Contract, Staking, or Messaging operation
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TxPayload {
     /// Native token transfer
@@ -300,6 +304,8 @@ pub enum TxPayload {
     ContractCall(ContractCallData),
     /// Staking operation
     Staking(StakingTxData),
+    /// Messaging operation (SRC-201)
+    Messaging(MessagingTxData),
 }
 
 impl TransactionV2 {
@@ -406,6 +412,23 @@ impl TransactionV2 {
         }
     }
 
+    /// Create a new messaging transaction
+    pub fn messaging(
+        chain_id: ChainId,
+        from: Address,
+        fee: Balance,
+        nonce: Nonce,
+        messaging_data: MessagingTxData,
+    ) -> Self {
+        Self {
+            chain_id,
+            from,
+            fee,
+            nonce,
+            payload: TxPayload::Messaging(messaging_data),
+        }
+    }
+
     /// Get the transaction type
     pub fn tx_type(&self) -> TxType {
         match &self.payload {
@@ -415,6 +438,7 @@ impl TransactionV2 {
             TxPayload::ContractDeploy(_) => TxType::ContractDeploy,
             TxPayload::ContractCall(_) => TxType::ContractCall,
             TxPayload::Staking(_) => TxType::Staking,
+            TxPayload::Messaging(_) => TxType::Messaging,
         }
     }
 
@@ -443,6 +467,7 @@ impl TransactionV2 {
             TxPayload::Token(_) => None,
             TxPayload::ContractDeploy(_) => None,
             TxPayload::Staking(_) => None,
+            TxPayload::Messaging(_) => None, // Recipient is encrypted in message
         }
     }
 
@@ -455,6 +480,7 @@ impl TransactionV2 {
             TxPayload::Nft(_) => 0,
             TxPayload::Token(_) => 0,
             TxPayload::Staking(_) => 0,
+            TxPayload::Messaging(_) => 0, // Koppa attachment is inside message data
         }
     }
 
@@ -516,6 +542,19 @@ impl TransactionV2 {
     /// Check if this is a staking transaction
     pub fn is_staking(&self) -> bool {
         matches!(self.payload, TxPayload::Staking(_))
+    }
+
+    /// Get messaging data if this is a Messaging transaction
+    pub fn messaging_data(&self) -> Option<&MessagingTxData> {
+        match &self.payload {
+            TxPayload::Messaging(data) => Some(data),
+            _ => None,
+        }
+    }
+
+    /// Check if this is a messaging transaction
+    pub fn is_messaging(&self) -> bool {
+        matches!(self.payload, TxPayload::Messaging(_))
     }
 }
 
@@ -658,6 +697,22 @@ impl SignedTransaction {
     /// Check if this is a Staking transaction
     pub fn is_staking(&self) -> bool {
         self.tx_type() == TxType::Staking
+    }
+
+    /// Get Messaging data if this is a Messaging transaction
+    pub fn messaging_data(&self) -> Option<&MessagingTxData> {
+        match &self.inner {
+            TxInner::V2(tx) => match &tx.payload {
+                TxPayload::Messaging(data) => Some(data),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Check if this is a Messaging transaction
+    pub fn is_messaging(&self) -> bool {
+        self.tx_type() == TxType::Messaging
     }
 
     /// Compute the transaction hash (unique identifier)

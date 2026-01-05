@@ -9,7 +9,10 @@ use std::fs;
 use std::path::Path;
 
 use sumchain_crypto::PublicKey;
-use sumchain_primitives::{Address, Balance, Block, ChainId, Hash, StakingParams, Timestamp};
+use sumchain_primitives::{
+    Address, Balance, Block, ChainId, Hash, StakingParams, Timestamp,
+    DEFAULT_DAILY_QUOTA, DEFAULT_MAX_MESSAGE_SIZE, DEFAULT_MIN_TRUST_STAKE,
+};
 use thiserror::Error;
 
 /// Genesis configuration errors
@@ -66,6 +69,9 @@ pub struct ChainParams {
     /// Staking parameters (optional - uses defaults if not specified)
     #[serde(default)]
     pub staking: Option<StakingParams>,
+    /// SRC-201 Messaging parameters (optional - uses defaults if not specified)
+    #[serde(default)]
+    pub messaging: Option<MessagingParams>,
 }
 
 fn default_finality_depth() -> u64 {
@@ -88,6 +94,82 @@ fn default_max_contract_gas() -> u64 {
     10_000_000 // 10M gas limit per transaction
 }
 
+/// SRC-201 Messaging Parameters
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessagingParams {
+    /// Daily free message quota per address
+    #[serde(default = "default_msg_daily_quota")]
+    pub daily_quota: u32,
+    /// Maximum message size in bytes
+    #[serde(default = "default_msg_max_size")]
+    pub max_message_size: u32,
+    /// Minimum stake for trusted sender tier
+    #[serde(default = "default_msg_min_stake")]
+    pub min_trust_stake: Balance,
+    /// Enable gas sponsorship for messages
+    #[serde(default = "default_sponsorship_enabled")]
+    pub sponsorship_enabled: bool,
+    /// Initial sponsorship fund (Koppa)
+    #[serde(default)]
+    pub initial_sponsorship_fund: Balance,
+    /// Registry admin address (optional)
+    #[serde(default)]
+    pub registry_admin: Option<String>,
+    /// Spam score threshold for restrictions
+    #[serde(default = "default_spam_threshold")]
+    pub spam_threshold: u32,
+    /// High spam score requiring stake
+    #[serde(default = "default_high_spam_threshold")]
+    pub high_spam_threshold: u32,
+    /// Cooldown blocks before stake withdrawal
+    #[serde(default = "default_stake_cooldown")]
+    pub stake_cooldown_blocks: u64,
+}
+
+fn default_msg_daily_quota() -> u32 {
+    DEFAULT_DAILY_QUOTA
+}
+
+fn default_msg_max_size() -> u32 {
+    DEFAULT_MAX_MESSAGE_SIZE
+}
+
+fn default_msg_min_stake() -> Balance {
+    DEFAULT_MIN_TRUST_STAKE
+}
+
+fn default_sponsorship_enabled() -> bool {
+    true
+}
+
+fn default_spam_threshold() -> u32 {
+    50
+}
+
+fn default_high_spam_threshold() -> u32 {
+    80
+}
+
+fn default_stake_cooldown() -> u64 {
+    50400 // ~7 days at 12s blocks
+}
+
+impl Default for MessagingParams {
+    fn default() -> Self {
+        Self {
+            daily_quota: default_msg_daily_quota(),
+            max_message_size: default_msg_max_size(),
+            min_trust_stake: default_msg_min_stake(),
+            sponsorship_enabled: default_sponsorship_enabled(),
+            initial_sponsorship_fund: 0,
+            registry_admin: None,
+            spam_threshold: default_spam_threshold(),
+            high_spam_threshold: default_high_spam_threshold(),
+            stake_cooldown_blocks: default_stake_cooldown(),
+        }
+    }
+}
+
 impl Default for ChainParams {
     fn default() -> Self {
         Self {
@@ -101,6 +183,7 @@ impl Default for ChainParams {
             min_contract_gas: default_min_contract_gas(),
             max_contract_gas: default_max_contract_gas(),
             staking: Some(StakingParams::default()),
+            messaging: Some(MessagingParams::default()),
         }
     }
 }

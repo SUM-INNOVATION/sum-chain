@@ -26,6 +26,7 @@ argon2 = { workspace = true }
 aes-gcm = { workspace = true }
 zeroize = { workspace = true }
 rand = { workspace = true }
+blake3 = { workspace = true }
 rpassword = "7.3"
 colored = "2.1"
 dialoguer = "0.11"

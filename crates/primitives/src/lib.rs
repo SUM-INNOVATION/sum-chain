@@ -6,6 +6,7 @@
 pub mod address;
 pub mod block;
 pub mod hash;
+pub mod messaging;
 pub mod receipt;
 pub mod staking;
 pub mod transaction;
@@ -20,6 +21,17 @@ pub use staking::{
     StakingParams, StakingTxData, SubmitEvidenceData, UnbondingDelegation, UndelegateData,
     UnstakeData, UpdateValidatorData, ValidatorInfo, ValidatorSet, ValidatorSetEntry,
     ValidatorSigningInfo, ValidatorStatus, WithdrawUnbondedData,
+};
+pub use messaging::{
+    validate_message_format, AttachmentType, BlockSenderData, ClaimPaymentData, ContactData,
+    ContentType, ExternalProtocol, FundRegistryData, InboxFilter, MessageEvent, MessageFlags,
+    MessageHeader, MessagingOperation, MessagingTxData, PendingPayment, QuotaInfo, ReportSpamData,
+    SendMessageData, SendMessageWithPaymentData, SetDailyQuotaData, SetInboxFilterData,
+    SetMaxMessageSizeData, SetMinTrustStakeData, SetSponsorshipEnabledData, SpamReport,
+    SponsoredMessage, StakeForTrustData, UnstakeData as MessagingUnstakeData,
+    DEFAULT_DAILY_QUOTA, DEFAULT_MAX_MESSAGE_SIZE, DEFAULT_MIN_TRUST_STAKE,
+    SRC201_HEADER_SIZE, SRC201_KDF_CONTEXT, SRC201_MAGIC, SRC201_NONCE_SIZE, SRC201_TAG_SIZE,
+    SRC201_VERSION,
 };
 pub use transaction::{
     NftOperation, NftTxData, SignedTransaction, TokenOperation, TokenTxData, Transaction,
