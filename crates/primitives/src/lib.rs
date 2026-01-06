@@ -5,6 +5,7 @@
 
 pub mod address;
 pub mod block;
+pub mod docclass;
 pub mod hash;
 pub mod messaging;
 pub mod receipt;
@@ -36,6 +37,14 @@ pub use messaging::{
 pub use transaction::{
     NftOperation, NftTxData, SignedTransaction, TokenOperation, TokenTxData, Transaction,
     TransactionV2, TxInner, TxPayload, TxType,
+};
+pub use docclass::{
+    AcademicCredential, CredentialAttribute, CredentialId, CredentialMetadata, DocClassEvent,
+    DocClassIssuer, DocClassIssuerStatus, DocClassIssuerType, DocClassOperation, DocClassTxData,
+    DocSubcode, EligibilityAttestation, EligibilityType, IdentityKey, IdentityRoot, IdentityStatus,
+    IssuerKey, KeyPurpose, KeyType, RevocationReason, RevocationRecord, RevocationStatus,
+    ServiceEndpoint, ZkProofInputs, generate_commitment, generate_credential_id, generate_nullifier,
+    generate_subject_commitment,
 };
 
 /// Chain ID type - identifies the network

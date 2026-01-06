@@ -834,3 +834,180 @@ pub struct SpamReportInfo {
     /// Whether sender is restricted
     pub is_restricted: bool,
 }
+
+// ============================================================================
+// DocClass Types (SRC-80X/81X)
+// ============================================================================
+
+/// DocClass identity root info for RPC responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocClassIdentityInfo {
+    /// Identity ID (hex)
+    pub identity_id: String,
+    /// Subject commitment (hex)
+    pub subject_commitment: String,
+    /// Primary controller address
+    pub controller: String,
+    /// Additional controller addresses
+    pub additional_controllers: Vec<String>,
+    /// Active keys
+    pub keys: Vec<DocClassKeyInfo>,
+    /// Service endpoints
+    pub services: Vec<DocClassServiceInfo>,
+    /// Creation timestamp
+    pub created_at: u64,
+    /// Last update timestamp
+    pub updated_at: u64,
+    /// Identity status
+    pub status: String,
+}
+
+/// DocClass key info for RPC responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocClassKeyInfo {
+    /// Key ID
+    pub key_id: String,
+    /// Key type
+    pub key_type: String,
+    /// Public key (hex)
+    pub public_key: String,
+    /// Key purposes
+    pub purposes: Vec<String>,
+    /// When key was added
+    pub added_at: u64,
+    /// Expiry timestamp (0 = no expiry)
+    pub expires_at: u64,
+    /// Whether key is active
+    pub active: bool,
+}
+
+/// DocClass service endpoint info for RPC responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocClassServiceInfo {
+    /// Service ID
+    pub service_id: String,
+    /// Service type
+    pub service_type: String,
+    /// Endpoint URL
+    pub endpoint: String,
+    /// Optional description
+    pub description: Option<String>,
+}
+
+/// DocClass credential info for RPC responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocClassCredentialInfo {
+    /// Credential ID (hex)
+    pub credential_id: String,
+    /// Document subcode (e.g., 802, 810)
+    pub subcode: u16,
+    /// Subcode name
+    pub subcode_name: String,
+    /// Subject commitment (hex)
+    pub subject_commitment: String,
+    /// Issuer address
+    pub issuer: String,
+    /// Jurisdiction code
+    pub jurisdiction: String,
+    /// Schema hash (hex)
+    pub schema_hash: String,
+    /// Content commitment (hex)
+    pub content_commitment: String,
+    /// Issuance timestamp
+    pub issued_at: u64,
+    /// Valid from timestamp
+    pub valid_from: u64,
+    /// Expiry timestamp (0 = no expiry)
+    pub expires_at: u64,
+    /// Revocation status
+    pub revocation_status: String,
+    /// If superseded, the new credential ID
+    pub superseded_by: Option<String>,
+    /// Credential metadata (if applicable)
+    pub metadata: Option<DocClassCredentialMetadata>,
+}
+
+/// DocClass credential metadata for RPC responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocClassCredentialMetadata {
+    /// Credential title
+    pub title: String,
+    /// Credential type
+    pub credential_type: String,
+    /// Program/field (if applicable)
+    pub program: Option<String>,
+    /// Issue date
+    pub issue_date: String,
+    /// Completion date (if applicable)
+    pub completion_date: Option<String>,
+}
+
+/// DocClass issuer info for RPC responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocClassIssuerInfo {
+    /// Issuer address
+    pub address: String,
+    /// Issuer name
+    pub name: String,
+    /// Issuer type
+    pub issuer_type: String,
+    /// Authorized jurisdictions
+    pub jurisdictions: Vec<String>,
+    /// Authorized document subcodes
+    pub authorized_subcodes: Vec<u16>,
+    /// Active keys
+    pub keys: Vec<DocClassIssuerKeyInfo>,
+    /// Registration timestamp
+    pub registered_at: u64,
+    /// Last update timestamp
+    pub updated_at: u64,
+    /// Issuer status
+    pub status: String,
+    /// Stake amount
+    pub stake_amount: String,
+}
+
+/// DocClass issuer key info for RPC responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocClassIssuerKeyInfo {
+    /// Key ID
+    pub key_id: String,
+    /// Public key (hex)
+    pub public_key: String,
+    /// Key type
+    pub key_type: String,
+    /// When key was added
+    pub added_at: u64,
+    /// Expiry timestamp
+    pub expires_at: u64,
+    /// Whether key is active
+    pub active: bool,
+    /// Whether this is the primary key
+    pub is_primary: bool,
+}
+
+/// DocClass configuration info for RPC responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocClassConfigInfo {
+    /// Minimum issuer stake required
+    pub min_issuer_stake: String,
+    /// Whether issuer stake is required
+    pub require_issuer_stake: bool,
+    /// Maximum credential validity duration (seconds)
+    pub max_credential_validity: u64,
+    /// Admin address (if any)
+    pub admin: Option<String>,
+}
+
+/// DocClass summary for RPC responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocClassSummary {
+    /// Total identity roots
+    pub total_identities: u64,
+    /// Total credentials issued
+    pub total_credentials: u64,
+    /// Total active issuers
+    pub total_issuers: u64,
+    /// Total revocations
+    pub total_revocations: u64,
+}

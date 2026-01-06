@@ -5,8 +5,9 @@ use jsonrpsee::proc_macros::rpc;
 use crate::metrics::MetricsSnapshot;
 use crate::types::{
     AccountInfo, BlockInfo, ContractCallResult, ContractInfo, DelegationRpcInfo,
-    DelegatorSummary, EpochInfo, FinalityInfo, GasEstimateResult, HealthResponse,
-    InboxFilterInfo, MessageEventInfo, MessagingConfigInfo, MessagingQuotaInfo,
+    DelegatorSummary, DocClassConfigInfo, DocClassCredentialInfo, DocClassIdentityInfo,
+    DocClassIssuerInfo, DocClassSummary, EpochInfo, FinalityInfo, GasEstimateResult,
+    HealthResponse, InboxFilterInfo, MessageEventInfo, MessagingConfigInfo, MessagingQuotaInfo,
     NftCollectionInfo, NftOwnerTokens, NftTokenInfo, NodeInfo, P2pStats, PendingPaymentInfo,
     ReceiptInfo, RpcPeerInfo, SendTxResponse, SlashingRecordRpcInfo, SlashingSummary,
     SpamReportInfo, StakingParamsInfo, StakingSummary, StakingValidatorInfo,
@@ -619,4 +620,97 @@ pub trait SumChainApi {
         &self,
         request: SubmitSponsoredMessageRequest,
     ) -> Result<SendTxResponse, jsonrpsee::types::ErrorObjectOwned>;
+
+    // ========================================================================
+    // SRC-80X/81X DocClass Endpoints
+    // ========================================================================
+
+    /// Get DocClass configuration
+    #[method(name = "docclass_getConfig")]
+    async fn docclass_get_config(
+        &self,
+    ) -> Result<DocClassConfigInfo, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get DocClass summary statistics
+    #[method(name = "docclass_getSummary")]
+    async fn docclass_get_summary(
+        &self,
+    ) -> Result<DocClassSummary, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get identity root by ID (hex)
+    #[method(name = "docclass_getIdentity")]
+    async fn docclass_get_identity(
+        &self,
+        identity_id: String,
+    ) -> Result<Option<DocClassIdentityInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get identity root by controller address
+    #[method(name = "docclass_getIdentityByController")]
+    async fn docclass_get_identity_by_controller(
+        &self,
+        controller: String,
+    ) -> Result<Option<DocClassIdentityInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get credential by ID (hex)
+    #[method(name = "docclass_getCredential")]
+    async fn docclass_get_credential(
+        &self,
+        credential_id: String,
+    ) -> Result<Option<DocClassCredentialInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get credentials by subject commitment (hex)
+    #[method(name = "docclass_getCredentialsBySubject")]
+    async fn docclass_get_credentials_by_subject(
+        &self,
+        subject_commitment: String,
+        limit: Option<u32>,
+        offset: Option<u32>,
+    ) -> Result<Vec<DocClassCredentialInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get credentials by issuer address
+    #[method(name = "docclass_getCredentialsByIssuer")]
+    async fn docclass_get_credentials_by_issuer(
+        &self,
+        issuer: String,
+        limit: Option<u32>,
+        offset: Option<u32>,
+    ) -> Result<Vec<DocClassCredentialInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Check if a credential is valid (not revoked, not expired)
+    #[method(name = "docclass_isCredentialValid")]
+    async fn docclass_is_credential_valid(
+        &self,
+        credential_id: String,
+    ) -> Result<bool, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get issuer by address
+    #[method(name = "docclass_getIssuer")]
+    async fn docclass_get_issuer(
+        &self,
+        address: String,
+    ) -> Result<Option<DocClassIssuerInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get all registered issuers
+    #[method(name = "docclass_getIssuers")]
+    async fn docclass_get_issuers(
+        &self,
+        limit: Option<u32>,
+        offset: Option<u32>,
+    ) -> Result<Vec<DocClassIssuerInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get issuers by jurisdiction
+    #[method(name = "docclass_getIssuersByJurisdiction")]
+    async fn docclass_get_issuers_by_jurisdiction(
+        &self,
+        jurisdiction: String,
+    ) -> Result<Vec<DocClassIssuerInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Check if an issuer can issue a specific subcode in a jurisdiction
+    #[method(name = "docclass_canIssue")]
+    async fn docclass_can_issue(
+        &self,
+        issuer: String,
+        subcode: u16,
+        jurisdiction: String,
+    ) -> Result<bool, jsonrpsee::types::ErrorObjectOwned>;
 }

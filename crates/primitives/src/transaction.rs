@@ -9,6 +9,7 @@
 use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
 
+use crate::docclass::DocClassTxData;
 use crate::messaging::MessagingTxData;
 use crate::staking::StakingTxData;
 use crate::{Address, Balance, ChainId, Hash, Nonce};
@@ -31,6 +32,8 @@ pub enum TxType {
     Staking = 5,
     /// Messaging operation (SRC-201)
     Messaging = 6,
+    /// DocClass operation (SRC-80X/81X)
+    DocClass = 7,
 }
 
 impl TxType {
@@ -44,6 +47,7 @@ impl TxType {
             4 => Some(TxType::ContractCall),
             5 => Some(TxType::Staking),
             6 => Some(TxType::Messaging),
+            7 => Some(TxType::DocClass),
             _ => None,
         }
     }
@@ -306,6 +310,8 @@ pub enum TxPayload {
     Staking(StakingTxData),
     /// Messaging operation (SRC-201)
     Messaging(MessagingTxData),
+    /// DocClass operation (SRC-80X/81X)
+    DocClass(DocClassTxData),
 }
 
 impl TransactionV2 {
@@ -439,6 +445,7 @@ impl TransactionV2 {
             TxPayload::ContractCall(_) => TxType::ContractCall,
             TxPayload::Staking(_) => TxType::Staking,
             TxPayload::Messaging(_) => TxType::Messaging,
+            TxPayload::DocClass(_) => TxType::DocClass,
         }
     }
 
@@ -468,6 +475,7 @@ impl TransactionV2 {
             TxPayload::ContractDeploy(_) => None,
             TxPayload::Staking(_) => None,
             TxPayload::Messaging(_) => None, // Recipient is encrypted in message
+            TxPayload::DocClass(_) => None,  // No direct recipient
         }
     }
 
@@ -481,6 +489,7 @@ impl TransactionV2 {
             TxPayload::Token(_) => 0,
             TxPayload::Staking(_) => 0,
             TxPayload::Messaging(_) => 0, // Koppa attachment is inside message data
+            TxPayload::DocClass(_) => 0,  // Stake/fee handled separately
         }
     }
 
@@ -555,6 +564,19 @@ impl TransactionV2 {
     /// Check if this is a messaging transaction
     pub fn is_messaging(&self) -> bool {
         matches!(self.payload, TxPayload::Messaging(_))
+    }
+
+    /// Get docclass data if this is a DocClass transaction
+    pub fn docclass_data(&self) -> Option<&DocClassTxData> {
+        match &self.payload {
+            TxPayload::DocClass(data) => Some(data),
+            _ => None,
+        }
+    }
+
+    /// Check if this is a docclass transaction
+    pub fn is_docclass(&self) -> bool {
+        matches!(self.payload, TxPayload::DocClass(_))
     }
 }
 

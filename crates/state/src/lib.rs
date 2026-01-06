@@ -5,6 +5,7 @@
 
 pub mod cache;
 pub mod contract_executor;
+pub mod docclass_executor;
 pub mod executor;
 pub mod mempool;
 pub mod messaging_executor;
@@ -16,6 +17,7 @@ pub mod token_executor;
 
 pub use cache::{CacheStats, CachedAccount, StateCache};
 pub use contract_executor::{ContractCallResult, ContractDeployResult, ContractExecutorState, ContractEvent, ContractMetadata};
+pub use docclass_executor::{DocClassExecutionResult, DocClassExecutor};
 pub use executor::{BlockExecutor, TxExecutionResult};
 pub use mempool::{Mempool, MempoolConfig, MempoolStats};
 pub use messaging_executor::{MessagingExecutionResult, MessagingExecutor};

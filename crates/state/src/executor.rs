@@ -15,6 +15,7 @@ use sumchain_storage::Database;
 use tracing::{debug, info, warn};
 
 use crate::contract_executor::ContractExecutorState;
+use crate::docclass_executor::DocClassExecutor;
 use crate::messaging_executor::MessagingExecutor;
 use crate::nft_executor::NftExecutor;
 use crate::staking_executor::StakingExecutor;
@@ -39,6 +40,7 @@ pub struct BlockExecutor {
     contract_executor: ContractExecutorState,
     staking_executor: StakingExecutor,
     messaging_executor: MessagingExecutor,
+    docclass_executor: DocClassExecutor,
 }
 
 impl BlockExecutor {
@@ -49,6 +51,7 @@ impl BlockExecutor {
         let contract_executor = ContractExecutorState::new(db.clone(), params.clone());
         let staking_executor = StakingExecutor::new(db.clone(), params.clone());
         let messaging_executor = MessagingExecutor::new(db.clone(), params.clone());
+        let docclass_executor = DocClassExecutor::new(db.clone(), params.clone());
         Self {
             state,
             db,
@@ -58,6 +61,7 @@ impl BlockExecutor {
             contract_executor,
             staking_executor,
             messaging_executor,
+            docclass_executor,
         }
     }
 
@@ -409,6 +413,46 @@ impl BlockExecutor {
                             Ok(TxExecutionResult {
                                 tx_hash,
                                 status: TxStatus::Failed(7), // Messaging operation failed
+                                fee_paid: 0,
+                            })
+                        }
+                    }
+                    TxPayload::DocClass(docclass_data) => {
+                        // Execute DocClass operation (SRC-80X/81X)
+                        let result = self.docclass_executor.execute(
+                            &v2_tx.from,
+                            &docclass_data,
+                            &self.state,
+                            proposer,
+                            v2_tx.fee,
+                            0, // block_height placeholder
+                            0, // block_timestamp placeholder
+                            0, // tx_index placeholder
+                            tx_hash,
+                        )?;
+
+                        if result.success {
+                            debug!(
+                                "V2 DocClass {} executed: {:?}",
+                                tx_hash,
+                                docclass_data.operation
+                            );
+
+                            Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Success,
+                                fee_paid: v2_tx.fee,
+                            })
+                        } else {
+                            warn!(
+                                "V2 DocClass {} failed: {}",
+                                tx_hash,
+                                result.error.as_deref().unwrap_or("Unknown error")
+                            );
+
+                            Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Failed(8), // DocClass operation failed
                                 fee_paid: 0,
                             })
                         }
@@ -785,6 +829,56 @@ impl BlockExecutor {
                     Ok(TxExecutionResult {
                         tx_hash,
                         status: TxStatus::Failed(7), // Messaging operation failed
+                        fee_paid: 0,
+                    })
+                }
+            }
+            TxPayload::DocClass(docclass_data) => {
+                // Check balance for fee
+                let balance = self.state.get_balance(&tx.from)?;
+                if balance < tx.fee {
+                    return Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::InsufficientBalance,
+                        fee_paid: 0,
+                    });
+                }
+
+                // Execute DocClass operation (SRC-80X/81X)
+                let result = self.docclass_executor.execute(
+                    &tx.from,
+                    docclass_data,
+                    &self.state,
+                    proposer,
+                    tx.fee,
+                    0, // block_height placeholder
+                    0, // block_timestamp placeholder
+                    0, // tx_index placeholder
+                    tx_hash,
+                )?;
+
+                if result.success {
+                    debug!(
+                        "V2 DocClass {} executed: {:?}",
+                        tx_hash,
+                        docclass_data.operation
+                    );
+
+                    Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::Success,
+                        fee_paid: tx.fee,
+                    })
+                } else {
+                    warn!(
+                        "V2 DocClass {} failed: {}",
+                        tx_hash,
+                        result.error.as_deref().unwrap_or("Unknown error")
+                    );
+
+                    Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::Failed(8), // DocClass operation failed
                         fee_paid: 0,
                     })
                 }

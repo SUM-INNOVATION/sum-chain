@@ -74,6 +74,7 @@ fn main() -> Result<()> {
             max_contract_gas: 10_000_000, // Maximum gas limit per transaction
             staking: None, // Use default staking params
             messaging: None, // Use default messaging params
+            docclass: None, // Use default docclass params
         },
     );
 

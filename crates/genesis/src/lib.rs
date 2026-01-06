@@ -72,6 +72,9 @@ pub struct ChainParams {
     /// SRC-201 Messaging parameters (optional - uses defaults if not specified)
     #[serde(default)]
     pub messaging: Option<MessagingParams>,
+    /// SRC-80X/81X DocClass parameters (optional - uses defaults if not specified)
+    #[serde(default)]
+    pub docclass: Option<DocClassParams>,
 }
 
 fn default_finality_depth() -> u64 {
@@ -170,6 +173,46 @@ impl Default for MessagingParams {
     }
 }
 
+/// SRC-80X/81X DocClass Parameters
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocClassParams {
+    /// Minimum stake required for issuer registration
+    #[serde(default = "default_docclass_min_issuer_stake")]
+    pub min_issuer_stake: Balance,
+    /// DocClass admin address (optional)
+    #[serde(default)]
+    pub admin: Option<String>,
+    /// Initial registered issuers (for bootstrapping)
+    #[serde(default)]
+    pub initial_issuers: Vec<String>,
+    /// Credential validity period limits (in seconds, 0 = no limit)
+    #[serde(default)]
+    pub max_credential_validity: u64,
+    /// Whether to require issuer stake for registration
+    #[serde(default = "default_require_issuer_stake")]
+    pub require_issuer_stake: bool,
+}
+
+fn default_docclass_min_issuer_stake() -> Balance {
+    1_000_000_000_000 // 1000 Koppa (10^12 base units)
+}
+
+fn default_require_issuer_stake() -> bool {
+    true
+}
+
+impl Default for DocClassParams {
+    fn default() -> Self {
+        Self {
+            min_issuer_stake: default_docclass_min_issuer_stake(),
+            admin: None,
+            initial_issuers: Vec::new(),
+            max_credential_validity: 0, // No limit
+            require_issuer_stake: default_require_issuer_stake(),
+        }
+    }
+}
+
 impl Default for ChainParams {
     fn default() -> Self {
         Self {
@@ -184,6 +227,7 @@ impl Default for ChainParams {
             max_contract_gas: default_max_contract_gas(),
             staking: Some(StakingParams::default()),
             messaging: Some(MessagingParams::default()),
+            docclass: Some(DocClassParams::default()),
         }
     }
 }

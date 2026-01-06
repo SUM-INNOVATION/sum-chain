@@ -90,6 +90,24 @@ pub mod cf {
     /// Validator sets by epoch (epoch -> ValidatorSet)
     pub const VALIDATOR_SETS: &str = "validator_sets";
 
+    // SRC-80X/81X DocClass column families
+    /// Identity roots (SRC-800)
+    pub const DOCCLASS_IDENTITY_ROOTS: &str = "docclass_identity_roots";
+    /// Eligibility attestations (SRC-802)
+    pub const DOCCLASS_ELIGIBILITY: &str = "docclass_eligibility";
+    /// Academic/Professional credentials (SRC-810-813)
+    pub const DOCCLASS_CREDENTIALS: &str = "docclass_credentials";
+    /// Revocation records (SRC-805)
+    pub const DOCCLASS_REVOCATIONS: &str = "docclass_revocations";
+    /// DocClass issuer registry
+    pub const DOCCLASS_ISSUERS: &str = "docclass_issuers";
+    /// Subject commitment index (subject_commitment -> credential_ids)
+    pub const DOCCLASS_SUBJECT_INDEX: &str = "docclass_subject_index";
+    /// Issuer credential index (issuer -> credential_ids)
+    pub const DOCCLASS_ISSUER_INDEX: &str = "docclass_issuer_index";
+    /// Credential events (for indexing)
+    pub const DOCCLASS_EVENTS: &str = "docclass_events";
+
     // SRC-201 Messaging column families
     /// Messaging configuration
     pub const MESSAGING_CONFIG: &str = "messaging_config";
@@ -139,6 +157,15 @@ pub const ALL_CFS: &[&str] = &[
     cf::VALIDATOR_SIGNING_INFO,
     cf::MISSED_BLOCKS,
     cf::VALIDATOR_SETS,
+    // SRC-80X/81X DocClass
+    cf::DOCCLASS_IDENTITY_ROOTS,
+    cf::DOCCLASS_ELIGIBILITY,
+    cf::DOCCLASS_CREDENTIALS,
+    cf::DOCCLASS_REVOCATIONS,
+    cf::DOCCLASS_ISSUERS,
+    cf::DOCCLASS_SUBJECT_INDEX,
+    cf::DOCCLASS_ISSUER_INDEX,
+    cf::DOCCLASS_EVENTS,
     // SRC-201 Messaging
     cf::MESSAGING_CONFIG,
     cf::MESSAGING_SENDER_NONCES,

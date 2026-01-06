@@ -8,7 +8,7 @@ use jsonrpsee::server::{Server, ServerHandle};
 use sumchain_consensus::ConsensusEngine;
 use sumchain_primitives::{Address, Block, Hash, SignedTransaction};
 use sumchain_state::{Mempool, StateManager};
-use sumchain_storage::{BlockStore, Database, DelegationStore, MessagingStore, NftStore, ReceiptStore, SlashingStore, StakingStore, TokenStore, TxStore, ValidatorSetStore};
+use sumchain_storage::{BlockStore, Database, DelegationStore, DocClassStore, MessagingStore, NftStore, ReceiptStore, SlashingStore, StakingStore, TokenStore, TxStore, ValidatorSetStore};
 use tokio::sync::mpsc;
 use tracing::info;
 
@@ -2203,6 +2203,430 @@ impl SumChainApiServer for RpcServer {
             "Sponsored message submission requires a relay service configuration".to_string(),
         )
         .into())
+    }
+
+    // ========================================================================
+    // SRC-80X/81X DocClass Endpoints
+    // ========================================================================
+
+    async fn docclass_get_config(
+        &self,
+    ) -> std::result::Result<DocClassConfigInfo, jsonrpsee::types::ErrorObjectOwned> {
+        // Return DocClass configuration from genesis params
+        // This is a simplified implementation - in production would read from chain state
+        Ok(DocClassConfigInfo {
+            min_issuer_stake: "1000000000000".to_string(), // 1000 SUM
+            require_issuer_stake: true,
+            max_credential_validity: 315360000, // 10 years in seconds
+            admin: None,
+        })
+    }
+
+    async fn docclass_get_summary(
+        &self,
+    ) -> std::result::Result<DocClassSummary, jsonrpsee::types::ErrorObjectOwned> {
+        let store = DocClassStore::new(&self.db);
+
+        // Count issuers (has get_all method)
+        let total_issuers = store
+            .issuers()
+            .get_all()
+            .map_err(|e| RpcError::Internal(e.to_string()))?
+            .len() as u64;
+
+        // Note: Identity/credential/revocation counts would require full iteration
+        // For now, return placeholder values - in production would add count methods to stores
+        Ok(DocClassSummary {
+            total_identities: 0, // Would need to iterate DOCCLASS_IDENTITY_ROOTS
+            total_credentials: 0, // Would need to iterate DOCCLASS_CREDENTIALS + DOCCLASS_ELIGIBILITY
+            total_issuers,
+            total_revocations: 0, // Would need to iterate DOCCLASS_REVOCATIONS
+        })
+    }
+
+    async fn docclass_get_identity(
+        &self,
+        identity_id: String,
+    ) -> std::result::Result<Option<DocClassIdentityInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let id_bytes: [u8; 32] = hex::decode(identity_id.trim_start_matches("0x"))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid identity ID hex: {}", e)))?
+            .try_into()
+            .map_err(|_| RpcError::InvalidParams("Identity ID must be 32 bytes".to_string()))?;
+
+        let store = DocClassStore::new(&self.db);
+        let identity = store
+            .identity_roots()
+            .get(&id_bytes)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        Ok(identity.map(|i| self.identity_to_rpc_info(&i)))
+    }
+
+    async fn docclass_get_identity_by_controller(
+        &self,
+        controller: String,
+    ) -> std::result::Result<Option<DocClassIdentityInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let addr = Address::from_base58(&controller)
+            .or_else(|_| Address::from_hex(&controller))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid controller address: {}", e)))?;
+
+        let store = DocClassStore::new(&self.db);
+        let identities = store
+            .identity_roots()
+            .get_by_controller(&addr)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        // Return the first identity found for this controller
+        Ok(identities.into_iter().next().map(|i| self.identity_to_rpc_info(&i)))
+    }
+
+    async fn docclass_get_credential(
+        &self,
+        credential_id: String,
+    ) -> std::result::Result<Option<DocClassCredentialInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let id_bytes: [u8; 32] = hex::decode(credential_id.trim_start_matches("0x"))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid credential ID hex: {}", e)))?
+            .try_into()
+            .map_err(|_| RpcError::InvalidParams("Credential ID must be 32 bytes".to_string()))?;
+
+        let store = DocClassStore::new(&self.db);
+
+        // Try eligibility first
+        if let Some(eligibility) = store
+            .eligibility()
+            .get(&id_bytes)
+            .map_err(|e| RpcError::Internal(e.to_string()))?
+        {
+            return Ok(Some(self.eligibility_to_rpc_info(&eligibility)));
+        }
+
+        // Try academic credential
+        if let Some(credential) = store
+            .credentials()
+            .get(&id_bytes)
+            .map_err(|e| RpcError::Internal(e.to_string()))?
+        {
+            return Ok(Some(self.academic_to_rpc_info(&credential)));
+        }
+
+        Ok(None)
+    }
+
+    async fn docclass_get_credentials_by_subject(
+        &self,
+        subject_commitment: String,
+        limit: Option<u32>,
+        offset: Option<u32>,
+    ) -> std::result::Result<Vec<DocClassCredentialInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let commitment_bytes: [u8; 32] = hex::decode(subject_commitment.trim_start_matches("0x"))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid subject commitment hex: {}", e)))?
+            .try_into()
+            .map_err(|_| RpcError::InvalidParams("Subject commitment must be 32 bytes".to_string()))?;
+
+        let store = DocClassStore::new(&self.db);
+        let limit = limit.unwrap_or(100) as usize;
+        let offset = offset.unwrap_or(0) as usize;
+
+        let mut results = Vec::new();
+
+        // Get eligibility attestations by subject
+        let eligibilities = store
+            .eligibility()
+            .get_by_subject(&commitment_bytes)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        for eligibility in eligibilities {
+            results.push(self.eligibility_to_rpc_info(&eligibility));
+        }
+
+        // Get academic credentials by subject
+        let credentials = store
+            .credentials()
+            .get_by_subject(&commitment_bytes)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        for credential in credentials {
+            results.push(self.academic_to_rpc_info(&credential));
+        }
+
+        // Apply pagination
+        Ok(results.into_iter().skip(offset).take(limit).collect())
+    }
+
+    async fn docclass_get_credentials_by_issuer(
+        &self,
+        issuer: String,
+        limit: Option<u32>,
+        offset: Option<u32>,
+    ) -> std::result::Result<Vec<DocClassCredentialInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let addr = Address::from_base58(&issuer)
+            .or_else(|_| Address::from_hex(&issuer))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid issuer address: {}", e)))?;
+
+        let store = DocClassStore::new(&self.db);
+        let limit = limit.unwrap_or(100) as usize;
+        let offset = offset.unwrap_or(0) as usize;
+
+        let mut results = Vec::new();
+
+        // Get eligibility attestations by issuer
+        let eligibilities = store
+            .eligibility()
+            .get_by_issuer(&addr)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        for eligibility in eligibilities {
+            results.push(self.eligibility_to_rpc_info(&eligibility));
+        }
+
+        // Get academic credentials by issuer
+        let credentials = store
+            .credentials()
+            .get_by_issuer(&addr)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        for credential in credentials {
+            results.push(self.academic_to_rpc_info(&credential));
+        }
+
+        // Apply pagination
+        Ok(results.into_iter().skip(offset).take(limit).collect())
+    }
+
+    async fn docclass_is_credential_valid(
+        &self,
+        credential_id: String,
+    ) -> std::result::Result<bool, jsonrpsee::types::ErrorObjectOwned> {
+        let id_bytes: [u8; 32] = hex::decode(credential_id.trim_start_matches("0x"))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid credential ID hex: {}", e)))?
+            .try_into()
+            .map_err(|_| RpcError::InvalidParams("Credential ID must be 32 bytes".to_string()))?;
+
+        let store = DocClassStore::new(&self.db);
+
+        // Check if revoked via revocation store
+        if store
+            .revocations()
+            .is_revoked(&id_bytes)
+            .map_err(|e| RpcError::Internal(e.to_string()))?
+        {
+            return Ok(false);
+        }
+
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        // Check eligibility attestation
+        if let Some(eligibility) = store
+            .eligibility()
+            .get(&id_bytes)
+            .map_err(|e| RpcError::Internal(e.to_string()))?
+        {
+            // Check revocation status
+            if !eligibility.revocation_status.is_valid() {
+                return Ok(false);
+            }
+            // Check expiry
+            if eligibility.expires_at > 0 && eligibility.expires_at < current_time {
+                return Ok(false);
+            }
+            return Ok(true);
+        }
+
+        // Check academic credential
+        if let Some(credential) = store
+            .credentials()
+            .get(&id_bytes)
+            .map_err(|e| RpcError::Internal(e.to_string()))?
+        {
+            // Check revocation status
+            if !credential.revocation_status.is_valid() {
+                return Ok(false);
+            }
+            // Check expiry
+            if credential.expires_at > 0 && credential.expires_at < current_time {
+                return Ok(false);
+            }
+            return Ok(true);
+        }
+
+        // Credential not found
+        Ok(false)
+    }
+
+    async fn docclass_get_issuer(
+        &self,
+        address: String,
+    ) -> std::result::Result<Option<DocClassIssuerInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let addr = Address::from_base58(&address)
+            .or_else(|_| Address::from_hex(&address))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid address: {}", e)))?;
+
+        let store = DocClassStore::new(&self.db);
+        let issuer = store
+            .issuers()
+            .get(&addr)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        Ok(issuer.map(|i| self.issuer_to_rpc_info(&i)))
+    }
+
+    async fn docclass_get_issuers(
+        &self,
+        limit: Option<u32>,
+        offset: Option<u32>,
+    ) -> std::result::Result<Vec<DocClassIssuerInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let store = DocClassStore::new(&self.db);
+        let limit = limit.unwrap_or(100) as usize;
+        let offset = offset.unwrap_or(0) as usize;
+
+        let issuers = store
+            .issuers()
+            .get_all()
+            .map_err(|e| RpcError::Internal(e.to_string()))?
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(|i| self.issuer_to_rpc_info(&i))
+            .collect();
+
+        Ok(issuers)
+    }
+
+    async fn docclass_get_issuers_by_jurisdiction(
+        &self,
+        jurisdiction: String,
+    ) -> std::result::Result<Vec<DocClassIssuerInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let store = DocClassStore::new(&self.db);
+
+        let issuers = store
+            .issuers()
+            .get_by_jurisdiction(&jurisdiction)
+            .map_err(|e| RpcError::Internal(e.to_string()))?
+            .into_iter()
+            .map(|i| self.issuer_to_rpc_info(&i))
+            .collect();
+
+        Ok(issuers)
+    }
+
+    async fn docclass_can_issue(
+        &self,
+        issuer: String,
+        subcode: u16,
+        jurisdiction: String,
+    ) -> std::result::Result<bool, jsonrpsee::types::ErrorObjectOwned> {
+        let addr = Address::from_base58(&issuer)
+            .or_else(|_| Address::from_hex(&issuer))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid issuer address: {}", e)))?;
+
+        let doc_subcode = sumchain_primitives::DocSubcode::from_u16(subcode)
+            .ok_or_else(|| RpcError::InvalidParams(format!("Invalid subcode: {}", subcode)))?;
+
+        let store = DocClassStore::new(&self.db);
+        store
+            .issuers()
+            .can_issue_subcode(&addr, doc_subcode, &jurisdiction)
+            .map_err(|e| RpcError::Internal(e.to_string()).into())
+    }
+}
+
+// Helper methods for DocClass RPC conversions
+impl RpcServer {
+    fn identity_to_rpc_info(&self, identity: &sumchain_primitives::IdentityRoot) -> DocClassIdentityInfo {
+        DocClassIdentityInfo {
+            identity_id: hex::encode(identity.identity_id),
+            subject_commitment: hex::encode(identity.subject_commitment),
+            controller: identity.controller.to_base58(),
+            additional_controllers: identity.additional_controllers.iter().map(|c| c.to_base58()).collect(),
+            keys: identity.keys.iter().map(|k| DocClassKeyInfo {
+                key_id: k.key_id.clone(),
+                key_type: format!("{:?}", k.key_type),
+                public_key: hex::encode(k.public_key),
+                purposes: k.purposes.iter().map(|p| format!("{:?}", p)).collect(),
+                added_at: k.added_at,
+                expires_at: k.expires_at,
+                active: k.active,
+            }).collect(),
+            services: identity.services.iter().map(|s| DocClassServiceInfo {
+                service_id: s.service_id.clone(),
+                service_type: s.service_type.clone(),
+                endpoint: s.endpoint.clone(),
+                description: s.description.clone(),
+            }).collect(),
+            created_at: identity.created_at,
+            updated_at: identity.updated_at,
+            status: format!("{:?}", identity.status),
+        }
+    }
+
+    fn eligibility_to_rpc_info(&self, eligibility: &sumchain_primitives::EligibilityAttestation) -> DocClassCredentialInfo {
+        DocClassCredentialInfo {
+            credential_id: hex::encode(eligibility.credential_id),
+            subcode: eligibility.subcode.as_u16(),
+            subcode_name: eligibility.subcode.name().to_string(),
+            subject_commitment: hex::encode(eligibility.subject_commitment),
+            issuer: eligibility.issuer.to_base58(),
+            jurisdiction: eligibility.jurisdiction.clone(),
+            schema_hash: hex::encode(eligibility.schema_hash),
+            content_commitment: hex::encode(eligibility.content_commitment),
+            issued_at: eligibility.issued_at,
+            valid_from: eligibility.valid_from,
+            expires_at: eligibility.expires_at,
+            revocation_status: format!("{:?}", eligibility.revocation_status),
+            superseded_by: eligibility.superseded_by.map(|id| hex::encode(id)),
+            metadata: None,
+        }
+    }
+
+    fn academic_to_rpc_info(&self, credential: &sumchain_primitives::AcademicCredential) -> DocClassCredentialInfo {
+        DocClassCredentialInfo {
+            credential_id: hex::encode(credential.credential_id),
+            subcode: credential.subcode.as_u16(),
+            subcode_name: credential.subcode.name().to_string(),
+            subject_commitment: hex::encode(credential.subject_commitment),
+            issuer: credential.issuer.to_base58(),
+            jurisdiction: credential.jurisdiction.clone(),
+            schema_hash: hex::encode(credential.schema_hash),
+            content_commitment: hex::encode(credential.content_commitment),
+            issued_at: credential.issued_at,
+            valid_from: credential.valid_from,
+            expires_at: credential.expires_at,
+            revocation_status: format!("{:?}", credential.revocation_status),
+            superseded_by: credential.superseded_by.map(|id| hex::encode(id)),
+            metadata: Some(DocClassCredentialMetadata {
+                title: credential.metadata.title.clone(),
+                credential_type: credential.metadata.credential_type.clone(),
+                program: credential.metadata.program.clone(),
+                issue_date: credential.metadata.issue_date.clone(),
+                completion_date: credential.metadata.completion_date.clone(),
+            }),
+        }
+    }
+
+    fn issuer_to_rpc_info(&self, issuer: &sumchain_primitives::DocClassIssuer) -> DocClassIssuerInfo {
+        DocClassIssuerInfo {
+            address: issuer.address.to_base58(),
+            name: issuer.name.clone(),
+            issuer_type: format!("{:?}", issuer.issuer_type),
+            jurisdictions: issuer.jurisdictions.clone(),
+            authorized_subcodes: issuer.authorized_subcodes.iter().map(|s| s.as_u16()).collect(),
+            keys: issuer.keys.iter().map(|k| DocClassIssuerKeyInfo {
+                key_id: k.key_id.clone(),
+                public_key: hex::encode(k.public_key),
+                key_type: format!("{:?}", k.key_type),
+                added_at: k.added_at,
+                expires_at: k.expires_at,
+                active: k.active,
+                is_primary: k.is_primary,
+            }).collect(),
+            registered_at: issuer.registered_at,
+            updated_at: issuer.updated_at,
+            status: format!("{:?}", issuer.status),
+            stake_amount: issuer.stake_amount.to_string(),
+        }
     }
 }
 
