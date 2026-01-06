@@ -1,10 +1,21 @@
-//! SRC-80X and SRC-81X DocClass Primitives
+//! SRC-80X Layered Trust Architecture
 //!
-//! This module defines the data structures for the DocClass credential family:
-//! - SRC-80X: Identity & Civil credentials (DID-like, eligibility attestations)
-//! - SRC-81X: Academic & Professional credentials (transcripts, diplomas, licenses)
+//! This module defines the data structures for the modular trust architecture:
+//! - SRC-801: Subject Standard (DID-like identity anchors)
+//! - SRC-802: Issuer Registry (who may attest)
+//! - SRC-803: Policy Token (verification rules)
+//! - SRC-804: Claim Token (verifiable statements)
+//! - SRC-805: Revocation Standard (privacy-preserving invalidation)
+//! - SRC-806: Proof Envelope (ZK proof containers)
+//! - SRC-81X: Domain-specific claims (academic, professional, etc.)
 //!
-//! Privacy-first design: No raw PII on-chain, only commitments and encrypted references.
+//! Design Principles:
+//! - Identity is not data - it is a cryptographic reference point
+//! - Trust is plural - policies define acceptable trust sources
+//! - Verification rules are code - deterministic on-chain objects
+//! - The chain stores verifiability, not information
+//! - Claims must be revocable without being traceable
+//! - Verifiers trust math and quorum, not institutions
 
 use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
@@ -12,23 +23,107 @@ use serde_big_array::BigArray;
 use crate::{Address, Balance, BlockHeight, Timestamp};
 
 // =============================================================================
-// DocClass Subcodes
+// Type Aliases for New Architecture
 // =============================================================================
 
-/// DocClass subcode identifying the credential type.
+/// Subject ID (SRC-801) - alias for identity anchors
+pub type SubjectId = [u8; 32];
+
+/// Policy ID (SRC-803) - hash of policy content
+pub type PolicyId = [u8; 32];
+
+/// Claim ID (SRC-804) - unique claim identifier
+pub type ClaimId = [u8; 32];
+
+/// Proof ID (SRC-806) - unique proof identifier
+pub type ProofId = [u8; 32];
+
+// =============================================================================
+// Claim Types for Policy Matching (SRC-803)
+// =============================================================================
+
+/// High-level claim type categories for policy matching.
+/// Used by policies to specify which types of claims satisfy requirements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum ClaimType {
+    /// Identity-related claims (government ID, etc.)
+    Identity = 0,
+    /// Eligibility attestations (citizenship, residency, age)
+    Eligibility = 1,
+    /// Education credentials (transcripts, diplomas)
+    Education = 2,
+    /// Professional licenses and certifications
+    License = 3,
+    /// Employment verification
+    Employment = 4,
+    /// Healthcare credentials
+    Healthcare = 5,
+    /// Financial attestations
+    Financial = 6,
+    /// Custom/other claim types
+    Custom = 255,
+}
+
+impl ClaimType {
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(ClaimType::Identity),
+            1 => Some(ClaimType::Eligibility),
+            2 => Some(ClaimType::Education),
+            3 => Some(ClaimType::License),
+            4 => Some(ClaimType::Employment),
+            5 => Some(ClaimType::Healthcare),
+            6 => Some(ClaimType::Financial),
+            255 => Some(ClaimType::Custom),
+            _ => None,
+        }
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            ClaimType::Identity => "Identity",
+            ClaimType::Eligibility => "Eligibility",
+            ClaimType::Education => "Education",
+            ClaimType::License => "License",
+            ClaimType::Employment => "Employment",
+            ClaimType::Healthcare => "Healthcare",
+            ClaimType::Financial => "Financial",
+            ClaimType::Custom => "Custom",
+        }
+    }
+}
+
+// =============================================================================
+// DocClass Subcodes (Claim Types)
+// =============================================================================
+
+/// DocClass subcode identifying the credential/claim type.
 /// Range 800-899 is reserved for DocClass family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u16)]
 pub enum DocSubcode {
-    // SRC-80X: Identity & Civil
-    /// 800: Identity Root (DID-equivalent) - key binding, controllers, services
-    IdentityRoot = 800,
-    /// 802: Eligibility Attestation - citizenship, residency, age verification
-    EligibilityAttestation = 802,
-    /// 805: Revocation / Status Update - revoke or supersede attestations
-    RevocationStatus = 805,
+    // SRC-80X Core Standards
+    /// 801: Subject (DID-equivalent) - key binding, controllers
+    Subject = 801,
+    /// 802: Issuer Registry entry
+    IssuerRegistry = 802,
+    /// 803: Policy Token
+    Policy = 803,
+    /// 804: Claim Token
+    Claim = 804,
+    /// 805: Revocation entry
+    Revocation = 805,
+    /// 806: Proof verification log
+    ProofLog = 806,
 
-    // SRC-81X: Academic & Professional
+    // SRC-80X Legacy (backward compat)
+    /// 800: Identity Root (legacy, maps to Subject)
+    IdentityRoot = 800,
+    /// 807: Eligibility Attestation (claim type)
+    EligibilityAttestation = 807,
+
+    // SRC-81X: Domain-Specific Claims
     /// 810: Academic Transcript Credential
     AcademicTranscript = 810,
     /// 811: Diploma / Degree Credential
@@ -37,17 +132,31 @@ pub enum DocSubcode {
     EnrollmentVerification = 812,
     /// 813: Professional License / Certification
     ProfessionalLicense = 813,
+    /// 814: Government ID verification
+    GovernmentId = 814,
+    /// 815: Employment verification
+    Employment = 815,
 }
 
 impl DocSubcode {
-    /// Check if this is an SRC-80X (Identity/Civil) subcode
-    pub fn is_identity_class(&self) -> bool {
+    /// Check if this is an SRC-80X core standard (800-809)
+    pub fn is_core_standard(&self) -> bool {
         (*self as u16) >= 800 && (*self as u16) < 810
     }
 
-    /// Check if this is an SRC-81X (Academic/Professional) subcode
-    pub fn is_academic_class(&self) -> bool {
+    /// Check if this is an SRC-80X (Identity/Civil) subcode (legacy alias)
+    pub fn is_identity_class(&self) -> bool {
+        self.is_core_standard()
+    }
+
+    /// Check if this is an SRC-81X (Domain-specific claim) subcode
+    pub fn is_domain_claim(&self) -> bool {
         (*self as u16) >= 810 && (*self as u16) < 820
+    }
+
+    /// Check if this is an SRC-81X (Academic/Professional) subcode (legacy alias)
+    pub fn is_academic_class(&self) -> bool {
+        self.is_domain_claim()
     }
 
     /// Get the subcode as u16
@@ -59,12 +168,19 @@ impl DocSubcode {
     pub fn from_u16(code: u16) -> Option<Self> {
         match code {
             800 => Some(DocSubcode::IdentityRoot),
-            802 => Some(DocSubcode::EligibilityAttestation),
-            805 => Some(DocSubcode::RevocationStatus),
+            801 => Some(DocSubcode::Subject),
+            802 => Some(DocSubcode::IssuerRegistry),
+            803 => Some(DocSubcode::Policy),
+            804 => Some(DocSubcode::Claim),
+            805 => Some(DocSubcode::Revocation),
+            806 => Some(DocSubcode::ProofLog),
+            807 => Some(DocSubcode::EligibilityAttestation),
             810 => Some(DocSubcode::AcademicTranscript),
             811 => Some(DocSubcode::Diploma),
             812 => Some(DocSubcode::EnrollmentVerification),
             813 => Some(DocSubcode::ProfessionalLicense),
+            814 => Some(DocSubcode::GovernmentId),
+            815 => Some(DocSubcode::Employment),
             _ => None,
         }
     }
@@ -72,13 +188,34 @@ impl DocSubcode {
     /// Get human-readable name
     pub fn name(&self) -> &'static str {
         match self {
-            DocSubcode::IdentityRoot => "Identity Root",
+            DocSubcode::IdentityRoot => "Identity Root (Legacy)",
+            DocSubcode::Subject => "Subject",
+            DocSubcode::IssuerRegistry => "Issuer Registry",
+            DocSubcode::Policy => "Policy",
+            DocSubcode::Claim => "Claim",
+            DocSubcode::Revocation => "Revocation",
+            DocSubcode::ProofLog => "Proof Log",
             DocSubcode::EligibilityAttestation => "Eligibility Attestation",
-            DocSubcode::RevocationStatus => "Revocation Status",
             DocSubcode::AcademicTranscript => "Academic Transcript",
             DocSubcode::Diploma => "Diploma/Degree",
             DocSubcode::EnrollmentVerification => "Enrollment Verification",
             DocSubcode::ProfessionalLicense => "Professional License",
+            DocSubcode::GovernmentId => "Government ID",
+            DocSubcode::Employment => "Employment",
+        }
+    }
+
+    /// Convert to ClaimType for policy matching
+    pub fn to_claim_type(&self) -> Option<ClaimType> {
+        match self {
+            DocSubcode::EligibilityAttestation => Some(ClaimType::Eligibility),
+            DocSubcode::AcademicTranscript => Some(ClaimType::Education),
+            DocSubcode::Diploma => Some(ClaimType::Education),
+            DocSubcode::EnrollmentVerification => Some(ClaimType::Education),
+            DocSubcode::ProfessionalLicense => Some(ClaimType::License),
+            DocSubcode::GovernmentId => Some(ClaimType::Identity),
+            DocSubcode::Employment => Some(ClaimType::Employment),
+            _ => None,
         }
     }
 }
@@ -676,7 +813,9 @@ impl DocClassIssuerType {
             DocClassIssuerType::Government => {
                 matches!(
                     subcode,
-                    DocSubcode::EligibilityAttestation | DocSubcode::RevocationStatus
+                    DocSubcode::EligibilityAttestation
+                        | DocSubcode::GovernmentId
+                        | DocSubcode::Revocation
                 )
             }
             DocClassIssuerType::Educational => {
@@ -685,17 +824,23 @@ impl DocClassIssuerType {
                     DocSubcode::AcademicTranscript
                         | DocSubcode::Diploma
                         | DocSubcode::EnrollmentVerification
-                        | DocSubcode::RevocationStatus
+                        | DocSubcode::Revocation
                 )
             }
             DocClassIssuerType::Professional => {
                 matches!(
                     subcode,
-                    DocSubcode::ProfessionalLicense | DocSubcode::RevocationStatus
+                    DocSubcode::ProfessionalLicense | DocSubcode::Revocation
+                )
+            }
+            DocClassIssuerType::Corporate => {
+                matches!(
+                    subcode,
+                    DocSubcode::Employment | DocSubcode::Revocation
                 )
             }
             DocClassIssuerType::SelfSovereign => {
-                matches!(subcode, DocSubcode::IdentityRoot)
+                matches!(subcode, DocSubcode::IdentityRoot | DocSubcode::Subject)
             }
             _ => false,
         }
