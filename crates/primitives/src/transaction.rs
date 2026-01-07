@@ -9,8 +9,10 @@
 use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
 
+use crate::agreement::AgreementTxData;
 use crate::docclass::DocClassTxData;
 use crate::equity::EquityTxData;
+use crate::legal::LegalTxData;
 use crate::messaging::MessagingTxData;
 use crate::staking::StakingTxData;
 use crate::tax::TaxTxData;
@@ -40,6 +42,10 @@ pub enum TxType {
     Tax = 8,
     /// Business, Governance & Equity operation (SRC-83X)
     Equity = 9,
+    /// Agreement & IP operation (SRC-84X)
+    Agreement = 10,
+    /// Legal Process operation (SRC-85X)
+    Legal = 11,
 }
 
 impl TxType {
@@ -56,6 +62,8 @@ impl TxType {
             7 => Some(TxType::DocClass),
             8 => Some(TxType::Tax),
             9 => Some(TxType::Equity),
+            10 => Some(TxType::Agreement),
+            11 => Some(TxType::Legal),
             _ => None,
         }
     }
@@ -324,6 +332,10 @@ pub enum TxPayload {
     Tax(TaxTxData),
     /// Business, Governance & Equity operation (SRC-83X)
     Equity(EquityTxData),
+    /// Agreement & IP operation (SRC-84X)
+    Agreement(AgreementTxData),
+    /// Legal Process operation (SRC-85X)
+    Legal(LegalTxData),
 }
 
 impl TransactionV2 {
@@ -460,6 +472,8 @@ impl TransactionV2 {
             TxPayload::DocClass(_) => TxType::DocClass,
             TxPayload::Tax(_) => TxType::Tax,
             TxPayload::Equity(_) => TxType::Equity,
+            TxPayload::Agreement(_) => TxType::Agreement,
+            TxPayload::Legal(_) => TxType::Legal,
         }
     }
 
@@ -489,9 +503,11 @@ impl TransactionV2 {
             TxPayload::ContractDeploy(_) => None,
             TxPayload::Staking(_) => None,
             TxPayload::Messaging(_) => None, // Recipient is encrypted in message
-            TxPayload::DocClass(_) => None,  // No direct recipient
-            TxPayload::Tax(_) => None,       // No direct recipient
-            TxPayload::Equity(_) => None,    // No direct recipient
+            TxPayload::DocClass(_) => None,   // No direct recipient
+            TxPayload::Tax(_) => None,        // No direct recipient
+            TxPayload::Equity(_) => None,     // No direct recipient
+            TxPayload::Agreement(_) => None,  // No direct recipient
+            TxPayload::Legal(_) => None,      // No direct recipient
         }
     }
 
@@ -505,9 +521,11 @@ impl TransactionV2 {
             TxPayload::Token(_) => 0,
             TxPayload::Staking(_) => 0,
             TxPayload::Messaging(_) => 0, // Koppa attachment is inside message data
-            TxPayload::DocClass(_) => 0,  // Stake/fee handled separately
-            TxPayload::Tax(_) => 0,       // Fee-only operations
-            TxPayload::Equity(_) => 0,    // Fee-only operations
+            TxPayload::DocClass(_) => 0,   // Stake/fee handled separately
+            TxPayload::Tax(_) => 0,        // Fee-only operations
+            TxPayload::Equity(_) => 0,     // Fee-only operations
+            TxPayload::Agreement(_) => 0,  // Fee-only operations
+            TxPayload::Legal(_) => 0,      // Fee-only operations
         }
     }
 

@@ -14,9 +14,11 @@ use sumchain_storage::schema::StateDiff;
 use sumchain_storage::Database;
 use tracing::{debug, info, warn};
 
+use crate::agreement_executor::AgreementExecutor;
 use crate::contract_executor::ContractExecutorState;
 use crate::docclass_executor::DocClassExecutor;
 use crate::equity_executor::EquityExecutor;
+use crate::legal_executor::LegalExecutor;
 use crate::messaging_executor::MessagingExecutor;
 use crate::nft_executor::NftExecutor;
 use crate::staking_executor::StakingExecutor;
@@ -45,6 +47,8 @@ pub struct BlockExecutor {
     docclass_executor: DocClassExecutor,
     tax_executor: TaxExecutor,
     equity_executor: EquityExecutor,
+    agreement_executor: AgreementExecutor,
+    legal_executor: LegalExecutor,
 }
 
 impl BlockExecutor {
@@ -58,6 +62,8 @@ impl BlockExecutor {
         let docclass_executor = DocClassExecutor::new(db.clone(), params.clone());
         let tax_executor = TaxExecutor::new(db.clone(), params.clone());
         let equity_executor = EquityExecutor::new(db.clone(), params.clone());
+        let agreement_executor = AgreementExecutor::new(db.clone(), params.clone());
+        let legal_executor = LegalExecutor::new(db.clone(), params.clone());
         Self {
             state,
             db,
@@ -70,6 +76,8 @@ impl BlockExecutor {
             docclass_executor,
             tax_executor,
             equity_executor,
+            agreement_executor,
+            legal_executor,
         }
     }
 
@@ -541,6 +549,86 @@ impl BlockExecutor {
                             Ok(TxExecutionResult {
                                 tx_hash,
                                 status: TxStatus::Failed(10), // Equity operation failed
+                                fee_paid: 0,
+                            })
+                        }
+                    }
+                    TxPayload::Agreement(agreement_data) => {
+                        // Execute Agreement operation (SRC-84X)
+                        let result = self.agreement_executor.execute(
+                            &v2_tx.from,
+                            &agreement_data,
+                            &self.state,
+                            proposer,
+                            v2_tx.fee,
+                            0, // block_height placeholder
+                            0, // block_timestamp placeholder
+                            0, // tx_index placeholder
+                            tx_hash,
+                        )?;
+
+                        if result.success {
+                            debug!(
+                                "V2 Agreement {} executed: {:?}",
+                                tx_hash,
+                                agreement_data.operation
+                            );
+
+                            Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Success,
+                                fee_paid: v2_tx.fee,
+                            })
+                        } else {
+                            warn!(
+                                "V2 Agreement {} failed: {}",
+                                tx_hash,
+                                result.error.as_deref().unwrap_or("Unknown error")
+                            );
+
+                            Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Failed(11), // Agreement operation failed
+                                fee_paid: 0,
+                            })
+                        }
+                    }
+                    TxPayload::Legal(legal_data) => {
+                        // Execute Legal operation (SRC-85X)
+                        let result = self.legal_executor.execute(
+                            &v2_tx.from,
+                            &legal_data,
+                            &self.state,
+                            proposer,
+                            v2_tx.fee,
+                            0, // block_height placeholder
+                            0, // block_timestamp placeholder
+                            0, // tx_index placeholder
+                            tx_hash,
+                        )?;
+
+                        if result.success {
+                            debug!(
+                                "V2 Legal {} executed: {:?}",
+                                tx_hash,
+                                legal_data.operation
+                            );
+
+                            Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Success,
+                                fee_paid: v2_tx.fee,
+                            })
+                        } else {
+                            warn!(
+                                "V2 Legal {} failed: {}",
+                                tx_hash,
+                                result.error.as_deref().unwrap_or("Unknown error")
+                            );
+
+                            Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Failed(12), // Legal operation failed
                                 fee_paid: 0,
                             })
                         }
@@ -1067,6 +1155,106 @@ impl BlockExecutor {
                     Ok(TxExecutionResult {
                         tx_hash,
                         status: TxStatus::Failed(10), // Equity operation failed
+                        fee_paid: 0,
+                    })
+                }
+            }
+            TxPayload::Agreement(agreement_data) => {
+                // Check balance for fee
+                let balance = self.state.get_balance(&tx.from)?;
+                if balance < tx.fee {
+                    return Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::InsufficientBalance,
+                        fee_paid: 0,
+                    });
+                }
+
+                // Execute Agreement operation (SRC-84X)
+                let result = self.agreement_executor.execute(
+                    &tx.from,
+                    agreement_data,
+                    &self.state,
+                    proposer,
+                    tx.fee,
+                    0, // block_height placeholder
+                    0, // block_timestamp placeholder
+                    0, // tx_index placeholder
+                    tx_hash,
+                )?;
+
+                if result.success {
+                    debug!(
+                        "V2 Agreement {} executed: {:?}",
+                        tx_hash,
+                        agreement_data.operation
+                    );
+
+                    Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::Success,
+                        fee_paid: tx.fee,
+                    })
+                } else {
+                    warn!(
+                        "V2 Agreement {} failed: {}",
+                        tx_hash,
+                        result.error.as_deref().unwrap_or("Unknown error")
+                    );
+
+                    Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::Failed(11), // Agreement operation failed
+                        fee_paid: 0,
+                    })
+                }
+            }
+            TxPayload::Legal(legal_data) => {
+                // Check balance for fee
+                let balance = self.state.get_balance(&tx.from)?;
+                if balance < tx.fee {
+                    return Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::InsufficientBalance,
+                        fee_paid: 0,
+                    });
+                }
+
+                // Execute Legal operation (SRC-85X)
+                let result = self.legal_executor.execute(
+                    &tx.from,
+                    legal_data,
+                    &self.state,
+                    proposer,
+                    tx.fee,
+                    0, // block_height placeholder
+                    0, // block_timestamp placeholder
+                    0, // tx_index placeholder
+                    tx_hash,
+                )?;
+
+                if result.success {
+                    debug!(
+                        "V2 Legal {} executed: {:?}",
+                        tx_hash,
+                        legal_data.operation
+                    );
+
+                    Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::Success,
+                        fee_paid: tx.fee,
+                    })
+                } else {
+                    warn!(
+                        "V2 Legal {} failed: {}",
+                        tx_hash,
+                        result.error.as_deref().unwrap_or("Unknown error")
+                    );
+
+                    Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::Failed(12), // Legal operation failed
                         fee_paid: 0,
                     })
                 }

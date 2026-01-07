@@ -3,9 +3,11 @@
 //! Persistent key-value storage for SUM Chain using RocksDB.
 //! Provides schemas for blocks, state, transactions, and receipts.
 
+pub mod agreement_store;
 pub mod db;
 pub mod docclass_store;
 pub mod equity_store;
+pub mod legal_store;
 pub mod messaging_store;
 pub mod pruner;
 pub mod schema;
@@ -31,6 +33,14 @@ pub use schema::{
 pub use tax_store::{
     TaxClaimTypeStore, TaxDisclosureStore, TaxEventStore, TaxIssuerStore, TaxPolicyStore,
     TaxProofStore, TaxStore,
+};
+pub use agreement_store::{
+    AgreementCommitmentStore, AgreementEventStore, AgreementProofStore, AgreementStore,
+    AttestationStore, ExecutorLinkStore, IpActionStore, SignatureStore,
+};
+pub use legal_store::{
+    BenefitStore, CaseStore, LegalEventStore, LegalProofStore, LegalStore, OrderStore,
+    ProcessEventStore,
 };
 
 use thiserror::Error;

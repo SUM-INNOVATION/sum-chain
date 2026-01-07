@@ -4,10 +4,12 @@
 //! This crate provides fundamental building blocks used throughout the chain.
 
 pub mod address;
+pub mod agreement;
 pub mod block;
 pub mod docclass;
 pub mod equity;
 pub mod hash;
+pub mod legal;
 pub mod messaging;
 pub mod receipt;
 pub mod staking;
@@ -60,6 +62,20 @@ pub use equity::{
     OwnershipSnapshot, OwnershipProofEnvelope, EquityEvent, EquityOperation, EquityTxData,
     VestingSchedule, TradingWindow, EntityStatus, TokenStatus, CorporateActionStatus,
     GovernanceActionStatus, OwnershipProofType, StockSplitParams, DividendDeclareParams,
+};
+pub use agreement::{
+    AgreementCommitment, AgreementEvent, AgreementOperation, AgreementProofEnvelope,
+    AgreementProofProfile, AgreementProofType, AgreementRole, AgreementStatus, AgreementTxData,
+    AttachmentRef, AttestationIssuerClass, AttestationPacket, AttestationStatus, AttestationTarget,
+    AttestationType, EncryptionAlgorithm as AgreementEncryptionAlgorithm, EncryptionMeta,
+    ExecutorLink, ExecutorState, IpActionStatus, IpActionType, IpAssetType, IpRightsAction,
+    PartyBinding, PartyRef, PartySignature, SignatureType,
+};
+pub use legal::{
+    BenefitDetermination, BenefitStatus, BenefitType, CaseAnchor, CaseStatus, CaseType, CourtOrder,
+    LegalEvent, LegalIssuerClass, LegalOperation, LegalProofEnvelope, LegalProofProfile,
+    LegalProofType, LegalTxData, OrderStatus, OrderType, ProcessEvent, ProcessEventStatus,
+    ProcessEventType,
 };
 
 /// Chain ID type - identifies the network

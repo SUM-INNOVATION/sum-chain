@@ -3,11 +3,13 @@
 //! State management and transaction execution for SUM Chain.
 //! Handles account balances, nonces, and transaction application.
 
+pub mod agreement_executor;
 pub mod cache;
 pub mod contract_executor;
 pub mod docclass_executor;
 pub mod equity_executor;
 pub mod executor;
+pub mod legal_executor;
 pub mod mempool;
 pub mod messaging_executor;
 pub mod nft_executor;
@@ -17,11 +19,13 @@ pub mod state;
 pub mod tax_executor;
 pub mod token_executor;
 
+pub use agreement_executor::{AgreementExecutionResult, AgreementExecutor};
 pub use cache::{CacheStats, CachedAccount, StateCache};
 pub use contract_executor::{ContractCallResult, ContractDeployResult, ContractExecutorState, ContractEvent, ContractMetadata};
 pub use docclass_executor::{DocClassExecutionResult, DocClassExecutor};
 pub use equity_executor::{EquityExecutionResult, EquityExecutor};
 pub use executor::{BlockExecutor, TxExecutionResult};
+pub use legal_executor::{LegalExecutionResult, LegalExecutor};
 pub use mempool::{Mempool, MempoolConfig, MempoolStats};
 pub use messaging_executor::{MessagingExecutionResult, MessagingExecutor};
 pub use nft_executor::{NftExecutionResult, NftExecutor};

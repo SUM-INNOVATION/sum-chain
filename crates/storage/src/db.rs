@@ -171,6 +171,46 @@ pub mod cf {
     pub const EQUITY_HOLDER_INDEX: &str = "equity_holder_index";
     /// Equity events (block_height + idx -> EquityEvent)
     pub const EQUITY_EVENTS: &str = "equity_events";
+
+    // SRC-84X Agreement & IP column families
+    /// Agreement commitments (agreement_id -> AgreementCommitment)
+    pub const AGREEMENT_COMMITMENTS: &str = "agreement_commitments";
+    /// Party signatures (signature_id -> PartySignature)
+    pub const AGREEMENT_SIGNATURES: &str = "agreement_signatures";
+    /// Attestation packets (attestation_id -> AttestationPacket)
+    pub const AGREEMENT_ATTESTATIONS: &str = "agreement_attestations";
+    /// IP rights actions (action_id -> IpRightsAction)
+    pub const AGREEMENT_IP_ACTIONS: &str = "agreement_ip_actions";
+    /// Executor links (link_id -> ExecutorLink)
+    pub const AGREEMENT_EXECUTOR_LINKS: &str = "agreement_executor_links";
+    /// Agreement proofs (proof_id -> AgreementProofEnvelope)
+    pub const AGREEMENT_PROOFS: &str = "agreement_proofs";
+    /// Agreement party index (party_ref_hash -> agreement_ids)
+    pub const AGREEMENT_PARTY_INDEX: &str = "agreement_party_index";
+    /// Agreement executor index (executor_address -> link_ids)
+    pub const AGREEMENT_EXECUTOR_INDEX: &str = "agreement_executor_index";
+    /// Agreement events (block_height + idx -> AgreementEvent)
+    pub const AGREEMENT_EVENTS: &str = "agreement_events";
+
+    // SRC-85X Legal & Benefits column families
+    /// Case anchors (case_id -> CaseAnchor)
+    pub const LEGAL_CASES: &str = "legal_cases";
+    /// Process events (event_id -> ProcessEvent)
+    pub const LEGAL_EVENTS: &str = "legal_events";
+    /// Court orders (order_id -> CourtOrder)
+    pub const LEGAL_ORDERS: &str = "legal_orders";
+    /// Benefit determinations (benefit_id -> BenefitDetermination)
+    pub const LEGAL_BENEFITS: &str = "legal_benefits";
+    /// Legal proofs (proof_id -> LegalProofEnvelope)
+    pub const LEGAL_PROOFS: &str = "legal_proofs";
+    /// Case event index (case_id -> event_ids)
+    pub const LEGAL_CASE_EVENT_INDEX: &str = "legal_case_event_index";
+    /// Case order index (case_id -> order_ids)
+    pub const LEGAL_CASE_ORDER_INDEX: &str = "legal_case_order_index";
+    /// Jurisdiction index (jurisdiction_code -> case_ids, benefit_ids)
+    pub const LEGAL_JURISDICTION_INDEX: &str = "legal_jurisdiction_index";
+    /// Legal system events (block_height + idx -> LegalEvent)
+    pub const LEGAL_SYSTEM_EVENTS: &str = "legal_system_events";
 }
 
 /// All column families used by the database
@@ -240,6 +280,26 @@ pub const ALL_CFS: &[&str] = &[
     cf::EQUITY_ENTITY_INDEX,
     cf::EQUITY_HOLDER_INDEX,
     cf::EQUITY_EVENTS,
+    // SRC-84X Agreement & IP
+    cf::AGREEMENT_COMMITMENTS,
+    cf::AGREEMENT_SIGNATURES,
+    cf::AGREEMENT_ATTESTATIONS,
+    cf::AGREEMENT_IP_ACTIONS,
+    cf::AGREEMENT_EXECUTOR_LINKS,
+    cf::AGREEMENT_PROOFS,
+    cf::AGREEMENT_PARTY_INDEX,
+    cf::AGREEMENT_EXECUTOR_INDEX,
+    cf::AGREEMENT_EVENTS,
+    // SRC-85X Legal & Benefits
+    cf::LEGAL_CASES,
+    cf::LEGAL_EVENTS,
+    cf::LEGAL_ORDERS,
+    cf::LEGAL_BENEFITS,
+    cf::LEGAL_PROOFS,
+    cf::LEGAL_CASE_EVENT_INDEX,
+    cf::LEGAL_CASE_ORDER_INDEX,
+    cf::LEGAL_JURISDICTION_INDEX,
+    cf::LEGAL_SYSTEM_EVENTS,
 ];
 
 /// Database configuration
