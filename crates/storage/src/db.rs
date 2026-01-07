@@ -211,6 +211,56 @@ pub mod cf {
     pub const LEGAL_JURISDICTION_INDEX: &str = "legal_jurisdiction_index";
     /// Legal system events (block_height + idx -> LegalEvent)
     pub const LEGAL_SYSTEM_EVENTS: &str = "legal_system_events";
+
+    // SRC-86X Property & Insurance column families
+    /// Asset anchors (asset_id -> AssetAnchor)
+    pub const PROPERTY_ASSETS: &str = "property_assets";
+    /// Title events (event_id -> TitleEvent)
+    pub const PROPERTY_TITLE_EVENTS: &str = "property_title_events";
+    /// Encumbrances (encumbrance_id -> Encumbrance)
+    pub const PROPERTY_ENCUMBRANCES: &str = "property_encumbrances";
+    /// Insurance coverage (coverage_id -> InsuranceCoverage)
+    pub const PROPERTY_COVERAGE: &str = "property_coverage";
+    /// Insurance claims (claim_id -> InsuranceClaim)
+    pub const PROPERTY_CLAIMS: &str = "property_claims";
+    /// Property proofs (proof_id -> PropertyProofEnvelope)
+    pub const PROPERTY_PROOFS: &str = "property_proofs";
+    /// Asset title index (asset_id -> title_event_ids)
+    pub const PROPERTY_ASSET_TITLE_INDEX: &str = "property_asset_title_index";
+    /// Asset encumbrance index (asset_id -> encumbrance_ids)
+    pub const PROPERTY_ASSET_ENCUMBRANCE_INDEX: &str = "property_asset_encumbrance_index";
+    /// Asset coverage index (asset_id -> coverage_ids)
+    pub const PROPERTY_ASSET_COVERAGE_INDEX: &str = "property_asset_coverage_index";
+    /// Coverage claim index (coverage_id -> claim_ids)
+    pub const PROPERTY_COVERAGE_CLAIM_INDEX: &str = "property_coverage_claim_index";
+    /// Jurisdiction index (jurisdiction_code -> asset_ids)
+    pub const PROPERTY_JURISDICTION_INDEX: &str = "property_jurisdiction_index";
+    /// Property system events (block_height + idx -> PropertyEvent)
+    pub const PROPERTY_SYSTEM_EVENTS: &str = "property_system_events";
+
+    // SRC-87X Healthcare & Membership column families
+    /// Provider profiles (provider_id -> ProviderProfile)
+    pub const HEALTHCARE_PROVIDERS: &str = "healthcare_providers";
+    /// Membership records (membership_id -> MembershipRecord)
+    pub const HEALTHCARE_MEMBERSHIPS: &str = "healthcare_memberships";
+    /// Consent envelopes (consent_id -> ConsentEnvelope)
+    pub const HEALTHCARE_CONSENTS: &str = "healthcare_consents";
+    /// Prescriptions (prescription_id -> Prescription)
+    pub const HEALTHCARE_PRESCRIPTIONS: &str = "healthcare_prescriptions";
+    /// Healthcare proofs (proof_id -> HealthcareProofEnvelope)
+    pub const HEALTHCARE_PROOFS: &str = "healthcare_proofs";
+    /// Provider network index (provider_id -> affiliated_plan_ids)
+    pub const HEALTHCARE_PROVIDER_NETWORK_INDEX: &str = "healthcare_provider_network_index";
+    /// Member index (member_nullifier -> membership_ids)
+    pub const HEALTHCARE_MEMBER_INDEX: &str = "healthcare_member_index";
+    /// Subject consent index (subject_nullifier -> consent_ids)
+    pub const HEALTHCARE_SUBJECT_CONSENT_INDEX: &str = "healthcare_subject_consent_index";
+    /// Patient prescription index (patient_nullifier -> prescription_ids)
+    pub const HEALTHCARE_PATIENT_RX_INDEX: &str = "healthcare_patient_rx_index";
+    /// Prescriber prescription index (prescriber_provider_id -> prescription_ids)
+    pub const HEALTHCARE_PRESCRIBER_RX_INDEX: &str = "healthcare_prescriber_rx_index";
+    /// Healthcare system events (block_height + idx -> HealthcareEvent)
+    pub const HEALTHCARE_SYSTEM_EVENTS: &str = "healthcare_system_events";
 }
 
 /// All column families used by the database
@@ -300,6 +350,31 @@ pub const ALL_CFS: &[&str] = &[
     cf::LEGAL_CASE_ORDER_INDEX,
     cf::LEGAL_JURISDICTION_INDEX,
     cf::LEGAL_SYSTEM_EVENTS,
+    // SRC-86X Property & Insurance
+    cf::PROPERTY_ASSETS,
+    cf::PROPERTY_TITLE_EVENTS,
+    cf::PROPERTY_ENCUMBRANCES,
+    cf::PROPERTY_COVERAGE,
+    cf::PROPERTY_CLAIMS,
+    cf::PROPERTY_PROOFS,
+    cf::PROPERTY_ASSET_TITLE_INDEX,
+    cf::PROPERTY_ASSET_ENCUMBRANCE_INDEX,
+    cf::PROPERTY_ASSET_COVERAGE_INDEX,
+    cf::PROPERTY_COVERAGE_CLAIM_INDEX,
+    cf::PROPERTY_JURISDICTION_INDEX,
+    cf::PROPERTY_SYSTEM_EVENTS,
+    // SRC-87X Healthcare & Membership
+    cf::HEALTHCARE_PROVIDERS,
+    cf::HEALTHCARE_MEMBERSHIPS,
+    cf::HEALTHCARE_CONSENTS,
+    cf::HEALTHCARE_PRESCRIPTIONS,
+    cf::HEALTHCARE_PROOFS,
+    cf::HEALTHCARE_PROVIDER_NETWORK_INDEX,
+    cf::HEALTHCARE_MEMBER_INDEX,
+    cf::HEALTHCARE_SUBJECT_CONSENT_INDEX,
+    cf::HEALTHCARE_PATIENT_RX_INDEX,
+    cf::HEALTHCARE_PRESCRIBER_RX_INDEX,
+    cf::HEALTHCARE_SYSTEM_EVENTS,
 ];
 
 /// Database configuration

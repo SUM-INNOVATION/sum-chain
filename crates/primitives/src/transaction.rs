@@ -12,8 +12,10 @@ use serde_big_array::BigArray;
 use crate::agreement::AgreementTxData;
 use crate::docclass::DocClassTxData;
 use crate::equity::EquityTxData;
+use crate::healthcare::HealthcareTxData;
 use crate::legal::LegalTxData;
 use crate::messaging::MessagingTxData;
+use crate::property::PropertyTxData;
 use crate::staking::StakingTxData;
 use crate::tax::TaxTxData;
 use crate::{Address, Balance, ChainId, Hash, Nonce};
@@ -46,6 +48,10 @@ pub enum TxType {
     Agreement = 10,
     /// Legal Process operation (SRC-85X)
     Legal = 11,
+    /// Property & Insurance operation (SRC-86X)
+    Property = 12,
+    /// Healthcare & Membership operation (SRC-87X)
+    Healthcare = 13,
 }
 
 impl TxType {
@@ -64,6 +70,8 @@ impl TxType {
             9 => Some(TxType::Equity),
             10 => Some(TxType::Agreement),
             11 => Some(TxType::Legal),
+            12 => Some(TxType::Property),
+            13 => Some(TxType::Healthcare),
             _ => None,
         }
     }
@@ -336,6 +344,10 @@ pub enum TxPayload {
     Agreement(AgreementTxData),
     /// Legal Process operation (SRC-85X)
     Legal(LegalTxData),
+    /// Property & Insurance operation (SRC-86X)
+    Property(PropertyTxData),
+    /// Healthcare & Membership operation (SRC-87X)
+    Healthcare(HealthcareTxData),
 }
 
 impl TransactionV2 {
@@ -474,6 +486,8 @@ impl TransactionV2 {
             TxPayload::Equity(_) => TxType::Equity,
             TxPayload::Agreement(_) => TxType::Agreement,
             TxPayload::Legal(_) => TxType::Legal,
+            TxPayload::Property(_) => TxType::Property,
+            TxPayload::Healthcare(_) => TxType::Healthcare,
         }
     }
 
@@ -508,6 +522,8 @@ impl TransactionV2 {
             TxPayload::Equity(_) => None,     // No direct recipient
             TxPayload::Agreement(_) => None,  // No direct recipient
             TxPayload::Legal(_) => None,      // No direct recipient
+            TxPayload::Property(_) => None,   // No direct recipient
+            TxPayload::Healthcare(_) => None, // No direct recipient
         }
     }
 
@@ -526,6 +542,8 @@ impl TransactionV2 {
             TxPayload::Equity(_) => 0,     // Fee-only operations
             TxPayload::Agreement(_) => 0,  // Fee-only operations
             TxPayload::Legal(_) => 0,      // Fee-only operations
+            TxPayload::Property(_) => 0,   // Fee-only operations
+            TxPayload::Healthcare(_) => 0, // Fee-only operations
         }
     }
 

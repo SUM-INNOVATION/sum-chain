@@ -9,8 +9,10 @@ pub mod block;
 pub mod docclass;
 pub mod equity;
 pub mod hash;
+pub mod healthcare;
 pub mod legal;
 pub mod messaging;
+pub mod property;
 pub mod receipt;
 pub mod staking;
 pub mod tax;
@@ -76,6 +78,20 @@ pub use legal::{
     LegalEvent, LegalIssuerClass, LegalOperation, LegalProofEnvelope, LegalProofProfile,
     LegalProofType, LegalTxData, OrderStatus, OrderType, ProcessEvent, ProcessEventStatus,
     ProcessEventType,
+};
+pub use property::{
+    AssetAnchor, AssetId, AssetStatus, AssetType, ClaimId, ClaimStatus, ClaimType, CoverageId,
+    CoverageStatus, CoverageType, Encumbrance, EncumbranceId, EncumbranceStatus, EncumbranceType,
+    InsuranceClaim, InsuranceCoverage, PriorityPosition, PropertyEvent, PropertyIssuerClass,
+    PropertyOperation, PropertyProofEnvelope, PropertyProofProfile, PropertyProofType,
+    PropertyTxData, TitleEvent, TitleEventId, TitleEventStatus, TitleEventType,
+};
+pub use healthcare::{
+    ConsentEnvelope, ConsentId, ConsentStatus, ConsentType, CoverageTier, DisclosureScope,
+    HealthcareEvent, HealthcareIssuerClass, HealthcareOperation, HealthcareProofEnvelope,
+    HealthcareProofProfile, HealthcareProofType, HealthcareTxData, MembershipId, MembershipRecord,
+    MembershipStatus, MembershipType, NetworkStatus, Prescription, PrescriptionId,
+    PrescriptionStatus, PrescriptionType, ProviderId, ProviderProfile, ProviderStatus, ProviderType,
 };
 
 /// Chain ID type - identifies the network

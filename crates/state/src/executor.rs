@@ -18,9 +18,11 @@ use crate::agreement_executor::AgreementExecutor;
 use crate::contract_executor::ContractExecutorState;
 use crate::docclass_executor::DocClassExecutor;
 use crate::equity_executor::EquityExecutor;
+use crate::healthcare_executor::HealthcareExecutor;
 use crate::legal_executor::LegalExecutor;
 use crate::messaging_executor::MessagingExecutor;
 use crate::nft_executor::NftExecutor;
+use crate::property_executor::PropertyExecutor;
 use crate::staking_executor::StakingExecutor;
 use crate::tax_executor::TaxExecutor;
 use crate::token_executor::TokenExecutor;
@@ -49,6 +51,8 @@ pub struct BlockExecutor {
     equity_executor: EquityExecutor,
     agreement_executor: AgreementExecutor,
     legal_executor: LegalExecutor,
+    property_executor: PropertyExecutor,
+    healthcare_executor: HealthcareExecutor,
 }
 
 impl BlockExecutor {
@@ -64,6 +68,8 @@ impl BlockExecutor {
         let equity_executor = EquityExecutor::new(db.clone(), params.clone());
         let agreement_executor = AgreementExecutor::new(db.clone(), params.clone());
         let legal_executor = LegalExecutor::new(db.clone(), params.clone());
+        let property_executor = PropertyExecutor::new(db.clone(), params.clone());
+        let healthcare_executor = HealthcareExecutor::new(db.clone(), params.clone());
         Self {
             state,
             db,
@@ -78,6 +84,8 @@ impl BlockExecutor {
             equity_executor,
             agreement_executor,
             legal_executor,
+            property_executor,
+            healthcare_executor,
         }
     }
 
@@ -629,6 +637,86 @@ impl BlockExecutor {
                             Ok(TxExecutionResult {
                                 tx_hash,
                                 status: TxStatus::Failed(12), // Legal operation failed
+                                fee_paid: 0,
+                            })
+                        }
+                    }
+                    TxPayload::Property(property_data) => {
+                        // Execute Property operation (SRC-86X)
+                        let result = self.property_executor.execute(
+                            &v2_tx.from,
+                            &property_data,
+                            &self.state,
+                            proposer,
+                            v2_tx.fee,
+                            0, // block_height placeholder
+                            0, // block_timestamp placeholder
+                            0, // tx_index placeholder
+                            tx_hash,
+                        )?;
+
+                        if result.success {
+                            debug!(
+                                "V2 Property {} executed: {:?}",
+                                tx_hash,
+                                property_data.operation
+                            );
+
+                            Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Success,
+                                fee_paid: v2_tx.fee,
+                            })
+                        } else {
+                            warn!(
+                                "V2 Property {} failed: {}",
+                                tx_hash,
+                                result.error.as_deref().unwrap_or("Unknown error")
+                            );
+
+                            Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Failed(13), // Property operation failed
+                                fee_paid: 0,
+                            })
+                        }
+                    }
+                    TxPayload::Healthcare(healthcare_data) => {
+                        // Execute Healthcare operation (SRC-87X)
+                        let result = self.healthcare_executor.execute(
+                            &v2_tx.from,
+                            &healthcare_data,
+                            &self.state,
+                            proposer,
+                            v2_tx.fee,
+                            0, // block_height placeholder
+                            0, // block_timestamp placeholder
+                            0, // tx_index placeholder
+                            tx_hash,
+                        )?;
+
+                        if result.success {
+                            debug!(
+                                "V2 Healthcare {} executed: {:?}",
+                                tx_hash,
+                                healthcare_data.operation
+                            );
+
+                            Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Success,
+                                fee_paid: v2_tx.fee,
+                            })
+                        } else {
+                            warn!(
+                                "V2 Healthcare {} failed: {}",
+                                tx_hash,
+                                result.error.as_deref().unwrap_or("Unknown error")
+                            );
+
+                            Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Failed(14), // Healthcare operation failed
                                 fee_paid: 0,
                             })
                         }
@@ -1255,6 +1343,106 @@ impl BlockExecutor {
                     Ok(TxExecutionResult {
                         tx_hash,
                         status: TxStatus::Failed(12), // Legal operation failed
+                        fee_paid: 0,
+                    })
+                }
+            }
+            TxPayload::Property(property_data) => {
+                // Check balance for fee
+                let balance = self.state.get_balance(&tx.from)?;
+                if balance < tx.fee {
+                    return Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::InsufficientBalance,
+                        fee_paid: 0,
+                    });
+                }
+
+                // Execute Property operation (SRC-86X)
+                let result = self.property_executor.execute(
+                    &tx.from,
+                    property_data,
+                    &self.state,
+                    proposer,
+                    tx.fee,
+                    0, // block_height placeholder
+                    0, // block_timestamp placeholder
+                    0, // tx_index placeholder
+                    tx_hash,
+                )?;
+
+                if result.success {
+                    debug!(
+                        "V2 Property {} executed: {:?}",
+                        tx_hash,
+                        property_data.operation
+                    );
+
+                    Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::Success,
+                        fee_paid: tx.fee,
+                    })
+                } else {
+                    warn!(
+                        "V2 Property {} failed: {}",
+                        tx_hash,
+                        result.error.as_deref().unwrap_or("Unknown error")
+                    );
+
+                    Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::Failed(13), // Property operation failed
+                        fee_paid: 0,
+                    })
+                }
+            }
+            TxPayload::Healthcare(healthcare_data) => {
+                // Check balance for fee
+                let balance = self.state.get_balance(&tx.from)?;
+                if balance < tx.fee {
+                    return Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::InsufficientBalance,
+                        fee_paid: 0,
+                    });
+                }
+
+                // Execute Healthcare operation (SRC-87X)
+                let result = self.healthcare_executor.execute(
+                    &tx.from,
+                    healthcare_data,
+                    &self.state,
+                    proposer,
+                    tx.fee,
+                    0, // block_height placeholder
+                    0, // block_timestamp placeholder
+                    0, // tx_index placeholder
+                    tx_hash,
+                )?;
+
+                if result.success {
+                    debug!(
+                        "V2 Healthcare {} executed: {:?}",
+                        tx_hash,
+                        healthcare_data.operation
+                    );
+
+                    Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::Success,
+                        fee_paid: tx.fee,
+                    })
+                } else {
+                    warn!(
+                        "V2 Healthcare {} failed: {}",
+                        tx_hash,
+                        result.error.as_deref().unwrap_or("Unknown error")
+                    );
+
+                    Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::Failed(14), // Healthcare operation failed
                         fee_paid: 0,
                     })
                 }

@@ -7,8 +7,10 @@ pub mod agreement_store;
 pub mod db;
 pub mod docclass_store;
 pub mod equity_store;
+pub mod healthcare_store;
 pub mod legal_store;
 pub mod messaging_store;
+pub mod property_store;
 pub mod pruner;
 pub mod schema;
 pub mod tax_store;
@@ -41,6 +43,14 @@ pub use agreement_store::{
 pub use legal_store::{
     BenefitStore, CaseStore, LegalEventStore, LegalProofStore, LegalStore, OrderStore,
     ProcessEventStore,
+};
+pub use property_store::{
+    AssetStore, ClaimStore, CoverageStore, EncumbranceStore, PropertyEventStore,
+    PropertyProofStore, PropertyStore, TitleEventStore,
+};
+pub use healthcare_store::{
+    ConsentStore, HealthcareEventStore, HealthcareProofStore, HealthcareStore, MembershipStore,
+    PrescriptionStore, ProviderStore,
 };
 
 use thiserror::Error;
