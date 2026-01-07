@@ -129,6 +129,48 @@ pub mod cf {
     pub const MESSAGING_PENDING_PAYMENTS: &str = "messaging_pending_payments";
     /// Message events for indexing (recipient_hash + block_height + idx -> MessageEvent)
     pub const MESSAGING_EVENTS: &str = "messaging_events";
+
+    // SRC-82X Tax & Compliance column families
+    /// Tax claim type registry (claim_type -> TaxClaimTypeEntry)
+    pub const TAX_CLAIM_TYPES: &str = "tax_claim_types";
+    /// Tax issuers (issuer_id -> TaxIssuer)
+    pub const TAX_ISSUERS: &str = "tax_issuers";
+    /// Tax policies (policy_id -> TaxPolicy)
+    pub const TAX_POLICIES: &str = "tax_policies";
+    /// Tax proof envelopes (proof_id -> TaxProofEnvelope)
+    pub const TAX_PROOFS: &str = "tax_proofs";
+    /// Tax disclosure envelopes (disclosure_id -> TaxDisclosureEnvelope)
+    pub const TAX_DISCLOSURES: &str = "tax_disclosures";
+    /// Tax subject index (subject_commitment -> proof_ids)
+    pub const TAX_SUBJECT_INDEX: &str = "tax_subject_index";
+    /// Tax issuer index (issuer_id -> proof_ids)
+    pub const TAX_ISSUER_INDEX: &str = "tax_issuer_index";
+    /// Tax events (block_height + idx -> TaxEvent)
+    pub const TAX_EVENTS: &str = "tax_events";
+
+    // SRC-83X Business & Equity column families
+    /// Entity profiles (subject_id -> EntityProfile)
+    pub const EQUITY_ENTITIES: &str = "equity_entities";
+    /// Governance actions (action_id -> GovernanceAction)
+    pub const EQUITY_GOVERNANCE: &str = "equity_governance";
+    /// Equity tokens (class_id -> EquityToken)
+    pub const EQUITY_TOKENS: &str = "equity_tokens";
+    /// Equity balances (class_id + holder -> balance)
+    pub const EQUITY_BALANCES: &str = "equity_balances";
+    /// Equity controller configs (class_id -> EquityControllerConfig)
+    pub const EQUITY_CONTROLLERS: &str = "equity_controllers";
+    /// Corporate actions (action_id -> CorporateAction)
+    pub const EQUITY_CORPORATE_ACTIONS: &str = "equity_corporate_actions";
+    /// Ownership snapshots (snapshot_id -> OwnershipSnapshot)
+    pub const EQUITY_SNAPSHOTS: &str = "equity_snapshots";
+    /// Ownership proofs (proof_id -> OwnershipProofEnvelope)
+    pub const EQUITY_PROOFS: &str = "equity_proofs";
+    /// Entity index (subject_id -> governance_action_ids, token_class_ids)
+    pub const EQUITY_ENTITY_INDEX: &str = "equity_entity_index";
+    /// Holder index (holder_commitment -> class_ids with balance)
+    pub const EQUITY_HOLDER_INDEX: &str = "equity_holder_index";
+    /// Equity events (block_height + idx -> EquityEvent)
+    pub const EQUITY_EVENTS: &str = "equity_events";
 }
 
 /// All column families used by the database
@@ -177,6 +219,27 @@ pub const ALL_CFS: &[&str] = &[
     cf::MESSAGING_BLOCKED,
     cf::MESSAGING_PENDING_PAYMENTS,
     cf::MESSAGING_EVENTS,
+    // SRC-82X Tax & Compliance
+    cf::TAX_CLAIM_TYPES,
+    cf::TAX_ISSUERS,
+    cf::TAX_POLICIES,
+    cf::TAX_PROOFS,
+    cf::TAX_DISCLOSURES,
+    cf::TAX_SUBJECT_INDEX,
+    cf::TAX_ISSUER_INDEX,
+    cf::TAX_EVENTS,
+    // SRC-83X Business & Equity
+    cf::EQUITY_ENTITIES,
+    cf::EQUITY_GOVERNANCE,
+    cf::EQUITY_TOKENS,
+    cf::EQUITY_BALANCES,
+    cf::EQUITY_CONTROLLERS,
+    cf::EQUITY_CORPORATE_ACTIONS,
+    cf::EQUITY_SNAPSHOTS,
+    cf::EQUITY_PROOFS,
+    cf::EQUITY_ENTITY_INDEX,
+    cf::EQUITY_HOLDER_INDEX,
+    cf::EQUITY_EVENTS,
 ];
 
 /// Database configuration

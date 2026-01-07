@@ -10,8 +10,10 @@ use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
 
 use crate::docclass::DocClassTxData;
+use crate::equity::EquityTxData;
 use crate::messaging::MessagingTxData;
 use crate::staking::StakingTxData;
+use crate::tax::TaxTxData;
 use crate::{Address, Balance, ChainId, Hash, Nonce};
 
 /// Transaction type identifier
@@ -34,6 +36,10 @@ pub enum TxType {
     Messaging = 6,
     /// DocClass operation (SRC-80X/81X)
     DocClass = 7,
+    /// Tax & Compliance operation (SRC-82X)
+    Tax = 8,
+    /// Business, Governance & Equity operation (SRC-83X)
+    Equity = 9,
 }
 
 impl TxType {
@@ -48,6 +54,8 @@ impl TxType {
             5 => Some(TxType::Staking),
             6 => Some(TxType::Messaging),
             7 => Some(TxType::DocClass),
+            8 => Some(TxType::Tax),
+            9 => Some(TxType::Equity),
             _ => None,
         }
     }
@@ -312,6 +320,10 @@ pub enum TxPayload {
     Messaging(MessagingTxData),
     /// DocClass operation (SRC-80X/81X)
     DocClass(DocClassTxData),
+    /// Tax & Compliance operation (SRC-82X)
+    Tax(TaxTxData),
+    /// Business, Governance & Equity operation (SRC-83X)
+    Equity(EquityTxData),
 }
 
 impl TransactionV2 {
@@ -446,6 +458,8 @@ impl TransactionV2 {
             TxPayload::Staking(_) => TxType::Staking,
             TxPayload::Messaging(_) => TxType::Messaging,
             TxPayload::DocClass(_) => TxType::DocClass,
+            TxPayload::Tax(_) => TxType::Tax,
+            TxPayload::Equity(_) => TxType::Equity,
         }
     }
 
@@ -476,6 +490,8 @@ impl TransactionV2 {
             TxPayload::Staking(_) => None,
             TxPayload::Messaging(_) => None, // Recipient is encrypted in message
             TxPayload::DocClass(_) => None,  // No direct recipient
+            TxPayload::Tax(_) => None,       // No direct recipient
+            TxPayload::Equity(_) => None,    // No direct recipient
         }
     }
 
@@ -490,6 +506,8 @@ impl TransactionV2 {
             TxPayload::Staking(_) => 0,
             TxPayload::Messaging(_) => 0, // Koppa attachment is inside message data
             TxPayload::DocClass(_) => 0,  // Stake/fee handled separately
+            TxPayload::Tax(_) => 0,       // Fee-only operations
+            TxPayload::Equity(_) => 0,    // Fee-only operations
         }
     }
 

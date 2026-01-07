@@ -16,9 +16,11 @@ use tracing::{debug, info, warn};
 
 use crate::contract_executor::ContractExecutorState;
 use crate::docclass_executor::DocClassExecutor;
+use crate::equity_executor::EquityExecutor;
 use crate::messaging_executor::MessagingExecutor;
 use crate::nft_executor::NftExecutor;
 use crate::staking_executor::StakingExecutor;
+use crate::tax_executor::TaxExecutor;
 use crate::token_executor::TokenExecutor;
 use crate::{Result, StateError, StateManager};
 
@@ -41,6 +43,8 @@ pub struct BlockExecutor {
     staking_executor: StakingExecutor,
     messaging_executor: MessagingExecutor,
     docclass_executor: DocClassExecutor,
+    tax_executor: TaxExecutor,
+    equity_executor: EquityExecutor,
 }
 
 impl BlockExecutor {
@@ -52,6 +56,8 @@ impl BlockExecutor {
         let staking_executor = StakingExecutor::new(db.clone(), params.clone());
         let messaging_executor = MessagingExecutor::new(db.clone(), params.clone());
         let docclass_executor = DocClassExecutor::new(db.clone(), params.clone());
+        let tax_executor = TaxExecutor::new(db.clone(), params.clone());
+        let equity_executor = EquityExecutor::new(db.clone(), params.clone());
         Self {
             state,
             db,
@@ -62,6 +68,8 @@ impl BlockExecutor {
             staking_executor,
             messaging_executor,
             docclass_executor,
+            tax_executor,
+            equity_executor,
         }
     }
 
@@ -453,6 +461,86 @@ impl BlockExecutor {
                             Ok(TxExecutionResult {
                                 tx_hash,
                                 status: TxStatus::Failed(8), // DocClass operation failed
+                                fee_paid: 0,
+                            })
+                        }
+                    }
+                    TxPayload::Tax(tax_data) => {
+                        // Execute Tax operation (SRC-82X)
+                        let result = self.tax_executor.execute(
+                            &v2_tx.from,
+                            &tax_data,
+                            &self.state,
+                            proposer,
+                            v2_tx.fee,
+                            0, // block_height placeholder
+                            0, // block_timestamp placeholder
+                            0, // tx_index placeholder
+                            tx_hash,
+                        )?;
+
+                        if result.success {
+                            debug!(
+                                "V2 Tax {} executed: {:?}",
+                                tx_hash,
+                                tax_data.operation
+                            );
+
+                            Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Success,
+                                fee_paid: v2_tx.fee,
+                            })
+                        } else {
+                            warn!(
+                                "V2 Tax {} failed: {}",
+                                tx_hash,
+                                result.error.as_deref().unwrap_or("Unknown error")
+                            );
+
+                            Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Failed(9), // Tax operation failed
+                                fee_paid: 0,
+                            })
+                        }
+                    }
+                    TxPayload::Equity(equity_data) => {
+                        // Execute Equity operation (SRC-83X)
+                        let result = self.equity_executor.execute(
+                            &v2_tx.from,
+                            &equity_data,
+                            &self.state,
+                            proposer,
+                            v2_tx.fee,
+                            0, // block_height placeholder
+                            0, // block_timestamp placeholder
+                            0, // tx_index placeholder
+                            tx_hash,
+                        )?;
+
+                        if result.success {
+                            debug!(
+                                "V2 Equity {} executed: {:?}",
+                                tx_hash,
+                                equity_data.operation
+                            );
+
+                            Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Success,
+                                fee_paid: v2_tx.fee,
+                            })
+                        } else {
+                            warn!(
+                                "V2 Equity {} failed: {}",
+                                tx_hash,
+                                result.error.as_deref().unwrap_or("Unknown error")
+                            );
+
+                            Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Failed(10), // Equity operation failed
                                 fee_paid: 0,
                             })
                         }
@@ -879,6 +967,106 @@ impl BlockExecutor {
                     Ok(TxExecutionResult {
                         tx_hash,
                         status: TxStatus::Failed(8), // DocClass operation failed
+                        fee_paid: 0,
+                    })
+                }
+            }
+            TxPayload::Tax(tax_data) => {
+                // Check balance for fee
+                let balance = self.state.get_balance(&tx.from)?;
+                if balance < tx.fee {
+                    return Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::InsufficientBalance,
+                        fee_paid: 0,
+                    });
+                }
+
+                // Execute Tax operation (SRC-82X)
+                let result = self.tax_executor.execute(
+                    &tx.from,
+                    tax_data,
+                    &self.state,
+                    proposer,
+                    tx.fee,
+                    0, // block_height placeholder
+                    0, // block_timestamp placeholder
+                    0, // tx_index placeholder
+                    tx_hash,
+                )?;
+
+                if result.success {
+                    debug!(
+                        "V2 Tax {} executed: {:?}",
+                        tx_hash,
+                        tax_data.operation
+                    );
+
+                    Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::Success,
+                        fee_paid: tx.fee,
+                    })
+                } else {
+                    warn!(
+                        "V2 Tax {} failed: {}",
+                        tx_hash,
+                        result.error.as_deref().unwrap_or("Unknown error")
+                    );
+
+                    Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::Failed(9), // Tax operation failed
+                        fee_paid: 0,
+                    })
+                }
+            }
+            TxPayload::Equity(equity_data) => {
+                // Check balance for fee
+                let balance = self.state.get_balance(&tx.from)?;
+                if balance < tx.fee {
+                    return Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::InsufficientBalance,
+                        fee_paid: 0,
+                    });
+                }
+
+                // Execute Equity operation (SRC-83X)
+                let result = self.equity_executor.execute(
+                    &tx.from,
+                    equity_data,
+                    &self.state,
+                    proposer,
+                    tx.fee,
+                    0, // block_height placeholder
+                    0, // block_timestamp placeholder
+                    0, // tx_index placeholder
+                    tx_hash,
+                )?;
+
+                if result.success {
+                    debug!(
+                        "V2 Equity {} executed: {:?}",
+                        tx_hash,
+                        equity_data.operation
+                    );
+
+                    Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::Success,
+                        fee_paid: tx.fee,
+                    })
+                } else {
+                    warn!(
+                        "V2 Equity {} failed: {}",
+                        tx_hash,
+                        result.error.as_deref().unwrap_or("Unknown error")
+                    );
+
+                    Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::Failed(10), // Equity operation failed
                         fee_paid: 0,
                     })
                 }

@@ -6,10 +6,12 @@
 pub mod address;
 pub mod block;
 pub mod docclass;
+pub mod equity;
 pub mod hash;
 pub mod messaging;
 pub mod receipt;
 pub mod staking;
+pub mod tax;
 pub mod transaction;
 
 pub use address::Address;
@@ -45,6 +47,19 @@ pub use docclass::{
     IssuerKey, KeyPurpose, KeyType, RevocationReason, RevocationRecord, RevocationStatus,
     ServiceEndpoint, ZkProofInputs, generate_commitment, generate_credential_id, generate_nullifier,
     generate_subject_commitment,
+};
+pub use tax::{
+    TaxClaimTypeEntry, TaxIssuerClass, TaxIssuer, TaxPolicy, TaxPolicyTemplate,
+    TaxProofEnvelope, TaxDisclosureEnvelope, TaxEvent, TaxOperation, TaxTxData,
+    TaxRiskLevel, TaxIssuerStatus, TaxVerificationResult, EncryptionAlgorithm,
+    IssuerRequirements, QuorumRule, ClaimTypeStatus,
+};
+pub use equity::{
+    EntityProfile, OrgType, GovernanceAction, GovernanceActionType, EquityToken, ShareClassType,
+    EquityControllerConfig, ControllerModel, LockupInfo, CorporateAction, CorporateActionType,
+    OwnershipSnapshot, OwnershipProofEnvelope, EquityEvent, EquityOperation, EquityTxData,
+    VestingSchedule, TradingWindow, EntityStatus, TokenStatus, CorporateActionStatus,
+    GovernanceActionStatus, OwnershipProofType, StockSplitParams, DividendDeclareParams,
 };
 
 /// Chain ID type - identifies the network

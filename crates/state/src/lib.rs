@@ -6,6 +6,7 @@
 pub mod cache;
 pub mod contract_executor;
 pub mod docclass_executor;
+pub mod equity_executor;
 pub mod executor;
 pub mod mempool;
 pub mod messaging_executor;
@@ -13,11 +14,13 @@ pub mod nft_executor;
 pub mod snapshot;
 pub mod staking_executor;
 pub mod state;
+pub mod tax_executor;
 pub mod token_executor;
 
 pub use cache::{CacheStats, CachedAccount, StateCache};
 pub use contract_executor::{ContractCallResult, ContractDeployResult, ContractExecutorState, ContractEvent, ContractMetadata};
 pub use docclass_executor::{DocClassExecutionResult, DocClassExecutor};
+pub use equity_executor::{EquityExecutionResult, EquityExecutor};
 pub use executor::{BlockExecutor, TxExecutionResult};
 pub use mempool::{Mempool, MempoolConfig, MempoolStats};
 pub use messaging_executor::{MessagingExecutionResult, MessagingExecutor};
@@ -25,6 +28,7 @@ pub use nft_executor::{NftExecutionResult, NftExecutor};
 pub use snapshot::{Snapshot, SnapshotHeader, SnapshotManager, SnapshotSyncConfig, RestoreResult};
 pub use staking_executor::{StakingExecutionResult, StakingExecutor};
 pub use state::StateManager;
+pub use tax_executor::{TaxExecutionResult, TaxExecutor};
 pub use token_executor::{TokenExecutionResult, TokenExecutor};
 
 use thiserror::Error;

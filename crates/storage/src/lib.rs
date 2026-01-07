@@ -5,14 +5,21 @@
 
 pub mod db;
 pub mod docclass_store;
+pub mod equity_store;
 pub mod messaging_store;
 pub mod pruner;
 pub mod schema;
+pub mod tax_store;
 
 pub use db::{BackupInfo, Database, DatabaseConfig};
 pub use docclass_store::{
     CredentialStore, DocClassEventStore, DocClassIssuerStore, DocClassStore, EligibilityStore,
     IdentityRootStore, RevocationStore,
+};
+pub use equity_store::{
+    CorporateActionStore, EntityProfileStore, EquityBalanceStore, EquityControllerStore,
+    EquityEventStore, EquityStore, EquityTokenStore, GovernanceActionStore, OwnershipProofStore,
+    OwnershipSnapshotStore,
 };
 pub use messaging_store::MessagingStore;
 pub use pruner::{DbStats, PruneStats, Pruner, PrunerConfig};
@@ -20,6 +27,10 @@ pub use schema::{
     BlockStore, DelegationStore, IssuerData, IssuerStore, NftCollectionData, NftStore,
     NftTokenData, ReceiptStore, SlashingStore, Src20TokenData, StakingStore, StateStore,
     TokenStore, TxStore, ValidatorSetStore,
+};
+pub use tax_store::{
+    TaxClaimTypeStore, TaxDisclosureStore, TaxEventStore, TaxIssuerStore, TaxPolicyStore,
+    TaxProofStore, TaxStore,
 };
 
 use thiserror::Error;
