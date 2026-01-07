@@ -553,4 +553,4 @@ let tx_data = AgreementTxData {
 
 | Version | Date | Changes |
 |---------|------|---------|
-| 1.0.0 | 2024-01 | Initial release |
+| 1.0.0 | 2026-01 | Initial release |

@@ -658,4 +658,4 @@ SRC-85X integrates with:
 
 | Version | Date | Changes |
 |---------|------|---------|
-| 1.0.0 | 2024-01 | Initial release |
+| 1.0.0 | 2026-01 | Initial release |
