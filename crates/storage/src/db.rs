@@ -261,6 +261,46 @@ pub mod cf {
     pub const HEALTHCARE_PRESCRIBER_RX_INDEX: &str = "healthcare_prescriber_rx_index";
     /// Healthcare system events (block_height + idx -> HealthcareEvent)
     pub const HEALTHCARE_SYSTEM_EVENTS: &str = "healthcare_system_events";
+
+    // SRC-88X Employment & HR column families
+    /// Employment issuers (issuer_address -> EmploymentIssuerProfile)
+    pub const EMPLOYMENT_ISSUERS: &str = "employment_issuers";
+    /// Employment credentials (employment_id -> EmploymentCredential)
+    pub const EMPLOYMENT_CREDENTIALS: &str = "employment_credentials";
+    /// Income attestations (attestation_id -> IncomeAttestation)
+    pub const EMPLOYMENT_INCOME_ATTESTATIONS: &str = "employment_income_attestations";
+    /// Employment proofs (proof_id -> EmploymentProofEnvelope)
+    pub const EMPLOYMENT_PROOFS: &str = "employment_proofs";
+    /// Employee index (employee_ref -> employment_ids)
+    pub const EMPLOYMENT_EMPLOYEE_INDEX: &str = "employment_employee_index";
+    /// Employer index (employer_ref -> employment_ids)
+    pub const EMPLOYMENT_EMPLOYER_INDEX: &str = "employment_employer_index";
+    /// Subject income index (subject_ref -> attestation_ids)
+    pub const EMPLOYMENT_SUBJECT_INCOME_INDEX: &str = "employment_subject_income_index";
+    /// Employment system events (block_height + idx -> EmploymentEvent)
+    pub const EMPLOYMENT_SYSTEM_EVENTS: &str = "employment_system_events";
+
+    // SRC-89X Finance & Banking column families
+    /// Finance issuers (issuer_address -> FinanceIssuerProfile)
+    pub const FINANCE_ISSUERS: &str = "finance_issuers";
+    /// Address proofs (proof_id -> AddressProof)
+    pub const FINANCE_ADDRESS_PROOFS: &str = "finance_address_proofs";
+    /// Bank standing credentials (credential_id -> BankStandingCredential)
+    pub const FINANCE_BANK_STANDINGS: &str = "finance_bank_standings";
+    /// KYC attestations (attestation_id -> KycAttestation)
+    pub const FINANCE_KYC_ATTESTATIONS: &str = "finance_kyc_attestations";
+    /// Finance proofs (proof_id -> FinanceProofEnvelope)
+    pub const FINANCE_PROOFS: &str = "finance_proofs";
+    /// Subject address index (subject_ref -> address_proof_ids)
+    pub const FINANCE_SUBJECT_ADDRESS_INDEX: &str = "finance_subject_address_index";
+    /// Subject bank standing index (subject_ref -> bank_standing_ids)
+    pub const FINANCE_SUBJECT_BANK_INDEX: &str = "finance_subject_bank_index";
+    /// Subject KYC index (subject_ref -> kyc_attestation_ids)
+    pub const FINANCE_SUBJECT_KYC_INDEX: &str = "finance_subject_kyc_index";
+    /// Jurisdiction index (jurisdiction_code -> issuer_addresses, proof_ids)
+    pub const FINANCE_JURISDICTION_INDEX: &str = "finance_jurisdiction_index";
+    /// Finance system events (block_height + idx -> FinanceEvent)
+    pub const FINANCE_SYSTEM_EVENTS: &str = "finance_system_events";
 }
 
 /// All column families used by the database
@@ -375,6 +415,26 @@ pub const ALL_CFS: &[&str] = &[
     cf::HEALTHCARE_PATIENT_RX_INDEX,
     cf::HEALTHCARE_PRESCRIBER_RX_INDEX,
     cf::HEALTHCARE_SYSTEM_EVENTS,
+    // SRC-88X Employment & HR
+    cf::EMPLOYMENT_ISSUERS,
+    cf::EMPLOYMENT_CREDENTIALS,
+    cf::EMPLOYMENT_INCOME_ATTESTATIONS,
+    cf::EMPLOYMENT_PROOFS,
+    cf::EMPLOYMENT_EMPLOYEE_INDEX,
+    cf::EMPLOYMENT_EMPLOYER_INDEX,
+    cf::EMPLOYMENT_SUBJECT_INCOME_INDEX,
+    cf::EMPLOYMENT_SYSTEM_EVENTS,
+    // SRC-89X Finance & Banking
+    cf::FINANCE_ISSUERS,
+    cf::FINANCE_ADDRESS_PROOFS,
+    cf::FINANCE_BANK_STANDINGS,
+    cf::FINANCE_KYC_ATTESTATIONS,
+    cf::FINANCE_PROOFS,
+    cf::FINANCE_SUBJECT_ADDRESS_INDEX,
+    cf::FINANCE_SUBJECT_BANK_INDEX,
+    cf::FINANCE_SUBJECT_KYC_INDEX,
+    cf::FINANCE_JURISDICTION_INDEX,
+    cf::FINANCE_SYSTEM_EVENTS,
 ];
 
 /// Database configuration

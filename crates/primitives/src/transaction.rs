@@ -11,7 +11,9 @@ use serde_big_array::BigArray;
 
 use crate::agreement::AgreementTxData;
 use crate::docclass::DocClassTxData;
+use crate::employment::EmploymentTxData;
 use crate::equity::EquityTxData;
+use crate::finance::FinanceTxData;
 use crate::healthcare::HealthcareTxData;
 use crate::legal::LegalTxData;
 use crate::messaging::MessagingTxData;
@@ -52,6 +54,10 @@ pub enum TxType {
     Property = 12,
     /// Healthcare & Membership operation (SRC-87X)
     Healthcare = 13,
+    /// Employment & HR operation (SRC-88X)
+    Employment = 14,
+    /// Finance & Banking operation (SRC-89X)
+    Finance = 15,
 }
 
 impl TxType {
@@ -72,6 +78,8 @@ impl TxType {
             11 => Some(TxType::Legal),
             12 => Some(TxType::Property),
             13 => Some(TxType::Healthcare),
+            14 => Some(TxType::Employment),
+            15 => Some(TxType::Finance),
             _ => None,
         }
     }
@@ -348,6 +356,10 @@ pub enum TxPayload {
     Property(PropertyTxData),
     /// Healthcare & Membership operation (SRC-87X)
     Healthcare(HealthcareTxData),
+    /// Employment & HR operation (SRC-88X)
+    Employment(EmploymentTxData),
+    /// Finance & Banking operation (SRC-89X)
+    Finance(FinanceTxData),
 }
 
 impl TransactionV2 {
@@ -488,6 +500,8 @@ impl TransactionV2 {
             TxPayload::Legal(_) => TxType::Legal,
             TxPayload::Property(_) => TxType::Property,
             TxPayload::Healthcare(_) => TxType::Healthcare,
+            TxPayload::Employment(_) => TxType::Employment,
+            TxPayload::Finance(_) => TxType::Finance,
         }
     }
 
@@ -524,6 +538,8 @@ impl TransactionV2 {
             TxPayload::Legal(_) => None,      // No direct recipient
             TxPayload::Property(_) => None,   // No direct recipient
             TxPayload::Healthcare(_) => None, // No direct recipient
+            TxPayload::Employment(_) => None, // No direct recipient
+            TxPayload::Finance(_) => None,    // No direct recipient
         }
     }
 
@@ -544,6 +560,8 @@ impl TransactionV2 {
             TxPayload::Legal(_) => 0,      // Fee-only operations
             TxPayload::Property(_) => 0,   // Fee-only operations
             TxPayload::Healthcare(_) => 0, // Fee-only operations
+            TxPayload::Employment(_) => 0, // Fee-only operations
+            TxPayload::Finance(_) => 0,    // Fee-only operations
         }
     }
 

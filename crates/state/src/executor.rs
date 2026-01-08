@@ -17,7 +17,9 @@ use tracing::{debug, info, warn};
 use crate::agreement_executor::AgreementExecutor;
 use crate::contract_executor::ContractExecutorState;
 use crate::docclass_executor::DocClassExecutor;
+use crate::employment_executor::EmploymentExecutor;
 use crate::equity_executor::EquityExecutor;
+use crate::finance_executor::FinanceExecutor;
 use crate::healthcare_executor::HealthcareExecutor;
 use crate::legal_executor::LegalExecutor;
 use crate::messaging_executor::MessagingExecutor;
@@ -53,6 +55,8 @@ pub struct BlockExecutor {
     legal_executor: LegalExecutor,
     property_executor: PropertyExecutor,
     healthcare_executor: HealthcareExecutor,
+    employment_executor: EmploymentExecutor,
+    finance_executor: FinanceExecutor,
 }
 
 impl BlockExecutor {
@@ -70,6 +74,8 @@ impl BlockExecutor {
         let legal_executor = LegalExecutor::new(db.clone(), params.clone());
         let property_executor = PropertyExecutor::new(db.clone(), params.clone());
         let healthcare_executor = HealthcareExecutor::new(db.clone(), params.clone());
+        let employment_executor = EmploymentExecutor::new(db.clone(), params.clone());
+        let finance_executor = FinanceExecutor::new(db.clone(), params.clone());
         Self {
             state,
             db,
@@ -86,6 +92,8 @@ impl BlockExecutor {
             legal_executor,
             property_executor,
             healthcare_executor,
+            employment_executor,
+            finance_executor,
         }
     }
 
@@ -717,6 +725,86 @@ impl BlockExecutor {
                             Ok(TxExecutionResult {
                                 tx_hash,
                                 status: TxStatus::Failed(14), // Healthcare operation failed
+                                fee_paid: 0,
+                            })
+                        }
+                    }
+                    TxPayload::Employment(employment_data) => {
+                        // Execute Employment operation (SRC-88X)
+                        let result = self.employment_executor.execute(
+                            &v2_tx.from,
+                            &employment_data,
+                            &self.state,
+                            proposer,
+                            v2_tx.fee,
+                            0, // block_height placeholder
+                            0, // block_timestamp placeholder
+                            0, // tx_index placeholder
+                            tx_hash,
+                        )?;
+
+                        if result.success {
+                            debug!(
+                                "V2 Employment {} executed: {:?}",
+                                tx_hash,
+                                employment_data.operation
+                            );
+
+                            Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Success,
+                                fee_paid: v2_tx.fee,
+                            })
+                        } else {
+                            warn!(
+                                "V2 Employment {} failed: {}",
+                                tx_hash,
+                                result.error.as_deref().unwrap_or("Unknown error")
+                            );
+
+                            Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Failed(15), // Employment operation failed
+                                fee_paid: 0,
+                            })
+                        }
+                    }
+                    TxPayload::Finance(finance_data) => {
+                        // Execute Finance operation (SRC-89X)
+                        let result = self.finance_executor.execute(
+                            &v2_tx.from,
+                            &finance_data,
+                            &self.state,
+                            proposer,
+                            v2_tx.fee,
+                            0, // block_height placeholder
+                            0, // block_timestamp placeholder
+                            0, // tx_index placeholder
+                            tx_hash,
+                        )?;
+
+                        if result.success {
+                            debug!(
+                                "V2 Finance {} executed: {:?}",
+                                tx_hash,
+                                finance_data.operation
+                            );
+
+                            Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Success,
+                                fee_paid: v2_tx.fee,
+                            })
+                        } else {
+                            warn!(
+                                "V2 Finance {} failed: {}",
+                                tx_hash,
+                                result.error.as_deref().unwrap_or("Unknown error")
+                            );
+
+                            Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Failed(16), // Finance operation failed
                                 fee_paid: 0,
                             })
                         }
@@ -1443,6 +1531,106 @@ impl BlockExecutor {
                     Ok(TxExecutionResult {
                         tx_hash,
                         status: TxStatus::Failed(14), // Healthcare operation failed
+                        fee_paid: 0,
+                    })
+                }
+            }
+            TxPayload::Employment(employment_data) => {
+                // Check balance for fee
+                let balance = self.state.get_balance(&tx.from)?;
+                if balance < tx.fee {
+                    return Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::InsufficientBalance,
+                        fee_paid: 0,
+                    });
+                }
+
+                // Execute Employment operation (SRC-88X)
+                let result = self.employment_executor.execute(
+                    &tx.from,
+                    employment_data,
+                    &self.state,
+                    proposer,
+                    tx.fee,
+                    0, // block_height placeholder
+                    0, // block_timestamp placeholder
+                    0, // tx_index placeholder
+                    tx_hash,
+                )?;
+
+                if result.success {
+                    debug!(
+                        "V2 Employment {} executed: {:?}",
+                        tx_hash,
+                        employment_data.operation
+                    );
+
+                    Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::Success,
+                        fee_paid: tx.fee,
+                    })
+                } else {
+                    warn!(
+                        "V2 Employment {} failed: {}",
+                        tx_hash,
+                        result.error.as_deref().unwrap_or("Unknown error")
+                    );
+
+                    Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::Failed(15), // Employment operation failed
+                        fee_paid: 0,
+                    })
+                }
+            }
+            TxPayload::Finance(finance_data) => {
+                // Check balance for fee
+                let balance = self.state.get_balance(&tx.from)?;
+                if balance < tx.fee {
+                    return Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::InsufficientBalance,
+                        fee_paid: 0,
+                    });
+                }
+
+                // Execute Finance operation (SRC-89X)
+                let result = self.finance_executor.execute(
+                    &tx.from,
+                    finance_data,
+                    &self.state,
+                    proposer,
+                    tx.fee,
+                    0, // block_height placeholder
+                    0, // block_timestamp placeholder
+                    0, // tx_index placeholder
+                    tx_hash,
+                )?;
+
+                if result.success {
+                    debug!(
+                        "V2 Finance {} executed: {:?}",
+                        tx_hash,
+                        finance_data.operation
+                    );
+
+                    Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::Success,
+                        fee_paid: tx.fee,
+                    })
+                } else {
+                    warn!(
+                        "V2 Finance {} failed: {}",
+                        tx_hash,
+                        result.error.as_deref().unwrap_or("Unknown error")
+                    );
+
+                    Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::Failed(16), // Finance operation failed
                         fee_paid: 0,
                     })
                 }

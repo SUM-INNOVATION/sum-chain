@@ -6,7 +6,9 @@
 pub mod agreement_store;
 pub mod db;
 pub mod docclass_store;
+pub mod employment_store;
 pub mod equity_store;
+pub mod finance_store;
 pub mod healthcare_store;
 pub mod legal_store;
 pub mod messaging_store;
@@ -51,6 +53,14 @@ pub use property_store::{
 pub use healthcare_store::{
     ConsentStore, HealthcareEventStore, HealthcareProofStore, HealthcareStore, MembershipStore,
     PrescriptionStore, ProviderStore,
+};
+pub use employment_store::{
+    EmploymentCredentialStore, EmploymentEventStore, EmploymentIssuerStore, EmploymentProofStore,
+    EmploymentStore, IncomeAttestationStore,
+};
+pub use finance_store::{
+    AddressProofStore, BankStandingStore, FinanceEventStore, FinanceIssuerStore, FinanceProofStore,
+    FinanceStore, KycAttestationStore,
 };
 
 use thiserror::Error;

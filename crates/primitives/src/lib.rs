@@ -7,7 +7,9 @@ pub mod address;
 pub mod agreement;
 pub mod block;
 pub mod docclass;
+pub mod employment;
 pub mod equity;
+pub mod finance;
 pub mod hash;
 pub mod healthcare;
 pub mod legal;
@@ -92,6 +94,19 @@ pub use healthcare::{
     HealthcareProofProfile, HealthcareProofType, HealthcareTxData, MembershipId, MembershipRecord,
     MembershipStatus, MembershipType, NetworkStatus, Prescription, PrescriptionId,
     PrescriptionStatus, PrescriptionType, ProviderId, ProviderProfile, ProviderStatus, ProviderType,
+};
+pub use employment::{
+    EmploymentCredential, EmploymentEvent, EmploymentId, EmploymentIssuerClass,
+    EmploymentIssuerProfile, EmploymentOperation, EmploymentProofEnvelope, EmploymentProofProfile,
+    EmploymentProofType, EmploymentRiskLevel, EmploymentStatus, EmploymentTxData, EmploymentType,
+    IncomeAttestation, IncomeAttestationId, IncomeBracket, IncomePeriod, IssuerStatus as EmploymentIssuerStatus,
+};
+pub use finance::{
+    AccountStanding, AccountType, AddressProof, AddressProofId, AddressProofType, AmlRisk,
+    BalanceBracket, BankStandingCredential, BankStandingId, FinanceEvent, FinanceIssuerClass,
+    FinanceIssuerProfile, FinanceIssuerStatus, FinanceOperation, FinanceProofEnvelope,
+    FinanceProofProfile, FinanceProofType, FinanceRiskLevel, FinanceTxData, KycAttestation,
+    KycAttestationId, KycLevel, KycStatus,
 };
 
 /// Chain ID type - identifies the network
