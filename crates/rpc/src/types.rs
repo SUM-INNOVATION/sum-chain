@@ -747,6 +747,21 @@ pub struct MessagingQuotaInfo {
     pub trust_stake: Option<String>,
 }
 
+/// Registered public key info for RPC responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublicKeyInfo {
+    /// The Ed25519 public key (hex)
+    pub public_key: String,
+    /// Address that registered this key
+    pub address: String,
+    /// Block height when registered
+    pub registered_at_block: u64,
+    /// Timestamp when registered
+    pub registered_at: u64,
+    /// Block height when last updated (0 if never updated)
+    pub updated_at_block: u64,
+}
+
 /// Messaging configuration info for RPC responses
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessagingConfigInfo {

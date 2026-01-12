@@ -9,7 +9,7 @@ use crate::types::{
     DocClassIssuerInfo, DocClassSummary, EpochInfo, FinalityInfo, GasEstimateResult,
     HealthResponse, InboxFilterInfo, MessageEventInfo, MessagingConfigInfo, MessagingQuotaInfo,
     NftCollectionInfo, NftOwnerTokens, NftTokenInfo, NodeInfo, P2pStats, PendingPaymentInfo,
-    ReceiptInfo, RpcPeerInfo, SendTxResponse, SlashingRecordRpcInfo, SlashingSummary,
+    PublicKeyInfo, ReceiptInfo, RpcPeerInfo, SendTxResponse, SlashingRecordRpcInfo, SlashingSummary,
     SpamReportInfo, StakingParamsInfo, StakingSummary, StakingValidatorInfo,
     SubmitSponsoredMessageRequest, TokenHoldings, TokenInfo, TransactionInfo,
     UnbondingDelegationRpcInfo, ValidatorDelegationSummary, ValidatorSetInfo,
@@ -620,6 +620,13 @@ pub trait SumChainApi {
         &self,
         request: SubmitSponsoredMessageRequest,
     ) -> Result<SendTxResponse, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get registered public key for an address
+    #[method(name = "account_getPublicKey")]
+    async fn account_get_public_key(
+        &self,
+        address: String,
+    ) -> Result<Option<PublicKeyInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     // ========================================================================
     // SRC-80X/81X DocClass Endpoints

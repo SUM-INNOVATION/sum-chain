@@ -11,11 +11,11 @@ use std::sync::Arc;
 use sumchain_genesis::{ChainParams, MessagingParams};
 use sumchain_primitives::{
     Address, Balance, BlockSenderData, ClaimPaymentData, ContactData, Hash, InboxFilter,
-    MessageEvent, MessagingOperation, MessagingTxData, PendingPayment, ReportSpamData,
-    SendMessageData, SendMessageWithPaymentData, SetDailyQuotaData, SetInboxFilterData,
-    SetMaxMessageSizeData, SetMinTrustStakeData, SetSponsorshipEnabledData,
-    StakeForTrustData, MessagingUnstakeData, FundRegistryData,
-    validate_message_format, DEFAULT_DAILY_QUOTA, DEFAULT_MAX_MESSAGE_SIZE,
+    MessageEvent, MessagingOperation, MessagingTxData, PendingPayment, RegisteredPublicKey,
+    RegisterPublicKeyData, ReportSpamData, SendMessageData, SendMessageWithPaymentData,
+    SetDailyQuotaData, SetInboxFilterData, SetMaxMessageSizeData, SetMinTrustStakeData,
+    SetSponsorshipEnabledData, StakeForTrustData, MessagingUnstakeData, FundRegistryData,
+    UpdatePublicKeyData, validate_message_format, DEFAULT_DAILY_QUOTA, DEFAULT_MAX_MESSAGE_SIZE,
 };
 use sumchain_storage::{Database, MessagingStore};
 use sumchain_crypto::recipient_hash;
@@ -113,6 +113,12 @@ impl MessagingExecutor {
             }
             MessagingOperation::ReportSpam => {
                 self.report_spam(sender, &data.data, &store)
+            }
+            MessagingOperation::RegisterPublicKey => {
+                self.register_public_key(sender, &data.data, block_height, block_timestamp, &store)
+            }
+            MessagingOperation::UpdatePublicKey => {
+                self.update_public_key(sender, &data.data, block_height, &store)
             }
             // Admin operations
             MessagingOperation::SetDailyQuota => {
@@ -658,6 +664,94 @@ impl MessagingExecutor {
             "Spam reported: {} reported {} for message {}, new score: {}",
             sender, report_data.spammer, report_data.message_id, new_score
         );
+
+        Ok(MessagingExecutionResult::success(None))
+    }
+
+    // ========================================================================
+    // Public Key Registry
+    // ========================================================================
+
+    /// Register Ed25519 public key for messaging
+    fn register_public_key(
+        &self,
+        sender: &Address,
+        data: &[u8],
+        block_height: u64,
+        block_timestamp: u64,
+        store: &MessagingStore,
+    ) -> Result<MessagingExecutionResult> {
+        let key_data: RegisterPublicKeyData = bincode::deserialize(data)
+            .map_err(|e| StateError::NftError(format!("Invalid key data: {}", e)))?;
+
+        // Verify the public key derives to this address
+        let derived_address = Address::from_public_key(&key_data.public_key);
+        if &derived_address != sender {
+            return Ok(MessagingExecutionResult::failure(
+                "Public key does not match sender address"
+            ));
+        }
+
+        // Check if already registered
+        if store.has_public_key(sender)? {
+            return Ok(MessagingExecutionResult::failure(
+                "Public key already registered. Use UpdatePublicKey to change."
+            ));
+        }
+
+        // Store the registered key
+        let registered = RegisteredPublicKey {
+            public_key: key_data.public_key,
+            address: *sender,
+            registered_at_block: block_height,
+            registered_at: block_timestamp,
+            updated_at_block: 0,
+        };
+        store.set_public_key(sender, &registered)?;
+
+        debug!("Public key registered: {} -> {:?}", sender, key_data.public_key);
+
+        Ok(MessagingExecutionResult::success(None))
+    }
+
+    /// Update registered public key
+    fn update_public_key(
+        &self,
+        sender: &Address,
+        data: &[u8],
+        block_height: u64,
+        store: &MessagingStore,
+    ) -> Result<MessagingExecutionResult> {
+        let key_data: UpdatePublicKeyData = bincode::deserialize(data)
+            .map_err(|e| StateError::NftError(format!("Invalid key data: {}", e)))?;
+
+        // Get existing registration
+        let existing = match store.get_public_key(sender)? {
+            Some(k) => k,
+            None => return Ok(MessagingExecutionResult::failure(
+                "No public key registered. Use RegisterPublicKey first."
+            )),
+        };
+
+        // Verify the new public key derives to this address
+        let derived_address = Address::from_public_key(&key_data.new_public_key);
+        if &derived_address != sender {
+            return Ok(MessagingExecutionResult::failure(
+                "New public key does not match sender address"
+            ));
+        }
+
+        // Update the registration
+        let updated = RegisteredPublicKey {
+            public_key: key_data.new_public_key,
+            address: *sender,
+            registered_at_block: existing.registered_at_block,
+            registered_at: existing.registered_at,
+            updated_at_block: block_height,
+        };
+        store.set_public_key(sender, &updated)?;
+
+        debug!("Public key updated: {} -> {:?}", sender, key_data.new_public_key);
 
         Ok(MessagingExecutionResult::success(None))
     }

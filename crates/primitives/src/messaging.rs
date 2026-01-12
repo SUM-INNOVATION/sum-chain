@@ -70,6 +70,10 @@ pub enum MessagingOperation {
     BlockSender = 9,
     /// Report a message as spam
     ReportSpam = 10,
+    /// Register Ed25519 public key for messaging
+    RegisterPublicKey = 11,
+    /// Update registered public key
+    UpdatePublicKey = 12,
 
     // Admin operations (governance controlled, 128+)
     /// Set daily free message quota
@@ -99,6 +103,8 @@ impl MessagingOperation {
             8 => Some(MessagingOperation::RemoveContact),
             9 => Some(MessagingOperation::BlockSender),
             10 => Some(MessagingOperation::ReportSpam),
+            11 => Some(MessagingOperation::RegisterPublicKey),
+            12 => Some(MessagingOperation::UpdatePublicKey),
             128 => Some(MessagingOperation::SetDailyQuota),
             129 => Some(MessagingOperation::SetMaxMessageSize),
             130 => Some(MessagingOperation::SetMinTrustStake),
@@ -462,6 +468,35 @@ pub struct SetSponsorshipEnabledData {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FundRegistryData {
     pub amount: Balance,
+}
+
+/// Data for RegisterPublicKey operation
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisterPublicKeyData {
+    /// Ed25519 public key (32 bytes)
+    pub public_key: [u8; 32],
+}
+
+/// Data for UpdatePublicKey operation
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdatePublicKeyData {
+    /// New Ed25519 public key (32 bytes)
+    pub new_public_key: [u8; 32],
+}
+
+/// Registered public key entry
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisteredPublicKey {
+    /// The Ed25519 public key
+    pub public_key: [u8; 32],
+    /// Address that registered this key
+    pub address: Address,
+    /// Block height when registered
+    pub registered_at_block: u64,
+    /// Timestamp when registered
+    pub registered_at: u64,
+    /// Block height when last updated (0 if never updated)
+    pub updated_at_block: u64,
 }
 
 // ============================================================================

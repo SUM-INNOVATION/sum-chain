@@ -129,6 +129,8 @@ pub mod cf {
     pub const MESSAGING_PENDING_PAYMENTS: &str = "messaging_pending_payments";
     /// Message events for indexing (recipient_hash + block_height + idx -> MessageEvent)
     pub const MESSAGING_EVENTS: &str = "messaging_events";
+    /// Registered public keys (address -> RegisteredPublicKey)
+    pub const MESSAGING_PUBLIC_KEYS: &str = "messaging_public_keys";
 
     // SRC-82X Tax & Compliance column families
     /// Tax claim type registry (claim_type -> TaxClaimTypeEntry)
@@ -349,6 +351,7 @@ pub const ALL_CFS: &[&str] = &[
     cf::MESSAGING_BLOCKED,
     cf::MESSAGING_PENDING_PAYMENTS,
     cf::MESSAGING_EVENTS,
+    cf::MESSAGING_PUBLIC_KEYS,
     // SRC-82X Tax & Compliance
     cf::TAX_CLAIM_TYPES,
     cf::TAX_ISSUERS,

@@ -9,7 +9,7 @@
 //! - Message event indexing
 
 use sumchain_primitives::{
-    Address, Balance, Hash, InboxFilter, MessageEvent, PendingPayment,
+    Address, Balance, Hash, InboxFilter, MessageEvent, PendingPayment, RegisteredPublicKey,
     DEFAULT_DAILY_QUOTA, DEFAULT_MAX_MESSAGE_SIZE, DEFAULT_MIN_TRUST_STAKE,
 };
 
@@ -475,6 +475,39 @@ impl<'a> MessagingStore<'a> {
         }
 
         Ok(count)
+    }
+
+    // ========================================================================
+    // Public Key Registry
+    // ========================================================================
+
+    /// Get registered public key for an address
+    pub fn get_public_key(&self, address: &Address) -> Result<Option<RegisteredPublicKey>> {
+        match self.db.get(cf::MESSAGING_PUBLIC_KEYS, address.as_bytes())? {
+            Some(bytes) => {
+                let key: RegisteredPublicKey = bincode::deserialize(&bytes)
+                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                Ok(Some(key))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Register or update public key for an address
+    pub fn set_public_key(&self, address: &Address, registered_key: &RegisteredPublicKey) -> Result<()> {
+        let bytes = bincode::serialize(registered_key)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        self.db.put(cf::MESSAGING_PUBLIC_KEYS, address.as_bytes(), &bytes)
+    }
+
+    /// Check if an address has a registered public key
+    pub fn has_public_key(&self, address: &Address) -> Result<bool> {
+        self.db.contains(cf::MESSAGING_PUBLIC_KEYS, address.as_bytes())
+    }
+
+    /// Delete registered public key (for key rotation cleanup if needed)
+    pub fn delete_public_key(&self, address: &Address) -> Result<()> {
+        self.db.delete(cf::MESSAGING_PUBLIC_KEYS, address.as_bytes())
     }
 }
 

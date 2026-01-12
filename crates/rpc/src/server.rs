@@ -2205,6 +2205,28 @@ impl SumChainApiServer for RpcServer {
         .into())
     }
 
+    async fn account_get_public_key(
+        &self,
+        address: String,
+    ) -> std::result::Result<Option<PublicKeyInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let addr = Address::from_base58(&address)
+            .or_else(|_| Address::from_hex(&address))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid address: {}", e)))?;
+
+        let store = MessagingStore::new(&self.db);
+        match store.get_public_key(&addr) {
+            Ok(Some(key)) => Ok(Some(PublicKeyInfo {
+                public_key: format!("0x{}", hex::encode(key.public_key)),
+                address: key.address.to_base58(),
+                registered_at_block: key.registered_at_block,
+                registered_at: key.registered_at,
+                updated_at_block: key.updated_at_block,
+            })),
+            Ok(None) => Ok(None),
+            Err(e) => Err(RpcError::Internal(e.to_string()).into()),
+        }
+    }
+
     // ========================================================================
     // SRC-80X/81X DocClass Endpoints
     // ========================================================================
