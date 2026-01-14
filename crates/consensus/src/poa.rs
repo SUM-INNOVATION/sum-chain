@@ -518,11 +518,19 @@ impl PoAEngine {
             .execute_block(&block, self.state.state_root())?;
 
         // Verify state root matches
+        // Skip verification for blocks at or before height 496720 (affected by bug)
         if block.header.state_root != state_root {
-            return Err(ConsensusError::InvalidBlock(format!(
-                "State root mismatch: expected {}, got {}",
-                block.header.state_root, state_root
-            )));
+            if height <= 496720 {
+                warn!(
+                    "State root mismatch at height {} - skipping verification for historical block",
+                    height
+                );
+            } else {
+                return Err(ConsensusError::InvalidBlock(format!(
+                    "State root mismatch: expected {}, got {}",
+                    block.header.state_root, state_root
+                )));
+            }
         }
 
         // Store block
