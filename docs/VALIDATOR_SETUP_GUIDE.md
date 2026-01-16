@@ -1,6 +1,6 @@
 # Validator Setup Guide
 
-This guide walks you through setting up a SUM Chain validator node on your computer.
+This guide walks you through setting up a SUM Chain validator node.
 
 ## Prerequisites
 
@@ -24,11 +24,12 @@ rustc --version
 cargo --version
 ```
 
-## Step 2: Build the Node
+## Step 2: Clone and Build the Node
 
 ```bash
-# Navigate to project directory
-cd /Users/1mle0wang/Library/Mobile\ Documents/com~apple~CloudDocs/sum-chain
+# Clone the repository
+git clone https://github.com/SUM-INNOVATION/sum-chain.git
+cd sum-chain
 
 # Build release version (optimized)
 cargo build --release
@@ -37,54 +38,58 @@ cargo build --release
 # Binary will be at: ./target/release/sumchain-node
 ```
 
-## Step 3: Generate Validator Key
+## Step 3: Create Working Directory
+
+```bash
+# Create validator working directory
+mkdir -p ~/sumchain
+cd ~/sumchain
+
+# Create keys subdirectory
+mkdir -p keys
+```
+
+## Step 4: Generate Validator Key
 
 Each validator needs a unique Ed25519 keypair:
 
 ```bash
-# Generate validator key
-./target/release/sumchain-node keygen --output validator-key.json
+# Generate validator key (replace N with your validator number: 1, 2, etc.)
+../sum-chain/target/release/sumchain-node keygen --output keys/validatorN.json
 
-# This creates a file with your validator keypair:
-# {
-#   "public_key": "0x1234...",  // Your validator public key
-#   "secret_key": "0xabcd..."   // Keep this SECRET!
-# }
+# This creates a file with your validator keypair (array format):
+# [93, 85, 141, 250, ...]  # 64 bytes representing the keypair
+
+# View your public key (base58 format)
+../sum-chain/target/release/sumchain-node keygen --show-public keys/validatorN.json
+# Output: 7jUZxm5rJ5PazGYkrtJ4sUJj7ztib2VHEoM2Yc4Liydy
 ```
 
-**⚠️ IMPORTANT**:
-- Back up `validator-key.json` securely
-- Never share your secret key
+**IMPORTANT**:
+- Back up `keys/validatorN.json` securely
+- Never share your private key
 - If you lose this file, you lose validator access
+- Use a paper backup for critical validators
 
-## Step 4: Share Your Public Key
+## Step 5: Collect Public Keys
 
-Send your **public key** (from validator-key.json) to coordinate with other validators for genesis configuration.
+Send your **public key** (base58 format) to coordinate with other validators for genesis configuration.
 
-You'll need:
-1. Your public key: `0x1234...`
-2. Delaware friend's public key
-3. China friend's public key
+Example public keys:
+- Validator 1: `GW1pJKzqDmmHczMGz5g7CV51RgDuR6kKw76yZ1cVbEv8`
+- Validator 2: `7jUZxm5rJ5PazGYkrtJ4sUJj7ztib2VHEoM2Yc4Liydy`
 
-## Step 5: Create Genesis File
+## Step 6: Create Genesis File
 
-Once you have all 3 validator public keys, create the genesis file:
-
-```bash
-# Edit genesis/mainnet_genesis.json
-nano genesis/mainnet_genesis.json
-```
-
-Update the validators array with all 3 public keys:
+Create `~/sumchain/genesis.json` with all validator public keys:
 
 ```json
 {
   "chain_id": 1,
   "genesis_time": 1734624000000,
   "validators": [
-    "YOUR_PUBLIC_KEY_HERE",
-    "DELAWARE_PUBLIC_KEY_HERE",
-    "CHINA_PUBLIC_KEY_HERE"
+    "GW1pJKzqDmmHczMGz5g7CV51RgDuR6kKw76yZ1cVbEv8",
+    "7jUZxm5rJ5PazGYkrtJ4sUJj7ztib2VHEoM2Yc4Liydy"
   ],
   "params": {
     "block_time": 3000,
@@ -101,388 +106,290 @@ Update the validators array with all 3 public keys:
 }
 ```
 
-**Share this genesis file** with Delaware and China validators - all 3 nodes must use the **exact same genesis**.
+**CRITICAL**: All validators must use the **exact same genesis file**.
 
-## Step 6: Create Node Configuration
+## Step 7: Create Node Configuration
 
-Create your node config file:
+Create `~/sumchain/config.toml`:
 
-```bash
-# Create config file
-cat > config.toml <<EOF
+### Validator 1 Configuration
+
+```toml
 [node]
 # Path to genesis file
-genesis = "genesis/mainnet_genesis.json"
+genesis = "genesis.json"
 
 # Data directory (blockchain data, state, etc.)
 data_dir = "data"
 
-# Validator key file
-validator_key = "validator-key.json"
-
-[consensus]
-# Use BFT consensus (Byzantine Fault Tolerant)
-engine = "bft"
-
-[consensus.bft]
-# Block proposal timeout (milliseconds)
-propose_timeout_ms = 3000
-
-# Prevote timeout
-prevote_timeout_ms = 1000
-
-# Precommit timeout
-precommit_timeout_ms = 1000
-
-# Timeout multiplier per round
-timeout_multiplier = 1.5
+# Validator key file (relative to working directory)
+validator_key = "keys/validator1.json"
 
 [network]
 # P2P listen address
 listen_addr = "/ip4/0.0.0.0/tcp/9933"
 
 # Bootstrap nodes (other validators)
-# You'll add these after getting their addresses
-bootnodes = []
+# Add after getting peer IDs from other validators
+bootnodes = [
+    "/ip4/OTHER_VALIDATOR_IP/tcp/9933/p2p/OTHER_VALIDATOR_PEER_ID"
+]
 
-# Maximum connections
-max_inbound = 50
-max_outbound = 10
+# Enable mDNS for local network discovery
+mdns = true
 
 [rpc]
 # JSON-RPC server address
 addr = "127.0.0.1:8545"
-
-# Enable authentication (recommended for production)
-# auth_token = "your-secret-rpc-token"
-
-[logging]
-# Log level: trace, debug, info, warn, error
-level = "info"
-EOF
 ```
 
-## Step 7: Get Your P2P Address
+### Validator 2 Configuration
 
-Start the node once to get your P2P address:
+```toml
+[node]
+genesis = "genesis.json"
+data_dir = "data"
+validator_key = "keys/validator2.json"
+
+[network]
+listen_addr = "/ip4/0.0.0.0/tcp/9933"
+bootnodes = [
+    "/ip4/VALIDATOR1_IP/tcp/9933/p2p/VALIDATOR1_PEER_ID"
+]
+mdns = true
+
+[rpc]
+# Use different port if running multiple validators on same network
+addr = "127.0.0.1:9944"
+```
+
+## Step 8: Get Your Peer ID
+
+Start the node once to get your P2P peer ID:
 
 ```bash
-./target/release/sumchain-node run --config config.toml
+cd ~/sumchain
+../sum-chain/target/release/sumchain-node run --config config.toml
 ```
 
 Look for a log line like:
 ```
-Local peer ID: 12D3KooWAbc123...
-Listening on: /ip4/192.168.1.100/tcp/9933/p2p/12D3KooWAbc123...
+Local peer ID: 12D3KooWGbbD8JBcVHR1Ps7TMwcQTbk1pWc7dJfuNk9BP9h4jkbG
 ```
 
-**Your full P2P address** is something like:
+Your full P2P multiaddress will be:
 ```
-/ip4/YOUR_PUBLIC_IP/tcp/9933/p2p/12D3KooWAbc123...
+/ip4/YOUR_IP/tcp/9933/p2p/12D3KooWGbbD8JBcVHR1Ps7TMwcQTbk1pWc7dJfuNk9BP9h4jkbG
 ```
 
-**Share this address** with Delaware and China validators.
-
-Stop the node (Ctrl+C) for now.
-
-## Step 8: Configure Port Forwarding
-
-To allow other validators to connect to you:
-
-**On your router**:
-1. Log into router admin panel (usually 192.168.1.1)
-2. Find "Port Forwarding" section
-3. Add rule:
-   - External Port: 9933
-   - Internal Port: 9933
-   - Internal IP: Your computer's local IP
-   - Protocol: TCP
-
-**Get your public IP**:
-```bash
-curl ifconfig.me
-```
+**Share this address** with other validators. Stop the node (Ctrl+C) for now.
 
 ## Step 9: Update Bootnodes
 
-Once you have P2P addresses from Delaware and China validators, update your config:
+Once you have P2P addresses from other validators, update your `config.toml`:
 
-```bash
-nano config.toml
-```
-
-Update the bootnodes section:
 ```toml
 [network]
-# ... other settings ...
-
+listen_addr = "/ip4/0.0.0.0/tcp/9933"
 bootnodes = [
-    "/ip4/DELAWARE_PUBLIC_IP/tcp/9933/p2p/DELAWARE_PEER_ID",
-    "/ip4/CHINA_PUBLIC_IP/tcp/9933/p2p/CHINA_PEER_ID",
+    "/ip4/100.124.197.122/tcp/9933/p2p/12D3KooWGbbD8JBcVHR1Ps7TMwcQTbk1pWc7dJfuNk9BP9h4jkbG"
 ]
+mdns = true
 ```
 
-## Step 10: Start Your Validator
+## Step 10: Set Up systemd Service (Linux)
+
+Create `/etc/systemd/system/sumchain.service`:
+
+```ini
+[Unit]
+Description=SUM Chain Validator Node
+After=network.target
+
+[Service]
+Type=simple
+User=YOUR_USERNAME
+WorkingDirectory=/home/YOUR_USERNAME/sumchain
+ExecStart=/home/YOUR_USERNAME/sum-chain/target/release/sumchain-node run --config config.toml
+Restart=always
+RestartSec=10
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Enable and start:
 
 ```bash
-# Start the validator node
-./target/release/sumchain-node run --config config.toml
+sudo systemctl daemon-reload
+sudo systemctl enable sumchain
+sudo systemctl start sumchain
 
-# You should see:
-# - "Starting node"
-# - "BFT consensus active"
-# - "Peer connected: 12D3..." (when other validators connect)
-# - "Received BFT proposal for height X"
-# - "BFT consensus reached for block Y"
+# View logs
+sudo journalctl -u sumchain -f
 ```
 
 ## Step 11: Verify It's Working
 
-Open another terminal and check the RPC:
+Check the logs for healthy operation:
 
 ```bash
-# Check node status
+# View recent logs
+journalctl -u sumchain -n 50 --no-pager
+
+# Follow logs in real-time
+sudo journalctl -u sumchain -f
+```
+
+### Healthy Validator Logs
+
+```
+INFO sumchain::node: Starting node
+INFO sumchain_network::p2p: Local peer ID: 12D3KooWGbbD8JBcVHR1Ps7TMwcQTbk1pWc7dJfuNk9BP9h4jkbG
+INFO sumchain_network::p2p: Peer connected: 12D3KooW...
+INFO sumchain_consensus::poa: Block producer started with 3000ms block time
+INFO sumchain_consensus::poa: Our turn to propose block 497004
+INFO sumchain_state::executor: Block 497004 executed, new state root: 0xf172...
+INFO sumchain_consensus::poa: Created block 0x1ea7... at height 497004 with 0 txs
+INFO sumchain_consensus::poa: Finality checkpoint: height 496998 (current: 497004, depth: 6)
+INFO sumchain::node: Produced block 0x1ea7... at height 497004
+```
+
+### RPC Health Check
+
+```bash
 curl -X POST http://127.0.0.1:8545 \
   -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0",
-    "method": "sum_blockNumber",
-    "params": [],
-    "id": 1
-  }'
+  -d '{"jsonrpc":"2.0","method":"sum_blockNumber","params":[],"id":1}'
 
-# Should return current block height:
-# {"jsonrpc":"2.0","id":1,"result":"0x123"}
+# Response: {"jsonrpc":"2.0","id":1,"result":497004}
 ```
 
-## Monitoring Your Validator
+## Updating the Node
 
-### Check logs
+When updates are available:
+
 ```bash
-# Watch logs in real-time
-tail -f logs/validator.log  # if you configured log_file
+# Pull latest changes
+cd ~/sum-chain
+git pull origin main
 
-# Or just watch the console output
+# Rebuild
+source ~/.cargo/env
+cargo build --release
+
+# Restart the service
+sudo systemctl restart sumchain
+
+# Verify new version is running
+sudo journalctl -u sumchain -n 20 --no-pager
 ```
 
-### Key metrics to watch:
-- **Peer count**: Should be 2 (Delaware + China)
-- **Block height**: Should increase every 3-5 seconds
-- **Consensus participation**: Look for "Received BFT prevote/precommit" logs
-- **Quorum reached**: "BFT consensus reached for block" logs
+## Copying Database Between Validators
 
-### Common log patterns:
+If a new validator needs to sync from an existing one:
 
-**Healthy validator**:
-```
-INFO Starting node
-INFO BFT consensus active
-INFO Peer connected: 12D3KooW... (Delaware)
-INFO Peer connected: 12D3KooW... (China)
-INFO Received BFT proposal for height 1
-INFO Received BFT prevote for height 1
-INFO BFT consensus reached for block 0xabc...
-INFO Block finalized: height=1, hash=0xabc...
-```
-
-**Issues to watch for**:
-```
-WARN Peer disconnected: 12D3KooW...  # Network issue
-ERROR Failed to import block: ...     # Sync issue
-WARN Sync request failed: ...         # Connectivity issue
-```
-
-## Firewall Configuration
-
-### macOS
 ```bash
-# Allow incoming connections on port 9933
-sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add /path/to/sumchain-node
-sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp /path/to/sumchain-node
-```
+# On source validator, stop the service
+sudo systemctl stop sumchain
 
-### Linux (ufw)
-```bash
-sudo ufw allow 9933/tcp
-sudo ufw enable
-```
+# Copy the data directory to the new validator
+rsync -avz --progress ~/sumchain/data/ user@new-validator:~/sumchain/data/
 
-## Running as a Service (Recommended)
+# IMPORTANT: Remove node.key from the copied data so new validator generates its own peer ID
+ssh user@new-validator "rm ~/sumchain/data/node.key"
 
-### macOS (launchd)
+# Restart source validator
+sudo systemctl start sumchain
 
-Create `~/Library/LaunchAgents/com.sumchain.validator.plist`:
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.sumchain.validator</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/path/to/sumchain-node</string>
-        <string>run</string>
-        <string>--config</string>
-        <string>/path/to/config.toml</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>/path/to/logs/validator.log</string>
-    <key>StandardErrorPath</key>
-    <string>/path/to/logs/validator-error.log</string>
-</dict>
-</plist>
-```
-
-Start the service:
-```bash
-launchctl load ~/Library/LaunchAgents/com.sumchain.validator.plist
-launchctl start com.sumchain.validator
-```
-
-## Backup and Recovery
-
-### What to backup:
-1. **validator-key.json** - Your validator identity (CRITICAL)
-2. **config.toml** - Node configuration
-3. **genesis/mainnet_genesis.json** - Genesis file
-4. **data/** directory - Blockchain data (optional, can resync)
-
-### How to backup:
-```bash
-# Create backup directory
-mkdir -p ~/sumchain-backups
-
-# Backup critical files
-cp validator-key.json ~/sumchain-backups/
-cp config.toml ~/sumchain-backups/
-cp genesis/mainnet_genesis.json ~/sumchain-backups/
-
-# Compress and encrypt (recommended)
-tar czf ~/sumchain-backups/validator-backup-$(date +%Y%m%d).tar.gz \
-    validator-key.json config.toml genesis/mainnet_genesis.json
-
-# Store this backup in a secure location (USB drive, cloud backup, etc.)
+# Start new validator
+ssh user@new-validator "sudo systemctl start sumchain"
 ```
 
 ## Troubleshooting
 
-### "Failed to bind to port 9933"
-- Port already in use
-- Run: `lsof -i :9933` to find what's using it
-- Kill the process or use a different port
+### "State root mismatch" Error
 
-### "No peers connected"
-- Check firewall settings
-- Verify port forwarding is correct
-- Confirm bootnodes addresses are correct
-- Check your public IP hasn't changed
+This occurs when validators are running different code versions:
 
-### "BFT consensus not reaching quorum"
-- Need at least 2 out of 3 validators online
-- Check network connectivity to other validators
-- Verify all validators have the same genesis file
-- Check time synchronization (NTP)
+```
+WARN sumchain::node: Failed to import block: Invalid block: State root mismatch: expected 0xdc9f..., got 0x9e38...
+```
 
-### "Out of disk space"
-- Default data directory can grow large
-- Monitor disk usage: `du -sh data/`
-- Consider pruning or larger disk
+**Solution**: Ensure all validators are running the same binary version. Update and restart the out-of-sync validator.
 
-## Next Steps
+### "Parent block not found" During Sync
 
-Once your validator is running:
-1. ✅ Monitor for 24 hours to ensure stability
-2. ✅ Coordinate with Delaware and China validators
-3. ✅ Set up automated backups
-4. ✅ Configure monitoring/alerting
-5. ✅ Document your setup for disaster recovery
+This can happen when syncing from genesis with blocks arriving out of order:
 
-## Support Checklist
+```
+WARN sumchain::node: Failed to import block: Parent block not found
+```
 
-- [ ] Rust installed and working
-- [ ] Node compiled successfully
-- [ ] Validator key generated and backed up
-- [ ] Genesis file created with all 3 validators
-- [ ] Config file created
-- [ ] Port 9933 forwarded on router
-- [ ] P2P address shared with other validators
-- [ ] Bootnodes configured
-- [ ] Node started and running
-- [ ] Connected to 2 peers (Delaware + China)
-- [ ] Participating in BFT consensus
-- [ ] Blocks being finalized
+**Solution**: Copy the database from a synced validator (see "Copying Database Between Validators" above).
 
-## Emergency Contacts
+### Validator Not Producing Blocks
 
-Keep contact info for other validators:
-- Delaware validator: [Contact info]
-- China validator: [Contact info]
-
-If your validator goes down, notify them ASAP so they know the network is operating with reduced capacity.
-
----
-
-**You're now running a SUM Chain validator node!** 🎉
-
-The network can tolerate 1 out of 3 validators being down (BFT requires 2f+1 for 3 validators, where f=0), so uptime is critical. Aim for 99.9% uptime.
-
----
-
-## Security Best Practices
-
-### Validator Key Security
-1. **Never commit validator-key.json to git**
-2. **Use file permissions**: `chmod 600 validator-key.json`
-3. **Consider HSM** for production deployments
-4. **Rotate keys** if compromise is suspected
-
-### Network Security
-1. **Use a firewall** - only allow port 9933 for P2P
-2. **Disable RPC** on public interface (use 127.0.0.1)
-3. **Use VPN** between validators for additional security
-4. **Enable RPC authentication** in production
-
-### Operational Security
-1. **Monitor** node logs for anomalies
-2. **Alert** on peer disconnections
-3. **Regular backups** of validator key
-4. **Test recovery** procedures periodically
-
-## Using the Wallet CLI
-
-The wallet CLI can interact with your running node:
+Check that:
+1. The correct validator key is configured in `config.toml`
+2. The key path is relative to the working directory
+3. The public key matches what's in genesis.json
 
 ```bash
-# Build the wallet
-cargo build --release --bin sumchain-wallet
+# Verify key configuration
+cat ~/sumchain/config.toml | grep validator_key
+# Should show: validator_key = "keys/validator1.json"
 
-# Check node health
-./target/release/sumchain-wallet status --rpc http://127.0.0.1:8545
+# Verify key file exists
+ls -la ~/sumchain/keys/validator1.json
+```
 
-# Generate a new address
-./target/release/sumchain-wallet generate --password "your-password"
+### "No peers connected"
 
-# Check balance
-./target/release/sumchain-wallet balance --address SUM1abc... --rpc http://127.0.0.1:8545
+1. Check firewall allows port 9933
+2. Verify bootnode addresses are correct
+3. Check network connectivity to other validators
 
-# Send transaction
-./target/release/sumchain-wallet send \
-  --from wallet.json \
-  --to SUM1xyz... \
-  --amount 1000000000 \
-  --rpc http://127.0.0.1:8545
+```bash
+# Test connectivity to other validator
+nc -zv 100.124.197.122 9933
+```
 
-# NFT Commands (SUM-721)
-./target/release/sumchain-wallet nft-collection --id 0x... --rpc http://127.0.0.1:8545
-./target/release/sumchain-wallet nft-token --collection 0x... --token-id 1
-./target/release/sumchain-wallet nft-list --owner SUM1abc...
-./target/release/sumchain-wallet nft-balance --owner SUM1abc...
+### Service Won't Start
+
+Check for configuration errors:
+
+```bash
+# Test config manually
+cd ~/sumchain
+../sum-chain/target/release/sumchain-node run --config config.toml
+
+# Check systemd logs for errors
+sudo journalctl -u sumchain -n 100 --no-pager
+```
+
+## File Permissions
+
+Secure your validator key:
+
+```bash
+chmod 600 ~/sumchain/keys/validator*.json
+chmod 700 ~/sumchain/keys
+```
+
+## Backup Checklist
+
+Critical files to backup:
+
+1. **Validator key**: `~/sumchain/keys/validatorN.json` - CRITICAL
+2. **Configuration**: `~/sumchain/config.toml`
+3. **Genesis file**: `~/sumchain/genesis.json`
+
+```bash
+# Create encrypted backup
+tar czf - ~/sumchain/keys ~/sumchain/config.toml ~/sumchain/genesis.json | \
+  gpg --symmetric --cipher-algo AES256 > validator-backup-$(date +%Y%m%d).tar.gz.gpg
 ```
 
 ## Network Parameters
@@ -491,16 +398,22 @@ cargo build --release --bin sumchain-wallet
 |-----------|-------|-------------|
 | Chain ID | 1 | Mainnet chain identifier |
 | Block Time | 3 seconds | Target block production time |
-| Min Fee | 1,000,000 Milli | Minimum transaction fee |
-| Total Supply | 800M SUM | Maximum token supply |
-| Validators | 3 | Initial validator count |
-| BFT Threshold | 2/3 | Required votes for consensus |
+| Min Fee | 1,000,000 base units | Minimum transaction fee |
+| P2P Port | 9933 | Default P2P networking port |
+| RPC Port | 8545 | Default JSON-RPC port |
+| Finality Depth | 6 blocks | Blocks until finality checkpoint |
 
-## Glossary
+## Current Validators
 
-- **Validator**: A node that participates in block production and consensus
-- **BFT**: Byzantine Fault Tolerant consensus algorithm
-- **Quorum**: Minimum number of validators needed to finalize a block (2/3)
-- **Peer ID**: Unique identifier for a node in the P2P network
-- **Genesis**: The first block and initial state of the blockchain
-- **Finality**: When a block cannot be reverted (immediate in BFT)
+| Validator | Public Key | IP (Tailscale) |
+|-----------|------------|----------------|
+| Validator 1 | `GW1pJKzqDmmHczMGz5g7CV51RgDuR6kKw76yZ1cVbEv8` | 100.124.197.122 |
+| Validator 2 | `7jUZxm5rJ5PazGYkrtJ4sUJj7ztib2VHEoM2Yc4Liydy` | 100.84.189.95 |
+
+## Support
+
+If your validator experiences issues:
+1. Check logs for error messages
+2. Verify all validators are on the same code version
+3. Ensure network connectivity between validators
+4. Coordinate with other validators before making changes
