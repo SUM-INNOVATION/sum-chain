@@ -837,6 +837,27 @@ pub struct SubmitSponsoredMessageRequest {
     pub koppa_amount: Option<String>,
 }
 
+/// Sponsored registration request - allows users to register their public key
+/// without needing any Koppa balance (gas sponsored by the chain)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SponsoredRegistrationRequest {
+    /// Ed25519 public key (hex, 32 bytes)
+    pub public_key: String,
+    /// Signature of "SUMCHAIN_REGISTER:{public_key_hex}" using the private key (hex)
+    pub signature: String,
+}
+
+/// Sponsored registration response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SponsoredRegistrationResponse {
+    /// The derived address from the public key
+    pub address: String,
+    /// Whether registration was successful
+    pub success: bool,
+    /// Error message if failed
+    pub error: Option<String>,
+}
+
 /// Spam report info for RPC responses
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpamReportInfo {

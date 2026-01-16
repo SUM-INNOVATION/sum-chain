@@ -2207,6 +2207,106 @@ impl SumChainApiServer for RpcServer {
         .into())
     }
 
+    async fn messaging_register_sponsored(
+        &self,
+        request: SponsoredRegistrationRequest,
+    ) -> std::result::Result<SponsoredRegistrationResponse, jsonrpsee::types::ErrorObjectOwned> {
+        use sumchain_primitives::RegisteredPublicKey;
+
+        // Parse the public key from hex
+        let pubkey_hex = request.public_key.strip_prefix("0x").unwrap_or(&request.public_key);
+        let pubkey_bytes = hex::decode(pubkey_hex)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid public key hex: {}", e)))?;
+
+        if pubkey_bytes.len() != 32 {
+            return Ok(SponsoredRegistrationResponse {
+                address: String::new(),
+                success: false,
+                error: Some("Public key must be 32 bytes".to_string()),
+            });
+        }
+
+        let mut pubkey: [u8; 32] = [0u8; 32];
+        pubkey.copy_from_slice(&pubkey_bytes);
+
+        // Derive address from public key
+        let address = Address::from_public_key(&pubkey);
+
+        // Parse and verify signature
+        let sig_hex = request.signature.strip_prefix("0x").unwrap_or(&request.signature);
+        let sig_bytes = hex::decode(sig_hex)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid signature hex: {}", e)))?;
+
+        if sig_bytes.len() != 64 {
+            return Ok(SponsoredRegistrationResponse {
+                address: address.to_base58(),
+                success: false,
+                error: Some("Signature must be 64 bytes".to_string()),
+            });
+        }
+
+        let mut sig_array: [u8; 64] = [0u8; 64];
+        sig_array.copy_from_slice(&sig_bytes);
+
+        // Verify signature over the registration message
+        let message = format!("SUMCHAIN_REGISTER:{}", pubkey_hex);
+        if sumchain_crypto::verify_bytes(message.as_bytes(), &sig_array, &pubkey).is_err() {
+            return Ok(SponsoredRegistrationResponse {
+                address: address.to_base58(),
+                success: false,
+                error: Some("Invalid signature".to_string()),
+            });
+        }
+
+        // Check if already registered
+        let store = MessagingStore::new(&self.db);
+        if store.has_public_key(&address).unwrap_or(false) {
+            return Ok(SponsoredRegistrationResponse {
+                address: address.to_base58(),
+                success: false,
+                error: Some("Public key already registered".to_string()),
+            });
+        }
+
+        // Get current block info for timestamps
+        let block_store = BlockStore::new(&self.db);
+        let (block_height, block_timestamp) = match block_store.get_latest() {
+            Ok(Some(block)) => (block.header.height, block.header.timestamp),
+            _ => (0, std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64),
+        };
+
+        // Register the public key directly (bypassing transaction validation)
+        let registered = RegisteredPublicKey {
+            public_key: pubkey,
+            address,
+            registered_at_block: block_height,
+            registered_at: block_timestamp,
+            updated_at_block: 0,
+        };
+
+        if let Err(e) = store.set_public_key(&address, &registered) {
+            return Ok(SponsoredRegistrationResponse {
+                address: address.to_base58(),
+                success: false,
+                error: Some(format!("Failed to register: {}", e)),
+            });
+        }
+
+        tracing::info!(
+            "Sponsored registration: {} registered public key",
+            address.to_base58()
+        );
+
+        Ok(SponsoredRegistrationResponse {
+            address: address.to_base58(),
+            success: true,
+            error: None,
+        })
+    }
+
     async fn account_get_public_key(
         &self,
         address: String,

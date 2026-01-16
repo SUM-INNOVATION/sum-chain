@@ -10,10 +10,10 @@ use crate::types::{
     HealthResponse, InboxFilterInfo, MessageEventInfo, MessagingConfigInfo, MessagingQuotaInfo,
     NftCollectionInfo, NftOwnerTokens, NftTokenInfo, NodeInfo, P2pStats, PendingPaymentInfo,
     PublicKeyInfo, ReceiptInfo, RpcPeerInfo, SendTxResponse, SlashingRecordRpcInfo, SlashingSummary,
-    SpamReportInfo, StakingParamsInfo, StakingSummary, StakingValidatorInfo,
-    SubmitSponsoredMessageRequest, TokenHoldings, TokenInfo, TransactionHistoryResponse, TransactionInfo,
-    UnbondingDelegationRpcInfo, ValidatorDelegationSummary, ValidatorSetInfo,
-    ValidatorSetRpcInfo, ValidatorSigningRpcInfo, ViewCallRequest,
+    SpamReportInfo, SponsoredRegistrationRequest, SponsoredRegistrationResponse, StakingParamsInfo,
+    StakingSummary, StakingValidatorInfo, SubmitSponsoredMessageRequest, TokenHoldings, TokenInfo,
+    TransactionHistoryResponse, TransactionInfo, UnbondingDelegationRpcInfo, ValidatorDelegationSummary,
+    ValidatorSetInfo, ValidatorSetRpcInfo, ValidatorSigningRpcInfo, ViewCallRequest,
 };
 
 /// SUM Chain RPC API
@@ -620,6 +620,14 @@ pub trait SumChainApi {
         &self,
         request: SubmitSponsoredMessageRequest,
     ) -> Result<SendTxResponse, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Register public key with gas sponsorship (no balance required)
+    /// This allows new users to register for SUMail without needing any Koppa
+    #[method(name = "messaging_registerSponsored")]
+    async fn messaging_register_sponsored(
+        &self,
+        request: SponsoredRegistrationRequest,
+    ) -> Result<SponsoredRegistrationResponse, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Get registered public key for an address
     #[method(name = "account_getPublicKey")]
