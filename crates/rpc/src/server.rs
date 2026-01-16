@@ -636,10 +636,11 @@ impl SumChainApiServer for RpcServer {
             .iter()
             .enumerate()
             .map(|(idx, pubkey)| {
-                let address = Address::from_public_key(pubkey);
+                // Address is the base58-encoded public key (same format as in genesis)
+                let address = bs58::encode(pubkey).into_string();
                 ValidatorInfo {
                     public_key: hex::encode(pubkey),
-                    address: address.to_base58(),
+                    address,
                     is_current_proposer: idx == proposer_index,
                 }
             })

@@ -5974,6 +5974,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "blake3",
+ "bs58",
  "hex",
  "http-body-util",
  "hyper 1.8.1",
