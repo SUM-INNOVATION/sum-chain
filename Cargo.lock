@@ -5973,6 +5973,7 @@ name = "sumchain-rpc"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bincode",
  "blake3",
  "bs58",
  "hex",

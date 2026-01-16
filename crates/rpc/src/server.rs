@@ -2197,14 +2197,162 @@ impl SumChainApiServer for RpcServer {
 
     async fn messaging_submit_sponsored(
         &self,
-        _request: SubmitSponsoredMessageRequest,
+        request: SubmitSponsoredMessageRequest,
     ) -> std::result::Result<SendTxResponse, jsonrpsee::types::ErrorObjectOwned> {
-        // Sponsored message submission requires a relay service
-        // For now, return an error indicating this endpoint requires additional setup
-        Err(RpcError::Internal(
-            "Sponsored message submission requires a relay service configuration".to_string(),
-        )
-        .into())
+        use sumchain_primitives::{MessagingOperation, MessagingTxData, SendMessageData, TransactionV2};
+
+        // Load sponsor keypair from environment variable or default path
+        let sponsor_key_path = std::env::var("SUMAIL_SPONSOR_KEY")
+            .unwrap_or_else(|_| "keys/sumail.json".to_string());
+
+        let key_json = std::fs::read_to_string(&sponsor_key_path)
+            .map_err(|e| RpcError::Internal(format!(
+                "Sponsor key not configured. Set SUMAIL_SPONSOR_KEY env var or place key at keys/sumail.json: {}", e
+            )))?;
+
+        let key_bytes: [u8; 32] = serde_json::from_str(&key_json)
+            .map_err(|e| RpcError::Internal(format!("Invalid sponsor key format: {}", e)))?;
+
+        let sponsor_keypair = sumchain_crypto::KeyPair::from_bytes(key_bytes);
+
+        // Parse sender's public key
+        let sender_pubkey_hex = request.sender_pubkey.strip_prefix("0x").unwrap_or(&request.sender_pubkey);
+        let sender_pubkey_bytes = hex::decode(sender_pubkey_hex)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid sender pubkey hex: {}", e)))?;
+
+        if sender_pubkey_bytes.len() != 32 {
+            return Err(RpcError::InvalidParams("Sender pubkey must be 32 bytes".to_string()).into());
+        }
+
+        let mut sender_pubkey: [u8; 32] = [0u8; 32];
+        sender_pubkey.copy_from_slice(&sender_pubkey_bytes);
+
+        // Derive sender address from public key
+        let sender_address = Address::from_public_key(&sender_pubkey);
+
+        // Verify sender has registered their public key
+        let store = MessagingStore::new(&self.db);
+        if !store.has_public_key(&sender_address).unwrap_or(false) {
+            return Err(RpcError::InvalidParams(
+                "Sender must register public key first via messaging_registerSponsored".to_string()
+            ).into());
+        }
+
+        // Parse signature
+        let sig_hex = request.signature.strip_prefix("0x").unwrap_or(&request.signature);
+        let sig_bytes = hex::decode(sig_hex)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid signature hex: {}", e)))?;
+
+        if sig_bytes.len() != 64 {
+            return Err(RpcError::InvalidParams("Signature must be 64 bytes".to_string()).into());
+        }
+
+        let mut sig_array: [u8; 64] = [0u8; 64];
+        sig_array.copy_from_slice(&sig_bytes);
+
+        // Parse message data
+        let message_data_hex = request.message_data.strip_prefix("0x").unwrap_or(&request.message_data);
+        let message_data = hex::decode(message_data_hex)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid message data hex: {}", e)))?;
+
+        // Parse recipient hash
+        let recipient_hash_hex = request.recipient_hash.strip_prefix("0x").unwrap_or(&request.recipient_hash);
+        let recipient_hash_bytes = hex::decode(recipient_hash_hex)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid recipient hash hex: {}", e)))?;
+
+        if recipient_hash_bytes.len() != 32 {
+            return Err(RpcError::InvalidParams("Recipient hash must be 32 bytes".to_string()).into());
+        }
+
+        let mut recipient_hash: [u8; 32] = [0u8; 32];
+        recipient_hash.copy_from_slice(&recipient_hash_bytes);
+
+        // Verify the sender's signature over the sponsored message request
+        // Format: "SUMCHAIN_SPONSORED_MSG:{nonce}:{expiry}:{recipient_hash}:{message_data_hash}"
+        let message_data_hash = blake3::hash(&message_data);
+        let sign_message = format!(
+            "SUMCHAIN_SPONSORED_MSG:{}:{}:{}:{}",
+            request.nonce,
+            request.expiry,
+            recipient_hash_hex,
+            hex::encode(message_data_hash.as_bytes())
+        );
+
+        if sumchain_crypto::verify_bytes(sign_message.as_bytes(), &sig_array, &sender_pubkey).is_err() {
+            return Err(RpcError::InvalidParams("Invalid sender signature".to_string()).into());
+        }
+
+        // Check expiry
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        if request.expiry < now {
+            return Err(RpcError::InvalidParams("Sponsored message request has expired".to_string()).into());
+        }
+
+        // Build the messaging transaction data
+        let send_data = SendMessageData {
+            message_data,
+            recipient_hash,
+        };
+
+        let messaging_data = MessagingTxData {
+            operation: MessagingOperation::SendMessageDirect,
+            data: bincode::serialize(&send_data)
+                .map_err(|e| RpcError::Internal(format!("Failed to serialize message data: {}", e)))?,
+        };
+
+        // Get sponsor's current nonce
+        let sponsor_address = sponsor_keypair.address();
+        let sponsor_nonce = self.state.get_nonce(&sponsor_address)
+            .map_err(|e| RpcError::Internal(format!("Failed to get sponsor nonce: {}", e)))?;
+
+        // Create the messaging transaction (sponsor pays the fee)
+        let chain_id = self.state.chain_id();
+        let fee = 1_000_000u128; // 0.001 Koppa fee
+
+        let tx = TransactionV2::messaging(
+            chain_id,
+            sender_address, // The actual sender of the message
+            fee,
+            sponsor_nonce,
+            messaging_data,
+        );
+
+        // Sign the transaction with sponsor's key
+        let signing_hash = tx.signing_hash();
+        let signature = sumchain_crypto::sign(signing_hash.as_bytes(), sponsor_keypair.private_key());
+        let signed_tx = SignedTransaction::new_v2(
+            tx,
+            *signature.as_bytes(),
+            *sponsor_keypair.public_key().as_bytes(),
+        );
+
+        let tx_hash = signed_tx.hash();
+
+        // Add to mempool
+        self.mempool
+            .add(signed_tx.clone())
+            .map_err(|e| RpcError::TxRejected(format!("Mempool rejected: {}", e)))?;
+
+        // Broadcast to network
+        self.tx_sender
+            .send(signed_tx)
+            .await
+            .map_err(|e| RpcError::Internal(format!("Failed to broadcast: {}", e)))?;
+
+        tracing::info!(
+            "Sponsored message submitted: {} (sponsor: {}, sender: {})",
+            tx_hash,
+            sponsor_address.to_base58(),
+            sender_address.to_base58()
+        );
+
+        Ok(SendTxResponse {
+            tx_hash: tx_hash.to_hex(),
+        })
     }
 
     async fn messaging_register_sponsored(
