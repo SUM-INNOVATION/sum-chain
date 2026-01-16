@@ -8,7 +8,7 @@ use jsonrpsee::server::{Server, ServerHandle};
 use sumchain_consensus::ConsensusEngine;
 use sumchain_primitives::{Address, Block, Hash, SignedTransaction};
 use sumchain_state::{Mempool, StateManager};
-use sumchain_storage::{BlockStore, Database, DelegationStore, DocClassStore, MessagingStore, NftStore, ReceiptStore, SlashingStore, StakingStore, TokenStore, TxStore, ValidatorSetStore};
+use sumchain_storage::{BlockStore, Database, DelegationStore, DocClassStore, MessagingStore, NftStore, ReceiptStore, SlashingStore, StakingStore, TokenStore, TxIndexStore, TxStore, ValidatorSetStore};
 use tokio::sync::mpsc;
 use tracing::info;
 
@@ -2551,6 +2551,217 @@ impl SumChainApiServer for RpcServer {
         store
             .issuers()
             .can_issue_subcode(&addr, doc_subcode, &jurisdiction)
+            .map_err(|e| RpcError::Internal(e.to_string()).into())
+    }
+
+    // ========================================================================
+    // Transaction History Endpoints Implementation
+    // ========================================================================
+
+    async fn sum_get_transactions_by_address(
+        &self,
+        address: String,
+        limit: Option<u32>,
+        offset: Option<u64>,
+    ) -> std::result::Result<TransactionHistoryResponse, jsonrpsee::types::ErrorObjectOwned> {
+        let addr = Address::from_base58(&address)
+            .or_else(|_| Address::from_hex(&address))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid address: {}", e)))?;
+
+        let limit = limit.unwrap_or(50).min(100) as usize;
+        let offset = offset.unwrap_or(0);
+
+        let tx_index_store = TxIndexStore::new(&self.db);
+        let (entries, has_more) = tx_index_store
+            .get_transactions_by_address(&addr, None, limit + 1)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        let tx_store = TxStore::new(&self.db);
+        let block_store = BlockStore::new(&self.db);
+        let receipt_store = ReceiptStore::new(&self.db);
+
+        let mut transactions = Vec::new();
+        for entry in entries.into_iter().skip(offset as usize).take(limit) {
+            if let Ok(Some(tx)) = tx_store.get(&entry.tx_hash) {
+                let status = receipt_store
+                    .get(&entry.tx_hash)
+                    .ok()
+                    .flatten()
+                    .map(|r| format!("{:?}", r.status))
+                    .unwrap_or_else(|| "unknown".to_string());
+
+                let timestamp = block_store
+                    .get_by_height(entry.block_height)
+                    .ok()
+                    .flatten()
+                    .map(|b| b.header.timestamp)
+                    .unwrap_or(0);
+
+                transactions.push(TransactionHistoryEntry {
+                    tx_hash: entry.tx_hash.to_hex(),
+                    block_height: entry.block_height,
+                    tx_index: entry.tx_index,
+                    from: tx.sender().to_base58(),
+                    to: tx.recipient().map(|a| a.to_base58()).unwrap_or_default(),
+                    amount: tx.amount().to_string(),
+                    fee: tx.fee().to_string(),
+                    status,
+                    timestamp,
+                });
+            }
+        }
+
+        let total_count = tx_index_store
+            .get_transaction_count(&addr)
+            .unwrap_or(0);
+
+        Ok(TransactionHistoryResponse {
+            address: addr.to_base58(),
+            transactions,
+            total_count,
+            has_more,
+            offset,
+            limit: limit as u32,
+        })
+    }
+
+    async fn sum_get_transactions_by_sender(
+        &self,
+        address: String,
+        limit: Option<u32>,
+        offset: Option<u64>,
+    ) -> std::result::Result<TransactionHistoryResponse, jsonrpsee::types::ErrorObjectOwned> {
+        let addr = Address::from_base58(&address)
+            .or_else(|_| Address::from_hex(&address))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid address: {}", e)))?;
+
+        let limit = limit.unwrap_or(50).min(100) as usize;
+        let offset = offset.unwrap_or(0);
+
+        let tx_index_store = TxIndexStore::new(&self.db);
+        let (entries, has_more) = tx_index_store
+            .get_transactions_by_sender(&addr, None, limit + 1)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        let tx_store = TxStore::new(&self.db);
+        let block_store = BlockStore::new(&self.db);
+        let receipt_store = ReceiptStore::new(&self.db);
+
+        let mut transactions = Vec::new();
+        for entry in entries.into_iter().skip(offset as usize).take(limit) {
+            if let Ok(Some(tx)) = tx_store.get(&entry.tx_hash) {
+                let status = receipt_store
+                    .get(&entry.tx_hash)
+                    .ok()
+                    .flatten()
+                    .map(|r| format!("{:?}", r.status))
+                    .unwrap_or_else(|| "unknown".to_string());
+
+                let timestamp = block_store
+                    .get_by_height(entry.block_height)
+                    .ok()
+                    .flatten()
+                    .map(|b| b.header.timestamp)
+                    .unwrap_or(0);
+
+                transactions.push(TransactionHistoryEntry {
+                    tx_hash: entry.tx_hash.to_hex(),
+                    block_height: entry.block_height,
+                    tx_index: entry.tx_index,
+                    from: tx.sender().to_base58(),
+                    to: tx.recipient().map(|a| a.to_base58()).unwrap_or_default(),
+                    amount: tx.amount().to_string(),
+                    fee: tx.fee().to_string(),
+                    status,
+                    timestamp,
+                });
+            }
+        }
+
+        Ok(TransactionHistoryResponse {
+            address: addr.to_base58(),
+            transactions,
+            total_count: 0, // Not computed for sender-only queries
+            has_more,
+            offset,
+            limit: limit as u32,
+        })
+    }
+
+    async fn sum_get_transactions_by_recipient(
+        &self,
+        address: String,
+        limit: Option<u32>,
+        offset: Option<u64>,
+    ) -> std::result::Result<TransactionHistoryResponse, jsonrpsee::types::ErrorObjectOwned> {
+        let addr = Address::from_base58(&address)
+            .or_else(|_| Address::from_hex(&address))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid address: {}", e)))?;
+
+        let limit = limit.unwrap_or(50).min(100) as usize;
+        let offset = offset.unwrap_or(0);
+
+        let tx_index_store = TxIndexStore::new(&self.db);
+        let (entries, has_more) = tx_index_store
+            .get_transactions_by_recipient(&addr, None, limit + 1)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        let tx_store = TxStore::new(&self.db);
+        let block_store = BlockStore::new(&self.db);
+        let receipt_store = ReceiptStore::new(&self.db);
+
+        let mut transactions = Vec::new();
+        for entry in entries.into_iter().skip(offset as usize).take(limit) {
+            if let Ok(Some(tx)) = tx_store.get(&entry.tx_hash) {
+                let status = receipt_store
+                    .get(&entry.tx_hash)
+                    .ok()
+                    .flatten()
+                    .map(|r| format!("{:?}", r.status))
+                    .unwrap_or_else(|| "unknown".to_string());
+
+                let timestamp = block_store
+                    .get_by_height(entry.block_height)
+                    .ok()
+                    .flatten()
+                    .map(|b| b.header.timestamp)
+                    .unwrap_or(0);
+
+                transactions.push(TransactionHistoryEntry {
+                    tx_hash: entry.tx_hash.to_hex(),
+                    block_height: entry.block_height,
+                    tx_index: entry.tx_index,
+                    from: tx.sender().to_base58(),
+                    to: tx.recipient().map(|a| a.to_base58()).unwrap_or_default(),
+                    amount: tx.amount().to_string(),
+                    fee: tx.fee().to_string(),
+                    status,
+                    timestamp,
+                });
+            }
+        }
+
+        Ok(TransactionHistoryResponse {
+            address: addr.to_base58(),
+            transactions,
+            total_count: 0, // Not computed for recipient-only queries
+            has_more,
+            offset,
+            limit: limit as u32,
+        })
+    }
+
+    async fn sum_get_transaction_count(
+        &self,
+        address: String,
+    ) -> std::result::Result<u64, jsonrpsee::types::ErrorObjectOwned> {
+        let addr = Address::from_base58(&address)
+            .or_else(|_| Address::from_hex(&address))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid address: {}", e)))?;
+
+        let tx_index_store = TxIndexStore::new(&self.db);
+        tx_index_store
+            .get_transaction_count(&addr)
             .map_err(|e| RpcError::Internal(e.to_string()).into())
     }
 }

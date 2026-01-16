@@ -237,3 +237,34 @@ export interface Src20TokenHoldings {
   count: number;
   tokens: Src20TokenBalance[];
 }
+
+// ============================================================================
+// Transaction History Types
+// ============================================================================
+
+/**
+ * Transaction history entry
+ */
+export interface TransactionHistoryEntry {
+  tx_hash: Hash;
+  block_height: number;
+  tx_index: number;
+  from: Address;
+  to: Address;
+  amount: string;
+  fee: string;
+  status: string;
+  timestamp: number;
+}
+
+/**
+ * Transaction history response with pagination
+ */
+export interface TransactionHistoryResponse {
+  address: Address;
+  transactions: TransactionHistoryEntry[];
+  total_count: number;
+  has_more: boolean;
+  offset: number;
+  limit: number;
+}

@@ -1026,3 +1026,47 @@ pub struct DocClassSummary {
     /// Total revocations
     pub total_revocations: u64,
 }
+
+// ============================================================================
+// Transaction History Types
+// ============================================================================
+
+/// Transaction history entry for RPC responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransactionHistoryEntry {
+    /// Transaction hash
+    pub tx_hash: String,
+    /// Block height where transaction was included
+    pub block_height: BlockHeight,
+    /// Transaction index within the block
+    pub tx_index: u32,
+    /// Sender address
+    pub from: String,
+    /// Recipient address (empty for contract creation)
+    pub to: String,
+    /// Amount transferred
+    pub amount: String,
+    /// Fee paid
+    pub fee: String,
+    /// Transaction status (success/failed)
+    pub status: String,
+    /// Block timestamp
+    pub timestamp: Timestamp,
+}
+
+/// Transaction history response with pagination
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransactionHistoryResponse {
+    /// Address queried
+    pub address: String,
+    /// List of transactions
+    pub transactions: Vec<TransactionHistoryEntry>,
+    /// Total count of transactions for this address
+    pub total_count: u64,
+    /// Whether there are more transactions
+    pub has_more: bool,
+    /// Current page offset
+    pub offset: u64,
+    /// Page limit
+    pub limit: u32,
+}

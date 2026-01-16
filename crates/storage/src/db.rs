@@ -282,6 +282,12 @@ pub mod cf {
     /// Employment system events (block_height + idx -> EmploymentEvent)
     pub const EMPLOYMENT_SYSTEM_EVENTS: &str = "employment_system_events";
 
+    // Transaction indexing by address
+    /// Transactions by sender (sender + height + tx_index -> tx_hash)
+    pub const TX_BY_SENDER: &str = "tx_by_sender";
+    /// Transactions by recipient (recipient + height + tx_index -> tx_hash)
+    pub const TX_BY_RECIPIENT: &str = "tx_by_recipient";
+
     // SRC-89X Finance & Banking column families
     /// Finance issuers (issuer_address -> FinanceIssuerProfile)
     pub const FINANCE_ISSUERS: &str = "finance_issuers";
@@ -438,6 +444,9 @@ pub const ALL_CFS: &[&str] = &[
     cf::FINANCE_SUBJECT_KYC_INDEX,
     cf::FINANCE_JURISDICTION_INDEX,
     cf::FINANCE_SYSTEM_EVENTS,
+    // Transaction indexing
+    cf::TX_BY_SENDER,
+    cf::TX_BY_RECIPIENT,
 ];
 
 /// Database configuration

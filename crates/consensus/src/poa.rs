@@ -20,7 +20,7 @@ use sumchain_primitives::{
     ValidatorSet, ValidatorSetEntry, ValidatorStatus,
 };
 use sumchain_state::{BlockExecutor, Mempool, StateManager};
-use sumchain_storage::{BlockStore, Database, DelegationStore, ReceiptStore, StakingStore, TxStore, ValidatorSetStore};
+use sumchain_storage::{BlockStore, Database, DelegationStore, ReceiptStore, StakingStore, TxIndexStore, TxStore, ValidatorSetStore};
 use tokio::sync::broadcast;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
@@ -445,9 +445,14 @@ impl PoAEngine {
         // Store receipts and transactions
         let tx_store = TxStore::new(&self.db);
         let receipt_store = ReceiptStore::new(&self.db);
+        let tx_index_store = TxIndexStore::new(&self.db);
 
-        for tx in &block.transactions {
+        for (tx_index, tx) in block.transactions.iter().enumerate() {
             tx_store.put(tx)?;
+            // Index transaction by sender and recipient for history queries
+            if let Err(e) = tx_index_store.index_transaction(tx, height, tx_index as u32) {
+                warn!("Failed to index transaction {}: {}", tx.hash(), e);
+            }
         }
         for receipt in &receipts {
             receipt_store.put(receipt)?;
@@ -539,9 +544,14 @@ impl PoAEngine {
         // Store receipts and transactions
         let tx_store = TxStore::new(&self.db);
         let receipt_store = ReceiptStore::new(&self.db);
+        let tx_index_store = TxIndexStore::new(&self.db);
 
-        for tx in &block.transactions {
+        for (tx_index, tx) in block.transactions.iter().enumerate() {
             tx_store.put(tx)?;
+            // Index transaction by sender and recipient for history queries
+            if let Err(e) = tx_index_store.index_transaction(tx, height, tx_index as u32) {
+                warn!("Failed to index transaction {}: {}", tx.hash(), e);
+            }
         }
         for receipt in &receipts {
             receipt_store.put(receipt)?;

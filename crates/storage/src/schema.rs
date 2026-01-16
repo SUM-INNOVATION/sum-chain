@@ -360,6 +360,242 @@ impl<'a> TxStore<'a> {
     }
 }
 
+/// Transaction index entry containing block height, tx index, and tx hash
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TxIndexEntry {
+    pub block_height: BlockHeight,
+    pub tx_index: u32,
+    pub tx_hash: Hash,
+}
+
+/// Transaction index storage operations for querying transactions by address
+pub struct TxIndexStore<'a> {
+    db: &'a Database,
+}
+
+impl<'a> TxIndexStore<'a> {
+    pub fn new(db: &'a Database) -> Self {
+        Self { db }
+    }
+
+    /// Create key for sender index: sender (20 bytes) + height (8 bytes BE) + tx_index (4 bytes BE)
+    fn sender_key(sender: &Address, height: BlockHeight, tx_index: u32) -> Vec<u8> {
+        let mut key = Vec::with_capacity(32);
+        key.extend_from_slice(sender.as_bytes());
+        key.extend_from_slice(&height.to_be_bytes());
+        key.extend_from_slice(&tx_index.to_be_bytes());
+        key
+    }
+
+    /// Create key for recipient index: recipient (20 bytes) + height (8 bytes BE) + tx_index (4 bytes BE)
+    fn recipient_key(recipient: &Address, height: BlockHeight, tx_index: u32) -> Vec<u8> {
+        let mut key = Vec::with_capacity(32);
+        key.extend_from_slice(recipient.as_bytes());
+        key.extend_from_slice(&height.to_be_bytes());
+        key.extend_from_slice(&tx_index.to_be_bytes());
+        key
+    }
+
+    /// Index a transaction by its sender
+    pub fn index_by_sender(
+        &self,
+        sender: &Address,
+        height: BlockHeight,
+        tx_index: u32,
+        tx_hash: &Hash,
+    ) -> Result<()> {
+        let key = Self::sender_key(sender, height, tx_index);
+        self.db.put(cf::TX_BY_SENDER, &key, tx_hash.as_bytes())
+    }
+
+    /// Index a transaction by its recipient
+    pub fn index_by_recipient(
+        &self,
+        recipient: &Address,
+        height: BlockHeight,
+        tx_index: u32,
+        tx_hash: &Hash,
+    ) -> Result<()> {
+        let key = Self::recipient_key(recipient, height, tx_index);
+        self.db.put(cf::TX_BY_RECIPIENT, &key, tx_hash.as_bytes())
+    }
+
+    /// Index a transaction (indexes both sender and recipient)
+    pub fn index_transaction(
+        &self,
+        tx: &SignedTransaction,
+        height: BlockHeight,
+        tx_index: u32,
+    ) -> Result<()> {
+        let tx_hash = tx.hash();
+        let sender = tx.sender();
+
+        // Index by sender
+        self.index_by_sender(&sender, height, tx_index, &tx_hash)?;
+
+        // Index by recipient if present
+        if let Some(recipient) = tx.recipient() {
+            self.index_by_recipient(&recipient, height, tx_index, &tx_hash)?;
+        }
+
+        Ok(())
+    }
+
+    /// Get transactions sent by an address, with pagination
+    /// Returns (tx_hashes, has_more)
+    pub fn get_transactions_by_sender(
+        &self,
+        sender: &Address,
+        start_height: Option<BlockHeight>,
+        limit: usize,
+    ) -> Result<(Vec<TxIndexEntry>, bool)> {
+        let prefix = sender.as_bytes();
+        let mut entries = Vec::new();
+
+        for (key, value) in self.db.prefix_iter(cf::TX_BY_SENDER, prefix)? {
+            // Verify key belongs to this sender (first 20 bytes)
+            if key.len() != 32 || &key[..20] != prefix {
+                continue;
+            }
+
+            // Parse height and tx_index from key
+            let height = BlockHeight::from_be_bytes(
+                key[20..28].try_into().map_err(|_| StorageError::InvalidData("Invalid height".to_string()))?
+            );
+            let tx_index = u32::from_be_bytes(
+                key[28..32].try_into().map_err(|_| StorageError::InvalidData("Invalid tx_index".to_string()))?
+            );
+
+            // Skip if before start_height
+            if let Some(start) = start_height {
+                if height < start {
+                    continue;
+                }
+            }
+
+            // Parse tx_hash
+            let tx_hash = Hash::from_slice(&value)
+                .map_err(|e| StorageError::InvalidData(e.to_string()))?;
+
+            entries.push(TxIndexEntry {
+                block_height: height,
+                tx_index,
+                tx_hash,
+            });
+
+            if entries.len() > limit {
+                break;
+            }
+        }
+
+        let has_more = entries.len() > limit;
+        if has_more {
+            entries.pop();
+        }
+
+        // Sort by height descending (most recent first)
+        entries.sort_by(|a, b| b.block_height.cmp(&a.block_height));
+
+        Ok((entries, has_more))
+    }
+
+    /// Get transactions received by an address, with pagination
+    /// Returns (tx_hashes, has_more)
+    pub fn get_transactions_by_recipient(
+        &self,
+        recipient: &Address,
+        start_height: Option<BlockHeight>,
+        limit: usize,
+    ) -> Result<(Vec<TxIndexEntry>, bool)> {
+        let prefix = recipient.as_bytes();
+        let mut entries = Vec::new();
+
+        for (key, value) in self.db.prefix_iter(cf::TX_BY_RECIPIENT, prefix)? {
+            // Verify key belongs to this recipient (first 20 bytes)
+            if key.len() != 32 || &key[..20] != prefix {
+                continue;
+            }
+
+            // Parse height and tx_index from key
+            let height = BlockHeight::from_be_bytes(
+                key[20..28].try_into().map_err(|_| StorageError::InvalidData("Invalid height".to_string()))?
+            );
+            let tx_index = u32::from_be_bytes(
+                key[28..32].try_into().map_err(|_| StorageError::InvalidData("Invalid tx_index".to_string()))?
+            );
+
+            // Skip if before start_height
+            if let Some(start) = start_height {
+                if height < start {
+                    continue;
+                }
+            }
+
+            // Parse tx_hash
+            let tx_hash = Hash::from_slice(&value)
+                .map_err(|e| StorageError::InvalidData(e.to_string()))?;
+
+            entries.push(TxIndexEntry {
+                block_height: height,
+                tx_index,
+                tx_hash,
+            });
+
+            if entries.len() > limit {
+                break;
+            }
+        }
+
+        let has_more = entries.len() > limit;
+        if has_more {
+            entries.pop();
+        }
+
+        // Sort by height descending (most recent first)
+        entries.sort_by(|a, b| b.block_height.cmp(&a.block_height));
+
+        Ok((entries, has_more))
+    }
+
+    /// Get all transactions for an address (both sent and received), with pagination
+    /// Returns (tx_entries, has_more)
+    pub fn get_transactions_by_address(
+        &self,
+        address: &Address,
+        start_height: Option<BlockHeight>,
+        limit: usize,
+    ) -> Result<(Vec<TxIndexEntry>, bool)> {
+        // Get sent transactions
+        let (sent, _) = self.get_transactions_by_sender(address, start_height, limit * 2)?;
+
+        // Get received transactions
+        let (received, _) = self.get_transactions_by_recipient(address, start_height, limit * 2)?;
+
+        // Merge and deduplicate by tx_hash
+        let mut all_entries: Vec<TxIndexEntry> = sent;
+        for entry in received {
+            if !all_entries.iter().any(|e| e.tx_hash == entry.tx_hash) {
+                all_entries.push(entry);
+            }
+        }
+
+        // Sort by height descending
+        all_entries.sort_by(|a, b| b.block_height.cmp(&a.block_height));
+
+        // Apply limit
+        let has_more = all_entries.len() > limit;
+        all_entries.truncate(limit);
+
+        Ok((all_entries, has_more))
+    }
+
+    /// Get transaction count for an address
+    pub fn get_transaction_count(&self, address: &Address) -> Result<u64> {
+        let (entries, _) = self.get_transactions_by_address(address, None, usize::MAX)?;
+        Ok(entries.len() as u64)
+    }
+}
+
 /// Receipt storage operations
 pub struct ReceiptStore<'a> {
     db: &'a Database,

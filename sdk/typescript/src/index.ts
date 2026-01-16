@@ -43,6 +43,8 @@ export type {
   BlockInfo,
   TransactionInfo,
   TransactionReceipt,
+  TransactionHistoryEntry,
+  TransactionHistoryResponse,
   ValidatorInfo,
   ValidatorSetInfo,
   HealthResponse,

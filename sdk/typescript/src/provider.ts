@@ -9,6 +9,7 @@ import type {
   BlockInfo,
   TransactionInfo,
   TransactionReceipt,
+  TransactionHistoryResponse,
   ValidatorSetInfo,
   HealthResponse,
   Address,
@@ -587,5 +588,106 @@ export class Provider {
    */
   async src20TokenExists(tokenId: string): Promise<boolean> {
     return this.request<boolean>('token_exists', [tokenId]);
+  }
+
+  // ==========================================================================
+  // Transaction History Methods
+  // ==========================================================================
+
+  /**
+   * Get transaction history for an address (both sent and received)
+   *
+   * @param address - Account address
+   * @param limit - Maximum number of transactions to return (default: 50, max: 100)
+   * @param offset - Number of transactions to skip (for pagination)
+   * @returns Transaction history with pagination info
+   *
+   * @example
+   * ```ts
+   * const history = await provider.getTransactionsByAddress('SUM1abc...', 20, 0);
+   * console.log(`Total transactions: ${history.total_count}`);
+   * for (const tx of history.transactions) {
+   *   console.log(`${tx.tx_hash}: ${tx.from} -> ${tx.to}: ${tx.amount}`);
+   * }
+   * ```
+   */
+  async getTransactionsByAddress(
+    address: Address,
+    limit?: number,
+    offset?: number
+  ): Promise<TransactionHistoryResponse> {
+    return this.request<TransactionHistoryResponse>('sum_getTransactionsByAddress', [
+      address,
+      limit ?? null,
+      offset ?? null,
+    ]);
+  }
+
+  /**
+   * Get transactions sent by an address
+   *
+   * @param address - Sender address
+   * @param limit - Maximum number of transactions to return
+   * @param offset - Number of transactions to skip
+   * @returns Transaction history with pagination info
+   *
+   * @example
+   * ```ts
+   * const sent = await provider.getTransactionsBySender('SUM1abc...');
+   * console.log(`Sent ${sent.transactions.length} transactions`);
+   * ```
+   */
+  async getTransactionsBySender(
+    address: Address,
+    limit?: number,
+    offset?: number
+  ): Promise<TransactionHistoryResponse> {
+    return this.request<TransactionHistoryResponse>('sum_getTransactionsBySender', [
+      address,
+      limit ?? null,
+      offset ?? null,
+    ]);
+  }
+
+  /**
+   * Get transactions received by an address
+   *
+   * @param address - Recipient address
+   * @param limit - Maximum number of transactions to return
+   * @param offset - Number of transactions to skip
+   * @returns Transaction history with pagination info
+   *
+   * @example
+   * ```ts
+   * const received = await provider.getTransactionsByRecipient('SUM1abc...');
+   * console.log(`Received ${received.transactions.length} transactions`);
+   * ```
+   */
+  async getTransactionsByRecipient(
+    address: Address,
+    limit?: number,
+    offset?: number
+  ): Promise<TransactionHistoryResponse> {
+    return this.request<TransactionHistoryResponse>('sum_getTransactionsByRecipient', [
+      address,
+      limit ?? null,
+      offset ?? null,
+    ]);
+  }
+
+  /**
+   * Get total transaction count for an address
+   *
+   * @param address - Account address
+   * @returns Total number of transactions involving this address
+   *
+   * @example
+   * ```ts
+   * const count = await provider.getTransactionCount('SUM1abc...');
+   * console.log(`Total transactions: ${count}`);
+   * ```
+   */
+  async getTransactionCount(address: Address): Promise<number> {
+    return this.request<number>('sum_getTransactionCount', [address]);
   }
 }

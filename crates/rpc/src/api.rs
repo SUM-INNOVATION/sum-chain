@@ -11,7 +11,7 @@ use crate::types::{
     NftCollectionInfo, NftOwnerTokens, NftTokenInfo, NodeInfo, P2pStats, PendingPaymentInfo,
     PublicKeyInfo, ReceiptInfo, RpcPeerInfo, SendTxResponse, SlashingRecordRpcInfo, SlashingSummary,
     SpamReportInfo, StakingParamsInfo, StakingSummary, StakingValidatorInfo,
-    SubmitSponsoredMessageRequest, TokenHoldings, TokenInfo, TransactionInfo,
+    SubmitSponsoredMessageRequest, TokenHoldings, TokenInfo, TransactionHistoryResponse, TransactionInfo,
     UnbondingDelegationRpcInfo, ValidatorDelegationSummary, ValidatorSetInfo,
     ValidatorSetRpcInfo, ValidatorSigningRpcInfo, ViewCallRequest,
 };
@@ -720,4 +720,43 @@ pub trait SumChainApi {
         subcode: u16,
         jurisdiction: String,
     ) -> Result<bool, jsonrpsee::types::ErrorObjectOwned>;
+
+    // ========================================================================
+    // Transaction History Endpoints
+    // ========================================================================
+
+    /// Get transactions by address (both sent and received)
+    /// Returns transactions with pagination support
+    #[method(name = "sum_getTransactionsByAddress")]
+    async fn sum_get_transactions_by_address(
+        &self,
+        address: String,
+        limit: Option<u32>,
+        offset: Option<u64>,
+    ) -> Result<TransactionHistoryResponse, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get transactions sent by an address
+    #[method(name = "sum_getTransactionsBySender")]
+    async fn sum_get_transactions_by_sender(
+        &self,
+        address: String,
+        limit: Option<u32>,
+        offset: Option<u64>,
+    ) -> Result<TransactionHistoryResponse, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get transactions received by an address
+    #[method(name = "sum_getTransactionsByRecipient")]
+    async fn sum_get_transactions_by_recipient(
+        &self,
+        address: String,
+        limit: Option<u32>,
+        offset: Option<u64>,
+    ) -> Result<TransactionHistoryResponse, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get transaction count for an address
+    #[method(name = "sum_getTransactionCount")]
+    async fn sum_get_transaction_count(
+        &self,
+        address: String,
+    ) -> Result<u64, jsonrpsee::types::ErrorObjectOwned>;
 }
