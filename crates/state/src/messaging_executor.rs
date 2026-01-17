@@ -15,7 +15,7 @@ use sumchain_primitives::{
     RegisterPublicKeyData, ReportSpamData, SendMessageData, SendMessageWithPaymentData,
     SetDailyQuotaData, SetInboxFilterData, SetMaxMessageSizeData, SetMinTrustStakeData,
     SetSponsorshipEnabledData, StakeForTrustData, MessagingUnstakeData, FundRegistryData,
-    UpdatePublicKeyData, validate_message_format, DEFAULT_DAILY_QUOTA, DEFAULT_MAX_MESSAGE_SIZE,
+    UpdatePublicKeyData, SponsoredMessage, validate_message_format, DEFAULT_DAILY_QUOTA, DEFAULT_MAX_MESSAGE_SIZE,
 };
 use sumchain_storage::{Database, MessagingStore};
 use sumchain_crypto::recipient_hash;
@@ -238,9 +238,11 @@ impl MessagingExecutor {
     }
 
     /// Send message with gas sponsorship
+    /// The tx.from is the sponsor address, but the real sender is derived from
+    /// SponsoredMessage.sender_pubkey
     fn send_message_sponsored(
         &self,
-        sender: &Address,
+        _sponsor: &Address, // tx.from is the sponsor, not the message sender
         data: &[u8],
         state: &StateManager,
         proposer: &Address,
@@ -255,59 +257,64 @@ impl MessagingExecutor {
             return Ok(MessagingExecutionResult::failure("Sponsorship disabled"));
         }
 
-        // Parse message data
-        let msg_data: SendMessageData = bincode::deserialize(data)
-            .map_err(|e| StateError::NftError(format!("Invalid message data: {}", e)))?;
+        // Parse sponsored message data (includes sender_pubkey)
+        let sponsored_msg: SponsoredMessage = bincode::deserialize(data)
+            .map_err(|e| StateError::NftError(format!("Invalid sponsored message data: {}", e)))?;
+
+        // Derive the real sender address from the sender's public key
+        let real_sender = Address::from_public_key(&sponsored_msg.sender_pubkey);
+
+        // Verify the real sender has registered their public key
+        if !store.has_public_key(&real_sender).unwrap_or(false) {
+            return Ok(MessagingExecutionResult::failure("Sender must register public key first"));
+        }
 
         // Validate message format
-        if let Err(e) = validate_message_format(&msg_data.message_data) {
+        if let Err(e) = validate_message_format(&sponsored_msg.message_data) {
             return Ok(MessagingExecutionResult::failure(format!("Invalid message format: {}", e)));
         }
 
         // Check message size
         let max_size = store.get_max_message_size()?;
-        if msg_data.message_data.len() > max_size as usize {
+        if sponsored_msg.message_data.len() > max_size as usize {
             return Ok(MessagingExecutionResult::failure("Message too large"));
         }
 
-        // Check rate limit
-        self.check_rate_limit(sender, block_timestamp, store)?;
-
-        // Check spam restrictions
-        self.check_spam_restrictions(sender, store)?;
-
-        // Check recipient filter
-        self.check_recipient_filter(sender, &msg_data.recipient_hash, store)?;
-
-        // Deduct sponsorship fee (minimal gas cost)
-        let sponsor_fee = self.params.min_fee;
-        let sponsor_balance = store.get_sponsorship_balance()?;
-        if sponsor_balance < sponsor_fee {
-            return Ok(MessagingExecutionResult::failure("Sponsorship fund depleted"));
+        // Check expiry
+        if sponsored_msg.expiry < block_timestamp {
+            return Ok(MessagingExecutionResult::failure("Sponsored message has expired"));
         }
-        store.deduct_sponsorship_balance(sponsor_fee)?;
 
-        // Credit fee to proposer
-        state.credit(proposer, sponsor_fee)?;
+        // Check rate limit for the real sender
+        self.check_rate_limit(&real_sender, block_timestamp, store)?;
 
-        // Increment sender's nonce and daily count
-        store.increment_sender_nonce(sender)?;
+        // Check spam restrictions for the real sender
+        self.check_spam_restrictions(&real_sender, store)?;
+
+        // Check recipient filter (using real sender)
+        self.check_recipient_filter(&real_sender, &sponsored_msg.recipient_hash, store)?;
+
+        // Credit fee to proposer (fee already deducted from sponsor in tx validation)
+        // Note: The sponsor pays the fee via normal tx flow, no sponsorship pool deduction needed
+
+        // Increment real sender's nonce and daily count
+        store.increment_sender_nonce(&real_sender)?;
         let day = self.current_day(block_timestamp);
-        store.increment_daily_message_count(sender, day)?;
+        store.increment_daily_message_count(&real_sender, day)?;
 
-        // Store message event
+        // Store message event with real sender
         let event = MessageEvent {
-            sender: *sender,
-            recipient_hash: msg_data.recipient_hash,
+            sender: real_sender,
+            recipient_hash: sponsored_msg.recipient_hash,
             message_id: tx_hash,
-            size: msg_data.message_data.len() as u32,
-            has_payment: false,
+            size: sponsored_msg.message_data.len() as u32,
+            has_payment: sponsored_msg.koppa_amount.is_some(),
             block_height,
             timestamp: block_timestamp,
         };
         store.store_message_event(&event, tx_index)?;
 
-        debug!("Sponsored message sent: {} -> {:?}", sender, msg_data.recipient_hash);
+        debug!("Sponsored message sent: {} -> {:?} (sponsored)", real_sender, sponsored_msg.recipient_hash);
 
         Ok(MessagingExecutionResult::success(Some(tx_hash)))
     }

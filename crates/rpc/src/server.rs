@@ -2199,7 +2199,7 @@ impl SumChainApiServer for RpcServer {
         &self,
         request: SubmitSponsoredMessageRequest,
     ) -> std::result::Result<SendTxResponse, jsonrpsee::types::ErrorObjectOwned> {
-        use sumchain_primitives::{MessagingOperation, MessagingTxData, SendMessageData, TransactionV2};
+        use sumchain_primitives::{MessagingOperation, MessagingTxData, SponsoredMessage, TransactionV2};
 
         // Load sponsor keypair from environment variable or default path
         let sponsor_key_path = std::env::var("SUMAIL_SPONSOR_KEY")
@@ -2292,16 +2292,30 @@ impl SumChainApiServer for RpcServer {
             return Err(RpcError::InvalidParams("Sponsored message request has expired".to_string()).into());
         }
 
-        // Build the messaging transaction data
-        let send_data = SendMessageData {
+        // Parse optional koppa amount
+        let koppa_amount = if let Some(ref amount_str) = request.koppa_amount {
+            let amount: u128 = amount_str.parse()
+                .map_err(|_| RpcError::InvalidParams("Invalid koppa_amount format".to_string()))?;
+            if amount > 0 { Some(amount) } else { None }
+        } else {
+            None
+        };
+
+        // Build the SponsoredMessage structure (includes sender_pubkey for executor to derive real sender)
+        let sponsored_msg = SponsoredMessage {
             message_data,
             recipient_hash,
+            signature: sig_array,
+            sender_pubkey,
+            nonce: request.nonce,
+            expiry: request.expiry,
+            koppa_amount,
         };
 
         let messaging_data = MessagingTxData {
-            operation: MessagingOperation::SendMessageDirect,
-            data: bincode::serialize(&send_data)
-                .map_err(|e| RpcError::Internal(format!("Failed to serialize message data: {}", e)))?,
+            operation: MessagingOperation::SendMessage, // Use sponsored message operation
+            data: bincode::serialize(&sponsored_msg)
+                .map_err(|e| RpcError::Internal(format!("Failed to serialize sponsored message: {}", e)))?,
         };
 
         // Get sponsor's current nonce
@@ -2309,13 +2323,15 @@ impl SumChainApiServer for RpcServer {
         let sponsor_nonce = self.state.get_nonce(&sponsor_address)
             .map_err(|e| RpcError::Internal(format!("Failed to get sponsor nonce: {}", e)))?;
 
-        // Create the messaging transaction (sponsor pays the fee)
+        // Create the messaging transaction
+        // tx.from = sponsor_address (matches the signer)
+        // The real message sender is in the SponsoredMessage.sender_pubkey
         let chain_id = self.state.chain_id();
         let fee = 1_000_000u128; // 0.001 Koppa fee
 
         let tx = TransactionV2::messaging(
             chain_id,
-            sender_address, // The actual sender of the message
+            sponsor_address, // Sponsor address as tx.from (matches signer)
             fee,
             sponsor_nonce,
             messaging_data,
