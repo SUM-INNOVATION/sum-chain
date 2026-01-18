@@ -8,7 +8,7 @@ use jsonrpsee::server::{Server, ServerHandle};
 use sumchain_consensus::ConsensusEngine;
 use sumchain_primitives::{Address, Block, Hash, SignedTransaction, MessagingTxData, MessagingOperation, SponsoredMessage, TxPayload};
 use sumchain_state::{Mempool, StateManager};
-use sumchain_storage::{BlockStore, Database, DelegationStore, DocClassStore, MessagingStore, NftStore, ReceiptStore, SlashingStore, StakingStore, TokenStore, TxIndexStore, TxStore, ValidatorSetStore};
+use sumchain_storage::{BlockStore, Database, DelegationStore, DocClassStore, EmploymentCredentialStore, EmploymentIssuerStore, IncomeAttestationStore, MessagingStore, NftStore, ReceiptStore, SlashingStore, StakingStore, TokenStore, TxIndexStore, TxStore, ValidatorSetStore};
 use tokio::sync::mpsc;
 use tracing::info;
 
@@ -3147,6 +3147,270 @@ impl SumChainApiServer for RpcServer {
             .get_transaction_count(&addr)
             .map_err(|e| RpcError::Internal(e.to_string()).into())
     }
+
+    // =========================================================================
+    // SRC-88X Employment & HR Endpoints Implementation
+    // =========================================================================
+
+    async fn employment_get_issuer(
+        &self,
+        issuer_address: String,
+    ) -> std::result::Result<Option<EmploymentIssuerInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let address = Address::from_base58(&issuer_address)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid address: {}", e)))?;
+
+        let store = EmploymentIssuerStore::new(&self.db);
+        match store.get(&address) {
+            Ok(Some(issuer)) => Ok(Some(self.employment_issuer_to_rpc(&issuer))),
+            Ok(None) => Ok(None),
+            Err(e) => Err(RpcError::Internal(e.to_string()).into()),
+        }
+    }
+
+    async fn employment_list_issuers(
+        &self,
+    ) -> std::result::Result<Vec<EmploymentIssuerInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let store = EmploymentIssuerStore::new(&self.db);
+        match store.list_active() {
+            Ok(issuers) => Ok(issuers.iter().map(|i| self.employment_issuer_to_rpc(i)).collect()),
+            Err(e) => Err(RpcError::Internal(e.to_string()).into()),
+        }
+    }
+
+    async fn employment_get_credential(
+        &self,
+        employment_id: String,
+    ) -> std::result::Result<Option<EmploymentCredentialInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let id_bytes = hex::decode(employment_id.strip_prefix("0x").unwrap_or(&employment_id))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid employment ID: {}", e)))?;
+
+        if id_bytes.len() != 32 {
+            return Err(RpcError::InvalidParams("Employment ID must be 32 bytes".to_string()).into());
+        }
+
+        let mut id_arr = [0u8; 32];
+        id_arr.copy_from_slice(&id_bytes);
+
+        let store = EmploymentCredentialStore::new(&self.db);
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        match store.get(&id_arr) {
+            Ok(Some(cred)) => Ok(Some(self.employment_credential_to_rpc(&cred, current_time))),
+            Ok(None) => Ok(None),
+            Err(e) => Err(RpcError::Internal(e.to_string()).into()),
+        }
+    }
+
+    async fn employment_get_credentials_by_employee(
+        &self,
+        employee_ref: String,
+    ) -> std::result::Result<Vec<EmploymentCredentialInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let ref_bytes = hex::decode(employee_ref.strip_prefix("0x").unwrap_or(&employee_ref))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid employee ref: {}", e)))?;
+
+        if ref_bytes.len() != 32 {
+            return Err(RpcError::InvalidParams("Employee ref must be 32 bytes".to_string()).into());
+        }
+
+        let mut ref_arr = [0u8; 32];
+        ref_arr.copy_from_slice(&ref_bytes);
+
+        let store = EmploymentCredentialStore::new(&self.db);
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        match store.get_by_employee(&ref_arr) {
+            Ok(creds) => Ok(creds.iter().map(|c| self.employment_credential_to_rpc(c, current_time)).collect()),
+            Err(e) => Err(RpcError::Internal(e.to_string()).into()),
+        }
+    }
+
+    async fn employment_get_active_credentials_by_employee(
+        &self,
+        employee_ref: String,
+    ) -> std::result::Result<Vec<EmploymentCredentialInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let ref_bytes = hex::decode(employee_ref.strip_prefix("0x").unwrap_or(&employee_ref))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid employee ref: {}", e)))?;
+
+        if ref_bytes.len() != 32 {
+            return Err(RpcError::InvalidParams("Employee ref must be 32 bytes".to_string()).into());
+        }
+
+        let mut ref_arr = [0u8; 32];
+        ref_arr.copy_from_slice(&ref_bytes);
+
+        let store = EmploymentCredentialStore::new(&self.db);
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        match store.get_active_by_employee(&ref_arr, current_time) {
+            Ok(creds) => Ok(creds.iter().map(|c| self.employment_credential_to_rpc(c, current_time)).collect()),
+            Err(e) => Err(RpcError::Internal(e.to_string()).into()),
+        }
+    }
+
+    async fn employment_get_credentials_by_employer(
+        &self,
+        employer_ref: String,
+    ) -> std::result::Result<Vec<EmploymentCredentialInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let ref_bytes = hex::decode(employer_ref.strip_prefix("0x").unwrap_or(&employer_ref))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid employer ref: {}", e)))?;
+
+        if ref_bytes.len() != 32 {
+            return Err(RpcError::InvalidParams("Employer ref must be 32 bytes".to_string()).into());
+        }
+
+        let mut ref_arr = [0u8; 32];
+        ref_arr.copy_from_slice(&ref_bytes);
+
+        let store = EmploymentCredentialStore::new(&self.db);
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        match store.get_by_employer(&ref_arr) {
+            Ok(creds) => Ok(creds.iter().map(|c| self.employment_credential_to_rpc(c, current_time)).collect()),
+            Err(e) => Err(RpcError::Internal(e.to_string()).into()),
+        }
+    }
+
+    async fn employment_verify_employment(
+        &self,
+        employee_ref: String,
+        employer_ref: String,
+    ) -> std::result::Result<EmploymentVerificationResult, jsonrpsee::types::ErrorObjectOwned> {
+        let employee_bytes = hex::decode(employee_ref.strip_prefix("0x").unwrap_or(&employee_ref))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid employee ref: {}", e)))?;
+        let employer_bytes = hex::decode(employer_ref.strip_prefix("0x").unwrap_or(&employer_ref))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid employer ref: {}", e)))?;
+
+        if employee_bytes.len() != 32 || employer_bytes.len() != 32 {
+            return Err(RpcError::InvalidParams("References must be 32 bytes".to_string()).into());
+        }
+
+        let mut employee_arr = [0u8; 32];
+        let mut employer_arr = [0u8; 32];
+        employee_arr.copy_from_slice(&employee_bytes);
+        employer_arr.copy_from_slice(&employer_bytes);
+
+        let store = EmploymentCredentialStore::new(&self.db);
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let creds = store.get_active_by_employee(&employee_arr, current_time)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        let matching = creds.into_iter().find(|c| c.employer_ref == employer_arr);
+
+        Ok(EmploymentVerificationResult {
+            is_employed: matching.is_some(),
+            credential: matching.map(|c| self.employment_credential_to_rpc(&c, current_time)),
+            verified_at: current_time,
+        })
+    }
+
+    async fn employment_get_summary(
+        &self,
+        employee_ref: String,
+    ) -> std::result::Result<EmploymentSummary, jsonrpsee::types::ErrorObjectOwned> {
+        let ref_bytes = hex::decode(employee_ref.strip_prefix("0x").unwrap_or(&employee_ref))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid employee ref: {}", e)))?;
+
+        if ref_bytes.len() != 32 {
+            return Err(RpcError::InvalidParams("Employee ref must be 32 bytes".to_string()).into());
+        }
+
+        let mut ref_arr = [0u8; 32];
+        ref_arr.copy_from_slice(&ref_bytes);
+
+        let store = EmploymentCredentialStore::new(&self.db);
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let all_creds = store.get_by_employee(&ref_arr)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        let active_creds: Vec<_> = all_creds.iter()
+            .filter(|c| c.is_valid(current_time))
+            .collect();
+
+        let ended_count = all_creds.iter()
+            .filter(|c| c.status == sumchain_primitives::employment::EmploymentStatus::Ended)
+            .count();
+
+        Ok(EmploymentSummary {
+            employee_ref: format!("0x{}", hex::encode(&ref_arr)),
+            total_credentials: all_creds.len() as u32,
+            active_credentials: active_creds.len() as u32,
+            ended_credentials: ended_count as u32,
+            active_employment: active_creds.iter().map(|c| self.employment_credential_to_rpc(c, current_time)).collect(),
+        })
+    }
+
+    async fn employment_get_income_attestation(
+        &self,
+        attestation_id: String,
+    ) -> std::result::Result<Option<IncomeAttestationInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let id_bytes = hex::decode(attestation_id.strip_prefix("0x").unwrap_or(&attestation_id))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid attestation ID: {}", e)))?;
+
+        if id_bytes.len() != 32 {
+            return Err(RpcError::InvalidParams("Attestation ID must be 32 bytes".to_string()).into());
+        }
+
+        let mut id_arr = [0u8; 32];
+        id_arr.copy_from_slice(&id_bytes);
+
+        let store = IncomeAttestationStore::new(&self.db);
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        match store.get(&id_arr) {
+            Ok(Some(att)) => Ok(Some(self.income_attestation_to_rpc(&att, current_time))),
+            Ok(None) => Ok(None),
+            Err(e) => Err(RpcError::Internal(e.to_string()).into()),
+        }
+    }
+
+    async fn employment_get_income_attestations_by_subject(
+        &self,
+        subject_ref: String,
+    ) -> std::result::Result<Vec<IncomeAttestationInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let ref_bytes = hex::decode(subject_ref.strip_prefix("0x").unwrap_or(&subject_ref))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid subject ref: {}", e)))?;
+
+        if ref_bytes.len() != 32 {
+            return Err(RpcError::InvalidParams("Subject ref must be 32 bytes".to_string()).into());
+        }
+
+        let mut ref_arr = [0u8; 32];
+        ref_arr.copy_from_slice(&ref_bytes);
+
+        let store = IncomeAttestationStore::new(&self.db);
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        match store.get_by_subject(&ref_arr) {
+            Ok(atts) => Ok(atts.iter().map(|a| self.income_attestation_to_rpc(a, current_time)).collect()),
+            Err(e) => Err(RpcError::Internal(e.to_string()).into()),
+        }
+    }
 }
 
 // Helper methods for DocClass RPC conversions
@@ -3242,6 +3506,61 @@ impl RpcServer {
             updated_at: issuer.updated_at,
             status: format!("{:?}", issuer.status),
             stake_amount: issuer.stake_amount.to_string(),
+        }
+    }
+
+    // Helper methods for employment conversions
+    fn employment_issuer_to_rpc(&self, issuer: &sumchain_primitives::employment::EmploymentIssuerProfile) -> EmploymentIssuerInfo {
+        EmploymentIssuerInfo {
+            issuer_address: issuer.issuer_address.to_base58(),
+            issuer_class: format!("{:?}", issuer.issuer_class),
+            issuer_commitment: format!("0x{}", hex::encode(issuer.issuer_commitment)),
+            jurisdiction: issuer.jurisdiction_code.clone(),
+            policy_id: format!("0x{}", hex::encode(issuer.policy_id)),
+            status: format!("{:?}", issuer.status),
+            risk_level: issuer.issuer_class.default_risk_level().name().to_string(),
+            registered_at_height: issuer.registered_at_height,
+            created_at: issuer.created_at,
+            updated_at: issuer.updated_at,
+        }
+    }
+
+    fn employment_credential_to_rpc(&self, cred: &sumchain_primitives::employment::EmploymentCredential, current_time: u64) -> EmploymentCredentialInfo {
+        EmploymentCredentialInfo {
+            employment_id: format!("0x{}", hex::encode(cred.employment_id)),
+            employee_ref: format!("0x{}", hex::encode(cred.employee_ref)),
+            employer_ref: format!("0x{}", hex::encode(cred.employer_ref)),
+            status: cred.status.name().to_string(),
+            tenure_commitment: format!("0x{}", hex::encode(cred.tenure_commitment)),
+            role_commitment: cred.role_commitment.map(|r| format!("0x{}", hex::encode(r))),
+            employment_type: format!("{:?}", cred.employment_type),
+            valid_from: cred.valid_from,
+            expiry: cred.expiry,
+            policy_id: format!("0x{}", hex::encode(cred.policy_id)),
+            revocation_ref: cred.revocation_ref.map(|r| format!("0x{}", hex::encode(r))),
+            issuer_address: cred.issuer_address.to_base58(),
+            issuer_class: format!("{:?}", cred.issuer_class),
+            is_valid: cred.is_valid(current_time),
+            created_at: cred.created_at,
+            updated_at: cred.updated_at,
+        }
+    }
+
+    fn income_attestation_to_rpc(&self, att: &sumchain_primitives::employment::IncomeAttestation, current_time: u64) -> IncomeAttestationInfo {
+        IncomeAttestationInfo {
+            attestation_id: format!("0x{}", hex::encode(att.attestation_id)),
+            subject_ref: format!("0x{}", hex::encode(att.subject_ref)),
+            employment_id: att.employment_id.map(|e| format!("0x{}", hex::encode(e))),
+            bracket_commitment: att.threshold_commitment.map(|c| format!("0x{}", hex::encode(c))).unwrap_or_else(|| "none".to_string()),
+            period_commitment: format!("0x{}", hex::encode(att.period_commitment)),
+            currency_code: format!("{:?}", att.income_bracket),
+            attestation_type: format!("{:?}", att.period_type),
+            valid_from: att.valid_from,
+            expiry: att.expiry,
+            policy_id: format!("0x{}", hex::encode(att.policy_id)),
+            issuer_address: att.issuer_address.to_base58(),
+            is_valid: att.is_valid(current_time),
+            created_at: att.created_at,
         }
     }
 }

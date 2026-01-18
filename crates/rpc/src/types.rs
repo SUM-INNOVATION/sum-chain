@@ -1112,3 +1112,126 @@ pub struct TransactionHistoryResponse {
     /// Page limit
     pub limit: u32,
 }
+
+// =============================================================================
+// SRC-88X Employment & HR RPC Types
+// =============================================================================
+
+/// Employment issuer info for RPC responses (SRC-881)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmploymentIssuerInfo {
+    /// Issuer address
+    pub issuer_address: String,
+    /// Issuer class
+    pub issuer_class: String,
+    /// Issuer commitment (hex)
+    pub issuer_commitment: String,
+    /// Jurisdiction code
+    pub jurisdiction: String,
+    /// Policy ID (hex)
+    pub policy_id: String,
+    /// Issuer status
+    pub status: String,
+    /// Risk level
+    pub risk_level: String,
+    /// Registered at block height
+    pub registered_at_height: u64,
+    /// Created timestamp
+    pub created_at: u64,
+    /// Updated timestamp
+    pub updated_at: u64,
+}
+
+/// Employment credential info for RPC responses (SRC-882)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmploymentCredentialInfo {
+    /// Employment ID (hex)
+    pub employment_id: String,
+    /// Employee reference/commitment (hex)
+    pub employee_ref: String,
+    /// Employer reference/commitment (hex)
+    pub employer_ref: String,
+    /// Employment status
+    pub status: String,
+    /// Tenure commitment (hex)
+    pub tenure_commitment: String,
+    /// Role commitment (hex, optional)
+    pub role_commitment: Option<String>,
+    /// Employment type
+    pub employment_type: String,
+    /// Valid from timestamp
+    pub valid_from: u64,
+    /// Expiry timestamp (0 = no expiry)
+    pub expiry: u64,
+    /// Policy ID (hex)
+    pub policy_id: String,
+    /// Revocation reference (hex, optional)
+    pub revocation_ref: Option<String>,
+    /// Issuer address
+    pub issuer_address: String,
+    /// Issuer class
+    pub issuer_class: String,
+    /// Is currently valid
+    pub is_valid: bool,
+    /// Created timestamp
+    pub created_at: u64,
+    /// Updated timestamp
+    pub updated_at: u64,
+}
+
+/// Income attestation info for RPC responses (SRC-883)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IncomeAttestationInfo {
+    /// Attestation ID (hex)
+    pub attestation_id: String,
+    /// Subject reference (hex)
+    pub subject_ref: String,
+    /// Employment ID (hex, optional)
+    pub employment_id: Option<String>,
+    /// Income bracket commitment (hex)
+    pub bracket_commitment: String,
+    /// Period commitment (hex)
+    pub period_commitment: String,
+    /// Currency code
+    pub currency_code: String,
+    /// Attestation type
+    pub attestation_type: String,
+    /// Valid from timestamp
+    pub valid_from: u64,
+    /// Expiry timestamp
+    pub expiry: u64,
+    /// Policy ID (hex)
+    pub policy_id: String,
+    /// Issuer address
+    pub issuer_address: String,
+    /// Is currently valid
+    pub is_valid: bool,
+    /// Created timestamp
+    pub created_at: u64,
+}
+
+/// Employment verification result
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmploymentVerificationResult {
+    /// Is the employee currently employed
+    pub is_employed: bool,
+    /// Matching credential (if employed)
+    pub credential: Option<EmploymentCredentialInfo>,
+    /// Verification timestamp
+    pub verified_at: u64,
+}
+
+/// Employment summary for an address
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmploymentSummary {
+    /// Employee reference (hex)
+    pub employee_ref: String,
+    /// Total credentials
+    pub total_credentials: u32,
+    /// Active credentials
+    pub active_credentials: u32,
+    /// Ended credentials
+    pub ended_credentials: u32,
+    /// List of active employment
+    pub active_employment: Vec<EmploymentCredentialInfo>,
+}

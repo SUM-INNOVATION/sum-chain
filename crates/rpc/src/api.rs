@@ -6,14 +6,16 @@ use crate::metrics::MetricsSnapshot;
 use crate::types::{
     AccountInfo, BlockInfo, ContractCallResult, ContractInfo, DelegationRpcInfo,
     DelegatorSummary, DocClassConfigInfo, DocClassCredentialInfo, DocClassIdentityInfo,
-    DocClassIssuerInfo, DocClassSummary, EpochInfo, FinalityInfo, GasEstimateResult,
-    HealthResponse, InboxFilterInfo, MessageDataInfo, MessageEventInfo, MessagingConfigInfo, MessagingQuotaInfo,
-    NftCollectionInfo, NftOwnerTokens, NftTokenInfo, NodeInfo, P2pStats, PendingPaymentInfo,
-    PublicKeyInfo, ReceiptInfo, RpcPeerInfo, SendTxResponse, SlashingRecordRpcInfo, SlashingSummary,
-    SpamReportInfo, SponsoredRegistrationRequest, SponsoredRegistrationResponse, StakingParamsInfo,
-    StakingSummary, StakingValidatorInfo, SubmitSponsoredMessageRequest, TokenHoldings, TokenInfo,
-    TransactionHistoryResponse, TransactionInfo, UnbondingDelegationRpcInfo, ValidatorDelegationSummary,
-    ValidatorSetInfo, ValidatorSetRpcInfo, ValidatorSigningRpcInfo, ViewCallRequest,
+    DocClassIssuerInfo, DocClassSummary, EmploymentCredentialInfo, EmploymentIssuerInfo,
+    EmploymentSummary, EmploymentVerificationResult, EpochInfo, FinalityInfo, GasEstimateResult,
+    HealthResponse, IncomeAttestationInfo, InboxFilterInfo, MessageDataInfo, MessageEventInfo,
+    MessagingConfigInfo, MessagingQuotaInfo, NftCollectionInfo, NftOwnerTokens, NftTokenInfo,
+    NodeInfo, P2pStats, PendingPaymentInfo, PublicKeyInfo, ReceiptInfo, RpcPeerInfo, SendTxResponse,
+    SlashingRecordRpcInfo, SlashingSummary, SpamReportInfo, SponsoredRegistrationRequest,
+    SponsoredRegistrationResponse, StakingParamsInfo, StakingSummary, StakingValidatorInfo,
+    SubmitSponsoredMessageRequest, TokenHoldings, TokenInfo, TransactionHistoryResponse,
+    TransactionInfo, UnbondingDelegationRpcInfo, ValidatorDelegationSummary, ValidatorSetInfo,
+    ValidatorSetRpcInfo, ValidatorSigningRpcInfo, ViewCallRequest,
 };
 
 /// SUM Chain RPC API
@@ -789,4 +791,78 @@ pub trait SumChainApi {
         &self,
         address: String,
     ) -> Result<u64, jsonrpsee::types::ErrorObjectOwned>;
+
+    // =========================================================================
+    // SRC-88X Employment & HR Endpoints
+    // =========================================================================
+
+    /// Get employment issuer by address (SRC-881)
+    #[method(name = "employment_getIssuer")]
+    async fn employment_get_issuer(
+        &self,
+        issuer_address: String,
+    ) -> Result<Option<EmploymentIssuerInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// List all active employment issuers
+    #[method(name = "employment_listIssuers")]
+    async fn employment_list_issuers(
+        &self,
+    ) -> Result<Vec<EmploymentIssuerInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get employment credential by ID (SRC-882)
+    #[method(name = "employment_getCredential")]
+    async fn employment_get_credential(
+        &self,
+        employment_id: String,
+    ) -> Result<Option<EmploymentCredentialInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get employment credentials by employee reference
+    #[method(name = "employment_getCredentialsByEmployee")]
+    async fn employment_get_credentials_by_employee(
+        &self,
+        employee_ref: String,
+    ) -> Result<Vec<EmploymentCredentialInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get active employment credentials by employee reference
+    #[method(name = "employment_getActiveCredentialsByEmployee")]
+    async fn employment_get_active_credentials_by_employee(
+        &self,
+        employee_ref: String,
+    ) -> Result<Vec<EmploymentCredentialInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get employment credentials by employer reference
+    #[method(name = "employment_getCredentialsByEmployer")]
+    async fn employment_get_credentials_by_employer(
+        &self,
+        employer_ref: String,
+    ) -> Result<Vec<EmploymentCredentialInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Verify if an employee is currently employed by a specific employer
+    #[method(name = "employment_verifyEmployment")]
+    async fn employment_verify_employment(
+        &self,
+        employee_ref: String,
+        employer_ref: String,
+    ) -> Result<EmploymentVerificationResult, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get employment summary for an employee
+    #[method(name = "employment_getSummary")]
+    async fn employment_get_summary(
+        &self,
+        employee_ref: String,
+    ) -> Result<EmploymentSummary, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get income attestation by ID (SRC-883)
+    #[method(name = "employment_getIncomeAttestation")]
+    async fn employment_get_income_attestation(
+        &self,
+        attestation_id: String,
+    ) -> Result<Option<IncomeAttestationInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get income attestations by subject reference
+    #[method(name = "employment_getIncomeAttestationsBySubject")]
+    async fn employment_get_income_attestations_by_subject(
+        &self,
+        subject_ref: String,
+    ) -> Result<Vec<IncomeAttestationInfo>, jsonrpsee::types::ErrorObjectOwned>;
 }
