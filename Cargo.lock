@@ -6035,6 +6035,7 @@ name = "sumchain-storage"
 version = "0.1.0"
 dependencies = [
  "bincode",
+ "hex",
  "parking_lot",
  "rocksdb",
  "serde",

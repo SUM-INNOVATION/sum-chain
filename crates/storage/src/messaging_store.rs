@@ -399,6 +399,14 @@ impl<'a> MessagingStore<'a> {
 
         let bytes = bincode::serialize(event)
             .map_err(|e| StorageError::Serialization(e.to_string()))?;
+
+        tracing::info!(
+            "MessagingStore: storing message event with key prefix 0x{} (block={}, tx_index={})",
+            hex::encode(&event.recipient_hash),
+            event.block_height,
+            tx_index
+        );
+
         self.db.put(cf::MESSAGING_EVENTS, &key, &bytes)
     }
 

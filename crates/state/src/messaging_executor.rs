@@ -314,7 +314,13 @@ impl MessagingExecutor {
         };
         store.store_message_event(&event, tx_index)?;
 
-        debug!("Sponsored message sent: {} -> {:?} (sponsored)", real_sender, sponsored_msg.recipient_hash);
+        tracing::info!(
+            "Sponsored message stored: tx={} sender={} recipient_hash=0x{} block={}",
+            tx_hash,
+            real_sender.to_base58(),
+            hex::encode(sponsored_msg.recipient_hash),
+            block_height
+        );
 
         Ok(MessagingExecutionResult::success(Some(tx_hash)))
     }
