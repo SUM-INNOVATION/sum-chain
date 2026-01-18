@@ -418,26 +418,24 @@ impl<'a> MessagingStore<'a> {
         to_block: u64,
         limit: usize,
     ) -> Result<Vec<MessageEvent>> {
-        let mut start_key = Vec::with_capacity(44);
-        start_key.extend_from_slice(recipient_hash);
-        start_key.extend_from_slice(&from_block.to_be_bytes());
-        start_key.extend_from_slice(&0u32.to_be_bytes());
-
-        let mut end_key = Vec::with_capacity(44);
-        end_key.extend_from_slice(recipient_hash);
-        end_key.extend_from_slice(&(to_block + 1).to_be_bytes());
-        end_key.extend_from_slice(&0u32.to_be_bytes());
-
         let mut events = Vec::new();
-        for (key, value) in self.db.prefix_iter(cf::MESSAGING_EVENTS, recipient_hash)? {
-            // Check if key is within range
+
+        // Use full scan and filter by recipient_hash and block range
+        // Note: prefix_iter requires bloom filter configuration which may not be set up
+        for (key, value) in self.db.full_iter(cf::MESSAGING_EVENTS)? {
+            // Key format: recipient_hash (32) + block_height (8) + tx_index (4)
             if key.len() < 44 {
                 continue;
             }
-            if key.as_ref() >= end_key.as_slice() {
-                break;
+
+            // Check if recipient_hash matches (first 32 bytes of key)
+            if &key[0..32] != recipient_hash {
+                continue;
             }
-            if key.as_ref() < start_key.as_slice() {
+
+            // Extract and check block height (bytes 32-40)
+            let block_height = u64::from_be_bytes(key[32..40].try_into().unwrap_or([0u8; 8]));
+            if block_height < from_block || block_height > to_block {
                 continue;
             }
 
@@ -461,24 +459,23 @@ impl<'a> MessagingStore<'a> {
     ) -> Result<u64> {
         let mut count = 0u64;
 
-        let mut start_key = Vec::with_capacity(44);
-        start_key.extend_from_slice(recipient_hash);
-        start_key.extend_from_slice(&from_block.to_be_bytes());
-
-        let mut end_key = Vec::with_capacity(44);
-        end_key.extend_from_slice(recipient_hash);
-        end_key.extend_from_slice(&(to_block + 1).to_be_bytes());
-
-        for (key, _) in self.db.prefix_iter(cf::MESSAGING_EVENTS, recipient_hash)? {
-            if key.len() < 40 {
+        // Use full scan and filter by recipient_hash and block range
+        for (key, _) in self.db.full_iter(cf::MESSAGING_EVENTS)? {
+            if key.len() < 44 {
                 continue;
             }
-            if key.as_ref() >= end_key.as_slice() {
-                break;
-            }
-            if key.as_ref() < start_key.as_slice() {
+
+            // Check if recipient_hash matches
+            if &key[0..32] != recipient_hash {
                 continue;
             }
+
+            // Extract and check block height
+            let block_height = u64::from_be_bytes(key[32..40].try_into().unwrap_or([0u8; 8]));
+            if block_height < from_block || block_height > to_block {
+                continue;
+            }
+
             count += 1;
         }
 
