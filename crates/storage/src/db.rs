@@ -876,6 +876,15 @@ impl Database {
         let cf = self.cf(cf_name)?;
         Ok(self.db.prefix_iterator_cf(cf, prefix).filter_map(|r| r.ok()))
     }
+
+    /// Get a full iterator over all entries in a column family
+    pub fn full_iter(
+        &self,
+        cf_name: &str,
+    ) -> Result<impl Iterator<Item = (Box<[u8]>, Box<[u8]>)> + '_> {
+        let cf = self.cf(cf_name)?;
+        Ok(self.db.iterator_cf(cf, rocksdb::IteratorMode::Start).filter_map(|r| r.ok()))
+    }
 }
 
 /// Atomic write batch

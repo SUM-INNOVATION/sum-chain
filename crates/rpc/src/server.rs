@@ -2084,6 +2084,64 @@ impl SumChainApiServer for RpcServer {
         Err(RpcError::Internal("Sender-based message indexing not yet implemented".to_string()).into())
     }
 
+    async fn messaging_get_message_by_tx_hash(
+        &self,
+        tx_hash: String,
+    ) -> std::result::Result<Option<MessageEventInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let hash_bytes = hex::decode(tx_hash.strip_prefix("0x").unwrap_or(&tx_hash))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid tx hash: {}", e)))?;
+
+        if hash_bytes.len() != 32 {
+            return Err(RpcError::InvalidParams("Tx hash must be 32 bytes".to_string()).into());
+        }
+
+        let mut hash_arr = [0u8; 32];
+        hash_arr.copy_from_slice(&hash_bytes);
+
+        let store = MessagingStore::new(&self.db);
+        match store.get_message_by_tx_hash(&hash_arr) {
+            Ok(Some(event)) => Ok(Some(MessageEventInfo {
+                tx_hash: format!("0x{}", hex::encode(event.message_id.as_bytes())),
+                block_height: event.block_height,
+                sender: event.sender.to_base58(),
+                recipient_hash: format!("0x{}", hex::encode(event.recipient_hash)),
+                content_type: 0,
+                flags: 0,
+                has_payment: event.has_payment,
+                payment_amount: None,
+            })),
+            Ok(None) => Ok(None),
+            Err(e) => Err(RpcError::Internal(e.to_string()).into()),
+        }
+    }
+
+    async fn messaging_get_messages_in_block(
+        &self,
+        block_height: u64,
+        limit: Option<u32>,
+    ) -> std::result::Result<Vec<MessageEventInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let store = MessagingStore::new(&self.db);
+        let events = store
+            .get_messages_in_block(block_height, limit.unwrap_or(100) as usize)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        let results: Vec<MessageEventInfo> = events
+            .into_iter()
+            .map(|e| MessageEventInfo {
+                tx_hash: format!("0x{}", hex::encode(e.message_id.as_bytes())),
+                block_height: e.block_height,
+                sender: e.sender.to_base58(),
+                recipient_hash: format!("0x{}", hex::encode(e.recipient_hash)),
+                content_type: 0,
+                flags: 0,
+                has_payment: e.has_payment,
+                payment_amount: None,
+            })
+            .collect();
+
+        Ok(results)
+    }
+
     async fn messaging_get_pending_payment(
         &self,
         message_id: String,

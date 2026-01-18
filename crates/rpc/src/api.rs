@@ -570,6 +570,21 @@ pub trait SumChainApi {
         offset: Option<u32>,
     ) -> Result<Vec<MessageEventInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
+    /// Get a specific message by transaction hash (for debugging)
+    #[method(name = "messaging_getMessageByTxHash")]
+    async fn messaging_get_message_by_tx_hash(
+        &self,
+        tx_hash: String,
+    ) -> Result<Option<MessageEventInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get all messages in a specific block (for debugging)
+    #[method(name = "messaging_getMessagesInBlock")]
+    async fn messaging_get_messages_in_block(
+        &self,
+        block_height: u64,
+        limit: Option<u32>,
+    ) -> Result<Vec<MessageEventInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
     /// Get pending payment by message ID
     #[method(name = "messaging_getPendingPayment")]
     async fn messaging_get_pending_payment(

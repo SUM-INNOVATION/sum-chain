@@ -477,6 +477,41 @@ impl<'a> MessagingStore<'a> {
         Ok(count)
     }
 
+    /// Get a message by its transaction hash (message_id)
+    /// This scans all events - use sparingly for debugging
+    pub fn get_message_by_tx_hash(&self, tx_hash: &[u8; 32]) -> Result<Option<MessageEvent>> {
+        // Scan all events looking for this message_id
+        // Note: This is O(n) - consider adding a tx_hash -> event index for production
+        for (_key, value) in self.db.full_iter(cf::MESSAGING_EVENTS)? {
+            if let Ok(event) = bincode::deserialize::<MessageEvent>(&value) {
+                if event.message_id.as_bytes() == tx_hash {
+                    return Ok(Some(event));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Get all messages in a specific block
+    /// This scans all events looking for the block height
+    pub fn get_messages_in_block(&self, block_height: u64, limit: usize) -> Result<Vec<MessageEvent>> {
+        let mut events = Vec::new();
+
+        // Scan all events looking for this block height
+        for (_key, value) in self.db.full_iter(cf::MESSAGING_EVENTS)? {
+            if let Ok(event) = bincode::deserialize::<MessageEvent>(&value) {
+                if event.block_height == block_height {
+                    events.push(event);
+                    if events.len() >= limit {
+                        break;
+                    }
+                }
+            }
+        }
+
+        Ok(events)
+    }
+
     // ========================================================================
     // Public Key Registry
     // ========================================================================
