@@ -803,6 +803,27 @@ pub struct MessageEventInfo {
     pub payment_amount: Option<String>,
 }
 
+/// Message data info for RPC responses (includes encrypted payload)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageDataInfo {
+    /// Transaction hash
+    pub tx_hash: String,
+    /// Block height
+    pub block_height: u64,
+    /// Sender address (base58)
+    pub sender: String,
+    /// Recipient hash (hex with 0x prefix)
+    pub recipient_hash: String,
+    /// Encrypted message data (hex with 0x prefix)
+    pub message_data: String,
+    /// Sender's public key (hex with 0x prefix)
+    pub sender_pubkey: String,
+    /// Whether message has payment attached
+    pub has_payment: bool,
+    /// Payment amount (if has_payment)
+    pub payment_amount: Option<String>,
+}
+
 /// Pending payment info for RPC responses
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingPaymentInfo {

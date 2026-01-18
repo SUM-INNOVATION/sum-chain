@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use jsonrpsee::server::{Server, ServerHandle};
 use sumchain_consensus::ConsensusEngine;
-use sumchain_primitives::{Address, Block, Hash, SignedTransaction};
+use sumchain_primitives::{Address, Block, Hash, SignedTransaction, MessagingTxData, MessagingOperation, SponsoredMessage, TxPayload};
 use sumchain_state::{Mempool, StateManager};
 use sumchain_storage::{BlockStore, Database, DelegationStore, DocClassStore, MessagingStore, NftStore, ReceiptStore, SlashingStore, StakingStore, TokenStore, TxIndexStore, TxStore, ValidatorSetStore};
 use tokio::sync::mpsc;
@@ -2140,6 +2140,65 @@ impl SumChainApiServer for RpcServer {
             .collect();
 
         Ok(results)
+    }
+
+    async fn messaging_get_message_data(
+        &self,
+        tx_hash: String,
+    ) -> std::result::Result<Option<MessageDataInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let hash = Hash::from_hex(&tx_hash)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid tx hash: {}", e)))?;
+
+        // Get the transaction from storage
+        let tx_store = TxStore::new(&self.db);
+        let tx = match tx_store.get(&hash) {
+            Ok(Some(tx)) => tx,
+            Ok(None) => return Ok(None),
+            Err(e) => return Err(RpcError::Internal(e.to_string()).into()),
+        };
+
+        // Get the receipt to find block height
+        let receipt_store = ReceiptStore::new(&self.db);
+        let block_height = match receipt_store.get(&hash) {
+            Ok(Some(receipt)) => receipt.block_height,
+            Ok(None) => 0,
+            Err(_) => 0,
+        };
+
+        // Extract the payload from the transaction
+        let payload = match &tx.inner {
+            sumchain_primitives::TxInner::V2(tx_v2) => &tx_v2.payload,
+            _ => return Err(RpcError::InvalidParams("Not a V2 transaction".to_string()).into()),
+        };
+
+        // Check if this is a messaging transaction
+        let messaging_data = match payload {
+            TxPayload::Messaging(data) => data,
+            _ => return Err(RpcError::InvalidParams("Not a messaging transaction".to_string()).into()),
+        };
+
+        // Check if this is a SendMessage (sponsored) operation
+        if messaging_data.operation != MessagingOperation::SendMessage {
+            return Err(RpcError::InvalidParams("Not a sponsored message transaction".to_string()).into());
+        }
+
+        // Deserialize the SponsoredMessage from the data
+        let sponsored_msg: SponsoredMessage = bincode::deserialize(&messaging_data.data)
+            .map_err(|e| RpcError::Internal(format!("Failed to deserialize message: {}", e)))?;
+
+        // Derive sender address from public key
+        let sender = Address::from_public_key(&sponsored_msg.sender_pubkey);
+
+        Ok(Some(MessageDataInfo {
+            tx_hash: format!("0x{}", hex::encode(hash.as_bytes())),
+            block_height,
+            sender: sender.to_base58(),
+            recipient_hash: format!("0x{}", hex::encode(sponsored_msg.recipient_hash)),
+            message_data: format!("0x{}", hex::encode(&sponsored_msg.message_data)),
+            sender_pubkey: format!("0x{}", hex::encode(sponsored_msg.sender_pubkey)),
+            has_payment: sponsored_msg.koppa_amount.is_some(),
+            payment_amount: sponsored_msg.koppa_amount.map(|a| a.to_string()),
+        }))
     }
 
     async fn messaging_get_pending_payment(

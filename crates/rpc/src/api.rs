@@ -7,7 +7,7 @@ use crate::types::{
     AccountInfo, BlockInfo, ContractCallResult, ContractInfo, DelegationRpcInfo,
     DelegatorSummary, DocClassConfigInfo, DocClassCredentialInfo, DocClassIdentityInfo,
     DocClassIssuerInfo, DocClassSummary, EpochInfo, FinalityInfo, GasEstimateResult,
-    HealthResponse, InboxFilterInfo, MessageEventInfo, MessagingConfigInfo, MessagingQuotaInfo,
+    HealthResponse, InboxFilterInfo, MessageDataInfo, MessageEventInfo, MessagingConfigInfo, MessagingQuotaInfo,
     NftCollectionInfo, NftOwnerTokens, NftTokenInfo, NodeInfo, P2pStats, PendingPaymentInfo,
     PublicKeyInfo, ReceiptInfo, RpcPeerInfo, SendTxResponse, SlashingRecordRpcInfo, SlashingSummary,
     SpamReportInfo, SponsoredRegistrationRequest, SponsoredRegistrationResponse, StakingParamsInfo,
@@ -584,6 +584,13 @@ pub trait SumChainApi {
         block_height: u64,
         limit: Option<u32>,
     ) -> Result<Vec<MessageEventInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get the encrypted message data for a specific message by transaction hash
+    #[method(name = "messaging_getMessageData")]
+    async fn messaging_get_message_data(
+        &self,
+        tx_hash: String,
+    ) -> Result<Option<MessageDataInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Get pending payment by message ID
     #[method(name = "messaging_getPendingPayment")]
