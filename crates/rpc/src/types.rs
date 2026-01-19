@@ -1147,6 +1147,8 @@ pub struct EmploymentIssuerInfo {
 pub struct EmploymentCredentialInfo {
     /// Employment ID (hex)
     pub employment_id: String,
+    /// Employee wallet address (token owner)
+    pub employee_address: String,
     /// Employee reference/commitment (hex)
     pub employee_ref: String,
     /// Employer reference/commitment (hex)
@@ -1184,6 +1186,8 @@ pub struct EmploymentCredentialInfo {
 pub struct IncomeAttestationInfo {
     /// Attestation ID (hex)
     pub attestation_id: String,
+    /// Holder wallet address (token owner)
+    pub holder_address: String,
     /// Subject reference (hex)
     pub subject_ref: String,
     /// Employment ID (hex, optional)

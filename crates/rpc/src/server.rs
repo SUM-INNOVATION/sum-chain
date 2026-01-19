@@ -3411,6 +3411,67 @@ impl SumChainApiServer for RpcServer {
             Err(e) => Err(RpcError::Internal(e.to_string()).into()),
         }
     }
+
+    // =========================================================================
+    // SRC-88X Employment - Address-based queries (token ownership)
+    // =========================================================================
+
+    async fn employment_get_credentials_by_employee_address(
+        &self,
+        employee_address: String,
+    ) -> std::result::Result<Vec<EmploymentCredentialInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let address = Address::from_base58(&employee_address)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid address: {}", e)))?;
+
+        let store = EmploymentCredentialStore::new(&self.db);
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        match store.get_by_employee_address(&address) {
+            Ok(creds) => Ok(creds.iter().map(|c| self.employment_credential_to_rpc(c, current_time)).collect()),
+            Err(e) => Err(RpcError::Internal(e.to_string()).into()),
+        }
+    }
+
+    async fn employment_get_active_credentials_by_employee_address(
+        &self,
+        employee_address: String,
+    ) -> std::result::Result<Vec<EmploymentCredentialInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let address = Address::from_base58(&employee_address)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid address: {}", e)))?;
+
+        let store = EmploymentCredentialStore::new(&self.db);
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        match store.get_active_by_employee_address(&address, current_time) {
+            Ok(creds) => Ok(creds.iter().map(|c| self.employment_credential_to_rpc(c, current_time)).collect()),
+            Err(e) => Err(RpcError::Internal(e.to_string()).into()),
+        }
+    }
+
+    async fn employment_get_income_attestations_by_holder_address(
+        &self,
+        holder_address: String,
+    ) -> std::result::Result<Vec<IncomeAttestationInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let address = Address::from_base58(&holder_address)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid address: {}", e)))?;
+
+        let store = IncomeAttestationStore::new(&self.db);
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        match store.get_by_holder_address(&address) {
+            Ok(atts) => Ok(atts.iter().map(|a| self.income_attestation_to_rpc(a, current_time)).collect()),
+            Err(e) => Err(RpcError::Internal(e.to_string()).into()),
+        }
+    }
 }
 
 // Helper methods for DocClass RPC conversions
@@ -3528,6 +3589,7 @@ impl RpcServer {
     fn employment_credential_to_rpc(&self, cred: &sumchain_primitives::employment::EmploymentCredential, current_time: u64) -> EmploymentCredentialInfo {
         EmploymentCredentialInfo {
             employment_id: format!("0x{}", hex::encode(cred.employment_id)),
+            employee_address: cred.employee_address.to_base58(),
             employee_ref: format!("0x{}", hex::encode(cred.employee_ref)),
             employer_ref: format!("0x{}", hex::encode(cred.employer_ref)),
             status: cred.status.name().to_string(),
@@ -3549,6 +3611,7 @@ impl RpcServer {
     fn income_attestation_to_rpc(&self, att: &sumchain_primitives::employment::IncomeAttestation, current_time: u64) -> IncomeAttestationInfo {
         IncomeAttestationInfo {
             attestation_id: format!("0x{}", hex::encode(att.attestation_id)),
+            holder_address: att.holder_address.to_base58(),
             subject_ref: format!("0x{}", hex::encode(att.subject_ref)),
             employment_id: att.employment_id.map(|e| format!("0x{}", hex::encode(e))),
             bracket_commitment: att.threshold_commitment.map(|c| format!("0x{}", hex::encode(c))).unwrap_or_else(|| "none".to_string()),

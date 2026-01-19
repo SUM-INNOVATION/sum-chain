@@ -865,4 +865,29 @@ pub trait SumChainApi {
         &self,
         subject_ref: String,
     ) -> Result<Vec<IncomeAttestationInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    // =========================================================================
+    // SRC-88X Employment - Address-based queries (token ownership)
+    // =========================================================================
+
+    /// Get employment credentials by employee wallet address
+    #[method(name = "employment_getCredentialsByEmployeeAddress")]
+    async fn employment_get_credentials_by_employee_address(
+        &self,
+        employee_address: String,
+    ) -> Result<Vec<EmploymentCredentialInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get active employment credentials by employee wallet address
+    #[method(name = "employment_getActiveCredentialsByEmployeeAddress")]
+    async fn employment_get_active_credentials_by_employee_address(
+        &self,
+        employee_address: String,
+    ) -> Result<Vec<EmploymentCredentialInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get income attestations by holder wallet address
+    #[method(name = "employment_getIncomeAttestationsByHolderAddress")]
+    async fn employment_get_income_attestations_by_holder_address(
+        &self,
+        holder_address: String,
+    ) -> Result<Vec<IncomeAttestationInfo>, jsonrpsee::types::ErrorObjectOwned>;
 }
