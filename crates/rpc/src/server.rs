@@ -3472,6 +3472,470 @@ impl SumChainApiServer for RpcServer {
             Err(e) => Err(RpcError::Internal(e.to_string()).into()),
         }
     }
+
+    // =========================================================================
+    // SRC-88X Employment Write Operations (Token-gated access)
+    // =========================================================================
+
+    async fn employment_register_issuer(
+        &self,
+        request: RegisterEmploymentIssuerRequest,
+    ) -> std::result::Result<RegisterEmploymentIssuerResponse, jsonrpsee::types::ErrorObjectOwned> {
+        use sumchain_primitives::employment::{
+            EmploymentIssuerClass, EmploymentIssuerProfile, EmploymentOperation, EmploymentTxData,
+            IssuerStatus,
+        };
+        use sumchain_primitives::{TransactionV2, TxPayload};
+
+        // Parse private key from hex
+        let key_hex = request.private_key.strip_prefix("0x").unwrap_or(&request.private_key);
+        let key_bytes = hex::decode(key_hex)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid private key hex: {}", e)))?;
+
+        if key_bytes.len() != 32 {
+            return Ok(RegisterEmploymentIssuerResponse {
+                success: false,
+                tx_hash: None,
+                issuer_address: String::new(),
+                error: Some("Private key must be 32 bytes".to_string()),
+            });
+        }
+
+        let mut key_array = [0u8; 32];
+        key_array.copy_from_slice(&key_bytes);
+        let keypair = sumchain_crypto::KeyPair::from_bytes(key_array);
+        let issuer_address = keypair.address();
+
+        // Parse issuer class
+        let issuer_class = match request.issuer_class.as_str() {
+            "GovernmentLabor" => EmploymentIssuerClass::GovernmentLabor,
+            "PayrollProcessor" => EmploymentIssuerClass::PayrollProcessor,
+            "RegulatedHrPlatform" => EmploymentIssuerClass::RegulatedHrPlatform,
+            "Peo" => EmploymentIssuerClass::Peo,
+            "Employer" => EmploymentIssuerClass::Employer,
+            "HrPlatform" => EmploymentIssuerClass::HrPlatform,
+            "StaffingAgency" => EmploymentIssuerClass::StaffingAgency,
+            "GigPlatform" => EmploymentIssuerClass::GigPlatform,
+            _ => {
+                return Ok(RegisterEmploymentIssuerResponse {
+                    success: false,
+                    tx_hash: None,
+                    issuer_address: issuer_address.to_base58(),
+                    error: Some(format!("Invalid issuer class: {}. Valid values: GovernmentLabor, PayrollProcessor, RegulatedHrPlatform, Peo, Employer, HrPlatform, StaffingAgency, GigPlatform", request.issuer_class)),
+                });
+            }
+        };
+
+        // Parse issuer commitment
+        let commitment_hex = request.issuer_commitment.strip_prefix("0x").unwrap_or(&request.issuer_commitment);
+        let commitment_bytes = hex::decode(commitment_hex)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid issuer commitment hex: {}", e)))?;
+
+        if commitment_bytes.len() != 32 {
+            return Ok(RegisterEmploymentIssuerResponse {
+                success: false,
+                tx_hash: None,
+                issuer_address: issuer_address.to_base58(),
+                error: Some("Issuer commitment must be 32 bytes".to_string()),
+            });
+        }
+
+        let mut issuer_commitment = [0u8; 32];
+        issuer_commitment.copy_from_slice(&commitment_bytes);
+
+        // Parse policy ID
+        let policy_hex = request.policy_id.strip_prefix("0x").unwrap_or(&request.policy_id);
+        let policy_bytes = hex::decode(policy_hex)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid policy ID hex: {}", e)))?;
+
+        if policy_bytes.len() != 32 {
+            return Ok(RegisterEmploymentIssuerResponse {
+                success: false,
+                tx_hash: None,
+                issuer_address: issuer_address.to_base58(),
+                error: Some("Policy ID must be 32 bytes".to_string()),
+            });
+        }
+
+        let mut policy_id = [0u8; 32];
+        policy_id.copy_from_slice(&policy_bytes);
+
+        // Check if issuer already exists
+        let store = EmploymentIssuerStore::new(&self.db);
+        if store.exists(&issuer_address).unwrap_or(false) {
+            return Ok(RegisterEmploymentIssuerResponse {
+                success: false,
+                tx_hash: None,
+                issuer_address: issuer_address.to_base58(),
+                error: Some("Issuer already registered".to_string()),
+            });
+        }
+
+        // Get current block info for timestamps
+        let block_store = BlockStore::new(&self.db);
+        let (block_height, block_timestamp) = match block_store.get_latest() {
+            Ok(Some(block)) => (block.header.height, block.header.timestamp),
+            _ => (0, std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64),
+        };
+
+        // Create the issuer profile
+        let issuer_profile = EmploymentIssuerProfile {
+            issuer_address,
+            issuer_class,
+            issuer_commitment,
+            jurisdiction_code: request.jurisdiction_code.clone(),
+            policy_id,
+            status: IssuerStatus::Active,
+            registered_at_height: block_height,
+            created_at: block_timestamp,
+            updated_at: block_timestamp,
+        };
+
+        // Serialize the issuer profile
+        let issuer_data = bincode::serialize(&issuer_profile)
+            .map_err(|e| RpcError::Internal(format!("Failed to serialize issuer profile: {}", e)))?;
+
+        // Create employment transaction data
+        let employment_tx_data = EmploymentTxData {
+            operation: EmploymentOperation::RegisterIssuer,
+            data: issuer_data,
+        };
+
+        // Get nonce for the issuer address
+        let nonce = self.state.get_nonce(&issuer_address)
+            .map_err(|e| RpcError::Internal(format!("Failed to get nonce: {}", e)))?;
+
+        // Create the transaction
+        let chain_id = self.state.chain_id();
+        let fee = 1_000_000u128; // 0.001 Koppa fee
+
+        let tx = TransactionV2 {
+            chain_id,
+            from: issuer_address,
+            fee,
+            nonce,
+            payload: TxPayload::Employment(employment_tx_data),
+        };
+
+        // Sign the transaction
+        let signing_hash = tx.signing_hash();
+        let signature = sumchain_crypto::sign(signing_hash.as_bytes(), keypair.private_key());
+        let signed_tx = SignedTransaction::new_v2(
+            tx,
+            *signature.as_bytes(),
+            *keypair.public_key().as_bytes(),
+        );
+
+        let tx_hash = signed_tx.hash();
+
+        // Add to mempool
+        if let Err(e) = self.mempool.add(signed_tx.clone()) {
+            return Ok(RegisterEmploymentIssuerResponse {
+                success: false,
+                tx_hash: None,
+                issuer_address: issuer_address.to_base58(),
+                error: Some(format!("Transaction rejected: {}", e)),
+            });
+        }
+
+        // Broadcast to network
+        if let Err(e) = self.tx_sender.send(signed_tx).await {
+            return Ok(RegisterEmploymentIssuerResponse {
+                success: false,
+                tx_hash: Some(tx_hash.to_hex()),
+                issuer_address: issuer_address.to_base58(),
+                error: Some(format!("Failed to broadcast: {}", e)),
+            });
+        }
+
+        info!("Employment issuer registration submitted: {} (tx: {})", issuer_address, tx_hash);
+
+        Ok(RegisterEmploymentIssuerResponse {
+            success: true,
+            tx_hash: Some(tx_hash.to_hex()),
+            issuer_address: issuer_address.to_base58(),
+            error: None,
+        })
+    }
+
+    async fn employment_create_credential(
+        &self,
+        request: CreateEmploymentCredentialRequest,
+    ) -> std::result::Result<CreateEmploymentCredentialResponse, jsonrpsee::types::ErrorObjectOwned> {
+        use sumchain_primitives::employment::{
+            EmploymentCredential, EmploymentOperation, EmploymentStatus, EmploymentTxData,
+            EmploymentType,
+        };
+        use sumchain_primitives::{TransactionV2, TxPayload};
+
+        // Parse private key from hex
+        let key_hex = request.private_key.strip_prefix("0x").unwrap_or(&request.private_key);
+        let key_bytes = hex::decode(key_hex)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid private key hex: {}", e)))?;
+
+        if key_bytes.len() != 32 {
+            return Ok(CreateEmploymentCredentialResponse {
+                success: false,
+                tx_hash: None,
+                employment_id: None,
+                error: Some("Private key must be 32 bytes".to_string()),
+            });
+        }
+
+        let mut key_array = [0u8; 32];
+        key_array.copy_from_slice(&key_bytes);
+        let keypair = sumchain_crypto::KeyPair::from_bytes(key_array);
+        let issuer_address = keypair.address();
+
+        // Verify issuer is registered and active
+        let issuer_store = EmploymentIssuerStore::new(&self.db);
+        let issuer = match issuer_store.get(&issuer_address) {
+            Ok(Some(i)) => i,
+            Ok(None) => {
+                return Ok(CreateEmploymentCredentialResponse {
+                    success: false,
+                    tx_hash: None,
+                    employment_id: None,
+                    error: Some("Issuer not registered. Register first with employment_registerIssuer".to_string()),
+                });
+            }
+            Err(e) => {
+                return Ok(CreateEmploymentCredentialResponse {
+                    success: false,
+                    tx_hash: None,
+                    employment_id: None,
+                    error: Some(format!("Failed to check issuer: {}", e)),
+                });
+            }
+        };
+
+        if !issuer.status.is_active() {
+            return Ok(CreateEmploymentCredentialResponse {
+                success: false,
+                tx_hash: None,
+                employment_id: None,
+                error: Some("Issuer is not active".to_string()),
+            });
+        }
+
+        // Parse employee address
+        let employee_address = Address::from_base58(&request.employee_address)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid employee address: {}", e)))?;
+
+        // Parse employee reference
+        let employee_ref_hex = request.employee_ref.strip_prefix("0x").unwrap_or(&request.employee_ref);
+        let employee_ref_bytes = hex::decode(employee_ref_hex)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid employee ref hex: {}", e)))?;
+
+        if employee_ref_bytes.len() != 32 {
+            return Ok(CreateEmploymentCredentialResponse {
+                success: false,
+                tx_hash: None,
+                employment_id: None,
+                error: Some("Employee ref must be 32 bytes".to_string()),
+            });
+        }
+
+        let mut employee_ref = [0u8; 32];
+        employee_ref.copy_from_slice(&employee_ref_bytes);
+
+        // Parse employer reference
+        let employer_ref_hex = request.employer_ref.strip_prefix("0x").unwrap_or(&request.employer_ref);
+        let employer_ref_bytes = hex::decode(employer_ref_hex)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid employer ref hex: {}", e)))?;
+
+        if employer_ref_bytes.len() != 32 {
+            return Ok(CreateEmploymentCredentialResponse {
+                success: false,
+                tx_hash: None,
+                employment_id: None,
+                error: Some("Employer ref must be 32 bytes".to_string()),
+            });
+        }
+
+        let mut employer_ref = [0u8; 32];
+        employer_ref.copy_from_slice(&employer_ref_bytes);
+
+        // Parse tenure commitment
+        let tenure_hex = request.tenure_commitment.strip_prefix("0x").unwrap_or(&request.tenure_commitment);
+        let tenure_bytes = hex::decode(tenure_hex)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid tenure commitment hex: {}", e)))?;
+
+        if tenure_bytes.len() != 32 {
+            return Ok(CreateEmploymentCredentialResponse {
+                success: false,
+                tx_hash: None,
+                employment_id: None,
+                error: Some("Tenure commitment must be 32 bytes".to_string()),
+            });
+        }
+
+        let mut tenure_commitment = [0u8; 32];
+        tenure_commitment.copy_from_slice(&tenure_bytes);
+
+        // Parse optional role commitment
+        let role_commitment = if let Some(ref role_hex_str) = request.role_commitment {
+            let role_hex = role_hex_str.strip_prefix("0x").unwrap_or(role_hex_str);
+            let role_bytes = hex::decode(role_hex)
+                .map_err(|e| RpcError::InvalidParams(format!("Invalid role commitment hex: {}", e)))?;
+
+            if role_bytes.len() != 32 {
+                return Ok(CreateEmploymentCredentialResponse {
+                    success: false,
+                    tx_hash: None,
+                    employment_id: None,
+                    error: Some("Role commitment must be 32 bytes".to_string()),
+                });
+            }
+
+            let mut role = [0u8; 32];
+            role.copy_from_slice(&role_bytes);
+            Some(role)
+        } else {
+            None
+        };
+
+        // Parse employment type
+        let employment_type = match request.employment_type.as_str() {
+            "FullTime" => EmploymentType::FullTime,
+            "PartTime" => EmploymentType::PartTime,
+            "Contract" => EmploymentType::Contract,
+            "Temporary" => EmploymentType::Temporary,
+            "Internship" => EmploymentType::Internship,
+            "Freelance" => EmploymentType::Freelance,
+            "Gig" => EmploymentType::Gig,
+            _ => {
+                return Ok(CreateEmploymentCredentialResponse {
+                    success: false,
+                    tx_hash: None,
+                    employment_id: None,
+                    error: Some(format!("Invalid employment type: {}. Valid values: FullTime, PartTime, Contract, Temporary, Internship, Freelance, Gig", request.employment_type)),
+                });
+            }
+        };
+
+        // Parse policy ID
+        let policy_hex = request.policy_id.strip_prefix("0x").unwrap_or(&request.policy_id);
+        let policy_bytes = hex::decode(policy_hex)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid policy ID hex: {}", e)))?;
+
+        if policy_bytes.len() != 32 {
+            return Ok(CreateEmploymentCredentialResponse {
+                success: false,
+                tx_hash: None,
+                employment_id: None,
+                error: Some("Policy ID must be 32 bytes".to_string()),
+            });
+        }
+
+        let mut policy_id = [0u8; 32];
+        policy_id.copy_from_slice(&policy_bytes);
+
+        // Get current timestamp
+        let block_store = BlockStore::new(&self.db);
+        let (_, block_timestamp) = match block_store.get_latest() {
+            Ok(Some(block)) => (block.header.height, block.header.timestamp),
+            _ => (0, std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64),
+        };
+
+        // Generate employment ID
+        let nonce = self.state.get_nonce(&issuer_address)
+            .map_err(|e| RpcError::Internal(format!("Failed to get nonce: {}", e)))?;
+        let employment_id = EmploymentCredential::generate_id(
+            &employee_ref,
+            &employer_ref,
+            &tenure_commitment,
+            nonce,
+        );
+
+        // Create the credential
+        let credential = EmploymentCredential {
+            employment_id,
+            employee_address,
+            employee_ref,
+            employer_ref,
+            status: EmploymentStatus::Active,
+            tenure_commitment,
+            role_commitment,
+            employment_type,
+            valid_from: request.valid_from,
+            expiry: request.expiry,
+            policy_id,
+            revocation_ref: None,
+            issuer_address,
+            issuer_class: issuer.issuer_class,
+            created_at: block_timestamp,
+            updated_at: block_timestamp,
+        };
+
+        // Serialize the credential
+        let credential_data = bincode::serialize(&credential)
+            .map_err(|e| RpcError::Internal(format!("Failed to serialize credential: {}", e)))?;
+
+        // Create employment transaction data
+        let employment_tx_data = EmploymentTxData {
+            operation: EmploymentOperation::CreateEmployment,
+            data: credential_data,
+        };
+
+        // Create the transaction
+        let chain_id = self.state.chain_id();
+        let fee = 1_000_000u128; // 0.001 Koppa fee
+
+        let tx = TransactionV2 {
+            chain_id,
+            from: issuer_address,
+            fee,
+            nonce,
+            payload: TxPayload::Employment(employment_tx_data),
+        };
+
+        // Sign the transaction
+        let signing_hash = tx.signing_hash();
+        let signature = sumchain_crypto::sign(signing_hash.as_bytes(), keypair.private_key());
+        let signed_tx = SignedTransaction::new_v2(
+            tx,
+            *signature.as_bytes(),
+            *keypair.public_key().as_bytes(),
+        );
+
+        let tx_hash = signed_tx.hash();
+
+        // Add to mempool
+        if let Err(e) = self.mempool.add(signed_tx.clone()) {
+            return Ok(CreateEmploymentCredentialResponse {
+                success: false,
+                tx_hash: None,
+                employment_id: None,
+                error: Some(format!("Transaction rejected: {}", e)),
+            });
+        }
+
+        // Broadcast to network
+        if let Err(e) = self.tx_sender.send(signed_tx).await {
+            return Ok(CreateEmploymentCredentialResponse {
+                success: false,
+                tx_hash: Some(tx_hash.to_hex()),
+                employment_id: Some(format!("0x{}", hex::encode(employment_id))),
+                error: Some(format!("Failed to broadcast: {}", e)),
+            });
+        }
+
+        info!("Employment credential creation submitted: {:?} (tx: {})", employment_id, tx_hash);
+
+        Ok(CreateEmploymentCredentialResponse {
+            success: true,
+            tx_hash: Some(tx_hash.to_hex()),
+            employment_id: Some(format!("0x{}", hex::encode(employment_id))),
+            error: None,
+        })
+    }
 }
 
 // Helper methods for DocClass RPC conversions

@@ -4,18 +4,20 @@ use jsonrpsee::proc_macros::rpc;
 
 use crate::metrics::MetricsSnapshot;
 use crate::types::{
-    AccountInfo, BlockInfo, ContractCallResult, ContractInfo, DelegationRpcInfo,
-    DelegatorSummary, DocClassConfigInfo, DocClassCredentialInfo, DocClassIdentityInfo,
-    DocClassIssuerInfo, DocClassSummary, EmploymentCredentialInfo, EmploymentIssuerInfo,
-    EmploymentSummary, EmploymentVerificationResult, EpochInfo, FinalityInfo, GasEstimateResult,
-    HealthResponse, IncomeAttestationInfo, InboxFilterInfo, MessageDataInfo, MessageEventInfo,
-    MessagingConfigInfo, MessagingQuotaInfo, NftCollectionInfo, NftOwnerTokens, NftTokenInfo,
-    NodeInfo, P2pStats, PendingPaymentInfo, PublicKeyInfo, ReceiptInfo, RpcPeerInfo, SendTxResponse,
-    SlashingRecordRpcInfo, SlashingSummary, SpamReportInfo, SponsoredRegistrationRequest,
-    SponsoredRegistrationResponse, StakingParamsInfo, StakingSummary, StakingValidatorInfo,
-    SubmitSponsoredMessageRequest, TokenHoldings, TokenInfo, TransactionHistoryResponse,
-    TransactionInfo, UnbondingDelegationRpcInfo, ValidatorDelegationSummary, ValidatorSetInfo,
-    ValidatorSetRpcInfo, ValidatorSigningRpcInfo, ViewCallRequest,
+    AccountInfo, BlockInfo, ContractCallResult, ContractInfo, CreateEmploymentCredentialRequest,
+    CreateEmploymentCredentialResponse, DelegationRpcInfo, DelegatorSummary, DocClassConfigInfo,
+    DocClassCredentialInfo, DocClassIdentityInfo, DocClassIssuerInfo, DocClassSummary,
+    EmploymentCredentialInfo, EmploymentIssuerInfo, EmploymentSummary, EmploymentVerificationResult,
+    EpochInfo, FinalityInfo, GasEstimateResult, HealthResponse, IncomeAttestationInfo,
+    InboxFilterInfo, MessageDataInfo, MessageEventInfo, MessagingConfigInfo, MessagingQuotaInfo,
+    NftCollectionInfo, NftOwnerTokens, NftTokenInfo, NodeInfo, P2pStats, PendingPaymentInfo,
+    PublicKeyInfo, ReceiptInfo, RegisterEmploymentIssuerRequest, RegisterEmploymentIssuerResponse,
+    RpcPeerInfo, SendTxResponse, SlashingRecordRpcInfo, SlashingSummary, SpamReportInfo,
+    SponsoredRegistrationRequest, SponsoredRegistrationResponse, StakingParamsInfo, StakingSummary,
+    StakingValidatorInfo, SubmitSponsoredMessageRequest, TokenHoldings, TokenInfo,
+    TransactionHistoryResponse, TransactionInfo, UnbondingDelegationRpcInfo,
+    ValidatorDelegationSummary, ValidatorSetInfo, ValidatorSetRpcInfo, ValidatorSigningRpcInfo,
+    ViewCallRequest,
 };
 
 /// SUM Chain RPC API
@@ -890,4 +892,24 @@ pub trait SumChainApi {
         &self,
         holder_address: String,
     ) -> Result<Vec<IncomeAttestationInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    // =========================================================================
+    // SRC-88X Employment Write Operations (Token-gated access)
+    // =========================================================================
+
+    /// Register as an employment issuer (SRC-881)
+    /// Requires signing the transaction with issuer's private key
+    #[method(name = "employment_registerIssuer")]
+    async fn employment_register_issuer(
+        &self,
+        request: RegisterEmploymentIssuerRequest,
+    ) -> Result<RegisterEmploymentIssuerResponse, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Create an employment credential (SRC-882)
+    /// Requires the caller to be a registered issuer
+    #[method(name = "employment_createCredential")]
+    async fn employment_create_credential(
+        &self,
+        request: CreateEmploymentCredentialRequest,
+    ) -> Result<CreateEmploymentCredentialResponse, jsonrpsee::types::ErrorObjectOwned>;
 }

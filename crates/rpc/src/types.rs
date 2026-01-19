@@ -1239,3 +1239,73 @@ pub struct EmploymentSummary {
     /// List of active employment
     pub active_employment: Vec<EmploymentCredentialInfo>,
 }
+
+// =============================================================================
+// SRC-88X Employment Write Operation Request/Response Types
+// =============================================================================
+
+/// Request to register as an employment issuer (SRC-881)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegisterEmploymentIssuerRequest {
+    /// Issuer's private key (hex, 32 bytes) - used to sign the transaction
+    pub private_key: String,
+    /// Issuer class (e.g., "Employer", "PayrollProcessor", "GigPlatform")
+    pub issuer_class: String,
+    /// Issuer commitment (hex, 32 bytes) - commitment to company info
+    pub issuer_commitment: String,
+    /// Jurisdiction code (ISO 3166-1 alpha-2, e.g., "US", "GB")
+    pub jurisdiction_code: String,
+    /// Policy ID (hex, 32 bytes) - governing policy for this issuer
+    pub policy_id: String,
+}
+
+/// Response for issuer registration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegisterEmploymentIssuerResponse {
+    /// Whether registration was successful
+    pub success: bool,
+    /// Transaction hash (if successful)
+    pub tx_hash: Option<String>,
+    /// Issuer address (derived from private key)
+    pub issuer_address: String,
+    /// Error message (if failed)
+    pub error: Option<String>,
+}
+
+/// Request to create an employment credential (SRC-882)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateEmploymentCredentialRequest {
+    /// Issuer's private key (hex, 32 bytes) - must be registered issuer
+    pub private_key: String,
+    /// Employee wallet address (base58) - will own the credential token
+    pub employee_address: String,
+    /// Employee reference (hex, 32 bytes) - commitment to employee identity
+    pub employee_ref: String,
+    /// Employer reference (hex, 32 bytes) - commitment to employer identity
+    pub employer_ref: String,
+    /// Tenure commitment (hex, 32 bytes) - commitment to start date
+    pub tenure_commitment: String,
+    /// Optional role commitment (hex, 32 bytes)
+    pub role_commitment: Option<String>,
+    /// Employment type (e.g., "FullTime", "PartTime", "Contract")
+    pub employment_type: String,
+    /// Valid from timestamp (milliseconds)
+    pub valid_from: u64,
+    /// Expiry timestamp (0 = no expiry)
+    pub expiry: u64,
+    /// Policy ID (hex, 32 bytes)
+    pub policy_id: String,
+}
+
+/// Response for credential creation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateEmploymentCredentialResponse {
+    /// Whether creation was successful
+    pub success: bool,
+    /// Transaction hash (if successful)
+    pub tx_hash: Option<String>,
+    /// Employment ID (hex, if successful)
+    pub employment_id: Option<String>,
+    /// Error message (if failed)
+    pub error: Option<String>,
+}
