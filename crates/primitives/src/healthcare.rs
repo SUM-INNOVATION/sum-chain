@@ -424,6 +424,8 @@ pub enum CoverageTier {
 pub struct MembershipRecord {
     /// Unique membership identifier
     pub membership_id: MembershipId,
+    /// Member wallet address (for token ownership)
+    pub member_address: Address,
     /// Provider/plan issuing this membership
     pub provider_id: ProviderId,
     /// Membership type
@@ -625,6 +627,8 @@ pub enum DisclosureScope {
 pub struct ConsentEnvelope {
     /// Unique consent identifier
     pub consent_id: ConsentId,
+    /// Subject wallet address (for token ownership)
+    pub subject_address: Address,
     /// Consent type
     pub consent_type: ConsentType,
     /// BLAKE3 commitment of consent details
@@ -807,6 +811,8 @@ pub enum PrescriptionStatus {
 pub struct Prescription {
     /// Unique prescription identifier
     pub prescription_id: PrescriptionId,
+    /// Patient wallet address (for token ownership)
+    pub patient_address: Address,
     /// Prescription type
     pub prescription_type: PrescriptionType,
     /// BLAKE3 commitment of prescription details

@@ -120,6 +120,7 @@ impl<'a> EmploymentCredentialStore<'a> {
 
         // Update indexes
         self.add_to_employee_index(&credential.employee_ref, &credential.employment_id)?;
+        self.add_to_employee_address_index(&credential.employee_address, &credential.employment_id)?;
         self.add_to_employer_index(&credential.employer_ref, &credential.employment_id)?;
 
         Ok(())
@@ -221,6 +222,28 @@ impl<'a> EmploymentCredentialStore<'a> {
         Ok(credentials)
     }
 
+    /// Get credentials by employee wallet address
+    pub fn get_by_employee_address(&self, employee_address: &Address) -> Result<Vec<EmploymentCredential>> {
+        let ids = self.get_employee_address_credential_ids(employee_address)?;
+        let mut credentials = Vec::new();
+        for id in ids {
+            if let Some(credential) = self.get(&id)? {
+                credentials.push(credential);
+            }
+        }
+        Ok(credentials)
+    }
+
+    /// Get active credentials by employee wallet address
+    pub fn get_active_by_employee_address(
+        &self,
+        employee_address: &Address,
+        current_time: Timestamp,
+    ) -> Result<Vec<EmploymentCredential>> {
+        let all = self.get_by_employee_address(employee_address)?;
+        Ok(all.into_iter().filter(|c| c.is_valid(current_time)).collect())
+    }
+
     // Index helpers
     fn add_to_employee_index(&self, employee_ref: &SubjectRef, employment_id: &EmploymentId) -> Result<()> {
         let mut ids = self.get_employee_credential_ids(employee_ref)?;
@@ -229,6 +252,17 @@ impl<'a> EmploymentCredentialStore<'a> {
             let bytes = bincode::serialize(&ids)
                 .map_err(|e| StorageError::Serialization(e.to_string()))?;
             self.db.put(cf::EMPLOYMENT_EMPLOYEE_INDEX, employee_ref, &bytes)?;
+        }
+        Ok(())
+    }
+
+    fn add_to_employee_address_index(&self, employee_address: &Address, employment_id: &EmploymentId) -> Result<()> {
+        let mut ids = self.get_employee_address_credential_ids(employee_address)?;
+        if !ids.contains(employment_id) {
+            ids.push(*employment_id);
+            let bytes = bincode::serialize(&ids)
+                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            self.db.put(cf::EMPLOYMENT_EMPLOYEE_ADDRESS_INDEX, employee_address.as_bytes(), &bytes)?;
         }
         Ok(())
     }
@@ -246,6 +280,17 @@ impl<'a> EmploymentCredentialStore<'a> {
 
     fn get_employee_credential_ids(&self, employee_ref: &SubjectRef) -> Result<Vec<EmploymentId>> {
         match self.db.get(cf::EMPLOYMENT_EMPLOYEE_INDEX, employee_ref)? {
+            Some(bytes) => {
+                let ids: Vec<EmploymentId> = bincode::deserialize(&bytes)
+                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                Ok(ids)
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+
+    fn get_employee_address_credential_ids(&self, employee_address: &Address) -> Result<Vec<EmploymentId>> {
+        match self.db.get(cf::EMPLOYMENT_EMPLOYEE_ADDRESS_INDEX, employee_address.as_bytes())? {
             Some(bytes) => {
                 let ids: Vec<EmploymentId> = bincode::deserialize(&bytes)
                     .map_err(|e| StorageError::Serialization(e.to_string()))?;
@@ -287,8 +332,9 @@ impl<'a> IncomeAttestationStore<'a> {
             .map_err(|e| StorageError::Serialization(e.to_string()))?;
         self.db.put(cf::EMPLOYMENT_INCOME_ATTESTATIONS, &attestation.attestation_id, &bytes)?;
 
-        // Update subject index
+        // Update indexes
         self.add_to_subject_index(&attestation.subject_ref, &attestation.attestation_id)?;
+        self.add_to_holder_address_index(&attestation.holder_address, &attestation.attestation_id)?;
 
         Ok(())
     }
@@ -354,6 +400,28 @@ impl<'a> IncomeAttestationStore<'a> {
         Ok(all.into_iter().filter(|a| a.is_valid(current_time)).collect())
     }
 
+    /// Get attestations by holder wallet address
+    pub fn get_by_holder_address(&self, holder_address: &Address) -> Result<Vec<IncomeAttestation>> {
+        let ids = self.get_holder_address_attestation_ids(holder_address)?;
+        let mut attestations = Vec::new();
+        for id in ids {
+            if let Some(attestation) = self.get(&id)? {
+                attestations.push(attestation);
+            }
+        }
+        Ok(attestations)
+    }
+
+    /// Get valid attestations by holder wallet address
+    pub fn get_valid_by_holder_address(
+        &self,
+        holder_address: &Address,
+        current_time: Timestamp,
+    ) -> Result<Vec<IncomeAttestation>> {
+        let all = self.get_by_holder_address(holder_address)?;
+        Ok(all.into_iter().filter(|a| a.is_valid(current_time)).collect())
+    }
+
     // Index helpers
     fn add_to_subject_index(&self, subject_ref: &SubjectRef, attestation_id: &IncomeAttestationId) -> Result<()> {
         let mut ids = self.get_subject_attestation_ids(subject_ref)?;
@@ -366,8 +434,30 @@ impl<'a> IncomeAttestationStore<'a> {
         Ok(())
     }
 
+    fn add_to_holder_address_index(&self, holder_address: &Address, attestation_id: &IncomeAttestationId) -> Result<()> {
+        let mut ids = self.get_holder_address_attestation_ids(holder_address)?;
+        if !ids.contains(attestation_id) {
+            ids.push(*attestation_id);
+            let bytes = bincode::serialize(&ids)
+                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            self.db.put(cf::EMPLOYMENT_INCOME_HOLDER_ADDRESS_INDEX, holder_address.as_bytes(), &bytes)?;
+        }
+        Ok(())
+    }
+
     fn get_subject_attestation_ids(&self, subject_ref: &SubjectRef) -> Result<Vec<IncomeAttestationId>> {
         match self.db.get(cf::EMPLOYMENT_SUBJECT_INCOME_INDEX, subject_ref)? {
+            Some(bytes) => {
+                let ids: Vec<IncomeAttestationId> = bincode::deserialize(&bytes)
+                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                Ok(ids)
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+
+    fn get_holder_address_attestation_ids(&self, holder_address: &Address) -> Result<Vec<IncomeAttestationId>> {
+        match self.db.get(cf::EMPLOYMENT_INCOME_HOLDER_ADDRESS_INDEX, holder_address.as_bytes())? {
             Some(bytes) => {
                 let ids: Vec<IncomeAttestationId> = bincode::deserialize(&bytes)
                     .map_err(|e| StorageError::Serialization(e.to_string()))?;
@@ -538,6 +628,7 @@ mod tests {
     fn sample_credential() -> EmploymentCredential {
         EmploymentCredential {
             employment_id: [4u8; 32],
+            employee_address: Address::new([99u8; 20]),
             employee_ref: [5u8; 32],
             employer_ref: [6u8; 32],
             status: EmploymentStatus::Active,
@@ -558,6 +649,7 @@ mod tests {
     fn sample_attestation() -> IncomeAttestation {
         IncomeAttestation {
             attestation_id: [11u8; 32],
+            holder_address: Address::new([98u8; 20]),
             subject_ref: [12u8; 32],
             period_commitment: [13u8; 32],
             period_type: IncomePeriod::Annual,

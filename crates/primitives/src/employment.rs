@@ -280,6 +280,8 @@ impl EmploymentStatus {
 pub struct EmploymentCredential {
     /// Unique employment ID
     pub employment_id: EmploymentId,
+    /// Employee wallet address (for direct wallet-based ownership)
+    pub employee_address: Address,
     /// Employee reference (subject commitment - NO PII)
     pub employee_ref: SubjectRef,
     /// Employer reference (issuer commitment or subject ID)
@@ -502,6 +504,8 @@ impl IncomePeriod {
 pub struct IncomeAttestation {
     /// Unique attestation ID
     pub attestation_id: IncomeAttestationId,
+    /// Holder wallet address (for token ownership)
+    pub holder_address: Address,
     /// Subject reference (commitment to employee)
     pub subject_ref: SubjectRef,
     /// Period commitment (period type + dates committed)

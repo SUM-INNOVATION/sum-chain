@@ -275,6 +275,10 @@ pub mod cf {
     pub const EMPLOYMENT_PROOFS: &str = "employment_proofs";
     /// Employee index (employee_ref -> employment_ids)
     pub const EMPLOYMENT_EMPLOYEE_INDEX: &str = "employment_employee_index";
+    /// Employee address index (employee_address -> employment_ids)
+    pub const EMPLOYMENT_EMPLOYEE_ADDRESS_INDEX: &str = "employment_employee_address_index";
+    /// Income attestation holder address index (holder_address -> attestation_ids)
+    pub const EMPLOYMENT_INCOME_HOLDER_ADDRESS_INDEX: &str = "employment_income_holder_address_index";
     /// Employer index (employer_ref -> employment_ids)
     pub const EMPLOYMENT_EMPLOYER_INDEX: &str = "employment_employer_index";
     /// Subject income index (subject_ref -> attestation_ids)
@@ -305,10 +309,24 @@ pub mod cf {
     pub const FINANCE_SUBJECT_BANK_INDEX: &str = "finance_subject_bank_index";
     /// Subject KYC index (subject_ref -> kyc_attestation_ids)
     pub const FINANCE_SUBJECT_KYC_INDEX: &str = "finance_subject_kyc_index";
+    /// Holder address index for address proofs (holder_address -> proof_ids)
+    pub const FINANCE_HOLDER_ADDRESS_PROOF_INDEX: &str = "finance_holder_address_proof_index";
+    /// Holder address index for bank standings (holder_address -> credential_ids)
+    pub const FINANCE_HOLDER_BANK_INDEX: &str = "finance_holder_bank_index";
+    /// Holder address index for KYC attestations (holder_address -> attestation_ids)
+    pub const FINANCE_HOLDER_KYC_INDEX: &str = "finance_holder_kyc_index";
     /// Jurisdiction index (jurisdiction_code -> issuer_addresses, proof_ids)
     pub const FINANCE_JURISDICTION_INDEX: &str = "finance_jurisdiction_index";
     /// Finance system events (block_height + idx -> FinanceEvent)
     pub const FINANCE_SYSTEM_EVENTS: &str = "finance_system_events";
+
+    // SRC-87X Healthcare holder address indexes
+    /// Member address index for memberships (member_address -> membership_ids)
+    pub const HEALTHCARE_MEMBER_ADDRESS_INDEX: &str = "healthcare_member_address_index";
+    /// Subject address index for consents (subject_address -> consent_ids)
+    pub const HEALTHCARE_SUBJECT_ADDRESS_INDEX: &str = "healthcare_subject_address_index";
+    /// Patient address index for prescriptions (patient_address -> prescription_ids)
+    pub const HEALTHCARE_PATIENT_ADDRESS_INDEX: &str = "healthcare_patient_address_index";
 }
 
 /// All column families used by the database
@@ -424,12 +442,17 @@ pub const ALL_CFS: &[&str] = &[
     cf::HEALTHCARE_PATIENT_RX_INDEX,
     cf::HEALTHCARE_PRESCRIBER_RX_INDEX,
     cf::HEALTHCARE_SYSTEM_EVENTS,
+    cf::HEALTHCARE_MEMBER_ADDRESS_INDEX,
+    cf::HEALTHCARE_SUBJECT_ADDRESS_INDEX,
+    cf::HEALTHCARE_PATIENT_ADDRESS_INDEX,
     // SRC-88X Employment & HR
     cf::EMPLOYMENT_ISSUERS,
     cf::EMPLOYMENT_CREDENTIALS,
     cf::EMPLOYMENT_INCOME_ATTESTATIONS,
     cf::EMPLOYMENT_PROOFS,
     cf::EMPLOYMENT_EMPLOYEE_INDEX,
+    cf::EMPLOYMENT_EMPLOYEE_ADDRESS_INDEX,
+    cf::EMPLOYMENT_INCOME_HOLDER_ADDRESS_INDEX,
     cf::EMPLOYMENT_EMPLOYER_INDEX,
     cf::EMPLOYMENT_SUBJECT_INCOME_INDEX,
     cf::EMPLOYMENT_SYSTEM_EVENTS,
@@ -442,6 +465,9 @@ pub const ALL_CFS: &[&str] = &[
     cf::FINANCE_SUBJECT_ADDRESS_INDEX,
     cf::FINANCE_SUBJECT_BANK_INDEX,
     cf::FINANCE_SUBJECT_KYC_INDEX,
+    cf::FINANCE_HOLDER_ADDRESS_PROOF_INDEX,
+    cf::FINANCE_HOLDER_BANK_INDEX,
+    cf::FINANCE_HOLDER_KYC_INDEX,
     cf::FINANCE_JURISDICTION_INDEX,
     cf::FINANCE_SYSTEM_EVENTS,
     // Transaction indexing

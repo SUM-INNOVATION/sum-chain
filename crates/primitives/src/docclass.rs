@@ -418,6 +418,8 @@ impl EligibilityType {
 pub struct EligibilityAttestation {
     /// Unique credential ID
     pub credential_id: CredentialId,
+    /// Subject wallet address (for token ownership)
+    pub subject_address: Address,
     /// Document subcode (802)
     pub subcode: DocSubcode,
     /// Subject commitment (NOT the subject address)
@@ -567,6 +569,8 @@ pub struct RevocationRecord {
 pub struct AcademicCredential {
     /// Unique credential ID
     pub credential_id: CredentialId,
+    /// Subject wallet address (for token ownership)
+    pub subject_address: Address,
     /// Document subcode (810, 811, 812, or 813)
     pub subcode: DocSubcode,
     /// Subject commitment (NOT the subject's real identity)

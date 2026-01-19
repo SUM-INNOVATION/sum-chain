@@ -362,6 +362,8 @@ impl AddressProofType {
 pub struct AddressProof {
     /// Unique address proof ID
     pub proof_id: AddressProofId,
+    /// Holder wallet address (for token ownership)
+    pub holder_address: Address,
     /// Subject reference (commitment to identity - NO PII)
     pub subject_ref: SubjectRef,
     /// Address commitment (full address committed, not revealed)
@@ -615,6 +617,8 @@ impl BalanceBracket {
 pub struct BankStandingCredential {
     /// Unique credential ID
     pub credential_id: BankStandingId,
+    /// Holder wallet address (for token ownership)
+    pub holder_address: Address,
     /// Subject reference (commitment to account holder identity - NO PII)
     pub subject_ref: SubjectRef,
     /// Account commitment (account number committed, not revealed)
@@ -835,6 +839,8 @@ impl KycStatus {
 pub struct KycAttestation {
     /// Unique attestation ID
     pub attestation_id: KycAttestationId,
+    /// Holder wallet address (for token ownership)
+    pub holder_address: Address,
     /// Subject reference (commitment to identity - NO PII)
     pub subject_ref: SubjectRef,
     /// KYC level achieved
