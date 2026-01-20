@@ -842,6 +842,8 @@ pub enum AgreementOperation {
 pub struct AgreementTxData {
     pub operation: AgreementOperation,
     pub data: Vec<u8>,
+    /// Token recipient address - the owner of the minted token
+    pub recipient: crate::Address,
 }
 
 // =============================================================================

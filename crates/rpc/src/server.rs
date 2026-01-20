@@ -3599,9 +3599,11 @@ impl SumChainApiServer for RpcServer {
             .map_err(|e| RpcError::Internal(format!("Failed to serialize issuer profile: {}", e)))?;
 
         // Create employment transaction data
+        // For issuer registration, the issuer is both sender and recipient (they own their issuer profile token)
         let employment_tx_data = EmploymentTxData {
             operation: EmploymentOperation::RegisterIssuer,
             data: issuer_data,
+            recipient: issuer_address,
         };
 
         // Get nonce for the issuer address
@@ -3879,9 +3881,11 @@ impl SumChainApiServer for RpcServer {
             .map_err(|e| RpcError::Internal(format!("Failed to serialize credential: {}", e)))?;
 
         // Create employment transaction data
+        // The employee is the recipient - they own the credential token
         let employment_tx_data = EmploymentTxData {
             operation: EmploymentOperation::CreateEmployment,
             data: credential_data,
+            recipient: employee_address,
         };
 
         // Create the transaction

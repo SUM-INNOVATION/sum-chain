@@ -907,6 +907,8 @@ pub enum LegalOperation {
 pub struct LegalTxData {
     pub operation: LegalOperation,
     pub data: Vec<u8>,
+    /// Token recipient address - the owner of the minted token
+    pub recipient: crate::Address,
 }
 
 // =============================================================================

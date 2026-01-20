@@ -856,6 +856,8 @@ impl EmploymentOperation {
 pub struct EmploymentTxData {
     pub operation: EmploymentOperation,
     pub data: Vec<u8>,
+    /// Token recipient address - the owner of the minted token
+    pub recipient: crate::Address,
 }
 
 #[cfg(test)]

@@ -1213,6 +1213,8 @@ impl FinanceOperation {
 pub struct FinanceTxData {
     pub operation: FinanceOperation,
     pub data: Vec<u8>,
+    /// Token recipient address - the owner of the minted token
+    pub recipient: crate::Address,
 }
 
 #[cfg(test)]

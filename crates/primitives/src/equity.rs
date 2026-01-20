@@ -1378,6 +1378,8 @@ pub struct EquityTxData {
     pub operation: EquityOperation,
     /// Operation-specific data (serialized)
     pub data: Vec<u8>,
+    /// Token recipient address - the owner of the minted token
+    pub recipient: crate::Address,
 }
 
 // =============================================================================

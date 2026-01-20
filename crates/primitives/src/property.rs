@@ -1224,6 +1224,8 @@ pub enum PropertyOperation {
 pub struct PropertyTxData {
     pub operation: PropertyOperation,
     pub data: Vec<u8>,
+    /// Token recipient address - the owner of the minted token
+    pub recipient: crate::Address,
 }
 
 // =============================================================================

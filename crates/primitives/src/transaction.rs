@@ -530,16 +530,16 @@ impl TransactionV2 {
             TxPayload::Token(_) => None,
             TxPayload::ContractDeploy(_) => None,
             TxPayload::Staking(_) => None,
-            TxPayload::Messaging(_) => None, // Recipient is encrypted in message
-            TxPayload::DocClass(_) => None,   // No direct recipient
-            TxPayload::Tax(_) => None,        // No direct recipient
-            TxPayload::Equity(_) => None,     // No direct recipient
-            TxPayload::Agreement(_) => None,  // No direct recipient
-            TxPayload::Legal(_) => None,      // No direct recipient
-            TxPayload::Property(_) => None,   // No direct recipient
-            TxPayload::Healthcare(_) => None, // No direct recipient
-            TxPayload::Employment(_) => None, // No direct recipient
-            TxPayload::Finance(_) => None,    // No direct recipient
+            TxPayload::Messaging(_) => None, // Recipient is encrypted for privacy
+            TxPayload::DocClass(data) => Some(data.recipient),
+            TxPayload::Tax(data) => Some(data.recipient),
+            TxPayload::Equity(data) => Some(data.recipient),
+            TxPayload::Agreement(data) => Some(data.recipient),
+            TxPayload::Legal(data) => Some(data.recipient),
+            TxPayload::Property(data) => Some(data.recipient),
+            TxPayload::Healthcare(data) => Some(data.recipient),
+            TxPayload::Employment(data) => Some(data.recipient),
+            TxPayload::Finance(data) => Some(data.recipient),
         }
     }
 
