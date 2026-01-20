@@ -191,6 +191,7 @@ pub struct EmploymentIssuerProfile {
     /// Issuer class
     pub issuer_class: EmploymentIssuerClass,
     /// Display name (public, e.g., "SUM INNOVATION INC")
+    #[serde(default)]
     pub display_name: String,
     /// Issuer commitment (company name, EIN, etc. - all committed, not revealed)
     pub issuer_commitment: [u8; 32],
@@ -309,6 +310,7 @@ pub struct EmploymentCredential {
     /// Issuer address
     pub issuer_address: Address,
     /// Issuer display name (public, e.g., "SUM INNOVATION INC")
+    #[serde(default)]
     pub issuer_name: String,
     /// Issuer class
     pub issuer_class: EmploymentIssuerClass,
