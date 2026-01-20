@@ -17,7 +17,7 @@ pub mod pruner;
 pub mod schema;
 pub mod tax_store;
 
-pub use db::{BackupInfo, Database, DatabaseConfig};
+pub use db::{cf, BackupInfo, Database, DatabaseConfig};
 pub use docclass_store::{
     CredentialStore, DocClassEventStore, DocClassIssuerStore, DocClassStore, EligibilityStore,
     IdentityRootStore, RevocationStore,
