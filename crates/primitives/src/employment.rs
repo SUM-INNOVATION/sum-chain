@@ -190,6 +190,8 @@ pub struct EmploymentIssuerProfile {
     pub issuer_address: Address,
     /// Issuer class
     pub issuer_class: EmploymentIssuerClass,
+    /// Display name (public, e.g., "SUM INNOVATION INC")
+    pub display_name: String,
     /// Issuer commitment (company name, EIN, etc. - all committed, not revealed)
     pub issuer_commitment: [u8; 32],
     /// Jurisdiction code (ISO 3166-1 alpha-2 + optional subdivision)
@@ -306,6 +308,8 @@ pub struct EmploymentCredential {
     pub revocation_ref: Option<[u8; 32]>,
     /// Issuer address
     pub issuer_address: Address,
+    /// Issuer display name (public, e.g., "SUM INNOVATION INC")
+    pub issuer_name: String,
     /// Issuer class
     pub issuer_class: EmploymentIssuerClass,
     /// Created at timestamp

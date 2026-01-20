@@ -1124,6 +1124,8 @@ pub struct EmploymentIssuerInfo {
     pub issuer_address: String,
     /// Issuer class
     pub issuer_class: String,
+    /// Display name (public, e.g., "SUM INNOVATION INC")
+    pub display_name: String,
     /// Issuer commitment (hex)
     pub issuer_commitment: String,
     /// Jurisdiction code
@@ -1171,6 +1173,8 @@ pub struct EmploymentCredentialInfo {
     pub revocation_ref: Option<String>,
     /// Issuer address
     pub issuer_address: String,
+    /// Issuer display name (public, e.g., "SUM INNOVATION INC")
+    pub issuer_name: String,
     /// Issuer class
     pub issuer_class: String,
     /// Is currently valid
@@ -1251,6 +1255,8 @@ pub struct RegisterEmploymentIssuerRequest {
     pub private_key: String,
     /// Issuer class (e.g., "Employer", "PayrollProcessor", "GigPlatform")
     pub issuer_class: String,
+    /// Display name (public, e.g., "SUM INNOVATION INC")
+    pub display_name: String,
     /// Issuer commitment (hex, 32 bytes) - commitment to company info
     pub issuer_commitment: String,
     /// Jurisdiction code (ISO 3166-1 alpha-2, e.g., "US", "GB")

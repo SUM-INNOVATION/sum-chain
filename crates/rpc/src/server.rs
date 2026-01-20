@@ -3585,6 +3585,7 @@ impl SumChainApiServer for RpcServer {
         let issuer_profile = EmploymentIssuerProfile {
             issuer_address,
             issuer_class,
+            display_name: request.display_name.clone(),
             issuer_commitment,
             jurisdiction_code: request.jurisdiction_code.clone(),
             policy_id,
@@ -3871,6 +3872,7 @@ impl SumChainApiServer for RpcServer {
             policy_id,
             revocation_ref: None,
             issuer_address,
+            issuer_name: issuer.display_name.clone(),
             issuer_class: issuer.issuer_class,
             created_at: block_timestamp,
             updated_at: block_timestamp,
@@ -4043,6 +4045,7 @@ impl RpcServer {
         EmploymentIssuerInfo {
             issuer_address: issuer.issuer_address.to_base58(),
             issuer_class: format!("{:?}", issuer.issuer_class),
+            display_name: issuer.display_name.clone(),
             issuer_commitment: format!("0x{}", hex::encode(issuer.issuer_commitment)),
             jurisdiction: issuer.jurisdiction_code.clone(),
             policy_id: format!("0x{}", hex::encode(issuer.policy_id)),
@@ -4069,6 +4072,7 @@ impl RpcServer {
             policy_id: format!("0x{}", hex::encode(cred.policy_id)),
             revocation_ref: cred.revocation_ref.map(|r| format!("0x{}", hex::encode(r))),
             issuer_address: cred.issuer_address.to_base58(),
+            issuer_name: cred.issuer_name.clone(),
             issuer_class: format!("{:?}", cred.issuer_class),
             is_valid: cred.is_valid(current_time),
             created_at: cred.created_at,
