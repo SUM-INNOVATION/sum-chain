@@ -3195,7 +3195,7 @@ impl SumChainApiServer for RpcServer {
         let current_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs();
+            .as_millis() as u64;
 
         match store.get(&id_arr) {
             Ok(Some(cred)) => Ok(Some(self.employment_credential_to_rpc(&cred, current_time))),
@@ -3222,7 +3222,7 @@ impl SumChainApiServer for RpcServer {
         let current_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs();
+            .as_millis() as u64;
 
         match store.get_by_employee(&ref_arr) {
             Ok(creds) => Ok(creds.iter().map(|c| self.employment_credential_to_rpc(c, current_time)).collect()),
@@ -3248,7 +3248,7 @@ impl SumChainApiServer for RpcServer {
         let current_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs();
+            .as_millis() as u64;
 
         match store.get_active_by_employee(&ref_arr, current_time) {
             Ok(creds) => Ok(creds.iter().map(|c| self.employment_credential_to_rpc(c, current_time)).collect()),
@@ -3274,7 +3274,7 @@ impl SumChainApiServer for RpcServer {
         let current_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs();
+            .as_millis() as u64;
 
         match store.get_by_employer(&ref_arr) {
             Ok(creds) => Ok(creds.iter().map(|c| self.employment_credential_to_rpc(c, current_time)).collect()),
@@ -3305,7 +3305,7 @@ impl SumChainApiServer for RpcServer {
         let current_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs();
+            .as_millis() as u64;
 
         let creds = store.get_active_by_employee(&employee_arr, current_time)
             .map_err(|e| RpcError::Internal(e.to_string()))?;
@@ -3337,7 +3337,7 @@ impl SumChainApiServer for RpcServer {
         let current_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs();
+            .as_millis() as u64;
 
         let all_creds = store.get_by_employee(&ref_arr)
             .map_err(|e| RpcError::Internal(e.to_string()))?;
@@ -3377,7 +3377,7 @@ impl SumChainApiServer for RpcServer {
         let current_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs();
+            .as_millis() as u64;
 
         match store.get(&id_arr) {
             Ok(Some(att)) => Ok(Some(self.income_attestation_to_rpc(&att, current_time))),
@@ -3404,7 +3404,7 @@ impl SumChainApiServer for RpcServer {
         let current_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs();
+            .as_millis() as u64;
 
         match store.get_by_subject(&ref_arr) {
             Ok(atts) => Ok(atts.iter().map(|a| self.income_attestation_to_rpc(a, current_time)).collect()),
@@ -3427,7 +3427,7 @@ impl SumChainApiServer for RpcServer {
         let current_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs();
+            .as_millis() as u64;
 
         match store.get_by_employee_address(&address) {
             Ok(creds) => Ok(creds.iter().map(|c| self.employment_credential_to_rpc(c, current_time)).collect()),
@@ -3446,7 +3446,7 @@ impl SumChainApiServer for RpcServer {
         let current_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs();
+            .as_millis() as u64;
 
         match store.get_active_by_employee_address(&address, current_time) {
             Ok(creds) => Ok(creds.iter().map(|c| self.employment_credential_to_rpc(c, current_time)).collect()),
@@ -3465,7 +3465,7 @@ impl SumChainApiServer for RpcServer {
         let current_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs();
+            .as_millis() as u64;
 
         match store.get_by_holder_address(&address) {
             Ok(atts) => Ok(atts.iter().map(|a| self.income_attestation_to_rpc(a, current_time)).collect()),
@@ -3939,6 +3939,193 @@ impl SumChainApiServer for RpcServer {
             success: true,
             tx_hash: Some(tx_hash.to_hex()),
             employment_id: Some(format!("0x{}", hex::encode(employment_id))),
+            error: None,
+        })
+    }
+
+    async fn employment_revoke_credential(
+        &self,
+        request: RevokeEmploymentCredentialRequest,
+    ) -> std::result::Result<RevokeEmploymentCredentialResponse, jsonrpsee::types::ErrorObjectOwned> {
+        use sumchain_primitives::employment::{EmploymentOperation, EmploymentTxData};
+        use sumchain_primitives::{TransactionV2, TxPayload};
+
+        // Parse private key from hex
+        let key_hex = request.private_key.strip_prefix("0x").unwrap_or(&request.private_key);
+        let key_bytes = hex::decode(key_hex)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid private key hex: {}", e)))?;
+
+        if key_bytes.len() != 32 {
+            return Ok(RevokeEmploymentCredentialResponse {
+                success: false,
+                tx_hash: None,
+                revocation_ref: None,
+                error: Some("Private key must be 32 bytes".to_string()),
+            });
+        }
+
+        let mut key_array = [0u8; 32];
+        key_array.copy_from_slice(&key_bytes);
+        let keypair = sumchain_crypto::KeyPair::from_bytes(key_array);
+        let caller_address = keypair.address();
+
+        // Parse employment ID
+        let id_hex = request.employment_id.strip_prefix("0x").unwrap_or(&request.employment_id);
+        let id_bytes = hex::decode(id_hex)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid employment ID hex: {}", e)))?;
+
+        if id_bytes.len() != 32 {
+            return Ok(RevokeEmploymentCredentialResponse {
+                success: false,
+                tx_hash: None,
+                revocation_ref: None,
+                error: Some("Employment ID must be 32 bytes".to_string()),
+            });
+        }
+
+        let mut employment_id = [0u8; 32];
+        employment_id.copy_from_slice(&id_bytes);
+
+        // Get the credential to verify ownership
+        let cred_store = EmploymentCredentialStore::new(&self.db);
+        let credential = match cred_store.get(&employment_id) {
+            Ok(Some(c)) => c,
+            Ok(None) => {
+                return Ok(RevokeEmploymentCredentialResponse {
+                    success: false,
+                    tx_hash: None,
+                    revocation_ref: None,
+                    error: Some("Credential not found".to_string()),
+                });
+            }
+            Err(e) => {
+                return Ok(RevokeEmploymentCredentialResponse {
+                    success: false,
+                    tx_hash: None,
+                    revocation_ref: None,
+                    error: Some(format!("Failed to get credential: {}", e)),
+                });
+            }
+        };
+
+        // Verify caller is the original issuer
+        if credential.issuer_address != caller_address {
+            return Ok(RevokeEmploymentCredentialResponse {
+                success: false,
+                tx_hash: None,
+                revocation_ref: None,
+                error: Some("Only the original issuer can revoke this credential".to_string()),
+            });
+        }
+
+        // Check if already revoked
+        if credential.revocation_ref.is_some() {
+            return Ok(RevokeEmploymentCredentialResponse {
+                success: false,
+                tx_hash: None,
+                revocation_ref: credential.revocation_ref.map(|r| format!("0x{}", hex::encode(r))),
+                error: Some("Credential is already revoked".to_string()),
+            });
+        }
+
+        // Get current timestamp
+        let block_store = BlockStore::new(&self.db);
+        let block_timestamp = match block_store.get_latest() {
+            Ok(Some(block)) => block.header.timestamp,
+            _ => std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+        };
+
+        // Generate revocation reference (hash of employment_id + timestamp + optional reason)
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&employment_id);
+        hasher.update(&block_timestamp.to_le_bytes());
+        if let Some(ref reason) = request.reason {
+            hasher.update(reason.as_bytes());
+        }
+        let revocation_ref: [u8; 32] = *hasher.finalize().as_bytes();
+
+        // Create revocation data structure
+        #[derive(serde::Serialize)]
+        struct RevocationData {
+            employment_id: [u8; 32],
+            revocation_ref: [u8; 32],
+            timestamp: u64,
+            reason: Option<String>,
+        }
+
+        let revocation_data = RevocationData {
+            employment_id,
+            revocation_ref,
+            timestamp: block_timestamp,
+            reason: request.reason.clone(),
+        };
+
+        let data = bincode::serialize(&revocation_data)
+            .map_err(|e| RpcError::Internal(format!("Failed to serialize revocation data: {}", e)))?;
+
+        // Create employment transaction data
+        let employment_tx_data = EmploymentTxData {
+            operation: EmploymentOperation::RevokeEmployment,
+            data,
+            recipient: credential.employee_address, // The employee still owns the (now revoked) token
+        };
+
+        // Get nonce
+        let nonce = self.state.get_nonce(&caller_address)
+            .map_err(|e| RpcError::Internal(format!("Failed to get nonce: {}", e)))?;
+
+        // Create the transaction
+        let chain_id = self.state.chain_id();
+        let fee = 1_000_000u128; // 0.001 Koppa fee
+
+        let tx = TransactionV2 {
+            chain_id,
+            from: caller_address,
+            fee,
+            nonce,
+            payload: TxPayload::Employment(employment_tx_data),
+        };
+
+        // Sign the transaction
+        let signing_hash = tx.signing_hash();
+        let signature = sumchain_crypto::sign(signing_hash.as_bytes(), keypair.private_key());
+        let signed_tx = SignedTransaction::new_v2(
+            tx,
+            *signature.as_bytes(),
+            *keypair.public_key().as_bytes(),
+        );
+
+        let tx_hash = signed_tx.hash();
+
+        // Add to mempool
+        if let Err(e) = self.mempool.add(signed_tx.clone()) {
+            return Ok(RevokeEmploymentCredentialResponse {
+                success: false,
+                tx_hash: None,
+                revocation_ref: None,
+                error: Some(format!("Transaction rejected: {}", e)),
+            });
+        }
+
+        // Broadcast to network
+        if let Err(e) = self.tx_sender.send(signed_tx).await {
+            return Ok(RevokeEmploymentCredentialResponse {
+                success: false,
+                tx_hash: Some(tx_hash.to_hex()),
+                revocation_ref: Some(format!("0x{}", hex::encode(revocation_ref))),
+                error: Some(format!("Failed to broadcast: {}", e)),
+            });
+        }
+
+        info!("Employment credential revocation submitted: {:?} (tx: {})", employment_id, tx_hash);
+
+        Ok(RevokeEmploymentCredentialResponse {
+            success: true,
+            tx_hash: Some(tx_hash.to_hex()),
+            revocation_ref: Some(format!("0x{}", hex::encode(revocation_ref))),
             error: None,
         })
     }

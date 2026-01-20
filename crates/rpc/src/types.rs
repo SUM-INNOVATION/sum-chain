@@ -1315,3 +1315,27 @@ pub struct CreateEmploymentCredentialResponse {
     /// Error message (if failed)
     pub error: Option<String>,
 }
+
+/// Request to revoke an employment credential (SRC-882)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RevokeEmploymentCredentialRequest {
+    /// Issuer's private key (hex, 32 bytes) - must be the original issuer
+    pub private_key: String,
+    /// Employment ID to revoke (hex, 32 bytes)
+    pub employment_id: String,
+    /// Revocation reason (optional, for audit trail)
+    pub reason: Option<String>,
+}
+
+/// Response for credential revocation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RevokeEmploymentCredentialResponse {
+    /// Whether revocation was successful
+    pub success: bool,
+    /// Transaction hash (if successful)
+    pub tx_hash: Option<String>,
+    /// Revocation reference (hex, 32 bytes - hash of revocation data)
+    pub revocation_ref: Option<String>,
+    /// Error message (if failed)
+    pub error: Option<String>,
+}

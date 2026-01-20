@@ -12,6 +12,7 @@ use crate::types::{
     InboxFilterInfo, MessageDataInfo, MessageEventInfo, MessagingConfigInfo, MessagingQuotaInfo,
     NftCollectionInfo, NftOwnerTokens, NftTokenInfo, NodeInfo, P2pStats, PendingPaymentInfo,
     PublicKeyInfo, ReceiptInfo, RegisterEmploymentIssuerRequest, RegisterEmploymentIssuerResponse,
+    RevokeEmploymentCredentialRequest, RevokeEmploymentCredentialResponse,
     RpcPeerInfo, SendTxResponse, SlashingRecordRpcInfo, SlashingSummary, SpamReportInfo,
     SponsoredRegistrationRequest, SponsoredRegistrationResponse, StakingParamsInfo, StakingSummary,
     StakingValidatorInfo, SubmitSponsoredMessageRequest, TokenHoldings, TokenInfo,
@@ -912,4 +913,12 @@ pub trait SumChainApi {
         &self,
         request: CreateEmploymentCredentialRequest,
     ) -> Result<CreateEmploymentCredentialResponse, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Revoke an employment credential (SRC-882)
+    /// Requires the caller to be the original issuer of the credential
+    #[method(name = "employment_revokeCredential")]
+    async fn employment_revoke_credential(
+        &self,
+        request: RevokeEmploymentCredentialRequest,
+    ) -> Result<RevokeEmploymentCredentialResponse, jsonrpsee::types::ErrorObjectOwned>;
 }
