@@ -206,6 +206,17 @@ enum Commands {
         #[arg(long, default_value = "1000000")]
         fee: u128,
     },
+
+    /// Wipe employment data (SRC-88X) from the database
+    WipeEmployment {
+        /// Data directory
+        #[arg(short, long, default_value = "data")]
+        data_dir: PathBuf,
+
+        /// Skip confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[tokio::main]
@@ -664,6 +675,55 @@ async fn main() -> Result<()> {
 
             println!("Transaction sent successfully!");
             println!("  TX Hash: {}", tx_hash);
+        }
+
+        Commands::WipeEmployment { data_dir, yes } => {
+            use sumchain_storage::cf;
+
+            init_logging("info", false)?;
+
+            // Employment column families to wipe
+            let employment_cfs = [
+                cf::EMPLOYMENT_ISSUERS,
+                cf::EMPLOYMENT_CREDENTIALS,
+                cf::EMPLOYMENT_INCOME_ATTESTATIONS,
+                cf::EMPLOYMENT_PROOFS,
+                cf::EMPLOYMENT_EMPLOYEE_INDEX,
+                cf::EMPLOYMENT_EMPLOYEE_ADDRESS_INDEX,
+                cf::EMPLOYMENT_INCOME_HOLDER_ADDRESS_INDEX,
+                cf::EMPLOYMENT_EMPLOYER_INDEX,
+                cf::EMPLOYMENT_SUBJECT_INCOME_INDEX,
+                cf::EMPLOYMENT_SYSTEM_EVENTS,
+            ];
+
+            println!("WARNING: This will wipe all employment data (SRC-88X) from the database!");
+            println!("Data directory: {:?}", data_dir);
+            println!();
+            println!("Column families to wipe:");
+            for cf_name in &employment_cfs {
+                println!("  - {}", cf_name);
+            }
+            println!();
+
+            if !yes {
+                println!("Are you sure you want to proceed? Type 'yes' to confirm:");
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                if input.trim().to_lowercase() != "yes" {
+                    println!("Aborted.");
+                    return Ok(());
+                }
+            }
+
+            info!("Opening database at {:?}", data_dir);
+            let db = Database::open_default(&data_dir)?;
+
+            info!("Wiping employment column families...");
+            let deleted = db.wipe_column_families(&employment_cfs)?;
+
+            println!();
+            println!("Employment data wiped successfully!");
+            println!("  Total entries deleted: {}", deleted);
         }
     }
 

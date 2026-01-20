@@ -911,6 +911,45 @@ impl Database {
         let cf = self.cf(cf_name)?;
         Ok(self.db.iterator_cf(cf, rocksdb::IteratorMode::Start).filter_map(|r| r.ok()))
     }
+
+    /// Wipe all data from specified column families
+    ///
+    /// This deletes all key-value pairs from the given column families.
+    /// The column families themselves remain, just emptied of data.
+    pub fn wipe_column_families(&self, cf_names: &[&str]) -> Result<usize> {
+        let mut total_deleted = 0usize;
+
+        for cf_name in cf_names {
+            info!("Wiping column family: {}", cf_name);
+            let cf = self.cf(cf_name)?;
+
+            // Collect all keys first to avoid iterator invalidation
+            let keys: Vec<Box<[u8]>> = self
+                .db
+                .iterator_cf(cf, rocksdb::IteratorMode::Start)
+                .filter_map(|r| r.ok())
+                .map(|(k, _)| k)
+                .collect();
+
+            let count = keys.len();
+            for key in keys {
+                self.db.delete_cf(cf, &key)?;
+            }
+
+            info!("Deleted {} entries from {}", count, cf_name);
+            total_deleted += count;
+        }
+
+        // Compact the wiped column families to reclaim space
+        for cf_name in cf_names {
+            if let Ok(cf) = self.cf(cf_name) {
+                self.db.compact_range_cf(cf, None::<&[u8]>, None::<&[u8]>);
+            }
+        }
+
+        info!("Total deleted: {} entries from {} column families", total_deleted, cf_names.len());
+        Ok(total_deleted)
+    }
 }
 
 /// Atomic write batch
