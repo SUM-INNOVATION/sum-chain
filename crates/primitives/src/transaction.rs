@@ -17,6 +17,7 @@ use crate::finance::FinanceTxData;
 use crate::healthcare::HealthcareTxData;
 use crate::legal::LegalTxData;
 use crate::messaging::MessagingTxData;
+use crate::policy_account::PolicyAccountTxData;
 use crate::property::PropertyTxData;
 use crate::staking::StakingTxData;
 use crate::tax::TaxTxData;
@@ -58,6 +59,8 @@ pub enum TxType {
     Employment = 14,
     /// Finance & Banking operation (SRC-89X)
     Finance = 15,
+    /// Policy Account operation (Group governance)
+    PolicyAccount = 16,
 }
 
 impl TxType {
@@ -80,6 +83,7 @@ impl TxType {
             13 => Some(TxType::Healthcare),
             14 => Some(TxType::Employment),
             15 => Some(TxType::Finance),
+            16 => Some(TxType::PolicyAccount),
             _ => None,
         }
     }
@@ -360,6 +364,8 @@ pub enum TxPayload {
     Employment(EmploymentTxData),
     /// Finance & Banking operation (SRC-89X)
     Finance(FinanceTxData),
+    /// Policy Account operation (Group governance)
+    PolicyAccount(PolicyAccountTxData),
 }
 
 impl TransactionV2 {
@@ -502,6 +508,7 @@ impl TransactionV2 {
             TxPayload::Healthcare(_) => TxType::Healthcare,
             TxPayload::Employment(_) => TxType::Employment,
             TxPayload::Finance(_) => TxType::Finance,
+            TxPayload::PolicyAccount(_) => TxType::PolicyAccount,
         }
     }
 
@@ -540,6 +547,7 @@ impl TransactionV2 {
             TxPayload::Healthcare(data) => Some(data.recipient),
             TxPayload::Employment(data) => Some(data.recipient),
             TxPayload::Finance(data) => Some(data.recipient),
+            TxPayload::PolicyAccount(data) => Some(data.recipient),
         }
     }
 
@@ -562,6 +570,7 @@ impl TransactionV2 {
             TxPayload::Healthcare(_) => 0, // Fee-only operations
             TxPayload::Employment(_) => 0, // Fee-only operations
             TxPayload::Finance(_) => 0,    // Fee-only operations
+            TxPayload::PolicyAccount(_) => 0, // Fee-only operations
         }
     }
 

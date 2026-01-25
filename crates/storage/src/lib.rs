@@ -12,6 +12,7 @@ pub mod finance_store;
 pub mod healthcare_store;
 pub mod legal_store;
 pub mod messaging_store;
+pub mod policy_account_store;
 pub mod property_store;
 pub mod pruner;
 pub mod schema;
@@ -62,6 +63,7 @@ pub use finance_store::{
     AddressProofStore, BankStandingStore, FinanceEventStore, FinanceIssuerStore, FinanceProofStore,
     FinanceStore, KycAttestationStore,
 };
+pub use policy_account_store::{PolicyAccountStorage, PolicyAccountStore, ProposalStore};
 
 use thiserror::Error;
 

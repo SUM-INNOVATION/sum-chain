@@ -3,6 +3,11 @@
 use jsonrpsee::proc_macros::rpc;
 
 use crate::metrics::MetricsSnapshot;
+use crate::policy_account_types::{
+    CancelProposalRequest, CancelProposalResponse, CreatePolicyAccountRequest,
+    CreatePolicyAccountResponse, ExecuteProposalRequest, ExecuteProposalResponse,
+    PolicyAccountInfo, ProposalInfo, SubmitProposalRequest, SubmitProposalResponse,
+};
 use crate::types::{
     AccountInfo, BlockInfo, ContractCallResult, ContractInfo, CreateEmploymentCredentialRequest,
     CreateEmploymentCredentialResponse, DelegationRpcInfo, DelegatorSummary, DocClassConfigInfo,
@@ -921,4 +926,78 @@ pub trait SumChainApi {
         &self,
         request: RevokeEmploymentCredentialRequest,
     ) -> Result<RevokeEmploymentCredentialResponse, jsonrpsee::types::ErrorObjectOwned>;
+
+    // =========================================================================
+    // Policy Account Methods (Group Governance)
+    // =========================================================================
+
+    /// Create a new policy account (group-governed address)
+    #[method(name = "policy_createAccount")]
+    async fn policy_create_account(
+        &self,
+        request: CreatePolicyAccountRequest,
+    ) -> Result<CreatePolicyAccountResponse, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get policy account information by ID
+    #[method(name = "policy_getAccount")]
+    async fn policy_get_account(
+        &self,
+        policy_account_id: String,
+    ) -> Result<PolicyAccountInfo, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get policy account by controlled address
+    #[method(name = "policy_getAccountByAddress")]
+    async fn policy_get_account_by_address(
+        &self,
+        address: String,
+    ) -> Result<Option<PolicyAccountInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// List policy accounts where the address is a member
+    #[method(name = "policy_listMemberAccounts")]
+    async fn policy_list_member_accounts(
+        &self,
+        member_address: String,
+    ) -> Result<Vec<PolicyAccountInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Submit a proposal for group-authorized action
+    #[method(name = "policy_submitProposal")]
+    async fn policy_submit_proposal(
+        &self,
+        request: SubmitProposalRequest,
+    ) -> Result<SubmitProposalResponse, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Execute a proposal once threshold is met
+    #[method(name = "policy_executeProposal")]
+    async fn policy_execute_proposal(
+        &self,
+        request: ExecuteProposalRequest,
+    ) -> Result<ExecuteProposalResponse, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Cancel a pending proposal (proposer only)
+    #[method(name = "policy_cancelProposal")]
+    async fn policy_cancel_proposal(
+        &self,
+        request: CancelProposalRequest,
+    ) -> Result<CancelProposalResponse, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get proposal information by ID
+    #[method(name = "policy_getProposal")]
+    async fn policy_get_proposal(
+        &self,
+        proposal_id: String,
+    ) -> Result<ProposalInfo, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// List all proposals for a policy account
+    #[method(name = "policy_listProposals")]
+    async fn policy_list_proposals(
+        &self,
+        policy_account_id: String,
+    ) -> Result<Vec<ProposalInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// List pending proposals for a policy account
+    #[method(name = "policy_listPendingProposals")]
+    async fn policy_list_pending_proposals(
+        &self,
+        policy_account_id: String,
+    ) -> Result<Vec<ProposalInfo>, jsonrpsee::types::ErrorObjectOwned>;
 }

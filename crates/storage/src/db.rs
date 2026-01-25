@@ -327,6 +327,12 @@ pub mod cf {
     pub const HEALTHCARE_SUBJECT_ADDRESS_INDEX: &str = "healthcare_subject_address_index";
     /// Patient address index for prescriptions (patient_address -> prescription_ids)
     pub const HEALTHCARE_PATIENT_ADDRESS_INDEX: &str = "healthcare_patient_address_index";
+
+    // Policy Account column families
+    /// Policy accounts (policy_account_id -> PolicyAccount)
+    pub const POLICY_ACCOUNTS: &str = "policy_accounts";
+    /// Proposals (proposal_id -> Proposal)
+    pub const POLICY_PROPOSALS: &str = "policy_proposals";
 }
 
 /// All column families used by the database
@@ -470,6 +476,9 @@ pub const ALL_CFS: &[&str] = &[
     cf::FINANCE_HOLDER_KYC_INDEX,
     cf::FINANCE_JURISDICTION_INDEX,
     cf::FINANCE_SYSTEM_EVENTS,
+    // Policy Account
+    cf::POLICY_ACCOUNTS,
+    cf::POLICY_PROPOSALS,
     // Transaction indexing
     cf::TX_BY_SENDER,
     cf::TX_BY_RECIPIENT,

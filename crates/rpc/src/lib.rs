@@ -6,6 +6,7 @@ pub mod api;
 pub mod auth;
 pub mod health;
 pub mod metrics;
+pub mod policy_account_types;
 pub mod rate_limit;
 pub mod server;
 pub mod types;

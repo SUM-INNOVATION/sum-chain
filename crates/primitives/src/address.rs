@@ -9,7 +9,7 @@ use std::fmt;
 use crate::{PrimitiveError, Result};
 
 /// 20-byte address derived from public key
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Address([u8; 20]);
 
 impl Address {

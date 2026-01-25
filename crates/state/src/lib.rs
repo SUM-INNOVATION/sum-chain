@@ -16,6 +16,7 @@ pub mod legal_executor;
 pub mod mempool;
 pub mod messaging_executor;
 pub mod nft_executor;
+pub mod policy_account_executor;
 pub mod property_executor;
 pub mod snapshot;
 pub mod staking_executor;
@@ -36,12 +37,16 @@ pub use legal_executor::{LegalExecutionResult, LegalExecutor};
 pub use mempool::{Mempool, MempoolConfig, MempoolStats};
 pub use messaging_executor::{MessagingExecutionResult, MessagingExecutor};
 pub use nft_executor::{NftExecutionResult, NftExecutor};
+pub use policy_account_executor::{PolicyAccountExecutionResult, PolicyAccountExecutor};
 pub use property_executor::{PropertyExecutionResult, PropertyExecutor};
 pub use snapshot::{Snapshot, SnapshotHeader, SnapshotManager, SnapshotSyncConfig, RestoreResult};
 pub use staking_executor::{StakingExecutionResult, StakingExecutor};
 pub use state::StateManager;
 pub use tax_executor::{TaxExecutionResult, TaxExecutor};
 pub use token_executor::{TokenExecutionResult, TokenExecutor};
+
+// Type alias for convenience (used by executors)
+pub type State = StateManager;
 
 use thiserror::Error;
 
@@ -86,6 +91,18 @@ pub enum StateError {
 
     #[error("Contract error: {0}")]
     ContractError(String),
+
+    #[error("Policy account error: {0}")]
+    PolicyAccountError(String),
+
+    #[error("Invalid operation: {0}")]
+    InvalidOperation(String),
+
+    #[error("Serialization error: {0}")]
+    SerializationError(String),
+
+    #[error("Deserialization error: {0}")]
+    DeserializationError(String),
 }
 
 pub type Result<T> = std::result::Result<T, StateError>;

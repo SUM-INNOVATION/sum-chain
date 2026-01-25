@@ -14,6 +14,7 @@ pub mod hash;
 pub mod healthcare;
 pub mod legal;
 pub mod messaging;
+pub mod policy_account;
 pub mod property;
 pub mod receipt;
 pub mod staking;
@@ -108,6 +109,12 @@ pub use finance::{
     FinanceIssuerProfile, FinanceIssuerStatus, FinanceOperation, FinanceProofEnvelope,
     FinanceProofProfile, FinanceProofType, FinanceRiskLevel, FinanceTxData, KycAttestation,
     KycAttestationId, KycLevel, KycStatus,
+};
+pub use policy_account::{
+    ActionClass, ApprovalThreshold, MemberApproval, PolicyAccount, PolicyAccountId,
+    PolicyAccountOperation, PolicyAccountStatus, PolicyAccountTxData, PolicyConfig, PolicyMember,
+    PolicyNonce, PolicyProfile, PolicyRule, Proposal, ProposalId, ProposalStatus,
+    MAX_APPROVALS, MAX_CUSTOM_RULES, MAX_MEMBERS, MAX_PROPOSAL_PAYLOAD_SIZE,
 };
 
 /// Chain ID type - identifies the network

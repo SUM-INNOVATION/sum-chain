@@ -24,6 +24,7 @@ use crate::healthcare_executor::HealthcareExecutor;
 use crate::legal_executor::LegalExecutor;
 use crate::messaging_executor::MessagingExecutor;
 use crate::nft_executor::NftExecutor;
+use crate::policy_account_executor::PolicyAccountExecutor;
 use crate::property_executor::PropertyExecutor;
 use crate::staking_executor::StakingExecutor;
 use crate::tax_executor::TaxExecutor;
@@ -57,6 +58,7 @@ pub struct BlockExecutor {
     healthcare_executor: HealthcareExecutor,
     employment_executor: EmploymentExecutor,
     finance_executor: FinanceExecutor,
+    policy_account_executor: PolicyAccountExecutor,
 }
 
 impl BlockExecutor {
@@ -76,6 +78,7 @@ impl BlockExecutor {
         let healthcare_executor = HealthcareExecutor::new(db.clone(), params.clone());
         let employment_executor = EmploymentExecutor::new(db.clone(), params.clone());
         let finance_executor = FinanceExecutor::new(db.clone(), params.clone());
+        let policy_account_executor = PolicyAccountExecutor::new(db.clone());
         Self {
             state,
             db,
@@ -94,6 +97,7 @@ impl BlockExecutor {
             healthcare_executor,
             employment_executor,
             finance_executor,
+            policy_account_executor,
         }
     }
 
@@ -805,6 +809,43 @@ impl BlockExecutor {
                             Ok(TxExecutionResult {
                                 tx_hash,
                                 status: TxStatus::Failed(16), // Finance operation failed
+                                fee_paid: 0,
+                            })
+                        }
+                    }
+                    TxPayload::PolicyAccount(policy_data) => {
+                        // Execute Policy Account operation
+                        let result = self.policy_account_executor.execute(
+                            &v2_tx.from,
+                            &policy_data,
+                            &self.state,
+                            proposer,
+                            v2_tx.fee,
+                            0, // block_height placeholder
+                        )?;
+
+                        if result.success {
+                            debug!(
+                                "V2 PolicyAccount {} executed: {:?}",
+                                tx_hash,
+                                policy_data.operation
+                            );
+
+                            Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Success,
+                                fee_paid: v2_tx.fee,
+                            })
+                        } else {
+                            warn!(
+                                "V2 PolicyAccount {} failed: {}",
+                                tx_hash,
+                                result.message
+                            );
+
+                            Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Failed(17), // PolicyAccount operation failed
                                 fee_paid: 0,
                             })
                         }
@@ -1631,6 +1672,53 @@ impl BlockExecutor {
                     Ok(TxExecutionResult {
                         tx_hash,
                         status: TxStatus::Failed(16), // Finance operation failed
+                        fee_paid: 0,
+                    })
+                }
+            }
+            TxPayload::PolicyAccount(policy_data) => {
+                // Check balance for fee
+                let balance = self.state.get_balance(&tx.from)?;
+                if balance < tx.fee {
+                    return Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::InsufficientBalance,
+                        fee_paid: 0,
+                    });
+                }
+
+                // Execute Policy Account operation
+                let result = self.policy_account_executor.execute(
+                    &tx.from,
+                    policy_data,
+                    &self.state,
+                    proposer,
+                    tx.fee,
+                    0, // block_height placeholder
+                )?;
+
+                if result.success {
+                    debug!(
+                        "V2 PolicyAccount {} executed: {:?}",
+                        tx_hash,
+                        policy_data.operation
+                    );
+
+                    Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::Success,
+                        fee_paid: tx.fee,
+                    })
+                } else {
+                    warn!(
+                        "V2 PolicyAccount {} failed: {}",
+                        tx_hash,
+                        &result.message
+                    );
+
+                    Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::Failed(17), // Policy Account operation failed
                         fee_paid: 0,
                     })
                 }

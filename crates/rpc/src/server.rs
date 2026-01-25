@@ -16,6 +16,7 @@ use crate::api::SumChainApiServer;
 use crate::auth::{ApiKeyValidator, RpcAuthConfig};
 use crate::health::HealthCheck;
 use crate::metrics::{Metrics, MetricsSnapshot};
+use crate::policy_account_types::*;
 use crate::rate_limit::{RateLimitConfig, RateLimiter};
 use crate::types::*;
 use crate::{RpcError, Result};
@@ -4128,6 +4129,46 @@ impl SumChainApiServer for RpcServer {
             revocation_ref: Some(format!("0x{}", hex::encode(revocation_ref))),
             error: None,
         })
+    }
+
+    async fn policy_create_account(&self, _request: CreatePolicyAccountRequest) -> std::result::Result<CreatePolicyAccountResponse, jsonrpsee::types::ErrorObjectOwned> {
+        Err(RpcError::Internal("Not yet implemented".to_string()).into())
+    }
+
+    async fn policy_get_account(&self, _policy_account_id: String) -> std::result::Result<PolicyAccountInfo, jsonrpsee::types::ErrorObjectOwned> {
+        Err(RpcError::Internal("Not yet implemented".to_string()).into())
+    }
+
+    async fn policy_get_account_by_address(&self, _address: String) -> std::result::Result<Option<PolicyAccountInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        Err(RpcError::Internal("Not yet implemented".to_string()).into())
+    }
+
+    async fn policy_list_member_accounts(&self, _member_address: String) -> std::result::Result<Vec<PolicyAccountInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        Err(RpcError::Internal("Not yet implemented".to_string()).into())
+    }
+
+    async fn policy_submit_proposal(&self, _request: SubmitProposalRequest) -> std::result::Result<SubmitProposalResponse, jsonrpsee::types::ErrorObjectOwned> {
+        Err(RpcError::Internal("Not yet implemented".to_string()).into())
+    }
+
+    async fn policy_execute_proposal(&self, _request: ExecuteProposalRequest) -> std::result::Result<ExecuteProposalResponse, jsonrpsee::types::ErrorObjectOwned> {
+        Err(RpcError::Internal("Not yet implemented".to_string()).into())
+    }
+
+    async fn policy_cancel_proposal(&self, _request: CancelProposalRequest) -> std::result::Result<CancelProposalResponse, jsonrpsee::types::ErrorObjectOwned> {
+        Err(RpcError::Internal("Not yet implemented".to_string()).into())
+    }
+
+    async fn policy_get_proposal(&self, _proposal_id: String) -> std::result::Result<ProposalInfo, jsonrpsee::types::ErrorObjectOwned> {
+        Err(RpcError::Internal("Not yet implemented".to_string()).into())
+    }
+
+    async fn policy_list_proposals(&self, _policy_account_id: String) -> std::result::Result<Vec<ProposalInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        Err(RpcError::Internal("Not yet implemented".to_string()).into())
+    }
+
+    async fn policy_list_pending_proposals(&self, _policy_account_id: String) -> std::result::Result<Vec<ProposalInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        Err(RpcError::Internal("Not yet implemented".to_string()).into())
     }
 }
 
