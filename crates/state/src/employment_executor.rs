@@ -19,7 +19,7 @@ use sumchain_primitives::{
 use sumchain_storage::{Database, EmploymentStore};
 use tracing::debug;
 
-use crate::{Result, StateError, StateManager};
+use crate::{Result, SchemaValidator, StateError, StateManager};
 
 /// Result of Employment operation execution
 #[derive(Debug)]
@@ -105,11 +105,16 @@ pub struct EmploymentExecutor {
     db: Arc<Database>,
     #[allow(dead_code)]
     params: ChainParams,
+    schema_validator: SchemaValidator,
 }
 
 impl EmploymentExecutor {
     pub fn new(db: Arc<Database>, params: ChainParams) -> Self {
-        Self { db, params }
+        Self {
+            db,
+            params,
+            schema_validator: SchemaValidator::new(),
+        }
     }
 
     /// Execute an Employment transaction
@@ -141,6 +146,15 @@ impl EmploymentExecutor {
 
                 if store.issuers().exists(&issuer.issuer_address)? {
                     return Ok(EmploymentExecutionResult::failure("Issuer already exists"));
+                }
+
+                // PRIVACY ENFORCEMENT: Validate display_name doesn't contain PII
+                if let Err(reason) = self.schema_validator.validate_institutional_name(&issuer.display_name, "display_name") {
+                    debug!("Schema validation failed for issuer {}: {}", issuer.issuer_address, reason);
+                    return Ok(EmploymentExecutionResult::failure(format!(
+                        "Schema validation failed: {}",
+                        reason
+                    )));
                 }
 
                 state.deduct(sender, fee)?;
@@ -243,6 +257,22 @@ impl EmploymentExecutor {
 
                 if store.credentials().exists(&credential.employment_id)? {
                     return Ok(EmploymentExecutionResult::failure("Employment credential already exists"));
+                }
+
+                // PRIVACY ENFORCEMENT: Validate schema to prevent PII in free-form fields
+                // Hard rejection at consensus level for SRC-882 employment credentials
+                let validation_result = self.schema_validator.validate_employment_credential(&credential, _block_height);
+                if !validation_result.is_valid() {
+                    if let crate::ValidationResult::Invalid { reason } = validation_result {
+                        debug!(
+                            "Schema validation failed for employment credential {:?}: {}",
+                            credential.employment_id, reason
+                        );
+                        return Ok(EmploymentExecutionResult::failure(format!(
+                            "Schema validation failed: {}",
+                            reason
+                        )));
+                    }
                 }
 
                 state.deduct(sender, fee)?;

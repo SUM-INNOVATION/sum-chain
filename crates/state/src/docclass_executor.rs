@@ -19,7 +19,7 @@ use sumchain_primitives::{
 use sumchain_storage::{Database, DocClassStore};
 use tracing::{debug, warn};
 
-use crate::{Result, StateError, StateManager};
+use crate::{Result, SchemaValidator, StateError, StateManager};
 
 /// Result of DocClass execution
 #[derive(Debug)]
@@ -51,11 +51,16 @@ impl DocClassExecutionResult {
 pub struct DocClassExecutor {
     db: Arc<Database>,
     params: ChainParams,
+    schema_validator: SchemaValidator,
 }
 
 impl DocClassExecutor {
     pub fn new(db: Arc<Database>, params: ChainParams) -> Self {
-        Self { db, params }
+        Self {
+            db,
+            params,
+            schema_validator: SchemaValidator::new(),
+        }
     }
 
     /// Execute a DocClass transaction
@@ -603,6 +608,22 @@ impl DocClassExecutor {
 
         if store.credentials().exists(&credential.credential_id)? {
             return Ok(DocClassExecutionResult::failure("Credential exists"));
+        }
+
+        // PRIVACY ENFORCEMENT: Validate schema to prevent PII on-chain
+        // Hard rejection at consensus level for SRC-81X credentials (810/811/812)
+        let validation_result = self.schema_validator.validate_academic_credential(&credential, block_height);
+        if !validation_result.is_valid() {
+            if let crate::ValidationResult::Invalid { reason } = validation_result {
+                warn!(
+                    "Schema validation failed for credential {:?}: {}",
+                    credential.credential_id, reason
+                );
+                return Ok(DocClassExecutionResult::failure(format!(
+                    "Schema validation failed: {}",
+                    reason
+                )));
+            }
         }
 
         state.deduct(sender, fee)?;

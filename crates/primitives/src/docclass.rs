@@ -20,6 +20,7 @@
 use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
 
+use crate::agreement::{EncryptionAlgorithm, EncryptionMeta};
 use crate::{Address, Balance, BlockHeight, Timestamp};
 
 // =============================================================================
@@ -444,6 +445,8 @@ pub struct EligibilityAttestation {
     pub payload_hash: Option<[u8; 32]>,
     /// Optional payload hint (e.g., IPFS CID, storage URL)
     pub payload_hint: Option<String>,
+    /// Optional encryption metadata (algorithm, key commitment, nonce)
+    pub encryption_meta: Option<EncryptionMeta>,
     /// Issuer signature over the credential
     #[serde(with = "BigArray")]
     pub issuer_signature: [u8; 64],
@@ -597,6 +600,8 @@ pub struct AcademicCredential {
     pub payload_hash: Option<[u8; 32]>,
     /// Optional payload hint (storage location)
     pub payload_hint: Option<String>,
+    /// Optional encryption metadata (algorithm, key commitment, nonce)
+    pub encryption_meta: Option<EncryptionMeta>,
     /// Issuer signature
     #[serde(with = "BigArray")]
     pub issuer_signature: [u8; 64],

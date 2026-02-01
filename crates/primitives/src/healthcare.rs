@@ -1230,6 +1230,7 @@ mod tests {
     fn test_membership_active() {
         let membership = MembershipRecord {
             membership_id: [1u8; 32],
+            member_address: Address::new([0u8; 20]),
             provider_id: [2u8; 32],
             membership_type: MembershipType::IndividualHealth,
             membership_commitment: [3u8; 32],
@@ -1261,6 +1262,7 @@ mod tests {
     fn test_consent_valid() {
         let consent = ConsentEnvelope {
             consent_id: [1u8; 32],
+            subject_address: Address::new([0u8; 20]),
             consent_type: ConsentType::HipaaAuthorization,
             consent_commitment: [2u8; 32],
             subject_ref: PartyRef::Commitment([3u8; 32]),
@@ -1292,6 +1294,7 @@ mod tests {
     fn test_prescription_validity() {
         let prescription = Prescription {
             prescription_id: [1u8; 32],
+            patient_address: Address::new([0u8; 20]),
             prescription_type: PrescriptionType::StandardPrescription,
             prescription_commitment: [2u8; 32],
             patient_ref: PartyRef::Commitment([3u8; 32]),
@@ -1332,6 +1335,7 @@ mod tests {
     fn test_controlled_prescription_no_transfer() {
         let prescription = Prescription {
             prescription_id: [1u8; 32],
+            patient_address: Address::new([0u8; 20]),
             prescription_type: PrescriptionType::ScheduleII,
             prescription_commitment: [2u8; 32],
             patient_ref: PartyRef::Commitment([3u8; 32]),
