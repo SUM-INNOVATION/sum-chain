@@ -14,9 +14,11 @@ use crate::types::{
     DocClassCredentialInfo, DocClassIdentityInfo, DocClassIssuerInfo, DocClassSummary,
     EmploymentCredentialInfo, EmploymentIssuerInfo, EmploymentSummary, EmploymentVerificationResult,
     EpochInfo, FinalityInfo, GasEstimateResult, HealthResponse, IncomeAttestationInfo,
-    InboxFilterInfo, MessageDataInfo, MessageEventInfo, MessagingConfigInfo, MessagingQuotaInfo,
+    InboxFilterInfo, IssueAcademicCredentialRequest, IssueAcademicCredentialResponse,
+    MessageDataInfo, MessageEventInfo, MessagingConfigInfo, MessagingQuotaInfo,
     NftCollectionInfo, NftOwnerTokens, NftTokenInfo, NodeInfo, P2pStats, PendingPaymentInfo,
-    PublicKeyInfo, ReceiptInfo, RegisterEmploymentIssuerRequest, RegisterEmploymentIssuerResponse,
+    PublicKeyInfo, ReceiptInfo, RegisterAcademicIssuerRequest, RegisterAcademicIssuerResponse,
+    RegisterEmploymentIssuerRequest, RegisterEmploymentIssuerResponse,
     RevokeEmploymentCredentialRequest, RevokeEmploymentCredentialResponse,
     RpcPeerInfo, SendTxResponse, SlashingRecordRpcInfo, SlashingSummary, SpamReportInfo,
     SponsoredRegistrationRequest, SponsoredRegistrationResponse, StakingParamsInfo, StakingSummary,
@@ -926,6 +928,28 @@ pub trait SumChainApi {
         &self,
         request: RevokeEmploymentCredentialRequest,
     ) -> Result<RevokeEmploymentCredentialResponse, jsonrpsee::types::ErrorObjectOwned>;
+
+    // =========================================================================
+    // SRC-81X Academic Credential Write Operations
+    // =========================================================================
+
+    /// Register as an academic issuer (educational institution)
+    /// Requires signing the transaction with issuer's private key
+    /// Requires stake amount (>= 1000 Ϙ)
+    #[method(name = "docclass_registerAcademicIssuer")]
+    async fn docclass_register_academic_issuer(
+        &self,
+        request: RegisterAcademicIssuerRequest,
+    ) -> Result<RegisterAcademicIssuerResponse, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Issue an academic credential (SRC-810/811/812)
+    /// Requires the caller to be a registered academic issuer
+    /// Subcodes: 810=Transcript, 811=Diploma, 812=Enrollment
+    #[method(name = "docclass_issueAcademicCredential")]
+    async fn docclass_issue_academic_credential(
+        &self,
+        request: IssueAcademicCredentialRequest,
+    ) -> Result<IssueAcademicCredentialResponse, jsonrpsee::types::ErrorObjectOwned>;
 
     // =========================================================================
     // Policy Account Methods (Group Governance)

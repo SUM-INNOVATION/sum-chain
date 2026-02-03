@@ -4131,6 +4131,510 @@ impl SumChainApiServer for RpcServer {
         })
     }
 
+    async fn docclass_register_academic_issuer(
+        &self,
+        request: RegisterAcademicIssuerRequest,
+    ) -> std::result::Result<RegisterAcademicIssuerResponse, jsonrpsee::types::ErrorObjectOwned> {
+        use sumchain_primitives::docclass::{
+            DocClassIssuer, DocClassIssuerStatus, DocClassIssuerType, DocClassOperation,
+            DocClassTxData, DocSubcode, IssuerKey, KeyType,
+        };
+        use sumchain_primitives::{TransactionV2, TxPayload};
+
+        // Parse private key from hex
+        let key_hex = request.private_key.strip_prefix("0x").unwrap_or(&request.private_key);
+        let key_bytes = hex::decode(key_hex)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid private key hex: {}", e)))?;
+
+        if key_bytes.len() != 32 {
+            return Ok(RegisterAcademicIssuerResponse {
+                success: false,
+                tx_hash: None,
+                issuer_address: String::new(),
+                error: Some("Private key must be 32 bytes".to_string()),
+            });
+        }
+
+        let mut key_array = [0u8; 32];
+        key_array.copy_from_slice(&key_bytes);
+        let keypair = sumchain_crypto::KeyPair::from_bytes(key_array);
+        let issuer_address = keypair.address();
+
+        // Parse stake amount
+        let stake_amount: u128 = request.stake_amount.parse()
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid stake amount: {}", e)))?;
+
+        // Validate minimum stake (1000 Ϙ = 1_000_000_000 Koppa)
+        const MIN_STAKE: u128 = 1_000_000_000;
+        if stake_amount < MIN_STAKE {
+            return Ok(RegisterAcademicIssuerResponse {
+                success: false,
+                tx_hash: None,
+                issuer_address: issuer_address.to_base58(),
+                error: Some(format!("Minimum stake is {} Koppa (1000 Ϙ)", MIN_STAKE)),
+            });
+        }
+
+        // Validate balance
+        let balance = self.state.get_balance(&issuer_address)
+            .map_err(|e| RpcError::Internal(format!("Failed to get balance: {}", e)))?;
+
+        if balance < stake_amount {
+            return Ok(RegisterAcademicIssuerResponse {
+                success: false,
+                tx_hash: None,
+                issuer_address: issuer_address.to_base58(),
+                error: Some(format!("Insufficient balance. Have: {} Koppa, Need: {} Koppa", balance, stake_amount)),
+            });
+        }
+
+        // Parse jurisdiction code
+        if request.jurisdiction_code.len() != 2 {
+            return Ok(RegisterAcademicIssuerResponse {
+                success: false,
+                tx_hash: None,
+                issuer_address: issuer_address.to_base58(),
+                error: Some("Jurisdiction code must be ISO 3166-1 alpha-2 (2 characters)".to_string()),
+            });
+        }
+
+        // Validate authorized subcodes (must be educational: 810, 811, 812)
+        for &subcode in &request.authorized_subcodes {
+            if !(810..=812).contains(&subcode) {
+                return Ok(RegisterAcademicIssuerResponse {
+                    success: false,
+                    tx_hash: None,
+                    issuer_address: issuer_address.to_base58(),
+                    error: Some(format!("Invalid subcode: {}. Educational issuers can only use 810 (Transcript), 811 (Diploma), 812 (Enrollment)", subcode)),
+                });
+            }
+        }
+
+        if request.authorized_subcodes.is_empty() {
+            return Ok(RegisterAcademicIssuerResponse {
+                success: false,
+                tx_hash: None,
+                issuer_address: issuer_address.to_base58(),
+                error: Some("At least one authorized subcode is required".to_string()),
+            });
+        }
+
+        // Get current timestamp
+        let block_store = BlockStore::new(&self.db);
+        let block_timestamp = match block_store.get_latest() {
+            Ok(Some(block)) => block.header.timestamp,
+            _ => std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+        };
+
+        // Create issuer key
+        let issuer_key = IssuerKey {
+            key_id: "primary-key".to_string(),
+            public_key: *keypair.public_key().as_bytes(),
+            key_type: KeyType::Ed25519,
+            added_at: block_timestamp,
+            expires_at: 0, // No expiry
+            active: true,
+            is_primary: true,
+        };
+
+        // Parse subcodes
+        let subcodes: Vec<DocSubcode> = request.authorized_subcodes.iter().map(|&code| {
+            match code {
+                810 => DocSubcode::AcademicTranscript,
+                811 => DocSubcode::Diploma,
+                812 => DocSubcode::EnrollmentVerification,
+                _ => DocSubcode::AcademicTranscript, // Default fallback
+            }
+        }).collect();
+
+        // Get first subcode for transaction before moving subcodes
+        let subcode = subcodes[0];
+
+        // Create issuer struct
+        let issuer = DocClassIssuer {
+            address: issuer_address,
+            name: request.institution_name.clone(),
+            issuer_type: DocClassIssuerType::Educational,
+            jurisdictions: vec![request.jurisdiction_code.clone()],
+            authorized_subcodes: subcodes,
+            keys: vec![issuer_key],
+            registered_at: block_timestamp,
+            updated_at: block_timestamp,
+            status: DocClassIssuerStatus::Active,
+            stake_amount,
+            metadata: None,
+        };
+
+        // Serialize the issuer data
+        let issuer_data = bincode::serialize(&issuer)
+            .map_err(|e| RpcError::Internal(format!("Failed to serialize issuer: {}", e)))?;
+
+        // Create DocClass transaction data
+        // Use first authorized subcode as the subcode for the transaction
+        let docclass_tx_data = DocClassTxData {
+            operation: DocClassOperation::RegisterIssuer,
+            subcode,
+            data: issuer_data,
+            recipient: issuer_address, // Issuer is the recipient
+        };
+
+        // Create the transaction
+        let chain_id = self.state.chain_id();
+        let nonce = self.state.get_nonce(&issuer_address)
+            .map_err(|e| RpcError::Internal(format!("Failed to get nonce: {}", e)))?;
+        let fee = 1_000_000u128; // 0.001 Koppa fee
+
+        let tx = TransactionV2 {
+            chain_id,
+            from: issuer_address,
+            fee,
+            nonce,
+            payload: TxPayload::DocClass(docclass_tx_data),
+        };
+
+        // Sign the transaction
+        let signing_hash = tx.signing_hash();
+        let signature = sumchain_crypto::sign(signing_hash.as_bytes(), keypair.private_key());
+        let signed_tx = SignedTransaction::new_v2(
+            tx,
+            *signature.as_bytes(),
+            *keypair.public_key().as_bytes(),
+        );
+
+        let tx_hash = signed_tx.hash();
+
+        // Add to mempool
+        if let Err(e) = self.mempool.add(signed_tx.clone()) {
+            return Ok(RegisterAcademicIssuerResponse {
+                success: false,
+                tx_hash: None,
+                issuer_address: issuer_address.to_base58(),
+                error: Some(format!("Transaction rejected: {}", e)),
+            });
+        }
+
+        // Broadcast to network
+        if let Err(e) = self.tx_sender.send(signed_tx).await {
+            return Ok(RegisterAcademicIssuerResponse {
+                success: false,
+                tx_hash: Some(tx_hash.to_hex()),
+                issuer_address: issuer_address.to_base58(),
+                error: Some(format!("Failed to broadcast: {}", e)),
+            });
+        }
+
+        info!("Academic issuer registration submitted: {} (tx: {})", issuer_address, tx_hash);
+
+        Ok(RegisterAcademicIssuerResponse {
+            success: true,
+            tx_hash: Some(tx_hash.to_hex()),
+            issuer_address: issuer_address.to_base58(),
+            error: None,
+        })
+    }
+
+    async fn docclass_issue_academic_credential(
+        &self,
+        request: IssueAcademicCredentialRequest,
+    ) -> std::result::Result<IssueAcademicCredentialResponse, jsonrpsee::types::ErrorObjectOwned> {
+        use sumchain_primitives::docclass::{
+            AcademicCredential, CredentialAttribute, CredentialMetadata, DocClassOperation,
+            DocClassTxData, DocSubcode, RevocationStatus,
+        };
+        use sumchain_primitives::{TransactionV2, TxPayload};
+        use sumchain_storage::DocClassIssuerStore;
+
+        // Parse private key from hex
+        let key_hex = request.private_key.strip_prefix("0x").unwrap_or(&request.private_key);
+        let key_bytes = hex::decode(key_hex)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid private key hex: {}", e)))?;
+
+        if key_bytes.len() != 32 {
+            return Ok(IssueAcademicCredentialResponse {
+                success: false,
+                tx_hash: None,
+                credential_id: None,
+                error: Some("Private key must be 32 bytes".to_string()),
+            });
+        }
+
+        let mut key_array = [0u8; 32];
+        key_array.copy_from_slice(&key_bytes);
+        let keypair = sumchain_crypto::KeyPair::from_bytes(key_array);
+        let issuer_address = keypair.address();
+
+        // Verify issuer is registered and active
+        let issuer_store = DocClassIssuerStore::new(&self.db);
+        let issuer = match issuer_store.get(&issuer_address) {
+            Ok(Some(i)) => i,
+            Ok(None) => {
+                return Ok(IssueAcademicCredentialResponse {
+                    success: false,
+                    tx_hash: None,
+                    credential_id: None,
+                    error: Some("Issuer not registered. Register first with docclass_registerAcademicIssuer".to_string()),
+                });
+            }
+            Err(e) => {
+                return Ok(IssueAcademicCredentialResponse {
+                    success: false,
+                    tx_hash: None,
+                    credential_id: None,
+                    error: Some(format!("Failed to check issuer: {}", e)),
+                });
+            }
+        };
+
+        if !issuer.status.can_issue() {
+            return Ok(IssueAcademicCredentialResponse {
+                success: false,
+                tx_hash: None,
+                credential_id: None,
+                error: Some("Issuer is not active or cannot issue credentials".to_string()),
+            });
+        }
+
+        // Validate subcode
+        let subcode = match request.subcode {
+            810 => DocSubcode::AcademicTranscript,
+            811 => DocSubcode::Diploma,
+            812 => DocSubcode::EnrollmentVerification,
+            _ => {
+                return Ok(IssueAcademicCredentialResponse {
+                    success: false,
+                    tx_hash: None,
+                    credential_id: None,
+                    error: Some(format!("Invalid subcode: {}. Valid values: 810 (Transcript), 811 (Diploma), 812 (Enrollment)", request.subcode)),
+                });
+            }
+        };
+
+        // Verify issuer is authorized for this subcode
+        if !issuer.authorized_subcodes.contains(&subcode) {
+            return Ok(IssueAcademicCredentialResponse {
+                success: false,
+                tx_hash: None,
+                credential_id: None,
+                error: Some(format!("Issuer not authorized for subcode {}", request.subcode)),
+            });
+        }
+
+        // Parse holder address
+        let holder_address = Address::from_base58(&request.holder_address)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid holder address: {}", e)))?;
+
+        // Parse subject commitment
+        let subject_hex = request.subject_commitment.strip_prefix("0x").unwrap_or(&request.subject_commitment);
+        let subject_bytes = hex::decode(subject_hex)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid subject commitment hex: {}", e)))?;
+
+        if subject_bytes.len() != 32 {
+            return Ok(IssueAcademicCredentialResponse {
+                success: false,
+                tx_hash: None,
+                credential_id: None,
+                error: Some("Subject commitment must be 32 bytes".to_string()),
+            });
+        }
+
+        let mut subject_commitment = [0u8; 32];
+        subject_commitment.copy_from_slice(&subject_bytes);
+
+        // Parse schema hash
+        let schema_hex = request.schema_hash.strip_prefix("0x").unwrap_or(&request.schema_hash);
+        let schema_bytes = hex::decode(schema_hex)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid schema hash hex: {}", e)))?;
+
+        if schema_bytes.len() != 32 {
+            return Ok(IssueAcademicCredentialResponse {
+                success: false,
+                tx_hash: None,
+                credential_id: None,
+                error: Some("Schema hash must be 32 bytes".to_string()),
+            });
+        }
+
+        let mut schema_hash = [0u8; 32];
+        schema_hash.copy_from_slice(&schema_bytes);
+
+        // Parse content commitment
+        let content_hex = request.content_commitment.strip_prefix("0x").unwrap_or(&request.content_commitment);
+        let content_bytes = hex::decode(content_hex)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid content commitment hex: {}", e)))?;
+
+        if content_bytes.len() != 32 {
+            return Ok(IssueAcademicCredentialResponse {
+                success: false,
+                tx_hash: None,
+                credential_id: None,
+                error: Some("Content commitment must be 32 bytes".to_string()),
+            });
+        }
+
+        let mut content_commitment = [0u8; 32];
+        content_commitment.copy_from_slice(&content_bytes);
+
+        // Parse attributes - convert RPC format to credential format
+        let mut attributes: Vec<CredentialAttribute> = Vec::new();
+        for attr in &request.attributes {
+            // For now, store the commitment hex as the value
+            // In a real implementation, this would be the non-PII public value
+            attributes.push(CredentialAttribute {
+                name: attr.name.clone(),
+                value: attr.value_commitment.clone(),
+            });
+        }
+
+        // Get current timestamp
+        let block_store = BlockStore::new(&self.db);
+        let block_timestamp = match block_store.get_latest() {
+            Ok(Some(block)) => block.header.timestamp,
+            _ => std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+        };
+
+        // Get issuer jurisdiction
+        let jurisdiction = issuer.jurisdictions.first()
+            .ok_or_else(|| RpcError::Internal("Issuer has no jurisdictions".to_string()))?
+            .clone();
+
+        // Generate credential ID
+        let nonce = self.state.get_nonce(&issuer_address)
+            .map_err(|e| RpcError::Internal(format!("Failed to get nonce: {}", e)))?;
+
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&subject_commitment);
+        hasher.update(issuer_address.as_bytes());
+        hasher.update(&nonce.to_le_bytes());
+        hasher.update(&(request.subcode as u16).to_le_bytes());
+        let credential_id: [u8; 32] = *hasher.finalize().as_bytes();
+
+        // Create metadata
+        let metadata = CredentialMetadata {
+            title: request.metadata.as_ref()
+                .and_then(|m| m.title.clone())
+                .unwrap_or_else(|| format!("Credential {}", request.subcode)),
+            credential_type: match request.subcode {
+                810 => "academic_transcript".to_string(),
+                811 => "diploma".to_string(),
+                812 => "enrollment_verification".to_string(),
+                _ => "academic_credential".to_string(),
+            },
+            program: request.metadata.as_ref().and_then(|m| m.program.clone()),
+            issue_date: request.metadata.as_ref()
+                .and_then(|m| m.issue_date.clone())
+                .unwrap_or_else(|| {
+                    // Simple timestamp-based date formatting
+                    let days_since_epoch = (block_timestamp / 1000) / 86400;
+                    let year = 1970 + (days_since_epoch / 365);
+                    format!("{}-01-01", year) // Simplified date format
+                }),
+            completion_date: request.metadata.as_ref().and_then(|m| m.completion_date.clone()),
+            attributes,
+        };
+
+        // Create the credential
+        let credential = AcademicCredential {
+            credential_id,
+            subject_address: holder_address,
+            subcode,
+            subject_commitment,
+            issuer: issuer_address,
+            institution_id: issuer.name.clone(),
+            jurisdiction: jurisdiction.clone(),
+            schema_hash,
+            content_commitment,
+            metadata,
+            issued_at: block_timestamp,
+            valid_from: request.valid_from,
+            expires_at: request.expires_at,
+            payload_hash: request.metadata.as_ref()
+                .and_then(|m| m.ipfs_cid.as_ref())
+                .and_then(|cid| {
+                    // Convert IPFS CID to hash if provided
+                    let hash_bytes = blake3::hash(cid.as_bytes());
+                    Some(*hash_bytes.as_bytes())
+                }),
+            payload_hint: request.metadata.as_ref()
+                .and_then(|m| m.ipfs_cid.clone())
+                .map(|cid| format!("ipfs://{}", cid)),
+            encryption_meta: None,
+            issuer_signature: [0u8; 64], // Will be filled by transaction processor
+            issuer_key_id: "primary-key".to_string(),
+            revocation_status: RevocationStatus::Active,
+            superseded_by: None,
+        };
+
+        // Serialize the credential
+        let credential_data = bincode::serialize(&credential)
+            .map_err(|e| RpcError::Internal(format!("Failed to serialize credential: {}", e)))?;
+
+        // Create DocClass transaction data
+        let docclass_tx_data = DocClassTxData {
+            operation: DocClassOperation::IssueCredential,
+            subcode,
+            data: credential_data,
+            recipient: holder_address, // Holder is the recipient
+        };
+
+        // Create the transaction
+        let chain_id = self.state.chain_id();
+        let fee = 1_000_000u128; // 0.001 Koppa fee
+
+        let tx = TransactionV2 {
+            chain_id,
+            from: issuer_address,
+            fee,
+            nonce,
+            payload: TxPayload::DocClass(docclass_tx_data),
+        };
+
+        // Sign the transaction
+        let signing_hash = tx.signing_hash();
+        let signature = sumchain_crypto::sign(signing_hash.as_bytes(), keypair.private_key());
+        let signed_tx = SignedTransaction::new_v2(
+            tx,
+            *signature.as_bytes(),
+            *keypair.public_key().as_bytes(),
+        );
+
+        let tx_hash = signed_tx.hash();
+
+        // Add to mempool
+        if let Err(e) = self.mempool.add(signed_tx.clone()) {
+            return Ok(IssueAcademicCredentialResponse {
+                success: false,
+                tx_hash: None,
+                credential_id: None,
+                error: Some(format!("Transaction rejected: {}", e)),
+            });
+        }
+
+        // Broadcast to network
+        if let Err(e) = self.tx_sender.send(signed_tx).await {
+            return Ok(IssueAcademicCredentialResponse {
+                success: false,
+                tx_hash: Some(tx_hash.to_hex()),
+                credential_id: Some(format!("0x{}", hex::encode(credential_id))),
+                error: Some(format!("Failed to broadcast: {}", e)),
+            });
+        }
+
+        info!("Academic credential issuance submitted: {:?} (tx: {})", credential_id, tx_hash);
+
+        Ok(IssueAcademicCredentialResponse {
+            success: true,
+            tx_hash: Some(tx_hash.to_hex()),
+            credential_id: Some(format!("0x{}", hex::encode(credential_id))),
+            error: None,
+        })
+    }
+
     async fn policy_create_account(&self, _request: CreatePolicyAccountRequest) -> std::result::Result<CreatePolicyAccountResponse, jsonrpsee::types::ErrorObjectOwned> {
         Err(RpcError::Internal("Not yet implemented".to_string()).into())
     }

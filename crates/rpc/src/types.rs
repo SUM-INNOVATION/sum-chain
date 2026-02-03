@@ -1339,3 +1339,103 @@ pub struct RevokeEmploymentCredentialResponse {
     /// Error message (if failed)
     pub error: Option<String>,
 }
+
+// =============================================================================
+// SRC-81X Academic Credential RPC Types
+// =============================================================================
+
+/// Request to register as an academic issuer (educational institution)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegisterAcademicIssuerRequest {
+    /// Issuer's private key (hex, 32 bytes) - used to sign the transaction
+    pub private_key: String,
+    /// Institution name (e.g., "SUM Hypothesis Institute Technology")
+    pub institution_name: String,
+    /// Institution type (e.g., "University", "College", "CertificationBody")
+    pub institution_type: String,
+    /// Jurisdiction code (ISO 3166-1 alpha-2, e.g., "US", "GB")
+    pub jurisdiction_code: String,
+    /// Authorized document subcodes (e.g., [810, 811, 812] for transcript, diploma, enrollment)
+    pub authorized_subcodes: Vec<u16>,
+    /// Stake amount (must be >= 1000 Ϙ)
+    pub stake_amount: String,
+}
+
+/// Response for academic issuer registration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegisterAcademicIssuerResponse {
+    /// Whether registration was successful
+    pub success: bool,
+    /// Transaction hash (if successful)
+    pub tx_hash: Option<String>,
+    /// Issuer address (derived from private key)
+    pub issuer_address: String,
+    /// Error message (if failed)
+    pub error: Option<String>,
+}
+
+/// Credential attribute for academic credentials
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredentialAttributeRpc {
+    /// Attribute name (e.g., "program", "degree", "gpa")
+    pub name: String,
+    /// Attribute value commitment (hex, 32 bytes)
+    pub value_commitment: String,
+    /// Whether the attribute is private
+    pub is_private: bool,
+}
+
+/// Academic credential metadata
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcademicCredentialMetadata {
+    /// Credential title (e.g., "Bachelor of Science in Computer Science")
+    pub title: Option<String>,
+    /// Program name
+    pub program: Option<String>,
+    /// Degree type (e.g., "Bachelor", "Master", "PhD")
+    pub degree_type: Option<String>,
+    /// Issue date (ISO 8601 format)
+    pub issue_date: Option<String>,
+    /// Completion date (ISO 8601 format)
+    pub completion_date: Option<String>,
+    /// IPFS CID for encrypted credential data (optional)
+    pub ipfs_cid: Option<String>,
+}
+
+/// Request to issue an academic credential (SRC-810/811/812)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssueAcademicCredentialRequest {
+    /// Issuer's private key (hex, 32 bytes) - must be registered issuer
+    pub private_key: String,
+    /// Document subcode (810=Transcript, 811=Diploma, 812=Enrollment)
+    pub subcode: u16,
+    /// Student/holder address (base58) - recipient of the credential
+    pub holder_address: String,
+    /// Subject commitment (hex, 32 bytes) - commitment to student identity
+    pub subject_commitment: String,
+    /// Schema hash (hex, 32 bytes) - commitment to credential schema
+    pub schema_hash: String,
+    /// Content commitment (hex, 32 bytes) - commitment to credential content
+    pub content_commitment: String,
+    /// Credential attributes (name-value pairs with commitments)
+    pub attributes: Vec<CredentialAttributeRpc>,
+    /// Metadata (optional human-readable info)
+    pub metadata: Option<AcademicCredentialMetadata>,
+    /// Valid from timestamp (milliseconds)
+    pub valid_from: u64,
+    /// Expiry timestamp (0 = no expiry)
+    pub expires_at: u64,
+}
+
+/// Response for academic credential issuance
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssueAcademicCredentialResponse {
+    /// Whether issuance was successful
+    pub success: bool,
+    /// Transaction hash (if successful)
+    pub tx_hash: Option<String>,
+    /// Credential ID (hex, if successful)
+    pub credential_id: Option<String>,
+    /// Error message (if failed)
+    pub error: Option<String>,
+}
