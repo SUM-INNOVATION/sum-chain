@@ -951,6 +951,14 @@ pub trait SumChainApi {
         request: IssueAcademicCredentialRequest,
     ) -> Result<IssueAcademicCredentialResponse, jsonrpsee::types::ErrorObjectOwned>;
 
+    /// Get academic credentials by holder address
+    /// Returns all academic credentials (810/811/812) owned by the given address
+    #[method(name = "docclass_getAcademicCredentialsByHolder")]
+    async fn docclass_get_academic_credentials_by_holder(
+        &self,
+        holder_address: String,
+    ) -> Result<Vec<DocClassCredentialInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
     // =========================================================================
     // Policy Account Methods (Group Governance)
     // =========================================================================

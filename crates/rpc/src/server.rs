@@ -10,7 +10,7 @@ use sumchain_primitives::{Address, Block, Hash, SignedTransaction, MessagingTxDa
 use sumchain_state::{Mempool, StateManager};
 use sumchain_storage::{BlockStore, Database, DelegationStore, DocClassStore, EmploymentCredentialStore, EmploymentIssuerStore, IncomeAttestationStore, MessagingStore, NftStore, ReceiptStore, SlashingStore, StakingStore, TokenStore, TxIndexStore, TxStore, ValidatorSetStore};
 use tokio::sync::mpsc;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::api::SumChainApiServer;
 use crate::auth::{ApiKeyValidator, RpcAuthConfig};
@@ -4633,6 +4633,78 @@ impl SumChainApiServer for RpcServer {
             credential_id: Some(format!("0x{}", hex::encode(credential_id))),
             error: None,
         })
+    }
+
+    async fn docclass_get_academic_credentials_by_holder(
+        &self,
+        holder_address: String,
+    ) -> std::result::Result<Vec<DocClassCredentialInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        use sumchain_storage::DocClassStore;
+
+        // Parse holder address
+        let holder = Address::from_base58(&holder_address)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid holder address: {}", e)))?;
+
+        let docclass_store = DocClassStore::new(&self.db);
+        let credential_store = docclass_store.credentials();
+
+        // Get all credentials and filter by subject_address (holder)
+        // Note: This could be optimized with an index in the future
+        let mut results = Vec::new();
+
+        // Iterate through all credentials (academic subcodes: 810, 811, 812)
+        use sumchain_primitives::docclass::DocSubcode;
+        for subcode in [DocSubcode::AcademicTranscript, DocSubcode::Diploma, DocSubcode::EnrollmentVerification] {
+            match credential_store.get_by_subcode(subcode) {
+                Ok(credentials) => {
+                    for credential in credentials {
+                        // Filter by holder address
+                        if credential.subject_address == holder {
+                            // Convert to RPC format
+                            let info = DocClassCredentialInfo {
+                                credential_id: format!("0x{}", hex::encode(credential.credential_id)),
+                                subcode: credential.subcode as u16,
+                                subcode_name: match credential.subcode {
+                                    DocSubcode::AcademicTranscript => "AcademicTranscript".to_string(),
+                                    DocSubcode::Diploma => "Diploma".to_string(),
+                                    DocSubcode::EnrollmentVerification => "EnrollmentVerification".to_string(),
+                                    _ => format!("{:?}", credential.subcode),
+                                },
+                                subject_commitment: format!("0x{}", hex::encode(credential.subject_commitment)),
+                                issuer: credential.issuer.to_base58(),
+                                jurisdiction: credential.jurisdiction.clone(),
+                                schema_hash: format!("0x{}", hex::encode(credential.schema_hash)),
+                                content_commitment: format!("0x{}", hex::encode(credential.content_commitment)),
+                                issued_at: credential.issued_at,
+                                valid_from: credential.valid_from,
+                                expires_at: credential.expires_at,
+                                revocation_status: match credential.revocation_status {
+                                    sumchain_primitives::docclass::RevocationStatus::Active => "Active".to_string(),
+                                    sumchain_primitives::docclass::RevocationStatus::Suspended => "Suspended".to_string(),
+                                    sumchain_primitives::docclass::RevocationStatus::Revoked => "Revoked".to_string(),
+                                    sumchain_primitives::docclass::RevocationStatus::Superseded => "Superseded".to_string(),
+                                    sumchain_primitives::docclass::RevocationStatus::Expired => "Expired".to_string(),
+                                },
+                                superseded_by: credential.superseded_by.map(|id| format!("0x{}", hex::encode(id))),
+                                metadata: Some(DocClassCredentialMetadata {
+                                    title: credential.metadata.title,
+                                    credential_type: credential.metadata.credential_type,
+                                    program: credential.metadata.program,
+                                    issue_date: credential.metadata.issue_date,
+                                    completion_date: credential.metadata.completion_date,
+                                }),
+                            };
+                            results.push(info);
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to get credentials for subcode {:?}: {}", subcode, e);
+                }
+            }
+        }
+
+        Ok(results)
     }
 
     async fn policy_create_account(&self, _request: CreatePolicyAccountRequest) -> std::result::Result<CreatePolicyAccountResponse, jsonrpsee::types::ErrorObjectOwned> {
