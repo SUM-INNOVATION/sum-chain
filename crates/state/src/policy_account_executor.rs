@@ -164,14 +164,15 @@ impl PolicyAccountExecutor {
         proposer: &Address,
         fee: Balance,
         current_height: BlockHeight,
+        block_timestamp: u64,
     ) -> Result<PolicyAccountExecutionResult> {
         match data.operation {
-            PolicyAccountOperation::Create => self.create_policy_account(sender, &data.data, state, current_height),
+            PolicyAccountOperation::Create => self.create_policy_account(sender, &data.data, state, current_height, block_timestamp),
             PolicyAccountOperation::SubmitProposal => {
-                self.submit_proposal(sender, &data.data, state, current_height)
+                self.submit_proposal(sender, &data.data, state, current_height, block_timestamp)
             }
             PolicyAccountOperation::ExecuteProposal => {
-                self.execute_proposal(sender, &data.data, state, proposer, fee, current_height)
+                self.execute_proposal(sender, &data.data, state, proposer, fee, current_height, block_timestamp)
             }
             PolicyAccountOperation::CancelProposal => {
                 self.cancel_proposal(sender, &data.data, state)
@@ -202,6 +203,7 @@ impl PolicyAccountExecutor {
         data: &[u8],
         state: &State,
         current_height: BlockHeight,
+        block_timestamp: u64,
     ) -> Result<PolicyAccountExecutionResult> {
         // Deserialize request
         let request: CreatePolicyAccountRequest = bincode::deserialize(data)
@@ -266,10 +268,7 @@ impl PolicyAccountExecutor {
             nonce: 0,
             status: PolicyAccountStatus::Active,
             created_at: current_height,
-            created_timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64,
+            created_timestamp: block_timestamp,
         };
 
         // Store
@@ -297,6 +296,7 @@ impl PolicyAccountExecutor {
         data: &[u8],
         state: &State,
         current_height: BlockHeight,
+        block_timestamp: u64,
     ) -> Result<PolicyAccountExecutionResult> {
         // Deserialize request
         let request: SubmitProposalRequest = bincode::deserialize(data)
@@ -425,10 +425,7 @@ impl PolicyAccountExecutor {
             approvals: request.approvals,
             status: ProposalStatus::Pending,
             expires_at: request.expires_at,
-            created_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64,
+            created_at: block_timestamp,
             created_height: current_height,
         };
 
@@ -470,6 +467,7 @@ impl PolicyAccountExecutor {
         proposer: &Address,
         fee: Balance,
         current_height: BlockHeight,
+        block_timestamp: u64,
     ) -> Result<PolicyAccountExecutionResult> {
         // Deserialize request
         let request: ExecuteProposalRequest = bincode::deserialize(data)
@@ -495,11 +493,7 @@ impl PolicyAccountExecutor {
         }
 
         // Check expiration
-        let current_time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
-        if current_time > proposal.expires_at {
+        if block_timestamp > proposal.expires_at {
             proposal.status = ProposalStatus::Expired;
             storage.proposals().put(&proposal)?;
             return Ok(PolicyAccountExecutionResult::failure(

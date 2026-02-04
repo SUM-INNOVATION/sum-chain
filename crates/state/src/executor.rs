@@ -159,6 +159,7 @@ impl BlockExecutor {
         &self,
         tx: &SignedTransaction,
         proposer: &Address,
+        block_timestamp: u64,
     ) -> Result<TxExecutionResult> {
         let tx_hash = tx.hash();
 
@@ -822,6 +823,7 @@ impl BlockExecutor {
                             proposer,
                             v2_tx.fee,
                             0, // block_height placeholder
+                            block_timestamp,
                         )?;
 
                         if result.success {
@@ -1677,51 +1679,10 @@ impl BlockExecutor {
                 }
             }
             TxPayload::PolicyAccount(policy_data) => {
-                // Check balance for fee
-                let balance = self.state.get_balance(&tx.from)?;
-                if balance < tx.fee {
-                    return Ok(TxExecutionResult {
-                        tx_hash,
-                        status: TxStatus::InsufficientBalance,
-                        fee_paid: 0,
-                    });
-                }
-
-                // Execute Policy Account operation
-                let result = self.policy_account_executor.execute(
-                    &tx.from,
-                    policy_data,
-                    &self.state,
-                    proposer,
-                    tx.fee,
-                    0, // block_height placeholder
-                )?;
-
-                if result.success {
-                    debug!(
-                        "V2 PolicyAccount {} executed: {:?}",
-                        tx_hash,
-                        policy_data.operation
-                    );
-
-                    Ok(TxExecutionResult {
-                        tx_hash,
-                        status: TxStatus::Success,
-                        fee_paid: tx.fee,
-                    })
-                } else {
-                    warn!(
-                        "V2 PolicyAccount {} failed: {}",
-                        tx_hash,
-                        &result.message
-                    );
-
-                    Ok(TxExecutionResult {
-                        tx_hash,
-                        status: TxStatus::Failed(17), // Policy Account operation failed
-                        fee_paid: 0,
-                    })
-                }
+                // This branch should never be reached - PolicyAccount is V2 only
+                return Err(StateError::InvalidOperation(
+                    "PolicyAccount is only supported in V2 transactions".to_string(),
+                ));
             }
         }
     }
@@ -1754,7 +1715,7 @@ impl BlockExecutor {
             };
             let proposer_before = self.state.get_account(&proposer)?;
 
-            let result = self.execute_tx(tx, &proposer)?;
+            let result = self.execute_tx(tx, &proposer, block.header.timestamp)?;
 
             // Record post-execution state for diff
             let sender_after = self.state.get_account(&sender)?;
@@ -2032,7 +1993,7 @@ mod tests {
             .unwrap();
 
         let tx = create_signed_tx(&sender, recipient.address(), 100, 10, 0);
-        let result = executor.execute_tx(&tx, &proposer.address()).unwrap();
+        let result = executor.execute_tx(&tx, &proposer.address(), 1000000000).unwrap();
 
         assert!(result.status.is_success());
         assert_eq!(state.get_balance(&sender.address()).unwrap(), 890);
