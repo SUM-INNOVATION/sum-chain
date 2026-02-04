@@ -72,12 +72,9 @@ impl TokenExecutor {
         Self { db, params }
     }
 
-    /// Get current timestamp in milliseconds
-    fn now_ms() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64
+    /// Get current timestamp in milliseconds (now uses block timestamp for determinism)
+    fn now_ms(block_timestamp: u64) -> u64 {
+        block_timestamp
     }
 
     /// Generate a token ID from creator, name, and nonce
@@ -99,6 +96,7 @@ impl TokenExecutor {
         proposer: &Address,
         fee: Balance,
         block_height: BlockHeight,
+        block_timestamp: u64,
     ) -> Result<TokenExecutionResult> {
         let store = TokenStore::new(&self.db);
 
@@ -107,7 +105,7 @@ impl TokenExecutor {
 
         match token_data.operation {
             TokenOperation::Create => {
-                self.execute_create(&store, sender, &token_data.data, block_height)
+                self.execute_create(&store, sender, &token_data.data, block_height, block_timestamp)
             }
             TokenOperation::Mint => {
                 self.execute_mint(&store, sender, &token_data.token_id, &token_data.data)
@@ -185,6 +183,7 @@ impl TokenExecutor {
         sender: &Address,
         data: &[u8],
         block_height: BlockHeight,
+        block_timestamp: u64,
     ) -> Result<TokenExecutionResult> {
         // Deserialize creation data
         #[derive(serde::Deserialize)]
@@ -228,7 +227,7 @@ impl TokenExecutor {
         }
 
         // Generate token ID
-        let nonce = Self::now_ms();
+        let nonce = Self::now_ms(block_timestamp);
         let token_id = Self::generate_token_id(sender, &create_data.name, nonce);
 
         // Check if token already exists
@@ -251,7 +250,7 @@ impl TokenExecutor {
             pausable: create_data.pausable,
             paused: false,
             minters: vec![*sender], // Owner is initial minter
-            created_at: Self::now_ms(),
+            created_at: Self::now_ms(block_timestamp),
             created_at_block: block_height,
         };
 

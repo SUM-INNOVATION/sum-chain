@@ -86,12 +86,9 @@ impl NftExecutor {
         Self { db, params }
     }
 
-    /// Get current timestamp in milliseconds
-    fn now_ms() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64
+    /// Get current timestamp in milliseconds (now uses block timestamp for determinism)
+    fn now_ms(block_timestamp: u64) -> u64 {
+        block_timestamp
     }
 
     /// Execute an NFT operation from transaction data
@@ -102,6 +99,7 @@ impl NftExecutor {
         state: &StateManager,
         proposer: &Address,
         fee: Balance,
+        block_timestamp: u64,
     ) -> Result<NftExecutionResult> {
         let store = NftStore::new(&self.db);
 
@@ -110,16 +108,16 @@ impl NftExecutor {
 
         match nft_data.operation {
             NftOperation::CreateCollection => {
-                self.execute_create_collection(&store, sender, &nft_data.data)
+                self.execute_create_collection(&store, sender, &nft_data.data, block_timestamp)
             }
             NftOperation::Mint => {
-                self.execute_mint(&store, sender, &nft_data.collection_id, &nft_data.data, false, fee)
+                self.execute_mint(&store, sender, &nft_data.collection_id, &nft_data.data, false, fee, block_timestamp)
             }
             NftOperation::MintDocument => {
-                self.execute_mint(&store, sender, &nft_data.collection_id, &nft_data.data, true, fee)
+                self.execute_mint(&store, sender, &nft_data.collection_id, &nft_data.data, true, fee, block_timestamp)
             }
             NftOperation::BatchMint => {
-                self.execute_batch_mint(&store, sender, &nft_data.collection_id, &nft_data.data)
+                self.execute_batch_mint(&store, sender, &nft_data.collection_id, &nft_data.data, block_timestamp)
             }
             NftOperation::Transfer => self.execute_transfer(
                 &store,
@@ -217,6 +215,7 @@ impl NftExecutor {
         store: &NftStore,
         sender: &Address,
         data: &[u8],
+        block_timestamp: u64,
     ) -> Result<NftExecutionResult> {
         // Deserialize collection creation data
         #[derive(serde::Deserialize)]
@@ -238,7 +237,7 @@ impl NftExecutor {
             .map_err(|e| StateError::BlockValidation(format!("Invalid config: {}", e)))?;
 
         // Generate collection ID
-        let nonce = Self::now_ms();
+        let nonce = Self::now_ms(block_timestamp);
         let collection_id = CollectionId::new(sender, &create_data.name, nonce);
 
         // Check if collection already exists
@@ -268,7 +267,7 @@ impl NftExecutor {
                 Address::ZERO
             },
             base_uri: create_data.base_uri,
-            created_at: Self::now_ms(),
+            created_at: Self::now_ms(block_timestamp),
         };
 
         store.put_collection(collection_id.as_bytes(), &collection_data)?;
@@ -292,6 +291,7 @@ impl NftExecutor {
         data: &[u8],
         is_document: bool,
         fee: Balance,
+        block_timestamp: u64,
     ) -> Result<NftExecutionResult> {
         // Get collection
         let mut collection = store.get_collection(collection_id)?.ok_or_else(|| {
@@ -343,7 +343,7 @@ impl NftExecutor {
         // Security: For document minting, verify issuer is registered
         if is_document {
             let issuer_store = IssuerStore::new(&self.db);
-            let current_time = Self::now_ms();
+            let current_time = Self::now_ms(block_timestamp);
 
             if !issuer_store.can_mint_documents(sender, None, current_time)? {
                 warn!(
@@ -376,7 +376,7 @@ impl NftExecutor {
             approved: None,
             locked: false,
             transfer_count: 0,
-            minted_at: Self::now_ms(),
+            minted_at: Self::now_ms(block_timestamp),
         };
 
         // Store token
@@ -410,6 +410,7 @@ impl NftExecutor {
         sender: &Address,
         collection_id: &[u8; 32],
         data: &[u8],
+        block_timestamp: u64,
     ) -> Result<NftExecutionResult> {
         // Get collection
         let mut collection = store.get_collection(collection_id)?.ok_or_else(|| {
@@ -464,7 +465,7 @@ impl NftExecutor {
                 approved: None,
                 locked: false,
                 transfer_count: 0,
-                minted_at: Self::now_ms(),
+                minted_at: Self::now_ms(block_timestamp),
             };
 
             store.put_token(collection_id, token_id, &token_data)?;

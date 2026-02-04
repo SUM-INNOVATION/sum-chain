@@ -236,6 +236,7 @@ impl BlockExecutor {
                             &self.state,
                             proposer,
                             v2_tx.fee,
+                            block_timestamp,
                         )?;
 
                         if result.success {
@@ -275,6 +276,7 @@ impl BlockExecutor {
                             proposer,
                             v2_tx.fee,
                             0, // block_height placeholder
+                            block_timestamp,
                         )?;
 
                         if result.success {
@@ -864,6 +866,7 @@ impl BlockExecutor {
         signature: &[u8; 64],
         public_key: &[u8; 32],
         proposer: &Address,
+        block_timestamp: u64,
     ) -> Result<TxExecutionResult> {
         let tx_hash = tx.signing_hash();
 
@@ -960,6 +963,7 @@ impl BlockExecutor {
                     &self.state,
                     proposer,
                     tx.fee,
+                    block_timestamp,
                 )?;
 
                 if result.success {
@@ -1007,6 +1011,7 @@ impl BlockExecutor {
                     proposer,
                     tx.fee,
                     0, // block_height placeholder
+                    block_timestamp,
                 )?;
 
                 if result.success {

@@ -116,6 +116,7 @@ impl NftTestNode {
                 &self.state,
                 &Address::ZERO,
                 0,
+                1000000000, // block_timestamp
             )
             .map_err(|e| e.to_string())?;
 
@@ -168,6 +169,7 @@ impl NftTestNode {
                 &self.state,
                 &Address::ZERO,
                 storage_fee,
+                1000000000, // block_timestamp
             )
             .map_err(|e| e.to_string())?;
 
@@ -208,6 +210,7 @@ impl NftTestNode {
                 &self.state,
                 &Address::ZERO,
                 0,
+                1000000000, // block_timestamp
             )
             .map_err(|e| e.to_string())?;
 
@@ -235,6 +238,7 @@ impl NftTestNode {
                 &self.state,
                 &Address::ZERO,
                 0,
+                1000000000, // block_timestamp
             )
             .map_err(|e| e.to_string())?;
 

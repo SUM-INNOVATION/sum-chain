@@ -139,6 +139,7 @@ impl SecurityTestNode {
                 &self.state,
                 &sender,
                 self.params.min_fee,
+                1000000000, // block_timestamp
             )
             .map_err(|e| format!("Failed to create collection: {}", e))?;
 
@@ -188,7 +189,7 @@ impl SecurityTestNode {
 
         let result = self
             .nft_executor
-            .execute(&sender, &nft_data, &self.state, &sender, fee)
+            .execute(&sender, &nft_data, &self.state, &sender, fee, 1000000000 /* block_timestamp */)
             .map_err(|e| format!("Failed to mint token: {}", e))?;
 
         if result.success {
