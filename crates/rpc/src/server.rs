@@ -4693,6 +4693,8 @@ impl SumChainApiServer for RpcServer {
                                     issue_date: credential.metadata.issue_date,
                                     completion_date: credential.metadata.completion_date,
                                 }),
+                                payload_hash: credential.payload_hash.map(|h| format!("0x{}", hex::encode(h))),
+                                payload_hint: credential.payload_hint.clone(),
                             };
                             results.push(info);
                         }
@@ -4793,6 +4795,8 @@ impl RpcServer {
             revocation_status: format!("{:?}", eligibility.revocation_status),
             superseded_by: eligibility.superseded_by.map(|id| hex::encode(id)),
             metadata: None,
+            payload_hash: None,
+            payload_hint: None,
         }
     }
 
@@ -4818,6 +4822,8 @@ impl RpcServer {
                 issue_date: credential.metadata.issue_date.clone(),
                 completion_date: credential.metadata.completion_date.clone(),
             }),
+            payload_hash: credential.payload_hash.map(|h| format!("0x{}", hex::encode(h))),
+            payload_hint: credential.payload_hint.clone(),
         }
     }
 

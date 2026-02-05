@@ -982,6 +982,10 @@ pub struct DocClassCredentialInfo {
     pub superseded_by: Option<String>,
     /// Credential metadata (if applicable)
     pub metadata: Option<DocClassCredentialMetadata>,
+    /// Payload hash (hex) - encrypted document reference
+    pub payload_hash: Option<String>,
+    /// Payload hint - storage location (e.g., IPFS CID)
+    pub payload_hint: Option<String>,
 }
 
 /// DocClass credential metadata for RPC responses
