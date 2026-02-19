@@ -1344,6 +1344,34 @@ pub struct RevokeEmploymentCredentialResponse {
     pub error: Option<String>,
 }
 
+/// Request to revoke an academic credential (SRC-810/811/812)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RevokeAcademicCredentialRequest {
+    /// Issuer's private key (hex, 32 bytes) - must be the original issuer
+    pub private_key: String,
+    /// Credential ID to revoke (hex, 32 bytes)
+    pub credential_id: String,
+    /// Revocation reason code (0=Unspecified, 1=KeyCompromise, 2=IssuerCompromise,
+    /// 3=AffiliationChanged, 4=Superseded, 5=CessationOfOperation, 6=CertificateHold,
+    /// 7=PrivilegeWithdrawn)
+    pub reason: Option<u8>,
+    /// Optional reason details (human-readable)
+    pub reason_details: Option<String>,
+}
+
+/// Response for academic credential revocation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RevokeAcademicCredentialResponse {
+    /// Whether revocation was successful
+    pub success: bool,
+    /// Transaction hash (if successful)
+    pub tx_hash: Option<String>,
+    /// Credential ID (hex)
+    pub credential_id: Option<String>,
+    /// Error message (if failed)
+    pub error: Option<String>,
+}
+
 // =============================================================================
 // SRC-81X Academic Credential RPC Types
 // =============================================================================

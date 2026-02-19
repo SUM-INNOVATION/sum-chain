@@ -19,6 +19,7 @@ use crate::types::{
     NftCollectionInfo, NftOwnerTokens, NftTokenInfo, NodeInfo, P2pStats, PendingPaymentInfo,
     PublicKeyInfo, ReceiptInfo, RegisterAcademicIssuerRequest, RegisterAcademicIssuerResponse,
     RegisterEmploymentIssuerRequest, RegisterEmploymentIssuerResponse,
+    RevokeAcademicCredentialRequest, RevokeAcademicCredentialResponse,
     RevokeEmploymentCredentialRequest, RevokeEmploymentCredentialResponse,
     RpcPeerInfo, SendTxResponse, SlashingRecordRpcInfo, SlashingSummary, SpamReportInfo,
     SponsoredRegistrationRequest, SponsoredRegistrationResponse, StakingParamsInfo, StakingSummary,
@@ -950,6 +951,14 @@ pub trait SumChainApi {
         &self,
         request: IssueAcademicCredentialRequest,
     ) -> Result<IssueAcademicCredentialResponse, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Revoke an academic credential (SRC-810/811/812)
+    /// Requires the caller to be the original issuer of the credential
+    #[method(name = "docclass_revokeAcademicCredential")]
+    async fn docclass_revoke_academic_credential(
+        &self,
+        request: RevokeAcademicCredentialRequest,
+    ) -> Result<RevokeAcademicCredentialResponse, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Get academic credentials by holder address
     /// Returns all academic credentials (810/811/812) owned by the given address

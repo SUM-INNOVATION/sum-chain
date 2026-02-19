@@ -4635,6 +4635,166 @@ impl SumChainApiServer for RpcServer {
         })
     }
 
+    async fn docclass_revoke_academic_credential(
+        &self,
+        request: RevokeAcademicCredentialRequest,
+    ) -> std::result::Result<RevokeAcademicCredentialResponse, jsonrpsee::types::ErrorObjectOwned> {
+        use sumchain_primitives::docclass::{
+            DocClassOperation, DocClassTxData, DocSubcode, RevocationReason,
+        };
+        use sumchain_primitives::{TransactionV2, TxPayload};
+
+        // Parse private key
+        let key_hex = request.private_key.strip_prefix("0x").unwrap_or(&request.private_key);
+        let key_bytes = hex::decode(key_hex)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid private key hex: {}", e)))?;
+
+        if key_bytes.len() != 32 {
+            return Ok(RevokeAcademicCredentialResponse {
+                success: false,
+                tx_hash: None,
+                credential_id: None,
+                error: Some("Private key must be 32 bytes".to_string()),
+            });
+        }
+
+        let mut key_array = [0u8; 32];
+        key_array.copy_from_slice(&key_bytes);
+        let keypair = sumchain_crypto::KeyPair::from_bytes(key_array);
+        let caller_address = keypair.address();
+
+        // Parse credential ID
+        let id_hex = request.credential_id.strip_prefix("0x").unwrap_or(&request.credential_id);
+        let id_bytes = hex::decode(id_hex)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid credential ID hex: {}", e)))?;
+
+        if id_bytes.len() != 32 {
+            return Ok(RevokeAcademicCredentialResponse {
+                success: false,
+                tx_hash: None,
+                credential_id: None,
+                error: Some("Credential ID must be 32 bytes".to_string()),
+            });
+        }
+
+        let mut credential_id = [0u8; 32];
+        credential_id.copy_from_slice(&id_bytes);
+
+        // Verify caller is a registered issuer
+        let issuer_store = sumchain_storage::DocClassIssuerStore::new(&self.db);
+        match issuer_store.get(&caller_address) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return Ok(RevokeAcademicCredentialResponse {
+                    success: false,
+                    tx_hash: None,
+                    credential_id: None,
+                    error: Some("Caller is not a registered issuer".to_string()),
+                });
+            }
+            Err(e) => {
+                return Ok(RevokeAcademicCredentialResponse {
+                    success: false,
+                    tx_hash: None,
+                    credential_id: None,
+                    error: Some(format!("Failed to check issuer: {}", e)),
+                });
+            }
+        };
+
+        // Parse revocation reason
+        let reason = match request.reason.unwrap_or(0) {
+            0 => RevocationReason::Unspecified,
+            1 => RevocationReason::KeyCompromise,
+            2 => RevocationReason::IssuerCompromise,
+            3 => RevocationReason::AffiliationChanged,
+            4 => RevocationReason::Superseded,
+            5 => RevocationReason::CessationOfOperation,
+            6 => RevocationReason::CertificateHold,
+            7 => RevocationReason::PrivilegeWithdrawn,
+            _ => RevocationReason::Unspecified,
+        };
+
+        // Create revocation data
+        #[derive(serde::Serialize)]
+        struct RevokeData {
+            credential_id: [u8; 32],
+            reason: RevocationReason,
+        }
+
+        let revoke_data = RevokeData {
+            credential_id,
+            reason,
+        };
+
+        let data = bincode::serialize(&revoke_data)
+            .map_err(|e| RpcError::Internal(format!("Failed to serialize: {}", e)))?;
+
+        // Create DocClass transaction
+        let docclass_tx_data = DocClassTxData {
+            operation: DocClassOperation::RevokeCredential,
+            subcode: DocSubcode::Diploma, // subcode context
+            data,
+            recipient: caller_address, // issuer is the caller
+        };
+
+        // Get nonce
+        let nonce = self.state.get_nonce(&caller_address)
+            .map_err(|e| RpcError::Internal(format!("Failed to get nonce: {}", e)))?;
+
+        // Create the transaction
+        let chain_id = self.state.chain_id();
+        let fee = 1_000_000u128;
+
+        let tx = TransactionV2 {
+            chain_id,
+            from: caller_address,
+            fee,
+            nonce,
+            payload: TxPayload::DocClass(docclass_tx_data),
+        };
+
+        // Sign the transaction
+        let signing_hash = tx.signing_hash();
+        let signature = sumchain_crypto::sign(signing_hash.as_bytes(), keypair.private_key());
+        let signed_tx = SignedTransaction::new_v2(
+            tx,
+            *signature.as_bytes(),
+            *keypair.public_key().as_bytes(),
+        );
+
+        let tx_hash = signed_tx.hash();
+
+        // Add to mempool
+        if let Err(e) = self.mempool.add(signed_tx.clone()) {
+            return Ok(RevokeAcademicCredentialResponse {
+                success: false,
+                tx_hash: None,
+                credential_id: None,
+                error: Some(format!("Transaction rejected: {}", e)),
+            });
+        }
+
+        // Broadcast to network
+        if let Err(e) = self.tx_sender.send(signed_tx).await {
+            return Ok(RevokeAcademicCredentialResponse {
+                success: false,
+                tx_hash: Some(tx_hash.to_hex()),
+                credential_id: Some(format!("0x{}", hex::encode(credential_id))),
+                error: Some(format!("Failed to broadcast: {}", e)),
+            });
+        }
+
+        info!("Academic credential revocation submitted: {:?} (tx: {})", credential_id, tx_hash);
+
+        Ok(RevokeAcademicCredentialResponse {
+            success: true,
+            tx_hash: Some(tx_hash.to_hex()),
+            credential_id: Some(format!("0x{}", hex::encode(credential_id))),
+            error: None,
+        })
+    }
+
     async fn docclass_get_academic_credentials_by_holder(
         &self,
         holder_address: String,
