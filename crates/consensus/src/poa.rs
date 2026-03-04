@@ -297,6 +297,9 @@ impl PoAEngine {
                 );
                 *self.best_block.write() = Some(block.clone());
 
+                // Restore state root cache from the latest block
+                self.state.set_state_root(block.header.state_root);
+
                 // Restore finality state from storage
                 if let Ok(Some(finalized_height)) = block_store.get_finalized_height() {
                     *self.last_finalized_height.write() = finalized_height;
