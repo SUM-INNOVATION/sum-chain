@@ -32,7 +32,7 @@ This document provides a comprehensive checklist for launching SUM Chain to prod
 **Files**:
 - [genesis/mainnet_genesis.json](../genesis/mainnet_genesis.json)
 - [genesis/testnet_genesis.json](../genesis/testnet_genesis.json)
-- [genesis/MAINNET_README.md](../genesis/MAINNET_README.md)
+- ~~genesis/MAINNET_README.md~~ (removed)
 
 ### 3. Network Infrastructure ✓
 
@@ -43,7 +43,7 @@ This document provides a comprehensive checklist for launching SUM Chain to prod
 - [x] Docker and Kubernetes configs
 
 **Files**:
-- [docs/bootstrap-nodes.md](../docs/bootstrap-nodes.md)
+- ~~docs/bootstrap-nodes.md~~ (removed)
 - [deploy/docker-compose.yaml](../deploy/docker-compose.yaml)
 - [deploy/kubernetes/](../deploy/kubernetes/)
 
@@ -89,31 +89,23 @@ This document provides a comprehensive checklist for launching SUM Chain to prod
 - [explorer/](../explorer/)
 - [explorer/README.md](../explorer/README.md)
 
-### 7. BFT Consensus Implementation ✓
+### 7. BFT Consensus Module (Experimental) ⚠️
 
-- [x] Tendermint-style BFT consensus
-- [x] Two-phase voting (prevote + precommit)
-- [x] Byzantine quorum (>2/3)
-- [x] Leader rotation
-- [x] Timeout mechanism
-- [x] P2P message types (proposals, votes)
-- [x] Comprehensive documentation
-- [x] Integration guide
-- [x] Configuration file
+- [x] Tendermint-style BFT data structures and types
+- [x] Two-phase voting types (prevote + precommit)
+- [x] Byzantine quorum logic
+- [x] Leader rotation logic
+- [x] P2P message types and gossipsub topics
+- [x] Documentation and integration guide
+- [ ] **`propose_block()` returns `NotImplemented`** — not production-ready
+- [ ] Full integration with block execution pipeline
+
+**Status**: Module exists but is **not functional**. Production consensus uses **PoA** (round-robin or stake-weighted proposer selection with depth-based finality).
 
 **Files**:
 - [crates/consensus/src/bft/](../crates/consensus/src/bft/)
 - [docs/bft-consensus.md](../docs/bft-consensus.md)
 - [docs/bft-integration.md](../docs/bft-integration.md)
-- [configs/bft-config.toml](../configs/bft-config.toml)
-
-**Components**:
-- `BftEngine` - Main consensus engine
-- `Vote` - Prevote and precommit votes
-- `Proposal` - Block proposals
-- `VoteSet` - Vote aggregation with quorum logic
-- P2P topics for consensus messages
-- Serialization with bincode
 
 ### 8. Performance Optimizations ✓
 
@@ -183,15 +175,15 @@ This document provides a comprehensive checklist for launching SUM Chain to prod
 
 ## Key Features
 
-### Immediate Finality
-- BFT consensus provides immediate finality
-- No confirmations needed
-- Blocks are final once committed
+### Depth-Based Finality (PoA)
+- PoA consensus with configurable finality depth (default 6 blocks)
+- Blocks are finalized after `finality_depth` confirmations (~18 seconds)
+- Finalized blocks cannot be reverted by reorg
 
-### Byzantine Fault Tolerance
-- Tolerates up to 1/3 malicious validators
-- Safety: Never commits conflicting blocks
-- Liveness: Always makes progress with >2/3 honest validators
+### Dynamic Validator Sets
+- Epoch-based validator set recalculation
+- Stake-weighted or round-robin proposer selection
+- Validator staking, delegation, and reward distribution
 
 ### High Performance
 - 1000+ TPS sustained throughput
@@ -321,12 +313,12 @@ This document provides a comprehensive checklist for launching SUM Chain to prod
     "supply_per_person": 100,
     "target_transaction_value": "5-50 Ϙ",
     "min_fee": "0.001 Ϙ",
-    "fee_model": "burned"
+    "fee_model": "to_proposer"
   },
   "consensus": {
-    "engine": "bft",
+    "engine": "poa",
     "block_time_target": "3-5s",
-    "finality": "immediate",
+    "finality": "depth-based (6 blocks)",
     "validators": 5
   },
   "performance": {
@@ -344,9 +336,8 @@ This document provides a comprehensive checklist for launching SUM Chain to prod
 
 ### Network Health
 - [ ] All validators online (100%)
-- [ ] Average rounds per block: 1-2
 - [ ] Block time: 3-5 seconds
-- [ ] Finality: Immediate
+- [ ] Finality: ~18 seconds (6 blocks)
 
 ### Performance
 - [ ] TPS: >1000 sustained
@@ -431,5 +422,6 @@ The chain is ready for mainnet launch following the procedures outlined above.
 ---
 
 **Generated**: 2025-12-19
-**Version**: 1.0.0
-**Status**: READY FOR PRODUCTION
+**Last Updated**: March 2026
+**Version**: 2.0.0
+**Status**: IN PROGRESS — PoA production consensus, BFT experimental

@@ -6,8 +6,8 @@ This guide covers performance optimizations for SUM Chain, including parallel ex
 
 SUM Chain is optimized for:
 - **High throughput**: 1000+ TPS sustained
-- **Low latency**: <3s block time with BFT consensus
-- **Efficient storage**: Merkle Patricia Trie with pruning
+- **Low latency**: Configurable block time with PoA consensus
+- **Efficient storage**: Blake3 hash-based state roots with RocksDB
 - **Scalable networking**: Optimized gossipsub and sync protocols
 
 ## Transaction Execution
@@ -587,7 +587,7 @@ rate(sumchain_storage_bytes[1h])
 | TPS (sustained) | 1000+ | 2500 |
 | Block time | <5s | 3-5s |
 | Block validation | <100ms | 50ms |
-| Finality | Immediate | Immediate (BFT) |
+| Finality | ~18s (6 blocks) | ~18s (PoA, depth-based) |
 | Memory usage | <2 GB | ~1.5 GB |
 | Disk (1M blocks) | <50 GB | ~10 GB |
 

@@ -66,7 +66,7 @@ With Earth's population at 8+ billion people:
 
 - **Throughput**: 1,000+ TPS sustained
 - **Block time**: 3-5 seconds
-- **Finality**: Immediate (BFT consensus)
+- **Finality**: Depth-based (6 block confirmations, PoA consensus)
 
 ### Daily Capacity
 
@@ -98,7 +98,7 @@ At full adoption (8 billion people):
 
 | System | Peak TPS | Daily Capacity | Notes |
 |--------|----------|----------------|-------|
-| **SUM Chain** | 1,000-2,500 | 86-216M tx/day | Immediate finality |
+| **SUM Chain** | 1,000-2,500 | 86-216M tx/day | ~18s finality (6 blocks) |
 | Visa | ~65,000 | 5.6B tx/day | 150M actual average |
 | Mastercard | ~50,000 | 4.3B tx/day | Settlement in days |
 | Bitcoin | ~7 | 600K tx/day | 60 min finality |
@@ -119,24 +119,21 @@ At scale pricing examples:
 
 ### Fee Distribution
 
-Transaction fees are **burned** (removed from circulation), creating deflationary pressure:
+Transaction fees are **paid to the block proposer** — the validator who creates the block. This directly incentivizes validators to participate in block production and maintain network uptime.
 
-```
-Daily burned = 86.4M tx/day × 0.001 Ϙ/tx = 86,400 Ϙ/day
-Yearly burned = 31,536,000 Ϙ/year (~0.004% of supply)
-```
-
-**Impact**: Very mild deflationary pressure, taking ~25,000 years to burn 1% of supply at current capacity.
+- All fees from transactions included in a block go to the proposing validator
+- Fee revenue scales with network usage, aligning validator incentives with network growth
+- No fees are burned; the total supply is only reduced by lost/inaccessible coins
 
 ### Validator Economics
 
-Validators are **not** paid from transaction fees in the initial model. Instead:
+Validators **earn transaction fees** from every block they propose. The block proposer receives all fees collected in their block. Additional funding sources include:
 
-- **Genesis allocation**: Validators funded from Community Rewards pool
+- **Genesis allocation**: Validators funded from Community Rewards pool (40B Ϙ)
 - **Network grants**: Foundation provides operational support
-- **Future governance**: Community can vote to redirect fees to validators
+- **Delegation distributions**: Staking rewards claimable by delegators
 
-**Rationale**: Keeping fees burned maintains simplicity and prevents validator centralization around fee extraction.
+**Rationale**: Paying fees to validators creates a sustainable economic incentive for block production without requiring inflation or new token issuance.
 
 ## Token Distribution & Governance
 
@@ -236,7 +233,7 @@ Validators are **not** paid from transaction fees in the initial model. Instead:
 **SUM Chain transfer**:
 - Fee: 0.001 Ϙ (~$0.001-0.01)
 - Time: 3-5 seconds
-- Finality: Immediate
+- Finality: ~18 seconds (6 block confirmations)
 - Access: Just need internet connection
 
 ### Credit Cards
@@ -250,7 +247,7 @@ Validators are **not** paid from transaction fees in the initial model. Instead:
 **SUM Chain payment**:
 - Fee: 0.001 Ϙ for both parties
 - Time: 3-5 seconds
-- Finality: Immediate (no chargebacks)
+- Finality: ~18 seconds (no chargebacks)
 - Access: No credit check needed
 
 ### Remittances (e.g., Western Union)
@@ -323,21 +320,21 @@ Cash velocity: ~5-7 transactions per year
 
 ## Deflationary Mechanics
 
-### Fee Burning
+### Validator Fee Revenue
 
-All transaction fees are burned (removed from supply):
+All transaction fees are paid to block proposers (validators), not burned:
 
 ```
 At full capacity (86.4M tx/day):
-- Daily burn: 86,400 Ϙ
-- Yearly burn: 31,536,000 Ϙ (0.00394% of supply)
-- 50% supply burned in: ~12,700 years
+- Daily fee revenue: 86,400 Ϙ
+- Yearly fee revenue: 31,536,000 Ϙ
+- Split among validators based on blocks proposed
 ```
 
-**Mild deflation** ensures:
-- Value preservation over time
-- Incentive to hold (but not too much)
-- Offset for lost/burned coins
+**Fee-based validator compensation** ensures:
+- Sustainable validator incentives without inflation
+- Revenue scales with network adoption
+- No new tokens need to be minted
 
 ### Lost Coins
 
@@ -347,22 +344,21 @@ Estimated lost coins over time:
 - Year 10: ~1% (8B Ϙ)
 - Year 50: ~5% (40B Ϙ)
 
-**Combined with fee burning**, supply slowly decreases, creating scarcity.
+**Lost coins are the only deflationary pressure** on the fixed supply, slowly creating scarcity over time.
 
 ## Monetary Policy
 
 ### No Inflation
 
 - **Zero new issuance**: All 800B Ϙ minted at genesis
-- **No mining**: BFT consensus, no block rewards
-- **No staking rewards**: Validators funded from Community pool initially
+- **No mining**: PoA consensus, no block rewards
+- **Staking rewards**: Available via delegation distributions (manual claim)
 
 ### Predictable Supply
 
 Circulating supply is **always decreasing** due to:
-1. Fee burning
-2. Lost coins
-3. Locked vesting (120B Ϙ locked for 4 years)
+1. Lost coins
+2. Locked vesting (120B Ϙ locked for 4 years)
 
 **Launch circulating supply**: ~680B Ϙ (800B - 120B vesting)
 
@@ -371,9 +367,9 @@ Circulating supply is **always decreasing** due to:
 **Concerns**: "Won't fees be too low to sustain validators?"
 
 **Solutions**:
-1. **Foundation grants**: Operational support from 400B Ϙ reserve
-2. **Fee market**: If network congested, fees increase naturally
-3. **Governance**: Community can vote to direct fees to validators
+1. **Transaction fees**: Block proposers earn all fees from their blocks
+2. **Foundation grants**: Operational support from 400B Ϙ reserve
+3. **Fee market**: If network congested, fees increase naturally
 4. **Value appreciation**: As Ϙ price rises, 0.001 Ϙ fee becomes more valuable
 
 **Example**: If 1 Ϙ = $10, then 0.001 Ϙ = $0.01 per transaction
@@ -388,9 +384,9 @@ SUM Chain's economic model is designed for **global peer-to-peer cash**:
 ✅ **800 billion supply**: Sized for 8+ billion people
 ✅ **Whole number pricing**: Psychological comfort
 ✅ **Ultra-low fees**: 0.001 Ϙ per transaction
-✅ **Immediate finality**: BFT consensus
+✅ **Depth-based finality**: PoA consensus (6 block confirmations)
 ✅ **High capacity**: 86.4M+ transactions per day
-✅ **Mild deflation**: Fee burning + lost coins
+✅ **Mild deflation**: Lost coins reduce supply over time
 ✅ **Fixed supply**: No inflation, predictable scarcity
 
 **Target use case**: Replace cash and payment processors for everyday transactions worldwide.
@@ -399,6 +395,6 @@ SUM Chain's economic model is designed for **global peer-to-peer cash**:
 
 ---
 
-**Document Version**: 2.0
-**Last Updated**: December 19, 2025
-**Next Review**: Q1 2026
+**Document Version**: 3.0
+**Last Updated**: March 2026
+**Next Review**: Q3 2026

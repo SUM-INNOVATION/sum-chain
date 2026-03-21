@@ -124,7 +124,7 @@ let keypair = SigningKey::generate(&mut OsRng);
 
 ### Proof of Authority (PoA)
 
-**Model**: Round-robin validator rotation
+**Model**: Round-robin validator rotation (default) or stake-weighted proposer selection
 
 **Security Assumptions**:
 1. Validator honesty: Majority of validators are honest
@@ -133,8 +133,12 @@ let keypair = SigningKey::generate(&mut OsRng);
 
 **Proposer Selection**:
 ```rust
+// Round-robin (default)
 let proposer_index = block_height % validator_count;
 let proposer = validators[proposer_index];
+
+// Stake-weighted (alternative)
+// Proposer selected proportionally to staked amount
 ```
 
 **Attack Resistance**:
@@ -146,13 +150,13 @@ let proposer = validators[proposer_index];
 
 ### Finality
 
-**Mechanism**: Confirmations-based finality
+**Mechanism**: Depth-based confirmations
 
 **Parameters**:
-- Finality threshold: 2/3 of validators
-- Finality delay: ~2 blocks (6 seconds on mainnet)
+- Finality depth: 6 blocks (configurable)
+- A block at height H is finalized when chain reaches height H + finality_depth
 
-**Code Location**: [`crates/consensus/src/engine.rs`](../crates/consensus/src/engine.rs)
+**Code Location**: [`crates/consensus/src/poa.rs`](../crates/consensus/src/poa.rs)
 
 ## Network Security
 
@@ -173,8 +177,11 @@ let proposer = validators[proposer_index];
 ### Gossipsub
 
 **Topics**:
-- `/sumchain/1/transactions/v1` - Transaction propagation
-- `/sumchain/1/blocks/v1` - Block propagation
+- `sumchain/tx/1` - Transaction propagation
+- `sumchain/block/1` - Block propagation
+- `sumchain/bft/proposal/1` - BFT proposals (experimental)
+- `sumchain/bft/prevote/1` - BFT prevotes (experimental)
+- `sumchain/bft/precommit/1` - BFT precommits (experimental)
 
 **Protection Mechanisms**:
 - Message deduplication
@@ -195,6 +202,7 @@ let proposer = validators[proposer_index];
 ### Transaction Format
 
 ```rust
+// V1 Transaction
 pub struct Transaction {
     pub chain_id: u64,      // Replay protection
     pub from: Address,      // Sender (derived from signature)
@@ -204,6 +212,8 @@ pub struct Transaction {
     pub nonce: u64,         // Nonce for ordering
 }
 ```
+
+**Note**: V2 transactions also include a `payload` field supporting 16 different payload types (Transfer, NFT, Token, Staking, Contract, Messaging, DocClass, etc.).
 
 ### Security Features
 
@@ -370,26 +380,21 @@ cors_origins = ["https://app.sumchain.io"]
 
 ### Current Version (v0.1.0)
 
-1. **Centralized Validator Set**
-   - Validators are fixed at genesis
-   - No dynamic validator addition/removal
-   - Planned for Phase 2
-
-2. **No Formal Verification**
+1. **No Formal Verification**
    - Code is not formally verified
    - Extensive testing and audits planned
 
-3. **Limited DoS Protection**
+2. **Limited DoS Protection**
    - Basic rate limiting only
    - Advanced DDoS mitigation planned
 
-4. **No Smart Contracts**
-   - Simple transfers only
-   - Smart contract support planned for Phase 2
-
-5. **No Light Clients**
+3. **No Light Clients**
    - All nodes are full nodes
    - Light client protocol planned
+
+4. **BFT Consensus (Experimental)**
+   - Experimental BFT module exists but `propose_block()` returns `NotImplemented`
+   - PoA is the production consensus
 
 ## Security Practices
 
@@ -454,7 +459,6 @@ For external auditors, please review:
 
 ## References
 
-- [Operator Guide](./operator-guide.md)
 - [API Reference](./api-reference.md)
 - [Consensus Specification](../crates/consensus/README.md)
 - [Cryptography Documentation](../crates/crypto/README.md)

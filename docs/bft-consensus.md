@@ -1,5 +1,8 @@
 # Byzantine Fault Tolerant (BFT) Consensus
 
+> **Status: EXPERIMENTAL / NOT PRODUCTION-READY**
+> The BFT module exists in the codebase but `propose_block()` returns `NotImplemented`. SUM Chain currently uses **Proof of Authority (PoA)** as its production consensus engine. This document describes the BFT design for future activation.
+
 SUM Chain implements a Tendermint-style BFT consensus algorithm that provides:
 - **Immediate Finality**: Blocks are final once committed (no confirmations needed)
 - **Byzantine Fault Tolerance**: Tolerates up to 1/3 malicious validators

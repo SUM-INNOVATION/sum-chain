@@ -13,6 +13,12 @@ A Layer-1 blockchain built entirely in Rust (stable toolchain). No C/C++, Python
 - **Koppa Currency**: Native token with symbol Ϙ (1 Koppa = 1,000,000,000 base units)
 - **SUM-721 NFTs**: Native NFT standard for digital assets and certified documents
 - **SRC-20 Tokens**: Native fungible token standard (ERC-20 compatible interface)
+- **Staking & Delegation**: Validator staking, delegation rewards, and slashing
+- **WASM Smart Contracts**: Contract deployment and execution via sumc-runtime
+- **Policy Accounts**: Consensus-level multi-sig group governance
+- **On-chain Encrypted Messaging**: SRC-201 standard using X25519 + XChaCha20-Poly1305
+- **SRC-80X through SRC-89X Document Token Families**: DocClass, Tax, Equity, Agreement, Legal, Property, Healthcare, Employment, Finance
+- **Dynamic Validator Sets**: Epoch-based, stake-weighted validator selection
 - **libp2p Networking**: Gossipsub for transaction/block propagation, mDNS for local discovery
 - **JSON-RPC API**: HTTP server for chain queries and transaction submission (ETH + SUM compatible)
 - **RocksDB Storage**: Persistent key-value storage for blocks and state
@@ -23,24 +29,29 @@ A Layer-1 blockchain built entirely in Rust (stable toolchain). No C/C++, Python
 ```
 sum-chain/
 ├── crates/
-│   ├── primitives/     # Core types: Hash, Address, Block, Transaction
-│   ├── crypto/         # Ed25519 keys/signatures, Blake3 hashing
-│   ├── storage/        # RocksDB persistence layer
-│   ├── genesis/        # Genesis configuration
-│   ├── state/          # Account state, transaction execution, mempool
-│   ├── consensus/      # PoA consensus engine
-│   ├── p2p/            # libp2p networking
-│   ├── rpc/            # JSON-RPC server
-│   ├── node/           # Full node binary
-│   ├── wallet/         # CLI wallet
-│   ├── nft/            # SUM-721 NFT standard
-│   └── token/          # SRC-20 fungible token standard
+│   ├── bridge/             # Cross-chain bridging
+│   ├── consensus/          # PoA consensus engine
+│   ├── crypto/             # Ed25519 keys/signatures, Blake3 hashing
+│   ├── genesis/            # Genesis configuration
+│   ├── integration-tests/  # End-to-end multi-node tests
+│   ├── nft/                # SUM-721 NFT standard
+│   ├── node/               # Full node binary
+│   ├── p2p/                # libp2p networking
+│   ├── primitives/         # Core types: Hash, Address, Block, Transaction
+│   ├── rpc/                # JSON-RPC server
+│   ├── state/              # Account state, transaction execution, mempool
+│   ├── storage/            # RocksDB persistence layer
+│   ├── sumc-runtime/       # WASM smart contract runtime
+│   ├── sumc-sdk/           # SDK for building on SUM Chain
+│   ├── sumc-sdk-macros/    # Procedural macros for sumc-sdk
+│   ├── token/              # SRC-20 fungible token standard
+│   └── wallet/             # CLI wallet
 ├── sdk/
-│   └── typescript/     # TypeScript SDK
-├── explorer/           # Block explorer (React)
-├── scripts/            # Setup scripts (Rust)
-├── configs/            # Node configuration files
-└── genesis/            # Genesis file templates
+│   └── typescript/         # TypeScript SDK
+├── explorer/               # Block explorer (React)
+├── scripts/                # Setup scripts (Rust)
+├── configs/                # Node configuration files
+└── genesis/                # Genesis file templates
 ```
 
 ## Requirements
@@ -383,12 +394,19 @@ SignedTransaction:
   - Transfer 1.5 Ϙ: `amount = 1500000000`
   - Fee 0.001 Ϙ: `fee = 1000000`
 
+**V2 Transaction Payload Types:**
+
+V2 transactions support 16 payload types: Transfer, NFT (SUM-721), Token (SRC-20), ContractDeploy, ContractCall, Staking, Messaging (SRC-201), DocClass (SRC-80X/81X), Tax (SRC-82X), Equity (SRC-83X), Agreement (SRC-84X), Legal (SRC-85X), Property (SRC-86X), Healthcare (SRC-87X), Employment (SRC-88X), Finance (SRC-89X), PolicyAccount.
+
 ## Consensus: Proof of Authority
 
 - Validators are defined in genesis
-- Round-robin proposer selection: `proposer = validators[height % validator_count]`
+- PoA with round-robin OR stake-weighted proposer selection (configurable)
+- Dynamic validator sets with epoch-based recalculation
 - Block time: configurable (default 2 seconds)
 - Fork choice: longest chain, with hash tiebreaker
+- Finality: depth-based (default 6 blocks)
+- BFT module exists but is not yet production-ready
 
 ## Security Considerations
 
@@ -414,7 +432,12 @@ SignedTransaction:
 - **Peer Management**: Connection limits, peer scoring/reputation, exponential backoff, RPC peer info
 - **Transaction Rebroadcasting**: Automatic retry for pending transactions
 - **Graceful Shutdown**: Clean termination with database flush
-- **Finality Tracking**: Block finality after 2/3 validator confirmations
+- **Finality Tracking**: Depth-based block finality (default 6 confirmations)
+- **Staking & Delegation**: Validator staking, delegation, reward claiming
+- **WASM Smart Contracts**: Contract deployment and execution
+- **Policy Accounts**: Consensus-level multi-sig group governance
+- **Encrypted Messaging**: SRC-201 on-chain encrypted messaging
+- **Document Token Families**: SRC-80X through SRC-89X industry-specific standards
 - **Rate Limiting**: Per-IP request rate limiting for RPC
 - **API Authentication**: Optional API key authentication for RPC
 - **Integration Tests**: 16 end-to-end tests for multi-node scenarios
@@ -435,25 +458,24 @@ SignedTransaction:
 
 ## Phase 2 Roadmap
 
-### Proof of Stake (PoS)
-- Stake delegation
-- Validator rewards and slashing
-- Economic finality
-
 ### Light Clients
 - Merkle proofs for state verification
 - Header-only sync
 - Light client protocol
 
-### Smart Contracts (Optional)
-- WASM-based VM
-- Contract deployment and execution
-- Gas metering
-
 ### Bridging / IBC
 - Cross-chain communication
 - Asset transfers
 - Relayer infrastructure
+
+### Archive/Storage Nodes
+- Full historical state retention
+- Dedicated storage node role
+
+### BFT Consensus (Production-Ready)
+- Harden existing BFT module for production use
+
+**Last Updated**: March 2026
 
 ## License
 

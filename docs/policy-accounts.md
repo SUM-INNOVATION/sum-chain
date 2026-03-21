@@ -623,6 +623,8 @@ curl -X POST http://localhost:8545 \
 
 ## RPC API Reference
 
+> **Status: NOT YET IMPLEMENTED.** The RPC endpoints below describe the planned API surface. The core policy account logic (primitives, storage, executor) is implemented at the consensus level, but the RPC handlers have not been wired up yet. See [policy-accounts-implementation-status.md](policy-accounts-implementation-status.md) for details.
+
 ### policy_createAccount
 
 Create a new policy account.

@@ -289,65 +289,11 @@ policy_listMemberAccounts(address) -> [info]
 
 ---
 
-### 3. Developer Documentation (Not Started)
+### 3. Developer Documentation (Complete)
 
-**File:** `docs/policy-accounts.md`
+**File:** `docs/policy-accounts.md` — Written with all sections including introduction, use cases, policy profiles, action classification, proposal workflow, security considerations, end-to-end examples, and RPC API reference.
 
-**Required Sections:**
-
-1. **Introduction**
-   - What are policy accounts?
-   - Use cases
-   - Benefits
-
-2. **Creating a Policy Account**
-   - Choose profile
-   - Define members
-   - Custom overrides
-   - Code example
-
-3. **Policy Profiles Guide**
-   - Conservative (high-value assets, houses)
-   - Company (corporate governance)
-   - DAO (decentralized orgs)
-   - Personal (shared accounts)
-   - Trust (fiduciary)
-   - Custom (advanced)
-   - Comparison table
-
-4. **Submitting and Executing Proposals**
-   - Propose action
-   - Collect off-chain approvals
-   - Submit with approvals
-   - Execute once threshold met
-   - Complete workflow
-
-5. **Action Classification**
-   - How classification works
-   - Why it matters
-   - Custom overrides
-
-6. **Security Considerations**
-   - Replay protection
-   - Approval binding
-   - Member management
-   - Common pitfalls
-
-7. **End-to-End Examples**
-   - **Example 1: House-Like Asset**
-     - Setup
-     - Selling the house
-     - Thresholds
-   - **Example 2: Company Governance**
-     - Setup
-     - Board resolution
-     - Selling assets
-     - Thresholds
-
-8. **RPC API Reference**
-   - All endpoints
-   - Request/response formats
-   - Error codes
+**Note:** The RPC endpoints documented in `policy-accounts.md` are **not yet implemented** in the RPC server — the documentation describes the planned API surface.
 
 ---
 
@@ -443,8 +389,8 @@ match proposal.action_class {
 | Integration | ✅ Complete | ~50 | 100% |
 | RPC | ❌ Not Started | 0 | 0% |
 | Tests | ❌ Not Started | 0 | 0% |
-| Docs | ❌ Not Started | 0 | 0% |
-| **Total** | **60% Complete** | **~1735** | **60%** |
+| Docs | ✅ Complete | ~870 | 100% |
+| **Total** | **70% Complete** | **~2600** | **70%** |
 
 ---
 
@@ -562,13 +508,15 @@ The implementation will be considered complete when:
 - [crates/primitives/src/transaction.rs](crates/primitives/src/transaction.rs)
 - [crates/storage/src/db.rs](crates/storage/src/db.rs)
 
+### Written (Documentation)
+- [docs/policy-accounts.md](../docs/policy-accounts.md) ✅
+
 ### To Be Created
 - `crates/rpc/src/policy_account_types.rs`
 - `crates/state/tests/policy_account_tests.rs`
-- `docs/policy-accounts.md`
 
 ---
 
-**Last Updated:** 2026-01-24
+**Last Updated:** 2026-03-20
 **Implementation Lead:** Claude (Senior Blockchain/Runtime Engineer)
-**Status:** 60% Complete - Core Functionality Implemented
+**Status:** 70% Complete - Core Functionality + Docs Implemented, RPC + Tests Remaining
