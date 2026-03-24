@@ -1041,4 +1041,15 @@ pub trait SumChainApi {
         &self,
         policy_account_id: String,
     ) -> Result<Vec<ProposalInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    // ========================================================================
+    // Storage Metadata Methods
+    // ========================================================================
+
+    /// Get storage file metadata and access list by merkle root
+    #[method(name = "storage_getAccessList")]
+    async fn storage_get_access_list(
+        &self,
+        merkle_root: String,
+    ) -> Result<Option<serde_json::Value>, jsonrpsee::types::ErrorObjectOwned>;
 }

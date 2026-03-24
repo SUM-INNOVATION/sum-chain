@@ -61,6 +61,10 @@ pub enum TxType {
     Finance = 15,
     /// Policy Account operation (Group governance)
     PolicyAccount = 16,
+    /// Node Registry operation (register/manage network nodes)
+    NodeRegistry = 17,
+    /// Storage Metadata operation (file registration, ACL, fee pool)
+    StorageMetadata = 18,
 }
 
 impl TxType {
@@ -84,6 +88,8 @@ impl TxType {
             14 => Some(TxType::Employment),
             15 => Some(TxType::Finance),
             16 => Some(TxType::PolicyAccount),
+            17 => Some(TxType::NodeRegistry),
+            18 => Some(TxType::StorageMetadata),
             _ => None,
         }
     }
@@ -366,6 +372,10 @@ pub enum TxPayload {
     Finance(FinanceTxData),
     /// Policy Account operation (Group governance)
     PolicyAccount(PolicyAccountTxData),
+    /// Node Registry operation (register/manage network nodes)
+    NodeRegistry(crate::node_registry::NodeRegistryTxData),
+    /// Storage Metadata operation (file registration, ACL, fee pool)
+    StorageMetadata(crate::storage_metadata::StorageMetadataTxData),
 }
 
 impl TransactionV2 {
@@ -509,6 +519,8 @@ impl TransactionV2 {
             TxPayload::Employment(_) => TxType::Employment,
             TxPayload::Finance(_) => TxType::Finance,
             TxPayload::PolicyAccount(_) => TxType::PolicyAccount,
+            TxPayload::NodeRegistry(_) => TxType::NodeRegistry,
+            TxPayload::StorageMetadata(_) => TxType::StorageMetadata,
         }
     }
 
@@ -548,6 +560,8 @@ impl TransactionV2 {
             TxPayload::Employment(data) => Some(data.recipient),
             TxPayload::Finance(data) => Some(data.recipient),
             TxPayload::PolicyAccount(data) => Some(data.recipient),
+            TxPayload::NodeRegistry(_) => None,
+            TxPayload::StorageMetadata(_) => None,
         }
     }
 
@@ -571,6 +585,8 @@ impl TransactionV2 {
             TxPayload::Employment(_) => 0, // Fee-only operations
             TxPayload::Finance(_) => 0,    // Fee-only operations
             TxPayload::PolicyAccount(_) => 0, // Fee-only operations
+            TxPayload::NodeRegistry(_) => 0,    // Stake handled in executor
+            TxPayload::StorageMetadata(_) => 0,  // Fee deposit handled in executor
         }
     }
 

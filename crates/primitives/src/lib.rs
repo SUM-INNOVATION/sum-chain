@@ -14,10 +14,12 @@ pub mod hash;
 pub mod healthcare;
 pub mod legal;
 pub mod messaging;
+pub mod node_registry;
 pub mod policy_account;
 pub mod property;
 pub mod receipt;
 pub mod staking;
+pub mod storage_metadata;
 pub mod tax;
 pub mod transaction;
 
@@ -109,6 +111,12 @@ pub use finance::{
     FinanceIssuerProfile, FinanceIssuerStatus, FinanceOperation, FinanceProofEnvelope,
     FinanceProofProfile, FinanceProofType, FinanceRiskLevel, FinanceTxData, KycAttestation,
     KycAttestationId, KycLevel, KycStatus,
+};
+pub use node_registry::{
+    NodeRecord, NodeRegistryOperation, NodeRegistryTxData, NodeRole, NodeStatus,
+};
+pub use storage_metadata::{
+    StorageMetadata, StorageMetadataOperation, StorageMetadataTxData,
 };
 pub use policy_account::{
     ActionClass, ApprovalThreshold, MemberApproval, PolicyAccount, PolicyAccountId,

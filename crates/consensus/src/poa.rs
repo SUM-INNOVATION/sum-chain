@@ -526,17 +526,32 @@ impl PoAEngine {
             .execute_block(&block, self.state.state_root())?;
 
         // Verify state root matches
-        // Skip verification for blocks at or before height 496720 (affected by bug)
+        //
+        // HISTORICAL EXCEPTION (height <= 496720):
+        // A state root cache bug caused Hash::ZERO to be mixed into
+        // compute_block_state_root() after node restarts during this era.
+        // Some blocks in this range carry incorrect state roots permanently
+        // committed in their headers. A fresh-syncing node computes the
+        // *correct* root which won't match, so we skip verification and
+        // force-adopt the header's root to keep the accumulator aligned
+        // for the next block.
+        //
+        // ROOT CAUSE FIX: load_chain() now calls
+        //   self.state.set_state_root(block.header.state_root)
+        // on startup (line ~301), preventing the bug for all new blocks.
+        // Strict enforcement applies for height > 496720.
         if block.header.state_root != state_root {
             if height <= 496720 {
                 warn!(
-                    "State root mismatch at height {} - skipping verification for historical block",
+                    "State root mismatch at height {} (historical bug window) - \
+                     adopting header root to align accumulator for next block",
                     height
                 );
+                self.state.set_state_root(block.header.state_root);
             } else {
                 return Err(ConsensusError::InvalidBlock(format!(
-                    "State root mismatch: expected {}, got {}",
-                    block.header.state_root, state_root
+                    "State root mismatch at height {}: header={}, computed={}",
+                    height, block.header.state_root, state_root
                 )));
             }
         }

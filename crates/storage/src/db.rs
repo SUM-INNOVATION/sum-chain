@@ -90,6 +90,14 @@ pub mod cf {
     /// Validator sets by epoch (epoch -> ValidatorSet)
     pub const VALIDATOR_SETS: &str = "validator_sets";
 
+    // Node Registry
+    /// Node registry (address -> NodeRecord, role indexes)
+    pub const NODE_REGISTRY: &str = "node_registry";
+
+    // Storage Metadata
+    /// Storage file metadata (merkle_root -> StorageMetadata, owner indexes)
+    pub const STORAGE_METADATA: &str = "storage_metadata";
+
     // SRC-80X/81X DocClass column families
     /// Identity roots (SRC-800)
     pub const DOCCLASS_IDENTITY_ROOTS: &str = "docclass_identity_roots";
@@ -479,6 +487,10 @@ pub const ALL_CFS: &[&str] = &[
     // Policy Account
     cf::POLICY_ACCOUNTS,
     cf::POLICY_PROPOSALS,
+    // Node Registry
+    cf::NODE_REGISTRY,
+    // Storage Metadata
+    cf::STORAGE_METADATA,
     // Transaction indexing
     cf::TX_BY_SENDER,
     cf::TX_BY_RECIPIENT,

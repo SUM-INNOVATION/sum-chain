@@ -4908,6 +4908,30 @@ impl SumChainApiServer for RpcServer {
     async fn policy_list_pending_proposals(&self, _policy_account_id: String) -> std::result::Result<Vec<ProposalInfo>, jsonrpsee::types::ErrorObjectOwned> {
         Err(RpcError::Internal("Not yet implemented".to_string()).into())
     }
+
+    async fn storage_get_access_list(
+        &self,
+        merkle_root: String,
+    ) -> std::result::Result<Option<serde_json::Value>, jsonrpsee::types::ErrorObjectOwned> {
+        let hash = self.parse_hash(&merkle_root)?;
+
+        let executor = sumchain_state::StorageMetadataExecutor::new(self.db.clone());
+        let meta = executor
+            .get_metadata(&hash)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        match meta {
+            Some(m) => Ok(Some(serde_json::json!({
+                "merkle_root": format!("0x{}", hex::encode(m.merkle_root.as_bytes())),
+                "owner": m.owner.to_base58(),
+                "total_size_bytes": m.total_size_bytes,
+                "access_list": m.access_list.iter().map(|a| a.to_base58()).collect::<Vec<_>>(),
+                "fee_pool": m.fee_pool,
+                "created_at": m.created_at,
+            }))),
+            None => Ok(None),
+        }
+    }
 }
 
 // Helper methods for DocClass RPC conversions

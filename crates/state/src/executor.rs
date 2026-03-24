@@ -24,9 +24,11 @@ use crate::healthcare_executor::HealthcareExecutor;
 use crate::legal_executor::LegalExecutor;
 use crate::messaging_executor::MessagingExecutor;
 use crate::nft_executor::NftExecutor;
+use crate::node_registry::NodeRegistryExecutor;
 use crate::policy_account_executor::PolicyAccountExecutor;
 use crate::property_executor::PropertyExecutor;
 use crate::staking_executor::StakingExecutor;
+use crate::storage_metadata::StorageMetadataExecutor;
 use crate::tax_executor::TaxExecutor;
 use crate::token_executor::TokenExecutor;
 use crate::{Result, StateError, StateManager};
@@ -59,6 +61,8 @@ pub struct BlockExecutor {
     employment_executor: EmploymentExecutor,
     finance_executor: FinanceExecutor,
     policy_account_executor: PolicyAccountExecutor,
+    node_registry_executor: NodeRegistryExecutor,
+    storage_metadata_executor: StorageMetadataExecutor,
 }
 
 impl BlockExecutor {
@@ -79,6 +83,8 @@ impl BlockExecutor {
         let employment_executor = EmploymentExecutor::new(db.clone(), params.clone());
         let finance_executor = FinanceExecutor::new(db.clone(), params.clone());
         let policy_account_executor = PolicyAccountExecutor::new(db.clone());
+        let node_registry_executor = NodeRegistryExecutor::new(db.clone());
+        let storage_metadata_executor = StorageMetadataExecutor::new(db.clone());
         Self {
             state,
             db,
@@ -98,6 +104,8 @@ impl BlockExecutor {
             employment_executor,
             finance_executor,
             policy_account_executor,
+            node_registry_executor,
+            storage_metadata_executor,
         }
     }
 
@@ -850,6 +858,72 @@ impl BlockExecutor {
                             Ok(TxExecutionResult {
                                 tx_hash,
                                 status: TxStatus::Failed(17), // PolicyAccount operation failed
+                                fee_paid: 0,
+                            })
+                        }
+                    }
+                    TxPayload::NodeRegistry(registry_data) => {
+                        let result = self.node_registry_executor.execute(
+                            &v2_tx.from,
+                            &registry_data,
+                            &self.state,
+                            proposer,
+                            v2_tx.fee,
+                            0, // block_height placeholder
+                            block_timestamp,
+                        )?;
+
+                        if result.success {
+                            debug!("V2 NodeRegistry {} executed", tx_hash);
+
+                            Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Success,
+                                fee_paid: v2_tx.fee,
+                            })
+                        } else {
+                            warn!(
+                                "V2 NodeRegistry {} failed: {}",
+                                tx_hash,
+                                result.error.as_deref().unwrap_or("Unknown error")
+                            );
+
+                            Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Failed(18), // NodeRegistry operation failed
+                                fee_paid: 0,
+                            })
+                        }
+                    }
+                    TxPayload::StorageMetadata(storage_data) => {
+                        let result = self.storage_metadata_executor.execute(
+                            &v2_tx.from,
+                            &storage_data,
+                            &self.state,
+                            proposer,
+                            v2_tx.fee,
+                            0, // block_height placeholder
+                            block_timestamp,
+                        )?;
+
+                        if result.success {
+                            debug!("V2 StorageMetadata {} executed", tx_hash);
+
+                            Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Success,
+                                fee_paid: v2_tx.fee,
+                            })
+                        } else {
+                            warn!(
+                                "V2 StorageMetadata {} failed: {}",
+                                tx_hash,
+                                result.error.as_deref().unwrap_or("Unknown error")
+                            );
+
+                            Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Failed(19), // StorageMetadata operation failed
                                 fee_paid: 0,
                             })
                         }
@@ -1683,10 +1757,19 @@ impl BlockExecutor {
                     })
                 }
             }
-            TxPayload::PolicyAccount(policy_data) => {
-                // This branch should never be reached - PolicyAccount is V2 only
+            TxPayload::PolicyAccount(_) => {
                 return Err(StateError::InvalidOperation(
                     "PolicyAccount is only supported in V2 transactions".to_string(),
+                ));
+            }
+            TxPayload::NodeRegistry(_) => {
+                return Err(StateError::InvalidOperation(
+                    "NodeRegistry is only supported in V2 transactions".to_string(),
+                ));
+            }
+            TxPayload::StorageMetadata(_) => {
+                return Err(StateError::InvalidOperation(
+                    "StorageMetadata is only supported in V2 transactions".to_string(),
                 ));
             }
         }
