@@ -734,6 +734,37 @@ impl StorageMetadataExecutor {
     // Challenge CRUD
     // =========================================================================
 
+    /// Get all active challenges assigned to a specific node.
+    /// Scans the N (node) prefix index: key = [b'N', target_node(20), challenge_id(32)]
+    pub fn get_challenges_by_node(&self, target_node: &Address) -> Result<Vec<StorageChallenge>> {
+        let mut prefix = Vec::with_capacity(21);
+        prefix.push(b'N');
+        prefix.extend_from_slice(target_node.as_bytes());
+
+        let mut challenges = Vec::new();
+
+        let entries: Vec<_> = self.db
+            .prefix_iter(CF_ACTIVE_CHALLENGES, &prefix)
+            .map_err(|e| StateError::Storage(e))?
+            .collect();
+
+        for (key, _) in entries {
+            // key = [b'N'(1), target_node(20), challenge_id(32)] = 53 bytes
+            if key.len() < 53 {
+                continue; // Malformed key — skip safely
+            }
+
+            let challenge_id = Hash::from_slice(&key[21..53])
+                .map_err(|e| StateError::DeserializationError(e.to_string()))?;
+
+            if let Some(challenge) = self.get_challenge(&challenge_id)? {
+                challenges.push(challenge);
+            }
+        }
+
+        Ok(challenges)
+    }
+
     pub fn put_challenge(&self, challenge: &StorageChallenge) -> Result<()> {
         let value = bincode::serialize(challenge)
             .map_err(|e| StateError::SerializationError(e.to_string()))?;

@@ -4932,6 +4932,84 @@ impl SumChainApiServer for RpcServer {
             None => Ok(None),
         }
     }
+
+    async fn storage_get_active_challenges(
+        &self,
+        node_address: String,
+    ) -> std::result::Result<Vec<serde_json::Value>, jsonrpsee::types::ErrorObjectOwned> {
+        let addr = self.parse_address(&node_address)?;
+
+        let executor = sumchain_state::StorageMetadataExecutor::new(self.db.clone());
+        let challenges = executor
+            .get_challenges_by_node(&addr)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        let result: Vec<serde_json::Value> = challenges
+            .iter()
+            .map(|c| serde_json::json!({
+                "challenge_id": format!("0x{}", hex::encode(c.challenge_id.as_bytes())),
+                "merkle_root": format!("0x{}", hex::encode(c.merkle_root.as_bytes())),
+                "chunk_index": c.chunk_index,
+                "target_node": c.target_node.to_base58(),
+                "created_at_height": c.created_at_height,
+                "expires_at_height": c.expires_at_height,
+            }))
+            .collect();
+
+        Ok(result)
+    }
+
+    async fn storage_get_funded_files(
+        &self,
+    ) -> std::result::Result<Vec<serde_json::Value>, jsonrpsee::types::ErrorObjectOwned> {
+        let executor = sumchain_state::StorageMetadataExecutor::new(self.db.clone());
+
+        let roots = executor
+            .get_funded_file_roots()
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        let mut files = Vec::with_capacity(roots.len());
+        for root in &roots {
+            if let Some(m) = executor
+                .get_metadata(root)
+                .map_err(|e| RpcError::Internal(e.to_string()))?
+            {
+                files.push(serde_json::json!({
+                    "merkle_root": format!("0x{}", hex::encode(m.merkle_root.as_bytes())),
+                    "owner": m.owner.to_base58(),
+                    "total_size_bytes": m.total_size_bytes,
+                    "access_list": m.access_list.iter().map(|a| a.to_base58()).collect::<Vec<_>>(),
+                    "fee_pool": m.fee_pool,
+                    "created_at": m.created_at,
+                }));
+            }
+        }
+
+        Ok(files)
+    }
+
+    async fn storage_get_node_record(
+        &self,
+        node_address: String,
+    ) -> std::result::Result<Option<serde_json::Value>, jsonrpsee::types::ErrorObjectOwned> {
+        let addr = self.parse_address(&node_address)?;
+
+        let executor = sumchain_state::NodeRegistryExecutor::new(self.db.clone());
+        let record = executor
+            .get_node(&addr)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        match record {
+            Some(r) => Ok(Some(serde_json::json!({
+                "address": r.address.to_base58(),
+                "role": format!("{:?}", r.role),
+                "staked_balance": r.staked_balance,
+                "status": format!("{:?}", r.status),
+                "registered_at": r.registered_at,
+            }))),
+            None => Ok(None),
+        }
+    }
 }
 
 // Helper methods for DocClass RPC conversions

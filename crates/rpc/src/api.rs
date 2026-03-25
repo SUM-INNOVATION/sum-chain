@@ -1052,4 +1052,24 @@ pub trait SumChainApi {
         &self,
         merkle_root: String,
     ) -> Result<Option<serde_json::Value>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get all active storage challenges assigned to a specific node
+    #[method(name = "storage_getActiveChallenges")]
+    async fn storage_get_active_challenges(
+        &self,
+        node_address: String,
+    ) -> Result<Vec<serde_json::Value>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get all files with a non-zero fee pool (the storage market)
+    #[method(name = "storage_getFundedFiles")]
+    async fn storage_get_funded_files(
+        &self,
+    ) -> Result<Vec<serde_json::Value>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get a node's registry record (stake, role, status)
+    #[method(name = "storage_getNodeRecord")]
+    async fn storage_get_node_record(
+        &self,
+        node_address: String,
+    ) -> Result<Option<serde_json::Value>, jsonrpsee::types::ErrorObjectOwned>;
 }
