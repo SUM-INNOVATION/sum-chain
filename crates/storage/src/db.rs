@@ -98,6 +98,10 @@ pub mod cf {
     /// Storage file metadata (merkle_root -> StorageMetadata, owner indexes)
     pub const STORAGE_METADATA: &str = "storage_metadata";
 
+    // PoR Challenges
+    /// Active storage challenges (challenge_id -> StorageChallenge, node/expiry indexes)
+    pub const ACTIVE_CHALLENGES: &str = "active_challenges";
+
     // SRC-80X/81X DocClass column families
     /// Identity roots (SRC-800)
     pub const DOCCLASS_IDENTITY_ROOTS: &str = "docclass_identity_roots";
@@ -491,6 +495,8 @@ pub const ALL_CFS: &[&str] = &[
     cf::NODE_REGISTRY,
     // Storage Metadata
     cf::STORAGE_METADATA,
+    // PoR Challenges
+    cf::ACTIVE_CHALLENGES,
     // Transaction indexing
     cf::TX_BY_SENDER,
     cf::TX_BY_RECIPIENT,

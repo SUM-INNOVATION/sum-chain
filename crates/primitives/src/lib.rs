@@ -116,7 +116,9 @@ pub use node_registry::{
     NodeRecord, NodeRegistryOperation, NodeRegistryTxData, NodeRole, NodeStatus,
 };
 pub use storage_metadata::{
-    StorageMetadata, StorageMetadataOperation, StorageMetadataTxData,
+    StorageChallenge, StorageMetadata, StorageMetadataOperation, StorageMetadataTxData,
+    CHALLENGE_INTERVAL_BLOCKS, CHALLENGE_REWARD, CHALLENGE_TTL_BLOCKS, CHUNK_SIZE,
+    SLASH_PERCENTAGE,
 };
 pub use policy_account::{
     ActionClass, ApprovalThreshold, MemberApproval, PolicyAccount, PolicyAccountId,

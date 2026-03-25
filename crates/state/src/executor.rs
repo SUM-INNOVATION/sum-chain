@@ -9,6 +9,7 @@ use sumchain_genesis::ChainParams;
 use sumchain_primitives::{
     Address, Balance, Block, BlockHeader, Hash, Receipt, SignedTransaction,
     TransactionV2, TxPayload, TxStatus,
+    CHALLENGE_INTERVAL_BLOCKS, SLASH_PERCENTAGE,
 };
 use sumchain_storage::schema::StateDiff;
 use sumchain_storage::Database;
@@ -1791,6 +1792,11 @@ impl BlockExecutor {
         let mut receipts = Vec::new();
         let mut state_diff = StateDiff::new();
 
+        // ── PoR Phase: Slash expired challenges BEFORE user transactions ─────
+        // This prevents a node from front-running a slash by submitting a
+        // last-second proof and a withdrawal in the same block.
+        self.process_expired_challenges(block.height())?;
+
         for (idx, tx) in block.transactions.iter().enumerate() {
             // Record pre-execution state for diff
             let sender = tx.sender();
@@ -1834,6 +1840,10 @@ impl BlockExecutor {
             receipts.push(receipt);
         }
 
+        // ── PoR Phase: Generate challenge AFTER transactions, BEFORE state root ──
+        // This ensures the challenge write is captured in the state root.
+        self.generate_storage_challenge_if_due(block)?;
+
         // Compute new state root (simplified)
         let state_root = self.compute_block_state_root(block, &receipts)?;
         self.state.set_state_root(state_root);
@@ -1876,6 +1886,102 @@ impl BlockExecutor {
         data.extend_from_slice(self.state.state_root().as_bytes());
 
         Ok(Hash::hash(&data))
+    }
+
+    // =========================================================================
+    // PoR Engine: Expired Challenge Slashing + Challenge Generation
+    // =========================================================================
+
+    /// Slash all ArchiveNodes with expired challenges.
+    /// Called at the START of execute_block, before user transactions.
+    fn process_expired_challenges(&self, current_height: u64) -> Result<()> {
+        let expired = self.storage_metadata_executor.get_expired_challenges(current_height)?;
+
+        for challenge in &expired {
+            // Load the node record
+            match self.node_registry_executor.get_node(&challenge.target_node)? {
+                Some(mut record) => {
+                    if record.status == sumchain_primitives::NodeStatus::Slashed {
+                        // Already slashed — just clean up the challenge
+                        self.storage_metadata_executor.delete_challenge(challenge)?;
+                        continue;
+                    }
+
+                    // Calculate slash amount: SLASH_PERCENTAGE% of staked balance
+                    let slash_amount = record.staked_balance
+                        .saturating_mul(SLASH_PERCENTAGE)
+                        / 100;
+
+                    record.staked_balance = record.staked_balance.saturating_sub(slash_amount);
+                    record.status = sumchain_primitives::NodeStatus::Slashed;
+
+                    // Write updated node record (reuse put_node via the executor)
+                    // We need to write directly since put_node is private
+                    let node_key = {
+                        let mut k = Vec::with_capacity(21);
+                        k.push(b'N');
+                        k.extend_from_slice(record.address.as_bytes());
+                        k
+                    };
+                    let node_value = bincode::serialize(&record)
+                        .map_err(|e| StateError::SerializationError(e.to_string()))?;
+                    self.db.put("node_registry", &node_key, &node_value)
+                        .map_err(|e| StateError::Storage(e))?;
+
+                    warn!(
+                        "Slashed node {} for expired challenge {}: -{} stake (remaining: {})",
+                        challenge.target_node, challenge.challenge_id,
+                        slash_amount, record.staked_balance
+                    );
+                }
+                None => {
+                    // Node not found — just clean up
+                    debug!(
+                        "Node {} not found for expired challenge {} — cleaning up",
+                        challenge.target_node, challenge.challenge_id
+                    );
+                }
+            }
+
+            // Delete the expired challenge from state
+            self.storage_metadata_executor.delete_challenge(challenge)?;
+        }
+
+        Ok(())
+    }
+
+    /// Generate a deterministic storage challenge if this block height
+    /// falls on the challenge interval. Called AFTER user transactions
+    /// but BEFORE state root computation.
+    fn generate_storage_challenge_if_due(&self, block: &Block) -> Result<()> {
+        let height = block.height();
+
+        if height == 0 || height % CHALLENGE_INTERVAL_BLOCKS != 0 {
+            return Ok(());
+        }
+
+        // Get active ArchiveNodes
+        let archive_nodes = self.node_registry_executor.get_active_archive_nodes()?;
+        if archive_nodes.is_empty() {
+            return Ok(());
+        }
+
+        // Use parent block hash as deterministic seed
+        let parent_hash = &block.header.parent_hash;
+
+        match self.storage_metadata_executor.generate_challenge(
+            parent_hash, height, &archive_nodes,
+        )? {
+            Some(_challenge) => {
+                // Challenge was created and written to ACTIVE_CHALLENGES
+                // The state write is already done inside generate_challenge()
+            }
+            None => {
+                debug!("No challenge generated at height {} (no eligible files/nodes)", height);
+            }
+        }
+
+        Ok(())
     }
 
     /// Validate a block header

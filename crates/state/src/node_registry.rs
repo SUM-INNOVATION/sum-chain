@@ -230,6 +230,12 @@ impl NodeRegistryExecutor {
         }
     }
 
+    /// Get all active ArchiveNodes (used by PoR challenge generation)
+    pub fn get_active_archive_nodes(&self) -> Result<Vec<NodeRecord>> {
+        let all = self.get_nodes_by_role(NodeRole::ArchiveNode)?;
+        Ok(all.into_iter().filter(|n| n.status == NodeStatus::Active).collect())
+    }
+
     pub fn get_nodes_by_role(&self, role: NodeRole) -> Result<Vec<NodeRecord>> {
         let prefix = vec![b'R', role as u8];
         let mut nodes = Vec::new();

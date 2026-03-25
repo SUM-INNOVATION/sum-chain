@@ -1,12 +1,31 @@
 //! Storage Metadata types for SUM Chain.
 //!
 //! Defines on-chain data structures for decentralized file storage metadata,
-//! including file identity (Blake3 Merkle root), access control lists, and
-//! fee pools for storage-node payouts.
+//! including file identity (Blake3 Merkle root), access control lists,
+//! fee pools for storage-node payouts, and Proof-of-Retrievability challenges.
 
 use serde::{Deserialize, Serialize};
 
 use crate::{Address, Hash};
+
+// ─── PoR Constants ───────────────────────────────────────────────────────────
+
+/// Chunk size for PoR challenges: 1 MB
+pub const CHUNK_SIZE: u64 = 1_048_576;
+
+/// How many blocks an ArchiveNode has to respond to a challenge
+pub const CHALLENGE_TTL_BLOCKS: u64 = 50;
+
+/// Issue a new challenge every N blocks
+pub const CHALLENGE_INTERVAL_BLOCKS: u64 = 100;
+
+/// Reward per valid proof: 10 Koppa (in base units)
+pub const CHALLENGE_REWARD: u64 = 10_000_000_000;
+
+/// Percentage of staked balance slashed on expired challenge
+pub const SLASH_PERCENTAGE: u64 = 5;
+
+// ─── File Metadata ───────────────────────────────────────────────────────────
 
 /// On-chain metadata for a stored file
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,6 +43,29 @@ pub struct StorageMetadata {
     /// Block height at which the metadata was created
     pub created_at: u64,
 }
+
+// ─── PoR Challenge ───────────────────────────────────────────────────────────
+
+/// An open cryptographic challenge issued by the L1 to an ArchiveNode.
+/// The node must submit a valid Merkle proof before `expires_at_height`
+/// or face slashing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageChallenge {
+    /// Deterministic ID: Blake3(merkle_root ++ chunk_index ++ created_at_height)
+    pub challenge_id: Hash,
+    /// Which file is being challenged
+    pub merkle_root: Hash,
+    /// Which 1 MB chunk to prove (0-indexed)
+    pub chunk_index: u32,
+    /// Which ArchiveNode must respond
+    pub target_node: Address,
+    /// Block height the challenge was issued
+    pub created_at_height: u64,
+    /// Deadline: must respond before this height
+    pub expires_at_height: u64,
+}
+
+// ─── Operations ──────────────────────────────────────────────────────────────
 
 /// Operations on storage metadata
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,6 +96,19 @@ pub enum StorageMetadataOperation {
     TopUpFeePool {
         merkle_root: Hash,
         amount: u64,
+    },
+    /// Submit a Merkle proof for a storage challenge (ArchiveNode only)
+    SubmitStorageProof {
+        /// The challenge being responded to
+        challenge_id: Hash,
+        /// File merkle root (must match challenge)
+        merkle_root: Hash,
+        /// Chunk index (must match challenge)
+        chunk_index: u32,
+        /// Blake3 hash of the raw chunk data
+        chunk_hash: Hash,
+        /// Merkle path from chunk leaf to root (sibling hashes, bottom-up)
+        merkle_path: Vec<Hash>,
     },
 }
 
