@@ -420,10 +420,17 @@ impl PoAEngine {
         let tx_root = Hash::merkle_root(&tx_hashes);
 
         // Create header (state_root will be set after execution)
+        // Guarantee strict timestamp monotonicity: if local clock is behind
+        // the parent (e.g. NTP skew), bump to parent_ts + 1 so validation
+        // (timestamp > parent) cannot reject our own block.
+        let timestamp = std::cmp::max(
+            Self::current_timestamp(),
+            best_block.header.timestamp.saturating_add(1),
+        );
         let header = BlockHeader::new(
             best_block.hash(),
             height,
-            Self::current_timestamp(),
+            timestamp,
             tx_root,
             Hash::ZERO, // Will be updated
             *validator_key.public_key().as_bytes(),
