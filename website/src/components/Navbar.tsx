@@ -12,10 +12,10 @@ type NavLink = {
 };
 
 const navLinks: NavLink[] = [
-  { name: 'Features', href: '#features' },
-  { name: 'Technology', href: '#technology' },
-  { name: 'Ecosystem', href: '#ecosystem' },
-  { name: 'Docs', href: '#', comingSoon: true },
+  { name: 'Features', href: '/#features' },
+  { name: 'Technology', href: '/#technology' },
+  { name: 'Ecosystem', href: '/#ecosystem' },
+  { name: 'Docs', href: '/docs' },
 ];
 
 export default function Navbar() {
@@ -96,7 +96,7 @@ export default function Navbar() {
                 Explorer
               </Link>
               <Link
-                href="#get-started"
+                href="/#get-started"
                 className="px-5 py-2.5 text-sm font-medium rounded-full bg-gradient-to-r from-[#26022e] to-[#3d0847] hover:from-[#3d0847] hover:to-[#26022e] border border-purple-500/30 hover:border-purple-500/50 transition-all duration-300 hover:shadow-lg hover:shadow-purple-500/20"
               >
                 Get Started
@@ -177,7 +177,7 @@ export default function Navbar() {
                 Explorer
               </Link>
               <Link
-                href="#get-started"
+                href="/#get-started"
                 onClick={() => setIsMobileMenuOpen(false)}
                 className="mt-4 px-8 py-3 text-lg font-medium rounded-full bg-gradient-to-r from-[#26022e] to-[#3d0847] border border-purple-500/30"
               >

@@ -12,7 +12,7 @@ const features = [
       </svg>
     ),
     title: 'Lightning Fast',
-    description: '3-second block times with instant finality. Your transactions confirm in the time it takes to blink.',
+    description: '3-second block times with fast deterministic finality (~18s, 6 confirmations). Your transactions confirm in the time it takes to take a sip of coffee.',
     gradient: 'from-yellow-500 to-orange-500',
   },
   {
@@ -32,18 +32,38 @@ const features = [
       </svg>
     ),
     title: 'Battle-Tested Security',
-    description: 'Ed25519 signatures, Blake3 hashing, and BFT consensus provide enterprise-grade security without compromise.',
+    description: 'Ed25519 signatures, Blake3 hashing, and Proof of Authority consensus provide enterprise-grade security without compromise.',
     gradient: 'from-blue-500 to-cyan-500',
   },
   {
     icon: (
       <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" />
       </svg>
     ),
-    title: 'Global Scale',
-    description: '800 billion Koppa total supply means ~100 Ϙ per person on Earth. Designed for worldwide adoption.',
+    title: 'Native Decentralized Storage',
+    description: 'L1 Proof-of-Retrievability engine with on-chain Merkle proofs. Archive nodes earn Koppa for serving files; cheats are slashed.',
     gradient: 'from-purple-500 to-pink-500',
+  },
+  {
+    icon: (
+      <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+      </svg>
+    ),
+    title: 'Verifiable AI (ZkML)',
+    description: 'OmniNode settles zero-knowledge AI inference results on-chain. Pay once for compute, prove it forever.',
+    gradient: 'from-fuchsia-500 to-purple-500',
+  },
+  {
+    icon: (
+      <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+      </svg>
+    ),
+    title: 'Native ACL & Identity',
+    description: 'On-chain access lists, encrypted messaging (SRC-201), and document-credential token families for tax, equity, healthcare, and more.',
+    gradient: 'from-indigo-500 to-violet-500',
   },
   {
     icon: (
@@ -54,16 +74,6 @@ const features = [
     title: 'Pure Rust',
     description: 'Built entirely in Rust with zero C/C++ dependencies. Memory-safe, blazing fast, and auditable.',
     gradient: 'from-red-500 to-rose-500',
-  },
-  {
-    icon: (
-      <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
-      </svg>
-    ),
-    title: 'Decentralized',
-    description: 'Proof of Authority consensus with a growing validator set ensures true decentralization and censorship resistance.',
-    gradient: 'from-indigo-500 to-violet-500',
   },
 ];
 

@@ -15,9 +15,9 @@ const footerLinks: Record<string, FooterLink[]> = {
     { name: 'SDK', href: '#', comingSoon: true },
   ],
   Resources: [
-    { name: 'Documentation', href: '#', comingSoon: true },
+    { name: 'Documentation', href: '/docs' },
     { name: 'GitHub', href: '#', comingSoon: true },
-    { name: 'API Reference', href: '#', comingSoon: true },
+    { name: 'API Reference', href: '/docs' },
   ],
   Community: [
     { name: 'X', href: 'https://x.com/SUM_INNOVATION' },

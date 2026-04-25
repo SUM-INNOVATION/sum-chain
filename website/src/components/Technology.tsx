@@ -24,8 +24,8 @@ const techStack = [
     category: 'Network',
   },
   {
-    name: 'BFT Consensus',
-    description: 'Byzantine fault tolerance',
+    name: 'PoA Consensus',
+    description: 'Round-robin validator rotation',
     category: 'Consensus',
   },
   {

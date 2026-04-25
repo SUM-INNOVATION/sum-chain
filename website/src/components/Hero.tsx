@@ -60,8 +60,8 @@ export default function Hero() {
             transition={{ duration: 0.6, delay: 0.3 }}
             className="text-5xl sm:text-6xl md:text-7xl lg:text-8xl font-bold tracking-tight mb-6"
           >
-            <span className="block">The Future of</span>
-            <span className="block gradient-text-purple">Digital Currency</span>
+            <span className="block">A Utility-Backed</span>
+            <span className="block gradient-text-purple">Layer-1</span>
           </motion.h1>
 
           {/* Subheadline */}
@@ -72,8 +72,9 @@ export default function Hero() {
             className="text-lg sm:text-xl text-gray-400 max-w-2xl mx-auto mb-12"
           >
             SUM Chain is a high-performance Layer-1 blockchain powering{' '}
-            <span className="text-white font-medium">Koppa (Ϙ)</span> — the native currency
-            designed for instant, global peer-to-peer transactions.
+            <span className="text-white font-medium">Koppa (Ϙ)</span> — value backed
+            by real on-chain utility: decentralized storage, verifiable AI compute,
+            encrypted messaging, and document credentials. Not just payments.
           </motion.p>
 
           {/* CTA Buttons */}
@@ -84,14 +85,14 @@ export default function Hero() {
             className="flex flex-col sm:flex-row items-center justify-center gap-4"
           >
             <Link
-              href="#get-started"
+              href="/#get-started"
               className="group relative px-8 py-4 text-lg font-medium rounded-full bg-white text-[#0a0a0a] hover:bg-gray-100 transition-all duration-300 overflow-hidden"
             >
               <span className="relative z-10">Start Building</span>
               <div className="absolute inset-0 bg-gradient-to-r from-purple-500 to-pink-500 opacity-0 group-hover:opacity-10 transition-opacity duration-300" />
             </Link>
             <Link
-              href="https://explorer.sum-chain.xyz"
+              href="https://explorer.sumchain.io"
               className="group px-8 py-4 text-lg font-medium rounded-full border border-white/20 hover:border-white/40 hover:bg-white/5 transition-all duration-300 flex items-center gap-2"
             >
               View Explorer
@@ -122,7 +123,7 @@ export default function Hero() {
               { label: 'Block Time', value: '3s' },
               { label: 'Transaction Fee', value: '~0.001 Ϙ' },
               { label: 'Total Supply', value: '800B Ϙ' },
-              { label: 'Finality', value: 'Instant' },
+              { label: 'Finality', value: '~18s' },
             ].map((stat, index) => (
               <div key={index} className="text-center">
                 <div className="text-3xl sm:text-4xl font-bold gradient-text mb-2">

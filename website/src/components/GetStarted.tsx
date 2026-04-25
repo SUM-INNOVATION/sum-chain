@@ -15,12 +15,13 @@ const content = {
     steps: [
       {
         title: 'Get the CLI Wallet',
-        code: `# Download and install
-curl -sSL https://sum-chain.xyz/install.sh | bash
+        code: `# Build from source (Rust 1.70+ required)
+git clone https://github.com/SUM-INNOVATION/sum-chain
+cd sum-chain && cargo build --release
 
-# Or build from source
-git clone https://github.com/anthropics/sum-chain
-cd sum-chain && cargo build --release`,
+# Binaries land in ./target/release/
+# - sumchain         (full node)
+# - sumchain-wallet  (CLI wallet)`,
       },
       {
         title: 'Create Your Wallet',
@@ -91,7 +92,7 @@ console.log(\`TX Hash: \${tx.hash}\`);`,
       {
         title: 'Build the Node',
         code: `# Clone and build
-git clone https://github.com/anthropics/sum-chain
+git clone https://github.com/SUM-INNOVATION/sum-chain
 cd sum-chain
 cargo build --release
 
