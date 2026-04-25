@@ -4,11 +4,18 @@ import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import Link from 'next/link';
 
-const navLinks = [
+type NavLink = {
+  name: string;
+  href: string;
+  external?: boolean;
+  comingSoon?: boolean;
+};
+
+const navLinks: NavLink[] = [
   { name: 'Features', href: '#features' },
   { name: 'Technology', href: '#technology' },
   { name: 'Ecosystem', href: '#ecosystem' },
-  { name: 'Docs', href: 'https://docs.sum-chain.xyz', external: true },
+  { name: 'Docs', href: '#', comingSoon: true },
 ];
 
 export default function Navbar() {
@@ -52,18 +59,32 @@ export default function Navbar() {
 
             {/* Desktop Navigation */}
             <div className="hidden md:flex items-center gap-8">
-              {navLinks.map((link) => (
-                <Link
-                  key={link.name}
-                  href={link.href}
-                  target={link.external ? '_blank' : undefined}
-                  rel={link.external ? 'noopener noreferrer' : undefined}
-                  className="text-sm text-gray-400 hover:text-white transition-colors duration-200 relative group"
-                >
-                  {link.name}
-                  <span className="absolute -bottom-1 left-0 w-0 h-0.5 bg-purple-500 group-hover:w-full transition-all duration-300" />
-                </Link>
-              ))}
+              {navLinks.map((link) =>
+                link.comingSoon ? (
+                  <span
+                    key={link.name}
+                    title="Not open to public yet"
+                    aria-label={`${link.name} (not open to public yet)`}
+                    className="text-sm text-gray-400 cursor-not-allowed relative group"
+                  >
+                    {link.name}
+                    <span className="pointer-events-none absolute left-full top-1/2 -translate-y-1/2 ml-2 whitespace-nowrap rounded-md bg-white/10 px-2 py-1 text-xs text-white opacity-0 group-hover:opacity-100 transition-opacity">
+                      Not open to public yet
+                    </span>
+                  </span>
+                ) : (
+                  <Link
+                    key={link.name}
+                    href={link.href}
+                    target={link.external ? '_blank' : undefined}
+                    rel={link.external ? 'noopener noreferrer' : undefined}
+                    className="text-sm text-gray-400 hover:text-white transition-colors duration-200 relative group"
+                  >
+                    {link.name}
+                    <span className="absolute -bottom-1 left-0 w-0 h-0.5 bg-purple-500 group-hover:w-full transition-all duration-300" />
+                  </Link>
+                )
+              )}
             </div>
 
             {/* CTA Buttons */}
@@ -125,17 +146,29 @@ export default function Navbar() {
             className="fixed inset-0 z-40 md:hidden pt-20 bg-[#0a0a0a]/95 backdrop-blur-xl"
           >
             <div className="flex flex-col items-center gap-8 pt-12">
-              {navLinks.map((link) => (
-                <Link
-                  key={link.name}
-                  href={link.href}
-                  target={link.external ? '_blank' : undefined}
-                  onClick={() => setIsMobileMenuOpen(false)}
-                  className="text-2xl text-gray-300 hover:text-white transition-colors"
-                >
-                  {link.name}
-                </Link>
-              ))}
+              {navLinks.map((link) =>
+                link.comingSoon ? (
+                  <span
+                    key={link.name}
+                    title="Not open to public yet"
+                    aria-label={`${link.name} (not open to public yet)`}
+                    className="text-2xl text-gray-500 cursor-not-allowed"
+                  >
+                    {link.name}
+                    <span className="ml-2 text-xs align-middle text-gray-400">(Not open to public yet)</span>
+                  </span>
+                ) : (
+                  <Link
+                    key={link.name}
+                    href={link.href}
+                    target={link.external ? '_blank' : undefined}
+                    onClick={() => setIsMobileMenuOpen(false)}
+                    className="text-2xl text-gray-300 hover:text-white transition-colors"
+                  >
+                    {link.name}
+                  </Link>
+                )
+              )}
               <Link
                 href="https://explorer.sum-chain.xyz"
                 className="text-2xl text-gray-300 hover:text-white transition-colors"
