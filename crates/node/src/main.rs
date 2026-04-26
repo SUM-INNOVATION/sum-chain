@@ -238,6 +238,41 @@ enum Commands {
         #[arg(long)]
         yes: bool,
     },
+
+    /// Export every registered SRC-201 messaging public key to NDJSON.
+    /// Used to migrate registrations from one validator to another after
+    /// `messaging_registerSponsored` direct-write divergence (recovery tool).
+    /// Node must be stopped on the source data dir.
+    ExportRegisteredKeys {
+        /// Data directory to read from
+        #[arg(short, long, default_value = "data")]
+        data_dir: PathBuf,
+
+        /// Output file path. Use "-" or omit to write to stdout.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+
+    /// Import SRC-201 messaging public keys from NDJSON.
+    /// Reads each registration record and writes it to MESSAGING_PUBLIC_KEYS.
+    /// Node must be stopped on the target data dir.
+    ImportRegisteredKeys {
+        /// Data directory to write to
+        #[arg(short, long, default_value = "data")]
+        data_dir: PathBuf,
+
+        /// Input file path. Use "-" or omit to read from stdin.
+        #[arg(short, long)]
+        input: Option<PathBuf>,
+
+        /// Skip records whose address is already registered locally
+        #[arg(long, default_value = "true")]
+        skip_existing: bool,
+
+        /// Skip confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[tokio::main]
@@ -874,6 +909,173 @@ async fn main() -> Result<()> {
             println!("  New tip: {} ({})", to_height, target_hash);
             println!();
             println!("Start the node to resume block production.");
+        }
+
+        Commands::ExportRegisteredKeys { data_dir, output } => {
+            use std::io::Write;
+            use sumchain_storage::messaging_store::MessagingStore;
+
+            init_logging("info", false)?;
+
+            info!("Opening database at {:?}", data_dir);
+            let db = Database::open_default(&data_dir)?;
+            let store = MessagingStore::new(&db);
+
+            let entries = store
+                .iter_all_pubkeys()
+                .context("Failed to iterate registered public keys")?;
+
+            // Stable order — sort by address bytes — so diffs across snapshots are clean.
+            let mut entries = entries;
+            entries.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+
+            let mut writer: Box<dyn Write> = match output.as_deref() {
+                None => Box::new(std::io::stdout()),
+                Some(p) if p.as_os_str() == "-" => Box::new(std::io::stdout()),
+                Some(p) => Box::new(std::fs::File::create(p).with_context(|| {
+                    format!("Failed to create output file {:?}", p)
+                })?),
+            };
+
+            for (address, key) in &entries {
+                let record = serde_json::json!({
+                    "address": address.to_base58(),
+                    "public_key": format!("0x{}", hex::encode(key.public_key)),
+                    "registered_at_block": key.registered_at_block,
+                    "registered_at": key.registered_at,
+                    "updated_at_block": key.updated_at_block,
+                });
+                writeln!(writer, "{}", serde_json::to_string(&record)?)
+                    .context("Failed to write output")?;
+            }
+
+            // If we wrote to stdout, just flush. If file, also report count to stderr.
+            writer.flush().ok();
+            eprintln!("Exported {} registered public key(s).", entries.len());
+        }
+
+        Commands::ImportRegisteredKeys {
+            data_dir,
+            input,
+            skip_existing,
+            yes,
+        } => {
+            use std::io::BufRead;
+            use sumchain_primitives::{Address, RegisteredPublicKey};
+            use sumchain_storage::messaging_store::MessagingStore;
+
+            init_logging("info", false)?;
+
+            // Read all records up front so we can show a count and prompt before mutating.
+            let reader: Box<dyn std::io::Read> = match input.as_deref() {
+                None => Box::new(std::io::stdin()),
+                Some(p) if p.as_os_str() == "-" => Box::new(std::io::stdin()),
+                Some(p) => Box::new(std::fs::File::open(p).with_context(|| {
+                    format!("Failed to open input file {:?}", p)
+                })?),
+            };
+            let buf = std::io::BufReader::new(reader);
+
+            #[derive(serde::Deserialize)]
+            struct Record {
+                address: String,
+                public_key: String,
+                registered_at_block: u64,
+                registered_at: u64,
+                updated_at_block: u64,
+            }
+
+            let mut records: Vec<(Address, RegisteredPublicKey)> = Vec::new();
+            for (lineno, line) in buf.lines().enumerate() {
+                let line = line.context("Failed to read input line")?;
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let r: Record = serde_json::from_str(&line).with_context(|| {
+                    format!("Failed to parse JSON on line {}", lineno + 1)
+                })?;
+
+                let address = Address::from_base58(&r.address)
+                    .or_else(|_| Address::from_hex(&r.address))
+                    .map_err(|e| {
+                        anyhow::anyhow!("Invalid address on line {}: {}", lineno + 1, e)
+                    })?;
+
+                let pubkey_hex = r.public_key.strip_prefix("0x").unwrap_or(&r.public_key);
+                let pubkey_bytes = hex::decode(pubkey_hex).with_context(|| {
+                    format!("Invalid public_key hex on line {}", lineno + 1)
+                })?;
+                if pubkey_bytes.len() != 32 {
+                    anyhow::bail!(
+                        "Public key on line {} is {} bytes, expected 32",
+                        lineno + 1,
+                        pubkey_bytes.len()
+                    );
+                }
+                let mut pubkey = [0u8; 32];
+                pubkey.copy_from_slice(&pubkey_bytes);
+
+                // Sanity: the address in the record must match the address derived from the pubkey.
+                let derived = Address::from_public_key(&pubkey);
+                if derived != address {
+                    anyhow::bail!(
+                        "Address/pubkey mismatch on line {}: record address {} but pubkey derives to {}",
+                        lineno + 1,
+                        address.to_base58(),
+                        derived.to_base58()
+                    );
+                }
+
+                records.push((
+                    address,
+                    RegisteredPublicKey {
+                        public_key: pubkey,
+                        address,
+                        registered_at_block: r.registered_at_block,
+                        registered_at: r.registered_at,
+                        updated_at_block: r.updated_at_block,
+                    },
+                ));
+            }
+
+            println!("WARNING: This will write {} registered public key record(s)", records.len());
+            println!("  to MESSAGING_PUBLIC_KEYS in data dir {:?}.", data_dir);
+            println!("  skip_existing = {}", skip_existing);
+            println!();
+            println!("The node must be stopped before running this command.");
+            println!();
+
+            if !yes {
+                println!("Type 'yes' to proceed:");
+                let mut s = String::new();
+                std::io::stdin().read_line(&mut s)?;
+                if s.trim().to_lowercase() != "yes" {
+                    println!("Aborted.");
+                    return Ok(());
+                }
+            }
+
+            info!("Opening database at {:?}", data_dir);
+            let db = Database::open_default(&data_dir)?;
+            let store = MessagingStore::new(&db);
+
+            let mut wrote = 0u64;
+            let mut skipped = 0u64;
+            for (address, key) in &records {
+                if skip_existing && store.has_public_key(address).unwrap_or(false) {
+                    skipped += 1;
+                    continue;
+                }
+                store.set_public_key(address, key)?;
+                wrote += 1;
+            }
+
+            println!();
+            println!("Import complete.");
+            println!("  Wrote:   {}", wrote);
+            println!("  Skipped: {} (already registered locally)", skipped);
+            println!();
+            println!("Start the node and the chain should accept previously-diverged blocks.");
         }
     }
 

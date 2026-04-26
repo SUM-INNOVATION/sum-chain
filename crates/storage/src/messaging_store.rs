@@ -549,6 +549,26 @@ impl<'a> MessagingStore<'a> {
     pub fn delete_public_key(&self, address: &Address) -> Result<()> {
         self.db.delete(cf::MESSAGING_PUBLIC_KEYS, address.as_bytes())
     }
+
+    /// Iterate every registered public key in the CF.
+    /// Used by the operator-side export/import recovery tooling.
+    pub fn iter_all_pubkeys(&self) -> Result<Vec<(Address, RegisteredPublicKey)>> {
+        let mut out = Vec::new();
+        for (key, value) in self.db.full_iter(cf::MESSAGING_PUBLIC_KEYS)? {
+            if key.len() != 20 {
+                continue;
+            }
+            let mut addr_bytes = [0u8; 20];
+            addr_bytes.copy_from_slice(&key);
+            let address = Address::new(addr_bytes);
+
+            let registered: RegisteredPublicKey = bincode::deserialize(&value)
+                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+
+            out.push((address, registered));
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
