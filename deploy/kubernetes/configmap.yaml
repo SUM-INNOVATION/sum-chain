@@ -1,4 +1,18 @@
-# SUM Chain Node Configuration
+# SUM Chain Node Configuration (k8s ConfigMap)
+#
+# Schema-validated against crates/node/src/config.rs (NodeConfig). Earlier
+# revisions used stale keys (`[chain].genesis_file`, `[rpc].listen_addr`,
+# `rate_limit_requests_per_second`) that fail to deserialize against the
+# current binary; corrected here.
+#
+# **Per-validator differences** (validator_key path, p2p public addr, etc.)
+# are NOT in this ConfigMap — they're injected per-pod via the StatefulSet
+# split or via CLI overrides. See SNIP-V2-TESTNET-DEPLOYMENT-PREP.md
+# §validator-keys for the recommended split layout.
+#
+# **Genesis** is currently a placeholder identical to genesis/local_genesis.json
+# in the repo. For SNIP-testnet rollout, replace with the chain-team-generated
+# `snip-testnet-genesis.json` after Decision #3 lands.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -12,38 +26,42 @@ data:
     # SUM Chain Node Configuration
 
     [node]
-    name = "sumchain-node"
+    # Path to the genesis file (mounted from this same ConfigMap into /config).
+    genesis = "/config/genesis.json"
+    # Data directory for blockchain storage (PVC mount target).
     data_dir = "/data"
-    log_level = "info"
-
-    [chain]
-    chain_id = 1337
-    genesis_file = "/config/genesis.json"
-
-    [network]
-    listen_addr = "0.0.0.0"
-    listen_port = 30303
-    max_peers = 50
-    enable_mdns = false
-
-    [rpc]
-    enabled = true
-    listen_addr = "0.0.0.0"
-    listen_port = 8545
-    cors_origins = ["*"]
-    rate_limit_enabled = true
-    rate_limit_requests_per_second = 100
+    # Validator key path is set per-pod via CLI `--validator-key`; leave unset here.
+    # validator_key = "/secrets/validator.key"
 
     [consensus]
-    block_time_ms = 2000
+    # PoA round-robin (no skip-proposer) — see crates/consensus/src/poa.rs:213-238.
+    engine = "poa"
 
-    [mempool]
-    max_size = 10000
-    max_per_sender = 100
+    [network]
+    # libp2p multiaddr for inbound P2P. The `0.0.0.0` form binds all interfaces;
+    # peers reach this pod via the headless `sumchain-validator` Service's DNS.
+    listen_addr = "/ip4/0.0.0.0/tcp/30303"
+    # Bootnodes are set per-pod via `--bootnodes` CLI flag (the bootnode
+    # validator-1 doesn't need them; the others need to point at it).
+    bootnodes = []
+    # mDNS doesn't help inside k8s — peers are discovered via the headless
+    # service + bootnodes.
+    mdns = false
+    max_peers = 50
 
-    [metrics]
-    enabled = true
-    prometheus_port = 9090
+    [rpc]
+    # Single host:port string in the current schema (NOT separate `listen_addr`
+    # + `listen_port`). 0.0.0.0 binds all interfaces inside the pod.
+    addr = "0.0.0.0:8545"
+    # No per-key auth on the SNIP testnet by default; rate-limit by IP at the
+    # ingress layer instead. See deployment-prep doc Decision #4.
+    rate_limit_enabled = true
+    rate_limit_rps = 100
+    rate_limit_burst = 200
+
+    [logging]
+    level = "info"
+    json = false
 
   genesis.json: |
     {
@@ -51,11 +69,5 @@ data:
       "genesis_time": 0,
       "validators": [],
       "alloc": {},
-      "params": {
-        "block_time_ms": 2000,
-        "max_block_bytes": 1000000,
-        "max_txs_per_block": 1000,
-        "min_fee": 1,
-        "finality_depth": 3
-      }
+      "params": {}
     }

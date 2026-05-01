@@ -12,6 +12,7 @@ sumchain-crypto = { path = "../crypto" }
 sumchain-storage = { path = "../storage" }
 sumchain-state = { path = "../state" }
 sumchain-consensus = { path = "../consensus" }
+sumchain-genesis = { path = "../genesis" }
 sumchain-p2p = { path = "../p2p" }
 jsonrpsee = { workspace = true }
 tokio = { workspace = true }

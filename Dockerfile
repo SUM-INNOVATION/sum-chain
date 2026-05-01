@@ -4,7 +4,11 @@
 # ===========================
 # Build Stage
 # ===========================
-FROM rust:1.75-slim-bookworm AS builder
+# Match rust-toolchain.toml (1.85.0) so the dependency build resolves the
+# same compiler features as `cargo` would locally. Earlier `rust:1.75` would
+# fail on stable-Rust APIs the workspace uses (e.g. `u64::div_ceil` from 1.73
+# is fine in 1.75, but other 1.80+ features are referenced; pin to match).
+FROM rust:1.85-slim-bookworm AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
@@ -68,10 +72,14 @@ RUN cargo build --release --bin sumchain --bin sumchain-wallet
 # ===========================
 FROM debian:bookworm-slim AS runtime
 
-# Install runtime dependencies
+# Install runtime dependencies. `curl` is required by the HEALTHCHECK below
+# (and by k8s/docker-compose health probes that exec into the container);
+# the earlier image omitted it and every health check would fail with
+# "executable file not found".
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl3 \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
@@ -102,6 +110,9 @@ EXPOSE 30303 8545
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8545/health/live || exit 1
 
-# Default command
+# Default command. Earlier revisions used the bare `--config X` shape, which
+# fails because the `sumchain` binary requires a subcommand (`run`, `init`,
+# `keygen`, etc.; see crates/node/src/main.rs:48-103). Fixed to use `run`.
+# Validator deployments override CMD to add `--validator-key /secrets/...`.
 ENTRYPOINT ["sumchain"]
-CMD ["--config", "/config/node.toml"]
+CMD ["run", "--config", "/config/node.toml"]

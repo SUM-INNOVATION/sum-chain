@@ -92,6 +92,93 @@ pub fn blake3_derive_key(context: &str, input: &[u8]) -> [u8; 32] {
     blake3::derive_key(context, input)
 }
 
+/// Seven X25519 low/small-order byte-string encodings blocked after masking
+/// the high bit. Mirrors libsodium's `crypto_scalarmult` validation list
+/// (`has_small_order` in `x25519_ref10.c`). RFC 7748 §6.1 enumerates the
+/// underlying small-order points; `p`, `p-1`, and `p+1` are non-canonical
+/// field encodings that RFC 7748 processing nevertheless accepts, so they
+/// are blocked here as well.
+///
+/// The high bit of byte 31 is pre-cleared in every entry. Inputs are masked
+/// the same way before comparison.
+pub const LOW_ORDER_X25519_POINTS: [[u8; 32]; 7] = [
+    // 0 (order 4)
+    [
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00,
+    ],
+    // 1 (order 1)
+    [
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00,
+    ],
+    // 325606250916557431795983626356110631294008115727848805560023387167927233504 (order 8)
+    [
+        0xe0, 0xeb, 0x7a, 0x7c, 0x3b, 0x41, 0xb8, 0xae, 0x16, 0x56, 0xe3, 0xfa, 0xf1, 0x9f, 0xc4,
+        0x6a, 0xda, 0x09, 0x8d, 0xeb, 0x9c, 0x32, 0xb1, 0xfd, 0x86, 0x62, 0x05, 0x16, 0x5f, 0x49,
+        0xb8, 0x00,
+    ],
+    // 39382357235489614581723060781553021112529911719440698176882885853963445705823 (order 8)
+    [
+        0x5f, 0x9c, 0x95, 0xbc, 0xa3, 0x50, 0x8c, 0x24, 0xb1, 0xd0, 0xb1, 0x55, 0x9c, 0x83, 0xef,
+        0x5b, 0x04, 0x44, 0x5c, 0xc4, 0x58, 0x1c, 0x8e, 0x86, 0xd8, 0x22, 0x4e, 0xdd, 0xd0, 0x9f,
+        0x11, 0x57,
+    ],
+    // p-1 (order 2)
+    [
+        0xec, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0x7f,
+    ],
+    // p (== 0, order 4) — non-canonical encoding of 0
+    [
+        0xed, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0x7f,
+    ],
+    // p+1 (== 1, order 1) — non-canonical encoding of 1
+    [
+        0xee, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0x7f,
+    ],
+];
+
+/// Constant-time equality over 32 bytes via OR-accumulator.
+fn ct_eq_32(a: &[u8; 32], b: &[u8; 32]) -> bool {
+    let mut acc: u8 = 0;
+    for i in 0..32 {
+        acc |= a[i] ^ b[i];
+    }
+    acc == 0
+}
+
+/// Reject X25519 public keys whose byte-string encoding falls in the
+/// small-order blocklist after masking the high bit (RFC 7748 §5).
+///
+/// Used at registration time so no peer ever has to encounter a low-order
+/// point on the encryption / wrapping path. Mirrors libsodium's
+/// `crypto_scalarmult` validation. Comparison is constant-time.
+///
+/// Note: this does NOT cover the RFC 7748 §6.1 all-zero shared-secret check
+/// — that belongs at the ECDH call site for any future code path that
+/// accepts unregistered ephemeral X25519 public keys.
+pub fn is_low_order_x25519_public_key(pubkey: &[u8; 32]) -> bool {
+    let mut masked = *pubkey;
+    masked[31] &= 0x7f;
+
+    let mut hit = false;
+    for entry in LOW_ORDER_X25519_POINTS.iter() {
+        // Don't short-circuit — keep timing independent of which entry
+        // matched (defense in depth; not strictly required at registration
+        // time, but the registry is a public surface).
+        hit |= ct_eq_32(&masked, entry);
+    }
+    hit
+}
+
 /// Compute recipient hash for message discovery
 pub fn recipient_hash(address: &Address) -> [u8; 32] {
     *blake3::hash(address.as_bytes()).as_bytes()
@@ -538,5 +625,78 @@ mod tests {
         );
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_low_order_blocklist_all_seven_rejected() {
+        for (i, entry) in LOW_ORDER_X25519_POINTS.iter().enumerate() {
+            assert!(
+                is_low_order_x25519_public_key(entry),
+                "blocklist entry {} ({}) was not rejected",
+                i,
+                hex::encode(entry)
+            );
+        }
+    }
+
+    #[test]
+    fn test_low_order_blocklist_high_bit_set_variants_rejected() {
+        // RFC 7748 §5 says implementations MUST mask the high bit of the public
+        // key. An attacker can't sneak a low-order point past us by setting
+        // bit 255.
+        for (i, entry) in LOW_ORDER_X25519_POINTS.iter().enumerate() {
+            let mut with_high_bit = *entry;
+            with_high_bit[31] |= 0x80;
+            assert!(
+                is_low_order_x25519_public_key(&with_high_bit),
+                "blocklist entry {} with high bit set was not rejected",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn test_low_order_blocklist_all_zero_rejected() {
+        // Trivial case — all-zero is the order-4 point at index 0. Explicit
+        // test because this is the most likely accidental value.
+        let zero = [0u8; 32];
+        assert!(is_low_order_x25519_public_key(&zero));
+    }
+
+    #[test]
+    fn test_low_order_blocklist_generated_pubkey_accepted() {
+        // A freshly generated keypair must not collide with the blocklist.
+        // Run several to catch any pathological RNG paths.
+        for _ in 0..16 {
+            let kp = KeyPair::generate();
+            let x25519_pk =
+                ed25519_pk_to_x25519(kp.public_key().as_bytes()).expect("conversion");
+            assert!(
+                !is_low_order_x25519_public_key(&x25519_pk),
+                "generated X25519 pubkey {} was rejected as low-order",
+                hex::encode(x25519_pk)
+            );
+        }
+    }
+
+    #[test]
+    fn test_low_order_blocklist_arbitrary_nonblocklist_accepted() {
+        // A 32-byte value that is not on the blocklist must pass.
+        let non_blocklist: [u8; 32] = [
+            0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42,
+            0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42,
+            0x42, 0x42, 0x42, 0x42,
+        ];
+        assert!(!is_low_order_x25519_public_key(&non_blocklist));
+    }
+
+    #[test]
+    fn test_ct_eq_32_basic() {
+        let a = [0xAB; 32];
+        let b = [0xAB; 32];
+        let mut c = [0xAB; 32];
+        c[15] ^= 0x01;
+        assert!(ct_eq_32(&a, &b));
+        assert!(!ct_eq_32(&a, &c));
     }
 }

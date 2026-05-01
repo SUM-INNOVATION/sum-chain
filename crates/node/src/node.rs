@@ -536,7 +536,14 @@ impl Node {
             self.rpc_auth_config.clone(),
             self.rpc_rate_limit_config.clone(),
             self.metrics.clone(),
-        );
+        )
+        // Bind the live chain's `ChainParams` to the RPC so RPCs that read
+        // consensus values (currently `storage_getAssignmentCoverageV2` —
+        // `assignment_replication_factor`) match the executor's validation.
+        // Without this, non-default chains would serve the V2 coverage RPC
+        // with the default R=3 and disagree with `AcceptAssignmentV2` on
+        // chains tuned to a different value.
+        .with_chain_params(self.genesis.params.clone());
 
         let handle = rpc.start(self.rpc_addr).await?;
 

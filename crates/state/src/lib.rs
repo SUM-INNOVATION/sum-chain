@@ -42,7 +42,10 @@ pub use messaging_executor::{MessagingExecutionResult, MessagingExecutor};
 pub use nft_executor::{NftExecutionResult, NftExecutor};
 pub use node_registry::{NodeRegistryExecutionResult, NodeRegistryExecutor};
 pub use policy_account_executor::{PolicyAccountExecutionResult, PolicyAccountExecutor};
-pub use storage_metadata::{StorageMetadataExecutionResult, StorageMetadataExecutor};
+pub use storage_metadata::{
+    ArchivePerEntry, CoverageSummaryV2, StorageMetadataExecutionResult, StorageMetadataExecutor,
+    StorageMetadataV2ExecutionResult, MAX_ASSIGNED_COUNT_CHUNK_COUNT,
+};
 pub use property_executor::{PropertyExecutionResult, PropertyExecutor};
 pub use schema_validator::{SchemaValidator, SchemaValidatorConfig, ValidationResult};
 pub use snapshot::{Snapshot, SnapshotHeader, SnapshotManager, SnapshotSyncConfig, RestoreResult};

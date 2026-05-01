@@ -1,4 +1,22 @@
-# SUM Chain Validator StatefulSet
+# SUM Chain Validator StatefulSet — DEPRECATED 3-replica layout.
+#
+# This single StatefulSet mounts one Secret (`sumchain-validator-keys`) into
+# all three pods at the same path, so all three would read the same validator
+# private key. That gives one identity to three pods (the chain still works,
+# but it's not a 3-validator chain — it's one validator with three replicas
+# competing for the same proposer slot).
+#
+# Use the per-validator StatefulSets in the `statefulset-validator-{1,2,3}.yaml`
+# split files (next commit) for an actual 3-validator deployment. This file is
+# retained for reference and as a starting point for any "single-validator
+# testnet" use case where one identity across replicas is acceptable.
+#
+# Schema-corrected from earlier revision:
+# - args: now uses `run` subcommand + `--validator-key` (CLI shape per
+#   crates/node/src/main.rs:48-103). Old shape `--config X --validator` would
+#   fail with `error: unrecognized argument`.
+# - Image tag was `sumchain/node:latest`; for SNIP testnet, ops should pin a
+#   versioned tag (`sumchain/node:v3.2-snip-testnet` or similar) before rollout.
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -34,9 +52,11 @@ spec:
           image: sumchain/node:latest
           imagePullPolicy: IfNotPresent
           args:
+            - "run"
             - "--config"
             - "/config/node.toml"
-            - "--validator"
+            - "--validator-key"
+            - "/secrets/validator.key"
           ports:
             - name: p2p
               containerPort: 30303

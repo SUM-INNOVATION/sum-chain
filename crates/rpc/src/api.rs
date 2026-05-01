@@ -9,11 +9,12 @@ use crate::policy_account_types::{
     PolicyAccountInfo, ProposalInfo, SubmitProposalRequest, SubmitProposalResponse,
 };
 use crate::types::{
-    AccountInfo, BlockInfo, ContractCallResult, ContractInfo, CreateEmploymentCredentialRequest,
+    AccountInfo, BlockHeightInfo, BlockInfo, ContractCallResult, ContractInfo,
+    CreateEmploymentCredentialRequest,
     CreateEmploymentCredentialResponse, DelegationRpcInfo, DelegatorSummary, DocClassConfigInfo,
     DocClassCredentialInfo, DocClassIdentityInfo, DocClassIssuerInfo, DocClassSummary,
     EmploymentCredentialInfo, EmploymentIssuerInfo, EmploymentSummary, EmploymentVerificationResult,
-    EpochInfo, FinalityInfo, GasEstimateResult, HealthResponse, IncomeAttestationInfo,
+    AssignmentCoverageV2, ChainParamsInfo, EpochInfo, FinalityInfo, GasEstimateResult, HealthResponse, IncomeAttestationInfo, NodeRecordInfo, PushableFileInfoV2, StorageFileInfoV2, TxStatusV2,
     InboxFilterInfo, IssueAcademicCredentialRequest, IssueAcademicCredentialResponse,
     MessageDataInfo, MessageEventInfo, MessagingConfigInfo, MessagingQuotaInfo,
     NftCollectionInfo, NftOwnerTokens, NftTokenInfo, NodeInfo, P2pStats, PendingPaymentInfo,
@@ -204,6 +205,48 @@ pub trait SumChainApi {
     /// Check if a block at a given height is finalized
     #[method(name = "is_block_finalized")]
     async fn is_block_finalized(&self, height: u64) -> Result<bool, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get the live consensus parameters this node is using. SNIP V2 Phase 2.
+    ///
+    /// Returns the actual `ChainParams` from the node's live config, NOT
+    /// hardcoded library defaults — so SNIP clients can read
+    /// `assignment_replication_factor`, `max_chunk_count_per_file`, etc.
+    /// at runtime instead of baking them in. If a future chain config tunes
+    /// any of these values, SNIP picks them up without a client release.
+    ///
+    /// Flat wire shape (no nested `staking`/`messaging`/`docclass` sub-configs)
+    /// since SNIP V2 clients don't use those. Additive; new fields can be
+    /// appended without breaking existing clients.
+    #[method(name = "chain_getChainParams")]
+    async fn chain_get_chain_params(
+        &self,
+    ) -> Result<ChainParamsInfo, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get the chain's current block height. SNIP V2 Ask 8 (Phase 0b).
+    ///
+    /// `finality` selector: `Some("finalized")` returns the finalized height
+    /// (safe for expiry calculations under PoA reorgs); `None` or
+    /// `Some("latest")` returns the head height. The return value's
+    /// `finality` field echoes which view was returned.
+    #[method(name = "chain_getBlockHeight")]
+    async fn chain_get_block_height(
+        &self,
+        finality: Option<String>,
+    ) -> Result<BlockHeightInfo, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get the inclusion / finality status of a transaction by hash.
+    /// SNIP V2 Ask 11 (Phase 0b).
+    ///
+    /// Returns one of: `Unknown` (never seen), `Pending` (in mempool),
+    /// `Included { block_height }` (in a block, not finalized),
+    /// `Finalized { block_height }` (finalized per consensus mode —
+    /// depth=3 under PoA, depth=0 under BFT), or `Failed { ... }`.
+    /// `Dropped` is reserved but not currently returned.
+    #[method(name = "chain_getTransactionStatus")]
+    async fn chain_get_transaction_status(
+        &self,
+        tx_hash: String,
+    ) -> Result<TxStatusV2, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Get list of connected peers
     #[method(name = "get_peers")]
@@ -671,6 +714,24 @@ pub trait SumChainApi {
         address: String,
     ) -> Result<Option<PublicKeyInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
+    /// Get the X25519 encryption pubkey registered for an account.
+    /// SNIP V2 Ask 3 (Phase 0b checkpoint 2).
+    ///
+    /// Returns `Some(hex-encoded 32-byte Montgomery U-coordinate)` if the
+    /// account has registered an encryption pubkey via
+    /// `NodeRegistryOperationV2::RegisterEncryptionKey`, else `None`.
+    /// Hex is `0x`-prefixed, lowercase.
+    ///
+    /// Distinct from `account_getPublicKey`, which returns the SRC-201 messaging
+    /// public key (Ed25519). The two are stored in separate column families and
+    /// serve different purposes; SNIP recipients must register an X25519 key
+    /// before anyone can share a Private file with them.
+    #[method(name = "account_getEncryptionPublicKey")]
+    async fn account_get_encryption_public_key(
+        &self,
+        address: String,
+    ) -> Result<Option<String>, jsonrpsee::types::ErrorObjectOwned>;
+
     // ========================================================================
     // SRC-80X/81X DocClass Endpoints
     // ========================================================================
@@ -1072,4 +1133,85 @@ pub trait SumChainApi {
         &self,
         node_address: String,
     ) -> Result<Option<serde_json::Value>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get full V2 file metadata with a paginated access-list window.
+    /// SNIP V2 Phase 1c (plan v3.2 §4, Ask 6).
+    ///
+    /// `access_offset` indexes into the file's `access_list`; `access_limit`
+    /// caps the returned window (default 256, hard cap 1024). The total
+    /// access-list size is returned in `access_total`. For Public files the
+    /// `encrypted_key_bundle` field of every entry is JSON `null`; for Private
+    /// files it's the `0x`-prefixed hex of the 80-byte bundle.
+    ///
+    /// Returns `None` if the file is not registered.
+    #[method(name = "storage_getFileInfoV2")]
+    async fn storage_get_file_info_v2(
+        &self,
+        merkle_root: String,
+        access_offset: Option<u32>,
+        access_limit: Option<u32>,
+    ) -> Result<Option<StorageFileInfoV2>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// List V2 files in a "pushable" lifecycle (Pending or Active);
+    /// Abandoned files are excluded. SNIP V2 Phase 1c (plan v3.2 §4, Ask 9).
+    ///
+    /// Used by archive nodes as a warm-cache source: when a push request
+    /// arrives, the archive can decide locally whether the file is known
+    /// without per-push RPC chatter. `Pending` means still ramping up;
+    /// `Active` means a resync push (the activation race rule from Ask 14).
+    ///
+    /// Paginated (offset/limit) so a hosted endpoint can serve a registry
+    /// of arbitrary size without unbounded response bodies. Files are
+    /// returned in `merkle_root` lexicographic order — stable under
+    /// concurrent appends, **eventually-consistent** under concurrent
+    /// lifecycle transitions (a file moving Pending→Active stays in the
+    /// list with its new lifecycle; one moving to Abandoned drops). Default
+    /// `limit = 256`, hard cap `1024`. Callers paginate with
+    /// `offset += returned.len()`.
+    #[method(name = "storage_getPushableFilesV2")]
+    async fn storage_get_pushable_files_v2(
+        &self,
+        offset: Option<u32>,
+        limit: Option<u32>,
+    ) -> Result<Vec<PushableFileInfoV2>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get coverage state for a Pending V2 file. SNIP V2 Phase 1b (plan v3.2 §4).
+    ///
+    /// Returns popcount summaries + a paginated window of missing chunk indices
+    /// — never raw `Vec<u32>` per archive. Owners poll until `can_activate_now`
+    /// is true; archives use `per_archive[i].assigned_count` to know what to push.
+    ///
+    /// `missing_offset` is a **chunk-index lower bound** (not an offset into the
+    /// filtered missing list). Pagination is stable under concurrent
+    /// `AcceptAssignmentV2` writes — the next call uses
+    /// `missing_offset = last_returned_index + 1`.
+    #[method(name = "storage_getAssignmentCoverageV2")]
+    async fn storage_get_assignment_coverage_v2(
+        &self,
+        merkle_root: String,
+        missing_offset: Option<u32>,
+        missing_limit: Option<u32>,
+    ) -> Result<Option<AssignmentCoverageV2>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get the active-archive-node set as snapshotted at the largest stored
+    /// height `≤ height`. SNIP V2 Ask 15 (Phase 0b checkpoint 2b).
+    ///
+    /// Lookup semantics (plan v3 §5.3):
+    /// - For `height == 0` or `height` < first post-genesis change → returns
+    ///   the genesis snapshot (empty array unless genesis pre-loaded archives,
+    ///   which it doesn't today).
+    /// - For `height` between two snapshot heights, returns the snapshot at
+    ///   the earlier height — assignments captured then are stable per the
+    ///   "no reassignment" rule.
+    /// - For `height` > head height, returns the most recent snapshot
+    ///   (no Err — saves a round-trip for clients querying near head).
+    ///
+    /// Each entry is a [`NodeRecordInfo`]: base58 `address`, role/status as
+    /// strings, `staked_balance` as a native `u64`, `registered_at` as block
+    /// height. Wire shape locked by JSON-shape tests in the server crate.
+    #[method(name = "storage_getActiveNodesAtHeight")]
+    async fn storage_get_active_nodes_at_height(
+        &self,
+        height: u64,
+    ) -> Result<Vec<NodeRecordInfo>, jsonrpsee::types::ErrorObjectOwned>;
 }

@@ -1,14 +1,32 @@
-# SUM Chain Docker Compose for Local Development/Testing
+# SUM Chain Docker Compose for Local Development / SNIP testnet local-mirror.
+#
+# What this gives you:
+#   - 3 PoA validators producing blocks via round-robin (no skip-proposer
+#     fallback in current PoA — see crates/consensus/src/poa.rs:213-238 — so
+#     all three pods need to stay up for liveness).
+#   - A non-validator full node for SNIP integration tests to point RPC at,
+#     keeping the validators free of test-client load.
+#   - Prometheus + Grafana for chain metrics.
+#
+# Files referenced from this compose are real, checked-in artifacts:
+#   ./genesis/local_genesis.json   — validators + pre-funded test accounts;
+#                                    matches the keys below by pubkey.
+#   ./keys/validator{1,2,3}.json   — JSON-encoded [u8; 32] private-key seed,
+#                                    the format crates/node/src/main.rs:367
+#                                    feeds into KeyPair::from_bytes.
 #
 # Usage:
-#   docker-compose up -d      # Start all services
-#   docker-compose logs -f    # Follow logs
-#   docker-compose down -v    # Stop and remove volumes
+#   docker-compose up -d --build       # Start everything (first run builds)
+#   docker-compose logs -f validator-1 # Tail one validator's log
+#   curl http://localhost:8548/        # Hit the full-node RPC (no auth)
+#   docker-compose down -v             # Stop and wipe block data
 #
-version: '3.8'
+# Earlier versions of this file pointed at ./deploy/config/validator-{1,2,3}/
+# and ./deploy/keys/validator-{1,2,3}/ which never existed in the repo. Fixed
+# in this revision to mount the actual checked-in files.
 
 services:
-  # Validator Node 1
+  # Validator 1 — bootnode for the others.
   validator-1:
     build:
       context: .
@@ -16,13 +34,21 @@ services:
     container_name: sumchain-validator-1
     hostname: validator-1
     command:
-      - "--config"
-      - "/config/node.toml"
-      - "--validator"
+      - "run"
+      - "--genesis"
+      - "/config/genesis.json"
+      - "--data-dir"
+      - "/data"
+      - "--validator-key"
+      - "/secrets/validator.key"
+      - "--p2p-addr"
+      - "/ip4/0.0.0.0/tcp/30303"
+      - "--rpc-addr"
+      - "0.0.0.0:8545"
     volumes:
       - validator-1-data:/data
-      - ./deploy/config/validator-1:/config:ro
-      - ./deploy/keys/validator-1:/secrets:ro
+      - ./genesis/local_genesis.json:/config/genesis.json:ro
+      - ./keys/validator1.json:/secrets/validator.key:ro
     ports:
       - "30303:30303"
       - "8545:8545"
@@ -39,7 +65,7 @@ services:
       start_period: 10s
     restart: unless-stopped
 
-  # Validator Node 2
+  # Validator 2 — bootstraps off validator-1.
   validator-2:
     build:
       context: .
@@ -47,13 +73,27 @@ services:
     container_name: sumchain-validator-2
     hostname: validator-2
     command:
-      - "--config"
-      - "/config/node.toml"
-      - "--validator"
+      - "run"
+      - "--genesis"
+      - "/config/genesis.json"
+      - "--data-dir"
+      - "/data"
+      - "--validator-key"
+      - "/secrets/validator.key"
+      - "--p2p-addr"
+      - "/ip4/0.0.0.0/tcp/30303"
+      - "--rpc-addr"
+      - "0.0.0.0:8545"
+      # Compose's internal DNS resolves `validator-1` to its container IP;
+      # libp2p `/dns4/` multiaddrs work natively. If the p2p stack ever swaps
+      # to a DNS-incompatible backend, fall back to a static IPAM
+      # `ipv4_address` per service and use `/ip4/172.28.0.X/tcp/30303` here.
+      - "--bootnodes"
+      - "/dns4/validator-1/tcp/30303"
     volumes:
       - validator-2-data:/data
-      - ./deploy/config/validator-2:/config:ro
-      - ./deploy/keys/validator-2:/secrets:ro
+      - ./genesis/local_genesis.json:/config/genesis.json:ro
+      - ./keys/validator2.json:/secrets/validator.key:ro
     ports:
       - "30304:30303"
       - "8546:8545"
@@ -72,7 +112,7 @@ services:
       start_period: 10s
     restart: unless-stopped
 
-  # Validator Node 3
+  # Validator 3 — bootstraps off validator-1.
   validator-3:
     build:
       context: .
@@ -80,13 +120,23 @@ services:
     container_name: sumchain-validator-3
     hostname: validator-3
     command:
-      - "--config"
-      - "/config/node.toml"
-      - "--validator"
+      - "run"
+      - "--genesis"
+      - "/config/genesis.json"
+      - "--data-dir"
+      - "/data"
+      - "--validator-key"
+      - "/secrets/validator.key"
+      - "--p2p-addr"
+      - "/ip4/0.0.0.0/tcp/30303"
+      - "--rpc-addr"
+      - "0.0.0.0:8545"
+      - "--bootnodes"
+      - "/dns4/validator-1/tcp/30303"
     volumes:
       - validator-3-data:/data
-      - ./deploy/config/validator-3:/config:ro
-      - ./deploy/keys/validator-3:/secrets:ro
+      - ./genesis/local_genesis.json:/config/genesis.json:ro
+      - ./keys/validator3.json:/secrets/validator.key:ro
     ports:
       - "30305:30303"
       - "8547:8545"
@@ -105,7 +155,50 @@ services:
       start_period: 10s
     restart: unless-stopped
 
-  # Prometheus for metrics
+  # Non-validator full node — recommended SNIP RPC endpoint so client load
+  # doesn't touch the proposers' mempool. No --validator-key, so the binary
+  # runs in observe-only mode (PoR challenges are a chain-wide concern, not
+  # this node's; it just imports blocks and serves RPCs).
+  fullnode:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sumchain-fullnode
+    hostname: fullnode
+    command:
+      - "run"
+      - "--genesis"
+      - "/config/genesis.json"
+      - "--data-dir"
+      - "/data"
+      - "--p2p-addr"
+      - "/ip4/0.0.0.0/tcp/30303"
+      - "--rpc-addr"
+      - "0.0.0.0:8545"
+      - "--bootnodes"
+      - "/dns4/validator-1/tcp/30303"
+    volumes:
+      - fullnode-data:/data
+      - ./genesis/local_genesis.json:/config/genesis.json:ro
+    ports:
+      - "30306:30303"
+      - "8548:8545"   # SNIP integration clients point at host port 8548
+      - "9093:9090"
+    environment:
+      - RUST_LOG=info,sumchain=debug
+    networks:
+      - sumchain
+    depends_on:
+      - validator-1
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8545/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  # Prometheus for chain metrics
   prometheus:
     image: prom/prometheus:v2.47.0
     container_name: sumchain-prometheus
@@ -153,5 +246,6 @@ volumes:
   validator-1-data:
   validator-2-data:
   validator-3-data:
+  fullnode-data:
   prometheus-data:
   grafana-data:

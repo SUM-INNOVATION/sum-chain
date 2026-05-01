@@ -65,6 +65,10 @@ pub enum TxType {
     NodeRegistry = 17,
     /// Storage Metadata operation (file registration, ACL, fee pool)
     StorageMetadata = 18,
+    /// V2 Node Registry operation (e.g. encryption-key registration — SNIP V2 Ask 3)
+    NodeRegistryV2 = 19,
+    /// V2 Storage Metadata operation (Pending lifecycle, bundle storage, abandonment — SNIP V2 Phase 1)
+    StorageMetadataV2 = 20,
 }
 
 impl TxType {
@@ -90,6 +94,8 @@ impl TxType {
             16 => Some(TxType::PolicyAccount),
             17 => Some(TxType::NodeRegistry),
             18 => Some(TxType::StorageMetadata),
+            19 => Some(TxType::NodeRegistryV2),
+            20 => Some(TxType::StorageMetadataV2),
             _ => None,
         }
     }
@@ -376,6 +382,10 @@ pub enum TxPayload {
     NodeRegistry(crate::node_registry::NodeRegistryTxData),
     /// Storage Metadata operation (file registration, ACL, fee pool)
     StorageMetadata(crate::storage_metadata::StorageMetadataTxData),
+    /// V2 Node Registry operation (e.g. RegisterEncryptionKey — SNIP V2 Ask 3)
+    NodeRegistryV2(crate::node_registry::NodeRegistryV2TxData),
+    /// V2 Storage Metadata operation (RegisterFilePendingV2, AbandonFileV2, etc. — SNIP V2 Phase 1)
+    StorageMetadataV2(crate::storage_metadata::StorageMetadataV2TxData),
 }
 
 impl TransactionV2 {
@@ -521,6 +531,8 @@ impl TransactionV2 {
             TxPayload::PolicyAccount(_) => TxType::PolicyAccount,
             TxPayload::NodeRegistry(_) => TxType::NodeRegistry,
             TxPayload::StorageMetadata(_) => TxType::StorageMetadata,
+            TxPayload::NodeRegistryV2(_) => TxType::NodeRegistryV2,
+            TxPayload::StorageMetadataV2(_) => TxType::StorageMetadataV2,
         }
     }
 
@@ -562,6 +574,8 @@ impl TransactionV2 {
             TxPayload::PolicyAccount(data) => Some(data.recipient),
             TxPayload::NodeRegistry(_) => None,
             TxPayload::StorageMetadata(_) => None,
+            TxPayload::NodeRegistryV2(_) => None,
+            TxPayload::StorageMetadataV2(_) => None,
         }
     }
 
@@ -587,6 +601,8 @@ impl TransactionV2 {
             TxPayload::PolicyAccount(_) => 0, // Fee-only operations
             TxPayload::NodeRegistry(_) => 0,    // Stake handled in executor
             TxPayload::StorageMetadata(_) => 0,  // Fee deposit handled in executor
+            TxPayload::NodeRegistryV2(_) => 0,  // Fee-only (e.g. RegisterEncryptionKey)
+            TxPayload::StorageMetadataV2(_) => 0, // fee_deposit handled in executor
         }
     }
 

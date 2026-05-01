@@ -16,6 +16,7 @@
     "block_time_ms": 2000,
     "max_block_bytes": 1000000,
     "max_txs_per_block": 1000,
-    "min_fee": 1
+    "min_fee": 1,
+    "v2_enabled_from_height": 0
   }
 }

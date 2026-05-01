@@ -16,7 +16,8 @@ pub mod signature;
 pub use keypair::{KeyPair, PrivateKey, PublicKey};
 pub use messaging::{
     blake3_derive_key, decrypt_message, ed25519_pk_to_x25519, ed25519_sk_to_x25519,
-    encrypt_message, recipient_hash, x25519_ecdh, DecryptedMessage,
+    encrypt_message, is_low_order_x25519_public_key, recipient_hash, x25519_ecdh,
+    DecryptedMessage, LOW_ORDER_X25519_POINTS,
 };
 pub use signature::{sign, verify, verify_bytes, Signature};
 

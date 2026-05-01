@@ -113,12 +113,15 @@ pub use finance::{
     KycAttestationId, KycLevel, KycStatus,
 };
 pub use node_registry::{
-    NodeRecord, NodeRegistryOperation, NodeRegistryTxData, NodeRole, NodeStatus,
+    NodeRecord, NodeRegistryOperation, NodeRegistryOperationV2, NodeRegistryTxData,
+    NodeRegistryV2TxData, NodeRole, NodeStatus,
 };
 pub use storage_metadata::{
-    StorageChallenge, StorageMetadata, StorageMetadataOperation, StorageMetadataTxData,
-    CHALLENGE_INTERVAL_BLOCKS, CHALLENGE_REWARD, CHALLENGE_TTL_BLOCKS, CHUNK_SIZE,
-    SLASH_PERCENTAGE,
+    assigned_archives, assigned_archives_presorted, is_archive_assigned_to_chunk, AccessEntryV2,
+    EncryptedKeyBundleV2, FileLifecycleV2, FileVisibilityV2, StorageChallenge, StorageMetadata,
+    StorageMetadataOperation, StorageMetadataOperationV2, StorageMetadataTxData, StorageMetadataV2,
+    StorageMetadataV2TxData, CHALLENGE_INTERVAL_BLOCKS, CHALLENGE_REWARD, CHALLENGE_TTL_BLOCKS,
+    CHUNK_SIZE, SLASH_PERCENTAGE, SNIP_V2_ASSIGNMENT_CONTEXT,
 };
 pub use policy_account::{
     ActionClass, ApprovalThreshold, MemberApproval, PolicyAccount, PolicyAccountId,

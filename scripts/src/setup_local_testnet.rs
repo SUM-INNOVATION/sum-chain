@@ -75,6 +75,13 @@ fn main() -> Result<()> {
             staking: None, // Use default staking params
             messaging: None, // Use default messaging params
             docclass: None, // Use default docclass params
+            max_access_list_bytes: 16_384,         // SNIP V2: 16 KB byte cap
+            activation_grace_blocks: 50,           // SNIP V2: ~100s at 2s blocks
+            abandonment_fee_percent: 10,           // SNIP V2: 10% retained on abandonment
+            max_chunk_count_per_file: 1_048_576,   // SNIP V2 v3.2: 1 TB at CHUNK_SIZE = 1 MB
+            max_chunk_indices_per_tx: 65_536,      // SNIP V2 v3.2: AcceptAssignmentV2 tx cap
+            assignment_replication_factor: 3,      // SNIP V2 v3.2: baseline R=3
+            v2_enabled_from_height: Some(0),       // local testnet: V2 active from genesis
         },
     );
 

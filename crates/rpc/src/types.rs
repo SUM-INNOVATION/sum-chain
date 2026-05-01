@@ -106,6 +106,228 @@ pub struct NodeInfo {
     pub uptime_seconds: u64,
 }
 
+/// One access-list entry in `StorageFileInfoV2.access_list` (Plan v3.2 §3.1, §4).
+/// Wire-shape mirror of `sumchain_primitives::AccessEntryV2` with the address
+/// rendered as a base58 string and the encrypted bundle as `0x`-prefixed hex
+/// (`None` → JSON `null` for Public files).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccessEntryRpcV2 {
+    /// Recipient address, base58.
+    pub address: String,
+    /// `Some("0x…")` for Private; `None` for Public. Always 80 bytes when Some.
+    pub encrypted_key_bundle: Option<String>,
+    /// Optional access expiry (block height); `None` = never expires.
+    pub expires_at: Option<u64>,
+}
+
+/// Wire-shape response for `storage_getFileInfoV2` (Plan v3.2 §4, Ask 6).
+/// Pagination on `access_list` lets very-Private files (~148-recipient cap)
+/// fit comfortably under default RPC body limits.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageFileInfoV2 {
+    /// Hex-encoded merkle root.
+    pub merkle_root: String,
+    /// Base58 owner.
+    pub owner: String,
+    pub plaintext_size_bytes: u64,
+    pub stored_size_bytes: u64,
+    pub chunk_count: u32,
+    /// Locked Koppa for PoR settlement / abandonment refund.
+    pub fee_pool: u64,
+    /// Block height of `RegisterFilePendingV2`.
+    pub created_at: u64,
+    /// `Some(height)` once `ActivateFileV2` lands; `None` while Pending or Abandoned.
+    pub activated_at_height: Option<u64>,
+    /// Block height of the active-archive snapshot used for chunk assignment.
+    pub assignment_height: u64,
+    /// `0` = Public, `1` = Private.
+    pub visibility: u8,
+    /// `0` = Pending, `1` = Active, `2` = Abandoned.
+    pub lifecycle: u8,
+    /// Window of access-list entries from `[access_offset .. access_offset + access_limit)`.
+    pub access_list: Vec<AccessEntryRpcV2>,
+    /// Total entries in the file's access list (independent of the returned window).
+    pub access_total: u32,
+    /// Echoed back from the request.
+    pub access_offset: u32,
+    /// Reserved for `Ask 10` (file rotation); always JSON `null` in V2.
+    pub predecessor_root: Option<String>,
+}
+
+/// One row of `storage_getPushableFilesV2` (Plan v3.2 §4, Ask 9). Slim — just
+/// what an archive node needs to decide whether a push is worth accepting
+/// without a follow-up `storage_getFileInfoV2` call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PushableFileInfoV2 {
+    pub merkle_root: String,
+    pub chunk_count: u32,
+    /// `0` = Pending (still ramping up), `1` = Active (resync push).
+    /// Abandoned files are excluded from this RPC.
+    pub lifecycle: u8,
+    pub created_at: u64,
+}
+
+/// Wire-shape response for `storage_getAssignmentCoverageV2` (Plan v3.2 §4).
+/// SNIP V2 Phase 1b — surfaces the per-file coverage state that
+/// `AcceptAssignmentV2` builds up and that `ActivateFileV2` gates on.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssignmentCoverageV2 {
+    pub chunk_count: u32,
+    /// Popcount over the OR of all snapshot-active archive bitmaps.
+    pub covered_count: u32,
+    /// `covered_count == chunk_count && lifecycle == Pending`.
+    pub can_activate_now: bool,
+    /// `chunk_count - covered_count` over the whole file (not just the window).
+    pub missing_total: u32,
+    /// Echoed back. `missing_offset` is a chunk-index lower bound (NOT an
+    /// offset into the filtered missing list) — see plan §4.
+    pub missing_offset: u32,
+    /// Ascending list of `i >= missing_offset` where coverage[i] == 0,
+    /// capped at `missing_limit` from the request.
+    pub missing_indices: Vec<u32>,
+    /// One entry per archive in the file's snapshot. `per_archive` is always
+    /// returned in full (bounded by snapshot size, typically O(10) entries).
+    pub per_archive: Vec<ArchiveCoverageSummaryV2>,
+}
+
+/// One row of `AssignmentCoverageV2.per_archive`. Popcount summaries only;
+/// raw bitmaps are never serialized into the RPC response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArchiveCoverageSummaryV2 {
+    /// Base58-encoded archive address.
+    pub archive: String,
+    /// Number of chunks assigned to this archive by the deterministic
+    /// rendezvous-hash assignment function. `Some(n)` when the chain
+    /// computed it (chunk_count <= `MAX_ASSIGNED_COUNT_CHUNK_COUNT`,
+    /// currently 16,384); `None` for files large enough that the chain
+    /// declines to compute — clients must run the assignment function
+    /// locally for those files. Bounds RPC-call cost.
+    pub assigned_count: Option<u32>,
+    /// Popcount of this archive's attestation bitmap row, or 0 if no row yet.
+    pub attested_count: u32,
+    /// True iff this archive's node-registry status is currently `Active`.
+    /// Snapshot-Slashed archives don't count toward `covered_count`.
+    pub currently_active: bool,
+}
+
+/// Live consensus parameters as configured at this node, returned by
+/// `chain_getChainParams`. Matches the chain's actual `ChainParams` —
+/// reads from the node's live config, NOT hardcoded defaults — so SNIP
+/// clients can pin their `assignment_replication_factor` etc. to whatever
+/// the chain is actually using right now.
+///
+/// Wire shape is intentionally flat (no nested `staking`/`messaging`/`docclass`
+/// sub-configs) since SNIP V2 clients don't use those. They can be added
+/// later if needed without breaking the existing fields.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChainParamsInfo {
+    pub chain_id: u64,
+    pub block_time_ms: u64,
+    pub max_block_bytes: u64,
+    pub max_txs_per_block: u32,
+    pub min_fee: u128,
+    pub finality_depth: u64,
+    pub storage_fee_per_byte: u128,
+    pub max_metadata_bytes: u64,
+    // SNIP V2 params (Plan v3.2 §3.4).
+    pub max_access_list_bytes: u64,
+    pub activation_grace_blocks: u64,
+    pub abandonment_fee_percent: u64,
+    pub max_chunk_count_per_file: u32,
+    pub max_chunk_indices_per_tx: u32,
+    pub assignment_replication_factor: u32,
+    /// Block height at which V2 storage ops become valid. `null` (JSON) or
+    /// `None` (Rust) means V2 is disabled — every V2 tx receipts as
+    /// `Failed(40)` at this chain. Clients use this to know whether to
+    /// even attempt V2 ops, and (for hosted environments) at what height
+    /// V2 will activate.
+    pub v2_enabled_from_height: Option<u64>,
+}
+
+/// One archive-node record as returned by `storage_getActiveNodesAtHeight`
+/// (Phase 0b, SNIP V2 Ask 15). Mirrors `sumchain_primitives::NodeRecord` with
+/// fields rendered for JSON consumers — addresses base58-encoded, balance as
+/// a native `u64` (no string wrapping), role/status as Rust `Debug`-cased
+/// strings (`"ArchiveNode"`, `"Active"`, `"Slashed"`).
+///
+/// Lookup contract is the SNIP-facing one, locked by JSON shape tests in
+/// [crate::server] — adding fields requires bumping the contract.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeRecordInfo {
+    /// Operator address, base58-encoded.
+    pub address: String,
+    /// Role string — currently always `"ArchiveNode"` here, but kept generic
+    /// so we don't have to bump the wire shape if other roles join later.
+    pub role: String,
+    /// Staked balance in Koppa base units.
+    pub staked_balance: u64,
+    /// Status string: `"Active"` or `"Slashed"`.
+    pub status: String,
+    /// Block height the node was registered at (post Phase 0a fix; will be
+    /// non-zero for archives registered after that fix landed).
+    pub registered_at: BlockHeight,
+}
+
+/// Block-height info for `chain_getBlockHeight` (Phase 0b, SNIP V2 Ask 8).
+///
+/// Returns the requested height (latest or finalized) along with a tag echoing
+/// which view was returned. Callers that don't care can leave `finality` unset
+/// in the request and will get the latest height.
+///
+/// **Consensus-mode caveat:** PoA and BFT engines have different `current_height()`
+/// semantics. PoA returns the height of the most recently produced block (head).
+/// BFT returns the next view height (one past head). So under BFT,
+/// `chain_getBlockHeight("latest")` returns `head + 1`, while `("finalized")`
+/// returns `head` (immediate finality). For uses that need a height matching
+/// an actual produced block (e.g. expiry calculations against block contents),
+/// **prefer `"finalized"`** — it returns a real block height under both engines.
+/// This matches the behavior of pre-existing chain RPCs (`eth_blockNumber`,
+/// `sum_blockNumber`) which also pass `current_height()` straight through.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockHeightInfo {
+    pub height: BlockHeight,
+    /// "finalized" or "latest" — echoes which view the caller asked for.
+    pub finality: String,
+}
+
+/// Transaction status V2 for `chain_getTransactionStatus` (Phase 0b, SNIP V2 Ask 11).
+///
+/// Distinguishes mempool / included-but-unfinalized / finalized states so
+/// clients don't have to compose `get_receipt` + `is_block_finalized` themselves.
+///
+/// Note: `Dropped` is reserved for mempool evictions but not currently
+/// returned — current mempool does not track eviction history, so an evicted
+/// tx returns `Unknown`. Distinguishing the two requires future mempool work.
+///
+/// `Failed { block_height }` reports the block in which the failure was
+/// recorded but does **not** encode whether that block is finalized. Under
+/// PoA (depth=3 by default) a `Failed` receipt in an unfinalized block can
+/// still disappear on reorg — even though the failure modes are deterministic
+/// against pre-state, a reorg replaces the entire block, so the failed receipt
+/// goes with it (the same tx might re-enter the mempool or land in a
+/// successor block).
+///
+/// **SNIP guidance:** treat `Failed` as terminal only once
+/// `block_height <= chain_getBlockHeight("finalized").height`. Until that
+/// inequality holds, `Failed` should be treated as a *probable* terminal
+/// state that may revert to `Pending` or `Unknown` after a reorg.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TxStatusV2 {
+    /// We have no record of this hash (never seen, or evicted from mempool without trace).
+    Unknown,
+    /// In the mempool, awaiting inclusion.
+    Pending,
+    /// Included in a block but not yet finalized — may reorg under PoA.
+    Included { block_height: BlockHeight },
+    /// Finalized per consensus (depth-aware: depth=3 PoA, depth=0 BFT).
+    Finalized { block_height: BlockHeight },
+    /// Executed and reverted, or rejected pre-execution.
+    Failed { block_height: Option<BlockHeight>, reason: String },
+    /// Evicted from mempool without inclusion. Reserved; not currently emitted.
+    Dropped,
+}
+
 /// Finality info for RPC responses
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FinalityInfo {

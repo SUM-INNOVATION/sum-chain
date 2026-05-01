@@ -51,6 +51,14 @@ impl StateManager {
             )?;
         }
 
+        // Genesis snapshot of the active-archive-node set (Ask 15, plan v3 §5.3).
+        // No archive nodes can have registered before genesis (RegisterArchiveNode
+        // is a tx, executed post-genesis), so this is always an empty `Vec`.
+        // Writing it explicitly lets `storage_getActiveNodesAtHeight(0)` always
+        // resolve, and gives the storage layout a self-describing baseline.
+        let node_registry = crate::node_registry::NodeRegistryExecutor::new(self.db.clone());
+        node_registry.write_active_archive_snapshot(0)?;
+
         let state_root = genesis
             .compute_state_root()
             .map_err(|e| StateError::Genesis(e.to_string()))?;

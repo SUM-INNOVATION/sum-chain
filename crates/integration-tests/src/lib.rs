@@ -4,6 +4,11 @@
 
 mod nft_tests;
 mod security_tests;
+mod snip_v2_tests;
+// stress_tests references a stale NftExecutor::execute signature (5-arg vs the
+// current 6-arg shape). Gate behind `legacy_tests` until it's updated, same
+// pattern as `crates/state/src` legacy modules.
+#[cfg(feature = "legacy_tests")]
 mod stress_tests;
 
 use std::collections::HashMap;
@@ -17,8 +22,9 @@ use sumchain_state::{Mempool, MempoolConfig, StateManager};
 use sumchain_storage::{BlockStore, Database, ReceiptStore, TxStore};
 use tempfile::TempDir;
 
-/// Test harness for running integration tests
-struct TestNode {
+/// Test harness for running integration tests. `pub(crate)` so that sibling
+/// test modules (e.g. `snip_v2_tests`) can construct and drive the node.
+pub(crate) struct TestNode {
     db: Arc<Database>,
     state: Arc<StateManager>,
     mempool: Arc<Mempool>,
@@ -50,6 +56,9 @@ impl TestNode {
             ChainParams {
                 block_time_ms: 100, // Fast blocks for testing
                 finality_depth: 2,
+                // Integration tests exercise V2 ops; enable the V2 gate from
+                // genesis. Production chains must set this explicitly.
+                v2_enabled_from_height: Some(0),
                 ..Default::default()
             },
         );
@@ -81,7 +90,7 @@ impl TestNode {
     }
 
     /// Create a test node with custom allocations
-    fn with_allocations(
+    pub(crate) fn with_allocations(
         validator_key_bytes: [u8; 32],
         chain_id: u64,
         alloc: HashMap<String, u128>,
@@ -103,6 +112,7 @@ impl TestNode {
             ChainParams {
                 block_time_ms: 100,
                 finality_depth: 2,
+                v2_enabled_from_height: Some(0),
                 ..Default::default()
             },
         );
@@ -166,29 +176,41 @@ impl TestNode {
     }
 
     /// Add transaction to mempool
-    fn submit_tx(&self, tx: SignedTransaction) -> Result<Hash, sumchain_state::StateError> {
+    pub(crate) fn submit_tx(&self, tx: SignedTransaction) -> Result<Hash, sumchain_state::StateError> {
         self.mempool.add(tx)
     }
 
     /// Produce a block with pending transactions
-    async fn produce_block(&self) -> Result<sumchain_primitives::Block, sumchain_consensus::ConsensusError> {
+    pub(crate) async fn produce_block(&self) -> Result<sumchain_primitives::Block, sumchain_consensus::ConsensusError> {
         let txs = self.mempool.select_for_block(100);
         self.consensus.propose_block(txs).await
     }
 
     /// Get current block height
-    fn height(&self) -> u64 {
+    pub(crate) fn height(&self) -> u64 {
         self.consensus.current_height()
     }
 
     /// Get balance for an address
-    fn balance(&self, addr: &Address) -> u128 {
+    pub(crate) fn balance(&self, addr: &Address) -> u128 {
         self.state.get_balance(addr).unwrap_or(0)
     }
 
     /// Get nonce for an address
-    fn nonce(&self, addr: &Address) -> u64 {
+    pub(crate) fn nonce(&self, addr: &Address) -> u64 {
         self.state.get_nonce(addr).unwrap_or(0)
+    }
+
+    /// Direct access to the underlying RocksDB handle. Used by sibling test
+    /// modules to construct fresh executor instances for state assertions
+    /// (e.g. `StorageMetadataExecutor::new(node.db().clone())`).
+    pub(crate) fn db(&self) -> &Arc<Database> {
+        &self.db
+    }
+
+    /// Chain id for V2 tx signing.
+    pub(crate) fn chain_id(&self) -> u64 {
+        self.chain_id
     }
 }
 

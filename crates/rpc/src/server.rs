@@ -24,6 +24,35 @@ use crate::{RpcError, Result};
 /// Node version constant
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Classify a transaction's status given its receipt (if any), mempool presence,
+/// and a finality check. Pure function — extracted from `chain_get_transaction_status`
+/// to make the dispatch logic testable without a full RPC server harness.
+pub(crate) fn classify_tx_status(
+    receipt: Option<&sumchain_primitives::Receipt>,
+    in_mempool: bool,
+    is_finalized: impl Fn(sumchain_primitives::BlockHeight) -> bool,
+) -> TxStatusV2 {
+    if let Some(receipt) = receipt {
+        return if receipt.is_success() {
+            if is_finalized(receipt.block_height) {
+                TxStatusV2::Finalized { block_height: receipt.block_height }
+            } else {
+                TxStatusV2::Included { block_height: receipt.block_height }
+            }
+        } else {
+            TxStatusV2::Failed {
+                block_height: Some(receipt.block_height),
+                reason: receipt.status.description().to_string(),
+            }
+        };
+    }
+    if in_mempool {
+        TxStatusV2::Pending
+    } else {
+        TxStatusV2::Unknown
+    }
+}
+
 /// Peer info provider function type
 pub type PeerInfoProvider = Arc<dyn Fn() -> Vec<RpcPeerInfo> + Send + Sync>;
 /// P2P stats provider function type
@@ -100,6 +129,12 @@ pub struct RpcServer {
     p2p_stats_provider: Option<P2pStatsProvider>,
     /// Timeout configuration
     timeout_config: RpcTimeoutConfig,
+    /// Consensus chain parameters. Read by RPCs that need to compute against
+    /// consensus values (e.g. SNIP V2 `assignment_replication_factor` for
+    /// `storage_getAssignmentCoverageV2`). Defaults to `ChainParams::default()`;
+    /// production callers MUST set via `with_chain_params` to match the chain
+    /// they're serving.
+    chain_params: sumchain_genesis::ChainParams,
     /// Contract executor for smart contract RPCs
     contract_executor: Option<Arc<sumchain_state::ContractExecutorState>>,
 }
@@ -227,7 +262,19 @@ impl RpcServer {
             p2p_stats_provider: None,
             timeout_config: RpcTimeoutConfig::default(),
             contract_executor: None,
+            chain_params: sumchain_genesis::ChainParams::default(),
         }
+    }
+
+    /// Set the consensus chain parameters this server should reference for
+    /// RPCs that depend on consensus values (currently:
+    /// `storage_getAssignmentCoverageV2` reads `assignment_replication_factor`).
+    /// Production callers MUST call this with the same `ChainParams` the
+    /// chain is running, otherwise the RPC's reported `assigned_count` per
+    /// archive will disagree with `AcceptAssignmentV2` validity.
+    pub fn with_chain_params(mut self, params: sumchain_genesis::ChainParams) -> Self {
+        self.chain_params = params;
+        self
     }
 
     /// Set the peer info provider for get_peers RPC
@@ -732,6 +779,71 @@ impl SumChainApiServer for RpcServer {
 
     async fn is_block_finalized(&self, height: u64) -> std::result::Result<bool, jsonrpsee::types::ErrorObjectOwned> {
         Ok(self.consensus.is_finalized(height))
+    }
+
+    async fn chain_get_chain_params(
+        &self,
+    ) -> std::result::Result<ChainParamsInfo, jsonrpsee::types::ErrorObjectOwned> {
+        // Read from the live ChainParams plumbed into RpcServer at construction
+        // (Phase 1b: `with_chain_params(self.genesis.params.clone())`). Do NOT
+        // call `ChainParams::default()` here — that would silently disagree
+        // with the chain's actual config on any non-default setting.
+        let p = &self.chain_params;
+        Ok(ChainParamsInfo {
+            chain_id: self.state.chain_id(),
+            block_time_ms: p.block_time_ms,
+            max_block_bytes: p.max_block_bytes,
+            max_txs_per_block: p.max_txs_per_block,
+            min_fee: p.min_fee,
+            finality_depth: p.finality_depth,
+            storage_fee_per_byte: p.storage_fee_per_byte,
+            max_metadata_bytes: p.max_metadata_bytes,
+            max_access_list_bytes: p.max_access_list_bytes,
+            activation_grace_blocks: p.activation_grace_blocks,
+            abandonment_fee_percent: p.abandonment_fee_percent,
+            max_chunk_count_per_file: p.max_chunk_count_per_file,
+            max_chunk_indices_per_tx: p.max_chunk_indices_per_tx,
+            assignment_replication_factor: p.assignment_replication_factor,
+            v2_enabled_from_height: p.v2_enabled_from_height,
+        })
+    }
+
+    async fn chain_get_block_height(
+        &self,
+        finality: Option<String>,
+    ) -> std::result::Result<BlockHeightInfo, jsonrpsee::types::ErrorObjectOwned> {
+        // Default to latest; "finalized" returns the depth-aware finalized head.
+        match finality.as_deref() {
+            Some("finalized") => Ok(BlockHeightInfo {
+                height: self.consensus.finalized_height(),
+                finality: "finalized".to_string(),
+            }),
+            None | Some("latest") => Ok(BlockHeightInfo {
+                height: self.consensus.current_height(),
+                finality: "latest".to_string(),
+            }),
+            Some(other) => Err(RpcError::InvalidParams(format!(
+                "finality must be \"latest\" or \"finalized\", got {:?}",
+                other
+            ))
+            .into()),
+        }
+    }
+
+    async fn chain_get_transaction_status(
+        &self,
+        tx_hash: String,
+    ) -> std::result::Result<TxStatusV2, jsonrpsee::types::ErrorObjectOwned> {
+        let hash = self.parse_hash(&tx_hash)?;
+
+        let receipt = ReceiptStore::new(&self.db)
+            .get(&hash)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        let in_mempool = self.mempool.get(&hash).is_some();
+
+        Ok(classify_tx_status(receipt.as_ref(), in_mempool, |h| {
+            self.consensus.is_finalized(h)
+        }))
     }
 
     async fn get_peers(&self) -> std::result::Result<Vec<RpcPeerInfo>, jsonrpsee::types::ErrorObjectOwned> {
@@ -2608,6 +2720,21 @@ impl SumChainApiServer for RpcServer {
             })),
             Ok(None) => Ok(None),
             Err(e) => Err(RpcError::Internal(e.to_string()).into()),
+        }
+    }
+
+    async fn account_get_encryption_public_key(
+        &self,
+        address: String,
+    ) -> std::result::Result<Option<String>, jsonrpsee::types::ErrorObjectOwned> {
+        let addr = self.parse_address(&address)?;
+        let registry = sumchain_state::NodeRegistryExecutor::new(self.db.clone());
+        match registry
+            .get_encryption_pubkey(&addr)
+            .map_err(|e| RpcError::Internal(e.to_string()))?
+        {
+            Some(pk) => Ok(Some(format!("0x{}", hex::encode(pk)))),
+            None => Ok(None),
         }
     }
 
@@ -5010,6 +5137,185 @@ impl SumChainApiServer for RpcServer {
             None => Ok(None),
         }
     }
+
+    async fn storage_get_file_info_v2(
+        &self,
+        merkle_root: String,
+        access_offset: Option<u32>,
+        access_limit: Option<u32>,
+    ) -> std::result::Result<Option<StorageFileInfoV2>, jsonrpsee::types::ErrorObjectOwned> {
+        let root = self.parse_hash(&merkle_root)?;
+        let offset = access_offset.unwrap_or(0);
+        // Default 256, hard cap 1024 — keeps RPC body small on Private files
+        // (1024 entries × ~110B = 110 KB, fits comfortably under the default
+        // max_response_body_size = 10 MB).
+        let limit = access_limit.unwrap_or(256).min(1024);
+
+        let storage = sumchain_state::StorageMetadataExecutor::new(self.db.clone());
+        let row = match storage
+            .get_metadata_v2(&root)
+            .map_err(|e| RpcError::Internal(e.to_string()))?
+        {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+
+        let total = row.access_list.len() as u32;
+        let start = (offset as usize).min(row.access_list.len());
+        let end = start.saturating_add(limit as usize).min(row.access_list.len());
+        let window: Vec<AccessEntryRpcV2> = row.access_list[start..end]
+            .iter()
+            .map(|e| AccessEntryRpcV2 {
+                address: e.address.to_base58(),
+                encrypted_key_bundle: e
+                    .encrypted_key_bundle
+                    .as_ref()
+                    .map(|b| format!("0x{}", hex::encode(b.0))),
+                expires_at: e.expires_at,
+            })
+            .collect();
+
+        Ok(Some(StorageFileInfoV2 {
+            merkle_root: row.merkle_root.to_hex(),
+            owner: row.owner.to_base58(),
+            plaintext_size_bytes: row.plaintext_size_bytes,
+            stored_size_bytes: row.stored_size_bytes,
+            chunk_count: row.chunk_count,
+            fee_pool: row.fee_pool,
+            created_at: row.created_at,
+            activated_at_height: row.activated_at_height,
+            assignment_height: row.assignment_height,
+            visibility: row.visibility as u8,
+            lifecycle: row.lifecycle as u8,
+            access_list: window,
+            access_total: total,
+            access_offset: offset,
+            predecessor_root: row.predecessor_root.map(|h| h.to_hex()),
+        }))
+    }
+
+    async fn storage_get_pushable_files_v2(
+        &self,
+        offset: Option<u32>,
+        limit: Option<u32>,
+    ) -> std::result::Result<Vec<PushableFileInfoV2>, jsonrpsee::types::ErrorObjectOwned> {
+        let off = offset.unwrap_or(0) as usize;
+        let lim = limit.unwrap_or(256).min(1024) as usize;
+
+        let storage = sumchain_state::StorageMetadataExecutor::new(self.db.clone());
+        let mut files = storage
+            .list_pushable_files_v2()
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        // RocksDB prefix iteration over `[b'F', b'2', merkle_root]` returns
+        // rows in lex-asc order on the merkle_root, so the natural iteration
+        // order is already stable. Sort defensively in case storage layout
+        // ever changes — cheap relative to the list size.
+        files.sort_by(|a, b| a.merkle_root.as_bytes().cmp(b.merkle_root.as_bytes()));
+
+        let start = off.min(files.len());
+        let end = start.saturating_add(lim).min(files.len());
+        Ok(files[start..end]
+            .iter()
+            .map(|r| PushableFileInfoV2 {
+                merkle_root: r.merkle_root.to_hex(),
+                chunk_count: r.chunk_count,
+                lifecycle: r.lifecycle as u8,
+                created_at: r.created_at,
+            })
+            .collect())
+    }
+
+    async fn storage_get_assignment_coverage_v2(
+        &self,
+        merkle_root: String,
+        missing_offset: Option<u32>,
+        missing_limit: Option<u32>,
+    ) -> std::result::Result<Option<AssignmentCoverageV2>, jsonrpsee::types::ErrorObjectOwned> {
+        let root = self.parse_hash(&merkle_root)?;
+        // Default 1024, hard cap 16384 per plan §4.
+        let limit = missing_limit.unwrap_or(1024).min(16384);
+        let offset = missing_offset.unwrap_or(0);
+
+        let storage = sumchain_state::StorageMetadataExecutor::new(self.db.clone());
+        let registry = sumchain_state::NodeRegistryExecutor::new(self.db.clone());
+
+        // Read replication_factor from the consensus params this server was
+        // configured with — must match the value the executor uses to
+        // validate `AcceptAssignmentV2`, otherwise SNIP clients see wrong
+        // `assigned_count` per archive.
+        let replication_factor = self.chain_params.assignment_replication_factor;
+
+        let summary = match storage
+            .compute_coverage_v2(&root, &registry, replication_factor)
+            .map_err(|e| RpcError::Internal(e.to_string()))?
+        {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+
+        // Per-archive wire entries. `assigned_count` is `Some(n)` when chunk_count
+        // was small enough for the chain to compute it (under the safety cap);
+        // otherwise `None` is rendered to JSON — clients with very large files
+        // compute counts locally via the deterministic assignment function.
+        let per_archive_wire: Vec<ArchiveCoverageSummaryV2> = summary
+            .per_archive
+            .iter()
+            .map(|p| ArchiveCoverageSummaryV2 {
+                archive: p.archive.to_base58(),
+                assigned_count: p.assigned_count,
+                attested_count: p.attested_count,
+                currently_active: p.currently_active,
+            })
+            .collect();
+
+        // Compute missing_indices window: ascending i >= offset where union[i] == 0.
+        let mut missing_indices = Vec::new();
+        for i in offset..summary.chunk_count {
+            if (missing_indices.len() as u32) >= limit {
+                break;
+            }
+            let byte = summary.union.get((i / 8) as usize).copied().unwrap_or(0);
+            if (byte >> (i % 8)) & 1 == 0 {
+                missing_indices.push(i);
+            }
+        }
+
+        let missing_total = summary.chunk_count - summary.covered_count;
+        let can_activate_now = summary.covered_count == summary.chunk_count
+            && summary.lifecycle == sumchain_primitives::FileLifecycleV2::Pending;
+
+        Ok(Some(AssignmentCoverageV2 {
+            chunk_count: summary.chunk_count,
+            covered_count: summary.covered_count,
+            can_activate_now,
+            missing_total,
+            missing_offset: offset,
+            missing_indices,
+            per_archive: per_archive_wire,
+        }))
+    }
+
+    async fn storage_get_active_nodes_at_height(
+        &self,
+        height: u64,
+    ) -> std::result::Result<Vec<NodeRecordInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let executor = sumchain_state::NodeRegistryExecutor::new(self.db.clone());
+        let records = executor
+            .get_active_archive_nodes_at_height(height)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        Ok(records
+            .into_iter()
+            .map(|r| NodeRecordInfo {
+                address: r.address.to_base58(),
+                role: format!("{:?}", r.role),
+                staked_balance: r.staked_balance,
+                status: format!("{:?}", r.status),
+                registered_at: r.registered_at,
+            })
+            .collect())
+    }
 }
 
 // Helper methods for DocClass RPC conversions
@@ -5169,6 +5475,500 @@ impl RpcServer {
             is_valid: att.is_valid(current_time),
             created_at: att.created_at,
         }
+    }
+}
+
+// ============================================================================
+// Phase 0b checkpoint 1 — RPC contract tests (SNIP V2 Asks 8, 11)
+//
+// These tests cover the dispatch logic and JSON wire shape for
+// chain_getBlockHeight + chain_getTransactionStatus without requiring a full
+// RpcServer harness. The dispatch logic is in `classify_tx_status` (above);
+// for `chain_getBlockHeight`, the parameter→branch mapping is exercised
+// indirectly via the `BlockHeightInfo` JSON shape tests since that contract
+// is what SNIP serializes against.
+// ============================================================================
+#[cfg(test)]
+mod phase_0b_rpc_tests {
+    use super::*;
+    use sumchain_primitives::{Hash, Receipt, TxStatus};
+
+    fn mk_receipt(status: TxStatus, block_height: u64) -> Receipt {
+        Receipt::new(Hash::hash(b"tx"), block_height, 0, status, 10)
+    }
+
+    // ------- classify_tx_status --------------------------------------------
+
+    #[test]
+    fn classify_unknown_when_no_receipt_and_no_mempool() {
+        let s = classify_tx_status(None, false, |_| true);
+        assert!(matches!(s, TxStatusV2::Unknown));
+    }
+
+    #[test]
+    fn classify_pending_when_in_mempool_only() {
+        let s = classify_tx_status(None, true, |_| true);
+        assert!(matches!(s, TxStatusV2::Pending));
+    }
+
+    #[test]
+    fn classify_finalized_when_success_receipt_in_finalized_block() {
+        let r = mk_receipt(TxStatus::Success, 42);
+        let s = classify_tx_status(Some(&r), false, |h| h == 42);
+        assert!(matches!(s, TxStatusV2::Finalized { block_height: 42 }));
+    }
+
+    #[test]
+    fn classify_included_when_success_receipt_in_unfinalized_block() {
+        let r = mk_receipt(TxStatus::Success, 42);
+        let s = classify_tx_status(Some(&r), false, |_| false);
+        assert!(matches!(s, TxStatusV2::Included { block_height: 42 }));
+    }
+
+    #[test]
+    fn classify_failed_carries_block_height_and_reason() {
+        let r = mk_receipt(TxStatus::InvalidNonce, 17);
+        let s = classify_tx_status(Some(&r), false, |_| true);
+        match s {
+            TxStatusV2::Failed { block_height, reason } => {
+                assert_eq!(block_height, Some(17));
+                assert_eq!(reason, "invalid nonce");
+            }
+            other => panic!("expected Failed, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn classify_failed_does_not_depend_on_finality() {
+        // Documented caveat: Failed { block_height } is returned regardless
+        // of whether the block is finalized. SNIP treats this as terminal.
+        let r = mk_receipt(TxStatus::Failed(7), 99);
+        let finalized = classify_tx_status(Some(&r), false, |_| true);
+        let unfinalized = classify_tx_status(Some(&r), false, |_| false);
+        assert!(matches!(finalized,   TxStatusV2::Failed { block_height: Some(99), .. }));
+        assert!(matches!(unfinalized, TxStatusV2::Failed { block_height: Some(99), .. }));
+    }
+
+    #[test]
+    fn classify_receipt_takes_precedence_over_mempool() {
+        // Edge case: tx is both in receipt store and mempool (e.g., mempool
+        // hasn't pruned yet after inclusion). Receipt wins.
+        let r = mk_receipt(TxStatus::Success, 5);
+        let s = classify_tx_status(Some(&r), true, |h| h == 5);
+        assert!(matches!(s, TxStatusV2::Finalized { block_height: 5 }));
+    }
+
+    // ------- TxStatusV2 JSON wire shape ------------------------------------
+
+    #[test]
+    fn tx_status_v2_json_shape_unknown() {
+        let json = serde_json::to_value(&TxStatusV2::Unknown).unwrap();
+        assert_eq!(json, serde_json::json!({ "kind": "unknown" }));
+    }
+
+    #[test]
+    fn tx_status_v2_json_shape_pending() {
+        let json = serde_json::to_value(&TxStatusV2::Pending).unwrap();
+        assert_eq!(json, serde_json::json!({ "kind": "pending" }));
+    }
+
+    #[test]
+    fn tx_status_v2_json_shape_included() {
+        let json = serde_json::to_value(&TxStatusV2::Included { block_height: 42 }).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "kind": "included", "block_height": 42 })
+        );
+    }
+
+    #[test]
+    fn tx_status_v2_json_shape_finalized() {
+        let json = serde_json::to_value(&TxStatusV2::Finalized { block_height: 100 }).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "kind": "finalized", "block_height": 100 })
+        );
+    }
+
+    #[test]
+    fn tx_status_v2_json_shape_failed_with_height() {
+        let v = TxStatusV2::Failed {
+            block_height: Some(7),
+            reason: "invalid nonce".to_string(),
+        };
+        let json = serde_json::to_value(&v).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "kind": "failed", "block_height": 7, "reason": "invalid nonce" })
+        );
+    }
+
+    #[test]
+    fn tx_status_v2_json_shape_failed_without_height() {
+        let v = TxStatusV2::Failed {
+            block_height: None,
+            reason: "rejected".to_string(),
+        };
+        let json = serde_json::to_value(&v).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "kind": "failed", "block_height": null, "reason": "rejected" })
+        );
+    }
+
+    #[test]
+    fn tx_status_v2_json_round_trip() {
+        let cases = vec![
+            TxStatusV2::Unknown,
+            TxStatusV2::Pending,
+            TxStatusV2::Included { block_height: 1 },
+            TxStatusV2::Finalized { block_height: 2 },
+            TxStatusV2::Failed { block_height: Some(3), reason: "x".to_string() },
+            TxStatusV2::Dropped,
+        ];
+        for c in cases {
+            let s = serde_json::to_string(&c).unwrap();
+            let back: TxStatusV2 = serde_json::from_str(&s).unwrap();
+            // PartialEq isn't derived; compare via re-serialization.
+            assert_eq!(s, serde_json::to_string(&back).unwrap());
+        }
+    }
+
+    // ------- BlockHeightInfo JSON wire shape -------------------------------
+
+    #[test]
+    fn block_height_info_json_shape() {
+        let v = BlockHeightInfo { height: 42, finality: "finalized".to_string() };
+        let json = serde_json::to_value(&v).unwrap();
+        assert_eq!(json, serde_json::json!({ "height": 42, "finality": "finalized" }));
+    }
+
+    #[test]
+    fn block_height_info_round_trip() {
+        let v = BlockHeightInfo { height: 7, finality: "latest".to_string() };
+        let s = serde_json::to_string(&v).unwrap();
+        let back: BlockHeightInfo = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.height, 7);
+        assert_eq!(back.finality, "latest");
+    }
+
+    // ------- NodeRecordInfo JSON wire shape (Ask 15) ------------------------
+
+    #[test]
+    fn node_record_info_json_shape() {
+        let v = NodeRecordInfo {
+            address: "1A1zP1eP".to_string(),
+            role: "ArchiveNode".to_string(),
+            staked_balance: 1_000_000_000,
+            status: "Active".to_string(),
+            registered_at: 42,
+        };
+        let json = serde_json::to_value(&v).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "address": "1A1zP1eP",
+                "role": "ArchiveNode",
+                "staked_balance": 1_000_000_000u64,
+                "status": "Active",
+                "registered_at": 42u64,
+            })
+        );
+    }
+
+    // ------- AssignmentCoverageV2 JSON wire shape (Phase 1b, Ask 12) ---------
+
+    /// Plan v3.2 §4 — wire-shape lock. SNIP clients serialize against this
+    /// struct; field-name drift or `Option<u32>` → `u32` regressions break
+    /// SNIP code that already shipped against the documented shape.
+    #[test]
+    fn assignment_coverage_v2_json_shape() {
+        let v = AssignmentCoverageV2 {
+            chunk_count: 4,
+            covered_count: 3,
+            can_activate_now: false,
+            missing_total: 1,
+            missing_offset: 0,
+            missing_indices: vec![3],
+            per_archive: vec![ArchiveCoverageSummaryV2 {
+                archive: "ArchiveAddr1".to_string(),
+                assigned_count: Some(2),
+                attested_count: 2,
+                currently_active: true,
+            }],
+        };
+        let got = serde_json::to_value(&v).unwrap();
+        let want = serde_json::json!({
+            "chunk_count": 4,
+            "covered_count": 3,
+            "can_activate_now": false,
+            "missing_total": 1,
+            "missing_offset": 0,
+            "missing_indices": [3],
+            "per_archive": [{
+                "archive": "ArchiveAddr1",
+                "assigned_count": 2,
+                "attested_count": 2,
+                "currently_active": true,
+            }],
+        });
+        assert_eq!(got, want);
+    }
+
+    /// `assigned_count == None` (large-file path, above the
+    /// MAX_ASSIGNED_COUNT_CHUNK_COUNT cap) must serialize as JSON null —
+    /// SNIP clients use that as the signal to compute counts locally via the
+    /// deterministic assignment function.
+    #[test]
+    fn assignment_coverage_v2_assigned_count_none_serializes_as_null() {
+        let v = AssignmentCoverageV2 {
+            chunk_count: 100_000,
+            covered_count: 0,
+            can_activate_now: false,
+            missing_total: 100_000,
+            missing_offset: 0,
+            missing_indices: Vec::new(),
+            per_archive: vec![ArchiveCoverageSummaryV2 {
+                archive: "BigArchive".to_string(),
+                assigned_count: None,
+                attested_count: 0,
+                currently_active: true,
+            }],
+        };
+        let got = serde_json::to_value(&v).unwrap();
+        assert_eq!(
+            got["per_archive"][0]["assigned_count"],
+            serde_json::Value::Null
+        );
+    }
+
+    /// Round-trip — every field deserializes back to the same value, locking
+    /// the deserialize side too (catches the case where a SNIP client serializes
+    /// the struct, sends it back, and we have to read it).
+    #[test]
+    fn assignment_coverage_v2_round_trip() {
+        let v = AssignmentCoverageV2 {
+            chunk_count: 16,
+            covered_count: 10,
+            can_activate_now: false,
+            missing_total: 6,
+            missing_offset: 4,
+            missing_indices: vec![6, 8, 9, 12, 14, 15],
+            per_archive: vec![
+                ArchiveCoverageSummaryV2 {
+                    archive: "A".to_string(),
+                    assigned_count: Some(5),
+                    attested_count: 4,
+                    currently_active: true,
+                },
+                ArchiveCoverageSummaryV2 {
+                    archive: "B".to_string(),
+                    assigned_count: None,
+                    attested_count: 6,
+                    currently_active: false,
+                },
+            ],
+        };
+        let s = serde_json::to_string(&v).unwrap();
+        let back: AssignmentCoverageV2 = serde_json::from_str(&s).unwrap();
+        // Re-serialize and compare strings — PartialEq isn't derived on the type.
+        assert_eq!(serde_json::to_string(&back).unwrap(), s);
+    }
+
+    // ------- StorageFileInfoV2 / PushableFileInfoV2 JSON wire shapes (Phase 1c, Asks 4/6/9/12/13) -------
+
+    #[test]
+    fn storage_file_info_v2_json_shape() {
+        let v = StorageFileInfoV2 {
+            merkle_root: "deadbeef".to_string(),
+            owner: "OwnerAddr".to_string(),
+            plaintext_size_bytes: 1024,
+            stored_size_bytes: 1024,
+            chunk_count: 1,
+            fee_pool: 5_000_000,
+            created_at: 100,
+            activated_at_height: Some(105),
+            assignment_height: 100,
+            visibility: 0,
+            lifecycle: 1,
+            access_list: vec![AccessEntryRpcV2 {
+                address: "Recipient1".to_string(),
+                encrypted_key_bundle: None,
+                expires_at: None,
+            }],
+            access_total: 1,
+            access_offset: 0,
+            predecessor_root: None,
+        };
+        let got = serde_json::to_value(&v).unwrap();
+        let want = serde_json::json!({
+            "merkle_root": "deadbeef",
+            "owner": "OwnerAddr",
+            "plaintext_size_bytes": 1024,
+            "stored_size_bytes": 1024,
+            "chunk_count": 1,
+            "fee_pool": 5000000,
+            "created_at": 100,
+            "activated_at_height": 105,
+            "assignment_height": 100,
+            "visibility": 0,
+            "lifecycle": 1,
+            "access_list": [{
+                "address": "Recipient1",
+                "encrypted_key_bundle": null,
+                "expires_at": null,
+            }],
+            "access_total": 1,
+            "access_offset": 0,
+            "predecessor_root": null,
+        });
+        assert_eq!(got, want);
+    }
+
+    /// Private file: `encrypted_key_bundle` serializes as `0x`-prefixed hex.
+    #[test]
+    fn access_entry_rpc_v2_private_bundle_serializes_as_hex() {
+        let e = AccessEntryRpcV2 {
+            address: "PrivAddr".to_string(),
+            encrypted_key_bundle: Some(format!("0x{}", "ab".repeat(80))),
+            expires_at: Some(12345),
+        };
+        let got = serde_json::to_value(&e).unwrap();
+        assert_eq!(got["encrypted_key_bundle"].as_str().unwrap().len(), 162); // 0x + 160 hex chars
+        assert!(got["encrypted_key_bundle"].as_str().unwrap().starts_with("0x"));
+        assert_eq!(got["expires_at"], 12345);
+    }
+
+    #[test]
+    fn pushable_file_info_v2_json_shape() {
+        let v = PushableFileInfoV2 {
+            merkle_root: "abc123".to_string(),
+            chunk_count: 8,
+            lifecycle: 0, // Pending
+            created_at: 50,
+        };
+        let got = serde_json::to_value(&v).unwrap();
+        assert_eq!(
+            got,
+            serde_json::json!({
+                "merkle_root": "abc123",
+                "chunk_count": 8,
+                "lifecycle": 0,
+                "created_at": 50,
+            })
+        );
+    }
+
+    #[test]
+    fn storage_file_info_v2_round_trip() {
+        let v = StorageFileInfoV2 {
+            merkle_root: "rt".to_string(),
+            owner: "owner".to_string(),
+            plaintext_size_bytes: 1,
+            stored_size_bytes: 1,
+            chunk_count: 1,
+            fee_pool: 0,
+            created_at: 0,
+            activated_at_height: None,
+            assignment_height: 0,
+            visibility: 1,
+            lifecycle: 0,
+            access_list: Vec::new(),
+            access_total: 0,
+            access_offset: 0,
+            predecessor_root: Some("predecessor-hash".to_string()),
+        };
+        let s = serde_json::to_string(&v).unwrap();
+        let back: StorageFileInfoV2 = serde_json::from_str(&s).unwrap();
+        assert_eq!(serde_json::to_string(&back).unwrap(), s);
+    }
+
+    // ------- ChainParamsInfo JSON wire shape (Phase 2) ----------------------
+
+    /// Plan v3.2 + reviewer advice: `chain_getChainParams` must return live
+    /// values, never hardcoded library defaults. This shape test locks the
+    /// flat layout (no nested sub-configs) and JSON field names so SNIP
+    /// clients can deserialize stably.
+    #[test]
+    fn chain_params_info_json_shape() {
+        let v = ChainParamsInfo {
+            chain_id: 1337,
+            block_time_ms: 2000,
+            max_block_bytes: 1_000_000,
+            max_txs_per_block: 1000,
+            min_fee: 1,
+            finality_depth: 3,
+            storage_fee_per_byte: 100,
+            max_metadata_bytes: 16_384,
+            max_access_list_bytes: 16_384,
+            activation_grace_blocks: 50,
+            abandonment_fee_percent: 10,
+            max_chunk_count_per_file: 1_048_576,
+            max_chunk_indices_per_tx: 65_536,
+            assignment_replication_factor: 3,
+            v2_enabled_from_height: None,  // disabled (production-safe default)
+        };
+        let got = serde_json::to_value(&v).unwrap();
+        let want = serde_json::json!({
+            "chain_id": 1337,
+            "block_time_ms": 2000,
+            "max_block_bytes": 1_000_000,
+            "max_txs_per_block": 1000,
+            "min_fee": 1,
+            "finality_depth": 3,
+            "storage_fee_per_byte": 100,
+            "max_metadata_bytes": 16_384,
+            "max_access_list_bytes": 16_384,
+            "activation_grace_blocks": 50,
+            "abandonment_fee_percent": 10,
+            "max_chunk_count_per_file": 1_048_576,
+            "max_chunk_indices_per_tx": 65_536,
+            "assignment_replication_factor": 3,
+            "v2_enabled_from_height": null,
+        });
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn chain_params_info_round_trip() {
+        let v = ChainParamsInfo {
+            chain_id: 9001,
+            block_time_ms: 3000,
+            max_block_bytes: 2_000_000,
+            max_txs_per_block: 500,
+            min_fee: 100_000,
+            finality_depth: 6,
+            storage_fee_per_byte: 200,
+            max_metadata_bytes: 32_768,
+            max_access_list_bytes: 32_768,
+            activation_grace_blocks: 150,
+            abandonment_fee_percent: 5,
+            max_chunk_count_per_file: 524_288,
+            max_chunk_indices_per_tx: 32_768,
+            assignment_replication_factor: 5,
+            v2_enabled_from_height: Some(1_000_000),  // activation height
+        };
+        let s = serde_json::to_string(&v).unwrap();
+        let back: ChainParamsInfo = serde_json::from_str(&s).unwrap();
+        assert_eq!(serde_json::to_string(&back).unwrap(), s);
+    }
+
+    #[test]
+    fn node_record_info_round_trip() {
+        let v = NodeRecordInfo {
+            address: "TestAddr".to_string(),
+            role: "ArchiveNode".to_string(),
+            staked_balance: 12345,
+            status: "Slashed".to_string(),
+            registered_at: 100,
+        };
+        let s = serde_json::to_string(&v).unwrap();
+        let back: NodeRecordInfo = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.address, "TestAddr");
+        assert_eq!(back.role, "ArchiveNode");
+        assert_eq!(back.staked_balance, 12345);
+        assert_eq!(back.status, "Slashed");
+        assert_eq!(back.registered_at, 100);
     }
 }
 

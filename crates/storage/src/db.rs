@@ -93,10 +93,29 @@ pub mod cf {
     // Node Registry
     /// Node registry (address -> NodeRecord, role indexes)
     pub const NODE_REGISTRY: &str = "node_registry";
+    /// Per-account X25519 encryption pubkey registry (address -> [u8; 32])
+    /// SNIP V2 Ask 3 — populated by `NodeRegistryOperationV2::RegisterEncryptionKey`.
+    pub const ACCOUNT_ENCRYPTION_KEYS: &str = "account_encryption_keys";
+    /// Active-archive-node set snapshots, snapshot-on-change.
+    /// Key: `[height_be_bytes_8]`. Value: `bincode(Vec<NodeRecord>)`.
+    /// SNIP V2 Ask 15 (Option A, height-based) — see plan v3 §5.3.
+    /// Genesis snapshot lives at key `0u64.to_be_bytes()`.
+    pub const ACTIVE_ARCHIVE_NODES_HISTORY: &str = "active_archive_nodes_history";
 
     // Storage Metadata
     /// Storage file metadata (merkle_root -> StorageMetadata, owner indexes)
     pub const STORAGE_METADATA: &str = "storage_metadata";
+    /// V2 storage file metadata (`[b'F', b'2', merkle_root]` -> `StorageMetadataV2`).
+    /// Coexists with V1 STORAGE_METADATA — V2 entries live under their own CF
+    /// to avoid prefix collisions while keeping V1 reads cheap. SNIP V2 Phase 1.
+    pub const STORAGE_METADATA_V2: &str = "storage_metadata_v2";
+    /// V2 per-(file, archive) attestation bitmaps for `AcceptAssignmentV2`.
+    /// Key: `[b'A', merkle_root_32, archive_address_20]` (53 bytes).
+    /// Value: `Vec<u8>` of length `ceil(chunk_count / 8)`.
+    /// Plan v3.2 §3.6 — dedicated CF for distinct access pattern (point lookups
+    /// during attestation, prefix scan `[b'A', root, ...]` during coverage RPC),
+    /// and to keep future post-activation GC isolated from file-row data.
+    pub const ASSIGNMENT_ATTESTATIONS_V2: &str = "assignment_attestations_v2";
 
     // PoR Challenges
     /// Active storage challenges (challenge_id -> StorageChallenge, node/expiry indexes)
@@ -373,6 +392,10 @@ pub const ALL_CFS: &[&str] = &[
     cf::VALIDATOR_SIGNING_INFO,
     cf::MISSED_BLOCKS,
     cf::VALIDATOR_SETS,
+    cf::ACCOUNT_ENCRYPTION_KEYS,
+    cf::ACTIVE_ARCHIVE_NODES_HISTORY,
+    cf::STORAGE_METADATA_V2,
+    cf::ASSIGNMENT_ATTESTATIONS_V2,
     // SRC-80X/81X DocClass
     cf::DOCCLASS_IDENTITY_ROOTS,
     cf::DOCCLASS_ELIGIBILITY,

@@ -75,6 +75,53 @@ pub struct ChainParams {
     /// SRC-80X/81X DocClass parameters (optional - uses defaults if not specified)
     #[serde(default)]
     pub docclass: Option<DocClassParams>,
+    // ─── SNIP V2 (Phase 1) parameters ──────────────────────────────────────
+    /// Maximum bincode-serialized size of a V2 file's `access_list` (bytes).
+    /// Plan v3.1 §3.4 — 200 Private entries = ~22 KB, so the cap drives the
+    /// effective recipient limit (~148 Private at default).
+    #[serde(default = "default_max_access_list_bytes")]
+    pub max_access_list_bytes: u64,
+    /// Grace period after `ActivateFileV2` (in blocks) during which PoR
+    /// challenges are suppressed for that file. Plan §3.5, Ask 12.
+    #[serde(default = "default_activation_grace_blocks")]
+    pub activation_grace_blocks: u64,
+    /// Percentage (0–100) of `fee_pool` retained on `AbandonFileV2`. The
+    /// remainder is refunded to the owner. Plan §3.5, Ask 13.
+    #[serde(default = "default_abandonment_fee_percent")]
+    pub abandonment_fee_percent: u64,
+    /// Cap on `chunk_count` per V2 file. Bounds the per-`(file, archive)`
+    /// `AcceptAssignmentV2` bitmap row size at `ceil(N/8)` bytes — at the
+    /// default of 1,048,576 chunks that's 128 KB worst-case per archive.
+    /// Plan v3.2 §3.4.
+    #[serde(default = "default_max_chunk_count_per_file")]
+    pub max_chunk_count_per_file: u32,
+    /// Cap on `chunk_indices.len()` in a single `AcceptAssignmentV2` tx.
+    /// Bounds tx size; archives with larger assignments split across multiple
+    /// txs (the bitmap OR-merge means partial submissions accumulate cleanly).
+    /// Plan v3.2 §3.4.
+    #[serde(default = "default_max_chunk_indices_per_tx")]
+    pub max_chunk_indices_per_tx: u32,
+    /// Number of archive nodes assigned to each chunk by the deterministic
+    /// rendezvous-hash assignment function. The actual replication factor
+    /// is `min(assignment_replication_factor, snapshot.len())`, so genesis
+    /// chains with fewer archives still produce coherent assignments.
+    /// Plan v3.2 §3.6.
+    #[serde(default = "default_assignment_replication_factor")]
+    pub assignment_replication_factor: u32,
+    /// Block height at which V2 storage operations (`NodeRegistryV2`,
+    /// `StorageMetadataV2`) become valid. `None` (the default) means V2 is
+    /// disabled entirely — every V2 tx receipts as `TxStatus::Failed(40)`
+    /// without consuming the sender's fee.
+    ///
+    /// Production safety: `#[serde(default)]` resolves a missing field to
+    /// `None`, so an existing mainnet `genesis.json` upgraded to a V2-aware
+    /// binary stays V2-disabled until the operator explicitly sets a
+    /// future activation height.
+    ///
+    /// To enable V2 from genesis (dev / SNIP local-mirror): set to `Some(0)`.
+    /// To activate at a future block on a live chain: set to `Some(target_height)`.
+    #[serde(default)]
+    pub v2_enabled_from_height: Option<u64>,
 }
 
 fn default_finality_depth() -> u64 {
@@ -95,6 +142,30 @@ fn default_min_contract_gas() -> u64 {
 
 fn default_max_contract_gas() -> u64 {
     10_000_000 // 10M gas limit per transaction
+}
+
+fn default_max_access_list_bytes() -> u64 {
+    16_384 // matches max_metadata_bytes; ~148 Private recipients per file
+}
+
+fn default_activation_grace_blocks() -> u64 {
+    50 // ~100s at 2s blocks; SNIP can request 150 if 5min wall-clock is needed
+}
+
+fn default_abandonment_fee_percent() -> u64 {
+    10 // 10% of fee_pool retained on abandonment
+}
+
+fn default_max_chunk_count_per_file() -> u32 {
+    1_048_576 // 1 TB at CHUNK_SIZE = 1 MB; 128 KB bitmap row max
+}
+
+fn default_max_chunk_indices_per_tx() -> u32 {
+    65_536 // bounds AcceptAssignmentV2 tx size; multi-tx OR-merge handles larger sets
+}
+
+fn default_assignment_replication_factor() -> u32 {
+    3 // baseline R=3; effective R is min(this, active_snapshot_size)
 }
 
 /// SRC-201 Messaging Parameters
@@ -228,6 +299,29 @@ impl Default for ChainParams {
             staking: Some(StakingParams::default()),
             messaging: Some(MessagingParams::default()),
             docclass: Some(DocClassParams::default()),
+            max_access_list_bytes: default_max_access_list_bytes(),
+            activation_grace_blocks: default_activation_grace_blocks(),
+            abandonment_fee_percent: default_abandonment_fee_percent(),
+            max_chunk_count_per_file: default_max_chunk_count_per_file(),
+            max_chunk_indices_per_tx: default_max_chunk_indices_per_tx(),
+            assignment_replication_factor: default_assignment_replication_factor(),
+            // Production-safe default: V2 disabled. Tests and dev genesis
+            // (snip-mirror, local) opt in via `with_v2_enabled()` or by
+            // setting the field explicitly in their genesis JSON.
+            v2_enabled_from_height: None,
+        }
+    }
+}
+
+impl ChainParams {
+    /// Convenience for tests + dev genesis JSONs where V2 should be enabled
+    /// from genesis. Production chains MUST NOT use this — they should set
+    /// `v2_enabled_from_height` explicitly to a chosen activation height
+    /// (or leave it `None`) in their `genesis.json`.
+    pub fn with_v2_enabled() -> Self {
+        Self {
+            v2_enabled_from_height: Some(0),
+            ..Self::default()
         }
     }
 }
@@ -473,6 +567,52 @@ impl NodeConfig {
 mod tests {
     use super::*;
     use sumchain_crypto::KeyPair;
+
+    /// Plan v3.2 — existing `genesis.json` files (without the new V2 fields)
+    /// must still deserialize cleanly. Any of the SNIP V2 params landing
+    /// without `#[serde(default)]` would break old-genesis loads — this test
+    /// catches that by deserializing a minimal-shape genesis and asserting the
+    /// V2 fields fall back to their declared defaults.
+    #[test]
+    fn test_genesis_deserializes_without_v2_fields() {
+        let json = r#"{
+            "chain_id": 1337,
+            "genesis_time": 0,
+            "validators": [],
+            "alloc": {},
+            "params": {
+                "block_time_ms": 2000,
+                "max_block_bytes": 1000000,
+                "max_txs_per_block": 1000,
+                "min_fee": 1
+            }
+        }"#;
+        let g: Genesis = serde_json::from_str(json).expect("old-shape genesis must deserialize");
+        // Phase 1 v3.0 params.
+        assert_eq!(g.params.max_access_list_bytes, default_max_access_list_bytes());
+        assert_eq!(g.params.activation_grace_blocks, default_activation_grace_blocks());
+        assert_eq!(
+            g.params.abandonment_fee_percent,
+            default_abandonment_fee_percent()
+        );
+        // v3.2 bitmap-attestation params.
+        assert_eq!(
+            g.params.max_chunk_count_per_file,
+            default_max_chunk_count_per_file()
+        );
+        assert_eq!(
+            g.params.max_chunk_indices_per_tx,
+            default_max_chunk_indices_per_tx()
+        );
+        assert_eq!(
+            g.params.assignment_replication_factor,
+            default_assignment_replication_factor()
+        );
+        // v3.3 V2 activation gate: production-safe default is `None`
+        // (V2 disabled). An old mainnet genesis upgraded to a V2-aware binary
+        // must NOT auto-enable V2 — operator must set the field explicitly.
+        assert_eq!(g.params.v2_enabled_from_height, None);
+    }
 
     #[test]
     fn test_genesis_validation() {

@@ -30,7 +30,41 @@ impl TxStatus {
         matches!(self, TxStatus::Success)
     }
 
-    /// Get a human-readable description
+    /// Get a human-readable description.
+    ///
+    /// `Failed(u32)` codes are mapped here so `chain_getTransactionStatus`
+    /// (and any other receipt-surfacing path) emits the specific reason.
+    /// Allocated codes:
+    ///
+    /// * `22` — V2 `RegisterEncryptionKey`: rejected a low/small-order
+    ///   X25519 public key. Validation lives in
+    ///   `sumchain_crypto::is_low_order_x25519_public_key` (separate crate;
+    ///   `sumchain-primitives` does not depend on `sumchain-crypto`, so this
+    ///   is a plain reference rather than an intra-doc link).
+    ///
+    /// Allocated codes (kept in sync with executor dispatch):
+    ///
+    /// * `20` — V2 NodeRegistry dispatch failed (generic) — falls through to
+    ///   `"failed"` until per-op reasons are added.
+    /// * `21` — V2 StorageMetadata dispatch failed (generic) — falls through.
+    /// * `22` — `RegisterEncryptionKey` rejected a low/small-order X25519
+    ///   public key. See `sumchain_crypto::is_low_order_x25519_public_key`.
+    /// * `30` — `RegisterFilePendingV2` validity failure (size/chunk caps,
+    ///   visibility/bundle/owner rules, recipient X25519 missing, collision).
+    /// * `31` — `AbandonFileV2` validity failure (state/owner/grace).
+    /// * `32` — V2 storage op accepted by the dispatcher but not yet
+    ///   implemented in the current checkpoint (placeholder for 1c stubs).
+    /// * `33` — `AcceptAssignmentV2` validity failure (file state, snapshot
+    ///   membership, per-tx cap, index range, index-not-assigned).
+    /// * `34` — `ActivateFileV2` validity failure (state/owner/incomplete
+    ///   chunk coverage).
+    /// * `35` — `AddAccessV2` / `RemoveAccessV2` / `UpdateAccessV2` validity
+    ///   failure (file state/owner/visibility-bundle/X25519/duplicate/missing/
+    ///   byte-cap).
+    /// * `40` — V2 storage protocol not enabled at this block height. Set
+    ///   `v2_enabled_from_height` in the chain's genesis to opt in.
+    ///   Distinct from validity codes 30–35: this is a chain-level gate
+    ///   rejection, no fee consumed; safe to retry after activation.
     pub fn description(&self) -> &'static str {
         match self {
             TxStatus::Success => "success",
@@ -38,6 +72,14 @@ impl TxStatus {
             TxStatus::InvalidNonce => "invalid nonce",
             TxStatus::InsufficientBalance => "insufficient balance",
             TxStatus::InvalidChainId => "invalid chain id",
+            TxStatus::Failed(22) => "low-order x25519 public key rejected",
+            TxStatus::Failed(30) => "RegisterFilePendingV2 validity check failed",
+            TxStatus::Failed(31) => "AbandonFileV2 validity check failed",
+            TxStatus::Failed(32) => "V2 storage op not yet implemented",
+            TxStatus::Failed(33) => "AcceptAssignmentV2 validity check failed",
+            TxStatus::Failed(34) => "ActivateFileV2 validity check failed",
+            TxStatus::Failed(35) => "V2 access op validity check failed",
+            TxStatus::Failed(40) => "V2 storage protocol not enabled at this height",
             TxStatus::Failed(_) => "failed",
         }
     }
