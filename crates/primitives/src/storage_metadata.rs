@@ -597,6 +597,10 @@ pub struct StorageMetadataV2 {
     pub created_at: u64,
     /// Set on `ActivateFileV2`; `None` while Pending or Abandoned.
     pub activated_at_height: Option<u64>,
+    /// Set on `AbandonFileV2`; `None` while Pending or Active. Off-chain
+    /// indexers (e.g. SNIP `IngestOutcome::AbandonedOnChain`) read this to
+    /// learn the exact lifecycle-transition block without scanning receipts.
+    pub abandoned_at_height: Option<u64>,
     /// Block height at which the active-archive-node snapshot used for
     /// chunk assignment was captured (Ask 15, Option A).
     pub assignment_height: u64,

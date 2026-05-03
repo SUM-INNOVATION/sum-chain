@@ -640,6 +640,58 @@ impl Database {
         Self::open(&config)
     }
 
+    /// Open a database in true read-only mode for inspection.
+    ///
+    /// Guarantees relied on by the SNIP V2 pre-deployment tripwire
+    /// (`sumchain inspect-v2-rows`):
+    /// - never creates the database (`create_if_missing = false`)
+    /// - never creates missing column families
+    /// - never attempts repair
+    /// - never writes a WAL or LOG entry (RocksDB read-only handle)
+    ///
+    /// Discovers and opens **every** column family that already exists on
+    /// disk via `DB::list_cf`. This avoids two failure modes:
+    /// - Some `rocksdb` bindings refuse a partial CF open (they want every
+    ///   on-disk CF descriptor passed in). Opening the full set is always
+    ///   accepted and costs nothing extra in read-only mode.
+    /// - It transparently tolerates pre-V2 databases: V2 CFs that don't
+    ///   exist on disk are simply absent from the opened set, and any
+    ///   caller that asks for them via `prefix_iter`/`get`/etc. will see
+    ///   `StorageError::NotFound("Column family: ...")`. The inspector
+    ///   treats that as "this CF doesn't exist on this DB, so it has zero
+    ///   rows."
+    pub fn open_read_only<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let path_str = path.as_ref().to_string_lossy().to_string();
+
+        let mut opts = Options::default();
+        opts.create_if_missing(false);
+
+        // Discover every CF on disk. `list_cf` is itself read-only and does
+        // not require the DB to be opened first.
+        let existing_cfs =
+            DB::list_cf(&opts, &path_str).map_err(StorageError::RocksDb)?;
+
+        let cf_descriptors: Vec<ColumnFamilyDescriptor> = existing_cfs
+            .iter()
+            .map(|n| {
+                let cf_opts = Options::default();
+                ColumnFamilyDescriptor::new(n, cf_opts)
+            })
+            .collect();
+
+        // `error_if_log_file_exist = false` so a stopped-but-not-clean node
+        // can still be inspected; the read-only handle never writes the WAL.
+        let db = DB::open_cf_descriptors_read_only(
+            &opts,
+            &path_str,
+            cf_descriptors,
+            false,
+        )
+        .map_err(StorageError::RocksDb)?;
+
+        Ok(Database { db, path: path_str })
+    }
+
     /// Check if an error indicates database corruption
     fn is_corruption_error(e: &rocksdb::Error) -> bool {
         let msg = e.to_string().to_lowercase();

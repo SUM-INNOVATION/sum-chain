@@ -138,6 +138,9 @@ pub struct StorageFileInfoV2 {
     pub created_at: u64,
     /// `Some(height)` once `ActivateFileV2` lands; `None` while Pending or Abandoned.
     pub activated_at_height: Option<u64>,
+    /// `Some(height)` once `AbandonFileV2` lands; `None` while Pending or Active.
+    /// Surfaced for off-chain indexers (SNIP `IngestOutcome::AbandonedOnChain`).
+    pub abandoned_at_height: Option<u64>,
     /// Block height of the active-archive snapshot used for chunk assignment.
     pub assignment_height: u64,
     /// `0` = Public, `1` = Private.

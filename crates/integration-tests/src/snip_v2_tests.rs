@@ -507,6 +507,17 @@ async fn snip_v2_abandon_after_grace_refunds_owner() {
     let row = store.get_metadata_v2(&merkle_root).unwrap().unwrap();
     assert_eq!(row.lifecycle, FileLifecycleV2::Abandoned);
     assert_eq!(row.fee_pool, 0);
+    // SNIP indexer dependency: the chain must surface the abandon block via
+    // `abandoned_at_height`. End-to-end check: row write happened, value lies
+    // strictly past the activation grace window (otherwise the abandon would
+    // have been rejected with code 31).
+    let abandoned_at = row.abandoned_at_height.expect("abandoned_at_height populated");
+    assert!(
+        abandoned_at > row.created_at + 50, // default activation_grace_blocks
+        "abandoned_at_height ({}) must be past created_at + grace ({} + 50)",
+        abandoned_at,
+        row.created_at
+    );
 }
 
 /// Multi-block AcceptAssignmentV2 OR-merge: two attestation txs from the

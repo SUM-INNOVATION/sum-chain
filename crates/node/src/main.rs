@@ -273,6 +273,18 @@ enum Commands {
         #[arg(long)]
         yes: bool,
     },
+
+    /// Inspect SNIP V2 metadata rows in the database (read-only). Used as a
+    /// pre-flight before deploying any V2 schema-bump binary: a non-zero file
+    /// or owner-index count means the positional bincode shape on disk must
+    /// match the binary, so a schema-changing upgrade is unsafe without a
+    /// versioned-row migration. Safe to run on a stopped node; opens the DB
+    /// read-only.
+    InspectV2Rows {
+        /// Data directory
+        #[arg(short, long, default_value = "data")]
+        data_dir: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -1076,6 +1088,116 @@ async fn main() -> Result<()> {
             println!("  Skipped: {} (already registered locally)", skipped);
             println!();
             println!("Start the node and the chain should accept previously-diverged blocks.");
+        }
+
+        Commands::InspectV2Rows { data_dir } => {
+            // Reports counts of every V2 keyspace prefix the chain writes, so
+            // the operator can decide whether a schema-changing binary swap
+            // is safe (zero file rows + zero owner-index rows = no positional
+            // bincode rows on disk to break). Only the file-row prefix is
+            // deserialized; owner-index and attestation entries are tallied
+            // by prefix-iterating their key prefixes.
+            init_logging("info", false)?;
+
+            info!("Opening database (read-only) at {:?}", data_dir);
+            let cf_metadata = sumchain_storage::cf::STORAGE_METADATA_V2;
+            let cf_attestations = sumchain_storage::cf::ASSIGNMENT_ATTESTATIONS_V2;
+
+            // True read-only open: no CF creation, no repair, no WAL writes.
+            // Opens every CF that exists on disk — V2 CFs absent on pre-V2
+            // DBs surface as `NotFound` from `prefix_iter` below and are
+            // reported as zero rows.
+            let db = Database::open_read_only(&data_dir)?;
+
+            // Treat a missing CF (pre-V2 DB) as "zero rows for this prefix".
+            // Any other storage error is fatal — we don't want to silently
+            // under-count an existing V2 row.
+            fn iter_or_empty<'a>(
+                db: &'a Database,
+                cf: &str,
+                prefix: &[u8],
+            ) -> Result<Box<dyn Iterator<Item = (Box<[u8]>, Box<[u8]>)> + 'a>> {
+                match db.prefix_iter(cf, prefix) {
+                    Ok(it) => Ok(Box::new(it)),
+                    Err(sumchain_storage::StorageError::NotFound(_)) => {
+                        Ok(Box::new(std::iter::empty()))
+                    }
+                    Err(e) => Err(e).context("prefix_iter on read-only DB"),
+                }
+            }
+
+            // File rows: [b'F', b'2', merkle_root_32] = 34 bytes.
+            let mut file_total: u64 = 0;
+            let mut pending: u64 = 0;
+            let mut active: u64 = 0;
+            let mut abandoned: u64 = 0;
+            let mut undeserializable: u64 = 0;
+            for (key, value) in iter_or_empty(&db, cf_metadata, &[b'F', b'2'])? {
+                if key.len() != 34 || key[0] != b'F' || key[1] != b'2' {
+                    continue;
+                }
+                file_total += 1;
+                match bincode::deserialize::<sumchain_primitives::StorageMetadataV2>(&value) {
+                    Ok(row) => match row.lifecycle {
+                        sumchain_primitives::FileLifecycleV2::Pending => pending += 1,
+                        sumchain_primitives::FileLifecycleV2::Active => active += 1,
+                        sumchain_primitives::FileLifecycleV2::Abandoned => abandoned += 1,
+                    },
+                    Err(_) => undeserializable += 1,
+                }
+            }
+
+            // Owner index: [b'O', b'2', owner_20, merkle_root_32] = 54 bytes.
+            // Counted only — never deserialized; the value is `[1]` sentinel.
+            let mut owner_index: u64 = 0;
+            for (key, _) in iter_or_empty(&db, cf_metadata, &[b'O', b'2'])? {
+                if key.len() == 54 && key[0] == b'O' && key[1] == b'2' {
+                    owner_index += 1;
+                }
+            }
+
+            // Attestations CF (separate CF). Counted only.
+            let mut attestation_rows: u64 = 0;
+            for (_key, _value) in iter_or_empty(&db, cf_attestations, &[b'A'])? {
+                attestation_rows += 1;
+            }
+
+            println!("SNIP V2 row inventory for {:?}", data_dir);
+            println!("  CF '{}'", cf_metadata);
+            println!("    file rows (prefix [b'F', b'2']):           {}", file_total);
+            println!("      lifecycle = Pending:                     {}", pending);
+            println!("      lifecycle = Active:                      {}", active);
+            println!("      lifecycle = Abandoned:                   {}", abandoned);
+            if undeserializable > 0 {
+                println!(
+                    "      undeserializable (schema mismatch?):     {}",
+                    undeserializable
+                );
+            }
+            println!("    owner-index rows (prefix [b'O', b'2']):    {}", owner_index);
+            println!("  CF '{}'", cf_attestations);
+            println!("    attestation rows (prefix [b'A']):          {}", attestation_rows);
+
+            // Tripwire summary the operator's runbook keys off.
+            let total_v2_rows = file_total
+                .saturating_add(owner_index)
+                .saturating_add(attestation_rows);
+            if total_v2_rows == 0 {
+                println!();
+                println!(
+                    "Result: SAFE_TO_BUMP_SCHEMA — zero V2 rows on disk; \
+                     a positional-bincode field addition is safe."
+                );
+            } else {
+                println!();
+                println!(
+                    "Result: UNSAFE_TO_BUMP_SCHEMA — {} V2 row(s) present. \
+                     Do NOT deploy a binary that changes the StorageMetadataV2 layout.",
+                    total_v2_rows
+                );
+                // Non-zero exit so a script can branch on the result.
+                std::process::exit(2);
+            }
         }
     }
 

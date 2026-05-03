@@ -1593,6 +1593,7 @@ impl StorageMetadataExecutor {
             fee_pool: fee_deposit,
             created_at: block_height,
             activated_at_height: None,
+            abandoned_at_height: None,
             assignment_height: block_height,
             visibility,
             lifecycle: FileLifecycleV2::Pending,
@@ -1662,6 +1663,7 @@ impl StorageMetadataExecutor {
 
         row.fee_pool = 0;
         row.lifecycle = FileLifecycleV2::Abandoned;
+        row.abandoned_at_height = Some(block_height);
         self.put_metadata_v2(&row)?;
 
         info!(

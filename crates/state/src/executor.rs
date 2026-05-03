@@ -2558,6 +2558,8 @@ mod tests {
         assert_eq!(row.created_at, 42);
         assert_eq!(row.assignment_height, 42);
         assert!(row.activated_at_height.is_none());
+        // Pending file: abandoned_at_height stays None until AbandonFileV2.
+        assert!(row.abandoned_at_height.is_none());
         assert_eq!(row.visibility, FileVisibilityV2::Public);
         assert_eq!(row.lifecycle, FileLifecycleV2::Pending);
         assert!(row.access_list.is_empty());
@@ -2755,6 +2757,9 @@ mod tests {
         let row = store.get_metadata_v2(&merkle_root).unwrap().expect("row retained");
         assert_eq!(row.lifecycle, FileLifecycleV2::Abandoned);
         assert_eq!(row.fee_pool, 0);
+        // SNIP indexer dependency: abandoned_at_height must record the exact
+        // block of lifecycle transition. Other lifecycle paths leave it None.
+        assert_eq!(row.abandoned_at_height, Some(abandon_height));
     }
 
     /// Plan v3.2 §3.4 — `chunk_count > max_chunk_count_per_file` → Failed(30).
@@ -4783,6 +4788,38 @@ mod tests {
         let h = tx.signing_hash();
         let s = sign(h.as_bytes(), sender.private_key());
         SignedTransaction::new_v2(tx, *s.as_bytes(), *sender.public_key().as_bytes())
+    }
+
+    /// Active-state row must report `abandoned_at_height: None`. Asymmetric
+    /// with `activated_at_height` (which IS set on activation) — abandoned
+    /// height is only ever populated by `AbandonFileV2`. Catches a regression
+    /// where activation accidentally writes the abandon-height field.
+    #[test]
+    fn test_active_file_v2_has_no_abandoned_at_height() {
+        let (state, db, _dir) = setup();
+        let executor =
+            BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
+        let proposer = KeyPair::generate();
+
+        let (_owner, _archive, merkle_root) =
+            setup_active_public_file(&executor, &state, &proposer.address(), b"active-no-abandon");
+
+        let store = crate::storage_metadata::StorageMetadataExecutor::new(db.clone());
+        let row = store.get_metadata_v2(&merkle_root).unwrap().expect("row");
+        assert_eq!(
+            row.lifecycle,
+            sumchain_primitives::FileLifecycleV2::Active,
+            "fixture should have transitioned to Active"
+        );
+        assert!(
+            row.activated_at_height.is_some(),
+            "Active file must record its activation height"
+        );
+        assert!(
+            row.abandoned_at_height.is_none(),
+            "Active file must NOT have abandoned_at_height set; got {:?}",
+            row.abandoned_at_height
+        );
     }
 
     /// Production-default ChainParams (`v2_enabled_from_height: None`) must
