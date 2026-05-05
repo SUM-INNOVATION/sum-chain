@@ -15,8 +15,8 @@
 //! -- --nocapture` to print the actual hex on failure.
 
 use sumchain_primitives::{
-    AccessEntryV2, Address, Hash, NodeRegistryOperationV2, NodeRegistryV2TxData,
-    StorageMetadataOperationV2, StorageMetadataV2TxData,
+    AccessEntryV2, Address, EncryptedKeyBundleV2, Hash, NodeRegistryOperationV2,
+    NodeRegistryV2TxData, StorageMetadataOperationV2, StorageMetadataV2TxData,
 };
 use sumchain_primitives::transaction::TxPayload;
 
@@ -258,6 +258,194 @@ fn fixture_accept_assignment_v2_tx_payload() {
     expected.extend_from_slice(&3u32.to_le_bytes());
     assert_bytes(
         "TxPayload::StorageMetadataV2(AcceptAssignmentV2)",
+        &bytes,
+        &expected,
+    );
+}
+
+// ─── 6. StorageMetadataOperationV2::AddAccessV2 ─────────────────────────────
+// Two fixtures: Public-style (no bundle, no expiry) and Private-style
+// (full 80-byte bundle + expiry). Both are wire-valid; executor validity
+// rules are independent and live in the state crate.
+
+const FIXTURE_RECIPIENT_ADDR: [u8; 20] = [0x33; 20];
+const FIXTURE_BUNDLE: [u8; 80] = [0x55; 80];
+const FIXTURE_EXPIRES_AT: u64 = 2_000;
+
+fn fixture_access_entry_public() -> AccessEntryV2 {
+    AccessEntryV2 {
+        address: Address::new(FIXTURE_RECIPIENT_ADDR),
+        encrypted_key_bundle: None,
+        expires_at: None,
+    }
+}
+
+fn fixture_access_entry_private() -> AccessEntryV2 {
+    AccessEntryV2 {
+        address: Address::new(FIXTURE_RECIPIENT_ADDR),
+        encrypted_key_bundle: Some(EncryptedKeyBundleV2(FIXTURE_BUNDLE)),
+        expires_at: Some(FIXTURE_EXPIRES_AT),
+    }
+}
+
+#[test]
+fn fixture_add_access_v2_inner_public_entry() {
+    let op = StorageMetadataOperationV2::AddAccessV2 {
+        merkle_root: fixture_merkle_root(),
+        entry: fixture_access_entry_public(),
+    };
+    let bytes = bincode::serialize(&op).unwrap();
+    // Layout:
+    //   [variant_tag u32 LE = 4]
+    //   [merkle_root 32 B]
+    //   [entry.address 20 B]
+    //   [entry.encrypted_key_bundle Option tag u8 = 0 (None)]
+    //   [entry.expires_at Option tag u8 = 0 (None)]
+    let mut expected = Vec::new();
+    expected.extend_from_slice(&[0x04, 0x00, 0x00, 0x00]);
+    expected.extend_from_slice(&[0x42; 32]);
+    expected.extend_from_slice(&FIXTURE_RECIPIENT_ADDR);
+    expected.push(0x00);
+    expected.push(0x00);
+    assert_bytes("AddAccessV2 (inner, public-style entry)", &bytes, &expected);
+}
+
+#[test]
+fn fixture_add_access_v2_inner_private_entry() {
+    let op = StorageMetadataOperationV2::AddAccessV2 {
+        merkle_root: fixture_merkle_root(),
+        entry: fixture_access_entry_private(),
+    };
+    let bytes = bincode::serialize(&op).unwrap();
+    // Layout:
+    //   [variant_tag u32 LE = 4]
+    //   [merkle_root 32 B]
+    //   [entry.address 20 B]
+    //   [entry.encrypted_key_bundle Option tag u8 = 1 (Some)][bundle 80 B]
+    //   [entry.expires_at Option tag u8 = 1 (Some)][expires_at u64 LE]
+    let mut expected = Vec::new();
+    expected.extend_from_slice(&[0x04, 0x00, 0x00, 0x00]);
+    expected.extend_from_slice(&[0x42; 32]);
+    expected.extend_from_slice(&FIXTURE_RECIPIENT_ADDR);
+    expected.push(0x01);
+    expected.extend_from_slice(&FIXTURE_BUNDLE);
+    expected.push(0x01);
+    expected.extend_from_slice(&FIXTURE_EXPIRES_AT.to_le_bytes());
+    assert_bytes("AddAccessV2 (inner, private-style entry)", &bytes, &expected);
+}
+
+#[test]
+fn fixture_add_access_v2_tx_payload_private_entry() {
+    let payload = TxPayload::StorageMetadataV2(StorageMetadataV2TxData {
+        operation: StorageMetadataOperationV2::AddAccessV2 {
+            merkle_root: fixture_merkle_root(),
+            entry: fixture_access_entry_private(),
+        },
+    });
+    let bytes = bincode::serialize(&payload).unwrap();
+    let mut expected = Vec::new();
+    expected.extend_from_slice(&[0x14, 0x00, 0x00, 0x00]); // TxPayload variant 20
+    expected.extend_from_slice(&[0x04, 0x00, 0x00, 0x00]); // op variant 4
+    expected.extend_from_slice(&[0x42; 32]);
+    expected.extend_from_slice(&FIXTURE_RECIPIENT_ADDR);
+    expected.push(0x01);
+    expected.extend_from_slice(&FIXTURE_BUNDLE);
+    expected.push(0x01);
+    expected.extend_from_slice(&FIXTURE_EXPIRES_AT.to_le_bytes());
+    assert_bytes(
+        "TxPayload::StorageMetadataV2(AddAccessV2 private)",
+        &bytes,
+        &expected,
+    );
+}
+
+// ─── 7. StorageMetadataOperationV2::RemoveAccessV2 ──────────────────────────
+
+#[test]
+fn fixture_remove_access_v2_inner() {
+    let op = StorageMetadataOperationV2::RemoveAccessV2 {
+        merkle_root: fixture_merkle_root(),
+        address: Address::new(FIXTURE_RECIPIENT_ADDR),
+    };
+    let bytes = bincode::serialize(&op).unwrap();
+    // Layout: [variant_tag u32 LE = 5][merkle_root 32 B][address 20 B]
+    let mut expected = Vec::with_capacity(4 + 32 + 20);
+    expected.extend_from_slice(&[0x05, 0x00, 0x00, 0x00]);
+    expected.extend_from_slice(&[0x42; 32]);
+    expected.extend_from_slice(&FIXTURE_RECIPIENT_ADDR);
+    assert_bytes("RemoveAccessV2 (inner)", &bytes, &expected);
+}
+
+#[test]
+fn fixture_remove_access_v2_tx_payload() {
+    let payload = TxPayload::StorageMetadataV2(StorageMetadataV2TxData {
+        operation: StorageMetadataOperationV2::RemoveAccessV2 {
+            merkle_root: fixture_merkle_root(),
+            address: Address::new(FIXTURE_RECIPIENT_ADDR),
+        },
+    });
+    let bytes = bincode::serialize(&payload).unwrap();
+    let mut expected = Vec::with_capacity(4 + 4 + 32 + 20);
+    expected.extend_from_slice(&[0x14, 0x00, 0x00, 0x00]);
+    expected.extend_from_slice(&[0x05, 0x00, 0x00, 0x00]);
+    expected.extend_from_slice(&[0x42; 32]);
+    expected.extend_from_slice(&FIXTURE_RECIPIENT_ADDR);
+    assert_bytes(
+        "TxPayload::StorageMetadataV2(RemoveAccessV2)",
+        &bytes,
+        &expected,
+    );
+}
+
+// ─── 8. StorageMetadataOperationV2::UpdateAccessV2 ──────────────────────────
+
+#[test]
+fn fixture_update_access_v2_inner() {
+    let op = StorageMetadataOperationV2::UpdateAccessV2 {
+        merkle_root: fixture_merkle_root(),
+        address: Address::new(FIXTURE_RECIPIENT_ADDR),
+        new_entry: fixture_access_entry_private(),
+    };
+    let bytes = bincode::serialize(&op).unwrap();
+    // Layout:
+    //   [variant_tag u32 LE = 6]
+    //   [merkle_root 32 B]
+    //   [address 20 B]
+    //   [new_entry: AccessEntryV2 — same shape as AddAccessV2's entry]
+    let mut expected = Vec::new();
+    expected.extend_from_slice(&[0x06, 0x00, 0x00, 0x00]);
+    expected.extend_from_slice(&[0x42; 32]);
+    expected.extend_from_slice(&FIXTURE_RECIPIENT_ADDR);
+    expected.extend_from_slice(&FIXTURE_RECIPIENT_ADDR);
+    expected.push(0x01);
+    expected.extend_from_slice(&FIXTURE_BUNDLE);
+    expected.push(0x01);
+    expected.extend_from_slice(&FIXTURE_EXPIRES_AT.to_le_bytes());
+    assert_bytes("UpdateAccessV2 (inner)", &bytes, &expected);
+}
+
+#[test]
+fn fixture_update_access_v2_tx_payload() {
+    let payload = TxPayload::StorageMetadataV2(StorageMetadataV2TxData {
+        operation: StorageMetadataOperationV2::UpdateAccessV2 {
+            merkle_root: fixture_merkle_root(),
+            address: Address::new(FIXTURE_RECIPIENT_ADDR),
+            new_entry: fixture_access_entry_private(),
+        },
+    });
+    let bytes = bincode::serialize(&payload).unwrap();
+    let mut expected = Vec::new();
+    expected.extend_from_slice(&[0x14, 0x00, 0x00, 0x00]);
+    expected.extend_from_slice(&[0x06, 0x00, 0x00, 0x00]);
+    expected.extend_from_slice(&[0x42; 32]);
+    expected.extend_from_slice(&FIXTURE_RECIPIENT_ADDR);
+    expected.extend_from_slice(&FIXTURE_RECIPIENT_ADDR);
+    expected.push(0x01);
+    expected.extend_from_slice(&FIXTURE_BUNDLE);
+    expected.push(0x01);
+    expected.extend_from_slice(&FIXTURE_EXPIRES_AT.to_le_bytes());
+    assert_bytes(
+        "TxPayload::StorageMetadataV2(UpdateAccessV2)",
         &bytes,
         &expected,
     );
