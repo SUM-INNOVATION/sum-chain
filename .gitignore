@@ -11,7 +11,18 @@
 # Data directories
 /data/
 /keys/
-/genesis/
+
+# /genesis/ holds both committed templates (chain_id, validators, alloc — no
+# key material) and operator-rendered runtime files. Ignore everything by
+# default and re-include only the templates we deliberately track. Switched
+# from `/genesis/` (dir ignore) to `/genesis/*` (file pattern) so per-file
+# `!` exceptions actually take effect — git does not descend into a fully-
+# excluded directory.
+/genesis/*
+!/genesis/local_genesis.json
+!/genesis/mainnet_genesis.json
+!/genesis/testnet_genesis.json
+!/genesis/snip-mirror-genesis.template.json
 
 # OS files
 .DS_Store

@@ -75,11 +75,17 @@ FROM debian:bookworm-slim AS runtime
 # Install runtime dependencies. `curl` is required by the HEALTHCHECK below
 # (and by k8s/docker-compose health probes that exec into the container);
 # the earlier image omitted it and every health check would fail with
-# "executable file not found".
+# "executable file not found". `python3-minimal` is used by the SNIP local-
+# mirror entrypoint to render the genesis template — Debian bookworm's jq
+# (1.6) serializes large integers (e.g. alloc balances of 1e18) as IEEE-754
+# floats, which the chain's serde JSON balance parser rejects. Python's
+# json module preserves arbitrary-precision integers, so we install it in
+# place of jq.
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl3 \
     curl \
+    python3-minimal \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user

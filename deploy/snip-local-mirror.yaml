@@ -5,6 +5,10 @@
 # Prometheus, no Grafana, no fullnode separation. Optimized for fast spin-up
 # in CI loops, not for any kind of production realism.
 #
+# **NOT a production validator deployment.** Production validators run on
+# host/systemd, not this Docker preset. Don't reuse this compose, the keys it
+# generates, or the genesis it renders for anything beyond local SNIP testing.
+#
 # **NOT production-like. NOT fault-tolerant.**
 # - One validator means a single container outage halts block production
 #   (PoA round-robin can't skip a missing proposer; see
@@ -15,10 +19,9 @@
 #   any "looks like mainnet" claims. It exists to verify SNIP V2 client code
 #   round-trips against a working chain end-to-end. Nothing more.
 #
-# **Chain ID 31337** (from `genesis/snip-mirror-genesis.json`) — Hardhat-style
-# "this is unambiguously a local devnet" chain ID. Distinct from `local_genesis
-# .json`'s 1337 and from any plausible mainnet ID. Refusing to mix this chain
-# with mainnet is a SNIP-client-side concern; the chain ID is the signal.
+# **Chain ID 31337** (set in `genesis/snip-mirror-genesis.template.json`) —
+# Hardhat-style "this is unambiguously a local devnet" chain ID. Distinct from
+# `local_genesis.json`'s 1337 and from any plausible mainnet ID.
 #
 # **Single validator on purpose**: PoA round-robin requires every validator
 # in the set to produce, so a single-validator genesis is the only way to
@@ -26,47 +29,61 @@
 # .json` won't make progress with only validator-1 running because
 # heights assigned to the absent validators 2/3 stall the chain.
 #
+# **Self-bootstrapping** — no committed key material:
+# `deploy/snip-mirror-entrypoint.sh` runs inside the container on first boot,
+# generates a fresh disposable Ed25519 validator keypair into the named
+# volume, renders the genesis template by substituting the new pubkey, then
+# exec's into `sumchain run`. Subsequent `up` (without `-v`) reuse the same
+# key + cached genesis → chain resumes. `down -v` wipes everything → next
+# `up` starts a brand new chain with a brand new pubkey.
+#
 # Usage:
 #   docker-compose -f deploy/snip-local-mirror.yaml up -d --build
 #   curl -s -X POST -H 'Content-Type: application/json' \
 #        --data '{"jsonrpc":"2.0","id":1,"method":"chain_id","params":[]}' \
 #        http://localhost:8545
-#   docker-compose -f deploy/snip-local-mirror.yaml down -v   # stop + wipe
+#   docker-compose -f deploy/snip-local-mirror.yaml down       # stop, keep chain
+#   docker-compose -f deploy/snip-local-mirror.yaml down -v    # stop + wipe
 #
-# Files referenced are real, checked-in artifacts — no `./deploy/config/...`
-# placeholders to chase:
-#   ./genesis/snip-mirror-genesis.json — chain_id 31337, ONE validator pubkey
-#                                         (matches keys/validator1.json), same
-#                                         pre-funded test accounts as
-#                                         local_genesis.json so SNIP can reuse
-#                                         their funded-account pubkeys.
-#   ./keys/validator1.json             — JSON-encoded [u8; 32] private-key seed.
-#                                         Format consumed by KeyPair::from_bytes
-#                                         per crates/node/src/main.rs:367-371.
+# **Funding your own SNIP test addresses** — copy
+# `deploy/snip-mirror-extra-alloc.example.json` to `extra-alloc.json` (anywhere
+# on the host), replace the placeholder addresses with your own dev base58
+# addresses, then uncomment the `/config/extra-alloc.json` mount below. The
+# overlay is applied **only on fresh-genesis boot** (empty volume); mounting
+# it against an existing chain is a hard error. To fund new accounts on an
+# already-running chain, use a faucet/transfer tx from one of the four
+# pre-funded local-only addresses or a mounted operator key.
+#
+# **Bringing your own validator key** (rare; for reproducible test runs across
+# machines): place the JSON-encoded [u8; 32] seed at any host path and
+# uncomment the `/secrets/validator.key` mount below.
 
 services:
-  validator:
+  # Service name is `mirror` (not `validator`) so override-file examples and
+  # SNIP-side docs read naturally — the file is `snip-local-mirror.yaml`, the
+  # role within the compose project is the mirror. The actual sumchain
+  # process inside still validates blocks; the role and the service-name are
+  # different layers.
+  mirror:
     build:
       context: ..
       dockerfile: Dockerfile
     container_name: snip-mirror-validator
     hostname: validator
-    command:
-      - "run"
-      - "--genesis"
-      - "/config/genesis.json"
-      - "--data-dir"
-      - "/data"
-      - "--validator-key"
-      - "/secrets/validator.key"
-      - "--p2p-addr"
-      - "/ip4/0.0.0.0/tcp/30303"
-      - "--rpc-addr"
-      - "0.0.0.0:8545"
+    entrypoint: ["/usr/local/bin/snip-mirror-entrypoint.sh"]
     volumes:
-      - validator-data:/data
-      - ../genesis/snip-mirror-genesis.json:/config/genesis.json:ro
-      - ../keys/validator1.json:/secrets/validator.key:ro
+      - mirror-data:/data
+      - ../genesis/snip-mirror-genesis.template.json:/config/genesis.template.json:ro
+      - ../deploy/snip-mirror-entrypoint.sh:/usr/local/bin/snip-mirror-entrypoint.sh:ro
+      # Optional: mount your own dev validator key (any host path containing a
+      # JSON-encoded [u8; 32] seed). When mounted, the entrypoint uses this
+      # instead of generating a fresh disposable key.
+      # - /absolute/path/to/your/dev-validator.key:/secrets/validator.key:ro
+      #
+      # Optional: mount your fresh-genesis-only alloc overlay. See
+      # `deploy/snip-mirror-extra-alloc.example.json` for the format. Rejected
+      # with a hard error if the chain DB already exists in /data.
+      # - /absolute/path/to/your/extra-alloc.json:/config/extra-alloc.json:ro
     ports:
       # Only RPC is exposed to the host. P2P (30303) and metrics (9090) stay
       # inside the compose network — SNIP doesn't need them and surfacing
@@ -84,4 +101,4 @@ services:
     restart: "no"  # crash → log; don't auto-restart on test failures
 
 volumes:
-  validator-data:
+  mirror-data:
