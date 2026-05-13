@@ -1506,7 +1506,7 @@ impl SumChainApiServer for RpcServer {
             .map_err(|e| RpcError::Internal(e.to_string()))?;
 
         // Get staking params from consensus/genesis
-        let min_stake = 1_000_000_000_000_000_000u128; // Default 1000 Koppa
+        let min_stake = 1_000_000_000_000_000_000u128; // 1e18 base units = 1B Koppa (must match StakingParams::default)
         let max_validators = 100u32;
         let unbonding_period = 100_800u64;
 
@@ -1525,7 +1525,7 @@ impl SumChainApiServer for RpcServer {
     ) -> std::result::Result<StakingParamsInfo, jsonrpsee::types::ErrorObjectOwned> {
         // These are the default staking params - in production would come from genesis
         Ok(StakingParamsInfo {
-            min_validator_stake: "1000000000000000000".to_string(), // 1000 Koppa
+            min_validator_stake: "1000000000000000000".to_string(), // 1e18 base units = 1B Koppa
             max_validators: 100,
             unbonding_period: 100_800, // ~7 days
             max_commission_bps: 10000, // 100%

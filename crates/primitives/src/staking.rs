@@ -652,7 +652,7 @@ pub struct StakingParams {
 impl Default for StakingParams {
     fn default() -> Self {
         Self {
-            min_validator_stake: 1_000_000_000_000_000_000, // 1B base units (1000 Koppa with 9 decimals)
+            min_validator_stake: 1_000_000_000_000_000_000, // 1e18 base units = 1,000,000,000 Koppa (1B Koppa with 9 decimals)
             max_validators: 100,
             unbonding_period: 100_800, // ~7 days at 6s blocks
             max_commission_bps: 10000, // 100%

@@ -197,7 +197,7 @@ impl StakingExecutor {
         // Validate minimum stake
         let min_stake = self.params.staking.as_ref()
             .map(|s| s.min_validator_stake)
-            .unwrap_or(1_000_000_000_000_000_000); // 1000 Koppa default
+            .unwrap_or(1_000_000_000_000_000_000); // 1e18 base units = 1B Koppa default (must match StakingParams::default)
 
         if create_data.stake < min_stake {
             return Ok(StakingExecutionResult::failure(format!(
@@ -369,7 +369,7 @@ impl StakingExecutor {
         // Check minimum stake requirement after unstaking
         let min_stake = self.params.staking.as_ref()
             .map(|s| s.min_validator_stake)
-            .unwrap_or(1_000_000_000_000_000_000);
+            .unwrap_or(1_000_000_000_000_000_000); // 1e18 base units = 1B Koppa default (must match StakingParams::default)
 
         let remaining_stake = validator.stake.saturating_sub(unstake_data.amount);
 
