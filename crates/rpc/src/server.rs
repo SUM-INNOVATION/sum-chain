@@ -833,6 +833,7 @@ impl SumChainApiServer for RpcServer {
             max_chunk_indices_per_tx: p.max_chunk_indices_per_tx,
             assignment_replication_factor: p.assignment_replication_factor,
             v2_enabled_from_height: p.v2_enabled_from_height,
+            omninode_enabled_from_height: p.omninode_enabled_from_height,
         })
     }
 
@@ -6010,6 +6011,7 @@ mod phase_0b_rpc_tests {
             max_chunk_indices_per_tx: 65_536,
             assignment_replication_factor: 3,
             v2_enabled_from_height: None,  // disabled (production-safe default)
+            omninode_enabled_from_height: None,  // disabled (production-safe default)
         };
         let got = serde_json::to_value(&v).unwrap();
         let want = serde_json::json!({
@@ -6028,6 +6030,7 @@ mod phase_0b_rpc_tests {
             "max_chunk_indices_per_tx": 65_536,
             "assignment_replication_factor": 3,
             "v2_enabled_from_height": null,
+            "omninode_enabled_from_height": null,
         });
         assert_eq!(got, want);
     }
@@ -6050,10 +6053,13 @@ mod phase_0b_rpc_tests {
             max_chunk_indices_per_tx: 32_768,
             assignment_replication_factor: 5,
             v2_enabled_from_height: Some(1_000_000),  // activation height
+            omninode_enabled_from_height: Some(1_250_000),  // distinct activation height
         };
         let s = serde_json::to_string(&v).unwrap();
         let back: ChainParamsInfo = serde_json::from_str(&s).unwrap();
         assert_eq!(serde_json::to_string(&back).unwrap(), s);
+        assert_eq!(back.v2_enabled_from_height, Some(1_000_000));
+        assert_eq!(back.omninode_enabled_from_height, Some(1_250_000));
     }
 
     #[test]

@@ -247,6 +247,11 @@ pub trait SumChainApi {
     /// Flat wire shape (no nested `staking`/`messaging`/`docclass` sub-configs)
     /// since SNIP V2 clients don't use those. Additive; new fields can be
     /// appended without breaking existing clients.
+    ///
+    /// Includes `omninode_enabled_from_height` (`null` when OmniNode is
+    /// disabled, `0` on the local-mirror preset, future block on a live
+    /// chain) so OmniNode clients can read the activation gate at runtime
+    /// the same way SNIP reads `v2_enabled_from_height`.
     #[method(name = "chain_getChainParams")]
     async fn chain_get_chain_params(
         &self,
