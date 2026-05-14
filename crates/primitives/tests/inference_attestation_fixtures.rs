@@ -253,11 +253,12 @@ fn fixture_inference_attestation_storage_key() {
 #[test]
 fn tx_payload_inference_attestation_variant_index_locked() {
     // Bincode tags enum variants by their declaration ordinal. The
-    // InferenceAttestation variant must be appended at index 22 (0-based:
-    // Transfer=0, Nft=1, …, StorageMetadataV2=21, InferenceAttestation=22).
-    // Locking this byte protects every serialized tx already on chain — any
-    // reorder of variants ABOVE InferenceAttestation silently re-numbers
-    // existing variants and turns historical txs into garbage.
+    // InferenceAttestation variant is appended at declaration index 21
+    // (0-based: Transfer=0, Nft=1, …, StorageMetadataV2=20,
+    // InferenceAttestation=21). Locking this byte protects every
+    // serialized tx already on chain — any reorder of variants ABOVE
+    // InferenceAttestation silently re-numbers existing variants and
+    // turns historical txs into garbage.
     use sumchain_primitives::transaction::TxPayload;
 
     let v = load_vectors().into_iter().next().expect("at least one vector");
