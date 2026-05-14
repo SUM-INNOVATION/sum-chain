@@ -284,6 +284,20 @@ pub struct ChainParamsInfo {
     /// even attempt V2 ops, and (for hosted environments) at what height
     /// V2 will activate.
     pub v2_enabled_from_height: Option<u64>,
+    /// Block height at which the OmniNode `InferenceAttestation` subprotocol
+    /// activates.
+    ///
+    /// `null` (JSON) or `None` (Rust) means OmniNode is disabled.
+    /// User-submitted `InferenceAttestation` txs are rejected at mempool
+    /// admission with `OmniNodeNotActivated` and produce no receipt; any tx
+    /// that bypasses admission and reaches executor dispatch receipts as
+    /// `Failed(50)`.
+    ///
+    /// OmniNode clients read this to decide whether to attempt attestation
+    /// submission, and (for hosted environments) at what height the
+    /// subprotocol will activate. Additive field — appended after
+    /// `v2_enabled_from_height`.
+    pub omninode_enabled_from_height: Option<u64>,
 }
 
 /// One archive-node record as returned by `storage_getActiveNodesAtHeight`
