@@ -1035,6 +1035,21 @@ impl BlockExecutor {
                             })
                         }
                     }
+                    TxPayload::InferenceAttestation(_) => {
+                        // Phase 1 (parity gate only). Full executor dispatch —
+                        // activation gate, sender==verifier, inner Stage 6
+                        // signature verification, permanent CF dedup — ships
+                        // in Phase 2. Until then, reject every attestation tx
+                        // with the same fail-closed shape v4-final defines for
+                        // pre-activation: Failed(50), fee_paid: 0. Matches the
+                        // SNIP V2 activation-gate failure pattern at
+                        // crates/state/src/executor.rs:945.
+                        Ok(TxExecutionResult {
+                            tx_hash,
+                            status: TxStatus::Failed(50), // NotActivated
+                            fee_paid: 0,
+                        })
+                    }
                 }
             }
         }
@@ -1888,6 +1903,11 @@ impl BlockExecutor {
             TxPayload::StorageMetadataV2(_) => {
                 return Err(StateError::InvalidOperation(
                     "StorageMetadataV2 is only supported in V2 transactions".to_string(),
+                ));
+            }
+            TxPayload::InferenceAttestation(_) => {
+                return Err(StateError::InvalidOperation(
+                    "InferenceAttestation is only supported in V2 transactions".to_string(),
                 ));
             }
         }

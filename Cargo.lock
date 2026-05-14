@@ -5961,6 +5961,7 @@ dependencies = [
  "blake3",
  "bs58",
  "derive_more 0.99.20",
+ "ed25519-dalek",
  "hex",
  "rand 0.8.5",
  "serde",

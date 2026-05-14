@@ -12,6 +12,7 @@ pub mod equity;
 pub mod finance;
 pub mod hash;
 pub mod healthcare;
+pub mod inference_attestation;
 pub mod legal;
 pub mod messaging;
 pub mod node_registry;

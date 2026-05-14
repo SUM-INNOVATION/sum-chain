@@ -18,11 +18,35 @@ A Layer-1 blockchain built entirely in Rust (stable toolchain). No C/C++, Python
 - **Policy Accounts**: Consensus-level multi-sig group governance
 - **On-chain Encrypted Messaging**: SRC-201 standard using X25519 + XChaCha20-Poly1305
 - **SRC-80X through SRC-89X Document Token Families**: DocClass, Tax, Equity, Agreement, Legal, Property, Healthcare, Employment, Finance
+- **SNIP V2 Storage Protocol**: Decentralized file storage with on-chain metadata. Pending → Active → Abandoned lifecycle, ed25519 X25519-derived encryption keys, archive-node staking + replication assignment, fee pools, and per-block PoR challenges. Activation gated by `v2_enabled_from_height`. See `crates/state/src/storage_metadata.rs` and `docs/SNIP-V2.md` (where present)
 - **Dynamic Validator Sets**: Epoch-based, stake-weighted validator selection
 - **libp2p Networking**: Gossipsub for transaction/block propagation, mDNS for local discovery
 - **JSON-RPC API**: HTTP server for chain queries and transaction submission (ETH + SUM compatible)
 - **RocksDB Storage**: Persistent key-value storage for blocks and state
 - **Enhanced CLI Wallet**: Colored output, human-readable amounts, interactive confirmations
+
+## Subprotocols
+
+| Name | Status | Location | Purpose |
+|---|---|---|---|
+| SRC-201 Messaging (a.k.a. SNIP V1) | Production (mainnet) | `crates/primitives/src/messaging.rs`, `crates/state/src/messaging_executor.rs` | On-chain encrypted messaging (X25519 + XChaCha20-Poly1305). Supports sender-paid and sponsored submission. |
+| SNIP V2 Storage Protocol | Production behind `v2_enabled_from_height` activation gate | `crates/state/src/storage_metadata.rs`, `crates/state/src/inference_attestations.rs` (forthcoming) | Decentralized file storage with chain-side metadata: Pending/Active/Abandoned lifecycle, encryption-key registry, archive-node staking, PoR challenges. Genesis param controls activation. |
+| OmniNode `InferenceAttestation` | In development (`omninode-attestation` branch) — Phase 1 wire-format parity gate green; Phases 2–4 (executor/CF/mempool/RPC) ahead | `crates/primitives/src/inference_attestation.rs`, fixtures in `crates/primitives/tests/fixtures/` | Verifier-signed digests attesting to off-chain inference outputs. Inner Stage 6 signature (`omninode.inference_attestation.v1` domain) verified at chain side; outer chain signing semantics unchanged. Activation gated by `omninode_enabled_from_height`. |
+
+## Local Development
+
+For SNIP V2 client integration without spinning up a full 3-validator local testnet, the chain ships a self-bootstrapping single-validator Docker preset on the `snip-local-mirror-preset` branch:
+
+```bash
+git checkout snip-local-mirror-preset
+docker-compose -f deploy/snip-local-mirror.yaml up -d --build
+curl -X POST -H 'Content-Type: application/json' \
+     --data '{"jsonrpc":"2.0","id":1,"method":"chain_id","params":[]}' \
+     http://localhost:8545
+# → {"jsonrpc":"2.0","result":31337,"id":1}
+```
+
+Generates a fresh disposable validator key on first boot, renders genesis from a committed template (`genesis/snip-mirror-genesis.template.json`), and exposes RPC on `localhost:8545`. `docker-compose down -v` wipes everything; `stop` / `start` preserves the chain. SNIP-side test addresses can be pre-funded via a mounted `extra-alloc.json` overlay before the first `up`.
 
 ## Architecture
 
@@ -475,7 +499,16 @@ V2 transactions support 16 payload types: Transfer, NFT (SUM-721), Token (SRC-20
 ### BFT Consensus (Production-Ready)
 - Harden existing BFT module for production use
 
-**Last Updated**: March 2026
+### OmniNode `InferenceAttestation` Subprotocol
+- Verifier-signed digests attesting to off-chain inference outputs, recorded on-chain by reference
+- Inner signature uses OmniNode-defined Stage 6 domain (`omninode.inference_attestation.v1`); chain re-verifies bit-for-bit against the same signing input — no double-signing, no chain-side crypto changes
+- New `TxPayload::InferenceAttestation` variant (bincode tag `21`, `TxType` discriminant `21`); outer `SignedTransaction` shape unchanged
+- Activation gated by `omninode_enabled_from_height: Option<u64>` chain param (default `None` = disabled forever); same dormant-deploy pattern SNIP V2 uses
+- Permanent `(session_id, verifier)` dedup at mempool admission via dedicated CF — required because executor duplicate failure returns `fee_paid: 0` and does not advance nonce
+- Phase 1 (wire format + parity tests) shipped on `omninode-attestation` branch
+- Phase 2–4 (executor dispatch + storage CF + mempool admission + read-only RPC) in progress
+
+**Last Updated**: May 2026
 
 ## License
 
