@@ -120,3 +120,55 @@ pub fn verify_attestation_signature(
 pub fn verifier_address(public_key: &[u8; 32]) -> Address {
     Address::from_public_key(public_key)
 }
+
+/// Domain string for the inference-attestation CF key derivation.
+/// Bumping this string (e.g. to `…V2`) is the path to a CF-schema
+/// migration without breaking lookups against historical entries.
+pub const INFERENCE_ATTESTATION_KEY_DOMAIN: &[u8] = b"InferenceAttestationKeyV1";
+
+/// Stable 32-byte CF key for the `inference_attestations` column family.
+///
+/// `BLAKE3(INFERENCE_ATTESTATION_KEY_DOMAIN || bincode((session_id, verifier_address)))`
+///
+/// Properties:
+/// - **Domain-separated**: the `V1` suffix in the domain string lets a
+///   future schema rotation use a `V2` keyspace without colliding with
+///   historical entries.
+/// - **Length-safe**: bincode 1.3 default config length-prefixes `String`
+///   with a u64 LE before the bytes, so a `session_id` containing `0x00`
+///   cannot be confused with a different `(session_id, verifier)` split.
+/// - **Fixed-size**: 32 bytes regardless of `session_id` length, keeping
+///   point-lookup cost bounded on RocksDB.
+/// - **Fixture-locked**: the wire-fixture test asserts the exact key bytes
+///   for OmniNode's three reference vectors. Drift = red CI.
+pub fn inference_attestation_key(
+    session_id: &str,
+    verifier_address: &Address,
+) -> [u8; 32] {
+    let inner = bincode::serialize(&(session_id, verifier_address))
+        .expect("bincode of (String, Address) cannot fail");
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(INFERENCE_ATTESTATION_KEY_DOMAIN);
+    hasher.update(&inner);
+    *hasher.finalize().as_bytes()
+}
+
+/// Value stored in the `INFERENCE_ATTESTATIONS` CF. Bincode-serialized.
+///
+/// Records the verifier-signed digest, the signature, and the inclusion
+/// metadata the chain stamps at executor time. Both the executor (during
+/// dedup check + persist) and future RPC read paths (Phase 4) consume
+/// this record.
+///
+/// Wire shape is **not** part of the OmniNode handoff — it's a chain-side
+/// internal storage record. Field order is still frozen for forward
+/// compatibility with stored data: changing it would require a CF schema
+/// migration (rotate to `InferenceAttestationKeyV2`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InferenceAttestationRecord {
+    pub digest: InferenceAttestationDigest,
+    #[serde(with = "BigArray")]
+    pub verifier_signature: [u8; 64],
+    pub included_at_height: u64,
+    pub tx_hash: crate::Hash,
+}

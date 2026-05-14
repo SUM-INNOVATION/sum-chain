@@ -22,6 +22,7 @@ use crate::employment_executor::EmploymentExecutor;
 use crate::equity_executor::EquityExecutor;
 use crate::finance_executor::FinanceExecutor;
 use crate::healthcare_executor::HealthcareExecutor;
+use crate::inference_attestation_executor::InferenceAttestationExecutor;
 use crate::legal_executor::LegalExecutor;
 use crate::messaging_executor::MessagingExecutor;
 use crate::nft_executor::NftExecutor;
@@ -57,6 +58,16 @@ fn v2_gate_open(params: &ChainParams, block_height: u64) -> bool {
     matches!(params.v2_enabled_from_height, Some(h) if block_height >= h)
 }
 
+/// OmniNode `InferenceAttestation` activation gate. Same semantics as
+/// `v2_gate_open` for a different chain param. Returns `true` when the
+/// subprotocol is enabled at `block_height`. Production default is `None`
+/// → never open; activation requires explicit `omninode_enabled_from_height`
+/// in `genesis.json` plus a coordinated validator upgrade.
+#[inline]
+fn omninode_gate_open(params: &ChainParams, block_height: u64) -> bool {
+    matches!(params.omninode_enabled_from_height, Some(h) if block_height >= h)
+}
+
 pub struct BlockExecutor {
     state: Arc<StateManager>,
     db: Arc<Database>,
@@ -78,6 +89,7 @@ pub struct BlockExecutor {
     policy_account_executor: PolicyAccountExecutor,
     node_registry_executor: NodeRegistryExecutor,
     storage_metadata_executor: StorageMetadataExecutor,
+    inference_attestation_executor: InferenceAttestationExecutor,
 }
 
 impl BlockExecutor {
@@ -100,6 +112,7 @@ impl BlockExecutor {
         let policy_account_executor = PolicyAccountExecutor::new(db.clone());
         let node_registry_executor = NodeRegistryExecutor::new(db.clone());
         let storage_metadata_executor = StorageMetadataExecutor::new(db.clone());
+        let inference_attestation_executor = InferenceAttestationExecutor::new(db.clone());
         Self {
             state,
             db,
@@ -121,6 +134,7 @@ impl BlockExecutor {
             policy_account_executor,
             node_registry_executor,
             storage_metadata_executor,
+            inference_attestation_executor,
         }
     }
 
@@ -1035,19 +1049,114 @@ impl BlockExecutor {
                             })
                         }
                     }
-                    TxPayload::InferenceAttestation(_) => {
-                        // Phase 1 (parity gate only). Full executor dispatch —
-                        // activation gate, sender==verifier, inner Stage 6
-                        // signature verification, permanent CF dedup — ships
-                        // in Phase 2. Until then, reject every attestation tx
-                        // with the same fail-closed shape v4-final defines for
-                        // pre-activation: Failed(50), fee_paid: 0. Matches the
-                        // SNIP V2 activation-gate failure pattern at
-                        // crates/state/src/executor.rs:945.
+                    TxPayload::InferenceAttestation(attestation_data) => {
+                        // Phase 2 dispatch. 5-step state machine; every
+                        // pre-success failure returns `fee_paid: 0` and
+                        // skips state mutations (no deduct, no nonce, no
+                        // CF write). Success deducts fee from sender,
+                        // credits proposer, increments nonce, then
+                        // persists the record.
+
+                        // 1. Activation gate. Production default is `None`
+                        //    so this rejects everything until the operator
+                        //    sets `omninode_enabled_from_height` in genesis
+                        //    via a coordinated upgrade.
+                        if !omninode_gate_open(&self.params, block_height) {
+                            return Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Failed(50), // NotActivated
+                                fee_paid: 0,
+                            });
+                        }
+
+                        // 2. Defensive sender/pubkey mismatch check.
+                        //    The outer-tx path already enforces
+                        //    `Address::from_public_key(public_key) ==
+                        //    v2_tx.from` (see executor.rs validate path);
+                        //    this re-check is belt-and-suspenders so the
+                        //    inner-sig verify below uses the right pubkey
+                        //    even if the outer check is ever bypassed.
+                        if sumchain_primitives::Address::from_public_key(&tx.public_key) != v2_tx.from
+                        {
+                            return Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Failed(53), // SenderVerifierMismatch
+                                fee_paid: 0,
+                            });
+                        }
+
+                        // 3. Inner Stage 6 signature verification under
+                        //    `omninode.inference_attestation.v1` domain.
+                        if sumchain_primitives::inference_attestation::verify_attestation_signature(
+                            attestation_data,
+                            &tx.public_key,
+                        )
+                        .is_err()
+                        {
+                            return Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Failed(52), // InvalidVerifierSignature
+                                fee_paid: 0,
+                            });
+                        }
+
+                        // 4. Permanent CF dedup: `(session_id, verifier)`
+                        //    must be unique across all history. Executor
+                        //    enforces; Phase 3 mempool admission will also
+                        //    enforce so duplicates never reach a block.
+                        let cf_key = sumchain_primitives::inference_attestation::inference_attestation_key(
+                            &attestation_data.digest.session_id,
+                            &v2_tx.from,
+                        );
+                        if self.inference_attestation_executor.exists(&cf_key)? {
+                            return Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Failed(51), // DuplicateAttestation
+                                fee_paid: 0,
+                            });
+                        }
+
+                        // 5a. Pre-deduct balance check. Matches existing
+                        //     dispatch-level style (see Transfer arm at
+                        //     line ~1108) so the failure mode is
+                        //     deterministic across executor tests.
+                        let sender_balance = self.state.get_balance(&v2_tx.from)?;
+                        if sender_balance < v2_tx.fee {
+                            return Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::InsufficientBalance,
+                                fee_paid: 0,
+                            });
+                        }
+
+                        // 5b. Fee accounting THEN persist. Order matters:
+                        //     CF write happens last so an error in
+                        //     deduct/credit/nonce doesn't leave a row
+                        //     behind with no fee accounting.
+                        self.state.deduct(&v2_tx.from, v2_tx.fee)?;
+                        self.state.credit(proposer, v2_tx.fee)?;
+                        self.state.increment_nonce(&v2_tx.from)?;
+
+                        let record = sumchain_primitives::inference_attestation::InferenceAttestationRecord {
+                            digest: attestation_data.digest.clone(),
+                            verifier_signature: attestation_data.verifier_signature,
+                            included_at_height: block_height,
+                            tx_hash,
+                        };
+                        self.inference_attestation_executor.put(&cf_key, &record)?;
+
+                        debug!(
+                            "V2 InferenceAttestation {} executed: session_id={:?} verifier={} height={}",
+                            tx_hash,
+                            attestation_data.digest.session_id,
+                            v2_tx.from,
+                            block_height,
+                        );
+
                         Ok(TxExecutionResult {
                             tx_hash,
-                            status: TxStatus::Failed(50), // NotActivated
-                            fee_paid: 0,
+                            status: TxStatus::Success,
+                            fee_paid: v2_tx.fee,
                         })
                     }
                 }

@@ -117,6 +117,17 @@ pub mod cf {
     /// and to keep future post-activation GC isolated from file-row data.
     pub const ASSIGNMENT_ATTESTATIONS_V2: &str = "assignment_attestations_v2";
 
+    /// OmniNode `InferenceAttestation` records (Stage 6 subprotocol).
+    /// Key: 32-byte BLAKE3-domain-separated digest of
+    /// `(session_id, verifier_address)`, see
+    /// `sumchain_primitives::inference_attestation::inference_attestation_key`.
+    /// Value: bincode-serialized `InferenceAttestationRecord` containing the
+    /// signed digest, verifier signature, included-at block height, and tx
+    /// hash. Used by both the executor (dedup on insert) and the future
+    /// mempool admission hook (permanent duplicate check) to enforce one
+    /// attestation per `(session_id, verifier)` pair across all history.
+    pub const INFERENCE_ATTESTATIONS: &str = "inference_attestations";
+
     // PoR Challenges
     /// Active storage challenges (challenge_id -> StorageChallenge, node/expiry indexes)
     pub const ACTIVE_CHALLENGES: &str = "active_challenges";
@@ -396,6 +407,7 @@ pub const ALL_CFS: &[&str] = &[
     cf::ACTIVE_ARCHIVE_NODES_HISTORY,
     cf::STORAGE_METADATA_V2,
     cf::ASSIGNMENT_ATTESTATIONS_V2,
+    cf::INFERENCE_ATTESTATIONS,
     // SRC-80X/81X DocClass
     cf::DOCCLASS_IDENTITY_ROOTS,
     cf::DOCCLASS_ELIGIBILITY,

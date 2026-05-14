@@ -31,7 +31,7 @@ A Layer-1 blockchain built entirely in Rust (stable toolchain). No C/C++, Python
 |---|---|---|---|
 | SRC-201 Messaging (a.k.a. SNIP V1) | Production (mainnet) | `crates/primitives/src/messaging.rs`, `crates/state/src/messaging_executor.rs` | On-chain encrypted messaging (X25519 + XChaCha20-Poly1305). Supports sender-paid and sponsored submission. |
 | SNIP V2 Storage Protocol | Production behind `v2_enabled_from_height` activation gate | `crates/state/src/storage_metadata.rs`, `crates/state/src/inference_attestations.rs` (forthcoming) | Decentralized file storage with chain-side metadata: Pending/Active/Abandoned lifecycle, encryption-key registry, archive-node staking, PoR challenges. Genesis param controls activation. |
-| OmniNode `InferenceAttestation` | In development (`omninode-attestation` branch) — Phase 1 wire-format parity gate green; Phases 2–4 (executor/CF/mempool/RPC) ahead | `crates/primitives/src/inference_attestation.rs`, fixtures in `crates/primitives/tests/fixtures/` | Verifier-signed digests attesting to off-chain inference outputs. Inner Stage 6 signature (`omninode.inference_attestation.v1` domain) verified at chain side; outer chain signing semantics unchanged. Activation gated by `omninode_enabled_from_height`. |
+| OmniNode `InferenceAttestation` | In development (`omninode-attestation` branch) — Phases 1–2 complete (wire format + parity gate + executor dispatch + storage CF + activation param); Phase 3 (mempool admission) and Phase 4 (read-only RPC) ahead | `crates/primitives/src/inference_attestation.rs`, `crates/state/src/inference_attestation_executor.rs`, fixtures in `crates/primitives/tests/fixtures/` | Verifier-signed digests attesting to off-chain inference outputs. Inner Stage 6 signature (`omninode.inference_attestation.v1` domain) verified at chain side; outer chain signing semantics unchanged. Activation gated by `omninode_enabled_from_height` (default `None` — dormant on mainnet). |
 
 ## Local Development
 
@@ -504,11 +504,13 @@ V2 transactions support 16 payload types: Transfer, NFT (SUM-721), Token (SRC-20
 - Inner signature uses OmniNode-defined Stage 6 domain (`omninode.inference_attestation.v1`); chain re-verifies bit-for-bit against the same signing input — no double-signing, no chain-side crypto changes
 - New `TxPayload::InferenceAttestation` variant (bincode tag `21`, `TxType` discriminant `21`); outer `SignedTransaction` shape unchanged
 - Activation gated by `omninode_enabled_from_height: Option<u64>` chain param (default `None` = disabled forever); same dormant-deploy pattern SNIP V2 uses
-- Permanent `(session_id, verifier)` dedup at mempool admission via dedicated CF — required because executor duplicate failure returns `fee_paid: 0` and does not advance nonce
-- Phase 1 (wire format + parity tests) shipped on `omninode-attestation` branch
-- Phase 2–4 (executor dispatch + storage CF + mempool admission + read-only RPC) in progress
+- Permanent `(session_id, verifier)` dedup at mempool admission via dedicated `INFERENCE_ATTESTATIONS` CF — required because executor duplicate failure returns `fee_paid: 0` and does not advance nonce
+- **Phase 1 (wire format + parity gate):** shipped on `omninode-attestation` branch. 11 parity tests pin DOMAIN_TAG, canonical digest bytes, signing input, signer address derivation, signature verification, oversize-session-id rejection, TxType ordinal, TxPayload variant index, and the `BLAKE3("InferenceAttestationKeyV1" || bincode((session_id, verifier_address)))` CF key for all three OmniNode reference vectors.
+- **Phase 2 (executor + storage + activation gate):** shipped on `omninode-attestation` branch. Full `execute_tx` dispatch state machine returns `Failed(50)` pre-activation, `Failed(51)` on duplicate `(session_id, verifier)`, `Failed(52)` on invalid inner signature, `Failed(53)` defensively on sender/verifier mismatch (unreachable through `execute_tx` due to outer validation), `InsufficientBalance` if sender can't cover fee, and `Success` with `state.deduct(sender) → state.credit(proposer) → state.increment_nonce(sender) → CF put` on the happy path. CF writes strictly last so a fee-mutation error doesn't leave an orphan record. 7 storage-executor unit tests + 6 dispatch integration tests cover all branches.
+- **Phase 3 (mempool admission)** — ahead. Activation gate + in-flight duplicate check + permanent CF duplicate check at admission. Required to make zero-fee executor-duplicate failure DoS-safe.
+- **Phase 4 (read-only RPC)** — ahead. `sum_getInferenceAttestation`, `sum_listInferenceAttestations`, `sum_getInferenceAttestationStatus`.
 
-**Last Updated**: May 2026
+**Last Updated**: 2026-05-13
 
 ## License
 

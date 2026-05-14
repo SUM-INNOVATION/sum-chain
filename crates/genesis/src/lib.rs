@@ -122,6 +122,19 @@ pub struct ChainParams {
     /// To activate at a future block on a live chain: set to `Some(target_height)`.
     #[serde(default)]
     pub v2_enabled_from_height: Option<u64>,
+
+    /// Block height at which the OmniNode `InferenceAttestation` subprotocol
+    /// activates. `None` = disabled forever; `Some(h)` = ops from block `h`
+    /// onward. Mirrors the SNIP V2 activation pattern above.
+    ///
+    /// Production safety: `#[serde(default)]` resolves a missing field to
+    /// `None`, so an existing mainnet `genesis.json` upgraded to an
+    /// OmniNode-aware binary stays disabled until the operator explicitly
+    /// sets a future activation height.
+    ///
+    /// Dev / OmniNode Stage 5: set to `Some(0)` to activate from genesis.
+    #[serde(default)]
+    pub omninode_enabled_from_height: Option<u64>,
 }
 
 fn default_finality_depth() -> u64 {
@@ -309,6 +322,10 @@ impl Default for ChainParams {
             // (snip-mirror, local) opt in via `with_v2_enabled()` or by
             // setting the field explicitly in their genesis JSON.
             v2_enabled_from_height: None,
+            // Production-safe default: OmniNode subprotocol disabled.
+            // Activation is coordinated separately, after the chain has
+            // shipped Phase 2-4 of the InferenceAttestation work.
+            omninode_enabled_from_height: None,
         }
     }
 }

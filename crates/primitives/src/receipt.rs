@@ -80,6 +80,11 @@ impl TxStatus {
             TxStatus::Failed(34) => "ActivateFileV2 validity check failed",
             TxStatus::Failed(35) => "V2 access op validity check failed",
             TxStatus::Failed(40) => "V2 storage protocol not enabled at this height",
+            // OmniNode `InferenceAttestation` subprotocol failures.
+            TxStatus::Failed(50) => "OmniNode subprotocol not enabled at this block height",
+            TxStatus::Failed(51) => "duplicate InferenceAttestation for (session_id, verifier)",
+            TxStatus::Failed(52) => "invalid OmniNode Stage 6 verifier signature",
+            TxStatus::Failed(53) => "tx sender does not match verifier address (Ed25519 pubkey hash)",
             TxStatus::Failed(_) => "failed",
         }
     }
