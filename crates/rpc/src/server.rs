@@ -7,6 +7,7 @@ use std::time::Duration;
 use jsonrpsee::server::{Server, ServerHandle};
 use sumchain_consensus::ConsensusEngine;
 use sumchain_primitives::{Address, Block, Hash, SignedTransaction, MessagingTxData, MessagingOperation, SponsoredMessage, TxPayload};
+use sumchain_state::inference_attestation_executor::InferenceAttestationExecutor;
 use sumchain_state::{Mempool, StateManager};
 use sumchain_storage::{BlockStore, Database, DelegationStore, DocClassStore, EmploymentCredentialStore, EmploymentIssuerStore, IncomeAttestationStore, MessagingStore, NftStore, ReceiptStore, SlashingStore, StakingStore, TokenStore, TxIndexStore, TxStore, ValidatorSetStore};
 use tokio::sync::mpsc;
@@ -394,6 +395,33 @@ impl RpcServer {
         Address::from_base58(s)
             .or_else(|_| Address::from_hex(s))
             .map_err(|_| RpcError::InvalidParams(format!("Invalid address: {}", s)))
+    }
+
+    /// Convert an on-disk `InferenceAttestationRecord` to its RPC view.
+    /// All binary fields hex-encoded with `0x` prefix; addresses use
+    /// base58 with checksum (chain's canonical Address::to_base58).
+    /// `finalized` is computed against live chain height + chain-param
+    /// `finality_depth` — same convention as `is_block_finalized` RPC.
+    fn attestation_record_to_info(
+        &self,
+        record: &sumchain_primitives::inference_attestation::InferenceAttestationRecord,
+        verifier_address: &Address,
+    ) -> crate::types::InferenceAttestationInfo {
+        let current = self.consensus.current_height();
+        let finality_depth = self.consensus.finality_depth();
+        let finalized = current >= record.included_at_height.saturating_add(finality_depth);
+        crate::types::InferenceAttestationInfo {
+            session_id: record.digest.session_id.clone(),
+            verifier_address: verifier_address.to_base58(),
+            model_hash: format!("0x{}", hex::encode(record.digest.model_hash)),
+            manifest_root: format!("0x{}", hex::encode(record.digest.manifest_root)),
+            response_hash: format!("0x{}", hex::encode(record.digest.response_hash)),
+            proof_root: format!("0x{}", hex::encode(record.digest.proof_root)),
+            verifier_signature: format!("0x{}", hex::encode(record.verifier_signature)),
+            included_at_height: record.included_at_height,
+            tx_hash: record.tx_hash.to_hex(),
+            finalized,
+        }
     }
 
     /// Parse hash from string
@@ -931,6 +959,73 @@ impl SumChainApiServer for RpcServer {
 
     async fn sum_get_validators(&self) -> std::result::Result<ValidatorSetInfo, jsonrpsee::types::ErrorObjectOwned> {
         self.get_validators().await
+    }
+
+    // ====================================================================
+    // OmniNode `InferenceAttestation` endpoints (Phase 4 read-only RPC)
+    // ====================================================================
+
+    async fn sum_get_inference_attestation(
+        &self,
+        session_id: String,
+        verifier_address: String,
+    ) -> std::result::Result<Option<crate::types::InferenceAttestationInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        use sumchain_primitives::inference_attestation::inference_attestation_key;
+        let addr = self.parse_address(&verifier_address)?;
+        let key = inference_attestation_key(&session_id, &addr);
+        let executor = InferenceAttestationExecutor::new(self.db.clone());
+        let maybe = executor
+            .get(&key)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(maybe.map(|record| self.attestation_record_to_info(&record, &addr)))
+    }
+
+    async fn sum_list_inference_attestations(
+        &self,
+        session_id: String,
+    ) -> std::result::Result<Vec<crate::types::InferenceAttestationInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        use sumchain_primitives::inference_attestation::inference_attestation_key;
+        let executor = InferenceAttestationExecutor::new(self.db.clone());
+        let verifiers = executor
+            .list_verifiers_by_session(&session_id)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        let mut out = Vec::with_capacity(verifiers.len());
+        for verifier in verifiers {
+            let key = inference_attestation_key(&session_id, &verifier);
+            if let Some(record) = executor
+                .get(&key)
+                .map_err(|e| RpcError::Internal(e.to_string()))?
+            {
+                out.push(self.attestation_record_to_info(&record, &verifier));
+            }
+        }
+        Ok(out)
+    }
+
+    async fn sum_get_inference_attestation_status(
+        &self,
+        tx_hash: String,
+    ) -> std::result::Result<crate::types::InferenceAttestationStatusInfo, jsonrpsee::types::ErrorObjectOwned> {
+        let hash = self.parse_hash(&tx_hash)?;
+
+        // Fetch the four inputs the pure classifier needs.
+        let tx_store = TxStore::new(&self.db);
+        let stored_tx = tx_store
+            .get(&hash)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        let mempool_tx = self.mempool.get(&hash);
+        let receipt_store = ReceiptStore::new(&self.db);
+        let receipt = receipt_store
+            .get(&hash)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        Ok(sumchain_primitives::inference_attestation::classify_inference_attestation_status(
+            stored_tx.as_ref(),
+            mempool_tx.as_ref(),
+            receipt.as_ref(),
+            self.consensus.current_height(),
+            self.consensus.finality_depth(),
+        ))
     }
 
     // ========================================================================
@@ -5491,6 +5586,10 @@ impl RpcServer {
 // ============================================================================
 #[cfg(test)]
 mod phase_0b_rpc_tests {
+    // The pure `classify_inference_attestation_status` tests now live
+    // in `sumchain-primitives` (with the classifier itself) so they
+    // can run without the rpc crate's storage transitive deps. See
+    // `crates/primitives/tests/inference_attestation_fixtures.rs`.
     use super::*;
     use sumchain_primitives::{Hash, Receipt, TxStatus};
 

@@ -1143,7 +1143,8 @@ impl BlockExecutor {
                             included_at_height: block_height,
                             tx_hash,
                         };
-                        self.inference_attestation_executor.put(&cf_key, &record)?;
+                        self.inference_attestation_executor
+                            .put(&cf_key, &record, &v2_tx.from)?;
 
                         debug!(
                             "V2 InferenceAttestation {} executed: session_id={:?} verifier={} height={}",

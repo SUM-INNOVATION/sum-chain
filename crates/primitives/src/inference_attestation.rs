@@ -153,6 +153,150 @@ pub fn inference_attestation_key(
     *hasher.finalize().as_bytes()
 }
 
+/// Domain string for the session-id-keyed index CF (`INFERENCE_ATTESTATIONS_BY_SESSION`).
+/// Versioned so future index-key rotations can use a `V2` namespace
+/// without colliding with historical entries.
+pub const INFERENCE_ATTESTATION_SESSION_INDEX_DOMAIN: &[u8] =
+    b"InferenceAttestationSessionIndexV1";
+
+/// Number of bytes of the session-id BLAKE3 hash used as the prefix
+/// portion of the session-index key. 16 bytes = 128 bits of session-id
+/// distinguishability, sufficient for any practical attestation rate.
+pub const SESSION_ID_HASH_BYTES: usize = 16;
+
+/// 36-byte index key for the `INFERENCE_ATTESTATIONS_BY_SESSION` CF:
+/// `session_id_hash_16 || verifier_address_20`.
+///
+/// Property: the first 16 bytes are a deterministic function of
+/// `session_id` alone — prefix-iterating with that 16-byte prefix
+/// returns every `(session_id, verifier)` pair for the given session.
+/// The trailing 20 bytes are the verifier's chain Address, so the
+/// caller can recover the verifier without a second lookup.
+pub fn session_index_key(
+    session_id: &str,
+    verifier_address: &Address,
+) -> [u8; 36] {
+    let mut out = [0u8; 36];
+    out[..SESSION_ID_HASH_BYTES].copy_from_slice(&session_index_prefix(session_id));
+    out[SESSION_ID_HASH_BYTES..].copy_from_slice(verifier_address.as_bytes());
+    out
+}
+
+/// 16-byte prefix portion of [`session_index_key`]. Used by the RPC
+/// `list_by_session` path to bound a prefix scan to one session's
+/// attestations.
+pub fn session_index_prefix(session_id: &str) -> [u8; SESSION_ID_HASH_BYTES] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(INFERENCE_ATTESTATION_SESSION_INDEX_DOMAIN);
+    hasher.update(session_id.as_bytes());
+    let hash = hasher.finalize();
+    let mut prefix = [0u8; SESSION_ID_HASH_BYTES];
+    prefix.copy_from_slice(&hash.as_bytes()[..SESSION_ID_HASH_BYTES]);
+    prefix
+}
+
+/// Status of a specific `InferenceAttestation` tx, returned by the
+/// `sum_getInferenceAttestationStatus` RPC. Lives in primitives (not
+/// `sumchain-rpc::types`) so the classification logic can be exercised
+/// without the storage / rocksdb transitive dependency chain.
+///
+/// Four-state v1 model: `submitted` (mempool), `included` (in a block
+/// but < finality_depth deep), `finalized` (>= finality_depth deep),
+/// `failed` (in a block, executor rejected). `Dropped` is intentionally
+/// NOT represented in v1 — mempool eviction is not tracked; clients
+/// should resubmit after a client-side timeout. `unknown` is returned
+/// for any tx hash that isn't a recognized `InferenceAttestation`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InferenceAttestationStatusInfo {
+    /// One of: `"submitted"`, `"included"`, `"finalized"`, `"failed"`,
+    /// `"unknown"`.
+    pub status: String,
+    /// Block height the tx was included at, or `None` if still
+    /// submitted / unknown.
+    pub included_at_height: Option<u64>,
+    /// Human-readable failure reason from `TxStatus::description()` when
+    /// `status == "failed"`. `None` otherwise.
+    pub reason: Option<String>,
+}
+
+/// Pure classifier for `sum_getInferenceAttestationStatus`. Receipt-first
+/// precedence with a payload-type guard:
+///
+/// 1. **Payload-type guard.** If neither the stored tx nor the mempool
+///    tx is an `InferenceAttestation`, return `"unknown"` regardless of
+///    receipt state. A foreign tx hash MUST NOT be reported as
+///    `included` or `finalized` through this method — clients would
+///    misinterpret it as an attestation otherwise.
+/// 2. **Receipt → `included`/`finalized`/`failed`.** Receipt is the
+///    authoritative source; a stale mempool entry can coexist with a
+///    receipt during the prune window. Mirrors the existing
+///    `classify_tx_status` helper in `sumchain-rpc::server`.
+/// 3. **Mempool → `submitted`.** Only consulted when no receipt exists.
+/// 4. **Otherwise → `"unknown"`.**
+///
+/// All inputs are owned by the RPC layer; this function performs zero
+/// I/O. It lives in primitives so the seven exhaustive branch tests
+/// can run without the rpc crate's storage transitive deps. The RPC
+/// server hands its four inputs through and returns the result.
+pub fn classify_inference_attestation_status(
+    stored_tx: Option<&crate::SignedTransaction>,
+    mempool_tx: Option<&crate::SignedTransaction>,
+    receipt: Option<&crate::Receipt>,
+    current_height: u64,
+    finality_depth: u64,
+) -> InferenceAttestationStatusInfo {
+    use crate::{TxInner, TxPayload, TxStatus};
+
+    let is_attestation = |signed: &crate::SignedTransaction| -> bool {
+        matches!(&signed.inner, TxInner::V2(v2)
+            if matches!(&v2.payload, TxPayload::InferenceAttestation(_)))
+    };
+    let confirmed = stored_tx.map(is_attestation).unwrap_or(false)
+        || mempool_tx.map(is_attestation).unwrap_or(false);
+    if !confirmed {
+        return InferenceAttestationStatusInfo {
+            status: "unknown".to_string(),
+            included_at_height: None,
+            reason: None,
+        };
+    }
+
+    if let Some(r) = receipt {
+        let is_success = matches!(r.status, TxStatus::Success);
+        let status_str = if !is_success {
+            "failed"
+        } else if current_height >= r.block_height.saturating_add(finality_depth) {
+            "finalized"
+        } else {
+            "included"
+        };
+        let reason = if !is_success {
+            Some(r.status.description().to_string())
+        } else {
+            None
+        };
+        return InferenceAttestationStatusInfo {
+            status: status_str.to_string(),
+            included_at_height: Some(r.block_height),
+            reason,
+        };
+    }
+
+    if mempool_tx.is_some() {
+        InferenceAttestationStatusInfo {
+            status: "submitted".to_string(),
+            included_at_height: None,
+            reason: None,
+        }
+    } else {
+        InferenceAttestationStatusInfo {
+            status: "unknown".to_string(),
+            included_at_height: None,
+            reason: None,
+        }
+    }
+}
+
 /// Value stored in the `INFERENCE_ATTESTATIONS` CF. Bincode-serialized.
 ///
 /// Records the verifier-signed digest, the signature, and the inclusion

@@ -128,6 +128,19 @@ pub mod cf {
     /// attestation per `(session_id, verifier)` pair across all history.
     pub const INFERENCE_ATTESTATIONS: &str = "inference_attestations";
 
+    /// Session-id index over `INFERENCE_ATTESTATIONS` so RPC
+    /// `sum_listInferenceAttestations(session_id)` can enumerate every
+    /// verifier that attested to a given session without scanning the
+    /// canonical CF. Key shape is `session_id_hash_16 || verifier_address_20`
+    /// (36 bytes) — a 16-byte BLAKE3 prefix derived from
+    /// `b"InferenceAttestationSessionIndexV1" || session_id` followed by
+    /// the 20-byte chain Address. Prefix-iterating with the 16-byte
+    /// session prefix returns every verifier for that session.
+    /// Value: empty (`&[]`) — presence is the signal; full records live
+    /// in the canonical CF and are fetched per-verifier via the
+    /// primary key derived from `(session_id, verifier_address)`.
+    pub const INFERENCE_ATTESTATIONS_BY_SESSION: &str = "inference_attestations_by_session";
+
     // PoR Challenges
     /// Active storage challenges (challenge_id -> StorageChallenge, node/expiry indexes)
     pub const ACTIVE_CHALLENGES: &str = "active_challenges";
@@ -408,6 +421,7 @@ pub const ALL_CFS: &[&str] = &[
     cf::STORAGE_METADATA_V2,
     cf::ASSIGNMENT_ATTESTATIONS_V2,
     cf::INFERENCE_ATTESTATIONS,
+    cf::INFERENCE_ATTESTATIONS_BY_SESSION,
     // SRC-80X/81X DocClass
     cf::DOCCLASS_IDENTITY_ROOTS,
     cf::DOCCLASS_ELIGIBILITY,

@@ -332,6 +332,105 @@ fn mempool_without_admission_still_dedupes_in_flight() {
     assert!(matches!(err, StateError::DuplicateInferenceAttestation));
 }
 
+// ────────────────────────────────────────────────────────────────────────
+// Production-wiring contract tests
+//
+// These mirror the admission recipe in `Node::new`
+// (crates/node/src/node.rs) line-for-line. If `Node::new` is refactored
+// to construct admission differently, these tests must be updated
+// alongside. The duplication is deliberate — it's a tripwire against
+// silent removal of `.with_inference_admission(...)` from production
+// node startup. Phase 4 step 3 contract.
+// ────────────────────────────────────────────────────────────────────────
+
+/// Mirror of `Node::new`'s admission construction. Returns the same
+/// `Arc<Mempool>` shape with the same admission context fields wired
+/// up. Used only by the two production-wiring tests below.
+fn build_production_wiring_mempool(
+    params: ChainParams,
+    initial_height: u64,
+) -> (Arc<sumchain_state::Mempool>, Arc<AtomicU64>, TempDir) {
+    use sumchain_state::MempoolConfig;
+    let dir = TempDir::new().unwrap();
+    let db = Arc::new(Database::open_default(dir.path()).unwrap());
+    let chain_height = Arc::new(AtomicU64::new(initial_height));
+    let admission = InferenceAttestationAdmission {
+        executor: Arc::new(InferenceAttestationExecutor::new(db.clone())),
+        params: Arc::new(params.clone()),
+        current_height: chain_height.clone(),
+    };
+    let mempool = Arc::new(
+        sumchain_state::Mempool::new(MempoolConfig {
+            min_fee: params.min_fee,
+            ..Default::default()
+        })
+        .with_inference_admission(admission),
+    );
+    (mempool, chain_height, dir)
+}
+
+#[test]
+fn production_wiring_rejects_attestation_pre_activation() {
+    // Default ChainParams has omninode_enabled_from_height = None. Any
+    // node started from such a genesis (i.e. mainnet today) MUST reject
+    // every attestation tx at mempool admission — proving
+    // `sum_sendRawTransaction` cannot reach an unactivated executor.
+    let (mempool, _height, _dir) = build_production_wiring_mempool(ChainParams::default(), 0);
+    let sender = KeyPair::generate();
+    let tx = build_signed_attestation_tx(&sender, 0, 1_000_000, sample_digest("prod-pre"), false);
+    let result = mempool.add(tx);
+    assert!(
+        matches!(result, Err(StateError::OmniNodeNotActivated)),
+        "production-shape mempool must reject pre-activation attestation; \
+         got {result:?}. If this is failing, Node::new has been \
+         refactored without an admission context — re-wire \
+         `.with_inference_admission(...)` before merging."
+    );
+    assert_eq!(mempool.len(), 0);
+}
+
+#[test]
+fn production_wiring_height_advance_opens_gate() {
+    // Activation = Some(1000). At chain_height = 999 the gate is closed;
+    // bumping chain_height to 1000 (which Node::new does on every
+    // BlockProduced / BlockImported event in its run loop) must open the
+    // gate for the next attestation. Proves the `chain_height.store(...)`
+    // path is load-bearing for live admission decisions.
+    let mut params = ChainParams::default();
+    params.omninode_enabled_from_height = Some(1000);
+    let (mempool, chain_height, _dir) = build_production_wiring_mempool(params, 999);
+
+    let sender = KeyPair::generate();
+    let tx_pre = build_signed_attestation_tx(
+        &sender,
+        0,
+        1_000_000,
+        sample_digest("below-target"),
+        false,
+    );
+    assert!(matches!(
+        mempool.add(tx_pre),
+        Err(StateError::OmniNodeNotActivated)
+    ));
+
+    // Simulate Node::new's run-loop bumping chain_height on a
+    // BlockProduced / BlockImported event.
+    chain_height.store(1000, Ordering::Relaxed);
+
+    let tx_post = build_signed_attestation_tx(
+        &sender,
+        1,
+        1_000_000,
+        sample_digest("at-target"),
+        false,
+    );
+    let hash = tx_post.hash();
+    mempool
+        .add(tx_post)
+        .expect("post-activation admission must succeed");
+    assert!(mempool.contains(&hash));
+}
+
 #[test]
 fn admission_does_not_affect_non_inference_payloads() {
     use sumchain_crypto::sign;

@@ -21,7 +21,10 @@
 
 use std::sync::Arc;
 
-use sumchain_primitives::inference_attestation::InferenceAttestationRecord;
+use sumchain_primitives::inference_attestation::{
+    session_index_key, session_index_prefix, InferenceAttestationRecord, SESSION_ID_HASH_BYTES,
+};
+use sumchain_primitives::Address;
 use sumchain_storage::{cf, Database};
 
 use crate::{Result, StateError};
@@ -62,15 +65,66 @@ impl InferenceAttestationExecutor {
     ///
     /// Fails the tx (propagated to dispatch as a hard error) if the
     /// bincode-serialized record cannot be written.
+    /// Persist an attestation record AND its session-id index entry.
+    /// The verifier address is taken as an explicit argument (rather
+    /// than recovered from `record`, which doesn't carry it) so the
+    /// caller — the dispatcher, which knows `tx.sender == verifier` —
+    /// passes it directly. This is the only successful-path entry
+    /// point; the canonical CF and the session index always move
+    /// together.
+    /// Persist an attestation record AND its session-id index entry
+    /// **atomically** via a single RocksDB write batch. If the batch
+    /// commit fails, neither CF is mutated. This is load-bearing for
+    /// `sum_listInferenceAttestations` correctness — a partial write
+    /// (canonical CF updated, index missing) would make a finalized
+    /// attestation invisible to the listing RPC while still findable
+    /// via point lookup, which is the kind of silent inconsistency
+    /// that's painful to debug.
     pub fn put(
         &self,
         key: &[u8; 32],
         record: &InferenceAttestationRecord,
+        verifier_address: &Address,
     ) -> Result<()> {
         let value = bincode::serialize(record)
             .map_err(|e| StateError::SerializationError(e.to_string()))?;
-        self.db.put(cf::INFERENCE_ATTESTATIONS, key, &value)?;
+        let index_key = session_index_key(&record.digest.session_id, verifier_address);
+
+        let mut batch = self.db.batch();
+        batch.put(cf::INFERENCE_ATTESTATIONS, key, &value)?;
+        // Session-id index — empty value, presence is the signal.
+        batch.put(cf::INFERENCE_ATTESTATIONS_BY_SESSION, &index_key, &[])?;
+        batch.commit()?;
         Ok(())
+    }
+
+    /// Enumerate verifier addresses that have attested to `session_id`.
+    /// Returns an empty vec for a session with zero attestations.
+    /// Backs `sum_listInferenceAttestations`.
+    pub fn list_verifiers_by_session(&self, session_id: &str) -> Result<Vec<Address>> {
+        let prefix = session_index_prefix(session_id);
+        let mut out = Vec::new();
+        // prefix_iter may return NotFound on a pre-V2 / pre-Phase-4 DB
+        // missing the CF entirely; treat that as zero rows so the RPC
+        // returns an empty list rather than failing.
+        match self
+            .db
+            .prefix_iter(cf::INFERENCE_ATTESTATIONS_BY_SESSION, &prefix)
+        {
+            Ok(it) => {
+                for (key, _value) in it {
+                    if key.len() != 36 || &key[..SESSION_ID_HASH_BYTES] != prefix.as_slice() {
+                        continue;
+                    }
+                    let mut addr = [0u8; 20];
+                    addr.copy_from_slice(&key[SESSION_ID_HASH_BYTES..]);
+                    out.push(Address::new(addr));
+                }
+            }
+            Err(sumchain_storage::StorageError::NotFound(_)) => {}
+            Err(e) => return Err(e.into()),
+        }
+        Ok(out)
     }
 
     /// Fetch a previously persisted record. Phase 4 RPC reads call this;
@@ -133,7 +187,7 @@ mod tests {
         let (db, _dir) = setup();
         let executor = InferenceAttestationExecutor::new(db);
         let key = [11u8; 32];
-        executor.put(&key, &sample_record()).unwrap();
+        executor.put(&key, &sample_record(), &Address::new([42u8; 20])).unwrap();
         assert!(executor.exists(&key).unwrap());
     }
 
@@ -143,7 +197,7 @@ mod tests {
         let executor = InferenceAttestationExecutor::new(db);
         let key = [22u8; 32];
         let record = sample_record();
-        executor.put(&key, &record).unwrap();
+        executor.put(&key, &record, &Address::new([42u8; 20])).unwrap();
         let loaded = executor.get(&key).unwrap().expect("present");
         assert_eq!(loaded, record);
     }
@@ -154,7 +208,7 @@ mod tests {
         let executor = InferenceAttestationExecutor::new(db);
         let k1 = [1u8; 32];
         let k2 = [2u8; 32];
-        executor.put(&k1, &sample_record()).unwrap();
+        executor.put(&k1, &sample_record(), &Address::new([42u8; 20])).unwrap();
         assert!(executor.exists(&k1).unwrap());
         assert!(!executor.exists(&k2).unwrap());
     }
@@ -169,13 +223,141 @@ mod tests {
         let (db, _dir) = setup();
         let executor = InferenceAttestationExecutor::new(db);
         let key = [33u8; 32];
-        executor.put(&key, &sample_record()).unwrap();
+        executor.put(&key, &sample_record(), &Address::new([42u8; 20])).unwrap();
 
         let mut second = sample_record();
         second.included_at_height = 99;
-        executor.put(&key, &second).unwrap();
+        executor.put(&key, &second, &Address::new([42u8; 20])).unwrap();
         let loaded = executor.get(&key).unwrap().expect("present");
         assert_eq!(loaded.included_at_height, 99);
+    }
+
+    #[test]
+    fn list_verifiers_returns_empty_for_unknown_session() {
+        let (db, _dir) = setup();
+        let executor = InferenceAttestationExecutor::new(db);
+        let v = executor.list_verifiers_by_session("never-attested").unwrap();
+        assert!(v.is_empty());
+    }
+
+    #[test]
+    fn list_verifiers_returns_all_attesters_for_session() {
+        let (db, _dir) = setup();
+        let executor = InferenceAttestationExecutor::new(db);
+        let session_id = "multi-verifier-session";
+
+        let v1 = Address::new([0x11u8; 20]);
+        let v2 = Address::new([0x22u8; 20]);
+        let v3 = Address::new([0x33u8; 20]);
+
+        let mk = |verifier: &Address, key: u8| {
+            (
+                {
+                    let mut k = [0u8; 32];
+                    k[0] = key;
+                    k
+                },
+                InferenceAttestationRecord {
+                    digest: InferenceAttestationDigest {
+                        session_id: session_id.to_string(),
+                        model_hash: [1u8; 32],
+                        manifest_root: [2u8; 32],
+                        response_hash: [3u8; 32],
+                        proof_root: [4u8; 32],
+                    },
+                    verifier_signature: [9u8; 64],
+                    included_at_height: 1,
+                    tx_hash: Hash::new([7u8; 32]),
+                },
+                *verifier,
+            )
+        };
+
+        let (k1, r1, a1) = mk(&v1, 1);
+        let (k2, r2, a2) = mk(&v2, 2);
+        let (k3, r3, a3) = mk(&v3, 3);
+        executor.put(&k1, &r1, &a1).unwrap();
+        executor.put(&k2, &r2, &a2).unwrap();
+        executor.put(&k3, &r3, &a3).unwrap();
+
+        let mut returned = executor.list_verifiers_by_session(session_id).unwrap();
+        returned.sort();
+        let mut expected = vec![v1, v2, v3];
+        expected.sort();
+        assert_eq!(returned, expected);
+    }
+
+    #[test]
+    fn put_is_atomic_canonical_and_index_together() {
+        // The dispatcher and the RPC list path read from two different
+        // CFs that `put` must keep in sync. This test exercises the
+        // invariant: after every successful `put`, BOTH `exists` (on
+        // the canonical CF) AND `list_verifiers_by_session` (on the
+        // index CF) reflect the row. Doesn't directly prove batch
+        // atomicity at the rocksdb level (kernel crash mid-batch is
+        // hard to simulate), but it does prove the two writes are
+        // intended to land together — a future regression that drops
+        // one of them would fail this test.
+        let (db, _dir) = setup();
+        let executor = InferenceAttestationExecutor::new(db);
+        let key = [77u8; 32];
+        let verifier = Address::new([0xabu8; 20]);
+        let record = sample_record();
+        executor.put(&key, &record, &verifier).unwrap();
+
+        // Canonical CF: point lookup hits.
+        assert!(executor.exists(&key).unwrap());
+        assert_eq!(executor.get(&key).unwrap().unwrap(), record);
+
+        // Index CF: list returns the verifier.
+        let v = executor
+            .list_verifiers_by_session(&record.digest.session_id)
+            .unwrap();
+        assert_eq!(v, vec![verifier]);
+    }
+
+    #[test]
+    fn list_verifiers_isolates_sessions() {
+        // An attester on session A must not appear when listing session B.
+        // Proves the BLAKE3 prefix actually separates sessions; a hash
+        // collision on the first 16 bytes is statistically impossible but
+        // a buggy keying scheme could leak across sessions.
+        let (db, _dir) = setup();
+        let executor = InferenceAttestationExecutor::new(db);
+
+        let verifier = Address::new([0x55u8; 20]);
+        let mk = |session: &str, key: u8| {
+            let mut k = [0u8; 32];
+            k[0] = key;
+            (
+                k,
+                InferenceAttestationRecord {
+                    digest: InferenceAttestationDigest {
+                        session_id: session.to_string(),
+                        model_hash: [1u8; 32],
+                        manifest_root: [2u8; 32],
+                        response_hash: [3u8; 32],
+                        proof_root: [4u8; 32],
+                    },
+                    verifier_signature: [9u8; 64],
+                    included_at_height: 1,
+                    tx_hash: Hash::new([7u8; 32]),
+                },
+            )
+        };
+
+        let (ka, ra) = mk("session-A", 10);
+        let (kb, rb) = mk("session-B", 11);
+        executor.put(&ka, &ra, &verifier).unwrap();
+        executor.put(&kb, &rb, &verifier).unwrap();
+
+        let a_verifiers = executor.list_verifiers_by_session("session-A").unwrap();
+        let b_verifiers = executor.list_verifiers_by_session("session-B").unwrap();
+        let c_verifiers = executor.list_verifiers_by_session("session-C").unwrap();
+
+        assert_eq!(a_verifiers, vec![verifier]);
+        assert_eq!(b_verifiers, vec![verifier]);
+        assert!(c_verifiers.is_empty());
     }
 
     #[test]

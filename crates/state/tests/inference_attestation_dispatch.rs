@@ -36,7 +36,9 @@ use sumchain_primitives::{
     },
     TxStatus,
 };
+use sumchain_state::inference_attestation_executor::InferenceAttestationExecutor;
 use sumchain_storage::cf;
+use std::sync::Arc;
 
 use common::{
     build_signed_attestation_tx, fund, params_omninode_enabled, sample_digest,
@@ -250,5 +252,43 @@ fn dispatch_stored_record_uses_omninode_domain_tag() {
         &input[..domain_bytes.len()],
         domain_bytes,
         "signing input must begin with DOMAIN_TAG bytes"
+    );
+}
+
+#[test]
+fn dispatch_populates_session_index() {
+    // After a Successful dispatch, the RPC `sum_listInferenceAttestations`
+    // path reads `INFERENCE_ATTESTATIONS_BY_SESSION` to enumerate the
+    // verifiers for a session. Prove the dispatcher actually maintains
+    // that index by querying it after execute_tx.
+    let (state, db, _dir, executor) = setup_with_params(params_omninode_enabled());
+
+    let sender_a = KeyPair::generate();
+    let sender_b = KeyPair::generate();
+    let proposer = KeyPair::generate();
+    let fee: u128 = 1_000_000;
+    fund(&state, &sender_a, 10 * fee);
+    fund(&state, &sender_b, 10 * fee);
+
+    let session_id = "indexed-session";
+    let tx_a = build_signed_attestation_tx(&sender_a, 0, fee, sample_digest(session_id), false);
+    let tx_b = build_signed_attestation_tx(&sender_b, 0, fee, sample_digest(session_id), false);
+
+    let r_a = executor.execute_tx(&tx_a, &proposer.address(), 1, 0).unwrap();
+    let r_b = executor.execute_tx(&tx_b, &proposer.address(), 2, 0).unwrap();
+    assert!(matches!(r_a.status, TxStatus::Success));
+    assert!(matches!(r_b.status, TxStatus::Success));
+
+    // Read the session index via the same path RPC uses.
+    let read_executor = InferenceAttestationExecutor::new(Arc::clone(&db));
+    let mut verifiers = read_executor
+        .list_verifiers_by_session(session_id)
+        .expect("index lookup");
+    verifiers.sort();
+    let mut expected = vec![sender_a.address(), sender_b.address()];
+    expected.sort();
+    assert_eq!(
+        verifiers, expected,
+        "session index must contain both verifiers after successful dispatch"
     );
 }

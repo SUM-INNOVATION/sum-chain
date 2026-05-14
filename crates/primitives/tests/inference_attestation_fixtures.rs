@@ -20,9 +20,10 @@ use serde::Deserialize;
 
 use sumchain_primitives::address::Address;
 use sumchain_primitives::inference_attestation::{
-    canonical_digest_bytes, inference_attestation_key, signing_input_bytes,
-    verify_attestation_signature, InferenceAttestationDigest,
-    InferenceAttestationTxData, DOMAIN_TAG, MAX_SESSION_ID_BYTES,
+    canonical_digest_bytes, classify_inference_attestation_status,
+    inference_attestation_key, signing_input_bytes, verify_attestation_signature,
+    InferenceAttestationDigest, InferenceAttestationTxData, DOMAIN_TAG,
+    MAX_SESSION_ID_BYTES,
 };
 
 /// Path is resolved at compile time relative to the crate manifest dir, so
@@ -281,5 +282,153 @@ fn tx_payload_inference_attestation_variant_index_locked() {
          got {tag}. If this is failing, someone reordered variants above \
          InferenceAttestation — every existing serialized tx would \
          re-decode as the wrong operation."
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// classify_inference_attestation_status — pure-function status RPC tests
+//
+// The classifier lives in `sumchain-primitives` (not in `sumchain-rpc`)
+// specifically so these tests can run locally without the rocksdb /
+// system-library link chain that `sumchain-rpc`'s test binary requires.
+// The `sum_getInferenceAttestationStatus` RPC handler in
+// `crates/rpc/src/server.rs` is a thin plumber: it fetches stored tx +
+// mempool tx + receipt + current_height + finality_depth from the chain
+// and passes them straight through to this function.
+// ─────────────────────────────────────────────────────────────────────────
+
+use sumchain_primitives::{Hash, Receipt, SignedTransaction, Transaction, TransactionV2, TxPayload, TxStatus};
+
+/// Build an Ed25519 keypair via `ed25519_dalek` — we keep test crypto
+/// dependencies inside the test file so the primitives crate itself
+/// doesn't acquire a transitive sign/verify dep for production code.
+fn ed25519_keypair_from_seed(seed: [u8; 32]) -> (ed25519_dalek::SigningKey, [u8; 32]) {
+    let sk = ed25519_dalek::SigningKey::from_bytes(&seed);
+    let pk_bytes = sk.verifying_key().to_bytes();
+    (sk, pk_bytes)
+}
+
+fn ed25519_sign(sk: &ed25519_dalek::SigningKey, message: &[u8]) -> [u8; 64] {
+    use ed25519_dalek::Signer;
+    sk.sign(message).to_bytes()
+}
+
+fn mk_attestation_signed_tx(seed: [u8; 32]) -> SignedTransaction {
+    let (sk, pk_bytes) = ed25519_keypair_from_seed(seed);
+    let sender_addr = Address::from_public_key(&pk_bytes);
+    let digest = InferenceAttestationDigest {
+        session_id: "classifier-test-session".to_string(),
+        model_hash: [1u8; 32],
+        manifest_root: [2u8; 32],
+        response_hash: [3u8; 32],
+        proof_root: [4u8; 32],
+    };
+    let signing_input = signing_input_bytes(&digest).unwrap();
+    let inner_sig = ed25519_sign(&sk, &signing_input);
+    let payload = TxPayload::InferenceAttestation(InferenceAttestationTxData {
+        digest,
+        verifier_signature: inner_sig,
+    });
+    let tx = TransactionV2 {
+        chain_id: 1,
+        from: sender_addr,
+        fee: 1_000_000,
+        nonce: 0,
+        payload,
+    };
+    let outer_hash = tx.signing_hash();
+    let outer_sig = ed25519_sign(&sk, outer_hash.as_bytes());
+    SignedTransaction::new_v2(tx, outer_sig, pk_bytes)
+}
+
+fn mk_transfer_signed_tx(seed: [u8; 32]) -> SignedTransaction {
+    let (sk, pk_bytes) = ed25519_keypair_from_seed(seed);
+    let sender_addr = Address::from_public_key(&pk_bytes);
+    let recipient_addr = Address::from_public_key(&[7u8; 32]);
+    let tx = Transaction::new(1, sender_addr, recipient_addr, 100, 10, 0);
+    let h = tx.signing_hash();
+    let sig = ed25519_sign(&sk, h.as_bytes());
+    SignedTransaction::new(tx, sig, pk_bytes)
+}
+
+fn mk_receipt(status: TxStatus, block_height: u64) -> Receipt {
+    Receipt::new(Hash::hash(b"tx"), block_height, 0, status, 10)
+}
+
+#[test]
+fn classifier_unknown_when_no_tx_and_no_mempool() {
+    let s = classify_inference_attestation_status(None, None, None, 100, 3);
+    assert_eq!(s.status, "unknown");
+    assert_eq!(s.included_at_height, None);
+    assert_eq!(s.reason, None);
+}
+
+#[test]
+fn classifier_unknown_when_foreign_tx_payload_type() {
+    // Transfer tx in store + Success receipt — but the payload-type guard
+    // MUST keep this from leaking as a finalized attestation through the
+    // InferenceAttestation-specific status RPC. This is the
+    // reviewer-flagged regression in Phase 4 (suggestion 3).
+    let foreign = mk_transfer_signed_tx([42u8; 32]);
+    let r = mk_receipt(TxStatus::Success, 50);
+    let s = classify_inference_attestation_status(Some(&foreign), None, Some(&r), 100, 3);
+    assert_eq!(
+        s.status, "unknown",
+        "foreign tx hash must not surface as included/finalized through the InferenceAttestation status RPC"
+    );
+    assert_eq!(s.included_at_height, None, "no height leak through the guard");
+}
+
+#[test]
+fn classifier_submitted_when_only_in_mempool() {
+    let att = mk_attestation_signed_tx([1u8; 32]);
+    let s = classify_inference_attestation_status(None, Some(&att), None, 100, 3);
+    assert_eq!(s.status, "submitted");
+}
+
+#[test]
+fn classifier_included_when_success_receipt_under_finality_depth() {
+    let att = mk_attestation_signed_tx([2u8; 32]);
+    let r = mk_receipt(TxStatus::Success, 50);
+    // current=51, finality_depth=3 → 51 < 50+3 → included.
+    let s = classify_inference_attestation_status(Some(&att), None, Some(&r), 51, 3);
+    assert_eq!(s.status, "included");
+    assert_eq!(s.included_at_height, Some(50));
+}
+
+#[test]
+fn classifier_finalized_when_success_receipt_past_finality_depth() {
+    let att = mk_attestation_signed_tx([3u8; 32]);
+    let r = mk_receipt(TxStatus::Success, 50);
+    // current=53, finality_depth=3 → 53 >= 50+3 → finalized.
+    let s = classify_inference_attestation_status(Some(&att), None, Some(&r), 53, 3);
+    assert_eq!(s.status, "finalized");
+    assert_eq!(s.included_at_height, Some(50));
+}
+
+#[test]
+fn classifier_failed_carries_description() {
+    let att = mk_attestation_signed_tx([4u8; 32]);
+    let r = mk_receipt(TxStatus::Failed(51), 50);
+    let s = classify_inference_attestation_status(Some(&att), None, Some(&r), 100, 3);
+    assert_eq!(s.status, "failed");
+    assert_eq!(s.included_at_height, Some(50));
+    // reason carries TxStatus::description() — must reference the
+    // failure code's meaning (`Failed(51)` = duplicate attestation).
+    assert!(s.reason.unwrap().contains("duplicate"));
+}
+
+#[test]
+fn classifier_receipt_takes_precedence_over_mempool() {
+    // A receipt-bearing attestation that's ALSO still in the mempool
+    // (the prune-lag window) must classify by receipt, not mempool.
+    // Otherwise `included`/`finalized` would regress to `submitted`.
+    // This is the reviewer-flagged regression in Phase 4 (issue 2).
+    let att = mk_attestation_signed_tx([5u8; 32]);
+    let r = mk_receipt(TxStatus::Success, 50);
+    let s = classify_inference_attestation_status(Some(&att), Some(&att), Some(&r), 100, 3);
+    assert_eq!(
+        s.status, "finalized",
+        "receipt-first precedence: mempool presence must not downgrade a finalized status"
     );
 }

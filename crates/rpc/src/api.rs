@@ -28,6 +28,7 @@ use crate::types::{
     TransactionHistoryResponse, TransactionInfo, UnbondingDelegationRpcInfo,
     ValidatorDelegationSummary, ValidatorSetInfo, ValidatorSetRpcInfo, ValidatorSigningRpcInfo,
     ViewCallRequest,
+    InferenceAttestationInfo, InferenceAttestationStatusInfo,
 };
 
 /// SUM Chain RPC API
@@ -169,6 +170,35 @@ pub trait SumChainApi {
     /// Get pending transactions (SUM native alias)
     #[method(name = "sum_getPendingTransactions")]
     async fn sum_get_pending_transactions(&self) -> Result<Vec<TransactionInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get a single `InferenceAttestation` record for `(session_id, verifier_address)`.
+    /// Returns `None` if no attestation has been committed for that pair.
+    /// OmniNode Stage 6 / chain Phase 4.
+    #[method(name = "sum_getInferenceAttestation")]
+    async fn sum_get_inference_attestation(
+        &self,
+        session_id: String,
+        verifier_address: String,
+    ) -> Result<Option<InferenceAttestationInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// List every verifier's `InferenceAttestation` for a given session.
+    /// Returns an empty vec if no attestations exist. Used by OmniNode
+    /// coordinators to determine quorum.
+    #[method(name = "sum_listInferenceAttestations")]
+    async fn sum_list_inference_attestations(
+        &self,
+        session_id: String,
+    ) -> Result<Vec<InferenceAttestationInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get the chain-side status of an `InferenceAttestation` tx by hash.
+    /// Four states (`submitted`, `included`, `finalized`, `failed`) plus
+    /// `unknown` for unrecognized hashes. `Dropped` is not tracked in
+    /// v1 — see `crates/rpc/src/types.rs::InferenceAttestationStatusInfo`.
+    #[method(name = "sum_getInferenceAttestationStatus")]
+    async fn sum_get_inference_attestation_status(
+        &self,
+        tx_hash: String,
+    ) -> Result<InferenceAttestationStatusInfo, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Get validators (SUM native alias)
     #[method(name = "sum_getValidators")]
