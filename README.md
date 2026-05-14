@@ -18,11 +18,35 @@ A Layer-1 blockchain built entirely in Rust (stable toolchain). No C/C++, Python
 - **Policy Accounts**: Consensus-level multi-sig group governance
 - **On-chain Encrypted Messaging**: SRC-201 standard using X25519 + XChaCha20-Poly1305
 - **SRC-80X through SRC-89X Document Token Families**: DocClass, Tax, Equity, Agreement, Legal, Property, Healthcare, Employment, Finance
+- **SNIP V2 Storage Protocol**: Decentralized file storage with on-chain metadata. Pending → Active → Abandoned lifecycle, ed25519 X25519-derived encryption keys, archive-node staking + replication assignment, fee pools, and per-block PoR challenges. Activation gated by `v2_enabled_from_height`. See `crates/state/src/storage_metadata.rs` and `docs/SNIP-V2.md` (where present)
 - **Dynamic Validator Sets**: Epoch-based, stake-weighted validator selection
 - **libp2p Networking**: Gossipsub for transaction/block propagation, mDNS for local discovery
 - **JSON-RPC API**: HTTP server for chain queries and transaction submission (ETH + SUM compatible)
 - **RocksDB Storage**: Persistent key-value storage for blocks and state
 - **Enhanced CLI Wallet**: Colored output, human-readable amounts, interactive confirmations
+
+## Subprotocols
+
+| Name | Status | Location | Purpose |
+|---|---|---|---|
+| SRC-201 Messaging (a.k.a. SNIP V1) | Production (mainnet) | `crates/primitives/src/messaging.rs`, `crates/state/src/messaging_executor.rs` | On-chain encrypted messaging (X25519 + XChaCha20-Poly1305). Supports sender-paid and sponsored submission. |
+| SNIP V2 Storage Protocol | Production behind `v2_enabled_from_height` activation gate | `crates/state/src/storage_metadata.rs`, `crates/state/src/inference_attestations.rs` (forthcoming) | Decentralized file storage with chain-side metadata: Pending/Active/Abandoned lifecycle, encryption-key registry, archive-node staking, PoR challenges. Genesis param controls activation. |
+| OmniNode `InferenceAttestation` | v1 complete on `omninode-attestation` branch (Phases 1–5: wire format + parity gate + executor dispatch + storage CFs + activation param + mempool admission + production wiring + read-only RPC + protocol doc). Awaiting merge review. | Spec: [`docs/SUBPROTOCOLS/INFERENCE-ATTESTATION.md`](docs/SUBPROTOCOLS/INFERENCE-ATTESTATION.md). Code: `crates/primitives/src/inference_attestation.rs`, `crates/state/src/inference_attestation_executor.rs`, `crates/state/src/mempool.rs` (`InferenceAttestationAdmission`), `crates/node/src/node.rs` (admission wiring), `crates/rpc/src/api.rs` + `server.rs` (RPC methods), fixtures in `crates/primitives/tests/fixtures/` | Verifier-signed digests attesting to off-chain inference outputs. Inner Stage 6 signature (`omninode.inference_attestation.v1` domain) verified at chain side; outer chain signing semantics unchanged. Activation gated by `omninode_enabled_from_height` (default `None` — dormant on mainnet). Mempool admission enforces activation gate + in-flight duplicate + permanent CF duplicate. Read-only RPC: `sum_getInferenceAttestation`, `sum_listInferenceAttestations`, `sum_getInferenceAttestationStatus`. Full protocol contract in the linked doc. |
+
+## Local Development
+
+For SNIP V2 client integration without spinning up a full 3-validator local testnet, the chain ships a self-bootstrapping single-validator Docker preset on the `snip-local-mirror-preset` branch:
+
+```bash
+git checkout snip-local-mirror-preset
+docker-compose -f deploy/snip-local-mirror.yaml up -d --build
+curl -X POST -H 'Content-Type: application/json' \
+     --data '{"jsonrpc":"2.0","id":1,"method":"chain_id","params":[]}' \
+     http://localhost:8545
+# → {"jsonrpc":"2.0","result":31337,"id":1}
+```
+
+Generates a fresh disposable validator key on first boot, renders genesis from a committed template (`genesis/snip-mirror-genesis.template.json`), and exposes RPC on `localhost:8545`. `docker-compose down -v` wipes everything; `stop` / `start` preserves the chain. SNIP-side test addresses can be pre-funded via a mounted `extra-alloc.json` overlay before the first `up`.
 
 ## Architecture
 
@@ -475,7 +499,19 @@ V2 transactions support 16 payload types: Transfer, NFT (SUM-721), Token (SRC-20
 ### BFT Consensus (Production-Ready)
 - Harden existing BFT module for production use
 
-**Last Updated**: March 2026
+### OmniNode `InferenceAttestation` Subprotocol
+- Verifier-signed digests attesting to off-chain inference outputs, recorded on-chain by reference
+- Inner signature uses OmniNode-defined Stage 6 domain (`omninode.inference_attestation.v1`); chain re-verifies bit-for-bit against the same signing input — no double-signing, no chain-side crypto changes
+- New `TxPayload::InferenceAttestation` variant (bincode tag `21`, `TxType` discriminant `21`); outer `SignedTransaction` shape unchanged
+- Activation gated by `omninode_enabled_from_height: Option<u64>` chain param (default `None` = disabled forever); same dormant-deploy pattern SNIP V2 uses
+- Permanent `(session_id, verifier)` dedup at mempool admission via dedicated `INFERENCE_ATTESTATIONS` CF — required because executor duplicate failure returns `fee_paid: 0` and does not advance nonce
+- **Phase 1 (wire format + parity gate):** shipped on `omninode-attestation` branch. 11 parity tests pin DOMAIN_TAG, canonical digest bytes, signing input, signer address derivation, signature verification, oversize-session-id rejection, TxType ordinal, TxPayload variant index, and the `BLAKE3("InferenceAttestationKeyV1" || bincode((session_id, verifier_address)))` CF key for all three OmniNode reference vectors.
+- **Phase 2 (executor + storage + activation gate):** shipped on `omninode-attestation` branch. Full `execute_tx` dispatch state machine returns `Failed(50)` pre-activation, `Failed(51)` on duplicate `(session_id, verifier)`, `Failed(52)` on invalid inner signature, `Failed(53)` defensively on sender/verifier mismatch (unreachable through `execute_tx` due to outer validation), `InsufficientBalance` if sender can't cover fee, and `Success` with `state.deduct(sender) → state.credit(proposer) → state.increment_nonce(sender) → CF put` on the happy path. CF writes strictly last so a fee-mutation error doesn't leave an orphan record. 7 storage-executor unit tests + 6 dispatch integration tests cover all branches.
+- **Phase 3 (mempool admission):** shipped on `omninode-attestation` branch. New `InferenceAttestationAdmission` carries the narrowest context (executor, ChainParams, current-height) into the mempool via `Mempool::with_inference_admission(...)`. `Mempool::add` performs three checks before insert: (a) activation gate (`StateError::OmniNodeNotActivated`), (b) in-flight `(session_id, verifier_address)` duplicate (`StateError::DuplicateInferenceAttestation`), (c) permanent `INFERENCE_ATTESTATIONS` CF duplicate (same error). In-flight key is stamped after every other index insert succeeds and cleared on `remove`/`clear`. Non-`InferenceAttestation` payloads are unaffected. 13 admission tests + shared `tests/common/mod.rs` helpers reused across dispatch and admission suites.
+- **Phase 4 (production wiring + read-only RPC):** shipped on `omninode-attestation` branch. (a) `Node::new` constructs `InferenceAttestationAdmission` and wires it into the production mempool via `.with_inference_admission(...)`; `chain_height: Arc<AtomicU64>` is initialized from `BlockStore::get_latest_height` and bumped on every `BlockProduced`/`BlockImported` consensus event. (b) Two production-wiring tests mirror `Node::new`'s admission recipe and assert `sum_sendRawTransaction` cannot reach an admission-disabled mempool. (c) Three new RPC methods: `sum_getInferenceAttestation(session_id, verifier_address)` (point lookup), `sum_listInferenceAttestations(session_id)` (prefix-scan over the new `INFERENCE_ATTESTATIONS_BY_SESSION` index CF), `sum_getInferenceAttestationStatus(tx_hash)` (4-state finality with receipt-first precedence + payload-type guard so foreign tx hashes return `"unknown"`). (d) `InferenceAttestationExecutor::put` writes both the canonical CF and the session-id index atomically via `Database::batch()`. The status classifier lives as a pure function in `sumchain-primitives` so its 7 branch tests run without the rpc crate's storage transitive deps.
+- **Phase 5 (docs):** shipped. [`docs/SUBPROTOCOLS/INFERENCE-ATTESTATION.md`](docs/SUBPROTOCOLS/INFERENCE-ATTESTATION.md) — frozen v1 protocol contract: submit path, digest wire format (bincode 1.3 + `DOMAIN_TAG`), address & signature encoding, executor dispatch + failure codes 50–53, permanent duplicate policy, mempool admission behavior, three read-only RPC methods with curl recipes, 4-state status semantics + payload-type guard, finality via `chain_getChainParams.finality_depth`, and explicit v1 exclusions (typed-sugar RPC, sponsored submission, dropped-state tracking, CF pruning, BLS aggregation, etc.). Cross-references the wire-fixture lock that protects the wire surface against future drift.
+
+**Last Updated**: 2026-05-13 (OmniNode v1 Phases 1–5 complete; awaiting merge)
 
 ## License
 

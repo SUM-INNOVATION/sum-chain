@@ -2,7 +2,7 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -15,8 +15,10 @@ use sumchain_genesis::Genesis;
 use sumchain_p2p::{NetworkCommand, NetworkConfig, NetworkEvent, NetworkService, SyncState, MAX_BLOCKS_PER_REQUEST};
 use sumchain_primitives::SignedTransaction;
 use sumchain_rpc::{Metrics, RateLimitConfig, RpcAuthConfig, RpcServer, ServerHandle};
+use sumchain_state::inference_attestation_executor::InferenceAttestationExecutor;
+use sumchain_state::mempool::InferenceAttestationAdmission;
 use sumchain_state::{Mempool, MempoolConfig, StateManager};
-use sumchain_storage::Database;
+use sumchain_storage::{BlockStore, Database};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
@@ -52,6 +54,11 @@ pub struct Node {
     tx_receiver: mpsc::Receiver<SignedTransaction>,
     /// Shutdown flag for graceful termination
     shutdown: Arc<AtomicBool>,
+    /// Live chain-tip height, consumed by `InferenceAttestationAdmission`
+    /// in the mempool's admission gate. Bumped on every BlockProduced or
+    /// BlockImported event so admission decisions track the chain. On
+    /// cold start, initialized from `BlockStore::get_latest_height()`.
+    chain_height: Arc<AtomicU64>,
 }
 
 impl Node {
@@ -120,11 +127,37 @@ impl Node {
         // Create state manager
         let state = Arc::new(StateManager::new(db.clone(), genesis.chain_id));
 
-        // Create mempool
-        let mempool = Arc::new(Mempool::new(MempoolConfig {
-            min_fee: genesis.params.min_fee,
-            ..Default::default()
-        }));
+        // Initialize live chain-height from on-disk state. The mempool's
+        // OmniNode admission gate reads this; cold start without on-disk
+        // blocks resolves to 0, which keeps every gate closed unless
+        // `omninode_enabled_from_height: Some(0)` is set in genesis.
+        let initial_height = BlockStore::new(&db)
+            .get_latest_height()?
+            .unwrap_or(0);
+        let chain_height = Arc::new(AtomicU64::new(initial_height));
+
+        // Build the InferenceAttestation admission context. Carries the
+        // narrowest set of handles needed for the three admission checks:
+        // the storage executor that owns the canonical CF, the chain's
+        // activation params, and a shared atomic for live chain-tip.
+        // Without this, `sum_sendRawTransaction` would let attestation
+        // txs bypass the activation gate and permanent CF dedup — Phase
+        // 3 ships the mechanism, but only this wiring makes it
+        // load-bearing for the production submit path.
+        let inference_admission = InferenceAttestationAdmission {
+            executor: Arc::new(InferenceAttestationExecutor::new(db.clone())),
+            params: Arc::new(genesis.params.clone()),
+            current_height: chain_height.clone(),
+        };
+
+        // Create mempool with admission wired in.
+        let mempool = Arc::new(
+            Mempool::new(MempoolConfig {
+                min_fee: genesis.params.min_fee,
+                ..Default::default()
+            })
+            .with_inference_admission(inference_admission),
+        );
 
         // Create consensus engine based on config
         use crate::config::ConsensusEngine as ConsensusEngineType;
@@ -177,6 +210,7 @@ impl Node {
             tx_sender,
             tx_receiver,
             shutdown: Arc::new(AtomicBool::new(false)),
+            chain_height,
         })
     }
 
@@ -203,6 +237,7 @@ impl Node {
         let mempool = self.mempool.clone();
         let network = self.network.clone();
         let metrics = self.metrics.clone();
+        let chain_height = self.chain_height.clone();
 
         // Spawn network task
         let network_clone = network.clone();
@@ -236,6 +271,10 @@ impl Node {
                             metrics.blocks.record_block_processed();
                             metrics.blocks.set_height(block.height());
                             metrics.blocks.set_last_block_time(block.header.timestamp);
+                            // Advance mempool admission gate's view of chain
+                            // height so InferenceAttestation activation
+                            // decisions track the live chain.
+                            chain_height.store(block.height(), Ordering::Relaxed);
                             // Broadcast to network
                             let _ = command_sender.send(NetworkCommand::BroadcastBlock(block)).await;
                         }
@@ -245,6 +284,10 @@ impl Node {
                             metrics.blocks.record_block_processed();
                             metrics.blocks.set_height(block.height());
                             metrics.blocks.set_last_block_time(block.header.timestamp);
+                            // Same as BlockProduced — admission must see
+                            // every height advance, whether the block came
+                            // from this node or a peer.
+                            chain_height.store(block.height(), Ordering::Relaxed);
                         }
                         ConsensusEvent::BlockFinalized(hash, height) => {
                             debug!("Block {} finalized at height {}", hash, height);
@@ -552,3 +595,15 @@ impl Node {
         Ok(handle)
     }
 }
+
+// Production-wiring contract is enforced by tests in
+// `crates/state/tests/inference_attestation_mempool.rs`:
+//   - `production_wiring_rejects_attestation_pre_activation`
+//   - `production_wiring_height_advance_opens_gate`
+// They mirror the exact admission recipe in `Node::new` above.
+// If you refactor the wiring (the `InferenceAttestationAdmission { ... }`
+// literal, the `chain_height.store(...)` calls in the event loop, or the
+// `Arc::new(BlockStore::new(&db).get_latest_height()…)` initialization),
+// update those tests too — they are intentionally a verbatim mirror so
+// that drift produces compile or assertion failures rather than silent
+// security regressions.

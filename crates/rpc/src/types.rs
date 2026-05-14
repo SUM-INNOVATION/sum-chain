@@ -67,6 +67,45 @@ pub struct ReceiptInfo {
     pub fee_paid: String,
 }
 
+/// OmniNode `InferenceAttestation` record as exposed over RPC.
+/// Wire-stable; all binary fields are hex-encoded with `0x` prefix
+/// except `session_id` (UTF-8 string, OmniNode-defined) and addresses
+/// (base58, chain default).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InferenceAttestationInfo {
+    /// OmniNode-supplied session identifier (UTF-8 string).
+    pub session_id: String,
+    /// Verifier's chain Address (base58 with checksum).
+    pub verifier_address: String,
+    /// `0x` + 64 hex chars of the model identity hash.
+    pub model_hash: String,
+    /// `0x` + 64 hex chars of the SNIP V2 Merkle root of the manifest blob.
+    pub manifest_root: String,
+    /// `0x` + 64 hex chars of the canonical response hash.
+    pub response_hash: String,
+    /// `0x` + 64 hex chars of the SNIP V2 Merkle root of the proof blob.
+    pub proof_root: String,
+    /// `0x` + 128 hex chars of the verifier's Ed25519 signature over
+    /// `STAGE4_DOMAIN || bincode(digest)`.
+    pub verifier_signature: String,
+    /// Block height at which the chain included this attestation.
+    pub included_at_height: u64,
+    /// `0x` + 64 hex chars of the tx hash that committed this attestation.
+    pub tx_hash: String,
+    /// True iff `current_height >= included_at_height + finality_depth`.
+    pub finalized: bool,
+}
+
+/// Status of a specific `InferenceAttestation` tx, queried by tx hash.
+///
+/// **Re-exported from `sumchain-primitives`** — the type and the pure
+/// classifier function ([`sumchain_primitives::inference_attestation::classify_inference_attestation_status`])
+/// live in primitives so the classifier can be unit-tested without
+/// pulling in the storage / rocksdb transitive dependency chain. The
+/// RPC layer just plumbs the chain's stored inputs into the classifier
+/// and returns the result.
+pub use sumchain_primitives::inference_attestation::InferenceAttestationStatusInfo;
+
 /// Validator info for RPC responses
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidatorInfo {

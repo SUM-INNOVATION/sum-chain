@@ -69,6 +69,9 @@ pub enum TxType {
     NodeRegistryV2 = 19,
     /// V2 Storage Metadata operation (Pending lifecycle, bundle storage, abandonment — SNIP V2 Phase 1)
     StorageMetadataV2 = 20,
+    /// OmniNode inference attestation (Stage 6 handoff) — variant index frozen at 21,
+    /// append-only; see crates/primitives/src/inference_attestation.rs for wire shape.
+    InferenceAttestation = 21,
 }
 
 impl TxType {
@@ -96,6 +99,7 @@ impl TxType {
             18 => Some(TxType::StorageMetadata),
             19 => Some(TxType::NodeRegistryV2),
             20 => Some(TxType::StorageMetadataV2),
+            21 => Some(TxType::InferenceAttestation),
             _ => None,
         }
     }
@@ -386,6 +390,13 @@ pub enum TxPayload {
     NodeRegistryV2(crate::node_registry::NodeRegistryV2TxData),
     /// V2 Storage Metadata operation (RegisterFilePendingV2, AbandonFileV2, etc. — SNIP V2 Phase 1)
     StorageMetadataV2(crate::storage_metadata::StorageMetadataV2TxData),
+    /// OmniNode inference attestation (Stage 6 handoff). Variant index 21 in
+    /// `TxType`; bincode-serialized as the 22nd enum variant in `TxPayload`.
+    /// **Append-only**: never reorder above this, or every existing
+    /// serialized tx re-decodes as a different operation. See
+    /// crates/primitives/src/inference_attestation.rs and the wire fixtures
+    /// in crates/primitives/tests/inference_attestation_fixtures.rs.
+    InferenceAttestation(crate::inference_attestation::InferenceAttestationTxData),
 }
 
 impl TransactionV2 {
@@ -533,6 +544,7 @@ impl TransactionV2 {
             TxPayload::StorageMetadata(_) => TxType::StorageMetadata,
             TxPayload::NodeRegistryV2(_) => TxType::NodeRegistryV2,
             TxPayload::StorageMetadataV2(_) => TxType::StorageMetadataV2,
+            TxPayload::InferenceAttestation(_) => TxType::InferenceAttestation,
         }
     }
 
@@ -576,6 +588,7 @@ impl TransactionV2 {
             TxPayload::StorageMetadata(_) => None,
             TxPayload::NodeRegistryV2(_) => None,
             TxPayload::StorageMetadataV2(_) => None,
+            TxPayload::InferenceAttestation(_) => None, // attestation, no value/recipient
         }
     }
 
@@ -603,6 +616,7 @@ impl TransactionV2 {
             TxPayload::StorageMetadata(_) => 0,  // Fee deposit handled in executor
             TxPayload::NodeRegistryV2(_) => 0,  // Fee-only (e.g. RegisterEncryptionKey)
             TxPayload::StorageMetadataV2(_) => 0, // fee_deposit handled in executor
+            TxPayload::InferenceAttestation(_) => 0, // attestation tx, no token value
         }
     }
 

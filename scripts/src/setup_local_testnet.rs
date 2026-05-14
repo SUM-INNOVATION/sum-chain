@@ -82,6 +82,7 @@ fn main() -> Result<()> {
             max_chunk_indices_per_tx: 65_536,      // SNIP V2 v3.2: AcceptAssignmentV2 tx cap
             assignment_replication_factor: 3,      // SNIP V2 v3.2: baseline R=3
             v2_enabled_from_height: Some(0),       // local testnet: V2 active from genesis
+            omninode_enabled_from_height: None,    // OmniNode subprotocol off by default; opt in per-genesis
         },
     );
 

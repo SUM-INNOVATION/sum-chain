@@ -16,6 +16,10 @@ blake3 = { workspace = true }
 thiserror = { workspace = true }
 derive_more = { workspace = true }
 serde-big-array = "0.5"
+# Used only by `inference_attestation::verify_attestation_signature` to verify
+# the inner OmniNode Stage 6 attestation signature without taking a circular
+# dependency on `sumchain-crypto` (which depends on primitives).
+ed25519-dalek = { workspace = true }
 
 [dev-dependencies]
 rand = { workspace = true }

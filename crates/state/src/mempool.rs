@@ -1,13 +1,42 @@
 //! Transaction mempool for SUM Chain.
 //!
 //! Stores pending transactions, sorted by fee for block inclusion.
+//!
+//! ## OmniNode `InferenceAttestation` admission
+//!
+//! When wired with [`InferenceAttestationAdmission`] (see
+//! [`Mempool::with_inference_admission`]), the mempool enforces three
+//! checks for any `TxPayload::InferenceAttestation` before insertion:
+//!
+//! 1. Activation gate: reject if the OmniNode subprotocol isn't enabled
+//!    at the current block height.
+//! 2. In-flight duplicate: reject if a tx with the same
+//!    `(session_id, verifier_address)` pair is already in this mempool.
+//! 3. Permanent duplicate: reject if the canonical
+//!    `INFERENCE_ATTESTATIONS` CF already contains a finalized
+//!    attestation for that pair.
+//!
+//! This is the load-bearing protection against zero-fee duplicate
+//! griefing — the executor returns `Failed(51), fee_paid: 0` on
+//! duplicate and does not advance nonce, so the only thing that
+//! prevents replay-spam is rejection at admission. The Mempool is
+//! intentionally subprotocol-agnostic by default
+//! (`InferenceAttestationAdmission` is `Option`-al); production
+//! deployments opt in via the builder.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::RwLock;
-use sumchain_primitives::{Address, Balance, Hash, Nonce, SignedTransaction};
+use sumchain_genesis::ChainParams;
+use sumchain_primitives::inference_attestation::inference_attestation_key;
+use sumchain_primitives::{
+    Address, Balance, Hash, Nonce, SignedTransaction, TxInner, TxPayload,
+};
 use tracing::{debug, info};
 
+use crate::inference_attestation_executor::InferenceAttestationExecutor;
 use crate::{Result, StateError, StateManager};
 
 /// Mempool configuration
@@ -43,6 +72,25 @@ struct TxEntry {
     received_at: u64, // Timestamp - reserved for future eviction policy
 }
 
+/// Narrow context required for OmniNode `InferenceAttestation` admission.
+///
+/// Carries only what the admission hook needs: the storage executor that
+/// owns the permanent CF, the chain params (for
+/// `omninode_enabled_from_height`), and a reference to the current block
+/// height. Production nodes construct this once at startup and pass it
+/// to [`Mempool::with_inference_admission`]. Tests can construct it
+/// directly with handle-grade dependencies (a `TempDir`-backed Database
+/// and an `AtomicU64` for height).
+///
+/// The mempool stores this `Option`-ally so other tx variants admit
+/// without any subprotocol coupling.
+#[derive(Clone)]
+pub struct InferenceAttestationAdmission {
+    pub executor: Arc<InferenceAttestationExecutor>,
+    pub params: Arc<ChainParams>,
+    pub current_height: Arc<AtomicU64>,
+}
+
 /// Transaction mempool
 pub struct Mempool {
     /// All transactions by hash
@@ -53,6 +101,16 @@ pub struct Mempool {
     by_fee: RwLock<BTreeMap<(Balance, Hash), Hash>>,
     /// Configuration
     config: MempoolConfig,
+    /// In-flight (session_id, verifier_address) keys mapped to tx hash.
+    /// Same 32-byte BLAKE3-domain-separated key shape used by the
+    /// `INFERENCE_ATTESTATIONS` CF; lets us point-lookup duplicates at
+    /// admission and unlink the entry when the tx is removed.
+    inference_in_flight: RwLock<HashMap<[u8; 32], Hash>>,
+    /// Optional admission context. `None` in tests and in any code path
+    /// that adds txs to the mempool without going through user submission
+    /// (e.g. consensus re-adding txs from rejected blocks). Production
+    /// node-startup wires this via [`Mempool::with_inference_admission`].
+    inference_admission: Option<InferenceAttestationAdmission>,
 }
 
 impl Mempool {
@@ -63,7 +121,23 @@ impl Mempool {
             by_sender: RwLock::new(HashMap::new()),
             by_fee: RwLock::new(BTreeMap::new()),
             config,
+            inference_in_flight: RwLock::new(HashMap::new()),
+            inference_admission: None,
         }
+    }
+
+    /// Builder: attach the OmniNode `InferenceAttestation` admission
+    /// context. Without it, `InferenceAttestation` txs are still
+    /// admitted by in-flight dedup but the activation gate and permanent
+    /// CF dedup are skipped (which is what you want for tests and for
+    /// consensus internal re-adds, but NEVER for production user
+    /// submission).
+    pub fn with_inference_admission(
+        mut self,
+        admission: InferenceAttestationAdmission,
+    ) -> Self {
+        self.inference_admission = Some(admission);
+        self
     }
 
     /// Add a transaction to the mempool
@@ -76,6 +150,12 @@ impl Mempool {
         if self.txs.read().contains_key(&hash) {
             return Err(StateError::TxAlreadyExists);
         }
+
+        // OmniNode `InferenceAttestation` subprotocol-specific admission.
+        // For any other payload variant this is a no-op. The returned
+        // key (if any) is stamped into `inference_in_flight` AFTER all
+        // other admission checks pass — see end of this method.
+        let inference_key = self.check_inference_admission(&tx)?;
 
         // Check mempool size
         if self.txs.read().len() >= self.config.max_size {
@@ -124,9 +204,63 @@ impl Mempool {
         let fee_key = (Balance::MAX - fee, hash);
         self.by_fee.write().insert(fee_key, hash);
 
+        // Stamp the in-flight key only after every other admission check
+        // and index insertion has succeeded, so a partial admission path
+        // can never leave a dangling in-flight entry behind.
+        if let Some(key) = inference_key {
+            self.inference_in_flight.write().insert(key, hash);
+        }
+
         debug!("Added tx {} to mempool (fee: {})", hash, fee);
 
         Ok(hash)
+    }
+
+    /// Run the three OmniNode `InferenceAttestation` admission checks.
+    /// Returns `Ok(None)` for any non-InferenceAttestation payload (skip).
+    /// Returns `Ok(Some(key))` if all checks pass and the caller should
+    /// register `key` in `inference_in_flight` after final insertion.
+    fn check_inference_admission(&self, tx: &SignedTransaction) -> Result<Option<[u8; 32]>> {
+        let TxInner::V2(v2_tx) = &tx.inner else {
+            return Ok(None);
+        };
+        let TxPayload::InferenceAttestation(att) = &v2_tx.payload else {
+            return Ok(None);
+        };
+
+        // (1) Activation gate. Only enforced when an admission context
+        // is wired; tests and consensus-internal re-adds construct the
+        // mempool without one and skip.
+        if let Some(ctx) = &self.inference_admission {
+            let height = ctx.current_height.load(Ordering::Relaxed);
+            let gate_open = matches!(
+                ctx.params.omninode_enabled_from_height,
+                Some(h) if height >= h
+            );
+            if !gate_open {
+                return Err(StateError::OmniNodeNotActivated);
+            }
+        }
+
+        // Same 32-byte BLAKE3-domain-separated key the CF uses, so the
+        // in-flight set and the permanent CF are queried under
+        // bit-identical keys — no encoding skew possible.
+        let key = inference_attestation_key(&att.digest.session_id, &v2_tx.from);
+
+        // (2) In-flight duplicate. Cheap point lookup in our own state.
+        if self.inference_in_flight.read().contains_key(&key) {
+            return Err(StateError::DuplicateInferenceAttestation);
+        }
+
+        // (3) Permanent CF dedup. Only enforced when an admission
+        // context is wired (the executor handle lives there).
+        if let Some(ctx) = &self.inference_admission {
+            if ctx.executor.exists(&key)? {
+                return Err(StateError::DuplicateInferenceAttestation);
+            }
+        }
+
+        Ok(Some(key))
     }
 
     /// Remove a transaction from the mempool
@@ -148,6 +282,20 @@ impl Mempool {
         // Remove from by_fee index
         let fee_key = (Balance::MAX - entry.fee, *hash);
         self.by_fee.write().remove(&fee_key);
+
+        // Clear in-flight key for InferenceAttestation txs. Re-derive
+        // the key from the stored tx rather than maintaining a reverse
+        // index, so the cleanup path can't desync from the admission
+        // path. No-op for non-InferenceAttestation variants.
+        if let TxInner::V2(v2_tx) = &entry.tx.inner {
+            if let TxPayload::InferenceAttestation(att) = &v2_tx.payload {
+                let key = inference_attestation_key(
+                    &att.digest.session_id,
+                    &v2_tx.from,
+                );
+                self.inference_in_flight.write().remove(&key);
+            }
+        }
 
         debug!("Removed tx {} from mempool", hash);
 
@@ -226,6 +374,7 @@ impl Mempool {
         self.txs.write().clear();
         self.by_sender.write().clear();
         self.by_fee.write().clear();
+        self.inference_in_flight.write().clear();
         info!("Mempool cleared");
     }
 
