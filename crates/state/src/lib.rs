@@ -90,6 +90,21 @@ pub enum StateError {
     #[error("Mempool full")]
     MempoolFull,
 
+    /// OmniNode `InferenceAttestation` subprotocol is not yet active at the
+    /// current block height — `omninode_enabled_from_height` is either
+    /// `None` or in the future. Mempool admission rejects with this so
+    /// pre-activation txs never enter the mempool.
+    #[error("OmniNode InferenceAttestation subprotocol not activated at this height")]
+    OmniNodeNotActivated,
+
+    /// Mempool already has an in-flight `InferenceAttestation` for the
+    /// same `(session_id, verifier_address)` pair, OR the canonical
+    /// `INFERENCE_ATTESTATIONS` column family already records a finalized
+    /// attestation for that pair. Either case = duplicate; the tx is
+    /// rejected at admission and never reaches the executor.
+    #[error("Duplicate InferenceAttestation for this (session_id, verifier) pair")]
+    DuplicateInferenceAttestation,
+
     #[error("Block validation failed: {0}")]
     BlockValidation(String),
 

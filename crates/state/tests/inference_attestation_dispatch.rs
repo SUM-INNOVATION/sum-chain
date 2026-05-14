@@ -26,100 +26,22 @@
 //! of the dispatch code. We do NOT spend test effort forcing an
 //! unreachable execution.
 
-use std::sync::Arc;
+mod common;
 
-use sumchain_crypto::{sign, KeyPair};
+use sumchain_crypto::KeyPair;
+use sumchain_genesis::ChainParams;
 use sumchain_primitives::{
     inference_attestation::{
-        canonical_digest_bytes, inference_attestation_key, signing_input_bytes,
-        InferenceAttestationDigest, InferenceAttestationTxData, DOMAIN_TAG,
+        canonical_digest_bytes, inference_attestation_key, signing_input_bytes, DOMAIN_TAG,
     },
-    SignedTransaction, TransactionV2, TxPayload, TxStatus,
+    TxStatus,
 };
-use sumchain_state::{state::StateManager, executor::BlockExecutor};
-use sumchain_storage::{cf, Database};
-use tempfile::TempDir;
-use sumchain_genesis::ChainParams;
+use sumchain_storage::cf;
 
-const CHAIN_ID: u64 = 1;
-
-/// Standard test setup: temp RocksDB, fresh StateManager, ChainParams.
-fn setup_with_params(params: ChainParams) -> (Arc<StateManager>, Arc<Database>, TempDir, BlockExecutor) {
-    let dir = TempDir::new().unwrap();
-    let db = Arc::new(Database::open_default(dir.path()).unwrap());
-    let state = Arc::new(StateManager::new(db.clone(), CHAIN_ID));
-    let executor = BlockExecutor::new(state.clone(), db.clone(), params);
-    (state, db, dir, executor)
-}
-
-/// ChainParams with OmniNode activated from genesis. Mirrors
-/// `ChainParams::with_v2_enabled()` but for our subprotocol gate.
-fn params_omninode_enabled() -> ChainParams {
-    let mut p = ChainParams::with_v2_enabled();
-    p.omninode_enabled_from_height = Some(0);
-    p
-}
-
-/// Fund a sender account so it has balance for fees.
-fn fund(state: &StateManager, kp: &KeyPair, balance: u128) {
-    state
-        .put_account(
-            &kp.address(),
-            &sumchain_storage::schema::AccountState { balance, nonce: 0 },
-        )
-        .unwrap();
-}
-
-/// Build a sample digest. Each test calls this with a unique session_id
-/// to avoid CF collisions across tests that share a setup.
-fn sample_digest(session_id: &str) -> InferenceAttestationDigest {
-    InferenceAttestationDigest {
-        session_id: session_id.to_string(),
-        model_hash: [1u8; 32],
-        manifest_root: [2u8; 32],
-        response_hash: [3u8; 32],
-        proof_root: [4u8; 32],
-    }
-}
-
-/// Sign the inner Stage 6 digest with the verifier's Ed25519 key.
-fn stage6_sign(kp: &KeyPair, digest: &InferenceAttestationDigest) -> [u8; 64] {
-    let input = signing_input_bytes(digest).expect("encode signing input");
-    let sig = sign(&input, kp.private_key());
-    *sig.as_bytes()
-}
-
-/// Construct a signed `TransactionV2` carrying an `InferenceAttestation`
-/// payload. The same Ed25519 key signs both the inner digest AND the
-/// outer tx (sender == verifier in v1).
-fn build_signed_attestation_tx(
-    sender: &KeyPair,
-    nonce: u64,
-    fee: u128,
-    digest: InferenceAttestationDigest,
-    corrupt_inner_sig: bool,
-) -> SignedTransaction {
-    let mut verifier_signature = stage6_sign(sender, &digest);
-    if corrupt_inner_sig {
-        // Flip one byte. Ed25519 verification is strict — any single-bit
-        // change rejects.
-        verifier_signature[0] ^= 0xff;
-    }
-    let payload = TxPayload::InferenceAttestation(InferenceAttestationTxData {
-        digest,
-        verifier_signature,
-    });
-    let tx = TransactionV2 {
-        chain_id: CHAIN_ID,
-        from: sender.address(),
-        fee,
-        nonce,
-        payload,
-    };
-    let outer_hash = tx.signing_hash();
-    let outer_sig = sign(outer_hash.as_bytes(), sender.private_key());
-    SignedTransaction::new_v2(tx, *outer_sig.as_bytes(), *sender.public_key().as_bytes())
-}
+use common::{
+    build_signed_attestation_tx, fund, params_omninode_enabled, sample_digest,
+    setup_with_params,
+};
 
 // ─────────────────────────────────────────────────────────────────────────
 // Tests
