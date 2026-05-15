@@ -16,7 +16,7 @@ For the frozen v1 protocol contract (wire format, dispatch behavior, RPC surface
 ## Explicit non-goals
 
 - No mainnet (or any other environment) activation height is proposed in this document.
-- No new tx status; the 4-state status model (`submitted` / `included` / `finalized` / `unknown`) is not expanded. In particular, no `Dropped` state.
+- No new tx status; the chain-facing status model (`submitted` | `included` | `finalized` | `failed` | `unknown`) is not expanded. In particular, no `Dropped` state.
 - No tx wire format change, no executor behavior change, no mempool behavior change, no RPC method addition or signature change.
 
 ## Pre-activation gates
@@ -65,9 +65,11 @@ This procedure assumes the environment's params-update mechanism already exists.
 
 Two distinct cases, and they behave very differently.
 
-**Case A — before height `H` is finalized.** Remove `omninode_enabled_from_height` from the params overlay (or set it to a later height) and propagate the change as in step 4 above. No state has been written to `INFERENCE_ATTESTATIONS`, no fees collected, no nonces advanced. The abort is effectively free.
+**Case A — before height `H` is reached, or before any activation-height block containing an attestation is produced.** Remove `omninode_enabled_from_height` from the params overlay (or set it to a later height) and propagate the change as in step 4 above. In this narrower case no attestation has been admitted or executed yet, so no `INFERENCE_ATTESTATIONS` rows exist, no attestation fees have been collected, and no attestation-tx nonce increments have been applied. The abort is effectively free.
 
-**Case B — after height `H` is finalized and at least one attestation has been accepted.** Accepted attestations cannot be retroactively erased: `INFERENCE_ATTESTATIONS` rows are part of chain state, and the associated fee deductions / nonce increments are part of the finalized history. Disabling **future** admission would require an operational decision:
+Note: once a block at height `≥ H` is produced and contains an attestation, `INFERENCE_ATTESTATIONS` writes and the associated fee/nonce mutations exist in local chain state immediately — even before that block is finalized. Use Case B from that point on.
+
+**Case B — after the first activation-height block containing an attestation has been produced (whether or not it is yet finalized).** Accepted attestations cannot be retroactively erased: `INFERENCE_ATTESTATIONS` rows are part of chain state, and the associated fee deductions / nonce increments are part of the chain's local execution history. Disabling **future** admission would require an operational decision:
 
 - The current chain has no built-in "deactivate" gate — `omninode_enabled_from_height` enables activation but is not consulted after the point of activation by every code path. Verify the runtime behavior in the target binary before relying on a "set to far-future height" rollback.
 - Adding a clean deactivation gate (or a per-height "deny new submissions" semantic) would be a new protocol change, not covered by this readiness package.
@@ -82,6 +84,7 @@ Recommended metrics. Reasonable starting points; tune thresholds against observe
   - `submitted`: in flight in mempool
   - `included`: in a block but not yet finalized
   - `finalized`: at or past `chain_getChainParams.finality_depth`
+  - `failed`: in a block but executor rejected; `fee_paid: 0`, `reason` set to the executor's status description
   - `unknown`: no receipt and not in mempool (evicted, never seen, or non-OmniNode tx hash submitted by mistake)
 - **Executor failure-code counters** (per the protocol doc's §"Failure codes"):
   - `Failed(50)` (pre-activation) — should be `0` after activation. Non-zero means a tx slipped past admission, which would be a bug.
