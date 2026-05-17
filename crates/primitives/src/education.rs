@@ -241,12 +241,101 @@ pub enum SuspendCancelAction {
     Cancel = 2,
 }
 
-// ───────────────────────── Representative op payloads ───────────────────────
+// ───────────── Wire code <-> helper-enum conversions ───────────────────────
 //
-// Phase 1 ships the three payloads exercised by the locked fixtures
-// (CreateCatalogEntry, CreateOffering, SubmitAssignmentReceipt). The
-// remaining operation payloads follow the same shape and are added as
-// Phase 1 increments without wire-breaking the envelope.
+// Payload structs carry stable `u8` *code* fields on the wire (NOT
+// these Rust enums — `#[repr(u8)]` does not make serde/bincode encode
+// an enum as one byte; bincode tags enums as a u32 ordinal). These
+// enums are ergonomic helpers only. `EnumVariant as u8` yields the
+// code; `TryFrom<u8>` validates an inbound code. The one-byte wire
+// encoding is locked by the fixtures.
+
+/// Returned by `TryFrom<u8>` when a wire code has no enum variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidEducationCode(pub u8);
+
+impl core::fmt::Display for InvalidEducationCode {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "invalid education wire code: {}", self.0)
+    }
+}
+
+impl TryFrom<u8> for CourseLevel {
+    type Error = InvalidEducationCode;
+    fn try_from(v: u8) -> Result<Self, Self::Error> {
+        Ok(match v {
+            0 => CourseLevel::Undergraduate,
+            1 => CourseLevel::Graduate,
+            2 => CourseLevel::Doctoral,
+            3 => CourseLevel::Professional,
+            4 => CourseLevel::Continuing,
+            5 => CourseLevel::Other,
+            other => return Err(InvalidEducationCode(other)),
+        })
+    }
+}
+
+impl TryFrom<u8> for ContentKind {
+    type Error = InvalidEducationCode;
+    fn try_from(v: u8) -> Result<Self, Self::Error> {
+        Ok(match v {
+            0 => ContentKind::Syllabus,
+            1 => ContentKind::LectureMaterial,
+            2 => ContentKind::Reading,
+            3 => ContentKind::Resource,
+            4 => ContentKind::Other,
+            other => return Err(InvalidEducationCode(other)),
+        })
+    }
+}
+
+impl TryFrom<u8> for AssessmentKind {
+    type Error = InvalidEducationCode;
+    fn try_from(v: u8) -> Result<Self, Self::Error> {
+        Ok(match v {
+            0 => AssessmentKind::Assignment,
+            1 => AssessmentKind::Exam,
+            2 => AssessmentKind::Quiz,
+            3 => AssessmentKind::Project,
+            other => return Err(InvalidEducationCode(other)),
+        })
+    }
+}
+
+impl TryFrom<u8> for CourseRole {
+    type Error = InvalidEducationCode;
+    fn try_from(v: u8) -> Result<Self, Self::Error> {
+        Ok(match v {
+            0 => CourseRole::InstitutionAdmin,
+            1 => CourseRole::Instructor,
+            2 => CourseRole::TeachingAssistant,
+            3 => CourseRole::Grader,
+            4 => CourseRole::Student,
+            5 => CourseRole::Auditor,
+            other => return Err(InvalidEducationCode(other)),
+        })
+    }
+}
+
+impl TryFrom<u8> for SuspendCancelAction {
+    type Error = InvalidEducationCode;
+    fn try_from(v: u8) -> Result<Self, Self::Error> {
+        Ok(match v {
+            0 => SuspendCancelAction::Suspend,
+            1 => SuspendCancelAction::Resume,
+            2 => SuspendCancelAction::Cancel,
+            other => return Err(InvalidEducationCode(other)),
+        })
+    }
+}
+
+// ───────────────────────── Operation payloads ──────────────────────────────
+//
+// Phase 1 defines the COMPLETE SRC-817/818 operation payload wire
+// surface (this section + the next). Three payloads
+// (CreateCatalogEntry, CreateOffering, SubmitAssignmentReceipt) also
+// carry canonical-byte fixtures as representative wire locks; the rest
+// are fully defined here so Phase 2 cannot wire-break the envelope.
 
 /// SRC-817 `CreateCatalogEntry` (operation = `catalog_op::CREATE_CATALOG_ENTRY`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -258,7 +347,8 @@ pub struct CreateCatalogEntryData {
     /// Plaintext title (default) — set exactly one of title/commitment.
     pub course_title: Option<String>,
     pub title_commitment: Option<[u8; 32]>,
-    pub course_level: CourseLevel,
+    /// `CourseLevel` code (see `CourseLevel as u8` / `TryFrom<u8>`).
+    pub course_level: u8,
     /// Plaintext credit hours (default) — or commitment for
     /// confidential programs. Set exactly one.
     pub credit_hours: Option<u16>,
@@ -329,7 +419,8 @@ pub struct UpdateCatalogEntryData {
     pub catalog_id: [u8; 32],
     pub course_title: Option<String>,
     pub title_commitment: Option<[u8; 32]>,
-    pub course_level: Option<CourseLevel>,
+    /// `CourseLevel` code, if changing it.
+    pub course_level: Option<u8>,
     pub credit_hours: Option<u16>,
     pub credit_commitment: Option<[u8; 32]>,
     pub nonce: u64,
@@ -388,7 +479,8 @@ pub struct UpdateOfferingData {
 pub struct PublishContentData {
     pub offering_id: [u8; 32],
     pub content_id: [u8; 32],
-    pub kind: ContentKind,
+    /// `ContentKind` code (see `ContentKind as u8` / `TryFrom<u8>`).
+    pub kind: u8,
     pub item: ManagedSnipRef,
     pub content_commitment: [u8; 32],
     pub nonce: u64,
@@ -399,7 +491,8 @@ pub struct PublishContentData {
 pub struct AddAssessmentData {
     pub offering_id: [u8; 32],
     pub assessment_id: [u8; 32],
-    pub kind: AssessmentKind,
+    /// `AssessmentKind` code (see `AssessmentKind as u8` / `TryFrom<u8>`).
+    pub kind: u8,
     pub instructions: ManagedSnipRef,
     pub spec_commitment: [u8; 32],
     pub opens_at: u64,
@@ -465,7 +558,8 @@ pub struct GradeSubmissionData {
     pub student_commitment: [u8; 32],
     pub grade_commitment: [u8; 32],
     pub feedback: Option<ManagedSnipRef>,
-    pub grader_role: CourseRole,
+    /// `CourseRole` code (see `CourseRole as u8` / `TryFrom<u8>`).
+    pub grader_role: u8,
     pub nonce: u64,
 }
 
@@ -498,30 +592,36 @@ pub struct ArchiveOfferingData {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SuspendOrCancelOfferingData {
     pub offering_id: [u8; 32],
-    pub action: SuspendCancelAction,
+    /// `SuspendCancelAction` code (see `… as u8` / `TryFrom<u8>`).
+    pub action: u8,
     pub nonce: u64,
 }
 
 // ───────────────────────── Commitment helpers ───────────────────────────────
 //
-// Pure, domain-separated BLAKE3. Same discipline as
-// `inference_attestation.rs`: a stable on-chain identifier scheme that
-// the Phase 1 fixtures pin byte-for-byte.
+// Pure, domain-separated BLAKE3. **Length-safe**: the input tuple is
+// serialized with bincode (which length-prefixes every String / byte
+// slice) BEFORE hashing, so variable-length fields cannot be
+// re-segmented into a colliding byte stream
+// (`("CS","101")` ≠ `("C","S101")`). Same discipline as the
+// InferenceAttestation CF-key scheme. Fixed-size `[u8; N]` arrays are
+// unambiguous by construction; `String`/`&[u8]` get a u64 length
+// prefix from bincode.
 
-fn blake3_concat(domain: &[u8], parts: &[&[u8]]) -> [u8; 32] {
-    let mut buf: Vec<u8> = Vec::with_capacity(domain.len());
+fn blake3_domain_bincode<T: Serialize>(domain: &[u8], value: &T) -> [u8; 32] {
+    // bincode serialization of these plain tuples cannot fail.
+    let inner = bincode::serialize(value)
+        .expect("commitment input is infallibly bincode-serializable");
+    let mut buf: Vec<u8> = Vec::with_capacity(domain.len() + inner.len());
     buf.extend_from_slice(domain);
-    for p in parts {
-        buf.extend_from_slice(p);
-    }
+    buf.extend_from_slice(&inner);
     *blake3::hash(&buf).as_bytes()
 }
 
-// Call sites slice every fixed-size array (`&arr[..]`) so all parts
-// unify to `&[u8]`.
-
-/// `catalog_id = BLAKE3("SRC817-CATALOG:v1:" ‖ institution_id ‖
-/// department ‖ course_code ‖ version_le ‖ nonce_le)`.
+/// `catalog_id = BLAKE3("SRC817-CATALOG:v1:" ‖ bincode(
+/// (institution_id, department, course_code, version, nonce)))`.
+/// Length-safe: `department`/`course_code` are bincode
+/// length-prefixed, so no string-boundary collision.
 pub fn catalog_id(
     institution_id: &[u8; 32],
     department: &str,
@@ -529,20 +629,15 @@ pub fn catalog_id(
     version: u32,
     nonce: u64,
 ) -> [u8; 32] {
-    blake3_concat(
+    blake3_domain_bincode(
         DOMAIN_CATALOG_ID,
-        &[
-            &institution_id[..],
-            department.as_bytes(),
-            course_code.as_bytes(),
-            &version.to_le_bytes()[..],
-            &nonce.to_le_bytes()[..],
-        ],
+        &(*institution_id, department, course_code, version, nonce),
     )
 }
 
-/// `offering_id = BLAKE3("SRC818-OFFERING:v1:" ‖ catalog_id ‖ term ‖
-/// section ‖ creator ‖ nonce_le)`.
+/// `offering_id = BLAKE3("SRC818-OFFERING:v1:" ‖ bincode(
+/// (catalog_id, term, section, creator, nonce)))`. Length-safe:
+/// `term`/`section` are bincode length-prefixed.
 pub fn offering_id(
     catalog_id: &[u8; 32],
     term: &str,
@@ -550,36 +645,30 @@ pub fn offering_id(
     creator: &Address,
     nonce: u64,
 ) -> [u8; 32] {
-    blake3_concat(
+    blake3_domain_bincode(
         DOMAIN_OFFERING_ID,
-        &[
-            &catalog_id[..],
-            term.as_bytes(),
-            section.as_bytes(),
-            &creator.as_bytes()[..],
-            &nonce.to_le_bytes()[..],
-        ],
+        &(*catalog_id, term, section, *creator.as_bytes(), nonce),
     )
 }
 
-/// `student_commitment = BLAKE3("SRC818-STUDENT:v1:" ‖ subject ‖
-/// offering_id ‖ salt)` — per-offering/per-context scoped, salted,
-/// non-reversible. A global/cross-offering student identifier is
-/// prohibited (Phase 0 FERPA rule).
+/// `student_commitment = BLAKE3("SRC818-STUDENT:v1:" ‖ bincode(
+/// (subject, offering_id, salt)))` — per-offering/per-context scoped,
+/// salted, non-reversible. A global/cross-offering student identifier
+/// is prohibited (Phase 0 FERPA rule). All inputs fixed-length.
 pub fn student_commitment(
     subject: &[u8; 32],
     offering_id: &[u8; 32],
     salt: &[u8; 32],
 ) -> [u8; 32] {
-    blake3_concat(
+    blake3_domain_bincode(
         DOMAIN_STUDENT_COMMITMENT,
-        &[&subject[..], &offering_id[..], &salt[..]],
+        &(*subject, *offering_id, *salt),
     )
 }
 
-/// `submission_commitment = BLAKE3("SRC818-SUBMISSION:v1:" ‖
-/// offering_id ‖ assessment_id ‖ student_commitment ‖ attempt_le ‖
-/// work_hash ‖ salt)`.
+/// `submission_commitment = BLAKE3("SRC818-SUBMISSION:v1:" ‖ bincode(
+/// (offering_id, assessment_id, student_commitment, attempt,
+/// work_hash, salt)))`.
 pub fn submission_commitment(
     offering_id: &[u8; 32],
     assessment_id: &[u8; 32],
@@ -588,22 +677,23 @@ pub fn submission_commitment(
     work_hash: &[u8; 32],
     salt: &[u8; 32],
 ) -> [u8; 32] {
-    blake3_concat(
+    blake3_domain_bincode(
         DOMAIN_SUBMISSION_COMMITMENT,
-        &[
-            &offering_id[..],
-            &assessment_id[..],
-            &student_commitment[..],
-            &attempt.to_le_bytes()[..],
-            &work_hash[..],
-            &salt[..],
-        ],
+        &(
+            *offering_id,
+            *assessment_id,
+            *student_commitment,
+            attempt,
+            *work_hash,
+            *salt,
+        ),
     )
 }
 
-/// `grade_commitment = BLAKE3("SRC818-GRADE:v1:" ‖ offering_id ‖
-/// assessment_id ‖ student_commitment ‖ grade_value ‖ salt)`. The raw
-/// grade is never on chain — only this commitment.
+/// `grade_commitment = BLAKE3("SRC818-GRADE:v1:" ‖ bincode(
+/// (offering_id, assessment_id, student_commitment, grade_value,
+/// salt)))`. Length-safe: `grade_value` is bincode length-prefixed.
+/// The raw grade is never on chain — only this commitment.
 pub fn grade_commitment(
     offering_id: &[u8; 32],
     assessment_id: &[u8; 32],
@@ -611,14 +701,14 @@ pub fn grade_commitment(
     grade_value: &[u8],
     salt: &[u8; 32],
 ) -> [u8; 32] {
-    blake3_concat(
+    blake3_domain_bincode(
         DOMAIN_GRADE_COMMITMENT,
-        &[
-            &offering_id[..],
-            &assessment_id[..],
-            &student_commitment[..],
+        &(
+            *offering_id,
+            *assessment_id,
+            *student_commitment,
             grade_value,
-            &salt[..],
-        ],
+            *salt,
+        ),
     )
 }

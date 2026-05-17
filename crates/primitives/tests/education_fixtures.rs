@@ -32,7 +32,7 @@ fn sample_create_catalog_entry() -> CreateCatalogEntryData {
         course_code: "CS101".to_string(),
         course_title: Some("Intro to CS".to_string()),
         title_commitment: None,
-        course_level: CourseLevel::Undergraduate,
+        course_level: CourseLevel::Undergraduate as u8,
         credit_hours: Some(3),
         credit_commitment: None,
         prerequisites_count: 0,
@@ -177,9 +177,9 @@ fn max_constants_locked() {
 
 // ───────────────────────── Canonical byte locks ─────────────────────────────
 
-const EXPECTED_CREATE_CATALOG_HEX: &str = "1600000000000000000086000000000000005fec2416c01fe2406a5acae41cd891de1b9b917312e4f832f3a51b8665d1e8c311111111111111111111111111111111111111111111111111111111111111110200000000000000435305000000000000004353313031010b00000000000000496e74726f20746f2043530000000000010300000000000000010000000007000000000000000000000000000000000000000000000000000000";
-const EXPECTED_CREATE_OFFERING_HEX: &str = "1600000001000000000077000000000000001a5022dadb5075c5123087ee43ed01821cddc75900988ea9e57e6fa46dbea7a45fec2416c01fe2406a5acae41cd891de1b9b917312e4f832f3a51b8665d1e8c30600000000000000323032364641010000000000000041e803000000000000d007000000000000c40900000000000009000000000000000000000000000000000000000000000000000000";
-const EXPECTED_SUBMIT_RECEIPT_HEX: &str = "16000000010000000800e0000000000000001a5022dadb5075c5123087ee43ed01821cddc75900988ea9e57e6fa46dbea7a455555555555555555555555555555555555555555555555555555555555555554eaee80fb2ea581de696155d755efccdefb8cccab16aea4c6f1cd0aee6de648a9eee6b9bae5ef0fab3126c4e2ebe4d5657da272b0bce89ddd554250e5650c63d44444444444444444444444444444444444444444444444444444444444444440000100000000000000100000001e8030000000000000000030000000101006666666666666666666666666666666666666666666666666666666666666666000000000000000000000000000000000000000000";
+const EXPECTED_CREATE_CATALOG_HEX: &str = "1600000000000000000083000000000000003f77062524d1010acc6b3c131c21713c57331ac7edabad06a7f87802e035d7e911111111111111111111111111111111111111111111111111111111111111110200000000000000435305000000000000004353313031010b00000000000000496e74726f20746f2043530000010300000000000000010000000007000000000000000000000000000000000000000000000000000000";
+const EXPECTED_CREATE_OFFERING_HEX: &str = "16000000010000000000770000000000000038fcf909fab2f8e0e226153ea5fd45020717ac2c3fa1175569ab2f300d1320273f77062524d1010acc6b3c131c21713c57331ac7edabad06a7f87802e035d7e90600000000000000323032364641010000000000000041e803000000000000d007000000000000c40900000000000009000000000000000000000000000000000000000000000000000000";
+const EXPECTED_SUBMIT_RECEIPT_HEX: &str = "16000000010000000800e00000000000000038fcf909fab2f8e0e226153ea5fd45020717ac2c3fa1175569ab2f300d13202755555555555555555555555555555555555555555555555555555555555555558069c08d1d63e419cb8e8166189c95deff7453f005ec739a3388ccfd8617f9ec3bcd27bb49f37697bc535a7158bc7e23e3bd4ebb4e017fd694cfe02841b1f5dd44444444444444444444444444444444444444444444444444444444444444440000100000000000000100000001e8030000000000000000030000000101006666666666666666666666666666666666666666666666666666666666666666000000000000000000000000000000000000000000";
 
 #[test]
 fn canonical_create_catalog_entry_bytes() {
@@ -264,11 +264,11 @@ fn submission_receipt_contains_no_raw_student_address() {
 // records would become unreachable: treat as a red flag, not a
 // re-pin.
 
-const EXPECTED_CATALOG_ID_HEX: &str = "5fec2416c01fe2406a5acae41cd891de1b9b917312e4f832f3a51b8665d1e8c3";
-const EXPECTED_OFFERING_ID_HEX: &str = "1a5022dadb5075c5123087ee43ed01821cddc75900988ea9e57e6fa46dbea7a4";
-const EXPECTED_STUDENT_COMMITMENT_HEX: &str = "4eaee80fb2ea581de696155d755efccdefb8cccab16aea4c6f1cd0aee6de648a";
-const EXPECTED_SUBMISSION_COMMITMENT_HEX: &str = "9eee6b9bae5ef0fab3126c4e2ebe4d5657da272b0bce89ddd554250e5650c63d";
-const EXPECTED_GRADE_COMMITMENT_HEX: &str = "0296e3a9c197d9594d4255b75bef84a81373011b3590ec20c681fce357f94d0d";
+const EXPECTED_CATALOG_ID_HEX: &str = "3f77062524d1010acc6b3c131c21713c57331ac7edabad06a7f87802e035d7e9";
+const EXPECTED_OFFERING_ID_HEX: &str = "38fcf909fab2f8e0e226153ea5fd45020717ac2c3fa1175569ab2f300d132027";
+const EXPECTED_STUDENT_COMMITMENT_HEX: &str = "8069c08d1d63e419cb8e8166189c95deff7453f005ec739a3388ccfd8617f9ec";
+const EXPECTED_SUBMISSION_COMMITMENT_HEX: &str = "3bcd27bb49f37697bc535a7158bc7e23e3bd4ebb4e017fd694cfe02841b1f5dd";
+const EXPECTED_GRADE_COMMITMENT_HEX: &str = "3bdb0b3c6e6196f1caddb7dd97dfbd953c6cbb92f41479378acbebcea0cee763";
 
 #[test]
 fn commitment_helpers_locked() {
@@ -308,4 +308,75 @@ fn commitment_helpers_locked() {
         "grade_commitment drift. actual={}",
         hex::encode(gr)
     );
+}
+
+// ───────────────────────── Wire enum-as-u8 locks ────────────────────────────
+
+#[test]
+fn payload_enum_fields_encode_as_single_byte() {
+    // `SuspendOrCancelOfferingData` = offering_id[32] + action(u8) +
+    // nonce(u64) = 41 bytes IFF `action` is one byte. A bincode Rust
+    // enum tag would be 4 bytes (u32) → 44 bytes. Length + the exact
+    // code byte lock the one-byte encoding.
+    let s = SuspendOrCancelOfferingData {
+        offering_id: [0x55; 32],
+        action: SuspendCancelAction::Cancel as u8,
+        nonce: 7,
+    };
+    let b = bincode::serialize(&s).unwrap();
+    assert_eq!(b.len(), 32 + 1 + 8, "action must be a single u8 code");
+    assert_eq!(b[32], 2, "SuspendCancelAction::Cancel code must be 2");
+
+    // GradeSubmission grader_role likewise one byte.
+    let g = GradeSubmissionData {
+        offering_id: [0; 32],
+        assessment_id: [0; 32],
+        student_commitment: [0; 32],
+        grade_commitment: [0; 32],
+        feedback: None,
+        grader_role: CourseRole::Instructor as u8,
+        nonce: 0,
+    };
+    let gb = bincode::serialize(&g).unwrap();
+    // 4×[32] + Option::None(1) + grader_role(1) + nonce(8) = 138.
+    assert_eq!(gb.len(), 128 + 1 + 1 + 8);
+    assert_eq!(gb[129], 1, "CourseRole::Instructor code must be 1");
+
+    // CreateCatalogEntry course_level is a u8 code, not a 4-byte tag.
+    let c = sample_create_catalog_entry();
+    assert_eq!(c.course_level, 0, "Undergraduate code must be 0");
+    let cb = bincode::serialize(&c).unwrap();
+    let cb2 = bincode::serialize(&{
+        let mut x = sample_create_catalog_entry();
+        x.course_level = CourseLevel::Graduate as u8;
+        x
+    })
+    .unwrap();
+    assert_eq!(
+        cb.len(),
+        cb2.len(),
+        "changing the course_level code must not change encoded length \
+         (proves it is a fixed u8, not a variable enum tag)"
+    );
+}
+
+#[test]
+fn wire_code_enums_round_trip() {
+    for v in 0u8..=5 {
+        if let Ok(e) = CourseLevel::try_from(v) {
+            assert_eq!(e as u8, v);
+        }
+    }
+    assert!(CourseLevel::try_from(6).is_err());
+    assert_eq!(ContentKind::try_from(4).unwrap() as u8, 4);
+    assert!(ContentKind::try_from(5).is_err());
+    assert_eq!(AssessmentKind::try_from(1).unwrap(), AssessmentKind::Exam);
+    assert!(AssessmentKind::try_from(4).is_err());
+    assert_eq!(CourseRole::try_from(5).unwrap(), CourseRole::Auditor);
+    assert!(CourseRole::try_from(6).is_err());
+    assert_eq!(
+        SuspendCancelAction::try_from(2).unwrap(),
+        SuspendCancelAction::Cancel
+    );
+    assert!(SuspendCancelAction::try_from(3).is_err());
 }
