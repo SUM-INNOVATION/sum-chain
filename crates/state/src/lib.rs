@@ -7,6 +7,7 @@ pub mod agreement_executor;
 pub mod cache;
 pub mod contract_executor;
 pub mod docclass_executor;
+pub mod education_executor;
 pub mod employment_executor;
 pub mod equity_executor;
 pub mod executor;

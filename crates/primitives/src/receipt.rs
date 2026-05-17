@@ -85,6 +85,22 @@ impl TxStatus {
             TxStatus::Failed(51) => "duplicate InferenceAttestation for (session_id, verifier)",
             TxStatus::Failed(52) => "invalid OmniNode Stage 6 verifier signature",
             TxStatus::Failed(53) => "tx sender does not match verifier address (Ed25519 pubkey hash)",
+            // SRC-817/818 Education-LMS suite failures (Phase 2).
+            TxStatus::Failed(70) => "education subprotocol not enabled at this block height",
+            TxStatus::Failed(71) => "malformed education payload",
+            TxStatus::Failed(72) => "unsupported education operation",
+            TxStatus::Failed(73) => "catalog entry not found",
+            TxStatus::Failed(74) => "catalog entry in wrong state for operation",
+            TxStatus::Failed(75) => "offering not found",
+            TxStatus::Failed(76) => "offering in wrong state for operation",
+            TxStatus::Failed(77) => "assessment not found or wrong kind",
+            TxStatus::Failed(78) => "assessment submission window closed",
+            TxStatus::Failed(79) => "student commitment not enrolled in offering",
+            TxStatus::Failed(80) => "submission attempts exhausted",
+            TxStatus::Failed(81) => "duplicate education record",
+            TxStatus::Failed(82) => "invalid reference (enrollment/employment/catalog)",
+            TxStatus::Failed(83) => "not authorized for education operation",
+            TxStatus::Failed(84) => "insufficient balance for education fee",
             TxStatus::Failed(_) => "failed",
         }
     }

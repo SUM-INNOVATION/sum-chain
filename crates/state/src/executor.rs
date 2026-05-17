@@ -68,6 +68,15 @@ fn omninode_gate_open(params: &ChainParams, block_height: u64) -> bool {
     matches!(params.omninode_enabled_from_height, Some(h) if block_height >= h)
 }
 
+/// SRC-817/818 Education-LMS suite activation gate. Same dormant-deploy
+/// semantics: production default `None` → never open; activation
+/// requires explicit `education_enabled_from_height` in `genesis.json`
+/// plus a coordinated validator upgrade.
+#[inline]
+fn education_gate_open(params: &ChainParams, block_height: u64) -> bool {
+    matches!(params.education_enabled_from_height, Some(h) if block_height >= h)
+}
+
 pub struct BlockExecutor {
     state: Arc<StateManager>,
     db: Arc<Database>,
@@ -90,6 +99,7 @@ pub struct BlockExecutor {
     node_registry_executor: NodeRegistryExecutor,
     storage_metadata_executor: StorageMetadataExecutor,
     inference_attestation_executor: InferenceAttestationExecutor,
+    education_executor: crate::education_executor::EducationExecutor,
 }
 
 impl BlockExecutor {
@@ -113,6 +123,8 @@ impl BlockExecutor {
         let node_registry_executor = NodeRegistryExecutor::new(db.clone());
         let storage_metadata_executor = StorageMetadataExecutor::new(db.clone());
         let inference_attestation_executor = InferenceAttestationExecutor::new(db.clone());
+        let education_executor =
+            crate::education_executor::EducationExecutor::new(db.clone());
         Self {
             state,
             db,
@@ -135,6 +147,7 @@ impl BlockExecutor {
             node_registry_executor,
             storage_metadata_executor,
             inference_attestation_executor,
+            education_executor,
         }
     }
 
@@ -1160,18 +1173,86 @@ impl BlockExecutor {
                             fee_paid: v2_tx.fee,
                         })
                     }
-                    TxPayload::Education(_) => {
-                        // Phase 1: SRC-817/818 wire types only. No
-                        // executor dispatch, CF, gate, mempool, RPC, or
-                        // fee/nonce semantics until Phase 2. Fail-closed:
-                        // reject with no state mutation and no fee, the
-                        // same shape every other pre-success rejection in
-                        // this match uses. Introduces no new semantics.
-                        Ok(TxExecutionResult {
-                            tx_hash,
-                            status: TxStatus::Failed(60), // Education unsupported (Phase 1)
-                            fee_paid: 0,
-                        })
+                    TxPayload::Education(edu) => {
+                        // Phase 2 dispatch. Policy B fee/nonce:
+                        //  - gate closed: Failed(70), no fee, no nonce
+                        //  - malformed/unsupported (pre-semantic): no fee, no nonce
+                        //  - insufficient balance: no fee, no nonce (can't charge)
+                        //  - semantic failure (active): charge fee + credit
+                        //    proposer + advance nonce, return Failed(code)
+                        //  - success: charge fee + credit + nonce, THEN
+                        //    atomic CF write
+                        // Fee payer is always v2_tx.from (sponsor/submitter),
+                        // never the student. Student identity never appears
+                        // on the public path — only as student_commitment.
+
+                        // 1. Activation gate (pre-semantic, free).
+                        if !education_gate_open(&self.params, block_height) {
+                            return Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Failed(70),
+                                fee_paid: 0,
+                            });
+                        }
+
+                        // 2. Decode/route (pre-semantic, free).
+                        let parsed = match crate::education_executor::parse_education(edu) {
+                            Ok(p) => p,
+                            Err(code) => {
+                                return Ok(TxExecutionResult {
+                                    tx_hash,
+                                    status: TxStatus::Failed(code as u32),
+                                    fee_paid: 0,
+                                });
+                            }
+                        };
+
+                        // 3. Pre-charge balance check (free; cannot charge
+                        //    what isn't there).
+                        let fee = v2_tx.fee;
+                        if self.state.get_balance(&v2_tx.from)? < fee {
+                            return Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::InsufficientBalance,
+                                fee_paid: 0,
+                            });
+                        }
+
+                        // 4. Semantic validation (pure DB reads).
+                        let outcome = self.education_executor.validate(
+                            &parsed,
+                            &v2_tx.from,
+                            block_height,
+                            block_timestamp,
+                        )?;
+
+                        match outcome {
+                            Err(code) => {
+                                // Policy B: semantic failure after
+                                // activation charges fee + advances nonce.
+                                self.state.deduct(&v2_tx.from, fee)?;
+                                self.state.credit(proposer, fee)?;
+                                self.state.increment_nonce(&v2_tx.from)?;
+                                Ok(TxExecutionResult {
+                                    tx_hash,
+                                    status: TxStatus::Failed(code as u32),
+                                    fee_paid: fee,
+                                })
+                            }
+                            Ok(prepared) => {
+                                // Success: charge fee + nonce, THEN atomic
+                                // CF write (cannot partially apply).
+                                self.state.deduct(&v2_tx.from, fee)?;
+                                self.state.credit(proposer, fee)?;
+                                self.state.increment_nonce(&v2_tx.from)?;
+                                self.education_executor.commit(prepared)?;
+                                Ok(TxExecutionResult {
+                                    tx_hash,
+                                    status: TxStatus::Success,
+                                    fee_paid: fee,
+                                })
+                            }
+                        }
                     }
                 }
             }

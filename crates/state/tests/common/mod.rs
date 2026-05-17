@@ -45,6 +45,21 @@ pub fn params_omninode_enabled() -> ChainParams {
     p
 }
 
+/// ChainParams with the SRC-817/818 Education suite activated from
+/// genesis (height 0).
+#[allow(dead_code)]
+pub fn params_education_enabled() -> ChainParams {
+    let mut p = ChainParams::with_v2_enabled();
+    p.education_enabled_from_height = Some(0);
+    p
+}
+
+/// ChainParams with the Education suite DISABLED (default `None`).
+#[allow(dead_code)]
+pub fn params_education_disabled() -> ChainParams {
+    ChainParams::with_v2_enabled()
+}
+
 /// Fund a sender account so it has balance for fees.
 #[allow(dead_code)]
 pub fn fund(state: &StateManager, kp: &KeyPair, balance: u128) {
