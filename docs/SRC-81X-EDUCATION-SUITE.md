@@ -59,7 +59,9 @@ No per-standard gate. Same dormant-deploy pattern as `omninode_enabled_from_heig
 | **Enrollment link** | On-chain binding of a `student_commitment` to an offering, backed by an SRC-812 credential reference. |
 | **Instructor binding** | On-chain binding of an instructor/TA `Address` + role to an offering, backed by an SRC-882 employment credential reference. |
 | **Assessment** | An assignment / exam / quiz / project under an offering (`AssessmentKind`). |
-| **Submission** | A student's chain-recorded act of submitting work; content is a student-owned SNIP object. |
+| **Submission (two-layer)** | (1) SNIP content submission — the student uploads work to SNIP and grants instructor/grader ACL; student identity is used *privately inside SNIP*. (2) Chain submission **receipt** — an auditable on-chain record that a `submission_commitment` exists for `(student_commitment, offering, assessment, attempt)`. The chain stores the receipt, never the work. |
+| **Submission receipt** | The on-chain `SubmissionRecord`: `offering_id`, `assessment_id`, `student_commitment`, `submission_commitment`, `snip_ref`, `submitted_at_height`/timestamp, `attempt`, `submitter`. Does not expose student wallet/name/ID, raw work, or grade. |
+| **Submitter** | The chain tx `from` for a submission receipt: institution / sponsor / relayer / LMS service account / other authorized submitter. **Never treated as the student identity** (SRC-201-style sponsored submission). |
 | **Grade commitment** | BLAKE3 commitment to a grade value; the raw grade is never on-chain. |
 | **Content item** | A course material object (syllabus, lecture, reading) referenced by SnipRef + policy. |
 | **`SnipRef`** | Off-chain content pointer: `content_root` + optional `snip_file_id` + size + schema version. No URL, no plaintext, no keys. |
@@ -76,7 +78,8 @@ No per-standard gate. Same dormant-deploy pattern as `omninode_enabled_from_heig
 
 | Class | Examples |
 |---|---|
-| **On-chain public** | `catalog_id`, `department`, `course_code`, `term`, `section`, `status`, `*_count`, assessment `opens_at`/`due_at`/`max_attempts`/`weight_bps`, lifecycle transitions, all `*_at_height` audit fields, `late` flag |
+| **On-chain public** | `catalog_id`, `department`, `course_code`, `term`, `section`, `status`, `*_count`, assessment `opens_at`/`due_at`/`max_attempts`/`weight_bps`, lifecycle transitions, all `*_at_height` audit fields, `late` flag, `submitter` (institutional/sponsor/relayer address — **not** a student) |
+| **Never the student wallet** | The chain tx `from` for a submission receipt is an authorized submitter, never the student address; the student wallet does not appear on-chain in any submission/enrollment record |
 | **On-chain commitment only** | `title_commitment`, `credit_commitment`, `institution_id`, `spec_commitment`, `content_commitment`, `grade_commitment`, `answer_key_commitment`, `student_commitment`, prerequisite/accreditation roots |
 | **SNIP private (ref + policy on chain)** | syllabus & materials, descriptions, learning outcomes, accreditation docs, assignment/exam instructions, rubrics, **submitted work**, **feedback text**, **grade detail**, answer keys (pre-close) |
 | **Never on-chain in any form** | student names/IDs/PII, raw grades, raw submissions, raw exam answers, instructor PII, DOB, email, contact info, government ID, any stable cross-system identifier |
@@ -150,6 +153,7 @@ AccessAudience {
 - **No direct PII on-chain.** No student name, school/student ID, email, date of birth, contact info, government ID, or any stable cross-system identifier may appear on-chain — in any field, index, event, or commitment input that could be brute-forced.
 - **Indirect / linkable data is also treated as sensitive.** A field that is not itself PII but that can be correlated to identify a student (small-cohort timestamps, unique sequences, cross-referencable counts) is in scope of this rule and must be minimized or moved off-chain.
 - **Scoped, non-reusable pseudonyms only.** Any commitment or pseudonym standing in for a student MUST be salted, non-reversible, and **scoped so it is not reusable across courses, institutions, or external systems** unless legal explicitly approves a broader scope. `student_commitment` is per-offering/per-context by construction (`BLAKE3(domain ‖ subject ‖ offering_id ‖ salt)`) — a global or cross-offering student identifier is prohibited without legal sign-off.
+- **The chain transaction sender is never the student.** Student-action records (submissions, and optionally enrollment links) use a **two-layer model**: the action happens in SNIP under private student identity; the chain records only an auditable **receipt** whose tx `from` is an authorized submitter (institution / sponsor / relayer / LMS service account), SRC-201-style. The public chain sender MUST NOT be the student wallet and MUST NOT be interpreted as the student identity. Student authorization is proven by the SRC-812 enrollment credential + scoped `student_commitment` + (where policy requires) a `student_auth_commitment` proven inside the private payload — never by `sender == student`.
 
 Reaffirmed hard rules:
 
@@ -249,3 +253,4 @@ Legal/privacy review is currently **conditional approval, not clean sign-off.** 
 | 0.1.0 | 2026-05-17 | Phase 0 draft — design baseline, pre-legal-review |
 | 0.1.1 | 2026-05-17 | Product/legal revision: EnrollmentClosed gating reworded, default academic access window (§3.2), FERPA-mandatory privacy non-negotiables (§3.4), Q9 FERPA-safe-or-replace |
 | 0.1.2 | 2026-05-17 | Phase 0 legal/privacy tightening (conditional approval): FERPA PII/linkability rule (§3.4), enrollment/timestamp minimization (§3.1/§3.5), authoritative-grades not-the-gradebook + role-based access/audit (§3.4), retention/erasure/amendment + redesign trigger (§3.6), IndividualStudent provisional scoping (§3.2), sign-off-artifact gate (§7), Q1/Q2/Q4/Q9 tightened |
+| 0.1.3 | 2026-05-17 | Two-layer submission model: glossary Submission/Submission receipt/Submitter entries; §3.1 submitter is institutional (never student wallet); §3.4 chain-sender-is-never-the-student normative rule (SRC-201-style sponsored submission) |
