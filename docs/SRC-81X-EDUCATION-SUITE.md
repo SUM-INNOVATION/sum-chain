@@ -68,7 +68,7 @@ No per-standard gate. Same dormant-deploy pattern as `omninode_enabled_from_heig
 | **Grace window** | `grace_until` interval after `due_at` during which a submission is accepted but flagged `late`. |
 | **Soulbound** | Non-transferable; no transfer operation exists for any suite record. |
 | **Deprecation vs Archive (catalog)** | Deprecated = still bindable by *existing* offerings, no new offerings; Archived = terminal read-only. |
-| **EnrollmentClosed (offering)** | **Decision (locked):** blocks only *new enrollment links*. Coursework submission and grading remain open. Submissions/grading are valid in both `Active` and `EnrollmentClosed`. |
+| **EnrollmentClosed (offering)** | **Decision (locked, revised by product/legal):** blocks *new enrollment links*. Instructor/staff grading and coursework administration remain allowed. **Student submissions after EnrollmentClosed are allowed only if an explicit per-assessment or per-student policy permits** (extension, late window, incomplete, school-approved accommodation); otherwise rejected. Default student submission window = assessment `opens_at`/`due_at`/`grace_until` bounded by the offering academic calendar. |
 
 ## 3. Privacy & SNIP Model (legal-review centerpiece)
 
@@ -114,15 +114,35 @@ AccessAudience {
 
 **Division of responsibility:** SUM Chain stores the access policy/schedule + commitments + refs as the authoritative source of truth. **SNIP enforces** actual private object access — encrypted ACL / key bundles (the `EncryptedKeyBundleV2` model in [crates/primitives/src/storage_metadata.rs](../crates/primitives/src/storage_metadata.rs)) deliver decryption to exactly the named audience, only within the policy window. The chain never holds decryption keys.
 
+**Default academic access window (canonical guidance).** Unless an object's `ContentAccessPolicy` explicitly overrides it:
+
+- Course-content access generally runs from the offering's `instruction_start_at` through its `final_grade_submission_deadline` (the SRC-818 offering academic-calendar fields).
+- Extensions and accommodations may extend access **per student or per assessment** (a wider per-student/per-assessment policy supersedes the offering default for that subject).
+- Archive/revoke behavior follows school policy via `revoke_on_course_archive`; an institution may keep a read tail past archive or hard-revoke at archive.
+- The model is intended to be **compatible with Canvas/Moodle-style LMS behavior**: content visible during instruction, an access tail through grade finalization, then archived/revoked per institution policy.
+- The default *student submission* window (distinct from content access) is the assessment `opens_at`/`due_at`/`grace_until`, bounded by the same academic calendar — see SRC-818 submit pipeline.
+
 ### 3.3 SNIP object-ownership model (corrected wording)
 
 - The instructor **controls publication and access policy** for course content — not "owns" it.
 - **SNIP object ownership varies by object type:** course materials / instructions / exam content / answer keys → institution or instructor; feedback / grade detail → instructor/grader.
 - **Submissions: the student owns/controls the submitted SNIP object.** Submission *grants* scoped access to instructor + assigned graders per the course policy; ownership is not transferred.
 
-### 3.4 Privacy non-negotiables (v1)
+### 3.4 Privacy non-negotiables (v1) — FERPA-mandatory
 
-No raw submissions, grades, answer keys, or student PII on-chain — commitments + SNIP refs only. Authoritative transcripts/credentials are SRC-810/SRC-811's responsibility, not SRC-818.
+**FERPA compliance is mandatory for the entire education suite.** It is not a "best effort" target; it is a release gate.
+
+- **If any on-chain field or index is legally risky, the design MUST provide a privacy-preserving workaround** before that field/index ships. A legally-risky element with no workaround blocks the relevant phase.
+- **Prefer, in order:** (1) commitments, (2) SNIP private ACLs, (3) access-controlled off-chain private indexers — over any public on-chain student-identifying data. Public on-chain student-identifying data is the option of last resort and requires explicit written legal sign-off.
+
+Reaffirmed hard rules:
+
+- **No raw grades on-chain.** Only `grade_commitment`.
+- **No raw submissions on-chain.** Only `content_ref` (SNIP) + `content_commitment`.
+- **No raw answer keys on-chain.** Only `answer_key_commitment`.
+- **No raw student PII on-chain** in any form.
+- **Grade details and feedback live in SNIP**, encrypted to the policy-named audience.
+- **The final transcript/credential belongs to SRC-810/SRC-811, not SRC-818.** SRC-818 records only commitments + audit trail; it is not a system of record for authoritative grades.
 
 ### 3.5 Student-indexing position (locked)
 
@@ -164,7 +184,7 @@ Resolution owner: Chain. Target: before Phase 2 (not a Phase 1 blocker, but a Ph
 | 6 | Institution identity: opaque `institution_id` commitment vs first-class SRC-802 issuer (stake/reputation/slashing) | Product/Chain | No (affects Phase 2) |
 | 7 | Catalog bootstrapping & SRC-812 maturity: SRC-818 requires `catalog_id` (Phase ordering ships SRC-817 first); SRC-812 is today only a DocClass subcode — keep `enrollment_ref` resolution behind an indirection so SRC-812 promotion doesn't force an SRC-818 wire break | Chain | No (design noted) |
 | 8 | Fee/nonce model (see §5) | Chain | No (Phase 2 blocker) |
-| 9 | `AccessAudience::IndividualStudent([u8;32])` **remains in the draft design** (carries a `student_commitment`, never a raw address). Legal/privacy must still confirm before Phase 1 whether a per-student commitment in on-chain policy is acceptable, or whether individual-targeting must move entirely into SNIP ACL with chain policy staying audience-class-only. | Legal | **Yes** |
+| 9 | `AccessAudience::IndividualStudent([u8;32])` **remains in the draft design** (carries a `student_commitment`, never a raw address) but is **Phase-1-blocking until legal confirms it is FERPA-safe**, OR it is replaced with SNIP-only ACL targeting (chain policy staying audience-class-only). No middle state ships. | Legal | **Yes** |
 | 10 | Activation governance: add legal sign-off to the OmniNode-style eng-director + validator-ops activation gate for education data | Legal/Chain | No (Phase 6) |
 
 ## 7. Phase Gate Definition (Phase 0 → Phase 1)
@@ -194,3 +214,4 @@ Phase 0 is complete and Phase 1 may begin only when:
 | Version | Date | Changes |
 |---|---|---|
 | 0.1.0 | 2026-05-17 | Phase 0 draft — design baseline, pre-legal-review |
+| 0.1.1 | 2026-05-17 | Product/legal revision: EnrollmentClosed gating reworded, default academic access window (§3.2), FERPA-mandatory privacy non-negotiables (§3.4), Q9 FERPA-safe-or-replace |
