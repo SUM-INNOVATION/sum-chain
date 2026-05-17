@@ -1160,6 +1160,19 @@ impl BlockExecutor {
                             fee_paid: v2_tx.fee,
                         })
                     }
+                    TxPayload::Education(_) => {
+                        // Phase 1: SRC-817/818 wire types only. No
+                        // executor dispatch, CF, gate, mempool, RPC, or
+                        // fee/nonce semantics until Phase 2. Fail-closed:
+                        // reject with no state mutation and no fee, the
+                        // same shape every other pre-success rejection in
+                        // this match uses. Introduces no new semantics.
+                        Ok(TxExecutionResult {
+                            tx_hash,
+                            status: TxStatus::Failed(60), // Education unsupported (Phase 1)
+                            fee_paid: 0,
+                        })
+                    }
                 }
             }
         }
@@ -2018,6 +2031,13 @@ impl BlockExecutor {
             TxPayload::InferenceAttestation(_) => {
                 return Err(StateError::InvalidOperation(
                     "InferenceAttestation is only supported in V2 transactions".to_string(),
+                ));
+            }
+            TxPayload::Education(_) => {
+                // Phase 1: wire types only; fail-closed, mirrors the
+                // adjacent V2-only rejections verbatim. No new semantics.
+                return Err(StateError::InvalidOperation(
+                    "Education is only supported in V2 transactions".to_string(),
                 ));
             }
         }
