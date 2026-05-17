@@ -7,6 +7,7 @@ pub mod address;
 pub mod agreement;
 pub mod block;
 pub mod docclass;
+pub mod education;
 pub mod employment;
 pub mod equity;
 pub mod finance;

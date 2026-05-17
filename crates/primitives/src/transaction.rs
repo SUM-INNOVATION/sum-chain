@@ -72,6 +72,9 @@ pub enum TxType {
     /// OmniNode inference attestation (Stage 6 handoff) — variant index frozen at 21,
     /// append-only; see crates/primitives/src/inference_attestation.rs for wire shape.
     InferenceAttestation = 21,
+    /// SRC-817/818 Education-LMS suite — variant index frozen at 22,
+    /// append-only; see crates/primitives/src/education.rs for wire shape.
+    Education = 22,
 }
 
 impl TxType {
@@ -100,6 +103,7 @@ impl TxType {
             19 => Some(TxType::NodeRegistryV2),
             20 => Some(TxType::StorageMetadataV2),
             21 => Some(TxType::InferenceAttestation),
+            22 => Some(TxType::Education),
             _ => None,
         }
     }
@@ -397,6 +401,12 @@ pub enum TxPayload {
     /// crates/primitives/src/inference_attestation.rs and the wire fixtures
     /// in crates/primitives/tests/inference_attestation_fixtures.rs.
     InferenceAttestation(crate::inference_attestation::InferenceAttestationTxData),
+    /// SRC-817/818 Education-LMS suite. `TxType` discriminant 22;
+    /// bincode-serialized as the 23rd enum variant in `TxPayload`
+    /// (declaration ordinal 22). **Append-only**: never reorder above
+    /// this. See crates/primitives/src/education.rs and the wire
+    /// fixtures in crates/primitives/tests/education_fixtures.rs.
+    Education(crate::education::EducationTxData),
 }
 
 impl TransactionV2 {
@@ -545,6 +555,7 @@ impl TransactionV2 {
             TxPayload::NodeRegistryV2(_) => TxType::NodeRegistryV2,
             TxPayload::StorageMetadataV2(_) => TxType::StorageMetadataV2,
             TxPayload::InferenceAttestation(_) => TxType::InferenceAttestation,
+            TxPayload::Education(_) => TxType::Education,
         }
     }
 
@@ -589,6 +600,7 @@ impl TransactionV2 {
             TxPayload::NodeRegistryV2(_) => None,
             TxPayload::StorageMetadataV2(_) => None,
             TxPayload::InferenceAttestation(_) => None, // attestation, no value/recipient
+            TxPayload::Education(data) => Some(data.recipient), // Address::ZERO for no-target ops
         }
     }
 
@@ -617,6 +629,7 @@ impl TransactionV2 {
             TxPayload::NodeRegistryV2(_) => 0,  // Fee-only (e.g. RegisterEncryptionKey)
             TxPayload::StorageMetadataV2(_) => 0, // fee_deposit handled in executor
             TxPayload::InferenceAttestation(_) => 0, // attestation tx, no token value
+            TxPayload::Education(_) => 0,            // education ops carry no token value
         }
     }
 
