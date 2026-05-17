@@ -154,6 +154,10 @@ pub mod cf {
     pub const EDU_CATALOG_PREREQUISITES: &str = "edu_catalog_prerequisites";
     /// Catalog accreditation child rows. Key `catalog_id[32] || idx_be[4]`.
     pub const EDU_CATALOG_ACCREDITATION: &str = "edu_catalog_accreditation";
+    /// Catalog content refs (description / learning-outcomes / syllabus /
+    /// assessment-policy). Key `catalog_id[32] || content_kind_u8[1]`.
+    /// Value: `ManagedSnipRef` (bounded child rows — no inline vec).
+    pub const EDU_CATALOG_CONTENT_ITEMS: &str = "edu_catalog_content_items";
     /// Index: institution -> catalog. Key `institution_id[32] || catalog_id[32]`.
     pub const EDU_CATALOG_BY_INSTITUTION: &str = "edu_catalog_by_institution";
     /// Dedupe/lookup index. Key is length-safe:
@@ -474,6 +478,7 @@ pub const ALL_CFS: &[&str] = &[
     cf::EDU_CATALOG_ENTRIES,
     cf::EDU_CATALOG_PREREQUISITES,
     cf::EDU_CATALOG_ACCREDITATION,
+    cf::EDU_CATALOG_CONTENT_ITEMS,
     cf::EDU_CATALOG_BY_INSTITUTION,
     cf::EDU_CATALOG_BY_CODE,
     cf::EDU_CATALOG_BY_STATUS,

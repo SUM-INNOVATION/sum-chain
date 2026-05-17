@@ -232,14 +232,18 @@ fn cat2(a: &[u8], b: &[u8]) -> Vec<u8> {
 #[derive(Debug, Default)]
 pub struct PreparedBatch {
     puts: Vec<(&'static str, Vec<u8>, Vec<u8>)>,
+    dels: Vec<(&'static str, Vec<u8>)>,
 }
 
 impl PreparedBatch {
     fn put(&mut self, cf_name: &'static str, key: Vec<u8>, val: Vec<u8>) {
         self.puts.push((cf_name, key, val));
     }
+    fn del(&mut self, cf_name: &'static str, key: Vec<u8>) {
+        self.dels.push((cf_name, key));
+    }
     pub fn is_empty(&self) -> bool {
-        self.puts.is_empty()
+        self.puts.is_empty() && self.dels.is_empty()
     }
 }
 
@@ -461,6 +465,9 @@ impl EducationExecutor {
                     Some(r) => r,
                     None => reject!(F_CATALOG_NOT_FOUND),
                 };
+                if rec.owner != *sponsor {
+                    reject!(F_NOT_AUTHORIZED);
+                }
                 if rec.status != CAT_DRAFT && rec.status != CAT_ACTIVE {
                     reject!(F_CATALOG_WRONG_STATE);
                 }
@@ -488,11 +495,38 @@ impl EducationExecutor {
                     Some(r) => r,
                     None => reject!(F_CATALOG_NOT_FOUND),
                 };
+                if rec.owner != *sponsor {
+                    reject!(F_NOT_AUTHORIZED);
+                }
                 if rec.status != CAT_DRAFT && rec.status != CAT_ACTIVE {
                     reject!(F_CATALOG_WRONG_STATE);
                 }
-                // First publish activates a Draft entry.
+                // Persist the SNIP content refs as bounded child rows
+                // (kind byte: 0=description, 1=learning_outcomes,
+                // 2=default_syllabus, 3=default_assessment_policy). Every
+                // stored ref is a ManagedSnipRef. Refs not provided in
+                // this op are left untouched (no silent drop).
+                let mut put_ref = |kind: u8, r: &Option<ManagedSnipRef>| -> Result<()> {
+                    if let Some(m) = r {
+                        pb.put(
+                            cf::EDU_CATALOG_CONTENT_ITEMS,
+                            cat2(&d.catalog_id, &[kind]),
+                            ser(m)?,
+                        );
+                    }
+                    Ok(())
+                };
+                put_ref(0, &d.description_ref)?;
+                put_ref(1, &d.learning_outcomes_ref)?;
+                put_ref(2, &d.default_syllabus_ref)?;
+                put_ref(3, &d.default_assessment_policy_ref)?;
+                // First publish activates a Draft entry; drop the stale
+                // Draft by-status index row before adding the Active one.
                 if rec.status == CAT_DRAFT {
+                    pb.del(
+                        cf::EDU_CATALOG_BY_STATUS,
+                        cat2(&[CAT_DRAFT], &d.catalog_id),
+                    );
                     pb.put(
                         cf::EDU_CATALOG_BY_STATUS,
                         cat2(&[CAT_ACTIVE], &d.catalog_id),
@@ -509,12 +543,19 @@ impl EducationExecutor {
                     Some(r) => r,
                     None => reject!(F_CATALOG_NOT_FOUND),
                 };
+                if rec.owner != *sponsor {
+                    reject!(F_NOT_AUTHORIZED);
+                }
                 if rec.status != CAT_ACTIVE {
                     reject!(F_CATALOG_WRONG_STATE);
                 }
                 rec.status = CAT_DEPRECATED;
                 rec.updated_at_height = height;
                 pb.put(cf::EDU_CATALOG_ENTRIES, d.catalog_id.to_vec(), ser(&rec)?);
+                pb.del(
+                    cf::EDU_CATALOG_BY_STATUS,
+                    cat2(&[CAT_ACTIVE], &d.catalog_id),
+                );
                 pb.put(
                     cf::EDU_CATALOG_BY_STATUS,
                     cat2(&[CAT_DEPRECATED], &d.catalog_id),
@@ -527,6 +568,9 @@ impl EducationExecutor {
                     Some(r) => r,
                     None => reject!(F_CATALOG_NOT_FOUND),
                 };
+                if old.owner != *sponsor {
+                    reject!(F_NOT_AUTHORIZED);
+                }
                 if old.status == CAT_ARCHIVED {
                     reject!(F_CATALOG_WRONG_STATE);
                 }
@@ -547,12 +591,20 @@ impl EducationExecutor {
                     Some(r) => r,
                     None => reject!(F_CATALOG_NOT_FOUND),
                 };
+                if rec.owner != *sponsor {
+                    reject!(F_NOT_AUTHORIZED);
+                }
                 if rec.status == CAT_ARCHIVED {
                     reject!(F_CATALOG_WRONG_STATE);
                 }
+                let old_status = rec.status;
                 rec.status = CAT_ARCHIVED;
                 rec.updated_at_height = height;
                 pb.put(cf::EDU_CATALOG_ENTRIES, d.catalog_id.to_vec(), ser(&rec)?);
+                pb.del(
+                    cf::EDU_CATALOG_BY_STATUS,
+                    cat2(&[old_status], &d.catalog_id),
+                );
                 pb.put(
                     cf::EDU_CATALOG_BY_STATUS,
                     cat2(&[CAT_ARCHIVED], &d.catalog_id),
@@ -568,8 +620,10 @@ impl EducationExecutor {
                     Some(c) => c,
                     None => reject!(F_CATALOG_NOT_FOUND),
                 };
-                // Offering may bind only Active or Deprecated catalog.
-                if cat.status != CAT_ACTIVE && cat.status != CAT_DEPRECATED {
+                // A NEW offering may bind only an Active catalog entry.
+                // Deprecated entries stay resolvable for offerings bound
+                // before deprecation, but cannot anchor new offerings.
+                if cat.status != CAT_ACTIVE {
                     reject!(F_CATALOG_WRONG_STATE);
                 }
                 let rec = StoredOffering {
@@ -612,6 +666,9 @@ impl EducationExecutor {
                     Some(r) => r,
                     None => reject!(F_OFFERING_NOT_FOUND),
                 };
+                if rec.owner != *sponsor {
+                    reject!(F_NOT_AUTHORIZED);
+                }
                 if !offering_mutable(rec.status) {
                     reject!(F_OFFERING_WRONG_STATE);
                 }
@@ -639,6 +696,9 @@ impl EducationExecutor {
                     Some(o) => o,
                     None => reject!(F_OFFERING_NOT_FOUND),
                 };
+                if off.owner != *sponsor {
+                    reject!(F_NOT_AUTHORIZED);
+                }
                 if !offering_mutable(off.status) {
                     reject!(F_OFFERING_WRONG_STATE);
                 }
@@ -666,6 +726,9 @@ impl EducationExecutor {
                     Some(o) => o,
                     None => reject!(F_OFFERING_NOT_FOUND),
                 };
+                if off.owner != *sponsor {
+                    reject!(F_NOT_AUTHORIZED);
+                }
                 if !offering_mutable(off.status) {
                     reject!(F_OFFERING_WRONG_STATE);
                 }
@@ -701,6 +764,9 @@ impl EducationExecutor {
                     Some(o) => o,
                     None => reject!(F_OFFERING_NOT_FOUND),
                 };
+                if off.owner != *sponsor {
+                    reject!(F_NOT_AUTHORIZED);
+                }
                 if !offering_mutable(off.status) {
                     reject!(F_OFFERING_WRONG_STATE);
                 }
@@ -733,6 +799,7 @@ impl EducationExecutor {
             EduParsed::OpenEnrollment(d) => {
                 let s = self.set_offering_status(
                     &d.offering_id,
+                    sponsor,
                     &[OFF_DRAFT, OFF_ACTIVE, OFF_ENROLLMENT_CLOSED],
                     OFF_ACTIVE,
                     height,
@@ -745,6 +812,7 @@ impl EducationExecutor {
             EduParsed::CloseEnrollment(d) => {
                 let s = self.set_offering_status(
                     &d.offering_id,
+                    sponsor,
                     &[OFF_ACTIVE],
                     OFF_ENROLLMENT_CLOSED,
                     height,
@@ -757,6 +825,7 @@ impl EducationExecutor {
             EduParsed::FinalizeCourse(d) => {
                 let s = self.set_offering_status(
                     &d.offering_id,
+                    sponsor,
                     &[OFF_ENROLLMENT_CLOSED],
                     OFF_COMPLETED,
                     height,
@@ -769,6 +838,7 @@ impl EducationExecutor {
             EduParsed::ArchiveOffering(d) => {
                 let s = self.set_offering_status(
                     &d.offering_id,
+                    sponsor,
                     &[OFF_COMPLETED],
                     OFF_ARCHIVED,
                     height,
@@ -791,6 +861,7 @@ impl EducationExecutor {
                 };
                 let s = self.set_offering_status(
                     &d.offering_id,
+                    sponsor,
                     allowed,
                     target,
                     height,
@@ -806,6 +877,11 @@ impl EducationExecutor {
                     Some(o) => o,
                     None => reject!(F_OFFERING_NOT_FOUND),
                 };
+                // Enrollment is an admin op: only the offering owner
+                // (institution/admin) may bind a student commitment.
+                if off.owner != *sponsor {
+                    reject!(F_NOT_AUTHORIZED);
+                }
                 // New enrollment links only while Active (EnrollmentClosed
                 // blocks NEW links per Phase 0 decision).
                 if off.status != OFF_ACTIVE {
@@ -912,8 +988,16 @@ impl EducationExecutor {
             }
 
             EduParsed::Grade(d) => {
-                if self.get_offering(&d.offering_id)?.is_none() {
-                    reject!(F_OFFERING_NOT_FOUND);
+                let off = match self.get_offering(&d.offering_id)? {
+                    Some(o) => o,
+                    None => reject!(F_OFFERING_NOT_FOUND),
+                };
+                // Phase 2 fail-closed: only the offering owner may
+                // grade. Per-grader SRC-882 role resolution (delegating
+                // to instructors/TAs) is deferred to a later phase;
+                // until then grading is owner-gated, not permissive.
+                if off.owner != *sponsor {
+                    reject!(F_NOT_AUTHORIZED);
                 }
                 if self
                     .get_assessment(&d.offering_id, &d.assessment_id)?
@@ -953,6 +1037,14 @@ impl EducationExecutor {
             }
 
             EduParsed::FinalizeGrade(d) => {
+                // Owner-gated, fail-closed (same as Grade).
+                let off = match self.get_offering(&d.offering_id)? {
+                    Some(o) => o,
+                    None => reject!(F_OFFERING_NOT_FOUND),
+                };
+                if off.owner != *sponsor {
+                    reject!(F_NOT_AUTHORIZED);
+                }
                 let mut gk = Vec::with_capacity(96);
                 gk.extend_from_slice(&d.offering_id);
                 gk.extend_from_slice(&d.assessment_id);
@@ -977,6 +1069,7 @@ impl EducationExecutor {
     fn set_offering_status(
         &self,
         id: &[u8; 32],
+        sponsor: &Address,
         allowed: &[u8],
         target: u8,
         height: u64,
@@ -986,17 +1079,22 @@ impl EducationExecutor {
             Some(r) => r,
             None => return Ok(Err(F_OFFERING_NOT_FOUND)),
         };
+        // Phase 2 reference-shape auth: only the offering owner
+        // (sponsoring institution/admin = CreateOffering tx.from) may
+        // drive lifecycle transitions.
+        if rec.owner != *sponsor {
+            return Ok(Err(F_NOT_AUTHORIZED));
+        }
         if !allowed.contains(&rec.status) {
             return Ok(Err(F_OFFERING_WRONG_STATE));
         }
+        let old_status = rec.status;
         rec.status = target;
         rec.updated_at_height = height;
         pb.put(cf::EDU_OFFERINGS, id.to_vec(), ser(&rec)?);
-        pb.put(
-            cf::EDU_OFFERING_BY_STATUS,
-            cat2(&[target], id),
-            vec![],
-        );
+        // Remove the stale by-status index row, then add the new one.
+        pb.del(cf::EDU_OFFERING_BY_STATUS, cat2(&[old_status], id));
+        pb.put(cf::EDU_OFFERING_BY_STATUS, cat2(&[target], id), vec![]);
         Ok(Ok(()))
     }
 
@@ -1004,6 +1102,9 @@ impl EducationExecutor {
     /// AFTER Policy B fee/nonce mutation on the success path.
     pub fn commit(&self, pb: PreparedBatch) -> Result<()> {
         let mut batch = self.db.batch();
+        for (cf_name, k) in &pb.dels {
+            batch.delete(cf_name, k)?;
+        }
         for (cf_name, k, v) in &pb.puts {
             batch.put(cf_name, k, v)?;
         }

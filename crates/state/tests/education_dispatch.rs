@@ -14,7 +14,8 @@ use sumchain_primitives::education::{
     catalog_op, offering_op, student_commitment, AddAssessmentData, AssessmentKind,
     ContentAccessPolicy, CourseLevel, CreateCatalogEntryData, CreateOfferingData, EducationStandard,
     EducationTxData, LinkEnrollmentData, ManagedSnipRef, OpenEnrollmentData,
-    PublishCatalogContentData, SnipRef, SubmitAssignmentReceiptData,
+    DeprecateCatalogEntryData, PublishCatalogContentData, SnipRef, SubmitAssignmentReceiptData,
+    UpdateCatalogEntryData,
 };
 use sumchain_primitives::{SignedTransaction, TransactionV2, TxPayload, TxStatus};
 use sumchain_crypto::sign;
@@ -408,10 +409,24 @@ fn full_flow_submission_receipt_privacy() {
         bincode::deserialize(&raw).unwrap();
     assert_eq!(rec.submitter, sponsor.address());
     assert_eq!(rec.student_commitment, sc);
-    // Privacy: no raw student address pattern in the stored bytes.
-    // (sponsor address is allowed; a hypothetical 20-byte student addr
-    // is not — we never had one. Assert the sponsor addr is the only
-    // 20-byte address-shaped field and student is a 32-byte commitment.)
+
+    // Privacy scan (mirrors the Phase 1 fixture approach): a fixed
+    // 20-byte "raw student address" pattern that the design must never
+    // place on-chain. Scan the serialized stored receipt bytes for it.
+    // The student is only ever a 32-byte BLAKE3 commitment; the only
+    // address-shaped field is `submitter` (the sponsor, allowed).
+    const FORBIDDEN_STUDENT_ADDR: [u8; 20] = [0x7E; 20];
+    let bytes = bincode::serialize(&rec).unwrap();
+    let needle = &FORBIDDEN_STUDENT_ADDR[..];
+    assert!(
+        !bytes.windows(needle.len()).any(|w| w == needle),
+        "forbidden raw student address pattern leaked into stored receipt"
+    );
+    // Sponsor address IS allowed and present (submitter).
+    assert!(bytes
+        .windows(20)
+        .any(|w| w == sponsor.address().as_bytes()));
+    // Student commitment is a 32-byte hash, not a 20-byte address.
     assert_ne!(&sc[..20], sponsor.address().as_bytes());
 }
 
@@ -555,4 +570,199 @@ fn failure_code_descriptions_present() {
     );
     assert_eq!(TxStatus::Failed(79).description(), "student commitment not enrolled in offering");
     assert_eq!(TxStatus::Failed(84).description(), "insufficient balance for education fee");
+    assert_eq!(
+        TxStatus::Failed(83).description(),
+        "not authorized for education operation"
+    );
+}
+
+/// A different funded sponsor cannot mutate a catalog it does not own:
+/// rejected with Failed(83) and STILL charged + nonce-advanced (Policy B).
+#[test]
+fn non_owner_rejected_83_and_charged() {
+    let (state, _db, _dir, ex) = setup_with_params(params_education_enabled());
+    let owner = KeyPair::generate();
+    let attacker = KeyPair::generate();
+    let proposer = KeyPair::generate();
+    fund(&state, &owner, 10 * FEE);
+    fund(&state, &attacker, 10 * FEE);
+
+    let (cid, cdata) = mk_catalog([1u8; 32], "CS", "101", 1);
+    let t = edu_tx(
+        &owner,
+        0,
+        EducationStandard::CourseCatalog,
+        catalog_op::CREATE_CATALOG_ENTRY,
+        cdata,
+    );
+    assert!(matches!(
+        ex.execute_tx(&t, &proposer.address(), 1, 0).unwrap().status,
+        TxStatus::Success
+    ));
+
+    // Attacker (funded, valid tx) tries to update the owner's catalog.
+    let upd = UpdateCatalogEntryData {
+        catalog_id: cid,
+        course_title: Some("hijacked".into()),
+        title_commitment: None,
+        course_level: None,
+        credit_hours: None,
+        credit_commitment: None,
+        nonce: 1,
+    };
+    let bal_before = state.get_balance(&attacker.address()).unwrap();
+    let t2 = edu_tx(
+        &attacker,
+        0,
+        EducationStandard::CourseCatalog,
+        catalog_op::UPDATE_CATALOG_ENTRY,
+        ser(&upd),
+    );
+    let r = ex.execute_tx(&t2, &proposer.address(), 2, 0).unwrap();
+    assert!(matches!(r.status, TxStatus::Failed(83)), "{:?}", r.status);
+    // Policy B: auth failure is a semantic failure → charged + nonce.
+    assert_eq!(r.fee_paid, FEE);
+    assert_eq!(
+        state.get_balance(&attacker.address()).unwrap(),
+        bal_before - FEE
+    );
+    assert_eq!(state.get_nonce(&attacker.address()).unwrap(), 1);
+}
+
+/// A Deprecated catalog cannot anchor a NEW offering: Failed(74),
+/// charged under Policy B.
+#[test]
+fn create_offering_rejects_deprecated_catalog_charged() {
+    let (state, _db, _dir, ex) = setup_with_params(params_education_enabled());
+    let sponsor = KeyPair::generate();
+    let proposer = KeyPair::generate();
+    fund(&state, &sponsor, 100 * FEE);
+    let mut nonce = 0u64;
+    let mut h = 1u64;
+    macro_rules! run {
+        ($op:expr, $data:expr) => {{
+            let tx = edu_tx(&sponsor, nonce, EducationStandard::CourseCatalog, $op, $data);
+            let r = ex.execute_tx(&tx, &proposer.address(), h, 0).unwrap();
+            nonce += 1;
+            h += 1;
+            r
+        }};
+    }
+    let (cid, cdata) = mk_catalog([2u8; 32], "CS", "301", 1);
+    assert!(matches!(
+        run!(catalog_op::CREATE_CATALOG_ENTRY, cdata).status,
+        TxStatus::Success
+    ));
+    let pc = PublishCatalogContentData {
+        catalog_id: cid,
+        description_ref: None,
+        learning_outcomes_ref: None,
+        default_syllabus_ref: None,
+        default_assessment_policy_ref: None,
+        nonce: 2,
+    };
+    assert!(matches!(
+        run!(catalog_op::PUBLISH_CATALOG_CONTENT, ser(&pc)).status,
+        TxStatus::Success
+    )); // -> Active
+    let dep = DeprecateCatalogEntryData { catalog_id: cid, nonce: 3 };
+    assert!(matches!(
+        run!(catalog_op::DEPRECATE_CATALOG_ENTRY, ser(&dep)).status,
+        TxStatus::Success
+    )); // -> Deprecated
+
+    let oid = sumchain_primitives::education::offering_id(
+        &cid,
+        "2026FA",
+        "A",
+        &sumchain_primitives::Address::ZERO,
+        1,
+    );
+    let od = CreateOfferingData {
+        offering_id: oid,
+        catalog_id: cid,
+        term: "2026FA".into(),
+        section: "A".into(),
+        instruction_start_at: 0,
+        instruction_end_at: 100,
+        final_grade_submission_deadline: 200,
+        nonce: 1,
+    };
+    let bal_before = state.get_balance(&sponsor.address()).unwrap();
+    let tx = edu_tx(
+        &sponsor,
+        nonce,
+        EducationStandard::CourseOffering,
+        offering_op::CREATE_OFFERING,
+        ser(&od),
+    );
+    let r = ex.execute_tx(&tx, &proposer.address(), h, 0).unwrap();
+    assert!(matches!(r.status, TxStatus::Failed(74)), "{:?}", r.status);
+    assert_eq!(r.fee_paid, FEE);
+    assert_eq!(
+        state.get_balance(&sponsor.address()).unwrap(),
+        bal_before - FEE
+    );
+}
+
+/// Status index must not go stale: after Draft→Active the Draft
+/// `by_status` row is gone and only the Active row remains.
+#[test]
+fn status_index_not_stale_after_transition() {
+    let (state, db, _dir, ex) = setup_with_params(params_education_enabled());
+    let sponsor = KeyPair::generate();
+    let proposer = KeyPair::generate();
+    fund(&state, &sponsor, 100 * FEE);
+    let (cid, cdata) = mk_catalog([3u8; 32], "CS", "401", 1);
+    let t1 = edu_tx(
+        &sponsor,
+        0,
+        EducationStandard::CourseCatalog,
+        catalog_op::CREATE_CATALOG_ENTRY,
+        cdata,
+    );
+    assert!(matches!(
+        ex.execute_tx(&t1, &proposer.address(), 1, 0).unwrap().status,
+        TxStatus::Success
+    ));
+    // Draft (status 0) index row present.
+    let mut draft_key = vec![0u8];
+    draft_key.extend_from_slice(&cid);
+    assert!(db
+        .get(sumchain_storage::cf::EDU_CATALOG_BY_STATUS, &draft_key)
+        .unwrap()
+        .is_some());
+
+    let pc = PublishCatalogContentData {
+        catalog_id: cid,
+        description_ref: None,
+        learning_outcomes_ref: None,
+        default_syllabus_ref: None,
+        default_assessment_policy_ref: None,
+        nonce: 2,
+    };
+    let t2 = edu_tx(
+        &sponsor,
+        1,
+        EducationStandard::CourseCatalog,
+        catalog_op::PUBLISH_CATALOG_CONTENT,
+        ser(&pc),
+    );
+    assert!(matches!(
+        ex.execute_tx(&t2, &proposer.address(), 2, 0).unwrap().status,
+        TxStatus::Success
+    ));
+    // Draft row deleted; Active (status 1) row present.
+    assert!(
+        db.get(sumchain_storage::cf::EDU_CATALOG_BY_STATUS, &draft_key)
+            .unwrap()
+            .is_none(),
+        "stale Draft by_status row must be removed after activation"
+    );
+    let mut active_key = vec![1u8];
+    active_key.extend_from_slice(&cid);
+    assert!(db
+        .get(sumchain_storage::cf::EDU_CATALOG_BY_STATUS, &active_key)
+        .unwrap()
+        .is_some());
 }
