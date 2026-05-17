@@ -135,6 +135,20 @@ pub struct ChainParams {
     /// Dev / OmniNode Stage 5: set to `Some(0)` to activate from genesis.
     #[serde(default)]
     pub omninode_enabled_from_height: Option<u64>,
+
+    /// Block height at which the SRC-817/818 Education-LMS suite
+    /// activates. `None` = disabled forever; `Some(h)` = education txs
+    /// executable from block `h` onward. Mirrors the OmniNode/SNIP V2
+    /// activation pattern.
+    ///
+    /// Production safety: `#[serde(default)]` resolves a missing field
+    /// to `None`, so an existing mainnet `genesis.json` upgraded to an
+    /// Education-aware binary stays disabled until the operator
+    /// explicitly sets a future activation height.
+    ///
+    /// Dev: set to `Some(0)` to activate from genesis.
+    #[serde(default)]
+    pub education_enabled_from_height: Option<u64>,
 }
 
 fn default_finality_depth() -> u64 {
@@ -326,6 +340,9 @@ impl Default for ChainParams {
             // Activation is coordinated separately, after the chain has
             // shipped Phase 2-4 of the InferenceAttestation work.
             omninode_enabled_from_height: None,
+            // Production-safe default: Education-LMS suite disabled.
+            // Activation is coordinated separately, post Phase 2-6.
+            education_enabled_from_height: None,
         }
     }
 }

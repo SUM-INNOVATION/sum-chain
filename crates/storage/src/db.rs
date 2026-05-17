@@ -141,6 +141,54 @@ pub mod cf {
     /// primary key derived from `(session_id, verifier_address)`.
     pub const INFERENCE_ATTESTATIONS_BY_SESSION: &str = "inference_attestations_by_session";
 
+    // ── SRC-817/818 Education-LMS suite (Phase 2) ──
+    // Privacy: students appear ONLY as a scoped `student_commitment`
+    // [u8;32] — never a raw Address — in any education key or value.
+    // Every stored SNIP ref is a `ManagedSnipRef`. Primary records
+    // hold counters/roots, not unbounded vectors. Numeric key
+    // components are big-endian so bytewise CF order = numeric order.
+
+    /// SRC-817 catalog entries. Key `catalog_id[32]`.
+    pub const EDU_CATALOG_ENTRIES: &str = "edu_catalog_entries";
+    /// Catalog prerequisite child rows. Key `catalog_id[32] || prereq_catalog_id[32]`.
+    pub const EDU_CATALOG_PREREQUISITES: &str = "edu_catalog_prerequisites";
+    /// Catalog accreditation child rows. Key `catalog_id[32] || idx_be[4]`.
+    pub const EDU_CATALOG_ACCREDITATION: &str = "edu_catalog_accreditation";
+    /// Index: institution -> catalog. Key `institution_id[32] || catalog_id[32]`.
+    pub const EDU_CATALOG_BY_INSTITUTION: &str = "edu_catalog_by_institution";
+    /// Dedupe/lookup index. Key is length-safe:
+    /// `BLAKE3("SRC817-CATALOG-BY-CODE:v1:" || bincode((department,
+    /// course_code)))[32] || catalog_id[32]` — no raw string concat.
+    pub const EDU_CATALOG_BY_CODE: &str = "edu_catalog_by_code";
+    /// Index: status -> catalog. Key `status_u8[1] || catalog_id[32]`.
+    pub const EDU_CATALOG_BY_STATUS: &str = "edu_catalog_by_status";
+
+    /// SRC-818 offerings (primary record, counters/roots only).
+    /// Key `offering_id[32]`.
+    pub const EDU_OFFERINGS: &str = "edu_offerings";
+    /// Instructor/TA bindings. Key `offering_id[32] || instructor_addr[20]`.
+    /// The address is an institutional/SRC-882 identity — NOT a student.
+    pub const EDU_INSTRUCTOR_BINDINGS: &str = "edu_instructor_bindings";
+    /// Content items. Key `offering_id[32] || content_id[32]`.
+    pub const EDU_CONTENT_ITEMS: &str = "edu_content_items";
+    /// Assessments. Key `offering_id[32] || assessment_id[32]`.
+    pub const EDU_ASSESSMENTS: &str = "edu_assessments";
+    /// Enrollment links. Key `offering_id[32] || student_commitment[32]`.
+    pub const EDU_ENROLLMENT_LINKS: &str = "edu_enrollment_links";
+    /// Submission receipts (receipt only — never the work).
+    /// Key `offering_id[32] || assessment_id[32] || student_commitment[32] || attempt_be[2]`.
+    pub const EDU_SUBMISSIONS: &str = "edu_submissions";
+    /// Grade records (grade_commitment only — never the raw grade).
+    /// Key `offering_id[32] || assessment_id[32] || student_commitment[32]`.
+    pub const EDU_GRADES: &str = "edu_grades";
+    /// Index: catalog -> offering. Key `catalog_id[32] || offering_id[32]`.
+    pub const EDU_OFFERING_BY_CATALOG: &str = "edu_offering_by_catalog";
+    /// Index: status -> offering. Key `status_u8[1] || offering_id[32]`.
+    pub const EDU_OFFERING_BY_STATUS: &str = "edu_offering_by_status";
+    /// Privacy-safe submission index, commitment-keyed (no raw address).
+    /// Key `student_commitment[32] || offering_id[32] || assessment_id[32] || attempt_be[2]`.
+    pub const EDU_SUBMISSION_BY_STUDENT_COMMITMENT: &str = "edu_submission_by_student_commitment";
+
     // PoR Challenges
     /// Active storage challenges (challenge_id -> StorageChallenge, node/expiry indexes)
     pub const ACTIVE_CHALLENGES: &str = "active_challenges";
@@ -422,6 +470,23 @@ pub const ALL_CFS: &[&str] = &[
     cf::ASSIGNMENT_ATTESTATIONS_V2,
     cf::INFERENCE_ATTESTATIONS,
     cf::INFERENCE_ATTESTATIONS_BY_SESSION,
+    // SRC-817/818 Education-LMS suite (Phase 2)
+    cf::EDU_CATALOG_ENTRIES,
+    cf::EDU_CATALOG_PREREQUISITES,
+    cf::EDU_CATALOG_ACCREDITATION,
+    cf::EDU_CATALOG_BY_INSTITUTION,
+    cf::EDU_CATALOG_BY_CODE,
+    cf::EDU_CATALOG_BY_STATUS,
+    cf::EDU_OFFERINGS,
+    cf::EDU_INSTRUCTOR_BINDINGS,
+    cf::EDU_CONTENT_ITEMS,
+    cf::EDU_ASSESSMENTS,
+    cf::EDU_ENROLLMENT_LINKS,
+    cf::EDU_SUBMISSIONS,
+    cf::EDU_GRADES,
+    cf::EDU_OFFERING_BY_CATALOG,
+    cf::EDU_OFFERING_BY_STATUS,
+    cf::EDU_SUBMISSION_BY_STUDENT_COMMITMENT,
     // SRC-80X/81X DocClass
     cf::DOCCLASS_IDENTITY_ROOTS,
     cf::DOCCLASS_ELIGIBILITY,
