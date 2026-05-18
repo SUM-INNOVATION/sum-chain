@@ -492,6 +492,14 @@ impl Mempool {
                             "Grade: assessment not found".into(),
                         ));
                     }
+                    if !ex.enrollment_link_exists(
+                        &d.offering_id,
+                        &d.student_commitment,
+                    )? {
+                        return Err(StateError::InvalidEducationTransaction(
+                            "Grade: student_commitment not enrolled".into(),
+                        ));
+                    }
                     if ex.grade_finalized(
                         &d.offering_id,
                         &d.assessment_id,
@@ -509,6 +517,14 @@ impl Mempool {
                     if !ex.assessment_exists(&d.offering_id, &d.assessment_id)? {
                         return Err(StateError::InvalidEducationTransaction(
                             "FinalizeGrade: assessment not found".into(),
+                        ));
+                    }
+                    if !ex.enrollment_link_exists(
+                        &d.offering_id,
+                        &d.student_commitment,
+                    )? {
+                        return Err(StateError::InvalidEducationTransaction(
+                            "FinalizeGrade: student_commitment not enrolled".into(),
                         ));
                     }
                     if ex.grade_finalized(
