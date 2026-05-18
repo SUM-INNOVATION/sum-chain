@@ -36,6 +36,9 @@ use sumchain_primitives::{
 };
 use tracing::{debug, info};
 
+use crate::education_executor::{
+    education_in_flight_key, parse_education, EducationExecutor, EduParsed,
+};
 use crate::inference_attestation_executor::InferenceAttestationExecutor;
 use crate::{Result, StateError, StateManager};
 
@@ -91,6 +94,21 @@ pub struct InferenceAttestationAdmission {
     pub current_height: Arc<AtomicU64>,
 }
 
+/// SRC-817/818 Education suite admission context. Same shape and
+/// lifecycle as [`InferenceAttestationAdmission`]: owns a read-only
+/// `EducationExecutor` (Phase 2 CFs), the chain params (for
+/// `education_enabled_from_height`), and the shared live chain-height
+/// `Arc<AtomicU64>`. Stored `Option`-ally so non-education txs and
+/// no-context paths (tests / consensus internal re-adds) are
+/// unaffected. Admission is a narrow filter only — the Phase 2
+/// executor remains authoritative (no fee/nonce/dispatch here).
+#[derive(Clone)]
+pub struct EducationAdmission {
+    pub executor: Arc<EducationExecutor>,
+    pub params: Arc<ChainParams>,
+    pub current_height: Arc<AtomicU64>,
+}
+
 /// Transaction mempool
 pub struct Mempool {
     /// All transactions by hash
@@ -111,6 +129,14 @@ pub struct Mempool {
     /// (e.g. consensus re-adding txs from rejected blocks). Production
     /// node-startup wires this via [`Mempool::with_inference_admission`].
     inference_admission: Option<InferenceAttestationAdmission>,
+    /// In-flight education dedup keys → tx hash. Same 32-byte
+    /// length-safe key the admission path derives via
+    /// [`education_in_flight_key`]; re-derived on `remove`/`clear` so
+    /// cleanup can't desync from admission.
+    education_in_flight: RwLock<HashMap<[u8; 32], Hash>>,
+    /// Optional education admission context (parallels
+    /// `inference_admission`).
+    education_admission: Option<EducationAdmission>,
 }
 
 impl Mempool {
@@ -123,6 +149,8 @@ impl Mempool {
             config,
             inference_in_flight: RwLock::new(HashMap::new()),
             inference_admission: None,
+            education_in_flight: RwLock::new(HashMap::new()),
+            education_admission: None,
         }
     }
 
@@ -137,6 +165,16 @@ impl Mempool {
         admission: InferenceAttestationAdmission,
     ) -> Self {
         self.inference_admission = Some(admission);
+        self
+    }
+
+    /// Builder: attach the SRC-817/818 Education admission context.
+    /// Without it, education txs are still in-flight-deduped but the
+    /// activation gate and committed-CF/structural prechecks are
+    /// skipped (tests / consensus internal re-adds), never for
+    /// production user submission.
+    pub fn with_education_admission(mut self, admission: EducationAdmission) -> Self {
+        self.education_admission = Some(admission);
         self
     }
 
@@ -156,6 +194,10 @@ impl Mempool {
         // key (if any) is stamped into `inference_in_flight` AFTER all
         // other admission checks pass — see end of this method.
         let inference_key = self.check_inference_admission(&tx)?;
+        // SRC-817/818 Education admission. No-op for any other payload
+        // variant. Returned key (if any) is stamped into
+        // `education_in_flight` AFTER all other admission checks pass.
+        let education_key = self.check_education_admission(&tx)?;
 
         // Check mempool size
         if self.txs.read().len() >= self.config.max_size {
@@ -210,6 +252,9 @@ impl Mempool {
         if let Some(key) = inference_key {
             self.inference_in_flight.write().insert(key, hash);
         }
+        if let Some(key) = education_key {
+            self.education_in_flight.write().insert(key, hash);
+        }
 
         debug!("Added tx {} to mempool (fee: {})", hash, fee);
 
@@ -263,6 +308,309 @@ impl Mempool {
         Ok(Some(key))
     }
 
+    /// SRC-817/818 Education admission. `Ok(None)` for any
+    /// non-education payload (skip — zero behavior change for other
+    /// variants). `Ok(Some(key))` if all checks pass and the caller
+    /// should register `key` in `education_in_flight` after final
+    /// insertion. Admission produces NO receipts and NO state mutation;
+    /// the Phase 2 executor remains authoritative. No submission
+    /// time-window check here (admission has no canonical block
+    /// timestamp — executor + Policy B handle the window).
+    fn check_education_admission(
+        &self,
+        tx: &SignedTransaction,
+    ) -> Result<Option<[u8; 32]>> {
+        let TxInner::V2(v2_tx) = &tx.inner else {
+            return Ok(None);
+        };
+        let TxPayload::Education(edu) = &v2_tx.payload else {
+            return Ok(None);
+        };
+
+        // (1) Activation gate (only when an admission ctx is wired).
+        if let Some(ctx) = &self.education_admission {
+            let height = ctx.current_height.load(Ordering::Relaxed);
+            let gate_open = matches!(
+                ctx.params.education_enabled_from_height,
+                Some(h) if height >= h
+            );
+            if !gate_open {
+                return Err(StateError::EducationNotActivated);
+            }
+        }
+
+        // (2) Decode/route (size + supported standard/op + bincode).
+        let parsed = parse_education(edu).map_err(|code| {
+            StateError::InvalidEducationTransaction(format!(
+                "undecodable or unsupported education op (code {code})"
+            ))
+        })?;
+
+        // (3) Derive the length-safe in-flight dedup key.
+        let key = education_in_flight_key(&parsed);
+
+        // (4) In-flight duplicate (cheap point lookup in our state).
+        if self.education_in_flight.read().contains_key(&key) {
+            return Err(StateError::DuplicateEducationRecord);
+        }
+
+        // (5) Committed-CF + structural cheap prechecks (only when ctx
+        // wired; the executor read handle lives there). No window check.
+        if let Some(ctx) = &self.education_admission {
+            let ex = &ctx.executor;
+            match &parsed {
+                EduParsed::CreateCatalog(d) => {
+                    if ex.catalog_exists(&d.catalog_id)? {
+                        return Err(StateError::DuplicateEducationRecord);
+                    }
+                }
+                EduParsed::CreateOffering(d) => {
+                    if ex.offering_exists(&d.offering_id)? {
+                        return Err(StateError::DuplicateEducationRecord);
+                    }
+                    match ex.get_catalog(&d.catalog_id)? {
+                        None => {
+                            return Err(StateError::InvalidEducationTransaction(
+                                "CreateOffering: catalog not found".into(),
+                            ))
+                        }
+                        Some(c) if c.status != 1 /* Active */ => {
+                            return Err(StateError::InvalidEducationTransaction(
+                                "CreateOffering: catalog not Active".into(),
+                            ))
+                        }
+                        Some(_) => {}
+                    }
+                }
+                EduParsed::PublishContent(d) => {
+                    if !ex.offering_exists(&d.offering_id)? {
+                        return Err(StateError::InvalidEducationTransaction(
+                            "PublishContent: offering not found".into(),
+                        ));
+                    }
+                    if ex.content_exists(&d.offering_id, &d.content_id)? {
+                        return Err(StateError::DuplicateEducationRecord);
+                    }
+                }
+                EduParsed::AddAssessment(d) => {
+                    if !ex.offering_exists(&d.offering_id)? {
+                        return Err(StateError::InvalidEducationTransaction(
+                            "AddAssessment: offering not found".into(),
+                        ));
+                    }
+                    if ex.assessment_exists(&d.offering_id, &d.assessment_id)? {
+                        return Err(StateError::DuplicateEducationRecord);
+                    }
+                }
+                EduParsed::LinkEnrollment(d) => {
+                    match ex.get_offering(&d.offering_id)? {
+                        None => {
+                            return Err(StateError::InvalidEducationTransaction(
+                                "LinkEnrollment: offering not found".into(),
+                            ))
+                        }
+                        Some(o) if o.status != 1 /* Active */ => {
+                            return Err(StateError::InvalidEducationTransaction(
+                                "LinkEnrollment: offering not Active".into(),
+                            ))
+                        }
+                        Some(_) => {}
+                    }
+                    if ex
+                        .enrollment_link_exists(&d.offering_id, &d.student_commitment)?
+                    {
+                        return Err(StateError::DuplicateEducationRecord);
+                    }
+                }
+                EduParsed::Submit(d, is_exam) => {
+                    let off = match ex.get_offering(&d.offering_id)? {
+                        None => {
+                            return Err(StateError::InvalidEducationTransaction(
+                                "Submit: offering not found".into(),
+                            ))
+                        }
+                        Some(o) => o,
+                    };
+                    // Active (1) or EnrollmentClosed (2).
+                    if off.status != 1 && off.status != 2 {
+                        return Err(StateError::InvalidEducationTransaction(
+                            "Submit: offering not accepting submissions".into(),
+                        ));
+                    }
+                    let a = match ex
+                        .get_assessment(&d.offering_id, &d.assessment_id)?
+                    {
+                        None => {
+                            return Err(StateError::InvalidEducationTransaction(
+                                "Submit: assessment not found".into(),
+                            ))
+                        }
+                        Some(a) => a,
+                    };
+                    let want_kind: u8 = if *is_exam { 1 } else { 0 };
+                    if a.kind != want_kind {
+                        return Err(StateError::InvalidEducationTransaction(
+                            "Submit: assessment kind mismatch".into(),
+                        ));
+                    }
+                    if !ex.enrollment_link_exists(
+                        &d.offering_id,
+                        &d.student_commitment,
+                    )? {
+                        return Err(StateError::InvalidEducationTransaction(
+                            "Submit: student_commitment not enrolled".into(),
+                        ));
+                    }
+                    if a.max_attempts != 0
+                        && ex.committed_attempts(
+                            &d.offering_id,
+                            &d.assessment_id,
+                            &d.student_commitment,
+                        )? >= a.max_attempts
+                    {
+                        return Err(StateError::InvalidEducationTransaction(
+                            "Submit: attempts exhausted".into(),
+                        ));
+                    }
+                    if ex.submission_exists(
+                        &d.offering_id,
+                        &d.assessment_id,
+                        &d.student_commitment,
+                        d.attempt,
+                    )? {
+                        return Err(StateError::DuplicateEducationRecord);
+                    }
+                }
+                EduParsed::Grade(d) => {
+                    if !ex.offering_exists(&d.offering_id)? {
+                        return Err(StateError::InvalidEducationTransaction(
+                            "Grade: offering not found".into(),
+                        ));
+                    }
+                    if !ex.assessment_exists(&d.offering_id, &d.assessment_id)? {
+                        return Err(StateError::InvalidEducationTransaction(
+                            "Grade: assessment not found".into(),
+                        ));
+                    }
+                    if ex.grade_finalized(
+                        &d.offering_id,
+                        &d.assessment_id,
+                        &d.student_commitment,
+                    )? {
+                        return Err(StateError::DuplicateEducationRecord);
+                    }
+                }
+                EduParsed::FinalizeGrade(d) => {
+                    if !ex.offering_exists(&d.offering_id)? {
+                        return Err(StateError::InvalidEducationTransaction(
+                            "FinalizeGrade: offering not found".into(),
+                        ));
+                    }
+                    if !ex.assessment_exists(&d.offering_id, &d.assessment_id)? {
+                        return Err(StateError::InvalidEducationTransaction(
+                            "FinalizeGrade: assessment not found".into(),
+                        ));
+                    }
+                    if ex.grade_finalized(
+                        &d.offering_id,
+                        &d.assessment_id,
+                        &d.student_commitment,
+                    )? {
+                        return Err(StateError::DuplicateEducationRecord);
+                    }
+                }
+                // Mutate/lifecycle ops: cheap existence only (executor
+                // remains authoritative for state/auth).
+                EduParsed::UpdateCatalog(d) => {
+                    if !ex.catalog_exists(&d.catalog_id)? {
+                        return Err(StateError::InvalidEducationTransaction(
+                            "catalog not found".into(),
+                        ));
+                    }
+                }
+                EduParsed::PublishCatalogContent(d) => {
+                    if !ex.catalog_exists(&d.catalog_id)? {
+                        return Err(StateError::InvalidEducationTransaction(
+                            "catalog not found".into(),
+                        ));
+                    }
+                }
+                EduParsed::DeprecateCatalog(d) => {
+                    if !ex.catalog_exists(&d.catalog_id)? {
+                        return Err(StateError::InvalidEducationTransaction(
+                            "catalog not found".into(),
+                        ));
+                    }
+                }
+                EduParsed::ArchiveCatalog(d) => {
+                    if !ex.catalog_exists(&d.catalog_id)? {
+                        return Err(StateError::InvalidEducationTransaction(
+                            "catalog not found".into(),
+                        ));
+                    }
+                }
+                EduParsed::SupersedeCatalog(d) => {
+                    if !ex.catalog_exists(&d.old_catalog_id)? {
+                        return Err(StateError::InvalidEducationTransaction(
+                            "catalog not found".into(),
+                        ));
+                    }
+                }
+                EduParsed::UpdateOffering(d) => {
+                    if !ex.offering_exists(&d.offering_id)? {
+                        return Err(StateError::InvalidEducationTransaction(
+                            "offering not found".into(),
+                        ));
+                    }
+                }
+                EduParsed::UpdateAssessment(d) => {
+                    if !ex.assessment_exists(&d.offering_id, &d.assessment_id)? {
+                        return Err(StateError::InvalidEducationTransaction(
+                            "assessment not found".into(),
+                        ));
+                    }
+                }
+                EduParsed::OpenEnrollment(d) => {
+                    if !ex.offering_exists(&d.offering_id)? {
+                        return Err(StateError::InvalidEducationTransaction(
+                            "offering not found".into(),
+                        ));
+                    }
+                }
+                EduParsed::CloseEnrollment(d) => {
+                    if !ex.offering_exists(&d.offering_id)? {
+                        return Err(StateError::InvalidEducationTransaction(
+                            "offering not found".into(),
+                        ));
+                    }
+                }
+                EduParsed::FinalizeCourse(d) => {
+                    if !ex.offering_exists(&d.offering_id)? {
+                        return Err(StateError::InvalidEducationTransaction(
+                            "offering not found".into(),
+                        ));
+                    }
+                }
+                EduParsed::ArchiveOffering(d) => {
+                    if !ex.offering_exists(&d.offering_id)? {
+                        return Err(StateError::InvalidEducationTransaction(
+                            "offering not found".into(),
+                        ));
+                    }
+                }
+                EduParsed::SuspendOrCancel(d) => {
+                    if !ex.offering_exists(&d.offering_id)? {
+                        return Err(StateError::InvalidEducationTransaction(
+                            "offering not found".into(),
+                        ));
+                    }
+                }
+            }
+        }
+
+        Ok(Some(key))
+    }
+
     /// Remove a transaction from the mempool
     pub fn remove(&self, hash: &Hash) -> Option<SignedTransaction> {
         let entry = self.txs.write().remove(hash)?;
@@ -294,6 +642,16 @@ impl Mempool {
                     &v2_tx.from,
                 );
                 self.inference_in_flight.write().remove(&key);
+            }
+            // Education in-flight unlink. Re-derive the key from the
+            // stored tx (no reverse index → cleanup can't desync from
+            // admission). No-op for non-education variants and for
+            // undecodable payloads (which never got admitted anyway).
+            if let TxPayload::Education(edu) = &v2_tx.payload {
+                if let Ok(parsed) = parse_education(edu) {
+                    let key = education_in_flight_key(&parsed);
+                    self.education_in_flight.write().remove(&key);
+                }
             }
         }
 
@@ -375,6 +733,7 @@ impl Mempool {
         self.by_sender.write().clear();
         self.by_fee.write().clear();
         self.inference_in_flight.write().clear();
+        self.education_in_flight.write().clear();
         info!("Mempool cleared");
     }
 

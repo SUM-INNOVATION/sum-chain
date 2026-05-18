@@ -313,6 +313,73 @@ pub fn parse_education(tx: &EducationTxData) -> std::result::Result<EduParsed, u
     })
 }
 
+/// Pure, length-safe in-flight dedup key for mempool admission.
+/// `BLAKE3("EDU-INFLIGHT:v1:" || bincode((variant_tag, identity)))`.
+/// Identity is a concatenation of fixed-width components; bincode
+/// length-prefixes it so no cross-class collision is possible, and the
+/// `variant_tag` separates record classes. Students appear only as a
+/// 32-byte `student_commitment` — never a raw address.
+pub fn education_in_flight_key(op: &EduParsed) -> [u8; 32] {
+    fn k(tag: u8, parts: &[&[u8]]) -> [u8; 32] {
+        let mut id = Vec::new();
+        for p in parts {
+            id.extend_from_slice(p);
+        }
+        let inner = bincode::serialize(&(tag, &id))
+            .expect("(u8, &Vec<u8>) is infallibly serializable");
+        let mut buf = Vec::with_capacity(16 + inner.len());
+        buf.extend_from_slice(b"EDU-INFLIGHT:v1:");
+        buf.extend_from_slice(&inner);
+        *Hash::hash(&buf).as_bytes()
+    }
+    match op {
+        EduParsed::CreateCatalog(d) => k(0, &[&d.catalog_id[..]]),
+        EduParsed::UpdateCatalog(d) => k(0, &[&d.catalog_id[..]]),
+        EduParsed::PublishCatalogContent(d) => k(0, &[&d.catalog_id[..]]),
+        EduParsed::DeprecateCatalog(d) => k(0, &[&d.catalog_id[..]]),
+        EduParsed::SupersedeCatalog(d) => k(0, &[&d.old_catalog_id[..]]),
+        EduParsed::ArchiveCatalog(d) => k(0, &[&d.catalog_id[..]]),
+        EduParsed::CreateOffering(d) => k(1, &[&d.offering_id[..]]),
+        EduParsed::UpdateOffering(d) => k(1, &[&d.offering_id[..]]),
+        EduParsed::OpenEnrollment(d) => k(1, &[&d.offering_id[..]]),
+        EduParsed::CloseEnrollment(d) => k(1, &[&d.offering_id[..]]),
+        EduParsed::FinalizeCourse(d) => k(1, &[&d.offering_id[..]]),
+        EduParsed::ArchiveOffering(d) => k(1, &[&d.offering_id[..]]),
+        EduParsed::SuspendOrCancel(d) => k(1, &[&d.offering_id[..]]),
+        EduParsed::PublishContent(d) => k(2, &[&d.offering_id[..], &d.content_id[..]]),
+        EduParsed::AddAssessment(d) => k(3, &[&d.offering_id[..], &d.assessment_id[..]]),
+        EduParsed::UpdateAssessment(d) => k(3, &[&d.offering_id[..], &d.assessment_id[..]]),
+        EduParsed::LinkEnrollment(d) => {
+            k(4, &[&d.offering_id[..], &d.student_commitment[..]])
+        }
+        EduParsed::Submit(d, _) => k(
+            5,
+            &[
+                &d.offering_id[..],
+                &d.assessment_id[..],
+                &d.student_commitment[..],
+                &d.attempt.to_be_bytes()[..],
+            ],
+        ),
+        EduParsed::Grade(d) => k(
+            6,
+            &[
+                &d.offering_id[..],
+                &d.assessment_id[..],
+                &d.student_commitment[..],
+            ],
+        ),
+        EduParsed::FinalizeGrade(d) => k(
+            6,
+            &[
+                &d.offering_id[..],
+                &d.assessment_id[..],
+                &d.student_commitment[..],
+            ],
+        ),
+    }
+}
+
 pub struct EducationExecutor {
     db: Arc<Database>,
 }
@@ -359,6 +426,92 @@ impl EducationExecutor {
 
     fn exists(&self, cf_name: &str, key: &[u8]) -> Result<bool> {
         Ok(self.db.get(cf_name, key)?.is_some())
+    }
+
+    // ── Read-only admission helpers (Phase 3) ──
+    // Pure point lookups for the mempool admission filter. No mutation,
+    // no dispatch/fee logic — the executor stays authoritative for any
+    // tx that passes admission.
+
+    pub fn catalog_exists(&self, catalog_id: &[u8; 32]) -> Result<bool> {
+        self.exists(cf::EDU_CATALOG_ENTRIES, catalog_id)
+    }
+
+    pub fn offering_exists(&self, offering_id: &[u8; 32]) -> Result<bool> {
+        self.exists(cf::EDU_OFFERINGS, offering_id)
+    }
+
+    pub fn content_exists(
+        &self,
+        offering_id: &[u8; 32],
+        content_id: &[u8; 32],
+    ) -> Result<bool> {
+        self.exists(cf::EDU_CONTENT_ITEMS, &cat2(offering_id, content_id))
+    }
+
+    pub fn assessment_exists(
+        &self,
+        offering_id: &[u8; 32],
+        assessment_id: &[u8; 32],
+    ) -> Result<bool> {
+        self.exists(cf::EDU_ASSESSMENTS, &cat2(offering_id, assessment_id))
+    }
+
+    pub fn enrollment_link_exists(
+        &self,
+        offering_id: &[u8; 32],
+        student_commitment: &[u8; 32],
+    ) -> Result<bool> {
+        self.exists(
+            cf::EDU_ENROLLMENT_LINKS,
+            &cat2(offering_id, student_commitment),
+        )
+    }
+
+    pub fn submission_exists(
+        &self,
+        offering_id: &[u8; 32],
+        assessment_id: &[u8; 32],
+        student_commitment: &[u8; 32],
+        attempt: u16,
+    ) -> Result<bool> {
+        let mut k = Vec::with_capacity(98);
+        k.extend_from_slice(offering_id);
+        k.extend_from_slice(assessment_id);
+        k.extend_from_slice(student_commitment);
+        k.extend_from_slice(&attempt.to_be_bytes());
+        self.exists(cf::EDU_SUBMISSIONS, &k)
+    }
+
+    /// `true` iff a finalized grade exists for the tuple.
+    pub fn grade_finalized(
+        &self,
+        offering_id: &[u8; 32],
+        assessment_id: &[u8; 32],
+        student_commitment: &[u8; 32],
+    ) -> Result<bool> {
+        let mut k = Vec::with_capacity(96);
+        k.extend_from_slice(offering_id);
+        k.extend_from_slice(assessment_id);
+        k.extend_from_slice(student_commitment);
+        match self.db.get(cf::EDU_GRADES, &k)? {
+            None => Ok(false),
+            Some(b) => {
+                let g: StoredGradeRecord = bincode::deserialize(&b)
+                    .map_err(|e| StateError::SerializationError(e.to_string()))?;
+                Ok(g.finalized)
+            }
+        }
+    }
+
+    /// Count of committed submission receipts for the tuple.
+    pub fn committed_attempts(
+        &self,
+        offering_id: &[u8; 32],
+        assessment_id: &[u8; 32],
+        student_commitment: &[u8; 32],
+    ) -> Result<u16> {
+        self.count_attempts(offering_id, assessment_id, student_commitment)
     }
 
     fn count_attempts(

@@ -106,6 +106,27 @@ pub enum StateError {
     #[error("Duplicate InferenceAttestation for this (session_id, verifier) pair")]
     DuplicateInferenceAttestation,
 
+    /// SRC-817/818 Education suite not activated at the current chain
+    /// height (`education_enabled_from_height` is `None` or in the
+    /// future). Mempool admission rejects pre-activation education txs;
+    /// no receipt is produced (admission only).
+    #[error("Education suite not activated at this height")]
+    EducationNotActivated,
+
+    /// An education record with the same identity is already in-flight
+    /// in the mempool, OR already committed in a Phase 2 education CF.
+    /// Rejected at admission; no receipt (admission only).
+    #[error("Duplicate education record (in-flight or committed)")]
+    DuplicateEducationRecord,
+
+    /// Education tx failed a cheap admission precheck (oversize payload,
+    /// undecodable/unsupported op, or a structural prerequisite such as
+    /// a missing/inactive catalog or missing enrollment). Rejected at
+    /// admission; no receipt — the executor remains authoritative for
+    /// txs that pass admission.
+    #[error("Invalid education transaction: {0}")]
+    InvalidEducationTransaction(String),
+
     #[error("Block validation failed: {0}")]
     BlockValidation(String),
 
