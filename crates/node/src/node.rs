@@ -15,8 +15,9 @@ use sumchain_genesis::Genesis;
 use sumchain_p2p::{NetworkCommand, NetworkConfig, NetworkEvent, NetworkService, SyncState, MAX_BLOCKS_PER_REQUEST};
 use sumchain_primitives::SignedTransaction;
 use sumchain_rpc::{Metrics, RateLimitConfig, RpcAuthConfig, RpcServer, ServerHandle};
+use sumchain_state::education_executor::EducationExecutor;
 use sumchain_state::inference_attestation_executor::InferenceAttestationExecutor;
-use sumchain_state::mempool::InferenceAttestationAdmission;
+use sumchain_state::mempool::{EducationAdmission, InferenceAttestationAdmission};
 use sumchain_state::{Mempool, MempoolConfig, StateManager};
 use sumchain_storage::{BlockStore, Database};
 use tokio::sync::mpsc;
@@ -150,13 +151,25 @@ impl Node {
             current_height: chain_height.clone(),
         };
 
+        // SRC-817/818 Education admission context. Same narrow shape;
+        // reuses the SAME live `chain_height` Arc so the education gate
+        // and the inference gate observe an identical chain tip. Phase
+        // 3 ships the filter; this wiring makes it load-bearing for the
+        // production submit path (read-only — executor authoritative).
+        let education_admission = EducationAdmission {
+            executor: Arc::new(EducationExecutor::new(db.clone())),
+            params: Arc::new(genesis.params.clone()),
+            current_height: chain_height.clone(),
+        };
+
         // Create mempool with admission wired in.
         let mempool = Arc::new(
             Mempool::new(MempoolConfig {
                 min_fee: genesis.params.min_fee,
                 ..Default::default()
             })
-            .with_inference_admission(inference_admission),
+            .with_inference_admission(inference_admission)
+            .with_education_admission(education_admission),
         );
 
         // Create consensus engine based on config
@@ -602,8 +615,11 @@ impl Node {
 //   - `production_wiring_height_advance_opens_gate`
 // They mirror the exact admission recipe in `Node::new` above.
 // If you refactor the wiring (the `InferenceAttestationAdmission { ... }`
-// literal, the `chain_height.store(...)` calls in the event loop, or the
-// `Arc::new(BlockStore::new(&db).get_latest_height()…)` initialization),
-// update those tests too — they are intentionally a verbatim mirror so
-// that drift produces compile or assertion failures rather than silent
-// security regressions.
+// or `EducationAdmission { ... }` literals, the `.with_*_admission(...)`
+// builder chain, the `chain_height.store(...)` calls in the event loop,
+// or the `Arc::new(BlockStore::new(&db).get_latest_height()…)`
+// initialization), update those tests too — they are intentionally a
+// verbatim mirror so that drift produces compile or assertion failures
+// rather than silent security regressions. `EducationAdmission` shares
+// the SAME `chain_height` Arc, so the event-loop `chain_height.store`
+// calls cover both admission gates.
