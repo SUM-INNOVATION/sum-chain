@@ -1,4 +1,5 @@
 {
+  "_comment": "TEMPLATE ONLY — production validators boot from the root runtime genesis.json, NOT this file. Validators/alloc are placeholders. Subprotocol activation params must be edited into each validator's runtime genesis.json (byte-identical), never here. See docs/SUBPROTOCOLS/EDUCATION-ACTIVATION.md.",
   "chain_id": 1,
   "genesis_time": 1734624000000,
   "validators": [

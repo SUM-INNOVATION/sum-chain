@@ -298,6 +298,19 @@ pub struct ChainParamsInfo {
     /// subprotocol will activate. Additive field — appended after
     /// `v2_enabled_from_height`.
     pub omninode_enabled_from_height: Option<u64>,
+
+    /// Block height at which the SRC-817/818 Education suite activates.
+    ///
+    /// `null` (JSON) / `None` (Rust) = education dormant: education txs
+    /// are rejected at mempool admission (`EducationNotActivated`) /
+    /// executor dispatch (`Failed(70)`). A height value means education
+    /// ops are executable from that block onward.
+    ///
+    /// Operators read this to verify activation state on each validator
+    /// post runtime-`genesis.json` edit (see
+    /// `docs/SUBPROTOCOLS/EDUCATION-ACTIVATION.md`). Additive field —
+    /// appended after `omninode_enabled_from_height`.
+    pub education_enabled_from_height: Option<u64>,
 }
 
 /// One archive-node record as returned by `storage_getActiveNodesAtHeight`
