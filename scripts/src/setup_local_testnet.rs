@@ -83,7 +83,7 @@ fn main() -> Result<()> {
             assignment_replication_factor: 3,      // SNIP V2 v3.2: baseline R=3
             v2_enabled_from_height: Some(0),       // local testnet: V2 active from genesis
             omninode_enabled_from_height: None,    // OmniNode subprotocol off by default; opt in per-genesis
-            education_enabled_from_height: None,    // SRC-817/818 Education suite off by default; opt in per-genesis
+            education_enabled_from_height: Some(0), // local/dev: SRC-817/818 Education active from genesis (local only; mainnet/testnet stay None)
         },
     );
 
