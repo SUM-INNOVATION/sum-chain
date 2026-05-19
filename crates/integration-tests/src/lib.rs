@@ -4,6 +4,7 @@
 
 mod nft_tests;
 mod security_tests;
+mod education_e2e_tests;
 mod snip_v2_tests;
 // stress_tests references a stale NftExecutor::execute signature (5-arg vs the
 // current 6-arg shape). Gate behind `legacy_tests` until it's updated, same
@@ -130,6 +131,50 @@ impl TestNode {
 
         consensus.init_genesis(&genesis).expect("Failed to init genesis");
 
+        Self {
+            db,
+            state,
+            mempool,
+            consensus,
+            validator_key_bytes,
+            chain_id,
+            data_dir,
+        }
+    }
+
+    /// Like [`with_allocations`] but with caller-supplied `ChainParams`
+    /// (Phase 5 education e2e needs `education_enabled_from_height:
+    /// Some(0)` in the in-process genesis — does not touch any genesis
+    /// file). `block_time_ms`/`finality_depth` kept at the test values.
+    pub(crate) fn with_allocations_and_params(
+        validator_key_bytes: [u8; 32],
+        chain_id: u64,
+        alloc: HashMap<String, u128>,
+        params: ChainParams,
+    ) -> Self {
+        let data_dir = TempDir::new().expect("Failed to create temp dir");
+        let db = Arc::new(Database::open_default(data_dir.path()).expect("Failed to open database"));
+        let state = Arc::new(StateManager::new(db.clone(), chain_id));
+        let mempool = Arc::new(Mempool::new(MempoolConfig::default()));
+        let validator_key = KeyPair::from_bytes(validator_key_bytes);
+        let genesis = Genesis::new(
+            chain_id,
+            0,
+            vec![validator_key.public_key().to_base58()],
+            alloc,
+            params,
+        );
+        let consensus = Arc::new(
+            PoAEngine::new(
+                db.clone(),
+                state.clone(),
+                mempool.clone(),
+                &genesis,
+                Some(KeyPair::from_bytes(validator_key_bytes)),
+            )
+            .expect("Failed to create consensus engine"),
+        );
+        consensus.init_genesis(&genesis).expect("Failed to init genesis");
         Self {
             db,
             state,
