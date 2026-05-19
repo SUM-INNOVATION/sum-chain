@@ -6683,4 +6683,368 @@ mod education_rpc_phase4_tests {
         assert_eq!(edu_cat_status_label(99), "Unknown");
         assert_eq!(edu_off_status_label(99), "Unknown");
     }
+
+    // ── JSON shape / round-trip for the remaining Info types ──
+
+    fn pol() -> crate::types::ContentAccessPolicyInfo {
+        edu_policy_to_info(&ContentAccessPolicy {
+            opens_at: Some(1),
+            closes_at: Some(9),
+            grace_until: None,
+            audience: AccessAudience::EnrolledStudents,
+            revoke_on_course_archive: true,
+        })
+    }
+
+    fn round_trip<T: serde::Serialize + serde::de::DeserializeOwned>(v: &T) -> String {
+        let j = serde_json::to_string(v).unwrap();
+        let back: T = serde_json::from_str(&j).unwrap();
+        let j2 = serde_json::to_string(&back).unwrap();
+        assert_eq!(j, j2, "round-trip mismatch");
+        j
+    }
+
+    #[test]
+    fn content_access_policy_info_shape() {
+        let p = pol();
+        assert_eq!(p.audience_kind, 1);
+        assert_eq!(p.audience_label, "EnrolledStudents");
+        assert!(p.audience_student_commitment.is_none());
+        let j = round_trip(&p);
+        for k in ["opens_at", "closes_at", "grace_until", "audience_kind", "audience_label", "audience_student_commitment", "revoke_on_course_archive"] {
+            assert!(j.contains(k), "missing field {k}");
+        }
+    }
+
+    #[test]
+    fn managed_snip_ref_and_catalog_content_ref_info_shape() {
+        let m = edu_snip_to_info(&snip());
+        round_trip(&m);
+        let c = crate::types::CatalogContentRefInfo {
+            kind: 2,
+            kind_label: edu_content_kind_label(2),
+            r#ref: m,
+        };
+        assert_eq!(c.kind_label, "DefaultSyllabus");
+        let j = round_trip(&c);
+        assert!(j.contains("\"ref\""), "field must serialize as `ref`");
+        assert!(j.contains("\"kind\"") && j.contains("\"kind_label\""));
+    }
+
+    #[test]
+    fn offering_info_shape() {
+        let o = StoredOffering {
+            offering_id: [1; 32],
+            catalog_id: [2; 32],
+            term: "2026FA".into(),
+            section: "A".into(),
+            instruction_start_at: 1,
+            instruction_end_at: 2,
+            final_grade_submission_deadline: 3,
+            owner: Address::from([8u8; 20]),
+            status: 2,
+            instructor_count: 1,
+            instructor_root: [3; 32],
+            content_count: 0,
+            content_root: [0; 32],
+            assessment_count: 0,
+            assessment_root: [0; 32],
+            enrollment_count: 0,
+            enrollment_root: [0; 32],
+            created_at_height: 5,
+            updated_at_height: 6,
+            nonce: 7,
+        };
+        let i = edu_offering_to_info(&o);
+        assert_eq!(i.status_code, 2);
+        assert_eq!(i.status_label, "EnrollmentClosed");
+        assert_eq!(i.offering_id, format!("0x{}", "01".repeat(32)));
+        assert_eq!(i.owner, o.owner.to_base58());
+        round_trip(&i);
+    }
+
+    #[test]
+    fn assessment_info_shape() {
+        let a = StoredAssessment {
+            offering_id: [1; 32],
+            assessment_id: [2; 32],
+            kind: 1,
+            instructions: snip(),
+            spec_commitment: [3; 32],
+            opens_at: 0,
+            due_at: 100,
+            max_attempts: 2,
+            weight_bps: 1000,
+            answer_key_commitment: Some([0xAB; 32]),
+            answer_key_access: Some(ContentAccessPolicy {
+                opens_at: None,
+                closes_at: None,
+                grace_until: None,
+                audience: AccessAudience::StaffOnly,
+                revoke_on_course_archive: true,
+            }),
+            status: 1,
+            created_at_height: 9,
+        };
+        let i = edu_assessment_to_info(&a);
+        assert_eq!(i.kind_label, "Exam");
+        assert_eq!(i.status_label, "Open");
+        // Answer key is a commitment only — never plaintext.
+        assert_eq!(i.answer_key_commitment, Some(format!("0x{}", "ab".repeat(32))));
+        assert!(i.answer_key_access.is_some());
+        round_trip(&i);
+    }
+
+    #[test]
+    fn enrollment_link_info_shape() {
+        let e = StoredEnrollmentLink {
+            student_commitment: [0x44; 32],
+            enrollment_ref: [0x66; 32],
+            linked_at_height: 12,
+        };
+        let i = edu_enrollment_to_info(&e);
+        assert_eq!(i.student_commitment, format!("0x{}", "44".repeat(32)));
+        let j = round_trip(&i);
+        // Only commitment + ref + height — no address-shaped field.
+        assert!(j.contains("student_commitment") && j.contains("enrollment_ref"));
+    }
+
+    // ── DB-backed read-path tests (executor helper + converter, the
+    //    exact substance each RPC handler runs) ──
+
+    use sumchain_crypto::{sign, KeyPair};
+    use sumchain_genesis::ChainParams;
+    use sumchain_primitives::education::{
+        catalog_op, offering_op, student_commitment, AddAssessmentData, AssessmentKind,
+        CourseLevel, CreateCatalogEntryData, CreateOfferingData, EducationStandard,
+        EducationTxData, GradeSubmissionData, LinkEnrollmentData, OpenEnrollmentData,
+        PublishCatalogContentData, SubmitAssignmentReceiptData,
+    };
+    use sumchain_primitives::{SignedTransaction, TransactionV2, TxPayload};
+    use sumchain_state::executor::BlockExecutor;
+    use sumchain_state::state::StateManager;
+    use sumchain_storage::Database;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    const CID_CHAIN: u64 = 1;
+    const FEE: u128 = 1_000;
+
+    fn p_enabled() -> ChainParams {
+        let mut p = ChainParams::default();
+        p.education_enabled_from_height = Some(0);
+        p
+    }
+
+    fn etx(sp: &KeyPair, nonce: u64, std_: EducationStandard, op: u16, data: Vec<u8>) -> SignedTransaction {
+        let tx = TransactionV2 {
+            chain_id: CID_CHAIN,
+            from: sp.address(),
+            fee: FEE,
+            nonce,
+            payload: TxPayload::Education(EducationTxData {
+                standard: std_,
+                operation: op,
+                data,
+                recipient: Address::ZERO,
+            }),
+        };
+        let h = tx.signing_hash();
+        let s = sign(h.as_bytes(), sp.private_key());
+        SignedTransaction::new_v2(tx, *s.as_bytes(), *sp.public_key().as_bytes())
+    }
+
+    fn b<T: serde::Serialize>(v: &T) -> Vec<u8> {
+        bincode::serialize(v).unwrap()
+    }
+
+    /// Commit a full education chain; return db + key ids for read tests.
+    fn seed() -> (TempDir, Arc<Database>, [u8; 32], [u8; 32], [u8; 32], [u8; 32]) {
+        let dir = TempDir::new().unwrap();
+        let db = Arc::new(Database::open_default(dir.path()).unwrap());
+        let state = Arc::new(StateManager::new(db.clone(), CID_CHAIN));
+        let ex = BlockExecutor::new(state.clone(), db.clone(), p_enabled());
+        let sp = KeyPair::generate();
+        let prop = KeyPair::generate();
+        state
+            .put_account(&sp.address(), &sumchain_storage::schema::AccountState { balance: 1_000_000, nonce: 0 })
+            .unwrap();
+        let inst = [0x21u8; 32];
+        let cid = sumchain_primitives::education::catalog_id(&inst, "CS", "101", 1, 1);
+        let mut n = 0u64;
+        let mut hh = 1u64;
+        macro_rules! run {
+            ($s:expr,$o:expr,$d:expr) => {{
+                let r = ex.execute_tx(&etx(&sp, n, $s, $o, $d), &prop.address(), hh, 50).unwrap();
+                assert!(matches!(r.status, sumchain_primitives::TxStatus::Success), "seed step: {:?}", r.status);
+                n += 1; hh += 1;
+            }};
+        }
+        run!(EducationStandard::CourseCatalog, catalog_op::CREATE_CATALOG_ENTRY, b(&CreateCatalogEntryData {
+            catalog_id: cid, institution_id: inst, department: "CS".into(), course_code: "101".into(),
+            course_title: Some("Intro".into()), title_commitment: None, course_level: CourseLevel::Undergraduate as u8,
+            credit_hours: Some(3), credit_commitment: None, prerequisites_count: 0, prerequisites_root: None,
+            version: 1, supersedes: None, nonce: 1,
+        }));
+        run!(EducationStandard::CourseCatalog, catalog_op::PUBLISH_CATALOG_CONTENT, b(&PublishCatalogContentData {
+            catalog_id: cid, description_ref: Some(snip()), learning_outcomes_ref: None,
+            default_syllabus_ref: None, default_assessment_policy_ref: None, nonce: 2,
+        }));
+        let oid = sumchain_primitives::education::offering_id(&cid, "2026FA", "A", &Address::ZERO, 1);
+        run!(EducationStandard::CourseOffering, offering_op::CREATE_OFFERING, b(&CreateOfferingData {
+            offering_id: oid, catalog_id: cid, term: "2026FA".into(), section: "A".into(),
+            instruction_start_at: 0, instruction_end_at: 1000, final_grade_submission_deadline: 2000, nonce: 1,
+        }));
+        run!(EducationStandard::CourseOffering, offering_op::OPEN_ENROLLMENT, b(&OpenEnrollmentData { offering_id: oid, nonce: 2 }));
+        let aid = [0x5au8; 32];
+        run!(EducationStandard::CourseOffering, offering_op::ADD_ASSESSMENT, b(&AddAssessmentData {
+            offering_id: oid, assessment_id: aid, kind: AssessmentKind::Assignment as u8, instructions: snip(),
+            spec_commitment: [0; 32], opens_at: 0, due_at: 100, max_attempts: 2, weight_bps: 1000,
+            answer_key_commitment: None, answer_key_access: None, nonce: 3,
+        }));
+        let sc = student_commitment(&[0xC1; 32], &oid, &[0xD1; 32]);
+        run!(EducationStandard::CourseOffering, offering_op::LINK_ENROLLMENT, b(&LinkEnrollmentData {
+            offering_id: oid, student_commitment: sc, enrollment_ref: [0xEE; 32], nonce: 4,
+        }));
+        run!(EducationStandard::CourseOffering, offering_op::SUBMIT_ASSIGNMENT, b(&SubmitAssignmentReceiptData {
+            offering_id: oid, assessment_id: aid, student_commitment: sc, submission_commitment: [0xAA; 32],
+            work: snip(), attempt: 0, enrollment_ref: [0xEE; 32], student_auth_commitment: None,
+        }));
+        run!(EducationStandard::CourseOffering, offering_op::GRADE_SUBMISSION, b(&GradeSubmissionData {
+            offering_id: oid, assessment_id: aid, student_commitment: sc, grade_commitment: [0x12; 32],
+            feedback: Some(snip()), grader_role: 1, nonce: 8,
+        }));
+        (dir, db, cid, oid, aid, sc)
+    }
+
+    #[test]
+    fn db_backed_reads_present_and_missing() {
+        let (_d, db, cid, oid, aid, sc) = seed();
+        let ex = EducationExecutor::new(db.clone());
+
+        // Present.
+        let c = ex.get_catalog(&cid).unwrap().unwrap();
+        let ci = edu_catalog_to_info(&c);
+        assert_eq!(ci.catalog_id, edu_hex0x(&cid));
+        assert_eq!(ci.status_label, "Active"); // published -> Active
+
+        let content = ex.get_catalog_content(&cid).unwrap();
+        assert_eq!(content.len(), 1); // only description_ref set
+        assert_eq!(content[0].0, 0); // kind Description
+
+        let o = ex.get_offering(&oid).unwrap().unwrap();
+        assert_eq!(edu_offering_to_info(&o).status_label, "Active");
+
+        let asmts = ex.list_assessments(&oid, 256).unwrap();
+        assert_eq!(asmts.len(), 1);
+        let ai = edu_assessment_to_info(&asmts[0]);
+        assert_eq!(ai.assessment_id, edu_hex0x(&aid));
+
+        assert!(ex.get_assessment(&oid, &aid).unwrap().is_some());
+        let link = ex.get_enrollment_link(&oid, &sc).unwrap().unwrap();
+        assert_eq!(edu_enrollment_to_info(&link).student_commitment, edu_hex0x(&sc));
+
+        let rec = ex.get_submission_receipt(&oid, &aid, &sc, 0).unwrap().unwrap();
+        assert_eq!(edu_submission_to_info(&rec).submission_commitment, edu_hex0x(&[0xAA; 32]));
+
+        let subs = ex.list_submissions_by_student_commitment(&sc, 256).unwrap();
+        assert_eq!(subs.len(), 1);
+
+        let g = ex.get_grade_record(&oid, &aid, &sc).unwrap().unwrap();
+        assert_eq!(edu_grade_to_info(&g).grade_commitment, edu_hex0x(&[0x12; 32]));
+
+        // Missing → None.
+        assert!(ex.get_catalog(&[0xFF; 32]).unwrap().is_none());
+        assert!(ex.get_offering(&[0xFF; 32]).unwrap().is_none());
+        assert!(ex.get_assessment(&oid, &[0xFF; 32]).unwrap().is_none());
+        assert!(ex.get_enrollment_link(&oid, &[0xFF; 32]).unwrap().is_none());
+        assert!(ex.get_submission_receipt(&oid, &aid, &sc, 99).unwrap().is_none());
+        assert!(ex.get_grade_record(&oid, &[0xFF; 32], &sc).unwrap().is_none());
+        assert!(ex.get_catalog_content(&[0xFF; 32]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn db_backed_list_by_index_and_limit_clamp() {
+        // 3 catalogs under one institution; assert limit clamp.
+        let dir = TempDir::new().unwrap();
+        let db = Arc::new(Database::open_default(dir.path()).unwrap());
+        let state = Arc::new(StateManager::new(db.clone(), CID_CHAIN));
+        let bex = BlockExecutor::new(state.clone(), db.clone(), p_enabled());
+        let sp = KeyPair::generate();
+        let prop = KeyPair::generate();
+        state.put_account(&sp.address(), &sumchain_storage::schema::AccountState { balance: 1_000_000, nonce: 0 }).unwrap();
+        let inst = [0x31u8; 32];
+        for (i, code) in ["A", "B", "C"].iter().enumerate() {
+            let cid = sumchain_primitives::education::catalog_id(&inst, "CS", code, 1, 1);
+            let r = bex.execute_tx(&etx(&sp, i as u64, EducationStandard::CourseCatalog, catalog_op::CREATE_CATALOG_ENTRY, b(&CreateCatalogEntryData {
+                catalog_id: cid, institution_id: inst, department: "CS".into(), course_code: (*code).into(),
+                course_title: None, title_commitment: None, course_level: 0, credit_hours: Some(3),
+                credit_commitment: None, prerequisites_count: 0, prerequisites_root: None, version: 1,
+                supersedes: None, nonce: 1,
+            })), &prop.address(), (i as u64) + 1, 0).unwrap();
+            assert!(matches!(r.status, sumchain_primitives::TxStatus::Success));
+        }
+        let ex = EducationExecutor::new(db.clone());
+        assert_eq!(ex.list_catalogs_by_institution(&inst, 256).unwrap().len(), 3);
+        // Clamp: requesting 2 returns at most 2.
+        assert_eq!(ex.list_catalogs_by_institution(&inst, 2).unwrap().len(), 2);
+        // by_code returns exactly the one matching (department, code).
+        assert_eq!(ex.list_catalogs_by_code("CS", "B", 256).unwrap().len(), 1);
+        assert_eq!(ex.list_catalogs_by_code("CS", "ZZ", 256).unwrap().len(), 0);
+        // offerings-by-catalog empty when none.
+        assert!(ex.list_offerings_by_catalog(&[0x99; 32], 256).unwrap().is_empty());
+    }
+
+    #[test]
+    fn bad_hex_param_is_invalid_params() {
+        // The handler path's only failure mode before the executor is
+        // hex parsing; assert it maps to InvalidParams (no panic, no
+        // Internal). edu_parse_hex32 backs RpcServer::parse_hex32.
+        assert!(edu_parse_hex32("nothex").is_err());
+        assert!(edu_parse_hex32("0x1234").is_err());
+        assert!(edu_parse_hex32(&"00".repeat(32)).is_ok());
+    }
+
+    #[test]
+    fn all_response_types_privacy_serialization_scan() {
+        // Build one of EVERY education Info response from seeded DB rows
+        // and assert the combined JSON exposes no raw student address,
+        // raw grade, submission body, answer-key plaintext, or SNIP
+        // decryption material.
+        const FORBIDDEN_STUDENT_ADDR: [u8; 20] = [0x7E; 20];
+        let (_d, db, cid, oid, aid, sc) = seed();
+        let ex = EducationExecutor::new(db.clone());
+
+        let mut blobs: Vec<String> = Vec::new();
+        blobs.push(serde_json::to_string(&edu_catalog_to_info(&ex.get_catalog(&cid).unwrap().unwrap())).unwrap());
+        for (k, m) in ex.get_catalog_content(&cid).unwrap() {
+            blobs.push(serde_json::to_string(&crate::types::CatalogContentRefInfo {
+                kind: k, kind_label: edu_content_kind_label(k), r#ref: edu_snip_to_info(&m),
+            }).unwrap());
+        }
+        blobs.push(serde_json::to_string(&edu_offering_to_info(&ex.get_offering(&oid).unwrap().unwrap())).unwrap());
+        blobs.push(serde_json::to_string(&edu_assessment_to_info(&ex.get_assessment(&oid, &aid).unwrap().unwrap())).unwrap());
+        blobs.push(serde_json::to_string(&edu_enrollment_to_info(&ex.get_enrollment_link(&oid, &sc).unwrap().unwrap())).unwrap());
+        blobs.push(serde_json::to_string(&edu_submission_to_info(&ex.get_submission_receipt(&oid, &aid, &sc, 0).unwrap().unwrap())).unwrap());
+        blobs.push(serde_json::to_string(&edu_grade_to_info(&ex.get_grade_record(&oid, &aid, &sc).unwrap().unwrap())).unwrap());
+        let all = blobs.join("\n");
+
+        // No raw student address pattern anywhere.
+        assert!(!all.contains(&hex::encode(FORBIDDEN_STUDENT_ADDR)));
+        // No raw-grade / plaintext / decryption-material field names.
+        for banned in [
+            "grade_value", "raw_grade", "plaintext", "answer_key_plaintext",
+            "decryption", "decrypt_key", "submission_body", "work_bytes",
+            "private_key", "secret",
+        ] {
+            assert!(!all.contains(banned), "leaked banned token: {banned}");
+        }
+        // Grade is exposed ONLY as a commitment.
+        let gi = edu_grade_to_info(&ex.get_grade_record(&oid, &aid, &sc).unwrap().unwrap());
+        assert_eq!(gi.grade_commitment, edu_hex0x(&[0x12; 32]));
+        // Student appears only as a 32-byte commitment hex (64 chars).
+        let si = edu_submission_to_info(&ex.get_submission_receipt(&oid, &aid, &sc, 0).unwrap().unwrap());
+        assert_eq!(si.student_commitment, edu_hex0x(&sc));
+        assert!(si.submitter != si.student_commitment);
+    }
 }
