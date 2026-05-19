@@ -8,6 +8,10 @@ use jsonrpsee::server::{Server, ServerHandle};
 use sumchain_consensus::ConsensusEngine;
 use sumchain_primitives::{Address, Block, Hash, SignedTransaction, MessagingTxData, MessagingOperation, SponsoredMessage, TxPayload};
 use sumchain_state::inference_attestation_executor::InferenceAttestationExecutor;
+use sumchain_state::education_executor::{
+    EducationExecutor, StoredAssessment, StoredCatalogEntry, StoredEnrollmentLink,
+    StoredGradeRecord, StoredOffering, StoredSubmissionReceipt, MAX_EDU_LIST_LIMIT,
+};
 use sumchain_state::{Mempool, StateManager};
 use sumchain_storage::{BlockStore, Database, DelegationStore, DocClassStore, EmploymentCredentialStore, EmploymentIssuerStore, IncomeAttestationStore, MessagingStore, NftStore, ReceiptStore, SlashingStore, StakingStore, TokenStore, TxIndexStore, TxStore, ValidatorSetStore};
 use tokio::sync::mpsc;
@@ -422,6 +426,12 @@ impl RpcServer {
             tx_hash: record.tx_hash.to_hex(),
             finalized,
         }
+    }
+
+    /// Parse a `0x`-prefixed (or bare) 64-hex-char string into `[u8;32]`.
+    /// Used for education id/commitment params (never an address).
+    fn parse_hex32(&self, s: &str) -> Result<[u8; 32]> {
+        edu_parse_hex32(s).map_err(RpcError::InvalidParams)
     }
 
     /// Parse hash from string
@@ -1027,6 +1037,183 @@ impl SumChainApiServer for RpcServer {
             self.consensus.current_height(),
             self.consensus.finality_depth(),
         ))
+    }
+
+    // ========================================================================
+    // SRC-817/818 Education suite — read-only RPC (Phase 4)
+    // Read-only: never touches executor/mempool/fee/nonce. Reads work
+    // regardless of the education activation gate. Student lookup is
+    // ONLY by `student_commitment` (a hash, never an address).
+    // ========================================================================
+
+    async fn src817_get_catalog_entry(
+        &self,
+        catalog_id: String,
+    ) -> std::result::Result<Option<CatalogEntryInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let id = self.parse_hex32(&catalog_id)?;
+        let ex = EducationExecutor::new(self.db.clone());
+        let rec = ex.get_catalog(&id).map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(rec.as_ref().map(edu_catalog_to_info))
+    }
+
+    async fn src817_get_catalog_content(
+        &self,
+        catalog_id: String,
+    ) -> std::result::Result<Vec<CatalogContentRefInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let id = self.parse_hex32(&catalog_id)?;
+        let ex = EducationExecutor::new(self.db.clone());
+        let rows = ex
+            .get_catalog_content(&id)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(rows
+            .into_iter()
+            .map(|(kind, m)| CatalogContentRefInfo {
+                kind,
+                kind_label: edu_content_kind_label(kind),
+                r#ref: edu_snip_to_info(&m),
+            })
+            .collect())
+    }
+
+    async fn src817_list_catalogs_by_institution(
+        &self,
+        institution_id: String,
+        limit: Option<u32>,
+    ) -> std::result::Result<Vec<CatalogEntryInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let id = self.parse_hex32(&institution_id)?;
+        let lim = limit.map(|l| l as usize).unwrap_or(MAX_EDU_LIST_LIMIT);
+        let ex = EducationExecutor::new(self.db.clone());
+        let rows = ex
+            .list_catalogs_by_institution(&id, lim)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(rows.iter().map(edu_catalog_to_info).collect())
+    }
+
+    async fn src817_list_catalogs_by_code(
+        &self,
+        department: String,
+        course_code: String,
+        limit: Option<u32>,
+    ) -> std::result::Result<Vec<CatalogEntryInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let lim = limit.map(|l| l as usize).unwrap_or(MAX_EDU_LIST_LIMIT);
+        let ex = EducationExecutor::new(self.db.clone());
+        let rows = ex
+            .list_catalogs_by_code(&department, &course_code, lim)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(rows.iter().map(edu_catalog_to_info).collect())
+    }
+
+    async fn src818_get_offering(
+        &self,
+        offering_id: String,
+    ) -> std::result::Result<Option<OfferingInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let id = self.parse_hex32(&offering_id)?;
+        let ex = EducationExecutor::new(self.db.clone());
+        let rec = ex.get_offering(&id).map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(rec.as_ref().map(edu_offering_to_info))
+    }
+
+    async fn src818_list_offerings_by_catalog(
+        &self,
+        catalog_id: String,
+        limit: Option<u32>,
+    ) -> std::result::Result<Vec<OfferingInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let id = self.parse_hex32(&catalog_id)?;
+        let lim = limit.map(|l| l as usize).unwrap_or(MAX_EDU_LIST_LIMIT);
+        let ex = EducationExecutor::new(self.db.clone());
+        let rows = ex
+            .list_offerings_by_catalog(&id, lim)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(rows.iter().map(edu_offering_to_info).collect())
+    }
+
+    async fn src818_list_assessments(
+        &self,
+        offering_id: String,
+        limit: Option<u32>,
+    ) -> std::result::Result<Vec<AssessmentInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let id = self.parse_hex32(&offering_id)?;
+        let lim = limit.map(|l| l as usize).unwrap_or(MAX_EDU_LIST_LIMIT);
+        let ex = EducationExecutor::new(self.db.clone());
+        let rows = ex
+            .list_assessments(&id, lim)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(rows.iter().map(edu_assessment_to_info).collect())
+    }
+
+    async fn src818_get_assessment(
+        &self,
+        offering_id: String,
+        assessment_id: String,
+    ) -> std::result::Result<Option<AssessmentInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let oid = self.parse_hex32(&offering_id)?;
+        let aid = self.parse_hex32(&assessment_id)?;
+        let ex = EducationExecutor::new(self.db.clone());
+        let rec = ex
+            .get_assessment(&oid, &aid)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(rec.as_ref().map(edu_assessment_to_info))
+    }
+
+    async fn src818_get_enrollment_link(
+        &self,
+        offering_id: String,
+        student_commitment: String,
+    ) -> std::result::Result<Option<EnrollmentLinkInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let oid = self.parse_hex32(&offering_id)?;
+        let sc = self.parse_hex32(&student_commitment)?;
+        let ex = EducationExecutor::new(self.db.clone());
+        let rec = ex
+            .get_enrollment_link(&oid, &sc)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(rec.as_ref().map(edu_enrollment_to_info))
+    }
+
+    async fn src818_get_submission_receipt(
+        &self,
+        offering_id: String,
+        assessment_id: String,
+        student_commitment: String,
+        attempt: u16,
+    ) -> std::result::Result<Option<SubmissionReceiptInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let oid = self.parse_hex32(&offering_id)?;
+        let aid = self.parse_hex32(&assessment_id)?;
+        let sc = self.parse_hex32(&student_commitment)?;
+        let ex = EducationExecutor::new(self.db.clone());
+        let rec = ex
+            .get_submission_receipt(&oid, &aid, &sc, attempt)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(rec.as_ref().map(edu_submission_to_info))
+    }
+
+    async fn src818_list_submissions_by_student_commitment(
+        &self,
+        student_commitment: String,
+        limit: Option<u32>,
+    ) -> std::result::Result<Vec<SubmissionReceiptInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let sc = self.parse_hex32(&student_commitment)?;
+        let lim = limit.map(|l| l as usize).unwrap_or(MAX_EDU_LIST_LIMIT);
+        let ex = EducationExecutor::new(self.db.clone());
+        let rows = ex
+            .list_submissions_by_student_commitment(&sc, lim)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(rows.iter().map(edu_submission_to_info).collect())
+    }
+
+    async fn src818_get_grade_record(
+        &self,
+        offering_id: String,
+        assessment_id: String,
+        student_commitment: String,
+    ) -> std::result::Result<Option<GradeRecordInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let oid = self.parse_hex32(&offering_id)?;
+        let aid = self.parse_hex32(&assessment_id)?;
+        let sc = self.parse_hex32(&student_commitment)?;
+        let ex = EducationExecutor::new(self.db.clone());
+        let rec = ex
+            .get_grade_record(&oid, &aid, &sc)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(rec.as_ref().map(edu_grade_to_info))
     }
 
     // ========================================================================
@@ -5585,6 +5772,256 @@ impl RpcServer {
 // indirectly via the `BlockHeightInfo` JSON shape tests since that contract
 // is what SNIP serializes against.
 // ============================================================================
+// ============================================================================
+// SRC-817/818 Education suite — stored → RPC-view converters (Phase 4)
+// Pure functions; no DB access. 32-byte fields => 0x+hex; Addresses =>
+// base58 (chain canonical). Status/kind/audience => numeric + label.
+// Never emits raw grade/submission/answer-key/decryption material —
+// the stored records only ever hold commitments + refs.
+// ============================================================================
+
+fn edu_hex0x(b: &[u8; 32]) -> String {
+    format!("0x{}", hex::encode(b))
+}
+
+/// Parse a `0x`-prefixed (or bare) 64-hex string into `[u8;32]`.
+/// Free fn so it is unit-testable without an `RpcServer`.
+fn edu_parse_hex32(s: &str) -> std::result::Result<[u8; 32], String> {
+    let trimmed = s.strip_prefix("0x").unwrap_or(s);
+    let bytes =
+        hex::decode(trimmed).map_err(|_| format!("Invalid hex32: {s}"))?;
+    if bytes.len() != 32 {
+        return Err(format!(
+            "expected 32 bytes (64 hex chars), got {}",
+            bytes.len()
+        ));
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Ok(out)
+}
+
+fn edu_cat_status_label(c: u8) -> String {
+    match c {
+        0 => "Draft",
+        1 => "Active",
+        2 => "Deprecated",
+        3 => "Archived",
+        _ => "Unknown",
+    }
+    .to_string()
+}
+
+fn edu_off_status_label(c: u8) -> String {
+    match c {
+        0 => "Draft",
+        1 => "Active",
+        2 => "EnrollmentClosed",
+        3 => "Completed",
+        4 => "Archived",
+        5 => "Suspended",
+        6 => "Cancelled",
+        _ => "Unknown",
+    }
+    .to_string()
+}
+
+fn edu_assess_status_label(c: u8) -> String {
+    match c {
+        0 => "Draft",
+        1 => "Open",
+        2 => "Closed",
+        3 => "Graded",
+        _ => "Unknown",
+    }
+    .to_string()
+}
+
+fn edu_content_kind_label(c: u8) -> String {
+    match c {
+        0 => "Description",
+        1 => "LearningOutcomes",
+        2 => "DefaultSyllabus",
+        3 => "DefaultAssessmentPolicy",
+        _ => "Unknown",
+    }
+    .to_string()
+}
+
+fn edu_policy_to_info(
+    p: &sumchain_primitives::education::ContentAccessPolicy,
+) -> crate::types::ContentAccessPolicyInfo {
+    use sumchain_primitives::education::AccessAudience::*;
+    let (kind, label, sc) = match &p.audience {
+        Public => (0u8, "Public", None),
+        EnrolledStudents => (1, "EnrolledStudents", None),
+        InstructorsOnly => (2, "InstructorsOnly", None),
+        StaffOnly => (3, "StaffOnly", None),
+        IndividualStudent(c) => (4, "IndividualStudent", Some(edu_hex0x(c))),
+    };
+    crate::types::ContentAccessPolicyInfo {
+        opens_at: p.opens_at,
+        closes_at: p.closes_at,
+        grace_until: p.grace_until,
+        audience_kind: kind,
+        audience_label: label.to_string(),
+        audience_student_commitment: sc,
+        revoke_on_course_archive: p.revoke_on_course_archive,
+    }
+}
+
+fn edu_snip_to_info(
+    m: &sumchain_primitives::education::ManagedSnipRef,
+) -> crate::types::ManagedSnipRefInfo {
+    crate::types::ManagedSnipRefInfo {
+        content_root: edu_hex0x(&m.snip_ref.content_root),
+        snip_file_id: m.snip_ref.snip_file_id.as_ref().map(edu_hex0x),
+        size_bytes: m.snip_ref.size_bytes,
+        schema_version: m.snip_ref.schema_version,
+        access_policy: edu_policy_to_info(&m.access_policy),
+    }
+}
+
+fn edu_catalog_to_info(c: &StoredCatalogEntry) -> crate::types::CatalogEntryInfo {
+    crate::types::CatalogEntryInfo {
+        catalog_id: edu_hex0x(&c.catalog_id),
+        institution_id: edu_hex0x(&c.institution_id),
+        department: c.department.clone(),
+        course_code: c.course_code.clone(),
+        course_title: c.course_title.clone(),
+        title_commitment: c.title_commitment.as_ref().map(edu_hex0x),
+        course_level: c.course_level,
+        credit_hours: c.credit_hours,
+        credit_commitment: c.credit_commitment.as_ref().map(edu_hex0x),
+        prerequisites_count: c.prerequisites_count,
+        prerequisites_root: edu_hex0x(&c.prerequisites_root),
+        accreditation_count: c.accreditation_count,
+        accreditation_root: edu_hex0x(&c.accreditation_root),
+        status_code: c.status,
+        status_label: edu_cat_status_label(c.status),
+        version: c.version,
+        supersedes: c.supersedes.as_ref().map(edu_hex0x),
+        superseded_by: c.superseded_by.as_ref().map(edu_hex0x),
+        owner: c.owner.to_base58(),
+        created_at_height: c.created_at_height,
+        updated_at_height: c.updated_at_height,
+        nonce: c.nonce,
+    }
+}
+
+fn edu_offering_to_info(o: &StoredOffering) -> crate::types::OfferingInfo {
+    crate::types::OfferingInfo {
+        offering_id: edu_hex0x(&o.offering_id),
+        catalog_id: edu_hex0x(&o.catalog_id),
+        term: o.term.clone(),
+        section: o.section.clone(),
+        instruction_start_at: o.instruction_start_at,
+        instruction_end_at: o.instruction_end_at,
+        final_grade_submission_deadline: o.final_grade_submission_deadline,
+        owner: o.owner.to_base58(),
+        status_code: o.status,
+        status_label: edu_off_status_label(o.status),
+        instructor_count: o.instructor_count,
+        instructor_root: edu_hex0x(&o.instructor_root),
+        content_count: o.content_count,
+        content_root: edu_hex0x(&o.content_root),
+        assessment_count: o.assessment_count,
+        assessment_root: edu_hex0x(&o.assessment_root),
+        enrollment_count: o.enrollment_count,
+        enrollment_root: edu_hex0x(&o.enrollment_root),
+        created_at_height: o.created_at_height,
+        updated_at_height: o.updated_at_height,
+        nonce: o.nonce,
+    }
+}
+
+fn edu_assessment_to_info(a: &StoredAssessment) -> crate::types::AssessmentInfo {
+    crate::types::AssessmentInfo {
+        offering_id: edu_hex0x(&a.offering_id),
+        assessment_id: edu_hex0x(&a.assessment_id),
+        kind: a.kind,
+        kind_label: match a.kind {
+            0 => "Assignment",
+            1 => "Exam",
+            2 => "Quiz",
+            3 => "Project",
+            _ => "Unknown",
+        }
+        .to_string(),
+        instructions: edu_snip_to_info(&a.instructions),
+        spec_commitment: edu_hex0x(&a.spec_commitment),
+        opens_at: a.opens_at,
+        due_at: a.due_at,
+        max_attempts: a.max_attempts,
+        weight_bps: a.weight_bps,
+        answer_key_commitment: a.answer_key_commitment.as_ref().map(edu_hex0x),
+        answer_key_access: a.answer_key_access.as_ref().map(edu_policy_to_info),
+        status_code: a.status,
+        status_label: edu_assess_status_label(a.status),
+        created_at_height: a.created_at_height,
+    }
+}
+
+fn edu_enrollment_to_info(
+    e: &StoredEnrollmentLink,
+) -> crate::types::EnrollmentLinkInfo {
+    crate::types::EnrollmentLinkInfo {
+        student_commitment: edu_hex0x(&e.student_commitment),
+        enrollment_ref: edu_hex0x(&e.enrollment_ref),
+        linked_at_height: e.linked_at_height,
+    }
+}
+
+fn edu_submission_to_info(
+    s: &StoredSubmissionReceipt,
+) -> crate::types::SubmissionReceiptInfo {
+    crate::types::SubmissionReceiptInfo {
+        offering_id: edu_hex0x(&s.offering_id),
+        assessment_id: edu_hex0x(&s.assessment_id),
+        student_commitment: edu_hex0x(&s.student_commitment),
+        attempt: s.attempt,
+        submission_commitment: edu_hex0x(&s.submission_commitment),
+        work: edu_snip_to_info(&s.work),
+        student_auth_commitment: s.student_auth_commitment.as_ref().map(edu_hex0x),
+        enrollment_ref: edu_hex0x(&s.enrollment_ref),
+        submitter: s.submitter.to_base58(),
+        late: s.late,
+        submitted_at_height: s.submitted_at_height,
+        submitted_at_ts: s.submitted_at_ts,
+        status_code: s.status,
+        status_label: match s.status {
+            0 => "Submitted",
+            1 => "Graded",
+            2 => "Resubmitted",
+            3 => "Voided",
+            _ => "Unknown",
+        }
+        .to_string(),
+    }
+}
+
+fn edu_grade_to_info(g: &StoredGradeRecord) -> crate::types::GradeRecordInfo {
+    crate::types::GradeRecordInfo {
+        offering_id: edu_hex0x(&g.offering_id),
+        assessment_id: edu_hex0x(&g.assessment_id),
+        student_commitment: edu_hex0x(&g.student_commitment),
+        grade_commitment: edu_hex0x(&g.grade_commitment),
+        feedback: g.feedback.as_ref().map(edu_snip_to_info),
+        grader: g.grader.to_base58(),
+        grader_role: g.grader_role,
+        graded_at_height: g.graded_at_height,
+        status_code: g.status,
+        status_label: match g.status {
+            0 => "Provisional",
+            1 => "Finalized",
+            2 => "Revised",
+            _ => "Unknown",
+        }
+        .to_string(),
+        finalized: g.finalized,
+    }
+}
+
 #[cfg(test)]
 mod phase_0b_rpc_tests {
     // The pure `classify_inference_attestation_status` tests now live
@@ -6081,3 +6518,169 @@ mod phase_0b_rpc_tests {
     }
 }
 
+
+#[cfg(test)]
+mod education_rpc_phase4_tests {
+    use super::*;
+    use sumchain_primitives::education::{
+        AccessAudience, ContentAccessPolicy, ManagedSnipRef, SnipRef,
+    };
+    use sumchain_primitives::Address;
+
+    fn snip() -> ManagedSnipRef {
+        ManagedSnipRef {
+            snip_ref: SnipRef {
+                content_root: [0x11; 32],
+                snip_file_id: Some([0x22; 32]),
+                size_bytes: 4096,
+                schema_version: 1,
+            },
+            access_policy: ContentAccessPolicy {
+                opens_at: Some(1),
+                closes_at: None,
+                grace_until: None,
+                audience: AccessAudience::IndividualStudent([0x33; 32]),
+                revoke_on_course_archive: true,
+            },
+        }
+    }
+
+    #[test]
+    fn parse_hex32_accepts_0x_and_bare_rejects_bad() {
+        let bare = "ab".repeat(32);
+        assert_eq!(edu_parse_hex32(&bare).unwrap(), [0xab; 32]);
+        assert_eq!(
+            edu_parse_hex32(&format!("0x{bare}")).unwrap(),
+            [0xab; 32]
+        );
+        assert!(edu_parse_hex32("0xzz").is_err()); // non-hex
+        assert!(edu_parse_hex32("0xabcd").is_err()); // too short
+        assert!(edu_parse_hex32(&"ab".repeat(33)).is_err()); // too long
+    }
+
+    #[test]
+    fn managed_snip_ref_info_round_trips_and_hex_encodes() {
+        let info = edu_snip_to_info(&snip());
+        assert_eq!(info.content_root, format!("0x{}", "11".repeat(32)));
+        assert_eq!(info.snip_file_id.as_deref(), Some(format!("0x{}", "22".repeat(32)).as_str()));
+        assert_eq!(info.access_policy.audience_kind, 4);
+        assert_eq!(info.access_policy.audience_label, "IndividualStudent");
+        assert_eq!(
+            info.access_policy.audience_student_commitment,
+            Some(format!("0x{}", "33".repeat(32)))
+        );
+        let j = serde_json::to_string(&info).unwrap();
+        let back: crate::types::ManagedSnipRefInfo = serde_json::from_str(&j).unwrap();
+        assert_eq!(serde_json::to_string(&back).unwrap(), j);
+    }
+
+    #[test]
+    fn catalog_to_info_shape_and_owner_base58() {
+        let owner = Address::from([7u8; 20]);
+        let c = StoredCatalogEntry {
+            catalog_id: [1; 32],
+            institution_id: [2; 32],
+            department: "CS".into(),
+            course_code: "CS101".into(),
+            course_title: Some("Intro".into()),
+            title_commitment: None,
+            course_level: 0,
+            credit_hours: Some(3),
+            credit_commitment: None,
+            prerequisites_count: 0,
+            prerequisites_root: [0; 32],
+            accreditation_count: 0,
+            accreditation_root: [0; 32],
+            status: 1,
+            version: 1,
+            supersedes: None,
+            superseded_by: None,
+            owner,
+            created_at_height: 10,
+            updated_at_height: 11,
+            nonce: 7,
+        };
+        let info = edu_catalog_to_info(&c);
+        assert_eq!(info.catalog_id, format!("0x{}", "01".repeat(32)));
+        assert_eq!(info.status_code, 1);
+        assert_eq!(info.status_label, "Active");
+        assert_eq!(info.owner, owner.to_base58());
+        // Round-trip the JSON contract.
+        let j = serde_json::to_string(&info).unwrap();
+        let back: crate::types::CatalogEntryInfo = serde_json::from_str(&j).unwrap();
+        assert_eq!(serde_json::to_string(&back).unwrap(), j);
+    }
+
+    #[test]
+    fn submission_receipt_info_privacy_no_raw_student_address() {
+        // A distinctive 20-byte "raw student address" pattern that must
+        // never appear in the serialized receipt view.
+        const FORBIDDEN_STUDENT_ADDR: [u8; 20] = [0x7E; 20];
+        let submitter = Address::from([9u8; 20]); // sponsor (allowed)
+        let r = StoredSubmissionReceipt {
+            offering_id: [1; 32],
+            assessment_id: [2; 32],
+            student_commitment: [0x44; 32], // hash, never an address
+            attempt: 0,
+            submission_commitment: [0x55; 32],
+            work: snip(),
+            student_auth_commitment: None,
+            enrollment_ref: [0x66; 32],
+            submitter,
+            late: false,
+            submitted_at_height: 5,
+            submitted_at_ts: 99,
+            status: 0,
+        };
+        let info = edu_submission_to_info(&r);
+        let j = serde_json::to_string(&info).unwrap();
+        // No raw student address pattern anywhere in the response.
+        let forbidden_hex = hex::encode(FORBIDDEN_STUDENT_ADDR);
+        assert!(!j.contains(&forbidden_hex));
+        // Student only as a 32-byte commitment.
+        assert_eq!(info.student_commitment, format!("0x{}", "44".repeat(32)));
+        // Submitter is the sponsor (base58), explicitly not the student.
+        assert_eq!(info.submitter, submitter.to_base58());
+        assert_ne!(info.submitter, info.student_commitment);
+        let back: crate::types::SubmissionReceiptInfo = serde_json::from_str(&j).unwrap();
+        assert_eq!(serde_json::to_string(&back).unwrap(), j);
+    }
+
+    #[test]
+    fn grade_record_info_exposes_commitment_not_raw_grade() {
+        let g = StoredGradeRecord {
+            offering_id: [1; 32],
+            assessment_id: [2; 32],
+            student_commitment: [0x44; 32],
+            grade_commitment: [0xAB; 32],
+            feedback: Some(snip()),
+            grader: Address::from([3u8; 20]),
+            grader_role: 1,
+            graded_at_height: 7,
+            status: 1,
+            finalized: true,
+        };
+        let info = edu_grade_to_info(&g);
+        // Only a commitment is present; there is no raw-grade field on
+        // the type at all (compile-time guarantee) and the value is the
+        // committed hash.
+        assert_eq!(info.grade_commitment, format!("0x{}", "ab".repeat(32)));
+        assert_eq!(info.status_label, "Finalized");
+        assert!(info.finalized);
+        let j = serde_json::to_string(&info).unwrap();
+        let back: crate::types::GradeRecordInfo = serde_json::from_str(&j).unwrap();
+        assert_eq!(serde_json::to_string(&back).unwrap(), j);
+    }
+
+    #[test]
+    fn status_labels_cover_all_codes() {
+        for c in 0u8..=3 {
+            assert_ne!(edu_cat_status_label(c), "Unknown");
+        }
+        for c in 0u8..=6 {
+            assert_ne!(edu_off_status_label(c), "Unknown");
+        }
+        assert_eq!(edu_cat_status_label(99), "Unknown");
+        assert_eq!(edu_off_status_label(99), "Unknown");
+    }
+}
