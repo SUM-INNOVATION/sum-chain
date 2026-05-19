@@ -1749,3 +1749,165 @@ pub struct IssueAcademicCredentialResponse {
     /// Error message (if failed)
     pub error: Option<String>,
 }
+
+// ============================================================================
+// SRC-817/818 Education suite — read-only RPC views (Phase 4)
+//
+// RPC-facing projections of the Phase 2 stored records. Decoupled from
+// internal bincode layout so storage can evolve without breaking the
+// public JSON contract. Privacy: every byte field is a commitment /
+// ref / institutional address; the ONLY student identifier is
+// `student_commitment` (a hash, never an address). No raw grade,
+// submission body, answer key, decryption material, or PII.
+// 32-byte fields => `0x` + 64 hex. Addresses => base58 (chain
+// canonical, same as other RPC types). Status => numeric code + label.
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContentAccessPolicyInfo {
+    pub opens_at: Option<u64>,
+    pub closes_at: Option<u64>,
+    pub grace_until: Option<u64>,
+    pub audience_kind: u8,
+    pub audience_label: String,
+    /// Present only for the `IndividualStudent` audience — a
+    /// `student_commitment` (hash), never a raw address.
+    pub audience_student_commitment: Option<String>,
+    pub revoke_on_course_archive: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedSnipRefInfo {
+    /// `0x` + 64 hex — SNIP object content root. Pointer only; no
+    /// payload or decryption material is ever exposed.
+    pub content_root: String,
+    pub snip_file_id: Option<String>,
+    pub size_bytes: u64,
+    pub schema_version: u32,
+    pub access_policy: ContentAccessPolicyInfo,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogEntryInfo {
+    pub catalog_id: String,
+    pub institution_id: String,
+    pub department: String,
+    pub course_code: String,
+    pub course_title: Option<String>,
+    pub title_commitment: Option<String>,
+    pub course_level: u8,
+    pub credit_hours: Option<u16>,
+    pub credit_commitment: Option<String>,
+    pub prerequisites_count: u32,
+    pub prerequisites_root: String,
+    pub accreditation_count: u32,
+    pub accreditation_root: String,
+    pub status_code: u8,
+    pub status_label: String,
+    pub version: u32,
+    pub supersedes: Option<String>,
+    pub superseded_by: Option<String>,
+    /// Sponsoring institution/admin address (base58). NOT a student.
+    pub owner: String,
+    pub created_at_height: u64,
+    pub updated_at_height: u64,
+    pub nonce: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogContentRefInfo {
+    pub kind: u8,
+    pub kind_label: String,
+    pub r#ref: ManagedSnipRefInfo,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OfferingInfo {
+    pub offering_id: String,
+    pub catalog_id: String,
+    pub term: String,
+    pub section: String,
+    pub instruction_start_at: u64,
+    pub instruction_end_at: u64,
+    pub final_grade_submission_deadline: u64,
+    /// Sponsoring institution/admin address (base58). NOT a student.
+    pub owner: String,
+    pub status_code: u8,
+    pub status_label: String,
+    pub instructor_count: u32,
+    pub instructor_root: String,
+    pub content_count: u32,
+    pub content_root: String,
+    pub assessment_count: u32,
+    pub assessment_root: String,
+    pub enrollment_count: u32,
+    pub enrollment_root: String,
+    pub created_at_height: u64,
+    pub updated_at_height: u64,
+    pub nonce: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssessmentInfo {
+    pub offering_id: String,
+    pub assessment_id: String,
+    pub kind: u8,
+    pub kind_label: String,
+    pub instructions: ManagedSnipRefInfo,
+    pub spec_commitment: String,
+    pub opens_at: u64,
+    pub due_at: u64,
+    pub max_attempts: u16,
+    pub weight_bps: u16,
+    /// Commitment only — the answer key plaintext is never on-chain.
+    pub answer_key_commitment: Option<String>,
+    pub answer_key_access: Option<ContentAccessPolicyInfo>,
+    pub status_code: u8,
+    pub status_label: String,
+    pub created_at_height: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnrollmentLinkInfo {
+    /// Scoped pseudonym (hash), never a raw address.
+    pub student_commitment: String,
+    pub enrollment_ref: String,
+    pub linked_at_height: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubmissionReceiptInfo {
+    pub offering_id: String,
+    pub assessment_id: String,
+    pub student_commitment: String,
+    pub attempt: u16,
+    pub submission_commitment: String,
+    /// SNIP pointer to the student-owned work — no payload exposed.
+    pub work: ManagedSnipRefInfo,
+    pub student_auth_commitment: Option<String>,
+    pub enrollment_ref: String,
+    /// Sponsor/relayer/LMS submitter address (base58). NOT the student.
+    pub submitter: String,
+    pub late: bool,
+    pub submitted_at_height: u64,
+    pub submitted_at_ts: u64,
+    pub status_code: u8,
+    pub status_label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GradeRecordInfo {
+    pub offering_id: String,
+    pub assessment_id: String,
+    pub student_commitment: String,
+    /// Commitment ONLY — the raw grade value is never on-chain.
+    pub grade_commitment: String,
+    pub feedback: Option<ManagedSnipRefInfo>,
+    /// Grader institutional address (base58). NOT a student.
+    pub grader: String,
+    pub grader_role: u8,
+    pub graded_at_height: u64,
+    pub status_code: u8,
+    pub status_label: String,
+    pub finalized: bool,
+}

@@ -48,6 +48,10 @@ pub const F_DUPLICATE: u8 = 81;
 pub const F_INVALID_REFERENCE: u8 = 82;
 pub const F_NOT_AUTHORIZED: u8 = 83;
 
+/// Hard cap for any read-only education list RPC (Phase 4). Callers
+/// pass a clamped limit; helpers also defensively stop at this many.
+pub const MAX_EDU_LIST_LIMIT: usize = 256;
+
 // Status codes (mirror primitives enums' #[repr(u8)] discriminants).
 const CAT_DRAFT: u8 = 0;
 const CAT_ACTIVE: u8 = 1;
@@ -512,6 +516,241 @@ impl EducationExecutor {
         student_commitment: &[u8; 32],
     ) -> Result<u16> {
         self.count_attempts(offering_id, assessment_id, student_commitment)
+    }
+
+    // ── Read-only list/get helpers (Phase 4 RPC) ──
+    // Pure, bounded reads backing the src817_*/src818_* RPC. No
+    // mutation, no dispatch/fee. Every list is capped at
+    // `min(limit, MAX_EDU_LIST_LIMIT)` — no unbounded prefix scans.
+    // A missing CF (pre-activation / empty) yields an empty vec /
+    // `None`, so reads work regardless of activation state.
+
+    fn de_val<T: DeserializeOwned>(&self, bytes: &[u8]) -> Result<T> {
+        bincode::deserialize(bytes)
+            .map_err(|e| StateError::SerializationError(e.to_string()))
+    }
+
+    fn cap(limit: usize) -> usize {
+        limit.min(MAX_EDU_LIST_LIMIT)
+    }
+
+    /// Up to 4 catalog content refs `(kind_byte, ManagedSnipRef)`.
+    pub fn get_catalog_content(
+        &self,
+        catalog_id: &[u8; 32],
+    ) -> Result<Vec<(u8, sumchain_primitives::education::ManagedSnipRef)>> {
+        let mut out = Vec::new();
+        match self.db.prefix_iter(cf::EDU_CATALOG_CONTENT_ITEMS, catalog_id) {
+            Ok(it) => {
+                for (k, v) in it {
+                    if k.len() != 33 || &k[..32] != &catalog_id[..] {
+                        continue;
+                    }
+                    out.push((k[32], self.de_val(&v)?));
+                    if out.len() >= 4 {
+                        break;
+                    }
+                }
+            }
+            Err(sumchain_storage::StorageError::NotFound(_)) => {}
+            Err(e) => return Err(e.into()),
+        }
+        Ok(out)
+    }
+
+    fn list_catalog_ids_by_prefix(
+        &self,
+        cf_name: &str,
+        prefix: &[u8],
+        limit: usize,
+    ) -> Result<Vec<StoredCatalogEntry>> {
+        let cap = Self::cap(limit);
+        let mut out = Vec::new();
+        match self.db.prefix_iter(cf_name, prefix) {
+            Ok(it) => {
+                for (k, _) in it {
+                    if out.len() >= cap {
+                        break;
+                    }
+                    if k.len() != prefix.len() + 32 || &k[..prefix.len()] != prefix {
+                        continue;
+                    }
+                    let mut cid = [0u8; 32];
+                    cid.copy_from_slice(&k[prefix.len()..]);
+                    if let Some(c) = self.get_catalog(&cid)? {
+                        out.push(c);
+                    }
+                }
+            }
+            Err(sumchain_storage::StorageError::NotFound(_)) => {}
+            Err(e) => return Err(e.into()),
+        }
+        Ok(out)
+    }
+
+    pub fn list_catalogs_by_institution(
+        &self,
+        institution_id: &[u8; 32],
+        limit: usize,
+    ) -> Result<Vec<StoredCatalogEntry>> {
+        self.list_catalog_ids_by_prefix(
+            cf::EDU_CATALOG_BY_INSTITUTION,
+            institution_id,
+            limit,
+        )
+    }
+
+    pub fn list_catalogs_by_code(
+        &self,
+        department: &str,
+        course_code: &str,
+        limit: usize,
+    ) -> Result<Vec<StoredCatalogEntry>> {
+        let h = by_code_hash(department, course_code);
+        self.list_catalog_ids_by_prefix(cf::EDU_CATALOG_BY_CODE, &h, limit)
+    }
+
+    pub fn list_offerings_by_catalog(
+        &self,
+        catalog_id: &[u8; 32],
+        limit: usize,
+    ) -> Result<Vec<StoredOffering>> {
+        let cap = Self::cap(limit);
+        let mut out = Vec::new();
+        match self.db.prefix_iter(cf::EDU_OFFERING_BY_CATALOG, catalog_id) {
+            Ok(it) => {
+                for (k, _) in it {
+                    if out.len() >= cap {
+                        break;
+                    }
+                    if k.len() != 64 || &k[..32] != &catalog_id[..] {
+                        continue;
+                    }
+                    let mut oid = [0u8; 32];
+                    oid.copy_from_slice(&k[32..]);
+                    if let Some(o) = self.get_offering(&oid)? {
+                        out.push(o);
+                    }
+                }
+            }
+            Err(sumchain_storage::StorageError::NotFound(_)) => {}
+            Err(e) => return Err(e.into()),
+        }
+        Ok(out)
+    }
+
+    pub fn list_assessments(
+        &self,
+        offering_id: &[u8; 32],
+        limit: usize,
+    ) -> Result<Vec<StoredAssessment>> {
+        let cap = Self::cap(limit);
+        let mut out = Vec::new();
+        match self.db.prefix_iter(cf::EDU_ASSESSMENTS, offering_id) {
+            Ok(it) => {
+                for (k, v) in it {
+                    if out.len() >= cap {
+                        break;
+                    }
+                    if k.len() != 64 || &k[..32] != &offering_id[..] {
+                        continue;
+                    }
+                    out.push(self.de_val(&v)?);
+                }
+            }
+            Err(sumchain_storage::StorageError::NotFound(_)) => {}
+            Err(e) => return Err(e.into()),
+        }
+        Ok(out)
+    }
+
+    pub fn get_enrollment_link(
+        &self,
+        offering_id: &[u8; 32],
+        student_commitment: &[u8; 32],
+    ) -> Result<Option<StoredEnrollmentLink>> {
+        let k = cat2(offering_id, student_commitment);
+        match self.db.get(cf::EDU_ENROLLMENT_LINKS, &k)? {
+            None => Ok(None),
+            Some(b) => Ok(Some(self.de_val(&b)?)),
+        }
+    }
+
+    pub fn get_submission_receipt(
+        &self,
+        offering_id: &[u8; 32],
+        assessment_id: &[u8; 32],
+        student_commitment: &[u8; 32],
+        attempt: u16,
+    ) -> Result<Option<StoredSubmissionReceipt>> {
+        let mut k = Vec::with_capacity(98);
+        k.extend_from_slice(offering_id);
+        k.extend_from_slice(assessment_id);
+        k.extend_from_slice(student_commitment);
+        k.extend_from_slice(&attempt.to_be_bytes());
+        match self.db.get(cf::EDU_SUBMISSIONS, &k)? {
+            None => Ok(None),
+            Some(b) => Ok(Some(self.de_val(&b)?)),
+        }
+    }
+
+    /// All submission receipts for a `student_commitment` across
+    /// offerings, via the commitment-keyed index (never an address).
+    pub fn list_submissions_by_student_commitment(
+        &self,
+        student_commitment: &[u8; 32],
+        limit: usize,
+    ) -> Result<Vec<StoredSubmissionReceipt>> {
+        let cap = Self::cap(limit);
+        let mut out = Vec::new();
+        match self
+            .db
+            .prefix_iter(cf::EDU_SUBMISSION_BY_STUDENT_COMMITMENT, student_commitment)
+        {
+            Ok(it) => {
+                for (k, _) in it {
+                    if out.len() >= cap {
+                        break;
+                    }
+                    // index key: sc[32] || offering[32] || assessment[32] || attempt_be[2]
+                    if k.len() != 98 || &k[..32] != &student_commitment[..] {
+                        continue;
+                    }
+                    let mut oid = [0u8; 32];
+                    oid.copy_from_slice(&k[32..64]);
+                    let mut aid = [0u8; 32];
+                    aid.copy_from_slice(&k[64..96]);
+                    let attempt = u16::from_be_bytes([k[96], k[97]]);
+                    if let Some(r) = self.get_submission_receipt(
+                        &oid,
+                        &aid,
+                        student_commitment,
+                        attempt,
+                    )? {
+                        out.push(r);
+                    }
+                }
+            }
+            Err(sumchain_storage::StorageError::NotFound(_)) => {}
+            Err(e) => return Err(e.into()),
+        }
+        Ok(out)
+    }
+
+    pub fn get_grade_record(
+        &self,
+        offering_id: &[u8; 32],
+        assessment_id: &[u8; 32],
+        student_commitment: &[u8; 32],
+    ) -> Result<Option<StoredGradeRecord>> {
+        let mut k = Vec::with_capacity(96);
+        k.extend_from_slice(offering_id);
+        k.extend_from_slice(assessment_id);
+        k.extend_from_slice(student_commitment);
+        match self.db.get(cf::EDU_GRADES, &k)? {
+            None => Ok(None),
+            Some(b) => Ok(Some(self.de_val(&b)?)),
+        }
     }
 
     fn count_attempts(

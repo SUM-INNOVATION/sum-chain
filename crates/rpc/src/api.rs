@@ -29,6 +29,8 @@ use crate::types::{
     ValidatorDelegationSummary, ValidatorSetInfo, ValidatorSetRpcInfo, ValidatorSigningRpcInfo,
     ViewCallRequest,
     InferenceAttestationInfo, InferenceAttestationStatusInfo,
+    AssessmentInfo, CatalogContentRefInfo, CatalogEntryInfo, EnrollmentLinkInfo,
+    GradeRecordInfo, OfferingInfo, SubmissionReceiptInfo,
 };
 
 /// SUM Chain RPC API
@@ -199,6 +201,97 @@ pub trait SumChainApi {
         &self,
         tx_hash: String,
     ) -> Result<InferenceAttestationStatusInfo, jsonrpsee::types::ErrorObjectOwned>;
+
+    // ── SRC-817/818 Education suite — read-only RPC (Phase 4) ──
+    // All ids/commitments are `0x`+hex strings. Student lookup is ONLY
+    // by `student_commitment` (never a raw address). List methods are
+    // bounded (default 256, capped at MAX_EDU_LIST_LIMIT=256). Reads
+    // work regardless of the education activation gate state.
+
+    #[method(name = "src817_getCatalogEntry")]
+    async fn src817_get_catalog_entry(
+        &self,
+        catalog_id: String,
+    ) -> Result<Option<CatalogEntryInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    #[method(name = "src817_getCatalogContent")]
+    async fn src817_get_catalog_content(
+        &self,
+        catalog_id: String,
+    ) -> Result<Vec<CatalogContentRefInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    #[method(name = "src817_listCatalogsByInstitution")]
+    async fn src817_list_catalogs_by_institution(
+        &self,
+        institution_id: String,
+        limit: Option<u32>,
+    ) -> Result<Vec<CatalogEntryInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    #[method(name = "src817_listCatalogsByCode")]
+    async fn src817_list_catalogs_by_code(
+        &self,
+        department: String,
+        course_code: String,
+        limit: Option<u32>,
+    ) -> Result<Vec<CatalogEntryInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    #[method(name = "src818_getOffering")]
+    async fn src818_get_offering(
+        &self,
+        offering_id: String,
+    ) -> Result<Option<OfferingInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    #[method(name = "src818_listOfferingsByCatalog")]
+    async fn src818_list_offerings_by_catalog(
+        &self,
+        catalog_id: String,
+        limit: Option<u32>,
+    ) -> Result<Vec<OfferingInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    #[method(name = "src818_listAssessments")]
+    async fn src818_list_assessments(
+        &self,
+        offering_id: String,
+        limit: Option<u32>,
+    ) -> Result<Vec<AssessmentInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    #[method(name = "src818_getAssessment")]
+    async fn src818_get_assessment(
+        &self,
+        offering_id: String,
+        assessment_id: String,
+    ) -> Result<Option<AssessmentInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    #[method(name = "src818_getEnrollmentLink")]
+    async fn src818_get_enrollment_link(
+        &self,
+        offering_id: String,
+        student_commitment: String,
+    ) -> Result<Option<EnrollmentLinkInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    #[method(name = "src818_getSubmissionReceipt")]
+    async fn src818_get_submission_receipt(
+        &self,
+        offering_id: String,
+        assessment_id: String,
+        student_commitment: String,
+        attempt: u16,
+    ) -> Result<Option<SubmissionReceiptInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    #[method(name = "src818_listSubmissionsByStudentCommitment")]
+    async fn src818_list_submissions_by_student_commitment(
+        &self,
+        student_commitment: String,
+        limit: Option<u32>,
+    ) -> Result<Vec<SubmissionReceiptInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    #[method(name = "src818_getGradeRecord")]
+    async fn src818_get_grade_record(
+        &self,
+        offering_id: String,
+        assessment_id: String,
+        student_commitment: String,
+    ) -> Result<Option<GradeRecordInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Get validators (SUM native alias)
     #[method(name = "sum_getValidators")]
