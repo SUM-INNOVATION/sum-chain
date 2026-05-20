@@ -26,7 +26,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["SUM Chain Team"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/sumchain/sum-chain"
+repository = "https://github.com/SUM-INNOVATION/sum-chain"
 
 [workspace.dependencies]
 # Async runtime

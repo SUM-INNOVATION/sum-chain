@@ -4,10 +4,14 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Cryptographic operations for SUM Chain"
+repository.workspace = true
+readme = "README.md"
+description = "Cryptographic operations for SUM Chain (an L1 blockchain): Ed25519 keypairs / signatures, BLAKE3 hashing, and the X25519 + ChaCha20-Poly1305 KEM used by the SRC-201 messaging subprotocol."
+keywords = ["sumchain", "blockchain", "ed25519", "x25519", "chacha20poly1305"]
+categories = ["cryptography", "cryptography::cryptocurrencies"]
 
 [dependencies]
-sumchain-primitives = { path = "../primitives" }
+sumchain-primitives = { path = "../primitives", version = "0.1.0" }
 ed25519-dalek = { workspace = true }
 blake3 = { workspace = true }
 rand = { workspace = true }
