@@ -35,7 +35,8 @@ than re-implementing.
     subprotocols. See the [SUM Chain repo][repo] for the SRC-*
     specs each one implements.
 
-The exact `pub use` surface lives in [`src/lib.rs`](src/lib.rs).
+The exact `pub use` surface lives in `src/lib.rs` in the source
+repository.
 
 ## Stability
 
@@ -86,5 +87,6 @@ inner attestation signatures without creating a circular dep.
 
 ## License
 
-Dual-licensed under [MIT](../../LICENSE-MIT) or
-[Apache-2.0](../../LICENSE-APACHE) at your option.
+Dual-licensed under `MIT OR Apache-2.0` at your option. The full
+license texts (`LICENSE-MIT`, `LICENSE-APACHE`) live at the root of
+the source repository.

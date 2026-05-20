@@ -13,9 +13,12 @@ transactions.
 - **Ed25519 signing / verification** (`signature`, `keypair`)
   - `KeyPair`, `PrivateKey`, `PublicKey` — Ed25519 key material with
     zeroize-on-drop on the secret half.
-  - `sign(&PrivateKey, &Hash) -> Signature`, `verify(&PublicKey,
-    &Hash, &Signature) -> Result<()>`, and `verify_bytes(...)` for
-    pre-hashed inputs.
+  - `sign(message: &[u8], private_key: &PrivateKey) -> Signature`
+    and `verify(message: &[u8], signature: &Signature, public_key:
+    &PublicKey) -> Result<()>` — sign/verify raw message bytes.
+    `verify_bytes(message: &[u8], signature: &[u8; 64], public_key:
+    &[u8; 32]) -> Result<()>` is a convenience that takes raw
+    signature + pubkey byte arrays instead of typed wrappers.
 - **BLAKE3 hashing** — used for domain-separated tx digests and the
   derived-key construction in messaging.
 - **SRC-201 messaging KEM** (`messaging`)
@@ -27,7 +30,8 @@ transactions.
     / open (`encrypt_message`, `decrypt_message`), with
     `recipient_hash` for inbox routing.
 
-Errors surface via `CryptoError` (in [`src/lib.rs`](src/lib.rs)).
+Errors surface via `CryptoError` (see `src/lib.rs` in the source
+repository).
 
 ## Underlying crates
 
@@ -53,20 +57,19 @@ sumchain-crypto     = "0.1"
 
 ```rust
 use sumchain_crypto::{KeyPair, sign, verify};
-use sumchain_primitives::Hash;
 
 let kp = KeyPair::generate();
-let msg_hash = Hash::from_bytes(blake3::hash(b"hello").as_bytes());
-let sig = sign(kp.private_key(), &msg_hash);
-verify(kp.public_key(), &msg_hash, &sig).expect("valid signature");
+let message = b"hello";
+let sig = sign(message, kp.private_key());
+verify(message, &sig, kp.public_key()).expect("valid signature");
 ```
 
 For the SUM Chain transaction submit path, pair with
 [`sumchain-primitives`](https://crates.io/crates/sumchain-primitives):
-build a `TransactionV2`, hash it, sign the hash with `sign(...)`,
-attach the signature to produce a `SignedTransaction`, then call
-`SignedTransaction::to_hex()` and POST it to a SUM Chain RPC's
-`sum_sendRawTransaction`.
+build a `TransactionV2`, serialize it to canonical bytes, call
+`sign(bytes, &private_key)` to produce a `Signature`, attach it to
+form a `SignedTransaction`, then call `SignedTransaction::to_hex()`
+and POST the hex to a SUM Chain RPC's `sum_sendRawTransaction`.
 
 ## Stability
 
@@ -81,5 +84,6 @@ version. The two ship in lockstep — same minor track. Semver intent:
 
 ## License
 
-Dual-licensed under [MIT](../../LICENSE-MIT) or
-[Apache-2.0](../../LICENSE-APACHE) at your option.
+Dual-licensed under `MIT OR Apache-2.0` at your option. The full
+license texts (`LICENSE-MIT`, `LICENSE-APACHE`) live at the root of
+the source repository.
