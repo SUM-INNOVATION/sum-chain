@@ -66,10 +66,27 @@ verify(message, &sig, kp.public_key()).expect("valid signature");
 
 For the SUM Chain transaction submit path, pair with
 [`sumchain-primitives`](https://crates.io/crates/sumchain-primitives):
-build a `TransactionV2`, serialize it to canonical bytes, call
-`sign(bytes, &private_key)` to produce a `Signature`, attach it to
-form a `SignedTransaction`, then call `SignedTransaction::to_hex()`
-and POST the hex to a SUM Chain RPC's `sum_sendRawTransaction`.
+build a `TransactionV2`, take its `signing_hash()` (a domain-separated
+`Hash` computed by the chain — do **not** sign the raw serialized
+transaction bytes), sign the hash bytes with `sign(...)`, then wrap
+the tx, signature, and public key into a `SignedTransaction` via
+`SignedTransaction::new_v2(...)` and POST `to_hex()` to a SUM Chain
+RPC's `sum_sendRawTransaction`:
+
+```rust
+use sumchain_crypto::{KeyPair, sign};
+use sumchain_primitives::{SignedTransaction, TransactionV2};
+
+let kp = KeyPair::generate();
+let tx: TransactionV2 = /* build your transaction */;
+
+let h   = tx.signing_hash();
+let sig = sign(h.as_bytes(), kp.private_key());
+
+let signed   = SignedTransaction::new_v2(tx, *sig.as_bytes(), *kp.public_key().as_bytes());
+let raw_hex  = signed.to_hex();
+// POST {"method":"sum_sendRawTransaction","params":[raw_hex]}
+```
 
 ## Stability
 
