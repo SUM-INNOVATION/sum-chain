@@ -1,7 +1,8 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { provider } from '../utils/provider';
 import { formatKoppa } from '../utils/formatters';
+import { DetailSkeleton, ErrorState, Skeleton } from '../components/States';
 import type { TransactionInfo, TransactionReceipt } from '@sumchain/sdk';
 
 export default function TransactionDetails() {
@@ -9,14 +10,11 @@ export default function TransactionDetails() {
   const [tx, setTx] = useState<TransactionInfo | null>(null);
   const [receipt, setReceipt] = useState<TransactionReceipt | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
 
-  useEffect(() => {
-    loadTransaction();
-  }, [hash]);
-
-  async function loadTransaction() {
+  const loadTransaction = useCallback(async () => {
     if (!hash) return;
-
+    setLoading(true);
     try {
       const [txData, receiptData] = await Promise.all([
         provider.getTransaction(hash),
@@ -24,36 +22,58 @@ export default function TransactionDetails() {
       ]);
       setTx(txData);
       setReceipt(receiptData);
-    } catch (error) {
-      console.error('Failed to load transaction:', error);
+      setError(false);
+    } catch (err) {
+      console.error('Failed to load transaction:', err);
+      setError(true);
     } finally {
       setLoading(false);
     }
-  }
+  }, [hash]);
+
+  useEffect(() => {
+    loadTransaction();
+  }, [loadTransaction]);
 
   if (loading) {
-    return <div className="text-center py-20 text-slate-400">Loading transaction...</div>;
+    return (
+      <div className="mx-auto max-w-4xl space-y-6">
+        <Skeleton className="h-9 w-56" />
+        <DetailSkeleton rows={8} />
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="py-20">
+        <ErrorState message="Could not load this transaction." onRetry={loadTransaction} />
+      </div>
+    );
   }
 
   if (!tx) {
     return (
-      <div className="text-center py-20">
-        <h2 className="text-2xl font-bold text-white mb-4">Transaction Not Found</h2>
-        <Link to="/" className="text-blue-400 hover:text-blue-300">← Back to Home</Link>
+      <div className="py-20 text-center">
+        <h2 className="mb-4 font-display text-2xl font-bold text-white">Transaction not found</h2>
+        <Link to="/" className="text-primary-300 hover:text-primary-200">
+          Back to home
+        </Link>
       </div>
     );
   }
 
   const status = receipt?.status || tx.status || 'pending';
-  const statusColor = status === 'success' ? 'text-green-400' : status === 'failed' ? 'text-red-400' : 'text-yellow-400';
+  const statusColor =
+    status === 'success' ? 'text-green-400' : status === 'failed' ? 'text-red-400' : 'text-amber-400';
 
   return (
-    <div className="max-w-4xl mx-auto space-y-6">
-      <h1 className="text-3xl font-bold text-white">Transaction Details</h1>
+    <div className="mx-auto max-w-4xl space-y-6">
+      <h1 className="font-display text-3xl font-bold text-white">Transaction</h1>
 
-      <div className="bg-slate-800/50 rounded-lg border border-slate-700 p-6 space-y-4">
-        <div className="flex justify-between items-start">
-          <div className="text-slate-400">Status</div>
+      <div className="space-y-4 rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6">
+        <div className="flex items-start justify-between">
+          <div className="text-zinc-400">Status</div>
           <div className={`font-bold uppercase ${statusColor}`}>{status}</div>
         </div>
         <DetailRow label="Hash" value={tx.hash} />
@@ -63,9 +83,11 @@ export default function TransactionDetails() {
         <DetailRow label="Fee" value={formatKoppa(tx.fee)} />
         <DetailRow label="Nonce" value={tx.nonce.toString()} />
         <DetailRow label="Chain ID" value={tx.chain_id.toString()} />
-        {tx.block_height && <DetailRow label="Block" value={tx.block_height.toString()} link={`/block/${tx.block_height}`} />}
-        {receipt && <DetailRow label="Block Index" value={receipt.tx_index.toString()} />}
-        {receipt && <DetailRow label="Fee Paid" value={formatKoppa(receipt.fee_paid)} />}
+        {tx.block_height && (
+          <DetailRow label="Block" value={tx.block_height.toString()} link={`/block/${tx.block_height}`} />
+        )}
+        {receipt && <DetailRow label="Block index" value={receipt.tx_index.toString()} />}
+        {receipt && <DetailRow label="Fee paid" value={formatKoppa(receipt.fee_paid)} />}
       </div>
     </div>
   );
@@ -80,18 +102,18 @@ interface DetailRowProps {
 
 function DetailRow({ label, value, link, highlight }: DetailRowProps) {
   const content = link ? (
-    <Link to={link} className="text-blue-400 hover:text-blue-300 font-mono break-all">
+    <Link to={link} className="tnum break-all font-mono text-primary-300 hover:text-primary-200">
       {value}
     </Link>
   ) : (
-    <span className={`font-mono break-all ${highlight ? 'text-cyan-400 font-bold' : 'text-white'}`}>
+    <span className={`tnum break-all font-mono ${highlight ? 'font-bold text-primary-300' : 'text-white'}`}>
       {value}
     </span>
   );
 
   return (
-    <div className="flex justify-between items-start border-b border-slate-700 pb-3">
-      <div className="text-slate-400 font-medium">{label}</div>
+    <div className="flex items-start justify-between gap-4 border-b border-zinc-800 pb-3">
+      <div className="font-medium text-zinc-400">{label}</div>
       <div className="text-right">{content}</div>
     </div>
   );

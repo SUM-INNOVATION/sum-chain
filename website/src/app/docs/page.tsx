@@ -502,7 +502,7 @@ export default function DocsPage() {
               Documentation
             </span>
             <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold mb-6">
-              SUM Chain <span className="gradient-text-purple">JSON-RPC API</span>
+              SUM Chain <span className="gradient-text">JSON-RPC API</span>
             </h1>
             <p className="text-lg text-gray-400 max-w-3xl">
               SUM Chain exposes a JSON-RPC 2.0 API for chain queries, transaction submission,

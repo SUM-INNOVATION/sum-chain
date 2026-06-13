@@ -1,32 +1,43 @@
 import type { Metadata } from "next";
-import { Inter, Space_Grotesk } from "next/font/google";
+import { Inter, Space_Grotesk, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 
 const inter = Inter({
   variable: "--font-inter",
   subsets: ["latin"],
+  display: "swap",
 });
 
 const spaceGrotesk = Space_Grotesk({
   variable: "--font-space-grotesk",
   subsets: ["latin"],
+  display: "swap",
+});
+
+const jetbrainsMono = JetBrains_Mono({
+  variable: "--font-jetbrains-mono",
+  subsets: ["latin"],
+  display: "swap",
 });
 
 export const metadata: Metadata = {
-  title: "SUM Chain | The Future of Digital Currency",
-  description: "SUM Chain is a high-performance Layer-1 blockchain with Koppa (Ϙ) - the native currency designed for global peer-to-peer transactions. Fast, secure, and built entirely in Rust.",
+  metadataBase: new URL("https://sumchain.io"),
+  title: "SUM Chain | A Utility-Backed Layer-1",
+  description:
+    "SUM Chain is a high-performance Layer-1 blockchain, built entirely in Rust, powering Koppa (Ϙ). Value backed by real on-chain utility: decentralized storage, verifiable AI compute, encrypted messaging, and document credentials.",
   keywords: ["blockchain", "cryptocurrency", "Koppa", "SUM Chain", "Layer 1", "Rust", "decentralized"],
   openGraph: {
-    title: "SUM Chain | The Future of Digital Currency",
-    description: "High-performance Layer-1 blockchain with Koppa (Ϙ) currency. Fast, secure, and built entirely in Rust.",
-    url: "https://sum-chain.xyz",
+    title: "SUM Chain | A Utility-Backed Layer-1",
+    description:
+      "High-performance Layer-1 blockchain, built in Rust, powering Koppa (Ϙ). Storage, verifiable AI, messaging, and credentials on-chain.",
+    url: "https://sumchain.io",
     siteName: "SUM Chain",
     type: "website",
   },
   twitter: {
     card: "summary_large_image",
-    title: "SUM Chain | The Future of Digital Currency",
-    description: "High-performance Layer-1 blockchain with Koppa (Ϙ) currency.",
+    title: "SUM Chain | A Utility-Backed Layer-1",
+    description: "High-performance Layer-1 blockchain, built in Rust, powering Koppa (Ϙ).",
   },
 };
 
@@ -38,8 +49,9 @@ export default function RootLayout({
   return (
     <html lang="en" className="dark">
       <body
-        className={`${inter.variable} ${spaceGrotesk.variable} antialiased bg-[#0a0a0a] text-white`}
+        className={`${inter.variable} ${spaceGrotesk.variable} ${jetbrainsMono.variable} antialiased bg-background text-foreground`}
       >
+        <div className="noise-overlay" aria-hidden="true" />
         {children}
       </body>
     </html>

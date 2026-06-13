@@ -1,7 +1,8 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { provider } from '../utils/provider';
 import { formatKoppa, formatTimestamp } from '../utils/formatters';
+import { DetailSkeleton, ErrorState, Skeleton } from '../components/States';
 
 interface TransactionHistoryEntry {
   tx_hash: string;
@@ -33,20 +34,13 @@ export default function AddressDetails() {
   const [hasMore, setHasMore] = useState<boolean>(false);
   const [offset, setOffset] = useState<number>(0);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
   const [loadingTxs, setLoadingTxs] = useState(true);
   const limit = 20;
 
-  useEffect(() => {
-    loadAddress();
-  }, [address]);
-
-  useEffect(() => {
-    loadTransactions();
-  }, [address, offset]);
-
-  async function loadAddress() {
+  const loadAddress = useCallback(async () => {
     if (!address) return;
-
+    setLoading(true);
     try {
       const [balanceData, nonceData] = await Promise.all([
         provider.getBalance(address),
@@ -54,33 +48,42 @@ export default function AddressDetails() {
       ]);
       setBalance(balanceData);
       setNonce(nonceData);
-    } catch (error) {
-      console.error('Failed to load address:', error);
+      setError(false);
+    } catch (err) {
+      console.error('Failed to load address:', err);
+      setError(true);
     } finally {
       setLoading(false);
     }
-  }
+  }, [address]);
 
-  async function loadTransactions() {
+  const loadTransactions = useCallback(async () => {
     if (!address) return;
-
     setLoadingTxs(true);
     try {
-      // Use the provider's getTransactionsByAddress method
-      const response = await (provider as any).getTransactionsByAddress(address, limit, offset) as TransactionHistoryResponse;
+      const response = (await (provider as unknown as {
+        getTransactionsByAddress: (a: string, l: number, o: number) => Promise<TransactionHistoryResponse>;
+      }).getTransactionsByAddress(address, limit, offset));
       setTransactions(response.transactions);
       setTotalCount(response.total_count);
       setHasMore(response.has_more);
-    } catch (error) {
-      console.error('Failed to load transactions:', error);
-      // If RPC method not available, show empty state
+    } catch (err) {
+      console.error('Failed to load transactions:', err);
       setTransactions([]);
       setTotalCount(0);
       setHasMore(false);
     } finally {
       setLoadingTxs(false);
     }
-  }
+  }, [address, offset]);
+
+  useEffect(() => {
+    loadAddress();
+  }, [loadAddress]);
+
+  useEffect(() => {
+    loadTransactions();
+  }, [loadTransactions]);
 
   function shortenHash(hash: string): string {
     if (!hash || hash.length < 16) return hash;
@@ -88,87 +91,94 @@ export default function AddressDetails() {
   }
 
   function shortenAddress(addr: string): string {
-    if (!addr || addr.length < 16) return addr || '—';
+    if (!addr || addr.length < 16) return addr || 'Unknown';
     return `${addr.slice(0, 8)}...${addr.slice(-6)}`;
   }
 
   if (loading) {
-    return <div className="text-center py-20 text-slate-400">Loading address...</div>;
+    return (
+      <div className="mx-auto max-w-6xl space-y-6">
+        <Skeleton className="h-9 w-32" />
+        <DetailSkeleton rows={3} />
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="py-20">
+        <ErrorState message="Could not load this address." onRetry={loadAddress} />
+      </div>
+    );
   }
 
   return (
-    <div className="max-w-6xl mx-auto space-y-6">
-      <h1 className="text-3xl font-bold text-white">Address</h1>
+    <div className="mx-auto max-w-6xl space-y-6">
+      <h1 className="font-display text-3xl font-bold text-white">Address</h1>
 
-      <div className="bg-slate-800/50 rounded-lg border border-slate-700 p-6">
-        <div className="text-sm text-slate-400 mb-2">Address</div>
-        <div className="font-mono text-white break-all text-lg mb-6">{address}</div>
+      <div className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6">
+        <div className="mb-2 text-sm text-zinc-400">Address</div>
+        <div className="mb-6 break-all font-mono text-lg text-white">{address}</div>
 
         <div className="grid grid-cols-2 gap-6">
           <div>
-            <div className="text-sm text-slate-400 mb-2">Balance</div>
-            <div className="text-2xl font-bold text-cyan-400">
-              {balance !== null ? formatKoppa(balance) : '—'}
+            <div className="mb-2 text-sm text-zinc-400">Balance</div>
+            <div className="tnum font-display text-2xl font-bold text-primary-300">
+              {balance !== null ? formatKoppa(balance) : 'Unknown'}
             </div>
           </div>
           <div>
-            <div className="text-sm text-slate-400 mb-2">Nonce</div>
-            <div className="text-2xl font-bold text-white">
-              {nonce !== null ? nonce.toString() : '—'}
+            <div className="mb-2 text-sm text-zinc-400">Nonce</div>
+            <div className="tnum font-display text-2xl font-bold text-white">
+              {nonce !== null ? nonce.toString() : 'Unknown'}
             </div>
           </div>
         </div>
       </div>
 
-      {/* Transaction History */}
-      <div className="bg-slate-800/50 rounded-lg border border-slate-700 p-6">
-        <div className="flex justify-between items-center mb-4">
-          <h2 className="text-xl font-semibold text-white">
-            Transaction History
-            {totalCount > 0 && (
-              <span className="ml-2 text-sm text-slate-400">({totalCount} total)</span>
-            )}
+      <div className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6">
+        <div className="mb-4 flex items-center justify-between">
+          <h2 className="font-display text-xl font-semibold text-white">
+            Transaction history
+            {totalCount > 0 && <span className="ml-2 text-sm text-zinc-400">({totalCount} total)</span>}
           </h2>
         </div>
 
         {loadingTxs ? (
-          <div className="text-center py-10 text-slate-400">Loading transactions...</div>
+          <div className="space-y-2">
+            {Array.from({ length: 5 }).map((_, i) => (
+              <Skeleton key={i} className="h-10 w-full" />
+            ))}
+          </div>
         ) : transactions.length === 0 ? (
-          <div className="text-center py-10 text-slate-500">No transactions found</div>
+          <div className="rounded-xl border border-dashed border-zinc-800 py-10 text-center text-zinc-500">
+            No transactions found for this address.
+          </div>
         ) : (
           <>
             <div className="overflow-x-auto">
               <table className="w-full">
                 <thead>
-                  <tr className="text-left text-sm text-slate-400 border-b border-slate-700">
-                    <th className="pb-3 pr-4">Tx Hash</th>
-                    <th className="pb-3 pr-4">Block</th>
-                    <th className="pb-3 pr-4">From</th>
-                    <th className="pb-3 pr-4">To</th>
-                    <th className="pb-3 pr-4 text-right">Amount</th>
-                    <th className="pb-3 pr-4">Status</th>
-                    <th className="pb-3">Time</th>
+                  <tr className="border-b border-zinc-800 text-left text-sm text-zinc-400">
+                    <th className="pb-3 pr-4 font-medium">Tx hash</th>
+                    <th className="pb-3 pr-4 font-medium">Block</th>
+                    <th className="pb-3 pr-4 font-medium">From</th>
+                    <th className="pb-3 pr-4 font-medium">To</th>
+                    <th className="pb-3 pr-4 text-right font-medium">Amount</th>
+                    <th className="pb-3 pr-4 font-medium">Status</th>
+                    <th className="pb-3 font-medium">Time</th>
                   </tr>
                 </thead>
                 <tbody className="text-sm">
                   {transactions.map((tx) => (
-                    <tr
-                      key={tx.tx_hash}
-                      className="border-b border-slate-700/50 hover:bg-slate-700/30"
-                    >
+                    <tr key={tx.tx_hash} className="border-b border-zinc-800/60 hover:bg-zinc-800/30">
                       <td className="py-3 pr-4">
-                        <Link
-                          to={`/tx/${tx.tx_hash}`}
-                          className="font-mono text-cyan-400 hover:underline"
-                        >
+                        <Link to={`/tx/${tx.tx_hash}`} className="font-mono text-primary-300 hover:underline">
                           {shortenHash(tx.tx_hash)}
                         </Link>
                       </td>
-                      <td className="py-3 pr-4">
-                        <Link
-                          to={`/block/${tx.block_height}`}
-                          className="text-cyan-400 hover:underline"
-                        >
+                      <td className="tnum py-3 pr-4">
+                        <Link to={`/block/${tx.block_height}`} className="text-primary-300 hover:underline">
                           {tx.block_height}
                         </Link>
                       </td>
@@ -176,23 +186,23 @@ export default function AddressDetails() {
                         <Link
                           to={`/address/${tx.from}`}
                           className={`font-mono ${
-                            tx.from === address ? 'text-yellow-400' : 'text-slate-300 hover:text-cyan-400'
+                            tx.from === address ? 'text-amber-400' : 'text-zinc-300 hover:text-primary-300'
                           }`}
                         >
-                          {tx.from === address ? 'This Address' : shortenAddress(tx.from)}
+                          {tx.from === address ? 'This address' : shortenAddress(tx.from)}
                         </Link>
                       </td>
                       <td className="py-3 pr-4">
                         <Link
                           to={`/address/${tx.to}`}
                           className={`font-mono ${
-                            tx.to === address ? 'text-yellow-400' : 'text-slate-300 hover:text-cyan-400'
+                            tx.to === address ? 'text-amber-400' : 'text-zinc-300 hover:text-primary-300'
                           }`}
                         >
-                          {tx.to === address ? 'This Address' : shortenAddress(tx.to)}
+                          {tx.to === address ? 'This address' : shortenAddress(tx.to)}
                         </Link>
                       </td>
-                      <td className="py-3 pr-4 text-right">
+                      <td className="tnum py-3 pr-4 text-right">
                         <span className={tx.from === address ? 'text-red-400' : 'text-green-400'}>
                           {tx.from === address ? '-' : '+'}
                           {formatKoppa(BigInt(tx.amount))}
@@ -200,7 +210,7 @@ export default function AddressDetails() {
                       </td>
                       <td className="py-3 pr-4">
                         <span
-                          className={`px-2 py-1 rounded text-xs ${
+                          className={`rounded px-2 py-1 text-xs ${
                             tx.status.toLowerCase().includes('success')
                               ? 'bg-green-500/20 text-green-400'
                               : 'bg-red-500/20 text-red-400'
@@ -209,8 +219,8 @@ export default function AddressDetails() {
                           {tx.status}
                         </span>
                       </td>
-                      <td className="py-3 text-slate-400">
-                        {tx.timestamp ? formatTimestamp(tx.timestamp) : '—'}
+                      <td className="tnum py-3 text-zinc-400">
+                        {tx.timestamp ? formatTimestamp(tx.timestamp) : '-'}
                       </td>
                     </tr>
                   ))}
@@ -218,30 +228,29 @@ export default function AddressDetails() {
               </table>
             </div>
 
-            {/* Pagination */}
             {(hasMore || offset > 0) && (
-              <div className="flex justify-center gap-4 mt-4">
+              <div className="mt-4 flex justify-center gap-4">
                 <button
                   onClick={() => setOffset(Math.max(0, offset - limit))}
                   disabled={offset === 0}
-                  className={`px-4 py-2 rounded ${
+                  className={`rounded px-4 py-2 ${
                     offset === 0
-                      ? 'bg-slate-700 text-slate-500 cursor-not-allowed'
-                      : 'bg-cyan-600 text-white hover:bg-cyan-500'
+                      ? 'cursor-not-allowed bg-zinc-800 text-zinc-600'
+                      : 'bg-primary-500 text-white hover:bg-primary-600'
                   }`}
                 >
                   Previous
                 </button>
-                <span className="px-4 py-2 text-slate-400">
+                <span className="tnum px-4 py-2 text-zinc-400">
                   Page {Math.floor(offset / limit) + 1}
                 </span>
                 <button
                   onClick={() => setOffset(offset + limit)}
                   disabled={!hasMore}
-                  className={`px-4 py-2 rounded ${
+                  className={`rounded px-4 py-2 ${
                     !hasMore
-                      ? 'bg-slate-700 text-slate-500 cursor-not-allowed'
-                      : 'bg-cyan-600 text-white hover:bg-cyan-500'
+                      ? 'cursor-not-allowed bg-zinc-800 text-zinc-600'
+                      : 'bg-primary-500 text-white hover:bg-primary-600'
                   }`}
                 >
                   Next
