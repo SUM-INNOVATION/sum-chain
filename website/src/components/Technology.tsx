@@ -1,174 +1,125 @@
 'use client';
 
-import { motion } from 'framer-motion';
+import { motion, useReducedMotion } from 'framer-motion';
 
 const techStack = [
-  {
-    name: 'Ed25519',
-    description: 'Elliptic curve signatures',
-    category: 'Cryptography',
-  },
-  {
-    name: 'Blake3',
-    description: 'Lightning-fast hashing',
-    category: 'Cryptography',
-  },
-  {
-    name: 'libp2p',
-    description: 'Peer-to-peer networking',
-    category: 'Network',
-  },
-  {
-    name: 'Gossipsub',
-    description: 'Message propagation',
-    category: 'Network',
-  },
-  {
-    name: 'PoA Consensus',
-    description: 'Round-robin validator rotation',
-    category: 'Consensus',
-  },
-  {
-    name: 'RocksDB',
-    description: 'High-performance storage',
-    category: 'Storage',
-  },
+  { name: 'Ed25519', description: 'Elliptic-curve signatures', category: 'Cryptography' },
+  { name: 'Blake3', description: 'Fast modern hashing', category: 'Cryptography' },
+  { name: 'libp2p', description: 'Peer-to-peer networking', category: 'Network' },
+  { name: 'Gossipsub', description: 'Block and tx propagation', category: 'Network' },
+  { name: 'Proof of Authority', description: 'Stake-weighted epoch rotation', category: 'Consensus' },
+  { name: 'RocksDB', description: 'Persistent state storage', category: 'Storage' },
 ];
 
-export default function Technology() {
-  return (
-    <section id="technology" className="relative py-32 overflow-hidden">
-      {/* Background */}
-      <div className="absolute inset-0 bg-[#26022e]/20" />
-      <div className="absolute inset-0 grid-pattern opacity-20" />
-
-      {/* Decorative Elements */}
-      <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[800px] h-[400px] bg-purple-500/10 rounded-full blur-3xl" />
-
-      <div className="relative z-10 max-w-7xl mx-auto px-6 lg:px-8">
-        <div className="grid lg:grid-cols-2 gap-16 items-center">
-          {/* Left Column - Content */}
-          <div>
-            <motion.span
-              initial={{ opacity: 0, y: 20 }}
-              whileInView={{ opacity: 1, y: 0 }}
-              viewport={{ once: true }}
-              transition={{ duration: 0.5 }}
-              className="inline-block text-sm font-medium text-purple-400 uppercase tracking-widest mb-4"
-            >
-              Technology
-            </motion.span>
-            <motion.h2
-              initial={{ opacity: 0, y: 20 }}
-              whileInView={{ opacity: 1, y: 0 }}
-              viewport={{ once: true }}
-              transition={{ duration: 0.5, delay: 0.1 }}
-              className="text-4xl sm:text-5xl font-bold mb-6"
-            >
-              Powered by{' '}
-              <span className="gradient-text-purple">Pure Rust</span>
-            </motion.h2>
-            <motion.p
-              initial={{ opacity: 0, y: 20 }}
-              whileInView={{ opacity: 1, y: 0 }}
-              viewport={{ once: true }}
-              transition={{ duration: 0.5, delay: 0.2 }}
-              className="text-lg text-gray-400 mb-8"
-            >
-              SUM Chain is built entirely in Rust using only the stable toolchain.
-              No C/C++, Python, Go, JavaScript, or Solidity. Just pure, memory-safe Rust
-              that&apos;s auditable, maintainable, and blazing fast.
-            </motion.p>
-
-            {/* Code Block */}
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              whileInView={{ opacity: 1, y: 0 }}
-              viewport={{ once: true }}
-              transition={{ duration: 0.5, delay: 0.3 }}
-              className="relative"
-            >
-              <div className="absolute inset-0 bg-gradient-to-r from-purple-500/20 to-pink-500/20 rounded-2xl blur-xl" />
-              <div className="relative glass rounded-2xl p-6 font-mono text-sm">
-                <div className="flex items-center gap-2 mb-4">
-                  <div className="w-3 h-3 rounded-full bg-red-500" />
-                  <div className="w-3 h-3 rounded-full bg-yellow-500" />
-                  <div className="w-3 h-3 rounded-full bg-green-500" />
-                  <span className="ml-2 text-gray-500 text-xs">transfer.rs</span>
-                </div>
-                <pre className="text-gray-300 overflow-x-auto">
-                  <code>{`// Send 10.5 Koppa with minimal fee
+const codeSample = `// Send 10.5 Koppa with a minimal fee
 let tx = Transaction::new(
     chain_id,
     sender.address(),
     recipient,
     koppa_to_base("10.5"),  // 10.5 Ϙ
-    koppa_to_base("0.001"), // Fee: 0.001 Ϙ
+    koppa_to_base("0.001"), // fee: 0.001 Ϙ
     nonce,
 );
 
 let signed = tx.sign(&sender)?;
-node.broadcast(signed).await?;`}</code>
+node.broadcast(signed).await?;`;
+
+export default function Technology() {
+  const reduce = useReducedMotion();
+  const reveal = {
+    initial: reduce ? (false as const) : { opacity: 0, y: 20 },
+    whileInView: { opacity: 1, y: 0 },
+    viewport: { once: true, amount: 0.3 } as const,
+  };
+
+  return (
+    <section id="technology" className="relative scroll-mt-20 overflow-hidden py-28 lg:py-36">
+      <div
+        className="absolute left-1/2 top-1/2 h-[420px] w-[760px] -translate-x-1/2 -translate-y-1/2 rounded-full opacity-40 blur-[120px]"
+        style={{ background: 'radial-gradient(circle, rgba(61,8,71,0.6), transparent 70%)' }}
+        aria-hidden="true"
+      />
+      <div className="relative z-10 mx-auto max-w-6xl px-6 lg:px-8">
+        <div className="grid items-center gap-14 lg:grid-cols-2">
+          <div>
+            <motion.h2
+              {...reveal}
+              transition={{ duration: 0.5 }}
+              className="font-[family-name:var(--font-display)] text-4xl font-bold tracking-tight sm:text-5xl"
+            >
+              Powered by pure Rust
+            </motion.h2>
+            <motion.p
+              {...reveal}
+              transition={{ duration: 0.5, delay: 0.1 }}
+              className="mt-4 max-w-lg text-lg text-muted"
+            >
+              SUM Chain is built entirely on the stable Rust toolchain. No C, C++,
+              Python, Go, JavaScript, or Solidity. Memory-safe, auditable, and fast.
+            </motion.p>
+
+            <motion.div
+              {...reveal}
+              transition={{ duration: 0.5, delay: 0.2 }}
+              className="relative mt-8"
+            >
+              <div className="glass overflow-hidden rounded-2xl">
+                <div className="flex items-center gap-2 border-b border-[var(--border)] px-5 py-3">
+                  <span className="h-3 w-3 rounded-full bg-red-500/80" />
+                  <span className="h-3 w-3 rounded-full bg-yellow-500/80" />
+                  <span className="h-3 w-3 rounded-full bg-green-500/80" />
+                  <span className="ml-2 font-[family-name:var(--font-mono)] text-xs text-muted">
+                    transfer.rs
+                  </span>
+                </div>
+                <pre className="overflow-x-auto p-5 font-[family-name:var(--font-mono)] text-sm leading-relaxed text-muted-strong">
+                  <code>{codeSample}</code>
                 </pre>
               </div>
             </motion.div>
           </div>
 
-          {/* Right Column - Tech Stack */}
           <div>
-            <motion.div
-              initial={{ opacity: 0, x: 40 }}
-              whileInView={{ opacity: 1, x: 0 }}
-              viewport={{ once: true }}
-              transition={{ duration: 0.6, delay: 0.2 }}
-              className="grid grid-cols-2 gap-4"
-            >
+            <div className="grid grid-cols-2 gap-4">
               {techStack.map((tech, index) => (
                 <motion.div
-                  key={index}
-                  initial={{ opacity: 0, y: 20 }}
+                  key={tech.name}
+                  initial={reduce ? false : { opacity: 0, y: 16 }}
                   whileInView={{ opacity: 1, y: 0 }}
-                  viewport={{ once: true }}
-                  transition={{ duration: 0.5, delay: 0.1 * index }}
-                  className="group p-6 rounded-2xl bg-white/[0.02] border border-white/5 hover:border-purple-500/30 hover:bg-white/[0.04] transition-all duration-300"
+                  viewport={{ once: true, amount: 0.4 }}
+                  transition={{ duration: 0.45, delay: index * 0.06 }}
+                  className="rounded-2xl border border-[var(--border)] bg-surface/50 p-5 transition-colors duration-300 hover:border-accent/40"
                 >
-                  <span className="text-xs font-medium text-purple-400 uppercase tracking-wider">
+                  <span className="text-xs font-medium uppercase tracking-wider text-accent-soft">
                     {tech.category}
                   </span>
-                  <h3 className="text-lg font-semibold mt-2 mb-1 group-hover:text-purple-300 transition-colors">
+                  <h3 className="mt-2 font-[family-name:var(--font-display)] text-lg font-semibold">
                     {tech.name}
                   </h3>
-                  <p className="text-sm text-gray-500">{tech.description}</p>
+                  <p className="mt-1 text-sm text-muted">{tech.description}</p>
                 </motion.div>
               ))}
-            </motion.div>
+            </div>
 
-            {/* Stats */}
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              whileInView={{ opacity: 1, y: 0 }}
-              viewport={{ once: true }}
-              transition={{ duration: 0.5, delay: 0.5 }}
-              className="mt-8 grid grid-cols-3 gap-4"
-            >
+            <div className="mt-4 grid grid-cols-3 gap-4">
               {[
                 { value: '100%', label: 'Rust' },
                 { value: '0', label: 'C/C++ deps' },
                 { value: '9', label: 'Decimals' },
-              ].map((stat, index) => (
+              ].map((stat) => (
                 <div
-                  key={index}
-                  className="text-center p-4 rounded-xl bg-white/[0.02] border border-white/5"
+                  key={stat.label}
+                  className="rounded-xl border border-[var(--border)] bg-surface/50 p-4 text-center"
                 >
-                  <div className="text-2xl font-bold gradient-text-purple">
+                  <div className="tnum font-[family-name:var(--font-display)] text-2xl font-bold text-accent-soft">
                     {stat.value}
                   </div>
-                  <div className="text-xs text-gray-500 uppercase tracking-wider mt-1">
+                  <div className="mt-1 text-xs uppercase tracking-wider text-muted">
                     {stat.label}
                   </div>
                 </div>
               ))}
-            </motion.div>
+            </div>
           </div>
         </div>
       </div>

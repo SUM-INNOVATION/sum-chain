@@ -11,6 +11,9 @@
     "format": "prettier --write \"src/**/*.{ts,tsx,css}\""
   },
   "dependencies": {
+    "@fontsource/inter": "^5.2.8",
+    "@fontsource/jetbrains-mono": "^5.2.8",
+    "@fontsource/space-grotesk": "^5.2.10",
     "@sumchain/sdk": "file:../sdk/typescript",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",

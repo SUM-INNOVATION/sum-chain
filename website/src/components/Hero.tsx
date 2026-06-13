@@ -1,172 +1,109 @@
 'use client';
 
-import { motion } from 'framer-motion';
+import { motion, useReducedMotion } from 'framer-motion';
 import Link from 'next/link';
-import { useEffect, useState } from 'react';
+import { ArrowRightIcon } from '@heroicons/react/24/outline';
+
+const stats = [
+  { label: 'Block Time', value: '3s' },
+  { label: 'Typical Fee', value: '~0.001 Ϙ' },
+  { label: 'Total Supply', value: '800B Ϙ' },
+  { label: 'Finality', value: '~18s' },
+];
 
 export default function Hero() {
-  const [mousePosition, setMousePosition] = useState({ x: 0, y: 0 });
-
-  useEffect(() => {
-    const handleMouseMove = (e: MouseEvent) => {
-      setMousePosition({
-        x: (e.clientX / window.innerWidth) * 100,
-        y: (e.clientY / window.innerHeight) * 100,
-      });
-    };
-    window.addEventListener('mousemove', handleMouseMove);
-    return () => window.removeEventListener('mousemove', handleMouseMove);
-  }, []);
+  const reduce = useReducedMotion();
+  const rise = (delay: number) =>
+    reduce
+      ? { initial: false as const }
+      : {
+          initial: { opacity: 0, y: 18 },
+          animate: { opacity: 1, y: 0 },
+          transition: { duration: 0.6, delay, ease: [0.16, 1, 0.3, 1] as const },
+        };
 
   return (
-    <section className="relative min-h-screen flex items-center justify-center overflow-hidden">
-      {/* Animated Background */}
-      <div className="absolute inset-0 animated-gradient" />
+    <>
+      <section className="relative flex min-h-[100dvh] items-center overflow-hidden">
+        {/* Intentional, restrained backdrop: structural grid + one soft brand glow.
+            No mouse-follow, no floating-orb soup. */}
+        <div className="absolute inset-0 grid-pattern opacity-70" aria-hidden="true" />
+        <div
+          className="absolute left-1/2 top-[-10%] h-[520px] w-[820px] -translate-x-1/2 rounded-full opacity-50 blur-[120px]"
+          style={{ background: 'radial-gradient(circle, rgba(168,85,247,0.22), transparent 70%)' }}
+          aria-hidden="true"
+        />
 
-      {/* Grid Pattern */}
-      <div className="absolute inset-0 grid-pattern opacity-50" />
-
-      {/* Radial Gradient following mouse */}
-      <div
-        className="absolute inset-0 opacity-30 transition-all duration-1000 ease-out"
-        style={{
-          background: `radial-gradient(circle at ${mousePosition.x}% ${mousePosition.y}%, rgba(168, 85, 247, 0.15) 0%, transparent 50%)`,
-        }}
-      />
-
-      {/* Floating Orbs */}
-      <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-purple-500/10 rounded-full blur-3xl float" />
-      <div className="absolute bottom-1/4 right-1/4 w-80 h-80 bg-[#26022e]/30 rounded-full blur-3xl float" style={{ animationDelay: '-3s' }} />
-      <div className="absolute top-1/2 right-1/3 w-64 h-64 bg-purple-600/10 rounded-full blur-3xl float" style={{ animationDelay: '-1.5s' }} />
-
-      {/* Content */}
-      <div className="relative z-10 max-w-7xl mx-auto px-6 lg:px-8 pt-32 pb-20">
-        <div className="text-center">
-          {/* Badge */}
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.6, delay: 0.2 }}
-            className="inline-flex items-center gap-2 px-4 py-2 rounded-full glass mb-8"
-          >
-            <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
-            <span className="text-sm text-gray-300">Mainnet Live</span>
-          </motion.div>
-
-          {/* Main Headline */}
-          <motion.h1
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.6, delay: 0.3 }}
-            className="text-5xl sm:text-6xl md:text-7xl lg:text-8xl font-bold tracking-tight mb-6"
-          >
-            <span className="block">A Utility-Backed</span>
-            <span className="block gradient-text-purple">Layer-1</span>
-          </motion.h1>
-
-          {/* Subheadline */}
-          <motion.p
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.6, delay: 0.4 }}
-            className="text-lg sm:text-xl text-gray-400 max-w-2xl mx-auto mb-12"
-          >
-            SUM Chain is a high-performance Layer-1 blockchain powering{' '}
-            <span className="text-white font-medium">Koppa (Ϙ)</span> — value backed
-            by real on-chain utility: decentralized storage, verifiable AI compute,
-            encrypted messaging, and document credentials. Not just payments.
-          </motion.p>
-
-          {/* CTA Buttons */}
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.6, delay: 0.5 }}
-            className="flex flex-col sm:flex-row items-center justify-center gap-4"
-          >
-            <Link
-              href="/#get-started"
-              className="group relative px-8 py-4 text-lg font-medium rounded-full bg-white text-[#0a0a0a] hover:bg-gray-100 transition-all duration-300 overflow-hidden"
+        <div className="relative z-10 mx-auto w-full max-w-6xl px-6 pt-24 lg:px-8">
+          <div className="max-w-3xl">
+            <motion.div
+              {...rise(0.05)}
+              className="glass mb-8 inline-flex items-center gap-2 rounded-full px-4 py-1.5 text-sm text-muted-strong"
             >
-              <span className="relative z-10">Start Building</span>
-              <div className="absolute inset-0 bg-gradient-to-r from-purple-500 to-pink-500 opacity-0 group-hover:opacity-10 transition-opacity duration-300" />
-            </Link>
-            <Link
-              href="https://explorer.sumchain.io"
-              className="group px-8 py-4 text-lg font-medium rounded-full border border-white/20 hover:border-white/40 hover:bg-white/5 transition-all duration-300 flex items-center gap-2"
+              <span className="relative flex h-2 w-2">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-green-400 opacity-60" />
+                <span className="relative inline-flex h-2 w-2 rounded-full bg-green-400" />
+              </span>
+              Mainnet Live
+            </motion.div>
+
+            <motion.h1
+              {...rise(0.12)}
+              className="font-[family-name:var(--font-display)] text-5xl font-bold leading-[1.02] tracking-tight sm:text-6xl lg:text-7xl"
             >
-              View Explorer
-              <svg
-                className="w-5 h-5 group-hover:translate-x-1 transition-transform duration-300"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
+              A Utility-Backed
+              <span className="block gradient-text">Layer-1</span>
+            </motion.h1>
+
+            <motion.p {...rise(0.2)} className="mt-6 max-w-xl text-lg text-muted">
+              The Rust-built Layer-1 where Koppa (Ϙ) is backed by real on-chain
+              utility, not just payments.
+            </motion.p>
+
+            <motion.div {...rise(0.28)} className="mt-10 flex flex-col gap-4 sm:flex-row">
+              <Link
+                href="/#get-started"
+                className="group inline-flex items-center justify-center gap-2 rounded-full bg-foreground px-7 py-3.5 text-base font-medium text-background transition-transform duration-200 hover:-translate-y-0.5 active:translate-y-0"
               >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M17 8l4 4m0 0l-4 4m4-4H3"
-                />
-              </svg>
-            </Link>
-          </motion.div>
-
-          {/* Stats Preview */}
-          <motion.div
-            initial={{ opacity: 0, y: 40 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.8, delay: 0.7 }}
-            className="mt-20 grid grid-cols-2 md:grid-cols-4 gap-8 max-w-4xl mx-auto"
-          >
-            {[
-              { label: 'Block Time', value: '3s' },
-              { label: 'Transaction Fee', value: '~0.001 Ϙ' },
-              { label: 'Total Supply', value: '800B Ϙ' },
-              { label: 'Finality', value: '~18s' },
-            ].map((stat, index) => (
-              <div key={index} className="text-center">
-                <div className="text-3xl sm:text-4xl font-bold gradient-text mb-2">
-                  {stat.value}
-                </div>
-                <div className="text-sm text-gray-500 uppercase tracking-wider">
-                  {stat.label}
-                </div>
-              </div>
-            ))}
-          </motion.div>
+                Start Building
+                <ArrowRightIcon className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5" />
+              </Link>
+              <Link
+                href="https://explorer.sumchain.io"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center justify-center gap-2 rounded-full border border-[var(--border-strong)] px-7 py-3.5 text-base font-medium text-muted-strong transition-colors duration-200 hover:border-accent/50 hover:text-foreground"
+              >
+                View Explorer
+              </Link>
+            </motion.div>
+          </div>
         </div>
-      </div>
+      </section>
 
-      {/* Scroll Indicator */}
-      <motion.div
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        transition={{ duration: 1, delay: 1.5 }}
-        className="absolute bottom-8 left-1/2 -translate-x-1/2"
-      >
-        <div className="flex flex-col items-center gap-2 text-gray-500">
-          <span className="text-xs uppercase tracking-widest">Scroll</span>
-          <motion.div
-            animate={{ y: [0, 8, 0] }}
-            transition={{ duration: 1.5, repeat: Infinity, ease: 'easeInOut' }}
-          >
-            <svg
-              className="w-5 h-5"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
+      {/* Stats band, directly below the hero (kept out of the hero stack per
+          hero-discipline rules). All figures verified against live mainnet. */}
+      <section className="relative border-y border-[var(--border)] bg-surface/40">
+        <div className="mx-auto grid max-w-6xl grid-cols-2 gap-px px-6 lg:grid-cols-4 lg:px-8">
+          {stats.map((stat, i) => (
+            <motion.div
+              key={stat.label}
+              initial={reduce ? false : { opacity: 0, y: 12 }}
+              whileInView={{ opacity: 1, y: 0 }}
+              viewport={{ once: true, amount: 0.5 }}
+              transition={{ duration: 0.45, delay: i * 0.06 }}
+              className="py-8 text-center lg:py-10"
             >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M19 14l-7 7m0 0l-7-7m7 7V3"
-              />
-            </svg>
-          </motion.div>
+              <div className="tnum font-[family-name:var(--font-display)] text-3xl font-bold sm:text-4xl">
+                {stat.value}
+              </div>
+              <div className="mt-2 text-xs uppercase tracking-[0.15em] text-muted">
+                {stat.label}
+              </div>
+            </motion.div>
+          ))}
         </div>
-      </motion.div>
-    </section>
+      </section>
+    </>
   );
 }

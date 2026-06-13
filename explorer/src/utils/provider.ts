@@ -1,7 +1,8 @@
 import { Provider } from '@sumchain/sdk';
 
-// Get RPC URL from environment or use default
-const RPC_URL = import.meta.env.VITE_RPC_URL || 'http://localhost:8545';
+// Default to the canonical public mainnet RPC so the deployed build works out
+// of the box. Override with VITE_RPC_URL for local development.
+const RPC_URL = import.meta.env.VITE_RPC_URL || 'https://rpc.sumchain.io';
 
 // Create singleton provider instance
 export const provider = new Provider({
