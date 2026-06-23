@@ -34,11 +34,19 @@ revisiting the specific proof system only after two blockers clear:
 ## What the mechanism is
 
 A small, governed Proof Eligibility Registry of proof systems that are eligible
-to be referenced on mainnet. Each record is added by an explicit registry PR
-carrying a review trail. The registry is **append-only and dormant by default**:
-shipping the mechanism with zero records changes no runtime behavior. Eligibility
-is never changed by editing or deleting a record — every transition is a new
-superseding record (see [§state model](#state-model)).
+to be referenced on mainnet. Each record describes a **proof profile** — the
+identity tuple `proof_system` + `backend_id` + `model_format` + `circuit_id_hex`
++ `model_hash` + `verification_key_hash_hex` + `halo2_version` — and is added by
+an explicit registry PR carrying a review trail. The registry is **append-only
+and dormant by default**: shipping the mechanism with zero records changes no
+runtime behavior. Eligibility is never changed by editing or deleting a record —
+every transition is a new superseding record (see [§state model](#state-model)).
+
+**v1 position:** SUM Chain admits by exact proof-profile identity match only.
+SUM Chain does not verify proof correctness for this profile; OmniNode owns
+proof generation and verification correctness. (This resolves
+[O-1](#open-question-o-1--verify-vs-register) to register-only for v1; an
+on-chain verifier remains a possible future fork, not v1 scope.)
 
 ### Registry record schema (proposed)
 
@@ -116,12 +124,13 @@ review artifact may be appended later; the GitHub PR + issue trail is the
 lowest-friction auditable baseline.
 
 ### 4. Evidence / audit bar
-Require the OmniNode Stage 11d/14 evidence bundle first. Then:
-- if **chain verifies proofs** → third-party cryptographer review required
-  before mainnet;
-- if **chain only registers identity hashes** → internal review may suffice,
-  but the record and review ref must state plainly that *the chain does not
-  verify the proof*.
+Require the OmniNode Stage 11d/14 evidence bundle first. Per the v1 register-only
+position ([O-1](#open-question-o-1--verify-vs-register)), the chain takes the
+register-only branch: internal review may suffice, **and** the record and review
+ref must state plainly that *the chain does not verify the proof* (it admits by
+proof-profile identity match only). The verify branch — third-party
+cryptographer review before mainnet — applies only if a future version links an
+on-chain verifier, which is out of v1 scope.
 
 ### 5. Activation semantics
 Reuse the genesis height-gate pattern: `proof_eligibility_enabled_from_height:
@@ -161,15 +170,25 @@ activation.
 
 ## Open question O-1 — verify vs. register
 
-**Blocking, owned by OmniNode.** Until answered, the verification code path is
-unspecified:
-- **Verify:** chain links a verifier for the proof system; record hashes gate a
-  real on-chain verification. Heavy; needs third-party crypto audit.
-- **Register-only:** chain stores the identity tuple and refuses/admits by hash
-  match only; OmniNode owns verification. Light; internal review may suffice.
+**v1 recommendation: register-only (resolved for v1).** SUM Chain admits by
+exact proof-profile identity match only. SUM Chain does not verify proof
+correctness for this profile; OmniNode owns proof generation and verification
+correctness. The two paths, for the record:
+- **Verify (deferred, possible future fork):** chain links a verifier for the
+  proof system; record hashes gate a real on-chain verification. Heavy; would
+  need third-party crypto audit. **Not v1 scope.**
+- **Register-only (v1):** chain stores the proof profile and refuses/admits by
+  identity match only; OmniNode owns verification. Light; internal review may
+  suffice, and the record must state plainly that the chain does not verify.
 
-The schema above supports both; the executor/verifier wiring does not exist and
-will be designed once O-1 is answered.
+The schema above supports both; only the register-only path is in v1 scope. The
+executor/match wiring does not exist yet and will be designed when the registry
+mechanism is implemented (still gated on the OmniNode evidence bundle).
+
+## Handoff to OmniNode
+
+After the chain has a `CandidateRefused` registry record and review trail,
+OmniNode Stage 11d.3C may mirror or consume that record locally.
 
 ## Non-goals
 

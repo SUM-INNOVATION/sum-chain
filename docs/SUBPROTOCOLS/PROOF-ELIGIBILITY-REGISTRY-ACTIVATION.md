@@ -18,6 +18,9 @@ records**. For the design/contract, see
   2. OmniNode confirms verify-vs-register ownership (design doc, O-1).
 - Production / mainnet default once shipped: `proof_eligibility_enabled_from_height:
   None` (dormant). No environment will have an activation height set by this PR.
+- **v1 position:** SUM Chain admits by exact proof-profile identity match only.
+  SUM Chain does not verify proof correctness for this profile; OmniNode owns
+  proof generation and verification correctness (design doc, O-1 = register-only).
 
 ## Explicit non-goals
 
@@ -30,14 +33,16 @@ records**. For the design/contract, see
 
 No box may be checked until O-1 is answered and the evidence bundle is in hand.
 
-- [ ] **Ownership split confirmed (O-1).** OmniNode states in writing whether
-      the chain verifies proofs or only registers identity hashes. The audit bar
-      and verification path follow from this.
+- [ ] **Ownership split confirmed (O-1).** v1 is register-only: the chain admits
+      by exact proof-profile identity match and does **not** verify proof
+      correctness. Confirm OmniNode agrees in writing that it owns proof
+      generation and verification correctness.
 - [ ] **Evidence bundle received.** OmniNode Stage 11d / Stage 14 evidence
       delivered to the chain team and attached to the review ref.
-- [ ] **Audit bar met.** If chain verifies: third-party cryptographer review
-      complete. If register-only: internal review complete *and* the record
-      states plainly that the chain does not verify the proof.
+- [ ] **Audit bar met.** Register-only (v1): internal review complete *and* the
+      record states plainly that the chain does not verify the proof. (The
+      verify branch — third-party cryptographer review — applies only to a
+      future on-chain-verifier version, out of v1 scope.)
 - [ ] **Tuple provenance recorded.** Each hash is either independently
       reproduced by the chain team, or marked
       `accepted by OmniNode attestation, not independently reproduced`.
@@ -109,6 +114,11 @@ Recommended starting points; tune against baseline.
   spikes usually mean submitter-side drift or a stale OmniNode build.
 - `chain_getChainParams.proof_eligibility_enabled_from_height` reachable and
   reporting the expected value from each validator.
+
+## Handoff to OmniNode
+
+After the chain has a `CandidateRefused` registry record and review trail,
+OmniNode Stage 11d.3C may mirror or consume that record locally.
 
 ## References
 
