@@ -1,18 +1,18 @@
-# Proof-Eligibility Allowlist — Design (DRAFT, dormant)
+# Proof Eligibility Registry — Design (DRAFT, dormant)
 
 **Status: DRAFT design. No mechanism is implemented in chain code, and no
-allowlist entry is approved.** This document specifies a *dormant* proof-system
-eligibility allowlist so that adding a proof system to mainnet is a reviewable,
+registry record is approved.** This document specifies a *dormant* Proof
+Eligibility Registry so that adding a proof system to mainnet is a reviewable,
 governed, append-only act rather than an ad-hoc code change. It exists because
 OmniNode requested chain-team/governance sign-off for
 `ProofSystem::Stage11dProductionFixedPointMlp`, which the chain cannot grant
-today: there is no allowlist, no such proof system, no verification path, and no
+today: there is no registry, no such proof system, no verification path, and no
 `chain_team_review_ref` convention in this repo. (The only existing `ProofSystem`
 reference is a draft enum in [`docs/SRC-80X-81X-DocClass.md`](../SRC-80X-81X-DocClass.md),
 not chain code.)
 
 This is the *contract/design* doc. Operational activation lives in
-[`PROOF-ELIGIBILITY-ALLOWLIST-ACTIVATION.md`](./PROOF-ELIGIBILITY-ALLOWLIST-ACTIVATION.md).
+[`PROOF-ELIGIBILITY-REGISTRY-ACTIVATION.md`](./PROOF-ELIGIBILITY-REGISTRY-ACTIVATION.md).
 It mirrors the dormant-by-default discipline of the
 [`InferenceAttestation`](./INFERENCE-ATTESTATION.md) subprotocol and the
 Education-LMS suite.
@@ -21,7 +21,7 @@ Education-LMS suite.
 
 Mainnet eligibility for `Stage11dProductionFixedPointMlp` is **REJECTED at this
 time.** Reason: nothing enforceable exists in chain code. What is approved is
-*building this dormant allowlist mechanism* — with **no active entries** — and
+*building this dormant registry mechanism* — with **no active records** — and
 revisiting the specific proof system only after two blockers clear:
 
 1. OmniNode delivers the Stage 11d / Stage 14 evidence bundle (it lives in the
@@ -33,14 +33,14 @@ revisiting the specific proof system only after two blockers clear:
 
 ## What the mechanism is
 
-A small, governed registry of proof systems that are eligible to be referenced
-on mainnet. Each record is added by an explicit allowlist PR carrying a review
-trail. The registry is **append-only and dormant by default**: shipping the
-mechanism with zero records changes no runtime behavior. Eligibility is never
-changed by editing or deleting a record — every transition is a new superseding
-record (see [§state model](#state-model)).
+A small, governed Proof Eligibility Registry of proof systems that are eligible
+to be referenced on mainnet. Each record is added by an explicit registry PR
+carrying a review trail. The registry is **append-only and dormant by default**:
+shipping the mechanism with zero records changes no runtime behavior. Eligibility
+is never changed by editing or deleting a record — every transition is a new
+superseding record (see [§state model](#state-model)).
 
-### Allowlist entry schema (proposed)
+### Registry record schema (proposed)
 
 One record per governance act. All fields required and non-empty unless typed
 `Option`. The registry is **append-only**: a record is never edited or deleted.
@@ -62,9 +62,10 @@ equivalently the non-superseded) record for its identity tuple.
 | `state_reason` | string | human-readable reason for this record's state (e.g. "dry-run", "activation", "rollback: incident #…") |
 | `chain_team_review_ref` | string, non-empty | full review trail for *this record*, see [§review-ref](#review-ref-scope-q7) |
 
-The exact Rust placement (likely a `proof_eligibility` module in
-`crates/primitives`, mirroring `inference_attestation.rs`) is deferred to
-implementation, pending O-1.
+(`entry_id` / `supersedes_entry_id` are the record identifiers — "entry" here is
+the record id, not a separate concept.) The exact Rust placement (likely a
+`proof_eligibility` module in `crates/primitives`, mirroring
+`inference_attestation.rs`) is deferred to implementation, pending O-1.
 
 ### State model
 
@@ -92,14 +93,14 @@ the record chain.
 These map 1:1 to OmniNode's nine sign-off questions.
 
 ### 1. Mainnet eligibility
-**Rejected now.** Approve the dormant mechanism only; the live entry is blocked
+**Rejected now.** Approve the dormant mechanism only; the live record is blocked
 on the two items above.
 
 ### 2. Tuple sign-off
-Do **not** sign off the cited hashes blindly. Each entry must record one of:
+Do **not** sign off the cited hashes blindly. Each record must note one of:
 - **independently reproduced** by the chain team (preferred if chain verifies), or
 - **`accepted by OmniNode attestation, not independently reproduced`** — stated
-  in plain text in the entry and the review ref.
+  in plain text in the record and the review ref.
 
 The cited tuple (recorded here for the future review, **not approved**):
 - `proof_system`: `Stage11dProductionFixedPointMlp`
@@ -119,7 +120,7 @@ Require the OmniNode Stage 11d/14 evidence bundle first. Then:
 - if **chain verifies proofs** → third-party cryptographer review required
   before mainnet;
 - if **chain only registers identity hashes** → internal review may suffice,
-  but the entry and review ref must state plainly that *the chain does not
+  but the record and review ref must state plainly that *the chain does not
   verify the proof*.
 
 ### 5. Activation semantics
@@ -134,19 +135,19 @@ Required, committed with the activating PR. Rollback is **append-only**: it adds
 a new superseding record (`Active → CandidateRefused` or `Active → Revoked`)
 with its own `state_reason` and `chain_team_review_ref` — never a deletion or
 in-place edit. See
-[`PROOF-ELIGIBILITY-ALLOWLIST-ACTIVATION.md`](./PROOF-ELIGIBILITY-ALLOWLIST-ACTIVATION.md).
+[`PROOF-ELIGIBILITY-REGISTRY-ACTIVATION.md`](./PROOF-ELIGIBILITY-REGISTRY-ACTIVATION.md).
 
 ### 7. Review-ref scope (Q7)
 **Full trail**, not activation-only. `chain_team_review_ref` must cover:
 proof-family review · circuit-identity tuple sign-off · evidence/audit result ·
-the allowlist entry · the activation height.
+the registry record · the activation height.
 
 ### 8. Regeneration policy (Q8)
 Any change invalidates the record. A change to `params.bin`,
 `verification_key_hash_hex`, `circuit_id_hex`, `halo2_version`, circuit code,
 `backend_id`, `model_format`, or `model_hash` makes the current record
 automatically invalid. Because a regenerated artifact is a *different identity
-tuple*, re-eligibility is a brand-new record (a fresh allowlist PR and a fresh
+tuple*, re-eligibility is a brand-new record (a fresh registry PR and a fresh
 `chain_team_review_ref`) — not a superseding record of the old tuple, and never
 an in-place edit.
 
@@ -162,7 +163,7 @@ activation.
 
 **Blocking, owned by OmniNode.** Until answered, the verification code path is
 unspecified:
-- **Verify:** chain links a verifier for the proof system; entry hashes gate a
+- **Verify:** chain links a verifier for the proof system; record hashes gate a
   real on-chain verification. Heavy; needs third-party crypto audit.
 - **Register-only:** chain stores the identity tuple and refuses/admits by hash
   match only; OmniNode owns verification. Light; internal review may suffice.
@@ -172,7 +173,7 @@ will be designed once O-1 is answered.
 
 ## Non-goals
 
-- No active allowlist entry in this PR.
+- No active registry record in this PR.
 - No `Stage11dProductionFixedPointMlp` enum variant or verifier in this PR.
 - No genesis code change in this PR (the gate field is *specified* here for
   reviewer approval, added in the implementation PR).

@@ -1,19 +1,19 @@
-# Proof-Eligibility Allowlist — Activation Readiness (DRAFT, dormant)
+# Proof Eligibility Registry — Activation Readiness (DRAFT, dormant)
 
 Mirrors [`INFERENCE-ATTESTATION-ACTIVATION.md`](./INFERENCE-ATTESTATION-ACTIVATION.md)
 and [`EDUCATION-ACTIVATION.md`](./EDUCATION-ACTIVATION.md).
 This document **does not set or propose an activation height for any
 environment.** The mechanism is specified to ship **dormant**
-(`proof_eligibility_enabled_from_height: None`) with **no active allowlist
-entries**. For the design/contract, see
-[`PROOF-ELIGIBILITY-ALLOWLIST.md`](./PROOF-ELIGIBILITY-ALLOWLIST.md).
+(`proof_eligibility_enabled_from_height: None`) with **no active registry
+records**. For the design/contract, see
+[`PROOF-ELIGIBILITY-REGISTRY.md`](./PROOF-ELIGIBILITY-REGISTRY.md).
 
 ## Current status (2026-06-23)
 
 - Mechanism: **not implemented.** This is a design package.
 - `Stage11dProductionFixedPointMlp` mainnet eligibility: **REJECTED** at this
   time (see design doc, Decision of record).
-- Blockers before any entry is even drafted:
+- Blockers before any record is even drafted:
   1. OmniNode delivers the Stage 11d / Stage 14 evidence bundle.
   2. OmniNode confirms verify-vs-register ownership (design doc, O-1).
 - Production / mainnet default once shipped: `proof_eligibility_enabled_from_height:
@@ -22,7 +22,7 @@ entries**. For the design/contract, see
 ## Explicit non-goals
 
 - No mainnet (or any) activation height is proposed here.
-- No active allowlist entry is added.
+- No active registry record is added.
 - No `Stage11dProductionFixedPointMlp` enum variant, verifier, executor,
   mempool, or RPC change is made.
 
@@ -36,14 +36,14 @@ No box may be checked until O-1 is answered and the evidence bundle is in hand.
 - [ ] **Evidence bundle received.** OmniNode Stage 11d / Stage 14 evidence
       delivered to the chain team and attached to the review ref.
 - [ ] **Audit bar met.** If chain verifies: third-party cryptographer review
-      complete. If register-only: internal review complete *and* the entry
+      complete. If register-only: internal review complete *and* the record
       states plainly that the chain does not verify the proof.
 - [ ] **Tuple provenance recorded.** Each hash is either independently
       reproduced by the chain team, or marked
       `accepted by OmniNode attestation, not independently reproduced`.
 - [ ] **`chain_team_review_ref` populated.** Non-empty, full-trail
       (`sum-chain#<PR>; governance#<ISSUE>; commit:<SHA>`), covering
-      proof-family review + circuit identity + evidence/audit + entry +
+      proof-family review + circuit identity + evidence/audit + registry record +
       activation height.
 - [ ] **Dormant-default guarded.** Production/testnet genesis files do NOT set
       `proof_eligibility_enabled_from_height` (it stays `None`). An integration
@@ -53,12 +53,12 @@ No box may be checked until O-1 is answered and the evidence bundle is in hand.
       not an in-place flip).
 - [ ] **Regeneration policy wired.** Changing `params.bin`, VK hash, circuit ID,
       Halo2 version, circuit code, backend ID, model format, or model hash
-      invalidates the entry and requires a fresh allowlist PR + review ref.
+      invalidates the record and requires a fresh registry PR + review ref.
 
 ## Activation procedure
 
 Generic template — no environment-specific values filled in. Assumes the
-mechanism is implemented and an entry is `Active`-ready.
+mechanism is implemented and a record is `Active`-ready.
 
 1. Build and deploy the validator binary from the candidate `main` commit to
    every validator in the target environment; verify all report the same commit.
@@ -76,12 +76,12 @@ mechanism is implemented and an entry is `Active`-ready.
 
 Two cases, mirroring the InferenceAttestation readiness package.
 
-**Case A — before height `H`, or before any proof referencing an active entry
+**Case A — before height `H`, or before any proof referencing an active record
 is admitted.** Remove `proof_eligibility_enabled_from_height` from the overlay
 (or set it to a later height) and propagate. No proof has been admitted, so the
 abort is effectively free.
 
-**Case B — after the first proof referencing an active entry has been admitted.**
+**Case B — after the first proof referencing an active record has been admitted.**
 As with InferenceAttestation, the current activation gate enables but is not
 necessarily consulted after activation by every code path; verify the target
 binary's runtime behavior before relying on a "set to far-future height"
@@ -102,17 +102,17 @@ before touching the height gate, which is environment-wide.
 
 Recommended starting points; tune against baseline.
 
-- Counts of proofs **refused** for referencing a `CandidateRefused` entry —
-  expected non-zero during dry-run, expected zero for `Active` entries.
-- Counts of proofs **admitted** per active entry.
-- Hash-mismatch refusals (a referenced tuple not matching any active entry) —
+- Counts of proofs **refused** for referencing a `CandidateRefused` record —
+  expected non-zero during dry-run, expected zero for `Active` records.
+- Counts of proofs **admitted** per active record.
+- Hash-mismatch refusals (a referenced tuple not matching any active record) —
   spikes usually mean submitter-side drift or a stale OmniNode build.
 - `chain_getChainParams.proof_eligibility_enabled_from_height` reachable and
   reporting the expected value from each validator.
 
 ## References
 
-- Design / contract: [`PROOF-ELIGIBILITY-ALLOWLIST.md`](./PROOF-ELIGIBILITY-ALLOWLIST.md)
+- Design / contract: [`PROOF-ELIGIBILITY-REGISTRY.md`](./PROOF-ELIGIBILITY-REGISTRY.md)
 - Activation-gate precedent: [`crates/genesis/src/lib.rs:151`](../../crates/genesis/src/lib.rs#L151)
 - Readiness-doc precedents: [`INFERENCE-ATTESTATION-ACTIVATION.md`](./INFERENCE-ATTESTATION-ACTIVATION.md),
   [`EDUCATION-ACTIVATION.md`](./EDUCATION-ACTIVATION.md)
