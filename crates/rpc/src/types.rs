@@ -311,6 +311,67 @@ pub struct ChainParamsInfo {
     /// `docs/SUBPROTOCOLS/EDUCATION-ACTIVATION.md`). Additive field —
     /// appended after `omninode_enabled_from_height`.
     pub education_enabled_from_height: Option<u64>,
+
+    /// Block height at which the Proof Eligibility Registry gate opens.
+    ///
+    /// `null` (JSON) / `None` (Rust) = gate closed. v1 is register-only and
+    /// mechanism-only (the registry ships with no records), so this gate has
+    /// **no runtime consumer yet** — it is forward plumbing for a future
+    /// `Active`-record admission path. Additive field — appended after
+    /// `education_enabled_from_height`. See
+    /// `docs/SUBPROTOCOLS/PROOF-ELIGIBILITY-REGISTRY.md`.
+    pub proof_eligibility_enabled_from_height: Option<u64>,
+}
+
+/// One Proof Eligibility Registry record as returned by
+/// `sum_getProofEligibilityRegistry`. Owned `String`s; the three identity
+/// hashes are rendered as `0x` + 64 lowercase hex chars. `is_current` is
+/// computed by the server (head of the supersession chain for this record's
+/// full proof-profile identity tuple). The chain admits by exact proof-profile
+/// identity match only and does **not** verify proof correctness — see `note`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProofEligibilityRecordInfo {
+    pub entry_id: u32,
+    pub supersedes_entry_id: Option<u32>,
+    pub proof_system: String,
+    pub backend_id: String,
+    pub model_format: String,
+    pub circuit_id_hex: String,
+    pub model_hash_hex: String,
+    pub verification_key_hash_hex: String,
+    pub halo2_version: String,
+    pub eligibility_state: String,
+    pub state_reason: String,
+    pub chain_team_review_ref: String,
+    pub note: String,
+    pub is_current: bool,
+}
+
+impl ProofEligibilityRecordInfo {
+    /// Render an internal [`sumchain_primitives::proof_eligibility::ProofEligibilityRecord`]
+    /// into its JSON DTO. `is_current` is computed by the caller (it needs the
+    /// full record set). Hashes become `0x` + lowercase hex.
+    pub fn from_record(
+        rec: &sumchain_primitives::proof_eligibility::ProofEligibilityRecord,
+        is_current: bool,
+    ) -> Self {
+        Self {
+            entry_id: rec.entry_id,
+            supersedes_entry_id: rec.supersedes_entry_id,
+            proof_system: rec.proof_system.as_str().to_string(),
+            backend_id: rec.backend_id.to_string(),
+            model_format: rec.model_format.to_string(),
+            circuit_id_hex: format!("0x{}", hex::encode(rec.circuit_id)),
+            model_hash_hex: format!("0x{}", hex::encode(rec.model_hash)),
+            verification_key_hash_hex: format!("0x{}", hex::encode(rec.verification_key_hash)),
+            halo2_version: rec.halo2_version.to_string(),
+            eligibility_state: rec.eligibility_state.as_str().to_string(),
+            state_reason: rec.state_reason.to_string(),
+            chain_team_review_ref: rec.chain_team_review_ref.to_string(),
+            note: rec.note.to_string(),
+            is_current,
+        }
+    }
 }
 
 /// One archive-node record as returned by `storage_getActiveNodesAtHeight`

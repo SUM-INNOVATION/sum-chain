@@ -14,7 +14,7 @@ use crate::types::{
     CreateEmploymentCredentialResponse, DelegationRpcInfo, DelegatorSummary, DocClassConfigInfo,
     DocClassCredentialInfo, DocClassIdentityInfo, DocClassIssuerInfo, DocClassSummary,
     EmploymentCredentialInfo, EmploymentIssuerInfo, EmploymentSummary, EmploymentVerificationResult,
-    AssignmentCoverageV2, ChainParamsInfo, EpochInfo, FinalityInfo, GasEstimateResult, HealthResponse, IncomeAttestationInfo, NodeRecordInfo, PushableFileInfoV2, StorageFileInfoV2, TxStatusV2,
+    AssignmentCoverageV2, ChainParamsInfo, EpochInfo, FinalityInfo, GasEstimateResult, HealthResponse, IncomeAttestationInfo, NodeRecordInfo, ProofEligibilityRecordInfo, PushableFileInfoV2, StorageFileInfoV2, TxStatusV2,
     InboxFilterInfo, IssueAcademicCredentialRequest, IssueAcademicCredentialResponse,
     MessageDataInfo, MessageEventInfo, MessagingConfigInfo, MessagingQuotaInfo,
     NftCollectionInfo, NftOwnerTokens, NftTokenInfo, NodeInfo, P2pStats, PendingPaymentInfo,
@@ -201,6 +201,19 @@ pub trait SumChainApi {
         &self,
         tx_hash: String,
     ) -> Result<InferenceAttestationStatusInfo, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Full Proof Eligibility Registry (v1, register-only) — every record in
+    /// append-only history, each with a computed `is_current` flag (head of the
+    /// supersession chain for its full proof-profile identity tuple).
+    ///
+    /// v1 ships mechanism-only, so this returns `[]` until a governed record
+    /// lands. Reads are independent of the activation gate. The chain admits by
+    /// exact proof-profile identity match only and does not verify proof
+    /// correctness — see each record's `note`.
+    #[method(name = "sum_getProofEligibilityRegistry")]
+    async fn sum_get_proof_eligibility_registry(
+        &self,
+    ) -> Result<Vec<ProofEligibilityRecordInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     // ── SRC-817/818 Education suite — read-only RPC (Phase 4) ──
     // All ids/commitments are `0x`+hex strings. Student lookup is ONLY

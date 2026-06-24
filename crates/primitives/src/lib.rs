@@ -18,6 +18,7 @@ pub mod legal;
 pub mod messaging;
 pub mod node_registry;
 pub mod policy_account;
+pub mod proof_eligibility;
 pub mod property;
 pub mod receipt;
 pub mod staking;

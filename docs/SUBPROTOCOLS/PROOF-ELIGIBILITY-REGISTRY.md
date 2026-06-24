@@ -1,0 +1,237 @@
+# Proof Eligibility Registry — Design (implemented, dormant)
+
+**Status: mechanism implemented, dormant, with ZERO records.** The v1
+register-only mechanism ships in
+[`crates/primitives/src/proof_eligibility.rs`](../../crates/primitives/src/proof_eligibility.rs)
+(types + resolution helpers + empty `REGISTRY`), the activation gate
+`proof_eligibility_enabled_from_height` is in
+[`crates/genesis/src/lib.rs`](../../crates/genesis/src/lib.rs) (default `None`),
+and the read RPC `sum_getProofEligibilityRegistry` returns the full append-only
+history (empty in v1). **No registry record is approved or shipped** — the first
+`Stage11dProductionFixedPointMlp` `CandidateRefused` record is a follow-up PR
+(see [§deferred](#deferred-the-stage11d-candidaterefused-record)). This document
+specifies the Proof Eligibility Registry so that adding a proof system to
+mainnet is a reviewable, governed, append-only act rather than an ad-hoc code
+change. It exists because
+OmniNode requested chain-team/governance sign-off for
+`ProofSystem::Stage11dProductionFixedPointMlp`, which the chain cannot grant
+today: there is no registry, no such proof system, no verification path, and no
+`chain_team_review_ref` convention in this repo. (The only existing `ProofSystem`
+reference is a draft enum in [`docs/SRC-80X-81X-DocClass.md`](../SRC-80X-81X-DocClass.md),
+not chain code.)
+
+This is the *contract/design* doc. Operational activation lives in
+[`PROOF-ELIGIBILITY-REGISTRY-ACTIVATION.md`](./PROOF-ELIGIBILITY-REGISTRY-ACTIVATION.md).
+It mirrors the dormant-by-default discipline of the
+[`InferenceAttestation`](./INFERENCE-ATTESTATION.md) subprotocol and the
+Education-LMS suite.
+
+## Decision of record (2026-06-23)
+
+Mainnet eligibility for `Stage11dProductionFixedPointMlp` is **REJECTED at this
+time.** Reason: nothing enforceable exists in chain code. What is approved is
+*building this dormant registry mechanism* — with **no active records** — and
+revisiting the specific proof system only after two blockers clear:
+
+1. OmniNode delivers the Stage 11d / Stage 14 evidence bundle (it lives in the
+   OmniNode repo, not here).
+2. OmniNode confirms the **ownership split**: does SUM Chain *verify* proofs, or
+   does it only *register identity hashes* and leave verification to OmniNode?
+   This single answer determines the size of the audit bar and the verification
+   code path (see [Open question O-1](#open-question-o-1--verify-vs-register)).
+
+## What the mechanism is
+
+A small, governed Proof Eligibility Registry of proof systems that are eligible
+to be referenced on mainnet. Each record describes a **proof profile** — the
+identity tuple `proof_system` + `backend_id` + `model_format` + `circuit_id_hex`
++ `model_hash` + `verification_key_hash_hex` + `halo2_version` — and is added by
+an explicit registry PR carrying a review trail. The registry is **append-only
+and dormant by default**: shipping the mechanism with zero records changes no
+runtime behavior. Eligibility is never changed by editing or deleting a record —
+every transition is a new superseding record (see [§state model](#state-model)).
+
+**v1 position:** SUM Chain admits by exact proof-profile identity match only.
+SUM Chain does not verify proof correctness for this profile; OmniNode owns
+proof generation and verification correctness. (This resolves
+[O-1](#open-question-o-1--verify-vs-register) to register-only for v1; an
+on-chain verifier remains a possible future fork, not v1 scope.)
+
+### Registry record schema
+
+Implemented as `ProofEligibilityRecord` in
+[`crates/primitives/src/proof_eligibility.rs`](../../crates/primitives/src/proof_eligibility.rs).
+One record per governance act. The registry is **append-only**: a record is
+never edited or deleted. A proof system's *current* eligibility is the
+non-superseded record for its full identity tuple ([`ProofProfileKey`](#state-model)).
+The three identity hashes are typed `[u8; 32]` internally and rendered as `0x` +
+64 lowercase hex chars at the RPC boundary (`ProofEligibilityRecordInfo`).
+
+| Field | Internal type | Notes |
+|---|---|---|
+| `entry_id` | `u32` | unique per record; identifies this record for superseding |
+| `supersedes_entry_id` | `Option<u32>` | `Some(prev)` when this record replaces an earlier one *for the same `ProofProfileKey`*; `None` for the first record |
+| `proof_system` | `ProofSystem` enum | v1: `Stage11dProductionFixedPointMlp` (single variant, extensible) |
+| `backend_id` | `&str` | e.g. `production-fixedpoint-mlp-v1` |
+| `model_format` | `&str` | e.g. `ProductionFixedPointMlp` |
+| `circuit_id` | `[u8; 32]` | circuit identity (RPC: `circuit_id_hex`) |
+| `model_hash` | `[u8; 32]` | model identity (RPC: `model_hash_hex`) |
+| `verification_key_hash` | `[u8; 32]` | VK identity (RPC: `verification_key_hash_hex`) |
+| `halo2_version` | `&str` | pinned; part of the identity per [§regeneration](#regeneration-policy-q8) |
+| `eligibility_state` | `EligibilityState` enum | `CandidateRefused` (dry-run) \| `Active` \| `Revoked`; see [§state model](#state-model) |
+| `state_reason` | `&str` | human-readable reason for this record's state |
+| `chain_team_review_ref` | `&str`, non-empty | full review trail for *this record*, see [§review-ref](#review-ref-scope-q7) |
+| `note` | `&str` | the register-only disclaimer (see below) |
+
+The internal record type carries **no serde derive** (the RPC DTO
+`ProofEligibilityRecordInfo` owns serialization and the hex rendering). Resolution
+helpers `current_record(records, &ProofProfileKey)` and `is_current(records, rec)`
+key on the **full** identity tuple, so profiles that share hashes but differ in
+`backend_id`, `model_format`, or `halo2_version` are distinct and never supersede
+one another. `is_admissible(rec, gate, height)` is `Active && gate-open`;
+`CandidateRefused`/`Revoked` are refused by construction (and it has no runtime
+caller in v1 — forward plumbing).
+
+### State model
+
+The registry is append-only; **eligibility never changes by mutating or
+deleting a record.** Every transition is a *new* record that supersedes the
+prior one for the same identity tuple, carries its own
+`chain_team_review_ref`, and sets `supersedes_entry_id` to the record it
+replaces. Three states:
+
+- `CandidateRefused` — dry-run. The tuple is observable as a candidate but
+  proofs referencing it are **refused**. This is the first record for any tuple.
+- `Active` — proofs referencing the tuple are admitted (subject to O-1).
+- `Revoked` — eligibility withdrawn; proofs referencing the tuple are refused.
+  Terminal for that tuple unless a later record re-establishes it (which is a
+  fresh review).
+
+Allowed transitions (each = one superseding record + its own review PR):
+`CandidateRefused → Active`, `Active → CandidateRefused`,
+`Active → Revoked`, `CandidateRefused → Revoked`. There is no in-place edit and
+no deletion, so the full governance history of a tuple is reconstructable from
+the record chain.
+
+## Per-question design positions
+
+These map 1:1 to OmniNode's nine sign-off questions.
+
+### 1. Mainnet eligibility
+**Rejected now.** Approve the dormant mechanism only; the live record is blocked
+on the two items above.
+
+### 2. Tuple sign-off
+Do **not** sign off the cited hashes blindly. Each record must note one of:
+- **independently reproduced** by the chain team (preferred if chain verifies), or
+- **`accepted by OmniNode attestation, not independently reproduced`** — stated
+  in plain text in the record and the review ref.
+
+The cited tuple (recorded here for the future review, **not approved**):
+- `proof_system`: `Stage11dProductionFixedPointMlp`
+- `backend_id`: `production-fixedpoint-mlp-v1`
+- `model_format`: `ProductionFixedPointMlp`
+- `circuit_id_hex`: `593d027df3778bc582f9ec40bf453e757a1be6a9b6961243f2dfdf38fb4ea95d`
+- `model_hash`: `1c95eea59ab7fe811f1a3c668798221577225c917846888a803b939f9cbda741`
+- `verification_key_hash_hex`: `2ec18faed223a28a23155492459c507a2672b9ff495c1df566103a19638655a9`
+
+### 3. `chain_team_review_ref`
+Canonical format: `sum-chain#<PR>; governance#<ISSUE>; commit:<SHA>`. A signed
+review artifact may be appended later; the GitHub PR + issue trail is the
+lowest-friction auditable baseline.
+
+### 4. Evidence / audit bar
+Require the OmniNode Stage 11d/14 evidence bundle first. Per the v1 register-only
+position ([O-1](#open-question-o-1--verify-vs-register)), the chain takes the
+register-only branch: internal review may suffice, **and** the record and review
+ref must state plainly that *the chain does not verify the proof* (it admits by
+proof-profile identity match only). The verify branch — third-party
+cryptographer review before mainnet — applies only if a future version links an
+on-chain verifier, which is out of v1 scope.
+
+### 5. Activation semantics
+Reuse the genesis height-gate pattern: `proof_eligibility_enabled_from_height:
+Option<u64>`, `#[serde(default)]` = `None` (dormant forever until set). This
+mirrors `omninode_enabled_from_height` and `education_enabled_from_height`
+([`crates/genesis/src/lib.rs:151`](../../crates/genesis/src/lib.rs#L151)).
+**Not** "merge = active."
+
+### 6. Emergency rollback
+Required, committed with the activating PR. Rollback is **append-only**: it adds
+a new superseding record (`Active → CandidateRefused` or `Active → Revoked`)
+with its own `state_reason` and `chain_team_review_ref` — never a deletion or
+in-place edit. See
+[`PROOF-ELIGIBILITY-REGISTRY-ACTIVATION.md`](./PROOF-ELIGIBILITY-REGISTRY-ACTIVATION.md).
+
+### 7. Review-ref scope (Q7)
+**Full trail**, not activation-only. `chain_team_review_ref` must cover:
+proof-family review · circuit-identity tuple sign-off · evidence/audit result ·
+the registry record · the activation height.
+
+### 8. Regeneration policy (Q8)
+Any change invalidates the record. A change to `params.bin`,
+`verification_key_hash_hex`, `circuit_id_hex`, `halo2_version`, circuit code,
+`backend_id`, `model_format`, or `model_hash` makes the current record
+automatically invalid. Because a regenerated artifact is a *different identity
+tuple*, re-eligibility is a brand-new record (a fresh registry PR and a fresh
+`chain_team_review_ref`) — not a superseding record of the old tuple, and never
+an in-place edit.
+
+### 9. Dry-run / observability (Q9)
+Yes. The first record for a tuple is `eligibility_state: CandidateRefused`: the
+tuple is logged as a candidate and observable, but proofs referencing it are
+still **refused**. Activation is a later, separate PR that appends a new
+`Active` record superseding the dry-run one (not an in-place flip). This follows
+the repo's dormant-by-default pattern and yields monitoring data before real
+activation.
+
+## Open question O-1 — verify vs. register
+
+**v1 recommendation: register-only (resolved for v1).** SUM Chain admits by
+exact proof-profile identity match only. SUM Chain does not verify proof
+correctness for this profile; OmniNode owns proof generation and verification
+correctness. The two paths, for the record:
+- **Verify (deferred, possible future fork):** chain links a verifier for the
+  proof system; record hashes gate a real on-chain verification. Heavy; would
+  need third-party crypto audit. **Not v1 scope.**
+- **Register-only (v1):** chain stores the proof profile and refuses/admits by
+  identity match only; OmniNode owns verification. Light; internal review may
+  suffice, and the record must state plainly that the chain does not verify.
+
+The schema above supports both; only the register-only path is in v1 scope. The
+executor/match wiring does not exist yet and will be designed when the registry
+mechanism is implemented (still gated on the OmniNode evidence bundle).
+
+## Read RPC
+
+`sum_getProofEligibilityRegistry()` → `Vec<ProofEligibilityRecordInfo>` returns
+the **full append-only history** (every record, superseded ones included), each
+with a computed `is_current` flag (head of the supersession chain for its full
+`ProofProfileKey`). It reads the static registry only — no chain state — and is
+independent of the activation gate. In v1 it returns `[]`. Identity hashes are
+`0x` + 64 lowercase hex.
+
+## Deferred: the Stage11d `CandidateRefused` record
+
+This PR ships the mechanism with `REGISTRY = []`. The first record — a
+`CandidateRefused` profile for `Stage11dProductionFixedPointMlp` — lands in a
+follow-up PR only when **all** of these are concrete (no placeholders): the
+OmniNode evidence bundle (supplies the real `halo2_version` + tuple provenance),
+a real governance issue, and a finalized `chain_team_review_ref`
+(`sum-chain#<PR>; governance#<ISSUE>; commit:<SHA>`). The mechanism + tests here
+make that follow-up a data-only change.
+
+## Handoff to OmniNode
+
+After the chain has a `CandidateRefused` registry record and review trail,
+OmniNode Stage 11d.3C may mirror or consume that record locally.
+
+## Non-goals
+
+- No registry record of any kind in this PR (`REGISTRY = []`).
+- No `Stage11dProductionFixedPointMlp` verifier or proof-verification path — v1
+  is register-only; the chain does not verify proof correctness.
+- No runtime consumer of the activation gate (forward plumbing only).
+- No rewards, penalties, reputation, staking, or slashing changes.
+- No new tx type, executor, or mempool change.
+- No merge-time activation; mainnet/default stays dormant.

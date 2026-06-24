@@ -149,6 +149,24 @@ pub struct ChainParams {
     /// Dev: set to `Some(0)` to activate from genesis.
     #[serde(default)]
     pub education_enabled_from_height: Option<u64>,
+
+    /// Block height at which the Proof Eligibility Registry activates.
+    /// `None` = disabled forever; `Some(h)` = gate open from block `h` onward.
+    /// Mirrors the OmniNode/SNIP V2/Education activation pattern.
+    ///
+    /// v1 is register-only and **mechanism-only** (the registry ships with no
+    /// records), so this gate has **no runtime consumer yet** — it is forward
+    /// plumbing for a future `Active`-record admission path. Nothing on chain
+    /// reads it in v1; see `docs/SUBPROTOCOLS/PROOF-ELIGIBILITY-REGISTRY.md`.
+    ///
+    /// Production safety: `#[serde(default)]` resolves a missing field to
+    /// `None`, so an existing mainnet `genesis.json` upgraded to a
+    /// registry-aware binary stays disabled until an operator explicitly sets a
+    /// future activation height.
+    ///
+    /// Dev: set to `Some(0)` to open the gate from genesis.
+    #[serde(default)]
+    pub proof_eligibility_enabled_from_height: Option<u64>,
 }
 
 fn default_finality_depth() -> u64 {
@@ -343,6 +361,10 @@ impl Default for ChainParams {
             // Production-safe default: Education-LMS suite disabled.
             // Activation is coordinated separately, post Phase 2-6.
             education_enabled_from_height: None,
+            // Production-safe default: Proof Eligibility Registry gate closed.
+            // v1 is mechanism-only (no records); this gate has no runtime
+            // consumer yet — forward plumbing only.
+            proof_eligibility_enabled_from_height: None,
         }
     }
 }
@@ -646,6 +668,10 @@ mod tests {
         // (V2 disabled). An old mainnet genesis upgraded to a V2-aware binary
         // must NOT auto-enable V2 — operator must set the field explicitly.
         assert_eq!(g.params.v2_enabled_from_height, None);
+        // Same production-safe default for the subprotocol gates.
+        assert_eq!(g.params.omninode_enabled_from_height, None);
+        assert_eq!(g.params.education_enabled_from_height, None);
+        assert_eq!(g.params.proof_eligibility_enabled_from_height, None);
     }
 
     #[test]
