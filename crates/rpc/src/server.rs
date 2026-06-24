@@ -845,6 +845,7 @@ impl SumChainApiServer for RpcServer {
             v2_enabled_from_height: p.v2_enabled_from_height,
             omninode_enabled_from_height: p.omninode_enabled_from_height,
             education_enabled_from_height: p.education_enabled_from_height,
+            proof_eligibility_enabled_from_height: p.proof_eligibility_enabled_from_height,
         })
     }
 
@@ -1038,6 +1039,26 @@ impl SumChainApiServer for RpcServer {
             self.consensus.current_height(),
             self.consensus.finality_depth(),
         ))
+    }
+
+    async fn sum_get_proof_eligibility_registry(
+        &self,
+    ) -> std::result::Result<Vec<ProofEligibilityRecordInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        // Static, governance-reviewed registry (v1 register-only, mechanism-only
+        // — empty until a governed record lands). No chain state is read.
+        // `is_current` is computed per record over the full record set so the
+        // DTO and the primitives resolver share one identity definition.
+        use sumchain_primitives::proof_eligibility;
+        let records = proof_eligibility::all_records();
+        Ok(records
+            .iter()
+            .map(|rec| {
+                ProofEligibilityRecordInfo::from_record(
+                    rec,
+                    proof_eligibility::is_current(records, rec),
+                )
+            })
+            .collect())
     }
 
     // ========================================================================
@@ -6451,6 +6472,7 @@ mod phase_0b_rpc_tests {
             v2_enabled_from_height: None,  // disabled (production-safe default)
             omninode_enabled_from_height: None,  // disabled (production-safe default)
             education_enabled_from_height: None,  // disabled (production-safe default)
+            proof_eligibility_enabled_from_height: None,  // disabled (production-safe default)
         };
         let got = serde_json::to_value(&v).unwrap();
         let want = serde_json::json!({
@@ -6471,6 +6493,7 @@ mod phase_0b_rpc_tests {
             "v2_enabled_from_height": null,
             "omninode_enabled_from_height": null,
             "education_enabled_from_height": null,
+            "proof_eligibility_enabled_from_height": null,
         });
         assert_eq!(got, want);
     }
@@ -6492,9 +6515,10 @@ mod phase_0b_rpc_tests {
             max_chunk_count_per_file: 524_288,
             max_chunk_indices_per_tx: 32_768,
             assignment_replication_factor: 5,
-            v2_enabled_from_height: Some(1_000_000),  // activation height
-            omninode_enabled_from_height: Some(1_250_000),  // distinct activation height
-            education_enabled_from_height: Some(1_500_000),  // distinct activation height
+            v2_enabled_from_height: Some(1_000_000),  // test-only round-trip value; not an activation proposal
+            omninode_enabled_from_height: Some(1_250_000),  // test-only round-trip value; not an activation proposal
+            education_enabled_from_height: Some(1_500_000),  // test-only round-trip value; not an activation proposal
+            proof_eligibility_enabled_from_height: Some(1_750_000),  // test-only round-trip value; not an activation proposal
         };
         let s = serde_json::to_string(&v).unwrap();
         let back: ChainParamsInfo = serde_json::from_str(&s).unwrap();
@@ -6502,6 +6526,86 @@ mod phase_0b_rpc_tests {
         assert_eq!(back.v2_enabled_from_height, Some(1_000_000));
         assert_eq!(back.omninode_enabled_from_height, Some(1_250_000));
         assert_eq!(back.education_enabled_from_height, Some(1_500_000));
+        assert_eq!(back.proof_eligibility_enabled_from_height, Some(1_750_000));
+    }
+
+    // ------- ProofEligibilityRecordInfo (register-only registry) ------------
+
+    /// `[u8; 32]` identity hashes must render as `0x` + 64 lowercase hex chars,
+    /// and enums as their stable string forms.
+    #[test]
+    fn proof_eligibility_record_info_hex_rendering() {
+        use sumchain_primitives::proof_eligibility::{
+            EligibilityState, ProofEligibilityRecord, ProofSystem, REGISTER_ONLY_DISCLAIMER,
+        };
+        let rec = ProofEligibilityRecord {
+            entry_id: 7,
+            supersedes_entry_id: Some(3),
+            proof_system: ProofSystem::Stage11dProductionFixedPointMlp,
+            backend_id: "production-fixedpoint-mlp-v1",
+            model_format: "ProductionFixedPointMlp",
+            circuit_id: [0xAB; 32],
+            model_hash: [0x01; 32],
+            verification_key_hash: [0xCD; 32],
+            halo2_version: "halo2-0.3.0",
+            eligibility_state: EligibilityState::CandidateRefused,
+            state_reason: "dry-run",
+            chain_team_review_ref: "sum-chain#21",
+            note: REGISTER_ONLY_DISCLAIMER,
+        };
+        let info = ProofEligibilityRecordInfo::from_record(&rec, true);
+        assert_eq!(info.circuit_id_hex, format!("0x{}", "ab".repeat(32)));
+        assert_eq!(info.model_hash_hex, format!("0x{}", "01".repeat(32)));
+        assert_eq!(info.verification_key_hash_hex, format!("0x{}", "cd".repeat(32)));
+        assert_eq!(info.proof_system, "Stage11dProductionFixedPointMlp");
+        assert_eq!(info.eligibility_state, "CandidateRefused");
+        assert_eq!(info.entry_id, 7);
+        assert_eq!(info.supersedes_entry_id, Some(3));
+        assert!(info.is_current);
+        // JSON shape is stable for OmniNode consumption.
+        let got = serde_json::to_value(&info).unwrap();
+        assert_eq!(got["circuit_id_hex"], format!("0x{}", "ab".repeat(32)));
+        assert_eq!(got["is_current"], true);
+        assert_eq!(got["proof_system"], "Stage11dProductionFixedPointMlp");
+    }
+
+    /// The DTO's `is_current` must use the same full-tuple resolver as
+    /// primitives: two records sharing all hashes but differing in
+    /// `halo2_version` are distinct profiles, so both are current.
+    #[test]
+    fn proof_eligibility_info_is_current_matches_primitives_resolver() {
+        use sumchain_primitives::proof_eligibility::{
+            self, EligibilityState, ProofEligibilityRecord, ProofSystem, REGISTER_ONLY_DISCLAIMER,
+        };
+        let mk = |entry_id: u32, halo2_version: &'static str| ProofEligibilityRecord {
+            entry_id,
+            supersedes_entry_id: None,
+            proof_system: ProofSystem::Stage11dProductionFixedPointMlp,
+            backend_id: "backend-x",
+            model_format: "ProductionFixedPointMlp",
+            circuit_id: [0xAA; 32],
+            model_hash: [0xBB; 32],
+            verification_key_hash: [0xCC; 32],
+            halo2_version,
+            eligibility_state: EligibilityState::CandidateRefused,
+            state_reason: "test",
+            chain_team_review_ref: "test-ref",
+            note: REGISTER_ONLY_DISCLAIMER,
+        };
+        let recs = [mk(1, "halo2-0.3.0"), mk(2, "halo2-0.3.1")];
+        let infos: Vec<_> = recs
+            .iter()
+            .map(|r| {
+                ProofEligibilityRecordInfo::from_record(r, proof_eligibility::is_current(&recs, r))
+            })
+            .collect();
+        assert!(infos[0].is_current && infos[1].is_current, "distinct profiles are both current");
+    }
+
+    /// v1 is mechanism-only: the static registry yields zero records.
+    #[test]
+    fn proof_eligibility_registry_is_empty_in_v1() {
+        assert!(sumchain_primitives::proof_eligibility::all_records().is_empty());
     }
 
     #[test]

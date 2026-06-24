@@ -8,16 +8,22 @@ environment.** The mechanism is specified to ship **dormant**
 records**. For the design/contract, see
 [`PROOF-ELIGIBILITY-REGISTRY.md`](./PROOF-ELIGIBILITY-REGISTRY.md).
 
-## Current status (2026-06-23)
+## Current status (2026-06-24)
 
-- Mechanism: **not implemented.** This is a design package.
+- Mechanism: **implemented, dormant, ZERO records.**
+  [`crates/primitives/src/proof_eligibility.rs`](../../crates/primitives/src/proof_eligibility.rs)
+  (types + resolution helpers + empty `REGISTRY`), gate
+  `proof_eligibility_enabled_from_height` in
+  [`crates/genesis/src/lib.rs`](../../crates/genesis/src/lib.rs) (default
+  `None`), read RPC `sum_getProofEligibilityRegistry` (returns `[]`).
 - `Stage11dProductionFixedPointMlp` mainnet eligibility: **REJECTED** at this
-  time (see design doc, Decision of record).
-- Blockers before any record is even drafted:
-  1. OmniNode delivers the Stage 11d / Stage 14 evidence bundle.
-  2. OmniNode confirms verify-vs-register ownership (design doc, O-1).
-- Production / mainnet default once shipped: `proof_eligibility_enabled_from_height:
-  None` (dormant). No environment will have an activation height set by this PR.
+  time; no record shipped (see design doc, Decision of record + §deferred).
+- Blockers before any record is drafted:
+  1. OmniNode delivers the Stage 11d / Stage 14 evidence bundle (real `halo2_version`).
+  2. A concrete governance issue + finalized `chain_team_review_ref` exist.
+- Production / mainnet default: `proof_eligibility_enabled_from_height: None`
+  (dormant). No environment has an activation height set by this PR. The gate has
+  **no runtime consumer** in v1 — forward plumbing for a future `Active` path.
 - **v1 position:** SUM Chain admits by exact proof-profile identity match only.
   SUM Chain does not verify proof correctness for this profile; OmniNode owns
   proof generation and verification correctness (design doc, O-1 = register-only).

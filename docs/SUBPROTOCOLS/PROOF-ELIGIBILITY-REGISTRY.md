@@ -1,9 +1,18 @@
-# Proof Eligibility Registry — Design (DRAFT, dormant)
+# Proof Eligibility Registry — Design (implemented, dormant)
 
-**Status: DRAFT design. No mechanism is implemented in chain code, and no
-registry record is approved.** This document specifies a *dormant* Proof
-Eligibility Registry so that adding a proof system to mainnet is a reviewable,
-governed, append-only act rather than an ad-hoc code change. It exists because
+**Status: mechanism implemented, dormant, with ZERO records.** The v1
+register-only mechanism ships in
+[`crates/primitives/src/proof_eligibility.rs`](../../crates/primitives/src/proof_eligibility.rs)
+(types + resolution helpers + empty `REGISTRY`), the activation gate
+`proof_eligibility_enabled_from_height` is in
+[`crates/genesis/src/lib.rs`](../../crates/genesis/src/lib.rs) (default `None`),
+and the read RPC `sum_getProofEligibilityRegistry` returns the full append-only
+history (empty in v1). **No registry record is approved or shipped** — the first
+`Stage11dProductionFixedPointMlp` `CandidateRefused` record is a follow-up PR
+(see [§deferred](#deferred-the-stage11d-candidaterefused-record)). This document
+specifies the Proof Eligibility Registry so that adding a proof system to
+mainnet is a reviewable, governed, append-only act rather than an ad-hoc code
+change. It exists because
 OmniNode requested chain-team/governance sign-off for
 `ProofSystem::Stage11dProductionFixedPointMlp`, which the chain cannot grant
 today: there is no registry, no such proof system, no verification path, and no
@@ -48,32 +57,40 @@ proof generation and verification correctness. (This resolves
 [O-1](#open-question-o-1--verify-vs-register) to register-only for v1; an
 on-chain verifier remains a possible future fork, not v1 scope.)
 
-### Registry record schema (proposed)
+### Registry record schema
 
-One record per governance act. All fields required and non-empty unless typed
-`Option`. The registry is **append-only**: a record is never edited or deleted.
-A proof system's *current* eligibility is the latest (highest `entry_id`,
-equivalently the non-superseded) record for its identity tuple.
+Implemented as `ProofEligibilityRecord` in
+[`crates/primitives/src/proof_eligibility.rs`](../../crates/primitives/src/proof_eligibility.rs).
+One record per governance act. The registry is **append-only**: a record is
+never edited or deleted. A proof system's *current* eligibility is the
+non-superseded record for its full identity tuple ([`ProofProfileKey`](#state-model)).
+The three identity hashes are typed `[u8; 32]` internally and rendered as `0x` +
+64 lowercase hex chars at the RPC boundary (`ProofEligibilityRecordInfo`).
 
-| Field | Type | Notes |
+| Field | Internal type | Notes |
 |---|---|---|
-| `entry_id` | monotonic id | unique per record; identifies this record for superseding |
-| `supersedes_entry_id` | `Option<id>` | `Some(prev)` when this record replaces an earlier one for the same tuple; `None` for the first record |
-| `proof_system` | enum variant | e.g. `Stage11dProductionFixedPointMlp` (the variant does not exist yet) |
-| `backend_id` | string | e.g. `production-fixedpoint-mlp-v1` |
-| `model_format` | string | e.g. `ProductionFixedPointMlp` |
-| `circuit_id_hex` | 32-byte hex | circuit identity |
-| `model_hash` | 32-byte hex | model identity |
-| `verification_key_hash_hex` | 32-byte hex | VK identity |
-| `halo2_version` | string | pinned; part of the identity per [§regeneration](#regeneration-policy-q8) |
-| `eligibility_state` | enum | `CandidateRefused` (dry-run) \| `Active` \| `Revoked`; see [§state model](#state-model) |
-| `state_reason` | string | human-readable reason for this record's state (e.g. "dry-run", "activation", "rollback: incident #…") |
-| `chain_team_review_ref` | string, non-empty | full review trail for *this record*, see [§review-ref](#review-ref-scope-q7) |
+| `entry_id` | `u32` | unique per record; identifies this record for superseding |
+| `supersedes_entry_id` | `Option<u32>` | `Some(prev)` when this record replaces an earlier one *for the same `ProofProfileKey`*; `None` for the first record |
+| `proof_system` | `ProofSystem` enum | v1: `Stage11dProductionFixedPointMlp` (single variant, extensible) |
+| `backend_id` | `&str` | e.g. `production-fixedpoint-mlp-v1` |
+| `model_format` | `&str` | e.g. `ProductionFixedPointMlp` |
+| `circuit_id` | `[u8; 32]` | circuit identity (RPC: `circuit_id_hex`) |
+| `model_hash` | `[u8; 32]` | model identity (RPC: `model_hash_hex`) |
+| `verification_key_hash` | `[u8; 32]` | VK identity (RPC: `verification_key_hash_hex`) |
+| `halo2_version` | `&str` | pinned; part of the identity per [§regeneration](#regeneration-policy-q8) |
+| `eligibility_state` | `EligibilityState` enum | `CandidateRefused` (dry-run) \| `Active` \| `Revoked`; see [§state model](#state-model) |
+| `state_reason` | `&str` | human-readable reason for this record's state |
+| `chain_team_review_ref` | `&str`, non-empty | full review trail for *this record*, see [§review-ref](#review-ref-scope-q7) |
+| `note` | `&str` | the register-only disclaimer (see below) |
 
-(`entry_id` / `supersedes_entry_id` are the record identifiers — "entry" here is
-the record id, not a separate concept.) The exact Rust placement (likely a
-`proof_eligibility` module in `crates/primitives`, mirroring
-`inference_attestation.rs`) is deferred to implementation, pending O-1.
+The internal record type carries **no serde derive** (the RPC DTO
+`ProofEligibilityRecordInfo` owns serialization and the hex rendering). Resolution
+helpers `current_record(records, &ProofProfileKey)` and `is_current(records, rec)`
+key on the **full** identity tuple, so profiles that share hashes but differ in
+`backend_id`, `model_format`, or `halo2_version` are distinct and never supersede
+one another. `is_admissible(rec, gate, height)` is `Active && gate-open`;
+`CandidateRefused`/`Revoked` are refused by construction (and it has no runtime
+caller in v1 — forward plumbing).
 
 ### State model
 
@@ -185,6 +202,25 @@ The schema above supports both; only the register-only path is in v1 scope. The
 executor/match wiring does not exist yet and will be designed when the registry
 mechanism is implemented (still gated on the OmniNode evidence bundle).
 
+## Read RPC
+
+`sum_getProofEligibilityRegistry()` → `Vec<ProofEligibilityRecordInfo>` returns
+the **full append-only history** (every record, superseded ones included), each
+with a computed `is_current` flag (head of the supersession chain for its full
+`ProofProfileKey`). It reads the static registry only — no chain state — and is
+independent of the activation gate. In v1 it returns `[]`. Identity hashes are
+`0x` + 64 lowercase hex.
+
+## Deferred: the Stage11d `CandidateRefused` record
+
+This PR ships the mechanism with `REGISTRY = []`. The first record — a
+`CandidateRefused` profile for `Stage11dProductionFixedPointMlp` — lands in a
+follow-up PR only when **all** of these are concrete (no placeholders): the
+OmniNode evidence bundle (supplies the real `halo2_version` + tuple provenance),
+a real governance issue, and a finalized `chain_team_review_ref`
+(`sum-chain#<PR>; governance#<ISSUE>; commit:<SHA>`). The mechanism + tests here
+make that follow-up a data-only change.
+
 ## Handoff to OmniNode
 
 After the chain has a `CandidateRefused` registry record and review trail,
@@ -192,8 +228,10 @@ OmniNode Stage 11d.3C may mirror or consume that record locally.
 
 ## Non-goals
 
-- No active registry record in this PR.
-- No `Stage11dProductionFixedPointMlp` enum variant or verifier in this PR.
-- No genesis code change in this PR (the gate field is *specified* here for
-  reviewer approval, added in the implementation PR).
-- No change to existing subprotocols, executor, mempool, or RPC.
+- No registry record of any kind in this PR (`REGISTRY = []`).
+- No `Stage11dProductionFixedPointMlp` verifier or proof-verification path — v1
+  is register-only; the chain does not verify proof correctness.
+- No runtime consumer of the activation gate (forward plumbing only).
+- No rewards, penalties, reputation, staking, or slashing changes.
+- No new tx type, executor, or mempool change.
+- No merge-time activation; mainnet/default stays dormant.
