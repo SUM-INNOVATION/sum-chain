@@ -1,4 +1,7 @@
 # Academic Credentials Implementation Addendum
+
+> **Archived / historical.** Kept for history; for current truth see [docs/tokens.md](../tokens.md) and [docs/policy-accounts-and-contracts.md](../policy-accounts-and-contracts.md).
+
 ## Answers to SUMail Gateway Questions
 
 **Date:** 2026-02-01
@@ -385,7 +388,7 @@ ws_subscribe("sum_newBlocks", callback=check_block_for_credential_events)
 
 ### Option 3: Future WebSocket API (Not Yet Available)
 ```javascript
-// FUTURE API (not implemented yet)
+// FUTURE API (planned)
 ws.send({
   "jsonrpc": "2.0",
   "method": "docclass_subscribe",
@@ -619,7 +622,7 @@ For **future enhancement**, implement **Option B** (Gateway Access Control) when
 | **C1: Data Source** | On-chain `AcademicCredential` struct via `docclass_getCredential`. Metadata is public on-chain, optional full payload on IPFS via `payload_hint`. |
 | **C2: PDF CID Storage** | Use `metadata.attributes` array with `pdf_cid` entry. Optionally set `payload_hint` to PDF CID. |
 | **C3: RPC Endpoints** | Testnet: `http://100.84.189.95:8545`. Protocol: JSON-RPC 2.0. Batching supported. See full API list in C3. |
-| **C4: Event Subscriptions** | WebSockets not implemented yet. Use polling with 30-60 second intervals. See hybrid polling pattern in C4. |
+| **C4: Event Subscriptions** | WebSockets are planned; use polling with 30-60 second intervals. See hybrid polling pattern in C4. |
 | **C5: Scope Enforcement** | No on-chain grants exist yet. Implement off-chain access control in Gateway or use public credentials only (Option A recommended for MVP). |
 
 ---

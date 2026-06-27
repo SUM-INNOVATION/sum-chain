@@ -1,10 +1,9 @@
 # SUMaillet Academic Credentials Integration Guide
 
-> **Status:** historical / integration handoff — pending consolidation
+> **Status:** historical / integration handoff
 > **Last verified:** 2026-06-27
-> **Public RPC support:** for current, code-verified usage see [docs/tokens.md](docs/tokens.md)
 >
-> This is an integration handoff document and may contain dated "live / mainnet / production" claims. Treat [docs/tokens.md](docs/tokens.md) and [docs/policy-accounts-and-contracts.md](docs/policy-accounts-and-contracts.md) as the current source of truth.
+> This is an integration handoff document. Current usage is in [docs/tokens.md](../tokens.md) and [docs/policy-accounts-and-contracts.md](../policy-accounts-and-contracts.md).
 
 **For Mobile Development Team**
 

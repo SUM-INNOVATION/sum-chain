@@ -1,5 +1,7 @@
 # Testing SUMaillet Academic Credentials Query
 
+> **Archived / historical.** Kept for history; for current truth see [docs/tokens.md](../tokens.md) and [docs/policy-accounts-and-contracts.md](../policy-accounts-and-contracts.md).
+
 ## What Was Added
 
 A new RPC endpoint to query academic credentials by holder address (wallet address):

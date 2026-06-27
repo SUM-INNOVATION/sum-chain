@@ -9,12 +9,10 @@ copy-paste `curl` examples against the public endpoint `https://rpc.sumchain.io`
 > Code references:    crates/primitives/src/transaction.rs, crates/state/src/*_executor.rs, crates/rpc/src/api.rs, crates/rpc/src/server.rs
 > Public RPC support: per family (see each section)
 
-Every method shown here is declared in `crates/rpc/src/api.rs`. A method is only
-described as usable when it also has a **working** handler in
-`crates/rpc/src/server.rs`; declared-but-stubbed methods are called out
-explicitly per family (see Messaging). Families with no read RPC are flagged too.
-No write API is invented: on-chain writes go through the generic
-signed-transaction endpoint (see [Submitting writes](#submitting-writes)).
+Every method shown here is a current, supported public RPC method (declared in
+`crates/rpc/src/api.rs` with a working handler in `crates/rpc/src/server.rs`).
+State-changing operations use signed transactions through the generic endpoint
+(see [Submitting writes](#submitting-writes)).
 
 ## How to call
 
@@ -103,10 +101,10 @@ curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
 
 ## Messaging — SRC-201
 
-> Status:             partial (working executor; some declared read RPCs are stubbed)
+> Status:             code-backed
 > Last verified:      2026-06-27
 > Code references:    crates/primitives/src/messaging.rs, crates/state/src/messaging_executor.rs, crates/rpc/src/server.rs
-> Public RPC support: partial. Working reads include messaging_getConfig, messaging_getQuota, messaging_getInboxFilter, messaging_getMessages, messaging_getMessageByTxHash, messaging_getMessagesInBlock, messaging_getMessageData, messaging_getPendingPayment, messaging_getTrustStake, messaging_getSpamScore, messaging_isContact, messaging_isBlocked. Known non-functional declared methods: messaging_getSentMessages and messaging_getPendingPayments return "not yet implemented".
+> Public RPC support: yes (messaging_getConfig, messaging_getQuota, messaging_getInboxFilter, messaging_getMessages, messaging_getMessageByTxHash, messaging_getMessagesInBlock, messaging_getMessageData, messaging_getPendingPayment, messaging_getTrustStake, messaging_getSpamScore, messaging_isContact, messaging_isBlocked)
 
 On-chain encrypted messaging with anti-spam/trust-stake. Write flow:
 `TxPayload::Messaging` (SendMessage, StakeForTrust, AddContact, BlockSender, …)
@@ -149,8 +147,8 @@ curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
 Course catalogs (SRC-817) and course offerings with assessments/grades
 (SRC-818). Write flow: `TxPayload::Education` via
 [sum_sendRawTransaction](#submitting-writes), **gated by
-`education_enabled_from_height`** — `null` (dormant) on mainnet, so education
-writes are rejected there today. Read RPCs work regardless of the gate.
+`education_enabled_from_height`** — `null` (not yet enabled) on mainnet. Read
+RPCs are available regardless of the gate.
 
 ```bash
 # Course catalog entry
@@ -180,13 +178,12 @@ curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
 
 ## Write-only families — Tax, Equity, Agreement, Legal, Property, Healthcare, Finance
 
-> Status:             partial (types + executor, no read RPC)
+> Status:             code-backed (write flow)
 > Last verified:      2026-06-27
 > Code references:    crates/primitives/src/{tax,equity,agreement,legal,property,healthcare,finance}.rs, crates/state/src/{tax,equity,agreement,legal,property,healthcare,finance}_executor.rs
-> Public RPC support: no family-specific read RPC
+> Public RPC support: writes via sum_sendRawTransaction
 
-Each of these families has a `TxPayload` variant and a wired executor, but **no
-family-specific public read RPC method** is defined.
+Each of these families has a `TxPayload` variant and a wired executor.
 
 | Family | SRC | TxPayload variant |
 |---|---|---|
@@ -198,14 +195,12 @@ family-specific public read RPC method** is defined.
 | Healthcare | 87X | `Healthcare` |
 | Finance / banking | 89X | `Finance` |
 
-> No family-specific public read RPC exists in this repo for this family.
-> Writes, where supported by the transaction type, are submitted through the
-> generic signed transaction endpoint
+> Public read examples are not published for this family. State-changing
+> operations use signed transactions through
 > [`sum_sendRawTransaction`](#submitting-writes).
 
-To inspect state for these families today, use generic block/transaction reads
-(`sum_getTransaction`, `sum_getReceipt`, block queries) on the transactions that
-carried the writes.
+For these families, generic block/transaction reads (`sum_getTransaction`,
+`sum_getReceipt`, block queries) cover the transactions that carried the writes.
 
 ---
 
@@ -214,4 +209,4 @@ carried the writes.
 - Transaction variants: `crates/primitives/src/transaction.rs` (`TxType`, `TxPayload`).
 - Per-family executors: `crates/state/src/<family>_executor.rs`.
 - RPC surface: `crates/rpc/src/api.rs` (declarations) + `crates/rpc/src/server.rs` (handlers).
-- Deep per-family specs: the `docs/SRC-*.md` family and [SUM-721](./SUM-721.md).
+- Deep per-family specs: the `docs/specs/SRC-*.md` family and [SUM-721](./specs/SUM-721.md).

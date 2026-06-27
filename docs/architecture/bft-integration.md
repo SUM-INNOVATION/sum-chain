@@ -293,7 +293,7 @@ async fn run_timeouts(bft: &BftEngine) {
 
 ## Configuration
 
-Update your node configuration file (see [configs/bft-config.toml](../configs/bft-config.toml)):
+Update your node configuration file (see [configs/bft-config.toml](../../configs/bft-config.toml)):
 
 ```toml
 [consensus]

@@ -1,15 +1,8 @@
 # Policy Accounts - Group Governance on SUM Chain
 
-> **Status:** unavailable via public RPC
-> **Last verified:** 2026-06-27
-> **Code references:** crates/rpc/src/server.rs (`policy_*` handlers return "Not yet implemented"), crates/state/src/policy_account_executor.rs
-> **Public RPC support:** no — all 10 `policy_*` methods are stubbed
->
-> Core logic exists, but the public RPC is not usable today, and approved
-> non-policy actions are not re-dispatched. The RPC surface documented below is
-> planned, not live. See the canonical
-> [policy-accounts-and-contracts](./policy-accounts-and-contracts.md) for the
-> verified status.
+> **Archived / historical.** This is a historical / planned policy-account guide.
+> The current public guide is
+> [policy-accounts-and-contracts](../policy-accounts-and-contracts.md).
 
 ## Table of Contents
 
@@ -634,7 +627,7 @@ curl -X POST http://localhost:8545 \
 
 ## RPC API Reference
 
-> **Status: NOT YET IMPLEMENTED.** The RPC endpoints below describe the planned API surface. The core policy account logic (primitives, storage, executor) is implemented at the consensus level, but the RPC handlers have not been wired up yet. See [policy-accounts-implementation-status.md](policy-accounts-implementation-status.md) for details.
+> **Status: NOT YET IMPLEMENTED.** The RPC endpoints below describe the planned API surface. The core policy account logic (primitives, storage, executor) is implemented at the consensus level, but the RPC handlers have not been wired up yet. See [policy-accounts-implementation-status.md](../specs/policy-accounts-implementation-status.md) for details.
 
 ### policy_createAccount
 
@@ -878,6 +871,6 @@ Policy Accounts bring **consensus-level group governance** to SUM Chain, enablin
 - ✅ **Compatible** (works with all SUM Chain features)
 
 For technical implementation details, see:
-- [Policy Account Implementation Status](policy-accounts-implementation-status.md)
-- [Source Code](../crates/primitives/src/policy_account.rs)
-- [Tests](../crates/state/tests/policy_account_tests.rs)
+- [Policy Account Implementation Status](../specs/policy-accounts-implementation-status.md)
+- [Source Code](../../crates/primitives/src/policy_account.rs)
+- [Tests](../../crates/state/tests/policy_account_tests.rs)

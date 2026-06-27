@@ -125,7 +125,7 @@ AccessAudience {
 - If legal **cannot** confirm FERPA safety of a per-student commitment in on-chain policy, it MUST be **replaced with SNIP-only ACL targeting** and the on-chain `ContentAccessPolicy` kept **audience-class-only** (`Public`/`EnrolledStudents`/`InstructorsOnly`/`StaffOnly`).
 - This is a **hard Phase-1 blocker**. No middle state ships.
 
-**Division of responsibility:** SUM Chain stores the access policy/schedule + commitments + refs as the authoritative source of truth. **SNIP enforces** actual private object access — encrypted ACL / key bundles (the `EncryptedKeyBundleV2` model in [crates/primitives/src/storage_metadata.rs](../crates/primitives/src/storage_metadata.rs)) deliver decryption to exactly the named audience, only within the policy window. The chain never holds decryption keys.
+**Division of responsibility:** SUM Chain stores the access policy/schedule + commitments + refs as the authoritative source of truth. **SNIP enforces** actual private object access — encrypted ACL / key bundles (the `EncryptedKeyBundleV2` model in [crates/primitives/src/storage_metadata.rs](../../crates/primitives/src/storage_metadata.rs)) deliver decryption to exactly the named audience, only within the policy window. The chain never holds decryption keys.
 
 **Default academic access window (canonical guidance).** Unless an object's `ContentAccessPolicy` explicitly overrides it:
 
@@ -203,7 +203,7 @@ Open questions:
 
 1. Should a **failed validation** path (gate closed, offering not active, window closed, not enrolled, attempts exhausted, raw-payload rejected) **consume fee**?
 2. Should the sender's **nonce advance** on a failed validation?
-3. **Which existing executor family is the precedent** SRC-817/818 must match — the gate/duplicate-fail pattern in [crates/state/src/inference_attestation_executor.rs](../crates/state/src/inference_attestation_executor.rs) (mempool rejection → no fee, no nonce, no receipt) vs. the operational-family pattern in [crates/state/src/employment_executor.rs](../crates/state/src/employment_executor.rs)?
+3. **Which existing executor family is the precedent** SRC-817/818 must match — the gate/duplicate-fail pattern in [crates/state/src/inference_attestation_executor.rs](../../crates/state/src/inference_attestation_executor.rs) (mempool rejection → no fee, no nonce, no receipt) vs. the operational-family pattern in [crates/state/src/employment_executor.rs](../../crates/state/src/employment_executor.rs)?
 4. If **zero-fee-on-failure** is chosen, which checks must move into **mempool admission** (Phase 3) to block cheap spam — candidate set: activation gate, offering-active, enrollment-link existence, assessment-open, attempt-count?
 
 Resolution owner: Chain. Target: before Phase 2 (not a Phase 1 blocker, but a Phase 2 blocker).
@@ -227,7 +227,7 @@ Resolution owner: Chain. Target: before Phase 2 (not a Phase 1 blocker, but a Ph
 
 Legal/privacy review is currently **conditional approval, not clean sign-off.** Phase 1 may begin only when:
 
-1. `docs/SRC-817.md`, `docs/SRC-818.md`, `docs/SRC-81X-EDUCATION-SUITE.md` reviewed and approved by chain/product.
+1. `docs/specs/SRC-817.md`, `docs/specs/SRC-818.md`, `docs/specs/SRC-81X-EDUCATION-SUITE.md` reviewed and approved by chain/product.
 2. **Legal explicitly accepts the tightened FERPA model (§3.4–§3.6), OR each FERPA-risky construct has a documented privacy-preserving workaround** recorded in this doc. Conditional/verbal approval is insufficient — **hard gate**.
 3. A **sign-off artifact is recorded** (who, date, scope, which constructs accepted vs. which require workaround) — referenced from this section. No artifact ⇒ Phase 1 does not start.
 4. Every "Blocks Phase 1? = Yes" question (Q1, Q2, Q4, Q9) is resolved or has a documented workaround; in particular Q9 `IndividualStudent` is either legal-confirmed under §3.2 scoping or replaced with SNIP-only ACL targeting.

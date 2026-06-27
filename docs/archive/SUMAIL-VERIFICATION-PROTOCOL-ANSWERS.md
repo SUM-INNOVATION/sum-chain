@@ -1,10 +1,9 @@
 # SUMail Verification Layer — Protocol Clarifications (ANSWERS)
 
-> **Status:** historical / integration handoff — pending consolidation
+> **Status:** historical / integration handoff
 > **Last verified:** 2026-06-27
-> **Public RPC support:** for current, code-verified usage see [docs/tokens.md](docs/tokens.md)
 >
-> This is an integration handoff document and may contain dated "live / mainnet / production" claims (including the activation-height note below). Treat [docs/tokens.md](docs/tokens.md) and [docs/policy-accounts-and-contracts.md](docs/policy-accounts-and-contracts.md) as the current source of truth.
+> This is an integration handoff document. Current usage is in [docs/tokens.md](../tokens.md) and [docs/policy-accounts-and-contracts.md](../policy-accounts-and-contracts.md).
 
 **Date**: 2026-02-01
 **Status**: PRODUCTION ANSWERS - Activation Height 385,000
@@ -34,7 +33,7 @@ Use the **supersede mechanism**:
 2. Reference the old credential ID in the new credential's `superseded_by` field
 3. Mark the old credential as `revocation_status: Superseded`
 
-**Code reference**: [crates/primitives/src/docclass.rs:611-613](crates/primitives/src/docclass.rs#L611-L613)
+**Code reference**: [crates/primitives/src/docclass.rs:611-613](../../crates/primitives/src/docclass.rs#L611-L613)
 
 ```rust
 /// Revocation status
@@ -73,7 +72,7 @@ pub superseded_by: Option<CredentialId>,
 - `"multisig"` - Multi-party institutional signing
 - Custom values allowed (not validated by schema)
 
-**Code reference**: [crates/state/src/schema_validator.rs:268](crates/state/src/schema_validator.rs#L268)
+**Code reference**: [crates/state/src/schema_validator.rs:268](../../crates/state/src/schema_validator.rs#L268)
 
 ```rust
 "signature_method", // "Ed25519", "multisig"
@@ -134,7 +133,7 @@ pub superseded_by: Option<CredentialId>,
 }
 ```
 
-**Rust Struct Reference**: [crates/primitives/src/docclass.rs:580-614](crates/primitives/src/docclass.rs#L580-L614)
+**Rust Struct Reference**: [crates/primitives/src/docclass.rs:580-614](../../crates/primitives/src/docclass.rs#L580-L614)
 
 ```rust
 pub struct AcademicCredential {
@@ -257,7 +256,7 @@ pub struct CredentialAttribute {
 | `gpa_bracket` | De-anonymization risk | Use `grades_commitment` |
 | `credit_range` | De-anonymization risk | Use `courses_commitment` |
 
-**Code Reference**: [crates/state/src/schema_validator.rs:251-349](crates/state/src/schema_validator.rs#L251-L349)
+**Code Reference**: [crates/state/src/schema_validator.rs:251-349](../../crates/state/src/schema_validator.rs#L251-L349)
 
 ---
 
@@ -293,7 +292,7 @@ pub struct CredentialAttribute {
 | `X25519Aes256Gcm` | **Recommended** - Hybrid key exchange | 256-bit | 12 bytes | ✅ Supported |
 | `ThresholdEncryption` | Multi-party threshold | Variable | Variable | ✅ Supported |
 
-**Code Reference**: [crates/primitives/src/agreement.rs:130-151](crates/primitives/src/agreement.rs#L130-L151)
+**Code Reference**: [crates/primitives/src/agreement.rs:130-151](../../crates/primitives/src/agreement.rs#L130-L151)
 
 ```rust
 pub struct EncryptionMeta {
@@ -479,7 +478,7 @@ const commitment = computeCommitment("SRC-810-COURSES-v1", courses);
 5. Verifier compares computed commitment with on-chain commitment
 6. ✅ Match = data authentic and unmodified
 
-**Full Specification**: See [SRC-81X-COMMITMENT-CANONICALIZATION.md](SRC-81X-COMMITMENT-CANONICALIZATION.md)
+**Full Specification**: See [SRC-81X-COMMITMENT-CANONICALIZATION.md](../specs/SRC-81X-COMMITMENT-CANONICALIZATION.md)
 
 ---
 
@@ -534,7 +533,7 @@ curl -X POST https://rpc.sum-chain.xyz \
 #         student_commitment, academic_year, semester, ..."
 ```
 
-**Code Reference**: [crates/state/src/schema_validator.rs:51-60](crates/state/src/schema_validator.rs#L51-L60)
+**Code Reference**: [crates/state/src/schema_validator.rs:51-60](../../crates/state/src/schema_validator.rs#L51-L60)
 
 ```rust
 impl Default for SchemaValidatorConfig {
@@ -824,15 +823,15 @@ curl -X POST https://rpc.sum-chain.xyz \
 ### Must-Read Documentation
 
 1. **[VERIFICATION-TEAM-SUMMARY.md](VERIFICATION-TEAM-SUMMARY.md)** - Complete implementation guide
-2. **[SRC-81X-COMMITMENT-CANONICALIZATION.md](SRC-81X-COMMITMENT-CANONICALIZATION.md)** - Hashing specification
-3. **[DEPLOYMENT-GUIDE.md](DEPLOYMENT-GUIDE.md)** - Validator deployment instructions
+2. **[SRC-81X-COMMITMENT-CANONICALIZATION.md](../specs/SRC-81X-COMMITMENT-CANONICALIZATION.md)** - Hashing specification
+3. **`DEPLOYMENT-GUIDE.md`** - Validator deployment instructions
 
 ### Code References
 
-- **Credential Schema**: [crates/primitives/src/docclass.rs:580-640](crates/primitives/src/docclass.rs#L580-L640)
-- **Validation Logic**: [crates/state/src/schema_validator.rs:51-450](crates/state/src/schema_validator.rs#L51-L450)
-- **Allowlists**: [crates/state/src/schema_validator.rs:251-349](crates/state/src/schema_validator.rs#L251-L349)
-- **Encryption Types**: [crates/primitives/src/agreement.rs:130-151](crates/primitives/src/agreement.rs#L130-L151)
+- **Credential Schema**: [crates/primitives/src/docclass.rs:580-640](../../crates/primitives/src/docclass.rs#L580-L640)
+- **Validation Logic**: [crates/state/src/schema_validator.rs:51-450](../../crates/state/src/schema_validator.rs#L51-L450)
+- **Allowlists**: [crates/state/src/schema_validator.rs:251-349](../../crates/state/src/schema_validator.rs#L251-L349)
+- **Encryption Types**: [crates/primitives/src/agreement.rs:130-151](../../crates/primitives/src/agreement.rs#L130-L151)
 
 ### Key Dates
 

@@ -44,7 +44,7 @@ This document describes the **comprehensive privacy enforcement** implemented ac
 - Reject any key not in allowlist
 - Max length enforcement on field values
 
-**Integration Point**: [docclass_executor.rs:615](crates/state/src/docclass_executor.rs#L615)
+**Integration Point**: [docclass_executor.rs:615](../../crates/state/src/docclass_executor.rs#L615)
 ```rust
 fn issue_academic_credential(...) {
     // ... existing checks ...
@@ -90,7 +90,7 @@ fn issue_academic_credential(...) {
 - Role: commitment of role_title + department + salt
 
 **Integration Points**:
-1. [employment_executor.rs:226](crates/state/src/employment_executor.rs#L226) - CreateEmployment operation
+1. [employment_executor.rs:226](../../crates/state/src/employment_executor.rs#L226) - CreateEmployment operation
 ```rust
 EmploymentOperation::CreateEmployment => {
     // ... existing checks ...
@@ -107,7 +107,7 @@ EmploymentOperation::CreateEmployment => {
 }
 ```
 
-2. [employment_executor.rs:134](crates/state/src/employment_executor.rs#L134) - RegisterIssuer operation
+2. [employment_executor.rs:134](../../crates/state/src/employment_executor.rs#L134) - RegisterIssuer operation
 ```rust
 EmploymentOperation::RegisterIssuer => {
     // ... existing checks ...
@@ -288,12 +288,12 @@ pub struct MembershipRecord {
 
 ### Executors Modified
 
-1. **[docclass_executor.rs](crates/state/src/docclass_executor.rs)**
+1. **[docclass_executor.rs](../../crates/state/src/docclass_executor.rs)**
    - Added `schema_validator: SchemaValidator` field
    - Integrated validation in `issue_academic_credential()` at line ~615
    - Hard rejection before state changes
 
-2. **[employment_executor.rs](crates/state/src/employment_executor.rs)**
+2. **[employment_executor.rs](../../crates/state/src/employment_executor.rs)**
    - Added `schema_validator: SchemaValidator` field
    - Integrated validation in `CreateEmployment` operation (line ~226)
    - Integrated validation in `RegisterIssuer` operation (line ~134)

@@ -590,9 +590,9 @@ def verify_credential(credential_id):
 
 ## Support and Resources
 
-- **Documentation**: `/docs/SRC-80X-81X-DocClass.md`
+- **Documentation**: `/docs/specs/SRC-80X-81X-DocClass.md`
 - **RPC Endpoints**: `https://rpc.sum-chain.xyz`
-- **Policy Account Guide**: `/docs/policy-accounts.md` (for multi-sig governance)
+- **Policy Account Guide**: `/docs/archive/policy-accounts.md` (for multi-sig governance)
 
 ---
 

@@ -1,10 +1,9 @@
 # Schema Validation Changes: Verification Team Summary (SRC-810/811/812)
 
-> **Status:** historical / integration handoff — pending consolidation
+> **Status:** historical / integration handoff
 > **Last verified:** 2026-06-27
-> **Public RPC support:** for current, code-verified usage see [docs/tokens.md](docs/tokens.md)
 >
-> This is an integration handoff document and may contain dated "live / mainnet / production" claims. Treat [docs/tokens.md](docs/tokens.md) and [docs/policy-accounts-and-contracts.md](docs/policy-accounts-and-contracts.md) as the current source of truth.
+> This is an integration handoff document. Current usage is in [docs/tokens.md](../tokens.md) and [docs/policy-accounts-and-contracts.md](../policy-accounts-and-contracts.md).
 
 ## Executive Summary
 
@@ -78,7 +77,7 @@ Academic credentials (SRC-810, 811, 812) now enforce **hard rejection** at conse
 
 **Problem**: Two teams hashing same data differently → verification breaks
 
-**Solution**: Follow [SRC-81X-COMMITMENT-CANONICALIZATION.md](SRC-81X-COMMITMENT-CANONICALIZATION.md)
+**Solution**: Follow [SRC-81X-COMMITMENT-CANONICALIZATION.md](../specs/SRC-81X-COMMITMENT-CANONICALIZATION.md)
 
 **Key Rules**:
 - Sort object keys lexicographically
@@ -230,7 +229,7 @@ Based on your privacy requirements:
 
 ### 3. **Implement Commitment Canonicalization**
 
-**Required Reading**: [SRC-81X-COMMITMENT-CANONICALIZATION.md](SRC-81X-COMMITMENT-CANONICALIZATION.md)
+**Required Reading**: [SRC-81X-COMMITMENT-CANONICALIZATION.md](../specs/SRC-81X-COMMITMENT-CANONICALIZATION.md)
 
 **Quick Example** (TypeScript):
 
@@ -438,9 +437,9 @@ curl -X POST https://rpc.sum-chain.xyz \
 ## Resources
 
 ### Documentation
-- **Commitment Canonicalization**: [SRC-81X-COMMITMENT-CANONICALIZATION.md](SRC-81X-COMMITMENT-CANONICALIZATION.md)
-- **Full Schema Details**: [SRC-81X-SCHEMA-VALIDATION.md](SRC-81X-SCHEMA-VALIDATION.md)
-- **Privacy Analysis**: [SRC-TOKEN-FAMILIES-PRIVACY-ANALYSIS.md](SRC-TOKEN-FAMILIES-PRIVACY-ANALYSIS.md)
+- **Commitment Canonicalization**: [SRC-81X-COMMITMENT-CANONICALIZATION.md](../specs/SRC-81X-COMMITMENT-CANONICALIZATION.md)
+- **Full Schema Details**: [SRC-81X-SCHEMA-VALIDATION.md](../specs/SRC-81X-SCHEMA-VALIDATION.md)
+- **Privacy Analysis**: [SRC-TOKEN-FAMILIES-PRIVACY-ANALYSIS.md](../specs/SRC-TOKEN-FAMILIES-PRIVACY-ANALYSIS.md)
 
 ### Reference Implementations
 - TypeScript: See commitment canonicalization spec

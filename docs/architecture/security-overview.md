@@ -73,7 +73,7 @@ SUM Chain is a Proof of Authority (PoA) blockchain written entirely in Rust:
 - Faster than SHA-256 and SHA-3
 - Resistant to length-extension attacks
 
-**Code Location**: [`crates/crypto/src/hash.rs`](../crates/crypto/src/hash.rs)
+**Code Location**: `crates/crypto/src/hash.rs`
 
 ### Digital Signatures: Ed25519
 
@@ -86,7 +86,7 @@ SUM Chain is a Proof of Authority (PoA) blockchain written entirely in Rust:
 - Small signature size (64 bytes)
 - Fast verification
 
-**Code Location**: [`crates/crypto/src/lib.rs`](../crates/crypto/src/lib.rs)
+**Code Location**: [`crates/crypto/src/lib.rs`](../../crates/crypto/src/lib.rs)
 
 **Key Generation**:
 ```rust
@@ -107,7 +107,7 @@ let keypair = SigningKey::generate(&mut OsRng);
 - Parallelism: 4
 - Salt: 16 bytes (random)
 
-**Code Location**: [`crates/wallet/src/keystore.rs`](../crates/wallet/src/keystore.rs)
+**Code Location**: [`crates/wallet/src/keystore.rs`](../../crates/wallet/src/keystore.rs)
 
 ### Encryption: AES-256-GCM
 
@@ -156,7 +156,7 @@ let proposer = validators[proposer_index];
 - Finality depth: 6 blocks (configurable)
 - A block at height H is finalized when chain reaches height H + finality_depth
 
-**Code Location**: [`crates/consensus/src/poa.rs`](../crates/consensus/src/poa.rs)
+**Code Location**: [`crates/consensus/src/poa.rs`](../../crates/consensus/src/poa.rs)
 
 ## Network Security
 
@@ -172,7 +172,7 @@ let proposer = validators[proposer_index];
 3. **Peer Reputation**: Connection scoring and banning
 4. **Rate Limiting**: Connection and message rate limits
 
-**Code Location**: [`crates/p2p/src/network.rs`](../crates/p2p/src/network.rs)
+**Code Location**: [`crates/p2p/src/network.rs`](../../crates/p2p/src/network.rs)
 
 ### Gossipsub
 
@@ -243,7 +243,7 @@ pub struct Transaction {
    }
    ```
 
-**Code Location**: [`crates/primitives/src/transaction.rs`](../crates/primitives/src/transaction.rs)
+**Code Location**: [`crates/primitives/src/transaction.rs`](../../crates/primitives/src/transaction.rs)
 
 ### Mempool Security
 
@@ -253,7 +253,7 @@ pub struct Transaction {
 - Expiration time: 1 hour
 - Minimum fee: 0.001 Ϙ (configurable)
 
-**Code Location**: [`crates/state/src/mempool.rs`](../crates/state/src/mempool.rs)
+**Code Location**: [`crates/state/src/mempool.rs`](../../crates/state/src/mempool.rs)
 
 ## State Machine Security
 
@@ -302,7 +302,7 @@ fn execute_transaction(state: &mut State, tx: &SignedTransaction) -> Result<Rece
 
 **Overflow Protection**: All arithmetic operations use checked math
 
-**Code Location**: [`crates/state/src/executor.rs`](../crates/state/src/executor.rs)
+**Code Location**: [`crates/state/src/executor.rs`](../../crates/state/src/executor.rs)
 
 ## Storage Security
 
@@ -318,7 +318,7 @@ fn execute_transaction(state: &mut State, tx: &SignedTransaction) -> Result<Rece
 - Corruption detection
 - Integrity checks
 
-**Code Location**: [`crates/storage/src/db.rs`](../crates/storage/src/db.rs)
+**Code Location**: [`crates/storage/src/db.rs`](../../crates/storage/src/db.rs)
 
 ### Data Integrity
 
@@ -352,7 +352,7 @@ api_keys = ["secret_key_1", "secret_key_2"]
 cors_origins = ["https://app.sumchain.io"]
 ```
 
-**Code Location**: [`crates/rpc/src/server.rs`](../crates/rpc/src/server.rs)
+**Code Location**: [`crates/rpc/src/server.rs`](../../crates/rpc/src/server.rs)
 
 ## Threat Model
 
@@ -459,9 +459,9 @@ For external auditors, please review:
 
 ## References
 
-- [API Reference](./api-reference.md)
-- [Consensus Specification](../crates/consensus/README.md)
-- [Cryptography Documentation](../crates/crypto/README.md)
+- [API Reference](../rpc/api-reference.md)
+- Consensus Specification
+- [Cryptography Documentation](../../crates/crypto/README.md)
 
 ## Contact
 

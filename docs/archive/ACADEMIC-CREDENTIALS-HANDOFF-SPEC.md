@@ -1,4 +1,7 @@
 # SUM Chain → SUMail Academic Credentials Handoff Specification
+
+> **Archived / historical.** Kept for history; for current truth see [docs/tokens.md](../tokens.md) and [docs/policy-accounts-and-contracts.md](../policy-accounts-and-contracts.md).
+
 ## TESTNET ONLY / FICTIONAL DEMO PROOF OF CONCEPT
 
 **Version:** 1.0

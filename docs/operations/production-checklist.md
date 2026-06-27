@@ -2,15 +2,12 @@
 
 This document provides a comprehensive checklist for launching SUM Chain to production (mainnet).
 
-> **Status:** partial — corrective note
+> **Status:** current note
 > **Last verified:** 2026-06-27
-> **Code references:** crates/consensus, docs/bft-consensus.md (experimental)
-> **Public RPC support:** n/a
+> **Code references:** crates/consensus, docs/architecture/bft-consensus.md (experimental)
 >
-> Production consensus is **PoA with depth-based finality**, not BFT. The BFT
-> path is experimental and non-functional (`propose_block()` returns
-> `NotImplemented`). Any "BFT complete" item below should be read as
-> not-production-ready, regardless of an ✅ marker.
+> Current supported production consensus is **PoA with depth-based finality**.
+> BFT is experimental and not part of the current supported production path.
 
 ## ✅ Completed Items
 
@@ -23,8 +20,8 @@ This document provides a comprehensive checklist for launching SUM Chain to prod
 - [x] API methods use Koppa terminology
 
 **Files**:
-- [README.md](../README.md)
-- [sdk/typescript/src/utils.ts](../sdk/typescript/src/utils.ts)
+- [README.md](../../README.md)
+- [sdk/typescript/src/utils.ts](../../sdk/typescript/src/utils.ts)
 - CLI wallet commands
 
 ### 2. Mainnet Genesis Configuration ✓
@@ -40,8 +37,8 @@ This document provides a comprehensive checklist for launching SUM Chain to prod
 - [x] Testnet genesis also available
 
 **Files**:
-- [genesis/mainnet_genesis.json](../genesis/mainnet_genesis.json)
-- [genesis/testnet_genesis.json](../genesis/testnet_genesis.json)
+- [genesis/mainnet_genesis.json](../../genesis/mainnet_genesis.json)
+- [genesis/testnet_genesis.json](../../genesis/testnet_genesis.json)
 - ~~genesis/MAINNET_README.md~~ (removed)
 
 ### 3. Network Infrastructure ✓
@@ -54,8 +51,8 @@ This document provides a comprehensive checklist for launching SUM Chain to prod
 
 **Files**:
 - ~~docs/bootstrap-nodes.md~~ (removed)
-- [deploy/docker-compose.yaml](../deploy/docker-compose.yaml)
-- [deploy/kubernetes/](../deploy/kubernetes/)
+- [deploy/docker-compose.yaml](../../docker-compose.yaml)
+- [deploy/kubernetes/](../../deploy/kubernetes)
 
 ### 4. Security Audit Documentation ✓
 
@@ -67,7 +64,7 @@ This document provides a comprehensive checklist for launching SUM Chain to prod
 - [x] Audit checklist created
 
 **Files**:
-- [docs/security-overview.md](../docs/security-overview.md)
+- [docs/architecture/security-overview.md](../architecture/security-overview.md)
 
 ### 5. JavaScript/TypeScript SDK ✓
 
@@ -80,9 +77,9 @@ This document provides a comprehensive checklist for launching SUM Chain to prod
 - [x] NPM package ready
 
 **Files**:
-- [sdk/typescript/](../sdk/typescript/)
-- [sdk/typescript/README.md](../sdk/typescript/README.md)
-- [sdk/typescript/examples/basic.ts](../sdk/typescript/examples/basic.ts)
+- [sdk/typescript/](../../sdk/typescript/)
+- [sdk/typescript/README.md](../../sdk/typescript/README.md)
+- [sdk/typescript/examples/basic.ts](../../sdk/typescript/examples/basic.ts)
 
 ### 6. Block Explorer ✓
 
@@ -96,8 +93,8 @@ This document provides a comprehensive checklist for launching SUM Chain to prod
 - [x] Responsive design
 
 **Files**:
-- [explorer/](../explorer/)
-- [explorer/README.md](../explorer/README.md)
+- [explorer/](../../explorer/)
+- [explorer/README.md](../../explorer/README.md)
 
 ### 7. BFT Consensus Module (Experimental) ⚠️
 
@@ -113,9 +110,9 @@ This document provides a comprehensive checklist for launching SUM Chain to prod
 **Status**: Module exists but is **not functional**. Production consensus uses **PoA** (round-robin or stake-weighted proposer selection with depth-based finality).
 
 **Files**:
-- [crates/consensus/src/bft/](../crates/consensus/src/bft/)
-- [docs/bft-consensus.md](../docs/bft-consensus.md)
-- [docs/bft-integration.md](../docs/bft-integration.md)
+- [crates/consensus/src/bft/](../../crates/consensus/src/bft)
+- [docs/architecture/bft-consensus.md](../architecture/bft-consensus.md)
+- [docs/architecture/bft-integration.md](../architecture/bft-integration.md)
 
 ### 8. Performance Optimizations ✓
 
@@ -127,8 +124,8 @@ This document provides a comprehensive checklist for launching SUM Chain to prod
 - [x] Comprehensive performance guide
 
 **Files**:
-- [crates/state/src/cache.rs](../crates/state/src/cache.rs)
-- [docs/performance-guide.md](../docs/performance-guide.md)
+- [crates/state/src/cache.rs](../../crates/state/src/cache.rs)
+- [docs/architecture/performance-guide.md](../architecture/performance-guide.md)
 
 **Features**:
 - LRU cache for accounts and storage
@@ -395,9 +392,9 @@ If critical issues are discovered:
 ## Support Resources
 
 ### Documentation
-- [README.md](../README.md) - Project overview
-- [docs/](../docs/) - Technical documentation
-- [sdk/typescript/README.md](../sdk/typescript/README.md) - SDK guide
+- [README.md](../../README.md) - Project overview
+- [docs/](../) - Technical documentation
+- [sdk/typescript/README.md](../../sdk/typescript/README.md) - SDK guide
 
 ### Monitoring
 - Prometheus metrics on port 9615

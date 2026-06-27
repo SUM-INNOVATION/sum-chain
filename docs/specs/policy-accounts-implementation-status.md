@@ -63,8 +63,8 @@ The Policy Account feature adds consensus-level group governance to SUM Chain, e
 
 #### Database Integration
 - ✅ Column families added: `POLICY_ACCOUNTS`, `POLICY_PROPOSALS`
-- ✅ Registered in `ALL_CFS` array in [db.rs](crates/storage/src/db.rs)
-- ✅ Module exported in [storage/lib.rs](crates/storage/src/lib.rs)
+- ✅ Registered in `ALL_CFS` array in [db.rs](../../crates/storage/src/db.rs)
+- ✅ Module exported in [storage/lib.rs](../../crates/storage/src/lib.rs)
 
 ---
 
@@ -168,9 +168,9 @@ The Policy Account feature adds consensus-level group governance to SUM Chain, e
 
 **Fully Complete**
 
-- ✅ [crates/primitives/src/lib.rs](crates/primitives/src/lib.rs): Exported all policy account types
-- ✅ [crates/storage/src/lib.rs](crates/storage/src/lib.rs): Exported storage modules
-- ✅ [crates/state/src/lib.rs](crates/state/src/lib.rs): Exported executor, added error types
+- ✅ [crates/primitives/src/lib.rs](../../crates/primitives/src/lib.rs): Exported all policy account types
+- ✅ [crates/storage/src/lib.rs](../../crates/storage/src/lib.rs): Exported storage modules
+- ✅ [crates/state/src/lib.rs](../../crates/state/src/lib.rs): Exported executor, added error types
 
 ---
 
@@ -291,7 +291,7 @@ policy_listMemberAccounts(address) -> [info]
 
 ### 3. Developer Documentation (Complete)
 
-**File:** `docs/policy-accounts.md` — Written with all sections including introduction, use cases, policy profiles, action classification, proposal workflow, security considerations, end-to-end examples, and RPC API reference.
+**File:** `docs/archive/policy-accounts.md` — Written with all sections including introduction, use cases, policy profiles, action classification, proposal workflow, security considerations, end-to-end examples, and RPC API reference.
 
 **Note:** The RPC endpoints documented in `policy-accounts.md` are **not yet implemented** in the RPC server — the documentation describes the planned API surface.
 
@@ -385,7 +385,7 @@ match proposal.action_class {
 |-----------|--------|-------|--------------|
 | Primitives | ✅ Complete | 755 | 100% |
 | Storage | ✅ Complete | 280 | 100% |
-| Executor | ⚠️ Mostly Complete | 650 | 90% (missing re-dispatch) |
+| Executor | ⚠️ Mostly Complete | 650 | 90% (re-dispatch pending) |
 | Integration | ✅ Complete | ~50 | 100% |
 | RPC | ❌ Not Started | 0 | 0% |
 | Tests | ❌ Not Started | 0 | 0% |
@@ -501,15 +501,15 @@ The implementation will be considered complete when:
 ## 🔗 Related Files
 
 ### Implemented
-- [crates/primitives/src/policy_account.rs](crates/primitives/src/policy_account.rs)
-- [crates/storage/src/policy_account_store.rs](crates/storage/src/policy_account_store.rs)
-- [crates/state/src/policy_account_executor.rs](crates/state/src/policy_account_executor.rs)
-- [crates/state/src/executor.rs](crates/state/src/executor.rs)
-- [crates/primitives/src/transaction.rs](crates/primitives/src/transaction.rs)
-- [crates/storage/src/db.rs](crates/storage/src/db.rs)
+- [crates/primitives/src/policy_account.rs](../../crates/primitives/src/policy_account.rs)
+- [crates/storage/src/policy_account_store.rs](../../crates/storage/src/policy_account_store.rs)
+- [crates/state/src/policy_account_executor.rs](../../crates/state/src/policy_account_executor.rs)
+- [crates/state/src/executor.rs](../../crates/state/src/executor.rs)
+- [crates/primitives/src/transaction.rs](../../crates/primitives/src/transaction.rs)
+- [crates/storage/src/db.rs](../../crates/storage/src/db.rs)
 
 ### Written (Documentation)
-- [docs/policy-accounts.md](../docs/policy-accounts.md) ✅
+- [docs/archive/policy-accounts.md](../archive/policy-accounts.md) ✅
 
 ### To Be Created
 - `crates/rpc/src/policy_account_types.rs`

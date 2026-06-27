@@ -4,29 +4,28 @@ Entry point for SUM Chain documentation. This index is the map; the canonical
 "how do I actually use X" docs are linked first, deep specs and operational docs
 below.
 
-## Start here (canonical, code-verified)
+## Start here (canonical usage docs)
 
-- **[Token types & token families](./tokens.md)** — every token/token-family
-  type, what's usable via public RPC today, and copy-paste `curl` examples.
-- **[Policy accounts & contracts](./policy-accounts-and-contracts.md)** — what
-  works, what is stubbed/partial, and why.
-- **[RPC API reference](./api-reference.md)** — full JSON-RPC method list.
+- **[Token types & token families](./tokens.md)** — current public usage for
+  every token/token-family type, with copy-paste `curl` examples.
+- **[Policy accounts & contracts](./policy-accounts-and-contracts.md)** — current
+  supported policy-account and contract usage.
+- **[RPC API reference](./rpc/api-reference.md)** — full JSON-RPC method list.
 
 ## Status legend
 
 Every canonical doc and Status block uses this schema:
 
 ```
-> Status:             code-backed | partial | spec-only | unavailable
+> Status:             code-backed | spec-only | historical
 > Last verified:      <date>
 > Code references:    <file[:line] ...>
-> Public RPC support: yes (<methods>) | no (<reason>)
+> Public RPC support: <current supported commands, or how writes are submitted>
 ```
 
-- **code-backed** — types + executor + a wired RPC handler all exist.
-- **partial** — some of {types, executor, RPC} exist; gaps called out.
-- **spec-only** — design document; no corresponding code path.
-- **unavailable** — declared but non-functional (e.g. stubbed handler).
+- **code-backed** — current supported usage backed by types + executor + RPC.
+- **spec-only** — design document; not a usage guide.
+- **historical** — archived; superseded by a canonical usage doc above.
 
 ## Mainnet activation gates
 
@@ -45,20 +44,17 @@ gate** — they are always available when the node binary is running.
 
 ## Map of other docs
 
-- **Architecture:** [bft-consensus](./bft-consensus.md) ·
-  [bft-integration](./bft-integration.md) ·
-  [security-overview](./security-overview.md) ·
-  [economic-model](./economic-model.md) ·
-  [performance-guide](./performance-guide.md)
-- **Subprotocols:** [SUBPROTOCOLS/](./SUBPROTOCOLS/) (inference attestation,
+- **Architecture:** [bft-consensus](./architecture/bft-consensus.md) ·
+  [bft-integration](./architecture/bft-integration.md) ·
+  [security-overview](./architecture/security-overview.md) ·
+  [economic-model](./architecture/economic-model.md) ·
+  [performance-guide](./architecture/performance-guide.md)
+- **Subprotocols:** [subprotocols/](./subprotocols/) (inference attestation,
   education activation)
-- **Standards / specs (design depth):** the `docs/SRC-*.md` family +
-  [SUM-721](./SUM-721.md). The canonical [tokens](./tokens.md) doc summarizes
-  which of these are code-backed vs design-only.
-- **Status / operational:** [production-checklist](./production-checklist.md) ·
-  [policy-accounts-implementation-status](./policy-accounts-implementation-status.md)
+- **Standards / specs (design depth):** the `docs/specs/SRC-*.md` family +
+  [SUM-721](./specs/SUM-721.md).
+- **Operational:** [production-checklist](./operations/production-checklist.md)
 
-> Several one-off documents at the repo root (academic-credentials, SUMallet,
-> SUMail, web-wallet, SNIP-V2, SRC-81X guides) are integration handoffs or
-> historical/design-only specs and may contain dated activation claims. Treat
-> the canonical docs above as current truth.
+> Integration handoffs and historical/design-only specs live under
+> `docs/integrations/`, `docs/specs/`, and `docs/archive/`. Current usage is in
+> the canonical usage docs above.

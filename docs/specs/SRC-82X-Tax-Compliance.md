@@ -542,7 +542,7 @@ pub struct RevocationCheckResult {
 ## Mock Verifier (for testing)
 
 ```rust
-/// Mock verifier for testing when ZK verifier not available
+/// Mock verifier for testing without a ZK verifier
 pub struct MockTaxProofVerifier {
     /// Accepted proofs (for testing)
     accepted_proofs: HashSet<[u8; 32]>,
