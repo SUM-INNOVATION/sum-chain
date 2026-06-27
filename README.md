@@ -503,8 +503,9 @@ V2 transactions support 16 payload types: Transfer, NFT (SUM-721), Token (SRC-20
 - Full historical state retention
 - Dedicated storage node role
 
-### BFT Consensus (Production-Ready)
-- Harden existing BFT module for production use
+### BFT Consensus (Experimental — not production-ready)
+- Production consensus today is **PoA with depth-based finality**. The BFT module is experimental and non-functional (`propose_block()` returns `NotImplemented`).
+- Roadmap: harden the existing BFT module for production use
 
 ### OmniNode `InferenceAttestation` Subprotocol
 - Verifier-signed digests attesting to off-chain inference outputs, recorded on-chain by reference

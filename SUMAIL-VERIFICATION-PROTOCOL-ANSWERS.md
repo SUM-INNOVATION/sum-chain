@@ -1,5 +1,11 @@
 # SUMail Verification Layer — Protocol Clarifications (ANSWERS)
 
+> **Status:** historical / integration handoff — pending consolidation
+> **Last verified:** 2026-06-27
+> **Public RPC support:** for current, code-verified usage see [docs/tokens.md](docs/tokens.md)
+>
+> This is an integration handoff document and may contain dated "live / mainnet / production" claims (including the activation-height note below). Treat [docs/tokens.md](docs/tokens.md) and [docs/policy-accounts-and-contracts.md](docs/policy-accounts-and-contracts.md) as the current source of truth.
+
 **Date**: 2026-02-01
 **Status**: PRODUCTION ANSWERS - Activation Height 385,000
 **Audience**: SUMail Verification SDK/Gateway Implementation Team

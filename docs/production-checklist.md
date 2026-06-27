@@ -2,6 +2,16 @@
 
 This document provides a comprehensive checklist for launching SUM Chain to production (mainnet).
 
+> **Status:** partial — corrective note
+> **Last verified:** 2026-06-27
+> **Code references:** crates/consensus, docs/bft-consensus.md (experimental)
+> **Public RPC support:** n/a
+>
+> Production consensus is **PoA with depth-based finality**, not BFT. The BFT
+> path is experimental and non-functional (`propose_block()` returns
+> `NotImplemented`). Any "BFT complete" item below should be read as
+> not-production-ready, regardless of an ✅ marker.
+
 ## ✅ Completed Items
 
 ### 1. Currency Branding ✓

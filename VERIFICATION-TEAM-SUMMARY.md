@@ -1,5 +1,11 @@
 # Schema Validation Changes: Verification Team Summary (SRC-810/811/812)
 
+> **Status:** historical / integration handoff — pending consolidation
+> **Last verified:** 2026-06-27
+> **Public RPC support:** for current, code-verified usage see [docs/tokens.md](docs/tokens.md)
+>
+> This is an integration handoff document and may contain dated "live / mainnet / production" claims. Treat [docs/tokens.md](docs/tokens.md) and [docs/policy-accounts-and-contracts.md](docs/policy-accounts-and-contracts.md) as the current source of truth.
+
 ## Executive Summary
 
 Academic credentials (SRC-810, 811, 812) now enforce **hard rejection** at consensus if they contain disallowed metadata fields. This prevents PII from being permanently stored on-chain.

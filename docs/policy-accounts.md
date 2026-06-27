@@ -1,5 +1,16 @@
 # Policy Accounts - Group Governance on SUM Chain
 
+> **Status:** unavailable via public RPC
+> **Last verified:** 2026-06-27
+> **Code references:** crates/rpc/src/server.rs (`policy_*` handlers return "Not yet implemented"), crates/state/src/policy_account_executor.rs
+> **Public RPC support:** no — all 10 `policy_*` methods are stubbed
+>
+> Core logic exists, but the public RPC is not usable today, and approved
+> non-policy actions are not re-dispatched. The RPC surface documented below is
+> planned, not live. See the canonical
+> [policy-accounts-and-contracts](./policy-accounts-and-contracts.md) for the
+> verified status.
+
 ## Table of Contents
 
 1. [Introduction](#introduction)

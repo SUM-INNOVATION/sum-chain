@@ -1,5 +1,11 @@
 # Academic Credentials RPC Endpoints Guide
 
+> **Status:** historical / integration handoff — pending consolidation
+> **Last verified:** 2026-06-27
+> **Public RPC support:** for current, code-verified usage see [docs/tokens.md](docs/tokens.md)
+>
+> This is an integration handoff document and may contain dated "live / mainnet / production" claims. Treat [docs/tokens.md](docs/tokens.md) and [docs/policy-accounts-and-contracts.md](docs/policy-accounts-and-contracts.md) as the current source of truth.
+
 This guide explains how to use the new RPC endpoints for issuing academic credentials (SRC-810/811/812) on SUM Chain.
 
 **✅ Status**: Production-ready and tested on mainnet
