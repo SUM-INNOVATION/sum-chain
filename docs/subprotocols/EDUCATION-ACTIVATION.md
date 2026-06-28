@@ -8,9 +8,9 @@ runtime genesis.** It records what shipped, the gates that must pass
 the production runtime-genesis procedure, the per-validator verification
 checklist, rollback, and post-activation monitoring.
 
-Companion contract: read [`SRC-81X-EDUCATION-VALIDATION.md`](../specs/SRC-81X-EDUCATION-VALIDATION.md)
-(dev runbook) and the Phase 0 specs ([`SRC-817.md`](../specs/SRC-817.md),
-[`SRC-818.md`](../specs/SRC-818.md), [`SRC-81X-EDUCATION-SUITE.md`](../specs/SRC-81X-EDUCATION-SUITE.md)).
+Current Education usage: [docs/tokens.md](../tokens.md#education--lms--src-817818).
+The earlier SRC-817/818 design specs and dev runbook have been consolidated
+into that document.
 
 ## Current status (2026-05-18)
 
@@ -55,8 +55,7 @@ legal/privacy gates are **hard blockers** (stricter than OmniNode).
 ### B. Dev-validation gates
 - [ ] Phase 5 e2e green on the candidate:
       `cargo test -p sumchain-integration-tests education`.
-- [ ] Dev runbook ([`SRC-81X-EDUCATION-VALIDATION.md`](../specs/SRC-81X-EDUCATION-VALIDATION.md))
-      executed against an education-enabled dev node.
+- [ ] Local/dev education validation executed against an education-enabled dev node.
 
 ### C. Legal / privacy gates (HARD — activation blocked until signed)
 - [ ] **FERPA / privacy sign-off** recorded (named approver + date).
@@ -169,9 +168,7 @@ application/json' localhost:8545 -d '{"jsonrpc":"2.0","id":1,"method":"<m>","par
 
 ## References
 
-- Specs: [`SRC-817.md`](../specs/SRC-817.md), [`SRC-818.md`](../specs/SRC-818.md),
-  [`SRC-81X-EDUCATION-SUITE.md`](../specs/SRC-81X-EDUCATION-SUITE.md)
-- Dev runbook: [`SRC-81X-EDUCATION-VALIDATION.md`](../specs/SRC-81X-EDUCATION-VALIDATION.md)
+- Usage: [docs/tokens.md](../tokens.md#education--lms--src-817818) (Education).
 - Phase PRs: #5–#7 (specs), #8 (wire), #9 (storage/executor/Policy B),
   #10 (mempool admission), #11 (read-only RPC), #12 (dev e2e),
   this phase (activation readiness + `chain_getChainParams` field)

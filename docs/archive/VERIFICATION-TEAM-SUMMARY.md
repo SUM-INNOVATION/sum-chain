@@ -77,7 +77,7 @@ Academic credentials (SRC-810, 811, 812) now enforce **hard rejection** at conse
 
 **Problem**: Two teams hashing same data differently → verification breaks
 
-**Solution**: Follow [SRC-81X-COMMITMENT-CANONICALIZATION.md](../specs/SRC-81X-COMMITMENT-CANONICALIZATION.md)
+**Solution**: Follow `SRC-81X-COMMITMENT-CANONICALIZATION.md`
 
 **Key Rules**:
 - Sort object keys lexicographically
@@ -229,7 +229,7 @@ Based on your privacy requirements:
 
 ### 3. **Implement Commitment Canonicalization**
 
-**Required Reading**: [SRC-81X-COMMITMENT-CANONICALIZATION.md](../specs/SRC-81X-COMMITMENT-CANONICALIZATION.md)
+**Required Reading**: `SRC-81X-COMMITMENT-CANONICALIZATION.md`
 
 **Quick Example** (TypeScript):
 
@@ -437,9 +437,9 @@ curl -X POST https://rpc.sum-chain.xyz \
 ## Resources
 
 ### Documentation
-- **Commitment Canonicalization**: [SRC-81X-COMMITMENT-CANONICALIZATION.md](../specs/SRC-81X-COMMITMENT-CANONICALIZATION.md)
-- **Full Schema Details**: [SRC-81X-SCHEMA-VALIDATION.md](../specs/SRC-81X-SCHEMA-VALIDATION.md)
-- **Privacy Analysis**: [SRC-TOKEN-FAMILIES-PRIVACY-ANALYSIS.md](../specs/SRC-TOKEN-FAMILIES-PRIVACY-ANALYSIS.md)
+- **Commitment Canonicalization**: `SRC-81X-COMMITMENT-CANONICALIZATION.md`
+- **Full Schema Details**: `SRC-81X-SCHEMA-VALIDATION.md`
+- **Privacy Analysis**: `SRC-TOKEN-FAMILIES-PRIVACY-ANALYSIS.md`
 
 ### Reference Implementations
 - TypeScript: See commitment canonicalization spec

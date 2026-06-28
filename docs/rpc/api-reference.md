@@ -2,6 +2,8 @@
 
 SUM Chain exposes a JSON-RPC API for interacting with the blockchain. The native currency is **Koppa (Ϙ)** with 9 decimal places.
 
+This reference lists SUM Chain's **current supported public** JSON-RPC methods. For token-family usage with copy-paste examples, see [docs/tokens.md](../tokens.md).
+
 ## Connection
 
 Default endpoint: `http://localhost:8545`

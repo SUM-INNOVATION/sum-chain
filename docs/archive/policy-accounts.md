@@ -627,7 +627,7 @@ curl -X POST http://localhost:8545 \
 
 ## RPC API Reference
 
-> **Status: NOT YET IMPLEMENTED.** The RPC endpoints below describe the planned API surface. The core policy account logic (primitives, storage, executor) is implemented at the consensus level, but the RPC handlers have not been wired up yet. See [policy-accounts-implementation-status.md](../specs/policy-accounts-implementation-status.md) for details.
+> **Status: NOT YET IMPLEMENTED.** The RPC endpoints below describe the planned API surface. The core policy account logic (primitives, storage, executor) is implemented at the consensus level, but the RPC handlers have not been wired up yet. See `policy-accounts-implementation-status.md` for details.
 
 ### policy_createAccount
 
@@ -871,6 +871,6 @@ Policy Accounts bring **consensus-level group governance** to SUM Chain, enablin
 - ✅ **Compatible** (works with all SUM Chain features)
 
 For technical implementation details, see:
-- [Policy Account Implementation Status](../specs/policy-accounts-implementation-status.md)
+- Policy Account Implementation Status
 - [Source Code](../../crates/primitives/src/policy_account.rs)
 - [Tests](../../crates/state/tests/policy_account_tests.rs)

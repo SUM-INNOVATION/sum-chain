@@ -96,18 +96,11 @@ This document provides a comprehensive checklist for launching SUM Chain to prod
 - [explorer/](../../explorer/)
 - [explorer/README.md](../../explorer/README.md)
 
-### 7. BFT Consensus Module (Experimental) ⚠️
+### 7. BFT Consensus (experimental roadmap)
 
-- [x] Tendermint-style BFT data structures and types
-- [x] Two-phase voting types (prevote + precommit)
-- [x] Byzantine quorum logic
-- [x] Leader rotation logic
-- [x] P2P message types and gossipsub topics
-- [x] Documentation and integration guide
-- [ ] **`propose_block()` returns `NotImplemented`** — not production-ready
-- [ ] Full integration with block execution pipeline
-
-**Status**: Module exists but is **not functional**. Production consensus uses **PoA** (round-robin or stake-weighted proposer selection with depth-based finality).
+Production consensus is **PoA** — round-robin or stake-weighted proposer
+selection with depth-based finality. A Tendermint-style BFT module exists as
+**experimental roadmap work** and is not part of the supported production path.
 
 **Files**:
 - [crates/consensus/src/bft/](../../crates/consensus/src/bft)

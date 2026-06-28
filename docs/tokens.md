@@ -204,9 +204,31 @@ For these families, generic block/transaction reads (`sum_getTransaction`,
 
 ---
 
+## Standards & privacy model
+
+Token families map to SUM standards: **SUM-20** (fungible token), **SUM-721**
+(NFT), **SRC-201** (messaging), **SRC-80X/81X** (document/credential class incl.
+academic credentials), **SRC-817/818** (education catalog/offering), **SRC-82X**
+(tax), **SRC-83X** (equity), **SRC-84X** (agreement), **SRC-85X** (legal),
+**SRC-86X** (property), **SRC-87X** (healthcare), **SRC-88X** (employment),
+**SRC-89X** (finance).
+
+Privacy model for the document/credential families (DocClass, Education,
+Employment, and the SRC-82X–89X families):
+
+- **No PII on-chain.** Records store only BLAKE3 commitments and optional
+  references to encrypted off-chain payloads — never names, IDs, emails, raw
+  grades/courses, or other personal data.
+- **Schema allowlist.** Credential metadata is validated against an attribute
+  allowlist; disallowed PII-bearing fields are rejected at consensus.
+- **Commitment canonicalization.** Commitments use BLAKE3 with domain separation
+  (e.g. `SRC-810-COURSES-v1`) over canonical JSON (sorted keys, no whitespace),
+  so independent parties derive identical commitments.
+- **Pseudonymous subjects.** Identity is a scoped commitment / pseudonymous
+  address, not a real-world identifier.
+
 ## Source-of-truth pointers
 
 - Transaction variants: `crates/primitives/src/transaction.rs` (`TxType`, `TxPayload`).
 - Per-family executors: `crates/state/src/<family>_executor.rs`.
 - RPC surface: `crates/rpc/src/api.rs` (declarations) + `crates/rpc/src/server.rs` (handlers).
-- Deep per-family specs: the `docs/specs/SRC-*.md` family and [SUM-721](./specs/SUM-721.md).

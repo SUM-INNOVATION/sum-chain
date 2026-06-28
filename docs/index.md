@@ -51,8 +51,8 @@ gate** — they are always available when the node binary is running.
   [performance-guide](./architecture/performance-guide.md)
 - **Subprotocols:** [subprotocols/](./subprotocols/) (inference attestation,
   education activation)
-- **Standards / specs (design depth):** the `docs/specs/SRC-*.md` family +
-  [SUM-721](./specs/SUM-721.md).
+- **Design specs (non-token):** [specs/](./specs/) (SNIP V2 storage plan).
+  Token-family usage is in [tokens.md](./tokens.md).
 - **Operational:** [production-checklist](./operations/production-checklist.md)
 
 > Integration handoffs and historical/design-only specs live under

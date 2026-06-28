@@ -478,7 +478,7 @@ const commitment = computeCommitment("SRC-810-COURSES-v1", courses);
 5. Verifier compares computed commitment with on-chain commitment
 6. ✅ Match = data authentic and unmodified
 
-**Full Specification**: See [SRC-81X-COMMITMENT-CANONICALIZATION.md](../specs/SRC-81X-COMMITMENT-CANONICALIZATION.md)
+**Full Specification**: See `SRC-81X-COMMITMENT-CANONICALIZATION.md`
 
 ---
 
@@ -823,7 +823,7 @@ curl -X POST https://rpc.sum-chain.xyz \
 ### Must-Read Documentation
 
 1. **[VERIFICATION-TEAM-SUMMARY.md](VERIFICATION-TEAM-SUMMARY.md)** - Complete implementation guide
-2. **[SRC-81X-COMMITMENT-CANONICALIZATION.md](../specs/SRC-81X-COMMITMENT-CANONICALIZATION.md)** - Hashing specification
+2. **`SRC-81X-COMMITMENT-CANONICALIZATION.md`** - Hashing specification
 3. **`DEPLOYMENT-GUIDE.md`** - Validator deployment instructions
 
 ### Code References
