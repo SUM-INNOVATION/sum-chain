@@ -28,7 +28,7 @@ pub use equity_store::{
     EquityEventStore, EquityStore, EquityTokenStore, GovernanceActionStore, OwnershipProofStore,
     OwnershipSnapshotStore,
 };
-pub use messaging_store::MessagingStore;
+pub use messaging_store::{BackfillStats, MessagingStore, MESSAGING_LIST_DEFAULT, MESSAGING_LIST_MAX};
 pub use pruner::{DbStats, PruneStats, Pruner, PrunerConfig};
 pub use schema::{
     BlockStore, DelegationStore, IssuerData, IssuerStore, NftCollectionData, NftStore,

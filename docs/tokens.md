@@ -102,9 +102,9 @@ curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
 ## Messaging — SRC-201
 
 > Status:             code-backed
-> Last verified:      2026-06-27
+> Last verified:      2026-06-29
 > Code references:    crates/primitives/src/messaging.rs, crates/state/src/messaging_executor.rs, crates/rpc/src/server.rs
-> Public RPC support: yes (messaging_getConfig, messaging_getQuota, messaging_getInboxFilter, messaging_getMessages, messaging_getMessageByTxHash, messaging_getMessagesInBlock, messaging_getMessageData, messaging_getPendingPayment, messaging_getTrustStake, messaging_getSpamScore, messaging_isContact, messaging_isBlocked)
+> Public RPC support: yes (messaging_getConfig, messaging_getQuota, messaging_getInboxFilter, messaging_getMessages, messaging_getSentMessages, messaging_getMessageByTxHash, messaging_getMessagesInBlock, messaging_getMessageData, messaging_getPendingPayment, messaging_getPendingPayments, messaging_getTrustStake, messaging_getSpamScore, messaging_isContact, messaging_isBlocked)
 
 On-chain encrypted messaging with anti-spam/trust-stake. Write flow:
 `TxPayload::Messaging` (SendMessage, StakeForTrust, AddContact, BlockSender, …)
@@ -114,6 +114,14 @@ via [sum_sendRawTransaction](#submitting-writes).
 # Messaging quota for an address
 curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"messaging_getQuota","params":["<address>"]}'
+
+# Messages sent by an address (paginated: limit default 100, max 1000; offset)
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"messaging_getSentMessages","params":["<sender_address>",100,0]}'
+
+# Pending escrow payments addressed to a recipient
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"messaging_getPendingPayments","params":["<recipient_address>"]}'
 ```
 
 ## DocClass / academic credentials — SRC-80X/81X

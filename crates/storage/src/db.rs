@@ -236,6 +236,10 @@ pub mod cf {
     pub const MESSAGING_PENDING_PAYMENTS: &str = "messaging_pending_payments";
     /// Message events for indexing (recipient_hash + block_height + idx -> MessageEvent)
     pub const MESSAGING_EVENTS: &str = "messaging_events";
+    /// Sent-message index (sender(20) + block_height(8 BE) + tx_index(4 BE) -> MessageEvent)
+    pub const MESSAGING_SENDER_EVENTS: &str = "messaging_sender_events";
+    /// Pending-payment-by-recipient index (recipient_hash(32) + message_id(32) -> [])
+    pub const MESSAGING_PAYMENTS_BY_RECIPIENT: &str = "messaging_payments_by_recipient";
     /// Registered public keys (address -> RegisteredPublicKey)
     pub const MESSAGING_PUBLIC_KEYS: &str = "messaging_public_keys";
 
@@ -512,6 +516,8 @@ pub const ALL_CFS: &[&str] = &[
     cf::MESSAGING_BLOCKED,
     cf::MESSAGING_PENDING_PAYMENTS,
     cf::MESSAGING_EVENTS,
+    cf::MESSAGING_SENDER_EVENTS,
+    cf::MESSAGING_PAYMENTS_BY_RECIPIENT,
     cf::MESSAGING_PUBLIC_KEYS,
     // SRC-82X Tax & Compliance
     cf::TAX_CLAIM_TYPES,

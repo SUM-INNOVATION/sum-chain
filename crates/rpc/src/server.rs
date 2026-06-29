@@ -13,7 +13,7 @@ use sumchain_state::education_executor::{
     StoredGradeRecord, StoredOffering, StoredSubmissionReceipt, MAX_EDU_LIST_LIMIT,
 };
 use sumchain_state::{Mempool, StateManager};
-use sumchain_storage::{BlockStore, Database, DelegationStore, DocClassStore, EmploymentCredentialStore, EmploymentIssuerStore, IncomeAttestationStore, MessagingStore, NftStore, PolicyAccountStorage, ReceiptStore, SlashingStore, StakingStore, TokenStore, TxIndexStore, TxStore, ValidatorSetStore};
+use sumchain_storage::{BlockStore, Database, DelegationStore, DocClassStore, EmploymentCredentialStore, EmploymentIssuerStore, IncomeAttestationStore, MessagingStore, NftStore, PolicyAccountStorage, ReceiptStore, SlashingStore, StakingStore, TokenStore, TxIndexStore, TxStore, ValidatorSetStore, MESSAGING_LIST_DEFAULT};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
@@ -2517,13 +2517,36 @@ impl SumChainApiServer for RpcServer {
 
     async fn messaging_get_sent_messages(
         &self,
-        _sender: String,
-        _limit: Option<u32>,
-        _offset: Option<u32>,
+        sender: String,
+        limit: Option<u32>,
+        offset: Option<u32>,
     ) -> std::result::Result<Vec<MessageEventInfo>, jsonrpsee::types::ErrorObjectOwned> {
-        // Sender-based indexing is not yet implemented in MessagingStore
-        // Would require iterating all events which is expensive
-        Err(RpcError::Internal("Sender-based message indexing not yet implemented".to_string()).into())
+        let addr = Address::from_base58(&sender)
+            .or_else(|_| Address::from_hex(&sender))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid sender address: {}", e)))?;
+
+        let store = MessagingStore::new(&self.db);
+        let limit = limit.map(|l| l as usize).unwrap_or(MESSAGING_LIST_DEFAULT);
+        let offset = offset.unwrap_or(0) as usize;
+        let events = store
+            .get_messages_by_sender(&addr, limit, offset)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        let results: Vec<MessageEventInfo> = events
+            .into_iter()
+            .map(|e| MessageEventInfo {
+                tx_hash: format!("0x{}", hex::encode(e.message_id.as_bytes())),
+                block_height: e.block_height,
+                sender: e.sender.to_base58(),
+                recipient_hash: format!("0x{}", hex::encode(e.recipient_hash)),
+                content_type: 0, // Not stored in MessageEvent
+                flags: 0,        // Not stored in MessageEvent
+                has_payment: e.has_payment,
+                payment_amount: None, // Amount not stored in MessageEvent
+            })
+            .collect();
+
+        Ok(results)
     }
 
     async fn messaging_get_message_by_tx_hash(
@@ -2666,11 +2689,30 @@ impl SumChainApiServer for RpcServer {
 
     async fn messaging_get_pending_payments(
         &self,
-        _recipient: String,
+        recipient: String,
     ) -> std::result::Result<Vec<PendingPaymentInfo>, jsonrpsee::types::ErrorObjectOwned> {
-        // Recipient-based pending payment listing is not yet implemented
-        // Would require iterating all payments which is expensive
-        Err(RpcError::Internal("Pending payment listing not yet implemented".to_string()).into())
+        let addr = Address::from_base58(&recipient)
+            .or_else(|_| Address::from_hex(&recipient))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid recipient address: {}", e)))?;
+        let recipient_hash = sumchain_crypto::recipient_hash(&addr);
+
+        let store = MessagingStore::new(&self.db);
+        let payments = store
+            .get_pending_payments_by_recipient(&recipient_hash)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        let results: Vec<PendingPaymentInfo> = payments
+            .into_iter()
+            .map(|(message_id, payment)| PendingPaymentInfo {
+                message_id: format!("0x{}", hex::encode(message_id.as_bytes())),
+                sender: payment.sender.to_base58(),
+                recipient_hash: format!("0x{}", hex::encode(payment.recipient_hash)),
+                amount: payment.amount.to_string(),
+                expiry: payment.expiry,
+            })
+            .collect();
+
+        Ok(results)
     }
 
     async fn messaging_get_trust_stake(
@@ -7521,5 +7563,118 @@ mod policy_rpc_tests {
         assert_eq!(decoded, pid);
 
         assert_eq!(resp.signing_hash, format!("0x{}", hex::encode(tx.signing_hash().as_bytes())));
+    }
+}
+
+#[cfg(test)]
+mod messaging_rpc_tests {
+    //! Coverage for messaging_getSentMessages and messaging_getPendingPayments
+    //! (issue #24) over a real RpcServer, reading only the new indexes.
+    use super::*;
+    use std::collections::HashMap;
+    use sumchain_consensus::PoAEngine;
+    use sumchain_crypto::KeyPair;
+    use sumchain_genesis::{ChainParams, Genesis};
+    use sumchain_primitives::{Address, Hash, MessageEvent, PendingPayment};
+    use sumchain_state::MempoolConfig;
+    use tempfile::TempDir;
+
+    fn server() -> (RpcServer, Arc<Database>, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let db = Arc::new(Database::open_default(dir.path()).unwrap());
+        let state = Arc::new(StateManager::new(db.clone(), 1));
+        let mempool = Arc::new(Mempool::new(MempoolConfig::default()));
+        let validator = KeyPair::generate();
+        let genesis = Genesis::new(
+            1,
+            0,
+            vec![validator.public_key().to_base58()],
+            HashMap::from([(validator.address().to_base58(), 1_000_000u128)]),
+            ChainParams::with_v2_enabled(),
+        );
+        let engine = Arc::new(
+            PoAEngine::new(db.clone(), state.clone(), mempool.clone(), &genesis, Some(validator)).unwrap(),
+        );
+        let (tx_sender, _rx) = mpsc::channel(64);
+        let srv = RpcServer::new(db.clone(), state, mempool, engine, tx_sender, Arc::new(|| 0usize));
+        (srv, db, dir)
+    }
+
+    fn event(sender: &Address, block: u64, tag: u8) -> MessageEvent {
+        MessageEvent {
+            sender: *sender,
+            recipient_hash: [1u8; 32],
+            message_id: Hash::hash(&[block as u8, tag]),
+            size: 10,
+            has_payment: false,
+            block_height: block,
+            timestamp: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn get_sent_messages_paginates_over_index() {
+        let (srv, db, _dir) = server();
+        let alice = Address::new([0xAA; 20]);
+        let store = MessagingStore::new(&db);
+        store.store_message_event(&event(&alice, 1, 0), 0).unwrap();
+        store.store_message_event(&event(&alice, 2, 0), 0).unwrap();
+        store.store_message_event(&event(&alice, 3, 0), 0).unwrap();
+
+        let all = srv
+            .messaging_get_sent_messages(alice.to_base58(), Some(100), Some(0))
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0].sender, alice.to_base58());
+        assert_eq!(all[0].block_height, 1);
+
+        // offset 1, limit 1 -> the middle event.
+        let page = srv
+            .messaging_get_sent_messages(alice.to_base58(), Some(1), Some(1))
+            .await
+            .unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].block_height, 2);
+
+        // Unknown sender -> empty.
+        let empty = srv
+            .messaging_get_sent_messages(Address::new([0xCC; 20]).to_base58(), None, None)
+            .await
+            .unwrap();
+        assert!(empty.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_pending_payments_lists_for_recipient() {
+        let (srv, db, _dir) = server();
+        let recipient = Address::new([0xDD; 20]);
+        let rh = sumchain_crypto::recipient_hash(&recipient);
+        let id = Hash::hash(b"pay1");
+        MessagingStore::new(&db)
+            .set_pending_payment(
+                &id,
+                &PendingPayment { recipient_hash: rh, amount: 250, expiry: 9, sender: Address::new([1; 20]) },
+            )
+            .unwrap();
+
+        let listed = srv.messaging_get_pending_payments(recipient.to_base58()).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].message_id, format!("0x{}", hex::encode(id.as_bytes())));
+        assert_eq!(listed[0].amount, "250");
+
+        // Unrelated recipient -> empty.
+        let empty = srv
+            .messaging_get_pending_payments(Address::new([0xEE; 20]).to_base58())
+            .await
+            .unwrap();
+        assert!(empty.is_empty());
+    }
+
+    #[tokio::test]
+    async fn invalid_address_is_rejected() {
+        let (srv, _db, _dir) = server();
+        assert!(srv.messaging_get_sent_messages("not-an-address".to_string(), None, None).await.is_err());
+        assert!(srv.messaging_get_pending_payments("not-an-address".to_string()).await.is_err());
     }
 }
