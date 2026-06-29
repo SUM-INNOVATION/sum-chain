@@ -125,6 +125,20 @@ impl Node {
         // Open database
         let db = Arc::new(Database::open_default(&data_dir)?);
 
+        // One-time, idempotent backfill of the messaging sender/payment
+        // indexes from primary records. Must complete before RPC/consensus
+        // start so messaging_getSentMessages / messaging_getPendingPayments
+        // never read partial indexes; a failure here fails startup.
+        let backfill = sumchain_storage::MessagingStore::new(&db)
+            .backfill_indexes()
+            .map_err(|e| anyhow::anyhow!("messaging index backfill failed: {}", e))?;
+        if backfill.ran {
+            info!(
+                "Messaging index backfill complete: {} sender-event rows, {} pending-payment rows",
+                backfill.sender_events, backfill.pending_payments
+            );
+        }
+
         // Create state manager
         let state = Arc::new(StateManager::new(db.clone(), genesis.chain_id));
 

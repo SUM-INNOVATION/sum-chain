@@ -26,6 +26,41 @@ pub mod config_keys {
     pub const REGISTRY_ADMIN: &[u8] = b"registry_admin";
     pub const SPAM_THRESHOLD: &[u8] = b"spam_threshold";
     pub const STAKE_COOLDOWN_BLOCKS: &[u8] = b"stake_cooldown_blocks";
+    /// Idempotency marker for the one-time sender/payment index backfill.
+    pub const INDEX_BACKFILL_V1: &[u8] = b"messaging_indexes_backfill_v1";
+}
+
+/// Hard cap on rows returned by the indexed listing reads.
+pub const MESSAGING_LIST_MAX: usize = 1000;
+/// Default page size for `get_messages_by_sender` when unspecified.
+pub const MESSAGING_LIST_DEFAULT: usize = 100;
+
+/// Counts produced by a one-time index backfill pass.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BackfillStats {
+    /// Number of sender-event index rows written.
+    pub sender_events: u64,
+    /// Number of pending-payment-by-recipient index rows written.
+    pub pending_payments: u64,
+    /// True if the backfill ran; false if it was already complete (gated).
+    pub ran: bool,
+}
+
+/// Sender index key: `sender(20) || block_height(8 BE) || tx_index(4 BE)`.
+fn sender_index_key(sender: &Address, block_height: u64, tx_index: u32) -> Vec<u8> {
+    let mut key = Vec::with_capacity(32);
+    key.extend_from_slice(sender.as_bytes());
+    key.extend_from_slice(&block_height.to_be_bytes());
+    key.extend_from_slice(&tx_index.to_be_bytes());
+    key
+}
+
+/// Recipient-payment index key: `recipient_hash(32) || message_id(32)`.
+fn payment_index_key(recipient_hash: &[u8; 32], message_id: &Hash) -> Vec<u8> {
+    let mut key = Vec::with_capacity(64);
+    key.extend_from_slice(recipient_hash);
+    key.extend_from_slice(message_id.as_bytes());
+    key
 }
 
 /// Messaging storage operations
@@ -373,16 +408,35 @@ impl<'a> MessagingStore<'a> {
         }
     }
 
-    /// Store pending payment
+    /// Store pending payment, plus the recipient -> payment secondary index,
+    /// in one atomic batch so primary and index cannot diverge.
     pub fn set_pending_payment(&self, message_id: &Hash, payment: &PendingPayment) -> Result<()> {
         let bytes = bincode::serialize(payment)
             .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::MESSAGING_PENDING_PAYMENTS, message_id.as_bytes(), &bytes)
+        let mut batch = self.db.batch();
+        batch.put(cf::MESSAGING_PENDING_PAYMENTS, message_id.as_bytes(), &bytes)?;
+        batch.put(
+            cf::MESSAGING_PAYMENTS_BY_RECIPIENT,
+            &payment_index_key(&payment.recipient_hash, message_id),
+            &[],
+        )?;
+        batch.commit()
     }
 
-    /// Delete pending payment (after claim or expiry)
+    /// Delete pending payment (after claim or expiry) and its recipient index
+    /// entry. The index key needs `recipient_hash`, which a `message_id` alone
+    /// cannot reconstruct, so the payment is read first. A missing primary is a
+    /// no-op (idempotent).
     pub fn delete_pending_payment(&self, message_id: &Hash) -> Result<()> {
-        self.db.delete(cf::MESSAGING_PENDING_PAYMENTS, message_id.as_bytes())
+        let mut batch = self.db.batch();
+        if let Some(payment) = self.get_pending_payment(message_id)? {
+            batch.delete(
+                cf::MESSAGING_PAYMENTS_BY_RECIPIENT,
+                &payment_index_key(&payment.recipient_hash, message_id),
+            )?;
+        }
+        batch.delete(cf::MESSAGING_PENDING_PAYMENTS, message_id.as_bytes())?;
+        batch.commit()
     }
 
     // ========================================================================
@@ -407,7 +461,139 @@ impl<'a> MessagingStore<'a> {
             tx_index
         );
 
-        self.db.put(cf::MESSAGING_EVENTS, &key, &bytes)
+        // Primary event + sender index (powers messaging_getSentMessages) in
+        // one atomic batch so they cannot diverge if one write fails.
+        let mut batch = self.db.batch();
+        batch.put(cf::MESSAGING_EVENTS, &key, &bytes)?;
+        batch.put(
+            cf::MESSAGING_SENDER_EVENTS,
+            &sender_index_key(&event.sender, event.block_height, tx_index),
+            &bytes,
+        )?;
+        batch.commit()
+    }
+
+    /// List messages sent by `sender` via the sender index, ordered ascending
+    /// by `(block_height, tx_index)`. `offset`/`limit` paginate; `limit` is
+    /// clamped to [`MESSAGING_LIST_MAX`].
+    pub fn get_messages_by_sender(
+        &self,
+        sender: &Address,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<MessageEvent>> {
+        let prefix = sender.as_bytes();
+        let cap = limit.min(MESSAGING_LIST_MAX);
+        let mut out = Vec::new();
+        let mut skipped = 0usize;
+        for (key, value) in self.db.prefix_iter(cf::MESSAGING_SENDER_EVENTS, prefix)? {
+            // `prefix_iterator` can over-return; stop at the prefix boundary.
+            if !key.starts_with(prefix) {
+                break;
+            }
+            if skipped < offset {
+                skipped += 1;
+                continue;
+            }
+            if out.len() >= cap {
+                break;
+            }
+            if let Ok(event) = bincode::deserialize::<MessageEvent>(&value) {
+                out.push(event);
+            }
+        }
+        Ok(out)
+    }
+
+    /// List pending payments addressed to `recipient_hash` via the recipient
+    /// index, returning `(message_id, payment)` pairs. Capped at
+    /// [`MESSAGING_LIST_MAX`].
+    pub fn get_pending_payments_by_recipient(
+        &self,
+        recipient_hash: &[u8; 32],
+    ) -> Result<Vec<(Hash, PendingPayment)>> {
+        let mut out = Vec::new();
+        for (key, _) in self.db.prefix_iter(cf::MESSAGING_PAYMENTS_BY_RECIPIENT, recipient_hash)? {
+            if !key.starts_with(recipient_hash) {
+                break;
+            }
+            if out.len() >= MESSAGING_LIST_MAX {
+                break;
+            }
+            // Key = recipient_hash(32) || message_id(32).
+            if key.len() != 64 {
+                continue;
+            }
+            let mut id = [0u8; 32];
+            id.copy_from_slice(&key[32..64]);
+            let message_id = Hash::new(id);
+            if let Some(payment) = self.get_pending_payment(&message_id)? {
+                out.push((message_id, payment));
+            }
+        }
+        Ok(out)
+    }
+
+    /// One-time, idempotent backfill of the sender and recipient-payment
+    /// indexes from the primary CFs. Gated by a marker in `MESSAGING_CONFIG`,
+    /// so subsequent calls are a single point-read. Index writes are
+    /// overwrites, so an ungated rerun would also be safe.
+    pub fn backfill_indexes(&self) -> Result<BackfillStats> {
+        if self
+            .db
+            .get(cf::MESSAGING_CONFIG, config_keys::INDEX_BACKFILL_V1)?
+            .is_some()
+        {
+            return Ok(BackfillStats::default());
+        }
+        let mut stats = BackfillStats { ran: true, ..Default::default() };
+
+        // Sender index from MESSAGING_EVENTS (recipient_hash(32)||block(8)||tx_index(4)).
+        // Fail fast on any malformed row: a partial index must not be marked
+        // complete. A failed run leaves the marker unset, so the next boot
+        // retries (index writes are overwrites, so the retry is idempotent).
+        for (key, value) in self.db.full_iter(cf::MESSAGING_EVENTS)? {
+            if key.len() < 44 {
+                return Err(StorageError::InvalidData(format!(
+                    "backfill: MESSAGING_EVENTS key too short ({} bytes)",
+                    key.len()
+                )));
+            }
+            let event: MessageEvent = bincode::deserialize(&value)
+                .map_err(|e| StorageError::Serialization(format!("backfill: bad MessageEvent: {}", e)))?;
+            let tx_index = u32::from_be_bytes(key[40..44].try_into().unwrap());
+            self.db.put(
+                cf::MESSAGING_SENDER_EVENTS,
+                &sender_index_key(&event.sender, event.block_height, tx_index),
+                &value,
+            )?;
+            stats.sender_events += 1;
+        }
+
+        // Recipient-payment index from MESSAGING_PENDING_PAYMENTS (message_id(32)).
+        for (key, value) in self.db.full_iter(cf::MESSAGING_PENDING_PAYMENTS)? {
+            if key.len() != 32 {
+                return Err(StorageError::InvalidData(format!(
+                    "backfill: MESSAGING_PENDING_PAYMENTS key not 32 bytes ({} bytes)",
+                    key.len()
+                )));
+            }
+            let payment: PendingPayment = bincode::deserialize(&value)
+                .map_err(|e| StorageError::Serialization(format!("backfill: bad PendingPayment: {}", e)))?;
+            let mut id = [0u8; 32];
+            id.copy_from_slice(&key);
+            let message_id = Hash::new(id);
+            self.db.put(
+                cf::MESSAGING_PAYMENTS_BY_RECIPIENT,
+                &payment_index_key(&payment.recipient_hash, &message_id),
+                &[],
+            )?;
+            stats.pending_payments += 1;
+        }
+
+        // Mark complete only after a fully successful pass.
+        self.db.put(cf::MESSAGING_CONFIG, config_keys::INDEX_BACKFILL_V1, &[1])?;
+        Ok(stats)
     }
 
     /// Get messages for a recipient within a block range
