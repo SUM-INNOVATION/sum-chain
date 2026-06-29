@@ -45,6 +45,11 @@ pub const PROPOSAL_DOMAIN_SEP: &[u8] = b"POLICY-PROPOSAL:";
 /// Domain separator for approval messages
 pub const APPROVAL_DOMAIN_SEP: &[u8] = b"POLICY-APPROVAL:";
 
+/// Domain separator for the v1 approval signing message. Member approvals are
+/// Ed25519 signatures over `APPROVAL_SIGNING_DOMAIN_V1 || policy_account_id ||
+/// action_hash || policy_nonce_le` (see [`Proposal::approval_signing_bytes`]).
+pub const APPROVAL_SIGNING_DOMAIN_V1: &[u8] = b"SUM-POLICY-APPROVAL:v1:";
+
 // =============================================================================
 // Limits (DoS Prevention)
 // =============================================================================
@@ -566,10 +571,15 @@ impl ProposalStatus {
 /// Member approval for a proposal
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemberApproval {
-    /// Approver address
+    /// Approver address (must equal `Address::from_public_key(&approver_pubkey)`)
     pub approver: Address,
 
-    /// Ed25519 signature over approval message
+    /// Approver's Ed25519 public key. Required to verify `signature`, since an
+    /// `Address` is a one-way hash of the key and cannot recover it.
+    pub approver_pubkey: [u8; 32],
+
+    /// Ed25519 signature over the approval signing message
+    /// (see [`Proposal::approval_signing_bytes`]).
     #[serde(with = "BigArray")]
     pub signature: [u8; 64],
 
@@ -650,6 +660,23 @@ impl Proposal {
         hasher.update(action_hash.as_bytes());
         hasher.update(&policy_nonce.to_le_bytes());
         Hash::new(*hasher.finalize().as_bytes())
+    }
+
+    /// Canonical bytes a member signs (Ed25519) to approve a proposal:
+    /// `APPROVAL_SIGNING_DOMAIN_V1 || policy_account_id || action_hash ||
+    /// policy_nonce_le`. The `policy_nonce` (account state at proposal creation)
+    /// provides replay protection; `action_hash` binds the exact action.
+    pub fn approval_signing_bytes(
+        policy_account_id: &PolicyAccountId,
+        action_hash: &Hash,
+        policy_nonce: PolicyNonce,
+    ) -> Vec<u8> {
+        let mut msg = Vec::with_capacity(APPROVAL_SIGNING_DOMAIN_V1.len() + 32 + 32 + 8);
+        msg.extend_from_slice(APPROVAL_SIGNING_DOMAIN_V1);
+        msg.extend_from_slice(policy_account_id);
+        msg.extend_from_slice(action_hash.as_bytes());
+        msg.extend_from_slice(&policy_nonce.to_le_bytes());
+        msg
     }
 
     /// Check if approver already approved

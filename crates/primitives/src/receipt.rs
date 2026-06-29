@@ -80,6 +80,8 @@ impl TxStatus {
             TxStatus::Failed(34) => "ActivateFileV2 validity check failed",
             TxStatus::Failed(35) => "V2 access op validity check failed",
             TxStatus::Failed(40) => "V2 storage protocol not enabled at this height",
+            // Policy account governance failures.
+            TxStatus::Failed(17) => "policy account operation failed (invalid approval, threshold not met, or unsupported wrapped action)",
             // OmniNode `InferenceAttestation` subprotocol failures.
             TxStatus::Failed(50) => "OmniNode subprotocol not enabled at this block height",
             TxStatus::Failed(51) => "duplicate InferenceAttestation for (session_id, verifier)",

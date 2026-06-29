@@ -13,7 +13,7 @@ use sumchain_state::education_executor::{
     StoredGradeRecord, StoredOffering, StoredSubmissionReceipt, MAX_EDU_LIST_LIMIT,
 };
 use sumchain_state::{Mempool, StateManager};
-use sumchain_storage::{BlockStore, Database, DelegationStore, DocClassStore, EmploymentCredentialStore, EmploymentIssuerStore, IncomeAttestationStore, MessagingStore, NftStore, ReceiptStore, SlashingStore, StakingStore, TokenStore, TxIndexStore, TxStore, ValidatorSetStore};
+use sumchain_storage::{BlockStore, Database, DelegationStore, DocClassStore, EmploymentCredentialStore, EmploymentIssuerStore, IncomeAttestationStore, MessagingStore, NftStore, PolicyAccountStorage, ReceiptStore, SlashingStore, StakingStore, TokenStore, TxIndexStore, TxStore, ValidatorSetStore};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
@@ -28,6 +28,11 @@ use crate::{RpcError, Result};
 
 /// Node version constant
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Default fee (Koppa base units) for policy-account builder helpers when the
+/// request omits one. Matches the house default used by other write builders
+/// (0.001 Koppa).
+const POLICY_DEFAULT_FEE: u128 = 1_000_000;
 
 /// Classify a transaction's status given its receipt (if any), mempool presence,
 /// and a finality check. Pure function — extracted from `chain_get_transaction_status`
@@ -399,6 +404,46 @@ impl RpcServer {
         Address::from_base58(s)
             .or_else(|_| Address::from_hex(s))
             .map_err(|_| RpcError::InvalidParams(format!("Invalid address: {}", s)))
+    }
+
+    /// Assemble an unsigned policy-account `TransactionV2`, filling chain id and
+    /// the sender's current nonce. Returns bincode(tx) hex + signing hash. The
+    /// builder never signs; the client signs `signing_hash` with the `from`
+    /// key and submits the resulting transaction via `sum_sendRawTransaction`.
+    fn build_unsigned_policy_tx(
+        &self,
+        from: Address,
+        fee: u128,
+        data: sumchain_primitives::policy_account::PolicyAccountTxData,
+    ) -> Result<PolicyBuildResponse> {
+        use sumchain_primitives::{TransactionV2, TxPayload};
+        let nonce = self
+            .state
+            .get_nonce(&from)
+            .map_err(|e| RpcError::Internal(format!("Failed to get nonce: {}", e)))?;
+        let chain_id = self.state.chain_id();
+        let tx = TransactionV2 {
+            chain_id,
+            from,
+            fee,
+            nonce,
+            payload: TxPayload::PolicyAccount(data),
+        };
+        let signing_hash = tx.signing_hash();
+        let unsigned = bincode::serialize(&tx)
+            .map_err(|e| RpcError::Internal(format!("Failed to encode tx: {}", e)))?;
+        Ok(PolicyBuildResponse {
+            unsigned_tx: format!("0x{}", hex::encode(unsigned)),
+            signing_hash: format!("0x{}", hex::encode(signing_hash.as_bytes())),
+            from: from.to_base58(),
+            nonce,
+            fee,
+            chain_id,
+            policy_account_id: None,
+            address: None,
+            proposal_id: None,
+            action_hash: None,
+        })
     }
 
     /// Convert an on-disk `InferenceAttestationRecord` to its RPC view.
@@ -5280,44 +5325,180 @@ impl SumChainApiServer for RpcServer {
         Ok(results)
     }
 
-    async fn policy_create_account(&self, _request: CreatePolicyAccountRequest) -> std::result::Result<CreatePolicyAccountResponse, jsonrpsee::types::ErrorObjectOwned> {
-        Err(RpcError::Internal("Not yet implemented".to_string()).into())
+    async fn policy_build_create_account(
+        &self,
+        request: BuildCreateAccountRequest,
+    ) -> std::result::Result<PolicyBuildResponse, jsonrpsee::types::ErrorObjectOwned> {
+        use sumchain_primitives::policy_account::{PolicyAccount, PolicyAccountOperation, PolicyAccountTxData};
+        use sumchain_state::policy_account_executor::CreatePolicyAccountRequest as ExecCreate;
+
+        let from = self.parse_address(&request.from)?;
+        let mut members = Vec::with_capacity(request.members.len());
+        for m in &request.members {
+            members.push(m.to_member().map_err(RpcError::InvalidParams)?);
+        }
+        let policy = request.policy.to_config().map_err(RpcError::InvalidParams)?;
+        let salt = hex::decode(request.salt.strip_prefix("0x").unwrap_or(&request.salt))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid salt hex: {}", e)))?;
+
+        let id = PolicyAccount::compute_id(&members, &salt);
+        let address = PolicyAccount::id_to_address(&id);
+
+        let exec_req = ExecCreate { members, policy, salt };
+        let data = PolicyAccountTxData {
+            operation: PolicyAccountOperation::Create,
+            data: bincode::serialize(&exec_req)
+                .map_err(|e| RpcError::Internal(format!("encode failed: {}", e)))?,
+            recipient: from,
+        };
+        let fee = request.fee.unwrap_or(POLICY_DEFAULT_FEE);
+        let mut resp = self.build_unsigned_policy_tx(from, fee, data)?;
+        resp.policy_account_id = Some(format!("0x{}", hex::encode(id)));
+        resp.address = Some(address.to_base58());
+        Ok(resp)
     }
 
-    async fn policy_get_account(&self, _policy_account_id: String) -> std::result::Result<PolicyAccountInfo, jsonrpsee::types::ErrorObjectOwned> {
-        Err(RpcError::Internal("Not yet implemented".to_string()).into())
+    async fn policy_get_account(&self, policy_account_id: String) -> std::result::Result<PolicyAccountInfo, jsonrpsee::types::ErrorObjectOwned> {
+        let id = self.parse_hex32(&policy_account_id)?;
+        let account = PolicyAccountStorage::new(&self.db)
+            .policy_accounts()
+            .get(&id)
+            .map_err(|e| RpcError::Internal(e.to_string()))?
+            .ok_or_else(|| RpcError::InvalidParams("Policy account not found".to_string()))?;
+        Ok(PolicyAccountInfo::from_account(&account))
     }
 
-    async fn policy_get_account_by_address(&self, _address: String) -> std::result::Result<Option<PolicyAccountInfo>, jsonrpsee::types::ErrorObjectOwned> {
-        Err(RpcError::Internal("Not yet implemented".to_string()).into())
+    async fn policy_get_account_by_address(&self, address: String) -> std::result::Result<Option<PolicyAccountInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let addr = self.parse_address(&address)?;
+        let account = PolicyAccountStorage::new(&self.db)
+            .policy_accounts()
+            .get_by_address(&addr)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(account.map(|a| PolicyAccountInfo::from_account(&a)))
     }
 
-    async fn policy_list_member_accounts(&self, _member_address: String) -> std::result::Result<Vec<PolicyAccountInfo>, jsonrpsee::types::ErrorObjectOwned> {
-        Err(RpcError::Internal("Not yet implemented".to_string()).into())
+    async fn policy_list_member_accounts(&self, member_address: String) -> std::result::Result<Vec<PolicyAccountInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let addr = self.parse_address(&member_address)?;
+        let accounts = PolicyAccountStorage::new(&self.db)
+            .policy_accounts()
+            .list_by_member(&addr)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(accounts.iter().map(PolicyAccountInfo::from_account).collect())
     }
 
-    async fn policy_submit_proposal(&self, _request: SubmitProposalRequest) -> std::result::Result<SubmitProposalResponse, jsonrpsee::types::ErrorObjectOwned> {
-        Err(RpcError::Internal("Not yet implemented".to_string()).into())
+    async fn policy_build_submit_proposal(
+        &self,
+        request: BuildSubmitProposalRequest,
+    ) -> std::result::Result<PolicyBuildResponse, jsonrpsee::types::ErrorObjectOwned> {
+        use sumchain_primitives::policy_account::{PolicyAccountOperation, PolicyAccountTxData, Proposal};
+        use sumchain_primitives::Hash;
+        use sumchain_state::policy_account_executor::SubmitProposalRequest as ExecSubmit;
+
+        let from = self.parse_address(&request.from)?;
+        let policy_account_id = self.parse_hex32(&request.policy_account_id)?;
+        let action_payload = hex::decode(request.action_data.strip_prefix("0x").unwrap_or(&request.action_data))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid action_data hex: {}", e)))?;
+
+        let mut approvals = Vec::with_capacity(request.approvals.len());
+        for a in &request.approvals {
+            approvals.push(a.to_member_approval().map_err(RpcError::InvalidParams)?);
+        }
+
+        // Derive the proposal id against the account's current policy nonce.
+        let account = PolicyAccountStorage::new(&self.db)
+            .policy_accounts()
+            .get(&policy_account_id)
+            .map_err(|e| RpcError::Internal(e.to_string()))?
+            .ok_or_else(|| RpcError::InvalidParams("Policy account not found".to_string()))?;
+        let action_hash = Hash::hash(&action_payload);
+        let proposal_id = Proposal::compute_id(&policy_account_id, account.nonce, &action_hash);
+
+        let exec_req = ExecSubmit {
+            policy_account_id,
+            action_payload,
+            approvals,
+            expires_at: request.expires_at,
+        };
+        let data = PolicyAccountTxData {
+            operation: PolicyAccountOperation::SubmitProposal,
+            data: bincode::serialize(&exec_req)
+                .map_err(|e| RpcError::Internal(format!("encode failed: {}", e)))?,
+            recipient: from,
+        };
+        let fee = request.fee.unwrap_or(POLICY_DEFAULT_FEE);
+        let mut resp = self.build_unsigned_policy_tx(from, fee, data)?;
+        resp.proposal_id = Some(format!("0x{}", hex::encode(proposal_id)));
+        resp.action_hash = Some(format!("0x{}", hex::encode(action_hash.as_bytes())));
+        Ok(resp)
     }
 
-    async fn policy_execute_proposal(&self, _request: ExecuteProposalRequest) -> std::result::Result<ExecuteProposalResponse, jsonrpsee::types::ErrorObjectOwned> {
-        Err(RpcError::Internal("Not yet implemented".to_string()).into())
+    async fn policy_build_execute_proposal(
+        &self,
+        request: BuildExecuteProposalRequest,
+    ) -> std::result::Result<PolicyBuildResponse, jsonrpsee::types::ErrorObjectOwned> {
+        use sumchain_primitives::policy_account::{PolicyAccountOperation, PolicyAccountTxData};
+        use sumchain_state::policy_account_executor::ExecuteProposalRequest as ExecExec;
+
+        let from = self.parse_address(&request.from)?;
+        let proposal_id = self.parse_hex32(&request.proposal_id)?;
+        let exec_req = ExecExec { proposal_id };
+        let data = PolicyAccountTxData {
+            operation: PolicyAccountOperation::ExecuteProposal,
+            data: bincode::serialize(&exec_req)
+                .map_err(|e| RpcError::Internal(format!("encode failed: {}", e)))?,
+            recipient: from,
+        };
+        let fee = request.fee.unwrap_or(POLICY_DEFAULT_FEE);
+        Ok(self.build_unsigned_policy_tx(from, fee, data)?)
     }
 
-    async fn policy_cancel_proposal(&self, _request: CancelProposalRequest) -> std::result::Result<CancelProposalResponse, jsonrpsee::types::ErrorObjectOwned> {
-        Err(RpcError::Internal("Not yet implemented".to_string()).into())
+    async fn policy_build_cancel_proposal(
+        &self,
+        request: BuildCancelProposalRequest,
+    ) -> std::result::Result<PolicyBuildResponse, jsonrpsee::types::ErrorObjectOwned> {
+        use sumchain_primitives::policy_account::{PolicyAccountOperation, PolicyAccountTxData};
+
+        let from = self.parse_address(&request.from)?;
+        let proposal_id = self.parse_hex32(&request.proposal_id)?;
+        // CancelProposal's executor decodes a raw `ProposalId`, not a request
+        // wrapper — encode the 32-byte id directly so the on-chain payload is
+        // exactly `CancelProposal + ProposalId`.
+        let data = PolicyAccountTxData {
+            operation: PolicyAccountOperation::CancelProposal,
+            data: bincode::serialize(&proposal_id)
+                .map_err(|e| RpcError::Internal(format!("encode failed: {}", e)))?,
+            recipient: from,
+        };
+        let fee = request.fee.unwrap_or(POLICY_DEFAULT_FEE);
+        Ok(self.build_unsigned_policy_tx(from, fee, data)?)
     }
 
-    async fn policy_get_proposal(&self, _proposal_id: String) -> std::result::Result<ProposalInfo, jsonrpsee::types::ErrorObjectOwned> {
-        Err(RpcError::Internal("Not yet implemented".to_string()).into())
+    async fn policy_get_proposal(&self, proposal_id: String) -> std::result::Result<ProposalInfo, jsonrpsee::types::ErrorObjectOwned> {
+        let id = self.parse_hex32(&proposal_id)?;
+        let proposal = PolicyAccountStorage::new(&self.db)
+            .proposals()
+            .get(&id)
+            .map_err(|e| RpcError::Internal(e.to_string()))?
+            .ok_or_else(|| RpcError::InvalidParams("Proposal not found".to_string()))?;
+        Ok(ProposalInfo::from_proposal(&proposal))
     }
 
-    async fn policy_list_proposals(&self, _policy_account_id: String) -> std::result::Result<Vec<ProposalInfo>, jsonrpsee::types::ErrorObjectOwned> {
-        Err(RpcError::Internal("Not yet implemented".to_string()).into())
+    async fn policy_list_proposals(&self, policy_account_id: String) -> std::result::Result<Vec<ProposalInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let id = self.parse_hex32(&policy_account_id)?;
+        let proposals = PolicyAccountStorage::new(&self.db)
+            .proposals()
+            .list_by_policy_account(&id)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(proposals.iter().map(ProposalInfo::from_proposal).collect())
     }
 
-    async fn policy_list_pending_proposals(&self, _policy_account_id: String) -> std::result::Result<Vec<ProposalInfo>, jsonrpsee::types::ErrorObjectOwned> {
-        Err(RpcError::Internal("Not yet implemented".to_string()).into())
+    async fn policy_list_pending_proposals(&self, policy_account_id: String) -> std::result::Result<Vec<ProposalInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let id = self.parse_hex32(&policy_account_id)?;
+        let proposals = PolicyAccountStorage::new(&self.db)
+            .proposals()
+            .list_pending(&id)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(proposals.iter().map(ProposalInfo::from_proposal).collect())
     }
 
     async fn storage_get_access_list(
@@ -7051,5 +7232,294 @@ mod education_rpc_phase4_tests {
         let si = edu_submission_to_info(&ex.get_submission_receipt(&oid, &aid, &sc, 0).unwrap().unwrap());
         assert_eq!(si.student_commitment, edu_hex0x(&sc));
         assert!(si.submitter != si.student_commitment);
+    }
+}
+
+#[cfg(test)]
+mod policy_rpc_tests {
+    //! Coverage for the policy-account RPC surface (issue #23): the six read
+    //! handlers and four no-key `policy_build*` helpers, driven through a real
+    //! `RpcServer` over a temp-backed state. Builder outputs are decoded back
+    //! into a `TransactionV2` and asserted field-by-field.
+    use super::*;
+    use std::collections::HashMap;
+    use sumchain_consensus::PoAEngine;
+    use sumchain_crypto::KeyPair;
+    use sumchain_genesis::{ChainParams, Genesis};
+    use sumchain_primitives::policy_account::{
+        ActionClass, PolicyAccount, PolicyAccountOperation, PolicyAccountStatus, PolicyAccountTxData,
+        PolicyConfig, PolicyMember, PolicyProfile, Proposal, ProposalStatus,
+    };
+    use sumchain_primitives::{Hash, TransactionV2, TxPayload};
+    use sumchain_state::policy_account_executor::{
+        CreatePolicyAccountRequest as ExecCreate, ExecuteProposalRequest as ExecExec,
+        SubmitProposalRequest as ExecSubmit,
+    };
+    use sumchain_state::MempoolConfig;
+    use tempfile::TempDir;
+
+    fn server() -> (RpcServer, Arc<Database>, Arc<StateManager>, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let db = Arc::new(Database::open_default(dir.path()).unwrap());
+        let state = Arc::new(StateManager::new(db.clone(), 1));
+        let mempool = Arc::new(Mempool::new(MempoolConfig::default()));
+        let validator = KeyPair::generate();
+        let genesis = Genesis::new(
+            1,
+            0,
+            vec![validator.public_key().to_base58()],
+            HashMap::from([(validator.address().to_base58(), 1_000_000u128)]),
+            ChainParams::with_v2_enabled(),
+        );
+        let engine = Arc::new(
+            PoAEngine::new(db.clone(), state.clone(), mempool.clone(), &genesis, Some(validator)).unwrap(),
+        );
+        let (tx_sender, _rx) = mpsc::channel(64);
+        let srv = RpcServer::new(
+            db.clone(),
+            state.clone(),
+            mempool,
+            engine,
+            tx_sender,
+            Arc::new(|| 0usize),
+        );
+        (srv, db, state, dir)
+    }
+
+    fn single_member_account(db: &Arc<Database>, member: &KeyPair) -> PolicyAccount {
+        let members = vec![PolicyMember::new(member.address())];
+        let salt = vec![7u8; 32];
+        let id = PolicyAccount::compute_id(&members, &salt);
+        let address = PolicyAccount::id_to_address(&id);
+        let account = PolicyAccount {
+            id,
+            address,
+            members,
+            policy: PolicyConfig { profile: PolicyProfile::Personal, overrides: vec![] },
+            nonce: 0,
+            status: PolicyAccountStatus::Active,
+            created_at: 0,
+            created_timestamp: 0,
+        };
+        PolicyAccountStorage::new(db).policy_accounts().put(&account).unwrap();
+        account
+    }
+
+    fn put_proposal(db: &Arc<Database>, account: &PolicyAccount, proposer: &KeyPair) -> Proposal {
+        let action_data = vec![1u8, 2, 3];
+        let action_hash = Hash::hash(&action_data);
+        let id = Proposal::compute_id(&account.id, account.nonce, &action_hash);
+        let proposal = Proposal {
+            id,
+            policy_account_id: account.id,
+            policy_nonce: account.nonce,
+            proposer: proposer.address(),
+            action_class: ActionClass::TransferNative,
+            action_data,
+            action_hash,
+            approvals: vec![],
+            status: ProposalStatus::Pending,
+            expires_at: 9_000_000_000_000,
+            created_at: 0,
+            created_height: 0,
+        };
+        PolicyAccountStorage::new(db).proposals().put(&proposal).unwrap();
+        proposal
+    }
+
+    fn decode_tx(resp: &PolicyBuildResponse) -> TransactionV2 {
+        let raw = hex::decode(resp.unsigned_tx.trim_start_matches("0x")).unwrap();
+        bincode::deserialize(&raw).unwrap()
+    }
+
+    fn policy_payload(tx: &TransactionV2) -> &PolicyAccountTxData {
+        match &tx.payload {
+            TxPayload::PolicyAccount(d) => d,
+            other => panic!("expected PolicyAccount payload, got {:?}", other),
+        }
+    }
+
+    // ---------------- reads ----------------
+
+    #[tokio::test]
+    async fn read_get_account_and_by_address_and_member_list() {
+        let (srv, db, _state, _dir) = server();
+        let m = KeyPair::generate();
+        let account = single_member_account(&db, &m);
+        let id_hex = format!("0x{}", hex::encode(account.id));
+
+        let by_id = srv.policy_get_account(id_hex.clone()).await.unwrap();
+        assert_eq!(by_id.id, id_hex);
+        assert_eq!(by_id.members.len(), 1);
+        assert_eq!(by_id.nonce, 0);
+        assert_eq!(by_id.status, "Active");
+
+        let by_addr = srv.policy_get_account_by_address(account.address.to_base58()).await.unwrap();
+        assert!(by_addr.is_some());
+        assert_eq!(by_addr.unwrap().id, id_hex);
+
+        // Unknown address -> None (not an error).
+        let none = srv.policy_get_account_by_address(KeyPair::generate().address().to_base58()).await.unwrap();
+        assert!(none.is_none());
+
+        let mine = srv.policy_list_member_accounts(m.address().to_base58()).await.unwrap();
+        assert_eq!(mine.len(), 1);
+        assert_eq!(mine[0].id, id_hex);
+    }
+
+    #[tokio::test]
+    async fn read_get_account_not_found_is_error() {
+        let (srv, _db, _state, _dir) = server();
+        let missing = format!("0x{}", hex::encode([9u8; 32]));
+        assert!(srv.policy_get_account(missing).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn read_proposal_get_and_lists() {
+        let (srv, db, _state, _dir) = server();
+        let m = KeyPair::generate();
+        let account = single_member_account(&db, &m);
+        let proposal = put_proposal(&db, &account, &m);
+        let pid_hex = format!("0x{}", hex::encode(proposal.id));
+        let id_hex = format!("0x{}", hex::encode(account.id));
+
+        let got = srv.policy_get_proposal(pid_hex.clone()).await.unwrap();
+        assert_eq!(got.id, pid_hex);
+        assert_eq!(got.status, "Pending");
+        assert_eq!(got.action_class, "TransferNative");
+
+        let all = srv.policy_list_proposals(id_hex.clone()).await.unwrap();
+        assert_eq!(all.len(), 1);
+        let pending = srv.policy_list_pending_proposals(id_hex).await.unwrap();
+        assert_eq!(pending.len(), 1);
+    }
+
+    // ---------------- builders ----------------
+
+    #[tokio::test]
+    async fn build_create_account_encodes_unsigned_create() {
+        let (srv, _db, _state, _dir) = server();
+        let from = KeyPair::generate();
+        let member = KeyPair::generate();
+        let req = BuildCreateAccountRequest {
+            from: from.address().to_base58(),
+            members: vec![PolicyMemberInfo { address: member.address().to_base58(), weight: 1 }],
+            policy: PolicyConfigInfo { profile: "Personal".to_string(), overrides: vec![] },
+            salt: format!("0x{}", hex::encode([3u8; 32])),
+            fee: None,
+        };
+        let resp = srv.policy_build_create_account(req).await.unwrap();
+
+        // No signing happened; defaults filled.
+        assert_eq!(resp.from, from.address().to_base58());
+        assert_eq!(resp.nonce, 0);
+        assert_eq!(resp.chain_id, 1);
+        assert_eq!(resp.fee, POLICY_DEFAULT_FEE);
+
+        let tx = decode_tx(&resp);
+        assert_eq!(tx.from, from.address());
+        assert_eq!(tx.chain_id, 1);
+        assert_eq!(resp.signing_hash, format!("0x{}", hex::encode(tx.signing_hash().as_bytes())));
+
+        let data = policy_payload(&tx);
+        assert!(matches!(data.operation, PolicyAccountOperation::Create));
+        let inner: ExecCreate = bincode::deserialize(&data.data).unwrap();
+        assert_eq!(inner.members.len(), 1);
+        assert_eq!(inner.members[0].address, member.address());
+        assert_eq!(inner.salt, vec![3u8; 32]);
+
+        // Derived ids match canonical computation.
+        let expect_id = PolicyAccount::compute_id(&inner.members, &inner.salt);
+        assert_eq!(resp.policy_account_id, Some(format!("0x{}", hex::encode(expect_id))));
+        assert_eq!(resp.address, Some(PolicyAccount::id_to_address(&expect_id).to_base58()));
+    }
+
+    #[tokio::test]
+    async fn build_submit_proposal_encodes_unsigned_submit() {
+        let (srv, db, _state, _dir) = server();
+        let m = KeyPair::generate();
+        let account = single_member_account(&db, &m);
+        let action = TxPayload::Transfer { to: KeyPair::generate().address(), amount: 5 };
+        let action_payload = bincode::serialize(&action).unwrap();
+        let approval = ApprovalInfo {
+            approver_address: m.address().to_base58(),
+            approver_pubkey: format!("0x{}", hex::encode(m.public_key().as_bytes())),
+            signature: format!("0x{}", hex::encode([0u8; 64])),
+        };
+        let req = BuildSubmitProposalRequest {
+            from: m.address().to_base58(),
+            policy_account_id: format!("0x{}", hex::encode(account.id)),
+            action_data: format!("0x{}", hex::encode(&action_payload)),
+            approvals: vec![approval],
+            expires_at: 9_000_000_000_000,
+            fee: Some(2_500),
+        };
+        let resp = srv.policy_build_submit_proposal(req).await.unwrap();
+        assert_eq!(resp.fee, 2_500);
+
+        let tx = decode_tx(&resp);
+        let data = policy_payload(&tx);
+        assert!(matches!(data.operation, PolicyAccountOperation::SubmitProposal));
+        let inner: ExecSubmit = bincode::deserialize(&data.data).unwrap();
+        assert_eq!(inner.policy_account_id, account.id);
+        assert_eq!(inner.action_payload, action_payload);
+        assert_eq!(inner.approvals.len(), 1);
+        assert_eq!(inner.approvals[0].approver_pubkey, *m.public_key().as_bytes());
+
+        // Derived proposal id/action hash against the account's current nonce.
+        let ah = Hash::hash(&action_payload);
+        let pid = Proposal::compute_id(&account.id, account.nonce, &ah);
+        assert_eq!(resp.proposal_id, Some(format!("0x{}", hex::encode(pid))));
+        assert_eq!(resp.action_hash, Some(format!("0x{}", hex::encode(ah.as_bytes()))));
+    }
+
+    #[tokio::test]
+    async fn build_execute_proposal_encodes_request_wrapper() {
+        let (srv, _db, _state, _dir) = server();
+        let from = KeyPair::generate();
+        let pid = [4u8; 32];
+        let resp = srv
+            .policy_build_execute_proposal(BuildExecuteProposalRequest {
+                from: from.address().to_base58(),
+                proposal_id: format!("0x{}", hex::encode(pid)),
+                fee: None,
+            })
+            .await
+            .unwrap();
+        let tx = decode_tx(&resp);
+        let data = policy_payload(&tx);
+        assert!(matches!(data.operation, PolicyAccountOperation::ExecuteProposal));
+        let inner: ExecExec = bincode::deserialize(&data.data).unwrap();
+        assert_eq!(inner.proposal_id, pid);
+        assert_eq!(resp.signing_hash, format!("0x{}", hex::encode(tx.signing_hash().as_bytes())));
+    }
+
+    #[tokio::test]
+    async fn build_cancel_proposal_encodes_raw_proposal_id() {
+        // Blocker fix: the cancel payload must be exactly `CancelProposal`
+        // plus a raw `ProposalId` (32 bytes), NOT an ExecuteProposalRequest
+        // wrapper.
+        let (srv, _db, _state, _dir) = server();
+        let from = KeyPair::generate();
+        let pid = [6u8; 32];
+        let resp = srv
+            .policy_build_cancel_proposal(BuildCancelProposalRequest {
+                from: from.address().to_base58(),
+                proposal_id: format!("0x{}", hex::encode(pid)),
+                fee: None,
+            })
+            .await
+            .unwrap();
+        let tx = decode_tx(&resp);
+        let data = policy_payload(&tx);
+        assert!(matches!(data.operation, PolicyAccountOperation::CancelProposal));
+
+        // Exactly the 32-byte id — bincode of a single [u8;32] is 32 raw bytes.
+        assert_eq!(data.data.len(), 32, "cancel payload must be a raw ProposalId");
+        assert_eq!(data.data, pid.to_vec());
+        let decoded: [u8; 32] = bincode::deserialize(&data.data).unwrap();
+        assert_eq!(decoded, pid);
+
+        assert_eq!(resp.signing_hash, format!("0x{}", hex::encode(tx.signing_hash().as_bytes())));
     }
 }

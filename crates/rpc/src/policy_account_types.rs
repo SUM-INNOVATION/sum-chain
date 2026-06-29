@@ -1,114 +1,121 @@
 //! Policy Account RPC Types
 //!
-//! Request and response types for Policy Account RPC endpoints
+//! Request and response types for Policy Account RPC endpoints.
+//!
+//! Write access is provided exclusively through no-key *builder* helpers: the
+//! server assembles an unsigned [`sumchain_primitives::TransactionV2`] and
+//! returns its bincode encoding plus the signing hash. Clients sign locally
+//! and submit via `sum_sendRawTransaction`. The server never sees a private
+//! key for policy operations.
 
 use serde::{Deserialize, Serialize};
 use sumchain_primitives::{
     policy_account::{
-        ActionClass, ApprovalThreshold, MemberApproval, PolicyAccountId, PolicyAccountStatus,
-        PolicyNonce, PolicyProfile, ProposalId, ProposalStatus,
+        ActionClass, ApprovalThreshold, MemberApproval, PolicyAccount, PolicyConfig, PolicyMember,
+        PolicyProfile, Proposal,
     },
-    Address, BlockHeight, Timestamp,
+    Address,
 };
 
 // =============================================================================
-// Request Types
+// Builder Request Types (no private keys)
 // =============================================================================
 
-/// Request to create a policy account
+/// Request to build an unsigned create-policy-account transaction.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreatePolicyAccountRequest {
-    /// Creator's private key (hex-encoded)
-    pub private_key: String,
-    /// Policy account members
+pub struct BuildCreateAccountRequest {
+    /// Sender / submitter address (base58-encoded). The server fills the
+    /// chain id and this account's current nonce.
+    pub from: String,
+    /// Policy account members.
     pub members: Vec<PolicyMemberInfo>,
-    /// Policy configuration
+    /// Policy configuration.
     pub policy: PolicyConfigInfo,
-    /// Salt for ID generation (hex-encoded)
+    /// Salt for ID generation (hex-encoded).
     pub salt: String,
+    /// Optional fee (Koppa base units). Defaults to the house default.
+    #[serde(default)]
+    pub fee: Option<u128>,
 }
 
-/// Request to submit a proposal
+/// Request to build an unsigned submit-proposal transaction.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubmitProposalRequest {
-    /// Proposer's private key (hex-encoded)
-    pub proposer_private_key: String,
-    /// Policy account ID (hex-encoded)
+pub struct BuildSubmitProposalRequest {
+    /// Sender / submitter address (base58-encoded).
+    pub from: String,
+    /// Policy account ID (hex-encoded).
     pub policy_account_id: String,
-    /// Embedded action data (hex-encoded serialized TxPayload)
+    /// Embedded action data (hex-encoded serialized `TxPayload`).
     pub action_data: String,
-    /// Member approvals
+    /// Member approvals over the canonical approval signing bytes.
     pub approvals: Vec<ApprovalInfo>,
-    /// Expiration time (seconds from now)
-    pub expires_in_seconds: u64,
+    /// Absolute expiration timestamp (milliseconds since epoch).
+    pub expires_at: u64,
+    /// Optional fee (Koppa base units). Defaults to the house default.
+    #[serde(default)]
+    pub fee: Option<u128>,
 }
 
-/// Request to execute a proposal
+/// Request to build an unsigned execute-proposal transaction.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExecuteProposalRequest {
-    /// Executor's private key (hex-encoded, can be any member)
-    pub executor_private_key: String,
-    /// Proposal ID (hex-encoded)
+pub struct BuildExecuteProposalRequest {
+    /// Sender / submitter address (base58-encoded).
+    pub from: String,
+    /// Proposal ID (hex-encoded).
     pub proposal_id: String,
+    /// Optional fee (Koppa base units). Defaults to the house default.
+    #[serde(default)]
+    pub fee: Option<u128>,
 }
 
-/// Request to cancel a proposal
+/// Request to build an unsigned cancel-proposal transaction.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CancelProposalRequest {
-    /// Proposer's private key (hex-encoded)
-    pub proposer_private_key: String,
-    /// Proposal ID (hex-encoded)
+pub struct BuildCancelProposalRequest {
+    /// Sender / submitter address (base58-encoded; must be the proposer).
+    pub from: String,
+    /// Proposal ID (hex-encoded).
     pub proposal_id: String,
+    /// Optional fee (Koppa base units). Defaults to the house default.
+    #[serde(default)]
+    pub fee: Option<u128>,
 }
 
 // =============================================================================
-// Response Types
+// Builder Response
 // =============================================================================
 
-/// Response from creating a policy account
+/// Unsigned transaction material returned by every `policy_build*` helper.
+///
+/// The builder never signs. `unsigned_tx` is the bincode encoding of the
+/// `TransactionV2`; `signing_hash` is what the client must sign with the
+/// `from` key. Submit the resulting signed transaction via
+/// `sum_sendRawTransaction`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreatePolicyAccountResponse {
-    /// Policy account ID (hex-encoded)
-    pub policy_account_id: String,
-    /// Controlled address (base58-encoded)
-    pub address: String,
-    /// Transaction hash (hex-encoded)
-    pub tx_hash: String,
-}
-
-/// Response from submitting a proposal
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubmitProposalResponse {
-    /// Proposal ID (hex-encoded)
-    pub proposal_id: String,
-    /// Proposal status
-    pub status: String,
-    /// Transaction hash (hex-encoded)
-    pub tx_hash: String,
-}
-
-/// Response from executing a proposal
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExecuteProposalResponse {
-    /// Success flag
-    pub success: bool,
-    /// New policy nonce after execution
-    pub new_policy_nonce: u64,
-    /// Execution message
-    pub message: String,
-    /// Transaction hash (hex-encoded)
-    pub tx_hash: String,
-}
-
-/// Response from canceling a proposal
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CancelProposalResponse {
-    /// Success flag
-    pub success: bool,
-    /// Message
-    pub message: String,
-    /// Transaction hash (hex-encoded)
-    pub tx_hash: String,
+pub struct PolicyBuildResponse {
+    /// Bincode-encoded unsigned `TransactionV2` (hex-encoded).
+    pub unsigned_tx: String,
+    /// Hash the client must sign (hex-encoded).
+    pub signing_hash: String,
+    /// Sender address echoed back (base58-encoded).
+    pub from: String,
+    /// Nonce the server filled in.
+    pub nonce: u64,
+    /// Fee the server filled in (Koppa base units).
+    pub fee: u128,
+    /// Chain id the server filled in.
+    pub chain_id: u64,
+    /// Derived policy account ID for create requests (hex-encoded).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_account_id: Option<String>,
+    /// Derived controlled address for create requests (base58-encoded).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+    /// Derived proposal ID for submit requests (hex-encoded).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal_id: Option<String>,
+    /// Derived action hash for submit requests (hex-encoded).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action_hash: Option<String>,
 }
 
 // =============================================================================
@@ -217,9 +224,9 @@ impl From<ApprovalThreshold> for ThresholdInfo {
     }
 }
 
-impl Into<ApprovalThreshold> for ThresholdInfo {
-    fn into(self) -> ApprovalThreshold {
-        match self {
+impl From<ThresholdInfo> for ApprovalThreshold {
+    fn from(t: ThresholdInfo) -> Self {
+        match t {
             ThresholdInfo::Unanimous => ApprovalThreshold::Unanimous,
             ThresholdInfo::Majority => ApprovalThreshold::Majority,
             ThresholdInfo::Percentage(p) => ApprovalThreshold::Percentage(p),
@@ -230,11 +237,16 @@ impl Into<ApprovalThreshold> for ThresholdInfo {
     }
 }
 
-/// Approval information (for requests)
+/// Approval information (for requests).
+///
+/// `approver_pubkey` is required because an `Address` is a one-way hash of the
+/// Ed25519 key and cannot recover it for signature verification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApprovalInfo {
     /// Approver address (base58-encoded)
     pub approver_address: String,
+    /// Approver Ed25519 public key (hex-encoded, 32 bytes)
+    pub approver_pubkey: String,
     /// Signature (hex-encoded, 64 bytes)
     pub signature: String,
 }
@@ -244,6 +256,8 @@ pub struct ApprovalInfo {
 pub struct ApprovalInfoResponse {
     /// Approver address (base58-encoded)
     pub approver: String,
+    /// Approver Ed25519 public key (hex-encoded)
+    pub approver_pubkey: String,
     /// Signature (hex-encoded)
     pub signature: String,
     /// Approval timestamp (milliseconds)
@@ -256,30 +270,41 @@ pub struct ApprovalInfoResponse {
 
 impl PolicyMemberInfo {
     pub fn from_address_and_weight(address: Address, weight: u64) -> Self {
-        Self {
-            address: address.to_string(),
-            weight,
-        }
+        Self { address: address.to_base58(), weight }
+    }
+
+    pub fn from_member(member: &PolicyMember) -> Self {
+        Self { address: member.address.to_base58(), weight: member.weight }
+    }
+
+    pub fn to_member(&self) -> Result<PolicyMember, String> {
+        Ok(PolicyMember {
+            address: self.to_address()?,
+            weight: self.weight.max(1),
+        })
     }
 
     pub fn to_address(&self) -> Result<Address, String> {
-        Address::from_base58(&self.address)
-            .map_err(|e| format!("Invalid address: {}", e))
+        Address::from_base58(&self.address).map_err(|e| format!("Invalid address: {}", e))
     }
 }
 
 impl PolicyConfigInfo {
     pub fn from_profile(profile: PolicyProfile) -> Self {
+        Self { profile: profile_to_str(profile), overrides: vec![] }
+    }
+
+    pub fn from_config(config: &PolicyConfig) -> Self {
         Self {
-            profile: match profile {
-                PolicyProfile::Conservative => "Conservative".to_string(),
-                PolicyProfile::Company => "Company".to_string(),
-                PolicyProfile::DAO => "DAO".to_string(),
-                PolicyProfile::Personal => "Personal".to_string(),
-                PolicyProfile::Trust => "Trust".to_string(),
-                PolicyProfile::Custom => "Custom".to_string(),
-            },
-            overrides: vec![],
+            profile: profile_to_str(config.profile),
+            overrides: config
+                .overrides
+                .iter()
+                .map(|r| PolicyRuleInfo {
+                    action_class: PolicyRuleInfo::action_class_to_str(r.action_class),
+                    threshold: ThresholdInfo::from(r.threshold),
+                })
+                .collect(),
         }
     }
 
@@ -293,6 +318,28 @@ impl PolicyConfigInfo {
             "Custom" => Ok(PolicyProfile::Custom),
             _ => Err(format!("Unknown profile: {}", self.profile)),
         }
+    }
+
+    pub fn to_config(&self) -> Result<PolicyConfig, String> {
+        let mut overrides = Vec::with_capacity(self.overrides.len());
+        for r in &self.overrides {
+            overrides.push(sumchain_primitives::policy_account::PolicyRule {
+                action_class: PolicyRuleInfo::action_class_from_str(&r.action_class)?,
+                threshold: r.threshold.clone().into(),
+            });
+        }
+        Ok(PolicyConfig { profile: self.to_profile()?, overrides })
+    }
+}
+
+fn profile_to_str(profile: PolicyProfile) -> String {
+    match profile {
+        PolicyProfile::Conservative => "Conservative".to_string(),
+        PolicyProfile::Company => "Company".to_string(),
+        PolicyProfile::DAO => "DAO".to_string(),
+        PolicyProfile::Personal => "Personal".to_string(),
+        PolicyProfile::Trust => "Trust".to_string(),
+        PolicyProfile::Custom => "Custom".to_string(),
     }
 }
 
@@ -325,6 +372,86 @@ impl PolicyRuleInfo {
             ActionClass::DeployContract => "DeployContract".to_string(),
             ActionClass::CallContract => "CallContract".to_string(),
             ActionClass::Other => "Other".to_string(),
+        }
+    }
+}
+
+impl ApprovalInfo {
+    /// Convert into a consensus [`MemberApproval`], parsing/validating the
+    /// address, public key, and signature. Does not verify the signature —
+    /// that happens in the executor against the canonical signing bytes.
+    pub fn to_member_approval(&self) -> Result<MemberApproval, String> {
+        let approver = Address::from_base58(&self.approver_address)
+            .map_err(|e| format!("Invalid approver address: {}", e))?;
+        let pk = hex::decode(self.approver_pubkey.strip_prefix("0x").unwrap_or(&self.approver_pubkey))
+            .map_err(|e| format!("Invalid approver pubkey hex: {}", e))?;
+        if pk.len() != 32 {
+            return Err("Approver pubkey must be 32 bytes".to_string());
+        }
+        let sig = hex::decode(self.signature.strip_prefix("0x").unwrap_or(&self.signature))
+            .map_err(|e| format!("Invalid signature hex: {}", e))?;
+        if sig.len() != 64 {
+            return Err("Signature must be 64 bytes".to_string());
+        }
+        let mut approver_pubkey = [0u8; 32];
+        approver_pubkey.copy_from_slice(&pk);
+        let mut signature = [0u8; 64];
+        signature.copy_from_slice(&sig);
+        Ok(MemberApproval { approver, approver_pubkey, signature, timestamp: 0 })
+    }
+}
+
+impl ApprovalInfoResponse {
+    pub fn from_approval(a: &MemberApproval) -> Self {
+        Self {
+            approver: a.approver.to_base58(),
+            approver_pubkey: format!("0x{}", hex::encode(a.approver_pubkey)),
+            signature: format!("0x{}", hex::encode(a.signature)),
+            timestamp: a.timestamp,
+        }
+    }
+}
+
+impl PolicyAccountInfo {
+    pub fn from_account(account: &PolicyAccount) -> Self {
+        use sumchain_primitives::policy_account::PolicyAccountStatus;
+        Self {
+            id: format!("0x{}", hex::encode(account.id)),
+            address: account.address.to_base58(),
+            members: account.members.iter().map(PolicyMemberInfo::from_member).collect(),
+            policy: PolicyConfigInfo::from_config(&account.policy),
+            nonce: account.nonce,
+            status: match account.status {
+                PolicyAccountStatus::Active => "Active".to_string(),
+                PolicyAccountStatus::Frozen => "Frozen".to_string(),
+            },
+            created_at: account.created_at,
+            created_timestamp: account.created_timestamp,
+        }
+    }
+}
+
+impl ProposalInfo {
+    pub fn from_proposal(p: &Proposal) -> Self {
+        use sumchain_primitives::policy_account::ProposalStatus;
+        Self {
+            id: format!("0x{}", hex::encode(p.id)),
+            policy_account_id: format!("0x{}", hex::encode(p.policy_account_id)),
+            policy_nonce: p.policy_nonce,
+            proposer: p.proposer.to_base58(),
+            action_class: PolicyRuleInfo::action_class_to_str(p.action_class),
+            action_hash: format!("0x{}", hex::encode(p.action_hash.as_bytes())),
+            approval_count: p.approvals.len(),
+            approvals: p.approvals.iter().map(ApprovalInfoResponse::from_approval).collect(),
+            status: match p.status {
+                ProposalStatus::Pending => "Pending".to_string(),
+                ProposalStatus::Executed => "Executed".to_string(),
+                ProposalStatus::Expired => "Expired".to_string(),
+                ProposalStatus::Cancelled => "Cancelled".to_string(),
+            },
+            expires_at: p.expires_at,
+            created_at: p.created_at,
+            created_height: p.created_height,
         }
     }
 }

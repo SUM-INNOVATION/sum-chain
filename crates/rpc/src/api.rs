@@ -4,9 +4,8 @@ use jsonrpsee::proc_macros::rpc;
 
 use crate::metrics::MetricsSnapshot;
 use crate::policy_account_types::{
-    CancelProposalRequest, CancelProposalResponse, CreatePolicyAccountRequest,
-    CreatePolicyAccountResponse, ExecuteProposalRequest, ExecuteProposalResponse,
-    PolicyAccountInfo, ProposalInfo, SubmitProposalRequest, SubmitProposalResponse,
+    BuildCancelProposalRequest, BuildCreateAccountRequest, BuildExecuteProposalRequest,
+    BuildSubmitProposalRequest, PolicyAccountInfo, PolicyBuildResponse, ProposalInfo,
 };
 use crate::types::{
     AccountInfo, BlockHeightInfo, BlockInfo, ContractCallResult, ContractInfo,
@@ -1161,12 +1160,16 @@ pub trait SumChainApi {
     // Policy Account Methods (Group Governance)
     // =========================================================================
 
-    /// Create a new policy account (group-governed address)
-    #[method(name = "policy_createAccount")]
-    async fn policy_create_account(
+    /// Build an unsigned create-policy-account transaction.
+    ///
+    /// Returns unsigned transaction material (bincode hex + signing hash). The
+    /// server never sees a private key; the client signs and submits via
+    /// `sum_sendRawTransaction`.
+    #[method(name = "policy_buildCreateAccount")]
+    async fn policy_build_create_account(
         &self,
-        request: CreatePolicyAccountRequest,
-    ) -> Result<CreatePolicyAccountResponse, jsonrpsee::types::ErrorObjectOwned>;
+        request: BuildCreateAccountRequest,
+    ) -> Result<PolicyBuildResponse, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Get policy account information by ID
     #[method(name = "policy_getAccount")]
@@ -1189,26 +1192,26 @@ pub trait SumChainApi {
         member_address: String,
     ) -> Result<Vec<PolicyAccountInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
-    /// Submit a proposal for group-authorized action
-    #[method(name = "policy_submitProposal")]
-    async fn policy_submit_proposal(
+    /// Build an unsigned submit-proposal transaction.
+    #[method(name = "policy_buildSubmitProposal")]
+    async fn policy_build_submit_proposal(
         &self,
-        request: SubmitProposalRequest,
-    ) -> Result<SubmitProposalResponse, jsonrpsee::types::ErrorObjectOwned>;
+        request: BuildSubmitProposalRequest,
+    ) -> Result<PolicyBuildResponse, jsonrpsee::types::ErrorObjectOwned>;
 
-    /// Execute a proposal once threshold is met
-    #[method(name = "policy_executeProposal")]
-    async fn policy_execute_proposal(
+    /// Build an unsigned execute-proposal transaction.
+    #[method(name = "policy_buildExecuteProposal")]
+    async fn policy_build_execute_proposal(
         &self,
-        request: ExecuteProposalRequest,
-    ) -> Result<ExecuteProposalResponse, jsonrpsee::types::ErrorObjectOwned>;
+        request: BuildExecuteProposalRequest,
+    ) -> Result<PolicyBuildResponse, jsonrpsee::types::ErrorObjectOwned>;
 
-    /// Cancel a pending proposal (proposer only)
-    #[method(name = "policy_cancelProposal")]
-    async fn policy_cancel_proposal(
+    /// Build an unsigned cancel-proposal transaction (proposer only).
+    #[method(name = "policy_buildCancelProposal")]
+    async fn policy_build_cancel_proposal(
         &self,
-        request: CancelProposalRequest,
-    ) -> Result<CancelProposalResponse, jsonrpsee::types::ErrorObjectOwned>;
+        request: BuildCancelProposalRequest,
+    ) -> Result<PolicyBuildResponse, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Get proposal information by ID
     #[method(name = "policy_getProposal")]
