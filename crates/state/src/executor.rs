@@ -58,6 +58,15 @@ fn v2_gate_open(params: &ChainParams, block_height: u64) -> bool {
     matches!(params.v2_enabled_from_height, Some(h) if block_height >= h)
 }
 
+/// Whether production-capable smart contracts (`ContractDeploy`/`ContractCall`)
+/// are active at `block_height`. Dormant by default (`None`); activation is a
+/// coordinated, consensus-breaking validator upgrade. Below the gate, contract
+/// txs are rejected free (no fee, no state) with `TxStatus::Failed(60)`.
+#[inline]
+fn contracts_gate_open(params: &ChainParams, block_height: u64) -> bool {
+    matches!(params.contracts_enabled_from_height, Some(h) if block_height >= h)
+}
+
 /// OmniNode `InferenceAttestation` activation gate. Same semantics as
 /// `v2_gate_open` for a different chain param. Returns `true` when the
 /// subprotocol is enabled at `block_height`. Production default is `None`
@@ -355,6 +364,16 @@ impl BlockExecutor {
                         }
                     }
                     TxPayload::ContractDeploy(deploy_data) => {
+                        // Activation gate: dormant by default. Reject free (no
+                        // fee, no state, no nonce) until the coordinated
+                        // contracts activation height.
+                        if !contracts_gate_open(&self.params, block_height) {
+                            return Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Failed(60),
+                                fee_paid: 0,
+                            });
+                        }
                         // Execute contract deployment
                         let result = self.contract_executor.deploy(
                             &v2_tx.from,
@@ -392,6 +411,16 @@ impl BlockExecutor {
                         }
                     }
                     TxPayload::ContractCall(call_data) => {
+                        // Activation gate: dormant by default. Reject free (no
+                        // fee, no state, no nonce) until the coordinated
+                        // contracts activation height.
+                        if !contracts_gate_open(&self.params, block_height) {
+                            return Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Failed(60),
+                                fee_paid: 0,
+                            });
+                        }
                         // Execute contract call
                         let result = self.contract_executor.call(
                             &v2_tx.from,
@@ -1466,6 +1495,15 @@ impl BlockExecutor {
                 }
             }
             TxPayload::ContractDeploy(deploy_data) => {
+                // Activation gate (defensive; this path is currently unreached
+                // but is public). Reject free until the contracts gate opens.
+                if !contracts_gate_open(&self.params, block_height) {
+                    return Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::Failed(60),
+                        fee_paid: 0,
+                    });
+                }
                 // Check balance for fee + value
                 let total_cost = tx.fee.saturating_add(deploy_data.value);
                 let balance = self.state.get_balance(&tx.from)?;
@@ -1514,6 +1552,15 @@ impl BlockExecutor {
                 }
             }
             TxPayload::ContractCall(call_data) => {
+                // Activation gate (defensive; this path is currently unreached
+                // but is public). Reject free until the contracts gate opens.
+                if !contracts_gate_open(&self.params, block_height) {
+                    return Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::Failed(60),
+                        fee_paid: 0,
+                    });
+                }
                 // Check balance for fee + value
                 let total_cost = tx.fee.saturating_add(call_data.value);
                 let balance = self.state.get_balance(&tx.from)?;
