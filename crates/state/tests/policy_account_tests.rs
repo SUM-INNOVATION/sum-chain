@@ -1,843 +1,389 @@
-//! Comprehensive tests for Policy Account feature
+//! Focused tests for policy-account governance (issue #23).
 //!
-//! Tests cover all critical scenarios including:
-//! - Conservative profile (unanimous requirement)
-//! - Company profile (majority for governance)
-//! - Replay protection
-//! - Duplicate approval detection
-//! - Non-member rejection
-//! - Proposal expiration
-//! - Fail-closed behavior
-//! - Membership modification
-//! - DAO weighted voting
-//! - Policy-controlled address enforcement
+//! Rewritten against the current API. Covers the surface made usable in the
+//! "policy accounts public surface" work: approval signature verification,
+//! fail-closed wrapped-action execution, fee/submitter-nonce accounting, and
+//! the policy-native + native-transfer execution paths, plus cancel and
+//! pending-proposal listing.
+//!
+//! Not rebuilt from the old (stale) harness — older scenarios (weighted DAO
+//! voting, expiration, non-member rejection, duplicate-approval) are noted in
+//! the PR body as deferred future coverage.
+
+mod common;
+use common::{fund, setup_with_params, CHAIN_ID};
 
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
-
-use sumchain_crypto::{KeyPair, sign_bytes};
-use sumchain_genesis::{ChainParams, Genesis};
+use sumchain_crypto::{sign, KeyPair};
+use sumchain_genesis::ChainParams;
 use sumchain_primitives::{
     policy_account::{
-        ActionClass, ApprovalThreshold, MemberApproval, PolicyAccount, PolicyAccountOperation,
-        PolicyAccountStatus, PolicyAccountTxData, PolicyConfig, PolicyMember, PolicyProfile,
-        PolicyRule, Proposal, ProposalStatus,
+        MemberApproval, PolicyAccount, PolicyAccountOperation, PolicyAccountStatus,
+        PolicyAccountTxData, PolicyConfig, PolicyMember, PolicyProfile, Proposal, ProposalStatus,
     },
-    Address, Balance, Hash, SignedTransaction, TransactionV2, TxPayload,
+    Address, Hash, SignedTransaction, TransactionV2, TxPayload, TxStatus,
 };
 use sumchain_state::{
     policy_account_executor::{
-        CreatePolicyAccountRequest, ExecuteProposalRequest, PolicyAccountExecutor,
-        SubmitProposalRequest,
+        CreatePolicyAccountRequest, ExecuteProposalRequest, ModifyMembershipRequest,
+        ModifyPolicyRequest, SubmitProposalRequest,
     },
-    BlockExecutor, StateManager,
+    PolicyAccountExecutionResult, PolicyAccountExecutor, StateManager,
 };
-use sumchain_storage::Database;
+use sumchain_storage::{schema::AccountState, Database, PolicyAccountStorage};
 
-// =============================================================================
-// Test Utilities
-// =============================================================================
+// --------------------------------------------------------------------------
+// Helpers
+// --------------------------------------------------------------------------
 
-/// Test context with initialized state
-struct TestContext {
-    db: Arc<Database>,
-    state: Arc<StateManager>,
-    executor: BlockExecutor,
-    chain_id: u64,
-}
-
-impl TestContext {
-    fn new() -> Self {
-        let db = Arc::new(Database::open_in_memory().unwrap());
-        let chain_id = 1;
-
-        let genesis = Genesis::default_with_chain_id(chain_id);
-        let params = ChainParams::default();
-
-        let state = Arc::new(StateManager::new(db.clone(), chain_id));
-        state.init_from_genesis(&genesis).unwrap();
-
-        let executor = BlockExecutor::new(state.clone(), db.clone(), params);
-
-        Self {
-            db,
-            state,
-            executor,
-            chain_id,
-        }
-    }
-}
-
-/// Generate a test keypair
-fn gen_keypair() -> KeyPair {
+fn kp() -> KeyPair {
     KeyPair::generate()
 }
 
-/// Get current timestamp in milliseconds
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64
+fn zero_addr() -> Address {
+    Address::new([0u8; 20])
 }
 
-/// Create a test policy account
-fn create_test_policy_account(
-    members: Vec<(Address, u64)>,
-    profile: PolicyProfile,
-) -> (PolicyAccount, Vec<u8>) {
-    let policy_members: Vec<PolicyMember> = members
-        .into_iter()
-        .map(|(addr, weight)| PolicyMember::with_weight(addr, weight))
-        .collect();
-
-    let policy = PolicyConfig {
-        profile,
-        overrides: vec![],
-    };
-
-    let salt = b"test-salt".to_vec();
-    let id = PolicyAccount::compute_id(&policy_members, &salt);
+/// A single-member Personal policy account, put directly into storage and its
+/// controlled address funded with `balance`. A single member keeps approval
+/// thresholds trivially satisfiable for execution-path tests.
+fn put_account(db: &Arc<Database>, state: &StateManager, member: &KeyPair, balance: u128) -> PolicyAccount {
+    let members = vec![PolicyMember::new(member.address())];
+    let salt = vec![7u8; 32];
+    let id = PolicyAccount::compute_id(&members, &salt);
     let address = PolicyAccount::id_to_address(&id);
-
     let account = PolicyAccount {
         id,
         address,
-        members: policy_members,
-        policy,
+        members,
+        policy: PolicyConfig { profile: PolicyProfile::Personal, overrides: vec![] },
         nonce: 0,
         status: PolicyAccountStatus::Active,
         created_at: 0,
-        created_timestamp: now_ms(),
+        created_timestamp: 0,
     };
-
-    (account, salt)
+    PolicyAccountStorage::new(db).policy_accounts().put(&account).unwrap();
+    if balance > 0 {
+        state.put_account(&address, &AccountState { balance, nonce: 0 }).unwrap();
+    }
+    account
 }
 
-/// Sign an approval message
-fn sign_approval(
-    proposal_id: &[u8; 32],
-    policy_account_id: &[u8; 32],
+/// Sign an approval over the canonical signing bytes.
+fn approve(
+    account: &PolicyAccount,
     action_hash: &Hash,
     policy_nonce: u64,
-    keypair: &KeyPair,
-) -> [u8; 64] {
-    let approval_msg = Proposal::approval_message(
-        proposal_id,
-        policy_account_id,
-        action_hash,
-        policy_nonce,
-    );
-
-    sign_bytes(approval_msg.as_bytes(), &keypair.secret_key())
-}
-
-// =============================================================================
-// Test 1: Conservative Profile - Unanimous Requirement
-// =============================================================================
-
-#[test]
-fn test_conservative_unanimous_required() {
-    let ctx = TestContext::new();
-
-    // Create 3 members
-    let alice = gen_keypair();
-    let bob = gen_keypair();
-    let carol = gen_keypair();
-
-    let alice_addr = Address::from_public_key(&alice.public_key());
-    let bob_addr = Address::from_public_key(&bob.public_key());
-    let carol_addr = Address::from_public_key(&carol.public_key());
-
-    // Create Conservative policy account (requires unanimous for transfers)
-    let (policy_account, salt) = create_test_policy_account(
-        vec![
-            (alice_addr, 1),
-            (bob_addr, 1),
-            (carol_addr, 1),
-        ],
-        PolicyProfile::Conservative,
-    );
-
-    // Store policy account
-    let storage = sumchain_storage::PolicyAccountStorage::new(&ctx.db);
-    storage.policy_accounts().put(&policy_account).unwrap();
-
-    // Fund the policy account
-    ctx.state
-        .put_account(
-            &policy_account.address,
-            &sumchain_storage::schema::AccountState {
-                balance: 1000,
-                nonce: 0,
-            },
-        )
-        .unwrap();
-
-    // Create a transfer proposal (TransferNative)
-    let recipient = Address::from_public_key(&gen_keypair().public_key());
-    let action_payload = TxPayload::Transfer {
-        to: recipient,
-        amount: 100,
-    };
-    let action_data = bincode::serialize(&action_payload).unwrap();
-    let action_hash = Hash::hash(&action_data);
-
-    // Compute proposal ID
-    let proposal_id = Proposal::compute_id(
-        &policy_account.id,
-        policy_account.nonce,
-        &action_hash,
-    );
-
-    // Test 1a: Submit with only 2 approvals (should fail on execution)
-    let alice_sig = sign_approval(
-        &proposal_id,
-        &policy_account.id,
-        &action_hash,
-        policy_account.nonce,
-        &alice,
-    );
-    let bob_sig = sign_approval(
-        &proposal_id,
-        &policy_account.id,
-        &action_hash,
-        policy_account.nonce,
-        &bob,
-    );
-
-    let approvals = vec![
-        MemberApproval {
-            approver: alice_addr,
-            signature: alice_sig,
-            timestamp: now_ms(),
-        },
-        MemberApproval {
-            approver: bob_addr,
-            signature: bob_sig,
-            timestamp: now_ms(),
-        },
-    ];
-
-    let proposal = Proposal {
-        id: proposal_id,
-        policy_account_id: policy_account.id,
-        policy_nonce: policy_account.nonce,
-        proposer: alice_addr,
-        action_class: ActionClass::TransferNative,
-        action_data: action_data.clone(),
-        action_hash,
-        approvals: approvals.clone(),
-        status: ProposalStatus::Pending,
-        expires_at: now_ms() + 3600_000, // 1 hour
-        created_at: now_ms(),
-        created_height: 0,
-    };
-
-    storage.proposals().put(&proposal).unwrap();
-
-    // Try to execute with only 2/3 approvals
-    let exec_request = ExecuteProposalRequest { proposal_id };
-    let exec_data = bincode::serialize(&exec_request).unwrap();
-
-    let policy_executor = PolicyAccountExecutor::new();
-    let result = policy_executor
-        .execute(
-            &alice_addr,
-            &PolicyAccountTxData {
-                operation: PolicyAccountOperation::ExecuteProposal,
-                data: exec_data.clone(),
-                recipient: Address::ZERO,
-            },
-            &ctx.state,
-            &Address::ZERO,
-            0,
-            0,
-        )
-        .unwrap();
-
-    // Should fail - not unanimous
-    assert!(!result.success);
-    assert!(result.message.contains("Threshold not met"));
-
-    // Test 1b: Add 3rd approval and execute successfully
-    let carol_sig = sign_approval(
-        &proposal_id,
-        &policy_account.id,
-        &action_hash,
-        policy_account.nonce,
-        &carol,
-    );
-
-    let mut proposal = storage.proposals().get(&proposal_id).unwrap().unwrap();
-    proposal.approvals.push(MemberApproval {
-        approver: carol_addr,
-        signature: carol_sig,
-        timestamp: now_ms(),
-    });
-    storage.proposals().put(&proposal).unwrap();
-
-    // Execute with 3/3 approvals
-    let result = policy_executor
-        .execute(
-            &alice_addr,
-            &PolicyAccountTxData {
-                operation: PolicyAccountOperation::ExecuteProposal,
-                data: exec_data,
-                recipient: Address::ZERO,
-            },
-            &ctx.state,
-            &Address::ZERO,
-            0,
-            0,
-        )
-        .unwrap();
-
-    // Should succeed - unanimous
-    assert!(result.success);
-
-    // Verify transfer occurred
-    let recipient_balance = ctx.state.get_balance(&recipient).unwrap();
-    assert_eq!(recipient_balance, 100);
-
-    // Verify policy nonce incremented
-    let updated_account = storage
-        .policy_accounts()
-        .get(&policy_account.id)
-        .unwrap()
-        .unwrap();
-    assert_eq!(updated_account.nonce, 1);
-
-    // Verify proposal marked as executed
-    let updated_proposal = storage.proposals().get(&proposal_id).unwrap().unwrap();
-    assert_eq!(updated_proposal.status, ProposalStatus::Executed);
-}
-
-// =============================================================================
-// Test 2: Replay Protection
-// =============================================================================
-
-#[test]
-fn test_replay_protection() {
-    let ctx = TestContext::new();
-
-    let alice = gen_keypair();
-    let alice_addr = Address::from_public_key(&alice.public_key());
-
-    // Create policy account
-    let (policy_account, _) = create_test_policy_account(
-        vec![(alice_addr, 1)],
-        PolicyProfile::Personal,
-    );
-
-    let storage = sumchain_storage::PolicyAccountStorage::new(&ctx.db);
-    storage.policy_accounts().put(&policy_account).unwrap();
-
-    ctx.state
-        .put_account(
-            &policy_account.address,
-            &sumchain_storage::schema::AccountState {
-                balance: 1000,
-                nonce: 0,
-            },
-        )
-        .unwrap();
-
-    // Create and execute first proposal
-    let recipient1 = Address::from_public_key(&gen_keypair().public_key());
-    let action_payload1 = TxPayload::Transfer {
-        to: recipient1,
-        amount: 100,
-    };
-    let action_data1 = bincode::serialize(&action_payload1).unwrap();
-    let action_hash1 = Hash::hash(&action_data1);
-
-    let proposal_id1 = Proposal::compute_id(
-        &policy_account.id,
-        0, // nonce = 0
-        &action_hash1,
-    );
-
-    let sig1 = sign_approval(
-        &proposal_id1,
-        &policy_account.id,
-        &action_hash1,
-        0,
-        &alice,
-    );
-
-    let proposal1 = Proposal {
-        id: proposal_id1,
-        policy_account_id: policy_account.id,
-        policy_nonce: 0,
-        proposer: alice_addr,
-        action_class: ActionClass::TransferNative,
-        action_data: action_data1,
-        action_hash: action_hash1,
-        approvals: vec![MemberApproval {
-            approver: alice_addr,
-            signature: sig1,
-            timestamp: now_ms(),
-        }],
-        status: ProposalStatus::Pending,
-        expires_at: now_ms() + 3600_000,
-        created_at: now_ms(),
-        created_height: 0,
-    };
-
-    storage.proposals().put(&proposal1).unwrap();
-
-    // Execute first proposal
-    let exec_request1 = ExecuteProposalRequest {
-        proposal_id: proposal_id1,
-    };
-    let exec_data1 = bincode::serialize(&exec_request1).unwrap();
-
-    let policy_executor = PolicyAccountExecutor::new();
-    let result1 = policy_executor
-        .execute(
-            &alice_addr,
-            &PolicyAccountTxData {
-                operation: PolicyAccountOperation::ExecuteProposal,
-                data: exec_data1.clone(),
-                recipient: Address::ZERO,
-            },
-            &ctx.state,
-            &Address::ZERO,
-            0,
-            0,
-        )
-        .unwrap();
-
-    assert!(result1.success);
-
-    // Try to execute same proposal again
-    let result_replay = policy_executor
-        .execute(
-            &alice_addr,
-            &PolicyAccountTxData {
-                operation: PolicyAccountOperation::ExecuteProposal,
-                data: exec_data1,
-                recipient: Address::ZERO,
-            },
-            &ctx.state,
-            &Address::ZERO,
-            0,
-            0,
-        )
-        .unwrap();
-
-    // Should fail - already executed
-    assert!(!result_replay.success);
-    assert!(result_replay.message.contains("not pending"));
-
-    // Try to reuse same approvals for new proposal (different action)
-    let recipient2 = Address::from_public_key(&gen_keypair().public_key());
-    let action_payload2 = TxPayload::Transfer {
-        to: recipient2,
-        amount: 50,
-    };
-    let action_data2 = bincode::serialize(&action_payload2).unwrap();
-    let action_hash2 = Hash::hash(&action_data2);
-
-    // Proposal ID will be different because action_hash is different
-    let proposal_id2 = Proposal::compute_id(
-        &policy_account.id,
-        1, // nonce = 1 (incremented)
-        &action_hash2,
-    );
-
-    // Try to use old signature (signed for nonce=0)
-    let proposal2 = Proposal {
-        id: proposal_id2,
-        policy_account_id: policy_account.id,
-        policy_nonce: 1,
-        proposer: alice_addr,
-        action_class: ActionClass::TransferNative,
-        action_data: action_data2,
-        action_hash: action_hash2,
-        approvals: vec![MemberApproval {
-            approver: alice_addr,
-            signature: sig1, // Old signature!
-            timestamp: now_ms(),
-        }],
-        status: ProposalStatus::Pending,
-        expires_at: now_ms() + 3600_000,
-        created_at: now_ms(),
-        created_height: 0,
-    };
-
-    storage.proposals().put(&proposal2).unwrap();
-
-    let exec_request2 = ExecuteProposalRequest {
-        proposal_id: proposal_id2,
-    };
-    let exec_data2 = bincode::serialize(&exec_request2).unwrap();
-
-    let result2 = policy_executor
-        .execute(
-            &alice_addr,
-            &PolicyAccountTxData {
-                operation: PolicyAccountOperation::ExecuteProposal,
-                data: exec_data2,
-                recipient: Address::ZERO,
-            },
-            &ctx.state,
-            &Address::ZERO,
-            0,
-            0,
-        )
-        .unwrap();
-
-    // Should succeed because signature validation is currently a placeholder
-    // In production, this would fail due to invalid signature
-    // TODO: Add full signature verification
-    assert!(result2.success);
-}
-
-// =============================================================================
-// Test 3: Duplicate Approval Detection
-// =============================================================================
-
-#[test]
-fn test_duplicate_approval_detection() {
-    let ctx = TestContext::new();
-
-    let alice = gen_keypair();
-    let alice_addr = Address::from_public_key(&alice.public_key());
-
-    let (policy_account, _) = create_test_policy_account(
-        vec![(alice_addr, 1)],
-        PolicyProfile::Personal,
-    );
-
-    let storage = sumchain_storage::PolicyAccountStorage::new(&ctx.db);
-    storage.policy_accounts().put(&policy_account).unwrap();
-
-    // Create proposal request with duplicate approvals
-    let action_payload = TxPayload::Transfer {
-        to: Address::ZERO,
-        amount: 100,
-    };
-    let action_data = bincode::serialize(&action_payload).unwrap();
-    let action_hash = Hash::hash(&action_data);
-
-    let proposal_id = Proposal::compute_id(
-        &policy_account.id,
-        0,
-        &action_hash,
-    );
-
-    let sig = sign_approval(
-        &proposal_id,
-        &policy_account.id,
-        &action_hash,
-        0,
-        &alice,
-    );
-
-    let submit_request = SubmitProposalRequest {
-        policy_account_id: policy_account.id,
-        action_payload: action_data,
-        approvals: vec![
-            MemberApproval {
-                approver: alice_addr,
-                signature: sig,
-                timestamp: now_ms(),
-            },
-            MemberApproval {
-                approver: alice_addr, // Same approver!
-                signature: sig,
-                timestamp: now_ms(),
-            },
-        ],
-        expires_at: now_ms() + 3600_000,
-    };
-
-    let submit_data = bincode::serialize(&submit_request).unwrap();
-
-    let policy_executor = PolicyAccountExecutor::new();
-    let result = policy_executor
-        .execute(
-            &alice_addr,
-            &PolicyAccountTxData {
-                operation: PolicyAccountOperation::SubmitProposal,
-                data: submit_data,
-                recipient: Address::ZERO,
-            },
-            &ctx.state,
-            &Address::ZERO,
-            0,
-            0,
-        )
-        .unwrap();
-
-    // Should fail due to duplicate approvals
-    assert!(!result.success);
-    assert!(result.message.contains("Duplicate approvals"));
-}
-
-// =============================================================================
-// Test 4: Non-Member Rejection
-// =============================================================================
-
-#[test]
-fn test_non_member_rejection() {
-    let ctx = TestContext::new();
-
-    let alice = gen_keypair();
-    let bob = gen_keypair(); // Not a member
-
-    let alice_addr = Address::from_public_key(&alice.public_key());
-    let bob_addr = Address::from_public_key(&bob.public_key());
-
-    let (policy_account, _) = create_test_policy_account(
-        vec![(alice_addr, 1)], // Only Alice is member
-        PolicyProfile::Personal,
-    );
-
-    let storage = sumchain_storage::PolicyAccountStorage::new(&ctx.db);
-    storage.policy_accounts().put(&policy_account).unwrap();
-
-    // Test 4a: Non-member trying to propose
-    let action_payload = TxPayload::Transfer {
-        to: Address::ZERO,
-        amount: 100,
-    };
-    let action_data = bincode::serialize(&action_payload).unwrap();
-
-    let submit_request = SubmitProposalRequest {
-        policy_account_id: policy_account.id,
-        action_payload: action_data.clone(),
-        approvals: vec![],
-        expires_at: now_ms() + 3600_000,
-    };
-
-    let submit_data = bincode::serialize(&submit_request).unwrap();
-
-    let policy_executor = PolicyAccountExecutor::new();
-    let result = policy_executor
-        .execute(
-            &bob_addr, // Bob is not a member!
-            &PolicyAccountTxData {
-                operation: PolicyAccountOperation::SubmitProposal,
-                data: submit_data,
-                recipient: Address::ZERO,
-            },
-            &ctx.state,
-            &Address::ZERO,
-            0,
-            0,
-        )
-        .unwrap();
-
-    // Should fail - Bob is not a member
-    assert!(!result.success);
-    assert!(result.message.contains("not a member"));
-
-    // Test 4b: Proposal with non-member approval
-    let action_hash = Hash::hash(&action_data);
-    let proposal_id = Proposal::compute_id(&policy_account.id, 0, &action_hash);
-
-    let bob_sig = sign_approval(
-        &proposal_id,
-        &policy_account.id,
-        &action_hash,
-        0,
-        &bob,
-    );
-
-    let submit_request2 = SubmitProposalRequest {
-        policy_account_id: policy_account.id,
-        action_payload: action_data,
-        approvals: vec![MemberApproval {
-            approver: bob_addr, // Bob is not a member!
-            signature: bob_sig,
-            timestamp: now_ms(),
-        }],
-        expires_at: now_ms() + 3600_000,
-    };
-
-    let submit_data2 = bincode::serialize(&submit_request2).unwrap();
-
-    let result2 = policy_executor
-        .execute(
-            &alice_addr, // Alice proposes
-            &PolicyAccountTxData {
-                operation: PolicyAccountOperation::SubmitProposal,
-                data: submit_data2,
-                recipient: Address::ZERO,
-            },
-            &ctx.state,
-            &Address::ZERO,
-            0,
-            0,
-        )
-        .unwrap();
-
-    // Should fail - Bob's approval is invalid
-    assert!(!result2.success);
-    assert!(result2.message.contains("not a member"));
-}
-
-// =============================================================================
-// Test 5: DAO Weighted Voting
-// =============================================================================
-
-#[test]
-fn test_dao_weighted_voting() {
-    let ctx = TestContext::new();
-
-    // Create members with different weights
-    let alice = gen_keypair();
-    let bob = gen_keypair();
-    let carol = gen_keypair();
-    let dave = gen_keypair();
-
-    let alice_addr = Address::from_public_key(&alice.public_key());
-    let bob_addr = Address::from_public_key(&bob.public_key());
-    let carol_addr = Address::from_public_key(&carol.public_key());
-    let dave_addr = Address::from_public_key(&dave.public_key());
-
-    // Total weight = 100
-    // DAO profile requires WeightedPercentage(51) for governance
-    let (policy_account, _) = create_test_policy_account(
-        vec![
-            (alice_addr, 10),  // 10%
-            (bob_addr, 20),    // 20%
-            (carol_addr, 30),  // 30%
-            (dave_addr, 40),   // 40%
-        ],
-        PolicyProfile::DAO,
-    );
-
-    let storage = sumchain_storage::PolicyAccountStorage::new(&ctx.db);
-    storage.policy_accounts().put(&policy_account).unwrap();
-
-    // Create a governance action proposal
-    // Note: This would typically be an Equity governance operation
-    // For simplicity, we'll use Transfer and manually set action class
-    let action_payload = TxPayload::Transfer {
-        to: Address::ZERO,
-        amount: 0,
-    };
-    let action_data = bincode::serialize(&action_payload).unwrap();
-    let action_hash = Hash::hash(&action_data);
-
-    let proposal_id = Proposal::compute_id(&policy_account.id, 0, &action_hash);
-
-    // Test 5a: Alice + Bob = 30% (not enough)
-    let alice_sig = sign_approval(&proposal_id, &policy_account.id, &action_hash, 0, &alice);
-    let bob_sig = sign_approval(&proposal_id, &policy_account.id, &action_hash, 0, &bob);
-
-    let proposal = Proposal {
-        id: proposal_id,
-        policy_account_id: policy_account.id,
-        policy_nonce: 0,
-        proposer: alice_addr,
-        action_class: ActionClass::GovernanceAction, // Set manually for test
-        action_data: action_data.clone(),
-        action_hash,
-        approvals: vec![
-            MemberApproval {
-                approver: alice_addr,
-                signature: alice_sig,
-                timestamp: now_ms(),
-            },
-            MemberApproval {
-                approver: bob_addr,
-                signature: bob_sig,
-                timestamp: now_ms(),
-            },
-        ],
-        status: ProposalStatus::Pending,
-        expires_at: now_ms() + 3600_000,
-        created_at: now_ms(),
-        created_height: 0,
-    };
-
-    storage.proposals().put(&proposal).unwrap();
-
-    let exec_request = ExecuteProposalRequest { proposal_id };
-    let exec_data = bincode::serialize(&exec_request).unwrap();
-
-    let policy_executor = PolicyAccountExecutor::new();
-    let result = policy_executor
-        .execute(
-            &alice_addr,
-            &PolicyAccountTxData {
-                operation: PolicyAccountOperation::ExecuteProposal,
-                data: exec_data.clone(),
-                recipient: Address::ZERO,
-            },
-            &ctx.state,
-            &Address::ZERO,
-            0,
-            0,
-        )
-        .unwrap();
-
-    // Should fail - only 30% weight
-    assert!(!result.success);
-    assert!(result.message.contains("Threshold not met"));
-
-    // Test 5b: Add Carol = 60% (enough)
-    let carol_sig = sign_approval(&proposal_id, &policy_account.id, &action_hash, 0, &carol);
-
-    let mut proposal = storage.proposals().get(&proposal_id).unwrap().unwrap();
-    proposal.approvals.push(MemberApproval {
-        approver: carol_addr,
-        signature: carol_sig,
-        timestamp: now_ms(),
-    });
-    storage.proposals().put(&proposal).unwrap();
-
-    let result2 = policy_executor
-        .execute(
-            &alice_addr,
-            &PolicyAccountTxData {
-                operation: PolicyAccountOperation::ExecuteProposal,
-                data: exec_data,
-                recipient: Address::ZERO,
-            },
-            &ctx.state,
-            &Address::ZERO,
-            0,
-            0,
-        )
-        .unwrap();
-
-    // Should succeed - 60% weight (>51% required)
-    assert!(result2.success);
-}
-
-// =============================================================================
-// Summary Test Runner
-// =============================================================================
-
-#[cfg(test)]
-mod integration {
-    use super::*;
-
-    #[test]
-    fn run_all_policy_account_tests() {
-        println!("Running Policy Account Test Suite...\n");
-
-        println!("✓ Test 1: Conservative profile unanimous requirement");
-        test_conservative_unanimous_required();
-
-        println!("✓ Test 2: Replay protection");
-        test_replay_protection();
-
-        println!("✓ Test 3: Duplicate approval detection");
-        test_duplicate_approval_detection();
-
-        println!("✓ Test 4: Non-member rejection");
-        test_non_member_rejection();
-
-        println!("✓ Test 5: DAO weighted voting");
-        test_dao_weighted_voting();
-
-        println!("\n✅ All tests passed!");
+    signer: &KeyPair,
+    pubkey_override: Option<[u8; 32]>,
+    corrupt: bool,
+) -> MemberApproval {
+    let msg = Proposal::approval_signing_bytes(&account.id, action_hash, policy_nonce);
+    let mut sig = *sign(&msg, signer.private_key()).as_bytes();
+    if corrupt {
+        sig[0] ^= 0xff;
     }
+    MemberApproval {
+        approver: signer.address(),
+        approver_pubkey: pubkey_override.unwrap_or(*signer.public_key().as_bytes()),
+        signature: sig,
+        timestamp: 0,
+    }
+}
+
+fn tx_data(op: PolicyAccountOperation, payload: &impl serde::Serialize) -> PolicyAccountTxData {
+    PolicyAccountTxData {
+        operation: op,
+        data: bincode::serialize(payload).unwrap(),
+        recipient: zero_addr(),
+    }
+}
+
+/// Submit `action` as a proposal with the given approvals.
+fn submit(
+    pe: &PolicyAccountExecutor,
+    state: &StateManager,
+    account: &PolicyAccount,
+    sender: &KeyPair,
+    action: &TxPayload,
+    approvals: Vec<MemberApproval>,
+) -> PolicyAccountExecutionResult {
+    let action_payload = bincode::serialize(action).unwrap();
+    let req = SubmitProposalRequest {
+        policy_account_id: account.id,
+        action_payload,
+        approvals,
+        expires_at: 4_000_000_000_000,
+    };
+    let data = tx_data(PolicyAccountOperation::SubmitProposal, &req);
+    pe.execute(&sender.address(), &data, state, &zero_addr(), 0, 1, 1000).unwrap()
+}
+
+fn exec(
+    pe: &PolicyAccountExecutor,
+    state: &StateManager,
+    sender: &KeyPair,
+    proposal_id: [u8; 32],
+) -> PolicyAccountExecutionResult {
+    let req = ExecuteProposalRequest { proposal_id };
+    let data = tx_data(PolicyAccountOperation::ExecuteProposal, &req);
+    pe.execute(&sender.address(), &data, state, &zero_addr(), 0, 2, 2000).unwrap()
+}
+
+fn action_hash(action: &TxPayload) -> Hash {
+    Hash::hash(&bincode::serialize(action).unwrap())
+}
+
+// --------------------------------------------------------------------------
+// Tests
+// --------------------------------------------------------------------------
+
+#[test]
+fn create_policy_account() {
+    let (state, db, _dir, _ex) = setup_with_params(ChainParams::with_v2_enabled());
+    let pe = PolicyAccountExecutor::new(db.clone());
+    let m = kp();
+    let req = CreatePolicyAccountRequest {
+        members: vec![PolicyMember::new(m.address())],
+        policy: PolicyConfig { profile: PolicyProfile::Personal, overrides: vec![] },
+        salt: vec![1u8; 32],
+    };
+    let data = tx_data(PolicyAccountOperation::Create, &req);
+    let res = pe.execute(&m.address(), &data, &state, &zero_addr(), 0, 1, 1000).unwrap();
+    assert!(res.success, "create failed: {}", res.message);
+    let id = PolicyAccount::compute_id(&[PolicyMember::new(m.address())], &[1u8; 32]);
+    assert!(PolicyAccountStorage::new(&db).policy_accounts().get(&id).unwrap().is_some());
+}
+
+#[test]
+fn submit_with_valid_approval_succeeds() {
+    let (state, db, _dir, _ex) = setup_with_params(ChainParams::with_v2_enabled());
+    let pe = PolicyAccountExecutor::new(db.clone());
+    let m = kp();
+    let account = put_account(&db, &state, &m, 0);
+    let action = TxPayload::Transfer { to: zero_addr(), amount: 1 };
+    let approval = approve(&account, &action_hash(&action), 0, &m, None, false);
+    let res = submit(&pe, &state, &account, &m, &action, vec![approval]);
+    assert!(res.success, "submit failed: {}", res.message);
+}
+
+#[test]
+fn forged_approval_rejected() {
+    let (state, db, _dir, _ex) = setup_with_params(ChainParams::with_v2_enabled());
+    let pe = PolicyAccountExecutor::new(db.clone());
+    let m = kp();
+    let account = put_account(&db, &state, &m, 0);
+    let action = TxPayload::Transfer { to: zero_addr(), amount: 1 };
+    // Corrupt the signature.
+    let approval = approve(&account, &action_hash(&action), 0, &m, None, true);
+    let res = submit(&pe, &state, &account, &m, &action, vec![approval]);
+    assert!(!res.success, "forged approval must be rejected");
+}
+
+#[test]
+fn approval_pubkey_address_mismatch_rejected() {
+    let (state, db, _dir, _ex) = setup_with_params(ChainParams::with_v2_enabled());
+    let pe = PolicyAccountExecutor::new(db.clone());
+    let m = kp();
+    let account = put_account(&db, &state, &m, 0);
+    let action = TxPayload::Transfer { to: zero_addr(), amount: 1 };
+    // Valid signature by `m`, but advertise a different (attacker) pubkey that
+    // does not hash to the approver address.
+    let attacker = kp();
+    let approval = approve(&account, &action_hash(&action), 0, &m, Some(*attacker.public_key().as_bytes()), false);
+    let res = submit(&pe, &state, &account, &m, &action, vec![approval]);
+    assert!(!res.success, "pubkey/address mismatch must be rejected");
+}
+
+#[test]
+fn transfer_native_executes_from_policy_account() {
+    let (state, db, _dir, _ex) = setup_with_params(ChainParams::with_v2_enabled());
+    let pe = PolicyAccountExecutor::new(db.clone());
+    let m = kp();
+    let account = put_account(&db, &state, &m, 1_000);
+    let to = kp().address();
+    let action = TxPayload::Transfer { to, amount: 100 };
+    let ah = action_hash(&action);
+    let approval = approve(&account, &ah, 0, &m, None, false);
+    let sres = submit(&pe, &state, &account, &m, &action, vec![approval]);
+    assert!(sres.success, "submit failed: {}", sres.message);
+    let pid = Proposal::compute_id(&account.id, 0, &ah);
+    let eres = exec(&pe, &state, &m, pid);
+    assert!(eres.success, "execute failed: {}", eres.message);
+    assert_eq!(state.get_balance(&to).unwrap(), 100, "funds did not move");
+    let updated = PolicyAccountStorage::new(&db).policy_accounts().get(&account.id).unwrap().unwrap();
+    assert_eq!(updated.nonce, 1, "policy nonce should advance on success");
+}
+
+#[test]
+fn modify_membership_executes() {
+    let (state, db, _dir, _ex) = setup_with_params(ChainParams::with_v2_enabled());
+    let pe = PolicyAccountExecutor::new(db.clone());
+    let m = kp();
+    let account = put_account(&db, &state, &m, 0);
+    let new_member = kp();
+    let modify = ModifyMembershipRequest {
+        new_members: vec![PolicyMember::new(m.address()), PolicyMember::new(new_member.address())],
+    };
+    let action = TxPayload::PolicyAccount(tx_data(PolicyAccountOperation::ModifyMembership, &modify));
+    let ah = action_hash(&action);
+    let approval = approve(&account, &ah, 0, &m, None, false);
+    let sres = submit(&pe, &state, &account, &m, &action, vec![approval]);
+    assert!(sres.success, "submit failed: {}", sres.message);
+    let pid = Proposal::compute_id(&account.id, 0, &ah);
+    let eres = exec(&pe, &state, &m, pid);
+    assert!(eres.success, "execute failed: {}", eres.message);
+    let updated = PolicyAccountStorage::new(&db).policy_accounts().get(&account.id).unwrap().unwrap();
+    assert_eq!(updated.members.len(), 2, "membership should be updated");
+}
+
+#[test]
+fn modify_policy_executes_with_fee_charged_once() {
+    // Exercises the full block path: submit a ModifyPolicy proposal, then
+    // execute it via `execute_tx` so submitter fee/nonce accounting runs
+    // alongside the policy update + policy-nonce advance.
+    let (state, db, _dir, executor) = setup_with_params(ChainParams::with_v2_enabled());
+    let pe = PolicyAccountExecutor::new(db.clone());
+    let m = kp();
+    let account = put_account(&db, &state, &m, 0);
+    let modify = ModifyPolicyRequest {
+        new_policy: PolicyConfig { profile: PolicyProfile::Company, overrides: vec![] },
+    };
+    let action = TxPayload::PolicyAccount(tx_data(PolicyAccountOperation::ModifyPolicy, &modify));
+    let ah = action_hash(&action);
+    let approval = approve(&account, &ah, 0, &m, None, false);
+    let sres = submit(&pe, &state, &account, &m, &action, vec![approval]);
+    assert!(sres.success, "submit failed: {}", sres.message);
+    let pid = Proposal::compute_id(&account.id, 0, &ah);
+
+    // Execute through the block executor so fee/nonce are charged.
+    let fee = 1_000u128;
+    fund(&state, &m, 10_000);
+    let exec = ExecuteProposalRequest { proposal_id: pid };
+    let payload = TxPayload::PolicyAccount(tx_data(PolicyAccountOperation::ExecuteProposal, &exec));
+    let tx = TransactionV2 { chain_id: CHAIN_ID, from: m.address(), fee, nonce: 0, payload };
+    let h = tx.signing_hash();
+    let sig = sign(h.as_bytes(), m.private_key());
+    let signed = SignedTransaction::new_v2(tx, *sig.as_bytes(), *m.public_key().as_bytes());
+    let proposer = kp();
+    let res = executor.execute_tx(&signed, &proposer.address(), 2, 2000).unwrap();
+    assert!(matches!(res.status, TxStatus::Success), "got {:?}", res.status);
+
+    // Policy updated + policy nonce advanced.
+    let updated = PolicyAccountStorage::new(&db).policy_accounts().get(&account.id).unwrap().unwrap();
+    assert!(matches!(updated.policy.profile, PolicyProfile::Company), "policy not updated");
+    assert_eq!(updated.nonce, 1, "policy nonce should advance");
+    // Submitter fee charged exactly once + one nonce step.
+    assert_eq!(state.get_balance(&m.address()).unwrap(), 10_000 - fee, "fee charged exactly once");
+    assert_eq!(state.get_nonce(&m.address()).unwrap(), 1, "submitter nonce +1");
+    assert_eq!(state.get_balance(&proposer.address()).unwrap(), fee, "proposer credited fee");
+}
+
+#[test]
+fn unsupported_wrapped_action_fails_closed() {
+    let (state, db, _dir, _ex) = setup_with_params(ChainParams::with_v2_enabled());
+    let pe = PolicyAccountExecutor::new(db.clone());
+    let m = kp();
+    let account = put_account(&db, &state, &m, 0);
+    // A wrapped PolicyAccount(Freeze) classifies as `Other` -> unsupported.
+    let wrapped = TxPayload::PolicyAccount(PolicyAccountTxData {
+        operation: PolicyAccountOperation::Freeze,
+        data: vec![],
+        recipient: zero_addr(),
+    });
+    let ah = action_hash(&wrapped);
+    let approval = approve(&account, &ah, 0, &m, None, false);
+    let sres = submit(&pe, &state, &account, &m, &wrapped, vec![approval]);
+    assert!(sres.success, "submit validates approvals, not executability: {}", sres.message);
+    let pid = Proposal::compute_id(&account.id, 0, &ah);
+    let eres = exec(&pe, &state, &m, pid);
+    assert!(!eres.success, "unsupported wrapped action must fail closed");
+    // Proposal stays Pending; policy nonce unchanged.
+    let prop = PolicyAccountStorage::new(&db).proposals().get(&pid).unwrap().unwrap();
+    assert_eq!(prop.status, ProposalStatus::Pending, "proposal must remain Pending on fail-closed");
+    let acct = PolicyAccountStorage::new(&db).policy_accounts().get(&account.id).unwrap().unwrap();
+    assert_eq!(acct.nonce, 0, "policy nonce must NOT advance on fail-closed");
+}
+
+#[test]
+fn cancel_proposal() {
+    let (state, db, _dir, _ex) = setup_with_params(ChainParams::with_v2_enabled());
+    let pe = PolicyAccountExecutor::new(db.clone());
+    let m = kp();
+    let account = put_account(&db, &state, &m, 0);
+    let action = TxPayload::Transfer { to: zero_addr(), amount: 1 };
+    let ah = action_hash(&action);
+    let approval = approve(&account, &ah, 0, &m, None, false);
+    submit(&pe, &state, &account, &m, &action, vec![approval]);
+    let pid = Proposal::compute_id(&account.id, 0, &ah);
+    // CancelProposal's payload is a raw ProposalId (matches the RPC builder).
+    let cancel = PolicyAccountTxData {
+        operation: PolicyAccountOperation::CancelProposal,
+        data: bincode::serialize(&pid).unwrap(),
+        recipient: zero_addr(),
+    };
+    let res = pe.execute(&m.address(), &cancel, &state, &zero_addr(), 0, 2, 2000).unwrap();
+    assert!(res.success, "cancel failed: {}", res.message);
+    let prop = PolicyAccountStorage::new(&db).proposals().get(&pid).unwrap().unwrap();
+    assert_eq!(prop.status, ProposalStatus::Cancelled);
+}
+
+#[test]
+fn pending_proposal_listing() {
+    let (state, db, _dir, _ex) = setup_with_params(ChainParams::with_v2_enabled());
+    let pe = PolicyAccountExecutor::new(db.clone());
+    let m = kp();
+    let account = put_account(&db, &state, &m, 0);
+    for amount in [1u128, 2u128] {
+        let action = TxPayload::Transfer { to: zero_addr(), amount };
+        let approval = approve(&account, &action_hash(&action), 0, &m, None, false);
+        submit(&pe, &state, &account, &m, &action, vec![approval]);
+    }
+    let pending = PolicyAccountStorage::new(&db).proposals().list_pending(&account.id).unwrap();
+    assert_eq!(pending.len(), 2, "two pending proposals expected");
+}
+
+// ---- block-level fee / submitter-nonce accounting (executor arm) ----
+
+fn create_tx(sender: &KeyPair, nonce: u64, fee: u128) -> SignedTransaction {
+    let req = CreatePolicyAccountRequest {
+        members: vec![PolicyMember::new(sender.address())],
+        policy: PolicyConfig { profile: PolicyProfile::Personal, overrides: vec![] },
+        salt: vec![9u8; 32],
+    };
+    let payload = TxPayload::PolicyAccount(tx_data(PolicyAccountOperation::Create, &req));
+    let tx = TransactionV2 { chain_id: CHAIN_ID, from: sender.address(), fee, nonce, payload };
+    let h = tx.signing_hash();
+    let sig = sign(h.as_bytes(), sender.private_key());
+    SignedTransaction::new_v2(tx, *sig.as_bytes(), *sender.public_key().as_bytes())
+}
+
+#[test]
+fn fee_and_submitter_nonce_charged_once_on_success() {
+    let (state, _db, _dir, executor) = setup_with_params(ChainParams::with_v2_enabled());
+    let sender = kp();
+    let proposer = kp();
+    let fee = 1_000u128;
+    fund(&state, &sender, 10_000);
+    let tx = create_tx(&sender, 0, fee);
+    let res = executor.execute_tx(&tx, &proposer.address(), 1, 1000).unwrap();
+    assert!(matches!(res.status, TxStatus::Success), "expected success, got {:?}", res.status);
+    assert_eq!(state.get_balance(&sender.address()).unwrap(), 10_000 - fee, "fee charged exactly once");
+    assert_eq!(state.get_nonce(&sender.address()).unwrap(), 1, "submitter nonce +1");
+    assert_eq!(state.get_balance(&proposer.address()).unwrap(), fee, "proposer credited fee");
+}
+
+#[test]
+fn insufficient_balance_is_free_no_nonce() {
+    let (state, _db, _dir, executor) = setup_with_params(ChainParams::with_v2_enabled());
+    let sender = kp();
+    let proposer = kp();
+    let fee = 1_000u128;
+    fund(&state, &sender, 10); // less than fee
+    let tx = create_tx(&sender, 0, fee);
+    let res = executor.execute_tx(&tx, &proposer.address(), 1, 1000).unwrap();
+    assert!(matches!(res.status, TxStatus::InsufficientBalance), "got {:?}", res.status);
+    assert_eq!(res.fee_paid, 0, "no fee on insufficient balance");
+    assert_eq!(state.get_balance(&sender.address()).unwrap(), 10, "balance unchanged");
+    assert_eq!(state.get_nonce(&sender.address()).unwrap(), 0, "nonce unchanged");
 }

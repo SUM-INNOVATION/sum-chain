@@ -18,6 +18,7 @@ use sumchain_primitives::{
     Address, Balance, BlockHeight, Hash, Timestamp, TxPayload,
 };
 use sumchain_primitives::{NftOperation, TokenOperation};
+use sumchain_crypto::verify_bytes;
 use sumchain_storage::{Database, PolicyAccountStorage, Result as StorageResult};
 
 use crate::{Result, State, StateError};
@@ -388,29 +389,32 @@ impl PolicyAccountExecutor {
             }
         }
 
-        // Verify all signatures
-        let approval_message = Proposal::approval_message(
-            &proposal_id,
+        // Verify each approval's Ed25519 signature over the canonical message.
+        // The signing bytes bind the account, the exact action, and the policy
+        // nonce (replay protection). An `Address` is a one-way hash of the key,
+        // so each approval carries the approver's pubkey, which must hash to the
+        // approver address before the signature is checked.
+        let approval_message = Proposal::approval_signing_bytes(
             &request.policy_account_id,
             &action_hash,
             policy_account.nonce,
         );
 
         for approval in &request.approvals {
-            // Derive public key from address (Note: In production, you'd need to look up the public key)
-            // For now, we'll verify the signature format is correct
-            // The actual verification would require the public key to be stored or derived
-            if approval.signature.len() != 64 {
+            if Address::from_public_key(&approval.approver_pubkey) != approval.approver {
                 return Ok(PolicyAccountExecutionResult::failure(format!(
-                    "Invalid signature length from approver: {}",
+                    "Approver pubkey does not match address: {}",
                     approval.approver
                 )));
             }
-
-            // In a real implementation, you would:
-            // 1. Look up the approver's public key (from a registry or derived from address)
-            // 2. Verify: verify_bytes(approval_message.as_bytes(), &approval.signature, &public_key)
-            // For now, we'll trust the signature format is correct
+            if verify_bytes(&approval_message, &approval.signature, &approval.approver_pubkey)
+                .is_err()
+            {
+                return Ok(PolicyAccountExecutionResult::failure(format!(
+                    "Invalid approval signature from approver: {}",
+                    approval.approver
+                )));
+            }
         }
 
         // Create proposal
@@ -609,25 +613,20 @@ impl PolicyAccountExecutor {
             | ActionClass::DeployContract
             | ActionClass::CallContract
             | ActionClass::Other => {
-                // For these actions, the embedded payload would need to be executed
-                // by the appropriate executor (token, NFT, staking, contract, etc.)
-                // with the policy account address as the sender.
+                // Fail closed: wrapped non-policy actions other than native
+                // transfer are not executed in v1. Running them "on behalf of"
+                // the policy account requires atomic cross-executor dispatch with
+                // per-tx rollback, which the state model does not yet provide.
                 //
-                // This requires access to those executors, which would create
-                // circular dependencies in the current architecture.
-                //
-                // The proper solution is to execute this through the BlockExecutor
-                // by creating a synthetic transaction with:
-                // - from = policy_account.address
-                // - payload = action_payload
-                // - fee = 0 (already paid by outer transaction)
-                //
-                // For now, we mark these as requiring re-dispatch and return success
-                // to indicate the proposal was approved and nonce incremented.
-                //
-                // Implementation note: The BlockExecutor should have a method like:
-                // `execute_on_behalf_of(address, payload, proposer)` that bypasses
-                // signature/nonce checks and uses the provided address as sender.
+                // Returning a failure here means the proposal is NOT marked
+                // Executed and the policy nonce is NOT advanced (the code below
+                // is skipped), so the proposal can still execute later once safe
+                // dispatch lands. The block executor treats this as a semantic
+                // failure and charges the outer fee + submitter nonce.
+                return Ok(PolicyAccountExecutionResult::failure(format!(
+                    "Wrapped action class {:?} is not supported for execution yet",
+                    proposal.action_class
+                )));
             }
         }
 

@@ -866,16 +866,40 @@ impl BlockExecutor {
                         }
                     }
                     TxPayload::PolicyAccount(policy_data) => {
-                        // Execute Policy Account operation
+                        // Policy-B fee/nonce accounting. The policy executor does
+                        // NOT touch the submitter's fee/nonce, so this arm owns
+                        // them (exactly one charge point — no double-charge).
+                        // Pre-semantic failure (insufficient balance) is free;
+                        // success AND semantic failure charge the fee, credit the
+                        // proposer, and advance the SUBMITTER nonce once. The
+                        // policy account's own replay protection is its policy
+                        // nonce, advanced inside the executor only on a supported,
+                        // successful action.
+                        let fee = v2_tx.fee;
+                        if self.state.get_balance(&v2_tx.from)? < fee {
+                            return Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::InsufficientBalance,
+                                fee_paid: 0,
+                            });
+                        }
+
                         let result = self.policy_account_executor.execute(
                             &v2_tx.from,
                             &policy_data,
                             &self.state,
                             proposer,
-                            v2_tx.fee,
+                            fee,
                             block_height,
                             block_timestamp,
                         )?;
+
+                        // The operation only moves policy-account funds (never the
+                        // submitter's balance), so the pre-checked submitter
+                        // balance still covers the fee here.
+                        self.state.deduct(&v2_tx.from, fee)?;
+                        self.state.credit(proposer, fee)?;
+                        self.state.increment_nonce(&v2_tx.from)?;
 
                         if result.success {
                             debug!(
@@ -887,11 +911,11 @@ impl BlockExecutor {
                             Ok(TxExecutionResult {
                                 tx_hash,
                                 status: TxStatus::Success,
-                                fee_paid: v2_tx.fee,
+                                fee_paid: fee,
                             })
                         } else {
                             warn!(
-                                "V2 PolicyAccount {} failed: {}",
+                                "V2 PolicyAccount {} failed (semantic): {}",
                                 tx_hash,
                                 result.message
                             );
@@ -899,7 +923,7 @@ impl BlockExecutor {
                             Ok(TxExecutionResult {
                                 tx_hash,
                                 status: TxStatus::Failed(17), // PolicyAccount operation failed
-                                fee_paid: 0,
+                                fee_paid: fee,
                             })
                         }
                     }
