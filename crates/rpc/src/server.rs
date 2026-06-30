@@ -306,6 +306,12 @@ impl RpcServer {
     }
 
     /// Set the contract executor for smart contract RPCs
+    /// Whether a contract executor is wired (powers contract_* RPCs). Used by
+    /// the node crate's production-wiring tripwire test.
+    pub fn has_contract_executor(&self) -> bool {
+        self.contract_executor.is_some()
+    }
+
     pub fn with_contract_executor(mut self, executor: Arc<sumchain_state::ContractExecutorState>) -> Self {
         self.contract_executor = Some(executor);
         self
@@ -1659,20 +1665,54 @@ impl SumChainApiServer for RpcServer {
         &self,
         request: ViewCallRequest,
     ) -> std::result::Result<GasEstimateResult, jsonrpsee::types::ErrorObjectOwned> {
-        // For now, return a fixed estimate - in production this would actually run the call
-        // and measure gas consumption
-        let base_gas: u64 = 21000;
-        let per_byte_gas: u64 = 16;
-
+        let contract_addr = self.parse_address(&request.contract)?;
+        let from_addr = match request.from {
+            Some(ref from) => Some(self.parse_address(from)?),
+            None => None,
+        };
         let args = hex::decode(request.args.trim_start_matches("0x"))
             .map_err(|e| RpcError::InvalidParams(format!("Invalid args hex: {}", e)))?;
 
-        let estimated_gas = base_gas + (args.len() as u64 * per_byte_gas);
+        let executor = self
+            .contract_executor
+            .as_ref()
+            .ok_or_else(|| RpcError::Internal("Contract executor not available".to_string()))?;
+
+        if !executor
+            .contract_exists(&contract_addr)
+            .map_err(|e| RpcError::Internal(e.to_string()))?
+        {
+            return Err(RpcError::InvalidParams("Contract not found".to_string()).into());
+        }
+
+        let height = BlockStore::new(&self.db)
+            .get_latest_height()
+            .map_err(|e| RpcError::Internal(e.to_string()))?
+            .unwrap_or(0);
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Metered dry-run; surface failure/out-of-gas as an error, never a
+        // fabricated estimate.
+        let gas_estimate = executor
+            .estimate_gas(
+                &contract_addr,
+                &request.method,
+                args,
+                from_addr,
+                height,
+                timestamp,
+                self.state.chain_id(),
+            )
+            .map_err(|e| RpcError::Internal(format!("gas estimation failed: {}", e)))?;
+
         let gas_price: u128 = 1_000_000; // 0.001 Koppa per gas unit
-        let total_cost = (estimated_gas as u128) * gas_price;
+        let total_cost = (gas_estimate as u128) * gas_price;
 
         Ok(GasEstimateResult {
-            gas_estimate: estimated_gas,
+            gas_estimate,
             gas_price: gas_price.to_string(),
             total_cost: total_cost.to_string(),
         })
@@ -1695,12 +1735,41 @@ impl SumChainApiServer for RpcServer {
 
     async fn contract_get_storage_at(
         &self,
-        _address: String,
-        _key: String,
+        address: String,
+        key: String,
     ) -> std::result::Result<Option<String>, jsonrpsee::types::ErrorObjectOwned> {
-        // Contract storage reading would require direct access to the contract storage backend
-        // This is a placeholder implementation
-        Err(RpcError::Internal("Storage querying not yet implemented".to_string()).into())
+        let addr = self.parse_address(&address)?;
+        let key_bytes = hex::decode(key.trim_start_matches("0x"))
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid storage key hex: {}", e)))?;
+
+        let executor = self
+            .contract_executor
+            .as_ref()
+            .ok_or_else(|| RpcError::Internal("Contract executor not available".to_string()))?;
+
+        // Gate on contract existence: a non-contract (or unknown address)
+        // returns None rather than an empty-vs-present ambiguity.
+        if !executor
+            .contract_exists(&addr)
+            .map_err(|e| RpcError::Internal(e.to_string()))?
+        {
+            return Ok(None);
+        }
+
+        // Raw contract_storage CF key: address(20) || b':' || key.
+        let mut full_key = Vec::with_capacity(addr.as_bytes().len() + 1 + key_bytes.len());
+        full_key.extend_from_slice(addr.as_bytes());
+        full_key.push(b':');
+        full_key.extend_from_slice(&key_bytes);
+
+        match self
+            .db
+            .get(sumchain_storage::cf::CONTRACT_STORAGE, &full_key)
+            .map_err(|e| RpcError::Internal(e.to_string()))?
+        {
+            Some(value) => Ok(Some(format!("0x{}", hex::encode(value)))),
+            None => Ok(None),
+        }
     }
 
     async fn contract_get_balance(
@@ -7676,5 +7745,136 @@ mod messaging_rpc_tests {
         let (srv, _db, _dir) = server();
         assert!(srv.messaging_get_sent_messages("not-an-address".to_string(), None, None).await.is_err());
         assert!(srv.messaging_get_pending_payments("not-an-address".to_string()).await.is_err());
+    }
+}
+
+#[cfg(test)]
+mod contract_rpc_tests {
+    //! Coverage for contract_getStorageAt + contract_estimateGas (issue #25).
+    use super::*;
+    use std::collections::HashMap;
+    use sumchain_consensus::PoAEngine;
+    use sumchain_crypto::KeyPair;
+    use sumchain_genesis::{ChainParams, Genesis};
+    use sumchain_primitives::transaction::ContractDeployData;
+    use sumchain_primitives::Address;
+    use sumchain_state::{ContractExecutorState, MempoolConfig};
+    use tempfile::TempDir;
+
+    // `new` writes key "k"->"VAL"; `one`/`two` write 1/2 slots; `boom` traps.
+    const WAT: &str = r#"
+    (module
+      (import "env" "storage_write" (func $sw (param i32 i32 i32 i32)))
+      (memory (export "memory") 1)
+      (global $bump (mut i32) (i32.const 1024))
+      (data (i32.const 0) "k")
+      (data (i32.const 8) "VAL")
+      (data (i32.const 16) "k2")
+      (func (export "alloc") (param i32) (result i32)
+        (local $p i32) (local.set $p (global.get $bump))
+        (global.set $bump (i32.add (global.get $bump) (local.get 0))) (local.get $p))
+      (func (export "new") (param i32 i32) (result i32)
+        (call $sw (i32.const 0) (i32.const 1) (i32.const 8) (i32.const 3)) (i32.const 0))
+      (func (export "one") (param i32 i32) (result i32)
+        (call $sw (i32.const 0) (i32.const 1) (i32.const 8) (i32.const 3)) (i32.const 0))
+      (func (export "two") (param i32 i32) (result i32)
+        (call $sw (i32.const 0) (i32.const 1) (i32.const 8) (i32.const 3))
+        (call $sw (i32.const 16) (i32.const 2) (i32.const 8) (i32.const 3)) (i32.const 0))
+      (func (export "boom") (param i32 i32) (result i32) (unreachable)))
+    "#;
+
+    // Returns (server, deployed contract address).
+    fn server_with_contract() -> (RpcServer, Address, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let db = Arc::new(Database::open_default(dir.path()).unwrap());
+        let state = Arc::new(StateManager::new(db.clone(), 1));
+        let params = ChainParams::with_contracts_enabled();
+
+        // Deploy a storage-writing contract through the shared executor.
+        let cexec = Arc::new(ContractExecutorState::new(db.clone(), params.clone()));
+        let deployer = KeyPair::generate();
+        let proposer = KeyPair::generate();
+        state
+            .put_account(
+                &deployer.address(),
+                &sumchain_storage::schema::AccountState { balance: 10_000_000, nonce: 0 },
+            )
+            .unwrap();
+        let deploy_data = ContractDeployData {
+            code: wat::parse_str(WAT).unwrap(),
+            init_method: "new".to_string(),
+            init_args: vec![],
+            value: 0,
+            gas_limit: 5_000_000,
+        };
+        let res = cexec
+            .deploy(&deployer.address(), &deploy_data, &state, &proposer.address(), 1_000, 1, 1000)
+            .unwrap();
+        assert!(res.success, "deploy failed: {:?}", res.error);
+        let addr = res.contract_address;
+
+        let mempool = Arc::new(Mempool::new(MempoolConfig::default()));
+        let validator = KeyPair::generate();
+        let genesis = Genesis::new(
+            1,
+            0,
+            vec![validator.public_key().to_base58()],
+            HashMap::from([(validator.address().to_base58(), 1_000_000u128)]),
+            params,
+        );
+        let engine = Arc::new(
+            PoAEngine::new(db.clone(), state.clone(), mempool.clone(), &genesis, Some(validator)).unwrap(),
+        );
+        let (tx_sender, _rx) = mpsc::channel(64);
+        let srv = RpcServer::new(db, state, mempool, engine, tx_sender, Arc::new(|| 0usize))
+            .with_contract_executor(cexec);
+        (srv, addr, dir)
+    }
+
+    fn view(contract: &Address, method: &str) -> ViewCallRequest {
+        ViewCallRequest {
+            contract: contract.to_base58(),
+            method: method.to_string(),
+            args: "0x".to_string(),
+            from: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn get_storage_at_present_missing_and_invalid() {
+        let (srv, addr, _dir) = server_with_contract();
+
+        // Present slot "k" (0x6b) -> "VAL" (0x56414c).
+        let got = srv.contract_get_storage_at(addr.to_base58(), "0x6b".to_string()).await.unwrap();
+        assert_eq!(got, Some("0x56414c".to_string()));
+
+        // Missing slot -> None.
+        let missing = srv.contract_get_storage_at(addr.to_base58(), "0xdead".to_string()).await.unwrap();
+        assert!(missing.is_none());
+
+        // Unknown contract address -> None (gated on existence).
+        let none = srv
+            .contract_get_storage_at(Address::new([9u8; 20]).to_base58(), "0x6b".to_string())
+            .await
+            .unwrap();
+        assert!(none.is_none());
+
+        // Invalid key hex -> error.
+        assert!(srv.contract_get_storage_at(addr.to_base58(), "0xzz".to_string()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn estimate_gas_varies_with_work_and_fails_loudly() {
+        let (srv, addr, _dir) = server_with_contract();
+
+        let one = srv.contract_estimate_gas(view(&addr, "one")).await.unwrap();
+        let two = srv.contract_estimate_gas(view(&addr, "two")).await.unwrap();
+        assert!(one.gas_estimate > 0, "estimate should be a real metered value");
+        assert!(two.gas_estimate > one.gas_estimate, "more storage work => more gas");
+
+        // A trapping method returns an error, not a fabricated estimate.
+        assert!(srv.contract_estimate_gas(view(&addr, "boom")).await.is_err());
+        // Unknown contract -> error.
+        assert!(srv.contract_estimate_gas(view(&Address::new([9u8; 20]), "one")).await.is_err());
     }
 }

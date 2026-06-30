@@ -297,6 +297,38 @@ impl ContractExecutor {
         }
     }
 
+    /// Estimate gas for a call by metered dry-run: execute under
+    /// `ctx.gas_limit`, then ALWAYS roll back (no commit, no journal). Returns
+    /// the metered gas used on success; returns `Err` on execution failure or
+    /// out-of-gas — callers must surface that, never a fabricated number.
+    pub fn estimate_gas(
+        &self,
+        contract: ContractAddress,
+        method: &str,
+        args: Vec<u8>,
+        ctx: ExecutionContext,
+    ) -> Result<u64> {
+        let gas_meter = Arc::new(GasMeter::new(ctx.gas_limit));
+        gas_meter.consume(gas_meter.costs().call_base)?;
+
+        let result = self.call_internal(contract, method, args, ctx, gas_meter.clone(), 0);
+
+        // Dry-run: never commit. Roll back only the staged writes from this
+        // run. We must NOT touch the commit journal — `call_internal` does not
+        // commit, so this run appends nothing, and any pre-existing committed
+        // journal entries (e.g. from earlier txs in the block) must be
+        // preserved for the reorg diff. `rollback` clears caches, not journal.
+        self.storage.rollback();
+
+        match result {
+            Ok(r) if r.success => Ok(gas_meter.used()),
+            Ok(r) => Err(RuntimeError::Execution(
+                r.error.unwrap_or_else(|| "gas estimation failed".to_string()),
+            )),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Internal call implementation
     fn call_internal(
         &self,

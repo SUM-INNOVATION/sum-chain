@@ -68,13 +68,13 @@ pub struct ContractExecutorState {
 }
 
 impl ContractExecutorState {
+    /// Create a new contract executor
     /// Drain the per-block contract-state journal (committed code/storage/
     /// metadata mutations) for reorg-diff construction.
     pub fn take_journal(&self) -> Vec<sumchain_storage::ContractMutation> {
         self.wasm_executor.take_journal()
     }
 
-    /// Create a new contract executor
     pub fn new(db: Arc<Database>, params: ChainParams) -> Self {
         // Persistent contract storage backed by RocksDB: code, storage, and
         // metadata live in dedicated CFs and survive restarts.
@@ -409,6 +409,34 @@ impl ContractExecutorState {
 
         self.wasm_executor
             .view(*contract, method, args, ctx)
+            .map_err(|e| StateError::ContractError(e.to_string()))
+    }
+
+    /// Estimate gas for a call via a metered dry-run (executed up to the chain's
+    /// `max_contract_gas`, then rolled back). Returns gas used, or `Err` on
+    /// execution failure / out-of-gas.
+    pub fn estimate_gas(
+        &self,
+        contract: &Address,
+        method: &str,
+        args: Vec<u8>,
+        from: Option<Address>,
+        block_height: u64,
+        block_timestamp: u64,
+        chain_id: u64,
+    ) -> Result<u64> {
+        let caller = from.unwrap_or(Address::ZERO);
+        let ctx = ExecutionContext {
+            caller,
+            origin: caller,
+            value: 0,
+            gas_limit: self.params.max_contract_gas,
+            block_height,
+            block_timestamp,
+            chain_id,
+        };
+        self.wasm_executor
+            .estimate_gas(*contract, method, args, ctx)
             .map_err(|e| StateError::ContractError(e.to_string()))
     }
 

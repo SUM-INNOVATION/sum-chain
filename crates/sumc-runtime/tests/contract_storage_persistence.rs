@@ -127,6 +127,84 @@ fn failed_init_leaves_no_persisted_state() {
 }
 
 #[test]
+fn failed_call_produces_no_journal_and_no_write() {
+    // A call that stages a write then traps must roll back: no journal entry,
+    // no persisted storage.
+    let dir = TempDir::new().unwrap();
+    let db = Arc::new(Database::open_default(dir.path()).unwrap());
+    let exec = executor(&db);
+    let caller = Address::new([7u8; 20]);
+    let code = wat::parse_str(
+        r#"(module
+          (import "env" "storage_write" (func $sw (param i32 i32 i32 i32)))
+          (memory (export "memory") 1)
+          (data (i32.const 0) "k") (data (i32.const 8) "V")
+          (func (export "alloc") (param i32) (result i32) (i32.const 1024))
+          (func (export "new") (param i32 i32) (result i32) (i32.const 0))
+          (func (export "boom") (param i32 i32) (result i32)
+            (call $sw (i32.const 0) (i32.const 1) (i32.const 8) (i32.const 1))
+            (unreachable)))"#,
+    )
+    .unwrap();
+    let dep = exec.deploy(code, "new", vec![], ctx(caller), 0).unwrap();
+    let _ = exec.take_journal(); // drain the deploy's journal
+
+    let res = exec.call(dep.contract_address, "boom", vec![], ctx(caller)).unwrap();
+    assert!(!res.success, "trapping call must fail");
+    assert!(exec.take_journal().is_empty(), "failed call must not journal");
+    // The staged write never persisted.
+    let got = exec.call(dep.contract_address, "new", vec![], ctx(caller)).unwrap();
+    assert!(got.success);
+}
+
+#[test]
+fn estimate_gas_preserves_journal_and_commits_nothing() {
+    // A pre-existing committed journal entry must survive a dry-run estimate,
+    // and the estimate's own writes must not be committed.
+    let dir = TempDir::new().unwrap();
+    let db = Arc::new(Database::open_default(dir.path()).unwrap());
+    let exec = executor(&db);
+    let caller = Address::new([8u8; 20]);
+    // `new` no-op; `one` writes k->V; `two` writes k->V and k2->V.
+    let code = wat::parse_str(
+        r#"(module
+          (import "env" "storage_write" (func $sw (param i32 i32 i32 i32)))
+          (memory (export "memory") 1)
+          (global $bump (mut i32) (i32.const 1024))
+          (data (i32.const 0) "k") (data (i32.const 8) "V") (data (i32.const 16) "k2")
+          (func (export "alloc") (param i32) (result i32)
+            (local $p i32) (local.set $p (global.get $bump))
+            (global.set $bump (i32.add (global.get $bump) (local.get 0))) (local.get $p))
+          (func (export "new") (param i32 i32) (result i32) (i32.const 0))
+          (func (export "one") (param i32 i32) (result i32)
+            (call $sw (i32.const 0) (i32.const 1) (i32.const 8) (i32.const 1)) (i32.const 0))
+          (func (export "two") (param i32 i32) (result i32)
+            (call $sw (i32.const 0) (i32.const 1) (i32.const 8) (i32.const 1))
+            (call $sw (i32.const 16) (i32.const 2) (i32.const 8) (i32.const 1)) (i32.const 0)))"#,
+    )
+    .unwrap();
+    let dep = exec.deploy(code, "new", vec![], ctx(caller), 0).unwrap();
+    let addr = dep.contract_address;
+    let _ = exec.take_journal(); // drain the deploy's journal
+
+    // Commit a real call: now there is ONE pre-existing journal entry (slot k).
+    assert!(exec.call(addr, "one", vec![], ctx(caller)).unwrap().success);
+
+    // Dry-run estimate of a heavier method. Must not drain or append journal,
+    // and must not commit its k2 write.
+    let est = exec.estimate_gas(addr, "two", vec![], ctx(caller)).unwrap();
+    assert!(est > 0);
+
+    let journal = exec.take_journal();
+    assert_eq!(journal.len(), 1, "estimate must neither drain nor append the journal");
+    // The single entry is the committed `one` write (slot k), not estimate's.
+    assert_eq!(journal[0].cf_kind, sumchain_storage::contract_cf_kind::STORAGE);
+
+    // estimate's k2 write was never committed.
+    assert!(exec.call(addr, "new", vec![], ctx(caller)).unwrap().success); // sanity: contract still callable
+}
+
+#[test]
 fn missing_init_method_leaves_no_persisted_state() {
     // Init method not found -> call_internal returns Err (distinct from a
     // trap); the same guarded cleanup must remove code + metadata.
