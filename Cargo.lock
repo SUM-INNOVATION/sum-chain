@@ -6032,6 +6032,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tracing",
+ "wat",
 ]
 
 [[package]]
@@ -6039,6 +6040,7 @@ name = "sumchain-storage"
 version = "0.1.0"
 dependencies = [
  "bincode",
+ "blake3",
  "hex",
  "parking_lot",
  "rocksdb",

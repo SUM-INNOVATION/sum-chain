@@ -68,6 +68,12 @@ pub struct ContractExecutorState {
 }
 
 impl ContractExecutorState {
+    /// Drain the per-block contract-state journal (committed code/storage/
+    /// metadata mutations) for reorg-diff construction.
+    pub fn take_journal(&self) -> Vec<sumchain_storage::ContractMutation> {
+        self.wasm_executor.take_journal()
+    }
+
     /// Create a new contract executor
     pub fn new(db: Arc<Database>, params: ChainParams) -> Self {
         // Persistent contract storage backed by RocksDB: code, storage, and

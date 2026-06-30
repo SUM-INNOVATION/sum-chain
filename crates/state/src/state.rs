@@ -227,6 +227,81 @@ impl StateManager {
 
         Ok(())
     }
+
+    /// Store the per-block contract-state diff for potential reorg.
+    pub fn save_contract_state_diff(
+        &self,
+        height: BlockHeight,
+        diff: sumchain_storage::schema::ContractStateDiff,
+    ) -> Result<()> {
+        let store = StateStore::new(&self.db);
+        store.put_contract_state_diff(height, &diff)?;
+        Ok(())
+    }
+
+    /// Atomically revert BOTH the account `StateDiff` and the contract
+    /// `ContractStateDiff` for a block, as one logical operation. Used by reorg.
+    ///
+    /// All restores — account old-states, contract CF restores/deletes (replayed
+    /// in reverse record order) — and the deletion of both diff records are
+    /// staged into a single [`Database::batch`] and committed together. Any
+    /// error (e.g. an unknown `cf_kind`) returns before commit, so nothing is
+    /// applied and both diffs remain intact for a clean retry. This avoids the
+    /// inconsistent state where accounts revert but contract state is orphaned.
+    pub fn revert_block_state_diffs(&self, height: BlockHeight) -> Result<()> {
+        use sumchain_storage::{cf, ContractStateDiff};
+        let store = StateStore::new(&self.db);
+        let account_diff = store.get_state_diff(height)?;
+        let contract_diff = store.get_contract_state_diff(height)?;
+        if account_diff.is_none() && contract_diff.is_none() {
+            return Ok(());
+        }
+
+        let mut batch = self.db.batch();
+
+        // Account restores (old state, or default if the account didn't exist).
+        if let Some(diff) = &account_diff {
+            for (addr, old_state, _new) in &diff.changes {
+                let mut key = Vec::with_capacity(4 + 20);
+                key.extend_from_slice(b"acct");
+                key.extend_from_slice(addr.as_bytes());
+                let state = old_state.clone().unwrap_or_default();
+                let bytes = bincode::serialize(&state)
+                    .map_err(|e| StateError::InvalidOperation(format!("account encode: {}", e)))?;
+                batch.put(cf::STATE, &key, &bytes)?;
+            }
+        }
+
+        // Contract restores in REVERSE record order. cf_kind is validated here,
+        // BEFORE commit, so an unknown kind aborts the whole revert with nothing
+        // applied and both diffs preserved.
+        if let Some(diff) = &contract_diff {
+            for record in diff.records.iter().rev() {
+                let cf_name = ContractStateDiff::cf_name(record.cf_kind).ok_or_else(|| {
+                    StateError::InvalidOperation(format!(
+                        "contract revert: unknown cf_kind {} at height {}",
+                        record.cf_kind, height
+                    ))
+                })?;
+                match &record.old {
+                    Some(v) => batch.put(cf_name, &record.key, v)?,
+                    None => batch.delete(cf_name, &record.key)?,
+                }
+            }
+        }
+
+        // Delete both diff records in the SAME batch — applied only on commit.
+        let hkey = height.to_be_bytes();
+        if account_diff.is_some() {
+            batch.delete(cf::STATE_DIFFS, &hkey)?;
+        }
+        if contract_diff.is_some() {
+            batch.delete(cf::CONTRACT_STATE_DIFFS, &hkey)?;
+        }
+
+        batch.commit()?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

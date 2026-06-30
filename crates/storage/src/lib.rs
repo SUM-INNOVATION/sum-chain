@@ -31,9 +31,10 @@ pub use equity_store::{
 pub use messaging_store::{BackfillStats, MessagingStore, MESSAGING_LIST_DEFAULT, MESSAGING_LIST_MAX};
 pub use pruner::{DbStats, PruneStats, Pruner, PrunerConfig};
 pub use schema::{
-    BlockStore, DelegationStore, IssuerData, IssuerStore, NftCollectionData, NftStore,
-    NftTokenData, ReceiptStore, SlashingStore, Src20TokenData, StakingStore, StateStore,
-    TokenStore, TxIndexEntry, TxIndexStore, TxStore, ValidatorSetStore,
+    contract_cf_kind, BlockStore, ContractMutation, ContractStateDiff,
+    CONTRACT_STATE_DIFF_DOMAIN, DelegationStore, IssuerData, IssuerStore, NftCollectionData,
+    NftStore, NftTokenData, ReceiptStore, SlashingStore, Src20TokenData, StakingStore, StateStore,
+    StateDiff, TokenStore, TxIndexEntry, TxIndexStore, TxStore, ValidatorSetStore,
 };
 pub use tax_store::{
     TaxClaimTypeStore, TaxDisclosureStore, TaxEventStore, TaxIssuerStore, TaxPolicyStore,

@@ -250,6 +250,8 @@ pub mod cf {
     pub const CONTRACT_STORAGE: &str = "contract_storage";
     /// Contract metadata (contract_address -> bincode(ContractMetadata)).
     pub const CONTRACT_METADATA: &str = "contract_metadata";
+    /// Per-block contract-state diffs for reorg revert (height -> ContractStateDiff).
+    pub const CONTRACT_STATE_DIFFS: &str = "contract_state_diffs";
 
     // SRC-82X Tax & Compliance column families
     /// Tax claim type registry (claim_type -> TaxClaimTypeEntry)
@@ -530,6 +532,7 @@ pub const ALL_CFS: &[&str] = &[
     cf::CONTRACT_CODE,
     cf::CONTRACT_STORAGE,
     cf::CONTRACT_METADATA,
+    cf::CONTRACT_STATE_DIFFS,
     // SRC-82X Tax & Compliance
     cf::TAX_CLAIM_TYPES,
     cf::TAX_ISSUERS,

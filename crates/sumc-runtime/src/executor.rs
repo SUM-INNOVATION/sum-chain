@@ -11,6 +11,7 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 use sumchain_primitives::Address;
+use sumchain_storage::{contract_cf_kind, ContractMutation};
 use tracing::{debug, trace, warn};
 use wasmer::{
     imports, Function, FunctionEnv, FunctionEnvMut, Instance, Memory, MemoryType, Module, Store,
@@ -150,7 +151,9 @@ impl ContractExecutor {
             Module::new(&store, &code)?
         };
 
-        // Store code
+        // Capture the pre-image of the code row for the reorg journal (None
+        // for a fresh address), then store code.
+        let old_code = self.storage.get_code(&contract_address)?;
         self.storage.store_code(&contract_address, &code)?;
 
         // Cache compiled module
@@ -170,7 +173,8 @@ impl ContractExecutor {
         // success==false, storage commit) must leave NO persisted code,
         // metadata, storage, or cache entry behind. On `Err`, run cleanup.
         let finalize = (|| -> Result<DeployResult> {
-            // Store metadata (persisted in the backend + cached in-memory).
+            // Capture metadata pre-image, then store metadata (backend + cache).
+            let old_meta = self.storage.get_metadata(&contract_address)?;
             let meta = ContractMetadata {
                 code_hash,
                 owner: ctx.caller,
@@ -202,8 +206,22 @@ impl ContractExecutor {
                 ));
             }
 
-            // Commit storage changes.
+            // Commit storage changes (appends init's storage mutations to the
+            // journal). Only after a fully successful deploy do we journal the
+            // code + metadata rows, so a failed deploy leaves no journal trace.
             self.storage.commit()?;
+            self.storage.record_raw(ContractMutation {
+                cf_kind: contract_cf_kind::CODE,
+                key: contract_address.as_bytes().to_vec(),
+                old: old_code.clone(),
+                new: Some(code.clone()),
+            });
+            self.storage.record_raw(ContractMutation {
+                cf_kind: contract_cf_kind::METADATA,
+                key: contract_address.as_bytes().to_vec(),
+                old: old_meta,
+                new: Some(meta_bytes),
+            });
 
             Ok(DeployResult {
                 contract_address,
@@ -520,6 +538,12 @@ impl ContractExecutor {
     /// Check if a contract exists
     pub fn contract_exists(&self, address: &ContractAddress) -> Result<bool> {
         Ok(self.storage.get_code(address)?.is_some())
+    }
+
+    /// Drain the accumulated contract-state journal (committed code/storage/
+    /// metadata mutations). Called once per block to build the reorg diff.
+    pub fn take_journal(&self) -> Vec<ContractMutation> {
+        self.storage.take_journal()
     }
 
     /// Get contract metadata

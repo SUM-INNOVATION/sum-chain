@@ -23,6 +23,7 @@ lru = "0.12"
 
 [dev-dependencies]
 tempfile = "3.10"
+wat = "1"
 
 [features]
 # Enable test modules that reference primitives schemas removed during migration.

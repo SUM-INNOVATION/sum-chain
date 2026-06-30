@@ -4,6 +4,17 @@ use crate::{ContractAddress, Result, RuntimeError};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
+use sumchain_storage::{contract_cf_kind, ContractMutation};
+
+/// Raw `contract_storage` CF row key: `contract(20) || b':' || key`.
+/// Matches `RocksDbStorage::make_key` so journal keys equal on-disk keys.
+pub fn storage_cf_key(contract: &ContractAddress, key: &[u8]) -> Vec<u8> {
+    let mut k = Vec::with_capacity(contract.as_bytes().len() + 1 + key.len());
+    k.extend_from_slice(contract.as_bytes());
+    k.push(b':');
+    k.extend_from_slice(key);
+    k
+}
 
 /// Storage key type
 pub type StorageKey = Vec<u8>;
@@ -156,6 +167,12 @@ pub struct ContractStorage {
     write_cache: RwLock<HashMap<(ContractAddress, StorageKey), Option<StorageValue>>>,
     /// Read cache
     read_cache: RwLock<HashMap<(ContractAddress, StorageKey), Option<StorageValue>>>,
+    /// Per-block journal of COMMITTED contract-CF mutations (old + new), used
+    /// for reorg revert + state-root commitment. Only successful commits and
+    /// `record_raw` (code/metadata) append here; `rollback` does NOT clear it
+    /// (uncommitted writes never reach the journal). Drained per block via
+    /// `take_journal`.
+    journal: RwLock<Vec<ContractMutation>>,
 }
 
 impl ContractStorage {
@@ -165,7 +182,19 @@ impl ContractStorage {
             backend,
             write_cache: RwLock::new(HashMap::new()),
             read_cache: RwLock::new(HashMap::new()),
+            journal: RwLock::new(Vec::new()),
         }
+    }
+
+    /// Record a raw CF mutation directly (used by deploy for code/metadata,
+    /// which bypass the storage write-cache).
+    pub fn record_raw(&self, mutation: ContractMutation) {
+        self.journal.write().push(mutation);
+    }
+
+    /// Drain the accumulated commit journal.
+    pub fn take_journal(&self) -> Vec<ContractMutation> {
+        std::mem::take(&mut *self.journal.write())
     }
 
     /// Read a value, checking cache first
@@ -254,7 +283,8 @@ impl ContractStorage {
     /// Commit all pending changes to the backend atomically.
     ///
     /// The write-cache is drained into a vector sorted by `(contract, key)` so
-    /// the applied order is deterministic across nodes, then applied
+    /// the applied order is deterministic across nodes (required for the
+    /// reorg journal and state-root digest added in a later set), then applied
     /// all-or-nothing via the backend's atomic `commit`.
     pub fn commit(&self) -> Result<()> {
         let mut write_cache = self.write_cache.write();
@@ -264,7 +294,23 @@ impl ContractStorage {
             .collect();
         ops.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()).then_with(|| a.1.cmp(&b.1)));
 
+        // Capture pre-images BEFORE applying so the journal records old + new.
+        let mut mutations = Vec::with_capacity(ops.len());
+        for (contract, key, new) in &ops {
+            let old = self.backend.read(contract, key)?;
+            mutations.push(ContractMutation {
+                cf_kind: contract_cf_kind::STORAGE,
+                key: storage_cf_key(contract, key),
+                old,
+                new: new.clone(),
+            });
+        }
+
+        // Apply atomically; only on success append to the journal.
         self.backend.commit(&ops)?;
+        if !mutations.is_empty() {
+            self.journal.write().extend(mutations);
+        }
 
         // Clear read cache (state has changed)
         self.read_cache.write().clear();
@@ -272,7 +318,9 @@ impl ContractStorage {
         Ok(())
     }
 
-    /// Rollback uncommitted changes.
+    /// Rollback uncommitted changes. Does NOT touch the commit journal —
+    /// uncommitted writes never reach it, and previously committed mutations
+    /// in the same block must survive a later tx's rollback.
     pub fn rollback(&self) {
         self.write_cache.write().clear();
         self.read_cache.write().clear();
