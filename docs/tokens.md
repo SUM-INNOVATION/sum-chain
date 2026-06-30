@@ -220,18 +220,55 @@ curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
 
 ---
 
-## Write-only families — Equity, Agreement, Legal, Property, Healthcare, Finance
+## Equity — SRC-83X (registry reads)
+
+> Status:             code-backed
+> Last verified:      2026-06-30
+> Code references:    crates/primitives/src/equity.rs, crates/storage/src/equity_store.rs, crates/rpc/src/server.rs
+> Public RPC support: yes for registry reads (equity_getEntity, equity_getActiveEntities, equity_getEntitiesByOrgType, equity_getEntitiesByController, equity_getShareClass, equity_getActiveShareClasses, equity_getShareClassesByIssuer, equity_getControllerConfig)
+
+Public read access to the SRC-83X equity registries: entity profiles, share
+classes, and class-level controller config. Commitments and rights/metadata
+references are returned as opaque `0x` hashes. Writes are signed
+`TxPayload::Equity` transactions via [sum_sendRawTransaction](#submitting-writes).
+
+```bash
+# Entities: by subject id (hex), active only, by org type, or by controller
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"equity_getEntity","params":["0x<subject_id_hex>"]}'
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"equity_getActiveEntities","params":[]}'
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"equity_getEntitiesByOrgType","params":["Corporation"]}'
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"equity_getEntitiesByController","params":["<controller_address>"]}'
+
+# Share classes: by class id (hex), active only, or by issuer entity (hex)
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"equity_getShareClass","params":["0x<class_id_hex>"]}'
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"equity_getActiveShareClasses","params":[]}'
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"equity_getShareClassesByIssuer","params":["0x<issuer_subject_hex>"]}'
+
+# Class-level controller config by class id (hex)
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"equity_getControllerConfig","params":["0x<class_id_hex>"]}'
+```
+
+---
+
+## Write-only families — Agreement, Legal, Property, Healthcare, Finance
 
 > Status:             code-backed (write flow)
 > Last verified:      2026-06-30
-> Code references:    crates/primitives/src/{equity,agreement,legal,property,healthcare,finance}.rs, crates/state/src/{equity,agreement,legal,property,healthcare,finance}_executor.rs
+> Code references:    crates/primitives/src/{agreement,legal,property,healthcare,finance}.rs, crates/state/src/{agreement,legal,property,healthcare,finance}_executor.rs
 > Public RPC support: writes via sum_sendRawTransaction
 
 Each of these families has a `TxPayload` variant and a wired executor.
 
 | Family | SRC | TxPayload variant |
 |---|---|---|
-| Business / equity | 83X | `Equity` |
 | Agreement / IP | 84X | `Agreement` |
 | Legal process | 85X | `Legal` |
 | Property / insurance | 86X | `Property` |
