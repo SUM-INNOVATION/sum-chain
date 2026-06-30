@@ -287,11 +287,37 @@ curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
 
 ---
 
-## Write-only families — Legal, Property, Healthcare, Finance
+## Property — SRC-86X (asset registry reads)
+
+> Status:             code-backed
+> Last verified:      2026-06-30
+> Code references:    crates/primitives/src/property.rs, crates/storage/src/property_store.rs, crates/rpc/src/server.rs
+> Public RPC support: yes for asset-anchor registry reads (property_getAsset, property_getActiveAssets, property_getAssetsByJurisdiction)
+
+Public read access to SRC-861 asset anchors — the property/asset identity
+registry. Ids and commitments are returned as opaque `0x` hashes;
+`issuer_address` is the registrant address. Writes are signed
+`TxPayload::Property` transactions via [sum_sendRawTransaction](#submitting-writes).
+
+```bash
+# Asset anchor by asset id (hex)
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"property_getAsset","params":["0x<asset_id_hex>"]}'
+# Active asset anchors
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"property_getActiveAssets","params":[]}'
+# Asset anchors registered in a jurisdiction (e.g. "US-CA-LA")
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"property_getAssetsByJurisdiction","params":["US-CA-LA"]}'
+```
+
+---
+
+## Write-only families — Legal, Healthcare, Finance
 
 > Status:             code-backed (write flow)
 > Last verified:      2026-06-30
-> Code references:    crates/primitives/src/{legal,property,healthcare,finance}.rs, crates/state/src/{legal,property,healthcare,finance}_executor.rs
+> Code references:    crates/primitives/src/{legal,healthcare,finance}.rs, crates/state/src/{legal,healthcare,finance}_executor.rs
 > Public RPC support: writes via sum_sendRawTransaction
 
 Each of these families has a `TxPayload` variant and a wired executor.
@@ -299,7 +325,6 @@ Each of these families has a `TxPayload` variant and a wired executor.
 | Family | SRC | TxPayload variant |
 |---|---|---|
 | Legal process | 85X | `Legal` |
-| Property / insurance | 86X | `Property` |
 | Healthcare | 87X | `Healthcare` |
 | Finance / banking | 89X | `Finance` |
 

@@ -8,7 +8,7 @@ use crate::policy_account_types::{
     BuildSubmitProposalRequest, PolicyAccountInfo, PolicyBuildResponse, ProposalInfo,
 };
 use crate::types::{
-    TaxClaimTypeInfo, TaxIssuerInfo, TaxPolicyInfo, ExecutorLinkInfo,
+    TaxClaimTypeInfo, TaxIssuerInfo, TaxPolicyInfo, ExecutorLinkInfo, AssetInfo,
     EquityControllerConfigInfo, EquityEntityInfo, EquityShareClassInfo,
     AccountInfo, BlockHeightInfo, BlockInfo, ContractCallResult, ContractInfo,
     CreateEmploymentCredentialRequest,
@@ -1087,6 +1087,32 @@ pub trait SumChainApi {
     async fn agreement_get_active_executor_links(
         &self,
     ) -> Result<Vec<ExecutorLinkInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    // =========================================================================
+    // SRC-86X Property asset-anchor registry reads (issue #26 — asset anchors
+    // only; no title events, encumbrances, coverage, claims, proofs, events,
+    // party identities, off-chain content, or amounts).
+    // =========================================================================
+
+    /// Get an asset anchor by asset id (hex).
+    #[method(name = "property_getAsset")]
+    async fn property_get_asset(
+        &self,
+        asset_id: String,
+    ) -> Result<Option<AssetInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// List active asset anchors.
+    #[method(name = "property_getActiveAssets")]
+    async fn property_get_active_assets(
+        &self,
+    ) -> Result<Vec<AssetInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// List asset anchors registered in a jurisdiction (e.g. "US-CA-LA").
+    #[method(name = "property_getAssetsByJurisdiction")]
+    async fn property_get_assets_by_jurisdiction(
+        &self,
+        jurisdiction: String,
+    ) -> Result<Vec<AssetInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Check if an issuer can issue a specific subcode in a jurisdiction
     #[method(name = "docclass_canIssue")]

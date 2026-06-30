@@ -3701,6 +3701,37 @@ impl SumChainApiServer for RpcServer {
         Ok(links.iter().map(ExecutorLinkInfo::from).collect())
     }
 
+    // ── SRC-86X Property asset-anchor reads (issue #26) ─────────────────────
+
+    async fn property_get_asset(
+        &self,
+        asset_id: String,
+    ) -> std::result::Result<Option<AssetInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let id = self.parse_hex32(&asset_id)?;
+        let store = sumchain_storage::AssetStore::new(&self.db);
+        let asset = store.get(&id).map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(asset.as_ref().map(AssetInfo::from))
+    }
+
+    async fn property_get_active_assets(
+        &self,
+    ) -> std::result::Result<Vec<AssetInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let store = sumchain_storage::AssetStore::new(&self.db);
+        let assets = store.list_active().map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(assets.iter().map(AssetInfo::from).collect())
+    }
+
+    async fn property_get_assets_by_jurisdiction(
+        &self,
+        jurisdiction: String,
+    ) -> std::result::Result<Vec<AssetInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let store = sumchain_storage::AssetStore::new(&self.db);
+        let assets = store
+            .get_by_jurisdiction(&jurisdiction)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(assets.iter().map(AssetInfo::from).collect())
+    }
+
     async fn docclass_can_issue(
         &self,
         issuer: String,
@@ -8471,5 +8502,100 @@ mod agreement_rpc_tests {
         assert_eq!(srv.agreement_get_executor_links_by_agreement(aid).await.unwrap().len(), 1);
         assert_eq!(srv.agreement_get_executor_links_by_executor(exec.to_base58()).await.unwrap().len(), 1);
         assert_eq!(srv.agreement_get_active_executor_links().await.unwrap().len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod property_rpc_tests {
+    //! Issue #26: Property asset-anchor read RPCs over a real RpcServer.
+    //! Asset anchors only — no title/encumbrance/coverage/claim/proof/event
+    //! reads, no party identities, no public_reference, no off-chain content.
+    use super::*;
+    use std::collections::HashMap;
+    use sumchain_consensus::PoAEngine;
+    use sumchain_crypto::KeyPair;
+    use sumchain_genesis::{ChainParams, Genesis};
+    use sumchain_primitives::property::{AssetAnchor, AssetStatus, AssetType, PropertyIssuerClass};
+    use sumchain_primitives::Address;
+    use sumchain_state::MempoolConfig;
+    use sumchain_storage::AssetStore;
+    use tempfile::TempDir;
+
+    fn server() -> (RpcServer, Arc<Database>, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let db = Arc::new(Database::open_default(dir.path()).unwrap());
+        let state = Arc::new(StateManager::new(db.clone(), 1));
+        let mempool = Arc::new(Mempool::new(MempoolConfig::default()));
+        let validator = KeyPair::generate();
+        let genesis = Genesis::new(
+            1,
+            0,
+            vec![validator.public_key().to_base58()],
+            HashMap::from([(validator.address().to_base58(), 1u128)]),
+            ChainParams::default(),
+        );
+        let engine = Arc::new(
+            PoAEngine::new(db.clone(), state.clone(), mempool.clone(), &genesis, Some(validator)).unwrap(),
+        );
+        let (tx_sender, _rx) = mpsc::channel(8);
+        let srv = RpcServer::new(db.clone(), state, mempool, engine, tx_sender, Arc::new(|| 0usize));
+        (srv, db, dir)
+    }
+
+    fn asset(asset_id: [u8; 32], jurisdiction: &str, issuer: Address, status: AssetStatus) -> AssetAnchor {
+        AssetAnchor {
+            asset_id,
+            asset_commitment: [2u8; 32],
+            asset_type: AssetType::SingleFamilyResidence,
+            jurisdiction_code: jurisdiction.to_string(),
+            // opt-in real-world identifier — must NOT surface in the DTO
+            public_reference: Some("APN-1234-567-890".to_string()),
+            policy_id: [3u8; 32],
+            issuer_class: PropertyIssuerClass::LandRegistry,
+            issuer_address: issuer,
+            status,
+            created_at: 1000,
+            updated_at: 1100,
+            anchored_at_height: 5,
+            related_assets: vec![[0xAB; 32]],
+            attachments: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn asset_anchor_reads() {
+        let (srv, db, _dir) = server();
+        let store = AssetStore::new(&db);
+        let issuer = Address::new([0xE1; 20]);
+        store.put(&asset([0x01; 32], "US-CA-LA", issuer, AssetStatus::Active)).unwrap();
+        store.put(&asset([0x02; 32], "US-CA-LA", issuer, AssetStatus::Deregistered)).unwrap();
+        store.put(&asset([0x03; 32], "US-NY-NY", issuer, AssetStatus::Active)).unwrap();
+
+        let aid = format!("0x{}", hex::encode([0x01; 32]));
+        let got = srv.property_get_asset(aid.clone()).await.unwrap().unwrap();
+        assert_eq!(got.asset_id, aid);
+        assert_eq!(got.asset_type, "SingleFamilyResidence");
+        assert_eq!(got.jurisdiction_code, "US-CA-LA");
+        assert_eq!(got.issuer_class, "LandRegistry");
+        assert_eq!(got.issuer_address, issuer.to_base58());
+        assert_eq!(got.status, "Active");
+        assert_eq!(got.anchored_at_height, 5);
+        assert_eq!(got.related_assets, vec![format!("0x{}", hex::encode([0xAB; 32]))]);
+
+        // Excluded/deferred fields must never appear in the serialized DTO.
+        let json = serde_json::to_string(&got).unwrap();
+        for banned in [
+            "public_reference", "attachments", "hint_uri", "encryption", "grantor",
+            "grantee", "holder", "obligor", "insured", "claimant", "premium", "loss_amount", "proof",
+        ] {
+            assert!(!json.contains(banned), "AssetInfo leaked banned field: {}", banned);
+        }
+
+        assert!(srv.property_get_asset(format!("0x{}", hex::encode([0u8; 32]))).await.unwrap().is_none());
+        // list_active excludes the Deregistered asset
+        assert_eq!(srv.property_get_active_assets().await.unwrap().len(), 2);
+        assert_eq!(srv.property_get_assets_by_jurisdiction("US-CA-LA".to_string()).await.unwrap().len(), 2);
+        assert_eq!(srv.property_get_assets_by_jurisdiction("US-NY-NY".to_string()).await.unwrap().len(), 1);
+        assert_eq!(srv.property_get_assets_by_jurisdiction("US-TX-AU".to_string()).await.unwrap().len(), 0);
     }
 }
