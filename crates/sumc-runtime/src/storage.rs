@@ -30,6 +30,23 @@ pub trait ContractStorageBackend: Send + Sync {
 
     /// Store contract code
     fn store_code(&self, contract: &ContractAddress, code: &[u8]) -> Result<()>;
+
+    /// Delete contract code (deploy cleanup on failed init).
+    fn delete_code(&self, contract: &ContractAddress) -> Result<()>;
+
+    /// Get serialized contract metadata.
+    fn get_metadata(&self, contract: &ContractAddress) -> Result<Option<Vec<u8>>>;
+
+    /// Store serialized contract metadata.
+    fn store_metadata(&self, contract: &ContractAddress, bytes: &[u8]) -> Result<()>;
+
+    /// Delete contract metadata (deploy cleanup on failed init).
+    fn delete_metadata(&self, contract: &ContractAddress) -> Result<()>;
+
+    /// Apply a set of storage writes/deletes atomically. `ops` is
+    /// `(contract, key, Some(value) | None)`; `None` deletes. Implementations
+    /// MUST apply all-or-nothing.
+    fn commit(&self, ops: &[(ContractAddress, StorageKey, Option<StorageValue>)]) -> Result<()>;
 }
 
 /// In-memory storage for testing
@@ -39,6 +56,8 @@ pub struct MemoryStorage {
     storage: RwLock<HashMap<ContractAddress, HashMap<StorageKey, StorageValue>>>,
     /// Contract code: contract_address -> wasm bytecode
     code: RwLock<HashMap<ContractAddress, Vec<u8>>>,
+    /// Contract metadata: contract_address -> serialized bytes
+    metadata: RwLock<HashMap<ContractAddress, Vec<u8>>>,
 }
 
 impl MemoryStorage {
@@ -89,6 +108,42 @@ impl ContractStorageBackend for MemoryStorage {
     fn store_code(&self, contract: &ContractAddress, wasm: &[u8]) -> Result<()> {
         let mut code = self.code.write();
         code.insert(*contract, wasm.to_vec());
+        Ok(())
+    }
+
+    fn delete_code(&self, contract: &ContractAddress) -> Result<()> {
+        self.code.write().remove(contract);
+        Ok(())
+    }
+
+    fn get_metadata(&self, contract: &ContractAddress) -> Result<Option<Vec<u8>>> {
+        Ok(self.metadata.read().get(contract).cloned())
+    }
+
+    fn store_metadata(&self, contract: &ContractAddress, bytes: &[u8]) -> Result<()> {
+        self.metadata.write().insert(*contract, bytes.to_vec());
+        Ok(())
+    }
+
+    fn delete_metadata(&self, contract: &ContractAddress) -> Result<()> {
+        self.metadata.write().remove(contract);
+        Ok(())
+    }
+
+    fn commit(&self, ops: &[(ContractAddress, StorageKey, Option<StorageValue>)]) -> Result<()> {
+        let mut storage = self.storage.write();
+        for (contract, key, value) in ops {
+            match value {
+                Some(v) => {
+                    storage.entry(*contract).or_default().insert(key.clone(), v.clone());
+                }
+                None => {
+                    if let Some(m) = storage.get_mut(contract) {
+                        m.remove(key);
+                    }
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -176,16 +231,40 @@ impl ContractStorage {
         self.backend.store_code(contract, code)
     }
 
-    /// Commit all pending changes to the backend
+    /// Delete contract code (deploy cleanup on failed init).
+    pub fn delete_code(&self, contract: &ContractAddress) -> Result<()> {
+        self.backend.delete_code(contract)
+    }
+
+    /// Get serialized contract metadata.
+    pub fn get_metadata(&self, contract: &ContractAddress) -> Result<Option<Vec<u8>>> {
+        self.backend.get_metadata(contract)
+    }
+
+    /// Store serialized contract metadata.
+    pub fn store_metadata(&self, contract: &ContractAddress, bytes: &[u8]) -> Result<()> {
+        self.backend.store_metadata(contract, bytes)
+    }
+
+    /// Delete contract metadata (deploy cleanup on failed init).
+    pub fn delete_metadata(&self, contract: &ContractAddress) -> Result<()> {
+        self.backend.delete_metadata(contract)
+    }
+
+    /// Commit all pending changes to the backend atomically.
+    ///
+    /// The write-cache is drained into a vector sorted by `(contract, key)` so
+    /// the applied order is deterministic across nodes, then applied
+    /// all-or-nothing via the backend's atomic `commit`.
     pub fn commit(&self) -> Result<()> {
         let mut write_cache = self.write_cache.write();
+        let mut ops: Vec<(ContractAddress, StorageKey, Option<StorageValue>)> = write_cache
+            .drain()
+            .map(|((contract, key), value)| (contract, key, value))
+            .collect();
+        ops.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()).then_with(|| a.1.cmp(&b.1)));
 
-        for ((contract, key), value) in write_cache.drain() {
-            match value {
-                Some(v) => self.backend.write(&contract, &key, &v)?,
-                None => self.backend.delete(&contract, &key)?,
-            }
-        }
+        self.backend.commit(&ops)?;
 
         // Clear read cache (state has changed)
         self.read_cache.write().clear();
@@ -193,7 +272,7 @@ impl ContractStorage {
         Ok(())
     }
 
-    /// Rollback all pending changes
+    /// Rollback uncommitted changes.
     pub fn rollback(&self) {
         self.write_cache.write().clear();
         self.read_cache.write().clear();
@@ -205,10 +284,11 @@ impl ContractStorage {
     }
 }
 
-/// Column family name for contract storage
-const CF_CONTRACT_STORAGE: &str = "contract_storage";
-/// Column family name for contract code
-const CF_CONTRACT_CODE: &str = "contract_code";
+// Column family names — single source of truth is `sumchain_storage::cf`
+// (registered in `ALL_CFS`), so these stay in sync with what the DB opens.
+const CF_CONTRACT_STORAGE: &str = sumchain_storage::cf::CONTRACT_STORAGE;
+const CF_CONTRACT_CODE: &str = sumchain_storage::cf::CONTRACT_CODE;
+const CF_CONTRACT_METADATA: &str = sumchain_storage::cf::CONTRACT_METADATA;
 
 /// Storage adapter for RocksDB backend
 pub struct RocksDbStorage {
@@ -266,6 +346,46 @@ impl ContractStorageBackend for RocksDbStorage {
         self.db
             .put(CF_CONTRACT_CODE, contract.as_bytes(), code)
             .map_err(|e| RuntimeError::Storage(e.to_string()))
+    }
+
+    fn delete_code(&self, contract: &ContractAddress) -> Result<()> {
+        self.db
+            .delete(CF_CONTRACT_CODE, contract.as_bytes())
+            .map_err(|e| RuntimeError::Storage(e.to_string()))
+    }
+
+    fn get_metadata(&self, contract: &ContractAddress) -> Result<Option<Vec<u8>>> {
+        self.db
+            .get(CF_CONTRACT_METADATA, contract.as_bytes())
+            .map_err(|e| RuntimeError::Storage(e.to_string()))
+    }
+
+    fn store_metadata(&self, contract: &ContractAddress, bytes: &[u8]) -> Result<()> {
+        self.db
+            .put(CF_CONTRACT_METADATA, contract.as_bytes(), bytes)
+            .map_err(|e| RuntimeError::Storage(e.to_string()))
+    }
+
+    fn delete_metadata(&self, contract: &ContractAddress) -> Result<()> {
+        self.db
+            .delete(CF_CONTRACT_METADATA, contract.as_bytes())
+            .map_err(|e| RuntimeError::Storage(e.to_string()))
+    }
+
+    fn commit(&self, ops: &[(ContractAddress, StorageKey, Option<StorageValue>)]) -> Result<()> {
+        let mut batch = self.db.batch();
+        for (contract, key, value) in ops {
+            let full_key = self.make_key(contract, key);
+            match value {
+                Some(v) => batch
+                    .put(CF_CONTRACT_STORAGE, &full_key, v)
+                    .map_err(|e| RuntimeError::Storage(e.to_string()))?,
+                None => batch
+                    .delete(CF_CONTRACT_STORAGE, &full_key)
+                    .map_err(|e| RuntimeError::Storage(e.to_string()))?,
+            }
+        }
+        batch.commit().map_err(|e| RuntimeError::Storage(e.to_string()))
     }
 }
 

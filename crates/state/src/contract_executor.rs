@@ -10,7 +10,7 @@ use sumchain_primitives::transaction::{ContractCallData, ContractDeployData};
 use sumchain_storage::Database;
 use sumc_runtime::{
     ContractExecutor as WasmExecutor, ContractStorage, ExecutionContext, ExecutionResult,
-    Gas, MemoryStorage,
+    Gas, RocksDbStorage,
 };
 use tracing::{debug, info, warn};
 
@@ -70,9 +70,9 @@ pub struct ContractExecutorState {
 impl ContractExecutorState {
     /// Create a new contract executor
     pub fn new(db: Arc<Database>, params: ChainParams) -> Self {
-        // Create in-memory storage for contracts
-        // In production, this would be backed by the database
-        let backend = Arc::new(MemoryStorage::new());
+        // Persistent contract storage backed by RocksDB: code, storage, and
+        // metadata live in dedicated CFs and survive restarts.
+        let backend = Arc::new(RocksDbStorage::new(db.clone()));
         let storage = Arc::new(ContractStorage::new(backend));
         let wasm_executor = Arc::new(WasmExecutor::new(storage));
 

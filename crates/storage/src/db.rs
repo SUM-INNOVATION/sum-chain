@@ -243,6 +243,14 @@ pub mod cf {
     /// Registered public keys (address -> RegisteredPublicKey)
     pub const MESSAGING_PUBLIC_KEYS: &str = "messaging_public_keys";
 
+    // Smart-contract persistent state (issue #25; dormant until activation).
+    /// Contract WASM bytecode (contract_address -> code).
+    pub const CONTRACT_CODE: &str = "contract_code";
+    /// Contract storage (contract_address + b':' + key -> value).
+    pub const CONTRACT_STORAGE: &str = "contract_storage";
+    /// Contract metadata (contract_address -> bincode(ContractMetadata)).
+    pub const CONTRACT_METADATA: &str = "contract_metadata";
+
     // SRC-82X Tax & Compliance column families
     /// Tax claim type registry (claim_type -> TaxClaimTypeEntry)
     pub const TAX_CLAIM_TYPES: &str = "tax_claim_types";
@@ -519,6 +527,9 @@ pub const ALL_CFS: &[&str] = &[
     cf::MESSAGING_SENDER_EVENTS,
     cf::MESSAGING_PAYMENTS_BY_RECIPIENT,
     cf::MESSAGING_PUBLIC_KEYS,
+    cf::CONTRACT_CODE,
+    cf::CONTRACT_STORAGE,
+    cf::CONTRACT_METADATA,
     // SRC-82X Tax & Compliance
     cf::TAX_CLAIM_TYPES,
     cf::TAX_ISSUERS,

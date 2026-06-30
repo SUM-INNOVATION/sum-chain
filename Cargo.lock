@@ -5769,6 +5769,7 @@ dependencies = [
  "tracing",
  "wasmer",
  "wasmer-compiler-singlepass",
+ "wat",
 ]
 
 [[package]]
