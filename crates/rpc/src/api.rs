@@ -9,6 +9,7 @@ use crate::policy_account_types::{
 };
 use crate::types::{
     TaxClaimTypeInfo, TaxIssuerInfo, TaxPolicyInfo,
+    EquityControllerConfigInfo, EquityEntityInfo, EquityShareClassInfo,
     AccountInfo, BlockHeightInfo, BlockInfo, ContractCallResult, ContractInfo,
     CreateEmploymentCredentialRequest,
     CreateEmploymentCredentialResponse, DelegationRpcInfo, DelegatorSummary, DocClassConfigInfo,
@@ -994,6 +995,65 @@ pub trait SumChainApi {
     async fn tax_list_policies(
         &self,
     ) -> Result<Vec<TaxPolicyInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    // =========================================================================
+    // SRC-83X Equity registry reads (issue #26 — entity / share-class /
+    // controller-config registries only; no holder/ownership/proof data).
+    // =========================================================================
+
+    /// Get an entity profile by subject id (hex).
+    #[method(name = "equity_getEntity")]
+    async fn equity_get_entity(
+        &self,
+        subject_id: String,
+    ) -> Result<Option<EquityEntityInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// List active entity profiles.
+    #[method(name = "equity_getActiveEntities")]
+    async fn equity_get_active_entities(
+        &self,
+    ) -> Result<Vec<EquityEntityInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// List entities by organization type (e.g. "Corporation", "LLC", "DAO").
+    #[method(name = "equity_getEntitiesByOrgType")]
+    async fn equity_get_entities_by_org_type(
+        &self,
+        org_type: String,
+    ) -> Result<Vec<EquityEntityInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// List entities a controller address controls.
+    #[method(name = "equity_getEntitiesByController")]
+    async fn equity_get_entities_by_controller(
+        &self,
+        controller: String,
+    ) -> Result<Vec<EquityEntityInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get a share class by class id (hex).
+    #[method(name = "equity_getShareClass")]
+    async fn equity_get_share_class(
+        &self,
+        class_id: String,
+    ) -> Result<Option<EquityShareClassInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// List active share classes.
+    #[method(name = "equity_getActiveShareClasses")]
+    async fn equity_get_active_share_classes(
+        &self,
+    ) -> Result<Vec<EquityShareClassInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// List share classes issued by an entity (issuer subject id, hex).
+    #[method(name = "equity_getShareClassesByIssuer")]
+    async fn equity_get_share_classes_by_issuer(
+        &self,
+        issuer_subject: String,
+    ) -> Result<Vec<EquityShareClassInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get the class-level controller config by class id (hex).
+    #[method(name = "equity_getControllerConfig")]
+    async fn equity_get_controller_config(
+        &self,
+        class_id: String,
+    ) -> Result<Option<EquityControllerConfigInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Check if an issuer can issue a specific subcode in a jurisdiction
     #[method(name = "docclass_canIssue")]

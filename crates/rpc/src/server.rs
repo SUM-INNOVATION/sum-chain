@@ -48,6 +48,23 @@ fn parse_tax_issuer_class(s: &str) -> Option<sumchain_primitives::tax::TaxIssuer
     }
 }
 
+/// Parse an Equity org type from its variant name (as emitted by the read
+/// DTOs) for the `equity_getEntitiesByOrgType` filter.
+fn parse_equity_org_type(s: &str) -> Option<sumchain_primitives::equity::OrgType> {
+    use sumchain_primitives::equity::OrgType;
+    match s {
+        "Corporation" => Some(OrgType::Corporation),
+        "LLC" => Some(OrgType::LLC),
+        "Partnership" => Some(OrgType::Partnership),
+        "DAO" => Some(OrgType::DAO),
+        "Foundation" => Some(OrgType::Foundation),
+        "Trust" => Some(OrgType::Trust),
+        "Cooperative" => Some(OrgType::Cooperative),
+        "Other" => Some(OrgType::Other),
+        _ => None,
+    }
+}
+
 /// Classify a transaction's status given its receipt (if any), mempool presence,
 /// and a finality check. Pure function — extracted from `chain_get_transaction_status`
 /// to make the dispatch logic testable without a full RPC server harness.
@@ -3563,6 +3580,85 @@ impl SumChainApiServer for RpcServer {
         let store = sumchain_storage::TaxPolicyStore::new(&self.db);
         let all = store.list_all().map_err(|e| RpcError::Internal(e.to_string()))?;
         Ok(all.iter().map(TaxPolicyInfo::from).collect())
+    }
+
+    // ── SRC-83X Equity registry reads (issue #26) ───────────────────────────
+
+    async fn equity_get_entity(
+        &self,
+        subject_id: String,
+    ) -> std::result::Result<Option<EquityEntityInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let id = self.parse_hex32(&subject_id)?;
+        let store = sumchain_storage::EntityProfileStore::new(&self.db);
+        let entity = store.get(&id).map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(entity.as_ref().map(EquityEntityInfo::from))
+    }
+
+    async fn equity_get_active_entities(
+        &self,
+    ) -> std::result::Result<Vec<EquityEntityInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let store = sumchain_storage::EntityProfileStore::new(&self.db);
+        let entities = store.list_active().map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(entities.iter().map(EquityEntityInfo::from).collect())
+    }
+
+    async fn equity_get_entities_by_org_type(
+        &self,
+        org_type: String,
+    ) -> std::result::Result<Vec<EquityEntityInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let org = parse_equity_org_type(&org_type)
+            .ok_or_else(|| RpcError::InvalidParams(format!("Unknown org type: {}", org_type)))?;
+        let store = sumchain_storage::EntityProfileStore::new(&self.db);
+        let entities = store.list_by_org_type(org).map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(entities.iter().map(EquityEntityInfo::from).collect())
+    }
+
+    async fn equity_get_entities_by_controller(
+        &self,
+        controller: String,
+    ) -> std::result::Result<Vec<EquityEntityInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let addr = self.parse_address(&controller)?;
+        let store = sumchain_storage::EntityProfileStore::new(&self.db);
+        let entities = store.get_by_controller(&addr).map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(entities.iter().map(EquityEntityInfo::from).collect())
+    }
+
+    async fn equity_get_share_class(
+        &self,
+        class_id: String,
+    ) -> std::result::Result<Option<EquityShareClassInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let id = self.parse_hex32(&class_id)?;
+        let store = sumchain_storage::EquityTokenStore::new(&self.db);
+        let token = store.get(&id).map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(token.as_ref().map(EquityShareClassInfo::from))
+    }
+
+    async fn equity_get_active_share_classes(
+        &self,
+    ) -> std::result::Result<Vec<EquityShareClassInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let store = sumchain_storage::EquityTokenStore::new(&self.db);
+        let tokens = store.list_active().map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(tokens.iter().map(EquityShareClassInfo::from).collect())
+    }
+
+    async fn equity_get_share_classes_by_issuer(
+        &self,
+        issuer_subject: String,
+    ) -> std::result::Result<Vec<EquityShareClassInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let id = self.parse_hex32(&issuer_subject)?;
+        let store = sumchain_storage::EquityTokenStore::new(&self.db);
+        let tokens = store.get_by_issuer(&id).map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(tokens.iter().map(EquityShareClassInfo::from).collect())
+    }
+
+    async fn equity_get_controller_config(
+        &self,
+        class_id: String,
+    ) -> std::result::Result<Option<EquityControllerConfigInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let id = self.parse_hex32(&class_id)?;
+        let store = sumchain_storage::EquityControllerStore::new(&self.db);
+        let cfg = store.get(&id).map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(cfg.as_ref().map(EquityControllerConfigInfo::from))
     }
 
     async fn docclass_can_issue(
@@ -8099,5 +8195,158 @@ mod tax_rpc_tests {
 
         assert!(srv.tax_get_policy(format!("0x{}", hex::encode([0u8; 32]))).await.unwrap().is_none());
         assert_eq!(srv.tax_list_policies().await.unwrap().len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod equity_rpc_tests {
+    //! Issue #26: Equity registry read RPCs over a real RpcServer (entities,
+    //! share classes, controller config only — no holder/ownership data).
+    use super::*;
+    use std::collections::HashMap;
+    use sumchain_consensus::PoAEngine;
+    use sumchain_crypto::KeyPair;
+    use sumchain_genesis::{ChainParams, Genesis};
+    use sumchain_primitives::equity::{
+        ControllerModel, EntityProfile, EntityStatus, EquityControllerConfig, EquityToken, OrgType,
+        ShareClassType, TokenStatus,
+    };
+    use sumchain_primitives::Address;
+    use sumchain_state::MempoolConfig;
+    use sumchain_storage::{EntityProfileStore, EquityControllerStore, EquityTokenStore};
+    use tempfile::TempDir;
+
+    fn server() -> (RpcServer, Arc<Database>, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let db = Arc::new(Database::open_default(dir.path()).unwrap());
+        let state = Arc::new(StateManager::new(db.clone(), 1));
+        let mempool = Arc::new(Mempool::new(MempoolConfig::default()));
+        let validator = KeyPair::generate();
+        let genesis = Genesis::new(
+            1,
+            0,
+            vec![validator.public_key().to_base58()],
+            HashMap::from([(validator.address().to_base58(), 1u128)]),
+            ChainParams::default(),
+        );
+        let engine = Arc::new(
+            PoAEngine::new(db.clone(), state.clone(), mempool.clone(), &genesis, Some(validator)).unwrap(),
+        );
+        let (tx_sender, _rx) = mpsc::channel(8);
+        let srv = RpcServer::new(db.clone(), state, mempool, engine, tx_sender, Arc::new(|| 0usize));
+        (srv, db, dir)
+    }
+
+    fn seed(db: &Arc<Database>, ctrl: Address) {
+        let es = EntityProfileStore::new(db);
+        es.put(&EntityProfile {
+            subject_id: [0xE1; 32],
+            org_type: OrgType::Corporation,
+            name_commitment: [1u8; 32],
+            jurisdiction: Some("US-DE".to_string()),
+            registration_commitment: None,
+            controller_model: ControllerModel::SingleSigner,
+            controllers: vec![ctrl],
+            multisig_threshold: None,
+            services: vec![],
+            metadata_hash: [2u8; 32],
+            created_at: 100,
+            updated_at: 100,
+            status: EntityStatus::Active,
+        })
+        .unwrap();
+
+        let ts = EquityTokenStore::new(db);
+        ts.put(&EquityToken {
+            issuer_subject: [0xE1; 32],
+            class_id: [0xA1; 32],
+            share_class_type: ShareClassType::Common,
+            name: "Common".to_string(),
+            symbol: "CMN".to_string(),
+            authorized_shares: 1_000_000,
+            issued_shares: 250_000,
+            votes_per_share: 1,
+            economic_rights_hash: [3u8; 32],
+            liquidation_preference_hash: None,
+            dividend_policy_hash: None,
+            conversion_rules_hash: None,
+            controller: Address::new([9u8; 20]),
+            par_value: Some(1),
+            created_at: 200,
+            updated_at: 200,
+            status: TokenStatus::Active,
+        })
+        .unwrap();
+
+        let cs = EquityControllerStore::new(db);
+        cs.put(
+            &[0xA1; 32],
+            &EquityControllerConfig {
+                address: Address::new([7u8; 20]),
+                whitelist_enabled: true,
+                trading_windows: vec![],
+                transfer_limit: 0,
+                governance_policy_id: [4u8; 32],
+                paused: false,
+            },
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn entity_reads() {
+        let (srv, db, _dir) = server();
+        let ctrl = Address::new([0xC1; 20]);
+        seed(&db, ctrl);
+        let id = format!("0x{}", hex::encode([0xE1; 32]));
+
+        let got = srv.equity_get_entity(id.clone()).await.unwrap().unwrap();
+        assert_eq!(got.subject_id, id);
+        assert_eq!(got.org_type, "Corporation");
+        assert_eq!(got.name_commitment, format!("0x{}", hex::encode([1u8; 32])));
+        assert_eq!(got.controllers, vec![ctrl.to_base58()]);
+
+        assert!(srv.equity_get_entity(format!("0x{}", hex::encode([0u8; 32]))).await.unwrap().is_none());
+        assert_eq!(srv.equity_get_active_entities().await.unwrap().len(), 1);
+        assert_eq!(srv.equity_get_entities_by_org_type("Corporation".to_string()).await.unwrap().len(), 1);
+        assert_eq!(srv.equity_get_entities_by_org_type("LLC".to_string()).await.unwrap().len(), 0);
+        assert!(srv.equity_get_entities_by_org_type("Bogus".to_string()).await.is_err());
+        assert_eq!(srv.equity_get_entities_by_controller(ctrl.to_base58()).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn share_class_reads_exclude_issued_shares() {
+        let (srv, db, _dir) = server();
+        seed(&db, Address::new([0xC1; 20]));
+        let cid = format!("0x{}", hex::encode([0xA1; 32]));
+
+        let got = srv.equity_get_share_class(cid.clone()).await.unwrap().unwrap();
+        assert_eq!(got.class_id, cid);
+        assert_eq!(got.symbol, "CMN");
+        assert_eq!(got.share_class_type, "Common");
+        assert_eq!(got.authorized_shares, "1000000");
+        // issued_shares must NOT be present: serialize to JSON and assert absence.
+        let json = serde_json::to_string(&got).unwrap();
+        assert!(!json.contains("issued_shares"), "issued_shares must not be exposed");
+        assert!(json.contains("authorized_shares"));
+
+        assert!(srv.equity_get_share_class(format!("0x{}", hex::encode([0u8; 32]))).await.unwrap().is_none());
+        assert_eq!(srv.equity_get_active_share_classes().await.unwrap().len(), 1);
+        assert_eq!(
+            srv.equity_get_share_classes_by_issuer(format!("0x{}", hex::encode([0xE1; 32]))).await.unwrap().len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn controller_config_read() {
+        let (srv, db, _dir) = server();
+        seed(&db, Address::new([0xC1; 20]));
+        let cid = format!("0x{}", hex::encode([0xA1; 32]));
+
+        let got = srv.equity_get_controller_config(cid).await.unwrap().unwrap();
+        assert!(got.whitelist_enabled);
+        assert_eq!(got.governance_policy_id, format!("0x{}", hex::encode([4u8; 32])));
+        assert!(srv.equity_get_controller_config(format!("0x{}", hex::encode([0u8; 32]))).await.unwrap().is_none());
     }
 }

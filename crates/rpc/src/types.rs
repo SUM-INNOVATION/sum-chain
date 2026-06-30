@@ -2047,3 +2047,156 @@ impl From<&sumchain_primitives::tax::TaxPolicy> for TaxPolicyInfo {
         }
     }
 }
+
+// =============================================================================
+// SRC-83X Equity registry read DTOs (issue #26 — registry/admin records only;
+// NO holder/balance/ownership/proof/snapshot/governance/corporate-action data,
+// and NO issued_shares/aggregate ownership).
+// =============================================================================
+
+/// On-chain entity service endpoint (admin metadata; endpoint is not
+/// validated, resolved, enriched, or labeled).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EquityServiceInfo {
+    pub service_id: String,
+    pub service_type: String,
+    pub endpoint: String,
+}
+
+impl From<&sumchain_primitives::equity::EntityService> for EquityServiceInfo {
+    fn from(s: &sumchain_primitives::equity::EntityService) -> Self {
+        Self {
+            service_id: s.service_id.clone(),
+            service_type: format!("{:?}", s.service_type),
+            endpoint: s.endpoint.clone(),
+        }
+    }
+}
+
+/// Public view of an SRC-831 entity profile. `subject_id`, `name_commitment`,
+/// `registration_commitment`, `metadata_hash` are opaque hashes (not decoded).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EquityEntityInfo {
+    pub subject_id: String,
+    pub org_type: String,
+    pub name_commitment: String,
+    pub jurisdiction: Option<String>,
+    pub registration_commitment: Option<String>,
+    pub controller_model: String,
+    pub controllers: Vec<String>,
+    pub multisig_threshold: Option<u8>,
+    pub services: Vec<EquityServiceInfo>,
+    pub metadata_hash: String,
+    pub created_at: u64,
+    pub updated_at: u64,
+    pub status: String,
+}
+
+impl From<&sumchain_primitives::equity::EntityProfile> for EquityEntityInfo {
+    fn from(e: &sumchain_primitives::equity::EntityProfile) -> Self {
+        Self {
+            subject_id: format!("0x{}", hex::encode(e.subject_id)),
+            org_type: format!("{:?}", e.org_type),
+            name_commitment: format!("0x{}", hex::encode(e.name_commitment)),
+            jurisdiction: e.jurisdiction.clone(),
+            registration_commitment: e
+                .registration_commitment
+                .map(|h| format!("0x{}", hex::encode(h))),
+            controller_model: format!("{:?}", e.controller_model),
+            controllers: e.controllers.iter().map(|a| a.to_base58()).collect(),
+            multisig_threshold: e.multisig_threshold,
+            services: e.services.iter().map(EquityServiceInfo::from).collect(),
+            metadata_hash: format!("0x{}", hex::encode(e.metadata_hash)),
+            created_at: e.created_at,
+            updated_at: e.updated_at,
+            status: format!("{:?}", e.status),
+        }
+    }
+}
+
+/// Public view of an SRC-833 share class. Aggregate/holder data is excluded:
+/// no `issued_shares`, balances, or holders. Rights hashes are opaque.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EquityShareClassInfo {
+    pub issuer_subject: String,
+    pub class_id: String,
+    pub share_class_type: String,
+    pub name: String,
+    pub symbol: String,
+    pub authorized_shares: String,
+    pub votes_per_share: u64,
+    pub economic_rights_hash: String,
+    pub liquidation_preference_hash: Option<String>,
+    pub dividend_policy_hash: Option<String>,
+    pub conversion_rules_hash: Option<String>,
+    pub controller: String,
+    pub par_value: Option<String>,
+    pub created_at: u64,
+    pub updated_at: u64,
+    pub status: String,
+}
+
+impl From<&sumchain_primitives::equity::EquityToken> for EquityShareClassInfo {
+    fn from(t: &sumchain_primitives::equity::EquityToken) -> Self {
+        Self {
+            issuer_subject: format!("0x{}", hex::encode(t.issuer_subject)),
+            class_id: format!("0x{}", hex::encode(t.class_id)),
+            share_class_type: format!("{:?}", t.share_class_type),
+            name: t.name.clone(),
+            symbol: t.symbol.clone(),
+            authorized_shares: t.authorized_shares.to_string(),
+            votes_per_share: t.votes_per_share,
+            economic_rights_hash: format!("0x{}", hex::encode(t.economic_rights_hash)),
+            liquidation_preference_hash: t
+                .liquidation_preference_hash
+                .map(|h| format!("0x{}", hex::encode(h))),
+            dividend_policy_hash: t.dividend_policy_hash.map(|h| format!("0x{}", hex::encode(h))),
+            conversion_rules_hash: t.conversion_rules_hash.map(|h| format!("0x{}", hex::encode(h))),
+            controller: t.controller.to_base58(),
+            par_value: t.par_value.map(|v| v.to_string()),
+            created_at: t.created_at,
+            updated_at: t.updated_at,
+            status: format!("{:?}", t.status),
+        }
+    }
+}
+
+/// Class-level controller config (SRC-834). Control policy only — no whitelist
+/// entries, lockups, or per-holder restrictions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EquityTradingWindowInfo {
+    pub start_day: u8,
+    pub end_day: u8,
+    pub months: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EquityControllerConfigInfo {
+    pub address: String,
+    pub whitelist_enabled: bool,
+    pub trading_windows: Vec<EquityTradingWindowInfo>,
+    pub transfer_limit: String,
+    pub governance_policy_id: String,
+    pub paused: bool,
+}
+
+impl From<&sumchain_primitives::equity::EquityControllerConfig> for EquityControllerConfigInfo {
+    fn from(c: &sumchain_primitives::equity::EquityControllerConfig) -> Self {
+        Self {
+            address: c.address.to_base58(),
+            whitelist_enabled: c.whitelist_enabled,
+            trading_windows: c
+                .trading_windows
+                .iter()
+                .map(|w| EquityTradingWindowInfo {
+                    start_day: w.start_day,
+                    end_day: w.end_day,
+                    months: w.months,
+                })
+                .collect(),
+            transfer_limit: c.transfer_limit.to_string(),
+            governance_policy_id: format!("0x{}", hex::encode(c.governance_policy_id)),
+            paused: c.paused,
+        }
+    }
+}
