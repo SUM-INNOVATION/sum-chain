@@ -34,6 +34,20 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// (0.001 Koppa).
 const POLICY_DEFAULT_FEE: u128 = 1_000_000;
 
+/// Parse a Tax issuer class from its variant name (as emitted by the read
+/// DTOs) for the `tax_getIssuersByClass` filter.
+fn parse_tax_issuer_class(s: &str) -> Option<sumchain_primitives::tax::TaxIssuerClass> {
+    use sumchain_primitives::tax::TaxIssuerClass;
+    match s {
+        "TaxAuthority" => Some(TaxIssuerClass::TaxAuthority),
+        "EmployerPayroll" => Some(TaxIssuerClass::EmployerPayroll),
+        "BankBroker" => Some(TaxIssuerClass::BankBroker),
+        "AuditorCpa" => Some(TaxIssuerClass::AuditorCpa),
+        "TaxFilingProvider" => Some(TaxIssuerClass::TaxFilingProvider),
+        _ => None,
+    }
+}
+
 /// Classify a transaction's status given its receipt (if any), mempool presence,
 /// and a finality check. Pure function — extracted from `chain_get_transaction_status`
 /// to make the dispatch logic testable without a full RPC server harness.
@@ -3483,6 +3497,72 @@ impl SumChainApiServer for RpcServer {
             .collect();
 
         Ok(issuers)
+    }
+
+    // ── SRC-82X Tax registry reads (issue #26) ──────────────────────────────
+
+    async fn tax_get_claim_type(
+        &self,
+        claim_type: String,
+    ) -> std::result::Result<Option<TaxClaimTypeInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let store = sumchain_storage::TaxClaimTypeStore::new(&self.db);
+        let entry = store.get(&claim_type).map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(entry.as_ref().map(TaxClaimTypeInfo::from))
+    }
+
+    async fn tax_list_claim_types(
+        &self,
+    ) -> std::result::Result<Vec<TaxClaimTypeInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let store = sumchain_storage::TaxClaimTypeStore::new(&self.db);
+        let all = store.list_all().map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(all.iter().map(TaxClaimTypeInfo::from).collect())
+    }
+
+    async fn tax_get_issuer(
+        &self,
+        address: String,
+    ) -> std::result::Result<Option<TaxIssuerInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let addr = self.parse_address(&address)?;
+        let store = sumchain_storage::TaxIssuerStore::new(&self.db);
+        let issuer = store.get(&addr).map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(issuer.as_ref().map(TaxIssuerInfo::from))
+    }
+
+    async fn tax_get_active_issuers(
+        &self,
+    ) -> std::result::Result<Vec<TaxIssuerInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let store = sumchain_storage::TaxIssuerStore::new(&self.db);
+        let issuers = store.list_active().map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(issuers.iter().map(TaxIssuerInfo::from).collect())
+    }
+
+    async fn tax_get_issuers_by_class(
+        &self,
+        tax_class: String,
+    ) -> std::result::Result<Vec<TaxIssuerInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let class = parse_tax_issuer_class(&tax_class)
+            .ok_or_else(|| RpcError::InvalidParams(format!("Unknown tax issuer class: {}", tax_class)))?;
+        let store = sumchain_storage::TaxIssuerStore::new(&self.db);
+        let issuers = store.list_by_class(class).map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(issuers.iter().map(TaxIssuerInfo::from).collect())
+    }
+
+    async fn tax_get_policy(
+        &self,
+        policy_id: String,
+    ) -> std::result::Result<Option<TaxPolicyInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let id = self.parse_hex32(&policy_id)?;
+        let store = sumchain_storage::TaxPolicyStore::new(&self.db);
+        let policy = store.get(&id).map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(policy.as_ref().map(TaxPolicyInfo::from))
+    }
+
+    async fn tax_list_policies(
+        &self,
+    ) -> std::result::Result<Vec<TaxPolicyInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let store = sumchain_storage::TaxPolicyStore::new(&self.db);
+        let all = store.list_all().map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(all.iter().map(TaxPolicyInfo::from).collect())
     }
 
     async fn docclass_can_issue(
@@ -7876,5 +7956,148 @@ mod contract_rpc_tests {
         assert!(srv.contract_estimate_gas(view(&addr, "boom")).await.is_err());
         // Unknown contract -> error.
         assert!(srv.contract_estimate_gas(view(&Address::new([9u8; 20]), "one")).await.is_err());
+    }
+}
+
+#[cfg(test)]
+mod tax_rpc_tests {
+    //! Issue #26: Tax registry read RPCs over a real RpcServer (registry data
+    //! only — claim types, issuers, policies).
+    use super::*;
+    use std::collections::HashMap;
+    use sumchain_consensus::PoAEngine;
+    use sumchain_crypto::KeyPair;
+    use sumchain_genesis::{ChainParams, Genesis};
+    use sumchain_primitives::tax::{
+        ClaimTypeStatus, IssuerRequirements, QuorumRule, TaxClaimTypeEntry, TaxIssuer,
+        TaxIssuerClass, TaxIssuerStatus, TaxPolicy, TaxPolicyTemplate, TaxRiskLevel,
+    };
+    use sumchain_primitives::Address;
+    use sumchain_state::MempoolConfig;
+    use sumchain_storage::{TaxClaimTypeStore, TaxIssuerStore, TaxPolicyStore};
+    use tempfile::TempDir;
+
+    fn server() -> (RpcServer, Arc<Database>, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let db = Arc::new(Database::open_default(dir.path()).unwrap());
+        let state = Arc::new(StateManager::new(db.clone(), 1));
+        let mempool = Arc::new(Mempool::new(MempoolConfig::default()));
+        let validator = KeyPair::generate();
+        let genesis = Genesis::new(
+            1,
+            0,
+            vec![validator.public_key().to_base58()],
+            HashMap::from([(validator.address().to_base58(), 1u128)]),
+            ChainParams::default(),
+        );
+        let engine = Arc::new(
+            PoAEngine::new(db.clone(), state.clone(), mempool.clone(), &genesis, Some(validator)).unwrap(),
+        );
+        let (tx_sender, _rx) = mpsc::channel(8);
+        let srv = RpcServer::new(db.clone(), state, mempool, engine, tx_sender, Arc::new(|| 0usize));
+        (srv, db, dir)
+    }
+
+    fn seed(db: &Arc<Database>, active_issuer: Address, revoked_issuer: Address) {
+        let ct = |id: &str| TaxClaimTypeEntry {
+            claim_type: id.to_string(),
+            schema_hash: [1u8; 32],
+            risk_level: TaxRiskLevel::Medium,
+            recommended_validity_secs: 86_400,
+            required_issuer_classes: vec![vec![TaxIssuerClass::TaxAuthority]],
+            status: ClaimTypeStatus::Active,
+            version: 1,
+            created_at: 100,
+            updated_at: 100,
+        };
+        let cts = TaxClaimTypeStore::new(db);
+        cts.put(&ct("tax.filed.return")).unwrap();
+        cts.put(&ct("tax.paid.status")).unwrap();
+
+        let iss = |addr: Address, class: TaxIssuerClass, status: TaxIssuerStatus| TaxIssuer {
+            address: addr,
+            tax_class: class,
+            jurisdictions: vec!["US".to_string()],
+            attributes_hash: [2u8; 32],
+            attributes_schema_hash: [3u8; 32],
+            registered_at: 200,
+            updated_at: 200,
+            status,
+            expires_at: None,
+        };
+        let is = TaxIssuerStore::new(db);
+        is.put(&iss(active_issuer, TaxIssuerClass::TaxAuthority, TaxIssuerStatus::Active)).unwrap();
+        is.put(&iss(revoked_issuer, TaxIssuerClass::BankBroker, TaxIssuerStatus::Revoked)).unwrap();
+
+        let ps = TaxPolicyStore::new(db);
+        ps.put(&TaxPolicy {
+            policy_id: [7u8; 32],
+            template: TaxPolicyTemplate::Filed,
+            claim_types: vec!["tax.filed.return".to_string()],
+            issuer_requirements: IssuerRequirements {
+                groups: vec![vec![TaxIssuerClass::AuditorCpa]],
+                quorum: QuorumRule::Any,
+            },
+            jurisdictions: vec!["US".to_string()],
+            tax_years: vec![2024],
+            max_age_secs: 31_536_000,
+            revocation_check: true,
+            creator: Address::new([9u8; 20]),
+            created_at: 300,
+        })
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn claim_type_reads() {
+        let (srv, db, _dir) = server();
+        seed(&db, Address::new([0xA1; 20]), Address::new([0xB2; 20]));
+
+        let got = srv.tax_get_claim_type("tax.filed.return".to_string()).await.unwrap().unwrap();
+        assert_eq!(got.claim_type, "tax.filed.return");
+        assert_eq!(got.status, "Active");
+        assert_eq!(got.risk_level, "Medium");
+        assert_eq!(got.schema_hash, format!("0x{}", hex::encode([1u8; 32])));
+        assert_eq!(got.required_issuer_classes, vec![vec!["TaxAuthority".to_string()]]);
+
+        assert!(srv.tax_get_claim_type("tax.nope".to_string()).await.unwrap().is_none());
+        assert_eq!(srv.tax_list_claim_types().await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn issuer_reads() {
+        let (srv, db, _dir) = server();
+        let a = Address::new([0xA1; 20]);
+        seed(&db, a, Address::new([0xB2; 20]));
+
+        let got = srv.tax_get_issuer(a.to_base58()).await.unwrap().unwrap();
+        assert_eq!(got.address, a.to_base58());
+        assert_eq!(got.tax_class, "TaxAuthority");
+        assert_eq!(got.attributes_hash, format!("0x{}", hex::encode([2u8; 32])));
+        assert_eq!(got.status, "Active");
+
+        assert!(srv.tax_get_issuer(Address::new([0xCC; 20]).to_base58()).await.unwrap().is_none());
+        // Only the Active issuer.
+        assert_eq!(srv.tax_get_active_issuers().await.unwrap().len(), 1);
+        // Class filter + invalid class error.
+        assert_eq!(srv.tax_get_issuers_by_class("TaxAuthority".to_string()).await.unwrap().len(), 1);
+        assert_eq!(srv.tax_get_issuers_by_class("AuditorCpa".to_string()).await.unwrap().len(), 0);
+        assert!(srv.tax_get_issuers_by_class("Bogus".to_string()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn policy_reads() {
+        let (srv, db, _dir) = server();
+        seed(&db, Address::new([0xA1; 20]), Address::new([0xB2; 20]));
+
+        let id_hex = format!("0x{}", hex::encode([7u8; 32]));
+        let got = srv.tax_get_policy(id_hex.clone()).await.unwrap().unwrap();
+        assert_eq!(got.policy_id, id_hex);
+        assert_eq!(got.template, "Filed");
+        assert_eq!(got.issuer_requirements.quorum, "Any");
+        assert_eq!(got.creator, Address::new([9u8; 20]).to_base58());
+
+        assert!(srv.tax_get_policy(format!("0x{}", hex::encode([0u8; 32]))).await.unwrap().is_none());
+        assert_eq!(srv.tax_list_policies().await.unwrap().len(), 1);
     }
 }

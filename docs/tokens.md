@@ -184,18 +184,53 @@ curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"employment_getCredential","params":["<employment_id>"]}'
 ```
 
-## Write-only families — Tax, Equity, Agreement, Legal, Property, Healthcare, Finance
+## Tax — SRC-82X (registry reads)
+
+> Status:             code-backed
+> Last verified:      2026-06-30
+> Code references:    crates/primitives/src/tax.rs, crates/storage/src/tax_store.rs, crates/rpc/src/server.rs
+> Public RPC support: yes for registry reads (tax_getClaimType, tax_listClaimTypes, tax_getIssuer, tax_getActiveIssuers, tax_getIssuersByClass, tax_getPolicy, tax_listPolicies)
+
+Public read access to the SRC-82X tax-compliance registries: claim-type
+definitions, authorized issuers, and policy templates. Hashes are returned as
+opaque `0x` values. Writes are signed `TxPayload::Tax` transactions via
+[sum_sendRawTransaction](#submitting-writes).
+
+```bash
+# Claim-type registry: one entry, or all
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tax_getClaimType","params":["tax.filed.return"]}'
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tax_listClaimTypes","params":[]}'
+
+# Issuers: by address, active only, or by class (e.g. "TaxAuthority")
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tax_getIssuer","params":["<issuer_address>"]}'
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tax_getActiveIssuers","params":[]}'
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tax_getIssuersByClass","params":["TaxAuthority"]}'
+
+# Policies: by id, or all
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tax_getPolicy","params":["0x<policy_id_hex>"]}'
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tax_listPolicies","params":[]}'
+```
+
+---
+
+## Write-only families — Equity, Agreement, Legal, Property, Healthcare, Finance
 
 > Status:             code-backed (write flow)
-> Last verified:      2026-06-27
-> Code references:    crates/primitives/src/{tax,equity,agreement,legal,property,healthcare,finance}.rs, crates/state/src/{tax,equity,agreement,legal,property,healthcare,finance}_executor.rs
+> Last verified:      2026-06-30
+> Code references:    crates/primitives/src/{equity,agreement,legal,property,healthcare,finance}.rs, crates/state/src/{equity,agreement,legal,property,healthcare,finance}_executor.rs
 > Public RPC support: writes via sum_sendRawTransaction
 
 Each of these families has a `TxPayload` variant and a wired executor.
 
 | Family | SRC | TxPayload variant |
 |---|---|---|
-| Tax / compliance | 82X | `Tax` |
 | Business / equity | 83X | `Equity` |
 | Agreement / IP | 84X | `Agreement` |
 | Legal process | 85X | `Legal` |
