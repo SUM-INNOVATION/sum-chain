@@ -258,18 +258,46 @@ curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
 
 ---
 
-## Write-only families — Agreement, Legal, Property, Healthcare, Finance
+## Agreement — SRC-84X (executor-link registry reads)
+
+> Status:             code-backed
+> Last verified:      2026-06-30
+> Code references:    crates/primitives/src/agreement.rs, crates/storage/src/agreement_store.rs, crates/rpc/src/server.rs
+> Public RPC support: yes for executor-link registry reads (agreement_getExecutorLink, agreement_getExecutorLinksByAgreement, agreement_getExecutorLinksByExecutor, agreement_getActiveExecutorLinks)
+
+Public read access to SRC-846 agreement executor links — the executor/automation
+bindings for an agreement. Ids and commitments are returned as opaque `0x`
+hashes; `executor_contract` is a contract address. Writes are signed
+`TxPayload::Agreement` transactions via [sum_sendRawTransaction](#submitting-writes).
+
+```bash
+# Executor link by link id (hex)
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"agreement_getExecutorLink","params":["0x<link_id_hex>"]}'
+# Links bound to an agreement (hex)
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"agreement_getExecutorLinksByAgreement","params":["0x<agreement_id_hex>"]}'
+# Links for an executor contract address
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"agreement_getExecutorLinksByExecutor","params":["<executor_address>"]}'
+# Active executor links
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"agreement_getActiveExecutorLinks","params":[]}'
+```
+
+---
+
+## Write-only families — Legal, Property, Healthcare, Finance
 
 > Status:             code-backed (write flow)
 > Last verified:      2026-06-30
-> Code references:    crates/primitives/src/{agreement,legal,property,healthcare,finance}.rs, crates/state/src/{agreement,legal,property,healthcare,finance}_executor.rs
+> Code references:    crates/primitives/src/{legal,property,healthcare,finance}.rs, crates/state/src/{legal,property,healthcare,finance}_executor.rs
 > Public RPC support: writes via sum_sendRawTransaction
 
 Each of these families has a `TxPayload` variant and a wired executor.
 
 | Family | SRC | TxPayload variant |
 |---|---|---|
-| Agreement / IP | 84X | `Agreement` |
 | Legal process | 85X | `Legal` |
 | Property / insurance | 86X | `Property` |
 | Healthcare | 87X | `Healthcare` |

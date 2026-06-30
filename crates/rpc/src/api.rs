@@ -8,7 +8,7 @@ use crate::policy_account_types::{
     BuildSubmitProposalRequest, PolicyAccountInfo, PolicyBuildResponse, ProposalInfo,
 };
 use crate::types::{
-    TaxClaimTypeInfo, TaxIssuerInfo, TaxPolicyInfo,
+    TaxClaimTypeInfo, TaxIssuerInfo, TaxPolicyInfo, ExecutorLinkInfo,
     EquityControllerConfigInfo, EquityEntityInfo, EquityShareClassInfo,
     AccountInfo, BlockHeightInfo, BlockInfo, ContractCallResult, ContractInfo,
     CreateEmploymentCredentialRequest,
@@ -1054,6 +1054,39 @@ pub trait SumChainApi {
         &self,
         class_id: String,
     ) -> Result<Option<EquityControllerConfigInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    // =========================================================================
+    // SRC-84X Agreement executor-link registry reads (issue #26 — executor
+    // links only; no commitments, parties, signatures, attestations, IP
+    // actions, proofs, events, or off-chain content).
+    // =========================================================================
+
+    /// Get an executor link by link id (hex).
+    #[method(name = "agreement_getExecutorLink")]
+    async fn agreement_get_executor_link(
+        &self,
+        link_id: String,
+    ) -> Result<Option<ExecutorLinkInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// List executor links bound to an agreement (agreement id, hex).
+    #[method(name = "agreement_getExecutorLinksByAgreement")]
+    async fn agreement_get_executor_links_by_agreement(
+        &self,
+        agreement_id: String,
+    ) -> Result<Vec<ExecutorLinkInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// List executor links for an executor contract address.
+    #[method(name = "agreement_getExecutorLinksByExecutor")]
+    async fn agreement_get_executor_links_by_executor(
+        &self,
+        executor_address: String,
+    ) -> Result<Vec<ExecutorLinkInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// List active executor links.
+    #[method(name = "agreement_getActiveExecutorLinks")]
+    async fn agreement_get_active_executor_links(
+        &self,
+    ) -> Result<Vec<ExecutorLinkInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Check if an issuer can issue a specific subcode in a jurisdiction
     #[method(name = "docclass_canIssue")]
