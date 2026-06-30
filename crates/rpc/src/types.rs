@@ -2243,3 +2243,49 @@ impl From<&sumchain_primitives::agreement::ExecutorLink> for ExecutorLinkInfo {
         }
     }
 }
+
+// =============================================================================
+// SRC-86X Property asset-anchor read DTO (issue #26 — asset registry/admin
+// records only; NO title events, encumbrances, coverage, claims, proofs,
+// system events, owner/holder/insured/claimant identities, off-chain content,
+// public_reference, or payout/loss/premium amounts).
+// =============================================================================
+
+/// Public view of an SRC-861 asset anchor: the property/asset identity record.
+/// Ids/commitments are opaque `0x` hashes; `issuer_address` is the registrant
+/// address (public by design). `public_reference` and `attachments` are
+/// deliberately omitted — the asset anchor carries no party/owner identity.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssetInfo {
+    pub asset_id: String,
+    pub asset_commitment: String,
+    pub asset_type: String,
+    pub jurisdiction_code: String,
+    pub policy_id: String,
+    pub issuer_class: String,
+    pub issuer_address: String,
+    pub status: String,
+    pub created_at: u64,
+    pub updated_at: u64,
+    pub anchored_at_height: u64,
+    pub related_assets: Vec<String>,
+}
+
+impl From<&sumchain_primitives::property::AssetAnchor> for AssetInfo {
+    fn from(a: &sumchain_primitives::property::AssetAnchor) -> Self {
+        Self {
+            asset_id: format!("0x{}", hex::encode(a.asset_id)),
+            asset_commitment: format!("0x{}", hex::encode(a.asset_commitment)),
+            asset_type: format!("{:?}", a.asset_type),
+            jurisdiction_code: a.jurisdiction_code.clone(),
+            policy_id: format!("0x{}", hex::encode(a.policy_id)),
+            issuer_class: format!("{:?}", a.issuer_class),
+            issuer_address: a.issuer_address.to_base58(),
+            status: format!("{:?}", a.status),
+            created_at: a.created_at,
+            updated_at: a.updated_at,
+            anchored_at_height: a.anchored_at_height,
+            related_assets: a.related_assets.iter().map(|id| format!("0x{}", hex::encode(id))).collect(),
+        }
+    }
+}
