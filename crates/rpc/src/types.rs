@@ -1924,3 +1924,126 @@ pub struct GradeRecordInfo {
     pub status_label: String,
     pub finalized: bool,
 }
+
+// =============================================================================
+// SRC-82X Tax registry read DTOs (issue #26 — registry-only, no subject data)
+// =============================================================================
+
+/// Public view of a Tax claim-type registry entry. Administrative metadata
+/// only; `schema_hash` is an opaque BLAKE3 hash.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaxClaimTypeInfo {
+    pub claim_type: String,
+    pub schema_hash: String,
+    pub risk_level: String,
+    pub recommended_validity_secs: u64,
+    pub required_issuer_classes: Vec<Vec<String>>,
+    pub status: String,
+    pub version: u32,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+impl From<&sumchain_primitives::tax::TaxClaimTypeEntry> for TaxClaimTypeInfo {
+    fn from(e: &sumchain_primitives::tax::TaxClaimTypeEntry) -> Self {
+        Self {
+            claim_type: e.claim_type.clone(),
+            schema_hash: format!("0x{}", hex::encode(e.schema_hash)),
+            risk_level: format!("{:?}", e.risk_level),
+            recommended_validity_secs: e.recommended_validity_secs,
+            required_issuer_classes: e
+                .required_issuer_classes
+                .iter()
+                .map(|g| g.iter().map(|c| format!("{:?}", c)).collect())
+                .collect(),
+            status: format!("{:?}", e.status),
+            version: e.version,
+            created_at: e.created_at,
+            updated_at: e.updated_at,
+        }
+    }
+}
+
+/// Public view of a Tax issuer registry entry. `address` is public by design;
+/// `attributes_hash`/`attributes_schema_hash` are opaque hashes (not decoded).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaxIssuerInfo {
+    pub address: String,
+    pub tax_class: String,
+    pub jurisdictions: Vec<String>,
+    pub attributes_hash: String,
+    pub attributes_schema_hash: String,
+    pub registered_at: u64,
+    pub updated_at: u64,
+    pub status: String,
+    pub expires_at: Option<u64>,
+}
+
+impl From<&sumchain_primitives::tax::TaxIssuer> for TaxIssuerInfo {
+    fn from(i: &sumchain_primitives::tax::TaxIssuer) -> Self {
+        Self {
+            address: i.address.to_base58(),
+            tax_class: format!("{:?}", i.tax_class),
+            jurisdictions: i.jurisdictions.clone(),
+            attributes_hash: format!("0x{}", hex::encode(i.attributes_hash)),
+            attributes_schema_hash: format!("0x{}", hex::encode(i.attributes_schema_hash)),
+            registered_at: i.registered_at,
+            updated_at: i.updated_at,
+            status: format!("{:?}", i.status),
+            expires_at: i.expires_at,
+        }
+    }
+}
+
+/// Issuer-class requirements for a Tax policy (class groups + quorum rule).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaxIssuerRequirementsInfo {
+    pub groups: Vec<Vec<String>>,
+    pub quorum: String,
+}
+
+impl From<&sumchain_primitives::tax::IssuerRequirements> for TaxIssuerRequirementsInfo {
+    fn from(r: &sumchain_primitives::tax::IssuerRequirements) -> Self {
+        Self {
+            groups: r
+                .groups
+                .iter()
+                .map(|g| g.iter().map(|c| format!("{:?}", c)).collect())
+                .collect(),
+            quorum: format!("{:?}", r.quorum),
+        }
+    }
+}
+
+/// Public view of a Tax policy template. `policy_id` is an opaque hash;
+/// `creator` is public by design.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaxPolicyInfo {
+    pub policy_id: String,
+    pub template: String,
+    pub claim_types: Vec<String>,
+    pub issuer_requirements: TaxIssuerRequirementsInfo,
+    pub jurisdictions: Vec<String>,
+    pub tax_years: Vec<u32>,
+    pub max_age_secs: u64,
+    pub revocation_check: bool,
+    pub creator: String,
+    pub created_at: u64,
+}
+
+impl From<&sumchain_primitives::tax::TaxPolicy> for TaxPolicyInfo {
+    fn from(p: &sumchain_primitives::tax::TaxPolicy) -> Self {
+        Self {
+            policy_id: format!("0x{}", hex::encode(p.policy_id)),
+            template: format!("{:?}", p.template),
+            claim_types: p.claim_types.clone(),
+            issuer_requirements: TaxIssuerRequirementsInfo::from(&p.issuer_requirements),
+            jurisdictions: p.jurisdictions.clone(),
+            tax_years: p.tax_years.clone(),
+            max_age_secs: p.max_age_secs,
+            revocation_check: p.revocation_check,
+            creator: p.creator.to_base58(),
+            created_at: p.created_at,
+        }
+    }
+}

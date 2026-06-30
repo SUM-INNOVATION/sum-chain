@@ -8,6 +8,7 @@ use crate::policy_account_types::{
     BuildSubmitProposalRequest, PolicyAccountInfo, PolicyBuildResponse, ProposalInfo,
 };
 use crate::types::{
+    TaxClaimTypeInfo, TaxIssuerInfo, TaxPolicyInfo,
     AccountInfo, BlockHeightInfo, BlockInfo, ContractCallResult, ContractInfo,
     CreateEmploymentCredentialRequest,
     CreateEmploymentCredentialResponse, DelegationRpcInfo, DelegatorSummary, DocClassConfigInfo,
@@ -942,6 +943,57 @@ pub trait SumChainApi {
         &self,
         jurisdiction: String,
     ) -> Result<Vec<DocClassIssuerInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    // =========================================================================
+    // SRC-82X Tax registry reads (issue #26 — administrative registries only;
+    // no subject-keyed proofs/disclosures/events are exposed).
+    // =========================================================================
+
+    /// Get a Tax claim-type registry entry by its identifier.
+    #[method(name = "tax_getClaimType")]
+    async fn tax_get_claim_type(
+        &self,
+        claim_type: String,
+    ) -> Result<Option<TaxClaimTypeInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// List all Tax claim-type registry entries.
+    #[method(name = "tax_listClaimTypes")]
+    async fn tax_list_claim_types(
+        &self,
+    ) -> Result<Vec<TaxClaimTypeInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get a Tax issuer by base address.
+    #[method(name = "tax_getIssuer")]
+    async fn tax_get_issuer(
+        &self,
+        address: String,
+    ) -> Result<Option<TaxIssuerInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// List active Tax issuers.
+    #[method(name = "tax_getActiveIssuers")]
+    async fn tax_get_active_issuers(
+        &self,
+    ) -> Result<Vec<TaxIssuerInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// List Tax issuers of a given class (e.g. "TaxAuthority", "BankBroker").
+    #[method(name = "tax_getIssuersByClass")]
+    async fn tax_get_issuers_by_class(
+        &self,
+        tax_class: String,
+    ) -> Result<Vec<TaxIssuerInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get a Tax policy by its hex policy id.
+    #[method(name = "tax_getPolicy")]
+    async fn tax_get_policy(
+        &self,
+        policy_id: String,
+    ) -> Result<Option<TaxPolicyInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// List all Tax policies.
+    #[method(name = "tax_listPolicies")]
+    async fn tax_list_policies(
+        &self,
+    ) -> Result<Vec<TaxPolicyInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Check if an issuer can issue a specific subcode in a jurisdiction
     #[method(name = "docclass_canIssue")]
