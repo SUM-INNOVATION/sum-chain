@@ -3661,6 +3661,46 @@ impl SumChainApiServer for RpcServer {
         Ok(cfg.as_ref().map(EquityControllerConfigInfo::from))
     }
 
+    // ── SRC-84X Agreement executor-link reads (issue #26) ───────────────────
+
+    async fn agreement_get_executor_link(
+        &self,
+        link_id: String,
+    ) -> std::result::Result<Option<ExecutorLinkInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let id = self.parse_hex32(&link_id)?;
+        let store = sumchain_storage::ExecutorLinkStore::new(&self.db);
+        let link = store.get(&id).map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(link.as_ref().map(ExecutorLinkInfo::from))
+    }
+
+    async fn agreement_get_executor_links_by_agreement(
+        &self,
+        agreement_id: String,
+    ) -> std::result::Result<Vec<ExecutorLinkInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let id = self.parse_hex32(&agreement_id)?;
+        let store = sumchain_storage::ExecutorLinkStore::new(&self.db);
+        let links = store.get_by_agreement(&id).map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(links.iter().map(ExecutorLinkInfo::from).collect())
+    }
+
+    async fn agreement_get_executor_links_by_executor(
+        &self,
+        executor_address: String,
+    ) -> std::result::Result<Vec<ExecutorLinkInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let addr = self.parse_address(&executor_address)?;
+        let store = sumchain_storage::ExecutorLinkStore::new(&self.db);
+        let links = store.get_by_executor(&addr).map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(links.iter().map(ExecutorLinkInfo::from).collect())
+    }
+
+    async fn agreement_get_active_executor_links(
+        &self,
+    ) -> std::result::Result<Vec<ExecutorLinkInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let store = sumchain_storage::ExecutorLinkStore::new(&self.db);
+        let links = store.list_active().map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(links.iter().map(ExecutorLinkInfo::from).collect())
+    }
+
     async fn docclass_can_issue(
         &self,
         issuer: String,
@@ -8348,5 +8388,88 @@ mod equity_rpc_tests {
         assert!(got.whitelist_enabled);
         assert_eq!(got.governance_policy_id, format!("0x{}", hex::encode([4u8; 32])));
         assert!(srv.equity_get_controller_config(format!("0x{}", hex::encode([0u8; 32]))).await.unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod agreement_rpc_tests {
+    //! Issue #26: Agreement executor-link read RPCs over a real RpcServer.
+    //! Executor links only — no commitments/parties/signatures/etc.
+    use super::*;
+    use std::collections::HashMap;
+    use sumchain_consensus::PoAEngine;
+    use sumchain_crypto::KeyPair;
+    use sumchain_genesis::{ChainParams, Genesis};
+    use sumchain_primitives::agreement::{ExecutorLink, ExecutorState};
+    use sumchain_primitives::Address;
+    use sumchain_state::MempoolConfig;
+    use sumchain_storage::ExecutorLinkStore;
+    use tempfile::TempDir;
+
+    fn server() -> (RpcServer, Arc<Database>, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let db = Arc::new(Database::open_default(dir.path()).unwrap());
+        let state = Arc::new(StateManager::new(db.clone(), 1));
+        let mempool = Arc::new(Mempool::new(MempoolConfig::default()));
+        let validator = KeyPair::generate();
+        let genesis = Genesis::new(
+            1,
+            0,
+            vec![validator.public_key().to_base58()],
+            HashMap::from([(validator.address().to_base58(), 1u128)]),
+            ChainParams::default(),
+        );
+        let engine = Arc::new(
+            PoAEngine::new(db.clone(), state.clone(), mempool.clone(), &genesis, Some(validator)).unwrap(),
+        );
+        let (tx_sender, _rx) = mpsc::channel(8);
+        let srv = RpcServer::new(db.clone(), state, mempool, engine, tx_sender, Arc::new(|| 0usize));
+        (srv, db, dir)
+    }
+
+    fn seed(db: &Arc<Database>, exec: Address) {
+        let store = ExecutorLinkStore::new(db);
+        store
+            .put(&ExecutorLink {
+                link_id: [0x01; 32],
+                agreement_id: [0xA1; 32],
+                executor_contract: exec,
+                executor_interface_id: [1u8; 32],
+                terms_commitment: [2u8; 32],
+                activation_policy_id: [3u8; 32],
+                state: ExecutorState::Active,
+                created_at: 100,
+                updated_at: 100,
+                created_at_height: 5,
+                activation_proof_id: None,
+            })
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn executor_link_reads() {
+        let (srv, db, _dir) = server();
+        let exec = Address::new([0xE1; 20]);
+        seed(&db, exec);
+        let lid = format!("0x{}", hex::encode([0x01; 32]));
+        let aid = format!("0x{}", hex::encode([0xA1; 32]));
+
+        let got = srv.agreement_get_executor_link(lid.clone()).await.unwrap().unwrap();
+        assert_eq!(got.link_id, lid);
+        assert_eq!(got.agreement_id, aid);
+        assert_eq!(got.executor_contract, exec.to_base58());
+        assert_eq!(got.state, "Active");
+        assert_eq!(got.activation_proof_id, None);
+
+        // Excluded/deferred fields must never appear in the serialized DTO.
+        let json = serde_json::to_string(&got).unwrap();
+        for banned in ["parties", "attachments", "hint_uri", "signed", "payload_hash", "encryption"] {
+            assert!(!json.contains(banned), "ExecutorLinkInfo leaked banned field: {}", banned);
+        }
+
+        assert!(srv.agreement_get_executor_link(format!("0x{}", hex::encode([0u8; 32]))).await.unwrap().is_none());
+        assert_eq!(srv.agreement_get_executor_links_by_agreement(aid).await.unwrap().len(), 1);
+        assert_eq!(srv.agreement_get_executor_links_by_executor(exec.to_base58()).await.unwrap().len(), 1);
+        assert_eq!(srv.agreement_get_active_executor_links().await.unwrap().len(), 1);
     }
 }

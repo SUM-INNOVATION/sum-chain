@@ -2200,3 +2200,46 @@ impl From<&sumchain_primitives::equity::EquityControllerConfig> for EquityContro
         }
     }
 }
+
+// =============================================================================
+// SRC-84X Agreement executor-link read DTO (issue #26 — executor links only;
+// NO agreement commitments, parties, attachments, signatures, attestations,
+// IP actions, proofs, events, or off-chain content).
+// =============================================================================
+
+/// Public view of an SRC-846 executor link: the executor/automation binding
+/// for an agreement. Ids/commitments are opaque `0x` hashes; `executor_contract`
+/// is a contract address. `activation_proof_id` is an opaque reference only —
+/// no proof content is read or exposed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutorLinkInfo {
+    pub link_id: String,
+    pub agreement_id: String,
+    pub executor_contract: String,
+    pub executor_interface_id: String,
+    pub terms_commitment: String,
+    pub activation_policy_id: String,
+    pub state: String,
+    pub created_at: u64,
+    pub updated_at: u64,
+    pub created_at_height: u64,
+    pub activation_proof_id: Option<String>,
+}
+
+impl From<&sumchain_primitives::agreement::ExecutorLink> for ExecutorLinkInfo {
+    fn from(l: &sumchain_primitives::agreement::ExecutorLink) -> Self {
+        Self {
+            link_id: format!("0x{}", hex::encode(l.link_id)),
+            agreement_id: format!("0x{}", hex::encode(l.agreement_id)),
+            executor_contract: l.executor_contract.to_base58(),
+            executor_interface_id: format!("0x{}", hex::encode(l.executor_interface_id)),
+            terms_commitment: format!("0x{}", hex::encode(l.terms_commitment)),
+            activation_policy_id: format!("0x{}", hex::encode(l.activation_policy_id)),
+            state: format!("{:?}", l.state),
+            created_at: l.created_at,
+            updated_at: l.updated_at,
+            created_at_height: l.created_at_height,
+            activation_proof_id: l.activation_proof_id.map(|p| format!("0x{}", hex::encode(p))),
+        }
+    }
+}
