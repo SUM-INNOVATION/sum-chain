@@ -11,6 +11,7 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 use sumchain_primitives::Address;
+use sumchain_storage::{contract_cf_kind, ContractMutation};
 use tracing::{debug, trace, warn};
 use wasmer::{
     imports, Function, FunctionEnv, FunctionEnvMut, Instance, Memory, MemoryType, Module, Store,
@@ -64,6 +65,9 @@ struct CompiledContract {
 struct WasmEnv {
     host_env: Arc<RwLock<HostEnv>>,
     memory: Option<Memory>,
+    /// Guest allocator export, used by host functions that must return a
+    /// variable-length buffer to the guest (e.g. `storage_read`).
+    alloc: Option<TypedFunction<i32, i32>>,
 }
 
 impl WasmEnv {
@@ -71,6 +75,7 @@ impl WasmEnv {
         Self {
             host_env,
             memory: None,
+            alloc: None,
         }
     }
 }
@@ -146,7 +151,9 @@ impl ContractExecutor {
             Module::new(&store, &code)?
         };
 
-        // Store code
+        // Capture the pre-image of the code row for the reorg journal (None
+        // for a fresh address), then store code.
+        let old_code = self.storage.get_code(&contract_address)?;
         self.storage.store_code(&contract_address, &code)?;
 
         // Cache compiled module
@@ -161,51 +168,86 @@ impl ContractExecutor {
             );
         }
 
-        // Store metadata
-        {
-            let mut metadata = self.metadata.write();
-            metadata.insert(
+        // Everything after `store_code` runs inside a guarded finalize: ANY
+        // failure path (metadata encode/persist, init gas, init Err, init
+        // success==false, storage commit) must leave NO persisted code,
+        // metadata, storage, or cache entry behind. On `Err`, run cleanup.
+        let finalize = (|| -> Result<DeployResult> {
+            // Capture metadata pre-image, then store metadata (backend + cache).
+            let old_meta = self.storage.get_metadata(&contract_address)?;
+            let meta = ContractMetadata {
+                code_hash,
+                owner: ctx.caller,
+                deployed_at: ctx.block_timestamp,
+                deployed_block: ctx.block_height,
+                upgradeable: false,
+            };
+            let meta_bytes = bincode::serialize(&meta)
+                .map_err(|e| RuntimeError::Storage(format!("metadata encode: {}", e)))?;
+            self.storage.store_metadata(&contract_address, &meta_bytes)?;
+            self.metadata.write().insert(contract_address, meta);
+
+            // Call init method.
+            let gas_meter = Arc::new(GasMeter::new(ctx.gas_limit));
+            gas_meter.consume(gas_meter.costs().deploy_base)?;
+
+            let result = self.call_internal(
                 contract_address,
-                ContractMetadata {
-                    code_hash,
-                    owner: ctx.caller,
-                    deployed_at: ctx.block_timestamp,
-                    deployed_block: ctx.block_height,
-                    upgradeable: false,
-                },
-            );
+                init_method,
+                init_args,
+                ctx.clone(),
+                gas_meter.clone(),
+                0, // call depth
+            )?;
+
+            if !result.success {
+                return Err(RuntimeError::Execution(
+                    result.error.unwrap_or_else(|| "Init failed".to_string()),
+                ));
+            }
+
+            // Commit storage changes (appends init's storage mutations to the
+            // journal). Only after a fully successful deploy do we journal the
+            // code + metadata rows, so a failed deploy leaves no journal trace.
+            self.storage.commit()?;
+            self.storage.record_raw(ContractMutation {
+                cf_kind: contract_cf_kind::CODE,
+                key: contract_address.as_bytes().to_vec(),
+                old: old_code.clone(),
+                new: Some(code.clone()),
+            });
+            self.storage.record_raw(ContractMutation {
+                cf_kind: contract_cf_kind::METADATA,
+                key: contract_address.as_bytes().to_vec(),
+                old: old_meta,
+                new: Some(meta_bytes),
+            });
+
+            Ok(DeployResult {
+                contract_address,
+                code_hash,
+                gas_used: gas_meter.used(),
+                events: result.events,
+            })
+        })();
+
+        match finalize {
+            Ok(r) => Ok(r),
+            Err(e) => {
+                self.cleanup_failed_deploy(&contract_address, &code_hash);
+                Err(e)
+            }
         }
+    }
 
-        // Call init method
-        let gas_meter = Arc::new(GasMeter::new(ctx.gas_limit));
-        gas_meter.consume(gas_meter.costs().deploy_base)?;
-
-        let result = self.call_internal(
-            contract_address,
-            init_method,
-            init_args,
-            ctx.clone(),
-            gas_meter.clone(),
-            0, // call depth
-        )?;
-
-        if !result.success {
-            // Rollback storage on failed init
-            self.storage.rollback();
-            return Err(RuntimeError::Execution(
-                result.error.unwrap_or_else(|| "Init failed".to_string()),
-            ));
-        }
-
-        // Commit storage changes
-        self.storage.commit()?;
-
-        Ok(DeployResult {
-            contract_address,
-            code_hash,
-            gas_used: gas_meter.used(),
-            events: result.events,
-        })
+    /// Roll back every persisted/cached effect of a deploy that failed after
+    /// `store_code`. Idempotent; deletes are best-effort.
+    fn cleanup_failed_deploy(&self, contract_address: &ContractAddress, code_hash: &CodeHash) {
+        self.storage.rollback();
+        let _ = self.storage.delete_code(contract_address);
+        let _ = self.storage.delete_metadata(contract_address);
+        self.metadata.write().remove(contract_address);
+        self.cache.write().remove(code_hash);
     }
 
     /// Call a contract method
@@ -252,6 +294,38 @@ impl ContractExecutor {
             Err(RuntimeError::Execution(
                 result.error.unwrap_or_else(|| "View call failed".to_string()),
             ))
+        }
+    }
+
+    /// Estimate gas for a call by metered dry-run: execute under
+    /// `ctx.gas_limit`, then ALWAYS roll back (no commit, no journal). Returns
+    /// the metered gas used on success; returns `Err` on execution failure or
+    /// out-of-gas — callers must surface that, never a fabricated number.
+    pub fn estimate_gas(
+        &self,
+        contract: ContractAddress,
+        method: &str,
+        args: Vec<u8>,
+        ctx: ExecutionContext,
+    ) -> Result<u64> {
+        let gas_meter = Arc::new(GasMeter::new(ctx.gas_limit));
+        gas_meter.consume(gas_meter.costs().call_base)?;
+
+        let result = self.call_internal(contract, method, args, ctx, gas_meter.clone(), 0);
+
+        // Dry-run: never commit. Roll back only the staged writes from this
+        // run. We must NOT touch the commit journal — `call_internal` does not
+        // commit, so this run appends nothing, and any pre-existing committed
+        // journal entries (e.g. from earlier txs in the block) must be
+        // preserved for the reorg diff. `rollback` clears caches, not journal.
+        self.storage.rollback();
+
+        match result {
+            Ok(r) if r.success => Ok(gas_meter.used()),
+            Ok(r) => Err(RuntimeError::Execution(
+                r.error.unwrap_or_else(|| "gas estimation failed".to_string()),
+            )),
+            Err(e) => Err(e),
         }
     }
 
@@ -332,6 +406,14 @@ impl ContractExecutor {
         // Get memory and set in environment
         if let Ok(memory) = instance.exports.get_memory("memory") {
             function_env.as_mut(&mut *store).memory = Some(memory.clone());
+        }
+        // Get the guest allocator so host functions can return variable-length
+        // buffers (e.g. storage_read) into guest memory.
+        if let Ok(alloc) = instance
+            .exports
+            .get_typed_function::<i32, i32>(&*store, "alloc")
+        {
+            function_env.as_mut(&mut *store).alloc = Some(alloc);
         }
 
         // Find and call the method
@@ -490,9 +572,28 @@ impl ContractExecutor {
         Ok(self.storage.get_code(address)?.is_some())
     }
 
+    /// Drain the accumulated contract-state journal (committed code/storage/
+    /// metadata mutations). Called once per block to build the reorg diff.
+    pub fn take_journal(&self) -> Vec<ContractMutation> {
+        self.storage.take_journal()
+    }
+
     /// Get contract metadata
     pub fn get_metadata(&self, address: &ContractAddress) -> Option<ContractMetadata> {
-        self.metadata.read().get(address).cloned()
+        if let Some(m) = self.metadata.read().get(address).cloned() {
+            return Some(m);
+        }
+        // Cache miss (e.g. after a node restart): load from the backend.
+        match self.storage.get_metadata(address) {
+            Ok(Some(bytes)) => match bincode::deserialize::<ContractMetadata>(&bytes) {
+                Ok(m) => {
+                    self.metadata.write().insert(*address, m.clone());
+                    Some(m)
+                }
+                Err(_) => None,
+            },
+            _ => None,
+        }
     }
 }
 
@@ -533,24 +634,106 @@ fn host_chain_id(env: FunctionEnvMut<WasmEnv>) -> i64 {
     host_env.chain_id as i64
 }
 
-fn host_storage_read(env: FunctionEnvMut<WasmEnv>, key_ptr: i32, key_len: i32) -> i32 {
-    // Read key from memory, look up in storage, return pointer to value
-    // Simplified: return 0 for not found
-    0
+/// Read `len` bytes at `ptr` from guest linear memory.
+fn read_guest_bytes(
+    memory: &Memory,
+    store: &impl wasmer::AsStoreRef,
+    ptr: i32,
+    len: i32,
+) -> std::result::Result<Vec<u8>, wasmer::RuntimeError> {
+    if ptr < 0 || len < 0 {
+        return Err(wasmer::RuntimeError::new("invalid guest memory range"));
+    }
+    let view = memory.view(store);
+    let mut buf = vec![0u8; len as usize];
+    view.read(ptr as u64, &mut buf)
+        .map_err(|e| wasmer::RuntimeError::new(format!("guest memory read: {}", e)))?;
+    Ok(buf)
+}
+
+// === Host storage ABI v1 ===
+//
+// Keys and values are passed as `(ptr, len)` into guest linear memory.
+// `storage_read` returns either `0` (absent) or a pointer to a host-allocated,
+// length-prefixed buffer `[u32 LE length][bytes]` (allocated via the guest's
+// exported `alloc`; the guest decodes the prefix — see `read_from_memory`).
+// All three are deterministic and charge gas via `HostEnv`; a gas or memory
+// error returns a trap (`Err`), which fails the call and rolls back its
+// staged storage writes.
+
+fn host_storage_read(
+    mut env: FunctionEnvMut<WasmEnv>,
+    key_ptr: i32,
+    key_len: i32,
+) -> std::result::Result<i32, wasmer::RuntimeError> {
+    let (data, mut store) = env.data_and_store_mut();
+    let memory = data
+        .memory
+        .clone()
+        .ok_or_else(|| wasmer::RuntimeError::new("contract has no exported memory"))?;
+    let alloc = data.alloc.clone();
+    let host_env = data.host_env.clone();
+
+    let key = read_guest_bytes(&memory, &store, key_ptr, key_len)?;
+    let value = host_env
+        .read()
+        .storage_read(&key)
+        .map_err(|e| wasmer::RuntimeError::new(format!("storage_read: {}", e)))?;
+
+    match value {
+        None => Ok(0),
+        Some(v) => {
+            let alloc = alloc
+                .ok_or_else(|| wasmer::RuntimeError::new("contract missing alloc export"))?;
+            let total = 4usize.saturating_add(v.len());
+            let ptr = alloc
+                .call(&mut store, total as i32)
+                .map_err(|e| wasmer::RuntimeError::new(format!("guest alloc: {}", e)))?;
+            let mut buf = Vec::with_capacity(total);
+            buf.extend_from_slice(&(v.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&v);
+            // Re-borrow the view AFTER alloc — memory may have grown.
+            let view = memory.view(&store);
+            view.write(ptr as u64, &buf)
+                .map_err(|e| wasmer::RuntimeError::new(format!("guest memory write: {}", e)))?;
+            Ok(ptr)
+        }
+    }
 }
 
 fn host_storage_write(
-    env: FunctionEnvMut<WasmEnv>,
+    mut env: FunctionEnvMut<WasmEnv>,
     key_ptr: i32,
     key_len: i32,
     value_ptr: i32,
     value_len: i32,
-) {
-    // Read key and value from memory, write to storage
+) -> std::result::Result<(), wasmer::RuntimeError> {
+    let (data, store) = env.data_and_store_mut();
+    let memory = data
+        .memory
+        .clone()
+        .ok_or_else(|| wasmer::RuntimeError::new("contract has no exported memory"))?;
+    let host_env = data.host_env.clone();
+    let key = read_guest_bytes(&memory, &store, key_ptr, key_len)?;
+    let value = read_guest_bytes(&memory, &store, value_ptr, value_len)?;
+    let result = host_env.read().storage_write(&key, &value);
+    result.map_err(|e| wasmer::RuntimeError::new(format!("storage_write: {}", e)))
 }
 
-fn host_storage_remove(env: FunctionEnvMut<WasmEnv>, key_ptr: i32, key_len: i32) {
-    // Read key from memory, remove from storage
+fn host_storage_remove(
+    mut env: FunctionEnvMut<WasmEnv>,
+    key_ptr: i32,
+    key_len: i32,
+) -> std::result::Result<(), wasmer::RuntimeError> {
+    let (data, store) = env.data_and_store_mut();
+    let memory = data
+        .memory
+        .clone()
+        .ok_or_else(|| wasmer::RuntimeError::new("contract has no exported memory"))?;
+    let host_env = data.host_env.clone();
+    let key = read_guest_bytes(&memory, &store, key_ptr, key_len)?;
+    let result = host_env.read().storage_remove(&key);
+    result.map_err(|e| wasmer::RuntimeError::new(format!("storage_remove: {}", e)))
 }
 
 fn host_blake3(env: FunctionEnvMut<WasmEnv>, data_ptr: i32, data_len: i32) -> i32 {

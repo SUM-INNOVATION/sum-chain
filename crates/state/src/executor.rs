@@ -11,7 +11,7 @@ use sumchain_primitives::{
     TransactionV2, TxPayload, TxStatus,
     CHALLENGE_INTERVAL_BLOCKS, SLASH_PERCENTAGE,
 };
-use sumchain_storage::schema::StateDiff;
+use sumchain_storage::schema::{ContractStateDiff, StateDiff};
 use sumchain_storage::Database;
 use tracing::{debug, info, warn};
 
@@ -56,6 +56,15 @@ pub struct TxExecutionResult {
 #[inline]
 fn v2_gate_open(params: &ChainParams, block_height: u64) -> bool {
     matches!(params.v2_enabled_from_height, Some(h) if block_height >= h)
+}
+
+/// Whether production-capable smart contracts (`ContractDeploy`/`ContractCall`)
+/// are active at `block_height`. Dormant by default (`None`); activation is a
+/// coordinated, consensus-breaking validator upgrade. Below the gate, contract
+/// txs are rejected free (no fee, no state) with `TxStatus::Failed(60)`.
+#[inline]
+fn contracts_gate_open(params: &ChainParams, block_height: u64) -> bool {
+    matches!(params.contracts_enabled_from_height, Some(h) if block_height >= h)
 }
 
 /// OmniNode `InferenceAttestation` activation gate. Same semantics as
@@ -355,6 +364,16 @@ impl BlockExecutor {
                         }
                     }
                     TxPayload::ContractDeploy(deploy_data) => {
+                        // Activation gate: dormant by default. Reject free (no
+                        // fee, no state, no nonce) until the coordinated
+                        // contracts activation height.
+                        if !contracts_gate_open(&self.params, block_height) {
+                            return Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Failed(60),
+                                fee_paid: 0,
+                            });
+                        }
                         // Execute contract deployment
                         let result = self.contract_executor.deploy(
                             &v2_tx.from,
@@ -392,6 +411,16 @@ impl BlockExecutor {
                         }
                     }
                     TxPayload::ContractCall(call_data) => {
+                        // Activation gate: dormant by default. Reject free (no
+                        // fee, no state, no nonce) until the coordinated
+                        // contracts activation height.
+                        if !contracts_gate_open(&self.params, block_height) {
+                            return Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Failed(60),
+                                fee_paid: 0,
+                            });
+                        }
                         // Execute contract call
                         let result = self.contract_executor.call(
                             &v2_tx.from,
@@ -1466,6 +1495,15 @@ impl BlockExecutor {
                 }
             }
             TxPayload::ContractDeploy(deploy_data) => {
+                // Activation gate (defensive; this path is currently unreached
+                // but is public). Reject free until the contracts gate opens.
+                if !contracts_gate_open(&self.params, block_height) {
+                    return Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::Failed(60),
+                        fee_paid: 0,
+                    });
+                }
                 // Check balance for fee + value
                 let total_cost = tx.fee.saturating_add(deploy_data.value);
                 let balance = self.state.get_balance(&tx.from)?;
@@ -1514,6 +1552,15 @@ impl BlockExecutor {
                 }
             }
             TxPayload::ContractCall(call_data) => {
+                // Activation gate (defensive; this path is currently unreached
+                // but is public). Reject free until the contracts gate opens.
+                if !contracts_gate_open(&self.params, block_height) {
+                    return Ok(TxExecutionResult {
+                        tx_hash,
+                        status: TxStatus::Failed(60),
+                        fee_paid: 0,
+                    });
+                }
                 // Check balance for fee + value
                 let total_cost = tx.fee.saturating_add(call_data.value);
                 let balance = self.state.get_balance(&tx.from)?;
@@ -2153,7 +2200,7 @@ impl BlockExecutor {
         &self,
         block: &Block,
         _parent_state_root: Hash,
-    ) -> Result<(Vec<Receipt>, Hash, StateDiff)> {
+    ) -> Result<(Vec<Receipt>, Hash, StateDiff, ContractStateDiff)> {
         info!(
             "Executing block {} with {} transactions",
             block.height(),
@@ -2163,6 +2210,10 @@ impl BlockExecutor {
         let proposer = Address::from_public_key(&block.header.proposer_pubkey);
         let mut receipts = Vec::new();
         let mut state_diff = StateDiff::new();
+
+        // Start from a clean contract-state journal; mutations from this
+        // block's contract txs accumulate as they commit.
+        let _ = self.contract_executor.take_journal();
 
         // ── PoR Phase: Slash expired challenges BEFORE user transactions ─────
         // This prevents a node from front-running a slash by submitting a
@@ -2216,8 +2267,15 @@ impl BlockExecutor {
         // This ensures the challenge write is captured in the state root.
         self.generate_storage_challenge_if_due(block)?;
 
-        // Compute new state root (simplified)
-        let state_root = self.compute_block_state_root(block, &receipts)?;
+        // Build this block's contract-state diff from the committed journal,
+        // sorted deterministically by (cf_kind, key) for revert + digest.
+        let mut contract_diff = ContractStateDiff::new();
+        contract_diff.records = self.contract_executor.take_journal();
+        contract_diff.sort();
+
+        // Compute new state root (folds the contract-state digest once the
+        // contracts gate is open — see compute_block_state_root).
+        let state_root = self.compute_block_state_root(block, &receipts, &contract_diff)?;
         self.state.set_state_root(state_root);
 
         info!(
@@ -2226,11 +2284,16 @@ impl BlockExecutor {
             state_root
         );
 
-        Ok((receipts, state_root, state_diff))
+        Ok((receipts, state_root, state_diff, contract_diff))
     }
 
     /// Compute state root after block execution
-    fn compute_block_state_root(&self, block: &Block, receipts: &[Receipt]) -> Result<Hash> {
+    fn compute_block_state_root(
+        &self,
+        block: &Block,
+        receipts: &[Receipt],
+        contract_diff: &ContractStateDiff,
+    ) -> Result<Hash> {
         // Simplified state root computation
         // In production, this would be a proper MPT root
         //
@@ -2252,6 +2315,14 @@ impl BlockExecutor {
             data.extend_from_slice(receipt.tx_hash.as_bytes());
             data.push(if receipt.is_success() { 1 } else { 0 });
             data.extend_from_slice(&receipt.fee_paid.to_be_bytes());
+        }
+
+        // Commit contract state to the root, but ONLY at/after the contracts
+        // activation gate. Below the gate the formula is byte-for-byte
+        // unchanged, so pre-activation block roots match un-upgraded nodes.
+        // This is the consensus-breaking change that activation coordinates.
+        if contracts_gate_open(&self.params, block.height()) {
+            data.extend_from_slice(&contract_diff.digest());
         }
 
         // Mix with previous state root (from before this block's execution)

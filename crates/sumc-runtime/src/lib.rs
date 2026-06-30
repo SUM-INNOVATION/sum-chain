@@ -15,5 +15,5 @@ pub mod types;
 pub use error::{RuntimeError, Result};
 pub use executor::{ContractExecutor, ExecutionContext, ExecutionResult};
 pub use gas::{Gas, GasCosts, GasMeter};
-pub use storage::{ContractStorage, MemoryStorage};
+pub use storage::{ContractStorage, MemoryStorage, RocksDbStorage};
 pub use types::*;

@@ -82,6 +82,8 @@ impl TxStatus {
             TxStatus::Failed(40) => "V2 storage protocol not enabled at this height",
             // Policy account governance failures.
             TxStatus::Failed(17) => "policy account operation failed (invalid approval, threshold not met, or unsupported wrapped action)",
+            // Smart-contract subprotocol gate.
+            TxStatus::Failed(60) => "contract subprotocol not enabled at this block height",
             // OmniNode `InferenceAttestation` subprotocol failures.
             TxStatus::Failed(50) => "OmniNode subprotocol not enabled at this block height",
             TxStatus::Failed(51) => "duplicate InferenceAttestation for (session_id, verifier)",

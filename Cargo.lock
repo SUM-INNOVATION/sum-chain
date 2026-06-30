@@ -5769,6 +5769,7 @@ dependencies = [
  "tracing",
  "wasmer",
  "wasmer-compiler-singlepass",
+ "wat",
 ]
 
 [[package]]
@@ -6000,6 +6001,7 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
+ "wat",
 ]
 
 [[package]]
@@ -6031,6 +6033,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tracing",
+ "wat",
 ]
 
 [[package]]
@@ -6038,6 +6041,7 @@ name = "sumchain-storage"
 version = "0.1.0"
 dependencies = [
  "bincode",
+ "blake3",
  "hex",
  "parking_lot",
  "rocksdb",

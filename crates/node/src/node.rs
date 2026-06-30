@@ -594,7 +594,10 @@ impl Node {
             Arc::new(move || network.sync_state().is_synced())
         };
 
-        let rpc = RpcServer::with_full_config(
+        // Build the fully-configured RPC server through the shared helper so
+        // production and the wiring tripwire test share one construction path
+        // (including the contract executor wiring).
+        let rpc = build_rpc_server(
             self.db.clone(),
             self.state.clone(),
             self.mempool.clone(),
@@ -606,14 +609,8 @@ impl Node {
             self.rpc_auth_config.clone(),
             self.rpc_rate_limit_config.clone(),
             self.metrics.clone(),
-        )
-        // Bind the live chain's `ChainParams` to the RPC so RPCs that read
-        // consensus values (currently `storage_getAssignmentCoverageV2` —
-        // `assignment_replication_factor`) match the executor's validation.
-        // Without this, non-default chains would serve the V2 coverage RPC
-        // with the default R=3 and disagree with `AcceptAssignmentV2` on
-        // chains tuned to a different value.
-        .with_chain_params(self.genesis.params.clone());
+            self.genesis.params.clone(),
+        );
 
         let handle = rpc.start(self.rpc_addr).await?;
 
@@ -637,3 +634,102 @@ impl Node {
 // rather than silent security regressions. `EducationAdmission` shares
 // the SAME `chain_height` Arc, so the event-loop `chain_height.store`
 // calls cover both admission gates.
+
+/// Build the fully-configured production RPC server.
+///
+/// Single construction path shared by `Node::start_rpc` and the wiring
+/// tripwire test, so the contract-executor wiring cannot silently regress.
+/// The contract executor is a dedicated RPC/view instance (separate from the
+/// consensus `BlockExecutor`'s internal executor) sharing the live DB + chain
+/// params; it powers the read/view contract RPCs
+/// (`contract_getContract`/`getCodeHash`/`getStorageAt`/`estimateGas`). These
+/// read committed state directly and are NOT gated by
+/// `contracts_enabled_from_height` (the activation gate governs execution —
+/// deploy/call in the block executor — not reads).
+#[allow(clippy::too_many_arguments)]
+fn build_rpc_server(
+    db: Arc<Database>,
+    state: Arc<StateManager>,
+    mempool: Arc<Mempool>,
+    consensus: Arc<dyn ConsensusEngine>,
+    tx_sender: mpsc::Sender<SignedTransaction>,
+    peer_count: Arc<dyn Fn() -> usize + Send + Sync>,
+    peer_id: Arc<dyn Fn() -> Option<String> + Send + Sync>,
+    is_synced: Arc<dyn Fn() -> bool + Send + Sync>,
+    rpc_auth_config: RpcAuthConfig,
+    rpc_rate_limit_config: RateLimitConfig,
+    metrics: Arc<Metrics>,
+    params: sumchain_genesis::ChainParams,
+) -> RpcServer {
+    let contract_executor = Arc::new(sumchain_state::ContractExecutorState::new(
+        db.clone(),
+        params.clone(),
+    ));
+    RpcServer::with_full_config(
+        db,
+        state,
+        mempool,
+        consensus,
+        tx_sender,
+        peer_count,
+        peer_id,
+        is_synced,
+        rpc_auth_config,
+        rpc_rate_limit_config,
+        metrics,
+    )
+    .with_chain_params(params)
+    .with_contract_executor(contract_executor)
+}
+
+#[cfg(test)]
+mod rpc_wiring_tests {
+    use super::*;
+    use std::collections::HashMap;
+    use sumchain_consensus::PoAEngine;
+    use sumchain_genesis::{ChainParams, Genesis};
+    use tempfile::TempDir;
+
+    /// Tripwire: the production RPC builder MUST wire the contract executor,
+    /// or contract_getStorageAt / estimateGas silently return "unavailable" on
+    /// a real node. `Node::start_rpc` builds through this same function.
+    #[test]
+    fn production_rpc_wires_contract_executor() {
+        let dir = TempDir::new().unwrap();
+        let db = Arc::new(Database::open_default(dir.path()).unwrap());
+        let state = Arc::new(StateManager::new(db.clone(), 1));
+        let mempool = Arc::new(Mempool::new(MempoolConfig::default()));
+        let validator = KeyPair::generate();
+        let genesis = Genesis::new(
+            1,
+            0,
+            vec![validator.public_key().to_base58()],
+            HashMap::from([(validator.address().to_base58(), 1u128)]),
+            ChainParams::default(),
+        );
+        let engine: Arc<dyn ConsensusEngine> = Arc::new(
+            PoAEngine::new(db.clone(), state.clone(), mempool.clone(), &genesis, Some(validator)).unwrap(),
+        );
+        let (tx_sender, _rx) = mpsc::channel(8);
+
+        let server = build_rpc_server(
+            db,
+            state,
+            mempool,
+            engine,
+            tx_sender,
+            Arc::new(|| 0usize),
+            Arc::new(|| None),
+            Arc::new(|| true),
+            RpcAuthConfig::disabled(),
+            RateLimitConfig::disabled(),
+            Arc::new(Metrics::new()),
+            genesis.params.clone(),
+        );
+
+        assert!(
+            server.has_contract_executor(),
+            "production RPC must wire the contract executor"
+        );
+    }
+}

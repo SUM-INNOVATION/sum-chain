@@ -4,6 +4,17 @@ use crate::{ContractAddress, Result, RuntimeError};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
+use sumchain_storage::{contract_cf_kind, ContractMutation};
+
+/// Raw `contract_storage` CF row key: `contract(20) || b':' || key`.
+/// Matches `RocksDbStorage::make_key` so journal keys equal on-disk keys.
+pub fn storage_cf_key(contract: &ContractAddress, key: &[u8]) -> Vec<u8> {
+    let mut k = Vec::with_capacity(contract.as_bytes().len() + 1 + key.len());
+    k.extend_from_slice(contract.as_bytes());
+    k.push(b':');
+    k.extend_from_slice(key);
+    k
+}
 
 /// Storage key type
 pub type StorageKey = Vec<u8>;
@@ -30,6 +41,23 @@ pub trait ContractStorageBackend: Send + Sync {
 
     /// Store contract code
     fn store_code(&self, contract: &ContractAddress, code: &[u8]) -> Result<()>;
+
+    /// Delete contract code (deploy cleanup on failed init).
+    fn delete_code(&self, contract: &ContractAddress) -> Result<()>;
+
+    /// Get serialized contract metadata.
+    fn get_metadata(&self, contract: &ContractAddress) -> Result<Option<Vec<u8>>>;
+
+    /// Store serialized contract metadata.
+    fn store_metadata(&self, contract: &ContractAddress, bytes: &[u8]) -> Result<()>;
+
+    /// Delete contract metadata (deploy cleanup on failed init).
+    fn delete_metadata(&self, contract: &ContractAddress) -> Result<()>;
+
+    /// Apply a set of storage writes/deletes atomically. `ops` is
+    /// `(contract, key, Some(value) | None)`; `None` deletes. Implementations
+    /// MUST apply all-or-nothing.
+    fn commit(&self, ops: &[(ContractAddress, StorageKey, Option<StorageValue>)]) -> Result<()>;
 }
 
 /// In-memory storage for testing
@@ -39,6 +67,8 @@ pub struct MemoryStorage {
     storage: RwLock<HashMap<ContractAddress, HashMap<StorageKey, StorageValue>>>,
     /// Contract code: contract_address -> wasm bytecode
     code: RwLock<HashMap<ContractAddress, Vec<u8>>>,
+    /// Contract metadata: contract_address -> serialized bytes
+    metadata: RwLock<HashMap<ContractAddress, Vec<u8>>>,
 }
 
 impl MemoryStorage {
@@ -91,6 +121,42 @@ impl ContractStorageBackend for MemoryStorage {
         code.insert(*contract, wasm.to_vec());
         Ok(())
     }
+
+    fn delete_code(&self, contract: &ContractAddress) -> Result<()> {
+        self.code.write().remove(contract);
+        Ok(())
+    }
+
+    fn get_metadata(&self, contract: &ContractAddress) -> Result<Option<Vec<u8>>> {
+        Ok(self.metadata.read().get(contract).cloned())
+    }
+
+    fn store_metadata(&self, contract: &ContractAddress, bytes: &[u8]) -> Result<()> {
+        self.metadata.write().insert(*contract, bytes.to_vec());
+        Ok(())
+    }
+
+    fn delete_metadata(&self, contract: &ContractAddress) -> Result<()> {
+        self.metadata.write().remove(contract);
+        Ok(())
+    }
+
+    fn commit(&self, ops: &[(ContractAddress, StorageKey, Option<StorageValue>)]) -> Result<()> {
+        let mut storage = self.storage.write();
+        for (contract, key, value) in ops {
+            match value {
+                Some(v) => {
+                    storage.entry(*contract).or_default().insert(key.clone(), v.clone());
+                }
+                None => {
+                    if let Some(m) = storage.get_mut(contract) {
+                        m.remove(key);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Contract storage wrapper with caching
@@ -101,6 +167,12 @@ pub struct ContractStorage {
     write_cache: RwLock<HashMap<(ContractAddress, StorageKey), Option<StorageValue>>>,
     /// Read cache
     read_cache: RwLock<HashMap<(ContractAddress, StorageKey), Option<StorageValue>>>,
+    /// Per-block journal of COMMITTED contract-CF mutations (old + new), used
+    /// for reorg revert + state-root commitment. Only successful commits and
+    /// `record_raw` (code/metadata) append here; `rollback` does NOT clear it
+    /// (uncommitted writes never reach the journal). Drained per block via
+    /// `take_journal`.
+    journal: RwLock<Vec<ContractMutation>>,
 }
 
 impl ContractStorage {
@@ -110,7 +182,19 @@ impl ContractStorage {
             backend,
             write_cache: RwLock::new(HashMap::new()),
             read_cache: RwLock::new(HashMap::new()),
+            journal: RwLock::new(Vec::new()),
         }
+    }
+
+    /// Record a raw CF mutation directly (used by deploy for code/metadata,
+    /// which bypass the storage write-cache).
+    pub fn record_raw(&self, mutation: ContractMutation) {
+        self.journal.write().push(mutation);
+    }
+
+    /// Drain the accumulated commit journal.
+    pub fn take_journal(&self) -> Vec<ContractMutation> {
+        std::mem::take(&mut *self.journal.write())
     }
 
     /// Read a value, checking cache first
@@ -176,15 +260,56 @@ impl ContractStorage {
         self.backend.store_code(contract, code)
     }
 
-    /// Commit all pending changes to the backend
+    /// Delete contract code (deploy cleanup on failed init).
+    pub fn delete_code(&self, contract: &ContractAddress) -> Result<()> {
+        self.backend.delete_code(contract)
+    }
+
+    /// Get serialized contract metadata.
+    pub fn get_metadata(&self, contract: &ContractAddress) -> Result<Option<Vec<u8>>> {
+        self.backend.get_metadata(contract)
+    }
+
+    /// Store serialized contract metadata.
+    pub fn store_metadata(&self, contract: &ContractAddress, bytes: &[u8]) -> Result<()> {
+        self.backend.store_metadata(contract, bytes)
+    }
+
+    /// Delete contract metadata (deploy cleanup on failed init).
+    pub fn delete_metadata(&self, contract: &ContractAddress) -> Result<()> {
+        self.backend.delete_metadata(contract)
+    }
+
+    /// Commit all pending changes to the backend atomically.
+    ///
+    /// The write-cache is drained into a vector sorted by `(contract, key)` so
+    /// the applied order is deterministic across nodes (required for the
+    /// reorg journal and state-root digest added in a later set), then applied
+    /// all-or-nothing via the backend's atomic `commit`.
     pub fn commit(&self) -> Result<()> {
         let mut write_cache = self.write_cache.write();
+        let mut ops: Vec<(ContractAddress, StorageKey, Option<StorageValue>)> = write_cache
+            .drain()
+            .map(|((contract, key), value)| (contract, key, value))
+            .collect();
+        ops.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()).then_with(|| a.1.cmp(&b.1)));
 
-        for ((contract, key), value) in write_cache.drain() {
-            match value {
-                Some(v) => self.backend.write(&contract, &key, &v)?,
-                None => self.backend.delete(&contract, &key)?,
-            }
+        // Capture pre-images BEFORE applying so the journal records old + new.
+        let mut mutations = Vec::with_capacity(ops.len());
+        for (contract, key, new) in &ops {
+            let old = self.backend.read(contract, key)?;
+            mutations.push(ContractMutation {
+                cf_kind: contract_cf_kind::STORAGE,
+                key: storage_cf_key(contract, key),
+                old,
+                new: new.clone(),
+            });
+        }
+
+        // Apply atomically; only on success append to the journal.
+        self.backend.commit(&ops)?;
+        if !mutations.is_empty() {
+            self.journal.write().extend(mutations);
         }
 
         // Clear read cache (state has changed)
@@ -193,7 +318,9 @@ impl ContractStorage {
         Ok(())
     }
 
-    /// Rollback all pending changes
+    /// Rollback uncommitted changes. Does NOT touch the commit journal —
+    /// uncommitted writes never reach it, and previously committed mutations
+    /// in the same block must survive a later tx's rollback.
     pub fn rollback(&self) {
         self.write_cache.write().clear();
         self.read_cache.write().clear();
@@ -205,10 +332,11 @@ impl ContractStorage {
     }
 }
 
-/// Column family name for contract storage
-const CF_CONTRACT_STORAGE: &str = "contract_storage";
-/// Column family name for contract code
-const CF_CONTRACT_CODE: &str = "contract_code";
+// Column family names — single source of truth is `sumchain_storage::cf`
+// (registered in `ALL_CFS`), so these stay in sync with what the DB opens.
+const CF_CONTRACT_STORAGE: &str = sumchain_storage::cf::CONTRACT_STORAGE;
+const CF_CONTRACT_CODE: &str = sumchain_storage::cf::CONTRACT_CODE;
+const CF_CONTRACT_METADATA: &str = sumchain_storage::cf::CONTRACT_METADATA;
 
 /// Storage adapter for RocksDB backend
 pub struct RocksDbStorage {
@@ -266,6 +394,46 @@ impl ContractStorageBackend for RocksDbStorage {
         self.db
             .put(CF_CONTRACT_CODE, contract.as_bytes(), code)
             .map_err(|e| RuntimeError::Storage(e.to_string()))
+    }
+
+    fn delete_code(&self, contract: &ContractAddress) -> Result<()> {
+        self.db
+            .delete(CF_CONTRACT_CODE, contract.as_bytes())
+            .map_err(|e| RuntimeError::Storage(e.to_string()))
+    }
+
+    fn get_metadata(&self, contract: &ContractAddress) -> Result<Option<Vec<u8>>> {
+        self.db
+            .get(CF_CONTRACT_METADATA, contract.as_bytes())
+            .map_err(|e| RuntimeError::Storage(e.to_string()))
+    }
+
+    fn store_metadata(&self, contract: &ContractAddress, bytes: &[u8]) -> Result<()> {
+        self.db
+            .put(CF_CONTRACT_METADATA, contract.as_bytes(), bytes)
+            .map_err(|e| RuntimeError::Storage(e.to_string()))
+    }
+
+    fn delete_metadata(&self, contract: &ContractAddress) -> Result<()> {
+        self.db
+            .delete(CF_CONTRACT_METADATA, contract.as_bytes())
+            .map_err(|e| RuntimeError::Storage(e.to_string()))
+    }
+
+    fn commit(&self, ops: &[(ContractAddress, StorageKey, Option<StorageValue>)]) -> Result<()> {
+        let mut batch = self.db.batch();
+        for (contract, key, value) in ops {
+            let full_key = self.make_key(contract, key);
+            match value {
+                Some(v) => batch
+                    .put(CF_CONTRACT_STORAGE, &full_key, v)
+                    .map_err(|e| RuntimeError::Storage(e.to_string()))?,
+                None => batch
+                    .delete(CF_CONTRACT_STORAGE, &full_key)
+                    .map_err(|e| RuntimeError::Storage(e.to_string()))?,
+            }
+        }
+        batch.commit().map_err(|e| RuntimeError::Storage(e.to_string()))
     }
 }
 

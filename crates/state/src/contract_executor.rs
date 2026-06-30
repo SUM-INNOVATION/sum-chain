@@ -10,7 +10,7 @@ use sumchain_primitives::transaction::{ContractCallData, ContractDeployData};
 use sumchain_storage::Database;
 use sumc_runtime::{
     ContractExecutor as WasmExecutor, ContractStorage, ExecutionContext, ExecutionResult,
-    Gas, MemoryStorage,
+    Gas, RocksDbStorage,
 };
 use tracing::{debug, info, warn};
 
@@ -69,10 +69,16 @@ pub struct ContractExecutorState {
 
 impl ContractExecutorState {
     /// Create a new contract executor
+    /// Drain the per-block contract-state journal (committed code/storage/
+    /// metadata mutations) for reorg-diff construction.
+    pub fn take_journal(&self) -> Vec<sumchain_storage::ContractMutation> {
+        self.wasm_executor.take_journal()
+    }
+
     pub fn new(db: Arc<Database>, params: ChainParams) -> Self {
-        // Create in-memory storage for contracts
-        // In production, this would be backed by the database
-        let backend = Arc::new(MemoryStorage::new());
+        // Persistent contract storage backed by RocksDB: code, storage, and
+        // metadata live in dedicated CFs and survive restarts.
+        let backend = Arc::new(RocksDbStorage::new(db.clone()));
         let storage = Arc::new(ContractStorage::new(backend));
         let wasm_executor = Arc::new(WasmExecutor::new(storage));
 
@@ -403,6 +409,34 @@ impl ContractExecutorState {
 
         self.wasm_executor
             .view(*contract, method, args, ctx)
+            .map_err(|e| StateError::ContractError(e.to_string()))
+    }
+
+    /// Estimate gas for a call via a metered dry-run (executed up to the chain's
+    /// `max_contract_gas`, then rolled back). Returns gas used, or `Err` on
+    /// execution failure / out-of-gas.
+    pub fn estimate_gas(
+        &self,
+        contract: &Address,
+        method: &str,
+        args: Vec<u8>,
+        from: Option<Address>,
+        block_height: u64,
+        block_timestamp: u64,
+        chain_id: u64,
+    ) -> Result<u64> {
+        let caller = from.unwrap_or(Address::ZERO);
+        let ctx = ExecutionContext {
+            caller,
+            origin: caller,
+            value: 0,
+            gas_limit: self.params.max_contract_gas,
+            block_height,
+            block_timestamp,
+            chain_id,
+        };
+        self.wasm_executor
+            .estimate_gas(*contract, method, args, ctx)
             .map_err(|e| StateError::ContractError(e.to_string()))
     }
 

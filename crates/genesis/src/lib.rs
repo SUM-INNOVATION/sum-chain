@@ -149,6 +149,22 @@ pub struct ChainParams {
     /// Dev: set to `Some(0)` to activate from genesis.
     #[serde(default)]
     pub education_enabled_from_height: Option<u64>,
+
+    /// Block height at which production-capable smart contracts activate
+    /// (persistent storage, reorg-reversible contract state, root-committed).
+    /// `None` = disabled forever; `Some(h)` = `ContractDeploy`/`ContractCall`
+    /// execute from block `h` onward. Below the gate they are rejected free
+    /// (no fee, no state). Mirrors the V2/OmniNode/Education activation pattern.
+    ///
+    /// Production safety: `#[serde(default)]` resolves a missing field to
+    /// `None`, so an existing mainnet `genesis.json` upgraded to a
+    /// contract-aware binary stays disabled until operators coordinate an
+    /// explicit activation height. Activation changes the block state-root
+    /// formula, so it is a consensus-breaking, validator-coordinated upgrade.
+    ///
+    /// Dev: set to `Some(0)` to activate from genesis.
+    #[serde(default)]
+    pub contracts_enabled_from_height: Option<u64>,
 }
 
 fn default_finality_depth() -> u64 {
@@ -343,6 +359,10 @@ impl Default for ChainParams {
             // Production-safe default: Education-LMS suite disabled.
             // Activation is coordinated separately, post Phase 2-6.
             education_enabled_from_height: None,
+            // Production-safe default: smart contracts dormant. Activation is a
+            // coordinated, consensus-breaking validator upgrade (changes the
+            // state-root formula); never set in default/mainnet config.
+            contracts_enabled_from_height: None,
         }
     }
 }
@@ -355,6 +375,18 @@ impl ChainParams {
     pub fn with_v2_enabled() -> Self {
         Self {
             v2_enabled_from_height: Some(0),
+            ..Self::default()
+        }
+    }
+
+    /// Convenience for tests + dev genesis where smart contracts should be
+    /// enabled from genesis (also enables V2, since contract txs are V2).
+    /// Production chains MUST NOT use this — set `contracts_enabled_from_height`
+    /// explicitly to a coordinated activation height.
+    pub fn with_contracts_enabled() -> Self {
+        Self {
+            v2_enabled_from_height: Some(0),
+            contracts_enabled_from_height: Some(0),
             ..Self::default()
         }
     }

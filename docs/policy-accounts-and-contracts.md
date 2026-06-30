@@ -91,15 +91,23 @@ signature) to `policy_buildSubmitProposal`.
 
 ## Smart contracts
 
-> Status:             code-backed
-> Last verified:      2026-06-27
-> Code references:    crates/state/src/contract_executor.rs, crates/sumc-runtime/, crates/rpc/src/server.rs
-> Public RPC support: yes (contract_getContract, contract_isContract, contract_call, contract_getCodeHash, contract_getBalance)
+> Status:             code-backed; execution gated (dormant by default)
+> Last verified:      2026-06-29
+> Code references:    crates/state/src/contract_executor.rs, crates/sumc-runtime/, crates/storage/src/schema.rs, crates/rpc/src/server.rs
+> Public RPC support: yes for reads (contract_getContract, contract_isContract, contract_call, contract_getCodeHash, contract_getBalance, contract_getStorageAt, contract_estimateGas); execution requires the activation gate
 
-WASM smart contracts. Deploy and call are signed transactions
-(`TxPayload::ContractDeploy` / `TxPayload::ContractCall`) submitted through
-[`sum_sendRawTransaction`](./tokens.md#submitting-writes). Contract examples
-below are intended for current public read/view usage.
+WASM smart contracts with persistent, reorg-reversible, root-committed state.
+Deploy and call are signed transactions (`TxPayload::ContractDeploy` /
+`TxPayload::ContractCall`) submitted through
+[`sum_sendRawTransaction`](./tokens.md#submitting-writes), **gated by
+`contracts_enabled_from_height`** — `null` (dormant) by default; activation is
+a coordinated, consensus-breaking network upgrade. The read/view RPCs below are
+available regardless of the gate (they return empty results until contracts
+exist on the network).
+
+Contract code, storage, and metadata persist in dedicated column families and
+survive restarts; `contract_getStorageAt` returns raw stored bytes for a slot,
+and `contract_estimateGas` reports gas from a metered dry-run of the call.
 
 ### Read examples
 
@@ -112,17 +120,23 @@ curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
 curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"contract_isContract","params":["<contract_addr>"]}'
 
-# Contract code hash
+# Contract code hash / balance
 curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"contract_getCodeHash","params":["<contract_addr>"]}'
-
-# Contract balance
 curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"contract_getBalance","params":["<contract_addr>"]}'
+
+# Storage slot by raw hex key -> "0x..." value, or null if absent
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"contract_getStorageAt","params":["<contract_addr>","0x<key_hex>"]}'
 
 # Read-only (view) call: request object is { contract, method, args (hex), from? }
 curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"contract_call","params":[{"contract":"<contract_addr>","method":"<method_name>","args":"<hex_args>","from":null}]}'
+
+# Gas estimate via metered dry-run (errors if the call would fail / run out of gas)
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"contract_estimateGas","params":[{"contract":"<contract_addr>","method":"<method_name>","args":"<hex_args>","from":null}]}'
 ```
 
 ---

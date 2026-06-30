@@ -273,6 +273,40 @@ impl<'a> StateStore<'a> {
         self.db.delete(cf::STATE_DIFFS, &key)
     }
 
+    /// Store the per-block contract-state diff (for reorg revert).
+    pub fn put_contract_state_diff(
+        &self,
+        height: BlockHeight,
+        diff: &ContractStateDiff,
+    ) -> Result<()> {
+        let key = height.to_be_bytes();
+        let bytes = bincode::serialize(diff)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        self.db.put(cf::CONTRACT_STATE_DIFFS, &key, &bytes)
+    }
+
+    /// Get the per-block contract-state diff.
+    pub fn get_contract_state_diff(
+        &self,
+        height: BlockHeight,
+    ) -> Result<Option<ContractStateDiff>> {
+        let key = height.to_be_bytes();
+        match self.db.get(cf::CONTRACT_STATE_DIFFS, &key)? {
+            Some(bytes) => {
+                let diff: ContractStateDiff = bincode::deserialize(&bytes)
+                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                Ok(Some(diff))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Delete the per-block contract-state diff.
+    pub fn delete_contract_state_diff(&self, height: BlockHeight) -> Result<()> {
+        let key = height.to_be_bytes();
+        self.db.delete(cf::CONTRACT_STATE_DIFFS, &key)
+    }
+
     /// Iterate over all accounts in state
     /// Returns (Address, AccountState) pairs
     pub fn iter_all_accounts(&self) -> Result<Vec<(Address, AccountState)>> {
@@ -322,6 +356,99 @@ impl StateDiff {
 impl Default for StateDiff {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// CF-kind tags for contract-state mutations (the CF a record targets).
+pub mod contract_cf_kind {
+    pub const STORAGE: u8 = 0;
+    pub const CODE: u8 = 1;
+    pub const METADATA: u8 = 2;
+}
+
+/// Domain separator for the contract-state-diff digest (consensus ABI v1).
+pub const CONTRACT_STATE_DIFF_DOMAIN: &[u8] = b"SUM-CONTRACT-STATE-DIFF:v1";
+
+/// One contract-state mutation, captured for reorg revert + root commitment.
+/// `key` is the raw column-family row key; `cf_kind` selects the CF.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ContractMutation {
+    pub cf_kind: u8,
+    pub key: Vec<u8>,
+    pub old: Option<Vec<u8>>,
+    pub new: Option<Vec<u8>>,
+}
+
+/// Per-block journal of contract code/storage/metadata mutations.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ContractStateDiff {
+    pub records: Vec<ContractMutation>,
+}
+
+impl ContractStateDiff {
+    pub fn new() -> Self {
+        Self { records: Vec::new() }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+
+    pub fn push(&mut self, m: ContractMutation) {
+        self.records.push(m);
+    }
+
+    /// Sort records deterministically by `(cf_kind, key)`. MUST be called
+    /// before persistence and digesting so every validator agrees.
+    pub fn sort(&mut self) {
+        self.records
+            .sort_by(|a, b| a.cf_kind.cmp(&b.cf_kind).then_with(|| a.key.cmp(&b.key)));
+    }
+
+    /// Deterministic, domain-separated digest over the (already-sorted)
+    /// records. An empty diff hashes to the domain-only digest. Per record:
+    /// `cf_kind(u8) | key_len(u32 LE) | key | old_present(u8) [old_len(u32 LE)|old]
+    /// | new_present(u8) [new_len(u32 LE)|new]`.
+    pub fn digest(&self) -> [u8; 32] {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(CONTRACT_STATE_DIFF_DOMAIN);
+        for r in &self.records {
+            hasher.update(&[r.cf_kind]);
+            hasher.update(&(r.key.len() as u32).to_le_bytes());
+            hasher.update(&r.key);
+            match &r.old {
+                Some(v) => {
+                    hasher.update(&[1u8]);
+                    hasher.update(&(v.len() as u32).to_le_bytes());
+                    hasher.update(v);
+                }
+                None => {
+                    hasher.update(&[0u8]);
+                }
+            }
+            match &r.new {
+                Some(v) => {
+                    hasher.update(&[1u8]);
+                    hasher.update(&(v.len() as u32).to_le_bytes());
+                    hasher.update(v);
+                }
+                None => {
+                    hasher.update(&[0u8]);
+                }
+            }
+        }
+        *hasher.finalize().as_bytes()
+    }
+
+    /// Column-family name for a `cf_kind` (used by reorg revert). `None` for
+    /// an unknown kind.
+    pub fn cf_name(cf_kind: u8) -> Option<&'static str> {
+        match cf_kind {
+            contract_cf_kind::STORAGE => Some(cf::CONTRACT_STORAGE),
+            contract_cf_kind::CODE => Some(cf::CONTRACT_CODE),
+            contract_cf_kind::METADATA => Some(cf::CONTRACT_METADATA),
+            _ => None,
+        }
     }
 }
 

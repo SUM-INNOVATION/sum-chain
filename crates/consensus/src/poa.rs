@@ -440,7 +440,7 @@ impl PoAEngine {
         let mut block = Block::new(header, transactions);
 
         // Execute block to get state root
-        let (receipts, state_root, state_diff) = self
+        let (receipts, state_root, state_diff, contract_diff) = self
             .executor
             .execute_block(&block, self.state.state_root())?;
 
@@ -470,6 +470,9 @@ impl PoAEngine {
 
         // Store state diff for potential reorg
         self.state.save_state_diff(height, state_diff)?;
+        // Persist the contract-state diff alongside the account diff, with
+        // identical timing, so a reorg reverts both together.
+        self.state.save_contract_state_diff(height, contract_diff)?;
 
         // Store the block
         let block_store = BlockStore::new(&self.db);
@@ -528,7 +531,7 @@ impl PoAEngine {
             .validate_block(&block, parent.as_ref(), &active_validators)?;
 
         // Execute block
-        let (receipts, state_root, state_diff) = self
+        let (receipts, state_root, state_diff, contract_diff) = self
             .executor
             .execute_block(&block, self.state.state_root())?;
 
@@ -584,6 +587,9 @@ impl PoAEngine {
 
         // Store state diff
         self.state.save_state_diff(height, state_diff)?;
+        // Persist the contract-state diff alongside the account diff, with
+        // identical timing, so a reorg reverts both together.
+        self.state.save_contract_state_diff(height, contract_diff)?;
 
         // Update best block if this extends the chain
         let current_best = self.best_block.read().clone();
@@ -666,7 +672,10 @@ impl PoAEngine {
 
         // Revert old chain blocks (except common ancestor)
         for block in old_chain.iter().rev().skip(1) {
-            self.state.revert_state_diff(block.height())?;
+            // Atomically revert account + contract state together, so an
+            // orphaned block cannot leave contract state behind while account
+            // state rolls back (or vice versa).
+            self.state.revert_block_state_diffs(block.height())?;
 
             // Return transactions to mempool
             for tx in &block.transactions {
