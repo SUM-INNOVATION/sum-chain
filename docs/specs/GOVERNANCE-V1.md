@@ -24,7 +24,7 @@ execution of code/release/validator/consensus changes remains off-chain
 | Asset model | **Single** approved governance asset (not multi-asset) |
 | Private/sensitive SRC families (Healthcare, Legal, Finance subjects, private credentials) | **Excluded** as voting sources |
 | Equity SRC-83X governance | **Separate**; no bridge in v1 |
-| Snapshot | Governance reverse holder index + `gov_snapshots` CF, frozen at voting-start |
+| Snapshot | `TOKEN_BALANCES` prefix scan by `token_id` + `gov_snapshots` CF, frozen at voting-start |
 | Ballot privacy | **Public votes** in v1 (commit-reveal is future) |
 | Governance token supply | **Fixed-supply / non-mintable or council-frozen mint authority** required before eligibility |
 | Validator binding | Governance **records approval**; it does not force validator upgrades or mutate chain params/consensus |
@@ -55,18 +55,22 @@ GovAsset {
 
 ## 4. Voting power & snapshot
 
-The current `TOKEN_HOLDER_INDEX` is `owner → token_ids` and balances are
-current-state (no history), so a naive "read all holders at height H" is not
-supported. v1 therefore adds:
+`TOKEN_BALANCES` is keyed **`token_id ‖ owner`**, so all holders of a governance
+token are directly enumerable with a prefix scan
+(`db.prefix_iter(TOKEN_BALANCES, token_id)`). No separate reverse index is
+needed. v1 therefore:
 
-- a **governance-only reverse holder index** (`token_id → holders`), maintained
-  only for registry-listed tokens; and
-- a **`gov_snapshots` CF** that freezes eligible balances
-  (`gov_snapshots[proposal_id][holder] = weight`) at the **voting-start** height.
+- freezes eligible balances via a **`TOKEN_BALANCES` prefix scan by `token_id`**
+  into a **`gov_snapshots` CF** (`gov_snapshots[proposal_id][holder] = weight`)
+  at the **voting-start** height; and
+- bounds the snapshot with a **maximum holder count** (constant or config): if a
+  governance token's holder set exceeds the bound, proposal creation /
+  voting-start fails cleanly rather than doing unbounded block work.
 
 Voting reads the frozen snapshot; **live balances are never used during voting**,
-so transfers after the snapshot do not change weight. Snapshotting at
-voting-start (not proposal creation) is intentional.
+so transfers after the snapshot do not change weight. For v1,
+`voting_start_height = proposal.created_at_height` (snapshot at creation; no
+delayed voting window).
 
 ## 5. Proposal & vote lifecycle
 
@@ -123,7 +127,8 @@ runtime-genesis edit. Governance never bypasses validator control.
 ## 9. Storage / RPC surface (for the implementation issue)
 
 - **CFs:** `gov_registry`, `gov_proposals`, `gov_votes`, `gov_snapshots`,
-  `gov_proposal_index`, `gov_token_holder_index` (governance-eligible tokens only).
+  `gov_proposal_index`. Snapshots are built by a `TOKEN_BALANCES` prefix scan
+  (§4), so no reverse holder-index CF is required.
 - **Tx:** new `TxPayload::Governance` (separate from equity `GovernanceAction`).
 - **RPC (builder pattern):** writes `gov_buildCreateProposal`,
   `gov_buildCastVote`, `gov_buildExecuteProposal`; reads `gov_getProposal`,

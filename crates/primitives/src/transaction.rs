@@ -75,6 +75,9 @@ pub enum TxType {
     /// SRC-817/818 Education-LMS suite — variant index frozen at 22,
     /// append-only; see crates/primitives/src/education.rs for wire shape.
     Education = 22,
+    /// On-chain governance v1 operation (SRC governance). Append-only; see
+    /// crates/primitives/src/governance.rs and docs/specs/GOVERNANCE-V1.md.
+    Governance = 23,
 }
 
 impl TxType {
@@ -104,6 +107,7 @@ impl TxType {
             20 => Some(TxType::StorageMetadataV2),
             21 => Some(TxType::InferenceAttestation),
             22 => Some(TxType::Education),
+            23 => Some(TxType::Governance),
             _ => None,
         }
     }
@@ -407,6 +411,13 @@ pub enum TxPayload {
     /// this. See crates/primitives/src/education.rs and the wire
     /// fixtures in crates/primitives/tests/education_fixtures.rs.
     Education(crate::education::EducationTxData),
+    /// On-chain governance v1. `TxType` discriminant 23; bincode-serialized as
+    /// the 24th enum variant in `TxPayload` (declaration ordinal 23).
+    /// **Append-only**: never reorder above this, or every existing serialized
+    /// tx re-decodes as a different operation. See
+    /// crates/primitives/src/governance.rs, docs/specs/GOVERNANCE-V1.md, and
+    /// the wire fixtures in crates/primitives/tests/governance_fixtures.rs.
+    Governance(crate::governance::GovernanceTxData),
 }
 
 impl TransactionV2 {
@@ -556,6 +567,7 @@ impl TransactionV2 {
             TxPayload::StorageMetadataV2(_) => TxType::StorageMetadataV2,
             TxPayload::InferenceAttestation(_) => TxType::InferenceAttestation,
             TxPayload::Education(_) => TxType::Education,
+            TxPayload::Governance(_) => TxType::Governance,
         }
     }
 
@@ -601,6 +613,7 @@ impl TransactionV2 {
             TxPayload::StorageMetadataV2(_) => None,
             TxPayload::InferenceAttestation(_) => None, // attestation, no value/recipient
             TxPayload::Education(data) => Some(data.recipient), // Address::ZERO for no-target ops
+            TxPayload::Governance(_) => None, // governance ops carry no value/recipient
         }
     }
 
@@ -630,6 +643,7 @@ impl TransactionV2 {
             TxPayload::StorageMetadataV2(_) => 0, // fee_deposit handled in executor
             TxPayload::InferenceAttestation(_) => 0, // attestation tx, no token value
             TxPayload::Education(_) => 0,            // education ops carry no token value
+            TxPayload::Governance(_) => 0,          // governance ops carry no token value
         }
     }
 

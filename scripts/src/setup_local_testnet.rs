@@ -85,6 +85,7 @@ fn main() -> Result<()> {
             omninode_enabled_from_height: None,    // OmniNode subprotocol off by default; opt in per-genesis
             education_enabled_from_height: Some(0), // local/dev: SRC-817/818 Education active from genesis (local only; mainnet/testnet stay None)
             contracts_enabled_from_height: None,   // smart contracts dormant; coordinated consensus-breaking activation only
+            governance_enabled_from_height: None,  // on-chain governance dormant; coordinated activation only
         },
     );
 
