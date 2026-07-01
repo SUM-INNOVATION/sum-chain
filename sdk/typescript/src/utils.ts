@@ -2,7 +2,7 @@
  * SUM Chain TypeScript SDK - Utility Functions
  */
 
-import type { KoppaAmount } from './types';
+import type { KoppaAmount } from './types.js';
 
 /**
  * One Koppa in base units (9 decimals)

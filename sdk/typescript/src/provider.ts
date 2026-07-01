@@ -19,7 +19,7 @@ import type {
   NftOwnerTokens,
   Src20TokenInfo,
   Src20TokenHoldings,
-} from './types';
+} from './types.js';
 
 /**
  * JSON-RPC Provider for SUM Chain
