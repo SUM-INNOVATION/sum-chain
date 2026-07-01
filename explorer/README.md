@@ -329,4 +329,4 @@ MIT
 - [SUM Chain Repository](https://github.com/sumchain/sum-chain)
 - [TypeScript SDK](../sdk/typescript)
 - [API Documentation](../docs/rpc/api-reference.md)
-- Operator Guide
+- [Operator Guide](../docs/operator-guide.md)

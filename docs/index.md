@@ -53,7 +53,7 @@ gate** — they are always available when the node binary is running.
   education activation)
 - **Design specs (non-token):** [specs/](./specs/) (SNIP V2 storage plan).
   Token-family usage is in [tokens.md](./tokens.md).
-- **Operational:** [production-checklist](./operations/production-checklist.md)
+- **Operational:** [operator-guide](./operator-guide.md), [production-checklist](./operations/production-checklist.md)
 
 > Integration handoffs and historical/design-only specs live under
 > `docs/integrations/`, `docs/specs/`, and `docs/archive/`. Current usage is in
