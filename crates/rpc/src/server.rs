@@ -3763,6 +3763,57 @@ impl SumChainApiServer for RpcServer {
         Ok(issuers.iter().map(FinanceIssuerInfo::from).collect())
     }
 
+    // ── SRC-85X Legal case-anchor reads (issue #26) ─────────────────────────
+    // Sealed cases are never returned; filtering is applied here in the RPC
+    // layer (no storage change).
+
+    async fn legal_get_case(
+        &self,
+        case_id: String,
+    ) -> std::result::Result<Option<CaseInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        use sumchain_primitives::legal::CaseStatus;
+        let id = self.parse_hex32(&case_id)?;
+        let store = sumchain_storage::CaseStore::new(&self.db);
+        let case = store.get(&id).map_err(|e| RpcError::Internal(e.to_string()))?;
+        // Sealed cases must never be returned; report as not found.
+        Ok(case
+            .filter(|c| c.status != CaseStatus::Sealed)
+            .as_ref()
+            .map(CaseInfo::from))
+    }
+
+    async fn legal_get_active_cases(
+        &self,
+    ) -> std::result::Result<Vec<CaseInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        use sumchain_primitives::legal::CaseStatus;
+        let store = sumchain_storage::CaseStore::new(&self.db);
+        // list_active() returns open (Filed/Active) anchors; defensively drop
+        // any Sealed just in case the helper contract changes.
+        let cases = store.list_active().map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(cases
+            .iter()
+            .filter(|c| c.status != CaseStatus::Sealed)
+            .map(CaseInfo::from)
+            .collect())
+    }
+
+    async fn legal_get_cases_by_jurisdiction(
+        &self,
+        jurisdiction: String,
+    ) -> std::result::Result<Vec<CaseInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        use sumchain_primitives::legal::CaseStatus;
+        let store = sumchain_storage::CaseStore::new(&self.db);
+        let cases = store
+            .get_by_jurisdiction(&jurisdiction)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        // Jurisdiction index returns all statuses incl. Sealed; filter them out.
+        Ok(cases
+            .iter()
+            .filter(|c| c.status != CaseStatus::Sealed)
+            .map(CaseInfo::from)
+            .collect())
+    }
+
     async fn docclass_can_issue(
         &self,
         issuer: String,
@@ -8717,5 +8768,115 @@ mod finance_rpc_tests {
         assert_eq!(srv.finance_get_issuers_by_jurisdiction("US".to_string()).await.unwrap().len(), 2);
         assert_eq!(srv.finance_get_issuers_by_jurisdiction("GB".to_string()).await.unwrap().len(), 1);
         assert_eq!(srv.finance_get_issuers_by_jurisdiction("FR".to_string()).await.unwrap().len(), 0);
+    }
+}
+
+#[cfg(test)]
+mod legal_rpc_tests {
+    //! Issue #26: Legal case-anchor read RPCs over a real RpcServer.
+    //! Case/docket anchors only — no case_type/public_reference/related_cases,
+    //! no process events/orders/benefits/proofs/parties. Sealed cases are
+    //! never returned.
+    use super::*;
+    use std::collections::HashMap;
+    use sumchain_consensus::PoAEngine;
+    use sumchain_crypto::KeyPair;
+    use sumchain_genesis::{ChainParams, Genesis};
+    use sumchain_primitives::legal::{CaseAnchor, CaseStatus, CaseType, LegalIssuerClass};
+    use sumchain_primitives::Address;
+    use sumchain_state::MempoolConfig;
+    use sumchain_storage::CaseStore;
+    use tempfile::TempDir;
+
+    fn server() -> (RpcServer, Arc<Database>, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let db = Arc::new(Database::open_default(dir.path()).unwrap());
+        let state = Arc::new(StateManager::new(db.clone(), 1));
+        let mempool = Arc::new(Mempool::new(MempoolConfig::default()));
+        let validator = KeyPair::generate();
+        let genesis = Genesis::new(
+            1,
+            0,
+            vec![validator.public_key().to_base58()],
+            HashMap::from([(validator.address().to_base58(), 1u128)]),
+            ChainParams::default(),
+        );
+        let engine = Arc::new(
+            PoAEngine::new(db.clone(), state.clone(), mempool.clone(), &genesis, Some(validator)).unwrap(),
+        );
+        let (tx_sender, _rx) = mpsc::channel(8);
+        let srv = RpcServer::new(db.clone(), state, mempool, engine, tx_sender, Arc::new(|| 0usize));
+        (srv, db, dir)
+    }
+
+    fn case(case_id: [u8; 32], jurisdiction: &str, status: CaseStatus, related: Vec<[u8; 32]>) -> CaseAnchor {
+        CaseAnchor {
+            case_id,
+            case_commitment: [2u8; 32],
+            jurisdiction_code: jurisdiction.to_string(),
+            // stigmatizing category + docket ref — must NOT surface in the DTO
+            case_type: Some(CaseType::Criminal),
+            public_reference: Some("2024-CR-12345".to_string()),
+            policy_id: [3u8; 32],
+            issuer_class: LegalIssuerClass::CourtSystem,
+            issuer_address: Address::new([0xE1; 20]),
+            status,
+            created_at: 1000,
+            updated_at: 1100,
+            anchored_at_height: 5,
+            related_cases: related,
+        }
+    }
+
+    #[tokio::test]
+    async fn case_anchor_reads_exclude_sealed_and_sensitive_fields() {
+        let (srv, db, _dir) = server();
+        let store = CaseStore::new(&db);
+        // Active case in US-NY with a populated related_cases link.
+        let linked = [0xCC; 32];
+        store.put(&case([0x01; 32], "US-NY", CaseStatus::Active, vec![linked])).unwrap();
+        store.put(&case([0x02; 32], "US-NY", CaseStatus::Filed, vec![])).unwrap();
+        store.put(&case([0x03; 32], "US-NY", CaseStatus::Closed, vec![])).unwrap();
+        store.put(&case([0x04; 32], "US-NY", CaseStatus::Sealed, vec![])).unwrap();
+        store.put(&case([0x05; 32], "US-CA", CaseStatus::Active, vec![])).unwrap();
+
+        let aid = format!("0x{}", hex::encode([0x01; 32]));
+        let got = srv.legal_get_case(aid.clone()).await.unwrap().unwrap();
+        assert_eq!(got.case_id, aid);
+        assert_eq!(got.case_commitment, format!("0x{}", hex::encode([2u8; 32])));
+        assert_eq!(got.jurisdiction_code, "US-NY");
+        assert_eq!(got.issuer_class, "CourtSystem");
+        assert_eq!(got.issuer_address, Address::new([0xE1; 20]).to_base58());
+        assert_eq!(got.status, "Active");
+        assert_eq!(got.anchored_at_height, 5);
+
+        // Omitted/excluded fields must never appear in the serialized DTO —
+        // including the populated related_cases link id.
+        let json = serde_json::to_string(&got).unwrap();
+        let linked_hex = hex::encode(linked);
+        for banned in [
+            "case_type", "Criminal", "public_reference", "2024-CR", "related_cases",
+            linked_hex.as_str(), "parties", "party", "attachments", "hint_uri",
+            "order", "benefit", "subject", "nullifier", "proof", "event",
+        ] {
+            assert!(!json.contains(banned), "CaseInfo leaked banned field: {}", banned);
+        }
+
+        // Sealed case must be reported as not found by get.
+        assert!(srv.legal_get_case(format!("0x{}", hex::encode([0x04; 32]))).await.unwrap().is_none());
+        // Unknown id -> None.
+        assert!(srv.legal_get_case(format!("0x{}", hex::encode([0u8; 32]))).await.unwrap().is_none());
+
+        // Active list = open (Filed/Active), excludes Sealed and Closed.
+        let active = srv.legal_get_active_cases().await.unwrap();
+        assert_eq!(active.len(), 3); // 0x01 Active, 0x02 Filed, 0x05 Active
+        assert!(active.iter().all(|c| c.status == "Active" || c.status == "Filed"));
+
+        // Jurisdiction list excludes the Sealed case (0x04).
+        let ny = srv.legal_get_cases_by_jurisdiction("US-NY".to_string()).await.unwrap();
+        assert_eq!(ny.len(), 3); // 0x01, 0x02, 0x03 (Closed retained); 0x04 Sealed excluded
+        assert!(ny.iter().all(|c| c.status != "Sealed"));
+        assert_eq!(srv.legal_get_cases_by_jurisdiction("US-CA".to_string()).await.unwrap().len(), 1);
+        assert_eq!(srv.legal_get_cases_by_jurisdiction("US-TX".to_string()).await.unwrap().len(), 0);
     }
 }

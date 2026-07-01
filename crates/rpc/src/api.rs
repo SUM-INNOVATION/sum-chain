@@ -9,6 +9,7 @@ use crate::policy_account_types::{
 };
 use crate::types::{
     TaxClaimTypeInfo, TaxIssuerInfo, TaxPolicyInfo, ExecutorLinkInfo, AssetInfo, FinanceIssuerInfo,
+    CaseInfo,
     EquityControllerConfigInfo, EquityEntityInfo, EquityShareClassInfo,
     AccountInfo, BlockHeightInfo, BlockInfo, ContractCallResult, ContractInfo,
     CreateEmploymentCredentialRequest,
@@ -1139,6 +1140,34 @@ pub trait SumChainApi {
         &self,
         jurisdiction: String,
     ) -> Result<Vec<FinanceIssuerInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    // =========================================================================
+    // SRC-85X Legal case-anchor registry reads (issue #26 — case/docket anchors
+    // only; no case_type/public_reference/related_cases, no process events,
+    // court orders, benefit determinations, proofs, events, or by-case/subject
+    // queries. Sealed cases are never returned.
+    // =========================================================================
+
+    /// Get a case anchor by case id (hex). Returns None for sealed cases.
+    #[method(name = "legal_getCase")]
+    async fn legal_get_case(
+        &self,
+        case_id: String,
+    ) -> Result<Option<CaseInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// List open (Filed/Active) case anchors. Sealed cases are excluded.
+    #[method(name = "legal_getActiveCases")]
+    async fn legal_get_active_cases(
+        &self,
+    ) -> Result<Vec<CaseInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// List case anchors registered in a jurisdiction (e.g. "US-NY-SDNY").
+    /// Sealed cases are excluded.
+    #[method(name = "legal_getCasesByJurisdiction")]
+    async fn legal_get_cases_by_jurisdiction(
+        &self,
+        jurisdiction: String,
+    ) -> Result<Vec<CaseInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Check if an issuer can issue a specific subcode in a jurisdiction
     #[method(name = "docclass_canIssue")]
