@@ -235,6 +235,57 @@ cargo run --bin sumchain-wallet -- send \
   --raw RAW_TX_HEX
 ```
 
+## Joining an Existing Network
+
+The Quick Start above spins up a self-contained **local** testnet. Joining an
+**existing** network (a shared testnet or mainnet) works differently, because
+the repo intentionally ships no infrastructure addresses.
+
+### Bootnodes are not committed
+
+The sample `config.toml` ships with `bootnodes = []` on purpose — no real peer
+addresses are stored in source control. `mdns = true` only discovers peers on
+the **same local network**, so a node on its own host/VPC will not find an
+existing network by itself. To join, you must supply at least one **bootnode**.
+
+**Obtain a current bootnode multiaddr from the operator team / a secure
+channel** — it is not in this repo, and real bootnode IPs/peer-ids **must not be
+committed**. A bootnode multiaddr looks like:
+
+```
+/ip4/<PUBLIC_IP>/tcp/9933/p2p/<PEER_ID>
+```
+
+### Supplying the bootnode
+
+**Recommended — CLI / systemd `--bootnodes` (overrides config):**
+
+```bash
+sumchain run --config config.toml --genesis genesis.json \
+  --bootnodes /ip4/<PUBLIC_IP>/tcp/9933/p2p/<PEER_ID>
+```
+
+Prefer this for production/systemd deployments: the CLI override takes
+precedence over `config.toml`, so it keeps working even if a later deploy resets
+the tracked sample config back to `bootnodes = []`.
+
+Secondary (local convenience only): you may instead set `bootnodes` in a
+host-local `config.toml` and keep your local edits from being overwritten by
+`git` with `git update-index --skip-worktree config.toml`. This is **not** a
+substitute for the CLI/systemd flag — it does not survive a hard reset — so use
+`--bootnodes` as the primary mechanism.
+
+### Full node vs. block-producing validator
+
+Supplying a bootnode lets your node **sync** as a full node. That is **not** the
+same as becoming a **block-producing validator**. Block production requires your
+validator public key to be in the **active validator set**; under the current
+PoA consensus this is coordinated by the operator team via genesis / the
+validator-set process, not by a node simply joining the network.
+
+If you are running a validator, **generate your own validator key** and never
+reuse another node's key.
+
 ## Documentation
 
 Start at **[docs/index.md](docs/index.md)**. Canonical usage docs:
