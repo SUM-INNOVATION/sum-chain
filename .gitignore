@@ -11,7 +11,8 @@
 # Data directories
 /data/
 /keys/
-/genesis/
+/genesis/*
+!/genesis/*.json
 
 # OS files
 .DS_Store

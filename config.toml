@@ -5,7 +5,7 @@ validator_key = "validator-key.json"
 
 [network]
 listen_addr = "/ip4/0.0.0.0/tcp/9933"
-bootnodes = ["/ip4/172.91.65.115/tcp/9933/p2p/12D3KooWE3Z8Zo8Tw679Nse1Ffhsonp1GsjuggTHSccPPueLTf8L"]
+bootnodes = []
 mdns = true
 
 [rpc]
