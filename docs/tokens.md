@@ -313,11 +313,38 @@ curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
 
 ---
 
-## Write-only families — Legal, Healthcare, Finance
+## Finance — SRC-89X (issuer registry reads)
+
+> Status:             code-backed
+> Last verified:      2026-06-30
+> Code references:    crates/primitives/src/finance.rs, crates/storage/src/finance_store.rs, crates/rpc/src/server.rs
+> Public RPC support: yes for issuer registry reads (finance_getIssuer, finance_getActiveIssuers, finance_getIssuersByJurisdiction)
+
+Public read access to SRC-891 finance issuer profiles — financial institution
+and utility issuer registrations. `issuer_address` is the institution address;
+`issuer_commitment` and `policy_id` are opaque `0x` hashes. These records carry
+no subject/customer data. Writes are signed `TxPayload::Finance` transactions
+via [sum_sendRawTransaction](#submitting-writes).
+
+```bash
+# Issuer profile by issuer address
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"finance_getIssuer","params":["<issuer_address>"]}'
+# Active issuer profiles
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"finance_getActiveIssuers","params":[]}'
+# Issuer profiles registered in a jurisdiction (e.g. "US")
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"finance_getIssuersByJurisdiction","params":["US"]}'
+```
+
+---
+
+## Write-only families — Legal, Healthcare
 
 > Status:             code-backed (write flow)
 > Last verified:      2026-06-30
-> Code references:    crates/primitives/src/{legal,healthcare,finance}.rs, crates/state/src/{legal,healthcare,finance}_executor.rs
+> Code references:    crates/primitives/src/{legal,healthcare}.rs, crates/state/src/{legal,healthcare}_executor.rs
 > Public RPC support: writes via sum_sendRawTransaction
 
 Each of these families has a `TxPayload` variant and a wired executor.
@@ -326,7 +353,6 @@ Each of these families has a `TxPayload` variant and a wired executor.
 |---|---|---|
 | Legal process | 85X | `Legal` |
 | Healthcare | 87X | `Healthcare` |
-| Finance / banking | 89X | `Finance` |
 
 > Public read examples are not published for this family. State-changing
 > operations use signed transactions through

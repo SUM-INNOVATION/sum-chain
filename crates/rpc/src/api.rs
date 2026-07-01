@@ -8,7 +8,7 @@ use crate::policy_account_types::{
     BuildSubmitProposalRequest, PolicyAccountInfo, PolicyBuildResponse, ProposalInfo,
 };
 use crate::types::{
-    TaxClaimTypeInfo, TaxIssuerInfo, TaxPolicyInfo, ExecutorLinkInfo, AssetInfo,
+    TaxClaimTypeInfo, TaxIssuerInfo, TaxPolicyInfo, ExecutorLinkInfo, AssetInfo, FinanceIssuerInfo,
     EquityControllerConfigInfo, EquityEntityInfo, EquityShareClassInfo,
     AccountInfo, BlockHeightInfo, BlockInfo, ContractCallResult, ContractInfo,
     CreateEmploymentCredentialRequest,
@@ -1113,6 +1113,32 @@ pub trait SumChainApi {
         &self,
         jurisdiction: String,
     ) -> Result<Vec<AssetInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    // =========================================================================
+    // SRC-89X Finance issuer-registry reads (issue #26 — institution issuer
+    // profiles only; no address proofs, bank-standing, KYC attestations,
+    // proofs, events, subject/holder records, or by-subject queries).
+    // =========================================================================
+
+    /// Get a finance issuer profile by issuer address.
+    #[method(name = "finance_getIssuer")]
+    async fn finance_get_issuer(
+        &self,
+        issuer_address: String,
+    ) -> Result<Option<FinanceIssuerInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// List active finance issuer profiles.
+    #[method(name = "finance_getActiveIssuers")]
+    async fn finance_get_active_issuers(
+        &self,
+    ) -> Result<Vec<FinanceIssuerInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// List finance issuer profiles registered in a jurisdiction (e.g. "US").
+    #[method(name = "finance_getIssuersByJurisdiction")]
+    async fn finance_get_issuers_by_jurisdiction(
+        &self,
+        jurisdiction: String,
+    ) -> Result<Vec<FinanceIssuerInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Check if an issuer can issue a specific subcode in a jurisdiction
     #[method(name = "docclass_canIssue")]

@@ -2289,3 +2289,43 @@ impl From<&sumchain_primitives::property::AssetAnchor> for AssetInfo {
         }
     }
 }
+
+// =============================================================================
+// SRC-89X Finance issuer-registry read DTO (issue #26 — institution issuer
+// profiles only; NO address proofs, bank-standing credentials, KYC
+// attestations, proofs, events, subject/holder records, balances/brackets,
+// account/identity/methods commitments, or any by-subject query).
+// =============================================================================
+
+/// Public view of an SRC-891 finance issuer profile: a financial
+/// institution / utility issuer registration. `issuer_address` is the
+/// institution address (public by design); `issuer_commitment` and `policy_id`
+/// are opaque `0x` hashes. This record carries no subject/customer data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FinanceIssuerInfo {
+    pub issuer_address: String,
+    pub issuer_class: String,
+    pub issuer_commitment: String,
+    pub jurisdiction_code: String,
+    pub policy_id: String,
+    pub status: String,
+    pub registered_at_height: u64,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+impl From<&sumchain_primitives::finance::FinanceIssuerProfile> for FinanceIssuerInfo {
+    fn from(i: &sumchain_primitives::finance::FinanceIssuerProfile) -> Self {
+        Self {
+            issuer_address: i.issuer_address.to_base58(),
+            issuer_class: format!("{:?}", i.issuer_class),
+            issuer_commitment: format!("0x{}", hex::encode(i.issuer_commitment)),
+            jurisdiction_code: i.jurisdiction_code.clone(),
+            policy_id: format!("0x{}", hex::encode(i.policy_id)),
+            status: format!("{:?}", i.status),
+            registered_at_height: i.registered_at_height,
+            created_at: i.created_at,
+            updated_at: i.updated_at,
+        }
+    }
+}
