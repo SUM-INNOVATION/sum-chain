@@ -86,6 +86,15 @@ fn education_gate_open(params: &ChainParams, block_height: u64) -> bool {
     matches!(params.education_enabled_from_height, Some(h) if block_height >= h)
 }
 
+/// On-chain governance v1 activation gate. Same dormant-deploy semantics:
+/// production default `None` → never open; activation requires explicit
+/// `governance_enabled_from_height` in `genesis.json` plus a coordinated
+/// validator upgrade. See docs/specs/GOVERNANCE-V1.md.
+#[inline]
+fn governance_gate_open(params: &ChainParams, block_height: u64) -> bool {
+    matches!(params.governance_enabled_from_height, Some(h) if block_height >= h)
+}
+
 pub struct BlockExecutor {
     state: Arc<StateManager>,
     db: Arc<Database>,
@@ -1307,6 +1316,23 @@ impl BlockExecutor {
                             }
                         }
                     }
+                    TxPayload::Governance(_) => {
+                        // Phase 1: wire/gate scaffolding only. The governance
+                        // lifecycle is implemented in later phases (issue #50).
+                        // Dormant by default: gate closed -> Failed(80); gate
+                        // open -> Failed(81) (P1 stub, no semantics). Either
+                        // way NO fee is charged and NO state is mutated.
+                        let code = if governance_gate_open(&self.params, block_height) {
+                            81
+                        } else {
+                            80
+                        };
+                        Ok(TxExecutionResult {
+                            tx_hash,
+                            status: TxStatus::Failed(code),
+                            fee_paid: 0,
+                        })
+                    }
                 }
             }
         }
@@ -2190,6 +2216,13 @@ impl BlockExecutor {
                 // adjacent V2-only rejections verbatim. No new semantics.
                 return Err(StateError::InvalidOperation(
                     "Education is only supported in V2 transactions".to_string(),
+                ));
+            }
+            TxPayload::Governance(_) => {
+                // Phase 1: wire types only; fail-closed, mirrors the
+                // adjacent V2-only rejections verbatim. No new semantics.
+                return Err(StateError::InvalidOperation(
+                    "Governance is only supported in V2 transactions".to_string(),
                 ));
             }
         }

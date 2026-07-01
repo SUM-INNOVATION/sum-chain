@@ -11,6 +11,7 @@ pub mod education;
 pub mod employment;
 pub mod equity;
 pub mod finance;
+pub mod governance;
 pub mod hash;
 pub mod healthcare;
 pub mod inference_attestation;

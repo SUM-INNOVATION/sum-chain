@@ -165,6 +165,22 @@ pub struct ChainParams {
     /// Dev: set to `Some(0)` to activate from genesis.
     #[serde(default)]
     pub contracts_enabled_from_height: Option<u64>,
+
+    /// Block height at which on-chain governance v1 activates. `None` =
+    /// disabled forever; `Some(h)` = `TxPayload::Governance` operations
+    /// execute from block `h` onward. Below the gate they are rejected free
+    /// (no fee, no state). Mirrors the V2/OmniNode/Education/Contracts
+    /// activation pattern.
+    ///
+    /// Production safety: `#[serde(default)]` resolves a missing field to
+    /// `None`, so an existing mainnet `genesis.json` upgraded to a
+    /// governance-aware binary stays dormant until operators coordinate an
+    /// explicit activation height (a consensus-relevant, validator-coordinated
+    /// upgrade). See docs/specs/GOVERNANCE-V1.md.
+    ///
+    /// Dev: set to `Some(0)` to activate from genesis.
+    #[serde(default)]
+    pub governance_enabled_from_height: Option<u64>,
 }
 
 fn default_finality_depth() -> u64 {
@@ -363,6 +379,10 @@ impl Default for ChainParams {
             // coordinated, consensus-breaking validator upgrade (changes the
             // state-root formula); never set in default/mainnet config.
             contracts_enabled_from_height: None,
+            // Production-safe default: on-chain governance dormant. Activation
+            // is a coordinated validator upgrade; never set in default/mainnet
+            // config. See docs/specs/GOVERNANCE-V1.md.
+            governance_enabled_from_height: None,
         }
     }
 }
