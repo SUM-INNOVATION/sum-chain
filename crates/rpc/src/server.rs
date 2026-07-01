@@ -3732,6 +3732,37 @@ impl SumChainApiServer for RpcServer {
         Ok(assets.iter().map(AssetInfo::from).collect())
     }
 
+    // ── SRC-89X Finance issuer-registry reads (issue #26) ───────────────────
+
+    async fn finance_get_issuer(
+        &self,
+        issuer_address: String,
+    ) -> std::result::Result<Option<FinanceIssuerInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let addr = self.parse_address(&issuer_address)?;
+        let store = sumchain_storage::FinanceIssuerStore::new(&self.db);
+        let issuer = store.get(&addr).map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(issuer.as_ref().map(FinanceIssuerInfo::from))
+    }
+
+    async fn finance_get_active_issuers(
+        &self,
+    ) -> std::result::Result<Vec<FinanceIssuerInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let store = sumchain_storage::FinanceIssuerStore::new(&self.db);
+        let issuers = store.list_active().map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(issuers.iter().map(FinanceIssuerInfo::from).collect())
+    }
+
+    async fn finance_get_issuers_by_jurisdiction(
+        &self,
+        jurisdiction: String,
+    ) -> std::result::Result<Vec<FinanceIssuerInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let store = sumchain_storage::FinanceIssuerStore::new(&self.db);
+        let issuers = store
+            .get_by_jurisdiction(&jurisdiction)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(issuers.iter().map(FinanceIssuerInfo::from).collect())
+    }
+
     async fn docclass_can_issue(
         &self,
         issuer: String,
@@ -8597,5 +8628,94 @@ mod property_rpc_tests {
         assert_eq!(srv.property_get_assets_by_jurisdiction("US-CA-LA".to_string()).await.unwrap().len(), 2);
         assert_eq!(srv.property_get_assets_by_jurisdiction("US-NY-NY".to_string()).await.unwrap().len(), 1);
         assert_eq!(srv.property_get_assets_by_jurisdiction("US-TX-AU".to_string()).await.unwrap().len(), 0);
+    }
+}
+
+#[cfg(test)]
+mod finance_rpc_tests {
+    //! Issue #26: Finance issuer-registry read RPCs over a real RpcServer.
+    //! Institution issuer profiles only — no address proofs, bank-standing,
+    //! KYC attestations, proofs, events, or any subject/holder data.
+    use super::*;
+    use std::collections::HashMap;
+    use sumchain_consensus::PoAEngine;
+    use sumchain_crypto::KeyPair;
+    use sumchain_genesis::{ChainParams, Genesis};
+    use sumchain_primitives::finance::{FinanceIssuerClass, FinanceIssuerProfile, FinanceIssuerStatus};
+    use sumchain_primitives::Address;
+    use sumchain_state::MempoolConfig;
+    use sumchain_storage::FinanceIssuerStore;
+    use tempfile::TempDir;
+
+    fn server() -> (RpcServer, Arc<Database>, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let db = Arc::new(Database::open_default(dir.path()).unwrap());
+        let state = Arc::new(StateManager::new(db.clone(), 1));
+        let mempool = Arc::new(Mempool::new(MempoolConfig::default()));
+        let validator = KeyPair::generate();
+        let genesis = Genesis::new(
+            1,
+            0,
+            vec![validator.public_key().to_base58()],
+            HashMap::from([(validator.address().to_base58(), 1u128)]),
+            ChainParams::default(),
+        );
+        let engine = Arc::new(
+            PoAEngine::new(db.clone(), state.clone(), mempool.clone(), &genesis, Some(validator)).unwrap(),
+        );
+        let (tx_sender, _rx) = mpsc::channel(8);
+        let srv = RpcServer::new(db.clone(), state, mempool, engine, tx_sender, Arc::new(|| 0usize));
+        (srv, db, dir)
+    }
+
+    fn issuer(addr: Address, jurisdiction: &str, status: FinanceIssuerStatus) -> FinanceIssuerProfile {
+        FinanceIssuerProfile {
+            issuer_address: addr,
+            issuer_class: FinanceIssuerClass::RegulatedBank,
+            issuer_commitment: [2u8; 32],
+            jurisdiction_code: jurisdiction.to_string(),
+            policy_id: [3u8; 32],
+            status,
+            registered_at_height: 5,
+            created_at: 1000,
+            updated_at: 1100,
+        }
+    }
+
+    #[tokio::test]
+    async fn finance_issuer_reads() {
+        let (srv, db, _dir) = server();
+        let store = FinanceIssuerStore::new(&db);
+        let a = Address::new([0xA1; 20]);
+        let b = Address::new([0xB2; 20]);
+        let c = Address::new([0xC3; 20]);
+        store.put(&issuer(a, "US", FinanceIssuerStatus::Active)).unwrap();
+        store.put(&issuer(b, "US", FinanceIssuerStatus::Revoked)).unwrap();
+        store.put(&issuer(c, "GB", FinanceIssuerStatus::Active)).unwrap();
+
+        let got = srv.finance_get_issuer(a.to_base58()).await.unwrap().unwrap();
+        assert_eq!(got.issuer_address, a.to_base58());
+        assert_eq!(got.issuer_class, "RegulatedBank");
+        assert_eq!(got.issuer_commitment, format!("0x{}", hex::encode([2u8; 32])));
+        assert_eq!(got.jurisdiction_code, "US");
+        assert_eq!(got.status, "Active");
+        assert_eq!(got.registered_at_height, 5);
+
+        // Excluded sensitive surfaces must never appear in the serialized DTO.
+        let json = serde_json::to_string(&got).unwrap();
+        for banned in [
+            "subject", "holder", "account", "balance", "bracket", "kyc", "aml",
+            "identity", "tenure", "address_commitment", "postal", "proof",
+        ] {
+            assert!(!json.contains(banned), "FinanceIssuerInfo leaked banned field: {}", banned);
+        }
+
+        // unknown address -> None
+        assert!(srv.finance_get_issuer(Address::new([0u8; 20]).to_base58()).await.unwrap().is_none());
+        // list_active excludes the Revoked issuer
+        assert_eq!(srv.finance_get_active_issuers().await.unwrap().len(), 2);
+        assert_eq!(srv.finance_get_issuers_by_jurisdiction("US".to_string()).await.unwrap().len(), 2);
+        assert_eq!(srv.finance_get_issuers_by_jurisdiction("GB".to_string()).await.unwrap().len(), 1);
+        assert_eq!(srv.finance_get_issuers_by_jurisdiction("FR".to_string()).await.unwrap().len(), 0);
     }
 }
