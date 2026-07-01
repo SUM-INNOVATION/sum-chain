@@ -367,25 +367,27 @@ curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
 
 ---
 
-## Write-only families — Healthcare
+## Healthcare — SRC-871 (institutional provider registry reads)
 
-> Status:             code-backed (write flow)
-> Last verified:      2026-06-30
-> Code references:    crates/primitives/src/healthcare.rs, crates/state/src/healthcare_executor.rs
-> Public RPC support: writes via sum_sendRawTransaction
+> Status:             code-backed
+> Last verified:      2026-07-01
+> Code references:    crates/primitives/src/healthcare.rs, crates/storage/src/healthcare_store.rs, crates/rpc/src/server.rs
+> Public RPC support: yes for institutional provider registry reads (healthcare_getInstitutionalProvider, healthcare_getActiveInstitutionalProviders)
 
-This family has a `TxPayload` variant and a wired executor.
+Public read access to SRC-871 provider profiles, restricted to institutional
+(organizational) providers — hospitals, health insurers, clinics, pharmacies,
+and laboratories. Ids and commitments are returned as opaque `0x` hashes;
+`issuer_address` is the registrant address. Writes are signed
+`TxPayload::Healthcare` transactions via [sum_sendRawTransaction](#submitting-writes).
 
-| Family | SRC | TxPayload variant |
-|---|---|---|
-| Healthcare | 87X | `Healthcare` |
-
-> Public read examples are not published for this family. State-changing
-> operations use signed transactions through
-> [`sum_sendRawTransaction`](#submitting-writes).
-
-For these families, generic block/transaction reads (`sum_getTransaction`,
-`sum_getReceipt`, block queries) cover the transactions that carried the writes.
+```bash
+# Institutional provider by provider id (hex); null for non-institutional providers
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"healthcare_getInstitutionalProvider","params":["0x<provider_id_hex>"]}'
+# Active institutional providers
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"healthcare_getActiveInstitutionalProviders","params":[]}'
+```
 
 ---
 

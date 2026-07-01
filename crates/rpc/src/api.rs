@@ -9,7 +9,7 @@ use crate::policy_account_types::{
 };
 use crate::types::{
     TaxClaimTypeInfo, TaxIssuerInfo, TaxPolicyInfo, ExecutorLinkInfo, AssetInfo, FinanceIssuerInfo,
-    CaseInfo,
+    CaseInfo, HealthcareProviderInfo,
     EquityControllerConfigInfo, EquityEntityInfo, EquityShareClassInfo,
     AccountInfo, BlockHeightInfo, BlockInfo, ContractCallResult, ContractInfo,
     CreateEmploymentCredentialRequest,
@@ -1168,6 +1168,27 @@ pub trait SumChainApi {
         &self,
         jurisdiction: String,
     ) -> Result<Vec<CaseInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    // =========================================================================
+    // SRC-871 Healthcare institutional provider registry reads (issue #41 —
+    // organizational providers only, restricted by an explicit allowlist of
+    // provider types; no memberships, consents, prescriptions, proofs, events,
+    // or member/patient/subject data; no by-network query).
+    // =========================================================================
+
+    /// Get an institutional provider by provider id (hex). Returns None for
+    /// non-allowlisted (e.g. individual-clinician) provider types.
+    #[method(name = "healthcare_getInstitutionalProvider")]
+    async fn healthcare_get_institutional_provider(
+        &self,
+        provider_id: String,
+    ) -> Result<Option<HealthcareProviderInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// List active institutional providers (allowlisted organizational types).
+    #[method(name = "healthcare_getActiveInstitutionalProviders")]
+    async fn healthcare_get_active_institutional_providers(
+        &self,
+    ) -> Result<Vec<HealthcareProviderInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Check if an issuer can issue a specific subcode in a jurisdiction
     #[method(name = "docclass_canIssue")]

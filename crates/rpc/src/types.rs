@@ -2372,3 +2372,50 @@ impl From<&sumchain_primitives::legal::CaseAnchor> for CaseInfo {
         }
     }
 }
+
+// =============================================================================
+// SRC-871 Healthcare institutional provider read DTO (issue #41 — institutional
+// provider registry records only; NO provider_type, public_reference,
+// attachments, network_affiliations, and NO membership / consent / prescription
+// / proof / event / member / patient / subject data). The RPC layer restricts
+// results to an explicit allowlist of organizational provider types.
+// =============================================================================
+
+/// Public view of an SRC-871 provider profile, restricted by the RPC layer to
+/// institutional (organizational) provider types. Ids/commitments are opaque
+/// `0x` hashes; `issuer_address` is the registrant address. `provider_type`,
+/// `public_reference`, `attachments`, and `network_affiliations` are omitted.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthcareProviderInfo {
+    pub provider_id: String,
+    pub provider_commitment: String,
+    pub specialties_commitment: Option<String>,
+    pub credentials_commitment: Option<String>,
+    pub jurisdiction_code: String,
+    pub policy_id: String,
+    pub issuer_class: String,
+    pub issuer_address: String,
+    pub status: String,
+    pub created_at: u64,
+    pub updated_at: u64,
+    pub registered_at_height: u64,
+}
+
+impl From<&sumchain_primitives::healthcare::ProviderProfile> for HealthcareProviderInfo {
+    fn from(p: &sumchain_primitives::healthcare::ProviderProfile) -> Self {
+        Self {
+            provider_id: format!("0x{}", hex::encode(p.provider_id)),
+            provider_commitment: format!("0x{}", hex::encode(p.provider_commitment)),
+            specialties_commitment: p.specialties_commitment.map(|c| format!("0x{}", hex::encode(c))),
+            credentials_commitment: p.credentials_commitment.map(|c| format!("0x{}", hex::encode(c))),
+            jurisdiction_code: p.jurisdiction_code.clone(),
+            policy_id: format!("0x{}", hex::encode(p.policy_id)),
+            issuer_class: format!("{:?}", p.issuer_class),
+            issuer_address: p.issuer_address.to_base58(),
+            status: format!("{:?}", p.status),
+            created_at: p.created_at,
+            updated_at: p.updated_at,
+            registered_at_height: p.registered_at_height,
+        }
+    }
+}

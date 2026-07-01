@@ -65,6 +65,22 @@ fn parse_equity_org_type(s: &str) -> Option<sumchain_primitives::equity::OrgType
     }
 }
 
+/// SRC-871 institutional-provider allowlist (issue #41). Default-deny: only
+/// these organizational provider types are exposed via the healthcare provider
+/// reads. Every other type — individual clinicians, non-allowlisted org/plan
+/// types, membership orgs, and `Other` — is excluded.
+fn is_institutional_provider(t: sumchain_primitives::healthcare::ProviderType) -> bool {
+    use sumchain_primitives::healthcare::ProviderType;
+    matches!(
+        t,
+        ProviderType::Hospital
+            | ProviderType::HealthInsurer
+            | ProviderType::Clinic
+            | ProviderType::Pharmacy
+            | ProviderType::Laboratory
+    )
+}
+
 /// Classify a transaction's status given its receipt (if any), mempool presence,
 /// and a finality check. Pure function — extracted from `chain_get_transaction_status`
 /// to make the dispatch logic testable without a full RPC server harness.
@@ -3811,6 +3827,39 @@ impl SumChainApiServer for RpcServer {
             .iter()
             .filter(|c| c.status != CaseStatus::Sealed)
             .map(CaseInfo::from)
+            .collect())
+    }
+
+    // ── SRC-871 Healthcare institutional provider reads (issue #41) ──────────
+    // The provider store is broad (mixes organizations and individual
+    // clinicians); this RPC layer restricts results to an explicit allowlist of
+    // organizational provider types. No new store/index/CF.
+
+    async fn healthcare_get_institutional_provider(
+        &self,
+        provider_id: String,
+    ) -> std::result::Result<Option<HealthcareProviderInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let id = self.parse_hex32(&provider_id)?;
+        let store = sumchain_storage::ProviderStore::new(&self.db);
+        let provider = store.get(&id).map_err(|e| RpcError::Internal(e.to_string()))?;
+        // Return None (indistinguishable from not-found) for non-allowlisted
+        // provider types; status-agnostic for allowlisted institutions.
+        Ok(provider
+            .filter(|p| is_institutional_provider(p.provider_type))
+            .as_ref()
+            .map(HealthcareProviderInfo::from))
+    }
+
+    async fn healthcare_get_active_institutional_providers(
+        &self,
+    ) -> std::result::Result<Vec<HealthcareProviderInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let store = sumchain_storage::ProviderStore::new(&self.db);
+        // list_active() returns Active-only; restrict to the institutional allowlist.
+        let providers = store.list_active().map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(providers
+            .iter()
+            .filter(|p| is_institutional_provider(p.provider_type))
+            .map(HealthcareProviderInfo::from)
             .collect())
     }
 
@@ -8878,5 +8927,157 @@ mod legal_rpc_tests {
         assert!(ny.iter().all(|c| c.status != "Sealed"));
         assert_eq!(srv.legal_get_cases_by_jurisdiction("US-CA".to_string()).await.unwrap().len(), 1);
         assert_eq!(srv.legal_get_cases_by_jurisdiction("US-TX".to_string()).await.unwrap().len(), 0);
+    }
+}
+
+#[cfg(test)]
+mod healthcare_rpc_tests {
+    //! Issue #41: Healthcare institutional-only provider read RPCs over a real
+    //! RpcServer. Organizational providers only (explicit allowlist); no
+    //! individual clinicians, memberships, consents, prescriptions, proofs,
+    //! events, or member/patient/subject data; no by-network query.
+    use super::*;
+    use std::collections::HashMap;
+    use sumchain_consensus::PoAEngine;
+    use sumchain_crypto::KeyPair;
+    use sumchain_genesis::{ChainParams, Genesis};
+    use sumchain_primitives::healthcare::{
+        HealthcareIssuerClass, ProviderProfile, ProviderStatus, ProviderType,
+    };
+    use sumchain_primitives::Address;
+    use sumchain_state::MempoolConfig;
+    use sumchain_storage::ProviderStore;
+    use tempfile::TempDir;
+
+    fn server() -> (RpcServer, Arc<Database>, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let db = Arc::new(Database::open_default(dir.path()).unwrap());
+        let state = Arc::new(StateManager::new(db.clone(), 1));
+        let mempool = Arc::new(Mempool::new(MempoolConfig::default()));
+        let validator = KeyPair::generate();
+        let genesis = Genesis::new(
+            1,
+            0,
+            vec![validator.public_key().to_base58()],
+            HashMap::from([(validator.address().to_base58(), 1u128)]),
+            ChainParams::default(),
+        );
+        let engine = Arc::new(
+            PoAEngine::new(db.clone(), state.clone(), mempool.clone(), &genesis, Some(validator)).unwrap(),
+        );
+        let (tx_sender, _rx) = mpsc::channel(8);
+        let srv = RpcServer::new(db.clone(), state, mempool, engine, tx_sender, Arc::new(|| 0usize));
+        (srv, db, dir)
+    }
+
+    fn provider(id: u8, ptype: ProviderType, status: ProviderStatus) -> ProviderProfile {
+        ProviderProfile {
+            provider_id: [id; 32],
+            provider_commitment: [2u8; 32],
+            provider_type: ptype,
+            jurisdiction_code: "US-CA".to_string(),
+            // individual-identifier field — must never surface in the DTO
+            public_reference: Some("NPI-1234".to_string()),
+            specialties_commitment: Some([3u8; 32]),
+            credentials_commitment: Some([4u8; 32]),
+            policy_id: [5u8; 32],
+            issuer_class: HealthcareIssuerClass::AccreditationBody,
+            issuer_address: Address::new([0xE1; 20]),
+            status,
+            created_at: 1000,
+            updated_at: 1100,
+            registered_at_height: 5,
+            network_affiliations: vec![[0xAB; 32]],
+            attachments: vec![],
+        }
+    }
+
+    const ALLOWLIST: [ProviderType; 5] = [
+        ProviderType::Hospital,
+        ProviderType::HealthInsurer,
+        ProviderType::Clinic,
+        ProviderType::Pharmacy,
+        ProviderType::Laboratory,
+    ];
+
+    // Representative non-allowlisted types: individual clinicians, org/plan
+    // types outside the allowlist, a membership org, and Other.
+    const EXCLUDED: [ProviderType; 10] = [
+        ProviderType::Physician,
+        ProviderType::Specialist,
+        ProviderType::MentalHealthProvider,
+        ProviderType::Dentist,
+        ProviderType::Chiropractor,
+        ProviderType::Telemedicine,
+        ProviderType::Medicare,
+        ProviderType::NursingFacility,
+        ProviderType::GymFitness,
+        ProviderType::Other,
+    ];
+
+    #[tokio::test]
+    async fn allowlisted_institutions_returned() {
+        let (srv, db, _dir) = server();
+        let store = ProviderStore::new(&db);
+        for (i, t) in ALLOWLIST.iter().enumerate() {
+            store.put(&provider(i as u8 + 1, *t, ProviderStatus::Active)).unwrap();
+        }
+        // each allowlisted type is returned by get and present in the active list
+        for i in 0..ALLOWLIST.len() {
+            let pid = format!("0x{}", hex::encode([i as u8 + 1; 32]));
+            assert!(srv.healthcare_get_institutional_provider(pid).await.unwrap().is_some());
+        }
+        assert_eq!(srv.healthcare_get_active_institutional_providers().await.unwrap().len(), 5);
+    }
+
+    #[tokio::test]
+    async fn non_allowlisted_types_excluded() {
+        let (srv, db, _dir) = server();
+        let store = ProviderStore::new(&db);
+        for (i, t) in EXCLUDED.iter().enumerate() {
+            store.put(&provider(i as u8 + 1, *t, ProviderStatus::Active)).unwrap();
+        }
+        // get returns None for every excluded type; active list is empty
+        for i in 0..EXCLUDED.len() {
+            let pid = format!("0x{}", hex::encode([i as u8 + 1; 32]));
+            assert!(
+                srv.healthcare_get_institutional_provider(pid).await.unwrap().is_none(),
+                "excluded provider type leaked via get: {:?}", EXCLUDED[i]
+            );
+        }
+        assert_eq!(srv.healthcare_get_active_institutional_providers().await.unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn active_list_excludes_inactive_but_get_is_status_agnostic() {
+        let (srv, db, _dir) = server();
+        let store = ProviderStore::new(&db);
+        // allowlisted but Suspended: absent from active list, still gettable by id
+        store.put(&provider(1, ProviderType::Hospital, ProviderStatus::Suspended)).unwrap();
+        store.put(&provider(2, ProviderType::Pharmacy, ProviderStatus::Active)).unwrap();
+
+        assert_eq!(srv.healthcare_get_active_institutional_providers().await.unwrap().len(), 1);
+
+        let suspended = srv
+            .healthcare_get_institutional_provider(format!("0x{}", hex::encode([1u8; 32])))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(suspended.status, "Suspended");
+        assert_eq!(suspended.jurisdiction_code, "US-CA");
+        assert_eq!(suspended.issuer_class, "AccreditationBody");
+        assert_eq!(suspended.issuer_address, Address::new([0xE1; 20]).to_base58());
+        assert_eq!(suspended.registered_at_height, 5);
+
+        // Omitted/excluded fields must never appear in the serialized DTO.
+        let json = serde_json::to_string(&suspended).unwrap();
+        let net_hex = hex::encode([0xAB; 32]);
+        for banned in [
+            "provider_type", "Hospital", "public_reference", "NPI-1234", "attachments",
+            "network_affiliations", net_hex.as_str(), "member", "patient", "subject",
+            "nullifier", "consent", "prescription", "medication", "proof", "event",
+        ] {
+            assert!(!json.contains(banned), "HealthcareProviderInfo leaked banned field: {}", banned);
+        }
     }
 }
