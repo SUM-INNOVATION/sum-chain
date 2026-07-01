@@ -51,7 +51,8 @@ gate** — they are always available when the node binary is running.
   [performance-guide](./architecture/performance-guide.md)
 - **Subprotocols:** [subprotocols/](./subprotocols/) (inference attestation,
   education activation)
-- **Design specs (non-token):** [specs/](./specs/) (SNIP V2 storage plan).
+- **Design specs (non-token):** [specs/](./specs/) (SNIP V2 storage plan;
+  [Governance v1](./specs/GOVERNANCE-V1.md) design spec).
   Token-family usage is in [tokens.md](./tokens.md).
 - **Operational:** [operator-guide](./operator-guide.md), [production-checklist](./operations/production-checklist.md)
 
