@@ -19,7 +19,7 @@
  * ```
  */
 
-export { Provider } from './provider';
+export { Provider } from './provider.js';
 
 export {
   koppaToBaseUnits,
@@ -34,7 +34,7 @@ export {
   KOPPA_SYMBOL,
   KOPPA_NAME,
   KOPPA_DECIMALS,
-} from './utils';
+} from './utils.js';
 
 export type {
   KoppaAmount,
@@ -57,4 +57,4 @@ export type {
   NftTokenInfo,
   NftTokenRef,
   NftOwnerTokens,
-} from './types';
+} from './types.js';

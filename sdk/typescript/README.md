@@ -187,11 +187,11 @@ Get node health status.
 
 ```typescript
 const health = await provider.getHealth();
-console.log(`Status: ${health.status}`);
+console.log(`Version: ${health.version}`);
 console.log(`Chain ID: ${health.chain_id}`);
-console.log(`Height: ${health.height}`);
+console.log(`Height: ${health.current_height}`);
 console.log(`Peers: ${health.peer_count}`);
-console.log(`Synced: ${health.is_synced}`);
+console.log(`Validator: ${health.is_validator}`);
 ```
 
 ##### getChainId()
@@ -370,13 +370,12 @@ const provider = new Provider('http://localhost:8545');
 
 const health = await provider.getHealth();
 
-if (health.status === 'healthy' && health.is_synced) {
-  console.log('Node is healthy and synced');
-  console.log(`Height: ${health.height}`);
-  console.log(`Peers: ${health.peer_count}`);
-} else {
-  console.log('Node is not ready');
-}
+console.log(`Version: ${health.version}`);
+console.log(`Chain ID: ${health.chain_id}`);
+console.log(`Height: ${health.current_height}`);
+console.log(`Peers: ${health.peer_count}`);
+console.log(`Mempool: ${health.mempool_size}`);
+console.log(`Validator: ${health.is_validator}`);
 ```
 
 ### List Validators
@@ -512,6 +511,26 @@ The SDK works in both Node.js and browser environments. For browsers, you may ne
   console.log(formatKoppa(balance));
 </script>
 ```
+
+## Building from Source
+
+The compiled `dist/` is generated, not committed:
+
+```bash
+npm ci
+npm run build          # tsc → dist/ (index, provider, utils, types; .js + .d.ts)
+npm pack               # runs prepare, then packs dist/ into the tarball
+```
+
+- `prepare` builds `dist/` on install-from-source (git/`file:` dependencies) and
+  during `npm pack`.
+- `prepublishOnly` runs the build before `npm publish`.
+- Consumers installing the published package receive the prebuilt `dist/` from
+  the tarball — no build runs at install time.
+
+The package is published as ESM (`"type": "module"`); relative imports in `src/`
+use explicit `.js` extensions so the emitted `dist/` resolves under both Node
+ESM (`import '@sumchain/sdk'`) and bundlers.
 
 ## License
 
