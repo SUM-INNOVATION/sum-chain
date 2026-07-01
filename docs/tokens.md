@@ -340,18 +340,44 @@ curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
 
 ---
 
-## Write-only families — Legal, Healthcare
+## Legal — SRC-85X (case-anchor registry reads)
+
+> Status:             code-backed
+> Last verified:      2026-06-30
+> Code references:    crates/primitives/src/legal.rs, crates/storage/src/legal_store.rs, crates/rpc/src/server.rs
+> Public RPC support: yes for case-anchor registry reads (legal_getCase, legal_getActiveCases, legal_getCasesByJurisdiction)
+
+Public read access to SRC-851 case/docket anchors. Ids and commitments are
+returned as opaque `0x` hashes; `issuer_address` is the court/agency address.
+`legal_getActiveCases` returns **open case anchors (Filed/Active)**. Sealed
+cases are never returned by any of these reads. Writes are signed
+`TxPayload::Legal` transactions via [sum_sendRawTransaction](#submitting-writes).
+
+```bash
+# Case anchor by case id (hex); returns null for sealed cases
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"legal_getCase","params":["0x<case_id_hex>"]}'
+# Open (Filed/Active) case anchors
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"legal_getActiveCases","params":[]}'
+# Case anchors registered in a jurisdiction (e.g. "US-NY-SDNY"); sealed excluded
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"legal_getCasesByJurisdiction","params":["US-NY-SDNY"]}'
+```
+
+---
+
+## Write-only families — Healthcare
 
 > Status:             code-backed (write flow)
 > Last verified:      2026-06-30
-> Code references:    crates/primitives/src/{legal,healthcare}.rs, crates/state/src/{legal,healthcare}_executor.rs
+> Code references:    crates/primitives/src/healthcare.rs, crates/state/src/healthcare_executor.rs
 > Public RPC support: writes via sum_sendRawTransaction
 
-Each of these families has a `TxPayload` variant and a wired executor.
+This family has a `TxPayload` variant and a wired executor.
 
 | Family | SRC | TxPayload variant |
 |---|---|---|
-| Legal process | 85X | `Legal` |
 | Healthcare | 87X | `Healthcare` |
 
 > Public read examples are not published for this family. State-changing

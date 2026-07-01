@@ -2329,3 +2329,46 @@ impl From<&sumchain_primitives::finance::FinanceIssuerProfile> for FinanceIssuer
         }
     }
 }
+
+// =============================================================================
+// SRC-85X Legal case-anchor read DTO (issue #26 — case/docket anchors only;
+// NO case_type, public_reference, related_cases, parties, process events,
+// court orders, benefit determinations, proofs, events, attachments, subject
+// nullifiers, or any by-case/by-subject query. Sealed cases are never returned
+// (filtered in the RPC handler layer).
+// =============================================================================
+
+/// Public view of an SRC-851 case/docket anchor. Ids/commitments are opaque
+/// `0x` hashes; `issuer_address` is the court/agency address (public by
+/// design). `case_type`, `public_reference`, and `related_cases` are
+/// deliberately omitted; sealed cases are never surfaced.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaseInfo {
+    pub case_id: String,
+    pub case_commitment: String,
+    pub jurisdiction_code: String,
+    pub policy_id: String,
+    pub issuer_class: String,
+    pub issuer_address: String,
+    pub status: String,
+    pub created_at: u64,
+    pub updated_at: u64,
+    pub anchored_at_height: u64,
+}
+
+impl From<&sumchain_primitives::legal::CaseAnchor> for CaseInfo {
+    fn from(c: &sumchain_primitives::legal::CaseAnchor) -> Self {
+        Self {
+            case_id: format!("0x{}", hex::encode(c.case_id)),
+            case_commitment: format!("0x{}", hex::encode(c.case_commitment)),
+            jurisdiction_code: c.jurisdiction_code.clone(),
+            policy_id: format!("0x{}", hex::encode(c.policy_id)),
+            issuer_class: format!("{:?}", c.issuer_class),
+            issuer_address: c.issuer_address.to_base58(),
+            status: format!("{:?}", c.status),
+            created_at: c.created_at,
+            updated_at: c.updated_at,
+            anchored_at_height: c.anchored_at_height,
+        }
+    }
+}
