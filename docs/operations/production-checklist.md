@@ -1,427 +1,151 @@
-# SUM Chain Production Launch Checklist
+# SUM Chain Production Operations & Launch Readiness Checklist
 
-This document provides a comprehensive checklist for launching SUM Chain to production (mainnet).
+Operational checklist for running SUM Chain validators and full nodes in
+production (mainnet).
 
-> **Status:** current note
-> **Last verified:** 2026-06-27
-> **Code references:** crates/consensus, docs/architecture/bft-consensus.md (experimental)
->
-> Current supported production consensus is **PoA with depth-based finality**.
-> BFT is experimental and not part of the current supported production path.
+> **Status:** current
+> **Last verified:** 2026-07-01 (against live `chain_getChainParams` on `https://rpc.sumchain.io`)
+> **Consensus:** Proof of Authority (PoA) with depth-based finality.
+> BFT is experimental/roadmap and not part of the supported production path.
 
-## ✅ Completed Items
+## Consensus & Finality
 
-### 1. Currency Branding ✓
+- Production consensus is **PoA** — round-robin (or stake-weighted) proposer
+  selection: the proposer for height `H` is `validators[H % N]`.
+- **Depth-based finality:** a block at height `H` is finalized once the chain
+  reaches `H + finality_depth`. The live `finality_depth` is **6** (≈18s at the
+  3s block time). Finalized blocks cannot be reverted by reorg.
+- A Tendermint-style BFT engine exists as **experimental/roadmap** work only.
 
-- [x] Native currency renamed to **Koppa (Ϙ)**
-- [x] 9 decimal places (1 Ϙ = 1,000,000,000 base units)
-- [x] CLI updated with human-readable amounts
-- [x] Documentation updated throughout
-- [x] API methods use Koppa terminology
+**Code references:**
+- [crates/consensus/src/poa.rs](../../crates/consensus/src/poa.rs) — production PoA engine.
+- [crates/consensus/src/bft/](../../crates/consensus/src/bft) — experimental BFT (roadmap).
+- [docs/architecture/bft-consensus.md](../architecture/bft-consensus.md) (experimental).
 
-**Files**:
-- [README.md](../../README.md)
-- [sdk/typescript/src/utils.ts](../../sdk/typescript/src/utils.ts)
-- CLI wallet commands
+## Genesis
 
-### 2. Mainnet Genesis Configuration ✓
+- The **root runtime `genesis.json`** is the genesis file production validators
+  boot from (`sumchain run --config config.toml --genesis genesis.json`). Its
+  validator set and allocations are the live chain's.
+- [genesis/mainnet_genesis.json](../../genesis/mainnet_genesis.json) is a
+  **template only** — its validators/allocations are placeholders. Production
+  validators do **not** boot from it.
+- All validators must run a **byte-identical** runtime `genesis.json`; any
+  subprotocol activation heights are edited into each validator's runtime
+  genesis identically, never into the template.
+- [genesis/testnet_genesis.json](../../genesis/testnet_genesis.json) is the
+  testnet template.
 
-- [x] Mainnet genesis file created
-- [x] Token distribution defined:
-  - 50% Foundation (5B Ϙ)
-  - 20% Ecosystem Fund (2B Ϙ)
-  - 15% Team (1.5B Ϙ, 4-year vesting)
-  - 10% Community (1B Ϙ)
-  - 5% Liquidity (500M Ϙ)
-- [x] 5 initial validators configured
-- [x] Testnet genesis also available
+**Consistency check:** confirm the `genesis.json` on every validator hashes
+identically before starting or restarting the network.
 
-**Files**:
-- [genesis/mainnet_genesis.json](../../genesis/mainnet_genesis.json)
-- [genesis/testnet_genesis.json](../../genesis/testnet_genesis.json)
-- ~~genesis/MAINNET_README.md~~ (removed)
+## Node Configuration
 
-### 3. Network Infrastructure ✓
+- Node config is TOML at the default path `config.toml`
+  (`sumchain run --config config.toml`).
+- The committed sample `config.toml` ships `bootnodes = []` and no
+  infrastructure addresses. `mdns = true` only discovers peers on the local
+  network.
+- Production validators supply real bootnodes out-of-band, preferably via the
+  systemd/CLI `--bootnodes` override (it takes precedence over `config.toml`, so
+  it survives sample-config changes). See the joining-network guidance in the
+  [README](../../README.md#joining-an-existing-network).
 
-- [x] Bootstrap node deployment guide
-- [x] Hardware requirements documented
-- [x] Security best practices
-- [x] Monitoring setup instructions
-- [x] Docker and Kubernetes configs
+## Validator Setup
 
-**Files**:
-- ~~docs/bootstrap-nodes.md~~ (removed)
-- [deploy/docker-compose.yaml](../../docker-compose.yaml)
-- [deploy/kubernetes/](../../deploy/kubernetes)
+- Install/build the node (`cargo build --release`) and run under a process
+  manager (e.g. systemd), `Restart=on-failure`.
+- Generate a **fresh validator key per node**; never reuse another node's key.
+- Being reachable as a block producer requires the validator's public key to be
+  in the active validator set (defined in the runtime genesis and coordinated by
+  the operator team) — running a node alone does not add it to the set.
+- Supply bootnodes via `--bootnodes` (see Node Configuration).
 
-### 4. Security Audit Documentation ✓
+## Deployment Assets
 
-- [x] Security architecture documented
-- [x] Cryptographic primitives listed
-- [x] Threat model analysis
-- [x] Attack mitigations explained
-- [x] Bug bounty program framework
-- [x] Audit checklist created
+- [docker-compose.yaml](../../docker-compose.yaml) — local/multi-node compose (root of repo).
+- [deploy/kubernetes/](../../deploy/kubernetes) — StatefulSet manifests + ConfigMap
+  (the ConfigMap ships `bootnodes = []`; per-pod bootnodes are set via `--bootnodes`).
+- [deploy/monitoring/prometheus.yml](../../deploy/monitoring/prometheus.yml) — Prometheus scrape config.
 
-**Files**:
-- [docs/architecture/security-overview.md](../architecture/security-overview.md)
+## Monitoring
 
-### 5. JavaScript/TypeScript SDK ✓
+- Prometheus metrics are exposed by the node; scrape config in
+  [deploy/monitoring/prometheus.yml](../../deploy/monitoring/prometheus.yml) and a
+  Kubernetes `ServiceMonitor` in
+  [deploy/kubernetes/servicemonitor.yaml](../../deploy/kubernetes/servicemonitor.yaml).
+- Track per validator: current height, peer count, mempool size, and finalized
+  height. `node_info` (health) exposes `current_height`, `peer_count`,
+  `mempool_size`, `uptime_seconds`, `is_validator`.
+- Watch for a validator falling behind its round-robin slots (see Restart
+  coordination).
 
-- [x] Complete TypeScript SDK
-- [x] Provider with JSON-RPC methods
-- [x] Currency utilities (Koppa conversion)
-- [x] Type definitions
-- [x] Comprehensive documentation
-- [x] Example code
-- [x] NPM package ready
+## State & Storage
 
-**Files**:
-- [sdk/typescript/](../../sdk/typescript/)
-- [sdk/typescript/README.md](../../sdk/typescript/README.md)
-- [sdk/typescript/examples/basic.ts](../../sdk/typescript/examples/basic.ts)
-
-### 6. Block Explorer ✓
-
-- [x] React + TypeScript SPA
-- [x] Real-time updates (3s polling)
-- [x] Block details page
-- [x] Transaction details page
-- [x] Address details page
-- [x] Validator list page
-- [x] Tailwind CSS styling
-- [x] Responsive design
-
-**Files**:
-- [explorer/](../../explorer/)
-- [explorer/README.md](../../explorer/README.md)
-
-### 7. BFT Consensus (experimental roadmap)
-
-Production consensus is **PoA** — round-robin or stake-weighted proposer
-selection with depth-based finality. A Tendermint-style BFT module exists as
-**experimental roadmap work** and is not part of the supported production path.
-
-**Files**:
-- [crates/consensus/src/bft/](../../crates/consensus/src/bft)
-- [docs/architecture/bft-consensus.md](../architecture/bft-consensus.md)
-- [docs/architecture/bft-integration.md](../architecture/bft-integration.md)
-
-### 8. Performance Optimizations ✓
-
-- [x] State caching (LRU cache)
-- [x] Parallel transaction execution design
-- [x] Database optimization guide
-- [x] Network optimization (gossipsub tuning)
-- [x] Memory management strategies
-- [x] Comprehensive performance guide
-
-**Files**:
-- [crates/state/src/cache.rs](../../crates/state/src/cache.rs)
-- [docs/architecture/performance-guide.md](../architecture/performance-guide.md)
-
-**Features**:
-- LRU cache for accounts and storage
-- Cache hit rate tracking
-- Parallel execution dependency graph
-- RocksDB configuration
-- Gossipsub mesh optimization
-- Compression for network messages
-
-## Architecture Overview
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                       SUM Chain Mainnet                     │
-├─────────────────────────────────────────────────────────────┤
-│                                                             │
-│  ┌───────────────┐    ┌───────────────┐                   │
-│  │   Consensus   │    │   P2P Network  │                   │
-│  │               │    │                │                   │
-│  │ • BFT Engine  │◄──►│ • Gossipsub    │                   │
-│  │ • Voting      │    │ • Block Sync   │                   │
-│  │ • Leader      │    │ • Peer Mgmt    │                   │
-│  └───────────────┘    └───────────────┘                   │
-│         ▲                     ▲                            │
-│         │                     │                            │
-│         ▼                     ▼                            │
-│  ┌─────────────────────────────────┐                      │
-│  │       Block Execution           │                      │
-│  │                                 │                      │
-│  │  • Transaction Validation       │                      │
-│  │  • State Transitions            │                      │
-│  │  • Parallel Execution           │                      │
-│  └─────────────────────────────────┘                      │
-│         ▲                                                  │
-│         │                                                  │
-│         ▼                                                  │
-│  ┌─────────────────────────────────┐                      │
-│  │       State Management          │                      │
-│  │                                 │                      │
-│  │  • Merkle Patricia Trie         │                      │
-│  │  • LRU Cache                    │                      │
-│  │  • RocksDB Storage              │                      │
-│  └─────────────────────────────────┘                      │
-│                                                             │
-│  ┌─────────────────────────────────┐                      │
-│  │         RPC Interface            │                      │
-│  │                                 │                      │
-│  │  • JSON-RPC 2.0                 │                      │
-│  │  • TypeScript SDK               │                      │
-│  │  • Block Explorer               │                      │
-│  └─────────────────────────────────┘                      │
-└─────────────────────────────────────────────────────��───────┘
-```
-
-## Key Features
-
-### Depth-Based Finality (PoA)
-- PoA consensus with configurable finality depth (default 6 blocks)
-- Blocks are finalized after `finality_depth` confirmations (~18 seconds)
-- Finalized blocks cannot be reverted by reorg
-
-### Dynamic Validator Sets
-- Epoch-based validator set recalculation
-- Stake-weighted or round-robin proposer selection
-- Validator staking, delegation, and reward distribution
-
-### High Performance
-- 1000+ TPS sustained throughput
-- <5s block time
-- Parallel transaction execution
-- LRU caching for state
-
-### Developer Experience
-- Complete TypeScript SDK
-- JSON-RPC API
-- Block explorer
-- Comprehensive documentation
-- Example code
-
-## Launch Procedure
-
-### Phase 1: Pre-Launch (Week -4)
-
-- [ ] **Security Audit**
-  - Engage professional auditors
-  - Review all critical code paths
-  - Fix identified vulnerabilities
-  - Publish audit report
-
-- [ ] **Testnet Launch**
-  - Deploy 5 validators
-  - Run for 2 weeks minimum
-  - Stress test with load generators
-  - Monitor for issues
-
-- [ ] **Bug Bounty Program**
-  - Announce bounty program
-  - Set reward tiers (up to 50,000 Ϙ)
-  - Coordinate with security researchers
-
-### Phase 2: Genesis Preparation (Week -2)
-
-- [ ] **Generate Validator Keys**
-  - Generate 5 validator key pairs
-  - Distribute to validator operators
-  - Verify public keys
-
-- [ ] **Finalize Genesis**
-  - Update mainnet_genesis.json with real addresses
-  - Verify token distribution totals
-  - Sign genesis file
-
-- [ ] **Deploy Infrastructure**
-  - Provision validator servers
-  - Configure firewalls
-  - Set up monitoring
-  - Test backup procedures
-
-### Phase 3: Validator Preparation (Week -1)
-
-- [ ] **Validator Setup**
-  - Install SUM Chain software
-  - Configure with BFT consensus
-  - Set up monitoring dashboards
-  - Configure alerts
-
-- [ ] **Network Testing**
-  - Test P2P connectivity
-  - Verify gossipsub mesh
-  - Test consensus voting
-  - Verify block propagation
-
-- [ ] **Documentation**
-  - Publish validator guide
-  - Publish API documentation
-  - Publish SDK documentation
-  - Create tutorial videos
-
-### Phase 4: Launch Day
-
-- [ ] **Genesis Block** (Hour 0)
-  - All validators start simultaneously
-  - Load genesis configuration
-  - First block proposed and committed
-  - Announce genesis hash
-
-- [ ] **Monitoring** (First 24 hours)
-  - Watch consensus rounds
-  - Monitor vote participation
-  - Check block times
-  - Verify finality
-
-- [ ] **Announcement**
-  - Publish launch announcement
-  - Share RPC endpoints
-  - Share block explorer URL
-  - Announce on social media
-
-### Phase 5: Post-Launch (Week +1)
-
-- [ ] **Ecosystem Development**
-  - Support early integrations
-  - Help developers build apps
-  - Onboard wallet providers
-  - Engage with community
-
-- [ ] **Performance Tuning**
-  - Monitor TPS and latency
-  - Optimize based on real usage
-  - Adjust timeout parameters
-  - Scale infrastructure as needed
-
-- [ ] **Security Monitoring**
-  - 24/7 monitoring of validators
-  - Track suspicious activity
-  - Respond to incidents
-  - Regular security reviews
+- State is persisted in RocksDB via [sumchain-storage](../../crates/storage);
+  accounts/storage are served through an LRU cache
+  ([crates/state/src/cache.rs](../../crates/state/src/cache.rs)).
+- The block state root is a content hash over state; see
+  [crates/state/src/state.rs](../../crates/state/src/state.rs).
 
 ## Mainnet Parameters
+
+Live values from `chain_getChainParams` (verified 2026-07-01):
 
 ```json
 {
   "chain_id": 1,
-  "genesis_time": "2025-12-20T00:00:00Z",
-  "currency": {
-    "name": "Koppa",
-    "symbol": "Ϙ",
-    "decimals": 9,
-    "total_supply": "800000000000000000000"
-  },
-  "economics": {
-    "supply_per_person": 100,
-    "target_transaction_value": "5-50 Ϙ",
-    "min_fee": "0.001 Ϙ",
-    "fee_model": "to_proposer"
-  },
-  "consensus": {
-    "engine": "poa",
-    "block_time_target": "3-5s",
-    "finality": "depth-based (6 blocks)",
-    "validators": 5
-  },
-  "performance": {
-    "target_tps": 1000,
-    "daily_capacity": "86.4M transactions",
-    "transactions_per_person_per_day": 10.8,
-    "max_block_size": "2MB",
-    "state_cache": "512MB",
-    "parallel_execution": true
-  }
+  "block_time_ms": 3000,
+  "max_block_bytes": 2000000,
+  "max_txs_per_block": 1000,
+  "min_fee": 1000,
+  "finality_depth": 6,
+  "storage_fee_per_byte": 100,
+  "max_metadata_bytes": 16384,
+  "max_access_list_bytes": 16384,
+  "activation_grace_blocks": 50,
+  "abandonment_fee_percent": 10,
+  "assignment_replication_factor": 3,
+  "v2_enabled_from_height": 5200000,
+  "omninode_enabled_from_height": 6000000,
+  "education_enabled_from_height": null
 }
 ```
 
-## Success Metrics
+- `v2_enabled_from_height` and `omninode_enabled_from_height` are past the
+  current chain height — those subprotocols are active on mainnet.
+- `education_enabled_from_height: null` — the education suite is disabled.
+- Query the current values with:
+  ```bash
+  curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"chain_getChainParams","params":[]}'
+  ```
 
-### Network Health
-- [ ] All validators online (100%)
-- [ ] Block time: 3-5 seconds
-- [ ] Finality: ~18 seconds (6 blocks)
+## Restart & Rollback Coordination
 
-### Performance
-- [ ] TPS: >1000 sustained
-- [ ] Transaction latency: <5s
-- [ ] RPC response time: <100ms
-- [ ] State sync: <1 hour for 1M blocks
+Under PoA round-robin there is no proposer-skip: restarting a validator stalls
+that validator's block slots until it rejoins, so coordinate restarts.
 
-### Security
-- [ ] No consensus failures
-- [ ] No double-spending attacks
-- [ ] No network partitions
-- [ ] All validators in sync
+1. **Pause / investigate** — coordinate a validator halt if a critical issue is
+   found; the chain stops advancing while proposers are down.
+2. **Fix & test** — reproduce on a testnet/local network before rolling out.
+3. **Coordinated restart** — bring validators back on a byte-identical
+   `genesis.json` and the same binary; verify peers reconnect and finalized
+   height advances.
+4. **One at a time** — for rolling restarts, restart a single validator and wait
+   for it to rejoin and produce before touching the next.
 
-### Adoption
-- [ ] 10+ dApps deployed (Month 1)
-- [ ] 1000+ active addresses (Month 1)
-- [ ] 10,000+ transactions/day (Month 3)
-- [ ] 5+ exchanges listing (Month 6)
+## Security
 
-## Rollback Plan
-
-If critical issues are discovered:
-
-1. **Stop Block Production**
-   - Coordinate validator halt
-   - Announce network pause
-   - Investigate issue
-
-2. **Fix and Test**
-   - Identify root cause
-   - Develop fix
-   - Test on testnet
-   - Audit if needed
-
-3. **Coordinated Restart**
-   - All validators upgrade
-   - Resume from last safe block
-   - Monitor closely
-
-4. **Communication**
-   - Keep community informed
-   - Publish incident report
-   - Update documentation
+- Keep validator keys off shared storage; restrict `config.toml`/key file perms.
+- Do not commit real bootnode IPs, peer IDs, or validator keys to the repo.
+- See [docs/architecture/security-overview.md](../architecture/security-overview.md)
+  for the security architecture, threat model, and mitigations.
 
 ## Support Resources
 
-### Documentation
-- [README.md](../../README.md) - Project overview
-- [docs/](../) - Technical documentation
-- [sdk/typescript/README.md](../../sdk/typescript/README.md) - SDK guide
-
-### Monitoring
-- Prometheus metrics on port 9615
-- Grafana dashboards
-- Log aggregation (Loki)
-
-### Communication
-- Discord: TBD
-- Twitter: TBD
-- GitHub: https://github.com/sumchain/sumchain
-- Email: support@sumchain.org
-
-## Conclusion
-
-SUM Chain is production-ready with:
-
-✅ **8/8 Preparation Steps Completed**
-
-- Currency branding (Koppa)
-- Mainnet genesis configuration
-- Network infrastructure
-- Security documentation
-- Developer SDK
-- Block explorer
-- BFT consensus
-- Performance optimizations
-
-The chain is ready for mainnet launch following the procedures outlined above.
-
-**Next Steps**: Begin Phase 1 (Security Audit) of the launch procedure.
-
----
-
-**Generated**: 2025-12-19
-**Last Updated**: March 2026
-**Version**: 2.0.0
-**Status**: IN PROGRESS — PoA production consensus, BFT experimental
+- [README.md](../../README.md) — project overview, build/run, joining a network.
+- [docs/operator-guide.md](../operator-guide.md) — operator entry point.
+- [docs/rpc/api-reference.md](../rpc/api-reference.md) — JSON-RPC reference.
+- [sdk/typescript/README.md](../../sdk/typescript/README.md) — TypeScript SDK guide.
+- [docs/architecture/performance-guide.md](../architecture/performance-guide.md) — performance/tuning notes.
