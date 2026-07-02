@@ -55,6 +55,8 @@ gate** — they are always available when the node binary is running.
   [Governance v1](./specs/GOVERNANCE-V1.md) design spec).
   Token-family usage is in [tokens.md](./tokens.md).
 - **Operational:** [operator-guide](./operator-guide.md), [production-checklist](./operations/production-checklist.md)
+- **Process:** [GOVERNANCE.md](../GOVERNANCE.md) (on-chain governance model; dormant by default) ·
+  [RELEASE.md](../RELEASE.md) (how approved changes are released)
 
 > Integration handoffs and historical/design-only specs live under
 > `docs/integrations/`, `docs/specs/`, and `docs/archive/`. Current usage is in
