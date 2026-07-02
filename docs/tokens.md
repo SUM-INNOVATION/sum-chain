@@ -33,6 +33,7 @@ not real values.
 |---|---|---|
 | Token, NFT, Messaging, DocClass, Employment | none | always available |
 | Education (SRC-817/818) | `education_enabled_from_height` | reads available; **writes dormant** (`null` on mainnet) |
+| Governance (on-chain v1) | `governance_enabled_from_height` **and** `ChainParams.governance` | code-backed; **dormant** (both unset on mainnet) |
 
 (Gate values are observable live via `chain_getChainParams`.)
 
@@ -387,6 +388,71 @@ curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
 # Active institutional providers
 curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"healthcare_getActiveInstitutionalProviders","params":[]}'
+```
+
+---
+
+## Governance — on-chain v1 (dormant)
+
+> Status:             code-backed; dormant (not enabled on mainnet)
+> Last verified:      2026-07-02
+> Code references:    docs/specs/GOVERNANCE-V1.md, crates/primitives/src/governance.rs, crates/state/src/governance_executor.rs, crates/storage/src/governance_store.rs, crates/rpc/src/server.rs
+> Public RPC support: builders (gov_buildCreateProposal, gov_buildCastVote, gov_buildExecuteProposal) + reads (gov_getProposal, gov_listProposals, gov_listActiveProposals, gov_getTally, gov_getVote, gov_getVotingPower, gov_listEligibleAssets)
+
+On-chain token-holder governance v1: holders of an allowlisted SRC-20 governance
+token create proposals and vote using a balance snapshot frozen at proposal
+creation; execution is record-only (approval is recorded on-chain and carried
+out off-chain). Full design: [docs/specs/GOVERNANCE-V1.md](specs/GOVERNANCE-V1.md).
+
+**Dormant by default.** Governance is inert unless **both** are configured via a
+coordinated validator upgrade: the activation gate `governance_enabled_from_height`
+**and** the `ChainParams.governance` parameters (council, quorum, pass threshold,
+voting period, snapshot bound). Neither is set on mainnet, so governance
+transactions are rejected and the reads below return empty/`null` until a network
+enables and populates governance. No mainnet token id, quorum, threshold, bond,
+or period values are published here.
+
+### Reads (safe to call; empty/`null` until configured & populated)
+
+```bash
+# Registered governance assets (empty until an asset is registered)
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"gov_listEligibleAssets","params":[]}'
+# All proposals, and only those currently in voting
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"gov_listProposals","params":[]}'
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"gov_listActiveProposals","params":[]}'
+# A proposal by id (hex); null if absent
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"gov_getProposal","params":["0x<proposal_id_hex>"]}'
+# Tally from the frozen snapshot + cast votes (quorum/pass are null when params are unset)
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"gov_getTally","params":["0x<proposal_id_hex>"]}'
+# A voter's vote, and a holder's frozen snapshot voting power (null if absent)
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"gov_getVote","params":["0x<proposal_id_hex>","<voter_address>"]}'
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"gov_getVotingPower","params":["0x<proposal_id_hex>","<holder_address>"]}'
+```
+
+### Builders (return unsigned tx material; sign locally, submit via `sum_sendRawTransaction`)
+
+The `gov_build*` methods accept **no private keys**. Each returns an unsigned
+`TransactionV2` (hex) plus a `signing_hash`; the client signs the hash locally
+and broadcasts via [sum_sendRawTransaction](#submitting-writes). The resulting
+transactions only take effect once governance is enabled.
+
+```bash
+# Unsigned create-proposal tx (the proposal id is discovered post-inclusion via gov_listProposals)
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"gov_buildCreateProposal","params":[{"from":"<address>","token_id":"0x<token_id_hex>","class":"RoutineProcess","execution_kind":"RecordOnly","external_ref_url":"https://example/pr/1","external_ref_content_hash":"0x<content_hash_hex>"}]}'
+# Unsigned cast-vote tx
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"gov_buildCastVote","params":[{"from":"<address>","proposal_id":"0x<proposal_id_hex>","choice":"Yes"}]}'
+# Unsigned execute-proposal tx
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"gov_buildExecuteProposal","params":[{"from":"<address>","proposal_id":"0x<proposal_id_hex>"}]}'
 ```
 
 ---
