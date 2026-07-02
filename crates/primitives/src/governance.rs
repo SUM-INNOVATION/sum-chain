@@ -237,3 +237,94 @@ pub struct GovVote {
     pub choice: VoteChoice,
     pub cast_at_height: GovBlockHeight,
 }
+
+// =============================================================================
+// Network governance parameters (chain-configured; dormant by default).
+// =============================================================================
+
+/// Network-level governance configuration. Held on `ChainParams` as
+/// `governance: Option<GovernanceParams>` (default `None` = not configured).
+/// Per-asset proposal thresholds live on `GovAsset::create_threshold`; these are
+/// the network-wide tally/authorization parameters. No mainnet defaults exist —
+/// values are set only for a coordinated activation or in tests.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GovernanceParams {
+    /// Authority allowed to register/enable governance assets (`RegisterAsset`
+    /// requires `tx.from == council`). Single configured address in v1.
+    pub council: Address,
+    /// Quorum, in basis points of total snapshot voting power.
+    pub quorum_bps: u16,
+    /// Pass threshold, in basis points of (yes + no) weight.
+    pub pass_threshold_bps: u16,
+    /// Voting window length in blocks (from `voting_start_height`).
+    pub voting_period_blocks: u64,
+    /// Maximum holders a proposal snapshot may capture; creation fails cleanly
+    /// if a governance token's holder set exceeds this bound.
+    pub max_snapshot_holders: u32,
+}
+
+// =============================================================================
+// Operation request payloads (bincode-encoded into `GovernanceTxData::data`).
+// Defined in P3a for the lifecycle phases; not yet decoded by the executor.
+// =============================================================================
+
+/// `RegisterAsset` request (council-only).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisterAssetRequest {
+    pub token_id: TokenId,
+    pub create_threshold: u128,
+    pub effective_height: GovBlockHeight,
+}
+
+/// `CreateProposal` request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateProposalRequest {
+    pub asset: GovAssetKind,
+    pub class: GovProposalClass,
+    pub execution_kind: ExecutionKind,
+    pub external_ref: ExternalRef,
+}
+
+/// `CastVote` request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CastVoteRequest {
+    pub proposal_id: GovProposalId,
+    pub choice: VoteChoice,
+}
+
+/// `ExecuteProposal` request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecuteProposalRequest {
+    pub proposal_id: GovProposalId,
+}
+
+/// `CancelProposal` request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelProposalRequest {
+    pub proposal_id: GovProposalId,
+}
+
+/// Domain separator for deterministic proposal-id derivation.
+pub const GOV_PROPOSAL_DOMAIN: &[u8] = b"SRC-GOV-PROPOSAL:v1:";
+
+/// Deterministically derive a proposal id. Replay-safe: the outer tx `nonce`
+/// (already replay-protected at the tx layer) is mixed in, along with the
+/// proposer, asset, external-ref content hash, and creation height.
+pub fn generate_proposal_id(
+    proposer: &Address,
+    asset: &GovAssetKind,
+    content_hash: &[u8; 32],
+    created_at_height: GovBlockHeight,
+    nonce: u64,
+) -> GovProposalId {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(GOV_PROPOSAL_DOMAIN);
+    hasher.update(proposer.as_ref());
+    match asset {
+        GovAssetKind::Src20Token(token_id) => hasher.update(token_id),
+    };
+    hasher.update(content_hash);
+    hasher.update(&created_at_height.to_le_bytes());
+    hasher.update(&nonce.to_le_bytes());
+    *hasher.finalize().as_bytes()
+}

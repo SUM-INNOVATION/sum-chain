@@ -12,6 +12,7 @@ pub mod employment_executor;
 pub mod equity_executor;
 pub mod executor;
 pub mod finance_executor;
+pub mod governance_executor;
 pub mod healthcare_executor;
 pub mod inference_attestation_executor;
 pub mod legal_executor;

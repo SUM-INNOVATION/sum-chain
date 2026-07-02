@@ -85,15 +85,8 @@ fn omninode_gate_open(params: &ChainParams, block_height: u64) -> bool {
 fn education_gate_open(params: &ChainParams, block_height: u64) -> bool {
     matches!(params.education_enabled_from_height, Some(h) if block_height >= h)
 }
-
-/// On-chain governance v1 activation gate. Same dormant-deploy semantics:
-/// production default `None` → never open; activation requires explicit
-/// `governance_enabled_from_height` in `genesis.json` plus a coordinated
-/// validator upgrade. See docs/specs/GOVERNANCE-V1.md.
-#[inline]
-fn governance_gate_open(params: &ChainParams, block_height: u64) -> bool {
-    matches!(params.governance_enabled_from_height, Some(h) if block_height >= h)
-}
+// Governance activation-gate resolution lives in
+// `crate::governance_executor::gate_open` (used by the dispatch skeleton).
 
 pub struct BlockExecutor {
     state: Arc<StateManager>,
@@ -1316,22 +1309,24 @@ impl BlockExecutor {
                             }
                         }
                     }
-                    TxPayload::Governance(_) => {
-                        // Phase 1: wire/gate scaffolding only. The governance
-                        // lifecycle is implemented in later phases (issue #50).
-                        // Dormant by default: gate closed -> Failed(80); gate
-                        // open -> Failed(81) (P1 stub, no semantics). Either
-                        // way NO fee is charged and NO state is mutated.
-                        let code = if governance_gate_open(&self.params, block_height) {
-                            81
-                        } else {
-                            80
-                        };
-                        Ok(TxExecutionResult {
+                    TxPayload::Governance(gov) => {
+                        // Governance v1 (RecordOnly) executor. Behind the P1
+                        // gate + `ChainParams::governance`; Policy-B fee/nonce.
+                        // See crate::governance_executor and
+                        // docs/specs/GOVERNANCE-V1.md.
+                        crate::governance_executor::execute(
+                            &self.state,
+                            &self.db,
+                            &self.params,
+                            gov,
+                            &v2_tx.from,
+                            v2_tx.nonce,
+                            v2_tx.fee,
+                            proposer,
+                            block_height,
+                            block_timestamp,
                             tx_hash,
-                            status: TxStatus::Failed(code),
-                            fee_paid: 0,
-                        })
+                        )
                     }
                 }
             }

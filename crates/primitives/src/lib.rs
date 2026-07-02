@@ -30,6 +30,7 @@ pub use address::Address;
 pub use block::{Block, BlockHeader};
 pub use hash::Hash;
 pub use receipt::{Receipt, TxStatus};
+pub use governance::GovernanceParams;
 pub use staking::{
     AddStakeData, ClaimDelegationRewardsData, CreateValidatorData, DelegateData, DelegationInfo,
     DoubleSignEvidence, DowntimeEvidence, EvidenceType, SlashingRecord, StakingOperation,

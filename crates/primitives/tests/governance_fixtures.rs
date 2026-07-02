@@ -136,3 +136,50 @@ fn gov_enum_discriminants_stable() {
     assert_eq!(VoteChoice::from_u8(2), Some(VoteChoice::Abstain));
     assert_eq!(GovProposalClass::from_u8(9), None);
 }
+
+// ───────────────────── P3a: params + request structs + id ────────────────────
+
+use sumchain_primitives::governance::{
+    generate_proposal_id, CancelProposalRequest, CastVoteRequest, CreateProposalRequest,
+    ExecuteProposalRequest, GovernanceParams, RegisterAssetRequest,
+};
+
+#[test]
+fn governance_params_round_trip() {
+    round_trip(&GovernanceParams {
+        council: Address::new([0xC0; 20]),
+        quorum_bps: 2_000,
+        pass_threshold_bps: 5_000,
+        voting_period_blocks: 100,
+        max_snapshot_holders: 16,
+    });
+}
+
+#[test]
+fn operation_request_structs_round_trip() {
+    round_trip(&RegisterAssetRequest { token_id: [7u8; 32], create_threshold: 1_000, effective_height: 42 });
+    round_trip(&CreateProposalRequest {
+        asset: GovAssetKind::Src20Token([7u8; 32]),
+        class: GovProposalClass::RoutineProcess,
+        execution_kind: ExecutionKind::RecordOnly,
+        external_ref: ExternalRef { url: "https://x/pr/1".into(), content_hash: [3u8; 32] },
+    });
+    round_trip(&CastVoteRequest { proposal_id: [1u8; 32], choice: VoteChoice::Yes });
+    round_trip(&ExecuteProposalRequest { proposal_id: [1u8; 32] });
+    round_trip(&CancelProposalRequest { proposal_id: [1u8; 32] });
+}
+
+#[test]
+fn proposal_id_is_deterministic_and_input_sensitive() {
+    let proposer = Address::new([2u8; 20]);
+    let asset = GovAssetKind::Src20Token([7u8; 32]);
+    let ch = [9u8; 32];
+    let id = generate_proposal_id(&proposer, &asset, &ch, 100, 1);
+    // Deterministic for identical inputs.
+    assert_eq!(id, generate_proposal_id(&proposer, &asset, &ch, 100, 1));
+    assert_ne!(id, [0u8; 32]);
+    // Sensitive to each input (nonce, height, content hash).
+    assert_ne!(id, generate_proposal_id(&proposer, &asset, &ch, 100, 2));
+    assert_ne!(id, generate_proposal_id(&proposer, &asset, &ch, 101, 1));
+    assert_ne!(id, generate_proposal_id(&proposer, &asset, &[8u8; 32], 100, 1));
+}
