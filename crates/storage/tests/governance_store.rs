@@ -39,6 +39,10 @@ fn proposal(id: u8, proposer: Address, status: GovProposalStatus) -> GovProposal
         created_at: 1000,
         created_at_height: 100,
         expires_at: 2000,
+        bond: 0,
+        bond_state: sumchain_primitives::governance::BondState::Escrowed,
+        treasury_beneficiary: None,
+        treasury_amount: None,
     }
 }
 

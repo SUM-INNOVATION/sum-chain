@@ -30,6 +30,8 @@ fn test_gov_params() -> GovernanceParams {
         pass_threshold_bps: 5_000,
         voting_period_blocks: 100,
         max_snapshot_holders: 16,
+        proposal_bond: 0,
+        treasury: None,
     }
 }
 

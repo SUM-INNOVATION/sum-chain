@@ -25,6 +25,13 @@ pub struct GovBuildCreateProposalRequest {
     pub external_ref_url: String,
     /// Content hash binding the referenced artifact (hex).
     pub external_ref_content_hash: String,
+    /// Beneficiary address for a `TreasurySpend` + `OnChain` proposal (base58).
+    /// Omit for every other class / `RecordOnly` proposal.
+    #[serde(default)]
+    pub treasury_beneficiary: Option<String>,
+    /// Native-Koppa payout amount for a `TreasurySpend` + `OnChain` proposal.
+    #[serde(default)]
+    pub treasury_amount: Option<u128>,
     pub fee: Option<u128>,
 }
 
@@ -39,6 +46,13 @@ pub struct GovBuildCastVoteRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GovBuildExecuteProposalRequest {
+    pub from: String,
+    pub proposal_id: String,
+    pub fee: Option<u128>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GovBuildCancelProposalRequest {
     pub from: String,
     pub proposal_id: String,
     pub fee: Option<u128>,
@@ -78,6 +92,16 @@ pub struct GovProposalInfo {
     pub created_at: u64,
     pub created_at_height: u64,
     pub expires_at: u64,
+    /// Deposit bond escrowed at creation ("0" when bonds are disabled).
+    pub bond: String,
+    /// Bond escrow lifecycle ("Escrowed" | "Returned" | "Burned").
+    pub bond_state: String,
+    /// Treasury payout beneficiary (base58) for a TreasurySpend/OnChain proposal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub treasury_beneficiary: Option<String>,
+    /// Treasury payout amount (native Koppa) for a TreasurySpend/OnChain proposal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub treasury_amount: Option<String>,
 }
 
 impl From<&GovProposal> for GovProposalInfo {
@@ -96,6 +120,10 @@ impl From<&GovProposal> for GovProposalInfo {
             created_at: p.created_at,
             created_at_height: p.created_at_height,
             expires_at: p.expires_at,
+            bond: p.bond.to_string(),
+            bond_state: format!("{:?}", p.bond_state),
+            treasury_beneficiary: p.treasury_beneficiary.as_ref().map(|a| a.to_base58()),
+            treasury_amount: p.treasury_amount.map(|a| a.to_string()),
         }
     }
 }

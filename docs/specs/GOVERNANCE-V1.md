@@ -26,7 +26,7 @@ execution of code/release/validator/consensus changes remains off-chain
 | Equity SRC-83X governance | **Separate**; no bridge in v1 |
 | Snapshot | `TOKEN_BALANCES` prefix scan by `token_id` + `gov_snapshots` CF, frozen at voting-start |
 | Ballot privacy | **Public votes** in v1 (commit-reveal is future) |
-| Governance token supply | **Fixed-supply / non-mintable or council-frozen mint authority** required before eligibility |
+| Governance token supply | **Fixed-supply / non-mintable** (`!mintable`) required before eligibility |
 | Validator binding | Governance **records approval**; it does not force validator upgrades or mutate chain params/consensus |
 
 ## 3. Governance asset registry
@@ -48,8 +48,11 @@ GovAsset {
 - The registry starts **empty**. The first (single) asset is added by the
   Policy Account council after activation.
 - **Eligibility rule:** a token may be listed only if it is fixed-supply /
-  non-mintable, or its mint authority is council-frozen, before listing. This
-  prevents inflating voting power by minting.
+  non-mintable (`!mintable`). This prevents inflating voting power by minting.
+  SRC-20 exposes no on-chain operation to freeze or renounce mint authority
+  (`mintable` is immutable after creation, and `pause` only halts transfers), so
+  `!mintable` is the sole v1 eligibility rule — a "council-frozen mint authority"
+  state does not exist on-chain and is not accepted.
 - Registry changes (list/enable/disable) are **council** actions (Policy
   Account), not open votes, in v1.
 
@@ -83,11 +86,17 @@ Created  (proposer snapshot power ≥ create_threshold; deposit bond posted)
 Cancel: by proposer before Voting; by council (emergency).
 ```
 
-- **Deposit bond**: returned on good-faith proposals; burned on spam / quorum
-  failure (amount TBD).
+- **Deposit bond**: `GovernanceParams.proposal_bond` (native Koppa; `0` = off).
+  Escrowed to a canonical keyless governance escrow address at creation (the
+  proposer must cover `fee + bond`); **returned** to the proposer on a good-faith
+  terminal state (Recorded / Executed / Rejected) or a proposer cancel, and
+  **burned** to `Address::ZERO` on spam / low turnout (QuorumNotMet / Expired) or
+  a council cancel.
 - **`external_ref`**: every proposal links to the GitHub PR / release / doc it
   authorizes (URL + content hash), so proposal IDs map to real artifacts.
-- **`execution_kind`**: `OnChain` (treasury only) or `RecordOnly`.
+- **`execution_kind`**: `OnChain` (treasury spend only) or `RecordOnly`.
+- **Cancel**: by the proposer or the council (`GovernanceParams.council`) while
+  Created/Voting, via the `gov_buildCancelProposal` builder.
 
 ## 6. Proposal classes → execution model
 
@@ -101,21 +110,31 @@ Cancel: by proposer before Voting; by council (emergency).
 | Consensus / wire / storage migration | RecordOnly (binary rollout) |
 | Package publishing | RecordOnly (off-chain) |
 | Emergency / security | Policy Account council fast-path |
-| Treasury spend (council-held Policy Account) | **On-chain** via the council's `ExecuteProposal` — the only auto-exec path in v1 |
+| Treasury spend (dedicated governance treasury) | **On-chain**: a passed `TreasurySpend` + `OnChain` proposal pays a single native-Koppa amount from `GovernanceParams.treasury` to its beneficiary and moves to `Executed` — the only auto-exec path in v1 |
 
-No on-chain chain-param/consensus mutation exists today, so nothing in those
-classes auto-executes. A passed proposal is an authoritative approval record,
-never a forced validator upgrade.
+Treasury execution is deliberately minimal: exactly one native-Koppa transfer,
+`TreasurySpend`-class only, from a dedicated governance-owned `treasury` address
+(funded to be governed; **not** the council Policy Account) to a beneficiary and
+amount fixed at proposal creation. Insufficient treasury balance fails cleanly
+(`312`) and leaves the proposal live; every other `OnChain` class fails `310`.
+No on-chain chain-param / validator / consensus mutation exists or is performed,
+so nothing else auto-executes — a passed proposal is an authoritative approval
+record, never a forced validator upgrade.
 
 ## 7. Policy Account council
 
-The existing Policy Account weighted-multisig is the **council**:
-- administers the governance asset registry,
-- holds emergency/security authority,
-- executes on-chain **treasury** actions via `ExecuteProposal`.
+The `GovernanceParams.council` address (a Policy Account weighted-multisig) is
+the **council**:
+- administers the governance asset registry (`RegisterAsset`),
+- holds emergency/security authority, including **cancelling** a live proposal
+  (bond burned),
+- funds and owns the dedicated `treasury` address that `TreasurySpend` payouts
+  draw from.
 
-Token-holder governance (this spec) is **separate** but a passed token-holder
-proposal can **authorize** a council action.
+On-chain treasury payouts execute through governance's own `ExecuteProposal`
+path (§6), from the dedicated `treasury` address — not from the council Policy
+Account itself. Token-holder governance (this spec) is **separate** but a passed
+token-holder proposal can **authorize** a council action.
 
 ## 8. Activation & migration
 
@@ -131,9 +150,9 @@ runtime-genesis edit. Governance never bypasses validator control.
   (§4), so no reverse holder-index CF is required.
 - **Tx:** new `TxPayload::Governance` (separate from equity `GovernanceAction`).
 - **RPC (builder pattern):** writes `gov_buildCreateProposal`,
-  `gov_buildCastVote`, `gov_buildExecuteProposal`; reads `gov_getProposal`,
-  `gov_listProposals`, `gov_listActiveProposals`, `gov_getTally`, `gov_getVote`,
-  `gov_getVotingPower`, `gov_listEligibleAssets`.
+  `gov_buildCastVote`, `gov_buildExecuteProposal`, `gov_buildCancelProposal`;
+  reads `gov_getProposal`, `gov_listProposals`, `gov_listActiveProposals`,
+  `gov_getTally`, `gov_getVote`, `gov_getVotingPower`, `gov_listEligibleAssets`.
 
 Detailed types and tests are defined in the implementation issue (#50).
 
@@ -142,7 +161,7 @@ Detailed types and tests are defined in the implementation issue (#50).
 - **Sensitive-holder leakage:** public governance draws power only from the
   allowlisted SRC-20 governance token; private/sensitive SRC families are never
   voting sources.
-- **Mint-based capture:** fixed-supply / frozen-mint eligibility rule (§3).
+- **Mint-based capture:** fixed-supply / non-mintable (`!mintable`) eligibility rule (§3).
 - **Vote-buying / balance moves:** voting-start snapshot (§4).
 - **Validator coercion:** record-first; governance does not force upgrades (§6, §8).
 - **Spam:** create-threshold + deposit bond + rate limits.
@@ -157,7 +176,8 @@ Detailed types and tests are defined in the implementation issue (#50).
 | Proposal `create_threshold` | TBD |
 | Quorum (% of snapshot power) | TBD |
 | Pass threshold (%) | TBD |
-| Deposit bond amount | TBD |
+| Deposit bond amount | Configurable via `GovernanceParams.proposal_bond` (`0` = off); value TBD per activation |
+| Governance `treasury` address | Configurable via `GovernanceParams.treasury` (`None` = no on-chain treasury execution); value TBD per activation |
 | Voting period (blocks) | TBD |
 | Proposal expiry (if unexecuted) | TBD |
 
@@ -165,5 +185,6 @@ Detailed types and tests are defined in the implementation issue (#50).
 
 Staked-Koppa voting, multi-asset weighted voting, commit-reveal ballots,
 Equity-governance bridging, on-chain consensus/param mutation, and any
-auto-execution beyond council-scoped treasury actions. `GOVERNANCE.md` /
-`RELEASE.md` are produced under #51 after the protocol (#50) is implemented.
+auto-execution beyond the single-native-transfer `TreasurySpend` payout (§6).
+`GOVERNANCE.md` / `RELEASE.md` are produced under #51 after the protocol (#50)
+is implemented.

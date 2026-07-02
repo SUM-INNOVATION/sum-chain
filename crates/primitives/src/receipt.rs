@@ -118,6 +118,8 @@ impl TxStatus {
             TxStatus::Failed(308) => "no governance snapshot weight for voter",
             TxStatus::Failed(309) => "duplicate governance vote",
             TxStatus::Failed(310) => "on-chain governance execution not supported in v1",
+            TxStatus::Failed(311) => "insufficient balance to post governance proposal bond",
+            TxStatus::Failed(312) => "insufficient governance treasury balance for on-chain payout",
             TxStatus::Failed(_) => "failed",
         }
     }

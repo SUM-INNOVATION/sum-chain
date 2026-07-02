@@ -615,6 +615,7 @@ mod tests {
         EmploymentIssuerProfile {
             issuer_address: Address::new([1u8; 20]),
             issuer_class: EmploymentIssuerClass::PayrollProcessor,
+            display_name: "Sample Issuer".to_string(),
             issuer_commitment: [2u8; 32],
             jurisdiction_code: "US-CA".to_string(),
             policy_id: [3u8; 32],
@@ -640,6 +641,7 @@ mod tests {
             policy_id: [9u8; 32],
             revocation_ref: None,
             issuer_address: Address::new([10u8; 20]),
+            issuer_name: "Sample Employer".to_string(),
             issuer_class: EmploymentIssuerClass::PayrollProcessor,
             created_at: 1000,
             updated_at: 1000,
