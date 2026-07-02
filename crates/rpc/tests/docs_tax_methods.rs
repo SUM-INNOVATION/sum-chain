@@ -29,7 +29,7 @@ fn documented_family_methods_exist_in_api() {
     let docs = fs::read_to_string(manifest.join("../../docs/tokens.md")).expect("read tokens.md");
 
     // Per-family read RPCs promoted under issue #26.
-    for prefix in ["tax_", "equity_", "property_", "finance_", "legal_", "healthcare_"] {
+    for prefix in ["tax_", "equity_", "property_", "finance_", "legal_", "healthcare_", "gov_"] {
         // api.rs declares methods as `#[method(name = "<prefix>...")]`.
         let registered = collect_methods(&api, "name = \"", prefix);
         // tokens.md curl examples use `"method":"<prefix>..."`.

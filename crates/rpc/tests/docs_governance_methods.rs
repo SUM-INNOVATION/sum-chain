@@ -2,8 +2,9 @@
 //! exactly the approved 10 methods (3 unsigned-tx builders + 7 reads) — and in
 //! particular that no private-key / direct-write governance method exists.
 //!
-//! No docs method-name validation here: `docs/tokens.md` gains no governance
-//! section until P5.
+//! Documented `gov_*` method-name validation (documented ⊆ registered) lives in
+//! the shared `docs_tax_methods` drift guard, extended for `gov_` in P5. This
+//! file keeps the exact-surface + no-private-key guards.
 
 use std::collections::BTreeSet;
 use std::fs;
