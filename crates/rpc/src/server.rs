@@ -3912,11 +3912,17 @@ impl SumChainApiServer for RpcServer {
         let execution_kind = parse_execution_kind(&request.execution_kind)
             .ok_or_else(|| RpcError::InvalidParams(format!("Unknown execution_kind: {}", request.execution_kind)))?;
         let content_hash = self.parse_hex32(&request.external_ref_content_hash)?;
+        let treasury_beneficiary = match &request.treasury_beneficiary {
+            Some(s) => Some(self.parse_address(s)?),
+            None => None,
+        };
         let req = CreateProposalRequest {
             asset: GovAssetKind::Src20Token(token_id),
             class,
             execution_kind,
             external_ref: ExternalRef { url: request.external_ref_url, content_hash },
+            treasury_beneficiary,
+            treasury_amount: request.treasury_amount,
         };
         let data = GovernanceTxData {
             operation: GovernanceOperation::CreateProposal,
@@ -3954,6 +3960,22 @@ impl SumChainApiServer for RpcServer {
         let req = ExecuteProposalRequest { proposal_id };
         let data = GovernanceTxData {
             operation: GovernanceOperation::ExecuteProposal,
+            data: bincode::serialize(&req).map_err(|e| RpcError::Internal(e.to_string()))?,
+        };
+        let fee = request.fee.unwrap_or(GOV_DEFAULT_FEE);
+        Ok(self.build_unsigned_governance_tx(from, fee, data)?)
+    }
+
+    async fn gov_build_cancel_proposal(
+        &self,
+        request: GovBuildCancelProposalRequest,
+    ) -> std::result::Result<GovBuildResponse, jsonrpsee::types::ErrorObjectOwned> {
+        use sumchain_primitives::governance::{CancelProposalRequest, GovernanceOperation, GovernanceTxData};
+        let from = self.parse_address(&request.from)?;
+        let proposal_id = self.parse_hex32(&request.proposal_id)?;
+        let req = CancelProposalRequest { proposal_id };
+        let data = GovernanceTxData {
+            operation: GovernanceOperation::CancelProposal,
             data: bincode::serialize(&req).map_err(|e| RpcError::Internal(e.to_string()))?,
         };
         let fee = request.fee.unwrap_or(GOV_DEFAULT_FEE);
@@ -9330,6 +9352,8 @@ mod governance_rpc_tests {
             pass_threshold_bps: 5_000,
             voting_period_blocks: 100,
             max_snapshot_holders: 64,
+            proposal_bond: 0,
+            treasury: None,
         }
     }
 
@@ -9371,6 +9395,10 @@ mod governance_rpc_tests {
             created_at: 1000,
             created_at_height: 5,
             expires_at: 1000,
+            bond: 0,
+            bond_state: sumchain_primitives::governance::BondState::Escrowed,
+            treasury_beneficiary: None,
+            treasury_amount: None,
         }
     }
 
@@ -9386,6 +9414,8 @@ mod governance_rpc_tests {
                 execution_kind: "RecordOnly".into(),
                 external_ref_url: "https://x/pr/1".into(),
                 external_ref_content_hash: format!("0x{}", hex::encode([0xAB; 32])),
+                treasury_beneficiary: None,
+                treasury_amount: None,
                 fee: None,
             })
             .await

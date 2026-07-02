@@ -8,13 +8,13 @@ use common::{fund, setup_with_params, CHAIN_ID};
 use sumchain_crypto::{sign, KeyPair};
 use sumchain_genesis::ChainParams;
 use sumchain_primitives::governance::{
-    CancelProposalRequest, CastVoteRequest, CreateProposalRequest, ExecuteProposalRequest,
-    ExecutionKind, GovAssetKind, GovProposalStatus, GovernanceOperation, GovernanceParams,
-    GovProposalClass, ExternalRef, RegisterAssetRequest, VoteChoice,
+    gov_escrow_address, BondState, CancelProposalRequest, CastVoteRequest, CreateProposalRequest,
+    ExecuteProposalRequest, ExecutionKind, GovAssetKind, GovProposalStatus, GovernanceOperation,
+    GovernanceParams, GovProposalClass, ExternalRef, RegisterAssetRequest, VoteChoice,
 };
 use sumchain_primitives::{Address, SignedTransaction, TransactionV2, TxPayload, TxStatus};
 use sumchain_state::StateManager;
-use sumchain_storage::schema::Src20TokenData;
+use sumchain_storage::schema::{AccountState, Src20TokenData};
 use sumchain_storage::{Database, GovStore, TokenStore};
 use std::sync::Arc;
 
@@ -31,6 +31,8 @@ fn params(gate: bool, configured: bool, max_holders: u32) -> ChainParams {
             pass_threshold_bps: 5_000, // >50% of yes+no
             voting_period_blocks: 100,
             max_snapshot_holders: max_holders,
+            proposal_bond: 0,
+            treasury: None,
         });
     }
     p
@@ -92,8 +94,24 @@ fn create_req(proposer: &KeyPair, exec: ExecutionKind) -> Vec<u8> {
         class: GovProposalClass::RoutineProcess,
         execution_kind: exec,
         external_ref: ExternalRef { url: "https://x/pr/1".into(), content_hash: [0xAB; 32] },
+        treasury_beneficiary: None,
+        treasury_amount: None,
     })
     .map(|b| { let _ = proposer; b })
+    .unwrap()
+}
+
+/// A `TreasurySpend` + `OnChain` create request with the same content hash as
+/// `create_req` (so `proposal_id_of` derives the same id).
+fn treasury_create_req(beneficiary: Address, amount: u128) -> Vec<u8> {
+    bincode::serialize(&CreateProposalRequest {
+        asset: GovAssetKind::Src20Token(TOKEN),
+        class: GovProposalClass::TreasurySpend,
+        execution_kind: ExecutionKind::OnChain,
+        external_ref: ExternalRef { url: "https://x/pr/1".into(), content_hash: [0xAB; 32] },
+        treasury_beneficiary: Some(beneficiary),
+        treasury_amount: Some(amount),
+    })
     .unwrap()
 }
 
@@ -308,6 +326,236 @@ fn semantic_failure_charges_fee_and_nonce() {
     assert_eq!(state.get_balance(&outsider.address()).unwrap(), 10_000 - 100, "fee deducted");
     assert_eq!(state.get_nonce(&outsider.address()).unwrap(), 1, "nonce advanced");
     assert_eq!(state.get_balance(&reward).unwrap(), 100, "proposer credited on semantic failure");
+}
+
+// ── Deposit bond (P6a) ───────────────────────────────────────────────────────
+
+const BLOCK_PROPOSER: [u8; 20] = [9; 20];
+
+/// Params with a non-zero bond; optionally override the council address.
+fn bond_params(bond: u128, council: Option<Address>) -> ChainParams {
+    let mut p = params(true, true, 100);
+    let g = p.governance.as_mut().unwrap();
+    g.proposal_bond = bond;
+    if let Some(c) = council {
+        g.council = c;
+    }
+    p
+}
+
+#[test]
+fn create_escrows_bond_and_requires_fee_plus_bond() {
+    // fee is 100 (see `signed`); bond 500 ⇒ needs 600.
+    let (state, db, _dir, exec) = setup_with_params(bond_params(500, None));
+    let escrow = gov_escrow_address();
+
+    // Exactly-funded proposer succeeds; bond lands in escrow.
+    let rich = KeyPair::generate();
+    fund(&state, &rich, 600);
+    seed_token(&db, false, &[(rich.address(), 100)]);
+    register(&db, 100);
+    let r = exec.execute_tx(&signed(&rich, 0, gov(GovernanceOperation::CreateProposal, create_req(&rich, ExecutionKind::RecordOnly))), &Address::new(BLOCK_PROPOSER), 5, 1000).unwrap();
+    assert!(matches!(r.status, TxStatus::Success), "create: {:?}", r.status);
+    assert_eq!(state.get_balance(&rich.address()).unwrap(), 0, "fee + bond fully spent");
+    assert_eq!(state.get_balance(&escrow).unwrap(), 500, "bond escrowed");
+    let pid = proposal_id_of(&rich.address(), 5, 0);
+    let stored = GovStore::new(&db).get_proposal(&pid).unwrap().unwrap();
+    assert_eq!(stored.bond, 500);
+    assert_eq!(stored.bond_state, BondState::Escrowed);
+
+    // Proposer that can cover the fee but not the bond → 311, fee charged, no proposal.
+    let poor = KeyPair::generate();
+    fund(&state, &poor, 300); // >= fee(100), < fee+bond(600)
+    TokenStore::new(&db).set_balance(&TOKEN, &poor.address(), 100).unwrap(); // meets threshold
+    let r = exec.execute_tx(&signed(&poor, 0, gov(GovernanceOperation::CreateProposal, create_req(&poor, ExecutionKind::RecordOnly))), &Address::new(BLOCK_PROPOSER), 6, 1000).unwrap();
+    assert!(matches!(r.status, TxStatus::Failed(311)), "bond short: {:?}", r.status);
+    assert_eq!(r.fee_paid, 100, "311 charges the fee (Policy-B)");
+    assert_eq!(state.get_balance(&poor.address()).unwrap(), 200, "only the fee left");
+    assert_eq!(state.get_balance(&escrow).unwrap(), 500, "no extra bond escrowed");
+    assert!(GovStore::new(&db).get_proposal(&proposal_id_of(&poor.address(), 6, 0)).unwrap().is_none(), "no proposal row");
+}
+
+#[test]
+fn bond_returned_on_recorded() {
+    let (state, db, _dir, exec) = setup_with_params(bond_params(500, None));
+    let escrow = gov_escrow_address();
+    let proposer = KeyPair::generate();
+    fund(&state, &proposer, 1_000_000);
+    seed_token(&db, false, &[(proposer.address(), 600), (Address::new([0x22; 20]), 400)]);
+    register(&db, 1);
+
+    assert!(matches!(exec.execute_tx(&signed(&proposer, 0, gov(GovernanceOperation::CreateProposal, create_req(&proposer, ExecutionKind::RecordOnly))), &Address::new(BLOCK_PROPOSER), 5, 1000).unwrap().status, TxStatus::Success));
+    assert_eq!(state.get_balance(&escrow).unwrap(), 500);
+    let pid = proposal_id_of(&proposer.address(), 5, 0);
+
+    let yes = bincode::serialize(&CastVoteRequest { proposal_id: pid, choice: VoteChoice::Yes }).unwrap();
+    exec.execute_tx(&signed(&proposer, 1, gov(GovernanceOperation::CastVote, yes)), &Address::new(BLOCK_PROPOSER), 10, 1000).unwrap();
+
+    let before_exec = state.get_balance(&proposer.address()).unwrap();
+    let ereq = bincode::serialize(&ExecuteProposalRequest { proposal_id: pid }).unwrap();
+    let r = exec.execute_tx(&signed(&proposer, 2, gov(GovernanceOperation::ExecuteProposal, ereq)), &Address::new(BLOCK_PROPOSER), 200, 1000).unwrap();
+    assert!(matches!(r.status, TxStatus::Success));
+
+    let stored = GovStore::new(&db).get_proposal(&pid).unwrap().unwrap();
+    assert_eq!(stored.status, GovProposalStatus::Recorded);
+    assert_eq!(stored.bond_state, BondState::Returned);
+    assert_eq!(state.get_balance(&escrow).unwrap(), 0, "escrow drained");
+    // execute fee (100) went to the block proposer; bond (500) returned to proposer.
+    assert_eq!(state.get_balance(&proposer.address()).unwrap(), before_exec - 100 + 500);
+}
+
+#[test]
+fn bond_burned_on_expired() {
+    let (state, db, _dir, exec) = setup_with_params(bond_params(500, None));
+    let escrow = gov_escrow_address();
+    let proposer = KeyPair::generate();
+    fund(&state, &proposer, 1_000_000);
+    seed_token(&db, false, &[(proposer.address(), 600), (Address::new([0x22; 20]), 400)]);
+    register(&db, 1);
+    let z0 = state.get_balance(&Address::ZERO).unwrap();
+
+    assert!(matches!(exec.execute_tx(&signed(&proposer, 0, gov(GovernanceOperation::CreateProposal, create_req(&proposer, ExecutionKind::RecordOnly))), &Address::new(BLOCK_PROPOSER), 5, 1000).unwrap().status, TxStatus::Success));
+    let pid = proposal_id_of(&proposer.address(), 5, 0);
+
+    // No votes → Expired after the window; bond burned to ZERO.
+    let ereq = bincode::serialize(&ExecuteProposalRequest { proposal_id: pid }).unwrap();
+    let r = exec.execute_tx(&signed(&proposer, 1, gov(GovernanceOperation::ExecuteProposal, ereq)), &Address::new(BLOCK_PROPOSER), 200, 1000).unwrap();
+    assert!(matches!(r.status, TxStatus::Success));
+
+    let stored = GovStore::new(&db).get_proposal(&pid).unwrap().unwrap();
+    assert_eq!(stored.status, GovProposalStatus::Expired);
+    assert_eq!(stored.bond_state, BondState::Burned);
+    assert_eq!(state.get_balance(&escrow).unwrap(), 0, "escrow drained");
+    assert_eq!(state.get_balance(&Address::ZERO).unwrap(), z0 + 500, "bond burned to ZERO");
+}
+
+#[test]
+fn proposer_cancel_returns_bond() {
+    let (state, db, _dir, exec) = setup_with_params(bond_params(500, None));
+    let escrow = gov_escrow_address();
+    let proposer = KeyPair::generate();
+    fund(&state, &proposer, 1_000_000);
+    seed_token(&db, false, &[(proposer.address(), 600)]);
+    register(&db, 1);
+
+    assert!(matches!(exec.execute_tx(&signed(&proposer, 0, gov(GovernanceOperation::CreateProposal, create_req(&proposer, ExecutionKind::RecordOnly))), &Address::new(BLOCK_PROPOSER), 5, 1000).unwrap().status, TxStatus::Success));
+    assert_eq!(state.get_balance(&escrow).unwrap(), 500);
+    let pid = proposal_id_of(&proposer.address(), 5, 0);
+
+    let before = state.get_balance(&proposer.address()).unwrap();
+    let creq = bincode::serialize(&CancelProposalRequest { proposal_id: pid }).unwrap();
+    let r = exec.execute_tx(&signed(&proposer, 1, gov(GovernanceOperation::CancelProposal, creq)), &Address::new(BLOCK_PROPOSER), 10, 1000).unwrap();
+    assert!(matches!(r.status, TxStatus::Success), "cancel: {:?}", r.status);
+
+    let stored = GovStore::new(&db).get_proposal(&pid).unwrap().unwrap();
+    assert_eq!(stored.status, GovProposalStatus::Cancelled);
+    assert_eq!(stored.bond_state, BondState::Returned);
+    assert_eq!(state.get_balance(&escrow).unwrap(), 0, "escrow drained");
+    assert_eq!(state.get_balance(&proposer.address()).unwrap(), before - 100 + 500, "cancel fee out, bond back");
+}
+
+#[test]
+fn council_cancel_burns_bond() {
+    // Council = a distinct keypair's address, so the canceller is council but not proposer.
+    let council = KeyPair::generate();
+    let (state, db, _dir, exec) = setup_with_params(bond_params(500, Some(council.address())));
+    let escrow = gov_escrow_address();
+    let proposer = KeyPair::generate();
+    fund(&state, &proposer, 1_000_000);
+    fund(&state, &council, 10_000);
+    seed_token(&db, false, &[(proposer.address(), 600)]);
+    register(&db, 1);
+    let z0 = state.get_balance(&Address::ZERO).unwrap();
+
+    assert!(matches!(exec.execute_tx(&signed(&proposer, 0, gov(GovernanceOperation::CreateProposal, create_req(&proposer, ExecutionKind::RecordOnly))), &Address::new(BLOCK_PROPOSER), 5, 1000).unwrap().status, TxStatus::Success));
+    let pid = proposal_id_of(&proposer.address(), 5, 0);
+
+    let creq = bincode::serialize(&CancelProposalRequest { proposal_id: pid }).unwrap();
+    let r = exec.execute_tx(&signed(&council, 0, gov(GovernanceOperation::CancelProposal, creq)), &Address::new(BLOCK_PROPOSER), 10, 1000).unwrap();
+    assert!(matches!(r.status, TxStatus::Success), "council cancel: {:?}", r.status);
+
+    let stored = GovStore::new(&db).get_proposal(&pid).unwrap().unwrap();
+    assert_eq!(stored.status, GovProposalStatus::Cancelled);
+    assert_eq!(stored.bond_state, BondState::Burned);
+    assert_eq!(state.get_balance(&escrow).unwrap(), 0, "escrow drained");
+    assert_eq!(state.get_balance(&Address::ZERO).unwrap(), z0 + 500, "council cancel burns bond");
+}
+
+// ── Treasury OnChain execution (P6b) ─────────────────────────────────────────
+
+/// Params with a configured treasury; bond stays 0 to isolate the payout.
+fn treasury_params(treasury: Option<Address>) -> ChainParams {
+    let mut p = params(true, true, 100);
+    p.governance.as_mut().unwrap().treasury = treasury;
+    p
+}
+
+fn fund_addr(state: &Arc<StateManager>, addr: &Address, balance: u128) {
+    state.put_account(addr, &AccountState { balance, nonce: 0 }).unwrap();
+}
+
+/// Create a passed TreasurySpend+OnChain proposal, returning (state, db, exec,
+/// proposer, pid) after a winning Yes vote (proposer holds 600/1000).
+fn setup_treasury_vote(
+    treasury: Option<Address>,
+    beneficiary: Address,
+    amount: u128,
+) -> (Arc<StateManager>, Arc<Database>, tempfile::TempDir, sumchain_state::executor::BlockExecutor, KeyPair, [u8; 32]) {
+    let (state, db, dir, exec) = setup_with_params(treasury_params(treasury));
+    let proposer = KeyPair::generate();
+    fund(&state, &proposer, 1_000_000);
+    seed_token(&db, false, &[(proposer.address(), 600), (Address::new([0x22; 20]), 400)]);
+    register(&db, 1);
+    assert!(matches!(exec.execute_tx(&signed(&proposer, 0, gov(GovernanceOperation::CreateProposal, treasury_create_req(beneficiary, amount))), &Address::new(BLOCK_PROPOSER), 5, 1000).unwrap().status, TxStatus::Success));
+    let pid = proposal_id_of(&proposer.address(), 5, 0);
+    let yes = bincode::serialize(&CastVoteRequest { proposal_id: pid, choice: VoteChoice::Yes }).unwrap();
+    exec.execute_tx(&signed(&proposer, 1, gov(GovernanceOperation::CastVote, yes)), &Address::new(BLOCK_PROPOSER), 10, 1000).unwrap();
+    (state, db, dir, exec, proposer, pid)
+}
+
+#[test]
+fn treasury_spend_onchain_pays_out() {
+    let treasury = Address::new([0x7C; 20]);
+    let beneficiary = Address::new([0x7B; 20]);
+    let (state, db, _dir, exec, proposer, pid) = setup_treasury_vote(Some(treasury), beneficiary, 300);
+    fund_addr(&state, &treasury, 1_000);
+
+    let ereq = bincode::serialize(&ExecuteProposalRequest { proposal_id: pid }).unwrap();
+    let r = exec.execute_tx(&signed(&proposer, 2, gov(GovernanceOperation::ExecuteProposal, ereq)), &Address::new(BLOCK_PROPOSER), 200, 1000).unwrap();
+    assert!(matches!(r.status, TxStatus::Success), "execute: {:?}", r.status);
+
+    assert_eq!(GovStore::new(&db).get_proposal(&pid).unwrap().unwrap().status, GovProposalStatus::Executed);
+    assert_eq!(state.get_balance(&treasury).unwrap(), 700, "treasury debited");
+    assert_eq!(state.get_balance(&beneficiary).unwrap(), 300, "beneficiary credited");
+}
+
+#[test]
+fn treasury_insufficient_returns_312_and_leaves_proposal_live() {
+    let treasury = Address::new([0x7C; 20]);
+    let beneficiary = Address::new([0x7B; 20]);
+    let (state, db, _dir, exec, proposer, pid) = setup_treasury_vote(Some(treasury), beneficiary, 300);
+    fund_addr(&state, &treasury, 100); // < amount
+
+    let ereq = bincode::serialize(&ExecuteProposalRequest { proposal_id: pid }).unwrap();
+    let r = exec.execute_tx(&signed(&proposer, 2, gov(GovernanceOperation::ExecuteProposal, ereq)), &Address::new(BLOCK_PROPOSER), 200, 1000).unwrap();
+    assert!(matches!(r.status, TxStatus::Failed(312)), "insufficient treasury: {:?}", r.status);
+    // No funds moved; proposal stays live (Voting) for a retry after funding.
+    assert_eq!(state.get_balance(&treasury).unwrap(), 100);
+    assert_eq!(state.get_balance(&beneficiary).unwrap(), 0);
+    assert_eq!(GovStore::new(&db).get_proposal(&pid).unwrap().unwrap().status, GovProposalStatus::Voting);
+}
+
+#[test]
+fn treasury_not_configured_returns_310() {
+    let beneficiary = Address::new([0x7B; 20]);
+    // treasury = None ⇒ on-chain treasury execution unavailable.
+    let (state, db, _dir, exec, proposer, pid) = setup_treasury_vote(None, beneficiary, 300);
+
+    let ereq = bincode::serialize(&ExecuteProposalRequest { proposal_id: pid }).unwrap();
+    let r = exec.execute_tx(&signed(&proposer, 2, gov(GovernanceOperation::ExecuteProposal, ereq)), &Address::new(BLOCK_PROPOSER), 200, 1000).unwrap();
+    assert!(matches!(r.status, TxStatus::Failed(310)), "no treasury: {:?}", r.status);
+    assert_eq!(state.get_balance(&beneficiary).unwrap(), 0);
+    assert_eq!(GovStore::new(&db).get_proposal(&pid).unwrap().unwrap().status, GovProposalStatus::Voting);
 }
 
 #[test]

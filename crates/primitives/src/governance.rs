@@ -181,6 +181,20 @@ impl GovProposalStatus {
     }
 }
 
+/// Lifecycle of a proposal's deposit bond (issue #50, P6a). The bond is
+/// escrowed to the canonical governance escrow address at creation, then either
+/// returned to the proposer or burned (credited to `Address::ZERO`) when the
+/// proposal reaches a terminal state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BondState {
+    /// Held in escrow while the proposal is live.
+    Escrowed,
+    /// Returned to the proposer (good-faith terminal state / proposer cancel).
+    Returned,
+    /// Burned to `Address::ZERO` (spam / quorum failure / council cancel).
+    Burned,
+}
+
 /// Reference to the off-chain artifact a proposal authorizes (GitHub PR /
 /// release / doc): a URL plus a content hash binding the referenced content.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -205,6 +219,15 @@ pub struct GovProposal {
     pub created_at: GovTimestamp,
     pub created_at_height: GovBlockHeight,
     pub expires_at: GovTimestamp,
+    /// Deposit bond escrowed at creation (`0` when bonds are disabled).
+    pub bond: u128,
+    /// Escrow lifecycle of the bond.
+    pub bond_state: BondState,
+    /// Beneficiary for a `TreasurySpend` + `OnChain` payout (P6b). `None` for
+    /// every other class / `RecordOnly` proposal.
+    pub treasury_beneficiary: Option<Address>,
+    /// Native-Koppa amount for a `TreasurySpend` + `OnChain` payout (P6b).
+    pub treasury_amount: Option<u128>,
 }
 
 /// A cast vote.
@@ -261,6 +284,35 @@ pub struct GovernanceParams {
     /// Maximum holders a proposal snapshot may capture; creation fails cleanly
     /// if a governance token's holder set exceeds this bound.
     pub max_snapshot_holders: u32,
+    /// Deposit bond (native Koppa) escrowed when a proposal is created,
+    /// returned on good-faith terminal states and burned on spam / quorum
+    /// failure / council cancel. `0` (default) disables bonds. No mainnet
+    /// default exists — set only for a coordinated activation or in tests.
+    #[serde(default)]
+    pub proposal_bond: u128,
+    /// Dedicated governance treasury address (P6b). A passed `TreasurySpend` +
+    /// `OnChain` proposal pays out from here to its beneficiary. `None`
+    /// (default) means on-chain treasury execution is unavailable — such
+    /// proposals fail rather than move funds. This is a governance-owned
+    /// address funded deliberately to be governed; it is **not** the council
+    /// Policy Account.
+    #[serde(default)]
+    pub treasury: Option<Address>,
+}
+
+/// Domain separator for the canonical, keyless governance bond-escrow address.
+pub const GOV_ESCROW_DOMAIN: &[u8] = b"SRC-GOV-ESCROW:v1:";
+
+/// Canonical governance bond-escrow address (issue #50, P6a). Deposit bonds are
+/// held here between proposal creation and terminal settlement. Deterministically
+/// derived from [`GOV_ESCROW_DOMAIN`] (not from any public key), so it is
+/// keyless and spendable only by the governance executor. Anyone can recompute
+/// it to audit the escrowed balance.
+pub fn gov_escrow_address() -> Address {
+    let hash = blake3::hash(GOV_ESCROW_DOMAIN);
+    let mut bytes = [0u8; 20];
+    bytes.copy_from_slice(&hash.as_bytes()[12..32]);
+    Address::new(bytes)
 }
 
 // =============================================================================
@@ -283,6 +335,13 @@ pub struct CreateProposalRequest {
     pub class: GovProposalClass,
     pub execution_kind: ExecutionKind,
     pub external_ref: ExternalRef,
+    /// Beneficiary for a `TreasurySpend` + `OnChain` proposal (P6b). Ignored
+    /// (and should be `None`) for every other class / `RecordOnly` proposal.
+    #[serde(default)]
+    pub treasury_beneficiary: Option<Address>,
+    /// Native-Koppa payout amount for a `TreasurySpend` + `OnChain` proposal.
+    #[serde(default)]
+    pub treasury_amount: Option<u128>,
 }
 
 /// `CastVote` request.

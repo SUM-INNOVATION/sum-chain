@@ -10,7 +10,22 @@
 //! - `304` create threshold not met · `305` snapshot holder bound exceeded
 //! - `306` proposal not found/wrong status · `307` voting closed/expired
 //! - `308` no snapshot weight        · `309` duplicate vote
-//! - `310` on-chain execution not supported in v1
+//! - `310` on-chain execution not supported for this proposal (non-treasury,
+//!   or treasury not configured / beneficiary+amount absent)
+//! - `311` insufficient balance to post the proposal bond
+//! - `312` insufficient governance treasury balance for the payout
+//!
+//! Treasury execution (P6b): a passed `TreasurySpend` + `OnChain` proposal pays
+//! a single native-Koppa amount from `GovernanceParams::treasury` to the
+//! proposal's beneficiary and moves to `Executed`. It is the only auto-exec
+//! path; every other `OnChain` class still fails `310`, and no chain-param /
+//! validator / consensus state is ever mutated.
+//!
+//! Deposit bond (P6a): when `GovernanceParams::proposal_bond > 0`, creating a
+//! proposal escrows the bond to the keyless [`gov_escrow_address`] (the proposer
+//! must cover `fee + bond`). On a terminal transition the bond is returned to
+//! the proposer (Passed/Recorded, Rejected, proposer cancel) or burned to
+//! `Address::ZERO` (QuorumNotMet, Expired, council cancel).
 //!
 //! Fee/nonce (Policy-B): gate/params/undecodable are pre-semantic (no fee, no
 //! nonce, no state). A decoded op that fails semantically charges the fee and
@@ -21,10 +36,10 @@ use std::sync::Arc;
 
 use sumchain_genesis::ChainParams;
 use sumchain_primitives::governance::{
-    generate_proposal_id, CancelProposalRequest, CastVoteRequest, CreateProposalRequest,
-    ExecuteProposalRequest, ExecutionKind, GovAsset, GovAssetKind, GovAssetStatus, GovProposal,
-    GovProposalStatus, GovVote, GovernanceOperation, GovernanceParams, GovernanceTxData,
-    RegisterAssetRequest, VoteChoice, WeightRule,
+    generate_proposal_id, gov_escrow_address, BondState, CancelProposalRequest, CastVoteRequest,
+    CreateProposalRequest, ExecuteProposalRequest, ExecutionKind, GovAsset, GovAssetKind,
+    GovAssetStatus, GovProposal, GovProposalClass, GovProposalStatus, GovVote, GovernanceOperation,
+    GovernanceParams, GovernanceTxData, RegisterAssetRequest, VoteChoice, WeightRule,
 };
 use sumchain_primitives::{Address, Balance, Hash, TxStatus};
 use sumchain_storage::{Database, GovStore, TokenStore};
@@ -46,12 +61,36 @@ fn result(tx_hash: Hash, status: TxStatus, fee_paid: Balance) -> TxExecutionResu
     TxExecutionResult { tx_hash, status, fee_paid }
 }
 
+/// Bond settlement staged alongside a terminal proposal update.
+enum BondSettlement {
+    /// No bond movement (bond disabled, or non-terminal update).
+    None,
+    /// Return the escrowed bond to the proposal's proposer.
+    Return(u128),
+    /// Burn the escrowed bond (credit `Address::ZERO`).
+    Burn(u128),
+}
+
+/// A single native-Koppa treasury payout staged by a passed `TreasurySpend` +
+/// `OnChain` proposal (P6b). Deducted from the configured governance treasury
+/// and credited to the beneficiary; nothing else is touched.
+struct TreasuryPayout {
+    from_treasury: Address,
+    to: Address,
+    amount: u128,
+}
+
 /// Writes staged by a successful validation, applied only after the fee is charged.
 enum Prepared {
     RegisterAsset(GovAsset),
     CreateProposal { proposal: GovProposal, snapshot: Vec<(Address, u128)> },
     CastVote(GovVote),
-    ProposalUpdate(GovProposal),
+    ProposalUpdate {
+        proposal: GovProposal,
+        settlement: BondSettlement,
+        /// Treasury payout for a passed `TreasurySpend` + `OnChain` proposal.
+        payout: Option<TreasuryPayout>,
+    },
 }
 
 /// Execute a `TxPayload::Governance` transaction. `nonce` is the tx nonce
@@ -98,15 +137,16 @@ pub fn execute(
         },
         GovernanceOperation::CancelProposal => match decode::<CancelProposalRequest>(&gov.data) {
             Err(()) => return Ok(result(tx_hash, TxStatus::Failed(302), 0)),
-            Ok(req) => validate_cancel(db, from, &req),
+            Ok(req) => validate_cancel(db, gp, from, &req),
         },
     };
 
     // ── Semantic: apply Policy-B fee/nonce ───────────────────────────────────
-    let affordable = state.get_balance(from)? >= fee;
+    let balance = state.get_balance(from)?;
+    let fee_affordable = balance >= fee;
     match validated {
         Err(code) => {
-            if affordable {
+            if fee_affordable {
                 charge(state, from, proposer, fee)?;
                 Ok(result(tx_hash, TxStatus::Failed(code), fee))
             } else {
@@ -115,15 +155,76 @@ pub fn execute(
             }
         }
         Ok(prepared) => {
-            if !affordable {
-                // Would succeed but the sender cannot cover the fee: reject free.
+            // Creating a proposal also escrows the deposit bond; the sender must
+            // cover `fee + bond`. Other ops post no bond.
+            let bond = match &prepared {
+                Prepared::CreateProposal { proposal, .. } => proposal.bond,
+                _ => 0,
+            };
+            if balance < fee.saturating_add(bond) {
+                if fee_affordable && bond > 0 {
+                    // Valid proposal, can pay the fee but not the bond: charge the
+                    // fee + advance nonce (Policy-B) and fail with a bond code.
+                    charge(state, from, proposer, fee)?;
+                    return Ok(result(tx_hash, TxStatus::Failed(311), fee));
+                }
+                // Cannot even cover the fee: reject free.
                 return Ok(result(tx_hash, TxStatus::Failed(302), 0));
             }
+            // Treasury payout affordability (312): checked before any state
+            // mutation, so an underfunded treasury leaves the proposal live
+            // (Voting) with its bond escrowed. Semantic failure ⇒ charge the fee.
+            if let Prepared::ProposalUpdate { payout: Some(p), .. } = &prepared {
+                if state.get_balance(&p.from_treasury)? < p.amount {
+                    charge(state, from, proposer, fee)?;
+                    return Ok(result(tx_hash, TxStatus::Failed(312), fee));
+                }
+            }
             charge(state, from, proposer, fee)?;
+            apply_bond(state, &prepared)?;
+            apply_treasury(state, &prepared)?;
             apply(db, prepared)?;
             Ok(result(tx_hash, TxStatus::Success, fee))
         }
     }
+}
+
+/// Apply the bond escrow (proposal create) or settlement (terminal update) to
+/// native balances. Runs after the fee is charged, so `fee + bond` affordability
+/// has already been checked for the create path.
+fn apply_bond(state: &Arc<StateManager>, prepared: &Prepared) -> Result<()> {
+    let escrow = gov_escrow_address();
+    match prepared {
+        // Escrow: proposer (== `from` at creation) funds the escrow.
+        Prepared::CreateProposal { proposal, .. } if proposal.bond > 0 => {
+            state.deduct(&proposal.proposer, proposal.bond)?;
+            state.credit(&escrow, proposal.bond)?;
+        }
+        Prepared::ProposalUpdate { proposal, settlement, .. } => match settlement {
+            BondSettlement::Return(amount) if *amount > 0 => {
+                state.deduct(&escrow, *amount)?;
+                state.credit(&proposal.proposer, *amount)?;
+            }
+            BondSettlement::Burn(amount) if *amount > 0 => {
+                state.deduct(&escrow, *amount)?;
+                state.credit(&Address::ZERO, *amount)?;
+            }
+            _ => {}
+        },
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Apply a staged treasury payout: deduct from the governance treasury and
+/// credit the beneficiary. Runs after the treasury-balance (312) check, so the
+/// deduct cannot underflow. No other account or chain state is touched.
+fn apply_treasury(state: &Arc<StateManager>, prepared: &Prepared) -> Result<()> {
+    if let Prepared::ProposalUpdate { payout: Some(p), .. } = prepared {
+        state.deduct(&p.from_treasury, p.amount)?;
+        state.credit(&p.to, p.amount)?;
+    }
+    Ok(())
 }
 
 fn charge(state: &Arc<StateManager>, from: &Address, proposer: &Address, fee: Balance) -> Result<()> {
@@ -141,7 +242,7 @@ fn apply(db: &Arc<Database>, prepared: Prepared) -> Result<()> {
             store.create_proposal_atomic(&proposal, &snapshot)?
         }
         Prepared::CastVote(vote) => store.put_vote(&vote)?,
-        Prepared::ProposalUpdate(proposal) => store.put_proposal(&proposal)?,
+        Prepared::ProposalUpdate { proposal, .. } => store.put_proposal(&proposal)?,
     }
     Ok(())
 }
@@ -219,6 +320,12 @@ fn validate_create(
         created_at: timestamp,
         created_at_height: height,
         expires_at: timestamp, // informational; the height-based window is authoritative
+        bond: gp.proposal_bond,
+        bond_state: BondState::Escrowed,
+        // Treasury payout target (pass-through; enforced at execution for a
+        // TreasurySpend + OnChain proposal, ignored otherwise).
+        treasury_beneficiary: req.treasury_beneficiary,
+        treasury_amount: req.treasury_amount,
     };
     Ok(Prepared::CreateProposal { proposal, snapshot })
 }
@@ -302,20 +409,67 @@ fn validate_execute(
         GovProposalStatus::Rejected
     };
 
+    let mut payout = None;
     if new_status == GovProposalStatus::Passed {
         match proposal.execution_kind {
-            // On-chain / treasury execution is not supported in v1.
-            ExecutionKind::OnChain => return Err(310),
             ExecutionKind::RecordOnly => proposal.status = GovProposalStatus::Recorded,
+            ExecutionKind::OnChain => {
+                // On-chain execution is limited to a single native-Koppa
+                // treasury payout; every other class is unsupported (310).
+                if proposal.class != GovProposalClass::TreasurySpend {
+                    return Err(310);
+                }
+                match (gp.treasury, proposal.treasury_beneficiary, proposal.treasury_amount) {
+                    (Some(treasury), Some(to), Some(amount)) if amount > 0 => {
+                        proposal.status = GovProposalStatus::Executed;
+                        payout = Some(TreasuryPayout { from_treasury: treasury, to, amount });
+                    }
+                    // Treasury not configured, or beneficiary/amount missing/zero:
+                    // no funds move; the proposal stays live for a later cancel.
+                    _ => return Err(310),
+                }
+            }
         }
     } else {
         proposal.status = new_status;
     }
-    Ok(Prepared::ProposalUpdate(proposal))
+
+    // Settle the bond on this terminal transition: return on a good-faith
+    // outcome (Recorded / Executed / Rejected), burn on spam / low turnout
+    // (QuorumNotMet / Expired).
+    let settlement = settle_bond(&mut proposal, |status| {
+        matches!(
+            status,
+            GovProposalStatus::Recorded | GovProposalStatus::Executed | GovProposalStatus::Rejected
+        )
+    });
+    Ok(Prepared::ProposalUpdate { proposal, settlement, payout })
+}
+
+/// Resolve a proposal's bond as it reaches a terminal state. `is_return`
+/// decides, from the (already-set) terminal `status`, whether the bond is
+/// returned; otherwise it is burned. Records the `bond_state` transition and
+/// returns the matching balance-settlement instruction. A no-op when the bond
+/// is `0` or already settled.
+fn settle_bond(
+    proposal: &mut GovProposal,
+    is_return: impl Fn(GovProposalStatus) -> bool,
+) -> BondSettlement {
+    if proposal.bond == 0 || proposal.bond_state != BondState::Escrowed {
+        return BondSettlement::None;
+    }
+    if is_return(proposal.status) {
+        proposal.bond_state = BondState::Returned;
+        BondSettlement::Return(proposal.bond)
+    } else {
+        proposal.bond_state = BondState::Burned;
+        BondSettlement::Burn(proposal.bond)
+    }
 }
 
 fn validate_cancel(
     db: &Arc<Database>,
+    gp: &GovernanceParams,
     from: &Address,
     req: &CancelProposalRequest,
 ) -> std::result::Result<Prepared, u32> {
@@ -324,12 +478,17 @@ fn validate_cancel(
         Some(p) => p,
         None => return Err(306),
     };
-    // Only the proposer may cancel, and only while Created/Voting.
-    if proposal.proposer != *from
+    // The proposer or the council may cancel, and only while Created/Voting.
+    let is_proposer = proposal.proposer == *from;
+    let is_council = *from == gp.council;
+    if (!is_proposer && !is_council)
         || !matches!(proposal.status, GovProposalStatus::Created | GovProposalStatus::Voting)
     {
         return Err(306);
     }
     proposal.status = GovProposalStatus::Cancelled;
-    Ok(Prepared::ProposalUpdate(proposal))
+    // Proposer cancel returns the bond (clean withdrawal); council cancel burns
+    // it (anti-spam force). If the canceller is both, the proposer path wins.
+    let settlement = settle_bond(&mut proposal, |_| is_proposer);
+    Ok(Prepared::ProposalUpdate { proposal, settlement, payout: None })
 }

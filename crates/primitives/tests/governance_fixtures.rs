@@ -113,6 +113,10 @@ fn gov_proposal_round_trip() {
         created_at: 1000,
         created_at_height: 100,
         expires_at: 2000,
+        bond: 500,
+        bond_state: sumchain_primitives::governance::BondState::Escrowed,
+        treasury_beneficiary: Some(Address::new([0xB0; 20])),
+        treasury_amount: Some(1_000),
     });
 }
 
@@ -152,6 +156,8 @@ fn governance_params_round_trip() {
         pass_threshold_bps: 5_000,
         voting_period_blocks: 100,
         max_snapshot_holders: 16,
+        proposal_bond: 500,
+        treasury: Some(Address::new([0xD0; 20])),
     });
 }
 
@@ -160,9 +166,11 @@ fn operation_request_structs_round_trip() {
     round_trip(&RegisterAssetRequest { token_id: [7u8; 32], create_threshold: 1_000, effective_height: 42 });
     round_trip(&CreateProposalRequest {
         asset: GovAssetKind::Src20Token([7u8; 32]),
-        class: GovProposalClass::RoutineProcess,
-        execution_kind: ExecutionKind::RecordOnly,
+        class: GovProposalClass::TreasurySpend,
+        execution_kind: ExecutionKind::OnChain,
         external_ref: ExternalRef { url: "https://x/pr/1".into(), content_hash: [3u8; 32] },
+        treasury_beneficiary: Some(Address::new([0xB1; 20])),
+        treasury_amount: Some(2_500),
     });
     round_trip(&CastVoteRequest { proposal_id: [1u8; 32], choice: VoteChoice::Yes });
     round_trip(&ExecuteProposalRequest { proposal_id: [1u8; 32] });

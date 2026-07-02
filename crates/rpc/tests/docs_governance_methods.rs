@@ -1,6 +1,7 @@
 //! Issue #50 Phase 4: hard guard that the registered `gov_*` RPC surface is
-//! exactly the approved 10 methods (3 unsigned-tx builders + 7 reads) — and in
+//! exactly the approved 11 methods (4 unsigned-tx builders + 7 reads) — and in
 //! particular that no private-key / direct-write governance method exists.
+//! (P6a added the `gov_buildCancelProposal` builder.)
 //!
 //! Documented `gov_*` method-name validation (documented ⊆ registered) lives in
 //! the shared `docs_tax_methods` drift guard, extended for `gov_` in P5. This
@@ -31,10 +32,11 @@ fn read(rel: &str) -> String {
 }
 
 /// The exact approved governance surface: builders (no keys) + reads.
-const ALLOWED: [&str; 10] = [
+const ALLOWED: [&str; 11] = [
     "gov_buildCreateProposal",
     "gov_buildCastVote",
     "gov_buildExecuteProposal",
+    "gov_buildCancelProposal",
     "gov_getProposal",
     "gov_listProposals",
     "gov_listActiveProposals",
@@ -56,7 +58,7 @@ fn governance_surface_is_exactly_the_approved_set() {
     // sum_sendRawTransaction).
     let extra: Vec<_> = registered.difference(&allowed).cloned().collect();
     assert!(extra.is_empty(), "unexpected gov_* RPC methods registered: {:?}", extra);
-    assert_eq!(registered, allowed, "gov_* surface must be exactly the 10 approved methods");
+    assert_eq!(registered, allowed, "gov_* surface must be exactly the 11 approved methods");
 }
 
 #[test]

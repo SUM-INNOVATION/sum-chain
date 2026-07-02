@@ -900,6 +900,8 @@ mod tests {
             credential_id: [1u8; 32],
             subcode: DocSubcode::EligibilityAttestation,
             subject_commitment,
+            subject_address: Address::new([0x36; 20]),
+            encryption_meta: None,
             issuer: Address::new([2u8; 20]),
             jurisdiction: "US".to_string(),
             eligibility_type: EligibilityType::Citizenship,

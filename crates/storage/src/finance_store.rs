@@ -683,6 +683,7 @@ mod tests {
         AddressProof {
             proof_id: [4u8; 32],
             subject_ref: [5u8; 32],
+            holder_address: Address::new([0x30; 20]),
             address_commitment: [6u8; 32],
             jurisdiction_code: "US-NY".to_string(),
             postal_commitment: [7u8; 32],
@@ -703,6 +704,7 @@ mod tests {
         BankStandingCredential {
             credential_id: [10u8; 32],
             subject_ref: [11u8; 32],
+            holder_address: Address::new([0x31; 20]),
             account_commitment: [12u8; 32],
             bank_ref: [13u8; 32],
             account_type: AccountType::Checking,
@@ -725,6 +727,7 @@ mod tests {
         KycAttestation {
             attestation_id: [17u8; 32],
             subject_ref: [18u8; 32],
+            holder_address: Address::new([0x32; 20]),
             kyc_level: KycLevel::Enhanced,
             aml_risk: AmlRisk::Low,
             identity_commitment: [19u8; 32],

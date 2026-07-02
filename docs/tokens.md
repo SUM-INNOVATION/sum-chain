@@ -397,7 +397,7 @@ curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
 > Status:             code-backed; dormant (not enabled on mainnet)
 > Last verified:      2026-07-02
 > Code references:    docs/specs/GOVERNANCE-V1.md, crates/primitives/src/governance.rs, crates/state/src/governance_executor.rs, crates/storage/src/governance_store.rs, crates/rpc/src/server.rs
-> Public RPC support: builders (gov_buildCreateProposal, gov_buildCastVote, gov_buildExecuteProposal) + reads (gov_getProposal, gov_listProposals, gov_listActiveProposals, gov_getTally, gov_getVote, gov_getVotingPower, gov_listEligibleAssets)
+> Public RPC support: builders (gov_buildCreateProposal, gov_buildCastVote, gov_buildExecuteProposal, gov_buildCancelProposal) + reads (gov_getProposal, gov_listProposals, gov_listActiveProposals, gov_getTally, gov_getVote, gov_getVotingPower, gov_listEligibleAssets)
 
 On-chain token-holder governance v1: holders of an allowlisted SRC-20 governance
 token create proposals and vote using a balance snapshot frozen at proposal
@@ -411,6 +411,21 @@ voting period, snapshot bound). Neither is set on mainnet, so governance
 transactions are rejected and the reads below return empty/`null` until a network
 enables and populates governance. No mainnet token id, quorum, threshold, bond,
 or period values are published here.
+
+When a non-zero deposit bond is configured, creating a proposal escrows the bond
+(the proposer must cover `fee + bond`); it is returned to the proposer on a
+good-faith outcome or proposer cancel, and burned on spam / quorum failure or
+council cancel. A proposal may be cancelled by its proposer or the council while
+Created/Voting via `gov_buildCancelProposal`. The `gov_getProposal` response
+surfaces the `bond` amount and `bond_state` (`Escrowed`/`Returned`/`Burned`).
+
+Execution is record-only except for a single treasury-spend path: when a
+governance `treasury` address is configured, a passed `TreasurySpend` proposal
+built with `execution_kind:"OnChain"` plus a `treasury_beneficiary` and
+`treasury_amount` pays that native-Koppa amount from the treasury to the
+beneficiary and moves to `Executed`. Every other `OnChain` class is rejected;
+no chain-parameter, validator, or consensus state is ever changed. When present,
+`gov_getProposal` surfaces `treasury_beneficiary` and `treasury_amount`.
 
 ### Reads (safe to call; empty/`null` until configured & populated)
 
@@ -453,6 +468,9 @@ curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
 # Unsigned execute-proposal tx
 curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"gov_buildExecuteProposal","params":[{"from":"<address>","proposal_id":"0x<proposal_id_hex>"}]}'
+# Unsigned cancel-proposal tx (proposer or council; while Created/Voting)
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"gov_buildCancelProposal","params":[{"from":"<address>","proposal_id":"0x<proposal_id_hex>"}]}'
 ```
 
 ---

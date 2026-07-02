@@ -8,9 +8,9 @@ use crate::policy_account_types::{
     BuildSubmitProposalRequest, PolicyAccountInfo, PolicyBuildResponse, ProposalInfo,
 };
 use crate::governance_types::{
-    GovAssetInfo, GovBuildCastVoteRequest, GovBuildCreateProposalRequest,
-    GovBuildExecuteProposalRequest, GovBuildResponse, GovProposalInfo, GovTallyInfo, GovVoteInfo,
-    GovVotingPowerInfo,
+    GovAssetInfo, GovBuildCancelProposalRequest, GovBuildCastVoteRequest,
+    GovBuildCreateProposalRequest, GovBuildExecuteProposalRequest, GovBuildResponse,
+    GovProposalInfo, GovTallyInfo, GovVoteInfo, GovVotingPowerInfo,
 };
 use crate::types::{
     TaxClaimTypeInfo, TaxIssuerInfo, TaxPolicyInfo, ExecutorLinkInfo, AssetInfo, FinanceIssuerInfo,
@@ -1220,6 +1220,15 @@ pub trait SumChainApi {
     async fn gov_build_execute_proposal(
         &self,
         request: GovBuildExecuteProposalRequest,
+    ) -> Result<GovBuildResponse, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Build an unsigned cancel-proposal transaction to sign and broadcast.
+    /// The proposer (bond returned) or the council (bond burned) may cancel
+    /// while the proposal is Created/Voting.
+    #[method(name = "gov_buildCancelProposal")]
+    async fn gov_build_cancel_proposal(
+        &self,
+        request: GovBuildCancelProposalRequest,
     ) -> Result<GovBuildResponse, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Get a proposal by id (hex).
