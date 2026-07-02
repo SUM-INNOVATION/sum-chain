@@ -293,6 +293,10 @@ Start at **[docs/index.md](docs/index.md)**. Canonical usage docs:
 - **[docs/policy-accounts-and-contracts.md](docs/policy-accounts-and-contracts.md)** — policy accounts & contracts.
 - **[docs/rpc/api-reference.md](docs/rpc/api-reference.md)** — JSON-RPC reference.
 
+Project process & policy: **[GOVERNANCE.md](GOVERNANCE.md)** (on-chain governance
+model; dormant by default) · **[RELEASE.md](RELEASE.md)** (how approved changes
+are released) · **[CONTRIBUTING.md](CONTRIBUTING.md)** · **[SECURITY.md](SECURITY.md)**.
+
 ## RPC API
 
 **All amounts in the RPC API are returned in base units.**
