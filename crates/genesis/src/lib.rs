@@ -10,7 +10,7 @@ use std::path::Path;
 
 use sumchain_crypto::PublicKey;
 use sumchain_primitives::{
-    Address, Balance, Block, ChainId, Hash, StakingParams, Timestamp,
+    Address, Balance, Block, ChainId, GovernanceParams, Hash, StakingParams, Timestamp,
     DEFAULT_DAILY_QUOTA, DEFAULT_MAX_MESSAGE_SIZE, DEFAULT_MIN_TRUST_STAKE,
 };
 use thiserror::Error;
@@ -181,6 +181,13 @@ pub struct ChainParams {
     /// Dev: set to `Some(0)` to activate from genesis.
     #[serde(default)]
     pub governance_enabled_from_height: Option<u64>,
+
+    /// On-chain governance v1 network parameters (council authority + tally
+    /// params + snapshot bound). `None` = not configured (governance operations
+    /// are rejected even above the height gate). No mainnet defaults; set only
+    /// for a coordinated activation or in tests. See docs/specs/GOVERNANCE-V1.md.
+    #[serde(default)]
+    pub governance: Option<GovernanceParams>,
 }
 
 fn default_finality_depth() -> u64 {
@@ -383,6 +390,8 @@ impl Default for ChainParams {
             // is a coordinated validator upgrade; never set in default/mainnet
             // config. See docs/specs/GOVERNANCE-V1.md.
             governance_enabled_from_height: None,
+            // No governance parameters configured by default.
+            governance: None,
         }
     }
 }

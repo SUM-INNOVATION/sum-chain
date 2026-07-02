@@ -113,6 +113,48 @@ impl<'a> GovStore<'a> {
             .put(cf::GOV_PROPOSAL_INDEX, &proposer_index_key(&proposal.proposer, &proposal.id), &[])
     }
 
+    /// Atomically persist a new proposal together with its proposer index entry
+    /// and all frozen snapshot rows. A single `WriteBatch` commit means a
+    /// snapshot-bound (or any) failure leaves **no partial rows**.
+    pub fn create_proposal_atomic(
+        &self,
+        proposal: &GovProposal,
+        snapshot: &[(Address, u128)],
+    ) -> Result<()> {
+        let mut batch = self.db.batch();
+        batch.put(cf::GOV_PROPOSALS, &proposal.id, &ser(proposal)?)?;
+        batch.put(cf::GOV_PROPOSAL_INDEX, &proposer_index_key(&proposal.proposer, &proposal.id), &[])?;
+        for (holder, weight) in snapshot {
+            batch.put(cf::GOV_SNAPSHOTS, &composite_key(&proposal.id, holder), &weight.to_be_bytes())?;
+        }
+        batch.commit()
+    }
+
+    /// Current holders of `token_id` scanned from `TOKEN_BALANCES` (keyed
+    /// `token_id || owner`). Zero balances are skipped. Scanning stops once
+    /// `cap + 1` holders are collected, so the caller can detect an over-bound
+    /// holder set (`len > cap`) without unbounded work.
+    pub fn scan_token_holders(&self, token_id: &[u8; 32], cap: usize) -> Result<Vec<(Address, u128)>> {
+        let mut out = Vec::new();
+        for (k, v) in self.db.prefix_iter(cf::TOKEN_BALANCES, token_id)? {
+            if !k.starts_with(token_id) || k.len() < 52 {
+                continue;
+            }
+            let arr: [u8; 16] = v[..]
+                .try_into()
+                .map_err(|_| StorageError::Serialization("token balance not 16 bytes".into()))?;
+            let bal = u128::from_be_bytes(arr);
+            if bal == 0 {
+                continue;
+            }
+            out.push((addr_from_suffix(&k), bal));
+            if out.len() > cap {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
     pub fn get_proposal(&self, id: &GovProposalId) -> Result<Option<GovProposal>> {
         match self.db.get(cf::GOV_PROPOSALS, id)? {
             Some(b) => Ok(Some(de(&b)?)),

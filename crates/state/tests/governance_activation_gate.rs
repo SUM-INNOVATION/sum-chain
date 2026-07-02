@@ -1,16 +1,15 @@
-//! Issue #50, Phase 1: governance is dormant behind `governance_enabled_from_height`.
-//! Below the gate, `TxPayload::Governance` is rejected free (Failed(80), no fee,
-//! no nonce, no state). Phase 1 has no lifecycle, so at/above the gate it is a
-//! fail-closed stub (Failed(81)) — still no fee and no state — but it is
-//! distinctly NOT the gate rejection. Mirrors the #25 contracts gate tests.
+//! Issue #50, Phase 3a: governance dispatch skeleton behind the P1 gate.
+//! Governance is dormant (`governance_enabled_from_height`) and unconfigured
+//! (`governance: None`) by default. Every path here is pre-semantic: no fee,
+//! no nonce, no state. Governance failure codes are the isolated 300-block.
 
 mod common;
 use common::{fund, setup_with_params, CHAIN_ID};
 
 use sumchain_crypto::{sign, KeyPair};
 use sumchain_genesis::ChainParams;
-use sumchain_primitives::governance::{GovernanceOperation, GovernanceTxData};
-use sumchain_primitives::{SignedTransaction, TransactionV2, TxPayload, TxStatus};
+use sumchain_primitives::governance::{GovernanceOperation, GovernanceParams, GovernanceTxData};
+use sumchain_primitives::{Address, SignedTransaction, TransactionV2, TxPayload, TxStatus};
 
 fn signed(kp: &KeyPair, fee: u128, nonce: u64, payload: TxPayload) -> SignedTransaction {
     let tx = TransactionV2 { chain_id: CHAIN_ID, from: kp.address(), fee, nonce, payload };
@@ -19,56 +18,93 @@ fn signed(kp: &KeyPair, fee: u128, nonce: u64, payload: TxPayload) -> SignedTran
     SignedTransaction::new_v2(tx, *sig.as_bytes(), *kp.public_key().as_bytes())
 }
 
-fn gov_payload() -> TxPayload {
-    TxPayload::Governance(GovernanceTxData {
-        operation: GovernanceOperation::CreateProposal,
-        data: vec![],
-    })
+fn gov_payload(op: GovernanceOperation) -> TxPayload {
+    TxPayload::Governance(GovernanceTxData { operation: op, data: vec![] })
+}
+
+fn test_gov_params() -> GovernanceParams {
+    // Fixture values only — no mainnet defaults.
+    GovernanceParams {
+        council: Address::new([0xC0; 20]),
+        quorum_bps: 2_000,
+        pass_threshold_bps: 5_000,
+        voting_period_blocks: 100,
+        max_snapshot_holders: 16,
+    }
+}
+
+fn assert_no_mutation(state: &sumchain_state::StateManager, sender: &Address, proposer: &Address) {
+    assert_eq!(state.get_balance(sender).unwrap(), 10_000, "balance unchanged");
+    assert_eq!(state.get_nonce(sender).unwrap(), 0, "nonce unchanged");
+    assert_eq!(state.get_balance(proposer).unwrap(), 0, "proposer not credited");
 }
 
 #[test]
-fn governance_rejected_free_when_gate_closed() {
-    // v2 enabled but governance dormant (None).
+fn gate_closed_rejects_300_no_mutation() {
+    // v2 enabled but governance dormant (None) and unconfigured.
     let (state, _db, _dir, executor) = setup_with_params(ChainParams::with_v2_enabled());
     let sender = KeyPair::generate();
     let proposer = KeyPair::generate();
     fund(&state, &sender, 10_000);
 
-    let tx = signed(&sender, 1_000, 0, gov_payload());
+    let tx = signed(&sender, 1_000, 0, gov_payload(GovernanceOperation::CreateProposal));
     let res = executor.execute_tx(&tx, &proposer.address(), 1, 1000).unwrap();
 
-    assert!(matches!(res.status, TxStatus::Failed(80)), "gate-closed code, got {:?}", res.status);
-    assert_eq!(res.fee_paid, 0, "no fee below the gate");
-    assert_eq!(state.get_balance(&sender.address()).unwrap(), 10_000, "balance unchanged");
-    assert_eq!(state.get_nonce(&sender.address()).unwrap(), 0, "nonce unchanged");
-    assert_eq!(state.get_balance(&proposer.address()).unwrap(), 0, "proposer not credited");
+    assert!(matches!(res.status, TxStatus::Failed(300)), "gate closed, got {:?}", res.status);
+    assert_eq!(res.fee_paid, 0);
+    assert_no_mutation(&state, &sender.address(), &proposer.address());
 }
 
 #[test]
-fn governance_gate_open_is_not_the_gate_rejection() {
-    // Governance activated from genesis: Phase 1 has no lifecycle yet, so the
-    // tx still fails closed (Failed(81)) with no fee/state — but it is NOT the
-    // gate rejection Failed(80). This proves the gate opens.
+fn gate_open_but_params_absent_rejects_301() {
+    // Gate open, but no GovernanceParams configured.
     let mut params = ChainParams::with_v2_enabled();
     params.governance_enabled_from_height = Some(0);
+    // params.governance stays None.
     let (state, _db, _dir, executor) = setup_with_params(params);
     let sender = KeyPair::generate();
     let proposer = KeyPair::generate();
     fund(&state, &sender, 10_000);
 
-    let tx = signed(&sender, 1_000, 0, gov_payload());
+    let tx = signed(&sender, 1_000, 0, gov_payload(GovernanceOperation::CreateProposal));
     let res = executor.execute_tx(&tx, &proposer.address(), 1, 1000).unwrap();
 
-    assert!(matches!(res.status, TxStatus::Failed(81)), "gate-open P1 stub, got {:?}", res.status);
-    assert!(!matches!(res.status, TxStatus::Failed(80)), "gate should be open");
-    // Phase 1 never mutates state, regardless of gate.
+    assert!(matches!(res.status, TxStatus::Failed(301)), "params absent, got {:?}", res.status);
     assert_eq!(res.fee_paid, 0);
-    assert_eq!(state.get_balance(&sender.address()).unwrap(), 10_000, "balance unchanged");
-    assert_eq!(state.get_nonce(&sender.address()).unwrap(), 0, "nonce unchanged");
+    assert_no_mutation(&state, &sender.address(), &proposer.address());
 }
 
 #[test]
-fn governance_default_params_leave_gate_closed() {
-    // Production default: governance_enabled_from_height is None.
-    assert_eq!(ChainParams::default().governance_enabled_from_height, None);
+fn gate_open_and_configured_op_unsupported_in_p3a_302() {
+    // Gate open AND params configured: P3a implements no lifecycle, so every
+    // recognized operation is unsupported (302).
+    let mut params = ChainParams::with_v2_enabled();
+    params.governance_enabled_from_height = Some(0);
+    params.governance = Some(test_gov_params());
+    let (state, _db, _dir, executor) = setup_with_params(params);
+    let sender = KeyPair::generate();
+    let proposer = KeyPair::generate();
+    fund(&state, &sender, 10_000);
+
+    for op in [
+        GovernanceOperation::RegisterAsset,
+        GovernanceOperation::CreateProposal,
+        GovernanceOperation::CastVote,
+        GovernanceOperation::ExecuteProposal,
+        GovernanceOperation::CancelProposal,
+    ] {
+        let tx = signed(&sender, 1_000, 0, gov_payload(op));
+        let res = executor.execute_tx(&tx, &proposer.address(), 1, 1000).unwrap();
+        assert!(matches!(res.status, TxStatus::Failed(302)), "op {:?} => {:?}", op, res.status);
+        assert_eq!(res.fee_paid, 0);
+    }
+    // No path mutated state.
+    assert_no_mutation(&state, &sender.address(), &proposer.address());
+}
+
+#[test]
+fn defaults_leave_governance_dormant_and_unconfigured() {
+    let p = ChainParams::default();
+    assert_eq!(p.governance_enabled_from_height, None);
+    assert!(p.governance.is_none());
 }

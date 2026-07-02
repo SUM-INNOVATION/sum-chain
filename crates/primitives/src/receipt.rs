@@ -105,6 +105,19 @@ impl TxStatus {
             TxStatus::Failed(82) => "invalid reference (enrollment/employment/catalog)",
             TxStatus::Failed(83) => "not authorized for education operation",
             TxStatus::Failed(84) => "insufficient balance for education fee",
+            // On-chain governance v1 failures (issue #50). Isolated 300-block so
+            // codes never collide with the education (70–84) or other ranges.
+            TxStatus::Failed(300) => "governance subprotocol not enabled at this block height",
+            TxStatus::Failed(301) => "governance not configured (no governance params)",
+            TxStatus::Failed(302) => "undecodable or unsupported governance operation",
+            TxStatus::Failed(303) => "governance registry / asset eligibility failure",
+            TxStatus::Failed(304) => "governance proposal create threshold not met",
+            TxStatus::Failed(305) => "governance snapshot holder bound exceeded",
+            TxStatus::Failed(306) => "governance proposal not found or in wrong status",
+            TxStatus::Failed(307) => "governance voting window closed or proposal expired",
+            TxStatus::Failed(308) => "no governance snapshot weight for voter",
+            TxStatus::Failed(309) => "duplicate governance vote",
+            TxStatus::Failed(310) => "on-chain governance execution not supported in v1",
             TxStatus::Failed(_) => "failed",
         }
     }
