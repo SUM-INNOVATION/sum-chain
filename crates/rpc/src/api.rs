@@ -7,6 +7,11 @@ use crate::policy_account_types::{
     BuildCancelProposalRequest, BuildCreateAccountRequest, BuildExecuteProposalRequest,
     BuildSubmitProposalRequest, PolicyAccountInfo, PolicyBuildResponse, ProposalInfo,
 };
+use crate::governance_types::{
+    GovAssetInfo, GovBuildCastVoteRequest, GovBuildCreateProposalRequest,
+    GovBuildExecuteProposalRequest, GovBuildResponse, GovProposalInfo, GovTallyInfo, GovVoteInfo,
+    GovVotingPowerInfo,
+};
 use crate::types::{
     TaxClaimTypeInfo, TaxIssuerInfo, TaxPolicyInfo, ExecutorLinkInfo, AssetInfo, FinanceIssuerInfo,
     CaseInfo, HealthcareProviderInfo,
@@ -1189,6 +1194,81 @@ pub trait SumChainApi {
     async fn healthcare_get_active_institutional_providers(
         &self,
     ) -> Result<Vec<HealthcareProviderInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    // =========================================================================
+    // On-chain governance v1 (issue #50) — unsigned-tx builders (no private
+    // keys) + reads. Governance is dormant by default; reads are gate-agnostic
+    // and return stored data / empty. See docs/specs/GOVERNANCE-V1.md.
+    // =========================================================================
+
+    /// Build an unsigned create-proposal transaction to sign and broadcast.
+    #[method(name = "gov_buildCreateProposal")]
+    async fn gov_build_create_proposal(
+        &self,
+        request: GovBuildCreateProposalRequest,
+    ) -> Result<GovBuildResponse, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Build an unsigned cast-vote transaction to sign and broadcast.
+    #[method(name = "gov_buildCastVote")]
+    async fn gov_build_cast_vote(
+        &self,
+        request: GovBuildCastVoteRequest,
+    ) -> Result<GovBuildResponse, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Build an unsigned execute-proposal transaction to sign and broadcast.
+    #[method(name = "gov_buildExecuteProposal")]
+    async fn gov_build_execute_proposal(
+        &self,
+        request: GovBuildExecuteProposalRequest,
+    ) -> Result<GovBuildResponse, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get a proposal by id (hex).
+    #[method(name = "gov_getProposal")]
+    async fn gov_get_proposal(
+        &self,
+        proposal_id: String,
+    ) -> Result<Option<GovProposalInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// List all proposals.
+    #[method(name = "gov_listProposals")]
+    async fn gov_list_proposals(
+        &self,
+    ) -> Result<Vec<GovProposalInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// List proposals currently in the voting state.
+    #[method(name = "gov_listActiveProposals")]
+    async fn gov_list_active_proposals(
+        &self,
+    ) -> Result<Vec<GovProposalInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Tally a proposal from its frozen snapshot + cast votes.
+    #[method(name = "gov_getTally")]
+    async fn gov_get_tally(
+        &self,
+        proposal_id: String,
+    ) -> Result<Option<GovTallyInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get a voter's vote on a proposal (hex id, address).
+    #[method(name = "gov_getVote")]
+    async fn gov_get_vote(
+        &self,
+        proposal_id: String,
+        voter: String,
+    ) -> Result<Option<GovVoteInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get a holder's frozen snapshot voting power for a proposal.
+    #[method(name = "gov_getVotingPower")]
+    async fn gov_get_voting_power(
+        &self,
+        proposal_id: String,
+        holder: String,
+    ) -> Result<Option<GovVotingPowerInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// List all registered governance assets (with status + effective height).
+    #[method(name = "gov_listEligibleAssets")]
+    async fn gov_list_eligible_assets(
+        &self,
+    ) -> Result<Vec<GovAssetInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Check if an issuer can issue a specific subcode in a jurisdiction
     #[method(name = "docclass_canIssue")]

@@ -21,6 +21,7 @@ use crate::api::SumChainApiServer;
 use crate::auth::{ApiKeyValidator, RpcAuthConfig};
 use crate::health::HealthCheck;
 use crate::metrics::{Metrics, MetricsSnapshot};
+use crate::governance_types::*;
 use crate::policy_account_types::*;
 use crate::rate_limit::{RateLimitConfig, RateLimiter};
 use crate::types::*;
@@ -33,6 +34,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// request omits one. Matches the house default used by other write builders
 /// (0.001 Koppa).
 const POLICY_DEFAULT_FEE: u128 = 1_000_000;
+const GOV_DEFAULT_FEE: u128 = 1_000_000;
 
 /// Parse a Tax issuer class from its variant name (as emitted by the read
 /// DTOs) for the `tax_getIssuersByClass` filter.
@@ -496,6 +498,37 @@ impl RpcServer {
             address: None,
             proposal_id: None,
             action_hash: None,
+        })
+    }
+
+    /// Build an unsigned `TxPayload::Governance` transaction (no private key).
+    /// Fills `chain_id` + `nonce`; returns the unsigned bytes + signing hash.
+    fn build_unsigned_governance_tx(
+        &self,
+        from: Address,
+        fee: u128,
+        data: sumchain_primitives::governance::GovernanceTxData,
+    ) -> Result<GovBuildResponse> {
+        use sumchain_primitives::{TransactionV2, TxPayload};
+        let nonce = self
+            .state
+            .get_nonce(&from)
+            .map_err(|e| RpcError::Internal(format!("Failed to get nonce: {}", e)))?;
+        let chain_id = self.state.chain_id();
+        let tx = TransactionV2 { chain_id, from, fee, nonce, payload: TxPayload::Governance(data) };
+        let signing_hash = tx.signing_hash();
+        let unsigned = bincode::serialize(&tx)
+            .map_err(|e| RpcError::Internal(format!("Failed to encode tx: {}", e)))?;
+        Ok(GovBuildResponse {
+            unsigned_tx: format!("0x{}", hex::encode(unsigned)),
+            signing_hash: format!("0x{}", hex::encode(signing_hash.as_bytes())),
+            from: from.to_base58(),
+            nonce,
+            fee,
+            chain_id,
+            // The proposal id depends on the execution block height (unknown at
+            // build time); discover via gov_listProposals after inclusion.
+            proposal_id: None,
         })
     }
 
@@ -3861,6 +3894,194 @@ impl SumChainApiServer for RpcServer {
             .filter(|p| is_institutional_provider(p.provider_type))
             .map(HealthcareProviderInfo::from)
             .collect())
+    }
+
+    // ── On-chain governance v1 (issue #50) — builders + reads ────────────────
+
+    async fn gov_build_create_proposal(
+        &self,
+        request: GovBuildCreateProposalRequest,
+    ) -> std::result::Result<GovBuildResponse, jsonrpsee::types::ErrorObjectOwned> {
+        use sumchain_primitives::governance::{
+            CreateProposalRequest, ExternalRef, GovAssetKind, GovernanceOperation, GovernanceTxData,
+        };
+        let from = self.parse_address(&request.from)?;
+        let token_id = self.parse_hex32(&request.token_id)?;
+        let class = parse_gov_class(&request.class)
+            .ok_or_else(|| RpcError::InvalidParams(format!("Unknown class: {}", request.class)))?;
+        let execution_kind = parse_execution_kind(&request.execution_kind)
+            .ok_or_else(|| RpcError::InvalidParams(format!("Unknown execution_kind: {}", request.execution_kind)))?;
+        let content_hash = self.parse_hex32(&request.external_ref_content_hash)?;
+        let req = CreateProposalRequest {
+            asset: GovAssetKind::Src20Token(token_id),
+            class,
+            execution_kind,
+            external_ref: ExternalRef { url: request.external_ref_url, content_hash },
+        };
+        let data = GovernanceTxData {
+            operation: GovernanceOperation::CreateProposal,
+            data: bincode::serialize(&req).map_err(|e| RpcError::Internal(e.to_string()))?,
+        };
+        let fee = request.fee.unwrap_or(GOV_DEFAULT_FEE);
+        Ok(self.build_unsigned_governance_tx(from, fee, data)?)
+    }
+
+    async fn gov_build_cast_vote(
+        &self,
+        request: GovBuildCastVoteRequest,
+    ) -> std::result::Result<GovBuildResponse, jsonrpsee::types::ErrorObjectOwned> {
+        use sumchain_primitives::governance::{CastVoteRequest, GovernanceOperation, GovernanceTxData};
+        let from = self.parse_address(&request.from)?;
+        let proposal_id = self.parse_hex32(&request.proposal_id)?;
+        let choice = parse_vote_choice(&request.choice)
+            .ok_or_else(|| RpcError::InvalidParams(format!("Unknown choice: {}", request.choice)))?;
+        let req = CastVoteRequest { proposal_id, choice };
+        let data = GovernanceTxData {
+            operation: GovernanceOperation::CastVote,
+            data: bincode::serialize(&req).map_err(|e| RpcError::Internal(e.to_string()))?,
+        };
+        let fee = request.fee.unwrap_or(GOV_DEFAULT_FEE);
+        Ok(self.build_unsigned_governance_tx(from, fee, data)?)
+    }
+
+    async fn gov_build_execute_proposal(
+        &self,
+        request: GovBuildExecuteProposalRequest,
+    ) -> std::result::Result<GovBuildResponse, jsonrpsee::types::ErrorObjectOwned> {
+        use sumchain_primitives::governance::{ExecuteProposalRequest, GovernanceOperation, GovernanceTxData};
+        let from = self.parse_address(&request.from)?;
+        let proposal_id = self.parse_hex32(&request.proposal_id)?;
+        let req = ExecuteProposalRequest { proposal_id };
+        let data = GovernanceTxData {
+            operation: GovernanceOperation::ExecuteProposal,
+            data: bincode::serialize(&req).map_err(|e| RpcError::Internal(e.to_string()))?,
+        };
+        let fee = request.fee.unwrap_or(GOV_DEFAULT_FEE);
+        Ok(self.build_unsigned_governance_tx(from, fee, data)?)
+    }
+
+    async fn gov_get_proposal(
+        &self,
+        proposal_id: String,
+    ) -> std::result::Result<Option<GovProposalInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let id = self.parse_hex32(&proposal_id)?;
+        let store = sumchain_storage::GovStore::new(&self.db);
+        let p = store.get_proposal(&id).map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(p.as_ref().map(GovProposalInfo::from))
+    }
+
+    async fn gov_list_proposals(
+        &self,
+    ) -> std::result::Result<Vec<GovProposalInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let store = sumchain_storage::GovStore::new(&self.db);
+        let all = store.list_proposals().map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(all.iter().map(GovProposalInfo::from).collect())
+    }
+
+    async fn gov_list_active_proposals(
+        &self,
+    ) -> std::result::Result<Vec<GovProposalInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        use sumchain_primitives::governance::GovProposalStatus;
+        let store = sumchain_storage::GovStore::new(&self.db);
+        let active = store
+            .list_proposals_by_status(GovProposalStatus::Voting)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(active.iter().map(GovProposalInfo::from).collect())
+    }
+
+    async fn gov_get_tally(
+        &self,
+        proposal_id: String,
+    ) -> std::result::Result<Option<GovTallyInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        use sumchain_primitives::governance::VoteChoice;
+        let id = self.parse_hex32(&proposal_id)?;
+        let store = sumchain_storage::GovStore::new(&self.db);
+        if store.get_proposal(&id).map_err(|e| RpcError::Internal(e.to_string()))?.is_none() {
+            return Ok(None);
+        }
+        let snapshot_total: u128 = store
+            .list_snapshot(&id)
+            .map_err(|e| RpcError::Internal(e.to_string()))?
+            .iter()
+            .map(|(_, w)| *w)
+            .sum();
+        let (mut yes, mut no, mut abstain): (u128, u128, u128) = (0, 0, 0);
+        for v in store.list_votes(&id).map_err(|e| RpcError::Internal(e.to_string()))? {
+            match v.choice {
+                VoteChoice::Yes => yes += v.weight,
+                VoteChoice::No => no += v.weight,
+                VoteChoice::Abstain => abstain += v.weight,
+            }
+        }
+        let participation = yes + no + abstain;
+        let (quorum_met, passed, projected_status) = match self.chain_params.governance.as_ref() {
+            Some(gp) => {
+                if participation == 0 {
+                    (Some(false), Some(false), "Expired".to_string())
+                } else {
+                    let q = participation.saturating_mul(10_000)
+                        >= (gp.quorum_bps as u128).saturating_mul(snapshot_total);
+                    let p = yes.saturating_mul(10_000)
+                        >= (gp.pass_threshold_bps as u128).saturating_mul(yes + no);
+                    let status = if !q {
+                        "QuorumNotMet"
+                    } else if p {
+                        "Passed"
+                    } else {
+                        "Rejected"
+                    };
+                    (Some(q), Some(p), status.to_string())
+                }
+            }
+            None => (None, None, "CountsOnly".to_string()),
+        };
+        Ok(Some(GovTallyInfo {
+            proposal_id: format!("0x{}", hex::encode(id)),
+            snapshot_total: snapshot_total.to_string(),
+            yes: yes.to_string(),
+            no: no.to_string(),
+            abstain: abstain.to_string(),
+            participation: participation.to_string(),
+            quorum_met,
+            passed,
+            projected_status,
+        }))
+    }
+
+    async fn gov_get_vote(
+        &self,
+        proposal_id: String,
+        voter: String,
+    ) -> std::result::Result<Option<GovVoteInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let id = self.parse_hex32(&proposal_id)?;
+        let addr = self.parse_address(&voter)?;
+        let store = sumchain_storage::GovStore::new(&self.db);
+        let v = store.get_vote(&id, &addr).map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(v.as_ref().map(GovVoteInfo::from))
+    }
+
+    async fn gov_get_voting_power(
+        &self,
+        proposal_id: String,
+        holder: String,
+    ) -> std::result::Result<Option<GovVotingPowerInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let id = self.parse_hex32(&proposal_id)?;
+        let addr = self.parse_address(&holder)?;
+        let store = sumchain_storage::GovStore::new(&self.db);
+        let w = store.get_snapshot(&id, &addr).map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(w.map(|weight| GovVotingPowerInfo {
+            proposal_id: format!("0x{}", hex::encode(id)),
+            holder: addr.to_base58(),
+            weight: weight.to_string(),
+        }))
+    }
+
+    async fn gov_list_eligible_assets(
+        &self,
+    ) -> std::result::Result<Vec<GovAssetInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let store = sumchain_storage::GovStore::new(&self.db);
+        let assets = store.list_assets().map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(assets.iter().map(GovAssetInfo::from).collect())
     }
 
     async fn docclass_can_issue(
@@ -9079,5 +9300,230 @@ mod healthcare_rpc_tests {
         ] {
             assert!(!json.contains(banned), "HealthcareProviderInfo leaked banned field: {}", banned);
         }
+    }
+}
+
+#[cfg(test)]
+mod governance_rpc_tests {
+    //! Issue #50 Phase 4: governance builders (unsigned tx, no keys) + reads
+    //! over a real RpcServer. Governance stays dormant; reads are gate-agnostic.
+    use super::*;
+    use std::collections::HashMap;
+    use sumchain_consensus::PoAEngine;
+    use sumchain_crypto::KeyPair;
+    use sumchain_genesis::{ChainParams, Genesis};
+    use sumchain_primitives::governance::{
+        ExecutionKind, ExternalRef, GovAsset, GovAssetKind, GovAssetStatus, GovProposal,
+        GovProposalClass, GovProposalStatus, GovVote, GovernanceParams, VoteChoice, WeightRule,
+    };
+    use sumchain_primitives::{Address, TransactionV2, TxPayload};
+    use sumchain_state::MempoolConfig;
+    use sumchain_storage::GovStore;
+    use tempfile::TempDir;
+
+    const TOKEN: [u8; 32] = [0x7A; 32];
+
+    fn gov_params() -> GovernanceParams {
+        GovernanceParams {
+            council: Address::new([0xC0; 20]),
+            quorum_bps: 2_000,
+            pass_threshold_bps: 5_000,
+            voting_period_blocks: 100,
+            max_snapshot_holders: 64,
+        }
+    }
+
+    fn server(governance: Option<GovernanceParams>) -> (RpcServer, Arc<Database>, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let db = Arc::new(Database::open_default(dir.path()).unwrap());
+        let state = Arc::new(StateManager::new(db.clone(), 1));
+        let mempool = Arc::new(Mempool::new(MempoolConfig::default()));
+        let validator = KeyPair::generate();
+        let mut params = ChainParams::with_v2_enabled();
+        params.governance_enabled_from_height = Some(0);
+        params.governance = governance;
+        let genesis = Genesis::new(
+            1,
+            0,
+            vec![validator.public_key().to_base58()],
+            HashMap::from([(validator.address().to_base58(), 1u128)]),
+            params.clone(),
+        );
+        let engine = Arc::new(
+            PoAEngine::new(db.clone(), state.clone(), mempool.clone(), &genesis, Some(validator)).unwrap(),
+        );
+        let (tx_sender, _rx) = mpsc::channel(8);
+        let srv = RpcServer::new(db.clone(), state, mempool, engine, tx_sender, Arc::new(|| 0usize))
+            .with_chain_params(params);
+        (srv, db, dir)
+    }
+
+    fn proposal(id: u8, status: GovProposalStatus) -> GovProposal {
+        GovProposal {
+            id: [id; 32],
+            proposer: Address::new([0xA1; 20]),
+            class: GovProposalClass::RoutineProcess,
+            execution_kind: ExecutionKind::RecordOnly,
+            external_ref: ExternalRef { url: "https://x/pr/1".into(), content_hash: [0xAB; 32] },
+            asset: GovAssetKind::Src20Token(TOKEN),
+            voting_start_height: 5,
+            status,
+            created_at: 1000,
+            created_at_height: 5,
+            expires_at: 1000,
+        }
+    }
+
+    #[tokio::test]
+    async fn builder_create_proposal_decodes_and_carries_no_key() {
+        let (srv, _db, _dir) = server(Some(gov_params()));
+        let from = Address::new([0x11; 20]);
+        let resp = srv
+            .gov_build_create_proposal(GovBuildCreateProposalRequest {
+                from: from.to_base58(),
+                token_id: format!("0x{}", hex::encode(TOKEN)),
+                class: "RoutineProcess".into(),
+                execution_kind: "RecordOnly".into(),
+                external_ref_url: "https://x/pr/1".into(),
+                external_ref_content_hash: format!("0x{}", hex::encode([0xAB; 32])),
+                fee: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(resp.from, from.to_base58());
+        assert_eq!(resp.nonce, 0);
+        assert_eq!(resp.chain_id, 1);
+        assert_eq!(resp.fee, GOV_DEFAULT_FEE);
+        assert!(resp.proposal_id.is_none(), "no build-time proposal id in v1");
+
+        // The response carries no key material; decode the unsigned tx.
+        let bytes = hex::decode(resp.unsigned_tx.strip_prefix("0x").unwrap()).unwrap();
+        let tx: TransactionV2 = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(tx.nonce, 0);
+        assert_eq!(tx.chain_id, 1);
+        match tx.payload {
+            TxPayload::Governance(g) => {
+                assert_eq!(g.operation, sumchain_primitives::governance::GovernanceOperation::CreateProposal);
+                let req: sumchain_primitives::governance::CreateProposalRequest =
+                    bincode::deserialize(&g.data).unwrap();
+                assert_eq!(req.asset, GovAssetKind::Src20Token(TOKEN));
+                assert_eq!(req.class, GovProposalClass::RoutineProcess);
+            }
+            other => panic!("expected Governance payload, got {:?}", other),
+        }
+        // Signing hash present; serialized DTO exposes no private-key field.
+        assert!(resp.signing_hash.starts_with("0x"));
+        assert!(!serde_json::to_string(&resp).unwrap().contains("private"));
+    }
+
+    #[tokio::test]
+    async fn builders_cast_vote_and_execute_encode_ops_and_fee_override() {
+        let (srv, _db, _dir) = server(Some(gov_params()));
+        let from = Address::new([0x11; 20]);
+        let pid = format!("0x{}", hex::encode([1u8; 32]));
+
+        let vote = srv
+            .gov_build_cast_vote(GovBuildCastVoteRequest { from: from.to_base58(), proposal_id: pid.clone(), choice: "Yes".into(), fee: Some(42) })
+            .await
+            .unwrap();
+        assert_eq!(vote.fee, 42, "fee override");
+        let tx: TransactionV2 = bincode::deserialize(&hex::decode(vote.unsigned_tx.strip_prefix("0x").unwrap()).unwrap()).unwrap();
+        assert!(matches!(tx.payload, TxPayload::Governance(g) if g.operation == sumchain_primitives::governance::GovernanceOperation::CastVote));
+
+        let exec = srv
+            .gov_build_execute_proposal(GovBuildExecuteProposalRequest { from: from.to_base58(), proposal_id: pid, fee: None })
+            .await
+            .unwrap();
+        let tx: TransactionV2 = bincode::deserialize(&hex::decode(exec.unsigned_tx.strip_prefix("0x").unwrap()).unwrap()).unwrap();
+        assert!(matches!(tx.payload, TxPayload::Governance(g) if g.operation == sumchain_primitives::governance::GovernanceOperation::ExecuteProposal));
+
+        // Invalid enum inputs are rejected.
+        assert!(srv.gov_build_cast_vote(GovBuildCastVoteRequest { from: from.to_base58(), proposal_id: format!("0x{}", hex::encode([1u8;32])), choice: "Maybe".into(), fee: None }).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn reads_map_proposals_and_active_filter() {
+        let (srv, db, _dir) = server(Some(gov_params()));
+        let store = GovStore::new(&db);
+        store.put_proposal(&proposal(1, GovProposalStatus::Voting)).unwrap();
+        store.put_proposal(&proposal(2, GovProposalStatus::Recorded)).unwrap();
+
+        let one = srv.gov_get_proposal(format!("0x{}", hex::encode([1u8; 32]))).await.unwrap().unwrap();
+        assert_eq!(one.status, "Voting");
+        assert_eq!(one.asset_token_id, format!("0x{}", hex::encode(TOKEN)));
+        assert!(srv.gov_get_proposal(format!("0x{}", hex::encode([9u8; 32]))).await.unwrap().is_none());
+        assert_eq!(srv.gov_list_proposals().await.unwrap().len(), 2);
+        assert_eq!(srv.gov_list_active_proposals().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn tally_with_params_computes_quorum_and_pass() {
+        let (srv, db, _dir) = server(Some(gov_params()));
+        let store = GovStore::new(&db);
+        let pid = [1u8; 32];
+        store.put_proposal(&proposal(1, GovProposalStatus::Voting)).unwrap();
+        // snapshot total 1000; A=600 votes Yes, B=400 no vote.
+        let a = Address::new([0xA1; 20]);
+        let b = Address::new([0xB2; 20]);
+        store.put_snapshot(&pid, &a, 600).unwrap();
+        store.put_snapshot(&pid, &b, 400).unwrap();
+        store.put_vote(&GovVote { proposal_id: pid, voter: a, weight: 600, choice: VoteChoice::Yes, cast_at_height: 6 }).unwrap();
+
+        let t = srv.gov_get_tally(format!("0x{}", hex::encode(pid))).await.unwrap().unwrap();
+        assert_eq!(t.snapshot_total, "1000");
+        assert_eq!(t.yes, "600");
+        assert_eq!(t.participation, "600");
+        assert_eq!(t.quorum_met, Some(true)); // 600/1000 = 60% >= 20%
+        assert_eq!(t.passed, Some(true));     // 600/600 = 100% >= 50%
+        assert_eq!(t.projected_status, "Passed");
+    }
+
+    #[tokio::test]
+    async fn tally_without_params_is_counts_only() {
+        let (srv, db, _dir) = server(None); // governance params absent
+        let store = GovStore::new(&db);
+        let pid = [1u8; 32];
+        store.put_proposal(&proposal(1, GovProposalStatus::Voting)).unwrap();
+        store.put_snapshot(&pid, &Address::new([0xA1; 20]), 100).unwrap();
+
+        let t = srv.gov_get_tally(format!("0x{}", hex::encode(pid))).await.unwrap().unwrap();
+        assert_eq!(t.quorum_met, None);
+        assert_eq!(t.passed, None);
+        assert_eq!(t.projected_status, "CountsOnly");
+    }
+
+    #[tokio::test]
+    async fn vote_and_voting_power_and_assets() {
+        let (srv, db, _dir) = server(Some(gov_params()));
+        let store = GovStore::new(&db);
+        let pid = [1u8; 32];
+        let voter = Address::new([0x11; 20]);
+        store.put_vote(&GovVote { proposal_id: pid, voter, weight: 250, choice: VoteChoice::Yes, cast_at_height: 6 }).unwrap();
+        store.put_snapshot(&pid, &voter, 250).unwrap();
+        store.put_asset(&GovAsset { asset: GovAssetKind::Src20Token(TOKEN), create_threshold: 10, vote_weight_rule: WeightRule::Linear, status: GovAssetStatus::Enabled, effective_height: 0 }).unwrap();
+
+        let v = srv.gov_get_vote(format!("0x{}", hex::encode(pid)), voter.to_base58()).await.unwrap().unwrap();
+        assert_eq!(v.weight, "250");
+        assert_eq!(v.choice, "Yes");
+        let vp = srv.gov_get_voting_power(format!("0x{}", hex::encode(pid)), voter.to_base58()).await.unwrap().unwrap();
+        assert_eq!(vp.weight, "250");
+        // Missing rows → None.
+        assert!(srv.gov_get_vote(format!("0x{}", hex::encode(pid)), Address::new([0x99; 20]).to_base58()).await.unwrap().is_none());
+        assert!(srv.gov_get_voting_power(format!("0x{}", hex::encode(pid)), Address::new([0x99; 20]).to_base58()).await.unwrap().is_none());
+
+        let assets = srv.gov_list_eligible_assets().await.unwrap();
+        assert_eq!(assets.len(), 1);
+        assert_eq!(assets[0].token_id, format!("0x{}", hex::encode(TOKEN)));
+        assert_eq!(assets[0].status, "Enabled");
+    }
+
+    #[tokio::test]
+    async fn dormant_reads_are_empty_and_safe() {
+        let (srv, _db, _dir) = server(None); // no params, empty store
+        assert!(srv.gov_list_proposals().await.unwrap().is_empty());
+        assert!(srv.gov_list_active_proposals().await.unwrap().is_empty());
+        assert!(srv.gov_list_eligible_assets().await.unwrap().is_empty());
+        assert!(srv.gov_get_proposal(format!("0x{}", hex::encode([1u8; 32]))).await.unwrap().is_none());
+        assert!(srv.gov_get_tally(format!("0x{}", hex::encode([1u8; 32]))).await.unwrap().is_none());
     }
 }
