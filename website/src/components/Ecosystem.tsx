@@ -18,78 +18,71 @@ import {
 type Item = {
   title: string;
   description: string;
-  href: string;
   icon: ComponentType<SVGProps<SVGSVGElement>>;
-  live: boolean;
+  /** External/internal link. Omit for a product-surface tile with no link. */
+  href?: string;
+  /** Small chip shown instead of an arrow for no-link product surfaces. */
+  tag?: string;
 };
 
 // Status verified against live mainnet: SNIP V2 storage and OmniNode are active.
-const liveItems: Item[] = [
+// CLI Wallet is repo-grounded (crates/wallet); SUMaillet Web/Mobile are SUMaillet
+// product surfaces (external apps, not shipped from this repository).
+const items: Item[] = [
   {
     title: 'Block Explorer',
     description: 'Track blocks, transactions, and addresses in real time.',
     href: 'https://explorer.sumchain.io',
     icon: MagnifyingGlassIcon,
-    live: true,
-  },
-  {
-    title: 'SUMailet Web',
-    description: 'Browser wallet for sending and receiving Koppa. No download.',
-    href: 'https://mlt.sumail.xyz/',
-    icon: WalletIcon,
-    live: true,
   },
   {
     title: 'CLI Wallet',
-    description: 'Generate keys, sign, and broadcast transactions from the terminal.',
-    href: '/#get-started',
+    description: 'Repo-grounded wallet, built from crates/wallet: encrypted keystore, balance, and signed Koppa transfers.',
+    href: '/wallet',
     icon: CommandLineIcon,
-    live: true,
+  },
+  {
+    title: 'SUMaillet Web',
+    description: 'SUMaillet product surface (external). Hosted browser wallet for Koppa, governance, and the full SRC token family.',
+    href: 'https://mlt.sumail.xyz/',
+    icon: WalletIcon,
+  },
+  {
+    title: 'SUMaillet Mobile',
+    description: 'SUMaillet product surface (external). Native iOS and Android for Koppa, governance, and the full SRC token family.',
+    tag: 'iOS · Android',
+    icon: DevicePhoneMobileIcon,
   },
   {
     title: 'Snip',
     description: 'Decentralized link and content sharing, pinned to native storage with on-chain ACLs.',
     href: 'https://snip.sumchain.io',
     icon: LinkIcon,
-    live: true,
   },
   {
     title: 'OmniNode',
     description: 'Verifiable AI compute. Verifier-signed inference attestations settle on-chain.',
     href: 'https://omninode.suminnovation.xyz',
     icon: CpuChipIcon,
-    live: true,
   },
   {
     title: 'TypeScript SDK',
     description: 'Fully-typed client for balances and transactions. Available on npm as @sumchain/sdk.',
     href: 'https://www.npmjs.com/package/@sumchain/sdk',
     icon: CodeBracketIcon,
-    live: true,
   },
   {
     title: 'Documentation',
     description: 'JSON-RPC reference with endpoints verified against live mainnet.',
     href: '/docs',
     icon: BookOpenIcon,
-    live: true,
-  },
-];
-
-const soonItems: Item[] = [
-  {
-    title: 'Mobile App',
-    description: 'Native iOS and Android apps for managing Koppa on the go.',
-    href: '#',
-    icon: DevicePhoneMobileIcon,
-    live: false,
   },
 ];
 
 function Row({ item, index }: { item: Item; index: number }) {
   const reduce = useReducedMotion();
   const Icon = item.icon;
-  const external = item.href.startsWith('http');
+  const external = item.href?.startsWith('http');
 
   const inner = (
     <>
@@ -102,11 +95,11 @@ function Row({ item, index }: { item: Item; index: number }) {
           <p className="mt-0.5 text-sm text-muted">{item.description}</p>
         </div>
       </div>
-      {item.live ? (
+      {item.href ? (
         <ArrowUpRightIcon className="h-5 w-5 shrink-0 text-muted transition-all duration-200 group-hover:translate-x-0.5 group-hover:-translate-y-0.5 group-hover:text-accent-soft" />
       ) : (
-        <span className="shrink-0 rounded-full border border-[var(--border)] px-2.5 py-1 text-xs text-muted">
-          Coming soon
+        <span className="mono shrink-0 rounded-full border border-[var(--border)] px-2.5 py-1 text-xs text-muted">
+          {item.tag ?? 'app'}
         </span>
       )}
     </>
@@ -115,14 +108,14 @@ function Row({ item, index }: { item: Item; index: number }) {
   const className =
     'group flex items-center justify-between gap-4 rounded-2xl border border-[var(--border)] bg-surface/50 p-5 transition-colors duration-300';
 
-  const wrapped = (
+  return (
     <motion.div
       initial={reduce ? false : { opacity: 0, y: 14 }}
       whileInView={{ opacity: 1, y: 0 }}
       viewport={{ once: true, amount: 0.4 }}
       transition={{ duration: 0.45, delay: (index % 2) * 0.06 }}
     >
-      {item.live ? (
+      {item.href ? (
         <Link
           href={item.href}
           target={external ? '_blank' : undefined}
@@ -132,18 +125,10 @@ function Row({ item, index }: { item: Item; index: number }) {
           {inner}
         </Link>
       ) : (
-        <span
-          title="Not open to public yet"
-          aria-label={`${item.title} (not open to public yet)`}
-          className={`${className} cursor-not-allowed opacity-80`}
-        >
-          {inner}
-        </span>
+        <div className={className}>{inner}</div>
       )}
     </motion.div>
   );
-
-  return wrapped;
 }
 
 export default function Ecosystem() {
@@ -152,23 +137,15 @@ export default function Ecosystem() {
       <div className="mx-auto max-w-6xl px-6 lg:px-8">
         <div className="mb-12 max-w-2xl">
           <h2 className="font-[family-name:var(--font-display)] text-4xl font-bold tracking-tight sm:text-5xl">
-            Tools and apps, ready to use
+            Tools and apps
           </h2>
           <p className="mt-4 text-lg text-muted">
-            A growing suite for users, developers, and validators.
+            A suite for users, developers, and operators — plus the SUMaillet product surfaces.
           </p>
         </div>
 
-        <p className="mb-4 text-sm font-medium text-muted-strong">Live now</p>
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-          {liveItems.map((item, i) => (
-            <Row key={item.title} item={item} index={i} />
-          ))}
-        </div>
-
-        <p className="mb-4 mt-10 text-sm font-medium text-muted-strong">Coming soon</p>
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-          {soonItems.map((item, i) => (
+          {items.map((item, i) => (
             <Row key={item.title} item={item} index={i} />
           ))}
         </div>

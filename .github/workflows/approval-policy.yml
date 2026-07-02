@@ -1,0 +1,76 @@
+name: approval-policy
+
+# Enforces the conditional approval policy from CONTRIBUTING.md:
+#   - PR authored by sunhaoxiangwang  -> requires >= 1 qualifying approval
+#   - PR authored by anyone else      -> requires >= 2 qualifying approvals
+# A "qualifying" approver has repo permission "admin" or "maintain" (admins and
+# maintainers). Only the latest APPROVED review per reviewer counts; the
+# author's own review never counts. The job fails (blocking the required status
+# check) when the bar is not met.
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+  pull_request_review:
+    types: [submitted, dismissed, edited]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+# Only the newest run per PR matters, so cancel superseded runs. This keeps a
+# single authoritative "approval-policy" check even with multiple triggers.
+concurrency:
+  group: approval-policy-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  approval-policy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enforce conditional admin-approval policy
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+          PR: ${{ github.event.pull_request.number }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          set -euo pipefail
+          echo "PR #${PR} authored by ${AUTHOR}"
+
+          # Latest review state per reviewer; keep only APPROVED; drop the author.
+          approvers=$(gh api --paginate "repos/${OWNER}/${REPO}/pulls/${PR}/reviews" \
+            | jq -r '
+                group_by(.user.login)
+                | map(max_by(.submitted_at))
+                | map(select(.state == "APPROVED"))
+                | .[].user.login' \
+            | sort -u | grep -vx "${AUTHOR}" || true)
+          echo "Current approvers (author excluded): ${approvers:-none}"
+
+          # Count approvers with repo permission "admin" or "maintain".
+          qualified=0
+          for u in ${approvers}; do
+            perm=$(gh api "repos/${OWNER}/${REPO}/collaborators/${u}/permission" \
+              --jq '.permission' 2>/dev/null || echo "unknown")
+            echo "  reviewer ${u}: permission=${perm}"
+            case "${perm}" in
+              admin|maintain) qualified=$((qualified + 1)) ;;
+            esac
+          done
+
+          if [ "${AUTHOR}" = "sunhaoxiangwang" ]; then
+            need=1
+          else
+            need=2
+          fi
+          echo "Qualifying (admin/maintainer) approvals: ${qualified} / required: ${need}"
+
+          if [ "${qualified}" -lt "${need}" ]; then
+            echo "::error::Approval policy not satisfied — ${qualified}/${need} admin/maintainer approvals for a PR by ${AUTHOR}."
+            exit 1
+          fi
+          echo "Approval policy satisfied."
