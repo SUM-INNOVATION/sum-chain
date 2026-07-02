@@ -50,6 +50,12 @@ const content: Record<string, TabContent> = {
     title: 'Build on SUM Chain',
     steps: [
       {
+        title: 'Install the TypeScript SDK',
+        body: 'The typed client is published on npm. It exposes a Provider plus Koppa helpers (koppaToBaseUnits, formatKoppa) and works with native Node ESM.',
+        code: `npm install @sumchain/sdk`,
+        link: { label: 'View on npm', href: 'https://www.npmjs.com/package/@sumchain/sdk' },
+      },
+      {
         title: 'Connect to mainnet',
         body: 'Every endpoint is JSON-RPC 2.0 over HTTPS. Check liveness with a health call.',
         code: `curl -X POST ${RPC} \\
@@ -66,7 +72,7 @@ const content: Record<string, TabContent> = {
       },
       {
         title: 'Submit a signed transaction',
-        body: 'Sign locally, then broadcast the hex-encoded transaction. A typed TypeScript SDK is coming soon.',
+        body: 'Sign locally, then broadcast the hex-encoded transaction — directly or via the @sumchain/sdk Provider.',
         code: `curl -X POST ${RPC} \\
   -H "Content-Type: application/json" \\
   -d '{"jsonrpc":"2.0","method":"send_raw_transaction",

@@ -1,109 +1,112 @@
 'use client';
 
-import { motion, useReducedMotion } from 'framer-motion';
 import Link from 'next/link';
-import { ArrowRightIcon } from '@heroicons/react/24/outline';
+import { motion, useReducedMotion } from 'framer-motion';
+import { useRef, type PointerEvent } from 'react';
 
-const stats = [
-  { label: 'Block Time', value: '3s' },
-  { label: 'Typical Fee', value: '~0.001 Ϙ' },
-  { label: 'Total Supply', value: '800B Ϙ' },
-  { label: 'Finality', value: '~18s' },
-];
+const rise = (delay: number, reduce: boolean | null) =>
+  reduce
+    ? { initial: false as const }
+    : {
+        initial: { opacity: 0, y: 18 },
+        animate: { opacity: 1, y: 0 },
+        transition: { duration: 0.8, ease: [0.16, 1, 0.3, 1] as const, delay },
+      };
 
 export default function Hero() {
   const reduce = useReducedMotion();
-  const rise = (delay: number) =>
-    reduce
-      ? { initial: false as const }
-      : {
-          initial: { opacity: 0, y: 18 },
-          animate: { opacity: 1, y: 0 },
-          transition: { duration: 0.6, delay, ease: [0.16, 1, 0.3, 1] as const },
-        };
+  const ref = useRef<HTMLElement>(null);
+
+  const onMove = (e: PointerEvent<HTMLElement>) => {
+    if (reduce || e.pointerType !== 'mouse') return;
+    const el = ref.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    el.style.setProperty('--mx', `${((e.clientX - r.left) / r.width) * 100}%`);
+    el.style.setProperty('--my', `${((e.clientY - r.top) / r.height) * 100}%`);
+    el.dataset.active = 'true';
+  };
+  const onLeave = () => {
+    if (ref.current) ref.current.dataset.active = 'false';
+  };
 
   return (
-    <>
-      <section className="relative flex min-h-[100dvh] items-center overflow-hidden">
-        {/* Intentional, restrained backdrop: structural grid + one soft brand glow.
-            No mouse-follow, no floating-orb soup. */}
-        <div className="absolute inset-0 grid-pattern opacity-70" aria-hidden="true" />
-        <div
-          className="absolute left-1/2 top-[-10%] h-[520px] w-[820px] -translate-x-1/2 rounded-full opacity-50 blur-[120px]"
-          style={{ background: 'radial-gradient(circle, rgba(168,85,247,0.22), transparent 70%)' }}
-          aria-hidden="true"
-        />
+    <section
+      ref={ref}
+      onPointerMove={onMove}
+      onPointerLeave={onLeave}
+      className="spotlight relative overflow-hidden pt-40 pb-24 sm:pt-48 sm:pb-32"
+    >
+      <div className="grid-pattern absolute inset-0" aria-hidden="true" />
+      <div
+        className="absolute inset-x-0 top-0 h-[520px]"
+        aria-hidden="true"
+        style={{
+          background:
+            'radial-gradient(60% 50% at 50% 0%, rgba(168,85,247,0.14), transparent 70%), radial-gradient(42% 42% at 82% 8%, rgba(34,211,238,0.08), transparent 70%)',
+        }}
+      />
 
-        <div className="relative z-10 mx-auto w-full max-w-6xl px-6 pt-24 lg:px-8">
-          <div className="max-w-3xl">
-            <motion.div
-              {...rise(0.05)}
-              className="glass mb-8 inline-flex items-center gap-2 rounded-full px-4 py-1.5 text-sm text-muted-strong"
-            >
-              <span className="relative flex h-2 w-2">
-                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-green-400 opacity-60" />
-                <span className="relative inline-flex h-2 w-2 rounded-full bg-green-400" />
-              </span>
-              Mainnet Live
-            </motion.div>
+      <div className="relative mx-auto max-w-6xl px-6 lg:px-8">
+        <motion.div {...rise(0, reduce)}>
+          <span className="kicker">Rust Layer-1 · Koppa (Ϙ)</span>
+        </motion.div>
 
-            <motion.h1
-              {...rise(0.12)}
-              className="font-[family-name:var(--font-display)] text-5xl font-bold leading-[1.02] tracking-tight sm:text-6xl lg:text-7xl"
-            >
-              A Utility-Backed
-              <span className="block gradient-text">Layer-1</span>
-            </motion.h1>
+        <motion.h1
+          {...rise(0.08, reduce)}
+          className="mt-5 max-w-4xl font-[family-name:var(--font-display)] text-4xl font-semibold leading-[1.08] tracking-tight sm:text-6xl"
+        >
+          Open infrastructure for{' '}
+          <span className="gradient-text">decentralized storage, verifiable AI compute,</span> and
+          on-chain governance.
+        </motion.h1>
 
-            <motion.p {...rise(0.2)} className="mt-6 max-w-xl text-lg text-muted">
-              The Rust-built Layer-1 where Koppa (Ϙ) is backed by real on-chain
-              utility, not just payments.
-            </motion.p>
+        <motion.p {...rise(0.16, reduce)} className="mt-6 max-w-2xl text-lg leading-relaxed text-muted">
+          SUM Chain is a Rust-built Layer-1 where Koppa is backed by real on-chain work — not just
+          payments. Files are held under Proof-of-Retrievability, AI inference settles through
+          verifier-signed attestations, and governance is code-backed and validator-respecting.
+        </motion.p>
 
-            <motion.div {...rise(0.28)} className="mt-10 flex flex-col gap-4 sm:flex-row">
-              <Link
-                href="/#get-started"
-                className="group inline-flex items-center justify-center gap-2 rounded-full bg-foreground px-7 py-3.5 text-base font-medium text-background transition-transform duration-200 hover:-translate-y-0.5 active:translate-y-0"
-              >
-                Start Building
-                <ArrowRightIcon className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5" />
-              </Link>
-              <Link
-                href="https://explorer.sumchain.io"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center justify-center gap-2 rounded-full border border-[var(--border-strong)] px-7 py-3.5 text-base font-medium text-muted-strong transition-colors duration-200 hover:border-accent/50 hover:text-foreground"
-              >
-                View Explorer
-              </Link>
-            </motion.div>
-          </div>
-        </div>
-      </section>
+        <motion.div {...rise(0.24, reduce)} className="mt-9 flex flex-wrap items-center gap-4">
+          <Link
+            href="/storage"
+            className="rounded-full bg-foreground px-6 py-3 text-sm font-semibold text-background transition-transform duration-200 hover:scale-[1.02]"
+          >
+            Explore the protocol
+          </Link>
+          <Link
+            href="/docs"
+            className="rounded-full border border-[var(--border-strong)] px-6 py-3 text-sm font-medium text-foreground transition-colors duration-200 hover:border-accent/60 hover:bg-accent/10"
+          >
+            Read the docs
+          </Link>
+          <Link
+            href="https://explorer.sumchain.io"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-sm text-muted transition-colors hover:text-foreground"
+          >
+            View explorer ↗
+          </Link>
+        </motion.div>
 
-      {/* Stats band, directly below the hero (kept out of the hero stack per
-          hero-discipline rules). All figures verified against live mainnet. */}
-      <section className="relative border-y border-[var(--border)] bg-surface/40">
-        <div className="mx-auto grid max-w-6xl grid-cols-2 gap-px px-6 lg:grid-cols-4 lg:px-8">
-          {stats.map((stat, i) => (
-            <motion.div
-              key={stat.label}
-              initial={reduce ? false : { opacity: 0, y: 12 }}
-              whileInView={{ opacity: 1, y: 0 }}
-              viewport={{ once: true, amount: 0.5 }}
-              transition={{ duration: 0.45, delay: i * 0.06 }}
-              className="py-8 text-center lg:py-10"
-            >
-              <div className="tnum font-[family-name:var(--font-display)] text-3xl font-bold sm:text-4xl">
-                {stat.value}
-              </div>
-              <div className="mt-2 text-xs uppercase tracking-[0.15em] text-muted">
-                {stat.label}
-              </div>
-            </motion.div>
+        <motion.dl
+          {...rise(0.32, reduce)}
+          className="mt-16 grid max-w-3xl grid-cols-2 gap-x-8 gap-y-6 border-t border-[var(--border)] pt-8 sm:grid-cols-4"
+        >
+          {[
+            { v: '3s', l: 'Block time' },
+            { v: '~18s', l: 'Finality · depth 6' },
+            { v: '800B Ϙ', l: 'Fixed supply' },
+            { v: '100% Rust', l: 'Zero C/C++ deps' },
+          ].map((s) => (
+            <div key={s.l}>
+              <dt className="tnum font-[family-name:var(--font-display)] text-2xl font-semibold">{s.v}</dt>
+              <dd className="mt-1 text-sm text-muted">{s.l}</dd>
+            </div>
           ))}
-        </div>
-      </section>
-    </>
+        </motion.dl>
+      </div>
+    </section>
   );
 }

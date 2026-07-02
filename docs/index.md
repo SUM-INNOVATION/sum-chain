@@ -31,13 +31,15 @@ Every canonical doc and Status block uses this schema:
 
 Read-only publication sanity check against the public endpoint
 `https://rpc.sumchain.io` (`chain_getChainParams`), `chain_id: 1`, verified
-2026-06-27. These are activation-gate values (stable), not the live chain head:
+2026-06-27; re-verified 2026-07-02 at height 8,183,329. These are
+activation-gate values (stable), not the live chain head:
 
 | Subprotocol gate | Mainnet value | Meaning |
 |---|---|---|
 | `v2_enabled_from_height` | `5200000` | V2 storage **active** |
 | `omninode_enabled_from_height` | `6000000` | OmniNode inference attestation **active** |
 | `education_enabled_from_height` | `null` | Education writes **dormant** (reads still work) |
+| `governance_enabled_from_height` | not set | Governance v1 **dormant** (code-backed; also needs `ChainParams.governance`) |
 
 Token / NFT / messaging / docclass / employment families have **no activation
 gate** — they are always available when the node binary is running.

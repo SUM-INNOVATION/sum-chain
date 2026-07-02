@@ -9,21 +9,23 @@ type FooterLink = {
 };
 
 const footerLinks: Record<string, FooterLink[]> = {
+  Protocol: [
+    { name: 'Storage', href: '/storage' },
+    { name: 'Compute', href: '/compute' },
+    { name: 'Governance', href: '/governance' },
+    { name: 'Tokenomics', href: '/tokenomics' },
+  ],
   Product: [
     { name: 'Explorer', href: 'https://explorer.sumchain.io' },
     { name: 'SUMailet', href: 'https://mlt.sumail.xyz/' },
     { name: 'Snip', href: 'https://snip.sumchain.io' },
-    { name: 'SDK', href: '#', comingSoon: true },
+    { name: 'OmniNode', href: 'https://omninode.suminnovation.xyz' },
   ],
-  Resources: [
+  Developers: [
     { name: 'Documentation', href: '/docs' },
     { name: 'API Reference', href: '/docs' },
+    { name: 'TypeScript SDK', href: 'https://www.npmjs.com/package/@sumchain/sdk' },
     { name: 'GitHub', href: '#', comingSoon: true },
-  ],
-  Community: [
-    { name: 'X', href: 'https://x.com/SUM_INNOVATION' },
-    { name: 'LinkedIn', href: 'https://www.linkedin.com/company/suminnovation/?viewAsMember=true' },
-    { name: 'Discord', href: '#', comingSoon: true },
   ],
   Network: [
     { name: 'Validators', href: 'https://explorer.sumchain.io/validators' },

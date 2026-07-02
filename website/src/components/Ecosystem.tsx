@@ -55,9 +55,16 @@ const liveItems: Item[] = [
   },
   {
     title: 'OmniNode',
-    description: 'Verifiable AI compute. Inference attestations settle on-chain via the PoR engine.',
+    description: 'Verifiable AI compute. Verifier-signed inference attestations settle on-chain.',
     href: 'https://omninode.suminnovation.xyz',
     icon: CpuChipIcon,
+    live: true,
+  },
+  {
+    title: 'TypeScript SDK',
+    description: 'Fully-typed client for balances and transactions. Available on npm as @sumchain/sdk.',
+    href: 'https://www.npmjs.com/package/@sumchain/sdk',
+    icon: CodeBracketIcon,
     live: true,
   },
   {
@@ -70,13 +77,6 @@ const liveItems: Item[] = [
 ];
 
 const soonItems: Item[] = [
-  {
-    title: 'TypeScript SDK',
-    description: 'Fully-typed SDK for querying balances and sending transactions.',
-    href: '#',
-    icon: CodeBracketIcon,
-    live: false,
-  },
   {
     title: 'Mobile App',
     description: 'Native iOS and Android apps for managing Koppa on the go.',
