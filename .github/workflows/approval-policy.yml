@@ -1,0 +1,88 @@
+name: Approval policy
+
+# Enforces the conditional approval policy from CONTRIBUTING.md:
+#   - PR authored by sunhaoxiangwang -> requires >= 1 admin/maintainer approval
+#   - PR authored by anyone else     -> requires >= 2 admin/maintainer approvals
+# A qualifying approver has repo permission "admin" or "maintain". Only the
+# latest APPROVED review per reviewer counts; the author is excluded.
+#
+# The verdict is published as a COMMIT STATUS with context "approval-policy"
+# (the required status check). Commit statuses are last-write-wins per context,
+# so a later "success" cleanly supersedes an earlier "failure" — there is no
+# stale failed check run to re-run, and merges unblock as soon as the policy is
+# met. The job itself always exits 0; the gate is the posted status.
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+  pull_request_review:
+    types: [submitted, dismissed, edited]
+
+permissions:
+  contents: read
+  pull-requests: read
+  statuses: write
+
+concurrency:
+  group: approval-policy-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  enforce:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Evaluate policy and publish the approval-policy status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+          PR: ${{ github.event.pull_request.number }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          echo "PR #${PR} by ${AUTHOR} @ ${SHA}"
+
+          # Latest review state per reviewer; keep only APPROVED; drop the author.
+          approvers=$(gh api --paginate "repos/${OWNER}/${REPO}/pulls/${PR}/reviews" \
+            | jq -r '
+                group_by(.user.login)
+                | map(max_by(.submitted_at))
+                | map(select(.state == "APPROVED"))
+                | .[].user.login' \
+            | sort -u | grep -vx "${AUTHOR}" || true)
+          echo "Approvers (author excluded): ${approvers:-none}"
+
+          qualified=0
+          for u in ${approvers}; do
+            perm=$(gh api "repos/${OWNER}/${REPO}/collaborators/${u}/permission" \
+              --jq '.permission' 2>/dev/null || echo "unknown")
+            echo "  reviewer ${u}: permission=${perm}"
+            case "${perm}" in
+              admin|maintain) qualified=$((qualified + 1)) ;;
+            esac
+          done
+
+          if [ "${AUTHOR}" = "sunhaoxiangwang" ]; then need=1; else need=2; fi
+          desc="${qualified}/${need} admin-or-maintainer approvals"
+          echo "${desc}"
+
+          if [ "${qualified}" -ge "${need}" ]; then
+            state="success"
+          else
+            state="failure"
+          fi
+
+          # Publish the required check as a commit status (last-write-wins).
+          # On fork PRs the pull_request event token is read-only and cannot
+          # write statuses; the pull_request_target run (base-repo token) does.
+          if gh api -X POST "repos/${OWNER}/${REPO}/statuses/${SHA}" \
+               -f state="${state}" \
+               -f context="approval-policy" \
+               -f description="${desc}" >/dev/null 2>&1; then
+            echo "Published approval-policy=${state} (${desc})"
+          else
+            echo "Could not publish status from this event (read-only token?); pull_request_target will."
+          fi

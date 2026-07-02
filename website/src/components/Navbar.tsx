@@ -17,6 +17,8 @@ const navLinks: NavLink[] = [
   { name: 'Compute', href: '/compute' },
   { name: 'Governance', href: '/governance' },
   { name: 'Tokenomics', href: '/tokenomics' },
+  { name: 'Run a node', href: '/run-node' },
+  { name: 'Wallet', href: '/wallet' },
   { name: 'Docs', href: '/docs' },
 ];
 
@@ -58,7 +60,7 @@ export default function Navbar() {
               </span>
             </Link>
 
-            <div className="hidden items-center gap-6 md:flex">
+            <div className="hidden items-center gap-6 lg:flex">
               {navLinks.map((link) => (
                 <Link
                   key={link.name}
@@ -78,7 +80,7 @@ export default function Navbar() {
               ))}
             </div>
 
-            <div className="hidden items-center gap-5 md:flex">
+            <div className="hidden items-center gap-5 lg:flex">
               <Link
                 href="https://explorer.sumchain.io"
                 target="_blank"
@@ -88,10 +90,10 @@ export default function Navbar() {
                 Explorer
               </Link>
               <Link
-                href="/#get-started"
+                href="/download"
                 className="rounded-full border border-[var(--border-strong)] px-5 py-2 text-sm font-medium text-foreground transition-colors duration-200 hover:border-accent/60 hover:bg-accent/10"
               >
-                Start Building
+                Download
               </Link>
             </div>
 
@@ -99,7 +101,7 @@ export default function Navbar() {
               onClick={() => setIsMobileMenuOpen((v) => !v)}
               aria-label={isMobileMenuOpen ? 'Close menu' : 'Open menu'}
               aria-expanded={isMobileMenuOpen}
-              className="p-2 text-muted transition-colors hover:text-foreground md:hidden"
+              className="p-2 text-muted transition-colors hover:text-foreground lg:hidden"
             >
               {isMobileMenuOpen ? (
                 <XMarkIcon className="h-6 w-6" />
@@ -118,7 +120,7 @@ export default function Navbar() {
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -16 }}
             transition={{ duration: 0.2 }}
-            className="fixed inset-0 z-40 bg-background/95 pt-[68px] backdrop-blur-xl md:hidden"
+            className="fixed inset-0 z-40 bg-background/95 pt-[68px] backdrop-blur-xl lg:hidden"
           >
             <div className="flex flex-col items-center gap-8 pt-12">
               {navLinks.map((link) => (
@@ -141,11 +143,11 @@ export default function Navbar() {
                 Explorer
               </Link>
               <Link
-                href="/#get-started"
+                href="/download"
                 onClick={() => setIsMobileMenuOpen(false)}
                 className="mt-4 rounded-full border border-[var(--border-strong)] px-8 py-3 text-lg font-medium text-foreground"
               >
-                Start Building
+                Download
               </Link>
             </div>
           </motion.div>

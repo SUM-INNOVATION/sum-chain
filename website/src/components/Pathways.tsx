@@ -13,7 +13,7 @@ import { Reveal } from '@/components/ui/primitives';
 const PATHS = [
   { icon: AcademicCapIcon, title: 'Learn', desc: 'How storage, compute, and governance fit together.', href: '/storage' },
   { icon: CommandLineIcon, title: 'Build', desc: 'JSON-RPC, token families, and signed transactions.', href: '/docs' },
-  { icon: ServerStackIcon, title: 'Run a node', desc: 'Validators and storage/archive operators.', href: '/docs#node' },
+  { icon: ServerStackIcon, title: 'Run a node', desc: 'Build and run a full node from source.', href: '/run-node' },
   { icon: ScaleIcon, title: 'Governance', desc: 'Code-backed on-chain governance v1 (dormant).', href: '/governance' },
   { icon: BookOpenIcon, title: 'Docs', desc: 'Full JSON-RPC reference, verified on mainnet.', href: '/docs' },
 ];

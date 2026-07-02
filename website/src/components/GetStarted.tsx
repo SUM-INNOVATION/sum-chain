@@ -3,7 +3,7 @@
 import { motion, useReducedMotion } from 'framer-motion';
 import Link from 'next/link';
 import { useState } from 'react';
-import { ArrowUpRightIcon, LockClosedIcon } from '@heroicons/react/24/outline';
+import { ArrowUpRightIcon } from '@heroicons/react/24/outline';
 
 const RPC = 'https://rpc.sumchain.io';
 
@@ -17,7 +17,6 @@ type Step = {
 type TabContent = {
   title: string;
   steps?: Step[];
-  gated?: { note: string };
 };
 
 const tabs = [
@@ -31,13 +30,14 @@ const content: Record<string, TabContent> = {
     title: 'Start using Koppa',
     steps: [
       {
-        title: 'Open SUMailet Web',
+        title: 'Open SUMaillet Web',
         body: 'Create a non-custodial wallet in your browser. No download, no extension.',
-        link: { label: 'Launch SUMailet', href: 'https://mlt.sumail.xyz/' },
+        link: { label: 'Launch SUMaillet', href: 'https://mlt.sumail.xyz/' },
       },
       {
         title: 'Receive and send',
-        body: 'Share your address to receive Ϙ. Transfers reach finality in about 18 seconds for a typical fee near 0.001 Ϙ.',
+        body: 'Share your address to receive Ϙ. Prefer the terminal? The CLI wallet signs and sends from an encrypted keystore.',
+        link: { label: 'CLI wallet guide', href: '/wallet' },
       },
       {
         title: 'Track everything',
@@ -81,10 +81,21 @@ const content: Record<string, TabContent> = {
     ],
   },
   validator: {
-    title: 'Run a validator node',
-    gated: {
-      note: 'The validator node software is not open to the public yet. Stake-weighted, epoch-based validator selection runs under Proof of Authority on mainnet today. Public node releases and a staking guide are on the way.',
-    },
+    title: 'Run a node',
+    steps: [
+      {
+        title: 'Build and run a full node',
+        body: 'The node is open source. Build it and run against a config and genesis file to sync and serve the network.',
+        code: `cargo build -p sumchain-node --release
+target/release/sumchain run \\
+  --config config.toml --genesis genesis.json`,
+        link: { label: 'Run a node guide', href: '/run-node' },
+      },
+      {
+        title: 'Full node vs. block producer',
+        body: 'Running a full node does not produce blocks. Block production runs under Proof-of-Authority; joining the active validator set is coordinated, not automatic.',
+      },
+    ],
   },
 };
 
@@ -168,15 +179,6 @@ export default function GetStarted() {
                   </div>
                 </div>
               ))}
-            </div>
-          )}
-
-          {active.gated && (
-            <div className="glass flex items-start gap-4 rounded-2xl p-6">
-              <span className="inline-flex shrink-0 rounded-xl border border-[var(--border)] bg-surface-2 p-2.5 text-muted">
-                <LockClosedIcon className="h-5 w-5" strokeWidth={1.5} />
-              </span>
-              <p className="text-muted">{active.gated.note}</p>
             </div>
           )}
         </motion.div>

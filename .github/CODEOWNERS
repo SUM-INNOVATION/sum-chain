@@ -1,0 +1,6 @@
+# Code owners for SUM Chain.
+#
+# GitHub requires an approving review from a code owner on every pull request
+# to a protected branch (see CONTRIBUTING.md → Review policy). One entry, the
+# repo owner/admin, owns the whole tree.
+* @sunhaoxiangwang
