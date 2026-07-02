@@ -190,6 +190,16 @@ const categories: Category[] = [
     ],
   },
   {
+    id: 'omninode',
+    title: 'OmniNode (InferenceAttestation)',
+    blurb: 'Verifiable AI compute — read verifier-signed inference attestations settled on-chain. Active on mainnet (omninode_enabled_from_height = 6,000,000).',
+    methods: [
+      { name: 'sum_getInferenceAttestation', description: 'Attestation for a (session_id, verifier_address) pair, or null.' },
+      { name: 'sum_listInferenceAttestations', description: 'All attestations recorded for a session_id.' },
+      { name: 'sum_getInferenceAttestationStatus', description: 'Status of an attestation tx: submitted, included, finalized, or failed.' },
+    ],
+  },
+  {
     id: 'validators',
     title: 'Validators &amp; Consensus',
     blurb: 'Active set, staking, delegation, slashing, and epoch info.',
@@ -411,6 +421,24 @@ const categories: Category[] = [
     ],
   },
   {
+    id: 'governance',
+    title: 'Governance (v1)',
+    blurb: 'On-chain token-holder governance — dormant on mainnet. These methods are registered and respond; reads return empty/null and builders return unsigned tx material until a network configures governance_enabled_from_height and ChainParams.governance.',
+    methods: [
+      { name: 'gov_buildCreateProposal', description: 'Build an unsigned create-proposal transaction to sign and broadcast.' },
+      { name: 'gov_buildCastVote', description: 'Build an unsigned cast-vote transaction.' },
+      { name: 'gov_buildExecuteProposal', description: 'Build an unsigned execute-proposal transaction.' },
+      { name: 'gov_buildCancelProposal', description: 'Build an unsigned cancel-proposal transaction (proposer or council).' },
+      { name: 'gov_getProposal', description: 'Proposal by id.' },
+      { name: 'gov_listProposals', description: 'All proposals.' },
+      { name: 'gov_listActiveProposals', description: 'Proposals currently in the voting state.' },
+      { name: 'gov_getTally', description: 'Tally from a proposal’s frozen snapshot and cast votes.' },
+      { name: 'gov_getVote', description: 'A voter’s vote on a proposal.' },
+      { name: 'gov_getVotingPower', description: 'A holder’s frozen snapshot voting power for a proposal.' },
+      { name: 'gov_listEligibleAssets', description: 'Registered governance assets with status and effective height.' },
+    ],
+  },
+  {
     id: 'node',
     title: 'Node &amp; Network',
     blurb: 'Operator-facing endpoints for monitoring.',
@@ -445,7 +473,7 @@ const categories: Category[] = [
     "version": "0.1.0",
     "chain_id": 1,
     "network": "sumchain-1",
-    "peer_id": "12D3KooWJdKDCZn9Wu5mo1WBMLRwEeej9abjTLDvgZRzLwZv6kdW",
+    "peer_id": "12D3KooW…",
     "is_validator": true,
     "current_height": 4807038,
     "peer_count": 2,
@@ -511,7 +539,9 @@ export default function DocsPage() {
               <span className="text-white">Koppa (Ϙ)</span> with 9 decimal places.
             </p>
             <p className="text-sm text-gray-500 mt-4">
-              All {totalMethods} methods on this page are verified against the live mainnet RPC.
+              All {totalMethods} methods are exposed by the live mainnet RPC at {ENDPOINT}. Example
+              responses are real captures. Governance is dormant on mainnet, so its reads return
+              empty/null until a network activates it.
             </p>
           </div>
 
@@ -658,7 +688,7 @@ export default function DocsPage() {
           {/* Footer note */}
           <div className="glass rounded-2xl p-8 text-center">
             <p className="text-gray-400 mb-4">
-              All {totalMethods} endpoints listed above are verified against{' '}
+              All {totalMethods} endpoints listed above are exposed by{' '}
               <a
                 href={ENDPOINT}
                 className="text-purple-400 hover:text-purple-300"
@@ -668,10 +698,10 @@ export default function DocsPage() {
               .
             </p>
             <Link
-              href="/#get-started"
+              href="/"
               className="text-purple-400 hover:text-purple-300 text-sm"
             >
-              ← Back to Get Started
+              ← Back to home
             </Link>
           </div>
         </div>

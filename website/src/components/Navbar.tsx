@@ -13,9 +13,10 @@ type NavLink = {
 };
 
 const navLinks: NavLink[] = [
-  { name: 'Features', href: '/#features' },
-  { name: 'Technology', href: '/#technology' },
-  { name: 'Ecosystem', href: '/#ecosystem' },
+  { name: 'Storage', href: '/storage' },
+  { name: 'Compute', href: '/compute' },
+  { name: 'Governance', href: '/governance' },
+  { name: 'Tokenomics', href: '/tokenomics' },
   { name: 'Docs', href: '/docs' },
 ];
 
@@ -57,7 +58,7 @@ export default function Navbar() {
               </span>
             </Link>
 
-            <div className="hidden items-center gap-8 md:flex">
+            <div className="hidden items-center gap-6 md:flex">
               {navLinks.map((link) => (
                 <Link
                   key={link.name}

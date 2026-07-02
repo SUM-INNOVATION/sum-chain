@@ -110,12 +110,12 @@ At full adoption (8 billion people):
 
 ### Transaction Fees
 
-**Minimum fee**: 0.001 Ϙ per transaction
+**Minimum fee**: `min_fee` is a chain parameter. On live mainnet it is **1,000 base units = 0.000001 Ϙ** (verified 2026-07-02 at height 8,183,329 via `chain_getChainParams`). `0.001 Ϙ` is a typical, comfortable fee used in the worked examples below, not the protocol minimum.
 
-At scale pricing examples:
-- **If 1 Ϙ = $1**: Fee is $0.001 (0.1¢) - cheaper than any payment processor
-- **If 1 Ϙ = $10**: Fee is $0.01 (1¢) - still very competitive
-- **If 1 Ϙ = $0.10**: Fee is $0.0001 (0.01¢) - essentially free
+The illustrative fiat figures below are hypothetical (no exchange rate is implied or endorsed):
+- **If 1 Ϙ = $1**: a 0.001 Ϙ fee is $0.001 (0.1¢).
+- **If 1 Ϙ = $10**: a 0.001 Ϙ fee is $0.01 (1¢).
+- **If 1 Ϙ = $0.10**: a 0.001 Ϙ fee is $0.0001 (0.01¢).
 
 ### Fee Distribution
 

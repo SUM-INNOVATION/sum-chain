@@ -4,14 +4,15 @@ Chain-side readiness package for any future devnet/mainnet decision to enable th
 
 For the frozen v1 protocol contract (wire format, dispatch behavior, RPC surface, status semantics), see [`INFERENCE-ATTESTATION.md`](INFERENCE-ATTESTATION.md). This doc is operational; that one is the contract.
 
-## Current status (2026-05-14)
+## Current status (updated 2026-07-02)
 
+- **Mainnet: active.** Live mainnet parameters verified at height 8,183,329 on 2026-07-02 (`chain_getChainParams`, `chain_id: 1`) report `omninode_enabled_from_height = 6,000,000`, with the current head well past that height — so InferenceAttestation is enabled and settling on mainnet. The activation procedure in this document describes how such an activation is coordinated; it remains the reference for any further environment.
 - InferenceAttestation v1 merged to `main` (PR [#1](https://github.com/SUM-INNOVATION/sum-chain/pull/1), merge commit `5a8548b6`).
 - `chain_getChainParams.omninode_enabled_from_height` merged to `main` (PR [#2](https://github.com/SUM-INNOVATION/sum-chain/pull/2), merge commit `d83e45a4`).
 - Local mirror branch `snip-local-mirror-omninode` is activated from genesis with `omninode_enabled_from_height: 0`.
 - OmniNode Stage 7b live validation passed on the activated local mirror.
 - OmniNode Stage 5.2 staleness/retry work is client-local and requires no SUM Chain change.
-- Production / mainnet default: `omninode_enabled_from_height: None` (dormant). No environment has an activation height set.
+- Fresh-chain genesis default remains `omninode_enabled_from_height: None` (dormant) until a network sets the gate.
 
 ## Explicit non-goals
 

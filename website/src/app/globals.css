@@ -2,25 +2,35 @@
 
 /*
   SUM Chain design tokens.
-  One theme (dark), one accent (purple brand), one neutral family (zinc/off-black).
-  Purple is SUM's real brand color, so we keep it and execute it with intent
-  rather than reaching for generic AI-gradient glow.
+  One dark theme. Purple (--accent) is SUM's brand mark, used sparingly.
+  A single cool "signal" accent (--signal) carries the AI/system-map energy.
+  Semantic status colors encode protocol reality: active / dormant / roadmap.
+  Restraint over glow: no generic Web3 gradient soup.
 */
 :root {
-  --background: #0a0a0a;
-  --surface: #111113;
-  --surface-2: #17171a;
+  --background: #08080a;
+  --surface: #101013;
+  --surface-2: #17171b;
   --border: rgba(255, 255, 255, 0.08);
   --border-strong: rgba(255, 255, 255, 0.14);
   --foreground: #fafafa;
-  --muted: #a1a1aa; /* zinc-400 */
-  --muted-strong: #d4d4d8; /* zinc-300 */
+  --muted: #9b9ba4; /* secondary text */
+  --muted-strong: #d4d4d8; /* elevated secondary */
 
-  /* Brand purple */
+  /* Brand purple (governance + brand mark) */
   --brand-deep: #26022e;
   --brand-deep-2: #3d0847;
   --accent: #a855f7; /* purple-500 */
   --accent-soft: #c084fc; /* purple-400 */
+
+  /* Signal cyan (compute / AI / system-map lines) — used sparingly */
+  --signal: #22d3ee; /* cyan-400 */
+  --signal-soft: #67e8f9; /* cyan-300 */
+
+  /* Protocol status semantics */
+  --status-active: #34d399; /* emerald — live on mainnet */
+  --status-dormant: #fbbf24; /* amber — code-backed, not active */
+  --status-roadmap: #60a5fa; /* blue — planned */
 }
 
 @theme inline {
@@ -34,11 +44,15 @@
   --color-brand-deep-2: var(--brand-deep-2);
   --color-accent: var(--accent);
   --color-accent-soft: var(--accent-soft);
+  --color-signal: var(--signal);
+  --color-signal-soft: var(--signal-soft);
+  --color-status-active: var(--status-active);
+  --color-status-dormant: var(--status-dormant);
+  --color-status-roadmap: var(--status-roadmap);
 
-  /* Wire the fonts actually loaded in layout.tsx (this mapping was previously
-     pointing at undefined --font-geist-* vars, so the body silently fell back
-     to system-ui). */
-  --font-sans: var(--font-inter);
+  /* Fonts loaded in layout.tsx. Body = Sora (geometric, non-default),
+     display = Space Grotesk, mono = JetBrains Mono for protocol labels. */
+  --font-sans: var(--font-sora);
   --font-display: var(--font-space-grotesk);
   --font-mono: var(--font-jetbrains-mono);
 }
@@ -65,6 +79,20 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+/* Monospace protocol/system label (kicker, code tags, addresses). */
+.mono {
+  font-family: var(--font-mono), ui-monospace, monospace;
+}
+
+/* Section eyebrow: small mono uppercase label above a heading. */
+.kicker {
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.72rem;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
 /* Custom scrollbar (tinted to the brand, not generic). */
 ::-webkit-scrollbar {
   width: 10px;
@@ -81,26 +109,25 @@ body {
   background: #3a3a42;
 }
 
-/* Visible keyboard focus everywhere (a11y, was missing). */
+/* Visible keyboard focus everywhere (a11y). */
 :focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
   border-radius: 4px;
 }
 
-/* Reserved single focal gradient-text moment (not on every heading). */
+/* Reserved focal gradient-text moment (hero only, not every heading). */
 .gradient-text {
-  background: linear-gradient(110deg, #ffffff 0%, var(--accent-soft) 55%, #ffffff 100%);
+  background: linear-gradient(110deg, #ffffff 0%, var(--accent-soft) 50%, var(--signal-soft) 100%);
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
   color: transparent;
 }
 
-/* Glass per skill 5.A: backdrop blur + 1px inner border + inner highlight for
-   real edge refraction (not a flat blur). Solid fallback below. */
+/* Glass: backdrop blur + 1px inner border + inner highlight. Solid fallback. */
 .glass {
-  background: rgba(23, 23, 26, 0.6);
+  background: rgba(23, 23, 27, 0.6);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   border: 1px solid var(--border);
@@ -122,15 +149,43 @@ body {
 /* Subtle structural grid (organizes content, low opacity). */
 .grid-pattern {
   background-image:
-    linear-gradient(rgba(168, 85, 247, 0.04) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(168, 85, 247, 0.04) 1px, transparent 1px);
+    linear-gradient(rgba(168, 85, 247, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(168, 85, 247, 0.045) 1px, transparent 1px);
   background-size: 56px 56px;
   -webkit-mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000 40%, transparent 100%);
   mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000 40%, transparent 100%);
 }
 
-/* Fixed grain overlay, pointer-events-none, applied once at the page root
-   (skill 6.E: never on scrolling containers). */
+/* Cursor-spotlight surface: reveals a soft radial glow at --mx/--my.
+   Consumers set those CSS vars from pointer move; static/no-JS is inert. */
+.spotlight {
+  position: relative;
+}
+.spotlight::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(
+    260px circle at var(--mx, 50%) var(--my, 40%),
+    rgba(34, 211, 238, 0.1),
+    rgba(168, 85, 247, 0.06) 40%,
+    transparent 70%
+  );
+  opacity: 0;
+  transition: opacity 0.4s ease;
+}
+.spotlight[data-active="true"]::before {
+  opacity: 1;
+}
+
+/* Hairline divider. */
+.rule {
+  height: 1px;
+  background: var(--border);
+}
+
+/* Fixed grain overlay, pointer-events-none, applied once at the page root. */
 .noise-overlay {
   position: fixed;
   inset: 0;
@@ -140,7 +195,32 @@ body {
   background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 
-/* Reduced motion: collapse all motion to instant (skill 6.B, mandatory). */
+/* Animated dash flow for system-map edges (motion-safe only). */
+@keyframes dashflow {
+  to {
+    stroke-dashoffset: -24;
+  }
+}
+.edge-flow {
+  stroke-dasharray: 4 8;
+  animation: dashflow 1.6s linear infinite;
+}
+
+/* Slow pulse for live/active status dots. */
+@keyframes statuspulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.status-pulse {
+  animation: statuspulse 2.4s ease-in-out infinite;
+}
+
+/* Reduced motion: collapse all motion to instant, kill decorative loops. */
 @media (prefers-reduced-motion: reduce) {
   html {
     scroll-behavior: auto;
@@ -151,5 +231,9 @@ body {
     animation-duration: 0.001ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;
+  }
+  .edge-flow,
+  .status-pulse {
+    animation: none !important;
   }
 }
