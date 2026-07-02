@@ -11,6 +11,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::Address;
+
 /// SRC governance operation codes (v1).
 ///
 /// Phase 1 defines the operation surface for wire stability; the executor does
@@ -53,4 +55,185 @@ impl GovernanceOperation {
 pub struct GovernanceTxData {
     pub operation: GovernanceOperation,
     pub data: Vec<u8>,
+}
+
+// =============================================================================
+// v1 data model (Phase 2 — passive data types only; no executor/lifecycle).
+// See docs/specs/GOVERNANCE-V1.md.
+// =============================================================================
+
+/// Opaque proposal identifier.
+pub type GovProposalId = [u8; 32];
+/// SRC-20 token identifier (as `[u8; 32]`; avoids a primitives→token crate cycle).
+pub type TokenId = [u8; 32];
+/// Block height alias for governance records.
+pub type GovBlockHeight = u64;
+/// Timestamp alias for governance records.
+pub type GovTimestamp = u64;
+
+/// Governance-eligible asset kind. v1 supports a single allowlisted SRC-20
+/// governance token; `StakedKoppa` and other classes are reserved for a future,
+/// separately-approved revision (not constructed or accepted in v1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum GovAssetKind {
+    /// An allowlisted SRC-20 governance token.
+    Src20Token(TokenId),
+}
+
+/// How a holder's balance maps to voting weight. v1 is linear
+/// (`weight = snapshot balance`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WeightRule {
+    /// weight = snapshot balance.
+    Linear,
+}
+
+/// Registry status of a governance asset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GovAssetStatus {
+    Enabled,
+    Disabled,
+}
+
+/// A governance-eligible asset entry in the registry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GovAsset {
+    pub asset: GovAssetKind,
+    /// Minimum snapshot voting power required to CREATE a proposal.
+    pub create_threshold: u128,
+    pub vote_weight_rule: WeightRule,
+    pub status: GovAssetStatus,
+    /// Height from which this eligibility takes effect.
+    pub effective_height: GovBlockHeight,
+}
+
+/// Proposal classification (drives the execution model). See spec §6.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum GovProposalClass {
+    RoutineProcess = 0,
+    PublicRpcSurface = 1,
+    TokenEconomic = 2,
+    GenesisConfigValidator = 3,
+    ActivationHeight = 4,
+    ConsensusWireStorageMigration = 5,
+    PackagePublishing = 6,
+    EmergencySecurity = 7,
+    TreasurySpend = 8,
+}
+
+impl GovProposalClass {
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::RoutineProcess),
+            1 => Some(Self::PublicRpcSurface),
+            2 => Some(Self::TokenEconomic),
+            3 => Some(Self::GenesisConfigValidator),
+            4 => Some(Self::ActivationHeight),
+            5 => Some(Self::ConsensusWireStorageMigration),
+            6 => Some(Self::PackagePublishing),
+            7 => Some(Self::EmergencySecurity),
+            8 => Some(Self::TreasurySpend),
+            _ => None,
+        }
+    }
+}
+
+/// How an approved proposal is carried out. v1 is RecordOnly-only; `OnChain` is
+/// named for the treasury path but is not executed in v1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExecutionKind {
+    /// Approval is an authoritative record; execution happens off-chain.
+    RecordOnly,
+    /// On-chain execution (treasury via council). Not executed in v1.
+    OnChain,
+}
+
+/// Proposal lifecycle status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum GovProposalStatus {
+    Created = 0,
+    Voting = 1,
+    Passed = 2,
+    Rejected = 3,
+    QuorumNotMet = 4,
+    Executed = 5,
+    Recorded = 6,
+    Expired = 7,
+    Cancelled = 8,
+}
+
+impl GovProposalStatus {
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::Created),
+            1 => Some(Self::Voting),
+            2 => Some(Self::Passed),
+            3 => Some(Self::Rejected),
+            4 => Some(Self::QuorumNotMet),
+            5 => Some(Self::Executed),
+            6 => Some(Self::Recorded),
+            7 => Some(Self::Expired),
+            8 => Some(Self::Cancelled),
+            _ => None,
+        }
+    }
+}
+
+/// Reference to the off-chain artifact a proposal authorizes (GitHub PR /
+/// release / doc): a URL plus a content hash binding the referenced content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalRef {
+    pub url: String,
+    pub content_hash: [u8; 32],
+}
+
+/// A governance proposal record (passive data in Phase 2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GovProposal {
+    pub id: GovProposalId,
+    pub proposer: Address,
+    pub class: GovProposalClass,
+    pub execution_kind: ExecutionKind,
+    pub external_ref: ExternalRef,
+    /// The governance asset whose snapshot decides this proposal.
+    pub asset: GovAssetKind,
+    /// Voting-start height. v1: equals `created_at_height` (snapshot at creation).
+    pub voting_start_height: GovBlockHeight,
+    pub status: GovProposalStatus,
+    pub created_at: GovTimestamp,
+    pub created_at_height: GovBlockHeight,
+    pub expires_at: GovTimestamp,
+}
+
+/// A cast vote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum VoteChoice {
+    Yes = 0,
+    No = 1,
+    Abstain = 2,
+}
+
+impl VoteChoice {
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::Yes),
+            1 => Some(Self::No),
+            2 => Some(Self::Abstain),
+            _ => None,
+        }
+    }
+}
+
+/// A vote record. One vote per (proposal, voter); the store key enforces this.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GovVote {
+    pub proposal_id: GovProposalId,
+    pub voter: Address,
+    /// Frozen snapshot weight applied to this vote.
+    pub weight: u128,
+    pub choice: VoteChoice,
+    pub cast_at_height: GovBlockHeight,
 }

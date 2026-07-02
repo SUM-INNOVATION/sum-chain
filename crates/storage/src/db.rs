@@ -454,6 +454,19 @@ pub mod cf {
     pub const POLICY_ACCOUNTS: &str = "policy_accounts";
     /// Proposals (proposal_id -> Proposal)
     pub const POLICY_PROPOSALS: &str = "policy_proposals";
+
+    // On-chain governance v1 (issue #50; docs/specs/GOVERNANCE-V1.md).
+    // Data model only in Phase 2; behavior stays dormant behind the P1 gate.
+    /// Governance asset registry (asset key -> GovAsset)
+    pub const GOV_REGISTRY: &str = "gov_registry";
+    /// Governance proposals (proposal_id -> GovProposal)
+    pub const GOV_PROPOSALS: &str = "gov_proposals";
+    /// Governance votes (proposal_id || voter -> GovVote)
+    pub const GOV_VOTES: &str = "gov_votes";
+    /// Governance voting-power snapshots (proposal_id || holder -> weight u128 BE)
+    pub const GOV_SNAPSHOTS: &str = "gov_snapshots";
+    /// Governance proposal-by-proposer index (proposer || proposal_id -> ())
+    pub const GOV_PROPOSAL_INDEX: &str = "gov_proposal_index";
 }
 
 /// All column families used by the database
@@ -630,6 +643,12 @@ pub const ALL_CFS: &[&str] = &[
     // Policy Account
     cf::POLICY_ACCOUNTS,
     cf::POLICY_PROPOSALS,
+    // Governance v1 (issue #50)
+    cf::GOV_REGISTRY,
+    cf::GOV_PROPOSALS,
+    cf::GOV_VOTES,
+    cf::GOV_SNAPSHOTS,
+    cf::GOV_PROPOSAL_INDEX,
     // Node Registry
     cf::NODE_REGISTRY,
     // Storage Metadata

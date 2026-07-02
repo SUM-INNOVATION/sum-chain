@@ -71,3 +71,68 @@ fn governance_txdata_bincode_round_trip() {
     assert_eq!(data, back);
     assert_eq!(GovernanceOperation::from_u8(2), Some(GovernanceOperation::CastVote));
 }
+
+// ───────────────────── v1 data-model round-trips (P2) ────────────────────────
+
+use sumchain_primitives::governance::{
+    ExecutionKind, ExternalRef, GovAsset, GovAssetKind, GovAssetStatus, GovProposal,
+    GovProposalClass, GovProposalStatus, GovVote, VoteChoice, WeightRule,
+};
+
+fn round_trip<T>(v: &T)
+where
+    T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+{
+    let bytes = bincode::serialize(v).expect("encodes");
+    let back: T = bincode::deserialize(&bytes).expect("decodes");
+    assert_eq!(v, &back);
+}
+
+#[test]
+fn gov_asset_round_trip() {
+    round_trip(&GovAsset {
+        asset: GovAssetKind::Src20Token([7u8; 32]),
+        create_threshold: 1_000,
+        vote_weight_rule: WeightRule::Linear,
+        status: GovAssetStatus::Enabled,
+        effective_height: 42,
+    });
+}
+
+#[test]
+fn gov_proposal_round_trip() {
+    round_trip(&GovProposal {
+        id: [1u8; 32],
+        proposer: Address::new([2u8; 20]),
+        class: GovProposalClass::RoutineProcess,
+        execution_kind: ExecutionKind::RecordOnly,
+        external_ref: ExternalRef { url: "https://x/pr/1".into(), content_hash: [3u8; 32] },
+        asset: GovAssetKind::Src20Token([7u8; 32]),
+        voting_start_height: 100,
+        status: GovProposalStatus::Created,
+        created_at: 1000,
+        created_at_height: 100,
+        expires_at: 2000,
+    });
+}
+
+#[test]
+fn gov_vote_round_trip() {
+    round_trip(&GovVote {
+        proposal_id: [1u8; 32],
+        voter: Address::new([9u8; 20]),
+        weight: 500,
+        choice: VoteChoice::Yes,
+        cast_at_height: 101,
+    });
+}
+
+#[test]
+fn gov_enum_discriminants_stable() {
+    // Lock the on-wire enum ordering (from_u8 must match repr).
+    assert_eq!(GovProposalClass::from_u8(8), Some(GovProposalClass::TreasurySpend));
+    assert_eq!(GovProposalStatus::from_u8(0), Some(GovProposalStatus::Created));
+    assert_eq!(GovProposalStatus::from_u8(8), Some(GovProposalStatus::Cancelled));
+    assert_eq!(VoteChoice::from_u8(2), Some(VoteChoice::Abstain));
+    assert_eq!(GovProposalClass::from_u8(9), None);
+}

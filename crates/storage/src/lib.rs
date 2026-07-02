@@ -9,6 +9,7 @@ pub mod docclass_store;
 pub mod employment_store;
 pub mod equity_store;
 pub mod finance_store;
+pub mod governance_store;
 pub mod healthcare_store;
 pub mod legal_store;
 pub mod messaging_store;
@@ -65,6 +66,7 @@ pub use finance_store::{
     FinanceStore, KycAttestationStore,
 };
 pub use policy_account_store::{PolicyAccountStorage, PolicyAccountStore, ProposalStore};
+pub use governance_store::GovStore;
 
 use thiserror::Error;
 
