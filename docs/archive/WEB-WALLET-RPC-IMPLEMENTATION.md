@@ -1,5 +1,10 @@
 # Web Wallet RPC Implementation Guide
 
+> **Archived / historical.** Point-in-time backend integration handoff (2026-02).
+> Kept for history; for current RPC usage see
+> [docs/rpc/api-reference.md](../rpc/api-reference.md) and
+> [docs/rpc/SNIP-V2-RPC-CHEATSHEET.md](../rpc/SNIP-V2-RPC-CHEATSHEET.md).
+
 **For Blockchain Backend Team**
 
 This document provides ready-to-paste implementation code for the three RPC endpoints required by the web wallet.

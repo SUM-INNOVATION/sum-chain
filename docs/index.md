@@ -60,6 +60,16 @@ gate** — they are always available when the node binary is running.
 - **Process:** [GOVERNANCE.md](../GOVERNANCE.md) (on-chain governance model; dormant by default) ·
   [RELEASE.md](../RELEASE.md) (how approved changes are released)
 
-> Integration handoffs and historical/design-only specs live under
-> `docs/integrations/`, `docs/specs/`, and `docs/archive/`. Current usage is in
-> the canonical usage docs above.
+## Conventions
+
+**Filenames.** New docs use lowercase kebab-case (e.g. `snip-v2-reassignment.md`).
+Existing UPPERCASE-KEBAB filenames (e.g. `SNIP-V2-CHAIN-PLAN.md`) are legacy and
+kept as-is — they are not mass-renamed.
+
+**Locations.**
+- **Current usage guides** live at the docs root and under `docs/rpc/`,
+  `docs/operations/`, and `docs/subprotocols/`.
+- **Design specs** (non-token) live under `docs/specs/`.
+- **Historical handoffs and superseded / point-in-time docs** live under
+  `docs/archive/`, each carrying an "Archived / historical" banner. Current
+  usage is always in the canonical usage docs above.

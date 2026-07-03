@@ -76,12 +76,12 @@ for chunk_idx in 0..response.chunk_count {
 
 Conformance vectors for `assigned_archives_presorted` are in [SNIP-V2-CHAIN-PLAN.md Appendix C](../specs/SNIP-V2-CHAIN-PLAN.md). Your implementation MUST reproduce them byte-for-byte.
 
-### 3. Mainnet integration is read-only unless separately approved
+### 3. V2 is live on mainnet — develop against the local mirror first
 
-V2 schemas + RPCs are **not** live on mainnet today. Hitting a mainnet RPC with a V2 tx will fail. Until V2 is shipped to mainnet via a chain upgrade (a separate, larger initiative — see [SNIP-V2-TESTNET-DEPLOYMENT-PREP.md](../archive/SNIP-V2-TESTNET-DEPLOYMENT-PREP.md) §"Mainnet V2 testing"):
+V2 schemas + RPCs are **active on mainnet** (`v2_enabled_from_height = 5,200,000`; the chain is well past that height). V2 tx submission (`RegisterFilePendingV2`, `AcceptAssignmentV2`, `ActivateFileV2`, etc.) succeeds on mainnet and spends real Koppa — deposits and fees are permanent.
 
-- Read-only against mainnet (`chain_id`, `get_balance`, etc.) is fine.
-- Any **V2 tx submission** (`RegisterFilePendingV2`, `AcceptAssignmentV2`, `ActivateFileV2`, etc.) must target the local mirror or a future hosted V2 testnet — never mainnet without explicit approval.
+- Read-only against mainnet (`chain_id`, `get_balance`, and the coverage/read RPCs) is always safe.
+- Treat **V2 tx submission** to mainnet as production: it is permanent and costs real Koppa. Develop and test against the local mirror (`docker-compose -f deploy/snip-local-mirror.yaml up -d`, chain_id 31337) before submitting anything to mainnet.
 
 ---
 
