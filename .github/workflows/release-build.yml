@@ -30,8 +30,6 @@ jobs:
             target: linux-arm64
           - os: macos-14
             target: macos-arm64
-          - os: macos-13
-            target: macos-x86_64
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout main (clean)
@@ -108,7 +106,6 @@ jobs:
           | `sumchain-0.1.0-linux-x86_64`, `sumchain-wallet-0.1.0-linux-x86_64` | Linux x86_64 | `ubuntu-latest` |
           | `sumchain-0.1.0-linux-arm64`, `sumchain-wallet-0.1.0-linux-arm64` | Linux arm64 | `ubuntu-24.04-arm` |
           | `sumchain-0.1.0-macos-arm64`, `sumchain-wallet-0.1.0-macos-arm64` | macOS arm64 (Apple Silicon) | `macos-14` |
-          | `sumchain-0.1.0-macos-x86_64`, `sumchain-wallet-0.1.0-macos-x86_64` | macOS x86_64 (Intel) | `macos-13` |
 
           After downloading, make the binaries executable:
           - **Linux / macOS:** `chmod +x ./sumchain ./sumchain-wallet`
