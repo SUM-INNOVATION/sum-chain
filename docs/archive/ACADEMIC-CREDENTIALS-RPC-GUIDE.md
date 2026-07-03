@@ -1,6 +1,6 @@
 # Academic Credentials RPC Endpoints Guide
 
-> **Status:** historical / integration handoff
+> **Archived / historical** — integration handoff.
 > **Last verified:** 2026-06-27
 >
 > This is an integration handoff document. Current usage is in [docs/tokens.md](../tokens.md) and [docs/policy-accounts-and-contracts.md](../policy-accounts-and-contracts.md).

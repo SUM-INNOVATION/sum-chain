@@ -1,6 +1,6 @@
 # Governance v1 — SRC-20 Holder Governance (Design Spec)
 
-> **Status:** design spec (approved direction; not yet implemented)
+> **Status:** code-backed, dormant (implemented behind an activation gate; not yet activated on mainnet)
 > **Umbrella:** issue #31 · **Implementation:** #50 · **Process docs:** #51
 > This document specifies the protocol. It is not an active mainnet surface;
 > governance ships dormant behind an activation gate and is enabled only by a
