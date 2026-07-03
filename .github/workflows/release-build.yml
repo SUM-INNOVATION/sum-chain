@@ -1,9 +1,9 @@
 name: release-build
 
-# Builds release binaries for all supported platforms from clean `main` and
-# updates the existing v0.1.0 DRAFT release (assets + SHA256SUMS + notes).
-# Never publishes: the release stays a draft. Trigger by pushing a release/**
-# branch, or manually via workflow_dispatch.
+# Builds release binaries for supported platforms from clean `main` and updates
+# the existing v0.1.0 DRAFT release (assets + SHA256SUMS + notes). Never
+# publishes: the release stays a draft. Trigger by pushing a release/** branch,
+# or manually via workflow_dispatch.
 
 on:
   push:
@@ -14,7 +14,6 @@ permissions:
   contents: write
 
 env:
-  VERSION: "0.1.0"
   TAG: "v0.1.0"
 
 jobs:
@@ -50,16 +49,16 @@ jobs:
 
       - name: Package binaries
         run: |
-          cp target/release/sumchain "sumchain-${VERSION}-${{ matrix.target }}"
-          cp target/release/sumchain-wallet "sumchain-wallet-${VERSION}-${{ matrix.target }}"
+          cp target/release/sumchain "sumchain-${TAG}-${{ matrix.target }}"
+          cp target/release/sumchain-wallet "sumchain-wallet-${TAG}-${{ matrix.target }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: bin-${{ matrix.target }}
           path: |
-            sumchain-${{ env.VERSION }}-${{ matrix.target }}
-            sumchain-wallet-${{ env.VERSION }}-${{ matrix.target }}
+            sumchain-${{ env.TAG }}-${{ matrix.target }}
+            sumchain-wallet-${{ env.TAG }}-${{ matrix.target }}
           if-no-files-found: error
 
   publish-assets:
@@ -81,15 +80,15 @@ jobs:
           cd dist
           ls -la
           for req in \
-            "sumchain-${VERSION}-linux-x86_64" "sumchain-wallet-${VERSION}-linux-x86_64" \
-            "sumchain-${VERSION}-macos-arm64"  "sumchain-wallet-${VERSION}-macos-arm64"; do
+            "sumchain-${TAG}-linux-x86_64" "sumchain-wallet-${TAG}-linux-x86_64" \
+            "sumchain-${TAG}-macos-arm64"  "sumchain-wallet-${TAG}-macos-arm64"; do
             test -f "$req" || { echo "::error::missing required asset: $req"; exit 1; }
           done
 
       - name: Generate SHA256SUMS
         run: |
           cd dist
-          sha256sum sumchain-${VERSION}-* sumchain-wallet-${VERSION}-* > SHA256SUMS
+          sha256sum sumchain-${TAG}-* sumchain-wallet-${TAG}-* > SHA256SUMS
           echo "----- SHA256SUMS -----"; cat SHA256SUMS
 
       - name: Write release notes
@@ -103,9 +102,11 @@ jobs:
           ## Supported platforms
           | Binaries | Platform | Built on (GitHub Actions) |
           |---|---|---|
-          | `sumchain-0.1.0-linux-x86_64`, `sumchain-wallet-0.1.0-linux-x86_64` | Linux x86_64 | `ubuntu-latest` |
-          | `sumchain-0.1.0-linux-arm64`, `sumchain-wallet-0.1.0-linux-arm64` | Linux arm64 | `ubuntu-24.04-arm` |
-          | `sumchain-0.1.0-macos-arm64`, `sumchain-wallet-0.1.0-macos-arm64` | macOS arm64 (Apple Silicon) | `macos-14` |
+          | `sumchain-v0.1.0-linux-x86_64`, `sumchain-wallet-v0.1.0-linux-x86_64` | Linux x86_64 | `ubuntu-latest` |
+          | `sumchain-v0.1.0-linux-arm64`, `sumchain-wallet-v0.1.0-linux-arm64` | Linux arm64 | `ubuntu-24.04-arm` |
+          | `sumchain-v0.1.0-macos-arm64`, `sumchain-wallet-v0.1.0-macos-arm64` | macOS arm64 (Apple Silicon) | `macos-14` |
+
+          macOS x86_64 (Intel) is not included in this release; build from source on an Intel Mac if needed.
 
           After downloading, make the binaries executable:
           - **Linux / macOS:** `chmod +x ./sumchain ./sumchain-wallet`
@@ -131,7 +132,7 @@ jobs:
 
           ## Checksums
           ```bash
-          sha256sum -c SHA256SUMS    # Linux
+          sha256sum -c SHA256SUMS      # Linux
           shasum -a 256 -c SHA256SUMS  # macOS
           ```
           EOF
@@ -141,7 +142,7 @@ jobs:
         run: |
           cd dist
           gh release upload "${TAG}" \
-            sumchain-${VERSION}-* sumchain-wallet-${VERSION}-* SHA256SUMS \
+            sumchain-${TAG}-* sumchain-wallet-${TAG}-* SHA256SUMS \
             --clobber --repo "${GITHUB_REPOSITORY}"
           gh release edit "${TAG}" --notes-file NOTES.md --repo "${GITHUB_REPOSITORY}"
           echo "Draft ${TAG} updated. Verifying it remains a draft:"
