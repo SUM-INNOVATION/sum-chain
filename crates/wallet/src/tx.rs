@@ -3,7 +3,10 @@
 use anyhow::{Context, Result};
 use jsonrpsee::http_client::{HttpClient, HttpClientBuilder};
 use sumchain_crypto::sign;
-use sumchain_primitives::{Address, Balance, SignedTransaction, Transaction};
+use sumchain_primitives::{
+    Address, Balance, NodeRegistryOperation, NodeRegistryTxData, SignedTransaction, Transaction,
+    TransactionV2, TxPayload,
+};
 use sumchain_rpc::api::SumChainApiClient;
 
 use crate::keystore::Keystore;
@@ -34,6 +37,64 @@ pub fn sign_transaction(
         *signature.as_bytes(),
         *keystore.public_key().as_bytes(),
     ))
+}
+
+/// Sign a NodeRegistry V2 transaction offline (issue #20 archive-node
+/// withdrawal ops, and other node-registry operations). Wraps the operation in
+/// a [`TransactionV2`] with a [`TxPayload::NodeRegistry`] payload, signs the
+/// V2 signing hash, and returns the ready-to-broadcast [`SignedTransaction`].
+pub fn sign_node_registry_tx(
+    keystore: &Keystore,
+    operation: NodeRegistryOperation,
+    fee: Balance,
+    nonce: u64,
+    chain_id: u64,
+) -> Result<SignedTransaction> {
+    let tx = TransactionV2 {
+        chain_id,
+        from: keystore.address(),
+        fee,
+        nonce,
+        payload: TxPayload::NodeRegistry(NodeRegistryTxData { operation }),
+    };
+
+    let signing_hash = tx.signing_hash();
+    let signature = sign(signing_hash.as_bytes(), keystore.keypair().private_key());
+
+    Ok(SignedTransaction::new_v2(
+        tx,
+        *signature.as_bytes(),
+        *keystore.public_key().as_bytes(),
+    ))
+}
+
+/// Query an archive node's registry record (role, stake, status). Used by the
+/// archive-node withdrawal commands to read the current staked balance.
+pub async fn storage_get_node_record(
+    rpc_url: &str,
+    node_address: &str,
+) -> Result<Option<serde_json::Value>> {
+    let client = create_client(rpc_url).await?;
+    let record = client
+        .storage_get_node_record(node_address.to_string())
+        .await
+        .context("Failed to get node record")?;
+
+    Ok(record)
+}
+
+/// Query an archive node's pending stake-unbonding record (issue #20).
+pub async fn storage_get_archive_unbonding(
+    rpc_url: &str,
+    operator_address: &str,
+) -> Result<Option<sumchain_rpc::types::ArchiveUnbondingInfo>> {
+    let client = create_client(rpc_url).await?;
+    let info = client
+        .storage_get_archive_unbonding(operator_address.to_string())
+        .await
+        .context("Failed to get archive unbonding record")?;
+
+    Ok(info)
 }
 
 /// Create RPC client
@@ -712,5 +773,63 @@ mod tests {
         assert_eq!(signed.fee(), 10);
         assert_eq!(signed.nonce(), 0);
         assert!(signed.verify_signer());
+    }
+
+    #[test]
+    fn test_sign_node_registry_begin_unstake() {
+        let keystore = Keystore::generate("test").unwrap();
+        let signed = sign_node_registry_tx(
+            &keystore,
+            NodeRegistryOperation::BeginUnstake { amount: 42 },
+            10,
+            3,
+            7,
+        )
+        .unwrap();
+
+        assert_eq!(signed.sender(), keystore.address());
+        assert!(signed.verify_signer());
+        assert_eq!(signed.nonce(), 3);
+        assert_eq!(signed.fee(), 10);
+
+        // Round-trips through the broadcast hex form.
+        let back = SignedTransaction::from_hex(&signed.to_hex()).unwrap();
+        assert_eq!(back.to_hex(), signed.to_hex());
+
+        // Payload is the archive begin-unstake op.
+        match back.inner() {
+            sumchain_primitives::TxInner::V2(tx) => match &tx.payload {
+                TxPayload::NodeRegistry(d) => assert_eq!(
+                    d.operation,
+                    NodeRegistryOperation::BeginUnstake { amount: 42 }
+                ),
+                other => panic!("unexpected payload: {:?}", other),
+            },
+            _ => panic!("expected a V2 transaction"),
+        }
+    }
+
+    #[test]
+    fn test_sign_node_registry_withdraw() {
+        let keystore = Keystore::generate("test").unwrap();
+        let signed = sign_node_registry_tx(
+            &keystore,
+            NodeRegistryOperation::WithdrawUnbonded,
+            5,
+            1,
+            7,
+        )
+        .unwrap();
+
+        assert!(signed.verify_signer());
+        match signed.inner() {
+            sumchain_primitives::TxInner::V2(tx) => match &tx.payload {
+                TxPayload::NodeRegistry(d) => {
+                    assert_eq!(d.operation, NodeRegistryOperation::WithdrawUnbonded)
+                }
+                other => panic!("unexpected payload: {:?}", other),
+            },
+            _ => panic!("expected a V2 transaction"),
+        }
     }
 }

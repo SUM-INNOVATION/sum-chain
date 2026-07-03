@@ -219,8 +219,11 @@ loop {
 | `storage_getPushableFilesV2(offset?, limit?)` | Pending+Active files (warm-cache for archive nodes). |
 | `storage_getAssignmentCoverageV2(merkle_root, missing_offset?, missing_limit?)` | Coverage progress + missing chunks. |
 | `storage_getActiveNodesAtHeight(height)` | Snapshot at `assignment_height` for client-side `assigned_archives_presorted`. |
+| `storage_getArchiveUnbonding(operator_address)` | Pending archive-node stake-unbonding record, or `null` if none (issue #20). |
 
 Defaults: `access_limit = 256` / hard cap 1024; `missing_limit = 1024` / hard cap 16384; `pushable.limit = 256` / hard cap 1024.
+
+`storage_getArchiveUnbonding` returns `null` unless the operator has a stake-withdrawal in progress. When present, the fields are `operator` (base58), `amount` (u64, stake that began unbonding), `started_height`, `unlock_height` (`WithdrawUnbonded` is permitted once chain height reaches this), and `remaining_amount` (u64, what withdrawal will credit back — reduced from `amount` if the archive is slashed for an expired challenge while unbonding). Archive-node withdrawal is dormant until `archive_unbonding_enabled_from_height` is set in genesis; below that gate, `BeginUnstake` / `WithdrawUnbonded` are rejected with no fee.
 
 ---
 

@@ -6335,6 +6335,26 @@ impl SumChainApiServer for RpcServer {
         }
     }
 
+    async fn storage_get_archive_unbonding(
+        &self,
+        operator_address: String,
+    ) -> std::result::Result<Option<ArchiveUnbondingInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let addr = self.parse_address(&operator_address)?;
+
+        let executor = sumchain_state::NodeRegistryExecutor::new(self.db.clone());
+        let record = executor
+            .get_archive_unbonding(&addr)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        Ok(record.map(|r| ArchiveUnbondingInfo {
+            operator: r.operator.to_base58(),
+            amount: r.amount,
+            started_height: r.started_height,
+            unlock_height: r.unlock_height,
+            remaining_amount: r.remaining_amount,
+        }))
+    }
+
     async fn storage_get_file_info_v2(
         &self,
         merkle_root: String,
@@ -8366,6 +8386,48 @@ mod messaging_rpc_tests {
         let (srv, _db, _dir) = server();
         assert!(srv.messaging_get_sent_messages("not-an-address".to_string(), None, None).await.is_err());
         assert!(srv.messaging_get_pending_payments("not-an-address".to_string()).await.is_err());
+    }
+
+    // Issue #20: storage_getArchiveUnbonding read shape.
+    #[tokio::test]
+    async fn archive_unbonding_read_roundtrips_and_absent_is_none() {
+        let (srv, db, _dir) = server();
+        let op = Address::new([0x2A; 20]);
+
+        // No record yet -> None.
+        assert!(srv
+            .storage_get_archive_unbonding(op.to_base58())
+            .await
+            .unwrap()
+            .is_none());
+
+        // Persist a record directly, then read it back through the RPC.
+        sumchain_state::NodeRegistryExecutor::new(db.clone())
+            .put_archive_unbonding(&sumchain_primitives::ArchiveUnbondingRecord {
+                operator: op,
+                amount: 1_000_000_000,
+                started_height: 7,
+                unlock_height: 107,
+                remaining_amount: 950_000_000,
+            })
+            .unwrap();
+
+        let info = srv
+            .storage_get_archive_unbonding(op.to_base58())
+            .await
+            .unwrap()
+            .expect("record present");
+        assert_eq!(info.operator, op.to_base58());
+        assert_eq!(info.amount, 1_000_000_000);
+        assert_eq!(info.started_height, 7);
+        assert_eq!(info.unlock_height, 107);
+        assert_eq!(info.remaining_amount, 950_000_000);
+
+        // Malformed address is rejected, not silently None.
+        assert!(srv
+            .storage_get_archive_unbonding("not-an-address".to_string())
+            .await
+            .is_err());
     }
 }
 

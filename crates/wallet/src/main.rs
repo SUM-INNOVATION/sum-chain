@@ -234,6 +234,86 @@ enum Commands {
     Info,
 
     // ========================================================================
+    // Archive-node stake withdrawal (issue #20)
+    //
+    // These operate on an ArchiveNode's STORAGE stake in the node registry —
+    // distinct from validator staking (see the `staking-*` commands). v1 is
+    // full-exit only: begin-unstake unbonds the node's entire staked balance.
+    // ========================================================================
+
+    /// Begin unbonding an archive node's storage stake (full exit).
+    ///
+    /// Archive-node stake only — this is NOT validator unstaking. Submits a
+    /// NodeRegistry `BeginUnstake` for the node's full staked balance (v1 is
+    /// full-exit only), moving it to `Unbonding`. After the unbonding period
+    /// elapses, run `archive-withdraw` to reclaim the stake. Requires the
+    /// archive-unbonding upgrade to be active on the target chain.
+    ArchiveBeginUnstake {
+        /// Path to the archive operator's key file
+        #[arg(short, long)]
+        key: PathBuf,
+
+        /// RPC URL
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+
+        /// Transaction fee in Koppa (e.g., "0.001")
+        #[arg(long, default_value = "0.001")]
+        fee: String,
+
+        /// Chain ID
+        #[arg(long)]
+        chain_id: u64,
+
+        /// Skip confirmation prompt
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+
+    /// Withdraw an archive node's unbonded storage stake after the unbonding
+    /// period has elapsed.
+    ///
+    /// Archive-node stake only — this is NOT validator withdrawal. Submits a
+    /// NodeRegistry `WithdrawUnbonded`, crediting the remaining (post-slash)
+    /// stake back to the operator's balance and marking the node `Withdrawn`.
+    ArchiveWithdraw {
+        /// Path to the archive operator's key file
+        #[arg(short, long)]
+        key: PathBuf,
+
+        /// RPC URL
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+
+        /// Transaction fee in Koppa (e.g., "0.001")
+        #[arg(long, default_value = "0.001")]
+        fee: String,
+
+        /// Chain ID
+        #[arg(long)]
+        chain_id: u64,
+
+        /// Skip confirmation prompt
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+
+    /// Show an archive node's pending stake-unbonding record (issue #20).
+    ///
+    /// Archive-node stake only. Displays the unbonding amount, the withdrawable
+    /// remaining amount (reduced by any slashes during unbonding), and the
+    /// unlock height at/after which `archive-withdraw` is permitted.
+    ArchiveUnbonding {
+        /// RPC URL
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+
+        /// Archive operator address to query
+        #[arg(long)]
+        address: String,
+    },
+
+    // ========================================================================
     // NFT (SUM-721) Commands
     // ========================================================================
 
@@ -846,6 +926,182 @@ async fn main() -> Result<()> {
             print_field("Transaction Hash", &tx_hash);
             println!();
             print_info("Use 'sumchain-wallet receipt --hash <hash>' to check status.");
+        }
+
+        Commands::ArchiveBeginUnstake {
+            key,
+            rpc,
+            fee,
+            chain_id,
+            yes,
+        } => {
+            let keystore = load_keystore(&key)?;
+            let addr_b58 = keystore.address().to_base58();
+
+            let fee_units = parse_koppa(&fee)
+                .context("Invalid fee format. Use e.g., '0.001' for 0.001 Koppa")?;
+
+            // v1 is full-exit only: the on-chain check requires the amount to
+            // equal the node's full staked balance, so read it from the registry
+            // rather than asking the operator to restate it.
+            let record = tx::storage_get_node_record(&rpc, &addr_b58)
+                .await?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "{} is not a registered node — nothing to unstake",
+                        addr_b58
+                    )
+                })?;
+            let role = record.get("role").and_then(|v| v.as_str()).unwrap_or("");
+            let status = record.get("status").and_then(|v| v.as_str()).unwrap_or("");
+            let staked_balance = record
+                .get("staked_balance")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+
+            if role != "ArchiveNode" {
+                anyhow::bail!(
+                    "{} is a {} node, not an ArchiveNode — this command unbonds archive-node stake only",
+                    addr_b58, role
+                );
+            }
+            if status != "Active" {
+                anyhow::bail!(
+                    "archive node status is {} (must be Active to begin unbonding)",
+                    status
+                );
+            }
+
+            let nonce = tx::get_nonce(&rpc, &addr_b58).await?;
+
+            print_header("Begin Archive-Node Unbonding (full exit)");
+            println!();
+            print_field("Archive Node", &addr_b58);
+            print_field("Status", status);
+            print_koppa_field("Unbonding Stake", staked_balance as u128);
+            print_koppa_field("Fee", fee_units);
+            print_field("Nonce", &nonce.to_string());
+            println!();
+            print_warning(
+                "This unbonds the archive node's ENTIRE storage stake (v1 is full-exit only).",
+            );
+            print_info(
+                "Run 'sumchain-wallet archive-withdraw' after the unbonding period to reclaim it.",
+            );
+            println!();
+
+            if !yes && !confirm("Proceed with archive-node begin-unstake?") {
+                print_warning("Begin-unstake cancelled.");
+                return Ok(());
+            }
+
+            println!();
+            print_info("Signing transaction...");
+            let signed_tx = tx::sign_node_registry_tx(
+                &keystore,
+                sumchain_primitives::NodeRegistryOperation::BeginUnstake {
+                    amount: staked_balance,
+                },
+                fee_units,
+                nonce,
+                chain_id,
+            )?;
+
+            print_info("Broadcasting transaction...");
+            let tx_hash = tx::send_raw_transaction(&rpc, &signed_tx.to_hex()).await?;
+
+            println!();
+            print_success("Archive-node begin-unstake submitted!");
+            print_field("Transaction Hash", &tx_hash);
+            println!();
+            print_info("Use 'sumchain-wallet receipt --hash <hash>' to check status.");
+            print_info("Use 'sumchain-wallet archive-unbonding --address <addr>' to track the unlock height.");
+        }
+
+        Commands::ArchiveWithdraw {
+            key,
+            rpc,
+            fee,
+            chain_id,
+            yes,
+        } => {
+            let keystore = load_keystore(&key)?;
+            let addr_b58 = keystore.address().to_base58();
+
+            let fee_units = parse_koppa(&fee)
+                .context("Invalid fee format. Use e.g., '0.001' for 0.001 Koppa")?;
+
+            let nonce = tx::get_nonce(&rpc, &addr_b58).await?;
+
+            // Surface the current unbonding record (if any) so the operator sees
+            // what will be withdrawn and whether the period has elapsed.
+            let unbonding = tx::storage_get_archive_unbonding(&rpc, &addr_b58).await?;
+
+            print_header("Withdraw Unbonded Archive-Node Stake");
+            println!();
+            print_field("Archive Node", &addr_b58);
+            match &unbonding {
+                Some(u) => {
+                    print_koppa_field("Withdrawable", u.remaining_amount as u128);
+                    print_field("Unlock Height", &u.unlock_height.to_string());
+                }
+                None => {
+                    print_warning(
+                        "No unbonding record found for this address — the withdraw will be rejected unless one exists on-chain.",
+                    );
+                }
+            }
+            print_koppa_field("Fee", fee_units);
+            print_field("Nonce", &nonce.to_string());
+            println!();
+
+            if !yes && !confirm("Proceed with archive-node withdraw?") {
+                print_warning("Withdraw cancelled.");
+                return Ok(());
+            }
+
+            println!();
+            print_info("Signing transaction...");
+            let signed_tx = tx::sign_node_registry_tx(
+                &keystore,
+                sumchain_primitives::NodeRegistryOperation::WithdrawUnbonded,
+                fee_units,
+                nonce,
+                chain_id,
+            )?;
+
+            print_info("Broadcasting transaction...");
+            let tx_hash = tx::send_raw_transaction(&rpc, &signed_tx.to_hex()).await?;
+
+            println!();
+            print_success("Archive-node withdraw submitted!");
+            print_field("Transaction Hash", &tx_hash);
+            println!();
+            print_info("Use 'sumchain-wallet receipt --hash <hash>' to check status.");
+        }
+
+        Commands::ArchiveUnbonding { rpc, address } => {
+            let unbonding = tx::storage_get_archive_unbonding(&rpc, &address).await?;
+
+            print_header("Archive-Node Unbonding Status");
+            println!();
+            print_field("Archive Node", &address);
+            match unbonding {
+                Some(u) => {
+                    print_koppa_field("Unbonding Amount", u.amount as u128);
+                    print_koppa_field("Withdrawable Remaining", u.remaining_amount as u128);
+                    print_field("Started Height", &u.started_height.to_string());
+                    print_field("Unlock Height", &u.unlock_height.to_string());
+                    println!();
+                    print_info(
+                        "Run 'sumchain-wallet archive-withdraw' once the chain height reaches the unlock height.",
+                    );
+                }
+                None => {
+                    println!();
+                    print_info("No unbonding in progress for this address.");
+                }
+            }
         }
 
         Commands::BlockNumber { rpc } => {

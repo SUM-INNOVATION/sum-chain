@@ -120,6 +120,14 @@ impl TxStatus {
             TxStatus::Failed(310) => "on-chain governance execution not supported in v1",
             TxStatus::Failed(311) => "insufficient balance to post governance proposal bond",
             TxStatus::Failed(312) => "insufficient governance treasury balance for on-chain payout",
+            // Archive-node withdrawal / unbonding (issue #20). Isolated 320-block.
+            TxStatus::Failed(320) => "archive unbonding not enabled at this block height",
+            TxStatus::Failed(321) => "not a registered archive node",
+            TxStatus::Failed(322) => "archive node not active (cannot begin unbonding)",
+            TxStatus::Failed(323) => "archive unbonding amount must equal the full staked balance",
+            TxStatus::Failed(324) => "archive has open retrievability challenges; cannot begin unbonding",
+            TxStatus::Failed(325) => "no archive unbonding in progress",
+            TxStatus::Failed(326) => "archive unbonding period has not elapsed",
             TxStatus::Failed(_) => "failed",
         }
     }

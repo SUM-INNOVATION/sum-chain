@@ -7,7 +7,7 @@ use std::sync::Arc;
 use sumchain_crypto::verify_bytes;
 use sumchain_genesis::ChainParams;
 use sumchain_primitives::{
-    Address, Balance, Block, BlockHeader, Hash, Receipt, SignedTransaction,
+    Address, Balance, Block, BlockHeader, Hash, NodeRegistryOperation, Receipt, SignedTransaction,
     TransactionV2, TxPayload, TxStatus,
     CHALLENGE_INTERVAL_BLOCKS, SLASH_PERCENTAGE,
 };
@@ -84,6 +84,16 @@ fn omninode_gate_open(params: &ChainParams, block_height: u64) -> bool {
 #[inline]
 fn education_gate_open(params: &ChainParams, block_height: u64) -> bool {
     matches!(params.education_enabled_from_height, Some(h) if block_height >= h)
+}
+
+/// Archive-node stake withdrawal / unbonding activation gate (issue #20). Same
+/// dormant-deploy semantics: production default `None` → never open, so
+/// `BeginUnstake` / `WithdrawUnbonded` are rejected free (`Failed(320)`, no fee,
+/// no state) until `archive_unbonding_enabled_from_height` is set in
+/// `genesis.json` via a coordinated validator upgrade.
+#[inline]
+fn archive_unbonding_gate_open(params: &ChainParams, block_height: u64) -> bool {
+    matches!(params.archive_unbonding_enabled_from_height, Some(h) if block_height >= h)
 }
 // Governance activation-gate resolution lives in
 // `crate::governance_executor::gate_open` (used by the dispatch skeleton).
@@ -959,15 +969,63 @@ impl BlockExecutor {
                         }
                     }
                     TxPayload::NodeRegistry(registry_data) => {
-                        let result = self.node_registry_executor.execute(
-                            &v2_tx.from,
-                            &registry_data,
-                            &self.state,
-                            proposer,
-                            v2_tx.fee,
-                            block_height,
-                            block_timestamp,
-                        )?;
+                        // Archive-node withdrawal ops (issue #20) are gated and
+                        // need extra context (unbonding period, open-challenge
+                        // state) the generic `execute` entrypoint lacks, so they
+                        // are dispatched here through dedicated methods. The gate
+                        // is checked BEFORE any executor call so a chain-level
+                        // configuration mismatch costs no fee and mutates nothing
+                        // (mirrors the V2 storage gate rationale above).
+                        let result = match &registry_data.operation {
+                            NodeRegistryOperation::BeginUnstake { amount } => {
+                                if !archive_unbonding_gate_open(&self.params, block_height) {
+                                    return Ok(TxExecutionResult {
+                                        tx_hash,
+                                        status: TxStatus::Failed(320),
+                                        fee_paid: 0,
+                                    });
+                                }
+                                let has_open_challenge = !self
+                                    .storage_metadata_executor
+                                    .get_challenges_by_node(&v2_tx.from)?
+                                    .is_empty();
+                                self.node_registry_executor.execute_begin_unstake(
+                                    &v2_tx.from,
+                                    *amount,
+                                    &self.state,
+                                    proposer,
+                                    v2_tx.fee,
+                                    block_height,
+                                    self.params.archive_unbonding_period_blocks,
+                                    has_open_challenge,
+                                )?
+                            }
+                            NodeRegistryOperation::WithdrawUnbonded => {
+                                if !archive_unbonding_gate_open(&self.params, block_height) {
+                                    return Ok(TxExecutionResult {
+                                        tx_hash,
+                                        status: TxStatus::Failed(320),
+                                        fee_paid: 0,
+                                    });
+                                }
+                                self.node_registry_executor.execute_withdraw_unbonded(
+                                    &v2_tx.from,
+                                    &self.state,
+                                    proposer,
+                                    v2_tx.fee,
+                                    block_height,
+                                )?
+                            }
+                            _ => self.node_registry_executor.execute(
+                                &v2_tx.from,
+                                &registry_data,
+                                &self.state,
+                                proposer,
+                                v2_tx.fee,
+                                block_height,
+                                block_timestamp,
+                            )?,
+                        };
 
                         if result.success {
                             debug!("V2 NodeRegistry {} executed", tx_hash);
@@ -984,9 +1042,13 @@ impl BlockExecutor {
                                 result.error.as_deref().unwrap_or("Unknown error")
                             );
 
+                            // Specific archive-unbonding reason codes (321–326)
+                            // propagate from the executor; generic NodeRegistry
+                            // failures fall through to code 18.
+                            let code = result.failure_code.unwrap_or(18);
                             Ok(TxExecutionResult {
                                 tx_hash,
-                                status: TxStatus::Failed(18), // NodeRegistry operation failed
+                                status: TxStatus::Failed(code),
                                 fee_paid: 0,
                             })
                         }
@@ -2377,8 +2439,14 @@ impl BlockExecutor {
             // Load the node record
             match self.node_registry_executor.get_node(&challenge.target_node)? {
                 Some(mut record) => {
-                    if record.status == sumchain_primitives::NodeStatus::Slashed {
-                        // Already slashed — just clean up the challenge
+                    // Skip terminal states (issue #20): an already-`Slashed` node
+                    // has nothing more to lose, and a `Withdrawn` node has exited
+                    // with a zero stake. Both just get their challenge cleaned up.
+                    if matches!(
+                        record.status,
+                        sumchain_primitives::NodeStatus::Slashed
+                            | sumchain_primitives::NodeStatus::Withdrawn
+                    ) {
                         self.storage_metadata_executor.delete_challenge(challenge)?;
                         continue;
                     }
@@ -2389,7 +2457,33 @@ impl BlockExecutor {
                         / 100;
 
                     record.staked_balance = record.staked_balance.saturating_sub(slash_amount);
-                    record.status = sumchain_primitives::NodeStatus::Slashed;
+
+                    // An `Unbonding` archive (issue #20) is still slashable while
+                    // its stake unbonds, but it does NOT flip to `Slashed`: it
+                    // stays `Unbonding` and keeps counting down to withdrawal.
+                    // The slash reduces both the node's `staked_balance` (above)
+                    // and the withdrawable `remaining_amount` on its unbonding
+                    // record, so the eventual `WithdrawUnbonded` pays out the
+                    // slashed remainder. Unbonding nodes are already excluded from
+                    // the active set, so no snapshot refresh is needed for them.
+                    if record.status == sumchain_primitives::NodeStatus::Unbonding {
+                        if let Some(mut unbonding) = self
+                            .node_registry_executor
+                            .get_archive_unbonding(&record.address)?
+                        {
+                            unbonding.remaining_amount =
+                                unbonding.remaining_amount.saturating_sub(slash_amount);
+                            self.node_registry_executor
+                                .put_archive_unbonding(&unbonding)?;
+                        }
+                    } else {
+                        // Active (in-service) node → slashed and removed from the
+                        // active-archive set.
+                        record.status = sumchain_primitives::NodeStatus::Slashed;
+                        if record.role == sumchain_primitives::NodeRole::ArchiveNode {
+                            active_set_changed = true;
+                        }
+                    }
 
                     // Write updated node record (reuse put_node via the executor)
                     // We need to write directly since put_node is private
@@ -2404,16 +2498,9 @@ impl BlockExecutor {
                     self.db.put("node_registry", &node_key, &node_value)
                         .map_err(|e| StateError::Storage(e))?;
 
-                    // ArchiveNodes are the only role that affects the active
-                    // archive set. (Validator slashing flows through the
-                    // staking module, not here, but guard anyway.)
-                    if record.role == sumchain_primitives::NodeRole::ArchiveNode {
-                        active_set_changed = true;
-                    }
-
                     warn!(
-                        "Slashed node {} for expired challenge {}: -{} stake (remaining: {})",
-                        challenge.target_node, challenge.challenge_id,
+                        "Slashed node {} ({:?}) for expired challenge {}: -{} stake (remaining: {})",
+                        challenge.target_node, record.status, challenge.challenge_id,
                         slash_amount, record.staked_balance
                     );
                 }

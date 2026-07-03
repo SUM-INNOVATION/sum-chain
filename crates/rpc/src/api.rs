@@ -21,7 +21,7 @@ use crate::types::{
     CreateEmploymentCredentialResponse, DelegationRpcInfo, DelegatorSummary, DocClassConfigInfo,
     DocClassCredentialInfo, DocClassIdentityInfo, DocClassIssuerInfo, DocClassSummary,
     EmploymentCredentialInfo, EmploymentIssuerInfo, EmploymentSummary, EmploymentVerificationResult,
-    AssignmentCoverageV2, ChainParamsInfo, EpochInfo, FinalityInfo, GasEstimateResult, HealthResponse, IncomeAttestationInfo, NodeRecordInfo, PushableFileInfoV2, StorageFileInfoV2, TxStatusV2,
+    ArchiveUnbondingInfo, AssignmentCoverageV2, ChainParamsInfo, EpochInfo, FinalityInfo, GasEstimateResult, HealthResponse, IncomeAttestationInfo, NodeRecordInfo, PushableFileInfoV2, StorageFileInfoV2, TxStatusV2,
     InboxFilterInfo, IssueAcademicCredentialRequest, IssueAcademicCredentialResponse,
     MessageDataInfo, MessageEventInfo, MessagingConfigInfo, MessagingQuotaInfo,
     NftCollectionInfo, NftOwnerTokens, NftTokenInfo, NodeInfo, P2pStats, PendingPaymentInfo,
@@ -1600,6 +1600,18 @@ pub trait SumChainApi {
         &self,
         node_address: String,
     ) -> Result<Option<serde_json::Value>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get an archive node's pending stake-unbonding record (issue #20).
+    ///
+    /// Returns `None` if the operator has no unbonding in progress (never
+    /// started, or already withdrawn). See [`ArchiveUnbondingInfo`] for the
+    /// wire shape; withdrawal via `WithdrawUnbonded` is permitted once chain
+    /// height reaches `unlock_height`.
+    #[method(name = "storage_getArchiveUnbonding")]
+    async fn storage_get_archive_unbonding(
+        &self,
+        operator_address: String,
+    ) -> Result<Option<ArchiveUnbondingInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Get full V2 file metadata with a paginated access-list window.
     /// SNIP V2 Phase 1c (plan v3.2 §4, Ask 6).
