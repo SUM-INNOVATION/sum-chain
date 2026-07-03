@@ -6476,18 +6476,37 @@ impl SumChainApiServer for RpcServer {
         // was small enough for the chain to compute it (under the safety cap);
         // otherwise `None` is rendered to JSON — clients with very large files
         // compute counts locally via the deterministic assignment function.
-        let per_archive_wire: Vec<ArchiveCoverageSummaryV2> = summary
-            .per_archive
+        fn map_per_archive(
+            entries: &[sumchain_state::storage_metadata::ArchivePerEntry],
+        ) -> Vec<ArchiveCoverageSummaryV2> {
+            entries
+                .iter()
+                .map(|p| ArchiveCoverageSummaryV2 {
+                    archive: p.archive.to_base58(),
+                    assigned_count: p.assigned_count,
+                    attested_count: p.attested_count,
+                    currently_active: p.currently_active,
+                })
+                .collect()
+        }
+
+        // Top-level `per_archive` is epoch-0-only (issue #62, backward-compatible).
+        let per_archive_wire = map_per_archive(&summary.per_archive);
+
+        // Per-epoch detail (issue #62). Reassignment-aware clients read this.
+        let per_epoch_wire: Vec<AssignmentEpochCoverageV2> = summary
+            .per_epoch
             .iter()
-            .map(|p| ArchiveCoverageSummaryV2 {
-                archive: p.archive.to_base58(),
-                assigned_count: p.assigned_count,
-                attested_count: p.attested_count,
-                currently_active: p.currently_active,
+            .map(|e| AssignmentEpochCoverageV2 {
+                epoch_height: e.epoch_height,
+                is_epoch_zero: e.is_epoch_zero,
+                covered_count: e.covered_count,
+                per_archive: map_per_archive(&e.per_archive),
             })
             .collect();
 
-        // Compute missing_indices window: ascending i >= offset where union[i] == 0.
+        // Compute missing_indices window over the AGGREGATE union: ascending
+        // i >= offset where union[i] == 0.
         let mut missing_indices = Vec::new();
         for i in offset..summary.chunk_count {
             if (missing_indices.len() as u32) >= limit {
@@ -6511,6 +6530,10 @@ impl SumChainApiServer for RpcServer {
             missing_offset: offset,
             missing_indices,
             per_archive: per_archive_wire,
+            assignment_epochs: summary.assignment_epochs.clone(),
+            latest_assignment_epoch: summary.latest_assignment_epoch,
+            reassignment_needed: summary.reassignment_needed,
+            per_epoch: per_epoch_wire,
         }))
     }
 
@@ -7168,6 +7191,20 @@ mod phase_0b_rpc_tests {
                 attested_count: 2,
                 currently_active: true,
             }],
+            assignment_epochs: vec![100],
+            latest_assignment_epoch: 100,
+            reassignment_needed: false,
+            per_epoch: vec![AssignmentEpochCoverageV2 {
+                epoch_height: 100,
+                is_epoch_zero: true,
+                covered_count: 3,
+                per_archive: vec![ArchiveCoverageSummaryV2 {
+                    archive: "ArchiveAddr1".to_string(),
+                    assigned_count: Some(2),
+                    attested_count: 2,
+                    currently_active: true,
+                }],
+            }],
         };
         let got = serde_json::to_value(&v).unwrap();
         let want = serde_json::json!({
@@ -7182,6 +7219,20 @@ mod phase_0b_rpc_tests {
                 "assigned_count": 2,
                 "attested_count": 2,
                 "currently_active": true,
+            }],
+            "assignment_epochs": [100],
+            "latest_assignment_epoch": 100,
+            "reassignment_needed": false,
+            "per_epoch": [{
+                "epoch_height": 100,
+                "is_epoch_zero": true,
+                "covered_count": 3,
+                "per_archive": [{
+                    "archive": "ArchiveAddr1",
+                    "assigned_count": 2,
+                    "attested_count": 2,
+                    "currently_active": true,
+                }],
             }],
         });
         assert_eq!(got, want);
@@ -7206,10 +7257,29 @@ mod phase_0b_rpc_tests {
                 attested_count: 0,
                 currently_active: true,
             }],
+            assignment_epochs: vec![0],
+            latest_assignment_epoch: 0,
+            reassignment_needed: false,
+            per_epoch: vec![AssignmentEpochCoverageV2 {
+                epoch_height: 0,
+                is_epoch_zero: true,
+                covered_count: 0,
+                per_archive: vec![ArchiveCoverageSummaryV2 {
+                    archive: "BigArchive".to_string(),
+                    assigned_count: None,
+                    attested_count: 0,
+                    currently_active: true,
+                }],
+            }],
         };
         let got = serde_json::to_value(&v).unwrap();
         assert_eq!(
             got["per_archive"][0]["assigned_count"],
+            serde_json::Value::Null
+        );
+        // The per_epoch mirror also renders `assigned_count` as JSON null.
+        assert_eq!(
+            got["per_epoch"][0]["per_archive"][0]["assigned_count"],
             serde_json::Value::Null
         );
     }
@@ -7238,6 +7308,33 @@ mod phase_0b_rpc_tests {
                     assigned_count: None,
                     attested_count: 6,
                     currently_active: false,
+                },
+            ],
+            assignment_epochs: vec![50, 120],
+            latest_assignment_epoch: 120,
+            reassignment_needed: true,
+            per_epoch: vec![
+                AssignmentEpochCoverageV2 {
+                    epoch_height: 50,
+                    is_epoch_zero: true,
+                    covered_count: 8,
+                    per_archive: vec![ArchiveCoverageSummaryV2 {
+                        archive: "A".to_string(),
+                        assigned_count: Some(5),
+                        attested_count: 4,
+                        currently_active: true,
+                    }],
+                },
+                AssignmentEpochCoverageV2 {
+                    epoch_height: 120,
+                    is_epoch_zero: false,
+                    covered_count: 2,
+                    per_archive: vec![ArchiveCoverageSummaryV2 {
+                        archive: "C".to_string(),
+                        assigned_count: Some(3),
+                        attested_count: 2,
+                        currently_active: true,
+                    }],
                 },
             ],
         };

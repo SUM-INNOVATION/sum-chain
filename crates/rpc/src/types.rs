@@ -227,8 +227,41 @@ pub struct AssignmentCoverageV2 {
     /// Ascending list of `i >= missing_offset` where coverage[i] == 0,
     /// capped at `missing_limit` from the request.
     pub missing_indices: Vec<u32>,
-    /// One entry per archive in the file's snapshot. `per_archive` is always
-    /// returned in full (bounded by snapshot size, typically O(10) entries).
+    /// One entry per archive in the file's **epoch-0** snapshot, kept
+    /// epoch-0-only for backward-compatibility (issue #62). Reassignment-aware
+    /// clients should read `per_epoch` instead. `per_archive` is always returned
+    /// in full (bounded by snapshot size, typically O(10) entries).
+    pub per_archive: Vec<ArchiveCoverageSummaryV2>,
+    /// All assignment epoch heights, ascending (issue #62):
+    /// `[assignment_height, ...reassignment heights]`. A file with no
+    /// reassignment has exactly one entry.
+    pub assignment_epochs: Vec<u64>,
+    /// The latest assignment epoch height (== `assignment_epochs.last()`).
+    pub latest_assignment_epoch: u64,
+    /// True iff an archive assigned under the latest epoch has left the active
+    /// set — i.e. an owner `ReassignChunksV2` would be accepted (issue #62).
+    pub reassignment_needed: bool,
+    /// Per-epoch coverage detail (issue #62). Each entry's `per_archive` and
+    /// `covered_count` are self-consistent for that epoch — no mixing of
+    /// epoch-0 and reassignment-epoch data. The top-level `covered_count` /
+    /// `missing_indices` are the aggregate across all epochs.
+    pub per_epoch: Vec<AssignmentEpochCoverageV2>,
+}
+
+/// One epoch's coverage detail within `AssignmentCoverageV2.per_epoch` (issue
+/// #62). `epoch_height` names the active-archive snapshot used for this epoch's
+/// assignment (query `storage_getActiveNodesAtHeight(epoch_height)` to re-derive
+/// it client-side).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssignmentEpochCoverageV2 {
+    /// Block height of this epoch's assignment snapshot.
+    pub epoch_height: u64,
+    /// True for epoch 0 (the file's original `assignment_height`).
+    pub is_epoch_zero: bool,
+    /// Chunks covered by currently-Active attesters **in this epoch** only.
+    pub covered_count: u32,
+    /// Per-archive summary for this epoch's snapshot; `assigned_count` /
+    /// `attested_count` are both scoped to this epoch.
     pub per_archive: Vec<ArchiveCoverageSummaryV2>,
 }
 

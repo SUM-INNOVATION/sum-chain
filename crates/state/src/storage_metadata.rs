@@ -35,7 +35,15 @@ pub const CF_ACTIVE_CHALLENGES: &str = "active_challenges";
 /// `[b'F', b'2', merkle_root]` so the prefix never overlaps V1 `[b'F', root]`.
 pub const CF_STORAGE_METADATA_V2: &str = "storage_metadata_v2";
 /// V2 per-(file, archive) AcceptAssignmentV2 bitmap CF. Plan v3.2 §3.6.
+/// Epoch-0 only (issue #62): replacement-epoch attestations live in
+/// [`CF_ASSIGNMENT_ATTESTATIONS_V2_EPOCH`] and never touch this CF.
 pub const CF_ASSIGNMENT_ATTESTATIONS_V2: &str = "assignment_attestations_v2";
+/// Per-file archive-reassignment epochs (issue #62): `merkle_root` → `Vec<u64>`
+/// of reassignment heights (epoch ≥ 1). Epoch 0 is the file's `assignment_height`
+/// and is not stored here.
+pub const CF_FILE_REASSIGNMENTS: &str = "file_reassignments";
+/// Per-(file, epoch, archive) reassignment attestation bitmaps (issue #62).
+pub const CF_ASSIGNMENT_ATTESTATIONS_V2_EPOCH: &str = "assignment_attestations_v2_epoch";
 
 // ─── Key Helpers ─────────────────────────────────────────────────────────────
 
@@ -96,6 +104,24 @@ fn attestation_v2_file_prefix(merkle_root: &Hash) -> Vec<u8> {
     p.push(b'A');
     p.extend_from_slice(merkle_root.as_bytes());
     p
+}
+
+// -- Reassignment keys (issue #62) --
+
+/// `file_reassignments` key: raw 32-byte `merkle_root` (dedicated CF).
+fn file_reassignments_key(merkle_root: &Hash) -> Vec<u8> {
+    merkle_root.as_bytes().to_vec()
+}
+
+/// Reassignment attestation bitmap key:
+/// `[b'R', merkle_root_32, epoch_height_be_8, archive_20]` (61 bytes).
+fn attestation_v2_epoch_key(merkle_root: &Hash, epoch_height: u64, archive: &Address) -> Vec<u8> {
+    let mut key = Vec::with_capacity(61);
+    key.push(b'R');
+    key.extend_from_slice(merkle_root.as_bytes());
+    key.extend_from_slice(&epoch_height.to_be_bytes());
+    key.extend_from_slice(archive.as_bytes());
+    key
 }
 
 // ─── Bitmap helpers (Plan v3.2 §3.6) ──────────────────────────────────────────
@@ -308,8 +334,25 @@ pub struct ArchivePerEntry {
 /// deterministic [`assigned_archives_presorted`] function.
 pub const MAX_ASSIGNED_COUNT_CHUNK_COUNT: u32 = 16_384;
 
+/// Per-epoch coverage detail (issue #62). One entry per assignment epoch (epoch
+/// 0 = `assignment_height`, then each reassignment height). Its `per_archive`
+/// and `covered_count` are self-consistent for that epoch — no mixing of
+/// epoch-0 and reassignment data.
+#[derive(Debug, Clone)]
+pub struct EpochCoverageEntry {
+    pub epoch_height: u64,
+    pub is_epoch_zero: bool,
+    pub covered_count: u32,
+    pub per_archive: Vec<ArchivePerEntry>,
+}
+
 /// Coverage summary for `storage_getAssignmentCoverageV2`. RPC-side combines
 /// this with `assigned_archives` per chunk to produce the wire response.
+///
+/// Issue #62: top-level scalars (`covered_count`, `union`) are **aggregate**
+/// across all epochs (equal to the epoch-0 values for files with no
+/// reassignment). Top-level `per_archive` stays **epoch-0-only** for
+/// backward-compatibility; all reassignment-aware detail is in `per_epoch`.
 #[derive(Debug, Clone)]
 pub struct CoverageSummaryV2 {
     pub chunk_count: u32,
@@ -317,10 +360,20 @@ pub struct CoverageSummaryV2 {
     pub lifecycle: FileLifecycleV2,
     pub assignment_height: u64,
     pub replication_factor: u32,
-    /// OR of all snapshot-active archives' bitmaps. Used by the RPC to
-    /// compute `missing_indices`.
+    /// Aggregate OR of every currently-active archive's bitmap across all
+    /// epochs. Used by the RPC to compute `missing_indices`.
     pub union: Vec<u8>,
+    /// Epoch-0-only per-archive summary (backward-compatible).
     pub per_archive: Vec<ArchivePerEntry>,
+    /// All assignment epoch heights, ascending: `[assignment_height, ...reassign]`.
+    pub assignment_epochs: Vec<u64>,
+    /// The latest epoch height (== `assignment_epochs.last()`).
+    pub latest_assignment_epoch: u64,
+    /// Whether an originally-/currently-assigned archive has left the active set
+    /// since the latest epoch — i.e. `ReassignChunksV2` would be accepted.
+    pub reassignment_needed: bool,
+    /// Per-epoch coverage detail (reassignment-aware client path).
+    pub per_epoch: Vec<EpochCoverageEntry>,
 }
 
 /// Result type for V2 storage operations. Carries an optional `failure_code`
@@ -962,13 +1015,22 @@ impl StorageMetadataExecutor {
             StorageMetadataOperationV2::AcceptAssignmentV2 {
                 merkle_root,
                 chunk_indices,
-            } => self.execute_accept_assignment_v2(
-                sender,
-                merkle_root,
-                chunk_indices,
-                chain_params,
-                node_registry,
-            ),
+            } => {
+                // Reassignment routing only applies when the reassignment gate is
+                // open; dormant → exactly the pre-#62 accept path.
+                let reassignment_gate_open = matches!(
+                    chain_params.archive_reassignment_enabled_from_height,
+                    Some(h) if block_height >= h
+                );
+                self.execute_accept_assignment_v2(
+                    sender,
+                    merkle_root,
+                    chunk_indices,
+                    chain_params,
+                    node_registry,
+                    reassignment_gate_open,
+                )
+            }
             StorageMetadataOperationV2::ActivateFileV2 { merkle_root } => self
                 .execute_activate_file_v2(
                     sender,
@@ -1001,6 +1063,14 @@ impl StorageMetadataExecutor {
                 chain_params,
                 node_registry,
             ),
+            StorageMetadataOperationV2::ReassignChunksV2 { merkle_root } => self
+                .execute_reassign_chunks_v2(
+                    sender,
+                    merkle_root,
+                    block_height,
+                    chain_params,
+                    node_registry,
+                ),
         }
     }
 
@@ -1188,8 +1258,12 @@ impl StorageMetadataExecutor {
     }
 
     /// Plan v3.2 §3.6 AcceptAssignmentV2 — OR the supplied `chunk_indices` into
-    /// the per-(file, archive) bitmap. Receipt code allocations:
+    /// the per-(file, archive) bitmap. Issue #62 makes this epoch-aware: an
+    /// attestation targets the file's **latest** assignment epoch and writes to
+    /// the matching CF (epoch 0 → `assignment_attestations_v2`; a reassignment
+    /// epoch → `assignment_attestations_v2_epoch`). Receipt codes:
     /// * 33 — AcceptAssignmentV2 validity failure.
+    /// * 335 — Active-file re-attestation with no reassignment epoch.
     fn execute_accept_assignment_v2(
         &self,
         signer: &Address,
@@ -1197,9 +1271,9 @@ impl StorageMetadataExecutor {
         chunk_indices: &[u32],
         chain_params: &ChainParams,
         node_registry: &NodeRegistryExecutor,
+        reassignment_gate_open: bool,
     ) -> Result<StorageMetadataV2ExecutionResult> {
-        // 1. File must exist and be Pending. Pending-only ensures bitmaps stop
-        // accumulating once activated — no post-activation re-attestation surface.
+        // 1. File must exist.
         let row = match self.get_metadata_v2(merkle_root)? {
             Some(r) => r,
             None => {
@@ -1209,14 +1283,43 @@ impl StorageMetadataExecutor {
                 ));
             }
         };
-        if row.lifecycle != FileLifecycleV2::Pending {
-            return Ok(StorageMetadataV2ExecutionResult::fail_with_code(
-                33,
-                "AcceptAssignmentV2: file must be Pending",
-            ));
+
+        // Reassignment routing engages ONLY when the reassignment gate is open.
+        // When dormant, this is exactly the pre-#62 path: Pending-only, epoch 0.
+        // (Reassignment epochs cannot exist unless the gate was open, so this is
+        // also the natural steady state on a chain that never activated #62.)
+        let reassignments = self.get_file_reassignments(merkle_root)?;
+        let use_reassignment = reassignment_gate_open && !reassignments.is_empty();
+        let target_epoch = if use_reassignment {
+            *reassignments.last().expect("non-empty checked above")
+        } else {
+            row.assignment_height
+        };
+        let is_epoch_zero = target_epoch == row.assignment_height;
+
+        // 2. Lifecycle gate.
+        // - Pending: always acceptable.
+        // - Active + gate open + reassignment epoch exists: re-attest to latest.
+        // - Active + gate open + no reassignment epoch: 335.
+        // - Active + gate dormant, or Abandoned: unchanged pre-#62 rejection (33).
+        match row.lifecycle {
+            FileLifecycleV2::Pending => {}
+            FileLifecycleV2::Active if use_reassignment => {}
+            FileLifecycleV2::Active if reassignment_gate_open => {
+                return Ok(StorageMetadataV2ExecutionResult::fail_with_code(
+                    335,
+                    "AcceptAssignmentV2: post-activation re-attestation requires an open reassignment epoch",
+                ));
+            }
+            _ => {
+                return Ok(StorageMetadataV2ExecutionResult::fail_with_code(
+                    33,
+                    "AcceptAssignmentV2: file must be Pending",
+                ));
+            }
         }
 
-        // 2. Per-tx cap. Enforced before snapshot lookup so a degenerate
+        // 3. Per-tx cap. Enforced before snapshot lookup so a degenerate
         // payload doesn't trigger a database read.
         if chunk_indices.len() as u64 > chain_params.max_chunk_indices_per_tx as u64 {
             return Ok(StorageMetadataV2ExecutionResult::fail_with_code(
@@ -1229,23 +1332,20 @@ impl StorageMetadataExecutor {
             ));
         }
 
-        // 3. Resolve the snapshot at the file's assignment_height.
-        // Signer must be in the snapshot AND currently Active.
-        let snapshot = node_registry
-            .get_active_archive_nodes_at_height(row.assignment_height)?;
+        // 4. Resolve the snapshot at the TARGET epoch. Signer must be in that
+        // snapshot AND currently Active.
+        let snapshot = node_registry.get_active_archive_nodes_at_height(target_epoch)?;
         if !snapshot
             .iter()
             .any(|n| n.address.as_bytes() == signer.as_bytes())
         {
             return Ok(StorageMetadataV2ExecutionResult::fail_with_code(
                 33,
-                "AcceptAssignmentV2: signer not in file's assignment snapshot",
+                "AcceptAssignmentV2: signer not in the target epoch's assignment snapshot",
             ));
         }
         // An `Unbonding` archive (issue #20) is exiting and must not take on new
-        // assignments — reject explicitly so the reason is precise. (The generic
-        // "not currently Active" check below would also catch it, but a dedicated
-        // message documents the interaction between withdrawal and assignment.)
+        // assignments — reject explicitly so the reason is precise.
         let signer_status = node_registry.get_node(signer)?.map(|rec| rec.status);
         if signer_status == Some(NodeStatus::Unbonding) {
             return Ok(StorageMetadataV2ExecutionResult::fail_with_code(
@@ -1261,9 +1361,9 @@ impl StorageMetadataExecutor {
             ));
         }
 
-        // 4. Per-index validity: idx < chunk_count AND signer is in the
-        // assigned set per the deterministic assignment function. Any
-        // mismatch rejects the whole tx (no partial application).
+        // 5. Per-index validity: idx < chunk_count AND signer is in the
+        // assigned set per the deterministic assignment function evaluated over
+        // the TARGET epoch's snapshot. Any mismatch rejects the whole tx.
         let snapshot_addrs: Vec<Address> =
             snapshot.iter().map(|n| n.address).collect();
         for &idx in chunk_indices {
@@ -1286,37 +1386,40 @@ impl StorageMetadataExecutor {
                 return Ok(StorageMetadataV2ExecutionResult::fail_with_code(
                     33,
                     format!(
-                        "AcceptAssignmentV2: chunk_index {} not assigned to signer",
+                        "AcceptAssignmentV2: chunk_index {} not assigned to signer in target epoch",
                         idx
                     ),
                 ));
             }
         }
 
-        // 5. OR the supplied indices into the per-(file, archive) bitmap.
-        // Lazy allocation: row is created on first accept.
+        // 6. OR the supplied indices into the per-(file, archive) bitmap for the
+        // target epoch. Epoch 0 → the original CF (unchanged behavior); a
+        // reassignment epoch → the epoch-aware CF. Lazy allocation on first accept.
         let bm_len = bitmap_byte_len(row.chunk_count);
-        let key = attestation_v2_key(merkle_root, signer);
-        let mut bitmap = match self
-            .db
-            .get(CF_ASSIGNMENT_ATTESTATIONS_V2, &key)
-            .map_err(StateError::Storage)?
-        {
+        let (cf, key) = if is_epoch_zero {
+            (CF_ASSIGNMENT_ATTESTATIONS_V2, attestation_v2_key(merkle_root, signer))
+        } else {
+            (
+                CF_ASSIGNMENT_ATTESTATIONS_V2_EPOCH,
+                attestation_v2_epoch_key(merkle_root, target_epoch, signer),
+            )
+        };
+        let mut bitmap = match self.db.get(cf, &key).map_err(StateError::Storage)? {
             Some(bytes) if bytes.len() == bm_len => bytes,
             _ => vec![0u8; bm_len],
         };
         for &idx in chunk_indices {
             bitmap_set(&mut bitmap, idx);
         }
-        self.db
-            .put(CF_ASSIGNMENT_ATTESTATIONS_V2, &key, &bitmap)
-            .map_err(StateError::Storage)?;
+        self.db.put(cf, &key, &bitmap).map_err(StateError::Storage)?;
 
         debug!(
-            "AcceptAssignmentV2: archive {} attested {} chunks for {} (popcount={})",
+            "AcceptAssignmentV2: archive {} attested {} chunks for {} at epoch {} (popcount={})",
             signer,
             chunk_indices.len(),
             merkle_root,
+            target_epoch,
             bitmap_popcount(&bitmap)
         );
 
@@ -1356,30 +1459,13 @@ impl StorageMetadataExecutor {
             ));
         }
 
-        // Coverage check. OR all snapshot-active archives' bitmaps and ensure
-        // every chunk index in `[0, chunk_count)` has at least one bit set.
-        // Inactive (Slashed) archives' bitmaps are excluded — slashing between
-        // attest and activate must remove that archive's contribution.
-        let snapshot = node_registry.get_active_archive_nodes_at_height(row.assignment_height)?;
-        let bm_len = bitmap_byte_len(row.chunk_count);
-        let mut union = vec![0u8; bm_len];
-        for node in &snapshot {
-            if !is_currently_active(node_registry, &node.address)? {
-                continue;
-            }
-            let key = attestation_v2_key(merkle_root, &node.address);
-            if let Some(bm) = self
-                .db
-                .get(CF_ASSIGNMENT_ATTESTATIONS_V2, &key)
-                .map_err(StateError::Storage)?
-            {
-                if bm.len() == bm_len {
-                    bitmap_or_into(&mut union, &bm);
-                }
-                // Length-mismatch row (shouldn't happen — chunk_count is fixed
-                // at registration) is silently ignored; treat as no contribution.
-            }
-        }
+        // Coverage check. Aggregate the attestation bitmaps of every
+        // currently-Active archive across epoch 0 AND all reassignment epochs
+        // (issue #62), and require every chunk index in `[0, chunk_count)` to be
+        // set. Inactive (Slashed/Unbonding/Withdrawn) archives' bitmaps are
+        // excluded. For a file with no reassignment this is exactly the
+        // pre-#62 epoch-0 union.
+        let union = self.aggregate_coverage_union(&row, node_registry)?;
         let covered = bitmap_popcount(&union);
         if covered != row.chunk_count {
             return Ok(StorageMetadataV2ExecutionResult::fail_with_code(
@@ -1722,19 +1808,62 @@ impl StorageMetadataExecutor {
             Some(r) => r,
             None => return Ok(None),
         };
-        let snapshot = node_registry.get_active_archive_nodes_at_height(row.assignment_height)?;
+
+        // Issue #62: compute coverage per epoch, then aggregate. Epoch 0
+        // (`assignment_height`) is always present; reassignment heights follow.
+        let epochs = self.file_epochs(&row)?;
+        let latest_assignment_epoch = *epochs.last().expect("epoch 0 always present");
+        let bm_len = bitmap_byte_len(row.chunk_count);
+        let mut agg_union = vec![0u8; bm_len];
+        let mut per_epoch: Vec<EpochCoverageEntry> = Vec::with_capacity(epochs.len());
+        for &epoch in &epochs {
+            let (entry, epoch_union) =
+                self.compute_epoch_coverage(&row, epoch, node_registry, replication_factor)?;
+            bitmap_or_into(&mut agg_union, &epoch_union);
+            per_epoch.push(entry);
+        }
+
+        // Top-level `per_archive` stays epoch-0-only for backward-compatibility.
+        let per_archive = per_epoch
+            .first()
+            .map(|e| e.per_archive.clone())
+            .unwrap_or_default();
+        let reassignment_needed = self.reassignment_needed(&row, node_registry)?;
+
+        Ok(Some(CoverageSummaryV2 {
+            chunk_count: row.chunk_count,
+            covered_count: bitmap_popcount(&agg_union),
+            lifecycle: row.lifecycle,
+            assignment_height: row.assignment_height,
+            replication_factor,
+            union: agg_union,
+            per_archive,
+            assignment_epochs: epochs,
+            latest_assignment_epoch,
+            reassignment_needed,
+            per_epoch,
+        }))
+    }
+
+    // ── Reassignment (issue #62) ─────────────────────────────────────────────
+
+    /// Compute one epoch's coverage entry and its (currently-Active) attestation
+    /// union. Shared by [`Self::compute_coverage_v2`].
+    fn compute_epoch_coverage(
+        &self,
+        row: &StorageMetadataV2,
+        epoch: u64,
+        node_registry: &NodeRegistryExecutor,
+        replication_factor: u32,
+    ) -> Result<(EpochCoverageEntry, Vec<u8>)> {
+        let snapshot = node_registry.get_active_archive_nodes_at_height(epoch)?;
         let bm_len = bitmap_byte_len(row.chunk_count);
         let mut union = vec![0u8; bm_len];
         let mut per_archive: Vec<ArchivePerEntry> = Vec::with_capacity(snapshot.len());
 
         for node in &snapshot {
             let currently_active = is_currently_active(node_registry, &node.address)?;
-            let key = attestation_v2_key(merkle_root, &node.address);
-            let attested_count = match self
-                .db
-                .get(CF_ASSIGNMENT_ATTESTATIONS_V2, &key)
-                .map_err(StateError::Storage)?
-            {
+            let attested_count = match self.get_attestation_bitmap(row, epoch, &node.address)? {
                 Some(bm) if bm.len() == bm_len => {
                     if currently_active {
                         bitmap_or_into(&mut union, &bm);
@@ -1747,25 +1876,20 @@ impl StorageMetadataExecutor {
                 archive: node.address,
                 attested_count,
                 currently_active,
-                assigned_count: None, // populated below if cap permits
+                assigned_count: None,
             });
         }
 
-        // Per-archive `assigned_count`. Compute iff under the safety cap; one
-        // pass over chunks reusing a presorted snapshot — the prior
-        // implementation re-sorted the snapshot inside every call, blowing up
-        // to O(chunks × archives²). Now O(chunks × archives × log(archives))
-        // dominated by BLAKE3, capped by MAX_ASSIGNED_COUNT_CHUNK_COUNT.
+        // Per-archive `assigned_count` for THIS epoch's snapshot, under the cap.
         if row.chunk_count <= MAX_ASSIGNED_COUNT_CHUNK_COUNT {
-            let mut sorted_addrs: Vec<Address> =
-                snapshot.iter().map(|n| n.address).collect();
+            let mut sorted_addrs: Vec<Address> = snapshot.iter().map(|n| n.address).collect();
             sorted_addrs.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
             sorted_addrs.dedup_by(|a, b| a.as_bytes() == b.as_bytes());
 
             let mut counts: Vec<u32> = vec![0u32; per_archive.len()];
             for chunk_idx in 0..row.chunk_count {
                 let assigned = sumchain_primitives::assigned_archives_presorted(
-                    merkle_root,
+                    &row.merkle_root,
                     &sorted_addrs,
                     chunk_idx,
                     replication_factor,
@@ -1784,15 +1908,171 @@ impl StorageMetadataExecutor {
             }
         }
 
-        Ok(Some(CoverageSummaryV2 {
-            chunk_count: row.chunk_count,
+        let entry = EpochCoverageEntry {
+            epoch_height: epoch,
+            is_epoch_zero: epoch == row.assignment_height,
             covered_count: bitmap_popcount(&union),
-            lifecycle: row.lifecycle,
-            assignment_height: row.assignment_height,
-            replication_factor,
-            union,
             per_archive,
-        }))
+        };
+        Ok((entry, union))
+    }
+
+    /// Read a file's reassignment epoch heights (issue #62). Empty ⇒ epoch-0-only
+    /// (every pre-#62 file). Public so the coverage RPC / clients can read it.
+    pub fn get_file_reassignments(&self, merkle_root: &Hash) -> Result<Vec<u64>> {
+        match self
+            .db
+            .get(CF_FILE_REASSIGNMENTS, &file_reassignments_key(merkle_root))
+            .map_err(StateError::Storage)?
+        {
+            Some(bytes) => bincode::deserialize(&bytes)
+                .map_err(|e| StateError::DeserializationError(e.to_string())),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    fn put_file_reassignments(&self, merkle_root: &Hash, epochs: &[u64]) -> Result<()> {
+        let value = bincode::serialize(&epochs.to_vec())
+            .map_err(|e| StateError::SerializationError(e.to_string()))?;
+        self.db
+            .put(CF_FILE_REASSIGNMENTS, &file_reassignments_key(merkle_root), &value)
+            .map_err(StateError::Storage)
+    }
+
+    /// Full epoch list for a file, ascending: `[assignment_height, ...reassign]`.
+    /// Always non-empty (epoch 0 = `assignment_height`).
+    fn file_epochs(&self, row: &StorageMetadataV2) -> Result<Vec<u64>> {
+        let mut epochs = vec![row.assignment_height];
+        epochs.extend(self.get_file_reassignments(&row.merkle_root)?);
+        Ok(epochs)
+    }
+
+    /// Read the (file, archive) attestation bitmap for a given epoch, from the
+    /// epoch-0 CF or the reassignment-epoch CF as appropriate.
+    fn get_attestation_bitmap(
+        &self,
+        row: &StorageMetadataV2,
+        epoch: u64,
+        archive: &Address,
+    ) -> Result<Option<Vec<u8>>> {
+        let (cf, key) = if epoch == row.assignment_height {
+            (CF_ASSIGNMENT_ATTESTATIONS_V2, attestation_v2_key(&row.merkle_root, archive))
+        } else {
+            (
+                CF_ASSIGNMENT_ATTESTATIONS_V2_EPOCH,
+                attestation_v2_epoch_key(&row.merkle_root, epoch, archive),
+            )
+        };
+        self.db.get(cf, &key).map_err(StateError::Storage)
+    }
+
+    /// Aggregate coverage union across all epochs — OR the bitmaps of every
+    /// currently-Active archive in each epoch's snapshot. For a file with no
+    /// reassignment this equals the epoch-0 union exactly.
+    fn aggregate_coverage_union(
+        &self,
+        row: &StorageMetadataV2,
+        node_registry: &NodeRegistryExecutor,
+    ) -> Result<Vec<u8>> {
+        let bm_len = bitmap_byte_len(row.chunk_count);
+        let mut union = vec![0u8; bm_len];
+        for epoch in self.file_epochs(row)? {
+            let snapshot = node_registry.get_active_archive_nodes_at_height(epoch)?;
+            for node in &snapshot {
+                if !is_currently_active(node_registry, &node.address)? {
+                    continue;
+                }
+                if let Some(bm) = self.get_attestation_bitmap(row, epoch, &node.address)? {
+                    if bm.len() == bm_len {
+                        bitmap_or_into(&mut union, &bm);
+                    }
+                }
+            }
+        }
+        Ok(union)
+    }
+
+    /// Issue #62 gap predicate. `true` iff an archive from the LATEST epoch's
+    /// assignment snapshot has since left the active set (exit / slash / unbond)
+    /// — the only condition under which `ReassignChunksV2` is accepted. After a
+    /// reassignment the latest snapshot is all-Active, so this returns `false`,
+    /// which rejects no-op epoch churn.
+    fn reassignment_needed(
+        &self,
+        row: &StorageMetadataV2,
+        node_registry: &NodeRegistryExecutor,
+    ) -> Result<bool> {
+        let epochs = self.file_epochs(row)?;
+        let latest = *epochs.last().expect("epoch 0 always present");
+        let latest_snapshot = node_registry.get_active_archive_nodes_at_height(latest)?;
+        for node in &latest_snapshot {
+            if !is_currently_active(node_registry, &node.address)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// `ReassignChunksV2` (issue #62). Owner-triggered epoch advance. The
+    /// reassignment activation gate is enforced at the dispatch layer (→ 330, no
+    /// fee) before this runs; here the fee is already deducted, so semantic
+    /// failures charge the fee (existing V2 policy). Receipt codes 331–334.
+    fn execute_reassign_chunks_v2(
+        &self,
+        sender: &Address,
+        merkle_root: &Hash,
+        block_height: u64,
+        _chain_params: &ChainParams,
+        node_registry: &NodeRegistryExecutor,
+    ) -> Result<StorageMetadataV2ExecutionResult> {
+        let row = match self.get_metadata_v2(merkle_root)? {
+            Some(r) => r,
+            None => {
+                return Ok(StorageMetadataV2ExecutionResult::fail_with_code(
+                    331,
+                    "ReassignChunksV2: file not found",
+                ));
+            }
+        };
+        if row.owner != *sender {
+            return Ok(StorageMetadataV2ExecutionResult::fail_with_code(
+                332,
+                "ReassignChunksV2: signer is not the file owner",
+            ));
+        }
+        match row.lifecycle {
+            FileLifecycleV2::Pending | FileLifecycleV2::Active => {}
+            FileLifecycleV2::Abandoned => {
+                return Ok(StorageMetadataV2ExecutionResult::fail_with_code(
+                    333,
+                    "ReassignChunksV2: Abandoned files cannot be reassigned",
+                ));
+            }
+        }
+        if !self.reassignment_needed(&row, node_registry)? {
+            return Ok(StorageMetadataV2ExecutionResult::fail_with_code(
+                334,
+                "ReassignChunksV2: no reassignment needed (no coverage gap)",
+            ));
+        }
+
+        let mut epochs = self.get_file_reassignments(merkle_root)?;
+        // Anti-churn: never append a duplicate epoch within the same block.
+        if epochs.last() == Some(&block_height) {
+            return Ok(StorageMetadataV2ExecutionResult::fail_with_code(
+                334,
+                "ReassignChunksV2: file already reassigned at this height",
+            ));
+        }
+        epochs.push(block_height);
+        self.put_file_reassignments(merkle_root, &epochs)?;
+
+        info!(
+            "ReassignChunksV2: file {} advanced to reassignment epoch {}",
+            merkle_root, block_height
+        );
+
+        Ok(StorageMetadataV2ExecutionResult::ok())
     }
 
     // ── V2 row CRUD ─────────────────────────────────────────────────────────
