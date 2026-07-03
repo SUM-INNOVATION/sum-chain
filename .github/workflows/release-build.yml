@@ -1,0 +1,152 @@
+name: release-build
+
+# Builds release binaries for all supported platforms from clean `main` and
+# updates the existing v0.1.0 DRAFT release (assets + SHA256SUMS + notes).
+# Never publishes: the release stays a draft. Trigger by pushing a release/**
+# branch, or manually via workflow_dispatch.
+
+on:
+  push:
+    branches: ["release/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  VERSION: "0.1.0"
+  TAG: "v0.1.0"
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-x86_64
+          - os: ubuntu-24.04-arm
+            target: linux-arm64
+          - os: macos-14
+            target: macos-arm64
+          - os: macos-13
+            target: macos-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout main (clean)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Build release binaries
+        run: cargo build -p sumchain-node -p sumchain-wallet --release
+
+      - name: Validate --help
+        run: |
+          ./target/release/sumchain --help | grep -q "Run a full node"
+          ./target/release/sumchain-wallet --help | grep -qi "keygen"
+
+      - name: Wallet keystore tests (non-interactive smoke)
+        run: cargo test -p sumchain-wallet
+
+      - name: Package binaries
+        run: |
+          cp target/release/sumchain "sumchain-${VERSION}-${{ matrix.target }}"
+          cp target/release/sumchain-wallet "sumchain-wallet-${VERSION}-${{ matrix.target }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.target }}
+          path: |
+            sumchain-${{ env.VERSION }}-${{ matrix.target }}
+            sumchain-wallet-${{ env.VERSION }}-${{ matrix.target }}
+          if-no-files-found: error
+
+  publish-assets:
+    name: update draft
+    needs: build
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Download all built binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Require linux-x86_64 and macos-arm64 to be present
+        run: |
+          cd dist
+          ls -la
+          for req in \
+            "sumchain-${VERSION}-linux-x86_64" "sumchain-wallet-${VERSION}-linux-x86_64" \
+            "sumchain-${VERSION}-macos-arm64"  "sumchain-wallet-${VERSION}-macos-arm64"; do
+            test -f "$req" || { echo "::error::missing required asset: $req"; exit 1; }
+          done
+
+      - name: Generate SHA256SUMS
+        run: |
+          cd dist
+          sha256sum sumchain-${VERSION}-* sumchain-wallet-${VERSION}-* > SHA256SUMS
+          echo "----- SHA256SUMS -----"; cat SHA256SUMS
+
+      - name: Write release notes
+        run: |
+          cd dist
+          cat > NOTES.md <<'EOF'
+          First public release of SUM Chain — a Rust Layer-1 powering Koppa (Ϙ).
+
+          Binaries are **unsigned** (no code signing, no notarization). Verify every download against `SHA256SUMS` before use.
+
+          ## Supported platforms
+          | Binaries | Platform | Built on (GitHub Actions) |
+          |---|---|---|
+          | `sumchain-0.1.0-linux-x86_64`, `sumchain-wallet-0.1.0-linux-x86_64` | Linux x86_64 | `ubuntu-latest` |
+          | `sumchain-0.1.0-linux-arm64`, `sumchain-wallet-0.1.0-linux-arm64` | Linux arm64 | `ubuntu-24.04-arm` |
+          | `sumchain-0.1.0-macos-arm64`, `sumchain-wallet-0.1.0-macos-arm64` | macOS arm64 (Apple Silicon) | `macos-14` |
+          | `sumchain-0.1.0-macos-x86_64`, `sumchain-wallet-0.1.0-macos-x86_64` | macOS x86_64 (Intel) | `macos-13` |
+
+          After downloading, make the binaries executable:
+          - **Linux / macOS:** `chmod +x ./sumchain ./sumchain-wallet`
+          - **macOS Gatekeeper:** if a downloaded binary is quarantined, clear the flag: `xattr -d com.apple.quarantine ./sumchain ./sumchain-wallet`
+
+          ## Run a node
+          ```bash
+          ./sumchain run --config config.toml --genesis genesis.json
+          ```
+          A full node syncs and serves the network; it does **not** make you a block producer — validator-set membership is coordinated (Proof-of-Authority). Guide: https://sumchain.io/run-node
+
+          ## Create a wallet
+          ```bash
+          ./sumchain-wallet keygen --output keystore.json
+          ```
+          Generates an encrypted keystore (Argon2 + AES-256-GCM), then `address` / `balance` / `transfer` / `sign-tx` / `send`. There is **no seed phrase** — back up your keystore file and password. Guide: https://sumchain.io/wallet
+
+          ## TypeScript SDK
+          ```bash
+          npm install @sumchain/sdk
+          ```
+          `@sumchain/sdk@0.1.0` is published on npm: https://www.npmjs.com/package/@sumchain/sdk
+
+          ## Checksums
+          ```bash
+          sha256sum -c SHA256SUMS    # Linux
+          shasum -a 256 -c SHA256SUMS  # macOS
+          ```
+          EOF
+          echo "wrote NOTES.md"
+
+      - name: Update the v0.1.0 draft (assets + notes; stays a draft)
+        run: |
+          cd dist
+          gh release upload "${TAG}" \
+            sumchain-${VERSION}-* sumchain-wallet-${VERSION}-* SHA256SUMS \
+            --clobber --repo "${GITHUB_REPOSITORY}"
+          gh release edit "${TAG}" --notes-file NOTES.md --repo "${GITHUB_REPOSITORY}"
+          echo "Draft ${TAG} updated. Verifying it remains a draft:"
+          gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json isDraft,tagName,assets \
+            --jq '{isDraft, tag: .tagName, assets: [.assets[].name]}'
