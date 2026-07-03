@@ -1242,10 +1242,18 @@ impl StorageMetadataExecutor {
                 "AcceptAssignmentV2: signer not in file's assignment snapshot",
             ));
         }
-        let signer_currently_active = match node_registry.get_node(signer)? {
-            Some(rec) => rec.status == NodeStatus::Active,
-            None => false,
-        };
+        // An `Unbonding` archive (issue #20) is exiting and must not take on new
+        // assignments — reject explicitly so the reason is precise. (The generic
+        // "not currently Active" check below would also catch it, but a dedicated
+        // message documents the interaction between withdrawal and assignment.)
+        let signer_status = node_registry.get_node(signer)?.map(|rec| rec.status);
+        if signer_status == Some(NodeStatus::Unbonding) {
+            return Ok(StorageMetadataV2ExecutionResult::fail_with_code(
+                33,
+                "AcceptAssignmentV2: signer is unbonding and cannot accept new assignments",
+            ));
+        }
+        let signer_currently_active = signer_status == Some(NodeStatus::Active);
         if !signer_currently_active {
             return Ok(StorageMetadataV2ExecutionResult::fail_with_code(
                 33,

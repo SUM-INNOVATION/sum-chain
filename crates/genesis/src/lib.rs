@@ -188,6 +188,30 @@ pub struct ChainParams {
     /// for a coordinated activation or in tests. See docs/specs/GOVERNANCE-V1.md.
     #[serde(default)]
     pub governance: Option<GovernanceParams>,
+
+    /// Block height at which archive-node stake withdrawal (issue #20) activates.
+    /// `None` = disabled forever; `Some(h)` = `BeginUnstake` / `WithdrawUnbonded`
+    /// execute from block `h` onward. Below the gate they are rejected free (no
+    /// fee, no state). Mirrors the V2/OmniNode/Education/Contracts/Governance
+    /// activation pattern; SNIP V2 is already active on mainnet, so archive
+    /// withdrawal ships behind its own coordinated gate.
+    ///
+    /// Production safety: `#[serde(default)]` resolves a missing field to `None`,
+    /// so an existing mainnet `genesis.json` stays dormant until operators
+    /// coordinate an explicit activation height.
+    #[serde(default)]
+    pub archive_unbonding_enabled_from_height: Option<u64>,
+
+    /// Number of blocks an archive node's stake stays locked after `BeginUnstake`
+    /// before `WithdrawUnbonded` is allowed (issue #20). Only consulted once
+    /// `archive_unbonding_enabled_from_height` is set. Distinct from validator
+    /// staking's `unbonding_period`.
+    #[serde(default = "default_archive_unbonding_period_blocks")]
+    pub archive_unbonding_period_blocks: u64,
+}
+
+fn default_archive_unbonding_period_blocks() -> u64 {
+    201_600 // ~7 days at 3s blocks; a safe non-trivial unbonding delay
 }
 
 fn default_finality_depth() -> u64 {
@@ -392,6 +416,10 @@ impl Default for ChainParams {
             governance_enabled_from_height: None,
             // No governance parameters configured by default.
             governance: None,
+            // Production-safe default: archive-node withdrawal dormant (issue
+            // #20). Activation is a coordinated validator upgrade.
+            archive_unbonding_enabled_from_height: None,
+            archive_unbonding_period_blocks: default_archive_unbonding_period_blocks(),
         }
     }
 }

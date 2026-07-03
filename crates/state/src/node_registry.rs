@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use sumchain_crypto::is_low_order_x25519_public_key;
 use sumchain_primitives::{
-    Address, Balance, NodeRecord, NodeRegistryOperation, NodeRegistryOperationV2,
-    NodeRegistryTxData, NodeRegistryV2TxData, NodeRole, NodeStatus,
+    Address, ArchiveUnbondingRecord, Balance, NodeRecord, NodeRegistryOperation,
+    NodeRegistryOperationV2, NodeRegistryTxData, NodeRegistryV2TxData, NodeRole, NodeStatus,
 };
 use sumchain_storage::Database;
 use tracing::{info, warn};
@@ -31,6 +31,10 @@ const CF_ACCOUNT_ENCRYPTION_KEYS: &str = "account_encryption_keys";
 /// (SNIP V2 Ask 15, Option A). Snapshot-on-change — written on register,
 /// status change to/from Slashed, expired-challenge slashing, and at genesis.
 const CF_ACTIVE_ARCHIVE_NODES_HISTORY: &str = "active_archive_nodes_history";
+
+/// Column family for pending archive-node stake unbonding records (issue #20),
+/// keyed by operator address -> `ArchiveUnbondingRecord`.
+const CF_ARCHIVE_UNBONDING: &str = "archive_unbonding";
 
 // ─── Key helpers ─────────────────────────────────────────────────────────────
 
@@ -142,6 +146,17 @@ impl NodeRegistryExecutor {
             }
             NodeRegistryOperation::UpdateStatus { target, new_status } => {
                 self.execute_update_status(sender, target, *new_status, block_height)
+            }
+            // Archive-node withdrawal ops (issue #20) are always dispatched via the
+            // gated path in `executor.rs` (`execute_begin_unstake` /
+            // `execute_withdraw_unbonded`), which supplies the activation gate,
+            // the unbonding period, and the open-challenge context this generic
+            // entrypoint lacks. Reaching here means a caller bypassed that path.
+            NodeRegistryOperation::BeginUnstake { .. }
+            | NodeRegistryOperation::WithdrawUnbonded => {
+                Ok(NodeRegistryExecutionResult::fail(
+                    "archive unbonding operations must be dispatched via the gated path",
+                ))
             }
         }
     }
@@ -376,6 +391,161 @@ impl NodeRegistryExecutor {
         Ok(NodeRegistryExecutionResult::ok())
     }
 
+    // ── Archive-node withdrawal / unbonding (issue #20) ──────────────────────
+
+    /// Begin unbonding an archive node's stake (issue #20, step 1).
+    ///
+    /// v1 is full-exit only: `amount` must equal the node's full
+    /// `staked_balance`. The caller (executor dispatch) is responsible for the
+    /// activation gate (`Failed(320)`, no fee) *before* invoking this; here the
+    /// fee is deducted upfront (matching the existing NodeRegistry fee policy)
+    /// and semantic failures return the specific receipt code with the fee
+    /// already consumed.
+    ///
+    /// `has_open_challenge` is computed by the caller from the active-challenge
+    /// index (the challenge state lives in the storage-metadata executor, not
+    /// here). `period_blocks` is `ChainParams::archive_unbonding_period_blocks`.
+    ///
+    /// On success the node moves `Active -> Unbonding` (removing it from the
+    /// active-archive set, so a fresh snapshot is written) and a single
+    /// `ArchiveUnbondingRecord` is persisted with the unlock height.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_begin_unstake(
+        &self,
+        sender: &Address,
+        amount: u64,
+        state: &StateManager,
+        proposer: &Address,
+        fee: Balance,
+        block_height: u64,
+        period_blocks: u64,
+        has_open_challenge: bool,
+    ) -> Result<NodeRegistryExecutionResult> {
+        self.deduct_fee(state, sender, fee, proposer)?;
+
+        let mut record = match self.get_node(sender)? {
+            Some(r) if r.role == NodeRole::ArchiveNode => r,
+            _ => {
+                return Ok(NodeRegistryExecutionResult::fail_with_code(
+                    321,
+                    "not a registered archive node",
+                ));
+            }
+        };
+
+        if record.status != NodeStatus::Active {
+            return Ok(NodeRegistryExecutionResult::fail_with_code(
+                322,
+                "archive node not active (cannot begin unbonding)",
+            ));
+        }
+
+        // Full-exit only for v1: the requested amount must be the entire stake.
+        if amount != record.staked_balance {
+            return Ok(NodeRegistryExecutionResult::fail_with_code(
+                323,
+                "archive unbonding amount must equal the full staked balance",
+            ));
+        }
+
+        // An archive with open retrievability challenges must resolve them (or be
+        // slashed) before it can start exiting — otherwise it could dodge a
+        // pending challenge by unbonding.
+        if has_open_challenge {
+            return Ok(NodeRegistryExecutionResult::fail_with_code(
+                324,
+                "archive has open retrievability challenges; cannot begin unbonding",
+            ));
+        }
+
+        let unlock_height = block_height.saturating_add(period_blocks);
+        let unbonding = ArchiveUnbondingRecord {
+            operator: *sender,
+            amount,
+            started_height: block_height,
+            unlock_height,
+            remaining_amount: amount,
+        };
+        self.put_archive_unbonding(&unbonding)?;
+
+        record.status = NodeStatus::Unbonding;
+        self.put_node(&record)?;
+
+        // Active -> Unbonding removes the node from the active-archive set.
+        self.write_active_archive_snapshot(block_height)?;
+
+        info!(
+            "Archive node {} began unbonding {} (unlock at height {})",
+            sender, amount, unlock_height
+        );
+
+        Ok(NodeRegistryExecutionResult::ok())
+    }
+
+    /// Withdraw an archive node's unbonded stake (issue #20, step 2).
+    ///
+    /// Allowed only once the unbonding period has elapsed
+    /// (`block_height >= record.unlock_height`). Credits the remaining amount
+    /// (after any slashes during unbonding) back to the operator's balance,
+    /// marks the node `Withdrawn` with a zero stake, and deletes the unbonding
+    /// record. The activation gate is enforced by the caller (`Failed(320)`, no
+    /// fee); here the fee is deducted upfront.
+    ///
+    /// No active-archive snapshot is written: an `Unbonding` node was already
+    /// excluded from the active set, so `Unbonding -> Withdrawn` does not change
+    /// it.
+    pub fn execute_withdraw_unbonded(
+        &self,
+        sender: &Address,
+        state: &StateManager,
+        proposer: &Address,
+        fee: Balance,
+        block_height: u64,
+    ) -> Result<NodeRegistryExecutionResult> {
+        self.deduct_fee(state, sender, fee, proposer)?;
+
+        let unbonding = match self.get_archive_unbonding(sender)? {
+            Some(u) => u,
+            None => {
+                return Ok(NodeRegistryExecutionResult::fail_with_code(
+                    325,
+                    "no archive unbonding in progress",
+                ));
+            }
+        };
+
+        if block_height < unbonding.unlock_height {
+            return Ok(NodeRegistryExecutionResult::fail_with_code(
+                326,
+                "archive unbonding period has not elapsed",
+            ));
+        }
+
+        // Credit the (possibly slashed) remaining amount back to the operator.
+        let mut sender_account = state.get_account(sender)?;
+        sender_account.balance = sender_account
+            .balance
+            .saturating_add(unbonding.remaining_amount as u128);
+        state.put_account(sender, &sender_account)?;
+
+        // Mark the node fully exited. If the record is somehow missing we still
+        // clear the unbonding entry (the balance credit already happened).
+        if let Some(mut record) = self.get_node(sender)? {
+            record.status = NodeStatus::Withdrawn;
+            record.staked_balance = 0;
+            self.put_node(&record)?;
+        }
+
+        self.delete_archive_unbonding(sender)?;
+
+        info!(
+            "Archive node {} withdrew {} unbonded stake and exited",
+            sender, unbonding.remaining_amount
+        );
+
+        Ok(NodeRegistryExecutionResult::ok())
+    }
+
     // ── Storage operations ───────────────────────────────────────────────────
 
     fn put_node(&self, record: &NodeRecord) -> Result<()> {
@@ -409,6 +579,40 @@ impl NodeRegistryExecutor {
     pub fn get_active_archive_nodes(&self) -> Result<Vec<NodeRecord>> {
         let all = self.get_nodes_by_role(NodeRole::ArchiveNode)?;
         Ok(all.into_iter().filter(|n| n.status == NodeStatus::Active).collect())
+    }
+
+    // ── Archive-unbonding record storage (issue #20) ─────────────────────────
+
+    /// Read the pending unbonding record for an operator, if any.
+    pub fn get_archive_unbonding(
+        &self,
+        operator: &Address,
+    ) -> Result<Option<ArchiveUnbondingRecord>> {
+        match self.db.get(CF_ARCHIVE_UNBONDING, operator.as_bytes()) {
+            Ok(Some(data)) => {
+                let record: ArchiveUnbondingRecord = bincode::deserialize(&data)
+                    .map_err(|e| StateError::DeserializationError(e.to_string()))?;
+                Ok(Some(record))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(StateError::Storage(e)),
+        }
+    }
+
+    /// Insert or overwrite an operator's unbonding record.
+    pub fn put_archive_unbonding(&self, record: &ArchiveUnbondingRecord) -> Result<()> {
+        let value = bincode::serialize(record)
+            .map_err(|e| StateError::SerializationError(e.to_string()))?;
+        self.db
+            .put(CF_ARCHIVE_UNBONDING, record.operator.as_bytes(), &value)
+            .map_err(StateError::Storage)
+    }
+
+    /// Remove an operator's unbonding record (on full withdrawal).
+    pub fn delete_archive_unbonding(&self, operator: &Address) -> Result<()> {
+        self.db
+            .delete(CF_ARCHIVE_UNBONDING, operator.as_bytes())
+            .map_err(StateError::Storage)
     }
 
     pub fn get_nodes_by_role(&self, role: NodeRole) -> Result<Vec<NodeRecord>> {

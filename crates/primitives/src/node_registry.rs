@@ -35,6 +35,12 @@ pub enum NodeStatus {
     Active = 0,
     /// Node has been slashed for misbehaviour
     Slashed = 1,
+    /// Archive node is unbonding its full stake (issue #20). Excluded from the
+    /// active-archive set (no new file assignments / challenges) but still
+    /// slashable for challenges that expire during the unbonding window.
+    Unbonding = 2,
+    /// Archive node has fully withdrawn its unbonded stake and exited (issue #20).
+    Withdrawn = 3,
 }
 
 impl NodeStatus {
@@ -42,6 +48,8 @@ impl NodeStatus {
         match b {
             0 => Some(NodeStatus::Active),
             1 => Some(NodeStatus::Slashed),
+            2 => Some(NodeStatus::Unbonding),
+            3 => Some(NodeStatus::Withdrawn),
             _ => None,
         }
     }
@@ -62,6 +70,24 @@ pub struct NodeRecord {
     pub registered_at: u64,
 }
 
+/// Pending archive-node unbonding record (issue #20). One per operator while an
+/// archive node is unbonding its stake (v1 is full-exit only). Persisted in the
+/// `archive_unbonding` column family, keyed by operator address.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchiveUnbondingRecord {
+    /// Archive-node operator address.
+    pub operator: Address,
+    /// Amount that began unbonding (the node's full stake at `BeginUnstake`).
+    pub amount: u64,
+    /// Height at which unbonding began.
+    pub started_height: u64,
+    /// Height at/after which `WithdrawUnbonded` is allowed
+    /// (`started_height + archive_unbonding_period_blocks`).
+    pub unlock_height: u64,
+    /// Amount still withdrawable, reduced by any slashes during unbonding.
+    pub remaining_amount: u64,
+}
+
 /// Operations that can be performed on the node registry
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NodeRegistryOperation {
@@ -75,6 +101,21 @@ pub enum NodeRegistryOperation {
         target: Address,
         new_status: NodeStatus,
     },
+    /// Archive-node withdrawal, step 1 (issue #20): begin unbonding the archive
+    /// node's stake. v1 is full-exit only — `amount` must equal the node's full
+    /// `staked_balance`. Moves the node to `Unbonding` and starts the unbonding
+    /// timer. Gated by `ChainParams::archive_unbonding_enabled_from_height`.
+    ///
+    /// Appended after `UpdateStatus` so existing bincode variant indices (0, 1)
+    /// are unchanged; `BeginUnstake` = 2, `WithdrawUnbonded` = 3.
+    BeginUnstake {
+        amount: u64,
+    },
+    /// Archive-node withdrawal, step 2 (issue #20): withdraw the unbonded stake
+    /// once the unbonding period has elapsed. Credits the remaining amount (after
+    /// any slashes) back to the operator's balance and exits the node
+    /// (`Withdrawn`). Gated by `ChainParams::archive_unbonding_enabled_from_height`.
+    WithdrawUnbonded,
 }
 
 /// Transaction data for node registry operations

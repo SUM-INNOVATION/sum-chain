@@ -87,6 +87,8 @@ fn main() -> Result<()> {
             contracts_enabled_from_height: None,   // smart contracts dormant; coordinated consensus-breaking activation only
             governance_enabled_from_height: None,  // on-chain governance dormant; coordinated activation only
             governance: None,                      // no governance params configured
+            archive_unbonding_enabled_from_height: None, // issue #20: archive withdrawal dormant
+            archive_unbonding_period_blocks: 201_600,    // ~7 days at 3s blocks
         },
     );
 

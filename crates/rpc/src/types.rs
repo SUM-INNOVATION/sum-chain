@@ -337,6 +337,29 @@ pub struct NodeRecordInfo {
     pub registered_at: BlockHeight,
 }
 
+/// Pending archive-node unbonding record as returned by
+/// `storage_getArchiveUnbonding` (issue #20). Mirrors
+/// [`sumchain_primitives::ArchiveUnbondingRecord`] for JSON consumers — the
+/// operator address is base58-encoded and all amounts/heights are native `u64`.
+///
+/// `remaining_amount` is what `WithdrawUnbonded` will credit back; it starts
+/// equal to `amount` and is reduced if the archive is slashed for an expired
+/// challenge while unbonding. Withdrawal is permitted once chain height reaches
+/// `unlock_height`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArchiveUnbondingInfo {
+    /// Archive-node operator address, base58-encoded.
+    pub operator: String,
+    /// Amount that began unbonding (the node's full stake at `BeginUnstake`).
+    pub amount: u64,
+    /// Height at which unbonding began.
+    pub started_height: BlockHeight,
+    /// Height at/after which `WithdrawUnbonded` is allowed.
+    pub unlock_height: BlockHeight,
+    /// Amount still withdrawable, reduced by any slashes during unbonding.
+    pub remaining_amount: u64,
+}
+
 /// Block-height info for `chain_getBlockHeight` (Phase 0b, SNIP V2 Ask 8).
 ///
 /// Returns the requested height (latest or finalized) along with a tag echoing

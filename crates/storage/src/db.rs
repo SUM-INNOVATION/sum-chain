@@ -102,6 +102,10 @@ pub mod cf {
     /// Genesis snapshot lives at key `0u64.to_be_bytes()`.
     pub const ACTIVE_ARCHIVE_NODES_HISTORY: &str = "active_archive_nodes_history";
 
+    /// Pending archive-node stake unbonding records (issue #20), keyed by
+    /// operator address -> `ArchiveUnbondingRecord`.
+    pub const ARCHIVE_UNBONDING: &str = "archive_unbonding";
+
     // Storage Metadata
     /// Storage file metadata (merkle_root -> StorageMetadata, owner indexes)
     pub const STORAGE_METADATA: &str = "storage_metadata";
@@ -497,6 +501,7 @@ pub const ALL_CFS: &[&str] = &[
     cf::VALIDATOR_SETS,
     cf::ACCOUNT_ENCRYPTION_KEYS,
     cf::ACTIVE_ARCHIVE_NODES_HISTORY,
+    cf::ARCHIVE_UNBONDING,
     cf::STORAGE_METADATA_V2,
     cf::ASSIGNMENT_ATTESTATIONS_V2,
     cf::INFERENCE_ATTESTATIONS,

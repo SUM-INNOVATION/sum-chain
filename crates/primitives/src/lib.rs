@@ -117,8 +117,8 @@ pub use finance::{
     KycAttestationId, KycLevel, KycStatus,
 };
 pub use node_registry::{
-    NodeRecord, NodeRegistryOperation, NodeRegistryOperationV2, NodeRegistryTxData,
-    NodeRegistryV2TxData, NodeRole, NodeStatus,
+    ArchiveUnbondingRecord, NodeRecord, NodeRegistryOperation, NodeRegistryOperationV2,
+    NodeRegistryTxData, NodeRegistryV2TxData, NodeRole, NodeStatus,
 };
 pub use storage_metadata::{
     assigned_archives, assigned_archives_presorted, is_archive_assigned_to_chunk, AccessEntryV2,
