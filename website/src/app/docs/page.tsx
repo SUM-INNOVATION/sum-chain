@@ -159,7 +159,7 @@ const categories: Category[] = [
   {
     id: 'storage',
     title: 'Decentralized Storage (PoR)',
-    blurb: 'Native L1 Proof-of-Retrievability — query files, challenges, and archive nodes. Powers snip.sumchain.io and the storage marketplace.',
+    blurb: 'Native L1 Proof-of-Retrievability — query files, challenges, archive nodes, and V2 coverage. Powers snip.sumchain.io (https://snip.sumchain.io). Archive-node withdrawal (issue #20) and reassignment (issue #62) are code-backed but dormant behind their activation gates.',
     methods: [
       {
         name: 'storage_getFundedFiles',
@@ -187,16 +187,40 @@ const categories: Category[] = [
         name: 'storage_getNodeRecord',
         description: 'Returns the NodeRegistry record (role, staked balance, status) for an address.',
       },
+      {
+        name: 'storage_getAssignmentCoverageV2',
+        description: 'Per-file chunk coverage: attested vs assigned per archive, missing chunks, and can_activate_now. Epoch-aware/aggregate since the reassignment work (issue #62).',
+      },
+      {
+        name: 'storage_getActiveNodesAtHeight',
+        description: 'The active-archive snapshot at a given height — used to reproduce the deterministic chunk assignment client-side.',
+      },
+      {
+        name: 'storage_getArchiveUnbonding',
+        description: 'Pending archive-node stake-unbonding record for an operator, or null. Part of archive-node withdrawal (issue #20), which is code-backed but dormant until its gate is set.',
+      },
     ],
   },
   {
     id: 'omninode',
     title: 'OmniNode (InferenceAttestation)',
-    blurb: 'Verifiable AI compute — read verifier-signed inference attestations settled on-chain. Active on mainnet (omninode_enabled_from_height = 6,000,000).',
+    blurb: 'Verifiable AI compute — read verifier-signed inference attestations settled on-chain. Attestation is active on mainnet (omninode_enabled_from_height = 6,000,000). Reads for the OmniNode product surface (https://omninode.suminnovation.xyz).',
     methods: [
       { name: 'sum_getInferenceAttestation', description: 'Attestation for a (session_id, verifier_address) pair, or null.' },
       { name: 'sum_listInferenceAttestations', description: 'All attestations recorded for a session_id.' },
       { name: 'sum_getInferenceAttestationStatus', description: 'Status of an attestation tx: submitted, included, finalized, or failed.' },
+    ],
+  },
+  {
+    id: 'omninode-settlement',
+    title: 'OmniNode Inference Settlement (dormant)',
+    blurb: 'Escrow-funded verifier rewards keyed by attestations — implemented but DORMANT behind inference_settlement_enabled_from_height (issue #61). No bond slashing in v1 (reward denial / claim withholding / escrow refund). Reads + unsigned-tx builders (no keys).',
+    methods: [
+      { name: 'omninode_getInferenceSession', description: 'Per-session settlement record (funder, reward terms, remaining escrow, status), or null.' },
+      { name: 'omninode_getInferenceClaims', description: 'All paid reward claims for a session.' },
+      { name: 'omninode_getInferenceDisputes', description: 'All dispute records for a session (record-only; disputes require a configured resolver).' },
+      { name: 'omninode_getClaimableReward', description: 'Whether a verifier can currently claim, plus amount and unlock height (attestation inclusion + finality_depth + dispute_window).' },
+      { name: 'omninode_buildOpenInferenceSession · buildFundInferenceSession · buildClaimInferenceReward · buildOpenInferenceDispute · buildResolveInferenceDispute · buildRefundInferenceSession', description: 'Unsigned-transaction builders for the six settlement operations — return a bincode-encoded TransactionV2 + signing hash; no private keys.' },
     ],
   },
   {

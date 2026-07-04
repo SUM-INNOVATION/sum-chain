@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import PageShell from '@/components/PageShell';
-import { SectionHeader, Reveal } from '@/components/ui/primitives';
+import { SectionHeader, Reveal, MonoTag } from '@/components/ui/primitives';
 import { Card, SpecList, StepFlow, Callout, SourceLinks } from '@/components/ui/blocks';
 
 export const metadata: Metadata = {
@@ -52,10 +52,13 @@ export default function StoragePage() {
                 ]}
               />
             </Card>
-            <Callout tone="roadmap" title="On the roadmap">
-              Automatic reassignment of chunks when an archive exits is not yet implemented; today,
-              affected chunks lose effective replication until re-registered. Challenge coverage is
-              probabilistic, not per-chunk guaranteed.
+            <Callout tone="dormant" title="Reassignment is implemented but dormant">
+              Archive-node exit/withdrawal and automatic chunk reassignment are implemented on-chain
+              behind <MonoTag>archive_unbonding_enabled_from_height</MonoTag> and{' '}
+              <MonoTag>archive_reassignment_enabled_from_height</MonoTag>, and are <strong>dormant</strong>{' '}
+              on mainnet. While dormant, chunks left by an exiting archive lose effective replication
+              until re-registered. Reassignment is epoch-aware and does not rewrite epoch-0
+              assignments. Challenge coverage remains probabilistic, not per-chunk guaranteed.
             </Callout>
           </Reveal>
         </div>
@@ -104,8 +107,30 @@ export default function StoragePage() {
         </div>
       </section>
 
+      <section>
+        <div className="mx-auto max-w-6xl px-6 pb-4 lg:px-8">
+          <Reveal>
+            <Callout tone="note" title="SNIP — the storage product surface">
+              This page describes the on-chain storage protocol. <strong>SNIP</strong> is the
+              application built on it — upload, retrieve, and manage files backed by SUM Chain
+              Proof-of-Retrievability. Try it at{' '}
+              <a
+                href="https://snip.sumchain.io"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="font-medium text-accent-soft underline underline-offset-2 hover:text-foreground"
+              >
+                snip.sumchain.io ↗
+              </a>
+              .
+            </Callout>
+          </Reveal>
+        </div>
+      </section>
+
       <SourceLinks
         links={[
+          { label: 'SNIP · snip.sumchain.io', href: 'https://snip.sumchain.io' },
           { label: 'SNIP-V2-CHAIN-PLAN.md', href: 'https://github.com/SUM-INNOVATION/sum-chain/blob/main/docs/specs/SNIP-V2-CHAIN-PLAN.md' },
           { label: 'SNIP-V2-RPC-CHEATSHEET.md', href: 'https://github.com/SUM-INNOVATION/sum-chain/blob/main/docs/rpc/SNIP-V2-RPC-CHEATSHEET.md' },
           { label: 'tokens.md', href: 'https://github.com/SUM-INNOVATION/sum-chain/blob/main/docs/tokens.md' },

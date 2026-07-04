@@ -7,7 +7,7 @@ import { Card, SpecList, Callout, SourceLinks } from '@/components/ui/blocks';
 export const metadata: Metadata = {
   title: 'Verifiable AI Compute | SUM Chain',
   description:
-    'OmniNode inference attestation on SUM Chain: users pay Koppa, inference nodes compute, a verifier signs the result, and the chain records a permanent InferenceAttestation. Live on mainnet; reward/slash settlement is on the roadmap.',
+    'OmniNode inference attestation on SUM Chain: users pay Koppa, inference nodes compute, a verifier signs the result, and the chain records a permanent InferenceAttestation. Attestation is live on mainnet; escrow-funded inference settlement is implemented but dormant (no bond slashing in v1).',
 };
 
 const RECORDS = [
@@ -85,10 +85,29 @@ export default function ComputePage() {
             </Card>
           </Reveal>
           <Reveal delay={0.1}>
-            <Callout tone="roadmap" title="What is not yet on-chain">
-              v1 records attestations only. On-chain reward, slashing, and dispute settlement are on
-              the roadmap — the chain does not pay or penalize inference nodes today. v1 also requires
-              the transaction sender to be the verifier (no sponsored submission).
+            <Callout tone="dormant" title="Settlement is implemented but dormant">
+              Attestation v1 records verifier-signed results only. Escrow-funded inference{' '}
+              <strong>settlement</strong> (rewards, refunds, disputes) is implemented behind{' '}
+              <MonoTag>inference_settlement_enabled_from_height</MonoTag> and is <strong>dormant</strong>{' '}
+              on mainnet — the chain does not pay inference nodes until it is activated. v1 has{' '}
+              <strong>no bond slashing</strong>: the levers are reward denial, claim withholding, and
+              escrow refund. v1 also requires the transaction sender to be the verifier (no sponsored
+              submission).
+            </Callout>
+          </Reveal>
+          <Reveal delay={0.15}>
+            <Callout tone="note" title="OmniNode — the compute product surface">
+              This page describes the on-chain attestation protocol. <strong>OmniNode</strong> is the
+              application built on it — request verifiable AI inference settled against SUM Chain. See{' '}
+              <a
+                href="https://omninode.suminnovation.xyz"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="font-medium text-accent-soft underline underline-offset-2 hover:text-foreground"
+              >
+                omninode.suminnovation.xyz ↗
+              </a>
+              .
             </Callout>
           </Reveal>
         </div>
@@ -96,8 +115,9 @@ export default function ComputePage() {
 
       <SourceLinks
         links={[
+          { label: 'OmniNode · omninode.suminnovation.xyz', href: 'https://omninode.suminnovation.xyz' },
           { label: 'INFERENCE-ATTESTATION.md', href: 'https://github.com/SUM-INNOVATION/sum-chain/blob/main/docs/subprotocols/INFERENCE-ATTESTATION.md' },
-          { label: 'INFERENCE-ATTESTATION-ACTIVATION.md', href: 'https://github.com/SUM-INNOVATION/sum-chain/blob/main/docs/subprotocols/INFERENCE-ATTESTATION-ACTIVATION.md' },
+          { label: 'inference-settlement.md', href: 'https://github.com/SUM-INNOVATION/sum-chain/blob/main/docs/subprotocols/inference-settlement.md' },
         ]}
       />
     </PageShell>
