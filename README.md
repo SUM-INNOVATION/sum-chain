@@ -10,6 +10,15 @@ A Layer-1 blockchain built entirely in Rust (stable toolchain). No C/C++, Python
 
 **Native Currency:** Koppa (Ϙ) with 9 decimal places
 
+## Project Process
+
+- [Governance](GOVERNANCE.md) — code-backed governance v1 is implemented but **dormant** until coordinated activation (`governance_enabled_from_height` is not set in live chain params). Design spec: [docs/specs/GOVERNANCE-V1.md](docs/specs/GOVERNANCE-V1.md).
+- [Release process](RELEASE.md) — record-first release and rollout process.
+- [Security](SECURITY.md) — private vulnerability reporting.
+- [Contributing](CONTRIBUTING.md) — PR and review policy.
+
+**Protocol status (live mainnet):** SNIP V2 storage and OmniNode `InferenceAttestation` v1 are **active**; Governance v1, archive unbonding (#20), archive reassignment (#62), and inference settlement (#61) are code-backed but **dormant** (their activation gates are unset in live chain params).
+
 ## Features
 
 - **Proof of Authority (PoA) Consensus**: Round-robin validator rotation with deterministic block production
@@ -38,6 +47,8 @@ A Layer-1 blockchain built entirely in Rust (stable toolchain). No C/C++, Python
 | SRC-201 Messaging (a.k.a. SNIP V1) | Production (mainnet) | `crates/primitives/src/messaging.rs`, `crates/state/src/messaging_executor.rs` | On-chain encrypted messaging (X25519 + XChaCha20-Poly1305). Supports sender-paid and sponsored submission. |
 | SNIP V2 Storage Protocol | Production behind `v2_enabled_from_height` activation gate | `crates/state/src/storage_metadata.rs`, `crates/state/src/inference_attestations.rs` (forthcoming) | Decentralized file storage with chain-side metadata: Pending/Active/Abandoned lifecycle, encryption-key registry, archive-node staking, PoR challenges. Genesis param controls activation. |
 | OmniNode `InferenceAttestation` | v1 merged on `main` (PR [#1](https://github.com/SUM-INNOVATION/sum-chain/pull/1) — wire format, executor, mempool, RPC, docs; PR [#2](https://github.com/SUM-INNOVATION/sum-chain/pull/2) — `chain_getChainParams.omninode_enabled_from_height`). Active on mainnet (`omninode_enabled_from_height = 6,000,000`, live params verified 2026-07-02 at height 8,183,329); fresh-chain genesis default `None`. Activation readiness: [`docs/subprotocols/INFERENCE-ATTESTATION-ACTIVATION.md`](docs/subprotocols/INFERENCE-ATTESTATION-ACTIVATION.md). | Spec: [`docs/subprotocols/INFERENCE-ATTESTATION.md`](docs/subprotocols/INFERENCE-ATTESTATION.md). Code: `crates/primitives/src/inference_attestation.rs`, `crates/state/src/inference_attestation_executor.rs`, `crates/state/src/mempool.rs` (`InferenceAttestationAdmission`), `crates/node/src/node.rs` (admission wiring), `crates/rpc/src/api.rs` + `server.rs` (RPC methods), fixtures in `crates/primitives/tests/fixtures/` | Verifier-signed digests attesting to off-chain inference outputs. Inner Stage 6 signature (`omninode.inference_attestation.v1` domain) verified at chain side; outer chain signing semantics unchanged. Activation gated by `omninode_enabled_from_height` (mainnet active at `6,000,000`; fresh-chain default `None`). Mempool admission enforces activation gate + in-flight duplicate + permanent CF duplicate. Read-only RPC: `sum_getInferenceAttestation`, `sum_listInferenceAttestations`, `sum_getInferenceAttestationStatus`. Full protocol contract in the linked doc. |
+| SNIP V2 archive-node withdrawal + reassignment | Code-backed, **dormant** (gates `archive_unbonding_enabled_from_height` [#20], `archive_reassignment_enabled_from_height` [#62]; both `null` on mainnet, verified 2026-07-04). | Code: `crates/state/src/node_registry.rs`, `crates/state/src/storage_metadata.rs`; RPC in `crates/rpc/src/api.rs` + `server.rs`. RPC cheatsheet: [`docs/rpc/SNIP-V2-RPC-CHEATSHEET.md`](docs/rpc/SNIP-V2-RPC-CHEATSHEET.md); design §5.4 in [`docs/specs/SNIP-V2-CHAIN-PLAN.md`](docs/specs/SNIP-V2-CHAIN-PLAN.md). | Two separate landed mechanics. **#20**: full-exit archive-node stake unbonding (`BeginUnstake`/`WithdrawUnbonded`, `Unbonding`/`Withdrawn` node states, `storage_getArchiveUnbonding`, wallet `archive-begin-unstake`/`archive-withdraw`/`archive-unbonding`). **#62**: deterministic chunk reassignment (`ReassignChunksV2`, epoch-aware attestation CFs with epoch-0 bitmaps untouched, epoch-aware/aggregate `storage_getAssignmentCoverageV2`). Both dormant until their gate is set. |
+| OmniNode Inference Settlement (v1) | Code-backed, **dormant** (gate `inference_settlement_enabled_from_height`, `null` on mainnet, verified 2026-07-04). Separate from attestation, which is active. | Spec: [`docs/subprotocols/inference-settlement.md`](docs/subprotocols/inference-settlement.md). Code: `crates/primitives/src/inference_settlement.rs`, `crates/state/src/inference_settlement_executor.rs`, RPC `omninode_*` in `crates/rpc/`. | Escrow-funded verifier rewards keyed by the immutable `(session_id, verifier)` attestations. Supply-conserving — no mint/inflation. Levers are **reward denial / claim withholding / escrow refund**; **no bond slashing in v1** (no verifier bond exists). Claim maturity = attestation inclusion + `finality_depth` + `dispute_window_blocks`; refunds cannot bypass pending immature claims. Disputes require `inference_settlement_dispute_resolver` (disabled when unset — settlement itself still works). Attestation v1 untouched. Issue #61. |
 | SRC-817/818 Education (Course Catalog + Offering) | Phases 0–6 merged on `main`. Production default: dormant (`education_enabled_from_height: None`). Activation readiness: [`docs/subprotocols/EDUCATION-ACTIVATION.md`](docs/subprotocols/EDUCATION-ACTIVATION.md). | Usage: [`docs/tokens.md`](docs/tokens.md) (Education). Code: `crates/primitives/src/education.rs`, `crates/state/src/education_executor.rs`, `crates/state/src/mempool.rs` (`EducationAdmission`), `crates/rpc/` (`src817_*`/`src818_*` read-only RPC). | LMS catalog/offering/assessment/enrollment/submission-receipt/grade. Activation gated by `education_enabled_from_height` (default `None`). Privacy-first: students only as scoped `student_commitment`; sponsor/institution `tx.from` (never the student); no raw grades/submissions/answer-keys/PII on-chain or RPC. Policy B fee/nonce. Read-only RPC only. |
 
 ## Local Development
@@ -150,7 +161,13 @@ cargo run --release --bin sumchain -- run \
   --bootnodes /ip4/127.0.0.1/tcp/30301
 ```
 
-### 3. Start a Full Node (Optional)
+### 3. Start a Local Full Node (Optional)
+
+This joins the **local** testnet created above (local genesis, loopback bootnode).
+To sync a **shared testnet or mainnet** instead, see
+[Joining an Existing Network](#joining-an-existing-network) — that uses the
+network-provided `config.toml` / `genesis.json` and an out-of-band bootnode, not
+the local paths below.
 
 ```bash
 cargo run --release --bin sumchain -- run \
