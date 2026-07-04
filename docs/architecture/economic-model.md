@@ -353,6 +353,12 @@ Estimated lost coins over time:
 - **Zero new issuance**: All 800B Ϙ minted at genesis
 - **No mining**: PoA consensus, no block rewards
 - **Staking rewards**: Available via delegation distributions (manual claim)
+- **Subprotocol rewards are escrow/fee-funded, never minted**: storage PoR
+  payouts (from per-file `fee_pool`) and OmniNode
+  [inference settlement](../subprotocols/inference-settlement.md) rewards (from a
+  funder's per-session escrow) are supply-conserving — a party is debited up
+  front and the same Koppa is later credited or refunded. No subprotocol issues
+  new tokens.
 
 ### Predictable Supply
 

@@ -29,8 +29,9 @@ fn tx_type_governance_ordinal_locked() {
     // The previous last discriminant (Education = 22) is unchanged.
     assert_eq!(TxType::Education as u8, 22);
     assert_eq!(TxType::from_byte(22), Some(TxType::Education));
-    // 24 is not yet assigned.
-    assert_eq!(TxType::from_byte(24), None);
+    // 24 is InferenceSettlement (issue #61, appended after Governance); 25 is free.
+    assert_eq!(TxType::from_byte(24), Some(TxType::InferenceSettlement));
+    assert_eq!(TxType::from_byte(25), None);
 }
 
 #[test]

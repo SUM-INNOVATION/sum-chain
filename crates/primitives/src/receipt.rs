@@ -135,6 +135,18 @@ impl TxStatus {
             TxStatus::Failed(333) => "reassignment: file lifecycle not eligible (Abandoned cannot be reassigned)",
             TxStatus::Failed(334) => "reassignment: no reassignment needed (no coverage gap)",
             TxStatus::Failed(335) => "AcceptAssignmentV2: post-activation re-attestation requires an open reassignment epoch",
+            // OmniNode Inference Settlement (issue #61). Isolated 350-block.
+            TxStatus::Failed(350) => "inference settlement not enabled at this block height",
+            TxStatus::Failed(351) => "malformed or unsupported inference settlement operation",
+            TxStatus::Failed(352) => "inference session not found or already exists",
+            TxStatus::Failed(353) => "unauthorized inference settlement operation (or dispute resolver not configured)",
+            TxStatus::Failed(354) => "invalid inference session terms",
+            TxStatus::Failed(355) => "insufficient escrow or deposit",
+            TxStatus::Failed(356) => "attestation not found or not finalized for this claim",
+            TxStatus::Failed(357) => "dispute window not elapsed; claim not yet mature",
+            TxStatus::Failed(358) => "duplicate inference claim or dispute",
+            TxStatus::Failed(359) => "unresolved or denied dispute blocks settlement",
+            TxStatus::Failed(360) => "inference session refund not available yet",
             TxStatus::Failed(_) => "failed",
         }
     }

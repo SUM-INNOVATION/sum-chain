@@ -532,6 +532,46 @@ impl RpcServer {
         })
     }
 
+    /// Build an unsigned `TransactionV2` carrying an inference-settlement
+    /// operation (issue #61). No private keys — returns the hex-encoded unsigned
+    /// tx + signing hash for the client to sign.
+    fn build_unsigned_settlement_tx(
+        &self,
+        from: Address,
+        fee: u128,
+        operation: sumchain_primitives::inference_settlement::InferenceSettlementOperation,
+    ) -> std::result::Result<
+        crate::inference_settlement_types::OmniSettlementBuildResponse,
+        jsonrpsee::types::ErrorObjectOwned,
+    > {
+        use sumchain_primitives::inference_settlement::InferenceSettlementTxData;
+        use sumchain_primitives::{TransactionV2, TxPayload};
+        let nonce = self
+            .state
+            .get_nonce(&from)
+            .map_err(|e| RpcError::Internal(format!("Failed to get nonce: {}", e)))?;
+        let chain_id = self.state.chain_id();
+        let data = InferenceSettlementTxData { operation };
+        let tx = TransactionV2 {
+            chain_id,
+            from,
+            fee,
+            nonce,
+            payload: TxPayload::InferenceSettlement(data),
+        };
+        let signing_hash = tx.signing_hash();
+        let unsigned = bincode::serialize(&tx)
+            .map_err(|e| RpcError::Internal(format!("Failed to encode tx: {}", e)))?;
+        Ok(crate::inference_settlement_types::OmniSettlementBuildResponse {
+            unsigned_tx: format!("0x{}", hex::encode(unsigned)),
+            signing_hash: format!("0x{}", hex::encode(signing_hash.as_bytes())),
+            from: from.to_base58(),
+            nonce,
+            fee,
+            chain_id,
+        })
+    }
+
     /// Convert an on-disk `InferenceAttestationRecord` to its RPC view.
     /// All binary fields hex-encoded with `0x` prefix; addresses use
     /// base58 with checksum (chain's canonical Address::to_base58).
@@ -3980,6 +4020,235 @@ impl SumChainApiServer for RpcServer {
         };
         let fee = request.fee.unwrap_or(GOV_DEFAULT_FEE);
         Ok(self.build_unsigned_governance_tx(from, fee, data)?)
+    }
+
+    // ── OmniNode Inference Settlement (issue #61) ───────────────────────────
+
+    async fn omninode_get_inference_session(
+        &self,
+        session_id: String,
+    ) -> std::result::Result<Option<crate::inference_settlement_types::InferenceSessionInfo>, jsonrpsee::types::ErrorObjectOwned>
+    {
+        use crate::inference_settlement_types::InferenceSessionInfo;
+        let exec = sumchain_state::inference_settlement_executor::InferenceSettlementExecutor::new(
+            self.db.clone(),
+        );
+        let s = exec.get_session(&session_id).map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(s.map(|s| InferenceSessionInfo {
+            session_id: s.session_id,
+            funder: s.funder.to_base58(),
+            reward_per_verifier: s.reward_per_verifier,
+            max_verifiers: s.max_verifiers,
+            remaining_escrow: s.remaining_escrow,
+            claims_count: s.claims_count,
+            dispute_window_blocks: s.dispute_window_blocks,
+            status: format!("{:?}", s.status),
+            created_at_height: s.created_at_height,
+            expires_at_height: s.expires_at_height,
+        }))
+    }
+
+    async fn omninode_get_inference_claims(
+        &self,
+        session_id: String,
+    ) -> std::result::Result<Vec<crate::inference_settlement_types::InferenceClaimInfo>, jsonrpsee::types::ErrorObjectOwned>
+    {
+        use crate::inference_settlement_types::InferenceClaimInfo;
+        let exec = sumchain_state::inference_settlement_executor::InferenceSettlementExecutor::new(
+            self.db.clone(),
+        );
+        let claims = exec.list_claims(&session_id).map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(claims
+            .into_iter()
+            .map(|c| InferenceClaimInfo {
+                session_id: c.session_id,
+                verifier: c.verifier.to_base58(),
+                amount: c.amount,
+                claimed_at_height: c.claimed_at_height,
+                status: format!("{:?}", c.status),
+            })
+            .collect())
+    }
+
+    async fn omninode_get_inference_disputes(
+        &self,
+        session_id: String,
+    ) -> std::result::Result<Vec<crate::inference_settlement_types::InferenceDisputeInfo>, jsonrpsee::types::ErrorObjectOwned>
+    {
+        use crate::inference_settlement_types::InferenceDisputeInfo;
+        let exec = sumchain_state::inference_settlement_executor::InferenceSettlementExecutor::new(
+            self.db.clone(),
+        );
+        let disputes =
+            exec.list_disputes(&session_id).map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(disputes
+            .into_iter()
+            .map(|d| InferenceDisputeInfo {
+                session_id: d.session_id,
+                verifier: d.verifier.to_base58(),
+                opener: d.opener.to_base58(),
+                evidence_commitment: format!("0x{}", hex::encode(d.evidence_commitment)),
+                status: format!("{:?}", d.status),
+                opened_at_height: d.opened_at_height,
+                resolved_at_height: d.resolved_at_height,
+                allow_claim: d.allow_claim,
+            })
+            .collect())
+    }
+
+    async fn omninode_get_claimable_reward(
+        &self,
+        session_id: String,
+        verifier: String,
+    ) -> std::result::Result<crate::inference_settlement_types::ClaimableRewardInfo, jsonrpsee::types::ErrorObjectOwned>
+    {
+        use crate::inference_settlement_types::ClaimableRewardInfo;
+        use sumchain_primitives::inference_attestation::inference_attestation_key;
+        use sumchain_primitives::inference_settlement::InferenceDisputeStatus;
+
+        let v = self.parse_address(&verifier)?;
+        let sexec = sumchain_state::inference_settlement_executor::InferenceSettlementExecutor::new(
+            self.db.clone(),
+        );
+        let aexec = sumchain_state::inference_attestation_executor::InferenceAttestationExecutor::new(
+            self.db.clone(),
+        );
+        let base = |eligible, amount, unlock, reason: &str| ClaimableRewardInfo {
+            session_id: session_id.clone(),
+            verifier: v.to_base58(),
+            eligible,
+            amount,
+            unlock_height: unlock,
+            reason: reason.to_string(),
+        };
+
+        let session = match sexec.get_session(&session_id).map_err(|e| RpcError::Internal(e.to_string()))? {
+            Some(s) => s,
+            None => return Ok(base(false, None, None, "session not found")),
+        };
+        if !matches!(session.status, sumchain_primitives::InferenceSessionStatus::Open) {
+            return Ok(base(false, None, None, "session not open"));
+        }
+        let att = aexec
+            .get(&inference_attestation_key(&session_id, &v))
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        let att = match att {
+            Some(a) => a,
+            None => return Ok(base(false, None, None, "no attestation for verifier")),
+        };
+        let unlock = att.included_at_height.saturating_add(session.dispute_window_blocks);
+        if sexec.get_claim(&session_id, &v).map_err(|e| RpcError::Internal(e.to_string()))?.is_some() {
+            return Ok(base(false, None, Some(unlock), "already claimed"));
+        }
+        if let Some(d) = sexec.get_dispute(&session_id, &v).map_err(|e| RpcError::Internal(e.to_string()))? {
+            match d.status {
+                InferenceDisputeStatus::Open => return Ok(base(false, None, Some(unlock), "blocked by open dispute")),
+                InferenceDisputeStatus::ResolvedDenyClaim => return Ok(base(false, None, Some(unlock), "claim denied by dispute")),
+                InferenceDisputeStatus::ResolvedAllowClaim => {}
+            }
+        }
+        if session.claims_count >= session.max_verifiers {
+            return Ok(base(false, None, Some(unlock), "max_verifiers reached"));
+        }
+        if session.remaining_escrow < session.reward_per_verifier {
+            return Ok(base(false, None, Some(unlock), "insufficient remaining escrow"));
+        }
+        let current = self.consensus.current_height();
+        if current < unlock {
+            return Ok(base(false, Some(session.reward_per_verifier), Some(unlock), "not yet mature"));
+        }
+        Ok(base(true, Some(session.reward_per_verifier), Some(unlock), "eligible"))
+    }
+
+    async fn omninode_build_open_inference_session(
+        &self,
+        request: crate::inference_settlement_types::OmniBuildOpenSessionRequest,
+    ) -> std::result::Result<crate::inference_settlement_types::OmniSettlementBuildResponse, jsonrpsee::types::ErrorObjectOwned>
+    {
+        use sumchain_primitives::inference_settlement::*;
+        let from = self.parse_address(&request.from)?;
+        let op = InferenceSettlementOperation::OpenSession(OpenInferenceSessionRequest {
+            session_id: request.session_id,
+            reward_per_verifier: request.reward_per_verifier,
+            max_verifiers: request.max_verifiers,
+            dispute_window_blocks: request.dispute_window_blocks,
+            expires_at_height: request.expires_at_height,
+            deposit: request.deposit,
+        });
+        self.build_unsigned_settlement_tx(from, request.fee.unwrap_or(GOV_DEFAULT_FEE), op)
+    }
+
+    async fn omninode_build_fund_inference_session(
+        &self,
+        request: crate::inference_settlement_types::OmniBuildFundSessionRequest,
+    ) -> std::result::Result<crate::inference_settlement_types::OmniSettlementBuildResponse, jsonrpsee::types::ErrorObjectOwned>
+    {
+        use sumchain_primitives::inference_settlement::*;
+        let from = self.parse_address(&request.from)?;
+        let op = InferenceSettlementOperation::FundSession(FundInferenceSessionRequest {
+            session_id: request.session_id,
+            amount: request.amount,
+        });
+        self.build_unsigned_settlement_tx(from, request.fee.unwrap_or(GOV_DEFAULT_FEE), op)
+    }
+
+    async fn omninode_build_claim_inference_reward(
+        &self,
+        request: crate::inference_settlement_types::OmniBuildClaimRewardRequest,
+    ) -> std::result::Result<crate::inference_settlement_types::OmniSettlementBuildResponse, jsonrpsee::types::ErrorObjectOwned>
+    {
+        use sumchain_primitives::inference_settlement::*;
+        let from = self.parse_address(&request.from)?;
+        let op = InferenceSettlementOperation::ClaimReward(ClaimInferenceRewardRequest {
+            session_id: request.session_id,
+        });
+        self.build_unsigned_settlement_tx(from, request.fee.unwrap_or(GOV_DEFAULT_FEE), op)
+    }
+
+    async fn omninode_build_open_inference_dispute(
+        &self,
+        request: crate::inference_settlement_types::OmniBuildOpenDisputeRequest,
+    ) -> std::result::Result<crate::inference_settlement_types::OmniSettlementBuildResponse, jsonrpsee::types::ErrorObjectOwned>
+    {
+        use sumchain_primitives::inference_settlement::*;
+        let from = self.parse_address(&request.from)?;
+        let verifier = self.parse_address(&request.verifier)?;
+        let evidence_commitment = self.parse_hex32(&request.evidence_commitment)?;
+        let op = InferenceSettlementOperation::OpenDispute(OpenInferenceDisputeRequest {
+            session_id: request.session_id,
+            verifier,
+            evidence_commitment,
+        });
+        self.build_unsigned_settlement_tx(from, request.fee.unwrap_or(GOV_DEFAULT_FEE), op)
+    }
+
+    async fn omninode_build_resolve_inference_dispute(
+        &self,
+        request: crate::inference_settlement_types::OmniBuildResolveDisputeRequest,
+    ) -> std::result::Result<crate::inference_settlement_types::OmniSettlementBuildResponse, jsonrpsee::types::ErrorObjectOwned>
+    {
+        use sumchain_primitives::inference_settlement::*;
+        let from = self.parse_address(&request.from)?;
+        let verifier = self.parse_address(&request.verifier)?;
+        let op = InferenceSettlementOperation::ResolveDispute(ResolveInferenceDisputeRequest {
+            session_id: request.session_id,
+            verifier,
+            allow_claim: request.allow_claim,
+        });
+        self.build_unsigned_settlement_tx(from, request.fee.unwrap_or(GOV_DEFAULT_FEE), op)
+    }
+
+    async fn omninode_build_refund_inference_session(
+        &self,
+        request: crate::inference_settlement_types::OmniBuildRefundSessionRequest,
+    ) -> std::result::Result<crate::inference_settlement_types::OmniSettlementBuildResponse, jsonrpsee::types::ErrorObjectOwned>
+    {
+        use sumchain_primitives::inference_settlement::*;
+        let from = self.parse_address(&request.from)?;
+        let op = InferenceSettlementOperation::RefundSession(RefundInferenceSessionRequest {
+            session_id: request.session_id,
+        });
+        self.build_unsigned_settlement_tx(from, request.fee.unwrap_or(GOV_DEFAULT_FEE), op)
     }
 
     async fn gov_get_proposal(
@@ -8525,6 +8794,58 @@ mod messaging_rpc_tests {
             .storage_get_archive_unbonding("not-an-address".to_string())
             .await
             .is_err());
+    }
+
+    // Issue #61: settlement builder round-trip + empty reads.
+    #[tokio::test]
+    async fn omninode_build_open_session_roundtrips() {
+        use crate::inference_settlement_types::OmniBuildOpenSessionRequest;
+        use sumchain_primitives::inference_settlement::InferenceSettlementOperation;
+        use sumchain_primitives::{TransactionV2, TxPayload};
+        let (srv, _db, _dir) = server();
+        let from = KeyPair::generate();
+        let resp = srv
+            .omninode_build_open_inference_session(OmniBuildOpenSessionRequest {
+                from: from.address().to_base58(),
+                session_id: "s".to_string(),
+                reward_per_verifier: 1_000_000,
+                max_verifiers: 2,
+                dispute_window_blocks: 10,
+                expires_at_height: 1000,
+                deposit: 2_000_000,
+                fee: Some(1000),
+            })
+            .await
+            .unwrap();
+        assert_eq!(resp.from, from.address().to_base58());
+        assert_eq!(resp.fee, 1000);
+        let bytes = hex::decode(resp.unsigned_tx.trim_start_matches("0x")).unwrap();
+        let tx = TransactionV2::from_bytes(&bytes).unwrap();
+        match tx.payload {
+            TxPayload::InferenceSettlement(d) => match d.operation {
+                InferenceSettlementOperation::OpenSession(o) => {
+                    assert_eq!(o.session_id, "s");
+                    assert_eq!(o.deposit, 2_000_000);
+                    assert_eq!(o.max_verifiers, 2);
+                }
+                other => panic!("wrong op: {:?}", other),
+            },
+            other => panic!("wrong payload: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn omninode_settlement_reads_empty_and_reason() {
+        let (srv, _db, _dir) = server();
+        assert!(srv.omninode_get_inference_session("nope".to_string()).await.unwrap().is_none());
+        assert!(srv.omninode_get_inference_claims("nope".to_string()).await.unwrap().is_empty());
+        assert!(srv.omninode_get_inference_disputes("nope".to_string()).await.unwrap().is_empty());
+        let c = srv
+            .omninode_get_claimable_reward("nope".to_string(), KeyPair::generate().address().to_base58())
+            .await
+            .unwrap();
+        assert!(!c.eligible);
+        assert_eq!(c.reason, "session not found");
     }
 }
 

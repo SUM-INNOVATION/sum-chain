@@ -77,6 +77,15 @@ fn omninode_gate_open(params: &ChainParams, block_height: u64) -> bool {
     matches!(params.omninode_enabled_from_height, Some(h) if block_height >= h)
 }
 
+/// OmniNode Inference Settlement activation gate (issue #61). Dormant by default
+/// (`None`); when closed, all settlement ops are rejected free (`Failed(350)`,
+/// no fee). Independent of `omninode_enabled_from_height` — attestation recording
+/// is unaffected.
+#[inline]
+fn inference_settlement_gate_open(params: &ChainParams, block_height: u64) -> bool {
+    matches!(params.inference_settlement_enabled_from_height, Some(h) if block_height >= h)
+}
+
 /// SRC-817/818 Education-LMS suite activation gate. Same dormant-deploy
 /// semantics: production default `None` → never open; activation
 /// requires explicit `education_enabled_from_height` in `genesis.json`
@@ -130,6 +139,7 @@ pub struct BlockExecutor {
     node_registry_executor: NodeRegistryExecutor,
     storage_metadata_executor: StorageMetadataExecutor,
     inference_attestation_executor: InferenceAttestationExecutor,
+    inference_settlement_executor: crate::inference_settlement_executor::InferenceSettlementExecutor,
     education_executor: crate::education_executor::EducationExecutor,
 }
 
@@ -154,6 +164,8 @@ impl BlockExecutor {
         let node_registry_executor = NodeRegistryExecutor::new(db.clone());
         let storage_metadata_executor = StorageMetadataExecutor::new(db.clone());
         let inference_attestation_executor = InferenceAttestationExecutor::new(db.clone());
+        let inference_settlement_executor =
+            crate::inference_settlement_executor::InferenceSettlementExecutor::new(db.clone());
         let education_executor =
             crate::education_executor::EducationExecutor::new(db.clone());
         Self {
@@ -178,6 +190,7 @@ impl BlockExecutor {
             node_registry_executor,
             storage_metadata_executor,
             inference_attestation_executor,
+            inference_settlement_executor,
             education_executor,
         }
     }
@@ -1332,6 +1345,47 @@ impl BlockExecutor {
                             fee_paid: v2_tx.fee,
                         })
                     }
+                    TxPayload::InferenceSettlement(settlement_data) => {
+                        // Activation gate (issue #61). Checked BEFORE any fee so a
+                        // gate-dormant rejection costs nothing and mutates nothing.
+                        if !inference_settlement_gate_open(&self.params, block_height) {
+                            return Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Failed(350),
+                                fee_paid: 0,
+                            });
+                        }
+                        let result = self.inference_settlement_executor.execute(
+                            &v2_tx.from,
+                            &settlement_data.operation,
+                            &self.state,
+                            proposer,
+                            v2_tx.fee,
+                            block_height,
+                            &self.params,
+                        )?;
+                        if result.success {
+                            debug!("InferenceSettlement {} executed", tx_hash);
+                            Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Success,
+                                fee_paid: v2_tx.fee,
+                            })
+                        } else {
+                            warn!(
+                                "InferenceSettlement {} failed: {}",
+                                tx_hash,
+                                result.error.as_deref().unwrap_or("Unknown error")
+                            );
+                            // Specific 35x codes propagate; else generic 351.
+                            let code = result.failure_code.unwrap_or(351);
+                            Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Failed(code),
+                                fee_paid: 0,
+                            })
+                        }
+                    }
                     TxPayload::Education(edu) => {
                         // Phase 2 dispatch. Policy B fee/nonce:
                         //  - gate closed: Failed(70), no fee, no nonce
@@ -2322,6 +2376,13 @@ impl BlockExecutor {
                 // adjacent V2-only rejections verbatim. No new semantics.
                 return Err(StateError::InvalidOperation(
                     "Governance is only supported in V2 transactions".to_string(),
+                ));
+            }
+            TxPayload::InferenceSettlement(_) => {
+                // Settlement is a V2-only subprotocol; mirror the adjacent
+                // rejections. No new semantics on this path.
+                return Err(StateError::InvalidOperation(
+                    "InferenceSettlement is only supported in V2 transactions".to_string(),
                 ));
             }
         }

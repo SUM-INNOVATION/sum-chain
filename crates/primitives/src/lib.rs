@@ -15,6 +15,7 @@ pub mod governance;
 pub mod hash;
 pub mod healthcare;
 pub mod inference_attestation;
+pub mod inference_settlement;
 pub mod legal;
 pub mod messaging;
 pub mod node_registry;
@@ -119,6 +120,12 @@ pub use finance::{
 pub use node_registry::{
     ArchiveUnbondingRecord, NodeRecord, NodeRegistryOperation, NodeRegistryOperationV2,
     NodeRegistryTxData, NodeRegistryV2TxData, NodeRole, NodeStatus,
+};
+pub use inference_settlement::{
+    ClaimInferenceRewardRequest, FundInferenceSessionRequest, InferenceClaim, InferenceClaimStatus,
+    InferenceDispute, InferenceDisputeStatus, InferenceSession, InferenceSessionStatus,
+    InferenceSettlementOperation, InferenceSettlementTxData, OpenInferenceDisputeRequest,
+    OpenInferenceSessionRequest, RefundInferenceSessionRequest, ResolveInferenceDisputeRequest,
 };
 pub use storage_metadata::{
     assigned_archives, assigned_archives_presorted, is_archive_assigned_to_chunk, AccessEntryV2,
