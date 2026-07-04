@@ -1,33 +1,36 @@
 name: Approval policy
 
-# Enforces the conditional approval policy from CONTRIBUTING.md as a WAITING gate:
+# Enforces the conditional approval policy from CONTRIBUTING.md:
 #   - PR authored by sunhaoxiangwang -> requires >= 1 admin/maintainer approval
 #   - PR authored by anyone else     -> requires >= 2 admin/maintainer approvals
 # A qualifying approver has repo permission "admin" or "maintain". Only the
 # latest APPROVED review per reviewer counts; the author is excluded; a PR
 # author's own review never counts.
 #
-# State machine (the check is NEVER a red "failure" — it is a waiting gate):
-#   * not yet satisfied  -> check-run status=in_progress (PENDING / yellow).
-#                           Blocks merge, but reads as "waiting for approval".
-#   * satisfied          -> check-run status=completed, conclusion=success (green).
-#   * new commit pushed  -> stale approvals dismissed (branch protection) + a
-#                           fresh PENDING check is published on the new head sha
-#                           -> waits for re-review.
-#   * approval dismissed / changes requested -> back to PENDING.
+# Why this shape:
+#   * GitHub (Feb 2025) forbids workflows from writing/updating custom check-run
+#     status/conclusions via the API. The only reliable required check a workflow
+#     can drive is the JOB's own check-run (managed by Actions), which is binary
+#     pass/fail. So the gate is this job's success/failure — no commit statuses,
+#     no hand-rolled check-runs.
+#   * It runs ONLY on review events (and manual dispatch). It does NOT run on PR
+#     open/synchronize, so before anyone reviews there is NO run and NO red mark:
+#     the required `approval-policy` check is simply absent, which GitHub shows as
+#     "Expected — waiting for status" (a pending/blocking state, not a red X).
+#   * A qualifying approval makes the job pass -> the check turns green -> the PR
+#     becomes mergeable automatically (no manual step). A new commit dismisses the
+#     stale approval (branch protection `dismiss_stale_reviews`), and since no
+#     review has happened on the new commit yet, the check is again absent/waiting.
+#   * The job only "fails" (red) if a review is submitted that genuinely does NOT
+#     satisfy the policy (e.g. a non-admin approval, or 1-of-2). That is an
+#     accurate "not satisfied" signal and clears automatically when a qualifying
+#     approval arrives. With admin/maintainer reviewers it never goes red.
 #
-# Exactly ONE check-run named `approval-policy` per head sha is kept (found and
-# updated in place), so there is never a mix of stale failure/success runs that
-# could deadlock the required check. No commit statuses are written. Concurrency
-# is per-PR and DOES NOT cancel (runs queue), so there are no canceled runs.
-#
-# Branch protection requires the check context "approval-policy" (this check-run
-# name). Runs via pull_request_target so the base-repo token can read collaborator
-# permissions; this workflow never checks out PR code, so that is safe.
+# Branch protection requires the check context "approval-policy" (this job name).
+# Runs via pull_request_review (base-repo context) so the token can read
+# collaborator permissions; this workflow never checks out PR code.
 
 on:
-  pull_request_target:
-    types: [opened, reopened, synchronize]
   pull_request_review:
     types: [submitted, edited, dismissed]
   workflow_dispatch:
@@ -40,11 +43,10 @@ on:
 permissions:
   contents: read
   pull-requests: read
-  checks: write
 
 concurrency:
-  # Serialize per PR so the single check-run is updated in order. Do NOT cancel —
-  # canceled runs are exactly the ugly red/gray marks we are removing.
+  # One evaluation at a time per PR; do NOT cancel (canceled runs are exactly the
+  # gray/red marks we are avoiding) — queued runs execute in order.
   group: approval-policy-${{ github.event.pull_request.number || github.event.inputs.pr }}
   cancel-in-progress: false
 
@@ -53,7 +55,7 @@ jobs:
     name: approval-policy
     runs-on: ubuntu-latest
     steps:
-      - name: Evaluate approval policy and update the waiting check
+      - name: Evaluate approval policy
         env:
           GH_TOKEN: ${{ github.token }}
           OWNER: ${{ github.repository_owner }}
@@ -62,13 +64,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Resolve author + current head sha for the PR (works for every trigger).
           meta=$(gh api "repos/${OWNER}/${REPO}/pulls/${PR}")
           AUTHOR=$(echo "${meta}" | jq -r '.user.login')
-          HEAD_SHA=$(echo "${meta}" | jq -r '.head.sha')
-          echo "PR #${PR} by ${AUTHOR} @ ${HEAD_SHA}"
+          echo "PR #${PR} by ${AUTHOR}"
 
-          # Latest review state per reviewer; keep only APPROVED; drop the author.
+          # Latest review per reviewer; keep only APPROVED; drop the author.
           approvers=$(gh api --paginate "repos/${OWNER}/${REPO}/pulls/${PR}/reviews" \
             | jq -r '
                 group_by(.user.login)
@@ -78,7 +78,6 @@ jobs:
             | sort -u | grep -vx "${AUTHOR}" || true)
           echo "Approvers (author excluded): ${approvers:-none}"
 
-          # Count reviewers whose repo permission is admin or maintain.
           qualified=0
           for u in ${approvers}; do
             perm=$(gh api "repos/${OWNER}/${REPO}/collaborators/${u}/permission" \
@@ -90,30 +89,11 @@ jobs:
           done
 
           if [ "${AUTHOR}" = "sunhaoxiangwang" ]; then need=1; else need=2; fi
-          if [ "${qualified}" -ge "${need}" ]; then
-            title="Approved"
-            summary="${qualified}/${need} admin-or-maintainer approvals — satisfied."
-            # Green, mergeable.
-            body=$(jq -n --arg sha "$HEAD_SHA" --arg t "$title" --arg s "$summary" \
-              '{name:"approval-policy", head_sha:$sha, status:"completed", conclusion:"success", output:{title:$t, summary:$s}}')
-          else
-            title="Waiting for approval"
-            summary="${qualified}/${need} admin-or-maintainer approvals — waiting for review."
-            # PENDING (in_progress): blocks merge, shows yellow/waiting, NOT red.
-            body=$(jq -n --arg sha "$HEAD_SHA" --arg t "$title" --arg s "$summary" \
-              '{name:"approval-policy", head_sha:$sha, status:"in_progress", output:{title:$t, summary:$s}}')
-          fi
-          echo "${summary}"
+          echo "Result: ${qualified}/${need} admin-or-maintainer approvals"
 
-          # Keep exactly one check-run per head sha: update in place if present,
-          # else create it. Avoids the multiple-same-name deadlock.
-          cid=$(gh api "repos/${OWNER}/${REPO}/commits/${HEAD_SHA}/check-runs" \
-            --jq 'first(.check_runs[] | select(.name=="approval-policy") | .id) // empty')
-          if [ -n "${cid}" ]; then
-            echo "${body}" | gh api -X PATCH "repos/${OWNER}/${REPO}/check-runs/${cid}" --input - >/dev/null
-            echo "Updated approval-policy check-run ${cid}."
+          if [ "${qualified}" -ge "${need}" ]; then
+            echo "Approval policy satisfied."
           else
-            echo "${body}" | gh api -X POST "repos/${OWNER}/${REPO}/check-runs" --input - >/dev/null
-            echo "Created approval-policy check-run."
+            echo "::error::Approval policy not met — waiting for ${need} admin/maintainer approval(s); have ${qualified}."
+            exit 1
           fi
-          # The job never fails — the waiting/green state lives in the check-run.
