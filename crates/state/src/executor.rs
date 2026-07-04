@@ -7,8 +7,8 @@ use std::sync::Arc;
 use sumchain_crypto::verify_bytes;
 use sumchain_genesis::ChainParams;
 use sumchain_primitives::{
-    Address, Balance, Block, BlockHeader, Hash, NodeRegistryOperation, Receipt, SignedTransaction,
-    TransactionV2, TxPayload, TxStatus,
+    Address, Balance, Block, BlockHeader, Hash, NodeRegistryOperation, Receipt,
+    SignedTransaction, StorageMetadataOperationV2, TransactionV2, TxPayload, TxStatus,
     CHALLENGE_INTERVAL_BLOCKS, SLASH_PERCENTAGE,
 };
 use sumchain_storage::schema::{ContractStateDiff, StateDiff};
@@ -94,6 +94,16 @@ fn education_gate_open(params: &ChainParams, block_height: u64) -> bool {
 #[inline]
 fn archive_unbonding_gate_open(params: &ChainParams, block_height: u64) -> bool {
     matches!(params.archive_unbonding_enabled_from_height, Some(h) if block_height >= h)
+}
+
+/// Archive-node chunk reassignment activation gate (issue #62). Same dormant-
+/// deploy semantics: production default `None` → never open, so `ReassignChunksV2`
+/// and post-activation (Active-file) `AcceptAssignmentV2` re-attestation are
+/// rejected free (`Failed(330)`, no fee, no state) until
+/// `archive_reassignment_enabled_from_height` is set via a coordinated upgrade.
+#[inline]
+fn archive_reassignment_gate_open(params: &ChainParams, block_height: u64) -> bool {
+    matches!(params.archive_reassignment_enabled_from_height, Some(h) if block_height >= h)
 }
 // Governance activation-gate resolution lives in
 // `crate::governance_executor::gate_open` (used by the dispatch skeleton).
@@ -1098,6 +1108,38 @@ impl BlockExecutor {
                                 status: TxStatus::Failed(40),
                                 fee_paid: 0,
                             });
+                        }
+                        // Issue #62 reassignment gate — checked BEFORE execute_v2's
+                        // up-front deduct_fee so a gate-dormant rejection (330)
+                        // costs no fee and mutates nothing. Only reassignment-context
+                        // ops are gated; existing epoch-0 storage flows are untouched.
+                        if !archive_reassignment_gate_open(&self.params, block_height) {
+                            let gated_330 = match &storage_v2_data.operation {
+                                StorageMetadataOperationV2::ReassignChunksV2 { .. } => true,
+                                StorageMetadataOperationV2::AcceptAssignmentV2 {
+                                    merkle_root,
+                                    ..
+                                } => {
+                                    // Only a file that ALREADY carries reassignment
+                                    // epochs is gate-blocked here (re-attesting to a
+                                    // reassignment epoch needs the gate). Files with
+                                    // no epochs — including ordinary Active-file
+                                    // re-attest attempts — fall through to the
+                                    // unchanged pre-#62 accept path (→ 33).
+                                    !self
+                                        .storage_metadata_executor
+                                        .get_file_reassignments(merkle_root)?
+                                        .is_empty()
+                                }
+                                _ => false,
+                            };
+                            if gated_330 {
+                                return Ok(TxExecutionResult {
+                                    tx_hash,
+                                    status: TxStatus::Failed(330),
+                                    fee_paid: 0,
+                                });
+                            }
                         }
                         let result = self.storage_metadata_executor.execute_v2(
                             &v2_tx.from,

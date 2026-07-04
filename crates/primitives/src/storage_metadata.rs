@@ -241,6 +241,19 @@ pub enum StorageMetadataOperationV2 {
         address: Address,
         new_entry: AccessEntryV2,
     },
+    /// Archive-node chunk reassignment (issue #62). Owner-triggered: advance the
+    /// file's assignment epoch to the current block's active-archive snapshot so
+    /// replacement archives can be assigned and attest, when an
+    /// originally-assigned archive has left the active set (exit/slash/unbond).
+    ///
+    /// Appended after `UpdateAccessV2` so existing bincode variant indices are
+    /// unchanged. The whole file advances one epoch (per-file, not per-chunk);
+    /// the executor stamps the current block height. Gated by
+    /// `ChainParams::archive_reassignment_enabled_from_height`. See
+    /// [docs/specs/SNIP-V2-CHAIN-PLAN.md](../../../docs/specs/SNIP-V2-CHAIN-PLAN.md) §5.4.
+    ReassignChunksV2 {
+        merkle_root: Hash,
+    },
 }
 
 /// Transaction data wrapper for V2 storage operations.

@@ -128,6 +128,13 @@ impl TxStatus {
             TxStatus::Failed(324) => "archive has open retrievability challenges; cannot begin unbonding",
             TxStatus::Failed(325) => "no archive unbonding in progress",
             TxStatus::Failed(326) => "archive unbonding period has not elapsed",
+            // Archive-node chunk reassignment (issue #62). Isolated 330-block.
+            TxStatus::Failed(330) => "archive reassignment not enabled at this block height",
+            TxStatus::Failed(331) => "reassignment: file not found",
+            TxStatus::Failed(332) => "reassignment: signer is not the file owner",
+            TxStatus::Failed(333) => "reassignment: file lifecycle not eligible (Abandoned cannot be reassigned)",
+            TxStatus::Failed(334) => "reassignment: no reassignment needed (no coverage gap)",
+            TxStatus::Failed(335) => "AcceptAssignmentV2: post-activation re-attestation requires an open reassignment epoch",
             TxStatus::Failed(_) => "failed",
         }
     }

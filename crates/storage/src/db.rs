@@ -121,6 +121,19 @@ pub mod cf {
     /// and to keep future post-activation GC isolated from file-row data.
     pub const ASSIGNMENT_ATTESTATIONS_V2: &str = "assignment_attestations_v2";
 
+    /// Per-file archive-reassignment epochs (issue #62). Key: `merkle_root` (raw
+    /// 32 bytes). Value: `bincode(Vec<u64>)` of reassignment heights (epoch ≥ 1);
+    /// epoch 0 is the file's `StorageMetadataV2.assignment_height` and is not
+    /// stored here. No entry ⇒ epoch-0-only (every pre-#62 file).
+    pub const FILE_REASSIGNMENTS: &str = "file_reassignments";
+
+    /// Per-(file, epoch, archive) reassignment attestation bitmaps (issue #62).
+    /// Key: `[b'R', merkle_root_32, epoch_height_be_8, archive_20]` (61 bytes).
+    /// Value: bitmap of length `ceil(chunk_count / 8)`. Kept physically separate
+    /// from the epoch-0 `ASSIGNMENT_ATTESTATIONS_V2` CF so epoch-0 attestations
+    /// are never conflated with replacement attestations.
+    pub const ASSIGNMENT_ATTESTATIONS_V2_EPOCH: &str = "assignment_attestations_v2_epoch";
+
     /// OmniNode `InferenceAttestation` records (Stage 6 subprotocol).
     /// Key: 32-byte BLAKE3-domain-separated digest of
     /// `(session_id, verifier_address)`, see
@@ -504,6 +517,8 @@ pub const ALL_CFS: &[&str] = &[
     cf::ARCHIVE_UNBONDING,
     cf::STORAGE_METADATA_V2,
     cf::ASSIGNMENT_ATTESTATIONS_V2,
+    cf::FILE_REASSIGNMENTS,
+    cf::ASSIGNMENT_ATTESTATIONS_V2_EPOCH,
     cf::INFERENCE_ATTESTATIONS,
     cf::INFERENCE_ATTESTATIONS_BY_SESSION,
     // SRC-817/818 Education-LMS suite (Phase 2)

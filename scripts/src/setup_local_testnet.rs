@@ -89,6 +89,7 @@ fn main() -> Result<()> {
             governance: None,                      // no governance params configured
             archive_unbonding_enabled_from_height: None, // issue #20: archive withdrawal dormant
             archive_unbonding_period_blocks: 201_600,    // ~7 days at 3s blocks
+            archive_reassignment_enabled_from_height: None, // issue #62: chunk reassignment dormant
         },
     );
 

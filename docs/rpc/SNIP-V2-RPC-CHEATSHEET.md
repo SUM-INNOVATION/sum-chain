@@ -264,8 +264,30 @@ When `chain_getTransactionStatus` returns `Failed { reason }`, the `reason` stri
 | `33` | `"AcceptAssignmentV2 validity check failed"` | Signer not in snapshot/not Active, `chunk_indices` over per-tx cap, index out of range, or index not assigned to signer per the deterministic fn. |
 | `34` | `"ActivateFileV2 validity check failed"` | Wrong lifecycle (must be Pending), wrong owner, or coverage incomplete (`covered_count < chunk_count`). |
 | `35` | `"V2 access op validity check failed"` | AddAccessV2: duplicate / Public-with-bundle / Private-no-X25519 / byte-cap re-violated. RemoveAccessV2: address absent / removing owner from Private. UpdateAccessV2: `new_entry.address != address` / address absent / visibility-bundle mismatch. |
+| `330` | `"archive reassignment not enabled at this block height"` | Reassignment subprotocol dormant (issue #62). Gate-level: **no fee**, no state. |
+| `331` | `"reassignment: file not found"` | `ReassignChunksV2` merkle_root not registered. |
+| `332` | `"reassignment: signer is not the file owner"` | Only the file owner may reassign. |
+| `333` | `"reassignment: file lifecycle not eligible (Abandoned cannot be reassigned)"` | File is Abandoned. |
+| `334` | `"reassignment: no reassignment needed (no coverage gap)"` | No latest-epoch archive has left the active set — reassigning would be a no-op. |
+| `335` | `"AcceptAssignmentV2: post-activation re-attestation requires an open reassignment epoch"` | Re-attesting an **Active** file that has no reassignment epoch (gate open). |
 
 Codes `20`/`21` (generic NodeRegistryV2 / StorageMetadataV2 fail) currently fall through to `"failed"` — a future change may add specific reasons. SNIP retry logic should **not** assume `"failed"` is permanent.
+
+---
+
+## Archive-node reassignment (issue #62)
+
+**Dormant by default** (gate `archive_reassignment_enabled_from_height`; unset on mainnet today). When active, a file's owner can advance its **assignment epoch** so replacement archives are assigned and can attest after an originally-assigned archive leaves the active set (exit / slash / unbond). See [SNIP-V2-CHAIN-PLAN.md](../specs/SNIP-V2-CHAIN-PLAN.md) §5.4.
+
+- **Op:** `StorageMetadataOperationV2::ReassignChunksV2 { merkle_root }` — owner-only. Succeeds only when a real gap exists (a latest-epoch archive has left the active set), else `Failed(334)`. Abandoned files can't be reassigned (`333`). Each success appends the current block height as a new epoch.
+- **Attestation after reassignment:** `AcceptAssignmentV2` targets the file's **latest** epoch. An **Active** file may be re-attested only while the gate is open and the file has ≥1 reassignment epoch (else `335`). Epoch-0 attestations stay in their original bitmaps and keep counting; replacement attestations are stored separately per epoch.
+- **`storage_getAssignmentCoverageV2` (issue #62 fields, appended — existing fields unchanged):**
+  - `covered_count` / `missing_indices` are now the **aggregate** across all epochs (identical to before for files with no reassignment).
+  - Top-level `per_archive` stays **epoch-0-only** (backward-compatible).
+  - `assignment_epochs: [u64]` — all epoch heights, ascending (`[assignment_height, ...reassign]`).
+  - `latest_assignment_epoch: u64` — the newest epoch height.
+  - `reassignment_needed: bool` — true iff an owner `ReassignChunksV2` would be accepted right now.
+  - `per_epoch: [{ epoch_height, is_epoch_zero, covered_count, per_archive }]` — self-consistent per-epoch detail. Re-derive each epoch's assignment with `assigned_archives_presorted(merkle_root, storage_getActiveNodesAtHeight(epoch_height), idx, R)`.
 
 ---
 

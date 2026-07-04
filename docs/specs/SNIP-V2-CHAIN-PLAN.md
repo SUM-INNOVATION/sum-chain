@@ -538,18 +538,22 @@ Implementation:
 - For `h` > head height → returns the **most recent snapshot** (no `Err` and no `None`). Saves a round-trip for clients querying near head; "what does the chain currently know" is the right answer rather than rejecting the query. Implementation and tests both encode this contract.
 - Caller behavior for files registered before the bug fix in §2.1 lands: `assignment_height` will be `0`, so the lookup returns the genesis snapshot. Acceptable for V1 → V2 migration (no V2 files exist yet).
 
-**Snapshot stability:** once written, never mutated. A node leaving the active set after a file is registered retains its assignment for that file's lifetime (no reassignment).
+**Snapshot stability:** once written, never mutated. A node leaving the active set after a file is registered retains its assignment within that epoch. Issue #62 (§5.4) adds owner-triggered reassignment that **layers a new epoch** pointing at a later (already-immutable) snapshot — it never mutates the original snapshot or `assignment_height`.
 
-### 5.4 Archive-node exit / no reassignment
+### 5.4 Archive-node exit / reassignment
 
-V2 does not implement reassignment. Consequence: when a snapshotted node leaves (exits or gets slashed to inactive), files registered before its exit lose effective replication for any chunks assigned to it. PoR challenges to that node will fail and slash, which is the V1 economic model's existing response — but the chunks themselves are not redistributed.
+**Update (issue #62): deterministic reassignment is now implemented, gate-dormant.** The original V2 shipped with no reassignment (documented below as historical context). Chunk reassignment now exists behind `archive_reassignment_enabled_from_height` (default `None` → dormant; unchanged behavior until a coordinated activation). When active, a file's owner submits `ReassignChunksV2 { merkle_root }` to advance the file's **assignment epoch** to the current active-archive snapshot, so replacement archives are assigned and can attest after an originally-assigned archive leaves the active set.
 
-**Why we're shipping this way:**
-- Reassignment requires either a `Reassign` tx (governance-coordinated) or automatic chain-driven reassignment (consensus-level complexity). Both are larger than V2 should be.
-- V1 already has this gap; V2 doesn't make it worse.
-- Real fix is v2.x — a `ReassignChunksV2` operation with replication factor parameters.
+Design (as implemented):
+- **Per-file, snapshot-layered epochs.** Epoch 0 is the file's `assignment_height`; each `ReassignChunksV2` appends the current block height as a new epoch. Reassignment heights are stored in the `file_reassignments` CF (`merkle_root → Vec<u64>`); `StorageMetadataV2` is unchanged. Assignment for each epoch uses the existing deterministic `assigned_archives(...)` over `storage_getActiveNodesAtHeight(epoch_height)`.
+- **Owner-triggered only** (no automatic chain-wide sweep); rejected as a no-op (`334`) unless a latest-epoch archive has left the active set; `Abandoned` files rejected (`333`).
+- **Epoch-aware attestations.** Epoch-0 bitmaps stay in `assignment_attestations_v2` (untouched); replacement attestations live in `assignment_attestations_v2_epoch` (`[b'R', merkle_root, epoch_height, archive]`). `AcceptAssignmentV2` targets the latest epoch; an **Active** file may be re-attested only while the gate is open and a reassignment epoch exists (else `335`).
+- **Aggregate coverage.** `covered_count` / `ActivateFileV2` union across epoch 0 + all reassignment epochs, currently-Active archives only. `storage_getAssignmentCoverageV2` gains `assignment_epochs`, `latest_assignment_epoch`, `reassignment_needed`, and `per_epoch` (top-level `per_archive` stays epoch-0-only).
+- **PoR challenge generation is unchanged.** Receipt codes 330–335.
 
-This is a known limitation — flagging explicitly because reviewer asked for it.
+Client-facing summary + coverage fields: [SNIP-V2-RPC-CHEATSHEET.md](../rpc/SNIP-V2-RPC-CHEATSHEET.md) §"Archive-node reassignment". Code: [crates/state/src/storage_metadata.rs](../../crates/state/src/storage_metadata.rs), receipt strings in [crates/primitives/src/receipt.rs](../../crates/primitives/src/receipt.rs).
+
+**Historical context (original V2 behavior, still the default until #62 is activated):** V2 did not implement reassignment. When a snapshotted node left (exit or slashed-to-inactive), files registered before its exit lost effective replication for any chunks assigned to it; PoR challenges to that node failed and slashed (the V1 economic response), but chunks were not redistributed. Reassignment was deferred because it requires either a `Reassign` tx or chain-driven reassignment — deliberately kept out of the initial V2 scope and delivered separately as #62.
 
 ### 5.5 Challenge coverage guarantees
 
@@ -628,7 +632,7 @@ These are real concerns that will need work eventually, but **none should block 
 | Token emissions / mining-style PoR rewards | Contradicts current economic model ([docs/architecture/economic-model.md](../architecture/economic-model.md) — fixed supply). Requires formal economic-model revision (v3.0 → v4.0) and governance approval. | Future tokenomics-extension proposal |
 | Decentralized AGI compute (PoC) | Requires verifiable-compute primitives (zk-ML, challenge-response for compute, oracle/benchmark eval). Independent project. | Separate spec |
 | File rotation / true revocation (Ask 10) | Schema hooks reserved (`predecessor_root`, `Rotated` lifecycle); design defers | v2.x SNIP work |
-| Reassignment on archive-node exit | Requires governance-coordinated or chain-driven reassignment; consensus-level complexity | v2.x storage work |
+| Reassignment on archive-node exit | **Implemented, gate-dormant** (issue #62): owner-triggered `ReassignChunksV2` with per-file snapshot-layered epochs; see §5.4 | Delivered |
 | Filecoin-grade challenge coverage | Requires per-file or per-chunk challenge scheduling | v3 storage redesign |
 
 ---

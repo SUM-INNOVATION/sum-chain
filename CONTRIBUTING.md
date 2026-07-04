@@ -64,7 +64,11 @@ approvals only count from **admins or maintainers** (repo permission `admin` or
 This conditional "1 if it's the owner, otherwise 2" rule is **not expressible in
 native branch protection or CODEOWNERS**, so it is enforced by the
 [`approval-policy`](.github/workflows/approval-policy.yml) GitHub Action, which
-is wired in as a **required status check**. `.github/CODEOWNERS` keeps a single
+is wired in as a **required status check**. The required check is the workflow
+job's own pass/fail conclusion (a single GitHub Actions check named
+`approval-policy`) — it writes **no separate commit statuses**, so approved or
+merged PRs never carry a stale failure mark; per-PR `cancel-in-progress`
+concurrency retires obsolete runs. `.github/CODEOWNERS` keeps a single
 owner entry (`* @sunhaoxiangwang`); native **"Require review from Code Owners"
 is intentionally left OFF** — with a single-owner CODEOWNERS it would deadlock
 the owner's own PRs (no other code owner could approve them).

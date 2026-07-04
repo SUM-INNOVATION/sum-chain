@@ -208,6 +208,14 @@ pub struct ChainParams {
     /// staking's `unbonding_period`.
     #[serde(default = "default_archive_unbonding_period_blocks")]
     pub archive_unbonding_period_blocks: u64,
+
+    /// Archive-node chunk reassignment activation gate (issue #62). `None` = the
+    /// reassignment subprotocol is dormant: `ReassignChunksV2` and post-activation
+    /// (Active-file) `AcceptAssignmentV2` re-attestation are rejected. Set to a
+    /// height via a coordinated validator upgrade to activate. `#[serde(default)]`
+    /// keeps existing mainnet `genesis.json` dormant.
+    #[serde(default)]
+    pub archive_reassignment_enabled_from_height: Option<u64>,
 }
 
 fn default_archive_unbonding_period_blocks() -> u64 {
@@ -420,6 +428,9 @@ impl Default for ChainParams {
             // #20). Activation is a coordinated validator upgrade.
             archive_unbonding_enabled_from_height: None,
             archive_unbonding_period_blocks: default_archive_unbonding_period_blocks(),
+            // Production-safe default: archive-node chunk reassignment dormant
+            // (issue #62). Activation is a coordinated validator upgrade.
+            archive_reassignment_enabled_from_height: None,
         }
     }
 }
