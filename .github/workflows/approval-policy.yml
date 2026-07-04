@@ -1,30 +1,33 @@
 name: Approval policy
 
-# Enforces the conditional approval policy from CONTRIBUTING.md:
+# Enforces the conditional approval policy from CONTRIBUTING.md as a WAITING gate:
 #   - PR authored by sunhaoxiangwang -> requires >= 1 admin/maintainer approval
 #   - PR authored by anyone else     -> requires >= 2 admin/maintainer approvals
 # A qualifying approver has repo permission "admin" or "maintain". Only the
 # latest APPROVED review per reviewer counts; the author is excluded; a PR
 # author's own review never counts.
 #
-# Design (no stale red / no canceled jobs):
-#   * Runs ONLY on review events (submitted/edited/dismissed) + manual dispatch.
-#     It does NOT run on PR open/synchronize, so there are no canceled runs and
-#     no red check before the first review — the required `approval-policy`
-#     check is simply absent/pending until someone reviews, which keeps the PR
-#     un-mergeable (branch protection treats a missing required check as pending).
-#   * Publishes a SINGLE check-run named `approval-policy` on the PR HEAD sha via
-#     the Checks API. (A `pull_request_review` workflow's own `github.sha` is the
-#     base branch, so the natural job check-run would attach to the wrong commit;
-#     creating the check-run explicitly on the head sha is what branch protection
-#     evaluates.) No commit statuses are written.
-#   * The job always exits 0, so the Actions run itself is never red — the verdict
-#     lives entirely in the published check-run's conclusion.
+# State machine (the check is NEVER a red "failure" — it is a waiting gate):
+#   * not yet satisfied  -> check-run status=in_progress (PENDING / yellow).
+#                           Blocks merge, but reads as "waiting for approval".
+#   * satisfied          -> check-run status=completed, conclusion=success (green).
+#   * new commit pushed  -> stale approvals dismissed (branch protection) + a
+#                           fresh PENDING check is published on the new head sha
+#                           -> waits for re-review.
+#   * approval dismissed / changes requested -> back to PENDING.
 #
-# Branch protection requires the check context "approval-policy" (this check-run's
-# name); no app_id pinning until this behavior is verified.
+# Exactly ONE check-run named `approval-policy` per head sha is kept (found and
+# updated in place), so there is never a mix of stale failure/success runs that
+# could deadlock the required check. No commit statuses are written. Concurrency
+# is per-PR and DOES NOT cancel (runs queue), so there are no canceled runs.
+#
+# Branch protection requires the check context "approval-policy" (this check-run
+# name). Runs via pull_request_target so the base-repo token can read collaborator
+# permissions; this workflow never checks out PR code, so that is safe.
 
 on:
+  pull_request_target:
+    types: [opened, reopened, synchronize]
   pull_request_review:
     types: [submitted, edited, dismissed]
   workflow_dispatch:
@@ -39,24 +42,27 @@ permissions:
   pull-requests: read
   checks: write
 
+concurrency:
+  # Serialize per PR so the single check-run is updated in order. Do NOT cancel —
+  # canceled runs are exactly the ugly red/gray marks we are removing.
+  group: approval-policy-${{ github.event.pull_request.number || github.event.inputs.pr }}
+  cancel-in-progress: false
+
 jobs:
   approval-policy:
     name: approval-policy
     runs-on: ubuntu-latest
     steps:
-      - name: Evaluate approval policy and publish the check-run
+      - name: Evaluate approval policy and update the waiting check
         env:
           GH_TOKEN: ${{ github.token }}
           OWNER: ${{ github.repository_owner }}
           REPO: ${{ github.event.repository.name }}
-          EVENT: ${{ github.event_name }}
-          PR_REVIEW: ${{ github.event.pull_request.number }}
-          PR_DISPATCH: ${{ github.event.inputs.pr }}
+          PR: ${{ github.event.pull_request.number || github.event.inputs.pr }}
         run: |
           set -euo pipefail
 
-          # Resolve PR number for either trigger, then fetch author + head sha.
-          if [ "${EVENT}" = "workflow_dispatch" ]; then PR="${PR_DISPATCH}"; else PR="${PR_REVIEW}"; fi
+          # Resolve author + current head sha for the PR (works for every trigger).
           meta=$(gh api "repos/${OWNER}/${REPO}/pulls/${PR}")
           AUTHOR=$(echo "${meta}" | jq -r '.user.login')
           HEAD_SHA=$(echo "${meta}" | jq -r '.head.sha')
@@ -84,19 +90,30 @@ jobs:
           done
 
           if [ "${AUTHOR}" = "sunhaoxiangwang" ]; then need=1; else need=2; fi
-          desc="${qualified}/${need} admin-or-maintainer approvals"
-          echo "Result: ${desc}"
-          if [ "${qualified}" -ge "${need}" ]; then concl="success"; else concl="failure"; fi
+          if [ "${qualified}" -ge "${need}" ]; then
+            title="Approved"
+            summary="${qualified}/${need} admin-or-maintainer approvals — satisfied."
+            # Green, mergeable.
+            body=$(jq -n --arg sha "$HEAD_SHA" --arg t "$title" --arg s "$summary" \
+              '{name:"approval-policy", head_sha:$sha, status:"completed", conclusion:"success", output:{title:$t, summary:$s}}')
+          else
+            title="Waiting for approval"
+            summary="${qualified}/${need} admin-or-maintainer approvals — waiting for review."
+            # PENDING (in_progress): blocks merge, shows yellow/waiting, NOT red.
+            body=$(jq -n --arg sha "$HEAD_SHA" --arg t "$title" --arg s "$summary" \
+              '{name:"approval-policy", head_sha:$sha, status:"in_progress", output:{title:$t, summary:$s}}')
+          fi
+          echo "${summary}"
 
-          # Publish exactly one check-run named "approval-policy" on the PR head sha.
-          gh api -X POST "repos/${OWNER}/${REPO}/check-runs" --input - >/dev/null <<JSON
-          {
-            "name": "approval-policy",
-            "head_sha": "${HEAD_SHA}",
-            "status": "completed",
-            "conclusion": "${concl}",
-            "output": { "title": "Approval policy", "summary": "${desc}" }
-          }
-          JSON
-          echo "Published approval-policy check-run: ${concl} (${desc})"
-          # The job never fails — the required gate is the published check-run.
+          # Keep exactly one check-run per head sha: update in place if present,
+          # else create it. Avoids the multiple-same-name deadlock.
+          cid=$(gh api "repos/${OWNER}/${REPO}/commits/${HEAD_SHA}/check-runs" \
+            --jq 'first(.check_runs[] | select(.name=="approval-policy") | .id) // empty')
+          if [ -n "${cid}" ]; then
+            echo "${body}" | gh api -X PATCH "repos/${OWNER}/${REPO}/check-runs/${cid}" --input - >/dev/null
+            echo "Updated approval-policy check-run ${cid}."
+          else
+            echo "${body}" | gh api -X POST "repos/${OWNER}/${REPO}/check-runs" --input - >/dev/null
+            echo "Created approval-policy check-run."
+          fi
+          # The job never fails — the waiting/green state lives in the check-run.
