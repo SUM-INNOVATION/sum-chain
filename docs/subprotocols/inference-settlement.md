@@ -30,16 +30,27 @@ wire format, storage, or records.
 A session is opened and funded by a **funder** (the requester/payer), who sets a
 fixed `reward_per_verifier`, a `max_verifiers` cap, a `dispute_window_blocks`, and
 an `expires_at_height`. Escrow is tracked as `remaining_escrow` in the session
-record.
+record. **`expires_at_height` must be at or after the minimum claim-maturity
+window** — `created_at_height + finality_depth + dispute_window_blocks` — so a
+session can never expire before an attestation submitted at open time could
+mature; otherwise `OpenSession` is rejected.
 
 A **verifier** who produced an attestation for that session may **self-claim** the
-fixed reward once the claim is *mature* — after the attestation is finalized and
-the dispute window has elapsed (`attestation.included_at_height +
-dispute_window_blocks`). Each verifier can claim once, up to `max_verifiers`,
-while escrow remains.
+fixed reward once the claim is *mature*. **No claim can be paid until the
+attestation is finalized AND the dispute window has elapsed**, i.e. not before:
+
+```
+attestation.included_at_height + finality_depth + dispute_window_blocks
+```
+
+Each verifier can claim once, up to `max_verifiers`, while escrow remains.
 
 The funder may **refund** the remaining escrow once the session is closable
-(expired or fully claimed) and no dispute is left unresolved.
+(expired or fully claimed) and no dispute is left unresolved. **A refund can never
+bypass a pending claim**: even at/after expiry, `RefundSession` is rejected while
+any verifier that attested for the session is still within its maturity window and
+has neither claimed nor been denied by a dispute. Only once every such claim has
+matured (or been claimed/denied) can the remaining escrow be refunded.
 
 ## Disputes (record-only, neutral resolver)
 
@@ -96,10 +107,11 @@ fee, no state change). Attestation recording is unaffected either way.
 ## Receipt codes (isolated 350-block)
 
 `350` not enabled · `351` malformed/unsupported op · `352` session not found/duplicate ·
-`353` unauthorized · `354` invalid session terms · `355` insufficient escrow/deposit ·
-`356` attestation not found/not finalized · `357` dispute window not elapsed (claim not mature) ·
+`353` unauthorized (or dispute resolver not configured) · `354` invalid session terms
+(incl. expiry before finality + dispute window) · `355` insufficient escrow/deposit ·
+`356` attestation not found · `357` claim not mature (needs finality_depth + dispute window) ·
 `358` duplicate claim/dispute · `359` unresolved/denied dispute blocks settlement ·
-`360` refund not available yet.
+`360` refund not available (not closable, or a claim is still within its maturity window).
 
 ## Privacy
 

@@ -27,8 +27,13 @@ const REWARD: u128 = 1_000_000;
 
 /// omninode + settlement enabled; `resolver` configured as the neutral dispute
 /// resolver.
+/// finality_depth pinned to 3 so maturity math is deterministic in tests:
+/// maturity = attestation.included_at_height + 3 + dispute_window_blocks.
+const FINALITY: u64 = 3;
+
 fn params_enabled(resolver: Option<Address>) -> ChainParams {
     let mut p = params_omninode_enabled();
+    p.finality_depth = FINALITY;
     p.inference_settlement_enabled_from_height = Some(0);
     p.inference_settlement_dispute_resolver = resolver;
     p
@@ -218,6 +223,32 @@ fn claim_requires_attestation_then_pays_after_maturity() {
 }
 
 #[test]
+fn claim_maturity_requires_finality_and_dispute_window() {
+    // Attest at height 5, dispute_window 10, finality 3 → maturity = 5+3+10 = 18.
+    let (state, _db, _dir, executor) = setup_with_params(params_enabled(None));
+    let funder = KeyPair::generate();
+    let verifier = KeyPair::generate();
+    let proposer = KeyPair::generate();
+    fund(&state, &funder, 10_000_000);
+    fund(&state, &verifier, 10_000_000);
+    executor.execute_tx(&settlement_tx(&funder, 0, open_op("s", 2, 2 * REWARD, 10, 1000)), &proposer.address(), 1, 1000).unwrap();
+    attest(&executor, &proposer.address(), &verifier, "s", 5, 0);
+
+    let claim = |nonce: u64, height: u64| {
+        executor
+            .execute_tx(&settlement_tx(&verifier, nonce, InferenceSettlementOperation::ClaimReward(ClaimInferenceRewardRequest { session_id: "s".into() })), &proposer.address(), height, 1000)
+            .unwrap()
+            .status
+    };
+    // Not finalized yet (height 7 < 5+3=8) → 357.
+    assert!(matches!(claim(1, 7), TxStatus::Failed(357)), "not finalized");
+    // Finalized but dispute window not elapsed (8 <= 10 < 18) → 357.
+    assert!(matches!(claim(2, 10), TxStatus::Failed(357)), "window not elapsed");
+    // Finalized + dispute window elapsed (height 18) → success.
+    assert!(claim(3, 18).is_success(), "should be mature at 18");
+}
+
+#[test]
 fn fund_top_up_increases_escrow() {
     let (state, db, _dir, executor) = setup_with_params(params_enabled(None));
     let funder = KeyPair::generate();
@@ -257,6 +288,98 @@ fn refund_after_expiry_credits_funder() {
     let s = sexec(&db).get_session("s").unwrap().unwrap();
     assert_eq!(s.status, InferenceSessionStatus::Refunded);
     assert_eq!(s.remaining_escrow, 0);
+}
+
+#[test]
+fn open_session_too_early_expiry_rejected_354() {
+    // dispute_window 10, finality 3, created height 1 → min expiry = 14.
+    let (state, _db, _dir, executor) = setup_with_params(params_enabled(None));
+    let funder = KeyPair::generate();
+    let proposer = KeyPair::generate();
+    fund(&state, &funder, 10_000_000);
+    // expires 13 < 14 → 354.
+    let r = executor
+        .execute_tx(&settlement_tx(&funder, 0, open_op("s", 2, 2 * REWARD, 10, 13)), &proposer.address(), 1, 1000)
+        .unwrap();
+    assert!(matches!(r.status, TxStatus::Failed(354)), "got {:?}", r.status);
+    // expires 14 == min → accepted.
+    let ok = executor
+        .execute_tx(&settlement_tx(&funder, 1, open_op("s2", 2, 2 * REWARD, 10, 14)), &proposer.address(), 1, 1000)
+        .unwrap();
+    assert!(ok.status.is_success(), "got {:?}", ok.status);
+}
+
+#[test]
+fn refund_blocked_while_attestation_within_maturity_then_succeeds() {
+    let (state, db, _dir, executor) = setup_with_params(params_enabled(None));
+    let funder = KeyPair::generate();
+    let verifier = KeyPair::generate();
+    let proposer = KeyPair::generate();
+    fund(&state, &funder, 10_000_000);
+    fund(&state, &verifier, 10_000_000);
+    // Open at height 1: dispute_window 10, expires 20 (>= min 14).
+    executor.execute_tx(&settlement_tx(&funder, 0, open_op("s", 2, 2 * REWARD, 10, 20)), &proposer.address(), 1, 1000).unwrap();
+    // A LATE attestation at height 18 → maturity = 18+3+10 = 31, past expiry (20).
+    attest(&executor, &proposer.address(), &verifier, "s", 18, 0);
+
+    // Refund at height 21 (>= expiry) is blocked: verifier still within maturity, unclaimed → 360.
+    let blocked = executor
+        .execute_tx(&settlement_tx(&funder, 1, InferenceSettlementOperation::RefundSession(RefundInferenceSessionRequest { session_id: "s".into() })), &proposer.address(), 21, 1000)
+        .unwrap();
+    assert!(matches!(blocked.status, TxStatus::Failed(360)), "got {:?}", blocked.status);
+
+    // After maturity (height 32), unclaimed + no dispute → refund succeeds.
+    let ok = executor
+        .execute_tx(&settlement_tx(&funder, 2, InferenceSettlementOperation::RefundSession(RefundInferenceSessionRequest { session_id: "s".into() })), &proposer.address(), 32, 1000)
+        .unwrap();
+    assert!(ok.status.is_success(), "got {:?}", ok.status);
+    assert_eq!(sexec(&db).get_session("s").unwrap().unwrap().remaining_escrow, 0);
+}
+
+// ── Fee accounting ───────────────────────────────────────────────────────────
+
+#[test]
+fn gate_closed_failure_charges_no_fee_no_nonce_no_proposer() {
+    let mut p = params_omninode_enabled();
+    p.inference_settlement_enabled_from_height = None;
+    let (state, _db, _dir, executor) = setup_with_params(p);
+    let funder = KeyPair::generate();
+    let proposer = KeyPair::generate();
+    fund(&state, &funder, 10_000_000);
+    let bal = state.get_balance(&funder.address()).unwrap();
+    let nonce = state.get_nonce(&funder.address()).unwrap();
+
+    let res = executor
+        .execute_tx(&settlement_tx(&funder, 0, open_op("s", 2, 2 * REWARD, 10, 1000)), &proposer.address(), 1, 1000)
+        .unwrap();
+    assert!(matches!(res.status, TxStatus::Failed(350)));
+    assert_eq!(res.fee_paid, 0);
+    assert_eq!(state.get_balance(&funder.address()).unwrap(), bal, "no fee charged");
+    assert_eq!(state.get_nonce(&funder.address()).unwrap(), nonce, "no nonce bump");
+    assert_eq!(state.get_balance(&proposer.address()).unwrap(), 0, "proposer not credited");
+}
+
+#[test]
+fn gate_open_semantic_failure_charges_fee_and_reports_it() {
+    let (state, _db, _dir, executor) = setup_with_params(params_enabled(None));
+    let funder = KeyPair::generate();
+    let proposer = KeyPair::generate();
+    fund(&state, &funder, 10_000_000);
+    // Open once (success).
+    executor.execute_tx(&settlement_tx(&funder, 0, open_op("s", 2, 2 * REWARD, 10, 1000)), &proposer.address(), 1, 1000).unwrap();
+    let bal = state.get_balance(&funder.address()).unwrap();
+    let nonce = state.get_nonce(&funder.address()).unwrap();
+    let prop_before = state.get_balance(&proposer.address()).unwrap();
+
+    // Duplicate open (semantic failure 352) — fee is charged and reported.
+    let dup = executor
+        .execute_tx(&settlement_tx(&funder, 1, open_op("s", 2, 2 * REWARD, 10, 1000)), &proposer.address(), 2, 1000)
+        .unwrap();
+    assert!(matches!(dup.status, TxStatus::Failed(352)), "got {:?}", dup.status);
+    assert_eq!(dup.fee_paid, FEE, "receipt fee_paid == fee");
+    assert_eq!(state.get_balance(&funder.address()).unwrap(), bal - FEE, "sender debited fee");
+    assert_eq!(state.get_nonce(&funder.address()).unwrap(), nonce + 1, "nonce incremented");
+    assert_eq!(state.get_balance(&proposer.address()).unwrap(), prop_before + FEE, "proposer credited");
 }
 
 // ── Disputes ─────────────────────────────────────────────────────────────────

@@ -4136,7 +4136,11 @@ impl SumChainApiServer for RpcServer {
             Some(a) => a,
             None => return Ok(base(false, None, None, "no attestation for verifier")),
         };
-        let unlock = att.included_at_height.saturating_add(session.dispute_window_blocks);
+        // Maturity = finality (attestation finalized) + dispute window elapsed.
+        let unlock = att
+            .included_at_height
+            .saturating_add(self.consensus.finality_depth())
+            .saturating_add(session.dispute_window_blocks);
         if sexec.get_claim(&session_id, &v).map_err(|e| RpcError::Internal(e.to_string()))?.is_some() {
             return Ok(base(false, None, Some(unlock), "already claimed"));
         }

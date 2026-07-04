@@ -47,6 +47,19 @@ impl InferenceSettlementExecutionResult {
     }
 }
 
+/// Height at/after which a verifier's claim is mature: the attestation must be
+/// finalized (`+ finality_depth`) AND the dispute window must have elapsed
+/// (`+ dispute_window_blocks`). No reward is payable before this.
+fn claim_maturity_height(
+    included_at_height: u64,
+    finality_depth: u64,
+    dispute_window_blocks: u64,
+) -> u64 {
+    included_at_height
+        .saturating_add(finality_depth)
+        .saturating_add(dispute_window_blocks)
+}
+
 pub struct InferenceSettlementExecutor {
     db: Arc<Database>,
 }
@@ -107,7 +120,7 @@ impl InferenceSettlementExecutor {
                 self.fund_session(sender, &req.session_id, req.amount, state)
             }
             InferenceSettlementOperation::ClaimReward(req) => {
-                self.claim_reward(sender, &req.session_id, state, block_height)
+                self.claim_reward(sender, &req.session_id, state, block_height, chain_params)
             }
             InferenceSettlementOperation::OpenDispute(req) => {
                 self.open_dispute(sender, req, block_height, chain_params)
@@ -116,7 +129,7 @@ impl InferenceSettlementExecutor {
                 self.resolve_dispute(sender, req, block_height, chain_params)
             }
             InferenceSettlementOperation::RefundSession(req) => {
-                self.refund_session(sender, &req.session_id, state, block_height)
+                self.refund_session(sender, &req.session_id, state, block_height, chain_params)
             }
         }
     }
@@ -150,10 +163,15 @@ impl InferenceSettlementExecutor {
                 "dispute_window_blocks exceeds chain maximum",
             ));
         }
-        if req.expires_at_height <= block_height {
+        // Expiry must be at or after the minimum claim-maturity window, so a
+        // session can never expire (and be refunded) before an attestation
+        // submitted at open time could finalize + clear its dispute window.
+        let min_expiry =
+            claim_maturity_height(block_height, chain_params.finality_depth, req.dispute_window_blocks);
+        if req.expires_at_height <= block_height || req.expires_at_height < min_expiry {
             return Ok(InferenceSettlementExecutionResult::fail(
                 354,
-                "expires_at_height must be in the future",
+                "expires_at_height must be >= created_at_height + finality_depth + dispute_window_blocks",
             ));
         }
         if req.expires_at_height - block_height
@@ -241,6 +259,7 @@ impl InferenceSettlementExecutor {
         session_id: &str,
         state: &StateManager,
         block_height: u64,
+        chain_params: &ChainParams,
     ) -> Result<InferenceSettlementExecutionResult> {
         let mut session = match self.get_session(session_id)? {
             Some(s) => s,
@@ -260,11 +279,17 @@ impl InferenceSettlementExecutor {
                 ));
             }
         };
-        // Claim only after finality + dispute window.
-        if block_height < att.included_at_height.saturating_add(session.dispute_window_blocks) {
+        // Claim only after the attestation is finalized AND the dispute window
+        // has elapsed.
+        let maturity = claim_maturity_height(
+            att.included_at_height,
+            chain_params.finality_depth,
+            session.dispute_window_blocks,
+        );
+        if block_height < maturity {
             return Ok(InferenceSettlementExecutionResult::fail(
                 357,
-                "dispute window has not elapsed; claim not yet mature",
+                "claim not yet mature (needs finality_depth + dispute_window)",
             ));
         }
         // A dispute against this verifier blocks the claim (open = pending,
@@ -352,10 +377,15 @@ impl InferenceSettlementExecutor {
                 ));
             }
         };
-        if block_height >= att.included_at_height.saturating_add(session.dispute_window_blocks) {
+        let maturity = claim_maturity_height(
+            att.included_at_height,
+            chain_params.finality_depth,
+            session.dispute_window_blocks,
+        );
+        if block_height >= maturity {
             return Ok(InferenceSettlementExecutionResult::fail(
                 357,
-                "dispute window has elapsed; cannot open dispute",
+                "claim already mature; cannot open dispute",
             ));
         }
         if self.get_dispute(&req.session_id, &req.verifier)?.is_some() {
@@ -430,6 +460,7 @@ impl InferenceSettlementExecutor {
         session_id: &str,
         state: &StateManager,
         block_height: u64,
+        chain_params: &ChainParams,
     ) -> Result<InferenceSettlementExecutionResult> {
         let mut session = match self.get_session(session_id)? {
             Some(s) => s,
@@ -459,6 +490,40 @@ impl InferenceSettlementExecutor {
                 return Ok(InferenceSettlementExecutionResult::fail(
                     359,
                     "unresolved dispute blocks refund",
+                ));
+            }
+        }
+        // Defensive: refund must not bypass a still-maturing, unclaimed,
+        // un-denied claim. Enumerate every verifier that attested for this
+        // session and block the refund while any of them could still validly
+        // claim (maturity not yet elapsed, not already claimed, not denied).
+        // This guards against parameter/record edge cases where a late
+        // attestation matures after `expires_at_height`.
+        let aexec = InferenceAttestationExecutor::new(self.db.clone());
+        for verifier in aexec.list_verifiers_by_session(session_id)? {
+            let att = match aexec
+                .get(&inference_attestation_key(session_id, &verifier))?
+            {
+                Some(a) => a,
+                None => continue,
+            };
+            let maturity = claim_maturity_height(
+                att.included_at_height,
+                chain_params.finality_depth,
+                session.dispute_window_blocks,
+            );
+            if block_height >= maturity {
+                continue; // matured — the claim window has closed for this verifier
+            }
+            let already_claimed = self.get_claim(session_id, &verifier)?.is_some();
+            let denied = matches!(
+                self.get_dispute(session_id, &verifier)?.map(|d| d.status),
+                Some(InferenceDisputeStatus::ResolvedDenyClaim)
+            );
+            if !already_claimed && !denied {
+                return Ok(InferenceSettlementExecutionResult::fail(
+                    360,
+                    "refund blocked: a verifier's claim is still within its maturity window",
                 ));
             }
         }

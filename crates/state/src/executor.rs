@@ -1377,12 +1377,16 @@ impl BlockExecutor {
                                 tx_hash,
                                 result.error.as_deref().unwrap_or("Unknown error")
                             );
-                            // Specific 35x codes propagate; else generic 351.
+                            // Gate-open semantic failure: the executor already
+                            // deducted the fee up-front (fee/nonce/proposer-credit
+                            // charged), so the receipt reports `fee_paid = fee`.
+                            // (The gate-closed 350 path returns above with
+                            // fee_paid 0 before any deduction.)
                             let code = result.failure_code.unwrap_or(351);
                             Ok(TxExecutionResult {
                                 tx_hash,
                                 status: TxStatus::Failed(code),
-                                fee_paid: 0,
+                                fee_paid: v2_tx.fee,
                             })
                         }
                     }
