@@ -31,15 +31,24 @@ Every canonical doc and Status block uses this schema:
 
 Read-only publication sanity check against the public endpoint
 `https://rpc.sumchain.io` (`chain_getChainParams`), `chain_id: 1`, verified
-2026-06-27; re-verified 2026-07-02 at height 8,183,329. These are
-activation-gate values (stable), not the live chain head:
+2026-06-27; re-verified 2026-07-04. These are activation-gate values (stable),
+not the live chain head:
 
 | Subprotocol gate | Mainnet value | Meaning |
 |---|---|---|
 | `v2_enabled_from_height` | `5200000` | V2 storage **active** |
-| `omninode_enabled_from_height` | `6000000` | OmniNode inference attestation **active** |
+| `omninode_enabled_from_height` | `6000000` | OmniNode inference **attestation active** |
 | `education_enabled_from_height` | `null` | Education writes **dormant** (reads still work) |
 | `governance_enabled_from_height` | not set | Governance v1 **dormant** (code-backed; also needs `ChainParams.governance`) |
+| `archive_unbonding_enabled_from_height` | `null` | Archive-node unbonding withdrawal **dormant** (code-backed, issue #20) |
+| `archive_reassignment_enabled_from_height` | `null` | Archive-node chunk reassignment **dormant** (code-backed, issue #62) |
+| `inference_settlement_enabled_from_height` | `null` | OmniNode inference settlement **dormant** (code-backed, issue #61; separate from attestation, which is active) |
+
+The last three rows are **code-backed but dormant** — implemented behind their
+gates and `null` (unset) on mainnet as of the verification above, so they have no
+effect until an operator activates them via a coordinated upgrade. OmniNode
+inference **attestation** is active; inference **settlement** (escrow-funded
+rewards/refunds) is a separate, still-dormant subprotocol.
 
 Token / NFT / messaging / docclass / employment families have **no activation
 gate** — they are always available when the node binary is running.
@@ -51,11 +60,16 @@ gate** — they are always available when the node binary is running.
   [security-overview](./architecture/security-overview.md) ·
   [economic-model](./architecture/economic-model.md) ·
   [performance-guide](./architecture/performance-guide.md)
-- **Subprotocols:** [subprotocols/](./subprotocols/) (inference attestation,
-  education activation)
-- **Design specs (non-token):** [specs/](./specs/) (SNIP V2 storage plan;
+- **Subprotocols:** [subprotocols/](./subprotocols/) —
+  [inference attestation](./subprotocols/INFERENCE-ATTESTATION.md) (active),
+  [inference settlement](./subprotocols/inference-settlement.md) (dormant, issue #61),
+  education activation.
+- **Design specs (non-token):** [specs/](./specs/) (SNIP V2 storage plan, incl.
+  §5.4 [archive reassignment](./specs/SNIP-V2-CHAIN-PLAN.md) (dormant, issue #62);
   [Governance v1](./specs/GOVERNANCE-V1.md) design spec).
-  Token-family usage is in [tokens.md](./tokens.md).
+  Archive-node unbonding withdrawal (dormant, issue #20) and reassignment are
+  separate landed storage mechanics — see the RPC cheatsheet. Token-family usage
+  is in [tokens.md](./tokens.md).
 - **Operational:** [operator-guide](./operator-guide.md), [production-checklist](./operations/production-checklist.md)
 - **Process:** [GOVERNANCE.md](../GOVERNANCE.md) (on-chain governance model; dormant by default) ·
   [RELEASE.md](../RELEASE.md) (how approved changes are released)

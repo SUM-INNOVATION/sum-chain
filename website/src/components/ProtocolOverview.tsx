@@ -13,6 +13,9 @@ type Topic = {
   spec: { k: string; v: string }[];
   href: string;
   cta: string;
+  /** External product/application surface built on this protocol. */
+  productHref?: string;
+  productCta?: string;
 };
 
 const TOPICS: Topic[] = [
@@ -35,6 +38,8 @@ const TOPICS: Topic[] = [
     ],
     href: '/storage',
     cta: 'Storage & PoR',
+    productHref: 'https://snip.sumchain.io',
+    productCta: 'Open SNIP',
   },
   {
     id: 'compute',
@@ -44,17 +49,19 @@ const TOPICS: Topic[] = [
     bullets: [
       'Users pay Koppa for inference; off-chain OmniNode workers perform the compute and a verifier signs the result.',
       'The verifier submits an InferenceAttestation — one per (session_id, verifier), permanently — which the chain records and finalizes.',
-      'Read RPCs expose attestations and their status. Reward and slashing settlement is on the roadmap, not yet live.',
+      'Read RPCs expose attestations and their status. Escrow-funded settlement (rewards/refunds) is implemented but dormant — no bond slashing in v1.',
     ],
     tags: ['InferenceAttestation', 'verifier_signature', 'proof_root'],
     spec: [
       { k: 'signing_domain', v: 'omninode.inference_attestation.v1' },
       { k: 'dedup', v: 'one per (session, verifier)' },
-      { k: 'read RPC methods', v: '3' },
-      { k: 'reward / slash', v: 'roadmap' },
+      { k: 'attestation', v: 'active' },
+      { k: 'settlement', v: 'implemented · dormant' },
     ],
     href: '/compute',
     cta: 'Compute & attestation',
+    productHref: 'https://omninode.suminnovation.xyz',
+    productCta: 'Open OmniNode',
   },
   {
     id: 'governance',
@@ -145,12 +152,24 @@ export default function ProtocolOverview() {
                     <MonoTag key={tag}>{tag}</MonoTag>
                   ))}
                 </div>
-                <Link
-                  href={t.href}
-                  className="mt-8 inline-flex items-center gap-2 text-sm font-medium text-foreground transition-colors hover:text-accent-soft"
-                >
-                  {t.cta} <span aria-hidden>→</span>
-                </Link>
+                <div className="mt-8 flex flex-wrap items-center gap-x-6 gap-y-3">
+                  <Link
+                    href={t.href}
+                    className="inline-flex items-center gap-2 text-sm font-medium text-foreground transition-colors hover:text-accent-soft"
+                  >
+                    {t.cta} <span aria-hidden>→</span>
+                  </Link>
+                  {t.productHref && t.productCta && (
+                    <Link
+                      href={t.productHref}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-2 text-sm font-medium text-accent-soft transition-colors hover:text-foreground"
+                    >
+                      {t.productCta} <span aria-hidden>↗</span>
+                    </Link>
+                  )}
+                </div>
               </Reveal>
 
               <Reveal delay={0.1} className={flip ? 'lg:order-1' : ''}>

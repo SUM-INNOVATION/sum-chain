@@ -742,6 +742,57 @@ Checks if an SRC-20 token exists.
 
 ---
 
+## Subprotocol RPC surface
+
+Read-only queries and unsigned-tx builders for the storage (SNIP V2) and OmniNode
+subprotocols. Method signatures and field semantics are documented in the
+subprotocol docs linked below; this is the discovery index. Several of these
+belong to **dormant** subprotocols (see the
+[activation-gate table](../index.md#mainnet-activation-gates)) — the RPC methods
+respond, but the underlying write ops are rejected until the gate is set.
+
+### SNIP V2 storage (`storage_*`)
+
+Detailed shapes: [SNIP-V2-RPC-CHEATSHEET.md](SNIP-V2-RPC-CHEATSHEET.md).
+
+| Method | Notes |
+|---|---|
+| `storage_getFileInfoV2(merkle_root, offset?, limit?)` | Full V2 file row + paginated access list. |
+| `storage_getPushableFilesV2(offset?, limit?)` | Pending+Active files (archive warm-cache). |
+| `storage_getAssignmentCoverageV2(merkle_root, missing_offset?, missing_limit?)` | Coverage progress; **epoch-aware/aggregate** since issue #62. |
+| `storage_getActiveNodesAtHeight(height)` | Active-archive snapshot at `assignment_height`. |
+| `storage_getArchiveUnbonding(operator_address)` | Pending archive-node unbonding record, or `null` (issue #20, **dormant**). |
+| `storage_getNodeRecord`, `storage_getAccessList`, `storage_getActiveChallenges`, `storage_getFundedFiles` | Node/ACL/challenge/funded-file reads. |
+
+Archive-node **withdrawal** (issue #20) and **reassignment** (issue #62) are
+code-backed but dormant behind `archive_unbonding_enabled_from_height` /
+`archive_reassignment_enabled_from_height`.
+
+### OmniNode inference attestation (`sum_*InferenceAttestation*`) — active
+
+| Method | Notes |
+|---|---|
+| `sum_getInferenceAttestation(session_id, verifier_address)` | One attestation record. |
+| `sum_listInferenceAttestations(session_id)` | Every verifier for a session. |
+| `sum_getInferenceAttestationStatus(tx_hash)` | Chain-side status of an attestation tx. |
+
+### OmniNode inference settlement (`omninode_*`) — dormant (issue #61)
+
+Escrow-funded rewards keyed by attestations; **dormant** behind
+`inference_settlement_enabled_from_height`. Full model:
+[inference-settlement.md](../subprotocols/inference-settlement.md). No bond
+slashing in v1 (reward denial / claim withholding / escrow refund only).
+
+| Method | Kind |
+|---|---|
+| `omninode_getInferenceSession(session_id)` | read |
+| `omninode_getInferenceClaims(session_id)` | read |
+| `omninode_getInferenceDisputes(session_id)` | read |
+| `omninode_getClaimableReward(session_id, verifier)` | read |
+| `omninode_buildOpenInferenceSession` / `buildFundInferenceSession` / `buildClaimInferenceReward` / `buildOpenInferenceDispute` / `buildResolveInferenceDispute` / `buildRefundInferenceSession` | unsigned-tx builders (no keys) |
+
+---
+
 ## REST Endpoints
 
 ### Health Checks
