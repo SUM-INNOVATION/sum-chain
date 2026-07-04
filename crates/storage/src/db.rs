@@ -158,6 +158,19 @@ pub mod cf {
     /// primary key derived from `(session_id, verifier_address)`.
     pub const INFERENCE_ATTESTATIONS_BY_SESSION: &str = "inference_attestations_by_session";
 
+    // ── OmniNode Inference Settlement (issue #61) ──
+    /// Per-session settlement records. Key: 32-byte
+    /// `BLAKE3("InferenceSettlementSessionV1" || session_id)`. Value:
+    /// bincode `InferenceSession` (funder, reward terms, remaining escrow, status).
+    pub const INFERENCE_SESSIONS: &str = "inference_sessions";
+    /// Per-(session, verifier) paid reward claims. Key: `session_prefix_16 ||
+    /// verifier_address_20` (36 bytes). Value: bincode `InferenceClaim`.
+    pub const INFERENCE_CLAIMS: &str = "inference_claims";
+    /// Per-(session, verifier) dispute records (record-only; no slashing). Key:
+    /// `session_prefix_16 || verifier_address_20` (36 bytes). Value: bincode
+    /// `InferenceDispute`.
+    pub const INFERENCE_DISPUTES: &str = "inference_disputes";
+
     // ── SRC-817/818 Education-LMS suite (Phase 2) ──
     // Privacy: students appear ONLY as a scoped `student_commitment`
     // [u8;32] — never a raw Address — in any education key or value.
@@ -521,6 +534,9 @@ pub const ALL_CFS: &[&str] = &[
     cf::ASSIGNMENT_ATTESTATIONS_V2_EPOCH,
     cf::INFERENCE_ATTESTATIONS,
     cf::INFERENCE_ATTESTATIONS_BY_SESSION,
+    cf::INFERENCE_SESSIONS,
+    cf::INFERENCE_CLAIMS,
+    cf::INFERENCE_DISPUTES,
     // SRC-817/818 Education-LMS suite (Phase 2)
     cf::EDU_CATALOG_ENTRIES,
     cf::EDU_CATALOG_PREREQUISITES,

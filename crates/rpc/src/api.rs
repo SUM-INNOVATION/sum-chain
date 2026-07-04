@@ -12,6 +12,12 @@ use crate::governance_types::{
     GovBuildCreateProposalRequest, GovBuildExecuteProposalRequest, GovBuildResponse,
     GovProposalInfo, GovTallyInfo, GovVoteInfo, GovVotingPowerInfo,
 };
+use crate::inference_settlement_types::{
+    ClaimableRewardInfo, InferenceClaimInfo, InferenceDisputeInfo, InferenceSessionInfo,
+    OmniBuildClaimRewardRequest, OmniBuildFundSessionRequest, OmniBuildOpenDisputeRequest,
+    OmniBuildOpenSessionRequest, OmniBuildRefundSessionRequest, OmniBuildResolveDisputeRequest,
+    OmniSettlementBuildResponse,
+};
 use crate::types::{
     TaxClaimTypeInfo, TaxIssuerInfo, TaxPolicyInfo, ExecutorLinkInfo, AssetInfo, FinanceIssuerInfo,
     CaseInfo, HealthcareProviderInfo,
@@ -208,6 +214,73 @@ pub trait SumChainApi {
         &self,
         tx_hash: String,
     ) -> Result<InferenceAttestationStatusInfo, jsonrpsee::types::ErrorObjectOwned>;
+
+    // ── OmniNode Inference Settlement (issue #61) — reads ───────────────────
+    /// Get a session's settlement record, or `null` if none.
+    #[method(name = "omninode_getInferenceSession")]
+    async fn omninode_get_inference_session(
+        &self,
+        session_id: String,
+    ) -> Result<Option<InferenceSessionInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// List all paid reward claims for a session.
+    #[method(name = "omninode_getInferenceClaims")]
+    async fn omninode_get_inference_claims(
+        &self,
+        session_id: String,
+    ) -> Result<Vec<InferenceClaimInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// List all dispute records for a session.
+    #[method(name = "omninode_getInferenceDisputes")]
+    async fn omninode_get_inference_disputes(
+        &self,
+        session_id: String,
+    ) -> Result<Vec<InferenceDisputeInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Whether a verifier can currently claim a session's reward (and when).
+    #[method(name = "omninode_getClaimableReward")]
+    async fn omninode_get_claimable_reward(
+        &self,
+        session_id: String,
+        verifier: String,
+    ) -> Result<ClaimableRewardInfo, jsonrpsee::types::ErrorObjectOwned>;
+
+    // ── OmniNode Inference Settlement (issue #61) — unsigned-tx builders ─────
+    #[method(name = "omninode_buildOpenInferenceSession")]
+    async fn omninode_build_open_inference_session(
+        &self,
+        request: OmniBuildOpenSessionRequest,
+    ) -> Result<OmniSettlementBuildResponse, jsonrpsee::types::ErrorObjectOwned>;
+
+    #[method(name = "omninode_buildFundInferenceSession")]
+    async fn omninode_build_fund_inference_session(
+        &self,
+        request: OmniBuildFundSessionRequest,
+    ) -> Result<OmniSettlementBuildResponse, jsonrpsee::types::ErrorObjectOwned>;
+
+    #[method(name = "omninode_buildClaimInferenceReward")]
+    async fn omninode_build_claim_inference_reward(
+        &self,
+        request: OmniBuildClaimRewardRequest,
+    ) -> Result<OmniSettlementBuildResponse, jsonrpsee::types::ErrorObjectOwned>;
+
+    #[method(name = "omninode_buildOpenInferenceDispute")]
+    async fn omninode_build_open_inference_dispute(
+        &self,
+        request: OmniBuildOpenDisputeRequest,
+    ) -> Result<OmniSettlementBuildResponse, jsonrpsee::types::ErrorObjectOwned>;
+
+    #[method(name = "omninode_buildResolveInferenceDispute")]
+    async fn omninode_build_resolve_inference_dispute(
+        &self,
+        request: OmniBuildResolveDisputeRequest,
+    ) -> Result<OmniSettlementBuildResponse, jsonrpsee::types::ErrorObjectOwned>;
+
+    #[method(name = "omninode_buildRefundInferenceSession")]
+    async fn omninode_build_refund_inference_session(
+        &self,
+        request: OmniBuildRefundSessionRequest,
+    ) -> Result<OmniSettlementBuildResponse, jsonrpsee::types::ErrorObjectOwned>;
 
     // ── SRC-817/818 Education suite — read-only RPC (Phase 4) ──
     // All ids/commitments are `0x`+hex strings. Student lookup is ONLY

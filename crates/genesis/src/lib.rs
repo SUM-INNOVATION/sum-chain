@@ -216,6 +216,40 @@ pub struct ChainParams {
     /// keeps existing mainnet `genesis.json` dormant.
     #[serde(default)]
     pub archive_reassignment_enabled_from_height: Option<u64>,
+
+    /// OmniNode Inference Settlement activation gate (issue #61). `None` = the
+    /// settlement subprotocol is dormant; all settlement ops are rejected free
+    /// (`Failed(350)`, no fee). Separate from `omninode_enabled_from_height` —
+    /// attestation recording is unaffected either way. `#[serde(default)]` keeps
+    /// existing mainnet `genesis.json` dormant.
+    #[serde(default)]
+    pub inference_settlement_enabled_from_height: Option<u64>,
+
+    /// Upper bound on a session's per-session `dispute_window_blocks` (issue #61).
+    /// Only consulted once settlement is enabled.
+    #[serde(default = "default_inference_settlement_max_dispute_window_blocks")]
+    pub inference_settlement_max_dispute_window_blocks: u64,
+
+    /// Upper bound on a session's lifetime (`expires_at_height - created_at`) so
+    /// escrow can't be locked indefinitely (issue #61). Only consulted once
+    /// settlement is enabled.
+    #[serde(default = "default_inference_settlement_max_session_duration_blocks")]
+    pub inference_settlement_max_session_duration_blocks: u64,
+
+    /// Neutral dispute resolver for inference settlement (issue #61). `None`
+    /// (default) means disputes are unavailable — `OpenDispute`/`ResolveDispute`
+    /// are rejected. When set, only this address may `ResolveDispute`. Chosen
+    /// over "funder resolves" to avoid the funder being both accuser and judge.
+    #[serde(default)]
+    pub inference_settlement_dispute_resolver: Option<Address>,
+}
+
+fn default_inference_settlement_max_dispute_window_blocks() -> u64 {
+    201_600 // ~7 days at 3s blocks — a generous ceiling; sessions pick smaller.
+}
+
+fn default_inference_settlement_max_session_duration_blocks() -> u64 {
+    2_592_000 // ~90 days at 3s blocks — ceiling on escrow lock-up.
 }
 
 fn default_archive_unbonding_period_blocks() -> u64 {
@@ -431,6 +465,14 @@ impl Default for ChainParams {
             // Production-safe default: archive-node chunk reassignment dormant
             // (issue #62). Activation is a coordinated validator upgrade.
             archive_reassignment_enabled_from_height: None,
+            // Production-safe default: OmniNode inference settlement dormant
+            // (issue #61). Activation is a coordinated validator upgrade.
+            inference_settlement_enabled_from_height: None,
+            inference_settlement_max_dispute_window_blocks:
+                default_inference_settlement_max_dispute_window_blocks(),
+            inference_settlement_max_session_duration_blocks:
+                default_inference_settlement_max_session_duration_blocks(),
+            inference_settlement_dispute_resolver: None,
         }
     }
 }

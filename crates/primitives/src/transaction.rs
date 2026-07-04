@@ -78,6 +78,10 @@ pub enum TxType {
     /// On-chain governance v1 operation (SRC governance). Append-only; see
     /// crates/primitives/src/governance.rs and docs/specs/GOVERNANCE-V1.md.
     Governance = 23,
+    /// OmniNode Inference Settlement (issue #61). Append-only, variant index
+    /// frozen at 24; see crates/primitives/src/inference_settlement.rs. Separate
+    /// subprotocol keyed by existing attestations; does not change attestation v1.
+    InferenceSettlement = 24,
 }
 
 impl TxType {
@@ -108,6 +112,7 @@ impl TxType {
             21 => Some(TxType::InferenceAttestation),
             22 => Some(TxType::Education),
             23 => Some(TxType::Governance),
+            24 => Some(TxType::InferenceSettlement),
             _ => None,
         }
     }
@@ -418,6 +423,12 @@ pub enum TxPayload {
     /// crates/primitives/src/governance.rs, docs/specs/GOVERNANCE-V1.md, and
     /// the wire fixtures in crates/primitives/tests/governance_fixtures.rs.
     Governance(crate::governance::GovernanceTxData),
+    /// OmniNode Inference Settlement (issue #61). `TxType` discriminant 24;
+    /// bincode-serialized as the 25th `TxPayload` variant (declaration ordinal
+    /// 24). **Append-only** — never reorder above this. Separate subprotocol
+    /// keyed by existing `(session_id, verifier_address)` attestations; see
+    /// crates/primitives/src/inference_settlement.rs.
+    InferenceSettlement(crate::inference_settlement::InferenceSettlementTxData),
 }
 
 impl TransactionV2 {
@@ -568,6 +579,7 @@ impl TransactionV2 {
             TxPayload::InferenceAttestation(_) => TxType::InferenceAttestation,
             TxPayload::Education(_) => TxType::Education,
             TxPayload::Governance(_) => TxType::Governance,
+            TxPayload::InferenceSettlement(_) => TxType::InferenceSettlement,
         }
     }
 
@@ -614,6 +626,7 @@ impl TransactionV2 {
             TxPayload::InferenceAttestation(_) => None, // attestation, no value/recipient
             TxPayload::Education(data) => Some(data.recipient), // Address::ZERO for no-target ops
             TxPayload::Governance(_) => None, // governance ops carry no value/recipient
+            TxPayload::InferenceSettlement(_) => None, // settlement carries no transfer recipient
         }
     }
 
@@ -644,6 +657,7 @@ impl TransactionV2 {
             TxPayload::InferenceAttestation(_) => 0, // attestation tx, no token value
             TxPayload::Education(_) => 0,            // education ops carry no token value
             TxPayload::Governance(_) => 0,          // governance ops carry no token value
+            TxPayload::InferenceSettlement(_) => 0, // escrow moves via executor, not tx value
         }
     }
 
