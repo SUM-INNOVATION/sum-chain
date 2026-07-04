@@ -64,11 +64,20 @@ approvals only count from **admins or maintainers** (repo permission `admin` or
 This conditional "1 if it's the owner, otherwise 2" rule is **not expressible in
 native branch protection or CODEOWNERS**, so it is enforced by the
 [`approval-policy`](.github/workflows/approval-policy.yml) GitHub Action, which
-is wired in as a **required status check**. The required check is the workflow
-job's own pass/fail conclusion (a single GitHub Actions check named
-`approval-policy`) — it writes **no separate commit statuses**, so approved or
-merged PRs never carry a stale failure mark; per-PR `cancel-in-progress`
-concurrency retires obsolete runs. `.github/CODEOWNERS` keeps a single
+is wired in as a **required status check** that behaves as a **waiting gate**,
+not a pass/fail test. It keeps exactly one GitHub Actions check-run named
+`approval-policy` on the PR head commit and updates it in place:
+
+- not yet satisfied → the check is **pending (`in_progress`, yellow "waiting for
+  approval")**, which blocks the merge but is **never red**;
+- satisfied → the check turns **green** and the PR is mergeable;
+- a new commit dismisses stale approvals and republishes a fresh pending check on
+  the new head, so it waits for re-review; a dismissed approval / requested
+  changes goes back to pending.
+
+It writes **no commit statuses**, and its per-PR concurrency does **not** cancel
+(runs queue), so there are **no canceled or red marks** on normal PRs.
+`.github/CODEOWNERS` keeps a single
 owner entry (`* @sunhaoxiangwang`); native **"Require review from Code Owners"
 is intentionally left OFF** — with a single-owner CODEOWNERS it would deadlock
 the owner's own PRs (no other code owner could approve them).
