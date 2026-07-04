@@ -7,46 +7,60 @@ name: Approval policy
 # latest APPROVED review per reviewer counts; the author is excluded; a PR
 # author's own review never counts.
 #
-# The gate is THIS job's own check-run conclusion (pass = exit 0, fail = exit 1).
-# No custom commit statuses are written, so an approved/merged PR never carries a
-# stale failure mark. Per-PR concurrency with cancel-in-progress lets GitHub
-# retire obsolete runs, leaving exactly one visible `approval-policy` check.
+# Design (no stale red / no canceled jobs):
+#   * Runs ONLY on review events (submitted/edited/dismissed) + manual dispatch.
+#     It does NOT run on PR open/synchronize, so there are no canceled runs and
+#     no red check before the first review — the required `approval-policy`
+#     check is simply absent/pending until someone reviews, which keeps the PR
+#     un-mergeable (branch protection treats a missing required check as pending).
+#   * Publishes a SINGLE check-run named `approval-policy` on the PR HEAD sha via
+#     the Checks API. (A `pull_request_review` workflow's own `github.sha` is the
+#     base branch, so the natural job check-run would attach to the wrong commit;
+#     creating the check-run explicitly on the head sha is what branch protection
+#     evaluates.) No commit statuses are written.
+#   * The job always exits 0, so the Actions run itself is never red — the verdict
+#     lives entirely in the published check-run's conclusion.
 #
-# Branch protection requires the check context "approval-policy" — which is this
-# job's name, so the GitHub Actions check-run satisfies it directly (no separate
-# status context). Runs via pull_request_target so the base-repo token can read
-# collaborator permissions (needed for fork PRs); this workflow never checks out
-# PR code, so pull_request_target is safe here.
+# Branch protection requires the check context "approval-policy" (this check-run's
+# name); no app_id pinning until this behavior is verified.
 
 on:
-  pull_request_target:
-    types: [opened, reopened, synchronize]
   pull_request_review:
-    types: [submitted, dismissed, edited]
+    types: [submitted, edited, dismissed]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "PR number to (re)evaluate (manual recovery)"
+        required: true
+        type: string
 
 permissions:
   contents: read
   pull-requests: read
-
-concurrency:
-  group: approval-policy-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  checks: write
 
 jobs:
   approval-policy:
     name: approval-policy
     runs-on: ubuntu-latest
     steps:
-      - name: Evaluate approval policy
+      - name: Evaluate approval policy and publish the check-run
         env:
           GH_TOKEN: ${{ github.token }}
           OWNER: ${{ github.repository_owner }}
           REPO: ${{ github.event.repository.name }}
-          PR: ${{ github.event.pull_request.number }}
-          AUTHOR: ${{ github.event.pull_request.user.login }}
+          EVENT: ${{ github.event_name }}
+          PR_REVIEW: ${{ github.event.pull_request.number }}
+          PR_DISPATCH: ${{ github.event.inputs.pr }}
         run: |
           set -euo pipefail
-          echo "PR #${PR} by ${AUTHOR}"
+
+          # Resolve PR number for either trigger, then fetch author + head sha.
+          if [ "${EVENT}" = "workflow_dispatch" ]; then PR="${PR_DISPATCH}"; else PR="${PR_REVIEW}"; fi
+          meta=$(gh api "repos/${OWNER}/${REPO}/pulls/${PR}")
+          AUTHOR=$(echo "${meta}" | jq -r '.user.login')
+          HEAD_SHA=$(echo "${meta}" | jq -r '.head.sha')
+          echo "PR #${PR} by ${AUTHOR} @ ${HEAD_SHA}"
 
           # Latest review state per reviewer; keep only APPROVED; drop the author.
           approvers=$(gh api --paginate "repos/${OWNER}/${REPO}/pulls/${PR}/reviews" \
@@ -70,12 +84,19 @@ jobs:
           done
 
           if [ "${AUTHOR}" = "sunhaoxiangwang" ]; then need=1; else need=2; fi
-          echo "Result: ${qualified}/${need} admin-or-maintainer approvals"
+          desc="${qualified}/${need} admin-or-maintainer approvals"
+          echo "Result: ${desc}"
+          if [ "${qualified}" -ge "${need}" ]; then concl="success"; else concl="failure"; fi
 
-          # The job conclusion IS the required check — no commit status is posted.
-          if [ "${qualified}" -ge "${need}" ]; then
-            echo "Approval policy satisfied."
-          else
-            echo "::error::Approval policy not met: ${qualified}/${need} admin-or-maintainer approvals."
-            exit 1
-          fi
+          # Publish exactly one check-run named "approval-policy" on the PR head sha.
+          gh api -X POST "repos/${OWNER}/${REPO}/check-runs" --input - >/dev/null <<JSON
+          {
+            "name": "approval-policy",
+            "head_sha": "${HEAD_SHA}",
+            "status": "completed",
+            "conclusion": "${concl}",
+            "output": { "title": "Approval policy", "summary": "${desc}" }
+          }
+          JSON
+          echo "Published approval-policy check-run: ${concl} (${desc})"
+          # The job never fails — the required gate is the published check-run.
