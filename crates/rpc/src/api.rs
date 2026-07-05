@@ -37,7 +37,7 @@ use crate::types::{
     RevokeEmploymentCredentialRequest, RevokeEmploymentCredentialResponse,
     RpcPeerInfo, SendTxResponse, SlashingRecordRpcInfo, SlashingSummary, SpamReportInfo,
     SponsoredRegistrationRequest, SponsoredRegistrationResponse, StakingParamsInfo, StakingSummary,
-    StakingValidatorInfo, SubmitSponsoredMessageRequest, TokenHoldings, TokenInfo,
+    StakingValidatorInfo, SubmitSponsoredMessageRequest, TokenHoldings, TokenInfo, TokenMintersInfo,
     TransactionHistoryResponse, TransactionInfo, UnbondingDelegationRpcInfo,
     ValidatorDelegationSummary, ValidatorSetInfo, ValidatorSetRpcInfo, ValidatorSigningRpcInfo,
     ViewCallRequest,
@@ -568,6 +568,19 @@ pub trait SumChainApi {
         &self,
         token_id: String,
     ) -> Result<bool, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Get the registered minters of a single SRC-20 token (token-scoped).
+    ///
+    /// Returns the token owner (implicit minter) plus explicitly registered
+    /// minter addresses, read from public token config. This is deliberately
+    /// token-scoped: there is no address→tokens ("what can this address mint")
+    /// endpoint — that would be a broader address-profiling surface and is out
+    /// of scope by design.
+    #[method(name = "token_getMinters")]
+    async fn token_get_minters(
+        &self,
+        token_id: String,
+    ) -> Result<Option<TokenMintersInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     // ========================================================================
     // Smart Contract (SUMC) Endpoints
