@@ -3,6 +3,7 @@ import { useParams, Link } from 'react-router-dom';
 import { provider } from '../utils/provider';
 import { formatKoppa, formatTimestamp } from '../utils/formatters';
 import { DetailSkeleton, ErrorState, Skeleton } from '../components/States';
+import { TransactionTypeBadge, TransactionActionLabel } from '../components/TransactionType';
 
 interface TransactionHistoryEntry {
   tx_hash: string;
@@ -14,6 +15,11 @@ interface TransactionHistoryEntry {
   fee: string;
   status: string;
   timestamp: number;
+  // Additive, read-time semantic labels (see @sumchain/sdk).
+  tx_type?: string;
+  action?: string | null;
+  asset_ref?: string | null;
+  asset_kind?: string | null;
 }
 
 interface TransactionHistoryResponse {
@@ -156,11 +162,13 @@ export default function AddressDetails() {
           </div>
         ) : (
           <>
-            <div className="overflow-x-auto">
+            {/* Desktop: dense table */}
+            <div className="hidden overflow-x-auto md:block">
               <table className="w-full">
                 <thead>
                   <tr className="border-b border-zinc-800 text-left text-sm text-zinc-400">
                     <th className="pb-3 pr-4 font-medium">Tx hash</th>
+                    <th className="pb-3 pr-4 font-medium">Type</th>
                     <th className="pb-3 pr-4 font-medium">Block</th>
                     <th className="pb-3 pr-4 font-medium">From</th>
                     <th className="pb-3 pr-4 font-medium">To</th>
@@ -176,6 +184,12 @@ export default function AddressDetails() {
                         <Link to={`/tx/${tx.tx_hash}`} className="font-mono text-primary-300 hover:underline">
                           {shortenHash(tx.tx_hash)}
                         </Link>
+                      </td>
+                      <td className="py-3 pr-4">
+                        <div className="flex items-center gap-2">
+                          <TransactionTypeBadge tx={tx} />
+                          <TransactionActionLabel tx={tx} className="whitespace-nowrap text-xs text-zinc-400" />
+                        </div>
                       </td>
                       <td className="tnum py-3 pr-4">
                         <Link to={`/block/${tx.block_height}`} className="text-primary-300 hover:underline">
@@ -193,14 +207,18 @@ export default function AddressDetails() {
                         </Link>
                       </td>
                       <td className="py-3 pr-4">
-                        <Link
-                          to={`/address/${tx.to}`}
-                          className={`font-mono ${
-                            tx.to === address ? 'text-amber-400' : 'text-zinc-300 hover:text-primary-300'
-                          }`}
-                        >
-                          {tx.to === address ? 'This address' : shortenAddress(tx.to)}
-                        </Link>
+                        {tx.to ? (
+                          <Link
+                            to={`/address/${tx.to}`}
+                            className={`font-mono ${
+                              tx.to === address ? 'text-amber-400' : 'text-zinc-300 hover:text-primary-300'
+                            }`}
+                          >
+                            {tx.to === address ? 'This address' : shortenAddress(tx.to)}
+                          </Link>
+                        ) : (
+                          <span className="text-zinc-600">—</span>
+                        )}
                       </td>
                       <td className="tnum py-3 pr-4 text-right">
                         <span className={tx.from === address ? 'text-red-400' : 'text-green-400'}>
@@ -226,6 +244,46 @@ export default function AddressDetails() {
                   ))}
                 </tbody>
               </table>
+            </div>
+
+            {/* Mobile: intentional stacked cards, not a squeezed table */}
+            <div className="space-y-3 md:hidden">
+              {transactions.map((tx) => (
+                <Link
+                  key={tx.tx_hash}
+                  to={`/tx/${tx.tx_hash}`}
+                  className="block rounded-xl border border-zinc-800 bg-[#0a0a0a]/60 p-4 transition-colors hover:border-primary-500/50"
+                >
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <TransactionTypeBadge tx={tx} />
+                    <span
+                      className={`rounded px-2 py-0.5 text-xs ${
+                        tx.status.toLowerCase().includes('success')
+                          ? 'bg-green-500/20 text-green-400'
+                          : 'bg-red-500/20 text-red-400'
+                      }`}
+                    >
+                      {tx.status}
+                    </span>
+                  </div>
+                  <TransactionActionLabel tx={tx} className="text-sm text-zinc-200" />
+                  <div className="mt-2 font-mono text-xs text-zinc-500">{shortenHash(tx.tx_hash)}</div>
+                  <div className="mt-2 flex items-center justify-between text-sm">
+                    <span className="font-mono text-zinc-400">
+                      {tx.from === address ? 'This address' : shortenAddress(tx.from)}
+                      {tx.to ? ` → ${tx.to === address ? 'This address' : shortenAddress(tx.to)}` : ''}
+                    </span>
+                    <span className={`tnum ${tx.from === address ? 'text-red-400' : 'text-green-400'}`}>
+                      {tx.from === address ? '-' : '+'}
+                      {formatKoppa(BigInt(tx.amount))}
+                    </span>
+                  </div>
+                  <div className="tnum mt-2 text-xs text-zinc-500">
+                    Block {tx.block_height}
+                    {tx.timestamp ? ` · ${formatTimestamp(tx.timestamp)}` : ''}
+                  </div>
+                </Link>
+              ))}
             </div>
 
             {(hasMore || offset > 0) && (

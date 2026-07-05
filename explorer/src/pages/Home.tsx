@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { provider } from '../utils/provider';
 import { formatKoppa, formatHash, formatTimeAgo } from '../utils/formatters';
 import { RowSkeleton, ErrorState, Skeleton } from '../components/States';
+import { TransactionTypeBadge, TransactionActionLabel } from '../components/TransactionType';
 import type { BlockInfo, TransactionInfo, HealthResponse } from '@sumchain/sdk';
 
 export default function Home() {
@@ -116,10 +117,17 @@ export default function Home() {
                   to={`/tx/${tx.hash}`}
                   className="block rounded-xl border border-zinc-800 bg-[#0a0a0a]/60 p-4 transition-colors hover:border-primary-500/50"
                 >
-                  <div className="mb-2 font-mono text-xs text-zinc-500">{formatHash(tx.hash, 12)}</div>
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <TransactionTypeBadge tx={tx} />
+                      <TransactionActionLabel tx={tx} className="truncate text-xs text-zinc-400" />
+                    </div>
+                    <div className="shrink-0 font-mono text-xs text-zinc-500">{formatHash(tx.hash, 10)}</div>
+                  </div>
                   <div className="flex items-center justify-between text-sm">
                     <div className="font-mono text-zinc-300">
-                      {formatHash(tx.from)} to {formatHash(tx.to)}
+                      {formatHash(tx.from)}
+                      {tx.to ? ` to ${formatHash(tx.to)}` : ''}
                     </div>
                     <div className="tnum font-medium text-primary-300">{formatKoppa(tx.amount)}</div>
                   </div>

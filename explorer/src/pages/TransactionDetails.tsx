@@ -1,14 +1,24 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, type ReactNode } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { provider } from '../utils/provider';
 import { formatKoppa } from '../utils/formatters';
 import { DetailSkeleton, ErrorState, Skeleton } from '../components/States';
-import type { TransactionInfo, TransactionReceipt } from '@sumchain/sdk';
+import { TransactionTypeBadge, TransactionActionLabel } from '../components/TransactionType';
+import { Copyable } from '../components/Copyable';
+import { minterRole } from '@sumchain/sdk';
+import type { TransactionInfo, TransactionReceipt, TokenMintersInfo } from '@sumchain/sdk';
+
+interface TokenNameMeta {
+  name: string;
+  symbol: string;
+}
 
 export default function TransactionDetails() {
   const { hash } = useParams<{ hash: string }>();
   const [tx, setTx] = useState<TransactionInfo | null>(null);
   const [receipt, setReceipt] = useState<TransactionReceipt | null>(null);
+  const [tokenMeta, setTokenMeta] = useState<TokenNameMeta | null>(null);
+  const [minters, setMinters] = useState<TokenMintersInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
 
@@ -23,6 +33,22 @@ export default function TransactionDetails() {
       setTx(txData);
       setReceipt(receiptData);
       setError(false);
+
+      // For SRC-20 token transactions, resolve the token's public name/symbol
+      // and its token-scoped minters (this token only — never an address-wide
+      // profile). Best-effort: failures leave the labels unresolved.
+      if (txData?.asset_kind === 'src20' && txData.asset_ref) {
+        const tokenId = `0x${txData.asset_ref}`;
+        const [meta, minterInfo] = await Promise.all([
+          provider.getSrc20Token(tokenId).catch(() => null),
+          provider.getTokenMinters(tokenId).catch(() => null),
+        ]);
+        setTokenMeta(meta ? { name: meta.name, symbol: meta.symbol } : null);
+        setMinters(minterInfo);
+      } else {
+        setTokenMeta(null);
+        setMinters(null);
+      }
     } catch (err) {
       console.error('Failed to load transaction:', err);
       setError(true);
@@ -67,18 +93,79 @@ export default function TransactionDetails() {
   const statusColor =
     status === 'success' ? 'text-green-400' : status === 'failed' ? 'text-red-400' : 'text-amber-400';
 
+  const fromRole = minters ? minterRole(minters, tx.from, tokenMeta?.symbol) : null;
+  const toRole = minters && tx.to ? minterRole(minters, tx.to, tokenMeta?.symbol) : null;
+
   return (
     <div className="mx-auto max-w-4xl space-y-6">
       <h1 className="font-display text-3xl font-bold text-white">Transaction</h1>
 
       <div className="space-y-4 rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6">
-        <div className="flex items-start justify-between">
+        <div className="flex items-start justify-between gap-4">
           <div className="text-zinc-400">Status</div>
           <div className={`font-bold uppercase ${statusColor}`}>{status}</div>
         </div>
-        <DetailRow label="Hash" value={tx.hash} />
-        <DetailRow label="From" value={tx.from} link={`/address/${tx.from}`} />
-        <DetailRow label="To" value={tx.to} link={`/address/${tx.to}`} />
+
+        {/* Type: domain chip + human action */}
+        <DetailRowNode label="Type">
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <TransactionTypeBadge tx={tx} />
+            <TransactionActionLabel tx={tx} className="text-white" />
+          </div>
+        </DetailRowNode>
+
+        {/* Asset (token / NFT), when the payload references one */}
+        {tx.asset_kind && (
+          <DetailRowNode label="Asset">
+            <div className="flex flex-col items-end gap-1">
+              <span className="text-white">
+                {tokenMeta
+                  ? `${tokenMeta.name} (${tokenMeta.symbol})`
+                  : tx.asset_kind === 'src20'
+                    ? 'SRC-20 token'
+                    : tx.asset_kind === 'nft'
+                      ? 'SUM-721 NFT'
+                      : 'Native Koppa'}
+              </span>
+              {tx.asset_ref && (
+                <Copyable text={tx.asset_ref} className="font-mono text-xs text-zinc-500" title="Copy asset id">
+                  <span className="break-all">0x{tx.asset_ref}</span>
+                </Copyable>
+              )}
+            </div>
+          </DetailRowNode>
+        )}
+
+        <DetailRowNode label="Hash">
+          <Copyable text={tx.hash} className="tnum font-mono text-white" title="Copy hash">
+            <span className="break-all">{tx.hash}</span>
+          </Copyable>
+        </DetailRowNode>
+
+        <DetailRowNode label="From">
+          <div className="flex flex-col items-end gap-1">
+            <Link to={`/address/${tx.from}`} className="tnum break-all font-mono text-primary-300 hover:text-primary-200">
+              {tx.from}
+            </Link>
+            {fromRole?.label && <MinterChip label={fromRole.label} />}
+          </div>
+        </DetailRowNode>
+
+        {tx.to ? (
+          <DetailRowNode label="To">
+            <div className="flex flex-col items-end gap-1">
+              <Link to={`/address/${tx.to}`} className="tnum break-all font-mono text-primary-300 hover:text-primary-200">
+                {tx.to}
+              </Link>
+              {toRole?.label && <MinterChip label={toRole.label} />}
+            </div>
+          </DetailRowNode>
+        ) : (
+          <DetailRowNode label="To">
+            <span className="text-zinc-500">Not a direct-transfer recipient</span>
+          </DetailRowNode>
+        )}
+
         <DetailRow label="Amount" value={formatKoppa(tx.amount)} highlight />
         <DetailRow label="Fee" value={formatKoppa(tx.fee)} />
         <DetailRow label="Nonce" value={tx.nonce.toString()} />
@@ -89,6 +176,25 @@ export default function TransactionDetails() {
         {receipt && <DetailRow label="Block index" value={receipt.tx_index.toString()} />}
         {receipt && <DetailRow label="Fee paid" value={formatKoppa(receipt.fee_paid)} />}
       </div>
+    </div>
+  );
+}
+
+/** Small token-scoped minter/owner chip (e.g. "ACME minter"). */
+function MinterChip({ label }: { label: string }) {
+  return (
+    <span className="inline-flex items-center rounded bg-primary-500/15 px-2 py-0.5 text-xs font-medium text-primary-200 ring-1 ring-inset ring-primary-400/30">
+      {label}
+    </span>
+  );
+}
+
+/** Detail row whose value is arbitrary JSX (chips, copyable values, links). */
+function DetailRowNode({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="flex items-start justify-between gap-4 border-b border-zinc-800 pb-3">
+      <div className="font-medium text-zinc-400">{label}</div>
+      <div className="min-w-0 text-right">{children}</div>
     </div>
   );
 }
