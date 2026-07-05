@@ -18,6 +18,7 @@ import type {
   NftTokenInfo,
   NftOwnerTokens,
   Src20TokenInfo,
+  TokenMintersInfo,
   Src20TokenHoldings,
 } from './types.js';
 
@@ -502,6 +503,27 @@ export class Provider {
    */
   async getSrc20Token(tokenId: string): Promise<Src20TokenInfo | null> {
     return this.request<Src20TokenInfo | null>('token_getToken', [tokenId]);
+  }
+
+  /**
+   * Get the registered minters of a single SRC-20 token (token-scoped).
+   *
+   * Returns the token owner (implicit minter) plus explicitly-registered minter
+   * addresses, from public token config. This is deliberately token-scoped:
+   * there is no address→tokens lookup — the SDK does not expose "all tokens an
+   * address can mint" (a broader address-profiling surface).
+   *
+   * @param tokenId - Token ID (hex string)
+   * @returns Minter info, or null if the token does not exist
+   *
+   * @example
+   * ```ts
+   * const m = await provider.getTokenMinters('0x1234...');
+   * if (m) console.log(m.owner, m.minters);
+   * ```
+   */
+  async getTokenMinters(tokenId: string): Promise<TokenMintersInfo | null> {
+    return this.request<TokenMintersInfo | null>('token_getMinters', [tokenId]);
   }
 
   /**

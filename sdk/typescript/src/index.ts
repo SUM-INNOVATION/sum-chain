@@ -22,6 +22,28 @@
 export { Provider } from './provider.js';
 
 export {
+  classifyTransaction,
+  humanAction,
+  minterRole,
+} from './txClassify.js';
+
+export type {
+  TxClassifiable,
+  TxClassification,
+  MinterRole,
+} from './txClassify.js';
+
+export {
+  DOMAIN_LABEL,
+  DOMAIN_BY_TX_TYPE,
+  ACTION_LABELS,
+  TYPE_FALLBACK,
+  UNKNOWN_LABEL,
+} from './txLabels.js';
+
+export type { TxDomain } from './txLabels.js';
+
+export {
   koppaToBaseUnits,
   baseUnitsToKoppa,
   formatKoppa,
@@ -45,6 +67,7 @@ export type {
   TransactionReceipt,
   TransactionHistoryEntry,
   TransactionHistoryResponse,
+  TokenMintersInfo,
   ValidatorInfo,
   ValidatorSetInfo,
   HealthResponse,

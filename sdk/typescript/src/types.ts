@@ -47,6 +47,14 @@ export interface TransactionInfo {
   chain_id: number;
   block_height?: number;
   status?: 'pending' | 'success' | 'failed';
+  /** Wire-stable machine token for the tx domain/type (e.g. "Transfer", "Token", "StorageMetadataV2"). Derived server-side at read time. */
+  tx_type?: string;
+  /** Inner-operation machine token when present (e.g. "Mint", "CastVote", "RegisterFilePendingV2"). */
+  action?: string | null;
+  /** Hex asset reference taken directly from the payload (SRC-20 token_id / NFT collection_id). */
+  asset_ref?: string | null;
+  /** Coarse asset class hint: "native" | "src20" | "nft" | null. */
+  asset_kind?: string | null;
 }
 
 /**
@@ -255,6 +263,31 @@ export interface TransactionHistoryEntry {
   fee: string;
   status: string;
   timestamp: number;
+  /** Wire-stable machine token for the tx domain/type. See {@link TransactionInfo.tx_type}. */
+  tx_type?: string;
+  /** Inner-operation machine token when present. See {@link TransactionInfo.action}. */
+  action?: string | null;
+  /** Hex asset reference (SRC-20 token_id / NFT collection_id) when a direct payload field. */
+  asset_ref?: string | null;
+  /** Coarse asset class hint: "native" | "src20" | "nft" | null. */
+  asset_kind?: string | null;
+}
+
+/**
+ * Registered minters of a single SRC-20 token (token-scoped, read-only).
+ *
+ * The owner is always an implicit minter and is returned separately from the
+ * explicitly-registered `minters`. There is intentionally no address→tokens
+ * ("what can this address mint") lookup — that broader address-profiling
+ * surface is out of scope.
+ */
+export interface TokenMintersInfo {
+  /** Hex token id. */
+  token_id: string;
+  /** Base58 token owner (implicit minter). */
+  owner: Address;
+  /** Base58 explicitly-registered minter addresses. */
+  minters: Address[];
 }
 
 /**
