@@ -53,7 +53,7 @@ const ARTIFACTS: Artifact[] = [
     installLabel: 'npm',
     install: 'npm install @sumchain/sdk',
     page: { href: 'https://www.npmjs.com/package/@sumchain/sdk', label: 'View on npm →' },
-    note: 'Published: @sumchain/sdk@0.1.0, installable now.',
+    note: 'Published: @sumchain/sdk@0.2.0, installable now.',
   },
 ];
 

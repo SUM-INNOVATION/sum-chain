@@ -4,10 +4,16 @@ A modern, real-time block explorer for SUM Chain built with React, TypeScript, a
 
 **Features:**
 - Real-time block and transaction updates
+- Human-readable transaction labels: compact domain chips (Native, Token, SNIP,
+  OmniNode, Governance, Policy, Messaging, Other) and action labels
+  (e.g. "SNIP file registration", "Governance vote"), via the `@sumchain/sdk`
+  classifier. Unknown/unproven types fall back to a conservative label.
+- Token-scoped minter context on token transactions (owner/minter of the token
+  in view); raw hashes and addresses stay visible and copyable
 - Search by address, block height, or transaction hash
 - Validator set visualization
 - Koppa (Ϙ) currency display
-- Responsive design
+- Responsive design (intentional mobile card layouts, not squeezed tables)
 
 ## Screenshots
 

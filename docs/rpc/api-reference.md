@@ -218,6 +218,19 @@ Returns transaction details by hash.
 | `chain_id` | integer | Chain ID |
 | `block_height` | integer | Block height (if confirmed) |
 | `status` | string | "pending", "success", or "failed" |
+| `tx_type` | string | Domain/type machine token derived from the payload at read time (e.g. `"Transfer"`, `"Token"`, `"StorageMetadataV2"`, `"Governance"`). |
+| `action` | string \| null | Inner-operation machine token when present (e.g. `"Mint"`, `"CastVote"`, `"RegisterFilePendingV2"`), else `null`. |
+| `asset_ref` | string \| null | Hex asset reference taken directly from the payload (SRC-20 `token_id` / NFT `collection_id`), else `null`. Never inferred. |
+| `asset_kind` | string \| null | Coarse asset class: `"native"`, `"src20"`, `"nft"`, or `null`. |
+
+> **`tx_type` / `action` / `asset_ref` / `asset_kind` are additive, read-time
+> semantic labels.** They are computed from the already-public transaction
+> payload when the response is built — nothing is persisted, and no
+> classification is inferred beyond what the payload proves. The same four fields
+> appear on transaction-history entries (`sum_getTransactionsByAddress` and
+> friends). Older clients that ignore them are unaffected. Consumers map these
+> stable machine tokens to human labels (see the `@sumchain/sdk`
+> `classifyTransaction` helper).
 
 ---
 
@@ -739,6 +752,39 @@ Checks if an SRC-20 token exists.
 1. `token_id` (string) - Token ID (hex)
 
 **Returns:** `boolean` - Exists
+
+---
+
+#### `token_getMinters`
+
+Returns the registered minters of a single SRC-20 token. **Token-scoped**: it
+answers "who may mint *this* token", read from the token's public config.
+
+**Parameters:**
+1. `token_id` (string) - Token ID (hex)
+
+**Returns:** Object or `null` (token not found)
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `token_id` | string | Token ID (hex) |
+| `owner` | string | Token owner (implicit minter) |
+| `minters` | string[] | Explicitly-registered minter addresses |
+
+**Example:**
+```bash
+curl -X POST http://localhost:8545 \
+    -H "Content-Type: application/json" \
+    -d '{"jsonrpc":"2.0","method":"token_getMinters","params":["0x1234..."],"id":1}'
+```
+
+> **Not exposed (by design).** There is intentionally **no** address→tokens
+> lookup — no "everything this address can mint" endpoint — and no maintained
+> minter reverse index. Minter data is only queryable **per token id** (a token
+> already in view), never as an address-wide minter profile; that broader
+> address-profiling surface is out of scope and deferred to a future
+> privacy/observability-reviewed change. Minters are read live from token config,
+> so removals are reflected immediately.
 
 ---
 

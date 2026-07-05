@@ -139,7 +139,11 @@ const categories: Category[] = [
           response: `{"jsonrpc":"2.0","result":{"tx_hash":"0xdef..."},"id":1}`,
         },
       },
-      { name: 'get_transaction', description: 'Returns a transaction by hash.' },
+      {
+        name: 'get_transaction',
+        description:
+          'Returns a transaction by hash. Includes additive, read-time semantic labels derived from the already-public payload — tx_type, action, asset_ref, asset_kind — so clients can classify a transaction without decoding it. The same fields appear on transaction-history entries.',
+      },
       { name: 'get_receipt', description: 'Returns receipt (success/failure + gas) by tx hash.' },
       { name: 'get_pending_transactions', description: 'Lists pending mempool transactions.' },
       {
@@ -315,7 +319,8 @@ const categories: Category[] = [
   {
     id: 'tokens',
     title: 'Fungible Tokens (SRC-20)',
-    blurb: 'Native fungible-token standard, ERC-20 compatible interface.',
+    blurb:
+      'Native fungible-token standard, ERC-20 compatible interface. Minter lookup is token-scoped: token_getMinters returns the owner and registered minters of one token id. There is intentionally no address→tokens (“everything this address can mint”) lookup.',
     methods: [
       { name: 'token_getToken', description: 'Token metadata.' },
       { name: 'token_balanceOf', description: 'Holder balance for a token.' },
@@ -323,6 +328,15 @@ const categories: Category[] = [
       { name: 'token_allowance', description: 'ERC-20-style allowance lookup.' },
       { name: 'token_totalSupply', description: 'Total supply of a token.' },
       { name: 'token_exists', description: 'Existence check.' },
+      {
+        name: 'token_getMinters',
+        description:
+          'Owner + registered minters of a single token (token-scoped, read from public token config). No address-wide minter enumeration is exposed.',
+        example: {
+          request: `{"jsonrpc":"2.0","method":"token_getMinters","params":["0x1234..."],"id":1}`,
+          response: `{"jsonrpc":"2.0","result":{"token_id":"0x1234...","owner":"SUM1own...","minters":["SUM1mnt..."]},"id":1}`,
+        },
+      },
     ],
   },
   {

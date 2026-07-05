@@ -59,7 +59,7 @@ Construct and sign it with the SDK; this doc does not invent a write API.
 > Status:             code-backed
 > Last verified:      2026-06-27
 > Code references:    crates/token/src/, crates/state/src/token_executor.rs, crates/rpc/src/server.rs
-> Public RPC support: yes (token_getToken, token_balanceOf, token_totalSupply, token_allowance, token_exists, token_getTokensByOwner)
+> Public RPC support: yes (token_getToken, token_balanceOf, token_totalSupply, token_allowance, token_exists, token_getTokensByOwner, token_getMinters)
 
 Fungible tokens. Write flow: `TxPayload::Token` (operations include Create,
 Mint, Burn, Transfer, Approve, TransferFrom) via [sum_sendRawTransaction](#submitting-writes).
@@ -78,7 +78,16 @@ curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
 # Token metadata
 curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"token_getToken","params":["<token_id>"]}'
+
+# Minters of a token (owner + registered minters) — token-scoped
+curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"token_getMinters","params":["<token_id>"]}'
 ```
+
+`token_getMinters` is **token-scoped**: it returns the owner and registered
+minters for one token id. There is intentionally no address→tokens ("everything
+this address can mint") lookup — see the note in
+[api-reference.md](rpc/api-reference.md#token_getminters).
 
 ## NFT — SUM-721
 
