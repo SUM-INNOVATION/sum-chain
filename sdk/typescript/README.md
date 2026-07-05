@@ -292,6 +292,41 @@ import {
 } from '@sumchain/sdk';
 ```
 
+## Transaction classification & token minters
+
+Transactions returned by the SDK carry additive, read-time semantic fields
+(`tx_type`, `action`, `asset_ref`, `asset_kind`) derived server-side from the
+already-public payload. `classifyTransaction` maps them to a domain and a
+conservative human label — the same helper the explorer and SUMaillet use.
+
+```typescript
+import { classifyTransaction, minterRole } from '@sumchain/sdk';
+
+const tx = await provider.getTransaction('0x...');
+if (tx) {
+  const c = classifyTransaction(tx);
+  console.log(c.domain);      // e.g. "snip"
+  console.log(c.domainLabel); // "SNIP"
+  console.log(c.action);      // e.g. "SNIP file registration" (or "Unknown transaction")
+}
+```
+
+Labels are conservative: document-family subtypes (e.g. "diploma" vs
+"transcript") are **not** inferred, and an unknown type yields `"Unknown
+transaction"` rather than a guess.
+
+Minter lookup is **token-scoped** — the owner and registered minters of a single
+token you already have in view. There is intentionally no address→tokens
+("everything this address can mint") lookup.
+
+```typescript
+const minters = await provider.getTokenMinters('0x<token_id>'); // { owner, minters } | null
+if (minters) {
+  const role = minterRole(minters, tx.from, 'ACME'); // { isOwner, isMinter, label }
+  console.log(role.label); // e.g. "ACME minter", or null if not a minter
+}
+```
+
 ## Examples
 
 ### Query Account Information

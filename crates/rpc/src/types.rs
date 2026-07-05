@@ -30,6 +30,22 @@ pub struct TransactionInfo {
     pub signature: String,
     pub block_height: Option<BlockHeight>,
     pub status: Option<String>,
+    /// Wire-stable machine token for the transaction's domain/type, derived from
+    /// the (already-public) payload at read time — never persisted. Examples:
+    /// `"Transfer"`, `"Token"`, `"StorageMetadataV2"`, `"Governance"`.
+    pub tx_type: String,
+    /// Inner-operation machine token when the payload carries one (e.g. `"Mint"`,
+    /// `"CastVote"`, `"RegisterFilePendingV2"`); `null` otherwise.
+    pub action: Option<String>,
+    /// Hex on-chain asset reference taken directly from the payload (SRC-20
+    /// `token_id`, NFT `collection_id`); `null` when the payload has no direct
+    /// asset id. Never inferred.
+    pub asset_ref: Option<String>,
+    /// Coarse asset class hint for the payload: `"native"`, `"src20"`, `"nft"`,
+    /// or `null`. Lets clients decide whether `asset_ref` resolves to token
+    /// metadata; the human token name is resolved client-side via
+    /// `token_getToken` (not embedded here, to keep list responses cheap).
+    pub asset_kind: Option<String>,
 }
 
 /// Account info for RPC responses
@@ -1445,6 +1461,33 @@ pub struct TransactionHistoryEntry {
     pub status: String,
     /// Block timestamp
     pub timestamp: Timestamp,
+    /// Wire-stable machine token for the transaction's domain/type, derived from
+    /// the payload at read time. See [`TransactionInfo::tx_type`].
+    pub tx_type: String,
+    /// Inner-operation machine token when the payload carries one; `null`
+    /// otherwise. See [`TransactionInfo::action`].
+    pub action: Option<String>,
+    /// Hex on-chain asset reference (SRC-20 `token_id`, NFT `collection_id`) when
+    /// a direct payload field; `null` otherwise.
+    pub asset_ref: Option<String>,
+    /// Coarse asset class hint (`"native"`/`"src20"`/`"nft"`/`null`).
+    pub asset_kind: Option<String>,
+}
+
+/// Registered minters of a single SRC-20 token (token-scoped, read-only).
+///
+/// A compact projection of public token config for one token id — the owner is
+/// always an implicit minter and is returned separately from the explicitly
+/// registered `minters`. This is intentionally token-scoped: there is no
+/// address→tokens ("what can this address mint") endpoint, by design.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenMintersInfo {
+    /// Hex token id.
+    pub token_id: String,
+    /// Base58 token owner (implicit minter).
+    pub owner: String,
+    /// Base58 explicitly-registered minter addresses.
+    pub minters: Vec<String>,
 }
 
 /// Transaction history response with pagination

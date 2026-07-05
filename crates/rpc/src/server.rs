@@ -438,8 +438,123 @@ impl RpcServer {
         }
     }
 
+    /// Derive read-time semantic labels for a transaction from its already-public
+    /// payload. Returns `(tx_type, action, asset_ref, asset_kind)`.
+    ///
+    /// Nothing here is persisted or inferred beyond what the payload proves:
+    /// `tx_type`/`action` are the enum variant identifiers, `asset_ref` is a
+    /// direct payload field (SRC-20 `token_id` / NFT `collection_id`), and
+    /// `asset_kind` is a coarse class hint. Consumers (SDK/explorer/SUMaillet)
+    /// map these stable machine tokens to human labels.
+    fn tx_semantics(
+        tx: &SignedTransaction,
+    ) -> (String, Option<String>, Option<String>, Option<String>) {
+        use sumchain_primitives::{TxInner, TxType};
+
+        // Leading variant identifier of a `{:?}` rendering, so struct/tuple
+        // variants that carry fields still yield a clean token.
+        fn ident(dbg: String) -> String {
+            dbg.chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect()
+        }
+        fn to_hex(bytes: &[u8]) -> String {
+            bytes.iter().map(|b| format!("{:02x}", b)).collect()
+        }
+
+        let tx_type = match tx.tx_type() {
+            TxType::Transfer => "Transfer",
+            TxType::Nft => "Nft",
+            TxType::Token => "Token",
+            TxType::ContractDeploy => "ContractDeploy",
+            TxType::ContractCall => "ContractCall",
+            TxType::Staking => "Staking",
+            TxType::Messaging => "Messaging",
+            TxType::DocClass => "DocClass",
+            TxType::Tax => "Tax",
+            TxType::Equity => "Equity",
+            TxType::Agreement => "Agreement",
+            TxType::Legal => "Legal",
+            TxType::Property => "Property",
+            TxType::Healthcare => "Healthcare",
+            TxType::Employment => "Employment",
+            TxType::Finance => "Finance",
+            TxType::PolicyAccount => "PolicyAccount",
+            TxType::NodeRegistry => "NodeRegistry",
+            TxType::StorageMetadata => "StorageMetadata",
+            TxType::NodeRegistryV2 => "NodeRegistryV2",
+            TxType::StorageMetadataV2 => "StorageMetadataV2",
+            TxType::InferenceAttestation => "InferenceAttestation",
+            TxType::Education => "Education",
+            TxType::Governance => "Governance",
+            TxType::InferenceSettlement => "InferenceSettlement",
+        }
+        .to_string();
+
+        let payload = match &tx.inner {
+            // Legacy envelope is always a native Koppa transfer.
+            TxInner::Legacy(_) => {
+                return (tx_type, None, None, Some("native".to_string()));
+            }
+            TxInner::V2(v2) => &v2.payload,
+        };
+
+        let action = match payload {
+            TxPayload::Transfer { .. }
+            | TxPayload::ContractDeploy(_)
+            | TxPayload::ContractCall(_)
+            | TxPayload::InferenceAttestation(_) => None,
+            TxPayload::Nft(d) => Some(ident(format!("{:?}", d.operation))),
+            TxPayload::Token(d) => Some(ident(format!("{:?}", d.operation))),
+            TxPayload::Staking(d) => Some(ident(format!("{:?}", d.operation))),
+            TxPayload::Messaging(d) => Some(ident(format!("{:?}", d.operation))),
+            TxPayload::DocClass(d) => Some(ident(format!("{:?}", d.operation))),
+            TxPayload::Tax(d) => Some(ident(format!("{:?}", d.operation))),
+            TxPayload::Equity(d) => Some(ident(format!("{:?}", d.operation))),
+            TxPayload::Agreement(d) => Some(ident(format!("{:?}", d.operation))),
+            TxPayload::Legal(d) => Some(ident(format!("{:?}", d.operation))),
+            TxPayload::Property(d) => Some(ident(format!("{:?}", d.operation))),
+            TxPayload::Healthcare(d) => Some(ident(format!("{:?}", d.operation))),
+            TxPayload::Employment(d) => Some(ident(format!("{:?}", d.operation))),
+            TxPayload::Finance(d) => Some(ident(format!("{:?}", d.operation))),
+            TxPayload::PolicyAccount(d) => Some(ident(format!("{:?}", d.operation))),
+            TxPayload::NodeRegistry(d) => Some(ident(format!("{:?}", d.operation))),
+            TxPayload::StorageMetadata(d) => Some(ident(format!("{:?}", d.operation))),
+            TxPayload::NodeRegistryV2(d) => Some(ident(format!("{:?}", d.operation))),
+            TxPayload::StorageMetadataV2(d) => Some(ident(format!("{:?}", d.operation))),
+            TxPayload::Governance(d) => Some(ident(format!("{:?}", d.operation))),
+            TxPayload::InferenceSettlement(d) => Some(ident(format!("{:?}", d.operation))),
+            TxPayload::Education(d) => {
+                Some(format!("{}Op{}", ident(format!("{:?}", d.standard)), d.operation))
+            }
+        };
+
+        let asset_ref = match payload {
+            TxPayload::Token(d) => {
+                if d.token_id == [0u8; 32] {
+                    None
+                } else {
+                    Some(to_hex(&d.token_id))
+                }
+            }
+            TxPayload::Nft(d) => Some(to_hex(&d.collection_id)),
+            _ => None,
+        };
+
+        let asset_kind = match payload {
+            TxPayload::Transfer { .. } => Some("native"),
+            TxPayload::Token(_) => Some("src20"),
+            TxPayload::Nft(_) => Some("nft"),
+            _ => None,
+        }
+        .map(|s| s.to_string());
+
+        (tx_type, action, asset_ref, asset_kind)
+    }
+
     /// Convert transaction to RPC type
     fn tx_to_info(&self, tx: &SignedTransaction, receipt: Option<&sumchain_primitives::Receipt>) -> TransactionInfo {
+        let (tx_type, action, asset_ref, asset_kind) = Self::tx_semantics(tx);
         TransactionInfo {
             hash: tx.hash().to_hex(),
             from: tx.sender().to_base58(),
@@ -451,6 +566,10 @@ impl RpcServer {
             signature: hex::encode(tx.signature),
             block_height: receipt.map(|r| r.block_height),
             status: receipt.map(|r| r.status.description().to_string()),
+            tx_type,
+            action,
+            asset_ref,
+            asset_kind,
         }
     }
 
@@ -1569,6 +1688,33 @@ impl SumChainApiServer for RpcServer {
                 paused: data.paused,
                 created_at: data.created_at,
                 created_at_block: data.created_at_block,
+            })),
+            Ok(None) => Ok(None),
+            Err(e) => Err(RpcError::Internal(e.to_string()).into()),
+        }
+    }
+
+    async fn token_get_minters(
+        &self,
+        token_id: String,
+    ) -> std::result::Result<Option<TokenMintersInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let token_bytes = self.parse_token_id(&token_id)?;
+        let token_store = TokenStore::new(&self.db);
+        // Base58-encode a stored token-config `Address` the same way the rest of
+        // the token RPC does.
+        fn addr_b58(a: &sumchain_primitives::Address) -> String {
+            Address::new({
+                let mut arr = [0u8; 20];
+                arr.copy_from_slice(a.as_bytes());
+                arr
+            })
+            .to_base58()
+        }
+        match token_store.get_token(&token_bytes) {
+            Ok(Some(data)) => Ok(Some(TokenMintersInfo {
+                token_id: format!("0x{}", hex::encode(token_bytes)),
+                owner: addr_b58(&data.owner),
+                minters: data.minters.iter().map(addr_b58).collect(),
             })),
             Ok(None) => Ok(None),
             Err(e) => Err(RpcError::Internal(e.to_string()).into()),
@@ -4442,6 +4588,7 @@ impl SumChainApiServer for RpcServer {
                     .map(|b| b.header.timestamp)
                     .unwrap_or(0);
 
+                let (tx_type, action, asset_ref, asset_kind) = Self::tx_semantics(&tx);
                 transactions.push(TransactionHistoryEntry {
                     tx_hash: entry.tx_hash.to_hex(),
                     block_height: entry.block_height,
@@ -4452,6 +4599,10 @@ impl SumChainApiServer for RpcServer {
                     fee: tx.fee().to_string(),
                     status,
                     timestamp,
+                    tx_type,
+                    action,
+                    asset_ref,
+                    asset_kind,
                 });
             }
         }
@@ -4509,6 +4660,7 @@ impl SumChainApiServer for RpcServer {
                     .map(|b| b.header.timestamp)
                     .unwrap_or(0);
 
+                let (tx_type, action, asset_ref, asset_kind) = Self::tx_semantics(&tx);
                 transactions.push(TransactionHistoryEntry {
                     tx_hash: entry.tx_hash.to_hex(),
                     block_height: entry.block_height,
@@ -4519,6 +4671,10 @@ impl SumChainApiServer for RpcServer {
                     fee: tx.fee().to_string(),
                     status,
                     timestamp,
+                    tx_type,
+                    action,
+                    asset_ref,
+                    asset_kind,
                 });
             }
         }
@@ -4572,6 +4728,7 @@ impl SumChainApiServer for RpcServer {
                     .map(|b| b.header.timestamp)
                     .unwrap_or(0);
 
+                let (tx_type, action, asset_ref, asset_kind) = Self::tx_semantics(&tx);
                 transactions.push(TransactionHistoryEntry {
                     tx_hash: entry.tx_hash.to_hex(),
                     block_height: entry.block_height,
@@ -4582,6 +4739,10 @@ impl SumChainApiServer for RpcServer {
                     fee: tx.fee().to_string(),
                     status,
                     timestamp,
+                    tx_type,
+                    action,
+                    asset_ref,
+                    asset_kind,
                 });
             }
         }
@@ -10039,5 +10200,225 @@ mod governance_rpc_tests {
         assert!(srv.gov_list_eligible_assets().await.unwrap().is_empty());
         assert!(srv.gov_get_proposal(format!("0x{}", hex::encode([1u8; 32]))).await.unwrap().is_none());
         assert!(srv.gov_get_tally(format!("0x{}", hex::encode([1u8; 32]))).await.unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod tx_semantics_tests {
+    //! Coverage for read-time transaction semantic labels (`tx_semantics`) and
+    //! the token-scoped `token_getMinters` handler (issue #64). Both are derived
+    //! from already-public data; nothing here persists or infers beyond the
+    //! payload / token config.
+    use super::*;
+    use std::collections::HashMap;
+    use sumchain_consensus::PoAEngine;
+    use sumchain_crypto::KeyPair;
+    use sumchain_genesis::{ChainParams, Genesis};
+    use sumchain_primitives::governance::{GovernanceOperation, GovernanceTxData};
+    use sumchain_primitives::inference_attestation::{
+        InferenceAttestationDigest, InferenceAttestationTxData,
+    };
+    use sumchain_primitives::storage_metadata::{
+        StorageMetadataOperationV2, StorageMetadataV2TxData,
+    };
+    use sumchain_primitives::{
+        Address, Hash, NftOperation, NftTxData, SignedTransaction, TokenOperation, TokenTxData,
+        Transaction, TransactionV2, TxPayload,
+    };
+    use sumchain_state::MempoolConfig;
+    use sumchain_storage::Src20TokenData;
+    use tempfile::TempDir;
+
+    fn v2(payload: TxPayload) -> SignedTransaction {
+        let tx = TransactionV2 {
+            chain_id: 1,
+            from: Address::new([1u8; 20]),
+            fee: 1000,
+            nonce: 0,
+            payload,
+        };
+        SignedTransaction::new_v2(tx, [0u8; 64], [0u8; 32])
+    }
+
+    #[test]
+    fn legacy_transfer_is_native() {
+        let tx = SignedTransaction::new(
+            Transaction {
+                chain_id: 1,
+                from: Address::new([1u8; 20]),
+                to: Address::new([2u8; 20]),
+                amount: 5,
+                fee: 1000,
+                nonce: 0,
+            },
+            [0u8; 64],
+            [0u8; 32],
+        );
+        let (t, a, r, k) = RpcServer::tx_semantics(&tx);
+        assert_eq!(t, "Transfer");
+        assert_eq!(a, None);
+        assert_eq!(r, None);
+        assert_eq!(k.as_deref(), Some("native"));
+    }
+
+    #[test]
+    fn v2_transfer_is_native() {
+        let tx = v2(TxPayload::Transfer { to: Address::new([2u8; 20]), amount: 7 });
+        let (t, a, _r, k) = RpcServer::tx_semantics(&tx);
+        assert_eq!(t, "Transfer");
+        assert_eq!(a, None);
+        assert_eq!(k.as_deref(), Some("native"));
+    }
+
+    #[test]
+    fn token_mint_action_and_asset() {
+        let tx = v2(TxPayload::Token(TokenTxData {
+            token_id: [9u8; 32],
+            operation: TokenOperation::Mint,
+            data: vec![],
+        }));
+        let (t, a, r, k) = RpcServer::tx_semantics(&tx);
+        assert_eq!(t, "Token");
+        assert_eq!(a.as_deref(), Some("Mint"));
+        assert_eq!(r.as_deref(), Some("09".repeat(32).as_str()));
+        assert_eq!(k.as_deref(), Some("src20"));
+    }
+
+    #[test]
+    fn token_create_zero_id_has_no_asset_ref() {
+        let tx = v2(TxPayload::Token(TokenTxData {
+            token_id: [0u8; 32],
+            operation: TokenOperation::Create,
+            data: vec![],
+        }));
+        let (_t, a, r, _k) = RpcServer::tx_semantics(&tx);
+        assert_eq!(a.as_deref(), Some("Create"));
+        assert_eq!(r, None);
+    }
+
+    #[test]
+    fn nft_asset_ref_is_collection() {
+        let tx = v2(TxPayload::Nft(NftTxData {
+            collection_id: [7u8; 32],
+            token_id: 3,
+            operation: NftOperation::Mint,
+            data: vec![],
+        }));
+        let (t, a, r, k) = RpcServer::tx_semantics(&tx);
+        assert_eq!(t, "Nft");
+        assert_eq!(a.as_deref(), Some("Mint"));
+        assert_eq!(r.as_deref(), Some("07".repeat(32).as_str()));
+        assert_eq!(k.as_deref(), Some("nft"));
+    }
+
+    #[test]
+    fn storage_v2_reassign_action() {
+        let tx = v2(TxPayload::StorageMetadataV2(StorageMetadataV2TxData {
+            operation: StorageMetadataOperationV2::ReassignChunksV2 { merkle_root: Hash::hash(b"f") },
+        }));
+        let (t, a, r, k) = RpcServer::tx_semantics(&tx);
+        assert_eq!(t, "StorageMetadataV2");
+        assert_eq!(a.as_deref(), Some("ReassignChunksV2"));
+        assert_eq!(r, None);
+        assert_eq!(k, None);
+    }
+
+    #[test]
+    fn governance_castvote_action() {
+        let tx = v2(TxPayload::Governance(GovernanceTxData {
+            operation: GovernanceOperation::CastVote,
+            data: vec![],
+        }));
+        let (t, a, _r, _k) = RpcServer::tx_semantics(&tx);
+        assert_eq!(t, "Governance");
+        assert_eq!(a.as_deref(), Some("CastVote"));
+    }
+
+    #[test]
+    fn inference_attestation_has_no_action() {
+        let digest = InferenceAttestationDigest {
+            session_id: "s".into(),
+            model_hash: [0u8; 32],
+            manifest_root: [0u8; 32],
+            response_hash: [0u8; 32],
+            proof_root: [0u8; 32],
+        };
+        let tx = v2(TxPayload::InferenceAttestation(InferenceAttestationTxData {
+            digest,
+            verifier_signature: [0u8; 64],
+        }));
+        let (t, a, r, k) = RpcServer::tx_semantics(&tx);
+        assert_eq!(t, "InferenceAttestation");
+        assert_eq!(a, None);
+        assert_eq!(r, None);
+        assert_eq!(k, None);
+    }
+
+    fn server() -> (RpcServer, Arc<Database>, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let db = Arc::new(Database::open_default(dir.path()).unwrap());
+        let state = Arc::new(StateManager::new(db.clone(), 1));
+        let mempool = Arc::new(Mempool::new(MempoolConfig::default()));
+        let validator = KeyPair::generate();
+        let genesis = Genesis::new(
+            1,
+            0,
+            vec![validator.public_key().to_base58()],
+            HashMap::from([(validator.address().to_base58(), 1_000_000u128)]),
+            ChainParams::with_v2_enabled(),
+        );
+        let engine = Arc::new(
+            PoAEngine::new(db.clone(), state.clone(), mempool.clone(), &genesis, Some(validator))
+                .unwrap(),
+        );
+        let (tx_sender, _rx) = mpsc::channel(64);
+        let srv = RpcServer::new(db.clone(), state, mempool, engine, tx_sender, Arc::new(|| 0usize));
+        (srv, db, dir)
+    }
+
+    fn put_token(db: &Arc<Database>, id: [u8; 32], owner: Address, minters: Vec<Address>) {
+        let data = Src20TokenData {
+            name: "T".into(),
+            symbol: "T".into(),
+            decimals: 9,
+            owner,
+            total_supply: 0,
+            max_supply: 0,
+            mintable: true,
+            burnable: false,
+            pausable: false,
+            paused: false,
+            minters,
+            created_at: 0,
+            created_at_block: 0,
+        };
+        TokenStore::new(db).put_token(&id, &data).unwrap();
+    }
+
+    #[tokio::test]
+    async fn minters_owner_and_explicit_then_removed_reflects_live() {
+        let (srv, db, _dir) = server();
+        let owner = Address::new([3u8; 20]);
+        let minter = Address::new([4u8; 20]);
+        let id = [1u8; 32];
+        put_token(&db, id, owner, vec![minter]);
+        let hex_id = format!("0x{}", hex::encode(id));
+
+        let info = srv.token_get_minters(hex_id.clone()).await.unwrap().unwrap();
+        assert_eq!(info.owner, owner.to_base58());
+        assert_eq!(info.minters, vec![minter.to_base58()]);
+
+        // Minter removed → read reflects current config immediately (no staleness).
+        put_token(&db, id, owner, vec![]);
+        let info2 = srv.token_get_minters(hex_id).await.unwrap().unwrap();
+        assert_eq!(info2.owner, owner.to_base58());
+        assert!(info2.minters.is_empty());
+    }
+
+    #[tokio::test]
+    async fn minters_absent_token_is_none() {
+        let (srv, _db, _dir) = server();
+        let hex_id = format!("0x{}", hex::encode([9u8; 32]));
+        assert!(srv.token_get_minters(hex_id).await.unwrap().is_none());
     }
 }
