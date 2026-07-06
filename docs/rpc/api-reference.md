@@ -824,6 +824,7 @@ active once the chain reaches it (≈2026-07-12)**.
 | `sum_getInferenceAttestation(session_id, verifier_address)` | One attestation record. |
 | `sum_listInferenceAttestations(session_id)` | Every verifier for a session. |
 | `sum_getInferenceAttestationStatus(tx_hash)` | Chain-side status of an attestation tx. |
+| `sum_buildSponsoredInferenceAttestation(request)` | Build an unsigned **sponsored** (v2) attestation tx (issue #79): a payer/sponsor submits on a verifier's behalf. No keys; the sponsor signs offline. The attestation stays verifier-keyed for dedup, storage, and settlement. |
 
 ### OmniNode inference settlement (`omninode_*`) — gate set to 8,900,000 (issue #61)
 
@@ -839,7 +840,10 @@ slashing in v1 (reward denial / claim withholding / escrow refund only).
 | `omninode_getInferenceClaims(session_id)` | read |
 | `omninode_getInferenceDisputes(session_id)` | read |
 | `omninode_getClaimableReward(session_id, verifier)` | read |
-| `omninode_buildOpenInferenceSession` / `buildFundInferenceSession` / `buildClaimInferenceReward` / `buildOpenInferenceDispute` / `buildResolveInferenceDispute` / `buildRefundInferenceSession` | unsigned-tx builders (no keys). Dispute resolution is validator-quorum controlled (no personal resolver key); `buildResolveInferenceDispute` accepts an optional `approvals` list of validator signatures. |
+| `omninode_getInferenceConsistency(session_id)` | read — attestations grouped by full digest tuple (issue #77 consistency mode) |
+| `omninode_getVerifier(verifier)` | read — verifier bond record: bond, status, unbonding timers (issue #78) |
+| `omninode_buildOpenInferenceSession` / `buildFundInferenceSession` / `buildClaimInferenceReward` / `buildOpenInferenceDispute` / `buildResolveInferenceDispute` / `buildRefundInferenceSession` | unsigned-tx builders (no keys). `buildOpenInferenceSession` accepts optional `consistency` (issue #77) and `bond_requirement` (issue #78) configs. Dispute resolution is validator-quorum controlled (no personal resolver key); `buildResolveInferenceDispute` accepts an optional `approvals` list of validator signatures. |
+| `omninode_buildRegisterVerifier` / `buildAddVerifierBond` / `buildBeginVerifierUnbond` / `buildWithdrawVerifierBond` | verifier bond-registry builders (no keys, issue #78). Bond is native Koppa; slashing on a denied dispute burns to the zero address. |
 
 ---
 

@@ -126,6 +126,47 @@ pub struct InferenceAttestationInfo {
     pub finalized: bool,
 }
 
+/// Builder request for a **sponsored** (v2) inference attestation (issue #79).
+/// No private keys — the returned unsigned tx is signed offline by the
+/// **sponsor/payer** (`from`), while the **verifier** is identified by
+/// `verifier_public_key` and its `verifier_signature` over the digest. Sponsored
+/// attestation changes who pays to submit, not who made the attestation. All
+/// binary fields are `0x`+hex.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SponsoredAttestationBuildRequest {
+    /// Sponsor/payer address (base58) — the outer tx sender + fee payer.
+    pub from: String,
+    /// OmniNode session identifier (UTF-8 string).
+    pub session_id: String,
+    /// `0x` + 64 hex — model identity hash.
+    pub model_hash: String,
+    /// `0x` + 64 hex — manifest Merkle root.
+    pub manifest_root: String,
+    /// `0x` + 64 hex — canonical response hash.
+    pub response_hash: String,
+    /// `0x` + 64 hex — proof Merkle root.
+    pub proof_root: String,
+    /// `0x` + 64 hex — the verifier's raw Ed25519 public key (attestation identity).
+    pub verifier_public_key: String,
+    /// `0x` + 128 hex — the verifier's signature over `DOMAIN_TAG || bincode(digest)`.
+    pub verifier_signature: String,
+    pub fee: Option<u128>,
+}
+
+/// Unsigned-tx build response for a sponsored attestation (issue #79).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SponsoredAttestationBuildResponse {
+    /// Bincode-encoded unsigned `TransactionV2` (hex, `0x`-prefixed).
+    pub unsigned_tx: String,
+    /// Hash the sponsor signs (hex, `0x`-prefixed).
+    pub signing_hash: String,
+    /// Sponsor/payer address (base58).
+    pub from: String,
+    pub nonce: u64,
+    pub fee: u128,
+    pub chain_id: u64,
+}
+
 /// Status of a specific `InferenceAttestation` tx, queried by tx hash.
 ///
 /// **Re-exported from `sumchain-primitives`** — the type and the pure

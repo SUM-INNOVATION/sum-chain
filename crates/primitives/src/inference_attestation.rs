@@ -65,8 +65,55 @@ pub enum AttestationError {
     SessionIdTooLong(usize),
     #[error("inner verifier signature is invalid for the supplied public key")]
     InvalidSignature,
+    #[error("verifier public key is not a valid Ed25519 point")]
+    InvalidPublicKey,
     #[error("bincode-serializing digest failed: {0}")]
     Serialization(String),
+}
+
+/// Sponsored attestation v2 envelope (issue #79). **Append-only** — this does
+/// NOT change v1: it wraps the *same* [`InferenceAttestationDigest`] and the same
+/// verifier signing bytes (`DOMAIN_TAG || bincode(digest)`), so a v2 attestation
+/// is an identical commitment to the v1 form.
+///
+/// The difference is *who submits it*: the outer `SignedTransaction` is signed by
+/// a **sponsor/payer** (the fee payer), while the **verifier** is identified by
+/// `verifier_public_key` and authenticated by `verifier_signature`. Sponsored
+/// attestation changes who pays to submit the attestation, not who made it — the
+/// verifier remains the attestation identity for deduplication, storage, and
+/// settlement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InferenceAttestationV2TxData {
+    pub digest: InferenceAttestationDigest,
+    /// The verifier's raw Ed25519 public key — the attestation identity. The
+    /// verifier address is `Address::from_public_key(verifier_public_key)`.
+    pub verifier_public_key: [u8; 32],
+    /// The verifier's signature over `DOMAIN_TAG || bincode(digest)` (identical
+    /// bytes to v1). Must verify against `verifier_public_key`.
+    #[serde(with = "BigArray")]
+    pub verifier_signature: [u8; 64],
+}
+
+/// Verify a sponsored (v2) attestation's inner verifier signature over the same
+/// v1 signing bytes, against the envelope's `verifier_public_key`. Distinguishes
+/// an invalid public key ([`AttestationError::InvalidPublicKey`]) from a bad
+/// signature ([`AttestationError::InvalidSignature`]) so the dispatch can surface
+/// the right receipt code. The sponsor (outer sender) is never consulted here.
+pub fn verify_attestation_v2_signature(
+    tx_data: &InferenceAttestationV2TxData,
+) -> Result<(), AttestationError> {
+    if tx_data.digest.session_id.len() > MAX_SESSION_ID_BYTES {
+        return Err(AttestationError::SessionIdTooLong(
+            tx_data.digest.session_id.len(),
+        ));
+    }
+    let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&tx_data.verifier_public_key)
+        .map_err(|_| AttestationError::InvalidPublicKey)?;
+    let signing_input = signing_input_bytes(&tx_data.digest)?;
+    let signature = ed25519_dalek::Signature::from_bytes(&tx_data.verifier_signature);
+    verifying_key
+        .verify_strict(&signing_input, &signature)
+        .map_err(|_| AttestationError::InvalidSignature)
 }
 
 /// Canonical bytes of the digest under bincode 1.3 default config.

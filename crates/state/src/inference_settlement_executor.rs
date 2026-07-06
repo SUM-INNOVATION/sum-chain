@@ -15,10 +15,12 @@ use std::sync::Arc;
 
 use sumchain_genesis::ChainParams;
 use sumchain_primitives::inference_attestation::inference_attestation_key;
+use sumchain_primitives::inference_attestation::InferenceAttestationDigest;
 use sumchain_primitives::inference_settlement::{
-    session_key, session_prefix, settlement_entry_key, InferenceClaim, InferenceClaimStatus,
-    InferenceDispute, InferenceDisputeStatus, InferenceSession, InferenceSessionStatus,
-    InferenceSettlementOperation, OpenInferenceDisputeRequest, OpenInferenceSessionRequest,
+    session_key, session_prefix, settlement_entry_key, verifier_key, InferenceClaim,
+    InferenceClaimStatus, InferenceConsistencyConfig, InferenceDispute, InferenceDisputeStatus,
+    InferenceSession, InferenceSessionStatus, InferenceSettlementOperation, InferenceVerifierRecord,
+    InferenceVerifierStatus, OpenInferenceDisputeRequest, OpenInferenceSessionRequest,
     ResolveInferenceDisputeRequest,
 };
 use sumchain_primitives::{Address, Balance};
@@ -58,6 +60,27 @@ fn claim_maturity_height(
     included_at_height
         .saturating_add(finality_depth)
         .saturating_add(dispute_window_blocks)
+}
+
+/// Deterministic consistency predicate (issue #77). `matching` is the size of the
+/// claimant's exact-tuple group (claimant included). The `min_matching_verifiers`
+/// constraint is always active; the `threshold_bps` constraint is active only when
+/// `> 0` and is measured against the fixed, funder-declared `max_verifiers` — never
+/// a live attestation count. Both active constraints must hold.
+fn consistency_satisfied(cfg: InferenceConsistencyConfig, matching: u32, max_verifiers: u32) -> bool {
+    if matching < cfg.min_matching_verifiers {
+        return false;
+    }
+    if cfg.threshold_bps > 0 {
+        // matching / max_verifiers >= threshold_bps / 10_000, in integer math.
+        // u64 widening avoids overflow (u32 * 10_000 fits in u64 comfortably).
+        let lhs = matching as u64 * 10_000;
+        let rhs = max_verifiers as u64 * cfg.threshold_bps as u64;
+        if lhs < rhs {
+            return false;
+        }
+    }
+    true
 }
 
 pub struct InferenceSettlementExecutor {
@@ -133,6 +156,7 @@ impl InferenceSettlementExecutor {
             InferenceSettlementOperation::ResolveDispute(req) => {
                 self.resolve_dispute(
                     req,
+                    state,
                     block_height,
                     chain_params,
                     state.chain_id(),
@@ -142,7 +166,28 @@ impl InferenceSettlementExecutor {
             InferenceSettlementOperation::RefundSession(req) => {
                 self.refund_session(sender, &req.session_id, state, block_height, chain_params)
             }
+            // ── Verifier bonding (issue #78) ──
+            InferenceSettlementOperation::RegisterVerifier(req) => {
+                self.register_verifier(sender, req.bond, state, block_height, chain_params)
+            }
+            InferenceSettlementOperation::AddVerifierBond(req) => {
+                self.add_verifier_bond(sender, req.amount, state, block_height, chain_params)
+            }
+            InferenceSettlementOperation::BeginVerifierUnbond => {
+                self.begin_verifier_unbond(sender, block_height, chain_params)
+            }
+            InferenceSettlementOperation::WithdrawVerifierBond => {
+                self.withdraw_verifier_bond(sender, state, block_height, chain_params)
+            }
         }
+    }
+
+    /// `true` iff the verifier-bonding gate (issue #78) is open at `block_height`.
+    fn bonding_gate_open(chain_params: &ChainParams, block_height: u64) -> bool {
+        matches!(
+            chain_params.inference_verifier_bonding_enabled_from_height,
+            Some(h) if block_height >= h
+        )
     }
 
     // ── Operations ───────────────────────────────────────────────────────────
@@ -201,6 +246,50 @@ impl InferenceSettlementExecutor {
                 "deposit must be between reward_per_verifier and reward_per_verifier*max_verifiers",
             ));
         }
+        // Consistency/plurality mode (issue #77) is an opt-in, gated claim rule.
+        // Only a session that requests it is affected: the consistency gate is a
+        // semantic OpenSession check (fee already paid), NOT the free 350
+        // settlement gate. A session with no consistency config is unaffected by
+        // the consistency gate entirely.
+        if let Some(cfg) = &req.consistency {
+            if !matches!(
+                chain_params.inference_settlement_consistency_enabled_from_height,
+                Some(h) if block_height >= h
+            ) {
+                return Ok(InferenceSettlementExecutionResult::fail(
+                    361,
+                    "inference consistency mode not enabled at this block height",
+                ));
+            }
+            // Deterministic bounds. Denominator for any bps rule is the fixed,
+            // funder-declared `max_verifiers` — never a live attestation count.
+            if cfg.min_matching_verifiers < 1
+                || cfg.min_matching_verifiers > req.max_verifiers
+                || cfg.threshold_bps > 10_000
+            {
+                return Ok(InferenceSettlementExecutionResult::fail(
+                    363,
+                    "invalid inference consistency configuration",
+                ));
+            }
+        }
+        // Verifier-bond requirement (issue #78) is opt-in and gated. A session that
+        // requests it needs the bonding gate open (semantic failure 364, fee paid);
+        // a session without it is unaffected by the bonding gate.
+        if let Some(req_bond) = &req.bond_requirement {
+            if !Self::bonding_gate_open(chain_params, block_height) {
+                return Ok(InferenceSettlementExecutionResult::fail(
+                    364,
+                    "inference verifier bonding not enabled at this block height",
+                ));
+            }
+            if req_bond.min_bond == 0 || req_bond.slash_bps_on_denied_dispute > 10_000 {
+                return Ok(InferenceSettlementExecutionResult::fail(
+                    365,
+                    "invalid verifier bond requirement config",
+                ));
+            }
+        }
         if state.get_balance(sender)? < req.deposit {
             return Ok(InferenceSettlementExecutionResult::fail(
                 355,
@@ -220,6 +309,8 @@ impl InferenceSettlementExecutor {
             status: InferenceSessionStatus::Open,
             created_at_height: block_height,
             expires_at_height: req.expires_at_height,
+            consistency: req.consistency,
+            bond_requirement: req.bond_requirement,
         };
         self.put_session(&session)?;
         info!(
@@ -319,6 +410,50 @@ impl InferenceSettlementExecutor {
         if self.get_claim(session_id, sender)?.is_some() {
             return Ok(InferenceSettlementExecutionResult::fail(358, "reward already claimed"));
         }
+        // Consistency/plurality rule (issue #77). Only when the session opted in.
+        // The group is computed against the CLAIMANT'S OWN full digest tuple, so a
+        // qualifying claimant is by construction a member of the winning group — a
+        // divergent-digest verifier can never ride another group's plurality.
+        if let Some(cfg) = session.consistency {
+            let matching = self.consistency_group_size(
+                session_id,
+                &att.digest,
+                block_height,
+                chain_params.finality_depth,
+            )?;
+            if !consistency_satisfied(cfg, matching, session.max_verifiers) {
+                return Ok(InferenceSettlementExecutionResult::fail(
+                    362,
+                    "insufficient verifier consistency for claim",
+                ));
+            }
+        }
+        // Verifier-bond gating (issue #78). Only for bond-required sessions.
+        // Deterministic order: missing record (367) → not Active (368) → too low (370).
+        if let Some(bond_req) = session.bond_requirement {
+            let record = self.get_verifier(sender)?;
+            match record {
+                None => {
+                    return Ok(InferenceSettlementExecutionResult::fail(
+                        367,
+                        "verifier not registered",
+                    ));
+                }
+                Some(r) if r.status != InferenceVerifierStatus::Active => {
+                    return Ok(InferenceSettlementExecutionResult::fail(
+                        368,
+                        "verifier not active (unbonding or withdrawn)",
+                    ));
+                }
+                Some(r) if r.bond < bond_req.min_bond => {
+                    return Ok(InferenceSettlementExecutionResult::fail(
+                        370,
+                        "insufficient verifier bond for claim",
+                    ));
+                }
+                Some(_) => {}
+            }
+        }
         if session.claims_count >= session.max_verifiers {
             return Ok(InferenceSettlementExecutionResult::fail(
                 355,
@@ -416,9 +551,11 @@ impl InferenceSettlementExecutor {
         Ok(InferenceSettlementExecutionResult::ok())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn resolve_dispute(
         &self,
         req: &ResolveInferenceDisputeRequest,
+        state: &StateManager,
         block_height: u64,
         chain_params: &ChainParams,
         chain_id: sumchain_primitives::ChainId,
@@ -455,9 +592,10 @@ impl InferenceSettlementExecutor {
                 "resolve dispute: validator quorum not met",
             ));
         }
-        if self.get_session(&req.session_id)?.is_none() {
-            return Ok(InferenceSettlementExecutionResult::fail(352, "session not found"));
-        }
+        let session = match self.get_session(&req.session_id)? {
+            Some(s) => s,
+            None => return Ok(InferenceSettlementExecutionResult::fail(352, "session not found")),
+        };
         let mut dispute = match self.get_dispute(&req.session_id, &req.verifier)? {
             Some(d) => d,
             None => return Ok(InferenceSettlementExecutionResult::fail(352, "dispute not found")),
@@ -476,9 +614,38 @@ impl InferenceSettlementExecutor {
         dispute.allow_claim = req.allow_claim;
         dispute.resolved_at_height = Some(block_height);
         self.put_dispute(&dispute)?;
+
+        // Slashing (issue #78) happens ONLY here, on a validator-quorum DENIED
+        // dispute, and ONLY when the session carries a bond requirement with a
+        // positive slash rate. Consistency failures never reach this path. A
+        // missing/zero bond slashes zero — reward denial still stands; no mint,
+        // no underflow. Slashed bond is burned to `Address::ZERO` (auditable),
+        // matching the governance bond-burn precedent. Slashing does NOT require
+        // the verifier to be Active — an Unbonding verifier's remaining bond is
+        // still slashable, reducing what it can later withdraw.
+        let mut slashed: u128 = 0;
+        if !req.allow_claim {
+            if let Some(bond_req) = session.bond_requirement {
+                if bond_req.slash_bps_on_denied_dispute > 0 {
+                    if let Some(mut record) = self.get_verifier(&req.verifier)? {
+                        let slash = record
+                            .bond
+                            .saturating_mul(bond_req.slash_bps_on_denied_dispute as u128)
+                            / 10_000;
+                        let slash = slash.min(record.bond); // cap at current bond
+                        if slash > 0 {
+                            record.bond -= slash;
+                            self.put_verifier(&record)?;
+                            state.credit(&Address::ZERO, slash)?; // auditable burn
+                            slashed = slash;
+                        }
+                    }
+                }
+            }
+        }
         info!(
-            "InferenceSettlement ResolveDispute {} verifier={} allow_claim={}",
-            req.session_id, req.verifier, req.allow_claim
+            "InferenceSettlement ResolveDispute {} verifier={} allow_claim={} slashed={}",
+            req.session_id, req.verifier, req.allow_claim, slashed
         );
         Ok(InferenceSettlementExecutionResult::ok())
     }
@@ -571,6 +738,232 @@ impl InferenceSettlementExecutor {
         Ok(InferenceSettlementExecutionResult::ok())
     }
 
+    // ── Verifier bonding (issue #78) ──────────────────────────────────────────
+
+    /// Register (or re-register a `Withdrawn` verifier with) a bond. Locks `bond`
+    /// native Koppa as accounting-in-record. Rejects an existing `Active`/`Unbonding`
+    /// record (366). Gate-closed → 364 (fee already paid; the free 350 gate is the
+    /// outer settlement gate).
+    fn register_verifier(
+        &self,
+        sender: &Address,
+        bond: u128,
+        state: &StateManager,
+        block_height: u64,
+        chain_params: &ChainParams,
+    ) -> Result<InferenceSettlementExecutionResult> {
+        if !Self::bonding_gate_open(chain_params, block_height) {
+            return Ok(InferenceSettlementExecutionResult::fail(
+                364,
+                "inference verifier bonding not enabled at this block height",
+            ));
+        }
+        if bond == 0 {
+            return Ok(InferenceSettlementExecutionResult::fail(365, "bond must be > 0"));
+        }
+        // An Active/Unbonding record blocks re-registration; a Withdrawn record is
+        // cleanly reinitialized.
+        if let Some(existing) = self.get_verifier(sender)? {
+            if existing.status != InferenceVerifierStatus::Withdrawn {
+                return Ok(InferenceSettlementExecutionResult::fail(
+                    366,
+                    "verifier already registered",
+                ));
+            }
+        }
+        if state.get_balance(sender)? < bond {
+            return Ok(InferenceSettlementExecutionResult::fail(
+                365,
+                "insufficient balance for verifier bond",
+            ));
+        }
+        state.deduct(sender, bond)?;
+        self.put_verifier(&InferenceVerifierRecord {
+            verifier: *sender,
+            bond,
+            status: InferenceVerifierStatus::Active,
+            registered_at_height: block_height,
+            unbonding_started_height: None,
+            unlock_height: None,
+        })?;
+        info!("InferenceSettlement RegisterVerifier {} bond={}", sender, bond);
+        Ok(InferenceSettlementExecutionResult::ok())
+    }
+
+    /// Top up an `Active` verifier's bond.
+    fn add_verifier_bond(
+        &self,
+        sender: &Address,
+        amount: u128,
+        state: &StateManager,
+        block_height: u64,
+        chain_params: &ChainParams,
+    ) -> Result<InferenceSettlementExecutionResult> {
+        if !Self::bonding_gate_open(chain_params, block_height) {
+            return Ok(InferenceSettlementExecutionResult::fail(
+                364,
+                "inference verifier bonding not enabled at this block height",
+            ));
+        }
+        if amount == 0 {
+            return Ok(InferenceSettlementExecutionResult::fail(365, "amount must be > 0"));
+        }
+        let mut record = match self.get_verifier(sender)? {
+            Some(r) => r,
+            None => return Ok(InferenceSettlementExecutionResult::fail(367, "verifier not registered")),
+        };
+        if record.status != InferenceVerifierStatus::Active {
+            return Ok(InferenceSettlementExecutionResult::fail(
+                368,
+                "verifier not active (unbonding or withdrawn)",
+            ));
+        }
+        if state.get_balance(sender)? < amount {
+            return Ok(InferenceSettlementExecutionResult::fail(
+                365,
+                "insufficient balance to add bond",
+            ));
+        }
+        state.deduct(sender, amount)?;
+        record.bond = record.bond.saturating_add(amount);
+        self.put_verifier(&record)?;
+        Ok(InferenceSettlementExecutionResult::ok())
+    }
+
+    /// Begin the unbonding delay for an `Active` verifier. Rejects a verifier with
+    /// no withdrawable bond (365) rather than creating a pointless unbonding state.
+    fn begin_verifier_unbond(
+        &self,
+        sender: &Address,
+        block_height: u64,
+        chain_params: &ChainParams,
+    ) -> Result<InferenceSettlementExecutionResult> {
+        if !Self::bonding_gate_open(chain_params, block_height) {
+            return Ok(InferenceSettlementExecutionResult::fail(
+                364,
+                "inference verifier bonding not enabled at this block height",
+            ));
+        }
+        let mut record = match self.get_verifier(sender)? {
+            Some(r) => r,
+            None => return Ok(InferenceSettlementExecutionResult::fail(367, "verifier not registered")),
+        };
+        if record.status != InferenceVerifierStatus::Active {
+            return Ok(InferenceSettlementExecutionResult::fail(
+                368,
+                "verifier not active (unbonding or withdrawn)",
+            ));
+        }
+        if record.bond == 0 {
+            return Ok(InferenceSettlementExecutionResult::fail(
+                365,
+                "no withdrawable bond to unbond",
+            ));
+        }
+        let unlock = block_height.saturating_add(chain_params.inference_verifier_unbonding_period_blocks);
+        record.status = InferenceVerifierStatus::Unbonding;
+        record.unbonding_started_height = Some(block_height);
+        record.unlock_height = Some(unlock);
+        self.put_verifier(&record)?;
+        info!("InferenceSettlement BeginVerifierUnbond {} unlock={}", sender, unlock);
+        Ok(InferenceSettlementExecutionResult::ok())
+    }
+
+    /// Withdraw a matured unbonding verifier's remaining bond (possibly reduced by
+    /// slashes during unbonding). Credits the sender and marks the record
+    /// `Withdrawn` with zero bond.
+    fn withdraw_verifier_bond(
+        &self,
+        sender: &Address,
+        state: &StateManager,
+        block_height: u64,
+        chain_params: &ChainParams,
+    ) -> Result<InferenceSettlementExecutionResult> {
+        if !Self::bonding_gate_open(chain_params, block_height) {
+            return Ok(InferenceSettlementExecutionResult::fail(
+                364,
+                "inference verifier bonding not enabled at this block height",
+            ));
+        }
+        let mut record = match self.get_verifier(sender)? {
+            Some(r) => r,
+            None => return Ok(InferenceSettlementExecutionResult::fail(367, "verifier not registered")),
+        };
+        if record.status != InferenceVerifierStatus::Unbonding {
+            return Ok(InferenceSettlementExecutionResult::fail(
+                368,
+                "verifier not unbonding",
+            ));
+        }
+        let unlock = record.unlock_height.unwrap_or(u64::MAX);
+        if block_height < unlock {
+            return Ok(InferenceSettlementExecutionResult::fail(
+                369,
+                "verifier unbonding not yet mature",
+            ));
+        }
+        let refund = record.bond; // already reduced by any slashes during unbonding
+        if refund > 0 {
+            state.credit(sender, refund)?;
+        }
+        record.bond = 0;
+        record.status = InferenceVerifierStatus::Withdrawn;
+        self.put_verifier(&record)?;
+        info!("InferenceSettlement WithdrawVerifierBond {} refund={}", sender, refund);
+        Ok(InferenceSettlementExecutionResult::ok())
+    }
+
+    // ── Consistency grouping (issue #77) ──────────────────────────────────────
+
+    /// Count the verifiers in `session_id` whose **full digest tuple**
+    /// `(model_hash, manifest_root, response_hash, proof_root)` exactly equals
+    /// `target` and who are eligible to count toward a plurality: their
+    /// attestation is **finalized** at `claim_height` (`included + finality_depth
+    /// <= claim_height`) and is **not** blocked by an `Open`/`ResolvedDenyClaim`
+    /// dispute. `response_hash` alone is never sufficient — all four fields must
+    /// match. The claimant is naturally included when its own tuple is `target`.
+    ///
+    /// Reads only attestation + dispute records; never mutates attestation storage.
+    pub fn consistency_group_size(
+        &self,
+        session_id: &str,
+        target: &InferenceAttestationDigest,
+        claim_height: u64,
+        finality_depth: u64,
+    ) -> Result<u32> {
+        let aexec = InferenceAttestationExecutor::new(self.db.clone());
+        let mut count: u32 = 0;
+        for verifier in aexec.list_verifiers_by_session(session_id)? {
+            let att = match aexec.get(&inference_attestation_key(session_id, &verifier))? {
+                Some(a) => a,
+                None => continue,
+            };
+            // Full-tuple equality — the four digest commitments, not response_hash
+            // alone. (session_id is constant across the group, so it is excluded.)
+            if att.digest.model_hash != target.model_hash
+                || att.digest.manifest_root != target.manifest_root
+                || att.digest.response_hash != target.response_hash
+                || att.digest.proof_root != target.proof_root
+            {
+                continue;
+            }
+            // Only finalized attestations count — prevents a flash of not-yet-final
+            // attestations from manufacturing a plurality in the same block.
+            if att.included_at_height.saturating_add(finality_depth) > claim_height {
+                continue;
+            }
+            // A disputed (open) or denied attestation lends no consistency weight.
+            if matches!(
+                self.get_dispute(session_id, &verifier)?.map(|d| d.status),
+                Some(InferenceDisputeStatus::Open) | Some(InferenceDisputeStatus::ResolvedDenyClaim)
+            ) {
+                continue;
+            }
+            count = count.saturating_add(1);
+        }
+        Ok(count)
+    }
+
     // ── Storage ──────────────────────────────────────────────────────────────
 
     pub fn get_session(&self, session_id: &str) -> Result<Option<InferenceSession>> {
@@ -587,6 +980,24 @@ impl InferenceSettlementExecutor {
         let bytes =
             bincode::serialize(s).map_err(|e| StateError::SerializationError(e.to_string()))?;
         self.db.put(cf::INFERENCE_SESSIONS, &session_key(&s.session_id), &bytes)?;
+        Ok(())
+    }
+
+    /// Fetch a verifier bond record (issue #78) by verifier address.
+    pub fn get_verifier(&self, verifier: &Address) -> Result<Option<InferenceVerifierRecord>> {
+        match self.db.get(cf::INFERENCE_VERIFIERS, &verifier_key(verifier))? {
+            Some(bytes) => Ok(Some(
+                bincode::deserialize(&bytes)
+                    .map_err(|e| StateError::SerializationError(e.to_string()))?,
+            )),
+            None => Ok(None),
+        }
+    }
+
+    fn put_verifier(&self, r: &InferenceVerifierRecord) -> Result<()> {
+        let bytes =
+            bincode::serialize(r).map_err(|e| StateError::SerializationError(e.to_string()))?;
+        self.db.put(cf::INFERENCE_VERIFIERS, &verifier_key(&r.verifier), &bytes)?;
         Ok(())
     }
 

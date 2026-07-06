@@ -22,7 +22,8 @@ use sumchain_primitives::address::Address;
 use sumchain_primitives::inference_attestation::{
     canonical_digest_bytes, classify_inference_attestation_status,
     inference_attestation_key, signing_input_bytes, verify_attestation_signature,
-    InferenceAttestationDigest, InferenceAttestationTxData, DOMAIN_TAG,
+    verify_attestation_v2_signature, AttestationError, InferenceAttestationDigest,
+    InferenceAttestationTxData, InferenceAttestationV2TxData, DOMAIN_TAG,
     MAX_SESSION_ID_BYTES,
 };
 
@@ -284,6 +285,86 @@ fn tx_payload_inference_attestation_variant_index_locked() {
          InferenceAttestation — every existing serialized tx would \
          re-decode as the wrong operation."
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Sponsored attestation v2 (issue #79) — append-only ordinals + verification
+// ─────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn tx_type_inference_attestation_v2_ordinal_locked() {
+    use sumchain_primitives::transaction::TxType;
+    // v2 appended at 25; v1 unchanged at 21.
+    assert_eq!(TxType::InferenceAttestationV2 as u8, 25);
+    assert_eq!(TxType::from_byte(25), Some(TxType::InferenceAttestationV2));
+    assert_eq!(TxType::InferenceAttestation as u8, 21);
+}
+
+#[test]
+fn tx_payload_inference_attestation_v2_variant_index_locked() {
+    // v2 is appended as the 26th TxPayload variant (declaration ordinal 25),
+    // AFTER InferenceSettlement (24). v1 InferenceAttestation stays at 21.
+    use sumchain_primitives::transaction::TxPayload;
+    let v = load_vectors().into_iter().next().expect("at least one vector");
+    let digest = build_digest(&v);
+    let payload = TxPayload::InferenceAttestationV2(InferenceAttestationV2TxData {
+        digest,
+        verifier_public_key: hex32("signer_pubkey_hex", &v.signer_pubkey_hex),
+        verifier_signature: hex64("signature_bytes", &v.signature_bytes),
+    });
+    let bytes = bincode::serialize(&payload).expect("payload encodes");
+    let tag = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    assert_eq!(
+        tag, 25,
+        "TxPayload::InferenceAttestationV2 bincode tag must be 25 (appended after \
+         InferenceSettlement=24); got {tag}"
+    );
+}
+
+#[test]
+fn v2_signature_verifies_over_same_v1_signing_bytes() {
+    // A v2 envelope reuses the exact v1 signing bytes, so every recorded v1
+    // vector's (digest, pubkey, signature) validates unchanged as v2 — proving
+    // the attestation is an identical commitment regardless of who submits it.
+    for v in load_vectors() {
+        let tx = InferenceAttestationV2TxData {
+            digest: build_digest(&v),
+            verifier_public_key: hex32("signer_pubkey_hex", &v.signer_pubkey_hex),
+            verifier_signature: hex64("signature_bytes", &v.signature_bytes),
+        };
+        verify_attestation_v2_signature(&tx)
+            .unwrap_or_else(|e| panic!("v2 verify rejected vector {:?}: {e}", v.session_id));
+    }
+}
+
+#[test]
+fn v2_signature_rejects_tampered_and_oversize() {
+    let v = load_vectors().into_iter().next().expect("at least one vector");
+    let pk = hex32("signer_pubkey_hex", &v.signer_pubkey_hex);
+    let sig = hex64("signature_bytes", &v.signature_bytes);
+
+    // Tampered signature → InvalidSignature.
+    let mut bad_sig = sig;
+    bad_sig[0] ^= 0xff;
+    let tampered = InferenceAttestationV2TxData {
+        digest: build_digest(&v),
+        verifier_public_key: pk,
+        verifier_signature: bad_sig,
+    };
+    assert_eq!(verify_attestation_v2_signature(&tampered), Err(AttestationError::InvalidSignature));
+
+    // Oversize session_id → SessionIdTooLong (dispatch maps this to Failed(55)).
+    let mut big = build_digest(&v);
+    big.session_id = "a".repeat(MAX_SESSION_ID_BYTES + 1);
+    let oversize = InferenceAttestationV2TxData {
+        digest: big,
+        verifier_public_key: pk,
+        verifier_signature: sig,
+    };
+    assert!(matches!(
+        verify_attestation_v2_signature(&oversize),
+        Err(AttestationError::SessionIdTooLong(_))
+    ));
 }
 
 // ─────────────────────────────────────────────────────────────────────────

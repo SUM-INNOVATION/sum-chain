@@ -488,6 +488,7 @@ impl RpcServer {
             TxType::Education => "Education",
             TxType::Governance => "Governance",
             TxType::InferenceSettlement => "InferenceSettlement",
+            TxType::InferenceAttestationV2 => "InferenceAttestationV2",
         }
         .to_string();
 
@@ -503,7 +504,8 @@ impl RpcServer {
             TxPayload::Transfer { .. }
             | TxPayload::ContractDeploy(_)
             | TxPayload::ContractCall(_)
-            | TxPayload::InferenceAttestation(_) => None,
+            | TxPayload::InferenceAttestation(_)
+            | TxPayload::InferenceAttestationV2(_) => None,
             TxPayload::Nft(d) => Some(ident(format!("{:?}", d.operation))),
             TxPayload::Token(d) => Some(ident(format!("{:?}", d.operation))),
             TxPayload::Staking(d) => Some(ident(format!("{:?}", d.operation))),
@@ -1352,6 +1354,64 @@ impl SumChainApiServer for RpcServer {
             self.consensus.current_height(),
             self.consensus.finality_depth(),
         ))
+    }
+
+    async fn sum_build_sponsored_inference_attestation(
+        &self,
+        request: crate::types::SponsoredAttestationBuildRequest,
+    ) -> std::result::Result<crate::types::SponsoredAttestationBuildResponse, jsonrpsee::types::ErrorObjectOwned>
+    {
+        use sumchain_primitives::inference_attestation::{
+            InferenceAttestationDigest, InferenceAttestationV2TxData,
+        };
+        use sumchain_primitives::{TransactionV2, TxPayload};
+
+        // `from` is the sponsor/payer — the outer sender. The verifier is carried
+        // in the envelope; the builder never conflates the two.
+        let from = self.parse_address(&request.from)?;
+        let digest = InferenceAttestationDigest {
+            session_id: request.session_id,
+            model_hash: self.parse_hex32(&request.model_hash)?,
+            manifest_root: self.parse_hex32(&request.manifest_root)?,
+            response_hash: self.parse_hex32(&request.response_hash)?,
+            proof_root: self.parse_hex32(&request.proof_root)?,
+        };
+        let verifier_public_key = self.parse_hex32(&request.verifier_public_key)?;
+        let sig_bytes = hex::decode(request.verifier_signature.trim_start_matches("0x"))
+            .map_err(|_| RpcError::InvalidParams("invalid verifier_signature hex".into()))?;
+        let verifier_signature: [u8; 64] = sig_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| RpcError::InvalidParams("verifier_signature must be 64 bytes".into()))?;
+
+        let fee = request.fee.unwrap_or(GOV_DEFAULT_FEE);
+        let nonce = self
+            .state
+            .get_nonce(&from)
+            .map_err(|e| RpcError::Internal(format!("Failed to get nonce: {}", e)))?;
+        let chain_id = self.state.chain_id();
+        let tx = TransactionV2 {
+            chain_id,
+            from,
+            fee,
+            nonce,
+            payload: TxPayload::InferenceAttestationV2(InferenceAttestationV2TxData {
+                digest,
+                verifier_public_key,
+                verifier_signature,
+            }),
+        };
+        let signing_hash = tx.signing_hash();
+        let unsigned = bincode::serialize(&tx)
+            .map_err(|e| RpcError::Internal(format!("Failed to encode tx: {}", e)))?;
+        Ok(crate::types::SponsoredAttestationBuildResponse {
+            unsigned_tx: format!("0x{}", hex::encode(unsigned)),
+            signing_hash: format!("0x{}", hex::encode(signing_hash.as_bytes())),
+            from: from.to_base58(),
+            nonce,
+            fee,
+            chain_id,
+        })
     }
 
     // ========================================================================
@@ -4202,7 +4262,9 @@ impl SumChainApiServer for RpcServer {
         session_id: String,
     ) -> std::result::Result<Option<crate::inference_settlement_types::InferenceSessionInfo>, jsonrpsee::types::ErrorObjectOwned>
     {
-        use crate::inference_settlement_types::InferenceSessionInfo;
+        use crate::inference_settlement_types::{
+            InferenceBondRequirementInfo, InferenceConsistencyInfo, InferenceSessionInfo,
+        };
         let exec = sumchain_state::inference_settlement_executor::InferenceSettlementExecutor::new(
             self.db.clone(),
         );
@@ -4218,6 +4280,14 @@ impl SumChainApiServer for RpcServer {
             status: format!("{:?}", s.status),
             created_at_height: s.created_at_height,
             expires_at_height: s.expires_at_height,
+            consistency: s.consistency.map(|c| InferenceConsistencyInfo {
+                min_matching_verifiers: c.min_matching_verifiers,
+                threshold_bps: c.threshold_bps,
+            }),
+            bond_requirement: s.bond_requirement.map(|b| InferenceBondRequirementInfo {
+                min_bond: b.min_bond,
+                slash_bps_on_denied_dispute: b.slash_bps_on_denied_dispute,
+            }),
         }))
     }
 
@@ -4275,7 +4345,7 @@ impl SumChainApiServer for RpcServer {
         verifier: String,
     ) -> std::result::Result<crate::inference_settlement_types::ClaimableRewardInfo, jsonrpsee::types::ErrorObjectOwned>
     {
-        use crate::inference_settlement_types::ClaimableRewardInfo;
+        use crate::inference_settlement_types::{ClaimConsistencyEval, ClaimableRewardInfo};
         use sumchain_primitives::inference_attestation::inference_attestation_key;
         use sumchain_primitives::inference_settlement::InferenceDisputeStatus;
 
@@ -4293,6 +4363,8 @@ impl SumChainApiServer for RpcServer {
             amount,
             unlock_height: unlock,
             reason: reason.to_string(),
+            consistency: None,
+            bond: None,
         };
 
         let session = match sexec.get_session(&session_id).map_err(|e| RpcError::Internal(e.to_string()))? {
@@ -4334,7 +4406,167 @@ impl SumChainApiServer for RpcServer {
         if current < unlock {
             return Ok(base(false, Some(session.reward_per_verifier), Some(unlock), "not yet mature"));
         }
-        Ok(base(true, Some(session.reward_per_verifier), Some(unlock), "eligible"))
+        use crate::inference_settlement_types::ClaimBondEval;
+        // Evaluation mirrors the executor's claim order: consistency (#77) decides
+        // eligibility first, then the bond requirement (#78). Both evals are surfaced
+        // for observability; the first unsatisfied one flips `eligible` false.
+        let mut consistency_eval: Option<ClaimConsistencyEval> = None;
+        let mut consistency_ok = true;
+        if let Some(cfg) = session.consistency {
+            let matching = sexec
+                .consistency_group_size(&session_id, &att.digest, current, self.consensus.finality_depth())
+                .map_err(|e| RpcError::Internal(e.to_string()))?;
+            let meets_min = matching >= cfg.min_matching_verifiers;
+            let meets_bps = cfg.threshold_bps == 0
+                || (matching as u64 * 10_000
+                    >= session.max_verifiers as u64 * cfg.threshold_bps as u64);
+            consistency_ok = meets_min && meets_bps;
+            consistency_eval = Some(ClaimConsistencyEval {
+                required_min: cfg.min_matching_verifiers,
+                threshold_bps: cfg.threshold_bps,
+                max_verifiers: session.max_verifiers,
+                matching_count: matching,
+                satisfied: consistency_ok,
+            });
+        }
+
+        let mut bond_eval: Option<ClaimBondEval> = None;
+        let mut bond_ok = true;
+        if let Some(req_bond) = session.bond_requirement {
+            let record = sexec.get_verifier(&v).map_err(|e| RpcError::Internal(e.to_string()))?;
+            let (status, bond_val, satisfied) = match &record {
+                None => ("unregistered".to_string(), None, false),
+                Some(r) => {
+                    let active = matches!(r.status, sumchain_primitives::InferenceVerifierStatus::Active);
+                    let ok = active && r.bond >= req_bond.min_bond;
+                    (format!("{:?}", r.status), Some(r.bond), ok)
+                }
+            };
+            bond_ok = satisfied;
+            bond_eval = Some(ClaimBondEval {
+                required_min: req_bond.min_bond,
+                verifier_bond: bond_val,
+                status,
+                satisfied,
+            });
+        }
+
+        let eligible = consistency_ok && bond_ok;
+        let reason = if !consistency_ok {
+            "insufficient consistency"
+        } else if !bond_ok {
+            "insufficient verifier bond"
+        } else {
+            "eligible"
+        };
+        Ok(ClaimableRewardInfo {
+            session_id: session_id.clone(),
+            verifier: v.to_base58(),
+            eligible,
+            amount: Some(session.reward_per_verifier),
+            unlock_height: Some(unlock),
+            reason: reason.to_string(),
+            consistency: consistency_eval,
+            bond: bond_eval,
+        })
+    }
+
+    async fn omninode_get_inference_consistency(
+        &self,
+        session_id: String,
+    ) -> std::result::Result<crate::inference_settlement_types::InferenceConsistencyReport, jsonrpsee::types::ErrorObjectOwned>
+    {
+        use crate::inference_settlement_types::{
+            InferenceConsistencyGroupInfo, InferenceConsistencyInfo, InferenceConsistencyReport,
+        };
+        use sumchain_primitives::inference_attestation::inference_attestation_key;
+        use sumchain_primitives::inference_settlement::InferenceDisputeStatus;
+
+        let sexec = sumchain_state::inference_settlement_executor::InferenceSettlementExecutor::new(
+            self.db.clone(),
+        );
+        let aexec = sumchain_state::inference_attestation_executor::InferenceAttestationExecutor::new(
+            self.db.clone(),
+        );
+        let session = sexec
+            .get_session(&session_id)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        let (consistency, max_verifiers) = match &session {
+            Some(s) => (
+                s.consistency.map(|c| InferenceConsistencyInfo {
+                    min_matching_verifiers: c.min_matching_verifiers,
+                    threshold_bps: c.threshold_bps,
+                }),
+                s.max_verifiers,
+            ),
+            None => (None, 0),
+        };
+
+        let hx = |b: &[u8; 32]| format!("0x{}", hex::encode(b));
+        let height = self.consensus.current_height();
+        let finality_depth = self.consensus.finality_depth();
+
+        // Group verifiers by the full digest tuple. Keyed by the concatenated
+        // 128 bytes so `response_hash` alone never merges distinct tuples.
+        let mut groups: std::collections::HashMap<[u8; 128], (sumchain_primitives::inference_attestation::InferenceAttestationDigest, Vec<String>, u32)> =
+            std::collections::HashMap::new();
+        for vf in aexec
+            .list_verifiers_by_session(&session_id)
+            .map_err(|e| RpcError::Internal(e.to_string()))?
+        {
+            let att = match aexec
+                .get(&inference_attestation_key(&session_id, &vf))
+                .map_err(|e| RpcError::Internal(e.to_string()))?
+            {
+                Some(a) => a,
+                None => continue,
+            };
+            let mut key = [0u8; 128];
+            key[..32].copy_from_slice(&att.digest.model_hash);
+            key[32..64].copy_from_slice(&att.digest.manifest_root);
+            key[64..96].copy_from_slice(&att.digest.response_hash);
+            key[96..].copy_from_slice(&att.digest.proof_root);
+            // Eligible = finalized at current height AND not open/denied disputed.
+            let finalized = att.included_at_height.saturating_add(finality_depth) <= height;
+            let disputed = matches!(
+                sexec
+                    .get_dispute(&session_id, &vf)
+                    .map_err(|e| RpcError::Internal(e.to_string()))?
+                    .map(|d| d.status),
+                Some(InferenceDisputeStatus::Open) | Some(InferenceDisputeStatus::ResolvedDenyClaim)
+            );
+            let entry = groups
+                .entry(key)
+                .or_insert_with(|| (att.digest.clone(), Vec::new(), 0));
+            entry.1.push(vf.to_base58());
+            if finalized && !disputed {
+                entry.2 = entry.2.saturating_add(1);
+            }
+        }
+
+        let mut groups: Vec<InferenceConsistencyGroupInfo> = groups
+            .into_values()
+            .map(|(digest, verifiers, eligible)| InferenceConsistencyGroupInfo {
+                model_hash: hx(&digest.model_hash),
+                manifest_root: hx(&digest.manifest_root),
+                response_hash: hx(&digest.response_hash),
+                proof_root: hx(&digest.proof_root),
+                verifier_count: verifiers.len() as u32,
+                eligible_count: eligible,
+                verifiers,
+            })
+            .collect();
+        // Deterministic ordering: eligible desc, then total desc, then tuple hex.
+        groups.sort_by(|a, b| {
+            b.eligible_count
+                .cmp(&a.eligible_count)
+                .then(b.verifier_count.cmp(&a.verifier_count))
+                .then(a.model_hash.cmp(&b.model_hash))
+                .then(a.response_hash.cmp(&b.response_hash))
+                .then(a.proof_root.cmp(&b.proof_root))
+        });
+
+        Ok(InferenceConsistencyReport { session_id, consistency, max_verifiers, groups })
     }
 
     async fn omninode_build_open_inference_session(
@@ -4351,6 +4583,14 @@ impl SumChainApiServer for RpcServer {
             dispute_window_blocks: request.dispute_window_blocks,
             expires_at_height: request.expires_at_height,
             deposit: request.deposit,
+            consistency: request.consistency.map(|c| InferenceConsistencyConfig {
+                min_matching_verifiers: c.min_matching_verifiers,
+                threshold_bps: c.threshold_bps,
+            }),
+            bond_requirement: request.bond_requirement.map(|b| InferenceVerifierBondRequirement {
+                min_bond: b.min_bond,
+                slash_bps_on_denied_dispute: b.slash_bps_on_denied_dispute,
+            }),
         });
         self.build_unsigned_settlement_tx(from, request.fee.unwrap_or(GOV_DEFAULT_FEE), op)
     }
@@ -4428,6 +4668,82 @@ impl SumChainApiServer for RpcServer {
             session_id: request.session_id,
         });
         self.build_unsigned_settlement_tx(from, request.fee.unwrap_or(GOV_DEFAULT_FEE), op)
+    }
+
+    // ── Verifier bonding (issue #78) ──
+    async fn omninode_get_verifier(
+        &self,
+        verifier: String,
+    ) -> std::result::Result<Option<crate::inference_settlement_types::InferenceVerifierInfo>, jsonrpsee::types::ErrorObjectOwned>
+    {
+        use crate::inference_settlement_types::InferenceVerifierInfo;
+        let v = self.parse_address(&verifier)?;
+        let sexec = sumchain_state::inference_settlement_executor::InferenceSettlementExecutor::new(
+            self.db.clone(),
+        );
+        let r = sexec.get_verifier(&v).map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(r.map(|r| InferenceVerifierInfo {
+            verifier: r.verifier.to_base58(),
+            bond: r.bond,
+            status: format!("{:?}", r.status),
+            registered_at_height: r.registered_at_height,
+            unbonding_started_height: r.unbonding_started_height,
+            unlock_height: r.unlock_height,
+        }))
+    }
+
+    async fn omninode_build_register_verifier(
+        &self,
+        request: crate::inference_settlement_types::OmniBuildRegisterVerifierRequest,
+    ) -> std::result::Result<crate::inference_settlement_types::OmniSettlementBuildResponse, jsonrpsee::types::ErrorObjectOwned>
+    {
+        use sumchain_primitives::inference_settlement::*;
+        let from = self.parse_address(&request.from)?;
+        let op = InferenceSettlementOperation::RegisterVerifier(RegisterVerifierRequest {
+            bond: request.bond,
+        });
+        self.build_unsigned_settlement_tx(from, request.fee.unwrap_or(GOV_DEFAULT_FEE), op)
+    }
+
+    async fn omninode_build_add_verifier_bond(
+        &self,
+        request: crate::inference_settlement_types::OmniBuildAddVerifierBondRequest,
+    ) -> std::result::Result<crate::inference_settlement_types::OmniSettlementBuildResponse, jsonrpsee::types::ErrorObjectOwned>
+    {
+        use sumchain_primitives::inference_settlement::*;
+        let from = self.parse_address(&request.from)?;
+        let op = InferenceSettlementOperation::AddVerifierBond(AddVerifierBondRequest {
+            amount: request.amount,
+        });
+        self.build_unsigned_settlement_tx(from, request.fee.unwrap_or(GOV_DEFAULT_FEE), op)
+    }
+
+    async fn omninode_build_begin_verifier_unbond(
+        &self,
+        request: crate::inference_settlement_types::OmniBuildVerifierBondActionRequest,
+    ) -> std::result::Result<crate::inference_settlement_types::OmniSettlementBuildResponse, jsonrpsee::types::ErrorObjectOwned>
+    {
+        use sumchain_primitives::inference_settlement::*;
+        let from = self.parse_address(&request.from)?;
+        self.build_unsigned_settlement_tx(
+            from,
+            request.fee.unwrap_or(GOV_DEFAULT_FEE),
+            InferenceSettlementOperation::BeginVerifierUnbond,
+        )
+    }
+
+    async fn omninode_build_withdraw_verifier_bond(
+        &self,
+        request: crate::inference_settlement_types::OmniBuildVerifierBondActionRequest,
+    ) -> std::result::Result<crate::inference_settlement_types::OmniSettlementBuildResponse, jsonrpsee::types::ErrorObjectOwned>
+    {
+        use sumchain_primitives::inference_settlement::*;
+        let from = self.parse_address(&request.from)?;
+        self.build_unsigned_settlement_tx(
+            from,
+            request.fee.unwrap_or(GOV_DEFAULT_FEE),
+            InferenceSettlementOperation::WithdrawVerifierBond,
+        )
     }
 
     async fn gov_get_proposal(
@@ -9008,6 +9324,8 @@ mod messaging_rpc_tests {
                 expires_at_height: 1000,
                 deposit: 2_000_000,
                 fee: Some(1000),
+                consistency: None,
+                bond_requirement: None,
             })
             .await
             .unwrap();
@@ -9040,6 +9358,158 @@ mod messaging_rpc_tests {
             .unwrap();
         assert!(!c.eligible);
         assert_eq!(c.reason, "session not found");
+    }
+
+    // Issue #77: consistency read groups attestations by the FULL digest tuple.
+    #[tokio::test]
+    async fn omninode_get_inference_consistency_groups_by_full_tuple() {
+        use sumchain_primitives::inference_attestation::{
+            inference_attestation_key, InferenceAttestationDigest, InferenceAttestationRecord,
+        };
+        use sumchain_state::inference_attestation_executor::InferenceAttestationExecutor;
+        let (srv, db, _dir) = server();
+        let aexec = InferenceAttestationExecutor::new(db.clone());
+
+        let mk = |v: u8, tuple: (u8, u8, u8, u8)| {
+            let verifier = sumchain_primitives::Address::new([v; 20]);
+            let digest = InferenceAttestationDigest {
+                session_id: "s".to_string(),
+                model_hash: [tuple.0; 32],
+                manifest_root: [tuple.1; 32],
+                response_hash: [tuple.2; 32],
+                proof_root: [tuple.3; 32],
+            };
+            let rec = InferenceAttestationRecord {
+                digest,
+                verifier_signature: [0u8; 64],
+                included_at_height: 1,
+                tx_hash: sumchain_primitives::Hash::new([v; 32]),
+            };
+            aexec.put(&inference_attestation_key("s", &verifier), &rec, &verifier).unwrap();
+        };
+        // Two verifiers agree on tuple A; one holds tuple B; a fourth shares only
+        // response_hash with A but differs elsewhere → its own singleton group.
+        mk(0x11, (1, 2, 3, 4));
+        mk(0x22, (1, 2, 3, 4));
+        mk(0x33, (9, 9, 9, 9));
+        mk(0x44, (7, 7, 3, 7)); // same response_hash (3), different tuple
+
+        let report = srv.omninode_get_inference_consistency("s".to_string()).await.unwrap();
+        assert_eq!(report.session_id, "s");
+        assert!(report.consistency.is_none(), "no session opened → no config");
+        // Three distinct full tuples ⇒ three groups; response_hash alone never merges.
+        assert_eq!(report.groups.len(), 3, "groups: {:?}", report.groups);
+        // Sorted: the 2-member tuple-A group is first.
+        assert_eq!(report.groups[0].verifier_count, 2);
+        assert_eq!(report.groups[0].verifiers.len(), 2);
+        assert!(report.groups[1..].iter().all(|g| g.verifier_count == 1));
+    }
+
+    // Issue #78: verifier bond builder round-trip + read of a persisted record.
+    #[tokio::test]
+    async fn omninode_verifier_bond_builder_and_read() {
+        use crate::inference_settlement_types::OmniBuildRegisterVerifierRequest;
+        use sumchain_primitives::inference_settlement::{
+            verifier_key, InferenceSettlementOperation, InferenceVerifierRecord, InferenceVerifierStatus,
+        };
+        use sumchain_primitives::{TransactionV2, TxPayload};
+        let (srv, db, _dir) = server();
+        let from = KeyPair::generate();
+
+        // Builder returns an unsigned RegisterVerifier(bond) tx.
+        let resp = srv
+            .omninode_build_register_verifier(OmniBuildRegisterVerifierRequest {
+                from: from.address().to_base58(),
+                bond: 5_000_000,
+                fee: Some(1000),
+            })
+            .await
+            .unwrap();
+        let bytes = hex::decode(resp.unsigned_tx.trim_start_matches("0x")).unwrap();
+        match TransactionV2::from_bytes(&bytes).unwrap().payload {
+            TxPayload::InferenceSettlement(d) => match d.operation {
+                InferenceSettlementOperation::RegisterVerifier(r) => assert_eq!(r.bond, 5_000_000),
+                other => panic!("wrong op: {:?}", other),
+            },
+            other => panic!("wrong payload: {:?}", other),
+        }
+
+        // Unknown verifier → None; a persisted record reads back.
+        assert!(srv
+            .omninode_get_verifier(from.address().to_base58())
+            .await
+            .unwrap()
+            .is_none());
+        let rec = InferenceVerifierRecord {
+            verifier: from.address(),
+            bond: 5_000_000,
+            status: InferenceVerifierStatus::Active,
+            registered_at_height: 7,
+            unbonding_started_height: None,
+            unlock_height: None,
+        };
+        db.put(
+            sumchain_storage::db::cf::INFERENCE_VERIFIERS,
+            &verifier_key(&from.address()),
+            &bincode::serialize(&rec).unwrap(),
+        )
+        .unwrap();
+        let info = srv
+            .omninode_get_verifier(from.address().to_base58())
+            .await
+            .unwrap()
+            .expect("record present");
+        assert_eq!(info.bond, 5_000_000);
+        assert_eq!(info.status, "Active");
+    }
+
+    // Issue #79: sponsored attestation builder round-trip (payer != verifier).
+    #[tokio::test]
+    async fn sum_build_sponsored_attestation_roundtrips() {
+        use crate::types::SponsoredAttestationBuildRequest;
+        use sumchain_primitives::inference_attestation::InferenceAttestationV2TxData;
+        use sumchain_primitives::{TransactionV2, TxPayload};
+        let (srv, _db, _dir) = server();
+        let sponsor = KeyPair::generate();
+        let verifier = KeyPair::generate();
+        let vpk = *verifier.public_key().as_bytes();
+
+        let resp = srv
+            .sum_build_sponsored_inference_attestation(SponsoredAttestationBuildRequest {
+                from: sponsor.address().to_base58(),
+                session_id: "sess-79".to_string(),
+                model_hash: format!("0x{}", hex::encode([1u8; 32])),
+                manifest_root: format!("0x{}", hex::encode([2u8; 32])),
+                response_hash: format!("0x{}", hex::encode([3u8; 32])),
+                proof_root: format!("0x{}", hex::encode([4u8; 32])),
+                verifier_public_key: format!("0x{}", hex::encode(vpk)),
+                verifier_signature: format!("0x{}", hex::encode([7u8; 64])),
+                fee: Some(1000),
+            })
+            .await
+            .unwrap();
+        // The builder attributes the outer tx to the SPONSOR/payer.
+        assert_eq!(resp.from, sponsor.address().to_base58());
+        assert_eq!(resp.fee, 1000);
+
+        let bytes = hex::decode(resp.unsigned_tx.trim_start_matches("0x")).unwrap();
+        let tx = TransactionV2::from_bytes(&bytes).unwrap();
+        assert_eq!(tx.from, sponsor.address(), "outer sender is the sponsor");
+        match tx.payload {
+            TxPayload::InferenceAttestationV2(InferenceAttestationV2TxData {
+                digest,
+                verifier_public_key,
+                ..
+            }) => {
+                assert_eq!(digest.session_id, "sess-79");
+                assert_eq!(digest.model_hash, [1u8; 32]);
+                // The verifier identity in the envelope is the VERIFIER's key,
+                // never the sponsor's.
+                assert_eq!(verifier_public_key, vpk);
+                assert_ne!(verifier_public_key, *sponsor.public_key().as_bytes());
+            }
+            other => panic!("wrong payload: {:?}", other),
+        }
     }
 }
 

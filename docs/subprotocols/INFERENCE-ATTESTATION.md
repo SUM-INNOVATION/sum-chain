@@ -195,6 +195,8 @@ Failed(50) → "OmniNode subprotocol not enabled at this block height"
 Failed(51) → "duplicate InferenceAttestation for (session_id, verifier)"
 Failed(52) → "invalid OmniNode Stage 6 verifier signature"
 Failed(53) → "tx sender does not match verifier address (Ed25519 pubkey hash)"
+Failed(54) → "sponsored inference attestation (v2) not enabled at this block height"  [issue #79]
+Failed(55) → "invalid verifier public key or malformed sponsored attestation envelope"  [issue #79]
 ```
 
 These descriptions are returned from `Receipt::status.description()` and surfaced through the `sum_getInferenceAttestationStatus` `reason` field on failure. See [`crates/primitives/src/receipt.rs`](../../crates/primitives/src/receipt.rs).
@@ -392,12 +394,41 @@ Explicitly out of scope for v1. All deferred to future protocol versions:
 |---|---|---|
 | `sum_submitInferenceAttestation` typed RPC sugar | Existing `sum_sendRawTransaction` is canonical and sufficient. Typed sugar is an ergonomics win, not a correctness requirement. | Optional v1.x |
 | `sum-chain-sdk` external crate publication | Internal vendoring suffices for v1. Public crate publication is a separate strategic decision. | Future, no commitment |
-| Sponsored submission (`sender ≠ verifier` with explicit `verifier_public_key` field) | v1 enforces `sender == verifier` for the simplest possible recovery model. Sponsored submission would require adding `verifier_public_key: [u8; 32]` to the payload (= `InferenceAttestationV2`) and explicit settlement coordination with OmniNode. | v2 if operationally needed |
+| ~~Sponsored submission (`sender ≠ verifier`)~~ | v1 enforced `sender == verifier`. **Now shipped as the append-only `InferenceAttestationV2` envelope (issue #79) — see §11a below.** v1 is untouched. | ✅ issue #79 |
 | Reward / slash / dispute tx families | Settlement and dispute are a separate protocol surface, referenced by `(session_id, verifier_address)`. v1 commits to attestation immutability; economics come later. **Now specified + implemented (dormant) as the separate [Inference Settlement](inference-settlement.md) subprotocol (issue #61)** — escrow-funded reward denial / claim withholding / escrow refund; **no bond slashing** (that needs a v2 verifier-bond registry). Attestation v1 is untouched. | [inference-settlement.md](inference-settlement.md) (issue #61) |
 | `Dropped` / replacement status tracking | Chain doesn't track mempool eviction history in v1. Clients implement client-side timeout + resubmit. | Future |
 | CF pruning policy for `INFERENCE_ATTESTATIONS` | CF grows monotonically. Acceptable for expected early-adopter attestation rate; dashboard CF size; revisit if growth becomes a real problem. | Future |
 | Aggregated multi-sig (BLS) attestations | v1 is one-tx-per-verifier. BLS aggregation is a scaling optimization for later. | Future if attestation rate demands |
 | `InferenceAttestationV2` schema fields (e.g. additional commitments, optional fields) | Wire format is frozen for v1. Any new fields go in a new variant; the bincode tag for `TxPayload::InferenceAttestation` is locked at index 21 by the wire-fixture tests. | New variant, append-only |
+
+---
+
+## 11a. Sponsored Attestation (v2 envelope — issue #79)
+
+**Sponsored attestation changes who pays to submit the attestation, not who made the attestation. The verifier remains the attestation identity for deduplication, storage, and settlement.**
+
+v1 requires `sender == verifier`: the verifier signs both the outer tx and the inner digest with the same key. Issue #79 adds an **append-only** payload variant, `TxPayload::InferenceAttestationV2` (`TxType` index **25**), that lets a **sponsor/payer** submit an attestation on a verifier's behalf. It does **not** change v1 (`InferenceAttestation`, index 21), the digest type, the signing domain, or the dedup key.
+
+The v2 envelope carries:
+
+```rust
+pub struct InferenceAttestationV2TxData {
+    digest: InferenceAttestationDigest,   // unchanged v1 type
+    verifier_public_key: [u8; 32],        // the verifier — the attestation identity
+    verifier_signature: [u8; 64],         // over DOMAIN_TAG || bincode(digest), identical to v1
+}
+```
+
+- **Who signs what.** The **outer** `SignedTransaction` is signed by the sponsor (the fee payer, `tx.from`). The **inner** `verifier_signature` is the verifier's signature over the *same* v1 signing bytes (`omninode.inference_attestation.v1` domain), verified against the envelope's `verifier_public_key`. A v2 attestation is therefore a byte-identical commitment to the v1 form.
+- **Verifier identity.** The verifier address = `Address::from_public_key(verifier_public_key)`. The sponsor cannot alter the digest (the inner signature would fail → `Failed(52)`) nor impersonate the verifier (the address derives from, and the signature must verify under, the verifier's key).
+- **Storage & dedup unchanged.** The record is stored under `inference_attestation_key(session_id, verifier_address)` — the same keyspace as v1 — so v1 and v2 cannot double-submit the same `(session_id, verifier)` (second attempt → `Failed(51)`). The stored `InferenceAttestationRecord` is **identical to v1 and verifier-attributed; the sponsor is not recorded**.
+- **Fee.** Paid by the outer sender (the sponsor).
+- **Settlement.** Unchanged: `ClaimReward` is keyed by verifier identity, so a sponsor who is not also the verifier **cannot** claim the reward.
+- **Gate.** `omninode_sponsored_attestation_enabled_from_height: Option<u64>` (default `None` — dormant). While closed, a v2 tx is rejected free (`Failed(54)`, no fee/mutation), symmetric with the `Failed(50)` v1 gate; v1 submission is unaffected (governed only by `omninode_enabled_from_height`). A malformed envelope (invalid verifier public key, or oversize `session_id`) → `Failed(55)`.
+
+This is a submission/payment path only — it makes **no** claim about the semantic correctness of the inference and performs **no** on-chain zkML/Halo2 verification, exactly as v1.
+
+**RPC.** `sum_buildSponsoredInferenceAttestation` returns an unsigned `TransactionV2` + signing hash for the sponsor to sign offline (inputs: `from` payer, digest fields, `verifier_public_key`, `verifier_signature`). No keys are handled server-side. Existing reads (`sum_getInferenceAttestation`, `sum_listInferenceAttestations`) work unchanged — they are verifier-keyed and cannot tell a v1 from a v2 submission, by design.
 
 ---
 

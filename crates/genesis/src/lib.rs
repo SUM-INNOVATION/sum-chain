@@ -255,6 +255,16 @@ pub struct ChainParams {
     #[serde(default)]
     pub omninode_enabled_from_height: Option<u64>,
 
+    /// Sponsored inference attestation (v2 envelope) activation gate (issue #79).
+    /// `None` (default) = the sponsored/relayed submission path is dormant: a
+    /// `TxPayload::InferenceAttestationV2` is rejected free (`Failed(54)`, no fee).
+    /// v1 attestation (`sender == verifier`) is unaffected — it is governed only by
+    /// `omninode_enabled_from_height`. Sponsored attestation changes who *pays* to
+    /// submit, not who made the attestation. `#[serde(default)]` keeps existing
+    /// `genesis.json` dormant.
+    #[serde(default)]
+    pub omninode_sponsored_attestation_enabled_from_height: Option<u64>,
+
     /// Block height at which the SRC-817/818 Education-LMS suite
     /// activates. `None` = disabled forever; `Some(h)` = education txs
     /// executable from block `h` onward. Mirrors the OmniNode/SNIP V2
@@ -368,6 +378,37 @@ pub struct ChainParams {
     /// there is no personal resolver address. `bps` must be `1..=10000`.
     #[serde(default)]
     pub inference_settlement_dispute_threshold_bps: Option<u16>,
+
+    /// Consistency/plurality settlement mode activation gate (issue #77). `None`
+    /// (default) = consistency mode is dormant: an `OpenSession` that requests a
+    /// consistency config is rejected `Failed(361)`, and existing single-verifier
+    /// v1 claims are unaffected. When `Some(h)` and `block_height >= h`, sessions
+    /// may opt into a consistency rule and matured claims are evaluated against it.
+    /// Independent of `inference_settlement_enabled_from_height` — consistency is a
+    /// stricter claim rule layered on top of enabled settlement. `#[serde(default)]`
+    /// keeps existing `genesis.json` dormant.
+    #[serde(default)]
+    pub inference_settlement_consistency_enabled_from_height: Option<u64>,
+
+    /// Verifier bonding + slashing activation gate (issue #78). `None` (default) =
+    /// bonding is dormant: bond-registry operations are rejected free (`Failed(364)`,
+    /// no fee) and a session that requests a `bond_requirement` fails `Failed(364)`.
+    /// Sessions without a bond requirement are unaffected. When `Some(h)` and
+    /// `block_height >= h`, verifiers may register bonds and bond-required sessions
+    /// enforce/slash. Independent of `inference_settlement_enabled_from_height`
+    /// (bonding layers on enabled settlement). `#[serde(default)]` keeps existing
+    /// `genesis.json` dormant.
+    #[serde(default)]
+    pub inference_verifier_bonding_enabled_from_height: Option<u64>,
+
+    /// Unbonding delay (blocks) between `BeginVerifierUnbond` and a permitted
+    /// `WithdrawVerifierBond` (issue #78). Only consulted once bonding is enabled.
+    #[serde(default = "default_inference_verifier_unbonding_period_blocks")]
+    pub inference_verifier_unbonding_period_blocks: u64,
+}
+
+fn default_inference_verifier_unbonding_period_blocks() -> u64 {
+    201_600 // ~7 days at 3s blocks — matches the archive-node unbonding default.
 }
 
 fn default_inference_settlement_max_dispute_window_blocks() -> u64 {
@@ -571,6 +612,7 @@ impl Default for ChainParams {
             // Activation is coordinated separately, after the chain has
             // shipped Phase 2-4 of the InferenceAttestation work.
             omninode_enabled_from_height: None,
+            omninode_sponsored_attestation_enabled_from_height: None,
             // Production-safe default: Education-LMS suite disabled.
             // Activation is coordinated separately, post Phase 2-6.
             education_enabled_from_height: None,
@@ -599,6 +641,10 @@ impl Default for ChainParams {
             inference_settlement_max_session_duration_blocks:
                 default_inference_settlement_max_session_duration_blocks(),
             inference_settlement_dispute_threshold_bps: None,
+            inference_settlement_consistency_enabled_from_height: None,
+            inference_verifier_bonding_enabled_from_height: None,
+            inference_verifier_unbonding_period_blocks:
+                default_inference_verifier_unbonding_period_blocks(),
         }
     }
 }
@@ -1063,6 +1109,74 @@ mod tests {
         assert!(json.contains("\"inference_settlement_dispute_threshold_bps\":6667"));
         let p2: ChainParams = serde_json::from_str(&json).unwrap();
         assert_eq!(p2.inference_settlement_dispute_threshold_bps, Some(6667));
+    }
+
+    #[test]
+    fn consistency_gate_defaults_none_and_round_trips() {
+        // Issue #77: dormant by default; absent from a pre-#77 genesis.json decodes
+        // to None (serde default); an explicit height round-trips.
+        let p = ChainParams::default();
+        assert_eq!(p.inference_settlement_consistency_enabled_from_height, None);
+        // Older genesis without the key still loads (serde default).
+        let mut value = serde_json::to_value(&p).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("inference_settlement_consistency_enabled_from_height");
+        let back: ChainParams = serde_json::from_value(value).unwrap();
+        assert_eq!(back.inference_settlement_consistency_enabled_from_height, None);
+        // Explicit activation height round-trips.
+        let mut p2 = ChainParams::default();
+        p2.inference_settlement_consistency_enabled_from_height = Some(8_900_000);
+        let json = serde_json::to_string(&p2).unwrap();
+        let p3: ChainParams = serde_json::from_str(&json).unwrap();
+        assert_eq!(p3.inference_settlement_consistency_enabled_from_height, Some(8_900_000));
+    }
+
+    #[test]
+    fn sponsored_attestation_gate_default_and_round_trip() {
+        // Issue #79: dormant by default; absent-from-genesis decodes to None;
+        // explicit height round-trips. v1 attestation is unaffected.
+        let p = ChainParams::default();
+        assert_eq!(p.omninode_sponsored_attestation_enabled_from_height, None);
+        let mut value = serde_json::to_value(&p).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("omninode_sponsored_attestation_enabled_from_height");
+        let back: ChainParams = serde_json::from_value(value).unwrap();
+        assert_eq!(back.omninode_sponsored_attestation_enabled_from_height, None);
+        let mut p2 = ChainParams::default();
+        p2.omninode_sponsored_attestation_enabled_from_height = Some(9_100_000);
+        let json = serde_json::to_string(&p2).unwrap();
+        let p3: ChainParams = serde_json::from_str(&json).unwrap();
+        assert_eq!(p3.omninode_sponsored_attestation_enabled_from_height, Some(9_100_000));
+    }
+
+    #[test]
+    fn verifier_bonding_params_default_and_round_trip() {
+        // Issue #78: dormant by default; unbonding period has a non-zero default;
+        // absent-from-genesis decodes cleanly; explicit height round-trips.
+        let p = ChainParams::default();
+        assert_eq!(p.inference_verifier_bonding_enabled_from_height, None);
+        assert!(p.inference_verifier_unbonding_period_blocks > 0);
+        // Older genesis without the keys still loads (serde defaults).
+        let mut value = serde_json::to_value(&p).unwrap();
+        let obj = value.as_object_mut().unwrap();
+        obj.remove("inference_verifier_bonding_enabled_from_height");
+        obj.remove("inference_verifier_unbonding_period_blocks");
+        let back: ChainParams = serde_json::from_value(value).unwrap();
+        assert_eq!(back.inference_verifier_bonding_enabled_from_height, None);
+        assert_eq!(
+            back.inference_verifier_unbonding_period_blocks,
+            p.inference_verifier_unbonding_period_blocks
+        );
+        // Explicit activation height round-trips.
+        let mut p2 = ChainParams::default();
+        p2.inference_verifier_bonding_enabled_from_height = Some(9_000_000);
+        let json = serde_json::to_string(&p2).unwrap();
+        let p3: ChainParams = serde_json::from_str(&json).unwrap();
+        assert_eq!(p3.inference_verifier_bonding_enabled_from_height, Some(9_000_000));
     }
 
     #[test]

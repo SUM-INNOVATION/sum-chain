@@ -89,6 +89,8 @@ impl TxStatus {
             TxStatus::Failed(51) => "duplicate InferenceAttestation for (session_id, verifier)",
             TxStatus::Failed(52) => "invalid OmniNode Stage 6 verifier signature",
             TxStatus::Failed(53) => "tx sender does not match verifier address (Ed25519 pubkey hash)",
+            TxStatus::Failed(54) => "sponsored inference attestation (v2) not enabled at this block height",
+            TxStatus::Failed(55) => "invalid verifier public key or malformed sponsored attestation envelope",
             // SRC-817/818 Education-LMS suite failures (Phase 2).
             TxStatus::Failed(70) => "education subprotocol not enabled at this block height",
             TxStatus::Failed(71) => "malformed education payload",
@@ -147,6 +149,16 @@ impl TxStatus {
             TxStatus::Failed(358) => "duplicate inference claim or dispute",
             TxStatus::Failed(359) => "unresolved or denied dispute blocks settlement",
             TxStatus::Failed(360) => "inference session refund not available yet",
+            TxStatus::Failed(361) => "inference consistency mode not enabled at this block height",
+            TxStatus::Failed(362) => "insufficient verifier consistency for claim",
+            TxStatus::Failed(363) => "invalid inference consistency configuration",
+            TxStatus::Failed(364) => "inference verifier bonding not enabled at this block height",
+            TxStatus::Failed(365) => "invalid verifier bond amount or bond requirement config",
+            TxStatus::Failed(366) => "verifier already registered",
+            TxStatus::Failed(367) => "verifier not registered",
+            TxStatus::Failed(368) => "verifier not active (unbonding or withdrawn)",
+            TxStatus::Failed(369) => "verifier unbonding not yet mature",
+            TxStatus::Failed(370) => "insufficient verifier bond for claim",
             TxStatus::Failed(_) => "failed",
         }
     }

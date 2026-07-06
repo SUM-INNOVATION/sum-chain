@@ -82,6 +82,11 @@ pub enum TxType {
     /// frozen at 24; see crates/primitives/src/inference_settlement.rs. Separate
     /// subprotocol keyed by existing attestations; does not change attestation v1.
     InferenceSettlement = 24,
+    /// Sponsored inference attestation (issue #79). Append-only, variant index
+    /// frozen at 25. A payer/sponsor submits an attestation on a verifier's
+    /// behalf; the verifier remains the attestation identity. Does NOT change
+    /// attestation v1 (index 21). See crates/primitives/src/inference_attestation.rs.
+    InferenceAttestationV2 = 25,
 }
 
 impl TxType {
@@ -113,6 +118,7 @@ impl TxType {
             22 => Some(TxType::Education),
             23 => Some(TxType::Governance),
             24 => Some(TxType::InferenceSettlement),
+            25 => Some(TxType::InferenceAttestationV2),
             _ => None,
         }
     }
@@ -429,6 +435,13 @@ pub enum TxPayload {
     /// keyed by existing `(session_id, verifier_address)` attestations; see
     /// crates/primitives/src/inference_settlement.rs.
     InferenceSettlement(crate::inference_settlement::InferenceSettlementTxData),
+    /// Sponsored inference attestation (issue #79). `TxType` discriminant 25;
+    /// bincode-serialized as the 26th `TxPayload` variant (declaration ordinal
+    /// 25). **Append-only** — never reorder above this. Wraps the same v1
+    /// `InferenceAttestationDigest`/signing bytes; the outer sender is the
+    /// payer/sponsor while the verifier is identified inside the envelope. See
+    /// crates/primitives/src/inference_attestation.rs.
+    InferenceAttestationV2(crate::inference_attestation::InferenceAttestationV2TxData),
 }
 
 impl TransactionV2 {
@@ -580,6 +593,7 @@ impl TransactionV2 {
             TxPayload::Education(_) => TxType::Education,
             TxPayload::Governance(_) => TxType::Governance,
             TxPayload::InferenceSettlement(_) => TxType::InferenceSettlement,
+            TxPayload::InferenceAttestationV2(_) => TxType::InferenceAttestationV2,
         }
     }
 
@@ -627,6 +641,7 @@ impl TransactionV2 {
             TxPayload::Education(data) => Some(data.recipient), // Address::ZERO for no-target ops
             TxPayload::Governance(_) => None, // governance ops carry no value/recipient
             TxPayload::InferenceSettlement(_) => None, // settlement carries no transfer recipient
+            TxPayload::InferenceAttestationV2(_) => None, // sponsored attestation, no value/recipient
         }
     }
 
@@ -658,6 +673,7 @@ impl TransactionV2 {
             TxPayload::Education(_) => 0,            // education ops carry no token value
             TxPayload::Governance(_) => 0,          // governance ops carry no token value
             TxPayload::InferenceSettlement(_) => 0, // escrow moves via executor, not tx value
+            TxPayload::InferenceAttestationV2(_) => 0, // sponsored attestation tx, no token value
         }
     }
 
