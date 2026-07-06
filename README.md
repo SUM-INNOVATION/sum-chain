@@ -111,7 +111,81 @@ cargo build --release
 cargo test --all
 ```
 
-## Quick Start: Local Testnet
+## Run a node (join the live network)
+
+For most operators, "running a node" means **joining an already-running network**
+(a shared testnet or mainnet) — not creating a new chain. You do that with the
+network's own `config.toml` and `genesis.json` plus at least one bootnode:
+
+```bash
+sumchain run \
+  --config config.toml \
+  --genesis genesis.json \
+  --bootnodes /ip4/<PUBLIC_IP>/tcp/9933/p2p/<PEER_ID>
+```
+
+- **`config.toml`** is the canonical node config (TOML). Its defaults expose
+  JSON-RPC on `127.0.0.1:8545` and P2P on `/ip4/0.0.0.0/tcp/9933`.
+- **`genesis.json`** is the network's runtime genesis. Every node on a network
+  must run a **byte-identical** `genesis.json`. **Do not edit genesis to join** —
+  obtain the exact file from the operators; a mismatched genesis will not sync.
+- **`config.toml` and `genesis.json` are network-specific and obtained
+  out-of-band** from the operator team / a secure channel. They are **not** the
+  local templates in this repo — in particular, `genesis/local_genesis.json` is
+  only for a throwaway local network (see
+  [Starting a new local network](#starting-a-new-local-network-local-development-only)).
+
+### Bootnodes
+
+The sample `config.toml` ships `bootnodes = []` on purpose — no real peer
+addresses live in source control, and `mdns` only discovers peers on the same
+LAN. To join across hosts you must supply at least one **bootnode**, obtained
+out-of-band. **Real bootnode IPs / peer-ids must never be committed.** A bootnode
+multiaddr is a placeholder of the form:
+
+```
+/ip4/<PUBLIC_IP>/tcp/9933/p2p/<PEER_ID>
+```
+
+Supply it with the CLI/systemd `--bootnodes` flag (shown above); that override
+takes precedence over `config.toml`, so it keeps working even if a later deploy
+resets the tracked sample config back to `bootnodes = []`. (You *may* instead set
+`bootnodes` in a host-local `config.toml` and protect it with
+`git update-index --skip-worktree config.toml`, but that does not survive a hard
+reset — prefer `--bootnodes`.)
+
+> **Running a full node does not make you a validator.** Syncing the chain and
+> producing blocks are different roles — see
+> [Becoming a validator](#becoming-a-validator).
+
+## Becoming a validator
+
+Supplying a bootnode lets your node **sync** as a full node. That is **not** the
+same as becoming a **block-producing validator**. Under the current PoA
+consensus, block production requires your validator public key to be in the
+**active validator set**, which is coordinated separately by the operator team
+(via genesis / the validator-set process) — a node does not become a producer
+just by joining the network.
+
+If you are approved to run a validator, **generate your own validator key** (never
+reuse another node's key) and run with it once your key is in the active set:
+
+```bash
+sumchain keygen --output keys/validator.json
+sumchain run --config config.toml --genesis genesis.json \
+  --bootnodes /ip4/<PUBLIC_IP>/tcp/9933/p2p/<PEER_ID> \
+  --validator-key keys/validator.json
+```
+
+## Starting a new local network (local development only)
+
+**Local development only.** The steps below **bootstrap a brand-new, throwaway
+network from scratch** on one machine — they generate their own validator keys
+and a local `genesis/local_genesis.json`, and wire nodes together over loopback.
+This is for development and testing. **It is not how you join the live network**
+(see [Run a node](#run-a-node-join-the-live-network)); never use
+`genesis/local_genesis.json` or loopback bootnodes to reach a shared testnet or
+mainnet.
 
 ### 1. Generate Keys and Genesis
 
@@ -165,9 +239,9 @@ cargo run --release --bin sumchain -- run \
 
 This joins the **local** testnet created above (local genesis, loopback bootnode).
 To sync a **shared testnet or mainnet** instead, see
-[Joining an Existing Network](#joining-an-existing-network) — that uses the
-network-provided `config.toml` / `genesis.json` and an out-of-band bootnode, not
-the local paths below.
+[Run a node (join the live network)](#run-a-node-join-the-live-network) — that
+uses the network-provided `config.toml` / `genesis.json` and an out-of-band
+bootnode, not the local paths below.
 
 ```bash
 cargo run --release --bin sumchain -- run \
@@ -251,57 +325,6 @@ cargo run --bin sumchain-wallet -- send \
   --rpc http://127.0.0.1:8545 \
   --raw RAW_TX_HEX
 ```
-
-## Joining an Existing Network
-
-The Quick Start above spins up a self-contained **local** testnet. Joining an
-**existing** network (a shared testnet or mainnet) works differently, because
-the repo intentionally ships no infrastructure addresses.
-
-### Bootnodes are not committed
-
-The sample `config.toml` ships with `bootnodes = []` on purpose — no real peer
-addresses are stored in source control. `mdns = true` only discovers peers on
-the **same local network**, so a node on its own host/VPC will not find an
-existing network by itself. To join, you must supply at least one **bootnode**.
-
-**Obtain a current bootnode multiaddr from the operator team / a secure
-channel** — it is not in this repo, and real bootnode IPs/peer-ids **must not be
-committed**. A bootnode multiaddr looks like:
-
-```
-/ip4/<PUBLIC_IP>/tcp/9933/p2p/<PEER_ID>
-```
-
-### Supplying the bootnode
-
-**Recommended — CLI / systemd `--bootnodes` (overrides config):**
-
-```bash
-sumchain run --config config.toml --genesis genesis.json \
-  --bootnodes /ip4/<PUBLIC_IP>/tcp/9933/p2p/<PEER_ID>
-```
-
-Prefer this for production/systemd deployments: the CLI override takes
-precedence over `config.toml`, so it keeps working even if a later deploy resets
-the tracked sample config back to `bootnodes = []`.
-
-Secondary (local convenience only): you may instead set `bootnodes` in a
-host-local `config.toml` and keep your local edits from being overwritten by
-`git` with `git update-index --skip-worktree config.toml`. This is **not** a
-substitute for the CLI/systemd flag — it does not survive a hard reset — so use
-`--bootnodes` as the primary mechanism.
-
-### Full node vs. block-producing validator
-
-Supplying a bootnode lets your node **sync** as a full node. That is **not** the
-same as becoming a **block-producing validator**. Block production requires your
-validator public key to be in the **active validator set**; under the current
-PoA consensus this is coordinated by the operator team via genesis / the
-validator-set process, not by a node simply joining the network.
-
-If you are running a validator, **generate your own validator key** and never
-reuse another node's key.
 
 ## Documentation
 

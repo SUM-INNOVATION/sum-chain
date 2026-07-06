@@ -17,10 +17,10 @@ const RUN_STEPS = [
   },
   {
     title: 'Prepare config and genesis',
-    body: 'Use the example config.toml and a genesis file, or generate a starter config.',
-    tag: 'sumchain gen-config',
+    body: 'To join an existing network, use that network’s config.toml and its exact genesis.json (obtained from the operators). Every node on a network runs a byte-identical genesis — do not edit it to join.',
+    tag: 'config.toml + genesis.json',
   },
-  { title: 'Run the node', body: 'Start syncing, serve JSON-RPC, and connect to peers via bootnodes.' },
+  { title: 'Run the node', body: 'Start syncing, serve JSON-RPC, and connect to peers via a bootnode from your target network.' },
 ];
 
 export default function RunNodePage() {
@@ -28,7 +28,7 @@ export default function RunNodePage() {
     <PageShell
       kicker="Run a node"
       title="Run SUM Chain from source"
-      intro="A SUM Chain node is a single Rust binary. Build it from this repository, point it at a config and genesis file, and it will sync the chain, serve JSON-RPC, and gossip with peers."
+      intro="A SUM Chain node is a single Rust binary. To join an existing network, build it from this repository and point it at that network’s config.toml and genesis.json plus a bootnode — it will sync the chain, serve JSON-RPC, and gossip with peers. Running a full node does not make you a validator."
     >
       {/* Build + run */}
       <section>
@@ -50,8 +50,8 @@ cargo build -p sumchain-node --release
   --config config.toml \\
   --genesis genesis.json \\
   --data-dir ./data \\
-  --rpc 127.0.0.1:8545 \\
-  --p2p 0.0.0.0:9933 \\
+  --rpc-addr 127.0.0.1:8545 \\
+  --p2p-addr /ip4/0.0.0.0/tcp/9933 \\
   --bootnodes /ip4/<PUBLIC_IP>/tcp/9933/p2p/<PEER_ID>`} />
           </Reveal>
         </div>
