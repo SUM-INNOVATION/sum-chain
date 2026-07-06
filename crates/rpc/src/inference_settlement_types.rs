@@ -18,6 +18,28 @@ pub struct InferenceConsistencyInfo {
     pub threshold_bps: u16,
 }
 
+/// Per-session verifier-bond requirement (issue #78). Present only when the
+/// session opted in.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InferenceBondRequirementInfo {
+    pub min_bond: u128,
+    /// Basis points of the target's bond slashed on a denied dispute; `0` = none.
+    pub slash_bps_on_denied_dispute: u16,
+}
+
+/// A verifier bond record (`omninode_getVerifier`, issue #78).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InferenceVerifierInfo {
+    /// Verifier address (base58).
+    pub verifier: String,
+    pub bond: u128,
+    /// `"Active"` | `"Unbonding"` | `"Withdrawn"`.
+    pub status: String,
+    pub registered_at_height: u64,
+    pub unbonding_started_height: Option<u64>,
+    pub unlock_height: Option<u64>,
+}
+
 /// Per-session settlement state (`omninode_getInferenceSession`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InferenceSessionInfo {
@@ -36,6 +58,9 @@ pub struct InferenceSessionInfo {
     /// Consistency/plurality rule (issue #77), or `null` for a v1 session.
     #[serde(default)]
     pub consistency: Option<InferenceConsistencyInfo>,
+    /// Verifier-bond requirement (issue #78), or `null` if none required.
+    #[serde(default)]
+    pub bond_requirement: Option<InferenceBondRequirementInfo>,
 }
 
 /// One full-digest-tuple group within a session (`omninode_getInferenceConsistency`).
@@ -112,6 +137,22 @@ pub struct ClaimableRewardInfo {
     /// into a consistency rule. `null` for a v1 session.
     #[serde(default)]
     pub consistency: Option<ClaimConsistencyEval>,
+    /// Bond evaluation (issue #78) — present only when the session requires a
+    /// verifier bond. `null` otherwise.
+    #[serde(default)]
+    pub bond: Option<ClaimBondEval>,
+}
+
+/// Bond eligibility for a specific claimant (issue #78).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClaimBondEval {
+    pub required_min: u128,
+    /// The verifier's current bond, or `null` if unregistered.
+    pub verifier_bond: Option<u128>,
+    /// `"Active"` | `"Unbonding"` | `"Withdrawn"` | `"unregistered"`.
+    pub status: String,
+    /// Whether the verifier holds an Active bond `>= required_min`.
+    pub satisfied: bool,
 }
 
 /// Consistency evaluation for a specific claimant (issue #77).
@@ -139,6 +180,36 @@ pub struct BuildInferenceConsistency {
     pub threshold_bps: u16,
 }
 
+/// Optional verifier-bond requirement on the open-session builder (issue #78).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildInferenceBondRequirement {
+    pub min_bond: u128,
+    /// Basis points of the target's bond slashed on a denied dispute; `0` = none.
+    #[serde(default)]
+    pub slash_bps_on_denied_dispute: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OmniBuildRegisterVerifierRequest {
+    pub from: String,
+    pub bond: u128,
+    pub fee: Option<u128>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OmniBuildAddVerifierBondRequest {
+    pub from: String,
+    pub amount: u128,
+    pub fee: Option<u128>,
+}
+
+/// Builder for `BeginVerifierUnbond` / `WithdrawVerifierBond` (no operands).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OmniBuildVerifierBondActionRequest {
+    pub from: String,
+    pub fee: Option<u128>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OmniBuildOpenSessionRequest {
     pub from: String,
@@ -152,6 +223,9 @@ pub struct OmniBuildOpenSessionRequest {
     /// Optional consistency/plurality rule (issue #77). Omit for a v1 session.
     #[serde(default)]
     pub consistency: Option<BuildInferenceConsistency>,
+    /// Optional verifier-bond requirement (issue #78). Omit for no bond/slash.
+    #[serde(default)]
+    pub bond_requirement: Option<BuildInferenceBondRequirement>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

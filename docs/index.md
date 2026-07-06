@@ -47,6 +47,7 @@ deployed genesis (not exposed over RPC):
 | `archive_reassignment_enabled_from_height` | `8900000` | Archive-node chunk reassignment **implemented**; gate **set to 8,900,000 — active at that height** (≈2026-07-12) (issue #62) |
 | `inference_settlement_enabled_from_height` | `8900000` | OmniNode inference settlement **implemented**; gate **set to 8,900,000 — active at that height** (≈2026-07-12) (issue #61; separate from attestation, which is already active). Dispute resolution is validator-quorum controlled via `inference_settlement_dispute_threshold_bps` (6667). |
 | `inference_settlement_consistency_enabled_from_height` | `null` | Consistency/plurality settlement mode **implemented, not yet gated** (code-backed, issue #77; opt-in claim rule layered on settlement). Not part of the 8,900,000 cohort — set a height to activate. |
+| `inference_verifier_bonding_enabled_from_height` | `null` | Verifier bonding + slashing **implemented, not yet gated** (code-backed, issue #78; opt-in per-session bond requirement, slash only on validator-quorum denied dispute, burned to the zero address). Not part of the 8,900,000 cohort — set a height to activate. |
 
 The 8,900,000-cohort rows are **deployed and code-backed; the activation gate is
 set to height 8,900,000 — active once the chain reaches it (≈2026-07-12)**. They

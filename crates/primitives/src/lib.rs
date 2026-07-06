@@ -126,8 +126,9 @@ pub use node_registry::{
 pub use inference_settlement::{
     ClaimInferenceRewardRequest, FundInferenceSessionRequest, InferenceClaim, InferenceClaimStatus,
     InferenceDispute, InferenceDisputeStatus, InferenceSession, InferenceSessionStatus,
-    InferenceSettlementOperation, InferenceSettlementTxData, OpenInferenceDisputeRequest,
-    OpenInferenceSessionRequest, RefundInferenceSessionRequest, ResolveInferenceDisputeRequest,
+    InferenceSettlementOperation, InferenceSettlementTxData, InferenceVerifierRecord,
+    InferenceVerifierStatus, OpenInferenceDisputeRequest, OpenInferenceSessionRequest,
+    RefundInferenceSessionRequest, ResolveInferenceDisputeRequest,
 };
 pub use storage_metadata::{
     assigned_archives, assigned_archives_presorted, is_archive_assigned_to_chunk, AccessEntryV2,

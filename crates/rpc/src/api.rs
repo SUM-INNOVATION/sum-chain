@@ -14,9 +14,10 @@ use crate::governance_types::{
 };
 use crate::inference_settlement_types::{
     ClaimableRewardInfo, InferenceClaimInfo, InferenceConsistencyReport, InferenceDisputeInfo,
-    InferenceSessionInfo, OmniBuildClaimRewardRequest, OmniBuildFundSessionRequest,
-    OmniBuildOpenDisputeRequest, OmniBuildOpenSessionRequest, OmniBuildRefundSessionRequest,
-    OmniBuildResolveDisputeRequest, OmniSettlementBuildResponse,
+    InferenceSessionInfo, InferenceVerifierInfo, OmniBuildAddVerifierBondRequest,
+    OmniBuildClaimRewardRequest, OmniBuildFundSessionRequest, OmniBuildOpenDisputeRequest,
+    OmniBuildOpenSessionRequest, OmniBuildRefundSessionRequest, OmniBuildRegisterVerifierRequest,
+    OmniBuildResolveDisputeRequest, OmniBuildVerifierBondActionRequest, OmniSettlementBuildResponse,
 };
 use crate::types::{
     TaxClaimTypeInfo, TaxIssuerInfo, TaxPolicyInfo, ExecutorLinkInfo, AssetInfo, FinanceIssuerInfo,
@@ -254,6 +255,14 @@ pub trait SumChainApi {
         session_id: String,
     ) -> Result<InferenceConsistencyReport, jsonrpsee::types::ErrorObjectOwned>;
 
+    /// Verifier bond record (issue #78): bond amount, status, unbonding timers.
+    /// Returns `None` if the verifier has never registered a bond.
+    #[method(name = "omninode_getVerifier")]
+    async fn omninode_get_verifier(
+        &self,
+        verifier: String,
+    ) -> Result<Option<InferenceVerifierInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
     // ── OmniNode Inference Settlement (issue #61) — unsigned-tx builders ─────
     #[method(name = "omninode_buildOpenInferenceSession")]
     async fn omninode_build_open_inference_session(
@@ -289,6 +298,31 @@ pub trait SumChainApi {
     async fn omninode_build_refund_inference_session(
         &self,
         request: OmniBuildRefundSessionRequest,
+    ) -> Result<OmniSettlementBuildResponse, jsonrpsee::types::ErrorObjectOwned>;
+
+    // ── Verifier bonding (issue #78) — unsigned-tx builders ─────
+    #[method(name = "omninode_buildRegisterVerifier")]
+    async fn omninode_build_register_verifier(
+        &self,
+        request: OmniBuildRegisterVerifierRequest,
+    ) -> Result<OmniSettlementBuildResponse, jsonrpsee::types::ErrorObjectOwned>;
+
+    #[method(name = "omninode_buildAddVerifierBond")]
+    async fn omninode_build_add_verifier_bond(
+        &self,
+        request: OmniBuildAddVerifierBondRequest,
+    ) -> Result<OmniSettlementBuildResponse, jsonrpsee::types::ErrorObjectOwned>;
+
+    #[method(name = "omninode_buildBeginVerifierUnbond")]
+    async fn omninode_build_begin_verifier_unbond(
+        &self,
+        request: OmniBuildVerifierBondActionRequest,
+    ) -> Result<OmniSettlementBuildResponse, jsonrpsee::types::ErrorObjectOwned>;
+
+    #[method(name = "omninode_buildWithdrawVerifierBond")]
+    async fn omninode_build_withdraw_verifier_bond(
+        &self,
+        request: OmniBuildVerifierBondActionRequest,
     ) -> Result<OmniSettlementBuildResponse, jsonrpsee::types::ErrorObjectOwned>;
 
     // ── SRC-817/818 Education suite — read-only RPC (Phase 4) ──

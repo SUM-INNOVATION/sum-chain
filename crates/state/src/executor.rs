@@ -86,6 +86,14 @@ fn inference_settlement_gate_open(params: &ChainParams, block_height: u64) -> bo
     matches!(params.inference_settlement_enabled_from_height, Some(h) if block_height >= h)
 }
 
+/// Verifier bonding activation gate (issue #78). Dormant by default; the direct
+/// bond-registry ops are impossible before it, so a gate-closed rejection is free
+/// (`Failed(364)`, no fee/mutation) — symmetric with the `350` settlement gate.
+#[inline]
+fn inference_verifier_bonding_gate_open(params: &ChainParams, block_height: u64) -> bool {
+    matches!(params.inference_verifier_bonding_enabled_from_height, Some(h) if block_height >= h)
+}
+
 /// SRC-817/818 Education-LMS suite activation gate. Same dormant-deploy
 /// semantics: production default `None` → never open; activation
 /// requires explicit `education_enabled_from_height` in `genesis.json`
@@ -1375,6 +1383,29 @@ impl BlockExecutor {
                                 status: TxStatus::Failed(350),
                                 fee_paid: 0,
                             });
+                        }
+                        // Verifier-bonding gate (issue #78) for the direct bond-registry
+                        // ops. These are dormant-subprotocol entry points — impossible
+                        // before the bonding gate — so a gate-closed rejection is FREE and
+                        // mutates nothing, exactly like the 350 settlement gate. (A
+                        // bond-*requiring* OpenSession is instead a gate-open semantic
+                        // failure handled fee-paid inside the executor.)
+                        {
+                            use sumchain_primitives::inference_settlement::InferenceSettlementOperation as ISOp;
+                            if matches!(
+                                settlement_data.operation,
+                                ISOp::RegisterVerifier(_)
+                                    | ISOp::AddVerifierBond(_)
+                                    | ISOp::BeginVerifierUnbond
+                                    | ISOp::WithdrawVerifierBond
+                            ) && !inference_verifier_bonding_gate_open(&self.params, block_height)
+                            {
+                                return Ok(TxExecutionResult {
+                                    tx_hash,
+                                    status: TxStatus::Failed(364),
+                                    fee_paid: 0,
+                                });
+                            }
                         }
                         let result = self.inference_settlement_executor.execute(
                             &v2_tx.from,

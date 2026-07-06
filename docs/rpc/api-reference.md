@@ -840,7 +840,9 @@ slashing in v1 (reward denial / claim withholding / escrow refund only).
 | `omninode_getInferenceDisputes(session_id)` | read |
 | `omninode_getClaimableReward(session_id, verifier)` | read |
 | `omninode_getInferenceConsistency(session_id)` | read — attestations grouped by full digest tuple (issue #77 consistency mode) |
-| `omninode_buildOpenInferenceSession` / `buildFundInferenceSession` / `buildClaimInferenceReward` / `buildOpenInferenceDispute` / `buildResolveInferenceDispute` / `buildRefundInferenceSession` | unsigned-tx builders (no keys). `buildOpenInferenceSession` accepts an optional `consistency` config. Dispute resolution is validator-quorum controlled (no personal resolver key); `buildResolveInferenceDispute` accepts an optional `approvals` list of validator signatures. |
+| `omninode_getVerifier(verifier)` | read — verifier bond record: bond, status, unbonding timers (issue #78) |
+| `omninode_buildOpenInferenceSession` / `buildFundInferenceSession` / `buildClaimInferenceReward` / `buildOpenInferenceDispute` / `buildResolveInferenceDispute` / `buildRefundInferenceSession` | unsigned-tx builders (no keys). `buildOpenInferenceSession` accepts optional `consistency` (issue #77) and `bond_requirement` (issue #78) configs. Dispute resolution is validator-quorum controlled (no personal resolver key); `buildResolveInferenceDispute` accepts an optional `approvals` list of validator signatures. |
+| `omninode_buildRegisterVerifier` / `buildAddVerifierBond` / `buildBeginVerifierUnbond` / `buildWithdrawVerifierBond` | verifier bond-registry builders (no keys, issue #78). Bond is native Koppa; slashing on a denied dispute burns to the zero address. |
 
 ---
 

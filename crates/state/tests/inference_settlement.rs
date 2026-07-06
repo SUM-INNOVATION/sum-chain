@@ -77,6 +77,32 @@ fn open_op(session: &str, max_verifiers: u32, deposit: u128, dispute_window: u64
         expires_at_height: expires,
         deposit,
         consistency: None,
+        bond_requirement: None,
+    })
+}
+
+/// Like `open_op` but with a verifier-bond requirement (issue #78).
+fn open_op_bond(
+    session: &str,
+    max_verifiers: u32,
+    deposit: u128,
+    dispute_window: u64,
+    expires: u64,
+    min_bond: u128,
+    slash_bps: u16,
+) -> InferenceSettlementOperation {
+    InferenceSettlementOperation::OpenSession(OpenInferenceSessionRequest {
+        session_id: session.to_string(),
+        reward_per_verifier: REWARD,
+        max_verifiers,
+        dispute_window_blocks: dispute_window,
+        expires_at_height: expires,
+        deposit,
+        consistency: None,
+        bond_requirement: Some(InferenceVerifierBondRequirement {
+            min_bond,
+            slash_bps_on_denied_dispute: slash_bps,
+        }),
     })
 }
 
@@ -98,6 +124,7 @@ fn open_op_consistency(
         expires_at_height: expires,
         deposit,
         consistency: Some(InferenceConsistencyConfig { min_matching_verifiers: min_matching, threshold_bps }),
+        bond_requirement: None,
     })
 }
 
@@ -207,6 +234,7 @@ fn open_session_invalid_terms_354() {
         expires_at_height: 1000,
         deposit: 0,
         consistency: None,
+        bond_requirement: None,
     });
     let r = executor.execute_tx(&settlement_tx(&funder, 0, zero), &proposer.address(), 1, 1000).unwrap();
     assert!(matches!(r.status, TxStatus::Failed(354)), "got {:?}", r.status);
@@ -871,4 +899,368 @@ fn consistency_gate_open_but_no_config_keeps_v1_behavior() {
     assert!(sexec(&db).get_session("s").unwrap().unwrap().consistency.is_none(), "no config stored");
     attest_digest(&executor, &p, &v1, "s", 5, 0, (1, 2, 3, 4));
     assert!(claim_status(&executor, &p, &v1, "s", 1, 8).is_success(), "v1 single-verifier claim unaffected");
+}
+
+// ── Verifier bonding + slashing (issue #78) ──────────────────────────────────
+
+const BOND: u128 = 5_000_000;
+const UNBOND_PERIOD: u64 = 10;
+
+/// settlement + bonding gates open; `dispute_bps` optional. Short unbonding delay.
+fn params_bonding(dispute_bps: Option<u16>) -> ChainParams {
+    let mut p = params_enabled(dispute_bps);
+    p.inference_verifier_bonding_enabled_from_height = Some(0);
+    p.inference_verifier_unbonding_period_blocks = UNBOND_PERIOD;
+    p
+}
+
+fn register_op(bond: u128) -> InferenceSettlementOperation {
+    InferenceSettlementOperation::RegisterVerifier(RegisterVerifierRequest { bond })
+}
+fn add_bond_op(amount: u128) -> InferenceSettlementOperation {
+    InferenceSettlementOperation::AddVerifierBond(AddVerifierBondRequest { amount })
+}
+fn open_dispute_op(session: &str, verifier: &Address) -> InferenceSettlementOperation {
+    InferenceSettlementOperation::OpenDispute(OpenInferenceDisputeRequest {
+        session_id: session.to_string(),
+        verifier: *verifier,
+        evidence_commitment: [9u8; 32],
+    })
+}
+
+/// Total native supply held across all accounts (incl. the ZERO burn address).
+/// Bonds and escrow are accounting-in-record, so they are *not* in any balance;
+/// `funded - sum(balances)` therefore equals `escrow_in_records + bond_in_records`.
+fn sum_balances(state: &sumchain_state::StateManager, accounts: &[Address]) -> u128 {
+    accounts.iter().map(|a| state.get_balance(a).unwrap()).sum()
+}
+
+#[test]
+fn register_locks_bond_and_add_increases_it() {
+    let (state, db, _dir, executor) = setup_with_params(params_bonding(None));
+    let v = KeyPair::generate();
+    let proposer = KeyPair::generate();
+    fund(&state, &v, 100_000_000);
+    let p = proposer.address();
+    let start = state.get_balance(&v.address()).unwrap();
+
+    let r = executor.execute_tx(&settlement_tx(&v, 0, register_op(BOND)), &p, 1, 1000).unwrap();
+    assert!(r.status.is_success(), "register: {:?}", r.status);
+    // Bond leaves the balance (accounting-in-record) plus the fee.
+    assert_eq!(state.get_balance(&v.address()).unwrap(), start - BOND - FEE);
+    let rec = sexec(&db).get_verifier(&v.address()).unwrap().unwrap();
+    assert_eq!(rec.bond, BOND);
+    assert_eq!(rec.status, InferenceVerifierStatus::Active);
+
+    // Duplicate register on an Active record → 366.
+    let dup = executor.execute_tx(&settlement_tx(&v, 1, register_op(BOND)), &p, 2, 1000).unwrap();
+    assert!(matches!(dup.status, TxStatus::Failed(366)), "dup: {:?}", dup.status);
+
+    // AddBond increases the locked bond.
+    let a = executor.execute_tx(&settlement_tx(&v, 2, add_bond_op(BOND)), &p, 3, 1000).unwrap();
+    assert!(a.status.is_success(), "add: {:?}", a.status);
+    assert_eq!(sexec(&db).get_verifier(&v.address()).unwrap().unwrap().bond, 2 * BOND);
+}
+
+#[test]
+fn unbond_lifecycle_withdraw_before_and_after_unlock() {
+    let (state, db, _dir, executor) = setup_with_params(params_bonding(None));
+    let v = KeyPair::generate();
+    let proposer = KeyPair::generate();
+    fund(&state, &v, 100_000_000);
+    let p = proposer.address();
+
+    executor.execute_tx(&settlement_tx(&v, 0, register_op(BOND)), &p, 1, 1000).unwrap();
+    // Begin unbond at height 5 → unlock = 15.
+    let b = executor.execute_tx(&settlement_tx(&v, 1, InferenceSettlementOperation::BeginVerifierUnbond), &p, 5, 1000).unwrap();
+    assert!(b.status.is_success(), "begin: {:?}", b.status);
+    let rec = sexec(&db).get_verifier(&v.address()).unwrap().unwrap();
+    assert_eq!(rec.status, InferenceVerifierStatus::Unbonding);
+    assert_eq!(rec.unlock_height, Some(15));
+
+    // Withdraw before unlock (height 10) → 369.
+    let early = executor.execute_tx(&settlement_tx(&v, 2, InferenceSettlementOperation::WithdrawVerifierBond), &p, 10, 1000).unwrap();
+    assert!(matches!(early.status, TxStatus::Failed(369)), "early: {:?}", early.status);
+
+    // Withdraw after unlock (height 15) → returns the bond.
+    let bal = state.get_balance(&v.address()).unwrap();
+    let w = executor.execute_tx(&settlement_tx(&v, 3, InferenceSettlementOperation::WithdrawVerifierBond), &p, 15, 1000).unwrap();
+    assert!(w.status.is_success(), "withdraw: {:?}", w.status);
+    assert_eq!(state.get_balance(&v.address()).unwrap(), bal - FEE + BOND, "bond returned");
+    let rec = sexec(&db).get_verifier(&v.address()).unwrap().unwrap();
+    assert_eq!(rec.status, InferenceVerifierStatus::Withdrawn);
+    assert_eq!(rec.bond, 0);
+
+    // A Withdrawn verifier may re-register with a fresh bond.
+    let re = executor.execute_tx(&settlement_tx(&v, 4, register_op(BOND)), &p, 16, 1000).unwrap();
+    assert!(re.status.is_success(), "re-register: {:?}", re.status);
+    let rec = sexec(&db).get_verifier(&v.address()).unwrap().unwrap();
+    assert_eq!(rec.status, InferenceVerifierStatus::Active);
+    assert_eq!(rec.bond, BOND);
+    assert_eq!(rec.registered_at_height, 16);
+    assert_eq!(rec.unbonding_started_height, None);
+}
+
+#[test]
+fn bond_required_claim_gating_order_367_368_370() {
+    let (state, _db, _dir, executor) = setup_with_params(params_bonding(None));
+    let funder = KeyPair::generate();
+    let v = KeyPair::generate();
+    let proposer = KeyPair::generate();
+    for kp in [&funder, &v] { fund(&state, kp, 100_000_000); }
+    let p = proposer.address();
+    // Session requires min_bond = BOND, no slashing.
+    executor.execute_tx(&settlement_tx(&funder, 0, open_op_bond("s", 2, 2 * REWARD, 0, 1000, BOND, 0)), &p, 1, 1000).unwrap();
+    attest_digest(&executor, &p, &v, "s", 5, 0, (1, 2, 3, 4)); // v nonce 0
+
+    // Not registered → 367.
+    assert!(matches!(claim_status(&executor, &p, &v, "s", 1, 8), TxStatus::Failed(367)), "unregistered → 367");
+
+    // Register with too-little bond, claim → 370.
+    executor.execute_tx(&settlement_tx(&v, 2, register_op(BOND - 1)), &p, 8, 1000).unwrap(); // v nonce 2
+    assert!(matches!(claim_status(&executor, &p, &v, "s", 3, 9), TxStatus::Failed(370)), "low bond → 370");
+
+    // Top up to sufficient, then Unbonding → 368.
+    executor.execute_tx(&settlement_tx(&v, 4, add_bond_op(1)), &p, 9, 1000).unwrap(); // bond = BOND
+    executor.execute_tx(&settlement_tx(&v, 5, InferenceSettlementOperation::BeginVerifierUnbond), &p, 9, 1000).unwrap();
+    assert!(matches!(claim_status(&executor, &p, &v, "s", 6, 10), TxStatus::Failed(368)), "unbonding → 368");
+}
+
+#[test]
+fn bond_required_claim_passes_with_active_sufficient_bond() {
+    let (state, _db, _dir, executor) = setup_with_params(params_bonding(None));
+    let funder = KeyPair::generate();
+    let v = KeyPair::generate();
+    let proposer = KeyPair::generate();
+    for kp in [&funder, &v] { fund(&state, kp, 100_000_000); }
+    let p = proposer.address();
+    executor.execute_tx(&settlement_tx(&funder, 0, open_op_bond("s", 2, 2 * REWARD, 0, 1000, BOND, 0)), &p, 1, 1000).unwrap();
+    executor.execute_tx(&settlement_tx(&v, 0, register_op(BOND)), &p, 2, 1000).unwrap(); // v nonce 0
+    attest_digest(&executor, &p, &v, "s", 5, 1, (1, 2, 3, 4)); // v nonce 1
+    let bal = state.get_balance(&v.address()).unwrap();
+    assert!(claim_status(&executor, &p, &v, "s", 2, 8).is_success(), "active sufficient bond claims");
+    assert_eq!(state.get_balance(&v.address()).unwrap(), bal - FEE + REWARD);
+}
+
+#[test]
+fn denied_dispute_denies_reward_and_slashes_bond() {
+    let resolver = KeyPair::generate();
+    let (state, db, _dir, executor) = setup_with_params(params_bonding(Some(5_000)));
+    let funder = KeyPair::generate();
+    let v = KeyPair::generate();
+    let proposer = KeyPair::generate();
+    for kp in [&funder, &v, &resolver] { fund(&state, kp, 100_000_000); }
+    let p = proposer.address();
+    let vset = [*resolver.public_key().as_bytes()];
+    // min_bond = BOND, slash 2500 bps (25%). window 50 → maturity 58; expires 100.
+    executor.execute_tx(&settlement_tx(&funder, 0, open_op_bond("s", 2, 2 * REWARD, 50, 100, BOND, 2500)), &p, 1, 1000).unwrap();
+    executor.execute_tx(&settlement_tx(&v, 0, register_op(BOND)), &p, 2, 1000).unwrap();
+    attest_digest(&executor, &p, &v, "s", 5, 1, (1, 2, 3, 4)); // v nonce 1
+
+    // Funder disputes (height 8), quorum DENIES (height 9).
+    executor.execute_tx(&settlement_tx(&funder, 1, open_dispute_op("s", &v.address())), &p, 8, 1000).unwrap();
+    let ap = resolve_approval(&resolver, "s", &v.address(), false);
+    let rd = executor.execute_tx_with_validators(&settlement_tx(&resolver, 0, InferenceSettlementOperation::ResolveDispute(ResolveInferenceDisputeRequest { session_id: "s".into(), verifier: v.address(), allow_claim: false, approvals: vec![ap] })), &p, 9, 1000, &vset).unwrap();
+    assert!(rd.status.is_success(), "resolve deny: {:?}", rd.status);
+
+    // Bond slashed by 25%; slashed amount burned to ZERO.
+    let expected_slash = BOND * 2500 / 10_000;
+    let rec = sexec(&db).get_verifier(&v.address()).unwrap().unwrap();
+    assert_eq!(rec.bond, BOND - expected_slash, "bond reduced by slash");
+    assert_eq!(state.get_balance(&Address::ZERO).unwrap(), expected_slash, "slash burned to ZERO");
+
+    // Claim after maturity is denied (359, dispute deny) — reward withheld.
+    assert!(matches!(claim_status(&executor, &p, &v, "s", 2, 58), TxStatus::Failed(359)), "denied dispute blocks claim");
+}
+
+#[test]
+fn allowed_dispute_does_not_slash() {
+    let resolver = KeyPair::generate();
+    let (state, db, _dir, executor) = setup_with_params(params_bonding(Some(5_000)));
+    let funder = KeyPair::generate();
+    let v = KeyPair::generate();
+    let proposer = KeyPair::generate();
+    for kp in [&funder, &v, &resolver] { fund(&state, kp, 100_000_000); }
+    let p = proposer.address();
+    let vset = [*resolver.public_key().as_bytes()];
+    executor.execute_tx(&settlement_tx(&funder, 0, open_op_bond("s", 2, 2 * REWARD, 50, 1000, BOND, 2500)), &p, 1, 1000).unwrap();
+    executor.execute_tx(&settlement_tx(&v, 0, register_op(BOND)), &p, 2, 1000).unwrap();
+    attest_digest(&executor, &p, &v, "s", 5, 1, (1, 2, 3, 4));
+    executor.execute_tx(&settlement_tx(&funder, 1, open_dispute_op("s", &v.address())), &p, 8, 1000).unwrap();
+    let ap = resolve_approval(&resolver, "s", &v.address(), true);
+    executor.execute_tx_with_validators(&settlement_tx(&resolver, 0, InferenceSettlementOperation::ResolveDispute(ResolveInferenceDisputeRequest { session_id: "s".into(), verifier: v.address(), allow_claim: true, approvals: vec![ap] })), &p, 9, 1000, &vset).unwrap();
+    assert_eq!(sexec(&db).get_verifier(&v.address()).unwrap().unwrap().bond, BOND, "allow → no slash");
+    assert_eq!(state.get_balance(&Address::ZERO).unwrap(), 0, "nothing burned");
+}
+
+#[test]
+fn denied_dispute_with_no_or_zero_bond_slashes_zero_no_underflow() {
+    let resolver = KeyPair::generate();
+    let (state, db, _dir, executor) = setup_with_params(params_bonding(Some(5_000)));
+    let funder = KeyPair::generate();
+    let v = KeyPair::generate();
+    let proposer = KeyPair::generate();
+    for kp in [&funder, &v, &resolver] { fund(&state, kp, 100_000_000); }
+    let p = proposer.address();
+    let vset = [*resolver.public_key().as_bytes()];
+    // Session requires a bond and slashing, but the verifier NEVER registers.
+    executor.execute_tx(&settlement_tx(&funder, 0, open_op_bond("s", 2, 2 * REWARD, 50, 100, BOND, 2500)), &p, 1, 1000).unwrap();
+    attest_digest(&executor, &p, &v, "s", 5, 0, (1, 2, 3, 4)); // v nonce 0, no registration
+    executor.execute_tx(&settlement_tx(&funder, 1, open_dispute_op("s", &v.address())), &p, 8, 1000).unwrap();
+    let ap = resolve_approval(&resolver, "s", &v.address(), false);
+    let rd = executor.execute_tx_with_validators(&settlement_tx(&resolver, 0, InferenceSettlementOperation::ResolveDispute(ResolveInferenceDisputeRequest { session_id: "s".into(), verifier: v.address(), allow_claim: false, approvals: vec![ap] })), &p, 9, 1000, &vset).unwrap();
+    assert!(rd.status.is_success(), "resolve succeeds even with no bond: {:?}", rd.status);
+    assert!(sexec(&db).get_verifier(&v.address()).unwrap().is_none(), "no verifier record created");
+    assert_eq!(state.get_balance(&Address::ZERO).unwrap(), 0, "no burn, no mint, no underflow");
+}
+
+#[test]
+fn slash_during_unbonding_reduces_withdrawal() {
+    let resolver = KeyPair::generate();
+    let (state, db, _dir, executor) = setup_with_params(params_bonding(Some(5_000)));
+    let funder = KeyPair::generate();
+    let v = KeyPair::generate();
+    let proposer = KeyPair::generate();
+    for kp in [&funder, &v, &resolver] { fund(&state, kp, 100_000_000); }
+    let p = proposer.address();
+    let vset = [*resolver.public_key().as_bytes()];
+    executor.execute_tx(&settlement_tx(&funder, 0, open_op_bond("s", 2, 2 * REWARD, 50, 200, BOND, 4000)), &p, 1, 1000).unwrap();
+    executor.execute_tx(&settlement_tx(&v, 0, register_op(BOND)), &p, 2, 1000).unwrap();
+    attest_digest(&executor, &p, &v, "s", 5, 1, (1, 2, 3, 4)); // v nonce 1
+    // Verifier begins unbonding (height 6, unlock 16) — still slashable.
+    executor.execute_tx(&settlement_tx(&v, 2, InferenceSettlementOperation::BeginVerifierUnbond), &p, 6, 1000).unwrap();
+    // Funder disputes + quorum denies (slashes 40% of remaining bond even while Unbonding).
+    executor.execute_tx(&settlement_tx(&funder, 1, open_dispute_op("s", &v.address())), &p, 7, 1000).unwrap();
+    let ap = resolve_approval(&resolver, "s", &v.address(), false);
+    executor.execute_tx_with_validators(&settlement_tx(&resolver, 0, InferenceSettlementOperation::ResolveDispute(ResolveInferenceDisputeRequest { session_id: "s".into(), verifier: v.address(), allow_claim: false, approvals: vec![ap] })), &p, 8, 1000, &vset).unwrap();
+    let slash = BOND * 4000 / 10_000;
+    assert_eq!(sexec(&db).get_verifier(&v.address()).unwrap().unwrap().bond, BOND - slash);
+
+    // Withdraw after unlock returns the REDUCED bond.
+    let bal = state.get_balance(&v.address()).unwrap();
+    let w = executor.execute_tx(&settlement_tx(&v, 3, InferenceSettlementOperation::WithdrawVerifierBond), &p, 16, 1000).unwrap();
+    assert!(w.status.is_success(), "withdraw: {:?}", w.status);
+    assert_eq!(state.get_balance(&v.address()).unwrap(), bal - FEE + (BOND - slash), "reduced bond returned");
+}
+
+#[test]
+fn consistency_failure_alone_does_not_slash() {
+    // Session with BOTH consistency and a bond+slash requirement. A lone verifier
+    // fails consistency (min=2) → reward blocked (362), but NO dispute occurs, so
+    // the bond is untouched. consistency decides eligibility; only a denied dispute
+    // slashes.
+    // Bonding + consistency gates both open.
+    let mut pr = params_bonding(None);
+    pr.inference_settlement_consistency_enabled_from_height = Some(0);
+    let (state, db, _dir, executor) = setup_with_params(pr);
+    let funder = KeyPair::generate();
+    let v = KeyPair::generate();
+    let proposer = KeyPair::generate();
+    for kp in [&funder, &v] { fund(&state, kp, 100_000_000); }
+    let p = proposer.address();
+    // Open with a bond+slash requirement AND a consistency rule.
+    let op = InferenceSettlementOperation::OpenSession(OpenInferenceSessionRequest {
+        session_id: "s".to_string(),
+        reward_per_verifier: REWARD,
+        max_verifiers: 3,
+        dispute_window_blocks: 0,
+        expires_at_height: 1000,
+        deposit: 3 * REWARD,
+        consistency: Some(InferenceConsistencyConfig { min_matching_verifiers: 2, threshold_bps: 0 }),
+        bond_requirement: Some(InferenceVerifierBondRequirement { min_bond: BOND, slash_bps_on_denied_dispute: 5000 }),
+    });
+    executor.execute_tx(&settlement_tx(&funder, 0, op), &p, 1, 1000).unwrap();
+    executor.execute_tx(&settlement_tx(&v, 0, register_op(BOND)), &p, 2, 1000).unwrap();
+    attest_digest(&executor, &p, &v, "s", 5, 1, (1, 2, 3, 4)); // v nonce 1, lone attester
+
+    assert!(matches!(claim_status(&executor, &p, &v, "s", 2, 8), TxStatus::Failed(362)), "consistency blocks reward");
+    // Bond is fully intact — consistency failure never slashes.
+    assert_eq!(sexec(&db).get_verifier(&v.address()).unwrap().unwrap().bond, BOND, "no slash from consistency failure");
+    assert_eq!(state.get_balance(&Address::ZERO).unwrap(), 0, "nothing burned");
+}
+
+#[test]
+fn bonding_gate_closed_and_invalid_config() {
+    // Bonding gate CLOSED (settlement still enabled).
+    let mut p = params_enabled(None);
+    p.inference_verifier_bonding_enabled_from_height = None;
+    let (state, db, _dir, executor) = setup_with_params(p);
+    let funder = KeyPair::generate();
+    let v = KeyPair::generate();
+    let proposer = KeyPair::generate();
+    for kp in [&funder, &v] { fund(&state, kp, 100_000_000); }
+    let pr = proposer.address();
+
+    // RegisterVerifier while bonding closed → 364, FREE (no fee/nonce/mutation),
+    // symmetric with the 350 settlement gate — a dormant entry point, not a
+    // semantic error.
+    let bal = state.get_balance(&v.address()).unwrap();
+    let nonce = state.get_nonce(&v.address()).unwrap();
+    let r = executor.execute_tx(&settlement_tx(&v, 0, register_op(BOND)), &pr, 1, 1000).unwrap();
+    assert!(matches!(r.status, TxStatus::Failed(364)), "register gate-closed: {:?}", r.status);
+    assert_eq!(r.fee_paid, 0, "bonding gate-closed is free");
+    assert_eq!(state.get_balance(&v.address()).unwrap(), bal, "no fee charged");
+    assert_eq!(state.get_nonce(&v.address()).unwrap(), nonce, "no nonce bump");
+    assert!(sexec(&db).get_verifier(&v.address()).unwrap().is_none(), "no record on gate-closed");
+
+    // The other three registry ops are likewise free when the gate is closed.
+    // (The free path never bumps the nonce, so each still uses nonce 0.)
+    for op in [
+        add_bond_op(BOND),
+        InferenceSettlementOperation::BeginVerifierUnbond,
+        InferenceSettlementOperation::WithdrawVerifierBond,
+    ] {
+        let rr = executor.execute_tx(&settlement_tx(&v, 0, op), &pr, 1, 1000).unwrap();
+        assert!(matches!(rr.status, TxStatus::Failed(364)), "registry op gate-closed: {:?}", rr.status);
+        assert_eq!(rr.fee_paid, 0, "registry op gate-closed is free");
+    }
+
+    // OpenSession requesting a bond requirement while bonding closed → 364, no session.
+    let os = executor.execute_tx(&settlement_tx(&funder, 0, open_op_bond("s", 2, 2 * REWARD, 0, 1000, BOND, 0)), &pr, 1, 1000).unwrap();
+    assert!(matches!(os.status, TxStatus::Failed(364)), "open bond gate-closed: {:?}", os.status);
+    assert!(sexec(&db).get_session("s").unwrap().is_none(), "no session on gate-closed");
+
+    // Bonding OPEN: invalid config (min_bond = 0) → 365.
+    let (state2, _db2, _dir2, exec2) = setup_with_params(params_bonding(None));
+    let f2 = KeyPair::generate();
+    fund(&state2, &f2, 100_000_000);
+    let bad = exec2.execute_tx(&settlement_tx(&f2, 0, open_op_bond("s", 2, 2 * REWARD, 0, 1000, 0, 0)), &pr, 1, 1000).unwrap();
+    assert!(matches!(bad.status, TxStatus::Failed(365)), "min_bond=0 → 365: {:?}", bad.status);
+}
+
+#[test]
+fn supply_conserved_across_register_open_slash_withdraw() {
+    // Reconciliation: bonds and escrow are accounting-in-record, so at every step
+    // sum(all balances incl. ZERO) + remaining_escrow + verifier_bond == funded.
+    let resolver = KeyPair::generate();
+    let (state, db, _dir, executor) = setup_with_params(params_bonding(Some(5_000)));
+    let funder = KeyPair::generate();
+    let v = KeyPair::generate();
+    let proposer = KeyPair::generate();
+    let per = 100_000_000u128;
+    for kp in [&funder, &v, &resolver] { fund(&state, kp, per); }
+    let funded = 3 * per; // total native minted into these accounts
+    let p = proposer.address();
+    let vset = [*resolver.public_key().as_bytes()];
+    // Fees flow sender→proposer, so include proposer + ZERO in the balance set.
+    let accts = [funder.address(), v.address(), resolver.address(), p, Address::ZERO];
+    let reconcile = |st: &sumchain_state::StateManager, db: &Arc<Database>| -> u128 {
+        let s = sexec(db).get_session("s").unwrap().map(|s| s.remaining_escrow).unwrap_or(0);
+        let b = sexec(db).get_verifier(&v.address()).unwrap().map(|r| r.bond).unwrap_or(0);
+        sum_balances(st, &accts) + s + b
+    };
+
+    executor.execute_tx(&settlement_tx(&funder, 0, open_op_bond("s", 2, 2 * REWARD, 50, 100, BOND, 3000)), &p, 1, 1000).unwrap();
+    assert_eq!(reconcile(&state, &db), funded, "after open");
+    executor.execute_tx(&settlement_tx(&v, 0, register_op(BOND)), &p, 2, 1000).unwrap();
+    assert_eq!(reconcile(&state, &db), funded, "after register");
+    attest_digest(&executor, &p, &v, "s", 5, 1, (1, 2, 3, 4));
+    executor.execute_tx(&settlement_tx(&funder, 1, open_dispute_op("s", &v.address())), &p, 8, 1000).unwrap();
+    let ap = resolve_approval(&resolver, "s", &v.address(), false);
+    executor.execute_tx_with_validators(&settlement_tx(&resolver, 0, InferenceSettlementOperation::ResolveDispute(ResolveInferenceDisputeRequest { session_id: "s".into(), verifier: v.address(), allow_claim: false, approvals: vec![ap] })), &p, 9, 1000, &vset).unwrap();
+    assert_eq!(reconcile(&state, &db), funded, "after slash (burn to ZERO conserves supply)");
+    // Unbond + withdraw the reduced bond.
+    executor.execute_tx(&settlement_tx(&v, 2, InferenceSettlementOperation::BeginVerifierUnbond), &p, 60, 1000).unwrap();
+    executor.execute_tx(&settlement_tx(&v, 3, InferenceSettlementOperation::WithdrawVerifierBond), &p, 60 + UNBOND_PERIOD, 1000).unwrap();
+    assert_eq!(reconcile(&state, &db), funded, "after withdraw");
 }

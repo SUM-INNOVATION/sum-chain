@@ -170,6 +170,13 @@ pub mod cf {
     /// `session_prefix_16 || verifier_address_20` (36 bytes). Value: bincode
     /// `InferenceDispute`.
     pub const INFERENCE_DISPUTES: &str = "inference_disputes";
+    /// Per-verifier bond records (issue #78). Key: 32-byte
+    /// `BLAKE3("InferenceVerifierV1" || verifier_address)`. Value: bincode
+    /// `InferenceVerifierRecord` (bond amount, status, unbonding timers).
+    /// Bond is accounting-in-record — native Koppa is debited on register/add and
+    /// credited back on withdraw, mirroring the escrow pattern. Slashing credits
+    /// `Address::ZERO`. Never touched by the attestation CFs.
+    pub const INFERENCE_VERIFIERS: &str = "inference_verifiers";
 
     // ── SRC-817/818 Education-LMS suite (Phase 2) ──
     // Privacy: students appear ONLY as a scoped `student_commitment`
@@ -537,6 +544,7 @@ pub const ALL_CFS: &[&str] = &[
     cf::INFERENCE_SESSIONS,
     cf::INFERENCE_CLAIMS,
     cf::INFERENCE_DISPUTES,
+    cf::INFERENCE_VERIFIERS,
     // SRC-817/818 Education-LMS suite (Phase 2)
     cf::EDU_CATALOG_ENTRIES,
     cf::EDU_CATALOG_PREREQUISITES,

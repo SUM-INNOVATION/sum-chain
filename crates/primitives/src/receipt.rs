@@ -150,6 +150,13 @@ impl TxStatus {
             TxStatus::Failed(361) => "inference consistency mode not enabled at this block height",
             TxStatus::Failed(362) => "insufficient verifier consistency for claim",
             TxStatus::Failed(363) => "invalid inference consistency configuration",
+            TxStatus::Failed(364) => "inference verifier bonding not enabled at this block height",
+            TxStatus::Failed(365) => "invalid verifier bond amount or bond requirement config",
+            TxStatus::Failed(366) => "verifier already registered",
+            TxStatus::Failed(367) => "verifier not registered",
+            TxStatus::Failed(368) => "verifier not active (unbonding or withdrawn)",
+            TxStatus::Failed(369) => "verifier unbonding not yet mature",
+            TxStatus::Failed(370) => "insufficient verifier bond for claim",
             TxStatus::Failed(_) => "failed",
         }
     }

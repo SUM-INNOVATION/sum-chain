@@ -379,6 +379,26 @@ pub struct ChainParams {
     /// keeps existing `genesis.json` dormant.
     #[serde(default)]
     pub inference_settlement_consistency_enabled_from_height: Option<u64>,
+
+    /// Verifier bonding + slashing activation gate (issue #78). `None` (default) =
+    /// bonding is dormant: bond-registry operations are rejected free (`Failed(364)`,
+    /// no fee) and a session that requests a `bond_requirement` fails `Failed(364)`.
+    /// Sessions without a bond requirement are unaffected. When `Some(h)` and
+    /// `block_height >= h`, verifiers may register bonds and bond-required sessions
+    /// enforce/slash. Independent of `inference_settlement_enabled_from_height`
+    /// (bonding layers on enabled settlement). `#[serde(default)]` keeps existing
+    /// `genesis.json` dormant.
+    #[serde(default)]
+    pub inference_verifier_bonding_enabled_from_height: Option<u64>,
+
+    /// Unbonding delay (blocks) between `BeginVerifierUnbond` and a permitted
+    /// `WithdrawVerifierBond` (issue #78). Only consulted once bonding is enabled.
+    #[serde(default = "default_inference_verifier_unbonding_period_blocks")]
+    pub inference_verifier_unbonding_period_blocks: u64,
+}
+
+fn default_inference_verifier_unbonding_period_blocks() -> u64 {
+    201_600 // ~7 days at 3s blocks — matches the archive-node unbonding default.
 }
 
 fn default_inference_settlement_max_dispute_window_blocks() -> u64 {
@@ -611,6 +631,9 @@ impl Default for ChainParams {
                 default_inference_settlement_max_session_duration_blocks(),
             inference_settlement_dispute_threshold_bps: None,
             inference_settlement_consistency_enabled_from_height: None,
+            inference_verifier_bonding_enabled_from_height: None,
+            inference_verifier_unbonding_period_blocks:
+                default_inference_verifier_unbonding_period_blocks(),
         }
     }
 }
@@ -1097,6 +1120,32 @@ mod tests {
         let json = serde_json::to_string(&p2).unwrap();
         let p3: ChainParams = serde_json::from_str(&json).unwrap();
         assert_eq!(p3.inference_settlement_consistency_enabled_from_height, Some(8_900_000));
+    }
+
+    #[test]
+    fn verifier_bonding_params_default_and_round_trip() {
+        // Issue #78: dormant by default; unbonding period has a non-zero default;
+        // absent-from-genesis decodes cleanly; explicit height round-trips.
+        let p = ChainParams::default();
+        assert_eq!(p.inference_verifier_bonding_enabled_from_height, None);
+        assert!(p.inference_verifier_unbonding_period_blocks > 0);
+        // Older genesis without the keys still loads (serde defaults).
+        let mut value = serde_json::to_value(&p).unwrap();
+        let obj = value.as_object_mut().unwrap();
+        obj.remove("inference_verifier_bonding_enabled_from_height");
+        obj.remove("inference_verifier_unbonding_period_blocks");
+        let back: ChainParams = serde_json::from_value(value).unwrap();
+        assert_eq!(back.inference_verifier_bonding_enabled_from_height, None);
+        assert_eq!(
+            back.inference_verifier_unbonding_period_blocks,
+            p.inference_verifier_unbonding_period_blocks
+        );
+        // Explicit activation height round-trips.
+        let mut p2 = ChainParams::default();
+        p2.inference_verifier_bonding_enabled_from_height = Some(9_000_000);
+        let json = serde_json::to_string(&p2).unwrap();
+        let p3: ChainParams = serde_json::from_str(&json).unwrap();
+        assert_eq!(p3.inference_verifier_bonding_enabled_from_height, Some(9_000_000));
     }
 
     #[test]

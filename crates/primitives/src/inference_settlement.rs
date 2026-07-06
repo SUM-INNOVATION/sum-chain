@@ -59,6 +59,19 @@ pub fn settlement_entry_key(session_id: &str, verifier: &Address) -> [u8; 36] {
     out
 }
 
+/// Domain for the per-verifier bond record key (issue #78). Distinct from the
+/// session/claim/dispute domains so the keyspaces never collide.
+const VERIFIER_KEY_DOMAIN: &[u8] = b"InferenceVerifierV1";
+
+/// Per-verifier bond record key for `INFERENCE_VERIFIERS`:
+/// `BLAKE3(VERIFIER_KEY_DOMAIN || verifier_address)` (32 bytes).
+pub fn verifier_key(verifier: &Address) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(VERIFIER_KEY_DOMAIN);
+    hasher.update(verifier.as_bytes());
+    *hasher.finalize().as_bytes()
+}
+
 // ─── Status enums ────────────────────────────────────────────────────────────
 
 /// Lifecycle of a settlement session.
@@ -123,6 +136,31 @@ impl InferenceDisputeStatus {
     }
 }
 
+/// Lifecycle of a verifier bond record (issue #78). Mirrors the archive-node
+/// unbonding lifecycle: bonds are locked while `Active`, enter a delay on
+/// `Unbonding`, and are returned (minus any slashes) at `Withdrawn`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum InferenceVerifierStatus {
+    /// Bond locked and usable to satisfy a session's bond requirement.
+    Active = 0,
+    /// Unbonding delay running; still slashable, not usable for new claims.
+    Unbonding = 1,
+    /// Bond withdrawn; zero bond. May re-register with a fresh bond.
+    Withdrawn = 2,
+}
+
+impl InferenceVerifierStatus {
+    pub fn from_byte(b: u8) -> Option<Self> {
+        match b {
+            0 => Some(Self::Active),
+            1 => Some(Self::Unbonding),
+            2 => Some(Self::Withdrawn),
+            _ => None,
+        }
+    }
+}
+
 // ─── Consistency / plurality mode (issue #77) ────────────────────────────────
 
 /// Optional consistency/plurality reward rule for a session (issue #77, v1.1).
@@ -151,6 +189,25 @@ pub struct InferenceConsistencyConfig {
     pub threshold_bps: u16,
 }
 
+// ─── Verifier bonding / slashing (issue #78) ─────────────────────────────────
+
+/// Optional per-session verifier-bond requirement (issue #78). When present, a
+/// verifier must hold an `Active` bond record of at least `min_bond` to claim,
+/// and an upheld (denied) dispute may slash `slash_bps_on_denied_dispute` of the
+/// target's bond. Absent → v1/#77 behavior: no bond required, no slashing.
+///
+/// **consistency decides eligibility; dispute resolution decides punishment** —
+/// slashing is only ever triggered by a validator-quorum denied dispute, never
+/// by a consistency-plurality failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InferenceVerifierBondRequirement {
+    /// Minimum `Active` bond a verifier must hold to claim this session. `> 0`.
+    pub min_bond: u128,
+    /// Basis points of the target's current bond slashed on a denied dispute.
+    /// `0` disables slashing (denial still withholds the reward). `<= 10_000`.
+    pub slash_bps_on_denied_dispute: u16,
+}
+
 // ─── Request payloads ────────────────────────────────────────────────────────
 
 /// Open (and fund with `deposit`) a settlement session. `reward_per_verifier` is
@@ -169,6 +226,25 @@ pub struct OpenInferenceSessionRequest {
     /// Requesting it while the consistency gate is closed fails `Failed(361)`.
     #[serde(default)]
     pub consistency: Option<InferenceConsistencyConfig>,
+    /// Optional verifier-bond requirement (issue #78). Appended field; `None`
+    /// preserves v1/#77 behavior (no bond, no slashing). Requesting it while the
+    /// bonding gate is closed fails `Failed(364)`.
+    #[serde(default)]
+    pub bond_requirement: Option<InferenceVerifierBondRequirement>,
+}
+
+/// Register a verifier bond (issue #78). Sender = verifier. Locks `bond` native
+/// Koppa as accounting-in-record. Re-registering a `Withdrawn` record reinitializes
+/// it; an `Active`/`Unbonding` record is rejected `Failed(366)`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisterVerifierRequest {
+    pub bond: u128,
+}
+
+/// Top up an existing `Active` verifier bond (issue #78). Sender = verifier.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AddVerifierBondRequest {
+    pub amount: u128,
 }
 
 /// Top up an open session's escrow.
@@ -216,7 +292,8 @@ pub struct RefundInferenceSessionRequest {
 
 // ─── Operation + tx wrapper ──────────────────────────────────────────────────
 
-/// The v1 InferenceSettlement operations. Append-only if extended.
+/// The InferenceSettlement operations. **Append-only** — new variants are added
+/// at the end so existing bincode variant indices never shift.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InferenceSettlementOperation {
     OpenSession(OpenInferenceSessionRequest),
@@ -225,6 +302,11 @@ pub enum InferenceSettlementOperation {
     OpenDispute(OpenInferenceDisputeRequest),
     ResolveDispute(ResolveInferenceDisputeRequest),
     RefundSession(RefundInferenceSessionRequest),
+    // ── Verifier bonding (issue #78), appended ──
+    RegisterVerifier(RegisterVerifierRequest),
+    AddVerifierBond(AddVerifierBondRequest),
+    BeginVerifierUnbond,
+    WithdrawVerifierBond,
 }
 
 /// Transaction data wrapper carried by `TxPayload::InferenceSettlement`.
@@ -257,6 +339,11 @@ pub struct InferenceSession {
     /// = v1 behavior. New records always carry an explicit value.
     #[serde(default)]
     pub consistency: Option<InferenceConsistencyConfig>,
+    /// Optional verifier-bond requirement (issue #78), fixed at open time.
+    /// **Appended** field — same dormant-safety rationale as `consistency`.
+    /// `None` = no bond required, no slashing.
+    #[serde(default)]
+    pub bond_requirement: Option<InferenceVerifierBondRequirement>,
 }
 
 /// A paid reward claim (`INFERENCE_CLAIMS`).
@@ -269,7 +356,9 @@ pub struct InferenceClaim {
     pub status: InferenceClaimStatus,
 }
 
-/// A dispute record (`INFERENCE_DISPUTES`). Record-only; never slashes.
+/// A dispute record (`INFERENCE_DISPUTES`). Record-only; the dispute itself never
+/// slashes — slashing (issue #78) happens at `ResolveDispute(deny)` time when the
+/// session carries a bond requirement, and reduces the verifier's bond record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InferenceDispute {
     pub session_id: String,
@@ -280,4 +369,21 @@ pub struct InferenceDispute {
     pub opened_at_height: u64,
     pub resolved_at_height: Option<u64>,
     pub allow_claim: bool,
+}
+
+/// Per-verifier bond record (`INFERENCE_VERIFIERS`, issue #78). Keyed by
+/// [`verifier_key`]. Bond is accounting-in-record (native Koppa debited on
+/// register/add, credited back on withdraw); a denied dispute slashes it to
+/// `Address::ZERO`. No minting; supply is conserved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InferenceVerifierRecord {
+    pub verifier: Address,
+    /// Currently locked bond (withdrawable amount while `Unbonding`).
+    pub bond: u128,
+    pub status: InferenceVerifierStatus,
+    pub registered_at_height: u64,
+    /// Set when `BeginVerifierUnbond` runs; `None` while `Active`.
+    pub unbonding_started_height: Option<u64>,
+    /// `unbonding_started_height + inference_verifier_unbonding_period_blocks`.
+    pub unlock_height: Option<u64>,
 }

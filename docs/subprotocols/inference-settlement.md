@@ -19,10 +19,12 @@ wire format, storage, or records.
   remainder is refunded to the funder on close. Nothing is minted. (Mirrors the
   storage `fee_pool` pattern; fixed 800B supply is unchanged — see
   [economic-model.md](../architecture/economic-model.md).)
-- **No bond slashing in v1.** There is no on-chain verifier bond, so there is
-  nothing to slash. v1's economic levers are **reward denial**, **claim
-  withholding**, **escrow refund**, and **dispute records**. Bond slashing is a
-  future (v2) feature that requires a verifier-bond registry.
+- **Bond slashing is opt-in and gated (issue #78).** Base v1 has no bond; a
+  session may require a verifier bond and slash it **only** on a validator-quorum
+  denied dispute. Slashing is supply-conserving (burned to `Address::ZERO`, never
+  minted) — see **Verifier bonding and slashing** below. Sessions without a bond
+  requirement keep the v1 levers: **reward denial**, **claim withholding**,
+  **escrow refund**, and **dispute records**.
 - **Attestation v1 is untouched.** `InferenceAttestationDigest`,
   `InferenceAttestationTxData`, and the attestation column families are read-only
   from settlement's perspective and are never mutated.
@@ -78,6 +80,53 @@ config is rejected `Failed(363)`. A matured claim whose group is too small is
 rejected `Failed(362)`. Sessions with **no** consistency config are unaffected —
 v1 single-attestation claim behavior is unchanged.
 
+### Verifier bonding and slashing (issue #78, gated, opt-in)
+
+By default settlement is **optimistic / lazy-approved**: once a verifier's
+attestation clears finality + the dispute window, satisfies the session's
+consistency rule (if any), and no dispute is upheld against it, the verifier may
+claim — no one has to actively approve each honest claim. **A dispute is the
+overwrite mechanism**: it can block a pending claim during the window, and
+validator-quorum resolution either lets the claim proceed or denies it.
+
+**consistency decides eligibility; dispute resolution decides punishment.** A
+consistency-plurality failure only blocks reward eligibility (`Failed(362)`) — it
+never slashes. Slashing happens **only** through an explicit adjudication path: a
+validator-quorum `ResolveDispute(allow_claim = false)` on a session that carries a
+bond requirement.
+
+A funder opts a session into bonding by supplying a `bond_requirement` at
+`OpenSession`:
+
+- `min_bond` (`u128`, `> 0`) — a verifier must hold an `Active` bond of at least
+  this much to claim the session.
+- `slash_bps_on_denied_dispute` (`u16`, `0`–`10000`, `0` = no slashing) — on a
+  denied dispute the target's bond is reduced by
+  `min(bond, bond * slash_bps / 10000)`.
+
+**Verifier bond registry.** Verifiers manage their own bond (sender = verifier):
+
+- `RegisterVerifier { bond }` — locks native Koppa as bond (accounting-in-record,
+  like session escrow). A `Withdrawn` record may be re-registered with a fresh
+  bond; an `Active`/`Unbonding` record is rejected (`366`).
+- `AddVerifierBond { amount }` — top up an `Active` bond.
+- `BeginVerifierUnbond` — start the
+  `inference_verifier_unbonding_period_blocks` delay (status → `Unbonding`).
+- `WithdrawVerifierBond` — after the unlock height, return the remaining bond
+  (possibly reduced by slashes during unbonding) and mark `Withdrawn`.
+
+**Claim gating (bond-required sessions), in order:** no record → `367`; status not
+`Active` → `368`; bond `< min_bond` → `370`. Sessions **without** a
+`bond_requirement` are entirely unaffected — no registration, no slashing.
+
+**Slashing is supply-conserving and auditable.** No Koppa is minted; a slash moves
+the amount from the verifier's bond record to `Address::ZERO` (the same burn sink
+governance uses for forfeited proposal bonds). A denied dispute against a verifier
+with **no or zero** bond slashes zero — the reward denial still stands, and there
+is no mint or underflow. An `Unbonding` verifier is still slashable; only *claiming*
+requires `Active` status. This is **agreement-and-adjudication economics — it does
+not prove semantic AI correctness and performs no on-chain zkML verification.**
+
 The funder may **refund** the remaining escrow once the session is closable
 (expired or fully claimed) and no dispute is left unresolved. **A refund can never
 bypass a pending claim**: even at/after expiry, `RefundSession` is rejected while
@@ -125,6 +174,8 @@ Ships dormant behind:
 - `inference_settlement_max_session_duration_blocks: u64` — ceiling on escrow lock-up.
 - `inference_settlement_dispute_threshold_bps: Option<u16>` (default `None`) — validator-quorum threshold (basis points of the active validator set) that must sign `ResolveDispute`; disputes disabled when unset (`None`). **On mainnet this is set to `6667`** (both validators of the current 2-validator net must sign).
 - `inference_settlement_consistency_enabled_from_height: Option<u64>` (default `None`) — consistency/plurality mode gate (issue #77). When unset or unreached, a session cannot opt into a consistency rule (`Failed(361)`); single-verifier v1 claims are unaffected. Not part of the mainnet 8,900,000 cohort — an operator sets a height to activate it.
+- `inference_verifier_bonding_enabled_from_height: Option<u64>` (default `None`) — verifier bonding + slashing gate (issue #78). When unset or unreached, bond-registry ops and bond-requiring `OpenSession` fail `Failed(364)`; sessions without a bond requirement are unaffected. Not part of the 8,900,000 cohort.
+- `inference_verifier_unbonding_period_blocks: u64` (default ~201,600 ≈ 7 days) — delay between `BeginVerifierUnbond` and a permitted `WithdrawVerifierBond`.
 
 Below the gate, all settlement operations are rejected with `Failed(350)` (no
 fee, no state change). Attestation recording is unaffected either way.
@@ -147,7 +198,9 @@ fee, no state change). Attestation recording is unaffected either way.
 - `omninode_getInferenceDisputes(session_id)`
 - `omninode_getClaimableReward(session_id, verifier)` — eligibility, amount, unlock height, and (for consistency sessions) the consistency evaluation `{ required_min, threshold_bps, max_verifiers, matching_count, satisfied }`.
 - `omninode_getInferenceConsistency(session_id)` — the session's rule plus attestations grouped by the full digest tuple, with per-group `verifier_count` and currently-`eligible_count` (finalized + undisputed).
-- `omninode_build{Open|Fund}InferenceSession`, `omninode_buildClaimInferenceReward`, `omninode_build{Open|Resolve}InferenceDispute`, `omninode_buildRefundInferenceSession` — return an unsigned `TransactionV2` (hex) + signing hash. `omninode_buildOpenInferenceSession` accepts an optional `consistency` config `{ min_matching_verifiers, threshold_bps }`. `omninode_buildResolveInferenceDispute` accepts an optional `approvals` list of validator signatures (validator-quorum authorization).
+- `omninode_getVerifier(verifier)` — a verifier's bond record: `bond`, `status` (`Active`/`Unbonding`/`Withdrawn`), and unbonding timers (issue #78). `null` if never registered.
+- `omninode_build{Open|Fund}InferenceSession`, `omninode_buildClaimInferenceReward`, `omninode_build{Open|Resolve}InferenceDispute`, `omninode_buildRefundInferenceSession` — return an unsigned `TransactionV2` (hex) + signing hash. `omninode_buildOpenInferenceSession` accepts optional `consistency` `{ min_matching_verifiers, threshold_bps }` and `bond_requirement` `{ min_bond, slash_bps_on_denied_dispute }` configs. `omninode_buildResolveInferenceDispute` accepts an optional `approvals` list of validator signatures (validator-quorum authorization).
+- `omninode_build{RegisterVerifier, AddVerifierBond, BeginVerifierUnbond, WithdrawVerifierBond}` — verifier bond-registry builders (issue #78).
 
 ## Receipt codes (isolated 350-block)
 
@@ -158,7 +211,11 @@ fee, no state change). Attestation recording is unaffected either way.
 `358` duplicate claim/dispute · `359` unresolved/denied dispute blocks settlement ·
 `360` refund not available (not closable, or a claim is still within its maturity window) ·
 `361` consistency mode not enabled at this height · `362` insufficient verifier consistency for claim ·
-`363` invalid consistency configuration.
+`363` invalid consistency configuration ·
+`364` verifier bonding not enabled at this height · `365` invalid bond amount/requirement config ·
+`366` verifier already registered · `367` verifier not registered ·
+`368` verifier not active (unbonding/withdrawn) · `369` verifier unbonding not yet mature ·
+`370` insufficient verifier bond for claim.
 
 ## Privacy
 
@@ -168,12 +225,13 @@ status. Dispute evidence is an opaque commitment, never plaintext.
 
 ## Not in v1 (future)
 
-- Verifier-bond registry and **bond slashing** (v2).
 - Sponsored attestation (`sender ≠ verifier`) — requires `InferenceAttestationV2`.
 
 > Consistency/plurality reward mode shipped in v1.1 (issue #77, gated by
 > `inference_settlement_consistency_enabled_from_height`) — see **Consistency /
-> plurality mode** above.
+> plurality mode** above. Verifier bonding + slashing shipped in issue #78 (gated
+> by `inference_verifier_bonding_enabled_from_height`) — see **Verifier bonding
+> and slashing** above.
 
 > This subprotocol is **deployed and code-backed on mainnet** with
 > `inference_settlement_enabled_from_height` set to height 8,900,000 (active
