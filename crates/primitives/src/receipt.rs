@@ -89,6 +89,8 @@ impl TxStatus {
             TxStatus::Failed(51) => "duplicate InferenceAttestation for (session_id, verifier)",
             TxStatus::Failed(52) => "invalid OmniNode Stage 6 verifier signature",
             TxStatus::Failed(53) => "tx sender does not match verifier address (Ed25519 pubkey hash)",
+            TxStatus::Failed(54) => "sponsored inference attestation (v2) not enabled at this block height",
+            TxStatus::Failed(55) => "invalid verifier public key or malformed sponsored attestation envelope",
             // SRC-817/818 Education-LMS suite failures (Phase 2).
             TxStatus::Failed(70) => "education subprotocol not enabled at this block height",
             TxStatus::Failed(71) => "malformed education payload",

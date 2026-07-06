@@ -255,6 +255,16 @@ pub struct ChainParams {
     #[serde(default)]
     pub omninode_enabled_from_height: Option<u64>,
 
+    /// Sponsored inference attestation (v2 envelope) activation gate (issue #79).
+    /// `None` (default) = the sponsored/relayed submission path is dormant: a
+    /// `TxPayload::InferenceAttestationV2` is rejected free (`Failed(54)`, no fee).
+    /// v1 attestation (`sender == verifier`) is unaffected — it is governed only by
+    /// `omninode_enabled_from_height`. Sponsored attestation changes who *pays* to
+    /// submit, not who made the attestation. `#[serde(default)]` keeps existing
+    /// `genesis.json` dormant.
+    #[serde(default)]
+    pub omninode_sponsored_attestation_enabled_from_height: Option<u64>,
+
     /// Block height at which the SRC-817/818 Education-LMS suite
     /// activates. `None` = disabled forever; `Some(h)` = education txs
     /// executable from block `h` onward. Mirrors the OmniNode/SNIP V2
@@ -602,6 +612,7 @@ impl Default for ChainParams {
             // Activation is coordinated separately, after the chain has
             // shipped Phase 2-4 of the InferenceAttestation work.
             omninode_enabled_from_height: None,
+            omninode_sponsored_attestation_enabled_from_height: None,
             // Production-safe default: Education-LMS suite disabled.
             // Activation is coordinated separately, post Phase 2-6.
             education_enabled_from_height: None,
@@ -1120,6 +1131,26 @@ mod tests {
         let json = serde_json::to_string(&p2).unwrap();
         let p3: ChainParams = serde_json::from_str(&json).unwrap();
         assert_eq!(p3.inference_settlement_consistency_enabled_from_height, Some(8_900_000));
+    }
+
+    #[test]
+    fn sponsored_attestation_gate_default_and_round_trip() {
+        // Issue #79: dormant by default; absent-from-genesis decodes to None;
+        // explicit height round-trips. v1 attestation is unaffected.
+        let p = ChainParams::default();
+        assert_eq!(p.omninode_sponsored_attestation_enabled_from_height, None);
+        let mut value = serde_json::to_value(&p).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("omninode_sponsored_attestation_enabled_from_height");
+        let back: ChainParams = serde_json::from_value(value).unwrap();
+        assert_eq!(back.omninode_sponsored_attestation_enabled_from_height, None);
+        let mut p2 = ChainParams::default();
+        p2.omninode_sponsored_attestation_enabled_from_height = Some(9_100_000);
+        let json = serde_json::to_string(&p2).unwrap();
+        let p3: ChainParams = serde_json::from_str(&json).unwrap();
+        assert_eq!(p3.omninode_sponsored_attestation_enabled_from_height, Some(9_100_000));
     }
 
     #[test]

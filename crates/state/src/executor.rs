@@ -77,6 +77,15 @@ fn omninode_gate_open(params: &ChainParams, block_height: u64) -> bool {
     matches!(params.omninode_enabled_from_height, Some(h) if block_height >= h)
 }
 
+/// Sponsored inference attestation (v2 envelope) gate (issue #79). Dormant by
+/// default; the sponsored path is a dormant subprotocol entry point, so a
+/// gate-closed rejection is free (`Failed(54)`, no fee/mutation). Independent of
+/// `omninode_enabled_from_height` — v1 attestation is unaffected.
+#[inline]
+fn sponsored_attestation_gate_open(params: &ChainParams, block_height: u64) -> bool {
+    matches!(params.omninode_sponsored_attestation_enabled_from_height, Some(h) if block_height >= h)
+}
+
 /// OmniNode Inference Settlement activation gate (issue #61). Dormant by default
 /// (`None`); when closed, all settlement ops are rejected free (`Failed(350)`,
 /// no fee). Independent of `omninode_enabled_from_height` — attestation recording
@@ -1374,6 +1383,109 @@ impl BlockExecutor {
                             fee_paid: v2_tx.fee,
                         })
                     }
+                    TxPayload::InferenceAttestationV2(v2_att) => {
+                        // Sponsored attestation (issue #79). The outer sender is the
+                        // payer/sponsor (already authenticated as `v2_tx.from` by the
+                        // outer sig + pubkey→address check). The VERIFIER is the
+                        // attestation identity, taken from the envelope's
+                        // `verifier_public_key` — the sponsor never becomes the
+                        // verifier. Every pre-success failure returns `fee_paid: 0`
+                        // and mutates nothing.
+
+                        // 1. Base OmniNode gate must be open (attestation subprotocol
+                        //    active) AND the sponsored sub-gate must be open. Both are
+                        //    free, dormant entry points.
+                        if !omninode_gate_open(&self.params, block_height)
+                            || !sponsored_attestation_gate_open(&self.params, block_height)
+                        {
+                            return Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Failed(54), // sponsored v2 not enabled
+                                fee_paid: 0,
+                            });
+                        }
+
+                        // 2. Verifier identity + inner signature. `verify_...v2` first
+                        //    parses `verifier_public_key` (→ 55 on a bad point) then
+                        //    verifies the signature over the SAME v1 signing bytes
+                        //    (→ 52 on a bad signature). Note: no sender==verifier
+                        //    check — v2 explicitly allows payer != verifier.
+                        use sumchain_primitives::inference_attestation::{
+                            verify_attestation_v2_signature, AttestationError,
+                        };
+                        match verify_attestation_v2_signature(v2_att) {
+                            Ok(()) => {}
+                            Err(AttestationError::InvalidPublicKey)
+                            | Err(AttestationError::SessionIdTooLong(_)) => {
+                                return Ok(TxExecutionResult {
+                                    tx_hash,
+                                    status: TxStatus::Failed(55), // malformed v2 envelope
+                                    fee_paid: 0,
+                                });
+                            }
+                            Err(_) => {
+                                return Ok(TxExecutionResult {
+                                    tx_hash,
+                                    status: TxStatus::Failed(52), // invalid verifier signature
+                                    fee_paid: 0,
+                                });
+                            }
+                        }
+
+                        // 3. Verifier address is derived from the ENVELOPE key, not
+                        //    the sender. Dedup + storage key are `(session_id,
+                        //    verifier_address)` — identical to v1, so v1 and v2 share
+                        //    one keyspace and cannot double-submit the same pair.
+                        let verifier_address = sumchain_primitives::Address::from_public_key(
+                            &v2_att.verifier_public_key,
+                        );
+                        let cf_key = sumchain_primitives::inference_attestation::inference_attestation_key(
+                            &v2_att.digest.session_id,
+                            &verifier_address,
+                        );
+                        if self.inference_attestation_executor.exists(&cf_key)? {
+                            return Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Failed(51), // DuplicateAttestation
+                                fee_paid: 0,
+                            });
+                        }
+
+                        // 4. Fee is paid by the SPONSOR (outer sender).
+                        let sender_balance = self.state.get_balance(&v2_tx.from)?;
+                        if sender_balance < v2_tx.fee {
+                            return Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::InsufficientBalance,
+                                fee_paid: 0,
+                            });
+                        }
+                        self.state.deduct(&v2_tx.from, v2_tx.fee)?;
+                        self.state.credit(proposer, v2_tx.fee)?;
+                        self.state.increment_nonce(&v2_tx.from)?;
+
+                        // 5. Store a verifier-attributed record IDENTICAL to v1 — the
+                        //    sponsor is not recorded (record shape is frozen). The
+                        //    `put` verifier arg is the ENVELOPE verifier, not the sender.
+                        let record = sumchain_primitives::inference_attestation::InferenceAttestationRecord {
+                            digest: v2_att.digest.clone(),
+                            verifier_signature: v2_att.verifier_signature,
+                            included_at_height: block_height,
+                            tx_hash,
+                        };
+                        self.inference_attestation_executor
+                            .put(&cf_key, &record, &verifier_address)?;
+
+                        debug!(
+                            "Sponsored InferenceAttestationV2 {} executed: session_id={:?} verifier={} sponsor={} height={}",
+                            tx_hash, v2_att.digest.session_id, verifier_address, v2_tx.from, block_height,
+                        );
+                        Ok(TxExecutionResult {
+                            tx_hash,
+                            status: TxStatus::Success,
+                            fee_paid: v2_tx.fee,
+                        })
+                    }
                     TxPayload::InferenceSettlement(settlement_data) => {
                         // Activation gate (issue #61). Checked BEFORE any fee so a
                         // gate-dormant rejection costs nothing and mutates nothing.
@@ -2441,6 +2553,13 @@ impl BlockExecutor {
                 // rejections. No new semantics on this path.
                 return Err(StateError::InvalidOperation(
                     "InferenceSettlement is only supported in V2 transactions".to_string(),
+                ));
+            }
+            TxPayload::InferenceAttestationV2(_) => {
+                // Sponsored attestation is a V2-only subprotocol (issue #79);
+                // mirror the adjacent rejections. No new semantics on this path.
+                return Err(StateError::InvalidOperation(
+                    "InferenceAttestationV2 is only supported in V2 transactions".to_string(),
                 ));
             }
         }

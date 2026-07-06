@@ -488,6 +488,7 @@ impl RpcServer {
             TxType::Education => "Education",
             TxType::Governance => "Governance",
             TxType::InferenceSettlement => "InferenceSettlement",
+            TxType::InferenceAttestationV2 => "InferenceAttestationV2",
         }
         .to_string();
 
@@ -503,7 +504,8 @@ impl RpcServer {
             TxPayload::Transfer { .. }
             | TxPayload::ContractDeploy(_)
             | TxPayload::ContractCall(_)
-            | TxPayload::InferenceAttestation(_) => None,
+            | TxPayload::InferenceAttestation(_)
+            | TxPayload::InferenceAttestationV2(_) => None,
             TxPayload::Nft(d) => Some(ident(format!("{:?}", d.operation))),
             TxPayload::Token(d) => Some(ident(format!("{:?}", d.operation))),
             TxPayload::Staking(d) => Some(ident(format!("{:?}", d.operation))),
@@ -1352,6 +1354,64 @@ impl SumChainApiServer for RpcServer {
             self.consensus.current_height(),
             self.consensus.finality_depth(),
         ))
+    }
+
+    async fn sum_build_sponsored_inference_attestation(
+        &self,
+        request: crate::types::SponsoredAttestationBuildRequest,
+    ) -> std::result::Result<crate::types::SponsoredAttestationBuildResponse, jsonrpsee::types::ErrorObjectOwned>
+    {
+        use sumchain_primitives::inference_attestation::{
+            InferenceAttestationDigest, InferenceAttestationV2TxData,
+        };
+        use sumchain_primitives::{TransactionV2, TxPayload};
+
+        // `from` is the sponsor/payer — the outer sender. The verifier is carried
+        // in the envelope; the builder never conflates the two.
+        let from = self.parse_address(&request.from)?;
+        let digest = InferenceAttestationDigest {
+            session_id: request.session_id,
+            model_hash: self.parse_hex32(&request.model_hash)?,
+            manifest_root: self.parse_hex32(&request.manifest_root)?,
+            response_hash: self.parse_hex32(&request.response_hash)?,
+            proof_root: self.parse_hex32(&request.proof_root)?,
+        };
+        let verifier_public_key = self.parse_hex32(&request.verifier_public_key)?;
+        let sig_bytes = hex::decode(request.verifier_signature.trim_start_matches("0x"))
+            .map_err(|_| RpcError::InvalidParams("invalid verifier_signature hex".into()))?;
+        let verifier_signature: [u8; 64] = sig_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| RpcError::InvalidParams("verifier_signature must be 64 bytes".into()))?;
+
+        let fee = request.fee.unwrap_or(GOV_DEFAULT_FEE);
+        let nonce = self
+            .state
+            .get_nonce(&from)
+            .map_err(|e| RpcError::Internal(format!("Failed to get nonce: {}", e)))?;
+        let chain_id = self.state.chain_id();
+        let tx = TransactionV2 {
+            chain_id,
+            from,
+            fee,
+            nonce,
+            payload: TxPayload::InferenceAttestationV2(InferenceAttestationV2TxData {
+                digest,
+                verifier_public_key,
+                verifier_signature,
+            }),
+        };
+        let signing_hash = tx.signing_hash();
+        let unsigned = bincode::serialize(&tx)
+            .map_err(|e| RpcError::Internal(format!("Failed to encode tx: {}", e)))?;
+        Ok(crate::types::SponsoredAttestationBuildResponse {
+            unsigned_tx: format!("0x{}", hex::encode(unsigned)),
+            signing_hash: format!("0x{}", hex::encode(signing_hash.as_bytes())),
+            from: from.to_base58(),
+            nonce,
+            fee,
+            chain_id,
+        })
     }
 
     // ========================================================================
@@ -9401,6 +9461,55 @@ mod messaging_rpc_tests {
             .expect("record present");
         assert_eq!(info.bond, 5_000_000);
         assert_eq!(info.status, "Active");
+    }
+
+    // Issue #79: sponsored attestation builder round-trip (payer != verifier).
+    #[tokio::test]
+    async fn sum_build_sponsored_attestation_roundtrips() {
+        use crate::types::SponsoredAttestationBuildRequest;
+        use sumchain_primitives::inference_attestation::InferenceAttestationV2TxData;
+        use sumchain_primitives::{TransactionV2, TxPayload};
+        let (srv, _db, _dir) = server();
+        let sponsor = KeyPair::generate();
+        let verifier = KeyPair::generate();
+        let vpk = *verifier.public_key().as_bytes();
+
+        let resp = srv
+            .sum_build_sponsored_inference_attestation(SponsoredAttestationBuildRequest {
+                from: sponsor.address().to_base58(),
+                session_id: "sess-79".to_string(),
+                model_hash: format!("0x{}", hex::encode([1u8; 32])),
+                manifest_root: format!("0x{}", hex::encode([2u8; 32])),
+                response_hash: format!("0x{}", hex::encode([3u8; 32])),
+                proof_root: format!("0x{}", hex::encode([4u8; 32])),
+                verifier_public_key: format!("0x{}", hex::encode(vpk)),
+                verifier_signature: format!("0x{}", hex::encode([7u8; 64])),
+                fee: Some(1000),
+            })
+            .await
+            .unwrap();
+        // The builder attributes the outer tx to the SPONSOR/payer.
+        assert_eq!(resp.from, sponsor.address().to_base58());
+        assert_eq!(resp.fee, 1000);
+
+        let bytes = hex::decode(resp.unsigned_tx.trim_start_matches("0x")).unwrap();
+        let tx = TransactionV2::from_bytes(&bytes).unwrap();
+        assert_eq!(tx.from, sponsor.address(), "outer sender is the sponsor");
+        match tx.payload {
+            TxPayload::InferenceAttestationV2(InferenceAttestationV2TxData {
+                digest,
+                verifier_public_key,
+                ..
+            }) => {
+                assert_eq!(digest.session_id, "sess-79");
+                assert_eq!(digest.model_hash, [1u8; 32]);
+                // The verifier identity in the envelope is the VERIFIER's key,
+                // never the sponsor's.
+                assert_eq!(verifier_public_key, vpk);
+                assert_ne!(verifier_public_key, *sponsor.public_key().as_bytes());
+            }
+            other => panic!("wrong payload: {:?}", other),
+        }
     }
 }
 

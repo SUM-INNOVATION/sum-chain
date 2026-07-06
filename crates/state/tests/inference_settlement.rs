@@ -7,7 +7,7 @@
 
 mod common;
 use common::{build_signed_attestation_tx, fund, params_omninode_enabled, sample_digest,
-    setup_with_params, CHAIN_ID};
+    setup_with_params, stage6_sign, CHAIN_ID};
 
 use std::sync::Arc;
 
@@ -1263,4 +1263,51 @@ fn supply_conserved_across_register_open_slash_withdraw() {
     executor.execute_tx(&settlement_tx(&v, 2, InferenceSettlementOperation::BeginVerifierUnbond), &p, 60, 1000).unwrap();
     executor.execute_tx(&settlement_tx(&v, 3, InferenceSettlementOperation::WithdrawVerifierBond), &p, 60 + UNBOND_PERIOD, 1000).unwrap();
     assert_eq!(reconcile(&state, &db), funded, "after withdraw");
+}
+
+// ── Sponsored attestation × settlement (issue #79) ───────────────────────────
+
+#[test]
+fn settlement_claim_uses_verifier_not_sponsor() {
+    // A sponsored (v2) attestation is submitted by a SPONSOR on behalf of a
+    // VERIFIER. Settlement must pay the verifier — the sponsor, who holds no
+    // attestation, cannot claim.
+    let mut pr = params_enabled(None);
+    pr.omninode_sponsored_attestation_enabled_from_height = Some(0);
+    let (state, _db, _dir, executor) = setup_with_params(pr);
+    let funder = KeyPair::generate();
+    let sponsor = KeyPair::generate();
+    let verifier = KeyPair::generate();
+    let proposer = KeyPair::generate();
+    for kp in [&funder, &sponsor, &verifier] { fund(&state, kp, 10_000_000); }
+    let p = proposer.address();
+
+    executor.execute_tx(&settlement_tx(&funder, 0, open_op("s", 2, 2 * REWARD, 0, 1000)), &p, 1, 1000).unwrap();
+
+    // Sponsor submits a v2 attestation for the verifier at height 5.
+    let digest = sample_digest("s");
+    let payload = TxPayload::InferenceAttestationV2(
+        sumchain_primitives::inference_attestation::InferenceAttestationV2TxData {
+            digest,
+            verifier_public_key: *verifier.public_key().as_bytes(),
+            verifier_signature: stage6_sign(&verifier, &sample_digest("s")),
+        },
+    );
+    let atx = {
+        let tx = TransactionV2 { chain_id: CHAIN_ID, from: sponsor.address(), fee: FEE, nonce: 0, payload };
+        let h = tx.signing_hash();
+        SignedTransaction::new_v2(tx, *sign(h.as_bytes(), sponsor.private_key()).as_bytes(), *sponsor.public_key().as_bytes())
+    };
+    assert!(executor.execute_tx(&atx, &p, 5, 1000).unwrap().status.is_success(), "sponsored attest");
+
+    // Sponsor has NO attestation → claim fails 356.
+    assert!(matches!(
+        claim_status(&executor, &p, &sponsor, "s", 1, 8),
+        TxStatus::Failed(356)
+    ), "sponsor cannot claim — it is not the verifier");
+
+    // Verifier (never paid a fee to submit) can claim the reward.
+    let vbal = state.get_balance(&verifier.address()).unwrap();
+    assert!(claim_status(&executor, &p, &verifier, "s", 0, 8).is_success(), "verifier claims");
+    assert_eq!(state.get_balance(&verifier.address()).unwrap(), vbal - FEE + REWARD);
 }

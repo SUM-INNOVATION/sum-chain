@@ -216,6 +216,16 @@ pub trait SumChainApi {
         tx_hash: String,
     ) -> Result<InferenceAttestationStatusInfo, jsonrpsee::types::ErrorObjectOwned>;
 
+    /// Build an unsigned **sponsored** (v2) inference attestation tx (issue #79).
+    /// No keys — the returned unsigned tx is signed offline by the sponsor/payer
+    /// (`from`); the verifier is carried in the envelope. The canonical attestation
+    /// remains verifier-keyed for dedup, storage, and settlement.
+    #[method(name = "sum_buildSponsoredInferenceAttestation")]
+    async fn sum_build_sponsored_inference_attestation(
+        &self,
+        request: crate::types::SponsoredAttestationBuildRequest,
+    ) -> Result<crate::types::SponsoredAttestationBuildResponse, jsonrpsee::types::ErrorObjectOwned>;
+
     // ── OmniNode Inference Settlement (issue #61) — reads ───────────────────
     /// Get a session's settlement record, or `null` if none.
     #[method(name = "omninode_getInferenceSession")]

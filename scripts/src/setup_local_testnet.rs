@@ -97,6 +97,7 @@ fn main() -> Result<()> {
             inference_settlement_consistency_enabled_from_height: None, // issue #77: dormant
             inference_verifier_bonding_enabled_from_height: None, // issue #78: dormant
             inference_verifier_unbonding_period_blocks: 201_600,
+            omninode_sponsored_attestation_enabled_from_height: None, // issue #79: dormant
         },
     );
 

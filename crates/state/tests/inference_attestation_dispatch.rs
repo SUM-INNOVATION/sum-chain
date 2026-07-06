@@ -292,3 +292,160 @@ fn dispatch_populates_session_index() {
         "session index must contain both verifiers after successful dispatch"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Sponsored attestation v2 (issue #79): payer != verifier
+// ─────────────────────────────────────────────────────────────────────────
+
+use sumchain_crypto::sign;
+use sumchain_primitives::inference_attestation::InferenceAttestationV2TxData;
+use sumchain_primitives::{SignedTransaction, TransactionV2, TxPayload};
+use common::{stage6_sign, CHAIN_ID};
+
+/// omninode + sponsored-attestation gates both open.
+fn params_sponsored_enabled() -> ChainParams {
+    let mut p = params_omninode_enabled();
+    p.omninode_sponsored_attestation_enabled_from_height = Some(0);
+    p
+}
+
+/// Build a sponsored v2 attestation tx: the SPONSOR signs the outer tx; the
+/// VERIFIER signs the inner digest. `wrong_verifier_pk` optionally swaps in a
+/// different (valid) key so the inner sig no longer matches.
+fn build_sponsored_tx(
+    sponsor: &KeyPair,
+    verifier: &KeyPair,
+    nonce: u64,
+    fee: u128,
+    digest: sumchain_primitives::inference_attestation::InferenceAttestationDigest,
+    tamper_sig: bool,
+    override_pk: Option<[u8; 32]>,
+) -> SignedTransaction {
+    let mut verifier_signature = stage6_sign(verifier, &digest);
+    if tamper_sig {
+        verifier_signature[0] ^= 0xff;
+    }
+    let verifier_public_key = override_pk.unwrap_or(*verifier.public_key().as_bytes());
+    let payload = TxPayload::InferenceAttestationV2(InferenceAttestationV2TxData {
+        digest,
+        verifier_public_key,
+        verifier_signature,
+    });
+    let tx = TransactionV2 { chain_id: CHAIN_ID, from: sponsor.address(), fee, nonce, payload };
+    let outer_hash = tx.signing_hash();
+    let outer_sig = sign(outer_hash.as_bytes(), sponsor.private_key());
+    SignedTransaction::new_v2(tx, *outer_sig.as_bytes(), *sponsor.public_key().as_bytes())
+}
+
+#[test]
+fn v2_sponsored_succeeds_and_stores_under_verifier_not_sponsor() {
+    let (state, db, _dir, executor) = setup_with_params(params_sponsored_enabled());
+    let sponsor = KeyPair::generate();
+    let verifier = KeyPair::generate();
+    let proposer = KeyPair::generate();
+    fund(&state, &sponsor, 1_000_000_000);
+    // verifier is NOT funded — it never pays.
+    let v_bal0 = state.get_balance(&verifier.address()).unwrap();
+    let s_bal0 = state.get_balance(&sponsor.address()).unwrap();
+
+    let digest = sample_digest("sponsored-vec");
+    let tx = build_sponsored_tx(&sponsor, &verifier, 0, 1_000, digest.clone(), false, None);
+    let r = executor.execute_tx(&tx, &proposer.address(), 1, 0).unwrap();
+    assert!(r.status.is_success(), "sponsored attestation should succeed: {:?}", r.status);
+
+    // Sponsor paid the fee + nonce; verifier untouched.
+    assert_eq!(state.get_balance(&sponsor.address()).unwrap(), s_bal0 - 1_000);
+    assert_eq!(state.get_nonce(&sponsor.address()).unwrap(), 1);
+    assert_eq!(state.get_balance(&verifier.address()).unwrap(), v_bal0, "verifier never pays");
+    assert_eq!(state.get_nonce(&verifier.address()).unwrap(), 0, "verifier nonce untouched");
+
+    // Record stored under the VERIFIER key, not the sponsor key.
+    let vkey = inference_attestation_key(&digest.session_id, &verifier.address());
+    let skey = inference_attestation_key(&digest.session_id, &sponsor.address());
+    assert!(db.get(cf::INFERENCE_ATTESTATIONS, &vkey).unwrap().is_some(), "stored under verifier");
+    assert!(db.get(cf::INFERENCE_ATTESTATIONS, &skey).unwrap().is_none(), "NOT stored under sponsor");
+    // Session index lists the verifier, not the sponsor.
+    let verifiers = InferenceAttestationExecutor::new(db.clone())
+        .list_verifiers_by_session(&digest.session_id)
+        .unwrap();
+    assert_eq!(verifiers, vec![verifier.address()], "index attributes to verifier");
+}
+
+#[test]
+fn v2_gate_closed_is_free_no_mutation() {
+    // omninode ON, sponsored sub-gate OFF → Failed(54), free, nothing written.
+    let (state, db, _dir, executor) = setup_with_params(params_omninode_enabled());
+    let sponsor = KeyPair::generate();
+    let verifier = KeyPair::generate();
+    let proposer = KeyPair::generate();
+    fund(&state, &sponsor, 1_000_000_000);
+    let bal0 = state.get_balance(&sponsor.address()).unwrap();
+
+    let digest = sample_digest("gate-closed-vec");
+    let tx = build_sponsored_tx(&sponsor, &verifier, 0, 1_000, digest.clone(), false, None);
+    let r = executor.execute_tx(&tx, &proposer.address(), 1, 0).unwrap();
+    assert!(matches!(r.status, TxStatus::Failed(54)), "got {:?}", r.status);
+    assert_eq!(r.fee_paid, 0, "sponsored gate-closed is free");
+    assert_eq!(state.get_balance(&sponsor.address()).unwrap(), bal0, "no fee");
+    assert_eq!(state.get_nonce(&sponsor.address()).unwrap(), 0, "no nonce bump");
+    let vkey = inference_attestation_key(&digest.session_id, &verifier.address());
+    assert!(db.get(cf::INFERENCE_ATTESTATIONS, &vkey).unwrap().is_none(), "no CF write");
+}
+
+#[test]
+fn v2_bad_verifier_signature_52() {
+    let (state, _db, _dir, executor) = setup_with_params(params_sponsored_enabled());
+    let sponsor = KeyPair::generate();
+    let verifier = KeyPair::generate();
+    let other = KeyPair::generate();
+    let proposer = KeyPair::generate();
+    fund(&state, &sponsor, 1_000_000_000);
+    let digest = sample_digest("bad-sig-vec");
+
+    // Tampered inner signature → 52.
+    let t = build_sponsored_tx(&sponsor, &verifier, 0, 1_000, digest.clone(), true, None);
+    assert!(matches!(executor.execute_tx(&t, &proposer.address(), 1, 0).unwrap().status, TxStatus::Failed(52)));
+
+    // Valid sig by `verifier` but envelope claims a DIFFERENT (valid) pubkey →
+    // the sponsor cannot swap in another verifier: sig no longer matches → 52.
+    let m = build_sponsored_tx(&sponsor, &verifier, 0, 1_000, digest, false, Some(*other.public_key().as_bytes()));
+    assert!(matches!(executor.execute_tx(&m, &proposer.address(), 1, 0).unwrap().status, TxStatus::Failed(52)));
+}
+
+#[test]
+fn v2_malformed_envelope_oversize_session_55() {
+    let (state, _db, _dir, executor) = setup_with_params(params_sponsored_enabled());
+    let sponsor = KeyPair::generate();
+    let verifier = KeyPair::generate();
+    let proposer = KeyPair::generate();
+    fund(&state, &sponsor, 1_000_000_000);
+
+    // session_id > MAX_SESSION_ID_BYTES (256) → malformed envelope → 55.
+    let mut digest = sample_digest("x");
+    digest.session_id = "a".repeat(300);
+    let tx = build_sponsored_tx(&sponsor, &verifier, 0, 1_000, digest, false, None);
+    let r = executor.execute_tx(&tx, &proposer.address(), 1, 0).unwrap();
+    assert!(matches!(r.status, TxStatus::Failed(55)), "got {:?}", r.status);
+    assert_eq!(r.fee_paid, 0, "malformed envelope pays nothing");
+}
+
+#[test]
+fn v2_duplicate_and_cross_version_dedup_51() {
+    let (state, _db, _dir, executor) = setup_with_params(params_sponsored_enabled());
+    let sponsor = KeyPair::generate();
+    let verifier = KeyPair::generate();
+    let proposer = KeyPair::generate();
+    fund(&state, &sponsor, 1_000_000_000);
+    fund(&state, &verifier, 1_000_000_000);
+    let digest = sample_digest("dup-vec");
+
+    // First v2 submission succeeds.
+    let a = build_sponsored_tx(&sponsor, &verifier, 0, 1_000, digest.clone(), false, None);
+    assert!(executor.execute_tx(&a, &proposer.address(), 1, 0).unwrap().status.is_success());
+    // Second v2 for the same (session, verifier) → 51.
+    let b = build_sponsored_tx(&sponsor, &verifier, 1, 1_000, digest.clone(), false, None);
+    assert!(matches!(executor.execute_tx(&b, &proposer.address(), 2, 0).unwrap().status, TxStatus::Failed(51)));
+    // A v1 self-submission by the verifier for the SAME pair also → 51 (shared keyspace).
+    let v1 = build_signed_attestation_tx(&verifier, 0, 1_000, digest, false);
+    assert!(matches!(executor.execute_tx(&v1, &proposer.address(), 3, 0).unwrap().status, TxStatus::Failed(51)));
+}
