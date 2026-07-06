@@ -85,16 +85,17 @@ export default function ComputePage() {
             </Card>
           </Reveal>
           <Reveal delay={0.1}>
-            <Callout tone="dormant" title="Settlement is implemented but dormant">
-              Attestation v1 records verifier-signed results only. Escrow-funded inference{' '}
-              <strong>settlement</strong> (rewards, refunds, disputes) is implemented behind{' '}
-              <MonoTag>inference_settlement_enabled_from_height</MonoTag> and is <strong>dormant</strong>{' '}
-              on mainnet — the chain does not pay inference nodes until it is activated. v1 has{' '}
-              <strong>no bond slashing</strong>: the levers are reward denial, claim withholding, and
-              escrow refund. Dispute resolution is <strong>validator-quorum controlled</strong> — a
-              basis-point threshold (<MonoTag>inference_settlement_dispute_threshold_bps</MonoTag>) of the
-              active validator set must sign, not a personal resolver key; non-signing validators abstain
-              but still count in the denominator. Disputes are disabled unless the threshold is set.
+            <Callout tone="dormant" title="Settlement is deployed — pending activation at height 8,900,000">
+              Attestation v1 (live) records verifier-signed results only. Escrow-funded inference{' '}
+              <strong>settlement</strong> (rewards, refunds, disputes) is deployed with{' '}
+              <MonoTag>inference_settlement_enabled_from_height</MonoTag> set to <MonoTag>8,900,000</MonoTag>{' '}
+              — the chain does not pay inference nodes until the chain reaches that height, then it
+              activates automatically. v1 has <strong>no bond slashing</strong>: the levers are reward
+              denial, claim withholding, and escrow refund. Dispute resolution is{' '}
+              <strong>validator-quorum controlled</strong> — a basis-point threshold
+              (<MonoTag>inference_settlement_dispute_threshold_bps</MonoTag>) of the active validator set
+              must sign, not a personal resolver key; non-signing validators abstain but still count in
+              the denominator.
             </Callout>
           </Reveal>
           <Reveal delay={0.15}>

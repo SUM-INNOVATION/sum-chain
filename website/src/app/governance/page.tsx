@@ -1,12 +1,13 @@
 import type { Metadata } from 'next';
 import PageShell from '@/components/PageShell';
+import { LiveStatus } from '@/components/LiveStatus';
 import { SectionHeader, Reveal, MonoTag } from '@/components/ui/primitives';
 import { Card, SpecList, StepFlow, Callout, SourceLinks } from '@/components/ui/blocks';
 
 export const metadata: Metadata = {
   title: 'Governance | SUM Chain',
   description:
-    'SUM Chain on-chain governance v1: record-first, SRC-20 token-holder snapshot voting, proposal bonds, and a single TreasurySpend on-chain execution path. Code-backed and dormant until activated.',
+    'SUM Chain on-chain governance v1: record-first, validator-quorum admin authority, SRC-20 token-holder snapshot voting, proposal bonds, and a single TreasurySpend on-chain execution path. Deployed on mainnet with the activation gate set to height 8,900,000.',
 };
 
 const LIFECYCLE = [
@@ -27,20 +28,21 @@ export default function GovernancePage() {
   return (
     <PageShell
       kicker="On-chain governance v1"
-      status="dormant"
+      statusNode={<LiveStatus feature="governance" />}
       title="Record-first governance, respecting validators"
-      intro="Token holders decide; the chain records the decision. Governance v1 is fully implemented in the node, but ships dormant — it does nothing until a network coordinates activation."
+      intro="Token holders decide; the chain records the decision. Governance v1 is fully implemented and deployed on mainnet, with its activation gate set to height 8,900,000 — it becomes active automatically once the chain reaches that height."
     >
-      {/* Dormant banner */}
+      {/* Activation banner */}
       <section className="border-b border-[var(--border)]">
         <div className="mx-auto max-w-6xl px-6 py-10 lg:px-8">
-          <Callout tone="dormant" title="Dormant until coordinated activation">
-            On-chain governance is inert until a coordinated validator activation sets{' '}
-            <MonoTag>governance_enabled_from_height</MonoTag> and the{' '}
-            <MonoTag>ChainParams.governance</MonoTag> parameters. Neither is set on mainnet, so
-            governance transactions are rejected today. No final token id, quorum, pass threshold,
-            proposal bond, voting period, or activation height is fixed here — those are set per
-            activation.
+          <Callout tone="dormant" title="Pending activation at height 8,900,000">
+            Governance is deployed with{' '}
+            <MonoTag>governance_enabled_from_height</MonoTag> set to <MonoTag>8,900,000</MonoTag> and
+            the <MonoTag>ChainParams.governance</MonoTag> parameters configured (validator-quorum
+            authority, quorum and pass thresholds, voting period, proposal bond). Governance
+            transactions are rejected until the chain reaches that height, after which the flow
+            activates automatically — no redeploy. Admin authority is a{' '}
+            <strong>validator quorum</strong>, not a single council address.
           </Callout>
         </div>
       </section>

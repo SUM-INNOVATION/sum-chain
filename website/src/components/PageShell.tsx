@@ -12,12 +12,15 @@ export default function PageShell({
   title,
   intro,
   status,
+  statusNode,
   children,
 }: {
   kicker: string;
   title: ReactNode;
   intro: ReactNode;
   status?: Status;
+  /** Live/dynamic status island (e.g. <LiveStatus feature="governance" />). Takes precedence over `status`. */
+  statusNode?: ReactNode;
   children: ReactNode;
 }) {
   return (
@@ -33,7 +36,7 @@ export default function PageShell({
         <div className="relative mx-auto max-w-6xl px-6 lg:px-8">
           <div className="flex flex-wrap items-center gap-3">
             <span className="kicker">{kicker}</span>
-            {status && <StatusPill status={status} />}
+            {statusNode ?? (status && <StatusPill status={status} />)}
           </div>
           <h1 className="mt-4 max-w-3xl font-[family-name:var(--font-display)] text-4xl font-semibold leading-tight tracking-tight sm:text-5xl">
             {title}

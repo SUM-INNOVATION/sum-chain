@@ -2,12 +2,16 @@
 
 import Link from 'next/link';
 import { Reveal, StatusPill, MonoTag, type Status } from '@/components/ui/primitives';
+import { LiveStatus } from '@/components/LiveStatus';
+import type { FeatureKey } from '@/lib/chainStatus';
 
 type Topic = {
   id: string;
   kicker: string;
   title: string;
   status?: Status;
+  /** When set, status is read live from the chain (auto-flips at the gate). */
+  feature?: FeatureKey;
   bullets: string[];
   tags: string[];
   spec: { k: string; v: string }[];
@@ -66,19 +70,19 @@ const TOPICS: Topic[] = [
   {
     id: 'governance',
     kicker: 'On-chain governance',
-    title: 'Record-first, code-backed',
-    status: 'dormant',
+    title: 'Record-first, validator-controlled',
+    feature: 'governance',
     bullets: [
       'SRC-20 token holders create proposals and vote with a balance snapshot frozen at proposal creation.',
-      'Most classes are RecordOnly. The one on-chain auto-exec path is a TreasurySpend: a single native payout from a configured treasury.',
-      'Governance cannot force validator upgrades or mutate consensus, the validator set, or chain params. It is dormant until activated.',
+      'Admin authority (asset registration, validator-cancel) is a validator quorum — not a single council address. Most classes are RecordOnly; the one on-chain auto-exec path is a TreasurySpend native payout from a configured treasury.',
+      'Governance cannot force validator upgrades or mutate consensus, the validator set, or chain params. Deployed with the gate set to height 8,900,000 — active once reached.',
     ],
-    tags: ['gov_*', 'TreasurySpend', 'snapshot'],
+    tags: ['gov_*', 'validator-quorum', 'snapshot'],
     spec: [
       { k: 'model', v: 'record-first approval' },
-      { k: 'voting_power', v: 'TOKEN_BALANCES snapshot' },
+      { k: 'authority', v: 'validator quorum' },
       { k: 'on-chain exec', v: 'TreasurySpend only' },
-      { k: 'mainnet status', v: 'dormant' },
+      { k: 'mainnet status', v: 'gate @ 8,900,000' },
     ],
     href: '/governance',
     cta: 'Governance',
@@ -109,7 +113,11 @@ function SpecPanel({ topic }: { topic: Topic }) {
     <div className="glass rounded-2xl p-6">
       <div className="flex items-center justify-between">
         <span className="mono text-xs text-muted">{topic.id}.spec</span>
-        {topic.status && <StatusPill status={topic.status} />}
+        {topic.feature ? (
+          <LiveStatus feature={topic.feature} />
+        ) : (
+          topic.status && <StatusPill status={topic.status} />
+        )}
       </div>
       <dl className="mt-5 divide-y divide-[var(--border)]">
         {topic.spec.map((row) => (
@@ -134,7 +142,11 @@ export default function ProtocolOverview() {
               <Reveal className={flip ? 'lg:order-2' : ''}>
                 <div className="flex items-center gap-3">
                   <span className="kicker">{t.kicker}</span>
-                  {t.status && <StatusPill status={t.status} />}
+                  {t.feature ? (
+                    <LiveStatus feature={t.feature} />
+                  ) : (
+                    t.status && <StatusPill status={t.status} />
+                  )}
                 </div>
                 <h2 className="mt-4 font-[family-name:var(--font-display)] text-3xl font-semibold tracking-tight sm:text-4xl">
                   {t.title}
