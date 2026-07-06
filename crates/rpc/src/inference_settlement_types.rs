@@ -113,6 +113,11 @@ pub struct OmniBuildResolveDisputeRequest {
     pub verifier: String,
     pub allow_claim: bool,
     pub fee: Option<u128>,
+    /// Validator approvals reaching the configured dispute threshold (collected
+    /// off-chain over the resolve-dispute signing bytes). Required for the tx to
+    /// pass authority.
+    #[serde(default)]
+    pub approvals: Vec<crate::types::ValidatorApprovalInput>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

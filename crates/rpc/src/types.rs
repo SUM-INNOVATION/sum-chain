@@ -3,6 +3,20 @@
 use serde::{Deserialize, Serialize};
 use sumchain_primitives::{BlockHeight, Nonce, Timestamp};
 
+/// A validator's quorum approval, as supplied to an unsigned-tx builder.
+///
+/// Validator-gated actions (governance `RegisterAsset` / validator-cancel,
+/// settlement `ResolveDispute`) are authorized by a quorum of the active PoA
+/// validator set; the approvals are Ed25519 signatures collected off-chain over
+/// the action's domain-separated signing bytes. Both fields are hex.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidatorApprovalInput {
+    /// Validator Ed25519 public key, hex (64 chars).
+    pub pubkey: String,
+    /// Ed25519 signature over the action's signing bytes, hex (128 chars).
+    pub signature: String,
+}
+
 /// Block info for RPC responses
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockInfo {

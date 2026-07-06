@@ -56,6 +56,10 @@ pub struct GovBuildCancelProposalRequest {
     pub from: String,
     pub proposal_id: String,
     pub fee: Option<u128>,
+    /// Validator approvals for a validator-quorum cancel. Empty (default) for a
+    /// proposer self-cancel, which needs no approvals.
+    #[serde(default)]
+    pub approvals: Vec<crate::types::ValidatorApprovalInput>,
 }
 
 // ── Builder response ─────────────────────────────────────────────────────────
