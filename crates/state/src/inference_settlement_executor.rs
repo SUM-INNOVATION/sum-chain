@@ -100,6 +100,7 @@ impl InferenceSettlementExecutor {
     /// Dispatch a settlement operation. The activation gate is enforced by the
     /// caller (dispatch) before this is invoked.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub fn execute(
         &self,
         sender: &Address,
@@ -109,6 +110,10 @@ impl InferenceSettlementExecutor {
         fee: Balance,
         block_height: u64,
         chain_params: &ChainParams,
+        // Active PoA validator set for the block being executed (threaded from
+        // consensus). `ResolveDispute` authorizes against exactly this set —
+        // never StakingStore/ValidatorSetStore.
+        active_validator_pubkeys: &[[u8; 32]],
     ) -> Result<InferenceSettlementExecutionResult> {
         self.deduct_fee(state, sender, fee, proposer)?;
 
@@ -126,7 +131,13 @@ impl InferenceSettlementExecutor {
                 self.open_dispute(sender, req, block_height, chain_params)
             }
             InferenceSettlementOperation::ResolveDispute(req) => {
-                self.resolve_dispute(sender, req, block_height, chain_params)
+                self.resolve_dispute(
+                    req,
+                    block_height,
+                    chain_params,
+                    state.chain_id(),
+                    active_validator_pubkeys,
+                )
             }
             InferenceSettlementOperation::RefundSession(req) => {
                 self.refund_session(sender, &req.session_id, state, block_height, chain_params)
@@ -346,12 +357,13 @@ impl InferenceSettlementExecutor {
         block_height: u64,
         chain_params: &ChainParams,
     ) -> Result<InferenceSettlementExecutionResult> {
-        // Disputes require a configured neutral resolver — otherwise a dispute
-        // could block a claim with no path to resolution.
-        if chain_params.inference_settlement_dispute_resolver.is_none() {
+        // Disputes require the dispute mode to be enabled (a configured
+        // validator-quorum threshold) — otherwise a dispute could block a claim
+        // with no path to resolution.
+        if chain_params.inference_settlement_dispute_threshold_bps.is_none() {
             return Ok(InferenceSettlementExecutionResult::fail(
                 353,
-                "disputes disabled: no dispute resolver configured",
+                "disputes disabled: no dispute threshold configured",
             ));
         }
         let session = match self.get_session(&req.session_id)? {
@@ -406,24 +418,41 @@ impl InferenceSettlementExecutor {
 
     fn resolve_dispute(
         &self,
-        sender: &Address,
         req: &ResolveInferenceDisputeRequest,
         block_height: u64,
         chain_params: &ChainParams,
+        chain_id: sumchain_primitives::ChainId,
+        active_validator_pubkeys: &[[u8; 32]],
     ) -> Result<InferenceSettlementExecutionResult> {
-        let resolver = match chain_params.inference_settlement_dispute_resolver {
-            Some(r) => r,
+        // Validator-quorum authority (replaces the former single resolver
+        // address). `tx.from` is only the fee payer; authority comes from the
+        // approvals over the active PoA validator set for this block.
+        let threshold_bps = match chain_params.inference_settlement_dispute_threshold_bps {
+            Some(bps) => bps,
             None => {
                 return Ok(InferenceSettlementExecutionResult::fail(
                     353,
-                    "disputes disabled: no dispute resolver configured",
+                    "disputes disabled: no dispute threshold configured",
                 ));
             }
         };
-        if *sender != resolver {
+        let signing = sumchain_primitives::validator_authority::resolve_dispute_signing_bytes(
+            chain_id,
+            &req.session_id,
+            &req.verifier,
+            req.allow_claim,
+        );
+        if crate::validator_quorum::verify_validator_quorum(
+            &req.approvals,
+            &signing,
+            active_validator_pubkeys,
+            threshold_bps,
+        )
+        .is_err()
+        {
             return Ok(InferenceSettlementExecutionResult::fail(
                 353,
-                "only the configured dispute resolver may resolve",
+                "resolve dispute: validator quorum not met",
             ));
         }
         if self.get_session(&req.session_id)?.is_none() {

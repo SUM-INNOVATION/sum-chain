@@ -249,12 +249,33 @@ impl BlockExecutor {
     }
 
     /// Execute a single transaction (supports both legacy and V2 formats)
+    /// Execute a single transaction with no block-supplied validator set.
+    ///
+    /// Convenience wrapper (used widely by tests and single-tx callers): passes
+    /// an empty active validator set, so any validator-quorum action fails closed.
+    /// Block execution uses [`Self::execute_tx_with_validators`] with the real
+    /// active PoA set for the height.
     pub fn execute_tx(
         &self,
         tx: &SignedTransaction,
         proposer: &Address,
         block_height: u64,
         block_timestamp: u64,
+    ) -> Result<TxExecutionResult> {
+        self.execute_tx_with_validators(tx, proposer, block_height, block_timestamp, &[])
+    }
+
+    /// Execute a single transaction, authorizing validator-quorum actions against
+    /// the supplied active PoA validator set (threaded from the consensus layer
+    /// for the block being executed). Never consults `StakingStore`/
+    /// `ValidatorSetStore` for authority.
+    pub fn execute_tx_with_validators(
+        &self,
+        tx: &SignedTransaction,
+        proposer: &Address,
+        block_height: u64,
+        block_timestamp: u64,
+        active_validator_pubkeys: &[[u8; 32]],
     ) -> Result<TxExecutionResult> {
         let tx_hash = tx.hash();
 
@@ -1363,6 +1384,7 @@ impl BlockExecutor {
                             v2_tx.fee,
                             block_height,
                             &self.params,
+                            active_validator_pubkeys,
                         )?;
                         if result.success {
                             debug!("InferenceSettlement {} executed", tx_hash);
@@ -1488,6 +1510,7 @@ impl BlockExecutor {
                             block_height,
                             block_timestamp,
                             tx_hash,
+                            active_validator_pubkeys,
                         )
                     }
                 }
@@ -2397,6 +2420,9 @@ impl BlockExecutor {
         &self,
         block: &Block,
         _parent_state_root: Hash,
+        // Active PoA validator set for THIS block's height (threaded from the
+        // consensus engine). Forwarded per-tx to the validator-quorum authority.
+        active_validator_pubkeys: &[[u8; 32]],
     ) -> Result<(Vec<Receipt>, Hash, StateDiff, ContractStateDiff)> {
         info!(
             "Executing block {} with {} transactions",
@@ -2429,7 +2455,13 @@ impl BlockExecutor {
             };
             let proposer_before = self.state.get_account(&proposer)?;
 
-            let result = self.execute_tx(tx, &proposer, block.height(), block.header.timestamp)?;
+            let result = self.execute_tx_with_validators(
+                tx,
+                &proposer,
+                block.height(),
+                block.header.timestamp,
+                active_validator_pubkeys,
+            )?;
 
             // Record post-execution state for diff
             let sender_after = self.state.get_account(&sender)?;

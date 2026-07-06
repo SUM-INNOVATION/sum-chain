@@ -97,6 +97,7 @@ enum Prepared {
 /// (mixed into proposal-id derivation); `from` pays the fee, `proposer` is
 /// credited.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub fn execute(
     state: &Arc<StateManager>,
     db: &Arc<Database>,
@@ -109,6 +110,10 @@ pub fn execute(
     block_height: u64,
     block_timestamp: u64,
     tx_hash: Hash,
+    // Active PoA validator set for the block being executed (threaded from
+    // consensus). Validator-gated actions authorize against exactly this set —
+    // never StakingStore/ValidatorSetStore.
+    active_validator_pubkeys: &[[u8; 32]],
 ) -> Result<TxExecutionResult> {
     // ── Pre-semantic: gate / params / decode (no fee, no nonce, no state) ────
     if !gate_open(params, block_height) {
@@ -117,11 +122,12 @@ pub fn execute(
     let Some(gp) = params.governance.as_ref() else {
         return Ok(result(tx_hash, TxStatus::Failed(301), 0));
     };
+    let chain_id = state.chain_id();
 
     let validated: std::result::Result<Prepared, u32> = match gov.operation {
         GovernanceOperation::RegisterAsset => match decode::<RegisterAssetRequest>(&gov.data) {
             Err(()) => return Ok(result(tx_hash, TxStatus::Failed(302), 0)),
-            Ok(req) => validate_register(db, gp, from, &req),
+            Ok(req) => validate_register(db, gp, &req, chain_id, active_validator_pubkeys),
         },
         GovernanceOperation::CreateProposal => match decode::<CreateProposalRequest>(&gov.data) {
             Err(()) => return Ok(result(tx_hash, TxStatus::Failed(302), 0)),
@@ -137,7 +143,7 @@ pub fn execute(
         },
         GovernanceOperation::CancelProposal => match decode::<CancelProposalRequest>(&gov.data) {
             Err(()) => return Ok(result(tx_hash, TxStatus::Failed(302), 0)),
-            Ok(req) => validate_cancel(db, gp, from, &req),
+            Ok(req) => validate_cancel(db, gp, from, &req, chain_id, active_validator_pubkeys),
         },
     };
 
@@ -252,11 +258,26 @@ fn apply(db: &Arc<Database>, prepared: Prepared) -> Result<()> {
 fn validate_register(
     db: &Arc<Database>,
     gp: &GovernanceParams,
-    from: &Address,
     req: &RegisterAssetRequest,
+    chain_id: sumchain_primitives::ChainId,
+    active_validator_pubkeys: &[[u8; 32]],
 ) -> std::result::Result<Prepared, u32> {
-    // Council authority.
-    if *from != gp.council {
+    // Validator-quorum authority (replaces the former single council address).
+    // `tx.from` is only the fee payer; authority comes from the approvals.
+    let signing = sumchain_primitives::validator_authority::register_asset_signing_bytes(
+        chain_id,
+        &req.token_id,
+        req.create_threshold,
+        req.effective_height,
+    );
+    if crate::validator_quorum::verify_validator_quorum(
+        &req.approvals,
+        &signing,
+        active_validator_pubkeys,
+        gp.validator_authority_threshold_bps,
+    )
+    .is_err()
+    {
         return Err(303);
     }
     // Token must exist and be fixed-supply / non-mintable.
@@ -472,23 +493,40 @@ fn validate_cancel(
     gp: &GovernanceParams,
     from: &Address,
     req: &CancelProposalRequest,
+    chain_id: sumchain_primitives::ChainId,
+    active_validator_pubkeys: &[[u8; 32]],
 ) -> std::result::Result<Prepared, u32> {
     let store = GovStore::new(db);
     let mut proposal = match store.get_proposal(&req.proposal_id).map_err(|_| 306u32)? {
         Some(p) => p,
         None => return Err(306),
     };
-    // The proposer or the council may cancel, and only while Created/Voting.
-    let is_proposer = proposal.proposer == *from;
-    let is_council = *from == gp.council;
-    if (!is_proposer && !is_council)
-        || !matches!(proposal.status, GovProposalStatus::Created | GovProposalStatus::Voting)
-    {
+    // Only cancellable while Created/Voting.
+    if !matches!(proposal.status, GovProposalStatus::Created | GovProposalStatus::Voting) {
         return Err(306);
     }
+    // Authority: the proposer may cancel with no approvals; anyone else needs a
+    // validator quorum (replaces the former single council address).
+    let is_proposer = proposal.proposer == *from;
+    if !is_proposer {
+        let signing = sumchain_primitives::validator_authority::cancel_proposal_signing_bytes(
+            chain_id,
+            &req.proposal_id,
+        );
+        if crate::validator_quorum::verify_validator_quorum(
+            &req.approvals,
+            &signing,
+            active_validator_pubkeys,
+            gp.validator_authority_threshold_bps,
+        )
+        .is_err()
+        {
+            return Err(306);
+        }
+    }
     proposal.status = GovProposalStatus::Cancelled;
-    // Proposer cancel returns the bond (clean withdrawal); council cancel burns
-    // it (anti-spam force). If the canceller is both, the proposer path wins.
+    // Proposer cancel returns the bond (clean withdrawal); validator-quorum cancel
+    // burns it (anti-spam force).
     let settlement = settle_bond(&mut proposal, |_| is_proposer);
     Ok(Prepared::ProposalUpdate { proposal, settlement, payout: None })
 }

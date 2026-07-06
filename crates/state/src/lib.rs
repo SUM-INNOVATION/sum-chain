@@ -30,6 +30,7 @@ pub mod state;
 pub mod storage_metadata;
 pub mod tax_executor;
 pub mod token_executor;
+pub mod validator_quorum;
 
 pub use agreement_executor::{AgreementExecutionResult, AgreementExecutor};
 pub use cache::{CacheStats, CachedAccount, StateCache};

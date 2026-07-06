@@ -93,7 +93,7 @@ fn main() -> Result<()> {
             inference_settlement_enabled_from_height: None, // issue #61: settlement dormant
             inference_settlement_max_dispute_window_blocks: 201_600,
             inference_settlement_max_session_duration_blocks: 2_592_000,
-            inference_settlement_dispute_resolver: None,
+            inference_settlement_dispute_threshold_bps: None,
         },
     );
 

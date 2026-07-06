@@ -31,12 +31,23 @@ const REWARD: u128 = 1_000_000;
 /// maturity = attestation.included_at_height + 3 + dispute_window_blocks.
 const FINALITY: u64 = 3;
 
-fn params_enabled(resolver: Option<Address>) -> ChainParams {
+fn params_enabled(dispute_bps: Option<u16>) -> ChainParams {
     let mut p = params_omninode_enabled();
     p.finality_depth = FINALITY;
     p.inference_settlement_enabled_from_height = Some(0);
-    p.inference_settlement_dispute_resolver = resolver;
+    p.inference_settlement_dispute_threshold_bps = dispute_bps;
     p
+}
+
+/// Validator approval over the resolve-dispute signing bytes.
+fn resolve_approval(v: &KeyPair, session: &str, verifier: &Address, allow: bool) -> sumchain_primitives::ValidatorApproval {
+    let msg = sumchain_primitives::validator_authority::resolve_dispute_signing_bytes(
+        CHAIN_ID, session, verifier, allow,
+    );
+    sumchain_primitives::ValidatorApproval {
+        pubkey: *v.public_key().as_bytes(),
+        signature: sign(&msg, v.private_key()).to_bytes(),
+    }
 }
 
 fn settlement_tx(
@@ -77,7 +88,7 @@ fn sexec(db: &Arc<Database>) -> InferenceSettlementExecutor {
 fn defaults_leave_settlement_dormant() {
     let p = ChainParams::default();
     assert_eq!(p.inference_settlement_enabled_from_height, None);
-    assert_eq!(p.inference_settlement_dispute_resolver, None);
+    assert_eq!(p.inference_settlement_dispute_threshold_bps, None);
 }
 
 #[test]
@@ -404,7 +415,7 @@ fn disputes_disabled_without_resolver_353() {
 #[test]
 fn dispute_deny_blocks_claim_and_allows_refund() {
     let resolver = KeyPair::generate();
-    let (state, db, _dir, executor) = setup_with_params(params_enabled(Some(resolver.address())));
+    let (state, db, _dir, executor) = setup_with_params(params_enabled(Some(5_000)));
     let funder = KeyPair::generate();
     let verifier = KeyPair::generate();
     let proposer = KeyPair::generate();
@@ -426,9 +437,12 @@ fn dispute_deny_blocks_claim_and_allows_refund() {
         .unwrap();
     assert!(matches!(rblocked.status, TxStatus::Failed(359)), "got {:?}", rblocked.status);
 
-    // Resolver denies the claim (height 9).
+    // Validator quorum denies the claim (height 9). `resolver` is the single
+    // active validator; the submitter carries its approval.
+    let vset = [*resolver.public_key().as_bytes()];
+    let ap = resolve_approval(&resolver, "s", &verifier.address(), false);
     let rd = executor
-        .execute_tx(&settlement_tx(&resolver, 0, InferenceSettlementOperation::ResolveDispute(ResolveInferenceDisputeRequest { session_id: "s".into(), verifier: verifier.address(), allow_claim: false })), &proposer.address(), 9, 1000)
+        .execute_tx_with_validators(&settlement_tx(&resolver, 0, InferenceSettlementOperation::ResolveDispute(ResolveInferenceDisputeRequest { session_id: "s".into(), verifier: verifier.address(), allow_claim: false, approvals: vec![ap] })), &proposer.address(), 9, 1000, &vset)
         .unwrap();
     assert!(rd.status.is_success(), "resolve: {:?}", rd.status);
 
@@ -449,7 +463,7 @@ fn dispute_deny_blocks_claim_and_allows_refund() {
 #[test]
 fn dispute_allow_lets_claim_proceed() {
     let resolver = KeyPair::generate();
-    let (state, _db, _dir, executor) = setup_with_params(params_enabled(Some(resolver.address())));
+    let (state, _db, _dir, executor) = setup_with_params(params_enabled(Some(5_000)));
     let funder = KeyPair::generate();
     let verifier = KeyPair::generate();
     let proposer = KeyPair::generate();
@@ -460,8 +474,10 @@ fn dispute_allow_lets_claim_proceed() {
     attest(&executor, &proposer.address(), &verifier, "s", 5, 0); // maturity = 55
 
     executor.execute_tx(&settlement_tx(&funder, 1, InferenceSettlementOperation::OpenDispute(OpenInferenceDisputeRequest { session_id: "s".into(), verifier: verifier.address(), evidence_commitment: [9u8; 32] })), &proposer.address(), 8, 1000).unwrap();
-    // resolver allows.
-    executor.execute_tx(&settlement_tx(&resolver, 0, InferenceSettlementOperation::ResolveDispute(ResolveInferenceDisputeRequest { session_id: "s".into(), verifier: verifier.address(), allow_claim: true })), &proposer.address(), 9, 1000).unwrap();
+    // validator quorum allows.
+    let vset = [*resolver.public_key().as_bytes()];
+    let ap = resolve_approval(&resolver, "s", &verifier.address(), true);
+    executor.execute_tx_with_validators(&settlement_tx(&resolver, 0, InferenceSettlementOperation::ResolveDispute(ResolveInferenceDisputeRequest { session_id: "s".into(), verifier: verifier.address(), allow_claim: true, approvals: vec![ap] })), &proposer.address(), 9, 1000, &vset).unwrap();
     // claim proceeds after maturity.
     let vbal = state.get_balance(&verifier.address()).unwrap();
     let claim = executor
@@ -472,9 +488,10 @@ fn dispute_allow_lets_claim_proceed() {
 }
 
 #[test]
-fn only_configured_resolver_may_resolve_353() {
-    let resolver = KeyPair::generate();
-    let (state, _db, _dir, executor) = setup_with_params(params_enabled(Some(resolver.address())));
+fn resolve_requires_validator_quorum_353() {
+    let validator = KeyPair::generate();
+    let vset = [*validator.public_key().as_bytes()];
+    let (state, _db, _dir, executor) = setup_with_params(params_enabled(Some(5_000)));
     let funder = KeyPair::generate();
     let verifier = KeyPair::generate();
     let stranger = KeyPair::generate();
@@ -485,11 +502,21 @@ fn only_configured_resolver_may_resolve_353() {
     executor.execute_tx(&settlement_tx(&funder, 0, open_op("s", 2, 2 * REWARD, 50, 1000)), &proposer.address(), 1, 1000).unwrap();
     attest(&executor, &proposer.address(), &verifier, "s", 5, 0);
     executor.execute_tx(&settlement_tx(&funder, 1, InferenceSettlementOperation::OpenDispute(OpenInferenceDisputeRequest { session_id: "s".into(), verifier: verifier.address(), evidence_commitment: [9u8; 32] })), &proposer.address(), 8, 1000).unwrap();
-    // stranger tries to resolve → 353.
+
+    // A non-validator's approval does not count → quorum unmet → 353. Submitter
+    // (stranger) is irrelevant; the approval is from a non-validator.
+    let bad = resolve_approval(&stranger, "s", &verifier.address(), true);
     let r = executor
-        .execute_tx(&settlement_tx(&stranger, 0, InferenceSettlementOperation::ResolveDispute(ResolveInferenceDisputeRequest { session_id: "s".into(), verifier: verifier.address(), allow_claim: true })), &proposer.address(), 9, 1000)
+        .execute_tx_with_validators(&settlement_tx(&stranger, 0, InferenceSettlementOperation::ResolveDispute(ResolveInferenceDisputeRequest { session_id: "s".into(), verifier: verifier.address(), allow_claim: true, approvals: vec![bad] })), &proposer.address(), 9, 1000, &vset)
         .unwrap();
-    assert!(matches!(r.status, TxStatus::Failed(353)), "got {:?}", r.status);
+    assert!(matches!(r.status, TxStatus::Failed(353)), "non-validator approval: {:?}", r.status);
+
+    // A valid validator quorum (submitted by a non-validator) → success.
+    let ap = resolve_approval(&validator, "s", &verifier.address(), true);
+    let r = executor
+        .execute_tx_with_validators(&settlement_tx(&stranger, 1, InferenceSettlementOperation::ResolveDispute(ResolveInferenceDisputeRequest { session_id: "s".into(), verifier: verifier.address(), allow_claim: true, approvals: vec![ap] })), &proposer.address(), 9, 1000, &vset)
+        .unwrap();
+    assert!(r.status.is_success(), "valid quorum by non-validator submitter: {:?}", r.status);
 }
 
 // ── Attestation immutability + restart ───────────────────────────────────────
