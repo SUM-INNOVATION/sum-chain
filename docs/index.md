@@ -29,26 +29,30 @@ Every canonical doc and Status block uses this schema:
 
 ## Mainnet activation gates
 
-Read-only publication sanity check against the public endpoint
-`https://rpc.sumchain.io` (`chain_getChainParams`), `chain_id: 1`, verified
-2026-06-27; re-verified 2026-07-04. These are activation-gate values (stable),
-not the live chain head:
+Deployed-genesis activation gates for `chain_id: 1`, verified at **height
+8,716,604 · 2026-07-06** (deployed commit `21de231d`, both validators). These
+are activation-gate values (stable), not the live chain head. `v2`, `omninode`,
+and `education` gates are also observable live via
+`chain_getChainParams`; the other five 8,900,000 gates are verified from the
+deployed genesis (not exposed over RPC):
 
 | Subprotocol gate | Mainnet value | Meaning |
 |---|---|---|
-| `v2_enabled_from_height` | `5200000` | V2 storage **active** |
-| `omninode_enabled_from_height` | `6000000` | OmniNode inference **attestation active** |
-| `education_enabled_from_height` | `null` | Education writes **dormant** (reads still work) |
-| `governance_enabled_from_height` | not set | Governance v1 **dormant** (code-backed; also needs `ChainParams.governance`, incl. `validator_authority_threshold_bps` — admin authority is validator-quorum controlled, no single council address) |
-| `archive_unbonding_enabled_from_height` | `null` | Archive-node unbonding withdrawal **dormant** (code-backed, issue #20) |
-| `archive_reassignment_enabled_from_height` | `null` | Archive-node chunk reassignment **dormant** (code-backed, issue #62) |
-| `inference_settlement_enabled_from_height` | `null` | OmniNode inference settlement **dormant** (code-backed, issue #61; separate from attestation, which is active) |
+| `v2_enabled_from_height` | `5200000` | V2 storage **active** (height > gate) |
+| `omninode_enabled_from_height` | `6000000` | OmniNode inference **attestation active** (height > gate) |
+| `education_enabled_from_height` | `8900000` | Education (SRC-817/818) deployed and code-backed; gate **set to 8,900,000 — active at that height** (≈2026-07-12). Reads work now regardless of the gate. |
+| `contracts_enabled_from_height` | `8900000` | WASM smart contracts deployed and code-backed; gate **set to 8,900,000 — active at that height** (≈2026-07-12) |
+| `governance_enabled_from_height` | `8900000` | Governance v1 deployed and code-backed; gate **set to 8,900,000 — active at that height** (≈2026-07-12). The `ChainParams.governance` params object is also configured (`validator_authority_threshold_bps 6667`, quorum, pass threshold, voting period, snapshot bound). Admin/council authority is **validator-quorum** controlled — no single council address. |
+| `archive_unbonding_enabled_from_height` | `8900000` | Archive-node unbonding withdrawal **implemented**; gate **set to 8,900,000 — active at that height** (≈2026-07-12) (issue #20) |
+| `archive_reassignment_enabled_from_height` | `8900000` | Archive-node chunk reassignment **implemented**; gate **set to 8,900,000 — active at that height** (≈2026-07-12) (issue #62) |
+| `inference_settlement_enabled_from_height` | `8900000` | OmniNode inference settlement **implemented**; gate **set to 8,900,000 — active at that height** (≈2026-07-12) (issue #61; separate from attestation, which is already active). Dispute resolution is validator-quorum controlled via `inference_settlement_dispute_threshold_bps` (6667). |
 
-The last three rows are **code-backed but dormant** — implemented behind their
-gates and `null` (unset) on mainnet as of the verification above, so they have no
-effect until an operator activates them via a coordinated upgrade. OmniNode
-inference **attestation** is active; inference **settlement** (escrow-funded
-rewards/refunds) is a separate, still-dormant subprotocol.
+The 8,900,000-cohort rows are **deployed and code-backed; the activation gate is
+set to height 8,900,000 — active once the chain reaches it (≈2026-07-12)**. They
+auto-activate when the chain crosses 8,900,000; no further operator action is
+required beyond the coordinated genesis that set the gate. OmniNode inference
+**attestation** is already active; inference **settlement** (escrow-funded
+rewards/refunds) is a separate subprotocol whose gate is set to 8,900,000.
 
 Token / NFT / messaging / docclass / employment families have **no activation
 gate** — they are always available when the node binary is running.
@@ -62,16 +66,16 @@ gate** — they are always available when the node binary is running.
   [performance-guide](./architecture/performance-guide.md)
 - **Subprotocols:** [subprotocols/](./subprotocols/) —
   [inference attestation](./subprotocols/INFERENCE-ATTESTATION.md) (active),
-  [inference settlement](./subprotocols/inference-settlement.md) (dormant, issue #61),
+  [inference settlement](./subprotocols/inference-settlement.md) (implemented; gate set to 8,900,000, issue #61),
   education activation.
 - **Design specs (non-token):** [specs/](./specs/) (SNIP V2 storage plan, incl.
-  §5.4 [archive reassignment](./specs/SNIP-V2-CHAIN-PLAN.md) (dormant, issue #62);
+  §5.4 [archive reassignment](./specs/SNIP-V2-CHAIN-PLAN.md) (implemented; gate set to 8,900,000, issue #62);
   [Governance v1](./specs/GOVERNANCE-V1.md) design spec).
-  Archive-node unbonding withdrawal (dormant, issue #20) and reassignment are
+  Archive-node unbonding withdrawal (implemented; gate set to 8,900,000, issue #20) and reassignment are
   separate landed storage mechanics — see the RPC cheatsheet. Token-family usage
   is in [tokens.md](./tokens.md).
 - **Operational:** [operator-guide](./operator-guide.md), [production-checklist](./operations/production-checklist.md)
-- **Process:** [GOVERNANCE.md](../GOVERNANCE.md) (on-chain governance model; dormant by default) ·
+- **Process:** [GOVERNANCE.md](../GOVERNANCE.md) (on-chain governance model; gate set to 8,900,000) ·
   [RELEASE.md](../RELEASE.md) (how approved changes are released)
 
 ## Conventions

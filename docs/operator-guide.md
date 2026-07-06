@@ -61,8 +61,13 @@ section for details.
   Kubernetes [ServiceMonitor](../deploy/kubernetes/servicemonitor.yaml).
 - Check node health via `node_info` (`current_height`, `peer_count`,
   `mempool_size`, `uptime_seconds`, `is_validator`).
-- Inspect live chain parameters (including `finality_depth`) with
-  `chain_getChainParams`.
+- Inspect live chain parameters (including `finality_depth` and the RPC-exposed
+  activation gates) with `chain_getChainParams`. SNIP V2 storage and OmniNode
+  inference attestation are **active** on mainnet; the 8,900,000-cohort gates
+  (governance, education, WASM contracts, archive unbonding/reassignment,
+  inference settlement) are **set to height 8,900,000 — active once the chain
+  reaches it (≈2026-07-12)**. Full gate table:
+  [operations/production-checklist.md](./operations/production-checklist.md#mainnet-parameters).
 
 ## Restarts
 

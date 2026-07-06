@@ -793,9 +793,11 @@ curl -X POST http://localhost:8545 \
 Read-only queries and unsigned-tx builders for the storage (SNIP V2) and OmniNode
 subprotocols. Method signatures and field semantics are documented in the
 subprotocol docs linked below; this is the discovery index. Several of these
-belong to **dormant** subprotocols (see the
+belong to subprotocols whose activation gate is **set to height 8,900,000 —
+active once the chain reaches it (≈2026-07-12)** (see the
 [activation-gate table](../index.md#mainnet-activation-gates)) — the RPC methods
-respond, but the underlying write ops are rejected until the gate is set.
+respond now, but the underlying write ops are rejected until the chain crosses
+the gate.
 
 ### SNIP V2 storage (`storage_*`)
 
@@ -807,12 +809,13 @@ Detailed shapes: [SNIP-V2-RPC-CHEATSHEET.md](SNIP-V2-RPC-CHEATSHEET.md).
 | `storage_getPushableFilesV2(offset?, limit?)` | Pending+Active files (archive warm-cache). |
 | `storage_getAssignmentCoverageV2(merkle_root, missing_offset?, missing_limit?)` | Coverage progress; **epoch-aware/aggregate** since issue #62. |
 | `storage_getActiveNodesAtHeight(height)` | Active-archive snapshot at `assignment_height`. |
-| `storage_getArchiveUnbonding(operator_address)` | Pending archive-node unbonding record, or `null` (issue #20, **dormant**). |
+| `storage_getArchiveUnbonding(operator_address)` | Pending archive-node unbonding record, or `null` (issue #20; implemented, gate set to 8,900,000). |
 | `storage_getNodeRecord`, `storage_getAccessList`, `storage_getActiveChallenges`, `storage_getFundedFiles` | Node/ACL/challenge/funded-file reads. |
 
 Archive-node **withdrawal** (issue #20) and **reassignment** (issue #62) are
-code-backed but dormant behind `archive_unbonding_enabled_from_height` /
-`archive_reassignment_enabled_from_height`.
+implemented; their gates `archive_unbonding_enabled_from_height` /
+`archive_reassignment_enabled_from_height` are **set to height 8,900,000 —
+active once the chain reaches it (≈2026-07-12)**.
 
 ### OmniNode inference attestation (`sum_*InferenceAttestation*`) — active
 
@@ -822,10 +825,11 @@ code-backed but dormant behind `archive_unbonding_enabled_from_height` /
 | `sum_listInferenceAttestations(session_id)` | Every verifier for a session. |
 | `sum_getInferenceAttestationStatus(tx_hash)` | Chain-side status of an attestation tx. |
 
-### OmniNode inference settlement (`omninode_*`) — dormant (issue #61)
+### OmniNode inference settlement (`omninode_*`) — gate set to 8,900,000 (issue #61)
 
-Escrow-funded rewards keyed by attestations; **dormant** behind
-`inference_settlement_enabled_from_height`. Full model:
+Escrow-funded rewards keyed by attestations; implemented, with
+`inference_settlement_enabled_from_height` **set to height 8,900,000 — active
+once the chain reaches it (≈2026-07-12)**. Full model:
 [inference-settlement.md](../subprotocols/inference-settlement.md). No bond
 slashing in v1 (reward denial / claim withholding / escrow refund only).
 
@@ -938,6 +942,9 @@ curl -X POST http://localhost:8545 \
 ## SDK Support
 
 ### TypeScript
+
+Published package: **`@sumchain/sdk@0.2.2`** (current). Install with
+`npm install @sumchain/sdk`.
 
 ```typescript
 import { Provider } from '@sumchain/sdk';

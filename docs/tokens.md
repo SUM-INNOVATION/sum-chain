@@ -29,13 +29,14 @@ not real values.
 
 ## Activation state
 
-| Family | Activation gate | Mainnet state |
+| Family | Activation gate | Mainnet state (height 8,716,604 · 2026-07-06) |
 |---|---|---|
 | Token, NFT, Messaging, DocClass, Employment | none | always available |
-| Education (SRC-817/818) | `education_enabled_from_height` | reads available; **writes dormant** (`null` on mainnet) |
-| Governance (on-chain v1) | `governance_enabled_from_height` **and** `ChainParams.governance` | code-backed; **dormant** (both unset on mainnet) |
+| Education (SRC-817/818) | `education_enabled_from_height` | reads available now; **writes** deployed and code-backed — gate **set to 8,900,000, active at that height** (≈2026-07-12) |
+| Governance (on-chain v1) | `governance_enabled_from_height` **and** `ChainParams.governance` | deployed and code-backed; gate **set to 8,900,000, active at that height** (≈2026-07-12); `ChainParams.governance` params object is configured |
 
-(Gate values are observable live via `chain_getChainParams`.)
+(`education_enabled_from_height` is observable live via `chain_getChainParams`;
+the 8,900,000 governance gate is verified from the deployed genesis.)
 
 ## Submitting writes
 
@@ -157,16 +158,17 @@ curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
 
 ## Education / LMS — SRC-817/818
 
-> Status:             code-backed; writes gated (dormant on mainnet)
-> Last verified:      2026-06-27
+> Status:             code-backed; writes gated (gate set to 8,900,000)
+> Last verified:      height 8,716,604 · 2026-07-06
 > Code references:    crates/primitives/src/education.rs, crates/state/src/education_executor.rs, crates/rpc/src/server.rs
 > Public RPC support: yes for reads (src817_*, src818_*); writes require the activation gate
 
 Course catalogs (SRC-817) and course offerings with assessments/grades
 (SRC-818). Write flow: `TxPayload::Education` via
 [sum_sendRawTransaction](#submitting-writes), **gated by
-`education_enabled_from_height`** — `null` (not yet enabled) on mainnet. Read
-RPCs are available regardless of the gate.
+`education_enabled_from_height`** — deployed and code-backed; the gate is **set
+to height 8,900,000 — active once the chain reaches it (≈2026-07-12)**. Read
+RPCs are available now regardless of the gate.
 
 ```bash
 # Course catalog entry
@@ -401,10 +403,10 @@ curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
 
 ---
 
-## Governance — on-chain v1 (dormant)
+## Governance — on-chain v1 (gate set to 8,900,000)
 
-> Status:             code-backed; dormant (not enabled on mainnet)
-> Last verified:      2026-07-02
+> Status:             code-backed; gate set to height 8,900,000 (active ≈2026-07-12)
+> Last verified:      height 8,716,604 · 2026-07-06
 > Code references:    docs/specs/GOVERNANCE-V1.md, crates/primitives/src/governance.rs, crates/state/src/governance_executor.rs, crates/storage/src/governance_store.rs, crates/rpc/src/server.rs
 > Public RPC support: builders (gov_buildCreateProposal, gov_buildCastVote, gov_buildExecuteProposal, gov_buildCancelProposal) + reads (gov_getProposal, gov_listProposals, gov_listActiveProposals, gov_getTally, gov_getVote, gov_getVotingPower, gov_listEligibleAssets)
 
@@ -413,15 +415,17 @@ token create proposals and vote using a balance snapshot frozen at proposal
 creation; execution is record-only (approval is recorded on-chain and carried
 out off-chain). Full design: [docs/specs/GOVERNANCE-V1.md](specs/GOVERNANCE-V1.md).
 
-**Dormant by default.** Governance is inert unless **both** are configured via a
-coordinated validator upgrade: the activation gate `governance_enabled_from_height`
-**and** the `ChainParams.governance` parameters (`validator_authority_threshold_bps`,
-quorum, pass threshold, voting period, snapshot bound). Admin/council authority is
+**Deployed and code-backed; gate set to 8,900,000.** On mainnet **both** are
+configured in the deployed genesis: the activation gate
+`governance_enabled_from_height` is **set to height 8,900,000 — active once the
+chain reaches it (≈2026-07-12)**, and the `ChainParams.governance` parameters
+object (`validator_authority_threshold_bps 6667`, quorum, pass threshold, voting
+period, snapshot bound) is populated. Admin/council authority is
 **validator-quorum controlled** — there is **no single council address**; a
-threshold of the active validator set signs. Neither is set on mainnet, so governance
-transactions are rejected and the reads below return empty/`null` until a network
-enables and populates governance. No mainnet token id, quorum, threshold, bond,
-or period values are published here.
+threshold of the active validator set signs. Until the chain crosses 8,900,000,
+governance transactions are rejected and the reads below return empty/`null`. No
+governance token id is registered until a validator-quorum `RegisterAsset` action
+after activation.
 
 When a non-zero deposit bond is configured, creating a proposal escrows the bond
 (the proposer must cover `fee + bond`); it is returned to the proposer on a

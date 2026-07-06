@@ -1,9 +1,9 @@
 # OmniNode `InferenceAttestation` v1
 
 **Version:** 1.0.0 (frozen)
-**Status:** v1 implemented and merged; **active on mainnet**. Live mainnet parameters verified at height 8,183,329 on 2026-07-02 report `omninode_enabled_from_height = 6,000,000` (current head > 8M). Fresh chains still default to `None` (dormant) until they set the gate.
+**Status:** v1 implemented and merged; **active on mainnet**. Live mainnet parameters verified at height 8,716,604 on 2026-07-06 (deployed commit `21de231d`) report `omninode_enabled_from_height = 6,000,000` (current head > gate). Fresh chains still default to `None` (dormant) until they set the gate.
 **Created:** 2026-05-13
-**Last Updated:** 2026-07-02
+**Last Updated:** 2026-07-06
 **Authors:** SUM Chain Team
 **External spec partner:** OmniNode Protocol (Stage 6 handoff)
 
