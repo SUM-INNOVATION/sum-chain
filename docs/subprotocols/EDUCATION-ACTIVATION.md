@@ -12,18 +12,19 @@ Current Education usage: [docs/tokens.md](../tokens.md#education--lms--src-81781
 The earlier SRC-817/818 design specs and dev runbook have been consolidated
 into that document.
 
-## Current status (2026-05-18)
+## Current status (height 8,716,604 · 2026-07-06)
 
-- Phases 0–5 merged to `main`: specs (PRs #5–#7), wire types (#8),
+- Phases 0–6 merged to `main`: specs (PRs #5–#7), wire types (#8),
   storage/executor/activation gate + Policy B (#9), mempool admission
   (#10), read-only RPC (#11), local/dev e2e validation (#12).
 - `chain_getChainParams` exposes `education_enabled_from_height`
-  (added by this phase) so activation state is **directly verifiable**
-  per validator — not inferred.
-- **Mainnet/testnet dormant.** No runtime `genesis.json` carries
-  `education_enabled_from_height` → `#[serde(default)] → None` →
-  education txs rejected (`EducationNotActivated` at admission /
-  `Failed(70)` at executor). No height chosen.
+  so activation state is **directly verifiable** per validator — not inferred.
+- **Mainnet: deployed and code-backed; gate set to 8,900,000.** The deployed
+  runtime `genesis.json` (commit `21de231d`, both validators) carries
+  `education_enabled_from_height = 8,900,000` — **active once the chain reaches
+  it (≈2026-07-12)**. Below that height, education writes are rejected
+  (`EducationNotActivated` at admission / `Failed(70)` at executor); read RPCs
+  work regardless. It auto-activates when the chain crosses 8,900,000.
 
 ## Explicit non-goals (this phase)
 

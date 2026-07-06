@@ -4,7 +4,7 @@ Operational checklist for running SUM Chain validators and full nodes in
 production (mainnet).
 
 > **Status:** current
-> **Last verified:** 2026-07-01 (against live `chain_getChainParams` on `https://rpc.sumchain.io`)
+> **Last verified:** height 8,716,604 · 2026-07-06 (live `chain_getChainParams` on `https://rpc.sumchain.io` + deployed genesis; deployed commit `21de231d` on both validators)
 > **Consensus:** Proof of Authority (PoA) with depth-based finality.
 > BFT is experimental/roadmap and not part of the supported production path.
 
@@ -90,7 +90,10 @@ identically before starting or restarting the network.
 
 ## Mainnet Parameters
 
-Live values from `chain_getChainParams` (verified 2026-07-01):
+Live values (verified at height 8,716,604 · 2026-07-06). `chain_getChainParams`
+exposes only the `v2` / `omninode` / `education` gates; the other five
+8,900,000 gates and the `governance` params object are verified from the
+deployed genesis:
 
 ```json
 {
@@ -108,14 +111,39 @@ Live values from `chain_getChainParams` (verified 2026-07-01):
   "assignment_replication_factor": 3,
   "v2_enabled_from_height": 5200000,
   "omninode_enabled_from_height": 6000000,
-  "education_enabled_from_height": null
+  "education_enabled_from_height": 8900000,
+  "contracts_enabled_from_height": 8900000,
+  "governance_enabled_from_height": 8900000,
+  "archive_unbonding_enabled_from_height": 8900000,
+  "archive_reassignment_enabled_from_height": 8900000,
+  "inference_settlement_enabled_from_height": 8900000,
+  "inference_settlement_dispute_threshold_bps": 6667,
+  "governance": {
+    "validator_authority_threshold_bps": 6667,
+    "quorum_bps": 2000,
+    "pass_threshold_bps": 5000,
+    "voting_period_blocks": 201600,
+    "max_snapshot_holders": 10000,
+    "proposal_bond": 0,
+    "treasury": null
+  }
 }
 ```
 
 - `v2_enabled_from_height` and `omninode_enabled_from_height` are past the
-  current chain height — those subprotocols are active on mainnet.
-- `education_enabled_from_height: null` — the education suite is disabled.
-- Query the current values with:
+  current chain height — those subprotocols are **active** on mainnet.
+- The six `*_from_height` gates set to `8900000` (education, WASM contracts,
+  governance, archive unbonding #20, archive reassignment #62, inference
+  settlement #61) are **deployed and code-backed; each activation gate is set to
+  height 8,900,000 — active once the chain reaches it (≈2026-07-12)**. They
+  auto-activate when the chain crosses 8,900,000; no further operator action is
+  required beyond the coordinated genesis that set the gate.
+- Governance admin/council authority is **validator-quorum** controlled
+  (`validator_authority_threshold_bps 6667` → both validators of the current
+  2-validator net must sign); there is no single council address. Inference-
+  settlement dispute resolution is likewise validator-quorum controlled
+  (`inference_settlement_dispute_threshold_bps 6667`).
+- Query the RPC-exposed gates with:
   ```bash
   curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
     -d '{"jsonrpc":"2.0","id":1,"method":"chain_getChainParams","params":[]}'

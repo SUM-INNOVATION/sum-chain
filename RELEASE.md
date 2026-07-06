@@ -63,13 +63,16 @@ Approved governance proposals map to concrete off-chain actions:
   controlled, no single council address); report vulnerabilities privately per
   [SECURITY.md](SECURITY.md).
 
-## Activating a dormant subprotocol (incl. governance)
+## Activating a gated subprotocol (incl. governance)
 
-Subprotocols such as on-chain governance ship **dormant** and are enabled only
-by a coordinated activation: a byte-identical runtime-genesis change that sets
-the activation gate (for governance, `governance_enabled_from_height`) and any
-required parameters (`ChainParams.governance`), rolled out with validator
-coordination. No activation height is proposed here. See
+Subprotocols such as on-chain governance are enabled by a coordinated
+activation: a byte-identical runtime-genesis change that sets the activation gate
+(for governance, `governance_enabled_from_height`) and any required parameters
+(`ChainParams.governance`), rolled out with validator coordination. On mainnet the
+8,900,000-cohort gates (governance, education, WASM contracts, archive
+unbonding #20, archive reassignment #62, inference settlement #61) are already
+**set to height 8,900,000 — active once the chain reaches it (≈2026-07-12)** in
+the deployed genesis; they auto-activate when the chain crosses that height. See
 [docs/operations/production-checklist.md](docs/operations/production-checklist.md)
 for the activation and rollback procedure, and [GOVERNANCE.md](GOVERNANCE.md)
 for what governance does once enabled.

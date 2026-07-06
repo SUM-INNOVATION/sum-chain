@@ -542,7 +542,7 @@ Implementation:
 
 ### 5.4 Archive-node exit / reassignment
 
-**Update (issue #62): deterministic reassignment is now implemented, gate-dormant.** The original V2 shipped with no reassignment (documented below as historical context). Chunk reassignment now exists behind `archive_reassignment_enabled_from_height` (default `None` → dormant; unchanged behavior until a coordinated activation). When active, a file's owner submits `ReassignChunksV2 { merkle_root }` to advance the file's **assignment epoch** to the current active-archive snapshot, so replacement archives are assigned and can attest after an originally-assigned archive leaves the active set.
+**Update (issue #62): deterministic reassignment is now implemented and deployed.** The original V2 shipped with no reassignment (documented below as historical context). Chunk reassignment exists behind `archive_reassignment_enabled_from_height` (fresh-chain default `None`; on mainnet the gate is **set to height 8,900,000 — active once the chain reaches it (≈2026-07-12)**, height 8,716,604 · 2026-07-06). When active, a file's owner submits `ReassignChunksV2 { merkle_root }` to advance the file's **assignment epoch** to the current active-archive snapshot, so replacement archives are assigned and can attest after an originally-assigned archive leaves the active set.
 
 Design (as implemented):
 - **Per-file, snapshot-layered epochs.** Epoch 0 is the file's `assignment_height`; each `ReassignChunksV2` appends the current block height as a new epoch. Reassignment heights are stored in the `file_reassignments` CF (`merkle_root → Vec<u64>`); `StorageMetadataV2` is unchanged. Assignment for each epoch uses the existing deterministic `assigned_archives(...)` over `storage_getActiveNodesAtHeight(epoch_height)`.
@@ -553,7 +553,7 @@ Design (as implemented):
 
 Client-facing summary + coverage fields: [SNIP-V2-RPC-CHEATSHEET.md](../rpc/SNIP-V2-RPC-CHEATSHEET.md) §"Archive-node reassignment". Code: [crates/state/src/storage_metadata.rs](../../crates/state/src/storage_metadata.rs), receipt strings in [crates/primitives/src/receipt.rs](../../crates/primitives/src/receipt.rs).
 
-**Historical context (original V2 behavior, still the default until #62 is activated):** V2 did not implement reassignment. When a snapshotted node left (exit or slashed-to-inactive), files registered before its exit lost effective replication for any chunks assigned to it; PoR challenges to that node failed and slashed (the V1 economic response), but chunks were not redistributed. Reassignment was deferred because it requires either a `Reassign` tx or chain-driven reassignment — deliberately kept out of the initial V2 scope and delivered separately as #62.
+**Historical context (original V2 behavior, still the default below the gate until the chain crosses 8,900,000):** V2 did not implement reassignment. When a snapshotted node left (exit or slashed-to-inactive), files registered before its exit lost effective replication for any chunks assigned to it; PoR challenges to that node failed and slashed (the V1 economic response), but chunks were not redistributed. Reassignment was deferred because it requires either a `Reassign` tx or chain-driven reassignment — deliberately kept out of the initial V2 scope and delivered separately as #62.
 
 ### 5.5 Challenge coverage guarantees
 

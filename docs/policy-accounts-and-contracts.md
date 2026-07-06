@@ -91,8 +91,8 @@ signature) to `policy_buildSubmitProposal`.
 
 ## Smart contracts
 
-> Status:             code-backed; execution gated (dormant by default)
-> Last verified:      2026-06-29
+> Status:             code-backed; execution gated (gate set to 8,900,000)
+> Last verified:      height 8,716,604 · 2026-07-06
 > Code references:    crates/state/src/contract_executor.rs, crates/sumc-runtime/, crates/storage/src/schema.rs, crates/rpc/src/server.rs
 > Public RPC support: yes for reads (contract_getContract, contract_isContract, contract_call, contract_getCodeHash, contract_getBalance, contract_getStorageAt, contract_estimateGas); execution requires the activation gate
 
@@ -100,10 +100,11 @@ WASM smart contracts with persistent, reorg-reversible, root-committed state.
 Deploy and call are signed transactions (`TxPayload::ContractDeploy` /
 `TxPayload::ContractCall`) submitted through
 [`sum_sendRawTransaction`](./tokens.md#submitting-writes), **gated by
-`contracts_enabled_from_height`** — `null` (dormant) by default; activation is
-a coordinated, consensus-breaking network upgrade. The read/view RPCs below are
-available regardless of the gate (they return empty results until contracts
-exist on the network).
+`contracts_enabled_from_height`** — deployed and code-backed; on mainnet the gate
+is **set to height 8,900,000 — active once the chain reaches it (≈2026-07-12)**
+(height 8,716,604 · 2026-07-06). The read/view RPCs below are available now
+regardless of the gate (they return empty results until contracts exist on the
+network).
 
 Contract code, storage, and metadata persist in dedicated column families and
 survive restarts; `contract_getStorageAt` returns raw stored bytes for a slot,
