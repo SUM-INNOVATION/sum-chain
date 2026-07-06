@@ -49,7 +49,7 @@ identically before starting or restarting the network.
 - Production validators supply real bootnodes out-of-band, preferably via the
   systemd/CLI `--bootnodes` override (it takes precedence over `config.toml`, so
   it survives sample-config changes). See the joining-network guidance in the
-  [README](../../README.md#joining-an-existing-network).
+  [README](../../README.md#run-a-node-join-the-live-network).
 
 ## Validator Setup
 

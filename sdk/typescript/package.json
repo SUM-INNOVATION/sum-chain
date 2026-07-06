@@ -35,7 +35,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/sumchain/sum-chain.git"
+    "url": "git+https://github.com/SUM-INNOVATION/sum-chain.git"
   },
   "dependencies": {
     "cross-fetch": "^4.0.0"

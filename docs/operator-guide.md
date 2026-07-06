@@ -41,8 +41,8 @@ sumchain run --config config.toml --genesis genesis.json \
 ```
 
 See the README's
-[Joining an Existing Network](../README.md#joining-an-existing-network) section
-for details.
+[Run a node (join the live network)](../README.md#run-a-node-join-the-live-network)
+section for details.
 
 ## Full Node vs. Block-Producing Validator
 
