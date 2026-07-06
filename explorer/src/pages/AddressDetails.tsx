@@ -120,33 +120,33 @@ export default function AddressDetails() {
 
   return (
     <div className="mx-auto max-w-6xl space-y-6">
-      <h1 className="font-display text-3xl font-bold text-white">Address</h1>
+      <h1 className="font-display text-3xl font-semibold tracking-tight text-foreground">Address</h1>
 
-      <div className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6">
-        <div className="mb-2 text-sm text-zinc-400">Address</div>
-        <div className="mb-6 break-all font-mono text-lg text-white">{address}</div>
+      <div className="rounded-2xl border border-border bg-surface p-6">
+        <div className="mb-2 text-sm text-muted">Address</div>
+        <div className="mb-6 break-all font-mono text-lg text-foreground">{address}</div>
 
         <div className="grid grid-cols-2 gap-6">
           <div>
-            <div className="mb-2 text-sm text-zinc-400">Balance</div>
-            <div className="tnum font-display text-2xl font-bold text-primary-300">
+            <div className="mb-2 text-sm text-muted">Balance</div>
+            <div className="tnum font-display text-2xl font-semibold text-accent-soft">
               {balance !== null ? formatKoppa(balance) : 'Unknown'}
             </div>
           </div>
           <div>
-            <div className="mb-2 text-sm text-zinc-400">Nonce</div>
-            <div className="tnum font-display text-2xl font-bold text-white">
+            <div className="mb-2 text-sm text-muted">Nonce</div>
+            <div className="tnum font-display text-2xl font-semibold tracking-tight text-foreground">
               {nonce !== null ? nonce.toString() : 'Unknown'}
             </div>
           </div>
         </div>
       </div>
 
-      <div className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6">
+      <div className="rounded-2xl border border-border bg-surface p-6">
         <div className="mb-4 flex items-center justify-between">
-          <h2 className="font-display text-xl font-semibold text-white">
+          <h2 className="font-display text-xl font-semibold text-foreground">
             Transaction history
-            {totalCount > 0 && <span className="ml-2 text-sm text-zinc-400">({totalCount} total)</span>}
+            {totalCount > 0 && <span className="ml-2 text-sm text-muted">({totalCount} total)</span>}
           </h2>
         </div>
 
@@ -157,7 +157,7 @@ export default function AddressDetails() {
             ))}
           </div>
         ) : transactions.length === 0 ? (
-          <div className="rounded-xl border border-dashed border-zinc-800 py-10 text-center text-zinc-500">
+          <div className="rounded-xl border border-dashed border-border py-10 text-center text-muted">
             No transactions found for this address.
           </div>
         ) : (
@@ -166,33 +166,33 @@ export default function AddressDetails() {
             <div className="hidden overflow-x-auto md:block">
               <table className="w-full">
                 <thead>
-                  <tr className="border-b border-zinc-800 text-left text-sm text-zinc-400">
-                    <th className="pb-3 pr-4 font-medium">Tx hash</th>
-                    <th className="pb-3 pr-4 font-medium">Type</th>
-                    <th className="pb-3 pr-4 font-medium">Block</th>
-                    <th className="pb-3 pr-4 font-medium">From</th>
-                    <th className="pb-3 pr-4 font-medium">To</th>
-                    <th className="pb-3 pr-4 text-right font-medium">Amount</th>
-                    <th className="pb-3 pr-4 font-medium">Status</th>
-                    <th className="pb-3 font-medium">Time</th>
+                  <tr className="border-b border-border text-left text-[11px] uppercase tracking-wide text-muted">
+                    <th className="pb-2.5 pr-4 font-medium">Tx hash</th>
+                    <th className="pb-2.5 pr-4 font-medium">Type</th>
+                    <th className="pb-2.5 pr-4 font-medium">Block</th>
+                    <th className="pb-2.5 pr-4 font-medium">From</th>
+                    <th className="pb-2.5 pr-4 font-medium">To</th>
+                    <th className="pb-2.5 pr-4 text-right font-medium">Amount</th>
+                    <th className="pb-2.5 pr-4 font-medium">Status</th>
+                    <th className="pb-2.5 font-medium">Time</th>
                   </tr>
                 </thead>
                 <tbody className="text-sm">
                   {transactions.map((tx) => (
-                    <tr key={tx.tx_hash} className="border-b border-zinc-800/60 hover:bg-zinc-800/30">
+                    <tr key={tx.tx_hash} className="border-b border-border hover:bg-surface-2">
                       <td className="py-3 pr-4">
-                        <Link to={`/tx/${tx.tx_hash}`} className="font-mono text-primary-300 hover:underline">
+                        <Link to={`/tx/${tx.tx_hash}`} className="font-mono text-accent-soft hover:underline">
                           {shortenHash(tx.tx_hash)}
                         </Link>
                       </td>
                       <td className="py-3 pr-4">
                         <div className="flex items-center gap-2">
                           <TransactionTypeBadge tx={tx} />
-                          <TransactionActionLabel tx={tx} className="whitespace-nowrap text-xs text-zinc-400" />
+                          <TransactionActionLabel tx={tx} className="whitespace-nowrap text-xs text-muted" />
                         </div>
                       </td>
                       <td className="tnum py-3 pr-4">
-                        <Link to={`/block/${tx.block_height}`} className="text-primary-300 hover:underline">
+                        <Link to={`/block/${tx.block_height}`} className="text-accent-soft hover:underline">
                           {tx.block_height}
                         </Link>
                       </td>
@@ -200,7 +200,7 @@ export default function AddressDetails() {
                         <Link
                           to={`/address/${tx.from}`}
                           className={`font-mono ${
-                            tx.from === address ? 'text-amber-400' : 'text-zinc-300 hover:text-primary-300'
+                            tx.from === address ? 'text-amber-400' : 'text-muted-strong hover:text-foreground'
                           }`}
                         >
                           {tx.from === address ? 'This address' : shortenAddress(tx.from)}
@@ -211,13 +211,13 @@ export default function AddressDetails() {
                           <Link
                             to={`/address/${tx.to}`}
                             className={`font-mono ${
-                              tx.to === address ? 'text-amber-400' : 'text-zinc-300 hover:text-primary-300'
+                              tx.to === address ? 'text-amber-400' : 'text-muted-strong hover:text-foreground'
                             }`}
                           >
                             {tx.to === address ? 'This address' : shortenAddress(tx.to)}
                           </Link>
                         ) : (
-                          <span className="text-zinc-600">—</span>
+                          <span className="text-muted">—</span>
                         )}
                       </td>
                       <td className="tnum py-3 pr-4 text-right">
@@ -237,7 +237,7 @@ export default function AddressDetails() {
                           {tx.status}
                         </span>
                       </td>
-                      <td className="tnum py-3 text-zinc-400">
+                      <td className="tnum py-3 text-muted">
                         {tx.timestamp ? formatTimestamp(tx.timestamp) : '-'}
                       </td>
                     </tr>
@@ -252,7 +252,7 @@ export default function AddressDetails() {
                 <Link
                   key={tx.tx_hash}
                   to={`/tx/${tx.tx_hash}`}
-                  className="block rounded-xl border border-zinc-800 bg-[#0a0a0a]/60 p-4 transition-colors hover:border-primary-500/50"
+                  className="block rounded-xl border border-border bg-surface-2 p-4 transition-colors hover:border-border-strong"
                 >
                   <div className="mb-2 flex items-center justify-between gap-2">
                     <TransactionTypeBadge tx={tx} />
@@ -266,10 +266,10 @@ export default function AddressDetails() {
                       {tx.status}
                     </span>
                   </div>
-                  <TransactionActionLabel tx={tx} className="text-sm text-zinc-200" />
-                  <div className="mt-2 font-mono text-xs text-zinc-500">{shortenHash(tx.tx_hash)}</div>
+                  <TransactionActionLabel tx={tx} className="text-sm text-foreground" />
+                  <div className="mt-2 font-mono text-xs text-muted">{shortenHash(tx.tx_hash)}</div>
                   <div className="mt-2 flex items-center justify-between text-sm">
-                    <span className="font-mono text-zinc-400">
+                    <span className="font-mono text-muted">
                       {tx.from === address ? 'This address' : shortenAddress(tx.from)}
                       {tx.to ? ` → ${tx.to === address ? 'This address' : shortenAddress(tx.to)}` : ''}
                     </span>
@@ -278,7 +278,7 @@ export default function AddressDetails() {
                       {formatKoppa(BigInt(tx.amount))}
                     </span>
                   </div>
-                  <div className="tnum mt-2 text-xs text-zinc-500">
+                  <div className="tnum mt-2 text-xs text-muted">
                     Block {tx.block_height}
                     {tx.timestamp ? ` · ${formatTimestamp(tx.timestamp)}` : ''}
                   </div>
@@ -293,13 +293,13 @@ export default function AddressDetails() {
                   disabled={offset === 0}
                   className={`rounded px-4 py-2 ${
                     offset === 0
-                      ? 'cursor-not-allowed bg-zinc-800 text-zinc-600'
-                      : 'bg-primary-500 text-white hover:bg-primary-600'
+                      ? 'cursor-not-allowed bg-surface-2 text-muted'
+                      : 'bg-primary-500 text-foreground hover:bg-primary-600'
                   }`}
                 >
                   Previous
                 </button>
-                <span className="tnum px-4 py-2 text-zinc-400">
+                <span className="tnum px-4 py-2 text-muted">
                   Page {Math.floor(offset / limit) + 1}
                 </span>
                 <button
@@ -307,8 +307,8 @@ export default function AddressDetails() {
                   disabled={!hasMore}
                   className={`rounded px-4 py-2 ${
                     !hasMore
-                      ? 'cursor-not-allowed bg-zinc-800 text-zinc-600'
-                      : 'bg-primary-500 text-white hover:bg-primary-600'
+                      ? 'cursor-not-allowed bg-surface-2 text-muted'
+                      : 'bg-primary-500 text-foreground hover:bg-primary-600'
                   }`}
                 >
                   Next

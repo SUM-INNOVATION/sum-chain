@@ -223,7 +223,7 @@ loop {
 
 Defaults: `access_limit = 256` / hard cap 1024; `missing_limit = 1024` / hard cap 16384; `pushable.limit = 256` / hard cap 1024.
 
-`storage_getArchiveUnbonding` returns `null` unless the operator has a stake-withdrawal in progress. When present, the fields are `operator` (base58), `amount` (u64, stake that began unbonding), `started_height`, `unlock_height` (`WithdrawUnbonded` is permitted once chain height reaches this), and `remaining_amount` (u64, what withdrawal will credit back — reduced from `amount` if the archive is slashed for an expired challenge while unbonding). Archive-node withdrawal is dormant until `archive_unbonding_enabled_from_height` is set in genesis; below that gate, `BeginUnstake` / `WithdrawUnbonded` are rejected with no fee.
+`storage_getArchiveUnbonding` returns `null` unless the operator has a stake-withdrawal in progress. When present, the fields are `operator` (base58), `amount` (u64, stake that began unbonding), `started_height`, `unlock_height` (`WithdrawUnbonded` is permitted once chain height reaches this), and `remaining_amount` (u64, what withdrawal will credit back — reduced from `amount` if the archive is slashed for an expired challenge while unbonding). Archive-node withdrawal is implemented; on mainnet `archive_unbonding_enabled_from_height` is set to height 8,900,000 (active ≈2026-07-12). Below that gate, `BeginUnstake` / `WithdrawUnbonded` are rejected with no fee.
 
 ---
 
@@ -264,7 +264,7 @@ When `chain_getTransactionStatus` returns `Failed { reason }`, the `reason` stri
 | `33` | `"AcceptAssignmentV2 validity check failed"` | Signer not in snapshot/not Active, `chunk_indices` over per-tx cap, index out of range, or index not assigned to signer per the deterministic fn. |
 | `34` | `"ActivateFileV2 validity check failed"` | Wrong lifecycle (must be Pending), wrong owner, or coverage incomplete (`covered_count < chunk_count`). |
 | `35` | `"V2 access op validity check failed"` | AddAccessV2: duplicate / Public-with-bundle / Private-no-X25519 / byte-cap re-violated. RemoveAccessV2: address absent / removing owner from Private. UpdateAccessV2: `new_entry.address != address` / address absent / visibility-bundle mismatch. |
-| `330` | `"archive reassignment not enabled at this block height"` | Reassignment subprotocol dormant (issue #62). Gate-level: **no fee**, no state. |
+| `330` | `"archive reassignment not enabled at this block height"` | Returned below the reassignment gate (issue #62; gate set to height 8,900,000, active ≈2026-07-12). Gate-level: **no fee**, no state. |
 | `331` | `"reassignment: file not found"` | `ReassignChunksV2` merkle_root not registered. |
 | `332` | `"reassignment: signer is not the file owner"` | Only the file owner may reassign. |
 | `333` | `"reassignment: file lifecycle not eligible (Abandoned cannot be reassigned)"` | File is Abandoned. |

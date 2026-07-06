@@ -1,10 +1,10 @@
 # Governance v1 — SRC-20 Holder Governance (Design Spec)
 
-> **Status:** code-backed, dormant (implemented behind an activation gate; not yet activated on mainnet)
+> **Status:** code-backed and deployed; activation gate `governance_enabled_from_height` **set to height 8,900,000 — active once the chain reaches it (≈2026-07-12)** (height 8,716,604 · 2026-07-06)
 > **Umbrella:** issue #31 · **Implementation:** #50 · **Process docs:** #51
-> This document specifies the protocol. It is not an active mainnet surface;
-> governance ships dormant behind an activation gate and is enabled only by a
-> coordinated validator rollout.
+> This document specifies the protocol. On mainnet the gate and the
+> `ChainParams.governance` params object are configured in the deployed genesis;
+> governance auto-activates when the chain crosses height 8,900,000.
 
 ## 1. Goal
 
@@ -157,10 +157,13 @@ validator-quorum admin action.
 
 ## 8. Activation & migration
 
-Ships dormant behind `governance_enabled_from_height: Option<u64>` (default
-`None`), mirroring the OmniNode / education / v2 dormant-deploy pattern.
-Validators deploy the binary; activation is a coordinated, byte-identical
-runtime-genesis edit. Governance never bypasses validator control.
+Gated by `governance_enabled_from_height: Option<u64>` (fresh-chain default
+`None`), mirroring the OmniNode / education / v2 deploy pattern. On mainnet this
+gate is **set to height 8,900,000 — active once the chain reaches it
+(≈2026-07-12)** and the `ChainParams.governance` params object is configured in
+the deployed genesis, so governance auto-activates when the chain crosses that
+height. Validators deploy the binary; the gate was set via a coordinated,
+byte-identical runtime-genesis edit. Governance never bypasses validator control.
 
 ## 9. Storage / RPC surface (for the implementation issue)
 

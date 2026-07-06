@@ -27,26 +27,45 @@ export default function Layout({ children }: LayoutProps) {
   };
 
   const navClass = ({ isActive }: { isActive: boolean }) =>
-    `text-sm transition-colors ${isActive ? 'text-white' : 'text-zinc-400 hover:text-white'}`;
+    `text-sm font-medium transition-colors ${isActive ? 'text-foreground' : 'text-muted hover:text-foreground'}`;
 
   return (
-    <div className="min-h-screen bg-[#0a0a0a]">
-      <header className="sticky top-0 z-40 border-b border-zinc-800 bg-[#0a0a0a]/80 backdrop-blur-xl">
-        <div className="container mx-auto px-4 py-4">
-          <div className="mb-4 flex items-center justify-between">
-            <Link to="/" className="flex items-center space-x-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-brand-deep to-brand-deep2">
-                <span className="koppa-symbol text-2xl font-bold text-primary-300">
-                  {KOPPA_SYMBOL}
-                </span>
+    <div className="min-h-screen bg-background">
+      <header className="sticky top-0 z-40 border-b border-border bg-background/80 backdrop-blur-xl">
+        <div className="mx-auto max-w-6xl px-6 lg:px-8">
+          <div className="flex h-16 items-center justify-between gap-6">
+            <Link to="/" className="flex items-center gap-3">
+              <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-gradient-to-br from-brand-deep to-brand-deep2 ring-1 ring-inset ring-border-strong">
+                <span className="koppa-symbol text-xl font-bold text-accent-soft">{KOPPA_SYMBOL}</span>
               </div>
-              <div>
-                <h1 className="font-display text-xl font-bold text-white">SUM Chain Explorer</h1>
-                <p className="text-xs text-zinc-500">Native currency: Koppa ({KOPPA_SYMBOL})</p>
+              <div className="leading-tight">
+                <div className="font-display text-base font-semibold tracking-tight text-foreground">
+                  SUM Chain Explorer
+                </div>
+                <div className="text-[11px] text-muted">Koppa ({KOPPA_SYMBOL}) · L1</div>
               </div>
             </Link>
 
-            <nav className="hidden space-x-6 md:flex">
+            <form onSubmit={handleSearch} className="hidden min-w-0 flex-1 md:block">
+              <div className="relative mx-auto max-w-xl">
+                <input
+                  type="text"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Search address, block height, or tx hash"
+                  aria-label="Search the chain"
+                  className="w-full rounded-lg border border-border bg-surface px-3.5 py-2 pr-20 text-sm text-foreground placeholder-muted transition-colors hover:border-border-strong focus:border-accent focus:outline-none"
+                />
+                <button
+                  type="submit"
+                  className="absolute right-1.5 top-1.5 rounded-md bg-accent px-3 py-1 text-xs font-medium text-white transition-colors hover:bg-primary-600 active:translate-y-px"
+                >
+                  Search
+                </button>
+              </div>
+            </form>
+
+            <nav className="flex items-center gap-5">
               <NavLink to="/" end className={navClass}>
                 Home
               </NavLink>
@@ -56,19 +75,20 @@ export default function Layout({ children }: LayoutProps) {
             </nav>
           </div>
 
-          <form onSubmit={handleSearch} className="max-w-2xl">
+          {/* Mobile search */}
+          <form onSubmit={handleSearch} className="pb-3 md:hidden">
             <div className="relative">
               <input
                 type="text"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search by address, block height, or transaction hash"
+                placeholder="Search address, block, or tx"
                 aria-label="Search the chain"
-                className="w-full rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3 text-white placeholder-zinc-500 transition-colors focus:border-primary-500 focus:outline-none"
+                className="w-full rounded-lg border border-border bg-surface px-3.5 py-2 pr-20 text-sm text-foreground placeholder-muted transition-colors focus:border-accent focus:outline-none"
               />
               <button
                 type="submit"
-                className="absolute right-2 top-2 rounded-md bg-primary-500 px-4 py-1.5 text-white transition-colors hover:bg-primary-600 active:translate-y-px"
+                className="absolute right-1.5 top-1.5 rounded-md bg-accent px-3 py-1 text-xs font-medium text-white hover:bg-primary-600"
               >
                 Search
               </button>
@@ -77,16 +97,14 @@ export default function Layout({ children }: LayoutProps) {
         </div>
       </header>
 
-      <main className="container mx-auto px-4 py-8">{children}</main>
+      <main className="mx-auto max-w-6xl px-6 py-10 lg:px-8">{children}</main>
 
-      <footer className="mt-16 border-t border-zinc-800">
-        <div className="container mx-auto px-4 py-6 text-center text-sm text-zinc-500">
+      <footer className="mt-16 border-t border-border">
+        <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-6 text-sm text-muted lg:px-8">
           <p>SUM Chain Explorer</p>
-          <p className="mt-1">
-            <a href="https://sumchain.io" className="transition-colors hover:text-primary-300">
-              sumchain.io
-            </a>
-          </p>
+          <a href="https://sumchain.io" className="transition-colors hover:text-accent-soft">
+            sumchain.io ↗
+          </a>
         </div>
       </footer>
     </div>

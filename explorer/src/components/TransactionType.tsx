@@ -28,7 +28,7 @@ export function TransactionTypeCell({ tx, className = '' }: { tx: TxClassifiable
   return (
     <span className={`inline-flex items-center gap-2 ${className}`}>
       <TransactionTypeBadge tx={tx} />
-      <span className="truncate text-zinc-300">{c.action}</span>
+      <span className="truncate text-muted-strong">{c.action}</span>
     </span>
   );
 }

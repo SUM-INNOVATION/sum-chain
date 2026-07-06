@@ -1,8 +1,10 @@
 # OmniNode Inference Settlement (issue #61)
 
-> **Status:** code-backed, **dormant** (implemented behind an activation gate;
-> not activated on mainnet). Activation is a coordinated validator upgrade that
-> sets `inference_settlement_enabled_from_height`.
+> **Status:** code-backed and **implemented**; deployed on mainnet with
+> `inference_settlement_enabled_from_height` **set to height 8,900,000 — active
+> once the chain reaches it (≈2026-07-12)** (height 8,716,604 · 2026-07-06). It
+> auto-activates when the chain crosses 8,900,000; no further operator action is
+> required.
 
 Escrow-funded reward settlement for OmniNode inference verifiers, **keyed by the
 existing immutable [`InferenceAttestation`](INFERENCE-ATTESTATION.md) records** by
@@ -90,7 +92,7 @@ Ships dormant behind:
 - `inference_settlement_enabled_from_height: Option<u64>` (default `None`) — gate.
 - `inference_settlement_max_dispute_window_blocks: u64` — ceiling on a session's dispute window.
 - `inference_settlement_max_session_duration_blocks: u64` — ceiling on escrow lock-up.
-- `inference_settlement_dispute_threshold_bps: Option<u16>` (default `None`) — validator-quorum threshold (basis points of the active validator set) that must sign `ResolveDispute`; disputes disabled when unset (`None`).
+- `inference_settlement_dispute_threshold_bps: Option<u16>` (default `None`) — validator-quorum threshold (basis points of the active validator set) that must sign `ResolveDispute`; disputes disabled when unset (`None`). **On mainnet this is set to `6667`** (both validators of the current 2-validator net must sign).
 
 Below the gate, all settlement operations are rejected with `Failed(350)` (no
 fee, no state change). Attestation recording is unaffected either way.
@@ -136,5 +138,8 @@ status. Dispute evidence is an opaque commitment, never plaintext.
   session plurality) — objectively checkable on chain; a candidate v1.1/v2 addition.
 - Sponsored attestation (`sender ≠ verifier`) — requires `InferenceAttestationV2`.
 
-> This subprotocol is **not active on mainnet**; it is dormant until an operator
-> configures `inference_settlement_enabled_from_height`.
+> This subprotocol is **deployed and code-backed on mainnet** with
+> `inference_settlement_enabled_from_height` set to height 8,900,000 (active
+> ≈2026-07-12) and `inference_settlement_dispute_threshold_bps` set to `6667`
+> (both validators of the 2-validator net must sign `ResolveDispute`). It
+> auto-activates when the chain crosses 8,900,000.

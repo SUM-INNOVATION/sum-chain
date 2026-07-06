@@ -7,6 +7,18 @@ export default {
   theme: {
     extend: {
       colors: {
+        // Semantic tokens (CSS vars in src/index.css) — shared vocabulary with
+        // the marketing site: bg-surface, text-muted, border-border, etc.
+        background: 'var(--background)',
+        surface: 'var(--surface)',
+        'surface-2': 'var(--surface-2)',
+        border: 'var(--border)',
+        'border-strong': 'var(--border-strong)',
+        foreground: 'var(--foreground)',
+        muted: 'var(--muted)',
+        'muted-strong': 'var(--muted-strong)',
+        accent: 'var(--accent)',
+        'accent-soft': 'var(--accent-soft)',
         // SUM brand purple. Single accent, shared with the marketing site.
         primary: {
           50: '#faf5ff',

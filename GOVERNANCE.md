@@ -7,19 +7,23 @@ follows. The protocol design spec is
 surface is documented in [docs/tokens.md](docs/tokens.md); how approved
 decisions are carried out is in [RELEASE.md](RELEASE.md).
 
-## Dormant by default
+## Deployed; gate set to height 8,900,000
 
-On-chain governance ships **inert**. It does nothing until a coordinated
-validator activation sets **both** the activation gate
-(`governance_enabled_from_height`) and the network parameters
-(`ChainParams.governance`). Neither is set on mainnet, so governance
-transactions are rejected until a network enables them. Activation is a
+On-chain governance is **deployed and code-backed**. On mainnet **both** the
+activation gate (`governance_enabled_from_height`) and the network parameters
+(`ChainParams.governance`) are configured in the deployed genesis: the gate is
+**set to height 8,900,000 — active once the chain reaches it (≈2026-07-12)**
+(live height 8,716,604 · 2026-07-06). Until the chain crosses 8,900,000,
+governance transactions are still rejected; the subprotocol auto-activates at
+that height with no further operator action. The gate was set via a
 validator-coordinated, byte-identical runtime-genesis change — see
 [RELEASE.md](RELEASE.md) and
 [docs/operations/production-checklist.md](docs/operations/production-checklist.md).
 
-No final token id, `create_threshold`, quorum, pass threshold, proposal bond,
-voting period, or activation height is fixed here; those are set per activation.
+The configured `ChainParams.governance` params object includes
+`validator_authority_threshold_bps 6667`, quorum, pass threshold, voting period,
+and the snapshot bound. No governance token id is registered until a
+validator-quorum `RegisterAsset` action after activation.
 
 ## Record-first model
 

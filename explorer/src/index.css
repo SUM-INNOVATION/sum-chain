@@ -12,13 +12,30 @@
 @tailwind components;
 @tailwind utilities;
 
+/* On-brand with the marketing site (website/src/app/globals.css): one dark
+   theme, purple accent used sparingly, a small set of semantic surface/border/
+   text tokens so panels and tables share a consistent, restrained hierarchy. */
 :root {
+  --background: #08080a;
+  --surface: #101013;
+  --surface-2: #17171b;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.14);
+  --foreground: #fafafa;
+  --muted: #9b9ba4;
+  --muted-strong: #d4d4d8;
+  --accent: #a855f7;
+  --accent-soft: #c084fc;
+  /* Restrained status signals (never the only cue — always paired with text). */
+  --pos: #4ade80;
+  --neg: #f87171;
+
   font-family: Inter, system-ui, -apple-system, sans-serif;
   line-height: 1.5;
   font-weight: 400;
   color-scheme: dark;
-  color: #fafafa;
-  background-color: #0a0a0a;
+  color: var(--foreground);
+  background-color: var(--background);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -28,6 +45,7 @@
 body {
   margin: 0;
   min-height: 100vh;
+  background-color: var(--background);
 }
 
 #root {
@@ -44,11 +62,42 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+/* Reusable surface panel — the single card treatment across the explorer. */
+.panel {
+  background-color: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 1rem;
+}
+
+/* Section eyebrow: small, tracked, muted — the marketing site's label idiom. */
+.eyebrow {
+  font-size: 0.6875rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 500;
+}
+
 /* Visible keyboard focus everywhere (a11y). */
 :focus-visible {
-  outline: 2px solid #a855f7;
+  outline: 2px solid var(--accent);
   outline-offset: 2px;
   border-radius: 6px;
+}
+
+/* Subtle, on-brand scrollbar (matches the marketing site). */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 9999px;
+  border: 2px solid var(--background);
 }
 
 /* Skeleton shimmer for loading states. */
@@ -60,7 +109,8 @@ body {
 .skeleton {
   position: relative;
   overflow: hidden;
-  background-color: rgb(39 39 42 / 0.6); /* zinc-800/60 */
+  background-color: var(--surface-2);
+  border-radius: 0.5rem;
 }
 .skeleton::after {
   content: '';
@@ -79,5 +129,8 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .skeleton::after {
     animation: none;
+  }
+  * {
+    scroll-behavior: auto !important;
   }
 }
