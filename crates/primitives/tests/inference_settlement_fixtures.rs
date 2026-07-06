@@ -56,6 +56,7 @@ fn all_operations_bincode_round_trip() {
             session_id: "sess-1".to_string(),
             verifier: addr(0xAB),
             allow_claim: false,
+            approvals: vec![],
         }),
         InferenceSettlementOperation::RefundSession(RefundInferenceSessionRequest {
             session_id: "sess-1".to_string(),

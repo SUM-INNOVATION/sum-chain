@@ -152,7 +152,7 @@ use sumchain_primitives::governance::{
 #[test]
 fn governance_params_round_trip() {
     round_trip(&GovernanceParams {
-        council: Address::new([0xC0; 20]),
+        validator_authority_threshold_bps: 6_667,
         quorum_bps: 2_000,
         pass_threshold_bps: 5_000,
         voting_period_blocks: 100,
@@ -164,7 +164,7 @@ fn governance_params_round_trip() {
 
 #[test]
 fn operation_request_structs_round_trip() {
-    round_trip(&RegisterAssetRequest { token_id: [7u8; 32], create_threshold: 1_000, effective_height: 42 });
+    round_trip(&RegisterAssetRequest { token_id: [7u8; 32], create_threshold: 1_000, effective_height: 42, approvals: vec![] });
     round_trip(&CreateProposalRequest {
         asset: GovAssetKind::Src20Token([7u8; 32]),
         class: GovProposalClass::TreasurySpend,
@@ -175,7 +175,7 @@ fn operation_request_structs_round_trip() {
     });
     round_trip(&CastVoteRequest { proposal_id: [1u8; 32], choice: VoteChoice::Yes });
     round_trip(&ExecuteProposalRequest { proposal_id: [1u8; 32] });
-    round_trip(&CancelProposalRequest { proposal_id: [1u8; 32] });
+    round_trip(&CancelProposalRequest { proposal_id: [1u8; 32], approvals: vec![] });
 }
 
 #[test]

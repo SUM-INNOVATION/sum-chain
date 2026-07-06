@@ -39,6 +39,125 @@ pub enum GenesisError {
 
 pub type Result<T> = std::result::Result<T, GenesisError>;
 
+/// Genesis JSON adapter for the one remaining human-edited address in the
+/// activation params — `governance.treasury`. It is written as a **base58**
+/// string (consistent with `validators` and `alloc` keys), not a raw byte array.
+///
+/// This is JSON-only and does not change `Address`'s global serde or any
+/// bincode/wire/storage encoding; the runtime `GovernanceParams` keeps using
+/// [`Address`]. A legacy `[u8; 20]` array is still accepted on input for
+/// backward compatibility; serialization always emits base58.
+mod addr_json {
+    use super::{Address, GovernanceParams};
+    use serde::de::{self, SeqAccess, Visitor};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::fmt;
+
+    /// (De)serializes an [`Address`] as a base58 string; accepts a legacy 20-byte
+    /// array on input.
+    pub(super) struct Base58Address(pub Address);
+
+    impl Serialize for Base58Address {
+        fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+            s.serialize_str(&self.0.to_base58())
+        }
+    }
+
+    impl<'de> Deserialize<'de> for Base58Address {
+        fn deserialize<D: Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+            struct V;
+            impl<'de> Visitor<'de> for V {
+                type Value = Address;
+                fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                    f.write_str("a base58 address string or a 20-byte array")
+                }
+                fn visit_str<E: de::Error>(self, v: &str) -> std::result::Result<Address, E> {
+                    Address::from_base58(v)
+                        .map_err(|e| de::Error::custom(format!("invalid base58 address: {e}")))
+                }
+                fn visit_seq<A: SeqAccess<'de>>(
+                    self,
+                    mut seq: A,
+                ) -> std::result::Result<Address, A::Error> {
+                    let mut bytes = [0u8; 20];
+                    for (i, b) in bytes.iter_mut().enumerate() {
+                        *b = seq
+                            .next_element()?
+                            .ok_or_else(|| de::Error::invalid_length(i, &"20 bytes"))?;
+                    }
+                    if seq.next_element::<u8>()?.is_some() {
+                        return Err(de::Error::invalid_length(21, &"exactly 20 bytes"));
+                    }
+                    Ok(Address::new(bytes))
+                }
+            }
+            d.deserialize_any(V).map(Base58Address)
+        }
+    }
+
+    /// JSON proxy for [`GovernanceParams`]: base58 `treasury`, plain numeric
+    /// threshold/tally params.
+    #[derive(Serialize, Deserialize)]
+    struct GovernanceParamsJson {
+        validator_authority_threshold_bps: u16,
+        quorum_bps: u16,
+        pass_threshold_bps: u16,
+        voting_period_blocks: u64,
+        max_snapshot_holders: u32,
+        #[serde(default)]
+        proposal_bond: u128,
+        #[serde(default)]
+        treasury: Option<Base58Address>,
+    }
+
+    impl From<&GovernanceParams> for GovernanceParamsJson {
+        fn from(g: &GovernanceParams) -> Self {
+            Self {
+                validator_authority_threshold_bps: g.validator_authority_threshold_bps,
+                quorum_bps: g.quorum_bps,
+                pass_threshold_bps: g.pass_threshold_bps,
+                voting_period_blocks: g.voting_period_blocks,
+                max_snapshot_holders: g.max_snapshot_holders,
+                proposal_bond: g.proposal_bond,
+                treasury: g.treasury.map(Base58Address),
+            }
+        }
+    }
+
+    impl From<GovernanceParamsJson> for GovernanceParams {
+        fn from(j: GovernanceParamsJson) -> Self {
+            GovernanceParams {
+                validator_authority_threshold_bps: j.validator_authority_threshold_bps,
+                quorum_bps: j.quorum_bps,
+                pass_threshold_bps: j.pass_threshold_bps,
+                voting_period_blocks: j.voting_period_blocks,
+                max_snapshot_holders: j.max_snapshot_holders,
+                proposal_bond: j.proposal_bond,
+                treasury: j.treasury.map(|b| b.0),
+            }
+        }
+    }
+
+    /// `#[serde(with = "addr_json::opt_governance")]` for `Option<GovernanceParams>`.
+    pub(super) mod opt_governance {
+        use super::{Deserialize, Deserializer, GovernanceParams, GovernanceParamsJson, Serializer};
+        pub fn serialize<S: Serializer>(
+            v: &Option<GovernanceParams>,
+            s: S,
+        ) -> std::result::Result<S::Ok, S::Error> {
+            match v {
+                Some(g) => s.serialize_some(&GovernanceParamsJson::from(g)),
+                None => s.serialize_none(),
+            }
+        }
+        pub fn deserialize<'de, D: Deserializer<'de>>(
+            d: D,
+        ) -> std::result::Result<Option<GovernanceParams>, D::Error> {
+            Ok(Option::<GovernanceParamsJson>::deserialize(d)?.map(Into::into))
+        }
+    }
+}
+
 /// Chain parameters
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChainParams {
@@ -182,11 +301,16 @@ pub struct ChainParams {
     #[serde(default)]
     pub governance_enabled_from_height: Option<u64>,
 
-    /// On-chain governance v1 network parameters (council authority + tally
-    /// params + snapshot bound). `None` = not configured (governance operations
-    /// are rejected even above the height gate). No mainnet defaults; set only
-    /// for a coordinated activation or in tests. See docs/specs/GOVERNANCE-V1.md.
-    #[serde(default)]
+    /// On-chain governance v1 network parameters (validator-quorum authority +
+    /// tally params + snapshot bound). `None` = not configured (governance
+    /// operations are rejected even above the height gate). No mainnet defaults;
+    /// set only for a coordinated activation or in tests. See
+    /// docs/specs/GOVERNANCE-V1.md.
+    ///
+    /// `treasury` is a base58 address string in `genesis.json` (see
+    /// [`addr_json`]); the runtime struct keeps using [`Address`]. There is no
+    /// council address — validator-gated actions use validator-quorum approvals.
+    #[serde(default, with = "addr_json::opt_governance")]
     pub governance: Option<GovernanceParams>,
 
     /// Block height at which archive-node stake withdrawal (issue #20) activates.
@@ -236,12 +360,14 @@ pub struct ChainParams {
     #[serde(default = "default_inference_settlement_max_session_duration_blocks")]
     pub inference_settlement_max_session_duration_blocks: u64,
 
-    /// Neutral dispute resolver for inference settlement (issue #61). `None`
-    /// (default) means disputes are unavailable — `OpenDispute`/`ResolveDispute`
-    /// are rejected. When set, only this address may `ResolveDispute`. Chosen
-    /// over "funder resolves" to avoid the funder being both accuser and judge.
+    /// Validator-quorum threshold (basis points of the active PoA validator set)
+    /// for inference-settlement dispute resolution (issue #61). `None` (default)
+    /// means disputes are unavailable — `OpenDispute`/`ResolveDispute` are
+    /// rejected. When `Some(bps)`, `ResolveDispute` requires validator approvals
+    /// reaching `ceil(active_count * bps / 10000)` of the active validator set;
+    /// there is no personal resolver address. `bps` must be `1..=10000`.
     #[serde(default)]
-    pub inference_settlement_dispute_resolver: Option<Address>,
+    pub inference_settlement_dispute_threshold_bps: Option<u16>,
 }
 
 fn default_inference_settlement_max_dispute_window_blocks() -> u64 {
@@ -472,7 +598,7 @@ impl Default for ChainParams {
                 default_inference_settlement_max_dispute_window_blocks(),
             inference_settlement_max_session_duration_blocks:
                 default_inference_settlement_max_session_duration_blocks(),
-            inference_settlement_dispute_resolver: None,
+            inference_settlement_dispute_threshold_bps: None,
         }
     }
 }
@@ -893,5 +1019,83 @@ mod tests {
         let root2 = genesis.compute_state_root().unwrap();
 
         assert_eq!(root1, root2);
+    }
+
+    // ── Validator-quorum activation params (base58, no council/resolver) ──────
+
+    fn gov_params_with_treasury(treasury: Option<Address>) -> GovernanceParams {
+        GovernanceParams {
+            validator_authority_threshold_bps: 6667,
+            quorum_bps: 2000,
+            pass_threshold_bps: 5000,
+            voting_period_blocks: 7200,
+            max_snapshot_holders: 10000,
+            proposal_bond: 0,
+            treasury,
+        }
+    }
+
+    #[test]
+    fn governance_treasury_round_trips_as_base58() {
+        let treasury = Address::new([0x11; 20]);
+        let mut p = ChainParams::default();
+        p.governance = Some(gov_params_with_treasury(Some(treasury)));
+        let json = serde_json::to_string(&p).unwrap();
+        // treasury emitted as a base58 string, not a byte array.
+        assert!(
+            json.contains(&format!("\"treasury\":\"{}\"", treasury.to_base58())),
+            "treasury not base58: {json}"
+        );
+        assert!(!json.contains("\"council\""), "no council field: {json}");
+        assert!(!json.contains("dispute_resolver"), "no resolver field: {json}");
+        // round-trips.
+        let p2: ChainParams = serde_json::from_str(&json).unwrap();
+        let gp = p2.governance.unwrap();
+        assert_eq!(gp.validator_authority_threshold_bps, 6667);
+        assert_eq!(gp.treasury, Some(treasury));
+    }
+
+    #[test]
+    fn dispute_threshold_bps_round_trips() {
+        let mut p = ChainParams::default();
+        p.inference_settlement_dispute_threshold_bps = Some(6667);
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(json.contains("\"inference_settlement_dispute_threshold_bps\":6667"));
+        let p2: ChainParams = serde_json::from_str(&json).unwrap();
+        assert_eq!(p2.inference_settlement_dispute_threshold_bps, Some(6667));
+    }
+
+    #[test]
+    fn defaults_need_no_council_or_resolver() {
+        let p = ChainParams::default();
+        assert!(p.governance.is_none());
+        assert_eq!(p.inference_settlement_dispute_threshold_bps, None);
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(!json.contains("council"));
+        assert!(!json.contains("dispute_resolver"));
+        assert!(json.contains("inference_settlement_dispute_threshold_bps"));
+    }
+
+    #[test]
+    fn invalid_base58_treasury_rejected() {
+        let treasury = Address::new([0x11; 20]);
+        let mut p = ChainParams::default();
+        p.governance = Some(gov_params_with_treasury(Some(treasury)));
+        let json = serde_json::to_string(&p).unwrap();
+        let bad = json.replace(&treasury.to_base58(), "not-valid-base58-0OIl");
+        assert!(serde_json::from_str::<ChainParams>(&bad).is_err(), "invalid base58 must reject");
+    }
+
+    #[test]
+    fn legacy_array_treasury_still_accepted() {
+        // Backward compat: a legacy [u8;20] array still deserializes to the same address.
+        let treasury = Address::new([0x11; 20]);
+        let mut p = ChainParams::default();
+        p.governance = Some(gov_params_with_treasury(Some(treasury)));
+        let json = serde_json::to_string(&p).unwrap();
+        let arr = serde_json::to_string(&vec![0x11u8; 20]).unwrap();
+        let legacy = json.replace(&format!("\"{}\"", treasury.to_base58()), &arr);
+        let p2: ChainParams = serde_json::from_str(&legacy).expect("legacy array treasury parses");
+        assert_eq!(p2.governance.unwrap().treasury, Some(treasury));
     }
 }
