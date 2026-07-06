@@ -835,7 +835,7 @@ slashing in v1 (reward denial / claim withholding / escrow refund only).
 | `omninode_getInferenceClaims(session_id)` | read |
 | `omninode_getInferenceDisputes(session_id)` | read |
 | `omninode_getClaimableReward(session_id, verifier)` | read |
-| `omninode_buildOpenInferenceSession` / `buildFundInferenceSession` / `buildClaimInferenceReward` / `buildOpenInferenceDispute` / `buildResolveInferenceDispute` / `buildRefundInferenceSession` | unsigned-tx builders (no keys) |
+| `omninode_buildOpenInferenceSession` / `buildFundInferenceSession` / `buildClaimInferenceReward` / `buildOpenInferenceDispute` / `buildResolveInferenceDispute` / `buildRefundInferenceSession` | unsigned-tx builders (no keys). Dispute resolution is validator-quorum controlled (no personal resolver key); `buildResolveInferenceDispute` accepts an optional `approvals` list of validator signatures. |
 
 ---
 

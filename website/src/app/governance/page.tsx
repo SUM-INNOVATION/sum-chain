@@ -14,7 +14,7 @@ const LIFECYCLE = [
   { title: 'Snapshot', body: 'Eligible balances are frozen from TOKEN_BALANCES at creation. Transfers afterward do not change voting weight.', tag: 'gov_snapshots' },
   { title: 'Vote', body: 'Holders cast Yes / No / Abstain, weighted only by the frozen snapshot — never by live balances.' },
   { title: 'Tally', body: 'After the window, quorum and the pass threshold are evaluated over snapshot power.' },
-  { title: 'Record / Execute / Cancel', body: 'Passed proposals are Recorded, or Executed for a TreasurySpend payout. The proposer or council may cancel a live proposal.' },
+  { title: 'Record / Execute / Cancel', body: 'Passed proposals are Recorded, or Executed for a TreasurySpend payout. The proposer, or a validator quorum, may cancel a live proposal.' },
 ];
 
 const CANNOT = [
@@ -86,11 +86,16 @@ export default function GovernancePage() {
               </Card>
             </Reveal>
             <Reveal delay={0.1}>
-              <Card title="Policy Account council">
+              <Card title="Validator-quorum authority">
                 <p className="text-sm leading-relaxed text-muted">
-                  A Policy Account weighted-multisig (<MonoTag>GovernanceParams.council</MonoTag>)
-                  administers the asset registry, holds emergency authority, may cancel a live proposal,
-                  and owns the treasury address that treasury payouts draw from.
+                  Admin actions — enabling a governance asset, and cancelling someone else&apos;s live
+                  proposal — are authorized by a <strong>quorum of the active validator set</strong>, not a
+                  personal council key. The bar is a basis-point threshold
+                  (<MonoTag>GovernanceParams.validator_authority_threshold_bps</MonoTag>): required
+                  approvals = ceil(active_validators × bps / 10000). Non-signing validators abstain but
+                  still count in the denominator; for the current two-validator network,
+                  <MonoTag>6667</MonoTag> requires both, and <MonoTag>10000</MonoTag> requires all. The
+                  governed treasury address is separate and base58-configured.
                 </p>
               </Card>
             </Reveal>
@@ -117,7 +122,7 @@ export default function GovernancePage() {
                 {[
                   { s: 'Escrow', d: 'at creation' },
                   { s: 'Return', d: 'good-faith / proposer cancel' },
-                  { s: 'Burn', d: 'spam / quorum fail / council cancel' },
+                  { s: 'Burn', d: 'spam / quorum fail / validator-quorum cancel' },
                 ].map((b) => (
                   <div key={b.s} className="rounded-xl border border-[var(--border)] bg-surface/40 p-3">
                     <p className="mono text-xs text-accent-soft">{b.s}</p>

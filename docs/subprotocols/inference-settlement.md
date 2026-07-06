@@ -52,25 +52,35 @@ any verifier that attested for the session is still within its maturity window a
 has neither claimed nor been denied by a dispute. Only once every such claim has
 matured (or been claimed/denied) can the remaining escrow be refunded.
 
-## Disputes (record-only, neutral resolver)
+## Disputes (record-only, validator-quorum resolution)
 
 Disputes are **record-only** — the chain cannot verify inference correctness. A
 dispute is raised by the funder during the dispute window against a specific
 verifier and carries only an opaque `evidence_commitment` (a hash; **no plaintext
 evidence on chain**). It **withholds** that verifier's claim until resolved.
 
-Resolution is performed by a **neutral configured resolver**
-(`inference_settlement_dispute_resolver`) — deliberately *not* the funder, so the
-funder is never both accuser and judge. Only that resolver may `ResolveDispute`. A
-resolution either **allows** the claim to proceed or **denies** it (the verifier's
-reward is withheld; escrow stays refundable to the funder).
+Inference-settlement dispute resolution is **validator-quorum controlled** —
+there is **no personal resolver key**, so the funder is never both accuser and
+judge. `ResolveDispute` requires a threshold of the **active PoA validator set**
+to sign (Ed25519, domain-separated, chain_id-bound). **Threshold is configured in
+basis points** (`inference_settlement_dispute_threshold_bps: Option<u16>`):
+required approvals = `ceil(active_validator_count * threshold_bps / 10000)`.
+**Non-signing validators count in the denominator; a validator that does not sign
+abstains, and the action only executes if enough approvals are submitted** — this
+is threshold authorization, not yes/no voting. For the current 2-validator
+network, `5000` → 1 signature, and `6667` requires both validators; `10000`
+requires all validators. `tx.from` is only the fee payer / submitter — not the
+authority. A resolution either **allows** the claim to proceed or **denies** it
+(the verifier's reward is withheld; escrow stays refundable to the funder).
 
-**Disputes require `inference_settlement_dispute_resolver` to be set.** When it is
-`None` (the default), both `OpenDispute` and `ResolveDispute` are rejected with
-`Failed(353)` — disputes are simply unavailable, and there is no way to open a
-dispute that could deadlock a claim with no resolution path. **Escrow / fund /
-claim / refund all still work normally when the resolver is `None`** — only the
-dispute mechanism is off. Configuring a resolver is a separate, coordinated
+**Disputes require `inference_settlement_dispute_threshold_bps` to be set.** When
+it is `None` (the default), disputes are **disabled**: both `OpenDispute` and
+`ResolveDispute` are rejected with `Failed(353)` — there is no way to open a
+dispute that could deadlock a claim with no resolution path. `OpenDispute` itself
+needs no approvals (it only requires the dispute threshold to be configured);
+approvals are required only for `ResolveDispute`. **Escrow / fund / claim / refund
+all still work normally when the threshold is `None`** — only the dispute
+mechanism is off. Configuring the dispute threshold is a separate, coordinated
 decision from enabling settlement.
 
 ## Activation & chain parameters
@@ -80,7 +90,7 @@ Ships dormant behind:
 - `inference_settlement_enabled_from_height: Option<u64>` (default `None`) — gate.
 - `inference_settlement_max_dispute_window_blocks: u64` — ceiling on a session's dispute window.
 - `inference_settlement_max_session_duration_blocks: u64` — ceiling on escrow lock-up.
-- `inference_settlement_dispute_resolver: Option<Address>` (default `None`) — neutral dispute resolver; disputes disabled when unset.
+- `inference_settlement_dispute_threshold_bps: Option<u16>` (default `None`) — validator-quorum threshold (basis points of the active validator set) that must sign `ResolveDispute`; disputes disabled when unset (`None`).
 
 Below the gate, all settlement operations are rejected with `Failed(350)` (no
 fee, no state change). Attestation recording is unaffected either way.
@@ -92,8 +102,8 @@ fee, no state change). Attestation recording is unaffected either way.
 | `OpenSession` | funder | Create + fund a session; debits the deposit. |
 | `FundSession` | funder | Top up `remaining_escrow`. |
 | `ClaimReward` | verifier (self) | Pay the fixed reward after maturity; one per verifier. |
-| `OpenDispute` | funder | Record a dispute (during window) that withholds a verifier's claim. Requires a configured resolver. |
-| `ResolveDispute` | resolver | Allow or deny the disputed claim. |
+| `OpenDispute` | funder | Record a dispute (during window) that withholds a verifier's claim. Requires the dispute threshold to be configured; no approvals. |
+| `ResolveDispute` | validator quorum | Allow or deny the disputed claim; requires a threshold of the active validator set to sign (approvals). |
 | `RefundSession` | funder | Refund remaining escrow once closable. |
 
 ## RPC (read-only + unsigned builders, no keys)
@@ -102,12 +112,12 @@ fee, no state change). Attestation recording is unaffected either way.
 - `omninode_getInferenceClaims(session_id)`
 - `omninode_getInferenceDisputes(session_id)`
 - `omninode_getClaimableReward(session_id, verifier)` — eligibility, amount, unlock height.
-- `omninode_build{Open|Fund}InferenceSession`, `omninode_buildClaimInferenceReward`, `omninode_build{Open|Resolve}InferenceDispute`, `omninode_buildRefundInferenceSession` — return an unsigned `TransactionV2` (hex) + signing hash.
+- `omninode_build{Open|Fund}InferenceSession`, `omninode_buildClaimInferenceReward`, `omninode_build{Open|Resolve}InferenceDispute`, `omninode_buildRefundInferenceSession` — return an unsigned `TransactionV2` (hex) + signing hash. `omninode_buildResolveInferenceDispute` accepts an optional `approvals` list of validator signatures (validator-quorum authorization).
 
 ## Receipt codes (isolated 350-block)
 
 `350` not enabled · `351` malformed/unsupported op · `352` session not found/duplicate ·
-`353` unauthorized (or dispute resolver not configured) · `354` invalid session terms
+`353` unauthorized (insufficient validator approvals, or dispute threshold not configured) · `354` invalid session terms
 (incl. expiry before finality + dispute window) · `355` insufficient escrow/deposit ·
 `356` attestation not found · `357` claim not mature (needs finality_depth + dispute window) ·
 `358` duplicate claim/dispute · `359` unresolved/denied dispute blocks settlement ·

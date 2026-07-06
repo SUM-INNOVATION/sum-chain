@@ -31,7 +31,9 @@ execution of code/release/validator/consensus changes remains off-chain
 
 ## 3. Governance asset registry
 
-An on-chain, **council-administered** allowlist of governance-eligible assets.
+An on-chain, **validator-quorum-administered** allowlist of governance-eligible
+assets. Governance admin/council authority is validator-quorum controlled; there
+is **no single council address**.
 
 ```
 GovAsset {
@@ -45,16 +47,17 @@ GovAsset {
 
 - `GovAssetKind` in v1 is `Src20Token(TokenId)` only. `StakedKoppa` and other
   classes are reserved for a future, separately-approved revision.
-- The registry starts **empty**. The first (single) asset is added by the
-  Policy Account council after activation.
+- The registry starts **empty**. The first (single) asset is added by a
+  validator-quorum `RegisterAsset` action after activation (a threshold of the
+  active validator set must sign).
 - **Eligibility rule:** a token may be listed only if it is fixed-supply /
   non-mintable (`!mintable`). This prevents inflating voting power by minting.
   SRC-20 exposes no on-chain operation to freeze or renounce mint authority
   (`mintable` is immutable after creation, and `pause` only halts transfers), so
-  `!mintable` is the sole v1 eligibility rule — a "council-frozen mint authority"
+  `!mintable` is the sole v1 eligibility rule — a "frozen mint authority"
   state does not exist on-chain and is not accepted.
-- Registry changes (list/enable/disable) are **council** actions (Policy
-  Account), not open votes, in v1.
+- Registry changes (list/enable/disable) are **validator-quorum** actions (a
+  threshold of the active validator set signs), not open votes, in v1.
 
 ## 4. Voting power & snapshot
 
@@ -82,8 +85,8 @@ Created  (proposer snapshot power ≥ create_threshold; deposit bond posted)
   → Voting     [snapshot eligible balances @ voting-start → gov_snapshots]
   → tally      (quorum + pass threshold over snapshot power)
   → { Passed | Rejected | QuorumNotMet }
-  → { Executed(on-chain: treasury via council) | Recorded(off-chain + external_ref) | Expired }
-Cancel: by proposer before Voting; by council (emergency).
+  → { Executed(on-chain: treasury payout) | Recorded(off-chain + external_ref) | Expired }
+Cancel: self-cancel by proposer (no approvals); or validator-quorum cancel (emergency).
 ```
 
 - **Deposit bond**: `GovernanceParams.proposal_bond` (native Koppa; `0` = off).
@@ -91,12 +94,15 @@ Cancel: by proposer before Voting; by council (emergency).
   proposer must cover `fee + bond`); **returned** to the proposer on a good-faith
   terminal state (Recorded / Executed / Rejected) or a proposer cancel, and
   **burned** to `Address::ZERO` on spam / low turnout (QuorumNotMet / Expired) or
-  a council cancel.
+  a validator-quorum cancel.
 - **`external_ref`**: every proposal links to the GitHub PR / release / doc it
   authorizes (URL + content hash), so proposal IDs map to real artifacts.
 - **`execution_kind`**: `OnChain` (treasury spend only) or `RecordOnly`.
-- **Cancel**: by the proposer or the council (`GovernanceParams.council`) while
-  Created/Voting, via the `gov_buildCancelProposal` builder.
+- **Cancel**: the proposer may self-cancel their own proposal with no approvals;
+  a **validator-quorum** cancel (a threshold of the active validator set,
+  configured by `GovernanceParams.validator_authority_threshold_bps`) may also
+  cancel a live proposal while Created/Voting, via the `gov_buildCancelProposal`
+  builder (which accepts an optional `approvals` list of validator signatures).
 
 ## 6. Proposal classes → execution model
 
@@ -109,32 +115,45 @@ Cancel: by proposer before Voting; by council (emergency).
 | Activation-height change | RecordOnly → byte-identical runtime-genesis edit + rollout |
 | Consensus / wire / storage migration | RecordOnly (binary rollout) |
 | Package publishing | RecordOnly (off-chain) |
-| Emergency / security | Policy Account council fast-path |
+| Emergency / security | Validator-quorum fast-path (threshold of the active validator set) |
 | Treasury spend (dedicated governance treasury) | **On-chain**: a passed `TreasurySpend` + `OnChain` proposal pays a single native-Koppa amount from `GovernanceParams.treasury` to its beneficiary and moves to `Executed` — the only auto-exec path in v1 |
 
 Treasury execution is deliberately minimal: exactly one native-Koppa transfer,
 `TreasurySpend`-class only, from a dedicated governance-owned `treasury` address
-(funded to be governed; **not** the council Policy Account) to a beneficiary and
+(a governed payout address, funded to be governed) to a beneficiary and
 amount fixed at proposal creation. Insufficient treasury balance fails cleanly
 (`312`) and leaves the proposal live; every other `OnChain` class fails `310`.
 No on-chain chain-param / validator / consensus mutation exists or is performed,
 so nothing else auto-executes — a passed proposal is an authoritative approval
 record, never a forced validator upgrade.
 
-## 7. Policy Account council
+## 7. Validator-quorum admin authority
 
-The `GovernanceParams.council` address (a Policy Account weighted-multisig) is
-the **council**:
+Governance admin/council authority is **validator-quorum controlled**; there is
+**no single council address**. A threshold of the **active PoA validator set**
+must sign (Ed25519, domain-separated, chain_id-bound) to exercise admin
+authority:
 - administers the governance asset registry (`RegisterAsset`),
-- holds emergency/security authority, including **cancelling** a live proposal
-  (bond burned),
-- funds and owns the dedicated `treasury` address that `TreasurySpend` payouts
-  draw from.
+- holds emergency/security authority, including a validator-quorum **cancel** of
+  a live proposal (bond burned) — the proposer can still self-cancel their own
+  proposal with no approvals,
+- the dedicated `treasury` address (a governed payout address) is what
+  `TreasurySpend` payouts draw from.
+
+**Threshold is configured in basis points**
+(`GovernanceParams.validator_authority_threshold_bps: u16`): required approvals =
+`ceil(active_validator_count * threshold_bps / 10000)`. **Non-signing validators
+count in the denominator; a validator that does not sign abstains, and the
+action only executes if enough approvals are submitted** — this is threshold
+authorization, not yes/no voting. For the current 2-validator network, `5000`
+→ 1 signature, and `5001`, `6667`, or `10000` → 2 signatures: `6667` requires
+both validators; `10000` requires all validators. `tx.from` is only the fee
+payer / submitter — not the authority.
 
 On-chain treasury payouts execute through governance's own `ExecuteProposal`
-path (§6), from the dedicated `treasury` address — not from the council Policy
-Account itself. Token-holder governance (this spec) is **separate** but a passed
-token-holder proposal can **authorize** a council action.
+path (§6), from the dedicated `treasury` address. Token-holder governance (this
+spec) is **separate** but a passed token-holder proposal can **authorize** a
+validator-quorum admin action.
 
 ## 8. Activation & migration
 
@@ -165,7 +184,7 @@ Detailed types and tests are defined in the implementation issue (#50).
 - **Vote-buying / balance moves:** voting-start snapshot (§4).
 - **Validator coercion:** record-first; governance does not force upgrades (§6, §8).
 - **Spam:** create-threshold + deposit bond + rate limits.
-- **Low turnout / capture:** quorum + council emergency backstop.
+- **Low turnout / capture:** quorum + validator-quorum emergency backstop.
 - **Ballot privacy:** public votes in v1; commit-reveal is a future option.
 
 ## 11. TBD parameters (resolved before/at implementation, not in this spec)
@@ -176,6 +195,7 @@ Detailed types and tests are defined in the implementation issue (#50).
 | Proposal `create_threshold` | TBD |
 | Quorum (% of snapshot power) | TBD |
 | Pass threshold (%) | TBD |
+| Validator admin authority threshold | Configurable via `GovernanceParams.validator_authority_threshold_bps` (basis points of the active validator set; `6667` requires both of a 2-validator network, `10000` requires all); value TBD per activation |
 | Deposit bond amount | Configurable via `GovernanceParams.proposal_bond` (`0` = off); value TBD per activation |
 | Governance `treasury` address | Configurable via `GovernanceParams.treasury` (`None` = no on-chain treasury execution); value TBD per activation |
 | Voting period (blocks) | TBD |
