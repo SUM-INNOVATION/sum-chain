@@ -37,7 +37,7 @@ export function Copyable({
       <span className="truncate">{children}</span>
       <span
         aria-hidden
-        className={`shrink-0 text-xs ${copied ? 'text-emerald-400' : 'text-zinc-600 group-hover:text-zinc-400'}`}
+        className={`shrink-0 text-xs ${copied ? 'text-emerald-400' : 'text-muted group-hover:text-muted-strong'}`}
       >
         {copied ? '✓' : '⧉'}
       </span>

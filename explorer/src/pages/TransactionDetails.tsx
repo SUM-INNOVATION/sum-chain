@@ -81,8 +81,8 @@ export default function TransactionDetails() {
   if (!tx) {
     return (
       <div className="py-20 text-center">
-        <h2 className="mb-4 font-display text-2xl font-bold text-white">Transaction not found</h2>
-        <Link to="/" className="text-primary-300 hover:text-primary-200">
+        <h2 className="mb-4 font-display text-2xl font-semibold tracking-tight text-foreground">Transaction not found</h2>
+        <Link to="/" className="text-accent-soft hover:text-primary-200">
           Back to home
         </Link>
       </div>
@@ -98,11 +98,11 @@ export default function TransactionDetails() {
 
   return (
     <div className="mx-auto max-w-4xl space-y-6">
-      <h1 className="font-display text-3xl font-bold text-white">Transaction</h1>
+      <h1 className="font-display text-3xl font-semibold tracking-tight text-foreground">Transaction</h1>
 
-      <div className="space-y-4 rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6">
+      <div className="space-y-4 rounded-2xl border border-border bg-surface p-6">
         <div className="flex items-start justify-between gap-4">
-          <div className="text-zinc-400">Status</div>
+          <div className="text-muted">Status</div>
           <div className={`font-bold uppercase ${statusColor}`}>{status}</div>
         </div>
 
@@ -110,7 +110,7 @@ export default function TransactionDetails() {
         <DetailRowNode label="Type">
           <div className="flex flex-wrap items-center justify-end gap-2">
             <TransactionTypeBadge tx={tx} />
-            <TransactionActionLabel tx={tx} className="text-white" />
+            <TransactionActionLabel tx={tx} className="text-foreground" />
           </div>
         </DetailRowNode>
 
@@ -118,7 +118,7 @@ export default function TransactionDetails() {
         {tx.asset_kind && (
           <DetailRowNode label="Asset">
             <div className="flex flex-col items-end gap-1">
-              <span className="text-white">
+              <span className="text-foreground">
                 {tokenMeta
                   ? `${tokenMeta.name} (${tokenMeta.symbol})`
                   : tx.asset_kind === 'src20'
@@ -128,7 +128,7 @@ export default function TransactionDetails() {
                       : 'Native Koppa'}
               </span>
               {tx.asset_ref && (
-                <Copyable text={tx.asset_ref} className="font-mono text-xs text-zinc-500" title="Copy asset id">
+                <Copyable text={tx.asset_ref} className="font-mono text-xs text-muted" title="Copy asset id">
                   <span className="break-all">0x{tx.asset_ref}</span>
                 </Copyable>
               )}
@@ -137,14 +137,14 @@ export default function TransactionDetails() {
         )}
 
         <DetailRowNode label="Hash">
-          <Copyable text={tx.hash} className="tnum font-mono text-white" title="Copy hash">
+          <Copyable text={tx.hash} className="tnum font-mono text-foreground" title="Copy hash">
             <span className="break-all">{tx.hash}</span>
           </Copyable>
         </DetailRowNode>
 
         <DetailRowNode label="From">
           <div className="flex flex-col items-end gap-1">
-            <Link to={`/address/${tx.from}`} className="tnum break-all font-mono text-primary-300 hover:text-primary-200">
+            <Link to={`/address/${tx.from}`} className="tnum break-all font-mono text-accent-soft hover:text-primary-200">
               {tx.from}
             </Link>
             {fromRole?.label && <MinterChip label={fromRole.label} />}
@@ -154,7 +154,7 @@ export default function TransactionDetails() {
         {tx.to ? (
           <DetailRowNode label="To">
             <div className="flex flex-col items-end gap-1">
-              <Link to={`/address/${tx.to}`} className="tnum break-all font-mono text-primary-300 hover:text-primary-200">
+              <Link to={`/address/${tx.to}`} className="tnum break-all font-mono text-accent-soft hover:text-primary-200">
                 {tx.to}
               </Link>
               {toRole?.label && <MinterChip label={toRole.label} />}
@@ -162,7 +162,7 @@ export default function TransactionDetails() {
           </DetailRowNode>
         ) : (
           <DetailRowNode label="To">
-            <span className="text-zinc-500">Not a direct-transfer recipient</span>
+            <span className="text-muted">Not a direct-transfer recipient</span>
           </DetailRowNode>
         )}
 
@@ -192,8 +192,8 @@ function MinterChip({ label }: { label: string }) {
 /** Detail row whose value is arbitrary JSX (chips, copyable values, links). */
 function DetailRowNode({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="flex items-start justify-between gap-4 border-b border-zinc-800 pb-3">
-      <div className="font-medium text-zinc-400">{label}</div>
+    <div className="flex items-start justify-between gap-4 border-b border-border pb-3">
+      <div className="font-medium text-muted">{label}</div>
       <div className="min-w-0 text-right">{children}</div>
     </div>
   );
@@ -208,18 +208,18 @@ interface DetailRowProps {
 
 function DetailRow({ label, value, link, highlight }: DetailRowProps) {
   const content = link ? (
-    <Link to={link} className="tnum break-all font-mono text-primary-300 hover:text-primary-200">
+    <Link to={link} className="tnum break-all font-mono text-accent-soft hover:text-primary-200">
       {value}
     </Link>
   ) : (
-    <span className={`tnum break-all font-mono ${highlight ? 'font-bold text-primary-300' : 'text-white'}`}>
+    <span className={`tnum break-all font-mono ${highlight ? 'font-bold text-accent-soft' : 'text-foreground'}`}>
       {value}
     </span>
   );
 
   return (
-    <div className="flex items-start justify-between gap-4 border-b border-zinc-800 pb-3">
-      <div className="font-medium text-zinc-400">{label}</div>
+    <div className="flex items-start justify-between gap-4 border-b border-border pb-3">
+      <div className="font-medium text-muted">{label}</div>
       <div className="text-right">{content}</div>
     </div>
   );

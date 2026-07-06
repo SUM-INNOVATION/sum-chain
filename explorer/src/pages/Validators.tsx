@@ -55,8 +55,8 @@ export default function Validators() {
   return (
     <div className="mx-auto max-w-6xl space-y-6">
       <div className="flex items-center justify-between">
-        <h1 className="font-display text-3xl font-bold text-white">Validators</h1>
-        <div className="tnum text-sm text-zinc-400">
+        <h1 className="font-display text-3xl font-semibold tracking-tight text-foreground">Validators</h1>
+        <div className="tnum text-sm text-muted">
           Height: {validators.current_height.toLocaleString()}
         </div>
       </div>
@@ -65,14 +65,14 @@ export default function Validators() {
         {validators.validators.map((validator, index) => (
           <div
             key={validator.address}
-            className={`rounded-2xl border bg-zinc-900/40 p-6 ${
-              validator.is_current_proposer ? 'border-primary-500/60' : 'border-zinc-800'
+            className={`rounded-2xl border bg-surface p-6 ${
+              validator.is_current_proposer ? 'border-primary-500/60' : 'border-border'
             }`}
           >
             <div className="mb-4 flex items-center gap-3">
-              <div className="tnum font-display text-2xl font-bold text-zinc-600">#{index}</div>
+              <div className="tnum font-display text-2xl font-semibold text-muted">#{index}</div>
               {validator.is_current_proposer && (
-                <span className="rounded-full bg-primary-500/20 px-3 py-1 text-sm font-medium text-primary-300">
+                <span className="rounded-full bg-primary-500/20 px-3 py-1 text-sm font-medium text-accent-soft">
                   Current proposer
                 </span>
               )}
@@ -80,28 +80,28 @@ export default function Validators() {
 
             <div className="space-y-3">
               <div>
-                <div className="mb-1 text-xs text-zinc-500">Address</div>
-                <div className="break-all font-mono text-white">{validator.address}</div>
+                <div className="mb-1 text-xs text-muted">Address</div>
+                <div className="break-all font-mono text-foreground">{validator.address}</div>
               </div>
               <div>
-                <div className="mb-1 text-xs text-zinc-500">Public key</div>
-                <div className="break-all font-mono text-sm text-zinc-400">{validator.public_key}</div>
+                <div className="mb-1 text-xs text-muted">Public key</div>
+                <div className="break-all font-mono text-sm text-muted">{validator.public_key}</div>
               </div>
             </div>
           </div>
         ))}
       </div>
 
-      <div className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6">
-        <h2 className="mb-4 font-display text-lg font-bold text-white">Consensus</h2>
+      <div className="rounded-2xl border border-border bg-surface p-6">
+        <h2 className="mb-4 font-display text-lg font-semibold tracking-tight text-foreground">Consensus</h2>
         <div className="grid grid-cols-2 gap-4 text-sm">
           <div>
-            <div className="text-zinc-400">Total validators</div>
-            <div className="tnum font-bold text-white">{validators.validators.length}</div>
+            <div className="text-muted">Total validators</div>
+            <div className="tnum font-semibold tracking-tight text-foreground">{validators.validators.length}</div>
           </div>
           <div>
-            <div className="text-zinc-400">Current proposer index</div>
-            <div className="tnum font-bold text-white">{validators.current_proposer_index}</div>
+            <div className="text-muted">Current proposer index</div>
+            <div className="tnum font-semibold tracking-tight text-foreground">{validators.current_proposer_index}</div>
           </div>
         </div>
       </div>

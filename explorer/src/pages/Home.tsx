@@ -61,37 +61,45 @@ export default function Home() {
   }
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-10">
       {/* Network Stats */}
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
-        <StatCard title="Block Height" value={health?.current_height?.toLocaleString()} loading={loading} />
-        <StatCard title="Chain ID" value={health?.chain_id?.toString()} loading={loading} />
-        <StatCard title="Peers" value={health?.peer_count?.toString()} loading={loading} />
-        <StatCard title="Version" value={health?.version} loading={loading} accent />
-      </div>
+      <section>
+        <div className="mb-4 flex items-center gap-2">
+          <span className="eyebrow">Network</span>
+          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--pos)]" aria-hidden />
+          <span className="text-xs text-muted">live</span>
+        </div>
+        <div className="grid grid-cols-2 gap-px overflow-hidden rounded-2xl border border-border bg-border lg:grid-cols-4">
+          <StatCard title="Block Height" value={health?.current_height?.toLocaleString()} loading={loading} />
+          <StatCard title="Chain ID" value={health?.chain_id?.toString()} loading={loading} />
+          <StatCard title="Peers" value={health?.peer_count?.toString()} loading={loading} />
+          <StatCard title="Version" value={health?.version} loading={loading} accent />
+        </div>
+      </section>
 
-      <div className="grid grid-cols-1 gap-8 lg:grid-cols-2">
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
         {/* Latest Blocks */}
-        <section className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6">
-          <h2 className="mb-4 font-display text-xl font-bold text-white">Latest Blocks</h2>
-          <div className="space-y-3">
+        <section className="panel overflow-hidden">
+          <div className="flex items-center justify-between border-b border-border px-5 py-3.5">
+            <h2 className="font-display text-sm font-semibold tracking-tight text-foreground">Latest Blocks</h2>
+            <span className="eyebrow">newest first</span>
+          </div>
+          <div className="divide-y divide-border">
             {loading
-              ? Array.from({ length: 6 }).map((_, i) => <RowSkeleton key={i} />)
+              ? Array.from({ length: 6 }).map((_, i) => <div key={i} className="px-5 py-3.5"><RowSkeleton /></div>)
               : latestBlocks.map((block) => (
                   <Link
                     key={block.height}
                     to={`/block/${block.height}`}
-                    className="block rounded-xl border border-zinc-800 bg-[#0a0a0a]/60 p-4 transition-colors hover:border-primary-500/50"
+                    className="flex items-center justify-between px-5 py-3.5 transition-colors hover:bg-surface-2"
                   >
-                    <div className="flex items-start justify-between">
-                      <div>
-                        <div className="tnum font-mono text-primary-300">#{block.height}</div>
-                        <div className="mt-1 font-mono text-sm text-zinc-500">{formatHash(block.hash)}</div>
-                      </div>
-                      <div className="text-right">
-                        <div className="tnum text-sm text-zinc-400">{block.tx_count} txs</div>
-                        <div className="tnum mt-1 text-xs text-zinc-500">{formatTimeAgo(block.timestamp)}</div>
-                      </div>
+                    <div className="min-w-0">
+                      <div className="tnum font-mono text-sm font-medium text-accent-soft">#{block.height}</div>
+                      <div className="mt-0.5 truncate font-mono text-xs text-muted">{formatHash(block.hash)}</div>
+                    </div>
+                    <div className="shrink-0 text-right">
+                      <div className="tnum text-sm text-muted-strong">{block.tx_count} txs</div>
+                      <div className="tnum mt-0.5 text-xs text-muted">{formatTimeAgo(block.timestamp)}</div>
                     </div>
                   </Link>
                 ))}
@@ -99,15 +107,16 @@ export default function Home() {
         </section>
 
         {/* Pending Transactions */}
-        <section className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6">
-          <h2 className="mb-4 font-display text-xl font-bold text-white">
-            Pending Transactions{!loading && ` (${pendingTxs.length})`}
-          </h2>
-          <div className="space-y-3">
+        <section className="panel overflow-hidden">
+          <div className="flex items-center justify-between border-b border-border px-5 py-3.5">
+            <h2 className="font-display text-sm font-semibold tracking-tight text-foreground">Pending Transactions</h2>
+            {!loading && <span className="eyebrow">{pendingTxs.length} in mempool</span>}
+          </div>
+          <div className="divide-y divide-border">
             {loading ? (
-              Array.from({ length: 4 }).map((_, i) => <RowSkeleton key={i} />)
+              Array.from({ length: 4 }).map((_, i) => <div key={i} className="px-5 py-3.5"><RowSkeleton /></div>)
             ) : pendingTxs.length === 0 ? (
-              <div className="rounded-xl border border-dashed border-zinc-800 py-10 text-center text-zinc-500">
+              <div className="px-5 py-12 text-center text-sm text-muted">
                 Mempool is empty. New transactions will appear here.
               </div>
             ) : (
@@ -115,21 +124,21 @@ export default function Home() {
                 <Link
                   key={tx.hash}
                   to={`/tx/${tx.hash}`}
-                  className="block rounded-xl border border-zinc-800 bg-[#0a0a0a]/60 p-4 transition-colors hover:border-primary-500/50"
+                  className="block px-5 py-3.5 transition-colors hover:bg-surface-2"
                 >
-                  <div className="mb-2 flex items-center justify-between gap-2">
+                  <div className="mb-1.5 flex items-center justify-between gap-2">
                     <div className="flex min-w-0 items-center gap-2">
                       <TransactionTypeBadge tx={tx} />
-                      <TransactionActionLabel tx={tx} className="truncate text-xs text-zinc-400" />
+                      <TransactionActionLabel tx={tx} className="truncate text-xs text-muted-strong" />
                     </div>
-                    <div className="shrink-0 font-mono text-xs text-zinc-500">{formatHash(tx.hash, 10)}</div>
+                    <div className="shrink-0 font-mono text-xs text-muted">{formatHash(tx.hash, 10)}</div>
                   </div>
                   <div className="flex items-center justify-between text-sm">
-                    <div className="font-mono text-zinc-300">
+                    <div className="min-w-0 truncate font-mono text-xs text-muted">
                       {formatHash(tx.from)}
-                      {tx.to ? ` to ${formatHash(tx.to)}` : ''}
+                      {tx.to ? ` → ${formatHash(tx.to)}` : ''}
                     </div>
-                    <div className="tnum font-medium text-primary-300">{formatKoppa(tx.amount)}</div>
+                    <div className="tnum shrink-0 font-medium text-foreground">{formatKoppa(tx.amount)}</div>
                   </div>
                 </Link>
               ))
@@ -150,13 +159,13 @@ interface StatCardProps {
 
 function StatCard({ title, value, loading, accent }: StatCardProps) {
   return (
-    <div className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6">
-      <div className="mb-2 text-sm text-zinc-400">{title}</div>
+    <div className="bg-surface p-5">
+      <div className="eyebrow">{title}</div>
       {loading ? (
-        <Skeleton className="h-7 w-24" />
+        <Skeleton className="mt-2 h-7 w-24" />
       ) : (
-        <div className={`tnum font-display text-2xl font-bold ${accent ? 'text-primary-300' : 'text-white'}`}>
-          {value ?? 'Unknown'}
+        <div className={`tnum mt-1.5 font-display text-2xl font-semibold tracking-tight ${accent ? 'text-accent-soft' : 'text-foreground'}`}>
+          {value ?? '—'}
         </div>
       )}
     </div>

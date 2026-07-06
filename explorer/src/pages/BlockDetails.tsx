@@ -58,8 +58,8 @@ export default function BlockDetails() {
   if (!block) {
     return (
       <div className="py-20 text-center">
-        <h2 className="mb-4 font-display text-2xl font-bold text-white">Block not found</h2>
-        <Link to="/" className="text-primary-300 hover:text-primary-200">
+        <h2 className="mb-4 font-display text-2xl font-semibold tracking-tight text-foreground">Block not found</h2>
+        <Link to="/" className="text-accent-soft hover:text-primary-200">
           Back to home
         </Link>
       </div>
@@ -68,9 +68,9 @@ export default function BlockDetails() {
 
   return (
     <div className="mx-auto max-w-4xl space-y-6">
-      <h1 className="tnum font-display text-3xl font-bold text-white">Block #{block.height}</h1>
+      <h1 className="tnum font-display text-3xl font-semibold tracking-tight text-foreground">Block #{block.height}</h1>
 
-      <div className="space-y-4 rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6">
+      <div className="space-y-4 rounded-2xl border border-border bg-surface p-6">
         <DetailRow label="Hash" value={block.hash} onCopy={() => handleCopy(block.hash, 'hash')} copied={copied === 'hash'} />
         <DetailRow label="Parent hash" value={block.parent_hash} onCopy={() => handleCopy(block.parent_hash, 'parent')} copied={copied === 'parent'} />
         <DetailRow label="Timestamp" value={formatTimestamp(block.timestamp)} />
@@ -81,8 +81,8 @@ export default function BlockDetails() {
       </div>
 
       {block.transactions.length > 0 && (
-        <div className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6">
-          <h2 className="mb-4 font-display text-xl font-bold text-white">
+        <div className="rounded-2xl border border-border bg-surface p-6">
+          <h2 className="mb-4 font-display text-xl font-semibold tracking-tight text-foreground">
             Transactions ({block.tx_count})
           </h2>
           <div className="space-y-2">
@@ -90,7 +90,7 @@ export default function BlockDetails() {
               <Link
                 key={txHash}
                 to={`/tx/${txHash}`}
-                className="block rounded-lg border border-zinc-800 bg-[#0a0a0a]/60 p-3 font-mono text-sm text-primary-300 transition-colors hover:border-primary-500/50"
+                className="block rounded-lg border border-border bg-surface-2 p-3 font-mono text-sm text-accent-soft transition-colors hover:border-border-strong"
               >
                 {formatHash(txHash, 20)}
               </Link>
@@ -111,15 +111,15 @@ interface DetailRowProps {
 
 function DetailRow({ label, value, onCopy, copied }: DetailRowProps) {
   return (
-    <div className="flex items-start justify-between gap-4 border-b border-zinc-800 pb-3">
-      <div className="font-medium text-zinc-400">{label}</div>
-      <div className="flex items-center gap-3 text-right font-mono text-white">
+    <div className="flex items-start justify-between gap-4 border-b border-border pb-3">
+      <div className="font-medium text-muted">{label}</div>
+      <div className="flex items-center gap-3 text-right font-mono text-foreground">
         <span className="tnum break-all">{value}</span>
         {onCopy && (
           <button
             onClick={onCopy}
             aria-label={`Copy ${label.toLowerCase()}`}
-            className="shrink-0 text-xs font-medium text-primary-300 transition-colors hover:text-primary-200"
+            className="shrink-0 text-xs font-medium text-accent-soft transition-colors hover:text-primary-200"
           >
             {copied ? 'Copied' : 'Copy'}
           </button>
