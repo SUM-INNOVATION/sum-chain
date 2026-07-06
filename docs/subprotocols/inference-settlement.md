@@ -47,6 +47,37 @@ attestation.included_at_height + finality_depth + dispute_window_blocks
 
 Each verifier can claim once, up to `max_verifiers`, while escrow remains.
 
+### Consistency / plurality mode (issue #77, v1.1 — gated, opt-in)
+
+A session may optionally require **agreement among verifiers** before a claim
+qualifies. This is **deterministic agreement over the on-chain commitments** — it
+compares the verifiers' *full attestation digest tuples*, `(model_hash,
+manifest_root, response_hash, proof_root)`. It is **not** a judgement of the AI
+output's semantic correctness, and involves **no zkML or on-chain re-execution**.
+
+A funder opts in at `OpenSession` by supplying a consistency config:
+
+- `min_matching_verifiers` (`u32`, `>= 1`, `<= max_verifiers`) — primary,
+  always-active rule: the claimant's exact-tuple group must reach at least this
+  many verifiers.
+- `threshold_bps` (`u16`, `0`–`10000`, `0` = disabled) — optional proportional
+  rule measured against the **fixed, funder-declared `max_verifiers`** (never the
+  live attestation count, which would be gameable): the group must also satisfy
+  `matching_count * 10000 >= max_verifiers * threshold_bps`.
+
+Both active constraints must hold. The group is always evaluated against the
+**claimant's own tuple**, so a verifier with a divergent digest can never ride
+another group's plurality. Only attestations that are **finalized** at claim
+height (`included + finality_depth`) and **not** blocked by an open/denied dispute
+count toward the group — a premature or disputed attestation lends no weight.
+
+Consistency mode is gated by
+`inference_settlement_consistency_enabled_from_height`. A session that requests a
+consistency config while the gate is closed is rejected `Failed(361)`; an invalid
+config is rejected `Failed(363)`. A matured claim whose group is too small is
+rejected `Failed(362)`. Sessions with **no** consistency config are unaffected —
+v1 single-attestation claim behavior is unchanged.
+
 The funder may **refund** the remaining escrow once the session is closable
 (expired or fully claimed) and no dispute is left unresolved. **A refund can never
 bypass a pending claim**: even at/after expiry, `RefundSession` is rejected while
@@ -93,6 +124,7 @@ Ships dormant behind:
 - `inference_settlement_max_dispute_window_blocks: u64` — ceiling on a session's dispute window.
 - `inference_settlement_max_session_duration_blocks: u64` — ceiling on escrow lock-up.
 - `inference_settlement_dispute_threshold_bps: Option<u16>` (default `None`) — validator-quorum threshold (basis points of the active validator set) that must sign `ResolveDispute`; disputes disabled when unset (`None`). **On mainnet this is set to `6667`** (both validators of the current 2-validator net must sign).
+- `inference_settlement_consistency_enabled_from_height: Option<u64>` (default `None`) — consistency/plurality mode gate (issue #77). When unset or unreached, a session cannot opt into a consistency rule (`Failed(361)`); single-verifier v1 claims are unaffected. Not part of the mainnet 8,900,000 cohort — an operator sets a height to activate it.
 
 Below the gate, all settlement operations are rejected with `Failed(350)` (no
 fee, no state change). Attestation recording is unaffected either way.
@@ -113,8 +145,9 @@ fee, no state change). Attestation recording is unaffected either way.
 - `omninode_getInferenceSession(session_id)`
 - `omninode_getInferenceClaims(session_id)`
 - `omninode_getInferenceDisputes(session_id)`
-- `omninode_getClaimableReward(session_id, verifier)` — eligibility, amount, unlock height.
-- `omninode_build{Open|Fund}InferenceSession`, `omninode_buildClaimInferenceReward`, `omninode_build{Open|Resolve}InferenceDispute`, `omninode_buildRefundInferenceSession` — return an unsigned `TransactionV2` (hex) + signing hash. `omninode_buildResolveInferenceDispute` accepts an optional `approvals` list of validator signatures (validator-quorum authorization).
+- `omninode_getClaimableReward(session_id, verifier)` — eligibility, amount, unlock height, and (for consistency sessions) the consistency evaluation `{ required_min, threshold_bps, max_verifiers, matching_count, satisfied }`.
+- `omninode_getInferenceConsistency(session_id)` — the session's rule plus attestations grouped by the full digest tuple, with per-group `verifier_count` and currently-`eligible_count` (finalized + undisputed).
+- `omninode_build{Open|Fund}InferenceSession`, `omninode_buildClaimInferenceReward`, `omninode_build{Open|Resolve}InferenceDispute`, `omninode_buildRefundInferenceSession` — return an unsigned `TransactionV2` (hex) + signing hash. `omninode_buildOpenInferenceSession` accepts an optional `consistency` config `{ min_matching_verifiers, threshold_bps }`. `omninode_buildResolveInferenceDispute` accepts an optional `approvals` list of validator signatures (validator-quorum authorization).
 
 ## Receipt codes (isolated 350-block)
 
@@ -123,7 +156,9 @@ fee, no state change). Attestation recording is unaffected either way.
 (incl. expiry before finality + dispute window) · `355` insufficient escrow/deposit ·
 `356` attestation not found · `357` claim not mature (needs finality_depth + dispute window) ·
 `358` duplicate claim/dispute · `359` unresolved/denied dispute blocks settlement ·
-`360` refund not available (not closable, or a claim is still within its maturity window).
+`360` refund not available (not closable, or a claim is still within its maturity window) ·
+`361` consistency mode not enabled at this height · `362` insufficient verifier consistency for claim ·
+`363` invalid consistency configuration.
 
 ## Privacy
 
@@ -134,12 +169,15 @@ status. Dispute evidence is an opaque commitment, never plaintext.
 ## Not in v1 (future)
 
 - Verifier-bond registry and **bond slashing** (v2).
-- Consistency/plurality reward mode (reward only verifiers whose digest matches the
-  session plurality) — objectively checkable on chain; a candidate v1.1/v2 addition.
 - Sponsored attestation (`sender ≠ verifier`) — requires `InferenceAttestationV2`.
+
+> Consistency/plurality reward mode shipped in v1.1 (issue #77, gated by
+> `inference_settlement_consistency_enabled_from_height`) — see **Consistency /
+> plurality mode** above.
 
 > This subprotocol is **deployed and code-backed on mainnet** with
 > `inference_settlement_enabled_from_height` set to height 8,900,000 (active
 > ≈2026-07-12) and `inference_settlement_dispute_threshold_bps` set to `6667`
 > (both validators of the 2-validator net must sign `ResolveDispute`). It
-> auto-activates when the chain crosses 8,900,000.
+> auto-activates when the chain crosses 8,900,000. The consistency gate is
+> **not** part of that cohort and remains unset until an operator configures it.

@@ -15,11 +15,12 @@ use std::sync::Arc;
 
 use sumchain_genesis::ChainParams;
 use sumchain_primitives::inference_attestation::inference_attestation_key;
+use sumchain_primitives::inference_attestation::InferenceAttestationDigest;
 use sumchain_primitives::inference_settlement::{
     session_key, session_prefix, settlement_entry_key, InferenceClaim, InferenceClaimStatus,
-    InferenceDispute, InferenceDisputeStatus, InferenceSession, InferenceSessionStatus,
-    InferenceSettlementOperation, OpenInferenceDisputeRequest, OpenInferenceSessionRequest,
-    ResolveInferenceDisputeRequest,
+    InferenceConsistencyConfig, InferenceDispute, InferenceDisputeStatus, InferenceSession,
+    InferenceSessionStatus, InferenceSettlementOperation, OpenInferenceDisputeRequest,
+    OpenInferenceSessionRequest, ResolveInferenceDisputeRequest,
 };
 use sumchain_primitives::{Address, Balance};
 use sumchain_storage::db::cf;
@@ -58,6 +59,27 @@ fn claim_maturity_height(
     included_at_height
         .saturating_add(finality_depth)
         .saturating_add(dispute_window_blocks)
+}
+
+/// Deterministic consistency predicate (issue #77). `matching` is the size of the
+/// claimant's exact-tuple group (claimant included). The `min_matching_verifiers`
+/// constraint is always active; the `threshold_bps` constraint is active only when
+/// `> 0` and is measured against the fixed, funder-declared `max_verifiers` — never
+/// a live attestation count. Both active constraints must hold.
+fn consistency_satisfied(cfg: InferenceConsistencyConfig, matching: u32, max_verifiers: u32) -> bool {
+    if matching < cfg.min_matching_verifiers {
+        return false;
+    }
+    if cfg.threshold_bps > 0 {
+        // matching / max_verifiers >= threshold_bps / 10_000, in integer math.
+        // u64 widening avoids overflow (u32 * 10_000 fits in u64 comfortably).
+        let lhs = matching as u64 * 10_000;
+        let rhs = max_verifiers as u64 * cfg.threshold_bps as u64;
+        if lhs < rhs {
+            return false;
+        }
+    }
+    true
 }
 
 pub struct InferenceSettlementExecutor {
@@ -201,6 +223,33 @@ impl InferenceSettlementExecutor {
                 "deposit must be between reward_per_verifier and reward_per_verifier*max_verifiers",
             ));
         }
+        // Consistency/plurality mode (issue #77) is an opt-in, gated claim rule.
+        // Only a session that requests it is affected: the consistency gate is a
+        // semantic OpenSession check (fee already paid), NOT the free 350
+        // settlement gate. A session with no consistency config is unaffected by
+        // the consistency gate entirely.
+        if let Some(cfg) = &req.consistency {
+            if !matches!(
+                chain_params.inference_settlement_consistency_enabled_from_height,
+                Some(h) if block_height >= h
+            ) {
+                return Ok(InferenceSettlementExecutionResult::fail(
+                    361,
+                    "inference consistency mode not enabled at this block height",
+                ));
+            }
+            // Deterministic bounds. Denominator for any bps rule is the fixed,
+            // funder-declared `max_verifiers` — never a live attestation count.
+            if cfg.min_matching_verifiers < 1
+                || cfg.min_matching_verifiers > req.max_verifiers
+                || cfg.threshold_bps > 10_000
+            {
+                return Ok(InferenceSettlementExecutionResult::fail(
+                    363,
+                    "invalid inference consistency configuration",
+                ));
+            }
+        }
         if state.get_balance(sender)? < req.deposit {
             return Ok(InferenceSettlementExecutionResult::fail(
                 355,
@@ -220,6 +269,7 @@ impl InferenceSettlementExecutor {
             status: InferenceSessionStatus::Open,
             created_at_height: block_height,
             expires_at_height: req.expires_at_height,
+            consistency: req.consistency,
         };
         self.put_session(&session)?;
         info!(
@@ -318,6 +368,24 @@ impl InferenceSettlementExecutor {
         }
         if self.get_claim(session_id, sender)?.is_some() {
             return Ok(InferenceSettlementExecutionResult::fail(358, "reward already claimed"));
+        }
+        // Consistency/plurality rule (issue #77). Only when the session opted in.
+        // The group is computed against the CLAIMANT'S OWN full digest tuple, so a
+        // qualifying claimant is by construction a member of the winning group — a
+        // divergent-digest verifier can never ride another group's plurality.
+        if let Some(cfg) = session.consistency {
+            let matching = self.consistency_group_size(
+                session_id,
+                &att.digest,
+                block_height,
+                chain_params.finality_depth,
+            )?;
+            if !consistency_satisfied(cfg, matching, session.max_verifiers) {
+                return Ok(InferenceSettlementExecutionResult::fail(
+                    362,
+                    "insufficient verifier consistency for claim",
+                ));
+            }
         }
         if session.claims_count >= session.max_verifiers {
             return Ok(InferenceSettlementExecutionResult::fail(
@@ -569,6 +637,57 @@ impl InferenceSettlementExecutor {
             session_id, sender, refund
         );
         Ok(InferenceSettlementExecutionResult::ok())
+    }
+
+    // ── Consistency grouping (issue #77) ──────────────────────────────────────
+
+    /// Count the verifiers in `session_id` whose **full digest tuple**
+    /// `(model_hash, manifest_root, response_hash, proof_root)` exactly equals
+    /// `target` and who are eligible to count toward a plurality: their
+    /// attestation is **finalized** at `claim_height` (`included + finality_depth
+    /// <= claim_height`) and is **not** blocked by an `Open`/`ResolvedDenyClaim`
+    /// dispute. `response_hash` alone is never sufficient — all four fields must
+    /// match. The claimant is naturally included when its own tuple is `target`.
+    ///
+    /// Reads only attestation + dispute records; never mutates attestation storage.
+    pub fn consistency_group_size(
+        &self,
+        session_id: &str,
+        target: &InferenceAttestationDigest,
+        claim_height: u64,
+        finality_depth: u64,
+    ) -> Result<u32> {
+        let aexec = InferenceAttestationExecutor::new(self.db.clone());
+        let mut count: u32 = 0;
+        for verifier in aexec.list_verifiers_by_session(session_id)? {
+            let att = match aexec.get(&inference_attestation_key(session_id, &verifier))? {
+                Some(a) => a,
+                None => continue,
+            };
+            // Full-tuple equality — the four digest commitments, not response_hash
+            // alone. (session_id is constant across the group, so it is excluded.)
+            if att.digest.model_hash != target.model_hash
+                || att.digest.manifest_root != target.manifest_root
+                || att.digest.response_hash != target.response_hash
+                || att.digest.proof_root != target.proof_root
+            {
+                continue;
+            }
+            // Only finalized attestations count — prevents a flash of not-yet-final
+            // attestations from manufacturing a plurality in the same block.
+            if att.included_at_height.saturating_add(finality_depth) > claim_height {
+                continue;
+            }
+            // A disputed (open) or denied attestation lends no consistency weight.
+            if matches!(
+                self.get_dispute(session_id, &verifier)?.map(|d| d.status),
+                Some(InferenceDisputeStatus::Open) | Some(InferenceDisputeStatus::ResolvedDenyClaim)
+            ) {
+                continue;
+            }
+            count = count.saturating_add(1);
+        }
+        Ok(count)
     }
 
     // ── Storage ──────────────────────────────────────────────────────────────

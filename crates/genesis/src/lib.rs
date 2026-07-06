@@ -368,6 +368,17 @@ pub struct ChainParams {
     /// there is no personal resolver address. `bps` must be `1..=10000`.
     #[serde(default)]
     pub inference_settlement_dispute_threshold_bps: Option<u16>,
+
+    /// Consistency/plurality settlement mode activation gate (issue #77). `None`
+    /// (default) = consistency mode is dormant: an `OpenSession` that requests a
+    /// consistency config is rejected `Failed(361)`, and existing single-verifier
+    /// v1 claims are unaffected. When `Some(h)` and `block_height >= h`, sessions
+    /// may opt into a consistency rule and matured claims are evaluated against it.
+    /// Independent of `inference_settlement_enabled_from_height` — consistency is a
+    /// stricter claim rule layered on top of enabled settlement. `#[serde(default)]`
+    /// keeps existing `genesis.json` dormant.
+    #[serde(default)]
+    pub inference_settlement_consistency_enabled_from_height: Option<u64>,
 }
 
 fn default_inference_settlement_max_dispute_window_blocks() -> u64 {
@@ -599,6 +610,7 @@ impl Default for ChainParams {
             inference_settlement_max_session_duration_blocks:
                 default_inference_settlement_max_session_duration_blocks(),
             inference_settlement_dispute_threshold_bps: None,
+            inference_settlement_consistency_enabled_from_height: None,
         }
     }
 }
@@ -1063,6 +1075,28 @@ mod tests {
         assert!(json.contains("\"inference_settlement_dispute_threshold_bps\":6667"));
         let p2: ChainParams = serde_json::from_str(&json).unwrap();
         assert_eq!(p2.inference_settlement_dispute_threshold_bps, Some(6667));
+    }
+
+    #[test]
+    fn consistency_gate_defaults_none_and_round_trips() {
+        // Issue #77: dormant by default; absent from a pre-#77 genesis.json decodes
+        // to None (serde default); an explicit height round-trips.
+        let p = ChainParams::default();
+        assert_eq!(p.inference_settlement_consistency_enabled_from_height, None);
+        // Older genesis without the key still loads (serde default).
+        let mut value = serde_json::to_value(&p).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("inference_settlement_consistency_enabled_from_height");
+        let back: ChainParams = serde_json::from_value(value).unwrap();
+        assert_eq!(back.inference_settlement_consistency_enabled_from_height, None);
+        // Explicit activation height round-trips.
+        let mut p2 = ChainParams::default();
+        p2.inference_settlement_consistency_enabled_from_height = Some(8_900_000);
+        let json = serde_json::to_string(&p2).unwrap();
+        let p3: ChainParams = serde_json::from_str(&json).unwrap();
+        assert_eq!(p3.inference_settlement_consistency_enabled_from_height, Some(8_900_000));
     }
 
     #[test]

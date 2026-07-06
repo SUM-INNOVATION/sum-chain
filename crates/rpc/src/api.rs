@@ -13,10 +13,10 @@ use crate::governance_types::{
     GovProposalInfo, GovTallyInfo, GovVoteInfo, GovVotingPowerInfo,
 };
 use crate::inference_settlement_types::{
-    ClaimableRewardInfo, InferenceClaimInfo, InferenceDisputeInfo, InferenceSessionInfo,
-    OmniBuildClaimRewardRequest, OmniBuildFundSessionRequest, OmniBuildOpenDisputeRequest,
-    OmniBuildOpenSessionRequest, OmniBuildRefundSessionRequest, OmniBuildResolveDisputeRequest,
-    OmniSettlementBuildResponse,
+    ClaimableRewardInfo, InferenceClaimInfo, InferenceConsistencyReport, InferenceDisputeInfo,
+    InferenceSessionInfo, OmniBuildClaimRewardRequest, OmniBuildFundSessionRequest,
+    OmniBuildOpenDisputeRequest, OmniBuildOpenSessionRequest, OmniBuildRefundSessionRequest,
+    OmniBuildResolveDisputeRequest, OmniSettlementBuildResponse,
 };
 use crate::types::{
     TaxClaimTypeInfo, TaxIssuerInfo, TaxPolicyInfo, ExecutorLinkInfo, AssetInfo, FinanceIssuerInfo,
@@ -244,6 +244,15 @@ pub trait SumChainApi {
         session_id: String,
         verifier: String,
     ) -> Result<ClaimableRewardInfo, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Consistency landscape for a session (issue #77): attestations grouped by
+    /// the full digest tuple `(model_hash, manifest_root, response_hash,
+    /// proof_root)`, with per-group total and currently-eligible counts.
+    #[method(name = "omninode_getInferenceConsistency")]
+    async fn omninode_get_inference_consistency(
+        &self,
+        session_id: String,
+    ) -> Result<InferenceConsistencyReport, jsonrpsee::types::ErrorObjectOwned>;
 
     // ── OmniNode Inference Settlement (issue #61) — unsigned-tx builders ─────
     #[method(name = "omninode_buildOpenInferenceSession")]

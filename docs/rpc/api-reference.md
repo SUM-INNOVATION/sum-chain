@@ -839,7 +839,8 @@ slashing in v1 (reward denial / claim withholding / escrow refund only).
 | `omninode_getInferenceClaims(session_id)` | read |
 | `omninode_getInferenceDisputes(session_id)` | read |
 | `omninode_getClaimableReward(session_id, verifier)` | read |
-| `omninode_buildOpenInferenceSession` / `buildFundInferenceSession` / `buildClaimInferenceReward` / `buildOpenInferenceDispute` / `buildResolveInferenceDispute` / `buildRefundInferenceSession` | unsigned-tx builders (no keys). Dispute resolution is validator-quorum controlled (no personal resolver key); `buildResolveInferenceDispute` accepts an optional `approvals` list of validator signatures. |
+| `omninode_getInferenceConsistency(session_id)` | read — attestations grouped by full digest tuple (issue #77 consistency mode) |
+| `omninode_buildOpenInferenceSession` / `buildFundInferenceSession` / `buildClaimInferenceReward` / `buildOpenInferenceDispute` / `buildResolveInferenceDispute` / `buildRefundInferenceSession` | unsigned-tx builders (no keys). `buildOpenInferenceSession` accepts an optional `consistency` config. Dispute resolution is validator-quorum controlled (no personal resolver key); `buildResolveInferenceDispute` accepts an optional `approvals` list of validator signatures. |
 
 ---
 

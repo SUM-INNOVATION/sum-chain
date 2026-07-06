@@ -123,6 +123,34 @@ impl InferenceDisputeStatus {
     }
 }
 
+// ─── Consistency / plurality mode (issue #77) ────────────────────────────────
+
+/// Optional consistency/plurality reward rule for a session (issue #77, v1.1).
+///
+/// When present, a `ClaimReward` qualifies only if the claimant's **full
+/// attestation digest tuple** `(model_hash, manifest_root, response_hash,
+/// proof_root)` is shared by a large enough group of other verifiers who
+/// attested the same `session_id`. This is **deterministic agreement over the
+/// on-chain commitments** — it is NOT a claim about the semantic correctness of
+/// the AI output and involves NO zkML / on-chain re-execution.
+///
+/// Absent (`InferenceSession::consistency == None`) → v1 single-attestation claim
+/// behavior is unchanged. Gated behind
+/// `ChainParams::inference_settlement_consistency_enabled_from_height`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InferenceConsistencyConfig {
+    /// Absolute minimum number of finalized, undisputed verifiers (the claimant
+    /// included) whose full digest tuple matches, for a claim to qualify. `>= 1`,
+    /// and `<= max_verifiers`. Primary, always-active constraint.
+    pub min_matching_verifiers: u32,
+    /// Optional proportional constraint, in basis points of the **fixed,
+    /// funder-declared `max_verifiers`** (never the live attestation count, which
+    /// would be gameable). `0` disables it. When `> 0`, the matching group must
+    /// also satisfy `matching_count * 10_000 >= max_verifiers * threshold_bps`.
+    /// Must be `<= 10_000`.
+    pub threshold_bps: u16,
+}
+
 // ─── Request payloads ────────────────────────────────────────────────────────
 
 /// Open (and fund with `deposit`) a settlement session. `reward_per_verifier` is
@@ -136,6 +164,11 @@ pub struct OpenInferenceSessionRequest {
     pub dispute_window_blocks: u64,
     pub expires_at_height: u64,
     pub deposit: u128,
+    /// Optional consistency/plurality rule (issue #77). Appended field; `None`
+    /// (the `serde` default for absent input) preserves v1 claim behavior.
+    /// Requesting it while the consistency gate is closed fails `Failed(361)`.
+    #[serde(default)]
+    pub consistency: Option<InferenceConsistencyConfig>,
 }
 
 /// Top up an open session's escrow.
@@ -217,6 +250,13 @@ pub struct InferenceSession {
     pub status: InferenceSessionStatus,
     pub created_at_height: u64,
     pub expires_at_height: u64,
+    /// Optional consistency/plurality rule (issue #77), fixed at open time.
+    /// **Appended** field — safe because settlement is dormant (activation gate
+    /// unreached on every live chain, so there are no persisted `InferenceSession`
+    /// records to break). `#[serde(default)]` decodes any pre-#77 record as `None`
+    /// = v1 behavior. New records always carry an explicit value.
+    #[serde(default)]
+    pub consistency: Option<InferenceConsistencyConfig>,
 }
 
 /// A paid reward claim (`INFERENCE_CLAIMS`).

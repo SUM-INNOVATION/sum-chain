@@ -4202,7 +4202,7 @@ impl SumChainApiServer for RpcServer {
         session_id: String,
     ) -> std::result::Result<Option<crate::inference_settlement_types::InferenceSessionInfo>, jsonrpsee::types::ErrorObjectOwned>
     {
-        use crate::inference_settlement_types::InferenceSessionInfo;
+        use crate::inference_settlement_types::{InferenceConsistencyInfo, InferenceSessionInfo};
         let exec = sumchain_state::inference_settlement_executor::InferenceSettlementExecutor::new(
             self.db.clone(),
         );
@@ -4218,6 +4218,10 @@ impl SumChainApiServer for RpcServer {
             status: format!("{:?}", s.status),
             created_at_height: s.created_at_height,
             expires_at_height: s.expires_at_height,
+            consistency: s.consistency.map(|c| InferenceConsistencyInfo {
+                min_matching_verifiers: c.min_matching_verifiers,
+                threshold_bps: c.threshold_bps,
+            }),
         }))
     }
 
@@ -4275,7 +4279,7 @@ impl SumChainApiServer for RpcServer {
         verifier: String,
     ) -> std::result::Result<crate::inference_settlement_types::ClaimableRewardInfo, jsonrpsee::types::ErrorObjectOwned>
     {
-        use crate::inference_settlement_types::ClaimableRewardInfo;
+        use crate::inference_settlement_types::{ClaimConsistencyEval, ClaimableRewardInfo};
         use sumchain_primitives::inference_attestation::inference_attestation_key;
         use sumchain_primitives::inference_settlement::InferenceDisputeStatus;
 
@@ -4293,6 +4297,7 @@ impl SumChainApiServer for RpcServer {
             amount,
             unlock_height: unlock,
             reason: reason.to_string(),
+            consistency: None,
         };
 
         let session = match sexec.get_session(&session_id).map_err(|e| RpcError::Internal(e.to_string()))? {
@@ -4334,7 +4339,138 @@ impl SumChainApiServer for RpcServer {
         if current < unlock {
             return Ok(base(false, Some(session.reward_per_verifier), Some(unlock), "not yet mature"));
         }
+        // Consistency/plurality evaluation (issue #77), only when the session opted
+        // in. The group is computed against the claimant's OWN full digest tuple.
+        if let Some(cfg) = session.consistency {
+            let matching = sexec
+                .consistency_group_size(&session_id, &att.digest, current, self.consensus.finality_depth())
+                .map_err(|e| RpcError::Internal(e.to_string()))?;
+            let meets_min = matching >= cfg.min_matching_verifiers;
+            let meets_bps = cfg.threshold_bps == 0
+                || (matching as u64 * 10_000
+                    >= session.max_verifiers as u64 * cfg.threshold_bps as u64);
+            let satisfied = meets_min && meets_bps;
+            let eval = ClaimConsistencyEval {
+                required_min: cfg.min_matching_verifiers,
+                threshold_bps: cfg.threshold_bps,
+                max_verifiers: session.max_verifiers,
+                matching_count: matching,
+                satisfied,
+            };
+            let reason = if satisfied {
+                "eligible"
+            } else {
+                "insufficient consistency"
+            };
+            return Ok(ClaimableRewardInfo {
+                session_id: session_id.clone(),
+                verifier: v.to_base58(),
+                eligible: satisfied,
+                amount: Some(session.reward_per_verifier),
+                unlock_height: Some(unlock),
+                reason: reason.to_string(),
+                consistency: Some(eval),
+            });
+        }
         Ok(base(true, Some(session.reward_per_verifier), Some(unlock), "eligible"))
+    }
+
+    async fn omninode_get_inference_consistency(
+        &self,
+        session_id: String,
+    ) -> std::result::Result<crate::inference_settlement_types::InferenceConsistencyReport, jsonrpsee::types::ErrorObjectOwned>
+    {
+        use crate::inference_settlement_types::{
+            InferenceConsistencyGroupInfo, InferenceConsistencyInfo, InferenceConsistencyReport,
+        };
+        use sumchain_primitives::inference_attestation::inference_attestation_key;
+        use sumchain_primitives::inference_settlement::InferenceDisputeStatus;
+
+        let sexec = sumchain_state::inference_settlement_executor::InferenceSettlementExecutor::new(
+            self.db.clone(),
+        );
+        let aexec = sumchain_state::inference_attestation_executor::InferenceAttestationExecutor::new(
+            self.db.clone(),
+        );
+        let session = sexec
+            .get_session(&session_id)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        let (consistency, max_verifiers) = match &session {
+            Some(s) => (
+                s.consistency.map(|c| InferenceConsistencyInfo {
+                    min_matching_verifiers: c.min_matching_verifiers,
+                    threshold_bps: c.threshold_bps,
+                }),
+                s.max_verifiers,
+            ),
+            None => (None, 0),
+        };
+
+        let hx = |b: &[u8; 32]| format!("0x{}", hex::encode(b));
+        let height = self.consensus.current_height();
+        let finality_depth = self.consensus.finality_depth();
+
+        // Group verifiers by the full digest tuple. Keyed by the concatenated
+        // 128 bytes so `response_hash` alone never merges distinct tuples.
+        let mut groups: std::collections::HashMap<[u8; 128], (sumchain_primitives::inference_attestation::InferenceAttestationDigest, Vec<String>, u32)> =
+            std::collections::HashMap::new();
+        for vf in aexec
+            .list_verifiers_by_session(&session_id)
+            .map_err(|e| RpcError::Internal(e.to_string()))?
+        {
+            let att = match aexec
+                .get(&inference_attestation_key(&session_id, &vf))
+                .map_err(|e| RpcError::Internal(e.to_string()))?
+            {
+                Some(a) => a,
+                None => continue,
+            };
+            let mut key = [0u8; 128];
+            key[..32].copy_from_slice(&att.digest.model_hash);
+            key[32..64].copy_from_slice(&att.digest.manifest_root);
+            key[64..96].copy_from_slice(&att.digest.response_hash);
+            key[96..].copy_from_slice(&att.digest.proof_root);
+            // Eligible = finalized at current height AND not open/denied disputed.
+            let finalized = att.included_at_height.saturating_add(finality_depth) <= height;
+            let disputed = matches!(
+                sexec
+                    .get_dispute(&session_id, &vf)
+                    .map_err(|e| RpcError::Internal(e.to_string()))?
+                    .map(|d| d.status),
+                Some(InferenceDisputeStatus::Open) | Some(InferenceDisputeStatus::ResolvedDenyClaim)
+            );
+            let entry = groups
+                .entry(key)
+                .or_insert_with(|| (att.digest.clone(), Vec::new(), 0));
+            entry.1.push(vf.to_base58());
+            if finalized && !disputed {
+                entry.2 = entry.2.saturating_add(1);
+            }
+        }
+
+        let mut groups: Vec<InferenceConsistencyGroupInfo> = groups
+            .into_values()
+            .map(|(digest, verifiers, eligible)| InferenceConsistencyGroupInfo {
+                model_hash: hx(&digest.model_hash),
+                manifest_root: hx(&digest.manifest_root),
+                response_hash: hx(&digest.response_hash),
+                proof_root: hx(&digest.proof_root),
+                verifier_count: verifiers.len() as u32,
+                eligible_count: eligible,
+                verifiers,
+            })
+            .collect();
+        // Deterministic ordering: eligible desc, then total desc, then tuple hex.
+        groups.sort_by(|a, b| {
+            b.eligible_count
+                .cmp(&a.eligible_count)
+                .then(b.verifier_count.cmp(&a.verifier_count))
+                .then(a.model_hash.cmp(&b.model_hash))
+                .then(a.response_hash.cmp(&b.response_hash))
+                .then(a.proof_root.cmp(&b.proof_root))
+        });
+
+        Ok(InferenceConsistencyReport { session_id, consistency, max_verifiers, groups })
     }
 
     async fn omninode_build_open_inference_session(
@@ -4351,6 +4487,10 @@ impl SumChainApiServer for RpcServer {
             dispute_window_blocks: request.dispute_window_blocks,
             expires_at_height: request.expires_at_height,
             deposit: request.deposit,
+            consistency: request.consistency.map(|c| InferenceConsistencyConfig {
+                min_matching_verifiers: c.min_matching_verifiers,
+                threshold_bps: c.threshold_bps,
+            }),
         });
         self.build_unsigned_settlement_tx(from, request.fee.unwrap_or(GOV_DEFAULT_FEE), op)
     }
@@ -9008,6 +9148,7 @@ mod messaging_rpc_tests {
                 expires_at_height: 1000,
                 deposit: 2_000_000,
                 fee: Some(1000),
+                consistency: None,
             })
             .await
             .unwrap();
@@ -9040,6 +9181,51 @@ mod messaging_rpc_tests {
             .unwrap();
         assert!(!c.eligible);
         assert_eq!(c.reason, "session not found");
+    }
+
+    // Issue #77: consistency read groups attestations by the FULL digest tuple.
+    #[tokio::test]
+    async fn omninode_get_inference_consistency_groups_by_full_tuple() {
+        use sumchain_primitives::inference_attestation::{
+            inference_attestation_key, InferenceAttestationDigest, InferenceAttestationRecord,
+        };
+        use sumchain_state::inference_attestation_executor::InferenceAttestationExecutor;
+        let (srv, db, _dir) = server();
+        let aexec = InferenceAttestationExecutor::new(db.clone());
+
+        let mk = |v: u8, tuple: (u8, u8, u8, u8)| {
+            let verifier = sumchain_primitives::Address::new([v; 20]);
+            let digest = InferenceAttestationDigest {
+                session_id: "s".to_string(),
+                model_hash: [tuple.0; 32],
+                manifest_root: [tuple.1; 32],
+                response_hash: [tuple.2; 32],
+                proof_root: [tuple.3; 32],
+            };
+            let rec = InferenceAttestationRecord {
+                digest,
+                verifier_signature: [0u8; 64],
+                included_at_height: 1,
+                tx_hash: sumchain_primitives::Hash::new([v; 32]),
+            };
+            aexec.put(&inference_attestation_key("s", &verifier), &rec, &verifier).unwrap();
+        };
+        // Two verifiers agree on tuple A; one holds tuple B; a fourth shares only
+        // response_hash with A but differs elsewhere → its own singleton group.
+        mk(0x11, (1, 2, 3, 4));
+        mk(0x22, (1, 2, 3, 4));
+        mk(0x33, (9, 9, 9, 9));
+        mk(0x44, (7, 7, 3, 7)); // same response_hash (3), different tuple
+
+        let report = srv.omninode_get_inference_consistency("s".to_string()).await.unwrap();
+        assert_eq!(report.session_id, "s");
+        assert!(report.consistency.is_none(), "no session opened → no config");
+        // Three distinct full tuples ⇒ three groups; response_hash alone never merges.
+        assert_eq!(report.groups.len(), 3, "groups: {:?}", report.groups);
+        // Sorted: the 2-member tuple-A group is first.
+        assert_eq!(report.groups[0].verifier_count, 2);
+        assert_eq!(report.groups[0].verifiers.len(), 2);
+        assert!(report.groups[1..].iter().all(|g| g.verifier_count == 1));
     }
 }
 

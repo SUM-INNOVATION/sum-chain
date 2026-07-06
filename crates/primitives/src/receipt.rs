@@ -147,6 +147,9 @@ impl TxStatus {
             TxStatus::Failed(358) => "duplicate inference claim or dispute",
             TxStatus::Failed(359) => "unresolved or denied dispute blocks settlement",
             TxStatus::Failed(360) => "inference session refund not available yet",
+            TxStatus::Failed(361) => "inference consistency mode not enabled at this block height",
+            TxStatus::Failed(362) => "insufficient verifier consistency for claim",
+            TxStatus::Failed(363) => "invalid inference consistency configuration",
             TxStatus::Failed(_) => "failed",
         }
     }

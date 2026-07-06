@@ -39,6 +39,17 @@ fn all_operations_bincode_round_trip() {
             dispute_window_blocks: 100,
             expires_at_height: 5_000,
             deposit: 3_000_000,
+            consistency: None,
+        }),
+        // A second OpenSession that opts into consistency, to lock its round-trip.
+        InferenceSettlementOperation::OpenSession(OpenInferenceSessionRequest {
+            session_id: "sess-c".to_string(),
+            reward_per_verifier: 1_000_000,
+            max_verifiers: 5,
+            dispute_window_blocks: 100,
+            expires_at_height: 5_000,
+            deposit: 3_000_000,
+            consistency: Some(InferenceConsistencyConfig { min_matching_verifiers: 3, threshold_bps: 6000 }),
         }),
         InferenceSettlementOperation::FundSession(FundInferenceSessionRequest {
             session_id: "sess-1".to_string(),
@@ -83,6 +94,7 @@ fn records_bincode_round_trip() {
         status: InferenceSessionStatus::Open,
         created_at_height: 10,
         expires_at_height: 5_000,
+        consistency: Some(InferenceConsistencyConfig { min_matching_verifiers: 2, threshold_bps: 0 }),
     };
     let claim = InferenceClaim {
         session_id: "sess-1".to_string(),
@@ -127,4 +139,54 @@ fn keys_are_domain_separated_and_stable_shape() {
     // Distinct sessions ⇒ distinct prefixes/keys.
     assert_ne!(session_key("sess-1"), session_key("sess-2"));
     assert_ne!(session_prefix("sess-1"), session_prefix("sess-2"));
+}
+
+// ── Consistency mode (issue #77) — append-only / default-safe ────────────────
+
+#[test]
+fn open_request_without_consistency_defaults_to_none() {
+    // A pre-#77 JSON payload (no `consistency` key) must decode as `None` so old
+    // clients / stored request shapes keep v1 behavior.
+    let json = r#"{
+        "session_id": "s",
+        "reward_per_verifier": 1000000,
+        "max_verifiers": 3,
+        "dispute_window_blocks": 100,
+        "expires_at_height": 5000,
+        "deposit": 3000000
+    }"#;
+    let req: OpenInferenceSessionRequest = serde_json::from_str(json).unwrap();
+    assert_eq!(req.consistency, None);
+}
+
+#[test]
+fn session_without_consistency_defaults_to_none() {
+    // Same for the stored `InferenceSession` record shape. Build a value, drop the
+    // `consistency` key (simulating a pre-#77 record), and confirm it decodes as
+    // `None`. Format-agnostic about the `funder` Address encoding.
+    let session = InferenceSession {
+        session_id: "s".to_string(),
+        funder: addr(0x01),
+        reward_per_verifier: 1_000_000,
+        max_verifiers: 3,
+        remaining_escrow: 3_000_000,
+        claims_count: 0,
+        dispute_window_blocks: 100,
+        status: InferenceSessionStatus::Open,
+        created_at_height: 10,
+        expires_at_height: 5_000,
+        consistency: Some(InferenceConsistencyConfig { min_matching_verifiers: 2, threshold_bps: 0 }),
+    };
+    let mut value = serde_json::to_value(&session).unwrap();
+    value.as_object_mut().unwrap().remove("consistency");
+    let decoded: InferenceSession = serde_json::from_value(value).unwrap();
+    assert_eq!(decoded.consistency, None);
+}
+
+#[test]
+fn consistency_config_round_trips() {
+    let cfg = InferenceConsistencyConfig { min_matching_verifiers: 3, threshold_bps: 6667 };
+    let back: InferenceConsistencyConfig =
+        bincode::deserialize(&bincode::serialize(&cfg).unwrap()).unwrap();
+    assert_eq!(back, cfg);
 }
