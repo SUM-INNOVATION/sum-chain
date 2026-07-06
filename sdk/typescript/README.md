@@ -574,5 +574,5 @@ MIT
 ## Links
 
 - [SUM Chain Repository](https://github.com/SUM-INNOVATION/sum-chain)
-- [API Documentation](https://docs.sumchain.io/api)
-- [Operator Guide](https://docs.sumchain.io/operator-guide)
+- [API Documentation](https://sumchain.io/docs)
+- [Operator Guide](https://github.com/SUM-INNOVATION/sum-chain/blob/main/docs/operator-guide.md)
