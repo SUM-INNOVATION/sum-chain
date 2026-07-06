@@ -58,8 +58,10 @@ Approved governance proposals map to concrete off-chain actions:
 - **Consensus / wire / storage migrations** — a binary rollout coordinated
   across validators, per the production checklist.
 - **Package publishing** — carried out off-chain by maintainers.
-- **Emergency / security** — the Policy Account council fast-path; report
-  vulnerabilities privately per [SECURITY.md](SECURITY.md).
+- **Emergency / security** — the validator-quorum fast-path (a threshold of the
+  active validator set signs; admin/council authority is validator-quorum
+  controlled, no single council address); report vulnerabilities privately per
+  [SECURITY.md](SECURITY.md).
 
 ## Activating a dormant subprotocol (incl. governance)
 

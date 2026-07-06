@@ -222,7 +222,7 @@ const categories: Category[] = [
     methods: [
       { name: 'omninode_getInferenceSession', description: 'Per-session settlement record (funder, reward terms, remaining escrow, status), or null.' },
       { name: 'omninode_getInferenceClaims', description: 'All paid reward claims for a session.' },
-      { name: 'omninode_getInferenceDisputes', description: 'All dispute records for a session (record-only; disputes require a configured resolver).' },
+      { name: 'omninode_getInferenceDisputes', description: 'All dispute records for a session (record-only; disputes require a configured validator-quorum threshold, and resolution is authorized by a validator quorum — no personal resolver key).' },
       { name: 'omninode_getClaimableReward', description: 'Whether a verifier can currently claim, plus amount and unlock height (attestation inclusion + finality_depth + dispute_window).' },
       { name: 'omninode_buildOpenInferenceSession · buildFundInferenceSession · buildClaimInferenceReward · buildOpenInferenceDispute · buildResolveInferenceDispute · buildRefundInferenceSession', description: 'Unsigned-transaction builders for the six settlement operations — return a bincode-encoded TransactionV2 + signing hash; no private keys.' },
     ],
@@ -466,7 +466,7 @@ const categories: Category[] = [
       { name: 'gov_buildCreateProposal', description: 'Build an unsigned create-proposal transaction to sign and broadcast.' },
       { name: 'gov_buildCastVote', description: 'Build an unsigned cast-vote transaction.' },
       { name: 'gov_buildExecuteProposal', description: 'Build an unsigned execute-proposal transaction.' },
-      { name: 'gov_buildCancelProposal', description: 'Build an unsigned cancel-proposal transaction (proposer or council).' },
+      { name: 'gov_buildCancelProposal', description: 'Build an unsigned cancel-proposal transaction. The proposer can self-cancel with no approvals; any other canceller supplies a validator-quorum (approvals). There is no single council address.' },
       { name: 'gov_getProposal', description: 'Proposal by id.' },
       { name: 'gov_listProposals', description: 'All proposals.' },
       { name: 'gov_listActiveProposals', description: 'Proposals currently in the voting state.' },

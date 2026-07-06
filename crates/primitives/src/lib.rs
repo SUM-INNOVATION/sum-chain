@@ -26,12 +26,14 @@ pub mod staking;
 pub mod storage_metadata;
 pub mod tax;
 pub mod transaction;
+pub mod validator_authority;
 
 pub use address::Address;
 pub use block::{Block, BlockHeader};
 pub use hash::Hash;
 pub use receipt::{Receipt, TxStatus};
 pub use governance::GovernanceParams;
+pub use validator_authority::ValidatorApproval;
 pub use staking::{
     AddStakeData, ClaimDelegationRewardsData, CreateValidatorData, DelegateData, DelegationInfo,
     DoubleSignEvidence, DowntimeEvidence, EvidenceType, SlashingRecord, StakingOperation,

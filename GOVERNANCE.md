@@ -38,12 +38,20 @@ which binary and genesis they run.
   at proposal creation** (transfers after the snapshot do not change weight;
   live balances are never used during voting). A token is eligible only if it is
   fixed-supply / non-mintable.
-- **Policy Account council.** The `GovernanceParams.council` address (an existing
-  Policy Account weighted-multisig — see
-  [docs/policy-accounts-and-contracts.md](docs/policy-accounts-and-contracts.md))
-  administers the governance asset registry, holds emergency/security authority,
-  may cancel a live proposal, and owns the treasury address that on-chain
-  treasury payouts draw from.
+- **Validator-quorum admin authority.** Governance admin/council authority is
+  **validator-quorum controlled** — there is **no single council address**
+  anymore. A threshold of the **active PoA validator set** must sign
+  (Ed25519, domain-separated, chain_id-bound) to administer the governance asset
+  registry, exercise emergency/security authority, or cancel a live proposal.
+  Threshold is configured in basis points
+  (`GovernanceParams.validator_authority_threshold_bps`): required approvals =
+  `ceil(active_validator_count * threshold_bps / 10000)`. Non-signing validators
+  count in the denominator; a validator that does not sign abstains, and the
+  action only executes if enough approvals are submitted — this is threshold
+  authorization, not yes/no voting. For the current 2-validator network, `6667`
+  requires both validators; `10000` requires all validators. The governance
+  `treasury` remains a governed payout address that on-chain treasury payouts
+  draw from.
 
 There is no foundation and no other committee. These two authorities are the
 whole model.
@@ -58,15 +66,17 @@ whole model.
 3. **Tally** — after the voting window, the result is one of **Recorded**,
    **Executed**, **Rejected**, **QuorumNotMet**, or **Expired**, by quorum and
    pass-threshold over the snapshot.
-4. **Cancel** — the proposer or the council may cancel while the proposal is
-   still open (Created/Voting).
+4. **Cancel** — the proposer may self-cancel their own proposal (no approvals
+   needed) while it is still open (Created/Voting); a **validator-quorum**
+   cancel (threshold of the active validator set) may also cancel a live
+   proposal.
 
 Every proposal links to the off-chain artifact it authorizes (a GitHub PR /
 release / doc: URL + content hash), so a proposal id maps to a real change.
 
 **Deposit bond.** Returned to the proposer on a good-faith outcome (Recorded /
 Executed / Rejected) or a proposer cancel; burned on spam / low turnout
-(QuorumNotMet / Expired) or a council cancel.
+(QuorumNotMet / Expired) or a validator-quorum cancel.
 
 ## Execution model
 
@@ -80,8 +90,8 @@ Approval is **record-only** for every proposal class except one:
   [docs/architecture/economic-model.md](docs/architecture/economic-model.md).
 - **On-chain** — a passed `TreasurySpend` proposal marked `OnChain` performs a
   single **native-Koppa transfer** from the configured governance treasury
-  (`GovernanceParams.treasury`, a dedicated governance-owned address — **not**
-  the council Policy Account) to the beneficiary and amount fixed at creation,
+  (`GovernanceParams.treasury`, a dedicated governance-owned payout address) to
+  the beneficiary and amount fixed at creation,
   then moves to **Executed**. An underfunded treasury fails cleanly and leaves
   the proposal live. This is the **only** on-chain auto-execution path; every
   other `OnChain` proposal is rejected. No chain parameter, validator, or
@@ -96,8 +106,9 @@ Approval is **record-only** for every proposal class except one:
 ## Emergency & security
 
 Suspected vulnerabilities follow [SECURITY.md](SECURITY.md) — report privately,
-not via a public issue or proposal. The council holds the emergency/security
-authority (including cancelling a live proposal) as a backstop.
+not via a public issue or proposal. Emergency/security authority (including a
+validator-quorum cancel of a live proposal) is validator-quorum controlled — a
+threshold of the active validator set — as a backstop.
 
 ## Related documents
 

@@ -91,8 +91,10 @@ export default function ComputePage() {
               <MonoTag>inference_settlement_enabled_from_height</MonoTag> and is <strong>dormant</strong>{' '}
               on mainnet — the chain does not pay inference nodes until it is activated. v1 has{' '}
               <strong>no bond slashing</strong>: the levers are reward denial, claim withholding, and
-              escrow refund. v1 also requires the transaction sender to be the verifier (no sponsored
-              submission).
+              escrow refund. Dispute resolution is <strong>validator-quorum controlled</strong> — a
+              basis-point threshold (<MonoTag>inference_settlement_dispute_threshold_bps</MonoTag>) of the
+              active validator set must sign, not a personal resolver key; non-signing validators abstain
+              but still count in the denominator. Disputes are disabled unless the threshold is set.
             </Callout>
           </Reveal>
           <Reveal delay={0.15}>

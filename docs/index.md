@@ -39,7 +39,7 @@ not the live chain head:
 | `v2_enabled_from_height` | `5200000` | V2 storage **active** |
 | `omninode_enabled_from_height` | `6000000` | OmniNode inference **attestation active** |
 | `education_enabled_from_height` | `null` | Education writes **dormant** (reads still work) |
-| `governance_enabled_from_height` | not set | Governance v1 **dormant** (code-backed; also needs `ChainParams.governance`) |
+| `governance_enabled_from_height` | not set | Governance v1 **dormant** (code-backed; also needs `ChainParams.governance`, incl. `validator_authority_threshold_bps` — admin authority is validator-quorum controlled, no single council address) |
 | `archive_unbonding_enabled_from_height` | `null` | Archive-node unbonding withdrawal **dormant** (code-backed, issue #20) |
 | `archive_reassignment_enabled_from_height` | `null` | Archive-node chunk reassignment **dormant** (code-backed, issue #62) |
 | `inference_settlement_enabled_from_height` | `null` | OmniNode inference settlement **dormant** (code-backed, issue #61; separate from attestation, which is active) |

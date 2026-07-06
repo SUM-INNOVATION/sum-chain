@@ -399,7 +399,7 @@ fn slash_during_unbonding_keeps_status_and_reduces_remaining() {
 
     // Executing a block at height 5 runs process_expired_challenges first.
     executor
-        .execute_block(&empty_block(5, &proposer), Hash::ZERO)
+        .execute_block(&empty_block(5, &proposer), Hash::ZERO, &[])
         .unwrap();
 
     // 5% slash of the 1e9 stake = 5e7. Status STAYS Unbonding; both the node's
@@ -472,7 +472,7 @@ fn withdrawn_node_skipped_by_expired_challenge() {
         .unwrap();
 
     executor
-        .execute_block(&empty_block(10, &proposer), Hash::ZERO)
+        .execute_block(&empty_block(10, &proposer), Hash::ZERO, &[])
         .unwrap();
 
     // Still Withdrawn, still zero stake — untouched.

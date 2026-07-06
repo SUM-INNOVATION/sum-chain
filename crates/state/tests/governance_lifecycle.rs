@@ -26,7 +26,8 @@ fn params(gate: bool, configured: bool, max_holders: u32) -> ChainParams {
     p.governance_enabled_from_height = if gate { Some(0) } else { None };
     if configured {
         p.governance = Some(GovernanceParams {
-            council: Address::new(COUNCIL),
+            // 5000 bps: on a 1-validator test set, ceil(1*5000/10000)=1 approval.
+            validator_authority_threshold_bps: 5_000,
             quorum_bps: 2_000,       // 20%
             pass_threshold_bps: 5_000, // >50% of yes+no
             voting_period_blocks: 100,
@@ -127,38 +128,58 @@ fn proposal_id_of(proposer: &Address, height: u64, nonce: u64) -> [u8; 32] {
 
 // ── RegisterAsset ────────────────────────────────────────────────────────────
 
+/// Build a validator approval over the RegisterAsset signing bytes.
+fn register_approval(v: &KeyPair, token_id: &[u8; 32], create_threshold: u128, eff: u64) -> sumchain_primitives::ValidatorApproval {
+    let msg = sumchain_primitives::validator_authority::register_asset_signing_bytes(
+        CHAIN_ID, token_id, create_threshold, eff,
+    );
+    sumchain_primitives::ValidatorApproval {
+        pubkey: *v.public_key().as_bytes(),
+        signature: sign(&msg, v.private_key()).to_bytes(),
+    }
+}
+
 #[test]
-fn register_requires_council_and_non_mintable() {
+fn register_requires_validator_quorum_and_non_mintable() {
     let (state, db, _dir, exec) = setup_with_params(params(true, true, 100));
-    let council = KeyPair::generate();
-    // Make the council keypair's address match the configured council.
-    // (setup uses configured COUNCIL; we assert on the code path via a non-council too.)
-    let non_council = KeyPair::generate();
-    fund(&state, &council, 10_000);
-    fund(&state, &non_council, 10_000);
+    let v = KeyPair::generate();
+    let vset = [*v.public_key().as_bytes()];
+    // Submitter is an ordinary (non-validator) account — authority comes from
+    // the approvals, not tx.from.
+    let submitter = KeyPair::generate();
+    fund(&state, &submitter, 10_000);
+    seed_token(&db, false, &[]); // non-mintable token exists
 
-    // Non-mintable token exists.
-    seed_token(&db, false, &[]);
-    let req = bincode::serialize(&RegisterAssetRequest { token_id: TOKEN, create_threshold: 1, effective_height: 0 }).unwrap();
+    // No approvals → 303, even with a validator set supplied (fail closed).
+    let req_no = bincode::serialize(&RegisterAssetRequest { token_id: TOKEN, create_threshold: 1, effective_height: 0, approvals: vec![] }).unwrap();
+    let r = exec.execute_tx_with_validators(&signed(&submitter, 0, gov(GovernanceOperation::RegisterAsset, req_no)), &Address::new([9; 20]), 1, 1000, &vset).unwrap();
+    assert!(matches!(r.status, TxStatus::Failed(303)), "no approvals: {:?}", r.status);
 
-    // Non-council sender → 303 (authority).
-    let r = exec.execute_tx(&signed(&non_council, 0, gov(GovernanceOperation::RegisterAsset, req.clone())), &Address::new([9; 20]), 1, 1000).unwrap();
-    assert!(matches!(r.status, TxStatus::Failed(303)), "non-council: {:?}", r.status);
+    // Approval NOT from an active validator → does not count → 303.
+    let outsider = KeyPair::generate();
+    let req_out = bincode::serialize(&RegisterAssetRequest { token_id: TOKEN, create_threshold: 1, effective_height: 0, approvals: vec![register_approval(&outsider, &TOKEN, 1, 0)] }).unwrap();
+    let r = exec.execute_tx_with_validators(&signed(&submitter, 1, gov(GovernanceOperation::RegisterAsset, req_out)), &Address::new([9; 20]), 1, 1000, &vset).unwrap();
+    assert!(matches!(r.status, TxStatus::Failed(303)), "non-validator approval: {:?}", r.status);
+
+    // Valid validator quorum → success.
+    let req_ok = bincode::serialize(&RegisterAssetRequest { token_id: TOKEN, create_threshold: 1, effective_height: 0, approvals: vec![register_approval(&v, &TOKEN, 1, 0)] }).unwrap();
+    let r = exec.execute_tx_with_validators(&signed(&submitter, 2, gov(GovernanceOperation::RegisterAsset, req_ok)), &Address::new([9; 20]), 1, 1000, &vset).unwrap();
+    assert!(matches!(r.status, TxStatus::Success), "valid quorum: {:?}", r.status);
 }
 
 #[test]
 fn register_rejects_mintable_and_missing_token() {
-    // Council keypair whose address == COUNCIL is hard to force; assert the
-    // eligibility branch via the store-seeded path in the create tests instead.
-    let (state, db, _dir, exec) = setup_with_params(params(true, true, 100));
-    let sender = KeyPair::generate();
-    fund(&state, &sender, 10_000);
-    // Mintable token → ineligible (303) regardless of council check ordering is
-    // covered by unit path; here we exercise missing-token (303).
-    let req = bincode::serialize(&RegisterAssetRequest { token_id: TOKEN, create_threshold: 1, effective_height: 0 }).unwrap();
-    let r = exec.execute_tx(&signed(&sender, 0, gov(GovernanceOperation::RegisterAsset, req)), &Address::new([9; 20]), 1, 1000).unwrap();
-    assert!(matches!(r.status, TxStatus::Failed(303)), "missing token / non-council: {:?}", r.status);
-    let _ = db;
+    // With a valid validator quorum, the eligibility branch is reached: a missing
+    // token still fails with 303.
+    let (state, _db, _dir, exec) = setup_with_params(params(true, true, 100));
+    let v = KeyPair::generate();
+    let vset = [*v.public_key().as_bytes()];
+    let submitter = KeyPair::generate();
+    fund(&state, &submitter, 10_000);
+    // No token seeded → missing token → 303 despite valid authority.
+    let req = bincode::serialize(&RegisterAssetRequest { token_id: TOKEN, create_threshold: 1, effective_height: 0, approvals: vec![register_approval(&v, &TOKEN, 1, 0)] }).unwrap();
+    let r = exec.execute_tx_with_validators(&signed(&submitter, 0, gov(GovernanceOperation::RegisterAsset, req)), &Address::new([9; 20]), 1, 1000, &vset).unwrap();
+    assert!(matches!(r.status, TxStatus::Failed(303)), "missing token: {:?}", r.status);
 }
 
 // ── CreateProposal + snapshot ────────────────────────────────────────────────
@@ -296,7 +317,7 @@ fn no_votes_expires_after_window() {
 #[test]
 fn cancel_by_proposer_only() {
     let (state, db, _dir, exec, proposer, pid) = setup_voting(100, ExecutionKind::RecordOnly);
-    let creq = bincode::serialize(&CancelProposalRequest { proposal_id: pid }).unwrap();
+    let creq = bincode::serialize(&CancelProposalRequest { proposal_id: pid, approvals: vec![] }).unwrap();
 
     // Non-proposer cancel → 306.
     let other = KeyPair::generate();
@@ -332,21 +353,18 @@ fn semantic_failure_charges_fee_and_nonce() {
 
 const BLOCK_PROPOSER: [u8; 20] = [9; 20];
 
-/// Params with a non-zero bond; optionally override the council address.
-fn bond_params(bond: u128, council: Option<Address>) -> ChainParams {
+/// Params with a non-zero bond.
+fn bond_params(bond: u128) -> ChainParams {
     let mut p = params(true, true, 100);
     let g = p.governance.as_mut().unwrap();
     g.proposal_bond = bond;
-    if let Some(c) = council {
-        g.council = c;
-    }
     p
 }
 
 #[test]
 fn create_escrows_bond_and_requires_fee_plus_bond() {
     // fee is 100 (see `signed`); bond 500 ⇒ needs 600.
-    let (state, db, _dir, exec) = setup_with_params(bond_params(500, None));
+    let (state, db, _dir, exec) = setup_with_params(bond_params(500));
     let escrow = gov_escrow_address();
 
     // Exactly-funded proposer succeeds; bond lands in escrow.
@@ -377,7 +395,7 @@ fn create_escrows_bond_and_requires_fee_plus_bond() {
 
 #[test]
 fn bond_returned_on_recorded() {
-    let (state, db, _dir, exec) = setup_with_params(bond_params(500, None));
+    let (state, db, _dir, exec) = setup_with_params(bond_params(500));
     let escrow = gov_escrow_address();
     let proposer = KeyPair::generate();
     fund(&state, &proposer, 1_000_000);
@@ -406,7 +424,7 @@ fn bond_returned_on_recorded() {
 
 #[test]
 fn bond_burned_on_expired() {
-    let (state, db, _dir, exec) = setup_with_params(bond_params(500, None));
+    let (state, db, _dir, exec) = setup_with_params(bond_params(500));
     let escrow = gov_escrow_address();
     let proposer = KeyPair::generate();
     fund(&state, &proposer, 1_000_000);
@@ -431,7 +449,7 @@ fn bond_burned_on_expired() {
 
 #[test]
 fn proposer_cancel_returns_bond() {
-    let (state, db, _dir, exec) = setup_with_params(bond_params(500, None));
+    let (state, db, _dir, exec) = setup_with_params(bond_params(500));
     let escrow = gov_escrow_address();
     let proposer = KeyPair::generate();
     fund(&state, &proposer, 1_000_000);
@@ -443,7 +461,7 @@ fn proposer_cancel_returns_bond() {
     let pid = proposal_id_of(&proposer.address(), 5, 0);
 
     let before = state.get_balance(&proposer.address()).unwrap();
-    let creq = bincode::serialize(&CancelProposalRequest { proposal_id: pid }).unwrap();
+    let creq = bincode::serialize(&CancelProposalRequest { proposal_id: pid, approvals: vec![] }).unwrap();
     let r = exec.execute_tx(&signed(&proposer, 1, gov(GovernanceOperation::CancelProposal, creq)), &Address::new(BLOCK_PROPOSER), 10, 1000).unwrap();
     assert!(matches!(r.status, TxStatus::Success), "cancel: {:?}", r.status);
 
@@ -455,14 +473,16 @@ fn proposer_cancel_returns_bond() {
 }
 
 #[test]
-fn council_cancel_burns_bond() {
-    // Council = a distinct keypair's address, so the canceller is council but not proposer.
-    let council = KeyPair::generate();
-    let (state, db, _dir, exec) = setup_with_params(bond_params(500, Some(council.address())));
+fn validator_quorum_cancel_burns_bond() {
+    // A non-proposer canceller needs a validator quorum; that path burns the bond.
+    let v = KeyPair::generate();
+    let vset = [*v.public_key().as_bytes()];
+    let (state, db, _dir, exec) = setup_with_params(bond_params(500));
     let escrow = gov_escrow_address();
     let proposer = KeyPair::generate();
+    let submitter = KeyPair::generate(); // non-proposer, non-validator fee payer
     fund(&state, &proposer, 1_000_000);
-    fund(&state, &council, 10_000);
+    fund(&state, &submitter, 10_000);
     seed_token(&db, false, &[(proposer.address(), 600)]);
     register(&db, 1);
     let z0 = state.get_balance(&Address::ZERO).unwrap();
@@ -470,15 +490,23 @@ fn council_cancel_burns_bond() {
     assert!(matches!(exec.execute_tx(&signed(&proposer, 0, gov(GovernanceOperation::CreateProposal, create_req(&proposer, ExecutionKind::RecordOnly))), &Address::new(BLOCK_PROPOSER), 5, 1000).unwrap().status, TxStatus::Success));
     let pid = proposal_id_of(&proposer.address(), 5, 0);
 
-    let creq = bincode::serialize(&CancelProposalRequest { proposal_id: pid }).unwrap();
-    let r = exec.execute_tx(&signed(&council, 0, gov(GovernanceOperation::CancelProposal, creq)), &Address::new(BLOCK_PROPOSER), 10, 1000).unwrap();
-    assert!(matches!(r.status, TxStatus::Success), "council cancel: {:?}", r.status);
+    // Non-proposer cancel WITHOUT approvals → 306 (authority).
+    let creq_no = bincode::serialize(&CancelProposalRequest { proposal_id: pid, approvals: vec![] }).unwrap();
+    let r = exec.execute_tx_with_validators(&signed(&submitter, 0, gov(GovernanceOperation::CancelProposal, creq_no)), &Address::new(BLOCK_PROPOSER), 10, 1000, &vset).unwrap();
+    assert!(matches!(r.status, TxStatus::Failed(306)), "no-approval validator cancel: {:?}", r.status);
+
+    // Non-proposer cancel WITH a valid validator quorum → success, bond burned.
+    let msg = sumchain_primitives::validator_authority::cancel_proposal_signing_bytes(CHAIN_ID, &pid);
+    let approval = sumchain_primitives::ValidatorApproval { pubkey: *v.public_key().as_bytes(), signature: sign(&msg, v.private_key()).to_bytes() };
+    let creq = bincode::serialize(&CancelProposalRequest { proposal_id: pid, approvals: vec![approval] }).unwrap();
+    let r = exec.execute_tx_with_validators(&signed(&submitter, 1, gov(GovernanceOperation::CancelProposal, creq)), &Address::new(BLOCK_PROPOSER), 10, 1000, &vset).unwrap();
+    assert!(matches!(r.status, TxStatus::Success), "validator cancel: {:?}", r.status);
 
     let stored = GovStore::new(&db).get_proposal(&pid).unwrap().unwrap();
     assert_eq!(stored.status, GovProposalStatus::Cancelled);
     assert_eq!(stored.bond_state, BondState::Burned);
     assert_eq!(state.get_balance(&escrow).unwrap(), 0, "escrow drained");
-    assert_eq!(state.get_balance(&Address::ZERO).unwrap(), z0 + 500, "council cancel burns bond");
+    assert_eq!(state.get_balance(&Address::ZERO).unwrap(), z0 + 500, "validator cancel burns bond");
 }
 
 // ── Treasury OnChain execution (P6b) ─────────────────────────────────────────

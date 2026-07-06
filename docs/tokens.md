@@ -415,17 +415,21 @@ out off-chain). Full design: [docs/specs/GOVERNANCE-V1.md](specs/GOVERNANCE-V1.m
 
 **Dormant by default.** Governance is inert unless **both** are configured via a
 coordinated validator upgrade: the activation gate `governance_enabled_from_height`
-**and** the `ChainParams.governance` parameters (council, quorum, pass threshold,
-voting period, snapshot bound). Neither is set on mainnet, so governance
+**and** the `ChainParams.governance` parameters (`validator_authority_threshold_bps`,
+quorum, pass threshold, voting period, snapshot bound). Admin/council authority is
+**validator-quorum controlled** — there is **no single council address**; a
+threshold of the active validator set signs. Neither is set on mainnet, so governance
 transactions are rejected and the reads below return empty/`null` until a network
 enables and populates governance. No mainnet token id, quorum, threshold, bond,
 or period values are published here.
 
 When a non-zero deposit bond is configured, creating a proposal escrows the bond
 (the proposer must cover `fee + bond`); it is returned to the proposer on a
-good-faith outcome or proposer cancel, and burned on spam / quorum failure or
-council cancel. A proposal may be cancelled by its proposer or the council while
-Created/Voting via `gov_buildCancelProposal`. The `gov_getProposal` response
+good-faith outcome or proposer cancel, and burned on spam / quorum failure or a
+validator-quorum cancel. A proposal may be self-cancelled by its proposer (no
+approvals), or cancelled by a **validator-quorum** (a threshold of the active
+validator set) while Created/Voting via `gov_buildCancelProposal` — which accepts
+an optional `approvals` list of validator signatures. The `gov_getProposal` response
 surfaces the `bond` amount and `bond_state` (`Escrowed`/`Returned`/`Burned`).
 
 Execution is record-only except for a single treasury-spend path: when a
@@ -477,7 +481,7 @@ curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
 # Unsigned execute-proposal tx
 curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"gov_buildExecuteProposal","params":[{"from":"<address>","proposal_id":"0x<proposal_id_hex>"}]}'
-# Unsigned cancel-proposal tx (proposer or council; while Created/Voting)
+# Unsigned cancel-proposal tx (proposer self-cancel, or validator-quorum via optional approvals; while Created/Voting)
 curl -s https://rpc.sumchain.io -H 'content-type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"gov_buildCancelProposal","params":[{"from":"<address>","proposal_id":"0x<proposal_id_hex>"}]}'
 ```

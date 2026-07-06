@@ -161,13 +161,18 @@ pub struct OpenInferenceDisputeRequest {
     pub evidence_commitment: [u8; 32],
 }
 
-/// Resolve a dispute. Only the configured dispute resolver may submit this.
+/// Resolve a dispute. Authorized by a **validator quorum** —
+/// `approvals` must reach `ChainParams.inference_settlement_dispute_threshold_bps`
+/// of the active PoA validator set. `tx.from` is only the fee payer.
 /// `allow_claim = true` lets the verifier proceed; `false` denies the claim.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolveInferenceDisputeRequest {
     pub session_id: String,
     pub verifier: Address,
     pub allow_claim: bool,
+    /// Validator approvals over [`crate::validator_authority::resolve_dispute_signing_bytes`].
+    #[serde(default)]
+    pub approvals: Vec<crate::validator_authority::ValidatorApproval>,
 }
 
 /// Refund the funder's remaining escrow once the session is closable.

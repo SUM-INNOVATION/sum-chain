@@ -272,9 +272,13 @@ pub struct GovVote {
 /// values are set only for a coordinated activation or in tests.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GovernanceParams {
-    /// Authority allowed to register/enable governance assets (`RegisterAsset`
-    /// requires `tx.from == council`). Single configured address in v1.
-    pub council: Address,
+    /// Quorum, in basis points of the **active PoA validator set**, required to
+    /// authorize validator-gated governance actions (`RegisterAsset` and
+    /// validator-cancel). Required approvals = `ceil(active_count * bps / 10000)`;
+    /// non-signing validators abstain but stay in the denominator. `10000`
+    /// requires every active validator. Replaces the former single `council`
+    /// address — there is no personal council key.
+    pub validator_authority_threshold_bps: u16,
     /// Quorum, in basis points of total snapshot voting power.
     pub quorum_bps: u16,
     /// Pass threshold, in basis points of (yes + no) weight.
@@ -320,12 +324,17 @@ pub fn gov_escrow_address() -> Address {
 // Defined in P3a for the lifecycle phases; not yet decoded by the executor.
 // =============================================================================
 
-/// `RegisterAsset` request (council-only).
+/// `RegisterAsset` request. Authorized by a **validator quorum**: `approvals`
+/// must reach `GovernanceParams.validator_authority_threshold_bps` of the active
+/// PoA validator set. `tx.from` is only the fee payer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegisterAssetRequest {
     pub token_id: TokenId,
     pub create_threshold: u128,
     pub effective_height: GovBlockHeight,
+    /// Validator approvals over [`crate::validator_authority::register_asset_signing_bytes`].
+    #[serde(default)]
+    pub approvals: Vec<crate::validator_authority::ValidatorApproval>,
 }
 
 /// `CreateProposal` request.
@@ -357,10 +366,16 @@ pub struct ExecuteProposalRequest {
     pub proposal_id: GovProposalId,
 }
 
-/// `CancelProposal` request.
+/// `CancelProposal` request. The **proposer** may cancel with no `approvals`.
+/// Any other submitter needs a **validator quorum** in `approvals` reaching
+/// `GovernanceParams.validator_authority_threshold_bps`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CancelProposalRequest {
     pub proposal_id: GovProposalId,
+    /// Validator approvals over [`crate::validator_authority::cancel_proposal_signing_bytes`].
+    /// Empty on the proposer-cancel path.
+    #[serde(default)]
+    pub approvals: Vec<crate::validator_authority::ValidatorApproval>,
 }
 
 /// Domain separator for deterministic proposal-id derivation.

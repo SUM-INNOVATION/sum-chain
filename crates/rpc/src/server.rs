@@ -724,6 +724,30 @@ impl RpcServer {
         edu_parse_hex32(s).map_err(RpcError::InvalidParams)
     }
 
+    /// Decode builder-supplied validator approvals (hex pubkey + hex signature)
+    /// into wire `ValidatorApproval`s embedded in the unsigned tx.
+    fn parse_approvals(
+        &self,
+        inputs: &[crate::types::ValidatorApprovalInput],
+    ) -> Result<Vec<sumchain_primitives::ValidatorApproval>> {
+        inputs
+            .iter()
+            .map(|a| {
+                let pk = hex::decode(a.pubkey.trim_start_matches("0x"))
+                    .map_err(|_| RpcError::InvalidParams("invalid approval pubkey hex".into()))?;
+                let sig = hex::decode(a.signature.trim_start_matches("0x"))
+                    .map_err(|_| RpcError::InvalidParams("invalid approval signature hex".into()))?;
+                let pubkey: [u8; 32] = pk
+                    .try_into()
+                    .map_err(|_| RpcError::InvalidParams("approval pubkey must be 32 bytes".into()))?;
+                let signature: [u8; 64] = sig.try_into().map_err(|_| {
+                    RpcError::InvalidParams("approval signature must be 64 bytes".into())
+                })?;
+                Ok(sumchain_primitives::ValidatorApproval { pubkey, signature })
+            })
+            .collect()
+    }
+
     /// Parse hash from string
     fn parse_hash(&self, s: &str) -> Result<Hash> {
         Hash::from_hex(s)
@@ -4159,7 +4183,10 @@ impl SumChainApiServer for RpcServer {
         use sumchain_primitives::governance::{CancelProposalRequest, GovernanceOperation, GovernanceTxData};
         let from = self.parse_address(&request.from)?;
         let proposal_id = self.parse_hex32(&request.proposal_id)?;
-        let req = CancelProposalRequest { proposal_id };
+        let req = CancelProposalRequest {
+            proposal_id,
+            approvals: self.parse_approvals(&request.approvals)?,
+        };
         let data = GovernanceTxData {
             operation: GovernanceOperation::CancelProposal,
             data: bincode::serialize(&req).map_err(|e| RpcError::Internal(e.to_string()))?,
@@ -4380,10 +4407,12 @@ impl SumChainApiServer for RpcServer {
         use sumchain_primitives::inference_settlement::*;
         let from = self.parse_address(&request.from)?;
         let verifier = self.parse_address(&request.verifier)?;
+        let approvals = self.parse_approvals(&request.approvals)?;
         let op = InferenceSettlementOperation::ResolveDispute(ResolveInferenceDisputeRequest {
             session_id: request.session_id,
             verifier,
             allow_claim: request.allow_claim,
+            approvals,
         });
         self.build_unsigned_settlement_tx(from, request.fee.unwrap_or(GOV_DEFAULT_FEE), op)
     }
@@ -9992,7 +10021,7 @@ mod governance_rpc_tests {
 
     fn gov_params() -> GovernanceParams {
         GovernanceParams {
-            council: Address::new([0xC0; 20]),
+            validator_authority_threshold_bps: 6_667,
             quorum_bps: 2_000,
             pass_threshold_bps: 5_000,
             voting_period_blocks: 100,

@@ -25,7 +25,7 @@ fn gov_payload(op: GovernanceOperation) -> TxPayload {
 fn test_gov_params() -> GovernanceParams {
     // Fixture values only — no mainnet defaults.
     GovernanceParams {
-        council: Address::new([0xC0; 20]),
+        validator_authority_threshold_bps: 6_667,
         quorum_bps: 2_000,
         pass_threshold_bps: 5_000,
         voting_period_blocks: 100,
