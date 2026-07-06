@@ -7,7 +7,7 @@ import { useState, type ReactNode } from 'react';
 /* Status pill — encodes protocol reality: active / dormant / roadmap  */
 /* ------------------------------------------------------------------ */
 
-export type Status = 'active' | 'dormant' | 'roadmap';
+export type Status = 'active' | 'pending' | 'dormant' | 'roadmap';
 
 const STATUS_META: Record<Status, { label: string; color: string; ring: string; dot: string }> = {
   active: {
@@ -15,6 +15,12 @@ const STATUS_META: Record<Status, { label: string; color: string; ring: string; 
     color: 'text-status-active',
     ring: 'border-status-active/30 bg-status-active/10',
     dot: 'bg-status-active',
+  },
+  pending: {
+    label: 'Pending activation',
+    color: 'text-status-pending',
+    ring: 'border-status-pending/30 bg-status-pending/10',
+    dot: 'bg-status-pending',
   },
   dormant: {
     label: 'Code-backed · dormant',
@@ -36,7 +42,7 @@ export function StatusPill({ status, label }: { status: Status; label?: string }
     <span
       className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium ${m.ring} ${m.color}`}
     >
-      <span className={`h-1.5 w-1.5 rounded-full ${m.dot} ${status === 'active' ? 'status-pulse' : ''}`} />
+      <span className={`h-1.5 w-1.5 rounded-full ${m.dot} ${status === 'active' || status === 'pending' ? 'status-pulse' : ''}`} />
       <span className="mono tracking-wide">{label ?? m.label}</span>
     </span>
   );

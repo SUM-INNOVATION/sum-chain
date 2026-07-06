@@ -29,7 +29,8 @@
 
   /* Protocol status semantics */
   --status-active: #34d399; /* emerald — live on mainnet */
-  --status-dormant: #fbbf24; /* amber — code-backed, not active */
+  --status-pending: #22d3ee; /* cyan — deployed, activation gate set, not yet reached */
+  --status-dormant: #fbbf24; /* amber — code-backed, no activation gate */
   --status-roadmap: #60a5fa; /* blue — planned */
 }
 
@@ -47,6 +48,7 @@
   --color-signal: var(--signal);
   --color-signal-soft: var(--signal-soft);
   --color-status-active: var(--status-active);
+  --color-status-pending: var(--status-pending);
   --color-status-dormant: var(--status-dormant);
   --color-status-roadmap: var(--status-roadmap);
 
