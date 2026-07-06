@@ -220,6 +220,7 @@ loop {
 | `storage_getAssignmentCoverageV2(merkle_root, missing_offset?, missing_limit?)` | Coverage progress + missing chunks. |
 | `storage_getActiveNodesAtHeight(height)` | Snapshot at `assignment_height` for client-side `assigned_archives_presorted`. |
 | `storage_getArchiveUnbonding(operator_address)` | Pending archive-node stake-unbonding record, or `null` if none (issue #20). |
+| `storage_buildReassignChunksV2({from, merkle_root, fee?})` | **No-key** unsigned-tx builder for the owner-triggered `ReassignChunksV2` op (issue #80). Returns `{unsigned_tx, signing_hash, from, nonce, fee, chain_id}` for the client to sign + broadcast via `send_raw_transaction`. No signing, no execution, no owner/gate pre-authorization — the executor stays authoritative. For non-Rust clients / the web SNIP wallet; the Rust CLI wallet builds this tx locally and does not need it. |
 
 Defaults: `access_limit = 256` / hard cap 1024; `missing_limit = 1024` / hard cap 16384; `pushable.limit = 256` / hard cap 1024.
 
@@ -288,6 +289,15 @@ Codes `20`/`21` (generic NodeRegistryV2 / StorageMetadataV2 fail) currently fall
   - `latest_assignment_epoch: u64` — the newest epoch height.
   - `reassignment_needed: bool` — true iff an owner `ReassignChunksV2` would be accepted right now.
   - `per_epoch: [{ epoch_height, is_epoch_zero, covered_count, per_archive }]` — self-consistent per-epoch detail. Re-derive each epoch's assignment with `assigned_archives_presorted(merkle_root, storage_getActiveNodesAtHeight(epoch_height), idx, R)`.
+
+### Tooling (issue #80)
+
+- **No-key builder:** `storage_buildReassignChunksV2({from, merkle_root, fee?})` returns an unsigned `ReassignChunksV2` tx (`{unsigned_tx, signing_hash, ...}`) for non-Rust clients / the web SNIP wallet to sign and submit via `send_raw_transaction`. It performs **no** signing, execution, or owner/gate check — the on-chain executor remains authoritative (owner-only, gate `archive_reassignment_enabled_from_height`, no-op rejected with `Failed(334)`).
+- **Rust CLI wallet** (`sumchain-wallet`) builds this tx **locally** (typed, signed offline) — it does not use the RPC builder. Operator commands:
+  - `storage-coverage --merkle-root <root>` — epoch-aware coverage (epoch 0 = original assignment; later = reassignment epochs); shows `reassignment_needed`; no raw bitmaps.
+  - `storage-active-nodes-at --height <h>` — the active-archive snapshot for an epoch height.
+  - `storage-reassign --key <k> --merkle-root <root> [--yes]` — owner-triggered reassign; preflights coverage and refuses a no-op unless `--yes`; builds/signs locally; submits via `send_raw_transaction`.
+- **Reassignment ↔ unbonding:** archive exit / slash / unbonding (`archive-begin-unstake`, `archive-unbonding`, `archive-withdraw`; issue #20) removes an archive from the active set, which is what creates the coverage gap that makes `reassignment_needed` true.
 
 ---
 

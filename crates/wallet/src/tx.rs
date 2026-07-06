@@ -7,6 +7,7 @@ use sumchain_primitives::{
     Address, Balance, NodeRegistryOperation, NodeRegistryTxData, SignedTransaction, Transaction,
     TransactionV2, TxPayload,
 };
+use sumchain_primitives::storage_metadata::{StorageMetadataOperationV2, StorageMetadataV2TxData};
 use sumchain_rpc::api::SumChainApiClient;
 
 use crate::keystore::Keystore;
@@ -66,6 +67,62 @@ pub fn sign_node_registry_tx(
         *signature.as_bytes(),
         *keystore.public_key().as_bytes(),
     ))
+}
+
+/// Sign a StorageMetadataV2 transaction offline (issue #80 archive reassignment,
+/// and other V2 storage operations). Mirrors [`sign_node_registry_tx`]: wraps the
+/// typed operation in a [`TransactionV2`] with a [`TxPayload::StorageMetadataV2`]
+/// payload and signs locally — the CLI wallet never hand-crafts raw bincode and
+/// does not depend on the `storage_buildReassignChunksV2` RPC builder (that
+/// builder exists for non-Rust clients).
+pub fn sign_storage_metadata_v2_tx(
+    keystore: &Keystore,
+    operation: StorageMetadataOperationV2,
+    fee: Balance,
+    nonce: u64,
+    chain_id: u64,
+) -> Result<SignedTransaction> {
+    let tx = TransactionV2 {
+        chain_id,
+        from: keystore.address(),
+        fee,
+        nonce,
+        payload: TxPayload::StorageMetadataV2(StorageMetadataV2TxData { operation }),
+    };
+    let signing_hash = tx.signing_hash();
+    let signature = sign(signing_hash.as_bytes(), keystore.keypair().private_key());
+    Ok(SignedTransaction::new_v2(
+        tx,
+        *signature.as_bytes(),
+        *keystore.public_key().as_bytes(),
+    ))
+}
+
+/// Read epoch-aware assignment coverage for a file (issue #62/#80). `None` when
+/// the file is not registered.
+pub async fn storage_get_assignment_coverage_v2(
+    rpc_url: &str,
+    merkle_root: &str,
+) -> Result<Option<sumchain_rpc::types::AssignmentCoverageV2>> {
+    let client = create_client(rpc_url).await?;
+    let cov = client
+        .storage_get_assignment_coverage_v2(merkle_root.to_string(), None, None)
+        .await
+        .context("Failed to get assignment coverage")?;
+    Ok(cov)
+}
+
+/// Read the active-archive-node snapshot at (or before) `height` (issue #80).
+pub async fn storage_get_active_nodes_at_height(
+    rpc_url: &str,
+    height: u64,
+) -> Result<Vec<sumchain_rpc::types::NodeRecordInfo>> {
+    let client = create_client(rpc_url).await?;
+    let nodes = client
+        .storage_get_active_nodes_at_height(height)
+        .await
+        .context("Failed to get active nodes at height")?;
+    Ok(nodes)
 }
 
 /// Query an archive node's registry record (role, stake, status). Used by the
@@ -827,6 +884,38 @@ mod tests {
                 TxPayload::NodeRegistry(d) => {
                     assert_eq!(d.operation, NodeRegistryOperation::WithdrawUnbonded)
                 }
+                other => panic!("unexpected payload: {:?}", other),
+            },
+            _ => panic!("expected a V2 transaction"),
+        }
+    }
+
+    #[test]
+    fn test_sign_reassign_chunks_v2() {
+        use sumchain_primitives::Hash;
+        let keystore = Keystore::generate("test").unwrap();
+        let root = Hash::hash(b"file-root");
+        let signed = sign_storage_metadata_v2_tx(
+            &keystore,
+            StorageMetadataOperationV2::ReassignChunksV2 { merkle_root: root },
+            10,
+            2,
+            7,
+        )
+        .unwrap();
+
+        assert_eq!(signed.sender(), keystore.address());
+        assert!(signed.verify_signer());
+        assert_eq!(signed.nonce(), 2);
+
+        // Round-trips through broadcast hex and decodes to ReassignChunksV2.
+        let back = SignedTransaction::from_hex(&signed.to_hex()).unwrap();
+        match back.inner() {
+            sumchain_primitives::TxInner::V2(tx) => match &tx.payload {
+                TxPayload::StorageMetadataV2(d) => assert_eq!(
+                    d.operation,
+                    StorageMetadataOperationV2::ReassignChunksV2 { merkle_root: root }
+                ),
                 other => panic!("unexpected payload: {:?}", other),
             },
             _ => panic!("expected a V2 transaction"),

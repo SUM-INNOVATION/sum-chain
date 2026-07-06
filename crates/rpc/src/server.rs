@@ -7336,6 +7336,49 @@ impl SumChainApiServer for RpcServer {
             })
             .collect())
     }
+
+    async fn storage_build_reassign_chunks_v2(
+        &self,
+        request: crate::types::StorageBuildReassignChunksV2Request,
+    ) -> std::result::Result<crate::types::StorageBuildResponse, jsonrpsee::types::ErrorObjectOwned>
+    {
+        use sumchain_primitives::storage_metadata::{
+            StorageMetadataOperationV2, StorageMetadataV2TxData,
+        };
+        use sumchain_primitives::{TransactionV2, TxPayload};
+
+        // No keys, no signing, no execution. Only decode + shape: parse the owner
+        // address and the 32-byte merkle root, then assemble the unsigned tx. All
+        // authority (owner check, gate, lifecycle, no-op) is left to the executor.
+        let from = self.parse_address(&request.from)?;
+        let merkle_root = self.parse_hash(&request.merkle_root)?;
+        let fee = request.fee.unwrap_or(GOV_DEFAULT_FEE);
+        let nonce = self
+            .state
+            .get_nonce(&from)
+            .map_err(|e| RpcError::Internal(format!("Failed to get nonce: {}", e)))?;
+        let chain_id = self.state.chain_id();
+        let tx = TransactionV2 {
+            chain_id,
+            from,
+            fee,
+            nonce,
+            payload: TxPayload::StorageMetadataV2(StorageMetadataV2TxData {
+                operation: StorageMetadataOperationV2::ReassignChunksV2 { merkle_root },
+            }),
+        };
+        let signing_hash = tx.signing_hash();
+        let unsigned = bincode::serialize(&tx)
+            .map_err(|e| RpcError::Internal(format!("Failed to encode tx: {}", e)))?;
+        Ok(crate::types::StorageBuildResponse {
+            unsigned_tx: format!("0x{}", hex::encode(unsigned)),
+            signing_hash: format!("0x{}", hex::encode(signing_hash.as_bytes())),
+            from: from.to_base58(),
+            nonce,
+            fee,
+            chain_id,
+        })
+    }
 }
 
 // Helper methods for DocClass RPC conversions
@@ -9510,6 +9553,57 @@ mod messaging_rpc_tests {
             }
             other => panic!("wrong payload: {:?}", other),
         }
+    }
+
+    // Issue #80: no-key ReassignChunksV2 builder round-trip + invalid-root reject.
+    #[tokio::test]
+    async fn storage_build_reassign_chunks_v2_roundtrips() {
+        use crate::types::StorageBuildReassignChunksV2Request;
+        use sumchain_primitives::storage_metadata::StorageMetadataOperationV2;
+        use sumchain_primitives::{Hash, TransactionV2, TxPayload};
+        let (srv, _db, _dir) = server();
+        let owner = KeyPair::generate();
+        let root = Hash::hash(b"some-file-merkle-root");
+
+        let resp = srv
+            .storage_build_reassign_chunks_v2(StorageBuildReassignChunksV2Request {
+                from: owner.address().to_base58(),
+                merkle_root: format!("0x{}", hex::encode(root.as_bytes())),
+                fee: Some(1000),
+            })
+            .await
+            .unwrap();
+        assert_eq!(resp.from, owner.address().to_base58());
+        assert_eq!(resp.fee, 1000);
+
+        // Decodes to exactly ReassignChunksV2 { merkle_root } with the owner as sender.
+        let bytes = hex::decode(resp.unsigned_tx.trim_start_matches("0x")).unwrap();
+        let tx = TransactionV2::from_bytes(&bytes).unwrap();
+        assert_eq!(tx.from, owner.address());
+        // The signing hash the client signs matches the assembled tx.
+        assert_eq!(
+            resp.signing_hash,
+            format!("0x{}", hex::encode(tx.signing_hash().as_bytes()))
+        );
+        match tx.payload {
+            TxPayload::StorageMetadataV2(d) => match d.operation {
+                StorageMetadataOperationV2::ReassignChunksV2 { merkle_root } => {
+                    assert_eq!(merkle_root, root);
+                }
+                other => panic!("wrong op: {:?}", other),
+            },
+            other => panic!("wrong payload: {:?}", other),
+        }
+
+        // Invalid merkle_root is rejected (decode/shape only — no execution).
+        assert!(srv
+            .storage_build_reassign_chunks_v2(StorageBuildReassignChunksV2Request {
+                from: owner.address().to_base58(),
+                merkle_root: "not-a-hash".to_string(),
+                fee: None,
+            })
+            .await
+            .is_err());
     }
 }
 
