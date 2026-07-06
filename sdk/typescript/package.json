@@ -1,6 +1,6 @@
 {
   "name": "@sumchain/sdk",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "TypeScript SDK for SUM Chain - A Rust-based blockchain with Koppa (Ϙ) native currency",
   "type": "module",
   "main": "dist/index.js",

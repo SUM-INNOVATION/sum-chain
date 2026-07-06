@@ -332,7 +332,7 @@ MIT
 
 ## Links
 
-- [SUM Chain Repository](https://github.com/sumchain/sum-chain)
+- [SUM Chain Repository](https://github.com/SUM-INNOVATION/sum-chain)
 - [TypeScript SDK](../sdk/typescript)
 - [API Documentation](../docs/rpc/api-reference.md)
 - [Operator Guide](../docs/operator-guide.md)
