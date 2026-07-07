@@ -215,6 +215,146 @@ fn transfer_native_executes_from_policy_account() {
     assert_eq!(updated.nonce, 1, "policy nonce should advance on success");
 }
 
+// --------------------------------------------------------------------------
+// Governance v2 (#90): Policy-Account token-admin op dispatch
+// --------------------------------------------------------------------------
+
+use sumchain_primitives::{TokenOperation, TokenTxData};
+use sumchain_primitives::token_ops::{TokenMinterData, TokenTransferOwnershipData};
+use sumchain_storage::schema::Src20TokenData;
+use sumchain_storage::TokenStore;
+
+const PA_TOKEN: [u8; 32] = [0x7A; 32];
+
+/// Seed a pausable/mintable SRC-20 owned by `owner`.
+fn seed_pa_token(db: &Arc<Database>, owner: Address, paused: bool, minters: Vec<Address>) {
+    TokenStore::new(db)
+        .put_token(
+            &PA_TOKEN,
+            &Src20TokenData {
+                name: "PA".into(),
+                symbol: "PA".into(),
+                decimals: 0,
+                owner,
+                total_supply: 0,
+                max_supply: 0,
+                mintable: true,
+                burnable: false,
+                pausable: true,
+                paused,
+                minters,
+                created_at: 0,
+                created_at_block: 0,
+            },
+        )
+        .unwrap();
+}
+
+/// Submit + execute a wrapped Token op through the policy account. Returns the
+/// execute result.
+fn run_token_op(
+    pe: &PolicyAccountExecutor,
+    state: &StateManager,
+    account: &PolicyAccount,
+    m: &KeyPair,
+    op: TokenOperation,
+    data: Vec<u8>,
+) -> PolicyAccountExecutionResult {
+    let action = TxPayload::Token(TokenTxData { token_id: PA_TOKEN, operation: op, data });
+    let ah = action_hash(&action);
+    let approval = approve(account, &ah, account.nonce, m, None, false);
+    let sres = submit(pe, state, account, m, &action, vec![approval]);
+    assert!(sres.success, "submit failed: {}", sres.message);
+    let pid = Proposal::compute_id(&account.id, account.nonce, &ah);
+    exec(pe, state, m, pid)
+}
+
+#[test]
+fn policy_account_executes_five_token_admin_ops() {
+    let (state, db, _dir, _ex) = setup_with_params(ChainParams::with_v2_enabled());
+    let pe = PolicyAccountExecutor::new(db.clone());
+    let m = kp();
+    let mut account = put_account(&db, &state, &m, 0);
+    let ts = TokenStore::new(&db);
+
+    // 1) Pause (token owned by the policy account, not paused).
+    seed_pa_token(&db, account.address, false, vec![]);
+    let r = run_token_op(&pe, &state, &account, &m, TokenOperation::Pause, vec![]);
+    assert!(r.success, "pause: {}", r.message);
+    assert!(ts.get_token(&PA_TOKEN).unwrap().unwrap().paused, "token paused");
+    account.nonce += 1;
+
+    // 2) Unpause.
+    let r = run_token_op(&pe, &state, &account, &m, TokenOperation::Unpause, vec![]);
+    assert!(r.success, "unpause: {}", r.message);
+    assert!(!ts.get_token(&PA_TOKEN).unwrap().unwrap().paused, "token unpaused");
+    account.nonce += 1;
+
+    // 3) AddMinter.
+    let minter = kp().address();
+    let add = bincode::serialize(&TokenMinterData { minter }).unwrap();
+    let r = run_token_op(&pe, &state, &account, &m, TokenOperation::AddMinter, add);
+    assert!(r.success, "add_minter: {}", r.message);
+    assert!(ts.get_token(&PA_TOKEN).unwrap().unwrap().minters.contains(&minter), "minter added");
+    account.nonce += 1;
+
+    // 4) RemoveMinter.
+    let rem = bincode::serialize(&TokenMinterData { minter }).unwrap();
+    let r = run_token_op(&pe, &state, &account, &m, TokenOperation::RemoveMinter, rem);
+    assert!(r.success, "remove_minter: {}", r.message);
+    assert!(!ts.get_token(&PA_TOKEN).unwrap().unwrap().minters.contains(&minter), "minter removed");
+    account.nonce += 1;
+
+    // 5) TransferOwnership.
+    let new_owner = kp().address();
+    let to = bincode::serialize(&TokenTransferOwnershipData { new_owner }).unwrap();
+    let r = run_token_op(&pe, &state, &account, &m, TokenOperation::TransferOwnership, to);
+    assert!(r.success, "transfer_ownership: {}", r.message);
+    assert_eq!(ts.get_token(&PA_TOKEN).unwrap().unwrap().owner, new_owner, "ownership transferred");
+}
+
+#[test]
+fn policy_account_failing_token_op_no_partial_state_no_nonce_advance() {
+    // The policy account does NOT own the token → execute_pause fails ("Only
+    // owner can pause"). No token state changes; policy nonce stays put.
+    let (state, db, _dir, _ex) = setup_with_params(ChainParams::with_v2_enabled());
+    let pe = PolicyAccountExecutor::new(db.clone());
+    let m = kp();
+    let account = put_account(&db, &state, &m, 0);
+    let ts = TokenStore::new(&db);
+    // Owner is someone else.
+    seed_pa_token(&db, kp().address(), false, vec![]);
+
+    let r = run_token_op(&pe, &state, &account, &m, TokenOperation::Pause, vec![]);
+    assert!(!r.success, "unauthorized pause must fail");
+    // No partial state: token not paused.
+    assert!(!ts.get_token(&PA_TOKEN).unwrap().unwrap().paused, "token must not be paused");
+    // Policy nonce NOT advanced.
+    let stored = PolicyAccountStorage::new(&db).policy_accounts().get(&account.id).unwrap().unwrap();
+    assert_eq!(stored.nonce, 0, "policy nonce must not advance on failure");
+}
+
+#[test]
+fn policy_account_non_allowlisted_token_op_fail_closed() {
+    // Mint is NOT one of the five allowlisted admin ops → classifies as `Other`
+    // → fail-closed (never dispatched), no nonce advance.
+    let (state, db, _dir, _ex) = setup_with_params(ChainParams::with_v2_enabled());
+    let pe = PolicyAccountExecutor::new(db.clone());
+    let m = kp();
+    let account = put_account(&db, &state, &m, 0);
+    seed_pa_token(&db, account.address, false, vec![]);
+
+    // Mint payload: TokenMintData { to, amount }. Even well-formed, Mint stays
+    // fail-closed.
+    let mint = bincode::serialize(&sumchain_primitives::token_ops::TokenMintData { to: kp().address(), amount: 5 }).unwrap();
+    let r = run_token_op(&pe, &state, &account, &m, TokenOperation::Mint, mint);
+    assert!(!r.success, "Mint must be fail-closed via a policy account");
+    // No supply minted.
+    assert_eq!(TokenStore::new(&db).get_token(&PA_TOKEN).unwrap().unwrap().total_supply, 0, "no mint");
+    let stored = PolicyAccountStorage::new(&db).policy_accounts().get(&account.id).unwrap().unwrap();
+    assert_eq!(stored.nonce, 0, "policy nonce must not advance");
+}
+
 #[test]
 fn modify_membership_executes() {
     let (state, db, _dir, _ex) = setup_with_params(ChainParams::with_v2_enabled());

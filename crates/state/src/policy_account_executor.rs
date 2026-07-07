@@ -17,10 +17,12 @@ use sumchain_primitives::{
     },
     Address, Balance, BlockHeight, Hash, Timestamp, TxPayload,
 };
-use sumchain_primitives::{NftOperation, TokenOperation};
+use sumchain_primitives::{NftOperation, TokenOperation, TokenTxData};
 use sumchain_crypto::verify_bytes;
+use sumchain_genesis::ChainParams;
 use sumchain_storage::{Database, PolicyAccountStorage, Result as StorageResult};
 
+use crate::token_executor::TokenExecutor;
 use crate::{Result, State, StateError};
 
 // =============================================================================
@@ -94,20 +96,22 @@ pub fn classify_action(payload: &TxPayload) -> ActionClass {
         // Native transfers
         TxPayload::Transfer { .. } => ActionClass::TransferNative,
 
-        // Token operations
-        TxPayload::Token(data) => {
-            let operation_byte = data.data.first().copied().unwrap_or(255);
-            match TokenOperation::from_byte(operation_byte) {
-                Some(TokenOperation::Transfer) | Some(TokenOperation::TransferOwnership) => {
-                    ActionClass::TransferTokenOwnership
-                }
-                Some(TokenOperation::Pause)
-                | Some(TokenOperation::Unpause)
-                | Some(TokenOperation::AddMinter)
-                | Some(TokenOperation::RemoveMinter) => ActionClass::AdministerToken,
-                _ => ActionClass::Other,
+        // Token operations. Classify from the typed `operation` field — the
+        // op-specific `data` is a bincode payload with no op-byte prefix (see the
+        // token no-key builder), so the previous `data.first()` byte-sniff
+        // mis-classified every real payload (e.g. Pause has empty `data`). Using
+        // the field is what makes the five Policy-Account admin ops (#90)
+        // classify correctly and reach dispatch.
+        TxPayload::Token(data) => match data.operation {
+            TokenOperation::Transfer | TokenOperation::TransferOwnership => {
+                ActionClass::TransferTokenOwnership
             }
-        }
+            TokenOperation::Pause
+            | TokenOperation::Unpause
+            | TokenOperation::AddMinter
+            | TokenOperation::RemoveMinter => ActionClass::AdministerToken,
+            _ => ActionClass::Other,
+        },
 
         // NFT operations
         TxPayload::Nft(data) => match data.operation {
@@ -606,25 +610,49 @@ impl PolicyAccountExecutor {
                     ));
                 }
             }
-            ActionClass::TransferTokenOwnership
-            | ActionClass::AdministerToken
-            | ActionClass::StakingOperation
+            ActionClass::AdministerToken | ActionClass::TransferTokenOwnership => {
+                // Governance-v2 (#90): execute the wrapped Token admin op AS the
+                // policy account. Only the five allowlisted ops (Pause, Unpause,
+                // AddMinter, RemoveMinter, TransferOwnership) run; any other Token
+                // op is fail-closed inside `apply_policy_admin_op`. A wrapped Token
+                // payload is required — an action-class mismatch (non-Token
+                // payload) fails closed.
+                let TxPayload::Token(token_data) = &action_payload else {
+                    return Ok(PolicyAccountExecutionResult::failure(
+                        "Action payload mismatch for token admin op".to_string(),
+                    ));
+                };
+                // Each per-op handler validates fully and performs its single
+                // `put_token` only on success, so a failure leaves NO partial
+                // token state. `sender = policy_account.address` — the policy
+                // account acts as the token owner/authority.
+                let token_exec = TokenExecutor::new(self.db.clone(), ChainParams::default());
+                let token_result =
+                    token_exec.apply_policy_admin_op(&policy_account.address, token_data)?;
+                if !token_result.success {
+                    // Token op rejected: do NOT mark Executed, do NOT advance the
+                    // policy nonce (the code below is skipped), and leave no
+                    // partial state. Block executor charges the outer fee + nonce.
+                    return Ok(PolicyAccountExecutionResult::failure(format!(
+                        "Wrapped token op failed: {}",
+                        token_result.error.unwrap_or_else(|| "unknown error".to_string())
+                    )));
+                }
+            }
+            ActionClass::StakingOperation
             | ActionClass::GovernanceAction
             | ActionClass::DeployContract
             | ActionClass::CallContract
             | ActionClass::Other => {
-                // Fail closed: wrapped non-policy actions other than native
-                // transfer are not executed in v1. Running them "on behalf of"
-                // the policy account requires atomic cross-executor dispatch with
-                // per-tx rollback, which the state model does not yet provide.
-                //
-                // Returning a failure here means the proposal is NOT marked
-                // Executed and the policy nonce is NOT advanced (the code below
-                // is skipped), so the proposal can still execute later once safe
-                // dispatch lands. The block executor treats this as a semantic
-                // failure and charges the outer fee + submitter nonce.
+                // Fail closed: only native transfer and the five Token admin ops
+                // are executable on behalf of a policy account. NFT/Staking/
+                // Governance/Deploy/Call/Other are not dispatched. Returning a
+                // failure means the proposal is NOT marked Executed and the policy
+                // nonce is NOT advanced (the code below is skipped). The block
+                // executor treats this as a semantic failure and charges the outer
+                // fee + submitter nonce.
                 return Ok(PolicyAccountExecutionResult::failure(format!(
-                    "Wrapped action class {:?} is not supported for execution yet",
+                    "Wrapped action class {:?} is not supported for execution",
                     proposal.action_class
                 )));
             }

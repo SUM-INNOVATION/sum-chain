@@ -144,6 +144,44 @@ impl TokenExecutor {
         }
     }
 
+    /// Dispatch a single **allowlisted token-admin op** as `sender`, WITHOUT any
+    /// fee/nonce handling (Governance-v2 Policy-Account dispatch, #90). The caller
+    /// (the Policy-Account executor) already owns fee/nonce accounting; this entry
+    /// only mutates token state, and only for the five ops a Policy Account may
+    /// run on behalf of its address: Pause, Unpause, AddMinter, RemoveMinter,
+    /// TransferOwnership. Every other `TokenOperation` returns a failure result
+    /// (fail-closed) and writes no token state — each handler validates fully and
+    /// performs its single `put_token` only on success, so a rejected op leaves no
+    /// partial state. Reuses the exact per-op handlers used by the fee-charging
+    /// `execute` path (no duplicated logic).
+    pub fn apply_policy_admin_op(
+        &self,
+        sender: &Address,
+        token_data: &TokenTxData,
+    ) -> Result<TokenExecutionResult> {
+        let store = TokenStore::new(&self.db);
+        match token_data.operation {
+            TokenOperation::Pause => self.execute_pause(&store, sender, &token_data.token_id),
+            TokenOperation::Unpause => self.execute_unpause(&store, sender, &token_data.token_id),
+            TokenOperation::AddMinter => {
+                self.execute_add_minter(&store, sender, &token_data.token_id, &token_data.data)
+            }
+            TokenOperation::RemoveMinter => {
+                self.execute_remove_minter(&store, sender, &token_data.token_id, &token_data.data)
+            }
+            TokenOperation::TransferOwnership => self.execute_transfer_ownership(
+                &store,
+                sender,
+                &token_data.token_id,
+                &token_data.data,
+            ),
+            // Fail closed: not an allowlisted Policy-Account admin op.
+            _ => Ok(TokenExecutionResult::failure(
+                "Token operation not allowed via Policy Account".to_string(),
+            )),
+        }
+    }
+
     /// Deduct fee from sender and credit to proposer
     fn deduct_fee(
         &self,
