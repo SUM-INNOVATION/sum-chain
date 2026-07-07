@@ -186,6 +186,10 @@ export const categories: Category[] = [
         description: 'Returns the NodeRegistry record (role, staked balance, status) for an address.',
       },
       {
+        name: 'nodeRegistry_buildTransaction',
+        description: 'Build an unsigned node-registry transaction (register, begin-unstake, withdraw-unbonded, register-encryption-key) — returns unsigned tx material + signing hash; no private keys.',
+      },
+      {
         name: 'storage_getAssignmentCoverageV2',
         description: 'Per-file chunk coverage: attested vs assigned per archive, missing chunks, and can_activate_now. Epoch-aware/aggregate since the reassignment work (issue #62).',
       },
@@ -259,6 +263,7 @@ export const categories: Category[] = [
       { name: 'staking_getSummary', description: 'Aggregate stats.' },
       { name: 'staking_getParams', description: 'Staking parameters.' },
       { name: 'staking_getTotalStake', description: 'Sum of all stake.' },
+      { name: 'staking_buildTransaction', description: 'Build an unsigned staking/validator transaction (create-validator, delegate, unstake, claim-rewards, submit-evidence, etc.) — returns unsigned tx material + signing hash; no private keys.' },
       { name: 'delegation_getDelegation', description: 'Single delegation lookup.' },
       { name: 'delegation_getDelegationsByDelegator', description: 'Delegations made by an address.' },
       { name: 'delegation_getDelegationsByValidator', description: 'Delegations to a validator.' },
@@ -308,6 +313,7 @@ export const categories: Category[] = [
       { name: 'nft_balanceOf', description: 'Number of tokens an address holds.' },
       { name: 'nft_ownerOf', description: 'Owner of a specific token.' },
       { name: 'nft_tokenExists', description: 'Existence check.' },
+      { name: 'nft_buildTransaction', description: 'Build an unsigned SUM-721 transaction (create-collection, mint, transfer, burn, update-config, etc.) — returns unsigned tx material + signing hash; no private keys.' },
     ],
   },
   {
@@ -331,6 +337,7 @@ export const categories: Category[] = [
           response: `{"jsonrpc":"2.0","result":{"token_id":"0x1234...","owner":"SUM1own...","minters":["SUM1mnt..."]},"id":1}`,
         },
       },
+      { name: 'token_buildTransaction', description: 'Build an unsigned SRC-20 transaction (create, mint, transfer, approve, pause, add-minter, etc.) — returns unsigned tx material + signing hash; no private keys.' },
     ],
   },
   {

@@ -20,6 +20,11 @@ import type {
   Src20TokenInfo,
   TokenMintersInfo,
   Src20TokenHoldings,
+  TxBuildResponse,
+  TokenBuildRequest,
+  NftBuildRequest,
+  StakingBuildRequest,
+  NodeRegistryBuildRequest,
 } from './types.js';
 
 /**
@@ -711,5 +716,31 @@ export class Provider {
    */
   async getTransactionCount(address: Address): Promise<number> {
     return this.request<number>('sum_getTransactionCount', [address]);
+  }
+
+  // ==========================================================================
+  // No-key unsigned-transaction builders (issue #89)
+  // Return unsigned tx material + signing hash only — no keys, no signing.
+  // Sign the `signing_hash` locally and submit via `sendRawTransaction`.
+  // ==========================================================================
+
+  /** Build an unsigned SRC-20 token transaction (`token_buildTransaction`). */
+  async buildTokenTransaction(request: TokenBuildRequest): Promise<TxBuildResponse> {
+    return this.request<TxBuildResponse>('token_buildTransaction', [request]);
+  }
+
+  /** Build an unsigned SUM-721 NFT transaction (`nft_buildTransaction`). */
+  async buildNftTransaction(request: NftBuildRequest): Promise<TxBuildResponse> {
+    return this.request<TxBuildResponse>('nft_buildTransaction', [request]);
+  }
+
+  /** Build an unsigned staking/validator transaction (`staking_buildTransaction`). */
+  async buildStakingTransaction(request: StakingBuildRequest): Promise<TxBuildResponse> {
+    return this.request<TxBuildResponse>('staking_buildTransaction', [request]);
+  }
+
+  /** Build an unsigned node-registry transaction (`nodeRegistry_buildTransaction`). */
+  async buildNodeRegistryTransaction(request: NodeRegistryBuildRequest): Promise<TxBuildResponse> {
+    return this.request<TxBuildResponse>('nodeRegistry_buildTransaction', [request]);
   }
 }
