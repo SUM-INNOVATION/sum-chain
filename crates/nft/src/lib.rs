@@ -27,6 +27,7 @@
 pub mod collection;
 pub mod error;
 pub mod metadata;
+pub mod ops;
 pub mod registry;
 pub mod token;
 pub mod transaction;
