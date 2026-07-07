@@ -32,6 +32,7 @@ fn test_gov_params() -> GovernanceParams {
         max_snapshot_holders: 16,
         proposal_bond: 0,
         treasury: None,
+        min_koppa_for_eligibility: 0,
     }
 }
 

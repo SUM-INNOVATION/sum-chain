@@ -25,6 +25,7 @@ pub use docclass_store::{
     IdentityRootStore, RevocationStore,
 };
 pub use equity_store::{
+    equity_balances_root, equity_balances_root_and_proof, equity_merkle_leaf, equity_merkle_verify,
     CorporateActionStore, EntityProfileStore, EquityBalanceStore, EquityControllerStore,
     EquityEventStore, EquityStore, EquityTokenStore, GovernanceActionStore, OwnershipProofStore,
     OwnershipSnapshotStore,
@@ -66,7 +67,7 @@ pub use finance_store::{
     FinanceStore, KycAttestationStore,
 };
 pub use policy_account_store::{PolicyAccountStorage, PolicyAccountStore, ProposalStore};
-pub use governance_store::GovStore;
+pub use governance_store::{EquityClassRoot, GovStore, QualifyingAsset};
 
 use thiserror::Error;
 
