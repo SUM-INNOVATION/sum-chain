@@ -504,6 +504,21 @@ pub mod cf {
     pub const GOV_SNAPSHOTS: &str = "gov_snapshots";
     /// Governance proposal-by-proposer index (proposer || proposal_id -> ())
     pub const GOV_PROPOSAL_INDEX: &str = "gov_proposal_index";
+
+    // Governance v2 (native-Koppa eligibility #91, SRC-833 equity vote #92).
+    /// Native-eligibility qualifying SRC-20 registry (#91). Key: `token_id` (32).
+    /// Value: bincode `QualifyingAsset { min_balance: u128, effective_height: u64 }`.
+    /// Validator-quorum authorized; enumerates the native 1-address-1-vote
+    /// electorate at proposal creation.
+    pub const GOV_QUALIFYING_ASSETS: &str = "gov_qualifying_assets";
+    /// Per-proposal frozen equity-class balances root (#92). Key: `proposal_id`
+    /// (32). Value: bincode `EquityClassRoot { class_id, balances_root,
+    /// votes_per_share, frozen_height }`. Binds a chain-derived Merkle root to a
+    /// single proposal so votes prove membership under exactly the frozen root.
+    pub const GOV_EQUITY_CLASS_ROOTS: &str = "gov_equity_class_roots";
+    /// Per-(proposal, holder_commitment) equity-vote dedup (#92). Key:
+    /// `proposal_id (32) || holder_commitment (32)` (64). Value: `&[]` (presence).
+    pub const GOV_EQUITY_USED_COMMITMENTS: &str = "gov_equity_used_commitments";
 }
 
 /// All column families used by the database
@@ -693,6 +708,10 @@ pub const ALL_CFS: &[&str] = &[
     cf::GOV_VOTES,
     cf::GOV_SNAPSHOTS,
     cf::GOV_PROPOSAL_INDEX,
+    // Governance v2 (issue #91 native eligibility, #92 equity vote)
+    cf::GOV_QUALIFYING_ASSETS,
+    cf::GOV_EQUITY_CLASS_ROOTS,
+    cf::GOV_EQUITY_USED_COMMITMENTS,
     // Node Registry
     cf::NODE_REGISTRY,
     // Storage Metadata

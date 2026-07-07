@@ -11,6 +11,8 @@
 //! - `GOV_SNAPSHOTS`:      `proposal_id (32) || holder (20)` -> weight (u128 BE)
 //! - `GOV_PROPOSAL_INDEX`: `proposer (20) || proposal_id (32)` -> `` (presence)
 
+use serde::{Deserialize, Serialize};
+
 use sumchain_primitives::governance::{
     GovAsset, GovAssetKind, GovAssetStatus, GovProposal, GovProposalId, GovProposalStatus, GovVote,
 };
@@ -19,6 +21,26 @@ use sumchain_primitives::Address;
 use crate::db::{cf, Database};
 use crate::{Result, StorageError};
 
+/// A native-eligibility qualifying SRC-20 (#91). Holders of `token_id` with
+/// balance >= `min_balance` form part of the native 1-address-1-vote electorate,
+/// once `effective_height` is reached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QualifyingAsset {
+    pub token_id: [u8; 32],
+    pub min_balance: u128,
+    pub effective_height: u64,
+}
+
+/// Per-proposal frozen equity-class balances root (#92). Binds a chain-derived
+/// Merkle root over `EQUITY_BALANCES` for `class_id` to a single proposal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EquityClassRoot {
+    pub class_id: [u8; 32],
+    pub balances_root: [u8; 32],
+    pub votes_per_share: u64,
+    pub frozen_height: u64,
+}
+
 fn ser<T: serde::Serialize>(v: &T) -> Result<Vec<u8>> {
     bincode::serialize(v).map_err(|e| StorageError::Serialization(e.to_string()))
 }
@@ -26,10 +48,20 @@ fn de<T: serde::de::DeserializeOwned>(b: &[u8]) -> Result<T> {
     bincode::deserialize(b).map_err(|e| StorageError::Serialization(e.to_string()))
 }
 
-/// Registry key for a governance asset. v1: the SRC-20 `token_id`.
+/// Registry key for a governance asset. Each variant maps to a distinct,
+/// collision-free key namespace (a one-byte tag prevents an SRC-20 `token_id`
+/// from ever aliasing an equity `class_id`). v1 SRC-20 keys keep their bare
+/// 32-byte layout for on-disk compatibility with existing rows.
 fn asset_key(kind: &GovAssetKind) -> Vec<u8> {
     match kind {
         GovAssetKind::Src20Token(token_id) => token_id.to_vec(),
+        GovAssetKind::NativeEligibility => b"native-eligibility".to_vec(),
+        GovAssetKind::EquityClass(class_id) => {
+            let mut k = Vec::with_capacity(33);
+            k.push(0x01);
+            k.extend_from_slice(class_id);
+            k
+        }
     }
 }
 
@@ -252,5 +284,97 @@ impl<'a> GovStore<'a> {
             out.push((addr_from_suffix(&k), u128::from_be_bytes(arr)));
         }
         Ok(out)
+    }
+
+    // ── Governance v2: qualifying-asset registry (#91) ────────────────────────
+
+    /// Register / update a native-eligibility qualifying SRC-20 (#91).
+    pub fn put_qualifying_asset(&self, asset: &QualifyingAsset) -> Result<()> {
+        self.db.put(cf::GOV_QUALIFYING_ASSETS, &asset.token_id, &ser(asset)?)
+    }
+
+    pub fn get_qualifying_asset(&self, token_id: &[u8; 32]) -> Result<Option<QualifyingAsset>> {
+        match self.db.get(cf::GOV_QUALIFYING_ASSETS, token_id)? {
+            Some(b) => Ok(Some(de(&b)?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn list_qualifying_assets(&self) -> Result<Vec<QualifyingAsset>> {
+        let mut out = Vec::new();
+        for (_, v) in self.db.iter(cf::GOV_QUALIFYING_ASSETS)? {
+            out.push(de::<QualifyingAsset>(&v)?);
+        }
+        Ok(out)
+    }
+
+    /// Qualifying assets whose `effective_height <= height`.
+    pub fn list_effective_qualifying_assets(&self, height: u64) -> Result<Vec<QualifyingAsset>> {
+        Ok(self
+            .list_qualifying_assets()?
+            .into_iter()
+            .filter(|a| a.effective_height <= height)
+            .collect())
+    }
+
+    // ── Governance v2: equity-class frozen root + vote dedup (#92) ─────────────
+
+    /// Freeze a class's chain-derived balances root for a specific proposal (#92).
+    pub fn put_equity_class_root(
+        &self,
+        proposal_id: &GovProposalId,
+        root: &EquityClassRoot,
+    ) -> Result<()> {
+        self.db.put(cf::GOV_EQUITY_CLASS_ROOTS, proposal_id, &ser(root)?)
+    }
+
+    pub fn get_equity_class_root(
+        &self,
+        proposal_id: &GovProposalId,
+    ) -> Result<Option<EquityClassRoot>> {
+        match self.db.get(cf::GOV_EQUITY_CLASS_ROOTS, proposal_id)? {
+            Some(b) => Ok(Some(de(&b)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Whether `holder_commitment` has already voted on `proposal_id` (#92 dedup).
+    pub fn is_equity_commitment_used(
+        &self,
+        proposal_id: &GovProposalId,
+        holder_commitment: &[u8; 32],
+    ) -> Result<bool> {
+        let mut k = Vec::with_capacity(64);
+        k.extend_from_slice(proposal_id);
+        k.extend_from_slice(holder_commitment);
+        self.db.contains(cf::GOV_EQUITY_USED_COMMITMENTS, &k)
+    }
+
+    /// Mark `(proposal_id, holder_commitment)` as used (#92 dedup).
+    pub fn mark_equity_commitment_used(
+        &self,
+        proposal_id: &GovProposalId,
+        holder_commitment: &[u8; 32],
+    ) -> Result<()> {
+        let mut k = Vec::with_capacity(64);
+        k.extend_from_slice(proposal_id);
+        k.extend_from_slice(holder_commitment);
+        self.db.put(cf::GOV_EQUITY_USED_COMMITMENTS, &k, &[])
+    }
+
+    /// Atomically record an equity vote + mark the commitment used (#92). A single
+    /// `WriteBatch` so a partial (vote without dedup, or vice-versa) can't occur.
+    pub fn record_equity_vote_atomic(
+        &self,
+        vote: &GovVote,
+        holder_commitment: &[u8; 32],
+    ) -> Result<()> {
+        let mut batch = self.db.batch();
+        batch.put(cf::GOV_VOTES, &composite_key(&vote.proposal_id, &vote.voter), &ser(vote)?)?;
+        let mut k = Vec::with_capacity(64);
+        k.extend_from_slice(&vote.proposal_id);
+        k.extend_from_slice(holder_commitment);
+        batch.put(cf::GOV_EQUITY_USED_COMMITMENTS, &k, &[])?;
+        batch.commit()
     }
 }

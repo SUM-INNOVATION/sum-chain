@@ -8,9 +8,11 @@ use crate::policy_account_types::{
     BuildSubmitProposalRequest, PolicyAccountInfo, PolicyBuildResponse, ProposalInfo,
 };
 use crate::governance_types::{
-    GovAssetInfo, GovBuildCancelProposalRequest, GovBuildCastVoteRequest,
-    GovBuildCreateProposalRequest, GovBuildExecuteProposalRequest, GovBuildResponse,
-    GovProposalInfo, GovTallyInfo, GovVoteInfo, GovVotingPowerInfo,
+    GovAssetInfo, GovBuildCancelProposalRequest, GovBuildCastEquityVoteRequest,
+    GovBuildCastNativeVoteRequest, GovBuildCastVoteRequest, GovBuildCreateProposalRequest,
+    GovBuildExecuteProposalRequest, GovBuildRegisterEquityClassRequest,
+    GovBuildRegisterQualifyingAssetRequest, GovBuildResponse, GovEquityClassVotingInfo,
+    GovProposalInfo, GovQualifyingAssetInfo, GovTallyInfo, GovVoteInfo, GovVotingPowerInfo,
 };
 use crate::inference_settlement_types::{
     ClaimableRewardInfo, InferenceClaimInfo, InferenceConsistencyReport, InferenceDisputeInfo,
@@ -1417,6 +1419,63 @@ pub trait SumChainApi {
     async fn gov_list_eligible_assets(
         &self,
     ) -> Result<Vec<GovAssetInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    // ── Governance v2: native-Koppa eligibility (#91) ────────────────────────
+
+    /// Build an unsigned register-qualifying-asset tx (#91, validator-quorum).
+    #[method(name = "gov_buildRegisterQualifyingAsset")]
+    async fn gov_build_register_qualifying_asset(
+        &self,
+        request: GovBuildRegisterQualifyingAssetRequest,
+    ) -> Result<GovBuildResponse, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Build an unsigned native-eligibility vote tx (#91; reuses the CastVote
+    /// payload path — weight is 1 per eligible address).
+    #[method(name = "gov_buildCastNativeVote")]
+    async fn gov_build_cast_native_vote(
+        &self,
+        request: GovBuildCastNativeVoteRequest,
+    ) -> Result<GovBuildResponse, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Whether `address` is in a native proposal's frozen eligibility snapshot.
+    #[method(name = "gov_getNativeEligibility")]
+    async fn gov_get_native_eligibility(
+        &self,
+        proposal_id: String,
+        address: String,
+    ) -> Result<bool, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// List the native-eligibility qualifying SRC-20 registry (#91).
+    #[method(name = "gov_listQualifyingAssets")]
+    async fn gov_list_qualifying_assets(
+        &self,
+    ) -> Result<Vec<GovQualifyingAssetInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    // ── Governance v2: SRC-833 controller-attested equity vote (#92) ─────────
+
+    /// Build an unsigned register-equity-class tx (#92, validator-quorum).
+    #[method(name = "gov_buildRegisterEquityClass")]
+    async fn gov_build_register_equity_class(
+        &self,
+        request: GovBuildRegisterEquityClassRequest,
+    ) -> Result<GovBuildResponse, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Build an unsigned controller-attested equity vote tx (#92). Carries the
+    /// holder commitment / shares / merkle path / controller pubkey+signature as
+    /// DATA — no private keys.
+    #[method(name = "gov_buildCastEquityVote")]
+    async fn gov_build_cast_equity_vote(
+        &self,
+        request: GovBuildCastEquityVoteRequest,
+    ) -> Result<GovBuildResponse, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// SRC-833 equity-class voting metadata (#92): chain-derived balances root,
+    /// votes-per-share, voting flag. Never a holder→balance table.
+    #[method(name = "gov_getEquityClassVoting")]
+    async fn gov_get_equity_class_voting(
+        &self,
+        class_id: String,
+    ) -> Result<Option<GovEquityClassVotingInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Check if an issuer can issue a specific subcode in a jurisdiction
     #[method(name = "docclass_canIssue")]

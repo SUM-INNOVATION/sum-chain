@@ -4314,6 +4314,160 @@ impl SumChainApiServer for RpcServer {
         Ok(self.build_unsigned_governance_tx(from, fee, data)?)
     }
 
+    // ── Governance v2: native-Koppa eligibility builders (#91) ──────────────
+
+    async fn gov_build_register_qualifying_asset(
+        &self,
+        request: GovBuildRegisterQualifyingAssetRequest,
+    ) -> std::result::Result<GovBuildResponse, jsonrpsee::types::ErrorObjectOwned> {
+        use sumchain_primitives::governance::{
+            GovernanceOperation, GovernanceTxData, RegisterQualifyingAssetRequest,
+        };
+        let from = self.parse_address(&request.from)?;
+        let token_id = self.parse_hex32(&request.token_id)?;
+        let req = RegisterQualifyingAssetRequest {
+            token_id,
+            min_balance: request.min_balance,
+            effective_height: request.effective_height,
+            approvals: self.parse_approvals(&request.approvals)?,
+        };
+        let data = GovernanceTxData {
+            operation: GovernanceOperation::RegisterQualifyingAsset,
+            data: bincode::serialize(&req).map_err(|e| RpcError::Internal(e.to_string()))?,
+        };
+        let fee = request.fee.unwrap_or(GOV_DEFAULT_FEE);
+        Ok(self.build_unsigned_governance_tx(from, fee, data)?)
+    }
+
+    async fn gov_build_cast_native_vote(
+        &self,
+        request: GovBuildCastNativeVoteRequest,
+    ) -> std::result::Result<GovBuildResponse, jsonrpsee::types::ErrorObjectOwned> {
+        use sumchain_primitives::governance::{
+            CastVoteRequest, GovernanceOperation, GovernanceTxData,
+        };
+        // Native votes reuse the CastVote payload path (weight = 1 per address).
+        let from = self.parse_address(&request.from)?;
+        let proposal_id = self.parse_hex32(&request.proposal_id)?;
+        let choice = parse_vote_choice(&request.choice)
+            .ok_or_else(|| RpcError::InvalidParams(format!("Unknown choice: {}", request.choice)))?;
+        let req = CastVoteRequest { proposal_id, choice };
+        let data = GovernanceTxData {
+            operation: GovernanceOperation::CastVote,
+            data: bincode::serialize(&req).map_err(|e| RpcError::Internal(e.to_string()))?,
+        };
+        let fee = request.fee.unwrap_or(GOV_DEFAULT_FEE);
+        Ok(self.build_unsigned_governance_tx(from, fee, data)?)
+    }
+
+    async fn gov_get_native_eligibility(
+        &self,
+        proposal_id: String,
+        address: String,
+    ) -> std::result::Result<bool, jsonrpsee::types::ErrorObjectOwned> {
+        let id = self.parse_hex32(&proposal_id)?;
+        let addr = self.parse_address(&address)?;
+        let store = sumchain_storage::GovStore::new(&self.db);
+        let w = store.get_snapshot(&id, &addr).map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(matches!(w, Some(weight) if weight > 0))
+    }
+
+    async fn gov_list_qualifying_assets(
+        &self,
+    ) -> std::result::Result<Vec<GovQualifyingAssetInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        let store = sumchain_storage::GovStore::new(&self.db);
+        let assets =
+            store.list_qualifying_assets().map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(assets
+            .into_iter()
+            .map(|a| GovQualifyingAssetInfo {
+                token_id: format!("0x{}", hex::encode(a.token_id)),
+                min_balance: a.min_balance.to_string(),
+                effective_height: a.effective_height,
+            })
+            .collect())
+    }
+
+    // ── Governance v2: SRC-833 controller-attested equity vote builders (#92) ─
+
+    async fn gov_build_register_equity_class(
+        &self,
+        request: GovBuildRegisterEquityClassRequest,
+    ) -> std::result::Result<GovBuildResponse, jsonrpsee::types::ErrorObjectOwned> {
+        use sumchain_primitives::governance::{
+            GovernanceOperation, GovernanceTxData, RegisterEquityClassRequest,
+        };
+        let from = self.parse_address(&request.from)?;
+        let class_id = self.parse_hex32(&request.class_id)?;
+        let req = RegisterEquityClassRequest {
+            class_id,
+            create_threshold: request.create_threshold,
+            effective_height: request.effective_height,
+            approvals: self.parse_approvals(&request.approvals)?,
+        };
+        let data = GovernanceTxData {
+            operation: GovernanceOperation::RegisterEquityClass,
+            data: bincode::serialize(&req).map_err(|e| RpcError::Internal(e.to_string()))?,
+        };
+        let fee = request.fee.unwrap_or(GOV_DEFAULT_FEE);
+        Ok(self.build_unsigned_governance_tx(from, fee, data)?)
+    }
+
+    async fn gov_build_cast_equity_vote(
+        &self,
+        request: GovBuildCastEquityVoteRequest,
+    ) -> std::result::Result<GovBuildResponse, jsonrpsee::types::ErrorObjectOwned> {
+        use sumchain_primitives::governance::{
+            CastEquityVoteRequest, GovernanceOperation, GovernanceTxData,
+        };
+        let from = self.parse_address(&request.from)?;
+        let proposal_id = self.parse_hex32(&request.proposal_id)?;
+        let holder_commitment = self.parse_hex32(&request.holder_commitment)?;
+        let controller_pubkey = self.parse_hex32(&request.controller_pubkey)?;
+        let controller_sig = self.parse_sig64(&request.controller_sig)?;
+        let mut merkle_path = Vec::with_capacity(request.merkle_path.len());
+        for e in &request.merkle_path {
+            merkle_path.push(self.parse_hex32(e)?);
+        }
+        let choice = parse_vote_choice(&request.choice)
+            .ok_or_else(|| RpcError::InvalidParams(format!("Unknown choice: {}", request.choice)))?;
+        let req = CastEquityVoteRequest {
+            proposal_id,
+            holder_commitment,
+            shares: request.shares,
+            merkle_path,
+            controller_pubkey,
+            controller_sig,
+            choice,
+        };
+        let data = GovernanceTxData {
+            operation: GovernanceOperation::CastEquityVote,
+            data: bincode::serialize(&req).map_err(|e| RpcError::Internal(e.to_string()))?,
+        };
+        let fee = request.fee.unwrap_or(GOV_DEFAULT_FEE);
+        Ok(self.build_unsigned_governance_tx(from, fee, data)?)
+    }
+
+    async fn gov_get_equity_class_voting(
+        &self,
+        class_id: String,
+    ) -> std::result::Result<Option<GovEquityClassVotingInfo>, jsonrpsee::types::ErrorObjectOwned>
+    {
+        let cid = self.parse_hex32(&class_id)?;
+        let equity = sumchain_storage::EquityStore::new(&self.db);
+        let token = equity.tokens().get(&cid).map_err(|e| RpcError::Internal(e.to_string()))?;
+        let Some(token) = token else { return Ok(None) };
+        // Chain-derived balances root — no holder table is ever returned.
+        let root = sumchain_storage::equity_balances_root(&self.db, &cid)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(Some(GovEquityClassVotingInfo {
+            class_id: format!("0x{}", hex::encode(cid)),
+            balances_root: format!("0x{}", hex::encode(root)),
+            votes_per_share: token.votes_per_share,
+            voting: token.votes_per_share > 0,
+        }))
+    }
+
     // ── OmniNode Inference Settlement (issue #61) ───────────────────────────
 
     async fn omninode_get_inference_session(
@@ -11067,6 +11221,7 @@ mod governance_rpc_tests {
             max_snapshot_holders: 64,
             proposal_bond: 0,
             treasury: None,
+            min_koppa_for_eligibility: 0,
         }
     }
 
@@ -11268,6 +11423,90 @@ mod governance_rpc_tests {
         assert!(srv.gov_list_eligible_assets().await.unwrap().is_empty());
         assert!(srv.gov_get_proposal(format!("0x{}", hex::encode([1u8; 32]))).await.unwrap().is_none());
         assert!(srv.gov_get_tally(format!("0x{}", hex::encode([1u8; 32]))).await.unwrap().is_none());
+    }
+
+    // ── Governance v2 reads/builders (#91 native, #92 equity) ────────────────
+
+    #[tokio::test]
+    async fn v2_builders_are_no_key_and_decode() {
+        let (srv, _db, _dir) = server(Some(gov_params()));
+        let from = Address::new([0x11; 20]);
+
+        // Register-qualifying-asset builder decodes to the right op, no keys.
+        let r = srv.gov_build_register_qualifying_asset(GovBuildRegisterQualifyingAssetRequest {
+            from: from.to_base58(), token_id: format!("0x{}", hex::encode(TOKEN)), min_balance: 50,
+            effective_height: 0, approvals: vec![], fee: None,
+        }).await.unwrap();
+        let tx: TransactionV2 = bincode::deserialize(&hex::decode(r.unsigned_tx.strip_prefix("0x").unwrap()).unwrap()).unwrap();
+        match tx.payload {
+            TxPayload::Governance(g) => assert_eq!(g.operation, sumchain_primitives::governance::GovernanceOperation::RegisterQualifyingAsset),
+            _ => panic!("wrong payload"),
+        }
+
+        // Cast-equity-vote builder carries all data fields (no signing keys).
+        let r = srv.gov_build_cast_equity_vote(GovBuildCastEquityVoteRequest {
+            from: from.to_base58(), proposal_id: format!("0x{}", hex::encode([1u8; 32])),
+            holder_commitment: format!("0x{}", hex::encode([2u8; 32])), shares: 10,
+            merkle_path: vec![format!("0x{}", hex::encode([3u8; 32]))],
+            controller_pubkey: format!("0x{}", hex::encode([4u8; 32])),
+            controller_sig: format!("0x{}", hex::encode([5u8; 64])), choice: "Yes".into(), fee: None,
+        }).await.unwrap();
+        let tx: TransactionV2 = bincode::deserialize(&hex::decode(r.unsigned_tx.strip_prefix("0x").unwrap()).unwrap()).unwrap();
+        match tx.payload {
+            TxPayload::Governance(g) => {
+                assert_eq!(g.operation, sumchain_primitives::governance::GovernanceOperation::CastEquityVote);
+                let req: sumchain_primitives::governance::CastEquityVoteRequest = bincode::deserialize(&g.data).unwrap();
+                assert_eq!(req.shares, 10);
+                assert_eq!(req.holder_commitment, [2u8; 32]);
+            }
+            _ => panic!("wrong payload"),
+        }
+    }
+
+    #[tokio::test]
+    async fn v2_reads_native_eligibility_and_qualifying_and_equity_no_holder_table() {
+        let (srv, db, _dir) = server(Some(gov_params()));
+        let store = GovStore::new(&db);
+
+        // Native eligibility: snapshot weight>0 → true.
+        let pid = [7u8; 32];
+        let addr = Address::new([0x11; 20]);
+        store.put_snapshot(&pid, &addr, 1).unwrap();
+        assert!(srv.gov_get_native_eligibility(format!("0x{}", hex::encode(pid)), addr.to_base58()).await.unwrap());
+        assert!(!srv.gov_get_native_eligibility(format!("0x{}", hex::encode(pid)), Address::new([0x99; 20]).to_base58()).await.unwrap());
+
+        // Qualifying registry read.
+        store.put_qualifying_asset(&sumchain_storage::QualifyingAsset { token_id: [1; 32], min_balance: 10, effective_height: 0 }).unwrap();
+        let qa = srv.gov_list_qualifying_assets().await.unwrap();
+        assert_eq!(qa.len(), 1);
+        assert_eq!(qa[0].min_balance, "10");
+
+        // Equity-class voting read exposes ONLY root/params — never a holder table.
+        let class_id = [0xEC; 32];
+        let equity = sumchain_storage::EquityStore::new(&db);
+        equity.tokens().put(&sumchain_primitives::equity::EquityToken {
+            issuer_subject: [1u8; 32], class_id, share_class_type: sumchain_primitives::equity::ShareClassType::Common,
+            name: "C".into(), symbol: "C".into(), authorized_shares: 100, issued_shares: 30, votes_per_share: 2,
+            economic_rights_hash: [7u8; 32], liquidation_preference_hash: None, dividend_policy_hash: None,
+            conversion_rules_hash: None, controller: Address::new([0xC0; 20]), par_value: None, created_at: 0,
+            updated_at: 0, status: sumchain_primitives::equity::TokenStatus::Active,
+        }).unwrap();
+        equity.balances().set_balance(&class_id, &[0x11; 32], 30).unwrap();
+        let info = srv.gov_get_equity_class_voting(format!("0x{}", hex::encode(class_id))).await.unwrap().unwrap();
+        assert_eq!(info.votes_per_share, 2);
+        assert!(info.voting);
+        // Privacy guard: the serialized response exposes NO holder→balance table
+        // (only the aggregate chain-derived root + params). `votes_per_share` /
+        // `balances_root` are aggregates, not per-holder rows, so the guard
+        // targets holder-row terms.
+        let json = serde_json::to_string(&info).unwrap();
+        for banned in ["holder", "commitment", "holders"] {
+            assert!(!json.contains(banned), "equity voting read must not expose '{}': {}", banned, json);
+        }
+        // No per-holder balance array (the aggregate `balances_root` is allowed).
+        assert!(!json.contains("\"balances\""), "no holder balances array: {}", json);
+        // Absent class → None.
+        assert!(srv.gov_get_equity_class_voting(format!("0x{}", hex::encode([0xAA; 32]))).await.unwrap().is_none());
     }
 }
 

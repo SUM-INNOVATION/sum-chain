@@ -34,6 +34,7 @@ fn params(gate: bool, configured: bool, max_holders: u32) -> ChainParams {
             max_snapshot_holders: max_holders,
             proposal_bond: 0,
             treasury: None,
+            min_koppa_for_eligibility: 0,
         });
     }
     p

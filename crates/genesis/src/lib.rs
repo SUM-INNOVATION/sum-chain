@@ -108,6 +108,8 @@ mod addr_json {
         proposal_bond: u128,
         #[serde(default)]
         treasury: Option<Base58Address>,
+        #[serde(default)]
+        min_koppa_for_eligibility: u128,
     }
 
     impl From<&GovernanceParams> for GovernanceParamsJson {
@@ -120,6 +122,7 @@ mod addr_json {
                 max_snapshot_holders: g.max_snapshot_holders,
                 proposal_bond: g.proposal_bond,
                 treasury: g.treasury.map(Base58Address),
+                min_koppa_for_eligibility: g.min_koppa_for_eligibility,
             }
         }
     }
@@ -134,6 +137,7 @@ mod addr_json {
                 max_snapshot_holders: j.max_snapshot_holders,
                 proposal_bond: j.proposal_bond,
                 treasury: j.treasury.map(|b| b.0),
+                min_koppa_for_eligibility: j.min_koppa_for_eligibility,
             }
         }
     }
@@ -1078,6 +1082,7 @@ mod tests {
             max_snapshot_holders: 10000,
             proposal_bond: 0,
             treasury,
+            min_koppa_for_eligibility: 0,
         }
     }
 

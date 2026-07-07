@@ -161,6 +161,7 @@ fn governance_params_round_trip() {
         max_snapshot_holders: 16,
         proposal_bond: 500,
         treasury: Some(Address::new([0xD0; 20])),
+        min_koppa_for_eligibility: 1_000,
     });
 }
 
@@ -193,4 +194,81 @@ fn proposal_id_is_deterministic_and_input_sensitive() {
     assert_ne!(id, generate_proposal_id(&proposer, &asset, &ch, 100, 2));
     assert_ne!(id, generate_proposal_id(&proposer, &asset, &ch, 101, 1));
     assert_ne!(id, generate_proposal_id(&proposer, &asset, &[8u8; 32], 100, 1));
+}
+
+// ───────────────────── Governance v2 (#91 native, #92 equity) ─────────────────
+
+use sumchain_primitives::governance::{
+    equity_vote_signing_bytes, CastEquityVoteRequest, RegisterEquityClassRequest,
+    RegisterQualifyingAssetRequest,
+};
+
+#[test]
+fn gov_v2_asset_kind_and_weight_rule_round_trip() {
+    round_trip(&GovAsset {
+        asset: GovAssetKind::NativeEligibility,
+        create_threshold: 0,
+        vote_weight_rule: WeightRule::OneAddressOneVote,
+        status: GovAssetStatus::Enabled,
+        effective_height: 1,
+    });
+    round_trip(&GovAsset {
+        asset: GovAssetKind::EquityClass([0xEC; 32]),
+        create_threshold: 100,
+        vote_weight_rule: WeightRule::SharesTimesVotesPerShare,
+        status: GovAssetStatus::Enabled,
+        effective_height: 5,
+    });
+}
+
+#[test]
+fn gov_v2_request_structs_round_trip() {
+    round_trip(&RegisterQualifyingAssetRequest {
+        token_id: [7u8; 32],
+        min_balance: 50,
+        effective_height: 10,
+        approvals: vec![],
+    });
+    round_trip(&RegisterEquityClassRequest {
+        class_id: [0xEC; 32],
+        create_threshold: 100,
+        effective_height: 10,
+        approvals: vec![],
+    });
+    round_trip(&CastEquityVoteRequest {
+        proposal_id: [1u8; 32],
+        holder_commitment: [2u8; 32],
+        shares: 1234,
+        merkle_path: vec![[3u8; 32], [4u8; 32]],
+        controller_pubkey: [5u8; 32],
+        controller_sig: [6u8; 64],
+        choice: VoteChoice::Yes,
+    });
+}
+
+#[test]
+fn gov_v2_proposal_id_variants_distinct() {
+    let proposer = Address::new([2u8; 20]);
+    let ch = [9u8; 32];
+    let src20 = generate_proposal_id(&proposer, &GovAssetKind::Src20Token([7u8; 32]), &ch, 100, 1);
+    let native = generate_proposal_id(&proposer, &GovAssetKind::NativeEligibility, &ch, 100, 1);
+    let equity = generate_proposal_id(&proposer, &GovAssetKind::EquityClass([7u8; 32]), &ch, 100, 1);
+    assert_ne!(src20, native);
+    assert_ne!(src20, equity);
+    assert_ne!(native, equity);
+}
+
+#[test]
+fn equity_vote_signing_bytes_bind_all_fields() {
+    let a = equity_vote_signing_bytes(1, &[1u8; 32], &[2u8; 32], &[3u8; 32], &[4u8; 32], 10, &Address::new([5u8; 20]));
+    // Deterministic.
+    assert_eq!(a, equity_vote_signing_bytes(1, &[1u8; 32], &[2u8; 32], &[3u8; 32], &[4u8; 32], 10, &Address::new([5u8; 20])));
+    // Sensitive to every field.
+    assert_ne!(a, equity_vote_signing_bytes(2, &[1u8; 32], &[2u8; 32], &[3u8; 32], &[4u8; 32], 10, &Address::new([5u8; 20])));
+    assert_ne!(a, equity_vote_signing_bytes(1, &[9u8; 32], &[2u8; 32], &[3u8; 32], &[4u8; 32], 10, &Address::new([5u8; 20])));
+    assert_ne!(a, equity_vote_signing_bytes(1, &[1u8; 32], &[9u8; 32], &[3u8; 32], &[4u8; 32], 10, &Address::new([5u8; 20])));
+    assert_ne!(a, equity_vote_signing_bytes(1, &[1u8; 32], &[2u8; 32], &[9u8; 32], &[4u8; 32], 10, &Address::new([5u8; 20])));
+    assert_ne!(a, equity_vote_signing_bytes(1, &[1u8; 32], &[2u8; 32], &[3u8; 32], &[9u8; 32], 10, &Address::new([5u8; 20])));
+    assert_ne!(a, equity_vote_signing_bytes(1, &[1u8; 32], &[2u8; 32], &[3u8; 32], &[4u8; 32], 99, &Address::new([5u8; 20])));
+    assert_ne!(a, equity_vote_signing_bytes(1, &[1u8; 32], &[2u8; 32], &[3u8; 32], &[4u8; 32], 10, &Address::new([9u8; 20])));
 }

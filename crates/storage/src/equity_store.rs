@@ -473,6 +473,168 @@ impl<'a> EquityBalanceStore<'a> {
 }
 
 // =============================================================================
+// Chain-derived equity balances Merkle root (SRC-833 controller-attested vote, #92)
+// =============================================================================
+//
+// A deterministic binary Merkle tree over a class's `EQUITY_BALANCES` entries.
+// The root is computed on-chain (never supplied by a client) so the executor and
+// any client agree byte-for-byte. Rules (fixed, documented, and covered by tests):
+//
+//   • Leaves are the class's holders, sorted by `holder_commitment` ASCENDING.
+//   • leaf = BLAKE3( LEAF_DOMAIN || holder_commitment(32) || shares.to_le_bytes(8) ).
+//   • Internal node = BLAKE3( NODE_DOMAIN || left(32) || right(32) ).
+//   • Odd level: the last node is promoted (hashed with itself) to the next level.
+//   • Empty set: the root is BLAKE3( EMPTY_DOMAIN ) — a fixed, non-zero constant.
+//
+// Distinct domain separators for leaf / node / empty prevent second-preimage
+// ambiguity between the three shapes.
+
+/// Domain separator for an `EQUITY_BALANCES` Merkle leaf (#92).
+pub const EQUITY_MERKLE_LEAF_DOMAIN: &[u8] = b"SRC-GOV-EQUITY-MERKLE:leaf:v1:";
+/// Domain separator for an `EQUITY_BALANCES` Merkle internal node (#92).
+pub const EQUITY_MERKLE_NODE_DOMAIN: &[u8] = b"SRC-GOV-EQUITY-MERKLE:node:v1:";
+/// Domain separator for an empty `EQUITY_BALANCES` Merkle tree (#92).
+pub const EQUITY_MERKLE_EMPTY_DOMAIN: &[u8] = b"SRC-GOV-EQUITY-MERKLE:empty:v1:";
+
+/// Compute a Merkle leaf for one `(holder_commitment, shares)` pair (#92).
+/// Exposed so the executor and clients derive identical leaves.
+pub fn equity_merkle_leaf(holder_commitment: &[u8; 32], shares: u64) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(EQUITY_MERKLE_LEAF_DOMAIN);
+    h.update(holder_commitment);
+    h.update(&shares.to_le_bytes());
+    *h.finalize().as_bytes()
+}
+
+/// Combine two child hashes into a parent node (#92).
+fn equity_merkle_node(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(EQUITY_MERKLE_NODE_DOMAIN);
+    h.update(left);
+    h.update(right);
+    *h.finalize().as_bytes()
+}
+
+/// The fixed root of an empty tree (#92).
+fn equity_merkle_empty_root() -> [u8; 32] {
+    *blake3::hash(EQUITY_MERKLE_EMPTY_DOMAIN).as_bytes()
+}
+
+/// Fold an ordered leaf vector up to a single Merkle root using the rules above.
+fn equity_merkle_root_from_leaves(mut level: Vec<[u8; 32]>) -> [u8; 32] {
+    if level.is_empty() {
+        return equity_merkle_empty_root();
+    }
+    while level.len() > 1 {
+        let mut next = Vec::with_capacity(level.len().div_ceil(2));
+        let mut i = 0;
+        while i < level.len() {
+            let left = level[i];
+            // Odd tail: promote the last node by hashing it with itself.
+            let right = if i + 1 < level.len() { level[i + 1] } else { level[i] };
+            next.push(equity_merkle_node(&left, &right));
+            i += 2;
+        }
+        level = next;
+    }
+    level[0]
+}
+
+/// Verify a Merkle inclusion proof for `(holder_commitment, shares)` against
+/// `root` (#92). The path is ordered leaf→root; each element is the *sibling* at
+/// that level. Because the tree promotes odd tails by self-hashing, a proof for
+/// such a node repeats the node itself as its own sibling — which this verifier
+/// accepts by construction (it simply hashes `node || sibling`). Sibling side is
+/// derived from the running index parity so a proof is unambiguous.
+///
+/// Exposed so clients build proofs that verify byte-for-byte on-chain.
+pub fn equity_merkle_verify(
+    root: &[u8; 32],
+    holder_commitment: &[u8; 32],
+    shares: u64,
+    leaf_index: u64,
+    path: &[[u8; 32]],
+) -> bool {
+    let mut node = equity_merkle_leaf(holder_commitment, shares);
+    let mut idx = leaf_index;
+    for sibling in path {
+        node = if idx & 1 == 0 {
+            equity_merkle_node(&node, sibling)
+        } else {
+            equity_merkle_node(sibling, &node)
+        };
+        idx >>= 1;
+    }
+    &node == root
+}
+
+/// Compute the chain-derived balances root for a class and, for a given
+/// `holder_commitment`, its `(leaf_index, path)` inclusion proof (#92). Returns
+/// `(root, holders_len)`; the proof is `None` when the holder is absent. Leaves
+/// are the class's `EQUITY_BALANCES` holders sorted by commitment ascending.
+///
+/// Reads only commitments + shares (never a raw address) — the equity balance CF
+/// is commitment-keyed by construction.
+pub fn equity_balances_root_and_proof(
+    db: &Database,
+    class_id: &ClassId,
+    holder_commitment: &[u8; 32],
+) -> Result<([u8; 32], Option<(u64, Vec<[u8; 32]>)>)> {
+    let mut holders = EquityBalanceStore::new(db).get_holders(class_id)?;
+    holders.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let leaves: Vec<[u8; 32]> =
+        holders.iter().map(|(hc, shares)| equity_merkle_leaf(hc, *shares)).collect();
+    let root = equity_merkle_root_from_leaves(leaves.clone());
+
+    // Locate the target holder (commitments are unique per class).
+    let target = holders.iter().position(|(hc, _)| hc == holder_commitment);
+    let proof = target.map(|idx| (idx as u64, equity_merkle_path(&leaves, idx)));
+    Ok((root, proof))
+}
+
+/// Compute the chain-derived balances root only (#92) — no proof.
+pub fn equity_balances_root(db: &Database, class_id: &ClassId) -> Result<[u8; 32]> {
+    let mut holders = EquityBalanceStore::new(db).get_holders(class_id)?;
+    holders.sort_by(|a, b| a.0.cmp(&b.0));
+    let leaves: Vec<[u8; 32]> =
+        holders.iter().map(|(hc, shares)| equity_merkle_leaf(hc, *shares)).collect();
+    Ok(equity_merkle_root_from_leaves(leaves))
+}
+
+/// Build the leaf→root sibling path for `leaf_index` under the odd-tail-promotion
+/// rule (mirrors [`equity_merkle_root_from_leaves`]).
+fn equity_merkle_path(leaves: &[[u8; 32]], leaf_index: usize) -> Vec<[u8; 32]> {
+    let mut path = Vec::new();
+    if leaves.is_empty() {
+        return path;
+    }
+    let mut level: Vec<[u8; 32]> = leaves.to_vec();
+    let mut idx = leaf_index;
+    while level.len() > 1 {
+        let sibling = if idx & 1 == 0 {
+            // Even index: sibling is the right neighbor, or self if odd tail.
+            if idx + 1 < level.len() { level[idx + 1] } else { level[idx] }
+        } else {
+            level[idx - 1]
+        };
+        path.push(sibling);
+        // Build the next level.
+        let mut next = Vec::with_capacity(level.len().div_ceil(2));
+        let mut i = 0;
+        while i < level.len() {
+            let left = level[i];
+            let right = if i + 1 < level.len() { level[i + 1] } else { level[i] };
+            next.push(equity_merkle_node(&left, &right));
+            i += 2;
+        }
+        level = next;
+        idx /= 2;
+    }
+    path
+}
+
+// =============================================================================
 // Equity Controller Storage (SRC-834)
 // =============================================================================
 
