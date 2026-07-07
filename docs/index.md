@@ -73,6 +73,7 @@ gate** — they are always available when the node binary is running.
   education activation.
 - **Design specs (non-token):** [specs/](./specs/) (SNIP V2 storage plan, incl.
   §5.4 [archive reassignment](./specs/SNIP-V2-CHAIN-PLAN.md) (implemented; gate set to 8,900,000, issue #62);
+  [assignment-aware PoR scheduling](./specs/snip-assignment-aware-por-scheduling.md) (**design-only**, not implemented, issue #81);
   [Governance v1](./specs/GOVERNANCE-V1.md) design spec).
   Archive-node unbonding withdrawal (implemented; gate set to 8,900,000, issue #20) and reassignment are
   separate landed storage mechanics — see the RPC cheatsheet. Token-family usage

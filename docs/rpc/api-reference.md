@@ -810,6 +810,7 @@ Detailed shapes: [SNIP-V2-RPC-CHEATSHEET.md](SNIP-V2-RPC-CHEATSHEET.md).
 | `storage_getAssignmentCoverageV2(merkle_root, missing_offset?, missing_limit?)` | Coverage progress; **epoch-aware/aggregate** since issue #62. |
 | `storage_getActiveNodesAtHeight(height)` | Active-archive snapshot at `assignment_height`. |
 | `storage_getArchiveUnbonding(operator_address)` | Pending archive-node unbonding record, or `null` (issue #20; implemented, gate set to 8,900,000). |
+| `storage_buildReassignChunksV2({from, merkle_root, fee?})` | **No-key** unsigned-tx builder for owner-triggered `ReassignChunksV2` (issue #80). Returns `{unsigned_tx, signing_hash, from, nonce, fee, chain_id}`; no signing/execution/authorization — executor stays authoritative. For non-Rust clients; the Rust CLI wallet builds locally. |
 | `storage_getNodeRecord`, `storage_getAccessList`, `storage_getActiveChallenges`, `storage_getFundedFiles` | Node/ACL/challenge/funded-file reads. |
 
 Archive-node **withdrawal** (issue #20) and **reassignment** (issue #62) are

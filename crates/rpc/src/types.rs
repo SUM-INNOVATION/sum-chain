@@ -280,6 +280,38 @@ pub struct PushableFileInfoV2 {
     pub created_at: u64,
 }
 
+/// Request for `storage_buildReassignChunksV2` (issue #80) — a **no-key**
+/// unsigned-tx builder for the owner-triggered `ReassignChunksV2` op. Handles no
+/// private keys, performs no signing/execution, and does **no** owner/gate
+/// pre-authorization beyond decoding `merkle_root` — the executor remains
+/// authoritative. The Rust CLI wallet builds this tx locally and does not need
+/// this method; it exists for non-Rust clients (e.g. a web SNIP wallet).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageBuildReassignChunksV2Request {
+    /// File owner address (base58) — the signer/sender of the eventual tx.
+    pub from: String,
+    /// `0x`+hex (or bare hex) of the file's 32-byte merkle root.
+    pub merkle_root: String,
+    /// Optional fee in base units; defaults to the standard build fee.
+    pub fee: Option<u128>,
+}
+
+/// Unsigned-tx build response for storage builders (issue #80). Mirrors the
+/// governance / OmniNode builder shape: hex-encoded unsigned `TransactionV2` +
+/// the signing hash the client signs. No keys, no signature.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageBuildResponse {
+    /// Bincode-encoded unsigned `TransactionV2` (hex, `0x`-prefixed).
+    pub unsigned_tx: String,
+    /// Hash the client signs (hex, `0x`-prefixed).
+    pub signing_hash: String,
+    /// Signer/sender address (base58).
+    pub from: String,
+    pub nonce: u64,
+    pub fee: u128,
+    pub chain_id: u64,
+}
+
 /// Wire-shape response for `storage_getAssignmentCoverageV2` (Plan v3.2 §4).
 /// SNIP V2 Phase 1b — surfaces the per-file coverage state that
 /// `AcceptAssignmentV2` builds up and that `ActivateFileV2` gates on.

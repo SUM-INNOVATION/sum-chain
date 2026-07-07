@@ -505,6 +505,13 @@ struct ArchiveCoverageSummaryV2 {
 
 V2 doesn't introduce Filecoin-style PoRep, Arweave-style randomized recall packing, or per-chunk continuous proof. Those would be a separate redesign with their own scope. **V2's value is privacy, not stronger storage proofs.**
 
+> **Future (design-only, not implemented):** a deterministic, bounded,
+> assignment-aware challenge scheduler that guarantees per-chunk-assignment
+> coverage over time without an `O(files × chunks)` sweep is proposed in
+> [snip-assignment-aware-por-scheduling.md](./snip-assignment-aware-por-scheduling.md)
+> (issue #81). It would ship dormant behind its own gate; the v1 probabilistic
+> selector above remains the only active path until then.
+
 ### 5.2 Initial replication proof (revised v3 — `AcceptAssignmentV2` brought into Phase 1)
 
 V2 ships **with** an on-chain initial replication attestation, contrary to v2 of this plan. Reviewer pointed out that without it, malicious or premature activation slashes honest archives — unacceptable for testnet third-party archive participation.

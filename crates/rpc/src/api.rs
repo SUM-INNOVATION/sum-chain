@@ -28,7 +28,7 @@ use crate::types::{
     CreateEmploymentCredentialResponse, DelegationRpcInfo, DelegatorSummary, DocClassConfigInfo,
     DocClassCredentialInfo, DocClassIdentityInfo, DocClassIssuerInfo, DocClassSummary,
     EmploymentCredentialInfo, EmploymentIssuerInfo, EmploymentSummary, EmploymentVerificationResult,
-    ArchiveUnbondingInfo, AssignmentCoverageV2, ChainParamsInfo, EpochInfo, FinalityInfo, GasEstimateResult, HealthResponse, IncomeAttestationInfo, NodeRecordInfo, PushableFileInfoV2, StorageFileInfoV2, TxStatusV2,
+    ArchiveUnbondingInfo, AssignmentCoverageV2, ChainParamsInfo, EpochInfo, FinalityInfo, GasEstimateResult, HealthResponse, IncomeAttestationInfo, NodeRecordInfo, PushableFileInfoV2, StorageBuildReassignChunksV2Request, StorageBuildResponse, StorageFileInfoV2, TxStatusV2,
     InboxFilterInfo, IssueAcademicCredentialRequest, IssueAcademicCredentialResponse,
     MessageDataInfo, MessageEventInfo, MessagingConfigInfo, MessagingQuotaInfo,
     NftCollectionInfo, NftOwnerTokens, NftTokenInfo, NodeInfo, P2pStats, PendingPaymentInfo,
@@ -1832,4 +1832,16 @@ pub trait SumChainApi {
         &self,
         height: u64,
     ) -> Result<Vec<NodeRecordInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Build an unsigned owner-triggered `ReassignChunksV2` tx (issue #80).
+    /// **No-key builder** — no signing, no execution, no owner/gate check beyond
+    /// decoding `merkle_root`; the executor stays authoritative. Returns the
+    /// hex-encoded unsigned `TransactionV2` + signing hash for the client to sign
+    /// and broadcast via `sum_sendRawTransaction`. The output decodes to
+    /// `TxPayload::StorageMetadataV2(StorageMetadataOperationV2::ReassignChunksV2)`.
+    #[method(name = "storage_buildReassignChunksV2")]
+    async fn storage_build_reassign_chunks_v2(
+        &self,
+        request: StorageBuildReassignChunksV2Request,
+    ) -> Result<StorageBuildResponse, jsonrpsee::types::ErrorObjectOwned>;
 }

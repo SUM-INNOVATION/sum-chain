@@ -314,6 +314,76 @@ enum Commands {
     },
 
     // ========================================================================
+    // SNIP V2 storage operator commands — archive reassignment (issue #62/#80)
+    // Read-only inspection + owner-triggered ReassignChunksV2. Gated on-chain by
+    // `archive_reassignment_enabled_from_height` (dormant until set).
+    // ========================================================================
+
+    /// Show epoch-aware assignment coverage for a file (issue #62/#80).
+    ///
+    /// Displays chunk coverage, whether the file can activate now, the assignment
+    /// epochs (epoch 0 = original assignment; later epochs = reassignment epochs),
+    /// and whether a `storage-reassign` is currently needed. Raw bitmaps are never
+    /// shown — only popcount summaries.
+    StorageCoverage {
+        /// RPC URL
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+
+        /// File merkle root (0x-hex or bare hex).
+        #[arg(long)]
+        merkle_root: String,
+    },
+
+    /// Show the active archive-node snapshot at (or before) a block height (#80).
+    ///
+    /// This is the snapshot used to derive chunk assignments for an epoch whose
+    /// `epoch_height` equals this height (see `storage-coverage`).
+    StorageActiveNodesAt {
+        /// RPC URL
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+
+        /// Snapshot block height.
+        #[arg(long)]
+        height: u64,
+    },
+
+    /// Owner-triggered archive reassignment: append a new assignment epoch so
+    /// replacement archives can be assigned after an originally-assigned archive
+    /// left the active set (exit / slash / unbond) — issue #62/#80.
+    ///
+    /// Preflights coverage: if no reassignment is needed the command refuses
+    /// unless `--yes`. Builds/signs `ReassignChunksV2` locally and submits via
+    /// `sum_sendRawTransaction`. Owner-only and gate-controlled on-chain; while the
+    /// gate is dormant the executor returns a clear "not enabled" error.
+    StorageReassign {
+        /// Path to the file owner's key file.
+        #[arg(short, long)]
+        key: PathBuf,
+
+        /// File merkle root (0x-hex or bare hex).
+        #[arg(long)]
+        merkle_root: String,
+
+        /// RPC URL
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+
+        /// Transaction fee in Koppa (e.g., "0.001")
+        #[arg(long, default_value = "0.001")]
+        fee: String,
+
+        /// Chain ID
+        #[arg(long)]
+        chain_id: u64,
+
+        /// Proceed even if coverage says no reassignment is needed.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+
+    // ========================================================================
     // NFT (SUM-721) Commands
     // ========================================================================
 
@@ -1102,6 +1172,146 @@ async fn main() -> Result<()> {
                     print_info("No unbonding in progress for this address.");
                 }
             }
+        }
+
+        Commands::StorageCoverage { rpc, merkle_root } => {
+            let cov = tx::storage_get_assignment_coverage_v2(&rpc, &merkle_root)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("file not found for merkle_root {}", merkle_root))?;
+
+            print_header("Assignment Coverage (SNIP V2, epoch-aware)");
+            println!();
+            print_field("Merkle Root", &merkle_root);
+            print_field("Chunk Count", &cov.chunk_count.to_string());
+            print_field(
+                "Covered",
+                &format!("{} / {} (aggregate across epochs)", cov.covered_count, cov.chunk_count),
+            );
+            print_field("Missing Total", &cov.missing_total.to_string());
+            print_field("Can Activate Now", &cov.can_activate_now.to_string());
+            print_field(
+                "Assignment Epochs",
+                &format!("{:?}", cov.assignment_epochs),
+            );
+            print_field("Latest Epoch", &cov.latest_assignment_epoch.to_string());
+            print_field("Reassignment Needed", &cov.reassignment_needed.to_string());
+            println!();
+            println!("  {}:", "Per-epoch coverage".dimmed());
+            for e in &cov.per_epoch {
+                let label = if e.is_epoch_zero {
+                    "original assignment"
+                } else {
+                    "reassignment epoch"
+                };
+                print_field(
+                    &format!("  epoch @ {}", e.epoch_height),
+                    &format!("{} — covered {} / {} chunks", label, e.covered_count, cov.chunk_count),
+                );
+            }
+            println!();
+            if cov.reassignment_needed {
+                print_warning(
+                    "A latest-epoch archive has left the active set — run 'sumchain-wallet storage-reassign' (file owner) to append a new epoch.",
+                );
+            } else {
+                print_info("No reassignment needed: every latest-epoch archive is still active.");
+            }
+        }
+
+        Commands::StorageActiveNodesAt { rpc, height } => {
+            let nodes = tx::storage_get_active_nodes_at_height(&rpc, height).await?;
+
+            print_header("Active Archive-Node Snapshot");
+            println!();
+            print_field("Snapshot Height", &height.to_string());
+            print_field("Active Archives", &nodes.len().to_string());
+            if nodes.is_empty() {
+                println!();
+                print_info("No active archive nodes at (or before) this height.");
+            } else {
+                println!();
+                for (i, n) in nodes.iter().enumerate() {
+                    print_list_item(
+                        i,
+                        &format!("{} — {} / {} — stake {}", n.address, n.role, n.status, n.staked_balance),
+                    );
+                }
+            }
+            println!();
+            print_info("Assignments for an epoch are derived from the snapshot at that epoch's height.");
+        }
+
+        Commands::StorageReassign {
+            key,
+            merkle_root,
+            rpc,
+            fee,
+            chain_id,
+            yes,
+        } => {
+            let keystore = load_keystore(&key)?;
+            let addr_b58 = keystore.address().to_base58();
+            let fee_units = parse_koppa(&fee)
+                .context("Invalid fee format. Use e.g., '0.001' for 0.001 Koppa")?;
+            let root = sumchain_primitives::Hash::from_hex(&merkle_root)
+                .map_err(|e| anyhow::anyhow!("invalid merkle_root: {}", e))?;
+
+            // Preflight coverage: reassignment only appends a new epoch when a
+            // real gap exists (a latest-epoch archive left the active set); the
+            // executor rejects a no-op with Failed(334).
+            let cov = tx::storage_get_assignment_coverage_v2(&rpc, &merkle_root)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("file not found for merkle_root {} (would be Failed(331))", merkle_root))?;
+
+            print_header("Archive Reassignment (append assignment epoch)");
+            println!();
+            print_field("File Owner", &addr_b58);
+            print_field("Merkle Root", &merkle_root);
+            print_field("Latest Epoch", &cov.latest_assignment_epoch.to_string());
+            print_field("Reassignment Needed", &cov.reassignment_needed.to_string());
+            print_koppa_field("Fee", fee_units);
+            println!();
+
+            if !cov.reassignment_needed {
+                print_warning(
+                    "Coverage reports NO reassignment needed — every latest-epoch archive is still active.",
+                );
+                print_warning("Submitting anyway would be rejected on-chain with Failed(334).");
+                if !yes {
+                    anyhow::bail!("aborting: re-run with --yes to submit regardless (not recommended)");
+                }
+            }
+
+            if !yes && !confirm("Proceed with archive reassignment?") {
+                print_warning("Reassignment cancelled.");
+                return Ok(());
+            }
+
+            let nonce = tx::get_nonce(&rpc, &addr_b58).await?;
+            print_info("Signing transaction...");
+            let signed_tx = tx::sign_storage_metadata_v2_tx(
+                &keystore,
+                sumchain_primitives::storage_metadata::StorageMetadataOperationV2::ReassignChunksV2 {
+                    merkle_root: root,
+                },
+                fee_units,
+                nonce,
+                chain_id,
+            )?;
+
+            print_info("Broadcasting transaction...");
+            let tx_hash = tx::send_raw_transaction(&rpc, &signed_tx.to_hex()).await?;
+            println!();
+            print_success("ReassignChunksV2 submitted!");
+            print_field("Transaction Hash", &tx_hash);
+            println!();
+            print_info("Use 'sumchain-wallet receipt --hash <hash>' to confirm execution.");
+            print_info(
+                "Owner-only + gate-controlled. Common failures: 330 gate not active · 331 file not found · 332 not owner · 333 lifecycle not eligible · 334 no reassignment needed.",
+            );
+            print_info(
+                "Coverage gaps come from archive exit/slash/unbonding (see 'archive-begin-unstake' / 'archive-unbonding').",
+            );
         }
 
         Commands::BlockNumber { rpc } => {
