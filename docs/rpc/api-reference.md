@@ -846,6 +846,17 @@ slashing in v1 (reward denial / claim withholding / escrow refund only).
 | `omninode_buildOpenInferenceSession` / `buildFundInferenceSession` / `buildClaimInferenceReward` / `buildOpenInferenceDispute` / `buildResolveInferenceDispute` / `buildRefundInferenceSession` | unsigned-tx builders (no keys). `buildOpenInferenceSession` accepts optional `consistency` (issue #77) and `bond_requirement` (issue #78) configs. Dispute resolution is validator-quorum controlled (no personal resolver key); `buildResolveInferenceDispute` accepts an optional `approvals` list of validator signatures. |
 | `omninode_buildRegisterVerifier` / `buildAddVerifierBond` / `buildBeginVerifierUnbond` / `buildWithdrawVerifierBond` | verifier bond-registry builders (no keys, issue #78). Bond is native Koppa; slashing on a denied dispute burns to the zero address. |
 
+### No-key unsigned-tx family builders (issue #89)
+
+One builder per family, each taking a tagged operation request `{from, fee?, nonce?, chain_id?, <envelope ids>, op}`. **No-key** — no private keys, no signing, no submit, no execution, no authorization: the builder only assembles an unsigned `TransactionV2`. All return the shared shape `{unsigned_tx, signing_hash, from, nonce, fee, chain_id}`. `nonce`/`chain_id` are fetched from state when omitted. The client signs `signing_hash` locally and broadcasts via `sum_sendRawTransaction`; the executor stays authoritative for all authority/gate/lifecycle checks.
+
+| Method | Notes |
+|---|---|
+| `token_buildTransaction({from, token_id?, op, ...})` | **No-key** SRC-20 builder. `op` (tagged): `create`, `mint`, `burn`, `transfer`, `approve`, `transfer_from`, `pause`, `unpause`, `transfer_ownership`, `add_minter`, `remove_minter`. `token_id` (hex) omitted for `create`. Decodes to `TxPayload::Token`. |
+| `nft_buildTransaction({from, collection_id, token_id, op, ...})` | **No-key** SUM-721 builder. `op` (tagged): `create_collection`, `mint`, `mint_document`, `batch_mint`, `transfer`, `approve`, `burn`, `update_metadata`, `transfer_collection_ownership`, `update_collection_config`, `lock_token`, `unlock_token`. (`set_approval_for_all` is intentionally unsupported.) Decodes to `TxPayload::Nft`. |
+| `staking_buildTransaction({from, op, ...})` | **No-key** staking builder covering all 11 ops: `create_validator`, `add_stake`, `unstake`, `update_validator`, `unjail`, `claim_rewards`, `delegate`, `undelegate`, `claim_delegation_rewards`, `withdraw_unbonded`, plus `submit_double_sign_evidence` / `submit_downtime_evidence`. Decodes to `TxPayload::Staking`. |
+| `nodeRegistry_buildTransaction({from, op, ...})` | **No-key** node-registry builder: `register {role, stake}`, `begin_unstake {amount}`, `withdraw_unbonded`, `register_encryption_key {encryption_pubkey}`. `register_encryption_key` decodes to `TxPayload::NodeRegistryV2`, the rest to `TxPayload::NodeRegistry`. (`update_status` is privileged/internal and intentionally unsupported.) |
+
 ---
 
 ## REST Endpoints
@@ -948,7 +959,7 @@ curl -X POST http://localhost:8545 \
 
 ### TypeScript
 
-Published package: **`@sumchain/sdk@0.2.2`** (current). Install with
+Published package: **`@sumchain/sdk@0.2.3`** (current). Install with
 `npm install @sumchain/sdk`.
 
 ```typescript

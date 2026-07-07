@@ -756,6 +756,65 @@ impl RpcServer {
             .map_err(|e| RpcError::InvalidParams(format!("Invalid hash: {}", e)))
     }
 
+    /// Decode a variable-length hex string (with or without `0x` prefix) into
+    /// bytes. Used by the issue-#89 family builders for opaque metadata blobs.
+    fn parse_hex_bytes(&self, s: &str) -> Result<Vec<u8>> {
+        let s = s.strip_prefix("0x").unwrap_or(s);
+        hex::decode(s).map_err(|e| RpcError::InvalidParams(format!("Invalid hex bytes: {}", e)))
+    }
+
+    /// Parse a 64-byte Ed25519 signature from hex (with or without `0x`).
+    fn parse_sig64(&self, s: &str) -> Result<[u8; 64]> {
+        let s = s.strip_prefix("0x").unwrap_or(s);
+        let bytes = hex::decode(s)
+            .map_err(|e| RpcError::InvalidParams(format!("Invalid signature: {}", e)))?;
+        if bytes.len() != 64 {
+            return Err(RpcError::InvalidParams(format!(
+                "Invalid signature length: expected 64, got {}",
+                bytes.len()
+            )));
+        }
+        let mut arr = [0u8; 64];
+        arr.copy_from_slice(&bytes);
+        Ok(arr)
+    }
+
+    /// Assemble an unsigned `TransactionV2` for the issue-#89 no-key family
+    /// builders. Uses the request-supplied `nonce`/`chain_id` when present, else
+    /// fetches them from state; defaults `fee` to `GOV_DEFAULT_FEE`. No keys, no
+    /// signing, no execution — returns the hex bytes + signing hash only.
+    fn assemble_unsigned_family_tx(
+        &self,
+        from: Address,
+        fee: Option<u128>,
+        nonce: Option<u64>,
+        chain_id: Option<u64>,
+        payload: TxPayload,
+    ) -> Result<crate::types::TxBuildResponse> {
+        use sumchain_primitives::TransactionV2;
+        let fee = fee.unwrap_or(GOV_DEFAULT_FEE);
+        let nonce = match nonce {
+            Some(n) => n,
+            None => self
+                .state
+                .get_nonce(&from)
+                .map_err(|e| RpcError::Internal(format!("Failed to get nonce: {}", e)))?,
+        };
+        let chain_id = chain_id.unwrap_or_else(|| self.state.chain_id());
+        let tx = TransactionV2 { chain_id, from, fee, nonce, payload };
+        let signing_hash = tx.signing_hash();
+        let unsigned = bincode::serialize(&tx)
+            .map_err(|e| RpcError::Internal(format!("Failed to encode tx: {}", e)))?;
+        Ok(crate::types::TxBuildResponse {
+            unsigned_tx: format!("0x{}", hex::encode(unsigned)),
+            signing_hash: format!("0x{}", hex::encode(signing_hash.as_bytes())),
+            from: from.to_base58(),
+            nonce,
+            fee,
+            chain_id,
+        })
+    }
+
     /// Parse collection ID from hex string
     fn parse_collection_id(&self, s: &str) -> Result<[u8; 32]> {
         let s = s.strip_prefix("0x").unwrap_or(s);
@@ -7379,6 +7438,422 @@ impl SumChainApiServer for RpcServer {
             chain_id,
         })
     }
+
+    // ── No-key unsigned-tx family builders (issue #89) ──────────────────────
+
+    async fn token_build_transaction(
+        &self,
+        request: crate::types::TokenBuildRequest,
+    ) -> std::result::Result<crate::types::TxBuildResponse, jsonrpsee::types::ErrorObjectOwned> {
+        use sumchain_primitives::token_ops::*;
+        use sumchain_primitives::transaction::{TokenOperation, TokenTxData};
+        use sumchain_primitives::TxPayload;
+
+        let from = self.parse_address(&request.from)?;
+        // Token id: hex when provided, else zero (Create).
+        let token_id = match &request.token_id {
+            Some(s) => self.parse_token_id(s)?,
+            None => [0u8; 32],
+        };
+        let (operation, data): (TokenOperation, Vec<u8>) = match request.op {
+            crate::types::TokenBuildOp::Create {
+                name,
+                symbol,
+                decimals,
+                initial_supply,
+                max_supply,
+                mintable,
+                burnable,
+                pausable,
+            } => (
+                TokenOperation::Create,
+                bincode::serialize(&CreateTokenData {
+                    name,
+                    symbol,
+                    decimals,
+                    initial_supply,
+                    max_supply,
+                    mintable,
+                    burnable,
+                    pausable,
+                })
+                .map_err(|e| RpcError::Internal(format!("Failed to encode op: {}", e)))?,
+            ),
+            crate::types::TokenBuildOp::Mint { to, amount } => (
+                TokenOperation::Mint,
+                bincode::serialize(&TokenMintData { to: self.parse_address(&to)?, amount })
+                    .map_err(|e| RpcError::Internal(format!("Failed to encode op: {}", e)))?,
+            ),
+            crate::types::TokenBuildOp::Burn { amount } => (
+                TokenOperation::Burn,
+                bincode::serialize(&TokenBurnData { amount })
+                    .map_err(|e| RpcError::Internal(format!("Failed to encode op: {}", e)))?,
+            ),
+            crate::types::TokenBuildOp::Transfer { to, amount } => (
+                TokenOperation::Transfer,
+                bincode::serialize(&TokenTransferData { to: self.parse_address(&to)?, amount })
+                    .map_err(|e| RpcError::Internal(format!("Failed to encode op: {}", e)))?,
+            ),
+            crate::types::TokenBuildOp::Approve { spender, amount } => (
+                TokenOperation::Approve,
+                bincode::serialize(&TokenApproveData {
+                    spender: self.parse_address(&spender)?,
+                    amount,
+                })
+                .map_err(|e| RpcError::Internal(format!("Failed to encode op: {}", e)))?,
+            ),
+            crate::types::TokenBuildOp::TransferFrom { from: sub_from, to, amount } => (
+                TokenOperation::TransferFrom,
+                bincode::serialize(&TokenTransferFromData {
+                    from: self.parse_address(&sub_from)?,
+                    to: self.parse_address(&to)?,
+                    amount,
+                })
+                .map_err(|e| RpcError::Internal(format!("Failed to encode op: {}", e)))?,
+            ),
+            crate::types::TokenBuildOp::Pause => (TokenOperation::Pause, vec![]),
+            crate::types::TokenBuildOp::Unpause => (TokenOperation::Unpause, vec![]),
+            crate::types::TokenBuildOp::TransferOwnership { new_owner } => (
+                TokenOperation::TransferOwnership,
+                bincode::serialize(&TokenTransferOwnershipData {
+                    new_owner: self.parse_address(&new_owner)?,
+                })
+                .map_err(|e| RpcError::Internal(format!("Failed to encode op: {}", e)))?,
+            ),
+            crate::types::TokenBuildOp::AddMinter { minter } => (
+                TokenOperation::AddMinter,
+                bincode::serialize(&TokenMinterData { minter: self.parse_address(&minter)? })
+                    .map_err(|e| RpcError::Internal(format!("Failed to encode op: {}", e)))?,
+            ),
+            crate::types::TokenBuildOp::RemoveMinter { minter } => (
+                TokenOperation::RemoveMinter,
+                bincode::serialize(&TokenMinterData { minter: self.parse_address(&minter)? })
+                    .map_err(|e| RpcError::Internal(format!("Failed to encode op: {}", e)))?,
+            ),
+        };
+        let payload = TxPayload::Token(TokenTxData { token_id, operation, data });
+        Ok(self.assemble_unsigned_family_tx(
+            from,
+            request.fee,
+            request.nonce,
+            request.chain_id,
+            payload,
+        )?)
+    }
+
+    async fn nft_build_transaction(
+        &self,
+        request: crate::types::NftBuildRequest,
+    ) -> std::result::Result<crate::types::TxBuildResponse, jsonrpsee::types::ErrorObjectOwned> {
+        use sumchain_nft::collection::CollectionConfig;
+        use sumchain_nft::ops::*;
+        use sumchain_primitives::transaction::{NftOperation, NftTxData};
+        use sumchain_primitives::TxPayload;
+
+        let from = self.parse_address(&request.from)?;
+        let collection_id = self.parse_collection_id(&request.collection_id)?;
+        let token_id = request.token_id;
+        let enc = |v: &[u8]| -> Vec<u8> { v.to_vec() };
+        let ser = |b: std::result::Result<Vec<u8>, bincode::Error>| -> Result<Vec<u8>> {
+            b.map_err(|e| RpcError::Internal(format!("Failed to encode op: {}", e)))
+        };
+        let (operation, data): (NftOperation, Vec<u8>) = match request.op {
+            crate::types::NftBuildOp::CreateCollection {
+                name,
+                symbol,
+                description,
+                config,
+                base_uri,
+            } => {
+                let config = CollectionConfig {
+                    max_supply: config.max_supply,
+                    transferable: config.transferable,
+                    burnable: config.burnable,
+                    metadata_updatable: config.metadata_updatable,
+                    owner_only_minting: config.owner_only_minting,
+                    royalty_bps: config.royalty_bps,
+                    royalty_recipient: self.parse_address(&config.royalty_recipient)?,
+                };
+                (
+                    NftOperation::CreateCollection,
+                    ser(bincode::serialize(&CreateCollectionData {
+                        name,
+                        symbol,
+                        description,
+                        config,
+                        base_uri,
+                    }))?,
+                )
+            }
+            crate::types::NftBuildOp::Mint { to, metadata, uri_type, uri_value } => (
+                NftOperation::Mint,
+                ser(bincode::serialize(&NftMintData {
+                    to: self.parse_address(&to)?,
+                    metadata: enc(&self.parse_hex_bytes(&metadata)?),
+                    uri_type,
+                    uri_value,
+                }))?,
+            ),
+            crate::types::NftBuildOp::MintDocument { to, metadata, uri_type, uri_value } => (
+                NftOperation::MintDocument,
+                ser(bincode::serialize(&NftMintData {
+                    to: self.parse_address(&to)?,
+                    metadata: enc(&self.parse_hex_bytes(&metadata)?),
+                    uri_type,
+                    uri_value,
+                }))?,
+            ),
+            crate::types::NftBuildOp::BatchMint { requests } => {
+                let mut reqs = Vec::with_capacity(requests.len());
+                for r in requests {
+                    reqs.push(NftBatchMintRequest {
+                        to: self.parse_address(&r.to)?,
+                        metadata: self.parse_hex_bytes(&r.metadata)?,
+                    });
+                }
+                (
+                    NftOperation::BatchMint,
+                    ser(bincode::serialize(&NftBatchMintData { requests: reqs }))?,
+                )
+            }
+            crate::types::NftBuildOp::Transfer { to } => (
+                NftOperation::Transfer,
+                ser(bincode::serialize(&NftTransferData { to: self.parse_address(&to)? }))?,
+            ),
+            crate::types::NftBuildOp::Approve { approved } => {
+                let approved = match approved {
+                    Some(a) => Some(self.parse_address(&a)?),
+                    None => None,
+                };
+                (
+                    NftOperation::Approve,
+                    ser(bincode::serialize(&NftApproveData { approved }))?,
+                )
+            }
+            crate::types::NftBuildOp::Burn => (NftOperation::Burn, vec![]),
+            // UpdateMetadata carries the raw replacement bytes directly (no struct).
+            crate::types::NftBuildOp::UpdateMetadata { metadata } => {
+                (NftOperation::UpdateMetadata, self.parse_hex_bytes(&metadata)?)
+            }
+            crate::types::NftBuildOp::TransferCollectionOwnership { new_owner } => (
+                NftOperation::TransferCollectionOwnership,
+                ser(bincode::serialize(&NftTransferCollectionOwnershipData {
+                    new_owner: self.parse_address(&new_owner)?,
+                }))?,
+            ),
+            crate::types::NftBuildOp::UpdateCollectionConfig {
+                new_royalty_recipient,
+                new_base_uri,
+            } => {
+                let new_royalty_recipient = match new_royalty_recipient {
+                    Some(a) => Some(self.parse_address(&a)?),
+                    None => None,
+                };
+                (
+                    NftOperation::UpdateCollectionConfig,
+                    ser(bincode::serialize(&NftUpdateCollectionConfigData {
+                        new_royalty_recipient,
+                        new_base_uri,
+                    }))?,
+                )
+            }
+            crate::types::NftBuildOp::LockToken => (NftOperation::LockToken, vec![]),
+            crate::types::NftBuildOp::UnlockToken => (NftOperation::UnlockToken, vec![]),
+        };
+        let payload =
+            TxPayload::Nft(NftTxData { collection_id, token_id, operation, data });
+        Ok(self.assemble_unsigned_family_tx(
+            from,
+            request.fee,
+            request.nonce,
+            request.chain_id,
+            payload,
+        )?)
+    }
+
+    async fn staking_build_transaction(
+        &self,
+        request: crate::types::StakingBuildRequest,
+    ) -> std::result::Result<crate::types::TxBuildResponse, jsonrpsee::types::ErrorObjectOwned> {
+        use sumchain_primitives::staking::*;
+        use sumchain_primitives::TxPayload;
+
+        let from = self.parse_address(&request.from)?;
+        let ser = |b: std::result::Result<Vec<u8>, bincode::Error>| -> Result<Vec<u8>> {
+            b.map_err(|e| RpcError::Internal(format!("Failed to encode op: {}", e)))
+        };
+        let (operation, data): (StakingOperation, Vec<u8>) = match request.op {
+            crate::types::StakingBuildOp::CreateValidator { stake, commission_bps, metadata } => (
+                StakingOperation::CreateValidator,
+                ser(bincode::serialize(&CreateValidatorData {
+                    stake,
+                    commission_bps,
+                    metadata: self.parse_hex_bytes(&metadata)?,
+                }))?,
+            ),
+            crate::types::StakingBuildOp::AddStake { amount } => (
+                StakingOperation::AddStake,
+                ser(bincode::serialize(&AddStakeData { amount }))?,
+            ),
+            crate::types::StakingBuildOp::Unstake { amount } => (
+                StakingOperation::Unstake,
+                ser(bincode::serialize(&UnstakeData { amount }))?,
+            ),
+            crate::types::StakingBuildOp::UpdateValidator { commission_bps, metadata } => {
+                let metadata = match metadata {
+                    Some(m) => Some(self.parse_hex_bytes(&m)?),
+                    None => None,
+                };
+                (
+                    StakingOperation::UpdateValidator,
+                    ser(bincode::serialize(&UpdateValidatorData { commission_bps, metadata }))?,
+                )
+            }
+            crate::types::StakingBuildOp::Unjail => (StakingOperation::Unjail, vec![]),
+            crate::types::StakingBuildOp::ClaimRewards => (StakingOperation::ClaimRewards, vec![]),
+            crate::types::StakingBuildOp::Delegate { validator_pubkey, amount } => (
+                StakingOperation::Delegate,
+                ser(bincode::serialize(&DelegateData {
+                    validator_pubkey: self.parse_pubkey(&validator_pubkey)?,
+                    amount,
+                }))?,
+            ),
+            crate::types::StakingBuildOp::Undelegate { validator_pubkey, amount } => (
+                StakingOperation::Undelegate,
+                ser(bincode::serialize(&UndelegateData {
+                    validator_pubkey: self.parse_pubkey(&validator_pubkey)?,
+                    amount,
+                }))?,
+            ),
+            crate::types::StakingBuildOp::ClaimDelegationRewards { validator_pubkey } => (
+                StakingOperation::ClaimDelegationRewards,
+                ser(bincode::serialize(&ClaimDelegationRewardsData {
+                    validator_pubkey: self.parse_pubkey(&validator_pubkey)?,
+                }))?,
+            ),
+            crate::types::StakingBuildOp::WithdrawUnbonded { validator_pubkey } => {
+                let validator_pubkey = match validator_pubkey {
+                    Some(p) => Some(self.parse_pubkey(&p)?),
+                    None => None,
+                };
+                (
+                    StakingOperation::WithdrawUnbonded,
+                    ser(bincode::serialize(&WithdrawUnbondedData { validator_pubkey }))?,
+                )
+            }
+            crate::types::StakingBuildOp::SubmitDoubleSignEvidence {
+                validator_pubkey,
+                height,
+                block_hash_1,
+                signature_1,
+                block_hash_2,
+                signature_2,
+                submitted_at,
+            } => {
+                let evidence = DoubleSignEvidence {
+                    validator_pubkey: self.parse_pubkey(&validator_pubkey)?,
+                    height,
+                    block_hash_1: self.parse_pubkey(&block_hash_1)?,
+                    signature_1: self.parse_sig64(&signature_1)?,
+                    block_hash_2: self.parse_pubkey(&block_hash_2)?,
+                    signature_2: self.parse_sig64(&signature_2)?,
+                    submitted_at,
+                };
+                (
+                    StakingOperation::SubmitEvidence,
+                    ser(bincode::serialize(&SubmitEvidenceData {
+                        evidence_type: EvidenceType::DoubleSign,
+                        evidence: ser(bincode::serialize(&evidence))?,
+                    }))?,
+                )
+            }
+            crate::types::StakingBuildOp::SubmitDowntimeEvidence {
+                validator_pubkey,
+                start_height,
+                end_height,
+                missed_blocks,
+                submitted_at,
+            } => {
+                let evidence = DowntimeEvidence {
+                    validator_pubkey: self.parse_pubkey(&validator_pubkey)?,
+                    start_height,
+                    end_height,
+                    missed_blocks,
+                    submitted_at,
+                };
+                (
+                    StakingOperation::SubmitEvidence,
+                    ser(bincode::serialize(&SubmitEvidenceData {
+                        evidence_type: EvidenceType::Downtime,
+                        evidence: ser(bincode::serialize(&evidence))?,
+                    }))?,
+                )
+            }
+        };
+        let payload = TxPayload::Staking(StakingTxData { operation, data });
+        Ok(self.assemble_unsigned_family_tx(
+            from,
+            request.fee,
+            request.nonce,
+            request.chain_id,
+            payload,
+        )?)
+    }
+
+    async fn node_registry_build_transaction(
+        &self,
+        request: crate::types::NodeRegistryBuildRequest,
+    ) -> std::result::Result<crate::types::TxBuildResponse, jsonrpsee::types::ErrorObjectOwned> {
+        use sumchain_primitives::node_registry::{
+            NodeRegistryOperation, NodeRegistryOperationV2, NodeRegistryTxData,
+            NodeRegistryV2TxData, NodeRole,
+        };
+        use sumchain_primitives::TxPayload;
+
+        let from = self.parse_address(&request.from)?;
+        let payload = match request.op {
+            crate::types::NodeRegistryBuildOp::Register { role, stake } => {
+                let role = match role.to_ascii_lowercase().as_str() {
+                    "validator" => NodeRole::Validator,
+                    "archive_node" | "archivenode" => NodeRole::ArchiveNode,
+                    other => {
+                        return Err(RpcError::InvalidParams(format!(
+                            "Invalid node role: {}",
+                            other
+                        ))
+                        .into())
+                    }
+                };
+                TxPayload::NodeRegistry(NodeRegistryTxData {
+                    operation: NodeRegistryOperation::Register { role, stake },
+                })
+            }
+            crate::types::NodeRegistryBuildOp::BeginUnstake { amount } => {
+                TxPayload::NodeRegistry(NodeRegistryTxData {
+                    operation: NodeRegistryOperation::BeginUnstake { amount },
+                })
+            }
+            crate::types::NodeRegistryBuildOp::WithdrawUnbonded => {
+                TxPayload::NodeRegistry(NodeRegistryTxData {
+                    operation: NodeRegistryOperation::WithdrawUnbonded,
+                })
+            }
+            crate::types::NodeRegistryBuildOp::RegisterEncryptionKey { encryption_pubkey } => {
+                TxPayload::NodeRegistryV2(NodeRegistryV2TxData {
+                    operation: NodeRegistryOperationV2::RegisterEncryptionKey {
+                        encryption_pubkey: self.parse_pubkey(&encryption_pubkey)?,
+                    },
+                })
+            }
+        };
+        Ok(self.assemble_unsigned_family_tx(
+            from,
+            request.fee,
+            request.nonce,
+            request.chain_id,
+            payload,
+        )?)
+    }
 }
 
 // Helper methods for DocClass RPC conversions
@@ -11013,5 +11488,500 @@ mod tx_semantics_tests {
         let (srv, _db, _dir) = server();
         let hex_id = format!("0x{}", hex::encode([9u8; 32]));
         assert!(srv.token_get_minters(hex_id).await.unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod family_builder_tests {
+    //! Issue #89: no-key unsigned-tx family builders (token / nft / staking /
+    //! nodeRegistry). Each test builds a couple of representative ops, decodes the
+    //! `unsigned_tx`, and asserts the payload round-trips to the exact op with the
+    //! right fields; the signing hash matches; invalid inputs are rejected. No
+    //! keys, no signing, no execution here — pure assembly.
+    use super::*;
+    use std::collections::HashMap;
+    use sumchain_consensus::PoAEngine;
+    use sumchain_crypto::KeyPair;
+    use sumchain_genesis::{ChainParams, Genesis};
+    use sumchain_primitives::{Address, TransactionV2, TxPayload};
+    use sumchain_state::MempoolConfig;
+    use tempfile::TempDir;
+
+    fn server() -> (RpcServer, Arc<Database>, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let db = Arc::new(Database::open_default(dir.path()).unwrap());
+        let state = Arc::new(StateManager::new(db.clone(), 1));
+        let mempool = Arc::new(Mempool::new(MempoolConfig::default()));
+        let validator = KeyPair::generate();
+        let genesis = Genesis::new(
+            1,
+            0,
+            vec![validator.public_key().to_base58()],
+            HashMap::from([(validator.address().to_base58(), 1_000_000u128)]),
+            ChainParams::with_v2_enabled(),
+        );
+        let engine = Arc::new(
+            PoAEngine::new(db.clone(), state.clone(), mempool.clone(), &genesis, Some(validator)).unwrap(),
+        );
+        let (tx_sender, _rx) = mpsc::channel(64);
+        let srv = RpcServer::new(db.clone(), state, mempool, engine, tx_sender, Arc::new(|| 0usize));
+        (srv, db, dir)
+    }
+
+    fn decode(unsigned_tx: &str) -> TransactionV2 {
+        let bytes = hex::decode(unsigned_tx.trim_start_matches("0x")).unwrap();
+        TransactionV2::from_bytes(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn token_build_transaction_roundtrips() {
+        use crate::types::{TokenBuildOp, TokenBuildRequest};
+        use sumchain_primitives::token_ops::{CreateTokenData, TokenMintData};
+        use sumchain_primitives::transaction::TokenOperation;
+
+        let (srv, _db, _dir) = server();
+        let owner = KeyPair::generate();
+        let to = KeyPair::generate();
+
+        // Create: token_id omitted -> zero id.
+        let resp = srv
+            .token_build_transaction(TokenBuildRequest {
+                from: owner.address().to_base58(),
+                fee: Some(1234),
+                nonce: Some(7),
+                chain_id: Some(1),
+                token_id: None,
+                op: TokenBuildOp::Create {
+                    name: "Foo".into(),
+                    symbol: "FOO".into(),
+                    decimals: 6,
+                    initial_supply: 1000,
+                    max_supply: 5000,
+                    mintable: true,
+                    burnable: false,
+                    pausable: true,
+                },
+            })
+            .await
+            .unwrap();
+        assert_eq!(resp.from, owner.address().to_base58());
+        assert_eq!(resp.fee, 1234);
+        assert_eq!(resp.nonce, 7);
+        let tx = decode(&resp.unsigned_tx);
+        assert_eq!(tx.from, owner.address());
+        assert_eq!(
+            resp.signing_hash,
+            format!("0x{}", hex::encode(tx.signing_hash().as_bytes()))
+        );
+        match tx.payload {
+            TxPayload::Token(d) => {
+                assert_eq!(d.token_id, [0u8; 32]);
+                assert_eq!(d.operation, TokenOperation::Create);
+                let c: CreateTokenData = bincode::deserialize(&d.data).unwrap();
+                assert_eq!(c.name, "Foo");
+                assert_eq!(c.symbol, "FOO");
+                assert_eq!(c.decimals, 6);
+                assert_eq!(c.initial_supply, 1000);
+                assert_eq!(c.max_supply, 5000);
+                assert!(c.mintable && c.pausable && !c.burnable);
+            }
+            other => panic!("wrong payload: {:?}", other),
+        }
+
+        // Mint: token_id hex provided, nonce/chain_id fetched from state.
+        let token_id = [0xABu8; 32];
+        let resp = srv
+            .token_build_transaction(TokenBuildRequest {
+                from: owner.address().to_base58(),
+                fee: None,
+                nonce: None,
+                chain_id: None,
+                token_id: Some(format!("0x{}", hex::encode(token_id))),
+                op: TokenBuildOp::Mint { to: to.address().to_base58(), amount: 42 },
+            })
+            .await
+            .unwrap();
+        assert_eq!(resp.chain_id, 1);
+        assert_eq!(resp.nonce, 0);
+        let tx = decode(&resp.unsigned_tx);
+        match tx.payload {
+            TxPayload::Token(d) => {
+                assert_eq!(d.token_id, token_id);
+                assert_eq!(d.operation, TokenOperation::Mint);
+                let m: TokenMintData = bincode::deserialize(&d.data).unwrap();
+                assert_eq!(m.to, to.address());
+                assert_eq!(m.amount, 42);
+            }
+            other => panic!("wrong payload: {:?}", other),
+        }
+
+        // Pause: empty data.
+        let resp = srv
+            .token_build_transaction(TokenBuildRequest {
+                from: owner.address().to_base58(),
+                fee: None,
+                nonce: None,
+                chain_id: None,
+                token_id: Some(format!("0x{}", hex::encode(token_id))),
+                op: TokenBuildOp::Pause,
+            })
+            .await
+            .unwrap();
+        match decode(&resp.unsigned_tx).payload {
+            TxPayload::Token(d) => {
+                assert_eq!(d.operation, TokenOperation::Pause);
+                assert!(d.data.is_empty());
+            }
+            other => panic!("wrong payload: {:?}", other),
+        }
+
+        // Invalid recipient address -> Err.
+        assert!(srv
+            .token_build_transaction(TokenBuildRequest {
+                from: owner.address().to_base58(),
+                fee: None,
+                nonce: None,
+                chain_id: None,
+                token_id: None,
+                op: TokenBuildOp::Mint { to: "not-an-address".into(), amount: 1 },
+            })
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn nft_build_transaction_roundtrips() {
+        use crate::types::{NftBuildOp, NftBuildRequest, NftCollectionConfigInput};
+        use sumchain_nft::ops::{CreateCollectionData, NftMintData};
+        use sumchain_primitives::transaction::NftOperation;
+
+        let (srv, _db, _dir) = server();
+        let owner = KeyPair::generate();
+        let recip = KeyPair::generate();
+        let collection_id = [0x11u8; 32];
+
+        // CreateCollection.
+        let resp = srv
+            .nft_build_transaction(NftBuildRequest {
+                from: owner.address().to_base58(),
+                fee: Some(9),
+                nonce: None,
+                chain_id: None,
+                collection_id: format!("0x{}", hex::encode(collection_id)),
+                token_id: 0,
+                op: NftBuildOp::CreateCollection {
+                    name: "Art".into(),
+                    symbol: "ART".into(),
+                    description: "desc".into(),
+                    config: NftCollectionConfigInput {
+                        max_supply: 100,
+                        transferable: true,
+                        burnable: false,
+                        metadata_updatable: true,
+                        owner_only_minting: false,
+                        royalty_bps: 250,
+                        royalty_recipient: recip.address().to_base58(),
+                    },
+                    base_uri: Some("ipfs://x".into()),
+                },
+            })
+            .await
+            .unwrap();
+        let tx = decode(&resp.unsigned_tx);
+        assert_eq!(tx.from, owner.address());
+        assert_eq!(
+            resp.signing_hash,
+            format!("0x{}", hex::encode(tx.signing_hash().as_bytes()))
+        );
+        match tx.payload {
+            TxPayload::Nft(d) => {
+                assert_eq!(d.collection_id, collection_id);
+                assert_eq!(d.operation, NftOperation::CreateCollection);
+                let c: CreateCollectionData = bincode::deserialize(&d.data).unwrap();
+                assert_eq!(c.name, "Art");
+                assert_eq!(c.config.royalty_bps, 250);
+                assert_eq!(c.config.royalty_recipient, recip.address());
+                assert_eq!(c.base_uri.as_deref(), Some("ipfs://x"));
+            }
+            other => panic!("wrong payload: {:?}", other),
+        }
+
+        // Mint with hex metadata + token_id echoed through.
+        let resp = srv
+            .nft_build_transaction(NftBuildRequest {
+                from: owner.address().to_base58(),
+                fee: None,
+                nonce: None,
+                chain_id: None,
+                collection_id: format!("0x{}", hex::encode(collection_id)),
+                token_id: 5,
+                op: NftBuildOp::Mint {
+                    to: recip.address().to_base58(),
+                    metadata: "0xdeadbeef".into(),
+                    uri_type: "onchain".into(),
+                    uri_value: None,
+                },
+            })
+            .await
+            .unwrap();
+        match decode(&resp.unsigned_tx).payload {
+            TxPayload::Nft(d) => {
+                assert_eq!(d.token_id, 5);
+                assert_eq!(d.operation, NftOperation::Mint);
+                let m: NftMintData = bincode::deserialize(&d.data).unwrap();
+                assert_eq!(m.to, recip.address());
+                assert_eq!(m.metadata, vec![0xde, 0xad, 0xbe, 0xef]);
+                assert_eq!(m.uri_type, "onchain");
+            }
+            other => panic!("wrong payload: {:?}", other),
+        }
+
+        // UpdateMetadata carries raw bytes directly (not a struct).
+        let resp = srv
+            .nft_build_transaction(NftBuildRequest {
+                from: owner.address().to_base58(),
+                fee: None,
+                nonce: None,
+                chain_id: None,
+                collection_id: format!("0x{}", hex::encode(collection_id)),
+                token_id: 5,
+                op: NftBuildOp::UpdateMetadata { metadata: "0x0102".into() },
+            })
+            .await
+            .unwrap();
+        match decode(&resp.unsigned_tx).payload {
+            TxPayload::Nft(d) => {
+                assert_eq!(d.operation, NftOperation::UpdateMetadata);
+                assert_eq!(d.data, vec![0x01, 0x02]);
+            }
+            other => panic!("wrong payload: {:?}", other),
+        }
+
+        // Invalid collection id hex -> Err.
+        assert!(srv
+            .nft_build_transaction(NftBuildRequest {
+                from: owner.address().to_base58(),
+                fee: None,
+                nonce: None,
+                chain_id: None,
+                collection_id: "zz".into(),
+                token_id: 0,
+                op: NftBuildOp::Burn,
+            })
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn staking_build_transaction_roundtrips() {
+        use crate::types::{StakingBuildOp, StakingBuildRequest};
+        use sumchain_primitives::staking::{
+            CreateValidatorData, DelegateData, EvidenceType, StakingOperation, SubmitEvidenceData,
+        };
+
+        let (srv, _db, _dir) = server();
+        let from = KeyPair::generate();
+        let val = KeyPair::generate();
+        let val_pubkey = *val.public_key().as_bytes();
+
+        // CreateValidator with hex metadata.
+        let resp = srv
+            .staking_build_transaction(StakingBuildRequest {
+                from: from.address().to_base58(),
+                fee: None,
+                nonce: None,
+                chain_id: None,
+                op: StakingBuildOp::CreateValidator {
+                    stake: 1_000,
+                    commission_bps: 500,
+                    metadata: "0xcafe".into(),
+                },
+            })
+            .await
+            .unwrap();
+        let tx = decode(&resp.unsigned_tx);
+        assert_eq!(tx.from, from.address());
+        assert_eq!(
+            resp.signing_hash,
+            format!("0x{}", hex::encode(tx.signing_hash().as_bytes()))
+        );
+        match tx.payload {
+            TxPayload::Staking(d) => {
+                assert_eq!(d.operation, StakingOperation::CreateValidator);
+                let c: CreateValidatorData = bincode::deserialize(&d.data).unwrap();
+                assert_eq!(c.stake, 1_000);
+                assert_eq!(c.commission_bps, 500);
+                assert_eq!(c.metadata, vec![0xca, 0xfe]);
+            }
+            other => panic!("wrong payload: {:?}", other),
+        }
+
+        // Delegate: validator pubkey hex.
+        let resp = srv
+            .staking_build_transaction(StakingBuildRequest {
+                from: from.address().to_base58(),
+                fee: None,
+                nonce: None,
+                chain_id: None,
+                op: StakingBuildOp::Delegate {
+                    validator_pubkey: format!("0x{}", hex::encode(val_pubkey)),
+                    amount: 77,
+                },
+            })
+            .await
+            .unwrap();
+        match decode(&resp.unsigned_tx).payload {
+            TxPayload::Staking(d) => {
+                assert_eq!(d.operation, StakingOperation::Delegate);
+                let dd: DelegateData = bincode::deserialize(&d.data).unwrap();
+                assert_eq!(dd.validator_pubkey, val_pubkey);
+                assert_eq!(dd.amount, 77);
+            }
+            other => panic!("wrong payload: {:?}", other),
+        }
+
+        // Unjail: no data.
+        let resp = srv
+            .staking_build_transaction(StakingBuildRequest {
+                from: from.address().to_base58(),
+                fee: None,
+                nonce: None,
+                chain_id: None,
+                op: StakingBuildOp::Unjail,
+            })
+            .await
+            .unwrap();
+        match decode(&resp.unsigned_tx).payload {
+            TxPayload::Staking(d) => {
+                assert_eq!(d.operation, StakingOperation::Unjail);
+                assert!(d.data.is_empty());
+            }
+            other => panic!("wrong payload: {:?}", other),
+        }
+
+        // SubmitEvidence (downtime) -> wrapped SubmitEvidenceData with type tag.
+        let resp = srv
+            .staking_build_transaction(StakingBuildRequest {
+                from: from.address().to_base58(),
+                fee: None,
+                nonce: None,
+                chain_id: None,
+                op: StakingBuildOp::SubmitDowntimeEvidence {
+                    validator_pubkey: format!("0x{}", hex::encode(val_pubkey)),
+                    start_height: 1,
+                    end_height: 9,
+                    missed_blocks: 8,
+                    submitted_at: 10,
+                },
+            })
+            .await
+            .unwrap();
+        match decode(&resp.unsigned_tx).payload {
+            TxPayload::Staking(d) => {
+                assert_eq!(d.operation, StakingOperation::SubmitEvidence);
+                let ev: SubmitEvidenceData = bincode::deserialize(&d.data).unwrap();
+                assert_eq!(ev.evidence_type, EvidenceType::Downtime);
+                assert!(!ev.evidence.is_empty());
+            }
+            other => panic!("wrong payload: {:?}", other),
+        }
+
+        // Invalid pubkey (wrong length) -> Err.
+        assert!(srv
+            .staking_build_transaction(StakingBuildRequest {
+                from: from.address().to_base58(),
+                fee: None,
+                nonce: None,
+                chain_id: None,
+                op: StakingBuildOp::Delegate { validator_pubkey: "0x1234".into(), amount: 1 },
+            })
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn node_registry_build_transaction_roundtrips() {
+        use crate::types::{NodeRegistryBuildOp, NodeRegistryBuildRequest};
+        use sumchain_primitives::node_registry::{
+            NodeRegistryOperation, NodeRegistryOperationV2, NodeRole,
+        };
+
+        let (srv, _db, _dir) = server();
+        let from = KeyPair::generate();
+
+        // Register (archive_node role).
+        let resp = srv
+            .node_registry_build_transaction(NodeRegistryBuildRequest {
+                from: from.address().to_base58(),
+                fee: None,
+                nonce: None,
+                chain_id: None,
+                op: NodeRegistryBuildOp::Register { role: "archive_node".into(), stake: 500 },
+            })
+            .await
+            .unwrap();
+        let tx = decode(&resp.unsigned_tx);
+        assert_eq!(tx.from, from.address());
+        assert_eq!(
+            resp.signing_hash,
+            format!("0x{}", hex::encode(tx.signing_hash().as_bytes()))
+        );
+        match tx.payload {
+            TxPayload::NodeRegistry(d) => match d.operation {
+                NodeRegistryOperation::Register { role, stake } => {
+                    assert_eq!(role, NodeRole::ArchiveNode);
+                    assert_eq!(stake, 500);
+                }
+                other => panic!("wrong op: {:?}", other),
+            },
+            other => panic!("wrong payload: {:?}", other),
+        }
+
+        // RegisterEncryptionKey routes to the V2 payload.
+        let enc_key = [0x22u8; 32];
+        let resp = srv
+            .node_registry_build_transaction(NodeRegistryBuildRequest {
+                from: from.address().to_base58(),
+                fee: None,
+                nonce: None,
+                chain_id: None,
+                op: NodeRegistryBuildOp::RegisterEncryptionKey {
+                    encryption_pubkey: format!("0x{}", hex::encode(enc_key)),
+                },
+            })
+            .await
+            .unwrap();
+        match decode(&resp.unsigned_tx).payload {
+            TxPayload::NodeRegistryV2(d) => match d.operation {
+                NodeRegistryOperationV2::RegisterEncryptionKey { encryption_pubkey } => {
+                    assert_eq!(encryption_pubkey, enc_key);
+                }
+            },
+            other => panic!("wrong payload: {:?}", other),
+        }
+
+        // Invalid role -> Err.
+        assert!(srv
+            .node_registry_build_transaction(NodeRegistryBuildRequest {
+                from: from.address().to_base58(),
+                fee: None,
+                nonce: None,
+                chain_id: None,
+                op: NodeRegistryBuildOp::Register { role: "wizard".into(), stake: 1 },
+            })
+            .await
+            .is_err());
+
+        // Invalid from address -> Err.
+        assert!(srv
+            .node_registry_build_transaction(NodeRegistryBuildRequest {
+                from: "not-an-address".into(),
+                fee: None,
+                nonce: None,
+                chain_id: None,
+                op: NodeRegistryBuildOp::WithdrawUnbonded,
+            })
+            .await
+            .is_err());
     }
 }

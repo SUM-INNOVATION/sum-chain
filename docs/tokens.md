@@ -53,6 +53,16 @@ curl -s https://rpc.sumchain.io \
 the relevant `TxPayload` variant (e.g. `Token`, `Nft`, `Education`, `Tax`).
 Construct and sign it with the SDK; this doc does not invent a write API.
 
+**No-key unsigned-tx builders (issue #89).** For clients that can't build the
+payload themselves, Token and NFT unsigned txs can be assembled server-side via
+`token_buildTransaction` / `nft_buildTransaction` (see
+[api-reference.md](rpc/api-reference.md#no-key-unsigned-tx-family-builders-issue-89)).
+These take **no private keys** and do no signing or execution — they only return
+the unsigned `TransactionV2` bytes plus a `signing_hash`. Sign that hash locally
+with the `from` key and submit the resulting signed tx via
+`sum_sendRawTransaction`. (Staking and node-registry have the analogous
+`staking_buildTransaction` / `nodeRegistry_buildTransaction`.)
+
 ---
 
 ## Native token — SUM-20 (fungible)
