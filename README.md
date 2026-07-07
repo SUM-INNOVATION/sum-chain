@@ -339,7 +339,7 @@ approved changes are released) · **[CONTRIBUTING.md](CONTRIBUTING.md)** · **[S
 
 ## TypeScript SDK
 
-The published TypeScript SDK is **`@sumchain/sdk@0.2.2`** (current):
+The published TypeScript SDK is **`@sumchain/sdk@0.2.3`** (current):
 
 ```bash
 npm install @sumchain/sdk

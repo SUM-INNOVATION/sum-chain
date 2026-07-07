@@ -301,3 +301,114 @@ export interface TransactionHistoryResponse {
   offset: number;
   limit: number;
 }
+
+// ============================================================================
+// No-key unsigned-transaction builders (issue #89)
+// ----------------------------------------------------------------------------
+// These mirror the RPC builder DTOs. Builders return unsigned tx material only
+// (no keys, no signing); sign locally and submit via `send_raw_transaction`.
+// Amounts are base-unit integers; the node expects JSON numbers for u64/u128.
+// ============================================================================
+
+/** Shared response for every `*_buildTransaction` builder. */
+export interface TxBuildResponse {
+  /** Bincode-encoded unsigned TransactionV2 (0x-hex). */
+  unsigned_tx: string;
+  /** Hash to sign (0x-hex). */
+  signing_hash: string;
+  /** Signer/sender address (base58). */
+  from: string;
+  nonce: number;
+  fee: number;
+  chain_id: number;
+}
+
+/** Fields common to every builder request. */
+export interface BuildRequestBase {
+  /** Sender/signer address (base58). */
+  from: string;
+  /** Fee in base units; omit for the node default. */
+  fee?: number;
+  /** Nonce; fetched from state when omitted. */
+  nonce?: number;
+  /** Chain id; fetched from state when omitted. */
+  chain_id?: number;
+}
+
+// ── SRC-20 token ────────────────────────────────────────────────────────────
+export type TokenBuildOp =
+  | { op: 'create'; name: string; symbol: string; decimals: number; initial_supply: number | string; max_supply: number | string; mintable: boolean; burnable: boolean; pausable: boolean }
+  | { op: 'mint'; to: string; amount: number | string }
+  | { op: 'burn'; amount: number | string }
+  | { op: 'transfer'; to: string; amount: number | string }
+  | { op: 'approve'; spender: string; amount: number | string }
+  | { op: 'transfer_from'; from: string; to: string; amount: number | string }
+  | { op: 'pause' }
+  | { op: 'unpause' }
+  | { op: 'transfer_ownership'; new_owner: string }
+  | { op: 'add_minter'; minter: string }
+  | { op: 'remove_minter'; minter: string };
+
+/** Request for `token_buildTransaction`. `token_id` is hex; omit for `create`. */
+export type TokenBuildRequest = BuildRequestBase & { token_id?: string } & TokenBuildOp;
+
+// ── SUM-721 NFT ───────────────────────────────────────────────────────────────
+export interface NftCollectionConfigInput {
+  max_supply: number;
+  transferable: boolean;
+  burnable: boolean;
+  metadata_updatable: boolean;
+  owner_only_minting: boolean;
+  royalty_bps: number;
+  /** Royalty recipient (base58). */
+  royalty_recipient: string;
+}
+export interface NftBatchMintRequestInput {
+  to: string;
+  /** Metadata bytes, hex. */
+  metadata: string;
+}
+export type NftBuildOp =
+  | { op: 'create_collection'; name: string; symbol: string; description: string; config: NftCollectionConfigInput; base_uri?: string | null }
+  | { op: 'mint'; to: string; metadata: string; uri_type: string; uri_value?: string | null }
+  | { op: 'mint_document'; to: string; metadata: string; uri_type: string; uri_value?: string | null }
+  | { op: 'batch_mint'; requests: NftBatchMintRequestInput[] }
+  | { op: 'transfer'; to: string }
+  | { op: 'approve'; approved?: string | null }
+  | { op: 'burn' }
+  | { op: 'update_metadata'; metadata: string }
+  | { op: 'transfer_collection_ownership'; new_owner: string }
+  | { op: 'update_collection_config'; new_royalty_recipient?: string | null; new_base_uri?: string | null }
+  | { op: 'lock_token' }
+  | { op: 'unlock_token' };
+
+/** Request for `nft_buildTransaction`. `collection_id` hex; `token_id` numeric (0 for collection-level ops). */
+export type NftBuildRequest = BuildRequestBase & { collection_id: string; token_id: number } & NftBuildOp;
+
+// ── Staking ───────────────────────────────────────────────────────────────────
+export type StakingBuildOp =
+  | { op: 'create_validator'; stake: number | string; commission_bps: number; metadata: string }
+  | { op: 'add_stake'; amount: number | string }
+  | { op: 'unstake'; amount: number | string }
+  | { op: 'update_validator'; commission_bps?: number | null; metadata?: string | null }
+  | { op: 'unjail' }
+  | { op: 'claim_rewards' }
+  | { op: 'delegate'; validator_pubkey: string; amount: number | string }
+  | { op: 'undelegate'; validator_pubkey: string; amount: number | string }
+  | { op: 'claim_delegation_rewards'; validator_pubkey: string }
+  | { op: 'withdraw_unbonded'; validator_pubkey?: string | null }
+  | { op: 'submit_double_sign_evidence'; validator_pubkey: string; height: number; block_hash_1: string; signature_1: string; block_hash_2: string; signature_2: string; submitted_at: number }
+  | { op: 'submit_downtime_evidence'; validator_pubkey: string; start_height: number; end_height: number; missed_blocks: number; submitted_at: number };
+
+/** Request for `staking_buildTransaction`. */
+export type StakingBuildRequest = BuildRequestBase & StakingBuildOp;
+
+// ── NodeRegistry ──────────────────────────────────────────────────────────────
+export type NodeRegistryBuildOp =
+  | { op: 'register'; role: 'validator' | 'archive_node'; stake: number }
+  | { op: 'begin_unstake'; amount: number }
+  | { op: 'withdraw_unbonded' }
+  | { op: 'register_encryption_key'; encryption_pubkey: string };
+
+/** Request for `nodeRegistry_buildTransaction`. */
+export type NodeRegistryBuildRequest = BuildRequestBase & NodeRegistryBuildOp;

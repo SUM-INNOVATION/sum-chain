@@ -25,6 +25,7 @@ pub mod receipt;
 pub mod staking;
 pub mod storage_metadata;
 pub mod tax;
+pub mod token_ops;
 pub mod transaction;
 pub mod validator_authority;
 

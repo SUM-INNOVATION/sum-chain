@@ -1844,4 +1844,47 @@ pub trait SumChainApi {
         &self,
         request: StorageBuildReassignChunksV2Request,
     ) -> Result<StorageBuildResponse, jsonrpsee::types::ErrorObjectOwned>;
+
+    // =========================================================================
+    // No-key unsigned-transaction builders (issue #89)
+    //
+    // One builder per family, taking a tagged operation request. Each assembles
+    // an unsigned `TransactionV2` and returns hex bytes + signing hash. **No
+    // private keys, no signing, no submit, no execution, no authorization** — the
+    // client signs `signing_hash` locally and submits via `sum_sendRawTransaction`.
+    // Authority checks stay in the executor.
+    // =========================================================================
+
+    /// Build an unsigned SRC-20 token tx for one operation (issue #89).
+    /// No-key: no signing/execution/authorization. Decodes to `TxPayload::Token`.
+    #[method(name = "token_buildTransaction")]
+    async fn token_build_transaction(
+        &self,
+        request: crate::types::TokenBuildRequest,
+    ) -> Result<crate::types::TxBuildResponse, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Build an unsigned SUM-721 NFT tx for one operation (issue #89).
+    /// No-key: no signing/execution/authorization. Decodes to `TxPayload::Nft`.
+    #[method(name = "nft_buildTransaction")]
+    async fn nft_build_transaction(
+        &self,
+        request: crate::types::NftBuildRequest,
+    ) -> Result<crate::types::TxBuildResponse, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Build an unsigned staking tx for one operation (issue #89).
+    /// No-key: no signing/execution/authorization. Decodes to `TxPayload::Staking`.
+    #[method(name = "staking_buildTransaction")]
+    async fn staking_build_transaction(
+        &self,
+        request: crate::types::StakingBuildRequest,
+    ) -> Result<crate::types::TxBuildResponse, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Build an unsigned node-registry tx for one operation (issue #89).
+    /// No-key: no signing/execution/authorization. Decodes to
+    /// `TxPayload::NodeRegistry` (or `NodeRegistryV2` for `RegisterEncryptionKey`).
+    #[method(name = "nodeRegistry_buildTransaction")]
+    async fn node_registry_build_transaction(
+        &self,
+        request: crate::types::NodeRegistryBuildRequest,
+    ) -> Result<crate::types::TxBuildResponse, jsonrpsee::types::ErrorObjectOwned>;
 }

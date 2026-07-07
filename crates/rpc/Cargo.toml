@@ -8,6 +8,7 @@ description = "JSON-RPC server for SUM Chain"
 
 [dependencies]
 sumchain-primitives = { path = "../primitives" }
+sumchain-nft = { path = "../nft" }
 sumchain-crypto = { path = "../crypto" }
 sumchain-storage = { path = "../storage" }
 sumchain-state = { path = "../state" }

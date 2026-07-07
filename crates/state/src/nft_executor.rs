@@ -17,6 +17,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use sumchain_genesis::ChainParams;
 use sumchain_nft::collection::{CollectionConfig, CollectionId};
+use sumchain_nft::ops::{
+    CreateCollectionData, NftApproveData, NftBatchMintData, NftMintData,
+    NftTransferCollectionOwnershipData, NftTransferData, NftUpdateCollectionConfigData,
+};
 use sumchain_primitives::{Address, Balance, NftOperation, NftTxData};
 use sumchain_storage::{Database, IssuerStore, NftCollectionData, NftStore, NftTokenData};
 use tracing::{debug, info, warn};
@@ -218,15 +222,7 @@ impl NftExecutor {
         block_timestamp: u64,
     ) -> Result<NftExecutionResult> {
         // Deserialize collection creation data
-        #[derive(serde::Deserialize)]
-        struct CreateCollectionData {
-            name: String,
-            symbol: String,
-            description: String,
-            config: CollectionConfig,
-            base_uri: Option<String>,
-        }
-
+        // Shared wire struct (issue #89)
         let create_data: CreateCollectionData = bincode::deserialize(data)
             .map_err(|e| StateError::BlockValidation(format!("Invalid collection data: {}", e)))?;
 
@@ -311,15 +307,8 @@ impl NftExecutor {
         }
 
         // Deserialize mint data
-        #[derive(serde::Deserialize)]
-        struct MintData {
-            to: Address,
-            metadata: Vec<u8>,
-            uri_type: String,
-            uri_value: Option<String>,
-        }
-
-        let mint_data: MintData = bincode::deserialize(data)
+        // Shared wire struct (issue #89)
+        let mint_data: NftMintData = bincode::deserialize(data)
             .map_err(|e| StateError::BlockValidation(format!("Invalid mint data: {}", e)))?;
 
         // Security: Validate metadata size
@@ -425,18 +414,8 @@ impl NftExecutor {
         }
 
         // Deserialize batch mint data
-        #[derive(serde::Deserialize)]
-        struct BatchMintData {
-            requests: Vec<BatchMintRequest>,
-        }
-
-        #[derive(serde::Deserialize)]
-        struct BatchMintRequest {
-            to: Address,
-            metadata: Vec<u8>,
-        }
-
-        let batch_data: BatchMintData = bincode::deserialize(data)
+        // Shared wire struct (issue #89)
+        let batch_data: NftBatchMintData = bincode::deserialize(data)
             .map_err(|e| StateError::BlockValidation(format!("Invalid batch data: {}", e)))?;
 
         let count = batch_data.requests.len() as u64;
@@ -531,12 +510,8 @@ impl NftExecutor {
         }
 
         // Deserialize recipient
-        #[derive(serde::Deserialize)]
-        struct TransferData {
-            to: Address,
-        }
-
-        let transfer_data: TransferData = bincode::deserialize(data)
+        // Shared wire struct (issue #89)
+        let transfer_data: NftTransferData = bincode::deserialize(data)
             .map_err(|e| StateError::BlockValidation(format!("Invalid transfer data: {}", e)))?;
 
         // Execute transfer
@@ -573,12 +548,8 @@ impl NftExecutor {
         }
 
         // Deserialize approval data
-        #[derive(serde::Deserialize)]
-        struct ApproveData {
-            approved: Option<Address>,
-        }
-
-        let approve_data: ApproveData = bincode::deserialize(data)
+        // Shared wire struct (issue #89)
+        let approve_data: NftApproveData = bincode::deserialize(data)
             .map_err(|e| StateError::BlockValidation(format!("Invalid approve data: {}", e)))?;
 
         token.approved = approve_data.approved;
@@ -706,12 +677,8 @@ impl NftExecutor {
         }
 
         // Deserialize new owner
-        #[derive(serde::Deserialize)]
-        struct TransferOwnerData {
-            new_owner: Address,
-        }
-
-        let transfer_data: TransferOwnerData = bincode::deserialize(data)
+        // Shared wire struct (issue #89)
+        let transfer_data: NftTransferCollectionOwnershipData = bincode::deserialize(data)
             .map_err(|e| StateError::BlockValidation(format!("Invalid transfer data: {}", e)))?;
 
         collection.owner = transfer_data.new_owner;
@@ -747,13 +714,8 @@ impl NftExecutor {
         }
 
         // Deserialize config update
-        #[derive(serde::Deserialize)]
-        struct ConfigUpdateData {
-            new_royalty_recipient: Option<Address>,
-            new_base_uri: Option<String>,
-        }
-
-        let update_data: ConfigUpdateData = bincode::deserialize(data)
+        // Shared wire struct (issue #89)
+        let update_data: NftUpdateCollectionConfigData = bincode::deserialize(data)
             .map_err(|e| StateError::BlockValidation(format!("Invalid config data: {}", e)))?;
 
         if let Some(recipient) = update_data.new_royalty_recipient {

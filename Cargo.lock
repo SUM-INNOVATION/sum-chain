@@ -5991,6 +5991,7 @@ dependencies = [
  "sumchain-consensus",
  "sumchain-crypto",
  "sumchain-genesis",
+ "sumchain-nft",
  "sumchain-p2p",
  "sumchain-primitives",
  "sumchain-state",

@@ -16,6 +16,10 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use sumchain_genesis::ChainParams;
+use sumchain_primitives::token_ops::{
+    CreateTokenData, TokenApproveData, TokenBurnData, TokenMintData, TokenMinterData,
+    TokenTransferData, TokenTransferFromData, TokenTransferOwnershipData,
+};
 use sumchain_primitives::{Address, Balance, BlockHeight, Hash, TokenOperation, TokenTxData};
 use sumchain_storage::{Database, Src20TokenData, TokenStore};
 use tracing::{debug, info};
@@ -185,20 +189,8 @@ impl TokenExecutor {
         block_height: BlockHeight,
         block_timestamp: u64,
     ) -> Result<TokenExecutionResult> {
-        // Deserialize creation data
-        #[derive(serde::Deserialize)]
-        struct CreateData {
-            name: String,
-            symbol: String,
-            decimals: u8,
-            initial_supply: u128,
-            max_supply: u128,
-            mintable: bool,
-            burnable: bool,
-            pausable: bool,
-        }
-
-        let create_data: CreateData = bincode::deserialize(data)
+        // Deserialize creation data (shared wire struct — issue #89)
+        let create_data: CreateTokenData = bincode::deserialize(data)
             .map_err(|e| StateError::BlockValidation(format!("Invalid token creation data: {}", e)))?;
 
         // Validate parameters
@@ -301,14 +293,8 @@ impl TokenExecutor {
             ));
         }
 
-        // Deserialize mint data
-        #[derive(serde::Deserialize)]
-        struct MintData {
-            to: Address,
-            amount: u128,
-        }
-
-        let mint_data: MintData = bincode::deserialize(data)
+        // Deserialize mint data (shared wire struct — issue #89)
+        let mint_data: TokenMintData = bincode::deserialize(data)
             .map_err(|e| StateError::BlockValidation(format!("Invalid mint data: {}", e)))?;
 
         if mint_data.amount == 0 {
@@ -363,13 +349,8 @@ impl TokenExecutor {
             ));
         }
 
-        // Deserialize burn data
-        #[derive(serde::Deserialize)]
-        struct BurnData {
-            amount: u128,
-        }
-
-        let burn_data: BurnData = bincode::deserialize(data)
+        // Deserialize burn data (shared wire struct — issue #89)
+        let burn_data: TokenBurnData = bincode::deserialize(data)
             .map_err(|e| StateError::BlockValidation(format!("Invalid burn data: {}", e)))?;
 
         if burn_data.amount == 0 {
@@ -423,14 +404,8 @@ impl TokenExecutor {
             ));
         }
 
-        // Deserialize transfer data
-        #[derive(serde::Deserialize)]
-        struct TransferData {
-            to: Address,
-            amount: u128,
-        }
-
-        let transfer_data: TransferData = bincode::deserialize(data)
+        // Deserialize transfer data (shared wire struct — issue #89)
+        let transfer_data: TokenTransferData = bincode::deserialize(data)
             .map_err(|e| StateError::BlockValidation(format!("Invalid transfer data: {}", e)))?;
 
         if transfer_data.amount == 0 {
@@ -478,14 +453,8 @@ impl TokenExecutor {
             ));
         }
 
-        // Deserialize approve data
-        #[derive(serde::Deserialize)]
-        struct ApproveData {
-            spender: Address,
-            amount: u128,
-        }
-
-        let approve_data: ApproveData = bincode::deserialize(data)
+        // Deserialize approve data (shared wire struct — issue #89)
+        let approve_data: TokenApproveData = bincode::deserialize(data)
             .map_err(|e| StateError::BlockValidation(format!("Invalid approve data: {}", e)))?;
 
         // Set allowance
@@ -522,15 +491,8 @@ impl TokenExecutor {
             ));
         }
 
-        // Deserialize transfer from data
-        #[derive(serde::Deserialize)]
-        struct TransferFromData {
-            from: Address,
-            to: Address,
-            amount: u128,
-        }
-
-        let transfer_data: TransferFromData = bincode::deserialize(data)
+        // Deserialize transfer from data (shared wire struct — issue #89)
+        let transfer_data: TokenTransferFromData = bincode::deserialize(data)
             .map_err(|e| StateError::BlockValidation(format!("Invalid transfer_from data: {}", e)))?;
 
         if transfer_data.amount == 0 {
@@ -675,13 +637,8 @@ impl TokenExecutor {
             ));
         }
 
-        // Deserialize new owner
-        #[derive(serde::Deserialize)]
-        struct TransferOwnerData {
-            new_owner: Address,
-        }
-
-        let transfer_data: TransferOwnerData = bincode::deserialize(data)
+        // Deserialize new owner (shared wire struct — issue #89)
+        let transfer_data: TokenTransferOwnershipData = bincode::deserialize(data)
             .map_err(|e| StateError::BlockValidation(format!("Invalid transfer ownership data: {}", e)))?;
 
         // Update owner
@@ -724,13 +681,8 @@ impl TokenExecutor {
             ));
         }
 
-        // Deserialize minter
-        #[derive(serde::Deserialize)]
-        struct MinterData {
-            minter: Address,
-        }
-
-        let minter_data: MinterData = bincode::deserialize(data)
+        // Deserialize minter (shared wire struct — issue #89)
+        let minter_data: TokenMinterData = bincode::deserialize(data)
             .map_err(|e| StateError::BlockValidation(format!("Invalid minter data: {}", e)))?;
 
         // Check if already a minter
@@ -773,13 +725,8 @@ impl TokenExecutor {
             ));
         }
 
-        // Deserialize minter
-        #[derive(serde::Deserialize)]
-        struct MinterData {
-            minter: Address,
-        }
-
-        let minter_data: MinterData = bincode::deserialize(data)
+        // Deserialize minter (shared wire struct — issue #89)
+        let minter_data: TokenMinterData = bincode::deserialize(data)
             .map_err(|e| StateError::BlockValidation(format!("Invalid minter data: {}", e)))?;
 
         // Check if is a minter

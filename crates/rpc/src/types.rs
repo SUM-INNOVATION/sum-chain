@@ -2605,3 +2605,264 @@ impl From<&sumchain_primitives::healthcare::ProviderProfile> for HealthcareProvi
         }
     }
 }
+
+// ============================================================================
+// No-key unsigned-transaction builders (issue #89)
+//
+// Four families — Token (SRC-20), NFT (SUM-721), Staking, and NodeRegistry —
+// each get ONE builder method taking a tagged operation request. The builder
+// assembles an unsigned `TransactionV2` (filling `chain_id` + `nonce` from state
+// when the request omits them) and returns the hex-encoded bytes plus the
+// signing hash. **No private keys, no signing, no submit, no execution, no
+// authorization.** The client signs `signing_hash` with the `from` key locally
+// and submits via `sum_sendRawTransaction`. All authority checks are left to the
+// executor. Addresses are base58 Strings, hashes/bytes are hex Strings.
+// ============================================================================
+
+/// Shared unsigned-tx build response for the issue-#89 family builders. Mirrors
+/// the storage / governance / OmniNode builder shape: hex-encoded unsigned
+/// `TransactionV2` + the signing hash the client signs. No keys, no signature.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TxBuildResponse {
+    /// Bincode-encoded unsigned `TransactionV2` (hex, `0x`-prefixed).
+    pub unsigned_tx: String,
+    /// Hash the client signs (hex, `0x`-prefixed).
+    pub signing_hash: String,
+    /// Signer/sender address (base58).
+    pub from: String,
+    pub nonce: u64,
+    pub fee: u128,
+    pub chain_id: u64,
+}
+
+// ── Token (SRC-20) ──────────────────────────────────────────────────────────
+
+/// A single SRC-20 token operation, tagged by `op`. Addresses base58, amounts
+/// native. Mirrors `sumchain_primitives::token_ops::*`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum TokenBuildOp {
+    Create {
+        name: String,
+        symbol: String,
+        decimals: u8,
+        initial_supply: u128,
+        max_supply: u128,
+        mintable: bool,
+        burnable: bool,
+        pausable: bool,
+    },
+    Mint { to: String, amount: u128 },
+    Burn { amount: u128 },
+    Transfer { to: String, amount: u128 },
+    Approve { spender: String, amount: u128 },
+    TransferFrom { from: String, to: String, amount: u128 },
+    Pause,
+    Unpause,
+    TransferOwnership { new_owner: String },
+    AddMinter { minter: String },
+    RemoveMinter { minter: String },
+}
+
+/// Request for `token_buildTransaction` (issue #89). `token_id` is hex; leave it
+/// `None` for `Create` (the builder uses the zero id). `nonce`/`chain_id` are
+/// fetched from state when omitted.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenBuildRequest {
+    /// Sender/signer address (base58).
+    pub from: String,
+    pub fee: Option<u128>,
+    pub nonce: Option<u64>,
+    pub chain_id: Option<u64>,
+    /// Token id (hex); `None` (or zero) for `Create`.
+    pub token_id: Option<String>,
+    #[serde(flatten)]
+    pub op: TokenBuildOp,
+}
+
+// ── NFT (SUM-721) ───────────────────────────────────────────────────────────
+
+/// Collection-config sub-object for `CreateCollection`. Mirrors
+/// `sumchain_nft::collection::CollectionConfig` with the recipient as base58.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NftCollectionConfigInput {
+    pub max_supply: u64,
+    pub transferable: bool,
+    pub burnable: bool,
+    pub metadata_updatable: bool,
+    pub owner_only_minting: bool,
+    pub royalty_bps: u16,
+    /// Royalty recipient address (base58).
+    pub royalty_recipient: String,
+}
+
+/// One batch-mint request row (base58 recipient, hex metadata).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NftBatchMintRequestInput {
+    pub to: String,
+    /// Metadata bytes, hex.
+    pub metadata: String,
+}
+
+/// A single SUM-721 NFT operation, tagged by `op`. Addresses base58, metadata
+/// bytes hex. Mirrors `sumchain_nft::ops::*`. `SetApprovalForAll` is
+/// intentionally omitted (unimplemented in the executor).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum NftBuildOp {
+    CreateCollection {
+        name: String,
+        symbol: String,
+        description: String,
+        config: NftCollectionConfigInput,
+        base_uri: Option<String>,
+    },
+    Mint {
+        to: String,
+        /// Metadata bytes, hex.
+        metadata: String,
+        uri_type: String,
+        uri_value: Option<String>,
+    },
+    MintDocument {
+        to: String,
+        metadata: String,
+        uri_type: String,
+        uri_value: Option<String>,
+    },
+    BatchMint { requests: Vec<NftBatchMintRequestInput> },
+    Transfer { to: String },
+    Approve { approved: Option<String> },
+    Burn,
+    /// Raw replacement metadata bytes, hex (NOT a struct — passed through as-is).
+    UpdateMetadata { metadata: String },
+    TransferCollectionOwnership { new_owner: String },
+    UpdateCollectionConfig {
+        new_royalty_recipient: Option<String>,
+        new_base_uri: Option<String>,
+    },
+    LockToken,
+    UnlockToken,
+}
+
+/// Request for `nft_buildTransaction` (issue #89). `collection_id` is hex,
+/// `token_id` is the numeric token id (0 for collection-level ops).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NftBuildRequest {
+    /// Sender/signer address (base58).
+    pub from: String,
+    pub fee: Option<u128>,
+    pub nonce: Option<u64>,
+    pub chain_id: Option<u64>,
+    /// Collection id (hex).
+    pub collection_id: String,
+    /// Token id (0 for collection-level ops).
+    pub token_id: u64,
+    #[serde(flatten)]
+    pub op: NftBuildOp,
+}
+
+// ── Staking ─────────────────────────────────────────────────────────────────
+
+/// A single staking operation, tagged by `op`. Validator pubkeys are hex,
+/// amounts native. Mirrors `sumchain_primitives::staking::*`. Covers all 11
+/// `StakingOperation` variants.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum StakingBuildOp {
+    CreateValidator {
+        stake: u128,
+        commission_bps: u16,
+        /// Metadata bytes, hex.
+        metadata: String,
+    },
+    AddStake { amount: u128 },
+    Unstake { amount: u128 },
+    UpdateValidator {
+        commission_bps: Option<u16>,
+        /// Metadata bytes, hex; `None` keeps current.
+        metadata: Option<String>,
+    },
+    Unjail,
+    ClaimRewards,
+    Delegate {
+        /// Validator public key (hex, 32 bytes).
+        validator_pubkey: String,
+        amount: u128,
+    },
+    Undelegate {
+        validator_pubkey: String,
+        amount: u128,
+    },
+    ClaimDelegationRewards {
+        validator_pubkey: String,
+    },
+    WithdrawUnbonded {
+        /// Validator public key (hex); `None` withdraws all.
+        validator_pubkey: Option<String>,
+    },
+    /// Double-sign misbehaviour evidence (hex fields).
+    SubmitDoubleSignEvidence {
+        validator_pubkey: String,
+        height: u64,
+        block_hash_1: String,
+        signature_1: String,
+        block_hash_2: String,
+        signature_2: String,
+        submitted_at: u64,
+    },
+    /// Downtime misbehaviour evidence.
+    SubmitDowntimeEvidence {
+        validator_pubkey: String,
+        start_height: u64,
+        end_height: u64,
+        missed_blocks: u64,
+        submitted_at: u64,
+    },
+}
+
+/// Request for `staking_buildTransaction` (issue #89).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StakingBuildRequest {
+    /// Sender/signer address (base58).
+    pub from: String,
+    pub fee: Option<u128>,
+    pub nonce: Option<u64>,
+    pub chain_id: Option<u64>,
+    #[serde(flatten)]
+    pub op: StakingBuildOp,
+}
+
+// ── NodeRegistry ────────────────────────────────────────────────────────────
+
+/// A single node-registry operation, tagged by `op`. Mirrors
+/// `sumchain_primitives::node_registry::*`. `UpdateStatus` is intentionally
+/// omitted (privileged/internal, no user authorization). `RegisterEncryptionKey`
+/// routes to the V2 payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum NodeRegistryBuildOp {
+    Register {
+        /// Node role: `"validator"` or `"archive_node"`.
+        role: String,
+        stake: u64,
+    },
+    BeginUnstake { amount: u64 },
+    WithdrawUnbonded,
+    RegisterEncryptionKey {
+        /// X25519 encryption pubkey (hex, 32 bytes).
+        encryption_pubkey: String,
+    },
+}
+
+/// Request for `nodeRegistry_buildTransaction` (issue #89).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeRegistryBuildRequest {
+    /// Sender/signer address (base58).
+    pub from: String,
+    pub fee: Option<u128>,
+    pub nonce: Option<u64>,
+    pub chain_id: Option<u64>,
+    #[serde(flatten)]
+    pub op: NodeRegistryBuildOp,
+}

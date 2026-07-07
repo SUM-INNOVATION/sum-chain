@@ -80,4 +80,17 @@ export type {
   NftTokenInfo,
   NftTokenRef,
   NftOwnerTokens,
+  // No-key transaction builders (issue #89)
+  TxBuildResponse,
+  BuildRequestBase,
+  TokenBuildOp,
+  TokenBuildRequest,
+  NftCollectionConfigInput,
+  NftBatchMintRequestInput,
+  NftBuildOp,
+  NftBuildRequest,
+  StakingBuildOp,
+  StakingBuildRequest,
+  NodeRegistryBuildOp,
+  NodeRegistryBuildRequest,
 } from './types.js';
