@@ -35,6 +35,9 @@ pub struct ValidatorApproval {
 pub const GOV_REGISTER_ASSET_DOMAIN: &[u8] = b"SRC-GOV-VALQUORUM:register_asset:v1:";
 /// Domain separator: governance validator-authority `CancelProposal` approval.
 pub const GOV_CANCEL_PROPOSAL_DOMAIN: &[u8] = b"SRC-GOV-VALQUORUM:cancel_proposal:v1:";
+/// Domain separator: governance `RegisterEquityClass` validator approval (#92).
+pub const GOV_REGISTER_EQUITY_CLASS_DOMAIN: &[u8] =
+    b"SRC-GOV-VALQUORUM:register_equity_class:v1:";
 /// Domain separator: inference-settlement `ResolveDispute` validator approval.
 pub const INFERENCE_RESOLVE_DISPUTE_DOMAIN: &[u8] =
     b"OMNINODE-SETTLE-VALQUORUM:resolve_dispute:v1:";
@@ -64,6 +67,23 @@ pub fn cancel_proposal_signing_bytes(chain_id: ChainId, proposal_id: &[u8; 32]) 
     m.extend_from_slice(GOV_CANCEL_PROPOSAL_DOMAIN);
     m.extend_from_slice(&chain_id.to_le_bytes());
     m.extend_from_slice(proposal_id);
+    m
+}
+
+/// Canonical bytes a validator signs to approve a governance `RegisterEquityClass`
+/// (#92). Binds `chain_id` + the class id, create threshold, and effective height.
+pub fn register_equity_class_signing_bytes(
+    chain_id: ChainId,
+    class_id: &[u8; 32],
+    create_threshold: u128,
+    effective_height: u64,
+) -> Vec<u8> {
+    let mut m = Vec::with_capacity(GOV_REGISTER_EQUITY_CLASS_DOMAIN.len() + 8 + 32 + 16 + 8);
+    m.extend_from_slice(GOV_REGISTER_EQUITY_CLASS_DOMAIN);
+    m.extend_from_slice(&chain_id.to_le_bytes());
+    m.extend_from_slice(class_id);
+    m.extend_from_slice(&create_threshold.to_le_bytes());
+    m.extend_from_slice(&effective_height.to_le_bytes());
     m
 }
 

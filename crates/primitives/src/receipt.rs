@@ -122,6 +122,13 @@ impl TxStatus {
             TxStatus::Failed(310) => "on-chain governance execution not supported in v1",
             TxStatus::Failed(311) => "insufficient balance to post governance proposal bond",
             TxStatus::Failed(312) => "insufficient governance treasury balance for on-chain payout",
+            // Governance v2 (native-Koppa eligibility #91, SRC-833 equity vote #92).
+            TxStatus::Failed(313) => "native-eligibility governance mode not enabled or configured",
+            TxStatus::Failed(314) => "native-eligibility create found no eligible addresses",
+            TxStatus::Failed(315) => "no qualifying-asset holders for native eligibility",
+            TxStatus::Failed(316) => "qualifying asset not allowlisted / registry empty",
+            TxStatus::Failed(317) => "equity governance mode not enabled or class is non-voting",
+            TxStatus::Failed(318) => "invalid controller-attested equity vote (proof/signature/root)",
             // Archive-node withdrawal / unbonding (issue #20). Isolated 320-block.
             TxStatus::Failed(320) => "archive unbonding not enabled at this block height",
             TxStatus::Failed(321) => "not a registered archive node",

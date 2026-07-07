@@ -31,6 +31,13 @@ pub enum GovernanceOperation {
     ExecuteProposal = 3,
     /// Cancel a pending proposal.
     CancelProposal = 4,
+    /// Register a native-eligibility qualifying SRC-20 (#91, validator-quorum).
+    RegisterQualifyingAsset = 5,
+    /// Register an SRC-833 equity share class as a governance asset (#92,
+    /// validator-quorum).
+    RegisterEquityClass = 6,
+    /// Cast an SRC-833 controller-attested equity vote (#92).
+    CastEquityVote = 7,
 }
 
 impl GovernanceOperation {
@@ -41,6 +48,9 @@ impl GovernanceOperation {
             2 => Some(GovernanceOperation::CastVote),
             3 => Some(GovernanceOperation::ExecuteProposal),
             4 => Some(GovernanceOperation::CancelProposal),
+            5 => Some(GovernanceOperation::RegisterQualifyingAsset),
+            6 => Some(GovernanceOperation::RegisterEquityClass),
+            7 => Some(GovernanceOperation::CastEquityVote),
             _ => None,
         }
     }
@@ -71,21 +81,39 @@ pub type GovBlockHeight = u64;
 /// Timestamp alias for governance records.
 pub type GovTimestamp = u64;
 
-/// Governance-eligible asset kind. v1 supports a single allowlisted SRC-20
-/// governance token; `StakedKoppa` and other classes are reserved for a future,
-/// separately-approved revision (not constructed or accepted in v1).
+/// Governance-eligible asset kind. Variants are append-only for wire safety.
+///
+/// - `Src20Token` — an allowlisted SRC-20 governance token (v1, weight = balance).
+/// - `NativeEligibility` — Governance-v2 native-Koppa 1-address-1-vote mode
+///   (#91): the electorate is holders of an allowlisted qualifying SRC-20 who
+///   also hold >= `GovernanceParams::min_koppa_for_eligibility` native Koppa at
+///   creation height, each with weight 1.
+/// - `EquityClass` — Governance-v2 SRC-833 controller-attested equity vote (#92):
+///   weight = `shares * votes_per_share` under the class's chain-derived
+///   `EQUITY_BALANCES` Merkle root, frozen at proposal creation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum GovAssetKind {
     /// An allowlisted SRC-20 governance token.
     Src20Token(TokenId),
+    /// Native-Koppa 1-address-1-vote eligibility mode (#91).
+    NativeEligibility,
+    /// SRC-833 equity share class, keyed by `class_id` (#92).
+    EquityClass([u8; 32]),
 }
 
-/// How a holder's balance maps to voting weight. v1 is linear
-/// (`weight = snapshot balance`).
+/// How a holder's balance maps to voting weight. Variants are append-only.
+///
+/// - `Linear` — weight = snapshot balance (v1 SRC-20).
+/// - `OneAddressOneVote` — weight = 1 per eligible address (#91 native mode).
+/// - `SharesTimesVotesPerShare` — weight = `shares * votes_per_share` (#92 equity).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WeightRule {
     /// weight = snapshot balance.
     Linear,
+    /// weight = 1 per eligible address.
+    OneAddressOneVote,
+    /// weight = shares * votes_per_share.
+    SharesTimesVotesPerShare,
 }
 
 /// Registry status of a governance asset.
@@ -302,6 +330,12 @@ pub struct GovernanceParams {
     /// Policy Account.
     #[serde(default)]
     pub treasury: Option<Address>,
+    /// Minimum native-Koppa balance an address must hold (at proposal-creation
+    /// height) to be included in a `NativeEligibility` 1-address-1-vote snapshot
+    /// (#91). `0` (default) imposes no native-Koppa floor beyond registry
+    /// membership. Never used for SRC-20 or equity proposals.
+    #[serde(default)]
+    pub min_koppa_for_eligibility: u128,
 }
 
 /// Domain separator for the canonical, keyless governance bond-escrow address.
@@ -378,6 +412,85 @@ pub struct CancelProposalRequest {
     pub approvals: Vec<crate::validator_authority::ValidatorApproval>,
 }
 
+// ── Governance v2 request payloads (#91 native, #92 equity) ──────────────────
+
+/// `RegisterQualifyingAsset` request (#91). Authorized by a **validator quorum**
+/// exactly like [`RegisterAssetRequest`]. Registers an SRC-20 `token_id` whose
+/// holders (balance >= `min_balance`) form part of the native-eligibility
+/// electorate. `tx.from` is only the fee payer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisterQualifyingAssetRequest {
+    pub token_id: TokenId,
+    /// Minimum SRC-20 balance a holder needs to qualify.
+    pub min_balance: u128,
+    pub effective_height: GovBlockHeight,
+    /// Validator approvals over [`crate::validator_authority::register_asset_signing_bytes`]
+    /// (reuses the RegisterAsset signing bytes with `create_threshold = min_balance`).
+    #[serde(default)]
+    pub approvals: Vec<crate::validator_authority::ValidatorApproval>,
+}
+
+/// `RegisterEquityClass` request (#92). Validator-quorum authorized. Registers a
+/// SRC-833 equity share `class_id` as a governance asset whose votes are
+/// controller-attested (weight = `shares * votes_per_share`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisterEquityClassRequest {
+    pub class_id: [u8; 32],
+    /// Minimum snapshot voting power required to CREATE a proposal for this class.
+    pub create_threshold: u128,
+    pub effective_height: GovBlockHeight,
+    /// Validator approvals over [`crate::validator_authority::register_equity_class_signing_bytes`].
+    #[serde(default)]
+    pub approvals: Vec<crate::validator_authority::ValidatorApproval>,
+}
+
+/// `CastEquityVote` request (#92 SRC-833 ControllerAttestedEquityVote). The
+/// holder's shares are proven by a Merkle path under the class's frozen
+/// `EQUITY_BALANCES` root, and the whole vote is co-signed by the class
+/// controller (Ed25519 over [`equity_vote_signing_bytes`]). Carries only DATA:
+/// `controller_sig`/`controller_pubkey` are signature material, not signing keys.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CastEquityVoteRequest {
+    pub proposal_id: GovProposalId,
+    pub holder_commitment: [u8; 32],
+    pub shares: u64,
+    pub merkle_path: Vec<[u8; 32]>,
+    pub controller_pubkey: [u8; 32],
+    #[serde(with = "serde_big_array::BigArray")]
+    pub controller_sig: [u8; 64],
+    pub choice: VoteChoice,
+}
+
+/// Domain separator for the SRC-833 controller-attested equity-vote signature.
+pub const GOV_EQUITY_VOTE_DOMAIN: &[u8] = b"SRC-GOV-EQUITY-VOTE:v1:";
+
+/// Canonical bytes the class controller signs to attest one equity vote (#92).
+/// Binds `chain_id`, the proposal, the class, the frozen `balances_root`, the
+/// voting holder's commitment + shares, and the on-chain voter (tx sender), so an
+/// attestation can never be replayed onto another proposal, class, root, holder,
+/// or submitter. Variable-length nothing here (all fixed-width), so no length
+/// prefixes are required.
+pub fn equity_vote_signing_bytes(
+    chain_id: crate::ChainId,
+    proposal_id: &GovProposalId,
+    class_id: &[u8; 32],
+    balances_root: &[u8; 32],
+    holder_commitment: &[u8; 32],
+    shares: u64,
+    voter_address: &Address,
+) -> Vec<u8> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(GOV_EQUITY_VOTE_DOMAIN);
+    hasher.update(&chain_id.to_le_bytes());
+    hasher.update(proposal_id);
+    hasher.update(class_id);
+    hasher.update(balances_root);
+    hasher.update(holder_commitment);
+    hasher.update(&shares.to_le_bytes());
+    hasher.update(voter_address.as_ref());
+    hasher.finalize().as_bytes().to_vec()
+}
+
 /// Domain separator for deterministic proposal-id derivation.
 pub const GOV_PROPOSAL_DOMAIN: &[u8] = b"SRC-GOV-PROPOSAL:v1:";
 
@@ -395,7 +508,15 @@ pub fn generate_proposal_id(
     hasher.update(GOV_PROPOSAL_DOMAIN);
     hasher.update(proposer.as_ref());
     match asset {
-        GovAssetKind::Src20Token(token_id) => hasher.update(token_id),
+        GovAssetKind::Src20Token(token_id) => {
+            hasher.update(b"src20:");
+            hasher.update(token_id)
+        }
+        GovAssetKind::NativeEligibility => hasher.update(b"native-eligibility:"),
+        GovAssetKind::EquityClass(class_id) => {
+            hasher.update(b"equity-class:");
+            hasher.update(class_id)
+        }
     };
     hasher.update(content_hash);
     hasher.update(&created_at_height.to_le_bytes());
