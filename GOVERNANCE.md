@@ -101,6 +101,45 @@ Approval is **record-only** for every proposal class except one:
   other `OnChain` proposal is rejected. No chain parameter, validator, or
   consensus state is ever changed.
 
+## Governance v2 — additional voting modes (shipped)
+
+Two token-holder voting modes ship alongside SRC-20 snapshot voting. Both reuse
+the same frozen-snapshot lifecycle, quorum, and bond mechanics; they differ only
+in how the electorate and per-voter weight are derived. Validator-quorum
+authority (used to register the eligibility sources) stays entirely separate
+from the public vote.
+
+- **Native-Koppa 1-address-1-vote (#91).** Validator-quorum
+  `RegisterQualifyingAsset` allowlists an SRC-20 whose holders (balance ≥ that
+  asset's `min_balance`) are eligible. At **proposal creation**, the electorate
+  is frozen: every holder of an effective qualifying SRC-20 whose native Koppa
+  balance is ≥ `GovernanceParams.min_koppa_for_eligibility` at creation height,
+  deduped, each with **weight 1** (bounded by `max_snapshot_holders`).
+  Non-allowlisted or self-minted tokens confer nothing; NFTs/credentials are not
+  qualifying (only an SRC-20 `token_id` registry exists). Native proposals pass
+  at a fixed **6667 bps** of (yes+no); quorum uses `quorum_bps` over the frozen
+  electorate size. Votes reuse the standard cast-vote path.
+- **SRC-833 controller-attested equity vote (#92).** Validator-quorum
+  `RegisterEquityClass` registers a voting equity share class
+  (`votes_per_share > 0`) as a governance asset. At proposal creation the class's
+  **chain-derived** `EQUITY_BALANCES` Merkle root is computed on-chain and frozen
+  to the proposal. A voter proves `(holder_commitment, shares)` under that root
+  and submits the class **controller's** Ed25519 attestation over the vote;
+  weight = `shares × votes_per_share`. Each `(proposal, holder_commitment)` may
+  vote once. The chain never stores or returns a holder→balance table — only the
+  root and parameters are readable (`gov_getEquityClassVoting`).
+
+## Policy-Account token administration (shipped)
+
+A Policy Account can now execute, on behalf of its own address, exactly five
+SRC-20 token-admin operations via an approved proposal: **Pause, Unpause,
+AddMinter, RemoveMinter, TransferOwnership** (#90). The wrapped token op runs as
+`sender = policy_account.address`. Any other token op (e.g. Mint/Transfer) and
+all NFT/Staking/Governance/Deploy/Call actions remain fail-closed; only native
+transfer and these five ops execute. A failing wrapped op leaves **no** partial
+token state and does **not** advance the policy nonce, so the proposal can be
+retried.
+
 ## What governance cannot do
 
 - It cannot force a validator to upgrade its binary or genesis.

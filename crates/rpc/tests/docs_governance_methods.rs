@@ -32,7 +32,8 @@ fn read(rel: &str) -> String {
 }
 
 /// The exact approved governance surface: builders (no keys) + reads.
-const ALLOWED: [&str; 11] = [
+/// v1 (issue #50) = 11; Governance-v2 (#91 native, #92 equity) adds 7 → 18.
+const ALLOWED: [&str; 18] = [
     "gov_buildCreateProposal",
     "gov_buildCastVote",
     "gov_buildExecuteProposal",
@@ -44,6 +45,15 @@ const ALLOWED: [&str; 11] = [
     "gov_getVote",
     "gov_getVotingPower",
     "gov_listEligibleAssets",
+    // Governance v2 — native-Koppa eligibility (#91).
+    "gov_buildRegisterQualifyingAsset",
+    "gov_buildCastNativeVote",
+    "gov_getNativeEligibility",
+    "gov_listQualifyingAssets",
+    // Governance v2 — SRC-833 controller-attested equity vote (#92).
+    "gov_buildRegisterEquityClass",
+    "gov_buildCastEquityVote",
+    "gov_getEquityClassVoting",
 ];
 
 #[test]

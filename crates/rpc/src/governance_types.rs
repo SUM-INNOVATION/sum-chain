@@ -62,6 +62,61 @@ pub struct GovBuildCancelProposalRequest {
     pub approvals: Vec<crate::types::ValidatorApprovalInput>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GovBuildRegisterQualifyingAssetRequest {
+    pub from: String,
+    /// SRC-20 token id whose holders form part of the native electorate (hex).
+    pub token_id: String,
+    /// Minimum SRC-20 balance a holder needs to qualify.
+    pub min_balance: u128,
+    pub effective_height: u64,
+    /// Validator approvals (validator-quorum authorized).
+    #[serde(default)]
+    pub approvals: Vec<crate::types::ValidatorApprovalInput>,
+    pub fee: Option<u128>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GovBuildCastNativeVoteRequest {
+    pub from: String,
+    pub proposal_id: String,
+    /// "Yes" | "No" | "Abstain".
+    pub choice: String,
+    pub fee: Option<u128>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GovBuildRegisterEquityClassRequest {
+    pub from: String,
+    /// SRC-833 equity share class id (hex).
+    pub class_id: String,
+    /// Minimum snapshot voting power required to CREATE a proposal for this class.
+    pub create_threshold: u128,
+    pub effective_height: u64,
+    #[serde(default)]
+    pub approvals: Vec<crate::types::ValidatorApprovalInput>,
+    pub fee: Option<u128>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GovBuildCastEquityVoteRequest {
+    pub from: String,
+    pub proposal_id: String,
+    /// Holder commitment (hex, 32 bytes).
+    pub holder_commitment: String,
+    pub shares: u64,
+    /// Leaf→root Merkle sibling path (hex 32-byte elements).
+    pub merkle_path: Vec<String>,
+    /// Class controller's Ed25519 public key (hex, 32 bytes) — DATA, not a key.
+    pub controller_pubkey: String,
+    /// Controller's Ed25519 signature (hex, 64 bytes) — signature material, not a
+    /// signing key.
+    pub controller_sig: String,
+    /// "Yes" | "No" | "Abstain".
+    pub choice: String,
+    pub fee: Option<u128>,
+}
+
 // ── Builder response ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,9 +163,19 @@ pub struct GovProposalInfo {
     pub treasury_amount: Option<String>,
 }
 
+/// Render a governance asset kind as a stable string id for read DTOs:
+/// `0x<token_id>` for SRC-20, `native-eligibility` for the native mode, and
+/// `equity:0x<class_id>` for an equity class. No holder/balance data.
+pub fn gov_asset_kind_id(kind: &GovAssetKind) -> String {
+    match kind {
+        GovAssetKind::Src20Token(token_id) => format!("0x{}", hex::encode(token_id)),
+        GovAssetKind::NativeEligibility => "native-eligibility".to_string(),
+        GovAssetKind::EquityClass(class_id) => format!("equity:0x{}", hex::encode(class_id)),
+    }
+}
+
 impl From<&GovProposal> for GovProposalInfo {
     fn from(p: &GovProposal) -> Self {
-        let GovAssetKind::Src20Token(token_id) = p.asset;
         Self {
             proposal_id: format!("0x{}", hex::encode(p.id)),
             proposer: p.proposer.to_base58(),
@@ -118,7 +183,7 @@ impl From<&GovProposal> for GovProposalInfo {
             execution_kind: format!("{:?}", p.execution_kind),
             external_ref_url: p.external_ref.url.clone(),
             external_ref_content_hash: format!("0x{}", hex::encode(p.external_ref.content_hash)),
-            asset_token_id: format!("0x{}", hex::encode(token_id)),
+            asset_token_id: gov_asset_kind_id(&p.asset),
             voting_start_height: p.voting_start_height,
             status: format!("{:?}", p.status),
             created_at: p.created_at,
@@ -143,9 +208,8 @@ pub struct GovAssetInfo {
 
 impl From<&GovAsset> for GovAssetInfo {
     fn from(a: &GovAsset) -> Self {
-        let GovAssetKind::Src20Token(token_id) = a.asset;
         Self {
-            token_id: format!("0x{}", hex::encode(token_id)),
+            token_id: gov_asset_kind_id(&a.asset),
             create_threshold: a.create_threshold.to_string(),
             weight_rule: format!("{:?}", a.vote_weight_rule),
             status: format!("{:?}", a.status),
@@ -196,6 +260,26 @@ pub struct GovVotingPowerInfo {
     pub holder: String,
     /// Frozen snapshot voting weight for this proposal (never live balance).
     pub weight: String,
+}
+
+/// A native-eligibility qualifying SRC-20 (#91). No holder data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GovQualifyingAssetInfo {
+    pub token_id: String,
+    pub min_balance: String,
+    pub effective_height: u64,
+}
+
+/// SRC-833 equity-class voting metadata (#92). Exposes ONLY the chain-derived
+/// balances root + parameters — never a holder→balance table.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GovEquityClassVotingInfo {
+    pub class_id: String,
+    /// Chain-derived Merkle root over the class's equity balances (hex).
+    pub balances_root: String,
+    pub votes_per_share: u64,
+    /// Whether the class is voting (votes_per_share > 0).
+    pub voting: bool,
 }
 
 // ── String → enum parsers for builder inputs ─────────────────────────────────

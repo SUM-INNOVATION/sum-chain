@@ -846,6 +846,26 @@ slashing in v1 (reward denial / claim withholding / escrow refund only).
 | `omninode_buildOpenInferenceSession` / `buildFundInferenceSession` / `buildClaimInferenceReward` / `buildOpenInferenceDispute` / `buildResolveInferenceDispute` / `buildRefundInferenceSession` | unsigned-tx builders (no keys). `buildOpenInferenceSession` accepts optional `consistency` (issue #77) and `bond_requirement` (issue #78) configs. Dispute resolution is validator-quorum controlled (no personal resolver key); `buildResolveInferenceDispute` accepts an optional `approvals` list of validator signatures. |
 | `omninode_buildRegisterVerifier` / `buildAddVerifierBond` / `buildBeginVerifierUnbond` / `buildWithdrawVerifierBond` | verifier bond-registry builders (no keys, issue #78). Bond is native Koppa; slashing on a denied dispute burns to the zero address. |
 
+### On-chain governance (`gov_*`) — gate set to 8,900,000
+
+Token-holder governance behind `governance_enabled_from_height`. All writes go
+through **no-key unsigned-tx builders** (client signs `signing_hash`, broadcasts
+via `sum_sendRawTransaction`); reads expose governance data only. Full model:
+[GOVERNANCE.md](../../GOVERNANCE.md). Validator-quorum authority (register paths)
+is separate from public token-holder voting.
+
+| Method | Kind |
+|---|---|
+| `gov_buildCreateProposal` / `gov_buildCastVote` / `gov_buildExecuteProposal` / `gov_buildCancelProposal` | unsigned-tx builders (no keys). SRC-20 snapshot voting (weight = frozen balance). |
+| `gov_getProposal(id)` / `gov_listProposals` / `gov_listActiveProposals` / `gov_getTally(id)` / `gov_getVote(id, voter)` / `gov_getVotingPower(id, holder)` / `gov_listEligibleAssets` | reads |
+| `gov_buildRegisterQualifyingAsset` | **Governance v2 (#91)** unsigned builder — validator-quorum registers an SRC-20 whose holders (balance ≥ `min_balance`) join the native-Koppa 1-address-1-vote electorate. |
+| `gov_buildCastNativeVote` | **Governance v2 (#91)** unsigned builder — cast a native-eligibility vote (weight = 1 per eligible address; reuses the CastVote payload). |
+| `gov_getNativeEligibility(proposal_id, address)` → `bool` | **Governance v2 (#91)** read — whether an address is in a native proposal's frozen eligibility snapshot. |
+| `gov_listQualifyingAssets` | **Governance v2 (#91)** read — the native qualifying-SRC-20 registry (`token_id`, `min_balance`, `effective_height`). |
+| `gov_buildRegisterEquityClass` | **Governance v2 (#92)** unsigned builder — validator-quorum registers an SRC-833 equity share class as a governance asset (weight = `shares × votes_per_share`). |
+| `gov_buildCastEquityVote` | **Governance v2 (#92)** unsigned builder — controller-attested equity vote carrying `holder_commitment` / `shares` / `merkle_path` / `controller_pubkey` / `controller_sig` as **data** (no keys). |
+| `gov_getEquityClassVoting(class_id)` → `{ balances_root, votes_per_share, voting }` | **Governance v2 (#92)** read — chain-derived balances root + params only; **never** a holder→balance table. |
+
 ### No-key unsigned-tx family builders (issue #89)
 
 One builder per family, each taking a tagged operation request `{from, fee?, nonce?, chain_id?, <envelope ids>, op}`. **No-key** — no private keys, no signing, no submit, no execution, no authorization: the builder only assembles an unsigned `TransactionV2`. All return the shared shape `{unsigned_tx, signing_hash, from, nonce, fee, chain_id}`. `nonce`/`chain_id` are fetched from state when omitted. The client signs `signing_hash` locally and broadcasts via `sum_sendRawTransaction`; the executor stays authoritative for all authority/gate/lifecycle checks.
