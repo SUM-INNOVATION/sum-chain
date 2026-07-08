@@ -370,6 +370,33 @@ pub struct ChainParams {
     #[serde(default)]
     pub por_assignment_targeting_enabled_from_height: Option<u64>,
 
+    /// Bounded assignment-aware PoR *scheduler* activation gate (issue #100,
+    /// Phase 2). `None` (default) = the scheduler is dormant and challenge
+    /// generation is exactly the post-#101 single-challenge path. When `Some(h)`
+    /// and `block_height >= h`, each challenge interval emits a bounded,
+    /// deterministic *set* of assignment-aware challenges instead of one.
+    /// Distinct from `por_assignment_targeting_enabled_from_height` (#97, Phase
+    /// 1) — the two gates are never shared. `#[serde(default)]` keeps existing
+    /// `genesis.json` on the pre-scheduler path.
+    #[serde(default)]
+    pub assignment_aware_por_scheduler_enabled_from_height: Option<u64>,
+
+    /// Hard cap on challenges emitted per interval by the #100 scheduler — the
+    /// primary per-block cost bound. Only consulted when the scheduler gate is
+    /// open.
+    #[serde(default = "default_max_assignment_aware_challenges_per_block")]
+    pub max_assignment_aware_challenges_per_block: u32,
+
+    /// Cap on distinct files sampled per interval by the #100 scheduler. Only
+    /// consulted when the scheduler gate is open.
+    #[serde(default = "default_max_files_sampled_per_interval")]
+    pub max_files_sampled_per_interval: u32,
+
+    /// Cap on chunk indices sampled per file per interval by the #100 scheduler.
+    /// Only consulted when the scheduler gate is open.
+    #[serde(default = "default_max_chunks_sampled_per_file")]
+    pub max_chunks_sampled_per_file: u32,
+
     /// OmniNode Inference Settlement activation gate (issue #61). `None` = the
     /// settlement subprotocol is dormant; all settlement ops are rejected free
     /// (`Failed(350)`, no fee). Separate from `omninode_enabled_from_height` —
@@ -484,6 +511,18 @@ fn default_max_chunk_indices_per_tx() -> u32 {
 
 fn default_assignment_replication_factor() -> u32 {
     3 // baseline R=3; effective R is min(this, active_snapshot_size)
+}
+
+fn default_max_assignment_aware_challenges_per_block() -> u32 {
+    16 // issue #100: bounded per-interval challenge budget
+}
+
+fn default_max_files_sampled_per_interval() -> u32 {
+    8 // issue #100: files inspected per interval
+}
+
+fn default_max_chunks_sampled_per_file() -> u32 {
+    4 // issue #100: chunks sampled per file per interval
 }
 
 /// SRC-201 Messaging Parameters
@@ -655,6 +694,13 @@ impl Default for ChainParams {
             // Production-safe default: legacy PoR challenge targeting (issue
             // #97). Activation is a coordinated validator upgrade.
             por_assignment_targeting_enabled_from_height: None,
+            // Production-safe default: bounded PoR scheduler dormant (issue
+            // #100). Activation is a coordinated validator upgrade.
+            assignment_aware_por_scheduler_enabled_from_height: None,
+            max_assignment_aware_challenges_per_block:
+                default_max_assignment_aware_challenges_per_block(),
+            max_files_sampled_per_interval: default_max_files_sampled_per_interval(),
+            max_chunks_sampled_per_file: default_max_chunks_sampled_per_file(),
             // Production-safe default: OmniNode inference settlement dormant
             // (issue #61). Activation is a coordinated validator upgrade.
             inference_settlement_enabled_from_height: None,

@@ -195,6 +195,41 @@ change. A pre-existing V1 bug was fixed alongside: `get_funded_file_roots` now
 guards `key[0] == b'F'` so owner-index marker keys are never decoded as funded
 rows.
 
+## 9b. Phase 2 shipped behavior (issue #100)
+
+The bounded scheduler is implemented behind its own gate
+`assignment_aware_por_scheduler_enabled_from_height: Option<u64>` (default `None`;
+never shared with the Phase-1 gate). When dormant, challenge generation is exactly
+the post-#101 single-challenge path.
+
+- **Params** (consulted only when the gate is open): `max_assignment_aware_challenges_per_block`
+  (default 16, the hard emit cap), `max_files_sampled_per_interval` (8),
+  `max_chunks_sampled_per_file` (4). Cadence reuses `CHALLENGE_INTERVAL_BLOCKS`;
+  epoch preference is fixed to **latest**; no cooldown in v1 (`TTL 50 < interval
+  100`, so no open challenge survives across intervals).
+- **Challengeable index** — CF `challengeable_files_v2`, key `merkle_root` (32
+  raw bytes) → value `chunk_count` (4-byte big-endian `u32`). Present iff a V2
+  file is `Active && fee_pool > 0 && chunk_count > 0`. Maintained on
+  `ActivateFileV2` and on a V2 challenge payout that drains `fee_pool` to 0. A
+  **one-time** backfill (guarded by a persisted marker in `meta`) is the only
+  full V2 scan and runs once when the gate first opens; if it fails the scheduler
+  fails closed for that block.
+- **Sampling** — seed `blake3("snip.por.schedule.v1" || parent_hash || H)`; a
+  seeded stride-walk (`iter_from`, wrap-around) samples ≤ `max_files` files from
+  the index, ≤ `max_chunks` chunks each; each `(file, chunk)` resolves to an
+  assigned-active target under the file's latest epoch (reusing #97's
+  `select_assigned_active_target`); emits ≤ `max_emit` challenges, identical in
+  shape to the single-challenge path. Pairs with no assigned-active archive are
+  skipped; stale index entries are removed and skipped. Cost is
+  `O(max_files·(log n + max_chunks·R))` — never files×chunks.
+- **V2 proof settlement (prerequisite)** — `SubmitStorageProof` now settles V2
+  files: V1 rows keep exact prior behavior; a V2-only file requires `Active`,
+  bounds `chunk_index < chunk_count`, verifies the same Merkle proof against the
+  root, and pays `CHALLENGE_REWARD` (partial if low) from V2 `fee_pool`, removing
+  the file from the index when drained. Without this, an honest archive holding a
+  challenged V2 chunk could not prove and would be slashed. Payout amount, slash
+  percentage, and TTL are unchanged.
+
 ## 10. Out of scope
 
 - **Reward / slash economics** — payout stays fee-pool based; slash stays the
