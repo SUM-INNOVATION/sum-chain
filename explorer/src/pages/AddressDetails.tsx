@@ -4,6 +4,7 @@ import { provider } from '../utils/provider';
 import { formatKoppa, formatTimestamp } from '../utils/formatters';
 import { DetailSkeleton, ErrorState, Skeleton } from '../components/States';
 import { TransactionTypeBadge, TransactionActionLabel } from '../components/TransactionType';
+import { AddressLabel } from '../components/AddressLabel';
 
 interface TransactionHistoryEntry {
   tx_hash: string;
@@ -124,6 +125,11 @@ export default function AddressDetails() {
 
       <div className="rounded-2xl border border-border bg-surface p-6">
         <div className="mb-2 text-sm text-muted">Address</div>
+        {address && (
+          <div className="mb-1 text-lg">
+            <AddressLabel address={address} mode="chip" />
+          </div>
+        )}
         <div className="mb-6 break-all font-mono text-lg text-foreground">{address}</div>
 
         <div className="grid grid-cols-2 gap-6">

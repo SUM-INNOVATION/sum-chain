@@ -19,6 +19,7 @@ import type {
   NftOwnerTokens,
   Src20TokenInfo,
   TokenMintersInfo,
+  AddressLabelsInfo,
   Src20TokenHoldings,
   TxBuildResponse,
   TokenBuildRequest,
@@ -529,6 +530,29 @@ export class Provider {
    */
   async getTokenMinters(tokenId: string): Promise<TokenMintersInfo | null> {
     return this.request<TokenMintersInfo | null>('token_getMinters', [tokenId]);
+  }
+
+  /**
+   * Resolve public registry labels for an address (issue #64).
+   *
+   * A read-only point lookup across the address-keyed public registries
+   * (DocClass / Employment issuer names; Tax / Finance issuer roles; node role).
+   * Returns the raw address plus any labels and a deterministic `primary_label`
+   * (empty labels + `null` primary when the address is in no public registry).
+   * This is a **current** registry view — not a historical-at-tx-height claim.
+   * Always display the raw address alongside any label.
+   *
+   * @param address - Address to resolve (base58)
+   * @returns Address plus resolved public labels
+   *
+   * @example
+   * ```ts
+   * const { primary_label, labels } = await provider.resolveAddressLabels('SUM1abc...');
+   * // primary_label: "SUM Hypothesis Institute" | null
+   * ```
+   */
+  async resolveAddressLabels(address: Address): Promise<AddressLabelsInfo> {
+    return this.request<AddressLabelsInfo>('sum_resolveAddressLabels', [address]);
   }
 
   /**
