@@ -68,6 +68,8 @@ export type {
   TransactionHistoryEntry,
   TransactionHistoryResponse,
   TokenMintersInfo,
+  AddressLabel,
+  AddressLabelsInfo,
   ValidatorInfo,
   ValidatorSetInfo,
   HealthResponse,

@@ -4,6 +4,7 @@ import { provider } from '../utils/provider';
 import { formatKoppa, formatHash, formatTimeAgo } from '../utils/formatters';
 import { RowSkeleton, ErrorState, Skeleton } from '../components/States';
 import { TransactionTypeBadge, TransactionActionLabel } from '../components/TransactionType';
+import { AddressLabel } from '../components/AddressLabel';
 import type { BlockInfo, TransactionInfo, HealthResponse } from '@sumchain/sdk';
 
 export default function Home() {
@@ -134,9 +135,14 @@ export default function Home() {
                     <div className="shrink-0 font-mono text-xs text-muted">{formatHash(tx.hash, 10)}</div>
                   </div>
                   <div className="flex items-center justify-between text-sm">
-                    <div className="min-w-0 truncate font-mono text-xs text-muted">
-                      {formatHash(tx.from)}
-                      {tx.to ? ` → ${formatHash(tx.to)}` : ''}
+                    <div className="flex min-w-0 items-center gap-1 truncate font-mono text-xs text-muted">
+                      <AddressLabel address={tx.from} mode="inline" />
+                      {tx.to ? (
+                        <>
+                          <span aria-hidden>→</span>
+                          <AddressLabel address={tx.to} mode="inline" />
+                        </>
+                      ) : null}
                     </div>
                     <div className="tnum shrink-0 font-medium text-foreground">{formatKoppa(tx.amount)}</div>
                   </div>

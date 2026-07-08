@@ -291,6 +291,37 @@ export interface TokenMintersInfo {
 }
 
 /**
+ * One public registry label for an address (issue #64). Either a registered
+ * institution/issuer name (`kind: 'institution'`) or a role/class label proven
+ * by a public registry (`kind: 'role'`). Never fabricated.
+ */
+export interface AddressLabel {
+  /** Display text — an institution/issuer name, or a role/class label. */
+  label: string;
+  /** `'institution'` (a real registered name) or `'role'` (a role/class only). */
+  kind: 'institution' | 'role';
+  /** Registry that produced the label: `DocClassIssuer` | `EmploymentIssuer` | `TaxIssuer` | `FinanceIssuer` | `NodeRegistry`. */
+  source: string;
+  /** Registry status (e.g. `Active`, `Suspended`, `Revoked`). */
+  status: string;
+}
+
+/**
+ * Public registry labels resolved for a single address at read time (issue #64).
+ * This is a **current** on-chain registry view, not a historical-at-tx-height
+ * assertion. Point lookup only. The raw `address` is always echoed so callers
+ * keep it visible/copyable.
+ */
+export interface AddressLabelsInfo {
+  /** The queried address, base58. */
+  address: Address;
+  /** Deterministic primary label for compact display, or `null` when none. */
+  primary_label: string | null;
+  /** All resolved labels, in a fixed source order. */
+  labels: AddressLabel[];
+}
+
+/**
  * Transaction history response with pagination
  */
 export interface TransactionHistoryResponse {

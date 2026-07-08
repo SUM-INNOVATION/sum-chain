@@ -3,6 +3,7 @@ import { useParams, Link } from 'react-router-dom';
 import { provider } from '../utils/provider';
 import { formatHash, formatTimestamp, copyToClipboard } from '../utils/formatters';
 import { DetailSkeleton, ErrorState, Skeleton } from '../components/States';
+import { AddressLabel } from '../components/AddressLabel';
 import type { BlockInfo } from '@sumchain/sdk';
 
 export default function BlockDetails() {
@@ -76,7 +77,12 @@ export default function BlockDetails() {
         <DetailRow label="Timestamp" value={formatTimestamp(block.timestamp)} />
         <DetailRow label="State root" value={block.state_root} onCopy={() => handleCopy(block.state_root, 'state')} copied={copied === 'state'} />
         <DetailRow label="Tx root" value={block.tx_root} onCopy={() => handleCopy(block.tx_root, 'tx')} copied={copied === 'tx'} />
-        <DetailRow label="Proposer" value={block.proposer} onCopy={() => handleCopy(block.proposer, 'proposer')} copied={copied === 'proposer'} />
+        <div className="flex items-start justify-between gap-4 border-b border-border pb-3">
+          <div className="font-medium text-muted">Proposer</div>
+          <div className="text-right font-mono text-foreground">
+            <AddressLabel address={block.proposer} className="justify-end" />
+          </div>
+        </div>
         <DetailRow label="Transaction count" value={block.tx_count.toString()} />
       </div>
 
