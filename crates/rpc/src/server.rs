@@ -1467,6 +1467,25 @@ impl SumChainApiServer for RpcServer {
         Ok(out)
     }
 
+    async fn sum_get_inference_attestation_sponsor(
+        &self,
+        session_id: String,
+        verifier_address: String,
+    ) -> std::result::Result<Option<crate::types::InferenceAttestationSponsorInfo>, jsonrpsee::types::ErrorObjectOwned> {
+        use sumchain_primitives::inference_attestation::inference_attestation_key;
+        let addr = self.parse_address(&verifier_address)?;
+        let key = inference_attestation_key(&session_id, &addr);
+        let executor = InferenceAttestationExecutor::new(self.db.clone());
+        let maybe = executor
+            .get_sponsor(&key)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(maybe.map(|sp| crate::types::InferenceAttestationSponsorInfo {
+            sponsor_address: sp.sponsor.to_base58(),
+            submitted_at_height: sp.submitted_at_height,
+            tx_hash: sp.tx_hash.to_hex(),
+        }))
+    }
+
     async fn sum_get_inference_attestation_status(
         &self,
         tx_hash: String,
@@ -10135,7 +10154,7 @@ mod messaging_rpc_tests {
                 included_at_height: 1,
                 tx_hash: sumchain_primitives::Hash::new([v; 32]),
             };
-            aexec.put(&inference_attestation_key("s", &verifier), &rec, &verifier).unwrap();
+            aexec.put(&inference_attestation_key("s", &verifier), &rec, &verifier, None).unwrap();
         };
         // Two verifiers agree on tuple A; one holds tuple B; a fourth shares only
         // response_hash with A but differs elsewhere → its own singleton group.

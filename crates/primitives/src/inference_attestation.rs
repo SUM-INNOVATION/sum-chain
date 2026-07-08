@@ -363,3 +363,21 @@ pub struct InferenceAttestationRecord {
     pub included_at_height: u64,
     pub tx_hash: crate::Hash,
 }
+
+/// Additive sponsor metadata for a **sponsored (v2)** inference attestation
+/// (issue #95). Stored in the dedicated `INFERENCE_ATTESTATION_SPONSORS` CF under
+/// the SAME `inference_attestation_key(session_id, verifier_address)` as the
+/// canonical [`InferenceAttestationRecord`], and written **only** by the
+/// sponsored v2 path, in the same atomic batch as the record. v1 direct
+/// submissions (`sender == verifier`) write no sponsor entry, so absence means
+/// "not sponsored". This is observability-only: the sponsor never becomes the
+/// attestation identity and settlement never reads it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InferenceAttestationSponsor {
+    /// The outer transaction sender that paid to submit the attestation.
+    pub sponsor: Address,
+    /// Block height at which the sponsored attestation was included.
+    pub submitted_at_height: u64,
+    /// Hash of the outer (sponsor-signed) transaction that carried the v2 envelope.
+    pub tx_hash: crate::Hash,
+}
