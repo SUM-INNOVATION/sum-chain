@@ -167,6 +167,34 @@ values are set during implementation review.
 
 **This PR makes no behavior change and adds no code — design only.**
 
+## 9a. Phase 1 shipped behavior (issue #97)
+
+Phase 1 (assignment-aware *targeting* of the existing single challenge, distinct
+from the bounded multi-challenge scheduler above) is implemented behind its own
+gate `por_assignment_targeting_enabled_from_height: Option<u64>` (default `None`;
+**not** shared with the future scheduler gate, per §5/#97).
+
+- **Below the gate** — byte-identical legacy: `generate_challenge` samples one
+  file from the V1 funded set (`get_funded_file_roots`) and one target from
+  **all** currently-active archives.
+- **At/above the gate** — same single-challenge cadence, but:
+  1. the file is sampled from the **V2 funded + Active** candidates
+     (`funded_active_v2_candidates`: `lifecycle == Active`, `fee_pool > 0`,
+     `chunk_count > 0`; deterministic order), which are the only files that
+     carry an assignment;
+  2. after `(file, chunk)` is chosen, the target is drawn only from the archives
+     **assigned to that chunk** under the file's **latest** applicable assignment
+     epoch snapshot, filtered to those **currently Active**, chosen
+     deterministically from the existing challenge seed;
+  3. if no assigned archive is currently Active for that chunk, the challenge is
+     **skipped** for the interval — a bystander is never challenged or slashed.
+
+Cost is `O(V2 funded+Active candidates + epoch snapshot size)` for the single
+challenge — no files×chunks sweep, no new CF, no schema change, no economics
+change. A pre-existing V1 bug was fixed alongside: `get_funded_file_roots` now
+guards `key[0] == b'F'` so owner-index marker keys are never decoded as funded
+rows.
+
 ## 10. Out of scope
 
 - **Reward / slash economics** — payout stays fee-pool based; slash stays the

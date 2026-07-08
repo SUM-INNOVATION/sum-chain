@@ -131,6 +131,16 @@ fn archive_unbonding_gate_open(params: &ChainParams, block_height: u64) -> bool 
 fn archive_reassignment_gate_open(params: &ChainParams, block_height: u64) -> bool {
     matches!(params.archive_reassignment_enabled_from_height, Some(h) if block_height >= h)
 }
+
+/// Assignment-aware PoR challenge targeting gate (issue #97, Phase 1). Same
+/// dormant-deploy semantics: production default `None` → never open, so storage
+/// challenges use legacy targeting (target drawn from all globally-active
+/// archives). When open, the challenge target is drawn only from the archives
+/// assigned to the challenged chunk that are currently Active.
+#[inline]
+fn por_assignment_targeting_gate_open(params: &ChainParams, block_height: u64) -> bool {
+    matches!(params.por_assignment_targeting_enabled_from_height, Some(h) if block_height >= h)
+}
 // Governance activation-gate resolution lives in
 // `crate::governance_executor::gate_open` (used by the dispatch skeleton).
 
@@ -2835,8 +2845,18 @@ impl BlockExecutor {
         // Use parent block hash as deterministic seed
         let parent_hash = &block.header.parent_hash;
 
+        // Issue #97: at/above the gate, restrict the target to archives assigned
+        // to the challenged chunk that are currently Active. Below the gate, the
+        // target is drawn from all active archives (exact legacy behavior).
+        let assignment_targeting = por_assignment_targeting_gate_open(&self.params, height);
+
         match self.storage_metadata_executor.generate_challenge(
-            parent_hash, height, &archive_nodes,
+            parent_hash,
+            height,
+            &archive_nodes,
+            &self.node_registry_executor,
+            assignment_targeting,
+            self.params.assignment_replication_factor,
         )? {
             Some(_challenge) => {
                 // Challenge was created and written to ACTIVE_CHALLENGES
