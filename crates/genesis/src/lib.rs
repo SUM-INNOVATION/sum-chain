@@ -355,6 +355,21 @@ pub struct ChainParams {
     #[serde(default)]
     pub archive_reassignment_enabled_from_height: Option<u64>,
 
+    /// Assignment-aware PoR challenge targeting activation gate (issue #97,
+    /// Phase 1). `None` (default) = legacy targeting: a storage challenge's
+    /// `target_node` is drawn from *all* globally-active archives, which can
+    /// challenge/slash a bystander not assigned to the challenged `(file,
+    /// chunk)`. When `Some(h)` and `block_height >= h`, the same file/chunk
+    /// candidate is selected as before, but the target is drawn only from the
+    /// archives assigned to that chunk (under the file's latest assignment
+    /// epoch) that are currently Active; if none, the challenge is skipped for
+    /// that interval. Distinct from
+    /// `archive_reassignment_enabled_from_height` (#62) and from the Phase 2
+    /// bounded scheduler gate (#100). `#[serde(default)]` keeps existing
+    /// `genesis.json` on legacy behavior.
+    #[serde(default)]
+    pub por_assignment_targeting_enabled_from_height: Option<u64>,
+
     /// OmniNode Inference Settlement activation gate (issue #61). `None` = the
     /// settlement subprotocol is dormant; all settlement ops are rejected free
     /// (`Failed(350)`, no fee). Separate from `omninode_enabled_from_height` —
@@ -637,6 +652,9 @@ impl Default for ChainParams {
             // Production-safe default: archive-node chunk reassignment dormant
             // (issue #62). Activation is a coordinated validator upgrade.
             archive_reassignment_enabled_from_height: None,
+            // Production-safe default: legacy PoR challenge targeting (issue
+            // #97). Activation is a coordinated validator upgrade.
+            por_assignment_targeting_enabled_from_height: None,
             // Production-safe default: OmniNode inference settlement dormant
             // (issue #61). Activation is a coordinated validator upgrade.
             inference_settlement_enabled_from_height: None,

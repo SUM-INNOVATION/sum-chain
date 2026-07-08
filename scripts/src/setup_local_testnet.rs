@@ -90,6 +90,7 @@ fn main() -> Result<()> {
             archive_unbonding_enabled_from_height: None, // issue #20: archive withdrawal dormant
             archive_unbonding_period_blocks: 201_600,    // ~7 days at 3s blocks
             archive_reassignment_enabled_from_height: None, // issue #62: chunk reassignment dormant
+            por_assignment_targeting_enabled_from_height: None, // issue #97: legacy PoR targeting
             inference_settlement_enabled_from_height: None, // issue #61: settlement dormant
             inference_settlement_max_dispute_window_blocks: 201_600,
             inference_settlement_max_session_duration_blocks: 2_592_000,

@@ -784,11 +784,22 @@ impl StorageMetadataExecutor {
     ///
     /// Returns `Ok(Some(challenge))` if a challenge was created, `Ok(None)` if
     /// no eligible files or nodes exist.
+    ///
+    /// Issue #97 (Phase 1): the file/chunk candidate is selected identically in
+    /// both modes. When `assignment_targeting` is `false` the `target_node` is
+    /// drawn from all currently-active archives (exact legacy behavior). When
+    /// `true`, the target is drawn only from the archives assigned to the
+    /// selected chunk — under the file's latest assignment epoch snapshot — that
+    /// are currently Active; if that set is empty the challenge is skipped
+    /// (`Ok(None)`), so a bystander is never challenged or slashed.
     pub fn generate_challenge(
         &self,
         parent_hash: &Hash,
         height: u64,
         archive_nodes: &[sumchain_primitives::NodeRecord],
+        node_registry: &NodeRegistryExecutor,
+        assignment_targeting: bool,
+        replication_factor: u32,
     ) -> Result<Option<StorageChallenge>> {
         // Filter to active nodes only (caller should pre-filter, but be safe)
         let active_nodes: Vec<_> = archive_nodes
@@ -801,50 +812,84 @@ impl StorageMetadataExecutor {
             return Ok(None);
         }
 
-        // Get all files with non-zero fee_pool
-        let eligible_roots = self.get_funded_file_roots()?;
-        if eligible_roots.is_empty() {
-            debug!("No funded files — skipping challenge at height {}", height);
-            return Ok(None);
-        }
-
-        // Deterministic seed from parent hash
+        // Deterministic seed from parent hash. File and chunk selection consume
+        // seed bytes [0..8] and [8..12] respectively; target selection [12..20].
+        // Both gate modes use the same seed material so selection is replayable.
         let seed = Hash::hash_many(&[
             parent_hash.as_bytes(),
             b"storage_challenge",
             &height.to_be_bytes(),
         ]);
         let seed_bytes = seed.as_bytes();
-
-        // Select file
-        let file_index = u64::from_be_bytes([
-            seed_bytes[0], seed_bytes[1], seed_bytes[2], seed_bytes[3],
-            seed_bytes[4], seed_bytes[5], seed_bytes[6], seed_bytes[7],
-        ]) % eligible_roots.len() as u64;
-        let selected_root = &eligible_roots[file_index as usize];
-
-        // Load file metadata for chunk count
-        let meta = match self.get_metadata(selected_root)? {
-            Some(m) => m,
-            None => return Ok(None), // Should not happen, but be safe
+        let seed_u64 = |from: usize| {
+            u64::from_be_bytes([
+                seed_bytes[from], seed_bytes[from + 1], seed_bytes[from + 2], seed_bytes[from + 3],
+                seed_bytes[from + 4], seed_bytes[from + 5], seed_bytes[from + 6], seed_bytes[from + 7],
+            ])
+        };
+        let seed_u32 = |from: usize| {
+            u32::from_be_bytes([
+                seed_bytes[from], seed_bytes[from + 1], seed_bytes[from + 2], seed_bytes[from + 3],
+            ])
         };
 
-        let chunk_count = (meta.total_size_bytes + CHUNK_SIZE - 1) / CHUNK_SIZE;
-        if chunk_count == 0 {
-            return Ok(None);
-        }
+        // Select the (file, chunk) candidate and its target. Below the gate the
+        // file comes from the legacy V1 funded set and the target from all
+        // active archives (byte-identical to the pre-#97 path). At/above the
+        // gate the file comes from V2 funded+Active candidates and the target
+        // from the chunk's assigned-active set (issue #97).
+        let (selected_root, chunk_index, target_node) = if assignment_targeting {
+            // File: one candidate from the V2 funded+Active set (deterministic
+            // order). Empty ⇒ skip. Single-candidate sampling, not files×chunks.
+            let candidates = self.funded_active_v2_candidates()?;
+            if candidates.is_empty() {
+                debug!("No funded+Active V2 files — skipping challenge at height {}", height);
+                return Ok(None);
+            }
+            let (root, chunk_count) = candidates[(seed_u64(0) % candidates.len() as u64) as usize];
+            // `funded_active_v2_candidates` guarantees chunk_count > 0.
+            let chunk_index = seed_u32(8) % chunk_count;
 
-        // Select chunk
-        let chunk_index = u32::from_be_bytes([
-            seed_bytes[8], seed_bytes[9], seed_bytes[10], seed_bytes[11],
-        ]) % chunk_count as u32;
-
-        // Select target node
-        let node_index = u64::from_be_bytes([
-            seed_bytes[12], seed_bytes[13], seed_bytes[14], seed_bytes[15],
-            seed_bytes[16], seed_bytes[17], seed_bytes[18], seed_bytes[19],
-        ]) % active_nodes.len() as u64;
-        let target_node = active_nodes[node_index as usize].address;
+            // Target: assigned-active archive for the chunk under the file's
+            // latest applicable assignment epoch. Empty ⇒ skip (no bystander).
+            let target = match self.select_assigned_active_target(
+                &root,
+                chunk_index,
+                seed_bytes,
+                node_registry,
+                replication_factor,
+            )? {
+                Some(addr) => addr,
+                None => {
+                    debug!(
+                        "No assigned-active archive for file={} chunk={} — skipping challenge at height {}",
+                        root, chunk_index, height
+                    );
+                    return Ok(None);
+                }
+            };
+            (root, chunk_index, target)
+        } else {
+            // Legacy V1 path: funded roots, chunk count from total size, target
+            // drawn from all currently-active archives.
+            let eligible_roots = self.get_funded_file_roots()?;
+            if eligible_roots.is_empty() {
+                debug!("No funded files — skipping challenge at height {}", height);
+                return Ok(None);
+            }
+            let selected_root = eligible_roots[(seed_u64(0) % eligible_roots.len() as u64) as usize];
+            let meta = match self.get_metadata(&selected_root)? {
+                Some(m) => m,
+                None => return Ok(None), // Should not happen, but be safe
+            };
+            let chunk_count = (meta.total_size_bytes + CHUNK_SIZE - 1) / CHUNK_SIZE;
+            if chunk_count == 0 {
+                return Ok(None);
+            }
+            let chunk_index = seed_u32(8) % chunk_count as u32;
+            let node_index = seed_u64(12) % active_nodes.len() as u64;
+            (selected_root, chunk_index, active_nodes[node_index as usize].address)
+        };
 
         // Compute deterministic challenge ID
         let challenge_id = Hash::hash_many(&[
@@ -855,7 +900,7 @@ impl StorageMetadataExecutor {
 
         let challenge = StorageChallenge {
             challenge_id,
-            merkle_root: *selected_root,
+            merkle_root: selected_root,
             chunk_index,
             target_node,
             created_at_height: height,
@@ -871,6 +916,73 @@ impl StorageMetadataExecutor {
         );
 
         Ok(Some(challenge))
+    }
+
+    /// Issue #97 (Phase 1): deterministically choose the challenge target from
+    /// the archives assigned to `chunk_index` of `merkle_root` that are
+    /// currently Active.
+    ///
+    /// Resolution mirrors `compute_coverage_v2`'s epoch handling: the file's
+    /// latest assignment epoch (epoch 0 = `assignment_height`, plus any #62
+    /// reassignment heights, all ≤ current height) selects the archive snapshot;
+    /// `assigned_archives_presorted` computes the assigned set for the chunk
+    /// under that snapshot; the set is filtered to currently-Active archives.
+    /// The target is picked from that set using the same seed bytes `[12..20]`
+    /// the legacy path uses, so selection is deterministic and replayable.
+    ///
+    /// Returns `Ok(None)` when the file has no V2 assignment metadata, or when
+    /// no assigned archive is currently Active — the caller then skips the
+    /// challenge for this interval. Cost is `O(snapshot_len)` (one assignment
+    /// computation for the single selected chunk); it never sweeps files×chunks.
+    fn select_assigned_active_target(
+        &self,
+        merkle_root: &Hash,
+        chunk_index: u32,
+        seed_bytes: &[u8],
+        node_registry: &NodeRegistryExecutor,
+        replication_factor: u32,
+    ) -> Result<Option<Address>> {
+        // A funded file with no V2 assignment metadata has no assigned archives.
+        let row = match self.get_metadata_v2(merkle_root)? {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+
+        // Latest applicable assignment epoch and its active-archive snapshot.
+        let epochs = self.file_epochs(&row)?;
+        let epoch = *epochs.last().expect("epoch 0 always present");
+        let snapshot = node_registry.get_active_archive_nodes_at_height(epoch)?;
+
+        // Sorted + deduped addresses, as the deterministic assignment function
+        // requires (same preparation as `compute_epoch_coverage`).
+        let mut sorted_addrs: Vec<Address> = snapshot.iter().map(|n| n.address).collect();
+        sorted_addrs.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        sorted_addrs.dedup_by(|a, b| a.as_bytes() == b.as_bytes());
+
+        // Archives assigned to this chunk under the epoch snapshot, filtered to
+        // those currently Active (deterministic order preserved).
+        let assigned = sumchain_primitives::assigned_archives_presorted(
+            merkle_root,
+            &sorted_addrs,
+            chunk_index,
+            replication_factor,
+        );
+        let mut assigned_active: Vec<Address> = Vec::with_capacity(assigned.len());
+        for addr in assigned {
+            if is_currently_active(node_registry, &addr)? {
+                assigned_active.push(addr);
+            }
+        }
+        if assigned_active.is_empty() {
+            return Ok(None);
+        }
+
+        // Deterministic pick using the legacy target-selection seed bytes.
+        let idx = u64::from_be_bytes([
+            seed_bytes[12], seed_bytes[13], seed_bytes[14], seed_bytes[15],
+            seed_bytes[16], seed_bytes[17], seed_bytes[18], seed_bytes[19],
+        ]) % assigned_active.len() as u64;
+        Ok(Some(assigned_active[idx as usize]))
     }
 
     // =========================================================================
@@ -2123,6 +2235,35 @@ impl StorageMetadataExecutor {
         Ok(out)
     }
 
+    /// Issue #97 (Phase 1): compact index of *challengeable* V2 files — those
+    /// that are funded (`fee_pool > 0`), `Active`, and have a valid
+    /// `chunk_count > 0`. Returns `(merkle_root, chunk_count)` pairs sorted by
+    /// root for deterministic, consensus-safe selection, without cloning the
+    /// full rows. `O(V2 file count)`; the single-challenge path samples one
+    /// candidate from this list, never files×chunks.
+    pub fn funded_active_v2_candidates(&self) -> Result<Vec<(Hash, u32)>> {
+        let mut out: Vec<(Hash, u32)> = Vec::new();
+        let prefix = [b'F', b'2'];
+        for (key, value) in self
+            .db
+            .prefix_iter(CF_STORAGE_METADATA_V2, &prefix)
+            .map_err(StateError::Storage)?
+        {
+            // Row keys are exactly `[b'F', b'2', hash(32)]` (34 bytes); skip
+            // owner-index keys `[b'O', b'2', ...]` sharing the CF.
+            if key.len() != 34 || key[0] != b'F' || key[1] != b'2' {
+                continue;
+            }
+            let row: StorageMetadataV2 = bincode::deserialize(&value)
+                .map_err(|e| StateError::DeserializationError(e.to_string()))?;
+            if row.lifecycle == FileLifecycleV2::Active && row.fee_pool > 0 && row.chunk_count > 0 {
+                out.push((row.merkle_root, row.chunk_count));
+            }
+        }
+        out.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        Ok(out)
+    }
+
     /// Look up a V2 file row by its merkle_root.
     pub fn get_metadata_v2(&self, merkle_root: &Hash) -> Result<Option<StorageMetadataV2>> {
         let key = metadata_v2_key(merkle_root);
@@ -2176,7 +2317,12 @@ impl StorageMetadataExecutor {
             .collect();
 
         for (key, value) in entries {
-            if key.len() >= 33 {
+            // Only the V1 row keys are `[b'F', merkle_root(32)]` (33 bytes).
+            // Owner-index keys `[b'O', owner(20), root(32)]` share this CF and,
+            // being `>= 'F'`, can appear under a prefix scan; their value is the
+            // 1-byte marker `[1]`, which must not be decoded as a funded row
+            // (issue #97 — was `DeserializationError` "unexpected end of file").
+            if key.len() >= 33 && key[0] == b'F' {
                 let meta: StorageMetadata = bincode::deserialize(&value)
                     .map_err(|e| StateError::DeserializationError(e.to_string()))?;
                 if meta.fee_pool > 0 {
