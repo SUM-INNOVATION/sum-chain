@@ -158,6 +158,14 @@ pub mod cf {
     /// primary key derived from `(session_id, verifier_address)`.
     pub const INFERENCE_ATTESTATIONS_BY_SESSION: &str = "inference_attestations_by_session";
 
+    /// Issue #95 — additive sponsor metadata for sponsored (v2) attestations.
+    /// Keyed by the SAME `inference_attestation_key(session_id, verifier)` as the
+    /// canonical record CF (32 bytes), value = bincode `InferenceAttestationSponsor`
+    /// (sponsor address, submitted_at_height, tx_hash). Written only by the
+    /// sponsored v2 path, in the same atomic batch as the canonical record; v1
+    /// direct submissions leave no entry. Never read by settlement.
+    pub const INFERENCE_ATTESTATION_SPONSORS: &str = "inference_attestation_sponsors";
+
     // ── OmniNode Inference Settlement (issue #61) ──
     /// Per-session settlement records. Key: 32-byte
     /// `BLAKE3("InferenceSettlementSessionV1" || session_id)`. Value:
@@ -562,6 +570,7 @@ pub const ALL_CFS: &[&str] = &[
     cf::ASSIGNMENT_ATTESTATIONS_V2_EPOCH,
     cf::INFERENCE_ATTESTATIONS,
     cf::INFERENCE_ATTESTATIONS_BY_SESSION,
+    cf::INFERENCE_ATTESTATION_SPONSORS,
     cf::INFERENCE_SESSIONS,
     cf::INFERENCE_CLAIMS,
     cf::INFERENCE_DISPUTES,

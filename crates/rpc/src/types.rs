@@ -126,6 +126,21 @@ pub struct InferenceAttestationInfo {
     pub finalized: bool,
 }
 
+/// Additive sponsor metadata for a **sponsored (v2)** inference attestation
+/// (issue #95). Returned by `sum_getInferenceAttestationSponsor`; the RPC yields
+/// `null` for v1 direct attestations (no sponsor) and for absent attestations.
+/// Observability-only — the sponsor is never the attestation identity and
+/// settlement never reads it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InferenceAttestationSponsorInfo {
+    /// Sponsor (outer tx payer) chain Address (base58 with checksum).
+    pub sponsor_address: String,
+    /// Block height at which the sponsored attestation was included.
+    pub submitted_at_height: u64,
+    /// `0x` + 64 hex chars of the outer (sponsor-signed) tx hash.
+    pub tx_hash: String,
+}
+
 /// Builder request for a **sponsored** (v2) inference attestation (issue #79).
 /// No private keys — the returned unsigned tx is signed offline by the
 /// **sponsor/payer** (`from`), while the **verifier** is identified by

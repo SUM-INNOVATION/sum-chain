@@ -449,3 +449,113 @@ fn v2_duplicate_and_cross_version_dedup_51() {
     let v1 = build_signed_attestation_tx(&verifier, 0, 1_000, digest, false);
     assert!(matches!(executor.execute_tx(&v1, &proposer.address(), 3, 0).unwrap().status, TxStatus::Failed(51)));
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Issue #95 — additive sponsor metadata
+// ─────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn v2_sponsored_writes_sponsor_metadata() {
+    let (state, db, _dir, executor) = setup_with_params(params_sponsored_enabled());
+    let sponsor = KeyPair::generate();
+    let verifier = KeyPair::generate();
+    let proposer = KeyPair::generate();
+    fund(&state, &sponsor, 1_000_000_000);
+
+    let digest = sample_digest("sponsor-meta-vec");
+    let tx = build_sponsored_tx(&sponsor, &verifier, 0, 1_000, digest.clone(), false, None);
+    let r = executor.execute_tx(&tx, &proposer.address(), 7, 0).unwrap();
+    assert!(r.status.is_success(), "sponsored attestation should succeed: {:?}", r.status);
+
+    // Sponsor metadata is keyed by the VERIFIER key (same as the record), and
+    // records sponsor address, inclusion height, and outer tx hash.
+    let vkey = inference_attestation_key(&digest.session_id, &verifier.address());
+    let sp = InferenceAttestationExecutor::new(db.clone())
+        .get_sponsor(&vkey)
+        .unwrap()
+        .expect("sponsor metadata present for a sponsored attestation");
+    assert_eq!(sp.sponsor, sponsor.address(), "sponsor is the outer sender");
+    assert_eq!(sp.submitted_at_height, 7, "records inclusion height");
+    assert_eq!(sp.tx_hash, r.tx_hash, "records the outer tx hash");
+
+    // Not keyed under the sponsor address.
+    let skey = inference_attestation_key(&digest.session_id, &sponsor.address());
+    assert!(db.get(cf::INFERENCE_ATTESTATION_SPONSORS, &skey).unwrap().is_none());
+}
+
+#[test]
+fn v1_direct_leaves_sponsor_metadata_absent() {
+    let (state, db, _dir, executor) = setup_with_params(params_omninode_enabled());
+    let verifier = KeyPair::generate();
+    let proposer = KeyPair::generate();
+    fund(&state, &verifier, 1_000_000_000);
+
+    let digest = sample_digest("v1-no-sponsor-vec");
+    let tx = build_signed_attestation_tx(&verifier, 0, 1_000, digest.clone(), false);
+    let r = executor.execute_tx(&tx, &proposer.address(), 1, 0).unwrap();
+    assert!(r.status.is_success(), "v1 direct attestation should succeed: {:?}", r.status);
+
+    // The record exists but no sponsor metadata is written for a direct submission.
+    let key = inference_attestation_key(&digest.session_id, &verifier.address());
+    assert!(db.get(cf::INFERENCE_ATTESTATIONS, &key).unwrap().is_some(), "record present");
+    assert!(
+        InferenceAttestationExecutor::new(db.clone()).get_sponsor(&key).unwrap().is_none(),
+        "v1 direct submission writes no sponsor metadata"
+    );
+}
+
+#[test]
+fn v2_duplicate_does_not_overwrite_sponsor_metadata() {
+    let (state, db, _dir, executor) = setup_with_params(params_sponsored_enabled());
+    let sponsor_a = KeyPair::generate();
+    let sponsor_b = KeyPair::generate();
+    let verifier = KeyPair::generate();
+    let proposer = KeyPair::generate();
+    fund(&state, &sponsor_a, 1_000_000_000);
+    fund(&state, &sponsor_b, 1_000_000_000);
+
+    let digest = sample_digest("dup-sponsor-vec");
+    // First sponsored submission by sponsor A succeeds and records A.
+    let a = build_sponsored_tx(&sponsor_a, &verifier, 0, 1_000, digest.clone(), false, None);
+    assert!(executor.execute_tx(&a, &proposer.address(), 1, 0).unwrap().status.is_success());
+    let vkey = inference_attestation_key(&digest.session_id, &verifier.address());
+    assert_eq!(
+        InferenceAttestationExecutor::new(db.clone()).get_sponsor(&vkey).unwrap().unwrap().sponsor,
+        sponsor_a.address()
+    );
+
+    // A second sponsored submission for the same (session, verifier) by sponsor B
+    // is rejected (51) and MUST NOT overwrite the recorded sponsor.
+    let b = build_sponsored_tx(&sponsor_b, &verifier, 0, 1_000, digest, false, None);
+    assert!(matches!(executor.execute_tx(&b, &proposer.address(), 2, 0).unwrap().status, TxStatus::Failed(51)));
+    assert_eq!(
+        InferenceAttestationExecutor::new(db.clone()).get_sponsor(&vkey).unwrap().unwrap().sponsor,
+        sponsor_a.address(),
+        "duplicate v2 must not overwrite existing sponsor metadata"
+    );
+}
+
+#[test]
+fn sponsored_attestation_settlement_identity_is_verifier_only() {
+    // Settlement's ClaimReward keys on `inference_attestation_key(session_id,
+    // claimer)` (inference_settlement_executor.rs). After a sponsored (v2)
+    // attestation, the canonical record resolves under the VERIFIER key and is
+    // ABSENT under the sponsor key — so only the verifier can claim; the sponsor
+    // cannot, regardless of the additive sponsor metadata. The sponsor CF is a
+    // separate keyspace settlement never reads.
+    let (state, db, _dir, executor) = setup_with_params(params_sponsored_enabled());
+    let sponsor = KeyPair::generate();
+    let verifier = KeyPair::generate();
+    let proposer = KeyPair::generate();
+    fund(&state, &sponsor, 1_000_000_000);
+
+    let digest = sample_digest("settlement-identity-vec");
+    let tx = build_sponsored_tx(&sponsor, &verifier, 0, 1_000, digest.clone(), false, None);
+    assert!(executor.execute_tx(&tx, &proposer.address(), 1, 0).unwrap().status.is_success());
+
+    let verifier_key = inference_attestation_key(&digest.session_id, &verifier.address());
+    let sponsor_key = inference_attestation_key(&digest.session_id, &sponsor.address());
+    // The settlement-relevant record is under the verifier, not the sponsor.
+    assert!(db.get(cf::INFERENCE_ATTESTATIONS, &verifier_key).unwrap().is_some(), "claimable by verifier");
+    assert!(db.get(cf::INFERENCE_ATTESTATIONS, &sponsor_key).unwrap().is_none(), "sponsor has no claimable record");
+}

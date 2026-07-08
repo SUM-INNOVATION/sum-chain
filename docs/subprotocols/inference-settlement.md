@@ -223,9 +223,15 @@ Only commitments/metadata are on chain, exactly as for attestations — no promp
 responses. Settlement adds public funder addresses, reward amounts, and claim/dispute
 status. Dispute evidence is an opaque commitment, never plaintext.
 
-## Not in v1 (future)
+## Shipped since v1
 
-- Sponsored attestation (`sender ≠ verifier`) — requires `InferenceAttestationV2`.
+- Sponsored attestation (`sender ≠ verifier`) — **shipped** as the append-only
+  `InferenceAttestationV2` envelope (issue #79), gated by
+  `omninode_sponsored_attestation_enabled_from_height`. The verifier remains the
+  attestation identity and the settlement reward recipient; only who pays to
+  submit changes. Additive sponsor metadata (issue #95) is queryable via
+  `sum_getInferenceAttestationSponsor`. See
+  [`INFERENCE-ATTESTATION.md`](./INFERENCE-ATTESTATION.md) §11a.
 
 > Consistency/plurality reward mode shipped in v1.1 (issue #77, gated by
 > `inference_settlement_consistency_enabled_from_height`) — see **Consistency /
