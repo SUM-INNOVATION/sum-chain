@@ -31,6 +31,18 @@ use crate::{Result, StateError, StateManager};
 
 pub const CF_STORAGE_METADATA: &str = "storage_metadata";
 pub const CF_ACTIVE_CHALLENGES: &str = "active_challenges";
+/// Issue #100 — compact challengeable V2-file index: `merkle_root(32)` →
+/// `chunk_count` (fixed 4-byte big-endian `u32`). Present iff the V2 file is
+/// `Active && fee_pool > 0 && chunk_count > 0`. Maintained on `ActivateFileV2`
+/// and on a V2 challenge payout that drains `fee_pool` to 0; the one-time
+/// backfill populates pre-upgrade files.
+pub const CF_CHALLENGEABLE_FILES_V2: &str = "challengeable_files_v2";
+/// General meta CF (shared) — the #100 backfill stores its one-shot completion
+/// marker under [`POR_SCHEDULER_BACKFILL_MARKER`] here.
+pub const CF_META: &str = "meta";
+/// Key in [`CF_META`] recording that the #100 challengeable-index backfill has
+/// run. Its presence prevents any further full V2 scan.
+pub const POR_SCHEDULER_BACKFILL_MARKER: &[u8] = b"por_scheduler_index_backfilled";
 /// V2 storage metadata column family. Coexists with V1 — entries keyed by
 /// `[b'F', b'2', merkle_root]` so the prefix never overlaps V1 `[b'F', root]`.
 pub const CF_STORAGE_METADATA_V2: &str = "storage_metadata_v2";
@@ -710,16 +722,37 @@ impl StorageMetadataExecutor {
             return Ok(StorageMetadataExecutionResult::fail("chunk_index does not match challenge"));
         }
 
-        // 5. Load file metadata to verify path length and root
-        let mut meta = match self.get_metadata(merkle_root)? {
-            Some(m) => m,
-            None => return Ok(StorageMetadataExecutionResult::fail(
-                "File metadata not found for merkle_root",
-            )),
+        // 5. Load file metadata (V1 preferred; else V2 — issue #100). A V1 row
+        // keeps the exact pre-existing settlement; a V2-only file (the assignment
+        // world, where challenges now originate) settles against its V2 row so a
+        // correctly-storing archive can actually prove and is not slashed.
+        let v1 = self.get_metadata(merkle_root)?;
+        let v2 = if v1.is_none() { self.get_metadata_v2(merkle_root)? } else { None };
+
+        // Determine chunk_count and (for V2) enforce Active + chunk bound.
+        let chunk_count: u64 = match (&v1, &v2) {
+            (Some(m), _) => (m.total_size_bytes + CHUNK_SIZE - 1) / CHUNK_SIZE,
+            (None, Some(r)) => {
+                if r.lifecycle != FileLifecycleV2::Active {
+                    return Ok(StorageMetadataExecutionResult::fail(
+                        "V2 file is not Active; cannot settle proof",
+                    ));
+                }
+                r.chunk_count as u64
+            }
+            (None, None) => {
+                return Ok(StorageMetadataExecutionResult::fail(
+                    "File metadata not found for merkle_root",
+                ))
+            }
         };
+        if (chunk_index as u64) >= chunk_count {
+            return Ok(StorageMetadataExecutionResult::fail(
+                "chunk_index out of range for file",
+            ));
+        }
 
         // 6. Validate merkle_path length
-        let chunk_count = (meta.total_size_bytes + CHUNK_SIZE - 1) / CHUNK_SIZE;
         let expected_depth = if chunk_count <= 1 {
             0
         } else {
@@ -734,7 +767,8 @@ impl StorageMetadataExecutor {
             )));
         }
 
-        // 7. Cryptographic Merkle proof verification
+        // 7. Cryptographic Merkle proof verification (identical for V1 and V2 —
+        // both verify against the same 32-byte `merkle_root`).
         if expected_depth == 0 {
             // Single-chunk file: chunk_hash must equal merkle_root directly
             if *chunk_hash != *merkle_root {
@@ -748,17 +782,30 @@ impl StorageMetadataExecutor {
             ));
         }
 
-        // 8. Settlement: pay reward from fee_pool to target_node
-        let payout = if meta.fee_pool >= CHALLENGE_REWARD {
-            CHALLENGE_REWARD
+        // 8. Settlement: pay reward from the file's fee_pool to target_node.
+        // Amount/partial-payout rule is identical for V1 and V2; only the row
+        // that holds the pool differs.
+        let payout;
+        if let Some(mut meta) = v1 {
+            payout = meta.fee_pool.min(CHALLENGE_REWARD);
+            if payout > 0 {
+                meta.fee_pool = meta.fee_pool.saturating_sub(payout);
+                self.put_metadata(&meta)?;
+            }
         } else {
-            meta.fee_pool // Partial payout if pool is low
-        };
+            let mut row = v2.expect("V2 row present when V1 absent");
+            payout = row.fee_pool.min(CHALLENGE_REWARD);
+            if payout > 0 {
+                row.fee_pool = row.fee_pool.saturating_sub(payout);
+                self.put_metadata_v2(&row)?;
+                // Drained → no longer challengeable: heal the #100 index.
+                if row.fee_pool == 0 {
+                    self.challengeable_index_remove(merkle_root)?;
+                }
+            }
+        }
 
         if payout > 0 {
-            meta.fee_pool = meta.fee_pool.saturating_sub(payout);
-            self.put_metadata(&meta)?;
-
             let mut node_account = state.get_account(&challenge.target_node)?;
             node_account.balance = node_account.balance.saturating_add(payout as u128);
             state.put_account(&challenge.target_node, &node_account)?;
@@ -855,7 +902,7 @@ impl StorageMetadataExecutor {
             let target = match self.select_assigned_active_target(
                 &root,
                 chunk_index,
-                seed_bytes,
+                seed_u64(12), // byte-identical to the historical seed_bytes[12..20] pick
                 node_registry,
                 replication_factor,
             )? {
@@ -927,8 +974,10 @@ impl StorageMetadataExecutor {
     /// reassignment heights, all ≤ current height) selects the archive snapshot;
     /// `assigned_archives_presorted` computes the assigned set for the chunk
     /// under that snapshot; the set is filtered to currently-Active archives.
-    /// The target is picked from that set using the same seed bytes `[12..20]`
-    /// the legacy path uses, so selection is deterministic and replayable.
+    /// The target is picked from that set using `pick_seed % assigned_active.len()`,
+    /// so selection is deterministic and replayable. The Phase-1 caller passes
+    /// `u64::from_be_bytes(seed_bytes[12..20])` (byte-identical to the historical
+    /// pick); the #100 scheduler passes a per-`(file, chunk)` derived seed.
     ///
     /// Returns `Ok(None)` when the file has no V2 assignment metadata, or when
     /// no assigned archive is currently Active — the caller then skips the
@@ -938,7 +987,7 @@ impl StorageMetadataExecutor {
         &self,
         merkle_root: &Hash,
         chunk_index: u32,
-        seed_bytes: &[u8],
+        pick_seed: u64,
         node_registry: &NodeRegistryExecutor,
         replication_factor: u32,
     ) -> Result<Option<Address>> {
@@ -977,12 +1026,196 @@ impl StorageMetadataExecutor {
             return Ok(None);
         }
 
-        // Deterministic pick using the legacy target-selection seed bytes.
-        let idx = u64::from_be_bytes([
-            seed_bytes[12], seed_bytes[13], seed_bytes[14], seed_bytes[15],
-            seed_bytes[16], seed_bytes[17], seed_bytes[18], seed_bytes[19],
-        ]) % assigned_active.len() as u64;
+        // Deterministic pick from the assigned-active set.
+        let idx = pick_seed % assigned_active.len() as u64;
         Ok(Some(assigned_active[idx as usize]))
+    }
+
+    // =========================================================================
+    // Issue #100 — challengeable-file index + bounded scheduler
+    // =========================================================================
+
+    /// Insert/refresh a file in the challengeable index. Value is the fixed
+    /// 4-byte big-endian `chunk_count`.
+    pub fn challengeable_index_insert(&self, merkle_root: &Hash, chunk_count: u32) -> Result<()> {
+        self.db
+            .put(CF_CHALLENGEABLE_FILES_V2, merkle_root.as_bytes(), &chunk_count.to_be_bytes())
+            .map_err(StateError::Storage)
+    }
+
+    /// Remove a file from the challengeable index (e.g. `fee_pool` drained to 0).
+    pub fn challengeable_index_remove(&self, merkle_root: &Hash) -> Result<()> {
+        self.db
+            .delete(CF_CHALLENGEABLE_FILES_V2, merkle_root.as_bytes())
+            .map_err(StateError::Storage)
+    }
+
+    /// Sync a V2 row into the challengeable index: present iff it is challengeable
+    /// (`Active && fee_pool > 0 && chunk_count > 0`), absent otherwise. Called
+    /// from the `ActivateFileV2` and V2-payout paths, and by the backfill.
+    fn challengeable_index_sync(&self, row: &StorageMetadataV2) -> Result<()> {
+        if row.lifecycle == FileLifecycleV2::Active && row.fee_pool > 0 && row.chunk_count > 0 {
+            self.challengeable_index_insert(&row.merkle_root, row.chunk_count)
+        } else {
+            self.challengeable_index_remove(&row.merkle_root)
+        }
+    }
+
+    /// Whether the one-time #100 backfill has already run.
+    pub fn por_scheduler_backfill_done(&self) -> Result<bool> {
+        Ok(self.db.get(CF_META, POR_SCHEDULER_BACKFILL_MARKER).map_err(StateError::Storage)?.is_some())
+    }
+
+    /// One-time, idempotent backfill of the challengeable index from the V2
+    /// metadata CF. This is the **only** full V2 scan and runs exactly once — the
+    /// persisted marker in [`CF_META`] prevents any repeat. Returns `Ok(false)`
+    /// if it was already done (no scan). Deterministic: the resulting index is a
+    /// pure function of current V2 rows, independent of scan order.
+    pub fn backfill_challengeable_index(&self) -> Result<bool> {
+        if self.por_scheduler_backfill_done()? {
+            return Ok(false);
+        }
+        let prefix = [b'F', b'2'];
+        for (key, value) in self
+            .db
+            .prefix_iter(CF_STORAGE_METADATA_V2, &prefix)
+            .map_err(StateError::Storage)?
+        {
+            if key.len() != 34 || key[0] != b'F' || key[1] != b'2' {
+                continue;
+            }
+            let row: StorageMetadataV2 = bincode::deserialize(&value)
+                .map_err(|e| StateError::DeserializationError(e.to_string()))?;
+            if row.lifecycle == FileLifecycleV2::Active && row.fee_pool > 0 && row.chunk_count > 0 {
+                self.challengeable_index_insert(&row.merkle_root, row.chunk_count)?;
+            }
+        }
+        self.db
+            .put(CF_META, POR_SCHEDULER_BACKFILL_MARKER, &[1])
+            .map_err(StateError::Storage)?;
+        Ok(true)
+    }
+
+    /// Issue #100 (Phase 2): emit a bounded, deterministic set of assignment-aware
+    /// challenges for interval height `height`. Samples ≤ `max_files` files from
+    /// the challengeable index via a seeded stride-walk (`iter_from`, wrap-around),
+    /// ≤ `max_chunks` chunks per file, resolves each `(file, chunk)` to an
+    /// assigned-active target under the file's latest epoch, and writes up to
+    /// `max_emit` challenges (identical shape to the single-challenge path).
+    /// `(file, chunk)` pairs with no assigned-active archive are skipped. Stale
+    /// index entries (file no longer challengeable) are removed and skipped.
+    ///
+    /// Cost is `O(max_files·(log n + max_chunks·R))` — independent of total files
+    /// and chunks. Returns the emitted challenges (already persisted).
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_challenge_schedule(
+        &self,
+        parent_hash: &Hash,
+        height: u64,
+        node_registry: &NodeRegistryExecutor,
+        replication_factor: u32,
+        max_files: u32,
+        max_chunks: u32,
+        max_emit: u32,
+    ) -> Result<Vec<StorageChallenge>> {
+        let mut emitted: Vec<StorageChallenge> = Vec::new();
+        if max_emit == 0 || max_files == 0 || max_chunks == 0 {
+            return Ok(emitted);
+        }
+        let seed = Hash::hash_many(&[
+            b"snip.por.schedule.v1",
+            parent_hash.as_bytes(),
+            &height.to_be_bytes(),
+        ]);
+
+        let mut seen_files: Vec<[u8; 32]> = Vec::new();
+        let mut seen_pairs: Vec<([u8; 32], u32)> = Vec::new();
+
+        'files: for i in 0..max_files {
+            if emitted.len() as u32 >= max_emit {
+                break;
+            }
+            // Seeded probe → first index entry at or after it (wrapping to start).
+            let probe = Hash::hash_many(&[seed.as_bytes(), b"file", &i.to_be_bytes()]);
+            let hit = match self
+                .db
+                .iter_from(CF_CHALLENGEABLE_FILES_V2, probe.as_bytes())
+                .map_err(StateError::Storage)?
+                .next()
+            {
+                Some(kv) => Some(kv),
+                None => self.db.iter(CF_CHALLENGEABLE_FILES_V2).map_err(StateError::Storage)?.next(),
+            };
+            let (key, _val) = match hit {
+                Some(kv) => kv,
+                None => break, // index empty
+            };
+            if key.len() != 32 {
+                continue;
+            }
+            let root = Hash::from_slice(&key).map_err(|e| StateError::DeserializationError(e.to_string()))?;
+            let root_bytes: [u8; 32] = *root.as_bytes();
+            if seen_files.iter().any(|f| f == &root_bytes) {
+                continue;
+            }
+            seen_files.push(root_bytes);
+
+            // Stale-index guard: re-read the authoritative V2 row. If the file is
+            // no longer challengeable, heal the index and skip.
+            let chunk_count = match self.get_metadata_v2(&root)? {
+                Some(r) if r.lifecycle == FileLifecycleV2::Active && r.fee_pool > 0 && r.chunk_count > 0 => {
+                    r.chunk_count
+                }
+                _ => {
+                    self.challengeable_index_remove(&root)?;
+                    continue 'files;
+                }
+            };
+
+            for j in 0..max_chunks {
+                if emitted.len() as u32 >= max_emit {
+                    break 'files;
+                }
+                let chunk_seed = Hash::hash_many(&[seed.as_bytes(), root.as_bytes(), b"chunk", &j.to_be_bytes()]);
+                let chunk_index =
+                    u32::from_be_bytes(chunk_seed.as_bytes()[0..4].try_into().unwrap()) % chunk_count;
+                if seen_pairs.iter().any(|(r, c)| r == &root_bytes && *c == chunk_index) {
+                    continue;
+                }
+                seen_pairs.push((root_bytes, chunk_index));
+
+                let pick = Hash::hash_many(&[seed.as_bytes(), root.as_bytes(), &chunk_index.to_be_bytes(), b"pick"]);
+                let pick_seed = u64::from_be_bytes(pick.as_bytes()[0..8].try_into().unwrap());
+                let target = match self.select_assigned_active_target(
+                    &root, chunk_index, pick_seed, node_registry, replication_factor,
+                )? {
+                    Some(addr) => addr,
+                    None => continue, // no assigned-active archive → skip, no bystander
+                };
+
+                let challenge_id = Hash::hash_many(&[
+                    root.as_bytes(),
+                    &chunk_index.to_be_bytes(),
+                    &height.to_be_bytes(),
+                ]);
+                let challenge = StorageChallenge {
+                    challenge_id,
+                    merkle_root: root,
+                    chunk_index,
+                    target_node: target,
+                    created_at_height: height,
+                    expires_at_height: height + CHALLENGE_TTL_BLOCKS,
+                };
+                self.put_challenge(&challenge)?;
+                emitted.push(challenge);
+            }
+        }
+
+        info!(
+            "PoR scheduler emitted {} challenge(s) at height {} (files<= {}, chunks<= {}, cap {})",
+            emitted.len(), height, max_files, max_chunks, max_emit
+        );
+        Ok(emitted)
     }
 
     // =========================================================================
@@ -1593,6 +1826,11 @@ impl StorageMetadataExecutor {
         row.lifecycle = FileLifecycleV2::Active;
         row.activated_at_height = Some(block_height);
         self.put_metadata_v2(&row)?;
+
+        // Issue #100: a now-Active funded file becomes challengeable — index it
+        // for the bounded scheduler. Harmless (and unread) while the scheduler
+        // gate is dormant; keeps the index complete once activated.
+        self.challengeable_index_sync(&row)?;
 
         // Suppress unused warning: replication_factor is captured by callers
         // of the assignment function; unused locally here but referenced in

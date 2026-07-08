@@ -91,6 +91,10 @@ fn main() -> Result<()> {
             archive_unbonding_period_blocks: 201_600,    // ~7 days at 3s blocks
             archive_reassignment_enabled_from_height: None, // issue #62: chunk reassignment dormant
             por_assignment_targeting_enabled_from_height: None, // issue #97: legacy PoR targeting
+            assignment_aware_por_scheduler_enabled_from_height: None, // issue #100: scheduler dormant
+            max_assignment_aware_challenges_per_block: 16,      // issue #100
+            max_files_sampled_per_interval: 8,                  // issue #100
+            max_chunks_sampled_per_file: 4,                     // issue #100
             inference_settlement_enabled_from_height: None, // issue #61: settlement dormant
             inference_settlement_max_dispute_window_blocks: 201_600,
             inference_settlement_max_session_duration_blocks: 2_592_000,

@@ -233,6 +233,11 @@ pub mod cf {
     // PoR Challenges
     /// Active storage challenges (challenge_id -> StorageChallenge, node/expiry indexes)
     pub const ACTIVE_CHALLENGES: &str = "active_challenges";
+    /// Issue #100 — compact challengeable V2-file index for the bounded PoR
+    /// scheduler: `merkle_root(32) -> chunk_count(u32 BE, 4 bytes)`. Present iff
+    /// the V2 file is `Active && fee_pool > 0`. Enables O(sample) seeded
+    /// sampling without scanning all V2 metadata rows.
+    pub const CHALLENGEABLE_FILES_V2: &str = "challengeable_files_v2";
 
     // SRC-80X/81X DocClass column families
     /// Identity roots (SRC-800)
@@ -550,6 +555,7 @@ pub const ALL_CFS: &[&str] = &[
     cf::ACCOUNT_ENCRYPTION_KEYS,
     cf::ACTIVE_ARCHIVE_NODES_HISTORY,
     cf::ARCHIVE_UNBONDING,
+    cf::CHALLENGEABLE_FILES_V2,
     cf::STORAGE_METADATA_V2,
     cf::ASSIGNMENT_ATTESTATIONS_V2,
     cf::FILE_REASSIGNMENTS,
@@ -1190,6 +1196,26 @@ impl Database {
         Ok(self
             .db
             .iterator_cf(cf, rocksdb::IteratorMode::Start)
+            .filter_map(|r| r.ok()))
+    }
+
+    /// Get a forward iterator starting at the first key `>= start` (total-order
+    /// seek). Used by the bounded PoR scheduler's seeded stride-walk over the
+    /// challengeable-file index: `.next()` yields the first entry at or after a
+    /// probe key without scanning from the start. Wrap-around is the caller's
+    /// job (fall back to [`Self::iter`] when this yields `None`).
+    pub fn iter_from<'a>(
+        &'a self,
+        cf_name: &str,
+        start: &[u8],
+    ) -> Result<impl Iterator<Item = (Box<[u8]>, Box<[u8]>)> + 'a> {
+        let cf = self.cf(cf_name)?;
+        Ok(self
+            .db
+            .iterator_cf(
+                cf,
+                rocksdb::IteratorMode::From(start, rocksdb::Direction::Forward),
+            )
             .filter_map(|r| r.ok()))
     }
 

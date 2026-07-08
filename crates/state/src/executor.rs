@@ -141,6 +141,42 @@ fn archive_reassignment_gate_open(params: &ChainParams, block_height: u64) -> bo
 fn por_assignment_targeting_gate_open(params: &ChainParams, block_height: u64) -> bool {
     matches!(params.por_assignment_targeting_enabled_from_height, Some(h) if block_height >= h)
 }
+
+/// Bounded assignment-aware PoR scheduler gate (issue #100, Phase 2). Same
+/// dormant-deploy semantics: production default `None` → never open, so challenge
+/// generation stays the post-#101 single-challenge path. When open, each interval
+/// emits a bounded, deterministic set of assignment-aware challenges.
+#[inline]
+fn assignment_aware_por_scheduler_gate_open(params: &ChainParams, block_height: u64) -> bool {
+    matches!(params.assignment_aware_por_scheduler_enabled_from_height, Some(h) if block_height >= h)
+}
+
+/// Fail-closed seam for the #100 scheduler (issue #100). Runs `schedule` only if
+/// the one-time challengeable-index `backfill` succeeded; on any backfill error,
+/// logs and skips — returning an empty schedule so `schedule` (which is what
+/// writes challenges) is never invoked and an incomplete index is never sampled.
+/// Extracted so the fail-closed decision is unit-testable with an injected
+/// `Result`, without a mock database. Pure: no runtime behavior change.
+fn run_scheduler_after_backfill<E, F>(
+    backfill: std::result::Result<bool, E>,
+    block_height: u64,
+    schedule: F,
+) -> Result<Vec<sumchain_primitives::StorageChallenge>>
+where
+    E: std::fmt::Display,
+    F: FnOnce() -> Result<Vec<sumchain_primitives::StorageChallenge>>,
+{
+    match backfill {
+        Ok(_) => schedule(),
+        Err(e) => {
+            warn!(
+                "PoR scheduler backfill failed at height {}: {} — skipping scheduler this block",
+                block_height, e
+            );
+            Ok(Vec::new())
+        }
+    }
+}
 // Governance activation-gate resolution lives in
 // `crate::governance_executor::gate_open` (used by the dispatch skeleton).
 
@@ -2845,6 +2881,34 @@ impl BlockExecutor {
         // Use parent block hash as deterministic seed
         let parent_hash = &block.header.parent_hash;
 
+        // Issue #100 (Phase 2): when the scheduler gate is open, emit a bounded,
+        // deterministic set of assignment-aware challenges instead of the single
+        // #97/legacy challenge. Runs the one-time challengeable-index backfill
+        // first; if backfill fails, fail closed — skip the scheduler this block
+        // rather than sampling an incomplete index.
+        if assignment_aware_por_scheduler_gate_open(&self.params, height) {
+            // Fail closed: the seam runs the schedule only if the one-time
+            // backfill succeeded; on error it skips (emits nothing) so an
+            // incomplete index is never sampled.
+            let emitted = run_scheduler_after_backfill(
+                self.storage_metadata_executor.backfill_challengeable_index(),
+                height,
+                || {
+                    self.storage_metadata_executor.generate_challenge_schedule(
+                        parent_hash,
+                        height,
+                        &self.node_registry_executor,
+                        self.params.assignment_replication_factor,
+                        self.params.max_files_sampled_per_interval,
+                        self.params.max_chunks_sampled_per_file,
+                        self.params.max_assignment_aware_challenges_per_block,
+                    )
+                },
+            )?;
+            debug!("PoR scheduler emitted {} challenge(s) at height {}", emitted.len(), height);
+            return Ok(());
+        }
+
         // Issue #97: at/above the gate, restrict the target to archives assigned
         // to the challenged chunk that are currently Active. Below the gate, the
         // target is drawn from all active archives (exact legacy behavior).
@@ -2984,6 +3048,35 @@ mod tests {
     use sumchain_crypto::{sign, KeyPair};
     use sumchain_primitives::Transaction;
     use sumchain_storage::Database;
+
+    // ── Issue #100: scheduler fail-closed seam ───────────────────────────────
+
+    #[test]
+    fn scheduler_skips_and_emits_nothing_when_backfill_errors() {
+        // Backfill error ⇒ the schedule closure (which is what writes challenges)
+        // must never run, and the result is empty ⇒ no challenge written.
+        let out = run_scheduler_after_backfill::<&str, _>(
+            Err("simulated backfill failure"),
+            100,
+            || -> Result<Vec<sumchain_primitives::StorageChallenge>> {
+                panic!("schedule generation must be skipped when backfill fails");
+            },
+        )
+        .unwrap();
+        assert!(out.is_empty(), "no challenges emitted when backfill fails");
+    }
+
+    #[test]
+    fn scheduler_runs_when_backfill_ok() {
+        let mut ran = false;
+        let out = run_scheduler_after_backfill::<&str, _>(Ok(true), 100, || {
+            ran = true;
+            Ok(Vec::new())
+        })
+        .unwrap();
+        assert!(ran, "schedule runs when backfill succeeds");
+        assert!(out.is_empty());
+    }
     use tempfile::TempDir;
 
     fn setup() -> (Arc<StateManager>, Arc<Database>, TempDir) {
