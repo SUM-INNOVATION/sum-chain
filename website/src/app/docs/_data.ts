@@ -114,6 +114,7 @@ export const categories: Category[] = [
       { name: 'eth_getBalance', description: 'Hex-formatted balance (Ethereum-compatible). Optional second `block` argument.' },
       { name: 'sum_getBalance', description: 'sum_-prefixed alias of get_balance.' },
       { name: 'sum_getNonce', description: 'sum_-prefixed alias of get_nonce.' },
+      { name: 'sum_resolveAddressLabels', description: 'Public registry labels for an address (current on-chain view): DocClass/Employment issuer names, Tax/Finance issuer roles, node role. Point lookup; raw address always preserved (#64).' },
       { name: 'sum_getTransactionCount', description: 'Total transactions sent by an address.' },
       { name: 'sum_getTransactionsByAddress', description: 'Tx history (sender + recipient) for an address.' },
       { name: 'sum_getTransactionsBySender', description: 'Tx history (sender only).' },

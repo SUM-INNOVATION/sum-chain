@@ -1319,6 +1319,84 @@ impl SumChainApiServer for RpcServer {
         self.get_nonce(address).await
     }
 
+    async fn sum_resolve_address_labels(
+        &self,
+        address: String,
+    ) -> std::result::Result<crate::types::AddressLabelsInfo, jsonrpsee::types::ErrorObjectOwned> {
+        use crate::types::{AddressLabel, AddressLabelsInfo};
+        let addr = self.parse_address(&address)?;
+        let internal = |e: sumchain_storage::StorageError| RpcError::Internal(e.to_string());
+        let mut labels: Vec<AddressLabel> = Vec::new();
+
+        // Fixed source order (DocClass, Employment, Tax, Finance, Node) — this is
+        // also the primary-label tie-break order. Every lookup is a single keyed
+        // DB get; no enumeration, no scan.
+
+        // 1. DocClass issuer — public institution name.
+        if let Some(i) = DocClassStore::new(&self.db).issuers().get(&addr).map_err(internal)? {
+            labels.push(AddressLabel {
+                label: i.name.clone(),
+                kind: "institution".to_string(),
+                source: "DocClassIssuer".to_string(),
+                status: format!("{:?}", i.status),
+            });
+        }
+        // 2. Employment issuer — public display name.
+        if let Some(i) = EmploymentIssuerStore::new(&self.db).get(&addr).map_err(internal)? {
+            labels.push(AddressLabel {
+                label: i.display_name.clone(),
+                kind: "institution".to_string(),
+                source: "EmploymentIssuer".to_string(),
+                status: format!("{:?}", i.status),
+            });
+        }
+        // 3. Tax issuer — role/class only (no public name).
+        if let Some(i) = sumchain_storage::TaxIssuerStore::new(&self.db).get(&addr).map_err(internal)? {
+            labels.push(AddressLabel {
+                label: i.tax_class.name().to_string(),
+                kind: "role".to_string(),
+                source: "TaxIssuer".to_string(),
+                status: format!("{:?}", i.status),
+            });
+        }
+        // 4. Finance issuer — role/class only (no public name).
+        if let Some(i) = sumchain_storage::FinanceIssuerStore::new(&self.db).get(&addr).map_err(internal)? {
+            labels.push(AddressLabel {
+                label: i.issuer_class.name().to_string(),
+                kind: "role".to_string(),
+                source: "FinanceIssuer".to_string(),
+                status: format!("{:?}", i.status),
+            });
+        }
+        // 5. Node registry — public role (Validator / Archive Node).
+        if let Some(rec) = sumchain_state::NodeRegistryExecutor::new(self.db.clone())
+            .get_node(&addr)
+            .map_err(|e| RpcError::Internal(e.to_string()))?
+        {
+            let role = match rec.role {
+                sumchain_primitives::NodeRole::Validator => "Validator",
+                sumchain_primitives::NodeRole::ArchiveNode => "Archive Node",
+            };
+            labels.push(AddressLabel {
+                label: role.to_string(),
+                kind: "role".to_string(),
+                source: "NodeRegistry".to_string(),
+                status: format!("{:?}", rec.status),
+            });
+        }
+
+        // Deterministic primary: first Active institution name, else first Active
+        // label, else none. Non-Active entries remain in `labels` with their true
+        // status so callers can dim/tag them.
+        let primary_label = labels
+            .iter()
+            .find(|l| l.kind == "institution" && l.status == "Active")
+            .or_else(|| labels.iter().find(|l| l.status == "Active"))
+            .map(|l| l.label.clone());
+
+        Ok(AddressLabelsInfo { address: addr.to_base58(), primary_label, labels })
+    }
+
     async fn sum_send_raw_transaction(
         &self,
         raw_tx: String,
@@ -12241,5 +12319,177 @@ mod family_builder_tests {
             })
             .await
             .is_err());
+    }
+}
+
+#[cfg(test)]
+mod address_label_tests {
+    //! Issue #64: `sum_resolveAddressLabels` — public, point-lookup registry
+    //! label resolution. Seeds address-keyed registries directly and asserts the
+    //! resolved labels, deterministic primary, empty/null fallback, and that no
+    //! private/holder data is serialized.
+    use super::*;
+    use std::collections::HashMap;
+    use sumchain_consensus::PoAEngine;
+    use sumchain_crypto::KeyPair;
+    use sumchain_genesis::{ChainParams, Genesis};
+    use sumchain_primitives::docclass::{DocClassIssuer, DocClassIssuerStatus, DocClassIssuerType};
+    use sumchain_primitives::employment::{EmploymentIssuerClass, EmploymentIssuerProfile, IssuerStatus};
+    use sumchain_primitives::tax::{TaxIssuer, TaxIssuerClass, TaxIssuerStatus};
+    use sumchain_primitives::Address;
+    use sumchain_state::MempoolConfig;
+    use tempfile::TempDir;
+
+    fn server() -> (RpcServer, Arc<Database>, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let db = Arc::new(Database::open_default(dir.path()).unwrap());
+        let state = Arc::new(StateManager::new(db.clone(), 1));
+        let mempool = Arc::new(Mempool::new(MempoolConfig::default()));
+        let validator = KeyPair::generate();
+        let genesis = Genesis::new(
+            1,
+            0,
+            vec![validator.public_key().to_base58()],
+            HashMap::from([(validator.address().to_base58(), 1_000_000u128)]),
+            ChainParams::with_v2_enabled(),
+        );
+        let engine = Arc::new(
+            PoAEngine::new(db.clone(), state.clone(), mempool.clone(), &genesis, Some(validator)).unwrap(),
+        );
+        let (tx_sender, _rx) = mpsc::channel(64);
+        let srv = RpcServer::new(db.clone(), state, mempool, engine, tx_sender, Arc::new(|| 0usize));
+        (srv, db, dir)
+    }
+
+    fn seed_docclass(db: &Arc<Database>, addr: Address, name: &str, status: DocClassIssuerStatus) {
+        let issuer = DocClassIssuer {
+            address: addr,
+            name: name.to_string(),
+            issuer_type: DocClassIssuerType::Educational,
+            jurisdictions: vec!["US".to_string()],
+            authorized_subcodes: vec![],
+            keys: vec![],
+            registered_at: 1,
+            updated_at: 1,
+            status,
+            stake_amount: 0,
+            metadata: None,
+        };
+        DocClassStore::new(db).issuers().put(&issuer).unwrap();
+    }
+
+    fn seed_employment(db: &Arc<Database>, addr: Address, display_name: &str) {
+        let issuer = EmploymentIssuerProfile {
+            issuer_address: addr,
+            issuer_class: EmploymentIssuerClass::PayrollProcessor,
+            display_name: display_name.to_string(),
+            issuer_commitment: [0u8; 32],
+            jurisdiction_code: "US".to_string(),
+            policy_id: [0u8; 32],
+            status: IssuerStatus::Active,
+            registered_at_height: 1,
+            created_at: 1,
+            updated_at: 1,
+        };
+        EmploymentIssuerStore::new(db).put(&issuer).unwrap();
+    }
+
+    fn seed_tax(db: &Arc<Database>, addr: Address) {
+        let issuer = TaxIssuer {
+            address: addr,
+            tax_class: TaxIssuerClass::TaxAuthority,
+            jurisdictions: vec!["US".to_string()],
+            attributes_hash: [0u8; 32],
+            attributes_schema_hash: [0u8; 32],
+            registered_at: 1,
+            updated_at: 1,
+            status: TaxIssuerStatus::Active,
+            expires_at: None,
+        };
+        sumchain_storage::TaxIssuerStore::new(db).put(&issuer).unwrap();
+    }
+
+    #[tokio::test]
+    async fn docclass_issuer_resolves_institution_name() {
+        let (srv, db, _dir) = server();
+        let a = KeyPair::generate().address();
+        seed_docclass(&db, a, "SUM Hypothesis Institute", DocClassIssuerStatus::Active);
+
+        let out = srv.sum_resolve_address_labels(a.to_base58()).await.unwrap();
+        assert_eq!(out.address, a.to_base58(), "raw address echoed");
+        assert_eq!(out.primary_label.as_deref(), Some("SUM Hypothesis Institute"));
+        assert_eq!(out.labels.len(), 1);
+        assert_eq!(out.labels[0].label, "SUM Hypothesis Institute");
+        assert_eq!(out.labels[0].kind, "institution");
+        assert_eq!(out.labels[0].source, "DocClassIssuer");
+        assert_eq!(out.labels[0].status, "Active");
+    }
+
+    #[tokio::test]
+    async fn employment_issuer_resolves_display_name() {
+        let (srv, db, _dir) = server();
+        let a = KeyPair::generate().address();
+        seed_employment(&db, a, "Acme Payroll");
+
+        let out = srv.sum_resolve_address_labels(a.to_base58()).await.unwrap();
+        assert_eq!(out.primary_label.as_deref(), Some("Acme Payroll"));
+        assert_eq!(out.labels[0].kind, "institution");
+        assert_eq!(out.labels[0].source, "EmploymentIssuer");
+    }
+
+    #[tokio::test]
+    async fn unregistered_address_returns_empty_labels_null_primary() {
+        let (srv, _db, _dir) = server();
+        let a = KeyPair::generate().address();
+        let out = srv.sum_resolve_address_labels(a.to_base58()).await.unwrap();
+        assert!(out.labels.is_empty(), "no registry ⇒ empty labels");
+        assert!(out.primary_label.is_none(), "no registry ⇒ null primary");
+        assert_eq!(out.address, a.to_base58(), "raw address still echoed");
+    }
+
+    #[tokio::test]
+    async fn role_only_source_has_kind_role() {
+        let (srv, db, _dir) = server();
+        let a = KeyPair::generate().address();
+        seed_tax(&db, a);
+        let out = srv.sum_resolve_address_labels(a.to_base58()).await.unwrap();
+        assert_eq!(out.labels.len(), 1);
+        assert_eq!(out.labels[0].kind, "role", "tax issuer is role-only, no fabricated name");
+        assert_eq!(out.labels[0].source, "TaxIssuer");
+        assert_eq!(out.primary_label.as_deref(), Some(out.labels[0].label.as_str()));
+    }
+
+    #[tokio::test]
+    async fn multiple_sources_pick_deterministic_institution_primary() {
+        let (srv, db, _dir) = server();
+        let a = KeyPair::generate().address();
+        // Same address registered as both a DocClass institution (name) AND a Tax
+        // issuer (role). Primary must be the institution name; source order fixed.
+        seed_docclass(&db, a, "Dual Institute", DocClassIssuerStatus::Active);
+        seed_tax(&db, a);
+
+        let out = srv.sum_resolve_address_labels(a.to_base58()).await.unwrap();
+        assert_eq!(out.labels.len(), 2);
+        assert_eq!(out.labels[0].source, "DocClassIssuer", "DocClass sorts first");
+        assert_eq!(out.labels[1].source, "TaxIssuer");
+        assert_eq!(out.primary_label.as_deref(), Some("Dual Institute"), "institution name beats role");
+    }
+
+    #[tokio::test]
+    async fn no_private_or_holder_data_serialized() {
+        let (srv, db, _dir) = server();
+        let a = KeyPair::generate().address();
+        seed_docclass(&db, a, "Privacy Institute", DocClassIssuerStatus::Active);
+        seed_tax(&db, a);
+        let out = srv.sum_resolve_address_labels(a.to_base58()).await.unwrap();
+        let json = serde_json::to_string(&out).unwrap();
+        // Only the public label surface is serialized.
+        for k in ["\"address\"", "\"primary_label\"", "\"labels\"", "\"kind\"", "\"source\"", "\"status\""] {
+            assert!(json.contains(k), "missing expected key {k}");
+        }
+        // No private registry internals leak through.
+        for forbidden in ["commitment", "attributes_hash", "policy_id", "jurisdiction", "holder", "stake", "private", "mnemonic", "seed"] {
+            assert!(!json.contains(forbidden), "leaked private field: {forbidden}");
+        }
     }
 }

@@ -5,6 +5,7 @@ import { formatKoppa } from '../utils/formatters';
 import { DetailSkeleton, ErrorState, Skeleton } from '../components/States';
 import { TransactionTypeBadge, TransactionActionLabel } from '../components/TransactionType';
 import { Copyable } from '../components/Copyable';
+import { AddressLabel } from '../components/AddressLabel';
 import { minterRole } from '@sumchain/sdk';
 import type { TransactionInfo, TransactionReceipt, TokenMintersInfo } from '@sumchain/sdk';
 
@@ -144,9 +145,7 @@ export default function TransactionDetails() {
 
         <DetailRowNode label="From">
           <div className="flex flex-col items-end gap-1">
-            <Link to={`/address/${tx.from}`} className="tnum break-all font-mono text-accent-soft hover:text-primary-200">
-              {tx.from}
-            </Link>
+            <AddressLabel address={tx.from} className="justify-end" />
             {fromRole?.label && <MinterChip label={fromRole.label} />}
           </div>
         </DetailRowNode>
@@ -154,9 +153,7 @@ export default function TransactionDetails() {
         {tx.to ? (
           <DetailRowNode label="To">
             <div className="flex flex-col items-end gap-1">
-              <Link to={`/address/${tx.to}`} className="tnum break-all font-mono text-accent-soft hover:text-primary-200">
-                {tx.to}
-              </Link>
+              <AddressLabel address={tx.to} className="justify-end" />
               {toRole?.label && <MinterChip label={toRole.label} />}
             </div>
           </DetailRowNode>

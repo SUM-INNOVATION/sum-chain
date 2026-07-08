@@ -97,6 +97,39 @@ pub struct ReceiptInfo {
     pub fee_paid: String,
 }
 
+/// One public, address-keyed registry label for an address (issue #64). Either
+/// an institution/issuer **name** (`kind: "institution"`) or a **role/class**
+/// label proven by a public registry (`kind: "role"`). Never fabricated: every
+/// label comes from an existing public registry the address is registered in.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddressLabel {
+    /// Display text — an institution/issuer name, or a role/class label.
+    pub label: String,
+    /// `"institution"` (a real registered name) or `"role"` (a role/class only).
+    pub kind: String,
+    /// Which public registry produced the label: `DocClassIssuer`,
+    /// `EmploymentIssuer`, `TaxIssuer`, `FinanceIssuer`, or `NodeRegistry`.
+    pub source: String,
+    /// Registry status of the entry (e.g. `Active`, `Suspended`, `Revoked`).
+    pub status: String,
+}
+
+/// Public registry labels resolved for a single address at read time (issue #64).
+/// This is a **current** on-chain registry view — it does not assert the label
+/// was valid at any historical transaction height. Point lookup only: the caller
+/// must already know the address. The raw `address` is always echoed so callers
+/// keep it visible/copyable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddressLabelsInfo {
+    /// The queried address, base58 (echoed for display alongside the label).
+    pub address: String,
+    /// Deterministic primary label for compact display: the first `Active`
+    /// institution name, else the first `Active` label, else `null`.
+    pub primary_label: Option<String>,
+    /// All resolved labels, in a fixed source order.
+    pub labels: Vec<AddressLabel>,
+}
+
 /// OmniNode `InferenceAttestation` record as exposed over RPC.
 /// Wire-stable; all binary fields are hex-encoded with `0x` prefix
 /// except `session_id` (UTF-8 string, OmniNode-defined) and addresses

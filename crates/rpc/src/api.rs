@@ -22,6 +22,7 @@ use crate::inference_settlement_types::{
     OmniBuildResolveDisputeRequest, OmniBuildVerifierBondActionRequest, OmniSettlementBuildResponse,
 };
 use crate::types::{
+    AddressLabelsInfo,
     TaxClaimTypeInfo, TaxIssuerInfo, TaxPolicyInfo, ExecutorLinkInfo, AssetInfo, FinanceIssuerInfo,
     CaseInfo, HealthcareProviderInfo,
     EquityControllerConfigInfo, EquityEntityInfo, EquityShareClassInfo,
@@ -163,6 +164,19 @@ pub trait SumChainApi {
     /// Get account nonce (SUM native alias)
     #[method(name = "sum_getNonce")]
     async fn sum_get_nonce(&self, address: String) -> Result<u64, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Resolve public registry labels for a single address (issue #64). A
+    /// read-only **point lookup** across the address-keyed public registries
+    /// (DocClass / Employment issuer names; Tax / Finance issuer roles; node
+    /// role) — no enumeration, no private data, no writes. Returns the raw
+    /// address plus any labels and a deterministic `primary_label`; empty labels
+    /// and `null` primary when the address is in no public registry. This is a
+    /// **current** registry view, not a historical-at-tx-height assertion.
+    #[method(name = "sum_resolveAddressLabels")]
+    async fn sum_resolve_address_labels(
+        &self,
+        address: String,
+    ) -> Result<AddressLabelsInfo, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Send raw transaction (SUM native alias)
     #[method(name = "sum_sendRawTransaction")]

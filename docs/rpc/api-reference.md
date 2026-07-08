@@ -463,6 +463,20 @@ Alias for `get_nonce`. Returns account nonce.
 
 ---
 
+#### `sum_resolveAddressLabels`
+
+Resolve public registry labels for an address (issue #64). Read-only **point lookup** across the address-keyed public registries — DocClass and Employment issuer **names**, Tax and Finance issuer **roles**, and node **role**. No enumeration, no scans, no private data. This is a **current** on-chain registry view, not a claim that a label was valid at a historical transaction height. Always display the raw address alongside any label.
+
+**Parameters:**
+1. `address` (string) - Address to resolve (base58)
+
+**Returns:** `AddressLabelsInfo`
+- `address` (string) - the queried address, echoed
+- `primary_label` (string | null) - deterministic primary label (first `Active` institution name, else first `Active` label, else `null`)
+- `labels` (array) - `{ label, kind: "institution" | "role", source, status }`, in fixed source order
+
+---
+
 #### `sum_sendRawTransaction`
 
 Alias for `send_raw_transaction`. Broadcasts a signed transaction.
