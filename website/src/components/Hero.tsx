@@ -97,7 +97,7 @@ export default function Hero() {
           {[
             { v: '3s', l: 'Block time' },
             { v: '~18s', l: 'Finality · depth 6' },
-            { v: '800B Ϙ', l: 'Fixed supply' },
+            { v: '800B Ϙ', l: 'Canonical supply' },
             { v: '100% Rust', l: 'Zero C/C++ deps' },
           ].map((s) => (
             <div key={s.l}>

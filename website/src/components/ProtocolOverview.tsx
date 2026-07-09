@@ -90,9 +90,9 @@ const TOPICS: Topic[] = [
   {
     id: 'tokenomics',
     kicker: 'Koppa economics',
-    title: 'Fixed supply, fee-funded validators',
+    title: 'No automatic emissions, fee-funded validators',
     bullets: [
-      '800,000,000,000 Ϙ fixed supply, minted at genesis. No inflation and no mining or block rewards.',
+      '800,000,000,000 Ϙ canonical supply after the coordinated supply migration. No inflation and no mining or block rewards; future expansion requires on-chain consensus governance.',
       'Transaction fees are paid to the block proposer, so validators are funded by real network usage rather than new issuance.',
       'Koppa has nine decimals: 1 Ϙ = 1,000,000,000 base units, with a minimum fee of 1,000 base units.',
     ],
@@ -101,7 +101,7 @@ const TOPICS: Topic[] = [
       { k: 'total_supply', v: '800,000,000,000 Ϙ' },
       { k: 'decimals', v: '9' },
       { k: 'min_fee', v: '1000 base (0.000001 Ϙ)' },
-      { k: 'issuance', v: 'none (fixed at genesis)' },
+      { k: 'issuance', v: 'none automatic; governance-only expansion' },
     ],
     href: '/tokenomics',
     cta: 'Tokenomics',

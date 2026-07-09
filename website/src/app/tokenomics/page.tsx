@@ -6,15 +6,15 @@ import { Card, SpecList, Callout, SourceLinks } from '@/components/ui/blocks';
 export const metadata: Metadata = {
   title: 'Tokenomics | SUM Chain',
   description:
-    'Koppa (Ϙ) tokenomics, grounded in code and live mainnet parameters: fixed 800B supply, nine decimals, fee-funded validators (min fee 1,000 base units), storage fee pools with Proof-of-Retrievability rewards, and dormant governance bonds. No inflation, no yield, no price claims.',
+    'Koppa (Ϙ) tokenomics, grounded in code and live mainnet parameters: 800B canonical supply after the coordinated supply migration, nine decimals, fee-funded validators (min fee 1,000 base units), a ProtocolReserve with service grants, storage fee pools with Proof-of-Retrievability rewards, and dormant governance bonds. No automatic emissions, no yield, no price claims.',
 };
 
 const ALLOCATION = [
-  { name: 'Foundation', pct: 50, amount: '400B Ϙ', color: 'var(--accent)' },
-  { name: 'Ecosystem', pct: 20, amount: '160B Ϙ', color: 'var(--signal)' },
-  { name: 'Team', pct: 15, amount: '120B Ϙ', color: 'var(--accent-soft)' },
-  { name: 'Community', pct: 10, amount: '80B Ϙ', color: 'var(--signal-soft)' },
-  { name: 'Liquidity', pct: 5, amount: '40B Ϙ', color: 'var(--muted)' },
+  { name: 'Governance reserve', pct: 40, amount: '319B Ϙ', color: 'var(--accent)' },
+  { name: 'Ecosystem / public goods', pct: 20, amount: '160B Ϙ', color: 'var(--signal)' },
+  { name: 'Archive service', pct: 15, amount: '120B Ϙ', color: 'var(--accent-soft)' },
+  { name: 'Compute service', pct: 15, amount: '120B Ϙ', color: 'var(--signal-soft)' },
+  { name: 'Validator bootstrap', pct: 10, amount: '80B Ϙ', color: 'var(--muted)' },
 ];
 
 const NOT_CLAIMED = [
@@ -36,7 +36,7 @@ export default function TokenomicsPage() {
         <div className="mx-auto max-w-6xl px-6 py-16 lg:px-8">
           <div className="grid grid-cols-2 gap-8 border-b border-[var(--border)] pb-12 sm:grid-cols-4">
             <Reveal>
-              <Stat value="800B Ϙ" label="Total supply" sub="fixed at genesis" />
+              <Stat value="800B Ϙ" label="Canonical supply" sub="after supply migration" />
             </Reveal>
             <Reveal delay={0.06}>
               <Stat value="9" label="Decimals" sub="1 Ϙ = 1,000,000,000 base" />
@@ -57,8 +57,8 @@ export default function TokenomicsPage() {
           <Reveal>
             <SectionHeader
               kicker="Koppa & base units"
-              title="A fixed unit of account"
-              intro="Koppa (Ϙ) has nine decimals: one Koppa is 1,000,000,000 base units. The entire supply is minted at genesis — there is no runtime mint path for native Koppa, so there is no inflation and no block reward. Validators are paid from fees, not new issuance."
+              title="A stable unit of account"
+              intro="Koppa (Ϙ) has nine decimals: one Koppa is 1,000,000,000 base units. There are no automatic emissions — no inflation and no block reward. Initial canonical supply is 800B Koppa after the coordinated supply migration; the 799B correction delta lives in a non-transferable ProtocolReserve, not in accounts. Future supply expansion, if ever needed, requires explicit on-chain consensus governance. Validators are paid from fees, not new issuance."
             />
           </Reveal>
           <Reveal delay={0.1}>
@@ -69,7 +69,7 @@ export default function TokenomicsPage() {
                   { k: 'decimals', v: '9' },
                   { k: 'base_unit', v: '1 Ϙ = 1,000,000,000' },
                   { k: 'total_supply', v: '800,000,000,000 Ϙ' },
-                  { k: 'issuance', v: 'fixed at genesis' },
+                  { k: 'issuance', v: 'none automatic; governance-only expansion' },
                 ]}
               />
             </Card>
@@ -81,15 +81,15 @@ export default function TokenomicsPage() {
       <section className="border-t border-[var(--border)]">
         <div className="mx-auto max-w-6xl px-6 py-20 lg:px-8">
           <SectionHeader
-            kicker="Genesis allocation"
-            title="How the fixed supply is distributed"
-            intro="All 800 billion Koppa are allocated at genesis. Figures follow the published economic model."
+            kicker="ProtocolReserve"
+            title="How the supply is distributed"
+            intro="1B Koppa was allocated at genesis to the two bootstrap validators. The 799B correction delta is non-transferable ProtocolReserve supply, released only through service grants earned by network participation or native-Koppa consensus governance. Figures follow the published economic model."
           />
           <Reveal className="mt-10">
             <div
               className="flex h-4 w-full overflow-hidden rounded-full border border-[var(--border)]"
               role="img"
-              aria-label="Genesis allocation: Foundation 50%, Ecosystem 20%, Team 15%, Community 10%, Liquidity 5%"
+              aria-label="ProtocolReserve pools: Governance reserve 40%, Ecosystem 20%, Archive service 15%, Compute service 15%, Validator bootstrap 10%"
             >
               {ALLOCATION.map((a) => (
                 <span key={a.name} style={{ width: `${a.pct}%`, background: a.color, opacity: 0.85 }} />
