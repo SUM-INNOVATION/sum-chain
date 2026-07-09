@@ -20,6 +20,8 @@ import type {
   Src20TokenInfo,
   TokenMintersInfo,
   AddressLabelsInfo,
+  SupplyInfo,
+  ProtocolReserveInfo,
   Src20TokenHoldings,
   TxBuildResponse,
   TokenBuildRequest,
@@ -553,6 +555,24 @@ export class Provider {
    */
   async resolveAddressLabels(address: Address): Promise<AddressLabelsInfo> {
     return this.request<AddressLabelsInfo>('sum_resolveAddressLabels', [address]);
+  }
+
+  /**
+   * Canonical-supply report (800B supply correction): initial/current
+   * canonical supply, live accounted account supply, burned supply, protocol
+   * reserve remaining, migration status, governance mint total, and
+   * `automatic_emissions_enabled` (always `false`).
+   */
+  async getSupplyInfo(): Promise<SupplyInfo> {
+    return this.request<SupplyInfo>('chain_getSupplyInfo', []);
+  }
+
+  /**
+   * ProtocolReserve pool balances, or `null` before the supply correction has
+   * applied on-chain.
+   */
+  async getProtocolReserve(): Promise<ProtocolReserveInfo | null> {
+    return this.request<ProtocolReserveInfo | null>('chain_getProtocolReserve', []);
   }
 
   /**
