@@ -33,7 +33,7 @@ A Layer-1 blockchain built entirely in Rust (stable toolchain). No C/C++, Python
 - **Policy Accounts**: Consensus-level multi-sig group governance
 - **On-chain Encrypted Messaging**: SRC-201 standard using X25519 + XChaCha20-Poly1305
 - **SRC-80X through SRC-89X Document Token Families**: DocClass, Tax, Equity, Agreement, Legal, Property, Healthcare, Employment, Finance
-- **SNIP V2 Storage Protocol**: Decentralized file storage with on-chain metadata. Pending → Active → Abandoned lifecycle, ed25519 X25519-derived encryption keys, archive-node staking + replication assignment, fee pools, and per-block PoR challenges. Activation gated by `v2_enabled_from_height`. See `crates/state/src/storage_metadata.rs` and `docs/SNIP-V2.md` (where present)
+- **SNIP V2 Storage Protocol**: Decentralized file storage with on-chain metadata. Pending → Active → Abandoned lifecycle, ed25519 X25519-derived encryption keys, archive-node staking + replication assignment, fee pools, and per-block PoR challenges. Activation gated by `v2_enabled_from_height`. See `crates/state/src/storage_metadata.rs`, [`docs/specs/SNIP-V2-CHAIN-PLAN.md`](docs/specs/SNIP-V2-CHAIN-PLAN.md), and [`docs/rpc/SNIP-V2-RPC-CHEATSHEET.md`](docs/rpc/SNIP-V2-RPC-CHEATSHEET.md)
 - **Dynamic Validator Sets**: Epoch-based, stake-weighted validator selection
 - **libp2p Networking**: Gossipsub for transaction/block propagation, mDNS for local discovery
 - **JSON-RPC API**: HTTP server for chain queries and transaction submission (ETH + SUM compatible)

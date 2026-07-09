@@ -885,6 +885,7 @@ active once the chain reaches it (≈2026-07-12)**.
 |---|---|
 | `sum_getInferenceAttestation(session_id, verifier_address)` | One attestation record. |
 | `sum_listInferenceAttestations(session_id)` | Every verifier for a session. |
+| `sum_getInferenceAttestationSponsor(session_id, verifier_address)` | Sponsor metadata (sponsor address, height, tx hash) for a sponsored (v2) attestation; `null` for v1 direct or absent attestations (issue #95). |
 | `sum_getInferenceAttestationStatus(tx_hash)` | Chain-side status of an attestation tx. |
 | `sum_buildSponsoredInferenceAttestation(request)` | Build an unsigned **sponsored** (v2) attestation tx (issue #79): a payer/sponsor submits on a verifier's behalf. No keys; the sponsor signs offline. The attestation stays verifier-keyed for dedup, storage, and settlement. |
 

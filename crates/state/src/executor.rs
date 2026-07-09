@@ -1421,8 +1421,11 @@ impl BlockExecutor {
                             included_at_height: block_height,
                             tx_hash,
                         };
+                        // v1 direct submission (sender == verifier): no sponsor
+                        // metadata is written (issue #95 — absence means "not
+                        // sponsored").
                         self.inference_attestation_executor
-                            .put(&cf_key, &record, &v2_tx.from)?;
+                            .put(&cf_key, &record, &v2_tx.from, None)?;
 
                         debug!(
                             "V2 InferenceAttestation {} executed: session_id={:?} verifier={} height={}",
@@ -1528,8 +1531,18 @@ impl BlockExecutor {
                             included_at_height: block_height,
                             tx_hash,
                         };
+                        // Issue #95: additive sponsor metadata, written in the
+                        // SAME batch as the canonical record. `InferenceAttestationRecord`
+                        // is unchanged; the sponsor lives in a side CF under the
+                        // same key. Reached only on a first (non-duplicate)
+                        // submission, so it never overwrites.
+                        let sponsor = sumchain_primitives::inference_attestation::InferenceAttestationSponsor {
+                            sponsor: v2_tx.from,
+                            submitted_at_height: block_height,
+                            tx_hash,
+                        };
                         self.inference_attestation_executor
-                            .put(&cf_key, &record, &verifier_address)?;
+                            .put(&cf_key, &record, &verifier_address, Some(&sponsor))?;
 
                         debug!(
                             "Sponsored InferenceAttestationV2 {} executed: session_id={:?} verifier={} sponsor={} height={}",

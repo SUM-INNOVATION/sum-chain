@@ -22,7 +22,8 @@
 use std::sync::Arc;
 
 use sumchain_primitives::inference_attestation::{
-    session_index_key, session_index_prefix, InferenceAttestationRecord, SESSION_ID_HASH_BYTES,
+    session_index_key, session_index_prefix, InferenceAttestationRecord,
+    InferenceAttestationSponsor, SESSION_ID_HASH_BYTES,
 };
 use sumchain_primitives::Address;
 use sumchain_storage::{cf, Database};
@@ -80,11 +81,20 @@ impl InferenceAttestationExecutor {
     /// attestation invisible to the listing RPC while still findable
     /// via point lookup, which is the kind of silent inconsistency
     /// that's painful to debug.
+    ///
+    /// Issue #95: when `sponsor` is `Some` (the sponsored v2 path), the sponsor
+    /// metadata is written to `INFERENCE_ATTESTATION_SPONSORS` under the SAME
+    /// `key` in the **same batch** — record, session index, and sponsor commit
+    /// together or not at all. v1 direct submissions pass `None` and write no
+    /// sponsor entry. The dispatch's `exists` dedup guarantees this `put` is only
+    /// reached on a first, non-duplicate submission, so sponsor metadata is never
+    /// overwritten.
     pub fn put(
         &self,
         key: &[u8; 32],
         record: &InferenceAttestationRecord,
         verifier_address: &Address,
+        sponsor: Option<&InferenceAttestationSponsor>,
     ) -> Result<()> {
         let value = bincode::serialize(record)
             .map_err(|e| StateError::SerializationError(e.to_string()))?;
@@ -94,8 +104,28 @@ impl InferenceAttestationExecutor {
         batch.put(cf::INFERENCE_ATTESTATIONS, key, &value)?;
         // Session-id index — empty value, presence is the signal.
         batch.put(cf::INFERENCE_ATTESTATIONS_BY_SESSION, &index_key, &[])?;
+        if let Some(sp) = sponsor {
+            let sp_value = bincode::serialize(sp)
+                .map_err(|e| StateError::SerializationError(e.to_string()))?;
+            batch.put(cf::INFERENCE_ATTESTATION_SPONSORS, key, &sp_value)?;
+        }
         batch.commit()?;
         Ok(())
+    }
+
+    /// Fetch the additive sponsor metadata for `(session_id, verifier)` keyed
+    /// record, if the attestation was sponsored (issue #95). Returns `None` for
+    /// v1 direct attestations and for absent attestations. Backs
+    /// `sum_getInferenceAttestationSponsor`; never consulted by settlement.
+    pub fn get_sponsor(&self, key: &[u8; 32]) -> Result<Option<InferenceAttestationSponsor>> {
+        match self.db.get(cf::INFERENCE_ATTESTATION_SPONSORS, key)? {
+            None => Ok(None),
+            Some(bytes) => {
+                let sp = bincode::deserialize::<InferenceAttestationSponsor>(&bytes)
+                    .map_err(|e| StateError::SerializationError(e.to_string()))?;
+                Ok(Some(sp))
+            }
+        }
     }
 
     /// Enumerate verifier addresses that have attested to `session_id`.
@@ -187,7 +217,7 @@ mod tests {
         let (db, _dir) = setup();
         let executor = InferenceAttestationExecutor::new(db);
         let key = [11u8; 32];
-        executor.put(&key, &sample_record(), &Address::new([42u8; 20])).unwrap();
+        executor.put(&key, &sample_record(), &Address::new([42u8; 20]), None).unwrap();
         assert!(executor.exists(&key).unwrap());
     }
 
@@ -197,7 +227,7 @@ mod tests {
         let executor = InferenceAttestationExecutor::new(db);
         let key = [22u8; 32];
         let record = sample_record();
-        executor.put(&key, &record, &Address::new([42u8; 20])).unwrap();
+        executor.put(&key, &record, &Address::new([42u8; 20]), None).unwrap();
         let loaded = executor.get(&key).unwrap().expect("present");
         assert_eq!(loaded, record);
     }
@@ -208,7 +238,7 @@ mod tests {
         let executor = InferenceAttestationExecutor::new(db);
         let k1 = [1u8; 32];
         let k2 = [2u8; 32];
-        executor.put(&k1, &sample_record(), &Address::new([42u8; 20])).unwrap();
+        executor.put(&k1, &sample_record(), &Address::new([42u8; 20]), None).unwrap();
         assert!(executor.exists(&k1).unwrap());
         assert!(!executor.exists(&k2).unwrap());
     }
@@ -223,11 +253,11 @@ mod tests {
         let (db, _dir) = setup();
         let executor = InferenceAttestationExecutor::new(db);
         let key = [33u8; 32];
-        executor.put(&key, &sample_record(), &Address::new([42u8; 20])).unwrap();
+        executor.put(&key, &sample_record(), &Address::new([42u8; 20]), None).unwrap();
 
         let mut second = sample_record();
         second.included_at_height = 99;
-        executor.put(&key, &second, &Address::new([42u8; 20])).unwrap();
+        executor.put(&key, &second, &Address::new([42u8; 20]), None).unwrap();
         let loaded = executor.get(&key).unwrap().expect("present");
         assert_eq!(loaded.included_at_height, 99);
     }
@@ -276,9 +306,9 @@ mod tests {
         let (k1, r1, a1) = mk(&v1, 1);
         let (k2, r2, a2) = mk(&v2, 2);
         let (k3, r3, a3) = mk(&v3, 3);
-        executor.put(&k1, &r1, &a1).unwrap();
-        executor.put(&k2, &r2, &a2).unwrap();
-        executor.put(&k3, &r3, &a3).unwrap();
+        executor.put(&k1, &r1, &a1, None).unwrap();
+        executor.put(&k2, &r2, &a2, None).unwrap();
+        executor.put(&k3, &r3, &a3, None).unwrap();
 
         let mut returned = executor.list_verifiers_by_session(session_id).unwrap();
         returned.sort();
@@ -303,7 +333,7 @@ mod tests {
         let key = [77u8; 32];
         let verifier = Address::new([0xabu8; 20]);
         let record = sample_record();
-        executor.put(&key, &record, &verifier).unwrap();
+        executor.put(&key, &record, &verifier, None).unwrap();
 
         // Canonical CF: point lookup hits.
         assert!(executor.exists(&key).unwrap());
@@ -348,8 +378,8 @@ mod tests {
 
         let (ka, ra) = mk("session-A", 10);
         let (kb, rb) = mk("session-B", 11);
-        executor.put(&ka, &ra, &verifier).unwrap();
-        executor.put(&kb, &rb, &verifier).unwrap();
+        executor.put(&ka, &ra, &verifier, None).unwrap();
+        executor.put(&kb, &rb, &verifier, None).unwrap();
 
         let a_verifiers = executor.list_verifiers_by_session("session-A").unwrap();
         let b_verifiers = executor.list_verifiers_by_session("session-B").unwrap();

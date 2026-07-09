@@ -46,7 +46,7 @@ use crate::types::{
     TransactionHistoryResponse, TransactionInfo, UnbondingDelegationRpcInfo,
     ValidatorDelegationSummary, ValidatorSetInfo, ValidatorSetRpcInfo, ValidatorSigningRpcInfo,
     ViewCallRequest,
-    InferenceAttestationInfo, InferenceAttestationStatusInfo,
+    InferenceAttestationInfo, InferenceAttestationSponsorInfo, InferenceAttestationStatusInfo,
     AssessmentInfo, CatalogContentRefInfo, CatalogEntryInfo, EnrollmentLinkInfo,
     GradeRecordInfo, OfferingInfo, SubmissionReceiptInfo,
 };
@@ -222,6 +222,18 @@ pub trait SumChainApi {
         &self,
         session_id: String,
     ) -> Result<Vec<InferenceAttestationInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Additive sponsor metadata for a **sponsored (v2)** inference attestation
+    /// (issue #95). Returns `null` for v1 direct attestations and for absent
+    /// attestations. Point lookup by `(session_id, verifier_address)` only — no
+    /// sponsor-wide reverse lookup. Never affects settlement, which pays the
+    /// verifier regardless of sponsorship.
+    #[method(name = "sum_getInferenceAttestationSponsor")]
+    async fn sum_get_inference_attestation_sponsor(
+        &self,
+        session_id: String,
+        verifier_address: String,
+    ) -> Result<Option<InferenceAttestationSponsorInfo>, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Get the chain-side status of an `InferenceAttestation` tx by hash.
     /// Four states (`submitted`, `included`, `finalized`, `failed`) plus
