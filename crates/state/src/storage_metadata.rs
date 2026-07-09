@@ -811,6 +811,20 @@ impl StorageMetadataExecutor {
             state.put_account(&challenge.target_node, &node_account)?;
         }
 
+        // 800B correction: a successful PoR proof is REAL archive service — it
+        // accrues protocol-earned credit (the payout) usable for 1:1 grant
+        // unlock, and advances the archive milestone counter. Both are no-ops
+        // until the supply correction is applied; nothing retroactive.
+        {
+            let supply = crate::supply::SupplyStore::new(self.db.clone());
+            supply.accrue_earned_credit(
+                &challenge.target_node,
+                sumchain_primitives::supply::ServiceKind::Archive,
+                payout as u128,
+            )?;
+            supply.record_por_proof(&challenge.target_node)?;
+        }
+
         // 9. Delete the challenge from state
         self.delete_challenge(&challenge)?;
 

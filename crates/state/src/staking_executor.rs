@@ -965,6 +965,16 @@ impl StakingExecutor {
         );
         slashing_store.put_slashing_record(&record)?;
 
+        // 800B correction: evidence-based validator slashing forfeits any
+        // remaining grant-derived locked stake back to the ProtocolReserve
+        // (grant money is public reserve money — misbehaviour returns it).
+        // Self-funded stake follows the normal staking rules above. No-op if
+        // no active grant / correction dormant.
+        crate::supply::SupplyStore::new(self.db.clone()).forfeit_locked_grant(
+            &sumchain_primitives::Address::from_public_key(&evidence.validator_pubkey),
+            sumchain_primitives::supply::ServiceKind::Validator,
+        )?;
+
         // Reward the evidence submitter (optional: give them a portion of slashed funds)
         // For now, slashed funds are burned (not credited anywhere)
         let total_slashed = validator_slash + delegation_slash;
@@ -1071,6 +1081,16 @@ impl StakingExecutor {
         );
         slashing_store.put_slashing_record(&record)?;
 
+        // 800B correction: evidence-based validator slashing forfeits any
+        // remaining grant-derived locked stake back to the ProtocolReserve
+        // (grant money is public reserve money — misbehaviour returns it).
+        // Self-funded stake follows the normal staking rules above. No-op if
+        // no active grant / correction dormant.
+        crate::supply::SupplyStore::new(self.db.clone()).forfeit_locked_grant(
+            &sumchain_primitives::Address::from_public_key(&evidence.validator_pubkey),
+            sumchain_primitives::supply::ServiceKind::Validator,
+        )?;
+
         let total_slashed = validator_slash + delegation_slash;
 
         warn!(
@@ -1152,6 +1172,16 @@ impl StakingExecutor {
             slash_fraction_bps,
         );
         slashing_store.put_slashing_record(&record)?;
+
+        // 800B correction: evidence-based validator slashing forfeits any
+        // remaining grant-derived locked stake back to the ProtocolReserve
+        // (grant money is public reserve money — misbehaviour returns it).
+        // Self-funded stake follows the normal staking rules above. No-op if
+        // no active grant / correction dormant.
+        crate::supply::SupplyStore::new(self.db.clone()).forfeit_locked_grant(
+            &sumchain_primitives::Address::from_public_key(validator_pubkey),
+            sumchain_primitives::supply::ServiceKind::Validator,
+        )?;
 
         let total_slashed = validator_slash + delegation_slash;
 

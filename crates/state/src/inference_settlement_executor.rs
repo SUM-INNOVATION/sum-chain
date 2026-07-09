@@ -468,6 +468,19 @@ impl InferenceSettlementExecutor {
         }
 
         state.credit(sender, session.reward_per_verifier)?;
+        // 800B correction: a valid settlement claim is REAL compute service —
+        // accrue protocol-earned credit (the reward) for 1:1 grant unlock and
+        // advance the verifier milestone counter. No-ops until the supply
+        // correction is applied.
+        {
+            let supply = crate::supply::SupplyStore::new(self.db.clone());
+            supply.accrue_earned_credit(
+                sender,
+                sumchain_primitives::supply::ServiceKind::Compute,
+                session.reward_per_verifier,
+            )?;
+            supply.record_settlement_claim(sender)?;
+        }
         session.remaining_escrow -= session.reward_per_verifier;
         session.claims_count += 1;
         self.put_session(&session)?;
@@ -641,6 +654,20 @@ impl InferenceSettlementExecutor {
                         }
                     }
                 }
+            }
+            // 800B correction: a DENIED dispute is recorded against the verifier
+            // (blocks further compute milestone claims) and forfeits any
+            // remaining grant-derived locked stake back to the ProtocolReserve.
+            // No-ops until the supply correction is applied. Note: consistency
+            // failure alone never reaches this branch — only an explicit denied
+            // dispute does.
+            {
+                let supply = crate::supply::SupplyStore::new(self.db.clone());
+                supply.record_denied_dispute(&req.verifier)?;
+                supply.forfeit_locked_grant(
+                    &req.verifier,
+                    sumchain_primitives::supply::ServiceKind::Compute,
+                )?;
             }
         }
         info!(

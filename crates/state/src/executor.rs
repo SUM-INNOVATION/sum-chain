@@ -151,6 +151,15 @@ fn assignment_aware_por_scheduler_gate_open(params: &ChainParams, block_height: 
     matches!(params.assignment_aware_por_scheduler_enabled_from_height, Some(h) if block_height >= h)
 }
 
+/// Service-grant claiming gate (800B supply correction). Dormant by default —
+/// all `Supply` transactions are rejected free while closed. Claiming is the
+/// ONLY thing gated here; the one-time correction and earned-credit accrual key
+/// off the persisted correction marker instead.
+#[inline]
+fn service_grants_gate_open(params: &ChainParams, block_height: u64) -> bool {
+    matches!(params.service_grants_enabled_from_height, Some(h) if block_height >= h)
+}
+
 /// Fail-closed seam for the #100 scheduler (issue #100). Runs `schedule` only if
 /// the one-time challengeable-index `backfill` succeeded; on any backfill error,
 /// logs and skips — returning an empty schedule so `schedule` (which is what
@@ -1702,6 +1711,79 @@ impl BlockExecutor {
                             active_validator_pubkeys,
                         )
                     }
+                    TxPayload::Supply(supply_data) => {
+                        // Service-grant claim/unlock (800B correction). Dormant
+                        // by default: gate closed → Failed(380), free, nothing
+                        // mutated. Gate open → fee is charged (Policy-B), then
+                        // the claim/unlock executes against the grant ledgers;
+                        // semantic failures are fee-paid Failed(code).
+                        if !service_grants_gate_open(&self.params, block_height) {
+                            return Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Failed(380),
+                                fee_paid: 0,
+                            });
+                        }
+                        let sender_balance = self.state.get_balance(&v2_tx.from)?;
+                        if sender_balance < v2_tx.fee {
+                            return Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::InsufficientBalance,
+                                fee_paid: 0,
+                            });
+                        }
+                        self.state.deduct(&v2_tx.from, v2_tx.fee)?;
+                        self.state.credit(proposer, v2_tx.fee)?;
+                        self.state.increment_nonce(&v2_tx.from)?;
+
+                        let store = crate::supply::SupplyStore::new(self.db.clone());
+                        use sumchain_primitives::supply::{ServiceKind, SupplyOperation};
+                        let outcome: std::result::Result<u128, u32> = match &supply_data.operation {
+                            SupplyOperation::ClaimServiceGrant { service_kind } => {
+                                match service_kind {
+                                    ServiceKind::Validator => store.claim_validator_grant(
+                                        &self.db,
+                                        &v2_tx.from,
+                                        block_height,
+                                    ),
+                                    ServiceKind::Archive | ServiceKind::Compute => store
+                                        .claim_milestone_grants(
+                                            &self.db,
+                                            &v2_tx.from,
+                                            *service_kind,
+                                            block_height,
+                                        ),
+                                }
+                            }
+                            SupplyOperation::UnlockServiceGrant { service_kind } => {
+                                store.unlock_grant(&v2_tx.from, *service_kind)
+                            }
+                        };
+                        match outcome {
+                            Ok(amount) => {
+                                // Liquid/unlocked portion enters the account NOW
+                                // (this is the only way reserve money becomes an
+                                // account balance outside governance release).
+                                if amount > 0 {
+                                    self.state.credit(&v2_tx.from, amount)?;
+                                }
+                                debug!(
+                                    "Supply op executed: sender={} credited={} height={}",
+                                    v2_tx.from, amount, block_height
+                                );
+                                Ok(TxExecutionResult {
+                                    tx_hash,
+                                    status: TxStatus::Success,
+                                    fee_paid: v2_tx.fee,
+                                })
+                            }
+                            Err(code) => Ok(TxExecutionResult {
+                                tx_hash,
+                                status: TxStatus::Failed(code),
+                                fee_paid: v2_tx.fee,
+                            }),
+                        }
+                    }
                 }
             }
         }
@@ -2608,6 +2690,13 @@ impl BlockExecutor {
                     "InferenceAttestationV2 is only supported in V2 transactions".to_string(),
                 ));
             }
+            TxPayload::Supply(_) => {
+                // Supply/service-grant ops are a V2-only subprotocol; mirror
+                // the adjacent rejections. No new semantics on this path.
+                return Err(StateError::InvalidOperation(
+                    "Supply is only supported in V2 transactions".to_string(),
+                ));
+            }
         }
     }
 
@@ -2688,9 +2777,38 @@ impl BlockExecutor {
             receipts.push(receipt);
         }
 
+        // ── Validator earned-credit accrual (800B correction) ──
+        // The proposer's protocol-earned credit is the block's total tx fees —
+        // the ONE real validator reward site. Ordinary transfers never reach
+        // this accrual, so "transfers don't count as earned credit" is
+        // structural. No-op until the supply correction is applied (checked
+        // inside), so pre-correction blocks are byte-identical. Grants carry NO
+        // proposer-selection weight — consensus rotation is untouched.
+        {
+            let block_fees: u128 = receipts.iter().map(|r| r.fee_paid).sum();
+            crate::supply::SupplyStore::new(self.db.clone()).accrue_earned_credit(
+                &proposer,
+                sumchain_primitives::supply::ServiceKind::Validator,
+                block_fees,
+            )?;
+        }
+
         // ── PoR Phase: Generate challenge AFTER transactions, BEFORE state root ──
         // This ensures the challenge write is captured in the state root.
         self.generate_storage_challenge_if_due(block)?;
+
+        // ── One-time mainnet 800B supply correction, BEFORE the state root ──
+        // Applies at most once (persisted marker → replay/restart-safe), only on
+        // chain_id 1 with pre-migration accounted supply == 1B and the pool split
+        // == the 799B delta. Credits NO account; initializes the non-transferable
+        // ProtocolReserve ledger and sets canonical supply to 800B. Fails closed
+        // (halts this block) on any guard violation rather than diverging. Its
+        // ledger is folded into the state root below.
+        crate::supply::apply_supply_correction_if_needed(
+            &self.db,
+            self.state.chain_id(),
+            block.height(),
+        )?;
 
         // Build this block's contract-state diff from the committed journal,
         // sorted deterministically by (cf_kind, key) for revert + digest.
@@ -2748,6 +2866,15 @@ impl BlockExecutor {
         // This is the consensus-breaking change that activation coordinates.
         if contracts_gate_open(&self.params, block.height()) {
             data.extend_from_slice(&contract_diff.digest());
+        }
+
+        // Fold the supply ledger + protocol reserve once the 800B correction is
+        // applied. The reserve is not an account, so the balance-only account
+        // root would otherwise miss it — this makes the correction consensus-
+        // committed. `None` while dormant, so pre-correction roots are byte-for-
+        // byte unchanged (like the contracts gate above).
+        if let Some(digest) = crate::supply::SupplyStore::new(self.db.clone()).state_digest()? {
+            data.extend_from_slice(digest.as_bytes());
         }
 
         // Mix with previous state root (from before this block's execution)
@@ -2818,6 +2945,21 @@ impl BlockExecutor {
                         if record.role == sumchain_primitives::NodeRole::ArchiveNode {
                             active_set_changed = true;
                         }
+                        // 800B correction: a slashed service node forfeits its
+                        // remaining grant-derived locked stake back to the
+                        // ProtocolReserve (grant money is public reserve money;
+                        // it never becomes liquid through failure). No-op if no
+                        // active grant / correction dormant.
+                        let kind = match record.role {
+                            sumchain_primitives::NodeRole::ArchiveNode => {
+                                sumchain_primitives::supply::ServiceKind::Archive
+                            }
+                            sumchain_primitives::NodeRole::Validator => {
+                                sumchain_primitives::supply::ServiceKind::Validator
+                            }
+                        };
+                        crate::supply::SupplyStore::new(self.db.clone())
+                            .forfeit_locked_grant(&record.address, kind)?;
                     }
 
                     // Write updated node record (reuse put_node via the executor)
