@@ -87,6 +87,10 @@ pub enum TxType {
     /// behalf; the verifier remains the attestation identity. Does NOT change
     /// attestation v1 (index 21). See crates/primitives/src/inference_attestation.rs.
     InferenceAttestationV2 = 25,
+    /// Supply/service-grant subprotocol (800B correction, protocol reserve).
+    /// Append-only, variant index frozen at 26. All operations are dormant-
+    /// gated (`service_grants_enabled_from_height`, default None).
+    Supply = 26,
 }
 
 impl TxType {
@@ -119,6 +123,7 @@ impl TxType {
             23 => Some(TxType::Governance),
             24 => Some(TxType::InferenceSettlement),
             25 => Some(TxType::InferenceAttestationV2),
+            26 => Some(TxType::Supply),
             _ => None,
         }
     }
@@ -442,6 +447,9 @@ pub enum TxPayload {
     /// payer/sponsor while the verifier is identified inside the envelope. See
     /// crates/primitives/src/inference_attestation.rs.
     InferenceAttestationV2(crate::inference_attestation::InferenceAttestationV2TxData),
+    /// Supply/service-grant operations (TxType 26, append-only; declaration
+    /// ordinal 26). Dormant-gated; see crates/primitives/src/supply.rs.
+    Supply(crate::supply::SupplyTxData),
 }
 
 impl TransactionV2 {
@@ -594,6 +602,7 @@ impl TransactionV2 {
             TxPayload::Governance(_) => TxType::Governance,
             TxPayload::InferenceSettlement(_) => TxType::InferenceSettlement,
             TxPayload::InferenceAttestationV2(_) => TxType::InferenceAttestationV2,
+            TxPayload::Supply(_) => TxType::Supply,
         }
     }
 
@@ -642,6 +651,7 @@ impl TransactionV2 {
             TxPayload::Governance(_) => None, // governance ops carry no value/recipient
             TxPayload::InferenceSettlement(_) => None, // settlement carries no transfer recipient
             TxPayload::InferenceAttestationV2(_) => None, // sponsored attestation, no value/recipient
+            TxPayload::Supply(_) => None, // grant claims credit the sender; no recipient field
         }
     }
 
@@ -674,6 +684,7 @@ impl TransactionV2 {
             TxPayload::Governance(_) => 0,          // governance ops carry no token value
             TxPayload::InferenceSettlement(_) => 0, // escrow moves via executor, not tx value
             TxPayload::InferenceAttestationV2(_) => 0, // sponsored attestation tx, no token value
+            TxPayload::Supply(_) => 0, // amounts are ledger-derived, not payload value
         }
     }
 

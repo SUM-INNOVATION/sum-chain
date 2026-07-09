@@ -129,6 +129,16 @@ impl TxStatus {
             TxStatus::Failed(316) => "qualifying asset not allowlisted / registry empty",
             TxStatus::Failed(317) => "equity governance mode not enabled or class is non-voting",
             TxStatus::Failed(318) => "invalid controller-attested equity vote (proof/signature/root)",
+            // Supply / service grants (800B correction). 380-389 block.
+            TxStatus::Failed(380) => "service-grant operations not enabled at this block height",
+            TxStatus::Failed(381) => "not eligible: no qualifying active service identity",
+            TxStatus::Failed(382) => "genesis validator identities are excluded from validator bootstrap grants",
+            TxStatus::Failed(383) => "grant already claimed / no new milestone reached",
+            TxStatus::Failed(384) => "nothing to unlock (no unused protocol-earned credit)",
+            TxStatus::Failed(385) => "grant/release exceeds the remaining reserve pool (or schedule exhausted)",
+            TxStatus::Failed(386) => "grant suspended or forfeited (slashing / denied dispute)",
+            TxStatus::Failed(387) => "monetary-policy governance not enabled at this block height",
+            TxStatus::Failed(388) => "monetary-policy proposals require NativeEligibility (native Koppa) governance",
             // Archive-node withdrawal / unbonding (issue #20). Isolated 320-block.
             TxStatus::Failed(320) => "archive unbonding not enabled at this block height",
             TxStatus::Failed(321) => "not a registered archive node",

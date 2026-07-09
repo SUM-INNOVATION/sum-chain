@@ -23,6 +23,7 @@ pub mod policy_account;
 pub mod property;
 pub mod receipt;
 pub mod staking;
+pub mod supply;
 pub mod storage_metadata;
 pub mod tax;
 pub mod token_ops;

@@ -91,6 +91,13 @@ fn main() -> Result<()> {
             archive_unbonding_period_blocks: 201_600,    // ~7 days at 3s blocks
             archive_reassignment_enabled_from_height: None, // issue #62: chunk reassignment dormant
             por_assignment_targeting_enabled_from_height: None, // issue #97: legacy PoR targeting
+            service_grants_enabled_from_height: None,           // 800B correction: claiming dormant
+            monetary_policy_enabled_from_height: None,          // 800B correction: gov release/mint dormant
+            validator_inactivity_window_blocks: 20_160,         // dormant design param
+            validator_inactivity_warn_bps: 1_000,               // dormant
+            validator_inactivity_inactive_bps: 3_300,           // dormant
+            validator_inactivity_removal_bps: 5_000,            // dormant
+            validator_reclaim_delay_blocks: 201_600,            // dormant
             assignment_aware_por_scheduler_enabled_from_height: None, // issue #100: scheduler dormant
             max_assignment_aware_challenges_per_block: 16,      // issue #100
             max_files_sampled_per_interval: 8,                  // issue #100

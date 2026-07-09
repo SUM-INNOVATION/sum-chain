@@ -370,6 +370,46 @@ pub struct ChainParams {
     #[serde(default)]
     pub por_assignment_targeting_enabled_from_height: Option<u64>,
 
+    /// Service-grant claiming gate (800B supply correction). `None` (default) =
+    /// all `Supply` transactions (grant claim / unlock) are rejected free
+    /// (`Failed(380)`, no fee, no state). The one-time supply correction and
+    /// earned-credit/milestone ACCRUAL are independent of this gate (they key
+    /// off the persisted correction marker); only CLAIMING is gated. Set via a
+    /// coordinated upgrade once final pool/cohort numbers are ratified.
+    #[serde(default)]
+    pub service_grants_enabled_from_height: Option<u64>,
+
+    /// Monetary-policy governance gate. `None` (default) = `ReserveRelease*`
+    /// and `MonetaryPolicyMint` governance proposals cannot be created or
+    /// executed (fail-closed). When set, those classes remain executable ONLY
+    /// through NativeEligibility (native Koppa consensus) governance at the
+    /// hardcoded 6667 bps threshold — never validator-quorum, never SRC-20/
+    /// equity governance.
+    #[serde(default)]
+    pub monetary_policy_enabled_from_height: Option<u64>,
+
+    /// Validator inactivity lifecycle parameters (DORMANT — documented design).
+    /// Automatic missed-block tracking is NOT persisted by consensus today
+    /// (`record_missed_block` has no callers), so automatic jailing/forfeiture
+    /// CANNOT be implemented honestly yet and remains fail-closed. These
+    /// parameters ship so the schedule is chain-visible and a future PR that
+    /// adds real signing-info tracking can activate enforcement without a
+    /// params change. Window ~7 days at 3s blocks.
+    #[serde(default = "default_validator_inactivity_window_blocks")]
+    pub validator_inactivity_window_blocks: u64,
+    /// Missed-block warning threshold (bps of the window). Dormant; see above.
+    #[serde(default = "default_validator_inactivity_warn_bps")]
+    pub validator_inactivity_warn_bps: u16,
+    /// Missed-block inactive threshold (bps). Dormant; see above.
+    #[serde(default = "default_validator_inactivity_inactive_bps")]
+    pub validator_inactivity_inactive_bps: u16,
+    /// Missed-block removal/jail threshold (bps). Dormant; see above.
+    #[serde(default = "default_validator_inactivity_removal_bps")]
+    pub validator_inactivity_removal_bps: u16,
+    /// Unbond/reclaim delay after removal (blocks). Dormant; see above.
+    #[serde(default = "default_validator_reclaim_delay_blocks")]
+    pub validator_reclaim_delay_blocks: u64,
+
     /// Bounded assignment-aware PoR *scheduler* activation gate (issue #100,
     /// Phase 2). `None` (default) = the scheduler is dormant and challenge
     /// generation is exactly the post-#101 single-challenge path. When `Some(h)`
@@ -523,6 +563,22 @@ fn default_max_files_sampled_per_interval() -> u32 {
 
 fn default_max_chunks_sampled_per_file() -> u32 {
     4 // issue #100: chunks sampled per file per interval
+}
+
+fn default_validator_inactivity_window_blocks() -> u64 {
+    20_160 // ~7 days of proposer slots at target cadence (dormant design param)
+}
+fn default_validator_inactivity_warn_bps() -> u16 {
+    1_000 // 10% missed (dormant)
+}
+fn default_validator_inactivity_inactive_bps() -> u16 {
+    3_300 // 33% missed (dormant)
+}
+fn default_validator_inactivity_removal_bps() -> u16 {
+    5_000 // 50% missed (dormant)
+}
+fn default_validator_reclaim_delay_blocks() -> u64 {
+    201_600 // ~7 days at 3s blocks (dormant)
 }
 
 /// SRC-201 Messaging Parameters
@@ -694,6 +750,16 @@ impl Default for ChainParams {
             // Production-safe default: legacy PoR challenge targeting (issue
             // #97). Activation is a coordinated validator upgrade.
             por_assignment_targeting_enabled_from_height: None,
+            // Production-safe defaults: service-grant claiming and monetary-
+            // policy governance dormant; validator-inactivity schedule is a
+            // dormant design parameterization (no auto-tracking exists yet).
+            service_grants_enabled_from_height: None,
+            monetary_policy_enabled_from_height: None,
+            validator_inactivity_window_blocks: default_validator_inactivity_window_blocks(),
+            validator_inactivity_warn_bps: default_validator_inactivity_warn_bps(),
+            validator_inactivity_inactive_bps: default_validator_inactivity_inactive_bps(),
+            validator_inactivity_removal_bps: default_validator_inactivity_removal_bps(),
+            validator_reclaim_delay_blocks: default_validator_reclaim_delay_blocks(),
             // Production-safe default: bounded PoR scheduler dormant (issue
             // #100). Activation is a coordinated validator upgrade.
             assignment_aware_por_scheduler_enabled_from_height: None,
