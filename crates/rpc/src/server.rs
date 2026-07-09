@@ -1379,6 +1379,19 @@ impl SumChainApiServer for RpcServer {
             v2_enabled_from_height: p.v2_enabled_from_height,
             omninode_enabled_from_height: p.omninode_enabled_from_height,
             education_enabled_from_height: p.education_enabled_from_height,
+            governance_enabled_from_height: p.governance_enabled_from_height,
+            monetary_policy_enabled_from_height: p.monetary_policy_enabled_from_height,
+            service_grants_enabled_from_height: p.service_grants_enabled_from_height,
+            governance: p.governance.as_ref().map(|g| crate::types::GovernanceParamsInfo {
+                validator_authority_threshold_bps: g.validator_authority_threshold_bps,
+                quorum_bps: g.quorum_bps,
+                pass_threshold_bps: g.pass_threshold_bps,
+                voting_period_blocks: g.voting_period_blocks,
+                max_snapshot_holders: g.max_snapshot_holders,
+                min_koppa_for_eligibility: g.min_koppa_for_eligibility.to_string(),
+                proposal_bond: g.proposal_bond.to_string(),
+                treasury_configured: g.treasury.is_some(),
+            }),
         })
     }
 

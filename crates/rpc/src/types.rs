@@ -568,6 +568,30 @@ pub struct ChainParamsInfo {
     /// `docs/SUBPROTOCOLS/EDUCATION-ACTIVATION.md`). Additive field —
     /// appended after `omninode_enabled_from_height`.
     pub education_enabled_from_height: Option<u64>,
+    /// Governance activation gate (issue #50 / v2 #88-#92).
+    pub governance_enabled_from_height: Option<u64>,
+    /// Monetary-policy gate (800B correction): ReserveRelease* / MonetaryPolicyMint.
+    pub monetary_policy_enabled_from_height: Option<u64>,
+    /// Service-grant claiming gate (800B correction).
+    pub service_grants_enabled_from_height: Option<u64>,
+    /// Configured governance parameters, when present in the deployed genesis.
+    pub governance: Option<GovernanceParamsInfo>,
+}
+
+/// Public snapshot of the configured `GovernanceParams` (no key material; the
+/// treasury is reported only as configured/not, to avoid implying a controller).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GovernanceParamsInfo {
+    pub validator_authority_threshold_bps: u16,
+    pub quorum_bps: u16,
+    pub pass_threshold_bps: u16,
+    pub voting_period_blocks: u64,
+    pub max_snapshot_holders: u32,
+    /// Native-eligibility Koppa floor (base units, decimal string).
+    pub min_koppa_for_eligibility: String,
+    /// Proposal bond (base units, decimal string).
+    pub proposal_bond: String,
+    pub treasury_configured: bool,
 }
 
 /// One archive-node record as returned by `storage_getActiveNodesAtHeight`
