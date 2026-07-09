@@ -71,6 +71,13 @@ pub fn gate_open(params: &ChainParams, block_height: u64) -> bool {
     matches!(params.governance_enabled_from_height, Some(h) if block_height >= h)
 }
 
+/// Whether the monetary-policy gate (800B correction — `ReserveRelease*` /
+/// `MonetaryPolicyMint` classes) is open at `block_height`. Dormant by default.
+#[inline]
+fn monetary_policy_gate_open(params: &ChainParams, block_height: u64) -> bool {
+    matches!(params.monetary_policy_enabled_from_height, Some(h) if block_height >= h)
+}
+
 fn decode<T: serde::de::DeserializeOwned>(data: &[u8]) -> std::result::Result<T, ()> {
     bincode::deserialize(data).map_err(|_| ())
 }
@@ -98,6 +105,26 @@ struct TreasuryPayout {
     amount: u128,
 }
 
+/// A passed monetary-policy action (800B correction): a ProtocolReserve pool
+/// release or a canonical-supply mint. Only ever staged for a passed
+/// `OnChain + NativeEligibility` proposal of the matching class — validator-
+/// quorum and SRC-20/equity governance can never stage one.
+enum MonetaryAction {
+    Release {
+        pool: sumchain_primitives::supply::ReservePool,
+        to: Address,
+        amount: u128,
+        proposal_id: [u8; 32],
+        reason_hash: Hash,
+    },
+    Mint {
+        to: Address,
+        amount: u128,
+        proposal_id: [u8; 32],
+        reason_hash: Hash,
+    },
+}
+
 /// Writes staged by a successful validation, applied only after the fee is charged.
 enum Prepared {
     RegisterAsset(GovAsset),
@@ -119,6 +146,9 @@ enum Prepared {
         settlement: BondSettlement,
         /// Treasury payout for a passed `TreasurySpend` + `OnChain` proposal.
         payout: Option<TreasuryPayout>,
+        /// Monetary-policy action for a passed NativeEligibility
+        /// `ReserveRelease*` / `MonetaryPolicyMint` proposal (800B correction).
+        monetary: Option<MonetaryAction>,
     },
 }
 
@@ -160,9 +190,17 @@ pub fn execute(
         },
         GovernanceOperation::CreateProposal => match decode::<CreateProposalRequest>(&gov.data) {
             Err(()) => return Ok(result(tx_hash, TxStatus::Failed(302), 0)),
-            Ok(req) => {
-                validate_create(state, db, gp, from, nonce, block_height, block_timestamp, &req)
-            }
+            Ok(req) => validate_create(
+                state,
+                db,
+                gp,
+                from,
+                nonce,
+                block_height,
+                block_timestamp,
+                &req,
+                monetary_policy_gate_open(params, block_height),
+            ),
         },
         GovernanceOperation::CastVote => match decode::<CastVoteRequest>(&gov.data) {
             Err(()) => return Ok(result(tx_hash, TxStatus::Failed(302), 0)),
@@ -170,7 +208,13 @@ pub fn execute(
         },
         GovernanceOperation::ExecuteProposal => match decode::<ExecuteProposalRequest>(&gov.data) {
             Err(()) => return Ok(result(tx_hash, TxStatus::Failed(302), 0)),
-            Ok(req) => validate_execute(db, gp, block_height, &req),
+            Ok(req) => validate_execute(
+                db,
+                gp,
+                block_height,
+                &req,
+                monetary_policy_gate_open(params, block_height),
+            ),
         },
         GovernanceOperation::CancelProposal => match decode::<CancelProposalRequest>(&gov.data) {
             Err(()) => return Ok(result(tx_hash, TxStatus::Failed(302), 0)),
@@ -245,9 +289,36 @@ pub fn execute(
                     return Ok(result(tx_hash, TxStatus::Failed(312), fee));
                 }
             }
+            // Reserve-release affordability (385): a release must fit its pool.
+            // Checked before any state mutation; underfunded pool ⇒ fee-paid
+            // failure, proposal stays live (mirrors the 312 pattern).
+            if let Prepared::ProposalUpdate {
+                monetary: Some(MonetaryAction::Release { pool, amount, .. }),
+                ..
+            } = &prepared
+            {
+                let reserve = crate::supply::SupplyStore::new(db.clone())
+                    .get_reserve()
+                    .ok()
+                    .flatten();
+                let remaining = match (reserve, pool) {
+                    (Some(r), sumchain_primitives::supply::ReservePool::Ecosystem) => {
+                        r.ecosystem_pool_remaining
+                    }
+                    (Some(r), sumchain_primitives::supply::ReservePool::GovernanceReserve) => {
+                        r.governance_reserve_remaining
+                    }
+                    (None, _) => 0,
+                };
+                if remaining < *amount {
+                    charge(state, from, proposer, fee)?;
+                    return Ok(result(tx_hash, TxStatus::Failed(385), fee));
+                }
+            }
             charge(state, from, proposer, fee)?;
             apply_bond(state, &prepared)?;
             apply_treasury(state, &prepared)?;
+            apply_monetary(state, db, &prepared, block_height)?;
             apply(db, prepared)?;
             Ok(result(tx_hash, TxStatus::Success, fee))
         }
@@ -288,6 +359,34 @@ fn apply_treasury(state: &Arc<StateManager>, prepared: &Prepared) -> Result<()> 
     if let Prepared::ProposalUpdate { payout: Some(p), .. } = prepared {
         state.deduct(&p.from_treasury, p.amount)?;
         state.credit(&p.to, p.amount)?;
+    }
+    Ok(())
+}
+
+/// Apply a staged monetary-policy action (800B correction). A Release moves
+/// pool ledger supply into the recipient's account (canonical unchanged); a
+/// Mint grows canonical supply and credits the recipient. Both write an
+/// append-only audit event keyed by the proposal id. Only reachable from a
+/// passed `OnChain + NativeEligibility` proposal (enforced at creation AND
+/// execution) with the monetary-policy gate open.
+fn apply_monetary(
+    state: &Arc<StateManager>,
+    db: &Arc<Database>,
+    prepared: &Prepared,
+    height: u64,
+) -> Result<()> {
+    if let Prepared::ProposalUpdate { monetary: Some(action), .. } = prepared {
+        let supply = crate::supply::SupplyStore::new(db.clone());
+        match action {
+            MonetaryAction::Release { pool, to, amount, proposal_id, reason_hash } => {
+                supply.apply_reserve_release(*pool, to, *amount, *proposal_id, *reason_hash, height)?;
+                state.credit(to, *amount)?;
+            }
+            MonetaryAction::Mint { to, amount, proposal_id, reason_hash } => {
+                supply.apply_monetary_mint(to, *amount, *proposal_id, *reason_hash, height)?;
+                state.credit(to, *amount)?;
+            }
+        }
     }
     Ok(())
 }
@@ -583,6 +682,7 @@ fn equity_vote_merkle_ok(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn validate_create(
     state: &Arc<StateManager>,
     db: &Arc<Database>,
@@ -592,8 +692,28 @@ fn validate_create(
     height: u64,
     timestamp: u64,
     req: &CreateProposalRequest,
+    monetary_gate_open: bool,
 ) -> std::result::Result<Prepared, u32> {
     let store = GovStore::new(db);
+
+    // 800B correction: monetary-policy classes are enforced at CREATION as well
+    // as execution. They require the monetary-policy gate (387) and the
+    // NativeEligibility asset — native Koppa consensus voting at the fixed
+    // 6667 bps (388). SRC-20 / equity assets (and thus any validator-quorum-
+    // admitted electorate) can never carry these classes.
+    if matches!(
+        req.class,
+        GovProposalClass::ReserveReleaseEcosystem
+            | GovProposalClass::ReserveReleaseGovernance
+            | GovProposalClass::MonetaryPolicyMint
+    ) {
+        if !monetary_gate_open {
+            return Err(387);
+        }
+        if req.asset != GovAssetKind::NativeEligibility {
+            return Err(388);
+        }
+    }
 
     // Asset must be registered, enabled, and effective at this height. A missing
     // registration maps to a mode-specific "not enabled" code for the v2 kinds
@@ -801,6 +921,7 @@ fn validate_execute(
     gp: &GovernanceParams,
     height: u64,
     req: &ExecuteProposalRequest,
+    monetary_gate_open: bool,
 ) -> std::result::Result<Prepared, u32> {
     let store = GovStore::new(db);
     let mut proposal = match store.get_proposal(&req.proposal_id).map_err(|_| 306u32)? {
@@ -849,25 +970,70 @@ fn validate_execute(
     };
 
     let mut payout = None;
+    let mut monetary = None;
     if new_status == GovProposalStatus::Passed {
         match proposal.execution_kind {
             ExecutionKind::RecordOnly => proposal.status = GovProposalStatus::Recorded,
-            ExecutionKind::OnChain => {
-                // On-chain execution is limited to a single native-Koppa
-                // treasury payout; every other class is unsupported (310).
-                if proposal.class != GovProposalClass::TreasurySpend {
-                    return Err(310);
-                }
-                match (gp.treasury, proposal.treasury_beneficiary, proposal.treasury_amount) {
-                    (Some(treasury), Some(to), Some(amount)) if amount > 0 => {
-                        proposal.status = GovProposalStatus::Executed;
-                        payout = Some(TreasuryPayout { from_treasury: treasury, to, amount });
+            ExecutionKind::OnChain => match proposal.class {
+                GovProposalClass::TreasurySpend => {
+                    match (gp.treasury, proposal.treasury_beneficiary, proposal.treasury_amount) {
+                        (Some(treasury), Some(to), Some(amount)) if amount > 0 => {
+                            proposal.status = GovProposalStatus::Executed;
+                            payout = Some(TreasuryPayout { from_treasury: treasury, to, amount });
+                        }
+                        // Treasury not configured, or beneficiary/amount missing/zero:
+                        // no funds move; the proposal stays live for a later cancel.
+                        _ => return Err(310),
                     }
-                    // Treasury not configured, or beneficiary/amount missing/zero:
-                    // no funds move; the proposal stays live for a later cancel.
-                    _ => return Err(310),
                 }
-            }
+                // 800B correction: monetary-policy classes. Executable ONLY via
+                // NativeEligibility (native Koppa consensus, fixed 6667 bps —
+                // enforced above by the pass threshold) — a proposal created
+                // under validator-quorum-registered SRC-20 or equity assets is
+                // rejected here (388) even if it somehow passed creation. The
+                // monetary-policy gate must also be open (387).
+                GovProposalClass::ReserveReleaseEcosystem
+                | GovProposalClass::ReserveReleaseGovernance
+                | GovProposalClass::MonetaryPolicyMint => {
+                    if !monetary_gate_open {
+                        return Err(387);
+                    }
+                    if proposal.asset != GovAssetKind::NativeEligibility {
+                        return Err(388);
+                    }
+                    match (proposal.treasury_beneficiary, proposal.treasury_amount) {
+                        (Some(to), Some(amount)) if amount > 0 => {
+                            let reason_hash = Hash::new(proposal.external_ref.content_hash);
+                            proposal.status = GovProposalStatus::Executed;
+                            monetary = Some(match proposal.class {
+                                GovProposalClass::ReserveReleaseEcosystem => MonetaryAction::Release {
+                                    pool: sumchain_primitives::supply::ReservePool::Ecosystem,
+                                    to,
+                                    amount,
+                                    proposal_id: proposal.id,
+                                    reason_hash,
+                                },
+                                GovProposalClass::ReserveReleaseGovernance => MonetaryAction::Release {
+                                    pool: sumchain_primitives::supply::ReservePool::GovernanceReserve,
+                                    to,
+                                    amount,
+                                    proposal_id: proposal.id,
+                                    reason_hash,
+                                },
+                                _ => MonetaryAction::Mint {
+                                    to,
+                                    amount,
+                                    proposal_id: proposal.id,
+                                    reason_hash,
+                                },
+                            });
+                        }
+                        _ => return Err(310),
+                    }
+                }
+                // Every other class is unsupported on-chain (310).
+                _ => return Err(310),
+            },
         }
     } else {
         proposal.status = new_status;
@@ -882,7 +1048,7 @@ fn validate_execute(
             GovProposalStatus::Recorded | GovProposalStatus::Executed | GovProposalStatus::Rejected
         )
     });
-    Ok(Prepared::ProposalUpdate { proposal, settlement, payout })
+    Ok(Prepared::ProposalUpdate { proposal, settlement, payout, monetary })
 }
 
 /// Resolve a proposal's bond as it reaches a terminal state. `is_return`
@@ -946,5 +1112,5 @@ fn validate_cancel(
     // Proposer cancel returns the bond (clean withdrawal); validator-quorum cancel
     // burns it (anti-spam force).
     let settlement = settle_bond(&mut proposal, |_| is_proposer);
-    Ok(Prepared::ProposalUpdate { proposal, settlement, payout: None })
+    Ok(Prepared::ProposalUpdate { proposal, settlement, payout: None, monetary: None })
 }
