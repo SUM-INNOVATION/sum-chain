@@ -5753,7 +5753,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "sumc-runtime"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bincode",
  "blake3",
@@ -5774,7 +5774,7 @@ dependencies = [
 
 [[package]]
 name = "sumc-sdk"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bincode",
  "blake3",
@@ -5787,7 +5787,7 @@ dependencies = [
 
 [[package]]
 name = "sumc-sdk-macros"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5796,7 +5796,7 @@ dependencies = [
 
 [[package]]
 name = "sumchain-bridge"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5820,7 +5820,7 @@ dependencies = [
 
 [[package]]
 name = "sumchain-consensus"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bincode",
@@ -5839,8 +5839,9 @@ dependencies = [
 
 [[package]]
 name = "sumchain-crypto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
+ "bincode",
  "blake3",
  "bs58",
  "chacha20poly1305",
@@ -5859,7 +5860,7 @@ dependencies = [
 
 [[package]]
 name = "sumchain-genesis"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bs58",
  "hex",
@@ -5873,7 +5874,7 @@ dependencies = [
 
 [[package]]
 name = "sumchain-integration-tests"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bincode",
  "serde",
@@ -5894,7 +5895,7 @@ dependencies = [
 
 [[package]]
 name = "sumchain-nft"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bincode",
  "hex",
@@ -5909,7 +5910,7 @@ dependencies = [
 
 [[package]]
 name = "sumchain-node"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "bincode",
@@ -5938,7 +5939,7 @@ dependencies = [
 
 [[package]]
 name = "sumchain-p2p"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bincode",
@@ -5956,7 +5957,7 @@ dependencies = [
 
 [[package]]
 name = "sumchain-primitives"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bincode",
  "blake3",
@@ -5973,7 +5974,7 @@ dependencies = [
 
 [[package]]
 name = "sumchain-rpc"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bincode",
@@ -6018,7 +6019,7 @@ dependencies = [
 
 [[package]]
 name = "sumchain-state"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bincode",
  "hex",
@@ -6039,7 +6040,7 @@ dependencies = [
 
 [[package]]
 name = "sumchain-storage"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bincode",
  "blake3",
@@ -6056,7 +6057,7 @@ dependencies = [
 
 [[package]]
 name = "sumchain-token"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bincode",
  "hex",
@@ -6067,7 +6068,7 @@ dependencies = [
 
 [[package]]
 name = "sumchain-wallet"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes-gcm",
  "anyhow",

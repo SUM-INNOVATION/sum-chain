@@ -11,7 +11,7 @@ keywords = ["sumchain", "blockchain", "ed25519", "x25519", "chacha20poly1305"]
 categories = ["cryptography", "cryptography::cryptocurrencies"]
 
 [dependencies]
-sumchain-primitives = { path = "../primitives", version = "0.1.0" }
+sumchain-primitives = { version = "0.2.0", path = "../primitives" }
 ed25519-dalek = { workspace = true }
 blake3 = { workspace = true }
 rand = { workspace = true }
@@ -27,3 +27,9 @@ curve25519-dalek = "4.1"
 sha2 = { workspace = true }
 
 [dev-dependencies]
+# Integration tests exercise wire assembly against primitives (TransactionV2 /
+# SignedTransaction) plus bincode/hex, which are not transitively available to a
+# separate test crate even though `sumchain-primitives`/`hex` are normal deps.
+sumchain-primitives = { path = "../primitives" }
+bincode = { workspace = true }
+hex = { workspace = true }

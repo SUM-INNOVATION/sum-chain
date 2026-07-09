@@ -202,6 +202,25 @@ fee, no state change). Attestation recording is unaffected either way.
 - `omninode_build{Open|Fund}InferenceSession`, `omninode_buildClaimInferenceReward`, `omninode_build{Open|Resolve}InferenceDispute`, `omninode_buildRefundInferenceSession` — return an unsigned `TransactionV2` (hex) + signing hash. `omninode_buildOpenInferenceSession` accepts optional `consistency` `{ min_matching_verifiers, threshold_bps }` and `bond_requirement` `{ min_bond, slash_bps_on_denied_dispute }` configs. `omninode_buildResolveInferenceDispute` accepts an optional `approvals` list of validator signatures (validator-quorum authorization).
 - `omninode_build{RegisterVerifier, AddVerifierBond, BeginVerifierUnbond, WithdrawVerifierBond}` — verifier bond-registry builders (issue #78).
 
+### Signed-submission wire format (no raw concatenation)
+
+The builder → sign → submit flow is entirely bincode-of-struct at both stages;
+nothing is hand-concatenated:
+
+1. **Builder output.** A builder returns `unsigned_tx` = `bincode(TransactionV2)`
+   (hex, `0x`-prefixed) plus `signing_hash` = `TransactionV2::signing_hash()`.
+   For a claim, the tx is `TxPayload::InferenceSettlement(InferenceSettlementTxData
+   { operation: ClaimReward { session_id } })`.
+2. **Sign offline.** `signature = Ed25519.sign(signing_hash.as_bytes())` with the
+   verifier's key. No key ever reaches the RPC.
+3. **Submit hex.** The raw tx submitted to `sum_sendRawTransaction` is
+   `bincode(SignedTransaction { inner: TxInner::V2(tx), signature, public_key })`
+   (hex), i.e. `SignedTransaction::new_v2(tx, signature, public_key).to_hex()`.
+   This is **not** `unsigned_tx` with the signature appended — it is the bincode
+   encoding of the whole `SignedTransaction`, and `SignedTransaction::from_hex`
+   round-trips it exactly. See the fixture
+   `crates/crypto/tests/omninode_claim_assembly.rs`.
+
 ## Receipt codes (isolated 350-block)
 
 `350` not enabled · `351` malformed/unsupported op · `352` session not found/duplicate ·
