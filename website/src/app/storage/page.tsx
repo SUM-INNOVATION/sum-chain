@@ -11,7 +11,7 @@ export const metadata: Metadata = {
 
 const POR_STEPS = [
   { title: 'Register & fund', body: 'A file is registered and a fee deposit is locked into its fee pool. It enters the Pending lifecycle.', tag: 'RegisterFilePendingV2' },
-  { title: 'Assign chunks', body: 'Each chunk is assigned to archive nodes by deterministic rendezvous hashing over its merkle_root — three replicas by default, snapshot-stable.', tag: 'merkle_root' },
+  { title: 'Assign chunks', body: 'Each chunk is assigned to archive nodes by deterministic rendezvous hashing over its merkle_root, three replicas by default, snapshot-stable.', tag: 'merkle_root' },
   { title: 'Accept assignment', body: 'Assigned archives attest possession before the file activates, recorded as per-file possession bitmaps.', tag: 'AcceptAssignmentV2' },
   { title: 'Challenge', body: 'The chain issues deterministic retrievability challenges over (file, chunk, node) at a fixed interval.', tag: 'PoR' },
   { title: 'Prove or be slashed', body: 'A valid Merkle proof draws a reward from the fee pool; an expired challenge slashes the node’s stake.', tag: 'SubmitStorageProof' },
@@ -52,11 +52,11 @@ export default function StoragePage() {
                 ]}
               />
             </Card>
-            <Callout tone="dormant" title="Reassignment is deployed — pending activation at height 8,900,000">
+            <Callout tone="dormant" title="Reassignment is deployed, pending activation at height 8,900,000">
               Archive-node exit/withdrawal and automatic chunk reassignment are implemented on-chain
               and deployed, with <MonoTag>archive_unbonding_enabled_from_height</MonoTag> and{' '}
               <MonoTag>archive_reassignment_enabled_from_height</MonoTag> set to{' '}
-              <MonoTag>8,900,000</MonoTag> — they activate automatically once the chain reaches that
+              <MonoTag>8,900,000</MonoTag>, they activate automatically once the chain reaches that
               height. Until then, chunks left by an exiting archive lose effective replication until
               re-registered. Reassignment is epoch-aware and does not rewrite epoch-0 assignments.
               Challenge coverage remains probabilistic, not per-chunk guaranteed.
@@ -89,7 +89,7 @@ export default function StoragePage() {
             <SectionHeader
               kicker="Private files"
               title="The chain enforces access, not encryption"
-              intro="Private files register an X25519 encryption-key entry per account and store per-recipient encrypted key bundles plus access metadata on-chain. The chain enforces these access-list and key-bundle rules — it does not encrypt the raw file bytes itself; that happens client-side before upload."
+              intro="Private files register an X25519 encryption-key entry per account and store per-recipient encrypted key bundles plus access metadata on-chain. The chain enforces these access-list and key-bundle rules, it does not encrypt the raw file bytes itself; that happens client-side before upload."
             />
           </Reveal>
           <Reveal delay={0.1}>
@@ -111,9 +111,9 @@ export default function StoragePage() {
       <section>
         <div className="mx-auto max-w-6xl px-6 pb-4 lg:px-8">
           <Reveal>
-            <Callout tone="note" title="SNIP — the storage product surface">
+            <Callout tone="note" title="SNIP, the storage product surface">
               This page describes the on-chain storage protocol. <strong>SNIP</strong> is the
-              application built on it — upload, retrieve, and manage files backed by SUM Chain
+              application built on it, upload, retrieve, and manage files backed by SUM Chain
               Proof-of-Retrievability. Try it at{' '}
               <a
                 href="https://snip.sumchain.io"

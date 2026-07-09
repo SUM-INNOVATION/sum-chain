@@ -23,15 +23,15 @@
   --accent: #a855f7; /* purple-500 */
   --accent-soft: #c084fc; /* purple-400 */
 
-  /* Signal cyan (compute / AI / system-map lines) — used sparingly */
+  /* Signal cyan (compute / AI / system-map lines), used sparingly */
   --signal: #22d3ee; /* cyan-400 */
   --signal-soft: #67e8f9; /* cyan-300 */
 
   /* Protocol status semantics */
-  --status-active: #34d399; /* emerald — live on mainnet */
-  --status-pending: #22d3ee; /* cyan — deployed, activation gate set, not yet reached */
-  --status-dormant: #fbbf24; /* amber — code-backed, no activation gate */
-  --status-roadmap: #60a5fa; /* blue — planned */
+  --status-active: #34d399; /* emerald, live on mainnet */
+  --status-pending: #22d3ee; /* cyan, deployed, activation gate set, not yet reached */
+  --status-dormant: #fbbf24; /* amber, code-backed, no activation gate */
+  --status-roadmap: #60a5fa; /* blue, planned */
 }
 
 @theme inline {

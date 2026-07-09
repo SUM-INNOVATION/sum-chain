@@ -140,7 +140,7 @@ export default function Ecosystem() {
             Tools and apps
           </h2>
           <p className="mt-4 text-lg text-muted">
-            A suite for users, developers, and operators — plus the SUMaillet product surfaces.
+            A suite for users, developers, and operators, plus the SUMaillet product surfaces.
           </p>
         </div>
 

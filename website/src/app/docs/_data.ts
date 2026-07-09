@@ -30,6 +30,35 @@ export const categories: Category[] = [
         },
       },
       {
+        name: 'chain_getSupplyInfo',
+        description:
+          'Canonical-supply report (800B supply correction): initial/current canonical supply, live accounted account balances, burned (Address::ZERO), protocol reserve remaining, migration id/status, governance-mint total, automatic_emissions_enabled (always false).',
+      },
+      {
+        name: 'chain_getProtocolReserve',
+        description:
+          'ProtocolReserve pool balances (validator / archive / compute / ecosystem / governance reserve). null before the supply correction has applied.',
+      },
+      {
+        name: 'chain_getServiceGrant',
+        description: 'Service-grant ledger record for (address, service_kind); null when no grant exists.',
+      },
+      {
+        name: 'chain_getServiceGrantEligibility',
+        description:
+          'Verifiable service-milestone counters, claiming-gate state, and genesis-validator exclusion for an address. Configuration/status read, not live participation data.',
+      },
+      {
+        name: 'chain_buildClaimServiceGrant',
+        description:
+          'Build an unsigned claim-service-grant transaction (no keys). Dormant until service_grants_enabled_from_height is set.',
+      },
+      {
+        name: 'chain_buildUnlockServiceGrant',
+        description:
+          'Build an unsigned unlock-service-grant transaction (locked grant unlocks 1:1 against protocol-earned Koppa).',
+      },
+      {
         name: 'get_latest_block',
         description: 'Returns the most recent block.',
         example: {
@@ -137,7 +166,7 @@ export const categories: Category[] = [
       {
         name: 'get_transaction',
         description:
-          'Returns a transaction by hash. Includes additive, read-time semantic labels derived from the already-public payload — tx_type, action, asset_ref, asset_kind — so clients can classify a transaction without decoding it. The same fields appear on transaction-history entries.',
+          'Returns a transaction by hash. Includes additive, read-time semantic labels derived from the already-public payload, tx_type, action, asset_ref, asset_kind, so clients can classify a transaction without decoding it. The same fields appear on transaction-history entries.',
       },
       { name: 'get_receipt', description: 'Returns receipt (success/failure + gas) by tx hash.' },
       { name: 'get_pending_transactions', description: 'Lists pending mempool transactions.' },
@@ -158,7 +187,7 @@ export const categories: Category[] = [
   {
     id: 'storage',
     title: 'Decentralized Storage (PoR)',
-    blurb: 'Native L1 Proof-of-Retrievability — query files, challenges, archive nodes, and V2 coverage. Powers snip.sumchain.io (https://snip.sumchain.io). Archive-node withdrawal (issue #20) and reassignment (issue #62) are code-backed but dormant behind their activation gates.',
+    blurb: 'Native L1 Proof-of-Retrievability, query files, challenges, archive nodes, and V2 coverage. Powers snip.sumchain.io (https://snip.sumchain.io). Archive-node withdrawal (issue #20) and reassignment (issue #62) are code-backed but dormant behind their activation gates.',
     methods: [
       {
         name: 'storage_getFundedFiles',
@@ -188,7 +217,7 @@ export const categories: Category[] = [
       },
       {
         name: 'nodeRegistry_buildTransaction',
-        description: 'Build an unsigned node-registry transaction (register, begin-unstake, withdraw-unbonded, register-encryption-key) — returns unsigned tx material + signing hash; no private keys.',
+        description: 'Build an unsigned node-registry transaction (register, begin-unstake, withdraw-unbonded, register-encryption-key), returns unsigned tx material + signing hash; no private keys.',
       },
       {
         name: 'storage_getAssignmentCoverageV2',
@@ -196,7 +225,7 @@ export const categories: Category[] = [
       },
       {
         name: 'storage_getActiveNodesAtHeight',
-        description: 'The active-archive snapshot at a given height — used to reproduce the deterministic chunk assignment client-side.',
+        description: 'The active-archive snapshot at a given height, used to reproduce the deterministic chunk assignment client-side.',
       },
       {
         name: 'storage_getArchiveUnbonding',
@@ -207,7 +236,7 @@ export const categories: Category[] = [
   {
     id: 'omninode',
     title: 'OmniNode (InferenceAttestation)',
-    blurb: 'Verifiable AI compute — read verifier-signed inference attestations settled on-chain. Attestation is active on mainnet (omninode_enabled_from_height = 6,000,000). Reads for the OmniNode product surface (https://omninode.suminnovation.xyz).',
+    blurb: 'Verifiable AI compute, read verifier-signed inference attestations settled on-chain. Attestation is active on mainnet (omninode_enabled_from_height = 6,000,000). Reads for the OmniNode product surface (https://omninode.suminnovation.xyz).',
     methods: [
       { name: 'sum_getInferenceAttestation', description: 'Attestation for a (session_id, verifier_address) pair, or null.' },
       { name: 'sum_listInferenceAttestations', description: 'All attestations recorded for a session_id.' },
@@ -217,13 +246,13 @@ export const categories: Category[] = [
   {
     id: 'omninode-settlement',
     title: 'OmniNode Inference Settlement (dormant)',
-    blurb: 'Escrow-funded verifier rewards keyed by attestations — implemented but DORMANT behind inference_settlement_enabled_from_height (issue #61). No bond slashing in v1 (reward denial / claim withholding / escrow refund). Reads + unsigned-tx builders (no keys).',
+    blurb: 'Escrow-funded verifier rewards keyed by attestations, implemented but DORMANT behind inference_settlement_enabled_from_height (issue #61). No bond slashing in v1 (reward denial / claim withholding / escrow refund). Reads + unsigned-tx builders (no keys).',
     methods: [
       { name: 'omninode_getInferenceSession', description: 'Per-session settlement record (funder, reward terms, remaining escrow, status), or null.' },
       { name: 'omninode_getInferenceClaims', description: 'All paid reward claims for a session.' },
-      { name: 'omninode_getInferenceDisputes', description: 'All dispute records for a session (record-only; disputes require a configured validator-quorum threshold, and resolution is authorized by a validator quorum — no personal resolver key).' },
+      { name: 'omninode_getInferenceDisputes', description: 'All dispute records for a session (record-only; disputes require a configured validator-quorum threshold, and resolution is authorized by a validator quorum, no personal resolver key).' },
       { name: 'omninode_getClaimableReward', description: 'Whether a verifier can currently claim, plus amount and unlock height (attestation inclusion + finality_depth + dispute_window).' },
-      { name: 'omninode_buildOpenInferenceSession · buildFundInferenceSession · buildClaimInferenceReward · buildOpenInferenceDispute · buildResolveInferenceDispute · buildRefundInferenceSession', description: 'Unsigned-transaction builders for the six settlement operations — return a bincode-encoded TransactionV2 + signing hash; no private keys.' },
+      { name: 'omninode_buildOpenInferenceSession · buildFundInferenceSession · buildClaimInferenceReward · buildOpenInferenceDispute · buildResolveInferenceDispute · buildRefundInferenceSession', description: 'Unsigned-transaction builders for the six settlement operations, return a bincode-encoded TransactionV2 + signing hash; no private keys.' },
     ],
   },
   {
@@ -264,7 +293,7 @@ export const categories: Category[] = [
       { name: 'staking_getSummary', description: 'Aggregate stats.' },
       { name: 'staking_getParams', description: 'Staking parameters.' },
       { name: 'staking_getTotalStake', description: 'Sum of all stake.' },
-      { name: 'staking_buildTransaction', description: 'Build an unsigned staking/validator transaction (create-validator, delegate, unstake, claim-rewards, submit-evidence, etc.) — returns unsigned tx material + signing hash; no private keys.' },
+      { name: 'staking_buildTransaction', description: 'Build an unsigned staking/validator transaction (create-validator, delegate, unstake, claim-rewards, submit-evidence, etc.), returns unsigned tx material + signing hash; no private keys.' },
       { name: 'delegation_getDelegation', description: 'Single delegation lookup.' },
       { name: 'delegation_getDelegationsByDelegator', description: 'Delegations made by an address.' },
       { name: 'delegation_getDelegationsByValidator', description: 'Delegations to a validator.' },
@@ -314,7 +343,7 @@ export const categories: Category[] = [
       { name: 'nft_balanceOf', description: 'Number of tokens an address holds.' },
       { name: 'nft_ownerOf', description: 'Owner of a specific token.' },
       { name: 'nft_tokenExists', description: 'Existence check.' },
-      { name: 'nft_buildTransaction', description: 'Build an unsigned SUM-721 transaction (create-collection, mint, transfer, burn, update-config, etc.) — returns unsigned tx material + signing hash; no private keys.' },
+      { name: 'nft_buildTransaction', description: 'Build an unsigned SUM-721 transaction (create-collection, mint, transfer, burn, update-config, etc.), returns unsigned tx material + signing hash; no private keys.' },
     ],
   },
   {
@@ -338,7 +367,7 @@ export const categories: Category[] = [
           response: `{"jsonrpc":"2.0","result":{"token_id":"0x1234...","owner":"SUM1own...","minters":["SUM1mnt..."]},"id":1}`,
         },
       },
-      { name: 'token_buildTransaction', description: 'Build an unsigned SRC-20 transaction (create, mint, transfer, approve, pause, add-minter, etc.) — returns unsigned tx material + signing hash; no private keys.' },
+      { name: 'token_buildTransaction', description: 'Build an unsigned SRC-20 transaction (create, mint, transfer, approve, pause, add-minter, etc.), returns unsigned tx material + signing hash; no private keys.' },
     ],
   },
   {
@@ -379,7 +408,7 @@ export const categories: Category[] = [
       },
       {
         name: 'messaging_registerSponsored',
-        description: 'Registers a public key for an address (sponsored — fee paid by relayer). Required before receiving messages. Not idempotent: a duplicate call returns success: false with "Public key already registered" — check via account_getPublicKey first.',
+        description: 'Registers a public key for an address (sponsored, fee paid by relayer). Required before receiving messages. Not idempotent: a duplicate call returns success: false with "Public key already registered", check via account_getPublicKey first.',
       },
       { name: 'messaging_submitSponsored', description: 'Submits an encrypted message via a sponsoring relayer.' },
       { name: 'messaging_getQuota', description: 'Quota status for a sender.' },
@@ -446,7 +475,7 @@ export const categories: Category[] = [
   {
     id: 'policy',
     title: 'Policy Accounts (Multi-Sig)',
-    blurb: 'Consensus-level multi-sig group governance — accounts, proposals, execution.',
+    blurb: 'Consensus-level multi-sig group governance, accounts, proposals, execution.',
     methods: [
       { name: 'policy_getAccount', description: 'Account by id.' },
       { name: 'policy_getAccountByAddress', description: 'Account by address.' },
@@ -463,7 +492,7 @@ export const categories: Category[] = [
   {
     id: 'governance',
     title: 'Governance (v1)',
-    blurb: 'On-chain token-holder governance — dormant on mainnet. These methods are registered and respond; reads return empty/null and builders return unsigned tx material until a network configures governance_enabled_from_height and ChainParams.governance.',
+    blurb: 'On-chain token-holder governance, dormant on mainnet. These methods are registered and respond; reads return empty/null and builders return unsigned tx material until a network configures governance_enabled_from_height and ChainParams.governance.',
     methods: [
       { name: 'gov_buildCreateProposal', description: 'Build an unsigned create-proposal transaction to sign and broadcast.' },
       { name: 'gov_buildCastVote', description: 'Build an unsigned cast-vote transaction.' },

@@ -36,7 +36,7 @@ export default function DocsPage() {
             </p>
             <p className="text-sm text-gray-500 mt-4">
               All {totalMethods} methods are exposed by the live mainnet RPC at {ENDPOINT}. Example
-              responses are real captures. Pick a topic below — each opens on its own page.
+              responses are real captures. Pick a topic below, each opens on its own page.
             </p>
           </div>
 
@@ -114,7 +114,7 @@ export default function DocsPage() {
             </div>
           </section>
 
-          {/* Topics — each links to its own page */}
+          {/* Topics, each links to its own page */}
           <section>
             <h2 className="text-2xl font-semibold mb-6">Topics</h2>
             <div className="space-y-10">

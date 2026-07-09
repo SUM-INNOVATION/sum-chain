@@ -29,9 +29,9 @@ const TOPICS: Topic[] = [
     title: 'Proof-of-Retrievability, not promises',
     status: 'active',
     bullets: [
-      'Files are chunked and assigned to archive nodes by deterministic rendezvous hashing — three replicas by default.',
+      'Files are chunked and assigned to archive nodes by deterministic rendezvous hashing, three replicas by default.',
       'Archives answer periodic retrievability challenges with Merkle proofs. Valid proofs earn rewards from the file’s fee pool; expired challenges slash stake.',
-      'Private files store encrypted key bundles and access metadata on-chain — the chain never encrypts raw file bytes itself.',
+      'Private files store encrypted key bundles and access metadata on-chain, the chain never encrypts raw file bytes itself.',
     ],
     tags: ['PoR', 'merkle_root', 'archive nodes'],
     spec: [
@@ -52,8 +52,8 @@ const TOPICS: Topic[] = [
     status: 'active',
     bullets: [
       'Users pay Koppa for inference; off-chain OmniNode workers perform the compute and a verifier signs the result.',
-      'The verifier submits an InferenceAttestation — one per (session_id, verifier), permanently — which the chain records and finalizes.',
-      'Read RPCs expose attestations and their status. Escrow-funded settlement (rewards/refunds) is implemented but dormant — no bond slashing in v1.',
+      'The verifier submits an InferenceAttestation, one per (session_id, verifier), permanently, which the chain records and finalizes.',
+      'Read RPCs expose attestations and their status. Escrow-funded settlement (rewards/refunds) is implemented but dormant, no bond slashing in v1.',
     ],
     tags: ['InferenceAttestation', 'verifier_signature', 'proof_root'],
     spec: [
@@ -74,8 +74,8 @@ const TOPICS: Topic[] = [
     feature: 'governance',
     bullets: [
       'SRC-20 token holders create proposals and vote with a balance snapshot frozen at proposal creation.',
-      'Admin authority (asset registration, validator-cancel) is a validator quorum — not a single council address. Most classes are RecordOnly; the one on-chain auto-exec path is a TreasurySpend native payout from a configured treasury.',
-      'Governance cannot force validator upgrades or mutate consensus, the validator set, or chain params. Deployed with the gate set to height 8,900,000 — active once reached.',
+      'Admin authority (asset registration, validator-cancel) is a validator quorum, not a single council address. Most classes are RecordOnly; the one on-chain auto-exec path is a TreasurySpend native payout from a configured treasury.',
+      'Governance cannot force validator upgrades or mutate consensus, the validator set, or chain params. Deployed with the gate set to height 8,900,000, active once reached.',
     ],
     tags: ['gov_*', 'validator-quorum', 'snapshot'],
     spec: [

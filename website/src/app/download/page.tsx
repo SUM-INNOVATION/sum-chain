@@ -33,18 +33,18 @@ const ARTIFACTS: Artifact[] = [
       'curl -LO https://github.com/SUM-INNOVATION/sum-chain/releases/download/v0.1.0/sumchain-v0.1.0-linux-x86_64\nchmod +x ./sumchain-v0.1.0-linux-x86_64',
     page: { href: '/run-node', label: 'Run a node →' },
     release: { href: RELEASES, label: 'All platforms & checksums →' },
-    note: 'Also linux-arm64 and macos-arm64 — swap the suffix. Unsigned; verify with SHA256SUMS. Prefer source? cargo build -p sumchain-node --release.',
+    note: 'Also linux-arm64 and macos-arm64, swap the suffix. Unsigned; verify with SHA256SUMS. Prefer source? cargo build -p sumchain-node --release.',
   },
   {
     name: 'CLI Wallet',
     bin: 'sumchain-wallet',
-    blurb: 'Encrypted keystore, address/balance, and signed Koppa transfers from the terminal. All you need to hold and send Koppa — no node required.',
+    blurb: 'Encrypted keystore, address/balance, and signed Koppa transfers from the terminal. All you need to hold and send Koppa, no node required.',
     installLabel: 'download · linux-x86_64',
     install:
       'curl -LO https://github.com/SUM-INNOVATION/sum-chain/releases/download/v0.1.0/sumchain-wallet-v0.1.0-linux-x86_64\nchmod +x ./sumchain-wallet-v0.1.0-linux-x86_64',
     page: { href: '/wallet', label: 'Wallet guide →' },
     release: { href: RELEASES, label: 'All platforms & checksums →' },
-    note: 'Also linux-arm64 and macos-arm64 — swap the suffix. Unsigned; verify with SHA256SUMS. Prefer source? cargo build -p sumchain-wallet --release.',
+    note: 'Also linux-arm64 and macos-arm64, swap the suffix. Unsigned; verify with SHA256SUMS. Prefer source? cargo build -p sumchain-wallet --release.',
   },
   {
     name: 'TypeScript SDK',
@@ -62,7 +62,7 @@ export default function DownloadPage() {
     <PageShell
       kicker="Download"
       title="Get SUM Chain"
-      intro="Grab only what you need: the CLI wallet to hold and send Koppa, the node to run one, or the TypeScript SDK from npm. Prebuilt binaries (Linux + macOS) are on the latest release with checksums — or build from source."
+      intro="Grab only what you need: the CLI wallet to hold and send Koppa, the node to run one, or the TypeScript SDK from npm. Prebuilt binaries (Linux + macOS) are on the latest release with checksums, or build from source."
     >
       <section>
         <div className="mx-auto max-w-6xl space-y-6 px-6 py-16 lg:px-8">

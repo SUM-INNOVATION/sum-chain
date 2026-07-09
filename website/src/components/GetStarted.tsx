@@ -72,7 +72,7 @@ const content: Record<string, TabContent> = {
       },
       {
         title: 'Submit a signed transaction',
-        body: 'Sign locally, then broadcast the hex-encoded transaction — directly or via the @sumchain/sdk Provider.',
+        body: 'Sign locally, then broadcast the hex-encoded transaction, directly or via the @sumchain/sdk Provider.',
         code: `curl -X POST ${RPC} \\
   -H "Content-Type: application/json" \\
   -d '{"jsonrpc":"2.0","method":"send_raw_transaction",

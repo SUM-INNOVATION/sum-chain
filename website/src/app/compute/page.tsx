@@ -25,7 +25,7 @@ export default function ComputePage() {
       kicker="Verifiable AI compute · OmniNode"
       status="active"
       title="AI inference, settled on-chain"
-      intro="Off-chain nodes do the compute; the chain settles the proof. A verifier signs each result and commits an InferenceAttestation that SUM Chain records permanently — one per session and verifier. OmniNode attestation is live on mainnet."
+      intro="Off-chain nodes do the compute; the chain settles the proof. A verifier signs each result and commits an InferenceAttestation that SUM Chain records permanently, one per session and verifier. OmniNode attestation is live on mainnet."
     >
       {/* Workflow */}
       <section>
@@ -48,7 +48,7 @@ export default function ComputePage() {
             <SectionHeader
               kicker="On-chain record"
               title="A signed digest, deduplicated forever"
-              intro="Each attestation binds a session to a tuple of content hashes, signed under OmniNode’s Stage-6 domain. The chain enforces one attestation per (session_id, verifier) permanently — no overwrite — and finalizes it by block depth."
+              intro="Each attestation binds a session to a tuple of content hashes, signed under OmniNode’s Stage-6 domain. The chain enforces one attestation per (session_id, verifier) permanently, no overwrite, and finalizes it by block depth."
             />
             <div className="mt-6 flex flex-wrap gap-2">
               <MonoTag>InferenceAttestation</MonoTag>
@@ -70,7 +70,7 @@ export default function ComputePage() {
           <Reveal>
             <Card eyebrow="read RPC" title="Query attestations">
               <p className="text-sm leading-relaxed text-muted">
-                Three read-only methods let coordinators enumerate attestations and check status —
+                Three read-only methods let coordinators enumerate attestations and check status:
                 submitted, included, finalized, or failed.
               </p>
               <div className="mt-4 space-y-2">
@@ -85,23 +85,23 @@ export default function ComputePage() {
             </Card>
           </Reveal>
           <Reveal delay={0.1}>
-            <Callout tone="dormant" title="Settlement is deployed — pending activation at height 8,900,000">
+            <Callout tone="dormant" title="Settlement is deployed, pending activation at height 8,900,000">
               Attestation v1 (live) records verifier-signed results only. Escrow-funded inference{' '}
               <strong>settlement</strong> (rewards, refunds, disputes) is deployed with{' '}
               <MonoTag>inference_settlement_enabled_from_height</MonoTag> set to <MonoTag>8,900,000</MonoTag>{' '}
-              — the chain does not pay inference nodes until the chain reaches that height, then it
+             , the chain does not pay inference nodes until the chain reaches that height, then it
               activates automatically. v1 has <strong>no bond slashing</strong>: the levers are reward
               denial, claim withholding, and escrow refund. Dispute resolution is{' '}
-              <strong>validator-quorum controlled</strong> — a basis-point threshold
+              <strong>validator-quorum controlled</strong>, a basis-point threshold
               (<MonoTag>inference_settlement_dispute_threshold_bps</MonoTag>) of the active validator set
               must sign, not a personal resolver key; non-signing validators abstain but still count in
               the denominator.
             </Callout>
           </Reveal>
           <Reveal delay={0.15}>
-            <Callout tone="note" title="OmniNode — the compute product surface">
+            <Callout tone="note" title="OmniNode, the compute product surface">
               This page describes the on-chain attestation protocol. <strong>OmniNode</strong> is the
-              application built on it — request verifiable AI inference settled against SUM Chain. See{' '}
+              application built on it, request verifiable AI inference settled against SUM Chain. See{' '}
               <a
                 href="https://omninode.suminnovation.xyz"
                 target="_blank"

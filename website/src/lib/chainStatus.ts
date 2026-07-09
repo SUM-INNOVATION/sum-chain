@@ -8,7 +8,7 @@ import { useEffect, useState } from 'react';
  * A feature is ACTIVE once the live chain height reaches its activation gate, and
  * PENDING before that. This is computed from the live public RPC
  * (`chain_getChainParams` + `chain_getBlockHeight`) on the client, so the site
- * **auto-flips** the moment the chain crosses a gate — no redeploy.
+ * **auto-flips** the moment the chain crosses a gate, no redeploy.
  *
  * `chain_getChainParams` only exposes `v2`, `omninode`, and `education` gates.
  * The rest of the batch-activated cohort (contracts, archive unbonding /
