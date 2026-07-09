@@ -11,6 +11,7 @@ pub mod education_executor;
 pub mod employment_executor;
 pub mod equity_executor;
 pub mod executor;
+pub mod supply;
 pub mod finance_executor;
 pub mod governance_executor;
 pub mod healthcare_executor;

@@ -17,7 +17,7 @@ const RUN_STEPS = [
   },
   {
     title: 'Prepare config and genesis',
-    body: 'To join an existing network, use that network’s config.toml and its exact genesis.json (obtained from the operators). Every node on a network runs a byte-identical genesis — do not edit it to join.',
+    body: 'To join an existing network, use that network’s config.toml and its exact genesis.json (obtained from the operators). Every node on a network runs a byte-identical genesis, do not edit it to join.',
     tag: 'config.toml + genesis.json',
   },
   { title: 'Run the node', body: 'Start syncing, serve JSON-RPC, and connect to peers via a bootnode from your target network.' },
@@ -28,7 +28,7 @@ export default function RunNodePage() {
     <PageShell
       kicker="Run a node"
       title="Run SUM Chain from source"
-      intro="A SUM Chain node is a single Rust binary. To join an existing network, build it from this repository and point it at that network’s config.toml and genesis.json plus a bootnode — it will sync the chain, serve JSON-RPC, and gossip with peers. Running a full node does not make you a validator."
+      intro="A SUM Chain node is a single Rust binary. To join an existing network, build it from this repository and point it at that network’s config.toml and genesis.json plus a bootnode, it will sync the chain, serve JSON-RPC, and gossip with peers. Running a full node does not make you a validator."
     >
       {/* Build + run */}
       <section>
@@ -72,7 +72,7 @@ cargo build -p sumchain-node --release
             </div>
           </Reveal>
           <Reveal delay={0.1}>
-            <CodeBlock label="config.toml (excerpt)" code={`# Example only — replace placeholders with real
+            <CodeBlock label="config.toml (excerpt)" code={`# Example only, replace placeholders with real
 # published bootnodes for your target network.
 bootnodes = [
   "/ip4/<PUBLIC_IP>/tcp/9933/p2p/<PEER_ID>",

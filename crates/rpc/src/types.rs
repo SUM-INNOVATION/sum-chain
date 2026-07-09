@@ -97,6 +97,94 @@ pub struct ReceiptInfo {
     pub fee_paid: String,
 }
 
+/// Canonical-supply report (800B correction). All amounts are base-unit
+/// decimal strings (u128-safe for JSON). `automatic_emissions_enabled` is
+/// always `false` — the chain has no block-reward/inflation path; supply can
+/// only change via the one-time correction and NativeEligibility governance.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SupplyInfo {
+    /// Canonical supply immediately after the correction (800B), or the 1B
+    /// genesis supply while the correction is pending.
+    pub initial_canonical_supply: String,
+    /// initial + total governance mints.
+    pub current_canonical_supply: String,
+    /// Live Σ of all account balances (incl. the burn sink).
+    pub accounted_account_supply: String,
+    /// Balance of the `Address::ZERO` burn sink.
+    pub burned_supply: String,
+    /// Σ remaining across all ProtocolReserve pools (0 while pending).
+    pub protocol_reserve_remaining: String,
+    /// Σ locked-unclaimed across all service grants.
+    pub outstanding_grant_unclaimed: String,
+    pub total_minted_by_migration: String,
+    pub total_minted_by_governance: String,
+    /// `0x` + 64 hex chars — BLAKE3 of the migration domain string.
+    pub migration_id: String,
+    pub migration_applied: bool,
+    pub migration_activation_height: u64,
+    /// Always `false`: no block rewards, no inflation, no hidden mint.
+    pub automatic_emissions_enabled: bool,
+}
+
+/// ProtocolReserve pool balances (base-unit decimal strings).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProtocolReserveInfo {
+    pub validator_pool_remaining: String,
+    pub archive_pool_remaining: String,
+    pub compute_pool_remaining: String,
+    pub ecosystem_pool_remaining: String,
+    pub governance_reserve_remaining: String,
+    pub total_remaining: String,
+}
+
+/// A service-grant ledger record for `(address, service_kind)`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceGrantInfo {
+    pub recipient: String,
+    /// `Validator` | `Archive` | `Compute`.
+    pub service_kind: String,
+    pub total_grant: String,
+    pub liquid_claimed: String,
+    pub locked_remaining: String,
+    pub earned_credit_total: String,
+    pub earned_credit_used_for_unlock: String,
+    /// min(locked_remaining, unused earned credit) — claimable via unlock now.
+    pub unlockable_now: String,
+    pub created_at_height: u64,
+    /// `Active` | `Suspended` | `Forfeited` | `Completed`.
+    pub status: String,
+}
+
+/// Service-grant eligibility snapshot for `(address, service_kind)`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceGrantEligibilityInfo {
+    pub address: String,
+    pub service_kind: String,
+    /// Whether claiming is enabled at all (`service_grants_enabled_from_height`).
+    pub claiming_enabled: bool,
+    /// Milestone counters (archive: PoR proofs; compute: settlement claims).
+    pub por_proofs: u64,
+    pub settlement_claims: u64,
+    pub denied_disputes: u64,
+    /// Milestone value already awarded (base units, decimal string).
+    pub milestone_awarded: String,
+    /// Whether this address is one of the excluded genesis validators
+    /// (validator kind only).
+    pub genesis_validator_excluded: bool,
+}
+
+/// No-key builder request for supply/service-grant transactions. The unsigned
+/// tx is signed offline by `from`; no private keys touch the RPC.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SupplyBuildRequest {
+    pub from: String,
+    /// `validator` | `archive` | `compute` (case-insensitive).
+    pub service_kind: String,
+    pub fee: Option<u128>,
+    pub nonce: Option<u64>,
+    pub chain_id: Option<u64>,
+}
+
 /// One public, address-keyed registry label for an address (issue #64). Either
 /// an institution/issuer **name** (`kind: "institution"`) or a **role/class**
 /// label proven by a public registry (`kind: "role"`). Never fabricated: every
@@ -495,6 +583,30 @@ pub struct ChainParamsInfo {
     /// `docs/SUBPROTOCOLS/EDUCATION-ACTIVATION.md`). Additive field —
     /// appended after `omninode_enabled_from_height`.
     pub education_enabled_from_height: Option<u64>,
+    /// Governance activation gate (issue #50 / v2 #88-#92).
+    pub governance_enabled_from_height: Option<u64>,
+    /// Monetary-policy gate (800B correction): ReserveRelease* / MonetaryPolicyMint.
+    pub monetary_policy_enabled_from_height: Option<u64>,
+    /// Service-grant claiming gate (800B correction).
+    pub service_grants_enabled_from_height: Option<u64>,
+    /// Configured governance parameters, when present in the deployed genesis.
+    pub governance: Option<GovernanceParamsInfo>,
+}
+
+/// Public snapshot of the configured `GovernanceParams` (no key material; the
+/// treasury is reported only as configured/not, to avoid implying a controller).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GovernanceParamsInfo {
+    pub validator_authority_threshold_bps: u16,
+    pub quorum_bps: u16,
+    pub pass_threshold_bps: u16,
+    pub voting_period_blocks: u64,
+    pub max_snapshot_holders: u32,
+    /// Native-eligibility Koppa floor (base units, decimal string).
+    pub min_koppa_for_eligibility: String,
+    /// Proposal bond (base units, decimal string).
+    pub proposal_bond: String,
+    pub treasury_configured: bool,
 }
 
 /// One archive-node record as returned by `storage_getActiveNodesAtHeight`

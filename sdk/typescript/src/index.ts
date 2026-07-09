@@ -70,6 +70,8 @@ export type {
   TokenMintersInfo,
   AddressLabel,
   AddressLabelsInfo,
+  SupplyInfo,
+  ProtocolReserveInfo,
   ValidatorInfo,
   ValidatorSetInfo,
   HealthResponse,

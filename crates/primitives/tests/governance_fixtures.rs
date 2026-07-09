@@ -30,10 +30,12 @@ fn tx_type_governance_ordinal_locked() {
     assert_eq!(TxType::Education as u8, 22);
     assert_eq!(TxType::from_byte(22), Some(TxType::Education));
     // 24 is InferenceSettlement (issue #61, appended after Governance); 25 is
-    // InferenceAttestationV2 (issue #79, sponsored attestation); 26 is free.
+    // InferenceAttestationV2 (issue #79, sponsored attestation); 26 is Supply
+    // (800B supply correction / service grants); 27 is free.
     assert_eq!(TxType::from_byte(24), Some(TxType::InferenceSettlement));
     assert_eq!(TxType::from_byte(25), Some(TxType::InferenceAttestationV2));
-    assert_eq!(TxType::from_byte(26), None);
+    assert_eq!(TxType::from_byte(26), Some(TxType::Supply));
+    assert_eq!(TxType::from_byte(27), None);
 }
 
 #[test]
@@ -141,7 +143,11 @@ fn gov_enum_discriminants_stable() {
     assert_eq!(GovProposalStatus::from_u8(0), Some(GovProposalStatus::Created));
     assert_eq!(GovProposalStatus::from_u8(8), Some(GovProposalStatus::Cancelled));
     assert_eq!(VoteChoice::from_u8(2), Some(VoteChoice::Abstain));
-    assert_eq!(GovProposalClass::from_u8(9), None);
+    // Monetary-policy classes (800B correction), appended: 9/10/11; 12 free.
+    assert_eq!(GovProposalClass::from_u8(9), Some(GovProposalClass::ReserveReleaseEcosystem));
+    assert_eq!(GovProposalClass::from_u8(10), Some(GovProposalClass::ReserveReleaseGovernance));
+    assert_eq!(GovProposalClass::from_u8(11), Some(GovProposalClass::MonetaryPolicyMint));
+    assert_eq!(GovProposalClass::from_u8(12), None);
 }
 
 // ───────────────────── P3a: params + request structs + id ────────────────────

@@ -291,6 +291,39 @@ export interface TokenMintersInfo {
 }
 
 /**
+ * Canonical-supply report (800B supply correction). All amounts are base-unit
+ * decimal strings. `automatic_emissions_enabled` is always `false` — the chain
+ * has no block-reward/inflation path.
+ */
+export interface SupplyInfo {
+  initial_canonical_supply: string;
+  current_canonical_supply: string;
+  accounted_account_supply: string;
+  burned_supply: string;
+  protocol_reserve_remaining: string;
+  outstanding_grant_unclaimed: string;
+  total_minted_by_migration: string;
+  total_minted_by_governance: string;
+  migration_id: string;
+  migration_applied: boolean;
+  migration_activation_height: number;
+  automatic_emissions_enabled: boolean;
+}
+
+/**
+ * ProtocolReserve pool balances (base-unit decimal strings). `null` before the
+ * supply correction has applied.
+ */
+export interface ProtocolReserveInfo {
+  validator_pool_remaining: string;
+  archive_pool_remaining: string;
+  compute_pool_remaining: string;
+  ecosystem_pool_remaining: string;
+  governance_reserve_remaining: string;
+  total_remaining: string;
+}
+
+/**
  * One public registry label for an address (issue #64). Either a registered
  * institution/issuer name (`kind: 'institution'`) or a role/class label proven
  * by a public registry (`kind: 'role'`). Never fabricated.

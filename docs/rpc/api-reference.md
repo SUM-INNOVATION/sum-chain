@@ -46,6 +46,53 @@ Returns the chain ID.
 
 ---
 
+#### `chain_getSupplyInfo`
+
+Canonical-supply report (800B supply correction). All amounts are base-unit decimal strings. `automatic_emissions_enabled` is always `false` — the chain has no block-reward/inflation path; supply can only change via the one-time correction and NativeEligibility governance (`MonetaryPolicyMint`, 6667 bps).
+
+**Parameters:** None
+
+**Returns:** `SupplyInfo` — `initial_canonical_supply`, `current_canonical_supply`, `accounted_account_supply` (live Σ of account balances), `burned_supply` (`Address::ZERO` balance), `protocol_reserve_remaining`, `outstanding_grant_unclaimed`, `total_minted_by_migration`, `total_minted_by_governance`, `migration_id`, `migration_applied`, `migration_activation_height`, `automatic_emissions_enabled`.
+
+---
+
+#### `chain_getProtocolReserve`
+
+ProtocolReserve pool balances (validator / archive / compute / ecosystem / governance-reserve). `null` before the supply correction has applied.
+
+**Parameters:** None
+
+---
+
+#### `chain_getServiceGrant`
+
+Service-grant ledger record for `(address, service_kind)`; `null` when no grant exists.
+
+**Parameters:**
+1. `address` (string) - Grant recipient (base58)
+2. `service_kind` (string) - `validator` | `archive` | `compute`
+
+---
+
+#### `chain_getServiceGrantEligibility`
+
+Eligibility snapshot: verifiable milestone counters (PoR proofs / settlement claims / denied disputes), the claiming-gate state, and genesis-validator exclusion.
+
+**Parameters:**
+1. `address` (string)
+2. `service_kind` (string) - `validator` | `archive` | `compute`
+
+---
+
+#### `chain_buildClaimServiceGrant` / `chain_buildUnlockServiceGrant`
+
+No-key builders for the supply/service-grant transactions (claim a bootstrap/milestone grant; unlock locked grant 1:1 against protocol-earned credit). Return an unsigned tx + signing hash; sign offline and submit via `sum_sendRawTransaction`. Both operations are dormant (`Failed(380)`) until `service_grants_enabled_from_height` is set.
+
+**Parameters:**
+1. `request` (object) - `{ from, service_kind, fee?, nonce?, chain_id? }`
+
+---
+
 #### `get_latest_block`
 
 Returns the latest block.

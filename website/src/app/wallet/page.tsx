@@ -24,7 +24,7 @@ export default function WalletPage() {
             <SectionHeader
               kicker="Get the wallet"
               title="Build, then generate an encrypted keystore"
-              intro="Build the binary from source, then create a keypair. keygen prompts for a password and writes an encrypted keystore file — the private key is protected with Argon2 key derivation and AES-256-GCM."
+              intro="Build the binary from source, then create a keypair. keygen prompts for a password and writes an encrypted keystore file, the private key is protected with Argon2 key derivation and AES-256-GCM."
             />
             <div className="mt-6 flex flex-wrap gap-2">
               <MonoTag>Argon2</MonoTag>
@@ -82,7 +82,7 @@ sumchain-wallet send --rpc https://rpc.sumchain.io \\
           <Reveal>
             <Callout tone="note" title="Keep your keystore safe">
               Your funds are controlled by the encrypted keystore file and its password. Back up{' '}
-              <MonoTag>keystore.json</MonoTag> and remember the password — there is no seed phrase and no
+              <MonoTag>keystore.json</MonoTag> and remember the password, there is no seed phrase and no
               recovery if both are lost. Never share the keystore or password.
             </Callout>
           </Reveal>

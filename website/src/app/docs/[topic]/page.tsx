@@ -25,7 +25,7 @@ export async function generateMetadata({
   if (!cat) return { title: 'Docs | SUM Chain' };
   const t = plainTitle(cat.title);
   return {
-    title: `${t} — JSON-RPC | SUM Chain Docs`,
+    title: `${t}, JSON-RPC | SUM Chain Docs`,
     description: cat.blurb,
   };
 }

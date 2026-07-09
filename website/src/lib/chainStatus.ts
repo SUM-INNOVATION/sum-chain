@@ -8,7 +8,7 @@ import { useEffect, useState } from 'react';
  * A feature is ACTIVE once the live chain height reaches its activation gate, and
  * PENDING before that. This is computed from the live public RPC
  * (`chain_getChainParams` + `chain_getBlockHeight`) on the client, so the site
- * **auto-flips** the moment the chain crosses a gate — no redeploy.
+ * **auto-flips** the moment the chain crosses a gate, no redeploy.
  *
  * `chain_getChainParams` only exposes `v2`, `omninode`, and `education` gates.
  * The rest of the batch-activated cohort (contracts, archive unbonding /
@@ -20,9 +20,13 @@ import { useEffect, useState } from 'react';
 
 export const RPC_URL = 'https://rpc.sumchain.io';
 
-/** Deployed gate values (fallback when the RPC is unreachable). Verified 2026-07-06. */
+/** Deployed gate values (fallback when the RPC is unreachable). Verified live
+ * 2026-07-09 at height 8,916,052: the chain has crossed the 8,900,000 cohort
+ * gate, so the whole batch (governance, contracts, archive unbonding /
+ * reassignment, inference settlement, education) is ACTIVE. The pinned height
+ * stays above that gate so an RPC blip never falsely reverts the UI to pending. */
 const PINNED = {
-  height: 8_716_604,
+  height: 8_916_052,
   v2: 5_200_000,
   omninode: 6_000_000,
   education: 8_900_000,

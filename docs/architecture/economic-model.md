@@ -15,7 +15,21 @@ SUM Chain is designed as **global peer-to-peer electronic cash** for everyday tr
 
 ### 800,000,000,000 Ϙ (800 Billion Koppa)
 
-**Fixed supply** - No inflation, no mining rewards, all tokens minted at genesis.
+**No automatic emissions** — no inflation, no mining/block rewards, no hidden
+mint path. **Initial canonical supply: 800B Koppa after the coordinated supply
+migration** (the one-time mainnet supply correction; migration id
+`0x00a88daf2062e610b09b379b74aa6bc5a9557eb145618f46e9571428a4584a8f`). The live
+genesis allocated 1B Ϙ to accounts; the 799B delta is held as non-transferable
+**ProtocolReserve** ledger supply — not an account, not a treasury key, not the
+burn sink — released only through implemented protocol rules (service grants)
+or native-Koppa consensus governance. Until the migration executes on-chain,
+the live canonical supply remains 1B; query `chain_getSupplyInfo` for the
+authoritative live view.
+
+**Future supply expansion, if ever needed, requires explicit on-chain consensus
+governance** (a `MonetaryPolicyMint` proposal under NativeEligibility voting at
+the fixed 6667 bps threshold). Validator-quorum authority cannot mint or
+release reserve; SRC-20/equity governance cannot mint native Koppa.
 
 ### Why 800 Billion?
 
@@ -129,96 +143,64 @@ Transaction fees are **paid to the block proposer** — the validator who create
 
 Validators **earn transaction fees** from every block they propose. The block proposer receives all fees collected in their block. Additional funding sources include:
 
-- **Genesis allocation**: Validators funded from Community Rewards pool (40B Ϙ)
-- **Network grants**: Foundation provides operational support
-- **Delegation distributions**: Staking rewards claimable by delegators
+- **Validator bootstrap grants**: declining-cohort service grants from the
+  ProtocolReserve validator pool (80B Ϙ), 10% liquid / 90% locked, unlocking
+  1:1 against protocol-earned fees. The first two genesis validators are
+  excluded (they were funded 500M Ϙ each at genesis). Claiming is gated until
+  the schedule is ratified.
+- **Proposer fees count as protocol-earned credit** toward unlocking locked
+  grant stake.
 
-**Rationale**: Paying fees to validators creates a sustainable economic incentive for block production without requiring inflation or new token issuance.
+**Rationale**: Paying fees to validators creates a sustainable economic incentive for block production without requiring inflation or new token issuance. Grants carry no proposer-selection weight.
 
 ## Token Distribution & Governance
 
-### Allocation Breakdown
+### ProtocolReserve (799B Ϙ correction delta)
 
-| Pool | Amount (Ϙ) | % | Purpose |
-|------|-----------|---|---------|
-| Foundation | 400B | 50% | Long-term development, operations |
-| Ecosystem | 160B | 20% | Grants, infrastructure, DApps |
-| Team | 120B | 15% | Core team (4-year vesting) |
-| Community | 80B | 10% | Validators, bug bounties, rewards |
-| Liquidity | 40B | 5% | DEX liquidity, exchanges |
+The 799B supply-correction delta is **not** pre-credited to any account. It is
+non-transferable ProtocolReserve ledger supply, split into service/governance
+pools and distributed only through **service grants earned by verifiable
+network participation** or **native-Koppa consensus governance releases**:
 
-### Foundation Reserve (400B Ϙ)
+| Pool | Amount (Ϙ) | Release path |
+|------|-----------|--------------|
+| Validator bootstrap | 80B | Declining-cohort service grants (claim-gated) |
+| Archive/storage service | 120B | PoR/service milestone grants (claim-gated) |
+| Compute/OmniNode service | 120B | Settlement/verifier milestone grants (claim-gated) |
+| Ecosystem / public goods | 160B | NativeEligibility governance release only |
+| Long-term governance reserve | 319B | NativeEligibility governance release only |
 
-**Purpose**: Long-term sustainability of the protocol
+### Service grants (earned, not handed out)
 
-**Governance**: 3-of-5 multisig with transparent on-chain activity
+- Every grant splits **10% liquid / 90% locked service stake**.
+- The locked portion unlocks **1:1 against protocol-earned Koppa** (proposer
+  fees for validators, PoR payouts for archives, settlement rewards for
+  verifiers). Ordinary transfers and self-transfers never count.
+- Slashing, denied disputes, or service failure **forfeit remaining locked
+  grant back to the ProtocolReserve**.
+- The first two genesis validators (funded 500M Ϙ each at genesis) are
+  **excluded** from validator bootstrap grants. Pre-existing archive nodes are
+  **not** excluded — they earn archive grants under the same milestone rules as
+  future nodes (milestone counting starts at the correction height; nothing is
+  fabricated retroactively).
+- Validator cohorts decline: validators 3–12 → 5M Ϙ, 13–100 → 2.5M, 101–1,000
+  → 1M, 1,001–10,000 → 250k, then none unless governance changes the schedule
+  (worst case ≈ 3.42B of the 80B pool).
+- Grant claiming is **dormant** (`service_grants_enabled_from_height = null`)
+  until the schedule is ratified; the reserve accounting itself is live from
+  the migration.
+- Grants carry **no proposer-selection weight** — consensus rotation is
+  unchanged by grant or stake size.
 
-**Use cases**:
-- Protocol upgrades and development
-- Security audits and bug bounties
-- Emergency network support
-- Strategic partnerships
-- Research & development
-- Public goods funding
+### Governance control
 
-### Ecosystem Fund (160B Ϙ)
-
-**Purpose**: Bootstrap the SUM Chain ecosystem
-
-**Distribution**:
-- **Developer grants**: 80B Ϙ (50%)
-- **Infrastructure**: 40B Ϙ (25%)
-- **DApp funding**: 32B Ϙ (20%)
-- **Public goods**: 8B Ϙ (5%)
-
-**Grant examples**:
-- Wallet development: 1-10B Ϙ
-- DEX deployment: 5-20B Ϙ
-- Payment processors: 2-15B Ϙ
-- Open-source tooling: 0.5-5B Ϙ
-
-### Team Vesting (120B Ϙ)
-
-**Vesting schedule**:
-- **Cliff**: 12 months (0 tokens)
-- **Linear**: 36 months after cliff
-- **Monthly unlock**: 2.5B Ϙ/month
-
-**Rationale**: Aligns team incentives with long-term success, prevents dumping.
-
-### Community Rewards (80B Ϙ)
-
-**Purpose**: Incentivize network participation
-
-**Allocation**:
-- **Validator operations**: 40B Ϙ (50%)
-- **Bug bounty program**: 20B Ϙ (25%)
-- **Community contests**: 12B Ϙ (15%)
-- **Early adopters**: 8B Ϙ (10%)
-
-**Validator rewards**:
-- 5 initial validators: 8B Ϙ each
-- Future validators: Community governance
-
-**Bug bounties**:
-- Critical: Up to 50,000 Ϙ
-- High: Up to 10,000 Ϙ
-- Medium: Up to 2,000 Ϙ
-- Low: Up to 500 Ϙ
-
-### Liquidity Pool (40B Ϙ)
-
-**Purpose**: Bootstrap trading and price discovery
-
-**Allocation**:
-- **DEX liquidity**: 24B Ϙ (60%)
-- **Market making**: 12B Ϙ (30%)
-- **Exchange listings**: 4B Ϙ (10%)
-
-**DEX pairs**:
-- Ϙ/USDC: 10B Ϙ
-- Ϙ/ETH: 8B Ϙ
-- Ϙ/BTC: 6B Ϙ
+Reserve releases (`ReserveRelease*`) and any future supply expansion
+(`MonetaryPolicyMint`) execute **only** through NativeEligibility governance —
+native Koppa consensus voting, 1 eligible address = 1 vote, fixed 6667 bps pass
+threshold. Validator-quorum authority and SRC-20/equity governance are rejected
+at both proposal creation and execution. Both classes are additionally gated by
+`monetary_policy_enabled_from_height` (dormant by default). Every release/mint
+writes an append-only audit event keyed by the proposal id.
 
 ## Comparison: SUM Chain vs Traditional Finance
 

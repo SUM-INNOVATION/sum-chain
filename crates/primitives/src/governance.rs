@@ -148,6 +148,15 @@ pub enum GovProposalClass {
     PackagePublishing = 6,
     EmergencySecurity = 7,
     TreasurySpend = 8,
+    /// Governance release from the ProtocolReserve ecosystem/public-goods
+    /// pool (800B correction). NativeEligibility-only, monetary-policy gated.
+    ReserveReleaseEcosystem = 9,
+    /// Governance release from the long-term governance reserve pool.
+    /// NativeEligibility-only, monetary-policy gated.
+    ReserveReleaseGovernance = 10,
+    /// Governance mint beyond the 800B canonical supply. NativeEligibility-
+    /// only, monetary-policy gated. The ONLY supply-expansion path.
+    MonetaryPolicyMint = 11,
 }
 
 impl GovProposalClass {
@@ -162,6 +171,9 @@ impl GovProposalClass {
             6 => Some(Self::PackagePublishing),
             7 => Some(Self::EmergencySecurity),
             8 => Some(Self::TreasurySpend),
+            9 => Some(Self::ReserveReleaseEcosystem),
+            10 => Some(Self::ReserveReleaseGovernance),
+            11 => Some(Self::MonetaryPolicyMint),
             _ => None,
         }
     }

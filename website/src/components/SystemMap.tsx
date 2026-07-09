@@ -5,7 +5,7 @@ import { useReducedMotion } from 'framer-motion';
 import { MonoTag } from '@/components/ui/primitives';
 
 /*
-  Signature system map — the data path across SUM Chain's node mesh.
+  Signature system map, the data path across SUM Chain's node mesh.
   End User → SUM Chain (verifier/settlement) → Inference Nodes → Archive/SNIP.
   Custom SVG (no stock art, no canvas dep). Cursor-spotlight is the one
   signature interaction; disabled under reduced-motion / coarse pointers.
@@ -184,7 +184,7 @@ export default function SystemMap() {
         </svg>
       </div>
 
-      {/* Sequence legend — accessible + mobile-legible */}
+      {/* Sequence legend, accessible + mobile-legible */}
       <ol className="space-y-3 lg:col-span-2">
         {STEPS.map((s) => (
           <li key={s.n} className="flex gap-3">

@@ -68,18 +68,26 @@ export function Callout({
   title,
   children,
 }: {
-  tone?: 'dormant' | 'roadmap' | 'note';
+  tone?: 'dormant' | 'roadmap' | 'note' | 'active';
   title: string;
   children: ReactNode;
 }) {
   const ring =
-    tone === 'dormant'
-      ? 'border-status-dormant/30 bg-status-dormant/[0.06]'
-      : tone === 'roadmap'
-        ? 'border-status-roadmap/30 bg-status-roadmap/[0.06]'
-        : 'border-[var(--border-strong)] bg-surface/40';
+    tone === 'active'
+      ? 'border-status-active/30 bg-status-active/[0.06]'
+      : tone === 'dormant'
+        ? 'border-status-dormant/30 bg-status-dormant/[0.06]'
+        : tone === 'roadmap'
+          ? 'border-status-roadmap/30 bg-status-roadmap/[0.06]'
+          : 'border-[var(--border-strong)] bg-surface/40';
   const dot =
-    tone === 'dormant' ? 'bg-status-dormant' : tone === 'roadmap' ? 'bg-status-roadmap' : 'bg-muted';
+    tone === 'active'
+      ? 'bg-status-active'
+      : tone === 'dormant'
+        ? 'bg-status-dormant'
+        : tone === 'roadmap'
+          ? 'bg-status-roadmap'
+          : 'bg-muted';
   return (
     <div className={`rounded-2xl border p-5 sm:p-6 ${ring}`}>
       <div className="flex items-center gap-2.5">

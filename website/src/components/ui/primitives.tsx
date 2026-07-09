@@ -4,7 +4,7 @@ import { motion, useReducedMotion } from 'framer-motion';
 import { useState, type ReactNode } from 'react';
 
 /* ------------------------------------------------------------------ */
-/* Status pill — encodes protocol reality: active / dormant / roadmap  */
+/* Status pill, encodes protocol reality: active / dormant / roadmap  */
 /* ------------------------------------------------------------------ */
 
 export type Status = 'active' | 'pending' | 'dormant' | 'roadmap';
@@ -61,7 +61,7 @@ export function MonoTag({ children }: { children: ReactNode }) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Reveal — standard scroll-in, reduced-motion safe                    */
+/* Reveal, standard scroll-in, reduced-motion safe                    */
 /* ------------------------------------------------------------------ */
 
 export function Reveal({
@@ -91,7 +91,7 @@ export function Reveal({
 }
 
 /* ------------------------------------------------------------------ */
-/* Section header — kicker + title + intro                             */
+/* Section header, kicker + title + intro                             */
 /* ------------------------------------------------------------------ */
 
 export function SectionHeader({
@@ -122,7 +122,7 @@ export function SectionHeader({
 }
 
 /* ------------------------------------------------------------------ */
-/* Stat — labeled data readout                                         */
+/* Stat, labeled data readout                                         */
 /* ------------------------------------------------------------------ */
 
 export function Stat({ value, label, sub }: { value: ReactNode; label: string; sub?: string }) {
@@ -138,7 +138,7 @@ export function Stat({ value, label, sub }: { value: ReactNode; label: string; s
 }
 
 /* ------------------------------------------------------------------ */
-/* Code block — mono, optional copy                                    */
+/* Code block, mono, optional copy                                    */
 /* ------------------------------------------------------------------ */
 
 export function CodeBlock({ code, label }: { code: string; label?: string }) {
@@ -149,7 +149,7 @@ export function CodeBlock({ code, label }: { code: string; label?: string }) {
       setCopied(true);
       setTimeout(() => setCopied(false), 1600);
     } catch {
-      /* clipboard unavailable — no-op */
+      /* clipboard unavailable, no-op */
     }
   };
   return (

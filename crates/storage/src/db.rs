@@ -246,6 +246,12 @@ pub mod cf {
     /// the V2 file is `Active && fee_pool > 0`. Enables O(sample) seeded
     /// sampling without scanning all V2 metadata rows.
     pub const CHALLENGEABLE_FILES_V2: &str = "challengeable_files_v2";
+    /// Monetary-policy / supply accounting (800B correction). Singleton records:
+    /// `b"ledger"` → bincode `SupplyLedger`, `b"reserve"` → bincode
+    /// `ProtocolReserve`. The reserve is non-transferable ledger supply (not an
+    /// account); both are folded into the block state root once the correction
+    /// is applied.
+    pub const SUPPLY: &str = "supply";
 
     // SRC-80X/81X DocClass column families
     /// Identity roots (SRC-800)
@@ -564,6 +570,7 @@ pub const ALL_CFS: &[&str] = &[
     cf::ACTIVE_ARCHIVE_NODES_HISTORY,
     cf::ARCHIVE_UNBONDING,
     cf::CHALLENGEABLE_FILES_V2,
+    cf::SUPPLY,
     cf::STORAGE_METADATA_V2,
     cf::ASSIGNMENT_ATTESTATIONS_V2,
     cf::FILE_REASSIGNMENTS,

@@ -8,7 +8,7 @@ import { useChainStatus, type FeatureKey } from '@/lib/chainStatus';
   (chain_id 1); activation status is read LIVE from the public RPC on the client
   (chain_getChainParams + chain_getBlockHeight), so a feature flips from
   "pending activation" to "active" automatically the moment the chain crosses its
-  gate — no redeploy.
+  gate, no redeploy.
 */
 
 const PARAMS = [
@@ -56,7 +56,7 @@ export default function NetworkStrip() {
             </dl>
           </Reveal>
 
-          {/* Activation gates — status derived live from height vs gate */}
+          {/* Activation gates, status derived live from height vs gate */}
           <Reveal delay={0.08} className="glass rounded-2xl p-6">
             <ul className="flex h-full flex-col justify-center gap-4">
               {GATES.map((g) => {

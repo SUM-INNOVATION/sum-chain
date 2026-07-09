@@ -62,7 +62,7 @@ export default function Hero() {
         </motion.h1>
 
         <motion.p {...rise(0.16, reduce)} className="mt-6 max-w-2xl text-lg leading-relaxed text-muted">
-          SUM Chain is a Rust-built Layer-1 where Koppa is backed by real on-chain work — not just
+          SUM Chain is a Rust-built Layer-1 where Koppa is backed by real on-chain work, not just
           payments. Files are held under Proof-of-Retrievability, AI inference settles through
           verifier-signed attestations, and governance is code-backed and validator-respecting.
         </motion.p>
@@ -97,7 +97,7 @@ export default function Hero() {
           {[
             { v: '3s', l: 'Block time' },
             { v: '~18s', l: 'Finality · depth 6' },
-            { v: '800B Ϙ', l: 'Fixed supply' },
+            { v: '800B Ϙ', l: 'Canonical supply' },
             { v: '100% Rust', l: 'Zero C/C++ deps' },
           ].map((s) => (
             <div key={s.l}>

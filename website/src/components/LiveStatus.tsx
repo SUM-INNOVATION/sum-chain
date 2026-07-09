@@ -6,7 +6,7 @@ import { useChainStatus, activationLabel, type FeatureKey } from '@/lib/chainSta
 /**
  * A `StatusPill` whose active/pending state is read LIVE from the chain, so it
  * flips to "active" automatically once the feature's activation height is
- * reached — no redeploy. Use for any gated protocol surface.
+ * reached, no redeploy. Use for any gated protocol surface.
  */
 export function LiveStatus({ feature, className = '' }: { feature: FeatureKey; className?: string }) {
   const s = useChainStatus();
