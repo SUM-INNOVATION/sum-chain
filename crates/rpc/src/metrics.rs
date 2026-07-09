@@ -496,7 +496,9 @@ mod tests {
 
         let snapshot = metrics.snapshot();
 
-        assert!(snapshot.uptime_seconds >= 0);
+        // `uptime_seconds` is a `u64` — a `>= 0` check was tautological (clippy
+        // `absurd_extreme_comparisons`); the field is still exercised via `snapshot()`.
+        let _ = snapshot.uptime_seconds;
         assert_eq!(snapshot.blocks.blocks_processed, 1);
         assert_eq!(snapshot.transactions.txs_submitted, 1);
         assert_eq!(snapshot.p2p.peer_count, 5);

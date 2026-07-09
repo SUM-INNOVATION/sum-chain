@@ -489,6 +489,7 @@ impl RpcServer {
             TxType::Governance => "Governance",
             TxType::InferenceSettlement => "InferenceSettlement",
             TxType::InferenceAttestationV2 => "InferenceAttestationV2",
+            TxType::Supply => "Supply",
         }
         .to_string();
 
@@ -505,7 +506,8 @@ impl RpcServer {
             | TxPayload::ContractDeploy(_)
             | TxPayload::ContractCall(_)
             | TxPayload::InferenceAttestation(_)
-            | TxPayload::InferenceAttestationV2(_) => None,
+            | TxPayload::InferenceAttestationV2(_)
+            | TxPayload::Supply(_) => None,
             TxPayload::Nft(d) => Some(ident(format!("{:?}", d.operation))),
             TxPayload::Token(d) => Some(ident(format!("{:?}", d.operation))),
             TxPayload::Staking(d) => Some(ident(format!("{:?}", d.operation))),
@@ -724,6 +726,20 @@ impl RpcServer {
     /// Used for education id/commitment params (never an address).
     fn parse_hex32(&self, s: &str) -> Result<[u8; 32]> {
         edu_parse_hex32(s).map_err(RpcError::InvalidParams)
+    }
+
+    /// Parse a service-kind selector (`validator` | `archive` | `compute`,
+    /// case-insensitive) for the supply/service-grant RPCs.
+    fn parse_service_kind(&self, s: &str) -> Result<sumchain_primitives::supply::ServiceKind> {
+        use sumchain_primitives::supply::ServiceKind;
+        match s.to_ascii_lowercase().as_str() {
+            "validator" => Ok(ServiceKind::Validator),
+            "archive" => Ok(ServiceKind::Archive),
+            "compute" => Ok(ServiceKind::Compute),
+            other => Err(RpcError::InvalidParams(format!(
+                "invalid service_kind '{other}' (expected validator|archive|compute)"
+            ))),
+        }
     }
 
     /// Decode builder-supplied validator approvals (hex pubkey + hex signature)
@@ -1192,6 +1208,149 @@ impl SumChainApiServer for RpcServer {
 
     async fn is_block_finalized(&self, height: u64) -> std::result::Result<bool, jsonrpsee::types::ErrorObjectOwned> {
         Ok(self.consensus.is_finalized(height))
+    }
+
+    async fn chain_get_supply_info(
+        &self,
+    ) -> std::result::Result<crate::types::SupplyInfo, jsonrpsee::types::ErrorObjectOwned> {
+        let store = sumchain_state::supply::SupplyStore::new(self.db.clone());
+        let internal = |e: sumchain_state::StateError| RpcError::Internal(e.to_string());
+        let ledger = store.get_ledger().map_err(internal)?;
+        let reserve_total = store
+            .get_reserve()
+            .map_err(internal)?
+            .map(|r| r.total_remaining())
+            .unwrap_or(0);
+        let agg = store.get_aggregate().map_err(internal)?;
+        let accounted = sumchain_state::supply::accounted_account_supply(&self.db).map_err(internal)?;
+        let burned = self
+            .state
+            .get_balance(&Address::ZERO)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(crate::types::SupplyInfo {
+            initial_canonical_supply: ledger.initial_canonical_supply.to_string(),
+            current_canonical_supply: ledger.current_canonical_supply().to_string(),
+            accounted_account_supply: accounted.to_string(),
+            burned_supply: burned.to_string(),
+            protocol_reserve_remaining: reserve_total.to_string(),
+            outstanding_grant_unclaimed: agg.outstanding_grant_unclaimed.to_string(),
+            total_minted_by_migration: ledger.total_minted_by_migration.to_string(),
+            total_minted_by_governance: ledger.total_minted_by_governance.to_string(),
+            migration_id: ledger.migration_id.to_hex(),
+            migration_applied: ledger.migration_applied,
+            migration_activation_height: ledger.migration_activation_height,
+            automatic_emissions_enabled: false,
+        })
+    }
+
+    async fn chain_get_protocol_reserve(
+        &self,
+    ) -> std::result::Result<Option<crate::types::ProtocolReserveInfo>, jsonrpsee::types::ErrorObjectOwned>
+    {
+        let store = sumchain_state::supply::SupplyStore::new(self.db.clone());
+        let reserve = store
+            .get_reserve()
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        Ok(reserve.map(|r| crate::types::ProtocolReserveInfo {
+            validator_pool_remaining: r.validator_pool_remaining.to_string(),
+            archive_pool_remaining: r.archive_pool_remaining.to_string(),
+            compute_pool_remaining: r.compute_pool_remaining.to_string(),
+            ecosystem_pool_remaining: r.ecosystem_pool_remaining.to_string(),
+            governance_reserve_remaining: r.governance_reserve_remaining.to_string(),
+            total_remaining: r.total_remaining().to_string(),
+        }))
+    }
+
+    async fn chain_get_service_grant(
+        &self,
+        address: String,
+        service_kind: String,
+    ) -> std::result::Result<Option<crate::types::ServiceGrantInfo>, jsonrpsee::types::ErrorObjectOwned>
+    {
+        let addr = self.parse_address(&address)?;
+        let kind = self.parse_service_kind(&service_kind)?;
+        let store = sumchain_state::supply::SupplyStore::new(self.db.clone());
+        let internal = |e: sumchain_state::StateError| RpcError::Internal(e.to_string());
+        let grant = match store.get_grant(&addr, kind).map_err(internal)? {
+            Some(g) => g,
+            None => return Ok(None),
+        };
+        let earned = store.get_earned_credit(&addr, kind).map_err(internal)?;
+        let unlockable = grant
+            .locked_remaining
+            .min(earned.saturating_sub(grant.earned_credit_used_for_unlock));
+        Ok(Some(crate::types::ServiceGrantInfo {
+            recipient: grant.recipient.to_base58(),
+            service_kind: kind.as_str().to_string(),
+            total_grant: grant.total_grant.to_string(),
+            liquid_claimed: grant.liquid_claimed.to_string(),
+            locked_remaining: grant.locked_remaining.to_string(),
+            earned_credit_total: earned.to_string(),
+            earned_credit_used_for_unlock: grant.earned_credit_used_for_unlock.to_string(),
+            unlockable_now: unlockable.to_string(),
+            created_at_height: grant.created_at_height,
+            status: format!("{:?}", grant.status),
+        }))
+    }
+
+    async fn chain_get_service_grant_eligibility(
+        &self,
+        address: String,
+        service_kind: String,
+    ) -> std::result::Result<crate::types::ServiceGrantEligibilityInfo, jsonrpsee::types::ErrorObjectOwned>
+    {
+        let addr = self.parse_address(&address)?;
+        let kind = self.parse_service_kind(&service_kind)?;
+        let store = sumchain_state::supply::SupplyStore::new(self.db.clone());
+        let m = store
+            .get_milestones(&addr, kind)
+            .map_err(|e| RpcError::Internal(e.to_string()))?;
+        let claiming_enabled = matches!(
+            self.chain_params.service_grants_enabled_from_height,
+            Some(h) if self.consensus.current_height() >= h
+        );
+        let excluded = kind == sumchain_primitives::supply::ServiceKind::Validator
+            && sumchain_primitives::supply::genesis_validator_excluded_addresses()
+                .iter()
+                .any(|a| a == &addr);
+        Ok(crate::types::ServiceGrantEligibilityInfo {
+            address: addr.to_base58(),
+            service_kind: kind.as_str().to_string(),
+            claiming_enabled,
+            por_proofs: m.por_proofs,
+            settlement_claims: m.settlement_claims,
+            denied_disputes: m.denied_disputes,
+            milestone_awarded: m.awarded.to_string(),
+            genesis_validator_excluded: excluded,
+        })
+    }
+
+    async fn chain_build_claim_service_grant(
+        &self,
+        request: crate::types::SupplyBuildRequest,
+    ) -> std::result::Result<crate::types::TxBuildResponse, jsonrpsee::types::ErrorObjectOwned> {
+        let from = self.parse_address(&request.from)?;
+        let kind = self.parse_service_kind(&request.service_kind)?;
+        let payload = TxPayload::Supply(sumchain_primitives::supply::SupplyTxData {
+            operation: sumchain_primitives::supply::SupplyOperation::ClaimServiceGrant {
+                service_kind: kind,
+            },
+        });
+        Ok(self.assemble_unsigned_family_tx(from, request.fee, request.nonce, request.chain_id, payload)?)
+    }
+
+    async fn chain_build_unlock_service_grant(
+        &self,
+        request: crate::types::SupplyBuildRequest,
+    ) -> std::result::Result<crate::types::TxBuildResponse, jsonrpsee::types::ErrorObjectOwned> {
+        let from = self.parse_address(&request.from)?;
+        let kind = self.parse_service_kind(&request.service_kind)?;
+        let payload = TxPayload::Supply(sumchain_primitives::supply::SupplyTxData {
+            operation: sumchain_primitives::supply::SupplyOperation::UnlockServiceGrant {
+                service_kind: kind,
+            },
+        });
+        Ok(self.assemble_unsigned_family_tx(from, request.fee, request.nonce, request.chain_id, payload)?)
     }
 
     async fn chain_get_chain_params(

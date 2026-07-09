@@ -22,7 +22,8 @@ use crate::inference_settlement_types::{
     OmniBuildResolveDisputeRequest, OmniBuildVerifierBondActionRequest, OmniSettlementBuildResponse,
 };
 use crate::types::{
-    AddressLabelsInfo,
+    AddressLabelsInfo, ProtocolReserveInfo, ServiceGrantEligibilityInfo, ServiceGrantInfo,
+    SupplyBuildRequest, SupplyInfo,
     TaxClaimTypeInfo, TaxIssuerInfo, TaxPolicyInfo, ExecutorLinkInfo, AssetInfo, FinanceIssuerInfo,
     CaseInfo, HealthcareProviderInfo,
     EquityControllerConfigInfo, EquityEntityInfo, EquityShareClassInfo,
@@ -498,6 +499,56 @@ pub trait SumChainApi {
     async fn chain_get_chain_params(
         &self,
     ) -> Result<ChainParamsInfo, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Canonical-supply report (800B correction): initial/current canonical
+    /// supply, live accounted account supply, burned supply, ProtocolReserve
+    /// remaining, outstanding grants, migration id/status, governance mint
+    /// total, and `automatic_emissions_enabled` (always `false`).
+    #[method(name = "chain_getSupplyInfo")]
+    async fn chain_get_supply_info(
+        &self,
+    ) -> Result<SupplyInfo, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// ProtocolReserve pool balances. `null` before the supply correction has
+    /// applied (the reserve does not exist yet).
+    #[method(name = "chain_getProtocolReserve")]
+    async fn chain_get_protocol_reserve(
+        &self,
+    ) -> Result<Option<ProtocolReserveInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Service-grant ledger record for `(address, service_kind)`; `null` when
+    /// no grant exists. `service_kind` ∈ `validator|archive|compute`.
+    #[method(name = "chain_getServiceGrant")]
+    async fn chain_get_service_grant(
+        &self,
+        address: String,
+        service_kind: String,
+    ) -> Result<Option<ServiceGrantInfo>, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Service-grant eligibility snapshot: verifiable milestone counters, the
+    /// claiming gate state, and genesis-validator exclusion. Read-only; the
+    /// authoritative check happens at claim execution.
+    #[method(name = "chain_getServiceGrantEligibility")]
+    async fn chain_get_service_grant_eligibility(
+        &self,
+        address: String,
+        service_kind: String,
+    ) -> Result<ServiceGrantEligibilityInfo, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Build an unsigned `ClaimServiceGrant` transaction (no keys; sign
+    /// offline, submit via `sum_sendRawTransaction`).
+    #[method(name = "chain_buildClaimServiceGrant")]
+    async fn chain_build_claim_service_grant(
+        &self,
+        request: SupplyBuildRequest,
+    ) -> Result<crate::types::TxBuildResponse, jsonrpsee::types::ErrorObjectOwned>;
+
+    /// Build an unsigned `UnlockServiceGrant` transaction (no keys).
+    #[method(name = "chain_buildUnlockServiceGrant")]
+    async fn chain_build_unlock_service_grant(
+        &self,
+        request: SupplyBuildRequest,
+    ) -> Result<crate::types::TxBuildResponse, jsonrpsee::types::ErrorObjectOwned>;
 
     /// Get the chain's current block height. SNIP V2 Ask 8 (Phase 0b).
     ///
