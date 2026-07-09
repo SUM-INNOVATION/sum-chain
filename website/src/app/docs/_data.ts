@@ -187,7 +187,7 @@ export const categories: Category[] = [
   {
     id: 'storage',
     title: 'Decentralized Storage (PoR)',
-    blurb: 'Native L1 Proof-of-Retrievability, query files, challenges, archive nodes, and V2 coverage. Powers snip.sumchain.io (https://snip.sumchain.io). Archive-node withdrawal (issue #20) and reassignment (issue #62) are code-backed but dormant behind their activation gates.',
+    blurb: 'Native L1 Proof-of-Retrievability, query files, challenges, archive nodes, and V2 coverage. Powers snip.sumchain.io (https://snip.sumchain.io). Archive-node withdrawal (issue #20) and reassignment (issue #62) are active on mainnet (their 8,900,000 gates have been reached).',
     methods: [
       {
         name: 'storage_getFundedFiles',
@@ -229,7 +229,7 @@ export const categories: Category[] = [
       },
       {
         name: 'storage_getArchiveUnbonding',
-        description: 'Pending archive-node stake-unbonding record for an operator, or null. Part of archive-node withdrawal (issue #20), which is code-backed but dormant until its gate is set.',
+        description: 'Pending archive-node stake-unbonding record for an operator, or null. Part of archive-node withdrawal (issue #20), active on mainnet (gate 8,900,000 reached).',
       },
     ],
   },
@@ -246,7 +246,7 @@ export const categories: Category[] = [
   {
     id: 'omninode-settlement',
     title: 'OmniNode Inference Settlement (dormant)',
-    blurb: 'Escrow-funded verifier rewards keyed by attestations, implemented but DORMANT behind inference_settlement_enabled_from_height (issue #61). No bond slashing in v1 (reward denial / claim withholding / escrow refund). Reads + unsigned-tx builders (no keys).',
+    blurb: 'Escrow-funded verifier rewards keyed by attestations, active on mainnet (inference_settlement_enabled_from_height = 8,900,000 reached, issue #61). No bond slashing in v1 (reward denial / claim withholding / escrow refund). Reads + unsigned-tx builders (no keys).',
     methods: [
       { name: 'omninode_getInferenceSession', description: 'Per-session settlement record (funder, reward terms, remaining escrow, status), or null.' },
       { name: 'omninode_getInferenceClaims', description: 'All paid reward claims for a session.' },

@@ -7,7 +7,7 @@ import { Card, SpecList, Callout, SourceLinks } from '@/components/ui/blocks';
 export const metadata: Metadata = {
   title: 'Verifiable AI Compute | SUM Chain',
   description:
-    'OmniNode inference attestation on SUM Chain: users pay Koppa, inference nodes compute, a verifier signs the result, and the chain records a permanent InferenceAttestation. Attestation is live on mainnet; escrow-funded inference settlement is implemented but dormant (no bond slashing in v1).',
+    'OmniNode inference attestation on SUM Chain: users pay Koppa, inference nodes compute, a verifier signs the result, and the chain records a permanent InferenceAttestation. Attestation and escrow-funded inference settlement are both live on mainnet (settlement gate 8,900,000 reached; no bond slashing in v1).',
 };
 
 const RECORDS = [
@@ -85,13 +85,12 @@ export default function ComputePage() {
             </Card>
           </Reveal>
           <Reveal delay={0.1}>
-            <Callout tone="dormant" title="Settlement is deployed, pending activation at height 8,900,000">
-              Attestation v1 (live) records verifier-signed results only. Escrow-funded inference{' '}
-              <strong>settlement</strong> (rewards, refunds, disputes) is deployed with{' '}
-              <MonoTag>inference_settlement_enabled_from_height</MonoTag> set to <MonoTag>8,900,000</MonoTag>{' '}
-             , the chain does not pay inference nodes until the chain reaches that height, then it
-              activates automatically. v1 has <strong>no bond slashing</strong>: the levers are reward
-              denial, claim withholding, and escrow refund. Dispute resolution is{' '}
+            <Callout tone="active" title="Settlement active on mainnet (activated at height 8,900,000)">
+              Attestation v1 records verifier-signed results only. Escrow-funded inference{' '}
+              <strong>settlement</strong> (rewards, refunds, disputes) is active: the chain has crossed{' '}
+              <MonoTag>inference_settlement_enabled_from_height</MonoTag> = <MonoTag>8,900,000</MonoTag>,
+              so it activated automatically with no redeploy. v1 has <strong>no bond slashing</strong>:
+              the levers are reward denial, claim withholding, and escrow refund. Dispute resolution is{' '}
               <strong>validator-quorum controlled</strong>, a basis-point threshold
               (<MonoTag>inference_settlement_dispute_threshold_bps</MonoTag>) of the active validator set
               must sign, not a personal resolver key; non-signing validators abstain but still count in

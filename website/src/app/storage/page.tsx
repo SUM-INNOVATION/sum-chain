@@ -52,14 +52,14 @@ export default function StoragePage() {
                 ]}
               />
             </Card>
-            <Callout tone="dormant" title="Reassignment is deployed, pending activation at height 8,900,000">
+            <Callout tone="active" title="Reassignment active on mainnet (activated at height 8,900,000)">
               Archive-node exit/withdrawal and automatic chunk reassignment are implemented on-chain
-              and deployed, with <MonoTag>archive_unbonding_enabled_from_height</MonoTag> and{' '}
-              <MonoTag>archive_reassignment_enabled_from_height</MonoTag> set to{' '}
-              <MonoTag>8,900,000</MonoTag>, they activate automatically once the chain reaches that
-              height. Until then, chunks left by an exiting archive lose effective replication until
-              re-registered. Reassignment is epoch-aware and does not rewrite epoch-0 assignments.
-              Challenge coverage remains probabilistic, not per-chunk guaranteed.
+              and active: the chain has crossed{' '}
+              <MonoTag>archive_unbonding_enabled_from_height</MonoTag> and{' '}
+              <MonoTag>archive_reassignment_enabled_from_height</MonoTag> = <MonoTag>8,900,000</MonoTag>,
+              so both activated automatically with no redeploy. Reassignment is epoch-aware and does
+              not rewrite epoch-0 assignments. Challenge coverage remains probabilistic, not
+              per-chunk guaranteed.
             </Callout>
           </Reveal>
         </div>

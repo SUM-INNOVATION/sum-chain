@@ -9,7 +9,7 @@ import { ReservePools } from '@/components/SupplyDashboard';
 export const metadata: Metadata = {
   title: 'Governance | SUM Chain',
   description:
-    'SUM Chain on-chain governance v1: record-first, validator-quorum admin authority, SRC-20 token-holder snapshot voting, proposal bonds, and a single TreasurySpend on-chain execution path. Deployed on mainnet with the activation gate set to height 8,900,000.',
+    'SUM Chain on-chain governance v1: record-first, validator-quorum admin authority, SRC-20 token-holder snapshot voting, proposal bonds, and a single TreasurySpend on-chain execution path. Active on mainnet (activation gate 8,900,000 reached).',
 };
 
 const LIFECYCLE = [
@@ -32,19 +32,18 @@ export default function GovernancePage() {
       kicker="On-chain governance v1"
       statusNode={<LiveStatus feature="governance" />}
       title="Record-first governance, respecting validators"
-      intro="Token holders decide; the chain records the decision. Governance v1 is fully implemented and deployed on mainnet, with its activation gate set to height 8,900,000; it becomes active automatically once the chain reaches that height."
+      intro="Token holders decide; the chain records the decision. Governance v1 is fully implemented and active on mainnet: its activation gate at height 8,900,000 has been reached, so governance transactions are live."
     >
       {/* Activation banner */}
       <section className="border-b border-[var(--border)]">
         <div className="mx-auto max-w-6xl px-6 py-10 lg:px-8">
-          <Callout tone="dormant" title="Pending activation at height 8,900,000">
-            Governance is deployed with{' '}
-            <MonoTag>governance_enabled_from_height</MonoTag> set to <MonoTag>8,900,000</MonoTag> and
+          <Callout tone="active" title="Active on mainnet (activated at height 8,900,000)">
+            Governance activated when the chain crossed{' '}
+            <MonoTag>governance_enabled_from_height</MonoTag> = <MonoTag>8,900,000</MonoTag>, with
             the <MonoTag>ChainParams.governance</MonoTag> parameters configured (validator-quorum
             authority, quorum and pass thresholds, voting period, proposal bond). Governance
-            transactions are rejected until the chain reaches that height, after which the flow
-            activates automatically with no redeploy. Admin authority is a{' '}
-            <strong>validator quorum</strong>, not a single council address.
+            transactions are now accepted; the flow activated automatically with no redeploy. Admin
+            authority is a <strong>validator quorum</strong>, not a single council address.
           </Callout>
         </div>
       </section>

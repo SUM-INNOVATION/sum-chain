@@ -53,7 +53,7 @@ const TOPICS: Topic[] = [
     bullets: [
       'Users pay Koppa for inference; off-chain OmniNode workers perform the compute and a verifier signs the result.',
       'The verifier submits an InferenceAttestation, one per (session_id, verifier), permanently, which the chain records and finalizes.',
-      'Read RPCs expose attestations and their status. Escrow-funded settlement (rewards/refunds) is implemented but dormant, no bond slashing in v1.',
+      'Read RPCs expose attestations and their status. Escrow-funded settlement (rewards/refunds) is active on mainnet (gate 8,900,000 reached); no bond slashing in v1.',
     ],
     tags: ['InferenceAttestation', 'verifier_signature', 'proof_root'],
     spec: [
@@ -75,14 +75,14 @@ const TOPICS: Topic[] = [
     bullets: [
       'SRC-20 token holders create proposals and vote with a balance snapshot frozen at proposal creation.',
       'Admin authority (asset registration, validator-cancel) is a validator quorum, not a single council address. Most classes are RecordOnly; the one on-chain auto-exec path is a TreasurySpend native payout from a configured treasury.',
-      'Governance cannot force validator upgrades or mutate consensus, the validator set, or chain params. Deployed with the gate set to height 8,900,000, active once reached.',
+      'Governance cannot force validator upgrades or mutate consensus, the validator set, or chain params. Active on mainnet: the gate at height 8,900,000 has been reached.',
     ],
     tags: ['gov_*', 'validator-quorum', 'snapshot'],
     spec: [
       { k: 'model', v: 'record-first approval' },
       { k: 'authority', v: 'validator quorum' },
       { k: 'on-chain exec', v: 'TreasurySpend only' },
-      { k: 'mainnet status', v: 'gate @ 8,900,000' },
+      { k: 'mainnet status', v: 'active (gate 8,900,000 reached)' },
     ],
     href: '/governance',
     cta: 'Governance',
