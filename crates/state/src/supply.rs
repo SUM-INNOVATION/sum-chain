@@ -8,20 +8,20 @@
 //!
 //! See [`sumchain_primitives::supply`] for the invariants and constants.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use sumchain_primitives::supply::{
     genesis_validator_excluded_addresses, split_grant, supply_correction_migration_id,
-    validator_cohort_grant, GrantStatus, GrantsAggregate, MonetaryPolicyEvent, ProtocolReserve,
-    ReservePool, ReserveReleaseEvent, ServiceGrant, ServiceKind, ServiceMilestones, SupplyLedger,
-    ARCHIVE_ACTIVE_BLOCKS_MILESTONE, ARCHIVE_ACTIVE_GRANT, ARCHIVE_PROOFS_GRANT_1,
-    ARCHIVE_PROOFS_GRANT_2, ARCHIVE_PROOFS_MILESTONE_1, ARCHIVE_PROOFS_MILESTONE_2,
-    COMPUTE_CLAIMS_GRANT_1, COMPUTE_CLAIMS_GRANT_2, COMPUTE_CLAIMS_MILESTONE_1,
-    COMPUTE_CLAIMS_MILESTONE_2, GENESIS_ACCOUNTED_SUPPLY, MAINNET_CHAIN_ID,
-    SUPPLY_CORRECTION_DELTA, TARGET_CANONICAL_SUPPLY,
+    validator_cohort_grant, GrantStatus, GrantsAggregate, MigrationWithheldReason,
+    MonetaryPolicyEvent, NativeSupplySnapshot, ProtocolReserve, ReservePool, ReserveReleaseEvent,
+    ServiceGrant, ServiceKind, ServiceMilestones, SupplyLedger, ARCHIVE_ACTIVE_BLOCKS_MILESTONE,
+    ARCHIVE_ACTIVE_GRANT, ARCHIVE_PROOFS_GRANT_1, ARCHIVE_PROOFS_GRANT_2, ARCHIVE_PROOFS_MILESTONE_1,
+    ARCHIVE_PROOFS_MILESTONE_2, COMPUTE_CLAIMS_GRANT_1, COMPUTE_CLAIMS_GRANT_2,
+    COMPUTE_CLAIMS_MILESTONE_1, COMPUTE_CLAIMS_MILESTONE_2, MAINNET_CHAIN_ID, TARGET_CANONICAL_SUPPLY,
 };
 use sumchain_primitives::{Address, Hash, NodeRole, NodeStatus};
-use sumchain_storage::{cf, Database, StateStore};
+use sumchain_storage::{cf, Database, DelegationStore, StakingStore, StateStore};
 
 use crate::{Result, StateError};
 
@@ -562,14 +562,184 @@ pub fn accounted_account_supply(db: &Arc<Database>) -> Result<u128> {
     Ok(sum)
 }
 
-/// Apply the one-time mainnet 800B supply correction if and only if every guard
-/// holds. Returns `Ok(true)` if applied this call, `Ok(false)` if not applicable
-/// (already applied — replay/restart-safe — or not the mainnet chain).
+/// A one-time, whole-ledger census of **every native-Koppa bucket** (see
+/// [`NativeSupplySnapshot`]). Deterministic: each bucket sum is an
+/// order-independent checked addition over a fixed-order RocksDB scan, so every
+/// node at the same height computes an identical result. NOT a hot path — used
+/// only by the one-time migration decision and the `chain_getSupplyInfo`
+/// diagnostic. Fail-closed on any overflow (never a silent wrap).
 ///
-/// **Fails closed** (`Err`, halting block execution rather than diverging) if a
-/// guard that *should* hold does not: pre-migration accounted supply ≠ 1B,
-/// migration-id mismatch, or the pool split ≠ the 799B delta. This runs before
-/// the block state root; the applied ledger is folded into that root.
+/// INCLUDE buckets (summed into `economic_supply`): account balances incl.
+/// `Address::ZERO`, validator self-stake, active delegations, archive stake,
+/// storage V1+V2 fee pools, inference escrow, inference verifier bonds. EXCLUDE
+/// buckets (duplicates of a counted bucket, not separate value): unbonding
+/// mirrors, governance/policy account balances (already in accounts),
+/// `validator.total_delegated`, and pending/unmaterialized rewards.
+pub fn native_supply_snapshot(db: &Arc<Database>) -> Result<NativeSupplySnapshot> {
+    // Account balances incl. Address::ZERO (INCLUDE); ZERO is also captured as
+    // the report-only burn subset in the same single scan.
+    let state = StateStore::new(db);
+    let mut account_balances_incl_zero: u128 = 0;
+    let mut burn_at_zero: u128 = 0;
+    for (addr, acct) in state.iter_all_accounts()? {
+        account_balances_incl_zero = account_balances_incl_zero
+            .checked_add(acct.balance)
+            .ok_or_else(|| StateError::BlockValidation("account balance sum overflow".to_string()))?;
+        if addr == Address::ZERO {
+            burn_at_zero = acct.balance;
+        }
+    }
+
+    // Validator self-stake + active delegations (INCLUDE).
+    let validator_self_stake = StakingStore::new(db).total_validator_self_stake()?;
+    let active_delegations = DelegationStore::new(db).total_active_delegations()?;
+
+    // Archive-node stake (INCLUDE).
+    let archive_staked_balance =
+        crate::node_registry::NodeRegistryExecutor::new(db.clone()).total_archive_staked_balance()?;
+
+    // Storage fee pools V1 + V2 (INCLUDE).
+    let (storage_v1_fee_pool, storage_v2_fee_pool) =
+        crate::storage_metadata::StorageMetadataExecutor::new(db.clone()).total_fee_pools()?;
+
+    // Inference escrow + verifier bonds (INCLUDE).
+    let inference =
+        crate::inference_settlement_executor::InferenceSettlementExecutor::new(db.clone());
+    let inference_escrow = inference.total_session_remaining_escrow()?;
+    let inference_verifier_bonds = inference.total_verifier_bonds()?;
+
+    Ok(NativeSupplySnapshot {
+        account_balances_incl_zero,
+        burn_at_zero,
+        validator_self_stake,
+        active_delegations,
+        archive_staked_balance,
+        storage_v1_fee_pool,
+        storage_v2_fee_pool,
+        inference_escrow,
+        inference_verifier_bonds,
+    })
+}
+
+/// A pure (write-free) evaluation of the supply correction: the native-supply
+/// census plus the decision — apply with a specific reserve delta, or withhold
+/// with a precise [`MigrationWithheldReason`]. Shared verbatim by the
+/// block-execution apply path and the `chain_getSupplyInfo` diagnostic so both
+/// report identically. Infallible by construction: a census scan failure becomes
+/// `reason = SnapshotError` (fail-closed) rather than an error, so the RPC can
+/// always surface a reason.
+#[derive(Debug, Clone, Copy)]
+pub struct SupplyCorrectionAssessment {
+    pub snapshot: NativeSupplySnapshot,
+    /// Live economic supply (Σ INCLUDE buckets); 0 if the census could not be
+    /// computed (`SnapshotError`) or overflowed (`ArithmeticOverflow`).
+    pub economic_supply: u128,
+    /// Reserve delta that would be minted (`TARGET - economic_supply`); non-zero
+    /// only when `reason == NotWithheld`.
+    pub reserve_delta: u128,
+    /// The pool split to persist; `Some` iff `reason == NotWithheld`.
+    pub reserve: Option<ProtocolReserve>,
+    /// Precise reason the correction is inert this evaluation (`NotWithheld` ⇒ it
+    /// applies / would apply now).
+    pub reason: MigrationWithheldReason,
+}
+
+/// Evaluate the supply correction without writing. `migration_applied` and
+/// `ledger_migration_id` come from the persisted ledger; the census is always
+/// computed so the RPC diagnostic reflects live ledger sums even post-migration.
+pub fn assess_supply_correction(
+    db: &Arc<Database>,
+    chain_id: u64,
+    migration_applied: bool,
+    ledger_migration_id: Hash,
+) -> SupplyCorrectionAssessment {
+    use MigrationWithheldReason as R;
+
+    // The census is the only fallible step; a failure is fail-closed → SnapshotError.
+    let snapshot = match native_supply_snapshot(db) {
+        Ok(s) => s,
+        Err(_) => {
+            return SupplyCorrectionAssessment {
+                snapshot: NativeSupplySnapshot::zeroed(),
+                economic_supply: 0,
+                reserve_delta: 0,
+                reserve: None,
+                reason: R::SnapshotError,
+            };
+        }
+    };
+    let econ = snapshot.economic_supply();
+
+    let (economic_supply, reserve_delta, reserve, reason) = if migration_applied {
+        (econ.unwrap_or(0), 0, None, R::AlreadyApplied)
+    } else if chain_id != MAINNET_CHAIN_ID {
+        (econ.unwrap_or(0), 0, None, R::WrongChainId)
+    } else if ledger_migration_id != supply_correction_migration_id() {
+        (econ.unwrap_or(0), 0, None, R::MigrationIdMismatch)
+    } else {
+        match econ {
+            None => (0, 0, None, R::ArithmeticOverflow),
+            Some(0) => (0, 0, None, R::EconomicSupplyZero),
+            Some(e) if e > TARGET_CANONICAL_SUPPLY => (e, 0, None, R::EconomicSupplyOverTarget),
+            Some(e) => {
+                // e ∈ (0, TARGET]. delta ≥ 0.
+                let delta = TARGET_CANONICAL_SUPPLY - e;
+                if delta == 0 {
+                    (e, 0, None, R::ReserveDeltaZero)
+                } else {
+                    match ProtocolReserve::from_reserve_delta(delta) {
+                        // delta < 480B: economic supply too near the target to
+                        // fund the fixed service pools — fail closed (never on
+                        // real mainnet, where economic ≈ 1B ≪ target).
+                        None => (e, 0, None, R::EconomicSupplyOverTarget),
+                        Some(reserve) => (e, delta, Some(reserve), R::NotWithheld),
+                    }
+                }
+            }
+        }
+    };
+
+    SupplyCorrectionAssessment { snapshot, economic_supply, reserve_delta, reserve, reason }
+}
+
+// Process-local rate limiter for the withhold-anomaly log. Purely operator-facing
+// output — it does NOT touch chain state, so it cannot affect determinism.
+// `u64::MAX` means "never logged in this process".
+static LAST_WITHHELD_LOG_HEIGHT: AtomicU64 = AtomicU64::new(u64::MAX);
+const WITHHELD_LOG_INTERVAL: u64 = 600;
+
+fn log_withheld_anomaly(height: u64, a: &SupplyCorrectionAssessment) {
+    let last = LAST_WITHHELD_LOG_HEIGHT.load(Ordering::Relaxed);
+    if last == u64::MAX || height >= last.saturating_add(WITHHELD_LOG_INTERVAL) {
+        LAST_WITHHELD_LOG_HEIGHT.store(height, Ordering::Relaxed);
+        tracing::error!(
+            reason = a.reason.as_str(),
+            economic_supply = %a.economic_supply,
+            target = %TARGET_CANONICAL_SUPPLY,
+            height,
+            "supply-correction WITHHELD (anomaly) — correction not applied; operator intervention required",
+        );
+    }
+}
+
+/// Apply the one-time mainnet 800B supply correction iff every guard holds.
+/// Returns `Ok(true)` if applied this call, `Ok(false)` if not applicable
+/// (already applied — replay/restart-safe — or not the mainnet chain — or
+/// withheld on a chain-state anomaly).
+///
+/// The reserve delta is **measured, not hardcoded**: it equals
+/// `TARGET_CANONICAL_SUPPLY − economic_supply`, where `economic_supply` is the
+/// live census of every native-Koppa bucket ([`native_supply_snapshot`]). The
+/// four service/ecosystem pools keep their spec'd sizes; the residual (incl. any
+/// Koppa held in non-account ledgers or lost to a sink) lands in the long-term
+/// governance reserve. No account is credited.
+///
+/// **Fails closed** rather than diverging: an in-binary migration-id mismatch is
+/// a HARD error (halts the block — it can only be build corruption); every
+/// chain-state anomaly (economic supply 0 / over target / delta 0 / overflow /
+/// census unreadable) WITHHOLDS deterministically on every upgraded node (the
+/// chain keeps producing blocks) and logs once per ~600 blocks. Runs before the
+/// block state root; the applied ledger + reserve are folded into that root.
 pub fn apply_supply_correction_if_needed(
     db: &Arc<Database>,
     chain_id: u64,
@@ -578,58 +748,60 @@ pub fn apply_supply_correction_if_needed(
     let store = SupplyStore::new(db.clone());
     let ledger = store.get_ledger()?;
 
-    // Marker guard — exactly once, replay/restart-safe.
-    if ledger.migration_applied {
-        return Ok(false);
-    }
-    // Chain guard — mainnet only. Not applicable elsewhere (no error).
-    if chain_id != MAINNET_CHAIN_ID {
-        return Ok(false);
-    }
-    // Migration-id guard (in-binary config) — corruption here is a build
-    // problem, never a chain-state problem: HARD fail-closed.
-    if ledger.migration_id != supply_correction_migration_id() {
-        return Err(StateError::BlockValidation(
-            "supply-correction fail-closed: migration id mismatch".to_string(),
-        ));
-    }
-    // Pool split MUST sum exactly to the delta (in-binary config): HARD
-    // fail-closed.
-    let reserve = ProtocolReserve::initial();
-    if reserve.total_remaining() != SUPPLY_CORRECTION_DELTA {
-        return Err(StateError::BlockValidation(
-            "supply-correction fail-closed: pool sum != delta".to_string(),
-        ));
-    }
-    // Pre-migration accounted supply MUST be exactly 1B (incl Address::ZERO).
-    // This is a CHAIN-STATE guard: if it does not hold, the correction is
-    // WITHHELD (deterministically, on every upgraded node) and a loud error is
-    // logged each block — the chain keeps producing blocks while operators
-    // intervene, rather than halting consensus outright. On the real mainnet
-    // every post-genesis path is redistribution (no mint), so accounted supply
-    // is exactly 1B at any height and this guard passes at the first upgraded
-    // block.
-    let accounted = accounted_account_supply(db)?;
-    if accounted != GENESIS_ACCOUNTED_SUPPLY {
-        tracing::error!(
-            "supply-correction WITHHELD: accounted {} != expected {} — correction not applied",
-            accounted,
-            GENESIS_ACCOUNTED_SUPPLY
-        );
+    // Hot-path short-circuits BEFORE any scan: steady state (already applied) or
+    // a non-mainnet chain never runs the census.
+    if ledger.migration_applied || chain_id != MAINNET_CHAIN_ID {
         return Ok(false);
     }
 
-    // Apply: initialize the reserve ledger (799B) and set canonical supply to
-    // 800B. NO account is credited; the reserve is non-transferable ledger
-    // supply. accounted account balances remain 1B.
-    store.put_reserve(&reserve)?;
-    store.put_ledger(&SupplyLedger {
-        initial_canonical_supply: TARGET_CANONICAL_SUPPLY,
-        total_minted_by_migration: SUPPLY_CORRECTION_DELTA,
-        total_minted_by_governance: 0,
-        migration_applied: true,
-        migration_id: supply_correction_migration_id(),
-        migration_activation_height: height,
-    })?;
-    Ok(true)
+    let assessment =
+        assess_supply_correction(db, chain_id, ledger.migration_applied, ledger.migration_id);
+
+    match assessment.reason {
+        MigrationWithheldReason::NotWithheld => {
+            let reserve = assessment
+                .reserve
+                .expect("NotWithheld invariant: reserve split is present");
+            // Defensive: the split MUST sum exactly to the measured delta.
+            if reserve.total_remaining() != assessment.reserve_delta {
+                return Err(StateError::BlockValidation(
+                    "supply-correction fail-closed: pool split != reserve delta".to_string(),
+                ));
+            }
+            // Write reserve FIRST, marker (ledger) LAST — so a crash between the
+            // two puts leaves the marker unset and the block retries cleanly.
+            store.put_reserve(&reserve)?;
+            store.put_ledger(&SupplyLedger {
+                initial_canonical_supply: TARGET_CANONICAL_SUPPLY,
+                total_minted_by_migration: assessment.reserve_delta,
+                total_minted_by_governance: 0,
+                migration_applied: true,
+                migration_id: supply_correction_migration_id(),
+                migration_activation_height: height,
+            })?;
+            tracing::info!(
+                economic_supply = %assessment.economic_supply,
+                reserve_delta = %assessment.reserve_delta,
+                height,
+                "supply-correction APPLIED: canonical supply set to 800B; measured delta minted into ProtocolReserve",
+            );
+            Ok(true)
+        }
+        // Benign deterministic skips — silent (the hot-path guards above already
+        // catch these on the apply path; kept for completeness/RPC symmetry).
+        MigrationWithheldReason::AlreadyApplied | MigrationWithheldReason::WrongChainId => Ok(false),
+        // In-binary config corruption — HARD fail-closed (halts this block).
+        MigrationWithheldReason::MigrationIdMismatch => Err(StateError::BlockValidation(
+            "supply-correction fail-closed: migration id mismatch".to_string(),
+        )),
+        // Chain-state anomalies — WITHHOLD (chain keeps producing), rate-limited log.
+        MigrationWithheldReason::EconomicSupplyZero
+        | MigrationWithheldReason::EconomicSupplyOverTarget
+        | MigrationWithheldReason::ReserveDeltaZero
+        | MigrationWithheldReason::ArithmeticOverflow
+        | MigrationWithheldReason::SnapshotError => {
+            log_withheld_anomaly(height, &assessment);
+            Ok(false)
+        }
+    }
 }

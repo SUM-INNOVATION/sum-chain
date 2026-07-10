@@ -7,16 +7,23 @@
 
 use std::sync::Arc;
 
+use sumchain_primitives::staking::DelegationInfo;
 use sumchain_primitives::supply::{
-    ProtocolReserve, GENESIS_ACCOUNTED_SUPPLY, SUPPLY_CORRECTION_DELTA, TARGET_CANONICAL_SUPPLY,
+    MigrationWithheldReason, ProtocolReserve, FIXED_SERVICE_POOLS, GENESIS_ACCOUNTED_SUPPLY, KOPPA,
+    SUPPLY_CORRECTION_DELTA, TARGET_CANONICAL_SUPPLY,
 };
 use sumchain_primitives::Address;
 use sumchain_state::supply::{
-    accounted_account_supply, apply_supply_correction_if_needed, SupplyStore,
+    accounted_account_supply, apply_supply_correction_if_needed, assess_supply_correction,
+    native_supply_snapshot, SupplyStore,
 };
 use sumchain_state::StateManager;
-use sumchain_storage::Database;
+use sumchain_storage::{Database, DelegationStore};
 use tempfile::TempDir;
+
+/// The live mainnet shortfall: accounted account balances are short of the 1B
+/// genesis supply by exactly 1,003 Koppa, which lives in non-account ledgers.
+const MAINNET_SHORTFALL: u128 = 1_003 * KOPPA;
 
 /// Fresh db + state on the mainnet chain (id 1), pre-funded so accounted supply
 /// == exactly 1B (two accounts of 500M, mirroring the two genesis validators).
@@ -86,23 +93,149 @@ fn canonical_equals_accounts_plus_reserve_invariant() {
 }
 
 #[test]
-fn withholds_when_pre_supply_is_not_1b() {
-    // Chain-state guard: not-exactly-1B accounted supply WITHHOLDS the
-    // correction (deterministic skip + loud error log) — the chain keeps
-    // producing blocks, but the correction is never applied and nothing is
-    // mutated. (In-binary config corruption — pool sum / migration id — is a
-    // hard error instead; those constants are compile-time-tested.)
+fn applies_when_shortfall_is_held_in_an_included_ledger() {
+    // LIVE MAINNET SHAPE (the bug this fix targets): accounted balances are
+    // 999,998,997 Koppa — short of 1B by 1,003 Koppa — because that Koppa was
+    // deducted out of accounts into a non-account INCLUDE ledger (here, an
+    // active delegation). The census measures economic supply == exactly 1B, so
+    // the correction APPLIES (the old exact-1B-accounts guard wrongly withheld
+    // it) and the reserve delta is the full 799B.
     let dir = TempDir::new().unwrap();
     let db = Arc::new(Database::open_default(dir.path()).unwrap());
     let state = Arc::new(StateManager::new(db.clone(), 1));
-    // Wrong pre-state: not exactly 1B.
-    state.credit(&Address::new([1u8; 20]), GENESIS_ACCOUNTED_SUPPLY + 1).unwrap();
+    // Accounts hold 1B − 1,003 Koppa (mirrors live accounted_account_supply).
+    state
+        .credit(&Address::new([1u8; 20]), GENESIS_ACCOUNTED_SUPPLY - MAINNET_SHORTFALL)
+        .unwrap();
+    // The missing 1,003 Koppa sits in an active delegation (an INCLUDE bucket).
+    DelegationStore::new(&db)
+        .put_delegation(&DelegationInfo::new([7u8; 32], [9u8; 32], MAINNET_SHORTFALL, 0))
+        .unwrap();
+
+    // Accounted < 1B, but the census measures economic == exactly 1B.
+    assert_eq!(
+        accounted_account_supply(&db).unwrap(),
+        GENESIS_ACCOUNTED_SUPPLY - MAINNET_SHORTFALL
+    );
+    let snap = native_supply_snapshot(&db).unwrap();
+    assert_eq!(snap.active_delegations, MAINNET_SHORTFALL);
+    assert_eq!(snap.economic_supply().unwrap(), GENESIS_ACCOUNTED_SUPPLY);
 
     let applied = apply_supply_correction_if_needed(&db, 1, 1).unwrap();
-    assert!(!applied, "must withhold, never apply on a wrong pre-state");
-    // Nothing applied, nothing mutated.
+    assert!(applied, "measured economic supply == 1B → correction applies");
+
+    let store = SupplyStore::new(db.clone());
+    let ledger = store.get_ledger().unwrap();
+    assert_eq!(
+        ledger.total_minted_by_migration, SUPPLY_CORRECTION_DELTA,
+        "delta = 799B, derived from economic supply not hardcoded"
+    );
+    assert_eq!(ledger.current_canonical_supply(), TARGET_CANONICAL_SUPPLY);
+    // Delta was exactly 799B, so the split is the canonical initial split.
+    let reserve = store.get_reserve().unwrap().unwrap();
+    assert_eq!(reserve, ProtocolReserve::initial());
+    // TRUE conservation identity: economic (accounts + buckets) + reserve == 800B.
+    let econ = native_supply_snapshot(&db).unwrap().economic_supply().unwrap();
+    assert_eq!(econ + reserve.total_remaining(), TARGET_CANONICAL_SUPPLY);
+}
+
+#[test]
+fn applies_and_restores_a_truly_leaked_shortfall_via_a_larger_reserve() {
+    // The OTHER shape: the 1,003 Koppa is not in any counted ledger — it was
+    // destroyed by a sink (e.g. the V2 abandon-retain leak). Economic supply is
+    // then genuinely 1B − 1,003. The correction still lands canonical at 800B by
+    // minting a LARGER reserve delta (799B + 1,003), restoring the leaked value
+    // into the governance reserve. No account is credited.
+    let dir = TempDir::new().unwrap();
+    let db = Arc::new(Database::open_default(dir.path()).unwrap());
+    let state = Arc::new(StateManager::new(db.clone(), 1));
+    state
+        .credit(&Address::new([1u8; 20]), GENESIS_ACCOUNTED_SUPPLY - MAINNET_SHORTFALL)
+        .unwrap();
+    // No bucket holds the shortfall → economic < 1B.
+    let econ_before = native_supply_snapshot(&db).unwrap().economic_supply().unwrap();
+    assert_eq!(econ_before, GENESIS_ACCOUNTED_SUPPLY - MAINNET_SHORTFALL);
+
+    assert!(apply_supply_correction_if_needed(&db, 1, 1).unwrap(), "still applies");
+
+    let store = SupplyStore::new(db.clone());
+    let ledger = store.get_ledger().unwrap();
+    // Reserve delta absorbs the leak: 799B + 1,003 Koppa.
+    assert_eq!(
+        ledger.total_minted_by_migration,
+        SUPPLY_CORRECTION_DELTA + MAINNET_SHORTFALL,
+        "reserve delta increases by exactly the leaked amount"
+    );
+    // Canonical still lands at 800B.
+    assert_eq!(ledger.current_canonical_supply(), TARGET_CANONICAL_SUPPLY);
+    // The restored leak lands entirely in the long-term governance reserve; the
+    // fixed service pools keep their spec'd sizes.
+    let reserve = store.get_reserve().unwrap().unwrap();
+    assert_eq!(
+        reserve.governance_reserve_remaining,
+        (SUPPLY_CORRECTION_DELTA + MAINNET_SHORTFALL) - FIXED_SERVICE_POOLS
+    );
+    assert_eq!(
+        reserve,
+        ProtocolReserve::from_reserve_delta(SUPPLY_CORRECTION_DELTA + MAINNET_SHORTFALL).unwrap()
+    );
+    // canonical identity holds here too (no buckets ⇒ accounts == economic).
+    let accounts = accounted_account_supply(&db).unwrap();
+    assert_eq!(accounts + reserve.total_remaining(), TARGET_CANONICAL_SUPPLY);
+}
+
+#[test]
+fn withholds_when_economic_supply_is_zero() {
+    // Empty ledgers → economic supply 0 → fail closed (never mint 800B out of
+    // nothing). Deterministic skip, nothing mutated.
+    let dir = TempDir::new().unwrap();
+    let db = Arc::new(Database::open_default(dir.path()).unwrap());
+    let _state = Arc::new(StateManager::new(db.clone(), 1));
+
+    let applied = apply_supply_correction_if_needed(&db, 1, 1).unwrap();
+    assert!(!applied, "must withhold on zero economic supply");
     assert!(!SupplyStore::new(db.clone()).is_migration_applied().unwrap());
-    assert!(SupplyStore::new(db).get_reserve().unwrap().is_none());
+    assert!(SupplyStore::new(db.clone()).get_reserve().unwrap().is_none());
+    let a = assess_supply_correction(&db, 1, false, sumchain_primitives::supply::supply_correction_migration_id());
+    assert_eq!(a.reason, MigrationWithheldReason::EconomicSupplyZero);
+    assert_eq!(a.reserve_delta, 0);
+}
+
+#[test]
+fn withholds_when_economic_supply_exceeds_target() {
+    // Economic supply above the 800B target → fail closed (a negative delta must
+    // never be minted). Nothing mutated.
+    let dir = TempDir::new().unwrap();
+    let db = Arc::new(Database::open_default(dir.path()).unwrap());
+    let state = Arc::new(StateManager::new(db.clone(), 1));
+    state.credit(&Address::new([1u8; 20]), TARGET_CANONICAL_SUPPLY + KOPPA).unwrap();
+
+    let applied = apply_supply_correction_if_needed(&db, 1, 1).unwrap();
+    assert!(!applied, "must withhold when economic supply exceeds target");
+    assert!(!SupplyStore::new(db.clone()).is_migration_applied().unwrap());
+    let a = assess_supply_correction(&db, 1, false, sumchain_primitives::supply::supply_correction_migration_id());
+    assert_eq!(a.reason, MigrationWithheldReason::EconomicSupplyOverTarget);
+}
+
+#[test]
+fn assess_reports_precise_reasons() {
+    let mid = sumchain_primitives::supply::supply_correction_migration_id();
+    // Would-apply (mainnet, pre-migration, economic == 1B).
+    let (db, _state, _dir) = mainnet_1b();
+    let a = assess_supply_correction(&db, 1, false, mid);
+    assert_eq!(a.reason, MigrationWithheldReason::NotWithheld);
+    assert_eq!(a.economic_supply, GENESIS_ACCOUNTED_SUPPLY);
+    assert_eq!(a.reserve_delta, SUPPLY_CORRECTION_DELTA);
+    // Non-mainnet.
+    assert_eq!(
+        assess_supply_correction(&db, 1337, false, mid).reason,
+        MigrationWithheldReason::WrongChainId
+    );
+    // Already applied.
+    apply_supply_correction_if_needed(&db, 1, 1).unwrap();
+    let a2 = assess_supply_correction(&db, 1, true, mid);
+    assert_eq!(a2.reason, MigrationWithheldReason::AlreadyApplied);
+    assert_eq!(a2.reserve_delta, 0);
 }
 
 #[test]

@@ -1227,6 +1227,16 @@ impl SumChainApiServer for RpcServer {
             .state
             .get_balance(&Address::ZERO)
             .map_err(|e| RpcError::Internal(e.to_string()))?;
+        // Native-supply census + correction assessment (whole-ledger scan;
+        // sanctioned for RPC diagnostics only). Write-free, infallible: a scan
+        // failure surfaces as `migration_withheld_reason = "snapshot_error"`.
+        let assessment = sumchain_state::supply::assess_supply_correction(
+            &self.db,
+            self.state.chain_id(),
+            ledger.migration_applied,
+            ledger.migration_id,
+        );
+        let snap = &assessment.snapshot;
         Ok(crate::types::SupplyInfo {
             initial_canonical_supply: ledger.initial_canonical_supply.to_string(),
             current_canonical_supply: ledger.current_canonical_supply().to_string(),
@@ -1240,6 +1250,15 @@ impl SumChainApiServer for RpcServer {
             migration_applied: ledger.migration_applied,
             migration_activation_height: ledger.migration_activation_height,
             automatic_emissions_enabled: false,
+            economic_supply_before_reserve: assessment.economic_supply.to_string(),
+            staked_or_locked: snap.staked_or_locked().unwrap_or(0).to_string(),
+            escrowed: snap.inference_escrow.to_string(),
+            bonded: snap.inference_verifier_bonds.to_string(),
+            fee_pools: snap.fee_pools().unwrap_or(0).to_string(),
+            target_canonical_supply:
+                sumchain_primitives::supply::TARGET_CANONICAL_SUPPLY.to_string(),
+            pending_reserve_delta: assessment.reserve_delta.to_string(),
+            migration_withheld_reason: assessment.reason.as_str().to_string(),
         })
     }
 

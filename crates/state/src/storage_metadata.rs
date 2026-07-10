@@ -2119,6 +2119,15 @@ impl StorageMetadataExecutor {
             state.put_account(sender, &owner_account)?;
         }
 
+        // TODO(supply-leak): `retain` is neither credited to any account nor
+        // routed to the burn sink — it is destroyed when `fee_pool` is zeroed
+        // below. This is a genuine native-Koppa sink: economic supply drops by
+        // `retain`, and the 800B supply correction currently restores that lost
+        // value into the ProtocolReserve via a larger reserve delta (see
+        // `StorageMetadataExecutor::total_fee_pools` / `native_supply_snapshot`).
+        // Fix in a separate PR: either credit `retain` to `Address::ZERO`
+        // (explicit burn, kept inside canonical) or to a protocol pool. Do NOT
+        // fold that fix into the supply-correction PR.
         row.fee_pool = 0;
         row.lifecycle = FileLifecycleV2::Abandoned;
         row.abandoned_at_height = Some(block_height);
@@ -2514,6 +2523,50 @@ impl StorageMetadataExecutor {
         }
         out.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
         Ok(out)
+    }
+
+    /// Σ every native-Koppa `fee_pool` held in storage metadata, as
+    /// `(v1_total, v2_total)`, with checked u128 addition. Deterministic full
+    /// scans of the two metadata CFs (both are mixed-key-family — data rows plus
+    /// owner-index rows — so each row is guarded by the same `[b'F']` /
+    /// `[b'F', b'2']` key-tag filters the challenge-selection paths use, and any
+    /// other key family is skipped). Summed across **all** lifecycles: funded
+    /// Pending/Active rows hold real Koppa; Abandoned rows carry `fee_pool == 0`
+    /// (set at abandon) and contribute nothing. Tolerates empty CFs (returns
+    /// `(0, 0)`). One-time supply census + `chain_getSupplyInfo` only.
+    ///
+    /// NOTE (follow-up, not this PR): `execute_abandon_file_v2` retains
+    /// `fee_pool * abandonment_fee_percent / 100` and zeroes the row without
+    /// crediting or burning the retained amount — a genuine native-Koppa sink.
+    /// That leaked value is therefore NOT present in any counted bucket, so the
+    /// census under-counts by exactly the leaked total and the supply correction
+    /// restores it into the ProtocolReserve via a larger reserve delta. The leak
+    /// itself is tracked for a separate fix (see the abandon path).
+    pub fn total_fee_pools(&self) -> Result<(u128, u128)> {
+        let mut v1: u128 = 0;
+        for (key, value) in self.db.iter(CF_STORAGE_METADATA).map_err(StateError::Storage)? {
+            // V1 file rows are `[b'F', merkle_root(32)]` (>= 33 bytes). Owner-index
+            // (`[b'O', ...]`) and other families in this CF are skipped.
+            if key.len() >= 33 && key[0] == b'F' {
+                let meta: StorageMetadata = bincode::deserialize(&value)
+                    .map_err(|e| StateError::DeserializationError(e.to_string()))?;
+                v1 = v1.checked_add(meta.fee_pool as u128).ok_or_else(|| {
+                    StateError::BlockValidation("storage V1 fee_pool sum overflow".to_string())
+                })?;
+            }
+        }
+        let mut v2: u128 = 0;
+        for (key, value) in self.db.iter(CF_STORAGE_METADATA_V2).map_err(StateError::Storage)? {
+            // V2 file rows are exactly `[b'F', b'2', hash(32)]` (34 bytes).
+            if key.len() == 34 && key[0] == b'F' && key[1] == b'2' {
+                let row: StorageMetadataV2 = bincode::deserialize(&value)
+                    .map_err(|e| StateError::DeserializationError(e.to_string()))?;
+                v2 = v2.checked_add(row.fee_pool as u128).ok_or_else(|| {
+                    StateError::BlockValidation("storage V2 fee_pool sum overflow".to_string())
+                })?;
+            }
+        }
+        Ok((v1, v2))
     }
 
     /// Look up a V2 file row by its merkle_root.

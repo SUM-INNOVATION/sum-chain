@@ -1518,6 +1518,23 @@ impl<'a> StakingStore<'a> {
         Ok(validators.iter().map(|v| v.stake).sum())
     }
 
+    /// Σ validator **self-stake** across all validators, with checked addition
+    /// (never silently wraps). Deterministic full scan of `cf::VALIDATORS`;
+    /// tolerates an empty CF (returns 0). Used only by the one-time supply
+    /// census + `chain_getSupplyInfo`, never a hot path. This counts `v.stake`
+    /// (the validator's own bonded balance), NOT `v.total_delegated` — delegated
+    /// stake is summed separately from the delegation records to avoid
+    /// double-counting.
+    pub fn total_validator_self_stake(&self) -> Result<u128> {
+        let mut sum: u128 = 0;
+        for v in self.get_all_validators()? {
+            sum = sum.checked_add(v.stake).ok_or_else(|| {
+                StorageError::Serialization("validator self-stake sum overflow".to_string())
+            })?;
+        }
+        Ok(sum)
+    }
+
     /// Get the number of validators
     pub fn get_validator_count(&self) -> Result<usize> {
         Ok(self.get_all_validators()?.len())
@@ -1735,6 +1752,28 @@ impl<'a> DelegationStore<'a> {
     pub fn get_total_delegated_by_delegator(&self, delegator: &[u8; 32]) -> Result<Balance> {
         let delegations = self.get_delegations_by_delegator(delegator)?;
         Ok(delegations.iter().map(|d| d.amount).sum())
+    }
+
+    /// Σ **all active delegation amounts** chain-wide, with checked addition.
+    /// Deterministic full scan of `cf::DELEGATIONS`; RocksDB iteration order is
+    /// fixed and addition is order-independent, so every node computes the same
+    /// total. `cf::DELEGATIONS` is single-key-family (64-byte `delegator ||
+    /// validator` rows only — the validator index lives in a separate CF); rows
+    /// of any other length are skipped defensively. Tolerates an empty CF
+    /// (returns 0). One-time supply census + `chain_getSupplyInfo` only.
+    pub fn total_active_delegations(&self) -> Result<u128> {
+        let mut sum: u128 = 0;
+        for (key, value) in self.db.iter(cf::DELEGATIONS)? {
+            if key.len() != 64 {
+                continue;
+            }
+            let delegation: DelegationInfo = bincode::deserialize(&value)
+                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            sum = sum.checked_add(delegation.amount).ok_or_else(|| {
+                StorageError::Serialization("active delegations sum overflow".to_string())
+            })?;
+        }
+        Ok(sum)
     }
 
     // ========================================================================
