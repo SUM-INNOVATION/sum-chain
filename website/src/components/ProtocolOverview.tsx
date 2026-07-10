@@ -60,7 +60,7 @@ const TOPICS: Topic[] = [
       { k: 'signing_domain', v: 'omninode.inference_attestation.v1' },
       { k: 'dedup', v: 'one per (session, verifier)' },
       { k: 'attestation', v: 'active' },
-      { k: 'settlement', v: 'implemented · dormant' },
+      { k: 'settlement', v: 'active (gate 8,900,000 reached)' },
     ],
     href: '/compute',
     cta: 'Compute & attestation',

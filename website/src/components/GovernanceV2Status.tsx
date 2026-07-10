@@ -2,7 +2,14 @@
 
 import { StatusPill } from '@/components/ui/primitives';
 import { SpecList } from '@/components/ui/blocks';
-import { koppa, useSupplyStatus, type GateState } from '@/lib/supplyStatus';
+import {
+  koppa,
+  postSupplyGateLabel,
+  postSupplyGateState,
+  useSupplyStatus,
+  type GateState,
+} from '@/lib/supplyStatus';
+import { POST_SUPPLY_GATE } from '@/lib/chainStatus';
 
 /**
  * Live governance-configuration dashboards (v2 + monetary policy).
@@ -21,13 +28,17 @@ function pill(state: GateState) {
 
 function fmtGate(gate: number | null, exposed: boolean): string {
   if (!exposed) return 'not exposed by current RPC';
-  if (gate == null) return 'null (dormant)';
+  if (gate == null) return 'not set';
   return `height ${gate.toLocaleString('en-US')}`;
 }
 
 export function MonetaryGovernanceStatus() {
   const s = useSupplyStatus();
-  const monetary = s.gateState(s.gates.monetary_policy_enabled_from_height);
+  // Reserve release and MonetaryPolicyMint share the monetary-policy gate, one
+  // of the seven post-supply gates deployed in runtime genesis at height
+  // 9,200,000. chain_getChainParams does not reliably expose it, so state comes
+  // from the live block height (auto-flips at the gate), never a null RPC field.
+  const monetary = postSupplyGateState(s.gates.height);
   return (
     <div>
       <ul className="space-y-4">
@@ -38,6 +49,12 @@ export function MonetaryGovernanceStatus() {
         <li className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
           <span className="text-sm text-muted-strong">MonetaryPolicyMint gate</span>
           {pill(monetary)}
+        </li>
+        <li className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+          <span className="text-sm text-muted-strong">Activation height</span>
+          <span className="mono text-xs text-muted-strong">
+            {POST_SUPPLY_GATE.toLocaleString('en-US')} (deployed)
+          </span>
         </li>
         <li className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
           <span className="text-sm text-muted-strong">Required governance mode</span>
@@ -54,11 +71,14 @@ export function MonetaryGovernanceStatus() {
         <li>
           Future monetary expansion is disabled unless explicitly activated
           through native governance; reserve release is protocol-gated and
-          requires native-Koppa governance once enabled.
+          requires native-Koppa governance once the gate activates.
         </li>
       </ul>
       <p className="mono mt-4 text-[11px] text-muted">
-        Configuration status from chain params, not live participation data.
+        The monetary-policy gate is deployed in runtime genesis and activates at
+        height {POST_SUPPLY_GATE.toLocaleString('en-US')}; the state above is
+        derived from the live block height, not a chain_getChainParams field
+        (which does not expose every gate).
       </p>
     </div>
   );
@@ -84,16 +104,28 @@ export function GovernanceParamsDashboard() {
     { k: 'voting_period_blocks', v: g ? g.voting_period_blocks.toLocaleString('en-US') : 'not exposed by current RPC' },
     { k: 'max_snapshot_holders', v: g ? g.max_snapshot_holders.toLocaleString('en-US') : 'not exposed by current RPC' },
     { k: 'min_koppa_for_eligibility', v: g ? `${koppa(g.min_koppa_for_eligibility)} Ϙ` : 'not exposed by current RPC' },
-    { k: 'monetary_policy_enabled_from_height', v: fmtGate(s.gates.monetary_policy_enabled_from_height, exposed) },
-    { k: 'service_grants_enabled_from_height', v: fmtGate(s.gates.service_grants_enabled_from_height, exposed) },
+    // Two of the seven post-supply gates. chain_getChainParams does not reliably
+    // expose them, so the site uses the operator-verified runtime-genesis height
+    // (9,200,000) and derives active/pending from the live block height, rather
+    // than treating a missing RPC field as dormant.
+    { k: 'monetary_policy_enabled_from_height', v: postSupplyGateLabel(s.gates.height) },
+    { k: 'service_grants_enabled_from_height', v: postSupplyGateLabel(s.gates.height) },
   ];
   return (
     <div>
       <SpecList rows={rows} />
       <p className="mono mt-4 text-[11px] text-muted">
         {exposed
-          ? 'Read live from chain_getChainParams. "not exposed" fields require a node running the supply-aware binary.'
+          ? 'Governance thresholds are read live from chain_getChainParams; "not exposed" fields require a node running the supply-aware binary.'
           : 'RPC unreachable, no configuration values are shown rather than estimates.'}
+      </p>
+      <p className="mono mt-2 text-[11px] text-muted">
+        The <span className="text-muted-strong">monetary_policy</span> and{' '}
+        <span className="text-muted-strong">service_grants</span> gates are two of
+        seven post-supply gates that chain_getChainParams does not expose. The
+        site uses their operator-verified runtime-genesis height (
+        {POST_SUPPLY_GATE.toLocaleString('en-US')}) and derives active/pending
+        from the live block height, so they are never shown as null/dormant.
       </p>
     </div>
   );

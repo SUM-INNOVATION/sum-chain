@@ -1,9 +1,16 @@
 # SNIP: Assignment-Aware, Bounded PoR Challenge Scheduling (design)
 
-> **Status:** design-only (issue #81). **Not implemented.** This document proposes
-> a future, gated scheduler; it changes no code, no protocol behavior, and no
-> economics. Nothing here is active on any chain. Implementation requires a
-> separate design review and its own activation gate.
+> **Status:** implemented and code-backed (issue #81). **Deployed in runtime
+> genesis and activation-gated at height 9,200,000** on mainnet, as two of the
+> seven post-supply gates: `por_assignment_targeting_enabled_from_height`
+> (Phase 1) and `assignment_aware_por_scheduler_enabled_from_height` (Phase 2).
+> Both are a strict extension of base PoR / SNIP V2, which is already active:
+> below the gate, behavior is identical to today. They are **not usable before
+> height 9,200,000** and auto-activate when the chain reaches it. Neither gate is
+> exposed by `chain_getChainParams`, so **runtime genesis is the source of
+> truth** (the website hard-codes the operator-verified constant `9,200,000` and
+> derives active/pending from the live block height). The design rationale below
+> is retained as written.
 
 **Refs:** #62 (epoch-aware assignment/coverage), #20 (archive unbonding), #80
 (operator tooling). See also [SNIP-V2-CHAIN-PLAN.md](./SNIP-V2-CHAIN-PLAN.md) §5.
@@ -84,7 +91,7 @@ The output is a bounded, deterministic list of `(file, chunk, assigned_archive)`
 challenges written exactly like today's single challenge. Everything downstream
 (proof submission, expiry/slash, fee-pool payout) is **unchanged**.
 
-## 5. Parameters (all new, gated, default-dormant)
+## 5. Parameters (all new; fresh-chain default `None`, mainnet gate 9,200,000)
 
 | Param | Meaning |
 |---|---|
@@ -156,23 +163,28 @@ values are set during implementation review.
 ## 9. Rollout plan
 
 1. **Design review** of this document before any code.
-2. Implement behind a **new activation gate** (e.g.
-   `assignment_aware_por_enabled_from_height: Option<u64>`, default `None`) so it
-   ships **dormant**; the v1 probabilistic selector remains the only active path
-   until the gate is set via a coordinated upgrade.
-3. When dormant, **behavior is identical to today** — this is a strict superset,
-   opt-in at a chosen height.
+2. Implement behind a **new activation gate** (fresh-chain default `None`) so it
+   ships gate-closed; the v1 probabilistic selector remains the only active path
+   until the gate is reached. **On mainnet the Phase 1 and Phase 2 gates are now
+   set to height 9,200,000** (see §9a/§9b).
+3. Below the gate, **behavior is identical to today** — this is a strict superset,
+   activated at the gate height.
 4. Add operator visibility (extend the #80 coverage tooling) and conformance
    vectors so all nodes agree on the deterministic schedule before activation.
 
-**This PR makes no behavior change and adds no code — design only.**
+**The original design PR made no behavior change; Phases 1 and 2 have since
+shipped (issues #97 and #100) and are activation-gated at height 9,200,000 on
+mainnet — see §9a/§9b.**
 
 ## 9a. Phase 1 shipped behavior (issue #97)
 
 Phase 1 (assignment-aware *targeting* of the existing single challenge, distinct
 from the bounded multi-challenge scheduler above) is implemented behind its own
-gate `por_assignment_targeting_enabled_from_height: Option<u64>` (default `None`;
-**not** shared with the future scheduler gate, per §5/#97).
+gate `por_assignment_targeting_enabled_from_height: Option<u64>` (fresh-chain
+default `None`; **on mainnet deployed and set to height 9,200,000**, one of the
+seven post-supply gates; **not** shared with the scheduler gate, per §5/#97).
+This gate is not exposed by `chain_getChainParams`, so runtime genesis is the
+source of truth.
 
 - **Below the gate** — byte-identical legacy: `generate_challenge` samples one
   file from the V1 funded set (`get_funded_file_roots`) and one target from
@@ -198,9 +210,11 @@ rows.
 ## 9b. Phase 2 shipped behavior (issue #100)
 
 The bounded scheduler is implemented behind its own gate
-`assignment_aware_por_scheduler_enabled_from_height: Option<u64>` (default `None`;
-never shared with the Phase-1 gate). When dormant, challenge generation is exactly
-the post-#101 single-challenge path.
+`assignment_aware_por_scheduler_enabled_from_height: Option<u64>` (fresh-chain
+default `None`; **on mainnet deployed and set to height 9,200,000**, never shared
+with the Phase-1 gate). This gate is not exposed by `chain_getChainParams`, so
+runtime genesis is the source of truth. Below the gate, challenge generation is
+exactly the post-#101 single-challenge path.
 
 - **Params** (consulted only when the gate is open): `max_assignment_aware_challenges_per_block`
   (default 16, the hard emit cap), `max_files_sampled_per_interval` (8),

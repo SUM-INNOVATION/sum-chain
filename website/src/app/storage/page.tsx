@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import PageShell from '@/components/PageShell';
+import { LiveStatus } from '@/components/LiveStatus';
 import { SectionHeader, Reveal, MonoTag } from '@/components/ui/primitives';
 import { Card, SpecList, StepFlow, Callout, SourceLinks } from '@/components/ui/blocks';
 
@@ -60,6 +61,25 @@ export default function StoragePage() {
               so both activated automatically with no redeploy. Reassignment is epoch-aware and does
               not rewrite epoch-0 assignments. Challenge coverage remains probabilistic, not
               per-chunk guaranteed.
+            </Callout>
+            <Callout tone="note" title="Deployed in runtime genesis, activates at height 9,200,000">
+              <p>
+                Two further PoR gates are already in runtime genesis and activate
+                together at height <MonoTag>9,200,000</MonoTag>, with no redeploy:
+                assignment targeting
+                (<MonoTag>por_assignment_targeting_enabled_from_height</MonoTag>)
+                and the assignment-aware bounded challenge scheduler
+                (<MonoTag>assignment_aware_por_scheduler_enabled_from_height</MonoTag>).
+              </p>
+              <p className="mt-3">
+                <MonoTag>chain_getChainParams</MonoTag> does not expose every one
+                of these gates, so this status uses the operator-verified
+                runtime-genesis height and flips to active from the live block
+                height.
+              </p>
+              <div className="mt-3">
+                <LiveStatus feature="porBoundedScheduler" />
+              </div>
             </Callout>
           </Reveal>
         </div>
