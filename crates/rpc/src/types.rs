@@ -124,6 +124,35 @@ pub struct SupplyInfo {
     pub migration_activation_height: u64,
     /// Always `false`: no block rewards, no inflation, no hidden mint.
     pub automatic_emissions_enabled: bool,
+
+    // ── Native-supply census diagnostics (whole-ledger scan; see
+    //    `native_supply_snapshot`). Report which ledgers hold native Koppa and
+    //    what the correction measures, so the 800B correction is auditable. ──
+    /// Live economic supply = Σ every native-Koppa bucket (accounts incl. burn +
+    /// stake + delegations + archive stake + fee pools + escrow + bonds). This
+    /// is the value the correction measures; `pending_reserve_delta = target −
+    /// this`.
+    pub economic_supply_before_reserve: String,
+    /// Staked/locked native Koppa outside plain balances (validator self-stake +
+    /// active delegations + archive stake).
+    pub staked_or_locked: String,
+    /// Native Koppa escrowed in open inference sessions.
+    pub escrowed: String,
+    /// Native Koppa bonded by inference verifiers.
+    pub bonded: String,
+    /// Native Koppa held in storage fee pools (V1 + V2).
+    pub fee_pools: String,
+    /// The 800B target canonical supply.
+    pub target_canonical_supply: String,
+    /// Reserve delta the correction would mint now (`target − economic_supply`);
+    /// `0` once applied.
+    pub pending_reserve_delta: String,
+    /// Precise reason the correction is inert this evaluation: `not_withheld`
+    /// (would apply / is applied — see `migration_applied`), `already_applied`,
+    /// `wrong_chain_id`, `migration_id_mismatch`, `economic_supply_zero`,
+    /// `economic_supply_over_target`, `reserve_delta_zero`, `arithmetic_overflow`,
+    /// or `snapshot_error`.
+    pub migration_withheld_reason: String,
 }
 
 /// ProtocolReserve pool balances (base-unit decimal strings).

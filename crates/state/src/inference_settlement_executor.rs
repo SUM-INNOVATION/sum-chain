@@ -1028,6 +1028,52 @@ impl InferenceSettlementExecutor {
         Ok(())
     }
 
+    /// Σ `remaining_escrow` across all inference sessions, with checked u128
+    /// addition. This is the live native-Koppa escrow still held by open
+    /// sessions: as a session pays out rewards or refunds, `remaining_escrow`
+    /// drops (the funds re-enter account balances), so closed sessions
+    /// contribute 0. `cf::INFERENCE_SESSIONS` is single-key-family (32-byte
+    /// blake3 session keys → `InferenceSession` rows only); rows of any other
+    /// length are skipped defensively. Deterministic full scan, tolerates an
+    /// empty CF. One-time supply census + `chain_getSupplyInfo` only.
+    pub fn total_session_remaining_escrow(&self) -> Result<u128> {
+        let mut sum: u128 = 0;
+        for (key, value) in self.db.iter(cf::INFERENCE_SESSIONS).map_err(StateError::Storage)? {
+            if key.len() != 32 {
+                continue;
+            }
+            let s: InferenceSession = bincode::deserialize(&value)
+                .map_err(|e| StateError::SerializationError(e.to_string()))?;
+            sum = sum.checked_add(s.remaining_escrow).ok_or_else(|| {
+                StateError::BlockValidation("inference escrow sum overflow".to_string())
+            })?;
+        }
+        Ok(sum)
+    }
+
+    /// Σ `bond` across all inference-verifier records, with checked u128
+    /// addition. This is the live native-Koppa verifier bond still held:
+    /// withdrawing a bond or slashing it reduces `bond` (the value re-enters
+    /// account balances or the burn sink), so fully-withdrawn verifiers
+    /// contribute 0. `cf::INFERENCE_VERIFIERS` is single-key-family (32-byte
+    /// blake3 verifier keys → `InferenceVerifierRecord` rows only); other lengths
+    /// are skipped defensively. Deterministic full scan, tolerates an empty CF.
+    /// One-time supply census + `chain_getSupplyInfo` only.
+    pub fn total_verifier_bonds(&self) -> Result<u128> {
+        let mut sum: u128 = 0;
+        for (key, value) in self.db.iter(cf::INFERENCE_VERIFIERS).map_err(StateError::Storage)? {
+            if key.len() != 32 {
+                continue;
+            }
+            let r: InferenceVerifierRecord = bincode::deserialize(&value)
+                .map_err(|e| StateError::SerializationError(e.to_string()))?;
+            sum = sum.checked_add(r.bond).ok_or_else(|| {
+                StateError::BlockValidation("inference verifier bond sum overflow".to_string())
+            })?;
+        }
+        Ok(sum)
+    }
+
     pub fn get_claim(&self, session_id: &str, verifier: &Address) -> Result<Option<InferenceClaim>> {
         match self
             .db

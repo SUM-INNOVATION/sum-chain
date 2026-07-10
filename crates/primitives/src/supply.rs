@@ -65,6 +65,14 @@ pub const POOL_ECOSYSTEM: u128 = 160_000_000_000 * KOPPA;
 /// Long-term native-governance reserve (governance-release only).
 pub const POOL_GOVERNANCE_RESERVE: u128 = 319_000_000_000 * KOPPA;
 
+/// Fixed-size service/ecosystem pools (validator + archive + compute +
+/// ecosystem = 480B). These keep their exact spec'd sizes regardless of the
+/// measured pre-migration economic supply. Only the residual long-term
+/// governance reserve absorbs the variance (see
+/// [`ProtocolReserve::from_reserve_delta`]).
+pub const FIXED_SERVICE_POOLS: u128 =
+    POOL_VALIDATOR + POOL_ARCHIVE + POOL_COMPUTE + POOL_ECOSYSTEM; // 480B
+
 /// The non-transferable protocol reserve, split into service/governance pools.
 /// Counted in canonical supply; only decreased by an implemented protocol rule
 /// (service-grant reservation) or a governance release. Never an account.
@@ -78,7 +86,10 @@ pub struct ProtocolReserve {
 }
 
 impl ProtocolReserve {
-    /// The pool split created by the one-time correction (sums to 799B).
+    /// The pool split for the canonical genesis-exact delta (799B, i.e. when
+    /// pre-migration economic supply is exactly 1B). Retained for the invariant
+    /// tests and as the digest fallback; live migration uses
+    /// [`Self::from_reserve_delta`] with the *measured* delta.
     pub const fn initial() -> Self {
         Self {
             validator_pool_remaining: POOL_VALIDATOR,
@@ -87,6 +98,29 @@ impl ProtocolReserve {
             ecosystem_pool_remaining: POOL_ECOSYSTEM,
             governance_reserve_remaining: POOL_GOVERNANCE_RESERVE,
         }
+    }
+
+    /// Split a *measured* reserve delta into pools. The four service/ecosystem
+    /// pools keep their exact spec'd sizes ([`FIXED_SERVICE_POOLS`] = 480B); the
+    /// residual — including any native Koppa that was held in non-account
+    /// ledgers or lost to a sink and is being restored to 800B — lands entirely
+    /// in the governance-release-only long-term reserve. This is the safest
+    /// placement: it never inflates a service-grant pool above its published
+    /// size, and the variance is only ever released by native-Koppa consensus
+    /// governance (6667 bps), never by an implemented service rule.
+    ///
+    /// Returns `None` when `delta < FIXED_SERVICE_POOLS` (would underfund the
+    /// fixed pools); callers MUST treat that as fail-closed and withhold. For
+    /// the canonical 799B delta this equals [`Self::initial`].
+    pub fn from_reserve_delta(delta: u128) -> Option<Self> {
+        let governance_reserve_remaining = delta.checked_sub(FIXED_SERVICE_POOLS)?;
+        Some(Self {
+            validator_pool_remaining: POOL_VALIDATOR,
+            archive_pool_remaining: POOL_ARCHIVE,
+            compute_pool_remaining: POOL_COMPUTE,
+            ecosystem_pool_remaining: POOL_ECOSYSTEM,
+            governance_reserve_remaining,
+        })
     }
 
     /// Total remaining across all pools. Checked add (pools are bounded well
@@ -162,6 +196,141 @@ impl SupplyLedger {
             self.migration_id.as_bytes(),
             &self.migration_activation_height.to_be_bytes(),
         ])
+    }
+}
+
+/// A one-time, whole-ledger census of **every native-Koppa bucket**, used to
+/// derive the migration's reserve delta and to power the `chain_getSupplyInfo`
+/// diagnostics. Built only by full column-family scans — never a hot path.
+///
+/// `economic_supply` = the value that *already exists* as native Koppa, summed
+/// across every ledger that can hold it: account balances (incl. `Address::ZERO`,
+/// the burn sink), validator self-stake, active delegations, archive stake,
+/// storage fee pools (V1+V2), inference escrow, and inference verifier bonds.
+/// Buckets that are pure duplicates of another counted bucket (unbonding
+/// mirrors, governance/policy account balances already inside accounts,
+/// validator `total_delegated`, pending unmaterialized rewards) are deliberately
+/// EXCLUDED — see `docs/architecture/economic-model.md`.
+///
+/// `burn_at_zero` is a REPORT-ONLY subset of `account_balances_incl_zero` (it is
+/// already counted there); it is surfaced separately as "burned" and never
+/// subtracted from the canonical supply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeSupplySnapshot {
+    /// Σ all account balances including `Address::ZERO` (INCLUDE).
+    pub account_balances_incl_zero: u128,
+    /// `Address::ZERO` balance — REPORT-ONLY subset of the above; not re-added.
+    pub burn_at_zero: u128,
+    /// Σ validator self-stake (INCLUDE).
+    pub validator_self_stake: u128,
+    /// Σ active delegation amounts (INCLUDE).
+    pub active_delegations: u128,
+    /// Σ archive-node `staked_balance` (INCLUDE).
+    pub archive_staked_balance: u128,
+    /// Σ storage V1 `fee_pool` (INCLUDE).
+    pub storage_v1_fee_pool: u128,
+    /// Σ storage V2 `fee_pool` (INCLUDE).
+    pub storage_v2_fee_pool: u128,
+    /// Σ inference-session `remaining_escrow` (INCLUDE).
+    pub inference_escrow: u128,
+    /// Σ inference-verifier `bond` (INCLUDE).
+    pub inference_verifier_bonds: u128,
+}
+
+impl NativeSupplySnapshot {
+    /// An all-zero census — used as the fail-closed placeholder when a ledger
+    /// scan cannot be completed (`MigrationWithheldReason::SnapshotError`).
+    pub const fn zeroed() -> Self {
+        Self {
+            account_balances_incl_zero: 0,
+            burn_at_zero: 0,
+            validator_self_stake: 0,
+            active_delegations: 0,
+            archive_staked_balance: 0,
+            storage_v1_fee_pool: 0,
+            storage_v2_fee_pool: 0,
+            inference_escrow: 0,
+            inference_verifier_bonds: 0,
+        }
+    }
+
+    /// Staked/locked native Koppa held outside plain account balances.
+    pub fn staked_or_locked(&self) -> Option<u128> {
+        self.validator_self_stake
+            .checked_add(self.active_delegations)?
+            .checked_add(self.archive_staked_balance)
+    }
+
+    /// Native Koppa held in storage fee pools (V1 + V2).
+    pub fn fee_pools(&self) -> Option<u128> {
+        self.storage_v1_fee_pool.checked_add(self.storage_v2_fee_pool)
+    }
+
+    /// Total live economic supply = every INCLUDE bucket, checked. `None` on the
+    /// (impossible-for-real-supply) overflow — callers fail closed, never wrap.
+    pub fn economic_supply(&self) -> Option<u128> {
+        self.account_balances_incl_zero
+            .checked_add(self.staked_or_locked()?)?
+            .checked_add(self.fee_pools()?)?
+            .checked_add(self.inference_escrow)?
+            .checked_add(self.inference_verifier_bonds)
+    }
+}
+
+/// Precise reason a supply-correction evaluation did **not** produce an applied
+/// migration this block. Surfaced via `chain_getSupplyInfo` and used to gate the
+/// (rate-limited) node log so operators see exactly why the correction is inert.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum MigrationWithheldReason {
+    /// Not withheld — the correction applied this block, or would apply now.
+    NotWithheld = 0,
+    /// The one-time marker is already set (replay/restart-safe no-op).
+    AlreadyApplied = 1,
+    /// Not the mainnet chain (`chain_id != 1`).
+    WrongChainId = 2,
+    /// The persisted migration id does not match the in-binary id.
+    MigrationIdMismatch = 3,
+    /// Measured economic supply is 0 (empty/unavailable ledgers) — fail closed.
+    EconomicSupplyZero = 4,
+    /// Measured economic supply exceeds the 800B target (or is within 480B of it,
+    /// leaving no room for the fixed service pools) — fail closed.
+    EconomicSupplyOverTarget = 5,
+    /// Economic supply already equals the target: reserve delta is 0, nothing to
+    /// mint.
+    ReserveDeltaZero = 6,
+    /// A checked u128 addition overflowed while summing buckets — fail closed.
+    ArithmeticOverflow = 7,
+    /// A ledger scan could not be read/deserialized — fail closed.
+    SnapshotError = 8,
+}
+
+impl MigrationWithheldReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            MigrationWithheldReason::NotWithheld => "not_withheld",
+            MigrationWithheldReason::AlreadyApplied => "already_applied",
+            MigrationWithheldReason::WrongChainId => "wrong_chain_id",
+            MigrationWithheldReason::MigrationIdMismatch => "migration_id_mismatch",
+            MigrationWithheldReason::EconomicSupplyZero => "economic_supply_zero",
+            MigrationWithheldReason::EconomicSupplyOverTarget => "economic_supply_over_target",
+            MigrationWithheldReason::ReserveDeltaZero => "reserve_delta_zero",
+            MigrationWithheldReason::ArithmeticOverflow => "arithmetic_overflow",
+            MigrationWithheldReason::SnapshotError => "snapshot_error",
+        }
+    }
+
+    /// Whether this reason represents an *anomaly* worth logging (as opposed to a
+    /// benign deterministic skip like `AlreadyApplied` / `WrongChainId`).
+    pub fn is_anomaly(&self) -> bool {
+        matches!(
+            self,
+            MigrationWithheldReason::EconomicSupplyZero
+                | MigrationWithheldReason::EconomicSupplyOverTarget
+                | MigrationWithheldReason::ReserveDeltaZero
+                | MigrationWithheldReason::ArithmeticOverflow
+                | MigrationWithheldReason::SnapshotError
+        )
     }
 }
 
@@ -418,6 +587,83 @@ mod tests {
     #[test]
     fn pools_sum_to_delta() {
         assert_eq!(ProtocolReserve::initial().total_remaining(), SUPPLY_CORRECTION_DELTA);
+    }
+
+    #[test]
+    fn fixed_service_pools_is_480b() {
+        assert_eq!(FIXED_SERVICE_POOLS, 480_000_000_000 * KOPPA);
+    }
+
+    #[test]
+    fn from_reserve_delta_matches_initial_at_canonical_delta() {
+        // The canonical 799B delta reproduces the exact `initial()` split.
+        let r = ProtocolReserve::from_reserve_delta(SUPPLY_CORRECTION_DELTA).unwrap();
+        assert_eq!(r, ProtocolReserve::initial());
+        assert_eq!(r.total_remaining(), SUPPLY_CORRECTION_DELTA);
+    }
+
+    #[test]
+    fn from_reserve_delta_puts_variance_in_governance_reserve() {
+        // A larger delta (e.g. restoring a leak) grows ONLY the governance
+        // reserve; the four fixed service pools keep their spec'd sizes.
+        let extra = 1_003 * KOPPA;
+        let r = ProtocolReserve::from_reserve_delta(SUPPLY_CORRECTION_DELTA + extra).unwrap();
+        assert_eq!(r.validator_pool_remaining, POOL_VALIDATOR);
+        assert_eq!(r.archive_pool_remaining, POOL_ARCHIVE);
+        assert_eq!(r.compute_pool_remaining, POOL_COMPUTE);
+        assert_eq!(r.ecosystem_pool_remaining, POOL_ECOSYSTEM);
+        assert_eq!(r.governance_reserve_remaining, POOL_GOVERNANCE_RESERVE + extra);
+        assert_eq!(r.total_remaining(), SUPPLY_CORRECTION_DELTA + extra);
+    }
+
+    #[test]
+    fn from_reserve_delta_fails_closed_below_fixed_pools() {
+        // A delta too small to fund the fixed service pools has no valid split.
+        assert!(ProtocolReserve::from_reserve_delta(FIXED_SERVICE_POOLS - 1).is_none());
+        // Exactly the fixed pools ⇒ zero governance reserve (boundary).
+        let r = ProtocolReserve::from_reserve_delta(FIXED_SERVICE_POOLS).unwrap();
+        assert_eq!(r.governance_reserve_remaining, 0);
+    }
+
+    #[test]
+    fn economic_supply_sums_every_include_bucket_checked() {
+        let s = NativeSupplySnapshot {
+            account_balances_incl_zero: 10 * KOPPA,
+            burn_at_zero: 2 * KOPPA, // subset of accounts — NOT re-added
+            validator_self_stake: 3 * KOPPA,
+            active_delegations: 4 * KOPPA,
+            archive_staked_balance: 5 * KOPPA,
+            storage_v1_fee_pool: 6 * KOPPA,
+            storage_v2_fee_pool: 7 * KOPPA,
+            inference_escrow: 8 * KOPPA,
+            inference_verifier_bonds: 9 * KOPPA,
+        };
+        assert_eq!(s.staked_or_locked(), Some(12 * KOPPA));
+        assert_eq!(s.fee_pools(), Some(13 * KOPPA));
+        // 10 + (3+4+5) + (6+7) + 8 + 9 = 52 Koppa; burn subset not double-counted.
+        assert_eq!(s.economic_supply(), Some(52 * KOPPA));
+        assert_eq!(NativeSupplySnapshot::zeroed().economic_supply(), Some(0));
+    }
+
+    #[test]
+    fn economic_supply_overflow_is_none_not_wrap() {
+        let mut s = NativeSupplySnapshot::zeroed();
+        s.account_balances_incl_zero = u128::MAX;
+        s.validator_self_stake = 1;
+        assert_eq!(s.economic_supply(), None);
+    }
+
+    #[test]
+    fn withheld_reason_strings_and_anomaly_flags() {
+        use MigrationWithheldReason::*;
+        assert_eq!(NotWithheld.as_str(), "not_withheld");
+        assert_eq!(EconomicSupplyOverTarget.as_str(), "economic_supply_over_target");
+        assert_eq!(SnapshotError.as_str(), "snapshot_error");
+        assert!(!NotWithheld.is_anomaly());
+        assert!(!AlreadyApplied.is_anomaly());
+        assert!(!WrongChainId.is_anomaly());
+        assert!(EconomicSupplyZero.is_anomaly());
+        assert!(ArithmeticOverflow.is_anomaly());
     }
 
     #[test]

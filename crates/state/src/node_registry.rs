@@ -637,4 +637,22 @@ impl NodeRegistryExecutor {
 
         Ok(nodes)
     }
+
+    /// Σ `staked_balance` across all archive nodes (any status), with checked
+    /// u128 addition. This is the live native-Koppa archive stake: `Withdrawn`
+    /// nodes carry `staked_balance == 0`, and a node mid-unbond keeps its
+    /// `staked_balance` (the mirrored `ARCHIVE_UNBONDING` record is deliberately
+    /// NOT counted, to avoid double-counting). Validators cannot register here
+    /// (rejected at registration), so this is archive stake only. Deterministic
+    /// (uses the role-index scan), tolerates zero archive nodes. One-time supply
+    /// census + `chain_getSupplyInfo` only.
+    pub fn total_archive_staked_balance(&self) -> Result<u128> {
+        let mut sum: u128 = 0;
+        for node in self.get_nodes_by_role(NodeRole::ArchiveNode)? {
+            sum = sum.checked_add(node.staked_balance as u128).ok_or_else(|| {
+                StateError::BlockValidation("archive staked_balance sum overflow".to_string())
+            })?;
+        }
+        Ok(sum)
+    }
 }
