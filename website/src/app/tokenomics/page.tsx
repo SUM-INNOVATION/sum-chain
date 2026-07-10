@@ -7,7 +7,7 @@ import { SupplyHeadline, SupplyComposition, ReservePools } from '@/components/Su
 export const metadata: Metadata = {
   title: 'Tokenomics | SUM Chain',
   description:
-    'Koppa (Ϙ) tokenomics, grounded in code and live mainnet parameters: 800B canonical supply after the coordinated supply migration, nine decimals, fee-funded validators (min fee 1,000 base units), a ProtocolReserve with service grants, storage fee pools with Proof-of-Retrievability rewards, and dormant governance bonds. No automatic emissions, no yield, no price claims.',
+    'Koppa (Ϙ) tokenomics, grounded in code and live mainnet parameters: 800B canonical supply after the coordinated supply migration, nine decimals, fee-funded validators (min fee 1,000 base units), a ProtocolReserve with service grants, storage fee pools with Proof-of-Retrievability rewards, and configurable governance proposal bonds. No automatic emissions, no yield, no price claims.',
 };
 
 const ALLOCATION = [
@@ -129,7 +129,7 @@ export default function TokenomicsPage() {
             <SectionHeader
               kicker="Service grants"
               title="Grants are earned by network work, not handed out"
-              intro="The reserve's service pools bootstrap operators without a supply shock: every grant is mostly locked, and liquidity comes from verifiable protocol work. Claiming is gate-controlled and dormant until the schedule is ratified."
+              intro="The reserve's service pools bootstrap operators without a supply shock: every grant is mostly locked, and liquidity comes from verifiable protocol work. Claiming is gate-controlled: the service-grants gate is deployed in runtime genesis and activates at height 9,200,000, after which claims go live automatically."
             />
             <ul className="mt-6 space-y-3 text-sm leading-relaxed text-muted">
               <li>
@@ -161,7 +161,7 @@ export default function TokenomicsPage() {
                   { k: 'early_archive_nodes', v: 'eligible via service evidence' },
                   { k: 'retroactive_grants', v: 'none, counting starts at correction' },
                   { k: 'slashing', v: 'forfeits locked stake to reserve' },
-                  { k: 'claiming', v: 'gate-controlled · dormant by default' },
+                  { k: 'claiming', v: 'gate-controlled · activates at height 9,200,000' },
                 ]}
               />
             </Card>

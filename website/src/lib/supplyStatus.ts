@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { RPC_URL } from '@/lib/chainStatus';
+import { RPC_URL, POST_SUPPLY_GATE } from '@/lib/chainStatus';
 
 const BASE = BigInt(1_000_000_000); // 1 Koppa in base units
 
@@ -124,6 +124,28 @@ export function koppaCompact(baseUnits: string | null | undefined): string {
   } catch {
     return 'n/a';
   }
+}
+
+/**
+ * Activation state for the seven post-supply gates (service grants, monetary
+ * policy, and the five compute/PoR gates). They are deployed in runtime genesis
+ * at the operator-verified height {@link POST_SUPPLY_GATE} (9,200,000) and are
+ * NOT all exposed by `chain_getChainParams`, so state is derived from the live
+ * block height, never inferred as null/dormant from a missing RPC field. Returns
+ * `'active'` once the live height reaches the gate, `'pending'` before it, and
+ * `'unknown'` only when the live height itself is unavailable. Auto-flips to
+ * active the moment the chain crosses 9,200,000, no redeploy.
+ */
+export function postSupplyGateState(height: number | null): GateState {
+  if (height == null) return 'unknown';
+  return height >= POST_SUPPLY_GATE ? 'active' : 'pending';
+}
+
+/** Human label for a post-supply gate: `height 9,200,000 · active|pending`. */
+export function postSupplyGateLabel(height: number | null): string {
+  const base = `height ${POST_SUPPLY_GATE.toLocaleString('en-US')}`;
+  const st = postSupplyGateState(height);
+  return st === 'unknown' ? base : `${base} · ${st}`;
 }
 
 export function useSupplyStatus(): SupplyStatus {

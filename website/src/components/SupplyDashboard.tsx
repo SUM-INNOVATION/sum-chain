@@ -1,7 +1,8 @@
 'use client';
 
 import { StatusPill } from '@/components/ui/primitives';
-import { koppa, koppaCompact, useSupplyStatus, type GateState } from '@/lib/supplyStatus';
+import { koppa, koppaCompact, postSupplyGateState, useSupplyStatus, type GateState } from '@/lib/supplyStatus';
+import { POST_SUPPLY_GATE } from '@/lib/chainStatus';
 
 const BASE = BigInt(1_000_000_000); // 1 Koppa in base units
 
@@ -36,9 +37,16 @@ const POOLS_META = [
 /* Fixed per-pool colors (same categorical order as the designed-split legend). */
 const POOL_COLORS = ['var(--muted)', 'var(--accent-soft)', 'var(--signal-soft)', 'var(--signal)', 'var(--accent)'];
 
-function gatePill(state: GateState) {
+function gatePill(state: GateState, gateHeight?: number) {
   if (state === 'unknown') return <span className="mono text-xs text-muted">status unavailable</span>;
-  const label = state === 'dormant' ? 'Dormant' : state === 'pending' ? 'Pending' : 'Active';
+  const label =
+    state === 'dormant'
+      ? 'Dormant'
+      : state === 'pending'
+        ? gateHeight
+          ? `Pending · activates at height ${gateHeight.toLocaleString('en-US')}`
+          : 'Pending'
+        : 'Active';
   return <StatusPill status={state} label={label} />;
 }
 
@@ -207,8 +215,12 @@ export function ReservePools() {
     );
   }
   const r = s.reserve as unknown as Record<string, string>;
-  const grantsGate = s.gateState(s.gates.service_grants_enabled_from_height);
-  const monetaryGate = s.gateState(s.gates.monetary_policy_enabled_from_height);
+  // Service-grants and monetary-policy release are two of the seven post-supply
+  // gates: deployed in runtime genesis at height 9,200,000 and NOT reliably
+  // exposed by chain_getChainParams, so their state comes from the live height
+  // (auto-flips at the gate), never from a missing RPC field.
+  const grantsGate = postSupplyGateState(s.gates.height);
+  const monetaryGate = grantsGate;
   const pools = POOLS_META.map((p, i) => ({
     ...p,
     color: POOL_COLORS[i],
@@ -253,17 +265,26 @@ export function ReservePools() {
               <span className="font-medium text-foreground">{p.label}</span>
               <span className="tnum mono text-muted-strong">{koppa(p.base)} Ϙ remaining</span>
               <span className="text-muted">{p.release}</span>
-              {gatePill(gate)}
+              {gatePill(gate, POST_SUPPLY_GATE)}
             </li>
           );
         })}
       </ul>
       <p className="mt-5 text-xs leading-relaxed text-muted">
         Reserve release is protocol-gated: service-grant pools pay out only
-        through verifiable service claims once the claiming gate is enabled, and
-        the ecosystem and governance pools require native-Koppa governance once
-        enabled. Gate states above are configuration read from chain parameters,
-        not live participation data.
+        through verifiable service claims once the service-grants gate activates,
+        and the ecosystem and governance pools require native-Koppa governance
+        once the monetary-policy gate activates. Both gates are deployed in
+        runtime genesis and activate at height{' '}
+        {POST_SUPPLY_GATE.toLocaleString('en-US')}; the state above is derived
+        from the live block height and flips to active automatically when the
+        chain reaches that height.
+      </p>
+      <p className="mono mt-2 text-[11px] text-muted">
+        Note: chain_getChainParams does not expose every gate. For these
+        post-supply gates the site uses the operator-verified runtime-genesis
+        height ({POST_SUPPLY_GATE.toLocaleString('en-US')}), not a null/dormant
+        RPC field.
       </p>
       <p className="sr-only">{summary}</p>
     </div>

@@ -51,7 +51,7 @@ export const categories: Category[] = [
       {
         name: 'chain_buildClaimServiceGrant',
         description:
-          'Build an unsigned claim-service-grant transaction (no keys). Dormant until service_grants_enabled_from_height is set.',
+          'Build an unsigned claim-service-grant transaction (no keys). The service_grants gate is deployed in runtime genesis and activates at height 9,200,000 (not exposed by chain_getChainParams; the site uses that operator-verified height).',
       },
       {
         name: 'chain_buildUnlockServiceGrant',
@@ -245,8 +245,8 @@ export const categories: Category[] = [
   },
   {
     id: 'omninode-settlement',
-    title: 'OmniNode Inference Settlement (dormant)',
-    blurb: 'Escrow-funded verifier rewards keyed by attestations, active on mainnet (inference_settlement_enabled_from_height = 8,900,000 reached, issue #61). No bond slashing in v1 (reward denial / claim withholding / escrow refund). Reads + unsigned-tx builders (no keys).',
+    title: 'OmniNode Inference Settlement',
+    blurb: 'Escrow-funded verifier rewards keyed by attestations, active on mainnet (inference_settlement_enabled_from_height = 8,900,000 reached, issue #61). No bond slashing in v1 (reward denial / claim withholding / escrow refund). Reads + unsigned-tx builders (no keys). Settlement consistency and verifier bonding are separate post-supply gates that activate at height 9,200,000.',
     methods: [
       { name: 'omninode_getInferenceSession', description: 'Per-session settlement record (funder, reward terms, remaining escrow, status), or null.' },
       { name: 'omninode_getInferenceClaims', description: 'All paid reward claims for a session.' },
@@ -492,7 +492,7 @@ export const categories: Category[] = [
   {
     id: 'governance',
     title: 'Governance (v1)',
-    blurb: 'On-chain token-holder governance, dormant on mainnet. These methods are registered and respond; reads return empty/null and builders return unsigned tx material until a network configures governance_enabled_from_height and ChainParams.governance.',
+    blurb: 'On-chain token-holder governance, active on mainnet: the governance_enabled_from_height = 8,900,000 gate has been reached and ChainParams.governance is configured (validator-quorum authority). These methods respond with live proposal/vote state; builders return unsigned tx material (no keys).',
     methods: [
       { name: 'gov_buildCreateProposal', description: 'Build an unsigned create-proposal transaction to sign and broadcast.' },
       { name: 'gov_buildCastVote', description: 'Build an unsigned cast-vote transaction.' },

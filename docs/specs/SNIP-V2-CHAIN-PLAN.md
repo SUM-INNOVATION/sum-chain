@@ -505,12 +505,17 @@ struct ArchiveCoverageSummaryV2 {
 
 V2 doesn't introduce Filecoin-style PoRep, Arweave-style randomized recall packing, or per-chunk continuous proof. Those would be a separate redesign with their own scope. **V2's value is privacy, not stronger storage proofs.**
 
-> **Future (design-only, not implemented):** a deterministic, bounded,
+> **Update (issue #81): shipped and gated.** A deterministic, bounded,
 > assignment-aware challenge scheduler that guarantees per-chunk-assignment
-> coverage over time without an `O(files × chunks)` sweep is proposed in
-> [snip-assignment-aware-por-scheduling.md](./snip-assignment-aware-por-scheduling.md)
-> (issue #81). It would ship dormant behind its own gate; the v1 probabilistic
-> selector above remains the only active path until then.
+> coverage over time without an `O(files × chunks)` sweep is specified in
+> [snip-assignment-aware-por-scheduling.md](./snip-assignment-aware-por-scheduling.md).
+> Phase 1 (`por_assignment_targeting_enabled_from_height`) and Phase 2
+> (`assignment_aware_por_scheduler_enabled_from_height`) are implemented and
+> **deployed in runtime genesis, activation-gated at height 9,200,000** (two of
+> the seven post-supply gates). Below the gate the v1 probabilistic selector
+> above remains the only active path; at height 9,200,000 the extension activates
+> automatically. Neither gate is exposed by `chain_getChainParams`, so runtime
+> genesis is the source of truth.
 
 ### 5.2 Initial replication proof (revised v3 — `AcceptAssignmentV2` brought into Phase 1)
 
@@ -639,7 +644,7 @@ These are real concerns that will need work eventually, but **none should block 
 | Token emissions / mining-style PoR rewards | Contradicts current economic model ([docs/architecture/economic-model.md](../architecture/economic-model.md) — fixed supply). Requires formal economic-model revision (v3.0 → v4.0) and governance approval. | Future tokenomics-extension proposal |
 | Decentralized AGI compute (PoC) | Requires verifiable-compute primitives (zk-ML, challenge-response for compute, oracle/benchmark eval). Independent project. | Separate spec |
 | File rotation / true revocation (Ask 10) | Schema hooks reserved (`predecessor_root`, `Rotated` lifecycle); design defers | v2.x SNIP work |
-| Reassignment on archive-node exit | **Implemented, gate-dormant** (issue #62): owner-triggered `ReassignChunksV2` with per-file snapshot-layered epochs; see §5.4 | Delivered |
+| Reassignment on archive-node exit | **Implemented and active on mainnet** (issue #62; gate set to 8,900,000, reached): owner-triggered `ReassignChunksV2` with per-file snapshot-layered epochs; see §5.4 | Delivered |
 | Filecoin-grade challenge coverage | Requires per-file or per-chunk challenge scheduling | v3 storage redesign |
 
 ---

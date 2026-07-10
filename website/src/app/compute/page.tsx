@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import PageShell from '@/components/PageShell';
 import SystemMap from '@/components/SystemMap';
+import { LiveStatus } from '@/components/LiveStatus';
 import { SectionHeader, Reveal, MonoTag } from '@/components/ui/primitives';
 import { Card, SpecList, Callout, SourceLinks } from '@/components/ui/blocks';
 
@@ -97,7 +98,30 @@ export default function ComputePage() {
               the denominator.
             </Callout>
           </Reveal>
-          <Reveal delay={0.15}>
+          <Reveal delay={0.12}>
+            <Callout tone="note" title="Deployed in runtime genesis, activates at height 9,200,000">
+              <p>
+                Three further OmniNode gates are already in runtime genesis and
+                activate together at height <MonoTag>9,200,000</MonoTag>, with no
+                redeploy: sponsored attestation
+                (<MonoTag>omninode_sponsored_attestation_enabled_from_height</MonoTag>),
+                settlement consistency
+                (<MonoTag>inference_settlement_consistency_enabled_from_height</MonoTag>),
+                and verifier bonding
+                (<MonoTag>inference_verifier_bonding_enabled_from_height</MonoTag>).
+              </p>
+              <p className="mt-3">
+                <MonoTag>chain_getChainParams</MonoTag> does not expose every one
+                of these gates, so this status uses the operator-verified
+                runtime-genesis height and flips to active from the live block
+                height.
+              </p>
+              <div className="mt-3">
+                <LiveStatus feature="verifierBonding" />
+              </div>
+            </Callout>
+          </Reveal>
+          <Reveal delay={0.18}>
             <Callout tone="note" title="OmniNode, the compute product surface">
               This page describes the on-chain attestation protocol. <strong>OmniNode</strong> is the
               application built on it, request verifiable AI inference settled against SUM Chain. See{' '}
