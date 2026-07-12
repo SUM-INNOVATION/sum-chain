@@ -1,0 +1,55 @@
+name: Rust CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test-clippy:
+    runs-on: ubuntu-latest
+    env:
+      # librocksdb-sys bundles + compiles RocksDB; GCC 13+ on modern ubuntu
+      # images needs <cstdint> force-included (documented repo workaround). If
+      # the RocksDB build still fails, fall back to `runs-on: ubuntu-22.04`.
+      CXXFLAGS: "-include cstdint"
+    steps:
+      - uses: actions/checkout@v4
+
+      # rustup on the runner reads rust-toolchain.toml and installs the pinned
+      # channel (1.85.0). Single source of truth — no version hardcoded here, so
+      # bumping rust-toolchain.toml updates CI automatically. `rustup show`
+      # forces the install; clippy is in the default profile but added explicitly.
+      - name: Set up pinned toolchain
+        run: |
+          rustup show
+          rustup component add clippy
+
+      - name: Show versions
+        run: |
+          rustc --version
+          cargo --version
+          cargo clippy --version
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build (workspace)
+        run: cargo build --workspace --locked
+
+      - name: Test (workspace)
+        run: cargo test --workspace --locked
+
+      # Error-gated only: catches clippy/compile-error regressions. The workspace
+      # is not yet warning-clean, so `-D warnings` is deferred to a separate
+      # cleanup PR to avoid turning legacy warnings into unrelated blockers.
+      - name: Clippy (workspace, tests)
+        run: cargo clippy --workspace --tests --locked
