@@ -618,6 +618,16 @@ pub struct ChainParamsInfo {
     pub monetary_policy_enabled_from_height: Option<u64>,
     /// Service-grant claiming gate (800B correction).
     pub service_grants_enabled_from_height: Option<u64>,
+    /// Base OmniNode inference-settlement activation gate (issue #61). `null` /
+    /// `None` means settlement ops are rejected (`Failed(350)`). Clients read
+    /// this to know whether escrow-funded settlement is live.
+    pub inference_settlement_enabled_from_height: Option<u64>,
+    /// Consistency/plurality settlement mode gate (issue #77) — a separate
+    /// post-supply extension of base settlement.
+    pub inference_settlement_consistency_enabled_from_height: Option<u64>,
+    /// Verifier bonding + slashing gate (issue #78) — a separate post-supply
+    /// extension of base settlement.
+    pub inference_verifier_bonding_enabled_from_height: Option<u64>,
     /// Configured governance parameters, when present in the deployed genesis.
     pub governance: Option<GovernanceParamsInfo>,
 }

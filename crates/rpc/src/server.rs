@@ -1401,6 +1401,11 @@ impl SumChainApiServer for RpcServer {
             governance_enabled_from_height: p.governance_enabled_from_height,
             monetary_policy_enabled_from_height: p.monetary_policy_enabled_from_height,
             service_grants_enabled_from_height: p.service_grants_enabled_from_height,
+            inference_settlement_enabled_from_height: p.inference_settlement_enabled_from_height,
+            inference_settlement_consistency_enabled_from_height: p
+                .inference_settlement_consistency_enabled_from_height,
+            inference_verifier_bonding_enabled_from_height: p
+                .inference_verifier_bonding_enabled_from_height,
             governance: p.governance.as_ref().map(|g| crate::types::GovernanceParamsInfo {
                 validator_authority_threshold_bps: g.validator_authority_threshold_bps,
                 quorum_bps: g.quorum_bps,
@@ -9220,6 +9225,13 @@ mod phase_0b_rpc_tests {
             v2_enabled_from_height: None,  // disabled (production-safe default)
             omninode_enabled_from_height: None,  // disabled (production-safe default)
             education_enabled_from_height: None,  // disabled (production-safe default)
+            governance_enabled_from_height: None,
+            monetary_policy_enabled_from_height: None,
+            service_grants_enabled_from_height: None,
+            inference_settlement_enabled_from_height: None,
+            inference_settlement_consistency_enabled_from_height: None,
+            inference_verifier_bonding_enabled_from_height: None,
+            governance: None,
         };
         let got = serde_json::to_value(&v).unwrap();
         let want = serde_json::json!({
@@ -9240,6 +9252,13 @@ mod phase_0b_rpc_tests {
             "v2_enabled_from_height": null,
             "omninode_enabled_from_height": null,
             "education_enabled_from_height": null,
+            "governance_enabled_from_height": null,
+            "monetary_policy_enabled_from_height": null,
+            "service_grants_enabled_from_height": null,
+            "inference_settlement_enabled_from_height": null,
+            "inference_settlement_consistency_enabled_from_height": null,
+            "inference_verifier_bonding_enabled_from_height": null,
+            "governance": null,
         });
         assert_eq!(got, want);
     }
@@ -9264,6 +9283,13 @@ mod phase_0b_rpc_tests {
             v2_enabled_from_height: Some(1_000_000),  // activation height
             omninode_enabled_from_height: Some(1_250_000),  // distinct activation height
             education_enabled_from_height: Some(1_500_000),  // distinct activation height
+            governance_enabled_from_height: Some(1_600_000),
+            monetary_policy_enabled_from_height: Some(1_700_000),
+            service_grants_enabled_from_height: Some(1_800_000),
+            inference_settlement_enabled_from_height: Some(1_900_000),  // distinct activation height
+            inference_settlement_consistency_enabled_from_height: Some(2_000_000),  // distinct
+            inference_verifier_bonding_enabled_from_height: Some(2_100_000),  // distinct
+            governance: None,
         };
         let s = serde_json::to_string(&v).unwrap();
         let back: ChainParamsInfo = serde_json::from_str(&s).unwrap();
@@ -9271,6 +9297,9 @@ mod phase_0b_rpc_tests {
         assert_eq!(back.v2_enabled_from_height, Some(1_000_000));
         assert_eq!(back.omninode_enabled_from_height, Some(1_250_000));
         assert_eq!(back.education_enabled_from_height, Some(1_500_000));
+        assert_eq!(back.inference_settlement_enabled_from_height, Some(1_900_000));
+        assert_eq!(back.inference_settlement_consistency_enabled_from_height, Some(2_000_000));
+        assert_eq!(back.inference_verifier_bonding_enabled_from_height, Some(2_100_000));
     }
 
     #[test]
