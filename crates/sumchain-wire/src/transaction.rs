@@ -820,6 +820,14 @@ impl Transaction {
 }
 
 /// Transaction inner payload - supports both legacy and V2 formats
+// Boxing the larger `V2` variant is the only large_enum_variant fix, but it
+// would change this consensus type's public shape
+// (`TxInner::V2(TransactionV2)` -> `TxInner::V2(Box<TransactionV2>)`), breaking
+// downstream exhaustive matches and construction. `TxInner` is a
+// signed-transaction wire type whose bincode tag order (Legacy=0 / V2=1) is
+// frozen by the golden fixtures; it must stay byte-for-byte as-is. Scoped to
+// this enum only.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TxInner {
     /// Legacy transfer transaction (backwards compatible)

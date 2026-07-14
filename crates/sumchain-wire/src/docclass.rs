@@ -20,7 +20,7 @@
 use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
 
-use crate::agreement::{EncryptionAlgorithm, EncryptionMeta};
+use crate::agreement::EncryptionMeta;
 use crate::{Address, Balance, BlockHeight, Timestamp};
 
 // =============================================================================

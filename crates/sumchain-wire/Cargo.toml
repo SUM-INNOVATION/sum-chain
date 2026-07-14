@@ -1,0 +1,32 @@
+[package]
+name = "sumchain-wire"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Byte-frozen on-chain wire formats for SUM Chain (an L1 blockchain): addresses, hashes, transactions, and every subprotocol payload. Pure encoding/decoding leaf crate — no signature verification, state, storage, or networking dependencies."
+keywords = ["sumchain", "blockchain", "wire", "bincode", "serialization"]
+categories = ["cryptography::cryptocurrencies", "data-structures", "encoding"]
+readme = "README.md"
+# Explicit allowlist: ONLY hand-written source + README + the manifest are
+# packaged. Guarantees build outputs (target/), generated files, or scratch
+# artifacts can never be swept into a published/dry-run package.
+include = ["src/**/*.rs", "README.md", "LICENSE-MIT", "LICENSE-APACHE"]
+
+# W1a leaf crate (sum-chain #124): holds ONLY the byte-frozen wire types
+# extracted verbatim from `sumchain-primitives`. Encoding lives here; semantic
+# verification (Ed25519, receipts, state) stays above the leaf in
+# `sumchain-primitives` and its dependents. Deliberately depends on NO
+# ed25519 / state / rpc / consensus / networking / rocksdb / libp2p crate, and
+# NOT on `sumchain-primitives` — keeping the dependency graph acyclic.
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+hex = { workspace = true }
+bs58 = { workspace = true }
+blake3 = { workspace = true }
+thiserror = { workspace = true }
+serde-big-array = { workspace = true }

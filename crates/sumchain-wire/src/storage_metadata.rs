@@ -387,10 +387,10 @@ mod assignment_tests {
     /// archive[j] = blake3::hash("snip-v2-archive-{j+1}").as_bytes()[..20]
     fn fixture_archives() -> [Address; 5] {
         let mut out = [Address::new([0u8; 20]); 5];
-        for j in 0..5 {
+        for (j, slot) in out.iter_mut().enumerate() {
             let label = format!("snip-v2-archive-{}", j + 1);
             let h = blake3::hash(label.as_bytes());
-            out[j] = Address::from_slice(&h.as_bytes()[..20]).expect("20 bytes");
+            *slot = Address::from_slice(&h.as_bytes()[..20]).expect("20 bytes");
         }
         out
     }

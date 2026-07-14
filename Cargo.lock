@@ -5969,6 +5969,7 @@ dependencies = [
  "serde",
  "serde-big-array",
  "serde_json",
+ "sumchain-wire",
  "thiserror 1.0.69",
 ]
 
@@ -6091,6 +6092,20 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "zeroize",
+]
+
+[[package]]
+name = "sumchain-wire"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "blake3",
+ "bs58",
+ "hex",
+ "serde",
+ "serde-big-array",
+ "serde_json",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

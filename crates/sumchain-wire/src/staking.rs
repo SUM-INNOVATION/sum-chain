@@ -8,12 +8,13 @@ use serde_big_array::BigArray;
 use crate::{Balance, BlockHeight};
 
 /// Validator status in the staking system
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum ValidatorStatus {
     /// Actively participating in consensus
     Active = 0,
     /// Voluntarily stopped validating
+    #[default]
     Inactive = 1,
     /// Penalized and temporarily removed from validator set
     Jailed = 2,
@@ -36,12 +37,6 @@ impl ValidatorStatus {
     /// Check if validator can participate in consensus
     pub fn can_validate(&self) -> bool {
         matches!(self, ValidatorStatus::Active)
-    }
-}
-
-impl Default for ValidatorStatus {
-    fn default() -> Self {
-        ValidatorStatus::Inactive
     }
 }
 
@@ -585,6 +580,10 @@ pub struct SlashingRecord {
 
 impl SlashingRecord {
     /// Create a new slashing record
+    // Eight parameters map 1:1 to this on-chain record's fields; collapsing them
+    // into a params struct would change this public constructor's signature (a
+    // public-API break) with no wire benefit. Scoped to this fn only.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         validator_pubkey: [u8; 32],
         evidence_type: EvidenceType,
@@ -794,12 +793,12 @@ impl ValidatorSet {
         let selection_value = u128::from_le_bytes(selection_bytes);
 
         // Map to range [0, total_voting_power)
-        let selection_point = selection_value % (self.total_voting_power as u128);
+        let selection_point = selection_value % self.total_voting_power;
 
         // Select proposer based on cumulative voting power
         let mut cumulative = 0u128;
         for validator in &self.validators {
-            cumulative += validator.voting_power as u128;
+            cumulative += validator.voting_power;
             if selection_point < cumulative {
                 return Some(validator.pubkey);
             }

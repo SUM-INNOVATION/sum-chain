@@ -794,7 +794,7 @@ impl TradingWindow {
     /// Check if trading is allowed at given day of month and month
     pub fn is_open(&self, day: u8, month: u8) -> bool {
         // Check month (0-indexed in bitmask)
-        if month < 1 || month > 12 {
+        if !(1..=12).contains(&month) {
             return false;
         }
         let month_allowed = (self.months & (1 << (month - 1))) != 0;

@@ -1,98 +1,28 @@
-//! `InferenceAttestation` — chain-side wire types for the OmniNode v1
-//! subprotocol (Stage 6 handoff).
+//! `InferenceAttestation` — semantic verification and status classification for
+//! the OmniNode v1 subprotocol (Stage 6 handoff).
 //!
-//! The on-chain tx variant `TxType::InferenceAttestation = 21` carries an
-//! [`InferenceAttestationTxData`] payload inside the existing
-//! `SignedTransaction` envelope. The verifier (off-chain OmniNode node)
-//! signs an inner [`InferenceAttestationDigest`] under
-//! `DOMAIN_TAG || bincode(digest)`; the chain verifies that signature
-//! against the outer `SignedTransaction.public_key` (which, by executor
-//! rule, equals `tx.sender`'s pubkey — `sender == verifier` is enforced).
+//! The **wire types** (digest, tx-data, sponsored-v2 envelope, storage records,
+//! key derivations, signing bytes, error type, and all constants) live in the
+//! `sumchain-wire` leaf crate and are re-exported below verbatim, so every
+//! existing `sumchain_primitives::inference_attestation::…` path keeps
+//! resolving unchanged.
 //!
-//! Wire-format frozen for v1, locked by the test vectors in
-//! `crates/primitives/tests/inference_attestation_fixtures.rs`:
+//! This module keeps the pieces that must stay ABOVE the leaf:
 //!
-//! - `bincode` 1.3 default config (u64-LE length prefix for `String`).
-//! - Field order of `InferenceAttestationDigest` is significant:
-//!   `session_id, model_hash, manifest_root, response_hash, proof_root`.
-//! - `DOMAIN_TAG` is the OmniNode-defined separator
-//!   `omninode.inference_attestation.v1`.
-//!
-//! See `docs/SUBPROTOCOLS/INFERENCE-ATTESTATION.md` for full protocol notes.
+//! * **Ed25519 verification** ([`verify_attestation_signature`],
+//!   [`verify_attestation_v2_signature`]) — the leaf is deliberately
+//!   ed25519-free; encoding is separated from cryptographic verification.
+//! * **Receipt-bound status classification**
+//!   ([`classify_inference_attestation_status`] /
+//!   [`InferenceAttestationStatusInfo`]) — binds `Receipt`/`TxStatus`, which
+//!   also live above the leaf.
 
 use serde::{Deserialize, Serialize};
-use serde_big_array::BigArray;
 
-use crate::address::Address;
-
-/// Domain separator prepended to `bincode(digest)` before Ed25519 signing.
-/// Frozen by OmniNode Stage 6; bumping requires a new TxPayload variant
-/// (e.g. `InferenceAttestationV2`).
-pub const DOMAIN_TAG: &str = "omninode.inference_attestation.v1";
-
-/// Maximum byte length (UTF-8) of `InferenceAttestationDigest::session_id`.
-/// Executor rejects payloads exceeding this.
-pub const MAX_SESSION_ID_BYTES: usize = 256;
-
-/// Inner digest signed by the verifier. Field order is the on-wire bincode
-/// order and is **frozen** for v1 — changing it silently invalidates every
-/// historical attestation. New fields require a new variant.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InferenceAttestationDigest {
-    pub session_id: String,
-    pub model_hash: [u8; 32],
-    pub manifest_root: [u8; 32],
-    pub response_hash: [u8; 32],
-    pub proof_root: [u8; 32],
-}
-
-/// On-chain tx payload. Wrapped by `SignedTransaction`; the outer signature
-/// (verifier signing the full `SignedTransaction.inner`) and the inner
-/// `verifier_signature` (verifier signing `DOMAIN_TAG || bincode(digest)`)
-/// are produced by the same Ed25519 key but under different inputs.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InferenceAttestationTxData {
-    pub digest: InferenceAttestationDigest,
-    #[serde(with = "BigArray")]
-    pub verifier_signature: [u8; 64],
-}
-
-/// Errors surfaced when validating an `InferenceAttestationTxData` against
-/// chain rules or its inner signature.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum AttestationError {
-    #[error("session_id is {0} bytes; max is {MAX_SESSION_ID_BYTES}")]
-    SessionIdTooLong(usize),
-    #[error("inner verifier signature is invalid for the supplied public key")]
-    InvalidSignature,
-    #[error("verifier public key is not a valid Ed25519 point")]
-    InvalidPublicKey,
-    #[error("bincode-serializing digest failed: {0}")]
-    Serialization(String),
-}
-
-/// Sponsored attestation v2 envelope (issue #79). **Append-only** — this does
-/// NOT change v1: it wraps the *same* [`InferenceAttestationDigest`] and the same
-/// verifier signing bytes (`DOMAIN_TAG || bincode(digest)`), so a v2 attestation
-/// is an identical commitment to the v1 form.
-///
-/// The difference is *who submits it*: the outer `SignedTransaction` is signed by
-/// a **sponsor/payer** (the fee payer), while the **verifier** is identified by
-/// `verifier_public_key` and authenticated by `verifier_signature`. Sponsored
-/// attestation changes who pays to submit the attestation, not who made it — the
-/// verifier remains the attestation identity for deduplication, storage, and
-/// settlement.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InferenceAttestationV2TxData {
-    pub digest: InferenceAttestationDigest,
-    /// The verifier's raw Ed25519 public key — the attestation identity. The
-    /// verifier address is `Address::from_public_key(verifier_public_key)`.
-    pub verifier_public_key: [u8; 32],
-    /// The verifier's signature over `DOMAIN_TAG || bincode(digest)` (identical
-    /// bytes to v1). Must verify against `verifier_public_key`.
-    #[serde(with = "BigArray")]
-    pub verifier_signature: [u8; 64],
-}
+// Re-export the full wire surface (digest, tx-data, records, key-derivations,
+// signing-byte helpers, `AttestationError`, and every constant) so callers see
+// an unchanged module API.
+pub use sumchain_wire::inference_attestation::*;
 
 /// Verify a sponsored (v2) attestation's inner verifier signature over the same
 /// v1 signing bytes, against the envelope's `verifier_public_key`. Distinguishes
@@ -116,28 +46,6 @@ pub fn verify_attestation_v2_signature(
         .map_err(|_| AttestationError::InvalidSignature)
 }
 
-/// Canonical bytes of the digest under bincode 1.3 default config.
-/// Matches OmniNode Stage 6 fixture's `canonical_digest_bytes`.
-pub fn canonical_digest_bytes(
-    digest: &InferenceAttestationDigest,
-) -> Result<Vec<u8>, AttestationError> {
-    bincode::serialize(digest).map_err(|e| AttestationError::Serialization(e.to_string()))
-}
-
-/// `DOMAIN_TAG.as_bytes() || canonical_digest_bytes(digest)` — the exact
-/// byte sequence Ed25519 signs over. Matches OmniNode Stage 6 fixture's
-/// `signing_input_bytes`.
-pub fn signing_input_bytes(
-    digest: &InferenceAttestationDigest,
-) -> Result<Vec<u8>, AttestationError> {
-    let canonical = canonical_digest_bytes(digest)?;
-    let domain = DOMAIN_TAG.as_bytes();
-    let mut out = Vec::with_capacity(domain.len() + canonical.len());
-    out.extend_from_slice(domain);
-    out.extend_from_slice(&canonical);
-    Ok(out)
-}
-
 /// Verify the inner `verifier_signature` over `signing_input_bytes(digest)`
 /// against the supplied raw 32-byte Ed25519 public key.
 ///
@@ -159,87 +67,6 @@ pub fn verify_attestation_signature(
     verifying_key
         .verify_strict(&signing_input, &signature)
         .map_err(|_| AttestationError::InvalidSignature)
-}
-
-/// Derive the verifier address from the raw Ed25519 public key using the
-/// chain's canonical address rule. Re-exported for clarity at the
-/// subprotocol surface; equivalent to [`Address::from_public_key`].
-pub fn verifier_address(public_key: &[u8; 32]) -> Address {
-    Address::from_public_key(public_key)
-}
-
-/// Domain string for the inference-attestation CF key derivation.
-/// Bumping this string (e.g. to `…V2`) is the path to a CF-schema
-/// migration without breaking lookups against historical entries.
-pub const INFERENCE_ATTESTATION_KEY_DOMAIN: &[u8] = b"InferenceAttestationKeyV1";
-
-/// Stable 32-byte CF key for the `inference_attestations` column family.
-///
-/// `BLAKE3(INFERENCE_ATTESTATION_KEY_DOMAIN || bincode((session_id, verifier_address)))`
-///
-/// Properties:
-/// - **Domain-separated**: the `V1` suffix in the domain string lets a
-///   future schema rotation use a `V2` keyspace without colliding with
-///   historical entries.
-/// - **Length-safe**: bincode 1.3 default config length-prefixes `String`
-///   with a u64 LE before the bytes, so a `session_id` containing `0x00`
-///   cannot be confused with a different `(session_id, verifier)` split.
-/// - **Fixed-size**: 32 bytes regardless of `session_id` length, keeping
-///   point-lookup cost bounded on RocksDB.
-/// - **Fixture-locked**: the wire-fixture test asserts the exact key bytes
-///   for OmniNode's three reference vectors. Drift = red CI.
-pub fn inference_attestation_key(
-    session_id: &str,
-    verifier_address: &Address,
-) -> [u8; 32] {
-    let inner = bincode::serialize(&(session_id, verifier_address))
-        .expect("bincode of (String, Address) cannot fail");
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(INFERENCE_ATTESTATION_KEY_DOMAIN);
-    hasher.update(&inner);
-    *hasher.finalize().as_bytes()
-}
-
-/// Domain string for the session-id-keyed index CF (`INFERENCE_ATTESTATIONS_BY_SESSION`).
-/// Versioned so future index-key rotations can use a `V2` namespace
-/// without colliding with historical entries.
-pub const INFERENCE_ATTESTATION_SESSION_INDEX_DOMAIN: &[u8] =
-    b"InferenceAttestationSessionIndexV1";
-
-/// Number of bytes of the session-id BLAKE3 hash used as the prefix
-/// portion of the session-index key. 16 bytes = 128 bits of session-id
-/// distinguishability, sufficient for any practical attestation rate.
-pub const SESSION_ID_HASH_BYTES: usize = 16;
-
-/// 36-byte index key for the `INFERENCE_ATTESTATIONS_BY_SESSION` CF:
-/// `session_id_hash_16 || verifier_address_20`.
-///
-/// Property: the first 16 bytes are a deterministic function of
-/// `session_id` alone — prefix-iterating with that 16-byte prefix
-/// returns every `(session_id, verifier)` pair for the given session.
-/// The trailing 20 bytes are the verifier's chain Address, so the
-/// caller can recover the verifier without a second lookup.
-pub fn session_index_key(
-    session_id: &str,
-    verifier_address: &Address,
-) -> [u8; 36] {
-    let mut out = [0u8; 36];
-    out[..SESSION_ID_HASH_BYTES].copy_from_slice(&session_index_prefix(session_id));
-    out[SESSION_ID_HASH_BYTES..].copy_from_slice(verifier_address.as_bytes());
-    out
-}
-
-/// 16-byte prefix portion of [`session_index_key`]. Used by the RPC
-/// `list_by_session` path to bound a prefix scan to one session's
-/// attestations.
-pub fn session_index_prefix(session_id: &str) -> [u8; SESSION_ID_HASH_BYTES] {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(INFERENCE_ATTESTATION_SESSION_INDEX_DOMAIN);
-    hasher.update(session_id.as_bytes());
-    let hash = hasher.finalize();
-    let mut prefix = [0u8; SESSION_ID_HASH_BYTES];
-    prefix.copy_from_slice(&hash.as_bytes()[..SESSION_ID_HASH_BYTES]);
-    prefix
 }
 
 /// Status of a specific `InferenceAttestation` tx, returned by the
@@ -342,42 +169,4 @@ pub fn classify_inference_attestation_status(
             reason: None,
         }
     }
-}
-
-/// Value stored in the `INFERENCE_ATTESTATIONS` CF. Bincode-serialized.
-///
-/// Records the verifier-signed digest, the signature, and the inclusion
-/// metadata the chain stamps at executor time. Both the executor (during
-/// dedup check + persist) and future RPC read paths (Phase 4) consume
-/// this record.
-///
-/// Wire shape is **not** part of the OmniNode handoff — it's a chain-side
-/// internal storage record. Field order is still frozen for forward
-/// compatibility with stored data: changing it would require a CF schema
-/// migration (rotate to `InferenceAttestationKeyV2`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InferenceAttestationRecord {
-    pub digest: InferenceAttestationDigest,
-    #[serde(with = "BigArray")]
-    pub verifier_signature: [u8; 64],
-    pub included_at_height: u64,
-    pub tx_hash: crate::Hash,
-}
-
-/// Additive sponsor metadata for a **sponsored (v2)** inference attestation
-/// (issue #95). Stored in the dedicated `INFERENCE_ATTESTATION_SPONSORS` CF under
-/// the SAME `inference_attestation_key(session_id, verifier_address)` as the
-/// canonical [`InferenceAttestationRecord`], and written **only** by the
-/// sponsored v2 path, in the same atomic batch as the record. v1 direct
-/// submissions (`sender == verifier`) write no sponsor entry, so absence means
-/// "not sponsored". This is observability-only: the sponsor never becomes the
-/// attestation identity and settlement never reads it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InferenceAttestationSponsor {
-    /// The outer transaction sender that paid to submit the attestation.
-    pub sponsor: Address,
-    /// Block height at which the sponsored attestation was included.
-    pub submitted_at_height: u64,
-    /// Hash of the outer (sponsor-signed) transaction that carried the v2 envelope.
-    pub tx_hash: crate::Hash,
 }

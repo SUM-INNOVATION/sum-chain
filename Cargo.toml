@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/sumchain-wire",
     "crates/primitives",
     "crates/crypto",
     "crates/storage",
@@ -29,12 +30,18 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/SUM-INNOVATION/sum-chain"
 
 [workspace.dependencies]
+# Internal crates
+# W1a wire-format leaf (sum-chain #124): the byte-frozen encoding surface,
+# re-exported by `sumchain-primitives`.
+sumchain-wire = { path = "crates/sumchain-wire", version = "0.1.0" }
+
 # Async runtime
 tokio = { version = "1.35", features = ["full"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+serde-big-array = "0.5"
 toml = "0.8"
 bincode = "1.3"
 hex = "0.4"
