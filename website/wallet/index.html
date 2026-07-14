@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>sum chain wallet</title>
+  <meta name="description" content="Koppa wallets: SUMailet in the browser and the CLI wallet in the terminal. Non-custodial, one identity across the protocol.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,300;14..32,400;14..32,500;14..32,600&display=swap" rel="stylesheet">
+  <link rel="icon" type="image/svg+xml" href="../favicon.svg">
+  <link rel="stylesheet" href="../styles.css">
+</head>
+<body>
+
+  <nav class="nav" id="nav">
+    <div class="nav-inner">
+      <a href="../" class="nav-logo"><span class="logo-plus">+</span>sum<span class="logo-suffix">chain</span></a>
+      <div class="nav-links">
+        <a href="../storage/">Storage</a>
+        <a href="../compute/">Compute</a>
+        <a href="../governance/">Governance</a>
+        <a href="../tokenomics/">Tokenomics</a>
+        <a href="../node/">Run a node</a>
+        <a href="../wallet/" aria-current="page">Wallet</a>
+        <a href="../docs/">Docs</a>
+      </div>
+      <a href="https://explorer.sumchain.io" class="nav-cta" target="_blank" rel="noopener">Explorer <span aria-hidden="true">&#8599;</span></a>
+      <button class="menu-btn" id="menuBtn" aria-label="Menu" aria-expanded="false">
+        <span></span><span></span><span></span>
+      </button>
+    </div>
+  </nav>
+
+  <div class="mobile-menu" id="mobileMenu">
+    <a href="../storage/">Storage</a>
+    <a href="../compute/">Compute</a>
+    <a href="../governance/">Governance</a>
+    <a href="../tokenomics/">Tokenomics</a>
+    <a href="../node/">Run a node</a>
+    <a href="../wallet/" aria-current="page">Wallet</a>
+    <a href="../docs/">Docs</a>
+    <a href="https://explorer.sumchain.io" target="_blank" rel="noopener">Explorer</a>
+  </div>
+
+  <main class="page">
+    <div class="page-head">
+      <span class="label">Wallet</span>
+      <h1>Your keys, two ways.</h1>
+      <p class="lede">Use Koppa from the browser with SUMailet or from the terminal with the CLI wallet. Both are non-custodial and speak to the same chain.</p>
+    </div>
+    <div class="page-body">
+      <h2 id="web">SUMailet, in the browser</h2>
+      <p><a href="https://mlt.sumail.xyz/" target="_blank" rel="noopener">SUMailet</a> is the web wallet: send and receive Koppa from any browser with nothing to install. It is non-custodial; keys stay with you.</p>
+
+      <h2 id="cli">The CLI wallet</h2>
+      <p>Built alongside the node from the same repository:</p>
+      <pre class="code">git clone https://github.com/SUM-INNOVATION/sum-chain
+cd sum-chain &amp;&amp; cargo build --release</pre>
+      <pre class="code"># Create a wallet
+sumchain keygen --output my-wallet.json
+
+# Check a balance
+sumchain-wallet balance --key my-wallet.json
+
+# Send Koppa
+sumchain-wallet transfer \
+  --key my-wallet.json \
+  --to RECIPIENT_ADDRESS \
+  --amount 10.5</pre>
+      <p>Transfers confirm in the next block and are final after six confirmations, roughly eighteen seconds. The typical fee is 0.001 &#984;.</p>
+
+      <h2 id="keys">Addresses and keys</h2>
+      <div class="spec-table">
+        <div class="spec-row"><span class="spec-k">Signatures</span><span class="spec-v">Ed25519</span></div>
+        <div class="spec-row"><span class="spec-k">Address</span><span class="spec-v mono">Blake3(pubkey)[12..32]</span></div>
+        <div class="spec-row"><span class="spec-k">Display formats</span><span class="spec-v">Base58 with checksum, or 0x-prefixed hex</span></div>
+        <div class="spec-row"><span class="spec-k">Messaging keys</span><span class="spec-v">X25519, derived from the same identity</span></div>
+      </div>
+      <p>The same keypair that holds Koppa can receive SRC-201 encrypted messages and hold document credentials; one identity across the whole protocol.</p>
+
+      <h2 id="roadmap">In development</h2>
+      <p>A TypeScript SDK and native mobile wallets are in progress. Until then, the <a href="../docs/">JSON-RPC API</a> is stable and fully documented for direct integration.</p>
+    </div>
+      <div class="pager">
+        <a href="../docs/">
+          <span class="pager-k">Next</span>
+          <span class="pager-v">JSON-RPC API <span aria-hidden="true">&#8594;</span></span>
+        </a>
+      </div>
+  </main>
+
+  <footer class="footer">
+    <div class="footer-inner">
+      <a href="../" class="nav-logo"><span class="logo-plus">+</span>sum<span class="logo-suffix">chain</span></a>
+      <span class="footer-copy">2026</span>
+      <div class="footer-links">
+        <a href="https://explorer.sumchain.io" target="_blank" rel="noopener">Explorer</a>
+        <a href="https://x.com/SUM_INNOVATION" target="_blank" rel="noopener">X</a>
+        <a href="https://www.linkedin.com/company/suminnovation/" target="_blank" rel="noopener">LinkedIn</a>
+        <a href="mailto:hello@suminnovation.xyz">Contact</a>
+      </div>
+    </div>
+  </footer>
+
+  <script src="../main.js"></script>
+</body>
+</html>

@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>sum chain governance</title>
+  <meta name="description" content="Consensus-level governance on sum chain: policy accounts with configurable multi-sig thresholds, epochs, and validator slashing.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,300;14..32,400;14..32,500;14..32,600&display=swap" rel="stylesheet">
+  <link rel="icon" type="image/svg+xml" href="../favicon.svg">
+  <link rel="stylesheet" href="../styles.css">
+</head>
+<body>
+
+  <nav class="nav" id="nav">
+    <div class="nav-inner">
+      <a href="../" class="nav-logo"><span class="logo-plus">+</span>sum<span class="logo-suffix">chain</span></a>
+      <div class="nav-links">
+        <a href="../storage/">Storage</a>
+        <a href="../compute/">Compute</a>
+        <a href="../governance/" aria-current="page">Governance</a>
+        <a href="../tokenomics/">Tokenomics</a>
+        <a href="../node/">Run a node</a>
+        <a href="../wallet/">Wallet</a>
+        <a href="../docs/">Docs</a>
+      </div>
+      <a href="https://explorer.sumchain.io" class="nav-cta" target="_blank" rel="noopener">Explorer <span aria-hidden="true">&#8599;</span></a>
+      <button class="menu-btn" id="menuBtn" aria-label="Menu" aria-expanded="false">
+        <span></span><span></span><span></span>
+      </button>
+    </div>
+  </nav>
+
+  <div class="mobile-menu" id="mobileMenu">
+    <a href="../storage/">Storage</a>
+    <a href="../compute/">Compute</a>
+    <a href="../governance/" aria-current="page">Governance</a>
+    <a href="../tokenomics/">Tokenomics</a>
+    <a href="../node/">Run a node</a>
+    <a href="../wallet/">Wallet</a>
+    <a href="../docs/">Docs</a>
+    <a href="https://explorer.sumchain.io" target="_blank" rel="noopener">Explorer</a>
+  </div>
+
+  <main class="page">
+    <div class="page-head">
+      <span class="label">Governance</span>
+      <h1>Governance at the consensus level.</h1>
+      <p class="lede">Group control on sum chain is not a smart contract pattern. Policy accounts are enforced directly by the state executor, so shared ownership carries no contract risk.</p>
+    </div>
+    <div class="page-body">
+      <h2 id="policy">Policy accounts</h2>
+      <p>A policy account is an address controlled by a group. Members carry optional voting weights, and a policy defines the approval threshold for each class of action: unanimous, majority, percentage, weighted, or custom.</p>
+      <p><strong>The rules run in the state executor, not in a smart contract.</strong> There is no contract code to exploit, approvals carry nonce-based replay protection, and unknown action types fail closed until explicitly configured.</p>
+
+      <h2 id="profiles">Profiles</h2>
+      <p>Pre-configured policies cover the common cases:</p>
+      <div class="spec-table">
+        <div class="spec-row"><span class="spec-k">Conservative</span><span class="spec-v">Unanimous approval for ownership transfers</span></div>
+        <div class="spec-row"><span class="spec-k">Company</span><span class="spec-v">Majority for governance, unanimous for asset transfers</span></div>
+        <div class="spec-row"><span class="spec-k">DAO</span><span class="spec-v">Token-weighted voting</span></div>
+        <div class="spec-row"><span class="spec-k">Trust</span><span class="spec-v">Conservative thresholds with fiduciary requirements</span></div>
+        <div class="spec-row"><span class="spec-k">Personal</span><span class="spec-v">Simple majority for shared accounts</span></div>
+      </div>
+
+      <h2 id="proposals">Proposals</h2>
+      <p>Any member can submit a proposal containing the action to execute, such as transferring an NFT the group owns. Members approve; once the threshold for that action class is met, the proposal executes and the account's nonce increments. Three people can jointly own a tokenized house and be certain it cannot be sold without all three signatures.</p>
+
+      <h2 id="validators">Validators and epochs</h2>
+      <p>Block production runs under Proof of Authority with round-robin rotation. The active validator set is recomputed every epoch of 14,400 blocks using stake-weighted selection. Missed blocks are tracked per validator, misbehavior is slashed, and repeat offenders can be tombstoned permanently.</p>
+      <pre class="code"># Current epoch
+{"jsonrpc":"2.0","method":"epoch_getInfo","params":[],"id":1}
+
+# Active set and proposer
+{"jsonrpc":"2.0","method":"get_validators","params":[],"id":1}
+
+# Slashing history
+{"jsonrpc":"2.0","method":"slashing_getRecords","params":[],"id":1}</pre>
+
+      <h2 id="treasury">Treasury</h2>
+      <p>The Foundation reserve of 400 billion Koppa is governed by a 3-of-5 multisig with all activity visible on chain. Allocation details are on the <a href="../tokenomics/">tokenomics page</a>.</p>
+    </div>
+      <div class="pager">
+        <a href="../tokenomics/">
+          <span class="pager-k">Next</span>
+          <span class="pager-v">Tokenomics <span aria-hidden="true">&#8594;</span></span>
+        </a>
+      </div>
+  </main>
+
+  <footer class="footer">
+    <div class="footer-inner">
+      <a href="../" class="nav-logo"><span class="logo-plus">+</span>sum<span class="logo-suffix">chain</span></a>
+      <span class="footer-copy">2026</span>
+      <div class="footer-links">
+        <a href="https://explorer.sumchain.io" target="_blank" rel="noopener">Explorer</a>
+        <a href="https://x.com/SUM_INNOVATION" target="_blank" rel="noopener">X</a>
+        <a href="https://www.linkedin.com/company/suminnovation/" target="_blank" rel="noopener">LinkedIn</a>
+        <a href="mailto:hello@suminnovation.xyz">Contact</a>
+      </div>
+    </div>
+  </footer>
+
+  <script src="../main.js"></script>
+</body>
+</html>

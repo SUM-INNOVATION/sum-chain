@@ -1,0 +1,926 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>sum chain docs</title>
+  <meta name="description" content="JSON-RPC 2.0 API reference for sum chain: chain queries, transactions, storage, tokens, messaging, and credential layers. All methods verified against mainnet.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,300;14..32,400;14..32,500;14..32,600&display=swap" rel="stylesheet">
+  <link rel="icon" type="image/svg+xml" href="../favicon.svg">
+  <link rel="stylesheet" href="../styles.css">
+</head>
+<body>
+
+  <nav class="nav" id="nav">
+    <div class="nav-inner">
+      <a href="../" class="nav-logo"><span class="logo-plus">+</span>sum<span class="logo-suffix">chain</span></a>
+      <div class="nav-links">
+        <a href="../storage/">Storage</a>
+        <a href="../compute/">Compute</a>
+        <a href="../governance/">Governance</a>
+        <a href="../tokenomics/">Tokenomics</a>
+        <a href="../node/">Run a node</a>
+        <a href="../wallet/">Wallet</a>
+        <a href="../docs/" aria-current="page">Docs</a>
+      </div>
+      <a href="https://explorer.sumchain.io" class="nav-cta" target="_blank" rel="noopener">Explorer <span aria-hidden="true">&#8599;</span></a>
+      <button class="menu-btn" id="menuBtn" aria-label="Menu" aria-expanded="false">
+        <span></span><span></span><span></span>
+      </button>
+    </div>
+  </nav>
+
+  <div class="mobile-menu" id="mobileMenu">
+    <a href="../storage/">Storage</a>
+    <a href="../compute/">Compute</a>
+    <a href="../governance/">Governance</a>
+    <a href="../tokenomics/">Tokenomics</a>
+    <a href="../node/">Run a node</a>
+    <a href="../wallet/">Wallet</a>
+    <a href="../docs/" aria-current="page">Docs</a>
+    <a href="https://explorer.sumchain.io" target="_blank" rel="noopener">Explorer</a>
+  </div>
+
+
+  <main class="docs-main">
+    <div class="page-head">
+      <span class="label">Documentation</span>
+      <h1>JSON-RPC API</h1>
+      <p class="lede">Chain queries, transaction submission, and integration with the storage protocol, NFTs, tokens, encrypted messaging, policy accounts, and document-credential layers. The native currency is Koppa (&#984;) with 9 decimal places.</p>
+      <p class="docs-note">All 143 methods on this page are verified against the live mainnet RPC.</p>
+    </div>
+    <div class="docs-body">
+
+    <section class="docs-section" id="connection">
+      <h2>Connection</h2>
+      <p class="blurb">Public mainnet endpoint:</p>
+      <pre class="code">https://rpc.sumchain.io</pre>
+      <p class="blurb">Every request follows JSON-RPC 2.0. The <code class="inline">Content-Type: application/json</code> header is required.</p>
+      <pre class="code">curl -X POST https://rpc.sumchain.io\
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"chain_id","params":[],"id":1}'</pre>
+    </section>
+
+    <section class="docs-section" id="currency">
+      <h2>Currency and units</h2>
+      <div class="spec-table">
+        <div class="spec-row"><span class="spec-k">Name</span><span class="spec-v">Koppa</span></div>
+        <div class="spec-row"><span class="spec-k">Symbol</span><span class="spec-v">&#984;</span></div>
+        <div class="spec-row"><span class="spec-k">Decimals</span><span class="spec-v mono">9</span></div>
+        <div class="spec-row"><span class="spec-k">Base unit</span><span class="spec-v mono">1 &#984; = 1,000,000,000</span></div>
+      </div>
+      <p class="blurb" style="margin-top: 1.25rem;">All amounts in the API are represented in base units. Examples: <code class="inline">1000000000</code> = 1 &#984;, <code class="inline">1000000</code> = 0.001 &#984; (typical fee).</p>
+    </section>
+
+    <section class="docs-section" id="addresses">
+      <h2>Addresses</h2>
+      <p class="blurb">Addresses are 20 bytes derived from an Ed25519 public key: <code class="inline">Address = Blake3(pubkey)[12..32]</code>. Two display formats are accepted in API parameters:</p>
+      <ul class="docs-list">
+        <li>Base58 with checksum (default display), e.g. <code class="inline">8zZ1pfbpUcAmoByWKYgJgiFZWpmhWQKJ4</code></li>
+        <li>Hex, e.g. <code class="inline">0x1a2b3c4d...</code></li>
+      </ul>
+    </section>
+
+    <section class="docs-section" id="index">
+      <h2>Method index</h2>
+      <div class="method-index">
+        <a href="#chain">Chain<span class="idx-count">11</span></a>
+        <a href="#account">Account<span class="idx-count">11</span></a>
+        <a href="#transactions">Transactions<span class="idx-count">9</span></a>
+        <a href="#storage">Decentralized storage (PoR)<span class="idx-count">4</span></a>
+        <a href="#validators">Validators &amp; consensus<span class="idx-count">25</span></a>
+        <a href="#nft">NFTs (SUM-721)<span class="idx-count">7</span></a>
+        <a href="#tokens">Fungible tokens (SRC-20)<span class="idx-count">6</span></a>
+        <a href="#contracts">Smart contracts (WASM)<span class="idx-count">7</span></a>
+        <a href="#messaging">Encrypted messaging (SRC-201)<span class="idx-count">16</span></a>
+        <a href="#docclass">Document credentials (SRC-80X)<span class="idx-count">16</span></a>
+        <a href="#employment">Employment credentials (SRC-88X)<span class="idx-count">16</span></a>
+        <a href="#policy">Policy accounts (multi-sig)<span class="idx-count">10</span></a>
+        <a href="#node">Node &amp; network<span class="idx-count">5</span></a>
+      </div>
+    </section>
+
+    <section class="docs-section" id="chain">
+      <h2>Chain</h2>
+      <p class="blurb">Block and chain metadata.</p>
+      <div class="method">
+        <span class="method-name">chain_id</span>
+        <p>Returns the chain identifier.</p>
+        <span class="io-label">Request</span>
+        <pre class="code">{"jsonrpc":"2.0","method":"chain_id","params":[],"id":1}</pre>
+        <span class="io-label">Response (live)</span>
+        <pre class="code">{"jsonrpc":"2.0","result":1,"id":1}</pre>
+      </div>
+      <div class="method">
+        <span class="method-name">get_latest_block</span>
+        <p>Returns the most recent block.</p>
+        <span class="io-label">Request</span>
+        <pre class="code">{"jsonrpc":"2.0","method":"get_latest_block","params":[],"id":1}</pre>
+        <span class="io-label">Response (live)</span>
+        <pre class="code">{
+  "jsonrpc": "2.0",
+  "result": {
+    "hash": "0x69226247daff051c87d610b0a5df1f793cd9b7cfa2d4bd70cb26166d541a0c64",
+    "height": 4807038,
+    "parent_hash": "0xec94cb97f6f97b4e78ad2054718fde0d0a30bea6a78ac1b69cb34c191df6c422",
+    "timestamp": 1777137175565,
+    "tx_root": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "state_root": "0xb9e67e5c251da9131a183a1658c5925690c6752a29c4a1c9e22c91b91e2f34b9",
+    "proposer": "e64e11c6f9f9937a1bc6a4535701f036388451e6cc83ad9f25b143973d90a4cd",
+    "tx_count": 0,
+    "transactions": []
+  },
+  "id": 1
+}</pre>
+      </div>
+      <div class="method">
+        <span class="method-name">get_block_by_height</span>
+        <p>Returns the block at a given height.</p>
+        <span class="io-label">Request</span>
+        <pre class="code">{"jsonrpc":"2.0","method":"get_block_by_height","params":[4807000],"id":1}</pre>
+      </div>
+      <div class="method">
+        <span class="method-name">get_block_by_hash</span>
+        <p>Returns the block matching a hex hash.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">get_blocks</span>
+        <p>Paginated block listing.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">get_finality</span>
+        <p>Returns finalized height plus the depth-based finality config (default 6 blocks).</p>
+        <span class="io-label">Request</span>
+        <pre class="code">{"jsonrpc":"2.0","method":"get_finality","params":[],"id":1}</pre>
+        <span class="io-label">Response (live)</span>
+        <pre class="code">{
+  "jsonrpc": "2.0",
+  "result": {
+    "finalized_height": 4807033,
+    "finalized_hash": "0x606ec3b283fe3eed4cdd4ca1cc5c5c5a262dbbb4ee10ebe4dba12dc22aec955a",
+    "current_height": 4807039,
+    "finality_depth": 6,
+    "pending_finality": 6
+  },
+  "id": 1
+}</pre>
+      </div>
+      <div class="method">
+        <span class="method-name">is_block_finalized</span>
+        <p>Reports whether a given height is finalized.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">eth_blockNumber</span>
+        <p>Latest block number in hex (Ethereum-compatible).</p>
+        <span class="io-label">Request</span>
+        <pre class="code">{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}</pre>
+        <span class="io-label">Response (live)</span>
+        <pre class="code">{"jsonrpc":"2.0","result":"0x49597f","id":1}</pre>
+      </div>
+      <div class="method">
+        <span class="method-name">sum_blockNumber</span>
+        <p>Same as eth_blockNumber, sum_-prefixed alias.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">sum_getLatestBlock</span>
+        <p>Alias of get_latest_block.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">sum_getBlockByHeight</span>
+        <p>Alias of get_block_by_height.</p>
+      </div>
+    </section>
+
+    <section class="docs-section" id="account">
+      <h2>Account</h2>
+      <p class="blurb">Balance, nonce, and account state. Addresses accept Base58 (with checksum) or 0x-prefixed hex.</p>
+      <div class="method">
+        <span class="method-name">get_balance</span>
+        <p>Returns balance in base units (1 Koppa = 1,000,000,000 base units).</p>
+        <span class="io-label">Request</span>
+        <pre class="code">{"jsonrpc":"2.0","method":"get_balance","params":["8zZ1pfbpUcAmoByWKYgJgiFZWpmhWQKJ4"],"id":1}</pre>
+        <span class="io-label">Response (live)</span>
+        <pre class="code">{"jsonrpc":"2.0","result":"500000001018000000","id":1}</pre>
+      </div>
+      <div class="method">
+        <span class="method-name">get_nonce</span>
+        <p>Returns the next expected nonce for the account.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">get_account</span>
+        <p>Returns balance plus nonce in one call.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">account_getPublicKey</span>
+        <p>Returns the registered Ed25519 public key for an address. Required for encrypted messaging recipients.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">eth_getBalance</span>
+        <p>Hex-formatted balance (Ethereum-compatible). Optional second <code class="inline">block</code> argument.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">sum_getBalance</span>
+        <p>sum_-prefixed alias of get_balance.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">sum_getNonce</span>
+        <p>sum_-prefixed alias of get_nonce.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">sum_getTransactionCount</span>
+        <p>Total transactions sent by an address.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">sum_getTransactionsByAddress</span>
+        <p>Transaction history (sender plus recipient) for an address.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">sum_getTransactionsBySender</span>
+        <p>Transaction history (sender only).</p>
+      </div>
+      <div class="method">
+        <span class="method-name">sum_getTransactionsByRecipient</span>
+        <p>Transaction history (recipient only).</p>
+      </div>
+    </section>
+
+    <section class="docs-section" id="transactions">
+      <h2>Transactions</h2>
+      <p class="blurb">Submit, look up, and inspect transactions.</p>
+      <div class="method">
+        <span class="method-name">send_raw_transaction</span>
+        <p>Submits a hex-encoded signed transaction. Returns the tx hash.</p>
+        <span class="io-label">Request</span>
+        <pre class="code">{"jsonrpc":"2.0","method":"send_raw_transaction","params":["0xabc..."],"id":1}</pre>
+        <span class="io-label">Response (live)</span>
+        <pre class="code">{"jsonrpc":"2.0","result":{"tx_hash":"0xdef..."},"id":1}</pre>
+      </div>
+      <div class="method">
+        <span class="method-name">get_transaction</span>
+        <p>Returns a transaction by hash.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">get_receipt</span>
+        <p>Returns receipt (success or failure plus gas) by tx hash.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">get_pending_transactions</span>
+        <p>Lists pending mempool transactions.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">pending_tx_count</span>
+        <p>Mempool size.</p>
+        <span class="io-label">Request</span>
+        <pre class="code">{"jsonrpc":"2.0","method":"pending_tx_count","params":[],"id":1}</pre>
+        <span class="io-label">Response (live)</span>
+        <pre class="code">{"jsonrpc":"2.0","result":0,"id":1}</pre>
+      </div>
+      <div class="method">
+        <span class="method-name">sum_sendRawTransaction</span>
+        <p>sum_-prefixed alias of send_raw_transaction.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">sum_getTransaction</span>
+        <p>sum_-prefixed alias.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">sum_getReceipt</span>
+        <p>sum_-prefixed alias.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">sum_getPendingTransactions</span>
+        <p>sum_-prefixed alias.</p>
+      </div>
+    </section>
+
+    <section class="docs-section" id="storage">
+      <h2>Decentralized storage (PoR)</h2>
+      <p class="blurb">Native L1 Proof-of-Retrievability. Query files, challenges, and archive nodes. Powers snip.sumchain.io and the storage marketplace.</p>
+      <div class="method">
+        <span class="method-name">storage_getFundedFiles</span>
+        <p>Returns all files with fee_pool above zero. New archive nodes use this to discover what to store and earn from.</p>
+        <span class="io-label">Request</span>
+        <pre class="code">{"jsonrpc":"2.0","method":"storage_getFundedFiles","params":[],"id":1}</pre>
+        <span class="io-label">Response (live)</span>
+        <pre class="code">{"jsonrpc":"2.0","result":[],"id":1}</pre>
+      </div>
+      <div class="method">
+        <span class="method-name">storage_getAccessList</span>
+        <p>Returns full metadata for a file by its merkle_root, including the on-chain ACL.</p>
+        <span class="io-label">Request</span>
+        <pre class="code">{"jsonrpc":"2.0","method":"storage_getAccessList","params":["0xabc..."],"id":1}</pre>
+      </div>
+      <div class="method">
+        <span class="method-name">storage_getActiveChallenges</span>
+        <p>Open Proof-of-Retrievability challenges assigned to a specific archive node. Failure to respond within 50 blocks slashes 5% of stake.</p>
+        <span class="io-label">Request</span>
+        <pre class="code">{"jsonrpc":"2.0","method":"storage_getActiveChallenges","params":["8zZ1pfbpUcAmoByWKYgJgiFZWpmhWQKJ4"],"id":1}</pre>
+      </div>
+      <div class="method">
+        <span class="method-name">storage_getNodeRecord</span>
+        <p>Returns the NodeRegistry record (role, staked balance, status) for an address.</p>
+      </div>
+    </section>
+
+    <section class="docs-section" id="validators">
+      <h2>Validators &amp; consensus</h2>
+      <p class="blurb">Active set, staking, delegation, slashing, and epoch info.</p>
+      <div class="method">
+        <span class="method-name">get_validators</span>
+        <p>Active validator set with current proposer.</p>
+        <span class="io-label">Request</span>
+        <pre class="code">{"jsonrpc":"2.0","method":"get_validators","params":[],"id":1}</pre>
+        <span class="io-label">Response (live)</span>
+        <pre class="code">{
+  "jsonrpc": "2.0",
+  "result": {
+    "validators": [
+      {
+        "public_key": "GW1pJKzqDmmHczMGz5g7CV51RgDuR6kKw76yZ1cVbEv8",
+        "address": "8zZ1pfbpUcAmoByWKYgJgiFZWpmhWQKJ4",
+        "is_current_proposer": true
+      },
+      {
+        "public_key": "7jUZxm5rJ5PazGYkrtJ4sUJj7ztib2VHEoM2Yc4Liydy",
+        "address": "D7Ls8H7Y2jCqYEEUUxWUcgQkF9cKhHxjV",
+        "is_current_proposer": false
+      }
+    ]
+  },
+  "id": 1
+}</pre>
+      </div>
+      <div class="method">
+        <span class="method-name">sum_getValidators</span>
+        <p>sum_-prefixed alias.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">staking_getValidator</span>
+        <p>Validator by pubkey.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">staking_getValidatorByAddress</span>
+        <p>Validator by address.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">staking_getValidators</span>
+        <p>All validators.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">staking_getActiveValidators</span>
+        <p>Active set only.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">staking_getSummary</span>
+        <p>Aggregate stats.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">staking_getParams</span>
+        <p>Staking parameters.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">staking_getTotalStake</span>
+        <p>Sum of all stake.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">delegation_getDelegation</span>
+        <p>Single delegation lookup.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">delegation_getDelegationsByDelegator</span>
+        <p>Delegations made by an address.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">delegation_getDelegationsByValidator</span>
+        <p>Delegations to a validator.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">delegation_getDelegatorSummary</span>
+        <p>Aggregate per delegator.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">delegation_getUnbondingDelegations</span>
+        <p>Pending unbondings.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">delegation_getValidatorDelegationSummary</span>
+        <p>Aggregate per validator.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">slashing_getRecords</span>
+        <p>Historical slashing records.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">slashing_getRecentRecords</span>
+        <p>Recent records.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">slashing_getSigningInfo</span>
+        <p>Per-validator missed-block tracking.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">slashing_getAllSigningInfo</span>
+        <p>All validators.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">slashing_getSummary</span>
+        <p>Aggregate stats.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">slashing_isTombstoned</span>
+        <p>Permanent-jail check.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">epoch_getInfo</span>
+        <p>Current epoch metadata.</p>
+        <span class="io-label">Request</span>
+        <pre class="code">{"jsonrpc":"2.0","method":"epoch_getInfo","params":[],"id":1}</pre>
+        <span class="io-label">Response (live)</span>
+        <pre class="code">{
+  "jsonrpc": "2.0",
+  "result": {
+    "current_epoch": 333,
+    "current_height": 4807057,
+    "epoch_length": 14400,
+    "epoch_start_height": 4795200,
+    "epoch_end_height": 4809599,
+    "blocks_remaining": 2542,
+    "stake_weighted_selection": true
+  },
+  "id": 1
+}</pre>
+      </div>
+      <div class="method">
+        <span class="method-name">validatorSet_getCurrent</span>
+        <p>Active validator set.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">validatorSet_getByEpoch</span>
+        <p>Set for a specific epoch.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">validatorSet_getProposer</span>
+        <p>Proposer at a given height.</p>
+      </div>
+    </section>
+
+    <section class="docs-section" id="nft">
+      <h2>NFTs (SUM-721)</h2>
+      <p class="blurb">Native NFT standard.</p>
+      <div class="method">
+        <span class="method-name">nft_getCollection</span>
+        <p>Collection metadata.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">nft_getToken</span>
+        <p>Single token.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">nft_getTokensByOwner</span>
+        <p>Tokens owned by an address.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">nft_getTokensInCollection</span>
+        <p>Tokens in a collection.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">nft_balanceOf</span>
+        <p>Number of tokens an address holds.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">nft_ownerOf</span>
+        <p>Owner of a specific token.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">nft_tokenExists</span>
+        <p>Existence check.</p>
+      </div>
+    </section>
+
+    <section class="docs-section" id="tokens">
+      <h2>Fungible tokens (SRC-20)</h2>
+      <p class="blurb">Native fungible-token standard, ERC-20 compatible interface.</p>
+      <div class="method">
+        <span class="method-name">token_getToken</span>
+        <p>Token metadata.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">token_balanceOf</span>
+        <p>Holder balance for a token.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">token_getTokensByOwner</span>
+        <p>Tokens an address holds.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">token_allowance</span>
+        <p>ERC-20-style allowance lookup.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">token_totalSupply</span>
+        <p>Total supply of a token.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">token_exists</span>
+        <p>Existence check.</p>
+      </div>
+    </section>
+
+    <section class="docs-section" id="contracts">
+      <h2>Smart contracts (WASM)</h2>
+      <p class="blurb">sumc-runtime WASM contract calls.</p>
+      <div class="method">
+        <span class="method-name">contract_getContract</span>
+        <p>Contract metadata.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">contract_isContract</span>
+        <p>Existence check.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">contract_call</span>
+        <p>Read-only view call.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">contract_estimateGas</span>
+        <p>Gas estimation.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">contract_getCodeHash</span>
+        <p>Code-hash lookup.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">contract_getStorageAt</span>
+        <p>Raw storage slot read.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">contract_getBalance</span>
+        <p>Contract balance.</p>
+      </div>
+    </section>
+
+    <section class="docs-section" id="messaging">
+      <h2>Encrypted messaging (SRC-201)</h2>
+      <p class="blurb">On-chain encrypted messaging using X25519 plus XChaCha20-Poly1305.</p>
+      <div class="method">
+        <span class="method-name">messaging_getConfig</span>
+        <p>Per-chain messaging parameters.</p>
+        <span class="io-label">Request</span>
+        <pre class="code">{"jsonrpc":"2.0","method":"messaging_getConfig","params":[],"id":1}</pre>
+        <span class="io-label">Response (live)</span>
+        <pre class="code">{
+  "jsonrpc": "2.0",
+  "result": {
+    "daily_quota": 100,
+    "max_message_size": 65535,
+    "min_trust_stake": "100000000000",
+    "sponsorship_enabled": true
+  },
+  "id": 1
+}</pre>
+      </div>
+      <div class="method">
+        <span class="method-name">messaging_registerSponsored</span>
+        <p>Registers a public key for an address (sponsored; fee paid by relayer). Required before receiving messages. Not idempotent: a duplicate call returns success: false with "Public key already registered"; check via account_getPublicKey first.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">messaging_submitSponsored</span>
+        <p>Submits an encrypted message via a sponsoring relayer.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">messaging_getQuota</span>
+        <p>Quota status for a sender.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">messaging_getInboxFilter</span>
+        <p>Recipient inbox-filter rules.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">messaging_getMessages</span>
+        <p>Inbox query.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">messaging_getSentMessages</span>
+        <p>Outbox query.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">messaging_getMessageByTxHash</span>
+        <p>Message lookup by tx.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">messaging_getMessagesInBlock</span>
+        <p>Messages in a block.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">messaging_getMessageData</span>
+        <p>Message ciphertext.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">messaging_getPendingPayment</span>
+        <p>Pending sponsorship payment.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">messaging_getPendingPayments</span>
+        <p>All pending payments.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">messaging_getTrustStake</span>
+        <p>Trust-stake balance.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">messaging_getSpamScore</span>
+        <p>Spam-score lookup.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">messaging_isContact</span>
+        <p>Contact-list check.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">messaging_isBlocked</span>
+        <p>Block-list check.</p>
+      </div>
+    </section>
+
+    <section class="docs-section" id="docclass">
+      <h2>Document credentials (SRC-80X)</h2>
+      <p class="blurb">Verifiable identity, credentials, and academic-credential issuance.</p>
+      <div class="method">
+        <span class="method-name">docclass_getConfig</span>
+        <p>Config and parameters.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">docclass_getSummary</span>
+        <p>Aggregate stats.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">docclass_getIdentity</span>
+        <p>Identity by id.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">docclass_getIdentityByController</span>
+        <p>Identity by controlling address.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">docclass_canIssue</span>
+        <p>Authorization check for an issuer.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">docclass_getCredential</span>
+        <p>Credential by id.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">docclass_isCredentialValid</span>
+        <p>Validity plus revocation check.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">docclass_getCredentialsBySubject</span>
+        <p>All credentials for a subject.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">docclass_getCredentialsByIssuer</span>
+        <p>All credentials from an issuer.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">docclass_getIssuer</span>
+        <p>Issuer record.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">docclass_getIssuers</span>
+        <p>All registered issuers.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">docclass_getIssuersByJurisdiction</span>
+        <p>Issuers by jurisdiction code.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">docclass_getAcademicCredentialsByHolder</span>
+        <p>Academic credentials for a holder.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">docclass_registerAcademicIssuer</span>
+        <p>Register an academic issuer (write).</p>
+      </div>
+      <div class="method">
+        <span class="method-name">docclass_issueAcademicCredential</span>
+        <p>Issue an academic credential (write).</p>
+      </div>
+      <div class="method">
+        <span class="method-name">docclass_revokeAcademicCredential</span>
+        <p>Revoke an academic credential (write).</p>
+      </div>
+    </section>
+
+    <section class="docs-section" id="employment">
+      <h2>Employment credentials (SRC-88X)</h2>
+      <p class="blurb">On-chain employment and income attestations.</p>
+      <div class="method">
+        <span class="method-name">employment_listIssuers</span>
+        <p>All registered employment issuers.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">employment_getIssuer</span>
+        <p>Issuer record.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">employment_registerIssuer</span>
+        <p>Register an employer issuer (write).</p>
+      </div>
+      <div class="method">
+        <span class="method-name">employment_getSummary</span>
+        <p>Aggregate stats.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">employment_getCredential</span>
+        <p>Credential by id.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">employment_getCredentialsByEmployee</span>
+        <p>All credentials for an employee.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">employment_getCredentialsByEmployeeAddress</span>
+        <p>By employee address.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">employment_getCredentialsByEmployer</span>
+        <p>By employer.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">employment_getActiveCredentialsByEmployee</span>
+        <p>Active only.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">employment_getActiveCredentialsByEmployeeAddress</span>
+        <p>Active only, by address.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">employment_createCredential</span>
+        <p>Issue a new employment credential (write).</p>
+      </div>
+      <div class="method">
+        <span class="method-name">employment_revokeCredential</span>
+        <p>Revoke a credential (write).</p>
+      </div>
+      <div class="method">
+        <span class="method-name">employment_verifyEmployment</span>
+        <p>Verify an employment claim.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">employment_getIncomeAttestation</span>
+        <p>Income attestation by id.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">employment_getIncomeAttestationsBySubject</span>
+        <p>By subject.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">employment_getIncomeAttestationsByHolderAddress</span>
+        <p>By holder address.</p>
+      </div>
+    </section>
+
+    <section class="docs-section" id="policy">
+      <h2>Policy accounts (multi-sig)</h2>
+      <p class="blurb">Consensus-level multi-sig group governance: accounts, proposals, execution.</p>
+      <div class="method">
+        <span class="method-name">policy_createAccount</span>
+        <p>Create a new policy account (write).</p>
+      </div>
+      <div class="method">
+        <span class="method-name">policy_getAccount</span>
+        <p>Account by id.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">policy_getAccountByAddress</span>
+        <p>Account by address.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">policy_listMemberAccounts</span>
+        <p>Accounts where the address is a member.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">policy_submitProposal</span>
+        <p>Submit a new proposal (write).</p>
+      </div>
+      <div class="method">
+        <span class="method-name">policy_executeProposal</span>
+        <p>Execute an approved proposal (write).</p>
+      </div>
+      <div class="method">
+        <span class="method-name">policy_cancelProposal</span>
+        <p>Cancel a pending proposal (write).</p>
+      </div>
+      <div class="method">
+        <span class="method-name">policy_getProposal</span>
+        <p>Proposal by id.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">policy_listProposals</span>
+        <p>All proposals for an account.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">policy_listPendingProposals</span>
+        <p>Pending only.</p>
+      </div>
+    </section>
+
+    <section class="docs-section" id="node">
+      <h2>Node &amp; network</h2>
+      <p class="blurb">Operator-facing endpoints for monitoring.</p>
+      <div class="method">
+        <span class="method-name">health</span>
+        <p>Liveness probe.</p>
+        <span class="io-label">Request</span>
+        <pre class="code">{"jsonrpc":"2.0","method":"health","params":[],"id":1}</pre>
+        <span class="io-label">Response (live)</span>
+        <pre class="code">{
+  "jsonrpc": "2.0",
+  "result": {
+    "status": "ok",
+    "chain_id": 1,
+    "height": 4807039,
+    "peer_count": 2,
+    "is_validator": true,
+    "is_synced": true
+  },
+  "id": 1
+}</pre>
+      </div>
+      <div class="method">
+        <span class="method-name">node_info</span>
+        <p>Version, peer ID, uptime.</p>
+        <span class="io-label">Request</span>
+        <pre class="code">{"jsonrpc":"2.0","method":"node_info","params":[],"id":1}</pre>
+        <span class="io-label">Response (live)</span>
+        <pre class="code">{
+  "jsonrpc": "2.0",
+  "result": {
+    "version": "0.1.0",
+    "chain_id": 1,
+    "network": "sumchain-1",
+    "peer_id": "12D3KooWJdKDCZn9Wu5mo1WBMLRwEeej9abjTLDvgZRzLwZv6kdW",
+    "is_validator": true,
+    "current_height": 4807038,
+    "peer_count": 2,
+    "mempool_size": 0,
+    "uptime_seconds": 238205
+  },
+  "id": 1
+}</pre>
+      </div>
+      <div class="method">
+        <span class="method-name">get_metrics</span>
+        <p>Prometheus-style metrics snapshot.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">get_peers</span>
+        <p>Connected peers.</p>
+      </div>
+      <div class="method">
+        <span class="method-name">get_p2p_stats</span>
+        <p>libp2p connection statistics.</p>
+        <span class="io-label">Request</span>
+        <pre class="code">{"jsonrpc":"2.0","method":"get_p2p_stats","params":[],"id":1}</pre>
+        <span class="io-label">Response (live)</span>
+        <pre class="code">{
+  "jsonrpc": "2.0",
+  "result": {
+    "total_known_peers": 2,
+    "connected_peers": 2,
+    "inbound_connections": 0,
+    "outbound_connections": 2,
+    "banned_peers": 0,
+    "max_connections": 100,
+    "max_inbound": 50,
+    "max_outbound": 50
+  },
+  "id": 1
+}</pre>
+      </div>
+    </section>
+
+    <section class="docs-section">
+      <p class="blurb">All 143 endpoints listed above are verified against <a href="https://rpc.sumchain.io" style="color: var(--accent); text-decoration: none;">rpc.sumchain.io</a>.</p>
+    </section>
+    </div>
+  </main>
+
+
+  <footer class="footer">
+    <div class="footer-inner">
+      <a href="../" class="nav-logo"><span class="logo-plus">+</span>sum<span class="logo-suffix">chain</span></a>
+      <span class="footer-copy">2026</span>
+      <div class="footer-links">
+        <a href="https://explorer.sumchain.io" target="_blank" rel="noopener">Explorer</a>
+        <a href="https://x.com/SUM_INNOVATION" target="_blank" rel="noopener">X</a>
+        <a href="https://www.linkedin.com/company/suminnovation/" target="_blank" rel="noopener">LinkedIn</a>
+        <a href="mailto:hello@suminnovation.xyz">Contact</a>
+      </div>
+    </div>
+  </footer>
+
+  <script src="../main.js"></script>
+</body>
+</html>

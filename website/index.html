@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>sum chain</title>
+  <meta name="description" content="sum chain is a Layer-1 blockchain built entirely in Rust. Koppa, its native currency, is backed by on-chain utility: storage, verifiable compute, encrypted messaging, and document credentials.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,300;14..32,400;14..32,500;14..32,600&display=swap" rel="stylesheet">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <nav class="nav" id="nav">
+    <div class="nav-inner">
+      <a href="#" class="nav-logo"><span class="logo-plus">+</span>sum<span class="logo-suffix">chain</span></a>
+      <div class="nav-links">
+        <a href="storage/">Storage</a>
+        <a href="compute/">Compute</a>
+        <a href="governance/">Governance</a>
+        <a href="tokenomics/">Tokenomics</a>
+        <a href="node/">Run a node</a>
+        <a href="wallet/">Wallet</a>
+        <a href="docs/">Docs</a>
+      </div>
+      <a href="https://explorer.sumchain.io" class="nav-cta" target="_blank" rel="noopener">Explorer <span aria-hidden="true">&#8599;</span></a>
+      <button class="menu-btn" id="menuBtn" aria-label="Menu" aria-expanded="false">
+        <span></span><span></span><span></span>
+      </button>
+    </div>
+  </nav>
+
+  <div class="mobile-menu" id="mobileMenu">
+    <a href="storage/">Storage</a>
+    <a href="compute/">Compute</a>
+    <a href="governance/">Governance</a>
+    <a href="tokenomics/">Tokenomics</a>
+    <a href="node/">Run a node</a>
+    <a href="wallet/">Wallet</a>
+    <a href="docs/">Docs</a>
+    <a href="https://explorer.sumchain.io" target="_blank" rel="noopener">Explorer</a>
+  </div>
+
+  <header class="hero">
+    <span class="label">Layer-1 &middot; mainnet</span>
+    <h1>The <span class="grad">utility-backed</span><br>Layer-1.</h1>
+    <p class="lede">sum chain is a Layer-1 network written entirely in Rust. Koppa (&#984;), its native currency, is backed by what the chain actually does: decentralized storage, verifiable compute, encrypted messaging, and document credentials.</p>
+    <div class="hero-ctas">
+      <a href="node/" class="btn btn-primary">Run a node</a>
+      <a href="docs/" class="btn btn-ghost">Read the docs <span aria-hidden="true">&#8594;</span></a>
+    </div>
+  </header>
+
+  <section class="live" aria-label="Live network data">
+    <div class="live-head">
+      <span class="live-dot" aria-hidden="true"></span>
+      <span class="label">Live from mainnet &middot; rpc.sumchain.io</span>
+    </div>
+    <div class="live-grid">
+      <div class="live-stat">
+        <span class="live-v" id="liveHeight">&#8202;</span>
+        <span class="live-k">Block height</span>
+      </div>
+      <div class="live-stat">
+        <span class="live-v" id="liveFinal">&#8202;</span>
+        <span class="live-k">Finalized</span>
+      </div>
+      <div class="live-stat">
+        <span class="live-v" id="liveEpoch">&#8202;</span>
+        <span class="live-k">Epoch</span>
+      </div>
+      <div class="live-stat">
+        <span class="live-v" id="liveVals">&#8202;</span>
+        <span class="live-k">Validators</span>
+      </div>
+    </div>
+    <div class="pulse-track" id="pulseTrack" aria-hidden="true"></div>
+  </section>
+
+  <section class="stats" aria-label="Protocol facts">
+    <div class="stats-inner">
+      <div class="stat"><span class="stat-v">3s</span><span class="stat-k">Block time</span></div>
+      <div class="stat"><span class="stat-v">~18s</span><span class="stat-k">Finality</span></div>
+      <div class="stat"><span class="stat-v">0.001 &#984;</span><span class="stat-k">Typical fee</span></div>
+      <div class="stat"><span class="stat-v">800B &#984;</span><span class="stat-k">Fixed supply</span></div>
+      <div class="stat"><span class="stat-v">100%</span><span class="stat-k">Rust</span></div>
+    </div>
+  </section>
+
+  <section class="pillars" aria-label="Protocol">
+    <span class="label">The protocol</span>
+    <a class="pillar" href="storage/">
+      <span class="pillar-num">01</span>
+      <span class="pillar-body">
+        <h3>Storage</h3>
+        <p>Files live on the protocol itself. Archive nodes stake Koppa, hold encrypted data, and answer per-block retrievability challenges with Merkle proofs recorded on chain.</p>
+        <span class="pillar-metric">Per-block PoR challenges &middot; 5% slash on failed proof</span>
+      </span>
+      <span class="pillar-arrow" aria-hidden="true">&#8594;</span>
+    </a>
+    <a class="pillar" href="compute/">
+      <span class="pillar-num">02</span>
+      <span class="pillar-body">
+        <h3>Compute</h3>
+        <p>OmniNode settles verifier-signed attestations of AI inference on chain. Pay once for compute; the proof that it ran stays verifiable forever.</p>
+        <span class="pillar-metric">One attestation per session and verifier, permanent</span>
+      </span>
+      <span class="pillar-arrow" aria-hidden="true">&#8594;</span>
+    </a>
+    <a class="pillar" href="governance/">
+      <span class="pillar-num">03</span>
+      <span class="pillar-body">
+        <h3>Governance</h3>
+        <p>Policy accounts put multi-signature group control in the state executor, not in smart contracts. Thresholds per action class, fail-closed by default.</p>
+        <span class="pillar-metric">Enforced at consensus level &middot; epochs of 14,400 blocks</span>
+      </span>
+      <span class="pillar-arrow" aria-hidden="true">&#8594;</span>
+    </a>
+    <a class="pillar" href="tokenomics/">
+      <span class="pillar-num">04</span>
+      <span class="pillar-body">
+        <h3>Tokenomics</h3>
+        <p>800 billion Koppa, all minted at genesis. No inflation, no block rewards. Fees are 0.001 &#984; flat and go to the validator who proposes the block.</p>
+        <span class="pillar-metric">800B &#984; fixed supply &middot; zero inflation</span>
+      </span>
+      <span class="pillar-arrow" aria-hidden="true">&#8594;</span>
+    </a>
+    <a class="pillar" href="node/">
+      <span class="pillar-num">05</span>
+      <span class="pillar-body">
+        <h3>Run a node</h3>
+        <p>The node is one Rust binary built from a single command. Three-second blocks, deterministic finality, and a JSON-RPC surface for monitoring.</p>
+        <span class="pillar-metric">Rust 1.85 &middot; 3s blocks &middot; ~18s finality</span>
+      </span>
+      <span class="pillar-arrow" aria-hidden="true">&#8594;</span>
+    </a>
+    <a class="pillar" href="wallet/">
+      <span class="pillar-num">06</span>
+      <span class="pillar-body">
+        <h3>Wallet</h3>
+        <p>SUMailet runs in the browser with nothing to install. The CLI wallet lives in the terminal. Both are non-custodial and talk to the same chain.</p>
+        <span class="pillar-metric">Web and CLI &middot; fees from 0.001 &#984;</span>
+      </span>
+      <span class="pillar-arrow" aria-hidden="true">&#8594;</span>
+    </a>
+  </section>
+
+  <section class="eco-line" aria-label="Ecosystem">
+    <span class="label">Built on sum chain</span>
+    <a href="https://explorer.sumchain.io" target="_blank" rel="noopener">Explorer<span class="ext" aria-hidden="true">&#8599;</span></a>
+    <a href="https://mlt.sumail.xyz/" target="_blank" rel="noopener">SUMailet<span class="ext" aria-hidden="true">&#8599;</span></a>
+    <a href="https://snip.sumchain.io" target="_blank" rel="noopener">Snip<span class="ext" aria-hidden="true">&#8599;</span></a>
+    <a href="https://omninode.suminnovation.xyz" target="_blank" rel="noopener">OmniNode<span class="ext" aria-hidden="true">&#8599;</span></a>
+  </section>
+
+  <footer class="footer">
+    <div class="footer-inner">
+      <a href="#" class="nav-logo"><span class="logo-plus">+</span>sum<span class="logo-suffix">chain</span></a>
+      <span class="footer-copy">2026</span>
+      <div class="footer-links">
+        <a href="https://explorer.sumchain.io" target="_blank" rel="noopener">Explorer</a>
+        <a href="https://x.com/SUM_INNOVATION" target="_blank" rel="noopener">X</a>
+        <a href="https://www.linkedin.com/company/suminnovation/" target="_blank" rel="noopener">LinkedIn</a>
+        <a href="mailto:hello@suminnovation.xyz">Contact</a>
+      </div>
+    </div>
+  </footer>
+
+  <script src="main.js"></script>
+</body>
+</html>

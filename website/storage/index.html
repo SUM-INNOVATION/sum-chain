@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>sum chain storage</title>
+  <meta name="description" content="Decentralized storage at the protocol layer: on-chain metadata, staked archive nodes, and per-block Proof-of-Retrievability challenges.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,300;14..32,400;14..32,500;14..32,600&display=swap" rel="stylesheet">
+  <link rel="icon" type="image/svg+xml" href="../favicon.svg">
+  <link rel="stylesheet" href="../styles.css">
+</head>
+<body>
+
+  <nav class="nav" id="nav">
+    <div class="nav-inner">
+      <a href="../" class="nav-logo"><span class="logo-plus">+</span>sum<span class="logo-suffix">chain</span></a>
+      <div class="nav-links">
+        <a href="../storage/" aria-current="page">Storage</a>
+        <a href="../compute/">Compute</a>
+        <a href="../governance/">Governance</a>
+        <a href="../tokenomics/">Tokenomics</a>
+        <a href="../node/">Run a node</a>
+        <a href="../wallet/">Wallet</a>
+        <a href="../docs/">Docs</a>
+      </div>
+      <a href="https://explorer.sumchain.io" class="nav-cta" target="_blank" rel="noopener">Explorer <span aria-hidden="true">&#8599;</span></a>
+      <button class="menu-btn" id="menuBtn" aria-label="Menu" aria-expanded="false">
+        <span></span><span></span><span></span>
+      </button>
+    </div>
+  </nav>
+
+  <div class="mobile-menu" id="mobileMenu">
+    <a href="../storage/" aria-current="page">Storage</a>
+    <a href="../compute/">Compute</a>
+    <a href="../governance/">Governance</a>
+    <a href="../tokenomics/">Tokenomics</a>
+    <a href="../node/">Run a node</a>
+    <a href="../wallet/">Wallet</a>
+    <a href="../docs/">Docs</a>
+    <a href="https://explorer.sumchain.io" target="_blank" rel="noopener">Explorer</a>
+  </div>
+
+  <main class="page">
+    <div class="page-head">
+      <span class="label">Storage</span>
+      <h1>Storage that proves itself.</h1>
+      <p class="lede">File storage is part of the protocol, not a service bolted on. sum chain records file metadata on chain and continuously challenges the nodes holding the data to prove they still have it.</p>
+    </div>
+    <div class="page-body">
+      <h2 id="how">How it works</h2>
+      <p>When a file is stored through sum chain, its metadata and Merkle root are recorded on chain while the encrypted content is held by archive nodes. Encryption keys are managed through an on-chain registry, with X25519 keys derived from the same Ed25519 identities that sign transactions.</p>
+      <p>Archive nodes stake Koppa to participate. The protocol assigns replication, and uploaders fund a per-file fee pool that pays the nodes holding the data. A new archive node can call <code class="inline">storage_getFundedFiles</code> to discover exactly which files the network will pay it to store.</p>
+
+      <h2 id="por">Proof of Retrievability</h2>
+      <p>Storage claims are cheap; proofs are not. Every block, the chain issues retrievability challenges against stored files. The assigned archive node must answer with a valid Merkle proof within 50 blocks.</p>
+      <p><strong>Fail a challenge and 5% of the node's stake is slashed.</strong> Holding the data and serving it is profitable; pretending to hold it is expensive. No trusted third party audits storage, the consensus itself does.</p>
+
+      <h2 id="lifecycle">File lifecycle</h2>
+      <div class="spec-table">
+        <div class="spec-row"><span class="spec-k">Pending</span><span class="spec-v">Metadata registered on chain, replication being established</span></div>
+        <div class="spec-row"><span class="spec-k">Active</span><span class="spec-v">Fully replicated, fee pool funded, PoR challenges running</span></div>
+        <div class="spec-row"><span class="spec-k">Abandoned</span><span class="spec-v">Fee pool exhausted, storage obligation released</span></div>
+      </div>
+
+      <h2 id="query">Query it</h2>
+      <p>The storage layer is fully inspectable over JSON-RPC:</p>
+      <pre class="code"># Files the network currently pays to store
+{"jsonrpc":"2.0","method":"storage_getFundedFiles","params":[],"id":1}
+
+# Metadata and on-chain ACL for a file
+{"jsonrpc":"2.0","method":"storage_getAccessList","params":["0xabc..."],"id":1}
+
+# Open challenges assigned to an archive node
+{"jsonrpc":"2.0","method":"storage_getActiveChallenges",
+ "params":["8zZ1pfbpUcAmoByWKYgJgiFZWpmhWQKJ4"],"id":1}</pre>
+      <p>Full method reference in the <a href="../docs/#storage">JSON-RPC API docs</a>.</p>
+
+      <h2 id="built">Built on it</h2>
+      <p><a href="https://snip.sumchain.io" target="_blank" rel="noopener">Snip</a> is decentralized link and content sharing pinned to sum chain storage, with access controlled by on-chain ACLs.</p>
+    </div>
+      <div class="pager">
+        <a href="../compute/">
+          <span class="pager-k">Next</span>
+          <span class="pager-v">Compute <span aria-hidden="true">&#8594;</span></span>
+        </a>
+      </div>
+  </main>
+
+  <footer class="footer">
+    <div class="footer-inner">
+      <a href="../" class="nav-logo"><span class="logo-plus">+</span>sum<span class="logo-suffix">chain</span></a>
+      <span class="footer-copy">2026</span>
+      <div class="footer-links">
+        <a href="https://explorer.sumchain.io" target="_blank" rel="noopener">Explorer</a>
+        <a href="https://x.com/SUM_INNOVATION" target="_blank" rel="noopener">X</a>
+        <a href="https://www.linkedin.com/company/suminnovation/" target="_blank" rel="noopener">LinkedIn</a>
+        <a href="mailto:hello@suminnovation.xyz">Contact</a>
+      </div>
+    </div>
+  </footer>
+
+  <script src="../main.js"></script>
+</body>
+</html>

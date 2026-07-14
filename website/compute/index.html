@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>sum chain compute</title>
+  <meta name="description" content="Verifiable AI compute on sum chain: OmniNode settles zero-knowledge inference attestations with permanent on-chain records.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,300;14..32,400;14..32,500;14..32,600&display=swap" rel="stylesheet">
+  <link rel="icon" type="image/svg+xml" href="../favicon.svg">
+  <link rel="stylesheet" href="../styles.css">
+</head>
+<body>
+
+  <nav class="nav" id="nav">
+    <div class="nav-inner">
+      <a href="../" class="nav-logo"><span class="logo-plus">+</span>sum<span class="logo-suffix">chain</span></a>
+      <div class="nav-links">
+        <a href="../storage/">Storage</a>
+        <a href="../compute/" aria-current="page">Compute</a>
+        <a href="../governance/">Governance</a>
+        <a href="../tokenomics/">Tokenomics</a>
+        <a href="../node/">Run a node</a>
+        <a href="../wallet/">Wallet</a>
+        <a href="../docs/">Docs</a>
+      </div>
+      <a href="https://explorer.sumchain.io" class="nav-cta" target="_blank" rel="noopener">Explorer <span aria-hidden="true">&#8599;</span></a>
+      <button class="menu-btn" id="menuBtn" aria-label="Menu" aria-expanded="false">
+        <span></span><span></span><span></span>
+      </button>
+    </div>
+  </nav>
+
+  <div class="mobile-menu" id="mobileMenu">
+    <a href="../storage/">Storage</a>
+    <a href="../compute/" aria-current="page">Compute</a>
+    <a href="../governance/">Governance</a>
+    <a href="../tokenomics/">Tokenomics</a>
+    <a href="../node/">Run a node</a>
+    <a href="../wallet/">Wallet</a>
+    <a href="../docs/">Docs</a>
+    <a href="https://explorer.sumchain.io" target="_blank" rel="noopener">Explorer</a>
+  </div>
+
+  <main class="page">
+    <div class="page-head">
+      <span class="label">Compute</span>
+      <h1>Compute you can verify.</h1>
+      <p class="lede">OmniNode settles zero-knowledge attestations of AI inference on sum chain. Pay once for the compute; the proof that it ran correctly stays on chain permanently.</p>
+    </div>
+    <div class="page-body">
+      <h2 id="attestations">Inference attestations</h2>
+      <p>OmniNode runs AI inference off chain and verifies it with zero-knowledge proofs. What lands on sum chain is an attestation: a verifier-signed digest binding a session identifier to four content hashes, covering the model, the input manifest, the response, and the proof.</p>
+      <pre class="code">InferenceAttestationDigest {
+    session_id:    String,
+    model_hash:    [u8; 32],
+    manifest_root: [u8; 32],
+    response_hash: [u8; 32],
+    proof_root:    [u8; 32],
+}</pre>
+      <p>The verifier signs twice with the same Ed25519 key: the outer transaction through the chain's standard signing path, and the inner digest under OmniNode's dedicated signing domain. The executor enforces that sender and verifier are the same key.</p>
+
+      <h2 id="permanence">Permanence</h2>
+      <p><strong>One attestation per session and verifier pair, forever.</strong> Duplicates are rejected both at mempool admission and at executor dispatch, and the record survives for the life of the chain. Anyone can later check that a given inference happened, was verified, and produced the claimed output.</p>
+
+      <h2 id="query">Query it</h2>
+      <pre class="code"># Attestation for a session
+{"jsonrpc":"2.0","method":"sum_getInferenceAttestation",
+ "params":["session-id"],"id":1}
+
+# Enumerate attestations
+{"jsonrpc":"2.0","method":"sum_listInferenceAttestations","params":[],"id":1}
+
+# Status check
+{"jsonrpc":"2.0","method":"sum_getInferenceAttestationStatus",
+ "params":["session-id"],"id":1}</pre>
+
+      <h2 id="status">Status</h2>
+      <p>The v1 wire format is frozen and merged, with byte-level fixture tests locking the format against drift. Mainnet activation is gated by the <code class="inline">omninode_enabled_from_height</code> chain parameter and follows a coordinated validator upgrade.</p>
+      <p>OmniNode itself is live at <a href="https://omninode.suminnovation.xyz" target="_blank" rel="noopener">omninode.suminnovation.xyz</a>.</p>
+    </div>
+      <div class="pager">
+        <a href="../governance/">
+          <span class="pager-k">Next</span>
+          <span class="pager-v">Governance <span aria-hidden="true">&#8594;</span></span>
+        </a>
+      </div>
+  </main>
+
+  <footer class="footer">
+    <div class="footer-inner">
+      <a href="../" class="nav-logo"><span class="logo-plus">+</span>sum<span class="logo-suffix">chain</span></a>
+      <span class="footer-copy">2026</span>
+      <div class="footer-links">
+        <a href="https://explorer.sumchain.io" target="_blank" rel="noopener">Explorer</a>
+        <a href="https://x.com/SUM_INNOVATION" target="_blank" rel="noopener">X</a>
+        <a href="https://www.linkedin.com/company/suminnovation/" target="_blank" rel="noopener">LinkedIn</a>
+        <a href="mailto:hello@suminnovation.xyz">Contact</a>
+      </div>
+    </div>
+  </footer>
+
+  <script src="../main.js"></script>
+</body>
+</html>

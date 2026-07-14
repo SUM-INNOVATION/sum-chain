@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>sum chain tokenomics</title>
+  <meta name="description" content="Koppa economics: 800 billion fixed supply minted at genesis, zero inflation, flat 0.001 fees paid to block proposers.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,300;14..32,400;14..32,500;14..32,600&display=swap" rel="stylesheet">
+  <link rel="icon" type="image/svg+xml" href="../favicon.svg">
+  <link rel="stylesheet" href="../styles.css">
+</head>
+<body>
+
+  <nav class="nav" id="nav">
+    <div class="nav-inner">
+      <a href="../" class="nav-logo"><span class="logo-plus">+</span>sum<span class="logo-suffix">chain</span></a>
+      <div class="nav-links">
+        <a href="../storage/">Storage</a>
+        <a href="../compute/">Compute</a>
+        <a href="../governance/">Governance</a>
+        <a href="../tokenomics/" aria-current="page">Tokenomics</a>
+        <a href="../node/">Run a node</a>
+        <a href="../wallet/">Wallet</a>
+        <a href="../docs/">Docs</a>
+      </div>
+      <a href="https://explorer.sumchain.io" class="nav-cta" target="_blank" rel="noopener">Explorer <span aria-hidden="true">&#8599;</span></a>
+      <button class="menu-btn" id="menuBtn" aria-label="Menu" aria-expanded="false">
+        <span></span><span></span><span></span>
+      </button>
+    </div>
+  </nav>
+
+  <div class="mobile-menu" id="mobileMenu">
+    <a href="../storage/">Storage</a>
+    <a href="../compute/">Compute</a>
+    <a href="../governance/">Governance</a>
+    <a href="../tokenomics/" aria-current="page">Tokenomics</a>
+    <a href="../node/">Run a node</a>
+    <a href="../wallet/">Wallet</a>
+    <a href="../docs/">Docs</a>
+    <a href="https://explorer.sumchain.io" target="_blank" rel="noopener">Explorer</a>
+  </div>
+
+  <main class="page">
+    <div class="page-head">
+      <span class="label">Tokenomics</span>
+      <h1>800 billion. Fixed forever.</h1>
+      <p class="lede">Koppa (&#984;) is sized for everyday payments by eight billion people: whole-number prices, a flat fee of 0.001 &#984;, and a supply that never inflates.</p>
+    </div>
+    <div class="page-body">
+      <h2 id="supply">Supply</h2>
+      <p>Every Koppa that will ever exist was minted at genesis: <strong>800 billion &#984;, fixed forever.</strong> There is no mining, no block reward, and no new issuance. With roughly 100 &#984; per person on Earth, everyday amounts stay in whole numbers: a coffee is 5 &#984;, not 0.00005 of something.</p>
+      <div class="spec-table">
+        <div class="spec-row"><span class="spec-k">Total supply</span><span class="spec-v mono">800,000,000,000 &#984;</span></div>
+        <div class="spec-row"><span class="spec-k">Decimals</span><span class="spec-v mono">9</span></div>
+        <div class="spec-row"><span class="spec-k">Base unit</span><span class="spec-v mono">1 &#984; = 1,000,000,000</span></div>
+        <div class="spec-row"><span class="spec-k">Circulating at launch</span><span class="spec-v mono">~680B &#984;</span></div>
+        <div class="spec-row"><span class="spec-k">Inflation</span><span class="spec-v mono">0</span></div>
+      </div>
+
+      <h2 id="allocation">Allocation</h2>
+      <div class="spec-table">
+        <div class="spec-row"><span class="spec-k">Foundation &middot; 50%</span><span class="spec-v">400B &#984; for long-term development, governed by 3-of-5 multisig</span></div>
+        <div class="spec-row"><span class="spec-k">Ecosystem &middot; 20%</span><span class="spec-v">160B &#984; for grants, infrastructure, and public goods</span></div>
+        <div class="spec-row"><span class="spec-k">Team &middot; 15%</span><span class="spec-v">120B &#984;, 12-month cliff then 36-month linear vesting</span></div>
+        <div class="spec-row"><span class="spec-k">Community &middot; 10%</span><span class="spec-v">80B &#984; for validators, bug bounties, and rewards</span></div>
+        <div class="spec-row"><span class="spec-k">Liquidity &middot; 5%</span><span class="spec-v">40B &#984; for DEX liquidity and listings</span></div>
+      </div>
+
+      <h2 id="fees">Fees</h2>
+      <p>The minimum fee is <strong>0.001 &#984; flat</strong>, never a percentage. Sending 5 &#984; and sending 5 million &#984; cost the same. All fees in a block go to the validator that proposed it; nothing is burned. Validator revenue therefore scales with real network usage instead of inflation.</p>
+
+      <h2 id="capacity">Capacity and velocity</h2>
+      <p>The chain sustains over 1,000 transactions per second, about 86 million transactions per day, with fees that stay negligible at scale. Koppa is designed for velocity: money that moves like cash rather than sitting like a collectible. The only deflationary pressure is coins lost over time.</p>
+    </div>
+      <div class="pager">
+        <a href="../node/">
+          <span class="pager-k">Next</span>
+          <span class="pager-v">Run a node <span aria-hidden="true">&#8594;</span></span>
+        </a>
+      </div>
+  </main>
+
+  <footer class="footer">
+    <div class="footer-inner">
+      <a href="../" class="nav-logo"><span class="logo-plus">+</span>sum<span class="logo-suffix">chain</span></a>
+      <span class="footer-copy">2026</span>
+      <div class="footer-links">
+        <a href="https://explorer.sumchain.io" target="_blank" rel="noopener">Explorer</a>
+        <a href="https://x.com/SUM_INNOVATION" target="_blank" rel="noopener">X</a>
+        <a href="https://www.linkedin.com/company/suminnovation/" target="_blank" rel="noopener">LinkedIn</a>
+        <a href="mailto:hello@suminnovation.xyz">Contact</a>
+      </div>
+    </div>
+  </footer>
+
+  <script src="../main.js"></script>
+</body>
+</html>

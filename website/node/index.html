@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>sum chain node</title>
+  <meta name="description" content="Run a sum chain node: build one Rust binary, configure, run, and monitor over JSON-RPC.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,300;14..32,400;14..32,500;14..32,600&display=swap" rel="stylesheet">
+  <link rel="icon" type="image/svg+xml" href="../favicon.svg">
+  <link rel="stylesheet" href="../styles.css">
+</head>
+<body>
+
+  <nav class="nav" id="nav">
+    <div class="nav-inner">
+      <a href="../" class="nav-logo"><span class="logo-plus">+</span>sum<span class="logo-suffix">chain</span></a>
+      <div class="nav-links">
+        <a href="../storage/">Storage</a>
+        <a href="../compute/">Compute</a>
+        <a href="../governance/">Governance</a>
+        <a href="../tokenomics/">Tokenomics</a>
+        <a href="../node/" aria-current="page">Run a node</a>
+        <a href="../wallet/">Wallet</a>
+        <a href="../docs/">Docs</a>
+      </div>
+      <a href="https://explorer.sumchain.io" class="nav-cta" target="_blank" rel="noopener">Explorer <span aria-hidden="true">&#8599;</span></a>
+      <button class="menu-btn" id="menuBtn" aria-label="Menu" aria-expanded="false">
+        <span></span><span></span><span></span>
+      </button>
+    </div>
+  </nav>
+
+  <div class="mobile-menu" id="mobileMenu">
+    <a href="../storage/">Storage</a>
+    <a href="../compute/">Compute</a>
+    <a href="../governance/">Governance</a>
+    <a href="../tokenomics/">Tokenomics</a>
+    <a href="../node/" aria-current="page">Run a node</a>
+    <a href="../wallet/">Wallet</a>
+    <a href="../docs/">Docs</a>
+    <a href="https://explorer.sumchain.io" target="_blank" rel="noopener">Explorer</a>
+  </div>
+
+  <main class="page">
+    <div class="page-head">
+      <span class="label">Run a node</span>
+      <h1>Run the chain yourself.</h1>
+      <p class="lede">The node is a single Rust binary. Building from source is one command, mainnet runs on modest hardware, and everything is inspectable over JSON-RPC.</p>
+    </div>
+    <div class="page-body">
+      <h2 id="build">Build</h2>
+      <p>The node is a single binary built from source with the stable Rust toolchain (1.85 is pinned in the repository). There are no C or C++ dependencies to fight with.</p>
+      <pre class="code">git clone https://github.com/SUM-INNOVATION/sum-chain
+cd sum-chain
+cargo build --release
+
+# Binaries in ./target/release/
+# - sumchain         (full node)
+# - sumchain-wallet  (CLI wallet)</pre>
+
+      <h2 id="configure">Configure</h2>
+      <pre class="code">cat &gt; config.toml &lt;&lt; EOF
+[node]
+genesis = "genesis.json"
+data_dir = "data"
+validator_key = "validator-key.json"
+
+[network]
+listen_addr = "/ip4/0.0.0.0/tcp/9933"
+
+[rpc]
+addr = "127.0.0.1:8545"
+EOF</pre>
+
+      <h2 id="run">Run</h2>
+      <pre class="code"># Generate a key
+./target/release/sumchain keygen --output validator-key.json
+
+# Start the node
+./target/release/sumchain run \
+  --config config.toml \
+  --genesis genesis.json</pre>
+
+      <h2 id="monitor">Monitor</h2>
+      <p>Every node exposes operator endpoints over JSON-RPC:</p>
+      <pre class="code"># Liveness, height, peers, sync state
+{"jsonrpc":"2.0","method":"health","params":[],"id":1}
+
+# Version, peer id, uptime
+{"jsonrpc":"2.0","method":"node_info","params":[],"id":1}
+
+# Prometheus-style metrics
+{"jsonrpc":"2.0","method":"get_metrics","params":[],"id":1}</pre>
+
+      <h2 id="validating">Joining the validator set</h2>
+      <p>Consensus is Proof of Authority with round-robin proposer rotation. The active set is recomputed each epoch with stake-weighted selection, and validators earn every fee in the blocks they propose. If you want to operate a validator, write to <a href="mailto:hello@suminnovation.xyz">hello@suminnovation.xyz</a>.</p>
+
+      <h2 id="local">Local development</h2>
+      <p>For client integration without a full testnet, the repository ships a self-bootstrapping single-validator Docker preset on the <code class="inline">snip-local-mirror-preset</code> branch. It generates a disposable key on first boot and exposes RPC on <code class="inline">localhost:8545</code>.</p>
+    </div>
+      <div class="pager">
+        <a href="../wallet/">
+          <span class="pager-k">Next</span>
+          <span class="pager-v">Wallet <span aria-hidden="true">&#8594;</span></span>
+        </a>
+      </div>
+  </main>
+
+  <footer class="footer">
+    <div class="footer-inner">
+      <a href="../" class="nav-logo"><span class="logo-plus">+</span>sum<span class="logo-suffix">chain</span></a>
+      <span class="footer-copy">2026</span>
+      <div class="footer-links">
+        <a href="https://explorer.sumchain.io" target="_blank" rel="noopener">Explorer</a>
+        <a href="https://x.com/SUM_INNOVATION" target="_blank" rel="noopener">X</a>
+        <a href="https://www.linkedin.com/company/suminnovation/" target="_blank" rel="noopener">LinkedIn</a>
+        <a href="mailto:hello@suminnovation.xyz">Contact</a>
+      </div>
+    </div>
+  </footer>
+
+  <script src="../main.js"></script>
+</body>
+</html>
