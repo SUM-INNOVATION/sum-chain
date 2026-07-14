@@ -99,7 +99,7 @@ compatible release.
 
 Byte-stability is enforced by hardcoded, pre-extraction golden vectors:
 
-- [`crates/primitives/tests/wire_golden_fixtures.rs`](../primitives/tests/wire_golden_fixtures.rs)
+- [`crates/primitives/tests/wire_golden_fixtures.rs`](https://github.com/SUM-INNOVATION/sum-chain/blob/50e64489e12c88b61e64744fd47bd13b7da82ba7/crates/primitives/tests/wire_golden_fixtures.rs)
   — all 27 `TxPayload` tags, legacy + V2 `SignedTransaction` full bytes,
   `hash`/`signing_hash`, hex (bare and `0x`-prefixed), `TxInner` discriminants,
   and the malformed-input rejection matrix.
