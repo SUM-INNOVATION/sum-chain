@@ -15,6 +15,11 @@ use crate::{PrimitiveError, Result};
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub struct Hash([u8; 32]);
 
+// `Hash::hash` is a long-standing public constructor named after the type;
+// renaming it (the only self_named_constructors fix) would break every
+// `Hash::hash(..)` call site across the workspace — a public-API break, not a
+// wire change. Scoped to this impl block only.
+#[allow(clippy::self_named_constructors)]
 impl Hash {
     /// Size of the hash in bytes
     pub const SIZE: usize = 32;

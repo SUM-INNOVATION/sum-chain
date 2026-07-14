@@ -1,29 +1,50 @@
-//! # SUM Chain Primitives
+//! # SUM Chain Wire (W1a leaf)
 //!
-//! Core types and data structures for the SUM Chain blockchain.
-//! This crate provides fundamental building blocks used throughout the chain.
+//! Byte-frozen on-chain wire formats for SUM Chain, extracted verbatim from
+//! `sumchain-primitives` (sum-chain #124 / W1a). This crate is the single home
+//! of the encoding/decoding surface: addresses, hashes, transactions, and every
+//! subprotocol payload, all serialized with **bincode 1.3 default config**
+//! (u32-LE enum variant tags). Signing hashes are `blake3(bincode(tx))`.
+//!
+//! This is a **leaf**: it depends on no signature-verification, state, RPC,
+//! consensus, storage, or networking crate, and NOT on `sumchain-primitives`.
+//! Semantic verification (Ed25519 attestation checks, receipt-bound status
+//! classification, blocks) stays ABOVE the leaf in `sumchain-primitives`.
+//!
+//! The wire shapes here are contract-frozen: any change to enum variant order,
+//! struct field order/width, or bincode config is a wire break. See the golden
+//! fixtures in `crates/primitives/tests/` (they exercise these types through the
+//! `sumchain-primitives` re-exports and must stay byte-identical).
 
-// Types that stay ABOVE the wire leaf — blocks, receipts, and the
-// inference-attestation Ed25519 verification / receipt-bound status
-// classification layer (which bind `SignedTransaction`/`Receipt`).
-pub mod block;
+#![forbid(unsafe_code)]
+
+pub mod address;
+pub mod agreement;
+pub mod docclass;
+pub mod education;
+pub mod employment;
+pub mod equity;
+pub mod finance;
+pub mod governance;
+pub mod hash;
+pub mod healthcare;
 pub mod inference_attestation;
-pub mod receipt;
-
-// The on-chain wire formats now live in the `sumchain-wire` leaf crate
-// (sum-chain #124 / W1a). Re-export each moved module here so every existing
-// `sumchain_primitives::<module>::…` path resolves unchanged; the crate-root
-// type re-exports below flow through these.
-pub use sumchain_wire::{
-    address, agreement, docclass, education, employment, equity, finance, governance, hash,
-    healthcare, inference_settlement, legal, messaging, node_registry, policy_account, property,
-    staking, storage_metadata, supply, tax, token_ops, transaction, validator_authority,
-};
+pub mod inference_settlement;
+pub mod legal;
+pub mod messaging;
+pub mod node_registry;
+pub mod policy_account;
+pub mod property;
+pub mod staking;
+pub mod supply;
+pub mod storage_metadata;
+pub mod tax;
+pub mod token_ops;
+pub mod transaction;
+pub mod validator_authority;
 
 pub use address::Address;
-pub use block::{Block, BlockHeader};
 pub use hash::Hash;
-pub use receipt::{Receipt, TxStatus};
 pub use governance::GovernanceParams;
 pub use validator_authority::ValidatorApproval;
 pub use staking::{
@@ -136,10 +157,39 @@ pub use policy_account::{
     MAX_APPROVALS, MAX_CUSTOM_RULES, MAX_MEMBERS, MAX_PROPOSAL_PAYLOAD_SIZE,
 };
 
-// Shared scalar type aliases and the wire error type were moved into the
-// `sumchain-wire` leaf; keep re-exporting them from the crate root so
-// `sumchain_primitives::{ChainId, BlockHeight, Nonce, Balance, Timestamp,
-// Result, PrimitiveError}` paths are unchanged.
-pub use sumchain_wire::{
-    Balance, BlockHeight, ChainId, Nonce, PrimitiveError, Result, Timestamp,
-};
+/// Chain ID type - identifies the network
+pub type ChainId = u64;
+
+/// Block height type
+pub type BlockHeight = u64;
+
+/// Nonce type for transactions
+pub type Nonce = u64;
+
+/// Balance/amount type - u128 supports large values
+pub type Balance = u128;
+
+/// Timestamp in milliseconds since Unix epoch
+pub type Timestamp = u64;
+
+/// Common result type for wire operations
+pub type Result<T> = std::result::Result<T, PrimitiveError>;
+
+/// Errors that can occur in wire encoding/decoding operations
+#[derive(Debug, thiserror::Error)]
+pub enum PrimitiveError {
+    #[error("Invalid hex string: {0}")]
+    InvalidHex(String),
+
+    #[error("Invalid length: expected {expected}, got {got}")]
+    InvalidLength { expected: usize, got: usize },
+
+    #[error("Invalid base58 encoding: {0}")]
+    InvalidBase58(String),
+
+    #[error("Serialization error: {0}")]
+    SerializationError(String),
+
+    #[error("Invalid address checksum")]
+    InvalidChecksum,
+}

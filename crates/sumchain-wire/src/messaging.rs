@@ -198,10 +198,11 @@ impl MessageFlags {
 }
 
 /// Content type for message payload
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum ContentType {
     // Text types (0x01-0x0F)
+    #[default]
     TextPlain = 0x01,
     TextMarkdown = 0x02,
     TextHtml = 0x03,
@@ -251,12 +252,6 @@ impl ContentType {
 
     pub fn is_image(&self) -> bool {
         (*self as u8) >= 0x30 && (*self as u8) <= 0x3F
-    }
-}
-
-impl Default for ContentType {
-    fn default() -> Self {
-        ContentType::TextPlain
     }
 }
 

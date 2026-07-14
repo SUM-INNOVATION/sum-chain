@@ -9,7 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 use crate::{Address, BlockHeight, Timestamp};
-use crate::agreement::{AttachmentRef, EncryptionMeta};
+use crate::agreement::AttachmentRef;
 
 // =============================================================================
 // Type Aliases

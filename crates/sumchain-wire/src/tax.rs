@@ -141,7 +141,7 @@ impl TaxClaimTypeEntry {
         hasher.update(TAX_SCHEMA_DOMAIN_SEP);
         hasher.update(claim_type.as_bytes());
         hasher.update(b":v");
-        hasher.update(&version.to_string().as_bytes());
+        hasher.update(version.to_string().as_bytes());
         *hasher.finalize().as_bytes()
     }
 
