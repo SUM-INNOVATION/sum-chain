@@ -1,0 +1,847 @@
+{
+  "artifact_id": "b0-pre-protocol-v1",
+  "spec_version": "b0-pre/v10",
+  "finalization": {
+    "state": "not_finalizable",
+    "blocked_on": [
+      "candidate_container_digests",
+      "cargo_lock_hashes",
+      "verifier_material_manifests"
+    ],
+    "note": "Blocked until the three Stage-1 categories exist: candidate container digests (base + per-arch builder), candidate dependency lock hashes, and candidate verifier-material manifests. Guest closure (r0_guest_set_hash, guest-program identities, populated allowlist) is post-spec-hash and is NOT required here. No fabricated values are inserted; protocol_hash refuses to run until then."
+  },
+  "toolchains": {
+    "validator_tool_rust_floor": "1.85.0",
+    "validator_tool_rust_floor_note": "Minimum Rust for building/running the B0-PRE validator tool crates.",
+    "candidate_container_rust": "1.88.0",
+    "candidate_container_rust_note": "Separately-frozen toolchain for candidate proving containers; distinct from the validator-tool floor and not conflated with it."
+  },
+  "domains": {
+    "structured_tags": [
+      {
+        "name": "OBJECT_TAG",
+        "ascii": "SUMCHAIN/R0/OBJECT/v1",
+        "bytes_hex": "53554d434841494e2f52302f4f424a4543542f76310000000000000000000000"
+      },
+      {
+        "name": "STATEMENT_TAG",
+        "ascii": "SUMCHAIN/R0/STATEMENT/v2",
+        "bytes_hex": "53554d434841494e2f52302f53544154454d454e542f76320000000000000000"
+      },
+      {
+        "name": "ENVELOPE_TAG",
+        "ascii": "SUMCHAIN/R0/ENVELOPE/v1",
+        "bytes_hex": "53554d434841494e2f52302f454e56454c4f50452f7631000000000000000000"
+      },
+      {
+        "name": "OUTPUT_MANIFEST_TAG",
+        "ascii": "SUMCHAIN/R0/MANIFEST/v1",
+        "bytes_hex": "53554d434841494e2f52302f4d414e49464553542f7631000000000000000000"
+      },
+      {
+        "name": "INPUT_MANIFEST_TAG",
+        "ascii": "SUMCHAIN/R0/INMANIFEST/v1",
+        "bytes_hex": "53554d434841494e2f52302f494e4d414e49464553542f763100000000000000"
+      },
+      {
+        "name": "BENCH_SAMPLE_TAG",
+        "ascii": "SUMCHAIN/R0/BENCH/v1",
+        "bytes_hex": "53554d434841494e2f52302f42454e43482f7631000000000000000000000000"
+      },
+      {
+        "name": "BENCH_RSS_TAG",
+        "ascii": "SUMCHAIN/R0/BENCHRSS/v1",
+        "bytes_hex": "53554d434841494e2f52302f42454e43485253532f7631000000000000000000"
+      },
+      {
+        "name": "RESEARCH_CHAIN_TAG",
+        "ascii": "SUMCHAIN/R0/RCHAIN/v1",
+        "bytes_hex": "53554d434841494e2f52302f52434841494e2f76310000000000000000000000"
+      },
+      {
+        "name": "DERIVED_INPUT_TAG",
+        "ascii": "SUMCHAIN/R0/DERIVIN/v1",
+        "bytes_hex": "53554d434841494e2f52302f4445524956494e2f763100000000000000000000"
+      },
+      {
+        "name": "EXP_TABLE_TAG",
+        "ascii": "SUMCHAIN/B0PRE/EXP/v1",
+        "bytes_hex": "53554d434841494e2f42305052452f4558502f76310000000000000000000000"
+      },
+      {
+        "name": "EXP_CERT_TAG",
+        "ascii": "SUMCHAIN/B0PRE/EXPCERT/v1",
+        "bytes_hex": "53554d434841494e2f42305052452f455850434552542f763100000000000000"
+      },
+      {
+        "name": "VERIFIER_MATERIAL_TAG",
+        "ascii": "SUMCHAIN/B0PRE/VMAT/v1",
+        "bytes_hex": "53554d434841494e2f42305052452f564d41542f763100000000000000000000"
+      },
+      {
+        "name": "CARGO_LOCK_TAG",
+        "ascii": "SUMCHAIN/B0PRE/CARGOLOCK/v1",
+        "bytes_hex": "53554d434841494e2f42305052452f434152474f4c4f434b2f76310000000000"
+      },
+      {
+        "name": "CONTAINER_TAG",
+        "ascii": "SUMCHAIN/B0PRE/CONTAINER/v1",
+        "bytes_hex": "53554d434841494e2f42305052452f434f4e5441494e45522f76310000000000"
+      }
+    ],
+    "hash_prefixes": [
+      {
+        "name": "FIXTURE_PREFIX",
+        "ascii": "SUMCHAIN/B0-PRE/FIXTURE/v1",
+        "terminator_hex": "00",
+        "bytes_hex": "53554d434841494e2f42302d5052452f464958545552452f763100"
+      },
+      {
+        "name": "ID_PREFIX",
+        "ascii": "SUMCHAIN/B0-PRE/ID/v1",
+        "terminator_hex": "00",
+        "bytes_hex": "53554d434841494e2f42302d5052452f49442f763100"
+      },
+      {
+        "name": "DATA_PREFIX",
+        "ascii": "SUMCHAIN/B0-PRE/DATA/v1",
+        "terminator_hex": "00",
+        "bytes_hex": "53554d434841494e2f42302d5052452f444154412f763100"
+      },
+      {
+        "name": "SPEC_PREFIX",
+        "ascii": "SUMCHAIN/B0-PRE/SPEC/v1",
+        "terminator_hex": "0a",
+        "bytes_hex": "53554d434841494e2f42302d5052452f535045432f76310a"
+      },
+      {
+        "name": "STMT_TEMPLATE_PREFIX",
+        "ascii": "SUMCHAIN/R0/STMTTEMPLATE/v2",
+        "terminator_hex": "0a",
+        "bytes_hex": "53554d434841494e2f52302f53544d5454454d504c4154452f76320a"
+      },
+      {
+        "name": "GUESTSET_PREFIX",
+        "ascii": "SUMCHAIN/R0/GUESTSET/v1",
+        "terminator_hex": "0a",
+        "bytes_hex": "53554d434841494e2f52302f47554553545345542f76310a"
+      },
+      {
+        "name": "GUESTSRC_PREFIX",
+        "ascii": "SUMCHAIN/R0/GUESTSRC/v1",
+        "terminator_hex": "0a",
+        "bytes_hex": "53554d434841494e2f52302f47554553545352432f76310a"
+      },
+      {
+        "name": "BUILDCMD_PREFIX",
+        "ascii": "SUMCHAIN/R0/BUILDCMD/v1",
+        "terminator_hex": "0a",
+        "bytes_hex": "53554d434841494e2f52302f4255494c44434d442f76310a"
+      },
+      {
+        "name": "ARCHPROV_PREFIX",
+        "ascii": "SUMCHAIN/R0/ARCHPROV/v1",
+        "terminator_hex": "0a",
+        "bytes_hex": "53554d434841494e2f52302f4152434850524f562f76310a"
+      },
+      {
+        "name": "RESULTSET_PREFIX",
+        "ascii": "SUMCHAIN/R0/RESULTSET/v1",
+        "terminator_hex": "0a",
+        "bytes_hex": "53554d434841494e2f52302f524553554c545345542f76310a"
+      },
+      {
+        "name": "HARNESS_PREFIX",
+        "ascii": "SUMCHAIN/R0/HARNESSSRC/v1",
+        "terminator_hex": "0a",
+        "bytes_hex": "53554d434841494e2f52302f4841524e4553535352432f76310a"
+      },
+      {
+        "name": "ENVCAP_PREFIX",
+        "ascii": "SUMCHAIN/R0/ENVCAP/v1",
+        "terminator_hex": "0a",
+        "bytes_hex": "53554d434841494e2f52302f454e564341502f76310a"
+      },
+      {
+        "name": "SAMPLEBUNDLE_PREFIX",
+        "ascii": "SUMCHAIN/R0/SAMPLEBUNDLE/v1",
+        "terminator_hex": "0a",
+        "bytes_hex": "53554d434841494e2f52302f53414d504c4542554e444c452f76310a"
+      },
+      {
+        "name": "RSSBUNDLE_PREFIX",
+        "ascii": "SUMCHAIN/R0/RSSBUNDLE/v1",
+        "terminator_hex": "0a",
+        "bytes_hex": "53554d434841494e2f52302f52535342554e444c452f76310a"
+      }
+    ]
+  },
+  "versions": [
+    {
+      "name": "schema_version",
+      "value": 1
+    },
+    {
+      "name": "algorithm_version",
+      "value": 1
+    },
+    {
+      "name": "softmax_variant_id",
+      "value": 1
+    },
+    {
+      "name": "token_input_scheme_id",
+      "value": 1
+    },
+    {
+      "name": "fixed_point_version",
+      "value": 1
+    },
+    {
+      "name": "fixed_point_scale_log2",
+      "value": 8
+    },
+    {
+      "name": "workload_arch_id",
+      "value": 1378877441
+    },
+    {
+      "name": "weight_schedule_version",
+      "value": 0
+    },
+    {
+      "name": "output_manifest_schema_version",
+      "value": 1
+    }
+  ],
+  "enums": [
+    {
+      "name": "ObjectKind",
+      "repr_bits": 16,
+      "variants": [
+        {
+          "name": "Empty",
+          "value": 0
+        },
+        {
+          "name": "Model",
+          "value": 1
+        },
+        {
+          "name": "TokenPrefix",
+          "value": 3
+        },
+        {
+          "name": "InputManifest",
+          "value": 4
+        },
+        {
+          "name": "OutputManifest",
+          "value": 5
+        },
+        {
+          "name": "ResidualState",
+          "value": 6
+        },
+        {
+          "name": "KvState",
+          "value": 7
+        },
+        {
+          "name": "DerivedInput",
+          "value": 9
+        },
+        {
+          "name": "TokenSeq",
+          "value": 10
+        },
+        {
+          "name": "PriorResidual",
+          "value": 11
+        },
+        {
+          "name": "PriorKv",
+          "value": 12
+        }
+      ],
+      "reserved": [
+        {
+          "name": "Tokenizer",
+          "value": 2
+        },
+        {
+          "name": "Slot",
+          "value": 8
+        }
+      ]
+    },
+    {
+      "name": "SlotKind",
+      "repr_bits": 8,
+      "variants": [
+        {
+          "name": "ResidualStream",
+          "value": 0
+        },
+        {
+          "name": "KvCache",
+          "value": 1
+        }
+      ],
+      "reserved": []
+    },
+    {
+      "name": "InputSlotKind",
+      "repr_bits": 8,
+      "variants": [
+        {
+          "name": "PriorResidual",
+          "value": 0
+        },
+        {
+          "name": "PriorKv",
+          "value": 1
+        },
+        {
+          "name": "TokenPrefix",
+          "value": 2
+        }
+      ],
+      "reserved": []
+    },
+    {
+      "name": "Candidate",
+      "repr_bits": 16,
+      "variants": [
+        {
+          "name": "Sp1",
+          "value": 1
+        },
+        {
+          "name": "Risc0",
+          "value": 2
+        }
+      ],
+      "reserved": []
+    },
+    {
+      "name": "UnitKind",
+      "repr_bits": 16,
+      "variants": [
+        {
+          "name": "TransformerLayerGroup",
+          "value": 0
+        },
+        {
+          "name": "SelectToken",
+          "value": 1
+        }
+      ],
+      "reserved": []
+    },
+    {
+      "name": "ProofRefKind",
+      "repr_bits": 8,
+      "variants": [
+        {
+          "name": "ContentDigest",
+          "value": 1
+        }
+      ],
+      "reserved": []
+    },
+    {
+      "name": "MetricKind",
+      "repr_bits": 8,
+      "variants": [
+        {
+          "name": "GuestCyclesModelAuth",
+          "value": 0
+        },
+        {
+          "name": "GuestCyclesTransformer",
+          "value": 1
+        },
+        {
+          "name": "GuestCyclesStateHash",
+          "value": 2
+        },
+        {
+          "name": "GuestCyclesTotal",
+          "value": 3
+        },
+        {
+          "name": "HostProveWrapNs",
+          "value": 4
+        },
+        {
+          "name": "HostVerifyNs",
+          "value": 5
+        },
+        {
+          "name": "HostSetupNs",
+          "value": 6
+        },
+        {
+          "name": "ProofBytes",
+          "value": 7
+        }
+      ],
+      "reserved": []
+    },
+    {
+      "name": "Unit",
+      "repr_bits": 8,
+      "variants": [
+        {
+          "name": "Cycles",
+          "value": 0
+        },
+        {
+          "name": "Nanoseconds",
+          "value": 1
+        },
+        {
+          "name": "Bytes",
+          "value": 2
+        }
+      ],
+      "reserved": []
+    },
+    {
+      "name": "RssScope",
+      "repr_bits": 8,
+      "variants": [
+        {
+          "name": "ProvingRun",
+          "value": 0
+        },
+        {
+          "name": "VerifyBatch",
+          "value": 1
+        }
+      ],
+      "reserved": []
+    },
+    {
+      "name": "SampleKind",
+      "repr_bits": 8,
+      "variants": [
+        {
+          "name": "Warmup",
+          "value": 0
+        },
+        {
+          "name": "Measured",
+          "value": 1
+        }
+      ],
+      "reserved": []
+    },
+    {
+      "name": "Status",
+      "repr_bits": 8,
+      "variants": [
+        {
+          "name": "Ok",
+          "value": 0
+        },
+        {
+          "name": "Failed",
+          "value": 1
+        },
+        {
+          "name": "Timeout",
+          "value": 2
+        }
+      ],
+      "reserved": []
+    },
+    {
+      "name": "Arch",
+      "repr_bits": 8,
+      "variants": [
+        {
+          "name": "X86_64",
+          "value": 1
+        },
+        {
+          "name": "Aarch64",
+          "value": 2
+        }
+      ],
+      "reserved": []
+    },
+    {
+      "name": "ProvenanceRole",
+      "repr_bits": 8,
+      "variants": [
+        {
+          "name": "Proving",
+          "value": 0
+        },
+        {
+          "name": "Verification",
+          "value": 1
+        }
+      ],
+      "reserved": []
+    },
+    {
+      "name": "VerifierMaterialRole",
+      "repr_bits": 8,
+      "variants": [
+        {
+          "name": "Groth16Vk",
+          "value": 0
+        },
+        {
+          "name": "ControlRoot",
+          "value": 1
+        },
+        {
+          "name": "ControlId",
+          "value": 2
+        },
+        {
+          "name": "VerifierParams",
+          "value": 3
+        }
+      ],
+      "reserved": []
+    },
+    {
+      "name": "StatementIndex",
+      "repr_bits": 8,
+      "variants": [
+        {
+          "name": "Tlg",
+          "value": 0
+        },
+        {
+          "name": "SelectToken",
+          "value": 1
+        }
+      ],
+      "reserved": []
+    }
+  ],
+  "dimensions": {
+    "d_model": 8,
+    "n_heads": 2,
+    "head_dim": 4,
+    "ffn_dim": 16,
+    "vocab_size": 16,
+    "max_seq": 8
+  },
+  "bounds": {
+    "official": [
+      {
+        "name": "max_d_model",
+        "value": 8
+      },
+      {
+        "name": "max_seq_len",
+        "value": 8
+      },
+      {
+        "name": "max_output_tokens",
+        "value": 8
+      },
+      {
+        "name": "max_manifest_slots",
+        "value": 3
+      },
+      {
+        "name": "max_state_bytes",
+        "value": 2761
+      },
+      {
+        "name": "max_cycles",
+        "value": 0
+      }
+    ],
+    "decoder_maxima": [
+      {
+        "name": "output_manifest_max_slots",
+        "value": 256
+      },
+      {
+        "name": "input_manifest_max_slots",
+        "value": 8
+      }
+    ]
+  },
+  "unit_kind_rules": [
+    {
+      "unit_kind": "TransformerLayerGroup",
+      "wire_value": 0,
+      "layer_start": 0,
+      "layer_end": 1,
+      "rule": "Single frozen layer group; runs RMSNorm+attention+FFN and emits the residual/KV state. selected_token and eos are sentinels."
+    },
+    {
+      "unit_kind": "SelectToken",
+      "wire_value": 1,
+      "layer_start": 0,
+      "layer_end": 0,
+      "rule": "Projects the final residual to logits and selects the argmax token (lowest index on ties); empty prior-KV and empty output manifest."
+    }
+  ],
+  "schema_layouts": [
+    {
+      "name": "ObjectCommitmentV1",
+      "encoded_bytes": 80,
+      "note": "tag || kind || byte_len || chunk_count || merkle_root"
+    },
+    {
+      "name": "DerivedInputV1",
+      "encoded_bytes": 350,
+      "note": "ids, model_id, commitment identities, position, sequence_length"
+    },
+    {
+      "name": "InputManifestV1(empty)",
+      "encoded_bytes": 38,
+      "note": "tag || schema_version || count"
+    },
+    {
+      "name": "InputManifestV1(3 slots)",
+      "encoded_bytes": 293,
+      "note": "38 + 3 x 85"
+    },
+    {
+      "name": "OutputManifestV1(2 slots)",
+      "encoded_bytes": 208,
+      "note": "38 + 2 x 85"
+    },
+    {
+      "name": "R0ComputationStatementV2",
+      "encoded_bytes": 996,
+      "note": "full public statement; template zeroes b0_pre_spec_hash"
+    },
+    {
+      "name": "GuestProgramAllowlistV1(empty)",
+      "encoded_bytes": 6,
+      "note": "schema_version(2) + count(4); only the EMPTY allowlist schema + hashing rule is in the spec hash. A populated allowlist (228 header + 33 bytes/entry) is post-spec."
+    },
+    {
+      "name": "R0ProofArtifactEnvelopeV1",
+      "encoded_bytes": 3503,
+      "note": "proof envelope with embedded artifact bytes"
+    },
+    {
+      "name": "BenchmarkSampleV1",
+      "encoded_bytes": 309,
+      "note": "domain || identities || metric || value"
+    }
+  ],
+  "commitment_merkle": {
+    "object_tag_ascii": "SUMCHAIN/R0/OBJECT/v1",
+    "commitment_encoded_bytes": 80,
+    "identity_rule": "ObjectCommitmentV1 = OBJECT_TAG || kind || byte_len || chunk_count || merkle_root; identity() = BLAKE3 over the 80-byte encoding.",
+    "merkle_chunk_bytes": 1048576,
+    "merkle_rule": "chunk_count = ceil(byte_len / CHUNK); leaves are BLAKE3 of each chunk; binary Merkle over leaves; single leaf is its own root.",
+    "empty_object_rule": "Empty object: byte_len 0, chunk_count 0, all-zero merkle_root."
+  },
+  "json_rules": {
+    "strict_scan": [
+      "UTF-8 only; reject BOM and control chars outside strings",
+      "reject duplicate object keys",
+      "reject leading zeros, '+' signs, and bare/ trailing decimal points",
+      "reject NaN, Infinity, and exponent-only anomalies",
+      "reject trailing bytes after the top-level value",
+      "integers above u64::MAX are preserved via arbitrary_precision, never coerced to f64"
+    ],
+    "canonical": [
+      "object keys sorted by UTF-8 byte order",
+      "minimal number form: no leading zeros, no exponent, no trailing zeros",
+      "the canonical byte stream is ASCII; any non-ASCII character is \\u-escaped, and the minimal escape set is used",
+      "null is not permitted; absent optional fields are omitted, never null",
+      "no insignificant whitespace"
+    ]
+  },
+  "exp_table": {
+    "z_max": 3016,
+    "entries": 3017,
+    "scale": 65536,
+    "scale_bits": 16,
+    "max_terms": 256,
+    "table_at_zero": 65536,
+    "table_at_z_max": 1,
+    "lookup_rule": "z <= Z_MAX reads table[z]; z > Z_MAX yields 0.",
+    "certification_rule": "Each entry is the unique Q16 rounding of exp(-z/SCALE) proven by a big-rational interval enclosure; no floating point.",
+    "table_hash_hex": "50231bbd8f0aad16ea8b65e13811e6b9042ab2717a7b07f036893878305c92e8",
+    "certificate_hash_hex": "5d7bc03ba31822f005451df82755a8d5ab961b5ee8daf6690eac371c916326be",
+    "table_domain_ascii": "SUMCHAIN/B0PRE/EXP/v1",
+    "certificate_domain_ascii": "SUMCHAIN/B0PRE/EXPCERT/v1"
+  },
+  "transformer": {
+    "model_encoded_bytes": 1334,
+    "model_magic": 1378897220,
+    "model_version": 1,
+    "fixed_point_scale_log2": 8,
+    "model_layout": [
+      "magic:u32",
+      "version:u16",
+      "attn_gamma[8]",
+      "wq[8x8] wk[8x8] wv[8x8] wo[8x8]",
+      "ffn_gamma[8]",
+      "w1[8x16] w2[16x8]",
+      "final_gamma[8]",
+      "lmhead[8x16]",
+      "all i16 LE, row-major [in][out]"
+    ],
+    "rmsnorm_rule": "isqrt(ss/8 + 1) with RHAZ requantize by 256",
+    "attention_rule": "2 heads, head_dim 4, masked softmax; score / 512; weights from the exp table; denominator floored at 65536",
+    "ffn_rule": "8->16->8 with ReLU; RHAZ requantize by 256",
+    "requantize_rule": "RHAZ(value, 256) - round half away from zero",
+    "select_argmax_rule": "argmax over logits; lowest index wins ties",
+    "eos_token": 15
+  },
+  "official_statements": {
+    "model_id_hex": "d3f7c07b230d2747b5e9365bec124f17f0948d03a55389ce0b6574101b8d4022",
+    "statement_encoded_bytes": 996,
+    "spec_hash_zeroed_range": [
+      34,
+      66
+    ],
+    "statements": [
+      {
+        "name": "official-tlg",
+        "unit_kind": "TransformerLayerGroup",
+        "statement_index": 0,
+        "position": 7,
+        "sequence_length": 8,
+        "template_hash_hex": "7301ee63f420bcb5b50c7be7802e6e242e068978c8200671569777ed212f9969"
+      },
+      {
+        "name": "official-select",
+        "unit_kind": "SelectToken",
+        "statement_index": 1,
+        "position": 6,
+        "sequence_length": 7,
+        "template_hash_hex": "a31799c2f5740173a6088979e30d85c60eefeb2b4a15b0913cf5d2568768c72a"
+      }
+    ],
+    "fixture_path": "docs/b0-pre/fixtures/workload/official.json",
+    "note": "The only two canonical B0-PRE workload statements. Both are byte-locked, independently, by both tool crates (NON_SELECTION / TEST_ONLY weights)."
+  },
+  "witness_binding": {
+    "contract_steps": [
+      "authenticate model + inputs against the public commitments",
+      "reconstruct DerivedInputV1 and check its commitment",
+      "enforce frozen dims/bounds and the checked max_state_bytes",
+      "execute the frozen unit and recompute the output manifest",
+      "rebuild the full statement template and compare byte-for-byte"
+    ]
+  },
+  "candidate_eligibility": {
+    "candidates": [
+      {
+        "name": "Sp1",
+        "value": 1
+      },
+      {
+        "name": "Risc0",
+        "value": 2
+      }
+    ],
+    "rules": [
+      "Exactly two candidates (SP1=1, RISC0=2); 0 is not a candidate.",
+      "At R0 time (after b0_pre_spec_hash is finalized), a candidate is eligible only with complete, non-mixed evidence bound to BOTH hashes: b0_pre_spec_hash and the post-spec r0_guest_set_hash, plus its container digest, tool lock hashes, guest-program identities, and verifier material.",
+      "Candidate proving containers build under the candidate-container toolchain (Rust 1.88.0), distinct from the validator-tool floor (Rust 1.85.0)."
+    ]
+  },
+  "evidence_completeness": {
+    "iterations_per_cell": 10,
+    "measured_proofs": 40,
+    "verify_timing_samples": 4000,
+    "prove_time_samples": 40,
+    "proof_bytes_samples": 40,
+    "setup_samples": 40,
+    "proving_run_rss": 40,
+    "verify_batch_rss": 40,
+    "provenance_snapshots": 4,
+    "grid_rule": "Measured grid: 2 statements x 2 architectures x 10 iterations = 40 measured proofs, in canonical ascending order.",
+    "provenance_rule": "4 provenance snapshots: {x86_64, aarch64} x {proving, verification}.",
+    "non_mixability_rule": "Every record must bind the same spec/guest-set/candidate/ material/program/lock/container identities; mixed evidence is rejected."
+  },
+  "qualification_gates": {
+    "verify_p99_gate_ns": 75000000,
+    "verifier_material_bytes": 292,
+    "max_cycles": 0,
+    "gates": [
+      "host_verify_ns p99 (nearest-rank, host_setup_ns excluded) must be <= the gate",
+      "verifier-material byte total must equal the canonical manifest total",
+      "max_cycles is a reported bound; official statements set it to 0"
+    ]
+  },
+  "reported_only_metrics": [
+    "GuestCyclesModelAuth",
+    "GuestCyclesTransformer",
+    "GuestCyclesStateHash",
+    "GuestCyclesTotal",
+    "HostProveWrapNs",
+    "HostSetupNs",
+    "ProofBytes"
+  ],
+  "aggregation": {
+    "deterministic_rules": [
+      "Samples sorted by (arch, statement, iteration); aggregates recomputed from raw bytes.",
+      "p99 via nearest-rank; bundle hashes are domain-prefixed BLAKE3 over the sorted raw records."
+    ],
+    "failure_codes": [
+      "MeasuredProofGrid",
+      "ProvenanceSet",
+      "CompletenessCount",
+      "SampleSum",
+      "RssSum",
+      "QualificationInconsistent",
+      "RecordMixed",
+      "ProvenanceIneligible"
+    ],
+    "b0_final_tiebreak": [
+      "Among qualified candidates, break ties by lowest verify-p99, then lowest proof_bytes, then lowest candidate discriminant (SP1 before RISC0)."
+    ]
+  },
+  "hash_preimage_rules": {
+    "spec_hash_prefix_ascii": "SUMCHAIN/B0-PRE/SPEC/v1",
+    "spec_hash_prefix_hex": "53554d434841494e2f42302d5052452f535045432f76310a",
+    "statement_template_prefix_ascii": "SUMCHAIN/R0/STMTTEMPLATE/v2",
+    "guest_set_prefix_ascii": "SUMCHAIN/R0/GUESTSET/v1",
+    "canonical_json_rule": "b0_pre_spec_hash = BLAKE3(SPEC_PREFIX || canonical_protocol_json), where the canonical JSON follows the canonical rules above.",
+    "finalization_rule": "The preimage may only be built from a finalized artifact; a not_finalizable artifact (any Stage-1 input absent) cannot be hashed. r0_guest_set_hash and guest-program identities are post-spec and never enter this preimage."
+  },
+  "lifecycle": {
+    "stage1_spec_hash_includes": [
+      "the complete normative protocol and workload",
+      "candidate dependency lock hashes",
+      "immutable base and per-architecture builder container identities",
+      "candidate verifier-material manifests and their identities",
+      "exp table and certificate identities",
+      "both official zero-hash statement templates and their template hashes",
+      "statement materialization rule: insert b0_pre_spec_hash into the template's b0_pre_spec_hash range [34,66) to form each final statement",
+      "the empty GuestProgramAllowlistV1 schema and its hashing rules",
+      "provenance/result-set schemas, eligibility rules, aggregation rules, failure codes"
+    ],
+    "stage1_spec_hash_excludes": [
+      "final materialized statement bytes",
+      "guest sources and binaries",
+      "guest_program_id / program / image identities",
+      "populated GuestProgramAllowlistV1",
+      "r0_guest_set_hash",
+      "provenance records",
+      "measurement / result records"
+    ],
+    "post_spec_hash_steps": [
+      "1. materialize the two final statements by inserting b0_pre_spec_hash",
+      "2. build guests that embed B0_PRE_SPEC_HASH",
+      "3. derive guest image / vkey / program identities",
+      "4. populate GuestProgramAllowlistV1",
+      "5. compute r0_guest_set_hash",
+      "6. bind all R0 evidence to both b0_pre_spec_hash and r0_guest_set_hash"
+    ],
+    "note": "Two stages, in order. Stage 1 hashes only the material above into b0_pre_spec_hash before any guest exists. Guests then embed that hash, so r0_guest_set_hash and guest identities are derived afterwards and can never feed back into the spec-hash preimage."
+  },
+  "pending_inputs": {}
+}

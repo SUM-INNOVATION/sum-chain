@@ -1,0 +1,15 @@
+[package]
+name = "b0-pre-risc0-verifier-material"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "Deterministic extraction + contract test for the immutable material consumed by the pinned RISC Zero 3.0.5 Groth16 receipt verifier. Builds/runs only on a native x86_64 container venue."
+
+# Pinned to the RISC Zero candidate. Verifier-material bytes are READ from these
+# crates at run time; never hardcoded.
+[dependencies]
+risc0-zkvm = "=3.0.5"
+risc0-groth16 = "=3.0.4"
+blake3 = "=1.5.4"
+serde_json = { version = "=1.0.149", features = ["arbitrary_precision"] }

@@ -1,0 +1,237 @@
+//! `ObjectCommitmentV1` — 80 bytes (plan §8).
+//!
+//! Layout: `OBJECT[32] · schema_version u16 · object_kind u16 · byte_len u64 ·
+//! chunk_count u32 · merkle_root[32]`.
+
+use crate::codec::{DecodeError, Reader, Writer};
+use crate::enums::ObjectKind;
+use crate::merkle;
+use crate::tags::OBJECT_TAG;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ObjectCommitmentV1 {
+    pub object_kind: ObjectKind,
+    pub byte_len: u64,
+    pub chunk_count: u32,
+    pub merkle_root: [u8; 32],
+}
+
+impl ObjectCommitmentV1 {
+    pub const SCHEMA_VERSION: u16 = 1;
+    /// Documented total, used by containing structures for offset arithmetic.
+    /// Tests assert the *encoder-derived* length against the literal 80.
+    pub const LEN: usize = 80;
+
+    /// Commit to `data` as an object of `kind`.
+    pub fn commit(kind: ObjectKind, data: &[u8]) -> Self {
+        let byte_len = data.len() as u64;
+        Self {
+            object_kind: kind,
+            byte_len,
+            chunk_count: merkle::chunk_count(byte_len),
+            merkle_root: merkle::merkle_root(data),
+        }
+    }
+
+    /// The canonical empty commitment for `kind` (`byte_len=0`, zero root).
+    pub fn empty(kind: ObjectKind) -> Self {
+        Self {
+            object_kind: kind,
+            byte_len: 0,
+            chunk_count: 0,
+            merkle_root: [0u8; 32],
+        }
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.tag(&OBJECT_TAG);
+        w.u16(Self::SCHEMA_VERSION);
+        w.u16(self.object_kind.to_repr());
+        w.u64(self.byte_len);
+        w.u32(self.chunk_count);
+        w.bytes(&self.merkle_root);
+        w.into_bytes()
+    }
+
+    /// `identity(ObjectCommitmentV1) = BLAKE3(its 80 canonical bytes)`.
+    pub fn identity(&self) -> [u8; 32] {
+        blake3::hash(&self.encode()).into()
+    }
+
+    /// Decode from a reader, validating tag, schema version, kind, and the
+    /// `chunk_count == ceil(byte_len/CHUNK)` / empty-root invariants.
+    pub fn decode(r: &mut Reader) -> Result<Self, DecodeError> {
+        let tag = r.read_array::<32>("ObjectCommitmentV1.tag")?;
+        if tag != OBJECT_TAG {
+            return Err(DecodeError::BadTag {
+                ctx: "ObjectCommitmentV1",
+            });
+        }
+        let sv = r.read_u16("ObjectCommitmentV1.schema_version")?;
+        if sv != Self::SCHEMA_VERSION {
+            return Err(DecodeError::BadFixedScalar {
+                ctx: "ObjectCommitmentV1.schema_version",
+                value: sv as u64,
+            });
+        }
+        let object_kind = ObjectKind::from_repr(r.read_u16("ObjectCommitmentV1.object_kind")?)?;
+        let byte_len = r.read_u64("ObjectCommitmentV1.byte_len")?;
+        let chunk_count = r.read_u32("ObjectCommitmentV1.chunk_count")?;
+        let merkle_root = r.read_array::<32>("ObjectCommitmentV1.merkle_root")?;
+
+        if chunk_count != merkle::chunk_count(byte_len) {
+            return Err(DecodeError::Inconsistent {
+                ctx: "ObjectCommitmentV1.chunk_count",
+            });
+        }
+        if byte_len == 0 && merkle_root != [0u8; 32] {
+            return Err(DecodeError::Inconsistent {
+                ctx: "ObjectCommitmentV1.empty_root",
+            });
+        }
+        Ok(Self {
+            object_kind,
+            byte_len,
+            chunk_count,
+            merkle_root,
+        })
+    }
+
+    /// Decode consuming exactly `bytes` (rejects trailing).
+    pub fn decode_exact(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut r = Reader::new(bytes);
+        let v = Self::decode(&mut r)?;
+        r.finish("ObjectCommitmentV1")?;
+        Ok(v)
+    }
+
+    /// Decode an embedded commitment that must carry a specific object kind.
+    pub fn decode_expecting(
+        r: &mut Reader,
+        expected: ObjectKind,
+        ctx: &'static str,
+    ) -> Result<Self, DecodeError> {
+        let v = Self::decode(r)?;
+        if v.object_kind != expected {
+            return Err(DecodeError::Inconsistent { ctx });
+        }
+        Ok(v)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encoded_length_is_eighty() {
+        let c = ObjectCommitmentV1::commit(ObjectKind::Model, &[7u8; 100]);
+        assert_eq!(c.encode().len(), 80);
+    }
+
+    #[test]
+    fn roundtrips_for_several_kinds() {
+        for kind in [
+            ObjectKind::Model,
+            ObjectKind::TokenPrefix,
+            ObjectKind::KvState,
+        ] {
+            let c = ObjectCommitmentV1::commit(kind, b"payload bytes");
+            let back = ObjectCommitmentV1::decode_exact(&c.encode()).unwrap();
+            assert_eq!(back, c);
+        }
+    }
+
+    #[test]
+    fn empty_commitment_roundtrips_and_bad_empty_root_rejected() {
+        let e = ObjectCommitmentV1::empty(ObjectKind::PriorKv);
+        assert_eq!(e.chunk_count, 0);
+        assert_eq!(e.merkle_root, [0u8; 32]);
+        assert_eq!(ObjectCommitmentV1::decode_exact(&e.encode()).unwrap(), e);
+
+        // byte_len=0 but non-zero root is inconsistent
+        let mut bytes = e.encode();
+        bytes[48] = 0x01; // first byte of merkle_root
+        assert!(matches!(
+            ObjectCommitmentV1::decode_exact(&bytes),
+            Err(DecodeError::Inconsistent {
+                ctx: "ObjectCommitmentV1.empty_root"
+            })
+        ));
+    }
+
+    #[test]
+    fn chunk_count_ambiguity_is_closed() {
+        // A commitment claiming 3 chunks by byte_len but 4 by chunk_count is
+        // rejected — this is what defeats the duplicated-4th-leaf forgery.
+        let three_chunks = 3u64 * merkle::CHUNK as u64;
+        let mut w = Writer::new();
+        w.tag(&OBJECT_TAG);
+        w.u16(ObjectCommitmentV1::SCHEMA_VERSION);
+        w.u16(ObjectKind::ResidualState.to_repr());
+        w.u64(three_chunks);
+        w.u32(4); // lie: real count is 3
+        w.bytes(&[9u8; 32]);
+        assert!(matches!(
+            ObjectCommitmentV1::decode_exact(&w.into_bytes()),
+            Err(DecodeError::Inconsistent {
+                ctx: "ObjectCommitmentV1.chunk_count"
+            })
+        ));
+    }
+
+    #[test]
+    fn object_kind_mismatch_rejected() {
+        let c = ObjectCommitmentV1::commit(ObjectKind::TokenSeq, b"abc");
+        let bytes = c.encode();
+        let mut r = Reader::new(&bytes);
+        assert!(matches!(
+            ObjectCommitmentV1::decode_expecting(&mut r, ObjectKind::Model, "expect-model"),
+            Err(DecodeError::Inconsistent {
+                ctx: "expect-model"
+            })
+        ));
+    }
+
+    #[test]
+    fn reserved_kind_in_bytes_rejected() {
+        let c = ObjectCommitmentV1::commit(ObjectKind::Model, b"abc");
+        let mut bytes = c.encode();
+        bytes[34..36].copy_from_slice(&2u16.to_le_bytes()); // object_kind = reserved Tokenizer(2)
+        assert!(matches!(
+            ObjectCommitmentV1::decode_exact(&bytes),
+            Err(DecodeError::ReservedEnum {
+                name: "ObjectKind",
+                value: 2
+            })
+        ));
+    }
+
+    #[test]
+    fn bad_tag_rejected() {
+        let c = ObjectCommitmentV1::commit(ObjectKind::Model, b"abc");
+        let mut bytes = c.encode();
+        bytes[0] ^= 0xFF;
+        assert!(matches!(
+            ObjectCommitmentV1::decode_exact(&bytes),
+            Err(DecodeError::BadTag { .. })
+        ));
+    }
+
+    #[test]
+    fn truncation_and_trailing_rejected() {
+        let c = ObjectCommitmentV1::commit(ObjectKind::Model, b"abc");
+        let bytes = c.encode();
+        assert!(matches!(
+            ObjectCommitmentV1::decode_exact(&bytes[..79]),
+            Err(DecodeError::Truncated { .. })
+        ));
+        let mut too_long = bytes.clone();
+        too_long.push(0x00);
+        assert!(matches!(
+            ObjectCommitmentV1::decode_exact(&too_long),
+            Err(DecodeError::TrailingBytes { .. })
+        ));
+    }
+}

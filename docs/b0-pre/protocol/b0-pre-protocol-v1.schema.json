@@ -1,0 +1,1043 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "B0PreProtocolV1",
+  "type": "object",
+  "required": [
+    "aggregation",
+    "artifact_id",
+    "bounds",
+    "candidate_eligibility",
+    "commitment_merkle",
+    "dimensions",
+    "domains",
+    "enums",
+    "evidence_completeness",
+    "exp_table",
+    "finalization",
+    "hash_preimage_rules",
+    "json_rules",
+    "lifecycle",
+    "official_statements",
+    "pending_inputs",
+    "qualification_gates",
+    "reported_only_metrics",
+    "schema_layouts",
+    "spec_version",
+    "toolchains",
+    "transformer",
+    "unit_kind_rules",
+    "versions",
+    "witness_binding"
+  ],
+  "properties": {
+    "aggregation": {
+      "$ref": "#/definitions/Aggregation"
+    },
+    "artifact_id": {
+      "type": "string"
+    },
+    "bounds": {
+      "$ref": "#/definitions/Bounds"
+    },
+    "candidate_eligibility": {
+      "$ref": "#/definitions/CandidateEligibility"
+    },
+    "commitment_merkle": {
+      "$ref": "#/definitions/CommitmentMerkle"
+    },
+    "dimensions": {
+      "$ref": "#/definitions/Dimensions"
+    },
+    "domains": {
+      "$ref": "#/definitions/Domains"
+    },
+    "enums": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/EnumSpec"
+      }
+    },
+    "evidence_completeness": {
+      "$ref": "#/definitions/EvidenceCompleteness"
+    },
+    "exp_table": {
+      "$ref": "#/definitions/ExpTableSpec"
+    },
+    "finalization": {
+      "$ref": "#/definitions/Finalization"
+    },
+    "hash_preimage_rules": {
+      "$ref": "#/definitions/HashPreimageRules"
+    },
+    "json_rules": {
+      "$ref": "#/definitions/JsonRules"
+    },
+    "lifecycle": {
+      "$ref": "#/definitions/Lifecycle"
+    },
+    "official_statements": {
+      "$ref": "#/definitions/OfficialStatements"
+    },
+    "pending_inputs": {
+      "$ref": "#/definitions/PendingInputs"
+    },
+    "qualification_gates": {
+      "$ref": "#/definitions/QualificationGates"
+    },
+    "reported_only_metrics": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "schema_layouts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/SchemaLayout"
+      }
+    },
+    "spec_version": {
+      "type": "string"
+    },
+    "toolchains": {
+      "$ref": "#/definitions/Toolchains"
+    },
+    "transformer": {
+      "$ref": "#/definitions/TransformerSpec"
+    },
+    "unit_kind_rules": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/UnitKindRule"
+      }
+    },
+    "versions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/NamedU64"
+      }
+    },
+    "witness_binding": {
+      "$ref": "#/definitions/WitnessBinding"
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "Aggregation": {
+      "type": "object",
+      "required": [
+        "b0_final_tiebreak",
+        "deterministic_rules",
+        "failure_codes"
+      ],
+      "properties": {
+        "b0_final_tiebreak": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "deterministic_rules": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "failure_codes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "Bounds": {
+      "type": "object",
+      "required": [
+        "decoder_maxima",
+        "official"
+      ],
+      "properties": {
+        "decoder_maxima": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/NamedU64"
+          }
+        },
+        "official": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/NamedU64"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "CandidateEligibility": {
+      "type": "object",
+      "required": [
+        "candidates",
+        "rules"
+      ],
+      "properties": {
+        "candidates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/NamedU64"
+          }
+        },
+        "rules": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "CommitmentMerkle": {
+      "type": "object",
+      "required": [
+        "commitment_encoded_bytes",
+        "empty_object_rule",
+        "identity_rule",
+        "merkle_chunk_bytes",
+        "merkle_rule",
+        "object_tag_ascii"
+      ],
+      "properties": {
+        "commitment_encoded_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "empty_object_rule": {
+          "type": "string"
+        },
+        "identity_rule": {
+          "type": "string"
+        },
+        "merkle_chunk_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "merkle_rule": {
+          "type": "string"
+        },
+        "object_tag_ascii": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ContainerDigest": {
+      "description": "One immutable container identity. `role` distinguishes the base runtime image from the per-architecture builder image, so base and builder digests are enumerated separately.",
+      "type": "object",
+      "required": [
+        "arch",
+        "candidate",
+        "domain_ascii",
+        "image_digest_sha256_hex",
+        "role"
+      ],
+      "properties": {
+        "arch": {
+          "type": "string"
+        },
+        "candidate": {
+          "type": "string"
+        },
+        "domain_ascii": {
+          "type": "string"
+        },
+        "image_digest_sha256_hex": {
+          "type": "string"
+        },
+        "role": {
+          "description": "`base` or `builder`.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Dimensions": {
+      "type": "object",
+      "required": [
+        "d_model",
+        "ffn_dim",
+        "head_dim",
+        "max_seq",
+        "n_heads",
+        "vocab_size"
+      ],
+      "properties": {
+        "d_model": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "ffn_dim": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "head_dim": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "max_seq": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "n_heads": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "vocab_size": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "Domains": {
+      "type": "object",
+      "required": [
+        "hash_prefixes",
+        "structured_tags"
+      ],
+      "properties": {
+        "hash_prefixes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/HashPrefix"
+          }
+        },
+        "structured_tags": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/StructuredTag"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "EnumSpec": {
+      "type": "object",
+      "required": [
+        "name",
+        "repr_bits",
+        "reserved",
+        "variants"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "repr_bits": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "reserved": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/NamedU64"
+          }
+        },
+        "variants": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/NamedU64"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "EvidenceCompleteness": {
+      "type": "object",
+      "required": [
+        "grid_rule",
+        "iterations_per_cell",
+        "measured_proofs",
+        "non_mixability_rule",
+        "proof_bytes_samples",
+        "prove_time_samples",
+        "provenance_rule",
+        "provenance_snapshots",
+        "proving_run_rss",
+        "setup_samples",
+        "verify_batch_rss",
+        "verify_timing_samples"
+      ],
+      "properties": {
+        "grid_rule": {
+          "type": "string"
+        },
+        "iterations_per_cell": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "measured_proofs": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "non_mixability_rule": {
+          "type": "string"
+        },
+        "proof_bytes_samples": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "prove_time_samples": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "provenance_rule": {
+          "type": "string"
+        },
+        "provenance_snapshots": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "proving_run_rss": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "setup_samples": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "verify_batch_rss": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "verify_timing_samples": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "ExpTableSpec": {
+      "type": "object",
+      "required": [
+        "certificate_domain_ascii",
+        "certificate_hash_hex",
+        "certification_rule",
+        "entries",
+        "lookup_rule",
+        "max_terms",
+        "scale",
+        "scale_bits",
+        "table_at_z_max",
+        "table_at_zero",
+        "table_domain_ascii",
+        "table_hash_hex",
+        "z_max"
+      ],
+      "properties": {
+        "certificate_domain_ascii": {
+          "type": "string"
+        },
+        "certificate_hash_hex": {
+          "type": "string"
+        },
+        "certification_rule": {
+          "type": "string"
+        },
+        "entries": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "lookup_rule": {
+          "type": "string"
+        },
+        "max_terms": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "scale": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "scale_bits": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "table_at_z_max": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "table_at_zero": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "table_domain_ascii": {
+          "type": "string"
+        },
+        "table_hash_hex": {
+          "type": "string"
+        },
+        "z_max": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "Finalization": {
+      "type": "object",
+      "required": [
+        "blocked_on",
+        "note",
+        "state"
+      ],
+      "properties": {
+        "blocked_on": {
+          "description": "Names of the absent implementation-produced fields blocking finalization.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "note": {
+          "type": "string"
+        },
+        "state": {
+          "description": "`not_finalizable` while any `pending_inputs` field is absent, else `finalizable`.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "HashPrefix": {
+      "type": "object",
+      "required": [
+        "ascii",
+        "bytes_hex",
+        "name",
+        "terminator_hex"
+      ],
+      "properties": {
+        "ascii": {
+          "type": "string"
+        },
+        "bytes_hex": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "terminator_hex": {
+          "description": "Exact terminator byte (`\\0` or `\\n`), as a two-hex-digit string.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "HashPreimageRules": {
+      "type": "object",
+      "required": [
+        "canonical_json_rule",
+        "finalization_rule",
+        "guest_set_prefix_ascii",
+        "spec_hash_prefix_ascii",
+        "spec_hash_prefix_hex",
+        "statement_template_prefix_ascii"
+      ],
+      "properties": {
+        "canonical_json_rule": {
+          "type": "string"
+        },
+        "finalization_rule": {
+          "type": "string"
+        },
+        "guest_set_prefix_ascii": {
+          "type": "string"
+        },
+        "spec_hash_prefix_ascii": {
+          "type": "string"
+        },
+        "spec_hash_prefix_hex": {
+          "type": "string"
+        },
+        "statement_template_prefix_ascii": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "JsonRules": {
+      "type": "object",
+      "required": [
+        "canonical",
+        "strict_scan"
+      ],
+      "properties": {
+        "canonical": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "strict_scan": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "Lifecycle": {
+      "description": "The frozen two-stage lifecycle. Stage 1 computes `b0_pre_spec_hash` over the normative protocol and Stage-1 inputs; guests then embed that hash and their closure (guest-set hash, identities, populated allowlist) is derived afterwards, at R0 time.",
+      "type": "object",
+      "required": [
+        "note",
+        "post_spec_hash_steps",
+        "stage1_spec_hash_excludes",
+        "stage1_spec_hash_includes"
+      ],
+      "properties": {
+        "note": {
+          "type": "string"
+        },
+        "post_spec_hash_steps": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "stage1_spec_hash_excludes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "stage1_spec_hash_includes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "LockHash": {
+      "type": "object",
+      "required": [
+        "blake3_hex",
+        "domain_ascii",
+        "name"
+      ],
+      "properties": {
+        "blake3_hex": {
+          "type": "string"
+        },
+        "domain_ascii": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "NamedU64": {
+      "type": "object",
+      "required": [
+        "name",
+        "value"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "value": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "OfficialStatement": {
+      "type": "object",
+      "required": [
+        "name",
+        "position",
+        "sequence_length",
+        "statement_index",
+        "template_hash_hex",
+        "unit_kind"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "position": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "sequence_length": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "statement_index": {
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0.0
+        },
+        "template_hash_hex": {
+          "type": "string"
+        },
+        "unit_kind": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "OfficialStatements": {
+      "type": "object",
+      "required": [
+        "fixture_path",
+        "model_id_hex",
+        "note",
+        "spec_hash_zeroed_range",
+        "statement_encoded_bytes",
+        "statements"
+      ],
+      "properties": {
+        "fixture_path": {
+          "type": "string"
+        },
+        "model_id_hex": {
+          "type": "string"
+        },
+        "note": {
+          "type": "string"
+        },
+        "spec_hash_zeroed_range": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          }
+        },
+        "statement_encoded_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "statements": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/OfficialStatement"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "PendingInputs": {
+      "description": "Typed placeholders for the **Stage-1** implementation-produced fields that must exist before `b0_pre_spec_hash` can be computed. Exactly three categories: candidate container digests (base + per-architecture builder), candidate dependency lock hashes, and candidate verifier-material manifests.\n\nPost-spec-hash guest closure (`r0_guest_set_hash`, guest-program / image / vkey identities, populated `GuestProgramAllowlistV1`) is deliberately NOT here: guests embed the finalized spec hash, so their identities cannot be a spec-hash input without circularity. There is no field capable of accepting a guest identity or the guest-set hash.\n\nEvery field is absent in the committed artifact (omitted, never `null`); no fabricated or temporary values are ever written here.",
+      "type": "object",
+      "properties": {
+        "candidate_container_digests": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/ContainerDigest"
+          }
+        },
+        "cargo_lock_hashes": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/LockHash"
+          }
+        },
+        "verifier_material_manifests": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/VerifierMaterialManifestRef"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "QualificationGates": {
+      "type": "object",
+      "required": [
+        "gates",
+        "max_cycles",
+        "verifier_material_bytes",
+        "verify_p99_gate_ns"
+      ],
+      "properties": {
+        "gates": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "max_cycles": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "verifier_material_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "verify_p99_gate_ns": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "SchemaLayout": {
+      "type": "object",
+      "required": [
+        "encoded_bytes",
+        "name",
+        "note"
+      ],
+      "properties": {
+        "encoded_bytes": {
+          "description": "Encoded byte length of the representative/official instance.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "name": {
+          "type": "string"
+        },
+        "note": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "StructuredTag": {
+      "type": "object",
+      "required": [
+        "ascii",
+        "bytes_hex",
+        "name"
+      ],
+      "properties": {
+        "ascii": {
+          "type": "string"
+        },
+        "bytes_hex": {
+          "description": "The 32-byte zero-padded tag, lowercase hex (64 chars).",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Toolchains": {
+      "type": "object",
+      "required": [
+        "candidate_container_rust",
+        "candidate_container_rust_note",
+        "validator_tool_rust_floor",
+        "validator_tool_rust_floor_note"
+      ],
+      "properties": {
+        "candidate_container_rust": {
+          "type": "string"
+        },
+        "candidate_container_rust_note": {
+          "type": "string"
+        },
+        "validator_tool_rust_floor": {
+          "type": "string"
+        },
+        "validator_tool_rust_floor_note": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "TransformerSpec": {
+      "type": "object",
+      "required": [
+        "attention_rule",
+        "eos_token",
+        "ffn_rule",
+        "fixed_point_scale_log2",
+        "model_encoded_bytes",
+        "model_layout",
+        "model_magic",
+        "model_version",
+        "requantize_rule",
+        "rmsnorm_rule",
+        "select_argmax_rule"
+      ],
+      "properties": {
+        "attention_rule": {
+          "type": "string"
+        },
+        "eos_token": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "ffn_rule": {
+          "type": "string"
+        },
+        "fixed_point_scale_log2": {
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0.0
+        },
+        "model_encoded_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "model_layout": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "model_magic": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "model_version": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "requantize_rule": {
+          "type": "string"
+        },
+        "rmsnorm_rule": {
+          "type": "string"
+        },
+        "select_argmax_rule": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "UnitKindRule": {
+      "type": "object",
+      "required": [
+        "layer_end",
+        "layer_start",
+        "rule",
+        "unit_kind",
+        "wire_value"
+      ],
+      "properties": {
+        "layer_end": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "layer_start": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "rule": {
+          "type": "string"
+        },
+        "unit_kind": {
+          "type": "string"
+        },
+        "wire_value": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "VerifierMaterialManifestRef": {
+      "type": "object",
+      "required": [
+        "candidate",
+        "domain_ascii",
+        "manifest_hash_hex",
+        "total_bytes"
+      ],
+      "properties": {
+        "candidate": {
+          "type": "string"
+        },
+        "domain_ascii": {
+          "type": "string"
+        },
+        "manifest_hash_hex": {
+          "type": "string"
+        },
+        "total_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "WitnessBinding": {
+      "type": "object",
+      "required": [
+        "contract_steps"
+      ],
+      "properties": {
+        "contract_steps": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

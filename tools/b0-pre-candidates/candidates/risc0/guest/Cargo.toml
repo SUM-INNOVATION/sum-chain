@@ -1,0 +1,11 @@
+[package]
+name = "b0-pre-candidate-risc0-guest"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "RISC Zero 3.0.5 guest-side candidate pin (zkVM platform). Resolved authoritatively only in the container venue."
+
+# Exact direct pin (guest-side platform crate).
+[dependencies]
+risc0-zkvm-platform = "=2.2.2"

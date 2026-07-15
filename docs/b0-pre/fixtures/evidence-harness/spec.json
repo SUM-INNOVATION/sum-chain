@@ -1,0 +1,14 @@
+{
+  "label": "NON_SELECTION / TEST_ONLY",
+  "seed": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+  "expected": {
+    "result_set_hash": "827e8898ffad9dc580bc328330d4ddd3446dbd062d91c49d27a416d9393b1f5e",
+    "worst_arch_p99_verify_ns": 59609120,
+    "max_proof_bytes": 209,
+    "verifier_material_bytes": 292,
+    "worst_arch_verifier_rss_bytes": 104865801,
+    "qualification": true,
+    "measured_proofs": 40,
+    "verify_samples": 4000
+  }
+}

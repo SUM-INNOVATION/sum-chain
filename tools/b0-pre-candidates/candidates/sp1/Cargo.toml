@@ -1,0 +1,15 @@
+# SP1 6.3.1 candidate dependency manifest (exact pins).
+#
+# NO authoritative Cargo.lock is committed here. The lock that is the full
+# transitive source of truth is generated INSIDE the pinned container venue
+# (native Linux, Rust 1.88.0) by scripts/run_authoritative.sh, then hashed with
+# the SUMCHAIN/B0PRE/CARGOLOCK/v1-prefixed BLAKE3 rule. A lock resolved on any
+# other host is non-authoritative and must not be used.
+#
+# Two members so a single lock covers both the host-side and guest-side pins:
+#   host:  sp1-sdk, sp1-verifier, sp1-build
+#   guest: sp1-zkvm
+
+[workspace]
+resolver = "2"
+members = ["host", "guest"]
