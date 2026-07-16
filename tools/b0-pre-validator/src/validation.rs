@@ -20,6 +20,7 @@ pub enum Reason {
     QualificationInconsistent,
     RecordMixed(&'static str),
     ProvenanceIneligible(&'static str),
+    PairedEnvironmentMismatch(&'static str),
 }
 
 /// The exact set of `(arch, statement, iteration)` keys an official result set
@@ -160,8 +161,21 @@ pub fn envelope_binds_result_set(
     Ok(())
 }
 
-/// Per-role resource eligibility for a provenance snapshot (plan §23).
+/// Controlled-benchmark measurement integrity plus the validator verification
+/// baseline for a provenance snapshot (plan §23, as corrected).
+///
+/// Proving contributors have NO hardware/resource eligibility: no minimum CPU,
+/// RAM, GPU, storage, or device class. A proving snapshot's cores, RAM, and
+/// cpuset/memory limits are recorded (reported-only) and never gate — a valid
+/// proof from any device is protocol-eligible; a slower device only takes
+/// longer. What is still enforced is (a) measurement-environment integrity,
+/// which is device-neutral (any device can meet it on the controlled benchmark
+/// host), and (b) the validator verification reference baseline (4 cores /
+/// 8 GiB) for the Verification role, which bounds chain-side verification for
+/// consensus safety — not contributor participation.
 pub fn provenance_eligible(p: &ArchRunProvenanceV1) -> Result<(), Reason> {
+    // Controlled-benchmark measurement integrity (both roles). Not a
+    // hardware-size gate; excludes no device class.
     if p.governor != "performance" {
         return Err(Reason::ProvenanceIneligible("governor"));
     }
@@ -172,29 +186,47 @@ pub fn provenance_eligible(p: &ArchRunProvenanceV1) -> Result<(), Reason> {
         return Err(Reason::ProvenanceIneligible("dirty"));
     }
     match p.provenance_role {
-        ProvenanceRole::Proving => {
-            if p.physical_core_count < 16 {
-                return Err(Reason::ProvenanceIneligible("phys"));
-            }
-            if p.total_ram_bytes < 64u64 << 30 {
-                return Err(Reason::ProvenanceIneligible("ram"));
-            }
-            if p.configured_cpuset_core_limit as u64 > (35 * p.physical_core_count as u64) / 100 {
-                return Err(Reason::ProvenanceIneligible("cpuset"));
-            }
-            let ram_gib = p.total_ram_bytes >> 30;
-            if p.configured_memory_limit_bytes > ((35 * ram_gib) / 100) << 30 {
-                return Err(Reason::ProvenanceIneligible("memlimit"));
-            }
-        }
+        // No proving-role hardware/resource gate: cores, RAM, and cpuset/memory
+        // limits are reported-only.
+        ProvenanceRole::Proving => {}
         ProvenanceRole::Verification => {
-            if p.configured_cpuset_core_limit != 4 {
+            if p.configured_cpuset_core_limit != consts::VALIDATOR_VERIFY_REFERENCE_CORES {
                 return Err(Reason::ProvenanceIneligible("verify_cpuset"));
             }
-            if p.configured_memory_limit_bytes != 8u64 << 30 {
+            if p.configured_memory_limit_bytes != consts::VALIDATOR_VERIFY_REFERENCE_RAM_BYTES {
                 return Err(Reason::ProvenanceIneligible("verify_mem"));
             }
         }
+    }
+    Ok(())
+}
+
+/// Fair-benchmark pairing: two paired runs (same architecture, the two
+/// candidates) must share the controlled measurement environment for the
+/// comparison to be fair. Prover hardware SIZE is deliberately not compared —
+/// only the controlled knobs both runs are required to hold equal. A mismatch
+/// is rejected; device-size differences never trigger it.
+pub fn paired_environment_consistent(
+    a: &ArchRunProvenanceV1,
+    b: &ArchRunProvenanceV1,
+) -> Result<(), Reason> {
+    if a.arch != b.arch {
+        return Err(Reason::PairedEnvironmentMismatch("arch"));
+    }
+    if a.configured_cpuset_core_limit != b.configured_cpuset_core_limit {
+        return Err(Reason::PairedEnvironmentMismatch("cpuset"));
+    }
+    if a.configured_memory_limit_bytes != b.configured_memory_limit_bytes {
+        return Err(Reason::PairedEnvironmentMismatch("memlimit"));
+    }
+    if a.governor != b.governor {
+        return Err(Reason::PairedEnvironmentMismatch("governor"));
+    }
+    if a.turbo_enabled != b.turbo_enabled {
+        return Err(Reason::PairedEnvironmentMismatch("turbo"));
+    }
+    if a.cgroup_version != b.cgroup_version {
+        return Err(Reason::PairedEnvironmentMismatch("cgroup_version"));
     }
     Ok(())
 }

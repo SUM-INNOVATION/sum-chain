@@ -108,12 +108,27 @@ fn reference_closure_agrees_on_valid_and_rejects_mutations() {
             "{k}"
         );
     }
-    for k in ["prov_underpowered", "prov_bad_governor"] {
-        let rejected = match ArchRunProvenanceV1::decode_exact(&rej(k)) {
+    // prov_bad_governor still fails device-neutral measurement-environment
+    // integrity (governor != performance).
+    {
+        let rejected = match ArchRunProvenanceV1::decode_exact(&rej("prov_bad_governor")) {
             Err(_) => true,
             Ok(p) => validation::provenance_eligible(&p).is_err(),
         };
-        assert!(rejected, "{k}");
+        assert!(rejected, "prov_bad_governor");
+    }
+    // Corrected policy (device neutrality): the historically-named
+    // `prov_underpowered` snapshot is a low-resource (8-core) proving device.
+    // Under the removed hardware gate it was rejected; now a valid proof from any
+    // device is protocol-eligible, so it must NOT be disqualified for its size.
+    {
+        let p = ArchRunProvenanceV1::decode_exact(&rej("prov_underpowered"))
+            .expect("low-resource snapshot still decodes");
+        assert_eq!(
+            validation::provenance_eligible(&p),
+            Ok(()),
+            "a low-resource proving device must not be disqualified for its hardware"
+        );
     }
     {
         let rejected = match R0ProofArtifactEnvelopeV1::decode_exact(&rej("env_wrong_guest_set")) {

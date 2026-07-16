@@ -27,6 +27,19 @@ pub const MAX_MANIFEST_SLOTS: u32 = 3;
 pub const MAX_STATE_BYTES: u64 = 2761;
 pub const MAX_CYCLES: u64 = 0;
 
+// Validator-side proof-verification baseline (§23). These bound consensus-time
+// verification on the validator reference machine; they are NOT OmniNode
+// contributor participation requirements and place no minimum on a contributor's
+// proving device.
+pub const VALIDATOR_VERIFY_REFERENCE_CORES: u32 = 4;
+pub const VALIDATOR_VERIFY_REFERENCE_RAM_BYTES: u64 = 8 << 30;
+pub const VALIDATOR_AGGREGATE_VERIFY_BUDGET_NS_PER_BLOCK: u64 = 300_000_000; // 300 ms/block
+
+// Recommended default local resource-budget an OmniNode operator may configure
+// per device. Not consensus, proof validity, candidate selection, or hardware
+// eligibility.
+pub const LOCAL_RESOURCE_BUDGET_DEFAULT_PERCENT: u32 = 35;
+
 // General decoder maxima (§8) — larger than the official bounds; schema-valid
 // but B0-selection-ineligible statements may use up to these.
 pub const OUTPUT_MANIFEST_MAX_SLOTS: u32 = 256;

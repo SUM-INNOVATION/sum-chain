@@ -4,8 +4,8 @@
 
 use b0_pre_independent::closure::{
     decode_allowlist, decode_env, decode_prov, decode_result_set, decode_rss, decode_sample,
-    decode_vm, envelope_binds, provenance_eligible, provenance_hash, validate_completeness,
-    Allowlist, ResultSet, Vm,
+    decode_vm, envelope_binds, paired_environment_consistent, provenance_eligible, provenance_hash,
+    validate_completeness, Allowlist, ResultSet, Vm,
 };
 
 const V: &str = include_str!("../../../docs/b0-pre/fixtures/closure-golden/vectors.json");
@@ -72,6 +72,15 @@ fn independent_closure_agrees_on_valid_and_rejects_mutations() {
     );
     assert_eq!(provenance_eligible(&pv), Ok(()));
 
+    // fair-benchmark pairing (independent mirror): identical controlled
+    // environment is consistent even when hardware size differs; a controlled-knob
+    // mismatch is rejected, and device size alone never triggers it.
+    let mut paired = decode_prov(&pv_bytes).unwrap();
+    paired.phys = pv.phys.saturating_mul(4);
+    assert_eq!(paired_environment_consistent(&pv, &paired), Ok(()));
+    paired.governor = "powersave".into();
+    assert!(paired_environment_consistent(&pv, &paired).is_err());
+
     // --- allowlist (empty): guest-set hash ---
     let al_bytes = unhex(&s(&["valid", "allowlist_empty", "bytes"]));
     let al = decode_allowlist(&al_bytes).unwrap();
@@ -106,12 +115,24 @@ fn independent_closure_agrees_on_valid_and_rejects_mutations() {
             "{k} must be rejected at decode"
         );
     }
-    for k in ["prov_underpowered", "prov_bad_governor"] {
-        let rejected = match decode_prov(&rej(k)) {
+    // prov_bad_governor still fails device-neutral measurement-environment
+    // integrity (governor != performance).
+    {
+        let rejected = match decode_prov(&rej("prov_bad_governor")) {
             Err(_) => true,
             Ok(p) => provenance_eligible(&p).is_err(),
         };
-        assert!(rejected, "{k} must be rejected");
+        assert!(rejected, "prov_bad_governor must be rejected");
+    }
+    // Corrected policy (device neutrality): the low-resource (8-core)
+    // `prov_underpowered` snapshot is no longer disqualified for its hardware.
+    {
+        let p = decode_prov(&rej("prov_underpowered")).expect("low-resource snapshot decodes");
+        assert_eq!(
+            provenance_eligible(&p),
+            Ok(()),
+            "a low-resource proving device must not be disqualified for its hardware"
+        );
     }
     {
         let rejected = match decode_env(&rej("env_wrong_guest_set")) {

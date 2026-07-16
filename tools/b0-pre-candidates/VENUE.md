@@ -98,3 +98,31 @@ blobs, and scratch data are never committed. Only Dockerfiles, manifests,
 venue-generated locks, canonical verifier-material artifacts, minimal TEST_ONLY
 contract fixtures (when required), hashes, and reproducibility metadata are
 retained.
+
+## 8. Contributor-resource policy (device-neutral)
+
+This contract governs *how* the paired benchmark is run, not *who* may
+contribute. OmniNode participation has **no hardware eligibility**: no minimum
+CPU, RAM, GPU, storage, or device class determines whether a contributor is
+protocol-eligible. A valid proof from any device is eligible; a slower device
+only takes longer. Prover time, peak RAM, configured/physical cores, device
+architecture, GPU use, storage usage, and timing variance are **reported-only**
+metrics recorded in provenance — they never gate qualification, candidate
+selection, or the B0-FINAL tie-break. (This is a preregistration correction:
+the former `>= 16`-core / `>= 64`-GiB / 35%-cap proving-resource gate is removed.)
+
+- **Benchmark fairness** comes from running *both* candidates under identical
+  controlled conditions on the same physical host per architecture (same cpuset,
+  memory limit, governor, isolation, workload, warmup, and iteration policy) and
+  recording all configured/detected resources — not from excluding weaker devices
+  or requiring a particular absolute host size.
+- The **35% resource budget** is a recommended *default local operating policy* an
+  operator may configure for their device. It is not consensus, proof validity,
+  candidate selection, or hardware eligibility.
+- The **prove watchdog** is a run-management timeout only. A timeout produces an
+  incomplete run requiring continuation/retry; it is not a candidate performance
+  failure or a disqualification.
+- **Validators** retain a separate verification-performance baseline (4 physical
+  cores, 8 GiB, worst-architecture verify p99 `<= 75 ms`, aggregate verification
+  `<= 300 ms/block`) because consensus safety needs bounded verification. That
+  baseline constrains chain-side proof verification, not OmniNode participation.

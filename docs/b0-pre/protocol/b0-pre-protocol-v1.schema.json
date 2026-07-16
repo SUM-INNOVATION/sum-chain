@@ -8,6 +8,7 @@
     "bounds",
     "candidate_eligibility",
     "commitment_merkle",
+    "contributor_resource_policy",
     "dimensions",
     "domains",
     "enums",
@@ -19,6 +20,7 @@
     "lifecycle",
     "official_statements",
     "pending_inputs",
+    "qualification_criteria",
     "qualification_gates",
     "reported_only_metrics",
     "schema_layouts",
@@ -44,6 +46,9 @@
     },
     "commitment_merkle": {
       "$ref": "#/definitions/CommitmentMerkle"
+    },
+    "contributor_resource_policy": {
+      "$ref": "#/definitions/ContributorResourcePolicy"
     },
     "dimensions": {
       "$ref": "#/definitions/Dimensions"
@@ -80,6 +85,9 @@
     },
     "pending_inputs": {
       "$ref": "#/definitions/PendingInputs"
+    },
+    "qualification_criteria": {
+      "$ref": "#/definitions/QualificationCriteria"
     },
     "qualification_gates": {
       "$ref": "#/definitions/QualificationGates"
@@ -128,7 +136,8 @@
       "required": [
         "b0_final_tiebreak",
         "deterministic_rules",
-        "failure_codes"
+        "failure_codes",
+        "tiebreak_excludes"
       ],
       "properties": {
         "b0_final_tiebreak": {
@@ -144,6 +153,12 @@
           }
         },
         "failure_codes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tiebreak_excludes": {
           "type": "array",
           "items": {
             "type": "string"
@@ -258,6 +273,42 @@
         "role": {
           "description": "`base` or `builder`.",
           "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ContributorResourcePolicy": {
+      "description": "The corrected contributor-resource policy. OmniNode participation is device-neutral: no minimum CPU, RAM, GPU, storage, or device class. Prover resources are recorded for transparency only. The 35% budget is a local operator default, not a selection gate.",
+      "type": "object",
+      "required": [
+        "fair_benchmark_pairing",
+        "hardware_eligibility",
+        "local_resource_budget",
+        "note",
+        "prove_watchdog",
+        "reported_only_resources"
+      ],
+      "properties": {
+        "fair_benchmark_pairing": {
+          "$ref": "#/definitions/FairBenchmarkPairing"
+        },
+        "hardware_eligibility": {
+          "type": "string"
+        },
+        "local_resource_budget": {
+          "$ref": "#/definitions/LocalResourceBudget"
+        },
+        "note": {
+          "type": "string"
+        },
+        "prove_watchdog": {
+          "type": "string"
+        },
+        "reported_only_resources": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       },
       "additionalProperties": false
@@ -508,6 +559,26 @@
       },
       "additionalProperties": false
     },
+    "FairBenchmarkPairing": {
+      "description": "Benchmark fairness is achieved by running both candidates under identical controlled conditions on the same physical host per architecture, not by excluding weaker devices or requiring a particular absolute host size.",
+      "type": "object",
+      "required": [
+        "per_architecture_controls",
+        "rule"
+      ],
+      "properties": {
+        "per_architecture_controls": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "rule": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
     "Finalization": {
       "type": "object",
       "required": [
@@ -642,6 +713,25 @@
           "items": {
             "type": "string"
           }
+        }
+      },
+      "additionalProperties": false
+    },
+    "LocalResourceBudget": {
+      "description": "A recommended default resource-budget an operator may configure per device. Not consensus, proof validity, candidate selection, or hardware eligibility.",
+      "type": "object",
+      "required": [
+        "default_fraction_percent",
+        "scope"
+      ],
+      "properties": {
+        "default_fraction_percent": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "scope": {
+          "type": "string"
         }
       },
       "additionalProperties": false
@@ -798,15 +888,52 @@
       },
       "additionalProperties": false
     },
-    "QualificationGates": {
+    "QualificationCriteria": {
+      "description": "What a candidate qualifies on, and what can never disqualify it. Prover performance and device resources are reported-only and appear in `never_disqualifies`.",
       "type": "object",
       "required": [
+        "never_disqualifies",
+        "note",
+        "qualifies_on"
+      ],
+      "properties": {
+        "never_disqualifies": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "note": {
+          "type": "string"
+        },
+        "qualifies_on": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "QualificationGates": {
+      "description": "Chain-side proof-verification limits, applied on the validator reference machine. These bound how fast a validator must verify a proof for consensus safety; they are deliberately NOT OmniNode contributor participation requirements and place no minimum on a contributor's proving device.",
+      "type": "object",
+      "required": [
+        "aggregate_verify_budget_ns_per_block",
         "gates",
         "max_cycles",
+        "scope",
+        "validator_reference_physical_cores",
+        "validator_reference_ram_bytes",
         "verifier_material_bytes",
         "verify_p99_gate_ns"
       ],
       "properties": {
+        "aggregate_verify_budget_ns_per_block": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
         "gates": {
           "type": "array",
           "items": {
@@ -814,6 +941,19 @@
           }
         },
         "max_cycles": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "scope": {
+          "type": "string"
+        },
+        "validator_reference_physical_cores": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "validator_reference_ram_bytes": {
           "type": "integer",
           "format": "uint64",
           "minimum": 0.0

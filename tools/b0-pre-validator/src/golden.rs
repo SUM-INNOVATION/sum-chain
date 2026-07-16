@@ -273,7 +273,11 @@ pub fn official_verifier_material() -> VerifierMaterialManifestV1 {
     }
 }
 
-/// An eligible proving-role provenance snapshot (16 cores / 64 GiB, 35% caps).
+/// A controlled proving-role provenance snapshot. Its 16-core / 64-GiB / cpuset
+/// / memory figures are recorded for transparency only; under the corrected
+/// policy they are reported-only and do not gate eligibility (any device
+/// qualifies). Kept at these values so the committed closure fixture stays
+/// byte-stable.
 pub fn official_provenance_proving() -> ArchRunProvenanceV1 {
     ArchRunProvenanceV1 {
         provenance_role: ProvenanceRole::Proving,

@@ -401,7 +401,11 @@ pub fn provenance_hash(canonical_bytes: &[u8]) -> [u8; 32] {
     crate::prefixed(tags::ARCHPROV_PREFIX, canonical_bytes)
 }
 
-/// Per-role resource eligibility (plan §23).
+/// Controlled-benchmark measurement integrity plus the validator verification
+/// baseline (plan §23, as corrected). Proving contributors have NO hardware or
+/// resource eligibility: cores, RAM, and cpuset/memory limits are reported-only
+/// and never gate. Only device-neutral measurement integrity (governor / turbo /
+/// clean tree) and the Verification-role baseline (4 cores / 8 GiB) gate.
 pub fn provenance_eligible(p: &Prov) -> Result<(), &'static str> {
     if p.governor != "performance" {
         return Err("governor");
@@ -413,22 +417,8 @@ pub fn provenance_eligible(p: &Prov) -> Result<(), &'static str> {
         return Err("dirty");
     }
     match p.role {
-        0 => {
-            // proving contributor: >=16 cores, >=64 GiB, <=35% caps
-            if p.phys < 16 {
-                return Err("phys");
-            }
-            if p.ram < 64u64 << 30 {
-                return Err("ram");
-            }
-            if p.cpuset as u64 > (35 * p.phys as u64) / 100 {
-                return Err("cpuset");
-            }
-            let ram_gib = p.ram >> 30;
-            if p.memlimit > ((35 * ram_gib) / 100) << 30 {
-                return Err("memlimit");
-            }
-        }
+        // proving contributor: no hardware/resource eligibility (reported-only)
+        0 => {}
         1 => {
             // verification validator baseline: 4 cores / 8 GiB
             if p.cpuset != 4 {
@@ -439,6 +429,31 @@ pub fn provenance_eligible(p: &Prov) -> Result<(), &'static str> {
             }
         }
         _ => return Err("role"),
+    }
+    Ok(())
+}
+
+/// Fair-benchmark pairing (independent mirror): two paired runs (same arch, the
+/// two candidates) must share the controlled measurement environment. Hardware
+/// size is deliberately not compared, so device differences never trigger it.
+pub fn paired_environment_consistent(a: &Prov, b: &Prov) -> Result<(), &'static str> {
+    if a.arch != b.arch {
+        return Err("arch");
+    }
+    if a.cpuset != b.cpuset {
+        return Err("cpuset");
+    }
+    if a.memlimit != b.memlimit {
+        return Err("memlimit");
+    }
+    if a.governor != b.governor {
+        return Err("governor");
+    }
+    if a.turbo != b.turbo {
+        return Err("turbo");
+    }
+    if a.cgroup_version != b.cgroup_version {
+        return Err("cgroup_version");
     }
     Ok(())
 }

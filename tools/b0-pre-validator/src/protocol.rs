@@ -89,6 +89,8 @@ pub struct B0PreProtocolV1 {
     pub candidate_eligibility: CandidateEligibility,
     pub evidence_completeness: EvidenceCompleteness,
     pub qualification_gates: QualificationGates,
+    pub qualification_criteria: QualificationCriteria,
+    pub contributor_resource_policy: ContributorResourcePolicy,
     pub reported_only_metrics: Vec<String>,
     pub aggregation: Aggregation,
     pub hash_preimage_rules: HashPreimageRules,
@@ -312,13 +314,66 @@ pub struct EvidenceCompleteness {
     pub non_mixability_rule: String,
 }
 
+/// Chain-side proof-verification limits, applied on the validator reference
+/// machine. These bound how fast a validator must verify a proof for consensus
+/// safety; they are deliberately NOT OmniNode contributor participation
+/// requirements and place no minimum on a contributor's proving device.
 #[derive(Serialize, Deserialize, JsonSchema, Clone, PartialEq, Eq, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct QualificationGates {
     pub verify_p99_gate_ns: u64,
+    pub aggregate_verify_budget_ns_per_block: u64,
+    pub validator_reference_physical_cores: u32,
+    pub validator_reference_ram_bytes: u64,
     pub verifier_material_bytes: u64,
     pub max_cycles: u64,
+    pub scope: String,
     pub gates: Vec<String>,
+}
+
+/// What a candidate qualifies on, and what can never disqualify it. Prover
+/// performance and device resources are reported-only and appear in
+/// `never_disqualifies`.
+#[derive(Serialize, Deserialize, JsonSchema, Clone, PartialEq, Eq, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct QualificationCriteria {
+    pub qualifies_on: Vec<String>,
+    pub never_disqualifies: Vec<String>,
+    pub note: String,
+}
+
+/// The corrected contributor-resource policy. OmniNode participation is
+/// device-neutral: no minimum CPU, RAM, GPU, storage, or device class. Prover
+/// resources are recorded for transparency only. The 35% budget is a local
+/// operator default, not a selection gate.
+#[derive(Serialize, Deserialize, JsonSchema, Clone, PartialEq, Eq, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct ContributorResourcePolicy {
+    pub hardware_eligibility: String,
+    pub reported_only_resources: Vec<String>,
+    pub local_resource_budget: LocalResourceBudget,
+    pub fair_benchmark_pairing: FairBenchmarkPairing,
+    pub prove_watchdog: String,
+    pub note: String,
+}
+
+/// A recommended default resource-budget an operator may configure per device.
+/// Not consensus, proof validity, candidate selection, or hardware eligibility.
+#[derive(Serialize, Deserialize, JsonSchema, Clone, PartialEq, Eq, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct LocalResourceBudget {
+    pub default_fraction_percent: u32,
+    pub scope: String,
+}
+
+/// Benchmark fairness is achieved by running both candidates under identical
+/// controlled conditions on the same physical host per architecture, not by
+/// excluding weaker devices or requiring a particular absolute host size.
+#[derive(Serialize, Deserialize, JsonSchema, Clone, PartialEq, Eq, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct FairBenchmarkPairing {
+    pub per_architecture_controls: Vec<String>,
+    pub rule: String,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, PartialEq, Eq, Debug)]
@@ -327,6 +382,7 @@ pub struct Aggregation {
     pub deterministic_rules: Vec<String>,
     pub failure_codes: Vec<String>,
     pub b0_final_tiebreak: Vec<String>,
+    pub tiebreak_excludes: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, PartialEq, Eq, Debug)]
@@ -460,6 +516,23 @@ impl B0PreProtocolV1 {
         // both official statements present, distinct indices
         if self.official_statements.statements.len() != 2 {
             v.push("exactly two official statements required".into());
+        }
+        // validator verification baseline must be internally consistent
+        if self
+            .qualification_gates
+            .aggregate_verify_budget_ns_per_block
+            < self.qualification_gates.verify_p99_gate_ns
+        {
+            v.push("aggregate verify budget must be >= the per-proof verify p99 gate".into());
+        }
+        // the 35% budget is a local operating default, never an eligibility fraction > 100%
+        if self
+            .contributor_resource_policy
+            .local_resource_budget
+            .default_fraction_percent
+            > 100
+        {
+            v.push("local resource budget fraction must be <= 100".into());
         }
         v
     }
@@ -672,6 +745,13 @@ impl B0PreProtocolV1 {
                     "Candidate proving containers build under the candidate-container toolchain \
                      (Rust 1.88.0), distinct from the validator-tool floor (Rust 1.85.0)."
                         .into(),
+                    "OmniNode contributor eligibility is device-neutral: no minimum CPU, RAM, GPU, \
+                     storage, or device class determines whether a contributor is protocol-eligible. \
+                     A valid proof from any device is eligible; a slower device only takes longer. \
+                     Prover time, memory, cores, architecture, GPU, storage, and timing variance are \
+                     reported-only and never determine eligibility, qualification, or the B0-FINAL \
+                     tie-break."
+                        .into(),
                 ],
             },
             evidence_completeness: EvidenceCompleteness {
@@ -697,14 +777,97 @@ impl B0PreProtocolV1 {
             },
             qualification_gates: QualificationGates {
                 verify_p99_gate_ns: crate::harness::P99_GATE_NS,
+                aggregate_verify_budget_ns_per_block:
+                    consts::VALIDATOR_AGGREGATE_VERIFY_BUDGET_NS_PER_BLOCK,
+                validator_reference_physical_cores: consts::VALIDATOR_VERIFY_REFERENCE_CORES,
+                validator_reference_ram_bytes: consts::VALIDATOR_VERIFY_REFERENCE_RAM_BYTES,
                 verifier_material_bytes: crate::harness::VERIFIER_MATERIAL_BYTES,
                 max_cycles: consts::MAX_CYCLES,
+                scope: "Chain-side proof verification on the validator reference machine \
+                        (4 physical cores, 8 GiB). These bound consensus-time verification, not \
+                        OmniNode participation, and place no minimum on a contributor's device."
+                    .into(),
                 gates: vec![
-                    "host_verify_ns p99 (nearest-rank, host_setup_ns excluded) must be <= the gate"
+                    "host_verify_ns p99 (nearest-rank, host_setup_ns excluded) must be <= \
+                     verify_p99_gate_ns on the worst architecture"
+                        .into(),
+                    "aggregate per-block verification must fit aggregate_verify_budget_ns_per_block"
                         .into(),
                     "verifier-material byte total must equal the canonical manifest total".into(),
                     "max_cycles is a reported bound; official statements set it to 0".into(),
                 ],
+            },
+            qualification_criteria: QualificationCriteria {
+                qualifies_on: vec![
+                    "correctness against the frozen witness-binding contract".into(),
+                    "a valid terminal proof verified through the pinned verifier".into(),
+                    "verifier identity / security (verifier material bound and authentic)".into(),
+                    "reproducibility (digest-pinned container, lock hashes, guest identities)"
+                        .into(),
+                    "cross-architecture semantic equivalence (x86_64 and aarch64 agree)".into(),
+                    "stable / no-advisory dependency policy".into(),
+                    "validator-side verification limits (verify p99 and per-block budget)".into(),
+                ],
+                never_disqualifies: vec![
+                    "prover wall-clock time".into(),
+                    "prover peak RAM".into(),
+                    "configured or physical core count".into(),
+                    "device architecture, GPU use, or storage usage".into(),
+                    "timing variance".into(),
+                    "device class or absolute host size".into(),
+                ],
+                note: "A valid candidate is never disqualified by prover performance or device \
+                       resources, and none of these enter the B0-FINAL tie-break."
+                    .into(),
+            },
+            contributor_resource_policy: ContributorResourcePolicy {
+                hardware_eligibility: "none: no minimum CPU, RAM, GPU, storage, or device class \
+                                       gates OmniNode participation. Preregistration correction \
+                                       removing the former >=16-core / >=64-GiB / 35%-cap \
+                                       proving-resource gate (resource_gate_proving)."
+                    .into(),
+                reported_only_resources: vec![
+                    "prover_time_ns".into(),
+                    "prover_peak_ram_bytes".into(),
+                    "configured_cpuset_core_limit".into(),
+                    "physical_core_count".into(),
+                    "total_ram_bytes".into(),
+                    "device_architecture".into(),
+                    "gpu_use".into(),
+                    "storage_usage".into(),
+                    "timing_variance".into(),
+                ],
+                local_resource_budget: LocalResourceBudget {
+                    default_fraction_percent: consts::LOCAL_RESOURCE_BUDGET_DEFAULT_PERCENT,
+                    scope: "A recommended default local resource-budget an OmniNode operator may \
+                            configure for their device. It is not consensus, proof validity, \
+                            candidate selection, or hardware eligibility."
+                        .into(),
+                },
+                fair_benchmark_pairing: FairBenchmarkPairing {
+                    per_architecture_controls: vec![
+                        "same controlled physical host".into(),
+                        "same cpuset".into(),
+                        "same memory limit".into(),
+                        "same governor".into(),
+                        "same isolation".into(),
+                        "same workload, warmup, and iteration policy".into(),
+                    ],
+                    rule: "For each architecture, both candidates run under identical controlled \
+                           conditions; all configured/detected resources are recorded in \
+                           provenance. No particular absolute host size is required, and proof \
+                           generation may take longer on weaker hardware."
+                        .into(),
+                },
+                prove_watchdog: "Run-management timeout only. A timeout produces an incomplete run \
+                                 requiring continuation/retry; it is not a candidate performance \
+                                 failure or a disqualification."
+                    .into(),
+                note: "Validators retain a verification-performance baseline (see \
+                       qualification_gates) because consensus safety needs bounded verification; \
+                       contributors do not. A valid proof remains valid regardless of the device \
+                       that produced it."
+                    .into(),
             },
             reported_only_metrics: vec![
                 "GuestCyclesModelAuth".into(),
@@ -733,11 +896,18 @@ impl B0PreProtocolV1 {
                     "QualificationInconsistent".into(),
                     "RecordMixed".into(),
                     "ProvenanceIneligible".into(),
+                    "PairedEnvironmentMismatch".into(),
                 ],
                 b0_final_tiebreak: vec![
                     "Among qualified candidates, break ties by lowest verify-p99, then lowest \
                      proof_bytes, then lowest candidate discriminant (SP1 before RISC0)."
                         .into(),
+                ],
+                tiebreak_excludes: vec![
+                    "prover wall-clock time".into(),
+                    "prover peak RAM".into(),
+                    "core count, device architecture, GPU, or storage".into(),
+                    "timing variance".into(),
                 ],
             },
             hash_preimage_rules: HashPreimageRules {

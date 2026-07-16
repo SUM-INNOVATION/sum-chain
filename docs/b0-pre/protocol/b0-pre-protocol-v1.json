@@ -749,7 +749,8 @@
     "rules": [
       "Exactly two candidates (SP1=1, RISC0=2); 0 is not a candidate.",
       "At R0 time (after b0_pre_spec_hash is finalized), a candidate is eligible only with complete, non-mixed evidence bound to BOTH hashes: b0_pre_spec_hash and the post-spec r0_guest_set_hash, plus its container digest, tool lock hashes, guest-program identities, and verifier material.",
-      "Candidate proving containers build under the candidate-container toolchain (Rust 1.88.0), distinct from the validator-tool floor (Rust 1.85.0)."
+      "Candidate proving containers build under the candidate-container toolchain (Rust 1.88.0), distinct from the validator-tool floor (Rust 1.85.0).",
+      "OmniNode contributor eligibility is device-neutral: no minimum CPU, RAM, GPU, storage, or device class determines whether a contributor is protocol-eligible. A valid proof from any device is eligible; a slower device only takes longer. Prover time, memory, cores, architecture, GPU, storage, and timing variance are reported-only and never determine eligibility, qualification, or the B0-FINAL tie-break."
     ]
   },
   "evidence_completeness": {
@@ -768,13 +769,69 @@
   },
   "qualification_gates": {
     "verify_p99_gate_ns": 75000000,
+    "aggregate_verify_budget_ns_per_block": 300000000,
+    "validator_reference_physical_cores": 4,
+    "validator_reference_ram_bytes": 8589934592,
     "verifier_material_bytes": 292,
     "max_cycles": 0,
+    "scope": "Chain-side proof verification on the validator reference machine (4 physical cores, 8 GiB). These bound consensus-time verification, not OmniNode participation, and place no minimum on a contributor's device.",
     "gates": [
-      "host_verify_ns p99 (nearest-rank, host_setup_ns excluded) must be <= the gate",
+      "host_verify_ns p99 (nearest-rank, host_setup_ns excluded) must be <= verify_p99_gate_ns on the worst architecture",
+      "aggregate per-block verification must fit aggregate_verify_budget_ns_per_block",
       "verifier-material byte total must equal the canonical manifest total",
       "max_cycles is a reported bound; official statements set it to 0"
     ]
+  },
+  "qualification_criteria": {
+    "qualifies_on": [
+      "correctness against the frozen witness-binding contract",
+      "a valid terminal proof verified through the pinned verifier",
+      "verifier identity / security (verifier material bound and authentic)",
+      "reproducibility (digest-pinned container, lock hashes, guest identities)",
+      "cross-architecture semantic equivalence (x86_64 and aarch64 agree)",
+      "stable / no-advisory dependency policy",
+      "validator-side verification limits (verify p99 and per-block budget)"
+    ],
+    "never_disqualifies": [
+      "prover wall-clock time",
+      "prover peak RAM",
+      "configured or physical core count",
+      "device architecture, GPU use, or storage usage",
+      "timing variance",
+      "device class or absolute host size"
+    ],
+    "note": "A valid candidate is never disqualified by prover performance or device resources, and none of these enter the B0-FINAL tie-break."
+  },
+  "contributor_resource_policy": {
+    "hardware_eligibility": "none: no minimum CPU, RAM, GPU, storage, or device class gates OmniNode participation. Preregistration correction removing the former >=16-core / >=64-GiB / 35%-cap proving-resource gate (resource_gate_proving).",
+    "reported_only_resources": [
+      "prover_time_ns",
+      "prover_peak_ram_bytes",
+      "configured_cpuset_core_limit",
+      "physical_core_count",
+      "total_ram_bytes",
+      "device_architecture",
+      "gpu_use",
+      "storage_usage",
+      "timing_variance"
+    ],
+    "local_resource_budget": {
+      "default_fraction_percent": 35,
+      "scope": "A recommended default local resource-budget an OmniNode operator may configure for their device. It is not consensus, proof validity, candidate selection, or hardware eligibility."
+    },
+    "fair_benchmark_pairing": {
+      "per_architecture_controls": [
+        "same controlled physical host",
+        "same cpuset",
+        "same memory limit",
+        "same governor",
+        "same isolation",
+        "same workload, warmup, and iteration policy"
+      ],
+      "rule": "For each architecture, both candidates run under identical controlled conditions; all configured/detected resources are recorded in provenance. No particular absolute host size is required, and proof generation may take longer on weaker hardware."
+    },
+    "prove_watchdog": "Run-management timeout only. A timeout produces an incomplete run requiring continuation/retry; it is not a candidate performance failure or a disqualification.",
+    "note": "Validators retain a verification-performance baseline (see qualification_gates) because consensus safety needs bounded verification; contributors do not. A valid proof remains valid regardless of the device that produced it."
   },
   "reported_only_metrics": [
     "GuestCyclesModelAuth",
@@ -798,10 +855,17 @@
       "RssSum",
       "QualificationInconsistent",
       "RecordMixed",
-      "ProvenanceIneligible"
+      "ProvenanceIneligible",
+      "PairedEnvironmentMismatch"
     ],
     "b0_final_tiebreak": [
       "Among qualified candidates, break ties by lowest verify-p99, then lowest proof_bytes, then lowest candidate discriminant (SP1 before RISC0)."
+    ],
+    "tiebreak_excludes": [
+      "prover wall-clock time",
+      "prover peak RAM",
+      "core count, device architecture, GPU, or storage",
+      "timing variance"
     ]
   },
   "hash_preimage_rules": {
