@@ -5,7 +5,7 @@
 //! exercise the `build-test-clippy` required check, then flipped to pass.
 #[test]
 fn ci_required_check_probe() {
-    // Intentional failure to confirm build-test-clippy blocks merge; will be
-    // flipped to `2` to confirm the required check then passes.
-    assert_eq!(1 + 1, 3, "intentional CI-gate probe failure");
+    // Flipped to passing: confirms the required build-test-clippy check now
+    // reports success on the same PR (still never merged; branch+file deleted).
+    assert_eq!(1 + 1, 2, "CI-gate probe now passes");
 }
