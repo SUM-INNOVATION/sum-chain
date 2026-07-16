@@ -72,14 +72,23 @@ fn independent_closure_agrees_on_valid_and_rejects_mutations() {
     );
     assert_eq!(provenance_eligible(&pv), Ok(()));
 
-    // fair-benchmark pairing (independent mirror): identical controlled
-    // environment is consistent even when hardware size differs; a controlled-knob
-    // mismatch is rejected, and device size alone never triggers it.
-    let mut paired = decode_prov(&pv_bytes).unwrap();
-    paired.phys = pv.phys.saturating_mul(4);
-    assert_eq!(paired_environment_consistent(&pv, &paired), Ok(()));
-    paired.governor = "powersave".into();
-    assert!(paired_environment_consistent(&pv, &paired).is_err());
+    // fair-benchmark pairing (independent mirror): the same controlled host is
+    // consistent; any host/environment field difference (including detected
+    // hardware, the "same physical host" rule) is rejected.
+    let same = decode_prov(&pv_bytes).unwrap();
+    assert_eq!(paired_environment_consistent(&pv, &same), Ok(()));
+    let mut diff_phys = decode_prov(&pv_bytes).unwrap();
+    diff_phys.phys = pv.phys.saturating_mul(4);
+    assert_eq!(
+        paired_environment_consistent(&pv, &diff_phys),
+        Err("physical_core_count")
+    );
+    let mut diff_gov = decode_prov(&pv_bytes).unwrap();
+    diff_gov.governor = "powersave".into();
+    assert_eq!(
+        paired_environment_consistent(&pv, &diff_gov),
+        Err("governor")
+    );
 
     // --- allowlist (empty): guest-set hash ---
     let al_bytes = unhex(&s(&["valid", "allowlist_empty", "bytes"]));

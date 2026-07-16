@@ -66,14 +66,97 @@ fn spec_hash() -> [u8; 32] {
 fn guest_set_hash() -> [u8; 32] {
     id(b"guest_set")
 }
-fn program_id() -> [u8; 32] {
-    id(b"program")
+/// Per-candidate identities. Environment stays candidate-independent (a paired
+/// benchmark runs both candidates on the same host); only these differ by
+/// candidate. Sp1's values equal the historical labels, so the committed
+/// evidence fixture stays byte-stable.
+#[derive(Clone, Copy)]
+struct Ids {
+    candidate: Candidate,
+    program: [u8; 32],
+    lock: [u8; 32],
+    container: [u8; 32],
+    builder: [u8; 32],
+    vk: [u8; 32],
 }
-fn lock_hash() -> [u8; 32] {
-    id(b"lock")
+fn ids_for(candidate: Candidate) -> Ids {
+    let lbl = |base: &[u8]| -> [u8; 32] {
+        match candidate {
+            Candidate::Sp1 => id(base),
+            Candidate::Risc0 => {
+                let mut v = base.to_vec();
+                v.extend_from_slice(b"_risc0");
+                id(&v)
+            }
+        }
+    };
+    Ids {
+        candidate,
+        program: lbl(b"program"),
+        lock: lbl(b"lock"),
+        container: lbl(b"container"),
+        builder: lbl(b"builder"),
+        vk: lbl(b"vk"),
+    }
 }
-fn container_digest() -> [u8; 32] {
-    id(b"container")
+
+/// Per-role detected/configured resources recorded in a provenance snapshot.
+#[derive(Clone, Copy)]
+struct RoleRes {
+    phys: u32,
+    logical: u32,
+    ram: u64,
+    cpuset: u32,
+    mem: u64,
+}
+
+/// The controlled host/environment recorded in every provenance snapshot. Both
+/// paired candidates must share it (enforced by `paired_environment_consistent`);
+/// `default_env()` reproduces the historical fixture exactly.
+#[derive(Clone)]
+struct Env {
+    host_os: String,
+    kernel: String,
+    cpu_vendor: String,
+    cpu_model: String,
+    governor: String,
+    clock_source: String,
+    cgroup_scope_label: String,
+    turbo: bool,
+    cgroup_version: u8,
+    proving: RoleRes,
+    verification: RoleRes,
+    harness_hash: [u8; 32],
+    envcap_hash: [u8; 32],
+}
+fn default_env() -> Env {
+    Env {
+        host_os: "linux".into(),
+        kernel: "6.8.0".into(),
+        cpu_vendor: "GenuineIntel".into(),
+        cpu_model: "test".into(),
+        governor: "performance".into(),
+        clock_source: "tsc".into(),
+        cgroup_scope_label: "b0-pre.slice".into(),
+        turbo: false,
+        cgroup_version: 2,
+        proving: RoleRes {
+            phys: 16,
+            logical: 32,
+            ram: 64u64 << 30,
+            cpuset: 5,
+            mem: 22u64 << 30,
+        },
+        verification: RoleRes {
+            phys: 4,
+            logical: 8,
+            ram: 8u64 << 30,
+            cpuset: 4,
+            mem: 8u64 << 30,
+        },
+        harness_hash: id(b"harness"),
+        envcap_hash: id(b"envcap"),
+    }
 }
 fn stmt_hash(s: StatementIndex) -> [u8; 32] {
     match s {
@@ -85,54 +168,58 @@ fn proof_hash(a: Arch, s: StatementIndex, iter: u32) -> [u8; 32] {
     id(&[b"proof", &[a.to_repr(), s.to_repr(), iter as u8][..]].concat())
 }
 
-pub fn verifier_material() -> VerifierMaterialManifestV1 {
+fn verifier_material_for(ids: Ids) -> VerifierMaterialManifestV1 {
     VerifierMaterialManifestV1 {
-        candidate: Candidate::Sp1,
+        candidate: ids.candidate,
         entries: vec![VerifierMaterialEntry {
             label: "GROTH16_VK_BYTES".to_string(),
             role: VerifierMaterialRole::Groth16Vk,
             byte_len: VERIFIER_MATERIAL_BYTES,
-            hash: id(b"vk"),
+            hash: ids.vk,
         }],
     }
 }
-fn vmat_id() -> [u8; 32] {
-    verifier_material().identity()
+/// SP1 verifier material (public no-arg API preserved).
+pub fn verifier_material() -> VerifierMaterialManifestV1 {
+    verifier_material_for(ids_for(Candidate::Sp1))
+}
+fn vmat_id(ids: Ids) -> [u8; 32] {
+    verifier_material_for(ids).identity()
 }
 
-fn provenance(a: Arch, role: ProvenanceRole) -> ArchRunProvenanceV1 {
-    let (cpuset, mem, phys, ram) = match role {
-        ProvenanceRole::Proving => (5, 22u64 << 30, 16, 64u64 << 30),
-        ProvenanceRole::Verification => (4, 8u64 << 30, 4, 8u64 << 30),
+fn provenance(a: Arch, role: ProvenanceRole, ids: Ids, env: &Env) -> ArchRunProvenanceV1 {
+    let r = match role {
+        ProvenanceRole::Proving => env.proving,
+        ProvenanceRole::Verification => env.verification,
     };
     ArchRunProvenanceV1 {
         provenance_role: role,
         b0_pre_spec_hash: spec_hash(),
         r0_guest_set_hash: guest_set_hash(),
-        candidate: Candidate::Sp1,
-        guest_program_id: program_id(),
-        candidate_dep_lock_hash: lock_hash(),
-        verifier_material_manifest_hash: vmat_id(),
+        candidate: ids.candidate,
+        guest_program_id: ids.program,
+        candidate_dep_lock_hash: ids.lock,
+        verifier_material_manifest_hash: vmat_id(ids),
         arch: a,
         source_commit: "0".repeat(40),
         dirty_tree_flag: false,
-        builder_container_digest: id(b"builder"),
-        host_os: "linux".into(),
-        kernel: "6.8.0".into(),
-        cpu_vendor: "GenuineIntel".into(),
-        cpu_model: "test".into(),
-        physical_core_count: phys,
-        logical_cpu_count: phys * 2,
-        total_ram_bytes: ram,
-        configured_cpuset_core_limit: cpuset,
-        configured_memory_limit_bytes: mem,
-        governor: "performance".into(),
-        turbo_enabled: false,
-        clock_source: "tsc".into(),
-        cgroup_version: 2,
-        cgroup_scope_label: "b0-pre.slice".into(),
-        benchmark_harness_source_hash: id(b"harness"),
-        raw_environment_capture_hash: id(b"envcap"),
+        builder_container_digest: ids.builder,
+        host_os: env.host_os.clone(),
+        kernel: env.kernel.clone(),
+        cpu_vendor: env.cpu_vendor.clone(),
+        cpu_model: env.cpu_model.clone(),
+        physical_core_count: r.phys,
+        logical_cpu_count: r.logical,
+        total_ram_bytes: r.ram,
+        configured_cpuset_core_limit: r.cpuset,
+        configured_memory_limit_bytes: r.mem,
+        governor: env.governor.clone(),
+        turbo_enabled: env.turbo,
+        clock_source: env.clock_source.clone(),
+        cgroup_version: env.cgroup_version,
+        cgroup_scope_label: env.cgroup_scope_label.clone(),
+        benchmark_harness_source_hash: env.harness_hash,
+        raw_environment_capture_hash: env.envcap_hash,
     }
 }
 
@@ -141,12 +228,13 @@ fn envelope(
     s: StatementIndex,
     iter: u32,
     proving_prov: [u8; 32],
+    ids: Ids,
 ) -> R0ProofArtifactEnvelopeV1 {
     R0ProofArtifactEnvelopeV1 {
-        candidate: Candidate::Sp1,
-        candidate_dep_lock_hash: lock_hash(),
-        guest_program_id: program_id(),
-        verifier_material_manifest_hash: vmat_id(),
+        candidate: ids.candidate,
+        candidate_dep_lock_hash: ids.lock,
+        guest_program_id: ids.program,
+        verifier_material_manifest_hash: vmat_id(ids),
         computation_statement_hash: stmt_hash(s),
         b0_pre_spec_hash: spec_hash(),
         r0_guest_set_hash: guest_set_hash(),
@@ -168,16 +256,17 @@ fn sample(
     value: u64,
     iter: u32,
     ph: [u8; 32],
+    ids: Ids,
 ) -> BenchmarkSampleV1 {
     BenchmarkSampleV1 {
         b0_pre_spec_hash: spec_hash(),
         r0_guest_set_hash: guest_set_hash(),
         computation_statement_hash: stmt_hash(s),
-        candidate: Candidate::Sp1,
-        guest_program_id: program_id(),
-        verifier_material_manifest_hash: vmat_id(),
-        candidate_dep_lock_hash: lock_hash(),
-        container_image_digest: container_digest(),
+        candidate: ids.candidate,
+        guest_program_id: ids.program,
+        verifier_material_manifest_hash: vmat_id(ids),
+        candidate_dep_lock_hash: ids.lock,
+        container_image_digest: ids.container,
         arch: a,
         sample_kind: SampleKind::Measured,
         metric_kind: metric,
@@ -189,16 +278,23 @@ fn sample(
     }
 }
 
-fn rss(a: Arch, scope: RssScope, peak: u64, run: u32, ph: [u8; 32]) -> BenchmarkRssRecordV1 {
+fn rss(
+    a: Arch,
+    scope: RssScope,
+    peak: u64,
+    run: u32,
+    ph: [u8; 32],
+    ids: Ids,
+) -> BenchmarkRssRecordV1 {
     BenchmarkRssRecordV1 {
         b0_pre_spec_hash: spec_hash(),
         r0_guest_set_hash: guest_set_hash(),
         computation_statement_hash: id(b"rss-context"),
-        candidate: Candidate::Sp1,
-        guest_program_id: program_id(),
-        verifier_material_manifest_hash: vmat_id(),
-        candidate_dep_lock_hash: lock_hash(),
-        container_image_digest: container_digest(),
+        candidate: ids.candidate,
+        guest_program_id: ids.program,
+        verifier_material_manifest_hash: vmat_id(ids),
+        candidate_dep_lock_hash: ids.lock,
+        container_image_digest: ids.container,
         arch: a,
         rss_scope: scope,
         proof_hash: ph,
@@ -261,6 +357,17 @@ pub struct Recomputed {
 }
 
 pub fn generate() -> Evidence {
+    generate_with(Candidate::Sp1, &default_env())
+}
+
+/// Generate a full evidence bundle for `candidate` on the default environment.
+/// Used to build the peer candidate of a paired benchmark.
+pub fn generate_candidate(candidate: Candidate) -> Evidence {
+    generate_with(candidate, &default_env())
+}
+
+fn generate_with(candidate: Candidate, env: &Env) -> Evidence {
+    let ids = ids_for(candidate);
     let mut samples = Vec::new();
     let mut rss_records = Vec::new();
     let mut envelopes = Vec::new();
@@ -270,7 +377,7 @@ pub fn generate() -> Evidence {
     let mut arch_provenance = Vec::new();
     for a in ARCHES {
         for role in [ProvenanceRole::Proving, ProvenanceRole::Verification] {
-            let p = provenance(a, role);
+            let p = provenance(a, role, ids, env);
             let h = p.provenance_hash();
             if role == ProvenanceRole::Proving {
                 proving_prov.insert(a.to_repr(), h);
@@ -297,7 +404,7 @@ pub fn generate() -> Evidence {
         for s in STMTS {
             for iter in 0..crate::consts::OFFICIAL_ITERATIONS_PER_CELL {
                 let ph = proof_hash(a, s, iter);
-                let eb = envelope(a, s, iter, proving_prov[&a.to_repr()]).encode();
+                let eb = envelope(a, s, iter, proving_prov[&a.to_repr()], ids).encode();
                 measured_proofs.push(MeasuredProofRef {
                     arch: a,
                     statement_index: s,
@@ -315,6 +422,7 @@ pub fn generate() -> Evidence {
                         v,
                         rep,
                         ph,
+                        ids,
                     )
                     .encode();
                     sbundle
@@ -329,7 +437,7 @@ pub fn generate() -> Evidence {
                             m: MetricKind,
                             u: Unit,
                             v: u64| {
-                    let b = sample(a, s, m, u, v, iter, ph).encode();
+                    let b = sample(a, s, m, u, v, iter, ph, ids).encode();
                     sbundle
                         .entry((a.to_repr(), s.to_repr(), m.to_repr()))
                         .or_default()
@@ -360,14 +468,22 @@ pub fn generate() -> Evidence {
                     pbv,
                 );
 
-                let prb = rss(a, RssScope::ProvingRun, proving_rss_value(iter), iter, ph).encode();
+                let prb = rss(
+                    a,
+                    RssScope::ProvingRun,
+                    proving_rss_value(iter),
+                    iter,
+                    ph,
+                    ids,
+                )
+                .encode();
                 prss.entry(a.to_repr())
                     .or_default()
                     .push(((ph, iter), prb.clone()));
                 rss_records.push(prb);
                 let vrv = verify_rss_value(a, iter);
                 vrss_by_arch.entry(a.to_repr()).or_default().push(vrv);
-                let vrb = rss(a, RssScope::VerifyBatch, vrv, iter, ph).encode();
+                let vrb = rss(a, RssScope::VerifyBatch, vrv, iter, ph, ids).encode();
                 vrss.entry(a.to_repr())
                     .or_default()
                     .push(((ph, iter), vrb.clone()));
@@ -429,8 +545,8 @@ pub fn generate() -> Evidence {
     let rs = R0ResultSetV1 {
         b0_pre_spec_hash: spec_hash(),
         r0_guest_set_hash: guest_set_hash(),
-        candidate: Candidate::Sp1,
-        verifier_material_manifest_hash: vmat_id(),
+        candidate: ids.candidate,
+        verifier_material_manifest_hash: vmat_id(ids),
         official_statement_hash_tlg: stmt_hash(StatementIndex::Tlg),
         official_statement_hash_st: stmt_hash(StatementIndex::SelectToken),
         arch_provenance,
@@ -461,7 +577,7 @@ pub fn generate() -> Evidence {
         rss: rss_records,
         envelopes,
         provenances,
-        verifier_material: verifier_material().encode(),
+        verifier_material: verifier_material_for(ids).encode(),
         result_set: rs.encode(),
     }
 }
@@ -782,6 +898,57 @@ pub fn verify_evidence(ev: &Evidence) -> Result<Recomputed, String> {
     })
 }
 
+/// Verify a PAIRED benchmark end-to-end: each candidate's evidence bundle
+/// individually, then that for every `(arch, role)` both candidates' provenance
+/// describe the SAME controlled host/environment. This is the paired-evidence
+/// verification path — `paired_environment_consistent` is enforced here, not only
+/// by unit tests — so two candidates benchmarked on different hardware are
+/// rejected even though each bundle is internally valid.
+pub fn verify_paired_evidence(a: &Evidence, b: &Evidence) -> Result<(), String> {
+    verify_evidence(a).map_err(|e| format!("candidate A: {e}"))?;
+    verify_evidence(b).map_err(|e| format!("candidate B: {e}"))?;
+
+    let rsa =
+        R0ResultSetV1::decode_exact(&a.result_set).map_err(|e| format!("A result_set: {e}"))?;
+    let rsb =
+        R0ResultSetV1::decode_exact(&b.result_set).map_err(|e| format!("B result_set: {e}"))?;
+    if rsa.candidate == rsb.candidate {
+        return Err("paired evidence must be two distinct candidates".into());
+    }
+    if rsa.b0_pre_spec_hash != rsb.b0_pre_spec_hash {
+        return Err("paired candidates bind different b0_pre_spec_hash".into());
+    }
+    if rsa.r0_guest_set_hash != rsb.r0_guest_set_hash {
+        return Err("paired candidates bind different r0_guest_set_hash".into());
+    }
+
+    let index = |ev: &Evidence| -> Result<HashMap<(u8, u8), ArchRunProvenanceV1>, String> {
+        let mut m = HashMap::new();
+        for pb in &ev.provenances {
+            let p = ArchRunProvenanceV1::decode_exact(pb).map_err(|e| format!("prov: {e}"))?;
+            if m.insert((p.arch.to_repr(), p.provenance_role.to_repr()), p)
+                .is_some()
+            {
+                return Err("duplicate provenance in bundle".into());
+            }
+        }
+        Ok(m)
+    };
+    let ma = index(a)?;
+    let mb = index(b)?;
+    if ma.len() != mb.len() {
+        return Err("paired provenance sets differ in shape".into());
+    }
+    for (k, pa) in &ma {
+        let pb = mb
+            .get(k)
+            .ok_or_else(|| format!("candidate B missing provenance for arch/role {k:?}"))?;
+        crate::validation::paired_environment_consistent(pa, pb)
+            .map_err(|e| format!("paired environment mismatch at {k:?}: {e:?}"))?;
+    }
+    Ok(())
+}
+
 fn expected_grid() -> BTreeSet<(u8, u8, u32)> {
     let mut g = BTreeSet::new();
     for a in ARCHES {
@@ -826,6 +993,40 @@ mod tests {
         let r = verify_evidence(&ev).expect("valid");
         assert!(r.qualification);
         assert_eq!(r.verifier_material_bytes, 292);
+    }
+
+    #[test]
+    fn paired_same_host_verifies_paired_different_host_rejected() {
+        let sp1 = generate();
+        // same-host RISC0 peer: candidate + candidate-specific ids differ, host is
+        // identical -> the integrated paired path accepts it.
+        let risc0 = generate_candidate(Candidate::Risc0);
+        assert!(verify_paired_evidence(&sp1, &risc0).is_ok());
+
+        // each alt-host RISC0 peer is internally valid but recorded on a DIFFERENT
+        // host in one controlled field; the integrated paired path must reject it.
+        let reject_on = |name: &str, mutate: &dyn Fn(&mut Env)| {
+            let mut env = default_env();
+            mutate(&mut env);
+            let alt = generate_with(Candidate::Risc0, &env);
+            assert!(
+                verify_evidence(&alt).is_ok(),
+                "{name}: alt-host bundle must be internally valid"
+            );
+            assert!(
+                verify_paired_evidence(&sp1, &alt).is_err(),
+                "e2e paired mismatch on `{name}` must reject"
+            );
+        };
+        reject_on("cpu_model", &|e| e.cpu_model = "alt-cpu".into());
+        reject_on("kernel", &|e| e.kernel = "9.9.9".into());
+        reject_on("clock_source", &|e| e.clock_source = "hpet".into());
+        reject_on("proving_phys", &|e| {
+            e.proving.phys = 8;
+            e.proving.logical = 16;
+        });
+        reject_on("proving_ram", &|e| e.proving.ram = 32u64 << 30);
+        reject_on("harness_hash", &|e| e.harness_hash = id(b"harness_alt"));
     }
 
     #[test]

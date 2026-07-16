@@ -3,11 +3,11 @@
 //! Preregistration correction: OmniNode participation is device-neutral (no
 //! hardware/resource eligibility); prover performance is reported-only and never
 //! gates or breaks ties; the validator-side verification baseline still bounds
-//! chain-side verification. These tests lock the intent of `protocol::frozen()`'s
-//! `contributor_resource_policy` / `qualification_criteria` against regressing
-//! back to a proving hardware gate.
+//! chain-side verification (on DETECTED hardware, not just configured limits);
+//! and paired candidates must run on the SAME controlled host, enforced inside
+//! the real verification path. These tests lock that intent against regression.
 
-use b0_pre_validator::enums::ProvenanceRole;
+use b0_pre_validator::enums::{Arch, Candidate, ProvenanceRole};
 use b0_pre_validator::golden;
 use b0_pre_validator::harness;
 use b0_pre_validator::protocol::B0PreProtocolV1;
@@ -54,7 +54,7 @@ fn low_resource_contributor_is_schema_valid_and_eligible() {
 //     tie-break.
 #[test]
 fn prover_performance_never_gates_or_breaks_ties() {
-    // Behavioral: eligibility is invariant across wildly different prover sizes.
+    // Behavioral: proving eligibility is invariant across wildly different sizes.
     let small = {
         let mut p = proving();
         p.physical_core_count = 1;
@@ -104,12 +104,28 @@ fn prover_performance_never_gates_or_breaks_ties() {
 }
 
 // (3) Validator verification limits still disqualify a candidate that exceeds
-//     them.
+//     them, on DETECTED hardware as well as configured limits.
 #[test]
 fn validator_verification_limits_still_bind() {
-    // The 4-core / 8-GiB verification reference baseline is still enforced.
+    // The reference baseline (>= 4 detected cores, >= 8 GiB detected RAM, pinned
+    // 4-core / 8-GiB configured run) is enforced.
     assert_eq!(validation::provenance_eligible(&verification()), Ok(()));
 
+    // detected hardware below the reference minimum is rejected
+    let mut under_phys = verification();
+    under_phys.physical_core_count = 2;
+    assert_eq!(
+        validation::provenance_eligible(&under_phys),
+        Err(Reason::ProvenanceIneligible("verify_phys"))
+    );
+    let mut under_ram = verification();
+    under_ram.total_ram_bytes = 4u64 << 30;
+    assert_eq!(
+        validation::provenance_eligible(&under_ram),
+        Err(Reason::ProvenanceIneligible("verify_ram"))
+    );
+
+    // configured verification run not pinned to exactly 4 cores / 8 GiB rejected
     let mut over_cores = verification();
     over_cores.configured_cpuset_core_limit = 8;
     assert_eq!(
@@ -138,40 +154,65 @@ fn validator_verification_limits_still_bind() {
     );
 }
 
-// (4) Paired benchmark environment mismatches are rejected (device-size
-//     differences are not).
+// (4) Paired benchmark environment mismatches are rejected on every controlled
+//     host/environment field (including DETECTED cores/RAM: the "same physical
+//     host" rule); candidate-specific identity differences do not trigger it.
 #[test]
 fn paired_environment_mismatch_rejected() {
     let a = proving();
 
-    // Same controlled environment is consistent even when hardware size differs.
-    let mut same_env_bigger = proving();
-    same_env_bigger.physical_core_count = 999;
-    same_env_bigger.total_ram_bytes = 999u64 << 30;
+    // identical controlled host/environment is consistent
     assert_eq!(
-        validation::paired_environment_consistent(&a, &same_env_bigger),
+        validation::paired_environment_consistent(&a, &proving()),
         Ok(())
     );
 
-    // Controlled-knob mismatches are rejected.
-    let mut diff_cpuset = proving();
-    diff_cpuset.configured_cpuset_core_limit = a.configured_cpuset_core_limit + 1;
+    // candidate-specific identity differences do NOT trigger an environment
+    // mismatch (they differ by design between the two candidates)
+    let mut other_candidate = proving();
+    other_candidate.candidate = Candidate::Risc0;
+    other_candidate.guest_program_id = [0x77; 32];
+    other_candidate.candidate_dep_lock_hash = [0x88; 32];
+    other_candidate.verifier_material_manifest_hash = [0x99; 32];
+    other_candidate.builder_container_digest = [0xAA; 32];
     assert_eq!(
-        validation::paired_environment_consistent(&a, &diff_cpuset),
-        Err(Reason::PairedEnvironmentMismatch("cpuset"))
+        validation::paired_environment_consistent(&a, &other_candidate),
+        Ok(())
     );
-    let mut diff_mem = proving();
-    diff_mem.configured_memory_limit_bytes = a.configured_memory_limit_bytes + 1;
-    assert_eq!(
-        validation::paired_environment_consistent(&a, &diff_mem),
-        Err(Reason::PairedEnvironmentMismatch("memlimit"))
-    );
-    let mut diff_gov = proving();
-    diff_gov.governor = "powersave".into();
-    assert_eq!(
-        validation::paired_environment_consistent(&a, &diff_gov),
-        Err(Reason::PairedEnvironmentMismatch("governor"))
-    );
+
+    // every controlled host/environment field difference is rejected
+    type Mutate = fn(&mut ArchRunProvenanceV1);
+    let cases: &[(&'static str, Mutate)] = &[
+        ("arch", |p| p.arch = Arch::Aarch64),
+        ("host_os", |p| p.host_os = "other-os".into()),
+        ("kernel", |p| p.kernel = "9.9.9".into()),
+        ("cpu_vendor", |p| p.cpu_vendor = "OtherVendor".into()),
+        ("cpu_model", |p| p.cpu_model = "other-cpu".into()),
+        ("physical_core_count", |p| p.physical_core_count = 999),
+        ("logical_cpu_count", |p| p.logical_cpu_count += 1),
+        ("total_ram_bytes", |p| p.total_ram_bytes = 999u64 << 30),
+        ("cpuset", |p| p.configured_cpuset_core_limit += 1),
+        ("memlimit", |p| p.configured_memory_limit_bytes += 1),
+        ("governor", |p| p.governor = "powersave".into()),
+        ("turbo", |p| p.turbo_enabled = true),
+        ("clock_source", |p| p.clock_source = "hpet".into()),
+        ("cgroup_version", |p| p.cgroup_version = 1),
+        ("cgroup_scope_label", |p| {
+            p.cgroup_scope_label = "other.slice".into()
+        }),
+        ("benchmark_harness_source_hash", |p| {
+            p.benchmark_harness_source_hash[0] ^= 1
+        }),
+    ];
+    for &(tag, mutate) in cases {
+        let mut b = proving();
+        mutate(&mut b);
+        assert_eq!(
+            validation::paired_environment_consistent(&a, &b),
+            Err(Reason::PairedEnvironmentMismatch(tag)),
+            "field {tag} must trigger a paired-environment mismatch"
+        );
+    }
 }
 
 // (5) Incomplete / watchdog-terminated runs cannot close R0 but are NOT candidate
@@ -202,4 +243,20 @@ fn incomplete_run_blocks_r0_without_being_a_disqualification() {
         .prove_watchdog
         .to_lowercase()
         .contains("not a candidate performance failure"));
+}
+
+// (6) The integrated paired-verification path accepts the official SP1 fixture
+//     paired with a same-host RISC0 peer (candidate-specific identity
+//     differences do not trip pairing), and rejects pairing a bundle with itself.
+#[test]
+fn official_fixture_passes_integrated_pairing() {
+    let sp1 = harness::generate();
+    let risc0 = harness::generate_candidate(Candidate::Risc0);
+    assert_eq!(
+        harness::verify_paired_evidence(&sp1, &risc0),
+        Ok(()),
+        "official SP1 fixture paired with a same-host RISC0 peer must pass"
+    );
+    // same candidate on both sides is not a valid pair
+    assert!(harness::verify_paired_evidence(&sp1, &sp1).is_err());
 }

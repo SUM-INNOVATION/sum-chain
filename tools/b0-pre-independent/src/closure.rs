@@ -322,13 +322,21 @@ pub struct Prov {
     pub vmat: [u8; 32],
     pub arch: u8,
     pub dirty: bool,
+    pub host_os: String,
+    pub kernel: String,
+    pub cpu_vendor: String,
+    pub cpu_model: String,
     pub phys: u32,
+    pub logical: u32,
     pub ram: u64,
     pub cpuset: u32,
     pub memlimit: u64,
     pub governor: String,
     pub turbo: bool,
+    pub clock_source: String,
     pub cgroup_version: u8,
+    pub cgroup_scope_label: String,
+    pub harness_hash: [u8; 32],
 }
 
 pub fn decode_prov(b: &[u8]) -> Result<Prov, E> {
@@ -357,24 +365,24 @@ pub fn decode_prov(b: &[u8]) -> Result<Prov, E> {
     }
     let dirty = boolean(r.u8()?)?;
     let _builder = r.arr::<32>()?;
-    let _host_os = r.str16(128)?;
-    let _kernel = r.str16(128)?;
-    let _vendor = r.str16(64)?;
-    let _model = r.str16(128)?;
+    let host_os = r.str16(128)?;
+    let kernel = r.str16(128)?;
+    let cpu_vendor = r.str16(64)?;
+    let cpu_model = r.str16(128)?;
     let phys = r.u32()?;
-    let _logical = r.u32()?;
+    let logical = r.u32()?;
     let ram = r.u64()?;
     let cpuset = r.u32()?;
     let memlimit = r.u64()?;
     let governor = r.str16(32)?;
     let turbo = boolean(r.u8()?)?;
-    let _clock = r.str16(32)?;
+    let clock_source = r.str16(32)?;
     let cgroup_version = r.u8()?;
     if cgroup_version != 1 && cgroup_version != 2 {
         return Err(E::Value);
     }
-    let _cgroup_label = r.str16(128)?;
-    let _harness = r.arr::<32>()?;
+    let cgroup_scope_label = r.str16(128)?;
+    let harness_hash = r.arr::<32>()?;
     let _envcap = r.arr::<32>()?;
     r.end()?;
     Ok(Prov {
@@ -387,13 +395,21 @@ pub fn decode_prov(b: &[u8]) -> Result<Prov, E> {
         vmat,
         arch,
         dirty,
+        host_os,
+        kernel,
+        cpu_vendor,
+        cpu_model,
         phys,
+        logical,
         ram,
         cpuset,
         memlimit,
         governor,
         turbo,
+        clock_source,
         cgroup_version,
+        cgroup_scope_label,
+        harness_hash,
     })
 }
 
@@ -405,7 +421,8 @@ pub fn provenance_hash(canonical_bytes: &[u8]) -> [u8; 32] {
 /// baseline (plan §23, as corrected). Proving contributors have NO hardware or
 /// resource eligibility: cores, RAM, and cpuset/memory limits are reported-only
 /// and never gate. Only device-neutral measurement integrity (governor / turbo /
-/// clean tree) and the Verification-role baseline (4 cores / 8 GiB) gate.
+/// clean tree) and the Verification-role baseline (detected >= 4 cores / 8 GiB,
+/// configured run pinned to 4 cores / 8 GiB) gate.
 pub fn provenance_eligible(p: &Prov) -> Result<(), &'static str> {
     if p.governor != "performance" {
         return Err("governor");
@@ -420,7 +437,14 @@ pub fn provenance_eligible(p: &Prov) -> Result<(), &'static str> {
         // proving contributor: no hardware/resource eligibility (reported-only)
         0 => {}
         1 => {
-            // verification validator baseline: 4 cores / 8 GiB
+            // verification validator baseline: DETECTED >= 4 cores / 8 GiB, and a
+            // configured run pinned to exactly 4 cores / 8 GiB
+            if p.phys < 4 {
+                return Err("verify_phys");
+            }
+            if p.ram < 8u64 << 30 {
+                return Err("verify_ram");
+            }
             if p.cpuset != 4 {
                 return Err("verify_cpuset");
             }
@@ -433,12 +457,38 @@ pub fn provenance_eligible(p: &Prov) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Fair-benchmark pairing (independent mirror): two paired runs (same arch, the
-/// two candidates) must share the controlled measurement environment. Hardware
-/// size is deliberately not compared, so device differences never trigger it.
+/// Fair-benchmark pairing (independent mirror): for a given (arch, role), the two
+/// candidates' provenance must represent the SAME controlled host and
+/// environment (the "same physical host" rule) — detected cores/RAM and CPU
+/// vendor/model and OS/kernel/clock/cgroup/harness identity, not just the
+/// configured cpuset/memory. Candidate-specific identities (guest/lock/verifier
+/// material/container) are NOT compared. Device neutrality means no absolute
+/// contributor minimum; it does not permit the two candidates to run on
+/// different hardware.
 pub fn paired_environment_consistent(a: &Prov, b: &Prov) -> Result<(), &'static str> {
     if a.arch != b.arch {
         return Err("arch");
+    }
+    if a.host_os != b.host_os {
+        return Err("host_os");
+    }
+    if a.kernel != b.kernel {
+        return Err("kernel");
+    }
+    if a.cpu_vendor != b.cpu_vendor {
+        return Err("cpu_vendor");
+    }
+    if a.cpu_model != b.cpu_model {
+        return Err("cpu_model");
+    }
+    if a.phys != b.phys {
+        return Err("physical_core_count");
+    }
+    if a.logical != b.logical {
+        return Err("logical_cpu_count");
+    }
+    if a.ram != b.ram {
+        return Err("total_ram_bytes");
     }
     if a.cpuset != b.cpuset {
         return Err("cpuset");
@@ -452,8 +502,17 @@ pub fn paired_environment_consistent(a: &Prov, b: &Prov) -> Result<(), &'static 
     if a.turbo != b.turbo {
         return Err("turbo");
     }
+    if a.clock_source != b.clock_source {
+        return Err("clock_source");
+    }
     if a.cgroup_version != b.cgroup_version {
         return Err("cgroup_version");
+    }
+    if a.cgroup_scope_label != b.cgroup_scope_label {
+        return Err("cgroup_scope_label");
+    }
+    if a.harness_hash != b.harness_hash {
+        return Err("benchmark_harness_source_hash");
     }
     Ok(())
 }

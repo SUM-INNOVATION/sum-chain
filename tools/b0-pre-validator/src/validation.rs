@@ -170,9 +170,11 @@ pub fn envelope_binds_result_set(
 /// proof from any device is protocol-eligible; a slower device only takes
 /// longer. What is still enforced is (a) measurement-environment integrity,
 /// which is device-neutral (any device can meet it on the controlled benchmark
-/// host), and (b) the validator verification reference baseline (4 cores /
-/// 8 GiB) for the Verification role, which bounds chain-side verification for
-/// consensus safety — not contributor participation.
+/// host), and (b) the validator verification reference baseline for the
+/// Verification role, which requires DETECTED hardware of at least 4 physical
+/// cores and 8 GiB RAM and a configured verification run pinned to exactly 4
+/// cores / 8 GiB. That baseline bounds chain-side verification for consensus
+/// safety, never contributor participation.
 pub fn provenance_eligible(p: &ArchRunProvenanceV1) -> Result<(), Reason> {
     // Controlled-benchmark measurement integrity (both roles). Not a
     // hardware-size gate; excludes no device class.
@@ -190,6 +192,15 @@ pub fn provenance_eligible(p: &ArchRunProvenanceV1) -> Result<(), Reason> {
         // limits are reported-only.
         ProvenanceRole::Proving => {}
         ProvenanceRole::Verification => {
+            // Detected hardware must meet the reference minimum ...
+            if p.physical_core_count < consts::VALIDATOR_VERIFY_REFERENCE_CORES {
+                return Err(Reason::ProvenanceIneligible("verify_phys"));
+            }
+            if p.total_ram_bytes < consts::VALIDATOR_VERIFY_REFERENCE_RAM_BYTES {
+                return Err(Reason::ProvenanceIneligible("verify_ram"));
+            }
+            // ... and the configured verification run must be pinned to exactly
+            // the reference cpuset / memory limit.
             if p.configured_cpuset_core_limit != consts::VALIDATOR_VERIFY_REFERENCE_CORES {
                 return Err(Reason::ProvenanceIneligible("verify_cpuset"));
             }
@@ -201,32 +212,69 @@ pub fn provenance_eligible(p: &ArchRunProvenanceV1) -> Result<(), Reason> {
     Ok(())
 }
 
-/// Fair-benchmark pairing: two paired runs (same architecture, the two
-/// candidates) must share the controlled measurement environment for the
-/// comparison to be fair. Prover hardware SIZE is deliberately not compared —
-/// only the controlled knobs both runs are required to hold equal. A mismatch
-/// is rejected; device-size differences never trigger it.
+/// Fair-benchmark pairing: for a given `(architecture, provenance_role)`, the two
+/// candidates' provenance must represent the SAME controlled host and
+/// environment, so their measurements are comparable. This enforces the "same
+/// physical host" rule: not only the configured cpuset/memory knobs but the
+/// detected hardware (physical/logical cores, total RAM, CPU vendor/model), the
+/// OS/kernel/clock, the cgroup scope, and the benchmark-harness identity must
+/// match. Candidate-specific identities (guest program id, lock hash, verifier
+/// material, container digest) are deliberately NOT compared — those differ by
+/// design. Device neutrality means there is no absolute minimum for a
+/// contributor; it does NOT mean the two paired candidates may run on different
+/// hardware.
 pub fn paired_environment_consistent(
     a: &ArchRunProvenanceV1,
     b: &ArchRunProvenanceV1,
 ) -> Result<(), Reason> {
+    let m = Reason::PairedEnvironmentMismatch;
     if a.arch != b.arch {
-        return Err(Reason::PairedEnvironmentMismatch("arch"));
+        return Err(m("arch"));
+    }
+    if a.host_os != b.host_os {
+        return Err(m("host_os"));
+    }
+    if a.kernel != b.kernel {
+        return Err(m("kernel"));
+    }
+    if a.cpu_vendor != b.cpu_vendor {
+        return Err(m("cpu_vendor"));
+    }
+    if a.cpu_model != b.cpu_model {
+        return Err(m("cpu_model"));
+    }
+    if a.physical_core_count != b.physical_core_count {
+        return Err(m("physical_core_count"));
+    }
+    if a.logical_cpu_count != b.logical_cpu_count {
+        return Err(m("logical_cpu_count"));
+    }
+    if a.total_ram_bytes != b.total_ram_bytes {
+        return Err(m("total_ram_bytes"));
     }
     if a.configured_cpuset_core_limit != b.configured_cpuset_core_limit {
-        return Err(Reason::PairedEnvironmentMismatch("cpuset"));
+        return Err(m("cpuset"));
     }
     if a.configured_memory_limit_bytes != b.configured_memory_limit_bytes {
-        return Err(Reason::PairedEnvironmentMismatch("memlimit"));
+        return Err(m("memlimit"));
     }
     if a.governor != b.governor {
-        return Err(Reason::PairedEnvironmentMismatch("governor"));
+        return Err(m("governor"));
     }
     if a.turbo_enabled != b.turbo_enabled {
-        return Err(Reason::PairedEnvironmentMismatch("turbo"));
+        return Err(m("turbo"));
+    }
+    if a.clock_source != b.clock_source {
+        return Err(m("clock_source"));
     }
     if a.cgroup_version != b.cgroup_version {
-        return Err(Reason::PairedEnvironmentMismatch("cgroup_version"));
+        return Err(m("cgroup_version"));
+    }
+    if a.cgroup_scope_label != b.cgroup_scope_label {
+        return Err(m("cgroup_scope_label"));
+    }
+    if a.benchmark_harness_source_hash != b.benchmark_harness_source_hash {
+        return Err(m("benchmark_harness_source_hash"));
     }
     Ok(())
 }

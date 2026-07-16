@@ -783,15 +783,21 @@ impl B0PreProtocolV1 {
                 validator_reference_ram_bytes: consts::VALIDATOR_VERIFY_REFERENCE_RAM_BYTES,
                 verifier_material_bytes: crate::harness::VERIFIER_MATERIAL_BYTES,
                 max_cycles: consts::MAX_CYCLES,
-                scope: "Chain-side proof verification on the validator reference machine \
-                        (4 physical cores, 8 GiB). These bound consensus-time verification, not \
-                        OmniNode participation, and place no minimum on a contributor's device."
+                scope: "Chain-side proof verification on the validator reference machine: detected \
+                        hardware of at least 4 physical cores and 8 GiB RAM, with the verification \
+                        run pinned to a 4-core / 8-GiB cpuset and memory limit. These bound \
+                        consensus-time verification, not OmniNode participation, and place no \
+                        minimum on a contributor's proving device."
                     .into(),
                 gates: vec![
                     "host_verify_ns p99 (nearest-rank, host_setup_ns excluded) must be <= \
                      verify_p99_gate_ns on the worst architecture"
                         .into(),
                     "aggregate per-block verification must fit aggregate_verify_budget_ns_per_block"
+                        .into(),
+                    "verification provenance must show detected physical cores >= \
+                     validator_reference_physical_cores and detected RAM >= \
+                     validator_reference_ram_bytes, pinned to exactly that cpuset/memory limit"
                         .into(),
                     "verifier-material byte total must equal the canonical manifest total".into(),
                     "max_cycles is a reported bound; official statements set it to 0".into(),
@@ -847,16 +853,24 @@ impl B0PreProtocolV1 {
                 fair_benchmark_pairing: FairBenchmarkPairing {
                     per_architecture_controls: vec![
                         "same controlled physical host".into(),
-                        "same cpuset".into(),
-                        "same memory limit".into(),
-                        "same governor".into(),
+                        "same host OS and kernel".into(),
+                        "same CPU vendor and model".into(),
+                        "same detected physical and logical core counts".into(),
+                        "same detected total RAM".into(),
+                        "same configured cpuset and memory limit".into(),
+                        "same governor, turbo state, clock source, and cgroup version/scope".into(),
                         "same isolation".into(),
+                        "same benchmark-harness source identity".into(),
                         "same workload, warmup, and iteration policy".into(),
                     ],
-                    rule: "For each architecture, both candidates run under identical controlled \
-                           conditions; all configured/detected resources are recorded in \
-                           provenance. No particular absolute host size is required, and proof \
-                           generation may take longer on weaker hardware."
+                    rule: "For each (architecture, provenance role) the two candidates' provenance \
+                           must represent the same controlled host and environment; this is \
+                           enforced in the paired-evidence verification path, not merely \
+                           documented. Candidate-specific identities (guest program, lock hash, \
+                           verifier material, container digest) are not compared. No particular \
+                           absolute host size is required (device neutrality), so weaker hardware \
+                           only takes longer -- but the two paired candidates may not run on \
+                           different hardware."
                         .into(),
                 },
                 prove_watchdog: "Run-management timeout only. A timeout produces an incomplete run \

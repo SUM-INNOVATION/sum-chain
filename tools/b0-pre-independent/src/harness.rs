@@ -49,7 +49,7 @@ fn push_str(b: &mut Vec<u8>, s: &[u8]) {
     b.extend_from_slice(s);
 }
 
-fn enc_vmat_with(byte_len: u64, candidate: u16) -> Vec<u8> {
+fn enc_vmat_full(byte_len: u64, candidate: u16, vk: [u8; 32]) -> Vec<u8> {
     let mut b = Vec::new();
     b.extend_from_slice(&tags::VERIFIER_MATERIAL);
     b.extend_from_slice(&1u16.to_le_bytes());
@@ -60,67 +60,159 @@ fn enc_vmat_with(byte_len: u64, candidate: u16) -> Vec<u8> {
     b.extend_from_slice(label);
     b.push(0);
     b.extend_from_slice(&byte_len.to_le_bytes());
-    b.extend_from_slice(&id(b"vk"));
+    b.extend_from_slice(&vk);
     b
 }
-fn enc_vmat() -> Vec<u8> {
-    enc_vmat_with(VERIFIER_MATERIAL_BYTES, 1)
-}
-fn vmat_id() -> [u8; 32] {
-    crate::plain(&enc_vmat())
+#[cfg(test)]
+fn enc_vmat_with(byte_len: u64, candidate: u16) -> Vec<u8> {
+    enc_vmat_full(byte_len, candidate, id(b"vk"))
 }
 
-fn enc_prov(arch: u8, role: u8) -> Vec<u8> {
-    let (cpuset, mem, phys, ram) = if role == 0 {
-        (5u32, 22u64 << 30, 16u32, 64u64 << 30)
+/// Per-candidate identities (independent mirror). Sp1 (candidate 1) reproduces
+/// the historical labels, so the committed fixture stays byte-stable.
+#[derive(Clone, Copy)]
+struct Ids {
+    candidate: u16,
+    program: [u8; 32],
+    lock: [u8; 32],
+    container: [u8; 32],
+    builder: [u8; 32],
+    vk: [u8; 32],
+}
+fn ids_for(candidate: u16) -> Ids {
+    let lbl = |base: &[u8]| -> [u8; 32] {
+        if candidate == 1 {
+            id(base)
+        } else {
+            let mut v = base.to_vec();
+            v.extend_from_slice(b"_risc0");
+            id(&v)
+        }
+    };
+    Ids {
+        candidate,
+        program: lbl(b"program"),
+        lock: lbl(b"lock"),
+        container: lbl(b"container"),
+        builder: lbl(b"builder"),
+        vk: lbl(b"vk"),
+    }
+}
+fn enc_vmat_ids(ids: Ids) -> Vec<u8> {
+    enc_vmat_full(VERIFIER_MATERIAL_BYTES, ids.candidate, ids.vk)
+}
+fn vmat_id(ids: Ids) -> [u8; 32] {
+    crate::plain(&enc_vmat_ids(ids))
+}
+
+/// Per-role detected/configured resources.
+#[derive(Clone, Copy)]
+struct RoleRes {
+    phys: u32,
+    logical: u32,
+    ram: u64,
+    cpuset: u32,
+    mem: u64,
+}
+/// Controlled host/environment (independent mirror); `default_env()` reproduces
+/// the historical fixture.
+#[derive(Clone)]
+struct Env {
+    host_os: String,
+    kernel: String,
+    cpu_vendor: String,
+    cpu_model: String,
+    governor: String,
+    clock_source: String,
+    cgroup_scope_label: String,
+    turbo: bool,
+    cgroup_version: u8,
+    proving: RoleRes,
+    verification: RoleRes,
+    harness_hash: [u8; 32],
+    envcap_hash: [u8; 32],
+}
+fn default_env() -> Env {
+    Env {
+        host_os: "linux".into(),
+        kernel: "6.8.0".into(),
+        cpu_vendor: "GenuineIntel".into(),
+        cpu_model: "test".into(),
+        governor: "performance".into(),
+        clock_source: "tsc".into(),
+        cgroup_scope_label: "b0-pre.slice".into(),
+        turbo: false,
+        cgroup_version: 2,
+        proving: RoleRes {
+            phys: 16,
+            logical: 32,
+            ram: 64u64 << 30,
+            cpuset: 5,
+            mem: 22u64 << 30,
+        },
+        verification: RoleRes {
+            phys: 4,
+            logical: 8,
+            ram: 8u64 << 30,
+            cpuset: 4,
+            mem: 8u64 << 30,
+        },
+        harness_hash: id(b"harness"),
+        envcap_hash: id(b"envcap"),
+    }
+}
+
+fn enc_prov(arch: u8, role: u8, ids: Ids, env: &Env) -> Vec<u8> {
+    let r = if role == 0 {
+        env.proving
     } else {
-        (4u32, 8u64 << 30, 4u32, 8u64 << 30)
+        env.verification
     };
     let mut b = Vec::new();
     b.extend_from_slice(&1u16.to_le_bytes());
     b.push(role);
     b.extend_from_slice(&id(b"spec"));
     b.extend_from_slice(&id(b"guest_set"));
-    b.extend_from_slice(&1u16.to_le_bytes());
-    b.extend_from_slice(&id(b"program"));
-    b.extend_from_slice(&id(b"lock"));
-    b.extend_from_slice(&vmat_id());
+    b.extend_from_slice(&ids.candidate.to_le_bytes());
+    b.extend_from_slice(&ids.program);
+    b.extend_from_slice(&ids.lock);
+    b.extend_from_slice(&vmat_id(ids));
     b.push(arch);
     let sc = vec![b'0'; 40];
     b.push(sc.len() as u8);
     b.extend_from_slice(&sc);
     b.push(0);
-    b.extend_from_slice(&id(b"builder"));
-    push_str(&mut b, b"linux");
-    push_str(&mut b, b"6.8.0");
-    push_str(&mut b, b"GenuineIntel");
-    push_str(&mut b, b"test");
-    b.extend_from_slice(&phys.to_le_bytes());
-    b.extend_from_slice(&(phys * 2).to_le_bytes());
-    b.extend_from_slice(&ram.to_le_bytes());
-    b.extend_from_slice(&cpuset.to_le_bytes());
-    b.extend_from_slice(&mem.to_le_bytes());
-    push_str(&mut b, b"performance");
-    b.push(0);
-    push_str(&mut b, b"tsc");
-    b.push(2);
-    push_str(&mut b, b"b0-pre.slice");
-    b.extend_from_slice(&id(b"harness"));
-    b.extend_from_slice(&id(b"envcap"));
+    b.extend_from_slice(&ids.builder);
+    push_str(&mut b, env.host_os.as_bytes());
+    push_str(&mut b, env.kernel.as_bytes());
+    push_str(&mut b, env.cpu_vendor.as_bytes());
+    push_str(&mut b, env.cpu_model.as_bytes());
+    b.extend_from_slice(&r.phys.to_le_bytes());
+    b.extend_from_slice(&r.logical.to_le_bytes());
+    b.extend_from_slice(&r.ram.to_le_bytes());
+    b.extend_from_slice(&r.cpuset.to_le_bytes());
+    b.extend_from_slice(&r.mem.to_le_bytes());
+    push_str(&mut b, env.governor.as_bytes());
+    b.push(if env.turbo { 1 } else { 0 });
+    push_str(&mut b, env.clock_source.as_bytes());
+    b.push(env.cgroup_version);
+    push_str(&mut b, env.cgroup_scope_label.as_bytes());
+    b.extend_from_slice(&env.harness_hash);
+    b.extend_from_slice(&env.envcap_hash);
     b
 }
-fn prov_h(arch: u8, role: u8) -> [u8; 32] {
-    crate::prefixed(tags::ARCHPROV_PREFIX, &enc_prov(arch, role))
+fn prov_h(arch: u8, role: u8, ids: Ids, env: &Env) -> [u8; 32] {
+    crate::prefixed(tags::ARCHPROV_PREFIX, &enc_prov(arch, role, ids, env))
 }
 
-fn enc_env(arch: u8, stmt: u8, iter: u32, pprov: [u8; 32]) -> Vec<u8> {
+fn enc_env(arch: u8, stmt: u8, iter: u32, pprov: [u8; 32], ids: Ids) -> Vec<u8> {
     let mut b = Vec::new();
     b.extend_from_slice(&tags::ENVELOPE);
     b.extend_from_slice(&1u16.to_le_bytes());
-    b.extend_from_slice(&1u16.to_le_bytes());
-    b.extend_from_slice(&id(b"lock"));
-    b.extend_from_slice(&id(b"program"));
-    b.extend_from_slice(&vmat_id());
+    b.extend_from_slice(&ids.candidate.to_le_bytes());
+    b.extend_from_slice(&ids.lock);
+    b.extend_from_slice(&ids.program);
+    b.extend_from_slice(&vmat_id(ids));
     b.extend_from_slice(&stmt_hash(stmt));
     b.extend_from_slice(&id(b"spec"));
     b.extend_from_slice(&id(b"guest_set"));
@@ -143,6 +235,7 @@ fn enc_sample(
     value: u64,
     iter: u32,
     ph: [u8; 32],
+    ids: Ids,
 ) -> Vec<u8> {
     let mut b = Vec::new();
     b.extend_from_slice(&tags::BENCH_SAMPLE);
@@ -150,11 +243,11 @@ fn enc_sample(
     b.extend_from_slice(&id(b"spec"));
     b.extend_from_slice(&id(b"guest_set"));
     b.extend_from_slice(&stmt_hash(stmt));
-    b.extend_from_slice(&1u16.to_le_bytes());
-    b.extend_from_slice(&id(b"program"));
-    b.extend_from_slice(&vmat_id());
-    b.extend_from_slice(&id(b"lock"));
-    b.extend_from_slice(&id(b"container"));
+    b.extend_from_slice(&ids.candidate.to_le_bytes());
+    b.extend_from_slice(&ids.program);
+    b.extend_from_slice(&vmat_id(ids));
+    b.extend_from_slice(&ids.lock);
+    b.extend_from_slice(&ids.container);
     b.push(arch);
     b.push(1);
     b.push(metric);
@@ -166,18 +259,18 @@ fn enc_sample(
     b
 }
 
-fn enc_rss(arch: u8, scope: u8, peak: u64, run: u32, ph: [u8; 32]) -> Vec<u8> {
+fn enc_rss(arch: u8, scope: u8, peak: u64, run: u32, ph: [u8; 32], ids: Ids) -> Vec<u8> {
     let mut b = Vec::new();
     b.extend_from_slice(&tags::BENCH_RSS);
     b.extend_from_slice(&1u16.to_le_bytes());
     b.extend_from_slice(&id(b"spec"));
     b.extend_from_slice(&id(b"guest_set"));
     b.extend_from_slice(&id(b"rss-context"));
-    b.extend_from_slice(&1u16.to_le_bytes());
-    b.extend_from_slice(&id(b"program"));
-    b.extend_from_slice(&vmat_id());
-    b.extend_from_slice(&id(b"lock"));
-    b.extend_from_slice(&id(b"container"));
+    b.extend_from_slice(&ids.candidate.to_le_bytes());
+    b.extend_from_slice(&ids.program);
+    b.extend_from_slice(&vmat_id(ids));
+    b.extend_from_slice(&ids.lock);
+    b.extend_from_slice(&ids.container);
     b.push(arch);
     b.push(scope);
     b.extend_from_slice(&ph);
@@ -237,6 +330,17 @@ pub struct Recomputed {
 }
 
 pub fn generate() -> Evidence {
+    generate_with(1, &default_env())
+}
+
+/// Generate a full evidence bundle for `candidate` (1 = SP1, 2 = RISC0) on the
+/// default environment. Used to build the peer candidate of a paired benchmark.
+pub fn generate_candidate(candidate: u16) -> Evidence {
+    generate_with(candidate, &default_env())
+}
+
+fn generate_with(candidate: u16, env: &Env) -> Evidence {
+    let ids = ids_for(candidate);
     let mut samples = Vec::new();
     let mut rss = Vec::new();
     let mut envelopes = Vec::new();
@@ -246,12 +350,12 @@ pub fn generate() -> Evidence {
     let mut proving: HashMap<u8, [u8; 32]> = HashMap::new();
     for a in ARCHES {
         for role in [0u8, 1] {
-            let h = prov_h(a, role);
+            let h = prov_h(a, role, ids, env);
             if role == 0 {
                 proving.insert(a, h);
             }
             arch_prov.push((a, role, h));
-            provenances.push(enc_prov(a, role));
+            provenances.push(enc_prov(a, role, ids, env));
         }
     }
 
@@ -267,12 +371,12 @@ pub fn generate() -> Evidence {
         for s in STMTS {
             for iter in 0..ITERS {
                 let ph = proof_hash(a, s, iter);
-                let eb = enc_env(a, s, iter, proving[&a]);
+                let eb = enc_env(a, s, iter, proving[&a], ids);
                 measured.push((a, s, iter, crate::plain(&eb)));
                 envelopes.push(eb);
                 for rep in 0..REPS {
                     let v = verify_value(a, s, iter, rep);
-                    let b = enc_sample(a, s, 5, 1, v, rep, ph);
+                    let b = enc_sample(a, s, 5, 1, v, rep, ph, ids);
                     sbundle
                         .entry((a, s, 5))
                         .or_default()
@@ -285,7 +389,7 @@ pub fn generate() -> Evidence {
                     (6, 1, setup_value(iter)),
                     (7, 2, proof_bytes_value(iter)),
                 ] {
-                    let b = enc_sample(a, s, metric, unit, value, iter, ph);
+                    let b = enc_sample(a, s, metric, unit, value, iter, ph, ids);
                     sbundle
                         .entry((a, s, metric))
                         .or_default()
@@ -293,12 +397,12 @@ pub fn generate() -> Evidence {
                     samples.push(b);
                 }
                 max_pb = max_pb.max(proof_bytes_value(iter));
-                let b = enc_rss(a, 0, proving_rss_value(iter), iter, ph);
+                let b = enc_rss(a, 0, proving_rss_value(iter), iter, ph, ids);
                 prss.entry(a).or_default().push(((ph, iter), b.clone()));
                 rss.push(b);
                 let vrv = verify_rss_value(a, iter);
                 vrss_by_arch.entry(a).or_default().push(vrv);
-                let b = enc_rss(a, 1, vrv, iter, ph);
+                let b = enc_rss(a, 1, vrv, iter, ph, ids);
                 vrss.entry(a).or_default().push(((ph, iter), b.clone()));
                 rss.push(b);
             }
@@ -340,6 +444,7 @@ pub fn generate() -> Evidence {
     let failure_codes: Vec<u16> = if qualification { vec![] } else { vec![3] };
 
     let result_set = enc_result_set(
+        ids,
         &arch_prov,
         &measured,
         &sample_bundles,
@@ -359,13 +464,14 @@ pub fn generate() -> Evidence {
         rss,
         envelopes,
         provenances,
-        verifier_material: enc_vmat(),
+        verifier_material: enc_vmat_ids(ids),
         result_set,
     }
 }
 
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn enc_result_set(
+    ids: Ids,
     arch_prov: &[(u8, u8, [u8; 32])],
     measured: &[(u8, u8, u32, [u8; 32])],
     sample_bundles: &[(u8, u8, u8, u8, u32, [u8; 32])],
@@ -378,8 +484,8 @@ fn enc_result_set(
     b.extend_from_slice(&1u16.to_le_bytes());
     b.extend_from_slice(&id(b"spec"));
     b.extend_from_slice(&id(b"guest_set"));
-    b.extend_from_slice(&1u16.to_le_bytes());
-    b.extend_from_slice(&vmat_id());
+    b.extend_from_slice(&ids.candidate.to_le_bytes());
+    b.extend_from_slice(&vmat_id(ids));
     b.extend_from_slice(&stmt_hash(0));
     b.extend_from_slice(&stmt_hash(1));
     b.extend_from_slice(&(arch_prov.len() as u32).to_le_bytes());
@@ -687,6 +793,50 @@ pub fn verify_evidence(ev: &Evidence) -> Result<Recomputed, String> {
     })
 }
 
+/// Verify a PAIRED benchmark (independent mirror): each candidate's bundle, then
+/// that for every `(arch, role)` both candidates' provenance describe the SAME
+/// controlled host/environment. Pairing is enforced in this path, not only in
+/// unit tests, so a two-candidate benchmark run on different hardware is rejected
+/// even though each bundle is internally valid.
+pub fn verify_paired_evidence(a: &Evidence, b: &Evidence) -> Result<(), String> {
+    verify_evidence(a).map_err(|e| format!("candidate A: {e}"))?;
+    verify_evidence(b).map_err(|e| format!("candidate B: {e}"))?;
+    let rsa = closure::decode_result_set(&a.result_set).map_err(|e| format!("A rs: {e:?}"))?;
+    let rsb = closure::decode_result_set(&b.result_set).map_err(|e| format!("B rs: {e:?}"))?;
+    if rsa.candidate == rsb.candidate {
+        return Err("paired evidence must be two distinct candidates".into());
+    }
+    if rsa.b0_pre_spec_hash != rsb.b0_pre_spec_hash {
+        return Err("paired candidates bind different b0_pre_spec_hash".into());
+    }
+    if rsa.r0_guest_set_hash != rsb.r0_guest_set_hash {
+        return Err("paired candidates bind different r0_guest_set_hash".into());
+    }
+    let index = |ev: &Evidence| -> Result<HashMap<(u8, u8), closure::Prov>, String> {
+        let mut m = HashMap::new();
+        for pb in &ev.provenances {
+            let p = closure::decode_prov(pb).map_err(|e| format!("prov: {e:?}"))?;
+            if m.insert((p.arch, p.role), p).is_some() {
+                return Err("duplicate provenance in bundle".into());
+            }
+        }
+        Ok(m)
+    };
+    let ma = index(a)?;
+    let mb = index(b)?;
+    if ma.len() != mb.len() {
+        return Err("paired provenance sets differ in shape".into());
+    }
+    for (k, pa) in &ma {
+        let pb = mb
+            .get(k)
+            .ok_or_else(|| format!("candidate B missing provenance for arch/role {k:?}"))?;
+        closure::paired_environment_consistent(pa, pb)
+            .map_err(|e| format!("paired environment mismatch at {k:?}: {e}"))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -707,6 +857,7 @@ mod tests {
         let mut rs = closure::decode_result_set(&e.result_set).unwrap();
         f(&mut rs);
         e.result_set = enc_result_set(
+            ids_for(1),
             &rs.arch_provenance,
             &rs.measured_proofs,
             &rs.sample_bundles,
@@ -727,6 +878,38 @@ mod tests {
         let r = verify_evidence(&ev).expect("valid");
         assert!(r.qualification);
         assert_eq!(r.verifier_material_bytes, 292);
+    }
+
+    #[test]
+    fn paired_same_host_verifies_paired_different_host_rejected() {
+        let sp1 = generate();
+        // same-host RISC0 peer accepted (candidate + candidate-specific ids differ)
+        assert!(verify_paired_evidence(&sp1, &generate_candidate(2)).is_ok());
+
+        // each alt-host RISC0 peer is internally valid but recorded on a DIFFERENT
+        // host in one controlled field; the integrated paired path must reject it.
+        let reject_on = |name: &str, mutate: &dyn Fn(&mut Env)| {
+            let mut env = default_env();
+            mutate(&mut env);
+            let alt = generate_with(2, &env);
+            assert!(
+                verify_evidence(&alt).is_ok(),
+                "{name}: alt-host bundle must be internally valid"
+            );
+            assert!(
+                verify_paired_evidence(&sp1, &alt).is_err(),
+                "e2e paired mismatch on `{name}` must reject"
+            );
+        };
+        reject_on("cpu_model", &|e| e.cpu_model = "alt-cpu".into());
+        reject_on("kernel", &|e| e.kernel = "9.9.9".into());
+        reject_on("clock_source", &|e| e.clock_source = "hpet".into());
+        reject_on("proving_phys", &|e| {
+            e.proving.phys = 8;
+            e.proving.logical = 16;
+        });
+        reject_on("proving_ram", &|e| e.proving.ram = 32u64 << 30);
+        reject_on("harness_hash", &|e| e.harness_hash = id(b"harness_alt"));
     }
 
     #[test]
