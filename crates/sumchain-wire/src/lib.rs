@@ -15,11 +15,25 @@
 //! struct field order/width, or bincode config is a wire break. See the golden
 //! fixtures in `crates/primitives/tests/` (they exercise these types through the
 //! `sumchain-primitives` re-exports and must stay byte-identical).
+//!
+//! ## B0-PRE candidate-neutral wire types ([`b0`])
+//!
+//! The [`b0`] module adds the frozen B0-PRE candidate-neutral wire family,
+//! reproduced byte-for-byte from the out-of-workspace `b0-pre-validator` reference
+//! (copied, never linked): [`b0::object_commitment::ObjectCommitmentV1`] (80 B),
+//! the input/output manifests, [`b0::derived_input::DerivedInputV1`] (350 B),
+//! [`b0::statement::R0ComputationStatementV2`] (996 B), the guest-program
+//! allowlist, and the verifier-material manifest — plus two **new** production
+//! proof types, [`b0::partial_proof::PartialComputeProofV1`] (137 B) and
+//! [`b0::proof_envelope::ProductionProofEnvelopeV1`] (235 B). These are strictly
+//! additive: they introduce no transaction ordinal and change no existing 0.1.1
+//! bytes.
 
 #![forbid(unsafe_code)]
 
 pub mod address;
 pub mod agreement;
+pub mod b0;
 pub mod docclass;
 pub mod education;
 pub mod employment;
@@ -47,6 +61,18 @@ pub use address::Address;
 pub use hash::Hash;
 pub use governance::GovernanceParams;
 pub use validator_authority::ValidatorApproval;
+
+// B0-PRE candidate-neutral wire types (also reachable under the `b0` namespace).
+pub use b0::allowlist::{GuestProgramAllowlistV1, GuestProgramEntryV1};
+pub use b0::derived_input::DerivedInputV1;
+pub use b0::manifest::{InputManifestV1, OutputManifestV1};
+pub use b0::object_commitment::ObjectCommitmentV1;
+pub use b0::partial_proof::PartialComputeProofV1;
+pub use b0::proof_envelope::{
+    allowlist_membership, shared_binding_ok, MembershipError, ProductionProofEnvelopeV1,
+};
+pub use b0::statement::R0ComputationStatementV2;
+pub use b0::verifier_material::VerifierMaterialManifestV1;
 pub use staking::{
     AddStakeData, ClaimDelegationRewardsData, CreateValidatorData, DelegateData, DelegationInfo,
     DoubleSignEvidence, DowntimeEvidence, EvidenceType, SlashingRecord, StakingOperation,

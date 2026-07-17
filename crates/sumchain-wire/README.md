@@ -35,6 +35,31 @@ The leaf deliberately depends on **no** `ed25519` / state / rpc / consensus /
 networking / rocksdb / libp2p crate, and **not** on `sumchain-primitives` —
 keeping the dependency graph acyclic (`wire ← primitives ← crypto ← …`).
 
+## B0-PRE candidate-neutral wire types (`b0`)
+
+The [`b0`](src/b0/) module (added in **0.2.0**) holds the frozen B0-PRE
+candidate-neutral wire family, reproduced **byte-for-byte** from the
+out-of-workspace `b0-pre-validator` reference (copied here, never linked — the
+leaf still depends on none of the `tools/` crates). It has its own length-checked
+codec, domain tags, frozen enums, SNIP Merkle, and hashing helpers, plus:
+
+- `ObjectCommitmentV1` (80 B), `OutputManifestV1` / `InputManifestV1`
+  (38-byte header + 85-byte slot descriptors), `DerivedInputV1` (350 B),
+  `R0ComputationStatementV2` (996 B), `GuestProgramAllowlistV1` /
+  `GuestProgramEntryV1` (with `guest_set_hash()`), and
+  `VerifierMaterialManifestV1`.
+- Two **new** production proof types: `PartialComputeProofV1` (137 B) and
+  `ProductionProofEnvelopeV1` (235 B), each with a strict self-domained magic
+  (`PCPFv1\0` / `PPEVv1\0`), a `schema_version` of 1, and truncation/trailing
+  rejection — plus the pure cross-binding checks `shared_binding_ok` and
+  `allowlist_membership` (registry Active/activation-height checks stay a
+  caller responsibility).
+
+This addition is **strictly additive**: it introduces **no** transaction ordinal
+and changes **no** existing 0.1.1 bytes. Byte-equality against the committed
+closure-golden fixtures and the frozen reference encoder is exercised by
+`tests/wire_0_2_0_golden.rs`.
+
 ## Byte-freeze / compatibility guarantee
 
 The types in this crate are **contract-frozen**. Their serialized bytes are
@@ -71,7 +96,9 @@ compatible release.
 
 ## Versioning & breaking-change policy
 
-- Current version: **0.1.0** (independent of the workspace's 0.2.0 members).
+- Current version: **0.2.0**. The 0.1.1 → 0.2.0 bump is **additive**: it adds the
+  `b0` candidate-neutral wire types (see above) and re-exports; it introduces no
+  new transaction ordinal and changes no existing 0.1.1 encoded bytes.
 - **Every change to an existing wire shape is breaking.** Reordering, removing,
   or re-typing a variant; reordering or re-typing a field; changing the bincode
   config; or changing a fixed-array length alters serialized bytes, changes
