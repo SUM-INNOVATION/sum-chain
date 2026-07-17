@@ -44,9 +44,12 @@ fn low_resource_contributor_is_schema_valid_and_eligible() {
     // not disqualified for its hardware
     assert_eq!(validation::provenance_eligible(&p), Ok(()));
 
-    // a 1-core / 512-MiB device is likewise eligible
+    // a 1-core / 512-MiB device is likewise eligible (self-consistent limits)
     p.physical_core_count = 1;
+    p.logical_cpu_count = 1;
     p.total_ram_bytes = 512u64 << 20;
+    p.configured_cpuset_core_limit = 1;
+    p.configured_memory_limit_bytes = 256u64 << 20;
     assert_eq!(validation::provenance_eligible(&p), Ok(()));
 }
 
@@ -66,6 +69,7 @@ fn prover_performance_never_gates_or_breaks_ties() {
     let huge = {
         let mut p = proving();
         p.physical_core_count = 256;
+        p.logical_cpu_count = 512;
         p.total_ram_bytes = 1024u64 << 30;
         p.configured_cpuset_core_limit = 200; // would have failed the old 35% cap
         p.configured_memory_limit_bytes = 900u64 << 30;
@@ -131,7 +135,7 @@ fn validator_verification_limits_still_bind() {
         Err(Reason::ProvenanceIneligible("verify_cpuset"))
     );
     let mut wrong_mem = verification();
-    wrong_mem.configured_memory_limit_bytes = 8u64 << 30;
+    wrong_mem.configured_memory_limit_bytes = 2u64 << 30; // != 4 GiB reference, still <= detected RAM
     assert_eq!(
         validation::provenance_eligible(&wrong_mem),
         Err(Reason::ProvenanceIneligible("verify_mem"))
@@ -258,4 +262,78 @@ fn official_fixture_passes_integrated_pairing() {
     );
     // same candidate on both sides is not a valid pair
     assert!(harness::verify_paired_evidence(&sp1, &sp1).is_err());
+}
+
+// (7) The two frozen performance gates are enforced INDEPENDENTLY (not via the
+//     4 x 75 ms = 300 ms coincidence): p99-within-gate-but-aggregate-over-budget
+//     rejects, p99-over rejects, aggregate-exactly-budget passes, checked
+//     overflow rejects.
+#[test]
+fn performance_gates_are_independent() {
+    // p99 within its gate but aggregate over budget (altered proof count) rejects
+    assert!(!validation::qualification_gates_pass(
+        70_000_000,
+        5,
+        75_000_000,
+        300_000_000
+    ));
+    // p99 over 75 ms rejects
+    assert!(!validation::qualification_gates_pass(
+        76_000_000,
+        4,
+        75_000_000,
+        300_000_000
+    ));
+    // aggregate exactly at budget passes -- frozen (4 * 75 ms) and altered (5 * 60 ms)
+    assert!(validation::official_qualification(75_000_000));
+    assert!(validation::qualification_gates_pass(
+        60_000_000,
+        5,
+        75_000_000,
+        300_000_000
+    ));
+    // checked multiplication overflow rejects (huge p99 with a huge p99-gate
+    // isolates the aggregate overflow path)
+    assert!(!validation::qualification_gates_pass(
+        u64::MAX / 2,
+        4,
+        u64::MAX,
+        300_000_000
+    ));
+    // over-gate fails BOTH frozen gates; a qualifying p99 yields no codes
+    assert_eq!(
+        validation::qualification_failure_codes(76_000_000),
+        vec![3, 4]
+    );
+    assert!(validation::qualification_failure_codes(59_000_000).is_empty());
+}
+
+// (8) Provenance self-consistency (evidence integrity, NOT hardware eligibility):
+//     configured limits cannot exceed detected resources, and values are nonzero.
+#[test]
+fn provenance_self_consistency_rejects_impossible_records() {
+    // a valid 2-core / 4-GiB reference provenance passes
+    assert_eq!(validation::provenance_eligible(&verification()), Ok(()));
+
+    // configured cpuset exceeding detected logical CPUs is malformed
+    let mut cpuset_over = verification();
+    cpuset_over.configured_cpuset_core_limit = cpuset_over.logical_cpu_count + 1;
+    assert_eq!(
+        validation::provenance_eligible(&cpuset_over),
+        Err(Reason::ProvenanceIneligible("cpuset_exceeds_logical"))
+    );
+    // configured memory limit exceeding detected RAM is malformed
+    let mut mem_over = verification();
+    mem_over.configured_memory_limit_bytes = mem_over.total_ram_bytes + 1;
+    assert_eq!(
+        validation::provenance_eligible(&mem_over),
+        Err(Reason::ProvenanceIneligible("memlimit_exceeds_ram"))
+    );
+    // a zero resource value is malformed
+    let mut zero = verification();
+    zero.configured_cpuset_core_limit = 0;
+    assert_eq!(
+        validation::provenance_eligible(&zero),
+        Err(Reason::ProvenanceIneligible("zero_resource"))
+    );
 }

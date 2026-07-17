@@ -16,7 +16,7 @@ use crate::tags;
 
 pub const NON_SELECTION_LABEL: &str = "NON_SELECTION / TEST_ONLY";
 pub const SEED: [u8; 32] = [0x5A; 32];
-pub const P99_GATE_NS: u64 = 75_000_000;
+pub const P99_GATE_NS: u64 = crate::closure::P99_GATE_NS;
 pub const VERIFIER_MATERIAL_BYTES: u64 = 292;
 const REPS: u32 = 100;
 const ITERS: u32 = 10;
@@ -440,8 +440,8 @@ fn generate_with(candidate: u16, env: &Env) -> Evidence {
         .map(|a| *vrss_by_arch[a].iter().max().unwrap())
         .max()
         .unwrap();
-    let qualification = worst_p99 <= P99_GATE_NS;
-    let failure_codes: Vec<u16> = if qualification { vec![] } else { vec![3] };
+    let qualification = closure::official_qualification(worst_p99);
+    let failure_codes = closure::qualification_failure_codes(worst_p99);
 
     let result_set = enc_result_set(
         ids,
@@ -765,8 +765,8 @@ pub fn verify_evidence(ev: &Evidence) -> Result<Recomputed, String> {
         })
         .max()
         .unwrap();
-    let qualification = worst_p99 <= P99_GATE_NS;
-    let failure_codes: Vec<u16> = if qualification { vec![] } else { vec![3] };
+    let qualification = closure::official_qualification(worst_p99);
+    let failure_codes = closure::qualification_failure_codes(worst_p99);
 
     let (cpb, cp99, _cvm, cvrss) = rs.aggregates;
     if cpb as u64 != max_pb {

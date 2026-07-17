@@ -38,6 +38,12 @@ pub const VALIDATOR_VERIFY_REFERENCE_CORES: u32 = 2;
 pub const VALIDATOR_VERIFY_REFERENCE_RAM_BYTES: u64 = 4 << 30;
 pub const VALIDATOR_AGGREGATE_VERIFY_BUDGET_NS_PER_BLOCK: u64 = 300_000_000; // 300 ms/block
 
+// Frozen block-acceptance bound feeding the aggregate gate. The aggregate gate
+// (worst_arch_p99 * this, checked) is evaluated INDEPENDENTLY of the per-proof
+// p99 gate; that 4 * 75 ms == 300 ms is a numerical coincidence, not a
+// derivation, so the two controls are encoded and tested separately.
+pub const MAX_ACCEPTED_PROOFS_PER_BLOCK: u64 = 4;
+
 // Recommended default local resource-budget an OmniNode operator may configure
 // per device. Not consensus, proof validity, candidate selection, or hardware
 // eligibility.

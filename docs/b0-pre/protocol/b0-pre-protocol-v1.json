@@ -770,6 +770,7 @@
   "qualification_gates": {
     "verify_p99_gate_ns": 75000000,
     "aggregate_verify_budget_ns_per_block": 300000000,
+    "max_accepted_proofs_per_block": 4,
     "reference_cpuset_cores": 2,
     "reference_memory_bytes": 4294967296,
     "verifier_material_bytes": 292,
@@ -778,10 +779,14 @@
     "scope": "Chain-side proof verification under a controlled reference envelope: the verification run is pinned to exactly reference_cpuset_cores cores and reference_memory_bytes of memory (2 cores / 4 GiB). Detected host hardware need only be sufficient to establish those limits and is never gated. This is a candidate-comparison envelope, not a validator hardware minimum.",
     "gates": [
       "host_verify_ns p99 (nearest-rank, host_setup_ns excluded) must be <= verify_p99_gate_ns on the worst architecture",
-      "aggregate per-block verification must fit aggregate_verify_budget_ns_per_block",
-      "the verification run must be configured to exactly reference_cpuset_cores cores and reference_memory_bytes memory; detected host hardware is not an eligibility gate",
+      "aggregate_verify_ns_per_block = worst_arch_p99_verify_ns * max_accepted_proofs_per_block (checked; overflow disqualifies) must be <= aggregate_verify_budget_ns_per_block; evaluated INDEPENDENTLY of the per-proof p99 gate (their product equalling the budget is a coincidence)",
+      "the verification run must be configured to exactly reference_cpuset_cores cores and reference_memory_bytes memory; detected host hardware is not an eligibility gate, but provenance must be self-consistent (configured limits <= detected resources, all nonzero)",
       "verifier-material byte total must equal the canonical manifest total",
       "max_cycles is a reported bound; official statements set it to 0"
+    ],
+    "qualification_failure_codes": [
+      "3 = worst-arch verify p99 exceeds verify_p99_gate_ns",
+      "4 = aggregate (worst-arch p99 * max_accepted_proofs_per_block, checked) exceeds aggregate_verify_budget_ns_per_block, or the multiplication overflows"
     ]
   },
   "qualification_criteria": {

@@ -326,6 +326,7 @@ pub struct EvidenceCompleteness {
 pub struct QualificationGates {
     pub verify_p99_gate_ns: u64,
     pub aggregate_verify_budget_ns_per_block: u64,
+    pub max_accepted_proofs_per_block: u32,
     pub reference_cpuset_cores: u32,
     pub reference_memory_bytes: u64,
     pub verifier_material_bytes: u64,
@@ -333,6 +334,7 @@ pub struct QualificationGates {
     pub validator_eligibility: String,
     pub scope: String,
     pub gates: Vec<String>,
+    pub qualification_failure_codes: Vec<String>,
 }
 
 /// What a candidate qualifies on, and what can never disqualify it. Prover
@@ -528,6 +530,9 @@ impl B0PreProtocolV1 {
             < self.qualification_gates.verify_p99_gate_ns
         {
             v.push("aggregate verify budget must be >= the per-proof verify p99 gate".into());
+        }
+        if self.qualification_gates.max_accepted_proofs_per_block == 0 {
+            v.push("max_accepted_proofs_per_block must be >= 1".into());
         }
         // the 35% budget is a local operating default, never an eligibility fraction > 100%
         if self
@@ -783,6 +788,7 @@ impl B0PreProtocolV1 {
                 verify_p99_gate_ns: crate::harness::P99_GATE_NS,
                 aggregate_verify_budget_ns_per_block:
                     consts::VALIDATOR_AGGREGATE_VERIFY_BUDGET_NS_PER_BLOCK,
+                max_accepted_proofs_per_block: consts::MAX_ACCEPTED_PROOFS_PER_BLOCK as u32,
                 reference_cpuset_cores: consts::VALIDATOR_VERIFY_REFERENCE_CORES,
                 reference_memory_bytes: consts::VALIDATOR_VERIFY_REFERENCE_RAM_BYTES,
                 verifier_material_bytes: crate::harness::VERIFIER_MATERIAL_BYTES,
@@ -807,14 +813,24 @@ impl B0PreProtocolV1 {
                     "host_verify_ns p99 (nearest-rank, host_setup_ns excluded) must be <= \
                      verify_p99_gate_ns on the worst architecture"
                         .into(),
-                    "aggregate per-block verification must fit aggregate_verify_budget_ns_per_block"
+                    "aggregate_verify_ns_per_block = worst_arch_p99_verify_ns * \
+                     max_accepted_proofs_per_block (checked; overflow disqualifies) must be <= \
+                     aggregate_verify_budget_ns_per_block; evaluated INDEPENDENTLY of the \
+                     per-proof p99 gate (their product equalling the budget is a coincidence)"
                         .into(),
                     "the verification run must be configured to exactly reference_cpuset_cores \
                      cores and reference_memory_bytes memory; detected host hardware is not an \
-                     eligibility gate"
+                     eligibility gate, but provenance must be self-consistent (configured limits \
+                     <= detected resources, all nonzero)"
                         .into(),
                     "verifier-material byte total must equal the canonical manifest total".into(),
                     "max_cycles is a reported bound; official statements set it to 0".into(),
+                ],
+                qualification_failure_codes: vec![
+                    "3 = worst-arch verify p99 exceeds verify_p99_gate_ns".into(),
+                    "4 = aggregate (worst-arch p99 * max_accepted_proofs_per_block, checked) \
+                     exceeds aggregate_verify_budget_ns_per_block, or the multiplication overflows"
+                        .into(),
                 ],
             },
             qualification_criteria: QualificationCriteria {

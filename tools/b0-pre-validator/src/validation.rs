@@ -177,6 +177,25 @@ pub fn envelope_binds_result_set(
 /// not a hardware-eligibility gate. Qualification is performance-based (verify
 /// p99 / per-block budget), enforced over the result set.
 pub fn provenance_eligible(p: &ArchRunProvenanceV1) -> Result<(), Reason> {
+    // Provenance self-consistency (evidence integrity, NOT hardware eligibility):
+    // a configured limit cannot exceed the detected resource it constrains, and
+    // resource values must be nonzero. This rejects impossible records (e.g. a
+    // 2-core cpuset on a host reporting fewer than 2 logical CPUs, or a 4-GiB
+    // limit above detected RAM) without imposing any absolute hardware minimum.
+    if p.physical_core_count == 0
+        || p.logical_cpu_count == 0
+        || p.total_ram_bytes == 0
+        || p.configured_cpuset_core_limit == 0
+        || p.configured_memory_limit_bytes == 0
+    {
+        return Err(Reason::ProvenanceIneligible("zero_resource"));
+    }
+    if p.configured_cpuset_core_limit > p.logical_cpu_count {
+        return Err(Reason::ProvenanceIneligible("cpuset_exceeds_logical"));
+    }
+    if p.configured_memory_limit_bytes > p.total_ram_bytes {
+        return Err(Reason::ProvenanceIneligible("memlimit_exceeds_ram"));
+    }
     // Controlled-benchmark measurement integrity (both roles). Not a
     // hardware-size gate; excludes no device class.
     if p.governor != "performance" {
@@ -273,6 +292,61 @@ pub fn paired_environment_consistent(
         return Err(m("benchmark_harness_source_hash"));
     }
     Ok(())
+}
+
+/// Result-set failure code: worst-arch verify p99 exceeds the per-proof gate.
+pub const FAILCODE_VERIFY_P99: u16 = 3;
+/// Result-set failure code: the aggregate per-block verification budget is
+/// exceeded (or the checked multiplication overflows).
+pub const FAILCODE_VERIFY_AGGREGATE: u16 = 4;
+
+/// The two frozen chain-verification performance gates, evaluated INDEPENDENTLY:
+/// the per-proof p99 gate (`worst_arch_p99_verify_ns <= p99_gate_ns`) and the
+/// aggregate per-block gate (`worst_arch_p99_verify_ns * max_proofs_per_block <=
+/// aggregate_budget_ns`, checked; overflow => fail). Gates are passed explicitly
+/// so callers/tests can exercise them independently; do not rely on the numerical
+/// coincidence that `max_proofs * p99_gate == aggregate_budget`.
+pub fn qualification_gates_pass(
+    worst_arch_p99_verify_ns: u64,
+    max_proofs_per_block: u64,
+    p99_gate_ns: u64,
+    aggregate_budget_ns: u64,
+) -> bool {
+    let p99_ok = worst_arch_p99_verify_ns <= p99_gate_ns;
+    let aggregate_ok = match worst_arch_p99_verify_ns.checked_mul(max_proofs_per_block) {
+        Some(agg) => agg <= aggregate_budget_ns,
+        None => false, // overflow => over budget
+    };
+    p99_ok && aggregate_ok
+}
+
+/// `qualification_gates_pass` bound to the frozen official constants. Called by
+/// the real evidence verifier, not only by tests.
+pub fn official_qualification(worst_arch_p99_verify_ns: u64) -> bool {
+    qualification_gates_pass(
+        worst_arch_p99_verify_ns,
+        consts::MAX_ACCEPTED_PROOFS_PER_BLOCK,
+        crate::harness::P99_GATE_NS,
+        consts::VALIDATOR_AGGREGATE_VERIFY_BUDGET_NS_PER_BLOCK,
+    )
+}
+
+/// Sorted failure codes for the performance gates a given worst-arch p99 fails
+/// (empty iff `official_qualification` is true).
+pub fn qualification_failure_codes(worst_arch_p99_verify_ns: u64) -> Vec<u16> {
+    let mut v = Vec::new();
+    if worst_arch_p99_verify_ns > crate::harness::P99_GATE_NS {
+        v.push(FAILCODE_VERIFY_P99);
+    }
+    let over_budget =
+        match worst_arch_p99_verify_ns.checked_mul(consts::MAX_ACCEPTED_PROOFS_PER_BLOCK) {
+            Some(agg) => agg > consts::VALIDATOR_AGGREGATE_VERIFY_BUDGET_NS_PER_BLOCK,
+            None => true, // overflow => over budget
+        };
+    if over_budget {
+        v.push(FAILCODE_VERIFY_AGGREGATE);
+    }
+    v
 }
 
 /// Nearest-rank p99 of an ascending-sorted slice (the frozen aggregation).

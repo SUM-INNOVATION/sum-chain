@@ -921,7 +921,9 @@
       "required": [
         "aggregate_verify_budget_ns_per_block",
         "gates",
+        "max_accepted_proofs_per_block",
         "max_cycles",
+        "qualification_failure_codes",
         "reference_cpuset_cores",
         "reference_memory_bytes",
         "scope",
@@ -941,10 +943,21 @@
             "type": "string"
           }
         },
+        "max_accepted_proofs_per_block": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
         "max_cycles": {
           "type": "integer",
           "format": "uint64",
           "minimum": 0.0
+        },
+        "qualification_failure_codes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         },
         "reference_cpuset_cores": {
           "type": "integer",

@@ -539,8 +539,8 @@ fn generate_with(candidate: Candidate, env: &Env) -> Evidence {
         .map(|a| *vrss_by_arch[&a.to_repr()].iter().max().unwrap())
         .max()
         .unwrap();
-    let qualification = worst_p99 <= P99_GATE_NS;
-    let failure_codes: Vec<u16> = if qualification { vec![] } else { vec![3] };
+    let qualification = crate::validation::official_qualification(worst_p99);
+    let failure_codes = crate::validation::qualification_failure_codes(worst_p99);
 
     let rs = R0ResultSetV1 {
         b0_pre_spec_hash: spec_hash(),
@@ -871,8 +871,8 @@ pub fn verify_evidence(ev: &Evidence) -> Result<Recomputed, String> {
         })
         .max()
         .unwrap();
-    let qualification = worst_p99 <= P99_GATE_NS;
-    let failure_codes: Vec<u16> = if qualification { vec![] } else { vec![3] };
+    let qualification = crate::validation::official_qualification(worst_p99);
+    let failure_codes = crate::validation::qualification_failure_codes(worst_p99);
 
     if rs.aggregates.max_proof_bytes as u64 != max_pb {
         return Err("max_proof_bytes mismatch".into());

@@ -424,6 +424,17 @@ pub fn provenance_hash(canonical_bytes: &[u8]) -> [u8; 32] {
 /// clean tree) and the controlled Verification reference envelope (configured run
 /// pinned to 2 cores / 4 GiB; detected hardware not gated) gate.
 pub fn provenance_eligible(p: &Prov) -> Result<(), &'static str> {
+    // Provenance self-consistency (evidence integrity, not hardware eligibility):
+    // configured limits cannot exceed detected resources, and values are nonzero.
+    if p.phys == 0 || p.logical == 0 || p.ram == 0 || p.cpuset == 0 || p.memlimit == 0 {
+        return Err("zero_resource");
+    }
+    if p.cpuset > p.logical {
+        return Err("cpuset_exceeds_logical");
+    }
+    if p.memlimit > p.ram {
+        return Err("memlimit_exceeds_ram");
+    }
     if p.governor != "performance" {
         return Err("governor");
     }
@@ -839,6 +850,56 @@ pub fn envelope_binds(env: &Env, rs: &ResultSet) -> Result<(), &'static str> {
         return Err("statement");
     }
     Ok(())
+}
+
+/// Frozen chain-verification performance gates (independent mirror). The two
+/// controls are evaluated INDEPENDENTLY; `MAX_ACCEPTED_PROOFS_PER_BLOCK *
+/// P99_GATE_NS == AGGREGATE_VERIFY_BUDGET_NS_PER_BLOCK` is a coincidence.
+pub const P99_GATE_NS: u64 = 75_000_000;
+pub const MAX_ACCEPTED_PROOFS_PER_BLOCK: u64 = 4;
+pub const AGGREGATE_VERIFY_BUDGET_NS_PER_BLOCK: u64 = 300_000_000;
+pub const FAILCODE_VERIFY_P99: u16 = 3;
+pub const FAILCODE_VERIFY_AGGREGATE: u16 = 4;
+
+/// Per-proof p99 gate AND aggregate per-block gate (checked; overflow => fail),
+/// evaluated independently. Gates passed explicitly for independent testing.
+pub fn qualification_gates_pass(
+    worst_arch_p99_verify_ns: u64,
+    max_proofs_per_block: u64,
+    p99_gate_ns: u64,
+    aggregate_budget_ns: u64,
+) -> bool {
+    let p99_ok = worst_arch_p99_verify_ns <= p99_gate_ns;
+    let aggregate_ok = match worst_arch_p99_verify_ns.checked_mul(max_proofs_per_block) {
+        Some(agg) => agg <= aggregate_budget_ns,
+        None => false,
+    };
+    p99_ok && aggregate_ok
+}
+/// `qualification_gates_pass` bound to the frozen constants; called by the real
+/// evidence verifier, not only tests.
+pub fn official_qualification(worst_arch_p99_verify_ns: u64) -> bool {
+    qualification_gates_pass(
+        worst_arch_p99_verify_ns,
+        MAX_ACCEPTED_PROOFS_PER_BLOCK,
+        P99_GATE_NS,
+        AGGREGATE_VERIFY_BUDGET_NS_PER_BLOCK,
+    )
+}
+/// Sorted failure codes for the gates a worst-arch p99 fails (empty iff qualified).
+pub fn qualification_failure_codes(worst_arch_p99_verify_ns: u64) -> Vec<u16> {
+    let mut v = Vec::new();
+    if worst_arch_p99_verify_ns > P99_GATE_NS {
+        v.push(FAILCODE_VERIFY_P99);
+    }
+    let over_budget = match worst_arch_p99_verify_ns.checked_mul(MAX_ACCEPTED_PROOFS_PER_BLOCK) {
+        Some(agg) => agg > AGGREGATE_VERIFY_BUDGET_NS_PER_BLOCK,
+        None => true,
+    };
+    if over_budget {
+        v.push(FAILCODE_VERIFY_AGGREGATE);
+    }
+    v
 }
 
 pub fn nearest_rank_p99(sorted_ascending: &[u64]) -> Option<u64> {
