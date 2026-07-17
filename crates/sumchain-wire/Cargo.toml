@@ -1,6 +1,6 @@
 [package]
 name = "sumchain-wire"
-version = "0.1.1"
+version = "0.2.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -9,10 +9,19 @@ description = "Byte-frozen on-chain wire formats for SUM Chain (an L1 blockchain
 keywords = ["sumchain", "blockchain", "wire", "bincode", "serialization"]
 categories = ["cryptography::cryptocurrencies", "data-structures", "encoding"]
 readme = "README.md"
-# Explicit allowlist: ONLY hand-written source + README + the manifest are
-# packaged. Guarantees build outputs (target/), generated files, or scratch
-# artifacts can never be swept into a published/dry-run package.
-include = ["src/**/*.rs", "README.md", "LICENSE-MIT", "LICENSE-APACHE"]
+# Explicit allowlist of packaged files. Hand-written source + README + the
+# manifest, plus (owner override of the src-only policy) the golden integration
+# test and its crate-local frozen fixtures, so `cargo test` on the published
+# crate re-verifies byte-stability. Build outputs (target/), generated files, and
+# scratch artifacts still can never be swept into a published/dry-run package.
+include = [
+    "src/**/*.rs",
+    "README.md",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+    "tests/**/*.rs",
+    "tests/fixtures/**",
+]
 
 # W1a leaf crate (sum-chain #124): holds ONLY the byte-frozen wire types
 # extracted verbatim from `sumchain-primitives`. Encoding lives here; semantic
