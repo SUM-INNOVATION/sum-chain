@@ -1,0 +1,15 @@
+[package]
+name = "b0-pre-candidate-risc0-host"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "RISC Zero 3.0.5 host-side candidate pins (zkVM + groth16 + build). Resolved authoritatively only in the container venue."
+
+# Exact direct pins. Never silently relaxed or replaced.
+[dependencies]
+risc0-zkvm = "=3.0.5"
+risc0-groth16 = "=3.0.4"
+
+[build-dependencies]
+risc0-build = "=3.0.5"

@@ -1,0 +1,21 @@
+[package]
+name = "b0-pre-validator"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "B0-PRE (#123) reference validator: byte-exact encoders, strict/canonical JSON, exp-table certification, deterministic official-workload fixtures, and the b0_pre_spec_hash preimage assembler. Workspace-excluded; no production dependency edges."
+
+# Pinned per B0-PRE plan §1. serde_json carries `arbitrary_precision` so integers
+# above u64::MAX survive the Value stage without being coerced to f64.
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "=1.0.149", features = ["arbitrary_precision"] }
+blake3 = "=1.5.4"
+num-bigint = "=0.4.6"
+num-rational = "=0.4.2"
+num-traits = "=0.2.19"
+schemars = "=0.8.21"
+# default-features off: we only validate local in-memory schemas, so drop the
+# HTTP `$ref` resolver (reqwest/tower-http/url/icu) — dead weight and advisory surface.
+jsonschema = { version = "=0.18.1", default-features = false }

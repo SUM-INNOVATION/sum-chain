@@ -1,0 +1,23 @@
+# Build caches / target dirs (never committed).
+target/
+**/target/
+
+# OCI layouts, image layers, and archives (recorded as digests, not blobs).
+*.oci.tar
+*.oci/
+*.tar
+*.tar.gz
+*.tgz
+
+# Downloaded SDK / toolchain archives.
+sdk-archives/
+*.crate
+
+# Proof blobs and scratch data (verifier-contract fixtures are added explicitly).
+proof-blobs/
+scratch/
+*.log
+
+# The venue-generated candidate Cargo.lock files ARE committed (source of truth)
+# and are intentionally NOT ignored. A lock must never be committed from a
+# non-venue host.

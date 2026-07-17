@@ -21,6 +21,9 @@ members = [
     "crates/integration-tests",
     "scripts",
 ]
+# B0-PRE (#123) host-side reproducibility tooling lives outside the workspace so it
+# has zero dependency edges into production crates. Proven in CI via `cargo metadata`.
+exclude = ["tools"]
 
 [workspace.package]
 version = "0.2.0"

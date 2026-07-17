@@ -1,0 +1,151 @@
+name: B0-PRE tools
+
+# Clean-checkout CI for the workspace-excluded B0-PRE tool crates
+# (tools/b0-pre-validator, tools/b0-pre-independent) and the committed
+# docs/b0-pre normative artifact + fixtures. The main "Rust CI" workflow builds
+# the sum-chain workspace, which excludes tools/, so these crates need their own
+# gate. This workflow deliberately does NOT download SP1 / RISC Zero toolchains
+# or build candidate containers; final b0_pre_spec_hash finalization stays
+# blocked until candidate-produced fields exist.
+
+on:
+  pull_request:
+    paths:
+      - "tools/b0-pre-validator/**"
+      - "tools/b0-pre-independent/**"
+      - "docs/b0-pre/**"
+      - ".github/workflows/b0-pre.yml"
+      - "rust-toolchain.toml"
+  push:
+    branches: [main]
+    paths:
+      - "tools/b0-pre-validator/**"
+      - "tools/b0-pre-independent/**"
+      - "docs/b0-pre/**"
+      - ".github/workflows/b0-pre.yml"
+      - "rust-toolchain.toml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  VAL: tools/b0-pre-validator
+  IND: tools/b0-pre-independent
+
+jobs:
+  b0-pre:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rustup reads rust-toolchain.toml (channel 1.85.0) — the single source of
+      # truth for the validator-tool compatibility floor. The distinct candidate
+      # container toolchain (Rust 1.88.0) is NOT installed here.
+      - name: Set up pinned toolchain (validator-tool floor)
+        run: |
+          rustup show
+          rustup component add clippy rustfmt
+
+      - name: Show versions (MSRV evidence)
+        run: |
+          rustc --version
+          cargo --version
+          rustc --version | grep -q '1.85' || { echo "expected Rust 1.85 floor"; exit 1; }
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            ${{ env.VAL }}
+            ${{ env.IND }}
+
+      # --- Isolation / dependency boundaries ---------------------------------
+      - name: Workspace exclusion + no production dependency
+        run: bash "$VAL/scripts/check_no_prod_dep.sh"
+
+      - name: Lockfile pins + MSRV / no-network-stack boundary
+        run: bash "$VAL/scripts/verify_locks.sh"
+
+      # --- Committed-lock enforcement ----------------------------------------
+      # Building --locked must neither need nor produce a lockfile change.
+      - name: Build --locked (both tools)
+        run: |
+          cargo build --locked --manifest-path "$VAL/Cargo.toml" --all-targets
+          cargo build --locked --manifest-path "$IND/Cargo.toml" --all-targets
+
+      - name: Committed lockfiles unchanged
+        run: git diff --exit-code -- "$VAL/Cargo.lock" "$IND/Cargo.lock"
+
+      # --- Format / lint ------------------------------------------------------
+      - name: Format check (both tools)
+        run: |
+          cargo fmt --manifest-path "$VAL/Cargo.toml" --check
+          cargo fmt --manifest-path "$IND/Cargo.toml" --check
+
+      - name: Clippy -D warnings (both tools, all targets)
+        run: |
+          cargo clippy --locked --manifest-path "$VAL/Cargo.toml" --all-targets -- -D warnings
+          cargo clippy --locked --manifest-path "$IND/Cargo.toml" --all-targets -- -D warnings
+
+      # --- Full test suites ---------------------------------------------------
+      # Covers strict/canonical JSON vectors, encoder-size + decoder-rejection
+      # suites, evidence-closure + adversarial matrices, exp-table generation /
+      # certification, transformer<->reference agreement, both official statement
+      # byte locks, witness-binding mutation matrices, and the protocol
+      # artifact / schema / hash suites (incl. jsonschema validation).
+      - name: Test (validator)
+        run: cargo test --locked --manifest-path "$VAL/Cargo.toml"
+
+      - name: Test (independent)
+        run: cargo test --locked --manifest-path "$IND/Cargo.toml"
+
+      # Explicit headline guarantees (reuse compiled artifacts; fast).
+      - name: Both official statements byte-locked (both crates)
+        run: |
+          cargo test --locked --manifest-path "$VAL/Cargo.toml" --test workload_official
+          cargo test --locked --manifest-path "$IND/Cargo.toml" --test workload_official
+
+      - name: Witness-binding mutation matrices
+        run: |
+          cargo test --locked --manifest-path "$VAL/Cargo.toml" workload::tests
+          cargo test --locked --manifest-path "$IND/Cargo.toml" workload::tests
+
+      - name: Exp-table certification + independent agreement
+        run: |
+          cargo test --locked --manifest-path "$VAL/Cargo.toml" exp::
+          cargo test --locked --manifest-path "$IND/Cargo.toml" --test exp_table
+
+      - name: Protocol artifact / schema / hash + independent identity lock
+        run: |
+          cargo test --locked --manifest-path "$VAL/Cargo.toml" --test protocol_artifact --test protocol_schema --test protocol_hash
+          cargo test --locked --manifest-path "$IND/Cargo.toml" --test protocol_identities
+
+      # --- Deterministic regeneration of committed docs -----------------------
+      # Re-emitting from the typed model must reproduce the committed bytes.
+      - name: Committed artifact / schema / golden are byte-reproducible
+        run: |
+          cargo run --locked --manifest-path "$VAL/Cargo.toml" --example emit_protocol
+          cargo run --locked --manifest-path "$VAL/Cargo.toml" --example emit_protocol_schema
+          cargo run --locked --manifest-path "$VAL/Cargo.toml" --example emit_protocol_hash_golden
+          git diff --exit-code -- docs/b0-pre/protocol
+
+      - name: Fixture identities
+        run: bash "$VAL/scripts/verify_fixtures.sh"
+
+      # --- Finalization is blocked -------------------------------------------
+      - name: Protocol hashing is blocked until candidate-produced fields exist
+        run: |
+          bash "$VAL/scripts/finalization_readiness.sh"
+          grep -q '"state": "not_finalizable"' docs/b0-pre/protocol/b0-pre-protocol-v1.json \
+            || { echo "artifact must be not_finalizable at this stage"; exit 1; }
+          if [ -e docs/b0-pre/protocol/b0-pre-protocol-v1.hash ]; then
+            echo "final b0_pre_spec_hash must NOT be written while inputs are absent"; exit 1
+          fi
+
+      - name: Diff check (whitespace / conflict markers)
+        run: git diff --check
