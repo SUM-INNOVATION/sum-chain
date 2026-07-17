@@ -770,15 +770,16 @@
   "qualification_gates": {
     "verify_p99_gate_ns": 75000000,
     "aggregate_verify_budget_ns_per_block": 300000000,
-    "validator_reference_physical_cores": 4,
-    "validator_reference_ram_bytes": 8589934592,
+    "reference_cpuset_cores": 2,
+    "reference_memory_bytes": 4294967296,
     "verifier_material_bytes": 292,
     "max_cycles": 0,
-    "scope": "Chain-side proof verification on the validator reference machine: detected hardware of at least 4 physical cores and 8 GiB RAM, with the verification run pinned to a 4-core / 8-GiB cpuset and memory limit. These bound consensus-time verification, not OmniNode participation, and place no minimum on a contributor's proving device.",
+    "validator_eligibility": "Validator qualification is performance-based, not hardware-class-based: no minimum physical cores or RAM, and detected host hardware is never an eligibility gate. A node of any CPU/RAM configuration may participate; reference_cpuset_cores / reference_memory_bytes are only the controlled candidate-comparison envelope, not a deployment or consensus hardware minimum. Operators remain responsible for network liveness under their workload; a machine that cannot keep the verification pace has an operational capacity condition, not a proof-system disqualification or consensus invalidity.",
+    "scope": "Chain-side proof verification under a controlled reference envelope: the verification run is pinned to exactly reference_cpuset_cores cores and reference_memory_bytes of memory (2 cores / 4 GiB). Detected host hardware need only be sufficient to establish those limits and is never gated. This is a candidate-comparison envelope, not a validator hardware minimum.",
     "gates": [
       "host_verify_ns p99 (nearest-rank, host_setup_ns excluded) must be <= verify_p99_gate_ns on the worst architecture",
       "aggregate per-block verification must fit aggregate_verify_budget_ns_per_block",
-      "verification provenance must show detected physical cores >= validator_reference_physical_cores and detected RAM >= validator_reference_ram_bytes, pinned to exactly that cpuset/memory limit",
+      "the verification run must be configured to exactly reference_cpuset_cores cores and reference_memory_bytes memory; detected host hardware is not an eligibility gate",
       "verifier-material byte total must equal the canonical manifest total",
       "max_cycles is a reported bound; official statements set it to 0"
     ]
@@ -836,7 +837,7 @@
       "rule": "For each (architecture, provenance role) the two candidates' provenance must represent the same controlled host and environment; this is enforced in the paired-evidence verification path, not merely documented. Candidate-specific identities (guest program, lock hash, verifier material, container digest) are not compared. No particular absolute host size is required (device neutrality), so weaker hardware only takes longer -- but the two paired candidates may not run on different hardware."
     },
     "prove_watchdog": "Run-management timeout only. A timeout produces an incomplete run requiring continuation/retry; it is not a candidate performance failure or a disqualification.",
-    "note": "Validators retain a verification-performance baseline (see qualification_gates) because consensus safety needs bounded verification; contributors do not. A valid proof remains valid regardless of the device that produced it."
+    "note": "Neither validators nor contributors have hardware-class eligibility. Validator qualification is performance-based under a controlled reference envelope (see qualification_gates); contributors have no resource gate at all. A valid proof remains valid regardless of the device that produced it, and a validator that cannot keep the verification pace has an operational-liveness condition, not a consensus disqualification."
   },
   "reported_only_metrics": [
     "GuestCyclesModelAuth",

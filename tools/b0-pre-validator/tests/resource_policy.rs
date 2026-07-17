@@ -21,11 +21,11 @@ fn proving() -> ArchRunProvenanceV1 {
 fn verification() -> ArchRunProvenanceV1 {
     let mut v = proving();
     v.provenance_role = ProvenanceRole::Verification;
-    v.physical_core_count = 4;
-    v.logical_cpu_count = 8;
-    v.total_ram_bytes = 8u64 << 30;
-    v.configured_cpuset_core_limit = 4;
-    v.configured_memory_limit_bytes = 8u64 << 30;
+    v.physical_core_count = 2;
+    v.logical_cpu_count = 4;
+    v.total_ram_bytes = 4u64 << 30;
+    v.configured_cpuset_core_limit = 2;
+    v.configured_memory_limit_bytes = 4u64 << 30;
     v
 }
 
@@ -103,45 +103,44 @@ fn prover_performance_never_gates_or_breaks_ties() {
     );
 }
 
-// (3) Validator verification limits still disqualify a candidate that exceeds
-//     them, on DETECTED hardware as well as configured limits.
+// (3) The validator gate is performance + a configured reference envelope, NOT
+//     detected hardware: a 2-core / 4-GiB configured run is accepted, detected
+//     hardware never gates, configured-envelope mismatches reject, and the
+//     verification-performance gate still disqualifies.
 #[test]
 fn validator_verification_limits_still_bind() {
-    // The reference baseline (>= 4 detected cores, >= 8 GiB detected RAM, pinned
-    // 4-core / 8-GiB configured run) is enforced.
+    // A verification run configured to the reference envelope (2 cores / 4 GiB)
+    // is accepted -- note its detected 2 cores / 4 GiB is below the previous
+    // 4-core / 8-GiB detected floor, which no longer exists.
     assert_eq!(validation::provenance_eligible(&verification()), Ok(()));
 
-    // detected hardware below the reference minimum is rejected
-    let mut under_phys = verification();
-    under_phys.physical_core_count = 2;
-    assert_eq!(
-        validation::provenance_eligible(&under_phys),
-        Err(Reason::ProvenanceIneligible("verify_phys"))
-    );
-    let mut under_ram = verification();
-    under_ram.total_ram_bytes = 4u64 << 30;
-    assert_eq!(
-        validation::provenance_eligible(&under_ram),
-        Err(Reason::ProvenanceIneligible("verify_ram"))
-    );
+    // Detected hardware is NOT an eligibility gate: with the configured envelope
+    // held at 2 cores / 4 GiB, a much larger detected machine is equally accepted.
+    let mut big_detected = verification();
+    big_detected.physical_core_count = 64;
+    big_detected.logical_cpu_count = 128;
+    big_detected.total_ram_bytes = 256u64 << 30;
+    assert_eq!(validation::provenance_eligible(&big_detected), Ok(()));
 
-    // configured verification run not pinned to exactly 4 cores / 8 GiB rejected
-    let mut over_cores = verification();
-    over_cores.configured_cpuset_core_limit = 8;
+    // A configured reference-envelope mismatch rejects the controlled benchmark
+    // record (it must be configured to exactly 2 cores / 4 GiB).
+    let mut wrong_cores = verification();
+    wrong_cores.configured_cpuset_core_limit = 4;
     assert_eq!(
-        validation::provenance_eligible(&over_cores),
+        validation::provenance_eligible(&wrong_cores),
         Err(Reason::ProvenanceIneligible("verify_cpuset"))
     );
-    let mut over_mem = verification();
-    over_mem.configured_memory_limit_bytes = 16u64 << 30;
+    let mut wrong_mem = verification();
+    wrong_mem.configured_memory_limit_bytes = 8u64 << 30;
     assert_eq!(
-        validation::provenance_eligible(&over_mem),
+        validation::provenance_eligible(&wrong_mem),
         Err(Reason::ProvenanceIneligible("verify_mem"))
     );
 
-    // A candidate that fails the verify p99 gate is a consistent DISQUALIFIED
-    // result: completeness accepts the disqualification (does not mask it), and
-    // claiming it qualified while carrying a failure code is rejected.
+    // The verification-performance gate still disqualifies: a candidate whose
+    // worst-arch verify p99 exceeds the gate is a consistent DISQUALIFIED result;
+    // completeness accepts the disqualification (does not mask it), and claiming
+    // it qualified while carrying a failure code is rejected.
     let mut disq = golden::official_result_set();
     disq.aggregates.worst_arch_p99_verify_ns = harness::P99_GATE_NS + 1;
     disq.qualification_result = false;

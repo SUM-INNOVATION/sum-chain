@@ -314,19 +314,23 @@ pub struct EvidenceCompleteness {
     pub non_mixability_rule: String,
 }
 
-/// Chain-side proof-verification limits, applied on the validator reference
-/// machine. These bound how fast a validator must verify a proof for consensus
-/// safety; they are deliberately NOT OmniNode contributor participation
-/// requirements and place no minimum on a contributor's proving device.
+/// Chain-side proof-verification qualification, under a controlled reference
+/// envelope (a configured cpuset / memory limit). These are performance gates,
+/// not hardware-class gates: neither validators nor contributors have a CPU/RAM
+/// minimum. `reference_cpuset_cores` / `reference_memory_bytes` are the configured
+/// candidate-comparison envelope, never a deployment or consensus hardware
+/// minimum. Insufficient performance is an operational-liveness condition, not a
+/// consensus / proof-system disqualification.
 #[derive(Serialize, Deserialize, JsonSchema, Clone, PartialEq, Eq, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct QualificationGates {
     pub verify_p99_gate_ns: u64,
     pub aggregate_verify_budget_ns_per_block: u64,
-    pub validator_reference_physical_cores: u32,
-    pub validator_reference_ram_bytes: u64,
+    pub reference_cpuset_cores: u32,
+    pub reference_memory_bytes: u64,
     pub verifier_material_bytes: u64,
     pub max_cycles: u64,
+    pub validator_eligibility: String,
     pub scope: String,
     pub gates: Vec<String>,
 }
@@ -779,15 +783,25 @@ impl B0PreProtocolV1 {
                 verify_p99_gate_ns: crate::harness::P99_GATE_NS,
                 aggregate_verify_budget_ns_per_block:
                     consts::VALIDATOR_AGGREGATE_VERIFY_BUDGET_NS_PER_BLOCK,
-                validator_reference_physical_cores: consts::VALIDATOR_VERIFY_REFERENCE_CORES,
-                validator_reference_ram_bytes: consts::VALIDATOR_VERIFY_REFERENCE_RAM_BYTES,
+                reference_cpuset_cores: consts::VALIDATOR_VERIFY_REFERENCE_CORES,
+                reference_memory_bytes: consts::VALIDATOR_VERIFY_REFERENCE_RAM_BYTES,
                 verifier_material_bytes: crate::harness::VERIFIER_MATERIAL_BYTES,
                 max_cycles: consts::MAX_CYCLES,
-                scope: "Chain-side proof verification on the validator reference machine: detected \
-                        hardware of at least 4 physical cores and 8 GiB RAM, with the verification \
-                        run pinned to a 4-core / 8-GiB cpuset and memory limit. These bound \
-                        consensus-time verification, not OmniNode participation, and place no \
-                        minimum on a contributor's proving device."
+                validator_eligibility: "Validator qualification is performance-based, not \
+                        hardware-class-based: no minimum physical cores or RAM, and detected host \
+                        hardware is never an eligibility gate. A node of any CPU/RAM configuration \
+                        may participate; reference_cpuset_cores / reference_memory_bytes are only \
+                        the controlled candidate-comparison envelope, not a deployment or consensus \
+                        hardware minimum. Operators remain responsible for network liveness under \
+                        their workload; a machine that cannot keep the verification pace has an \
+                        operational capacity condition, not a proof-system disqualification or \
+                        consensus invalidity."
+                    .into(),
+                scope: "Chain-side proof verification under a controlled reference envelope: the \
+                        verification run is pinned to exactly reference_cpuset_cores cores and \
+                        reference_memory_bytes of memory (2 cores / 4 GiB). Detected host hardware \
+                        need only be sufficient to establish those limits and is never gated. This \
+                        is a candidate-comparison envelope, not a validator hardware minimum."
                     .into(),
                 gates: vec![
                     "host_verify_ns p99 (nearest-rank, host_setup_ns excluded) must be <= \
@@ -795,9 +809,9 @@ impl B0PreProtocolV1 {
                         .into(),
                     "aggregate per-block verification must fit aggregate_verify_budget_ns_per_block"
                         .into(),
-                    "verification provenance must show detected physical cores >= \
-                     validator_reference_physical_cores and detected RAM >= \
-                     validator_reference_ram_bytes, pinned to exactly that cpuset/memory limit"
+                    "the verification run must be configured to exactly reference_cpuset_cores \
+                     cores and reference_memory_bytes memory; detected host hardware is not an \
+                     eligibility gate"
                         .into(),
                     "verifier-material byte total must equal the canonical manifest total".into(),
                     "max_cycles is a reported bound; official statements set it to 0".into(),
@@ -877,10 +891,12 @@ impl B0PreProtocolV1 {
                                  requiring continuation/retry; it is not a candidate performance \
                                  failure or a disqualification."
                     .into(),
-                note: "Validators retain a verification-performance baseline (see \
-                       qualification_gates) because consensus safety needs bounded verification; \
-                       contributors do not. A valid proof remains valid regardless of the device \
-                       that produced it."
+                note: "Neither validators nor contributors have hardware-class eligibility. \
+                       Validator qualification is performance-based under a controlled reference \
+                       envelope (see qualification_gates); contributors have no resource gate at \
+                       all. A valid proof remains valid regardless of the device that produced it, \
+                       and a validator that cannot keep the verification pace has an \
+                       operational-liveness condition, not a consensus disqualification."
                     .into(),
             },
             reported_only_metrics: vec![

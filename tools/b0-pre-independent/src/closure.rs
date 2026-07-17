@@ -421,8 +421,8 @@ pub fn provenance_hash(canonical_bytes: &[u8]) -> [u8; 32] {
 /// baseline (plan §23, as corrected). Proving contributors have NO hardware or
 /// resource eligibility: cores, RAM, and cpuset/memory limits are reported-only
 /// and never gate. Only device-neutral measurement integrity (governor / turbo /
-/// clean tree) and the Verification-role baseline (detected >= 4 cores / 8 GiB,
-/// configured run pinned to 4 cores / 8 GiB) gate.
+/// clean tree) and the controlled Verification reference envelope (configured run
+/// pinned to 2 cores / 4 GiB; detected hardware not gated) gate.
 pub fn provenance_eligible(p: &Prov) -> Result<(), &'static str> {
     if p.governor != "performance" {
         return Err("governor");
@@ -437,18 +437,13 @@ pub fn provenance_eligible(p: &Prov) -> Result<(), &'static str> {
         // proving contributor: no hardware/resource eligibility (reported-only)
         0 => {}
         1 => {
-            // verification validator baseline: DETECTED >= 4 cores / 8 GiB, and a
-            // configured run pinned to exactly 4 cores / 8 GiB
-            if p.phys < 4 {
-                return Err("verify_phys");
-            }
-            if p.ram < 8u64 << 30 {
-                return Err("verify_ram");
-            }
-            if p.cpuset != 4 {
+            // controlled verification reference envelope: configured run pinned
+            // to exactly 2 cores / 4 GiB. Detected hardware is not gated -- no
+            // validator CPU/RAM minimum.
+            if p.cpuset != 2 {
                 return Err("verify_cpuset");
             }
-            if p.memlimit != 8u64 << 30 {
+            if p.memlimit != 4u64 << 30 {
                 return Err("verify_mem");
             }
         }

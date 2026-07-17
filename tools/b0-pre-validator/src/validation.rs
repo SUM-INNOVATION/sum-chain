@@ -170,11 +170,12 @@ pub fn envelope_binds_result_set(
 /// proof from any device is protocol-eligible; a slower device only takes
 /// longer. What is still enforced is (a) measurement-environment integrity,
 /// which is device-neutral (any device can meet it on the controlled benchmark
-/// host), and (b) the validator verification reference baseline for the
-/// Verification role, which requires DETECTED hardware of at least 4 physical
-/// cores and 8 GiB RAM and a configured verification run pinned to exactly 4
-/// cores / 8 GiB. That baseline bounds chain-side verification for consensus
-/// safety, never contributor participation.
+/// host), and (b) the controlled chain-verification reference envelope for the
+/// Verification role: the run must be configured to exactly the reference cpuset
+/// and memory limit (2 cores / 4 GiB). Detected host hardware is NOT gated --
+/// validators have no CPU/RAM minimum; this is a candidate-comparison envelope,
+/// not a hardware-eligibility gate. Qualification is performance-based (verify
+/// p99 / per-block budget), enforced over the result set.
 pub fn provenance_eligible(p: &ArchRunProvenanceV1) -> Result<(), Reason> {
     // Controlled-benchmark measurement integrity (both roles). Not a
     // hardware-size gate; excludes no device class.
@@ -192,15 +193,10 @@ pub fn provenance_eligible(p: &ArchRunProvenanceV1) -> Result<(), Reason> {
         // limits are reported-only.
         ProvenanceRole::Proving => {}
         ProvenanceRole::Verification => {
-            // Detected hardware must meet the reference minimum ...
-            if p.physical_core_count < consts::VALIDATOR_VERIFY_REFERENCE_CORES {
-                return Err(Reason::ProvenanceIneligible("verify_phys"));
-            }
-            if p.total_ram_bytes < consts::VALIDATOR_VERIFY_REFERENCE_RAM_BYTES {
-                return Err(Reason::ProvenanceIneligible("verify_ram"));
-            }
-            // ... and the configured verification run must be pinned to exactly
-            // the reference cpuset / memory limit.
+            // Controlled reference envelope: the verification run must be
+            // configured to exactly the reference cpuset / memory limit. Detected
+            // hardware is NOT gated -- any machine able to establish these limits
+            // qualifies; there is no validator CPU/RAM minimum.
             if p.configured_cpuset_core_limit != consts::VALIDATOR_VERIFY_REFERENCE_CORES {
                 return Err(Reason::ProvenanceIneligible("verify_cpuset"));
             }

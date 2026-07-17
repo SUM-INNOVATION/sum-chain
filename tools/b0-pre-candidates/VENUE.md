@@ -122,7 +122,11 @@ the former `>= 16`-core / `>= 64`-GiB / 35%-cap proving-resource gate is removed
 - The **prove watchdog** is a run-management timeout only. A timeout produces an
   incomplete run requiring continuation/retry; it is not a candidate performance
   failure or a disqualification.
-- **Validators** retain a separate verification-performance baseline (4 physical
-  cores, 8 GiB, worst-architecture verify p99 `<= 75 ms`, aggregate verification
-  `<= 300 ms/block`) because consensus safety needs bounded verification. That
-  baseline constrains chain-side proof verification, not OmniNode participation.
+- **Validators** have no hardware-class eligibility either: qualification is
+  performance-based, not device-based, with no minimum CPU or RAM to participate.
+  The controlled chain-verification reference envelope is a configured 2-core
+  cpuset and 4-GiB memory limit (detected host hardware need only be sufficient to
+  establish those limits, and is never gated), under which the candidate gates are
+  worst-architecture verify p99 `<= 75 ms` and aggregate verification
+  `<= 300 ms/block`. A validator whose machine cannot keep that pace has an
+  operational-liveness condition, not a consensus or proof-system disqualification.

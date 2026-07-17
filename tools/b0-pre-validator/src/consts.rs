@@ -27,12 +27,15 @@ pub const MAX_MANIFEST_SLOTS: u32 = 3;
 pub const MAX_STATE_BYTES: u64 = 2761;
 pub const MAX_CYCLES: u64 = 0;
 
-// Validator-side proof-verification baseline (§23). These bound consensus-time
-// verification on the validator reference machine; they are NOT OmniNode
-// contributor participation requirements and place no minimum on a contributor's
-// proving device.
-pub const VALIDATOR_VERIFY_REFERENCE_CORES: u32 = 4;
-pub const VALIDATOR_VERIFY_REFERENCE_RAM_BYTES: u64 = 8 << 30;
+// Controlled chain-verification reference envelope (§23): the verification run is
+// pinned to exactly this configured cpuset and memory limit for the B0
+// candidate comparison. This is NOT a validator hardware minimum -- validators
+// need no minimum CPU or RAM to participate, and detected host hardware is not
+// gated. Qualification is performance-based (worst-arch verify p99 / per-block
+// budget) under this envelope; a machine that cannot keep pace has an
+// operational-liveness condition, not a consensus/proof-system disqualification.
+pub const VALIDATOR_VERIFY_REFERENCE_CORES: u32 = 2;
+pub const VALIDATOR_VERIFY_REFERENCE_RAM_BYTES: u64 = 4 << 30;
 pub const VALIDATOR_AGGREGATE_VERIFY_BUDGET_NS_PER_BLOCK: u64 = 300_000_000; // 300 ms/block
 
 // Recommended default local resource-budget an OmniNode operator may configure

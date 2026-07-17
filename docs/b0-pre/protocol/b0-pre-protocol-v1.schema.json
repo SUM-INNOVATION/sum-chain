@@ -916,15 +916,16 @@
       "additionalProperties": false
     },
     "QualificationGates": {
-      "description": "Chain-side proof-verification limits, applied on the validator reference machine. These bound how fast a validator must verify a proof for consensus safety; they are deliberately NOT OmniNode contributor participation requirements and place no minimum on a contributor's proving device.",
+      "description": "Chain-side proof-verification qualification, under a controlled reference envelope (a configured cpuset / memory limit). These are performance gates, not hardware-class gates: neither validators nor contributors have a CPU/RAM minimum. `reference_cpuset_cores` / `reference_memory_bytes` are the configured candidate-comparison envelope, never a deployment or consensus hardware minimum. Insufficient performance is an operational-liveness condition, not a consensus / proof-system disqualification.",
       "type": "object",
       "required": [
         "aggregate_verify_budget_ns_per_block",
         "gates",
         "max_cycles",
+        "reference_cpuset_cores",
+        "reference_memory_bytes",
         "scope",
-        "validator_reference_physical_cores",
-        "validator_reference_ram_bytes",
+        "validator_eligibility",
         "verifier_material_bytes",
         "verify_p99_gate_ns"
       ],
@@ -945,18 +946,21 @@
           "format": "uint64",
           "minimum": 0.0
         },
-        "scope": {
-          "type": "string"
-        },
-        "validator_reference_physical_cores": {
+        "reference_cpuset_cores": {
           "type": "integer",
           "format": "uint32",
           "minimum": 0.0
         },
-        "validator_reference_ram_bytes": {
+        "reference_memory_bytes": {
           "type": "integer",
           "format": "uint64",
           "minimum": 0.0
+        },
+        "scope": {
+          "type": "string"
+        },
+        "validator_eligibility": {
+          "type": "string"
         },
         "verifier_material_bytes": {
           "type": "integer",
