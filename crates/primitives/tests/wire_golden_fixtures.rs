@@ -13,8 +13,11 @@
 //!     `TxPayload::Transfer`, `TxInner` discriminants, `SignedTransaction`
 //!     (legacy + V2) full bytes, `hash`/`signing_hash`;
 //!   * `to_hex`/`from_hex` accepting BOTH bare and `0x`-prefixed input;
-//!   * malformed decode policy pinned exactly as bincode 1.3 default currently
-//!     behaves (notably: trailing bytes are TOLERATED by `bincode::deserialize`).
+//!   * malformed decode policy pinned to current behavior. NOTE: as of
+//!     sumchain-wire 0.2.1 the canonical `SignedTransaction::from_bytes`/
+//!     `from_hex` path REJECTS trailing bytes (explicit reject-trailing bincode
+//!     options); the lower-level `Transaction`/`TransactionV2::from_bytes` still
+//!     tolerate trailing bytes via `bincode::deserialize`.
 
 use sumchain_primitives::education::{EducationStandard, EducationTxData};
 use sumchain_primitives::governance::{GovernanceOperation, GovernanceTxData};
@@ -227,16 +230,22 @@ fn hash_and_address_from_hex_accept_bare_and_0x() {
 // ── 4. Malformed decode policy (pinned to CURRENT bincode 1.3 behavior) ──────
 
 #[test]
-fn trailing_bytes_are_tolerated() {
-    // bincode 1.3 `deserialize` reads only what it needs and IGNORES trailing
-    // bytes. This is the CURRENT policy; pin it so the extraction cannot
-    // silently start rejecting (or a config change start accepting differently).
+fn trailing_bytes_are_rejected() {
+    // sumchain-wire 0.2.1 hardened the canonical `SignedTransaction` decode
+    // path to REJECT trailing bytes (explicit reject-trailing bincode options).
+    // The accepted canonical byte set is unchanged from 0.2.0 — only extra
+    // trailing bytes after a fully-decoded value now fail closed. Pin the new
+    // policy so it cannot silently regress. (The lower-level
+    // `Transaction`/`TransactionV2::from_bytes` still use tolerant
+    // `bincode::deserialize`; only `SignedTransaction` was hardened.)
     let good = SignedTransaction::new(legacy_tx(), SIG, PK).to_bytes();
+    // canonical bytes still decode unchanged.
+    assert!(SignedTransaction::from_bytes(&good).is_ok());
     let mut trailing = good.clone();
     trailing.push(0xFF);
     assert!(
-        SignedTransaction::from_bytes(&trailing).is_ok(),
-        "trailing bytes must remain tolerated"
+        SignedTransaction::from_bytes(&trailing).is_err(),
+        "trailing bytes must now be rejected"
     );
 }
 

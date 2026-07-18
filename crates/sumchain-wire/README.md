@@ -87,18 +87,33 @@ compatible release.
 - **Serializer:** `bincode` 1.3, **default config** (fixed-int encoding, u32
   little-endian enum variant tags, little-endian scalars).
 - **Signing hash:** `signing_hash = blake3(bincode(tx))`.
-- **Decoder tolerance (pinned, not aspirational):** `bincode::deserialize`
-  currently **tolerates trailing bytes** after a fully-decoded value. This is
-  the *observed and locked* behavior, captured by the golden fixtures — it is
-  documented here so it cannot be changed silently. Truncated input, short
-  fixed arrays, out-of-range enum ordinals (e.g. `TxPayload` tag 27), and
-  oversized length prefixes all decode to `Err`.
+- **Decoder tolerance (pinned, not aspirational):**
+  - As of **0.2.1**, the canonical `SignedTransaction::from_bytes` /
+    `from_hex` path **REJECTS trailing bytes**: the input must be exactly one
+    serialized `SignedTransaction`. This uses explicit reject-trailing bincode
+    options (fixed-int, little-endian) so the **accepted canonical byte set is
+    byte-for-byte identical to 0.2.0** — only silent trailing-byte tolerance was
+    removed. The encoder (`to_bytes`/`to_hex`), `signing_hash`, and the tx hash
+    are unchanged.
+  - The lower-level `Transaction::from_bytes` and `TransactionV2::from_bytes`
+    still use `bincode::deserialize`, which **tolerates trailing bytes** after a
+    fully-decoded value. This remains the *observed and locked* behavior for
+    those two entry points (flagged for separate review; unchanged in 0.2.1).
+  - In all cases, truncated input, short fixed arrays, out-of-range enum
+    ordinals (e.g. `TxPayload` tag 27), and oversized length prefixes decode to
+    `Err`.
 
 ## Versioning & breaking-change policy
 
-- Current version: **0.2.0**. The 0.1.1 → 0.2.0 bump is **additive**: it adds the
-  `b0` candidate-neutral wire types (see above) and re-exports; it introduces no
-  new transaction ordinal and changes no existing 0.1.1 encoded bytes.
+- Current version: **0.2.1**. The 0.2.0 → 0.2.1 bump is a **patch-level
+  decoder-hardening**: the canonical `SignedTransaction::from_bytes`/`from_hex`
+  path now rejects trailing bytes. It changes **no** encoded bytes — the
+  encoder, every golden fixture, all hashes/signatures, and the accepted
+  canonical byte set are byte-for-byte identical to 0.2.0; only silent
+  trailing-byte tolerance on that one decode path is removed.
+- The 0.1.1 → 0.2.0 bump was **additive**: it adds the `b0` candidate-neutral
+  wire types (see above) and re-exports; it introduces no new transaction
+  ordinal and changes no existing 0.1.1 encoded bytes.
 - **Every change to an existing wire shape is breaking.** Reordering, removing,
   or re-typing a variant; reordering or re-typing a field; changing the bincode
   config; or changing a fixed-array length alters serialized bytes, changes

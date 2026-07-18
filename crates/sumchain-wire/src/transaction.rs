@@ -960,9 +960,23 @@ impl SignedTransaction {
         bincode::serialize(self).expect("SignedTransaction serialization should not fail")
     }
 
-    /// Deserialize from bytes
+    /// Deserialize from bytes.
+    ///
+    /// This is the canonical decode path. It REJECTS trailing bytes: the input
+    /// must be exactly one serialized `SignedTransaction` and nothing more.
+    ///
+    /// The accepted canonical byte set is identical to 0.2.0. The encoder
+    /// (`to_bytes`) uses `bincode::serialize`, i.e. fixed-int, little-endian
+    /// encoding with no byte limit; this decoder uses the matching explicit
+    /// options and only differs from the previous `bincode::deserialize` by
+    /// refusing to silently ignore extra trailing bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::Error> {
-        bincode::deserialize(bytes)
+        use bincode::Options;
+        bincode::options()
+            .with_fixint_encoding()
+            .with_little_endian()
+            .reject_trailing_bytes()
+            .deserialize(bytes)
     }
 
     /// Serialize to hex string
@@ -1116,5 +1130,89 @@ mod tests {
         let hex = signed.to_hex();
         let signed2 = SignedTransaction::from_hex(&hex).unwrap();
         assert_eq!(signed, signed2);
+    }
+
+    // ---- 0.2.1 strict-decoder (reject-trailing) tests for SignedTransaction ----
+    //
+    // These assert the *only* behavioral change in 0.2.1: the canonical decode
+    // path `SignedTransaction::from_bytes`/`from_hex` rejects trailing bytes
+    // while the accepted canonical byte set stays byte-for-byte identical to
+    // 0.2.0 (encoder unchanged).
+
+    fn sample_signed() -> SignedTransaction {
+        SignedTransaction::new(sample_tx(), [7u8; 64], [9u8; 32])
+    }
+
+    /// Positive: canonical bytes still decode, and re-encoding the decoded value
+    /// yields the SAME bytes — proving the accept-set is identical to 0.2.0.
+    #[test]
+    fn from_bytes_accepts_canonical_and_reencodes_identically() {
+        let signed = sample_signed();
+        let bytes = signed.to_bytes();
+        let decoded = SignedTransaction::from_bytes(&bytes)
+            .expect("canonical bytes must still decode under 0.2.1");
+        assert_eq!(decoded, signed);
+        // accept-set identity: strict decode -> re-encode is byte-for-byte equal.
+        assert_eq!(decoded.to_bytes(), bytes);
+        // hash / signing_hash are unaffected by the decoder change.
+        assert_eq!(decoded.hash(), signed.hash());
+        assert_eq!(decoded.signing_hash(), signed.signing_hash());
+    }
+
+    /// Negative: exactly one trailing zero byte is rejected.
+    #[test]
+    fn from_bytes_rejects_single_trailing_zero_byte() {
+        let mut bytes = sample_signed().to_bytes();
+        bytes.push(0);
+        assert!(SignedTransaction::from_bytes(&bytes).is_err());
+    }
+
+    /// Negative: arbitrary trailing bytes are rejected.
+    #[test]
+    fn from_bytes_rejects_arbitrary_trailing_bytes() {
+        let mut bytes = sample_signed().to_bytes();
+        bytes.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        assert!(SignedTransaction::from_bytes(&bytes).is_err());
+    }
+
+    /// Negative: a valid signed-tx prefix followed by a second full serialized
+    /// transaction is rejected (the decoder must not stop after the first).
+    #[test]
+    fn from_bytes_rejects_prefix_plus_second_full_transaction() {
+        let signed = sample_signed();
+        let mut bytes = signed.to_bytes();
+        bytes.extend_from_slice(&signed.to_bytes());
+        assert!(SignedTransaction::from_bytes(&bytes).is_err());
+    }
+
+    /// Negative: truncated bytes are rejected.
+    #[test]
+    fn from_bytes_rejects_truncated_bytes() {
+        let bytes = sample_signed().to_bytes();
+        assert!(SignedTransaction::from_bytes(&bytes[..bytes.len() - 1]).is_err());
+    }
+
+    /// Negative: an out-of-range `TxInner` discriminant is rejected. bincode
+    /// encodes the enum tag as the leading fixint u32; only 0 (Legacy) and 1
+    /// (V2) are valid, so 99 is a malformed discriminant.
+    #[test]
+    fn from_bytes_rejects_malformed_txinner_discriminant() {
+        let mut bytes = sample_signed().to_bytes();
+        bytes[0] = 99;
+        assert!(SignedTransaction::from_bytes(&bytes).is_err());
+    }
+
+    /// `from_hex` inherits the strict behavior automatically (delegates to
+    /// `from_bytes`): valid hex round-trips, trailing bytes are rejected.
+    #[test]
+    fn from_hex_inherits_strict_reject_trailing() {
+        let signed = sample_signed();
+        assert_eq!(
+            SignedTransaction::from_hex(&signed.to_hex()).unwrap(),
+            signed
+        );
+        let mut bytes = signed.to_bytes();
+        bytes.push(0);
+        assert!(SignedTransaction::from_hex(&hex::encode(&bytes)).is_err());
     }
 }
