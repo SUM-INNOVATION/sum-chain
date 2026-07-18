@@ -18,6 +18,7 @@ spec:
   ports:
     - { name: p2p,     port: 30303, targetPort: p2p }
     - { name: rpc,     port: 8545,  targetPort: rpc }
+    - { name: health,  port: 8546,  targetPort: health }
     - { name: metrics, port: 9090,  targetPort: metrics }
 ---
 apiVersion: apps/v1
@@ -68,6 +69,7 @@ spec:
           ports:
             - { name: p2p,     containerPort: 30303, protocol: TCP }
             - { name: rpc,     containerPort: 8545,  protocol: TCP }
+            - { name: health,  containerPort: 8546,  protocol: TCP }
             - { name: metrics, containerPort: 9090,  protocol: TCP }
           env:
             - name: RUST_LOG
@@ -80,19 +82,19 @@ spec:
             requests: { cpu: "500m",  memory: "1Gi" }
             limits:   { cpu: "2000m", memory: "4Gi" }
           livenessProbe:
-            httpGet: { path: /health/live, port: rpc }
+            httpGet: { path: /health, port: health }
             initialDelaySeconds: 10
             periodSeconds: 30
             timeoutSeconds: 5
             failureThreshold: 3
           readinessProbe:
-            httpGet: { path: /health/ready, port: rpc }
+            httpGet: { path: /ready, port: health }
             initialDelaySeconds: 5
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 3
           startupProbe:
-            httpGet: { path: /health/live, port: rpc }
+            httpGet: { path: /health, port: health }
             initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 5

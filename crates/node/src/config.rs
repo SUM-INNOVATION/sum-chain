@@ -19,6 +19,8 @@ pub struct NodeConfig {
     pub network: NetworkSettings,
     /// RPC server settings
     pub rpc: RpcSettings,
+    /// Health/readiness HTTP server settings
+    pub health: HealthSettings,
     /// Logging settings
     pub logging: LoggingSettings,
 }
@@ -30,6 +32,7 @@ impl Default for NodeConfig {
             consensus: ConsensusSettings::default(),
             network: NetworkSettings::default(),
             rpc: RpcSettings::default(),
+            health: HealthSettings::default(),
             logging: LoggingSettings::default(),
         }
     }
@@ -113,6 +116,13 @@ rate_limit_rps = 100
 # Burst size for rate limiting
 rate_limit_burst = 200
 
+[health]
+# Health/readiness HTTP server listen address.
+# Serves GET /health (liveness) and GET /ready (readiness). Bound separately
+# from the JSON-RPC server so container/orchestrator probes never contend with
+# RPC traffic. Defaults to 0.0.0.0:8546.
+addr = "0.0.0.0:8546"
+
 [logging]
 # Log level: trace, debug, info, warn, error
 level = "info"
@@ -194,6 +204,30 @@ impl Default for RpcSettings {
             rate_limit_enabled: false,
             rate_limit_rps: 100,
             rate_limit_burst: 200,
+        }
+    }
+}
+
+/// Health/readiness HTTP server settings.
+///
+/// The health server is bound separately from the JSON-RPC server so that
+/// container healthchecks and orchestrator readiness probes never contend with
+/// RPC traffic. It serves `GET /health` (liveness) and `GET /ready`
+/// (readiness); see `crates/rpc/src/health.rs`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HealthSettings {
+    /// Health/readiness server listen address
+    pub addr: String,
+}
+
+impl Default for HealthSettings {
+    fn default() -> Self {
+        Self {
+            // Bind on all interfaces so the in-container healthcheck and
+            // external orchestrator probes both reach it. Distinct port from
+            // the JSON-RPC server (8545).
+            addr: "0.0.0.0:8546".to_string(),
         }
     }
 }
@@ -288,6 +322,34 @@ mod tests {
         assert_eq!(config.node.data_dir, PathBuf::from("data"));
         assert_eq!(config.rpc.addr, "127.0.0.1:8545");
         assert_eq!(config.logging.level, "info");
+    }
+
+    #[test]
+    fn test_health_addr_default() {
+        // The [health] section defaults to 0.0.0.0:8546, independent of the
+        // JSON-RPC addr (which stays 127.0.0.1:8545).
+        let config = NodeConfig::default();
+        assert_eq!(config.health.addr, "0.0.0.0:8546");
+        assert_eq!(config.rpc.addr, "127.0.0.1:8545");
+    }
+
+    #[test]
+    fn test_health_addr_override_and_default_when_omitted() {
+        // Explicit [health] addr overrides the default.
+        let with_override = r#"
+[health]
+addr = "127.0.0.1:9999"
+"#;
+        let config: NodeConfig = toml::from_str(with_override).unwrap();
+        assert_eq!(config.health.addr, "127.0.0.1:9999");
+
+        // Omitting [health] entirely falls back to the default.
+        let without = r#"
+[rpc]
+addr = "0.0.0.0:8545"
+"#;
+        let config: NodeConfig = toml::from_str(without).unwrap();
+        assert_eq!(config.health.addr, "0.0.0.0:8546");
     }
 
     #[test]

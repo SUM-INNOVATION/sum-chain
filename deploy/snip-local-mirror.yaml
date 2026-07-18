@@ -68,15 +68,19 @@ services:
       - ../genesis/snip-mirror-genesis.json:/config/genesis.json:ro
       - ../keys/validator1.json:/secrets/validator.key:ro
     ports:
-      # Only RPC is exposed to the host. P2P (30303) and metrics (9090) stay
+      # RPC plus the health/readiness port. P2P (30303) and metrics (9090) stay
       # inside the compose network — SNIP doesn't need them and surfacing
       # extra ports invites confusion. If you need metrics, run the full
       # 3-validator `docker-compose.yaml` instead.
       - "8545:8545"
+      # Health/readiness server (default 0.0.0.0:8546). Published so the host
+      # orchestrator (issue #121) can poll GET /ready before registering this
+      # single validator; the in-container healthcheck below also uses it.
+      - "8546:8546"
     environment:
       - RUST_LOG=info,sumchain=debug
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8545/health/live"]
+      test: ["CMD", "curl", "-f", "http://localhost:8546/health"]
       interval: 5s
       timeout: 3s
       retries: 5
