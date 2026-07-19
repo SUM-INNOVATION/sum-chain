@@ -59,6 +59,14 @@ data:
     rate_limit_rps = 100
     rate_limit_burst = 200
 
+    [health]
+    # Health/readiness HTTP server. Bound separately from the JSON-RPC server
+    # (8545) so container liveness/readiness probes and the #121 orchestrator
+    # poll it without contending with RPC traffic. Serves GET /health
+    # (liveness) and GET /ready (readiness). Matches the `health` container
+    # port and the k8s probes in the StatefulSets.
+    addr = "0.0.0.0:8546"
+
     [logging]
     level = "info"
     json = false

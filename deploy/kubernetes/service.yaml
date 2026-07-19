@@ -21,6 +21,9 @@ spec:
     - name: rpc
       port: 8545
       targetPort: rpc
+    - name: health
+      port: 8546
+      targetPort: health
     - name: metrics
       port: 9090
       targetPort: metrics
@@ -43,6 +46,12 @@ spec:
     - name: rpc
       port: 8545
       targetPort: rpc
+      protocol: TCP
+    # Health/readiness endpoint, exposed so an external orchestrator (issue
+    # #121) can poll GET /ready before routing traffic. Liveness is GET /health.
+    - name: health
+      port: 8546
+      targetPort: health
       protocol: TCP
 ---
 # Service for Prometheus scraping

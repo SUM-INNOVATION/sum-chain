@@ -64,6 +64,9 @@ spec:
             - name: rpc
               containerPort: 8545
               protocol: TCP
+            - name: health
+              containerPort: 8546
+              protocol: TCP
             - name: metrics
               containerPort: 9090
               protocol: TCP
@@ -96,24 +99,24 @@ spec:
               memory: "4Gi"
           livenessProbe:
             httpGet:
-              path: /health/live
-              port: rpc
+              path: /health
+              port: health
             initialDelaySeconds: 10
             periodSeconds: 30
             timeoutSeconds: 5
             failureThreshold: 3
           readinessProbe:
             httpGet:
-              path: /health/ready
-              port: rpc
+              path: /ready
+              port: health
             initialDelaySeconds: 5
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 3
           startupProbe:
             httpGet:
-              path: /health/live
-              port: rpc
+              path: /health
+              port: health
             initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 5

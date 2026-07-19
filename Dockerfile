@@ -104,11 +104,13 @@ WORKDIR /data
 # Default ports:
 # 30303 - P2P
 # 8545  - RPC/HTTP
-EXPOSE 30303 8545
+# 8546  - Health/readiness HTTP (GET /health liveness, GET /ready readiness)
+EXPOSE 30303 8545 8546
 
-# Health check
+# Health check — probes the standalone health server's liveness endpoint on
+# 8546 (served by crates/rpc/src/health.rs; default bind 0.0.0.0:8546).
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8545/health/live || exit 1
+    CMD curl -f http://localhost:8546/health || exit 1
 
 # Default command. Earlier revisions used the bare `--config X` shape, which
 # fails because the `sumchain` binary requires a subcommand (`run`, `init`,
