@@ -269,6 +269,32 @@ pub struct StorageMetadataV2TxData {
 /// version, since SNIP clients reproduce this byte-for-byte.
 pub const SNIP_V2_ASSIGNMENT_CONTEXT: &str = "sumchain SNIP-V2 chunk-assignment v1";
 
+/// Rendezvous-hash score for one `(merkle_root, chunk_index, archive)` tuple.
+///
+/// Builds the canonical 56-byte KDF input
+/// `merkle_root (32) || chunk_index.to_be_bytes() (4, big-endian) || archive (20)`,
+/// runs `blake3::derive_key(SNIP_V2_ASSIGNMENT_CONTEXT, &input)`, and returns the
+/// first 8 bytes of the 32-byte derived key as a big-endian `u64`. **Lower scores
+/// rank an archive higher** in the assignment ordering.
+///
+/// This is the single source of truth for the per-archive score: [`assigned_archives`]
+/// and [`assigned_archives_presorted`] compute their `(score, address)` pairs by
+/// calling this exact function, so any external caller (SNIP client, conformance
+/// tooling) scoring a tuple obtains a byte-identical result to the on-chain
+/// assignment. Do NOT substitute `blake3::keyed_hash` (32-byte key, not a context
+/// string) or plain `blake3::hash` (no domain separation).
+///
+/// Conformance vectors: chain plan v3.2 Appendix C, locked by
+/// `assignment_tests::appendix_c_scores_for_root0_chunk0`.
+pub fn assignment_score(merkle_root: &Hash, chunk_index: u32, archive: &Address) -> u64 {
+    let mut input = [0u8; 56];
+    input[..32].copy_from_slice(merkle_root.as_bytes());
+    input[32..36].copy_from_slice(&chunk_index.to_be_bytes());
+    input[36..56].copy_from_slice(archive.as_bytes());
+    let derived = blake3::derive_key(SNIP_V2_ASSIGNMENT_CONTEXT, &input);
+    u64::from_be_bytes(derived[..8].try_into().expect("8-byte slice"))
+}
+
 /// Compute the rendezvous-hash assignment for a single chunk.
 ///
 /// Returns the `min(R, snapshot.len())` archive addresses with the smallest
@@ -301,18 +327,11 @@ pub fn assigned_archives(
         return Vec::new();
     }
 
-    // Score each archive. Build the 56-byte input (32 root + 4 chunk_index_be + 20 addr)
-    // exactly as specified in §3.6 — order matters for SNIP client conformance.
+    // Score each archive via the canonical scorer (single source of truth for the
+    // 56-byte KDF input `root(32) || chunk_index_be(4) || addr(20)`).
     let mut scored: Vec<(u64, Address)> = Vec::with_capacity(addrs.len());
-    let chunk_be = chunk_index.to_be_bytes();
     for a in &addrs {
-        let mut input = [0u8; 56];
-        input[..32].copy_from_slice(merkle_root.as_bytes());
-        input[32..36].copy_from_slice(&chunk_be);
-        input[36..56].copy_from_slice(a.as_bytes());
-        let derived = blake3::derive_key(SNIP_V2_ASSIGNMENT_CONTEXT, &input);
-        let score = u64::from_be_bytes(derived[..8].try_into().expect("8-byte slice"));
-        scored.push((score, *a));
+        scored.push((assignment_score(merkle_root, chunk_index, a), *a));
     }
 
     // Sort ascending by (score, address). The address tie-break makes the
@@ -347,15 +366,8 @@ pub fn assigned_archives_presorted(
         return Vec::new();
     }
     let mut scored: Vec<(u64, Address)> = Vec::with_capacity(sorted_addresses.len());
-    let chunk_be = chunk_index.to_be_bytes();
     for a in sorted_addresses {
-        let mut input = [0u8; 56];
-        input[..32].copy_from_slice(merkle_root.as_bytes());
-        input[32..36].copy_from_slice(&chunk_be);
-        input[36..56].copy_from_slice(a.as_bytes());
-        let derived = blake3::derive_key(SNIP_V2_ASSIGNMENT_CONTEXT, &input);
-        let score = u64::from_be_bytes(derived[..8].try_into().expect("8-byte slice"));
-        scored.push((score, *a));
+        scored.push((assignment_score(merkle_root, chunk_index, a), *a));
     }
     scored.sort_by(|x, y| {
         x.0.cmp(&y.0)
@@ -463,6 +475,31 @@ mod assignment_tests {
                  (\"{}\" expected) or keyed_hash-vs-derive_key drift",
                 hex::encode(archive.as_bytes()),
                 SNIP_V2_ASSIGNMENT_CONTEXT,
+            );
+        }
+    }
+
+    /// Plan v3.2 Appendix C — DIRECT check of the PUBLIC `assignment_score`
+    /// (not the inlined KDF above, and not the assignment-list wrappers): the
+    /// single source of truth must reproduce the frozen per-archive scores for
+    /// (merkle_root[0], chunk_index=0).
+    #[test]
+    fn appendix_c_public_assignment_score_direct() {
+        let root = fixture_root(0);
+        let archives = fixture_archives();
+        let cases: [(Address, u64); 5] = [
+            (archives[4], 0x4cd8130d5f5c7f55),
+            (archives[2], 0x73e9ad5ef9a6ba04),
+            (archives[1], 0xc8859dade38f7649),
+            (archives[3], 0xd2823bf6a2d883bb),
+            (archives[0], 0xf3c350979cb3f293),
+        ];
+        for (archive, expected) in cases.iter() {
+            assert_eq!(
+                assignment_score(&root, 0, archive),
+                *expected,
+                "public assignment_score drifted for archive {}",
+                hex::encode(archive.as_bytes()),
             );
         }
     }

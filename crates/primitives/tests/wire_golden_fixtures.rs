@@ -235,9 +235,10 @@ fn trailing_bytes_are_rejected() {
     // path to REJECT trailing bytes (explicit reject-trailing bincode options).
     // The accepted canonical byte set is unchanged from 0.2.0 — only extra
     // trailing bytes after a fully-decoded value now fail closed. Pin the new
-    // policy so it cannot silently regress. (The lower-level
-    // `Transaction`/`TransactionV2::from_bytes` still use tolerant
-    // `bincode::deserialize`; only `SignedTransaction` was hardened.)
+    // policy so it cannot silently regress. (As of 0.2.2 all three canonical tx
+    // decoders — `Transaction`, `TransactionV2`, and `SignedTransaction` — reject
+    // trailing bytes via the same explicit reject-trailing bincode options;
+    // 0.2.1 had hardened only `SignedTransaction`.)
     let good = SignedTransaction::new(legacy_tx(), SIG, PK).to_bytes();
     // canonical bytes still decode unchanged.
     assert!(SignedTransaction::from_bytes(&good).is_ok());

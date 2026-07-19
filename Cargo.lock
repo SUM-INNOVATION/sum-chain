@@ -6096,7 +6096,7 @@ dependencies = [
 
 [[package]]
 name = "sumchain-wire"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "bincode",
  "blake3",
@@ -6105,6 +6105,7 @@ dependencies = [
  "serde",
  "serde-big-array",
  "serde_json",
+ "sha2",
  "thiserror 1.0.69",
 ]
 

@@ -1,6 +1,6 @@
 [package]
 name = "sumchain-wire"
-version = "0.2.1"
+version = "0.2.2"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -39,3 +39,8 @@ bs58 = { workspace = true }
 blake3 = { workspace = true }
 thiserror = { workspace = true }
 serde-big-array = { workspace = true }
+
+[dev-dependencies]
+# Test-only: mechanically recompute the corroboration fixture's provenance
+# sha256 (production code uses blake3 only; this is not a runtime dependency).
+sha2 = { workspace = true }
