@@ -416,6 +416,7 @@ async fn main() -> Result<()> {
                     ..Default::default()
                 },
                 cfg.rpc.addr.parse().context("Invalid RPC address")?,
+                cfg.health.addr.parse().context("Invalid health address")?,
                 rpc_auth_config,
                 rpc_rate_limit_config,
                 cfg.consensus,

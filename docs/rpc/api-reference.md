@@ -945,11 +945,16 @@ One builder per family, each taking a tagged operation request `{from, fee?, non
 
 ### Health Checks
 
+The liveness and readiness endpoints are served by a **standalone health
+server**, bound separately from the JSON-RPC server (`:8545`). Its default bind
+address is `0.0.0.0:8546` (configurable via the `[health] addr` node-config
+key). This is the port container healthchecks and Kubernetes liveness/readiness
+probes target — not the JSON-RPC port.
+
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/health` | GET | Full health status (JSON) |
-| `/health/live` | GET | Liveness probe (200 OK) |
-| `/health/ready` | GET | Readiness probe (200/503) |
+| `:8546/health` | GET | Liveness probe. Returns `200 OK` (JSON `{status, version}`) once the health server is up. |
+| `:8546/ready` | GET | Readiness probe. Returns `200` once the node is synced with peers **or** has committed its first block past genesis (single-validator devnet rule); otherwise `503`. |
 
 ### Metrics
 

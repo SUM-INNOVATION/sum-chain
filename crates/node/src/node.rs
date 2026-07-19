@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use sumchain_consensus::{
     bft::{Proposal, Vote, VoteType},
     ConsensusEngine, ConsensusEvent,
@@ -14,7 +14,10 @@ use sumchain_crypto::KeyPair;
 use sumchain_genesis::Genesis;
 use sumchain_p2p::{NetworkCommand, NetworkConfig, NetworkEvent, NetworkService, SyncState, MAX_BLOCKS_PER_REQUEST};
 use sumchain_primitives::SignedTransaction;
-use sumchain_rpc::{Metrics, RateLimitConfig, RpcAuthConfig, RpcServer, ServerHandle};
+use sumchain_rpc::{
+    HealthCheck, HealthServer, HealthServerHandle, Metrics, RateLimitConfig, RpcAuthConfig,
+    RpcServer, ServerHandle,
+};
 use sumchain_state::education_executor::EducationExecutor;
 use sumchain_state::inference_attestation_executor::InferenceAttestationExecutor;
 use sumchain_state::mempool::{EducationAdmission, InferenceAttestationAdmission};
@@ -43,6 +46,12 @@ pub struct Node {
     genesis: Genesis,
     /// RPC address
     rpc_addr: SocketAddr,
+    /// Health/readiness HTTP server address (separate from the JSON-RPC addr)
+    health_addr: SocketAddr,
+    /// Height the node started at (its on-disk tip at construction). Used as
+    /// the readiness `genesis_height` baseline: a single validator with no
+    /// peers becomes ready once it commits its first block past this height.
+    genesis_height: u64,
     /// RPC authentication config
     rpc_auth_config: RpcAuthConfig,
     /// RPC rate limit config
@@ -71,6 +80,7 @@ impl Node {
         validator_key: Option<KeyPair>,
         network_config: NetworkConfig,
         rpc_addr: SocketAddr,
+        health_addr: SocketAddr,
         consensus_config: crate::config::ConsensusSettings,
     ) -> Result<Self> {
         Self::with_rpc_config(
@@ -79,6 +89,7 @@ impl Node {
             validator_key,
             network_config,
             rpc_addr,
+            health_addr,
             RpcAuthConfig::disabled(),
             RateLimitConfig::disabled(),
             consensus_config,
@@ -87,12 +98,14 @@ impl Node {
 
     /// Create a new node with RPC authentication
     #[allow(dead_code)]
+    #[allow(clippy::too_many_arguments)]
     pub fn with_rpc_auth(
         data_dir: PathBuf,
         genesis: Genesis,
         validator_key: Option<KeyPair>,
         network_config: NetworkConfig,
         rpc_addr: SocketAddr,
+        health_addr: SocketAddr,
         rpc_auth_config: RpcAuthConfig,
         consensus_config: crate::config::ConsensusSettings,
     ) -> Result<Self> {
@@ -102,6 +115,7 @@ impl Node {
             validator_key,
             network_config,
             rpc_addr,
+            health_addr,
             rpc_auth_config,
             RateLimitConfig::disabled(),
             consensus_config,
@@ -109,12 +123,14 @@ impl Node {
     }
 
     /// Create a new node with full RPC configuration
+    #[allow(clippy::too_many_arguments)]
     pub fn with_rpc_config(
         data_dir: PathBuf,
         genesis: Genesis,
         validator_key: Option<KeyPair>,
         network_config: NetworkConfig,
         rpc_addr: SocketAddr,
+        health_addr: SocketAddr,
         rpc_auth_config: RpcAuthConfig,
         rpc_rate_limit_config: RateLimitConfig,
         consensus_config: crate::config::ConsensusSettings,
@@ -231,6 +247,8 @@ impl Node {
             network_command_rx,
             genesis,
             rpc_addr,
+            health_addr,
+            genesis_height: initial_height,
             rpc_auth_config,
             rpc_rate_limit_config,
             metrics,
@@ -251,8 +269,12 @@ impl Node {
         // Start consensus
         self.consensus.start().await?;
 
-        // Start RPC server
-        let rpc_handle = self.start_rpc().await?;
+        // Start the RPC and health servers together. `start_servers` performs
+        // partial-start rollback: if the health server fails to bind after the
+        // RPC server is already up, it explicitly stops the RPC server before
+        // returning the error, so a health bind failure fails node startup
+        // without leaking the RPC port.
+        let (rpc_handle, health_handle) = self.start_servers().await?;
 
         // Subscribe to events
         let mut consensus_events = self.consensus.subscribe();
@@ -540,9 +562,12 @@ impl Node {
         info!("Stopping consensus engine...");
         self.consensus.stop().await?;
 
-        // 2. Stop RPC server (stops accepting new requests)
-        info!("Stopping RPC server...");
-        rpc_handle.stop()?;
+        // 2. Stop BOTH the RPC and health servers. `stop_servers` runs the
+        //    health shutdown first (infallible) and surfaces any RPC-shutdown
+        //    error only after both stop() calls have run — so neither service's
+        //    shutdown is skipped because the other errored.
+        info!("Stopping RPC and health servers...");
+        let servers_stop_result = Self::stop_servers(rpc_handle, health_handle);
 
         // 3. Give running tasks a grace period to finish
         info!("Waiting for tasks to complete...");
@@ -559,7 +584,11 @@ impl Node {
         }
 
         info!("Node shutdown complete");
-        Ok(())
+
+        // Surface any RPC-shutdown error only now, after the full teardown
+        // sequence (including health shutdown, task aborts, and DB flush) has
+        // run, so an error in one step never skips the others.
+        servers_stop_result
     }
 
     /// Initialize or load the chain
@@ -618,6 +647,125 @@ impl Node {
 
         Ok(handle)
     }
+
+    /// Start the standalone health/readiness HTTP server.
+    ///
+    /// Serves `GET /health` (liveness) and `GET /ready` (readiness) on the
+    /// configured `health_addr` (default `0.0.0.0:8546`), separate from the
+    /// JSON-RPC server. Wires the readiness predicate so a single-validator
+    /// devnet with no peers becomes ready once it commits its first block past
+    /// the height it started at (`genesis_height`); see issue #120 and
+    /// [`single_validator_synced`].
+    async fn start_health(&self) -> Result<HealthServerHandle> {
+        // Readiness `is_synced`: true if the p2p sync state says synced OR the
+        // chain has advanced past the startup height. The latter is what lets a
+        // lone validator (no peers, `sync_state` stuck at `Initializing`) flip
+        // ready after producing its first block.
+        let is_synced = {
+            let network = self.network.clone();
+            let chain_height = self.chain_height.clone();
+            let genesis_height = self.genesis_height;
+            Arc::new(move || {
+                single_validator_synced(
+                    network.sync_state().is_synced(),
+                    chain_height.load(Ordering::Relaxed),
+                    genesis_height,
+                )
+            })
+        };
+
+        let peer_count = {
+            let network = self.network.clone();
+            Arc::new(move || network.peer_count())
+        };
+
+        let current_height = {
+            let chain_height = self.chain_height.clone();
+            Arc::new(move || chain_height.load(Ordering::Relaxed))
+        };
+
+        // `HealthCheck::new` defaults `min_peers_for_ready` to 0, so a
+        // single-validator devnet is not blocked on peers.
+        let health_check = Arc::new(HealthCheck::new(is_synced, peer_count, current_height));
+        let server = HealthServer::new(health_check);
+
+        let handle = server
+            .start(self.health_addr)
+            .await
+            .with_context(|| format!("Failed to bind health server to {}", self.health_addr))?;
+
+        Ok(handle)
+    }
+
+    /// Start the RPC server, then the health server, with partial-start
+    /// rollback.
+    ///
+    /// The RPC server binds first. If the health server then fails to bind, the
+    /// already-started RPC server is explicitly stopped (we do NOT rely on drop
+    /// semantics) so its port is released before the health error is
+    /// propagated. On success both handles are returned to the caller.
+    async fn start_servers(&self) -> Result<(ServerHandle, HealthServerHandle)> {
+        let rpc_handle = self.start_rpc().await?;
+
+        match self.start_health().await {
+            Ok(health_handle) => Ok((rpc_handle, health_handle)),
+            Err(e) => {
+                error!(
+                    "Health server failed to start; rolling back the already-started RPC server"
+                );
+                if let Err(rpc_stop_err) = rpc_handle.stop() {
+                    error!(
+                        "Failed to stop RPC server during health-start rollback: {}",
+                        rpc_stop_err
+                    );
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Stop both servers, guaranteeing neither shutdown is skipped because the
+    /// other errored.
+    ///
+    /// Routes through [`shutdown_both`], which runs the (infallible) health
+    /// shutdown first and surfaces any RPC-shutdown error only after both
+    /// stop() calls have run.
+    fn stop_servers(rpc_handle: ServerHandle, mut health_handle: HealthServerHandle) -> Result<()> {
+        shutdown_both(
+            || {
+                info!("Stopping health server...");
+                health_handle.stop();
+            },
+            || {
+                info!("Stopping RPC server...");
+                rpc_handle.stop().map_err(anyhow::Error::from)
+            },
+        )
+    }
+}
+
+/// Readiness override for a single-validator devnet.
+///
+/// The node counts as "synced" for readiness purposes if the p2p sync state
+/// reports synced OR it has committed at least one block past the height it
+/// started at (`genesis_height`). A lone validator with no peers never reaches
+/// `SyncState::Synced`, so without the height clause its `/ready` probe would
+/// never return 200. See issue #120.
+fn single_validator_synced(
+    sync_state_synced: bool,
+    current_height: u64,
+    genesis_height: u64,
+) -> bool {
+    sync_state_synced || current_height > genesis_height
+}
+
+/// Run both shutdown steps, health first, so a failing RPC shutdown can never
+/// skip the health shutdown. Any RPC-shutdown error is surfaced only after the
+/// health shutdown has run. Generic over the two shutdown actions so the
+/// ordering guarantee is unit-testable with an injected RPC-shutdown failure.
+fn shutdown_both(stop_health: impl FnOnce(), stop_rpc: impl FnOnce() -> Result<()>) -> Result<()> {
+    stop_health();
+    stop_rpc()
 }
 
 // Production-wiring contract is enforced by tests in
@@ -680,6 +828,171 @@ fn build_rpc_server(
     )
     .with_chain_params(params)
     .with_contract_executor(contract_executor)
+}
+
+#[cfg(test)]
+mod health_wiring_tests {
+    use super::single_validator_synced;
+
+    /// The single-validator readiness predicate: a fresh validator (started at
+    /// genesis height 0, no peers, `sync_state` = Initializing so
+    /// `sync_state_synced = false`) is NOT ready at genesis, but becomes ready
+    /// the moment it commits its first block past genesis. This is the exact
+    /// predicate `Node::start_health` wires into the `HealthCheck` `is_synced`
+    /// callback.
+    #[test]
+    fn ready_only_after_first_block_past_genesis() {
+        let genesis = 0u64;
+
+        // At genesis, not peer-synced, zero peers -> not ready.
+        assert!(!single_validator_synced(false, genesis, genesis));
+
+        // First block past genesis -> ready, even with sync_state Initializing.
+        assert!(single_validator_synced(false, genesis + 1, genesis));
+
+        // Peer-synced is independently sufficient (normal multi-node path).
+        assert!(single_validator_synced(true, genesis, genesis));
+    }
+
+    /// On restart, `genesis_height` is the on-disk tip at startup, so readiness
+    /// requires committing a NEW block past that tip.
+    #[test]
+    fn restart_requires_progress_past_startup_tip() {
+        let startup_tip = 100u64;
+        assert!(!single_validator_synced(false, startup_tip, startup_tip));
+        assert!(single_validator_synced(false, startup_tip + 1, startup_tip));
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use std::collections::HashMap;
+    use sumchain_genesis::ChainParams;
+    use tempfile::TempDir;
+
+    /// Build a real single-validator Node bound to the given RPC and health
+    /// addresses. Returns the `TempDir` so the on-disk DB outlives the test.
+    fn test_node(rpc_addr: SocketAddr, health_addr: SocketAddr) -> (Node, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let validator = KeyPair::generate();
+        let genesis = Genesis::new(
+            1,
+            0,
+            vec![validator.public_key().to_base58()],
+            HashMap::from([(validator.address().to_base58(), 1u128)]),
+            ChainParams::default(),
+        );
+        let node = Node::with_rpc_config(
+            dir.path().to_path_buf(),
+            genesis,
+            Some(validator),
+            NetworkConfig::default(),
+            rpc_addr,
+            health_addr,
+            RpcAuthConfig::disabled(),
+            RateLimitConfig::disabled(),
+            crate::config::ConsensusSettings::default(),
+        )
+        .unwrap();
+        (node, dir)
+    }
+
+    /// Bind an ephemeral port and free it, returning the address so a server
+    /// can rebind it.
+    async fn free_addr() -> SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        addr
+    }
+
+    /// Poll until `addr` is bindable again (its port has been released), up to
+    /// ~1s.
+    async fn port_is_rebindable(addr: SocketAddr) -> bool {
+        for _ in 0..40 {
+            if tokio::net::TcpListener::bind(addr).await.is_ok() {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        false
+    }
+
+    /// Item 3.1: an occupied health port must FAIL node startup AND roll back
+    /// the already-started RPC server so its port is released (re-bindable).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn health_bind_failure_fails_startup_and_releases_rpc_port() {
+        let rpc_addr = free_addr().await;
+        let health_addr = free_addr().await;
+
+        // Occupy the health port for the whole startup attempt.
+        let _blocker = tokio::net::TcpListener::bind(health_addr).await.unwrap();
+
+        let (node, _dir) = test_node(rpc_addr, health_addr);
+        let result = node.start_servers().await;
+        assert!(
+            result.is_err(),
+            "startup must fail when the health port is already bound"
+        );
+
+        // Rollback must have stopped the RPC server, freeing its port.
+        assert!(
+            port_is_rebindable(rpc_addr).await,
+            "RPC port must be released after a failed (rolled-back) startup"
+        );
+    }
+
+    /// Item 3.3: a normal shutdown releases BOTH the RPC and health ports.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn normal_shutdown_releases_both_ports() {
+        let rpc_addr = free_addr().await;
+        let health_addr = free_addr().await;
+        let (node, _dir) = test_node(rpc_addr, health_addr);
+
+        let (rpc_handle, health_handle) = node
+            .start_servers()
+            .await
+            .expect("both servers should start");
+
+        // Both ports are occupied while the servers are running.
+        assert!(tokio::net::TcpListener::bind(rpc_addr).await.is_err());
+        assert!(tokio::net::TcpListener::bind(health_addr).await.is_err());
+
+        Node::stop_servers(rpc_handle, health_handle).expect("clean shutdown should succeed");
+
+        assert!(
+            port_is_rebindable(rpc_addr).await,
+            "RPC port must be released after shutdown"
+        );
+        assert!(
+            port_is_rebindable(health_addr).await,
+            "health port must be released after shutdown"
+        );
+    }
+
+    /// Item 3.2: an injected RPC-shutdown failure must NOT skip the health
+    /// shutdown. Exercises the real production `shutdown_both` helper that
+    /// `Node::stop_servers` routes through.
+    #[test]
+    fn rpc_shutdown_error_does_not_skip_health_shutdown() {
+        use std::cell::Cell;
+
+        let health_ran = Cell::new(false);
+        let result = shutdown_both(
+            || health_ran.set(true),
+            || Err(anyhow::anyhow!("injected RPC shutdown failure")),
+        );
+
+        assert!(
+            health_ran.get(),
+            "health shutdown must run even when the RPC shutdown errors"
+        );
+        assert!(
+            result.is_err(),
+            "the RPC-shutdown error must still be surfaced"
+        );
+    }
 }
 
 #[cfg(test)]

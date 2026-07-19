@@ -358,4 +358,191 @@ mod tests {
         );
         assert!(!unhealthy.is_ready());
     }
+
+    /// The single-validator devnet readiness rule (issue #120): with zero peers
+    /// and `sync_state` never leaving `Initializing` (so the raw `is_synced`
+    /// signal is `false`), the node is NOT ready at genesis height but becomes
+    /// ready as soon as it commits its first block past genesis. Drives the
+    /// exact `is_synced = sync_state_synced || height > genesis_height`
+    /// predicate that `Node::start_health` wires in, using an adjustable mock
+    /// height.
+    #[test]
+    fn test_readiness_single_validator_genesis_predicate() {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+        let genesis_height = 0u64;
+        let height = Arc::new(AtomicU64::new(genesis_height));
+        // Raw p2p sync signal: a lone validator never leaves Initializing.
+        let sync_state_synced = Arc::new(AtomicBool::new(false));
+
+        let is_synced = {
+            let sync_state_synced = sync_state_synced.clone();
+            let height = height.clone();
+            Arc::new(move || {
+                sync_state_synced.load(Ordering::Relaxed)
+                    || height.load(Ordering::Relaxed) > genesis_height
+            })
+        };
+        let current_height = {
+            let height = height.clone();
+            Arc::new(move || height.load(Ordering::Relaxed))
+        };
+        // Zero peers, min_peers default 0.
+        let health = HealthCheck::new(is_synced, Arc::new(|| 0usize), current_height);
+
+        // At genesis: not synced, 0 peers -> not ready.
+        let status = health.readiness();
+        assert!(!status.ready, "should not be ready at genesis height");
+        assert!(!status.checks.synced);
+        assert_eq!(status.checks.block_height, genesis_height);
+        assert_eq!(status.checks.peer_count, 0);
+
+        // First block past genesis -> ready, even with 0 peers and the raw sync
+        // signal still false.
+        height.store(genesis_height + 1, Ordering::Relaxed);
+        let status = health.readiness();
+        assert!(status.ready, "should be ready once past genesis height");
+        assert!(status.checks.synced, "height predicate drives synced=true");
+        assert_eq!(status.checks.block_height, genesis_height + 1);
+        assert_eq!(status.checks.peer_count, 0);
+    }
+
+    // ---- HTTP-level tests exercising the running HealthServer ----
+
+    /// Bind an ephemeral port, return its address, and free it so the caller
+    /// can hand the address to `HealthServer::start`.
+    async fn free_local_addr() -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        addr
+    }
+
+    /// Issue `GET <path>` over a raw TCP connection and return the HTTP status
+    /// code. Sends `Connection: close` so the server closes after responding.
+    async fn get_status(addr: SocketAddr, path: &str) -> u16 {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let req = format!(
+            "GET {} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            path
+        );
+        stream.write_all(req.as_bytes()).await.unwrap();
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        let text = String::from_utf8_lossy(&buf);
+        let status_line = text.lines().next().expect("no status line");
+        status_line
+            .split_whitespace()
+            .nth(1)
+            .expect("no status code")
+            .parse()
+            .expect("status code not a number")
+    }
+
+    #[tokio::test]
+    async fn test_http_health_returns_200_when_up() {
+        let addr = free_local_addr().await;
+        // Not ready (not synced), but /health (liveness) must still be 200.
+        let health = Arc::new(HealthCheck::new(
+            Arc::new(|| false),
+            Arc::new(|| 0),
+            Arc::new(|| 0),
+        ));
+        let mut handle = HealthServer::new(health).start(addr).await.unwrap();
+
+        assert_eq!(get_status(addr, "/health").await, 200);
+
+        handle.stop();
+    }
+
+    #[tokio::test]
+    async fn test_http_ready_transitions_503_to_200_past_genesis() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let addr = free_local_addr().await;
+        let genesis_height = 0u64;
+        let height = Arc::new(AtomicU64::new(genesis_height));
+
+        let is_synced = {
+            let height = height.clone();
+            // Raw sync signal stays false (single validator, no peers).
+            Arc::new(move || height.load(Ordering::Relaxed) > genesis_height)
+        };
+        let current_height = {
+            let height = height.clone();
+            Arc::new(move || height.load(Ordering::Relaxed))
+        };
+        let health = Arc::new(HealthCheck::new(
+            is_synced,
+            Arc::new(|| 0usize),
+            current_height,
+        ));
+        let mut handle = HealthServer::new(health).start(addr).await.unwrap();
+
+        // Before the first block past genesis: 503.
+        assert_eq!(get_status(addr, "/ready").await, 503);
+
+        // After committing a block past genesis: 200.
+        height.store(genesis_height + 1, Ordering::Relaxed);
+        assert_eq!(get_status(addr, "/ready").await, 200);
+
+        handle.stop();
+    }
+
+    #[tokio::test]
+    async fn test_http_bind_failure_surfaces_error() {
+        let addr = free_local_addr().await;
+        let make_health = || {
+            Arc::new(HealthCheck::new(
+                Arc::new(|| true),
+                Arc::new(|| 0),
+                Arc::new(|| 0),
+            ))
+        };
+
+        let mut first = HealthServer::new(make_health()).start(addr).await.unwrap();
+
+        // Second bind to the same address must fail rather than silently
+        // succeed.
+        let second = HealthServer::new(make_health()).start(addr).await;
+        assert!(second.is_err(), "second bind to {addr} should fail");
+
+        first.stop();
+    }
+
+    #[tokio::test]
+    async fn test_clean_shutdown_releases_port() {
+        let addr = free_local_addr().await;
+        let make_health = || {
+            Arc::new(HealthCheck::new(
+                Arc::new(|| true),
+                Arc::new(|| 0),
+                Arc::new(|| 0),
+            ))
+        };
+
+        let mut handle = HealthServer::new(make_health()).start(addr).await.unwrap();
+        assert_eq!(get_status(addr, "/health").await, 200);
+
+        // Stop and confirm the port is released by rebinding to the same addr.
+        handle.stop();
+
+        let mut rebound = None;
+        for _ in 0..40 {
+            match HealthServer::new(make_health()).start(addr).await {
+                Ok(h) => {
+                    rebound = Some(h);
+                    break;
+                }
+                Err(_) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+            }
+        }
+        let mut rebound = rebound.expect("port was not released after clean shutdown");
+        assert_eq!(get_status(addr, "/health").await, 200);
+        rebound.stop();
+    }
 }
