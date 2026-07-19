@@ -5,6 +5,12 @@ edition = "2021"
 license.workspace = true
 publish = false
 
+# The #119 smoke provisioner lives in the library target (src/lib.rs); the bins
+# below are thin CLI wrappers over it.
+[lib]
+name = "sumchain_scripts"
+path = "src/lib.rs"
+
 [[bin]]
 name = "setup-local-testnet"
 path = "src/setup_local_testnet.rs"
@@ -19,3 +25,7 @@ sumchain-primitives = { path = "../crates/primitives" }
 sumchain-genesis = { path = "../crates/genesis" }
 serde_json = "1.0"
 anyhow = "1.0"
+clap = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.10"

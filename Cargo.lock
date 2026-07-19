@@ -6012,10 +6012,12 @@ name = "sumchain-scripts"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "clap",
  "serde_json",
  "sumchain-crypto",
  "sumchain-genesis",
  "sumchain-primitives",
+ "tempfile",
 ]
 
 [[package]]
