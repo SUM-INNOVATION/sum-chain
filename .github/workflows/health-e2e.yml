@@ -1,0 +1,63 @@
+# End-to-end health/readiness evidence for the devnet health server (issue #120).
+#
+# Runs deploy/health-e2e-harness.sh on an Ubuntu runner (Docker Engine, Docker
+# Compose v2, and a Rust toolchain are all preinstalled on ubuntu-latest). The
+# harness brings up the real three-validator docker-compose.yaml devnet from an
+# ephemeral, mktemp-provisioned identity set and asserts the 503->200 readiness
+# transition after block advancement. The sanitized evidence log is uploaded as
+# an artifact; it is NOT committed. Evidence is DEVNET_ONLY / NON_SELECTION /
+# INVALID_FOR_B0, chain id 1337.
+name: health-e2e (devnet #120)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'deploy/health-e2e-harness.sh'
+      - '.github/workflows/health-e2e.yml'
+      - 'docker-compose.yaml'
+      - 'Dockerfile'
+      - 'crates/rpc/src/health.rs'
+      - 'crates/node/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'deploy/health-e2e-harness.sh'
+      - '.github/workflows/health-e2e.yml'
+      - 'docker-compose.yaml'
+      - 'Dockerfile'
+      - 'crates/rpc/src/health.rs'
+      - 'crates/node/**'
+
+# One in-flight run per ref; a newer push cancels the older devnet bring-up.
+concurrency:
+  group: health-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  health-e2e:
+    name: devnet health/readiness E2E (3-validator compose)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain versions
+        run: |
+          docker version
+          docker compose version
+          cargo --version
+
+      - name: Run the health/readiness E2E harness
+        env:
+          EVIDENCE_LOG: ${{ runner.temp }}/health-e2e-evidence.log
+          # NO_CACHE: "1"   # uncomment to force a fully clean image build
+        run: bash deploy/health-e2e-harness.sh
+
+      - name: Upload sanitized evidence log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: health-e2e-evidence
+          path: ${{ runner.temp }}/health-e2e-evidence.log
+          if-no-files-found: warn

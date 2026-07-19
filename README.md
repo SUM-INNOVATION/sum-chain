@@ -53,18 +53,16 @@ A Layer-1 blockchain built entirely in Rust (stable toolchain). No C/C++, Python
 
 ## Local Development
 
-For SNIP V2 client integration without spinning up a full 3-validator local testnet, the chain ships a self-bootstrapping single-validator Docker preset on the `snip-local-mirror-preset` branch:
+Bring up a local devnet with the three-validator `docker-compose.yaml` (chain id 1337) after generating a matching keys+genesis set:
 
 ```bash
-git checkout snip-local-mirror-preset
-docker-compose -f deploy/snip-local-mirror.yaml up -d --build
-curl -X POST -H 'Content-Type: application/json' \
-     --data '{"jsonrpc":"2.0","id":1,"method":"chain_id","params":[]}' \
-     http://localhost:8545
-# → {"jsonrpc":"2.0","result":31337,"id":1}
+cargo run --bin setup-local-testnet   # writes keys/ + genesis/local_genesis.json (chain id 1337)
+docker compose up -d --build
 ```
 
-Generates a fresh disposable validator key on first boot, renders genesis from a committed template (`genesis/snip-mirror-genesis.template.json`), and exposes RPC on `localhost:8545`. `docker-compose down -v` wipes everything; `stop` / `start` preserves the chain. SNIP-side test addresses can be pre-funded via a mounted `extra-alloc.json` overlay before the first `up`.
+To exercise only the health/readiness endpoints from a clean checkout without touching any tracked file, run `deploy/health-e2e-harness.sh`; it provisions a disposable identity into a temp directory (evidence is chain id 1337, `DEVNET_ONLY / NON_SELECTION / INVALID_FOR_B0`).
+
+A self-bootstrapping single-validator preset (`deploy/snip-local-mirror.yaml`) is **planned under #118/#119**. Its required runtime artifacts (a genesis template and a first-boot disposable-key mechanism) are **not present on `main`**, so that preset cannot `up` from a clean `main` checkout yet — use the three-validator harness above for clean local testing at chain id 1337.
 
 ## Architecture
 
