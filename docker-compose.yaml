@@ -8,22 +8,32 @@
 #     keeping the validators free of test-client load.
 #   - Prometheus + Grafana for chain metrics.
 #
-# Files referenced from this compose are real, checked-in artifacts:
-#   ./genesis/local_genesis.json   — validators + pre-funded test accounts;
-#                                    matches the keys below by pubkey.
-#   ./keys/validator{1,2,3}.json   — JSON-encoded [u8; 32] private-key seed,
-#                                    the format crates/node/src/main.rs:367
-#                                    feeds into KeyPair::from_bytes.
+# Files this compose mounts, and how to provision them:
+#   ./genesis/local_genesis.json   — committed genesis (validators + pre-funded
+#                                    test accounts).
+#   ./keys/validator{1,2,3}.json   — validator private-key seeds ([u8; 32] JSON,
+#                                    the format crates/node/src/main.rs feeds to
+#                                    KeyPair::from_bytes). NOT committed: `/keys/`
+#                                    is gitignored (secrets), and the private
+#                                    keys for the committed genesis are not
+#                                    distributed. Generate a fresh, matching
+#                                    keys+genesis set before the first `up`:
 #
-# Usage:
-#   docker-compose up -d --build       # Start everything (first run builds)
-#   docker-compose logs -f validator-1 # Tail one validator's log
+#     cargo run --bin setup-local-testnet   # writes keys/ + genesis/local_genesis.json
+#
+#   Note: setup-local-testnet REWRITES genesis/local_genesis.json in place. To
+#   exercise the health endpoints without touching any tracked file, run
+#   deploy/health-e2e-harness.sh, which provisions into a temp dir instead.
+#
+# Usage (after provisioning):
+#   docker compose up -d --build       # Start everything (first run builds)
+#   docker compose logs -f validator-1 # Tail one validator's log
 #   curl http://localhost:8548/        # Hit the full-node RPC (no auth)
-#   docker-compose down -v             # Stop and wipe block data
+#   docker compose down -v             # Stop and wipe block data
 #
 # Earlier versions of this file pointed at ./deploy/config/validator-{1,2,3}/
-# and ./deploy/keys/validator-{1,2,3}/ which never existed in the repo. Fixed
-# in this revision to mount the actual checked-in files.
+# and ./deploy/keys/validator-{1,2,3}/ which never existed in the repo; this
+# revision mounts genesis/local_genesis.json and keys/validator{1,2,3}.json.
 
 services:
   # Validator 1 — bootnode for the others.
