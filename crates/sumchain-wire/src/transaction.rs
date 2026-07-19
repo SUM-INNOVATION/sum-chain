@@ -617,9 +617,21 @@ impl TransactionV2 {
         bincode::serialize(self).expect("TransactionV2 serialization should not fail")
     }
 
-    /// Deserialize from bytes
+    /// Deserialize from bytes.
+    ///
+    /// REJECTS trailing bytes: the input must be exactly one serialized
+    /// `TransactionV2` and nothing more. The accepted canonical byte set is
+    /// identical to 0.2.0/0.2.1 — the encoder (`to_bytes`) uses `bincode::serialize`
+    /// (fixint, little-endian, no limit); this decoder uses the matching explicit
+    /// options and only differs from the previous `bincode::deserialize` by refusing
+    /// to silently ignore extra trailing bytes. (Mirrors `SignedTransaction::from_bytes`.)
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::Error> {
-        bincode::deserialize(bytes)
+        use bincode::Options;
+        bincode::options()
+            .with_fixint_encoding()
+            .with_little_endian()
+            .reject_trailing_bytes()
+            .deserialize(bytes)
     }
 
     /// Get recipient address (for transfers) or contract address (for calls)
@@ -808,9 +820,17 @@ impl Transaction {
         bincode::serialize(self).expect("Transaction serialization should not fail")
     }
 
-    /// Deserialize transaction from bytes
+    /// Deserialize transaction from bytes.
+    ///
+    /// REJECTS trailing bytes (see `TransactionV2::from_bytes` / `SignedTransaction::from_bytes`).
+    /// Canonical accepted byte set unchanged from 0.2.0/0.2.1.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::Error> {
-        bincode::deserialize(bytes)
+        use bincode::Options;
+        bincode::options()
+            .with_fixint_encoding()
+            .with_little_endian()
+            .reject_trailing_bytes()
+            .deserialize(bytes)
     }
 
     /// Total cost to sender (amount + fee)

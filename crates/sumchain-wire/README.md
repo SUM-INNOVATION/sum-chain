@@ -95,22 +95,32 @@ compatible release.
     byte-for-byte identical to 0.2.0** — only silent trailing-byte tolerance was
     removed. The encoder (`to_bytes`/`to_hex`), `signing_hash`, and the tx hash
     are unchanged.
-  - The lower-level `Transaction::from_bytes` and `TransactionV2::from_bytes`
-    still use `bincode::deserialize`, which **tolerates trailing bytes** after a
-    fully-decoded value. This remains the *observed and locked* behavior for
-    those two entry points (flagged for separate review; unchanged in 0.2.1).
+  - As of **0.2.2**, `Transaction::from_bytes` and `TransactionV2::from_bytes`
+    **also REJECT trailing bytes**, using the same explicit reject-trailing
+    bincode options (fixed-int, little-endian) as the `SignedTransaction` path.
+    The accepted canonical byte set for both is byte-for-byte identical to
+    0.2.1/0.2.0 — only silent trailing-byte tolerance was removed.
+  - `MessageHeader::from_bytes` remains **intentionally permissive**: it parses a
+    fixed 72-byte prefix off a larger SRC-201 frame whose encrypted body
+    legitimately follows, so rejecting "trailing" bytes would reject every real
+    message.
   - In all cases, truncated input, short fixed arrays, out-of-range enum
     ordinals (e.g. `TxPayload` tag 27), and oversized length prefixes decode to
     `Err`.
 
 ## Versioning & breaking-change policy
 
-- Current version: **0.2.1**. The 0.2.0 → 0.2.1 bump is a **patch-level
-  decoder-hardening**: the canonical `SignedTransaction::from_bytes`/`from_hex`
-  path now rejects trailing bytes. It changes **no** encoded bytes — the
-  encoder, every golden fixture, all hashes/signatures, and the accepted
-  canonical byte set are byte-for-byte identical to 0.2.0; only silent
-  trailing-byte tolerance on that one decode path is removed.
+- Current version: **0.2.2**. The 0.2.1 → 0.2.2 bump is **patch-level**:
+  (a) `Transaction::from_bytes` and `TransactionV2::from_bytes` now reject
+  trailing bytes (extending the 0.2.1 `SignedTransaction` hardening;
+  `MessageHeader` stays permissive by design), and (b) a single public
+  `assignment_score` is exposed and drives both assignment loops (no second
+  scorer). It changes **no** encoded bytes — the encoder, every golden fixture,
+  all hashes/signatures, assignment outputs, and the accepted canonical byte set
+  are byte-for-byte identical to 0.2.1/0.2.0.
+- The 0.2.0 → 0.2.1 bump was a **patch-level decoder-hardening**: the canonical
+  `SignedTransaction::from_bytes`/`from_hex` path rejects trailing bytes; it
+  changes **no** encoded bytes vs 0.2.0.
 - The 0.1.1 → 0.2.0 bump was **additive**: it adds the `b0` candidate-neutral
   wire types (see above) and re-exports; it introduces no new transaction
   ordinal and changes no existing 0.1.1 encoded bytes.

@@ -170,7 +170,8 @@ pub use inference_settlement::{
     RefundInferenceSessionRequest, ResolveInferenceDisputeRequest,
 };
 pub use storage_metadata::{
-    assigned_archives, assigned_archives_presorted, is_archive_assigned_to_chunk, AccessEntryV2,
+    assigned_archives, assigned_archives_presorted, assignment_score,
+    is_archive_assigned_to_chunk, AccessEntryV2,
     EncryptedKeyBundleV2, FileLifecycleV2, FileVisibilityV2, StorageChallenge, StorageMetadata,
     StorageMetadataOperation, StorageMetadataOperationV2, StorageMetadataTxData, StorageMetadataV2,
     StorageMetadataV2TxData, CHALLENGE_INTERVAL_BLOCKS, CHALLENGE_REWARD, CHALLENGE_TTL_BLOCKS,
