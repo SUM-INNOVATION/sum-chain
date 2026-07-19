@@ -110,6 +110,8 @@ fn main() -> Result<()> {
             inference_verifier_bonding_enabled_from_height: None, // issue #78: dormant
             inference_verifier_unbonding_period_blocks: 201_600,
             omninode_sponsored_attestation_enabled_from_height: None, // issue #79: dormant
+            compute_pool_enabled_from_height: None, // issue #118: compute-pool gate dormant (fail-closed until ComputePoolParams exists)
+            beacon_enabled_from_height: None,       // issue #118: beacon gate dormant (fail-closed until BeaconParams exists)
         },
     );
 

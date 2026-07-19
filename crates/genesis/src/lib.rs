@@ -35,6 +35,17 @@ pub enum GenesisError {
 
     #[error("Genesis already initialized")]
     AlreadyInitialized,
+
+    /// A subsystem activation gate was set (`Some(_)`) before the typed
+    /// parameter structure it requires exists. Fail-closed: the gate cannot be
+    /// opened until its parameters are defined and validated. `gate` is the
+    /// stable field name (issue references belong in source comments / PR text,
+    /// never in this runtime string).
+    #[error(
+        "subsystem activation gate '{gate}' cannot be enabled: its required \
+         parameter structure does not exist yet"
+    )]
+    IncompleteSubsystemActivation { gate: &'static str },
 }
 
 pub type Result<T> = std::result::Result<T, GenesisError>;
@@ -491,6 +502,30 @@ pub struct ChainParams {
     /// `WithdrawVerifierBond` (issue #78). Only consulted once bonding is enabled.
     #[serde(default = "default_inference_verifier_unbonding_period_blocks")]
     pub inference_verifier_unbonding_period_blocks: u64,
+
+    // ─── Dormant compute-pool / beacon activation gates ────────────────────
+    // Minimal typed foundation for the ecosystem-devnet genesis (issue #118).
+    // Both gates mirror the existing `*_enabled_from_height` idiom and stay
+    // dormant (`None`). They are FAIL-CLOSED: they must remain `None` until
+    // their required typed parameter structures exist — `ComputePoolParams`
+    // (blocked on B0 #123 + C1 #130) and `BeaconParams` (blocked on BR1 #127).
+    // No parameter struct, economic value, `Some(0)`, or `Some(h)` is
+    // introduced here; enforcement lives in `ChainParams::validate()`.
+    /// Compute-pool subprotocol activation gate. `None` (default) = dormant.
+    /// Fail-closed: a `ChainParams` deserialized in isolation *may* hold
+    /// `Some(h)`, but every genesis loaded through the authoritative
+    /// `Genesis::validate()` path rejects any `Some(_)` until the
+    /// `ComputePoolParams` surface + its validation exist.
+    #[serde(default)]
+    pub compute_pool_enabled_from_height: Option<u64>,
+
+    /// Threshold-BLS beacon activation gate. `None` (default) = dormant.
+    /// Fail-closed: a `ChainParams` deserialized in isolation *may* hold
+    /// `Some(h)`, but every genesis loaded through the authoritative
+    /// `Genesis::validate()` path rejects any `Some(_)` until the
+    /// `BeaconParams` surface + its validation exist.
+    #[serde(default)]
+    pub beacon_enabled_from_height: Option<u64>,
 }
 
 fn default_inference_verifier_unbonding_period_blocks() -> u64 {
@@ -779,6 +814,11 @@ impl Default for ChainParams {
             inference_verifier_bonding_enabled_from_height: None,
             inference_verifier_unbonding_period_blocks:
                 default_inference_verifier_unbonding_period_blocks(),
+            // Production-safe defaults: compute-pool and beacon subsystems
+            // dormant. Fail-closed until their typed parameter surfaces exist
+            // (issue #118 foundation).
+            compute_pool_enabled_from_height: None,
+            beacon_enabled_from_height: None,
         }
     }
 }
@@ -819,6 +859,31 @@ impl ChainParams {
     /// Validate metadata size against limits
     pub fn validate_metadata_size(&self, metadata_bytes: usize) -> bool {
         metadata_bytes as u64 <= self.max_metadata_bytes
+    }
+
+    /// Validate the dormant subsystem activation gates that do not yet have a
+    /// typed parameter surface.
+    ///
+    /// `compute_pool_enabled_from_height` and `beacon_enabled_from_height` are
+    /// fail-closed: they must remain `None` until their required parameter
+    /// structures exist (`ComputePoolParams`, blocked on B0 #123 + C1 #130;
+    /// `BeaconParams`, blocked on BR1 #127). This method does not — and cannot
+    /// — prevent constructing a `ChainParams` (in code or by deserializing one
+    /// in isolation) that carries `Some(h)`. The guarantee is loader-level:
+    /// [`Genesis::validate`] calls this, so every genesis admitted through the
+    /// authoritative loader rejects any `Some(_)` for these gates.
+    pub fn validate(&self) -> Result<()> {
+        if self.compute_pool_enabled_from_height.is_some() {
+            return Err(GenesisError::IncompleteSubsystemActivation {
+                gate: "compute_pool_enabled_from_height",
+            });
+        }
+        if self.beacon_enabled_from_height.is_some() {
+            return Err(GenesisError::IncompleteSubsystemActivation {
+                gate: "beacon_enabled_from_height",
+            });
+        }
+        Ok(())
     }
 }
 
@@ -900,6 +965,10 @@ impl Genesis {
                 .or_else(|_| Address::from_hex(addr))
                 .map_err(|_| GenesisError::InvalidAddress(addr.clone()))?;
         }
+
+        // Fail-closed: reject any genesis that opens a subsystem gate whose
+        // typed parameter surface does not exist yet (compute-pool / beacon).
+        self.params.validate()?;
 
         Ok(())
     }
@@ -1346,5 +1415,171 @@ mod tests {
         let legacy = json.replace(&format!("\"{}\"", treasury.to_base58()), &arr);
         let p2: ChainParams = serde_json::from_str(&legacy).expect("legacy array treasury parses");
         assert_eq!(p2.governance.unwrap().treasury, Some(treasury));
+    }
+
+    // ─── Issue #118: dormant compute-pool / beacon activation-gate foundation ──
+    //
+    // These tests pin the AUTHORITATIVE-LOADER boundary. A `ChainParams`
+    // deserialized in isolation (raw `serde_json::from_str::<ChainParams>`) may
+    // still hold `Some(h)` for either gate — that is by design and is NOT what
+    // these tests claim. The guarantee under test is that every genesis admitted
+    // through `Genesis::from_json` / `Genesis::from_file` (which call
+    // `Genesis::validate` → `ChainParams::validate`) rejects any `Some(_)` until
+    // the gate's typed parameter surface exists. The real committed
+    // `genesis/local_genesis.json` is used as the valid-genesis base so the
+    // validator/alloc checks always pass and only the gate behavior is isolated.
+
+    /// The committed local genesis, used as a valid base for gate mutation.
+    const LOCAL_GENESIS_JSON: &str = include_str!("../../../genesis/local_genesis.json");
+
+    /// Parse the committed local genesis into a mutable JSON value.
+    fn local_genesis_value() -> serde_json::Value {
+        serde_json::from_str(LOCAL_GENESIS_JSON).expect("local genesis is valid JSON")
+    }
+
+    // Test 1 — missing fields are accepted as `None` by the authoritative loader.
+    #[test]
+    fn foundation_gates_absent_default_to_none_and_loader_accepts() {
+        // The committed local genesis carries neither key.
+        assert!(!LOCAL_GENESIS_JSON.contains("compute_pool_enabled_from_height"));
+        assert!(!LOCAL_GENESIS_JSON.contains("beacon_enabled_from_height"));
+        let g = Genesis::from_json(LOCAL_GENESIS_JSON)
+            .expect("committed local genesis must load through the authoritative loader");
+        assert_eq!(g.params.compute_pool_enabled_from_height, None);
+        assert_eq!(g.params.beacon_enabled_from_height, None);
+    }
+
+    // Test 2 — explicit JSON `null` is accepted as `None` by the loader.
+    #[test]
+    fn foundation_gates_explicit_null_decode_to_none_and_loader_accepts() {
+        let mut v = local_genesis_value();
+        v["params"]["compute_pool_enabled_from_height"] = serde_json::Value::Null;
+        v["params"]["beacon_enabled_from_height"] = serde_json::Value::Null;
+        let s = serde_json::to_string(&v).unwrap();
+        let g = Genesis::from_json(&s).expect("explicit-null gates must load as None");
+        assert_eq!(g.params.compute_pool_enabled_from_height, None);
+        assert_eq!(g.params.beacon_enabled_from_height, None);
+    }
+
+    // Test 3a — `Some(0)` on compute-pool is rejected INDEPENDENTLY (beacon absent).
+    #[test]
+    fn foundation_compute_pool_some_zero_rejected_by_loader() {
+        let mut v = local_genesis_value();
+        v["params"]["compute_pool_enabled_from_height"] = serde_json::json!(0u64);
+        let s = serde_json::to_string(&v).unwrap();
+        match Genesis::from_json(&s) {
+            Err(GenesisError::IncompleteSubsystemActivation { gate }) => {
+                assert_eq!(gate, "compute_pool_enabled_from_height");
+            }
+            other => panic!("expected IncompleteSubsystemActivation, got {other:?}"),
+        }
+    }
+
+    // Test 3b — `Some(0)` on beacon is rejected INDEPENDENTLY (compute-pool absent).
+    #[test]
+    fn foundation_beacon_some_zero_rejected_by_loader() {
+        let mut v = local_genesis_value();
+        v["params"]["beacon_enabled_from_height"] = serde_json::json!(0u64);
+        let s = serde_json::to_string(&v).unwrap();
+        match Genesis::from_json(&s) {
+            Err(GenesisError::IncompleteSubsystemActivation { gate }) => {
+                assert_eq!(gate, "beacon_enabled_from_height");
+            }
+            other => panic!("expected IncompleteSubsystemActivation, got {other:?}"),
+        }
+    }
+
+    // Test 4 — a future `Some(h)` is rejected too (not just `Some(0)`), per gate.
+    #[test]
+    fn foundation_gates_future_height_rejected_by_loader() {
+        for gate in ["compute_pool_enabled_from_height", "beacon_enabled_from_height"] {
+            let mut v = local_genesis_value();
+            v["params"][gate] = serde_json::json!(9_000_000u64);
+            let s = serde_json::to_string(&v).unwrap();
+            match Genesis::from_json(&s) {
+                Err(GenesisError::IncompleteSubsystemActivation { gate: g }) => {
+                    assert_eq!(g, gate);
+                }
+                other => panic!("expected IncompleteSubsystemActivation for {gate}, got {other:?}"),
+            }
+        }
+    }
+
+    // Test 5 — the existing committed genesis fixtures still load: this change
+    //          never regresses any of them. Every committed fixture still
+    //          deserializes with the two gates dormant (`None`), and NONE fails
+    //          the authoritative loader because of the new gates
+    //          (`IncompleteSubsystemActivation`). `testnet`/`mainnet` are
+    //          placeholder templates whose *validator* keys are not real base58
+    //          — they fail `validate()` for that pre-existing, unrelated reason,
+    //          exactly as they did before this change — so full `from_file`
+    //          admission is asserted only for `local`, which has real keys.
+    #[test]
+    fn foundation_existing_committed_genesis_fixtures_still_load() {
+        for rel in [
+            "/../../genesis/local_genesis.json",
+            "/../../genesis/testnet_genesis.json",
+            "/../../genesis/mainnet_genesis.json",
+        ] {
+            let path = format!("{}{}", env!("CARGO_MANIFEST_DIR"), rel);
+            let contents = std::fs::read_to_string(&path).expect("fixture readable");
+            // Still deserializes; the two new gates default to dormant `None`.
+            let g: Genesis =
+                serde_json::from_str(&contents).unwrap_or_else(|e| panic!("{path}: {e:?}"));
+            assert_eq!(g.params.compute_pool_enabled_from_height, None, "{path}");
+            assert_eq!(g.params.beacon_enabled_from_height, None, "{path}");
+            // The authoritative loader never rejects a committed fixture *for the
+            // new gates*. (It may reject placeholder templates for their existing
+            // invalid validator keys — that predates and is unrelated to #118.)
+            match Genesis::from_file(&path) {
+                Ok(_) | Err(GenesisError::InvalidValidator(_)) | Err(GenesisError::InvalidAddress(_)) => {}
+                Err(GenesisError::IncompleteSubsystemActivation { gate }) => {
+                    panic!("{path}: new gate '{gate}' must not reject a committed fixture")
+                }
+                Err(e) => panic!("{path}: unexpected pre-existing failure {e:?}"),
+            }
+        }
+        // The real-validator fixture loads fully through the authoritative loader.
+        let local = format!("{}/../../genesis/local_genesis.json", env!("CARGO_MANIFEST_DIR"));
+        let g = Genesis::from_file(&local).expect("local genesis must fully load");
+        assert_eq!(g.params.compute_pool_enabled_from_height, None);
+        assert_eq!(g.params.beacon_enabled_from_height, None);
+    }
+
+    // Test 6 — serialization round-trip preserves both `None` gate fields.
+    #[test]
+    fn foundation_default_serialization_round_trip_preserves_none_gates() {
+        let p = ChainParams::default();
+        assert_eq!(p.compute_pool_enabled_from_height, None);
+        assert_eq!(p.beacon_enabled_from_height, None);
+        let json = serde_json::to_string(&p).unwrap();
+        // Both keys are emitted (a real round-trip, not a serde-default rescue).
+        assert!(json.contains("compute_pool_enabled_from_height"));
+        assert!(json.contains("beacon_enabled_from_height"));
+        let back: ChainParams = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.compute_pool_enabled_from_height, None);
+        assert_eq!(back.beacon_enabled_from_height, None);
+    }
+
+    // Test 7 — the foundation adds NO activation / RPC / executor / state /
+    //          template behavior: the gates are inert dormant fields validated
+    //          fail-closed. `validate` takes `&self` (cannot mutate/activate),
+    //          is pure, and accepts the dormant default. Nothing here introduces
+    //          a `with_*_enabled` constructor, an activation predicate, a param
+    //          struct, an `n_min` floor, a registry, or a `chain_getChainParams`
+    //          surface — those remain deferred to their defining issues.
+    #[test]
+    fn foundation_adds_no_activation_or_runtime_behavior() {
+        let p = ChainParams::default();
+        // Dormant default is accepted; validation is pure (idempotent, no mutation).
+        assert!(p.validate().is_ok());
+        assert!(p.validate().is_ok());
+        assert_eq!(p.compute_pool_enabled_from_height, None);
+        assert_eq!(p.beacon_enabled_from_height, None);
+        // A committed genesis loaded through the authoritative loader is admitted
+        // with the gates dormant — no activation side effect occurs.
+        let g = Genesis::from_json(LOCAL_GENESIS_JSON).unwrap();
+        assert_eq!(g.params.compute_pool_enabled_from_height, None);
+        assert_eq!(g.params.beacon_enabled_from_height, None);
     }
 }
