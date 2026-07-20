@@ -408,7 +408,7 @@ export const categories: Category[] = [
       },
       {
         name: 'messaging_registerSponsored',
-        description: 'Registers a public key for an address (sponsored, fee paid by relayer). Required before receiving messages. Not idempotent: a duplicate call returns success: false with "Public key already registered", check via account_getPublicKey first.',
+        description: 'Builds, signs, and submits a sponsored RegisterPublicKeySponsoredV1 transaction (fee paid by the relayer) that registers the caller\'s messaging public key through consensus. The registrant signs the canonical preimage "SUMCHAIN/SRC-201/REGISTER-SPONSORED/v1" || chain_id_le || sponsor_address || registrant_pubkey. Returns { success, tx_hash } on submission — success means submitted/pending, NOT yet registered; poll account_getPublicKey (or the tx receipt) to confirm inclusion. Requires the chain to have messaging_sponsored_registration_enabled_from_height active.',
       },
       { name: 'messaging_submitSponsored', description: 'Submits an encrypted message via a sponsoring relayer.' },
       { name: 'messaging_getQuota', description: 'Quota status for a sender.' },

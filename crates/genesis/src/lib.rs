@@ -526,6 +526,27 @@ pub struct ChainParams {
     /// `BeaconParams` surface + its validation exist.
     #[serde(default)]
     pub beacon_enabled_from_height: Option<u64>,
+
+    /// SRC-201 sponsored public-key registration activation gate (issue #145).
+    ///
+    /// This is a fully-implemented ACTIVATION gate, NOT a dormant-until-built
+    /// gate: `None` (default) means the `RegisterPublicKeySponsoredV1` operation
+    /// is unavailable and rejects free (`Failed(390)`, no fee, no state) at the
+    /// state executor; `Some(h)` permits execution only when
+    /// `block_height >= h`. Because it enables real block-ordered execution, it
+    /// is deliberately NOT part of the reject-all [`ChainParams::validate`]
+    /// (which only guards subsystems whose typed parameter surface does not yet
+    /// exist — compute-pool / beacon). Enforcement lives in the state executor's
+    /// gate check, mirroring `omninode_sponsored_attestation_enabled_from_height`
+    /// and the other `*_enabled_from_height` activation idioms.
+    ///
+    /// Production-safe default `None`. Activation is a coordinated,
+    /// mixed-version-forbidden validator upgrade: every validator must run the
+    /// identical reviewed binary and observe the same chosen height BEFORE it is
+    /// reached. Never set to `Some(_)` in a committed genesis in this branch.
+    /// `#[serde(default)]` keeps every existing genesis file parse-compatible.
+    #[serde(default)]
+    pub messaging_sponsored_registration_enabled_from_height: Option<u64>,
 }
 
 fn default_inference_verifier_unbonding_period_blocks() -> u64 {
@@ -819,6 +840,10 @@ impl Default for ChainParams {
             // (issue #118 foundation).
             compute_pool_enabled_from_height: None,
             beacon_enabled_from_height: None,
+            // Production-safe default: sponsored public-key registration (issue
+            // #145) unavailable. Activation is a coordinated validator upgrade;
+            // never set in default/mainnet config.
+            messaging_sponsored_registration_enabled_from_height: None,
         }
     }
 }
@@ -1559,6 +1584,102 @@ mod tests {
         let back: ChainParams = serde_json::from_str(&json).unwrap();
         assert_eq!(back.compute_pool_enabled_from_height, None);
         assert_eq!(back.beacon_enabled_from_height, None);
+    }
+
+    // ── Sponsored registration activation gate (issue #145) ──────────────────
+
+    // Default None; a pre-#145 genesis without the key decodes to None; an
+    // explicit height round-trips.
+    #[test]
+    fn sponsored_registration_gate_default_none_absent_and_round_trip() {
+        let p = ChainParams::default();
+        assert_eq!(p.messaging_sponsored_registration_enabled_from_height, None);
+        // Absent from an older genesis → serde default None.
+        let mut value = serde_json::to_value(&p).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("messaging_sponsored_registration_enabled_from_height");
+        let back: ChainParams = serde_json::from_value(value).unwrap();
+        assert_eq!(back.messaging_sponsored_registration_enabled_from_height, None);
+        // Explicit height round-trips.
+        let p2 = ChainParams {
+            messaging_sponsored_registration_enabled_from_height: Some(12_345_678),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&p2).unwrap();
+        let p3: ChainParams = serde_json::from_str(&json).unwrap();
+        assert_eq!(p3.messaging_sponsored_registration_enabled_from_height, Some(12_345_678));
+    }
+
+    // Explicit JSON `null` decodes to None (and the loader accepts it).
+    #[test]
+    fn sponsored_registration_gate_explicit_null_decodes_none() {
+        let mut v = local_genesis_value();
+        v["params"]["messaging_sponsored_registration_enabled_from_height"] =
+            serde_json::Value::Null;
+        let s = serde_json::to_string(&v).unwrap();
+        let g = Genesis::from_json(&s).expect("explicit-null gate must load as None");
+        assert_eq!(g.params.messaging_sponsored_registration_enabled_from_height, None);
+    }
+
+    // CRITICAL: unlike the dormant compute-pool / beacon gates, this is a
+    // fully-implemented ACTIVATION gate — the authoritative loader MUST ACCEPT
+    // `Some(h)` (it is deliberately NOT part of the reject-all `validate()`).
+    #[test]
+    fn sponsored_registration_gate_some_height_accepted_by_loader() {
+        for h in [0u64, 9_000_000u64] {
+            let mut v = local_genesis_value();
+            v["params"]["messaging_sponsored_registration_enabled_from_height"] =
+                serde_json::json!(h);
+            let s = serde_json::to_string(&v).unwrap();
+            let g = Genesis::from_json(&s).unwrap_or_else(|e| {
+                panic!("activation gate Some({h}) must be accepted by the loader, got {e:?}")
+            });
+            assert_eq!(
+                g.params.messaging_sponsored_registration_enabled_from_height,
+                Some(h)
+            );
+        }
+    }
+
+    // Serialization emits the key and round-trips None (a real round-trip, not a
+    // serde-default rescue).
+    #[test]
+    fn sponsored_registration_gate_default_serialization_round_trip() {
+        let p = ChainParams::default();
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(json.contains("messaging_sponsored_registration_enabled_from_height"));
+        let back: ChainParams = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.messaging_sponsored_registration_enabled_from_height, None);
+    }
+
+    // Every committed genesis fixture still loads AND leaves the gate dormant —
+    // no committed genesis activates sponsored registration.
+    #[test]
+    fn committed_genesis_never_activates_sponsored_registration_gate() {
+        for rel in [
+            "/../../genesis/local_genesis.json",
+            "/../../genesis/testnet_genesis.json",
+            "/../../genesis/mainnet_genesis.json",
+            "/../../genesis.json",
+        ] {
+            let path = format!("{}{}", env!("CARGO_MANIFEST_DIR"), rel);
+            let contents = match std::fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(_) => continue, // not every layout ships every fixture
+            };
+            assert!(
+                !contents.contains("messaging_sponsored_registration_enabled_from_height"),
+                "{path}: committed genesis must not carry the sponsored-registration gate"
+            );
+            let g: Genesis =
+                serde_json::from_str(&contents).unwrap_or_else(|e| panic!("{path}: {e:?}"));
+            assert_eq!(
+                g.params.messaging_sponsored_registration_enabled_from_height, None,
+                "{path}: gate must be dormant"
+            );
+        }
     }
 
     // Test 7 — the foundation adds NO activation / RPC / executor / state /

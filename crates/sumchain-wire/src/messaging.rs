@@ -86,6 +86,25 @@ pub enum MessagingOperation {
     SetSponsorshipEnabled = 131,
     /// Fund the registry with Koppa
     FundRegistry = 132,
+
+    /// Sponsored public-key registration (sum-chain issue #145).
+    ///
+    /// A sponsor pays the transaction fee while the *registrant* authorizes the
+    /// registration of their own Ed25519 public key via an inner signature (see
+    /// [`RegisterPublicKeySponsoredV1Data`] and
+    /// [`SPONSORED_REGISTER_V1_TAG`]). Unlike [`Self::RegisterPublicKey`] this
+    /// operation does NOT require the registered key to derive to `tx.from`
+    /// (which is the sponsor); the registrant is bound cryptographically by the
+    /// inner signature instead.
+    ///
+    /// WIRE NOTE: this variant is declared LAST so its **bincode variant index**
+    /// — the on-wire `u32-LE` tag, which is the declaration-order position (18),
+    /// NOT this `#[repr(u8)]` discriminant — is append-only and does not shift
+    /// the existing admin-op indices (13..=17). The `= 13` discriminant is the
+    /// next free NON-admin (`< 128`) value, consumed only by
+    /// [`Self::from_byte`] / [`Self::is_admin`]; the frozen goldens in this
+    /// module lock BOTH the index (18) and the repr (13).
+    RegisterPublicKeySponsoredV1 = 13,
 }
 
 impl MessagingOperation {
@@ -110,6 +129,7 @@ impl MessagingOperation {
             130 => Some(MessagingOperation::SetMinTrustStake),
             131 => Some(MessagingOperation::SetSponsorshipEnabled),
             132 => Some(MessagingOperation::FundRegistry),
+            13 => Some(MessagingOperation::RegisterPublicKeySponsoredV1),
             _ => None,
         }
     }
@@ -479,6 +499,94 @@ pub struct UpdatePublicKeyData {
     pub new_public_key: [u8; 32],
 }
 
+// ============================================================================
+// Sponsored public-key registration (issue #145) — RegisterPublicKeySponsoredV1
+// ============================================================================
+
+/// Canonical ASCII domain-separation tag for the RegisterPublicKeySponsoredV1
+/// inner registrant-signature preimage (sum-chain issue #145).
+///
+/// Exact bytes (38): `SUMCHAIN/SRC-201/REGISTER-SPONSORED/v1`
+///
+/// This is a compile-time constant of FIXED length, so prefixing it to the
+/// fixed-width preimage fields yields an unambiguous byte string. It is a raw
+/// ASCII tag — never JSON, `format!`, a platform string, or a bincode framing.
+/// See [`sponsored_register_v1_signing_preimage`] and the golden tests that pin
+/// its exact bytes and length.
+pub const SPONSORED_REGISTER_V1_TAG: &[u8] = b"SUMCHAIN/SRC-201/REGISTER-SPONSORED/v1";
+
+/// Total length in bytes of the RegisterPublicKeySponsoredV1 signing preimage:
+/// `TAG(38) || chain_id_le(8) || sponsor_address(20) || registrant_public_key(32)`.
+pub const SPONSORED_REGISTER_V1_PREIMAGE_LEN: usize =
+    38 /* SPONSORED_REGISTER_V1_TAG.len() */ + 8 + 20 + 32;
+
+/// Payload for [`MessagingOperation::RegisterPublicKeySponsoredV1`] (issue #145).
+///
+/// Contains ONLY the consensus-required registrant authorization material. The
+/// registrant address is ALWAYS derived from `registrant_public_key` during
+/// execution — never taken from a caller-supplied field. The outer transaction
+/// supplies `chain_id`, `tx.from` (= sponsor address), the sponsor nonce, the
+/// fee, and the sponsor's outer signature.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisterPublicKeySponsoredV1Data {
+    /// The registrant's Ed25519 public key (32 bytes). The registrant address is
+    /// derived from this via `Address::from_public_key`.
+    pub registrant_public_key: [u8; 32],
+    /// The registrant's Ed25519 signature (64 bytes) over
+    /// [`sponsored_register_v1_signing_preimage`]. Verified with strict
+    /// (malleability-rejecting) Ed25519 verification during consensus execution.
+    #[serde(with = "BigArray")]
+    pub registrant_signature: [u8; 64],
+}
+
+impl RegisterPublicKeySponsoredV1Data {
+    /// Encode with the frozen wire config (bincode fixint + little-endian).
+    /// Byte-identical to `bincode::serialize`; paired with [`Self::from_bytes`].
+    pub fn to_bytes(&self) -> Vec<u8> {
+        bincode::serialize(self).expect("RegisterPublicKeySponsoredV1Data serialization is infallible")
+    }
+
+    /// Strict decoder: REJECTS trailing bytes and uses the frozen bincode
+    /// options (fixint, little-endian). Mirrors `TransactionV2::from_bytes`.
+    /// The input must be exactly one serialized value and nothing more; a
+    /// truncated buffer, trailing garbage, or a wrong-width field is rejected.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::Error> {
+        use bincode::Options;
+        bincode::options()
+            .with_fixint_encoding()
+            .with_little_endian()
+            .reject_trailing_bytes()
+            .deserialize(bytes)
+    }
+}
+
+/// Build the exact canonical registrant-signature preimage for
+/// RegisterPublicKeySponsoredV1 (issue #145):
+///
+/// ```text
+/// SPONSORED_REGISTER_V1_TAG || chain_id.to_le_bytes() || sponsor_address[20] || registrant_public_key[32]
+/// ```
+///
+/// Fixed-width and unambiguous. This binding prevents cross-chain replay
+/// (`chain_id`), sponsor substitution (`sponsor_address`), and public-key
+/// substitution (`registrant_public_key`). The result is exactly
+/// [`SPONSORED_REGISTER_V1_PREIMAGE_LEN`] bytes. This crate is deliberately
+/// ed25519-free — the registrant signs this preimage and the signature is
+/// verified strictly above the leaf (in `sumchain-primitives`).
+pub fn sponsored_register_v1_signing_preimage(
+    chain_id: u64,
+    sponsor_address: &Address,
+    registrant_public_key: &[u8; 32],
+) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(SPONSORED_REGISTER_V1_PREIMAGE_LEN);
+    buf.extend_from_slice(SPONSORED_REGISTER_V1_TAG);
+    buf.extend_from_slice(&chain_id.to_le_bytes());
+    buf.extend_from_slice(sponsor_address.as_bytes());
+    buf.extend_from_slice(registrant_public_key);
+    debug_assert_eq!(buf.len(), SPONSORED_REGISTER_V1_PREIMAGE_LEN);
+    buf
+}
+
 /// Registered public key entry
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegisteredPublicKey {
@@ -666,7 +774,133 @@ mod tests {
             MessagingOperation::from_byte(128),
             Some(MessagingOperation::SetDailyQuota)
         );
+        // Issue #145: new sponsored-registration op, repr (from_byte) discriminant 13.
+        assert_eq!(
+            MessagingOperation::from_byte(13),
+            Some(MessagingOperation::RegisterPublicKeySponsoredV1)
+        );
         assert!(MessagingOperation::from_byte(200).is_none());
+        // The new op is a USER op, never admin.
+        assert!(!MessagingOperation::RegisterPublicKeySponsoredV1.is_admin());
+        assert!(!MessagingOperation::RegisterPublicKeySponsoredV1.is_send());
+    }
+
+    /// GOLDEN: `MessagingOperation` is serialized inside `MessagingTxData` as a
+    /// bincode `u32-LE` variant tag == the DECLARATION-ORDER index (NOT the
+    /// `#[repr(u8)]` discriminant). This locks every existing index AND the new
+    /// issue #145 op at index 18. Any drift here is a consensus wire break.
+    #[test]
+    fn messaging_operation_bincode_variant_indices_are_frozen() {
+        let cases: &[(MessagingOperation, u32)] = &[
+            (MessagingOperation::SendMessage, 0),
+            (MessagingOperation::SendMessageDirect, 1),
+            (MessagingOperation::SendMessageWithPayment, 2),
+            (MessagingOperation::ClaimPayment, 3),
+            (MessagingOperation::StakeForTrust, 4),
+            (MessagingOperation::Unstake, 5),
+            (MessagingOperation::SetInboxFilter, 6),
+            (MessagingOperation::AddContact, 7),
+            (MessagingOperation::RemoveContact, 8),
+            (MessagingOperation::BlockSender, 9),
+            (MessagingOperation::ReportSpam, 10),
+            (MessagingOperation::RegisterPublicKey, 11),
+            (MessagingOperation::UpdatePublicKey, 12),
+            (MessagingOperation::SetDailyQuota, 13),
+            (MessagingOperation::SetMaxMessageSize, 14),
+            (MessagingOperation::SetMinTrustStake, 15),
+            (MessagingOperation::SetSponsorshipEnabled, 16),
+            (MessagingOperation::FundRegistry, 17),
+            // Issue #145: append-only, index 18.
+            (MessagingOperation::RegisterPublicKeySponsoredV1, 18),
+        ];
+        for (op, want_index) in cases {
+            let b = bincode::serialize(op).unwrap();
+            assert_eq!(b.len(), 4, "unit variant is a bare u32-LE tag");
+            let tag = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+            assert_eq!(tag, *want_index, "MessagingOperation {op:?} bincode tag drifted");
+        }
+    }
+
+    /// GOLDEN: the new op embedded in `MessagingTxData` encodes the operation as
+    /// u32-LE `18` followed by the length-prefixed `data` vec.
+    #[test]
+    fn messaging_txdata_sponsored_register_tag_is_frozen() {
+        let td = MessagingTxData {
+            operation: MessagingOperation::RegisterPublicKeySponsoredV1,
+            data: vec![],
+        };
+        let b = bincode::serialize(&td).unwrap();
+        assert_eq!(&b[..4], &18u32.to_le_bytes(), "operation tag must be 18");
+        // followed by an 8-byte little-endian length prefix for the empty vec.
+        assert_eq!(&b[4..12], &0u64.to_le_bytes());
+        assert_eq!(b.len(), 12);
+    }
+
+    /// GOLDEN: the domain tag's exact bytes and length.
+    #[test]
+    fn sponsored_register_v1_tag_is_frozen() {
+        assert_eq!(SPONSORED_REGISTER_V1_TAG, b"SUMCHAIN/SRC-201/REGISTER-SPONSORED/v1");
+        assert_eq!(SPONSORED_REGISTER_V1_TAG.len(), 38);
+        assert_eq!(SPONSORED_REGISTER_V1_PREIMAGE_LEN, 38 + 8 + 20 + 32);
+        assert_eq!(SPONSORED_REGISTER_V1_PREIMAGE_LEN, 98);
+    }
+
+    /// GOLDEN: the exact signing preimage bytes for a fixed input vector.
+    #[test]
+    fn sponsored_register_v1_preimage_is_frozen() {
+        let chain_id: u64 = 0x0102_0304_0506_0708;
+        let sponsor = Address::new([0x11; 20]);
+        let registrant_pk = [0x22u8; 32];
+        let pre = sponsored_register_v1_signing_preimage(chain_id, &sponsor, &registrant_pk);
+        assert_eq!(pre.len(), SPONSORED_REGISTER_V1_PREIMAGE_LEN);
+        // TAG || chain_id_le || sponsor(20) || registrant_pk(32)
+        let mut want = Vec::new();
+        want.extend_from_slice(b"SUMCHAIN/SRC-201/REGISTER-SPONSORED/v1");
+        want.extend_from_slice(&[0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01]); // LE
+        want.extend_from_slice(&[0x11; 20]);
+        want.extend_from_slice(&[0x22; 32]);
+        assert_eq!(pre, want);
+        assert_eq!(
+            hex::encode(&pre),
+            "53554d434841494e2f5352432d3230312f52454749535445522d53504f4e534f5245442f76310807060504030201\
+1111111111111111111111111111111111111111\
+2222222222222222222222222222222222222222222222222222222222222222"
+        );
+    }
+
+    /// GOLDEN: exact encoded bytes of a `RegisterPublicKeySponsoredV1Data`.
+    #[test]
+    fn sponsored_register_v1_data_wire_is_frozen() {
+        let d = RegisterPublicKeySponsoredV1Data {
+            registrant_public_key: [0xAA; 32],
+            registrant_signature: [0xBB; 64],
+        };
+        let b = d.to_bytes();
+        // Plain concatenation: 32-byte pubkey then 64-byte signature (no framing).
+        assert_eq!(b.len(), 96);
+        assert_eq!(&b[..32], &[0xAA; 32]);
+        assert_eq!(&b[32..], &[0xBB; 64][..]);
+        // Round-trips through the strict decoder.
+        assert_eq!(RegisterPublicKeySponsoredV1Data::from_bytes(&b).unwrap(), d);
+    }
+
+    /// STRICT DECODE NEGATIVES: trailing bytes, truncation, wrong-width.
+    #[test]
+    fn sponsored_register_v1_data_strict_decode_rejects_bad_input() {
+        let d = RegisterPublicKeySponsoredV1Data {
+            registrant_public_key: [1u8; 32],
+            registrant_signature: [2u8; 64],
+        };
+        let good = d.to_bytes();
+        assert!(RegisterPublicKeySponsoredV1Data::from_bytes(&good).is_ok());
+        // Trailing byte -> rejected.
+        let mut trailing = good.clone();
+        trailing.push(0x00);
+        assert!(RegisterPublicKeySponsoredV1Data::from_bytes(&trailing).is_err());
+        // Truncated (one short) -> rejected.
+        assert!(RegisterPublicKeySponsoredV1Data::from_bytes(&good[..good.len() - 1]).is_err());
+        // Empty -> rejected.
+        assert!(RegisterPublicKeySponsoredV1Data::from_bytes(&[]).is_err());
     }
 
     #[test]

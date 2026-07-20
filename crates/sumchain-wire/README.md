@@ -110,7 +110,19 @@ compatible release.
 
 ## Versioning & breaking-change policy
 
-- Current version: **0.2.2**. The 0.2.1 → 0.2.2 bump is **patch-level**:
+- Current version: **0.3.0**. The 0.2.2 → 0.3.0 bump is a **minor (breaking)**
+  release: it appends a new `MessagingOperation` variant,
+  `RegisterPublicKeySponsoredV1` (sum-chain issue #145), plus its payload
+  (`RegisterPublicKeySponsoredV1Data`), the canonical domain tag
+  (`SPONSORED_REGISTER_V1_TAG`), and the signing-preimage builder. The variant
+  is declared LAST so its bincode variant index — the on-wire `u32-LE` tag,
+  index **18** — is append-only and shifts **no** existing `MessagingOperation`
+  index (0–17 are byte-identical, locked by golden tests); every other encoded
+  byte, hash, and signature is unchanged. Per the exhaustive-enum rule below,
+  appending a variant that expands the set of consensus-valid encodings is
+  breaking (a coordinated wire/protocol change gated by
+  `messaging_sponsored_registration_enabled_from_height`), hence the minor bump.
+- The 0.2.1 → 0.2.2 bump is **patch-level**:
   (a) `Transaction::from_bytes` and `TransactionV2::from_bytes` now reject
   trailing bytes (extending the 0.2.1 `SignedTransaction` hardening;
   `MessageHeader` stays permissive by design), and (b) a single public

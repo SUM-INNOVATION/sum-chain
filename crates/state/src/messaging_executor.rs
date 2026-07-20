@@ -136,6 +136,21 @@ impl MessagingExecutor {
             MessagingOperation::FundRegistry => {
                 self.fund_registry(sender, &data.data, state, &store)
             }
+            // Issue #145: sponsored public-key registration is dispatched by the
+            // state executor's gated, sponsor-pays, per-code path
+            // (`BlockExecutor::execute_sponsored_register_v1`) BEFORE this generic
+            // entrypoint is reached — it needs the activation gate, the chain id
+            // for the inner preimage, and explicit sponsor fee/nonce handling that
+            // this `MessagingExecutionResult`-shaped API cannot express. Reaching
+            // this arm means a caller bypassed the dispatch interception; fail
+            // closed rather than execute an ungated / miscoded registration.
+            MessagingOperation::RegisterPublicKeySponsoredV1 => {
+                Ok(MessagingExecutionResult::failure(
+                    "RegisterPublicKeySponsoredV1 must be executed via the state \
+                     executor's gated sponsored-registration path, not the generic \
+                     messaging executor",
+                ))
+            }
         }
     }
 

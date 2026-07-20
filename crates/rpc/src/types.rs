@@ -628,6 +628,14 @@ pub struct ChainParamsInfo {
     /// Verifier bonding + slashing gate (issue #78) — a separate post-supply
     /// extension of base settlement.
     pub inference_verifier_bonding_enabled_from_height: Option<u64>,
+    /// SRC-201 sponsored public-key registration gate (issue #145). `null` /
+    /// `None` means `RegisterPublicKeySponsoredV1` is unavailable and rejects
+    /// (`Failed(390)`); `Some(h)` means it executes from block height `h`.
+    /// Operators read this to verify every validator observes the same
+    /// activation configuration before the chosen height (mixed-version
+    /// activation is forbidden). Additive field — appended after
+    /// `inference_verifier_bonding_enabled_from_height`.
+    pub messaging_sponsored_registration_enabled_from_height: Option<u64>,
     /// Configured governance parameters, when present in the deployed genesis.
     pub governance: Option<GovernanceParamsInfo>,
 }
@@ -1507,24 +1515,49 @@ pub struct SubmitSponsoredMessageRequest {
     pub koppa_amount: Option<String>,
 }
 
-/// Sponsored registration request - allows users to register their public key
-/// without needing any Koppa balance (gas sponsored by the chain)
+/// Sponsored registration request — lets a user register their messaging public
+/// key without holding any Koppa (the relayer/sponsor pays the fee). The server
+/// builds, signs, and submits a `RegisterPublicKeySponsoredV1` transaction; it
+/// performs NO consensus-state write itself (issue #145).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SponsoredRegistrationRequest {
-    /// Ed25519 public key (hex, 32 bytes)
+    /// Registrant Ed25519 public key (hex, 32 bytes). The registrant address is
+    /// derived from this on-chain; never supplied separately.
     pub public_key: String,
-    /// Signature of "SUMCHAIN_REGISTER:{public_key_hex}" using the private key (hex)
+    /// Registrant Ed25519 signature (hex, 64 bytes) over the exact canonical
+    /// RegisterPublicKeySponsoredV1 preimage (issue #145):
+    ///
+    /// ```text
+    /// "SUMCHAIN/SRC-201/REGISTER-SPONSORED/v1" || chain_id.to_le_bytes()
+    ///     || sponsor_address[20] || registrant_public_key[32]
+    /// ```
+    ///
+    /// `chain_id` comes from `chain_getChainId`; `sponsor_address` is the
+    /// relayer's published sponsor address (the tx `from`). This REPLACES the
+    /// legacy `"SUMCHAIN_REGISTER:{public_key_hex}"` string convention, which is
+    /// no longer accepted and is never interpreted as a V1 authorization.
     pub signature: String,
 }
 
-/// Sponsored registration response
+/// Sponsored registration response.
+///
+/// A truthful *submission* result — NOT a confirmation of registration. The
+/// server has built, signed, and broadcast a `RegisterPublicKeySponsoredV1`
+/// transaction; registration takes effect only once that tx is included and
+/// executed by consensus. Clients should poll `account_getPublicKey` (or the
+/// tx receipt) to confirm.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SponsoredRegistrationResponse {
-    /// The derived address from the public key
+    /// The registrant address derived from `public_key`.
     pub address: String,
-    /// Whether registration was successful
+    /// `true` iff the transaction was constructed, signed, admitted to the
+    /// mempool, AND broadcast. This means *submitted/pending*, never
+    /// *already registered*.
     pub success: bool,
-    /// Error message if failed
+    /// Canonical transaction hash (hex) when `success == true`; `None` on a
+    /// preflight/build/submit failure.
+    pub tx_hash: Option<String>,
+    /// Error message when `success == false`.
     pub error: Option<String>,
 }
 
