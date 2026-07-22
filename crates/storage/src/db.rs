@@ -538,6 +538,23 @@ pub mod cf {
     /// Per-(proposal, holder_commitment) equity-vote dedup (#92). Key:
     /// `proposal_id (32) || holder_commitment (32)` (64). Value: `&[]` (presence).
     pub const GOV_EQUITY_USED_COMMITMENTS: &str = "gov_equity_used_commitments";
+
+    // C1 dormant compute-pool state (issue #130). DORMANT: no gate, no wire
+    // ordinal, no consensus commitment. These rows never participate in a state
+    // root; they exist only for local persistence + reorg revert, exactly like
+    // `state_diffs` / `contract_state_diffs`. Records are `bincode` fixint-LE
+    // values (the storage convention), decoded canonically with
+    // `.reject_trailing_bytes()` (the `sumchain-wire` strict-decode precedent).
+    /// Shared C1 state keyspace with a 1-byte domain/type prefix per record
+    /// category (job/unit/offer/active-offer-index/reservation/leaf/assignment/
+    /// entitlement) followed by fixed-width big-endian composite bodies, so no
+    /// category can alias another and keys within a category are unambiguous.
+    /// See `sumchain_state::compute_pool_store`.
+    pub const COMPUTE_POOL_STATE: &str = "compute_pool_state";
+    /// Per-block C1 revert journal (`ComputePoolStateDiff`), keyed by
+    /// `height.to_be_bytes()`. Mirrors `contract_state_diffs`: each entry is a
+    /// `(key, old, new)` mutation replayed in reverse into one atomic batch.
+    pub const COMPUTE_POOL_STATE_DIFFS: &str = "compute_pool_state_diffs";
 }
 
 /// All column families used by the database
@@ -743,6 +760,9 @@ pub const ALL_CFS: &[&str] = &[
     // Transaction indexing
     cf::TX_BY_SENDER,
     cf::TX_BY_RECIPIENT,
+    // C1 dormant compute-pool state (issue #130)
+    cf::COMPUTE_POOL_STATE,
+    cf::COMPUTE_POOL_STATE_DIFFS,
 ];
 
 /// Database configuration
