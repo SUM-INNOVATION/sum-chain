@@ -8,7 +8,13 @@ description = "Deterministic extraction + contract test for the immutable materi
 
 # Pinned to the RISC Zero candidate. Verifier-material bytes are READ from these
 # crates at run time; never hardcoded.
+#
+# The canonical manifest encoding / identity / labels come from the SHARED
+# `b0-pre-vmat` leaf (blake3-only) that the reference validator also uses — this
+# crate hand-rolls no wire replica. Tool-only path dependency; adds no candidate
+# or guest edge and does not touch candidates/{sp1,risc0}/Cargo.lock.
 [dependencies]
+b0-pre-vmat = { path = "../../../b0-pre-vmat" }
 risc0-zkvm = "=3.0.5"
 risc0-groth16 = "=3.0.4"
 blake3 = "=1.5.4"

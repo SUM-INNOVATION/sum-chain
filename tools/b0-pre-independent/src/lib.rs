@@ -23,8 +23,10 @@ pub mod tags;
 pub mod transformer;
 pub mod workload;
 
-/// The frozen B0-PRE protocol revision this crate cross-checks.
-pub const SPEC_VERSION: &str = "b0-pre/v10";
+/// The frozen B0-PRE protocol revision this crate cross-checks. Bumped v10 -> v11
+/// with the canonical Stage-1 preregistration hardening (#123); kept in lockstep
+/// with `b0-pre-validator`'s `SPEC_VERSION`.
+pub const SPEC_VERSION: &str = "b0-pre/v11";
 
 /// `BLAKE3(prefix ‖ data)`.
 pub fn prefixed(prefix: &[u8], data: &[u8]) -> [u8; 32] {

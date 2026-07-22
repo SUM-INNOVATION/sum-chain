@@ -14,5 +14,7 @@ pub mod manifest;
 pub mod object;
 pub mod provenance;
 pub mod result_set;
+pub mod stage1_bundle;
+pub mod stage6;
 pub mod statement;
 pub mod verifier_material;

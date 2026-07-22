@@ -21,6 +21,9 @@ output produced outside this contract is non-authoritative and must never enter
   recommended per builder.
 - **Two** clean builds per candidate per architecture, with all content digests
   compared; any mismatch is a hard failure.
+- `b3sum` and `python3` present on the builder (used by `build_container.sh` /
+  `aggregate_stage6_inputs.sh` to hash build evidence and serialize the Stage-6
+  inputs); `build_container.sh` is fail-closed if `b3sum` is missing.
 
 ## 2. Architecture rule (non-negotiable)
 
@@ -30,6 +33,15 @@ Rosetta / buildx cross-platform) results are **ineligible** and must be rejected
 not recorded. arm64-only evidence is incomplete and does not resolve the
 category.
 
+Because no single host satisfies both architectures, the run is split into a
+per-architecture **producer** (`run_authoritative.sh produce-arch <arch>`), an
+independent **import verification** of each returned per-arch bundle
+(`import-verify`), and a cross-architecture **aggregation** (`aggregate`) that
+assembles the full `AUTHORITATIVE_STAGE1` bundle ONLY after BOTH per-arch bundles
+pass — sourcing RISC Zero material from the x86_64 bundle. A per-arch producer emits
+only that arch's evidence; the aarch64 producer never attempts RISC Zero, and an
+aarch64 bundle carrying RISC Zero material is refused on import.
+
 ## 3. What the venue produces (and only the venue)
 
 1. Candidate `Cargo.lock` files, resolved **inside** the pinned container, that
@@ -38,11 +50,40 @@ category.
    `SUMCHAIN/B0PRE/CARGOLOCK/v1`-prefixed BLAKE3 rule, over the
    container-generated lock.
 3. Base + per-architecture builder OCI digests (full sha256 manifest/index
-   digests + media types), each reproduced by two clean builds.
+   digests + media types). The **builder** is reproduced by TWO independent clean
+   builds (independent empty cache scopes), compared by their **OCI manifest
+   content address** (parsed from the exported layout's `index.json`, never a hash
+   of the exported tar). The **base is an immutable INPUT**, not a built image: it
+   is resolved by pull-by-digest (`BASE_DIGEST` is preregistered), so its recorded
+   identity IS the pinned base digest and its provenance is the base-resolution
+   command/output — distinct from, and never a copy of, the builder's two-build
+   evidence.
 4. `VerifierMaterialManifestV1` per candidate, from deterministic extraction of
    the immutable non-code material actually consumed by the pinned terminal
    verifier, proven by an executable contract fixture that is
    `TEST_ONLY / NON_SELECTION / INVALID_FOR_R0 / NOT_AN_OFFICIAL_GUEST`.
+5. Complete tool identities per candidate: for each proof tool, its name, version,
+   immutable artifact identity or URL, checksum algorithm, full checksum, and
+   installation command / entrypoint. A version string alone does not preregister
+   the executable bytes; **authoritative assembly is fail-closed on any absent or
+   synthetic tool-identity value** and never invents an installer URL/checksum.
+
+### Digest representation (one coherent form)
+
+- OCI / base / builder **manifest identities** are full `sha256:<64hex>` digests
+  (matching `lib.sh` `require_full_sha256_digest` and `BASE_DIGEST`); the `sha256:`
+  algorithm prefix is never stripped.
+- Raw BLAKE3 / SHA-256 fields — command-log, raw-output, lock, and material hashes,
+  each named `*_hex` — are bare 64-hex (the algorithm is named in the field).
+
+### Bundle classification (finalization boundary)
+
+Every Stage-1 result bundle carries a REQUIRED classification. Only
+`AUTHORITATIVE_STAGE1` — produced solely from complete real venue inputs — reaches
+`stage1-ingest` and can build a finalizable artifact. `TEST_ONLY` / `NON_SELECTION`
+bundles are validated but REFUSED by authoritative ingest, so no synthetic-input
+bundle ever reaches finalization. There is no shippable command that mints an
+`AUTHORITATIVE_STAGE1` bundle from synthetic data.
 
 ## 4. Completeness / refusal
 

@@ -36,6 +36,17 @@ use crate::tags;
 /// Stable identifier of this normative artifact.
 pub const ARTIFACT_ID: &str = "b0-pre-protocol-v1";
 
+/// The two candidate identities, as their canonical string keys (== the
+/// `Candidate` enum variant names). No other candidate string is accepted in the
+/// Stage-1 coverage checks.
+pub const CANDIDATE_NAMES: [&str; 2] = ["Sp1", "Risc0"];
+/// The two per-architecture container roles: a base runtime image and a builder
+/// image. Both are architecture-specific, enumerated separately.
+pub const CONTAINER_ROLES: [&str; 2] = ["base", "builder"];
+/// The two architectures every candidate/role pair is enumerated over (== the
+/// `Arch` enum variant names).
+pub const ARCH_NAMES: [&str; 2] = ["X86_64", "Aarch64"];
+
 /// Rust toolchain floor for building/running the B0-PRE validator tools.
 pub const VALIDATOR_TOOL_RUST_FLOOR: &str = "1.85.0";
 /// Distinct, separately-frozen Rust toolchain for candidate proving containers.
@@ -329,7 +340,6 @@ pub struct QualificationGates {
     pub max_accepted_proofs_per_block: u32,
     pub reference_cpuset_cores: u32,
     pub reference_memory_bytes: u64,
-    pub verifier_material_bytes: u64,
     pub max_cycles: u64,
     pub validator_eligibility: String,
     pub scope: String,
@@ -436,7 +446,10 @@ pub struct ContainerDigest {
     /// `base` or `builder`.
     pub role: String,
     pub arch: String,
-    pub image_digest_sha256_hex: String,
+    /// The OCI manifest identity as a full `sha256:<64hex>` digest (one coherent
+    /// representation with `lib.sh`/`VENUE.md`/the Dockerfiles/`BASE_DIGEST`); the
+    /// `sha256:` algorithm prefix is never stripped.
+    pub image_digest: String,
     pub domain_ascii: String,
 }
 
@@ -543,7 +556,170 @@ impl B0PreProtocolV1 {
         {
             v.push("local resource budget fraction must be <= 100".into());
         }
+        // Stage-1 coverage / uniqueness / domain checks for any present category.
+        self.pending_input_violations(&mut v);
         v
+    }
+
+    /// Cross-field coverage rules for the Stage-1 `pending_inputs`. A category that
+    /// is absent (not yet resolved) contributes nothing; a category that is present
+    /// must be exactly complete. An empty array (`Some(vec![])`) is therefore never
+    /// finalizable: it fails the exact-count rule here, so `protocol_hash_preimage`
+    /// refuses it.
+    ///
+    /// Enforced when present:
+    ///   * exactly 8 container digests = 2 candidates x 2 roles (base, builder) x
+    ///     2 arches, every `(candidate, role, arch)` tuple exactly once (no
+    ///     missing / duplicate / extra), unknown candidate/role/arch rejected;
+    ///   * exactly 2 dependency lock hashes, one per candidate, unique;
+    ///   * exactly 2 verifier-material manifests, one per candidate, unique,
+    ///     non-zero total_bytes;
+    ///   * every entry carries its exact frozen domain tag and a 64-hex identity.
+    fn pending_input_violations(&self, v: &mut Vec<String>) {
+        let is_hex64 = |s: &str| {
+            s.len() == 64
+                && s.bytes()
+                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        };
+        let container_tag = ascii_of(&tags::CONTAINER_TAG);
+        let lock_tag = ascii_of(&tags::CARGO_LOCK_TAG);
+        let vmat_tag = ascii_of(&tags::VERIFIER_MATERIAL_TAG);
+
+        if let Some(containers) = &self.pending_inputs.candidate_container_digests {
+            // The full 2x2x2 coverage, each tuple required exactly once.
+            let mut required: std::collections::BTreeSet<(&str, &str, &str)> =
+                std::collections::BTreeSet::new();
+            for c in CANDIDATE_NAMES {
+                for role in CONTAINER_ROLES {
+                    for arch in ARCH_NAMES {
+                        required.insert((c, role, arch));
+                    }
+                }
+            }
+            let mut seen: std::collections::BTreeSet<(String, String, String)> =
+                std::collections::BTreeSet::new();
+            for cd in containers {
+                if !CANDIDATE_NAMES.contains(&cd.candidate.as_str()) {
+                    v.push(format!(
+                        "container digest has unknown candidate {:?}",
+                        cd.candidate
+                    ));
+                }
+                if !CONTAINER_ROLES.contains(&cd.role.as_str()) {
+                    v.push(format!("container digest has unknown role {:?}", cd.role));
+                }
+                if !ARCH_NAMES.contains(&cd.arch.as_str()) {
+                    v.push(format!("container digest has unknown arch {:?}", cd.arch));
+                }
+                if cd.domain_ascii != container_tag {
+                    v.push("container digest domain_ascii must be the CONTAINER tag".into());
+                }
+                // OCI manifest identity: full `sha256:<64hex>` (algorithm prefix
+                // required, never bare hex or another algorithm).
+                let oci_ok = cd
+                    .image_digest
+                    .strip_prefix("sha256:")
+                    .is_some_and(is_hex64);
+                if !oci_ok {
+                    v.push(
+                        "container image_digest must be a full sha256:<64hex> OCI manifest identity"
+                            .into(),
+                    );
+                }
+                let key = (cd.candidate.clone(), cd.role.clone(), cd.arch.clone());
+                if !seen.insert(key) {
+                    v.push(format!(
+                        "duplicate container tuple ({}, {}, {})",
+                        cd.candidate, cd.role, cd.arch
+                    ));
+                }
+            }
+            let present: std::collections::BTreeSet<(&str, &str, &str)> = seen
+                .iter()
+                .map(|(c, r, a)| (c.as_str(), r.as_str(), a.as_str()))
+                .collect();
+            for missing in required.difference(&present) {
+                v.push(format!(
+                    "missing container tuple ({}, {}, {})",
+                    missing.0, missing.1, missing.2
+                ));
+            }
+            for extra in present.difference(&required) {
+                v.push(format!(
+                    "extra container tuple ({}, {}, {})",
+                    extra.0, extra.1, extra.2
+                ));
+            }
+            if containers.len() != 8 {
+                v.push(format!(
+                    "exactly 8 container digests required (2 candidates x 2 roles x 2 arches), got {}",
+                    containers.len()
+                ));
+            }
+        }
+
+        if let Some(locks) = &self.pending_inputs.cargo_lock_hashes {
+            let mut names: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+            for lk in locks {
+                if !CANDIDATE_NAMES.contains(&lk.name.as_str()) {
+                    v.push(format!(
+                        "dependency lock has unknown candidate {:?}",
+                        lk.name
+                    ));
+                }
+                if lk.domain_ascii != lock_tag {
+                    v.push("dependency lock domain_ascii must be the CARGO_LOCK tag".into());
+                }
+                if !is_hex64(&lk.blake3_hex) {
+                    v.push("dependency lock blake3_hex must be 64 lowercase hex".into());
+                }
+                if !names.insert(lk.name.as_str()) {
+                    v.push(format!(
+                        "duplicate dependency lock for candidate {}",
+                        lk.name
+                    ));
+                }
+            }
+            if locks.len() != 2 {
+                v.push(format!(
+                    "exactly 2 dependency lock hashes required (one per candidate), got {}",
+                    locks.len()
+                ));
+            }
+        }
+
+        if let Some(manifests) = &self.pending_inputs.verifier_material_manifests {
+            let mut cands: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+            for m in manifests {
+                if !CANDIDATE_NAMES.contains(&m.candidate.as_str()) {
+                    v.push(format!(
+                        "verifier-material manifest has unknown candidate {:?}",
+                        m.candidate
+                    ));
+                }
+                if m.domain_ascii != vmat_tag {
+                    v.push("verifier-material manifest domain_ascii must be the VMAT tag".into());
+                }
+                if !is_hex64(&m.manifest_hash_hex) {
+                    v.push("verifier-material manifest_hash_hex must be 64 lowercase hex".into());
+                }
+                if m.total_bytes == 0 {
+                    v.push("verifier-material manifest total_bytes must be non-zero".into());
+                }
+                if !cands.insert(m.candidate.as_str()) {
+                    v.push(format!(
+                        "duplicate verifier-material manifest for candidate {}",
+                        m.candidate
+                    ));
+                }
+            }
+            if manifests.len() != 2 {
+                v.push(format!(
+                    "exactly 2 verifier-material manifests required (one per candidate), got {}",
+                    manifests.len()
+                ));
+            }
+        }
     }
 
     fn bounds_official(&self, name: &str) -> u64 {
@@ -791,7 +967,6 @@ impl B0PreProtocolV1 {
                 max_accepted_proofs_per_block: consts::MAX_ACCEPTED_PROOFS_PER_BLOCK as u32,
                 reference_cpuset_cores: consts::VALIDATOR_VERIFY_REFERENCE_CORES,
                 reference_memory_bytes: consts::VALIDATOR_VERIFY_REFERENCE_RAM_BYTES,
-                verifier_material_bytes: crate::harness::VERIFIER_MATERIAL_BYTES,
                 max_cycles: consts::MAX_CYCLES,
                 validator_eligibility: "Validator qualification is performance-based, not \
                         hardware-class-based: no minimum physical cores or RAM, and detected host \
@@ -823,7 +998,12 @@ impl B0PreProtocolV1 {
                      eligibility gate, but provenance must be self-consistent (configured limits \
                      <= detected resources, all nonzero)"
                         .into(),
-                    "verifier-material byte total must equal the canonical manifest total".into(),
+                    "each candidate's result_set.verifier_material_bytes must equal the Sum of \
+                     byte_len over THAT candidate's own preregistered verifier-material manifest, \
+                     checked independently per candidate. There is no cross-candidate \
+                     verifier-material byte constant and no universal maximum: SP1's 292-byte \
+                     Groth16 VK is SP1's value only, never a shared gate."
+                        .into(),
                     "max_cycles is a reported bound; official statements set it to 0".into(),
                 ],
                 qualification_failure_codes: vec![
@@ -1024,42 +1204,68 @@ fn frozen_lifecycle() -> Lifecycle {
 /// preimage / hash path and its golden vectors. The hash it produces is NOT the
 /// real `b0_pre_spec_hash`.
 pub fn test_only_finalizable_artifact() -> B0PreProtocolV1 {
+    use crate::enums::VerifierMaterialRole::{ControlId, ControlRoot, Groth16Vk, VerifierParams};
+    use crate::schema::verifier_material::VerifierMaterialManifestV1;
+
     let h = |b: u8| hex(&[b; 32]);
     let cd = |candidate: &str, role: &str, arch: &str, b: u8| ContainerDigest {
         candidate: candidate.into(),
         role: role.into(),
         arch: arch.into(),
-        image_digest_sha256_hex: h(b),
+        // Full sha256:<64hex> OCI manifest identity (the one coherent representation).
+        image_digest: format!("sha256:{}", h(b)),
         domain_ascii: ascii_of(&tags::CONTAINER_TAG),
     };
+    let lock = |candidate: &str, b: u8| LockHash {
+        name: candidate.into(),
+        blake3_hex: h(b),
+        domain_ascii: ascii_of(&tags::CARGO_LOCK_TAG),
+    };
+    // Build the two canonical manifests from raw synthetic entries so the ref's
+    // manifest_hash_hex is BLAKE3(VerifierMaterialManifestV1::encode()) and its
+    // total_bytes is that candidate's own Sum(byte_len) — never a shared 292.
+    let sp1_vmm =
+        VerifierMaterialManifestV1::from_canonical(Candidate::Sp1, [(Groth16Vk, 292, [0x71; 32])]);
+    let risc0_vmm = VerifierMaterialManifestV1::from_canonical(
+        Candidate::Risc0,
+        [
+            (Groth16Vk, 256, [0x72; 32]),
+            (ControlRoot, 32, [0x73; 32]),
+            (ControlId, 32, [0x74; 32]),
+            (VerifierParams, 32, [0x75; 32]),
+        ],
+    );
+    let vmat_ref = |m: &VerifierMaterialManifestV1| VerifierMaterialManifestRef {
+        candidate: match m.candidate {
+            Candidate::Sp1 => "Sp1".into(),
+            Candidate::Risc0 => "Risc0".into(),
+        },
+        // TEST_ONLY canonical manifests always encode; a codec error here would be
+        // an invariant break, not a runtime input condition.
+        manifest_hash_hex: hex(&m.identity().expect("canonical TEST_ONLY manifest encodes")),
+        total_bytes: m.verifier_material_bytes().expect("no overflow"),
+        domain_ascii: ascii_of(&tags::VERIFIER_MATERIAL_TAG),
+    };
+
     let mut p = B0PreProtocolV1::frozen();
     p.pending_inputs = PendingInputs {
+        // 8 = 2 candidates x 2 roles (base, builder) x 2 arches; base AND builder
+        // are architecture-specific, enumerated separately.
         candidate_container_digests: Some(vec![
             cd("Sp1", "base", "X86_64", 0x21),
-            cd("Sp1", "builder", "X86_64", 0x22),
-            cd("Sp1", "builder", "Aarch64", 0x23),
-            cd("Risc0", "base", "X86_64", 0x24),
-            cd("Risc0", "builder", "X86_64", 0x25),
-            cd("Risc0", "builder", "Aarch64", 0x26),
+            cd("Sp1", "base", "Aarch64", 0x22),
+            cd("Sp1", "builder", "X86_64", 0x23),
+            cd("Sp1", "builder", "Aarch64", 0x24),
+            cd("Risc0", "base", "X86_64", 0x25),
+            cd("Risc0", "base", "Aarch64", 0x26),
+            cd("Risc0", "builder", "X86_64", 0x27),
+            cd("Risc0", "builder", "Aarch64", 0x28),
         ]),
-        cargo_lock_hashes: Some(vec![
-            LockHash {
-                name: "b0-pre-validator".into(),
-                blake3_hex: h(0x33),
-                domain_ascii: ascii_of(&tags::CARGO_LOCK_TAG),
-            },
-            LockHash {
-                name: "b0-pre-independent".into(),
-                blake3_hex: h(0x34),
-                domain_ascii: ascii_of(&tags::CARGO_LOCK_TAG),
-            },
-        ]),
-        verifier_material_manifests: Some(vec![VerifierMaterialManifestRef {
-            candidate: "Risc0".into(),
-            manifest_hash_hex: h(0x55),
-            total_bytes: 292,
-            domain_ascii: ascii_of(&tags::VERIFIER_MATERIAL_TAG),
-        }]),
+        // one in-container dependency lock per candidate.
+        cargo_lock_hashes: Some(vec![lock("Sp1", 0x33), lock("Risc0", 0x34)]),
+        // one verifier-material manifest per candidate; SP1's total is 292, RISC
+        // Zero's is its own four-role Sum (352), so RISC Zero never carries 292.
+        verifier_material_manifests: Some(vec![vmat_ref(&sp1_vmm), vmat_ref(&risc0_vmm)]),
     };
     p.finalization.state = "finalizable".into();
     p.finalization.blocked_on = Vec::new();

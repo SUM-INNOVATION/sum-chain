@@ -1,6 +1,6 @@
 {
   "artifact_id": "b0-pre-protocol-v1",
-  "spec_version": "b0-pre/v10",
+  "spec_version": "b0-pre/v11",
   "finalization": {
     "state": "not_finalizable",
     "blocked_on": [
@@ -773,7 +773,6 @@
     "max_accepted_proofs_per_block": 4,
     "reference_cpuset_cores": 2,
     "reference_memory_bytes": 4294967296,
-    "verifier_material_bytes": 292,
     "max_cycles": 0,
     "validator_eligibility": "Validator qualification is performance-based, not hardware-class-based: no minimum physical cores or RAM, and detected host hardware is never an eligibility gate. A node of any CPU/RAM configuration may participate; reference_cpuset_cores / reference_memory_bytes are only the controlled candidate-comparison envelope, not a deployment or consensus hardware minimum. Operators remain responsible for network liveness under their workload; a machine that cannot keep the verification pace has an operational capacity condition, not a proof-system disqualification or consensus invalidity.",
     "scope": "Chain-side proof verification under a controlled reference envelope: the verification run is pinned to exactly reference_cpuset_cores cores and reference_memory_bytes of memory (2 cores / 4 GiB). Detected host hardware need only be sufficient to establish those limits and is never gated. This is a candidate-comparison envelope, not a validator hardware minimum.",
@@ -781,7 +780,7 @@
       "host_verify_ns p99 (nearest-rank, host_setup_ns excluded) must be <= verify_p99_gate_ns on the worst architecture",
       "aggregate_verify_ns_per_block = worst_arch_p99_verify_ns * max_accepted_proofs_per_block (checked; overflow disqualifies) must be <= aggregate_verify_budget_ns_per_block; evaluated INDEPENDENTLY of the per-proof p99 gate (their product equalling the budget is a coincidence)",
       "the verification run must be configured to exactly reference_cpuset_cores cores and reference_memory_bytes memory; detected host hardware is not an eligibility gate, but provenance must be self-consistent (configured limits <= detected resources, all nonzero)",
-      "verifier-material byte total must equal the canonical manifest total",
+      "each candidate's result_set.verifier_material_bytes must equal the Sum of byte_len over THAT candidate's own preregistered verifier-material manifest, checked independently per candidate. There is no cross-candidate verifier-material byte constant and no universal maximum: SP1's 292-byte Groth16 VK is SP1's value only, never a shared gate.",
       "max_cycles is a reported bound; official statements set it to 0"
     ],
     "qualification_failure_codes": [

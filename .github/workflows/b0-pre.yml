@@ -1,16 +1,17 @@
 name: B0-PRE tools
 
 # Clean-checkout CI for the workspace-excluded B0-PRE tool crates
-# (tools/b0-pre-validator, tools/b0-pre-independent) and the committed
-# docs/b0-pre normative artifact + fixtures. The main "Rust CI" workflow builds
-# the sum-chain workspace, which excludes tools/, so these crates need their own
-# gate. This workflow deliberately does NOT download SP1 / RISC Zero toolchains
-# or build candidate containers; final b0_pre_spec_hash finalization stays
-# blocked until candidate-produced fields exist.
+# (tools/b0-pre-vmat, tools/b0-pre-validator, tools/b0-pre-independent) and the
+# committed docs/b0-pre normative artifact + fixtures. The main "Rust CI" workflow
+# builds the sum-chain workspace, which excludes tools/, so these crates need
+# their own gate. This workflow deliberately does NOT download SP1 / RISC Zero
+# toolchains or build candidate containers; final b0_pre_spec_hash finalization
+# stays blocked until candidate-produced fields exist.
 
 on:
   pull_request:
     paths:
+      - "tools/b0-pre-vmat/**"
       - "tools/b0-pre-validator/**"
       - "tools/b0-pre-independent/**"
       - "docs/b0-pre/**"
@@ -19,6 +20,7 @@ on:
   push:
     branches: [main]
     paths:
+      - "tools/b0-pre-vmat/**"
       - "tools/b0-pre-validator/**"
       - "tools/b0-pre-independent/**"
       - "docs/b0-pre/**"
@@ -34,6 +36,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  VMAT: tools/b0-pre-vmat
   VAL: tools/b0-pre-validator
   IND: tools/b0-pre-independent
 
@@ -61,12 +64,33 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
+            ${{ env.VMAT }}
             ${{ env.VAL }}
             ${{ env.IND }}
 
       # --- Isolation / dependency boundaries ---------------------------------
       - name: Workspace exclusion + no production dependency
         run: bash "$VAL/scripts/check_no_prod_dep.sh"
+
+      # --- Shared canonical primitive as an independent CI authority ----------
+      # b0-pre-vmat is the SOLE canonical verifier-material encoding + identity +
+      # stamp-policy implementation (a blake3-only leaf the validator AND the venue
+      # extractors call). It gets its own locked test / clippy / fmt gate so a
+      # change under tools/b0-pre-vmat/** is verified on its own, not only
+      # transitively through the validator.
+      - name: b0-pre-vmat locked tests
+        run: cargo test --locked --manifest-path "$VMAT/Cargo.toml"
+
+      - name: b0-pre-vmat clippy -D warnings (all targets)
+        run: cargo clippy --locked --manifest-path "$VMAT/Cargo.toml" --all-targets -- -D warnings
+
+      - name: b0-pre-vmat format check
+        run: cargo fmt --manifest-path "$VMAT/Cargo.toml" --check
+
+      - name: b0-pre-vmat committed lockfile unchanged
+        run: |
+          cargo build --locked --manifest-path "$VMAT/Cargo.toml" --all-targets
+          git diff --exit-code -- "$VMAT/Cargo.lock"
 
       - name: Lockfile pins + MSRV / no-network-stack boundary
         run: bash "$VAL/scripts/verify_locks.sh"
@@ -132,6 +156,7 @@ jobs:
           cargo run --locked --manifest-path "$VAL/Cargo.toml" --example emit_protocol
           cargo run --locked --manifest-path "$VAL/Cargo.toml" --example emit_protocol_schema
           cargo run --locked --manifest-path "$VAL/Cargo.toml" --example emit_protocol_hash_golden
+          cargo run --locked --manifest-path "$VAL/Cargo.toml" --example emit_stage1_bundle_schema
           git diff --exit-code -- docs/b0-pre/protocol
 
       - name: Fixture identities

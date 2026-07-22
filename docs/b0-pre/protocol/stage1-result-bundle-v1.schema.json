@@ -1,0 +1,360 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Stage1ResultBundleV1",
+  "type": "object",
+  "required": [
+    "all_reproducible",
+    "bundle_kind",
+    "candidate_container_digests",
+    "cargo_lock_hashes",
+    "classification",
+    "native_build_provenance",
+    "reproducibility",
+    "schema_version",
+    "tool_identities",
+    "verifier_material_manifests"
+  ],
+  "properties": {
+    "all_reproducible": {
+      "description": "True only when every category is two-build reproducible; a bundle with this false is refused (partial insertion is never allowed).",
+      "type": "boolean"
+    },
+    "bundle_kind": {
+      "type": "string"
+    },
+    "candidate_container_digests": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ContainerDigestEntry"
+      }
+    },
+    "cargo_lock_hashes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/LockHashEntry"
+      }
+    },
+    "classification": {
+      "description": "REQUIRED classification. Only `AUTHORITATIVE_STAGE1` can build a finalizable artifact; `TEST_ONLY` / `NON_SELECTION` are rejected by authoritative ingest.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/BundleClassification"
+        }
+      ]
+    },
+    "native_build_provenance": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/NativeBuildProvenance"
+      }
+    },
+    "reproducibility": {
+      "$ref": "#/definitions/ReproducibilityEvidence"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "tool_identities": {
+      "description": "Exact Rust / SP1 / RISC Zero tool identities, one entry per candidate, cross-checked against the frozen pins. In the authoritative venue path this is read from real toolchain evidence; if absent the run fails closed.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ToolIdentityEntry"
+      }
+    },
+    "verifier_material_manifests": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/VerifierMaterialManifestEntry"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "BundleClassification": {
+      "description": "The Stage-1 bundle classification, bound into the schema and REQUIRED. Only `AUTHORITATIVE_STAGE1` may reach `stage1-ingest` / `build_finalizable_artifact`; `TEST_ONLY` and `NON_SELECTION` are rejected there (they carry synthetic tool identities and never resolve the real Stage-1 categories). There is no shippable command that mints an `AUTHORITATIVE_STAGE1` bundle from synthetic data.",
+      "type": "string",
+      "enum": [
+        "AUTHORITATIVE_STAGE1",
+        "TEST_ONLY",
+        "NON_SELECTION"
+      ]
+    },
+    "ContainerDigestEntry": {
+      "type": "object",
+      "required": [
+        "arch",
+        "base_image_digest",
+        "base_image_ref",
+        "build_command_log_blake3_hex",
+        "builder_oci_digest",
+        "builder_oci_ref",
+        "candidate",
+        "domain_ascii",
+        "image_digest",
+        "image_digest_build1",
+        "image_digest_build2",
+        "raw_build_output_blake3_hex",
+        "role",
+        "source_commit_hex"
+      ],
+      "properties": {
+        "arch": {
+          "type": "string"
+        },
+        "base_image_digest": {
+          "type": "string"
+        },
+        "base_image_ref": {
+          "description": "The base image (OCI ref + its pinned `sha256:<64hex>` digest). For a `base` entry this IS the entry's own immutable-input identity.",
+          "type": "string"
+        },
+        "build_command_log_blake3_hex": {
+          "description": "BLAKE3 of the command log and of the relevant raw output, so the evidence carries HOW the identity was produced. For a `builder` entry this is the two-clean-build command/output; for a `base` entry it is the GENUINE pull-by-digest base-resolution command/output — never a copy of the builder's build evidence.",
+          "type": "string"
+        },
+        "builder_oci_digest": {
+          "type": "string"
+        },
+        "builder_oci_ref": {
+          "description": "The builder OCI image identity (ref + its `sha256:<64hex>` manifest digest, parsed from the exported OCI layout). For a `builder` entry this IS the entry's own built-image identity.",
+          "type": "string"
+        },
+        "candidate": {
+          "type": "string"
+        },
+        "domain_ascii": {
+          "type": "string"
+        },
+        "image_digest": {
+          "description": "The agreed immutable OCI manifest identity, as a FULL `sha256:<64hex>` digest (matching `lib.sh` `require_full_sha256_digest`, `VENUE.md`, the Dockerfiles, and `BASE_DIGEST`). It is NOT trusted on its own: validation requires it to equal both paired build digests below AND, per role, to equal `base_image_digest` (base = the pinned pull-by-digest identity) or `builder_oci_digest` (builder = the built image). The `sha256:` prefix carries the algorithm identity and is never stripped, and it is the REAL OCI manifest content address (parsed from the exported layout's `index.json`), never a hash of the exported tar serialization.",
+          "type": "string"
+        },
+        "image_digest_build1": {
+          "description": "The two build digests, each a full `sha256:<64hex>`. For a `builder` entry these are two INDEPENDENT clean-OCI builds (independent empty cache scopes); `two_builds_match` is DERIVED by comparing them (`build1 == build2`), never a supplied boolean, and a divergence fails closed. For a `base` entry they are the pinned base digest resolved by pull-by-digest (an immutable input is not re-built, so both equal `base_image_digest`).",
+          "type": "string"
+        },
+        "image_digest_build2": {
+          "type": "string"
+        },
+        "raw_build_output_blake3_hex": {
+          "type": "string"
+        },
+        "role": {
+          "description": "`base` or `builder`. The two roles carry DIFFERENT kinds of evidence (Blocker 6): a `base` entry is an IMMUTABLE INPUT resolved by pull-by-digest, while a `builder` entry is the two-clean-build image. Validation binds each role's identity to its own source so builder evidence can never be relabelled as base evidence.",
+          "type": "string"
+        },
+        "source_commit_hex": {
+          "description": "The clean source commit the build was produced from (git object id, hex).",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "LockHashEntry": {
+      "type": "object",
+      "required": [
+        "blake3_hex",
+        "candidate",
+        "domain_ascii"
+      ],
+      "properties": {
+        "blake3_hex": {
+          "type": "string"
+        },
+        "candidate": {
+          "type": "string"
+        },
+        "domain_ascii": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "NativeBuildProvenance": {
+      "type": "object",
+      "required": [
+        "arch",
+        "candidate",
+        "host_arch",
+        "native_arch",
+        "two_build_reproducible"
+      ],
+      "properties": {
+        "arch": {
+          "type": "string"
+        },
+        "candidate": {
+          "type": "string"
+        },
+        "host_arch": {
+          "description": "The architecture of the host the build actually ran on. `native_arch` is DERIVED from `host_arch == arch`; a build whose host does not match the target arch is a cross-compile and is refused.",
+          "type": "string"
+        },
+        "native_arch": {
+          "description": "Asserted native flag; validation requires it to equal the DERIVED `host_arch == arch`, so a mislabelled cross-compile cannot claim native.",
+          "type": "boolean"
+        },
+        "two_build_reproducible": {
+          "description": "Asserted two-build reproducibility; validation requires it to equal the value DERIVED from the paired container-digest comparison for this `(candidate, arch)`, so a supplied boolean can never override the digests.",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ReproducibilityEvidence": {
+      "type": "object",
+      "required": [
+        "all_container_digests_two_build_reproducible",
+        "in_container_lock_resolution",
+        "verifier_material_reproduced"
+      ],
+      "properties": {
+        "all_container_digests_two_build_reproducible": {
+          "type": "boolean"
+        },
+        "in_container_lock_resolution": {
+          "type": "boolean"
+        },
+        "verifier_material_reproduced": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ToolIdentityEntry": {
+      "description": "Exact tool identities for one candidate: the container Rust toolchain plus the pinned proof-stack tool versions, cross-checked against the frozen pins.",
+      "type": "object",
+      "required": [
+        "candidate",
+        "proof_tools",
+        "rust_version"
+      ],
+      "properties": {
+        "candidate": {
+          "type": "string"
+        },
+        "proof_tools": {
+          "description": "The proof-stack tool versions this candidate pins (name → version).",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ToolVersion"
+          }
+        },
+        "rust_version": {
+          "description": "The candidate-container Rust toolchain (e.g. `1.88.0`).",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ToolVersion": {
+      "description": "The complete preregistered identity of one proof tool. A version string alone does NOT preregister the executable bytes, so every field below is required and, in authoritative mode, must be present and non-synthetic (fail-closed).",
+      "type": "object",
+      "required": [
+        "artifact_identity",
+        "checksum_algorithm",
+        "checksum_hex",
+        "install_entrypoint",
+        "name",
+        "version"
+      ],
+      "properties": {
+        "artifact_identity": {
+          "description": "The immutable artifact identity or URL that pins the executable bytes (e.g. a release URL, an OCI/content digest reference, or a crate content id).",
+          "type": "string"
+        },
+        "checksum_algorithm": {
+          "description": "The checksum algorithm covering `checksum_hex` (`sha256`/`sha384`/`sha512`/ `blake3`); the hex length must match the named algorithm.",
+          "type": "string"
+        },
+        "checksum_hex": {
+          "description": "The FULL checksum of the artifact bytes, lowercase hex.",
+          "type": "string"
+        },
+        "install_entrypoint": {
+          "description": "The installation command / entrypoint identity that installs or invokes the tool (e.g. the pinned installer command or cargo dependency spec).",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "VerifierMaterialEntryJson": {
+      "type": "object",
+      "required": [
+        "blake3_hex",
+        "byte_len",
+        "label",
+        "role"
+      ],
+      "properties": {
+        "blake3_hex": {
+          "type": "string"
+        },
+        "byte_len": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "label": {
+          "description": "The single canonical label, which must equal the role name.",
+          "type": "string"
+        },
+        "role": {
+          "description": "Canonical lowercase role name (`groth16_vk`, `control_root`, ...).",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "VerifierMaterialManifestEntry": {
+      "type": "object",
+      "required": [
+        "candidate",
+        "domain_ascii",
+        "entries",
+        "manifest_hash_hex",
+        "stamp",
+        "total_bytes"
+      ],
+      "properties": {
+        "candidate": {
+          "type": "string"
+        },
+        "domain_ascii": {
+          "type": "string"
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/VerifierMaterialEntryJson"
+          }
+        },
+        "manifest_hash_hex": {
+          "description": "Must equal `BLAKE3(VerifierMaterialManifestV1::encode())` of the canonical manifest reconstructed from `entries`. No ad-hoc extractor hash is valid.",
+          "type": "string"
+        },
+        "stamp": {
+          "description": "The extractor's self-labelling stamps. The real fixture-acceptance path requires ALL of `b0_pre_vmat::REQUIRED_STAMPS` (TEST_ONLY, NON_SELECTION, INVALID_FOR_R0, NOT_AN_OFFICIAL_GUEST) BEFORE this manifest is inserted; a three-stamp manifest is rejected. This is the same gate the extractor contract tests apply, sourced from the shared crate — not a second copy.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "total_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,14 @@
+[package]
+name = "b0-pre-vmat"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "B0-PRE (#123) shared canonical verifier-material primitive: the ONE implementation of role-label construction, entry sorting, canonical VerifierMaterialManifestV1 encoding, total-byte computation, and manifest identity. Depended on by the reference validator AND the venue extractors so neither hand-rolls a replica. Tool-only, workspace-excluded; sole dependency blake3; no production, guest, or candidate edge."
+
+# Deliberately a pure leaf: blake3 only. This is the SMALLEST safe bridge — the
+# validator would otherwise drag serde/schemars/jsonschema/num-* into the tiny
+# extractor crates (option B), and no published leaf exposes this format (option
+# C: VerifierMaterialManifestV1 lives only in b0-pre-validator).
+[dependencies]
+blake3 = "=1.5.4"

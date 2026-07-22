@@ -6,9 +6,38 @@ publish = false
 license = "MIT OR Apache-2.0"
 description = "B0-PRE (#123) reference validator: byte-exact encoders, strict/canonical JSON, exp-table certification, deterministic official-workload fixtures, and the b0_pre_spec_hash preimage assembler. Workspace-excluded; no production dependency edges."
 
+# The authoritative Stage-1 insertion gate: strict decode + full validation +
+# all-or-nothing durable write. Wired into run_authoritative.sh (no loose host-side
+# JSON parsing). Hyphenated name for shell invocation.
+[[bin]]
+name = "stage1-ingest"
+path = "src/bin/stage1_ingest.rs"
+
+# The production Stage-6 bundle producer: consumes the real venue outputs (paired
+# OCI build digests, in-container Cargo.lock, verifier-material extractor JSON,
+# native provenance, tool identities) and emits the strict result bundle that
+# stage1-ingest re-validates. Fails closed without real tool-identity evidence.
+[[bin]]
+name = "stage6-assemble"
+path = "src/bin/stage6_assemble.rs"
+
+# The real venue verification commands the shell orchestration calls (OCI manifest
+# identity, in-container lock provenance, tool checksum/binary binding, Stage-2 graph
+# audit). Each subcommand is the SAME logic that is unit-tested off-venue and fails
+# closed on absent/malformed inputs; it never fabricates.
+[[bin]]
+name = "venue-verify"
+path = "src/bin/venue_verify.rs"
+
 # Pinned per B0-PRE plan §1. serde_json carries `arbitrary_precision` so integers
 # above u64::MAX survive the Value stage without being coerced to f64.
 [dependencies]
+# The shared canonical verifier-material primitive (role labels, sort, encode,
+# identity, totals, stamps). Tool-only path dependency, blake3-only leaf; this is
+# the ONE canonical implementation the extractors also call — no replica. Adds a
+# single local `[[package]]` entry to Cargo.lock and no new external crates
+# (blake3 is already resolved).
+b0-pre-vmat = { path = "../b0-pre-vmat" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "=1.0.149", features = ["arbitrary_precision"] }
 blake3 = "=1.5.4"

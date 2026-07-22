@@ -254,7 +254,7 @@
         "arch",
         "candidate",
         "domain_ascii",
-        "image_digest_sha256_hex",
+        "image_digest",
         "role"
       ],
       "properties": {
@@ -267,7 +267,8 @@
         "domain_ascii": {
           "type": "string"
         },
-        "image_digest_sha256_hex": {
+        "image_digest": {
+          "description": "The OCI manifest identity as a full `sha256:<64hex>` digest (one coherent representation with `lib.sh`/`VENUE.md`/the Dockerfiles/`BASE_DIGEST`); the `sha256:` algorithm prefix is never stripped.",
           "type": "string"
         },
         "role": {
@@ -928,7 +929,6 @@
         "reference_memory_bytes",
         "scope",
         "validator_eligibility",
-        "verifier_material_bytes",
         "verify_p99_gate_ns"
       ],
       "properties": {
@@ -974,11 +974,6 @@
         },
         "validator_eligibility": {
           "type": "string"
-        },
-        "verifier_material_bytes": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0.0
         },
         "verify_p99_gate_ns": {
           "type": "integer",

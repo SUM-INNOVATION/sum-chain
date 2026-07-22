@@ -18,6 +18,46 @@ fn fixture() -> Option<PathBuf> {
     std::env::var_os("RISC0_G16_FIXTURE").map(PathBuf::from)
 }
 
+/// The required-stamp policy is the SHARED one (`b0_pre_vmat::REQUIRED_STAMPS`),
+/// the same gate the validator's real fixture-acceptance path applies — no local
+/// copy. A fixture missing any one stamp (in particular `NOT_AN_OFFICIAL_GUEST`)
+/// is rejected.
+fn stamp_strings(stamp: &[serde_json::Value]) -> Vec<String> {
+    stamp
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect()
+}
+
+fn all_required_stamps_present(stamp: &[serde_json::Value]) -> bool {
+    b0_pre_vmat::all_required_stamps_present(&stamp_strings(stamp))
+}
+
+#[test]
+fn three_stamp_fixture_is_rejected_four_stamp_accepted() {
+    let three = serde_json::json!(["TEST_ONLY", "NON_SELECTION", "INVALID_FOR_R0"]);
+    assert!(!all_required_stamps_present(three.as_array().unwrap()));
+
+    let four = serde_json::json!(b0_pre_vmat::REQUIRED_STAMPS);
+    assert!(all_required_stamps_present(four.as_array().unwrap()));
+}
+
+#[test]
+fn each_single_stamp_omission_is_rejected() {
+    for omit in b0_pre_vmat::REQUIRED_STAMPS {
+        let kept: Vec<&str> = b0_pre_vmat::REQUIRED_STAMPS
+            .iter()
+            .copied()
+            .filter(|s| *s != omit)
+            .collect();
+        let arr = serde_json::json!(kept);
+        assert!(
+            !all_required_stamps_present(arr.as_array().unwrap()),
+            "omitting {omit} must be rejected"
+        );
+    }
+}
+
 #[test]
 fn groth16_receipt_verifies_and_rejects_every_component_mutation() {
     let Some(path) = fixture() else {
@@ -30,14 +70,10 @@ fn groth16_receipt_verifies_and_rejects_every_component_mutation() {
     let f: serde_json::Value = serde_json::from_slice(&raw).expect("parse fixture");
 
     let stamp = f["stamp"].as_array().expect("stamp");
-    for s in [
-        "TEST_ONLY",
-        "NON_SELECTION",
-        "INVALID_FOR_R0",
-        "NOT_AN_OFFICIAL_GUEST",
-    ] {
-        assert!(stamp.iter().any(|v| v == s), "fixture missing stamp {s}");
-    }
+    assert!(
+        all_required_stamps_present(stamp),
+        "fixture missing a required stamp (all four, incl. NOT_AN_OFFICIAL_GUEST, are mandatory)"
+    );
 
     // The venue deserializes the pinned Receipt + image_id from the fixture and
     // runs the assertions below. Kept as an explicit checklist so the venue
