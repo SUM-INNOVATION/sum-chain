@@ -52,7 +52,9 @@ fn read_index(crate_name: &str) -> Option<Vec<IdxVer>> {
     };
     let home = std::env::var("CARGO_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cargo"));
+        .unwrap_or_else(|_| {
+            PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cargo")
+        });
     let idx_root = home.join("registry").join("index");
     let entries = std::fs::read_dir(&idx_root).ok()?;
     for e in entries.flatten() {
@@ -80,16 +82,17 @@ fn parse_rows(bytes: &[u8]) -> Vec<IdxVer> {
             continue;
         };
         let yanked = v.get("yanked").and_then(|x| x.as_bool()).unwrap_or(false);
-        let spin_req = v
-            .get("deps")
-            .and_then(|d| d.as_array())
-            .and_then(|deps| {
-                deps.iter()
-                    .find(|d| d.get("name").and_then(|n| n.as_str()) == Some("spin"))
-                    .and_then(|d| d.get("req").and_then(|r| r.as_str()))
-                    .map(|s| s.to_string())
-            });
-        out.push(IdxVer { vers: vers.to_string(), yanked, spin_req });
+        let spin_req = v.get("deps").and_then(|d| d.as_array()).and_then(|deps| {
+            deps.iter()
+                .find(|d| d.get("name").and_then(|n| n.as_str()) == Some("spin"))
+                .and_then(|d| d.get("req").and_then(|r| r.as_str()))
+                .map(|s| s.to_string())
+        });
+        out.push(IdxVer {
+            vers: vers.to_string(),
+            yanked,
+            spin_req,
+        });
     }
     out
 }
@@ -220,7 +223,8 @@ fn fresh_generate_lockfile_selects_a_non_yanked_spin() {
         }
     }
 
-    let spin_ver = spin_ver.expect("the probe forces the spin edge; spin must be in the fresh lock");
+    let spin_ver =
+        spin_ver.expect("the probe forces the spin edge; spin must be in the fresh lock");
     // The decisive regression guard: a FRESH lock must never pin the yanked 0.9.8, and
     // must land on a version that satisfies ^0.9.8 (i.e., the non-yanked 0.9.9+).
     assert_ne!(

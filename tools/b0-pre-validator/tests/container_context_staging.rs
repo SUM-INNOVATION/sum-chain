@@ -42,13 +42,12 @@ fn cargo_bin() -> String {
 fn unique_dir(tag: &str) -> PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
-    let d = std::env::temp_dir().join(format!(
+    std::env::temp_dir().join(format!(
         "b0pre-ctxstage-{}-{}-{}",
         tag,
         std::process::id(),
         SEQ.fetch_add(1, Ordering::Relaxed)
-    ));
-    d
+    ))
 }
 
 /// Stage `candidate` into a fresh temp dir via the real staging script (no Docker).
@@ -60,7 +59,10 @@ fn stage(candidate: &str) -> PathBuf {
         .arg(&out)
         .status()
         .unwrap_or_else(|e| panic!("spawn stage_context.sh: {e}"));
-    assert!(status.success(), "stage_context.sh {candidate} must succeed");
+    assert!(
+        status.success(),
+        "stage_context.sh {candidate} must succeed"
+    );
     out
 }
 
@@ -72,7 +74,10 @@ fn read(path: &Path) -> String {
 fn path_dep(manifest: &str, name: &str) -> String {
     for line in manifest.lines() {
         let t = line.trim();
-        if t.starts_with(name) && t[name.len()..].trim_start().starts_with('=') && t.contains("path") {
+        if t.starts_with(name)
+            && t[name.len()..].trim_start().starts_with('=')
+            && t.contains("path")
+        {
             let after = t.split("path").nth(1).unwrap();
             let after = after.split('=').nth(1).unwrap();
             let start = after.find('"').expect("path opening quote");
@@ -151,7 +156,14 @@ fn section_body(manifest: &str, header: &str) -> String {
 
 fn cargo_metadata_no_deps_offline_ok(manifest: &Path) -> bool {
     Command::new(cargo_bin())
-        .args(["metadata", "--no-deps", "--offline", "--format-version", "1", "--manifest-path"])
+        .args([
+            "metadata",
+            "--no-deps",
+            "--offline",
+            "--format-version",
+            "1",
+            "--manifest-path",
+        ])
         .arg(manifest)
         .output()
         .map(|o| o.status.success())
@@ -193,7 +205,8 @@ fn staging_reproduces_only_the_guest_graph_and_no_unrelated_crate() {
         // ISOLATION: the OTHER candidate never enters this context.
         let other = if cand == "sp1" { "risc0" } else { "sp1" };
         assert!(
-            !s.join(format!("tools/b0-pre-candidates/candidates/{other}")).exists(),
+            !s.join(format!("tools/b0-pre-candidates/candidates/{other}"))
+                .exists(),
             "the other candidate ({other}) must not be staged for {cand}"
         );
         // HOST-LOCK REFUSAL: no Cargo.lock anywhere in the staged context.
@@ -276,7 +289,10 @@ fn curated_root_provides_every_workspace_key_sumchain_wire_inherits() {
 
     // The curated root is a workspace that excludes tools (so guest-core + the candidate
     // workspace under tools/ stay standalone) and carries ONLY sumchain-wire as a member.
-    assert!(root.contains("[workspace]"), "curated root must be a workspace");
+    assert!(
+        root.contains("[workspace]"),
+        "curated root must be a workspace"
+    );
     assert!(
         root.contains("members = [\"crates/sumchain-wire\"]"),
         "curated root must list only sumchain-wire as a member"
@@ -333,13 +349,15 @@ fn cargo_resolves_the_staged_workspace_inheritance_offline() {
             "staged sumchain-wire must resolve its curated-workspace inheritance offline ({cand})"
         );
         assert!(
-            cargo_metadata_no_deps_offline_ok(&s.join("tools/b0-pre-candidates/guest-core/Cargo.toml")),
+            cargo_metadata_no_deps_offline_ok(
+                &s.join("tools/b0-pre-candidates/guest-core/Cargo.toml")
+            ),
             "staged guest-core must load offline as a standalone package ({cand})"
         );
         assert!(
-            cargo_metadata_no_deps_offline_ok(
-                &s.join(format!("tools/b0-pre-candidates/candidates/{cand}/Cargo.toml"))
-            ),
+            cargo_metadata_no_deps_offline_ok(&s.join(format!(
+                "tools/b0-pre-candidates/candidates/{cand}/Cargo.toml"
+            ))),
             "staged candidate workspace must load offline ({cand})"
         );
         std::fs::remove_dir_all(&s).ok();
