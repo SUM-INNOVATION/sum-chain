@@ -6,7 +6,8 @@ verifier material exists for the SP1 candidate.
 - Direct pins (exact): `sp1-sdk = 6.3.1`, `sp1-zkvm = 6.3.1`, `sp1-build = 6.3.1`,
   `sp1-verifier = 6.3.1`.
 - Authoritative lock: **absent** — to be generated inside the container venue
-  (native Linux, Rust 1.88.0) per [`../../VENUE.md`](../../VENUE.md).
+  (native Linux, Rust 1.88.0) per
+  [`docs/b0-pre/venue/VENUE.md`](../../../../docs/b0-pre/venue/VENUE.md).
 - `candidate_dep_lock_hash`: **not computed** (must not be computed off-venue).
 - Any `Cargo.lock` present in this directory is an error and must be deleted; it
   was not produced by the authoritative venue.

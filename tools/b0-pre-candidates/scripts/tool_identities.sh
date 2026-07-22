@@ -36,7 +36,7 @@ out="${1:-}"
 [ -n "$out" ] || die "output directory argument required"
 mkdir -p "$out"
 
-# Frozen pins (mirror run_authoritative.sh / VENUE.md audit policy; not invented).
+# Frozen pins (mirror run_authoritative.sh / docs/b0-pre/venue/VENUE.md audit policy; not invented).
 RUST=1.88.0; SP1_VER=6.3.1; R0_ZKVM=3.0.5; R0_G16=3.0.4
 SENTINEL=TEST_ONLY_SYNTHETIC
 

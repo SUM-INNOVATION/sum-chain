@@ -992,6 +992,7 @@ pub fn write_test_only_bundle_dir(dir: &Path, arch: &str) -> Result<(), String> 
         };
         let stage2 = serde_json::json!({"candidate":c,"arch":arch,"lock_blake3_hex":lock_hash,
             "container_digest":builder,"source_commit":commit,
+            "command_log_blake3_hex":bh(&format!("stage2cmd-{lc}-{arch}")),
             "audit_tool_identity":"cargo-metadata 1.0 + cargo-audit 0.21",
             "advisory_db_snapshot":"rustsec-db@2026-07-01",
             "allowed_licenses":["MIT","Apache-2.0","MIT OR Apache-2.0"],"nodes":nodes,"advisories":[]});
@@ -1032,6 +1033,7 @@ pub fn write_test_only_bundle_dir(dir: &Path, arch: &str) -> Result<(), String> 
                 "fixture_hashes":[{"label":"terminal-proof","blake3_hex":bh(&format!("fx-{lc}-{arch}")),"byte_len":512}],
                 "verifier_identity":format!("pinned-{lc}-verifier@1"),"mutation_cases":cases,
                 "tool_identity_hex":first_installed,"container_digest":builder,"source_commit":commit,
+                "command_log_blake3_hex":bh(&format!("stage5cmd-{lc}-{arch}")),
                 "overall_pass":true});
             w(&stage5_file(c), &serde_json::to_vec_pretty(&s5).unwrap())?;
         }

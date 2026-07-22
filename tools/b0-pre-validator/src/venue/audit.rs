@@ -400,6 +400,10 @@ pub struct Stage2AuditRecord {
     /// Bound to the builder-image `sha256:<64hex>` digest the graph was resolved in.
     pub container_digest: String,
     pub source_commit: String,
+    /// Bound to the exact in-container commands that produced the graph + audit
+    /// (bare 64-hex BLAKE3 of the command log). A record whose graph was produced by
+    /// a different command sequence than the one hashed here is not this evidence.
+    pub command_log_blake3_hex: String,
     /// The exact audit-tool identity (e.g. `cargo-metadata 1.x + cargo-audit 0.y`).
     pub audit_tool_identity: String,
     /// The advisory-DB snapshot the scan ran against (git rev / date).
@@ -429,6 +433,8 @@ pub enum Stage2RecordError {
     },
     /// The required-crate coverage failed (empty/incomplete graph).
     Coverage(GraphCoverageError),
+    /// Raw `cargo metadata` / `cargo audit` output could not be parsed.
+    Parse(String),
 }
 
 impl std::fmt::Display for Stage2RecordError {
@@ -453,6 +459,9 @@ impl std::fmt::Display for Stage2RecordError {
             }
             Stage2RecordError::Coverage(e) => {
                 write!(f, "Stage-2 required-crate coverage failed: {e}")
+            }
+            Stage2RecordError::Parse(e) => {
+                write!(f, "Stage-2 raw-output parse failed: {e}")
             }
         }
     }
@@ -497,6 +506,9 @@ impl Stage2AuditRecord {
         if self.source_commit.trim().is_empty() {
             return Err(Stage2RecordError::Missing("source_commit"));
         }
+        if !is_hex64(&self.command_log_blake3_hex) {
+            return Err(Stage2RecordError::BadHash("command_log_blake3_hex"));
+        }
         if self.audit_tool_identity.trim().is_empty() {
             return Err(Stage2RecordError::Missing("audit_tool_identity"));
         }
@@ -515,6 +527,135 @@ impl Stage2AuditRecord {
             });
         }
         Ok(report)
+    }
+}
+
+// ---- Raw-command-output → typed, bound Stage-2 evidence ----------------------
+
+/// The binding inputs the venue already holds for the Stage-2 record — everything
+/// except the graph/advisories (parsed here from raw output) and the command-log hash
+/// (computed here from the raw command log, never supplied).
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Stage2BindParams {
+    pub candidate: String,
+    pub arch: String,
+    pub container_digest: String,
+    pub lock_blake3_hex: String,
+    pub source_commit: String,
+    pub audit_tool_identity: String,
+    pub advisory_db_snapshot: String,
+    pub allowed_licenses: Vec<String>,
+}
+
+// Focused views over raw `cargo metadata --format-version 1` / `cargo audit --json`
+// output; the real outputs carry far more fields, all ignored here.
+#[derive(serde::Deserialize)]
+struct RawMetadata {
+    packages: Vec<RawPackage>,
+}
+#[derive(serde::Deserialize)]
+struct RawPackage {
+    name: String,
+    version: String,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    license: Option<String>,
+}
+#[derive(serde::Deserialize)]
+struct RawAudit {
+    vulnerabilities: RawVulns,
+}
+#[derive(serde::Deserialize)]
+struct RawVulns {
+    #[serde(default)]
+    list: Vec<RawVuln>,
+}
+#[derive(serde::Deserialize)]
+struct RawVuln {
+    advisory: RawAdvisory,
+}
+#[derive(serde::Deserialize)]
+struct RawAdvisory {
+    id: String,
+    package: String,
+}
+
+/// Parse the resolved dependency graph from raw `cargo metadata --format-version 1`
+/// output into typed [`CrateNode`]s. `source: null` is a path/workspace crate; a
+/// `registry+` / `git+` source maps to the corresponding [`Source`] (an unrecognized
+/// source is treated as non-registry so the source gate scrutinizes it).
+pub fn parse_cargo_metadata(raw: &str) -> Result<Vec<CrateNode>, String> {
+    let meta: RawMetadata =
+        serde_json::from_str(raw).map_err(|e| format!("cargo metadata parse failed: {e}"))?;
+    Ok(meta
+        .packages
+        .into_iter()
+        .map(|p| {
+            let source = match p.source.as_deref() {
+                None => Source::Path,
+                Some(s) if s.starts_with("registry+") => Source::Registry,
+                Some(s) if s.starts_with("git+") => Source::Git,
+                Some(_) => Source::Git,
+            };
+            CrateNode {
+                name: p.name,
+                version: p.version,
+                source,
+                license: p.license,
+            }
+        })
+        .collect())
+}
+
+/// Parse active security advisories from raw `cargo audit --json` output. Every entry
+/// in `vulnerabilities.list` affects the resolved graph, so it is recorded as an
+/// UNRESOLVED advisory (`resolved: false`) and the audit gate then treats it as fatal.
+pub fn parse_cargo_audit(raw: &str) -> Result<Vec<Advisory>, String> {
+    let audit: RawAudit =
+        serde_json::from_str(raw).map_err(|e| format!("cargo audit parse failed: {e}"))?;
+    Ok(audit
+        .vulnerabilities
+        .list
+        .into_iter()
+        .map(|v| Advisory {
+            crate_name: v.advisory.package,
+            id: v.advisory.id,
+            resolved: false,
+        })
+        .collect())
+}
+
+impl Stage2AuditRecord {
+    /// Build a typed, bound Stage-2 record DIRECTLY from raw in-container command
+    /// output: the graph from `cargo metadata`, the advisories from `cargo audit`, and
+    /// the command-log hash computed HERE from the raw command log (never supplied).
+    /// The result is fully validated (non-fatal audit + required-crate coverage) before
+    /// it is returned, so a fatal graph never becomes a record.
+    pub fn generate(
+        params: &Stage2BindParams,
+        cargo_metadata_raw: &str,
+        cargo_audit_raw: &str,
+        command_log_bytes: &[u8],
+    ) -> Result<Stage2AuditRecord, Stage2RecordError> {
+        let nodes = parse_cargo_metadata(cargo_metadata_raw).map_err(Stage2RecordError::Parse)?;
+        let advisories = parse_cargo_audit(cargo_audit_raw).map_err(Stage2RecordError::Parse)?;
+        let record = Stage2AuditRecord {
+            candidate: params.candidate.clone(),
+            arch: params.arch.clone(),
+            lock_blake3_hex: params.lock_blake3_hex.clone(),
+            container_digest: params.container_digest.clone(),
+            source_commit: params.source_commit.clone(),
+            command_log_blake3_hex: super::to_hex(blake3::hash(command_log_bytes).as_bytes()),
+            audit_tool_identity: params.audit_tool_identity.clone(),
+            advisory_db_snapshot: params.advisory_db_snapshot.clone(),
+            allowed_licenses: params.allowed_licenses.clone(),
+            nodes,
+            advisories,
+        };
+        record.validate()?;
+        Ok(record)
     }
 }
 
@@ -704,6 +845,9 @@ mod tests {
                 super::super::sha256::hex_digest(b"builder-sp1")
             ),
             source_commit: "a".repeat(40),
+            command_log_blake3_hex: super::super::to_hex(
+                blake3::hash(b"sp1-stage2-cmd").as_bytes(),
+            ),
             audit_tool_identity: "cargo-metadata 1.0 + cargo-audit 0.21".into(),
             advisory_db_snapshot: "rustsec-db@2026-07-01".into(),
             allowed_licenses: ["MIT", "Apache-2.0", "MIT OR Apache-2.0"]
@@ -765,5 +909,121 @@ mod tests {
             rec2.validate(),
             Err(Stage2RecordError::Missing("advisory_db_snapshot"))
         ));
+    }
+
+    // ---- raw-output → typed generation ------------------------------------
+
+    fn sp1_bind() -> Stage2BindParams {
+        Stage2BindParams {
+            candidate: "Sp1".into(),
+            arch: "X86_64".into(),
+            container_digest: format!(
+                "sha256:{}",
+                super::super::sha256::hex_digest(b"builder-sp1")
+            ),
+            lock_blake3_hex: super::super::to_hex(blake3::hash(b"sp1-lock").as_bytes()),
+            source_commit: "a".repeat(40),
+            audit_tool_identity: "cargo-metadata 1.0 + cargo-audit 0.21".into(),
+            advisory_db_snapshot: "rustsec-db@2026-07-01".into(),
+            allowed_licenses: ["MIT", "Apache-2.0", "MIT OR Apache-2.0"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        }
+    }
+
+    // Source/license-mapping fixture: a registry pin, a git dep, and a workspace/path
+    // member (source null, license null) — exercises all three `Source` variants.
+    const META_MIXED: &str = r#"{
+      "packages": [
+        {"name":"sp1","version":"6.3.1","source":"registry+https://github.com/rust-lang/crates.io-index","license":"MIT OR Apache-2.0"},
+        {"name":"somegit","version":"0.1.0","source":"git+https://github.com/x/y#abc","license":"MIT"},
+        {"name":"b0-pre-candidate-sp1","version":"0.0.0","source":null,"license":null}
+      ],
+      "workspace_members": [], "resolve": null
+    }"#;
+    // Audit-valid fixture (mirrors the known-good sp1_graph): all registry + licensed.
+    const META_VALID: &str = r#"{
+      "packages": [
+        {"name":"sp1","version":"6.3.1","source":"registry+https://github.com/rust-lang/crates.io-index","license":"MIT OR Apache-2.0"},
+        {"name":"p3-field","version":"0.1.0-alpha.1","source":"registry+https://github.com/rust-lang/crates.io-index","license":"MIT"},
+        {"name":"serde","version":"1.0.200","source":"registry+https://github.com/rust-lang/crates.io-index","license":"MIT OR Apache-2.0"}
+      ], "workspace_members": [], "resolve": null
+    }"#;
+    const NO_VULNS: &str = r#"{"vulnerabilities":{"found":false,"count":0,"list":[]}}"#;
+
+    #[test]
+    fn parse_cargo_metadata_maps_sources_and_licenses() {
+        let nodes = parse_cargo_metadata(META_MIXED).expect("parse");
+        assert_eq!(nodes.len(), 3);
+        let sp1 = nodes.iter().find(|n| n.name == "sp1").unwrap();
+        assert_eq!(sp1.source, Source::Registry);
+        assert_eq!(sp1.license.as_deref(), Some("MIT OR Apache-2.0"));
+        assert_eq!(
+            nodes.iter().find(|n| n.name == "somegit").unwrap().source,
+            Source::Git
+        );
+        // source: null -> Path (workspace/local); license null -> None.
+        let local = nodes
+            .iter()
+            .find(|n| n.name == "b0-pre-candidate-sp1")
+            .unwrap();
+        assert_eq!(local.source, Source::Path);
+        assert!(local.license.is_none());
+    }
+
+    #[test]
+    fn parse_cargo_audit_extracts_active_advisories() {
+        let raw = r#"{"vulnerabilities":{"found":true,"count":1,"list":[
+            {"advisory":{"id":"RUSTSEC-2024-0001","package":"badcrate"}}]}}"#;
+        let advs = parse_cargo_audit(raw).expect("parse");
+        assert_eq!(advs.len(), 1);
+        assert_eq!(advs[0].crate_name, "badcrate");
+        assert_eq!(advs[0].id, "RUSTSEC-2024-0001");
+        assert!(
+            !advs[0].resolved,
+            "a listed advisory affects the graph -> unresolved"
+        );
+        assert!(parse_cargo_audit(NO_VULNS).unwrap().is_empty());
+    }
+
+    #[test]
+    fn stage2_generate_builds_a_valid_bound_record_from_raw_output() {
+        let log = b"docker run ... cargo metadata --locked && cargo audit --json\n";
+        let rec = Stage2AuditRecord::generate(&sp1_bind(), META_VALID, NO_VULNS, log)
+            .expect("valid graph generates a record");
+        assert_eq!(rec.candidate, "Sp1");
+        assert_eq!(rec.nodes.len(), 3);
+        assert!(rec.advisories.is_empty());
+        // the command-log hash is DERIVED here from the raw log, not supplied.
+        assert_eq!(
+            rec.command_log_blake3_hex,
+            super::super::to_hex(blake3::hash(log).as_bytes())
+        );
+        // and it re-validates (the generator never emits a record that fails validation).
+        assert!(rec.validate().is_ok());
+    }
+
+    #[test]
+    fn stage2_generate_rejects_a_fatal_graph() {
+        // sp1 (present at its pin, so coverage passes) carries a disallowed license ->
+        // fatal audit -> no record is emitted.
+        let bad = META_VALID.replacen("MIT OR Apache-2.0", "GPL-3.0-only", 1);
+        let err = Stage2AuditRecord::generate(&sp1_bind(), &bad, NO_VULNS, b"log").unwrap_err();
+        assert!(matches!(err, Stage2RecordError::FatalAudit { .. }));
+        // and a wrong pin is rejected too, at the coverage gate (before the audit).
+        let wrong = META_VALID.replace("\"6.3.1\"", "\"6.3.0\"");
+        assert!(matches!(
+            Stage2AuditRecord::generate(&sp1_bind(), &wrong, NO_VULNS, b"log").unwrap_err(),
+            Stage2RecordError::Coverage(_)
+        ));
+    }
+
+    #[test]
+    fn stage2_generate_rejects_an_unresolved_advisory() {
+        let vuln = r#"{"vulnerabilities":{"found":true,"count":1,"list":[
+            {"advisory":{"id":"RUSTSEC-2024-0002","package":"sp1"}}]}}"#;
+        let err = Stage2AuditRecord::generate(&sp1_bind(), META_VALID, vuln, b"log").unwrap_err();
+        assert!(matches!(err, Stage2RecordError::FatalAudit { .. }));
     }
 }
