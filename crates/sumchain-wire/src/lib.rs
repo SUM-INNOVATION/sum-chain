@@ -34,6 +34,7 @@
 pub mod address;
 pub mod agreement;
 pub mod b0;
+pub mod beacon_wire;
 pub mod docclass;
 pub mod education;
 pub mod employment;
@@ -73,6 +74,13 @@ pub use b0::proof_envelope::{
 };
 pub use b0::statement::R0ComputationStatementV2;
 pub use b0::verifier_material::VerifierMaterialManifestV1;
+
+// BR1 beacon DKG + K-rotate W1b wire carriers (#125). Dormant / pre-ratification;
+// deliberately NOT registered in `TxType`/`TxPayload` (see the module docs).
+pub use beacon_wire::{
+    BeaconWireOp, DkgComplaintV1, DkgDealV1, RegisterBeaconKeyV1, CT_LEN, DEGREE_PLUS_ONE, G1_LEN,
+    POP_LEN, SCALAR_LEN,
+};
 pub use staking::{
     AddStakeData, ClaimDelegationRewardsData, CreateValidatorData, DelegateData, DelegationInfo,
     DoubleSignEvidence, DowntimeEvidence, EvidenceType, SlashingRecord, StakingOperation,
