@@ -6,7 +6,8 @@ verifier material exists for the RISC Zero candidate.
 - Direct pins (exact): `risc0-zkvm = 3.0.5`, `risc0-build = 3.0.5`,
   `risc0-groth16 = 3.0.4`, `risc0-zkvm-platform = 2.2.2`.
 - Authoritative lock: **absent** — to be generated inside the container venue
-  (native Linux **x86_64**, Rust 1.88.0) per [`../../VENUE.md`](../../VENUE.md).
+  (native Linux **x86_64**, Rust 1.88.0) per
+  [`docs/b0-pre/venue/VENUE.md`](../../../../docs/b0-pre/venue/VENUE.md).
 - `candidate_dep_lock_hash`: **not computed** (must not be computed off-venue).
 - Groth16 receipt generation + verifier-material extraction must run **natively
   on x86_64**; emulated results are ineligible.

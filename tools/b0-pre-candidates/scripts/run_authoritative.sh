@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The authoritative orchestration for resolving the three B0-PRE Stage-1 categories,
 # built on the SEALED per-arch evidence bundle (PerArchEvidenceBundleV1). Runs ONLY on
-# proper native Linux venues (per VENUE.md). Fail-closed at every stage; refuses
+# proper native Linux venues (per docs/b0-pre/venue/VENUE.md). Fail-closed at every stage; refuses
 # PARTIAL insertion. Never fabricates, never pushes, never writes the real
 # b0-pre-protocol-v1.hash.
 #
@@ -97,6 +97,42 @@ print(b["builder_oci_digest"])
 PY
 }
 
+# ---- Disk telemetry ---------------------------------------------------------
+# Records free space at start, per-stage free + work-dir usage, the PEAK work-dir usage,
+# and the FINAL retained evidence size into $work/disk-telemetry.tsv. Each large stage is
+# refused BEFORE it starts if its estimated headroom is unavailable (see require_headroom_gib).
+DISK_TELEMETRY=""
+DISK_PEAK_MIB=0
+disk_telemetry_init() {
+  local work="$1"
+  DISK_TELEMETRY="$work/disk-telemetry.tsv"
+  DISK_PEAK_MIB=0
+  {
+    printf 'stage\tfree_gib\twork_used_mib\n'
+    printf 'start\t%s\t0\n' "$(disk_free_gib "$work")"
+  } > "$DISK_TELEMETRY"
+}
+# Record disk state AFTER a stage completes; track the peak work-dir usage.
+disk_stage() {
+  local label="$1" work="$2" free used
+  [ -n "$DISK_TELEMETRY" ] || return 0
+  free="$(disk_free_gib "$work")"
+  used="$(dir_used_mib "$work")"
+  [ "${used:-0}" -gt "$DISK_PEAK_MIB" ] && DISK_PEAK_MIB="$used"
+  printf '%s\t%s\t%s\n' "$label" "$free" "$used" >> "$DISK_TELEMETRY"
+}
+disk_telemetry_final() {
+  local work="$1" evidence="$2" ev_used start_free
+  [ -n "$DISK_TELEMETRY" ] || return 0
+  ev_used="$(dir_used_mib "$evidence")"
+  start_free="$(awk -F'\t' '$1=="start"{print $2}' "$DISK_TELEMETRY")"
+  {
+    printf 'peak_work_used_mib\t%s\n' "$DISK_PEAK_MIB"
+    printf 'final_evidence_used_mib\t%s\n' "$ev_used"
+  } >> "$DISK_TELEMETRY"
+  note "disk telemetry: start_free=${start_free}GiB peak_work=${DISK_PEAK_MIB}MiB final_evidence=${ev_used}MiB (log: $DISK_TELEMETRY)"
+}
+
 # ---- (a) per-architecture producer -> sealed, import-verified evidence bundle ------
 produce_arch() {
   local arch="$1" evidence="$2"
@@ -112,6 +148,7 @@ produce_arch() {
   local work="${evidence%/}.work"
   rm -rf "$work"
   mkdir -p "$evidence" "$work"
+  disk_telemetry_init "$work"
 
   if is_dryrun; then
     note "== DRY-RUN: synthesize a TEST_ONLY per-arch evidence bundle (exact required_files shapes) =="
@@ -130,6 +167,7 @@ produce_arch() {
   vv import-bundle "$evidence" \
     || die "per-arch evidence bundle failed typed import; NOT ready"
 
+  disk_telemetry_final "$work" "$evidence"
   note "per-arch bundle READY at $evidence (arch=$arch): sealed + import-verified. Final insertion requires BOTH arches -> aggregate."
 }
 
@@ -150,10 +188,13 @@ produce_arch_authoritative() {
   require_no_preexisting_lock "$ROOT/candidates/risc0"
 
   note "== Stage 3: two clean OCI builds per candidate (this arch), compare MANIFEST identities -> work =="
+  require_headroom_gib "$work" 80 "Stage 3 two-clean-builds (both candidates)"
   bash "$HERE/build_container.sh" sp1   "$arch" "$work"
   bash "$HERE/build_container.sh" risc0 "$arch" "$work"
+  disk_stage "stage3-clean-builds" "$work"
 
   note "== Stage 1: resolve candidate locks INSIDE the pinned builder image -> work =="
+  require_headroom_gib "$work" 10 "Stage 1 in-container lock resolution"
   local sp1_builder risc0_builder
   sp1_builder="$(builder_digest_of sp1 "$arch" "$work")"
   risc0_builder="$(builder_digest_of risc0 "$arch" "$work")"
@@ -162,11 +203,14 @@ produce_arch_authoritative() {
   SCHEMA_ARCH="$schema_arch" BUILDER_IMAGE_REF="oci:local/b0pre-risc0-$arch" \
     BUILDER_IMAGE_DIGEST="$risc0_builder" bash "$HERE/resolve_lock.sh" risc0 "$work"
 
-  note "== Stage 2: PER-CANDIDATE container-resolved graph audit -> work =="
-  produce_stage2 Sp1   "$work"
-  produce_stage2 Risc0 "$work"
+  note "== Stage 2: PER-CANDIDATE in-container cargo metadata + audit -> typed record -> work =="
+  require_headroom_gib "$work" 5 "Stage 2 in-container cargo metadata + audit"
+  produce_stage2 Sp1   "$arch" "$schema_arch" "$work"
+  produce_stage2 Risc0 "$arch" "$schema_arch" "$work"
+  disk_stage "stage2-audit" "$work"
 
   note "== Stage 4-5: extract verifier material INSIDE the pinned builder -> work =="
+  require_headroom_gib "$work" 10 "Stage 4-5 verifier-material extraction"
   cargo run --quiet --locked --manifest-path "$ROOT/harness/sp1-verifier-material/Cargo.toml" \
     > "$work/sp1-verifier-material.json" || die "SP1 verifier-material extraction failed closed"
   if [ "$arch" = "x86_64" ]; then
@@ -175,48 +219,132 @@ produce_arch_authoritative() {
       > "$work/risc0-verifier-material.json" \
       || die "RISC Zero verifier-material extraction failed closed (native x86_64 only)"
   else
-    note "arch=$arch: skipping RISC Zero extraction (x86_64-only per VENUE.md §2)"
+    note "arch=$arch: skipping RISC Zero extraction (x86_64-only per docs/b0-pre/venue/VENUE.md §2)"
   fi
+
+  disk_stage "stage4-verifier-material" "$work"
 
   note "== Stage 5b: real tool identities (download->verify->install->verify->bind) -> work =="
   bash "$HERE/tool_identities.sh" "$work"
 
-  note "== Stage 5c: per-candidate proof-verification (mutation) results -> work =="
-  produce_stage5 Sp1 "$work"
+  note "== Stage 5c: per-candidate genuine verifier fixture + mutation execution -> typed record -> work =="
+  require_headroom_gib "$work" 10 "Stage 5 verifier fixture + mutation execution"
+  produce_stage5 Sp1 "$arch" "$schema_arch" "$work"
   if [ "$arch" = "x86_64" ]; then
-    produce_stage5 Risc0 "$work"
+    produce_stage5 Risc0 "$arch" "$schema_arch" "$work"
   fi
+  disk_stage "stage5-fixtures" "$work"
 
   note "== ASSEMBLE the clean evidence dir under EXACT required_files() names (no scratch is sealed) =="
   assemble_evidence "$arch" "$work" "$evidence"
 }
 
-# Per-candidate Stage-2 graph audit. The venue supplies the in-container resolved graph,
-# advisory report, and license allow-list per candidate; venue-verify emits the typed,
-# candidate-scoped record and EXITS NON-ZERO on any fatal finding.
+# The canonical B0-PRE license allow-list (docs/b0-pre/venue/VENUE.md §5). A resolved crate whose license
+# is not one of these is a FATAL Stage-2 finding held for review — never silently
+# accepted, and never operator-widened at run time.
+STAGE2_ALLOWED_LICENSES='["MIT","Apache-2.0","MIT OR Apache-2.0","Apache-2.0 OR MIT","BSD-2-Clause","BSD-3-Clause","ISC","Unicode-DFS-2016","Apache-2.0 WITH LLVM-exception","MPL-2.0","Zlib","CC0-1.0","Unlicense"]'
+
+# Real per-candidate Stage-2 GENERATION. Runs `cargo metadata` + `cargo audit` INSIDE the
+# pinned builder container, captures the RAW output + the exact command log + the
+# in-container tool identities, and has venue-verify TYPE, AUDIT, and BIND the record
+# directly from that raw output (bound to candidate/arch/container-digest/lock-hash/
+# source-commit/commands). No operator-authored graph/advisory JSON is accepted; a fatal
+# finding (wrong pin, bad source, advisory, disallowed license) exits non-zero.
 produce_stage2() {
-  local cand="$1" work="$2"
-  local UC; UC="$(printf '%s' "$cand" | tr '[:lower:]' '[:upper:]')"
-  local gv="STAGE2_${UC}_GRAPH_JSON" av="STAGE2_${UC}_ADVISORIES_JSON" lv="STAGE2_${UC}_LICENSES_JSON"
-  local g="${!gv:-}" a="${!av:-}" l="${!lv:-}"
-  [ -n "$g" ] || nyr "$gv (in-container resolved graph for $cand) is required"
-  [ -n "$a" ] || nyr "$av (cargo-audit output for $cand) is required"
-  [ -n "$l" ] || nyr "$lv (license allow-list for $cand) is required"
-  vv stage2-audit "$g" "$a" "$l" "$work/$cand.stage2-audit.json" \
-    || die "Stage-2 graph audit is FATAL for $cand; candidate ineligible"
+  local cand="$1" arch="$2" schema_arch="$3" work="$4"
+  local lc; lc="$(printf '%s' "$cand" | tr '[:upper:]' '[:lower:]')"
+  local ref="oci:local/b0pre-$lc-$arch"
+  local builder commit lock_hex
+  builder="$(builder_digest_of "$lc" "$arch" "$work")"
+  commit="$(git -C "$ROOT" rev-parse HEAD)"
+  lock_hex="$(vv lock-hash "$work/$cand.Cargo.lock")" || die "lock-hash failed for $cand"
+
+  local meta="$work/$cand.cargo-metadata.json"
+  local advis="$work/$cand.cargo-audit.json"
+  local cmdlog="$work/$cand.stage2.cmd.log"
+  {
+    printf 'docker run --rm --pull never %s cargo metadata --format-version 1 --locked (cwd=/work/candidates/%s)\n' "$builder" "$lc"
+    printf 'docker run --rm --pull never %s cargo audit --json (cwd=/work/candidates/%s)\n' "$builder" "$lc"
+  } > "$cmdlog"
+  docker run --rm --pull never "$ref" \
+    bash -c "cd /work/candidates/$lc && cargo metadata --format-version 1 --locked" \
+    > "$meta" 2>>"$cmdlog" || die "in-container cargo metadata failed for $cand"
+  # cargo audit EXITS NON-ZERO when it finds advisories; capture its JSON regardless so
+  # the typed audit gate classifies them (fatal). An empty/non-JSON body fails generation.
+  docker run --rm --pull never "$ref" \
+    bash -c "cd /work/candidates/$lc && cargo audit --json" \
+    > "$advis" 2>>"$cmdlog" || true
+  [ -s "$advis" ] || die "in-container cargo audit produced no output for $cand"
+
+  local tool_id db_snap
+  tool_id="$(docker run --rm --pull never "$ref" bash -c 'cargo --version; cargo audit --version' \
+    2>/dev/null | tr '\n' ' ' | sed 's/  */ /g; s/ *$//')"
+  db_snap="$(python3 -c 'import json,sys
+d=json.load(open(sys.argv[1])).get("database",{})
+print(d.get("last-commit") or d.get("last-updated") or "unknown")' "$advis" 2>/dev/null || echo unknown)"
+
+  local params="$work/$cand.stage2-params.json"
+  python3 - "$params" "$cand" "$schema_arch" "$builder" "$lock_hex" "$commit" \
+    "${tool_id:-cargo + cargo-audit (in-container)}" "$db_snap" "$STAGE2_ALLOWED_LICENSES" <<'PY'
+import json, sys
+path, cand, arch, digest, lock, commit, tool, db, licenses = sys.argv[1:10]
+json.dump({
+    "candidate": cand, "arch": arch, "container_digest": digest,
+    "lock_blake3_hex": lock, "source_commit": commit,
+    "audit_tool_identity": tool, "advisory_db_snapshot": db,
+    "allowed_licenses": json.loads(licenses),
+}, open(path, "w"), indent=2)
+PY
+  vv stage2-generate "$params" "$meta" "$advis" "$cmdlog" "$work/$cand.stage2-audit.json" \
+    || die "Stage-2 generation FATAL for $cand (audit finding / parse / binding); candidate ineligible"
 }
 
-# Per-candidate Stage-5 proof-verification + mutation results. The venue supplies the
-# result JSON; venue-verify validates its shape (verify-stage5) before it is recorded.
+# Real per-candidate Stage-5 GENERATION. Runs the pinned terminal verifier on a genuine
+# proof fixture and applies EVERY required mutation INSIDE the pinned builder via the
+# candidate's verifier-fixture harness (docs/b0-pre/venue/VENUE.md §3.4), capturing raw receipts/material +
+# per-mutation rejection outcomes + the command log. venue-verify DERIVES overall_pass
+# from the individual outcomes (a supplied pass is NEVER accepted), hashes the raw
+# artifacts, and binds the record. No operator-authored result JSON is accepted.
 produce_stage5() {
-  local cand="$1" work="$2"
-  local UC; UC="$(printf '%s' "$cand" | tr '[:lower:]' '[:upper:]')"
-  local rv="STAGE5_${UC}_RESULT_JSON" r
-  r="${!rv:-}"
-  [ -n "$r" ] || nyr "$rv (proof-verification/mutation results for $cand) is required"
-  [ -f "$r" ] || die "$rv points at a missing file: $r"
-  vv verify-stage5 "$r" || die "Stage-5 result for $cand failed verification"
-  cp "$r" "$work/$cand.stage5-result.json"
+  local cand="$1" arch="$2" schema_arch="$3" work="$4"
+  local lc; lc="$(printf '%s' "$cand" | tr '[:upper:]' '[:lower:]')"
+  local ref="oci:local/b0pre-$lc-$arch"
+  local builder commit tool_hex
+  builder="$(builder_digest_of "$lc" "$arch" "$work")"
+  commit="$(git -C "$ROOT" rev-parse HEAD)"
+  # bind Stage-5 to the VERIFIED installed-binary identity (the first tool binding).
+  tool_hex="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[0]["installed_binary_sha256_hex"])' \
+    "$work/$cand.tool-binding.json")" || die "cannot read tool identity for $cand"
+
+  local outdir="$work/$cand.stage5"; mkdir -p "$outdir"
+  local cmdlog="$work/$cand.stage5.cmd.log"
+  # The candidate-specific verifier-fixture harness runs the genuine terminal-proof
+  # verification + the five required mutation cases inside the pinned container, writing
+  # raw artifacts to $outdir plus `fixtures.json` ([{label,path}]) and `mutations.json`
+  # ([{name,actual_rejected}]). It is fail-closed if absent — a real verifier run is
+  # required; no synthetic result is ever substituted in authoritative mode.
+  local harness="$HERE/verifier_fixtures.sh"
+  [ -x "$harness" ] \
+    || nyr "verifier fixture harness $harness (genuine per-candidate verifier + mutation runner) is required"
+  VERIFIER_REF="$ref" OUT_DIR="$outdir" CMD_LOG="$cmdlog" SCHEMA_ARCH="$schema_arch" \
+    bash "$harness" "$lc" "$arch" \
+    || die "Stage-5 verifier fixture execution failed for $cand"
+  [ -f "$outdir/fixtures.json" ] && [ -f "$outdir/mutations.json" ] \
+    || die "verifier fixture harness did not emit fixtures.json + mutations.json for $cand"
+
+  local params="$work/$cand.stage5-params.json"
+  python3 - "$params" "$cand" "$schema_arch" "$builder" "$commit" "$tool_hex" "$lc" <<'PY'
+import json, sys
+path, cand, arch, digest, commit, tool, lc = sys.argv[1:8]
+json.dump({
+    "candidate": cand, "arch": arch,
+    "verifier_identity": f"pinned-{lc}-terminal-verifier",
+    "tool_identity_hex": tool, "container_digest": digest, "source_commit": commit,
+}, open(path, "w"), indent=2)
+PY
+  vv stage5-generate "$params" "$outdir/fixtures.json" "$outdir/mutations.json" "$cmdlog" \
+    "$work/$cand.stage5-result.json" \
+    || die "Stage-5 generation failed for $cand (a mutation was not rejected, or binding failed)"
 }
 
 # Copy ONLY the final typed artifacts from the work dir into the clean evidence dir

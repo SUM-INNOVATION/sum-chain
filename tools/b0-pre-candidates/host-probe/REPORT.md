@@ -6,7 +6,7 @@ purpose: early resolution/anomaly signal only; not reproducible, not authoritati
 policy: prerelease findings below are RECORDED for the venue audit, not a verdict. The
         stable-only rule binds the selected candidate release (sp1 6.3.1 / risc0 3.0.5 /
         3.0.4 / 2.2.2); the transitive graph is subject to the security/source/reproducibility
-        gates. See VENUE.md 'Version / audit policy'.
+        gates. See docs/b0-pre/venue/VENUE.md 'Version / audit policy'.
 
 == candidate: sp1 ==
 resolve: OK (host, non-authoritative)
