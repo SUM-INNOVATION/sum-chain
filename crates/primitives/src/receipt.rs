@@ -176,6 +176,16 @@ impl TxStatus {
             TxStatus::Failed(368) => "verifier not active (unbonding or withdrawn)",
             TxStatus::Failed(369) => "verifier unbonding not yet mature",
             TxStatus::Failed(370) => "insufficient verifier bond for claim",
+            // SRC-201 sponsored public-key registration (issue #145). Isolated
+            // 390-block; messaging previously had no per-code receipts (all
+            // failures mapped to the generic `Failed(7)`), so this range is
+            // collision-free. Every 390-block failure is a FREE rejection
+            // (`fee_paid: 0`, no state mutation) at the state executor.
+            TxStatus::Failed(390) => "sponsored messaging registration not enabled at this block height",
+            TxStatus::Failed(391) => "invalid registrant signature for sponsored messaging registration",
+            TxStatus::Failed(392) => "malformed sponsored messaging registration payload",
+            TxStatus::Failed(393) => "invalid registrant public key (not a canonical Ed25519 point)",
+            TxStatus::Failed(394) => "messaging public key already registered for this registrant",
             TxStatus::Failed(_) => "failed",
         }
     }
@@ -257,5 +267,35 @@ mod tests {
         let bytes = receipt.to_bytes();
         let receipt2 = Receipt::from_bytes(&bytes).unwrap();
         assert_eq!(receipt, receipt2);
+    }
+
+    /// Issue #145: the sponsored-registration codes (390–394) each map to a
+    /// SPECIFIC description (not the generic "failed" catch-all) and are
+    /// mutually distinct — a coverage + no-collision check for the new block.
+    #[test]
+    fn sponsored_registration_failure_codes_are_specific_and_distinct() {
+        let mapped: Vec<&'static str> = (390..=394)
+            .map(|c| TxStatus::Failed(c).description())
+            .collect();
+        // Coverage: none falls through to the generic reason.
+        for (i, d) in mapped.iter().enumerate() {
+            assert_ne!(*d, "failed", "code {} must have a specific description", 390 + i);
+        }
+        // Distinctness: all five descriptions differ.
+        for i in 0..mapped.len() {
+            for j in (i + 1)..mapped.len() {
+                assert_ne!(mapped[i], mapped[j], "codes {} and {} collide", 390 + i, 390 + j);
+            }
+        }
+        // Spot-check the exact mapping the executor emits.
+        assert!(TxStatus::Failed(390).description().contains("not enabled"));
+        assert!(TxStatus::Failed(391).description().contains("registrant signature"));
+        assert!(TxStatus::Failed(392).description().contains("malformed"));
+        assert!(TxStatus::Failed(393).description().contains("public key"));
+        assert!(TxStatus::Failed(394).description().contains("already registered"));
+        // A neighbouring unallocated code still returns the generic reason —
+        // proving 390–394 is a bounded island (no accidental over-capture).
+        assert_eq!(TxStatus::Failed(395).description(), "failed");
+        assert_eq!(TxStatus::Failed(389).description(), "failed");
     }
 }

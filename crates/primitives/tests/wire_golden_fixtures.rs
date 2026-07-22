@@ -36,9 +36,10 @@ use sumchain_primitives::{
     MessagingOperation, MessagingTxData, NftOperation, NftTxData, NodeRegistryOperation,
     NodeRegistryOperationV2, NodeRegistryTxData, NodeRegistryV2TxData, NodeRole,
     PolicyAccountOperation, PolicyAccountTxData, PropertyOperation, PropertyTxData,
-    SignedTransaction, StakingOperation, StakingTxData, StorageMetadataOperation,
-    StorageMetadataOperationV2, StorageMetadataTxData, StorageMetadataV2TxData, TaxOperation,
-    TaxTxData, TokenOperation, TokenTxData, Transaction, TransactionV2, TxInner, TxType,
+    RegisterPublicKeySponsoredV1Data, SignedTransaction, StakingOperation, StakingTxData,
+    StorageMetadataOperation, StorageMetadataOperationV2, StorageMetadataTxData,
+    StorageMetadataV2TxData, TaxOperation, TaxTxData, TokenOperation, TokenTxData, Transaction,
+    TransactionV2, TxInner, TxType,
 };
 
 // ── Hardcoded golden constants (captured pre-extraction from main) ───────────
@@ -247,6 +248,47 @@ fn trailing_bytes_are_rejected() {
     assert!(
         SignedTransaction::from_bytes(&trailing).is_err(),
         "trailing bytes must now be rejected"
+    );
+}
+
+// ── Issue #145: RegisterPublicKeySponsoredV1 TxPayload wrapping + outer hash ──
+
+#[test]
+fn sponsored_register_v1_txpayload_bytes_and_outer_hash_are_frozen() {
+    // Fixed, signature-free payload (the 64-byte "signature" is just data here).
+    let data = RegisterPublicKeySponsoredV1Data {
+        registrant_public_key: [0xAA; 32],
+        registrant_signature: [0xBB; 64],
+    };
+    let payload = TxPayload::Messaging(MessagingTxData {
+        operation: MessagingOperation::RegisterPublicKeySponsoredV1,
+        data: bincode::serialize(&data).unwrap(),
+    });
+    let b = bincode::serialize(&payload).unwrap();
+    // TxPayload::Messaging is ordinal 6; MessagingOperation index 18; then an
+    // 8-byte LE length (96) and the 96 payload bytes.
+    let mut want = Vec::new();
+    want.extend_from_slice(&6u32.to_le_bytes());
+    want.extend_from_slice(&18u32.to_le_bytes());
+    want.extend_from_slice(&96u64.to_le_bytes());
+    want.extend_from_slice(&[0xAA; 32]);
+    want.extend_from_slice(&[0xBB; 64]);
+    assert_eq!(
+        b, want,
+        "TxPayload::Messaging(RegisterPublicKeySponsoredV1) bytes drifted"
+    );
+
+    // Deterministic outer signing hash = blake3(bincode(tx)); no signature needed.
+    let tx = TransactionV2 {
+        chain_id: 1,
+        from: Address::new([0x11; 20]),
+        fee: 1000,
+        nonce: 7,
+        payload,
+    };
+    assert_eq!(
+        tx.signing_hash().to_hex(),
+        "0xa78e47f42fee6b50d611d7933340001643b3ee5361340010a4c4fe5b833fcd1c"
     );
 }
 

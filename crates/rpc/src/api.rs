@@ -1052,8 +1052,16 @@ pub trait SumChainApi {
         request: SubmitSponsoredMessageRequest,
     ) -> Result<SendTxResponse, jsonrpsee::types::ErrorObjectOwned>;
 
-    /// Register public key with gas sponsorship (no balance required)
-    /// This allows new users to register for SUMail without needing any Koppa
+    /// Register a messaging public key with gas sponsorship (no balance
+    /// required) — issue #145. This BUILDS, SIGNS, and SUBMITS a
+    /// `RegisterPublicKeySponsoredV1` transaction (the relayer/sponsor pays the
+    /// fee); it performs NO consensus-state write itself. Registration occurs
+    /// only when that transaction is included and executed, so a `success: true`
+    /// response means submitted/pending, NOT already registered. Refuses in
+    /// read-only preflight when the sponsored-registration gate is closed or not
+    /// yet active. The registrant must sign the canonical
+    /// `RegisterPublicKeySponsoredV1` preimage (see
+    /// `SponsoredRegistrationRequest`).
     #[method(name = "messaging_registerSponsored")]
     async fn messaging_register_sponsored(
         &self,

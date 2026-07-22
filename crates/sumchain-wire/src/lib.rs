@@ -81,16 +81,17 @@ pub use staking::{
     ValidatorSigningInfo, ValidatorStatus, WithdrawUnbondedData,
 };
 pub use messaging::{
-    validate_message_format, AttachmentType, BlockSenderData, ClaimPaymentData, ContactData,
-    ContentType, ExternalProtocol, FundRegistryData, InboxFilter, MessageEvent, MessageFlags,
-    MessageHeader, MessagingOperation, MessagingTxData, PendingPayment, QuotaInfo,
-    RegisteredPublicKey, RegisterPublicKeyData, ReportSpamData, SendMessageData,
-    SendMessageWithPaymentData, SetDailyQuotaData, SetInboxFilterData, SetMaxMessageSizeData,
-    SetMinTrustStakeData, SetSponsorshipEnabledData, SpamReport, SponsoredMessage,
-    StakeForTrustData, UnstakeData as MessagingUnstakeData, UpdatePublicKeyData,
-    DEFAULT_DAILY_QUOTA, DEFAULT_MAX_MESSAGE_SIZE, DEFAULT_MIN_TRUST_STAKE,
-    SRC201_HEADER_SIZE, SRC201_KDF_CONTEXT, SRC201_MAGIC, SRC201_NONCE_SIZE, SRC201_TAG_SIZE,
-    SRC201_VERSION,
+    sponsored_register_v1_signing_preimage, validate_message_format, AttachmentType,
+    BlockSenderData, ClaimPaymentData, ContactData, ContentType, ExternalProtocol, FundRegistryData,
+    InboxFilter, MessageEvent, MessageFlags, MessageHeader, MessagingOperation, MessagingTxData,
+    PendingPayment, QuotaInfo, RegisterPublicKeySponsoredV1Data, RegisteredPublicKey,
+    RegisterPublicKeyData, ReportSpamData, SendMessageData, SendMessageWithPaymentData,
+    SetDailyQuotaData, SetInboxFilterData, SetMaxMessageSizeData, SetMinTrustStakeData,
+    SetSponsorshipEnabledData, SpamReport, SponsoredMessage, StakeForTrustData,
+    UnstakeData as MessagingUnstakeData, UpdatePublicKeyData, DEFAULT_DAILY_QUOTA,
+    DEFAULT_MAX_MESSAGE_SIZE, DEFAULT_MIN_TRUST_STAKE, SPONSORED_REGISTER_V1_PREIMAGE_LEN,
+    SPONSORED_REGISTER_V1_TAG, SRC201_HEADER_SIZE, SRC201_KDF_CONTEXT, SRC201_MAGIC,
+    SRC201_NONCE_SIZE, SRC201_TAG_SIZE, SRC201_VERSION,
 };
 pub use transaction::{
     NftOperation, NftTxData, SignedTransaction, TokenOperation, TokenTxData, Transaction,
