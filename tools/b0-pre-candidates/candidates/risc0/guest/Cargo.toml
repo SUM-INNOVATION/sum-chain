@@ -4,8 +4,22 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 license = "MIT OR Apache-2.0"
-description = "RISC Zero 3.0.5 guest-side candidate pin (zkVM platform). Resolved authoritatively only in the container venue."
+description = "Official RISC Zero 3.0.5 guest for the two frozen B0-PRE statements (thin wrapper over the candidate-neutral b0-pre-guest-core). Resolved + built authoritatively only in the native x86_64 container venue."
 
-# Exact direct pin (guest-side platform crate).
+# The zkVM guest binary. Built by `cargo risczero build` with the pinned RISC
+# Zero 3.0.5 toolchain inside the native x86_64 venue container.
+[[bin]]
+name = "b0-pre-candidate-risc0-guest"
+path = "src/main.rs"
+
 [dependencies]
-risc0-zkvm-platform = "=2.2.2"
+# Exact direct pin (RISC Zero 3.0.5 guest env + `entry!`). `default-features =
+# false` drops the host/prover machinery; the guest needs only the zkVM env and
+# `std` (the shared core uses `alloc`/`std` + BLAKE3). The guest-side platform
+# crate (`risc0-zkvm-platform`) is pulled transitively at the matching version.
+risc0-zkvm = { version = "=3.0.5", default-features = false, features = ["std"] }
+# The candidate-neutral official guest semantics (SAME crate the SP1 guest uses).
+# It adopts the frozen `sumchain-wire::b0` wire types directly; the venue build
+# context must therefore include `b0-pre-guest-core` and `sumchain-wire` (see
+# docs/b0-pre/GUEST_SOURCE.md § Venue packaging).
+b0-pre-guest-core = { path = "../../../guest-core" }

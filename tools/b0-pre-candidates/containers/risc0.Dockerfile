@@ -50,6 +50,24 @@ RUN rustc --version | grep -q "${RUST_VERSION}"
 # installer here.
 
 WORKDIR /work
-COPY candidates/risc0 /work/candidates/risc0
-RUN test ! -f /work/candidates/risc0/Cargo.lock \
+# CURATED, MINIMAL build context: the docker context is the reproduced repo-relative
+# layout that scripts/stage_context.sh stages (NOT the raw source tree), carrying ONLY
+# the official guest dependency graph so the path deps + `.workspace` inheritance
+# resolve in-container, and NO unrelated production crate (isolation):
+#   crates/sumchain-wire                         frozen wire leaf (workspace member)
+#   Cargo.toml                                   curated workspace root (only the
+#                                                [workspace]/[workspace.package]/
+#                                                [workspace.dependencies] sections
+#                                                sumchain-wire inherits + that one member)
+#   tools/b0-pre-candidates/guest-core           candidate-neutral shared guest core
+#   tools/b0-pre-candidates/candidates/risc0     this candidate workspace (host + guest)
+#   docs/b0-pre/{fixtures/workload,exp}          frozen guest fixtures
+# The candidate lock is then generated HERE from the COMPLETE staged graph (see
+# resolve_lock.sh / run_authoritative.sh) and becomes the authoritative source of truth.
+# The host must not supply any Cargo.lock (staging strips them; refused again below).
+COPY Cargo.toml /work/Cargo.toml
+COPY crates /work/crates
+COPY docs /work/docs
+COPY tools /work/tools
+RUN test ! -f /work/tools/b0-pre-candidates/candidates/risc0/Cargo.lock \
  || (echo "REFUSED: host-supplied candidates/risc0/Cargo.lock is not allowed" >&2; exit 2)

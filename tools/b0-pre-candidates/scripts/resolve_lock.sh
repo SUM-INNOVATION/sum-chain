@@ -62,13 +62,32 @@ VAL="$ROOT/../b0-pre-validator/Cargo.toml"
 
 # Generate the lock INSIDE the pinned builder image (no network beyond the pinned
 # registry the image is configured for) and export the resulting bytes + the exact
-# command log. The host filesystem contributes no lock.
+# command log. The host filesystem contributes no lock. The builder image bakes in the
+# CURATED staged guest graph (candidate workspace + guest-core + sumchain-wire + curated
+# workspace root, at their reproduced repo-relative paths), so `cargo generate-lockfile`
+# in the candidate workspace resolves the COMPLETE transitive graph — guest + guest-core
+# + sumchain-wire + all their crates.io deps — into ONE lock, not just the candidate
+# crate's direct pins. Before the container context staging existed, the guest path deps
+# were absent and this resolution could not even complete.
+#
+# YANKED-VERSION NOTE (verified). The graph transitively pulls `lazy_static 1.5.0`,
+# whose optional `spin_no_std` feature requires `spin = ^0.9.8`; `spin 0.9.8` is YANKED
+# on crates.io. This does NOT block the fresh lock: `^0.9.8` is also satisfied by the
+# NON-YANKED `spin 0.9.9`, and the v2 resolver refuses a yanked version for a fresh lock
+# and selects `0.9.9`. A fresh `cargo generate-lockfile` over BOTH candidate graphs was
+# confirmed to resolve `spin 0.9.9` from the authoritative registry (sp1: 532 pkgs,
+# risc0: 359 pkgs). No host lock, un-yank, invented version, or vendored source is
+# needed. Regression:
+# tools/b0-pre-validator/tests/candidate_lock_yanked_spin.rs. (An `--offline` resolve on
+# a dev host with only `spin-0.9.8.crate` cached fails spuriously — an offline-mode
+# artifact, not a venue failure; the venue resolves online against the pinned registry.)
+cand_dir="$(incontainer_candidate_dir "$candidate")"
 gen_cmd="$out/$schema_cand.generate-lockfile.cmd"
 gen_log="$out/$schema_cand.generate-lockfile.log"
-printf 'docker run --rm --pull never %s cargo generate-lockfile (candidate=%s)\n' \
-  "$BUILDER_IMAGE_DIGEST" "$candidate" > "$gen_cmd"
+printf 'docker run --rm --pull never %s bash -c "cd %s && cargo generate-lockfile" (candidate=%s; full staged path-dep graph)\n' \
+  "$BUILDER_IMAGE_DIGEST" "$cand_dir" "$candidate" > "$gen_cmd"
 docker run --rm --pull never "$BUILDER_IMAGE_REF" \
-  bash -c "cd /work/candidates/$candidate && cargo generate-lockfile && cat Cargo.lock" \
+  bash -c "cd $cand_dir && cargo generate-lockfile && cat Cargo.lock" \
   > "$dest" 2> "$gen_log" \
   || die "in-container 'cargo generate-lockfile' failed for $candidate (no host lock is substituted)"
 [ -s "$dest" ] || die "in-container lock export for $candidate is empty; refusing"

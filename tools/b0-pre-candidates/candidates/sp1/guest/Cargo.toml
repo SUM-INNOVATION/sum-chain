@@ -4,8 +4,19 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 license = "MIT OR Apache-2.0"
-description = "SP1 6.3.1 guest-side candidate pin (zkVM runtime). Resolved authoritatively only in the container venue."
+description = "Official SP1 6.3.1 guest for the two frozen B0-PRE statements (thin wrapper over the candidate-neutral b0-pre-guest-core). Resolved + built authoritatively only in the container venue."
 
-# Exact direct pin (SP1 6.3.1 guest runtime).
+# The zkVM guest binary. Built by `cargo prove build` with the pinned SP1 6.3.1
+# guest toolchain inside the venue container.
+[[bin]]
+name = "b0-pre-candidate-sp1-guest"
+path = "src/main.rs"
+
 [dependencies]
+# Exact direct pin (SP1 6.3.1 guest runtime). Owns ONLY the zkVM I/O.
 sp1-zkvm = "=6.3.1"
+# The candidate-neutral official guest semantics (SAME crate the RISC Zero guest
+# uses). It adopts the frozen `sumchain-wire::b0` wire types directly; the venue
+# build context must therefore include `b0-pre-guest-core` and `sumchain-wire`
+# (see docs/b0-pre/GUEST_SOURCE.md § Venue packaging).
+b0-pre-guest-core = { path = "../../../guest-core" }

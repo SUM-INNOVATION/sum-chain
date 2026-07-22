@@ -307,8 +307,8 @@ fn no_external_fixture_triggers_generation_which_fails_closed_off_venue() {
     let work = workdir();
     let cmdlog = work.join("cmd.log");
     write(&cmdlog, "");
-    // No external fixture env -> the harness GENERATES one by proving the frozen guest.
-    // Off-venue the guest is a placeholder (NOT_YET_REPRODUCED), so generation fails
+    // No external fixture env -> the harness GENERATES one by proving the OFFICIAL guest.
+    // Off-venue there is no pinned prover toolchain / container, so generation fails
     // closed and NOTHING is written (no synthetic fixture is ever substituted).
     let status = Command::new("bash")
         .arg(harness())
@@ -357,16 +357,17 @@ fn run_prove(
 }
 
 #[test]
-fn generation_fails_closed_while_the_candidate_guest_is_a_placeholder() {
+fn generation_fails_closed_off_venue_even_with_official_guest_source() {
     let work = workdir();
     let cmdlog = work.join("cmd.log");
     write(&cmdlog, "");
     let tb = work.join("tb.json");
     write(&tb, "[]");
     let out = work.join("gen.json");
-    // Full venue-shaped env, but the candidate guest is NOT_YET_REPRODUCED
-    // (placeholder / NOT_AN_OFFICIAL_GUEST): a genuine proof cannot be produced, so
-    // generation refuses — never a canned/synthetic proof.
+    // Full venue-shaped env. The candidate guest now carries OFFICIAL source
+    // (routes through b0_pre_guest_core::run), so the positive official-guest gate
+    // passes — but off-venue there is no pinned prover toolchain / container / native
+    // builder, so generation still fails closed. Never a canned/synthetic proof.
     let (ok, wrote) = run_prove(
         "sp1",
         "x86_64",
@@ -378,10 +379,10 @@ fn generation_fails_closed_while_the_candidate_guest_is_a_placeholder() {
         ],
         &out,
     );
-    assert!(!ok, "generation must fail closed for a placeholder guest");
+    assert!(!ok, "generation must fail closed off-venue");
     assert!(
         !wrote,
-        "no genuine fixture may be written for a placeholder guest"
+        "no genuine fixture may be written when generation fails closed"
     );
     std::fs::remove_dir_all(&work).ok();
 }
@@ -481,8 +482,8 @@ fn generation_command_path_proves_and_never_cans_a_fixture() {
         "generation must build the frozen guest with the pinned prover toolchain"
     );
     assert!(
-        src.contains("NOT_AN_OFFICIAL_GUEST") && src.contains("NOT_YET_REPRODUCED.md"),
-        "generation must stamp non-selection and gate on the frozen-guest marker"
+        src.contains("NOT_AN_OFFICIAL_GUEST") && src.contains("b0_pre_guest_core::run"),
+        "generation must stamp non-selection and gate POSITIVELY on the official guest source"
     );
     // the harness drives generation by default and binds the prover lock into the log.
     let hsrc = std::fs::read_to_string(harness()).unwrap();

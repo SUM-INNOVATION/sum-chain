@@ -262,17 +262,20 @@ produce_stage2() {
   local meta="$work/$cand.cargo-metadata.json"
   local advis="$work/$cand.cargo-audit.json"
   local cmdlog="$work/$cand.stage2.cmd.log"
+  # The candidate workspace lives at its reproduced repo-relative path in the staged
+  # builder image (see stage_context.sh); metadata/audit run there over the full graph.
+  local cdir; cdir="$(incontainer_candidate_dir "$lc")"
   {
-    printf 'docker run --rm --pull never %s cargo metadata --format-version 1 --locked (cwd=/work/candidates/%s)\n' "$builder" "$lc"
-    printf 'docker run --rm --pull never %s cargo audit --json (cwd=/work/candidates/%s)\n' "$builder" "$lc"
+    printf 'docker run --rm --pull never %s cargo metadata --format-version 1 --locked (cwd=%s)\n' "$builder" "$cdir"
+    printf 'docker run --rm --pull never %s cargo audit --json (cwd=%s)\n' "$builder" "$cdir"
   } > "$cmdlog"
   docker run --rm --pull never "$ref" \
-    bash -c "cd /work/candidates/$lc && cargo metadata --format-version 1 --locked" \
+    bash -c "cd $cdir && cargo metadata --format-version 1 --locked" \
     > "$meta" 2>>"$cmdlog" || die "in-container cargo metadata failed for $cand"
   # cargo audit EXITS NON-ZERO when it finds advisories; capture its JSON regardless so
   # the typed audit gate classifies them (fatal). An empty/non-JSON body fails generation.
   docker run --rm --pull never "$ref" \
-    bash -c "cd /work/candidates/$lc && cargo audit --json" \
+    bash -c "cd $cdir && cargo audit --json" \
     > "$advis" 2>>"$cmdlog" || true
   [ -s "$advis" ] || die "in-container cargo audit produced no output for $cand"
 
