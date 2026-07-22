@@ -13,7 +13,7 @@ It contains **no** authoritative outputs. No candidate `Cargo.lock`, no containe
 OCI digest, no verifier-material bytes, and no `candidate_dep_lock_hash` are
 present or may be fabricated here. Every real value is produced only by running
 [`scripts/run_authoritative.sh`](scripts/run_authoritative.sh) on the native
-Linux builders described in [`VENUE.md`](VENUE.md).
+Linux builders described in [`docs/b0-pre/venue/VENUE.md`](../../docs/b0-pre/venue/VENUE.md).
 
 ## Why nothing is built here
 
@@ -21,13 +21,18 @@ This scaffolding was authored on an arm64 macOS workstation that is deliberately
 **not** provisioned as a build venue: docker daemon down, no `buildx`/QEMU (so no
 native x86_64), no Rust 1.88, no SP1/RISC Zero toolchains, and a near-full disk.
 RISC Zero Groth16 receipt generation and verifier-material extraction must run
-**natively on x86_64** — emulated results are ineligible. See `VENUE.md`.
+**natively on x86_64** — emulated results are ineligible. See
+[`docs/b0-pre/venue/VENUE.md`](../../docs/b0-pre/venue/VENUE.md).
 
 ## Layout
 
+The authoritative execution-venue contract and runbook live in the repo docs tree:
+[`docs/b0-pre/venue/VENUE.md`](../../docs/b0-pre/venue/VENUE.md) (prerequisites,
+invariants) and [`docs/b0-pre/venue/RUNBOOK.md`](../../docs/b0-pre/venue/RUNBOOK.md)
+(two-host operator runbook).
+
 | Path | Purpose |
 |------|---------|
-| `VENUE.md` | Authoritative execution-venue contract (prerequisites, invariants). |
 | `candidates/sp1/`, `candidates/risc0/` | Exact-pinned candidate manifests. No lockfiles (the venue generates them). |
 | `containers/` | Dockerfiles requiring immutable base-image digests + Rust 1.88 by exact checksum. |
 | `harness/` | Verifier-material extraction + contract-test crates (build/run only in the venue). |
