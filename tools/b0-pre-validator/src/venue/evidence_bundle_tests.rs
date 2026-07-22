@@ -118,6 +118,7 @@ fn write_bundle_files(dir: &Path, arch: &str) {
             "lock_blake3_hex": lock_hash,
             "container_digest": builder_digest,
             "source_commit": COMMIT,
+            "command_log_blake3_hex": bh(&format!("stage2cmd-{c}-{arch}")),
             "audit_tool_identity": "cargo-metadata 1.0 + cargo-audit 0.21",
             "advisory_db_snapshot": "rustsec-db@2026-07-01",
             "allowed_licenses": ["MIT","Apache-2.0","MIT OR Apache-2.0"],
@@ -165,6 +166,7 @@ fn write_bundle_files(dir: &Path, arch: &str) {
                 "tool_identity_hex": first_installed,
                 "container_digest": builder_digest,
                 "source_commit": COMMIT,
+                "command_log_blake3_hex": bh(&format!("stage5cmd-{lc}-{arch}")),
                 "overall_pass": true,
             });
             write(dir, &stage5_file(c), serde_json::to_vec_pretty(&s5).unwrap().as_slice());

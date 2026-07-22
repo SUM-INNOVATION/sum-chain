@@ -73,6 +73,9 @@ pub struct Stage5Result {
     pub container_digest: String,
     /// The clean source commit (40/64-hex).
     pub source_commit: String,
+    /// Bound to the exact in-container commands that ran the verifier + mutations
+    /// (bare 64-hex BLAKE3 of the command log).
+    pub command_log_blake3_hex: String,
     /// The OVERALL pass. Validation requires it to equal the value DERIVED from the
     /// individual cases (all required present, each rejected); a lying `true` is
     /// refused.
@@ -234,6 +237,9 @@ impl Stage5Result {
         if self.source_commit.trim().is_empty() {
             return Err(Stage5Error::Missing("source_commit"));
         }
+        if !is_hex64(&self.command_log_blake3_hex) {
+            return Err(Stage5Error::BadHash("command_log_blake3_hex"));
+        }
         // container digest must be a full sha256:<64hex>.
         match self.container_digest.strip_prefix("sha256:") {
             Some(hex) if is_hex64(hex) => {}
@@ -274,6 +280,90 @@ impl Stage5Result {
     }
 }
 
+// ---- Raw fixture/mutation execution -> typed, bound Stage-5 evidence ---------
+
+/// Binding inputs the venue holds for the Stage-5 record. The fixture hashes are
+/// computed HERE from raw artifact bytes, the mutation outcomes come from the ACTUAL
+/// verifier runs, `overall_pass` is DERIVED (never supplied), and the command-log hash
+/// is computed here from the raw log.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Stage5BindParams {
+    pub candidate: String,
+    pub arch: String,
+    pub verifier_identity: String,
+    pub tool_identity_hex: String,
+    pub container_digest: String,
+    pub source_commit: String,
+}
+
+/// One raw fixture/receipt/material artifact the verifier consumed: a label and the
+/// path to its bytes (hashed here, not trusted).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Stage5FixtureInput {
+    pub label: String,
+    pub path: String,
+}
+
+/// The observed outcome of ONE mutation case from the actual verifier run.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Stage5MutationOutcome {
+    pub name: String,
+    /// Whether the pinned verifier ACTUALLY rejected the mutated input.
+    pub actual_rejected: bool,
+}
+
+impl Stage5Result {
+    /// Build a typed, bound Stage-5 result from GENUINE execution outcomes: fixture
+    /// hashes computed from the raw artifact bytes, each mutation case carrying the
+    /// ACTUAL observed rejection, `overall_pass` DERIVED from the individual results (a
+    /// supplied pass is never accepted), and the command-log hash computed here. The
+    /// result is fully validated, so it is emitted ONLY when the run genuinely passed
+    /// (every required mutation present and rejected, fixtures well-formed).
+    pub fn generate(
+        params: &Stage5BindParams,
+        fixtures: &[(String, Vec<u8>)],
+        mutations: &[Stage5MutationOutcome],
+        command_log_bytes: &[u8],
+    ) -> Result<Stage5Result, Stage5Error> {
+        let fixture_hashes = fixtures
+            .iter()
+            .map(|(label, bytes)| Stage5FixtureHash {
+                label: label.clone(),
+                blake3_hex: super::to_hex(blake3::hash(bytes).as_bytes()),
+                byte_len: bytes.len() as u64,
+            })
+            .collect();
+        let mutation_cases = mutations
+            .iter()
+            .map(|m| Stage5MutationCase {
+                name: m.name.clone(),
+                expected_rejected: true, // a mutation must be rejected
+                actual_rejected: m.actual_rejected,
+            })
+            .collect();
+        let mut result = Stage5Result {
+            candidate: params.candidate.clone(),
+            arch: params.arch.clone(),
+            fixture_hashes,
+            verifier_identity: params.verifier_identity.clone(),
+            mutation_cases,
+            tool_identity_hex: params.tool_identity_hex.clone(),
+            container_digest: params.container_digest.clone(),
+            source_commit: params.source_commit.clone(),
+            command_log_blake3_hex: super::to_hex(blake3::hash(command_log_bytes).as_bytes()),
+            overall_pass: false,
+        };
+        // DERIVE the overall pass from the individual results; never read a supplied one.
+        result.overall_pass = result.derive_pass().is_ok();
+        // validate() re-derives + requires a genuine pass, so a failing run yields Err.
+        result.validate()?;
+        Ok(result)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,6 +397,7 @@ mod tests {
             tool_identity_hex: h("tool"),
             container_digest: format!("sha256:{}", h("container")),
             source_commit: "a".repeat(40),
+            command_log_blake3_hex: h("stage5-cmd"),
             overall_pass: true,
         }
     }
@@ -408,5 +499,80 @@ mod tests {
             r3.validate(),
             Err(Stage5Error::UnknownCandidate { .. })
         ));
+    }
+
+    // ---- raw execution outcomes → typed, bound generation -----------------
+
+    fn s5_bind() -> Stage5BindParams {
+        Stage5BindParams {
+            candidate: "Sp1".into(),
+            arch: "X86_64".into(),
+            verifier_identity: "pinned-terminal-verifier@1".into(),
+            tool_identity_hex: h("tool"),
+            container_digest: format!("sha256:{}", h("container")),
+            source_commit: "a".repeat(40),
+        }
+    }
+    fn all_rejected() -> Vec<Stage5MutationOutcome> {
+        REQUIRED_MUTATION_CASES
+            .iter()
+            .map(|n| Stage5MutationOutcome {
+                name: (*n).into(),
+                actual_rejected: true,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn stage5_generate_derives_pass_from_genuine_outcomes() {
+        let fixtures = vec![("terminal-proof".to_string(), b"receipt-bytes".to_vec())];
+        let log = b"docker run ... verify + mutate\n".to_vec();
+        let res = Stage5Result::generate(&s5_bind(), &fixtures, &all_rejected(), &log)
+            .expect("a genuine pass generates a result");
+        assert!(res.overall_pass, "overall_pass is DERIVED true");
+        assert_eq!(res.mutation_cases.len(), REQUIRED_MUTATION_CASES.len());
+        assert!(res.mutation_cases.iter().all(|c| c.expected_rejected));
+        // fixture hash + command-log hash are computed HERE from the raw bytes.
+        assert_eq!(
+            res.fixture_hashes[0].blake3_hex,
+            super::super::to_hex(blake3::hash(b"receipt-bytes").as_bytes())
+        );
+        assert_eq!(
+            res.fixture_hashes[0].byte_len,
+            b"receipt-bytes".len() as u64
+        );
+        assert_eq!(
+            res.command_log_blake3_hex,
+            super::super::to_hex(blake3::hash(&log).as_bytes())
+        );
+        assert!(res.validate().is_ok());
+    }
+
+    #[test]
+    fn stage5_generate_refuses_a_non_rejecting_mutation() {
+        // the verifier FAILED to reject one mutation -> the run did not pass -> no record
+        // is ever emitted with a lying `overall_pass`.
+        let mut outcomes = all_rejected();
+        outcomes[0].actual_rejected = false;
+        let err = Stage5Result::generate(
+            &s5_bind(),
+            &[("f".into(), b"x".to_vec())],
+            &outcomes,
+            b"log",
+        )
+        .unwrap_err();
+        assert!(matches!(err, Stage5Error::MutationNotRejected { .. }));
+    }
+
+    #[test]
+    fn stage5_generate_refuses_a_missing_required_case() {
+        let short: Vec<_> = all_rejected()
+            .into_iter()
+            .take(REQUIRED_MUTATION_CASES.len() - 1)
+            .collect();
+        let err =
+            Stage5Result::generate(&s5_bind(), &[("f".into(), b"x".to_vec())], &short, b"log")
+                .unwrap_err();
+        assert!(matches!(err, Stage5Error::MissingCase { .. }));
     }
 }

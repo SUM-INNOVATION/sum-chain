@@ -60,7 +60,7 @@ use b0_pre_validator::venue::oci_layout::{
     extract_manifest_identity, verify_runtime_image_identity,
 };
 use b0_pre_validator::venue::stage4::{enforce_stage4_arch, Extractor};
-use b0_pre_validator::venue::stage5::Stage5Result;
+use b0_pre_validator::venue::stage5::{self, Stage5Result};
 use b0_pre_validator::venue::tool_install::{install_and_bind, DeclaredArtifact, InstallMode};
 
 fn read(path: &str) -> Result<Vec<u8>, String> {
@@ -311,6 +311,85 @@ fn stage2_record(record_path: &str) -> Result<String, String> {
     ))
 }
 
+/// Generate a typed, bound Stage-2 record DIRECTLY from raw in-container command
+/// output: the graph from `cargo metadata`, advisories from `cargo audit`, and the
+/// command-log hash computed here (never supplied). Fully validated before it is
+/// written; a fatal graph never becomes a record.
+fn stage2_generate(
+    params_path: &str,
+    metadata_path: &str,
+    audit_path: &str,
+    command_log_path: &str,
+    out_path: &str,
+) -> Result<String, String> {
+    let params: audit::Stage2BindParams = serde_json::from_str(&read_str(params_path)?)
+        .map_err(|e| format!("bad Stage-2 bind params: {e}"))?;
+    let metadata_raw = read_str(metadata_path)?;
+    let audit_raw = read_str(audit_path)?;
+    let command_log = std::fs::read(command_log_path)
+        .map_err(|e| format!("cannot read command log {command_log_path}: {e}"))?;
+    if Path::new(out_path).exists() {
+        return Err(format!("refusing to overwrite existing {out_path}"));
+    }
+    let record = Stage2AuditRecord::generate(&params, &metadata_raw, &audit_raw, &command_log)
+        .map_err(|e| e.to_string())?;
+    let json = serde_json::to_string_pretty(&record).map_err(|e| format!("serialize: {e}"))?;
+    std::fs::write(out_path, format!("{json}\n")).map_err(|e| format!("write {out_path}: {e}"))?;
+    Ok(format!(
+        "Stage-2 record generated for {} ({}): {} crate node(s), {} advisory(ies), \
+         audit non-fatal -> {out_path}",
+        record.candidate,
+        record.arch,
+        record.nodes.len(),
+        record.advisories.len()
+    ))
+}
+
+/// Generate a typed, bound Stage-5 result from GENUINE execution outcomes: fixture
+/// hashes computed here from raw artifact bytes, ACTUAL per-mutation rejections, an
+/// overall pass DERIVED (never supplied), and the command-log hash computed here.
+/// Emitted only when the run genuinely passed.
+fn stage5_generate(
+    params_path: &str,
+    fixtures_path: &str,
+    mutations_path: &str,
+    command_log_path: &str,
+    out_path: &str,
+) -> Result<String, String> {
+    let params: stage5::Stage5BindParams = serde_json::from_str(&read_str(params_path)?)
+        .map_err(|e| format!("bad Stage-5 bind params: {e}"))?;
+    let fixture_inputs: Vec<stage5::Stage5FixtureInput> =
+        serde_json::from_str(&read_str(fixtures_path)?)
+            .map_err(|e| format!("bad Stage-5 fixtures list: {e}"))?;
+    let mutations: Vec<stage5::Stage5MutationOutcome> =
+        serde_json::from_str(&read_str(mutations_path)?)
+            .map_err(|e| format!("bad Stage-5 mutation outcomes: {e}"))?;
+    // read each raw fixture artifact's bytes so the hash is computed here, not trusted.
+    let mut fixtures: Vec<(String, Vec<u8>)> = Vec::with_capacity(fixture_inputs.len());
+    for fx in &fixture_inputs {
+        let bytes = std::fs::read(&fx.path)
+            .map_err(|e| format!("cannot read fixture {} at {}: {e}", fx.label, fx.path))?;
+        fixtures.push((fx.label.clone(), bytes));
+    }
+    let command_log = std::fs::read(command_log_path)
+        .map_err(|e| format!("cannot read command log {command_log_path}: {e}"))?;
+    if Path::new(out_path).exists() {
+        return Err(format!("refusing to overwrite existing {out_path}"));
+    }
+    let result = Stage5Result::generate(&params, &fixtures, &mutations, &command_log)
+        .map_err(|e| e.to_string())?;
+    let json = serde_json::to_string_pretty(&result).map_err(|e| format!("serialize: {e}"))?;
+    std::fs::write(out_path, format!("{json}\n")).map_err(|e| format!("write {out_path}: {e}"))?;
+    Ok(format!(
+        "Stage-5 result generated for {} ({}): {} fixture(s), {} mutation case(s) all rejected, \
+         overall_pass derived=true -> {out_path}",
+        result.candidate,
+        result.arch,
+        result.fixture_hashes.len(),
+        result.mutation_cases.len()
+    ))
+}
+
 /// Blocker 4: validate a Stage-5 fixture+mutation result — every required mutation
 /// case present, each rejected, and a derived (not asserted) overall pass.
 fn verify_stage5(result_path: &str) -> Result<String, String> {
@@ -410,6 +489,9 @@ fn run() -> Result<String, String> {
             verify_tool(mode, declared, artifact, installed)
         }
         [cmd, graph, adv, lic, out] if cmd == "stage2-audit" => stage2_audit(graph, adv, lic, out),
+        [cmd, params, metadata, adv, cmdlog, out] if cmd == "stage2-generate" => {
+            stage2_generate(params, metadata, adv, cmdlog, out)
+        }
         [cmd, dir] if cmd == "import-arch" => import_arch(dir),
         [cmd, x86, arm, out] if cmd == "aggregate-arches" => aggregate_arches(x86, arm, out),
         [cmd, dir, arch, commit] if cmd == "seal-bundle" => seal_bundle(dir, arch, commit),
@@ -420,6 +502,9 @@ fn run() -> Result<String, String> {
         }
         [cmd, record] if cmd == "stage2-record" => stage2_record(record),
         [cmd, result] if cmd == "verify-stage5" => verify_stage5(result),
+        [cmd, params, fixtures, mutations, cmdlog, out] if cmd == "stage5-generate" => {
+            stage5_generate(params, fixtures, mutations, cmdlog, out)
+        }
         [cmd, dir, arch] if cmd == "emit-test-only-bundle" => {
             let sa = schema_arch(arch)?;
             evidence_bundle::write_test_only_bundle_dir(Path::new(dir), sa)
@@ -427,9 +512,9 @@ fn run() -> Result<String, String> {
         }
         _ => Err(
             "usage: venue-verify <oci-manifest|verify-runtime-image|lock-hash|verify-lock|\
-             verify-tool|stage2-audit|stage2-record|stage4-guard|verify-stage5|import-arch|\
-             aggregate-arches|seal-bundle|import-bundle|aggregate-bundles|\
-             emit-test-only-bundle> ..."
+             verify-tool|stage2-audit|stage2-generate|stage2-record|stage4-guard|verify-stage5|\
+             stage5-generate|import-arch|aggregate-arches|seal-bundle|import-bundle|\
+             aggregate-bundles|emit-test-only-bundle> ..."
                 .into(),
         ),
     }

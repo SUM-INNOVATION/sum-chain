@@ -56,8 +56,33 @@ require_linux_oci_builder() {
 # Minimum free space (GiB) on a given path.
 require_free_gib() {
   local path="$1" min="$2" free
-  free="$(df -Pg "$path" 2>/dev/null | awk 'NR==2{print $4}')" || free=0
+  free="$(disk_free_gib "$path")"
   [ "${free:-0}" -ge "$min" ] || die "need >= ${min}GiB free at $path; only ${free:-0}GiB available"
+}
+
+# ---- Disk telemetry primitives ---------------------------------------------
+# Free whole-GiB available on the filesystem holding PATH (0 if unknown).
+disk_free_gib() {
+  local path="$1" free
+  free="$(df -Pg "$path" 2>/dev/null | awk 'NR==2{print $4}')" || free=0
+  printf '%s' "${free:-0}"
+}
+
+# Disk used (whole MiB) by a directory tree; 0 if it does not exist.
+dir_used_mib() {
+  local path="$1"
+  [ -e "$path" ] || { printf '0'; return; }
+  du -sm "$path" 2>/dev/null | awk '{print $1}'
+}
+
+# Fail-closed BEFORE a stage runs if fewer than <min> GiB are free at <path>. Used to
+# stop a stage whose estimated disk headroom is unavailable, rather than crashing part
+# way through a large build/extraction.
+require_headroom_gib() {
+  local path="$1" min="$2" stage="${3:-next stage}" free
+  free="$(disk_free_gib "$path")"
+  [ "${free:-0}" -ge "$min" ] \
+    || die "insufficient disk headroom for ${stage}: need >= ${min}GiB free at $path, have ${free:-0}GiB"
 }
 
 # The candidate must NOT already carry a lock (locks come only from the venue).
