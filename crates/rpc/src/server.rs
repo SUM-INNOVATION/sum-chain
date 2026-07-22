@@ -1406,6 +1406,8 @@ impl SumChainApiServer for RpcServer {
                 .inference_settlement_consistency_enabled_from_height,
             inference_verifier_bonding_enabled_from_height: p
                 .inference_verifier_bonding_enabled_from_height,
+            messaging_sponsored_registration_enabled_from_height: p
+                .messaging_sponsored_registration_enabled_from_height,
             governance: p.governance.as_ref().map(|g| crate::types::GovernanceParamsInfo {
                 validator_authority_threshold_bps: g.validator_authority_threshold_bps,
                 quorum_bps: g.quorum_bps,
@@ -3747,98 +3749,185 @@ impl SumChainApiServer for RpcServer {
         &self,
         request: SponsoredRegistrationRequest,
     ) -> std::result::Result<SponsoredRegistrationResponse, jsonrpsee::types::ErrorObjectOwned> {
-        use sumchain_primitives::RegisteredPublicKey;
+        use sumchain_primitives::{
+            verify_sponsored_registration_v1, MessagingOperation, MessagingTxData,
+            RegisterPublicKeySponsoredV1Data, SponsoredRegisterError, TransactionV2,
+        };
 
-        // Parse the public key from hex
+        // ── Read-only preflight (issue #145). NO consensus-state write happens
+        //    in this handler; registration occurs ONLY through block-ordered
+        //    execution of the constructed transaction. ──
+
+        // Chain id for the inner preimage + the outer tx.
+        let chain_id = self.state.chain_id();
+
+        // Activation state at the current tip. Refuse — BEFORE loading the
+        // sponsor key, touching the mempool, consuming a nonce, or building a tx
+        // — when the gate is closed (`None`) or not yet active (tip < height).
+        let current_height = match BlockStore::new(&self.db).get_latest() {
+            Ok(Some(block)) => block.header.height,
+            Ok(None) => 0,
+            Err(e) => {
+                // Fail closed: a store read error must NOT be silently treated as
+                // tip height 0, which could spuriously satisfy `Some(0)` and
+                // activate the gate. Surface it as an RPC internal error.
+                return Err(RpcError::Internal(format!(
+                    "Failed to read chain tip during sponsored-registration preflight: {e}"
+                ))
+                .into());
+            }
+        };
+        let gate_active = matches!(
+            self.chain_params.messaging_sponsored_registration_enabled_from_height,
+            Some(h) if current_height >= h
+        );
+        if !gate_active {
+            return Ok(SponsoredRegistrationResponse {
+                address: String::new(),
+                success: false,
+                tx_hash: None,
+                error: Some(
+                    "Sponsored registration is not active on this chain \
+                     (messaging_sponsored_registration_enabled_from_height is unset or \
+                     its activation height has not been reached)."
+                        .to_string(),
+                ),
+            });
+        }
+
+        // Parse the registrant public key (32 bytes) and derive its address.
         let pubkey_hex = request.public_key.strip_prefix("0x").unwrap_or(&request.public_key);
         let pubkey_bytes = hex::decode(pubkey_hex)
             .map_err(|e| RpcError::InvalidParams(format!("Invalid public key hex: {}", e)))?;
-
         if pubkey_bytes.len() != 32 {
             return Ok(SponsoredRegistrationResponse {
                 address: String::new(),
                 success: false,
+                tx_hash: None,
                 error: Some("Public key must be 32 bytes".to_string()),
             });
         }
+        let mut registrant_public_key: [u8; 32] = [0u8; 32];
+        registrant_public_key.copy_from_slice(&pubkey_bytes);
+        let registrant_address = Address::from_public_key(&registrant_public_key);
 
-        let mut pubkey: [u8; 32] = [0u8; 32];
-        pubkey.copy_from_slice(&pubkey_bytes);
-
-        // Derive address from public key
-        let address = Address::from_public_key(&pubkey);
-
-        // Parse and verify signature
+        // Parse the registrant signature (64 bytes).
         let sig_hex = request.signature.strip_prefix("0x").unwrap_or(&request.signature);
         let sig_bytes = hex::decode(sig_hex)
             .map_err(|e| RpcError::InvalidParams(format!("Invalid signature hex: {}", e)))?;
-
         if sig_bytes.len() != 64 {
             return Ok(SponsoredRegistrationResponse {
-                address: address.to_base58(),
+                address: registrant_address.to_base58(),
                 success: false,
+                tx_hash: None,
                 error: Some("Signature must be 64 bytes".to_string()),
             });
         }
+        let mut registrant_signature: [u8; 64] = [0u8; 64];
+        registrant_signature.copy_from_slice(&sig_bytes);
 
-        let mut sig_array: [u8; 64] = [0u8; 64];
-        sig_array.copy_from_slice(&sig_bytes);
+        // Load the sponsor key ONLY after preflight passes.
+        let sponsor_key_path = std::env::var("SUMAIL_SPONSOR_KEY")
+            .unwrap_or_else(|_| "keys/sumail.json".to_string());
+        let key_json = std::fs::read_to_string(&sponsor_key_path).map_err(|e| {
+            RpcError::Internal(format!(
+                "Sponsor key not configured. Set SUMAIL_SPONSOR_KEY env var or place key at keys/sumail.json: {}",
+                e
+            ))
+        })?;
+        let key_bytes: [u8; 32] = serde_json::from_str(&key_json)
+            .map_err(|e| RpcError::Internal(format!("Invalid sponsor key format: {}", e)))?;
+        let sponsor_keypair = sumchain_crypto::KeyPair::from_bytes(key_bytes);
+        let sponsor_address = sponsor_keypair.address();
 
-        // Verify signature over the registration message
-        let message = format!("SUMCHAIN_REGISTER:{}", pubkey_hex);
-        if sumchain_crypto::verify_bytes(message.as_bytes(), &sig_array, &pubkey).is_err() {
-            return Ok(SponsoredRegistrationResponse {
-                address: address.to_base58(),
-                success: false,
-                error: Some("Invalid signature".to_string()),
-            });
+        // Build the V1 payload (registrant material only) and locally verify the
+        // registrant signature over the exact canonical preimage bound to
+        // (chain_id, sponsor_address, registrant_public_key) for fast client
+        // feedback. Consensus re-verifies this strictly regardless.
+        let reg = RegisterPublicKeySponsoredV1Data {
+            registrant_public_key,
+            registrant_signature,
+        };
+        match verify_sponsored_registration_v1(&reg, chain_id, &sponsor_address) {
+            Ok(()) => {}
+            Err(SponsoredRegisterError::InvalidPublicKey) => {
+                return Ok(SponsoredRegistrationResponse {
+                    address: registrant_address.to_base58(),
+                    success: false,
+                    tx_hash: None,
+                    error: Some("Invalid registrant public key (not a canonical Ed25519 point)".to_string()),
+                });
+            }
+            Err(SponsoredRegisterError::InvalidSignature) => {
+                return Ok(SponsoredRegistrationResponse {
+                    address: registrant_address.to_base58(),
+                    success: false,
+                    tx_hash: None,
+                    error: Some(
+                        "Invalid registrant signature over the RegisterPublicKeySponsoredV1 preimage \
+                         (check chain_id and the relayer sponsor address)."
+                            .to_string(),
+                    ),
+                });
+            }
         }
 
-        // Check if already registered
-        let store = MessagingStore::new(&self.db);
-        if store.has_public_key(&address).unwrap_or(false) {
+        // Construct the RegisterPublicKeySponsoredV1 transaction as the sponsor.
+        let messaging_data = MessagingTxData {
+            operation: MessagingOperation::RegisterPublicKeySponsoredV1,
+            data: reg.to_bytes(),
+        };
+        let sponsor_nonce = self
+            .state
+            .get_nonce(&sponsor_address)
+            .map_err(|e| RpcError::Internal(format!("Failed to get sponsor nonce: {}", e)))?;
+        let fee = 1_000_000u128; // 0.001 Koppa fee, same as messaging_submitSponsored.
+        let tx = TransactionV2::messaging(chain_id, sponsor_address, fee, sponsor_nonce, messaging_data);
+        let signing_hash = tx.signing_hash();
+        let signature = sumchain_crypto::sign(signing_hash.as_bytes(), sponsor_keypair.private_key());
+        let signed_tx = SignedTransaction::new_v2(
+            tx,
+            *signature.as_bytes(),
+            *sponsor_keypair.public_key().as_bytes(),
+        );
+        let tx_hash = signed_tx.hash();
+
+        // Admit to mempool + broadcast. A failure here is NOT reported as success.
+        if let Err(e) = self.mempool.add(signed_tx.clone()) {
             return Ok(SponsoredRegistrationResponse {
-                address: address.to_base58(),
+                address: registrant_address.to_base58(),
                 success: false,
-                error: Some("Public key already registered".to_string()),
+                tx_hash: None,
+                error: Some(format!("Mempool rejected: {}", e)),
             });
         }
-
-        // Get current block info for timestamps
-        let block_store = BlockStore::new(&self.db);
-        let (block_height, block_timestamp) = match block_store.get_latest() {
-            Ok(Some(block)) => (block.header.height, block.header.timestamp),
-            _ => (0, std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64),
-        };
-
-        // Register the public key directly (bypassing transaction validation)
-        let registered = RegisteredPublicKey {
-            public_key: pubkey,
-            address,
-            registered_at_block: block_height,
-            registered_at: block_timestamp,
-            updated_at_block: 0,
-        };
-
-        if let Err(e) = store.set_public_key(&address, &registered) {
+        if let Err(e) = self.tx_sender.send(signed_tx).await {
+            // Broadcast failed after mempool admission. Roll back the local
+            // admission so the tx is not left pending on this node alone —
+            // leaving it would reintroduce exactly the node-local divergence
+            // this subprotocol exists to prevent. Then report failure.
+            self.mempool.remove(&tx_hash);
             return Ok(SponsoredRegistrationResponse {
-                address: address.to_base58(),
+                address: registrant_address.to_base58(),
                 success: false,
-                error: Some(format!("Failed to register: {}", e)),
+                tx_hash: None,
+                error: Some(format!("Failed to broadcast: {}", e)),
             });
         }
 
         tracing::info!(
-            "Sponsored registration: {} registered public key",
-            address.to_base58()
+            "Sponsored registration submitted: tx={} sponsor={} registrant={}",
+            tx_hash,
+            sponsor_address.to_base58(),
+            registrant_address.to_base58()
         );
 
+        // Truthful: submitted/pending, NOT already registered. The registrant's
+        // key becomes live only when this tx is included and executed.
         Ok(SponsoredRegistrationResponse {
-            address: address.to_base58(),
+            address: registrant_address.to_base58(),
             success: true,
+            tx_hash: Some(tx_hash.to_hex()),
             error: None,
         })
     }
@@ -9231,6 +9320,7 @@ mod phase_0b_rpc_tests {
             inference_settlement_enabled_from_height: None,
             inference_settlement_consistency_enabled_from_height: None,
             inference_verifier_bonding_enabled_from_height: None,
+            messaging_sponsored_registration_enabled_from_height: None,
             governance: None,
         };
         let got = serde_json::to_value(&v).unwrap();
@@ -9258,6 +9348,7 @@ mod phase_0b_rpc_tests {
             "inference_settlement_enabled_from_height": null,
             "inference_settlement_consistency_enabled_from_height": null,
             "inference_verifier_bonding_enabled_from_height": null,
+            "messaging_sponsored_registration_enabled_from_height": null,
             "governance": null,
         });
         assert_eq!(got, want);
@@ -9289,6 +9380,7 @@ mod phase_0b_rpc_tests {
             inference_settlement_enabled_from_height: Some(1_900_000),  // distinct activation height
             inference_settlement_consistency_enabled_from_height: Some(2_000_000),  // distinct
             inference_verifier_bonding_enabled_from_height: Some(2_100_000),  // distinct
+            messaging_sponsored_registration_enabled_from_height: Some(2_200_000),  // distinct
             governance: None,
         };
         let s = serde_json::to_string(&v).unwrap();
@@ -9300,6 +9392,7 @@ mod phase_0b_rpc_tests {
         assert_eq!(back.inference_settlement_enabled_from_height, Some(1_900_000));
         assert_eq!(back.inference_settlement_consistency_enabled_from_height, Some(2_000_000));
         assert_eq!(back.inference_verifier_bonding_enabled_from_height, Some(2_100_000));
+        assert_eq!(back.messaging_sponsored_registration_enabled_from_height, Some(2_200_000));
     }
 
     #[test]
@@ -10550,6 +10643,176 @@ mod messaging_rpc_tests {
             })
             .await
             .is_err());
+    }
+
+    // ── Sponsored registration (issue #145) RPC behavior ──────────────────
+
+    use crate::types::SponsoredRegistrationRequest;
+    use sumchain_crypto::sign as ed_sign;
+    use sumchain_primitives::{
+        sponsored_register_v1_signing_preimage, MessagingOperation, RegisterPublicKeySponsoredV1Data,
+        TxPayload,
+    };
+
+    /// Build an RpcServer with the sponsored-registration gate open from height 0
+    /// and a real broadcast receiver kept alive by the caller.
+    fn server_gate_open() -> (
+        RpcServer,
+        Arc<Database>,
+        Arc<Mempool>,
+        mpsc::Receiver<sumchain_primitives::SignedTransaction>,
+        TempDir,
+    ) {
+        let dir = TempDir::new().unwrap();
+        let db = Arc::new(Database::open_default(dir.path()).unwrap());
+        let state = Arc::new(StateManager::new(db.clone(), 1));
+        let mempool = Arc::new(Mempool::new(MempoolConfig::default()));
+        let validator = KeyPair::generate();
+        let genesis = Genesis::new(
+            1,
+            0,
+            vec![validator.public_key().to_base58()],
+            HashMap::from([(validator.address().to_base58(), 1_000_000u128)]),
+            ChainParams::with_v2_enabled(),
+        );
+        let engine = Arc::new(
+            PoAEngine::new(db.clone(), state.clone(), mempool.clone(), &genesis, Some(validator)).unwrap(),
+        );
+        let (tx_sender, rx) = mpsc::channel(64);
+        let mut params = ChainParams::with_v2_enabled();
+        params.messaging_sponsored_registration_enabled_from_height = Some(0);
+        let srv = RpcServer::new(db.clone(), state, mempool.clone(), engine, tx_sender, Arc::new(|| 0usize))
+            .with_chain_params(params);
+        (srv, db, mempool, rx, dir)
+    }
+
+    fn signed_request(
+        registrant: &KeyPair,
+        chain_id: u64,
+        sponsor_addr: &Address,
+    ) -> SponsoredRegistrationRequest {
+        let pk = *registrant.public_key().as_bytes();
+        let preimage = sponsored_register_v1_signing_preimage(chain_id, sponsor_addr, &pk);
+        let sig = *ed_sign(&preimage, registrant.private_key()).as_bytes();
+        SponsoredRegistrationRequest {
+            public_key: format!("0x{}", hex::encode(pk)),
+            signature: format!("0x{}", hex::encode(sig)),
+        }
+    }
+
+    #[tokio::test]
+    async fn sponsored_registration_closed_gate_preflight_refuses_before_key_load() {
+        // Default server(): gate is None → closed. Even with NO sponsor key
+        // configured, the handler returns the gate-closed response — proving the
+        // preflight refuses BEFORE loading the sponsor key / touching the
+        // mempool / consuming a nonce / writing state.
+        std::env::remove_var("SUMAIL_SPONSOR_KEY");
+        let (srv, db, _dir) = server();
+        let registrant = KeyPair::generate();
+        // Any sponsor addr here; the request never gets far enough to matter.
+        let req = signed_request(&registrant, 1, &Address::ZERO);
+
+        let resp = srv.messaging_register_sponsored(req).await.unwrap();
+        assert!(!resp.success, "closed gate must not report success");
+        assert!(resp.tx_hash.is_none());
+        let err = resp.error.unwrap();
+        assert!(err.contains("not active"), "expected gate message, got: {err}");
+        assert!(
+            !err.contains("Sponsor key"),
+            "must NOT have tried to load the sponsor key: {err}"
+        );
+        // No registration write happened.
+        assert!(!MessagingStore::new(&db)
+            .has_public_key(&registrant.address())
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn sponsored_registration_open_gate_submits_pending_without_registering() {
+        // One test owns the process-global SUMAIL_SPONSOR_KEY env var; the
+        // closed-gate test never reads env, so there is no cross-test race.
+        let (srv, db, mempool, mut rx, dir) = server_gate_open();
+
+        // Deterministic sponsor key file.
+        let sponsor = KeyPair::from_bytes([7u8; 32]);
+        let sponsor_addr = sponsor.address();
+        let key_path = dir.path().join("sponsor.json");
+        std::fs::write(&key_path, serde_json::to_string(sponsor.private_key().as_bytes()).unwrap())
+            .unwrap();
+        std::env::set_var("SUMAIL_SPONSOR_KEY", &key_path);
+
+        let registrant = KeyPair::generate();
+
+        // (a) Invalid registrant signature → clear rejection, nothing submitted.
+        let mut bad = signed_request(&registrant, 1, &sponsor_addr);
+        bad.signature = format!("0x{}", hex::encode([0u8; 64]));
+        let resp_bad = srv.messaging_register_sponsored(bad).await.unwrap();
+        assert!(!resp_bad.success);
+        assert!(resp_bad.tx_hash.is_none());
+        assert!(resp_bad.error.unwrap().to_lowercase().contains("signature"));
+        assert!(mempool.is_empty(), "invalid sig must not enter the mempool");
+
+        // (b) Valid request → builds the exact op, submits, returns tx_hash, and
+        //     does NOT register (submitted/pending, not already registered).
+        let good = signed_request(&registrant, 1, &sponsor_addr);
+        let resp = srv.messaging_register_sponsored(good).await.unwrap();
+        assert!(resp.success, "valid request should submit: {:?}", resp.error);
+        assert_eq!(resp.address, registrant.address().to_base58());
+        let tx_hash_hex = resp.tx_hash.expect("tx_hash present on submission");
+        assert_eq!(mempool.len(), 1, "exactly one tx submitted");
+
+        // The broadcast tx carries the exact RegisterPublicKeySponsoredV1 op,
+        // paid by the sponsor (tx.from), and decodes to the registrant material.
+        let broadcast = rx.try_recv().expect("broadcast tx received");
+        assert_eq!(broadcast.hash().to_hex(), tx_hash_hex);
+        let partb_hash = broadcast.hash();
+        match broadcast.inner() {
+            sumchain_primitives::TxInner::V2(v2) => {
+                assert_eq!(v2.from, sponsor_addr, "sponsor pays (tx.from == sponsor)");
+                match &v2.payload {
+                    TxPayload::Messaging(m) => {
+                        assert_eq!(m.operation, MessagingOperation::RegisterPublicKeySponsoredV1);
+                        let decoded = RegisterPublicKeySponsoredV1Data::from_bytes(&m.data).unwrap();
+                        assert_eq!(decoded.registrant_public_key, *registrant.public_key().as_bytes());
+                    }
+                    other => panic!("wrong payload: {:?}", other),
+                }
+            }
+            other => panic!("expected V2, got {:?}", other),
+        }
+
+        // Critically: the RPC performed NO consensus-state write. Registration
+        // only happens when the tx is executed by consensus.
+        assert!(
+            !MessagingStore::new(&db).has_public_key(&registrant.address()).unwrap(),
+            "RPC must not register directly; only submit"
+        );
+
+        // (c) Broadcast failure rolls back the mempool admission and is not
+        //     reported as success. Drain the earlier submission first so the
+        //     mempool starts empty, then drop the receiver so the sponsor
+        //     channel send fails; use a fresh registrant to avoid the mempool
+        //     dedup path masking the broadcast error.
+        assert!(
+            mempool.remove(&partb_hash).is_some(),
+            "part-(b) tx should be present to drain"
+        );
+        assert!(mempool.is_empty(), "precondition: mempool drained before the failing submit");
+        drop(rx);
+        let registrant2 = KeyPair::generate();
+        let good2 = signed_request(&registrant2, 1, &sponsor_addr);
+        let resp2 = srv.messaging_register_sponsored(good2).await.unwrap();
+        assert!(!resp2.success, "broadcast failure must not report success");
+        assert!(resp2.tx_hash.is_none());
+        assert!(resp2.error.unwrap().to_lowercase().contains("broadcast"));
+        // The admitted tx was rolled back on broadcast failure → the mempool is
+        // empty, never left locally pending (which would refork the node).
+        assert!(
+            mempool.is_empty(),
+            "broadcast failure must roll back the mempool admission"
+        );
+
+        std::env::remove_var("SUMAIL_SPONSOR_KEY");
     }
 }
 

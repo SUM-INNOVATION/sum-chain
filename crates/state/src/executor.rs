@@ -7,7 +7,7 @@ use std::sync::Arc;
 use sumchain_crypto::verify_bytes;
 use sumchain_genesis::ChainParams;
 use sumchain_primitives::{
-    Address, Balance, Block, BlockHeader, Hash, NodeRegistryOperation, Receipt,
+    Address, Balance, Block, BlockHeader, Hash, MessagingOperation, NodeRegistryOperation, Receipt,
     SignedTransaction, StorageMetadataOperationV2, TransactionV2, TxPayload, TxStatus,
     CHALLENGE_INTERVAL_BLOCKS, SLASH_PERCENTAGE,
 };
@@ -158,6 +158,21 @@ fn assignment_aware_por_scheduler_gate_open(params: &ChainParams, block_height: 
 #[inline]
 fn service_grants_gate_open(params: &ChainParams, block_height: u64) -> bool {
     matches!(params.service_grants_enabled_from_height, Some(h) if block_height >= h)
+}
+
+/// SRC-201 sponsored public-key registration gate (issue #145). Dormant by
+/// default (`None` → never open); a coordinated validator upgrade sets
+/// `messaging_sponsored_registration_enabled_from_height` to a chosen height.
+/// While closed, `RegisterPublicKeySponsoredV1` transactions are rejected free
+/// (`Failed(390)`, no fee, no state) at the state executor. Same dormant-deploy
+/// semantics as `omninode_sponsored_attestation_enabled_from_height` and the
+/// other `*_enabled_from_height` activation gates.
+#[inline]
+fn messaging_sponsored_registration_gate_open(params: &ChainParams, block_height: u64) -> bool {
+    matches!(
+        params.messaging_sponsored_registration_enabled_from_height,
+        Some(h) if block_height >= h
+    )
 }
 
 /// Fail-closed seam for the #100 scheduler (issue #100). Runs `schedule` only if
@@ -623,6 +638,29 @@ impl BlockExecutor {
                         }
                     }
                     TxPayload::Messaging(messaging_data) => {
+                        // Issue #145: sponsored public-key registration is a
+                        // GATED, first-class consensus op with distinct receipt
+                        // codes and explicit sponsor fee/nonce accounting. Route
+                        // it here BEFORE the generic messaging executor, which
+                        // lacks the activation gate + per-code receipts and whose
+                        // RegisterPublicKey path binds the key to tx.from (wrong
+                        // for a sponsor). Mirrors the sponsored InferenceAttestation
+                        // V2 arm (#79/#95): every pre-success failure is free
+                        // (fee_paid: 0, no mutation); only a fully valid tx charges
+                        // the sponsor and writes the registrant's key.
+                        if messaging_data.operation
+                            == MessagingOperation::RegisterPublicKeySponsoredV1
+                        {
+                            return self.execute_sponsored_register_v1(
+                                &v2_tx.from,
+                                &messaging_data.data,
+                                proposer,
+                                v2_tx.fee,
+                                block_height,
+                                block_timestamp,
+                                tx_hash,
+                            );
+                        }
                         // Execute messaging operation (SRC-201)
                         let result = self.messaging_executor.execute(
                             &v2_tx.from,
@@ -1802,6 +1840,141 @@ impl BlockExecutor {
         }
     }
 
+    /// Consensus execution of `RegisterPublicKeySponsoredV1` (sum-chain #145).
+    ///
+    /// A sponsor (`sponsor` == outer `tx.from`, already authenticated by the
+    /// outer signature + `pubkey→address` check and validated against the
+    /// chain id/nonce/min-fee before dispatch) pays the fee, while the
+    /// *registrant* — derived ONLY from `registrant_public_key`, never from a
+    /// caller-supplied field — authorizes the registration via an inner
+    /// Ed25519 signature over the canonical
+    /// [`sumchain_primitives::sponsored_register_v1_signing_preimage`].
+    ///
+    /// Fail-closed and fee ordering (mirrors the sponsored InferenceAttestation
+    /// V2 arm, #79/#95): the activation gate, payload decode, strict signature
+    /// verification, and the duplicate check are ALL pre-success and reject FREE
+    /// (`fee_paid: 0`, zero state mutation). Only once every check passes is the
+    /// sponsor charged (deduct fee → credit proposer → advance sponsor nonce)
+    /// and the registrant's key written through the block-ordered messaging
+    /// store. Database errors propagate via `?` (deterministic halt) — never
+    /// converted into a business branch.
+    #[allow(clippy::too_many_arguments)]
+    fn execute_sponsored_register_v1(
+        &self,
+        sponsor: &Address,
+        data: &[u8],
+        proposer: &Address,
+        fee: Balance,
+        block_height: u64,
+        block_timestamp: u64,
+        tx_hash: Hash,
+    ) -> Result<TxExecutionResult> {
+        use sumchain_primitives::messaging_sponsored::{
+            verify_sponsored_registration_v1, SponsoredRegisterError,
+        };
+        use sumchain_primitives::{RegisterPublicKeySponsoredV1Data, RegisteredPublicKey};
+        use sumchain_storage::MessagingStore;
+
+        // 1. Activation gate — fail-closed. Closed → free rejection.
+        if !messaging_sponsored_registration_gate_open(&self.params, block_height) {
+            return Ok(TxExecutionResult {
+                tx_hash,
+                status: TxStatus::Failed(390),
+                fee_paid: 0,
+            });
+        }
+
+        // 2. Strict payload decode (rejects trailing/truncated/wrong-width).
+        //    Malformed → free rejection.
+        let reg = match RegisterPublicKeySponsoredV1Data::from_bytes(data) {
+            Ok(r) => r,
+            Err(_) => {
+                return Ok(TxExecutionResult {
+                    tx_hash,
+                    status: TxStatus::Failed(392),
+                    fee_paid: 0,
+                });
+            }
+        };
+
+        // 3. Strict Ed25519 verification of the registrant's inner authorization
+        //    over the canonical preimage bound to (chain_id, sponsor, pubkey).
+        //    Bad key → 393; bad signature → 391. Both free.
+        //    `self.state.chain_id()` equals the outer tx chain id (validated in
+        //    `validate_tx` before dispatch).
+        match verify_sponsored_registration_v1(&reg, self.state.chain_id(), sponsor) {
+            Ok(()) => {}
+            Err(SponsoredRegisterError::InvalidPublicKey) => {
+                return Ok(TxExecutionResult {
+                    tx_hash,
+                    status: TxStatus::Failed(393),
+                    fee_paid: 0,
+                });
+            }
+            Err(SponsoredRegisterError::InvalidSignature) => {
+                return Ok(TxExecutionResult {
+                    tx_hash,
+                    status: TxStatus::Failed(391),
+                    fee_paid: 0,
+                });
+            }
+        }
+
+        // 4. Registrant address is ALWAYS derived from the registrant key.
+        let registrant = Address::from_public_key(&reg.registrant_public_key);
+
+        // 5. Duplicate registration follows existing RegisterPublicKey semantics
+        //    (a fresh key only; use UpdatePublicKey to rotate). Error-explicit:
+        //    a DB read error propagates via `?`, never `unwrap_or(false)`.
+        let store = MessagingStore::new(&self.db);
+        if store.has_public_key(&registrant)? {
+            return Ok(TxExecutionResult {
+                tx_hash,
+                status: TxStatus::Failed(394),
+                fee_paid: 0,
+            });
+        }
+
+        // 6. Sponsor pays. Insufficient balance is a free, pre-success rejection
+        //    (checked before any mutation so `deduct` can never error here).
+        if self.state.get_balance(sponsor)? < fee {
+            return Ok(TxExecutionResult {
+                tx_hash,
+                status: TxStatus::InsufficientBalance,
+                fee_paid: 0,
+            });
+        }
+        self.state.deduct(sponsor, fee)?;
+        self.state.credit(proposer, fee)?;
+        self.state.increment_nonce(sponsor)?;
+
+        // 7. Write the registrant's key record through the block-ordered store.
+        //    Reached only after all checks pass, so no partial mutation on any
+        //    business failure; a DB write error propagates via `?`.
+        let registered = RegisteredPublicKey {
+            public_key: reg.registrant_public_key,
+            address: registrant,
+            registered_at_block: block_height,
+            registered_at: block_timestamp,
+            updated_at_block: 0,
+        };
+        store.set_public_key(&registrant, &registered)?;
+
+        debug!(
+            "Sponsored registration {}: sponsor={} registrant={} block={}",
+            tx_hash,
+            sponsor.to_base58(),
+            registrant.to_base58(),
+            block_height
+        );
+
+        Ok(TxExecutionResult {
+            tx_hash,
+            status: TxStatus::Success,
+            fee_paid: fee,
+        })
+    }
+
     /// Execute a V2 transaction (supports both transfers and NFT operations)
     pub fn execute_tx_v2(
         &self,
@@ -2146,6 +2319,22 @@ impl BlockExecutor {
                 }
             }
             TxPayload::Messaging(messaging_data) => {
+                // Issue #145: route sponsored registration to the gated,
+                // per-code, sponsor-pays handler shared with the production
+                // (`execute_tx_with_validators`) path so BOTH public execution
+                // entrypoints behave byte-identically. (Handles its own gate +
+                // sponsor balance/fee/nonce; do not pre-charge here.)
+                if messaging_data.operation == MessagingOperation::RegisterPublicKeySponsoredV1 {
+                    return self.execute_sponsored_register_v1(
+                        &tx.from,
+                        &messaging_data.data,
+                        proposer,
+                        tx.fee,
+                        block_height,
+                        block_timestamp,
+                        tx_hash,
+                    );
+                }
                 // Check balance for fee
                 let balance = self.state.get_balance(&tx.from)?;
                 if balance < tx.fee {
