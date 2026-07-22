@@ -66,3 +66,42 @@ require_no_preexisting_lock() {
   [ -f "$dir/Cargo.lock" ] && die "unexpected pre-existing $dir/Cargo.lock; authoritative locks come only from the venue"
   true
 }
+
+# Fail-closed if a required command is missing.
+require_cmd() {
+  command -v "$1" >/dev/null 2>&1 || die "required command '$1' not found on PATH"
+}
+
+# Bare 64-hex SHA-256 of stdin, using whichever portable tool is present
+# (sha256sum on Linux, shasum on macOS). Used for the OFF-VENUE dry-run producers
+# and for hashing local build evidence.
+sha256_hex_stdin() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  else
+    die "no sha256 tool (sha256sum / shasum) on PATH"
+  fi
+}
+
+# A deterministic, non-placeholder bare 64-hex value derived from a label. Used by
+# the dry-run producers to emit real-SHAPED sample digests off-venue (no real image
+# is built). NOT an authoritative digest.
+syn_hex() { printf '%s' "$1" | sha256_hex_stdin; }
+
+# A deterministic, non-placeholder full sha256:<64hex> OCI-shaped sample digest.
+syn_oci() { printf 'sha256:%s' "$(syn_hex "$1")"; }
+
+# Real BLAKE3 (bare 64-hex) of a file, for on-venue build-evidence hashing. Requires
+# b3sum (a venue dependency); never invoked in the off-venue dry-run.
+blake3_hex_file() {
+  require_cmd b3sum
+  b3sum "$1" | awk '{print $1}'
+}
+
+# True when the OFF-VENUE dry-run is requested (SUMCHAIN_B0PRE_DRYRUN=1). The dry
+# run emits real-SHAPED sample files matching the exact production schema, WITHOUT
+# Docker / toolchains, so the producer→consumer compatibility tests and the two
+# demonstrations can run where no venue exists. Dry-run output is never authoritative.
+is_dryrun() { [ "${SUMCHAIN_B0PRE_DRYRUN:-0}" = "1" ]; }

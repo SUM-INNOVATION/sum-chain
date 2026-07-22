@@ -18,6 +18,7 @@
 
 pub mod codec;
 pub mod consts;
+pub mod durable;
 pub mod enums;
 pub mod exp;
 pub mod fixed;
@@ -31,10 +32,15 @@ pub mod schema;
 pub mod tags;
 pub mod transformer;
 pub mod validation;
+pub mod venue;
 pub mod workload;
 
-/// The frozen B0-PRE protocol revision this crate implements.
-pub const SPEC_VERSION: &str = "b0-pre/v10";
+/// The frozen B0-PRE protocol revision this crate implements. Bumped v10 -> v11
+/// with the canonical Stage-1 preregistration hardening (#123): per-candidate
+/// verifier-material totals (no global 292), strict Stage-1 bundle decode +
+/// canonical-label rejection, the shared canonical verifier-material primitive,
+/// and the four-stamp fixture-acceptance gate.
+pub const SPEC_VERSION: &str = "b0-pre/v11";
 
 /// Why a protocol-hash preimage could not be built.
 #[derive(Debug, Clone, PartialEq, Eq)]

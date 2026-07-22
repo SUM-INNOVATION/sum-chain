@@ -38,7 +38,18 @@ use crate::validation::nearest_rank_p99;
 pub const NON_SELECTION_LABEL: &str = "NON_SELECTION / TEST_ONLY";
 pub const SEED: [u8; 32] = [0x5A; 32];
 pub const P99_GATE_NS: u64 = 75_000_000;
-pub const VERIFIER_MATERIAL_BYTES: u64 = 292;
+/// SP1's single immutable Groth16 verifying-key blob byte length. This is SP1's
+/// value ONLY — never a cross-candidate constant, universal max, or
+/// encoded-manifest size. The verifier-material byte total is checked
+/// per-candidate against that candidate's own manifest, never against this
+/// literal (see `generate_with` / `verify_evidence`).
+pub const SP1_GROTH16_VK_BYTES: u64 = 292;
+/// RISC Zero's four Groth16-receipt material blobs (TEST_ONLY synthetic lengths;
+/// distinct per role and summing to a total that is deliberately not SP1's 292).
+const RISC0_GROTH16_VK_BYTES: u64 = 256;
+const RISC0_CONTROL_ROOT_BYTES: u64 = 32;
+const RISC0_CONTROL_ID_BYTES: u64 = 32;
+const RISC0_VERIFIER_PARAMS_BYTES: u64 = 32;
 const REPS: u32 = 100;
 const ARCHES: [Arch; 2] = [Arch::X86_64, Arch::Aarch64];
 const STMTS: [StatementIndex; 2] = [StatementIndex::Tlg, StatementIndex::SelectToken];
@@ -169,14 +180,46 @@ fn proof_hash(a: Arch, s: StatementIndex, iter: u32) -> [u8; 32] {
 }
 
 fn verifier_material_for(ids: Ids) -> VerifierMaterialManifestV1 {
-    VerifierMaterialManifestV1 {
-        candidate: ids.candidate,
-        entries: vec![VerifierMaterialEntry {
-            label: "GROTH16_VK_BYTES".to_string(),
-            role: VerifierMaterialRole::Groth16Vk,
-            byte_len: VERIFIER_MATERIAL_BYTES,
-            hash: ids.vk,
-        }],
+    match ids.candidate {
+        // SP1: one groth16_vk blob. The historical uppercase label is retained so
+        // the committed evidence fixture stays byte-stable; it is synthetic R0
+        // timing evidence, not the canonical extractor path.
+        Candidate::Sp1 => VerifierMaterialManifestV1 {
+            candidate: Candidate::Sp1,
+            entries: vec![VerifierMaterialEntry {
+                label: "GROTH16_VK_BYTES".to_string(),
+                role: VerifierMaterialRole::Groth16Vk,
+                byte_len: SP1_GROTH16_VK_BYTES,
+                hash: ids.vk,
+            }],
+        },
+        // RISC Zero: the four canonical roles its Groth16 receipt path consumes.
+        // Distinct byte lengths -> a per-candidate total that is not SP1's 292.
+        Candidate::Risc0 => VerifierMaterialManifestV1::from_canonical(
+            Candidate::Risc0,
+            [
+                (
+                    VerifierMaterialRole::Groth16Vk,
+                    RISC0_GROTH16_VK_BYTES,
+                    ids.vk,
+                ),
+                (
+                    VerifierMaterialRole::ControlRoot,
+                    RISC0_CONTROL_ROOT_BYTES,
+                    id(b"risc0_control_root"),
+                ),
+                (
+                    VerifierMaterialRole::ControlId,
+                    RISC0_CONTROL_ID_BYTES,
+                    id(b"risc0_control_id"),
+                ),
+                (
+                    VerifierMaterialRole::VerifierParams,
+                    RISC0_VERIFIER_PARAMS_BYTES,
+                    id(b"risc0_verifier_params"),
+                ),
+            ],
+        ),
     }
 }
 /// SP1 verifier material (public no-arg API preserved).
@@ -184,7 +227,12 @@ pub fn verifier_material() -> VerifierMaterialManifestV1 {
     verifier_material_for(ids_for(Candidate::Sp1))
 }
 fn vmat_id(ids: Ids) -> [u8; 32] {
-    verifier_material_for(ids).identity()
+    // The harness builds statically-canonical (byte-encodable) manifests; the
+    // fallible codec cannot fail here, so surfacing the error as a panic is a
+    // genuine invariant, not silent handling on the authority path.
+    verifier_material_for(ids)
+        .identity()
+        .expect("harness verifier-material manifest encodes")
 }
 
 fn provenance(a: Arch, role: ProvenanceRole, ids: Ids, env: &Env) -> ArchRunProvenanceV1 {
@@ -542,6 +590,13 @@ fn generate_with(candidate: Candidate, env: &Env) -> Evidence {
     let qualification = crate::validation::official_qualification(worst_p99);
     let failure_codes = crate::validation::qualification_failure_codes(worst_p99);
 
+    // Per-candidate verifier-material total: the Σ byte_len of THIS candidate's
+    // own canonical manifest — never a shared cross-candidate constant.
+    let vmm = verifier_material_for(ids);
+    let vmat_total = vmm
+        .verifier_material_bytes()
+        .expect("verifier-material total overflow");
+
     let rs = R0ResultSetV1 {
         b0_pre_spec_hash: spec_hash(),
         r0_guest_set_hash: guest_set_hash(),
@@ -565,7 +620,7 @@ fn generate_with(candidate: Candidate, env: &Env) -> Evidence {
         aggregates: Aggregates {
             max_proof_bytes: max_pb as u32,
             worst_arch_p99_verify_ns: worst_p99,
-            verifier_material_bytes: VERIFIER_MATERIAL_BYTES,
+            verifier_material_bytes: vmat_total,
             worst_arch_verifier_rss_bytes: worst_vrss,
         },
         qualification_result: qualification,
@@ -577,7 +632,9 @@ fn generate_with(candidate: Candidate, env: &Env) -> Evidence {
         rss: rss_records,
         envelopes,
         provenances,
-        verifier_material: verifier_material_for(ids).encode(),
+        verifier_material: vmm
+            .encode()
+            .expect("harness verifier-material manifest encodes"),
         result_set: rs.encode(),
     }
 }
@@ -609,7 +666,7 @@ pub fn verify_evidence(ev: &Evidence) -> Result<Recomputed, String> {
     // verifier-material byte total recomputed from the canonical manifest record
     let vmm = VerifierMaterialManifestV1::decode_exact(&ev.verifier_material)
         .map_err(|e| format!("vmat: {e}"))?;
-    if vmm.identity() != vm {
+    if vmm.identity().map_err(|e| format!("vmat identity: {e}"))? != vm {
         return Err("verifier-material identity".into());
     }
     let vmat_bytes = vmm
@@ -992,7 +1049,51 @@ mod tests {
         assert_eq!(ev.provenances.len(), 4);
         let r = verify_evidence(&ev).expect("valid");
         assert!(r.qualification);
-        assert_eq!(r.verifier_material_bytes, 292);
+        assert_eq!(r.verifier_material_bytes, 292); // SP1's own per-candidate total
+    }
+
+    /// TEST_ONLY synthetic RISC Zero material total: the Σ of the four synthetic
+    /// per-role lengths this evidence generator uses. It is NOT a protocol
+    /// constant, candidate requirement, qualification limit, preregistered
+    /// expected result, or venue acceptance condition — an authoritative RISC Zero
+    /// bundle may carry ANY own-consistent total (proved by
+    /// `stage1_bundle::authoritative_risc0_may_carry_any_total_checked_against_own_manifest`).
+    const TEST_ONLY_SYNTHETIC_RISC0_MATERIAL_TOTAL: u64 = RISC0_GROTH16_VK_BYTES
+        + RISC0_CONTROL_ROOT_BYTES
+        + RISC0_CONTROL_ID_BYTES
+        + RISC0_VERIFIER_PARAMS_BYTES;
+
+    #[test]
+    fn per_candidate_verifier_material_total_is_independent_not_a_shared_292() {
+        // SP1's total is its single groth16_vk (292); RISC Zero's is the Σ of its
+        // four synthetic canonical-role lengths. The verifier recomputes each from
+        // the candidate's own manifest — there is no shared 292 constant, and the
+        // RISC0 total is synthetic (never checked against a fixed 352).
+        let sp1 = verify_evidence(&generate_candidate(Candidate::Sp1)).expect("sp1 valid");
+        let risc0 = verify_evidence(&generate_candidate(Candidate::Risc0)).expect("risc0 valid");
+        assert_eq!(sp1.verifier_material_bytes, SP1_GROTH16_VK_BYTES);
+        assert_eq!(
+            risc0.verifier_material_bytes,
+            TEST_ONLY_SYNTHETIC_RISC0_MATERIAL_TOTAL
+        );
+        assert_ne!(sp1.verifier_material_bytes, risc0.verifier_material_bytes);
+
+        // and the RISC Zero manifest is canonically labelled with all four roles
+        let vmm = VerifierMaterialManifestV1::decode_exact(
+            &generate_candidate(Candidate::Risc0).verifier_material,
+        )
+        .unwrap();
+        assert_eq!(vmm.validate_canonical(), Ok(()));
+        let labels: Vec<&str> = vmm.entries.iter().map(|e| e.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            [
+                "groth16_vk",
+                "control_root",
+                "control_id",
+                "verifier_params"
+            ]
+        );
     }
 
     #[test]
@@ -1281,11 +1382,11 @@ mod tests {
                     let mut m = verifier_material();
                     m.entries[0].byte_len = 293;
                     let mut e = with_rs(e, move |rs| {
-                        rs.verifier_material_manifest_hash = m.identity()
+                        rs.verifier_material_manifest_hash = m.identity().unwrap()
                     });
                     let mut m2 = verifier_material();
                     m2.entries[0].byte_len = 293;
-                    e.verifier_material = m2.encode();
+                    e.verifier_material = m2.encode().unwrap();
                     e
                 }),
             ),
@@ -1297,7 +1398,8 @@ mod tests {
                         candidate: Candidate::Sp1,
                         entries: vec![],
                     }
-                    .encode();
+                    .encode()
+                    .unwrap();
                     e
                 }),
             ),
@@ -1307,7 +1409,7 @@ mod tests {
                     let mut e = clone_ev(e);
                     let mut m = verifier_material();
                     m.candidate = Candidate::Risc0;
-                    e.verifier_material = m.encode();
+                    e.verifier_material = m.encode().unwrap();
                     e
                 }),
             ),

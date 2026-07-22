@@ -114,6 +114,28 @@ impl InputSlotKind {
     }
 }
 
+impl VerifierMaterialRole {
+    /// The single canonical verifier-material label for this role: the lowercase
+    /// role name (`groth16_vk`, `control_root`, `control_id`, `verifier_params`).
+    /// Delegates to the shared canonical primitive so labels are minted in exactly
+    /// one place; extractors and the manifest constructor assign the same string.
+    pub fn canonical_label(self) -> &'static str {
+        b0_pre_vmat::canonical_label(self.to_repr())
+            .expect("every VerifierMaterialRole has a shared canonical label")
+    }
+
+    /// Parse a canonical lowercase role label back to its role, rejecting any
+    /// non-canonical (e.g. uppercase / aliased) spelling. Delegates to the shared
+    /// primitive's `role_from_canonical_label`.
+    pub fn from_canonical_label(label: &str) -> Result<Self, DecodeError> {
+        b0_pre_vmat::role_from_canonical_label(label)
+            .and_then(|r| Self::from_repr(r).ok())
+            .ok_or(DecodeError::BadValue {
+                ctx: "VerifierMaterialRole.canonical_label",
+            })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,5 +215,26 @@ mod tests {
         assert!(ProofRefKind::from_repr(0).is_err());
         assert_eq!(Candidate::Sp1.to_repr(), 1);
         assert_eq!(Candidate::Risc0.to_repr(), 2);
+    }
+
+    #[test]
+    fn verifier_material_role_canonical_labels_roundtrip_and_reject_noncanonical() {
+        for &r in VerifierMaterialRole::ALL {
+            assert_eq!(
+                VerifierMaterialRole::from_canonical_label(r.canonical_label()).unwrap(),
+                r
+            );
+        }
+        assert_eq!(
+            VerifierMaterialRole::Groth16Vk.canonical_label(),
+            "groth16_vk"
+        );
+        assert_eq!(
+            VerifierMaterialRole::VerifierParams.canonical_label(),
+            "verifier_params"
+        );
+        // the historical uppercase spelling is NOT a canonical label
+        assert!(VerifierMaterialRole::from_canonical_label("GROTH16_VK_BYTES").is_err());
+        assert!(VerifierMaterialRole::from_canonical_label("groth16").is_err());
     }
 }

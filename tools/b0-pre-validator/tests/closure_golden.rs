@@ -45,7 +45,7 @@ fn reference_closure_agrees_on_valid_and_rejects_mutations() {
     ])))
     .unwrap();
     assert_eq!(
-        hx(&vm.identity()),
+        hx(&vm.identity().unwrap()),
         s(&["valid", "verifier_material", "identity"])
     );
     assert_eq!(vm.verifier_material_bytes().unwrap(), 292);

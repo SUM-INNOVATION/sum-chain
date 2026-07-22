@@ -8,7 +8,13 @@ description = "Deterministic extraction + contract test for the immutable materi
 
 # Pinned to the SP1 candidate. The verifier-material bytes are READ from this
 # crate at run time; they are never hardcoded here.
+#
+# The canonical manifest encoding / identity / labels come from the SHARED
+# `b0-pre-vmat` leaf (blake3-only) that the reference validator also uses — this
+# crate hand-rolls no wire replica. Tool-only path dependency; adds no candidate
+# or guest edge and does not touch candidates/{sp1,risc0}/Cargo.lock.
 [dependencies]
+b0-pre-vmat = { path = "../../../b0-pre-vmat" }
 sp1-verifier = "=6.3.1"
 blake3 = "=1.5.4"
 serde_json = { version = "=1.0.149", features = ["arbitrary_precision"] }
