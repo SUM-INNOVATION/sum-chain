@@ -1,0 +1,26 @@
+[package]
+name = "sumchain-beacon-crypto"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "BR1 randomness-beacon dev/test cryptography (issue #127): a NARROW internal adapter over BLS12-381 (blstrs/blst) exposing only the operations the DKG + threshold-BLS beacon needs — canonical compressed G1 encode/decode with subgroup + infinity rejection, single-group Chaum-Pedersen DLEQ, BLS sign + proof-of-possession, partial-signature verification, and exactly-T sorted Lagrange combination. DEV/TEST ONLY: not activated, not wired into consensus, no protocol constants ratified."
+publish = false
+
+[dependencies]
+# BLS12-381: blst-backed. Confined to THIS crate; the raw blstrs/blst types are
+# never re-exported — only the opaque wrappers in `bls` cross the crate boundary.
+# Exact-pinned (issue #127 owner condition): the committed Cargo.lock is the
+# lock of record; these `=` requirements make the direct-dep versions exact at
+# the manifest level too, so `cargo update` cannot silently bump the crypto deps.
+blstrs = "=0.7.1"
+ff = "=0.13.1"
+group = "=0.13.0"
+subtle = "=2.6.1"
+sha2 = { workspace = true }
+zeroize = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+hex = { workspace = true }
