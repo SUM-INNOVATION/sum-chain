@@ -74,7 +74,9 @@ so the run is split into three explicit `run_authoritative.sh` commands:
 3. **`aggregate <x86_64_dir> <aarch64_dir> <workdir>`** — assemble the full
    `AUTHORITATIVE_STAGE1` bundle ONLY after BOTH per-arch bundles pass import
    verification, sourcing RISC Zero material from the x86_64 bundle
-   (`venue-verify aggregate-arches`), then `stage6-assemble` → `stage1-ingest`.
+   (`venue-verify aggregate-bundles`, the sealed-bundle path — the obsolete
+   `aggregate-arches` / `import-arch` mutable-directory path is not used), then
+   `stage6-assemble` → `stage1-ingest`.
 
 The assembler emits a strict `AUTHORITATIVE_STAGE1`-classified bundle; `stage1-ingest`
 is the single insertion gate and REFUSES any `TEST_ONLY` / `NON_SELECTION` bundle.
@@ -84,6 +86,15 @@ sample files matching the exact production schema (no Docker / toolchains / b3su
 for the producer→consumer compatibility tests. Dry-run tool identities are
 unmistakably synthetic (they carry the `TEST_ONLY_SYNTHETIC` sentinel) and can never
 substitute for real venue metadata.
+
+**Readiness preflight** (`scripts/preflight_venue.sh`, off-venue safe, read-only):
+one push-button check that the pipeline is READY to target the OFFICIAL guests
+before spending any venue time / cloud credits. It verifies the official-guest
+wiring, the off-venue container-context staging, the `not_finalizable` protocol
+boundary (no fabricated `.hash`), and that the authoritative producers fail closed
+off-venue — then prints the exact list of prove/measure stages that remain
+GATED/DEFERRED on a native venue + credits. `--deep` also runs the cargo-backed
+offline staging test + guest-core acceptance. It fabricates nothing.
 
 ## Hard boundaries (in force)
 
