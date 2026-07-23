@@ -61,14 +61,40 @@
 //! | `DkgJustifyV1` | (`r_ij` + Schnorr) | §6.5 | — | — | **ABSENT / non-normative** (not a carrier) |
 //! | `BeaconPartialV1` | `epoch, round, j`, `sigma_j` G2[96] | §2.4, §4.3, §10, §12 | signing → 29 | `0xBE04` (reserved) | inventoried; **not implemented** (PROPOSED) |
 //! | `BeaconFinalizeV1` | `epoch, round`, combined `Sigma_r` G2[96], selected-contributor witness | §4.3, §12 | signing → 29 | `0xBE05` (reserved) | inventoried; **not implemented** (PROPOSED) |
-//! | Equivocation — conflicting deal | (no carrier) two conflicting on-chain `DkgDealV1` sharing `(chain_id,epoch,i,j)` | §8.4, §6.4 | setup → 28 | — | **inline-detected** from duplicates; no dedicated carrier |
-//! | Equivocation — conflicting partial | (no carrier) two conflicting on-chain partials sharing `(epoch,round,j)` | §6.4 | signing → 29 | — | **inline-detected** from duplicates; no dedicated carrier |
+//! | DKG finalization (QUAL) | (no carrier) deterministic state transition | §4.2, §6.1 | setup → 28 | — | **not a carrier** — deterministic transition (see below) |
+//! | Equivocation — conflicting deal | (no carrier) two conflicting on-chain `DkgDealV1` sharing `(chain_id,epoch,i,j)` | §8.4, §6.4 | setup → 28 | — | **inline-detected** (see condition below) |
+//! | Equivocation — conflicting partial | (no carrier) two conflicting on-chain partials sharing `(epoch,round,j)` | §6.4 | signing → 29 | — | **inline-detected** (see condition below) |
+//!
+//! ### DKG finalization is a deterministic state transition, not a carrier
+//!
+//! **DKG finalization — determining the `QUAL` set at `h_cd` and, on success
+//! (`|QUAL| ≥ Q_dkg`), the epoch group key `PK_E = Σ_{i∈QUAL} C_{i,0}` — is a
+//! DETERMINISTIC STATE TRANSITION computed from the on-chain deals, complaints, and
+//! adjudication verdicts, NOT a submitted transaction carrier.** Verified against
+//! the BR1 draft: `QUAL` is "the set of dealers not disqualified by adjudicated
+//! complaints" and adjudication is "a pure function of on-chain data" (§4.2, §6.1),
+//! so every validator recomputes the identical `QUAL`/`PK_E` — there is no proposer
+//! `finalize-DKG` message and no submitted result to authenticate. It therefore
+//! correctly consumes **no** band slot. This is **distinct from** `BeaconFinalizeV1`
+//! (slot 29), which *is* a carrier: that is the per-round **signing-phase** output
+//! combine `Σ_r = ⊕ λ_k·σ_k` over verified partials (§4.3, §12) — a produced beacon
+//! output, not the epoch-setup QUAL determination.
+//!
+//! ### Equivocation inline-detection — the explicit condition (not a free lunch)
 //!
 //! Objective misconduct (§6.4) — conflicting deals/partials, invalid PoP, false
 //! accusation — is adjudicated from *existing on-chain records* (the two
 //! conflicting messages, the registration PoP, the complaint), so BR1 needs **no**
 //! separate "evidence submission" transaction (unlike staking's explicit
-//! `DoubleSignEvidence`). Equivocation therefore consumes **no** band slot.
+//! `DoubleSignEvidence`), and equivocation consumes **no** band slot — **but only
+//! under this explicit condition:** inline detection is valid **iff BOTH conflicting
+//! signed records are (a) available to execution — both reached the executing
+//! validator's view of the chain — AND (b) retained as evidence** (kept in
+//! revertible state, not pruned), so the adjudicator can compare them and attribute
+//! the verdict. If either conflicting record is absent from execution's view or has
+//! been discarded, the equivocation is *not* inline-detectable and a dedicated
+//! evidence carrier would be required; this design assumes both records persist
+//! within the epoch's retention window (cf. §10/§11.3).
 //!
 //! ## Two-level namespacing — beacon op tags are NOT `TxType` ordinals
 //!
@@ -149,32 +175,45 @@ pub const POP_LEN: usize = 96;
 /// any other length is a malformed deal.
 pub const CT_LEN: usize = 48;
 
-/// Wire-level upper bound on the number of Feldman commitments carried by a deal,
-/// **derived from the authoritative validator-set cap** (not self-chosen).
+/// Authoritative on-chain payload-size framing limit that [`MAX_COMMITMENTS`] is
+/// derived from: the genesis block-byte cap `GenesisParams::max_block_bytes`
+/// (`u64`, **default `1_000_000` = 1 MB** — `crates/genesis/src/lib.rs`, field
+/// decl ~L182, default ~L760). A transaction cannot exceed the block that carries
+/// it, so this is the hard upper bound on any deal's serialized size. It is
+/// mirrored here as a literal **only** because the wire leaf crate must not depend
+/// on `crates/genesis`; the live per-chain value is enforced above the wire
+/// (consensus/mempool block assembly), not by this codec.
+const DEFAULT_MAX_BLOCK_BYTES: usize = 1_000_000;
+
+/// Wire-level **framing / decode-DoS** bound on the commitment count — the most
+/// 48-byte commitments that can fit in a deal within one (default) max block.
 ///
-/// A dealer commits `degree + 1 = T` coefficients, and the reconstruction
-/// threshold is bounded by the committee size — `T ≤ n ≤ max_validators` — because
-/// the DKG membership snapshot is drawn from the active validator set. The
-/// authoritative cap is the genesis staking parameter
-/// [`crate::staking::StakingParams::max_validators`] (`u32`, **default 100** —
-/// defined in `crates/sumchain-wire/src/staking.rs` and enforced in
-/// `crates/state/src/staking_executor.rs`, which rejects a set that would exceed
-/// it). Hence:
+/// Derived from the authoritative *payload-size* limit
+/// [`DEFAULT_MAX_BLOCK_BYTES`], **not** from the validator-set cap:
 ///
 /// ```text
-/// MAX_COMMITMENTS = default max_validators = 100
-///   because  commitments = degree + 1 = T ≤ n ≤ max_validators.
+/// MAX_COMMITMENTS = (DEFAULT_MAX_BLOCK_BYTES - DkgDealV1::BASE_LEN) / G1_LEN
 /// ```
 ///
-/// This is a **derived DoS/framing bound**, not a frozen protocol parameter: the
-/// deal still encodes a bounded variable-length commitment vector
-/// (`1 ≤ count ≤ MAX_COMMITMENTS`), and the PROPOSED threshold `T = f + 1 = 2`
-/// (draft §1.2, unratified) sits far below the cap, so it never constrains a future
-/// ratified `T`. Because this leaf crate cannot read genesis at compile time, the
-/// bound tracks the **default** `max_validators`; **if a chain configures a larger
-/// `max_validators`, this constant MUST be raised in lockstep** (else a deal from a
-/// larger committee is rejected at the wire).
-pub const MAX_COMMITMENTS: usize = 100;
+/// Its only job is to cap decode-time allocation (`Vec::with_capacity(count)`) so a
+/// malicious `count` cannot request an unbounded vector; a deal larger than this
+/// cannot be included on-chain anyway. It is a *framing* ceiling, deliberately
+/// hundreds of times above any plausible committee, so it never rejects a
+/// semantically-valid deal: a smaller configured `max_block_bytes` is enforced
+/// independently by block assembly, and a larger one only matters for committees
+/// far beyond any real validator set. It intentionally does **not** encode `T` or
+/// the validator cap.
+///
+/// **SEMANTICS LIVE ABOVE THE WIRE (layer-boundary note, cf. the PoP caveat).** The
+/// decoder guarantees only that a deal is *well-framed and block-sized*. A future
+/// dispatch/execution path MUST, before accepting a deal into state, additionally
+/// enforce the semantic bounds this codec deliberately omits:
+/// `commitment_count == ratified T` (draft §1.2 `T = f + 1`, **unratified**) **and**
+/// `commitment_count <= active StakingParams::max_validators`
+/// (`crates/sumchain-wire/src/staking.rs`, enforced by
+/// `crates/state/src/staking_executor.rs`). The wire MUST NOT hardcode `T` or the
+/// live validator cap — those are configurable/ratifiable and belong to execution.
+pub const MAX_COMMITMENTS: usize = (DEFAULT_MAX_BLOCK_BYTES - DkgDealV1::BASE_LEN) / G1_LEN;
 
 /// First byte flag: compression bit — set in every canonical compressed encoding
 /// (ZCash/`blst`). A field with it clear is not a compressed point.
@@ -1020,6 +1059,19 @@ mod tests {
         assert_eq!(DkgDealV1::encoded_len(2), 229);
         assert_eq!(DkgDealV1::encoded_len(1), DkgDealV1::BASE_LEN + G1_LEN);
         assert_eq!(DkgDealV1::wire_op(), BeaconWireOp::DkgDeal);
+    }
+
+    #[test]
+    fn max_commitments_is_the_tight_block_framing_bound() {
+        // MAX_COMMITMENTS is derived from the authoritative payload-size limit
+        // (DEFAULT_MAX_BLOCK_BYTES), not from the validator cap: a deal at MAX fits
+        // in one default max block, and one more commitment would not.
+        assert!(DkgDealV1::encoded_len(MAX_COMMITMENTS) <= DEFAULT_MAX_BLOCK_BYTES);
+        assert!(DkgDealV1::encoded_len(MAX_COMMITMENTS + 1) > DEFAULT_MAX_BLOCK_BYTES);
+        // It is a framing/DoS ceiling far above any plausible committee, so it never
+        // rejects a semantically-valid deal: a deal from a full *default* committee
+        // (100 = default `StakingParams::max_validators`) is far below the ceiling.
+        assert!(DkgDealV1::encoded_len(100) < DkgDealV1::encoded_len(MAX_COMMITMENTS));
     }
 
     #[test]
