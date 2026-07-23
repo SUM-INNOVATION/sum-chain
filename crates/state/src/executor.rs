@@ -6480,6 +6480,70 @@ mod tests {
         assert!(!store.has_journal(height).unwrap(), "C1 journal consumed");
     }
 
+    /// A forced C1 revert failure (a corrupt journal) must abort the UNIFIED
+    /// `revert_block_state_diffs` BEFORE commit, so account (and contract) state
+    /// can never be reverted independently of C1 — all families revert or none.
+    #[test]
+    fn forced_c1_revert_failure_cannot_revert_account_independently() {
+        use crate::compute_pool::JobId;
+        use crate::compute_pool_store::ComputePoolStore;
+        use sumchain_storage::{cf, schema::AccountState};
+
+        let (state, db, _dir) = setup();
+        let params = ChainParams {
+            compute_pool_enabled_from_height: Some(0),
+            ..ChainParams::default()
+        };
+        let executor = BlockExecutor::new(state.clone(), db.clone(), params);
+
+        let height = 7u64;
+        let acct = Address::new([0x33; 20]);
+
+        // Post-block state: an account mutation (with its StateDiff) AND a C1
+        // transition (with its per-height journal), both finalized at `height`.
+        state
+            .put_account(&acct, &AccountState { balance: 50, nonce: 1 })
+            .unwrap();
+        let mut sd = StateDiff::new();
+        sd.add_change(
+            acct,
+            Some(AccountState { balance: 100, nonce: 0 }),
+            AccountState { balance: 50, nonce: 1 },
+        );
+        state.save_state_diff(height, sd).unwrap();
+        apply_one_job(&executor, height, 0x44);
+        let store = ComputePoolStore::new(&db);
+        assert!(store.has_journal(height).unwrap());
+
+        // Force a C1 revert failure: overwrite the journal with undecodable bytes
+        // (too short for the fixint length prefix -> c1_decode errors in
+        // stage_block_revert, before anything is committed).
+        db.put(cf::COMPUTE_POOL_STATE_DIFFS, &height.to_be_bytes(), &[0xFFu8; 4])
+            .unwrap();
+
+        // The unified revert MUST abort — nothing committed.
+        assert!(
+            state.revert_block_state_diffs(height).is_err(),
+            "corrupt C1 journal aborts the unified revert before commit"
+        );
+
+        // Account is NOT reverted independently; the C1 rows are likewise NOT
+        // reverted, and the corrupt journal is preserved for retry — all-or-none.
+        assert_eq!(
+            state.get_balance(&acct).unwrap(),
+            50,
+            "account NOT reverted while the C1 revert failed (all-or-none)"
+        );
+        assert!(
+            store.get_job(&JobId::from_bytes([0x44; 32])).unwrap().is_some(),
+            "C1 rows NOT reverted either (the whole revert aborted)"
+        );
+        assert!(
+            store.has_journal(height).unwrap(),
+            "corrupt C1 journal preserved for retry"
+        );
+    }
+
     /// Even with the gate test-enabled, the LIVE block-apply seam
     /// (`execute_block`) still writes nothing, because there is no `ComputePool`
     /// operation source on the live path yet — that is #125's gate-closed
