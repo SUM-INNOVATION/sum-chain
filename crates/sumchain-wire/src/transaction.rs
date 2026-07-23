@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
 
 use crate::agreement::AgreementTxData;
+use crate::b0::codec::DecodeError;
+use crate::beacon_wire::BeaconOperation;
 use crate::docclass::DocClassTxData;
 use crate::employment::EmploymentTxData;
 use crate::equity::EquityTxData;
@@ -91,6 +93,25 @@ pub enum TxType {
     /// Append-only, variant index frozen at 26. All operations are dormant-
     /// gated (`service_grants_enabled_from_height`, default None).
     Supply = 26,
+    // NOTE: top-level ordinal 27 is RESERVED for C1/ComputePool (#130) and is
+    // intentionally NOT registered — no compute-pool carrier exists yet, so
+    // `from_byte(27)` returns `None`. The beacon families own 28/29 (owner
+    // ratification, 2026-07; the band split is by PHASE, not subsystem).
+    /// Beacon **epoch-setup** operations (BR1 randomness beacon, #125). Append-only,
+    /// variant index frozen at **28** — note the deliberate gap at 27 (reserved for
+    /// C1/ComputePool, unregistered). Carries a
+    /// [`crate::beacon_wire::BeaconOperation`] in the epoch-setup phase
+    /// (`RegisterBeaconKeyV1` / `DkgDealV1` / `DkgComplaintV1`). The wire layout is
+    /// owner-RATIFIED and byte-FROZEN; EXECUTION is gate-closed behind
+    /// `beacon_enabled_from_height` (default `None`, fail-closed pending BR1 #127).
+    /// See crates/sumchain-wire/src/beacon_wire.rs and crates/state/src/beacon_executor.rs.
+    BeaconSetup = 28,
+    /// Beacon **signing/output** operations (BR1 randomness beacon, #125).
+    /// Append-only, variant index frozen at **29**. Carries a
+    /// [`crate::beacon_wire::BeaconOperation`] in the signing phase
+    /// (`BeaconPartialV1` / `BeaconFinalizeV1`). Wire layout FROZEN; EXECUTION
+    /// gate-closed (see [`TxType::BeaconSetup`]).
+    BeaconSigning = 29,
 }
 
 impl TxType {
@@ -124,6 +145,10 @@ impl TxType {
             24 => Some(TxType::InferenceSettlement),
             25 => Some(TxType::InferenceAttestationV2),
             26 => Some(TxType::Supply),
+            // 27 is RESERVED for C1/ComputePool (#130) and intentionally
+            // unregistered — it maps to `None` until a compute-pool carrier lands.
+            28 => Some(TxType::BeaconSetup),
+            29 => Some(TxType::BeaconSigning),
             _ => None,
         }
     }
@@ -349,6 +374,41 @@ impl NftOperation {
     }
 }
 
+/// Beacon transaction payload wrapper (BR1 randomness beacon, #125).
+///
+/// Holds the **frozen** canonical [`crate::beacon_wire::BeaconOperation`] encoding
+/// — the 7-byte-magic manual codec bytes — as an opaque length-prefixed blob,
+/// mirroring how [`NftTxData`]/[`TokenTxData`] carry their operation-specific
+/// `data: Vec<u8>`. The beacon layout is byte-frozen at the codec layer
+/// (`crates/sumchain-wire/src/beacon_wire.rs`); this wrapper only makes it compose
+/// into the serde/bincode `TxPayload`. Execution/admission decode it via
+/// [`crate::beacon_wire::BeaconOperation::decode_exact`] (magic/op-tag routing) and
+/// validate the carried op's phase against the enclosing `TxPayload` variant. The
+/// wrapper deliberately does **not** re-encode the operation through serde — the
+/// consensus bytes are the manual-codec bytes, never a serde re-derivation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeaconTxData {
+    /// Canonical `BeaconOperation` encoding (frozen manual-codec bytes). Opaque
+    /// at this layer; routed by its leading 7-byte magic.
+    pub op_bytes: Vec<u8>,
+}
+
+impl BeaconTxData {
+    /// Wrap a beacon operation as its canonical frozen encoding. `Err` iff the
+    /// operation fails its structural encode invariants.
+    pub fn from_operation(op: &BeaconOperation) -> Result<Self, DecodeError> {
+        Ok(Self {
+            op_bytes: op.try_encode()?,
+        })
+    }
+
+    /// Decode the carried bytes back into a `BeaconOperation` (magic/op-tag
+    /// routing, rejects trailing). Returns a decode error for malformed bytes.
+    pub fn decode_operation(&self) -> Result<BeaconOperation, DecodeError> {
+        BeaconOperation::decode_exact(&self.op_bytes)
+    }
+}
+
 /// Extended transaction with payload type
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransactionV2 {
@@ -450,6 +510,24 @@ pub enum TxPayload {
     /// Supply/service-grant operations (TxType 26, append-only; declaration
     /// ordinal 26). Dormant-gated; see crates/primitives/src/supply.rs.
     Supply(crate::supply::SupplyTxData),
+    /// Beacon **epoch-setup** operation (BR1 #125). `TxType` discriminant **28**;
+    /// bincode-serialized as the **28th** `TxPayload` variant (**declaration
+    /// ordinal 27**). The gap between the declaration ordinal (27) and the `TxType`
+    /// discriminant (28) is deliberate: top-level ordinal 27 belongs to
+    /// C1/ComputePool (#130), which has **no** `TxPayload` variant yet, so the
+    /// beacon variants are appended here. **Append-only** — never reorder above
+    /// this, and never insert a C1 variant before it: the beacon carrier bytes are
+    /// owner-FROZEN and any earlier C1 variant must likewise be appended. Carries a
+    /// [`crate::beacon_wire::BeaconOperation`] (epoch-setup phase). EXECUTION is
+    /// gate-closed (`beacon_enabled_from_height`, default `None`); see
+    /// crates/sumchain-wire/src/beacon_wire.rs and crates/state/src/beacon_executor.rs.
+    BeaconSetup(BeaconTxData),
+    /// Beacon **signing/output** operation (BR1 #125). `TxType` discriminant **29**;
+    /// bincode-serialized as the **29th** `TxPayload` variant (**declaration
+    /// ordinal 28**). **Append-only** — never reorder above this. Carries a
+    /// [`crate::beacon_wire::BeaconOperation`] (signing phase). EXECUTION gate-closed
+    /// (see [`TxPayload::BeaconSetup`]).
+    BeaconSigning(BeaconTxData),
 }
 
 impl TransactionV2 {
@@ -603,6 +681,8 @@ impl TransactionV2 {
             TxPayload::InferenceSettlement(_) => TxType::InferenceSettlement,
             TxPayload::InferenceAttestationV2(_) => TxType::InferenceAttestationV2,
             TxPayload::Supply(_) => TxType::Supply,
+            TxPayload::BeaconSetup(_) => TxType::BeaconSetup,
+            TxPayload::BeaconSigning(_) => TxType::BeaconSigning,
         }
     }
 
@@ -664,6 +744,9 @@ impl TransactionV2 {
             TxPayload::InferenceSettlement(_) => None, // settlement carries no transfer recipient
             TxPayload::InferenceAttestationV2(_) => None, // sponsored attestation, no value/recipient
             TxPayload::Supply(_) => None, // grant claims credit the sender; no recipient field
+            // Beacon carriers have no transfer recipient; the registrant/participant
+            // identity is the signer, bound at semantic validation (see beacon_executor).
+            TxPayload::BeaconSetup(_) | TxPayload::BeaconSigning(_) => None,
         }
     }
 
@@ -697,6 +780,7 @@ impl TransactionV2 {
             TxPayload::InferenceSettlement(_) => 0, // escrow moves via executor, not tx value
             TxPayload::InferenceAttestationV2(_) => 0, // sponsored attestation tx, no token value
             TxPayload::Supply(_) => 0, // amounts are ledger-derived, not payload value
+            TxPayload::BeaconSetup(_) | TxPayload::BeaconSigning(_) => 0, // beacon carriers move no token value
         }
     }
 

@@ -4,6 +4,7 @@
 //! Handles account balances, nonces, and transaction application.
 
 pub mod agreement_executor;
+pub mod beacon_executor;
 pub mod cache;
 pub mod compute_pool;
 pub mod compute_pool_manager;
@@ -119,6 +120,16 @@ pub enum StateError {
     /// no receipt is produced (admission only).
     #[error("Education suite not activated at this height")]
     EducationNotActivated,
+
+    /// BR1 randomness-beacon subprotocol (#125) is not active: the
+    /// `beacon_enabled_from_height` gate is `None`/in the future (and is
+    /// fail-closed pending BR1 #127). Beacon payloads (`BeaconSetup` /
+    /// `BeaconSigning`) are deterministically rejected at mempool admission so a
+    /// gate-closed beacon tx never enters the mempool; no receipt (admission only).
+    /// The executor independently rejects any beacon tx that reaches execution
+    /// (`crate::beacon_executor`, `Failed(400)`), mutating no beacon state.
+    #[error("Beacon subprotocol not activated at this height")]
+    BeaconNotActivated,
 
     /// An education record with the same identity is already in-flight
     /// in the mempool, OR already committed in a Phase 2 education CF.

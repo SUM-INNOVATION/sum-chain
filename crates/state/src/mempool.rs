@@ -198,6 +198,10 @@ impl Mempool {
         // variant. Returned key (if any) is stamped into
         // `education_in_flight` AFTER all other admission checks pass.
         let education_key = self.check_education_admission(&tx)?;
+        // BR1 beacon (#125) admission: deterministically reject beacon payloads
+        // while the subprotocol is gate-closed (the default; fail-closed pending
+        // #127). No-op for any non-beacon payload.
+        self.check_beacon_admission(&tx)?;
 
         // Check mempool size
         if self.txs.read().len() >= self.config.max_size {
@@ -627,6 +631,31 @@ impl Mempool {
         Ok(Some(key))
     }
 
+    /// BR1 randomness-beacon (#125) admission. `Ok(())` for any non-beacon
+    /// payload (skip — zero behavior change for other variants). For a beacon
+    /// payload (`BeaconSetup` / `BeaconSigning`), the subprotocol is **gate-closed**
+    /// and fail-closed pending BR1 #127, so admission **deterministically rejects**
+    /// with [`StateError::BeaconNotActivated`] — no beacon tx enters the mempool,
+    /// no receipt, no state. The executor independently rejects any beacon tx that
+    /// reaches execution (`crate::beacon_executor`), so both seams are closed.
+    ///
+    /// (When #127 makes `beacon_enabled_from_height` openable, this should consult
+    /// the gate via a wired admission context, exactly like
+    /// [`Self::check_inference_admission`] / [`Self::check_education_admission`];
+    /// until then the fail-closed unconditional rejection is the correct dormant
+    /// stance and needs no admission-context plumbing.)
+    fn check_beacon_admission(&self, tx: &SignedTransaction) -> Result<()> {
+        let TxInner::V2(v2_tx) = &tx.inner else {
+            return Ok(());
+        };
+        match &v2_tx.payload {
+            TxPayload::BeaconSetup(_) | TxPayload::BeaconSigning(_) => {
+                Err(StateError::BeaconNotActivated)
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Remove a transaction from the mempool
     pub fn remove(&self, hash: &Hash) -> Option<SignedTransaction> {
         let entry = self.txs.write().remove(hash)?;
@@ -954,6 +983,48 @@ mod tests {
         let result = mempool.add(tx);
 
         assert!(matches!(result, Err(StateError::TxAlreadyExists)));
+    }
+
+    #[test]
+    fn beacon_tx_decodes_but_admission_rejects_while_gate_closed() {
+        use sumchain_primitives::beacon_wire::{BeaconOperation, RegisterBeaconKeyV1, G1_LEN};
+        use sumchain_primitives::{BeaconTxData, TransactionV2, TxType};
+
+        // A well-formed beacon setup op, wrapped and signed as a V2 tx.
+        let mut ek = [0x11u8; G1_LEN];
+        ek[0] = 0x80; // compressed, non-infinity
+        let op = BeaconOperation::RegisterBeaconKey(RegisterBeaconKeyV1 {
+            chain_id: 1,
+            epoch: 1,
+            ek_j: ek,
+            pop: [0x22; 96],
+        });
+        let kp = KeyPair::generate();
+        let v2 = TransactionV2 {
+            chain_id: 1,
+            from: kp.address(),
+            fee: 10,
+            nonce: 0,
+            payload: TxPayload::BeaconSetup(BeaconTxData::from_operation(&op).unwrap()),
+        };
+        let sig = sign(v2.signing_hash().as_bytes(), kp.private_key());
+        let signed = SignedTransaction::new_v2(v2, *sig.as_bytes(), *kp.public_key().as_bytes());
+
+        // (a) It DECODES on the normal consensus path: bytes round-trip and the
+        // registered tx type is the beacon setup phase (28).
+        let back = SignedTransaction::from_bytes(&signed.to_bytes()).unwrap();
+        assert_eq!(back, signed);
+        assert_eq!(back.tx_type(), TxType::BeaconSetup);
+        assert_eq!(back.tx_type() as u8, 28);
+
+        // (b) But mempool admission deterministically REJECTS it while the beacon
+        // gate is closed (the default), and nothing enters the mempool.
+        let mempool = Mempool::new(MempoolConfig::default());
+        assert!(matches!(
+            mempool.add(signed),
+            Err(StateError::BeaconNotActivated)
+        ));
+        assert_eq!(mempool.len(), 0);
     }
 
     #[test]
