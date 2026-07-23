@@ -80,6 +80,11 @@ pub const C1_SCHEMA_VERSION: u8 = 1;
 /// value may make the decoder allocate. Records are tiny; 1 MiB is generous.
 pub const C1_DECODE_BYTE_LIMIT: u64 = 1 << 20;
 
+/// Domain tag for [`ComputePoolStore::state_digest`]. Separates the C1 state
+/// commitment from every other digest domain (mirrors the `SUM-…:v1` /
+/// `sumchain.supply.v1` domain-tag convention used elsewhere).
+const C1_STATE_DIGEST_DOMAIN: &[u8] = b"sumchain.compute_pool.state.v1";
+
 /// 1-byte domain/type prefixes for the shared C1 keyspace. Distinct per record
 /// category, so two categories can never alias even at equal body length.
 mod domain {
@@ -731,6 +736,44 @@ impl<'a> ComputePoolStore<'a> {
         Ok(map)
     }
 
+    /// Deterministic, domain-separated digest over the FULL persisted C1 state.
+    ///
+    /// Built from [`load_state_map`](Self::load_state_map), whose rows are
+    /// `BTreeMap`-ordered and content-addressed (never insertion-order
+    /// dependent), so every validator computes the identical digest. The block
+    /// executor folds this into the block state root **only when the compute-pool
+    /// gate is open**, binding every persisted C1 row into the consensus
+    /// commitment; while the gate is `None` (production default) it is never
+    /// folded, so dormant block roots are byte-for-byte unchanged.
+    ///
+    /// Encoding: `DOMAIN ‖ for each (key, value): key_len(u32 LE) ‖ key ‖
+    /// val_len(u32 LE) ‖ value`. Length prefixes make the concatenation
+    /// unambiguous; the empty state hashes to the domain-only digest.
+    pub fn state_digest(&self) -> Result<Hash> {
+        let rows = self.load_state_map()?;
+        let mut buf: Vec<u8> = Vec::with_capacity(C1_STATE_DIGEST_DOMAIN.len());
+        buf.extend_from_slice(C1_STATE_DIGEST_DOMAIN);
+        for (k, v) in &rows {
+            buf.extend_from_slice(&(k.len() as u32).to_le_bytes());
+            buf.extend_from_slice(k);
+            buf.extend_from_slice(&(v.len() as u32).to_le_bytes());
+            buf.extend_from_slice(v);
+        }
+        Ok(Hash::hash(&buf))
+    }
+
+    /// Load + canonically decode the per-height revert journal (`None` if absent,
+    /// e.g. always under the dormant gate, which writes no journal).
+    pub fn load_journal(&self, height: BlockHeight) -> Result<Option<ComputePoolStateDiff>> {
+        match self
+            .db
+            .get(cf::COMPUTE_POOL_STATE_DIFFS, &height.to_be_bytes())?
+        {
+            Some(bytes) => Ok(Some(c1_decode(&bytes)?)),
+            None => Ok(None),
+        }
+    }
+
     /// Persist the transition `before -> after` for `height` **atomically**.
     ///
     /// Exactly ONE finalized C1 transition may commit per block height. This is
@@ -838,22 +881,34 @@ impl<'a> ComputePoolStore<'a> {
             .contains(cf::COMPUTE_POOL_STATE_DIFFS, &height.to_be_bytes())?)
     }
 
-    /// Atomically revert the C1 state mutations recorded for `height`.
+    /// Stage the reverse-replay of the per-height C1 journal (and the journal's
+    /// own deletion) into a caller-provided
+    /// [`WriteBatch`](sumchain_storage::db::WriteBatch), returning whether
+    /// anything was staged (`false` when no journal exists at `height` — e.g.
+    /// ALWAYS under the dormant gate, which writes no journal).
     ///
-    /// Mirrors [`crate::state::StateManager::revert_block_state_diffs`]: mutations
-    /// are replayed in REVERSE record order (restore `old`, or delete when `old`
-    /// is `None`), and the journal entry is deleted — all in one
-    /// [`Database::batch`]. Every key is validated (correct CF, non-empty,
-    /// recognized domain prefix) BEFORE `commit`, so a corrupt journal aborts the
-    /// whole revert with nothing applied and the journal preserved for retry.
-    pub fn revert_block(&self, height: BlockHeight) -> Result<()> {
+    /// This is the seam that lets the C1 revert compose into the SAME atomic
+    /// write as the account + contract revert: the live reorg driver
+    /// ([`crate::state::StateManager::revert_block_state_diffs`]) stages account,
+    /// contract, AND C1 restores into one batch and commits once, so a crash can
+    /// never leave a partially-reverted node (all families revert or none do).
+    ///
+    /// Mutations are replayed in REVERSE record order (restore `old`, or delete
+    /// when `old` is `None`). Every key's domain prefix is validated BEFORE it is
+    /// staged, so a corrupt journal returns an error with nothing staged; because
+    /// the caller only commits on success, a corrupt C1 journal aborts the whole
+    /// multi-family revert and preserves every diff for retry.
+    pub fn stage_block_revert(
+        &self,
+        batch: &mut sumchain_storage::db::WriteBatch<'_>,
+        height: BlockHeight,
+    ) -> Result<bool> {
         let hkey = height.to_be_bytes();
         let Some(bytes) = self.db.get(cf::COMPUTE_POOL_STATE_DIFFS, &hkey)? else {
-            return Ok(()); // nothing to revert
+            return Ok(false); // nothing to revert
         };
         let diff: ComputePoolStateDiff = c1_decode(&bytes)?;
 
-        let mut batch = self.db.batch();
         for record in diff.records.iter().rev() {
             // Validate the key domain before staging (corruption guard).
             match record.key.first() {
@@ -879,7 +934,23 @@ impl<'a> ComputePoolStore<'a> {
             }
         }
         batch.delete(cf::COMPUTE_POOL_STATE_DIFFS, &hkey)?;
-        batch.commit()?; // single atomic commit
+        Ok(true)
+    }
+
+    /// Atomically revert the C1 state mutations recorded for `height` in
+    /// isolation (its own [`Database::batch`]).
+    ///
+    /// Thin wrapper over [`stage_block_revert`](Self::stage_block_revert): stages
+    /// the reverse-replay into a fresh batch and commits it. A corrupt journal
+    /// propagates the error with nothing committed and the journal preserved for
+    /// retry. Retained for the standalone store/manager tests; the LIVE reorg
+    /// path drives `stage_block_revert` into the unified account+contract+C1
+    /// batch instead (one commit, crash-consistent across all families).
+    pub fn revert_block(&self, height: BlockHeight) -> Result<()> {
+        let mut batch = self.db.batch();
+        if self.stage_block_revert(&mut batch, height)? {
+            batch.commit()?; // single atomic commit
+        }
         Ok(())
     }
 

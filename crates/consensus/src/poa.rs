@@ -675,16 +675,12 @@ impl PoAEngine {
 
         // Revert old chain blocks (except common ancestor)
         for block in old_chain.iter().rev().skip(1) {
-            // Atomically revert account + contract state together, so an
-            // orphaned block cannot leave contract state behind while account
-            // state rolls back (or vice versa).
+            // Atomically revert account + contract + dormant C1 compute-pool state
+            // together in a single write batch (issue #130), so an orphaned block
+            // cannot leave any one family behind while another rolls back. Under
+            // the production `None` gate no C1 journal exists, so the C1 revert is
+            // an inert no-op inside the same batch.
             self.state.revert_block_state_diffs(block.height())?;
-            // Revert the dormant C1 compute-pool transition for this block too,
-            // so a reorg rolls back compute-pool state alongside account +
-            // contract state. GATE-CLOSED: inert (manager never constructed,
-            // nothing reverted) under the production `None` gate.
-            self.executor
-                .revert_compute_pool_transitions(block.height())?;
 
             // Return transactions to mempool
             for tx in &block.transactions {

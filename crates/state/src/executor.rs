@@ -17,7 +17,8 @@ use tracing::{debug, info, warn};
 
 use crate::agreement_executor::AgreementExecutor;
 use crate::compute_pool::{ComputePoolModel, PoolResult};
-use crate::compute_pool_manager::ComputePoolManager;
+use crate::compute_pool_manager::{compute_pool_gate_open, ComputePoolManager};
+use crate::compute_pool_store::ComputePoolStore;
 use crate::contract_executor::ContractExecutorState;
 use crate::docclass_executor::DocClassExecutor;
 use crate::employment_executor::EmploymentExecutor;
@@ -3020,21 +3021,24 @@ impl BlockExecutor {
         contract_diff.records = self.contract_executor.take_journal();
         contract_diff.sort();
 
-        // Compute new state root (folds the contract-state digest once the
-        // contracts gate is open — see compute_block_state_root).
-        let state_root = self.compute_block_state_root(block, &receipts, &contract_diff)?;
-        self.state.set_state_root(state_root);
-
         // ── Dormant C1 compute-pool subprotocol (issue #130) ──
         // Drive this block's compute-pool transitions through the gated
-        // `ComputePoolManager` into the model + persistent store, then (on a
-        // reorg) revert them per height via `revert_compute_pool_transitions`.
+        // `ComputePoolManager` into the model + persistent store (rows + per-height
+        // revert journal committed atomically in one write batch), BEFORE the state
+        // root so the committed C1 state is folded into the consensus commitment
+        // when the gate is open. On reorg these rows revert atomically with account
+        // + contract state via `StateManager::revert_block_state_diffs`.
         // GATE-CLOSED: under the production default
         // (`compute_pool_enabled_from_height == None`) the manager is never
-        // constructed and nothing is applied — the hook is inert. These rows are
-        // deliberately NOT folded into the state root above (storage/revert-
-        // adapter design), so this call cannot change any block root.
+        // constructed, nothing is applied, and the root fold below is skipped — the
+        // whole path is inert and dormant block roots are byte-for-byte unchanged.
         self.apply_compute_pool_transitions(block.height())?;
+
+        // Compute new state root (folds the contract-state digest once the
+        // contracts gate is open, and the C1 state digest once the compute-pool
+        // gate is open — see compute_block_state_root).
+        let state_root = self.compute_block_state_root(block, &receipts, &contract_diff)?;
+        self.state.set_state_root(state_root);
 
         info!(
             "Block {} executed, new state root: {}",
@@ -3084,24 +3088,6 @@ impl BlockExecutor {
         Ok(())
     }
 
-    /// Gated compute-pool REORG-REVERT seam (issue #130).
-    ///
-    /// Reverts the C1 compute-pool transition finalized at `height` by rolling
-    /// back the persistent store's per-height revert journal (via the manager).
-    /// Called from the PoA reorg driver alongside
-    /// [`StateManager::revert_block_state_diffs`](crate::state::StateManager::revert_block_state_diffs),
-    /// so a reverted block rolls back account, contract, AND (once enabled)
-    /// compute-pool state together.
-    ///
-    /// GATE-CLOSED / dormant: under the production `None` gate the manager is
-    /// never constructed and nothing is reverted — a no-op.
-    pub fn revert_compute_pool_transitions(&self, height: BlockHeight) -> Result<()> {
-        if let Some(mut manager) = ComputePoolManager::new_enabled(&self.db, &self.params, height) {
-            manager.revert_block(height)?;
-        }
-        Ok(())
-    }
-
     /// Compute state root after block execution
     fn compute_block_state_root(
         &self,
@@ -3147,6 +3133,21 @@ impl BlockExecutor {
         // byte unchanged (like the contracts gate above).
         if let Some(digest) = crate::supply::SupplyStore::new(self.db.clone()).state_digest()? {
             data.extend_from_slice(digest.as_bytes());
+        }
+
+        // Commit the dormant C1 compute-pool state into the root, but ONLY at/after
+        // the compute-pool activation gate (issue #130). Below the gate — the
+        // production default `compute_pool_enabled_from_height == None`, closed at
+        // every height — this branch is skipped, so the formula is byte-for-byte
+        // unchanged and dormant block roots match un-upgraded nodes; C1 state
+        // therefore cannot affect consensus while dormant. Once the gate is open,
+        // every persisted C1 row is bound into the consensus commitment, so
+        // validators cannot diverge on compute-pool state undetected. Mirrors the
+        // contracts/supply gated folds above; C1 rows are applied BEFORE this in
+        // execute_block, so the digest sees this block's transition.
+        if compute_pool_gate_open(&self.params, block.height()) {
+            let cp_digest = ComputePoolStore::new(&self.db).state_digest()?;
+            data.extend_from_slice(cp_digest.as_bytes());
         }
 
         // Mix with previous state root (from before this block's execution)
@@ -6214,11 +6215,12 @@ mod tests {
             "dormant gate must not write any C1 revert journal during block-apply"
         );
 
-        // The reorg-revert seam is a clean no-op under the dormant gate.
-        executor.revert_compute_pool_transitions(1).unwrap();
+        // The unified reorg-revert path is a clean no-op under the dormant gate
+        // (no account/contract/C1 diff at this height).
+        state.revert_block_state_diffs(1).unwrap();
         assert!(
             store.load_state_map().unwrap().is_empty(),
-            "dormant reorg-revert seam must touch nothing"
+            "dormant reorg-revert must touch nothing"
         );
     }
 
@@ -6291,8 +6293,9 @@ mod tests {
             "per-height revert journal written by the apply seam"
         );
 
-        // REORG-REVERT: the gated revert seam rolls this block's C1 state back.
-        executor.revert_compute_pool_transitions(height).unwrap();
+        // REORG-REVERT: the unified atomic reorg path (account+contract+C1 in one
+        // batch) rolls this block's C1 state back.
+        state.revert_block_state_diffs(height).unwrap();
         assert!(
             store.get_job(&job).unwrap().is_none(),
             "job reverted on reorg"
@@ -6307,7 +6310,174 @@ mod tests {
         );
 
         // Idempotent: reverting an already-consumed height is a clean no-op.
-        executor.revert_compute_pool_transitions(height).unwrap();
+        state.revert_block_state_diffs(height).unwrap();
+    }
+
+    /// Helper: apply a one-job C1 transition at `height` through the gated apply
+    /// seam (stand-in for #125's dispatch operation source).
+    fn apply_one_job(executor: &BlockExecutor, height: u64, seed: u8) {
+        use crate::compute_pool::{
+            ComputePoolModel, ExposureInputs, JobId, UnitId, UnitSizing, UnitState, WorkUnit,
+        };
+        let job = JobId::from_bytes([seed; 32]);
+        let unit = UnitId::from_bytes([seed.wrapping_add(1); 32]);
+        executor
+            .apply_compute_pool_ops(height, move |m: &mut ComputePoolModel| {
+                m.create_job(
+                    job,
+                    Address::new([9; 20]),
+                    1,
+                    vec![WorkUnit {
+                        job_id: job,
+                        unit_id: unit,
+                        predecessors: vec![],
+                        required_inputs: vec![],
+                        generation: 0,
+                        state: UnitState::Blocked,
+                    }],
+                    &[UnitSizing { slots: 0 }],
+                    1,
+                    0,
+                    1_000,
+                    ExposureInputs {
+                        q: 100,
+                        reprovision_allowance: 10,
+                        job_max_retention_files: 0,
+                        max_reassignments_per_file: 2,
+                        reassign_reimb: 5,
+                    },
+                    1_000_000,
+                )
+                .map(|_| ())
+            })
+            .unwrap();
+    }
+
+    /// DORMANT IDENTITY (state commitment): under the production default gate the
+    /// state root is INDEPENDENT of C1 state — injecting arbitrary C1 rows must not
+    /// change the computed block root. This proves compute-pool state cannot affect
+    /// consensus while dormant, i.e. the commitment fold is a strict no-op under
+    /// `None` and dormant roots are byte-for-byte unchanged by this change.
+    #[test]
+    fn compute_pool_commitment_is_noop_under_dormant_gate() {
+        let (state, db, _dir) = setup();
+        let executor = BlockExecutor::new(state.clone(), db.clone(), ChainParams::default());
+
+        let proposer = KeyPair::generate();
+        let blk = compute_pool_test_block(1, &proposer);
+        let empty_diff = ContractStateDiff::new();
+
+        let root_before = executor
+            .compute_block_state_root(&blk, &[], &empty_diff)
+            .unwrap();
+
+        // Inject arbitrary bytes into the C1 state CF (domain-prefixed junk).
+        db.put(
+            sumchain_storage::cf::COMPUTE_POOL_STATE,
+            &[0x01, 9, 9, 9],
+            b"junk-c1-state",
+        )
+        .unwrap();
+
+        let root_after = executor
+            .compute_block_state_root(&blk, &[], &empty_diff)
+            .unwrap();
+
+        assert_eq!(
+            root_before, root_after,
+            "under the dormant None gate, C1 state must NOT be folded into the root"
+        );
+    }
+
+    /// STATE COMMITMENT (enabled): once the gate is open, C1 state IS bound into
+    /// the block state root — the same injected rows that were invisible above now
+    /// change the root, so validators cannot diverge on compute-pool state
+    /// undetected. Complements the dormant-identity test.
+    #[test]
+    fn compute_pool_commitment_binds_state_when_gate_open() {
+        let (state, db, _dir) = setup();
+        let params = ChainParams {
+            compute_pool_enabled_from_height: Some(0),
+            ..ChainParams::default()
+        };
+        let executor = BlockExecutor::new(state.clone(), db.clone(), params);
+
+        let proposer = KeyPair::generate();
+        let blk = compute_pool_test_block(1, &proposer);
+        let empty_diff = ContractStateDiff::new();
+
+        let root_empty = executor
+            .compute_block_state_root(&blk, &[], &empty_diff)
+            .unwrap();
+
+        db.put(
+            sumchain_storage::cf::COMPUTE_POOL_STATE,
+            &[0x01, 9, 9, 9],
+            b"junk-c1-state",
+        )
+        .unwrap();
+
+        let root_with_c1 = executor
+            .compute_block_state_root(&blk, &[], &empty_diff)
+            .unwrap();
+
+        assert_ne!(
+            root_empty, root_with_c1,
+            "with the gate open, C1 state must be committed into the block root"
+        );
+    }
+
+    /// ATOMIC REORG REVERT: a reverted block rolls back account AND C1 state in a
+    /// SINGLE `revert_block_state_diffs` call (one write batch), so the two
+    /// families cannot end up partially reverted.
+    #[test]
+    fn compute_pool_reorg_reverts_account_and_c1_in_one_call() {
+        use crate::compute_pool::JobId;
+        use crate::compute_pool_store::ComputePoolStore;
+        use sumchain_storage::schema::AccountState;
+
+        let (state, db, _dir) = setup();
+        let params = ChainParams {
+            compute_pool_enabled_from_height: Some(0),
+            ..ChainParams::default()
+        };
+        let executor = BlockExecutor::new(state.clone(), db.clone(), params);
+
+        let height = 7u64;
+        let acct = Address::new([0x33; 20]);
+
+        // Post-block state: an account mutation (with a saved StateDiff) AND a C1
+        // transition (with its per-height journal), both finalized at `height`.
+        state
+            .put_account(&acct, &AccountState { balance: 50, nonce: 1 })
+            .unwrap();
+        let mut sd = StateDiff::new();
+        sd.add_change(
+            acct,
+            Some(AccountState { balance: 100, nonce: 0 }),
+            AccountState { balance: 50, nonce: 1 },
+        );
+        state.save_state_diff(height, sd).unwrap();
+        apply_one_job(&executor, height, 0x44);
+
+        let store = ComputePoolStore::new(&db);
+        assert!(store.get_job(&JobId::from_bytes([0x44; 32])).unwrap().is_some());
+        assert!(store.has_journal(height).unwrap());
+
+        // ONE call reverts BOTH families atomically.
+        state.revert_block_state_diffs(height).unwrap();
+
+        assert_eq!(
+            state.get_balance(&acct).unwrap(),
+            100,
+            "account reverted to pre-block balance"
+        );
+        assert!(
+            store.get_job(&JobId::from_bytes([0x44; 32])).unwrap().is_none(),
+            "C1 job reverted in the same call"
+        );
+        assert!(store.load_state_map().unwrap().is_empty(), "all C1 rows reverted");
+        assert!(!store.has_journal(height).unwrap(), "C1 journal consumed");
     }
 
     /// Even with the gate test-enabled, the LIVE block-apply seam
