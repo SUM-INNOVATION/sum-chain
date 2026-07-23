@@ -18,6 +18,12 @@ blstrs = "=0.7.1"
 ff = "=0.13.1"
 group = "=0.13.0"
 subtle = "=2.6.1"
+# ECIES symmetric layer (draft §8): HKDF-SHA-256 (RFC 5869) + ChaCha20-Poly1305.
+# `=`-pinned like the pairing deps (issue #127 owner condition); already present in
+# the committed Cargo.lock, so `--locked` builds are unaffected. Confined to the
+# `ecies` module — no raw AEAD/HKDF type crosses the crate boundary.
+hkdf = "=0.12.4"
+chacha20poly1305 = "=0.10.1"
 sha2 = { workspace = true }
 zeroize = { workspace = true }
 thiserror = { workspace = true }

@@ -360,6 +360,135 @@ pub fn combine(partials: &[PartialSignature]) -> Result<Signature> {
 }
 
 // ---------------------------------------------------------------------------
+// DKG aggregation, Feldman verification, ECDH (G1 arithmetic, spec §4.2/§6.2/§8)
+// ---------------------------------------------------------------------------
+
+impl PublicKey {
+    /// Reinterpret a validated [`G1Point`] (same group, same §2.2 checks) as a
+    /// beacon verification key. Used for the aggregated group key `PK_E` and the
+    /// per-participant `vk_j`, which are sums of already-validated G1 elements.
+    pub fn from_g1_point(p: G1Point) -> Self {
+        PublicKey(p.0)
+    }
+}
+
+impl SecretScalar {
+    /// Sum two signing shares (spec §4.2): a participant's final share is
+    /// `sk_j = Σ_{i∈QUAL} s_{ij}`. Field addition in `F_r`; the sum is always a
+    /// canonical scalar, so this is infallible.
+    pub fn add(&self, other: &SecretScalar) -> SecretScalar {
+        let sum_le = self.with_scalar(|a| other.with_scalar(|b| (*a + *b).to_bytes_le()));
+        SecretScalar {
+            le_bytes: Zeroizing::new(sum_le),
+        }
+    }
+
+    /// ECDH shared secret `D = point^{self}` in G1 (spec §8.2). For a dealer this is
+    /// `D_{ij} = EK_j^{r_ij}`; for a recipient `D_{ij} = R_{ij}^{ek_j}`. Rejects an
+    /// identity result (only possible from a zero scalar — a degenerate key).
+    pub fn ecdh(&self, point: &G1Point) -> Result<G1Point> {
+        let p = self.with_scalar(|s| point.projective() * *s).to_affine();
+        if bool::from(p.is_identity()) {
+            return Err(BeaconCryptoError::PointAtInfinity);
+        }
+        Ok(G1Point(p))
+    }
+}
+
+/// Evaluate the *committed* polynomial "in the exponent" at `x`:
+/// `Σ_{k} [x^k mod r] · C_k` (in G1), where `commitments = [C_0, …, C_{deg}]`.
+/// This is the RHS of the Feldman check (spec §6.2) and a single dealer's
+/// contribution term to the aggregated `vk_j` (spec §2.4/§4.2). `x = x_j = j + 1`
+/// (spec §3). Returns `DegenerateAggregate` if `commitments` is empty or the term
+/// evaluates to the identity.
+pub fn commitment_poly_eval(commitments: &[G1Point], x: u64) -> Result<G1Point> {
+    let acc = commitment_eval_projective(commitments, x)?;
+    let aff = acc.to_affine();
+    if bool::from(aff.is_identity()) {
+        return Err(BeaconCryptoError::DegenerateAggregate);
+    }
+    Ok(G1Point(aff))
+}
+
+/// Internal: `Σ_k [x^k] C_k` in projective G1. Errors only on an empty vector.
+fn commitment_eval_projective(commitments: &[G1Point], x: u64) -> Result<G1Projective> {
+    if commitments.is_empty() {
+        return Err(BeaconCryptoError::DegenerateAggregate);
+    }
+    let x = Scalar::from(x);
+    let mut x_pow = Scalar::ONE; // x^0
+    let mut acc = G1Projective::identity();
+    for c in commitments {
+        acc += c.projective() * x_pow;
+        x_pow *= x;
+    }
+    Ok(acc)
+}
+
+/// Feldman share check (spec §6.2): `g1^{s} == Π_k C_k^{x^k}` (equivalently, in the
+/// additive notation used here, `[s]·g1 == Σ_k [x^k] C_k`). `share_le` is the
+/// candidate scalar share `s_ij` as canonical 32-byte little-endian; a non-canonical
+/// (`≥ r`) encoding is rejected (`NonCanonicalScalar`). `x = x_j = j + 1`.
+///
+/// Returns `Ok(true)` iff the share is consistent with the dealer's commitments.
+pub fn feldman_check(
+    commitments: &[G1Point],
+    x: u64,
+    share_le: &[u8; SCALAR_SIZE],
+) -> Result<bool> {
+    let s: Scalar = Option::from(Scalar::from_bytes_le(share_le))
+        .ok_or(BeaconCryptoError::NonCanonicalScalar)?;
+    let lhs = G1Projective::generator() * s;
+    let rhs = commitment_eval_projective(commitments, x)?;
+    Ok(lhs == rhs)
+}
+
+/// Aggregate a set of validated G1 points into one (spec §4.2): `PK_E = Σ C_{i,0}`
+/// over `QUAL`, or `vk_j = Σ_{i∈QUAL} (Σ_k [x_j^k] C_{i,k})`. Rejects an empty input
+/// or a sum equal to the identity (a degenerate group/verification key, §2.2).
+pub fn aggregate_g1(points: &[G1Point]) -> Result<G1Point> {
+    if points.is_empty() {
+        return Err(BeaconCryptoError::DegenerateAggregate);
+    }
+    let mut acc = G1Projective::identity();
+    for p in points {
+        acc += p.projective();
+    }
+    let aff = acc.to_affine();
+    if bool::from(aff.is_identity()) {
+        return Err(BeaconCryptoError::DegenerateAggregate);
+    }
+    Ok(G1Point(aff))
+}
+
+/// Whether canonical 32-byte little-endian `bytes` decode to an in-range `F_r`
+/// scalar (`< r`). Confines the `blstrs::Scalar` canonicality test to this module so
+/// the `ecies` module can range-check a decrypted share without touching `blstrs`.
+pub(crate) fn scalar_le_is_canonical(bytes: &[u8; SCALAR_SIZE]) -> bool {
+    Option::<Scalar>::from(Scalar::from_bytes_le(bytes)).is_some()
+}
+
+/// Evaluate a sharing polynomial `f(x) = Σ_k coeffs[k]·x^k` over `F_r` (spec §3),
+/// returning the share `f(x)` as canonical 32-byte little-endian. Dealer-side share
+/// computation: for recipient `j`, `x = x_j = j + 1`. Each coefficient must be a
+/// canonical scalar (`< r`), else [`BeaconCryptoError::NonCanonicalScalar`].
+pub fn eval_share_le(coeffs_le: &[[u8; SCALAR_SIZE]], x: u64) -> Result<[u8; SCALAR_SIZE]> {
+    if coeffs_le.is_empty() {
+        return Err(BeaconCryptoError::NonCanonicalScalar);
+    }
+    let x = Scalar::from(x);
+    let mut x_pow = Scalar::ONE; // x^0
+    let mut acc = Scalar::ZERO;
+    for c in coeffs_le {
+        let coeff: Scalar =
+            Option::from(Scalar::from_bytes_le(c)).ok_or(BeaconCryptoError::NonCanonicalScalar)?;
+        acc += coeff * x_pow;
+        x_pow *= x;
+    }
+    Ok(acc.to_bytes_le())
+}
+
+// ---------------------------------------------------------------------------
 // DLEQ (single-group Chaum-Pedersen in G1) — spec §5
 // ---------------------------------------------------------------------------
 
