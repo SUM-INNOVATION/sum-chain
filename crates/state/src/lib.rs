@@ -6,6 +6,8 @@
 pub mod agreement_executor;
 pub mod cache;
 pub mod compute_pool;
+pub mod compute_pool_manager;
+pub mod compute_pool_store;
 pub mod contract_executor;
 pub mod docclass_executor;
 pub mod education_executor;

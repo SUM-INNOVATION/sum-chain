@@ -44,6 +44,23 @@ export SP1_TOOL_IDENTITY=...     # path to the ratified SP1 tool-identity metada
 export RISC0_TOOL_IDENTITY=...   # path to the ratified RISC Zero tool-identity metadata
 ```
 
+## 1b. Preflight before spending venue time (off-venue safe, read-only)
+
+Before the (credit-consuming) native run, confirm the pipeline is READY to target the
+OFFICIAL candidate guests. This is off-venue safe and fabricates nothing — it verifies
+the official-guest wiring, the container-context staging, the `not_finalizable`
+protocol boundary, and that the authoritative producers fail closed off-venue, then
+prints exactly which prove/measure stages remain venue/credit-gated:
+
+```sh
+bash tools/b0-pre-candidates/scripts/preflight_venue.sh          # fast structural checks
+bash tools/b0-pre-candidates/scripts/preflight_venue.sh --deep   # + cargo offline proofs
+```
+
+Expect `READY: every non-GPU/non-credit venue-readiness check passed.` On a real venue
+host the fail-closed sub-check is skipped (the authoritative run is available there and
+must not be launched by the preflight); the readiness assertions still apply.
+
 ## 2. Produce each architecture's sealed bundle (on its own native host)
 
 The producer runs Stage 0 gates, two clean OCI builds per candidate, in-container lock

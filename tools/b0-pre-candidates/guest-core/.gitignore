@@ -1,0 +1,6 @@
+# Host build artifacts — never committed. `b0-pre-guest-core` is a host-testable
+# library; its lock is resolved locally for `cargo test` and is NOT a venue
+# artifact, so (matching the repo rule "a lock must never be committed from a
+# non-venue host") it is ignored here.
+/target/
+/Cargo.lock

@@ -137,7 +137,8 @@ fn all_27_txpayload_tags_are_frozen() {
 
 #[test]
 fn txtype_out_of_range_ordinal_rejected() {
-    // 27 is reserved for W1b — it MUST NOT decode as a valid TxType in W1a.
+    // 27 is reserved for C1 / ComputePool (#130) — it MUST NOT decode as a valid
+    // TxType in W1a. (The W1b beacon band is 28/29.)
     assert!(TxType::from_byte(27).is_none());
     assert!(TxType::from_byte(255).is_none());
 }
