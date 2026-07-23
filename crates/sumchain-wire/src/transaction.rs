@@ -409,6 +409,22 @@ impl BeaconTxData {
     }
 }
 
+/// Uninhabited placeholder type occupying the C1/ComputePool reserved
+/// [`TxPayload`] declaration position (#130, top-level ordinal 27).
+///
+/// It is a **zero-variant enum**, so no value can ever be constructed — therefore
+/// [`TxPayload::ComputePoolReserved`] is **unconstructable**, and any transaction
+/// whose outer bincode enum tag is `27` is **rejected at decode** (bincode reads
+/// the inner variant index and finds no valid variant). This preserves the 1:1
+/// `TxType` ↔ `TxPayload` positional correspondence the codebase has held for
+/// ordinals 0–26: it holds the positional slot `27` so the beacon variants land at
+/// positional tags **28**/**29**, exactly equal to their `TxType` discriminants
+/// (`BeaconSetup = 28`, `BeaconSigning = 29`). When C1/ComputePool is defined it
+/// **replaces** this variant in place at position 27 (TxType 27); no beacon bytes
+/// shift. See the module note on `TxPayload` and beacon_wire.rs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ComputePoolReservedSlot {}
+
 /// Extended transaction with payload type
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransactionV2 {
@@ -510,23 +526,30 @@ pub enum TxPayload {
     /// Supply/service-grant operations (TxType 26, append-only; declaration
     /// ordinal 26). Dormant-gated; see crates/primitives/src/supply.rs.
     Supply(crate::supply::SupplyTxData),
+    /// **Reserved positional slot for C1/ComputePool** (#130, top-level ordinal
+    /// **27**). Declaration ordinal 27 == bincode enum tag 27 == the reserved
+    /// `TxType` slot 27, preserving the 1:1 `TxType` ↔ `TxPayload` positional
+    /// correspondence. Holds the uninhabited [`ComputePoolReservedSlot`], so this
+    /// variant is **unconstructable** and any tx with outer tag 27 is **rejected at
+    /// decode** (C1 has no payload yet). **Do not remove or reorder**: when C1 is
+    /// defined it replaces this variant in place (position 27, TxType 27). This is
+    /// what lets the beacon variants below sit at positional tags 28/29 == their
+    /// `TxType` discriminants without any future C1 addition shifting beacon bytes.
+    ComputePoolReserved(ComputePoolReservedSlot),
     /// Beacon **epoch-setup** operation (BR1 #125). `TxType` discriminant **28**;
     /// bincode-serialized as the **28th** `TxPayload` variant (**declaration
-    /// ordinal 27**). The gap between the declaration ordinal (27) and the `TxType`
-    /// discriminant (28) is deliberate: top-level ordinal 27 belongs to
-    /// C1/ComputePool (#130), which has **no** `TxPayload` variant yet, so the
-    /// beacon variants are appended here. **Append-only** — never reorder above
-    /// this, and never insert a C1 variant before it: the beacon carrier bytes are
-    /// owner-FROZEN and any earlier C1 variant must likewise be appended. Carries a
-    /// [`crate::beacon_wire::BeaconOperation`] (epoch-setup phase). EXECUTION is
-    /// gate-closed (`beacon_enabled_from_height`, default `None`); see
-    /// crates/sumchain-wire/src/beacon_wire.rs and crates/state/src/beacon_executor.rs.
+    /// ordinal 28** — equal to its `TxType`, thanks to the reserved slot 27 above).
+    /// **Append-only** — never reorder above this; the beacon carrier bytes are
+    /// owner-FROZEN. Carries a [`crate::beacon_wire::BeaconOperation`] (epoch-setup
+    /// phase). EXECUTION is gate-closed (`beacon_enabled_from_height`, default
+    /// `None`); see crates/sumchain-wire/src/beacon_wire.rs and
+    /// crates/state/src/beacon_executor.rs.
     BeaconSetup(BeaconTxData),
     /// Beacon **signing/output** operation (BR1 #125). `TxType` discriminant **29**;
     /// bincode-serialized as the **29th** `TxPayload` variant (**declaration
-    /// ordinal 28**). **Append-only** — never reorder above this. Carries a
-    /// [`crate::beacon_wire::BeaconOperation`] (signing phase). EXECUTION gate-closed
-    /// (see [`TxPayload::BeaconSetup`]).
+    /// ordinal 29** — equal to its `TxType`). **Append-only** — never reorder above
+    /// this. Carries a [`crate::beacon_wire::BeaconOperation`] (signing phase).
+    /// EXECUTION gate-closed (see [`TxPayload::BeaconSetup`]).
     BeaconSigning(BeaconTxData),
 }
 
@@ -681,6 +704,8 @@ impl TransactionV2 {
             TxPayload::InferenceSettlement(_) => TxType::InferenceSettlement,
             TxPayload::InferenceAttestationV2(_) => TxType::InferenceAttestationV2,
             TxPayload::Supply(_) => TxType::Supply,
+            // Uninhabited reserved slot — unreachable (no value can exist).
+            TxPayload::ComputePoolReserved(never) => match *never {},
             TxPayload::BeaconSetup(_) => TxType::BeaconSetup,
             TxPayload::BeaconSigning(_) => TxType::BeaconSigning,
         }
@@ -744,6 +769,7 @@ impl TransactionV2 {
             TxPayload::InferenceSettlement(_) => None, // settlement carries no transfer recipient
             TxPayload::InferenceAttestationV2(_) => None, // sponsored attestation, no value/recipient
             TxPayload::Supply(_) => None, // grant claims credit the sender; no recipient field
+            TxPayload::ComputePoolReserved(never) => match *never {}, // uninhabited
             // Beacon carriers have no transfer recipient; the registrant/participant
             // identity is the signer, bound at semantic validation (see beacon_executor).
             TxPayload::BeaconSetup(_) | TxPayload::BeaconSigning(_) => None,
@@ -780,6 +806,7 @@ impl TransactionV2 {
             TxPayload::InferenceSettlement(_) => 0, // escrow moves via executor, not tx value
             TxPayload::InferenceAttestationV2(_) => 0, // sponsored attestation tx, no token value
             TxPayload::Supply(_) => 0, // amounts are ledger-derived, not payload value
+            TxPayload::ComputePoolReserved(never) => match *never {}, // uninhabited
             TxPayload::BeaconSetup(_) | TxPayload::BeaconSigning(_) => 0, // beacon carriers move no token value
         }
     }

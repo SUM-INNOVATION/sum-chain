@@ -127,7 +127,8 @@ pub enum StateError {
     /// `BeaconSigning`) are deterministically rejected at mempool admission so a
     /// gate-closed beacon tx never enters the mempool; no receipt (admission only).
     /// The executor independently rejects any beacon tx that reaches execution
-    /// (`crate::beacon_executor`, `Failed(400)`), mutating no beacon state.
+    /// (`crate::beacon_executor`) with the generic `Failed(0)` receipt, mutating no
+    /// beacon state (no beacon-specific receipt code is frozen).
     #[error("Beacon subprotocol not activated at this height")]
     BeaconNotActivated,
 

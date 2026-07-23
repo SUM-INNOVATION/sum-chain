@@ -540,6 +540,8 @@ impl RpcServer {
                 .decode_operation()
                 .ok()
                 .map(|op| ident(format!("{:?}", op.wire_op()))),
+            // Uninhabited reserved C1 slot 27 — unconstructable; unreachable.
+            TxPayload::ComputePoolReserved(never) => match *never {},
         };
 
         let asset_ref = match payload {

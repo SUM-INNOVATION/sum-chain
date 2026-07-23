@@ -25,8 +25,8 @@ const PARTIAL_HEX: &str = "42505254763100010011100f0e0d0c0b0a0700000000000000050
 const FINALIZE_HEX: &str = "42464e4c7631000100998877665544332208000000000000000600000000000000808282828282828282828282828282828282828282828282828282828282828282828282828282828282828282828282828282828282828282828282828282828282828282828282828282828282828282828282828282828282828282828282020000000000000001000000";
 
 // ── Frozen TxPayload/TransactionV2 bincode (registration; appended ordinals). ──
-const TX_SETUP_HEX: &str = "08070605040302011111111111111111111111111111111111111111e803000000000000000000000000000007000000000000001b000000a90000000000000052424b31763100010008070605040302012a00000000000000802121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333";
-const TX_SIGNING_HEX: &str = "11100f0e0d0c0b0a1111111111111111111111111111111111111111e803000000000000000000000000000007000000000000001c000000850000000000000042505254763100010011100f0e0d0c0b0a0700000000000000050000000000000003000000808181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181";
+const TX_SETUP_HEX: &str = "08070605040302011111111111111111111111111111111111111111e803000000000000000000000000000007000000000000001c000000a90000000000000052424b31763100010008070605040302012a00000000000000802121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333";
+const TX_SIGNING_HEX: &str = "11100f0e0d0c0b0a1111111111111111111111111111111111111111e803000000000000000000000000000007000000000000001d000000850000000000000042505254763100010011100f0e0d0c0b0a0700000000000000050000000000000003000000808181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181";
 
 fn unhex(s: &str) -> Vec<u8> {
     hex::decode(s).expect("valid hex")
@@ -215,17 +215,18 @@ fn txpayload_beacon_bincode_is_frozen_and_roundtrips() {
 
     // The outer bincode enum tag (declaration ordinal) sits right after
     // chain_id(u64=8) + from(20) + fee(Balance=u128=16) + nonce(u64=8) = offset
-    // 52, as a u32_le. The beacon variants are APPENDED after Supply, so their
-    // tags are 27 and 28 — exactly the C1 gap below their TxType discriminants
-    // (28/29). Freezing this guards against any reorder that would shift the
-    // beacon bytes.
+    // 52, as a u32_le. Thanks to the reserved `ComputePoolReserved` slot at
+    // position 27, each beacon variant's positional tag EQUALS its TxType
+    // discriminant: BeaconSetup = 28, BeaconSigning = 29. Freezing this guards the
+    // 1:1 correspondence against any reorder that would shift the frozen bytes.
     const TAG_OFFSET: usize = 8 + 20 + 16 + 8;
     let setup_bytes = unhex(TX_SETUP_HEX);
     let tag_setup = u32::from_le_bytes(setup_bytes[TAG_OFFSET..TAG_OFFSET + 4].try_into().unwrap());
     assert_eq!(
-        tag_setup, 27,
-        "BeaconSetup declaration ordinal must stay 27"
+        tag_setup, 28,
+        "BeaconSetup positional tag must equal TxType 28"
     );
+    assert_eq!(tag_setup as u8, TxType::BeaconSetup as u8);
     let signing_bytes = unhex(TX_SIGNING_HEX);
     let tag_signing = u32::from_le_bytes(
         signing_bytes[TAG_OFFSET..TAG_OFFSET + 4]
@@ -233,9 +234,10 @@ fn txpayload_beacon_bincode_is_frozen_and_roundtrips() {
             .unwrap(),
     );
     assert_eq!(
-        tag_signing, 28,
-        "BeaconSigning declaration ordinal must stay 28"
+        tag_signing, 29,
+        "BeaconSigning positional tag must equal TxType 29"
     );
+    assert_eq!(tag_signing as u8, TxType::BeaconSigning as u8);
 
     // The frozen carrier bytes are embedded verbatim after an 8-byte length prefix.
     assert!(hex::encode(&setup_bytes).contains(KEY_HEX));
@@ -247,4 +249,50 @@ fn txpayload_beacon_bincode_is_frozen_and_roundtrips() {
     } else {
         panic!("expected BeaconSetup payload");
     }
+}
+
+// ── (6) The reserved C1 positional slot 27 is unconstructable + decode-rejected. ─
+#[test]
+fn computepool_reserved_slot_27_rejects_at_decode() {
+    // Take a valid BeaconSetup tx (positional tag 28) and rewrite its outer enum
+    // tag to 27 (the reserved C1 slot). Decoding MUST fail: the reserved slot holds
+    // an uninhabited type, so bincode finds no valid inner variant. This proves a
+    // tx claiming tag 27 can never masquerade as a usable payload.
+    const TAG_OFFSET: usize = 8 + 20 + 16 + 8;
+    let mut bytes = unhex(TX_SETUP_HEX);
+    bytes[TAG_OFFSET..TAG_OFFSET + 4].copy_from_slice(&27u32.to_le_bytes());
+    assert!(
+        TransactionV2::from_bytes(&bytes).is_err(),
+        "outer tag 27 (reserved C1 slot) must be rejected at decode"
+    );
+    // And unknown tags above the registered range likewise reject.
+    let mut bytes30 = unhex(TX_SETUP_HEX);
+    bytes30[TAG_OFFSET..TAG_OFFSET + 4].copy_from_slice(&30u32.to_le_bytes());
+    assert!(TransactionV2::from_bytes(&bytes30).is_err());
+}
+
+// ── (7) A huge `op_bytes` length prefix on a tiny tx is REJECTED, not amplified. ─
+#[test]
+fn huge_op_bytes_length_prefix_is_rejected_bounded() {
+    // The `BeaconTxData.op_bytes` Vec<u8> length prefix (u64_le) sits right after
+    // the outer enum tag: chain_id(8)+from(20)+fee(16)+nonce(8)+tag(4) = offset 56.
+    // Rewrite it to u64::MAX on an otherwise-tiny valid tx. The decoder MUST return
+    // an error (unexpected end) — NOT hang or OOM — because serde's Vec<u8>
+    // deserialization uses `size_hint::cautious` (bounded pre-allocation) and then
+    // reads incrementally, so the allocation can never exceed the actual input
+    // slice (which is itself frame-/block-capped upstream). This test completing
+    // is the proof that the enclosing decoder bounds the allocation before it can
+    // be amplified by the declared length.
+    const OPBYTES_LEN_OFFSET: usize = 8 + 20 + 16 + 8 + 4; // = 56
+    let mut bytes = unhex(TX_SETUP_HEX);
+    bytes[OPBYTES_LEN_OFFSET..OPBYTES_LEN_OFFSET + 8].copy_from_slice(&u64::MAX.to_le_bytes());
+    assert!(
+        TransactionV2::from_bytes(&bytes).is_err(),
+        "a huge op_bytes length prefix must be a bounded decode error, never an amplified allocation"
+    );
+    // A merely-too-large-but-plausible length (1 GiB) on a tiny buffer also errors
+    // fast (bincode cannot read past the slice; no eager 1 GiB allocation).
+    let mut big = unhex(TX_SETUP_HEX);
+    big[OPBYTES_LEN_OFFSET..OPBYTES_LEN_OFFSET + 8].copy_from_slice(&(1u64 << 30).to_le_bytes());
+    assert!(TransactionV2::from_bytes(&big).is_err());
 }
