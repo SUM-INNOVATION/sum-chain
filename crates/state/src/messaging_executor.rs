@@ -279,8 +279,16 @@ impl MessagingExecutor {
         // Derive the real sender address from the sender's public key
         let real_sender = Address::from_public_key(&sponsored_msg.sender_pubkey);
 
-        // Verify the real sender has registered their public key
-        if !store.has_public_key(&real_sender).unwrap_or(false) {
+        // Verify the real sender has registered their public key.
+        //
+        // issue #145: this predicate is a CONSENSUS branch — every validator must
+        // evaluate it identically or their state roots diverge. A DB read error is
+        // a node-local I/O fault, NOT the fact "sender is unregistered". Swallowing
+        // it with `unwrap_or(false)` would silently push the faulting node down the
+        // failure branch while a healthy node takes the success branch → fork.
+        // Propagate the error with `?` so the faulting node halts loudly (and can be
+        // recovered) instead of committing a divergent block.
+        if !store.has_public_key(&real_sender)? {
             return Ok(MessagingExecutionResult::failure("Sender must register public key first"));
         }
 

@@ -3604,9 +3604,17 @@ impl SumChainApiServer for RpcServer {
         // Derive sender address from public key
         let sender_address = Address::from_public_key(&sender_pubkey);
 
-        // Verify sender has registered their public key
+        // Verify sender has registered their public key.
+        //
+        // issue #145: this is an ADVISORY preflight (consensus re-checks at execution
+        // time) and mutates no state, but a DB read error must not masquerade as
+        // "unregistered". Surface it as an internal error instead of silently
+        // reshaping it into a client-facing "must register first" message.
         let store = MessagingStore::new(&self.db);
-        if !store.has_public_key(&sender_address).unwrap_or(false) {
+        let sender_registered = store.has_public_key(&sender_address).map_err(|e| {
+            RpcError::Internal(format!("Failed to read sender registration state: {e}"))
+        })?;
+        if !sender_registered {
             return Err(RpcError::InvalidParams(
                 "Sender must register public key first via messaging_registerSponsored".to_string()
             ).into());
