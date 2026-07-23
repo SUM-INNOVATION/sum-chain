@@ -15,8 +15,9 @@
 # statement, never a proof of a venue run).
 #
 # Exit 0 = every locally-verifiable readiness check passed AND the venue
-# prove/measure stages remain GATED/DEFERRED by design. Non-zero = a readiness
-# check failed (or a fabricated venue artifact leaked in).
+# prove/measure stages remain GATED / VENUE-REQUIRED by design. A green local
+# preflight is NOT authoritative venue readiness. Non-zero = a readiness check
+# failed (or a fabricated venue artifact leaked in).
 #
 # Usage: preflight_venue.sh [--deep]
 #   --deep  additionally run the cargo-backed OFFLINE proofs: the container-context
@@ -204,7 +205,7 @@ if [ "$DEEP" = 1 ]; then
 fi
 
 # ---------------------------------------------------------------------------
-hdr "GATED / DEFERRED — requires a native Linux venue + cloud credits (NOT exercised here)"
+hdr "GATED / VENUE-REQUIRED — a native Linux venue + cloud credits (NOT exercised here)"
 cat <<'GATED'
   The following are intentionally NOT produced off-venue and remain blocked on a
   native Linux + Docker venue with a GPU / prover toolchain and cloud credits:
@@ -222,10 +223,17 @@ GATED
 
 hdr "SUMMARY"
 if [ "$fail" = 0 ]; then
-  printf 'READY: every non-GPU/non-credit venue-readiness check passed.\n'
-  printf 'The prove/measure stages remain GATED/DEFERRED (see above); nothing was fabricated.\n'
+  printf 'LOCAL PREFLIGHT PASS\n'
+  printf 'AUTHORITATIVE VENUE EXECUTION: NOT RUN\n'
+  printf '\n'
+  printf 'Every non-GPU/non-credit readiness check passed, and the prove/measure stages\n'
+  printf 'remain VENUE-REQUIRED (see above). A green local preflight does NOT establish\n'
+  printf 'authoritative venue readiness; nothing was fabricated.\n'
   exit 0
 else
-  printf 'NOT READY: at least one readiness check failed (see FAIL lines above).\n'
+  printf 'LOCAL PREFLIGHT FAIL\n'
+  printf 'AUTHORITATIVE VENUE EXECUTION: NOT RUN\n'
+  printf '\n'
+  printf 'At least one readiness check failed (see FAIL lines above).\n'
   exit 1
 fi
