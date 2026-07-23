@@ -33,8 +33,9 @@ invariants) and [`docs/b0-pre/venue/RUNBOOK.md`](../../docs/b0-pre/venue/RUNBOOK
 
 | Path | Purpose |
 |------|---------|
-| `candidates/sp1/`, `candidates/risc0/` | Exact-pinned candidate manifests. No lockfiles (the venue generates them). |
-| `containers/` | Dockerfiles requiring immutable base-image digests + Rust 1.88 by exact checksum. |
+| `candidates/sp1/`, `candidates/risc0/` | Exact-pinned candidate manifests + the OFFICIAL guest entrypoints (`guest/src/main.rs`, thin wrappers over `guest-core`). No lockfiles (the venue generates them). |
+| `guest-core/` | Candidate-neutral OFFICIAL guest source: the frozen integer transformer + the strict witness→statement contract for both official statements, over the frozen `sumchain-wire::b0` wire types. Locally tested; no prover toolchain needed. See [`docs/b0-pre/GUEST_SOURCE.md`](../../docs/b0-pre/GUEST_SOURCE.md). |
+| `containers/` | Dockerfiles requiring immutable base-image digests + Rust 1.88 by exact checksum. Built from the curated staged context (`scripts/stage_context.sh`) that reproduces ONLY the guest dep graph (candidate + `guest-core` + `sumchain-wire` + a curated workspace root + guest fixtures), so the path deps + `.workspace` inheritance resolve in-container; no unrelated production crate enters the image. |
 | `harness/` | Verifier-material extraction + contract-test crates (build/run only in the venue). |
 | `scripts/` | Build / extract / orchestrate / probe scripts. Refuse to run outside the venue. |
 
@@ -89,10 +90,17 @@ substitute for real venue metadata.
 - No production nodes, validator config, deployments, registries, GitHub, or CI touched.
 - No image pushed to any registry; no host-global toolchain installed.
 - No commit / push / PR; no real `b0-pre-protocol-v1.hash` written.
-- No final statement materialization, official guests, populated allowlist, or `r0_guest_set_hash`.
+- No final statement materialization, no populated allowlist, no `r0_guest_set_hash`,
+  and no venue-built guest IDENTITY (program id / verifying key / image id). The
+  official guest **source** is now present (`guest-core/` + the candidate
+  entrypoints), but its identity is a venue artifact and does not enter the
+  normative protocol artifact (Stage-1 rule preserved).
 - Any proof produced only to validate a verifier contract is stamped
   `TEST_ONLY / NON_SELECTION / INVALID_FOR_R0 / NOT_AN_OFFICIAL_GUEST`; its guest
   identity never enters the normative protocol artifact.
 
-This tree is workspace-excluded (`exclude = ["tools"]`) and has no production
-dependency edge.
+This tree is workspace-excluded (`exclude = ["tools"]`). No production crate
+depends on it (no reverse edge). The one FORWARD edge is deliberate: `guest-core`
+depends on the frozen production wire crate `sumchain-wire` (types only), so the
+official guest enforces the exact merged wire formats instead of a hand-written
+mirror. See [`docs/b0-pre/GUEST_SOURCE.md`](../../docs/b0-pre/GUEST_SOURCE.md).

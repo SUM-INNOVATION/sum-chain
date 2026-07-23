@@ -1,0 +1,37 @@
+# B0-PRE official guest CORE — the candidate-neutral, shared guest semantics for
+# the two official B0-PRE statements (`TransformerLayerGroup` + `SelectToken`).
+#
+# This crate is the SINGLE auditable source of the guest-side statement contract
+# that BOTH the SP1 and the RISC Zero guest wrappers call. It is deliberately
+# candidate-agnostic: it contains NO `sp1-*` / `risc0-*` dependency and does no
+# zkVM I/O — the thin per-candidate wrappers own that. See
+# `docs/b0-pre/GUEST_SOURCE.md`.
+#
+# It adopts the FROZEN B0-PRE wire types DIRECTLY from the production
+# `sumchain-wire` crate (path dependency, never a hand-written mirror), so the
+# statement / commitment / manifest / derived-input decoders the guest enforces
+# are byte-identical to the merged production types.
+#
+# STATUS: official guest SOURCE. NOT reproduced at a venue — no authoritative
+# Cargo.lock, program id, verifier key, receipt, or measured cost exists yet.
+[package]
+name = "b0-pre-guest-core"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "Candidate-neutral official guest core for the two frozen B0-PRE statements (TransformerLayerGroup + SelectToken): frozen integer transformer + strict witness->statement verification over the sumchain-wire b0 types. Workspace-excluded research crate; no production dependency edge onto it."
+
+# `unsafe` is forbidden crate-wide via `#![forbid(unsafe_code)]` in src/lib.rs.
+
+[dependencies]
+# Adopt the frozen B0-PRE candidate-neutral wire types DIRECTLY (no mirror). This
+# path dependency binds the guest to the exact merged production decoders.
+sumchain-wire = { path = "../../../crates/sumchain-wire" }
+# Same BLAKE3 the wire types + workload commit with (workspace pin is 1.5).
+blake3 = "1.5"
+
+[dev-dependencies]
+# Host-only: the golden binding tests parse the committed JSON fixtures
+# (official workload + exp table). Never compiled into a guest ELF.
+serde_json = "1.0"
