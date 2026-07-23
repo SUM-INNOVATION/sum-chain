@@ -188,14 +188,17 @@ pub const CT_LEN: usize = 48;
 // codec. There is likewise no `max_validators`-derived limit (semantic, also
 // configurable).
 //
-// Instead, `DkgDealV1::decode` is **self-validating and allocation-safe**: it
-// reads the `u32` count and, with checked arithmetic and BEFORE allocating
-// anything, requires the actual remaining input to be exactly
-// `count * G1_LEN + (G1_LEN + CT_LEN)` bytes (the commitment vector plus the fixed
-// `r_ij`/`ct_ij` suffix). A tiny buffer therefore cannot declare a huge count and
-// amplify a `Vec::with_capacity`: allocation is bounded by the real input length.
-// The decoder's only structural bound is this self-consistency — it deliberately
-// does **not** encode `T`, the validator cap, or a block-size-derived ceiling.
+// Instead, `DkgDealV1::decode` is a **prefix parser** (the crate convention — it
+// reads exactly its own bytes and leaves trailing to `decode_exact`'s `finish`)
+// that is **allocation-safe on two levels**: (1) with checked arithmetic and
+// BEFORE reserving anything it verifies the remaining input holds AT LEAST
+// `count * G1_LEN + (G1_LEN + CT_LEN)` bytes (commitment vector + fixed
+// `r_ij`/`ct_ij` suffix), so a tiny buffer cannot declare a huge count and amplify
+// an allocation — the count is bounded by the real input length; and (2) the
+// reservation is FALLIBLE (`try_reserve_exact`, mapped to a `DecodeError`), so even
+// a genuinely huge but well-framed buffer returns an error instead of aborting the
+// process. The decoder imposes no count ceiling and deliberately does **not** encode
+// `T`, the validator cap, or a block-size-derived ceiling.
 //
 // **SEMANTICS LIVE ABOVE THE WIRE (layer-boundary note, cf. the PoP caveat).**
 // Wire-decode success means only "well-framed and internally self-consistent". A
@@ -271,6 +274,23 @@ fn read_scalar(r: &mut Reader, ctx: &'static str) -> Result<[u8; SCALAR_LEN], De
         return Err(DecodeError::BadValue { ctx });
     }
     Ok(s)
+}
+
+/// Fallibly reserve a commitment vector of `count` elements. Maps a
+/// `TryReserveError` (allocation failure OR capacity overflow) to a
+/// [`DecodeError::BadValue`] instead of aborting the process — protecting the
+/// public [`DkgDealV1::decode`] codec even when a caller passes a genuinely huge
+/// (well-framed) buffer whose declared count would exhaust memory. `DecodeError`
+/// is the frozen b0 error type, so an allocation failure maps to its generic
+/// `BadValue` (there is no dedicated allocation variant to add without editing the
+/// frozen codec).
+fn reserve_commitment_vec(count: usize) -> Result<Vec<[u8; G1_LEN]>, DecodeError> {
+    let mut v: Vec<[u8; G1_LEN]> = Vec::new();
+    v.try_reserve_exact(count)
+        .map_err(|_| DecodeError::BadValue {
+            ctx: "DkgDealV1.commitment_count_alloc",
+        })?;
+    Ok(v)
 }
 
 // ---------------------------------------------------------------------------
@@ -610,16 +630,27 @@ impl DkgDealV1 {
         Ok(self.encode())
     }
 
-    /// Decode from a reader — **self-validating and allocation-safe**.
+    /// Decode from a reader — a **prefix parser** (crate convention), allocation-safe.
+    ///
+    /// Like every other `sumchain-wire` `decode` (e.g. the b0
+    /// [`OutputManifestV1::decode`](crate::b0::manifest::OutputManifestV1::decode)
+    /// and [`RegisterBeaconKeyV1::decode`]/[`DkgComplaintV1::decode`] in this
+    /// module), this reads **exactly its own bytes and leaves any trailing bytes
+    /// for the caller**; trailing-byte rejection is owned by
+    /// [`decode_exact`](Self::decode_exact) via `Reader::finish`.
     ///
     /// After the fixed header it reads the `u32` count and, with **checked
-    /// arithmetic and before allocating anything**, requires the remaining input to
-    /// be exactly `count * G1_LEN + (G1_LEN + CT_LEN)` bytes — the commitment vector
-    /// plus the fixed `r_ij`/`ct_ij` suffix. So a tiny buffer declaring a huge count
-    /// is rejected (`Inconsistent`, or `BadValue` on `checked_mul` overflow) **before**
-    /// the `Vec::with_capacity`; a too-large or too-small count both mismatch the
-    /// actual length and are rejected. Only then are the `count` structurally-valid
-    /// commitments and the fixed fields read. The decoder imposes no count ceiling.
+    /// arithmetic and before allocating anything**, verifies the remaining input
+    /// holds **at least** `count * G1_LEN + (G1_LEN + CT_LEN)` bytes — the
+    /// commitment vector plus the fixed `r_ij`/`ct_ij` suffix. A tiny buffer
+    /// declaring a huge count is therefore rejected (`Truncated`, or `BadValue` on
+    /// `checked_mul` overflow) **before** any reservation. The count is then bounded
+    /// by the real input length, and the reservation itself is **fallible**
+    /// ([`try_reserve_exact`], mapped to `BadValue`) so even a genuinely huge but
+    /// well-framed buffer returns a decode error instead of aborting the process.
+    /// The decoder imposes no count ceiling.
+    ///
+    /// [`try_reserve_exact`]: Vec::try_reserve_exact
     pub fn decode(r: &mut Reader) -> Result<Self, DecodeError> {
         let magic = r.read_array::<7>("DkgDealV1.magic")?;
         if magic != Self::MAGIC {
@@ -642,29 +673,32 @@ impl DkgDealV1 {
                 ctx: "DkgDealV1.commitment_count_zero",
             });
         }
-        // Allocation-safe self-consistency check — BEFORE any allocation. The
-        // remaining input must be EXACTLY the commitment vector (count × G1_LEN)
-        // plus the fixed suffix r_ij (G1_LEN) + ct_ij (CT_LEN). `checked_mul` guards
-        // overflow (matters on 32-bit `usize`); the equality guards against a tiny
-        // buffer declaring a huge count, so `Vec::with_capacity(count)` below is
+        // Minimum-length check (checked arithmetic), BEFORE allocating. Prefix
+        // parser: this only verifies the deal's OWN bytes are present (`>=`); it
+        // does NOT reject trailing bytes (that is `decode_exact`'s `finish`).
+        // `checked_mul` guards overflow (matters on 32-bit `usize`); the `>=` guards
+        // a tiny buffer from declaring a huge count, so the reservation below is
         // bounded by the real input length and can never be amplified.
         let commit_bytes = (count as usize)
             .checked_mul(G1_LEN)
             .ok_or(DecodeError::BadValue {
                 ctx: "DkgDealV1.commitment_count_overflow",
             })?;
-        let expected_remaining =
-            commit_bytes
-                .checked_add(G1_LEN + CT_LEN)
-                .ok_or(DecodeError::BadValue {
-                    ctx: "DkgDealV1.commitment_count_overflow",
-                })?;
-        if r.remaining() != expected_remaining {
-            return Err(DecodeError::Inconsistent {
-                ctx: "DkgDealV1.commitment_count",
+        let needed = commit_bytes
+            .checked_add(G1_LEN + CT_LEN)
+            .ok_or(DecodeError::BadValue {
+                ctx: "DkgDealV1.commitment_count_overflow",
+            })?;
+        if r.remaining() < needed {
+            return Err(DecodeError::Truncated {
+                needed,
+                remaining: r.remaining(),
+                ctx: "DkgDealV1.commitments",
             });
         }
-        let mut commitments = Vec::with_capacity(count as usize);
+        // Fallible reservation: an over-large (but well-framed) count returns a
+        // decode error rather than aborting the process on `with_capacity`.
+        let mut commitments = reserve_commitment_vec(count as usize)?;
         for _ in 0..count {
             commitments.push(read_g1(r, "DkgDealV1.commitment")?);
         }
@@ -1084,26 +1118,62 @@ mod tests {
     }
 
     #[test]
+    fn deal_decode_is_prefix_parser_decode_exact_rejects_trailing() {
+        // Crate convention: `decode` reads exactly its own bytes and LEAVES trailing
+        // for the caller; `decode_exact` owns trailing-byte rejection via `finish`.
+        let deal = deal_with(2);
+        let mut bytes = deal.try_encode().unwrap();
+        bytes.extend_from_slice(&[0xAB, 0xCD, 0xEF]); // 3 trailing bytes
+
+        // `decode` succeeds on the prefix and leaves exactly the 3 trailing bytes.
+        let mut r = Reader::new(&bytes);
+        let decoded = DkgDealV1::decode(&mut r).expect("prefix decode must succeed");
+        assert_eq!(decoded, deal);
+        assert_eq!(r.remaining(), 3);
+
+        // `decode_exact` rejects the same input's trailing bytes.
+        assert!(matches!(
+            DkgDealV1::decode_exact(&bytes),
+            Err(DecodeError::TrailingBytes { .. })
+        ));
+    }
+
+    #[test]
     fn deal_amplification_dos_guard_rejects_huge_count_on_tiny_buffer() {
         // The core DoS guard: a tiny buffer that declares a huge count must be
-        // rejected by the checked self-consistency check BEFORE any allocation, so
-        // `Vec::with_capacity(count)` can never be amplified. Take a real count=1
-        // deal (181 bytes) and rewrite only its count field to u32::MAX.
+        // rejected by the checked minimum-length check BEFORE any reservation, so
+        // the commitment vector can never be amplified. Take a real count=1 deal
+        // (181 bytes) and rewrite only its count field to u32::MAX.
         let bytes = deal_with(1).try_encode().unwrap();
         assert_eq!(bytes.len(), DkgDealV1::encoded_len(1)); // small buffer
         let mut huge = bytes;
         huge[33..37].copy_from_slice(&u32::MAX.to_le_bytes());
         // `checked_mul` does not overflow on 64-bit usize (u32::MAX * 48 fits), so
-        // the equality check fires: expected_remaining (~206 GB) != the tiny actual
-        // remaining -> Inconsistent, before the vector is ever allocated. (On a
-        // 32-bit target the same input trips `checked_mul` -> BadValue overflow
-        // instead; both reject before allocating.)
+        // the `>=` check fires: needed (~206 GB) > the tiny actual remaining ->
+        // Truncated, before any reservation. (On a 32-bit target the same input
+        // trips `checked_mul` -> BadValue overflow instead; both reject pre-alloc.)
         assert!(matches!(
             DkgDealV1::decode_exact(&huge),
-            Err(DecodeError::Inconsistent {
-                ctx: "DkgDealV1.commitment_count"
+            Err(DecodeError::Truncated {
+                ctx: "DkgDealV1.commitments",
+                ..
             })
         ));
+    }
+
+    #[test]
+    fn deal_fallible_reservation_maps_alloc_failure_to_decode_error() {
+        // The reservation helper maps a `TryReserveError` (here a capacity overflow
+        // from an impossibly large count) to a DecodeError rather than aborting —
+        // the public-codec protection independent of the length check above.
+        assert!(matches!(
+            reserve_commitment_vec(usize::MAX),
+            Err(DecodeError::BadValue {
+                ctx: "DkgDealV1.commitment_count_alloc"
+            })
+        ));
+        // A sane count reserves successfully.
+        assert!(reserve_commitment_vec(8).unwrap().capacity() >= 8);
     }
 
     #[test]
@@ -1131,30 +1201,32 @@ mod tests {
     }
 
     #[test]
-    fn deal_rejects_count_vs_length_self_inconsistency() {
-        // The self-consistency check rejects BOTH a too-large and a too-small
-        // declared count (the count must exactly account for the payload).
+    fn deal_rejects_count_too_large_and_too_small() {
         let bytes = deal_with(2).try_encode().unwrap();
 
-        // too LARGE: count 2 -> 3 (expected_remaining > actual) -> Inconsistent,
-        // before allocation.
+        // too LARGE: count 2 -> 3. `needed` (3 commitments + suffix) exceeds the
+        // remaining input -> Truncated, before any reservation.
         let mut too_large = bytes.clone();
         too_large[33..37].copy_from_slice(&3u32.to_le_bytes());
         assert!(matches!(
             DkgDealV1::decode_exact(&too_large),
-            Err(DecodeError::Inconsistent {
-                ctx: "DkgDealV1.commitment_count"
+            Err(DecodeError::Truncated {
+                ctx: "DkgDealV1.commitments",
+                ..
             })
         ));
 
-        // too SMALL: count 2 -> 1 (expected_remaining < actual) -> Inconsistent.
+        // too SMALL: count 2 -> 1. Prefix `decode` accepts it (reads a valid 1-
+        // commitment deal) and leaves the surplus 48 bytes trailing; `decode_exact`
+        // then rejects that surplus via `finish`.
         let mut too_small = bytes;
         too_small[33..37].copy_from_slice(&1u32.to_le_bytes());
+        let mut r = Reader::new(&too_small);
+        assert!(DkgDealV1::decode(&mut r).is_ok());
+        assert_eq!(r.remaining(), G1_LEN); // one commitment's worth of surplus
         assert!(matches!(
             DkgDealV1::decode_exact(&too_small),
-            Err(DecodeError::Inconsistent {
-                ctx: "DkgDealV1.commitment_count"
-            })
+            Err(DecodeError::TrailingBytes { .. })
         ));
     }
 
@@ -1186,23 +1258,23 @@ mod tests {
     fn deal_rejects_trailing_and_truncation() {
         let bytes = deal_with(2).try_encode().unwrap();
 
-        // Trailing byte after a valid deal: the payload is one byte longer than the
-        // declared count accounts for -> self-consistency mismatch (Inconsistent).
+        // Trailing byte after a valid deal: `decode` consumes the prefix, leaving
+        // one surplus byte; `decode_exact`'s `finish` rejects it -> TrailingBytes.
         let mut long = bytes.clone();
         long.push(0);
         assert!(matches!(
             DkgDealV1::decode_exact(&long),
-            Err(DecodeError::Inconsistent {
-                ctx: "DkgDealV1.commitment_count"
-            })
+            Err(DecodeError::TrailingBytes { .. })
         ));
 
         // One byte short (truncated in the ct_ij tail, after the count): the
-        // remaining is one short of what the declared count needs -> Inconsistent.
+        // remaining is one short of what the declared count needs -> the `>=`
+        // minimum-length check fails = Truncated.
         assert!(matches!(
             DkgDealV1::decode_exact(&bytes[..bytes.len() - 1]),
-            Err(DecodeError::Inconsistent {
-                ctx: "DkgDealV1.commitment_count"
+            Err(DecodeError::Truncated {
+                ctx: "DkgDealV1.commitments",
+                ..
             })
         ));
 
