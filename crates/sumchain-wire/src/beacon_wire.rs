@@ -29,34 +29,63 @@
 //! ## Top-level ordinal band (owner allocation, 2026-07) — reservation only
 //!
 //! The top-level `TxType` ordinal space above the live W1a range (`0..=26`,
-//! `Supply = 26`) is allocated across dormant subsystems:
+//! `Supply = 26`) is allocated across dormant subsystems. W1b gets a **two-slot
+//! band (28/29)**; the complete beacon operation inventory (below) is grouped into
+//! those two slots by protocol phase:
 //!
-//! | Ordinal | Owner | Notes |
-//! |---------|-------|-------|
+//! | Ordinal | Owner | Beacon family (phase) |
+//! |---------|-------|-----------------------|
 //! | `27` | **C1 / ComputePool (#130)** — [`C1_COMPUTE_POOL_TXTYPE_RESERVED`] | NOT the beacon; W1b must not take 27. |
-//! | `28` | **W1b beacon** — [`W1B_BEACON_KEY_TXTYPE`] | carries [`RegisterBeaconKeyV1`]. |
-//! | `29` | **W1b beacon** — [`W1B_BEACON_DKG_TXTYPE`] | carries [`DkgDealV1`] / [`DkgComplaintV1`]. |
+//! | `28` | **W1b beacon** — [`W1B_BEACON_DKG_TXTYPE`] | DKG / **epoch-setup**: key registration, deal, complaint. |
+//! | `29` | **W1b beacon** — [`W1B_BEACON_SIGN_TXTYPE`] | **signing / output**: per-round partials, finalization. |
 //!
 //! These are **documented reservations**, not registered `TxType`/`TxPayload`
 //! variants — the family stays dormant. (This refines the older
 //! `crates/sumchain-wire/README.md` "ordinal 27+ owned by W1b" note: the owner
 //! carved `27` out for C1 and gave W1b the `28/29` band.)
 //!
+//! ## Complete beacon operation inventory (PROPOSED — OWNER DECISION)
+//!
+//! Enumerated from the BR1 draft (nothing invented). Only the K-rotate direction
+//! and `G_enc = G1` are ratified; every carrier layout is PROPOSED. This module
+//! **implements the three slot-28 setup carriers**; the slot-29 signing carriers
+//! are inventoried and their sub-tags reserved, but are left to a future
+//! #125/#127 revision (implementing an unratified layout now would be inventing
+//! bytes).
+//!
+//! | Op / carrier | Carries | Draft § | Phase → slot | Sub-tag | Status here |
+//! |---|---|---|---|---|---|
+//! | [`RegisterBeaconKeyV1`] | `EK_j` G1[48] + PoP G2[96] | §2.3, §11, §16.1 | setup → 28 | `0xBE01` | **implemented** (K-rotate dir. ratified) |
+//! | [`DkgDealV1`] | `C_{i,*}` G1[48]×(deg+1), `R_ij` G1[48], `ct_ij`[48] | §8, §9.1 | setup → 28 | `0xBE02` | **implemented** (PROPOSED) |
+//! | [`DkgComplaintV1`] | `i,j`, `R_ij` G1[48], `D_ij` G1[48], `dleq(c,z)` 2×[32] | §5, §6, §9.1 | setup → 28 | `0xBE03` | **implemented** (PROPOSED) |
+//! | `DkgJustifyV1` | (`r_ij` + Schnorr) | §6.5 | — | — | **ABSENT / non-normative** (not a carrier) |
+//! | `BeaconPartialV1` | `epoch, round, j`, `sigma_j` G2[96] | §2.4, §4.3, §10, §12 | signing → 29 | `0xBE04` (reserved) | inventoried; **not implemented** (PROPOSED) |
+//! | `BeaconFinalizeV1` | `epoch, round`, combined `Sigma_r` G2[96], selected-contributor witness | §4.3, §12 | signing → 29 | `0xBE05` (reserved) | inventoried; **not implemented** (PROPOSED) |
+//! | Equivocation — conflicting deal | (no carrier) two conflicting on-chain `DkgDealV1` sharing `(chain_id,epoch,i,j)` | §8.4, §6.4 | setup → 28 | — | **inline-detected** from duplicates; no dedicated carrier |
+//! | Equivocation — conflicting partial | (no carrier) two conflicting on-chain partials sharing `(epoch,round,j)` | §6.4 | signing → 29 | — | **inline-detected** from duplicates; no dedicated carrier |
+//!
+//! Objective misconduct (§6.4) — conflicting deals/partials, invalid PoP, false
+//! accusation — is adjudicated from *existing on-chain records* (the two
+//! conflicting messages, the registration PoP, the complaint), so BR1 needs **no**
+//! separate "evidence submission" transaction (unlike staking's explicit
+//! `DoubleSignEvidence`). Equivocation therefore consumes **no** band slot.
+//!
 //! ## Two-level namespacing — beacon op tags are NOT `TxType` ordinals
 //!
-//! The three beacon message kinds are **beacon-family-local operation sub-tags**
-//! ([`BeaconWireOp`]), explicitly namespaced so they can never masquerade as a
+//! Each beacon message kind is a **beacon-family-local operation sub-tag**
+//! ([`BeaconWireOp`]), explicitly namespaced so it can never masquerade as a
 //! top-level transaction ordinal:
 //!
-//! * their canonical on-wire identity is each carrier's own **7-byte magic**
+//! * its canonical on-wire identity is each carrier's own **7-byte magic**
 //!   (self-domaining, like the B0-PRE production types); and
-//! * their compact numeric discriminant ([`BeaconWireOp::to_repr`]) lives in the
+//! * its compact numeric discriminant ([`BeaconWireOp::to_repr`]) lives in the
 //!   **`0xBE__` beacon namespace** ([`BEACON_OP_NAMESPACE`]) — a `u16` whose high
 //!   byte is `0xBE`, which is unmistakably **not** a `u8` `TxType` ordinal
 //!   (`0..=26`) nor a reserved band slot (`27`/`28`/`29`).
 //!
 //! Each op declares which reserved top-level band slot would carry it via
-//! [`BeaconWireOp::top_level_txtype`] (28 for key registration, 29 for DKG).
+//! [`BeaconWireOp::top_level_txtype`]. The three implemented setup ops map to slot
+//! 28; the reserved signing ops (partial/finalize) map to slot 29.
 //!
 //! ## Wire layer vs. crypto adapter boundary (deliberate — enforced downstream)
 //!
@@ -120,17 +149,32 @@ pub const POP_LEN: usize = 96;
 /// any other length is a malformed deal.
 pub const CT_LEN: usize = 48;
 
-/// Wire-level upper bound on the number of Feldman commitments carried by a deal.
+/// Wire-level upper bound on the number of Feldman commitments carried by a deal,
+/// **derived from the authoritative validator-set cap** (not self-chosen).
 ///
-/// This is a **DoS / framing sanity bound only**, NOT a ratified protocol
-/// parameter: the deal carries `degree + 1 = T` commitments, and the PROPOSED
-/// threshold is `T = f + 1 = 2` (draft §1.2, *not* owner-ratified). Because `T`
-/// is not ratified it is deliberately **not** frozen into the wire; the deal
-/// encodes a bounded variable-length commitment vector whose declared count must
-/// satisfy `1 ≤ count ≤ MAX_COMMITMENTS`. The bound is set far above any plausible
-/// threshold for an `n ≥ 5` committee so it never constrains a future ratified
-/// `T`, while still capping a malicious deal's size.
-pub const MAX_COMMITMENTS: usize = 128;
+/// A dealer commits `degree + 1 = T` coefficients, and the reconstruction
+/// threshold is bounded by the committee size — `T ≤ n ≤ max_validators` — because
+/// the DKG membership snapshot is drawn from the active validator set. The
+/// authoritative cap is the genesis staking parameter
+/// [`crate::staking::StakingParams::max_validators`] (`u32`, **default 100** —
+/// defined in `crates/sumchain-wire/src/staking.rs` and enforced in
+/// `crates/state/src/staking_executor.rs`, which rejects a set that would exceed
+/// it). Hence:
+///
+/// ```text
+/// MAX_COMMITMENTS = default max_validators = 100
+///   because  commitments = degree + 1 = T ≤ n ≤ max_validators.
+/// ```
+///
+/// This is a **derived DoS/framing bound**, not a frozen protocol parameter: the
+/// deal still encodes a bounded variable-length commitment vector
+/// (`1 ≤ count ≤ MAX_COMMITMENTS`), and the PROPOSED threshold `T = f + 1 = 2`
+/// (draft §1.2, unratified) sits far below the cap, so it never constrains a future
+/// ratified `T`. Because this leaf crate cannot read genesis at compile time, the
+/// bound tracks the **default** `max_validators`; **if a chain configures a larger
+/// `max_validators`, this constant MUST be raised in lockstep** (else a deal from a
+/// larger committee is rejected at the wire).
+pub const MAX_COMMITMENTS: usize = 100;
 
 /// First byte flag: compression bit — set in every canonical compressed encoding
 /// (ZCash/`blst`). A field with it clear is not a compressed point.
@@ -199,16 +243,21 @@ fn read_scalar(r: &mut Reader, ctx: &'static str) -> Result<[u8; SCALAR_LEN], De
 /// `crates/state/src/compute_pool.rs`.)
 pub const C1_COMPUTE_POOL_TXTYPE_RESERVED: u8 = 27;
 
-/// Reserved top-level `TxType` slot for the beacon **key-registration**
-/// transaction (W1b band). RESERVED, **not** registered in `TxType`/`TxPayload`
-/// (dormant). Carries [`RegisterBeaconKeyV1`].
-pub const W1B_BEACON_KEY_TXTYPE: u8 = 28;
+/// Reserved top-level `TxType` slot `28` for the beacon **DKG / epoch-setup**
+/// family (W1b band). RESERVED, **not** registered in `TxType`/`TxPayload`
+/// (dormant). Carries the epoch-setup ops [`RegisterBeaconKeyV1`], [`DkgDealV1`],
+/// and [`DkgComplaintV1`], distinguished by their beacon-local op sub-tag /
+/// 7-byte magic.
+pub const W1B_BEACON_DKG_TXTYPE: u8 = 28;
 
-/// Reserved top-level `TxType` slot for the beacon **DKG** transaction (W1b band).
-/// RESERVED, **not** registered in `TxType`/`TxPayload` (dormant). Carries
-/// [`DkgDealV1`] and [`DkgComplaintV1`], distinguished by their beacon-local op
-/// sub-tag / 7-byte magic.
-pub const W1B_BEACON_DKG_TXTYPE: u8 = 29;
+/// Reserved top-level `TxType` slot `29` for the beacon **signing / output**
+/// family (W1b band). RESERVED, **not** registered in `TxType`/`TxPayload`
+/// (dormant). Will carry the per-round ops — beacon partial signatures
+/// (`BeaconPartialV1`, sub-tag `0xBE04`) and finalization/combine
+/// (`BeaconFinalizeV1`, sub-tag `0xBE05`); see the module-doc inventory. Those
+/// carriers are PROPOSED and **not implemented in this module yet** — the slot and
+/// their sub-tags are reserved for a future #125/#127 revision.
+pub const W1B_BEACON_SIGN_TXTYPE: u8 = 29;
 
 /// Namespace prefix (high byte `0xBE`, "BE"acon) for the beacon-local operation
 /// sub-tag discriminants ([`BeaconWireOp::to_repr`]). A discriminant in this
@@ -217,9 +266,12 @@ pub const W1B_BEACON_DKG_TXTYPE: u8 = 29;
 pub const BEACON_OP_NAMESPACE: u16 = 0xBE00;
 
 // Namespaced beacon-local op discriminants.
+// Slot 28 (DKG / epoch-setup) — implemented in this module:
 const OP_REGISTER_BEACON_KEY: u16 = BEACON_OP_NAMESPACE | 0x01;
 const OP_DKG_DEAL: u16 = BEACON_OP_NAMESPACE | 0x02;
 const OP_DKG_COMPLAINT: u16 = BEACON_OP_NAMESPACE | 0x03;
+// Slot 29 (signing / output) — RESERVED for the PROPOSED, not-yet-implemented
+// carriers: `BeaconPartialV1` = `0xBE04`, `BeaconFinalizeV1` = `0xBE05`.
 
 /// The beacon-family-local operation sub-tags.
 ///
@@ -276,13 +328,17 @@ impl BeaconWireOp {
         }
     }
 
-    /// The reserved top-level `TxType` band slot that would carry this op: `28`
-    /// for key registration, `29` for the DKG messages. (Reservation only — the
-    /// family is not registered in `TxType`/`TxPayload`.)
+    /// The reserved top-level `TxType` band slot that would carry this op. All
+    /// three implemented ops are DKG / epoch-setup, so they map to slot `28`
+    /// ([`W1B_BEACON_DKG_TXTYPE`]); the signing/output slot `29`
+    /// ([`W1B_BEACON_SIGN_TXTYPE`]) is reserved for the not-yet-implemented
+    /// partial/finalize carriers. (Reservation only — the family is not registered
+    /// in `TxType`/`TxPayload`.)
     pub const fn top_level_txtype(self) -> u8 {
         match self {
-            BeaconWireOp::RegisterBeaconKey => W1B_BEACON_KEY_TXTYPE,
-            BeaconWireOp::DkgDeal | BeaconWireOp::DkgComplaint => W1B_BEACON_DKG_TXTYPE,
+            BeaconWireOp::RegisterBeaconKey
+            | BeaconWireOp::DkgDeal
+            | BeaconWireOp::DkgComplaint => W1B_BEACON_DKG_TXTYPE,
         }
     }
 
@@ -792,21 +848,23 @@ mod tests {
             );
             assert_eq!(BeaconWireOp::from_repr(r).unwrap(), op);
         }
-        // (b) W1b never claims C1's slot 27; W1b owns exactly the 28/29 band.
+        // (b) W1b never claims C1's slot 27; W1b owns exactly the 28/29 band
+        //     (28 = DKG/setup, 29 = signing/output).
         assert_eq!(C1_COMPUTE_POOL_TXTYPE_RESERVED, 27);
-        assert_eq!(W1B_BEACON_KEY_TXTYPE, 28);
-        assert_eq!(W1B_BEACON_DKG_TXTYPE, 29);
-        assert_ne!(W1B_BEACON_KEY_TXTYPE, C1_COMPUTE_POOL_TXTYPE_RESERVED);
+        assert_eq!(W1B_BEACON_DKG_TXTYPE, 28);
+        assert_eq!(W1B_BEACON_SIGN_TXTYPE, 29);
         assert_ne!(W1B_BEACON_DKG_TXTYPE, C1_COMPUTE_POOL_TXTYPE_RESERVED);
-        // (c) Each op maps to a band slot in {28,29}, never C1's 27.
+        assert_ne!(W1B_BEACON_SIGN_TXTYPE, C1_COMPUTE_POOL_TXTYPE_RESERVED);
+        // (c) Each implemented op maps to a band slot in {28,29}, never C1's 27.
+        //     All three current ops are epoch-setup, so they map to slot 28.
         for &op in BeaconWireOp::ALL {
             let t = op.top_level_txtype();
-            assert!(t == W1B_BEACON_KEY_TXTYPE || t == W1B_BEACON_DKG_TXTYPE);
+            assert!(t == W1B_BEACON_DKG_TXTYPE || t == W1B_BEACON_SIGN_TXTYPE);
             assert_ne!(t, C1_COMPUTE_POOL_TXTYPE_RESERVED);
         }
         assert_eq!(
             BeaconWireOp::RegisterBeaconKey.top_level_txtype(),
-            W1B_BEACON_KEY_TXTYPE
+            W1B_BEACON_DKG_TXTYPE
         );
         assert_eq!(
             BeaconWireOp::DkgDeal.top_level_txtype(),
@@ -838,8 +896,8 @@ mod tests {
         // TxType. C1's 27 is likewise dormant (C1 adds no live TxType variant).
         use crate::transaction::TxType;
         assert!(TxType::from_byte(C1_COMPUTE_POOL_TXTYPE_RESERVED).is_none());
-        assert!(TxType::from_byte(W1B_BEACON_KEY_TXTYPE).is_none());
         assert!(TxType::from_byte(W1B_BEACON_DKG_TXTYPE).is_none());
+        assert!(TxType::from_byte(W1B_BEACON_SIGN_TXTYPE).is_none());
     }
 
     // --- RegisterBeaconKeyV1 -------------------------------------------------
