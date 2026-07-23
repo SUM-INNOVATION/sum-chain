@@ -79,9 +79,9 @@ pub use b0::verifier_material::VerifierMaterialManifestV1;
 // deliberately NOT registered in `TxType`/`TxPayload` (see the module docs). The
 // top-level 28/29 band + beacon-local `0xBE__` op namespace are reservations only.
 pub use beacon_wire::{
-    BeaconWireOp, DkgComplaintV1, DkgDealV1, RegisterBeaconKeyV1, BEACON_OP_NAMESPACE,
-    C1_COMPUTE_POOL_TXTYPE_RESERVED, CT_LEN, G1_LEN, POP_LEN, SCALAR_LEN, W1B_BEACON_DKG_TXTYPE,
-    W1B_BEACON_SIGN_TXTYPE,
+    BeaconFinalizeV1, BeaconOperation, BeaconPartialV1, BeaconWireOp, DkgComplaintV1, DkgDealV1,
+    RegisterBeaconKeyV1, BEACON_OP_NAMESPACE, C1_COMPUTE_POOL_TXTYPE_RESERVED, CT_LEN, G1_LEN,
+    G2_LEN, POP_LEN, SCALAR_LEN, W1B_BEACON_DKG_TXTYPE, W1B_BEACON_SIGN_TXTYPE,
 };
 pub use staking::{
     AddStakeData, ClaimDelegationRewardsData, CreateValidatorData, DelegateData, DelegationInfo,
@@ -104,8 +104,8 @@ pub use messaging::{
     SRC201_NONCE_SIZE, SRC201_TAG_SIZE, SRC201_VERSION,
 };
 pub use transaction::{
-    NftOperation, NftTxData, SignedTransaction, TokenOperation, TokenTxData, Transaction,
-    TransactionV2, TxInner, TxPayload, TxType,
+    BeaconTxData, NftOperation, NftTxData, SignedTransaction, TokenOperation, TokenTxData,
+    Transaction, TransactionV2, TxInner, TxPayload, TxType,
 };
 pub use docclass::{
     AcademicCredential, CredentialAttribute, CredentialId, CredentialMetadata, DocClassEvent,

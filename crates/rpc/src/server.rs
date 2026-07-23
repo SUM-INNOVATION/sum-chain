@@ -490,6 +490,8 @@ impl RpcServer {
             TxType::InferenceSettlement => "InferenceSettlement",
             TxType::InferenceAttestationV2 => "InferenceAttestationV2",
             TxType::Supply => "Supply",
+            TxType::BeaconSetup => "BeaconSetup",
+            TxType::BeaconSigning => "BeaconSigning",
         }
         .to_string();
 
@@ -531,6 +533,15 @@ impl RpcServer {
             TxPayload::Education(d) => {
                 Some(format!("{}Op{}", ident(format!("{:?}", d.standard)), d.operation))
             }
+            // Beacon (#125): surface the decoded beacon op sub-tag
+            // (RegisterBeaconKey/DkgDeal/…) for observability; malformed bytes
+            // display as no action (non-panicking display path).
+            TxPayload::BeaconSetup(d) | TxPayload::BeaconSigning(d) => d
+                .decode_operation()
+                .ok()
+                .map(|op| ident(format!("{:?}", op.wire_op()))),
+            // Uninhabited reserved C1 slot 27 — unconstructable; unreachable.
+            TxPayload::ComputePoolReserved(never) => match *never {},
         };
 
         let asset_ref = match payload {

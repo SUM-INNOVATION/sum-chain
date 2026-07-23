@@ -1838,6 +1838,29 @@ impl BlockExecutor {
                             }),
                         }
                     }
+                    // Uninhabited reserved C1/ComputePool slot 27 — unconstructable
+                    // (a decoded tx can never carry it); unreachable.
+                    TxPayload::ComputePoolReserved(never) => match *never {},
+                    TxPayload::BeaconSetup(beacon_data) | TxPayload::BeaconSigning(beacon_data) => {
+                        // BR1 randomness beacon (#125). Registered payload
+                        // (TxType 28/29), EXECUTION gate-closed. Delegates to the
+                        // beacon seam: gate-closed (default) -> generic Failed(0)
+                        // free, no state; gate-open -> pure semantic precheck then
+                        // FAIL CLOSED (still generic Failed(0)) pending #127 crypto/
+                        // threshold/membership validation. No beacon-specific receipt
+                        // code is frozen. Never accepts unvalidated state.
+                        // `tx_type() as u8` is the enclosing variant's phase
+                        // ordinal (28 setup / 29 signing) for the phase-consistency
+                        // check.
+                        Ok(crate::beacon_executor::execute(
+                            &self.params,
+                            block_height,
+                            tx_hash,
+                            v2_tx.chain_id,
+                            v2_tx.tx_type() as u8,
+                            beacon_data,
+                        ))
+                    }
                 }
             }
         }
@@ -2900,6 +2923,16 @@ impl BlockExecutor {
                 // the adjacent rejections. No new semantics on this path.
                 return Err(StateError::InvalidOperation(
                     "Supply is only supported in V2 transactions".to_string(),
+                ));
+            }
+            TxPayload::ComputePoolReserved(never) => match *never {}, // uninhabited reserved slot 27
+            TxPayload::BeaconSetup(_) | TxPayload::BeaconSigning(_) => {
+                // BR1 beacon ops are a V2-only subprotocol; mirror the adjacent
+                // rejections on this (currently unreached) legacy path. The
+                // authoritative gate-closed handling lives in the V2 dispatch
+                // above / crate::beacon_executor. No new semantics here.
+                return Err(StateError::InvalidOperation(
+                    "Beacon ops are only supported in V2 transactions".to_string(),
                 ));
             }
         }

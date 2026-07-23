@@ -16,9 +16,9 @@ pub mod receipt;
 // `sumchain_primitives::<module>::…` path resolves unchanged; the crate-root
 // type re-exports below flow through these.
 pub use sumchain_wire::{
-    address, agreement, docclass, education, employment, equity, finance, governance, hash,
-    healthcare, inference_settlement, legal, messaging, node_registry, policy_account, property,
-    staking, storage_metadata, supply, tax, token_ops, transaction, validator_authority,
+    address, agreement, beacon_wire, docclass, education, employment, equity, finance, governance,
+    hash, healthcare, inference_settlement, legal, messaging, node_registry, policy_account,
+    property, staking, storage_metadata, supply, tax, token_ops, transaction, validator_authority,
 };
 
 pub use address::Address;
@@ -49,8 +49,8 @@ pub use messaging::{
 };
 pub use messaging_sponsored::{verify_sponsored_registration_v1, SponsoredRegisterError};
 pub use transaction::{
-    NftOperation, NftTxData, SignedTransaction, TokenOperation, TokenTxData, Transaction,
-    TransactionV2, TxInner, TxPayload, TxType,
+    BeaconTxData, NftOperation, NftTxData, SignedTransaction, TokenOperation, TokenTxData,
+    Transaction, TransactionV2, TxInner, TxPayload, TxType,
 };
 pub use docclass::{
     AcademicCredential, CredentialAttribute, CredentialId, CredentialMetadata, DocClassEvent,
