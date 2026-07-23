@@ -7,15 +7,18 @@ use std::sync::Arc;
 use sumchain_crypto::verify_bytes;
 use sumchain_genesis::ChainParams;
 use sumchain_primitives::{
-    Address, Balance, Block, BlockHeader, Hash, MessagingOperation, NodeRegistryOperation, Receipt,
-    SignedTransaction, StorageMetadataOperationV2, TransactionV2, TxPayload, TxStatus,
-    CHALLENGE_INTERVAL_BLOCKS, SLASH_PERCENTAGE,
+    Address, Balance, Block, BlockHeader, BlockHeight, Hash, MessagingOperation,
+    NodeRegistryOperation, Receipt, SignedTransaction, StorageMetadataOperationV2, TransactionV2,
+    TxPayload, TxStatus, CHALLENGE_INTERVAL_BLOCKS, SLASH_PERCENTAGE,
 };
 use sumchain_storage::schema::{ContractStateDiff, StateDiff};
 use sumchain_storage::Database;
 use tracing::{debug, info, warn};
 
 use crate::agreement_executor::AgreementExecutor;
+use crate::compute_pool::{ComputePoolModel, PoolResult};
+use crate::compute_pool_manager::{compute_pool_gate_open, ComputePoolManager};
+use crate::compute_pool_store::ComputePoolStore;
 use crate::contract_executor::ContractExecutorState;
 use crate::docclass_executor::DocClassExecutor;
 use crate::employment_executor::EmploymentExecutor;
@@ -3018,8 +3021,22 @@ impl BlockExecutor {
         contract_diff.records = self.contract_executor.take_journal();
         contract_diff.sort();
 
+        // ── Dormant C1 compute-pool subprotocol (issue #130) ──
+        // Drive this block's compute-pool transitions through the gated
+        // `ComputePoolManager` into the model + persistent store (rows + per-height
+        // revert journal committed atomically in one write batch), BEFORE the state
+        // root so the committed C1 state is folded into the consensus commitment
+        // when the gate is open. On reorg these rows revert atomically with account
+        // + contract state via `StateManager::revert_block_state_diffs`.
+        // GATE-CLOSED: under the production default
+        // (`compute_pool_enabled_from_height == None`) the manager is never
+        // constructed, nothing is applied, and the root fold below is skipped — the
+        // whole path is inert and dormant block roots are byte-for-byte unchanged.
+        self.apply_compute_pool_transitions(block.height())?;
+
         // Compute new state root (folds the contract-state digest once the
-        // contracts gate is open — see compute_block_state_root).
+        // contracts gate is open, and the C1 state digest once the compute-pool
+        // gate is open — see compute_block_state_root).
         let state_root = self.compute_block_state_root(block, &receipts, &contract_diff)?;
         self.state.set_state_root(state_root);
 
@@ -3030,6 +3047,45 @@ impl BlockExecutor {
         );
 
         Ok((receipts, state_root, state_diff, contract_diff))
+    }
+
+    /// Gated compute-pool APPLY seam (issue #130).
+    ///
+    /// GATE-CLOSED / dormant: under the production default
+    /// (`compute_pool_enabled_from_height == None`) the gate is closed at every
+    /// height, so [`ComputePoolManager::new_enabled`] returns `None`, the manager
+    /// is never constructed, and this seam applies nothing and writes nothing.
+    ///
+    /// #125 dependency: there is no `ComputePool` `TxPayload` on the live path
+    /// yet — sourcing per-block operations from a block's transactions is #125's
+    /// gate-closed dispatch. Until that lands there is no operation source, so
+    /// even a hypothetically-open gate drives an EMPTY transition here (which
+    /// mutates no rows and writes no revert journal). The full apply→persist path
+    /// is exercised end-to-end by driving [`Self::apply_compute_pool_ops`] with a
+    /// real operation source in tests.
+    fn apply_compute_pool_transitions(&self, height: BlockHeight) -> Result<()> {
+        // No live operation source yet (blocked on #125's dispatch) ⇒ the block
+        // contributes an empty (no-op) compute-pool transition.
+        self.apply_compute_pool_ops(height, |_model| Ok(()))
+    }
+
+    /// The gated compute-pool apply seam, parameterized by the operation source
+    /// `ops` so the end-to-end apply→persist lifecycle is exercisable through the
+    /// real gated machinery without a live #125 dispatch.
+    ///
+    /// Inert under the production `None` gate: `new_enabled` yields `None`, so the
+    /// manager is never constructed and `ops` never runs. When the gate is
+    /// (hypothetically / test-) enabled, `ops` runs against the manager's working
+    /// model and, on success, the transition is persisted atomically into the C1
+    /// store with a per-height revert journal.
+    fn apply_compute_pool_ops<F>(&self, height: BlockHeight, ops: F) -> Result<()>
+    where
+        F: FnOnce(&mut ComputePoolModel) -> PoolResult<()>,
+    {
+        if let Some(mut manager) = ComputePoolManager::new_enabled(&self.db, &self.params, height) {
+            manager.apply_block(height, ops)?;
+        }
+        Ok(())
     }
 
     /// Compute state root after block execution
@@ -3077,6 +3133,21 @@ impl BlockExecutor {
         // byte unchanged (like the contracts gate above).
         if let Some(digest) = crate::supply::SupplyStore::new(self.db.clone()).state_digest()? {
             data.extend_from_slice(digest.as_bytes());
+        }
+
+        // Commit the dormant C1 compute-pool state into the root, but ONLY at/after
+        // the compute-pool activation gate (issue #130). Below the gate — the
+        // production default `compute_pool_enabled_from_height == None`, closed at
+        // every height — this branch is skipped, so the formula is byte-for-byte
+        // unchanged and dormant block roots match un-upgraded nodes; C1 state
+        // therefore cannot affect consensus while dormant. Once the gate is open,
+        // every persisted C1 row is bound into the consensus commitment, so
+        // validators cannot diverge on compute-pool state undetected. Mirrors the
+        // contracts/supply gated folds above; C1 rows are applied BEFORE this in
+        // execute_block, so the digest sees this block's transition.
+        if compute_pool_gate_open(&self.params, block.height()) {
+            let cp_digest = ComputePoolStore::new(&self.db).state_digest()?;
+            data.extend_from_slice(cp_digest.as_bytes());
         }
 
         // Mix with previous state root (from before this block's execution)
@@ -6092,6 +6163,490 @@ mod tests {
             registry.get_encryption_pubkey(&sender.address()).unwrap(),
             Some([7u8; 32]),
             "V2 dispatch should have persisted the encryption pubkey"
+        );
+    }
+
+    // ── C1 compute-pool execution-path seam (issue #130) ─────────────────────
+
+    /// Build an empty block for the block-apply path (mirrors the block helper
+    /// in `tests/contract_reorg_and_root.rs`).
+    fn compute_pool_test_block(height: u64, proposer: &KeyPair) -> Block {
+        let header = BlockHeader::new(
+            Hash::ZERO,
+            height,
+            1000,
+            Hash::ZERO,
+            Hash::ZERO,
+            *proposer.public_key().as_bytes(),
+        );
+        Block::new(header, vec![])
+    }
+
+    /// Under the production default gate (`compute_pool_enabled_from_height ==
+    /// None`) the compute-pool execution path is fully INERT: running a block
+    /// through the real `execute_block` apply seam constructs no manager and
+    /// writes no C1 state / journal, and the reorg-revert seam is a clean no-op.
+    #[test]
+    fn compute_pool_execution_path_is_inert_under_dormant_gate() {
+        use crate::compute_pool_store::ComputePoolStore;
+
+        let (state, db, _dir) = setup();
+        // Production default: the gate is `None` (closed at every height).
+        let params = ChainParams::default();
+        assert_eq!(
+            params.compute_pool_enabled_from_height, None,
+            "production default must keep the compute-pool gate dormant"
+        );
+        let executor = BlockExecutor::new(state.clone(), db.clone(), params);
+
+        // Apply a block through the REAL block-application path.
+        let proposer = KeyPair::generate();
+        let blk = compute_pool_test_block(1, &proposer);
+        executor.execute_block(&blk, Hash::ZERO, &[]).unwrap();
+
+        // The apply seam touched nothing: both C1 column families are empty.
+        let store = ComputePoolStore::new(&db);
+        assert!(
+            store.load_state_map().unwrap().is_empty(),
+            "dormant gate must not write any C1 state rows during block-apply"
+        );
+        assert!(
+            !store.has_journal(1).unwrap(),
+            "dormant gate must not write any C1 revert journal during block-apply"
+        );
+
+        // The unified reorg-revert path is a clean no-op under the dormant gate
+        // (no account/contract/C1 diff at this height).
+        state.revert_block_state_diffs(1).unwrap();
+        assert!(
+            store.load_state_map().unwrap().is_empty(),
+            "dormant reorg-revert must touch nothing"
+        );
+    }
+
+    /// With the gate test-enabled (test-local `ChainParams`, the same idiom other
+    /// executor gate tests use — NOT a committed genesis flip), the full
+    /// apply→persist→reorg-revert lifecycle runs end-to-end through the gated
+    /// seams. The apply seam is driven with a real operation source standing in
+    /// for #125's not-yet-existing `ComputePool` dispatch.
+    #[test]
+    fn compute_pool_execution_path_full_lifecycle_when_enabled() {
+        use crate::compute_pool::{
+            ComputePoolModel, ExposureInputs, JobId, UnitId, UnitSizing, UnitState, WorkUnit,
+        };
+        use crate::compute_pool_store::ComputePoolStore;
+
+        let (state, db, _dir) = setup();
+        // Test-local gate at height 0; `ChainParams::default()` stays `None`.
+        let params = ChainParams {
+            compute_pool_enabled_from_height: Some(0),
+            ..ChainParams::default()
+        };
+        let executor = BlockExecutor::new(state.clone(), db.clone(), params);
+
+        let job = JobId::from_bytes([1; 32]);
+        let unit = UnitId::from_bytes([2; 32]);
+        let height = 5u64;
+
+        // APPLY: drive a real compute-pool transition through the gated apply
+        // seam (the operation source #125's dispatch will eventually supply).
+        executor
+            .apply_compute_pool_ops(height, |m: &mut ComputePoolModel| {
+                m.create_job(
+                    job,
+                    Address::new([9; 20]),
+                    1,
+                    vec![WorkUnit {
+                        job_id: job,
+                        unit_id: unit,
+                        predecessors: vec![],
+                        required_inputs: vec![],
+                        generation: 0,
+                        state: UnitState::Blocked,
+                    }],
+                    &[UnitSizing { slots: 0 }],
+                    1,
+                    0,
+                    1_000,
+                    ExposureInputs {
+                        q: 100,
+                        reprovision_allowance: 10,
+                        job_max_retention_files: 0,
+                        max_reassignments_per_file: 2,
+                        reassign_reimb: 5,
+                    },
+                    1_000_000,
+                )
+                .map(|_| ())
+            })
+            .unwrap();
+
+        // PERSIST: the transition landed as C1 rows + a per-height revert journal.
+        let store = ComputePoolStore::new(&db);
+        assert!(
+            store.get_job(&job).unwrap().is_some(),
+            "job persisted through the apply seam"
+        );
+        assert!(!store.load_state_map().unwrap().is_empty());
+        assert!(
+            store.has_journal(height).unwrap(),
+            "per-height revert journal written by the apply seam"
+        );
+
+        // REORG-REVERT: the unified atomic reorg path (account+contract+C1 in one
+        // batch) rolls this block's C1 state back.
+        state.revert_block_state_diffs(height).unwrap();
+        assert!(
+            store.get_job(&job).unwrap().is_none(),
+            "job reverted on reorg"
+        );
+        assert!(
+            store.load_state_map().unwrap().is_empty(),
+            "all C1 rows reverted on reorg"
+        );
+        assert!(
+            !store.has_journal(height).unwrap(),
+            "revert journal consumed on reorg"
+        );
+
+        // Idempotent: reverting an already-consumed height is a clean no-op.
+        state.revert_block_state_diffs(height).unwrap();
+    }
+
+    /// Helper: apply a one-job C1 transition at `height` through the gated apply
+    /// seam (stand-in for #125's dispatch operation source).
+    fn apply_one_job(executor: &BlockExecutor, height: u64, seed: u8) {
+        use crate::compute_pool::{
+            ComputePoolModel, ExposureInputs, JobId, UnitId, UnitSizing, UnitState, WorkUnit,
+        };
+        let job = JobId::from_bytes([seed; 32]);
+        let unit = UnitId::from_bytes([seed.wrapping_add(1); 32]);
+        executor
+            .apply_compute_pool_ops(height, move |m: &mut ComputePoolModel| {
+                m.create_job(
+                    job,
+                    Address::new([9; 20]),
+                    1,
+                    vec![WorkUnit {
+                        job_id: job,
+                        unit_id: unit,
+                        predecessors: vec![],
+                        required_inputs: vec![],
+                        generation: 0,
+                        state: UnitState::Blocked,
+                    }],
+                    &[UnitSizing { slots: 0 }],
+                    1,
+                    0,
+                    1_000,
+                    ExposureInputs {
+                        q: 100,
+                        reprovision_allowance: 10,
+                        job_max_retention_files: 0,
+                        max_reassignments_per_file: 2,
+                        reassign_reimb: 5,
+                    },
+                    1_000_000,
+                )
+                .map(|_| ())
+            })
+            .unwrap();
+    }
+
+    /// DORMANT IDENTITY (state commitment): under the production default gate the
+    /// state root is INDEPENDENT of C1 state — injecting arbitrary C1 rows must not
+    /// change the computed block root. This proves compute-pool state cannot affect
+    /// consensus while dormant, i.e. the commitment fold is a strict no-op under
+    /// `None` and dormant roots are byte-for-byte unchanged by this change.
+    #[test]
+    fn compute_pool_commitment_is_noop_under_dormant_gate() {
+        let (state, db, _dir) = setup();
+        let executor = BlockExecutor::new(state.clone(), db.clone(), ChainParams::default());
+
+        let proposer = KeyPair::generate();
+        let blk = compute_pool_test_block(1, &proposer);
+        let empty_diff = ContractStateDiff::new();
+
+        let root_before = executor
+            .compute_block_state_root(&blk, &[], &empty_diff)
+            .unwrap();
+
+        // Inject arbitrary bytes into the C1 state CF (domain-prefixed junk).
+        db.put(
+            sumchain_storage::cf::COMPUTE_POOL_STATE,
+            &[0x01, 9, 9, 9],
+            b"junk-c1-state",
+        )
+        .unwrap();
+
+        let root_after = executor
+            .compute_block_state_root(&blk, &[], &empty_diff)
+            .unwrap();
+
+        assert_eq!(
+            root_before, root_after,
+            "under the dormant None gate, C1 state must NOT be folded into the root"
+        );
+    }
+
+    /// STATE COMMITMENT (enabled): once the gate is open, C1 state IS bound into
+    /// the block state root — the same injected rows that were invisible above now
+    /// change the root, so validators cannot diverge on compute-pool state
+    /// undetected. Complements the dormant-identity test.
+    #[test]
+    fn compute_pool_commitment_binds_state_when_gate_open() {
+        let (state, db, _dir) = setup();
+        let params = ChainParams {
+            compute_pool_enabled_from_height: Some(0),
+            ..ChainParams::default()
+        };
+        let executor = BlockExecutor::new(state.clone(), db.clone(), params);
+
+        let proposer = KeyPair::generate();
+        let blk = compute_pool_test_block(1, &proposer);
+        let empty_diff = ContractStateDiff::new();
+
+        let root_empty = executor
+            .compute_block_state_root(&blk, &[], &empty_diff)
+            .unwrap();
+
+        db.put(
+            sumchain_storage::cf::COMPUTE_POOL_STATE,
+            &[0x01, 9, 9, 9],
+            b"junk-c1-state",
+        )
+        .unwrap();
+
+        let root_with_c1 = executor
+            .compute_block_state_root(&blk, &[], &empty_diff)
+            .unwrap();
+
+        assert_ne!(
+            root_empty, root_with_c1,
+            "with the gate open, C1 state must be committed into the block root"
+        );
+    }
+
+    /// STATE-COMMITMENT differential golden (issue #163): under the dormant gate
+    /// the COMPLETE block-root preimage is byte-for-byte the PRE-#163 algorithm
+    /// (C1 fold contributes nothing), and under an open gate it is exactly that
+    /// preimage with the 32-byte C1 digest inserted at the DOCUMENTED position —
+    /// after the supply fold, before the previous-state-root mix.
+    #[test]
+    fn compute_pool_root_none_identical_open_appends_digest_at_documented_offset() {
+        use crate::compute_pool_store::ComputePoolStore;
+
+        let (state, db, _dir) = setup();
+        // Both executors share this state/db. Contracts gate CLOSED (default),
+        // supply uncorrected (fresh db ⇒ None), empty block/receipts, prev state
+        // root == ZERO ⇒ the ONLY preimage difference is the C1 fold.
+        let ex_none = BlockExecutor::new(state.clone(), db.clone(), ChainParams::default());
+        let ex_open = BlockExecutor::new(
+            state.clone(),
+            db.clone(),
+            ChainParams {
+                compute_pool_enabled_from_height: Some(0),
+                ..ChainParams::default()
+            },
+        );
+
+        let proposer = KeyPair::generate();
+        let blk = compute_pool_test_block(1, &proposer);
+        let empty_contract = ContractStateDiff::new();
+
+        // A known C1 row so the committed digest is non-trivial.
+        db.put(
+            sumchain_storage::cf::COMPUTE_POOL_STATE,
+            &[0x01, 0x02, 0x03],
+            &[0xAA, 0xBB],
+        )
+        .unwrap();
+        let cp_digest = ComputePoolStore::new(&db).state_digest().unwrap();
+
+        // Reconstruct the PRE-#163 preimage for these controlled inputs:
+        // height ‖ parent_hash ‖ timestamp ‖ tx_root ‖ prev_state_root.
+        let mut pre163 = Vec::new();
+        pre163.extend_from_slice(&blk.height().to_be_bytes());
+        pre163.extend_from_slice(blk.header.parent_hash.as_bytes());
+        pre163.extend_from_slice(&blk.header.timestamp.to_be_bytes());
+        pre163.extend_from_slice(blk.header.tx_root.as_bytes());
+        let prefix_len = pre163.len(); // everything before the prev-root mix
+        pre163.extend_from_slice(state.state_root().as_bytes());
+
+        // Gate None: byte-for-byte the pre-#163 preimage hash (C1 fold inert),
+        // even though a C1 row is present in the DB.
+        assert_eq!(
+            ex_none
+                .compute_block_state_root(&blk, &[], &empty_contract)
+                .unwrap(),
+            Hash::hash(&pre163),
+            "under None gate the root must equal the pre-#163 preimage hash"
+        );
+
+        // Gate open: the same preimage with the 32-byte C1 digest inserted at the
+        // documented offset (after supply fold, before prev-root mix).
+        let mut open_preimage = pre163[..prefix_len].to_vec();
+        open_preimage.extend_from_slice(cp_digest.as_bytes());
+        open_preimage.extend_from_slice(state.state_root().as_bytes());
+        assert_eq!(
+            open_preimage.len(),
+            pre163.len() + 32,
+            "open-gate preimage must be the closed preimage plus exactly 32 bytes"
+        );
+        assert_eq!(
+            ex_open
+                .compute_block_state_root(&blk, &[], &empty_contract)
+                .unwrap(),
+            Hash::hash(&open_preimage),
+            "open-gate root must be the closed preimage + the 32-byte C1 digest at the documented offset"
+        );
+    }
+
+    /// ATOMIC REORG REVERT: a reverted block rolls back account AND C1 state in a
+    /// SINGLE `revert_block_state_diffs` call (one write batch), so the two
+    /// families cannot end up partially reverted.
+    #[test]
+    fn compute_pool_reorg_reverts_account_and_c1_in_one_call() {
+        use crate::compute_pool::JobId;
+        use crate::compute_pool_store::ComputePoolStore;
+        use sumchain_storage::schema::AccountState;
+
+        let (state, db, _dir) = setup();
+        let params = ChainParams {
+            compute_pool_enabled_from_height: Some(0),
+            ..ChainParams::default()
+        };
+        let executor = BlockExecutor::new(state.clone(), db.clone(), params);
+
+        let height = 7u64;
+        let acct = Address::new([0x33; 20]);
+
+        // Post-block state: an account mutation (with a saved StateDiff) AND a C1
+        // transition (with its per-height journal), both finalized at `height`.
+        state
+            .put_account(&acct, &AccountState { balance: 50, nonce: 1 })
+            .unwrap();
+        let mut sd = StateDiff::new();
+        sd.add_change(
+            acct,
+            Some(AccountState { balance: 100, nonce: 0 }),
+            AccountState { balance: 50, nonce: 1 },
+        );
+        state.save_state_diff(height, sd).unwrap();
+        apply_one_job(&executor, height, 0x44);
+
+        let store = ComputePoolStore::new(&db);
+        assert!(store.get_job(&JobId::from_bytes([0x44; 32])).unwrap().is_some());
+        assert!(store.has_journal(height).unwrap());
+
+        // ONE call reverts BOTH families atomically.
+        state.revert_block_state_diffs(height).unwrap();
+
+        assert_eq!(
+            state.get_balance(&acct).unwrap(),
+            100,
+            "account reverted to pre-block balance"
+        );
+        assert!(
+            store.get_job(&JobId::from_bytes([0x44; 32])).unwrap().is_none(),
+            "C1 job reverted in the same call"
+        );
+        assert!(store.load_state_map().unwrap().is_empty(), "all C1 rows reverted");
+        assert!(!store.has_journal(height).unwrap(), "C1 journal consumed");
+    }
+
+    /// A forced C1 revert failure (a corrupt journal) must abort the UNIFIED
+    /// `revert_block_state_diffs` BEFORE commit, so account (and contract) state
+    /// can never be reverted independently of C1 — all families revert or none.
+    #[test]
+    fn forced_c1_revert_failure_cannot_revert_account_independently() {
+        use crate::compute_pool::JobId;
+        use crate::compute_pool_store::ComputePoolStore;
+        use sumchain_storage::{cf, schema::AccountState};
+
+        let (state, db, _dir) = setup();
+        let params = ChainParams {
+            compute_pool_enabled_from_height: Some(0),
+            ..ChainParams::default()
+        };
+        let executor = BlockExecutor::new(state.clone(), db.clone(), params);
+
+        let height = 7u64;
+        let acct = Address::new([0x33; 20]);
+
+        // Post-block state: an account mutation (with its StateDiff) AND a C1
+        // transition (with its per-height journal), both finalized at `height`.
+        state
+            .put_account(&acct, &AccountState { balance: 50, nonce: 1 })
+            .unwrap();
+        let mut sd = StateDiff::new();
+        sd.add_change(
+            acct,
+            Some(AccountState { balance: 100, nonce: 0 }),
+            AccountState { balance: 50, nonce: 1 },
+        );
+        state.save_state_diff(height, sd).unwrap();
+        apply_one_job(&executor, height, 0x44);
+        let store = ComputePoolStore::new(&db);
+        assert!(store.has_journal(height).unwrap());
+
+        // Force a C1 revert failure: overwrite the journal with undecodable bytes
+        // (too short for the fixint length prefix -> c1_decode errors in
+        // stage_block_revert, before anything is committed).
+        db.put(cf::COMPUTE_POOL_STATE_DIFFS, &height.to_be_bytes(), &[0xFFu8; 4])
+            .unwrap();
+
+        // The unified revert MUST abort — nothing committed.
+        assert!(
+            state.revert_block_state_diffs(height).is_err(),
+            "corrupt C1 journal aborts the unified revert before commit"
+        );
+
+        // Account is NOT reverted independently; the C1 rows are likewise NOT
+        // reverted, and the corrupt journal is preserved for retry — all-or-none.
+        assert_eq!(
+            state.get_balance(&acct).unwrap(),
+            50,
+            "account NOT reverted while the C1 revert failed (all-or-none)"
+        );
+        assert!(
+            store.get_job(&JobId::from_bytes([0x44; 32])).unwrap().is_some(),
+            "C1 rows NOT reverted either (the whole revert aborted)"
+        );
+        assert!(
+            store.has_journal(height).unwrap(),
+            "corrupt C1 journal preserved for retry"
+        );
+    }
+
+    /// Even with the gate test-enabled, the LIVE block-apply seam
+    /// (`execute_block`) still writes nothing, because there is no `ComputePool`
+    /// operation source on the live path yet — that is #125's gate-closed
+    /// dispatch. This pins the flagged #125 dependency: the seam is wired, but
+    /// inert until #125 supplies per-block operations.
+    #[test]
+    fn compute_pool_execute_block_is_noop_without_a_125_operation_source() {
+        use crate::compute_pool_store::ComputePoolStore;
+
+        let (state, db, _dir) = setup();
+        let params = ChainParams {
+            compute_pool_enabled_from_height: Some(0),
+            ..ChainParams::default()
+        };
+        let executor = BlockExecutor::new(state.clone(), db.clone(), params);
+
+        let proposer = KeyPair::generate();
+        let blk = compute_pool_test_block(1, &proposer);
+        executor.execute_block(&blk, Hash::ZERO, &[]).unwrap();
+
+        let store = ComputePoolStore::new(&db);
+        assert!(
+            store.load_state_map().unwrap().is_empty(),
+            "no C1 rows: execute_block has no #125 operation source yet"
+        );
+        assert!(
+            !store.has_journal(1).unwrap(),
+            "no C1 journal: the empty live transition writes nothing"
         );
     }
 }
