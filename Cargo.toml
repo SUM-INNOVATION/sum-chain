@@ -5,6 +5,7 @@ members = [
     "crates/primitives",
     "crates/crypto",
     "crates/beacon-crypto",
+    "crates/beacon-runtime",
     "crates/storage",
     "crates/genesis",
     "crates/state",

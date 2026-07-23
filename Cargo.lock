@@ -5848,13 +5848,26 @@ name = "sumchain-beacon-crypto"
 version = "0.2.0"
 dependencies = [
  "blstrs",
+ "chacha20poly1305",
  "ff",
  "group",
  "hex",
+ "hkdf",
  "sha2",
  "subtle",
  "thiserror 1.0.69",
  "zeroize",
+]
+
+[[package]]
+name = "sumchain-beacon-runtime"
+version = "0.2.0"
+dependencies = [
+ "blake3",
+ "hex",
+ "sumchain-beacon-crypto",
+ "sumchain-wire",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
