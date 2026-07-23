@@ -6427,6 +6427,81 @@ mod tests {
         );
     }
 
+    /// STATE-COMMITMENT differential golden (issue #163): under the dormant gate
+    /// the COMPLETE block-root preimage is byte-for-byte the PRE-#163 algorithm
+    /// (C1 fold contributes nothing), and under an open gate it is exactly that
+    /// preimage with the 32-byte C1 digest inserted at the DOCUMENTED position —
+    /// after the supply fold, before the previous-state-root mix.
+    #[test]
+    fn compute_pool_root_none_identical_open_appends_digest_at_documented_offset() {
+        use crate::compute_pool_store::ComputePoolStore;
+
+        let (state, db, _dir) = setup();
+        // Both executors share this state/db. Contracts gate CLOSED (default),
+        // supply uncorrected (fresh db ⇒ None), empty block/receipts, prev state
+        // root == ZERO ⇒ the ONLY preimage difference is the C1 fold.
+        let ex_none = BlockExecutor::new(state.clone(), db.clone(), ChainParams::default());
+        let ex_open = BlockExecutor::new(
+            state.clone(),
+            db.clone(),
+            ChainParams {
+                compute_pool_enabled_from_height: Some(0),
+                ..ChainParams::default()
+            },
+        );
+
+        let proposer = KeyPair::generate();
+        let blk = compute_pool_test_block(1, &proposer);
+        let empty_contract = ContractStateDiff::new();
+
+        // A known C1 row so the committed digest is non-trivial.
+        db.put(
+            sumchain_storage::cf::COMPUTE_POOL_STATE,
+            &[0x01, 0x02, 0x03],
+            &[0xAA, 0xBB],
+        )
+        .unwrap();
+        let cp_digest = ComputePoolStore::new(&db).state_digest().unwrap();
+
+        // Reconstruct the PRE-#163 preimage for these controlled inputs:
+        // height ‖ parent_hash ‖ timestamp ‖ tx_root ‖ prev_state_root.
+        let mut pre163 = Vec::new();
+        pre163.extend_from_slice(&blk.height().to_be_bytes());
+        pre163.extend_from_slice(blk.header.parent_hash.as_bytes());
+        pre163.extend_from_slice(&blk.header.timestamp.to_be_bytes());
+        pre163.extend_from_slice(blk.header.tx_root.as_bytes());
+        let prefix_len = pre163.len(); // everything before the prev-root mix
+        pre163.extend_from_slice(state.state_root().as_bytes());
+
+        // Gate None: byte-for-byte the pre-#163 preimage hash (C1 fold inert),
+        // even though a C1 row is present in the DB.
+        assert_eq!(
+            ex_none
+                .compute_block_state_root(&blk, &[], &empty_contract)
+                .unwrap(),
+            Hash::hash(&pre163),
+            "under None gate the root must equal the pre-#163 preimage hash"
+        );
+
+        // Gate open: the same preimage with the 32-byte C1 digest inserted at the
+        // documented offset (after supply fold, before prev-root mix).
+        let mut open_preimage = pre163[..prefix_len].to_vec();
+        open_preimage.extend_from_slice(cp_digest.as_bytes());
+        open_preimage.extend_from_slice(state.state_root().as_bytes());
+        assert_eq!(
+            open_preimage.len(),
+            pre163.len() + 32,
+            "open-gate preimage must be the closed preimage plus exactly 32 bytes"
+        );
+        assert_eq!(
+            ex_open
+                .compute_block_state_root(&blk, &[], &empty_contract)
+                .unwrap(),
+            Hash::hash(&open_preimage),
+            "open-gate root must be the closed preimage + the 32-byte C1 digest at the documented offset"
+        );
+    }
+
     /// ATOMIC REORG REVERT: a reverted block rolls back account AND C1 state in a
     /// SINGLE `revert_block_state_diffs` call (one write batch), so the two
     /// families cannot end up partially reverted.

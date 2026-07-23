@@ -83,7 +83,32 @@ pub const C1_DECODE_BYTE_LIMIT: u64 = 1 << 20;
 /// Domain tag for [`ComputePoolStore::state_digest`]. Separates the C1 state
 /// commitment from every other digest domain (mirrors the `SUM-…:v1` /
 /// `sumchain.supply.v1` domain-tag convention used elsewhere).
+///
+/// **Explicitly versioned** (`…state.v1`). This byte string is a FROZEN
+/// consensus value once the compute-pool gate can open: it is committed into the
+/// block state root, so any change to it (including the version suffix) is a
+/// consensus-breaking change that REQUIRES a deliberate protocol version bump
+/// (`…state.v2`) coordinated with activation — never an incidental edit. The
+/// exact bytes are pinned by the golden test `c1_state_digest_domain_is_frozen`.
 const C1_STATE_DIGEST_DOMAIN: &[u8] = b"sumchain.compute_pool.state.v1";
+
+/// Encode a field byte-length as the canonical 4-byte little-endian frame prefix
+/// used by [`ComputePoolStore::state_digest`], rejecting any length that does not
+/// fit in `u32`.
+///
+/// A raw `len as u32` cast would SILENTLY TRUNCATE a `> u32::MAX` length,
+/// producing an ambiguous frame (two different fields hashing identically) — a
+/// consensus hazard. This checked conversion fails closed instead. For every
+/// realistic length (`≤ u32::MAX`) the emitted bytes are byte-for-byte identical
+/// to the old cast, so no frozen golden vector changes.
+fn frame_len(n: usize) -> Result<[u8; 4]> {
+    let framed = u32::try_from(n).map_err(|_| {
+        StateError::InvalidOperation(format!(
+            "C1 state digest: field length {n} exceeds u32::MAX; cannot frame unambiguously"
+        ))
+    })?;
+    Ok(framed.to_le_bytes())
+}
 
 /// 1-byte domain/type prefixes for the shared C1 keyspace. Distinct per record
 /// category, so two categories can never alias even at equal body length.
@@ -754,9 +779,9 @@ impl<'a> ComputePoolStore<'a> {
         let mut buf: Vec<u8> = Vec::with_capacity(C1_STATE_DIGEST_DOMAIN.len());
         buf.extend_from_slice(C1_STATE_DIGEST_DOMAIN);
         for (k, v) in &rows {
-            buf.extend_from_slice(&(k.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&frame_len(k.len())?);
             buf.extend_from_slice(k);
-            buf.extend_from_slice(&(v.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&frame_len(v.len())?);
             buf.extend_from_slice(v);
         }
         Ok(Hash::hash(&buf))
@@ -1072,6 +1097,135 @@ mod tests {
     fn open_db() -> (Database, TempDir) {
         let dir = TempDir::new().unwrap();
         (Database::open_default(dir.path()).unwrap(), dir)
+    }
+
+    // ── C1 state-commitment golden vectors (issue #163) ──────────────────────
+    //
+    // These FREEZE the deterministic C1 state digest that the block executor
+    // folds into the block state root once the compute-pool gate is open. They
+    // are a CONSENSUS surface at activation: if any value below changes, the
+    // on-chain commitment changed, and the digest MUST be re-versioned
+    // (`C1_STATE_DIGEST_DOMAIN` → `…state.v2`) as a deliberate, activation-
+    // coordinated protocol bump — never an incidental edit.
+
+    /// The domain tag is EXPLICITLY VERSIONED (`…state.v1`) and its exact bytes
+    /// are frozen. A change requires a deliberate `v2` bump (see the const doc).
+    #[test]
+    fn c1_state_digest_domain_is_frozen() {
+        assert_eq!(C1_STATE_DIGEST_DOMAIN, b"sumchain.compute_pool.state.v1");
+        assert_eq!(
+            hex::encode(C1_STATE_DIGEST_DOMAIN),
+            "73756d636861696e2e636f6d707574655f706f6f6c2e73746174652e7631"
+        );
+        assert!(
+            C1_STATE_DIGEST_DOMAIN.ends_with(b".v1"),
+            "domain must carry an explicit version tag"
+        );
+    }
+
+    /// Empty-store digest == the domain-only blake3 (frozen).
+    #[test]
+    fn c1_state_digest_empty_is_frozen() {
+        let (db, _d) = open_db();
+        assert_eq!(
+            hex::encode(ComputePoolStore::new(&db).state_digest().unwrap().as_bytes()),
+            "6ef6a51fb97c160d331253b7848af5306d7b67d1d669a2e3175a4a7af0271e75"
+        );
+    }
+
+    /// Fixed one-row digest (frozen).
+    #[test]
+    fn c1_state_digest_one_row_is_frozen() {
+        let (db, _d) = open_db();
+        db.put(cf::COMPUTE_POOL_STATE, &[0x01, 0x02, 0x03], &[0xAA, 0xBB])
+            .unwrap();
+        assert_eq!(
+            hex::encode(ComputePoolStore::new(&db).state_digest().unwrap().as_bytes()),
+            "55f9b92fa394be2d2392c07fa0d197600dbee9aa62f9ee2ca1bb1f49ec060414"
+        );
+    }
+
+    /// Fixed multi-row digest (frozen) with PROOF of (a) canonical key ordering
+    /// and (b) insertion-order independence: a scrambled and a sorted insertion
+    /// order produce the identical frozen digest.
+    #[test]
+    fn c1_state_digest_multi_row_is_frozen_and_order_independent() {
+        const MULTI_HEX: &str =
+            "c5ea8d063768eb42a69ac3989f44c86e4ba5e020fe1d7310673c3026415c302c";
+        let rows: [(&[u8], &[u8]); 3] =
+            [(b"\x01k1", b"v1"), (b"\x02k2", b"val2"), (b"\x03k3", b"value3")];
+
+        // Sorted insertion order.
+        let (db_sorted, _s) = open_db();
+        for (k, v) in rows {
+            db_sorted.put(cf::COMPUTE_POOL_STATE, k, v).unwrap();
+        }
+        let d_sorted = ComputePoolStore::new(&db_sorted).state_digest().unwrap();
+
+        // Scrambled insertion order.
+        let (db_scram, _c) = open_db();
+        for (k, v) in [rows[2], rows[0], rows[1]] {
+            db_scram.put(cf::COMPUTE_POOL_STATE, k, v).unwrap();
+        }
+        let d_scram = ComputePoolStore::new(&db_scram).state_digest().unwrap();
+
+        assert_eq!(hex::encode(d_sorted.as_bytes()), MULTI_HEX, "multi-row digest drifted");
+        assert_eq!(
+            d_sorted, d_scram,
+            "digest must be insertion-order independent (canonical key order)"
+        );
+    }
+
+    /// The u32 length prefixes make the concatenation UNAMBIGUOUS: `(key="ab",
+    /// val="c")` and `(key="a", val="bc")` share identical unframed bytes yet
+    /// hash to DIFFERENT frozen digests.
+    #[test]
+    fn c1_state_digest_length_framing_is_unambiguous() {
+        let (db1, _d1) = open_db();
+        db1.put(cf::COMPUTE_POOL_STATE, b"ab", b"c").unwrap();
+        let ab_c = ComputePoolStore::new(&db1).state_digest().unwrap();
+
+        let (db2, _d2) = open_db();
+        db2.put(cf::COMPUTE_POOL_STATE, b"a", b"bc").unwrap();
+        let a_bc = ComputePoolStore::new(&db2).state_digest().unwrap();
+
+        assert_eq!(
+            hex::encode(ab_c.as_bytes()),
+            "3046df96a519ddd677fe8a2dea8ce95f755549bb7b358e6f7e4a7d48f5c9b4fa"
+        );
+        assert_eq!(
+            hex::encode(a_bc.as_bytes()),
+            "e73b22e6b2b6e45668e03488aaf501c17d195fa268ccd335e1f294f2d6045418"
+        );
+        assert_ne!(
+            ab_c, a_bc,
+            "length framing must disambiguate equal concatenated bytes"
+        );
+    }
+
+    /// `frame_len` is the CHECKED u32 conversion (replaces a silent `as u32`
+    /// truncation): normal lengths emit exact LE bytes byte-identical to the old
+    /// cast (so no golden moves), while a `> u32::MAX` length is REJECTED rather
+    /// than framed ambiguously.
+    #[test]
+    fn frame_len_is_checked_and_matches_old_cast_in_range() {
+        assert_eq!(frame_len(0).unwrap(), [0, 0, 0, 0]);
+        assert_eq!(frame_len(5).unwrap(), 5u32.to_le_bytes());
+        assert_eq!(frame_len(u32::MAX as usize).unwrap(), u32::MAX.to_le_bytes());
+        // Byte-identical to the previous unchecked `n as u32` cast for every
+        // in-range length ⇒ the checked conversion changes no frozen vector.
+        for n in [1usize, 2, 3, 255, 256, 65_535, 1_000_000] {
+            assert_eq!(frame_len(n).unwrap(), (n as u32).to_le_bytes());
+        }
+        // A length that overflows u32 is rejected (usize is 64-bit here).
+        #[cfg(target_pointer_width = "64")]
+        {
+            let too_big = (u32::MAX as usize) + 1;
+            assert!(matches!(
+                frame_len(too_big),
+                Err(StateError::InvalidOperation(_))
+            ));
+        }
     }
 
     fn jid(b: u8) -> JobId {
