@@ -156,8 +156,12 @@ compatible release.
 - **Publication never activates an ordinal.** Publishing this crate alone does
   not make a new `TxPayload` ordinal live: new ordinals require explicit
   chain/client adoption, compatibility tests, and activation gating.
-- **Ordinal ownership:** W1a introduces **no** new ordinal (variants 0–26 only);
-  ordinal **27+** is owned by **W1b**.
+- **Ordinal ownership:** W1a introduces **no** new ordinal (variants 0–26 only).
+  Above that (owner allocation, 2026-07): ordinal **27** is owned by **C1 /
+  ComputePool (#130)**; the **28/29 band** is owned by **W1b** beacon, split by
+  protocol phase (**28** = DKG / epoch-setup: key registration, deal, complaint;
+  **29** = signing / output: per-round partials, finalization). All are dormant
+  reservations — not yet registered `TxType`/`TxPayload` variants.
 
 ## Golden fixtures
 
