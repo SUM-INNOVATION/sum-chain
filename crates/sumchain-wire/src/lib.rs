@@ -76,10 +76,12 @@ pub use b0::statement::R0ComputationStatementV2;
 pub use b0::verifier_material::VerifierMaterialManifestV1;
 
 // BR1 beacon DKG + K-rotate W1b wire carriers (#125). Dormant / pre-ratification;
-// deliberately NOT registered in `TxType`/`TxPayload` (see the module docs).
+// deliberately NOT registered in `TxType`/`TxPayload` (see the module docs). The
+// top-level 28/29 band + beacon-local `0xBE__` op namespace are reservations only.
 pub use beacon_wire::{
-    BeaconWireOp, DkgComplaintV1, DkgDealV1, RegisterBeaconKeyV1, CT_LEN, DEGREE_PLUS_ONE, G1_LEN,
-    POP_LEN, SCALAR_LEN,
+    BeaconWireOp, DkgComplaintV1, DkgDealV1, RegisterBeaconKeyV1, BEACON_OP_NAMESPACE,
+    C1_COMPUTE_POOL_TXTYPE_RESERVED, CT_LEN, G1_LEN, MAX_COMMITMENTS, POP_LEN, SCALAR_LEN,
+    W1B_BEACON_DKG_TXTYPE, W1B_BEACON_KEY_TXTYPE,
 };
 pub use staking::{
     AddStakeData, ClaimDelegationRewardsData, CreateValidatorData, DelegateData, DelegationInfo,

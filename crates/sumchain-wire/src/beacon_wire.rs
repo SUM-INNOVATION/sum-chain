@@ -14,16 +14,51 @@
 //! This module is **dormant wire plumbing only**. It is intentionally *not*
 //! registered in [`crate::transaction::TxType`] / [`crate::transaction::TxPayload`],
 //! so it is on **no** consensus, mempool, or block-application path and flips **no**
-//! gate. It mirrors the B0-PRE family's stance ("no transaction ordinals; no
-//! existing bytes change"). Two BR1 elements are RATIFIED by the owner (2026-07) —
-//! `G_enc = BLS12-381 G1` and the K-rotate key lifecycle — and the codecs below
-//! honour the byte consequences of those two (48-byte compressed G1 points;
-//! per-epoch `RegisterBeaconKeyV1`). **Everything else** the carriers encode
-//! (KDF/AEAD/DLEQ transcript details, threshold `T`, activation) is reviewer-
-//! approved **PROPOSED**, not adopted; the encodings here MUST NOT be treated as
-//! frozen consensus bytes until #125/#127 ratify them.
+//! gate. It mirrors the B0-PRE / C1 family stance (C1 compute-pool likewise adds
+//! "no `TxPayload` ordinal", `crates/state/src/compute_pool.rs`). Two BR1 elements
+//! are RATIFIED by the owner (2026-07) — `G_enc = BLS12-381 G1` and the K-rotate
+//! key lifecycle — and the codecs below honour the byte consequences of those two
+//! (48-byte compressed G1 points; per-epoch `RegisterBeaconKeyV1`). **Everything
+//! else** the carriers encode (KDF/AEAD/DLEQ transcript details, threshold `T`,
+//! activation) is reviewer-approved **PROPOSED**, not adopted; the encodings here
+//! MUST NOT be treated as frozen consensus bytes until #125/#127 ratify them. In
+//! particular, `T` (the DKG threshold / commitment count) is **not** ratified, so
+//! it is **not** frozen into the wire: the deal uses a bounded variable-length
+//! commitment vector (see [`DkgDealV1`] / [`MAX_COMMITMENTS`]).
 //!
-//! ## Wire layer vs. crypto adapter boundary (deliberate)
+//! ## Top-level ordinal band (owner allocation, 2026-07) — reservation only
+//!
+//! The top-level `TxType` ordinal space above the live W1a range (`0..=26`,
+//! `Supply = 26`) is allocated across dormant subsystems:
+//!
+//! | Ordinal | Owner | Notes |
+//! |---------|-------|-------|
+//! | `27` | **C1 / ComputePool (#130)** — [`C1_COMPUTE_POOL_TXTYPE_RESERVED`] | NOT the beacon; W1b must not take 27. |
+//! | `28` | **W1b beacon** — [`W1B_BEACON_KEY_TXTYPE`] | carries [`RegisterBeaconKeyV1`]. |
+//! | `29` | **W1b beacon** — [`W1B_BEACON_DKG_TXTYPE`] | carries [`DkgDealV1`] / [`DkgComplaintV1`]. |
+//!
+//! These are **documented reservations**, not registered `TxType`/`TxPayload`
+//! variants — the family stays dormant. (This refines the older
+//! `crates/sumchain-wire/README.md` "ordinal 27+ owned by W1b" note: the owner
+//! carved `27` out for C1 and gave W1b the `28/29` band.)
+//!
+//! ## Two-level namespacing — beacon op tags are NOT `TxType` ordinals
+//!
+//! The three beacon message kinds are **beacon-family-local operation sub-tags**
+//! ([`BeaconWireOp`]), explicitly namespaced so they can never masquerade as a
+//! top-level transaction ordinal:
+//!
+//! * their canonical on-wire identity is each carrier's own **7-byte magic**
+//!   (self-domaining, like the B0-PRE production types); and
+//! * their compact numeric discriminant ([`BeaconWireOp::to_repr`]) lives in the
+//!   **`0xBE__` beacon namespace** ([`BEACON_OP_NAMESPACE`]) — a `u16` whose high
+//!   byte is `0xBE`, which is unmistakably **not** a `u8` `TxType` ordinal
+//!   (`0..=26`) nor a reserved band slot (`27`/`28`/`29`).
+//!
+//! Each op declares which reserved top-level band slot would carry it via
+//! [`BeaconWireOp::top_level_txtype`] (28 for key registration, 29 for DKG).
+//!
+//! ## Wire layer vs. crypto adapter boundary (deliberate — enforced downstream)
 //!
 //! To keep this leaf crate free of any BLS/pairing dependency (per its charter),
 //! group elements and field scalars are carried as **validated fixed-width byte
@@ -33,16 +68,22 @@
 //!   **48-byte** canonical-compressed (ZCash/`blst`) field. The decoder performs
 //!   only the *cheap structural* checks that need no field arithmetic: the
 //!   compression flag MUST be set and the infinity flag MUST be clear (rejecting
-//!   the identity element the draft §2.2 forbids). **Full on-curve + prime-order
-//!   subgroup membership validation is out of scope here and belongs to the #127
-//!   crypto adapter** (`blst`/`arkworks`), which every consumer MUST run before use.
+//!   the identity element the draft §2.2 forbids).
 //! * **`F_r` scalars** (`dleq (c, z)`) — a fixed **32-byte little-endian** field
 //!   with the mandatory canonical `< r` range check applied at decode (draft §5.6,
 //!   §8.2). This check is exact and cheap (256-bit compare), so it lives here.
 //! * **Proof-of-possession** — an **opaque fixed-width 96-byte** field (canonical
 //!   compressed BLS12-381 **G2** signature, per draft §2.3 minimal-pubkey-size).
-//!   Only its length is enforced here; `PopVerify` (subgroup, non-identity,
-//!   pairing) is entirely #127's responsibility.
+//!   Only its length is enforced here.
+//!
+//! **LAYER-BOUNDARY CAVEAT (owner).** This module performs *only* the cheap
+//! structural byte checks above. **Full curve / prime-order subgroup / infinity /
+//! `PopVerify` (pairing) validation lives in the #127 crypto adapter**
+//! (`blst`/`arkworks`), and **every future dispatch/execution path that accepts
+//! beacon state into consensus MUST invoke that verification BEFORE accepting the
+//! state.** Passing `decode_exact` here is *necessary but not sufficient*: a value
+//! that decodes cleanly may still be off-curve, off-subgroup, or a non-verifying
+//! PoP. Treat wire-decode success as "well-framed bytes", never as "valid crypto".
 //!
 //! ## Reject-trailing discipline
 //!
@@ -70,7 +111,8 @@ pub const G1_LEN: usize = 48;
 pub const SCALAR_LEN: usize = 32;
 
 /// Proof-of-possession field width (bytes) — opaque canonical compressed
-/// BLS12-381 **G2** signature (draft §2.3). Length-checked only at this layer.
+/// BLS12-381 **G2** signature (draft §2.3). Length-checked only at this layer;
+/// `PopVerify` is the #127 crypto adapter's job (see the layer-boundary caveat).
 pub const POP_LEN: usize = 96;
 
 /// ECIES body width (bytes): 32-byte ChaCha20-Poly1305 ciphertext of the 32-byte
@@ -78,13 +120,17 @@ pub const POP_LEN: usize = 96;
 /// any other length is a malformed deal.
 pub const CT_LEN: usize = 48;
 
-/// Number of Feldman commitments in a deal = polynomial `degree + 1 = T`.
+/// Wire-level upper bound on the number of Feldman commitments carried by a deal.
 ///
-/// PROPOSED (tracks #127 threshold `T = f + 1 = 2`, draft §1.2; "pending
-/// adoption"). The deal decoder enforces exactly this many commitments, so this
-/// constant is the single place the deal's fixed length depends on `T`. If #127
-/// ratifies a different threshold, change it here (and [`DkgDealV1::LEN`]).
-pub const DEGREE_PLUS_ONE: usize = 2;
+/// This is a **DoS / framing sanity bound only**, NOT a ratified protocol
+/// parameter: the deal carries `degree + 1 = T` commitments, and the PROPOSED
+/// threshold is `T = f + 1 = 2` (draft §1.2, *not* owner-ratified). Because `T`
+/// is not ratified it is deliberately **not** frozen into the wire; the deal
+/// encodes a bounded variable-length commitment vector whose declared count must
+/// satisfy `1 ≤ count ≤ MAX_COMMITMENTS`. The bound is set far above any plausible
+/// threshold for an `n ≥ 5` committee so it never constrains a future ratified
+/// `T`, while still capping a malicious deal's size.
+pub const MAX_COMMITMENTS: usize = 128;
 
 /// First byte flag: compression bit — set in every canonical compressed encoding
 /// (ZCash/`blst`). A field with it clear is not a compressed point.
@@ -144,21 +190,44 @@ fn read_scalar(r: &mut Reader, ctx: &'static str) -> Result<[u8; SCALAR_LEN], De
 }
 
 // ---------------------------------------------------------------------------
-// W1b operation ordinals (#125-proposed)
+// Top-level ordinal-band reservations (owner allocation) — NOT registered
 // ---------------------------------------------------------------------------
 
-/// The W1b carrier operations, with their **#125-proposed** wire ordinals in the
-/// [`crate::transaction::TxType`] ordinal space.
+/// Top-level `TxType` ordinal `27` is owned by **C1 / ComputePool (#130)**, not
+/// the beacon. Recorded here so the boundary is explicit and the beacon never
+/// takes 27. (C1 itself is dormant and adds no live `TxType` variant — see
+/// `crates/state/src/compute_pool.rs`.)
+pub const C1_COMPUTE_POOL_TXTYPE_RESERVED: u8 = 27;
+
+/// Reserved top-level `TxType` slot for the beacon **key-registration**
+/// transaction (W1b band). RESERVED, **not** registered in `TxType`/`TxPayload`
+/// (dormant). Carries [`RegisterBeaconKeyV1`].
+pub const W1B_BEACON_KEY_TXTYPE: u8 = 28;
+
+/// Reserved top-level `TxType` slot for the beacon **DKG** transaction (W1b band).
+/// RESERVED, **not** registered in `TxType`/`TxPayload` (dormant). Carries
+/// [`DkgDealV1`] and [`DkgComplaintV1`], distinguished by their beacon-local op
+/// sub-tag / 7-byte magic.
+pub const W1B_BEACON_DKG_TXTYPE: u8 = 29;
+
+/// Namespace prefix (high byte `0xBE`, "BE"acon) for the beacon-local operation
+/// sub-tag discriminants ([`BeaconWireOp::to_repr`]). A discriminant in this
+/// namespace is a `u16 == 0xBE__`, which cannot be confused with a `u8` top-level
+/// `TxType` ordinal (`0..=26`) or a reserved band slot (`27`/`28`/`29`).
+pub const BEACON_OP_NAMESPACE: u16 = 0xBE00;
+
+// Namespaced beacon-local op discriminants.
+const OP_REGISTER_BEACON_KEY: u16 = BEACON_OP_NAMESPACE | 0x01;
+const OP_DKG_DEAL: u16 = BEACON_OP_NAMESPACE | 0x02;
+const OP_DKG_COMPLAINT: u16 = BEACON_OP_NAMESPACE | 0x03;
+
+/// The beacon-family-local operation sub-tags.
 ///
-/// The BR1 draft earmarks tx ordinals 27/28/29 for these carriers and defers the
-/// assignment to #125 (draft §9.1, §15 decision-table row "W1b tx ordinals
-/// 28/29"). `TxType` currently occupies 0..=26 (`Supply = 26`), so 27/28/29 are
-/// the next free values; the collision guard test asserts they are unused.
-///
-/// These ordinals are a **reservation** for a future #125 dispatch envelope. They
-/// are **not** baked into the per-carrier bytes (each carrier self-domains via its
-/// own 7-byte magic) and this enum is deliberately **not** wired into `TxType` /
-/// `TxPayload`, keeping the family dormant / off the consensus path.
+/// These are **not** top-level transaction ordinals. Their canonical on-wire
+/// identity is each carrier's 7-byte magic ([`Self::magic`]); their compact
+/// numeric form ([`Self::to_repr`]) is a namespaced `0xBE__` `u16`
+/// ([`BEACON_OP_NAMESPACE`]). Each op reports which reserved top-level band slot
+/// (28 / 29) would carry it ([`Self::top_level_txtype`]).
 ///
 /// `DkgJustifyV1` is intentionally **absent**: the draft (§6.5/§6.6) makes the
 /// dealer justification non-normative — the four objective verdicts are decided
@@ -174,25 +243,46 @@ pub enum BeaconWireOp {
 }
 
 impl BeaconWireOp {
-    /// The #125-proposed wire ordinal for this operation.
-    pub const fn to_repr(self) -> u8 {
+    /// The namespaced (`0xBE__`) beacon-local discriminant. NOT a `TxType` ordinal.
+    pub const fn to_repr(self) -> u16 {
         match self {
-            BeaconWireOp::RegisterBeaconKey => 27,
-            BeaconWireOp::DkgDeal => 28,
-            BeaconWireOp::DkgComplaint => 29,
+            BeaconWireOp::RegisterBeaconKey => OP_REGISTER_BEACON_KEY,
+            BeaconWireOp::DkgDeal => OP_DKG_DEAL,
+            BeaconWireOp::DkgComplaint => OP_DKG_COMPLAINT,
         }
     }
 
-    /// Decode a wire ordinal, rejecting unknown values.
-    pub fn from_repr(v: u8) -> Result<Self, DecodeError> {
+    /// Decode a namespaced beacon-local discriminant, rejecting anything outside
+    /// the `0xBE__` namespace and any unknown local op.
+    pub fn from_repr(v: u16) -> Result<Self, DecodeError> {
         match v {
-            27 => Ok(BeaconWireOp::RegisterBeaconKey),
-            28 => Ok(BeaconWireOp::DkgDeal),
-            29 => Ok(BeaconWireOp::DkgComplaint),
+            OP_REGISTER_BEACON_KEY => Ok(BeaconWireOp::RegisterBeaconKey),
+            OP_DKG_DEAL => Ok(BeaconWireOp::DkgDeal),
+            OP_DKG_COMPLAINT => Ok(BeaconWireOp::DkgComplaint),
             _ => Err(DecodeError::BadEnum {
                 name: "BeaconWireOp",
                 value: v as u64,
             }),
+        }
+    }
+
+    /// The carrier's canonical 7-byte self-domaining magic (its true wire
+    /// identity — the numeric [`Self::to_repr`] is only a compact index).
+    pub const fn magic(self) -> [u8; 7] {
+        match self {
+            BeaconWireOp::RegisterBeaconKey => RegisterBeaconKeyV1::MAGIC,
+            BeaconWireOp::DkgDeal => DkgDealV1::MAGIC,
+            BeaconWireOp::DkgComplaint => DkgComplaintV1::MAGIC,
+        }
+    }
+
+    /// The reserved top-level `TxType` band slot that would carry this op: `28`
+    /// for key registration, `29` for the DKG messages. (Reservation only — the
+    /// family is not registered in `TxType`/`TxPayload`.)
+    pub const fn top_level_txtype(self) -> u8 {
+        match self {
+            BeaconWireOp::RegisterBeaconKey => W1B_BEACON_KEY_TXTYPE,
+            BeaconWireOp::DkgDeal | BeaconWireOp::DkgComplaint => W1B_BEACON_DKG_TXTYPE,
         }
     }
 
@@ -237,7 +327,7 @@ impl RegisterBeaconKeyV1 {
     /// Documented total; asserted against the encoder-derived length in tests.
     pub const LEN: usize = 7 + 2 + 8 + 8 + G1_LEN + POP_LEN; // 169
 
-    /// This carrier's #125-proposed wire ordinal.
+    /// This carrier's beacon-local op sub-tag.
     pub const fn wire_op() -> BeaconWireOp {
         BeaconWireOp::RegisterBeaconKey
     }
@@ -316,17 +406,21 @@ impl RegisterBeaconKeyV1 {
 
 /// A single `(dealer i → recipient j)` DKG deal record (draft §8.2, §8.7, §9.1).
 ///
-/// Layout (`LEN` = 229 bytes for `T = 2`):
+/// Layout (variable, `encoded_len(count)` bytes):
 /// `magic b"DKDLv1\0"[7] · schema_version u16 · chain_id u64_le · epoch u64_le ·
 /// dealer_i u32_le · recipient_j u32_le · commitment_count u32_le ·
 /// commitments (count × G1[48]) · r_ij G1[48] · ct_ij[48]`.
 ///
-/// `commitments` are the dealer's Feldman commitments `C_{i,0..T-1}`
-/// (`commitment_count` MUST equal [`DEGREE_PLUS_ONE`]); `r_ij` is the ECIES
-/// ephemeral carrier `R_{ij} = g1^{r_ij}`; `ct_ij` is the fixed 48-byte
-/// ChaCha20-Poly1305 body (32-byte scalar ciphertext ‖ 16-byte tag, §8.2/§8.7).
-/// No nonce is transmitted (it is re-derived from the public context, §8.3).
-/// Indices `i`, `j` are 0-based membership-snapshot indices (§8.2), not the
+/// `commitments` are the dealer's Feldman commitments `C_{i,0..T-1}`. Because the
+/// threshold `T` is **not** owner-ratified (draft §1.2, PROPOSED), it is not
+/// frozen into the wire: the count is a `u32_le` length prefix and the decoder
+/// accepts any `1 ≤ count ≤ MAX_COMMITMENTS` — the record length is a function of
+/// the declared count, not a fixed constant.
+///
+/// `r_ij` is the ECIES ephemeral carrier `R_{ij} = g1^{r_ij}`; `ct_ij` is the
+/// fixed 48-byte ChaCha20-Poly1305 body (32-byte scalar ciphertext ‖ 16-byte tag,
+/// §8.2/§8.7). No nonce is transmitted (it is re-derived from the public context,
+/// §8.3). Indices `i`, `j` are 0-based membership-snapshot indices (§8.2), not the
 /// evaluation point `x_j = j + 1`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DkgDealV1 {
@@ -339,7 +433,7 @@ pub struct DkgDealV1 {
     /// Recipient index `j`, 0-based, `u32_le`.
     pub recipient_j: u32,
     /// Feldman commitments `C_{i,0..T-1}`, each canonical compressed G1 (48B).
-    /// Length MUST equal [`DEGREE_PLUS_ONE`].
+    /// Length MUST be in `1..=MAX_COMMITMENTS`.
     pub commitments: Vec<[u8; G1_LEN]>,
     /// `R_{ij}` — ECIES carrier, canonical compressed G1 (48B), non-identity.
     pub r_ij: [u8; G1_LEN],
@@ -351,22 +445,35 @@ impl DkgDealV1 {
     /// Seven-byte structure magic: `D K D L v 1 NUL`.
     pub const MAGIC: [u8; 7] = *b"DKDLv1\0";
     pub const SCHEMA_VERSION: u16 = 1;
-    /// Documented total for the canonical `T = DEGREE_PLUS_ONE` deal.
-    /// `= 7 + 2 + 8 + 8 + 4 + 4 + 4 (count) + T*48 + 48 (R) + 48 (ct)`.
-    pub const LEN: usize = 7 + 2 + 8 + 8 + 4 + 4 + 4 + DEGREE_PLUS_ONE * G1_LEN + G1_LEN + CT_LEN;
+    /// Fixed overhead of a deal excluding the commitment vector:
+    /// `7 (magic) + 2 (ver) + 8 (chain_id) + 8 (epoch) + 4 (i) + 4 (j) +
+    /// 4 (count) + 48 (r_ij) + 48 (ct_ij)`.
+    pub const BASE_LEN: usize = 7 + 2 + 8 + 8 + 4 + 4 + 4 + G1_LEN + CT_LEN; // 133
 
-    /// This carrier's #125-proposed wire ordinal.
+    /// Encoded length of a deal carrying `commitment_count` commitments.
+    pub const fn encoded_len(commitment_count: usize) -> usize {
+        Self::BASE_LEN + commitment_count * G1_LEN
+    }
+
+    /// This carrier's beacon-local op sub-tag.
     pub const fn wire_op() -> BeaconWireOp {
         BeaconWireOp::DkgDeal
     }
 
-    /// Re-check invariants: exactly [`DEGREE_PLUS_ONE`] commitments, every
+    /// Re-check invariants: `1 ≤ commitments.len() ≤ MAX_COMMITMENTS`, every
     /// commitment and `r_ij` a structurally valid non-identity compressed G1.
     pub fn validate(&self) -> Result<(), DecodeError> {
-        if self.commitments.len() != DEGREE_PLUS_ONE {
-            return Err(DecodeError::BadFixedScalar {
+        let n = self.commitments.len();
+        if n == 0 {
+            return Err(DecodeError::BadValue {
+                ctx: "DkgDealV1.commitment_count_zero",
+            });
+        }
+        if n > MAX_COMMITMENTS {
+            return Err(DecodeError::CountExceedsMax {
                 ctx: "DkgDealV1.commitment_count",
-                value: self.commitments.len() as u64,
+                count: n as u64,
+                max: MAX_COMMITMENTS as u64,
             });
         }
         for c in &self.commitments {
@@ -403,14 +510,15 @@ impl DkgDealV1 {
     }
 
     /// Canonical encode: validates invariants then emits the layout. `Err` iff the
-    /// commitment count is wrong or any G1 field is structurally invalid.
+    /// commitment count is out of `1..=MAX_COMMITMENTS` or any G1 field is invalid.
     pub fn try_encode(&self) -> Result<Vec<u8>, DecodeError> {
         self.validate()?;
         Ok(self.encode())
     }
 
-    /// Decode from a reader. Enforces the exact commitment count, each G1 field's
-    /// structural validity, and the fixed `ct_ij` width; truncation is rejected.
+    /// Decode from a reader. Enforces `1 ≤ count ≤ MAX_COMMITMENTS`, reads exactly
+    /// `count` structurally-valid commitments, and the fixed `r_ij`/`ct_ij` fields;
+    /// a declared count larger than the buffer supports is a truncation error.
     pub fn decode(r: &mut Reader) -> Result<Self, DecodeError> {
         let magic = r.read_array::<7>("DkgDealV1.magic")?;
         if magic != Self::MAGIC {
@@ -428,14 +536,20 @@ impl DkgDealV1 {
         let dealer_i = r.read_u32("DkgDealV1.dealer_i")?;
         let recipient_j = r.read_u32("DkgDealV1.recipient_j")?;
         let count = r.read_u32("DkgDealV1.commitment_count")?;
-        if count as usize != DEGREE_PLUS_ONE {
-            return Err(DecodeError::BadFixedScalar {
-                ctx: "DkgDealV1.commitment_count",
-                value: count as u64,
+        if count == 0 {
+            return Err(DecodeError::BadValue {
+                ctx: "DkgDealV1.commitment_count_zero",
             });
         }
-        let mut commitments = Vec::with_capacity(DEGREE_PLUS_ONE);
-        for _ in 0..DEGREE_PLUS_ONE {
+        if count as usize > MAX_COMMITMENTS {
+            return Err(DecodeError::CountExceedsMax {
+                ctx: "DkgDealV1.commitment_count",
+                count: count as u64,
+                max: MAX_COMMITMENTS as u64,
+            });
+        }
+        let mut commitments = Vec::with_capacity(count as usize);
+        for _ in 0..count {
             commitments.push(read_g1(r, "DkgDealV1.commitment")?);
         }
         let r_ij = read_g1(r, "DkgDealV1.r_ij")?;
@@ -451,7 +565,8 @@ impl DkgDealV1 {
         })
     }
 
-    /// Decode consuming exactly `bytes` (rejects trailing).
+    /// Decode consuming exactly `bytes` (rejects trailing / count-vs-length
+    /// mismatch: a buffer longer than the declared count implies is rejected).
     pub fn decode_exact(bytes: &[u8]) -> Result<Self, DecodeError> {
         let mut r = Reader::new(bytes);
         let v = Self::decode(&mut r)?;
@@ -503,7 +618,7 @@ impl DkgComplaintV1 {
     /// Documented total; asserted against the encoder-derived length in tests.
     pub const LEN: usize = 7 + 2 + 8 + 8 + 4 + 4 + G1_LEN + G1_LEN + SCALAR_LEN + SCALAR_LEN; // 193
 
-    /// This carrier's #125-proposed wire ordinal.
+    /// This carrier's beacon-local op sub-tag.
     pub const fn wire_op() -> BeaconWireOp {
         BeaconWireOp::DkgComplaint
     }
@@ -656,33 +771,75 @@ mod tests {
         assert!(!g1_structurally_ok(&inf));
     }
 
+    // --- Namespacing / ordinal-band reconciliation --------------------------
+
     #[test]
-    fn wire_ops_reserved_and_distinct() {
-        // Ordinals are 27/28/29 and round-trip.
+    fn beacon_op_tags_are_namespaced_not_txtype_ordinals() {
+        // (a) Every beacon-local op sub-tag lives in the 0xBE__ namespace and so
+        //     is NOT a u8 top-level TxType ordinal (0..=26) nor a reserved band
+        //     slot (27/28/29). This is the real anti-collision guarantee — it is
+        //     grounded in the namespacing, not in "TxType currently stops at 26".
         for &op in BeaconWireOp::ALL {
-            assert_eq!(BeaconWireOp::from_repr(op.to_repr()).unwrap(), op);
+            let r = op.to_repr();
+            assert_eq!(
+                r & 0xFF00,
+                BEACON_OP_NAMESPACE,
+                "op {op:?} not in the 0xBE__ beacon namespace"
+            );
+            assert!(
+                r > 0x00FF,
+                "op repr {r:#06x} could be mistaken for a u8 TxType ordinal"
+            );
+            assert_eq!(BeaconWireOp::from_repr(r).unwrap(), op);
         }
-        assert_eq!(BeaconWireOp::RegisterBeaconKey.to_repr(), 27);
-        assert_eq!(BeaconWireOp::DkgDeal.to_repr(), 28);
-        assert_eq!(BeaconWireOp::DkgComplaint.to_repr(), 29);
-        assert!(BeaconWireOp::from_repr(26).is_err());
-        assert!(BeaconWireOp::from_repr(30).is_err());
+        // (b) W1b never claims C1's slot 27; W1b owns exactly the 28/29 band.
+        assert_eq!(C1_COMPUTE_POOL_TXTYPE_RESERVED, 27);
+        assert_eq!(W1B_BEACON_KEY_TXTYPE, 28);
+        assert_eq!(W1B_BEACON_DKG_TXTYPE, 29);
+        assert_ne!(W1B_BEACON_KEY_TXTYPE, C1_COMPUTE_POOL_TXTYPE_RESERVED);
+        assert_ne!(W1B_BEACON_DKG_TXTYPE, C1_COMPUTE_POOL_TXTYPE_RESERVED);
+        // (c) Each op maps to a band slot in {28,29}, never C1's 27.
+        for &op in BeaconWireOp::ALL {
+            let t = op.top_level_txtype();
+            assert!(t == W1B_BEACON_KEY_TXTYPE || t == W1B_BEACON_DKG_TXTYPE);
+            assert_ne!(t, C1_COMPUTE_POOL_TXTYPE_RESERVED);
+        }
+        assert_eq!(
+            BeaconWireOp::RegisterBeaconKey.top_level_txtype(),
+            W1B_BEACON_KEY_TXTYPE
+        );
+        assert_eq!(
+            BeaconWireOp::DkgDeal.top_level_txtype(),
+            W1B_BEACON_DKG_TXTYPE
+        );
+        assert_eq!(
+            BeaconWireOp::DkgComplaint.top_level_txtype(),
+            W1B_BEACON_DKG_TXTYPE
+        );
+        // (d) Namespaced-tag decode rejects values that look like TxType ordinals,
+        //     the bare namespace, and unknown local ops.
+        assert!(BeaconWireOp::from_repr(0x0001).is_err()); // a u8-range value
+        assert!(BeaconWireOp::from_repr(27).is_err()); // C1's slot, not a beacon op
+        assert!(BeaconWireOp::from_repr(28).is_err()); // band slot, not a beacon op
+        assert!(BeaconWireOp::from_repr(BEACON_OP_NAMESPACE).is_err()); // no local op
+        assert!(BeaconWireOp::from_repr(BEACON_OP_NAMESPACE | 0x04).is_err()); // unknown
+                                                                               // (e) The op's canonical wire identity is its 7-byte magic.
+        assert_eq!(
+            BeaconWireOp::RegisterBeaconKey.magic(),
+            RegisterBeaconKeyV1::MAGIC
+        );
+        assert_eq!(BeaconWireOp::DkgDeal.magic(), DkgDealV1::MAGIC);
+        assert_eq!(BeaconWireOp::DkgComplaint.magic(), DkgComplaintV1::MAGIC);
     }
 
     #[test]
-    fn wire_ordinals_do_not_collide_with_txtype() {
-        // The reserved 27/28/29 slots must be unused in the live TxType space.
+    fn beacon_band_is_dormant_not_registered_in_txtype() {
+        // Dormancy check (NOT a collision check): the reserved band is not a live
+        // TxType. C1's 27 is likewise dormant (C1 adds no live TxType variant).
         use crate::transaction::TxType;
-        for &op in BeaconWireOp::ALL {
-            assert!(
-                TxType::from_byte(op.to_repr()).is_none(),
-                "W1b ordinal {} collides with an existing TxType",
-                op.to_repr()
-            );
-        }
-        // And 26 (Supply) is the current max, so 27 is the first free slot.
-        assert!(TxType::from_byte(26).is_some());
-        assert!(TxType::from_byte(27).is_none());
+        assert!(TxType::from_byte(C1_COMPUTE_POOL_TXTYPE_RESERVED).is_none());
+        assert!(TxType::from_byte(W1B_BEACON_KEY_TXTYPE).is_none());
+        assert!(TxType::from_byte(W1B_BEACON_DKG_TXTYPE).is_none());
     }
 
     // --- RegisterBeaconKeyV1 -------------------------------------------------
@@ -779,60 +936,110 @@ mod tests {
         assert!(bad.try_encode().is_err());
     }
 
-    // --- DkgDealV1 ----------------------------------------------------------
+    // --- DkgDealV1 (bounded variable-length commitments) --------------------
 
-    fn sample_deal() -> DkgDealV1 {
+    fn deal_with(count: usize) -> DkgDealV1 {
         DkgDealV1 {
             chain_id: 7,
             epoch: 9,
             dealer_i: 1,
             recipient_j: 3,
-            commitments: vec![g1(0x41), g1(0x42)],
+            commitments: (0..count).map(|k| g1(0x40 | (k as u8 & 0x0F))).collect(),
             r_ij: g1(0x51),
             ct_ij: [0x60; CT_LEN],
         }
     }
 
     #[test]
-    fn deal_len_and_roundtrip() {
-        let d = sample_deal();
-        let bytes = d.try_encode().unwrap();
-        assert_eq!(bytes.len(), DkgDealV1::LEN);
-        assert_eq!(bytes.len(), 229);
-        assert_eq!(DkgDealV1::decode_exact(&bytes).unwrap(), d);
+    fn deal_roundtrips_for_count_1_typical_and_max() {
+        for count in [1usize, 2, MAX_COMMITMENTS] {
+            let d = deal_with(count);
+            let bytes = d.try_encode().unwrap();
+            assert_eq!(bytes.len(), DkgDealV1::encoded_len(count));
+            assert_eq!(DkgDealV1::decode_exact(&bytes).unwrap(), d);
+        }
+        // The old fixed T=2 length is now just encoded_len(2) — no frozen constant.
+        assert_eq!(DkgDealV1::encoded_len(2), 229);
+        assert_eq!(DkgDealV1::encoded_len(1), DkgDealV1::BASE_LEN + G1_LEN);
         assert_eq!(DkgDealV1::wire_op(), BeaconWireOp::DkgDeal);
     }
 
     #[test]
-    fn deal_rejects_wrong_commitment_count() {
-        // Encode with the correct count then corrupt the u32 count field.
-        // count is at offset 7 + 2 + 8 + 8 + 4 + 4 = 33.
-        let bytes = sample_deal().try_encode().unwrap();
-        let mut wrong = bytes.clone();
-        wrong[33..37].copy_from_slice(&3u32.to_le_bytes());
+    fn deal_rejects_zero_count() {
+        // Build a well-formed count=1 deal, then rewrite the count field to 0.
+        // count u32 at offset 7 + 2 + 8 + 8 + 4 + 4 = 33.
+        let bytes = deal_with(1).try_encode().unwrap();
+        let mut zero = bytes;
+        zero[33..37].copy_from_slice(&0u32.to_le_bytes());
         assert!(matches!(
-            DkgDealV1::decode_exact(&wrong),
-            Err(DecodeError::BadFixedScalar {
-                ctx: "DkgDealV1.commitment_count",
-                value: 3
+            DkgDealV1::decode_exact(&zero),
+            Err(DecodeError::BadValue {
+                ctx: "DkgDealV1.commitment_count_zero"
             })
         ));
-
-        // try_encode rejects an in-memory deal with the wrong number of commitments.
-        let mut too_few = sample_deal();
-        too_few.commitments.pop();
+        // try_encode rejects an in-memory empty commitment vector.
+        let mut empty = deal_with(1);
+        empty.commitments.clear();
         assert!(matches!(
-            too_few.try_encode(),
-            Err(DecodeError::BadFixedScalar {
-                ctx: "DkgDealV1.commitment_count",
-                value: 1
+            empty.try_encode(),
+            Err(DecodeError::BadValue {
+                ctx: "DkgDealV1.commitment_count_zero"
             })
+        ));
+    }
+
+    #[test]
+    fn deal_rejects_count_over_max() {
+        // Declare MAX+1 commitments in the count field (no need to supply them —
+        // the count check fires before reading the vector).
+        let bytes = deal_with(1).try_encode().unwrap();
+        let mut over = bytes;
+        over[33..37].copy_from_slice(&((MAX_COMMITMENTS as u32) + 1).to_le_bytes());
+        assert!(matches!(
+            DkgDealV1::decode_exact(&over),
+            Err(DecodeError::CountExceedsMax {
+                ctx: "DkgDealV1.commitment_count",
+                max,
+                ..
+            }) if max == MAX_COMMITMENTS as u64
+        ));
+        // try_encode rejects an in-memory oversized vector.
+        let mut big = deal_with(1);
+        big.commitments = vec![g1(0x41); MAX_COMMITMENTS + 1];
+        assert!(matches!(
+            big.try_encode(),
+            Err(DecodeError::CountExceedsMax { .. })
+        ));
+    }
+
+    #[test]
+    fn deal_rejects_declared_count_vs_buffer_length_mismatch() {
+        // Declared count too LARGE for the buffer -> rejected. Encode count=2,
+        // bump the declared count to 3. The decoder reinterprets the following
+        // fixed fields as an extra commitment: the exact error kind is
+        // data-dependent (here the misaligned `ct_ij` region — flag byte 0x60 —
+        // fails the G1 compression-flag check before the buffer is exhausted; with
+        // an all-G1-shaped tail it would instead run out of bytes = `Truncated`).
+        // Either way it is a decode error; the count/length mismatch is rejected.
+        let bytes = deal_with(2).try_encode().unwrap();
+        let mut too_large = bytes.clone();
+        too_large[33..37].copy_from_slice(&3u32.to_le_bytes());
+        assert!(DkgDealV1::decode_exact(&too_large).is_err());
+
+        // Declared count too SMALL for the buffer -> the remaining commitment's
+        // bytes become trailing. Encode count=2, drop the declared count to 1.
+        let mut too_small = bytes;
+        too_small[33..37].copy_from_slice(&1u32.to_le_bytes());
+        assert!(matches!(
+            DkgDealV1::decode_exact(&too_small),
+            Err(DecodeError::TrailingBytes { .. })
         ));
     }
 
     #[test]
     fn deal_rejects_malformed_commitment_and_carrier() {
-        let bytes = sample_deal().try_encode().unwrap();
+        let d = deal_with(2);
+        let bytes = d.try_encode().unwrap();
         // first commitment at offset 37.
         let mut bad_c = bytes.clone();
         bad_c[37] = 0x00; // compression flag clear
@@ -843,7 +1050,7 @@ mod tests {
             })
         ));
         // r_ij at offset 37 + 2*48 = 133.
-        let mut bad_r = bytes.clone();
+        let mut bad_r = bytes;
         bad_r[133] = G1_COMPRESSION_FLAG | G1_INFINITY_FLAG;
         assert!(matches!(
             DkgDealV1::decode_exact(&bad_r),
@@ -855,7 +1062,7 @@ mod tests {
 
     #[test]
     fn deal_rejects_trailing_and_truncation() {
-        let bytes = sample_deal().try_encode().unwrap();
+        let bytes = deal_with(2).try_encode().unwrap();
         assert!(matches!(
             DkgDealV1::decode_exact(&bytes[..bytes.len() - 1]),
             Err(DecodeError::Truncated { .. })
