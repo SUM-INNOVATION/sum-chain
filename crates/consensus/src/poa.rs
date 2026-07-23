@@ -679,6 +679,12 @@ impl PoAEngine {
             // orphaned block cannot leave contract state behind while account
             // state rolls back (or vice versa).
             self.state.revert_block_state_diffs(block.height())?;
+            // Revert the dormant C1 compute-pool transition for this block too,
+            // so a reorg rolls back compute-pool state alongside account +
+            // contract state. GATE-CLOSED: inert (manager never constructed,
+            // nothing reverted) under the production `None` gate.
+            self.executor
+                .revert_compute_pool_transitions(block.height())?;
 
             // Return transactions to mempool
             for tx in &block.transactions {

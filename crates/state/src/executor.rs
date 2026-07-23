@@ -7,15 +7,17 @@ use std::sync::Arc;
 use sumchain_crypto::verify_bytes;
 use sumchain_genesis::ChainParams;
 use sumchain_primitives::{
-    Address, Balance, Block, BlockHeader, Hash, MessagingOperation, NodeRegistryOperation, Receipt,
-    SignedTransaction, StorageMetadataOperationV2, TransactionV2, TxPayload, TxStatus,
-    CHALLENGE_INTERVAL_BLOCKS, SLASH_PERCENTAGE,
+    Address, Balance, Block, BlockHeader, BlockHeight, Hash, MessagingOperation,
+    NodeRegistryOperation, Receipt, SignedTransaction, StorageMetadataOperationV2, TransactionV2,
+    TxPayload, TxStatus, CHALLENGE_INTERVAL_BLOCKS, SLASH_PERCENTAGE,
 };
 use sumchain_storage::schema::{ContractStateDiff, StateDiff};
 use sumchain_storage::Database;
 use tracing::{debug, info, warn};
 
 use crate::agreement_executor::AgreementExecutor;
+use crate::compute_pool::{ComputePoolModel, PoolResult};
+use crate::compute_pool_manager::ComputePoolManager;
 use crate::contract_executor::ContractExecutorState;
 use crate::docclass_executor::DocClassExecutor;
 use crate::employment_executor::EmploymentExecutor;
@@ -3023,6 +3025,17 @@ impl BlockExecutor {
         let state_root = self.compute_block_state_root(block, &receipts, &contract_diff)?;
         self.state.set_state_root(state_root);
 
+        // ── Dormant C1 compute-pool subprotocol (issue #130) ──
+        // Drive this block's compute-pool transitions through the gated
+        // `ComputePoolManager` into the model + persistent store, then (on a
+        // reorg) revert them per height via `revert_compute_pool_transitions`.
+        // GATE-CLOSED: under the production default
+        // (`compute_pool_enabled_from_height == None`) the manager is never
+        // constructed and nothing is applied — the hook is inert. These rows are
+        // deliberately NOT folded into the state root above (storage/revert-
+        // adapter design), so this call cannot change any block root.
+        self.apply_compute_pool_transitions(block.height())?;
+
         info!(
             "Block {} executed, new state root: {}",
             block.height(),
@@ -3030,6 +3043,63 @@ impl BlockExecutor {
         );
 
         Ok((receipts, state_root, state_diff, contract_diff))
+    }
+
+    /// Gated compute-pool APPLY seam (issue #130).
+    ///
+    /// GATE-CLOSED / dormant: under the production default
+    /// (`compute_pool_enabled_from_height == None`) the gate is closed at every
+    /// height, so [`ComputePoolManager::new_enabled`] returns `None`, the manager
+    /// is never constructed, and this seam applies nothing and writes nothing.
+    ///
+    /// #125 dependency: there is no `ComputePool` `TxPayload` on the live path
+    /// yet — sourcing per-block operations from a block's transactions is #125's
+    /// gate-closed dispatch. Until that lands there is no operation source, so
+    /// even a hypothetically-open gate drives an EMPTY transition here (which
+    /// mutates no rows and writes no revert journal). The full apply→persist path
+    /// is exercised end-to-end by driving [`Self::apply_compute_pool_ops`] with a
+    /// real operation source in tests.
+    fn apply_compute_pool_transitions(&self, height: BlockHeight) -> Result<()> {
+        // No live operation source yet (blocked on #125's dispatch) ⇒ the block
+        // contributes an empty (no-op) compute-pool transition.
+        self.apply_compute_pool_ops(height, |_model| Ok(()))
+    }
+
+    /// The gated compute-pool apply seam, parameterized by the operation source
+    /// `ops` so the end-to-end apply→persist lifecycle is exercisable through the
+    /// real gated machinery without a live #125 dispatch.
+    ///
+    /// Inert under the production `None` gate: `new_enabled` yields `None`, so the
+    /// manager is never constructed and `ops` never runs. When the gate is
+    /// (hypothetically / test-) enabled, `ops` runs against the manager's working
+    /// model and, on success, the transition is persisted atomically into the C1
+    /// store with a per-height revert journal.
+    fn apply_compute_pool_ops<F>(&self, height: BlockHeight, ops: F) -> Result<()>
+    where
+        F: FnOnce(&mut ComputePoolModel) -> PoolResult<()>,
+    {
+        if let Some(mut manager) = ComputePoolManager::new_enabled(&self.db, &self.params, height) {
+            manager.apply_block(height, ops)?;
+        }
+        Ok(())
+    }
+
+    /// Gated compute-pool REORG-REVERT seam (issue #130).
+    ///
+    /// Reverts the C1 compute-pool transition finalized at `height` by rolling
+    /// back the persistent store's per-height revert journal (via the manager).
+    /// Called from the PoA reorg driver alongside
+    /// [`StateManager::revert_block_state_diffs`](crate::state::StateManager::revert_block_state_diffs),
+    /// so a reverted block rolls back account, contract, AND (once enabled)
+    /// compute-pool state together.
+    ///
+    /// GATE-CLOSED / dormant: under the production `None` gate the manager is
+    /// never constructed and nothing is reverted — a no-op.
+    pub fn revert_compute_pool_transitions(&self, height: BlockHeight) -> Result<()> {
+        if let Some(mut manager) = ComputePoolManager::new_enabled(&self.db, &self.params, height) {
+            manager.revert_block(height)?;
+        }
+        Ok(())
     }
 
     /// Compute state root after block execution
@@ -6092,6 +6162,182 @@ mod tests {
             registry.get_encryption_pubkey(&sender.address()).unwrap(),
             Some([7u8; 32]),
             "V2 dispatch should have persisted the encryption pubkey"
+        );
+    }
+
+    // ── C1 compute-pool execution-path seam (issue #130) ─────────────────────
+
+    /// Build an empty block for the block-apply path (mirrors the block helper
+    /// in `tests/contract_reorg_and_root.rs`).
+    fn compute_pool_test_block(height: u64, proposer: &KeyPair) -> Block {
+        let header = BlockHeader::new(
+            Hash::ZERO,
+            height,
+            1000,
+            Hash::ZERO,
+            Hash::ZERO,
+            *proposer.public_key().as_bytes(),
+        );
+        Block::new(header, vec![])
+    }
+
+    /// Under the production default gate (`compute_pool_enabled_from_height ==
+    /// None`) the compute-pool execution path is fully INERT: running a block
+    /// through the real `execute_block` apply seam constructs no manager and
+    /// writes no C1 state / journal, and the reorg-revert seam is a clean no-op.
+    #[test]
+    fn compute_pool_execution_path_is_inert_under_dormant_gate() {
+        use crate::compute_pool_store::ComputePoolStore;
+
+        let (state, db, _dir) = setup();
+        // Production default: the gate is `None` (closed at every height).
+        let params = ChainParams::default();
+        assert_eq!(
+            params.compute_pool_enabled_from_height, None,
+            "production default must keep the compute-pool gate dormant"
+        );
+        let executor = BlockExecutor::new(state.clone(), db.clone(), params);
+
+        // Apply a block through the REAL block-application path.
+        let proposer = KeyPair::generate();
+        let blk = compute_pool_test_block(1, &proposer);
+        executor.execute_block(&blk, Hash::ZERO, &[]).unwrap();
+
+        // The apply seam touched nothing: both C1 column families are empty.
+        let store = ComputePoolStore::new(&db);
+        assert!(
+            store.load_state_map().unwrap().is_empty(),
+            "dormant gate must not write any C1 state rows during block-apply"
+        );
+        assert!(
+            !store.has_journal(1).unwrap(),
+            "dormant gate must not write any C1 revert journal during block-apply"
+        );
+
+        // The reorg-revert seam is a clean no-op under the dormant gate.
+        executor.revert_compute_pool_transitions(1).unwrap();
+        assert!(
+            store.load_state_map().unwrap().is_empty(),
+            "dormant reorg-revert seam must touch nothing"
+        );
+    }
+
+    /// With the gate test-enabled (test-local `ChainParams`, the same idiom other
+    /// executor gate tests use — NOT a committed genesis flip), the full
+    /// apply→persist→reorg-revert lifecycle runs end-to-end through the gated
+    /// seams. The apply seam is driven with a real operation source standing in
+    /// for #125's not-yet-existing `ComputePool` dispatch.
+    #[test]
+    fn compute_pool_execution_path_full_lifecycle_when_enabled() {
+        use crate::compute_pool::{
+            ComputePoolModel, ExposureInputs, JobId, UnitId, UnitSizing, UnitState, WorkUnit,
+        };
+        use crate::compute_pool_store::ComputePoolStore;
+
+        let (state, db, _dir) = setup();
+        // Test-local gate at height 0; `ChainParams::default()` stays `None`.
+        let params = ChainParams {
+            compute_pool_enabled_from_height: Some(0),
+            ..ChainParams::default()
+        };
+        let executor = BlockExecutor::new(state.clone(), db.clone(), params);
+
+        let job = JobId::from_bytes([1; 32]);
+        let unit = UnitId::from_bytes([2; 32]);
+        let height = 5u64;
+
+        // APPLY: drive a real compute-pool transition through the gated apply
+        // seam (the operation source #125's dispatch will eventually supply).
+        executor
+            .apply_compute_pool_ops(height, |m: &mut ComputePoolModel| {
+                m.create_job(
+                    job,
+                    Address::new([9; 20]),
+                    1,
+                    vec![WorkUnit {
+                        job_id: job,
+                        unit_id: unit,
+                        predecessors: vec![],
+                        required_inputs: vec![],
+                        generation: 0,
+                        state: UnitState::Blocked,
+                    }],
+                    &[UnitSizing { slots: 0 }],
+                    1,
+                    0,
+                    1_000,
+                    ExposureInputs {
+                        q: 100,
+                        reprovision_allowance: 10,
+                        job_max_retention_files: 0,
+                        max_reassignments_per_file: 2,
+                        reassign_reimb: 5,
+                    },
+                    1_000_000,
+                )
+                .map(|_| ())
+            })
+            .unwrap();
+
+        // PERSIST: the transition landed as C1 rows + a per-height revert journal.
+        let store = ComputePoolStore::new(&db);
+        assert!(
+            store.get_job(&job).unwrap().is_some(),
+            "job persisted through the apply seam"
+        );
+        assert!(!store.load_state_map().unwrap().is_empty());
+        assert!(
+            store.has_journal(height).unwrap(),
+            "per-height revert journal written by the apply seam"
+        );
+
+        // REORG-REVERT: the gated revert seam rolls this block's C1 state back.
+        executor.revert_compute_pool_transitions(height).unwrap();
+        assert!(
+            store.get_job(&job).unwrap().is_none(),
+            "job reverted on reorg"
+        );
+        assert!(
+            store.load_state_map().unwrap().is_empty(),
+            "all C1 rows reverted on reorg"
+        );
+        assert!(
+            !store.has_journal(height).unwrap(),
+            "revert journal consumed on reorg"
+        );
+
+        // Idempotent: reverting an already-consumed height is a clean no-op.
+        executor.revert_compute_pool_transitions(height).unwrap();
+    }
+
+    /// Even with the gate test-enabled, the LIVE block-apply seam
+    /// (`execute_block`) still writes nothing, because there is no `ComputePool`
+    /// operation source on the live path yet — that is #125's gate-closed
+    /// dispatch. This pins the flagged #125 dependency: the seam is wired, but
+    /// inert until #125 supplies per-block operations.
+    #[test]
+    fn compute_pool_execute_block_is_noop_without_a_125_operation_source() {
+        use crate::compute_pool_store::ComputePoolStore;
+
+        let (state, db, _dir) = setup();
+        let params = ChainParams {
+            compute_pool_enabled_from_height: Some(0),
+            ..ChainParams::default()
+        };
+        let executor = BlockExecutor::new(state.clone(), db.clone(), params);
+
+        let proposer = KeyPair::generate();
+        let blk = compute_pool_test_block(1, &proposer);
+        executor.execute_block(&blk, Hash::ZERO, &[]).unwrap();
+
+        let store = ComputePoolStore::new(&db);
+        assert!(
+            store.load_state_map().unwrap().is_empty(),
+            "no C1 rows: execute_block has no #125 operation source yet"
+        );
+        assert!(
+            !store.has_journal(1).unwrap(),
+            "no C1 journal: the empty live transition writes nothing"
         );
     }
 }
