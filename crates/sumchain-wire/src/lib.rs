@@ -80,8 +80,8 @@ pub use b0::verifier_material::VerifierMaterialManifestV1;
 // top-level 28/29 band + beacon-local `0xBE__` op namespace are reservations only.
 pub use beacon_wire::{
     BeaconWireOp, DkgComplaintV1, DkgDealV1, RegisterBeaconKeyV1, BEACON_OP_NAMESPACE,
-    C1_COMPUTE_POOL_TXTYPE_RESERVED, CT_LEN, G1_LEN, MAX_COMMITMENTS, POP_LEN, SCALAR_LEN,
-    W1B_BEACON_DKG_TXTYPE, W1B_BEACON_SIGN_TXTYPE,
+    C1_COMPUTE_POOL_TXTYPE_RESERVED, CT_LEN, G1_LEN, POP_LEN, SCALAR_LEN, W1B_BEACON_DKG_TXTYPE,
+    W1B_BEACON_SIGN_TXTYPE,
 };
 pub use staking::{
     AddStakeData, ClaimDelegationRewardsData, CreateValidatorData, DelegateData, DelegationInfo,

@@ -23,8 +23,9 @@
 //! activation) is reviewer-approved **PROPOSED**, not adopted; the encodings here
 //! MUST NOT be treated as frozen consensus bytes until #125/#127 ratify them. In
 //! particular, `T` (the DKG threshold / commitment count) is **not** ratified, so
-//! it is **not** frozen into the wire: the deal uses a bounded variable-length
-//! commitment vector (see [`DkgDealV1`] / [`MAX_COMMITMENTS`]).
+//! it is **not** frozen into the wire: the deal uses a **self-validating**
+//! variable-length commitment vector (see [`DkgDealV1`]) — the decoder carries no
+//! commitment-count ceiling, only a checked self-consistency + allocation guard.
 //!
 //! ## Top-level ordinal band (owner allocation, 2026-07) — reservation only
 //!
@@ -175,45 +176,45 @@ pub const POP_LEN: usize = 96;
 /// any other length is a malformed deal.
 pub const CT_LEN: usize = 48;
 
-/// Authoritative on-chain payload-size framing limit that [`MAX_COMMITMENTS`] is
-/// derived from: the genesis block-byte cap `GenesisParams::max_block_bytes`
-/// (`u64`, **default `1_000_000` = 1 MB** — `crates/genesis/src/lib.rs`, field
-/// decl ~L182, default ~L760). A transaction cannot exceed the block that carries
-/// it, so this is the hard upper bound on any deal's serialized size. It is
-/// mirrored here as a literal **only** because the wire leaf crate must not depend
-/// on `crates/genesis`; the live per-chain value is enforced above the wire
-/// (consensus/mempool block assembly), not by this codec.
-const DEFAULT_MAX_BLOCK_BYTES: usize = 1_000_000;
-
-/// Wire-level **framing / decode-DoS** bound on the commitment count — the most
-/// 48-byte commitments that can fit in a deal within one (default) max block.
-///
-/// Derived from the authoritative *payload-size* limit
-/// [`DEFAULT_MAX_BLOCK_BYTES`], **not** from the validator-set cap:
-///
-/// ```text
-/// MAX_COMMITMENTS = (DEFAULT_MAX_BLOCK_BYTES - DkgDealV1::BASE_LEN) / G1_LEN
-/// ```
-///
-/// Its only job is to cap decode-time allocation (`Vec::with_capacity(count)`) so a
-/// malicious `count` cannot request an unbounded vector; a deal larger than this
-/// cannot be included on-chain anyway. It is a *framing* ceiling, deliberately
-/// hundreds of times above any plausible committee, so it never rejects a
-/// semantically-valid deal: a smaller configured `max_block_bytes` is enforced
-/// independently by block assembly, and a larger one only matters for committees
-/// far beyond any real validator set. It intentionally does **not** encode `T` or
-/// the validator cap.
-///
-/// **SEMANTICS LIVE ABOVE THE WIRE (layer-boundary note, cf. the PoP caveat).** The
-/// decoder guarantees only that a deal is *well-framed and block-sized*. A future
-/// dispatch/execution path MUST, before accepting a deal into state, additionally
-/// enforce the semantic bounds this codec deliberately omits:
-/// `commitment_count == ratified T` (draft §1.2 `T = f + 1`, **unratified**) **and**
-/// `commitment_count <= active StakingParams::max_validators`
-/// (`crates/sumchain-wire/src/staking.rs`, enforced by
-/// `crates/state/src/staking_executor.rs`). The wire MUST NOT hardcode `T` or the
-/// live validator cap — those are configurable/ratifiable and belong to execution.
-pub const MAX_COMMITMENTS: usize = (DEFAULT_MAX_BLOCK_BYTES - DkgDealV1::BASE_LEN) / G1_LEN;
+// ---------------------------------------------------------------------------
+// DkgDealV1 commitment-count bound — RESOLUTION A: self-validating decode
+// ---------------------------------------------------------------------------
+//
+// This codec carries **no** canonical commitment-count ceiling. An earlier
+// revision derived a `MAX_COMMITMENTS` from the genesis `max_block_bytes` default
+// (`1_000_000`); that was **removed** — `max_block_bytes` is a *configurable*
+// genesis parameter, not a hard protocol maximum, so deriving a wire-validity
+// limit from its default would (again) couple valid chain configuration to the
+// codec. There is likewise no `max_validators`-derived limit (semantic, also
+// configurable).
+//
+// Instead, `DkgDealV1::decode` is **self-validating and allocation-safe**: it
+// reads the `u32` count and, with checked arithmetic and BEFORE allocating
+// anything, requires the actual remaining input to be exactly
+// `count * G1_LEN + (G1_LEN + CT_LEN)` bytes (the commitment vector plus the fixed
+// `r_ij`/`ct_ij` suffix). A tiny buffer therefore cannot declare a huge count and
+// amplify a `Vec::with_capacity`: allocation is bounded by the real input length.
+// The decoder's only structural bound is this self-consistency — it deliberately
+// does **not** encode `T`, the validator cap, or a block-size-derived ceiling.
+//
+// **SEMANTICS LIVE ABOVE THE WIRE (layer-boundary note, cf. the PoP caveat).**
+// Wire-decode success means only "well-framed and internally self-consistent". A
+// future dispatch/execution path MUST, before accepting a deal into state, enforce
+// the semantic limits this codec deliberately omits, all evaluated at execution
+// time:
+//   * the **active** block-size limit — `GenesisParams::max_block_bytes` at that
+//     height — applied to the **FULL serialized transaction envelope** (signature,
+//     public key, nonce, fee, tx framing, …), NOT merely `BASE_LEN + commitments`;
+//   * `commitment_count <= active StakingParams::max_validators`
+//     (`crates/sumchain-wire/src/staking.rs`, enforced by
+//     `crates/state/src/staking_executor.rs`); and
+//   * `commitment_count == ratified T` (draft §1.2 `T = f + 1`, **unratified**).
+//
+// **RESOLUTION B (owner note — NOT implemented here).** The alternative is to
+// ratify a genuine *hard protocol maximum* commitment count, independent of any
+// configurable genesis default, whose derivation accounts for the complete
+// transaction-envelope overhead (not just the deal body). That requires owner
+// ratification; until then this module defaults to Resolution A above.
 
 /// First byte flag: compression bit — set in every canonical compressed encoding
 /// (ZCash/`blst`). A field with it clear is not a compressed point.
@@ -508,9 +509,11 @@ impl RegisterBeaconKeyV1 {
 ///
 /// `commitments` are the dealer's Feldman commitments `C_{i,0..T-1}`. Because the
 /// threshold `T` is **not** owner-ratified (draft §1.2, PROPOSED), it is not
-/// frozen into the wire: the count is a `u32_le` length prefix and the decoder
-/// accepts any `1 ≤ count ≤ MAX_COMMITMENTS` — the record length is a function of
-/// the declared count, not a fixed constant.
+/// frozen into the wire: the count is a `u32_le` length prefix and the decoder is
+/// **self-validating** — it carries no count ceiling; it only requires (via checked
+/// arithmetic, before allocating) that the declared count exactly accounts for the
+/// remaining input (see [`decode`](Self::decode)). The record length is a function
+/// of the declared count, not a fixed constant.
 ///
 /// `r_ij` is the ECIES ephemeral carrier `R_{ij} = g1^{r_ij}`; `ct_ij` is the
 /// fixed 48-byte ChaCha20-Poly1305 body (32-byte scalar ciphertext ‖ 16-byte tag,
@@ -528,7 +531,8 @@ pub struct DkgDealV1 {
     /// Recipient index `j`, 0-based, `u32_le`.
     pub recipient_j: u32,
     /// Feldman commitments `C_{i,0..T-1}`, each canonical compressed G1 (48B).
-    /// Length MUST be in `1..=MAX_COMMITMENTS`.
+    /// Length MUST be `>= 1`; the wire imposes no upper ceiling (the decoder's
+    /// self-consistency check bounds it to what the input actually holds).
     pub commitments: Vec<[u8; G1_LEN]>,
     /// `R_{ij}` — ECIES carrier, canonical compressed G1 (48B), non-identity.
     pub r_ij: [u8; G1_LEN],
@@ -555,20 +559,15 @@ impl DkgDealV1 {
         BeaconWireOp::DkgDeal
     }
 
-    /// Re-check invariants: `1 ≤ commitments.len() ≤ MAX_COMMITMENTS`, every
-    /// commitment and `r_ij` a structurally valid non-identity compressed G1.
+    /// Re-check invariants: `commitments.len() >= 1`, and every commitment and
+    /// `r_ij` a structurally valid non-identity compressed G1. There is no upper
+    /// count ceiling (see the module note): the wire codec carries none, and a
+    /// decoded value's count is bounded by its own byte length.
     pub fn validate(&self) -> Result<(), DecodeError> {
         let n = self.commitments.len();
         if n == 0 {
             return Err(DecodeError::BadValue {
                 ctx: "DkgDealV1.commitment_count_zero",
-            });
-        }
-        if n > MAX_COMMITMENTS {
-            return Err(DecodeError::CountExceedsMax {
-                ctx: "DkgDealV1.commitment_count",
-                count: n as u64,
-                max: MAX_COMMITMENTS as u64,
             });
         }
         for c in &self.commitments {
@@ -605,15 +604,22 @@ impl DkgDealV1 {
     }
 
     /// Canonical encode: validates invariants then emits the layout. `Err` iff the
-    /// commitment count is out of `1..=MAX_COMMITMENTS` or any G1 field is invalid.
+    /// commitment vector is empty or any G1 field is structurally invalid.
     pub fn try_encode(&self) -> Result<Vec<u8>, DecodeError> {
         self.validate()?;
         Ok(self.encode())
     }
 
-    /// Decode from a reader. Enforces `1 ≤ count ≤ MAX_COMMITMENTS`, reads exactly
-    /// `count` structurally-valid commitments, and the fixed `r_ij`/`ct_ij` fields;
-    /// a declared count larger than the buffer supports is a truncation error.
+    /// Decode from a reader — **self-validating and allocation-safe**.
+    ///
+    /// After the fixed header it reads the `u32` count and, with **checked
+    /// arithmetic and before allocating anything**, requires the remaining input to
+    /// be exactly `count * G1_LEN + (G1_LEN + CT_LEN)` bytes — the commitment vector
+    /// plus the fixed `r_ij`/`ct_ij` suffix. So a tiny buffer declaring a huge count
+    /// is rejected (`Inconsistent`, or `BadValue` on `checked_mul` overflow) **before**
+    /// the `Vec::with_capacity`; a too-large or too-small count both mismatch the
+    /// actual length and are rejected. Only then are the `count` structurally-valid
+    /// commitments and the fixed fields read. The decoder imposes no count ceiling.
     pub fn decode(r: &mut Reader) -> Result<Self, DecodeError> {
         let magic = r.read_array::<7>("DkgDealV1.magic")?;
         if magic != Self::MAGIC {
@@ -636,11 +642,26 @@ impl DkgDealV1 {
                 ctx: "DkgDealV1.commitment_count_zero",
             });
         }
-        if count as usize > MAX_COMMITMENTS {
-            return Err(DecodeError::CountExceedsMax {
+        // Allocation-safe self-consistency check — BEFORE any allocation. The
+        // remaining input must be EXACTLY the commitment vector (count × G1_LEN)
+        // plus the fixed suffix r_ij (G1_LEN) + ct_ij (CT_LEN). `checked_mul` guards
+        // overflow (matters on 32-bit `usize`); the equality guards against a tiny
+        // buffer declaring a huge count, so `Vec::with_capacity(count)` below is
+        // bounded by the real input length and can never be amplified.
+        let commit_bytes = (count as usize)
+            .checked_mul(G1_LEN)
+            .ok_or(DecodeError::BadValue {
+                ctx: "DkgDealV1.commitment_count_overflow",
+            })?;
+        let expected_remaining =
+            commit_bytes
+                .checked_add(G1_LEN + CT_LEN)
+                .ok_or(DecodeError::BadValue {
+                    ctx: "DkgDealV1.commitment_count_overflow",
+                })?;
+        if r.remaining() != expected_remaining {
+            return Err(DecodeError::Inconsistent {
                 ctx: "DkgDealV1.commitment_count",
-                count: count as u64,
-                max: MAX_COMMITMENTS as u64,
             });
         }
         let mut commitments = Vec::with_capacity(count as usize);
@@ -1048,8 +1069,9 @@ mod tests {
     }
 
     #[test]
-    fn deal_roundtrips_for_count_1_typical_and_max() {
-        for count in [1usize, 2, MAX_COMMITMENTS] {
+    fn deal_roundtrips_for_small_counts() {
+        // No hard ceiling: the wire self-validates count against the payload.
+        for count in [1usize, 2, 8, 64] {
             let d = deal_with(count);
             let bytes = d.try_encode().unwrap();
             assert_eq!(bytes.len(), DkgDealV1::encoded_len(count));
@@ -1062,16 +1084,26 @@ mod tests {
     }
 
     #[test]
-    fn max_commitments_is_the_tight_block_framing_bound() {
-        // MAX_COMMITMENTS is derived from the authoritative payload-size limit
-        // (DEFAULT_MAX_BLOCK_BYTES), not from the validator cap: a deal at MAX fits
-        // in one default max block, and one more commitment would not.
-        assert!(DkgDealV1::encoded_len(MAX_COMMITMENTS) <= DEFAULT_MAX_BLOCK_BYTES);
-        assert!(DkgDealV1::encoded_len(MAX_COMMITMENTS + 1) > DEFAULT_MAX_BLOCK_BYTES);
-        // It is a framing/DoS ceiling far above any plausible committee, so it never
-        // rejects a semantically-valid deal: a deal from a full *default* committee
-        // (100 = default `StakingParams::max_validators`) is far below the ceiling.
-        assert!(DkgDealV1::encoded_len(100) < DkgDealV1::encoded_len(MAX_COMMITMENTS));
+    fn deal_amplification_dos_guard_rejects_huge_count_on_tiny_buffer() {
+        // The core DoS guard: a tiny buffer that declares a huge count must be
+        // rejected by the checked self-consistency check BEFORE any allocation, so
+        // `Vec::with_capacity(count)` can never be amplified. Take a real count=1
+        // deal (181 bytes) and rewrite only its count field to u32::MAX.
+        let bytes = deal_with(1).try_encode().unwrap();
+        assert_eq!(bytes.len(), DkgDealV1::encoded_len(1)); // small buffer
+        let mut huge = bytes;
+        huge[33..37].copy_from_slice(&u32::MAX.to_le_bytes());
+        // `checked_mul` does not overflow on 64-bit usize (u32::MAX * 48 fits), so
+        // the equality check fires: expected_remaining (~206 GB) != the tiny actual
+        // remaining -> Inconsistent, before the vector is ever allocated. (On a
+        // 32-bit target the same input trips `checked_mul` -> BadValue overflow
+        // instead; both reject before allocating.)
+        assert!(matches!(
+            DkgDealV1::decode_exact(&huge),
+            Err(DecodeError::Inconsistent {
+                ctx: "DkgDealV1.commitment_count"
+            })
+        ));
     }
 
     #[test]
@@ -1099,50 +1131,30 @@ mod tests {
     }
 
     #[test]
-    fn deal_rejects_count_over_max() {
-        // Declare MAX+1 commitments in the count field (no need to supply them —
-        // the count check fires before reading the vector).
-        let bytes = deal_with(1).try_encode().unwrap();
-        let mut over = bytes;
-        over[33..37].copy_from_slice(&((MAX_COMMITMENTS as u32) + 1).to_le_bytes());
-        assert!(matches!(
-            DkgDealV1::decode_exact(&over),
-            Err(DecodeError::CountExceedsMax {
-                ctx: "DkgDealV1.commitment_count",
-                max,
-                ..
-            }) if max == MAX_COMMITMENTS as u64
-        ));
-        // try_encode rejects an in-memory oversized vector.
-        let mut big = deal_with(1);
-        big.commitments = vec![g1(0x41); MAX_COMMITMENTS + 1];
-        assert!(matches!(
-            big.try_encode(),
-            Err(DecodeError::CountExceedsMax { .. })
-        ));
-    }
-
-    #[test]
-    fn deal_rejects_declared_count_vs_buffer_length_mismatch() {
-        // Declared count too LARGE for the buffer -> rejected. Encode count=2,
-        // bump the declared count to 3. The decoder reinterprets the following
-        // fixed fields as an extra commitment: the exact error kind is
-        // data-dependent (here the misaligned `ct_ij` region — flag byte 0x60 —
-        // fails the G1 compression-flag check before the buffer is exhausted; with
-        // an all-G1-shaped tail it would instead run out of bytes = `Truncated`).
-        // Either way it is a decode error; the count/length mismatch is rejected.
+    fn deal_rejects_count_vs_length_self_inconsistency() {
+        // The self-consistency check rejects BOTH a too-large and a too-small
+        // declared count (the count must exactly account for the payload).
         let bytes = deal_with(2).try_encode().unwrap();
+
+        // too LARGE: count 2 -> 3 (expected_remaining > actual) -> Inconsistent,
+        // before allocation.
         let mut too_large = bytes.clone();
         too_large[33..37].copy_from_slice(&3u32.to_le_bytes());
-        assert!(DkgDealV1::decode_exact(&too_large).is_err());
+        assert!(matches!(
+            DkgDealV1::decode_exact(&too_large),
+            Err(DecodeError::Inconsistent {
+                ctx: "DkgDealV1.commitment_count"
+            })
+        ));
 
-        // Declared count too SMALL for the buffer -> the remaining commitment's
-        // bytes become trailing. Encode count=2, drop the declared count to 1.
+        // too SMALL: count 2 -> 1 (expected_remaining < actual) -> Inconsistent.
         let mut too_small = bytes;
         too_small[33..37].copy_from_slice(&1u32.to_le_bytes());
         assert!(matches!(
             DkgDealV1::decode_exact(&too_small),
-            Err(DecodeError::TrailingBytes { .. })
+            Err(DecodeError::Inconsistent {
+                ctx: "DkgDealV1.commitment_count"
+            })
         ));
     }
 
@@ -1173,15 +1185,32 @@ mod tests {
     #[test]
     fn deal_rejects_trailing_and_truncation() {
         let bytes = deal_with(2).try_encode().unwrap();
-        assert!(matches!(
-            DkgDealV1::decode_exact(&bytes[..bytes.len() - 1]),
-            Err(DecodeError::Truncated { .. })
-        ));
-        let mut long = bytes;
+
+        // Trailing byte after a valid deal: the payload is one byte longer than the
+        // declared count accounts for -> self-consistency mismatch (Inconsistent).
+        let mut long = bytes.clone();
         long.push(0);
         assert!(matches!(
             DkgDealV1::decode_exact(&long),
-            Err(DecodeError::TrailingBytes { .. })
+            Err(DecodeError::Inconsistent {
+                ctx: "DkgDealV1.commitment_count"
+            })
+        ));
+
+        // One byte short (truncated in the ct_ij tail, after the count): the
+        // remaining is one short of what the declared count needs -> Inconsistent.
+        assert!(matches!(
+            DkgDealV1::decode_exact(&bytes[..bytes.len() - 1]),
+            Err(DecodeError::Inconsistent {
+                ctx: "DkgDealV1.commitment_count"
+            })
+        ));
+
+        // Truncated inside the FIXED header (before the count is even read) -> the
+        // Reader runs out mid-field = Truncated.
+        assert!(matches!(
+            DkgDealV1::decode_exact(&bytes[..20]),
+            Err(DecodeError::Truncated { .. })
         ));
     }
 
