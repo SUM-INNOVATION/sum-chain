@@ -4,6 +4,7 @@ members = [
     "crates/sumchain-wire",
     "crates/primitives",
     "crates/crypto",
+    "crates/beacon-crypto",
     "crates/storage",
     "crates/genesis",
     "crates/state",
