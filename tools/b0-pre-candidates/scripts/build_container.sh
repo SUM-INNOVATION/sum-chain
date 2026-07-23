@@ -122,6 +122,20 @@ df="$ROOT/containers/$candidate.Dockerfile"
   || die "source tree is not clean; refuse to build from a dirty state"
 source_commit="$(git -C "$ROOT" rev-parse HEAD)"
 
+# Stage the CURATED, MINIMAL, reproduced-layout build context (only the official guest
+# dep graph: candidate workspace + guest-core + sumchain-wire + curated workspace root +
+# frozen guest fixtures — NO unrelated production crate). This is the authoritative
+# container context: the path deps (../../../guest-core, ../../../crates/sumchain-wire)
+# and sumchain-wire's `.workspace` inheritance resolve because the reproduced repo root
+# maps to /work. Staged UNDER the (scratch) work dir; it never dirties the source tree.
+STAGE="$out/${candidate}.${arch}.context"
+stage_container_context "$candidate" "$STAGE"
+# Bind the exact staged-context bytes into the #154 build evidence (below, via the
+# builder command log, which is BLAKE3-hashed into command_log_blake3). This ADDS a
+# binding; it weakens none.
+staged_ctx_b3="$(staged_context_blake3 "$STAGE")"
+note "staged curated container context at $STAGE (blake3:$staged_ctx_b3; reproduced repo-relative layout, no unrelated crate)"
+
 # The reference validator carries the real OCI-layout manifest parser (venue-verify
 # oci-manifest) — the SAME code unit-tested off-venue, so the recorded manifest
 # identity is genuinely parsed, never sha256(the exported tar).
@@ -145,7 +159,7 @@ build_once() {
     --build-arg "RUSTUP_INIT_SHA256=$RUSTUP_INIT_SHA256" \
     --build-arg "RUST_VERSION=1.88.0" \
     --output "type=oci,dest=$tar" \
-    "$ROOT" >"$log" 2>&1
+    "$STAGE" >"$log" 2>&1
 }
 
 # Extract a layout and parse its TRUE OCI manifest identity (content-addressed
@@ -187,6 +201,9 @@ cmd_log="$out/${candidate}.${arch}.command.log"
   printf 'docker build --no-cache --file %s --platform linux/%s --output type=oci ...(build-args pinned)\n' "$df" "$oci_arch"
   printf 'BASE_IMAGE=%s BASE_DIGEST=%s APT_SNAPSHOT=%s RUST_VERSION=1.88.0\n' \
     "$BASE_IMAGE" "$BASE_DIGEST" "$APT_SNAPSHOT"
+  # The build context is the curated staged guest-source graph, not the raw tree; bind
+  # its exact identity here (this line is BLAKE3-hashed into command_log_blake3 below).
+  printf 'build_context=curated-staged-guest-graph staged_context_blake3=%s (candidate+guest-core+sumchain-wire+curated-root+guest-fixtures; no unrelated crate)\n' "$staged_ctx_b3"
   printf 'oci_manifest_identity=%s (build1==build2)\n' "$builder_digest"
   printf 'raw_export_tar_blake3 build1=%s build2=%s (raw artifacts, NOT the identity)\n' "$tar1_hex" "$tar2_hex"
 } > "$cmd_log"

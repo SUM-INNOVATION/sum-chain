@@ -5,11 +5,18 @@
 # the Stage-5 mutation harness (verifier_fixtures.sh).
 #
 # STATUS: the command path + fail-closed contracts are IMPLEMENTED; the in-container
-# proving is VENUE-UNEXECUTED. The candidate guests are still placeholders
-# (candidates/<cand>/NOT_YET_REPRODUCED.md present, NOT_AN_OFFICIAL_GUEST), so the
-# FROZEN-GUEST gate below fails closed everywhere off-venue and on any venue lacking a
-# frozen official guest. NOTHING here fabricates a canned/synthetic proof: no genuine
-# fixture is produced until a real venue proves a real frozen guest.
+# proving is VENUE-UNEXECUTED. The candidate guests now carry OFFICIAL guest SOURCE
+# (candidates/<cand>/guest/src/main.rs routing through b0-pre-guest-core), so the
+# OFFICIAL-GUEST gate below locates/builds the real guest rather than a placeholder
+# marker. Generation still fails closed everywhere off-venue: it requires the pinned
+# prover toolchain, the pinned container (VERIFIER_REF), a native builder, and the
+# bound tool identity — none of which exist off-venue. The guest SOURCE is official,
+# but the guest has NOT been reproduced at a venue (no Cargo.lock / program id /
+# receipt / measured cost exists), so any fixture it eventually proves is STILL
+# self-labeled NON_SELECTION / NOT_AN_OFFICIAL_GUEST (four stamps): no venue-built
+# guest identity or allowlist enters the normative artifact. NOTHING here fabricates a
+# canned/synthetic proof: no genuine fixture is produced until a real venue proves the
+# real frozen guest.
 #
 # Usage: prove_fixture.sh <sp1|risc0> <arch> <out_fixture.json>
 #   env: VERIFIER_REF  pinned builder image the prover toolchain runs INSIDE
@@ -56,14 +63,33 @@ if [ "$CAND_LC" = "risc0" ]; then
   require_native_arch x86_64
 fi
 
-# FROZEN GUEST gate (deterministic, before any tool/container work): a genuine fixture
-# can only be PROVED from a frozen, official candidate guest. While the candidate is
-# NOT_YET_REPRODUCED (placeholder / NOT_AN_OFFICIAL_GUEST) there is nothing genuine to
-# prove — refuse rather than fabricate. This is why generation fails closed off-venue.
-[ -f "$ROOT/candidates/$CAND_LC/NOT_YET_REPRODUCED.md" ] \
-  && nyr "candidate $CAND_LC guest is NOT_YET_REPRODUCED (placeholder / NOT_AN_OFFICIAL_GUEST); a genuine proof/receipt fixture requires a frozen official guest — no canned fixture is substituted"
+# OFFICIAL-GUEST gate (deterministic, before any tool/container work): a genuine
+# fixture can only be PROVED from the frozen OFFICIAL guest SOURCE — the zkVM
+# entrypoint that routes through the candidate-neutral b0-pre-guest-core. This is a
+# POSITIVE locate-the-official-guest check (not a placeholder-marker absence check):
+# refuse a candidate that has no official entrypoint, or one that does not go through
+# the shared core, rather than fabricate. It does NOT weaken fail-closed: proving still
+# requires the pinned toolchain / container / native builder / bound tool identity
+# (asserted below), all absent off-venue.
 local_guest="$ROOT/candidates/$CAND_LC/guest"
 [ -d "$local_guest" ] || nyr "candidate $CAND_LC guest crate not found at $local_guest"
+[ -f "$local_guest/src/main.rs" ] \
+  || nyr "candidate $CAND_LC has no official guest entrypoint ($local_guest/src/main.rs); a genuine fixture requires the frozen official guest source"
+[ -f "$local_guest/src/lib.rs" ] \
+  && die "candidate $CAND_LC guest still carries a placeholder src/lib.rs; the official guest is a src/main.rs entrypoint"
+grep -q 'b0_pre_guest_core::run' "$local_guest/src/main.rs" \
+  || die "candidate $CAND_LC guest entrypoint does not route through the official b0-pre-guest-core::run; refusing to prove a non-official guest"
+# VENUE PACKAGING (IMPLEMENTED; the guest ELF build/prove stays VENUE-UNEXECUTED): the
+# official guest depends on the shared `b0-pre-guest-core`, which adopts the frozen
+# `sumchain-wire::b0` wire types directly. The builder image now BAKES IN the curated
+# staged guest graph (scripts/stage_context.sh): the candidate workspace, `guest-core`,
+# and `sumchain-wire` sit at their reproduced repo-relative paths under /work, so the
+# path deps (`../../../guest-core`, `../../../crates/sumchain-wire`) and sumchain-wire's
+# `.workspace` inheritance resolve. The in-container build below therefore runs from the
+# candidate's staged path (`$(incontainer_candidate_dir <cand>)/guest`). Off-venue there
+# is no pinned toolchain / container / native builder, so proving still fails closed (a
+# missing toolchain is a hard error, never a synthetic proof).
+CAND_DIR="$(incontainer_candidate_dir "$CAND_LC")"
 
 # Required host commands + the BOUND pinned prover identity.
 require_cmd docker
@@ -131,8 +157,10 @@ fn run() -> Result<(), String> {
     }
     let mut stdin = SP1Stdin::new();
     if let Some(input_path) = args.get(3) {
+        // The frozen guest-input envelope bytes; the official guest reads them
+        // back with `sp1_zkvm::io::read::<Vec<u8>>()`.
         let bytes = fs::read(input_path).map_err(|e| format!("read guest input: {e}"))?;
-        stdin.write_slice(&bytes);
+        stdin.write(&bytes);
     }
 
     // Genuine proving: setup the verifying key from the ELF, prove Groth16.
@@ -168,8 +196,9 @@ fn main() -> ExitCode {
 }
 RUST
   # The frozen SP1 guest ELF is built with the pinned SP1 guest toolchain (cargo-prove
-  # installed from the bound tool identity), then proved by the runner.
-  BUILD_GUEST="cd /work/candidates/sp1/guest && cargo prove build --output-directory /out/guest --elf-name guest.elf"
+  # installed from the bound tool identity), then proved by the runner. Built from the
+  # staged candidate path so the guest-core/sumchain-wire path deps resolve.
+  BUILD_GUEST="cd $CAND_DIR/guest && cargo prove build --output-directory /out/guest --elf-name guest.elf"
   ELF_PATH="/out/guest/guest.elf"
 else
   cat > "$PROVER/Cargo.toml" <<'TOML'
@@ -220,8 +249,12 @@ fn run() -> Result<(), String> {
     }
     let mut builder = ExecutorEnv::builder();
     if let Some(input_path) = args.get(3) {
+        // The frozen guest-input envelope bytes; the official guest reads them
+        // back with `risc0_zkvm::guest::env::read::<Vec<u8>>()`.
         let bytes = fs::read(input_path).map_err(|e| format!("read guest input: {e}"))?;
-        builder.write_slice(&bytes);
+        builder
+            .write(&bytes)
+            .map_err(|e| format!("write guest input: {e}"))?;
     }
     let env = builder.build().map_err(|e| format!("executor env: {e}"))?;
 
@@ -255,7 +288,8 @@ fn main() -> ExitCode {
     }
 }
 RUST
-  BUILD_GUEST="cd /work/candidates/risc0/guest && cargo risczero build --output /out/guest/guest.elf"
+  # Built from the staged candidate path so the guest-core/sumchain-wire path deps resolve.
+  BUILD_GUEST="cd $CAND_DIR/guest && cargo risczero build --output /out/guest/guest.elf"
   ELF_PATH="/out/guest/guest.elf"
 fi
 
