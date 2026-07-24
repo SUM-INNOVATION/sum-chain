@@ -48,6 +48,7 @@
 //! When #127 lands, its adapter is invoked here (after the pure precheck) and only
 //! on full success may beacon state be mutated; until then this seam rejects.
 
+use sumchain_beacon_runtime::{validate_operation, BeaconParams};
 use sumchain_genesis::ChainParams;
 use sumchain_primitives::beacon_wire::BeaconOperation;
 use sumchain_primitives::{BeaconTxData, Hash, TxStatus};
@@ -88,8 +89,16 @@ pub enum BeaconReject {
     ChainIdMismatch,
     /// A `BeaconFinalizeV1` witness is not strictly ascending (unsorted/duplicate).
     WitnessNonCanonical,
-    /// Gate open but the #127 crypto/threshold/membership validation required before
-    /// accepting state is unavailable — FAIL CLOSED.
+    /// Gate open, the pure precheck passed, and the #127 runtime's **stateless**
+    /// crypto/structural validation ([`validate_operation`]) REJECTED the carrier
+    /// (bad subgroup/infinity point, failing PoP, non-canonical scalar, or an
+    /// invalid finalize witness). The runtime is genuinely reached here.
+    RuntimeValidationFailed,
+    /// Gate open, the pure precheck AND the #127 runtime's stateless validation
+    /// passed, but the full STATEFUL adjudication (DLEQ/AEAD vs the on-chain deal,
+    /// QUAL, pairing-under-`PK_E`) + persisted epoch/round state are not wired to
+    /// live execution yet — FAIL CLOSED (needs a genesis `BeaconParams` + membership
+    /// snapshot, which do not exist while the gate is `None`).
     CryptoUnavailablePending127,
 }
 
@@ -168,9 +177,22 @@ pub fn classify_reject(
     // genesis loader forbids it until #127).
     match semantic_precheck(expected_phase_ordinal, tx_chain_id, data) {
         Err(reason) => reason,
-        // Pure checks pass, but #127 crypto/threshold/membership validation is not
-        // built — FAIL CLOSED. Never accept unvalidated beacon state.
-        Ok(_op) => BeaconReject::CryptoUnavailablePending127,
+        // Pure checks pass → REACH the #127 runtime for the stateless crypto/
+        // structural validation (real §2.2 subgroup/infinity, PoP pairing, canonical
+        // scalars, exactly-T/ascending/membership-bounded witness). This is the
+        // vertical connection: the runtime is genuinely invoked here.
+        //
+        // `BeaconParams::proposed_default()` is a FIXTURE — the authoritative genesis
+        // `BeaconParams` surface does not exist yet, and the gate can only be open via
+        // an in-memory `ChainParams` (the genesis loader forbids `Some(_)`), so this
+        // never runs in production. If/when a genesis surface lands, thread it here.
+        Ok(op) => match validate_operation(&BeaconParams::proposed_default(), &op) {
+            Err(_) => BeaconReject::RuntimeValidationFailed,
+            // Stateless crypto passed; still FAIL CLOSED because the full stateful
+            // adjudication + persisted epoch/round state are not wired to live
+            // execution yet. Never accept unvalidated beacon state.
+            Ok(()) => BeaconReject::CryptoUnavailablePending127,
+        },
     }
 }
 
@@ -290,9 +312,10 @@ mod tests {
     }
 
     #[test]
-    fn gate_open_fails_closed_after_pure_precheck_passes() {
-        // Well-formed setup op, phase + chain_id correct → pure precheck PASSES,
-        // then FAIL CLOSED on the missing #127 validation. Never Success; generic receipt.
+    fn gate_open_reaches_runtime_and_rejects_fake_points() {
+        // Well-framed setup op, phase + chain_id correct → pure precheck PASSES →
+        // the #127 runtime is REACHED and rejects the structurally-OK-but-not-a-real-
+        // curve-point fixture (`ek_j = g1(0x11)`). Still generic receipt, no state.
         let p = open_params();
         let r = execute(&p, 0, Hash::hash(b"tx"), 7, 28, &setup_data(7));
         assert_eq!(r.status, GENERIC);
@@ -300,7 +323,7 @@ mod tests {
         assert!(!r.status.is_success());
         assert_eq!(
             classify_reject(&p, 0, 7, 28, &setup_data(7)),
-            BeaconReject::CryptoUnavailablePending127
+            BeaconReject::RuntimeValidationFailed
         );
         assert!(semantic_precheck(28, 7, &setup_data(7)).is_ok());
     }
@@ -366,15 +389,49 @@ mod tests {
             semantic_precheck(29, 7, &unsorted).unwrap_err(),
             BeaconReject::WitnessNonCanonical
         );
-        // A strictly-ascending witness passes the pure check, then FAIL CLOSED.
+        // A strictly-ascending witness passes the pure precheck; the #127 runtime is
+        // then reached and rejects it (fixture `sigma_r`/witness are not real, and
+        // len 3 != fixture T=2), still with the generic receipt.
         let ok = finalize_data(7, vec![0, 1, 2]);
         assert!(semantic_precheck(29, 7, &ok).is_ok());
         let p = open_params();
         assert_eq!(execute(&p, 0, Hash::hash(b"c"), 7, 29, &ok).status, GENERIC);
         assert_eq!(
             classify_reject(&p, 0, 7, 29, &ok),
+            BeaconReject::RuntimeValidationFailed
+        );
+    }
+
+    #[test]
+    fn gate_open_reaches_runtime_and_fails_closed_on_valid_carrier() {
+        // Build a REAL registration (valid EK_j = g1^{ek}, valid PoP) with the #127
+        // crypto adapter, so the runtime's stateless validation PASSES — proving the
+        // seam is vertically connected to the runtime. The seam then STILL fails
+        // closed (stateful adjudication + persistence not wired), with the generic
+        // receipt and no state.
+        use sumchain_beacon_crypto::SecretScalar;
+        let mut sk_bytes = [0u8; 32];
+        sk_bytes[0] = 7; // a small canonical scalar (< r)
+        let sk = SecretScalar::from_bytes_le(&sk_bytes).unwrap();
+        let reg = RegisterBeaconKeyV1 {
+            chain_id: 7,
+            epoch: 1,
+            ek_j: sk.public_g1().to_compressed(),
+            pop: sk.pop_prove().to_compressed(),
+        };
+        let data = BeaconTxData::from_operation(&BeaconOperation::RegisterBeaconKey(reg)).unwrap();
+
+        let p = open_params();
+        // The runtime validated the real crypto OK, yet the seam fails closed pending
+        // the stateful path — the vertical connection is exercised, state stays dormant.
+        assert_eq!(
+            classify_reject(&p, 0, 7, 28, &data),
             BeaconReject::CryptoUnavailablePending127
         );
+        let r = execute(&p, 0, Hash::hash(b"tx"), 7, 28, &data);
+        assert_eq!(r.status, GENERIC);
+        assert_eq!(r.fee_paid, 0);
+        assert!(!r.status.is_success());
     }
 
     #[test]

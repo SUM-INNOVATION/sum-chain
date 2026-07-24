@@ -10,19 +10,29 @@
 //!
 //! ## What it implements
 //!
-//! * **Setup** ([`dkg`]): process `RegisterBeaconKeyV1` (PoP verify, §2.3),
-//!   `DkgDealV1` (commitment/carrier validation + §8.4 replay/conflicting-deal
-//!   rules), and `DkgComplaintV1`.
+//! * **Validated parameters** ([`params::BeaconParams`]): injected from authoritative
+//!   config, with the ratified §7.4 inequalities enforced on construction; the
+//!   proposed profile is a test fixture only, never frozen behavior.
+//! * **Authenticated context** ([`context`]): every transition takes an
+//!   [`context::ExecContext`] (signer identity, epoch membership snapshot, phase,
+//!   cutoffs) and enforces the actor bindings #164 deferred (registrant ↔ `j`,
+//!   dealer ↔ `i`, complainant ↔ `j`, partial signer ↔ `j`, indices `< n`, cutoffs).
+//! * **Setup** ([`dkg`]): `RegisterBeaconKeyV1` (PoP verify §2.3; replay vs
+//!   equivocation distinguished with retained evidence), `DkgDealV1` (count `== T`,
+//!   membership, identical-commitments-across-recipients, §8.4 replay/conflict with
+//!   retained evidence), and `DkgComplaintV1`.
 //! * **Objective complaint adjudication** ([`dkg::DkgEpoch::adjudicate`]): the four
-//!   deterministic verdicts of draft §6.1 — `REJECT_COMPLAINT_MALFORMED`,
-//!   `DISQUALIFY(i)`, `SLASH_FALSE_ACCUSER(j)`, `DISQUALIFY_AND_SLASH(i)` — via the
-//!   DLEQ (§5) ⇒ ECIES-open (§8) ⇒ Feldman (§6.2) pipeline, idempotent per §6.6.
+//!   deterministic verdicts of draft §6.1 via the DLEQ (§5) ⇒ ECIES-open (§8) ⇒
+//!   Feldman (§6.2) pipeline, idempotent per §6.6.
 //! * **QUAL determination** ([`dkg::DkgEpoch::finalize`]): the carrier-free
-//!   deterministic state transition of §4.2 — `QUAL` = non-disqualified dealers,
-//!   success iff `|QUAL| ≥ Q_dkg`, else **safe-halt**; on success `PK_E = Σ C_{i,0}`.
-//! * **Signing** ([`signing`]): derive `vk_j` (§2.4), verify `BeaconPartialV1`
-//!   partials, exactly-`T` sorted Lagrange combine to `Sigma_r` (§4.3), verify
-//!   `BeaconFinalizeV1`; plus the §12.1 beacon chaining messages ([`wire`]).
+//!   deterministic state transition of §4.2 — success iff `|QUAL| ≥ Q_dkg`, else
+//!   **safe-halt**; on success `PK_E = Σ C_{i,0}`.
+//! * **Signing** ([`signing`]): derive `vk_j` (§2.4), verify partials, exactly-`T`
+//!   sorted Lagrange combine to `Σ_r` (§4.3), verify `BeaconFinalizeV1`.
+//! * **Chained-round state machine** ([`rounds::BeaconChain`]): GENESIS/ROUND/OUT
+//!   domains + chained `Σ_prev` (§12.1), monotonic round progression, partial
+//!   replay/conflict, output verification + replay separation, and reorg restoration
+//!   of prior rounds / finalized signatures (§10).
 //!
 //! ## GATE-CLOSED — no activation, and activation additionally requires AUDIT
 //!
@@ -54,32 +64,22 @@
 //! OWNER DECISION, not ratified** (draft §16.3); their ratification is a further
 //! prerequisite.
 //!
-//! ## Executor integration point (documented, NOT wired — the #164 seam)
+//! ## Executor integration (vertically connected — finding 7)
 //!
-//! The #125/#164 beacon executor seam (`crates/state/src/beacon_executor.rs`) is
-//! today **fail-closed**: gate-open it runs the crypto-free semantic precheck, then
-//! returns `Failed(BEACON_CRYPTO_UNAVAILABLE_127)` because "the #127 crypto +
-//! threshold/membership validation that MUST pass before accepting beacon state is
-//! not built yet." **This crate is that validation.** When the owner wires it (after
-//! audit + ratification), `execute`, on the gate-open path and after the semantic
-//! precheck, dispatches the decoded `BeaconOperation` to this runtime, keyed by the
-//! epoch's `BeaconParams` + membership snapshot:
-//!
-//! | `BeaconOperation` variant | Runtime call |
-//! |---|---|
-//! | `RegisterBeaconKey(k)` | [`dkg::DkgEpoch::register_key`] (signer index, `k`) |
-//! | `DkgDeal(d)` | [`dkg::DkgEpoch::submit_deal`] |
-//! | `DkgComplaint(c)` | [`dkg::DkgEpoch::apply_complaint`] |
-//! | DKG finalization (no carrier) | [`dkg::DkgEpoch::finalize`] at the cutoff height |
-//! | `BeaconPartial(p)` | [`signing::QualifiedEpoch::verify_partial_carrier`] |
-//! | `BeaconFinalize(f)` | [`signing::QualifiedEpoch::verify_finalize`] |
-//!
-//! Only on a fully-validating result may the executor mutate beacon state; any error
-//! keeps the current fail-closed behaviour (reject, no state, no fee). The seam's
-//! `BeaconParams` type and the epoch membership snapshot are the missing runtime
-//! inputs the executor must supply — they do not exist in `main` yet, which is the
-//! one thing that genuinely needs #164 (the #125 seam) merged before wiring. This
-//! crate provides the logic; it deliberately does **not** edit the executor.
+//! The beacon executor seam (`crates/state/src/beacon_executor.rs`) reaches this
+//! runtime on the gate-open path: after the crypto-free semantic precheck it invokes
+//! [`validate_operation`] (this crate) to run the §2.2 subgroup/infinity, PoP, DLEQ,
+//! AEAD, and pairing validation the seam documented as deferred. Because the beacon
+//! activation gate is `None` by default (dormant, fail-closed in
+//! `ChainParams::validate`), the runtime is never reached in production and every
+//! beacon tx still rejects with the generic `Failed(0)` and mutates no state —
+//! byte/state-identical to before. The persisted epoch/round state
+//! (`crates/state/src/beacon_store.rs`) follows the #163 C1 pattern: a domain-versioned
+//! `state_digest` folded into `compute_block_state_root` **only** when the gate is
+//! open (no-op under `None`), and a `stage_block_revert` composed into the unified
+//! atomic reorg batch (`revert_block_state_diffs`). Full live per-block epoch-state
+//! mutation additionally needs a genesis `BeaconParams` + membership-snapshot source,
+//! which do not exist yet (the gate stays closed until they — and an audit — do).
 //!
 //! ## Boundary invariants
 //!
@@ -91,12 +91,17 @@
 
 #![forbid(unsafe_code)]
 
+pub mod context;
 pub mod dkg;
 pub mod params;
+pub mod rounds;
 pub mod signing;
+pub mod validate;
 pub mod wire;
 
+pub use context::{BeaconPhase, EpochMembership, ExecContext, ValidatorId};
 pub use params::BeaconParams;
+pub use validate::{validate_operation, ValidationError};
 
 #[cfg(test)]
 mod tests;
