@@ -1,71 +1,18 @@
-//! Signing-phase carriers + beacon chaining messages (draft §2.4, §4.3, §12).
+//! Canonical signing carriers + beacon chaining messages (draft §2.4, §4.3, §12).
 //!
-//! ## Local mirrors of the not-yet-merged signing carriers
+//! ## Canonical wire types (finding 1 — mirrors removed)
 //!
-//! The DKG **setup** carriers ([`RegisterBeaconKeyV1`], [`DkgDealV1`],
-//! [`DkgComplaintV1`]) are already in `main`'s `sumchain-wire::beacon_wire` and are
-//! consumed directly by the [`crate::dkg`] module. The **signing** carriers
-//! `BeaconPartialV1` / `BeaconFinalizeV1` are **not yet in `main`** — they land with
-//! #125 (they exist today only in the `w1b-125-close` branch). To stay self-contained
-//! and buildable against `main`, this module mirrors their **exact field layout**
-//! from that branch:
-//!
-//! * `BeaconPartialV1` — magic `b"BPRTv1\0"`, `LEN = 133`:
-//!   `magic[7] · schema_version u16 · chain_id u64_le · epoch u64_le · round u64_le ·
-//!    j u32_le · sigma_j G2[96]`.
-//! * `BeaconFinalizeV1` — magic `b"BFNLv1\0"`, `BASE_LEN = 133` + witness:
-//!   `magic[7] · schema_version u16 · chain_id u64_le · epoch u64_le · round u64_le ·
-//!    Sigma_r G2[96] · witness_count u32_le · witness (count × u32_le)`.
-//!
-//! **Integration note.** When #125 merges these into `sumchain-wire`, delete these
-//! mirrors and change [`crate::signing`] to consume
-//! `sumchain_wire::beacon_wire::{BeaconPartialV1, BeaconFinalizeV1}` — the field
-//! names here are chosen to match, so the swap is mechanical. The runtime operates on
-//! the *decoded fields* (never re-encodes), so the byte codec staying in
-//! `sumchain-wire` is correct; only the struct source moves.
+//! The signing carriers are now the **canonical** `sumchain_wire::beacon_wire`
+//! types, re-exported here for one import site. An earlier revision mirrored them
+//! locally because they had not yet merged to `main`; #164 landed them, so the
+//! mirrors are deleted and the runtime consumes the frozen carriers directly. The
+//! conformance test [`tests::canonical_carriers_are_the_wire_types`] proves there is
+//! no semantic drift (field-for-field construction + canonical round-trip through the
+//! frozen `sumchain-wire` codec).
 
-use sumchain_beacon_crypto::{Signature, G2_COMPRESSED_SIZE};
+pub use sumchain_wire::beacon_wire::{BeaconFinalizeV1, BeaconPartialV1, G2_LEN};
 
-/// Compressed G2 point width (bytes) — a partial / combined signature.
-pub const G2_LEN: usize = G2_COMPRESSED_SIZE;
-
-/// Per-round threshold-BLS partial signature (draft §2.4, §4.3). Mirror of the #125
-/// `sumchain_wire::beacon_wire::BeaconPartialV1` (see module docs). `j` is the
-/// 0-based membership-snapshot index; the evaluation point is `x_j = j + 1` (§3).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BeaconPartialV1 {
-    /// Chain id (replay separation), `u64_le`.
-    pub chain_id: u64,
-    /// Beacon epoch, `u64_le`.
-    pub epoch: u64,
-    /// Beacon round within the epoch, `u64_le` (draft §12 `m_r`).
-    pub round: u64,
-    /// Participant index `j`, 0-based membership index, `u32_le`.
-    pub j: u32,
-    /// `sigma_j = H_{G2}(m_r)^{sk_j}` — canonical compressed G2 (96B).
-    pub sigma_j: [u8; G2_LEN],
-}
-
-/// Per-round exactly-`T` Lagrange combine output (draft §4.3, §12). Mirror of the
-/// #125 `sumchain_wire::beacon_wire::BeaconFinalizeV1` (see module docs).
-///
-/// **Distinct from DKG finalization (QUAL).** Determining `QUAL`/`PK_E` is a
-/// deterministic state transition with no carrier ([`crate::dkg`]); this is the
-/// per-round produced signing output.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BeaconFinalizeV1 {
-    /// Chain id (replay separation), `u64_le`.
-    pub chain_id: u64,
-    /// Beacon epoch, `u64_le`.
-    pub epoch: u64,
-    /// Beacon round within the epoch, `u64_le`.
-    pub round: u64,
-    /// `Sigma_r` — combined round signature, canonical compressed G2 (96B).
-    pub sigma_r: [u8; G2_LEN],
-    /// Selected-contributor witness (draft §4.3 step 3): the 0-based membership
-    /// indices of the exactly-`T` contributors, sorted ascending by `x_j`.
-    pub witness: Vec<u32>,
-}
+use sumchain_beacon_crypto::Signature;
 
 // ---------------------------------------------------------------------------
 // Beacon chaining domains (draft §12.1) — PROPOSED, not consensus.
@@ -129,4 +76,48 @@ pub fn beacon_output(chain_id: u64, epoch: u64, round: u64, sigma_r: &Signature)
     h.update(&round.to_le_bytes());
     h.update(&sigma_r.to_compressed());
     *h.finalize().as_bytes()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Conformance: the runtime's signing carriers ARE the canonical
+    /// `sumchain-wire` types (finding 1) — no local mirror, no drift. We build each
+    /// carrier by field name and round-trip it through the frozen `sumchain-wire`
+    /// codec (`try_encode` / `decode_exact`), proving the runtime and consensus agree
+    /// on the exact bytes.
+    #[test]
+    fn canonical_carriers_are_the_wire_types() {
+        let mut sig = [0u8; G2_LEN];
+        sig[0] = 0x80; // compression set, infinity clear (structural-OK placeholder)
+
+        let p = BeaconPartialV1 {
+            chain_id: 0x0102_0304_0506_0708,
+            epoch: 7,
+            round: 3,
+            j: 2,
+            sigma_j: sig,
+        };
+        let p_bytes = p.try_encode().expect("partial encodes");
+        assert_eq!(
+            BeaconPartialV1::decode_exact(&p_bytes).unwrap(),
+            p,
+            "partial must round-trip through the frozen wire codec"
+        );
+
+        let f = BeaconFinalizeV1 {
+            chain_id: 0x0102_0304_0506_0708,
+            epoch: 7,
+            round: 3,
+            sigma_r: sig,
+            witness: vec![0, 1],
+        };
+        let f_bytes = f.try_encode().expect("finalize encodes");
+        assert_eq!(
+            BeaconFinalizeV1::decode_exact(&f_bytes).unwrap(),
+            f,
+            "finalize must round-trip through the frozen wire codec"
+        );
+    }
 }

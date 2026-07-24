@@ -3183,6 +3183,17 @@ impl BlockExecutor {
             data.extend_from_slice(cp_digest.as_bytes());
         }
 
+        // Commit the dormant BR1 beacon state into the root, but ONLY at/after the
+        // beacon activation gate (issue #127). Below the gate — the production default
+        // `beacon_enabled_from_height == None`, closed at every height — this branch
+        // is skipped, so the formula is byte-for-byte unchanged and dormant block
+        // roots match un-upgraded nodes; beacon state cannot affect consensus while
+        // dormant. Mirrors the contracts/supply/C1 gated folds above.
+        if crate::beacon_executor::beacon_gate_open(&self.params, block.height()) {
+            let beacon_digest = crate::beacon_store::BeaconStore::new(&self.db).state_digest()?;
+            data.extend_from_slice(beacon_digest.as_bytes());
+        }
+
         // Mix with previous state root (from before this block's execution)
         data.extend_from_slice(self.state.state_root().as_bytes());
 

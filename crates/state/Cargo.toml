@@ -12,6 +12,10 @@ sumchain-crypto = { path = "../crypto" }
 sumchain-storage = { path = "../storage" }
 sumchain-genesis = { path = "../genesis" }
 sumchain-nft = { path = "../nft" }
+# BR1 randomness-beacon (#127) gate-closed runtime — the crypto/threshold/membership
+# validation the beacon executor seam reaches on the gate-open path. Pulls the
+# `blstrs`-backed adapter transitively (confined to that adapter). Dormant by default.
+sumchain-beacon-runtime = { path = "../beacon-runtime" }
 sumc-runtime = { path = "../sumc-runtime" }
 serde = { workspace = true }
 bincode = { workspace = true }
@@ -24,6 +28,9 @@ lru = "0.12"
 [dev-dependencies]
 tempfile = "3.10"
 wat = "1"
+# Build a REAL beacon carrier (valid EK + PoP) to exercise the gate-open →
+# #127-runtime → fail-closed-pending-stateful path end to end.
+sumchain-beacon-crypto = { path = "../beacon-crypto" }
 
 [features]
 # Enable test modules that reference primitives schemas removed during migration.

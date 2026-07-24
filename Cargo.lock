@@ -6106,6 +6106,8 @@ dependencies = [
  "parking_lot",
  "serde",
  "sumc-runtime",
+ "sumchain-beacon-crypto",
+ "sumchain-beacon-runtime",
  "sumchain-crypto",
  "sumchain-genesis",
  "sumchain-nft",
