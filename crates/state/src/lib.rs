@@ -5,6 +5,7 @@
 
 pub mod agreement_executor;
 pub mod beacon_executor;
+pub mod beacon_store;
 pub mod cache;
 pub mod compute_pool;
 pub mod compute_pool_manager;

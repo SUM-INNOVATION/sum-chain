@@ -1,0 +1,25 @@
+[package]
+name = "sumchain-beacon-runtime"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "BR1 randomness-beacon GATE-CLOSED runtime / state machine (issue #127): the epoch DKG + threshold-BLS lifecycle (setup → objective complaint adjudication → deterministic QUAL → per-round signing) over the sumchain-wire beacon carriers, built on the sumchain-beacon-crypto adapter. GATE-CLOSED: no state mutation, no activation height, no gate flip; activation additionally requires an INDEPENDENT CRYPTOGRAPHIC AUDIT. A workspace leaf — no production crate depends on it."
+publish = false
+
+[dependencies]
+# The #127 crypto adapter (blstrs confined behind it) — the ONLY curve/pairing edge.
+sumchain-beacon-crypto = { path = "../beacon-crypto" }
+# The merged W1b beacon wire carriers (setup family: RegisterBeaconKey/DkgDeal/
+# DkgComplaint). The signing carriers (BeaconPartialV1/BeaconFinalizeV1) are not yet
+# in main's sumchain-wire (they land with #125); this crate mirrors their exact
+# layouts locally in `wire` until then — see that module.
+sumchain-wire = { workspace = true }
+# BLAKE3 for the beacon genesis-seed / output hashing (draft §12.1). A plain hash;
+# NOT a pairing dep — the blstrs confinement invariant is unaffected.
+blake3 = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+hex = { workspace = true }

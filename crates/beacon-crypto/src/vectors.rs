@@ -17,9 +17,10 @@ use crate::bls::test_support::{
     poly_eval_deg1_le,
 };
 use crate::bls::{
-    combine, dleq_prove, dleq_verify, pop_verify, verify, verify_partial, DleqContext, DleqProof,
-    G1Point, PartialSignature, PublicKey, SecretScalar, Signature, G1_COMPRESSED_SIZE,
-    G2_COMPRESSED_SIZE, SCALAR_SIZE,
+    aggregate_g1, combine, commitment_poly_eval, dleq_prove, dleq_verify, eval_share_le,
+    feldman_check, pop_verify, verify, verify_partial, DleqContext, DleqProof, G1Point,
+    PartialSignature, PublicKey, SecretScalar, Signature, G1_COMPRESSED_SIZE, G2_COMPRESSED_SIZE,
+    SCALAR_SIZE,
 };
 use crate::BeaconCryptoError;
 
@@ -379,6 +380,70 @@ fn vec_neg_non_canonical_scalar_rejected() {
     let (h, ek_pt, r_pt, d_pt, ek, _nonce) = build_dleq_statement();
     assert_eq!(
         dleq_prove(&ctx, &h, &ek_pt, &r_pt, &d_pt, &ek, &[0xFFu8; SCALAR_SIZE]).unwrap_err(),
+        BeaconCryptoError::NonCanonicalScalar
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Positive/negative: Feldman check + poly-commit eval + G1 aggregation (§4.2/§6.2)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn vec_feldman_and_commitment_eval() {
+    // Dealer polynomial f(x) = a0 + a1*x (degree T-1 = 1); commitments C_k = g1^{a_k}.
+    let a0 = seed(0x11);
+    let a1 = seed(0x22);
+    let c0 = SecretScalar::from_bytes_le(&a0).unwrap().public_g1();
+    let c1 = SecretScalar::from_bytes_le(&a1).unwrap().public_g1();
+    let commitments = [c0, c1];
+
+    for x in [1u64, 2, 3] {
+        let share = eval_share_le(&[a0, a1], x).unwrap();
+        // Feldman: g1^{f(x)} == Π_k C_k^{x^k}.
+        assert!(
+            feldman_check(&commitments, x, &share).unwrap(),
+            "honest share must pass Feldman at x={x}"
+        );
+        // commitment_poly_eval == g1^{share}.
+        let rhs = commitment_poly_eval(&commitments, x).unwrap();
+        let lhs = SecretScalar::from_bytes_le(&share).unwrap().public_g1();
+        assert_eq!(lhs, rhs, "commitment_poly_eval must equal g1^{{f(x)}}");
+
+        // A tampered share fails Feldman.
+        let mut wrong = share;
+        wrong[0] ^= 0x01;
+        assert!(
+            !feldman_check(&commitments, x, &wrong).unwrap(),
+            "inconsistent share must fail Feldman"
+        );
+    }
+
+    // Non-canonical share is rejected at decode.
+    assert_eq!(
+        feldman_check(&commitments, 1, &[0xFFu8; SCALAR_SIZE]).unwrap_err(),
+        BeaconCryptoError::NonCanonicalScalar
+    );
+}
+
+#[test]
+fn vec_g1_aggregation_and_share_sum() {
+    // PK_E = Σ C_{i,0} over two dealers equals g1^{a0 + b0}.
+    let a0 = seed(0x11);
+    let b0 = seed(0x31);
+    let ca = SecretScalar::from_bytes_le(&a0).unwrap();
+    let cb = SecretScalar::from_bytes_le(&b0).unwrap();
+    let pk_e = aggregate_g1(&[ca.public_g1(), cb.public_g1()]).unwrap();
+    let summed = ca.add(&cb).public_g1();
+    assert_eq!(pk_e, summed, "aggregate_g1 of constants == g1^{{Σ a_i0}}");
+
+    // Empty aggregation is a degenerate error.
+    assert_eq!(
+        aggregate_g1(&[]).unwrap_err(),
+        BeaconCryptoError::DegenerateAggregate
+    );
+    // eval_share_le rejects an empty coefficient vector.
+    assert_eq!(
+        eval_share_le(&[], 1).unwrap_err(),
         BeaconCryptoError::NonCanonicalScalar
     );
 }

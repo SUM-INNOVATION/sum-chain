@@ -261,7 +261,18 @@ impl StateManager {
         // to revert and the dormant path is byte-for-byte unchanged.
         let cp_store = crate::compute_pool_store::ComputePoolStore::new(&self.db);
         let has_cp_journal = cp_store.has_journal(height)?;
-        if account_diff.is_none() && contract_diff.is_none() && !has_cp_journal {
+        // Dormant BR1 beacon subsystem (issue #127): its block-rollback revert folds
+        // into THIS same batch so account, contract, compute-pool, AND beacon state
+        // revert atomically (all-or-none). Driven by journal PRESENCE, not the gate:
+        // under the production `None` gate no beacon journal is ever written, so
+        // there is nothing to revert and the dormant path is byte-for-byte unchanged.
+        let beacon_store = crate::beacon_store::BeaconStore::new(&self.db);
+        let has_beacon_journal = beacon_store.has_journal(height)?;
+        if account_diff.is_none()
+            && contract_diff.is_none()
+            && !has_cp_journal
+            && !has_beacon_journal
+        {
             return Ok(());
         }
 
@@ -304,6 +315,13 @@ impl StateManager {
         // WHOLE revert (nothing applied, every diff preserved for retry) — exactly
         // like the unknown-`cf_kind` guard above. No-op when no C1 journal exists.
         cp_store.stage_block_revert(&mut batch, height)?;
+
+        // BR1 beacon restores (reverse-replay of the per-height journal) + the
+        // journal's own deletion, staged into the SAME batch. Domain prefixes are
+        // validated BEFORE commit, so a corrupt beacon journal aborts the WHOLE
+        // revert (nothing applied, every diff preserved for retry). No-op when no
+        // beacon journal exists (always, under the dormant gate).
+        beacon_store.stage_block_revert(&mut batch, height)?;
 
         // Delete both diff records in the SAME batch — applied only on commit.
         let hkey = height.to_be_bytes();
