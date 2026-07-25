@@ -3168,45 +3168,82 @@ impl BlockExecutor {
         height: BlockHeight,
         active_validator_pubkeys: &[[u8; 32]],
     ) -> Result<()> {
-        use sumchain_beacon_runtime::context::{EpochCutoffs, EpochMembership, ValidatorId};
+        use sumchain_beacon_runtime::context::{BeaconPhase, EpochCutoffs};
         use sumchain_beacon_runtime::dkg::DkgConfig;
         use sumchain_beacon_runtime::wire::genesis_seed;
 
+        let clear = || *self.beacon_block.lock() = None;
         if !crate::beacon_executor::beacon_gate_open(&self.params, height) {
-            *self.beacon_block.lock() = None;
+            clear();
             return Ok(());
         }
-        let params = self.beacon_params_or_fixture()?;
-        let cfg = DkgConfig {
-            chain_id: self.state.chain_id(),
-            epoch: 0, // current-epoch = 0 until a ratified height→epoch schedule exists
-            params,
+        // Derive (epoch, phase, cutoffs) DETERMINISTICALLY from the authoritative
+        // height→epoch schedule (checked arithmetic). No schedule, a pre-start height,
+        // or an overflow ⇒ no accumulator (beacon txs fail closed this block). This
+        // replaces the former `epoch = 0` placeholder.
+        let Some(sched) = self.params.beacon_schedule else {
+            clear();
+            return Ok(());
         };
-        // Epoch membership = the authoritative validator snapshot for this block.
-        let members: Vec<ValidatorId> = active_validator_pubkeys
-            .iter()
-            .map(|pk| ValidatorId(*pk))
-            .collect();
-        let membership = match EpochMembership::new(members) {
-            Ok(m) => m,
-            // No/invalid snapshot ⇒ no accumulator (beacon txs fail closed this block).
-            Err(_) => {
-                *self.beacon_block.lock() = None;
+        let point = match sched.derive(height) {
+            Ok(Some(p)) => p,
+            _ => {
+                clear();
                 return Ok(());
             }
         };
-        // Timing magnitudes are OPEN in the spec; permissive here (the runtime still
-        // enforces the ordering, exercised in the runtime unit tests).
-        let cutoffs = EpochCutoffs {
-            deal_cutoff: u64::MAX,
-            complaint_deadline: u64::MAX,
+        let params = self.beacon_params_or_fixture()?;
+        let cfg = DkgConfig {
+            chain_id: self.state.chain_id(),
+            epoch: point.epoch, // the DERIVED epoch, used consistently everywhere
+            params,
         };
+        let cutoffs = EpochCutoffs {
+            deal_cutoff: point.deal_cutoff,
+            complaint_deadline: point.complaint_deadline,
+        };
+        let phase = if point.phase_is_signing {
+            BeaconPhase::Signing
+        } else {
+            BeaconPhase::Setup
+        };
+        // FIXED per-epoch membership snapshot: the validator set persisted at the
+        // epoch's first block (loaded thereafter), NOT the mutable current set.
+        let membership = match self.beacon_epoch_membership(point.epoch, active_validator_pubkeys)? {
+            Some(m) => m,
+            None => {
+                clear();
+                return Ok(());
+            }
+        };
+        // Genesis seed binds chain_id (draft §12.1); the round/output/ECIES domains
+        // bind the DERIVED epoch via `cfg.epoch`.
         let genesis = genesis_seed(cfg.chain_id, &[0u8; 32]);
         let acc = crate::beacon_manager::BeaconBlockState::load_from_store(
-            &self.db, cfg, membership, cutoffs, genesis,
+            &self.db, cfg, membership, cutoffs, phase, genesis,
         )?;
         *self.beacon_block.lock() = Some(acc);
         Ok(())
+    }
+
+    /// The FIXED epoch membership snapshot for `epoch`: the validator set persisted at
+    /// the epoch's first block, loaded on every subsequent block (so mid-epoch
+    /// validator-set churn does not change it). If no snapshot is persisted yet (the
+    /// epoch's first block), the current `active_validator_pubkeys` is the snapshot and
+    /// the accumulator persists it as part of this block's transition. Returns `None`
+    /// for an empty/invalid snapshot.
+    fn beacon_epoch_membership(
+        &self,
+        epoch: u64,
+        active_validator_pubkeys: &[[u8; 32]],
+    ) -> Result<Option<sumchain_beacon_runtime::context::EpochMembership>> {
+        use sumchain_beacon_runtime::context::{EpochMembership, ValidatorId};
+        let store = crate::beacon_store::BeaconStore::new(&self.db);
+        let members: Vec<[u8; 32]> = match store.get_membership(epoch)? {
+            Some(persisted) => persisted,
+            None => active_validator_pubkeys.to_vec(),
+        };
+        Ok(EpochMembership::new(members.into_iter().map(ValidatorId).collect()).ok())
     }
 
     /// Execute one beacon tx through the per-block accumulator (the vertical
@@ -3225,7 +3262,7 @@ impl BlockExecutor {
         beacon_data: &sumchain_primitives::BeaconTxData,
         block_height: u64,
     ) -> TxExecutionResult {
-        use sumchain_beacon_runtime::context::{BeaconPhase, ExecContext, ValidatorId};
+        use sumchain_beacon_runtime::context::{ExecContext, ValidatorId};
 
         let mut guard = self.beacon_block.lock();
         let Some(acc) = guard.as_mut() else {
@@ -3253,11 +3290,11 @@ impl BlockExecutor {
             Ok(op) => op,
             Err(_) => return failed,
         };
-        let phase = if phase_ordinal == sumchain_primitives::beacon_wire::W1B_BEACON_SIGN_TXTYPE {
-            BeaconPhase::Signing
-        } else {
-            BeaconPhase::Setup
-        };
+        // The runtime phase is the SCHEDULE-DERIVED phase for this block's height (not
+        // the tx variant): a setup op arriving in the signing window (or vice-versa)
+        // fails the runtime's `check_phase`. The variant↔family check is the semantic
+        // precheck above.
+        let phase = acc.phase();
         // Clone the membership out so the authenticated `ExecContext` borrows the
         // clone while `apply_op` takes `&mut acc` (no aliasing).
         let membership = acc.membership().clone();
@@ -6835,6 +6872,14 @@ mod tests {
                 q_dkg: 3,
                 n: 5,
             }),
+            // Schedule: epoch 0 starts at height 0, 1000 blocks/epoch; test heights
+            // (1, 3) land in epoch 0's setup window (position < deal_cutoff_offset).
+            beacon_schedule: Some(sumchain_primitives::beacon_schedule::BeaconSchedule {
+                start_height: 0,
+                epoch_length: 1000,
+                deal_cutoff_offset: 100,
+                complaint_deadline_offset: 200,
+            }),
             ..ChainParams::with_v2_enabled()
         }
     }
@@ -6885,7 +6930,7 @@ mod tests {
             store
                 .load_state_map()
                 .unwrap()
-                .contains_key(&crate::beacon_store::key_row_key(0)),
+                .contains_key(&crate::beacon_store::key_row_key(0, 0)),
             "registrant key persisted at membership index 0"
         );
         assert!(store.has_journal(1).unwrap(), "one beacon journal at the block height");
@@ -6955,8 +7000,8 @@ mod tests {
         // Only the valid op's state is materialized (index 0 keyed, index 1 not).
         let store = crate::beacon_store::BeaconStore::new(&db);
         let rows = store.load_state_map().unwrap();
-        assert!(rows.contains_key(&crate::beacon_store::key_row_key(0)));
-        assert!(!rows.contains_key(&crate::beacon_store::key_row_key(1)));
+        assert!(rows.contains_key(&crate::beacon_store::key_row_key(0, 0)));
+        assert!(!rows.contains_key(&crate::beacon_store::key_row_key(0, 1)));
     }
 
     #[test]
@@ -6979,6 +7024,138 @@ mod tests {
         state.revert_block_state_diffs(3).unwrap();
         assert!(store.load_state_map().unwrap().is_empty(), "beacon state reverted");
         assert!(!store.has_journal(3).unwrap(), "beacon journal consumed");
+    }
+
+    /// RESTART between blocks reproduces the same beacon state as uninterrupted
+    /// execution: a fresh executor rehydrates the persisted state and its next block
+    /// yields the identical beacon state digest.
+    #[test]
+    fn beacon_restart_between_blocks_matches_uninterrupted() {
+        // Share ONE fixed validator set + tx set across both runs so the only
+        // difference is whether a restart occurs between the two blocks.
+        let (vs, pubs) = beacon_validators();
+        let run = |restart: bool| -> sumchain_primitives::Hash {
+            let (state, db, _dir) = setup();
+            let fee = beacon_open_params().min_fee;
+            fund(&state, &vs[0].address(), fee + 1000);
+            fund(&state, &vs[1].address(), fee + 1000);
+            let ex = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
+            // Block 1: reg from vs[0].
+            let b1 = beacon_block_with(1, vs[0].public_key().as_bytes(), vec![beacon_reg_tx(&vs[0], 7, false, fee)]);
+            ex.execute_block(&b1, Hash::ZERO, &pubs).unwrap();
+            // Optionally simulate a restart with a brand-new executor over the same db.
+            let ex2 = if restart {
+                BlockExecutor::new(state.clone(), db.clone(), beacon_open_params())
+            } else {
+                ex
+            };
+            // Block 2: reg from vs[1] (must rehydrate vs[0]'s key first).
+            let b2 = beacon_block_with(2, vs[1].public_key().as_bytes(), vec![beacon_reg_tx(&vs[1], 8, false, fee)]);
+            ex2.execute_block(&b2, Hash::ZERO, &pubs).unwrap();
+            crate::beacon_store::BeaconStore::new(&db).state_digest().unwrap()
+        };
+        assert_eq!(run(true), run(false), "restart-between-blocks == uninterrupted");
+    }
+
+    /// REORG then REPLAY reproduces identical receipts, beacon rows, and state digest.
+    #[test]
+    fn beacon_reorg_replay_reproduces_state() {
+        let (state, db, _dir) = setup();
+        let (vs, pubs) = beacon_validators();
+        let fee = beacon_open_params().min_fee;
+        fund(&state, &vs[0].address(), fee + 1000);
+        let ex = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
+        let blk = beacon_block_with(4, vs[0].public_key().as_bytes(), vec![beacon_reg_tx(&vs[0], 7, false, fee)]);
+
+        let (r1, _root1, _, _) = ex.execute_block(&blk, Hash::ZERO, &pubs).unwrap();
+        let digest1 = crate::beacon_store::BeaconStore::new(&db).state_digest().unwrap();
+        assert!(r1[0].is_success());
+
+        state.revert_block_state_diffs(4).unwrap();
+        // A fresh executor replays the identical block.
+        let ex2 = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
+        let (r2, _root2, _, _) = ex2.execute_block(&blk, Hash::ZERO, &pubs).unwrap();
+        let digest2 = crate::beacon_store::BeaconStore::new(&db).state_digest().unwrap();
+        assert_eq!(r1[0].is_success(), r2[0].is_success());
+        assert_eq!(digest1, digest2, "reorg-then-replay reproduces identical beacon state");
+    }
+
+    /// A FAILED op does not erase an earlier VALID op's state, and does not mutate its
+    /// own state (all-or-none per op; earlier accepted state persists).
+    #[test]
+    fn beacon_failed_op_does_not_erase_earlier_valid_op() {
+        let (state, db, _dir) = setup();
+        let (vs, pubs) = beacon_validators();
+        let fee = beacon_open_params().min_fee;
+        fund(&state, &vs[0].address(), fee + 1000);
+        fund(&state, &vs[1].address(), fee + 1000);
+        let ex = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
+        // valid reg (vs[0]) THEN invalid reg (vs[1], bad PoP).
+        let blk = beacon_block_with(
+            1,
+            vs[0].public_key().as_bytes(),
+            vec![beacon_reg_tx(&vs[0], 7, false, fee), beacon_reg_tx(&vs[1], 9, true, fee)],
+        );
+        let (r, _root, _, _) = ex.execute_block(&blk, Hash::ZERO, &pubs).unwrap();
+        assert!(r[0].is_success(), "valid op1 succeeds");
+        assert!(!r[1].is_success(), "invalid op2 fails closed");
+        let store = crate::beacon_store::BeaconStore::new(&db);
+        let rows = store.load_state_map().unwrap();
+        assert!(rows.contains_key(&crate::beacon_store::key_row_key(0, 0)), "op1's key survives op2's failure");
+        assert!(!rows.contains_key(&crate::beacon_store::key_row_key(0, 1)), "op2 mutated no state");
+    }
+
+    /// Equivocation EVIDENCE (two conflicting authenticated registrations) survives
+    /// RESTART: the persisted KEY_EQUIV evidence is rehydrated and re-persisted.
+    #[test]
+    fn beacon_equivocation_evidence_survives_restart() {
+        let (state, db, _dir) = setup();
+        let (vs, pubs) = beacon_validators();
+        let fee = beacon_open_params().min_fee;
+        fund(&state, &vs[0].address(), fee + 1000);
+        let ex = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
+        // Block 1: vs[0] registers key A (seed 7) then key B (seed 8) → equivocation.
+        let blk = beacon_block_with(
+            1,
+            vs[0].public_key().as_bytes(),
+            vec![beacon_reg_tx(&vs[0], 7, false, fee), beacon_reg_tx(&vs[0], 8, false, fee)],
+        );
+        ex.execute_block(&blk, Hash::ZERO, &pubs).unwrap();
+        let has_equiv = |db: &Database| {
+            crate::beacon_store::BeaconStore::new(db)
+                .load_state_map()
+                .unwrap()
+                .keys()
+                .any(|k| k.first() == Some(&0x09)) // KEY_EQUIV domain
+        };
+        assert!(has_equiv(&db), "key-equivocation evidence persisted");
+
+        // Restart: a fresh executor runs a later block; the evidence must survive.
+        let ex2 = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
+        let blk2 = beacon_block_with(2, vs[0].public_key().as_bytes(), vec![beacon_reg_tx(&vs[1], 9, false, fee)]);
+        fund(&state, &vs[1].address(), fee + 1000);
+        ex2.execute_block(&blk2, Hash::ZERO, &pubs).unwrap();
+        assert!(has_equiv(&db), "equivocation evidence survives restart");
+    }
+
+    /// A PERSISTENCE FAILURE aborts the whole block — the block errors and no beacon
+    /// state is committed (all-or-none, like the C1 single-batch guarantee).
+    #[test]
+    fn beacon_persistence_failure_aborts_block() {
+        let (state, db, _dir) = setup();
+        let (vs, pubs) = beacon_validators();
+        let fee = beacon_open_params().min_fee;
+        fund(&state, &vs[0].address(), fee + 1000);
+        // Pre-write a journal at height 5 so `persist_transition`'s duplicate-height
+        // guard makes the block's beacon persist FAIL.
+        db.put(sumchain_storage::cf::BEACON_STATE_DIFFS, &5u64.to_be_bytes(), b"x")
+            .unwrap();
+        let ex = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
+        let blk = beacon_block_with(5, vs[0].public_key().as_bytes(), vec![beacon_reg_tx(&vs[0], 7, false, fee)]);
+        assert!(ex.execute_block(&blk, Hash::ZERO, &pubs).is_err(), "persist failure aborts the block");
+        // No beacon KEY row was committed (the atomic batch never ran).
+        let rows = crate::beacon_store::BeaconStore::new(&db).load_state_map().unwrap();
+        assert!(!rows.contains_key(&crate::beacon_store::key_row_key(0, 0)), "no state committed on persist failure");
     }
 
     /// ATOMIC REORG REVERT: a reverted block rolls back account AND C1 state in a

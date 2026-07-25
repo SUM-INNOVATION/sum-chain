@@ -52,6 +52,11 @@ pub enum GenesisError {
     /// declared ahead of activation, but only if internally consistent.
     #[error("invalid beacon_params: {reason}")]
     InvalidBeaconParams { reason: &'static str },
+
+    /// A `beacon_schedule` config (issue #127) is internally inconsistent and is
+    /// rejected at genesis load (not an activation height — declared dormant).
+    #[error("invalid beacon_schedule: {reason}")]
+    InvalidBeaconSchedule { reason: &'static str },
 }
 
 pub type Result<T> = std::result::Result<T, GenesisError>;
@@ -544,6 +549,18 @@ pub struct ChainParams {
     #[serde(default)]
     pub beacon_params: Option<BeaconParamsConfig>,
 
+    /// BR1 randomness-beacon height→epoch **schedule** (issue #127). `None` (default)
+    /// = absent. When `Some`, it is VALIDATED at genesis load
+    /// (`BeaconSchedule::validate`: `epoch_length ≥ 1`, strictly-ordered phase offsets
+    /// inside the epoch). It is the authoritative, deterministic map from block height
+    /// to `(epoch, phase, cutoffs)` the executor uses for membership selection, tx
+    /// validation, persistence keys, and replay domains. **It is NOT an activation
+    /// height:** the gate ([`Self::beacon_enabled_from_height`]) stays `None` and
+    /// `validate()` still rejects any `Some(_)` gate; the schedule is frozen config
+    /// that may be declared ahead of a future coordinated activation.
+    #[serde(default)]
+    pub beacon_schedule: Option<sumchain_primitives::beacon_schedule::BeaconSchedule>,
+
     /// SRC-201 sponsored public-key registration activation gate (issue #145).
     ///
     /// This is a fully-implemented ACTIVATION gate, NOT a dormant-until-built
@@ -860,6 +877,8 @@ impl Default for ChainParams {
             // Production-safe default: no beacon parameter surface (typed config
             // absent). The gate above stays dormant regardless.
             beacon_params: None,
+            // Production-safe default: no beacon schedule declared.
+            beacon_schedule: None,
             // Production-safe default: sponsored public-key registration (issue
             // #145) unavailable. Activation is a coordinated validator upgrade;
             // never set in default/mainnet config.
@@ -934,7 +953,28 @@ impl ChainParams {
         if let Some(bp) = &self.beacon_params {
             bp.validate()?;
         }
+        // The beacon SCHEDULE (#127) MAY likewise be declared dormant, but only if
+        // internally consistent (epoch_length ≥ 1, strictly-ordered phase offsets).
+        // Not an activation height — the gate stays rejected above.
+        if let Some(sched) = &self.beacon_schedule {
+            sched
+                .validate()
+                .map_err(|e| GenesisError::InvalidBeaconSchedule { reason: e_reason(e) })?;
+        }
         Ok(())
+    }
+}
+
+/// Map a schedule error to a stable reason string (kept out of `validate` for
+/// brevity).
+fn e_reason(e: sumchain_primitives::beacon_schedule::BeaconScheduleError) -> &'static str {
+    use sumchain_primitives::beacon_schedule::BeaconScheduleError as E;
+    match e {
+        E::ZeroEpochLength => "epoch_length must be >= 1",
+        E::UnorderedOffsets => {
+            "phase offsets must satisfy deal_cutoff_offset < complaint_deadline_offset < epoch_length"
+        }
+        E::Overflow => "beacon epoch derivation overflowed u64",
     }
 }
 
@@ -961,32 +1001,15 @@ pub struct BeaconParamsConfig {
 }
 
 impl BeaconParamsConfig {
-    /// Validate the draft §7.4 inequalities: `T ≥ 1`, `T = f+1`, `Q_dkg = 2f+1`,
-    /// `T ≤ Q_dkg ≤ n`, `n − f − c ≥ T` (L1), `n − f − c ≥ Q_dkg` (L2). Rejects any
-    /// inconsistent config. (Matches `BeaconParams::validated`; the runtime is the
-    /// executable source of truth and re-checks on construction.)
+    /// Validate the draft §7.4 inequalities. **Delegates to the single shared
+    /// predicate** `sumchain_primitives::beacon_schedule::validate_beacon_params` —
+    /// the SAME rule the runtime's `BeaconParams::validated` uses — so genesis and the
+    /// runtime accept/reject exactly the same parameter space (no drift).
     pub fn validate(&self) -> Result<()> {
-        let err = |reason| Err(GenesisError::InvalidBeaconParams { reason });
-        if self.t == 0 {
-            return err("reconstruction threshold T must be >= 1");
-        }
-        if self.t < self.f + 1 {
-            return err("require T >= f+1 (S1)");
-        }
-        if self.q_dkg < 2 * self.f + 1 {
-            return err("require Q_dkg >= 2f+1 (S2)");
-        }
-        if !(self.t <= self.q_dkg && self.q_dkg <= self.n) {
-            return err("require T <= Q_dkg <= n (C1)");
-        }
-        let avail = self.n as i64 - self.f as i64 - self.c as i64;
-        if avail < self.t as i64 {
-            return err("require n-f-c >= T (L1)");
-        }
-        if avail < self.q_dkg as i64 {
-            return err("require n-f-c >= Q_dkg (L2)");
-        }
-        Ok(())
+        sumchain_primitives::beacon_schedule::validate_beacon_params(
+            self.f, self.c, self.t, self.q_dkg, self.n,
+        )
+        .map_err(|v| GenesisError::InvalidBeaconParams { reason: v.reason() })
     }
 }
 

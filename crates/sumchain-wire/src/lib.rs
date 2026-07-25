@@ -34,6 +34,7 @@
 pub mod address;
 pub mod agreement;
 pub mod b0;
+pub mod beacon_schedule;
 pub mod beacon_wire;
 pub mod docclass;
 pub mod education;

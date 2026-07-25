@@ -30,7 +30,7 @@
 
 use std::collections::BTreeMap;
 
-use sumchain_beacon_runtime::context::{EpochCutoffs, EpochMembership, ExecContext};
+use sumchain_beacon_runtime::context::{BeaconPhase, EpochCutoffs, EpochMembership, ExecContext};
 use sumchain_beacon_runtime::dkg::{DkgConfig, DkgEpoch, DkgOutcome};
 use sumchain_beacon_runtime::rounds::BeaconChain;
 use sumchain_beacon_runtime::signing::QualifiedEpoch;
@@ -145,9 +145,12 @@ impl<'a> BeaconManager<'a> {
         let mut working = before.clone();
         apply(&mut working)?;
 
-        // Materialize before/after runtime states → row sets, persist the delta.
-        let before_rows = BeaconStore::materialize(&before.epoch, before.chain.as_ref())?;
-        let after_rows = BeaconStore::materialize(&working.epoch, working.chain.as_ref())?;
+        // Materialize before/after runtime states → row sets, persist the delta. The
+        // standalone lifecycle coordinator has no membership snapshot (that is the
+        // executor's `BeaconBlockState`), so it materializes with an empty snapshot.
+        let ep = before.epoch.config().epoch;
+        let before_rows = BeaconStore::materialize(ep, &before.epoch, before.chain.as_ref(), &[])?;
+        let after_rows = BeaconStore::materialize(ep, &working.epoch, working.chain.as_ref(), &[])?;
         let mutated = {
             let store = BeaconStore::new(self.db);
             store.persist_transition(&before_rows, &after_rows, height)?
@@ -190,22 +193,26 @@ pub struct BeaconBlockState {
     cfg: DkgConfig,
     membership: EpochMembership,
     cutoffs: EpochCutoffs,
+    /// The schedule-derived phase for THIS block's height (constant for the block).
+    phase: BeaconPhase,
     genesis: [u8; 32],
     working: BeaconWorking,
 }
 
 impl BeaconBlockState {
     /// Rehydrate the accumulator from the persisted store (rows → runtime).
+    #[allow(clippy::too_many_arguments)]
     pub fn load_from_store(
         db: &Database,
         cfg: DkgConfig,
         membership: EpochMembership,
         cutoffs: EpochCutoffs,
+        phase: BeaconPhase,
         genesis: [u8; 32],
     ) -> Result<Self> {
         let store = BeaconStore::new(db);
-        let (keys, deals, disqualified, rounds) = store.load_materialized()?;
-        let epoch = DkgEpoch::rehydrate(cfg, keys, deals, disqualified)
+        let (input, rounds) = store.load_materialized(cfg.epoch)?;
+        let epoch = DkgEpoch::rehydrate(cfg, input)
             .map_err(|e| StateError::DeserializationError(format!("beacon rehydrate: {e:?}")))?;
         let chain = if rounds.is_empty() {
             None
@@ -227,6 +234,7 @@ impl BeaconBlockState {
             cfg,
             membership,
             cutoffs,
+            phase,
             genesis,
             working: BeaconWorking { epoch, chain },
         })
@@ -235,6 +243,11 @@ impl BeaconBlockState {
     /// The epoch membership snapshot (validator-set at the epoch boundary).
     pub fn membership(&self) -> &EpochMembership {
         &self.membership
+    }
+
+    /// The schedule-derived phase for this block's height.
+    pub fn phase(&self) -> BeaconPhase {
+        self.phase
     }
     /// The static epoch config (chain/epoch/params).
     pub fn cfg(&self) -> DkgConfig {
@@ -311,14 +324,25 @@ impl BeaconBlockState {
         }
     }
 
-    /// Materialize + persist this block's whole accumulated transition into the store
-    /// as EXACTLY ONE per-height journal (delta against the live pre-block state).
-    /// Returns the number of mutated rows (`0` for a no-op block — no journal).
+    /// Materialize + persist this block's whole accumulated transition for THIS epoch
+    /// into the store as EXACTLY ONE per-height journal (delta against the live
+    /// pre-block state; other epochs' rows are untouched). Includes the fixed
+    /// membership snapshot. Returns the number of mutated rows (`0` for a no-op block).
     pub fn persist(&self, db: &Database, height: BlockHeight) -> Result<usize> {
         let store = BeaconStore::new(db);
-        let before = store.load_state_map()?; // live == pre-block (no beacon write yet this block)
-        let after = BeaconStore::materialize(&self.working.epoch, self.working.chain.as_ref())?;
-        store.persist_transition(&before, &after, height)
+        let members: Vec<[u8; 32]> = self
+            .membership
+            .members()
+            .iter()
+            .map(|v| *v.as_bytes())
+            .collect();
+        let current = BeaconStore::materialize(
+            self.cfg.epoch,
+            &self.working.epoch,
+            self.working.chain.as_ref(),
+            &members,
+        )?;
+        store.persist_epoch_transition(self.cfg.epoch, current, height)
     }
 }
 
@@ -450,6 +474,38 @@ mod tests {
         assert!(!store.has_journal(100).unwrap());
     }
 
+    /// Correction 3: genesis `BeaconParamsConfig::validate` and runtime
+    /// `BeaconParams::validated` accept/reject the SAME parameter space (they delegate
+    /// to one shared predicate). Drive both over a shared valid/invalid table.
+    #[test]
+    fn params_conformance_genesis_and_runtime_agree() {
+        let table: &[(u32, u32, u32, u32, u32)] = &[
+            (1, 1, 2, 3, 5),   // valid (proposed)
+            (2, 1, 3, 5, 8),   // valid
+            (3, 2, 4, 7, 12),  // valid
+            (0, 0, 1, 1, 1),   // valid edge
+            (1, 1, 0, 3, 5),   // invalid: T=0
+            (1, 1, 1, 3, 5),   // invalid: T<f+1
+            (1, 1, 2, 2, 5),   // invalid: Q<2f+1
+            (1, 1, 2, 3, 2),   // invalid: Q>n
+            (1, 1, 2, 3, 4),   // invalid: n-f-c<Q (L2)
+            (5, 5, 6, 11, 12), // invalid: n-f-c<T (L1)
+        ];
+        for &(f, c, t, q, n) in table {
+            let g = sumchain_genesis::BeaconParamsConfig {
+                f,
+                c,
+                t,
+                q_dkg: q,
+                n,
+            }
+            .validate()
+            .is_ok();
+            let r = sumchain_beacon_runtime::params::BeaconParams::validated(f, c, t, q, n).is_ok();
+            assert_eq!(g, r, "genesis vs runtime disagree on ({f},{c},{t},{q},{n})");
+        }
+    }
+
     #[test]
     fn rehydrate_roundtrip_reproduces_materialization() {
         use sumchain_beacon_runtime::dkg::DkgEpoch;
@@ -470,13 +526,13 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        let original = BeaconStore::materialize(&mgr.working().epoch, None).unwrap();
+        let original = BeaconStore::materialize(EPOCH, &mgr.working().epoch, None, &[]).unwrap();
 
         // Rows → runtime (load_materialized + DkgEpoch::rehydrate) → rows again.
         let store = BeaconStore::new(&db);
-        let (keys, deals, disqualified, _rounds) = store.load_materialized().unwrap();
-        let rehydrated = DkgEpoch::rehydrate(cfg(), keys, deals, disqualified).unwrap();
-        let reproduced = BeaconStore::materialize(&rehydrated, None).unwrap();
+        let (input, _rounds) = store.load_materialized(EPOCH).unwrap();
+        let rehydrated = DkgEpoch::rehydrate(cfg(), input).unwrap();
+        let reproduced = BeaconStore::materialize(EPOCH, &rehydrated, None, &[]).unwrap();
         assert_eq!(
             original, reproduced,
             "materialize(rehydrate(rows)) must byte-reproduce the persisted rows"
@@ -517,16 +573,20 @@ mod tests {
         let live = store.load_state_map().unwrap();
         assert_eq!(
             live,
-            BeaconStore::materialize(&mgr.working().epoch, None).unwrap()
+            BeaconStore::materialize(EPOCH, &mgr.working().epoch, None, &[]).unwrap()
         );
-        let key_row = live.get(&crate::beacon_store::key_row_key(0)).unwrap();
+        let key_row = live
+            .get(&crate::beacon_store::key_row_key(EPOCH, 0))
+            .unwrap();
         assert_eq!(
             crate::beacon_store::decode_key(key_row)
                 .unwrap()
                 .validator_index,
             0
         );
-        let deal_row = live.get(&crate::beacon_store::deal_row_key(0, 0)).unwrap();
+        let deal_row = live
+            .get(&crate::beacon_store::deal_row_key(EPOCH, 0, 0))
+            .unwrap();
         assert_eq!(
             crate::beacon_store::decode_deal(deal_row).unwrap().dealer_i,
             0

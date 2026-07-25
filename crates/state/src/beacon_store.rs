@@ -36,8 +36,29 @@ use std::collections::BTreeMap;
 use bincode::Options;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use sumchain_beacon_runtime::dkg::{DealView, DkgEpoch};
+use sumchain_beacon_runtime::context::ValidatorId;
+use sumchain_beacon_runtime::dkg::{
+    DealEquivocationEvidence, DealView, DkgEpoch, KeyEquivocationEvidence, KeyView, RehydrateInput,
+    SignedRecordRef,
+};
 use sumchain_beacon_runtime::rounds::BeaconChain;
+
+/// Convert a runtime authenticated record ref → its persisted form.
+fn to_stored_ref(r: &SignedRecordRef) -> StoredSignedRef {
+    StoredSignedRef {
+        signer: *r.signer.as_bytes(),
+        tx_ref: r.tx_ref,
+        carrier: r.carrier.clone(),
+    }
+}
+/// Convert a persisted record ref → the runtime form.
+fn from_stored_ref(s: &StoredSignedRef) -> SignedRecordRef {
+    SignedRecordRef {
+        signer: ValidatorId(s.signer),
+        tx_ref: s.tx_ref,
+        carrier: s.carrier.clone(),
+    }
+}
 use sumchain_primitives::{BlockHeight, Hash};
 use sumchain_storage::{cf, Database};
 
@@ -80,28 +101,69 @@ fn frame_len(n: usize) -> Result<[u8; 4]> {
     Ok(framed.to_le_bytes())
 }
 
-/// 1-byte domain/type prefixes for the beacon keyspace. Each persisted row key MUST
-/// begin with one of these, so no category can alias another and a corrupt journal
-/// key is rejected on revert.
+/// 1-byte domain/type prefixes for the beacon keyspace. Every persisted row key is
+/// `DOMAIN(1) ‖ epoch(8 BE) ‖ body` so no category aliases another AND different
+/// epochs never collide (issue #127 correction 1: epoch in persistence keys).
 pub mod domain {
-    /// Registered per-epoch encryption key `EK_j` (+ PoP evidence).
+    /// Registered per-epoch encryption key `EK_j` (+ authenticated record ref).
     pub const KEY: u8 = 0x01;
-    /// A `(dealer, recipient)` deal record.
+    /// A `(dealer, recipient)` deal record (+ authenticated record ref).
     pub const DEAL: u8 = 0x02;
-    /// A per-dealer / per-complaint verdict (QUAL disqualification, slash).
+    /// A disqualified dealer.
     pub const VERDICT: u8 = 0x03;
     /// A finalized round's combined signature.
     pub const ROUND: u8 = 0x04;
     /// A finalized round's beacon output.
     pub const OUTPUT: u8 = 0x05;
+    /// The FIXED per-epoch membership snapshot (validator set at the epoch boundary).
+    pub const MEMBERSHIP: u8 = 0x06;
+    /// A slashed false-accuser (recipient index).
+    pub const FALSE_ACCUSER: u8 = 0x07;
+    /// An adjudicated `(dealer, recipient)` complaint pair (idempotence / no
+    /// double-jeopardy).
+    pub const ADJUDICATED: u8 = 0x08;
+    /// Retained authenticated KEY equivocation evidence.
+    pub const KEY_EQUIV: u8 = 0x09;
+    /// Retained authenticated DEAL equivocation evidence.
+    pub const DEAL_EQUIV: u8 = 0x0A;
 }
 
 /// True iff `key`'s first byte is a recognized beacon domain prefix.
 fn is_beacon_domain(key: &[u8]) -> bool {
     matches!(
         key.first(),
-        Some(&domain::KEY | &domain::DEAL | &domain::VERDICT | &domain::ROUND | &domain::OUTPUT)
+        Some(
+            &domain::KEY
+                | &domain::DEAL
+                | &domain::VERDICT
+                | &domain::ROUND
+                | &domain::OUTPUT
+                | &domain::MEMBERSHIP
+                | &domain::FALSE_ACCUSER
+                | &domain::ADJUDICATED
+                | &domain::KEY_EQUIV
+                | &domain::DEAL_EQUIV
+        )
     )
+}
+
+/// Extract the epoch a row key belongs to (`DOMAIN(1) ‖ epoch(8 BE) ‖ …`), or `None`
+/// if too short.
+fn key_epoch(key: &[u8]) -> Option<u64> {
+    if key.len() < 9 {
+        return None;
+    }
+    let mut e = [0u8; 8];
+    e.copy_from_slice(&key[1..9]);
+    Some(u64::from_be_bytes(e))
+}
+
+/// Push `DOMAIN ‖ epoch(8 BE)` — the common prefix of every beacon row key.
+fn key_prefix(domain: u8, epoch: u64) -> Vec<u8> {
+    let mut k = Vec::with_capacity(1 + 8 + 8);
+    k.push(domain);
+    k.extend_from_slice(&epoch.to_be_bytes());
+    k
 }
 
 // --- journal codec (bincode fixint LE + limit + reject-trailing, per C1) ---
@@ -131,40 +193,71 @@ fn beacon_decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
 // Big-endian so composite ordering matches numeric ordering for range scans.
 // ---------------------------------------------------------------------------
 
-/// `[KEY] ‖ validator_index(u32 BE)` (5 bytes).
-pub fn key_row_key(validator_index: u32) -> Vec<u8> {
-    let mut k = Vec::with_capacity(1 + 4);
-    k.push(domain::KEY);
+/// `[KEY] ‖ epoch(8) ‖ validator_index(u32 BE)`.
+pub fn key_row_key(epoch: u64, validator_index: u32) -> Vec<u8> {
+    let mut k = key_prefix(domain::KEY, epoch);
     k.extend_from_slice(&validator_index.to_be_bytes());
     k
 }
-/// `[DEAL] ‖ dealer_i(u32 BE) ‖ recipient_j(u32 BE)` (9 bytes).
-pub fn deal_row_key(dealer_i: u32, recipient_j: u32) -> Vec<u8> {
-    let mut k = Vec::with_capacity(1 + 8);
-    k.push(domain::DEAL);
+/// `[DEAL] ‖ epoch(8) ‖ dealer_i(u32 BE) ‖ recipient_j(u32 BE)`.
+pub fn deal_row_key(epoch: u64, dealer_i: u32, recipient_j: u32) -> Vec<u8> {
+    let mut k = key_prefix(domain::DEAL, epoch);
     k.extend_from_slice(&dealer_i.to_be_bytes());
     k.extend_from_slice(&recipient_j.to_be_bytes());
     k
 }
-/// `[VERDICT] ‖ dealer_i(u32 BE)` (5 bytes) — a disqualification.
-pub fn disqualified_row_key(dealer_i: u32) -> Vec<u8> {
-    let mut k = Vec::with_capacity(1 + 4);
-    k.push(domain::VERDICT);
+/// `[VERDICT] ‖ epoch(8) ‖ dealer_i(u32 BE)` — a disqualification.
+pub fn disqualified_row_key(epoch: u64, dealer_i: u32) -> Vec<u8> {
+    let mut k = key_prefix(domain::VERDICT, epoch);
     k.extend_from_slice(&dealer_i.to_be_bytes());
     k
 }
-/// `[ROUND] ‖ round(u64 BE)` (9 bytes) — a finalized `Σ_r`.
-pub fn round_row_key(round: u64) -> Vec<u8> {
-    let mut k = Vec::with_capacity(1 + 8);
-    k.push(domain::ROUND);
+/// `[ROUND] ‖ epoch(8) ‖ round(u64 BE)` — a finalized `Σ_r`.
+pub fn round_row_key(epoch: u64, round: u64) -> Vec<u8> {
+    let mut k = key_prefix(domain::ROUND, epoch);
     k.extend_from_slice(&round.to_be_bytes());
     k
 }
-/// `[OUTPUT] ‖ round(u64 BE)` (9 bytes) — a beacon output.
-pub fn output_row_key(round: u64) -> Vec<u8> {
-    let mut k = Vec::with_capacity(1 + 8);
-    k.push(domain::OUTPUT);
+/// `[OUTPUT] ‖ epoch(8) ‖ round(u64 BE)` — a beacon output.
+pub fn output_row_key(epoch: u64, round: u64) -> Vec<u8> {
+    let mut k = key_prefix(domain::OUTPUT, epoch);
     k.extend_from_slice(&round.to_be_bytes());
+    k
+}
+/// `[MEMBERSHIP] ‖ epoch(8)` — the fixed per-epoch membership snapshot.
+pub fn membership_row_key(epoch: u64) -> Vec<u8> {
+    key_prefix(domain::MEMBERSHIP, epoch)
+}
+/// `[FALSE_ACCUSER] ‖ epoch(8) ‖ recipient_j(u32 BE)`.
+pub fn false_accuser_row_key(epoch: u64, recipient_j: u32) -> Vec<u8> {
+    let mut k = key_prefix(domain::FALSE_ACCUSER, epoch);
+    k.extend_from_slice(&recipient_j.to_be_bytes());
+    k
+}
+/// `[ADJUDICATED] ‖ epoch(8) ‖ dealer_i(u32 BE) ‖ recipient_j(u32 BE)`.
+pub fn adjudicated_row_key(epoch: u64, dealer_i: u32, recipient_j: u32) -> Vec<u8> {
+    let mut k = key_prefix(domain::ADJUDICATED, epoch);
+    k.extend_from_slice(&dealer_i.to_be_bytes());
+    k.extend_from_slice(&recipient_j.to_be_bytes());
+    k
+}
+/// `[KEY_EQUIV] ‖ epoch(8) ‖ first_tx_ref(32) ‖ second_tx_ref(32)` — one row per
+/// conflicting signed-tx pair (deterministic, collision-free).
+pub fn key_equiv_row_key(epoch: u64, first_tx_ref: &[u8; 32], second_tx_ref: &[u8; 32]) -> Vec<u8> {
+    let mut k = key_prefix(domain::KEY_EQUIV, epoch);
+    k.extend_from_slice(first_tx_ref);
+    k.extend_from_slice(second_tx_ref);
+    k
+}
+/// `[DEAL_EQUIV] ‖ epoch(8) ‖ first_tx_ref(32) ‖ second_tx_ref(32)`.
+pub fn deal_equiv_row_key(
+    epoch: u64,
+    first_tx_ref: &[u8; 32],
+    second_tx_ref: &[u8; 32],
+) -> Vec<u8> {
+    let mut k = key_prefix(domain::DEAL_EQUIV, epoch);
+    k.extend_from_slice(first_tx_ref);
+    k.extend_from_slice(second_tx_ref);
     k
 }
 
@@ -175,7 +268,21 @@ pub fn output_row_key(round: u64) -> Vec<u8> {
 // runtime state materializes into a store row (Item 2).
 // ---------------------------------------------------------------------------
 
-/// A registered epoch encryption key `EK_j` (draft §2.3, §11).
+/// An **authenticated** signed-record reference (Item 3 durability): signer identity,
+/// signed-tx-envelope hash, and canonical carrier bytes. Persisted so evidence
+/// attribution survives restart/reorg.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredSignedRef {
+    /// Authenticated signer identity (32 bytes).
+    pub signer: [u8; 32],
+    /// Signed-tx-envelope hash (32 bytes).
+    pub tx_ref: [u8; 32],
+    /// Canonical carrier bytes.
+    pub carrier: Vec<u8>,
+}
+
+/// A registered epoch encryption key `EK_j` (draft §2.3, §11) + its authenticated
+/// record reference (so a later equivocation attributes the first record correctly).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredBeaconKey {
     /// Record schema version (byte 0).
@@ -184,9 +291,11 @@ pub struct StoredBeaconKey {
     pub validator_index: u32,
     /// Canonical compressed G1 `EK_j` (48 bytes).
     pub ek: Vec<u8>,
+    /// The authenticated record reference for the accepted registration.
+    pub record: StoredSignedRef,
 }
 
-/// An accepted `(dealer i → recipient j)` deal (draft §8).
+/// An accepted `(dealer i → recipient j)` deal (draft §8) + its authenticated record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredBeaconDeal {
     /// Record schema version.
@@ -201,6 +310,66 @@ pub struct StoredBeaconDeal {
     pub r_ij: Vec<u8>,
     /// ECIES body `ct_{ij}` (48 bytes).
     pub ct_ij: Vec<u8>,
+    /// The authenticated record reference for the accepted deal.
+    pub record: StoredSignedRef,
+}
+
+/// The FIXED per-epoch membership snapshot (validator set at the epoch boundary).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredBeaconMembership {
+    /// Record schema version.
+    pub schema_version: u8,
+    /// The epoch.
+    pub epoch: u64,
+    /// The ordered validator identities (index order).
+    pub members: Vec<[u8; 32]>,
+}
+
+/// A slashed false-accuser (draft §6.4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredBeaconFalseAccuser {
+    /// Record schema version.
+    pub schema_version: u8,
+    /// The slashed recipient index.
+    pub recipient_j: u32,
+}
+
+/// An adjudicated `(dealer, recipient)` complaint pair (idempotence / no
+/// double-jeopardy, draft §6.6).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredBeaconAdjudicated {
+    /// Record schema version.
+    pub schema_version: u8,
+    /// Dealer index `i`.
+    pub dealer_i: u32,
+    /// Recipient index `j`.
+    pub recipient_j: u32,
+}
+
+/// Retained KEY equivocation evidence: two conflicting authenticated registrations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredBeaconKeyEquivocation {
+    /// Record schema version.
+    pub schema_version: u8,
+    /// The equivocating validator index.
+    pub validator_index: u32,
+    /// The first (authoritative) authenticated record.
+    pub first: StoredSignedRef,
+    /// The conflicting authenticated record.
+    pub second: StoredSignedRef,
+}
+
+/// Retained DEAL equivocation evidence: two conflicting authenticated deals.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredBeaconDealEquivocation {
+    /// Record schema version.
+    pub schema_version: u8,
+    /// The dealer index.
+    pub dealer_i: u32,
+    /// The first (accepted) authenticated record.
+    pub first: StoredSignedRef,
+    /// The conflicting authenticated record.
+    pub second: StoredSignedRef,
 }
 
 /// A disqualified dealer (draft §4.2 / §6.1 verdict).
@@ -297,6 +466,36 @@ pub fn decode_output(bytes: &[u8]) -> Result<StoredBeaconOutput> {
     check_len("output", v.output.len(), OUT_LEN)?;
     Ok(v)
 }
+/// Strictly decode a [`StoredBeaconMembership`] (version).
+pub fn decode_membership(bytes: &[u8]) -> Result<StoredBeaconMembership> {
+    let v: StoredBeaconMembership = beacon_decode(bytes)?;
+    check_version(v.schema_version)?;
+    Ok(v)
+}
+/// Strictly decode a [`StoredBeaconFalseAccuser`] (version).
+pub fn decode_false_accuser(bytes: &[u8]) -> Result<StoredBeaconFalseAccuser> {
+    let v: StoredBeaconFalseAccuser = beacon_decode(bytes)?;
+    check_version(v.schema_version)?;
+    Ok(v)
+}
+/// Strictly decode a [`StoredBeaconAdjudicated`] (version).
+pub fn decode_adjudicated(bytes: &[u8]) -> Result<StoredBeaconAdjudicated> {
+    let v: StoredBeaconAdjudicated = beacon_decode(bytes)?;
+    check_version(v.schema_version)?;
+    Ok(v)
+}
+/// Strictly decode a [`StoredBeaconKeyEquivocation`] (version).
+pub fn decode_key_equivocation(bytes: &[u8]) -> Result<StoredBeaconKeyEquivocation> {
+    let v: StoredBeaconKeyEquivocation = beacon_decode(bytes)?;
+    check_version(v.schema_version)?;
+    Ok(v)
+}
+/// Strictly decode a [`StoredBeaconDealEquivocation`] (version).
+pub fn decode_deal_equivocation(bytes: &[u8]) -> Result<StoredBeaconDealEquivocation> {
+    let v: StoredBeaconDealEquivocation = beacon_decode(bytes)?;
+    check_version(v.schema_version)?;
+    Ok(v)
+}
 
 /// One beacon state mutation captured for block-rollback revert.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -337,31 +536,34 @@ impl<'a> BeaconStore<'a> {
         Self { db }
     }
 
-    /// **Materialize** the runtime beacon state into the canonical `key -> value` row
-    /// set (Item 2 — the producer's runtime→row mapping, byte-pinned). Built from the
-    /// runtime's public persistable accessors so it is a deterministic function of
-    /// state *content* only (every backing collection is ordered), never insertion
-    /// order. Registered keys, accepted deals, disqualifications, and (if a signing
-    /// chain is supplied) finalized rounds + outputs each become a versioned,
-    /// length-checked record under its domain-prefixed key.
+    /// **Materialize** the runtime beacon state for `epoch` into the canonical
+    /// `key -> value` row set — the producer's runtime→row mapping, byte-pinned and
+    /// epoch-keyed. Emits the FIXED membership snapshot, registered keys + deals (with
+    /// authenticated records), disqualifications, false-accuser + adjudicated
+    /// (idempotence/slash-once) state, key/deal equivocation evidence, and — if a
+    /// signing chain is supplied — finalized rounds + outputs. Deterministic in state
+    /// *content* only (every backing collection is ordered).
     pub fn materialize(
-        epoch: &DkgEpoch,
+        epoch: u64,
+        dkg: &DkgEpoch,
         chain: Option<&BeaconChain>,
+        membership: &[[u8; 32]],
     ) -> Result<BTreeMap<Vec<u8>, Vec<u8>>> {
         let mut rows: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
-        for (idx, ek) in epoch.registered_keys() {
+        for k in dkg.authenticated_keys() {
             rows.insert(
-                key_row_key(idx),
+                key_row_key(epoch, k.validator_index),
                 beacon_encode(&StoredBeaconKey {
                     schema_version: BEACON_RECORD_VERSION,
-                    validator_index: idx,
-                    ek: ek.to_vec(),
+                    validator_index: k.validator_index,
+                    ek: k.ek.to_vec(),
+                    record: to_stored_ref(&k.record),
                 })?,
             );
         }
-        for d in epoch.accepted_deals() {
+        for d in dkg.accepted_deals() {
             rows.insert(
-                deal_row_key(d.dealer_i, d.recipient_j),
+                deal_row_key(epoch, d.dealer_i, d.recipient_j),
                 beacon_encode(&StoredBeaconDeal {
                     schema_version: BEACON_RECORD_VERSION,
                     dealer_i: d.dealer_i,
@@ -369,22 +571,64 @@ impl<'a> BeaconStore<'a> {
                     commitments: d.commitments.iter().map(|c| c.to_vec()).collect(),
                     r_ij: d.r_ij.to_vec(),
                     ct_ij: d.ct_ij.to_vec(),
+                    record: to_stored_ref(&d.record),
                 })?,
             );
         }
-        for i in epoch.disqualified() {
+        for i in dkg.disqualified() {
             rows.insert(
-                disqualified_row_key(*i),
+                disqualified_row_key(epoch, *i),
                 beacon_encode(&StoredBeaconDisqualified {
                     schema_version: BEACON_RECORD_VERSION,
                     dealer_i: *i,
                 })?,
             );
         }
+        for j in dkg.false_accusers() {
+            rows.insert(
+                false_accuser_row_key(epoch, *j),
+                beacon_encode(&StoredBeaconFalseAccuser {
+                    schema_version: BEACON_RECORD_VERSION,
+                    recipient_j: *j,
+                })?,
+            );
+        }
+        for (i, j) in dkg.adjudicated() {
+            rows.insert(
+                adjudicated_row_key(epoch, *i, *j),
+                beacon_encode(&StoredBeaconAdjudicated {
+                    schema_version: BEACON_RECORD_VERSION,
+                    dealer_i: *i,
+                    recipient_j: *j,
+                })?,
+            );
+        }
+        for e in dkg.key_equivocations() {
+            rows.insert(
+                key_equiv_row_key(epoch, &e.first.tx_ref, &e.second.tx_ref),
+                beacon_encode(&StoredBeaconKeyEquivocation {
+                    schema_version: BEACON_RECORD_VERSION,
+                    validator_index: e.validator_index,
+                    first: to_stored_ref(&e.first),
+                    second: to_stored_ref(&e.second),
+                })?,
+            );
+        }
+        for e in dkg.deal_equivocations() {
+            rows.insert(
+                deal_equiv_row_key(epoch, &e.first.tx_ref, &e.second.tx_ref),
+                beacon_encode(&StoredBeaconDealEquivocation {
+                    schema_version: BEACON_RECORD_VERSION,
+                    dealer_i: e.dealer_i,
+                    first: to_stored_ref(&e.first),
+                    second: to_stored_ref(&e.second),
+                })?,
+            );
+        }
         if let Some(chain) = chain {
             for (r, sigma_r, output) in chain.finalized_rounds() {
                 rows.insert(
-                    round_row_key(r),
+                    round_row_key(epoch, r),
                     beacon_encode(&StoredBeaconRound {
                         schema_version: BEACON_RECORD_VERSION,
                         round: r,
@@ -392,7 +636,7 @@ impl<'a> BeaconStore<'a> {
                     })?,
                 );
                 rows.insert(
-                    output_row_key(r),
+                    output_row_key(epoch, r),
                     beacon_encode(&StoredBeaconOutput {
                         schema_version: BEACON_RECORD_VERSION,
                         round: r,
@@ -400,6 +644,19 @@ impl<'a> BeaconStore<'a> {
                     })?,
                 );
             }
+        }
+        // The FIXED per-epoch membership snapshot is persisted ONLY once the epoch has
+        // real beacon state (its first VALID op), so a block with only invalid beacon
+        // txs writes nothing (no snapshot, no state). Once written it stays stable.
+        if !rows.is_empty() {
+            rows.insert(
+                membership_row_key(epoch),
+                beacon_encode(&StoredBeaconMembership {
+                    schema_version: BEACON_RECORD_VERSION,
+                    epoch,
+                    members: membership.to_vec(),
+                })?,
+            );
         }
         Ok(rows)
     }
@@ -413,24 +670,27 @@ impl<'a> BeaconStore<'a> {
         Ok(map)
     }
 
-    /// **De-materialize** the persisted rows back into the runtime rehydration
-    /// inputs (rows → runtime): `(keys, deals, disqualified, rounds)`. The inverse of
-    /// [`materialize`](Self::materialize); strict-decodes every typed record. Feeds
-    /// `DkgEpoch::rehydrate` / `BeaconChain::rehydrate` on restart and at each block
-    /// start (so a block's transition is a delta against the true live state).
+    /// Read the FIXED membership snapshot persisted for `epoch`, if any.
+    pub fn get_membership(&self, epoch: u64) -> Result<Option<Vec<[u8; 32]>>> {
+        match self.db.get(cf::BEACON_STATE, &membership_row_key(epoch))? {
+            Some(bytes) => Ok(Some(decode_membership(&bytes)?.members)),
+            None => Ok(None),
+        }
+    }
+
+    /// **De-materialize** the persisted rows for `epoch` back into the runtime
+    /// rehydration inputs (rows → runtime): a [`RehydrateInput`] (keys, deals,
+    /// disqualified, false-accusers, adjudicated, equivocations) + the finalized
+    /// rounds. The inverse of [`materialize`](Self::materialize) restricted to
+    /// `epoch`; strict-decodes every typed record. Feeds `DkgEpoch::rehydrate` /
+    /// `BeaconChain::rehydrate`.
     #[allow(clippy::type_complexity)]
     pub fn load_materialized(
         &self,
-    ) -> Result<(
-        Vec<(u32, [u8; G1_LEN])>,
-        Vec<DealView>,
-        Vec<u32>,
-        Vec<(u64, [u8; G2_LEN], [u8; OUT_LEN])>,
-    )> {
+        epoch: u64,
+    ) -> Result<(RehydrateInput, Vec<(u64, [u8; G2_LEN], [u8; OUT_LEN])>)> {
         let rows = self.load_state_map()?;
-        let mut keys = Vec::new();
-        let mut deals = Vec::new();
-        let mut disqualified = Vec::new();
+        let mut input = RehydrateInput::default();
         let mut round_sig: BTreeMap<u64, [u8; G2_LEN]> = BTreeMap::new();
         let mut round_out: BTreeMap<u64, [u8; OUT_LEN]> = BTreeMap::new();
 
@@ -442,37 +702,69 @@ impl<'a> BeaconStore<'a> {
             }
             Ok(v.to_vec())
         };
+        let fixed = |v: &[u8]| -> Result<[u8; G1_LEN]> {
+            let mut a = [0u8; G1_LEN];
+            a.copy_from_slice(&as_arr(v, G1_LEN)?);
+            Ok(a)
+        };
 
         for (k, v) in &rows {
+            // Only this epoch's rows (epoch is bytes [1..9] of every key).
+            if key_epoch(k) != Some(epoch) {
+                continue;
+            }
             match k.first() {
+                Some(&domain::MEMBERSHIP) => {
+                    decode_membership(v)?; // validate; membership loaded via get_membership
+                }
                 Some(&domain::KEY) => {
                     let sk = decode_key(v)?;
-                    let mut ek = [0u8; G1_LEN];
-                    ek.copy_from_slice(&as_arr(&sk.ek, G1_LEN)?);
-                    keys.push((sk.validator_index, ek));
+                    input.keys.push(KeyView {
+                        validator_index: sk.validator_index,
+                        ek: fixed(&sk.ek)?,
+                        record: from_stored_ref(&sk.record),
+                    });
                 }
                 Some(&domain::DEAL) => {
                     let sd = decode_deal(v)?;
-                    let mut r_ij = [0u8; G1_LEN];
-                    r_ij.copy_from_slice(&as_arr(&sd.r_ij, G1_LEN)?);
                     let mut ct_ij = [0u8; CT_LEN];
                     ct_ij.copy_from_slice(&as_arr(&sd.ct_ij, CT_LEN)?);
                     let mut commitments = Vec::with_capacity(sd.commitments.len());
                     for c in &sd.commitments {
-                        let mut cc = [0u8; G1_LEN];
-                        cc.copy_from_slice(&as_arr(c, G1_LEN)?);
-                        commitments.push(cc);
+                        commitments.push(fixed(c)?);
                     }
-                    deals.push(DealView {
+                    input.deals.push(DealView {
                         dealer_i: sd.dealer_i,
                         recipient_j: sd.recipient_j,
                         commitments,
-                        r_ij,
+                        r_ij: fixed(&sd.r_ij)?,
                         ct_ij,
+                        record: from_stored_ref(&sd.record),
                     });
                 }
-                Some(&domain::VERDICT) => {
-                    disqualified.push(decode_disqualified(v)?.dealer_i);
+                Some(&domain::VERDICT) => input.disqualified.push(decode_disqualified(v)?.dealer_i),
+                Some(&domain::FALSE_ACCUSER) => input
+                    .false_accusers
+                    .push(decode_false_accuser(v)?.recipient_j),
+                Some(&domain::ADJUDICATED) => {
+                    let a = decode_adjudicated(v)?;
+                    input.adjudicated.push((a.dealer_i, a.recipient_j));
+                }
+                Some(&domain::KEY_EQUIV) => {
+                    let e = decode_key_equivocation(v)?;
+                    input.key_equivocations.push(KeyEquivocationEvidence {
+                        validator_index: e.validator_index,
+                        first: from_stored_ref(&e.first),
+                        second: from_stored_ref(&e.second),
+                    });
+                }
+                Some(&domain::DEAL_EQUIV) => {
+                    let e = decode_deal_equivocation(v)?;
+                    input.deal_equivocations.push(DealEquivocationEvidence {
+                        dealer_i: e.dealer_i,
+                        first: from_stored_ref(&e.first),
+                        second: from_stored_ref(&e.second),
+                    });
                 }
                 Some(&domain::ROUND) => {
                     let sr = decode_round(v)?;
@@ -497,7 +789,7 @@ impl<'a> BeaconStore<'a> {
             .into_iter()
             .filter_map(|(r, sig)| round_out.get(&r).map(|out| (r, sig, *out)))
             .collect();
-        Ok((keys, deals, disqualified, rounds))
+        Ok((input, rounds))
     }
 
     /// Deterministic, domain-separated digest over the FULL persisted beacon state.
@@ -532,6 +824,28 @@ impl<'a> BeaconStore<'a> {
             Some(bytes) => Ok(Some(beacon_decode(&bytes)?)),
             None => Ok(None),
         }
+    }
+
+    /// Persist a single **epoch's** transition atomically: replace exactly the rows of
+    /// `epoch` (all other epochs' rows are carried forward unchanged) with
+    /// `current_epoch_rows`, journaling the delta at `height`. Wraps
+    /// [`persist_transition`](Self::persist_transition) so the atomic single-batch +
+    /// duplicate-height + stale-predecessor guarantees all apply.
+    pub fn persist_epoch_transition(
+        &self,
+        epoch: u64,
+        current_epoch_rows: BTreeMap<Vec<u8>, Vec<u8>>,
+        height: BlockHeight,
+    ) -> Result<usize> {
+        let before = self.load_state_map()?;
+        // after = (live rows NOT in this epoch) ∪ (this epoch's fresh materialization).
+        let mut after: BTreeMap<Vec<u8>, Vec<u8>> = before
+            .iter()
+            .filter(|(k, _)| key_epoch(k) != Some(epoch))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        after.extend(current_epoch_rows);
+        self.persist_transition(&before, &after, height)
     }
 
     /// Persist the transition `before -> after` for `height` **atomically** (one
@@ -769,35 +1083,76 @@ mod tests {
 
     // ── Item 2: frozen typed-record codec + key layouts + strict decode ──────
 
+    fn null_ref() -> StoredSignedRef {
+        StoredSignedRef {
+            signer: [0u8; 32],
+            tx_ref: [0u8; 32],
+            carrier: vec![],
+        }
+    }
+
     #[test]
     fn record_version_and_key_layouts_are_frozen() {
         assert_eq!(BEACON_RECORD_VERSION, 1);
-        // Domain-prefixed big-endian composite keys (exact bytes pinned).
-        assert_eq!(key_row_key(0), vec![0x01, 0, 0, 0, 0]);
-        assert_eq!(key_row_key(3), vec![0x01, 0, 0, 0, 3]);
-        assert_eq!(deal_row_key(1, 2), vec![0x02, 0, 0, 0, 1, 0, 0, 0, 2]);
-        assert_eq!(disqualified_row_key(4), vec![0x03, 0, 0, 0, 4]);
-        assert_eq!(round_row_key(5), vec![0x04, 0, 0, 0, 0, 0, 0, 0, 5]);
-        assert_eq!(output_row_key(6), vec![0x05, 0, 0, 0, 0, 0, 0, 0, 6]);
+        // Epoch-keyed domain-prefixed big-endian composite keys (exact bytes pinned):
+        // DOMAIN(1) ‖ epoch(8 BE) ‖ body.
+        assert_eq!(
+            key_row_key(7, 2),
+            vec![0x01, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 2]
+        );
+        assert_eq!(
+            deal_row_key(7, 1, 2),
+            vec![0x02, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 1, 0, 0, 0, 2]
+        );
+        assert_eq!(
+            disqualified_row_key(7, 4),
+            vec![0x03, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 4]
+        );
+        assert_eq!(
+            round_row_key(7, 5),
+            vec![0x04, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 5]
+        );
+        assert_eq!(
+            output_row_key(7, 6),
+            vec![0x05, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 6]
+        );
+        assert_eq!(membership_row_key(7), vec![0x06, 0, 0, 0, 0, 0, 0, 0, 7]);
+        assert_eq!(
+            false_accuser_row_key(7, 1),
+            vec![0x07, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 1]
+        );
+        assert_eq!(
+            adjudicated_row_key(7, 1, 2),
+            vec![0x08, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 1, 0, 0, 0, 2]
+        );
+        // Equivocation keys embed both conflicting tx refs (collision-free).
+        assert_eq!(
+            key_equiv_row_key(7, &[0xAA; 32], &[0xBB; 32]).len(),
+            1 + 8 + 32 + 32
+        );
+        assert_eq!(deal_equiv_row_key(7, &[0xAA; 32], &[0xBB; 32])[0], 0x0A);
     }
 
     #[test]
     fn stored_records_roundtrip_and_bytes_are_frozen() {
-        // A key record with a fixed ek → frozen canonical bytes + strict decode.
+        // A key record with a fixed ek + null ref → frozen canonical prefix + strict
+        // decode. bincode fixint LE: version(1) ‖ u32_le(idx) ‖ len(u64_le=48) ‖ ek ‖
+        // record{ signer(32) ‖ tx_ref(32) ‖ carrier_len(u64_le=0) }.
         let k = StoredBeaconKey {
             schema_version: BEACON_RECORD_VERSION,
             validator_index: 2,
             ek: vec![0xAB; G1_LEN],
+            record: null_ref(),
         };
         let kb = beacon_encode(&k).unwrap();
-        // bincode fixint LE: version(1) ‖ u32_le(2) ‖ len(u64_le=48) ‖ 48×0xAB.
         assert_eq!(&kb[0..1], &[0x01]);
         assert_eq!(&kb[1..5], &2u32.to_le_bytes());
         assert_eq!(&kb[5..13], &48u64.to_le_bytes());
-        assert_eq!(kb.len(), 1 + 4 + 8 + G1_LEN);
+        assert_eq!(kb.len(), 1 + 4 + 8 + G1_LEN + 32 + 32 + 8);
         assert_eq!(decode_key(&kb).unwrap(), k);
 
-        // Round / output / disqualified round-trip.
+        // Round / output / disqualified / membership / false-accuser / adjudicated /
+        // equivocation round-trips.
         let r = StoredBeaconRound {
             schema_version: BEACON_RECORD_VERSION,
             round: 9,
@@ -815,6 +1170,46 @@ mod tests {
             dealer_i: 3,
         };
         assert_eq!(decode_disqualified(&beacon_encode(&d).unwrap()).unwrap(), d);
+        let mem = StoredBeaconMembership {
+            schema_version: BEACON_RECORD_VERSION,
+            epoch: 7,
+            members: vec![[1u8; 32], [2u8; 32]],
+        };
+        assert_eq!(
+            decode_membership(&beacon_encode(&mem).unwrap()).unwrap(),
+            mem
+        );
+        let fa = StoredBeaconFalseAccuser {
+            schema_version: BEACON_RECORD_VERSION,
+            recipient_j: 4,
+        };
+        assert_eq!(
+            decode_false_accuser(&beacon_encode(&fa).unwrap()).unwrap(),
+            fa
+        );
+        let adj = StoredBeaconAdjudicated {
+            schema_version: BEACON_RECORD_VERSION,
+            dealer_i: 1,
+            recipient_j: 2,
+        };
+        assert_eq!(
+            decode_adjudicated(&beacon_encode(&adj).unwrap()).unwrap(),
+            adj
+        );
+        let ke = StoredBeaconKeyEquivocation {
+            schema_version: BEACON_RECORD_VERSION,
+            validator_index: 0,
+            first: null_ref(),
+            second: StoredSignedRef {
+                signer: [9u8; 32],
+                tx_ref: [8u8; 32],
+                carrier: vec![1, 2, 3],
+            },
+        };
+        assert_eq!(
+            decode_key_equivocation(&beacon_encode(&ke).unwrap()).unwrap(),
+            ke
+        );
     }
 
     #[test]
@@ -824,6 +1219,7 @@ mod tests {
             schema_version: 2,
             validator_index: 0,
             ek: vec![0; G1_LEN],
+            record: null_ref(),
         };
         assert!(decode_key(&beacon_encode(&bad_ver).unwrap()).is_err());
         // Wrong ek length.
@@ -831,6 +1227,7 @@ mod tests {
             schema_version: BEACON_RECORD_VERSION,
             validator_index: 0,
             ek: vec![0; G1_LEN - 1],
+            record: null_ref(),
         };
         assert!(decode_key(&beacon_encode(&bad_len).unwrap()).is_err());
         // Trailing bytes rejected by the canonical decoder.
@@ -838,6 +1235,7 @@ mod tests {
             schema_version: BEACON_RECORD_VERSION,
             validator_index: 0,
             ek: vec![0; G1_LEN],
+            record: null_ref(),
         })
         .unwrap();
         trailing.push(0xFF);
@@ -850,6 +1248,7 @@ mod tests {
             commitments: vec![],
             r_ij: vec![0; G1_LEN],
             ct_ij: vec![0; CT_LEN],
+            record: null_ref(),
         };
         assert!(decode_deal(&beacon_encode(&bad_deal).unwrap()).is_err());
     }

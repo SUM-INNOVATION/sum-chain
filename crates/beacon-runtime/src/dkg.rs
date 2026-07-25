@@ -157,8 +157,9 @@ pub enum RehydrateError {
     InvalidElement(BeaconCryptoError),
 }
 
-/// A read-only, persistable view of one accepted deal (Item 2 — the exact fields the
-/// producer materializes into a store row). Points are canonical compressed bytes.
+/// A read-only, persistable view of one accepted deal (the exact fields the producer
+/// materializes into a store row) + its authenticated record reference. Points are
+/// canonical compressed bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DealView {
     /// Dealer index `i`.
@@ -171,6 +172,41 @@ pub struct DealView {
     pub r_ij: [u8; sumchain_beacon_crypto::G1_COMPRESSED_SIZE],
     /// ECIES body `ct_{ij}` (48B).
     pub ct_ij: [u8; sumchain_beacon_crypto::ECIES_CT_LEN],
+    /// The authenticated record reference for the accepted deal (signer + tx_ref +
+    /// carrier bytes) — persisted so evidence attribution survives restart.
+    pub record: SignedRecordRef,
+}
+
+/// A read-only, persistable view of one registered key + its authenticated record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyView {
+    /// 0-based validator/membership index `j`.
+    pub validator_index: u32,
+    /// Canonical compressed G1 `EK_j` (48B).
+    pub ek: [u8; sumchain_beacon_crypto::G1_COMPRESSED_SIZE],
+    /// The authenticated record reference for the accepted registration.
+    pub record: SignedRecordRef,
+}
+
+/// The full set of persisted state needed to rehydrate a [`DkgEpoch`] on restart
+/// (rows → runtime). Restores authenticated records, equivocation evidence, and
+/// adjudication state so nothing semantic is lost across restart/reorg.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RehydrateInput {
+    /// Registered keys (with authenticated records).
+    pub keys: Vec<KeyView>,
+    /// Accepted deals (with authenticated records).
+    pub deals: Vec<DealView>,
+    /// Disqualified dealer indices.
+    pub disqualified: Vec<u32>,
+    /// Slashed false-accuser recipient indices.
+    pub false_accusers: Vec<u32>,
+    /// Adjudicated `(dealer, recipient)` complaint pairs (idempotence / slash-once).
+    pub adjudicated: Vec<(u32, u32)>,
+    /// Retained key-equivocation evidence.
+    pub key_equivocations: Vec<KeyEquivocationEvidence>,
+    /// Retained deal-equivocation evidence.
+    pub deal_equivocations: Vec<DealEquivocationEvidence>,
 }
 
 /// The four objective complaint verdicts (draft §6.1). Adjudication is deterministic
@@ -292,39 +328,25 @@ impl DkgEpoch {
         }
     }
 
-    /// **Rehydrate** a DKG epoch from persisted state on restart (rows → runtime).
-    /// The inverse of the store's materialization: `keys` are `(validator_index, EK_j
-    /// compressed)`, `deals` are the persisted [`DealView`]s, and `disqualified` is
-    /// the disqualified-dealer set. Group elements are re-decoded with the §2.2
-    /// checks. Because the persisted rows do **not** carry the authenticated
-    /// `SignedRecordRef` (signer + tx envelope hash) — only the essential consensus
-    /// state — rehydrated records carry a NULL reference; a *new* equivocation in a
-    /// later block still records a real reference for its own conflicting record, and
-    /// `materialize` ignores the reference, so `materialize(rehydrate(rows)) == rows`
-    /// exactly (the round-trip the per-block producer relies on).
-    pub fn rehydrate(
-        cfg: DkgConfig,
-        keys: Vec<(u32, [u8; sumchain_beacon_crypto::G1_COMPRESSED_SIZE])>,
-        deals: Vec<DealView>,
-        disqualified: Vec<u32>,
-    ) -> Result<Self, RehydrateError> {
-        let null_ref = SignedRecordRef {
-            signer: ValidatorId([0u8; 32]),
-            tx_ref: [0u8; 32],
-            carrier: Vec::new(),
-        };
+    /// **Rehydrate** a DKG epoch from persisted state on restart (rows → runtime) —
+    /// the inverse of the store's materialization, restoring ALL semantic state
+    /// including the authenticated record references, equivocation evidence, and the
+    /// adjudication (false-accuser + adjudicated-pair) state, so restart/reorg
+    /// preserves attribution, verdicts, idempotence, and slash-once. Group elements
+    /// are re-decoded with the §2.2 checks. `materialize(rehydrate(rows)) == rows`.
+    pub fn rehydrate(cfg: DkgConfig, input: RehydrateInput) -> Result<Self, RehydrateError> {
         let mut epoch = DkgEpoch::new(cfg);
-        for (idx, ek) in keys {
-            let ek = G1Point::from_compressed(&ek).map_err(RehydrateError::InvalidElement)?;
+        for k in input.keys {
+            let ek = G1Point::from_compressed(&k.ek).map_err(RehydrateError::InvalidElement)?;
             epoch.keys.insert(
-                idx,
+                k.validator_index,
                 RegisteredKey {
                     ek,
-                    record: null_ref.clone(),
+                    record: k.record,
                 },
             );
         }
-        for d in deals {
+        for d in input.deals {
             let mut commitments = Vec::with_capacity(d.commitments.len());
             for c in &d.commitments {
                 commitments
@@ -340,13 +362,21 @@ impl DkgEpoch {
                 AcceptedDeal {
                     r_ij,
                     ct_ij: d.ct_ij,
-                    record: null_ref.clone(),
+                    record: d.record,
                 },
             );
         }
-        for i in disqualified {
+        for i in input.disqualified {
             epoch.disqualified.insert(i);
         }
+        for j in input.false_accusers {
+            epoch.false_accusers.insert(j);
+        }
+        for pair in input.adjudicated {
+            epoch.adjudicated.insert(pair);
+        }
+        epoch.key_equivocations = input.key_equivocations;
+        epoch.deal_equivocations = input.deal_equivocations;
         Ok(epoch)
     }
 
@@ -444,19 +474,27 @@ impl DkgEpoch {
 
     // -- Persistable-state accessors (the PRODUCER materializes these into rows) --
 
-    /// The accepted registered encryption keys as `(validator_index, EK_j
-    /// compressed)`, ascending by index. The exact bytes the persistence layer
-    /// materializes (Item 2).
-    pub fn registered_keys(&self) -> Vec<(u32, [u8; sumchain_beacon_crypto::G1_COMPRESSED_SIZE])> {
+    /// The adjudicated `(dealer, recipient)` pairs (idempotence / no-double-jeopardy).
+    pub fn adjudicated(&self) -> &BTreeSet<(u32, u32)> {
+        &self.adjudicated
+    }
+
+    /// The accepted registered keys as [`KeyView`]s (validator index, `EK_j`
+    /// compressed, authenticated record), ascending by index.
+    pub fn authenticated_keys(&self) -> Vec<KeyView> {
         self.keys
             .iter()
-            .map(|(idx, k)| (*idx, k.ek.to_compressed()))
+            .map(|(idx, k)| KeyView {
+                validator_index: *idx,
+                ek: k.ek.to_compressed(),
+                record: k.record.clone(),
+            })
             .collect()
     }
 
-    /// The accepted deals as persistable views, ascending by `(dealer_i,
-    /// recipient_j)`. `commitments` is the dealer's committed polynomial (repeated
-    /// from `dealer_commitments`, so a deal row is self-contained).
+    /// The accepted deals as persistable [`DealView`]s (with authenticated records),
+    /// ascending by `(dealer_i, recipient_j)`. `commitments` is the dealer's committed
+    /// polynomial (repeated so a deal row is self-contained).
     pub fn accepted_deals(&self) -> Vec<DealView> {
         self.deals
             .iter()
@@ -470,6 +508,7 @@ impl DkgEpoch {
                     .unwrap_or_default(),
                 r_ij: d.r_ij.to_compressed(),
                 ct_ij: d.ct_ij,
+                record: d.record.clone(),
             })
             .collect()
     }

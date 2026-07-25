@@ -9,28 +9,10 @@
 //! only as a clearly-labelled test fixture ([`BeaconParams::proposed_default`]),
 //! never as frozen protocol behavior.
 
-/// A validated construction failure for a [`BeaconParams`] set (draft §7.4).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum ParamsError {
-    /// A zero threshold `T` is never valid (degree `T−1` would be negative).
-    #[error("reconstruction threshold T must be >= 1")]
-    ZeroThreshold,
-    /// `T` must be at least `f + 1` (draft §7.4 (S1) unforgeability).
-    #[error("reconstruction threshold T={t} must be >= f+1={min} (draft §7.4 S1)")]
-    ThresholdTooSmall { t: u32, min: u32 },
-    /// `Q_dkg` must be at least `2f + 1` (draft §7.4 (S2) robust DKG).
-    #[error("qualification size Q_dkg={q} must be >= 2f+1={min} (draft §7.4 S2)")]
-    QualTooSmall { q: u32, min: u32 },
-    /// Consistency `T ≤ Q_dkg ≤ n` (draft §7.4 (C1)).
-    #[error("consistency violated: require T={t} <= Q_dkg={q} <= n={n} (draft §7.4 C1)")]
-    Inconsistent { t: u32, q: u32, n: u32 },
-    /// Liveness (L1) signing: `n − f − c ≥ T` (enough honest-online signers).
-    #[error("liveness L1 violated: n-f-c={avail} must be >= T={t} (draft §7.4 L1)")]
-    LivenessSigning { avail: i64, t: u32 },
-    /// Liveness (L2) qualification: `n − f − c ≥ Q_dkg` (enough honest dealers).
-    #[error("liveness L2 violated: n-f-c={avail} must be >= Q_dkg={q} (draft §7.4 L2)")]
-    LivenessQual { avail: i64, q: u32 },
-}
+/// A validated construction failure for a [`BeaconParams`] set (draft §7.4). This is
+/// the **shared** `sumchain_wire::beacon_schedule::BeaconParamsViolation` — the SAME
+/// enum the genesis config validates against, so the two cannot drift (one rule set).
+pub use sumchain_wire::beacon_schedule::BeaconParamsViolation as ParamsError;
 
 /// The validated threshold / fault parameters governing one beacon epoch
 /// (draft §1.2, §7). Construct **only** via [`BeaconParams::validated`], which
@@ -50,34 +32,13 @@ pub struct BeaconParams {
 }
 
 impl BeaconParams {
-    /// Construct + **validate** a parameter set against the draft §7.4 inequalities:
+    /// Construct + **validate** a parameter set. Delegates to the single shared
+    /// predicate `sumchain_wire::beacon_schedule::validate_beacon_params` (draft §7.4:
     /// `T ≥ f+1`, `Q_dkg ≥ 2f+1`, `T ≤ Q_dkg ≤ n`, `n−f−c ≥ T` (L1), `n−f−c ≥ Q_dkg`
-    /// (L2). Any violation returns a typed [`ParamsError`]; an invalid config can
-    /// never be represented.
+    /// (L2)) — the SAME rule the genesis config validates against, so an invalid
+    /// config can never be represented and the two surfaces cannot drift.
     pub fn validated(f: u32, c: u32, t: u32, q_dkg: u32, n: u32) -> Result<Self, ParamsError> {
-        if t == 0 {
-            return Err(ParamsError::ZeroThreshold);
-        }
-        if t < f + 1 {
-            return Err(ParamsError::ThresholdTooSmall { t, min: f + 1 });
-        }
-        if q_dkg < 2 * f + 1 {
-            return Err(ParamsError::QualTooSmall {
-                q: q_dkg,
-                min: 2 * f + 1,
-            });
-        }
-        if !(t <= q_dkg && q_dkg <= n) {
-            return Err(ParamsError::Inconsistent { t, q: q_dkg, n });
-        }
-        // Computed in i64 so an over-large f+c cannot underflow.
-        let avail = n as i64 - f as i64 - c as i64;
-        if avail < t as i64 {
-            return Err(ParamsError::LivenessSigning { avail, t });
-        }
-        if avail < q_dkg as i64 {
-            return Err(ParamsError::LivenessQual { avail, q: q_dkg });
-        }
+        sumchain_wire::beacon_schedule::validate_beacon_params(f, c, t, q_dkg, n)?;
         Ok(BeaconParams { f, c, t, q_dkg, n })
     }
 

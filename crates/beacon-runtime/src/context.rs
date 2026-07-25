@@ -82,6 +82,12 @@ impl EpochMembership {
     pub fn id_at(&self, idx: u32) -> Option<ValidatorId> {
         self.members.get(idx as usize).copied()
     }
+
+    /// The ordered member identities (index order). Used to persist the fixed epoch
+    /// snapshot.
+    pub fn members(&self) -> &[ValidatorId] {
+        &self.members
+    }
 }
 
 /// The protocol phase of a beacon operation (matches the #164 `TxPayload` split:
