@@ -14,9 +14,7 @@ use sumchain_beacon_crypto::{
 };
 use sumchain_wire::beacon_wire::{DkgComplaintV1, DkgDealV1, RegisterBeaconKeyV1};
 
-use crate::context::{
-    BeaconPhase, ContextError, EpochCutoffs, EpochMembership, ExecContext, ValidatorId,
-};
+use crate::context::{BeaconPhase, ContextError, EpochMembership, ExecContext, ValidatorId};
 use crate::dkg::{
     AdjudicateError, DealOutcome, DkgConfig, DkgEpoch, DkgOutcome, RegistrationOutcome, SetupError,
     Verdict,
@@ -31,8 +29,6 @@ use sumchain_wire::beacon_wire::BeaconOperation;
 const CHAIN_ID: u64 = 0x0102_0304_0506_0708;
 const EPOCH: u64 = 7;
 const N: u32 = 5;
-const DEAL_CUTOFF: u64 = 100;
-const COMPLAINT_DEADLINE: u64 = 200;
 
 fn seed(tag: u8) -> [u8; SCALAR_SIZE] {
     let mut b = [0u8; SCALAR_SIZE];
@@ -49,13 +45,6 @@ fn vid(i: u32) -> ValidatorId {
 
 fn membership() -> EpochMembership {
     EpochMembership::new((0..N).map(vid).collect()).unwrap()
-}
-
-fn cutoffs() -> EpochCutoffs {
-    EpochCutoffs {
-        deal_cutoff: DEAL_CUTOFF,
-        complaint_deadline: COMPLAINT_DEADLINE,
-    }
 }
 
 fn ctx(m: &EpochMembership, signer_index: u32, phase: BeaconPhase, height: u64) -> ExecContext<'_> {
@@ -78,9 +67,8 @@ fn ctx_ref(
         chain_id: CHAIN_ID,
         epoch: EPOCH,
         block_height: height,
-        phase,
+        phase: Some(phase),
         membership: m,
-        cutoffs: cutoffs(),
     }
 }
 
@@ -195,11 +183,11 @@ fn epoch_with_deal(
     tamper: bool,
 ) -> DkgEpoch {
     let mut e = DkgEpoch::new(config());
-    e.register_key(&ctx(m, j, BeaconPhase::Setup, 10), &make_reg(j))
+    e.register_key(&ctx(m, j, BeaconPhase::KeyRegistration, 10), &make_reg(j))
         .unwrap();
     assert_eq!(
         e.submit_deal(
-            &ctx(m, i, BeaconPhase::Setup, 10),
+            &ctx(m, i, BeaconPhase::Deal, 10),
             &make_deal(i, j, share_override, tamper)
         )
         .unwrap(),
@@ -253,7 +241,7 @@ fn context_actor_binding_negatives() {
     let mut e = DkgEpoch::new(config());
 
     // Deal signer must equal dealer_i: signer=vid(1) but dealer_i=0.
-    let bad_signer = ctx(&m, 1, BeaconPhase::Setup, 10);
+    let bad_signer = ctx(&m, 1, BeaconPhase::Deal, 10);
     assert_eq!(
         e.submit_deal(&bad_signer, &make_deal(0, 2, None, false)),
         Err(SetupError::Context(ContextError::ActorIndexMismatch))
@@ -262,7 +250,7 @@ fn context_actor_binding_negatives() {
     // Non-member signer.
     let non_member = ExecContext {
         signer: vid(99),
-        ..ctx(&m, 0, BeaconPhase::Setup, 10)
+        ..ctx(&m, 0, BeaconPhase::Deal, 10)
     };
     assert_eq!(
         e.submit_deal(&non_member, &make_deal(0, 2, None, false)),
@@ -272,41 +260,43 @@ fn context_actor_binding_negatives() {
     // Index out of range: recipient_j = 99 (>= n).
     assert_eq!(
         e.submit_deal(
-            &ctx(&m, 0, BeaconPhase::Setup, 10),
+            &ctx(&m, 0, BeaconPhase::Deal, 10),
             &make_deal(0, 99, None, false)
         ),
         Err(SetupError::Context(ContextError::IndexOutOfRange))
     );
 
-    // Wrong phase: a deal under the Signing phase.
-    assert_eq!(
-        e.submit_deal(
-            &ctx(&m, 0, BeaconPhase::Signing, 10),
-            &make_deal(0, 2, None, false)
-        ),
-        Err(SetupError::Context(ContextError::PhaseMismatch))
-    );
-
-    // Cutoff: deal after the deal cutoff.
-    assert_eq!(
-        e.submit_deal(
-            &ctx(&m, 0, BeaconPhase::Setup, DEAL_CUTOFF + 1),
-            &make_deal(0, 2, None, false)
-        ),
-        Err(SetupError::Context(ContextError::CutoffViolation))
-    );
+    // STRICT PHASE SEPARATION: a deal is valid ONLY in the Deal window. It is rejected
+    // in every other phase — one window before it (KeyRegistration), after it
+    // (Complaint / Signing), and in a between-windows gap (`phase = None`).
+    for wrong in [
+        Some(BeaconPhase::KeyRegistration),
+        Some(BeaconPhase::Complaint),
+        Some(BeaconPhase::Signing),
+        None,
+    ] {
+        let bad_phase = ExecContext {
+            phase: wrong,
+            ..ctx(&m, 0, BeaconPhase::Deal, 10)
+        };
+        assert_eq!(
+            e.submit_deal(&bad_phase, &make_deal(0, 2, None, false)),
+            Err(SetupError::Context(ContextError::PhaseMismatch)),
+            "deal must be rejected in phase {wrong:?}"
+        );
+    }
 
     // Cross-epoch / cross-chain on the carrier.
     let mut wrong_epoch = make_deal(0, 2, None, false);
     wrong_epoch.epoch = EPOCH + 1;
     assert_eq!(
-        e.submit_deal(&ctx(&m, 0, BeaconPhase::Setup, 10), &wrong_epoch),
+        e.submit_deal(&ctx(&m, 0, BeaconPhase::Deal, 10), &wrong_epoch),
         Err(SetupError::Context(ContextError::EpochMismatch))
     );
     let mut wrong_chain = make_deal(0, 2, None, false);
     wrong_chain.chain_id = CHAIN_ID + 1;
     assert_eq!(
-        e.submit_deal(&ctx(&m, 0, BeaconPhase::Setup, 10), &wrong_chain),
+        e.submit_deal(&ctx(&m, 0, BeaconPhase::Deal, 10), &wrong_chain),
         Err(SetupError::Context(ContextError::ChainIdMismatch))
     );
 }
@@ -318,7 +308,7 @@ fn context_membership_size_must_match_params() {
     let mut e = DkgEpoch::new(config());
     assert!(matches!(
         e.submit_deal(
-            &ctx(&m4, 0, BeaconPhase::Setup, 10),
+            &ctx(&m4, 0, BeaconPhase::Deal, 10),
             &make_deal(0, 2, None, false)
         ),
         Err(SetupError::MembershipSizeMismatch {
@@ -333,17 +323,30 @@ fn context_complaint_signer_must_be_recipient() {
     let m = membership();
     let e = epoch_with_deal(&m, 0, 1, None, false);
     // Complaint for recipient j=1 but signed by vid(2).
-    let wrong = ctx(&m, 2, BeaconPhase::Setup, 50);
+    let wrong = ctx(&m, 2, BeaconPhase::Complaint, 50);
     assert_eq!(
         e.adjudicate(&wrong, &make_complaint(0, 1, None)),
         Err(AdjudicateError::Context(ContextError::ActorIndexMismatch))
     );
-    // Complaint past the deadline.
-    let late = ctx(&m, 1, BeaconPhase::Setup, COMPLAINT_DEADLINE + 1);
-    assert_eq!(
-        e.adjudicate(&late, &make_complaint(0, 1, None)),
-        Err(AdjudicateError::Context(ContextError::CutoffViolation))
-    );
+    // STRICT PHASE SEPARATION: a complaint is valid ONLY in the Complaint window; it is
+    // rejected in every other phase (before it — KeyRegistration/Deal — after it —
+    // Signing — and in a between-windows gap, `None`).
+    for wrong_phase in [
+        Some(BeaconPhase::KeyRegistration),
+        Some(BeaconPhase::Deal),
+        Some(BeaconPhase::Signing),
+        None,
+    ] {
+        let bad = ExecContext {
+            phase: wrong_phase,
+            ..ctx(&m, 1, BeaconPhase::Complaint, 50)
+        };
+        assert_eq!(
+            e.adjudicate(&bad, &make_complaint(0, 1, None)),
+            Err(AdjudicateError::Context(ContextError::PhaseMismatch)),
+            "complaint must be rejected in phase {wrong_phase:?}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -358,7 +361,7 @@ fn deal_commitment_count_must_equal_t() {
     // Add a 3rd commitment (T = 2) → mismatch.
     deal.commitments.push(deal.commitments[0]);
     assert_eq!(
-        e.submit_deal(&ctx(&m, 0, BeaconPhase::Setup, 10), &deal),
+        e.submit_deal(&ctx(&m, 0, BeaconPhase::Deal, 10), &deal),
         Err(SetupError::CommitmentCountMismatch {
             got: 3,
             expected: 2
@@ -372,7 +375,7 @@ fn deal_conflicting_commitments_across_recipients_retains_evidence() {
     let mut e = DkgEpoch::new(config());
     assert_eq!(
         e.submit_deal(
-            &ctx(&m, 0, BeaconPhase::Setup, 10),
+            &ctx(&m, 0, BeaconPhase::Deal, 10),
             &make_deal(0, 0, None, false)
         )
         .unwrap(),
@@ -392,7 +395,7 @@ fn deal_conflicting_commitments_across_recipients_retains_evidence() {
             .to_compressed(),
     ];
     let outcome = e
-        .submit_deal(&ctx(&m, 0, BeaconPhase::Setup, 10), &deal)
+        .submit_deal(&ctx(&m, 0, BeaconPhase::Deal, 10), &deal)
         .unwrap();
     assert!(matches!(outcome, DealOutcome::ConflictingDeal(_)));
     assert!(e.disqualified().contains(&0));
@@ -409,12 +412,12 @@ fn deal_accept_duplicate_conflict_evidence() {
     let mut e = DkgEpoch::new(config());
     let deal = make_deal(0, 1, None, false);
     assert_eq!(
-        e.submit_deal(&ctx(&m, 0, BeaconPhase::Setup, 10), &deal)
+        e.submit_deal(&ctx(&m, 0, BeaconPhase::Deal, 10), &deal)
             .unwrap(),
         DealOutcome::Accepted
     );
     assert_eq!(
-        e.submit_deal(&ctx(&m, 0, BeaconPhase::Setup, 10), &deal)
+        e.submit_deal(&ctx(&m, 0, BeaconPhase::Deal, 10), &deal)
             .unwrap(),
         DealOutcome::Duplicate
     );
@@ -422,7 +425,7 @@ fn deal_accept_duplicate_conflict_evidence() {
 
     let conflicting = make_deal(0, 1, Some(seed(0xAB)), false);
     let outcome = e
-        .submit_deal(&ctx(&m, 0, BeaconPhase::Setup, 10), &conflicting)
+        .submit_deal(&ctx(&m, 0, BeaconPhase::Deal, 10), &conflicting)
         .unwrap();
     assert!(matches!(outcome, DealOutcome::ConflictingDeal(ev) if ev.dealer_i == 0));
     assert!(e.disqualified().contains(&0));
@@ -440,7 +443,7 @@ fn key_replay_vs_equivocation() {
     // Fresh key accepted (tx envelope ref [1;32]).
     assert_eq!(
         e.register_key(
-            &ctx_ref(&m, 0, BeaconPhase::Setup, 10, [1u8; 32]),
+            &ctx_ref(&m, 0, BeaconPhase::KeyRegistration, 10, [1u8; 32]),
             &make_reg(0)
         )
         .unwrap(),
@@ -449,7 +452,7 @@ fn key_replay_vs_equivocation() {
     // Identical replay ⇒ idempotent no-op.
     assert_eq!(
         e.register_key(
-            &ctx_ref(&m, 0, BeaconPhase::Setup, 10, [2u8; 32]),
+            &ctx_ref(&m, 0, BeaconPhase::KeyRegistration, 10, [2u8; 32]),
             &make_reg(0)
         )
         .unwrap(),
@@ -459,7 +462,10 @@ fn key_replay_vs_equivocation() {
     // ⇒ equivocation with two individually-authenticated records.
     let other = make_reg_for(&SecretScalar::from_bytes_le(&seed(0x91)).unwrap());
     let outcome = e
-        .register_key(&ctx_ref(&m, 0, BeaconPhase::Setup, 10, [3u8; 32]), &other)
+        .register_key(
+            &ctx_ref(&m, 0, BeaconPhase::KeyRegistration, 10, [3u8; 32]),
+            &other,
+        )
         .unwrap();
     match outcome {
         RegistrationOutcome::Equivocation(ev) => {
@@ -494,24 +500,30 @@ fn register_rejects_bad_pop_and_off_curve() {
     let mut wrong_pop = make_reg(0);
     wrong_pop.pop = ek_secret(2).pop_prove().to_compressed();
     assert_eq!(
-        e.register_key(&ctx(&m, 0, BeaconPhase::Setup, 10), &wrong_pop),
+        e.register_key(&ctx(&m, 0, BeaconPhase::KeyRegistration, 10), &wrong_pop),
         Err(SetupError::PopInvalid)
     );
     // Off-curve EK.
     let mut bad = make_reg(0);
     bad.ek_j = [0x80u8; 48];
     assert!(matches!(
-        e.register_key(&ctx(&m, 0, BeaconPhase::Setup, 10), &bad),
+        e.register_key(&ctx(&m, 0, BeaconPhase::KeyRegistration, 10), &bad),
         Err(SetupError::InvalidElement(_))
     ));
-    // Registering after the cutoff (register-before-cutoff, §11 rule 3).
-    assert_eq!(
-        e.register_key(
-            &ctx(&m, 0, BeaconPhase::Setup, DEAL_CUTOFF + 1),
-            &make_reg(0)
-        ),
-        Err(SetupError::Context(ContextError::CutoffViolation))
-    );
+    // STRICT PHASE SEPARATION (register-before-cutoff, §11 rule 3): key registration is
+    // valid ONLY in the KeyRegistration window; it is rejected once the deal window has
+    // opened (one window after) and in a between-windows gap (`None`).
+    for wrong in [Some(BeaconPhase::Deal), None] {
+        let bad_phase = ExecContext {
+            phase: wrong,
+            ..ctx(&m, 0, BeaconPhase::KeyRegistration, 10)
+        };
+        assert_eq!(
+            e.register_key(&bad_phase, &make_reg(0)),
+            Err(SetupError::Context(ContextError::PhaseMismatch)),
+            "registration must be rejected in phase {wrong:?}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -524,7 +536,7 @@ fn verdict_slash_false_accuser() {
     let mut e = epoch_with_deal(&m, 0, 1, None, false);
     let outcome = e
         .apply_complaint(
-            &ctx(&m, 1, BeaconPhase::Setup, 50),
+            &ctx(&m, 1, BeaconPhase::Complaint, 50),
             &make_complaint(0, 1, None),
         )
         .unwrap();
@@ -540,7 +552,7 @@ fn verdict_disqualify_and_slash() {
     let mut e = epoch_with_deal(&m, 0, 1, Some(seed(0xCD)), false);
     let outcome = e
         .apply_complaint(
-            &ctx(&m, 1, BeaconPhase::Setup, 50),
+            &ctx(&m, 1, BeaconPhase::Complaint, 50),
             &make_complaint(0, 1, None),
         )
         .unwrap();
@@ -554,7 +566,7 @@ fn verdict_disqualify_aead_open_failure() {
     let mut e = epoch_with_deal(&m, 0, 1, None, true);
     let outcome = e
         .apply_complaint(
-            &ctx(&m, 1, BeaconPhase::Setup, 50),
+            &ctx(&m, 1, BeaconPhase::Complaint, 50),
             &make_complaint(0, 1, None),
         )
         .unwrap();
@@ -570,7 +582,7 @@ fn verdict_reject_complaint_malformed_and_reprosecute() {
     let d_wrong = ek_secret(2).ecdh(&r_pt).unwrap();
     let outcome = e
         .apply_complaint(
-            &ctx(&m, 1, BeaconPhase::Setup, 50),
+            &ctx(&m, 1, BeaconPhase::Complaint, 50),
             &make_complaint(0, 1, Some(d_wrong)),
         )
         .unwrap();
@@ -580,7 +592,7 @@ fn verdict_reject_complaint_malformed_and_reprosecute() {
     // A malformed complaint does not consume the pair: a valid one still takes effect.
     let good = e
         .apply_complaint(
-            &ctx(&m, 1, BeaconPhase::Setup, 50),
+            &ctx(&m, 1, BeaconPhase::Complaint, 50),
             &make_complaint(0, 1, None),
         )
         .unwrap();
@@ -594,14 +606,14 @@ fn complaint_idempotent_no_double_jeopardy() {
     let mut e = epoch_with_deal(&m, 0, 1, Some(seed(0xCD)), false);
     let first = e
         .apply_complaint(
-            &ctx(&m, 1, BeaconPhase::Setup, 50),
+            &ctx(&m, 1, BeaconPhase::Complaint, 50),
             &make_complaint(0, 1, None),
         )
         .unwrap();
     assert!(first.state_changed);
     let second = e
         .apply_complaint(
-            &ctx(&m, 1, BeaconPhase::Setup, 50),
+            &ctx(&m, 1, BeaconPhase::Complaint, 50),
             &make_complaint(0, 1, None),
         )
         .unwrap();
@@ -615,19 +627,19 @@ fn complaint_not_adjudicable_missing_facts() {
     let mut e = DkgEpoch::new(config());
     assert_eq!(
         e.adjudicate(
-            &ctx(&m, 1, BeaconPhase::Setup, 50),
+            &ctx(&m, 1, BeaconPhase::Complaint, 50),
             &make_complaint(0, 1, None)
         ),
         Err(AdjudicateError::NoDeal)
     );
     e.submit_deal(
-        &ctx(&m, 0, BeaconPhase::Setup, 10),
+        &ctx(&m, 0, BeaconPhase::Deal, 10),
         &make_deal(0, 1, None, false),
     )
     .unwrap();
     assert_eq!(
         e.adjudicate(
-            &ctx(&m, 1, BeaconPhase::Setup, 50),
+            &ctx(&m, 1, BeaconPhase::Complaint, 50),
             &make_complaint(0, 1, None)
         ),
         Err(AdjudicateError::NoRecipientKey)
@@ -645,7 +657,7 @@ fn qual_success_and_safe_halt() {
     for i in 0..4 {
         assert_eq!(
             e.submit_deal(
-                &ctx(&m, i, BeaconPhase::Setup, 10),
+                &ctx(&m, i, BeaconPhase::Deal, 10),
                 &make_deal(i, 0, None, false)
             )
             .unwrap(),
@@ -679,7 +691,7 @@ fn honest_qualified_epoch() -> (QualifiedEpoch, Vec<SecretScalar>) {
         for j in 0..3 {
             assert_eq!(
                 e.submit_deal(
-                    &ctx(&m, i, BeaconPhase::Setup, 10),
+                    &ctx(&m, i, BeaconPhase::Deal, 10),
                     &make_deal(i, j, None, false)
                 )
                 .unwrap(),

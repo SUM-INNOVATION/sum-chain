@@ -2,8 +2,9 @@
 //!
 //! One [`DkgEpoch`] accumulates the on-chain epoch-setup facts — key registrations,
 //! deals, and the objective verdicts of adjudicated complaints — under an
-//! **authenticated** [`ExecContext`] (signer identity, epoch membership snapshot,
-//! phase, cutoffs), and then deterministically determines `QUAL` and, on success,
+//! **authenticated** [`ExecContext`] (signer identity, epoch membership snapshot, the
+//! schedule-derived within-epoch phase), and then deterministically determines `QUAL`
+//! and, on success,
 //! the epoch group key `PK_E` ([`DkgEpoch::finalize`]). Every method is a pure
 //! function of already-accepted on-chain data plus the crypto adapter; there is no
 //! vote, no clock, and no RNG (draft §6.1 "a pure function of on-chain data").
@@ -427,17 +428,16 @@ impl DkgEpoch {
     ) -> Result<RegistrationOutcome, SetupError> {
         self.check_membership_size(ctx)?;
         ctx.check_chain_epoch(reg.chain_id, reg.epoch)?;
-        ctx.check_phase(BeaconPhase::Setup)?;
+        // Register-before-cutoff (draft §11 rule 3): key registration is valid ONLY in
+        // the KeyRegistration window; the schedule-derived phase enforces the height
+        // window (reject one block before/after).
+        ctx.check_phase(BeaconPhase::KeyRegistration)?;
         // The signer must be the member the registration is *for* — its membership
         // index is the registrant's identity `j`.
         let validator_index = ctx
             .membership
             .index_of(&ctx.signer)
             .ok_or(ContextError::SignerNotMember)?;
-        // Register-before-cutoff (draft §11 rule 3).
-        if ctx.block_height > ctx.cutoffs.deal_cutoff {
-            return Err(SetupError::Context(ContextError::CutoffViolation));
-        }
 
         let ek = G1Point::from_compressed(&reg.ek_j)?;
         let pop = Pop::from_compressed(&reg.pop)?;
@@ -531,14 +531,13 @@ impl DkgEpoch {
     ) -> Result<DealOutcome, SetupError> {
         self.check_membership_size(ctx)?;
         ctx.check_chain_epoch(deal.chain_id, deal.epoch)?;
-        ctx.check_phase(BeaconPhase::Setup)?;
+        // Deals are valid ONLY in the Deal window (strictly after the key cutoff, §8);
+        // the schedule-derived phase enforces the height window.
+        ctx.check_phase(BeaconPhase::Deal)?;
         ctx.check_signer_is(deal.dealer_i)?; // deal signer ↔ dealer_i
         ctx.check_index(deal.dealer_i)?; // dealer membership (< n)
         ctx.check_index(deal.recipient_j)?; // recipient membership (< n)
-        if ctx.block_height > ctx.cutoffs.deal_cutoff {
-            return Err(SetupError::Context(ContextError::CutoffViolation));
-        }
-        // Commitment count == T (draft §1.2/§4.3).
+                                            // Commitment count == T (draft §1.2/§4.3).
         if deal.commitments.len() != self.cfg.params.t() as usize {
             return Err(SetupError::CommitmentCountMismatch {
                 got: deal.commitments.len(),
@@ -607,22 +606,21 @@ impl DkgEpoch {
     // -- Complaint adjudication (draft §5, §6.1) -----------------------------
 
     /// Adjudicate a complaint under an authenticated context — a **pure** function of
-    /// on-chain data (draft §6.1). Enforces (before crypto): chain/epoch, setup
-    /// phase, complainant signer ↔ recipient `j`, both indices `< n`, complaint
-    /// deadline. Then the DLEQ (§5.5) ⇒ ECIES-open (§8) ⇒ Feldman (§6.2) pipeline.
+    /// on-chain data (draft §6.1). Enforces (before crypto): chain/epoch, complaint
+    /// phase, complainant signer ↔ recipient `j`, both indices `< n`. The complaint
+    /// window (strictly after the deal cutoff, up to and including the complaint
+    /// deadline, §6.5) is enforced by the schedule-derived phase. Then the DLEQ (§5.5)
+    /// ⇒ ECIES-open (§8) ⇒ Feldman (§6.2) pipeline.
     pub fn adjudicate(
         &self,
         ctx: &ExecContext,
         complaint: &DkgComplaintV1,
     ) -> Result<Verdict, AdjudicateError> {
         ctx.check_chain_epoch(complaint.chain_id, complaint.epoch)?;
-        ctx.check_phase(BeaconPhase::Setup)?;
+        ctx.check_phase(BeaconPhase::Complaint)?;
         ctx.check_signer_is(complaint.j)?; // complainant ↔ recipient j
         ctx.check_index(complaint.i)?;
         ctx.check_index(complaint.j)?;
-        if ctx.block_height > ctx.cutoffs.complaint_deadline {
-            return Err(AdjudicateError::Context(ContextError::CutoffViolation));
-        }
 
         let deal = self
             .deals

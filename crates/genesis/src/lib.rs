@@ -166,7 +166,9 @@ mod addr_json {
 
     /// `#[serde(with = "addr_json::opt_governance")]` for `Option<GovernanceParams>`.
     pub(super) mod opt_governance {
-        use super::{Deserialize, Deserializer, GovernanceParams, GovernanceParamsJson, Serializer};
+        use super::{
+            Deserialize, Deserializer, GovernanceParams, GovernanceParamsJson, Serializer,
+        };
         pub fn serialize<S: Serializer>(
             v: &Option<GovernanceParams>,
             s: S,
@@ -790,8 +792,8 @@ impl Default for DocClassParams {
 impl Default for ChainParams {
     fn default() -> Self {
         Self {
-            block_time_ms: 2000,           // 2 seconds
-            max_block_bytes: 1_000_000,    // 1 MB
+            block_time_ms: 2000,        // 2 seconds
+            max_block_bytes: 1_000_000, // 1 MB
             max_txs_per_block: 1000,
             min_fee: 1,
             finality_depth: default_finality_depth(),
@@ -959,7 +961,9 @@ impl ChainParams {
         if let Some(sched) = &self.beacon_schedule {
             sched
                 .validate()
-                .map_err(|e| GenesisError::InvalidBeaconSchedule { reason: e_reason(e) })?;
+                .map_err(|e| GenesisError::InvalidBeaconSchedule {
+                    reason: e_reason(e),
+                })?;
         }
         Ok(())
     }
@@ -972,7 +976,9 @@ fn e_reason(e: sumchain_primitives::beacon_schedule::BeaconScheduleError) -> &'s
     match e {
         E::ZeroEpochLength => "epoch_length must be >= 1",
         E::UnorderedOffsets => {
-            "phase offsets must satisfy deal_cutoff_offset < complaint_deadline_offset < epoch_length"
+            "phase offsets must satisfy strict separation: key_cutoff < deal_start <= \
+             deal_cutoff < complaint_start <= complaint_deadline, with a non-empty \
+             signing window (complaint_deadline + 1 < epoch_length)"
         }
         E::Overflow => "beacon epoch derivation overflowed u64",
     }
@@ -1227,8 +1233,8 @@ impl NodeConfig {
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let contents = fs::read_to_string(path)?;
         // Using serde_json for simplicity; in production use toml crate
-        let config: NodeConfig = serde_json::from_str(&contents)
-            .map_err(|e| GenesisError::Json(e))?;
+        let config: NodeConfig =
+            serde_json::from_str(&contents).map_err(|e| GenesisError::Json(e))?;
         Ok(config)
     }
 
@@ -1266,8 +1272,14 @@ mod tests {
         }"#;
         let g: Genesis = serde_json::from_str(json).expect("old-shape genesis must deserialize");
         // Phase 1 v3.0 params.
-        assert_eq!(g.params.max_access_list_bytes, default_max_access_list_bytes());
-        assert_eq!(g.params.activation_grace_blocks, default_activation_grace_blocks());
+        assert_eq!(
+            g.params.max_access_list_bytes,
+            default_max_access_list_bytes()
+        );
+        assert_eq!(
+            g.params.activation_grace_blocks,
+            default_activation_grace_blocks()
+        );
         assert_eq!(
             g.params.abandonment_fee_percent,
             default_abandonment_fee_percent()
@@ -1310,15 +1322,12 @@ mod tests {
 
     #[test]
     fn test_no_validators() {
-        let genesis = Genesis::new(
-            1,
-            0,
-            vec![],
-            HashMap::new(),
-            ChainParams::default(),
-        );
+        let genesis = Genesis::new(1, 0, vec![], HashMap::new(), ChainParams::default());
 
-        assert!(matches!(genesis.validate(), Err(GenesisError::NoValidators)));
+        assert!(matches!(
+            genesis.validate(),
+            Err(GenesisError::NoValidators)
+        ));
     }
 
     #[test]
@@ -1331,7 +1340,10 @@ mod tests {
             ChainParams::default(),
         );
 
-        assert!(matches!(genesis.validate(), Err(GenesisError::InvalidValidator(_))));
+        assert!(matches!(
+            genesis.validate(),
+            Err(GenesisError::InvalidValidator(_))
+        ));
     }
 
     #[test]
@@ -1423,7 +1435,10 @@ mod tests {
             "treasury not base58: {json}"
         );
         assert!(!json.contains("\"council\""), "no council field: {json}");
-        assert!(!json.contains("dispute_resolver"), "no resolver field: {json}");
+        assert!(
+            !json.contains("dispute_resolver"),
+            "no resolver field: {json}"
+        );
         // round-trips.
         let p2: ChainParams = serde_json::from_str(&json).unwrap();
         let gp = p2.governance.unwrap();
@@ -1454,13 +1469,19 @@ mod tests {
             .unwrap()
             .remove("inference_settlement_consistency_enabled_from_height");
         let back: ChainParams = serde_json::from_value(value).unwrap();
-        assert_eq!(back.inference_settlement_consistency_enabled_from_height, None);
+        assert_eq!(
+            back.inference_settlement_consistency_enabled_from_height,
+            None
+        );
         // Explicit activation height round-trips.
         let mut p2 = ChainParams::default();
         p2.inference_settlement_consistency_enabled_from_height = Some(8_900_000);
         let json = serde_json::to_string(&p2).unwrap();
         let p3: ChainParams = serde_json::from_str(&json).unwrap();
-        assert_eq!(p3.inference_settlement_consistency_enabled_from_height, Some(8_900_000));
+        assert_eq!(
+            p3.inference_settlement_consistency_enabled_from_height,
+            Some(8_900_000)
+        );
     }
 
     #[test]
@@ -1475,12 +1496,18 @@ mod tests {
             .unwrap()
             .remove("omninode_sponsored_attestation_enabled_from_height");
         let back: ChainParams = serde_json::from_value(value).unwrap();
-        assert_eq!(back.omninode_sponsored_attestation_enabled_from_height, None);
+        assert_eq!(
+            back.omninode_sponsored_attestation_enabled_from_height,
+            None
+        );
         let mut p2 = ChainParams::default();
         p2.omninode_sponsored_attestation_enabled_from_height = Some(9_100_000);
         let json = serde_json::to_string(&p2).unwrap();
         let p3: ChainParams = serde_json::from_str(&json).unwrap();
-        assert_eq!(p3.omninode_sponsored_attestation_enabled_from_height, Some(9_100_000));
+        assert_eq!(
+            p3.omninode_sponsored_attestation_enabled_from_height,
+            Some(9_100_000)
+        );
     }
 
     #[test]
@@ -1506,7 +1533,10 @@ mod tests {
         p2.inference_verifier_bonding_enabled_from_height = Some(9_000_000);
         let json = serde_json::to_string(&p2).unwrap();
         let p3: ChainParams = serde_json::from_str(&json).unwrap();
-        assert_eq!(p3.inference_verifier_bonding_enabled_from_height, Some(9_000_000));
+        assert_eq!(
+            p3.inference_verifier_bonding_enabled_from_height,
+            Some(9_000_000)
+        );
     }
 
     #[test]
@@ -1527,7 +1557,10 @@ mod tests {
         p.governance = Some(gov_params_with_treasury(Some(treasury)));
         let json = serde_json::to_string(&p).unwrap();
         let bad = json.replace(&treasury.to_base58(), "not-valid-base58-0OIl");
-        assert!(serde_json::from_str::<ChainParams>(&bad).is_err(), "invalid base58 must reject");
+        assert!(
+            serde_json::from_str::<ChainParams>(&bad).is_err(),
+            "invalid base58 must reject"
+        );
     }
 
     #[test]
@@ -1620,21 +1653,37 @@ mod tests {
     #[test]
     fn beacon_params_config_validation() {
         // Default genesis has no beacon params and a dormant gate.
-        let g = Genesis::from_json(&serde_json::to_string(&local_genesis_value()).unwrap()).unwrap();
+        let g =
+            Genesis::from_json(&serde_json::to_string(&local_genesis_value()).unwrap()).unwrap();
         assert_eq!(g.params.beacon_params, None);
         assert_eq!(g.params.beacon_enabled_from_height, None);
 
         // A VALID params config is accepted at load (gate still None).
-        let valid = BeaconParamsConfig { f: 1, c: 1, t: 2, q_dkg: 3, n: 5 };
+        let valid = BeaconParamsConfig {
+            f: 1,
+            c: 1,
+            t: 2,
+            q_dkg: 3,
+            n: 5,
+        };
         assert!(valid.validate().is_ok());
         let mut v = local_genesis_value();
         v["params"]["beacon_params"] = serde_json::to_value(valid).unwrap();
         let g = Genesis::from_json(&serde_json::to_string(&v).unwrap()).unwrap();
         assert_eq!(g.params.beacon_params, Some(valid));
-        assert_eq!(g.params.beacon_enabled_from_height, None, "params surface does NOT open the gate");
+        assert_eq!(
+            g.params.beacon_enabled_from_height, None,
+            "params surface does NOT open the gate"
+        );
 
         // An INVALID config (T < f+1) is rejected at load.
-        let invalid = BeaconParamsConfig { f: 1, c: 1, t: 1, q_dkg: 3, n: 5 };
+        let invalid = BeaconParamsConfig {
+            f: 1,
+            c: 1,
+            t: 1,
+            q_dkg: 3,
+            n: 5,
+        };
         assert!(invalid.validate().is_err());
         let mut v = local_genesis_value();
         v["params"]["beacon_params"] = serde_json::to_value(invalid).unwrap();
@@ -1649,14 +1698,19 @@ mod tests {
         v["params"]["beacon_enabled_from_height"] = serde_json::json!(0u64);
         assert!(matches!(
             Genesis::from_json(&serde_json::to_string(&v).unwrap()),
-            Err(GenesisError::IncompleteSubsystemActivation { gate: "beacon_enabled_from_height" })
+            Err(GenesisError::IncompleteSubsystemActivation {
+                gate: "beacon_enabled_from_height"
+            })
         ));
     }
 
     // Test 4 — a future `Some(h)` is rejected too (not just `Some(0)`), per gate.
     #[test]
     fn foundation_gates_future_height_rejected_by_loader() {
-        for gate in ["compute_pool_enabled_from_height", "beacon_enabled_from_height"] {
+        for gate in [
+            "compute_pool_enabled_from_height",
+            "beacon_enabled_from_height",
+        ] {
             let mut v = local_genesis_value();
             v["params"][gate] = serde_json::json!(9_000_000u64);
             let s = serde_json::to_string(&v).unwrap();
@@ -1696,7 +1750,9 @@ mod tests {
             // new gates*. (It may reject placeholder templates for their existing
             // invalid validator keys — that predates and is unrelated to #118.)
             match Genesis::from_file(&path) {
-                Ok(_) | Err(GenesisError::InvalidValidator(_)) | Err(GenesisError::InvalidAddress(_)) => {}
+                Ok(_)
+                | Err(GenesisError::InvalidValidator(_))
+                | Err(GenesisError::InvalidAddress(_)) => {}
                 Err(GenesisError::IncompleteSubsystemActivation { gate }) => {
                     panic!("{path}: new gate '{gate}' must not reject a committed fixture")
                 }
@@ -1704,7 +1760,10 @@ mod tests {
             }
         }
         // The real-validator fixture loads fully through the authoritative loader.
-        let local = format!("{}/../../genesis/local_genesis.json", env!("CARGO_MANIFEST_DIR"));
+        let local = format!(
+            "{}/../../genesis/local_genesis.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
         let g = Genesis::from_file(&local).expect("local genesis must fully load");
         assert_eq!(g.params.compute_pool_enabled_from_height, None);
         assert_eq!(g.params.beacon_enabled_from_height, None);
@@ -1740,7 +1799,10 @@ mod tests {
             .unwrap()
             .remove("messaging_sponsored_registration_enabled_from_height");
         let back: ChainParams = serde_json::from_value(value).unwrap();
-        assert_eq!(back.messaging_sponsored_registration_enabled_from_height, None);
+        assert_eq!(
+            back.messaging_sponsored_registration_enabled_from_height,
+            None
+        );
         // Explicit height round-trips.
         let p2 = ChainParams {
             messaging_sponsored_registration_enabled_from_height: Some(12_345_678),
@@ -1748,7 +1810,10 @@ mod tests {
         };
         let json = serde_json::to_string(&p2).unwrap();
         let p3: ChainParams = serde_json::from_str(&json).unwrap();
-        assert_eq!(p3.messaging_sponsored_registration_enabled_from_height, Some(12_345_678));
+        assert_eq!(
+            p3.messaging_sponsored_registration_enabled_from_height,
+            Some(12_345_678)
+        );
     }
 
     // Explicit JSON `null` decodes to None (and the loader accepts it).
@@ -1759,7 +1824,11 @@ mod tests {
             serde_json::Value::Null;
         let s = serde_json::to_string(&v).unwrap();
         let g = Genesis::from_json(&s).expect("explicit-null gate must load as None");
-        assert_eq!(g.params.messaging_sponsored_registration_enabled_from_height, None);
+        assert_eq!(
+            g.params
+                .messaging_sponsored_registration_enabled_from_height,
+            None
+        );
     }
 
     // CRITICAL: unlike the dormant compute-pool / beacon gates, this is a
@@ -1776,7 +1845,8 @@ mod tests {
                 panic!("activation gate Some({h}) must be accepted by the loader, got {e:?}")
             });
             assert_eq!(
-                g.params.messaging_sponsored_registration_enabled_from_height,
+                g.params
+                    .messaging_sponsored_registration_enabled_from_height,
                 Some(h)
             );
         }
@@ -1790,7 +1860,10 @@ mod tests {
         let json = serde_json::to_string(&p).unwrap();
         assert!(json.contains("messaging_sponsored_registration_enabled_from_height"));
         let back: ChainParams = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.messaging_sponsored_registration_enabled_from_height, None);
+        assert_eq!(
+            back.messaging_sponsored_registration_enabled_from_height,
+            None
+        );
     }
 
     // Every committed genesis fixture still loads AND leaves the gate dormant —
@@ -1815,7 +1888,9 @@ mod tests {
             let g: Genesis =
                 serde_json::from_str(&contents).unwrap_or_else(|e| panic!("{path}: {e:?}"));
             assert_eq!(
-                g.params.messaging_sponsored_registration_enabled_from_height, None,
+                g.params
+                    .messaging_sponsored_registration_enabled_from_height,
+                None,
                 "{path}: gate must be dormant"
             );
         }

@@ -645,10 +645,15 @@ impl<'a> BeaconStore<'a> {
                 );
             }
         }
-        // The FIXED per-epoch membership snapshot is persisted ONLY once the epoch has
-        // real beacon state (its first VALID op), so a block with only invalid beacon
-        // txs writes nothing (no snapshot, no state). Once written it stays stable.
-        if !rows.is_empty() {
+        // MEMBERSHIP AT THE EPOCH BOUNDARY (Correction 1): the FIXED per-epoch snapshot
+        // is emitted whenever a non-empty snapshot is supplied — i.e. the executor's
+        // per-block accumulator persists it at the epoch boundary (`height ==
+        // epoch_start`) INDEPENDENT of any beacon tx, and re-emits the identical row
+        // (zero delta) on later blocks. The standalone lifecycle coordinator passes an
+        // empty snapshot (`&[]`) and therefore writes no membership row. The snapshot is
+        // frozen: mid-epoch validator-set churn never reaches this row (later blocks
+        // LOAD the persisted set rather than re-sampling the active set).
+        if !membership.is_empty() {
             rows.insert(
                 membership_row_key(epoch),
                 beacon_encode(&StoredBeaconMembership {

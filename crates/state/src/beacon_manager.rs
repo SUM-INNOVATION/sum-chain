@@ -30,7 +30,7 @@
 
 use std::collections::BTreeMap;
 
-use sumchain_beacon_runtime::context::{BeaconPhase, EpochCutoffs, EpochMembership, ExecContext};
+use sumchain_beacon_runtime::context::{BeaconPhase, EpochMembership, ExecContext};
 use sumchain_beacon_runtime::dkg::{DkgConfig, DkgEpoch, DkgOutcome};
 use sumchain_beacon_runtime::rounds::BeaconChain;
 use sumchain_beacon_runtime::signing::QualifiedEpoch;
@@ -192,22 +192,20 @@ impl<'a> BeaconManager<'a> {
 pub struct BeaconBlockState {
     cfg: DkgConfig,
     membership: EpochMembership,
-    cutoffs: EpochCutoffs,
-    /// The schedule-derived phase for THIS block's height (constant for the block).
-    phase: BeaconPhase,
+    /// The schedule-derived within-epoch phase for THIS block's height (constant for
+    /// the block), or `None` in a between-windows gap (no op valid this block).
+    phase: Option<BeaconPhase>,
     genesis: [u8; 32],
     working: BeaconWorking,
 }
 
 impl BeaconBlockState {
     /// Rehydrate the accumulator from the persisted store (rows → runtime).
-    #[allow(clippy::too_many_arguments)]
     pub fn load_from_store(
         db: &Database,
         cfg: DkgConfig,
         membership: EpochMembership,
-        cutoffs: EpochCutoffs,
-        phase: BeaconPhase,
+        phase: Option<BeaconPhase>,
         genesis: [u8; 32],
     ) -> Result<Self> {
         let store = BeaconStore::new(db);
@@ -233,29 +231,26 @@ impl BeaconBlockState {
         Ok(BeaconBlockState {
             cfg,
             membership,
-            cutoffs,
             phase,
             genesis,
             working: BeaconWorking { epoch, chain },
         })
     }
 
-    /// The epoch membership snapshot (validator-set at the epoch boundary).
+    /// The epoch membership snapshot (the active validator set as of the epoch
+    /// boundary `epoch_start`, frozen for the whole epoch).
     pub fn membership(&self) -> &EpochMembership {
         &self.membership
     }
 
-    /// The schedule-derived phase for this block's height.
-    pub fn phase(&self) -> BeaconPhase {
+    /// The schedule-derived within-epoch phase for this block's height (`None` in a
+    /// between-windows gap).
+    pub fn phase(&self) -> Option<BeaconPhase> {
         self.phase
     }
     /// The static epoch config (chain/epoch/params).
     pub fn cfg(&self) -> DkgConfig {
         self.cfg
-    }
-    /// The epoch timing cutoffs.
-    pub fn cutoffs(&self) -> EpochCutoffs {
-        self.cutoffs
     }
     /// The accumulated working state (read-only).
     pub fn working(&self) -> &BeaconWorking {
@@ -351,7 +346,7 @@ mod tests {
     use super::*;
     use sumchain_beacon_crypto::SecretScalar;
     use sumchain_beacon_runtime::context::{
-        BeaconPhase, EpochCutoffs, EpochMembership, ExecContext, ValidatorId,
+        BeaconPhase, EpochMembership, ExecContext, ValidatorId,
     };
     use sumchain_beacon_runtime::dkg::{DealOutcome, RegistrationOutcome};
     use sumchain_beacon_runtime::params::BeaconParams;
@@ -402,19 +397,20 @@ mod tests {
             params: BeaconParams::proposed_default(),
         }
     }
-    fn ctx(m: &EpochMembership, signer: u32, tx_ref: [u8; 32]) -> ExecContext<'_> {
+    fn ctx(
+        m: &EpochMembership,
+        signer: u32,
+        phase: BeaconPhase,
+        tx_ref: [u8; 32],
+    ) -> ExecContext<'_> {
         ExecContext {
             signer: vid(signer),
             tx_ref,
             chain_id: CHAIN_ID,
             epoch: EPOCH,
             block_height: 10,
-            phase: BeaconPhase::Setup,
+            phase: Some(phase),
             membership: m,
-            cutoffs: EpochCutoffs {
-                deal_cutoff: 100,
-                complaint_deadline: 200,
-            },
         }
     }
     fn reg(secret: &SecretScalar) -> RegisterBeaconKeyV1 {
@@ -516,12 +512,12 @@ mod tests {
         mgr.apply_block(5, |w| {
             w.epoch
                 .register_key(
-                    &ctx(&m, 0, [1u8; 32]),
+                    &ctx(&m, 0, BeaconPhase::KeyRegistration, [1u8; 32]),
                     &reg(&SecretScalar::from_bytes_le(&seed(0x40)).unwrap()),
                 )
                 .map_err(|e| StateError::InvalidOperation(format!("{e:?}")))?;
             w.epoch
-                .submit_deal(&ctx(&m, 0, [2u8; 32]), &deal(0, 0))
+                .submit_deal(&ctx(&m, 0, BeaconPhase::Deal, [2u8; 32]), &deal(0, 0))
                 .map_err(|e| StateError::InvalidOperation(format!("{e:?}")))?;
             Ok(())
         })
@@ -551,7 +547,7 @@ mod tests {
                 assert_eq!(
                     w.epoch
                         .register_key(
-                            &ctx(&m, 0, [1u8; 32]),
+                            &ctx(&m, 0, BeaconPhase::KeyRegistration, [1u8; 32]),
                             &reg(&SecretScalar::from_bytes_le(&seed(0x40)).unwrap())
                         )
                         .map_err(|e| StateError::InvalidOperation(format!("{e:?}")))?,
@@ -559,7 +555,7 @@ mod tests {
                 );
                 assert_eq!(
                     w.epoch
-                        .submit_deal(&ctx(&m, 0, [2u8; 32]), &deal(0, 0))
+                        .submit_deal(&ctx(&m, 0, BeaconPhase::Deal, [2u8; 32]), &deal(0, 0))
                         .map_err(|e| StateError::InvalidOperation(format!("{e:?}")))?,
                     DealOutcome::Accepted
                 );
@@ -598,7 +594,7 @@ mod tests {
         // Height 6: a second deal 1->0 on top.
         mgr.apply_block(6, |w| {
             w.epoch
-                .submit_deal(&ctx(&m, 1, [3u8; 32]), &deal(1, 0))
+                .submit_deal(&ctx(&m, 1, BeaconPhase::Deal, [3u8; 32]), &deal(1, 0))
                 .map_err(|e| StateError::InvalidOperation(format!("{e:?}")))?;
             Ok(())
         })
@@ -623,7 +619,7 @@ mod tests {
         let d6_first = {
             mgr.apply_block(6, |w| {
                 w.epoch
-                    .submit_deal(&ctx(&m, 1, [3u8; 32]), &deal(1, 0))
+                    .submit_deal(&ctx(&m, 1, BeaconPhase::Deal, [3u8; 32]), &deal(1, 0))
                     .map_err(|e| StateError::InvalidOperation(format!("{e:?}")))?;
                 Ok(())
             })
@@ -633,7 +629,7 @@ mod tests {
         mgr.revert_block(6).unwrap();
         mgr.apply_block(6, |w| {
             w.epoch
-                .submit_deal(&ctx(&m, 1, [3u8; 32]), &deal(1, 0))
+                .submit_deal(&ctx(&m, 1, BeaconPhase::Deal, [3u8; 32]), &deal(1, 0))
                 .map_err(|e| StateError::InvalidOperation(format!("{e:?}")))?;
             Ok(())
         })
@@ -659,7 +655,7 @@ mod tests {
         // whole transition errors and nothing is persisted.
         let err = mgr.apply_block(5, |w| {
             w.epoch
-                .submit_deal(&ctx(&m, 1, [9u8; 32]), &deal(0, 0)) // signer 1, dealer 0
+                .submit_deal(&ctx(&m, 1, BeaconPhase::Deal, [9u8; 32]), &deal(0, 0)) // signer 1, dealer 0
                 .map_err(|e| StateError::InvalidOperation(format!("{e:?}")))?;
             Ok(())
         });

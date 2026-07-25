@@ -14,9 +14,10 @@
 //!   config, with the ratified §7.4 inequalities enforced on construction; the
 //!   proposed profile is a test fixture only, never frozen behavior.
 //! * **Authenticated context** ([`context`]): every transition takes an
-//!   [`context::ExecContext`] (signer identity, epoch membership snapshot, phase,
-//!   cutoffs) and enforces the actor bindings #164 deferred (registrant ↔ `j`,
-//!   dealer ↔ `i`, complainant ↔ `j`, partial signer ↔ `j`, indices `< n`, cutoffs).
+//!   [`context::ExecContext`] (signer identity, epoch membership snapshot, the
+//!   schedule-derived within-epoch phase) and enforces the actor bindings #164
+//!   deferred (registrant ↔ `j`, dealer ↔ `i`, complainant ↔ `j`, partial signer ↔
+//!   `j`, indices `< n`) plus STRICT PHASE SEPARATION (each op only in its window).
 //! * **Setup** ([`dkg`]): `RegisterBeaconKeyV1` (PoP verify §2.3; replay vs
 //!   equivocation distinguished with retained evidence), `DkgDealV1` (count `== T`,
 //!   membership, identical-commitments-across-recipients, §8.4 replay/conflict with
@@ -83,8 +84,9 @@
 //! The runtime is **fully vertically connected**. On the gate-open path the beacon
 //! executor (`crates/state/src/executor.rs::execute_beacon_tx`) builds an
 //! authenticated [`context::ExecContext`] from the SIGNED tx envelope (signer = tx
-//! public key, `tx_ref` = tx hash, chain/epoch, height/phase, cutoffs) + the epoch
-//! validator-snapshot membership + the genesis `BeaconParams`, and drives this runtime
+//! public key, `tx_ref` = tx hash, chain/epoch, height, schedule-derived phase) + the
+//! epoch validator-snapshot membership + the genesis `BeaconParams`, and drives this
+//! runtime
 //! through a per-block accumulator (`crate::beacon_manager::BeaconBlockState`): a VALID
 //! op (all runtime + crypto + actor/membership/cutoff checks pass) yields a **`Success`
 //! receipt** and is accumulated, then MATERIALIZED + PERSISTED as exactly one journal

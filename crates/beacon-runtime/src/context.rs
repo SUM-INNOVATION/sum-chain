@@ -90,35 +90,30 @@ impl EpochMembership {
     }
 }
 
-/// The protocol phase of a beacon operation (matches the #164 `TxPayload` split:
-/// setup slot 28, signing slot 29).
+/// The within-epoch lifecycle phase of a beacon operation, in ratified STRICT PHASE
+/// SEPARATION order (draft §11.3, §6.5, §8). Each op kind is valid ONLY in its own
+/// window; the executor derives the block's phase from the authoritative
+/// `BeaconSchedule` and threads it here. A between-windows gap is represented as
+/// `None` in [`ExecContext::phase`], and admits no operation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BeaconPhase {
-    /// DKG epoch-setup (registration, deal, complaint).
-    Setup,
-    /// Signing / output (partial, finalize).
+    /// K-rotate encryption-key registration window (`RegisterBeaconKey`).
+    KeyRegistration,
+    /// DKG deal window (`DkgDeal`).
+    Deal,
+    /// Complaint-adjudication window (`DkgComplaint`).
+    Complaint,
+    /// Threshold-signing / output window (`BeaconPartial`, `BeaconFinalize`).
     Signing,
-}
-
-/// Per-epoch timing cutoffs (draft §11.3, §6.5). Block-height magnitudes are OPEN
-/// in the draft (config, not consensus-fixed here); the runtime enforces the
-/// *ordering* rules against whatever the authoritative config supplies.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct EpochCutoffs {
-    /// Deals + key registrations must be included at height `≤ deal_cutoff`
-    /// (register-before-cutoff, §11 rule 3).
-    pub deal_cutoff: u64,
-    /// Complaints must be included at height `≤ complaint_deadline` (§6.5, §11.3).
-    /// Signing may proceed only after this (`> complaint_deadline`).
-    pub complaint_deadline: u64,
 }
 
 /// The authenticated execution context threaded into every beacon transition.
 ///
 /// `signer` is the **authenticated** tx signer (from the envelope, not the payload);
 /// `tx_ref` is the hash of that signed envelope; `membership` is the epoch snapshot;
-/// `phase`, `block_height`, `chain_id`, `epoch`, and `cutoffs` come from the
-/// executing block + authoritative config.
+/// `phase`, `block_height`, `chain_id`, and `epoch` come from the executing block +
+/// the authoritative `BeaconSchedule`. `phase` is `None` in a between-windows gap,
+/// where every operation is rejected.
 #[derive(Clone, Copy, Debug)]
 pub struct ExecContext<'a> {
     /// The authenticated tx signer's epoch identity.
@@ -136,12 +131,11 @@ pub struct ExecContext<'a> {
     pub epoch: u64,
     /// The height of the executing block.
     pub block_height: u64,
-    /// The enclosing `TxPayload` phase (setup / signing).
-    pub phase: BeaconPhase,
+    /// The block's within-epoch phase derived from the authoritative schedule, or
+    /// `None` for a between-windows gap (no operation is valid).
+    pub phase: Option<BeaconPhase>,
     /// The epoch membership snapshot.
     pub membership: &'a EpochMembership,
-    /// The epoch timing cutoffs.
-    pub cutoffs: EpochCutoffs,
 }
 
 /// An authenticated-binding / membership / phase / cutoff violation (draft §1.3,
@@ -167,9 +161,6 @@ pub enum ContextError {
     /// A carrier index (dealer/recipient/witness) is out of range (`>= n`).
     #[error("index out of membership range (>= n)")]
     IndexOutOfRange,
-    /// The operation arrived outside its allowed height / cutoff window.
-    #[error("operation outside its allowed cutoff window")]
-    CutoffViolation,
 }
 
 impl ExecContext<'_> {
@@ -206,9 +197,10 @@ impl ExecContext<'_> {
         }
     }
 
-    /// Enforce the phase equals `expected`.
+    /// Enforce the block's phase equals `expected` (a between-windows gap, `None`,
+    /// rejects every operation).
     pub(crate) fn check_phase(&self, expected: BeaconPhase) -> Result<(), ContextError> {
-        if self.phase == expected {
+        if self.phase == Some(expected) {
             Ok(())
         } else {
             Err(ContextError::PhaseMismatch)

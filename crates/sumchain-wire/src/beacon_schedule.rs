@@ -128,10 +128,14 @@ pub enum BeaconScheduleError {
     /// `epoch_length` is zero (an epoch must span ≥ 1 block).
     #[error("epoch_length must be >= 1")]
     ZeroEpochLength,
-    /// The within-epoch phase offsets are not strictly ordered and inside the epoch:
-    /// require `deal_cutoff_offset < complaint_deadline_offset < epoch_length`.
+    /// The within-epoch phase offsets do not satisfy the ratified STRICT PHASE
+    /// SEPARATION: require `key_cutoff_offset < deal_start_offset <=
+    /// deal_cutoff_offset < complaint_start_offset <= complaint_deadline_offset`
+    /// with a non-empty signing window (`complaint_deadline_offset + 1 < epoch_length`).
     #[error(
-        "phase offsets must satisfy deal_cutoff_offset < complaint_deadline_offset < epoch_length"
+        "phase offsets must satisfy key_cutoff_offset < deal_start_offset <= \
+         deal_cutoff_offset < complaint_start_offset <= complaint_deadline_offset, \
+         with complaint_deadline_offset + 1 < epoch_length (non-empty signing window)"
     )]
     UnorderedOffsets,
     /// A height derivation overflowed `u64` (astronomically large height).
@@ -141,63 +145,91 @@ pub enum BeaconScheduleError {
 
 /// The BR1 height→epoch schedule config (issue #127). Authoritative, validated at
 /// genesis load. **Declaring it does NOT activate the beacon** — the gate stays
-/// `None`. Within each epoch of `epoch_length` blocks starting at `start_height`:
-/// `[epoch_start, epoch_start+deal_cutoff_offset]` is the deal/registration window,
-/// `(…, epoch_start+complaint_deadline_offset]` the complaint window, and the
-/// remainder the signing window (draft §11.3, §6.5; magnitudes are config, not
+/// `None`. Within each epoch of `epoch_length` blocks starting at `start_height`,
+/// the ratified STRICT PHASE SEPARATION applies: key-registration
+/// `[epoch_start, +key_cutoff_offset]`, deal `[+deal_start_offset, +deal_cutoff_offset]`,
+/// complaint `[+complaint_start_offset, +complaint_deadline_offset]`, then signing
+/// after the complaint deadline (draft §11.3, §6.5, §8; magnitudes are config, not
 /// consensus-fixed constants).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BeaconSchedule {
     /// The block height at which beacon epoch 0 begins. Heights below this have no
     /// beacon epoch.
     pub start_height: u64,
-    /// The number of blocks per epoch (≥ 1).
+    /// The number of blocks per epoch (≥ enough for all four windows).
     pub epoch_length: u64,
-    /// Within-epoch offset (blocks from `epoch_start`) of the deal/registration
-    /// cutoff (register-before-cutoff, §11 rule 3).
+    /// Inclusive end of the KEY-REGISTRATION window: `[epoch_start, epoch_start +
+    /// key_cutoff_offset]` (register-before-cutoff, §11 rule 3).
+    pub key_cutoff_offset: u64,
+    /// Start of the DEAL window (strictly after the key cutoff): `[epoch_start +
+    /// deal_start_offset, epoch_start + deal_cutoff_offset]`.
+    pub deal_start_offset: u64,
+    /// Inclusive end of the DEAL window (§8).
     pub deal_cutoff_offset: u64,
-    /// Within-epoch offset of the complaint deadline (§6.5, §11.3). Setup ⇒ position
-    /// `≤` this; signing ⇒ position `>` this.
+    /// Start of the COMPLAINT window (strictly after the deal cutoff): `[epoch_start +
+    /// complaint_start_offset, epoch_start + complaint_deadline_offset]`.
+    pub complaint_start_offset: u64,
+    /// Inclusive end of the COMPLAINT window / the complaint deadline (§6.5, §11.3).
+    /// SIGNING is ONLY after this (`position > complaint_deadline_offset`, to epoch
+    /// end).
     pub complaint_deadline_offset: u64,
 }
 
-/// The deterministic derivation at a block height: the epoch, its start height, the
-/// absolute deal-cutoff / complaint-deadline heights, and whether the height is in
-/// the signing phase.
+/// The ratified within-epoch lifecycle phase of a block height (draft §11.3, §6.5,
+/// §8). Each op kind is valid ONLY in its own window; a gap between windows admits no
+/// op.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BeaconWindowPhase {
+    /// K-rotate encryption-key registration window.
+    KeyRegistration,
+    /// DKG deal window.
+    Deal,
+    /// Complaint-adjudication window.
+    Complaint,
+    /// Threshold-signing / output window (after the complaint deadline).
+    Signing,
+}
+
+/// The deterministic derivation at a block height: the epoch, its start height, and
+/// the within-epoch lifecycle phase (`None` in a between-windows gap — no op valid).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BeaconEpochPoint {
     /// The 0-based beacon epoch index.
     pub epoch: u64,
-    /// The first block height of this epoch.
+    /// The first block height of this epoch (the membership-snapshot boundary).
     pub epoch_start: u64,
-    /// Absolute deal-cutoff height (`epoch_start + deal_cutoff_offset`).
-    pub deal_cutoff: u64,
-    /// Absolute complaint-deadline height (`epoch_start + complaint_deadline_offset`).
-    pub complaint_deadline: u64,
-    /// `true` iff the height is in the signing phase (position `>` complaint offset).
-    pub phase_is_signing: bool,
+    /// The within-epoch phase, or `None` for a between-windows gap.
+    pub phase: Option<BeaconWindowPhase>,
 }
 
 impl BeaconSchedule {
-    /// Validate the config: `epoch_length ≥ 1` and strictly-ordered offsets that fit
-    /// within the epoch (`0 ≤ deal_cutoff_offset < complaint_deadline_offset <
-    /// epoch_length` — the same strict-phase-separation ordering).
+    /// Validate the config, enforcing the ratified STRICT PHASE SEPARATION (draft
+    /// §11.3, §6.5, §8): `key_cutoff < deal_start ≤ deal_cutoff < complaint_start ≤
+    /// complaint_deadline`, every required window spans ≥ 1 block, no two windows
+    /// overlap, and a non-empty signing window remains before epoch end
+    /// (`complaint_deadline_offset + 1 < epoch_length`). `epoch_length ≥ 1`.
     pub fn validate(&self) -> Result<(), BeaconScheduleError> {
         if self.epoch_length == 0 {
             return Err(BeaconScheduleError::ZeroEpochLength);
         }
-        if !(self.deal_cutoff_offset < self.complaint_deadline_offset
-            && self.complaint_deadline_offset < self.epoch_length)
-        {
+        // Strict ordering (< between windows ⇒ no overlap) + non-empty windows (≤
+        // within each). Key window `[0, key_cutoff]` is always ≥ 1 block.
+        let ordered = self.key_cutoff_offset < self.deal_start_offset
+            && self.deal_start_offset <= self.deal_cutoff_offset
+            && self.deal_cutoff_offset < self.complaint_start_offset
+            && self.complaint_start_offset <= self.complaint_deadline_offset
+            // Signing window `[complaint_deadline+1, epoch_length-1]` must be ≥ 1 block.
+            && self.complaint_deadline_offset + 1 < self.epoch_length;
+        if !ordered {
             return Err(BeaconScheduleError::UnorderedOffsets);
         }
         Ok(())
     }
 
-    /// Deterministically derive `(epoch, phase, cutoffs)` at `height` with CHECKED
-    /// arithmetic. `Ok(None)` for a pre-start height (no beacon epoch); `Err` on
-    /// `u64` overflow. Requires a valid config (call [`validate`](Self::validate)
-    /// first).
+    /// Deterministically derive `(epoch, epoch_start, phase)` at `height` with CHECKED
+    /// arithmetic. `Ok(None)` for a pre-start height (no beacon epoch); `Err` on `u64`
+    /// overflow. The phase is `None` in a between-windows gap. Requires a valid config
+    /// ([`validate`](Self::validate)).
     pub fn derive(&self, height: u64) -> Result<Option<BeaconEpochPoint>, BeaconScheduleError> {
         if height < self.start_height {
             return Ok(None);
@@ -212,19 +244,30 @@ impl BeaconSchedule {
             .start_height
             .checked_add(epoch_offset)
             .ok_or(BeaconScheduleError::Overflow)?;
-        let deal_cutoff = epoch_start
-            .checked_add(self.deal_cutoff_offset)
-            .ok_or(BeaconScheduleError::Overflow)?;
-        let complaint_deadline = epoch_start
-            .checked_add(self.complaint_deadline_offset)
-            .ok_or(BeaconScheduleError::Overflow)?;
+        let phase = self.phase_at_position(position);
         Ok(Some(BeaconEpochPoint {
             epoch,
             epoch_start,
-            deal_cutoff,
-            complaint_deadline,
-            phase_is_signing: position > self.complaint_deadline_offset,
+            phase,
         }))
+    }
+
+    /// The within-epoch phase for a 0-based `position` (`= height − epoch_start`), or
+    /// `None` in a between-windows gap.
+    fn phase_at_position(&self, position: u64) -> Option<BeaconWindowPhase> {
+        if position <= self.key_cutoff_offset {
+            Some(BeaconWindowPhase::KeyRegistration)
+        } else if position >= self.deal_start_offset && position <= self.deal_cutoff_offset {
+            Some(BeaconWindowPhase::Deal)
+        } else if position >= self.complaint_start_offset
+            && position <= self.complaint_deadline_offset
+        {
+            Some(BeaconWindowPhase::Complaint)
+        } else if position > self.complaint_deadline_offset {
+            Some(BeaconWindowPhase::Signing)
+        } else {
+            None // between-windows gap
+        }
     }
 }
 
@@ -258,137 +301,118 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn schedule_validation() {
-        assert!(BeaconSchedule {
+    /// A canonical strict-phase schedule for the golden vectors. start=100, len=100:
+    /// KeyReg [100,110], gap [111,119], Deal [120,130], gap [131,139],
+    /// Complaint [140,150], Signing [151,199]; epoch 1 starts at 200.
+    fn golden_schedule() -> BeaconSchedule {
+        BeaconSchedule {
             start_height: 100,
-            epoch_length: 50,
-            deal_cutoff_offset: 10,
-            complaint_deadline_offset: 20,
+            epoch_length: 100,
+            key_cutoff_offset: 10,
+            deal_start_offset: 20,
+            deal_cutoff_offset: 30,
+            complaint_start_offset: 40,
+            complaint_deadline_offset: 50,
         }
-        .validate()
-        .is_ok());
-        // zero epoch length
-        assert_eq!(
-            BeaconSchedule {
-                start_height: 0,
-                epoch_length: 0,
-                deal_cutoff_offset: 0,
-                complaint_deadline_offset: 0
-            }
-            .validate(),
-            Err(BeaconScheduleError::ZeroEpochLength)
-        );
-        // unordered: deal >= complaint
-        assert_eq!(
-            BeaconSchedule {
-                start_height: 0,
-                epoch_length: 50,
-                deal_cutoff_offset: 20,
-                complaint_deadline_offset: 20
-            }
-            .validate(),
-            Err(BeaconScheduleError::UnorderedOffsets)
-        );
-        // complaint >= epoch_length
-        assert_eq!(
-            BeaconSchedule {
-                start_height: 0,
-                epoch_length: 20,
-                deal_cutoff_offset: 10,
-                complaint_deadline_offset: 20
-            }
-            .validate(),
-            Err(BeaconScheduleError::UnorderedOffsets)
-        );
     }
 
-    /// GOLDEN boundary vectors: `(epoch, epoch_start, deal_cutoff, complaint_deadline,
-    /// phase_is_signing)` frozen at every boundary (pre-start, first/last of an epoch,
-    /// first of the next epoch) and overflow edges. start=100, len=50, deal=10, cmpl=20.
     #[test]
-    fn schedule_derivation_golden_boundaries() {
-        let s = BeaconSchedule {
-            start_height: 100,
-            epoch_length: 50,
-            deal_cutoff_offset: 10,
-            complaint_deadline_offset: 20,
-        };
-        s.validate().unwrap();
-        // pre-start
-        assert_eq!(s.derive(0).unwrap(), None);
-        assert_eq!(s.derive(99).unwrap(), None);
-        // first height of epoch 0 (position 0 → setup)
-        assert_eq!(
-            s.derive(100).unwrap().unwrap(),
-            BeaconEpochPoint {
-                epoch: 0,
-                epoch_start: 100,
-                deal_cutoff: 110,
-                complaint_deadline: 120,
-                phase_is_signing: false
-            }
-        );
-        // exactly the complaint deadline (position 20 → still setup, boundary inclusive)
-        assert_eq!(
-            s.derive(120).unwrap().unwrap(),
-            BeaconEpochPoint {
-                epoch: 0,
-                epoch_start: 100,
-                deal_cutoff: 110,
-                complaint_deadline: 120,
-                phase_is_signing: false
-            }
-        );
-        // one past the deadline (position 21 → signing)
-        assert!(s.derive(121).unwrap().unwrap().phase_is_signing);
-        // last height of epoch 0 (position 49 → signing)
-        assert_eq!(
-            s.derive(149).unwrap().unwrap(),
-            BeaconEpochPoint {
-                epoch: 0,
-                epoch_start: 100,
-                deal_cutoff: 110,
-                complaint_deadline: 120,
-                phase_is_signing: true
-            }
-        );
-        // first height of epoch 1
-        assert_eq!(
-            s.derive(150).unwrap().unwrap(),
-            BeaconEpochPoint {
-                epoch: 1,
-                epoch_start: 150,
-                deal_cutoff: 160,
-                complaint_deadline: 170,
-                phase_is_signing: false
-            }
-        );
-        // last height of epoch 1
-        assert_eq!(
-            s.derive(199).unwrap().unwrap(),
-            BeaconEpochPoint {
-                epoch: 1,
-                epoch_start: 150,
-                deal_cutoff: 160,
-                complaint_deadline: 170,
-                phase_is_signing: true
-            }
-        );
+    fn schedule_validation_strict_phase_separation() {
+        let ok = golden_schedule();
+        assert!(ok.validate().is_ok());
+        // zero epoch length
+        let mut z = ok;
+        z.epoch_length = 0;
+        assert_eq!(z.validate(), Err(BeaconScheduleError::ZeroEpochLength));
+        // key_cutoff >= deal_start (windows would touch/overlap).
+        let mut a = ok;
+        a.key_cutoff_offset = 20;
+        assert_eq!(a.validate(), Err(BeaconScheduleError::UnorderedOffsets));
+        // deal_start > deal_cutoff (empty deal window).
+        let mut b = ok;
+        b.deal_start_offset = 31;
+        assert_eq!(b.validate(), Err(BeaconScheduleError::UnorderedOffsets));
+        // deal_cutoff >= complaint_start (touching windows).
+        let mut c = ok;
+        c.deal_cutoff_offset = 40;
+        assert_eq!(c.validate(), Err(BeaconScheduleError::UnorderedOffsets));
+        // complaint_start > complaint_deadline (empty complaint window).
+        let mut d = ok;
+        d.complaint_start_offset = 51;
+        assert_eq!(d.validate(), Err(BeaconScheduleError::UnorderedOffsets));
+        // empty signing window (complaint_deadline+1 == epoch_length).
+        let mut e = ok;
+        e.epoch_length = 51;
+        assert_eq!(e.validate(), Err(BeaconScheduleError::UnorderedOffsets));
+    }
 
-        // Overflow edge: `u64::MAX` is exactly divisible by 3, so with epoch_length=3
-        // and start=0, height=u64::MAX lands at position 0 with epoch_start=u64::MAX;
-        // `epoch_start + deal_cutoff_offset(1)` then overflows u64 → checked → Err.
-        let s_of = BeaconSchedule {
+    /// GOLDEN phase-boundary vectors: the derived phase frozen at EVERY transition
+    /// (last/first block of each window) + the reject-one-block-before/after cases
+    /// (gap ⇒ `None`) + pre-start, epoch rollover, and overflow.
+    #[test]
+    fn schedule_phase_golden_boundaries() {
+        let s = golden_schedule();
+        s.validate().unwrap();
+        let phase = |h: u64| s.derive(h).unwrap().map(|p| p.phase);
+        let epoch = |h: u64| s.derive(h).unwrap().map(|p| (p.epoch, p.epoch_start));
+        use BeaconWindowPhase::*;
+
+        // pre-start
+        assert_eq!(s.derive(99).unwrap(), None);
+        // epoch/epoch_start rollover
+        assert_eq!(epoch(100), Some((0, 100)));
+        assert_eq!(epoch(199), Some((0, 100)));
+        assert_eq!(epoch(200), Some((1, 200)));
+
+        // KeyRegistration window [100,110]; reject one after (111 → gap).
+        assert_eq!(phase(100), Some(Some(KeyRegistration))); // first key block
+        assert_eq!(phase(110), Some(Some(KeyRegistration))); // LAST key block
+        assert_eq!(phase(111), Some(None)); // one after → gap (reject key)
+        assert_eq!(phase(119), Some(None)); // one before deal → gap
+
+        // Deal window [120,130]; reject one before (119→gap) and one after (131→gap).
+        assert_eq!(phase(120), Some(Some(Deal))); // FIRST deal block
+        assert_eq!(phase(130), Some(Some(Deal))); // LAST deal block
+        assert_eq!(phase(131), Some(None)); // one after → gap (reject deal)
+        assert_eq!(phase(139), Some(None)); // one before complaint → gap
+
+        // Complaint window [140,150]; reject one before (139→gap) and one after (151→signing).
+        assert_eq!(phase(140), Some(Some(Complaint))); // FIRST complaint block
+        assert_eq!(phase(150), Some(Some(Complaint))); // LAST complaint block
+        assert_eq!(phase(151), Some(Some(Signing))); // FIRST signing block (one after complaint)
+
+        // Signing window [151,199]; last block of the epoch.
+        assert_eq!(phase(199), Some(Some(Signing)));
+        // Next epoch's boundary is KeyRegistration again.
+        assert_eq!(phase(200), Some(Some(KeyRegistration)));
+
+        // Overflow edge: u64::MAX divisible by 3, epoch_start=u64::MAX; but this
+        // schedule has no epoch-start-relative offset overflow because phase is derived
+        // from position only — so exercise overflow with a start-relative overflow of
+        // `epoch_start` itself is impossible; instead confirm derive stays total.
+        let big = BeaconSchedule {
             start_height: 0,
             epoch_length: 3,
+            key_cutoff_offset: 0,
+            deal_start_offset: 1,
             deal_cutoff_offset: 1,
+            complaint_start_offset: 2,
             complaint_deadline_offset: 2,
         };
-        s_of.validate().unwrap();
-        assert_eq!(
-            s_of.derive(u64::MAX).unwrap_err(),
-            BeaconScheduleError::Overflow
-        );
+        // epoch_length=3 with these offsets: signing window empty (2+1==3) ⇒ invalid.
+        assert!(big.validate().is_err());
+        // A valid tiny schedule at an astronomical start still derives without panic.
+        let big2 = BeaconSchedule {
+            start_height: 0,
+            epoch_length: 6,
+            key_cutoff_offset: 0,
+            deal_start_offset: 1,
+            deal_cutoff_offset: 1,
+            complaint_start_offset: 2,
+            complaint_deadline_offset: 2,
+        };
+        big2.validate().unwrap();
+        // u64::MAX is divisible by 3 but not by 6; check derive is total (no panic).
+        assert!(big2.derive(u64::MAX).unwrap().is_some());
     }
 }
