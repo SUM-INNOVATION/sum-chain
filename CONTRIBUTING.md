@@ -55,13 +55,14 @@ builds with `npm run build` in `sdk/typescript`.
 approvals only count from **admins or maintainers** (repo permission `admin` or
 `maintain`):
 
-- **PRs authored by `sunhaoxiangwang`** require **1** approving review from
+- **PRs authored by an admin/maintainer** require **1** approving review from
   another admin/maintainer.
-- **All other PRs** require **2** approving reviews from admins/maintainers.
+- **All other PRs** (non-admin / outside contributors) require **2** approving
+  reviews from admins/maintainers.
 - A PR author's own review never counts, and stale approvals are dismissed on
   new commits.
 
-This conditional "1 if it's the owner, otherwise 2" rule is **not expressible in
+This conditional "1 if the author is an admin/maintainer, otherwise 2" rule is **not expressible in
 native branch protection or CODEOWNERS**, so it is enforced by the
 [`approval-policy`](.github/workflows/approval-policy.yml) GitHub Action, which
 is wired in as a **required status check**. It runs **only on review events**
