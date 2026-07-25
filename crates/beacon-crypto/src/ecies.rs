@@ -107,8 +107,10 @@ fn derive_key_nonce(
     d_ij: &G1Point,
     ctx_bytes: &[u8],
 ) -> (Zeroizing<[u8; AEAD_KEY_LEN]>, [u8; AEAD_NONCE_LEN]) {
-    let ikm = d_ij.to_compressed();
-    let hk = Hkdf::<Sha256>::new(Some(ECIES_HKDF_SALT), &ikm);
+    // The compressed ECDH secret `D_ij` is the HKDF IKM — a SECRET (§8, §9). Hold it
+    // in `Zeroizing` so it is scrubbed on drop rather than left in the stack buffer.
+    let ikm = Zeroizing::new(d_ij.to_compressed());
+    let hk = Hkdf::<Sha256>::new(Some(ECIES_HKDF_SALT), ikm.as_ref());
 
     let mut info_key = Vec::with_capacity(ctx_bytes.len() + ECIES_AEAD_KEY_LABEL.len());
     info_key.extend_from_slice(ctx_bytes);
@@ -131,6 +133,10 @@ fn derive_key_nonce(
 /// ECDH secret `d_ij` and the canonical `ctx`, returning the 32-byte canonical LE
 /// scalar share.
 ///
+/// The recovered share is a **secret** `F_r` scalar, so it is returned inside
+/// [`Zeroizing`] (scrubbed on drop) and every transient copy — the AEAD plaintext
+/// `Vec` and the fixed buffer — is likewise zeroized (control C8).
+///
 /// Errors:
 /// * [`BeaconCryptoError::AeadOpenFailed`] — bad tag / wrong key / tampered
 ///   ciphertext (during adjudication this is `DISQUALIFY(i)`, §6.1);
@@ -140,27 +146,31 @@ pub fn ecies_open(
     d_ij: &G1Point,
     ctx: &EciesContext,
     ct: &[u8; ECIES_CT_LEN],
-) -> Result<[u8; ECIES_PLAINTEXT_LEN]> {
+) -> Result<Zeroizing<[u8; ECIES_PLAINTEXT_LEN]>> {
     let ctx_bytes = ctx.to_bytes();
     let (key, nonce) = derive_key_nonce(d_ij, &ctx_bytes);
 
     let cipher = ChaCha20Poly1305::new(Key::from_slice(key.as_ref()));
-    let plaintext = cipher
-        .decrypt(
-            Nonce::from_slice(&nonce),
-            Payload {
-                msg: ct,
-                aad: &ctx_bytes,
-            },
-        )
-        .map_err(|_| BeaconCryptoError::AeadOpenFailed)?;
+    // The decrypted plaintext is the SECRET share; hold it in `Zeroizing` so the
+    // heap buffer is scrubbed on drop.
+    let plaintext: Zeroizing<Vec<u8>> = Zeroizing::new(
+        cipher
+            .decrypt(
+                Nonce::from_slice(&nonce),
+                Payload {
+                    msg: ct,
+                    aad: &ctx_bytes,
+                },
+            )
+            .map_err(|_| BeaconCryptoError::AeadOpenFailed)?,
+    );
 
     // Fixed 32-byte plaintext (a correctly-formed share). Any other length is a
     // dealer fault surfaced as a canonical-scalar failure.
     if plaintext.len() != ECIES_PLAINTEXT_LEN {
         return Err(BeaconCryptoError::NonCanonicalScalar);
     }
-    let mut share = [0u8; ECIES_PLAINTEXT_LEN];
+    let mut share = Zeroizing::new([0u8; ECIES_PLAINTEXT_LEN]);
     share.copy_from_slice(&plaintext);
 
     // Post-decryption canonical-scalar check (spec §8.2): reject `≥ r`.
@@ -280,7 +290,7 @@ mod tests {
         let ct = ecies_seal(&d, &ctx, &share).unwrap();
         assert_eq!(ct.len(), ECIES_CT_LEN);
         let recovered = ecies_open(&d, &ctx, &ct).unwrap();
-        assert_eq!(recovered, share, "open recovers the sealed share");
+        assert_eq!(*recovered, share, "open recovers the sealed share");
         println!("KAT ECIES ct = {}", hex::encode(ct));
     }
 

@@ -110,12 +110,20 @@ pub struct EpochCutoffs {
 /// The authenticated execution context threaded into every beacon transition.
 ///
 /// `signer` is the **authenticated** tx signer (from the envelope, not the payload);
-/// `membership` is the epoch snapshot; `phase`, `block_height`, `chain_id`, `epoch`,
-/// and `cutoffs` come from the executing block + authoritative config.
+/// `tx_ref` is the hash of that signed envelope; `membership` is the epoch snapshot;
+/// `phase`, `block_height`, `chain_id`, `epoch`, and `cutoffs` come from the
+/// executing block + authoritative config.
 #[derive(Clone, Copy, Debug)]
 pub struct ExecContext<'a> {
     /// The authenticated tx signer's epoch identity.
     pub signer: ValidatorId,
+    /// The **authenticated reference** to the signed transaction envelope carrying
+    /// this operation — its 32-byte hash. Retained in equivocation evidence so a
+    /// stored conflicting record is individually attributable to a signed tx (the
+    /// evidence references the envelope, not merely an unsigned payload). The
+    /// executor supplies the real `SignedTransaction` hash; the runtime treats it as
+    /// an opaque authenticated handle.
+    pub tx_ref: [u8; 32],
     /// The chain id the transaction binds.
     pub chain_id: u64,
     /// The beacon epoch the transaction targets.

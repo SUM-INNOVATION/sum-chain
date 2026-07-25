@@ -59,8 +59,22 @@ fn cutoffs() -> EpochCutoffs {
 }
 
 fn ctx(m: &EpochMembership, signer_index: u32, phase: BeaconPhase, height: u64) -> ExecContext<'_> {
+    // Default tx_ref derived from the signer, so distinct signers get distinct
+    // authenticated envelope references; tests needing two txs from the SAME signer
+    // (equivocation) use `ctx_ref` with explicit refs.
+    ctx_ref(m, signer_index, phase, height, [signer_index as u8; 32])
+}
+
+fn ctx_ref(
+    m: &EpochMembership,
+    signer_index: u32,
+    phase: BeaconPhase,
+    height: u64,
+    tx_ref: [u8; 32],
+) -> ExecContext<'_> {
     ExecContext {
         signer: vid(signer_index),
+        tx_ref,
         chain_id: CHAIN_ID,
         epoch: EPOCH,
         block_height: height,
@@ -111,7 +125,7 @@ fn make_deal(
     let c0 = SecretScalar::from_bytes_le(&coeffs[0]).unwrap().public_g1();
     let c1 = SecretScalar::from_bytes_le(&coeffs[1]).unwrap().public_g1();
     let x_j = (j as u64) + 1;
-    let share = share_override.unwrap_or_else(|| eval_share_le(&coeffs[..], x_j).unwrap());
+    let share = share_override.unwrap_or_else(|| *eval_share_le(&coeffs[..], x_j).unwrap());
 
     let r = r_secret(i, j);
     let r_pt = r.public_g1();
@@ -423,27 +437,44 @@ fn deal_accept_duplicate_conflict_evidence() {
 fn key_replay_vs_equivocation() {
     let m = membership();
     let mut e = DkgEpoch::new(config());
-    // Fresh key accepted.
+    // Fresh key accepted (tx envelope ref [1;32]).
     assert_eq!(
-        e.register_key(&ctx(&m, 0, BeaconPhase::Setup, 10), &make_reg(0))
-            .unwrap(),
+        e.register_key(
+            &ctx_ref(&m, 0, BeaconPhase::Setup, 10, [1u8; 32]),
+            &make_reg(0)
+        )
+        .unwrap(),
         RegistrationOutcome::Accepted
     );
     // Identical replay ⇒ idempotent no-op.
     assert_eq!(
-        e.register_key(&ctx(&m, 0, BeaconPhase::Setup, 10), &make_reg(0))
-            .unwrap(),
+        e.register_key(
+            &ctx_ref(&m, 0, BeaconPhase::Setup, 10, [2u8; 32]),
+            &make_reg(0)
+        )
+        .unwrap(),
         RegistrationOutcome::DuplicateReplay
     );
-    // A DIFFERENT valid key for the same validator ⇒ equivocation with evidence.
+    // A DIFFERENT valid key from the same signer, in a DIFFERENT signed tx ([3;32])
+    // ⇒ equivocation with two individually-authenticated records.
     let other = make_reg_for(&SecretScalar::from_bytes_le(&seed(0x91)).unwrap());
     let outcome = e
-        .register_key(&ctx(&m, 0, BeaconPhase::Setup, 10), &other)
+        .register_key(&ctx_ref(&m, 0, BeaconPhase::Setup, 10, [3u8; 32]), &other)
         .unwrap();
     match outcome {
         RegistrationOutcome::Equivocation(ev) => {
             assert_eq!(ev.validator_index, 0);
-            assert_ne!(ev.first, ev.second, "two distinct signed records retained");
+            // Each retained record is authenticated: same equivocating signer, but
+            // distinct signed-tx envelope references and distinct carrier bytes.
+            assert_eq!(ev.first.signer, vid(0));
+            assert_eq!(ev.second.signer, vid(0));
+            assert_eq!(ev.first.tx_ref, [1u8; 32]);
+            assert_eq!(ev.second.tx_ref, [3u8; 32]);
+            assert_ne!(
+                ev.first.carrier, ev.second.carrier,
+                "distinct signed carrier bytes"
+            );
+            assert_ne!(ev.first, ev.second);
         }
         other => panic!("expected equivocation, got {other:?}"),
     }

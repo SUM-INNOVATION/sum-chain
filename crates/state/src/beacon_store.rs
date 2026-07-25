@@ -18,12 +18,13 @@
 //!   (`crate::state::StateManager::revert_block_state_diffs`). Both are no-ops while
 //!   no journal exists (always, under the `None` gate), so dormant behavior is
 //!   unchanged.
-//! * **Not yet wired (documented seam):** materializing the in-memory
-//!   `sumchain_beacon_runtime` epoch/round state into the persisted row set during
-//!   live block execution (which would WRITE a journal) needs a genesis
-//!   `BeaconParams` + membership-snapshot source that does not exist yet. Until then
-//!   the store is a complete, isolation-tested adapter — exactly the stance C1 took
-//!   before its own live wiring.
+//! * **Wired (live producer):** [`BeaconStore::materialize`] serializes the runtime
+//!   epoch/round state into rows, and [`BeaconStore::load_materialized`] de-serializes
+//!   them back for [`DkgEpoch::rehydrate`] / `BeaconChain::rehydrate`. The executor's
+//!   per-block accumulator (`crate::beacon_manager::BeaconBlockState`) drives this on
+//!   the gate-open path: a VALID beacon tx is accumulated and persisted as EXACTLY ONE
+//!   journal per block (`materialize(rehydrate(rows)) == rows`, so a block persists a
+//!   delta against the true prior state). Still a no-op under the `None` gate.
 //!
 //! The row set is a domain-prefixed `key -> value` map; the runtime supplies a
 //! materialized snapshot and this module commits/reverts it. Rows are opaque bytes
@@ -35,6 +36,8 @@ use std::collections::BTreeMap;
 use bincode::Options;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use sumchain_beacon_runtime::dkg::{DealView, DkgEpoch};
+use sumchain_beacon_runtime::rounds::BeaconChain;
 use sumchain_primitives::{BlockHeight, Hash};
 use sumchain_storage::{cf, Database};
 
@@ -43,6 +46,20 @@ use crate::{Result, StateError};
 /// Local anti-DoS ceiling on a single decoded beacon journal, in bytes. NOT a
 /// consensus/economic cap — it only bounds decoder allocation on a corrupt value.
 pub const BEACON_DECODE_BYTE_LIMIT: u64 = 1 << 20;
+
+/// On-disk schema version stamped as the first field of every typed beacon record.
+/// A future ratified layout bumps this; decoders reject any other value. A change is
+/// a consensus event once the gate can open (records feed [`BeaconStore::state_digest`]).
+pub const BEACON_RECORD_VERSION: u8 = 1;
+
+/// Canonical compressed G1 width (bytes) — encryption keys, carriers, commitments.
+const G1_LEN: usize = 48;
+/// Canonical compressed G2 width (bytes) — combined round signature `Σ_r`.
+const G2_LEN: usize = 96;
+/// ECIES body width (bytes) — `ct_{ij}`.
+const CT_LEN: usize = 48;
+/// Beacon output width (bytes).
+const OUT_LEN: usize = 32;
 
 /// Domain tag for [`BeaconStore::state_digest`]. **Explicitly versioned**
 /// (`…state.v1`) — a FROZEN consensus value once the beacon gate can open (it is
@@ -109,6 +126,178 @@ fn beacon_decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
         .map_err(|e| StateError::DeserializationError(e.to_string()))
 }
 
+// ---------------------------------------------------------------------------
+// Canonical key encoders — domain prefix ‖ fixed-width big-endian body (Item 2).
+// Big-endian so composite ordering matches numeric ordering for range scans.
+// ---------------------------------------------------------------------------
+
+/// `[KEY] ‖ validator_index(u32 BE)` (5 bytes).
+pub fn key_row_key(validator_index: u32) -> Vec<u8> {
+    let mut k = Vec::with_capacity(1 + 4);
+    k.push(domain::KEY);
+    k.extend_from_slice(&validator_index.to_be_bytes());
+    k
+}
+/// `[DEAL] ‖ dealer_i(u32 BE) ‖ recipient_j(u32 BE)` (9 bytes).
+pub fn deal_row_key(dealer_i: u32, recipient_j: u32) -> Vec<u8> {
+    let mut k = Vec::with_capacity(1 + 8);
+    k.push(domain::DEAL);
+    k.extend_from_slice(&dealer_i.to_be_bytes());
+    k.extend_from_slice(&recipient_j.to_be_bytes());
+    k
+}
+/// `[VERDICT] ‖ dealer_i(u32 BE)` (5 bytes) — a disqualification.
+pub fn disqualified_row_key(dealer_i: u32) -> Vec<u8> {
+    let mut k = Vec::with_capacity(1 + 4);
+    k.push(domain::VERDICT);
+    k.extend_from_slice(&dealer_i.to_be_bytes());
+    k
+}
+/// `[ROUND] ‖ round(u64 BE)` (9 bytes) — a finalized `Σ_r`.
+pub fn round_row_key(round: u64) -> Vec<u8> {
+    let mut k = Vec::with_capacity(1 + 8);
+    k.push(domain::ROUND);
+    k.extend_from_slice(&round.to_be_bytes());
+    k
+}
+/// `[OUTPUT] ‖ round(u64 BE)` (9 bytes) — a beacon output.
+pub fn output_row_key(round: u64) -> Vec<u8> {
+    let mut k = Vec::with_capacity(1 + 8);
+    k.push(domain::OUTPUT);
+    k.extend_from_slice(&round.to_be_bytes());
+    k
+}
+
+// ---------------------------------------------------------------------------
+// Typed record DTOs — `schema_version` first; point fields are length-validated
+// `Vec<u8>` (strict decode + bounds). Canonical serialization is `beacon_codec`
+// (bincode fixint LE), identical for encode + decode. These pin the EXACT bytes a
+// runtime state materializes into a store row (Item 2).
+// ---------------------------------------------------------------------------
+
+/// A registered epoch encryption key `EK_j` (draft §2.3, §11).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredBeaconKey {
+    /// Record schema version (byte 0).
+    pub schema_version: u8,
+    /// 0-based validator/membership index `j`.
+    pub validator_index: u32,
+    /// Canonical compressed G1 `EK_j` (48 bytes).
+    pub ek: Vec<u8>,
+}
+
+/// An accepted `(dealer i → recipient j)` deal (draft §8).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredBeaconDeal {
+    /// Record schema version.
+    pub schema_version: u8,
+    /// Dealer index `i`.
+    pub dealer_i: u32,
+    /// Recipient index `j`.
+    pub recipient_j: u32,
+    /// Feldman commitments `C_{i,*}`, each canonical compressed G1 (48 bytes).
+    pub commitments: Vec<Vec<u8>>,
+    /// Carrier `R_{ij}` (48 bytes).
+    pub r_ij: Vec<u8>,
+    /// ECIES body `ct_{ij}` (48 bytes).
+    pub ct_ij: Vec<u8>,
+}
+
+/// A disqualified dealer (draft §4.2 / §6.1 verdict).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredBeaconDisqualified {
+    /// Record schema version.
+    pub schema_version: u8,
+    /// The disqualified dealer index.
+    pub dealer_i: u32,
+}
+
+/// A finalized round's combined signature `Σ_r` (draft §4.3, §12).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredBeaconRound {
+    /// Record schema version.
+    pub schema_version: u8,
+    /// The round.
+    pub round: u64,
+    /// Canonical compressed G2 `Σ_r` (96 bytes).
+    pub sigma_r: Vec<u8>,
+}
+
+/// A finalized round's beacon output (draft §12.1 OUT domain).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredBeaconOutput {
+    /// Record schema version.
+    pub schema_version: u8,
+    /// The round.
+    pub round: u64,
+    /// The 32-byte beacon output.
+    pub output: Vec<u8>,
+}
+
+fn check_version(v: u8) -> Result<()> {
+    if v == BEACON_RECORD_VERSION {
+        Ok(())
+    } else {
+        Err(StateError::DeserializationError(format!(
+            "unsupported beacon record schema version {v} (expected {BEACON_RECORD_VERSION})"
+        )))
+    }
+}
+
+fn check_len(field: &str, got: usize, want: usize) -> Result<()> {
+    if got == want {
+        Ok(())
+    } else {
+        Err(StateError::DeserializationError(format!(
+            "beacon record: {field} length {got} != {want}"
+        )))
+    }
+}
+
+/// Strictly decode a [`StoredBeaconKey`] (version + `ek` length).
+pub fn decode_key(bytes: &[u8]) -> Result<StoredBeaconKey> {
+    let v: StoredBeaconKey = beacon_decode(bytes)?;
+    check_version(v.schema_version)?;
+    check_len("ek", v.ek.len(), G1_LEN)?;
+    Ok(v)
+}
+/// Strictly decode a [`StoredBeaconDeal`] (version + all point lengths).
+pub fn decode_deal(bytes: &[u8]) -> Result<StoredBeaconDeal> {
+    let v: StoredBeaconDeal = beacon_decode(bytes)?;
+    check_version(v.schema_version)?;
+    check_len("r_ij", v.r_ij.len(), G1_LEN)?;
+    check_len("ct_ij", v.ct_ij.len(), CT_LEN)?;
+    if v.commitments.is_empty() {
+        return Err(StateError::DeserializationError(
+            "beacon deal: empty commitment vector".into(),
+        ));
+    }
+    for c in &v.commitments {
+        check_len("commitment", c.len(), G1_LEN)?;
+    }
+    Ok(v)
+}
+/// Strictly decode a [`StoredBeaconDisqualified`] (version).
+pub fn decode_disqualified(bytes: &[u8]) -> Result<StoredBeaconDisqualified> {
+    let v: StoredBeaconDisqualified = beacon_decode(bytes)?;
+    check_version(v.schema_version)?;
+    Ok(v)
+}
+/// Strictly decode a [`StoredBeaconRound`] (version + `Σ_r` length).
+pub fn decode_round(bytes: &[u8]) -> Result<StoredBeaconRound> {
+    let v: StoredBeaconRound = beacon_decode(bytes)?;
+    check_version(v.schema_version)?;
+    check_len("sigma_r", v.sigma_r.len(), G2_LEN)?;
+    Ok(v)
+}
+/// Strictly decode a [`StoredBeaconOutput`] (version + output length).
+pub fn decode_output(bytes: &[u8]) -> Result<StoredBeaconOutput> {
+    let v: StoredBeaconOutput = beacon_decode(bytes)?;
+    check_version(v.schema_version)?;
+    check_len("output", v.output.len(), OUT_LEN)?;
+    Ok(v)
+}
+
 /// One beacon state mutation captured for block-rollback revert.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BeaconMutation {
@@ -148,6 +337,73 @@ impl<'a> BeaconStore<'a> {
         Self { db }
     }
 
+    /// **Materialize** the runtime beacon state into the canonical `key -> value` row
+    /// set (Item 2 — the producer's runtime→row mapping, byte-pinned). Built from the
+    /// runtime's public persistable accessors so it is a deterministic function of
+    /// state *content* only (every backing collection is ordered), never insertion
+    /// order. Registered keys, accepted deals, disqualifications, and (if a signing
+    /// chain is supplied) finalized rounds + outputs each become a versioned,
+    /// length-checked record under its domain-prefixed key.
+    pub fn materialize(
+        epoch: &DkgEpoch,
+        chain: Option<&BeaconChain>,
+    ) -> Result<BTreeMap<Vec<u8>, Vec<u8>>> {
+        let mut rows: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
+        for (idx, ek) in epoch.registered_keys() {
+            rows.insert(
+                key_row_key(idx),
+                beacon_encode(&StoredBeaconKey {
+                    schema_version: BEACON_RECORD_VERSION,
+                    validator_index: idx,
+                    ek: ek.to_vec(),
+                })?,
+            );
+        }
+        for d in epoch.accepted_deals() {
+            rows.insert(
+                deal_row_key(d.dealer_i, d.recipient_j),
+                beacon_encode(&StoredBeaconDeal {
+                    schema_version: BEACON_RECORD_VERSION,
+                    dealer_i: d.dealer_i,
+                    recipient_j: d.recipient_j,
+                    commitments: d.commitments.iter().map(|c| c.to_vec()).collect(),
+                    r_ij: d.r_ij.to_vec(),
+                    ct_ij: d.ct_ij.to_vec(),
+                })?,
+            );
+        }
+        for i in epoch.disqualified() {
+            rows.insert(
+                disqualified_row_key(*i),
+                beacon_encode(&StoredBeaconDisqualified {
+                    schema_version: BEACON_RECORD_VERSION,
+                    dealer_i: *i,
+                })?,
+            );
+        }
+        if let Some(chain) = chain {
+            for (r, sigma_r, output) in chain.finalized_rounds() {
+                rows.insert(
+                    round_row_key(r),
+                    beacon_encode(&StoredBeaconRound {
+                        schema_version: BEACON_RECORD_VERSION,
+                        round: r,
+                        sigma_r: sigma_r.to_vec(),
+                    })?,
+                );
+                rows.insert(
+                    output_row_key(r),
+                    beacon_encode(&StoredBeaconOutput {
+                        schema_version: BEACON_RECORD_VERSION,
+                        round: r,
+                        output: output.to_vec(),
+                    })?,
+                );
+            }
+        }
+        Ok(rows)
+    }
+
     /// Read the full persisted beacon `key -> value` row set (canonical order).
     pub fn load_state_map(&self) -> Result<BTreeMap<Vec<u8>, Vec<u8>>> {
         let mut map = BTreeMap::new();
@@ -155,6 +411,93 @@ impl<'a> BeaconStore<'a> {
             map.insert(k.to_vec(), v.to_vec());
         }
         Ok(map)
+    }
+
+    /// **De-materialize** the persisted rows back into the runtime rehydration
+    /// inputs (rows → runtime): `(keys, deals, disqualified, rounds)`. The inverse of
+    /// [`materialize`](Self::materialize); strict-decodes every typed record. Feeds
+    /// `DkgEpoch::rehydrate` / `BeaconChain::rehydrate` on restart and at each block
+    /// start (so a block's transition is a delta against the true live state).
+    #[allow(clippy::type_complexity)]
+    pub fn load_materialized(
+        &self,
+    ) -> Result<(
+        Vec<(u32, [u8; G1_LEN])>,
+        Vec<DealView>,
+        Vec<u32>,
+        Vec<(u64, [u8; G2_LEN], [u8; OUT_LEN])>,
+    )> {
+        let rows = self.load_state_map()?;
+        let mut keys = Vec::new();
+        let mut deals = Vec::new();
+        let mut disqualified = Vec::new();
+        let mut round_sig: BTreeMap<u64, [u8; G2_LEN]> = BTreeMap::new();
+        let mut round_out: BTreeMap<u64, [u8; OUT_LEN]> = BTreeMap::new();
+
+        let as_arr = |v: &[u8], n: usize| -> Result<Vec<u8>> {
+            if v.len() != n {
+                return Err(StateError::DeserializationError(
+                    "bad persisted length".into(),
+                ));
+            }
+            Ok(v.to_vec())
+        };
+
+        for (k, v) in &rows {
+            match k.first() {
+                Some(&domain::KEY) => {
+                    let sk = decode_key(v)?;
+                    let mut ek = [0u8; G1_LEN];
+                    ek.copy_from_slice(&as_arr(&sk.ek, G1_LEN)?);
+                    keys.push((sk.validator_index, ek));
+                }
+                Some(&domain::DEAL) => {
+                    let sd = decode_deal(v)?;
+                    let mut r_ij = [0u8; G1_LEN];
+                    r_ij.copy_from_slice(&as_arr(&sd.r_ij, G1_LEN)?);
+                    let mut ct_ij = [0u8; CT_LEN];
+                    ct_ij.copy_from_slice(&as_arr(&sd.ct_ij, CT_LEN)?);
+                    let mut commitments = Vec::with_capacity(sd.commitments.len());
+                    for c in &sd.commitments {
+                        let mut cc = [0u8; G1_LEN];
+                        cc.copy_from_slice(&as_arr(c, G1_LEN)?);
+                        commitments.push(cc);
+                    }
+                    deals.push(DealView {
+                        dealer_i: sd.dealer_i,
+                        recipient_j: sd.recipient_j,
+                        commitments,
+                        r_ij,
+                        ct_ij,
+                    });
+                }
+                Some(&domain::VERDICT) => {
+                    disqualified.push(decode_disqualified(v)?.dealer_i);
+                }
+                Some(&domain::ROUND) => {
+                    let sr = decode_round(v)?;
+                    let mut sig = [0u8; G2_LEN];
+                    sig.copy_from_slice(&as_arr(&sr.sigma_r, G2_LEN)?);
+                    round_sig.insert(sr.round, sig);
+                }
+                Some(&domain::OUTPUT) => {
+                    let so = decode_output(v)?;
+                    let mut out = [0u8; OUT_LEN];
+                    out.copy_from_slice(&as_arr(&so.output, OUT_LEN)?);
+                    round_out.insert(so.round, out);
+                }
+                _ => {
+                    return Err(StateError::DeserializationError(
+                        "unrecognized beacon row domain".into(),
+                    ));
+                }
+            }
+        }
+        let rounds: Vec<(u64, [u8; G2_LEN], [u8; OUT_LEN])> = round_sig
+            .into_iter()
+            .filter_map(|(r, sig)| round_out.get(&r).map(|out| (r, sig, *out)))
+            .collect();
+        Ok((keys, deals, disqualified, rounds))
     }
 
     /// Deterministic, domain-separated digest over the FULL persisted beacon state.
@@ -422,5 +765,92 @@ mod tests {
         assert!(store
             .persist_transition(&BTreeMap::new(), &after, 1)
             .is_err());
+    }
+
+    // ── Item 2: frozen typed-record codec + key layouts + strict decode ──────
+
+    #[test]
+    fn record_version_and_key_layouts_are_frozen() {
+        assert_eq!(BEACON_RECORD_VERSION, 1);
+        // Domain-prefixed big-endian composite keys (exact bytes pinned).
+        assert_eq!(key_row_key(0), vec![0x01, 0, 0, 0, 0]);
+        assert_eq!(key_row_key(3), vec![0x01, 0, 0, 0, 3]);
+        assert_eq!(deal_row_key(1, 2), vec![0x02, 0, 0, 0, 1, 0, 0, 0, 2]);
+        assert_eq!(disqualified_row_key(4), vec![0x03, 0, 0, 0, 4]);
+        assert_eq!(round_row_key(5), vec![0x04, 0, 0, 0, 0, 0, 0, 0, 5]);
+        assert_eq!(output_row_key(6), vec![0x05, 0, 0, 0, 0, 0, 0, 0, 6]);
+    }
+
+    #[test]
+    fn stored_records_roundtrip_and_bytes_are_frozen() {
+        // A key record with a fixed ek → frozen canonical bytes + strict decode.
+        let k = StoredBeaconKey {
+            schema_version: BEACON_RECORD_VERSION,
+            validator_index: 2,
+            ek: vec![0xAB; G1_LEN],
+        };
+        let kb = beacon_encode(&k).unwrap();
+        // bincode fixint LE: version(1) ‖ u32_le(2) ‖ len(u64_le=48) ‖ 48×0xAB.
+        assert_eq!(&kb[0..1], &[0x01]);
+        assert_eq!(&kb[1..5], &2u32.to_le_bytes());
+        assert_eq!(&kb[5..13], &48u64.to_le_bytes());
+        assert_eq!(kb.len(), 1 + 4 + 8 + G1_LEN);
+        assert_eq!(decode_key(&kb).unwrap(), k);
+
+        // Round / output / disqualified round-trip.
+        let r = StoredBeaconRound {
+            schema_version: BEACON_RECORD_VERSION,
+            round: 9,
+            sigma_r: vec![0x11; G2_LEN],
+        };
+        assert_eq!(decode_round(&beacon_encode(&r).unwrap()).unwrap(), r);
+        let o = StoredBeaconOutput {
+            schema_version: BEACON_RECORD_VERSION,
+            round: 9,
+            output: vec![0x22; OUT_LEN],
+        };
+        assert_eq!(decode_output(&beacon_encode(&o).unwrap()).unwrap(), o);
+        let d = StoredBeaconDisqualified {
+            schema_version: BEACON_RECORD_VERSION,
+            dealer_i: 3,
+        };
+        assert_eq!(decode_disqualified(&beacon_encode(&d).unwrap()).unwrap(), d);
+    }
+
+    #[test]
+    fn strict_decode_rejects_bad_version_length_and_trailing() {
+        // Wrong version.
+        let bad_ver = StoredBeaconKey {
+            schema_version: 2,
+            validator_index: 0,
+            ek: vec![0; G1_LEN],
+        };
+        assert!(decode_key(&beacon_encode(&bad_ver).unwrap()).is_err());
+        // Wrong ek length.
+        let bad_len = StoredBeaconKey {
+            schema_version: BEACON_RECORD_VERSION,
+            validator_index: 0,
+            ek: vec![0; G1_LEN - 1],
+        };
+        assert!(decode_key(&beacon_encode(&bad_len).unwrap()).is_err());
+        // Trailing bytes rejected by the canonical decoder.
+        let mut trailing = beacon_encode(&StoredBeaconKey {
+            schema_version: BEACON_RECORD_VERSION,
+            validator_index: 0,
+            ek: vec![0; G1_LEN],
+        })
+        .unwrap();
+        trailing.push(0xFF);
+        assert!(decode_key(&trailing).is_err());
+        // A deal with an empty commitment vector is rejected.
+        let bad_deal = StoredBeaconDeal {
+            schema_version: BEACON_RECORD_VERSION,
+            dealer_i: 0,
+            recipient_j: 0,
+            commitments: vec![],
+            r_ij: vec![0; G1_LEN],
+            ct_ij: vec![0; CT_LEN],
+        };
+        assert!(decode_deal(&beacon_encode(&bad_deal).unwrap()).is_err());
     }
 }

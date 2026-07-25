@@ -9,12 +9,34 @@ description = "BR1 randomness-beacon dev/test cryptography (issue #127): a NARRO
 publish = false
 
 [dependencies]
-# BLS12-381: blst-backed. Confined to THIS crate; the raw blstrs/blst types are
+# ── BLS12-381: blst-backed. Confined to THIS crate; the raw blstrs/blst types are
 # never re-exported — only the opaque wrappers in `bls` cross the crate boundary.
 # Exact-pinned (issue #127 owner condition): the committed Cargo.lock is the
 # lock of record; these `=` requirements make the direct-dep versions exact at
 # the manifest level too, so `cargo update` cannot silently bump the crypto deps.
+#
+# ── Dependency-hardening controls (owner-authorized dormant production linkage) ──
+# C1 (version + feature pin, vendored C source): `blst` is pinned EXACTLY below and
+#    inherits its DEFAULT features only. `blst`'s default feature set is EMPTY
+#    (`default = []`; the optional features are `force-adx`, `no-threads`,
+#    `portable`, `serde-secret`), which is exactly what `blstrs` selects
+#    (`default-features = true` over an empty default), so the explicit pin does NOT
+#    change the compiled artifact. `blst` has **no system/dynamic-library option**:
+#    its `build.rs` always compiles the VENDORED C/assembly source in-tree, so no
+#    system `libblst` can be substituted. We do NOT enable `portable` and do NOT set
+#    the `BLST_PORTABLE` env var, so the standard runtime-CPU-detection build (ADX +
+#    portable fallback) is used, which is correct on both x86_64 and aarch64.
+# C7 (license + advisory): `blst` = Apache-2.0; `blstrs` = MIT/Apache-2.0;
+#    `ff`/`group`/`subtle`/`sha2`/`hkdf`/`chacha20poly1305`/`zeroize` = MIT/Apache-2.0
+#    (RustCrypto). No RUSTSEC advisory is open against `blst 0.3.16` or `blstrs 0.7.1`
+#    at the pinned versions (manually checked; the repo has no `cargo-deny`/
+#    `cargo-audit` config, so this manifest note is the durable record — add these
+#    crates to a `deny.toml`/`advisories` section if one is introduced).
 blstrs = "=0.7.1"
+# Explicit exact pin of the transitive `blst` (C1). Not imported directly (blstrs is
+# the only user); declared solely to hard-pin the version + default (empty) features
+# at the manifest level so `cargo update -p blst` cannot bump it.
+blst = "=0.3.16"
 ff = "=0.13.1"
 group = "=0.13.0"
 subtle = "=2.6.1"

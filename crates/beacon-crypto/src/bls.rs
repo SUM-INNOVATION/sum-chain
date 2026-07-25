@@ -472,7 +472,15 @@ pub(crate) fn scalar_le_is_canonical(bytes: &[u8; SCALAR_SIZE]) -> bool {
 /// returning the share `f(x)` as canonical 32-byte little-endian. Dealer-side share
 /// computation: for recipient `j`, `x = x_j = j + 1`. Each coefficient must be a
 /// canonical scalar (`< r`), else [`BeaconCryptoError::NonCanonicalScalar`].
-pub fn eval_share_le(coeffs_le: &[[u8; SCALAR_SIZE]], x: u64) -> Result<[u8; SCALAR_SIZE]> {
+///
+/// The evaluated share is a **secret** `F_r` scalar, so it is returned in
+/// [`Zeroizing`] (scrubbed on drop) and the transient field accumulator is best-
+/// effort scrubbed before return (control C8). `blstrs::Scalar` is `Copy` and not
+/// `Zeroize`, so the durable secret is the little-endian byte buffer.
+pub fn eval_share_le(
+    coeffs_le: &[[u8; SCALAR_SIZE]],
+    x: u64,
+) -> Result<Zeroizing<[u8; SCALAR_SIZE]>> {
     if coeffs_le.is_empty() {
         return Err(BeaconCryptoError::NonCanonicalScalar);
     }
@@ -485,7 +493,12 @@ pub fn eval_share_le(coeffs_le: &[[u8; SCALAR_SIZE]], x: u64) -> Result<[u8; SCA
         acc += coeff * x_pow;
         x_pow *= x;
     }
-    Ok(acc.to_bytes_le())
+    let out = Zeroizing::new(acc.to_bytes_le());
+    // Best-effort scrub of the transient field accumulator (Scalar is Copy; the
+    // durable secret is `out`).
+    acc = Scalar::ZERO;
+    let _ = core::hint::black_box(acc);
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------

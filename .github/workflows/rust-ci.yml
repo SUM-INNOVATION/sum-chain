@@ -15,7 +15,16 @@ concurrency:
 
 jobs:
   build-test-clippy:
-    runs-on: ubuntu-latest
+    # C3 (issue #127 dependency hardening): build/test/clippy the ENTIRE workspace —
+    # including the `blst`-backed `sumchain-beacon-crypto` now linked into production
+    # binaries via `state -> beacon-runtime -> beacon-crypto` — on BOTH x86_64
+    # (`ubuntu-latest`) and aarch64 (`ubuntu-24.04-arm`), so the vendored `blst`
+    # C/assembly compiles and the workspace tests pass on both required targets.
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
     env:
       # librocksdb-sys bundles + compiles RocksDB; GCC 13+ on modern ubuntu
       # images needs <cstdint> force-included (documented repo workaround). If

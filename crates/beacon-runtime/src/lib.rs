@@ -64,22 +64,41 @@
 //! OWNER DECISION, not ratified** (draft §16.3); their ratification is a further
 //! prerequisite.
 //!
+//! **Control C5 (MANDATORY independent audit).** An independent cryptographic
+//! construction + integration audit of the on-chain DKG, complaint adjudication, and
+//! threshold combine is a HARD PRECONDITION before any non-`None`
+//! `beacon_enabled_from_height` gate may be accepted. Completeness of this code is not
+//! a substitute for that audit.
+//!
+//! **Control C6 (identical reviewed binaries/config across validators).** Because a
+//! non-`None` gate makes the beacon state-digest fold consensus-critical (it enters
+//! the block root), any future activation is a coordinated, mixed-version-FORBIDDEN
+//! validator upgrade: every validator MUST run the identical reviewed binary and the
+//! identical ratified `BeaconParams`/gate height, exactly like the other
+//! `*_enabled_from_height` activation gates. Divergent binaries or params would fork
+//! the chain at the beacon fold.
+//!
 //! ## Executor integration (vertically connected — finding 7)
 //!
-//! The beacon executor seam (`crates/state/src/beacon_executor.rs`) reaches this
-//! runtime on the gate-open path: after the crypto-free semantic precheck it invokes
-//! [`validate_operation`] (this crate) to run the §2.2 subgroup/infinity, PoP, DLEQ,
-//! AEAD, and pairing validation the seam documented as deferred. Because the beacon
-//! activation gate is `None` by default (dormant, fail-closed in
-//! `ChainParams::validate`), the runtime is never reached in production and every
-//! beacon tx still rejects with the generic `Failed(0)` and mutates no state —
-//! byte/state-identical to before. The persisted epoch/round state
-//! (`crates/state/src/beacon_store.rs`) follows the #163 C1 pattern: a domain-versioned
-//! `state_digest` folded into `compute_block_state_root` **only** when the gate is
-//! open (no-op under `None`), and a `stage_block_revert` composed into the unified
-//! atomic reorg batch (`revert_block_state_diffs`). Full live per-block epoch-state
-//! mutation additionally needs a genesis `BeaconParams` + membership-snapshot source,
-//! which do not exist yet (the gate stays closed until they — and an audit — do).
+//! The runtime is **fully vertically connected**. On the gate-open path the beacon
+//! executor (`crates/state/src/executor.rs::execute_beacon_tx`) builds an
+//! authenticated [`context::ExecContext`] from the SIGNED tx envelope (signer = tx
+//! public key, `tx_ref` = tx hash, chain/epoch, height/phase, cutoffs) + the epoch
+//! validator-snapshot membership + the genesis `BeaconParams`, and drives this runtime
+//! through a per-block accumulator (`crate::beacon_manager::BeaconBlockState`): a VALID
+//! op (all runtime + crypto + actor/membership/cutoff checks pass) yields a **`Success`
+//! receipt** and is accumulated, then MATERIALIZED + PERSISTED as exactly one journal
+//! per block at finalization; an invalid op yields `Failed(0)` with no state. The
+//! accumulator rehydrates ([`dkg::DkgEpoch::rehydrate`] / [`rounds::BeaconChain::
+//! rehydrate`]) from the store each block, so cross-block persistence + restart work.
+//! The persisted `state_digest` folds into `compute_block_state_root` and reverts via
+//! the unified `revert_block_state_diffs` batch — **only** when the gate is open.
+//!
+//! Because `beacon_enabled_from_height` is `None` by default (fail-closed in
+//! `ChainParams::validate`), the whole path is dormant in production: no accumulator is
+//! built, every beacon tx rejects with the generic `Failed(0)`, no state is written,
+//! and block roots are byte/state/root-identical. Activation additionally requires an
+//! audit (C5) + ratified params/gate + identical validator binaries (C6).
 //!
 //! ## Boundary invariants
 //!

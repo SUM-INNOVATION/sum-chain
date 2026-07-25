@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 use sumchain_beacon_crypto::Signature;
 
 use crate::context::{BeaconPhase, ContextError, ExecContext};
+use crate::dkg::SignedRecordRef;
 use crate::signing::{FinalizeError, PartialError, QualifiedEpoch};
 use crate::wire::{beacon_output, round_message, BeaconFinalizeV1, BeaconPartialV1, ChainInput};
 
@@ -41,17 +42,20 @@ pub enum PartialOutcome {
     Conflict(Box<PartialConflictEvidence>),
 }
 
-/// Retained evidence of two conflicting partials for one `(round, j)`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Retained evidence of two conflicting partials for one `(round, j)`. Each side is
+/// an **authenticated** [`SignedRecordRef`] (signer + signed-tx-envelope hash +
+/// canonical `sigma_j` bytes), so a conflicting partial is individually attributable
+/// (Item 3).
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PartialConflictEvidence {
     /// The round.
     pub round: u64,
     /// The participant index `j`.
     pub j: u32,
-    /// The first recorded partial signature bytes.
-    pub first: [u8; 96],
-    /// The conflicting partial signature bytes.
-    pub second: [u8; 96],
+    /// The first recorded authenticated partial.
+    pub first: SignedRecordRef,
+    /// The conflicting authenticated partial.
+    pub second: SignedRecordRef,
 }
 
 /// The finalized-round result.
@@ -115,7 +119,8 @@ pub struct BeaconChain {
     qe: QualifiedEpoch,
     genesis: [u8; 32],
     rounds: BTreeMap<u64, FinalizedRound>,
-    partials: BTreeMap<(u64, u32), [u8; 96]>,
+    /// Accepted authenticated partial per `(round, j)` (signer + tx_ref + `sigma_j`).
+    partials: BTreeMap<(u64, u32), SignedRecordRef>,
     partial_conflicts: Vec<PartialConflictEvidence>,
 }
 
@@ -137,6 +142,31 @@ impl BeaconChain {
         }
     }
 
+    /// **Rehydrate** a chain from persisted finalized rounds on restart (rows →
+    /// runtime). `rounds` are the persisted `(round, Σ_r compressed, output)` tuples;
+    /// each `Σ_r` is re-decoded with the §2.2 checks. Transient partials are not
+    /// persisted (they matter only within a round), so `partials`/`partial_conflicts`
+    /// start empty. `materialize(rehydrate(rows)) == rows` for the round/output rows.
+    pub fn rehydrate(
+        qe: QualifiedEpoch,
+        genesis: [u8; 32],
+        rounds: Vec<(u64, [u8; 96], [u8; 32])>,
+    ) -> Result<Self, FinalizeError> {
+        let mut chain = BeaconChain::new(qe, genesis);
+        for (r, sigma_r, output) in rounds {
+            let sig = Signature::from_compressed(&sigma_r)
+                .map_err(|_| FinalizeError::InvalidSignature)?;
+            chain.rounds.insert(
+                r,
+                FinalizedRound {
+                    sigma_r: sig,
+                    output,
+                },
+            );
+        }
+        Ok(chain)
+    }
+
     /// The next round expected to be finalized (0 initially; contiguous by the
     /// monotonic guard).
     pub fn next_round(&self) -> u64 {
@@ -146,6 +176,15 @@ impl BeaconChain {
     /// The finalized round record, if any.
     pub fn finalized(&self, round: u64) -> Option<&FinalizedRound> {
         self.rounds.get(&round)
+    }
+
+    /// The finalized rounds as persistable `(round, Σ_r compressed, beacon output)`,
+    /// ascending by round — the exact bytes the producer materializes (Item 2).
+    pub fn finalized_rounds(&self) -> Vec<(u64, [u8; 96], [u8; 32])> {
+        self.rounds
+            .iter()
+            .map(|(r, rec)| (*r, rec.sigma_r.to_compressed(), rec.output))
+            .collect()
     }
 
     /// Retained conflicting-partial evidence.
@@ -190,20 +229,26 @@ impl BeaconChain {
             return Err(RoundError::PartialDidNotVerify);
         }
         let key = (partial.round, partial.j);
+        // Authenticated partial record: signer + signed-tx-envelope hash + sigma bytes.
+        let signed = SignedRecordRef {
+            signer: ctx.signer,
+            tx_ref: ctx.tx_ref,
+            carrier: partial.sigma_j.to_vec(),
+        };
         match self.partials.get(&key) {
-            Some(existing) if *existing == partial.sigma_j => Ok(PartialOutcome::Replay),
+            Some(existing) if existing.carrier == signed.carrier => Ok(PartialOutcome::Replay),
             Some(existing) => {
                 let evidence = PartialConflictEvidence {
                     round: partial.round,
                     j: partial.j,
-                    first: *existing,
-                    second: partial.sigma_j,
+                    first: existing.clone(),
+                    second: signed,
                 };
-                self.partial_conflicts.push(evidence);
+                self.partial_conflicts.push(evidence.clone());
                 Ok(PartialOutcome::Conflict(Box::new(evidence)))
             }
             None => {
-                self.partials.insert(key, partial.sigma_j);
+                self.partials.insert(key, signed);
                 Ok(PartialOutcome::Accepted)
             }
         }

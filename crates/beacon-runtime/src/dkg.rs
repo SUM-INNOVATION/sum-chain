@@ -19,7 +19,7 @@ use sumchain_beacon_crypto::{
 };
 use sumchain_wire::beacon_wire::{DkgComplaintV1, DkgDealV1, RegisterBeaconKeyV1};
 
-use crate::context::{BeaconPhase, ContextError, ExecContext};
+use crate::context::{BeaconPhase, ContextError, ExecContext, ValidatorId};
 use crate::params::BeaconParams;
 
 /// Static configuration for one beacon epoch's DKG.
@@ -89,17 +89,35 @@ pub enum RegistrationOutcome {
     Equivocation(KeyEquivocationEvidence),
 }
 
-/// Retained evidence of a key equivocation: the two conflicting canonical
-/// `RegisterBeaconKeyV1` encodings for the same validator index (draft §6.4,
-/// objective misconduct). Enough for deterministic equivocation adjudication.
+/// An **authenticated** reference to one signed carrier retained as equivocation
+/// evidence (Item 3): the signer's epoch identity, the hash of its signed
+/// transaction envelope (`tx_ref`), and the canonical carrier bytes. A stored
+/// conflicting record is therefore individually attributable to a signed tx — not
+/// merely an unsigned payload. (The envelope signature itself is verified by the
+/// executor before the op reaches the runtime; the runtime retains the authenticated
+/// `signer` + `tx_ref` that attribution produced.)
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SignedRecordRef {
+    /// The authenticated signer identity (from the tx envelope).
+    pub signer: ValidatorId,
+    /// The 32-byte hash of the signed transaction envelope carrying this record.
+    pub tx_ref: [u8; 32],
+    /// The canonical carrier bytes the signed envelope carried.
+    pub carrier: Vec<u8>,
+}
+
+/// Retained evidence of a key equivocation: the two conflicting **authenticated**
+/// `RegisterBeaconKeyV1` records for the same validator index (draft §6.4, objective
+/// misconduct). Each side carries the signer + tx envelope reference + canonical
+/// bytes, so the evidence is individually attributable/authenticated.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyEquivocationEvidence {
     /// The 0-based membership index that equivocated.
     pub validator_index: u32,
-    /// Canonical bytes of the first (authoritative) registration.
-    pub first: Vec<u8>,
-    /// Canonical bytes of the conflicting second registration.
-    pub second: Vec<u8>,
+    /// The first (authoritative) authenticated registration.
+    pub first: SignedRecordRef,
+    /// The conflicting second authenticated registration.
+    pub second: SignedRecordRef,
 }
 
 /// The outcome of submitting a deal (draft §8.4 replay/duplication rules).
@@ -117,16 +135,42 @@ pub enum DealOutcome {
     ConflictingDeal(DealEquivocationEvidence),
 }
 
-/// Retained evidence of a conflicting deal: the two conflicting canonical
-/// `DkgDealV1` encodings that share an identity (draft §8.4).
+/// Retained evidence of a conflicting deal: the two conflicting **authenticated**
+/// `DkgDealV1` records sharing an identity (draft §8.4). Each side carries the signer
+/// + tx envelope reference + canonical bytes (Item 3).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DealEquivocationEvidence {
     /// The dealer index responsible.
     pub dealer_i: u32,
-    /// Canonical bytes of the first (accepted) record.
-    pub first: Vec<u8>,
-    /// Canonical bytes of the conflicting record.
-    pub second: Vec<u8>,
+    /// The first (accepted) authenticated deal record.
+    pub first: SignedRecordRef,
+    /// The conflicting authenticated deal record.
+    pub second: SignedRecordRef,
+}
+
+/// A rehydration failure (persisted rows → runtime). The only failure mode is a
+/// persisted group element that no longer decodes under the §2.2 checks (corruption).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum RehydrateError {
+    /// A persisted G1 field failed canonical / subgroup / infinity decode.
+    #[error("rehydrate: invalid persisted group element: {0}")]
+    InvalidElement(BeaconCryptoError),
+}
+
+/// A read-only, persistable view of one accepted deal (Item 2 — the exact fields the
+/// producer materializes into a store row). Points are canonical compressed bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DealView {
+    /// Dealer index `i`.
+    pub dealer_i: u32,
+    /// Recipient index `j`.
+    pub recipient_j: u32,
+    /// The dealer's Feldman commitments `C_{i,*}` (canonical compressed G1, 48B each).
+    pub commitments: Vec<[u8; sumchain_beacon_crypto::G1_COMPRESSED_SIZE]>,
+    /// ECIES carrier `R_{ij}` (canonical compressed G1, 48B).
+    pub r_ij: [u8; sumchain_beacon_crypto::G1_COMPRESSED_SIZE],
+    /// ECIES body `ct_{ij}` (48B).
+    pub ct_ij: [u8; sumchain_beacon_crypto::ECIES_CT_LEN],
 }
 
 /// The four objective complaint verdicts (draft §6.1). Adjudication is deterministic
@@ -179,21 +223,22 @@ pub struct ComplaintOutcome {
     pub state_changed: bool,
 }
 
-/// A registered epoch encryption key plus the canonical bytes of its signed
-/// registration (retained so a later equivocation can be proven).
+/// A registered epoch encryption key plus its **authenticated** signed-record
+/// reference (signer + tx envelope hash + canonical bytes), retained so a later
+/// equivocation can be proven and individually attributed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RegisteredKey {
     ek: G1Point,
-    raw: Vec<u8>,
+    record: SignedRecordRef,
 }
 
-/// A single accepted `(dealer i → recipient j)` deal record (validated), plus the
-/// canonical bytes of the signed deal (retained for equivocation evidence).
+/// A single accepted `(dealer i → recipient j)` deal record (validated), plus its
+/// **authenticated** signed-record reference (retained for equivocation evidence).
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AcceptedDeal {
     r_ij: G1Point,
     ct_ij: [u8; sumchain_beacon_crypto::ECIES_CT_LEN],
-    raw: Vec<u8>,
+    record: SignedRecordRef,
 }
 
 /// The result of DKG finalization (draft §4.2).
@@ -245,6 +290,64 @@ impl DkgEpoch {
             false_accusers: BTreeSet::new(),
             adjudicated: BTreeSet::new(),
         }
+    }
+
+    /// **Rehydrate** a DKG epoch from persisted state on restart (rows → runtime).
+    /// The inverse of the store's materialization: `keys` are `(validator_index, EK_j
+    /// compressed)`, `deals` are the persisted [`DealView`]s, and `disqualified` is
+    /// the disqualified-dealer set. Group elements are re-decoded with the §2.2
+    /// checks. Because the persisted rows do **not** carry the authenticated
+    /// `SignedRecordRef` (signer + tx envelope hash) — only the essential consensus
+    /// state — rehydrated records carry a NULL reference; a *new* equivocation in a
+    /// later block still records a real reference for its own conflicting record, and
+    /// `materialize` ignores the reference, so `materialize(rehydrate(rows)) == rows`
+    /// exactly (the round-trip the per-block producer relies on).
+    pub fn rehydrate(
+        cfg: DkgConfig,
+        keys: Vec<(u32, [u8; sumchain_beacon_crypto::G1_COMPRESSED_SIZE])>,
+        deals: Vec<DealView>,
+        disqualified: Vec<u32>,
+    ) -> Result<Self, RehydrateError> {
+        let null_ref = SignedRecordRef {
+            signer: ValidatorId([0u8; 32]),
+            tx_ref: [0u8; 32],
+            carrier: Vec::new(),
+        };
+        let mut epoch = DkgEpoch::new(cfg);
+        for (idx, ek) in keys {
+            let ek = G1Point::from_compressed(&ek).map_err(RehydrateError::InvalidElement)?;
+            epoch.keys.insert(
+                idx,
+                RegisteredKey {
+                    ek,
+                    record: null_ref.clone(),
+                },
+            );
+        }
+        for d in deals {
+            let mut commitments = Vec::with_capacity(d.commitments.len());
+            for c in &d.commitments {
+                commitments
+                    .push(G1Point::from_compressed(c).map_err(RehydrateError::InvalidElement)?);
+            }
+            let r_ij = G1Point::from_compressed(&d.r_ij).map_err(RehydrateError::InvalidElement)?;
+            epoch
+                .dealer_commitments
+                .entry(d.dealer_i)
+                .or_insert(commitments);
+            epoch.deals.insert(
+                (d.dealer_i, d.recipient_j),
+                AcceptedDeal {
+                    r_ij,
+                    ct_ij: d.ct_ij,
+                    record: null_ref.clone(),
+                },
+            );
+        }
+        for i in disqualified {
+            epoch.disqualified.insert(i);
+        }
+        Ok(epoch)
     }
 
     /// The static configuration for this epoch.
@@ -312,6 +415,12 @@ impl DkgEpoch {
             return Err(SetupError::PopInvalid);
         }
         let raw = reg.try_encode().map_err(|_| SetupError::EvidenceEncode)?;
+        // Authenticated record: signer + signed-tx-envelope hash + canonical bytes.
+        let record = SignedRecordRef {
+            signer: ctx.signer,
+            tx_ref: ctx.tx_ref,
+            carrier: raw,
+        };
 
         match self.keys.get(&validator_index) {
             Some(existing) if existing.ek == ek => Ok(RegistrationOutcome::DuplicateReplay),
@@ -319,17 +428,50 @@ impl DkgEpoch {
                 // Distinct valid key for an already-keyed validator ⇒ equivocation.
                 let evidence = KeyEquivocationEvidence {
                     validator_index,
-                    first: existing.raw.clone(),
-                    second: raw,
+                    first: existing.record.clone(),
+                    second: record,
                 };
                 self.key_equivocations.push(evidence.clone());
                 Ok(RegistrationOutcome::Equivocation(evidence))
             }
             None => {
-                self.keys.insert(validator_index, RegisteredKey { ek, raw });
+                self.keys
+                    .insert(validator_index, RegisteredKey { ek, record });
                 Ok(RegistrationOutcome::Accepted)
             }
         }
+    }
+
+    // -- Persistable-state accessors (the PRODUCER materializes these into rows) --
+
+    /// The accepted registered encryption keys as `(validator_index, EK_j
+    /// compressed)`, ascending by index. The exact bytes the persistence layer
+    /// materializes (Item 2).
+    pub fn registered_keys(&self) -> Vec<(u32, [u8; sumchain_beacon_crypto::G1_COMPRESSED_SIZE])> {
+        self.keys
+            .iter()
+            .map(|(idx, k)| (*idx, k.ek.to_compressed()))
+            .collect()
+    }
+
+    /// The accepted deals as persistable views, ascending by `(dealer_i,
+    /// recipient_j)`. `commitments` is the dealer's committed polynomial (repeated
+    /// from `dealer_commitments`, so a deal row is self-contained).
+    pub fn accepted_deals(&self) -> Vec<DealView> {
+        self.deals
+            .iter()
+            .map(|((i, j), d)| DealView {
+                dealer_i: *i,
+                recipient_j: *j,
+                commitments: self
+                    .dealer_commitments
+                    .get(i)
+                    .map(|cs| cs.iter().map(|c| c.to_compressed()).collect())
+                    .unwrap_or_default(),
+                r_ij: d.r_ij.to_compressed(),
+                ct_ij: d.ct_ij,
+            })
+            .collect()
     }
 
     /// The registered encryption key `EK_j` for validator `j`, if any.
@@ -372,11 +514,16 @@ impl DkgEpoch {
         }
         let r_ij = G1Point::from_compressed(&deal.r_ij)?;
         let raw = deal.try_encode().map_err(|_| SetupError::EvidenceEncode)?;
+        let signed = SignedRecordRef {
+            signer: ctx.signer,
+            tx_ref: ctx.tx_ref,
+            carrier: raw,
+        };
         let key = (deal.dealer_i, deal.recipient_j);
         let record = AcceptedDeal {
             r_ij,
             ct_ij: deal.ct_ij,
-            raw: raw.clone(),
+            record: signed.clone(),
         };
 
         // §8.4 identity-tuple replay: at most one deal per (i, j).
@@ -386,8 +533,8 @@ impl DkgEpoch {
             }
             let evidence = DealEquivocationEvidence {
                 dealer_i: deal.dealer_i,
-                first: existing.raw.clone(),
-                second: raw,
+                first: existing.record.clone(),
+                second: signed,
             };
             self.deal_equivocations.push(evidence.clone());
             self.disqualified.insert(deal.dealer_i);
@@ -397,10 +544,12 @@ impl DkgEpoch {
         // A dealer has ONE polynomial: all its deals must carry the same commitments.
         match self.dealer_commitments.get(&deal.dealer_i) {
             Some(existing) if *existing != commitments => {
+                let first =
+                    existing_deal_ref(&self.deals, deal.dealer_i).unwrap_or_else(|| signed.clone());
                 let evidence = DealEquivocationEvidence {
                     dealer_i: deal.dealer_i,
-                    first: existing_deal_raw(&self.deals, deal.dealer_i).unwrap_or_default(),
-                    second: raw,
+                    first,
+                    second: signed,
                 };
                 self.deal_equivocations.push(evidence.clone());
                 self.disqualified.insert(deal.dealer_i);
@@ -603,11 +752,14 @@ impl DkgEpoch {
     }
 }
 
-/// Fetch any accepted deal's raw bytes for dealer `i` (for cross-recipient
+/// Fetch any accepted deal's authenticated record for dealer `i` (for cross-recipient
 /// commitment-conflict evidence). Returns the first in canonical `(i, j)` order.
-fn existing_deal_raw(deals: &BTreeMap<(u32, u32), AcceptedDeal>, dealer_i: u32) -> Option<Vec<u8>> {
+fn existing_deal_ref(
+    deals: &BTreeMap<(u32, u32), AcceptedDeal>,
+    dealer_i: u32,
+) -> Option<SignedRecordRef> {
     deals
         .iter()
         .find(|((i, _j), _)| *i == dealer_i)
-        .map(|(_, d)| d.raw.clone())
+        .map(|(_, d)| d.record.clone())
 }

@@ -46,6 +46,12 @@ pub enum GenesisError {
          parameter structure does not exist yet"
     )]
     IncompleteSubsystemActivation { gate: &'static str },
+
+    /// A `beacon_params` config (issue #127) violates the ratified §7.4 threshold /
+    /// fault inequalities and is rejected at genesis load. The params surface may be
+    /// declared ahead of activation, but only if internally consistent.
+    #[error("invalid beacon_params: {reason}")]
+    InvalidBeaconParams { reason: &'static str },
 }
 
 pub type Result<T> = std::result::Result<T, GenesisError>;
@@ -527,6 +533,17 @@ pub struct ChainParams {
     #[serde(default)]
     pub beacon_enabled_from_height: Option<u64>,
 
+    /// BR1 randomness-beacon threshold/fault parameters (issue #127). `None`
+    /// (default) = the typed surface is absent. When `Some`, it is VALIDATED at
+    /// genesis load ([`BeaconParamsConfig::validate`], the draft §7.4 inequalities),
+    /// so an inconsistent config is rejected. **The params surface existing does NOT
+    /// activate the beacon:** [`Self::beacon_enabled_from_height`] stays `None` and
+    /// `validate()` still rejects any `Some(_)` gate. This lets an operator declare
+    /// the (audited, ratified) parameters ahead of a future coordinated activation
+    /// without opening the gate. No economic magnitude or activation height here.
+    #[serde(default)]
+    pub beacon_params: Option<BeaconParamsConfig>,
+
     /// SRC-201 sponsored public-key registration activation gate (issue #145).
     ///
     /// This is a fully-implemented ACTIVATION gate, NOT a dormant-until-built
@@ -840,6 +857,9 @@ impl Default for ChainParams {
             // (issue #118 foundation).
             compute_pool_enabled_from_height: None,
             beacon_enabled_from_height: None,
+            // Production-safe default: no beacon parameter surface (typed config
+            // absent). The gate above stays dormant regardless.
+            beacon_params: None,
             // Production-safe default: sponsored public-key registration (issue
             // #145) unavailable. Activation is a coordinated validator upgrade;
             // never set in default/mainnet config.
@@ -907,6 +927,64 @@ impl ChainParams {
             return Err(GenesisError::IncompleteSubsystemActivation {
                 gate: "beacon_enabled_from_height",
             });
+        }
+        // The beacon PARAMETER surface (#127) MAY be declared while the gate stays
+        // dormant — but only if internally consistent (draft §7.4). This validates
+        // the config at load; it does NOT open the gate (still rejected above).
+        if let Some(bp) = &self.beacon_params {
+            bp.validate()?;
+        }
+        Ok(())
+    }
+}
+
+/// BR1 randomness-beacon threshold / fault parameters as an authoritative genesis
+/// config surface (issue #127). A plain, self-contained serde struct: it deliberately
+/// does NOT depend on `sumchain-beacon-runtime` (which links `blst`), so the genesis
+/// crate stays free of the pairing linkage. Its [`validate`](Self::validate) enforces
+/// the SAME ratified §7.4 inequalities as `sumchain_beacon_runtime::BeaconParams::
+/// validated`; the state producer re-validates through that runtime constructor (the
+/// single source of truth for the executable runtime), so the two cannot silently
+/// diverge — a mismatch would fail the runtime's own construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeaconParamsConfig {
+    /// Byzantine faults tolerated `f`.
+    pub f: u32,
+    /// Additional crash slack `c`.
+    pub c: u32,
+    /// Reconstruction threshold `T` (partials to combine; commitment count/deal).
+    pub t: u32,
+    /// QUAL / qualification size `Q_dkg`.
+    pub q_dkg: u32,
+    /// Committee size `n` (membership-snapshot cardinality).
+    pub n: u32,
+}
+
+impl BeaconParamsConfig {
+    /// Validate the draft §7.4 inequalities: `T ≥ 1`, `T = f+1`, `Q_dkg = 2f+1`,
+    /// `T ≤ Q_dkg ≤ n`, `n − f − c ≥ T` (L1), `n − f − c ≥ Q_dkg` (L2). Rejects any
+    /// inconsistent config. (Matches `BeaconParams::validated`; the runtime is the
+    /// executable source of truth and re-checks on construction.)
+    pub fn validate(&self) -> Result<()> {
+        let err = |reason| Err(GenesisError::InvalidBeaconParams { reason });
+        if self.t == 0 {
+            return err("reconstruction threshold T must be >= 1");
+        }
+        if self.t < self.f + 1 {
+            return err("require T >= f+1 (S1)");
+        }
+        if self.q_dkg < 2 * self.f + 1 {
+            return err("require Q_dkg >= 2f+1 (S2)");
+        }
+        if !(self.t <= self.q_dkg && self.q_dkg <= self.n) {
+            return err("require T <= Q_dkg <= n (C1)");
+        }
+        let avail = self.n as i64 - self.f as i64 - self.c as i64;
+        if avail < self.t as i64 {
+            return err("require n-f-c >= T (L1)");
+        }
+        if avail < self.q_dkg as i64 {
+            return err("require n-f-c >= Q_dkg (L2)");
         }
         Ok(())
     }
@@ -1512,6 +1590,44 @@ mod tests {
             }
             other => panic!("expected IncompleteSubsystemActivation, got {other:?}"),
         }
+    }
+
+    // Issue #127 Item 1a: the beacon PARAMS surface may be declared while the gate
+    // stays dormant, but only if internally consistent (§7.4). Default is None.
+    #[test]
+    fn beacon_params_config_validation() {
+        // Default genesis has no beacon params and a dormant gate.
+        let g = Genesis::from_json(&serde_json::to_string(&local_genesis_value()).unwrap()).unwrap();
+        assert_eq!(g.params.beacon_params, None);
+        assert_eq!(g.params.beacon_enabled_from_height, None);
+
+        // A VALID params config is accepted at load (gate still None).
+        let valid = BeaconParamsConfig { f: 1, c: 1, t: 2, q_dkg: 3, n: 5 };
+        assert!(valid.validate().is_ok());
+        let mut v = local_genesis_value();
+        v["params"]["beacon_params"] = serde_json::to_value(valid).unwrap();
+        let g = Genesis::from_json(&serde_json::to_string(&v).unwrap()).unwrap();
+        assert_eq!(g.params.beacon_params, Some(valid));
+        assert_eq!(g.params.beacon_enabled_from_height, None, "params surface does NOT open the gate");
+
+        // An INVALID config (T < f+1) is rejected at load.
+        let invalid = BeaconParamsConfig { f: 1, c: 1, t: 1, q_dkg: 3, n: 5 };
+        assert!(invalid.validate().is_err());
+        let mut v = local_genesis_value();
+        v["params"]["beacon_params"] = serde_json::to_value(invalid).unwrap();
+        assert!(matches!(
+            Genesis::from_json(&serde_json::to_string(&v).unwrap()),
+            Err(GenesisError::InvalidBeaconParams { .. })
+        ));
+
+        // Params present but gate Some ⇒ still rejected (gate cannot open yet).
+        let mut v = local_genesis_value();
+        v["params"]["beacon_params"] = serde_json::to_value(valid).unwrap();
+        v["params"]["beacon_enabled_from_height"] = serde_json::json!(0u64);
+        assert!(matches!(
+            Genesis::from_json(&serde_json::to_string(&v).unwrap()),
+            Err(GenesisError::IncompleteSubsystemActivation { gate: "beacon_enabled_from_height" })
+        ));
     }
 
     // Test 4 — a future `Some(h)` is rejected too (not just `Some(0)`), per gate.

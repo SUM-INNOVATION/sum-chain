@@ -231,6 +231,13 @@ pub struct BlockExecutor {
     inference_attestation_executor: InferenceAttestationExecutor,
     inference_settlement_executor: crate::inference_settlement_executor::InferenceSettlementExecutor,
     education_executor: crate::education_executor::EducationExecutor,
+    /// BR1 beacon (#127) per-block accumulator. Interior-mutable (`parking_lot::Mutex`
+    /// so `BlockExecutor` stays `Send + Sync`) so the per-tx dispatch (`&self`) can
+    /// drive the stateful beacon runtime across a block's beacon txs; built once at
+    /// block start when the gate is open, persisted once at block finalization, cleared
+    /// after. `None` while dormant (production default) — then the beacon dispatch is
+    /// byte/state-identical to the fail-closed seam.
+    beacon_block: parking_lot::Mutex<Option<crate::beacon_manager::BeaconBlockState>>,
 }
 
 impl BlockExecutor {
@@ -282,6 +289,7 @@ impl BlockExecutor {
             inference_attestation_executor,
             inference_settlement_executor,
             education_executor,
+            beacon_block: parking_lot::Mutex::new(None),
         }
     }
 
@@ -1842,23 +1850,24 @@ impl BlockExecutor {
                     // (a decoded tx can never carry it); unreachable.
                     TxPayload::ComputePoolReserved(never) => match *never {},
                     TxPayload::BeaconSetup(beacon_data) | TxPayload::BeaconSigning(beacon_data) => {
-                        // BR1 randomness beacon (#125). Registered payload
-                        // (TxType 28/29), EXECUTION gate-closed. Delegates to the
-                        // beacon seam: gate-closed (default) -> generic Failed(0)
-                        // free, no state; gate-open -> pure semantic precheck then
-                        // FAIL CLOSED (still generic Failed(0)) pending #127 crypto/
-                        // threshold/membership validation. No beacon-specific receipt
-                        // code is frozen. Never accepts unvalidated state.
-                        // `tx_type() as u8` is the enclosing variant's phase
-                        // ordinal (28 setup / 29 signing) for the phase-consistency
-                        // check.
-                        Ok(crate::beacon_executor::execute(
-                            &self.params,
-                            block_height,
+                        // BR1 randomness beacon (#127). Registered payload (TxType
+                        // 28/29). Re-routed through the per-block accumulator built at
+                        // block start: gate-CLOSED (production default) → the dormant
+                        // fail-closed seam (`Failed(0)`, no state, byte/state-identical);
+                        // gate-OPEN → an authenticated `ExecContext` from the SIGNED
+                        // envelope (signer = tx public key, `tx_ref` = tx hash,
+                        // chain/epoch, height/phase, cutoffs) drives the stateful
+                        // runtime — a VALID op returns `Success` and is accumulated
+                        // (persisted once at block finalization), an invalid op returns
+                        // `Failed(0)` with no state. `tx_type() as u8` is the enclosing
+                        // variant's phase ordinal (28 setup / 29 signing).
+                        Ok(self.execute_beacon_tx(
+                            tx.public_key,
                             tx_hash,
                             v2_tx.chain_id,
                             v2_tx.tx_type() as u8,
                             beacon_data,
+                            block_height,
                         ))
                     }
                 }
@@ -2966,6 +2975,11 @@ impl BlockExecutor {
         // last-second proof and a withdrawal in the same block.
         self.process_expired_challenges(block.height())?;
 
+        // ── BR1 beacon (#127): build the per-block accumulator (rehydrated from the
+        // store) when the gate is open, so the per-tx beacon dispatch drives the
+        // stateful runtime across this block's beacon txs. No-op under the None gate.
+        self.init_beacon_block(block.height(), active_validator_pubkeys)?;
+
         for (idx, tx) in block.transactions.iter().enumerate() {
             // Record pre-execution state for diff
             let sender = tx.sender();
@@ -3067,6 +3081,14 @@ impl BlockExecutor {
         // whole path is inert and dormant block roots are byte-for-byte unchanged.
         self.apply_compute_pool_transitions(block.height())?;
 
+        // BR1 beacon (#127): drive + persist this block's beacon transition BEFORE the
+        // state root so the committed beacon state is folded into the consensus
+        // commitment when the gate is open. GATE-CLOSED: under the production default
+        // (`beacon_enabled_from_height == None`) the manager is never constructed,
+        // nothing is applied, and the root fold below is skipped — inert, dormant
+        // block roots byte-for-byte unchanged.
+        self.apply_beacon_transitions(block.height())?;
+
         // Compute new state root (folds the contract-state digest once the
         // contracts gate is open, and the C1 state digest once the compute-pool
         // gate is open — see compute_block_state_root).
@@ -3117,6 +3139,158 @@ impl BlockExecutor {
     {
         if let Some(mut manager) = ComputePoolManager::new_enabled(&self.db, &self.params, height) {
             manager.apply_block(height, ops)?;
+        }
+        Ok(())
+    }
+
+    /// The BR1 beacon (#127) threshold/fault params for the LIVE producer: the
+    /// authoritative genesis `beacon_params` (re-validated through the runtime's own
+    /// `BeaconParams::validated`, the executable source of truth), or — only when the
+    /// gate is (test-)open with no genesis surface — the PROPOSED fixture.
+    fn beacon_params_or_fixture(
+        &self,
+    ) -> Result<sumchain_beacon_runtime::params::BeaconParams> {
+        use sumchain_beacon_runtime::params::BeaconParams;
+        match &self.params.beacon_params {
+            Some(bp) => BeaconParams::validated(bp.f, bp.c, bp.t, bp.q_dkg, bp.n)
+                .map_err(|e| StateError::InvalidOperation(format!("invalid beacon_params: {e:?}"))),
+            None => Ok(BeaconParams::proposed_default()),
+        }
+    }
+
+    /// Build the per-block beacon accumulator when the gate is open (rehydrated from
+    /// the store), using the genesis `BeaconParams` + the epoch VALIDATOR-SNAPSHOT
+    /// membership (`active_validator_pubkeys` for this block, threaded from consensus
+    /// — the authoritative set, not mutable membership). Under the `None` gate this
+    /// clears the slot: no accumulator, byte/state-identical dormant path.
+    fn init_beacon_block(
+        &self,
+        height: BlockHeight,
+        active_validator_pubkeys: &[[u8; 32]],
+    ) -> Result<()> {
+        use sumchain_beacon_runtime::context::{EpochCutoffs, EpochMembership, ValidatorId};
+        use sumchain_beacon_runtime::dkg::DkgConfig;
+        use sumchain_beacon_runtime::wire::genesis_seed;
+
+        if !crate::beacon_executor::beacon_gate_open(&self.params, height) {
+            *self.beacon_block.lock() = None;
+            return Ok(());
+        }
+        let params = self.beacon_params_or_fixture()?;
+        let cfg = DkgConfig {
+            chain_id: self.state.chain_id(),
+            epoch: 0, // current-epoch = 0 until a ratified height→epoch schedule exists
+            params,
+        };
+        // Epoch membership = the authoritative validator snapshot for this block.
+        let members: Vec<ValidatorId> = active_validator_pubkeys
+            .iter()
+            .map(|pk| ValidatorId(*pk))
+            .collect();
+        let membership = match EpochMembership::new(members) {
+            Ok(m) => m,
+            // No/invalid snapshot ⇒ no accumulator (beacon txs fail closed this block).
+            Err(_) => {
+                *self.beacon_block.lock() = None;
+                return Ok(());
+            }
+        };
+        // Timing magnitudes are OPEN in the spec; permissive here (the runtime still
+        // enforces the ordering, exercised in the runtime unit tests).
+        let cutoffs = EpochCutoffs {
+            deal_cutoff: u64::MAX,
+            complaint_deadline: u64::MAX,
+        };
+        let genesis = genesis_seed(cfg.chain_id, &[0u8; 32]);
+        let acc = crate::beacon_manager::BeaconBlockState::load_from_store(
+            &self.db, cfg, membership, cutoffs, genesis,
+        )?;
+        *self.beacon_block.lock() = Some(acc);
+        Ok(())
+    }
+
+    /// Execute one beacon tx through the per-block accumulator (the vertical
+    /// connection). Gate-closed (no accumulator) → the dormant fail-closed seam
+    /// (`Failed(0)`, no state). Gate-open: crypto-free semantic precheck, then an
+    /// authenticated [`ExecContext`] from the SIGNED envelope (signer = tx public key,
+    /// `tx_ref` = tx hash, chain/epoch, height/phase, cutoffs) is driven through the
+    /// runtime; a VALID op ⇒ `Success` (accumulated, persisted once at block
+    /// finalization), an invalid op ⇒ `Failed(0)`, no state.
+    fn execute_beacon_tx(
+        &self,
+        signer_pubkey: [u8; 32],
+        tx_hash: Hash,
+        tx_chain_id: u64,
+        phase_ordinal: u8,
+        beacon_data: &sumchain_primitives::BeaconTxData,
+        block_height: u64,
+    ) -> TxExecutionResult {
+        use sumchain_beacon_runtime::context::{BeaconPhase, ExecContext, ValidatorId};
+
+        let mut guard = self.beacon_block.lock();
+        let Some(acc) = guard.as_mut() else {
+            // Dormant (gate closed / no snapshot) → the fail-closed seam.
+            return crate::beacon_executor::execute(
+                &self.params,
+                block_height,
+                tx_hash,
+                tx_chain_id,
+                phase_ordinal,
+                beacon_data,
+            );
+        };
+        let failed = TxExecutionResult {
+            tx_hash,
+            status: TxStatus::Failed(0),
+            fee_paid: 0,
+        };
+        // Crypto-free semantic precheck: decode + phase↔variant + chain_id binding.
+        let op = match crate::beacon_executor::semantic_precheck(
+            phase_ordinal,
+            tx_chain_id,
+            beacon_data,
+        ) {
+            Ok(op) => op,
+            Err(_) => return failed,
+        };
+        let phase = if phase_ordinal == sumchain_primitives::beacon_wire::W1B_BEACON_SIGN_TXTYPE {
+            BeaconPhase::Signing
+        } else {
+            BeaconPhase::Setup
+        };
+        // Clone the membership out so the authenticated `ExecContext` borrows the
+        // clone while `apply_op` takes `&mut acc` (no aliasing).
+        let membership = acc.membership().clone();
+        let cfg = acc.cfg();
+        let cutoffs = acc.cutoffs();
+        let ctx = ExecContext {
+            signer: ValidatorId(signer_pubkey),
+            tx_ref: *tx_hash.as_bytes(),
+            chain_id: tx_chain_id,
+            epoch: cfg.epoch,
+            block_height,
+            phase,
+            membership: &membership,
+            cutoffs,
+        };
+        if acc.apply_op(&ctx, &op) {
+            TxExecutionResult {
+                tx_hash,
+                status: TxStatus::Success,
+                fee_paid: 0,
+            }
+        } else {
+            failed
+        }
+    }
+
+    /// Persist the block's accumulated beacon transition as EXACTLY ONE per-height
+    /// journal, then clear the accumulator. No-op (and no accumulator) under the
+    /// `None` gate — byte/state/root-identical dormant path.
+    fn apply_beacon_transitions(&self, height: BlockHeight) -> Result<()> {
+        let acc = self.beacon_block.lock().take();
+        if let Some(acc) = acc {
+            acc.persist(&self.db, height)?;
         }
         Ok(())
     }
@@ -6544,6 +6718,267 @@ mod tests {
             Hash::hash(&open_preimage),
             "open-gate root must be the closed preimage + the 32-byte C1 digest at the documented offset"
         );
+    }
+
+    /// STATE-COMMITMENT differential (issue #127, Item 2): under the dormant BEACON
+    /// gate the block-root preimage is byte-for-byte the pre-beacon algorithm (the
+    /// beacon fold contributes nothing even with a beacon row present), and under an
+    /// open beacon gate it is exactly that preimage with the 32-byte beacon digest
+    /// inserted at the documented offset (after the supply/C1 folds, before the
+    /// previous-state-root mix).
+    #[test]
+    fn beacon_root_none_identical_open_appends_digest_at_documented_offset() {
+        use crate::beacon_store::BeaconStore;
+
+        let (state, db, _dir) = setup();
+        // Contracts + supply + compute-pool all inert (default/None, fresh db), empty
+        // block/receipts, prev state root == ZERO ⇒ the ONLY preimage difference is
+        // the beacon fold.
+        let ex_none = BlockExecutor::new(state.clone(), db.clone(), ChainParams::default());
+        let ex_open = BlockExecutor::new(
+            state.clone(),
+            db.clone(),
+            ChainParams {
+                beacon_enabled_from_height: Some(0),
+                ..ChainParams::default()
+            },
+        );
+
+        let proposer = KeyPair::generate();
+        let blk = compute_pool_test_block(1, &proposer);
+        let empty_contract = ContractStateDiff::new();
+
+        // A known beacon row so the committed digest is non-trivial.
+        db.put(sumchain_storage::cf::BEACON_STATE, &[0x01, 0x00, 0x00, 0x00, 0x00], &[0xAB, 0xCD])
+            .unwrap();
+        let beacon_digest = BeaconStore::new(&db).state_digest().unwrap();
+
+        // Pre-beacon preimage: height ‖ parent_hash ‖ timestamp ‖ tx_root ‖ prev_root.
+        let mut pre = Vec::new();
+        pre.extend_from_slice(&blk.height().to_be_bytes());
+        pre.extend_from_slice(blk.header.parent_hash.as_bytes());
+        pre.extend_from_slice(&blk.header.timestamp.to_be_bytes());
+        pre.extend_from_slice(blk.header.tx_root.as_bytes());
+        let prefix_len = pre.len();
+        pre.extend_from_slice(state.state_root().as_bytes());
+
+        // Gate None: byte-for-byte the pre-beacon preimage hash (fold inert), even
+        // though a beacon row is present in the DB.
+        assert_eq!(
+            ex_none
+                .compute_block_state_root(&blk, &[], &empty_contract)
+                .unwrap(),
+            Hash::hash(&pre),
+            "under None gate the root must equal the pre-beacon preimage hash"
+        );
+
+        // Gate open: same preimage with the 32-byte beacon digest at the documented
+        // offset (after the supply/C1 folds, before the prev-root mix).
+        let mut open_preimage = pre[..prefix_len].to_vec();
+        open_preimage.extend_from_slice(beacon_digest.as_bytes());
+        open_preimage.extend_from_slice(state.state_root().as_bytes());
+        assert_eq!(open_preimage.len(), pre.len() + 32);
+        assert_eq!(
+            ex_open
+                .compute_block_state_root(&blk, &[], &empty_contract)
+                .unwrap(),
+            Hash::hash(&open_preimage),
+            "open-gate root must be the closed preimage + the 32-byte beacon digest at the documented offset"
+        );
+    }
+
+    // ── Per-tx receipt path (issue #127): valid op → SUCCESS + materialize/persist ──
+
+    /// Build a signed `BeaconSetup` registration tx from `signer` (chain_id 1, epoch
+    /// 0) carrying a REAL `EK_j` + PoP. `bad_pop` swaps in a wrong PoP to force a
+    /// runtime crypto failure.
+    fn beacon_reg_tx(signer: &KeyPair, secret_seed: u8, bad_pop: bool, fee: u128) -> SignedTransaction {
+        use sumchain_beacon_crypto::SecretScalar;
+        use sumchain_primitives::beacon_wire::{BeaconOperation, RegisterBeaconKeyV1};
+        use sumchain_primitives::{BeaconTxData, TransactionV2, TxPayload};
+
+        let mut sk_bytes = [0u8; 32];
+        sk_bytes[0] = secret_seed;
+        let sk = SecretScalar::from_bytes_le(&sk_bytes).unwrap();
+        let pop = if bad_pop {
+            let mut other = [0u8; 32];
+            other[0] = secret_seed.wrapping_add(1);
+            SecretScalar::from_bytes_le(&other).unwrap().pop_prove()
+        } else {
+            sk.pop_prove()
+        };
+        let reg = RegisterBeaconKeyV1 {
+            chain_id: 1,
+            epoch: 0,
+            ek_j: sk.public_g1().to_compressed(),
+            pop: pop.to_compressed(),
+        };
+        let data = BeaconTxData::from_operation(&BeaconOperation::RegisterBeaconKey(reg)).unwrap();
+        let tx = TransactionV2 {
+            chain_id: 1,
+            from: signer.address(),
+            fee,
+            nonce: 0,
+            payload: TxPayload::BeaconSetup(data),
+        };
+        let sig = sign(tx.signing_hash().as_bytes(), signer.private_key());
+        SignedTransaction::new_v2(tx, *sig.as_bytes(), *signer.public_key().as_bytes())
+    }
+
+    fn beacon_open_params() -> ChainParams {
+        ChainParams {
+            beacon_enabled_from_height: Some(0),
+            beacon_params: Some(sumchain_genesis::BeaconParamsConfig {
+                f: 1,
+                c: 1,
+                t: 2,
+                q_dkg: 3,
+                n: 5,
+            }),
+            ..ChainParams::with_v2_enabled()
+        }
+    }
+
+    /// 5 validators (the epoch snapshot); index 0 signs the beacon tx.
+    fn beacon_validators() -> (Vec<KeyPair>, Vec<[u8; 32]>) {
+        let vs: Vec<KeyPair> = (0..5).map(|_| KeyPair::generate()).collect();
+        let pubs: Vec<[u8; 32]> = vs.iter().map(|k| *k.public_key().as_bytes()).collect();
+        (vs, pubs)
+    }
+
+    fn fund(state: &StateManager, addr: &Address, balance: u128) {
+        state
+            .put_account(
+                addr,
+                &sumchain_storage::schema::AccountState { balance, nonce: 0 },
+            )
+            .unwrap();
+    }
+
+    fn beacon_block_with(height: u64, proposer: &[u8; 32], txs: Vec<SignedTransaction>) -> Block {
+        let header = BlockHeader::new(Hash::ZERO, height, 1000, Hash::ZERO, Hash::ZERO, *proposer);
+        Block::new(header, txs)
+    }
+
+    #[test]
+    fn beacon_gate_open_valid_tx_succeeds_and_persists() {
+        let (state, db, _dir) = setup();
+        let params = beacon_open_params();
+        let fee = params.min_fee;
+        let executor = BlockExecutor::new(state.clone(), db.clone(), params);
+        let (vs, pubs) = beacon_validators();
+        fund(&state, &vs[0].address(), fee + 1000);
+
+        let tx = beacon_reg_tx(&vs[0], 7, false, fee);
+        let blk = beacon_block_with(1, vs[0].public_key().as_bytes(), vec![tx]);
+        let (receipts, _root, _sd, _cd) = executor.execute_block(&blk, Hash::ZERO, &pubs).unwrap();
+
+        assert_eq!(receipts.len(), 1);
+        assert!(
+            receipts[0].is_success(),
+            "VALID beacon tx must SUCCEED (got {:?})",
+            receipts[0].status
+        );
+        // Runtime state materialized + persisted (exactly one journal at height 1).
+        let store = crate::beacon_store::BeaconStore::new(&db);
+        assert!(
+            store
+                .load_state_map()
+                .unwrap()
+                .contains_key(&crate::beacon_store::key_row_key(0)),
+            "registrant key persisted at membership index 0"
+        );
+        assert!(store.has_journal(1).unwrap(), "one beacon journal at the block height");
+    }
+
+    #[test]
+    fn beacon_gate_open_invalid_tx_fails_closed_no_state() {
+        let (state, db, _dir) = setup();
+        let params = beacon_open_params();
+        let fee = params.min_fee;
+        let executor = BlockExecutor::new(state.clone(), db.clone(), params);
+        let (vs, pubs) = beacon_validators();
+        fund(&state, &vs[0].address(), fee + 1000);
+
+        // A registration with a WRONG PoP → runtime PopInvalid → FAIL CLOSED.
+        let tx = beacon_reg_tx(&vs[0], 7, true, fee);
+        let blk = beacon_block_with(1, vs[0].public_key().as_bytes(), vec![tx]);
+        let (receipts, _root, _sd, _cd) = executor.execute_block(&blk, Hash::ZERO, &pubs).unwrap();
+
+        assert!(!receipts[0].is_success(), "invalid beacon tx fails closed");
+        let store = crate::beacon_store::BeaconStore::new(&db);
+        assert!(store.load_state_map().unwrap().is_empty(), "no beacon state on invalid op");
+        assert!(!store.has_journal(1).unwrap(), "no beacon journal on invalid op");
+    }
+
+    #[test]
+    fn beacon_gate_none_tx_fails_closed_no_state() {
+        let (state, db, _dir) = setup();
+        // Gate CLOSED (default) but V2 enabled so the beacon payload still dispatches.
+        let params = ChainParams::with_v2_enabled();
+        let fee = params.min_fee;
+        let executor = BlockExecutor::new(state.clone(), db.clone(), params);
+        let (vs, pubs) = beacon_validators();
+        fund(&state, &vs[0].address(), fee + 1000);
+
+        // Even a well-formed, valid-crypto op is rejected (dormant) with the generic
+        // failure receipt and writes NO beacon state/journal — byte/state-identical to
+        // the pre-per-tx-wiring fail-closed seam.
+        let tx = beacon_reg_tx(&vs[0], 7, false, fee);
+        let blk = beacon_block_with(1, vs[0].public_key().as_bytes(), vec![tx]);
+        let (receipts, _root, _sd, _cd) = executor.execute_block(&blk, Hash::ZERO, &pubs).unwrap();
+
+        assert!(!receipts[0].is_success(), "dormant gate: beacon tx fails closed");
+        let store = crate::beacon_store::BeaconStore::new(&db);
+        assert!(store.load_state_map().unwrap().is_empty(), "None gate: no beacon state");
+        assert!(!store.has_journal(1).unwrap(), "None gate: no beacon journal");
+    }
+
+    #[test]
+    fn beacon_mixed_block_valid_and_invalid() {
+        let (state, db, _dir) = setup();
+        let params = beacon_open_params();
+        let fee = params.min_fee;
+        let executor = BlockExecutor::new(state.clone(), db.clone(), params);
+        let (vs, pubs) = beacon_validators();
+        fund(&state, &vs[0].address(), fee + 1000);
+        fund(&state, &vs[1].address(), fee + 1000);
+
+        // Signer index 0: valid registration. Signer index 1: bad PoP → fail closed.
+        let good = beacon_reg_tx(&vs[0], 7, false, fee);
+        let bad = beacon_reg_tx(&vs[1], 9, true, fee);
+        let blk = beacon_block_with(1, vs[0].public_key().as_bytes(), vec![good, bad]);
+        let (receipts, _root, _sd, _cd) = executor.execute_block(&blk, Hash::ZERO, &pubs).unwrap();
+
+        assert!(receipts[0].is_success(), "valid op succeeds");
+        assert!(!receipts[1].is_success(), "invalid op fails closed");
+        // Only the valid op's state is materialized (index 0 keyed, index 1 not).
+        let store = crate::beacon_store::BeaconStore::new(&db);
+        let rows = store.load_state_map().unwrap();
+        assert!(rows.contains_key(&crate::beacon_store::key_row_key(0)));
+        assert!(!rows.contains_key(&crate::beacon_store::key_row_key(1)));
+    }
+
+    #[test]
+    fn beacon_block_reorg_reverts_beacon_state_atomically() {
+        let (state, db, _dir) = setup();
+        let params = beacon_open_params();
+        let fee = params.min_fee;
+        let executor = BlockExecutor::new(state.clone(), db.clone(), params);
+        let (vs, pubs) = beacon_validators();
+        fund(&state, &vs[0].address(), fee + 1000);
+
+        let tx = beacon_reg_tx(&vs[0], 7, false, fee);
+        let blk = beacon_block_with(3, vs[0].public_key().as_bytes(), vec![tx]);
+        executor.execute_block(&blk, Hash::ZERO, &pubs).unwrap();
+        let store = crate::beacon_store::BeaconStore::new(&db);
+        assert!(!store.load_state_map().unwrap().is_empty(), "beacon state persisted");
+        assert!(store.has_journal(3).unwrap());
+
+        // Reorg: revert height 3 → beacon rows + journal roll back atomically.
+        state.revert_block_state_diffs(3).unwrap();
+        assert!(store.load_state_map().unwrap().is_empty(), "beacon state reverted");
+        assert!(!store.has_journal(3).unwrap(), "beacon journal consumed");
     }
 
     /// ATOMIC REORG REVERT: a reverted block rolls back account AND C1 state in a
