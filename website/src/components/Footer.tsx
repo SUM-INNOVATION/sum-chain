@@ -27,7 +27,7 @@ const footerLinks: Record<string, FooterLink[]> = {
     { name: 'Explorer', href: 'https://explorer.sumchain.io' },
     { name: 'SUMaillet (hosted)', href: 'https://mlt.sumail.xyz/' },
     { name: 'Snip', href: 'https://snip.sumchain.io' },
-    { name: 'OmniNode', href: 'https://omninode.suminnovation.xyz' },
+    { name: 'OmniNode', href: 'https://omninode.sumchain.io' },
   ],
 };
 
