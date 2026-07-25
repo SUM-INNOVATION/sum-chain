@@ -555,6 +555,16 @@ pub mod cf {
     /// `height.to_be_bytes()`. Mirrors `contract_state_diffs`: each entry is a
     /// `(key, old, new)` mutation replayed in reverse into one atomic batch.
     pub const COMPUTE_POOL_STATE_DIFFS: &str = "compute_pool_state_diffs";
+
+    /// Dormant BR1 randomness-beacon (#127) state keyspace: domain-prefixed rows for
+    /// the epoch DKG / round state (keys, deals, verdicts, finalized rounds/outputs).
+    /// Folded into the block state root only when the beacon gate is open. See
+    /// `sumchain_state::beacon_store`.
+    pub const BEACON_STATE: &str = "beacon_state";
+    /// Per-block beacon revert journal (`BeaconStateDiff`), keyed by
+    /// `height.to_be_bytes()`. Mirrors `compute_pool_state_diffs`: `(key, old, new)`
+    /// mutations replayed in reverse into the unified atomic reorg batch.
+    pub const BEACON_STATE_DIFFS: &str = "beacon_state_diffs";
 }
 
 /// All column families used by the database
@@ -763,6 +773,9 @@ pub const ALL_CFS: &[&str] = &[
     // C1 dormant compute-pool state (issue #130)
     cf::COMPUTE_POOL_STATE,
     cf::COMPUTE_POOL_STATE_DIFFS,
+    // BR1 dormant beacon state (issue #127)
+    cf::BEACON_STATE,
+    cf::BEACON_STATE_DIFFS,
 ];
 
 /// Database configuration

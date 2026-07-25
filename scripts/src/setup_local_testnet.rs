@@ -248,6 +248,8 @@ fn run_local() -> Result<()> {
             omninode_sponsored_attestation_enabled_from_height: None, // issue #79: dormant
             compute_pool_enabled_from_height: None, // issue #118: compute-pool gate dormant (fail-closed until ComputePoolParams exists)
             beacon_enabled_from_height: None, // issue #118: beacon gate dormant (fail-closed until BeaconParams exists)
+            beacon_params: None, // issue #127: beacon parameter surface absent by default
+            beacon_schedule: None, // issue #127: beacon height->epoch schedule absent by default
             messaging_sponsored_registration_enabled_from_height: None, // issue #145: sponsored registration dormant (coordinated activation only)
         },
     );

@@ -16,9 +16,10 @@ pub mod receipt;
 // `sumchain_primitives::<module>::…` path resolves unchanged; the crate-root
 // type re-exports below flow through these.
 pub use sumchain_wire::{
-    address, agreement, beacon_wire, docclass, education, employment, equity, finance, governance,
-    hash, healthcare, inference_settlement, legal, messaging, node_registry, policy_account,
-    property, staking, storage_metadata, supply, tax, token_ops, transaction, validator_authority,
+    address, agreement, beacon_schedule, beacon_wire, docclass, education, employment, equity,
+    finance, governance, hash, healthcare, inference_settlement, legal, messaging, node_registry,
+    policy_account, property, staking, storage_metadata, supply, tax, token_ops, transaction,
+    validator_authority,
 };
 
 pub use address::Address;
