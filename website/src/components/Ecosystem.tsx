@@ -50,6 +50,7 @@ const items: Item[] = [
   {
     title: 'SUMaillet Mobile',
     description: 'SUMaillet product surface (external). Native iOS and Android for Koppa, governance, and the full SRC token family.',
+    href: 'https://testflight.apple.com/join/zydrd8ZY',
     tag: 'iOS · Android',
     icon: DevicePhoneMobileIcon,
   },
