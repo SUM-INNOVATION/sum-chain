@@ -1,8 +1,8 @@
 name: Approval policy
 
 # Enforces the conditional approval policy from CONTRIBUTING.md:
-#   - PR authored by sunhaoxiangwang -> requires >= 1 admin/maintainer approval
-#   - PR authored by anyone else     -> requires >= 2 admin/maintainer approvals
+#   - PR authored by an admin/maintainer -> requires >= 1 admin/maintainer approval
+#   - PR authored by anyone else         -> requires >= 2 admin/maintainer approvals
 # A qualifying approver has repo permission "admin" or "maintain". Only the
 # latest APPROVED review per reviewer counts; the author is excluded; a PR
 # author's own review never counts.
@@ -88,7 +88,17 @@ jobs:
             esac
           done
 
-          if [ "${AUTHOR}" = "sunhaoxiangwang" ]; then need=1; else need=2; fi
+          # An admin/maintainer author needs 1 qualifying approval; anyone else
+          # (non-admin / outside contributor) needs 2. The author's own review is
+          # never counted (excluded above). A failed/unknown permission lookup
+          # falls through to the stricter need=2.
+          author_perm=$(gh api "repos/${OWNER}/${REPO}/collaborators/${AUTHOR}/permission" \
+            --jq '.permission' 2>/dev/null || echo "unknown")
+          case "${author_perm}" in
+            admin|maintain) need=1 ;;
+            *)              need=2 ;;
+          esac
+          echo "Author ${AUTHOR} permission=${author_perm} -> need=${need}"
           echo "Result: ${qualified}/${need} admin-or-maintainer approvals"
 
           if [ "${qualified}" -ge "${need}" ]; then
