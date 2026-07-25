@@ -236,7 +236,7 @@ export const categories: Category[] = [
   {
     id: 'omninode',
     title: 'OmniNode (InferenceAttestation)',
-    blurb: 'Verifiable AI compute, read verifier-signed inference attestations settled on-chain. Attestation is active on mainnet (omninode_enabled_from_height = 6,000,000). Reads for the OmniNode product surface (https://omninode.suminnovation.xyz).',
+    blurb: 'Verifiable AI compute, read verifier-signed inference attestations settled on-chain. Attestation is active on mainnet (omninode_enabled_from_height = 6,000,000). Reads for the OmniNode product surface (https://omninode.sumchain.io).',
     methods: [
       { name: 'sum_getInferenceAttestation', description: 'Attestation for a (session_id, verifier_address) pair, or null.' },
       { name: 'sum_listInferenceAttestations', description: 'All attestations recorded for a session_id.' },

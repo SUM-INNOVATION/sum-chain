@@ -45,6 +45,7 @@
 //! signature. See [`bls`].
 
 pub mod bls;
+pub mod ecies;
 
 mod hash_to_scalar;
 
@@ -52,16 +53,21 @@ mod hash_to_scalar;
 mod vectors;
 
 pub use bls::{
-    combine, dleq_prove, dleq_verify, pop_verify, verify, verify_partial, DleqContext, DleqProof,
-    G1Point, PartialSignature, Pop, PublicKey, SecretScalar, Signature, DST_DLEQ, DST_POP, DST_SIG,
+    aggregate_g1, combine, commitment_poly_eval, dleq_prove, dleq_verify, eval_share_le,
+    feldman_check, pop_verify, verify, verify_partial, DleqContext, DleqProof, G1Point,
+    PartialSignature, Pop, PublicKey, SecretScalar, Signature, DST_DLEQ, DST_POP, DST_SIG,
     G1_COMPRESSED_SIZE, G2_COMPRESSED_SIZE, SCALAR_SIZE, THRESHOLD_T,
+};
+pub use ecies::{
+    ecies_open, ecies_seal, EciesContext, ECIES_AEAD_KEY_LABEL, ECIES_AEAD_NONCE_LABEL,
+    ECIES_CTX_DST, ECIES_CT_LEN, ECIES_HKDF_SALT, ECIES_PLAINTEXT_LEN,
 };
 
 use thiserror::Error;
 
 /// Errors surfaced by the beacon-crypto adapter. Point/scalar decode failures are
 /// split so that the deterministic vectors can assert the *reason* for rejection.
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
 pub enum BeaconCryptoError {
     /// Bytes did not decode to a canonical on-curve point in the prime-order
     /// subgroup (covers non-canonical encodings, off-curve points, and
@@ -91,6 +97,18 @@ pub enum BeaconCryptoError {
     /// interpolation is undefined.
     #[error("duplicate evaluation point x = {0}")]
     DuplicateEvaluationPoint(u64),
+
+    /// An AEAD (ChaCha20-Poly1305) open failed — a bad tag, a wrong key/nonce, or
+    /// tampered ciphertext (spec §8, §6.1: during adjudication this is conclusive
+    /// dealer misconduct, `DISQUALIFY(i)`).
+    #[error("AEAD open failed (bad tag / wrong key / tampered ciphertext)")]
+    AeadOpenFailed,
+
+    /// A G1 aggregation (e.g. `PK_E = Σ C_{i,0}` or `vk_j = Σ …`) had no inputs, or
+    /// summed to the identity — a degenerate group/verification key, rejected per
+    /// the §2.2 infinity rule.
+    #[error("G1 aggregation empty or summed to identity")]
+    DegenerateAggregate,
 }
 
 /// Crate result alias.

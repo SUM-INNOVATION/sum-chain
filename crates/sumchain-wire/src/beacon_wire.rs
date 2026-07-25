@@ -9,50 +9,62 @@
 //! "the authenticated wire carrier", §5 DLEQ, §2.2 subgroup/infinity checks,
 //! §11/§16.1 K-rotate, §16.3 ratification packet).
 //!
-//! ## Status: PRE-RATIFICATION — NOT CONSENSUS, NOT WIRED IN
+//! ## Status: WIRE-FROZEN & REGISTERED — EXECUTION GATE-CLOSED
 //!
-//! This module is **dormant wire plumbing only**. It is intentionally *not*
-//! registered in [`crate::transaction::TxType`] / [`crate::transaction::TxPayload`],
-//! so it is on **no** consensus, mempool, or block-application path and flips **no**
-//! gate. It mirrors the B0-PRE / C1 family stance (C1 compute-pool likewise adds
-//! "no `TxPayload` ordinal", `crates/state/src/compute_pool.rs`). Two BR1 elements
-//! are RATIFIED by the owner (2026-07) — `G_enc = BLS12-381 G1` and the K-rotate
-//! key lifecycle — and the codecs below honour the byte consequences of those two
-//! (48-byte compressed G1 points; per-epoch `RegisterBeaconKeyV1`). **Everything
-//! else** the carriers encode (KDF/AEAD/DLEQ transcript details, threshold `T`,
-//! activation) is reviewer-approved **PROPOSED**, not adopted; the encodings here
-//! MUST NOT be treated as frozen consensus bytes until #125/#127 ratify them. In
-//! particular, `T` (the DKG threshold / commitment count) is **not** ratified, so
-//! it is **not** frozen into the wire: the deal uses a **self-validating**
-//! variable-length commitment vector (see [`DkgDealV1`]) — the decoder carries no
-//! commitment-count ceiling, only a checked self-consistency + allocation guard.
+//! **Owner OPTION B (2026-07).** The beacon wire layout is now owner-RATIFIED and
+//! byte-FROZEN, and the beacon families are **registered** in the canonical
+//! [`crate::transaction::TxType`] / [`crate::transaction::TxPayload`]: the
+//! epoch-setup phase as `BeaconSetup` (ordinal **28**) and the signing phase as
+//! `BeaconSigning` (ordinal **29**), each carrying a [`BeaconOperation`]. **Frozen
+//! and byte-stable:** each carrier's `schema_version = 1` encoded bytes, the
+//! two-slot phase allocation (28 = setup / 29 = signing), and the `0xBE01..=0xBE05`
+//! op sub-tags. These MUST NOT change (append-only; golden fixtures pin them).
 //!
-//! ## Top-level ordinal band (owner allocation, 2026-07) — reservation only
+//! **This authorizes DECODING, NOT EXECUTION.** Registration puts a beacon tx on
+//! the decode path only; it is still **gate-closed for state execution** behind the
+//! `beacon_enabled_from_height` activation gate (`crates/genesis/src/lib.rs`,
+//! default `None`). Under the default (closed) configuration a beacon tx is
+//! deterministically **rejected** at both mempool admission and execution and
+//! **mutates no beacon state** (`crates/state/src/beacon_executor.rs`,
+//! `crates/state/src/mempool.rs`). Two BR1 elements were already RATIFIED —
+//! `G_enc = BLS12-381 G1` and the K-rotate key lifecycle. **Still NOT frozen /
+//! deferred:** the higher-level crypto semantics (KDF/AEAD/DLEQ transcript details,
+//! the threshold `T` value, membership, subgroup/pairing/PoP verification) live in
+//! the **#127 crypto adapter / `BeaconParams`**, which does not exist yet — so the
+//! gate is fail-closed pending #127 and the gate-open acceptance path **fails
+//! closed** rather than accepting unvalidated state. In particular `T` is still not
+//! frozen into the wire: the deal uses a **self-validating** variable-length
+//! commitment vector (see [`DkgDealV1`]); likewise [`BeaconFinalizeV1`]'s witness.
+//!
+//! ## Top-level ordinal band (owner allocation, 2026-07) — 28/29 REGISTERED
 //!
 //! The top-level `TxType` ordinal space above the live W1a range (`0..=26`,
-//! `Supply = 26`) is allocated across dormant subsystems. W1b gets a **two-slot
-//! band (28/29)**; the complete beacon operation inventory (below) is grouped into
-//! those two slots by protocol phase:
+//! `Supply = 26`) is allocated by protocol phase. W1b owns the **two-slot band
+//! (28/29)**, now registered; `27` stays a documented reservation for C1:
 //!
-//! | Ordinal | Owner | Beacon family (phase) |
-//! |---------|-------|-----------------------|
-//! | `27` | **C1 / ComputePool (#130)** — [`C1_COMPUTE_POOL_TXTYPE_RESERVED`] | NOT the beacon; W1b must not take 27. |
-//! | `28` | **W1b beacon** — [`W1B_BEACON_DKG_TXTYPE`] | DKG / **epoch-setup**: key registration, deal, complaint. |
-//! | `29` | **W1b beacon** — [`W1B_BEACON_SIGN_TXTYPE`] | **signing / output**: per-round partials, finalization. |
+//! | Ordinal | Owner | Beacon family (phase) | Registered? |
+//! |---------|-------|-----------------------|-------------|
+//! | `27` | **C1 / ComputePool (#130)** — [`C1_COMPUTE_POOL_TXTYPE_RESERVED`] | NOT the beacon; W1b must not take 27. | **No** — reserved, unregistered (`from_byte(27) == None`). |
+//! | `28` | **W1b beacon** — [`W1B_BEACON_DKG_TXTYPE`] | DKG / **epoch-setup**: key registration, deal, complaint. | **Yes** — `TxType::BeaconSetup`. |
+//! | `29` | **W1b beacon** — [`W1B_BEACON_SIGN_TXTYPE`] | **signing / output**: per-round partials, finalization. | **Yes** — `TxType::BeaconSigning`. |
 //!
-//! These are **documented reservations**, not registered `TxType`/`TxPayload`
-//! variants — the family stays dormant. (This refines the older
-//! `crates/sumchain-wire/README.md` "ordinal 27+ owned by W1b" note: the owner
-//! carved `27` out for C1 and gave W1b the `28/29` band.)
+//! 28/29 are registered `TxType`/`TxPayload` variants; `27` remains an
+//! **unregistered reservation** (no C1 carrier exists yet). Because 27 has no
+//! `TxPayload` variant, the two beacon `TxPayload` variants are **appended** after
+//! `Supply` (declaration ordinals 27/28), so their bincode tags differ from their
+//! `TxType` discriminants (28/29) by exactly the C1 gap — a future C1 variant must
+//! likewise be appended, never inserted, to keep the frozen beacon bytes stable.
 //!
 //! ## Complete beacon operation inventory (PROPOSED — OWNER DECISION)
 //!
 //! Enumerated from the BR1 draft (nothing invented). Only the K-rotate direction
 //! and `G_enc = G1` are ratified; every carrier layout is PROPOSED. This module
-//! **implements the three slot-28 setup carriers**; the slot-29 signing carriers
-//! are inventoried and their sub-tags reserved, but are left to a future
-//! #125/#127 revision (implementing an unratified layout now would be inventing
-//! bytes).
+//! now **implements all five carriers** — the three slot-28 setup carriers and the
+//! two slot-29 signing carriers — plus the [`BeaconOperation`] dispatch that routes
+//! decoded bytes to the right carrier by its self-domaining magic. The signing
+//! layouts follow the draft §4.3/§12 field descriptions; they remain PROPOSED (not
+//! frozen consensus bytes) and, like the whole family, GATE-CLOSED — decode/routing
+//! only, registered in **no** live `TxType`/`TxPayload` (see the dormancy note).
 //!
 //! | Op / carrier | Carries | Draft § | Phase → slot | Sub-tag | Status here |
 //! |---|---|---|---|---|---|
@@ -60,8 +72,8 @@
 //! | [`DkgDealV1`] | `C_{i,*}` G1[48]×(deg+1), `R_ij` G1[48], `ct_ij`[48] | §8, §9.1 | setup → 28 | `0xBE02` | **implemented** (PROPOSED) |
 //! | [`DkgComplaintV1`] | `i,j`, `R_ij` G1[48], `D_ij` G1[48], `dleq(c,z)` 2×[32] | §5, §6, §9.1 | setup → 28 | `0xBE03` | **implemented** (PROPOSED) |
 //! | `DkgJustifyV1` | (`r_ij` + Schnorr) | §6.5 | — | — | **ABSENT / non-normative** (not a carrier) |
-//! | `BeaconPartialV1` | `epoch, round, j`, `sigma_j` G2[96] | §2.4, §4.3, §10, §12 | signing → 29 | `0xBE04` (reserved) | inventoried; **not implemented** (PROPOSED) |
-//! | `BeaconFinalizeV1` | `epoch, round`, combined `Sigma_r` G2[96], selected-contributor witness | §4.3, §12 | signing → 29 | `0xBE05` (reserved) | inventoried; **not implemented** (PROPOSED) |
+//! | [`BeaconPartialV1`] | `chain_id, epoch, round, j`, `sigma_j` G2[96] | §2.4, §4.3, §10, §12 | signing → 29 | `0xBE04` | **implemented** (PROPOSED) |
+//! | [`BeaconFinalizeV1`] | `chain_id, epoch, round`, combined `Sigma_r` G2[96], selected-contributor witness | §4.3, §12 | signing → 29 | `0xBE05` | **implemented** (PROPOSED) |
 //! | DKG finalization (QUAL) | (no carrier) deterministic state transition | §4.2, §6.1 | setup → 28 | — | **not a carrier** — deterministic transition (see below) |
 //! | Equivocation — conflicting deal | (no carrier) two conflicting on-chain `DkgDealV1` sharing `(chain_id,epoch,i,j)` | §8.4, §6.4 | setup → 28 | — | **inline-detected** (see condition below) |
 //! | Equivocation — conflicting partial | (no carrier) two conflicting on-chain partials sharing `(epoch,round,j)` | §6.4 | signing → 29 | — | **inline-detected** (see condition below) |
@@ -111,8 +123,10 @@
 //!   (`0..=26`) nor a reserved band slot (`27`/`28`/`29`).
 //!
 //! Each op declares which reserved top-level band slot would carry it via
-//! [`BeaconWireOp::top_level_txtype`]. The three implemented setup ops map to slot
-//! 28; the reserved signing ops (partial/finalize) map to slot 29.
+//! [`BeaconWireOp::top_level_txtype`]. The setup ops (key/deal/complaint) map to
+//! slot 28; the signing ops (partial/finalize) map to slot 29. All five carriers
+//! are implemented and dispatched by [`BeaconOperation`]; both slots (28/29) are
+//! REGISTERED in `TxType`/`TxPayload` (wire-frozen; execution gate-closed).
 //!
 //! ## Wire layer vs. crypto adapter boundary (deliberate — enforced downstream)
 //!
@@ -131,6 +145,13 @@
 //! * **Proof-of-possession** — an **opaque fixed-width 96-byte** field (canonical
 //!   compressed BLS12-381 **G2** signature, per draft §2.3 minimal-pubkey-size).
 //!   Only its length is enforced here.
+//! * **G2 signatures** (`sigma_j`, `Sigma_r` — the signing carriers) — a fixed
+//!   **96-byte** canonical-compressed G2 field. Like the G1 fields these get the
+//!   cheap structural check the draft §2.2 mandates (compression flag set,
+//!   infinity flag clear — a partial/combined signature equal to `O_{G2}` is
+//!   rejected). On-curve / prime-order-subgroup / pairing verification (§2.4/§4.3)
+//!   stays in the #127 adapter — the SAME boundary as G1; treat a decoded G2 field
+//!   as "well-framed bytes", never "a valid signature".
 //!
 //! **LAYER-BOUNDARY CAVEAT (owner).** This module performs *only* the cheap
 //! structural byte checks above. **Full curve / prime-order subgroup / infinity /
@@ -170,6 +191,15 @@ pub const SCALAR_LEN: usize = 32;
 /// BLS12-381 **G2** signature (draft §2.3). Length-checked only at this layer;
 /// `PopVerify` is the #127 crypto adapter's job (see the layer-boundary caveat).
 pub const POP_LEN: usize = 96;
+
+/// Canonical compressed BLS12-381 **G2** point width (bytes). Signatures live in
+/// G2 under the minimal-pubkey-size placement (draft §1.1): both the per-round
+/// partial `sigma_j` and the combined `Sigma_r` are 96-byte compressed G2 points.
+/// Numerically equal to [`POP_LEN`] (a PoP is itself a compressed G2 signature),
+/// but distinct in intent: unlike the opaque PoP field, the signing carriers apply
+/// the cheap [`g2_structurally_ok`] non-identity check the draft §2.2 mandates for
+/// partial/combined signatures. Subgroup/pairing verification stays in #127.
+pub const G2_LEN: usize = 96;
 
 /// ECIES body width (bytes): 32-byte ChaCha20-Poly1305 ciphertext of the 32-byte
 /// LE scalar share ‖ 16-byte Poly1305 tag (draft §8.2, §8.7). Fixed — a body of
@@ -267,6 +297,27 @@ fn read_g1(r: &mut Reader, ctx: &'static str) -> Result<[u8; G1_LEN], DecodeErro
     Ok(p)
 }
 
+/// Cheap structural check on a 96-byte compressed G2 field. Compressed BLS12-381
+/// G2 uses the **same** first-byte flag scheme as G1 (ZCash/`blst`): the
+/// compression flag MUST be set and the infinity flag MUST be clear — the draft
+/// §2.2 requires rejecting a partial or combined signature equal to the identity
+/// `O_{G2}`. Does **not** verify on-curve or prime-order-subgroup membership; that
+/// (and `e(·)` pairing verification) is the #127 crypto adapter's job — the same
+/// layer boundary the G1 fields and the opaque PoP observe.
+fn g2_structurally_ok(bytes: &[u8; G2_LEN]) -> bool {
+    let flag = bytes[0];
+    (flag & G1_COMPRESSION_FLAG) != 0 && (flag & G1_INFINITY_FLAG) == 0
+}
+
+/// Read a 96-byte G2 field and apply [`g2_structurally_ok`].
+fn read_g2(r: &mut Reader, ctx: &'static str) -> Result<[u8; G2_LEN], DecodeError> {
+    let p = r.read_array::<G2_LEN>(ctx)?;
+    if !g2_structurally_ok(&p) {
+        return Err(DecodeError::BadValue { ctx });
+    }
+    Ok(p)
+}
+
 /// Read a 32-byte scalar field and apply the canonical `< r` check.
 fn read_scalar(r: &mut Reader, ctx: &'static str) -> Result<[u8; SCALAR_LEN], DecodeError> {
     let s = r.read_array::<SCALAR_LEN>(ctx)?;
@@ -293,6 +344,19 @@ fn reserve_commitment_vec(count: usize) -> Result<Vec<[u8; G1_LEN]>, DecodeError
     Ok(v)
 }
 
+/// Fallibly reserve a witness vector of `count` 0-based contributor indices,
+/// mapping a `TryReserveError` to a [`DecodeError::BadValue`] rather than aborting
+/// — the same allocation-safety discipline as [`reserve_commitment_vec`], applied
+/// to [`BeaconFinalizeV1`]'s `u32` selected-contributor witness.
+fn reserve_index_vec(count: usize) -> Result<Vec<u32>, DecodeError> {
+    let mut v: Vec<u32> = Vec::new();
+    v.try_reserve_exact(count)
+        .map_err(|_| DecodeError::BadValue {
+            ctx: "BeaconFinalizeV1.witness_count_alloc",
+        })?;
+    Ok(v)
+}
+
 // ---------------------------------------------------------------------------
 // Top-level ordinal-band reservations (owner allocation) — NOT registered
 // ---------------------------------------------------------------------------
@@ -303,20 +367,20 @@ fn reserve_commitment_vec(count: usize) -> Result<Vec<[u8; G1_LEN]>, DecodeError
 /// `crates/state/src/compute_pool.rs`.)
 pub const C1_COMPUTE_POOL_TXTYPE_RESERVED: u8 = 27;
 
-/// Reserved top-level `TxType` slot `28` for the beacon **DKG / epoch-setup**
-/// family (W1b band). RESERVED, **not** registered in `TxType`/`TxPayload`
-/// (dormant). Carries the epoch-setup ops [`RegisterBeaconKeyV1`], [`DkgDealV1`],
-/// and [`DkgComplaintV1`], distinguished by their beacon-local op sub-tag /
-/// 7-byte magic.
+/// Top-level `TxType` slot `28` for the beacon **DKG / epoch-setup** family (W1b
+/// band). **REGISTERED and byte-FROZEN** as [`crate::transaction::TxType::BeaconSetup`]
+/// / `TxPayload::BeaconSetup` (owner Option B, 2026-07); EXECUTION gate-closed.
+/// Carries the epoch-setup ops [`RegisterBeaconKeyV1`], [`DkgDealV1`], and
+/// [`DkgComplaintV1`], distinguished by their beacon-local op sub-tag / 7-byte magic.
 pub const W1B_BEACON_DKG_TXTYPE: u8 = 28;
 
-/// Reserved top-level `TxType` slot `29` for the beacon **signing / output**
-/// family (W1b band). RESERVED, **not** registered in `TxType`/`TxPayload`
-/// (dormant). Will carry the per-round ops — beacon partial signatures
-/// (`BeaconPartialV1`, sub-tag `0xBE04`) and finalization/combine
-/// (`BeaconFinalizeV1`, sub-tag `0xBE05`); see the module-doc inventory. Those
-/// carriers are PROPOSED and **not implemented in this module yet** — the slot and
-/// their sub-tags are reserved for a future #125/#127 revision.
+/// Top-level `TxType` slot `29` for the beacon **signing / output** family (W1b
+/// band). **REGISTERED and byte-FROZEN** as
+/// [`crate::transaction::TxType::BeaconSigning`] / `TxPayload::BeaconSigning`;
+/// EXECUTION gate-closed. Carries the per-round signing ops — beacon partial
+/// signatures ([`BeaconPartialV1`], sub-tag `0xBE04`) and finalization/combine
+/// ([`BeaconFinalizeV1`], sub-tag `0xBE05`), distinguished by their beacon-local
+/// op sub-tag / 7-byte magic and dispatched by [`BeaconOperation`].
 pub const W1B_BEACON_SIGN_TXTYPE: u8 = 29;
 
 /// Namespace prefix (high byte `0xBE`, "BE"acon) for the beacon-local operation
@@ -330,8 +394,10 @@ pub const BEACON_OP_NAMESPACE: u16 = 0xBE00;
 const OP_REGISTER_BEACON_KEY: u16 = BEACON_OP_NAMESPACE | 0x01;
 const OP_DKG_DEAL: u16 = BEACON_OP_NAMESPACE | 0x02;
 const OP_DKG_COMPLAINT: u16 = BEACON_OP_NAMESPACE | 0x03;
-// Slot 29 (signing / output) — RESERVED for the PROPOSED, not-yet-implemented
-// carriers: `BeaconPartialV1` = `0xBE04`, `BeaconFinalizeV1` = `0xBE05`.
+// Slot 29 (signing / output) — the PROPOSED signing carriers, now implemented in
+// this module: `BeaconPartialV1` = `0xBE04`, `BeaconFinalizeV1` = `0xBE05`.
+const OP_BEACON_PARTIAL: u16 = BEACON_OP_NAMESPACE | 0x04;
+const OP_BEACON_FINALIZE: u16 = BEACON_OP_NAMESPACE | 0x05;
 
 /// The beacon-family-local operation sub-tags.
 ///
@@ -352,6 +418,10 @@ pub enum BeaconWireOp {
     DkgDeal,
     /// DLEQ-authenticated complaint ([`DkgComplaintV1`]).
     DkgComplaint,
+    /// Per-round threshold-BLS partial signature ([`BeaconPartialV1`]).
+    BeaconPartial,
+    /// Per-round exactly-`T` Lagrange combine output ([`BeaconFinalizeV1`]).
+    BeaconFinalize,
 }
 
 impl BeaconWireOp {
@@ -361,6 +431,8 @@ impl BeaconWireOp {
             BeaconWireOp::RegisterBeaconKey => OP_REGISTER_BEACON_KEY,
             BeaconWireOp::DkgDeal => OP_DKG_DEAL,
             BeaconWireOp::DkgComplaint => OP_DKG_COMPLAINT,
+            BeaconWireOp::BeaconPartial => OP_BEACON_PARTIAL,
+            BeaconWireOp::BeaconFinalize => OP_BEACON_FINALIZE,
         }
     }
 
@@ -371,11 +443,27 @@ impl BeaconWireOp {
             OP_REGISTER_BEACON_KEY => Ok(BeaconWireOp::RegisterBeaconKey),
             OP_DKG_DEAL => Ok(BeaconWireOp::DkgDeal),
             OP_DKG_COMPLAINT => Ok(BeaconWireOp::DkgComplaint),
+            OP_BEACON_PARTIAL => Ok(BeaconWireOp::BeaconPartial),
+            OP_BEACON_FINALIZE => Ok(BeaconWireOp::BeaconFinalize),
             _ => Err(DecodeError::BadEnum {
                 name: "BeaconWireOp",
                 value: v as u64,
             }),
         }
+    }
+
+    /// Identify the op from a carrier's leading 7-byte magic (its canonical
+    /// on-wire identity). This is the dispatch key [`BeaconOperation::decode`]
+    /// uses: peek the magic, pick the op, delegate to that carrier's `decode`.
+    pub fn from_magic(magic: &[u8; 7]) -> Result<Self, DecodeError> {
+        for &op in BeaconWireOp::ALL {
+            if op.magic() == *magic {
+                return Ok(op);
+            }
+        }
+        Err(DecodeError::BadTag {
+            ctx: "BeaconWireOp.magic",
+        })
     }
 
     /// The carrier's canonical 7-byte self-domaining magic (its true wire
@@ -385,20 +473,24 @@ impl BeaconWireOp {
             BeaconWireOp::RegisterBeaconKey => RegisterBeaconKeyV1::MAGIC,
             BeaconWireOp::DkgDeal => DkgDealV1::MAGIC,
             BeaconWireOp::DkgComplaint => DkgComplaintV1::MAGIC,
+            BeaconWireOp::BeaconPartial => BeaconPartialV1::MAGIC,
+            BeaconWireOp::BeaconFinalize => BeaconFinalizeV1::MAGIC,
         }
     }
 
-    /// The reserved top-level `TxType` band slot that would carry this op. All
-    /// three implemented ops are DKG / epoch-setup, so they map to slot `28`
-    /// ([`W1B_BEACON_DKG_TXTYPE`]); the signing/output slot `29`
-    /// ([`W1B_BEACON_SIGN_TXTYPE`]) is reserved for the not-yet-implemented
-    /// partial/finalize carriers. (Reservation only — the family is not registered
-    /// in `TxType`/`TxPayload`.)
+    /// The registered top-level `TxType` band slot that carries this op, grouped by
+    /// protocol **phase**: the DKG / epoch-setup ops (key/deal/complaint) map to
+    /// slot `28` ([`W1B_BEACON_DKG_TXTYPE`] = `TxType::BeaconSetup`); the signing /
+    /// output ops (partial/finalize) map to slot `29` ([`W1B_BEACON_SIGN_TXTYPE`] =
+    /// `TxType::BeaconSigning`). Never C1's reserved slot `27`. The beacon
+    /// executor uses this to enforce phase-consistency between the `TxPayload`
+    /// variant and the carried op (wire-frozen; execution gate-closed).
     pub const fn top_level_txtype(self) -> u8 {
         match self {
             BeaconWireOp::RegisterBeaconKey
             | BeaconWireOp::DkgDeal
             | BeaconWireOp::DkgComplaint => W1B_BEACON_DKG_TXTYPE,
+            BeaconWireOp::BeaconPartial | BeaconWireOp::BeaconFinalize => W1B_BEACON_SIGN_TXTYPE,
         }
     }
 
@@ -407,6 +499,8 @@ impl BeaconWireOp {
         BeaconWireOp::RegisterBeaconKey,
         BeaconWireOp::DkgDeal,
         BeaconWireOp::DkgComplaint,
+        BeaconWireOp::BeaconPartial,
+        BeaconWireOp::BeaconFinalize,
     ];
 }
 
@@ -865,6 +959,435 @@ impl DkgComplaintV1 {
     }
 }
 
+// ---------------------------------------------------------------------------
+// BeaconPartialV1 — per-round threshold-BLS partial signature (signing slot 29)
+// ---------------------------------------------------------------------------
+
+/// A participant's per-round threshold-BLS partial signature (draft §2.4, §4.3,
+/// §10, §12). PROPOSED — not consensus (see the module header): the whole signing
+/// family is dormant wire plumbing and the round-message layout it binds is a
+/// §12.1 owner decision, **not** ratified.
+///
+/// Layout (`LEN` = 133 bytes, fixed):
+/// `magic b"BPRTv1\0"[7] · schema_version u16 · chain_id u64_le · epoch u64_le ·
+/// round u64_le · j u32_le · sigma_j G2[96]`.
+///
+/// `sigma_j = H_{G2}(m_r)^{sk_j}` is participant `j`'s partial over the round
+/// message `m_r` (§2.4). Per draft §12 the message `m_r` binds
+/// `chain_id ‖ u64_le(epoch) ‖ u64_le(round) ‖ compress(Sigma_prev)`, so this
+/// carrier records `chain_id`, `epoch`, and `round` as `u64_le` for replay
+/// separation — matching the setup carriers' `chain_id`-first convention. `j` is
+/// the 0-based membership-snapshot index (§1.3), not the evaluation point
+/// `x_j = j + 1`. `sigma_j` gets the cheap §2.2 non-identity structural check
+/// ([`g2_structurally_ok`]); subgroup + pairing verification (§2.4) is the #127
+/// crypto adapter's job (layer-boundary caveat).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BeaconPartialV1 {
+    /// Chain id (replay separation), `u64_le`.
+    pub chain_id: u64,
+    /// Beacon epoch, `u64_le`.
+    pub epoch: u64,
+    /// Beacon round within the epoch, `u64_le` (draft §12 `m_r`).
+    pub round: u64,
+    /// Participant index `j`, 0-based membership-snapshot index, `u32_le`.
+    pub j: u32,
+    /// `sigma_j` — partial signature, canonical compressed G2 (96B), non-identity.
+    pub sigma_j: [u8; G2_LEN],
+}
+
+impl BeaconPartialV1 {
+    /// Seven-byte structure magic: `B P R T v 1 NUL`.
+    pub const MAGIC: [u8; 7] = *b"BPRTv1\0";
+    pub const SCHEMA_VERSION: u16 = 1;
+    /// Documented total; asserted against the encoder-derived length in tests.
+    pub const LEN: usize = 7 + 2 + 8 + 8 + 8 + 4 + G2_LEN; // 133
+
+    /// This carrier's beacon-local op sub-tag.
+    pub const fn wire_op() -> BeaconWireOp {
+        BeaconWireOp::BeaconPartial
+    }
+
+    /// Re-check the structural invariant a decoded value satisfies (`sigma_j` a
+    /// non-identity compressed G2). Exposed so callers can defend a hand-built
+    /// value before [`try_encode`](Self::try_encode).
+    pub fn validate(&self) -> Result<(), DecodeError> {
+        if !g2_structurally_ok(&self.sigma_j) {
+            return Err(DecodeError::BadValue {
+                ctx: "BeaconPartialV1.sigma_j",
+            });
+        }
+        Ok(())
+    }
+
+    /// Private raw serializer; public route is [`try_encode`](Self::try_encode).
+    fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.bytes(&Self::MAGIC);
+        w.u16(Self::SCHEMA_VERSION);
+        w.u64(self.chain_id);
+        w.u64(self.epoch);
+        w.u64(self.round);
+        w.u32(self.j);
+        w.bytes(&self.sigma_j);
+        w.into_bytes()
+    }
+
+    /// Canonical encode: validates the G2 field, then emits the fixed 133-byte
+    /// layout. `Err` iff `sigma_j` is structurally invalid.
+    pub fn try_encode(&self) -> Result<Vec<u8>, DecodeError> {
+        self.validate()?;
+        Ok(self.encode())
+    }
+
+    /// Decode from a reader (truncation rejected; `sigma_j` structurally validated).
+    pub fn decode(r: &mut Reader) -> Result<Self, DecodeError> {
+        let magic = r.read_array::<7>("BeaconPartialV1.magic")?;
+        if magic != Self::MAGIC {
+            return Err(DecodeError::BadTag {
+                ctx: "BeaconPartialV1",
+            });
+        }
+        let sv = r.read_u16("BeaconPartialV1.schema_version")?;
+        if sv != Self::SCHEMA_VERSION {
+            return Err(DecodeError::BadFixedScalar {
+                ctx: "BeaconPartialV1.schema_version",
+                value: sv as u64,
+            });
+        }
+        let chain_id = r.read_u64("BeaconPartialV1.chain_id")?;
+        let epoch = r.read_u64("BeaconPartialV1.epoch")?;
+        let round = r.read_u64("BeaconPartialV1.round")?;
+        let j = r.read_u32("BeaconPartialV1.j")?;
+        let sigma_j = read_g2(r, "BeaconPartialV1.sigma_j")?;
+        Ok(Self {
+            chain_id,
+            epoch,
+            round,
+            j,
+            sigma_j,
+        })
+    }
+
+    /// Decode consuming exactly `bytes` (rejects trailing).
+    pub fn decode_exact(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut r = Reader::new(bytes);
+        let v = Self::decode(&mut r)?;
+        r.finish("BeaconPartialV1")?;
+        Ok(v)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BeaconFinalizeV1 — per-round exactly-T Lagrange combine output (signing slot 29)
+// ---------------------------------------------------------------------------
+
+/// A per-round beacon **signing-output** combine (draft §4.3, §12). This is the
+/// carrier form of §4.3's EXACTLY-`T` sorted Lagrange combine: the combined
+/// signature `Sigma_r = Σ_{k ∈ selection} [λ_k]·sigma_k` plus the witness naming
+/// the selected contributors. PROPOSED — not consensus.
+///
+/// **Distinct from DKG finalization (QUAL).** DKG finalization — determining the
+/// `QUAL` set and epoch key `PK_E` — is a **deterministic state transition** with
+/// **no carrier** (module header). `BeaconFinalizeV1` is the *per-round* signing
+/// combine, which *is* a produced, submitted artifact.
+///
+/// Layout (variable, `encoded_len(witness_count)` bytes):
+/// `magic b"BFNLv1\0"[7] · schema_version u16 · chain_id u64_le · epoch u64_le ·
+/// round u64_le · Sigma_r G2[96] · witness_count u32_le ·
+/// witness (witness_count × u32_le)`.
+///
+/// `Sigma_r` is the combined round signature, a canonical compressed G2 point
+/// (96B) getting the §2.2 non-identity structural check. The **witness** is the
+/// selected-contributor set of §4.3 step 3 — the exactly-`T` contributors, sorted
+/// ascending by `x_j`, whose partials were interpolated — recorded as a bounded
+/// variable-length vector of **0-based** `u32_le` membership indices.
+///
+/// **Witness bound / ordering — the minimal self-validating form (FLAGGED).** The
+/// draft (§4.3) fixes the combine to **exactly `T`** contributors sorted ascending
+/// and distinct, but `T` and the §4.1/§4.3 selection/ordering rule are **PROPOSED,
+/// not ratified** (§1.2), so — exactly as [`DkgDealV1`] deliberately does not
+/// freeze `T` into its commitment vector — this codec does **not** freeze
+/// `witness_count == T` nor enforce the ascending/distinct canonical order at the
+/// wire layer. It applies only the same discipline as `DkgDealV1`'s commitments:
+/// a `u32_le` length prefix, a self-validating prefix decode (the declared count
+/// must be covered by the remaining input, checked before allocating), fallible
+/// allocation ([`reserve_index_vec`]), and a `>= 1` non-empty check. The semantic
+/// rules (`== T`, canonical ascending, distinctness, each index `< n`) live
+/// **above the wire**, enforced at execution by the #127 combine/verification path
+/// — the same "semantics live above the wire" boundary the module documents for
+/// `DkgDealV1`. (If the owner later ratifies `T` and the selection rule, a future
+/// revision may tighten this to an exactly-`T`, strictly-ascending vector.)
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BeaconFinalizeV1 {
+    /// Chain id (replay separation), `u64_le`.
+    pub chain_id: u64,
+    /// Beacon epoch, `u64_le`.
+    pub epoch: u64,
+    /// Beacon round within the epoch, `u64_le` (draft §12 `m_r`).
+    pub round: u64,
+    /// `Sigma_r` — combined round signature, canonical compressed G2 (96B),
+    /// non-identity.
+    pub sigma_r: [u8; G2_LEN],
+    /// Selected-contributor witness (§4.3): 0-based membership indices of the
+    /// contributors whose partials were combined. Length MUST be `>= 1`; the wire
+    /// imposes no upper ceiling and no ordering constraint (see the type note) —
+    /// the decoder's self-consistency check bounds it to what the input holds.
+    pub witness: Vec<u32>,
+}
+
+impl BeaconFinalizeV1 {
+    /// Seven-byte structure magic: `B F N L v 1 NUL`.
+    pub const MAGIC: [u8; 7] = *b"BFNLv1\0";
+    pub const SCHEMA_VERSION: u16 = 1;
+    /// Fixed overhead excluding the witness vector:
+    /// `7 (magic) + 2 (ver) + 8 (chain_id) + 8 (epoch) + 8 (round) + 96 (Sigma_r)
+    /// + 4 (witness_count)`.
+    pub const BASE_LEN: usize = 7 + 2 + 8 + 8 + 8 + G2_LEN + 4; // 133
+
+    /// Width of one witness element (`u32_le` contributor index).
+    const WITNESS_ELEM_LEN: usize = 4;
+
+    /// Encoded length of a finalize carrying `witness_count` contributor indices.
+    pub const fn encoded_len(witness_count: usize) -> usize {
+        Self::BASE_LEN + witness_count * Self::WITNESS_ELEM_LEN
+    }
+
+    /// This carrier's beacon-local op sub-tag.
+    pub const fn wire_op() -> BeaconWireOp {
+        BeaconWireOp::BeaconFinalize
+    }
+
+    /// Re-check invariants: `Sigma_r` a non-identity compressed G2 and the witness
+    /// non-empty. There is no upper witness ceiling and no ordering check at the
+    /// wire layer (see the type note): those semantics live above the wire.
+    pub fn validate(&self) -> Result<(), DecodeError> {
+        if !g2_structurally_ok(&self.sigma_r) {
+            return Err(DecodeError::BadValue {
+                ctx: "BeaconFinalizeV1.sigma_r",
+            });
+        }
+        if self.witness.is_empty() {
+            return Err(DecodeError::BadValue {
+                ctx: "BeaconFinalizeV1.witness_count_zero",
+            });
+        }
+        Ok(())
+    }
+
+    /// Private raw serializer; public route is [`try_encode`](Self::try_encode).
+    fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.bytes(&Self::MAGIC);
+        w.u16(Self::SCHEMA_VERSION);
+        w.u64(self.chain_id);
+        w.u64(self.epoch);
+        w.u64(self.round);
+        w.bytes(&self.sigma_r);
+        w.u32(self.witness.len() as u32);
+        for idx in &self.witness {
+            w.u32(*idx);
+        }
+        w.into_bytes()
+    }
+
+    /// Canonical encode: validates invariants then emits the layout. `Err` iff the
+    /// witness is empty or `Sigma_r` is structurally invalid.
+    pub fn try_encode(&self) -> Result<Vec<u8>, DecodeError> {
+        self.validate()?;
+        Ok(self.encode())
+    }
+
+    /// Decode from a reader — a **prefix parser** (crate convention), allocation-safe.
+    ///
+    /// Mirrors [`DkgDealV1::decode`]: after the fixed header it reads the `u32`
+    /// witness count and, with **checked arithmetic and before allocating**,
+    /// verifies the remaining input holds at least `witness_count * 4` bytes (the
+    /// witness is the final field, so there is no fixed suffix). A tiny buffer
+    /// declaring a huge count is rejected (`Truncated`, or `BadValue` on
+    /// `checked_mul` overflow) before any reservation; the reservation itself is
+    /// fallible ([`reserve_index_vec`]). Reads exactly its own bytes and leaves any
+    /// trailing to [`decode_exact`](Self::decode_exact)'s `finish`.
+    pub fn decode(r: &mut Reader) -> Result<Self, DecodeError> {
+        let magic = r.read_array::<7>("BeaconFinalizeV1.magic")?;
+        if magic != Self::MAGIC {
+            return Err(DecodeError::BadTag {
+                ctx: "BeaconFinalizeV1",
+            });
+        }
+        let sv = r.read_u16("BeaconFinalizeV1.schema_version")?;
+        if sv != Self::SCHEMA_VERSION {
+            return Err(DecodeError::BadFixedScalar {
+                ctx: "BeaconFinalizeV1.schema_version",
+                value: sv as u64,
+            });
+        }
+        let chain_id = r.read_u64("BeaconFinalizeV1.chain_id")?;
+        let epoch = r.read_u64("BeaconFinalizeV1.epoch")?;
+        let round = r.read_u64("BeaconFinalizeV1.round")?;
+        let sigma_r = read_g2(r, "BeaconFinalizeV1.sigma_r")?;
+        let count = r.read_u32("BeaconFinalizeV1.witness_count")?;
+        if count == 0 {
+            return Err(DecodeError::BadValue {
+                ctx: "BeaconFinalizeV1.witness_count_zero",
+            });
+        }
+        // Minimum-length check (checked arithmetic), BEFORE allocating. Prefix
+        // parser: verifies only that the witness's OWN bytes are present (`>=`);
+        // trailing-byte rejection is `decode_exact`'s `finish`. `checked_mul`
+        // guards overflow on 32-bit `usize`; the `>=` guards a tiny buffer from
+        // declaring a huge count, so the reservation is bounded by real input.
+        let needed =
+            (count as usize)
+                .checked_mul(Self::WITNESS_ELEM_LEN)
+                .ok_or(DecodeError::BadValue {
+                    ctx: "BeaconFinalizeV1.witness_count_overflow",
+                })?;
+        if r.remaining() < needed {
+            return Err(DecodeError::Truncated {
+                needed,
+                remaining: r.remaining(),
+                ctx: "BeaconFinalizeV1.witness",
+            });
+        }
+        let mut witness = reserve_index_vec(count as usize)?;
+        for _ in 0..count {
+            witness.push(r.read_u32("BeaconFinalizeV1.witness_index")?);
+        }
+        Ok(Self {
+            chain_id,
+            epoch,
+            round,
+            sigma_r,
+            witness,
+        })
+    }
+
+    /// Decode consuming exactly `bytes` (rejects trailing / count-vs-length
+    /// mismatch: a buffer longer than the declared witness count is rejected).
+    pub fn decode_exact(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut r = Reader::new(bytes);
+        let v = Self::decode(&mut r)?;
+        r.finish("BeaconFinalizeV1")?;
+        Ok(v)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BeaconOperation — complete beacon carrier dispatch (registered payload;
+// EXECUTION gate-closed)
+// ---------------------------------------------------------------------------
+
+/// The complete beacon carrier set as a single dispatchable operation — the
+/// payload carried by `TxPayload::BeaconSetup` / `TxPayload::BeaconSigning`.
+///
+/// Decoding is by the carrier's self-domaining 7-byte magic (the canonical op
+/// identity, per the module header): [`decode`](Self::decode) peeks the magic,
+/// resolves it to a [`BeaconWireOp`], and delegates to that carrier's own `decode`.
+/// The variants group by protocol **phase** exactly as the band does — setup ops
+/// (key/deal/complaint) report slot `28` and signing ops (partial/finalize) report
+/// slot `29` via [`top_level_txtype`](Self::top_level_txtype).
+///
+/// ## DECODING is authorized; EXECUTION is gate-closed
+///
+/// This is now a **registered** consensus payload (owner Option B): a beacon tx
+/// decodes on the normal path via [`crate::transaction::TxType::BeaconSetup`] /
+/// `BeaconSigning`. Registration authorizes **decoding, not execution**: the
+/// dispatcher itself performs **no** state transition, adjudication, or activation,
+/// and the execution/admission seams (`crates/state/src/beacon_executor.rs`,
+/// `crates/state/src/mempool.rs`) deterministically **reject** a beacon tx while the
+/// `beacon_enabled_from_height` gate is closed (the default), mutating no beacon
+/// state. Even gate-open, **decoding here means only "well-framed bytes", never
+/// "valid crypto" or "accepted state"**: subgroup/pairing/PoP/DLEQ/AEAD and the
+/// threshold/membership rules are the #127 adapter's job, and the gate-open
+/// acceptance path **fails closed** until #127 provides them (the layer-boundary
+/// caveat — never accept unvalidated state).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BeaconOperation {
+    /// Slot 28 — K-rotate encryption-key registration.
+    RegisterBeaconKey(RegisterBeaconKeyV1),
+    /// Slot 28 — DKG scalar-share deal.
+    DkgDeal(DkgDealV1),
+    /// Slot 28 — DLEQ-authenticated complaint.
+    DkgComplaint(DkgComplaintV1),
+    /// Slot 29 — per-round threshold-BLS partial signature.
+    BeaconPartial(BeaconPartialV1),
+    /// Slot 29 — per-round exactly-`T` Lagrange combine output.
+    BeaconFinalize(BeaconFinalizeV1),
+}
+
+impl BeaconOperation {
+    /// The beacon-local op sub-tag of the carried operation.
+    pub const fn wire_op(&self) -> BeaconWireOp {
+        match self {
+            BeaconOperation::RegisterBeaconKey(_) => BeaconWireOp::RegisterBeaconKey,
+            BeaconOperation::DkgDeal(_) => BeaconWireOp::DkgDeal,
+            BeaconOperation::DkgComplaint(_) => BeaconWireOp::DkgComplaint,
+            BeaconOperation::BeaconPartial(_) => BeaconWireOp::BeaconPartial,
+            BeaconOperation::BeaconFinalize(_) => BeaconWireOp::BeaconFinalize,
+        }
+    }
+
+    /// The registered top-level band slot (28 = setup, 29 = signing) that carries
+    /// this operation — the phase→ordinal split. The beacon executor asserts this
+    /// equals the enclosing `TxPayload` variant's ordinal (phase-consistency).
+    pub const fn top_level_txtype(&self) -> u8 {
+        self.wire_op().top_level_txtype()
+    }
+
+    /// The `chain_id` the carried operation binds (every carrier records it for
+    /// replay separation). Used by the beacon executor's pure semantic precheck to
+    /// require the operation's `chain_id` equal the enclosing transaction's.
+    pub const fn chain_id(&self) -> u64 {
+        match self {
+            BeaconOperation::RegisterBeaconKey(v) => v.chain_id,
+            BeaconOperation::DkgDeal(v) => v.chain_id,
+            BeaconOperation::DkgComplaint(v) => v.chain_id,
+            BeaconOperation::BeaconPartial(v) => v.chain_id,
+            BeaconOperation::BeaconFinalize(v) => v.chain_id,
+        }
+    }
+
+    /// Canonically encode the carried operation (delegates to its `try_encode`).
+    pub fn try_encode(&self) -> Result<Vec<u8>, DecodeError> {
+        match self {
+            BeaconOperation::RegisterBeaconKey(v) => v.try_encode(),
+            BeaconOperation::DkgDeal(v) => v.try_encode(),
+            BeaconOperation::DkgComplaint(v) => v.try_encode(),
+            BeaconOperation::BeaconPartial(v) => v.try_encode(),
+            BeaconOperation::BeaconFinalize(v) => v.try_encode(),
+        }
+    }
+
+    /// Decode any beacon carrier by dispatching on its leading 7-byte magic — a
+    /// **prefix parser** (crate convention): it reads exactly the selected
+    /// carrier's bytes and leaves any trailing to [`decode_exact`](Self::decode_exact).
+    pub fn decode(r: &mut Reader) -> Result<Self, DecodeError> {
+        let magic = r.peek_array::<7>("BeaconOperation.magic")?;
+        let op = BeaconWireOp::from_magic(&magic)?;
+        Ok(match op {
+            BeaconWireOp::RegisterBeaconKey => {
+                BeaconOperation::RegisterBeaconKey(RegisterBeaconKeyV1::decode(r)?)
+            }
+            BeaconWireOp::DkgDeal => BeaconOperation::DkgDeal(DkgDealV1::decode(r)?),
+            BeaconWireOp::DkgComplaint => BeaconOperation::DkgComplaint(DkgComplaintV1::decode(r)?),
+            BeaconWireOp::BeaconPartial => {
+                BeaconOperation::BeaconPartial(BeaconPartialV1::decode(r)?)
+            }
+            BeaconWireOp::BeaconFinalize => {
+                BeaconOperation::BeaconFinalize(BeaconFinalizeV1::decode(r)?)
+            }
+        })
+    }
+
+    /// Decode exactly one beacon carrier from `bytes`, rejecting trailing bytes.
+    pub fn decode_exact(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut r = Reader::new(bytes);
+        let v = Self::decode(&mut r)?;
+        r.finish("BeaconOperation")?;
+        Ok(v)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -968,13 +1491,22 @@ mod tests {
             BeaconWireOp::DkgComplaint.top_level_txtype(),
             W1B_BEACON_DKG_TXTYPE
         );
+        // The signing ops (partial/finalize) map to slot 29, never 28 or C1's 27.
+        assert_eq!(
+            BeaconWireOp::BeaconPartial.top_level_txtype(),
+            W1B_BEACON_SIGN_TXTYPE
+        );
+        assert_eq!(
+            BeaconWireOp::BeaconFinalize.top_level_txtype(),
+            W1B_BEACON_SIGN_TXTYPE
+        );
         // (d) Namespaced-tag decode rejects values that look like TxType ordinals,
         //     the bare namespace, and unknown local ops.
         assert!(BeaconWireOp::from_repr(0x0001).is_err()); // a u8-range value
         assert!(BeaconWireOp::from_repr(27).is_err()); // C1's slot, not a beacon op
         assert!(BeaconWireOp::from_repr(28).is_err()); // band slot, not a beacon op
         assert!(BeaconWireOp::from_repr(BEACON_OP_NAMESPACE).is_err()); // no local op
-        assert!(BeaconWireOp::from_repr(BEACON_OP_NAMESPACE | 0x04).is_err()); // unknown
+        assert!(BeaconWireOp::from_repr(BEACON_OP_NAMESPACE | 0x06).is_err()); // unknown
                                                                                // (e) The op's canonical wire identity is its 7-byte magic.
         assert_eq!(
             BeaconWireOp::RegisterBeaconKey.magic(),
@@ -982,16 +1514,37 @@ mod tests {
         );
         assert_eq!(BeaconWireOp::DkgDeal.magic(), DkgDealV1::MAGIC);
         assert_eq!(BeaconWireOp::DkgComplaint.magic(), DkgComplaintV1::MAGIC);
+        assert_eq!(BeaconWireOp::BeaconPartial.magic(), BeaconPartialV1::MAGIC);
+        assert_eq!(
+            BeaconWireOp::BeaconFinalize.magic(),
+            BeaconFinalizeV1::MAGIC
+        );
+        // from_magic is the dispatch inverse of magic() for every op.
+        for &op in BeaconWireOp::ALL {
+            assert_eq!(BeaconWireOp::from_magic(&op.magic()).unwrap(), op);
+        }
+        assert!(BeaconWireOp::from_magic(b"XXXXXXX").is_err());
     }
 
     #[test]
-    fn beacon_band_is_dormant_not_registered_in_txtype() {
-        // Dormancy check (NOT a collision check): the reserved band is not a live
-        // TxType. C1's 27 is likewise dormant (C1 adds no live TxType variant).
+    fn beacon_band_registered_in_txtype_c1_slot_still_reserved() {
+        // Owner OPTION B (2026-07): the beacon phase band 28/29 is now REGISTERED
+        // in the canonical `TxType` (byte-frozen wire layout; EXECUTION stays
+        // gate-closed). C1's slot 27 remains an UNREGISTERED reservation — no
+        // compute-pool carrier exists yet, so `from_byte(27)` is still `None`.
         use crate::transaction::TxType;
         assert!(TxType::from_byte(C1_COMPUTE_POOL_TXTYPE_RESERVED).is_none());
-        assert!(TxType::from_byte(W1B_BEACON_DKG_TXTYPE).is_none());
-        assert!(TxType::from_byte(W1B_BEACON_SIGN_TXTYPE).is_none());
+        assert_eq!(
+            TxType::from_byte(W1B_BEACON_DKG_TXTYPE),
+            Some(TxType::BeaconSetup)
+        );
+        assert_eq!(
+            TxType::from_byte(W1B_BEACON_SIGN_TXTYPE),
+            Some(TxType::BeaconSigning)
+        );
+        // The frozen top-level discriminants match the reserved band constants.
+        assert_eq!(TxType::BeaconSetup as u8, W1B_BEACON_DKG_TXTYPE);
+        assert_eq!(TxType::BeaconSigning as u8, W1B_BEACON_SIGN_TXTYPE);
     }
 
     // --- RegisterBeaconKeyV1 -------------------------------------------------
@@ -1381,16 +1934,358 @@ mod tests {
         ));
     }
 
+    // --- BeaconPartialV1 (fixed layout, G2 signature field) -----------------
+
+    /// A structurally-valid compressed-G2 placeholder: compression flag set,
+    /// infinity flag clear, arbitrary tail. NOT a real curve point.
+    fn g2(byte: u8) -> [u8; G2_LEN] {
+        let mut p = [byte; G2_LEN];
+        p[0] = G1_COMPRESSION_FLAG; // compressed, non-infinity (same scheme as G1)
+        p
+    }
+
+    fn sample_partial() -> BeaconPartialV1 {
+        BeaconPartialV1 {
+            chain_id: 0x0A0B_0C0D_0E0F_1011,
+            epoch: 7,
+            round: 5,
+            j: 3,
+            sigma_j: g2(0x81),
+        }
+    }
+
+    #[test]
+    fn partial_len_and_roundtrip() {
+        let p = sample_partial();
+        let bytes = p.try_encode().unwrap();
+        assert_eq!(bytes.len(), BeaconPartialV1::LEN);
+        assert_eq!(bytes.len(), 133);
+        assert_eq!(BeaconPartialV1::decode_exact(&bytes).unwrap(), p);
+        assert_eq!(BeaconPartialV1::wire_op(), BeaconWireOp::BeaconPartial);
+    }
+
+    #[test]
+    fn partial_rejects_bad_magic_version_trailing_truncation() {
+        let bytes = sample_partial().try_encode().unwrap();
+
+        let mut m = bytes.clone();
+        m[0] ^= 0xFF;
+        assert!(matches!(
+            BeaconPartialV1::decode_exact(&m),
+            Err(DecodeError::BadTag { .. })
+        ));
+
+        let mut v = bytes.clone();
+        v[7..9].copy_from_slice(&2u16.to_le_bytes());
+        assert!(matches!(
+            BeaconPartialV1::decode_exact(&v),
+            Err(DecodeError::BadFixedScalar {
+                ctx: "BeaconPartialV1.schema_version",
+                ..
+            })
+        ));
+
+        assert!(matches!(
+            BeaconPartialV1::decode_exact(&bytes[..bytes.len() - 1]),
+            Err(DecodeError::Truncated { .. })
+        ));
+
+        let mut long = bytes.clone();
+        long.push(0);
+        assert!(matches!(
+            BeaconPartialV1::decode_exact(&long),
+            Err(DecodeError::TrailingBytes { .. })
+        ));
+
+        // A second full record concatenated is rejected.
+        let mut two = bytes.clone();
+        two.extend_from_slice(&bytes);
+        assert!(BeaconPartialV1::decode_exact(&two).is_err());
+    }
+
+    #[test]
+    fn partial_rejects_malformed_sigma() {
+        // sigma_j at offset 7 + 2 + 8 + 8 + 8 + 4 = 37.
+        let off = 37;
+        let bytes = sample_partial().try_encode().unwrap();
+
+        // infinity flag set -> rejected (identity signature forbidden, §2.2).
+        let mut inf = bytes.clone();
+        inf[off] = G1_COMPRESSION_FLAG | G1_INFINITY_FLAG;
+        assert!(matches!(
+            BeaconPartialV1::decode_exact(&inf),
+            Err(DecodeError::BadValue {
+                ctx: "BeaconPartialV1.sigma_j"
+            })
+        ));
+        // compression flag clear -> rejected.
+        let mut unc = bytes;
+        unc[off] = 0x00;
+        assert!(matches!(
+            BeaconPartialV1::decode_exact(&unc),
+            Err(DecodeError::BadValue {
+                ctx: "BeaconPartialV1.sigma_j"
+            })
+        ));
+
+        // try_encode also rejects an in-memory malformed partial.
+        let mut bad = sample_partial();
+        bad.sigma_j[0] = 0x00;
+        assert!(bad.try_encode().is_err());
+    }
+
+    // --- BeaconFinalizeV1 (bounded variable-length witness) ------------------
+
+    fn finalize_with(count: usize) -> BeaconFinalizeV1 {
+        BeaconFinalizeV1 {
+            chain_id: 0x2233_4455_6677_8899,
+            epoch: 8,
+            round: 6,
+            sigma_r: g2(0x82),
+            witness: (0..count as u32).collect(),
+        }
+    }
+
+    #[test]
+    fn finalize_roundtrips_for_small_counts() {
+        // No hard ceiling: the wire self-validates count against the payload.
+        for count in [1usize, 2, 8, 64] {
+            let f = finalize_with(count);
+            let bytes = f.try_encode().unwrap();
+            assert_eq!(bytes.len(), BeaconFinalizeV1::encoded_len(count));
+            assert_eq!(BeaconFinalizeV1::decode_exact(&bytes).unwrap(), f);
+        }
+        // BASE_LEN + count*4; exactly-T=2 is just encoded_len(2), no frozen constant.
+        assert_eq!(BeaconFinalizeV1::BASE_LEN, 133);
+        assert_eq!(BeaconFinalizeV1::encoded_len(2), 141);
+        assert_eq!(BeaconFinalizeV1::wire_op(), BeaconWireOp::BeaconFinalize);
+    }
+
+    #[test]
+    fn finalize_decode_is_prefix_parser_decode_exact_rejects_trailing() {
+        let f = finalize_with(2);
+        let mut bytes = f.try_encode().unwrap();
+        bytes.extend_from_slice(&[0xAB, 0xCD, 0xEF]); // 3 trailing bytes
+
+        // `decode` succeeds on the prefix and leaves exactly the 3 trailing bytes.
+        let mut r = Reader::new(&bytes);
+        let decoded = BeaconFinalizeV1::decode(&mut r).expect("prefix decode must succeed");
+        assert_eq!(decoded, f);
+        assert_eq!(r.remaining(), 3);
+
+        // `decode_exact` rejects the same input's trailing bytes.
+        assert!(matches!(
+            BeaconFinalizeV1::decode_exact(&bytes),
+            Err(DecodeError::TrailingBytes { .. })
+        ));
+    }
+
+    #[test]
+    fn finalize_amplification_dos_guard_rejects_huge_count_on_tiny_buffer() {
+        // A tiny buffer that declares a huge witness count must be rejected by the
+        // checked minimum-length check BEFORE any reservation. witness_count u32 is
+        // at offset 7 + 2 + 8 + 8 + 8 + 96 = 129.
+        let bytes = finalize_with(1).try_encode().unwrap();
+        assert_eq!(bytes.len(), BeaconFinalizeV1::encoded_len(1));
+        let mut huge = bytes;
+        huge[129..133].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(matches!(
+            BeaconFinalizeV1::decode_exact(&huge),
+            Err(DecodeError::Truncated {
+                ctx: "BeaconFinalizeV1.witness",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn finalize_fallible_reservation_maps_alloc_failure_to_decode_error() {
+        assert!(matches!(
+            reserve_index_vec(usize::MAX),
+            Err(DecodeError::BadValue {
+                ctx: "BeaconFinalizeV1.witness_count_alloc"
+            })
+        ));
+        assert!(reserve_index_vec(8).unwrap().capacity() >= 8);
+    }
+
+    #[test]
+    fn finalize_rejects_zero_witness_count() {
+        // witness_count u32 at offset 129.
+        let bytes = finalize_with(1).try_encode().unwrap();
+        let mut zero = bytes;
+        zero[129..133].copy_from_slice(&0u32.to_le_bytes());
+        assert!(matches!(
+            BeaconFinalizeV1::decode_exact(&zero),
+            Err(DecodeError::BadValue {
+                ctx: "BeaconFinalizeV1.witness_count_zero"
+            })
+        ));
+        // try_encode rejects an in-memory empty witness.
+        let mut empty = finalize_with(1);
+        empty.witness.clear();
+        assert!(matches!(
+            empty.try_encode(),
+            Err(DecodeError::BadValue {
+                ctx: "BeaconFinalizeV1.witness_count_zero"
+            })
+        ));
+    }
+
+    #[test]
+    fn finalize_rejects_witness_count_too_large_and_too_small() {
+        let bytes = finalize_with(2).try_encode().unwrap();
+
+        // too LARGE: count 2 -> 3. `needed` exceeds remaining -> Truncated pre-alloc.
+        let mut too_large = bytes.clone();
+        too_large[129..133].copy_from_slice(&3u32.to_le_bytes());
+        assert!(matches!(
+            BeaconFinalizeV1::decode_exact(&too_large),
+            Err(DecodeError::Truncated {
+                ctx: "BeaconFinalizeV1.witness",
+                ..
+            })
+        ));
+
+        // too SMALL: count 2 -> 1. Prefix decode accepts a 1-index witness and
+        // leaves the surplus 4 bytes; decode_exact then rejects them via finish.
+        let mut too_small = bytes;
+        too_small[129..133].copy_from_slice(&1u32.to_le_bytes());
+        let mut r = Reader::new(&too_small);
+        assert!(BeaconFinalizeV1::decode(&mut r).is_ok());
+        assert_eq!(r.remaining(), 4); // one index's worth of surplus
+        assert!(matches!(
+            BeaconFinalizeV1::decode_exact(&too_small),
+            Err(DecodeError::TrailingBytes { .. })
+        ));
+    }
+
+    #[test]
+    fn finalize_rejects_malformed_sigma() {
+        // sigma_r at offset 7 + 2 + 8 + 8 + 8 = 33.
+        let bytes = finalize_with(2).try_encode().unwrap();
+        let mut bad = bytes;
+        bad[33] = G1_COMPRESSION_FLAG | G1_INFINITY_FLAG;
+        assert!(matches!(
+            BeaconFinalizeV1::decode_exact(&bad),
+            Err(DecodeError::BadValue {
+                ctx: "BeaconFinalizeV1.sigma_r"
+            })
+        ));
+    }
+
+    // --- BeaconOperation dispatch -------------------------------------------
+
+    #[test]
+    fn beacon_operation_dispatches_every_carrier_by_magic() {
+        let ops = [
+            (
+                BeaconOperation::RegisterBeaconKey(sample_key()),
+                BeaconWireOp::RegisterBeaconKey,
+                W1B_BEACON_DKG_TXTYPE,
+            ),
+            (
+                BeaconOperation::DkgDeal(deal_with(2)),
+                BeaconWireOp::DkgDeal,
+                W1B_BEACON_DKG_TXTYPE,
+            ),
+            (
+                BeaconOperation::DkgComplaint(sample_complaint()),
+                BeaconWireOp::DkgComplaint,
+                W1B_BEACON_DKG_TXTYPE,
+            ),
+            (
+                BeaconOperation::BeaconPartial(sample_partial()),
+                BeaconWireOp::BeaconPartial,
+                W1B_BEACON_SIGN_TXTYPE,
+            ),
+            (
+                BeaconOperation::BeaconFinalize(finalize_with(2)),
+                BeaconWireOp::BeaconFinalize,
+                W1B_BEACON_SIGN_TXTYPE,
+            ),
+        ];
+        for (op, want_wire_op, want_slot) in ops {
+            assert_eq!(op.wire_op(), want_wire_op);
+            assert_eq!(op.top_level_txtype(), want_slot);
+            let bytes = op.try_encode().unwrap();
+            // Dispatch decodes to the SAME carrier via the leading magic.
+            let decoded = BeaconOperation::decode_exact(&bytes).unwrap();
+            assert_eq!(decoded, op);
+            assert_eq!(decoded.wire_op(), want_wire_op);
+            // The dispatched bytes equal the carrier's own encoding.
+            assert_eq!(decoded.try_encode().unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn beacon_operation_rejects_unknown_magic_trailing_and_truncation() {
+        // Unknown 7-byte magic -> BadTag from from_magic, before any carrier decode.
+        let mut bogus = sample_partial().try_encode().unwrap();
+        bogus[0..7].copy_from_slice(b"ZZZZZZZ");
+        assert!(matches!(
+            BeaconOperation::decode_exact(&bogus),
+            Err(DecodeError::BadTag {
+                ctx: "BeaconWireOp.magic"
+            })
+        ));
+
+        // Truncated below the 7-byte magic -> Truncated from the peek.
+        assert!(matches!(
+            BeaconOperation::decode_exact(&[0u8; 3]),
+            Err(DecodeError::Truncated { .. })
+        ));
+
+        // Trailing bytes after a valid carrier -> TrailingBytes via finish.
+        let mut long = sample_complaint().try_encode().unwrap();
+        long.push(0xEE);
+        assert!(matches!(
+            BeaconOperation::decode_exact(&long),
+            Err(DecodeError::TrailingBytes { .. })
+        ));
+    }
+
+    #[test]
+    fn beacon_operation_decode_is_prefix_parser() {
+        // The streaming `decode` leaves trailing bytes for the caller (crate
+        // convention), while decode_exact owns rejection.
+        let op = BeaconOperation::BeaconFinalize(finalize_with(3));
+        let mut bytes = op.try_encode().unwrap();
+        bytes.extend_from_slice(&[0x01, 0x02]);
+        let mut r = Reader::new(&bytes);
+        let decoded = BeaconOperation::decode(&mut r).unwrap();
+        assert_eq!(decoded, op);
+        assert_eq!(r.remaining(), 2);
+    }
+
     // --- Cross-type: magics are distinct, records don't cross-decode ---------
 
     #[test]
     fn magics_are_distinct_and_records_do_not_cross_decode() {
-        assert_ne!(RegisterBeaconKeyV1::MAGIC, DkgDealV1::MAGIC);
-        assert_ne!(RegisterBeaconKeyV1::MAGIC, DkgComplaintV1::MAGIC);
-        assert_ne!(DkgDealV1::MAGIC, DkgComplaintV1::MAGIC);
+        let magics = [
+            RegisterBeaconKeyV1::MAGIC,
+            DkgDealV1::MAGIC,
+            DkgComplaintV1::MAGIC,
+            BeaconPartialV1::MAGIC,
+            BeaconFinalizeV1::MAGIC,
+        ];
+        // All five carrier magics are pairwise distinct.
+        for a in 0..magics.len() {
+            for b in (a + 1)..magics.len() {
+                assert_ne!(magics[a], magics[b]);
+            }
+        }
 
         let key_bytes = sample_key().try_encode().unwrap();
         assert!(DkgDealV1::decode_exact(&key_bytes).is_err());
         assert!(DkgComplaintV1::decode_exact(&key_bytes).is_err());
+        assert!(BeaconPartialV1::decode_exact(&key_bytes).is_err());
+        assert!(BeaconFinalizeV1::decode_exact(&key_bytes).is_err());
+
+        // A partial's bytes do not cross-decode as a finalize, and vice versa.
+        let partial_bytes = sample_partial().try_encode().unwrap();
+        assert!(BeaconFinalizeV1::decode_exact(&partial_bytes).is_err());
+        let finalize_bytes = finalize_with(2).try_encode().unwrap();
+        assert!(BeaconPartialV1::decode_exact(&finalize_bytes).is_err());
     }
 }

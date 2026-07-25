@@ -62,7 +62,7 @@ const items: Item[] = [
   {
     title: 'OmniNode',
     description: 'Verifiable AI compute. Verifier-signed inference attestations settle on-chain.',
-    href: 'https://omninode.suminnovation.xyz',
+    href: 'https://omninode.sumchain.io',
     icon: CpuChipIcon,
   },
   {

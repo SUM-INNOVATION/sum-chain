@@ -15,6 +15,10 @@ concurrency:
 
 jobs:
   build-test-clippy:
+    # x86_64 (ubuntu-latest). This job keeps the EXACT name `build-test-clippy`
+    # so it matches the branch-protection required status check; do not add a
+    # matrix here (a matrix would rename the check to `build-test-clippy (...)`
+    # and break the required context). The aarch64 leg is a separate job below.
     runs-on: ubuntu-latest
     env:
       # librocksdb-sys bundles + compiles RocksDB; GCC 13+ on modern ubuntu
@@ -51,5 +55,44 @@ jobs:
       # Error-gated only: catches clippy/compile-error regressions. The workspace
       # is not yet warning-clean, so `-D warnings` is deferred to a separate
       # cleanup PR to avoid turning legacy warnings into unrelated blockers.
+      - name: Clippy (workspace, tests)
+        run: cargo clippy --workspace --tests --locked
+
+  build-test-clippy-aarch64:
+    # C3 (issue #127 dependency hardening): build/test/clippy the ENTIRE workspace
+    # — including the `blst`-backed `sumchain-beacon-crypto` now linked into
+    # production binaries via `state -> beacon-runtime -> beacon-crypto` — on native
+    # aarch64 (`ubuntu-24.04-arm`), so the vendored `blst` C/assembly compiles and
+    # the workspace tests pass on aarch64 as well as x86_64.
+    #
+    # NOTE: this runs on every PR/push for coverage, but it is NOT a
+    # branch-protection required context. To make aarch64 a MERGE GATE, an admin
+    # must add `build-test-clippy-aarch64` to main's required status checks.
+    runs-on: ubuntu-24.04-arm
+    env:
+      CXXFLAGS: "-include cstdint"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up pinned toolchain
+        run: |
+          rustup show
+          rustup component add clippy
+
+      - name: Show versions
+        run: |
+          rustc --version
+          cargo --version
+          cargo clippy --version
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build (workspace)
+        run: cargo build --workspace --locked
+
+      - name: Test (workspace)
+        run: cargo test --workspace --locked
+
       - name: Clippy (workspace, tests)
         run: cargo clippy --workspace --tests --locked

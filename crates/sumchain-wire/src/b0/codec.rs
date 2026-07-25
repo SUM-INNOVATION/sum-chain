@@ -123,6 +123,24 @@ impl<'a> Reader<'a> {
         Ok(out)
     }
 
+    /// Read the next `N` bytes **without advancing** the cursor. Additive,
+    /// non-consuming counterpart of [`read_array`](Self::read_array): a caller can
+    /// inspect a fixed-width self-domaining prefix (e.g. a carrier's 7-byte magic)
+    /// to pick a sub-decoder, then let that sub-decoder re-read the same prefix.
+    /// Truncation is rejected exactly as `read_array`.
+    pub fn peek_array<const N: usize>(&self, ctx: &'static str) -> Result<[u8; N], DecodeError> {
+        if self.remaining() < N {
+            return Err(DecodeError::Truncated {
+                needed: N,
+                remaining: self.remaining(),
+                ctx,
+            });
+        }
+        let mut out = [0u8; N];
+        out.copy_from_slice(&self.buf[self.pos..self.pos + N]);
+        Ok(out)
+    }
+
     pub fn read_bytes(&mut self, n: usize, ctx: &'static str) -> Result<&'a [u8], DecodeError> {
         if self.remaining() < n {
             return Err(DecodeError::Truncated {
@@ -245,6 +263,23 @@ mod tests {
         assert_eq!(r.read_u64("").unwrap(), 0x0102_0304_0506_0708);
         assert_eq!(r.read_array::<32>("").unwrap(), [0xAA; 32]);
         assert!(r.finish("").is_ok());
+    }
+
+    #[test]
+    fn peek_array_does_not_advance_and_rejects_truncation() {
+        let buf = [0x11u8, 0x22, 0x33, 0x44];
+        let mut r = Reader::new(&buf);
+        // Peeking returns the prefix but leaves the cursor untouched.
+        assert_eq!(r.peek_array::<2>("").unwrap(), [0x11, 0x22]);
+        assert_eq!(r.remaining(), 4);
+        // A subsequent read sees the same bytes the peek reported.
+        assert_eq!(r.read_array::<2>("").unwrap(), [0x11, 0x22]);
+        assert_eq!(r.remaining(), 2);
+        // Peeking past the end is a truncation error, like read_array.
+        assert!(matches!(
+            r.peek_array::<4>(""),
+            Err(DecodeError::Truncated { .. })
+        ));
     }
 
     #[test]

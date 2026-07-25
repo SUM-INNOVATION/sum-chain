@@ -7,15 +7,18 @@ use std::sync::Arc;
 use sumchain_crypto::verify_bytes;
 use sumchain_genesis::ChainParams;
 use sumchain_primitives::{
-    Address, Balance, Block, BlockHeader, Hash, MessagingOperation, NodeRegistryOperation, Receipt,
-    SignedTransaction, StorageMetadataOperationV2, TransactionV2, TxPayload, TxStatus,
-    CHALLENGE_INTERVAL_BLOCKS, SLASH_PERCENTAGE,
+    Address, Balance, Block, BlockHeader, BlockHeight, Hash, MessagingOperation,
+    NodeRegistryOperation, Receipt, SignedTransaction, StorageMetadataOperationV2, TransactionV2,
+    TxPayload, TxStatus, CHALLENGE_INTERVAL_BLOCKS, SLASH_PERCENTAGE,
 };
 use sumchain_storage::schema::{ContractStateDiff, StateDiff};
 use sumchain_storage::Database;
 use tracing::{debug, info, warn};
 
 use crate::agreement_executor::AgreementExecutor;
+use crate::compute_pool::{ComputePoolModel, PoolResult};
+use crate::compute_pool_manager::{compute_pool_gate_open, ComputePoolManager};
+use crate::compute_pool_store::ComputePoolStore;
 use crate::contract_executor::ContractExecutorState;
 use crate::docclass_executor::DocClassExecutor;
 use crate::employment_executor::EmploymentExecutor;
@@ -226,8 +229,16 @@ pub struct BlockExecutor {
     node_registry_executor: NodeRegistryExecutor,
     storage_metadata_executor: StorageMetadataExecutor,
     inference_attestation_executor: InferenceAttestationExecutor,
-    inference_settlement_executor: crate::inference_settlement_executor::InferenceSettlementExecutor,
+    inference_settlement_executor:
+        crate::inference_settlement_executor::InferenceSettlementExecutor,
     education_executor: crate::education_executor::EducationExecutor,
+    /// BR1 beacon (#127) per-block accumulator. Interior-mutable (`parking_lot::Mutex`
+    /// so `BlockExecutor` stays `Send + Sync`) so the per-tx dispatch (`&self`) can
+    /// drive the stateful beacon runtime across a block's beacon txs; built once at
+    /// block start when the gate is open, persisted once at block finalization, cleared
+    /// after. `None` while dormant (production default) — then the beacon dispatch is
+    /// byte/state-identical to the fail-closed seam.
+    beacon_block: parking_lot::Mutex<Option<crate::beacon_manager::BeaconBlockState>>,
 }
 
 impl BlockExecutor {
@@ -253,8 +264,7 @@ impl BlockExecutor {
         let inference_attestation_executor = InferenceAttestationExecutor::new(db.clone());
         let inference_settlement_executor =
             crate::inference_settlement_executor::InferenceSettlementExecutor::new(db.clone());
-        let education_executor =
-            crate::education_executor::EducationExecutor::new(db.clone());
+        let education_executor = crate::education_executor::EducationExecutor::new(db.clone());
         Self {
             state,
             db,
@@ -279,6 +289,7 @@ impl BlockExecutor {
             inference_attestation_executor,
             inference_settlement_executor,
             education_executor,
+            beacon_block: parking_lot::Mutex::new(None),
         }
     }
 
@@ -412,13 +423,8 @@ impl BlockExecutor {
                 // Execute V2 transaction
                 match &v2_tx.payload {
                     TxPayload::Transfer { to, amount } => {
-                        self.state.transfer(
-                            &v2_tx.from,
-                            to,
-                            *amount,
-                            v2_tx.fee,
-                            proposer,
-                        )?;
+                        self.state
+                            .transfer(&v2_tx.from, to, *amount, v2_tx.fee, proposer)?;
 
                         debug!(
                             "V2 Transfer {} executed: {} -> {} amount={}",
@@ -443,11 +449,7 @@ impl BlockExecutor {
                         )?;
 
                         if result.success {
-                            debug!(
-                                "V2 NFT {} executed: {:?}",
-                                tx_hash,
-                                nft_data.operation
-                            );
+                            debug!("V2 NFT {} executed: {:?}", tx_hash, nft_data.operation);
 
                             Ok(TxExecutionResult {
                                 tx_hash,
@@ -481,11 +483,7 @@ impl BlockExecutor {
                         )?;
 
                         if result.success {
-                            debug!(
-                                "V2 Token {} executed: {:?}",
-                                tx_hash,
-                                token_data.operation
-                            );
+                            debug!("V2 Token {} executed: {:?}", tx_hash, token_data.operation);
 
                             Ok(TxExecutionResult {
                                 tx_hash,
@@ -614,8 +612,7 @@ impl BlockExecutor {
                         if result.success {
                             debug!(
                                 "V2 Staking {} executed: {:?}",
-                                tx_hash,
-                                staking_data.operation
+                                tx_hash, staking_data.operation
                             );
 
                             Ok(TxExecutionResult {
@@ -677,8 +674,7 @@ impl BlockExecutor {
                         if result.success {
                             debug!(
                                 "V2 Messaging {} executed: {:?}",
-                                tx_hash,
-                                messaging_data.operation
+                                tx_hash, messaging_data.operation
                             );
 
                             Ok(TxExecutionResult {
@@ -717,8 +713,7 @@ impl BlockExecutor {
                         if result.success {
                             debug!(
                                 "V2 DocClass {} executed: {:?}",
-                                tx_hash,
-                                docclass_data.operation
+                                tx_hash, docclass_data.operation
                             );
 
                             Ok(TxExecutionResult {
@@ -755,11 +750,7 @@ impl BlockExecutor {
                         )?;
 
                         if result.success {
-                            debug!(
-                                "V2 Tax {} executed: {:?}",
-                                tx_hash,
-                                tax_data.operation
-                            );
+                            debug!("V2 Tax {} executed: {:?}", tx_hash, tax_data.operation);
 
                             Ok(TxExecutionResult {
                                 tx_hash,
@@ -797,8 +788,7 @@ impl BlockExecutor {
                         if result.success {
                             debug!(
                                 "V2 Equity {} executed: {:?}",
-                                tx_hash,
-                                equity_data.operation
+                                tx_hash, equity_data.operation
                             );
 
                             Ok(TxExecutionResult {
@@ -837,8 +827,7 @@ impl BlockExecutor {
                         if result.success {
                             debug!(
                                 "V2 Agreement {} executed: {:?}",
-                                tx_hash,
-                                agreement_data.operation
+                                tx_hash, agreement_data.operation
                             );
 
                             Ok(TxExecutionResult {
@@ -875,11 +864,7 @@ impl BlockExecutor {
                         )?;
 
                         if result.success {
-                            debug!(
-                                "V2 Legal {} executed: {:?}",
-                                tx_hash,
-                                legal_data.operation
-                            );
+                            debug!("V2 Legal {} executed: {:?}", tx_hash, legal_data.operation);
 
                             Ok(TxExecutionResult {
                                 tx_hash,
@@ -917,8 +902,7 @@ impl BlockExecutor {
                         if result.success {
                             debug!(
                                 "V2 Property {} executed: {:?}",
-                                tx_hash,
-                                property_data.operation
+                                tx_hash, property_data.operation
                             );
 
                             Ok(TxExecutionResult {
@@ -957,8 +941,7 @@ impl BlockExecutor {
                         if result.success {
                             debug!(
                                 "V2 Healthcare {} executed: {:?}",
-                                tx_hash,
-                                healthcare_data.operation
+                                tx_hash, healthcare_data.operation
                             );
 
                             Ok(TxExecutionResult {
@@ -997,8 +980,7 @@ impl BlockExecutor {
                         if result.success {
                             debug!(
                                 "V2 Employment {} executed: {:?}",
-                                tx_hash,
-                                employment_data.operation
+                                tx_hash, employment_data.operation
                             );
 
                             Ok(TxExecutionResult {
@@ -1037,8 +1019,7 @@ impl BlockExecutor {
                         if result.success {
                             debug!(
                                 "V2 Finance {} executed: {:?}",
-                                tx_hash,
-                                finance_data.operation
+                                tx_hash, finance_data.operation
                             );
 
                             Ok(TxExecutionResult {
@@ -1099,8 +1080,7 @@ impl BlockExecutor {
                         if result.success {
                             debug!(
                                 "V2 PolicyAccount {} executed: {:?}",
-                                tx_hash,
-                                policy_data.operation
+                                tx_hash, policy_data.operation
                             );
 
                             Ok(TxExecutionResult {
@@ -1111,8 +1091,7 @@ impl BlockExecutor {
                         } else {
                             warn!(
                                 "V2 PolicyAccount {} failed (semantic): {}",
-                                tx_hash,
-                                result.message
+                                tx_hash, result.message
                             );
 
                             Ok(TxExecutionResult {
@@ -1392,7 +1371,8 @@ impl BlockExecutor {
                         //    this re-check is belt-and-suspenders so the
                         //    inner-sig verify below uses the right pubkey
                         //    even if the outer check is ever bypassed.
-                        if sumchain_primitives::Address::from_public_key(&tx.public_key) != v2_tx.from
+                        if sumchain_primitives::Address::from_public_key(&tx.public_key)
+                            != v2_tx.from
                         {
                             return Ok(TxExecutionResult {
                                 tx_hash,
@@ -1420,10 +1400,11 @@ impl BlockExecutor {
                         //    must be unique across all history. Executor
                         //    enforces; Phase 3 mempool admission will also
                         //    enforce so duplicates never reach a block.
-                        let cf_key = sumchain_primitives::inference_attestation::inference_attestation_key(
-                            &attestation_data.digest.session_id,
-                            &v2_tx.from,
-                        );
+                        let cf_key =
+                            sumchain_primitives::inference_attestation::inference_attestation_key(
+                                &attestation_data.digest.session_id,
+                                &v2_tx.from,
+                            );
                         if self.inference_attestation_executor.exists(&cf_key)? {
                             return Ok(TxExecutionResult {
                                 tx_hash,
@@ -1462,8 +1443,12 @@ impl BlockExecutor {
                         // v1 direct submission (sender == verifier): no sponsor
                         // metadata is written (issue #95 — absence means "not
                         // sponsored").
-                        self.inference_attestation_executor
-                            .put(&cf_key, &record, &v2_tx.from, None)?;
+                        self.inference_attestation_executor.put(
+                            &cf_key,
+                            &record,
+                            &v2_tx.from,
+                            None,
+                        )?;
 
                         debug!(
                             "V2 InferenceAttestation {} executed: session_id={:?} verifier={} height={}",
@@ -1535,10 +1520,11 @@ impl BlockExecutor {
                         let verifier_address = sumchain_primitives::Address::from_public_key(
                             &v2_att.verifier_public_key,
                         );
-                        let cf_key = sumchain_primitives::inference_attestation::inference_attestation_key(
-                            &v2_att.digest.session_id,
-                            &verifier_address,
-                        );
+                        let cf_key =
+                            sumchain_primitives::inference_attestation::inference_attestation_key(
+                                &v2_att.digest.session_id,
+                                &verifier_address,
+                            );
                         if self.inference_attestation_executor.exists(&cf_key)? {
                             return Ok(TxExecutionResult {
                                 tx_hash,
@@ -1579,8 +1565,12 @@ impl BlockExecutor {
                             submitted_at_height: block_height,
                             tx_hash,
                         };
-                        self.inference_attestation_executor
-                            .put(&cf_key, &record, &verifier_address, Some(&sponsor))?;
+                        self.inference_attestation_executor.put(
+                            &cf_key,
+                            &record,
+                            &verifier_address,
+                            Some(&sponsor),
+                        )?;
 
                         debug!(
                             "Sponsored InferenceAttestationV2 {} executed: session_id={:?} verifier={} sponsor={} height={}",
@@ -1616,8 +1606,10 @@ impl BlockExecutor {
                                     | ISOp::AddVerifierBond(_)
                                     | ISOp::BeginVerifierUnbond
                                     | ISOp::WithdrawVerifierBond
-                            ) && !inference_verifier_bonding_gate_open(&self.params, block_height)
-                            {
+                            ) && !inference_verifier_bonding_gate_open(
+                                &self.params,
+                                block_height,
+                            ) {
                                 return Ok(TxExecutionResult {
                                     tx_hash,
                                     status: TxStatus::Failed(364),
@@ -1835,6 +1827,30 @@ impl BlockExecutor {
                             }),
                         }
                     }
+                    // Uninhabited reserved C1/ComputePool slot 27 — unconstructable
+                    // (a decoded tx can never carry it); unreachable.
+                    TxPayload::ComputePoolReserved(never) => match *never {},
+                    TxPayload::BeaconSetup(beacon_data) | TxPayload::BeaconSigning(beacon_data) => {
+                        // BR1 randomness beacon (#127). Registered payload (TxType
+                        // 28/29). Re-routed through the per-block accumulator built at
+                        // block start: gate-CLOSED (production default) → the dormant
+                        // fail-closed seam (`Failed(0)`, no state, byte/state-identical);
+                        // gate-OPEN → an authenticated `ExecContext` from the SIGNED
+                        // envelope (signer = tx public key, `tx_ref` = tx hash,
+                        // chain/epoch, height, schedule-derived phase) drives the stateful
+                        // runtime — a VALID op returns `Success` and is accumulated
+                        // (persisted once at block finalization), an invalid op returns
+                        // `Failed(0)` with no state. `tx_type() as u8` is the enclosing
+                        // variant's phase ordinal (28 setup / 29 signing).
+                        Ok(self.execute_beacon_tx(
+                            tx.public_key,
+                            tx_hash,
+                            v2_tx.chain_id,
+                            v2_tx.tx_type() as u8,
+                            beacon_data,
+                            block_height,
+                        ))
+                    }
                 }
             }
         }
@@ -2049,7 +2065,8 @@ impl BlockExecutor {
                 }
 
                 // Execute transfer
-                self.state.transfer(&tx.from, to, *amount, tx.fee, proposer)?;
+                self.state
+                    .transfer(&tx.from, to, *amount, tx.fee, proposer)?;
 
                 debug!(
                     "V2 Transfer {} executed: {} -> {} amount={}",
@@ -2084,11 +2101,7 @@ impl BlockExecutor {
                 )?;
 
                 if result.success {
-                    debug!(
-                        "V2 NFT {} executed: {:?}",
-                        tx_hash,
-                        nft_data.operation
-                    );
+                    debug!("V2 NFT {} executed: {:?}", tx_hash, nft_data.operation);
 
                     Ok(TxExecutionResult {
                         tx_hash,
@@ -2132,11 +2145,7 @@ impl BlockExecutor {
                 )?;
 
                 if result.success {
-                    debug!(
-                        "V2 Token {} executed: {:?}",
-                        tx_hash,
-                        token_data.operation
-                    );
+                    debug!("V2 Token {} executed: {:?}", tx_hash, token_data.operation);
 
                     Ok(TxExecutionResult {
                         tx_hash,
@@ -2295,8 +2304,7 @@ impl BlockExecutor {
                 if result.success {
                     debug!(
                         "V2 Staking {} executed: {:?}",
-                        tx_hash,
-                        staking_data.operation
+                        tx_hash, staking_data.operation
                     );
 
                     Ok(TxExecutionResult {
@@ -2361,8 +2369,7 @@ impl BlockExecutor {
                 if result.success {
                     debug!(
                         "V2 Messaging {} executed: {:?}",
-                        tx_hash,
-                        messaging_data.operation
+                        tx_hash, messaging_data.operation
                     );
 
                     Ok(TxExecutionResult {
@@ -2411,8 +2418,7 @@ impl BlockExecutor {
                 if result.success {
                     debug!(
                         "V2 DocClass {} executed: {:?}",
-                        tx_hash,
-                        docclass_data.operation
+                        tx_hash, docclass_data.operation
                     );
 
                     Ok(TxExecutionResult {
@@ -2459,11 +2465,7 @@ impl BlockExecutor {
                 )?;
 
                 if result.success {
-                    debug!(
-                        "V2 Tax {} executed: {:?}",
-                        tx_hash,
-                        tax_data.operation
-                    );
+                    debug!("V2 Tax {} executed: {:?}", tx_hash, tax_data.operation);
 
                     Ok(TxExecutionResult {
                         tx_hash,
@@ -2511,8 +2513,7 @@ impl BlockExecutor {
                 if result.success {
                     debug!(
                         "V2 Equity {} executed: {:?}",
-                        tx_hash,
-                        equity_data.operation
+                        tx_hash, equity_data.operation
                     );
 
                     Ok(TxExecutionResult {
@@ -2561,8 +2562,7 @@ impl BlockExecutor {
                 if result.success {
                     debug!(
                         "V2 Agreement {} executed: {:?}",
-                        tx_hash,
-                        agreement_data.operation
+                        tx_hash, agreement_data.operation
                     );
 
                     Ok(TxExecutionResult {
@@ -2609,11 +2609,7 @@ impl BlockExecutor {
                 )?;
 
                 if result.success {
-                    debug!(
-                        "V2 Legal {} executed: {:?}",
-                        tx_hash,
-                        legal_data.operation
-                    );
+                    debug!("V2 Legal {} executed: {:?}", tx_hash, legal_data.operation);
 
                     Ok(TxExecutionResult {
                         tx_hash,
@@ -2661,8 +2657,7 @@ impl BlockExecutor {
                 if result.success {
                     debug!(
                         "V2 Property {} executed: {:?}",
-                        tx_hash,
-                        property_data.operation
+                        tx_hash, property_data.operation
                     );
 
                     Ok(TxExecutionResult {
@@ -2711,8 +2706,7 @@ impl BlockExecutor {
                 if result.success {
                     debug!(
                         "V2 Healthcare {} executed: {:?}",
-                        tx_hash,
-                        healthcare_data.operation
+                        tx_hash, healthcare_data.operation
                     );
 
                     Ok(TxExecutionResult {
@@ -2761,8 +2755,7 @@ impl BlockExecutor {
                 if result.success {
                     debug!(
                         "V2 Employment {} executed: {:?}",
-                        tx_hash,
-                        employment_data.operation
+                        tx_hash, employment_data.operation
                     );
 
                     Ok(TxExecutionResult {
@@ -2811,8 +2804,7 @@ impl BlockExecutor {
                 if result.success {
                     debug!(
                         "V2 Finance {} executed: {:?}",
-                        tx_hash,
-                        finance_data.operation
+                        tx_hash, finance_data.operation
                     );
 
                     Ok(TxExecutionResult {
@@ -2899,6 +2891,16 @@ impl BlockExecutor {
                     "Supply is only supported in V2 transactions".to_string(),
                 ));
             }
+            TxPayload::ComputePoolReserved(never) => match *never {}, // uninhabited reserved slot 27
+            TxPayload::BeaconSetup(_) | TxPayload::BeaconSigning(_) => {
+                // BR1 beacon ops are a V2-only subprotocol; mirror the adjacent
+                // rejections on this (currently unreached) legacy path. The
+                // authoritative gate-closed handling lives in the V2 dispatch
+                // above / crate::beacon_executor. No new semantics here.
+                return Err(StateError::InvalidOperation(
+                    "Beacon ops are only supported in V2 transactions".to_string(),
+                ));
+            }
         }
     }
 
@@ -2929,6 +2931,11 @@ impl BlockExecutor {
         // This prevents a node from front-running a slash by submitting a
         // last-second proof and a withdrawal in the same block.
         self.process_expired_challenges(block.height())?;
+
+        // ── BR1 beacon (#127): build the per-block accumulator (rehydrated from the
+        // store) when the gate is open, so the per-tx beacon dispatch drives the
+        // stateful runtime across this block's beacon txs. No-op under the None gate.
+        self.init_beacon_block(block.height(), active_validator_pubkeys)?;
 
         for (idx, tx) in block.transactions.iter().enumerate() {
             // Record pre-execution state for diff
@@ -2961,10 +2968,15 @@ impl BlockExecutor {
 
             // Add to state diff
             state_diff.add_change(sender, Some(sender_before), sender_after);
-            if let (Some(r), Some(before), Some(after)) = (recipient, recipient_before, recipient_after) {
+            if let (Some(r), Some(before), Some(after)) =
+                (recipient, recipient_before, recipient_after)
+            {
                 state_diff.add_change(r, Some(before), after);
             }
-            if !proposer.is_zero() && proposer != sender && recipient.map_or(true, |r| proposer != r) {
+            if !proposer.is_zero()
+                && proposer != sender
+                && recipient.map_or(true, |r| proposer != r)
+            {
                 state_diff.add_change(proposer, Some(proposer_before), proposer_after);
             }
 
@@ -3018,8 +3030,30 @@ impl BlockExecutor {
         contract_diff.records = self.contract_executor.take_journal();
         contract_diff.sort();
 
+        // ── Dormant C1 compute-pool subprotocol (issue #130) ──
+        // Drive this block's compute-pool transitions through the gated
+        // `ComputePoolManager` into the model + persistent store (rows + per-height
+        // revert journal committed atomically in one write batch), BEFORE the state
+        // root so the committed C1 state is folded into the consensus commitment
+        // when the gate is open. On reorg these rows revert atomically with account
+        // + contract state via `StateManager::revert_block_state_diffs`.
+        // GATE-CLOSED: under the production default
+        // (`compute_pool_enabled_from_height == None`) the manager is never
+        // constructed, nothing is applied, and the root fold below is skipped — the
+        // whole path is inert and dormant block roots are byte-for-byte unchanged.
+        self.apply_compute_pool_transitions(block.height())?;
+
+        // BR1 beacon (#127): drive + persist this block's beacon transition BEFORE the
+        // state root so the committed beacon state is folded into the consensus
+        // commitment when the gate is open. GATE-CLOSED: under the production default
+        // (`beacon_enabled_from_height == None`) the manager is never constructed,
+        // nothing is applied, and the root fold below is skipped — inert, dormant
+        // block roots byte-for-byte unchanged.
+        self.apply_beacon_transitions(block.height())?;
+
         // Compute new state root (folds the contract-state digest once the
-        // contracts gate is open — see compute_block_state_root).
+        // contracts gate is open, and the C1 state digest once the compute-pool
+        // gate is open — see compute_block_state_root).
         let state_root = self.compute_block_state_root(block, &receipts, &contract_diff)?;
         self.state.set_state_root(state_root);
 
@@ -3030,6 +3064,248 @@ impl BlockExecutor {
         );
 
         Ok((receipts, state_root, state_diff, contract_diff))
+    }
+
+    /// Gated compute-pool APPLY seam (issue #130).
+    ///
+    /// GATE-CLOSED / dormant: under the production default
+    /// (`compute_pool_enabled_from_height == None`) the gate is closed at every
+    /// height, so [`ComputePoolManager::new_enabled`] returns `None`, the manager
+    /// is never constructed, and this seam applies nothing and writes nothing.
+    ///
+    /// #125 dependency: there is no `ComputePool` `TxPayload` on the live path
+    /// yet — sourcing per-block operations from a block's transactions is #125's
+    /// gate-closed dispatch. Until that lands there is no operation source, so
+    /// even a hypothetically-open gate drives an EMPTY transition here (which
+    /// mutates no rows and writes no revert journal). The full apply→persist path
+    /// is exercised end-to-end by driving [`Self::apply_compute_pool_ops`] with a
+    /// real operation source in tests.
+    fn apply_compute_pool_transitions(&self, height: BlockHeight) -> Result<()> {
+        // No live operation source yet (blocked on #125's dispatch) ⇒ the block
+        // contributes an empty (no-op) compute-pool transition.
+        self.apply_compute_pool_ops(height, |_model| Ok(()))
+    }
+
+    /// The gated compute-pool apply seam, parameterized by the operation source
+    /// `ops` so the end-to-end apply→persist lifecycle is exercisable through the
+    /// real gated machinery without a live #125 dispatch.
+    ///
+    /// Inert under the production `None` gate: `new_enabled` yields `None`, so the
+    /// manager is never constructed and `ops` never runs. When the gate is
+    /// (hypothetically / test-) enabled, `ops` runs against the manager's working
+    /// model and, on success, the transition is persisted atomically into the C1
+    /// store with a per-height revert journal.
+    fn apply_compute_pool_ops<F>(&self, height: BlockHeight, ops: F) -> Result<()>
+    where
+        F: FnOnce(&mut ComputePoolModel) -> PoolResult<()>,
+    {
+        if let Some(mut manager) = ComputePoolManager::new_enabled(&self.db, &self.params, height) {
+            manager.apply_block(height, ops)?;
+        }
+        Ok(())
+    }
+
+    /// The BR1 beacon (#127) threshold/fault params for the LIVE producer: the
+    /// authoritative genesis `beacon_params` (re-validated through the runtime's own
+    /// `BeaconParams::validated`, the executable source of truth), or — only when the
+    /// gate is (test-)open with no genesis surface — the PROPOSED fixture.
+    fn beacon_params_or_fixture(&self) -> Result<sumchain_beacon_runtime::params::BeaconParams> {
+        use sumchain_beacon_runtime::params::BeaconParams;
+        match &self.params.beacon_params {
+            Some(bp) => BeaconParams::validated(bp.f, bp.c, bp.t, bp.q_dkg, bp.n)
+                .map_err(|e| StateError::InvalidOperation(format!("invalid beacon_params: {e:?}"))),
+            None => Ok(BeaconParams::proposed_default()),
+        }
+    }
+
+    /// Build the per-block beacon accumulator when the gate is open (rehydrated from
+    /// the store), using the genesis `BeaconParams` + the epoch VALIDATOR-SNAPSHOT
+    /// membership (`active_validator_pubkeys` for this block, threaded from consensus
+    /// — the authoritative set, not mutable membership). Under the `None` gate this
+    /// clears the slot: no accumulator, byte/state-identical dormant path.
+    fn init_beacon_block(
+        &self,
+        height: BlockHeight,
+        active_validator_pubkeys: &[[u8; 32]],
+    ) -> Result<()> {
+        use sumchain_beacon_runtime::context::BeaconPhase;
+        use sumchain_beacon_runtime::dkg::DkgConfig;
+        use sumchain_beacon_runtime::wire::genesis_seed;
+        use sumchain_primitives::beacon_schedule::BeaconWindowPhase;
+
+        let clear = || *self.beacon_block.lock() = None;
+        if !crate::beacon_executor::beacon_gate_open(&self.params, height) {
+            clear();
+            return Ok(());
+        }
+        // Derive (epoch, epoch_start, within-epoch phase) DETERMINISTICALLY from the
+        // authoritative height→epoch schedule (checked arithmetic). No schedule, a
+        // pre-start height, or an overflow ⇒ no accumulator (beacon txs fail closed this
+        // block). This replaces the former `epoch = 0` placeholder.
+        let Some(sched) = self.params.beacon_schedule else {
+            clear();
+            return Ok(());
+        };
+        let point = match sched.derive(height) {
+            Ok(Some(p)) => p,
+            _ => {
+                clear();
+                return Ok(());
+            }
+        };
+        let params = self.beacon_params_or_fixture()?;
+        let cfg = DkgConfig {
+            chain_id: self.state.chain_id(),
+            epoch: point.epoch, // the DERIVED epoch, used consistently everywhere
+            params,
+        };
+        // STRICT PHASE SEPARATION (Correction 2): the block's within-epoch phase, or
+        // `None` in a between-windows gap (no op valid this block). Each op is enforced
+        // to its own window by the runtime's `check_phase`.
+        let phase = point.phase.map(|p| match p {
+            BeaconWindowPhase::KeyRegistration => BeaconPhase::KeyRegistration,
+            BeaconWindowPhase::Deal => BeaconPhase::Deal,
+            BeaconWindowPhase::Complaint => BeaconPhase::Complaint,
+            BeaconWindowPhase::Signing => BeaconPhase::Signing,
+        });
+        // MEMBERSHIP AT THE EPOCH BOUNDARY (Correction 1): membership for epoch E is the
+        // active validator set AS OF `epoch_start(E)`, frozen for the whole epoch.
+        let membership = match self.beacon_epoch_membership(
+            point.epoch,
+            point.epoch_start,
+            height,
+            active_validator_pubkeys,
+        )? {
+            Some(m) => m,
+            None => {
+                clear();
+                return Ok(());
+            }
+        };
+        // Genesis seed binds chain_id (draft §12.1); the round/output/ECIES domains
+        // bind the DERIVED epoch via `cfg.epoch`.
+        let genesis = genesis_seed(cfg.chain_id, &[0u8; 32]);
+        let acc = crate::beacon_manager::BeaconBlockState::load_from_store(
+            &self.db, cfg, membership, phase, genesis,
+        )?;
+        *self.beacon_block.lock() = Some(acc);
+        Ok(())
+    }
+
+    /// The FIXED epoch membership snapshot for `epoch` (Correction 1): the active
+    /// validator set AS OF the epoch boundary `epoch_start`, frozen for the whole epoch.
+    ///
+    /// * If a snapshot is already persisted for `epoch`, LOAD it — never re-sample the
+    ///   current active set (so validator churn AFTER `epoch_start` cannot change this
+    ///   epoch's membership, and a late first beacon op still gets the boundary set).
+    /// * Otherwise, iff this block IS the boundary (`height == epoch_start`), snapshot
+    ///   the current `active_validator_pubkeys`; the accumulator persists this snapshot
+    ///   as the MEMBERSHIP row this block, INDEPENDENT of any beacon tx.
+    /// * Otherwise (past the boundary with no persisted snapshot — e.g. the boundary
+    ///   block was not gate-open) fail closed: the `epoch_start` set cannot be
+    ///   reconstructed, so no accumulator is built this block.
+    ///
+    /// Returns `None` for the fail-closed case or an empty/invalid snapshot.
+    fn beacon_epoch_membership(
+        &self,
+        epoch: u64,
+        epoch_start: u64,
+        height: u64,
+        active_validator_pubkeys: &[[u8; 32]],
+    ) -> Result<Option<sumchain_beacon_runtime::context::EpochMembership>> {
+        use sumchain_beacon_runtime::context::{EpochMembership, ValidatorId};
+        let store = crate::beacon_store::BeaconStore::new(&self.db);
+        let members: Vec<[u8; 32]> = match store.get_membership(epoch)? {
+            Some(persisted) => persisted, // LOAD the frozen snapshot (never re-sample)
+            None if height == epoch_start => active_validator_pubkeys.to_vec(), // boundary snapshot
+            None => return Ok(None),      // past the boundary, no snapshot ⇒ fail closed
+        };
+        Ok(EpochMembership::new(members.into_iter().map(ValidatorId).collect()).ok())
+    }
+
+    /// Execute one beacon tx through the per-block accumulator (the vertical
+    /// connection). Gate-closed (no accumulator) → the dormant fail-closed seam
+    /// (`Failed(0)`, no state). Gate-open: crypto-free semantic precheck, then an
+    /// authenticated [`ExecContext`] from the SIGNED envelope (signer = tx public key,
+    /// `tx_ref` = tx hash, chain/epoch, height, schedule-derived phase) is driven
+    /// through the runtime; a VALID op ⇒ `Success` (accumulated, persisted once at block
+    /// finalization), an invalid op ⇒ `Failed(0)`, no state.
+    fn execute_beacon_tx(
+        &self,
+        signer_pubkey: [u8; 32],
+        tx_hash: Hash,
+        tx_chain_id: u64,
+        phase_ordinal: u8,
+        beacon_data: &sumchain_primitives::BeaconTxData,
+        block_height: u64,
+    ) -> TxExecutionResult {
+        use sumchain_beacon_runtime::context::{ExecContext, ValidatorId};
+
+        let mut guard = self.beacon_block.lock();
+        let Some(acc) = guard.as_mut() else {
+            // Dormant (gate closed / no snapshot) → the fail-closed seam.
+            return crate::beacon_executor::execute(
+                &self.params,
+                block_height,
+                tx_hash,
+                tx_chain_id,
+                phase_ordinal,
+                beacon_data,
+            );
+        };
+        let failed = TxExecutionResult {
+            tx_hash,
+            status: TxStatus::Failed(0),
+            fee_paid: 0,
+        };
+        // Crypto-free semantic precheck: decode + phase↔variant + chain_id binding.
+        let op = match crate::beacon_executor::semantic_precheck(
+            phase_ordinal,
+            tx_chain_id,
+            beacon_data,
+        ) {
+            Ok(op) => op,
+            Err(_) => return failed,
+        };
+        // The runtime phase is the SCHEDULE-DERIVED within-epoch phase for this block's
+        // height (not the tx variant): STRICT PHASE SEPARATION means an op arriving one
+        // block before or after its window — or in a between-windows gap (`None`) —
+        // fails the runtime's `check_phase`. The variant↔family check is the semantic
+        // precheck above.
+        let phase = acc.phase();
+        // Clone the membership out so the authenticated `ExecContext` borrows the
+        // clone while `apply_op` takes `&mut acc` (no aliasing).
+        let membership = acc.membership().clone();
+        let cfg = acc.cfg();
+        let ctx = ExecContext {
+            signer: ValidatorId(signer_pubkey),
+            tx_ref: *tx_hash.as_bytes(),
+            chain_id: tx_chain_id,
+            epoch: cfg.epoch,
+            block_height,
+            phase,
+            membership: &membership,
+        };
+        if acc.apply_op(&ctx, &op) {
+            TxExecutionResult {
+                tx_hash,
+                status: TxStatus::Success,
+                fee_paid: 0,
+            }
+        } else {
+            failed
+        }
+    }
+
+    /// Persist the block's accumulated beacon transition as EXACTLY ONE per-height
+    /// journal, then clear the accumulator. No-op (and no accumulator) under the
+    /// `None` gate — byte/state/root-identical dormant path.
+    fn apply_beacon_transitions(&self, height: BlockHeight) -> Result<()> {
+        let acc = self.beacon_block.lock().take();
+        if let Some(acc) = acc {
+            acc.persist(&self.db, height)?;
+        }
+        Ok(())
     }
 
     /// Compute state root after block execution
@@ -3079,6 +3355,32 @@ impl BlockExecutor {
             data.extend_from_slice(digest.as_bytes());
         }
 
+        // Commit the dormant C1 compute-pool state into the root, but ONLY at/after
+        // the compute-pool activation gate (issue #130). Below the gate — the
+        // production default `compute_pool_enabled_from_height == None`, closed at
+        // every height — this branch is skipped, so the formula is byte-for-byte
+        // unchanged and dormant block roots match un-upgraded nodes; C1 state
+        // therefore cannot affect consensus while dormant. Once the gate is open,
+        // every persisted C1 row is bound into the consensus commitment, so
+        // validators cannot diverge on compute-pool state undetected. Mirrors the
+        // contracts/supply gated folds above; C1 rows are applied BEFORE this in
+        // execute_block, so the digest sees this block's transition.
+        if compute_pool_gate_open(&self.params, block.height()) {
+            let cp_digest = ComputePoolStore::new(&self.db).state_digest()?;
+            data.extend_from_slice(cp_digest.as_bytes());
+        }
+
+        // Commit the dormant BR1 beacon state into the root, but ONLY at/after the
+        // beacon activation gate (issue #127). Below the gate — the production default
+        // `beacon_enabled_from_height == None`, closed at every height — this branch
+        // is skipped, so the formula is byte-for-byte unchanged and dormant block
+        // roots match un-upgraded nodes; beacon state cannot affect consensus while
+        // dormant. Mirrors the contracts/supply/C1 gated folds above.
+        if crate::beacon_executor::beacon_gate_open(&self.params, block.height()) {
+            let beacon_digest = crate::beacon_store::BeaconStore::new(&self.db).state_digest()?;
+            data.extend_from_slice(beacon_digest.as_bytes());
+        }
+
         // Mix with previous state root (from before this block's execution)
         data.extend_from_slice(self.state.state_root().as_bytes());
 
@@ -3092,7 +3394,9 @@ impl BlockExecutor {
     /// Slash all ArchiveNodes with expired challenges.
     /// Called at the START of execute_block, before user transactions.
     fn process_expired_challenges(&self, current_height: u64) -> Result<()> {
-        let expired = self.storage_metadata_executor.get_expired_challenges(current_height)?;
+        let expired = self
+            .storage_metadata_executor
+            .get_expired_challenges(current_height)?;
 
         // Track whether any Active→Slashed transition occurred so we can
         // refresh the active-archive snapshot at the end (Ask 15). Already-Slashed
@@ -3101,7 +3405,10 @@ impl BlockExecutor {
 
         for challenge in &expired {
             // Load the node record
-            match self.node_registry_executor.get_node(&challenge.target_node)? {
+            match self
+                .node_registry_executor
+                .get_node(&challenge.target_node)?
+            {
                 Some(mut record) => {
                     // Skip terminal states (issue #20): an already-`Slashed` node
                     // has nothing more to lose, and a `Withdrawn` node has exited
@@ -3116,9 +3423,7 @@ impl BlockExecutor {
                     }
 
                     // Calculate slash amount: SLASH_PERCENTAGE% of staked balance
-                    let slash_amount = record.staked_balance
-                        .saturating_mul(SLASH_PERCENTAGE)
-                        / 100;
+                    let slash_amount = record.staked_balance.saturating_mul(SLASH_PERCENTAGE) / 100;
 
                     record.staked_balance = record.staked_balance.saturating_sub(slash_amount);
 
@@ -3174,7 +3479,8 @@ impl BlockExecutor {
                     };
                     let node_value = bincode::serialize(&record)
                         .map_err(|e| StateError::SerializationError(e.to_string()))?;
-                    self.db.put("node_registry", &node_key, &node_value)
+                    self.db
+                        .put("node_registry", &node_key, &node_value)
                         .map_err(|e| StateError::Storage(e))?;
 
                     warn!(
@@ -3200,7 +3506,8 @@ impl BlockExecutor {
         // (Ask 15). One snapshot covers all slashings within this block — they
         // collapse into a single post-block active set.
         if active_set_changed {
-            self.node_registry_executor.write_active_archive_snapshot(current_height)?;
+            self.node_registry_executor
+                .write_active_archive_snapshot(current_height)?;
         }
 
         Ok(())
@@ -3235,7 +3542,8 @@ impl BlockExecutor {
             // backfill succeeded; on error it skips (emits nothing) so an
             // incomplete index is never sampled.
             let emitted = run_scheduler_after_backfill(
-                self.storage_metadata_executor.backfill_challengeable_index(),
+                self.storage_metadata_executor
+                    .backfill_challengeable_index(),
                 height,
                 || {
                     self.storage_metadata_executor.generate_challenge_schedule(
@@ -3249,7 +3557,11 @@ impl BlockExecutor {
                     )
                 },
             )?;
-            debug!("PoR scheduler emitted {} challenge(s) at height {}", emitted.len(), height);
+            debug!(
+                "PoR scheduler emitted {} challenge(s) at height {}",
+                emitted.len(),
+                height
+            );
             return Ok(());
         }
 
@@ -3271,7 +3583,10 @@ impl BlockExecutor {
                 // The state write is already done inside generate_challenge()
             }
             None => {
-                debug!("No challenge generated at height {} (no eligible files/nodes)", height);
+                debug!(
+                    "No challenge generated at height {} (no eligible files/nodes)",
+                    height
+                );
             }
         }
 
@@ -3510,7 +3825,9 @@ mod tests {
             .unwrap();
 
         let tx = create_signed_tx(&sender, recipient.address(), 100, 10, 0);
-        let result = executor.execute_tx(&tx, &proposer.address(), 1, 1000000000).unwrap();
+        let result = executor
+            .execute_tx(&tx, &proposer.address(), 1, 1000000000)
+            .unwrap();
 
         assert!(result.status.is_success());
         assert_eq!(state.get_balance(&sender.address()).unwrap(), 890);
@@ -3527,7 +3844,8 @@ mod tests {
         };
 
         let (state, db, _dir) = setup();
-        let executor = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
+        let executor =
+            BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
 
         let sender = KeyPair::generate();
         let proposer = KeyPair::generate();
@@ -3557,11 +3875,8 @@ mod tests {
         };
         let signing_hash = tx_v2.signing_hash();
         let sig = sign(signing_hash.as_bytes(), sender.private_key());
-        let signed = SignedTransaction::new_v2(
-            tx_v2,
-            *sig.as_bytes(),
-            *sender.public_key().as_bytes(),
-        );
+        let signed =
+            SignedTransaction::new_v2(tx_v2, *sig.as_bytes(), *sender.public_key().as_bytes());
 
         let result = executor
             .execute_tx(&signed, &proposer.address(), 1, 1_000_000_000)
@@ -3586,7 +3901,8 @@ mod tests {
         };
 
         let (state, db, _dir) = setup();
-        let executor = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
+        let executor =
+            BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
 
         let sender = KeyPair::generate();
         let proposer = KeyPair::generate();
@@ -3715,7 +4031,8 @@ mod tests {
         use sumchain_primitives::{FileLifecycleV2, FileVisibilityV2, Hash};
 
         let (state, db, _dir) = setup();
-        let executor = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
+        let executor =
+            BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let owner = KeyPair::generate();
         let proposer = KeyPair::generate();
 
@@ -3732,7 +4049,7 @@ mod tests {
             merkle_root,
             8,
             deposit,
-            0, // Public
+            0,          // Public
             Vec::new(), // Public may be empty
         );
         assert!(status.is_success(), "register failed: {:?}", status);
@@ -3758,7 +4075,8 @@ mod tests {
         use sumchain_primitives::{Hash, TxStatus};
 
         let (state, db, _dir) = setup();
-        let executor = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
+        let executor =
+            BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let owner = KeyPair::generate();
         let proposer = KeyPair::generate();
 
@@ -3770,7 +4088,7 @@ mod tests {
             10,
             0,
             Hash::hash(b"zero-chunks"),
-            0,    // chunk_count must be > 0
+            0, // chunk_count must be > 0
             1000,
             0,
             Vec::new(),
@@ -3784,7 +4102,8 @@ mod tests {
         use sumchain_primitives::{Hash, TxStatus};
 
         let (state, db, _dir) = setup();
-        let executor = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
+        let executor =
+            BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let owner = KeyPair::generate();
         let proposer = KeyPair::generate();
 
@@ -3810,7 +4129,8 @@ mod tests {
         use sumchain_primitives::{AccessEntryV2, EncryptedKeyBundleV2, Hash, TxStatus};
 
         let (state, db, _dir) = setup();
-        let executor = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
+        let executor =
+            BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let owner = KeyPair::generate();
         let proposer = KeyPair::generate();
         let recipient = KeyPair::generate();
@@ -3843,7 +4163,8 @@ mod tests {
         use sumchain_primitives::{AccessEntryV2, EncryptedKeyBundleV2, Hash, TxStatus};
 
         let (state, db, _dir) = setup();
-        let executor = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
+        let executor =
+            BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let owner = KeyPair::generate();
         let proposer = KeyPair::generate();
 
@@ -3878,7 +4199,8 @@ mod tests {
         };
 
         let (state, db, _dir) = setup();
-        let executor = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
+        let executor =
+            BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let owner = KeyPair::generate();
         let proposer = KeyPair::generate();
         let merkle_root = Hash::hash(b"abandon-happy");
@@ -3890,8 +4212,15 @@ mod tests {
             &state,
             &owner,
             &proposer.address(),
-            10, 0, merkle_root, 4, deposit, 0, Vec::new(),
-        ).is_success());
+            10,
+            0,
+            merkle_root,
+            4,
+            deposit,
+            0,
+            Vec::new(),
+        )
+        .is_success());
 
         // Snapshot the post-registration owner balance (changes with the
         // pre-funding helper, so capture after register).
@@ -3923,11 +4252,8 @@ mod tests {
         };
         let h = abandon_tx.signing_hash();
         let s = sign(h.as_bytes(), owner.private_key());
-        let signed = SignedTransaction::new_v2(
-            abandon_tx,
-            *s.as_bytes(),
-            *owner.public_key().as_bytes(),
-        );
+        let signed =
+            SignedTransaction::new_v2(abandon_tx, *s.as_bytes(), *owner.public_key().as_bytes());
         let r = executor
             .execute_tx(&signed, &proposer.address(), abandon_height, 0)
             .unwrap();
@@ -3941,7 +4267,10 @@ mod tests {
 
         // Row state.
         let store = crate::storage_metadata::StorageMetadataExecutor::new(db.clone());
-        let row = store.get_metadata_v2(&merkle_root).unwrap().expect("row retained");
+        let row = store
+            .get_metadata_v2(&merkle_root)
+            .unwrap()
+            .expect("row retained");
         assert_eq!(row.lifecycle, FileLifecycleV2::Abandoned);
         assert_eq!(row.fee_pool, 0);
         // SNIP indexer dependency: abandoned_at_height must record the exact
@@ -4016,7 +4345,8 @@ mod tests {
         };
 
         let (state, db, _dir) = setup();
-        let executor = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
+        let executor =
+            BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let owner = KeyPair::generate();
         let proposer = KeyPair::generate();
 
@@ -4071,7 +4401,8 @@ mod tests {
         };
 
         let (state, db, _dir) = setup();
-        let executor = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
+        let executor =
+            BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let owner = KeyPair::generate();
         let proposer = KeyPair::generate();
 
@@ -4132,7 +4463,10 @@ mod tests {
             TxStatus::Failed(32).description(),
             "V2 storage op not yet implemented"
         );
-        assert_eq!(TxStatus::Failed(22).description(), "low-order x25519 public key rejected");
+        assert_eq!(
+            TxStatus::Failed(22).description(),
+            "low-order x25519 public key rejected"
+        );
         // Generic fallthrough still works for unmapped codes.
         assert_eq!(TxStatus::Failed(99).description(), "failed");
     }
@@ -4215,17 +4549,17 @@ mod tests {
             nonce,
             payload: sumchain_primitives::TxPayload::StorageMetadataV2(
                 sumchain_primitives::StorageMetadataV2TxData {
-                    operation: sumchain_primitives::StorageMetadataOperationV2::AcceptAssignmentV2 {
-                        merkle_root,
-                        chunk_indices,
-                    },
+                    operation:
+                        sumchain_primitives::StorageMetadataOperationV2::AcceptAssignmentV2 {
+                            merkle_root,
+                            chunk_indices,
+                        },
                 },
             ),
         };
         let h = tx.signing_hash();
         let s = sign(h.as_bytes(), archive.private_key());
-        let signed =
-            SignedTransaction::new_v2(tx, *s.as_bytes(), *archive.public_key().as_bytes());
+        let signed = SignedTransaction::new_v2(tx, *s.as_bytes(), *archive.public_key().as_bytes());
         executor
             .execute_tx(&signed, proposer, block_height, 0)
             .unwrap()
@@ -4282,7 +4616,8 @@ mod tests {
         use sumchain_primitives::{Hash, TxStatus};
 
         let (state, db, _dir) = setup();
-        let executor = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
+        let executor =
+            BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
 
         let archive = setup_archive(&executor, &state, &proposer.address(), 1);
@@ -4324,7 +4659,7 @@ mod tests {
             .unwrap()
             .expect("bitmap created");
         assert_eq!(bm.len(), 1); // ceil(4/8) = 1 byte
-        // Bits 0 and 2 set.
+                                 // Bits 0 and 2 set.
         assert_eq!(bm[0], 0b0000_0101);
     }
 
@@ -4334,29 +4669,62 @@ mod tests {
         use sumchain_primitives::{Hash, TxStatus};
 
         let (state, db, _dir) = setup();
-        let executor = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
+        let executor =
+            BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
 
         let archive = setup_archive(&executor, &state, &proposer.address(), 1);
         let owner = KeyPair::generate();
         let merkle_root = Hash::hash(b"matrix-2");
         assert!(register_v2_file(
-            &executor, &state, &owner, &proposer.address(), 10, 0, merkle_root, 8, 1000, 0, Vec::new(),
-        ).is_success());
+            &executor,
+            &state,
+            &owner,
+            &proposer.address(),
+            10,
+            0,
+            merkle_root,
+            8,
+            1000,
+            0,
+            Vec::new(),
+        )
+        .is_success());
 
         // First: {0, 1, 2}
         assert_eq!(
-            submit_accept(&executor, &state, &archive, &proposer.address(), 11, 1, merkle_root, vec![0, 1, 2]),
+            submit_accept(
+                &executor,
+                &state,
+                &archive,
+                &proposer.address(),
+                11,
+                1,
+                merkle_root,
+                vec![0, 1, 2]
+            ),
             TxStatus::Success
         );
         // Second: {2, 3, 4} — overlaps at 2, idempotent on it.
         assert_eq!(
-            submit_accept(&executor, &state, &archive, &proposer.address(), 12, 2, merkle_root, vec![2, 3, 4]),
+            submit_accept(
+                &executor,
+                &state,
+                &archive,
+                &proposer.address(),
+                12,
+                2,
+                merkle_root,
+                vec![2, 3, 4]
+            ),
             TxStatus::Success
         );
 
         let store = crate::storage_metadata::StorageMetadataExecutor::new(db.clone());
-        let bm = store.get_attestation_bitmap_v2(&merkle_root, &archive.address()).unwrap().unwrap();
+        let bm = store
+            .get_attestation_bitmap_v2(&merkle_root, &archive.address())
+            .unwrap()
+            .unwrap();
         // Bits 0..=4 set, bits 5..=7 unset.
         assert_eq!(bm[0], 0b0001_1111);
     }
@@ -4367,31 +4735,64 @@ mod tests {
         use sumchain_primitives::{Hash, TxStatus};
 
         let (state, db, _dir) = setup();
-        let executor = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
+        let executor =
+            BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
 
         let archive = setup_archive(&executor, &state, &proposer.address(), 1);
         let owner = KeyPair::generate();
         let merkle_root = Hash::hash(b"matrix-3");
         assert!(register_v2_file(
-            &executor, &state, &owner, &proposer.address(), 10, 0, merkle_root, 4, 1000, 0, Vec::new(),
-        ).is_success());
+            &executor,
+            &state,
+            &owner,
+            &proposer.address(),
+            10,
+            0,
+            merkle_root,
+            4,
+            1000,
+            0,
+            Vec::new(),
+        )
+        .is_success());
 
         // First, a valid attestation of {0, 1}.
         assert_eq!(
-            submit_accept(&executor, &state, &archive, &proposer.address(), 11, 1, merkle_root, vec![0, 1]),
+            submit_accept(
+                &executor,
+                &state,
+                &archive,
+                &proposer.address(),
+                11,
+                1,
+                merkle_root,
+                vec![0, 1]
+            ),
             TxStatus::Success
         );
 
         // Now {2, 99} — 99 >= chunk_count=4, must reject the whole tx.
         // No partial application: bitmap stays at {0, 1}.
         assert_eq!(
-            submit_accept(&executor, &state, &archive, &proposer.address(), 12, 2, merkle_root, vec![2, 99]),
+            submit_accept(
+                &executor,
+                &state,
+                &archive,
+                &proposer.address(),
+                12,
+                2,
+                merkle_root,
+                vec![2, 99]
+            ),
             TxStatus::Failed(33)
         );
 
         let store = crate::storage_metadata::StorageMetadataExecutor::new(db.clone());
-        let bm = store.get_attestation_bitmap_v2(&merkle_root, &archive.address()).unwrap().unwrap();
+        let bm = store
+            .get_attestation_bitmap_v2(&merkle_root, &archive.address())
+            .unwrap()
+            .unwrap();
         // Still {0, 1} — index 2 should NOT have been written.
         assert_eq!(bm[0], 0b0000_0011);
     }
@@ -4420,8 +4821,19 @@ mod tests {
         let owner = KeyPair::generate();
         let merkle_root = Hash::hash(b"matrix-4");
         assert!(register_v2_file(
-            &executor, &state, &owner, &proposer.address(), 10, 0, merkle_root, 4, 1000, 0, Vec::new(),
-        ).is_success());
+            &executor,
+            &state,
+            &owner,
+            &proposer.address(),
+            10,
+            0,
+            merkle_root,
+            4,
+            1000,
+            0,
+            Vec::new(),
+        )
+        .is_success());
 
         // For chunk 0, exactly one of {archive_a, archive_b} is assigned under
         // R=1. Pick the OTHER one as the unassigned signer and have it attest
@@ -4436,8 +4848,7 @@ mod tests {
             1,
             "R=1 must yield exactly one assignee per chunk"
         );
-        let unassigned_signer = if assigned_to_zero[0].as_bytes()
-            == archive_a.address().as_bytes()
+        let unassigned_signer = if assigned_to_zero[0].as_bytes() == archive_a.address().as_bytes()
         {
             &archive_b
         } else {
@@ -4476,12 +4887,32 @@ mod tests {
         let owner = KeyPair::generate();
         let merkle_root = Hash::hash(b"matrix-5");
         assert!(register_v2_file(
-            &executor, &state, &owner, &proposer.address(), 10, 0, merkle_root, 8, 1000, 0, Vec::new(),
-        ).is_success());
+            &executor,
+            &state,
+            &owner,
+            &proposer.address(),
+            10,
+            0,
+            merkle_root,
+            8,
+            1000,
+            0,
+            Vec::new(),
+        )
+        .is_success());
 
         // 5 indices > cap of 4.
         assert_eq!(
-            submit_accept(&executor, &state, &archive, &proposer.address(), 11, 1, merkle_root, vec![0, 1, 2, 3, 4]),
+            submit_accept(
+                &executor,
+                &state,
+                &archive,
+                &proposer.address(),
+                11,
+                1,
+                merkle_root,
+                vec![0, 1, 2, 3, 4]
+            ),
             TxStatus::Failed(33)
         );
     }
@@ -4492,39 +4923,93 @@ mod tests {
         use sumchain_primitives::{Hash, TxStatus};
 
         let (state, db, _dir) = setup();
-        let executor = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
+        let executor =
+            BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
 
         let archive = setup_archive(&executor, &state, &proposer.address(), 1);
         let owner = KeyPair::generate();
         let merkle_root = Hash::hash(b"matrix-8");
         assert!(register_v2_file(
-            &executor, &state, &owner, &proposer.address(), 10, 0, merkle_root, 4, 1000, 0, Vec::new(),
-        ).is_success());
+            &executor,
+            &state,
+            &owner,
+            &proposer.address(),
+            10,
+            0,
+            merkle_root,
+            4,
+            1000,
+            0,
+            Vec::new(),
+        )
+        .is_success());
 
         // Activate before any accept → fail.
         assert_eq!(
-            submit_activate(&executor, &state, &owner, &proposer.address(), 11, 1, merkle_root),
+            submit_activate(
+                &executor,
+                &state,
+                &owner,
+                &proposer.address(),
+                11,
+                1,
+                merkle_root
+            ),
             TxStatus::Failed(34)
         );
 
         // Accept partial coverage {0, 1} → activation still fails.
         assert_eq!(
-            submit_accept(&executor, &state, &archive, &proposer.address(), 12, 1, merkle_root, vec![0, 1]),
+            submit_accept(
+                &executor,
+                &state,
+                &archive,
+                &proposer.address(),
+                12,
+                1,
+                merkle_root,
+                vec![0, 1]
+            ),
             TxStatus::Success
         );
         assert_eq!(
-            submit_activate(&executor, &state, &owner, &proposer.address(), 13, 2, merkle_root),
+            submit_activate(
+                &executor,
+                &state,
+                &owner,
+                &proposer.address(),
+                13,
+                2,
+                merkle_root
+            ),
             TxStatus::Failed(34)
         );
 
         // Cover the rest {2, 3} → activation succeeds.
         assert_eq!(
-            submit_accept(&executor, &state, &archive, &proposer.address(), 14, 2, merkle_root, vec![2, 3]),
+            submit_accept(
+                &executor,
+                &state,
+                &archive,
+                &proposer.address(),
+                14,
+                2,
+                merkle_root,
+                vec![2, 3]
+            ),
             TxStatus::Success
         );
         assert_eq!(
-            submit_activate(&executor, &state, &owner, &proposer.address(), 15, 3, merkle_root),
+            submit_activate(
+                &executor,
+                &state,
+                &owner,
+                &proposer.address(),
+                15,
+                3,
+                merkle_root
+            ),
             TxStatus::Success
         );
 
@@ -4546,7 +5031,8 @@ mod tests {
         };
 
         let (state, db, _dir) = setup();
-        let executor = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
+        let executor =
+            BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
 
         // Two archives — both register before the file (both in snapshot, both assigned at default R=3).
@@ -4556,13 +5042,33 @@ mod tests {
         let owner = KeyPair::generate();
         let merkle_root = Hash::hash(b"matrix-9");
         assert!(register_v2_file(
-            &executor, &state, &owner, &proposer.address(), 10, 0, merkle_root, 4, 1000, 0, Vec::new(),
-        ).is_success());
+            &executor,
+            &state,
+            &owner,
+            &proposer.address(),
+            10,
+            0,
+            merkle_root,
+            4,
+            1000,
+            0,
+            Vec::new(),
+        )
+        .is_success());
 
         // Both attest full coverage.
         for (kp, nonce) in [(&archive_a, 1u64), (&archive_b, 1u64)] {
             assert_eq!(
-                submit_accept(&executor, &state, kp, &proposer.address(), 11, nonce, merkle_root, vec![0, 1, 2, 3]),
+                submit_accept(
+                    &executor,
+                    &state,
+                    kp,
+                    &proposer.address(),
+                    11,
+                    nonce,
+                    merkle_root,
+                    vec![0, 1, 2, 3]
+                ),
                 TxStatus::Success
             );
         }
@@ -4584,18 +5090,32 @@ mod tests {
         state
             .put_account(
                 &archive_a.address(),
-                &sumchain_storage::schema::AccountState { balance: prior.balance + 1, nonce: 2 },
+                &sumchain_storage::schema::AccountState {
+                    balance: prior.balance + 1,
+                    nonce: 2,
+                },
             )
             .unwrap();
         let h = update_tx.signing_hash();
         let s = sign(h.as_bytes(), archive_a.private_key());
-        let signed = SignedTransaction::new_v2(update_tx, *s.as_bytes(), *archive_a.public_key().as_bytes());
-        let r = executor.execute_tx(&signed, &proposer.address(), 12, 0).unwrap();
+        let signed =
+            SignedTransaction::new_v2(update_tx, *s.as_bytes(), *archive_a.public_key().as_bytes());
+        let r = executor
+            .execute_tx(&signed, &proposer.address(), 12, 0)
+            .unwrap();
         assert!(r.status.is_success());
 
         // archive_a is Slashed but archive_b still covers all chunks → activation succeeds.
         assert_eq!(
-            submit_activate(&executor, &state, &owner, &proposer.address(), 13, 1, merkle_root),
+            submit_activate(
+                &executor,
+                &state,
+                &owner,
+                &proposer.address(),
+                13,
+                1,
+                merkle_root
+            ),
             TxStatus::Success
         );
     }
@@ -4606,29 +5126,67 @@ mod tests {
         use sumchain_primitives::{Hash, TxStatus};
 
         let (state, db, _dir) = setup();
-        let executor = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
+        let executor =
+            BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
 
         let archive = setup_archive(&executor, &state, &proposer.address(), 1);
         let owner = KeyPair::generate();
         let merkle_root = Hash::hash(b"matrix-10");
         assert!(register_v2_file(
-            &executor, &state, &owner, &proposer.address(), 10, 0, merkle_root, 1, 1000, 0, Vec::new(),
-        ).is_success());
+            &executor,
+            &state,
+            &owner,
+            &proposer.address(),
+            10,
+            0,
+            merkle_root,
+            1,
+            1000,
+            0,
+            Vec::new(),
+        )
+        .is_success());
 
         // Cover and activate.
         assert_eq!(
-            submit_accept(&executor, &state, &archive, &proposer.address(), 11, 1, merkle_root, vec![0]),
+            submit_accept(
+                &executor,
+                &state,
+                &archive,
+                &proposer.address(),
+                11,
+                1,
+                merkle_root,
+                vec![0]
+            ),
             TxStatus::Success
         );
         assert_eq!(
-            submit_activate(&executor, &state, &owner, &proposer.address(), 12, 1, merkle_root),
+            submit_activate(
+                &executor,
+                &state,
+                &owner,
+                &proposer.address(),
+                12,
+                1,
+                merkle_root
+            ),
             TxStatus::Success
         );
 
         // Re-attest after activation → reject.
         assert_eq!(
-            submit_accept(&executor, &state, &archive, &proposer.address(), 13, 2, merkle_root, vec![0]),
+            submit_accept(
+                &executor,
+                &state,
+                &archive,
+                &proposer.address(),
+                13,
+                2,
+                merkle_root,
+                vec![0]
+            ),
             TxStatus::Failed(33)
         );
     }
@@ -4664,9 +5222,19 @@ mod tests {
         let merkle_root = Hash::hash(b"r1-coverage");
         let chunk_count: u32 = 8;
         assert!(register_v2_file(
-            &executor, &state, &owner, &proposer.address(),
-            10, 0, merkle_root, chunk_count, 1000, 0, Vec::new(),
-        ).is_success());
+            &executor,
+            &state,
+            &owner,
+            &proposer.address(),
+            10,
+            0,
+            merkle_root,
+            chunk_count,
+            1000,
+            0,
+            Vec::new(),
+        )
+        .is_success());
 
         // Compute the deterministic per-archive assignment that the executor
         // would accept. With R=1 each chunk goes to exactly one archive, so
@@ -4688,8 +5256,14 @@ mod tests {
                 let n = nonces.entry(key).or_insert(0u64);
                 *n += 1;
                 let s = submit_accept(
-                    &executor, &state, kp, &proposer.address(),
-                    11, *n, merkle_root, idxs.clone(),
+                    &executor,
+                    &state,
+                    kp,
+                    &proposer.address(),
+                    11,
+                    *n,
+                    merkle_root,
+                    idxs.clone(),
                 );
                 assert!(
                     s.is_success(),
@@ -4710,7 +5284,10 @@ mod tests {
         // computed independently from the assignment function.
         for entry in &cov.per_archive {
             let chain_count = entry.assigned_count.expect("under cap; should be Some");
-            let local_count = expected.get(&entry.archive).map(|v| v.len() as u32).unwrap_or(0);
+            let local_count = expected
+                .get(&entry.archive)
+                .map(|v| v.len() as u32)
+                .unwrap_or(0);
             assert_eq!(
                 chain_count, local_count,
                 "RPC assigned_count {} disagrees with deterministic count {} for archive {:?}",
@@ -4720,8 +5297,15 @@ mod tests {
 
         // And full coverage means activation must succeed.
         assert!(submit_activate(
-            &executor, &state, &owner, &proposer.address(), 12, 1, merkle_root,
-        ).is_success());
+            &executor,
+            &state,
+            &owner,
+            &proposer.address(),
+            12,
+            1,
+            merkle_root,
+        )
+        .is_success());
     }
 
     /// Matrix item 11 — `compute_coverage_v2` (the RPC backend) returns
@@ -4732,7 +5316,8 @@ mod tests {
         use sumchain_primitives::Hash;
 
         let (state, db, _dir) = setup();
-        let executor = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
+        let executor =
+            BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
         let registry = crate::node_registry::NodeRegistryExecutor::new(db.clone());
         let storage = crate::storage_metadata::StorageMetadataExecutor::new(db.clone());
@@ -4741,24 +5326,41 @@ mod tests {
         let owner = KeyPair::generate();
         let merkle_root = Hash::hash(b"matrix-11");
         assert!(register_v2_file(
-            &executor, &state, &owner, &proposer.address(), 10, 0, merkle_root, 16, 1000, 0, Vec::new(),
-        ).is_success());
+            &executor,
+            &state,
+            &owner,
+            &proposer.address(),
+            10,
+            0,
+            merkle_root,
+            16,
+            1000,
+            0,
+            Vec::new(),
+        )
+        .is_success());
 
         // Helper: extract missing chunks ≥ offset, mimicking the RPC.
-        let extract_missing = |union: &[u8], chunk_count: u32, offset: u32, limit: u32| -> Vec<u32> {
-            let mut out = Vec::new();
-            for i in offset..chunk_count {
-                if (out.len() as u32) >= limit { break; }
-                let byte = union.get((i / 8) as usize).copied().unwrap_or(0);
-                if (byte >> (i % 8)) & 1 == 0 {
-                    out.push(i);
+        let extract_missing =
+            |union: &[u8], chunk_count: u32, offset: u32, limit: u32| -> Vec<u32> {
+                let mut out = Vec::new();
+                for i in offset..chunk_count {
+                    if (out.len() as u32) >= limit {
+                        break;
+                    }
+                    let byte = union.get((i / 8) as usize).copied().unwrap_or(0);
+                    if (byte >> (i % 8)) & 1 == 0 {
+                        out.push(i);
+                    }
                 }
-            }
-            out
-        };
+                out
+            };
 
         // No accepts yet — every index 0..16 is missing.
-        let cov = storage.compute_coverage_v2(&merkle_root, &registry, 3).unwrap().unwrap();
+        let cov = storage
+            .compute_coverage_v2(&merkle_root, &registry, 3)
+            .unwrap()
+            .unwrap();
         let page1 = extract_missing(&cov.union, cov.chunk_count, 0, 4);
         assert_eq!(page1, vec![0, 1, 2, 3]);
 
@@ -4768,11 +5370,21 @@ mod tests {
         // outside-window changes (those drop from missing without affecting
         // ordering of indices < the new offset).
         assert!(submit_accept(
-            &executor, &state, &archive, &proposer.address(), 11, 1, merkle_root,
+            &executor,
+            &state,
+            &archive,
+            &proposer.address(),
+            11,
+            1,
+            merkle_root,
             vec![5, 7, 12, 14],
-        ).is_success());
+        )
+        .is_success());
 
-        let cov2 = storage.compute_coverage_v2(&merkle_root, &registry, 3).unwrap().unwrap();
+        let cov2 = storage
+            .compute_coverage_v2(&merkle_root, &registry, 3)
+            .unwrap()
+            .unwrap();
         let page2 = extract_missing(&cov2.union, cov2.chunk_count, 4, 4);
         // Window [4..16) missing-set after accept = {4, 6, 8, 9, 10, 11, 13, 15}
         // (indices 5, 7, 12, 14 covered). First 4 ascending = [4, 6, 8, 9].
@@ -4805,10 +5417,30 @@ mod tests {
         let owner = KeyPair::generate();
         let merkle_root = Hash::hash(file_label);
         assert!(register_v2_file(
-            executor, state, &owner, proposer, 10, 0, merkle_root, 1, 1000, 0, Vec::new(),
-        ).is_success());
+            executor,
+            state,
+            &owner,
+            proposer,
+            10,
+            0,
+            merkle_root,
+            1,
+            1000,
+            0,
+            Vec::new(),
+        )
+        .is_success());
         assert_eq!(
-            submit_accept(executor, state, &archive, proposer, 11, 1, merkle_root, vec![0]),
+            submit_accept(
+                executor,
+                state,
+                &archive,
+                proposer,
+                11,
+                1,
+                merkle_root,
+                vec![0]
+            ),
             sumchain_primitives::TxStatus::Success
         );
         assert_eq!(
@@ -4890,7 +5522,10 @@ mod tests {
             fee,
             nonce,
             payload: TxPayload::StorageMetadataV2(StorageMetadataV2TxData {
-                operation: StorageMetadataOperationV2::RemoveAccessV2 { merkle_root, address },
+                operation: StorageMetadataOperationV2::RemoveAccessV2 {
+                    merkle_root,
+                    address,
+                },
             }),
         };
         let h = tx.signing_hash();
@@ -4909,7 +5544,8 @@ mod tests {
         use sumchain_primitives::{AccessEntryV2, TxStatus};
 
         let (state, db, _dir) = setup();
-        let executor = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
+        let executor =
+            BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
 
         let (owner, _archive, root) =
@@ -4922,7 +5558,14 @@ mod tests {
             expires_at: None,
         };
         let status = submit_add_access(
-            &executor, &state, &owner, &proposer.address(), 13, 1, root, entry,
+            &executor,
+            &state,
+            &owner,
+            &proposer.address(),
+            13,
+            1,
+            root,
+            entry,
         );
         assert_eq!(status, TxStatus::Success);
 
@@ -4938,7 +5581,8 @@ mod tests {
         use sumchain_primitives::{AccessEntryV2, TxStatus};
 
         let (state, db, _dir) = setup();
-        let executor = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
+        let executor =
+            BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
 
         let (_owner, _archive, root) =
@@ -4951,7 +5595,14 @@ mod tests {
             expires_at: None,
         };
         let status = submit_add_access(
-            &executor, &state, &intruder, &proposer.address(), 13, 0, root, entry,
+            &executor,
+            &state,
+            &intruder,
+            &proposer.address(),
+            13,
+            0,
+            root,
+            entry,
         );
         assert_eq!(status, TxStatus::Failed(35));
         let _ = db; // keep db alive for the temp dir until end of fn
@@ -4963,7 +5614,8 @@ mod tests {
         use sumchain_primitives::{AccessEntryV2, TxStatus};
 
         let (state, db, _dir) = setup();
-        let executor = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
+        let executor =
+            BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
 
         let (owner, _archive, root) =
@@ -4975,12 +5627,30 @@ mod tests {
             expires_at: None,
         };
         assert_eq!(
-            submit_add_access(&executor, &state, &owner, &proposer.address(), 13, 1, root, entry.clone()),
+            submit_add_access(
+                &executor,
+                &state,
+                &owner,
+                &proposer.address(),
+                13,
+                1,
+                root,
+                entry.clone()
+            ),
             TxStatus::Success
         );
         // Re-add same address → reject.
         assert_eq!(
-            submit_add_access(&executor, &state, &owner, &proposer.address(), 14, 2, root, entry),
+            submit_add_access(
+                &executor,
+                &state,
+                &owner,
+                &proposer.address(),
+                14,
+                2,
+                root,
+                entry
+            ),
             TxStatus::Failed(35)
         );
     }
@@ -4991,7 +5661,8 @@ mod tests {
         use sumchain_primitives::{AccessEntryV2, EncryptedKeyBundleV2, TxStatus};
 
         let (state, db, _dir) = setup();
-        let executor = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
+        let executor =
+            BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
 
         let (owner, _archive, root) =
@@ -5002,7 +5673,16 @@ mod tests {
             expires_at: None,
         };
         assert_eq!(
-            submit_add_access(&executor, &state, &owner, &proposer.address(), 13, 1, root, bad),
+            submit_add_access(
+                &executor,
+                &state,
+                &owner,
+                &proposer.address(),
+                13,
+                1,
+                root,
+                bad
+            ),
             TxStatus::Failed(35)
         );
         let _ = db;
@@ -5014,7 +5694,8 @@ mod tests {
         use sumchain_primitives::{AccessEntryV2, TxStatus};
 
         let (state, db, _dir) = setup();
-        let executor = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
+        let executor =
+            BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
 
         let (owner, _archive, root) =
@@ -5026,12 +5707,30 @@ mod tests {
             expires_at: None,
         };
         assert_eq!(
-            submit_add_access(&executor, &state, &owner, &proposer.address(), 13, 1, root, entry),
+            submit_add_access(
+                &executor,
+                &state,
+                &owner,
+                &proposer.address(),
+                13,
+                1,
+                root,
+                entry
+            ),
             TxStatus::Success
         );
         // Happy: remove that recipient.
         assert_eq!(
-            submit_remove_access(&executor, &state, &owner, &proposer.address(), 14, 2, root, r.address()),
+            submit_remove_access(
+                &executor,
+                &state,
+                &owner,
+                &proposer.address(),
+                14,
+                2,
+                root,
+                r.address()
+            ),
             TxStatus::Success
         );
         let store = crate::storage_metadata::StorageMetadataExecutor::new(db.clone());
@@ -5040,7 +5739,16 @@ mod tests {
 
         // Same recipient again — now missing → Failed(35).
         assert_eq!(
-            submit_remove_access(&executor, &state, &owner, &proposer.address(), 15, 3, root, r.address()),
+            submit_remove_access(
+                &executor,
+                &state,
+                &owner,
+                &proposer.address(),
+                15,
+                3,
+                root,
+                r.address()
+            ),
             TxStatus::Failed(35)
         );
     }
@@ -5051,15 +5759,27 @@ mod tests {
         use sumchain_primitives::{AccessEntryV2, Hash, TxStatus};
 
         let (state, db, _dir) = setup();
-        let executor = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
+        let executor =
+            BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
 
         let owner = KeyPair::generate();
         let root = Hash::hash(b"1c-pending");
         // Pending — never activate.
         assert!(register_v2_file(
-            &executor, &state, &owner, &proposer.address(), 10, 0, root, 1, 1000, 0, Vec::new(),
-        ).is_success());
+            &executor,
+            &state,
+            &owner,
+            &proposer.address(),
+            10,
+            0,
+            root,
+            1,
+            1000,
+            0,
+            Vec::new(),
+        )
+        .is_success());
 
         let r = KeyPair::generate();
         let entry = AccessEntryV2 {
@@ -5068,11 +5788,29 @@ mod tests {
             expires_at: None,
         };
         assert_eq!(
-            submit_add_access(&executor, &state, &owner, &proposer.address(), 13, 1, root, entry),
+            submit_add_access(
+                &executor,
+                &state,
+                &owner,
+                &proposer.address(),
+                13,
+                1,
+                root,
+                entry
+            ),
             TxStatus::Failed(35)
         );
         assert_eq!(
-            submit_remove_access(&executor, &state, &owner, &proposer.address(), 14, 1, root, r.address()),
+            submit_remove_access(
+                &executor,
+                &state,
+                &owner,
+                &proposer.address(),
+                14,
+                1,
+                root,
+                r.address()
+            ),
             TxStatus::Failed(35)
         );
         let _ = db;
@@ -5167,7 +5905,8 @@ mod tests {
         };
         let h = reg_tx.signing_hash();
         let s = sign(h.as_bytes(), owner.private_key());
-        let signed = SignedTransaction::new_v2(reg_tx, *s.as_bytes(), *owner.public_key().as_bytes());
+        let signed =
+            SignedTransaction::new_v2(reg_tx, *s.as_bytes(), *owner.public_key().as_bytes());
         assert!(executor
             .execute_tx(&signed, proposer, 5, 0)
             .unwrap()
@@ -5182,12 +5921,32 @@ mod tests {
             expires_at: None,
         };
         assert!(register_v2_file(
-            executor, state, &owner, proposer, 10, 1, merkle_root, 1, 1000, 1, vec![owner_entry],
-        ).is_success());
+            executor,
+            state,
+            &owner,
+            proposer,
+            10,
+            1,
+            merkle_root,
+            1,
+            1000,
+            1,
+            vec![owner_entry],
+        )
+        .is_success());
 
         // Cover and activate.
         assert_eq!(
-            submit_accept(executor, state, &archive, proposer, 11, 1, merkle_root, vec![0]),
+            submit_accept(
+                executor,
+                state,
+                &archive,
+                proposer,
+                11,
+                1,
+                merkle_root,
+                vec![0]
+            ),
             sumchain_primitives::TxStatus::Success
         );
         assert_eq!(
@@ -5204,7 +5963,8 @@ mod tests {
         use sumchain_primitives::{AccessEntryV2, TxStatus};
 
         let (state, db, _dir) = setup();
-        let executor = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
+        let executor =
+            BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
 
         let (owner, _archive, root) =
@@ -5216,7 +5976,16 @@ mod tests {
             expires_at: None,
         };
         assert_eq!(
-            submit_add_access(&executor, &state, &owner, &proposer.address(), 13, 1, root, initial),
+            submit_add_access(
+                &executor,
+                &state,
+                &owner,
+                &proposer.address(),
+                13,
+                1,
+                root,
+                initial
+            ),
             TxStatus::Success
         );
 
@@ -5227,7 +5996,17 @@ mod tests {
             expires_at: Some(99),
         };
         assert_eq!(
-            submit_update_access(&executor, &state, &owner, &proposer.address(), 14, 2, root, r.address(), new_entry),
+            submit_update_access(
+                &executor,
+                &state,
+                &owner,
+                &proposer.address(),
+                14,
+                2,
+                root,
+                r.address(),
+                new_entry
+            ),
             TxStatus::Success
         );
 
@@ -5244,7 +6023,8 @@ mod tests {
         use sumchain_primitives::{AccessEntryV2, TxStatus};
 
         let (state, db, _dir) = setup();
-        let executor = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
+        let executor =
+            BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
 
         let (owner, _archive, root) =
@@ -5256,7 +6036,17 @@ mod tests {
             expires_at: None,
         };
         assert_eq!(
-            submit_update_access(&executor, &state, &owner, &proposer.address(), 13, 1, root, absent.address(), new_entry),
+            submit_update_access(
+                &executor,
+                &state,
+                &owner,
+                &proposer.address(),
+                13,
+                1,
+                root,
+                absent.address(),
+                new_entry
+            ),
             TxStatus::Failed(35)
         );
         let _ = db;
@@ -5268,11 +6058,16 @@ mod tests {
         use sumchain_primitives::{AccessEntryV2, TxStatus};
 
         let (state, db, _dir) = setup();
-        let executor = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
+        let executor =
+            BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
 
-        let (owner, _archive, root) =
-            setup_active_public_file(&executor, &state, &proposer.address(), b"1c-update-non-owner");
+        let (owner, _archive, root) = setup_active_public_file(
+            &executor,
+            &state,
+            &proposer.address(),
+            b"1c-update-non-owner",
+        );
         let r = KeyPair::generate();
         let entry = AccessEntryV2 {
             address: r.address(),
@@ -5280,13 +6075,32 @@ mod tests {
             expires_at: None,
         };
         assert_eq!(
-            submit_add_access(&executor, &state, &owner, &proposer.address(), 13, 1, root, entry.clone()),
+            submit_add_access(
+                &executor,
+                &state,
+                &owner,
+                &proposer.address(),
+                13,
+                1,
+                root,
+                entry.clone()
+            ),
             TxStatus::Success
         );
 
         let intruder = KeyPair::generate();
         assert_eq!(
-            submit_update_access(&executor, &state, &intruder, &proposer.address(), 14, 0, root, r.address(), entry),
+            submit_update_access(
+                &executor,
+                &state,
+                &intruder,
+                &proposer.address(),
+                14,
+                0,
+                root,
+                r.address(),
+                entry
+            ),
             TxStatus::Failed(35)
         );
     }
@@ -5298,11 +6112,16 @@ mod tests {
         use sumchain_primitives::{AccessEntryV2, TxStatus};
 
         let (state, db, _dir) = setup();
-        let executor = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
+        let executor =
+            BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
 
-        let (owner, _archive, root) =
-            setup_active_public_file(&executor, &state, &proposer.address(), b"1c-update-addr-mismatch");
+        let (owner, _archive, root) = setup_active_public_file(
+            &executor,
+            &state,
+            &proposer.address(),
+            b"1c-update-addr-mismatch",
+        );
         let a = KeyPair::generate();
         let b = KeyPair::generate();
         let entry_a = AccessEntryV2 {
@@ -5311,7 +6130,16 @@ mod tests {
             expires_at: None,
         };
         assert_eq!(
-            submit_add_access(&executor, &state, &owner, &proposer.address(), 13, 1, root, entry_a),
+            submit_add_access(
+                &executor,
+                &state,
+                &owner,
+                &proposer.address(),
+                13,
+                1,
+                root,
+                entry_a
+            ),
             TxStatus::Success
         );
 
@@ -5322,7 +6150,17 @@ mod tests {
             expires_at: None,
         };
         assert_eq!(
-            submit_update_access(&executor, &state, &owner, &proposer.address(), 14, 2, root, a.address(), new_entry_b),
+            submit_update_access(
+                &executor,
+                &state,
+                &owner,
+                &proposer.address(),
+                14,
+                2,
+                root,
+                a.address(),
+                new_entry_b
+            ),
             TxStatus::Failed(35)
         );
         let _ = db;
@@ -5334,11 +6172,16 @@ mod tests {
         use sumchain_primitives::{AccessEntryV2, EncryptedKeyBundleV2, TxStatus};
 
         let (state, db, _dir) = setup();
-        let executor = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
+        let executor =
+            BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
 
-        let (owner, _archive, root) =
-            setup_active_public_file(&executor, &state, &proposer.address(), b"1c-update-pub-bundle");
+        let (owner, _archive, root) = setup_active_public_file(
+            &executor,
+            &state,
+            &proposer.address(),
+            b"1c-update-pub-bundle",
+        );
         let r = KeyPair::generate();
         let entry = AccessEntryV2 {
             address: r.address(),
@@ -5346,7 +6189,16 @@ mod tests {
             expires_at: None,
         };
         assert_eq!(
-            submit_add_access(&executor, &state, &owner, &proposer.address(), 13, 1, root, entry),
+            submit_add_access(
+                &executor,
+                &state,
+                &owner,
+                &proposer.address(),
+                13,
+                1,
+                root,
+                entry
+            ),
             TxStatus::Success
         );
         let bad_update = AccessEntryV2 {
@@ -5355,7 +6207,17 @@ mod tests {
             expires_at: None,
         };
         assert_eq!(
-            submit_update_access(&executor, &state, &owner, &proposer.address(), 14, 2, root, r.address(), bad_update),
+            submit_update_access(
+                &executor,
+                &state,
+                &owner,
+                &proposer.address(),
+                14,
+                2,
+                root,
+                r.address(),
+                bad_update
+            ),
             TxStatus::Failed(35)
         );
         let _ = db;
@@ -5372,11 +6234,13 @@ mod tests {
         use sumchain_primitives::{AccessEntryV2, EncryptedKeyBundleV2, TxStatus};
 
         let (state, db, _dir) = setup();
-        let executor = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
+        let executor =
+            BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
 
         // Active Private file with owner already in the access list.
-        let (owner, root) = setup_active_private_file(&executor, &state, &proposer.address(), b"1c-update-priv");
+        let (owner, root) =
+            setup_active_private_file(&executor, &state, &proposer.address(), b"1c-update-priv");
 
         // Add a recipient who DOES have a pubkey, then try to update with
         // a new_entry where the address is one without a pubkey is impossible
@@ -5399,7 +6263,17 @@ mod tests {
             expires_at: None,
         };
         assert_eq!(
-            submit_update_access(&executor, &state, &owner, &proposer.address(), 13, 2, root, owner.address(), new_entry_no_bundle),
+            submit_update_access(
+                &executor,
+                &state,
+                &owner,
+                &proposer.address(),
+                13,
+                2,
+                root,
+                owner.address(),
+                new_entry_no_bundle
+            ),
             TxStatus::Failed(35)
         );
 
@@ -5413,7 +6287,16 @@ mod tests {
             expires_at: None,
         };
         assert_eq!(
-            submit_add_access(&executor, &state, &owner, &proposer.address(), 14, 3, root, stranger_entry),
+            submit_add_access(
+                &executor,
+                &state,
+                &owner,
+                &proposer.address(),
+                14,
+                3,
+                root,
+                stranger_entry
+            ),
             TxStatus::Failed(35)
         );
         let _ = db;
@@ -5428,7 +6311,8 @@ mod tests {
         };
 
         let (state, db, _dir) = setup();
-        let executor = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
+        let executor =
+            BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
         let store = crate::storage_metadata::StorageMetadataExecutor::new(db.clone());
 
@@ -5436,8 +6320,19 @@ mod tests {
         let owner_p = KeyPair::generate();
         let root_p = Hash::hash(b"pushable-pending");
         assert!(register_v2_file(
-            &executor, &state, &owner_p, &proposer.address(), 10, 0, root_p, 1, 1000, 0, Vec::new(),
-        ).is_success());
+            &executor,
+            &state,
+            &owner_p,
+            &proposer.address(),
+            10,
+            0,
+            root_p,
+            1,
+            1000,
+            0,
+            Vec::new(),
+        )
+        .is_success());
 
         // Active file
         let (_, _, root_a) =
@@ -5447,8 +6342,19 @@ mod tests {
         let owner_b = KeyPair::generate();
         let root_b = Hash::hash(b"pushable-abandoned");
         assert!(register_v2_file(
-            &executor, &state, &owner_b, &proposer.address(), 10, 0, root_b, 1, 1000, 0, Vec::new(),
-        ).is_success());
+            &executor,
+            &state,
+            &owner_b,
+            &proposer.address(),
+            10,
+            0,
+            root_b,
+            1,
+            1000,
+            0,
+            Vec::new(),
+        )
+        .is_success());
         let prior = state.get_account(&owner_b.address()).unwrap();
         state
             .put_account(
@@ -5465,15 +6371,21 @@ mod tests {
             fee: 1,
             nonce: 1,
             payload: TxPayload::StorageMetadataV2(StorageMetadataV2TxData {
-                operation: StorageMetadataOperationV2::AbandonFileV2 { merkle_root: root_b },
+                operation: StorageMetadataOperationV2::AbandonFileV2 {
+                    merkle_root: root_b,
+                },
             }),
         };
         let h = abandon_tx.signing_hash();
         let s = sign(h.as_bytes(), owner_b.private_key());
-        let signed = SignedTransaction::new_v2(abandon_tx, *s.as_bytes(), *owner_b.public_key().as_bytes());
+        let signed =
+            SignedTransaction::new_v2(abandon_tx, *s.as_bytes(), *owner_b.public_key().as_bytes());
         // grace = 50 → abandon at h=61.
         assert_eq!(
-            executor.execute_tx(&signed, &proposer.address(), 61, 0).unwrap().status,
+            executor
+                .execute_tx(&signed, &proposer.address(), 61, 0)
+                .unwrap()
+                .status,
             TxStatus::Success
         );
         let row_b = store.get_metadata_v2(&root_b).unwrap().unwrap();
@@ -5503,7 +6415,8 @@ mod tests {
         };
 
         let (state, db, _dir) = setup();
-        let executor = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
+        let executor =
+            BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let owner = KeyPair::generate();
         let proposer = KeyPair::generate();
         let merkle_root = Hash::hash(b"abandon-grief");
@@ -5514,8 +6427,15 @@ mod tests {
             &state,
             &owner,
             &proposer.address(),
-            10, 0, merkle_root, 4, deposit, 0, Vec::new(),
-        ).is_success());
+            10,
+            0,
+            merkle_root,
+            4,
+            deposit,
+            0,
+            Vec::new(),
+        )
+        .is_success());
 
         let fee: u128 = 10;
         let acct = state.get_account(&owner.address()).unwrap();
@@ -5541,11 +6461,8 @@ mod tests {
         };
         let h = abandon_tx.signing_hash();
         let s = sign(h.as_bytes(), owner.private_key());
-        let signed = SignedTransaction::new_v2(
-            abandon_tx,
-            *s.as_bytes(),
-            *owner.public_key().as_bytes(),
-        );
+        let signed =
+            SignedTransaction::new_v2(abandon_tx, *s.as_bytes(), *owner.public_key().as_bytes());
         let r = executor
             .execute_tx(&signed, &proposer.address(), 30, 0)
             .unwrap();
@@ -5614,8 +6531,8 @@ mod tests {
     /// Plan v3.1 §5.3.
     #[test]
     fn test_genesis_snapshot_is_empty_at_height_zero() {
-        use sumchain_genesis::Genesis;
         use std::collections::HashMap;
+        use sumchain_genesis::Genesis;
 
         let (state, db, _dir) = setup();
         // Minimal genesis — empty validators/alloc, default params. Triggers
@@ -5639,7 +6556,8 @@ mod tests {
     #[test]
     fn test_register_archive_writes_snapshot_at_block_height() {
         let (state, db, _dir) = setup();
-        let executor = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
+        let executor =
+            BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
         let registry = crate::node_registry::NodeRegistryExecutor::new(db.clone());
 
@@ -5661,7 +6579,8 @@ mod tests {
     #[test]
     fn test_get_active_nodes_at_height_walks_back_to_nearest_snapshot() {
         let (state, db, _dir) = setup();
-        let executor = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
+        let executor =
+            BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
         let registry = crate::node_registry::NodeRegistryExecutor::new(db.clone());
 
@@ -5672,7 +6591,10 @@ mod tests {
         assert!(register_archive(&executor, &state, &b, &proposer.address(), 20, 0).is_success());
 
         // h=4: no snapshot, empty.
-        assert!(registry.get_active_archive_nodes_at_height(4).unwrap().is_empty());
+        assert!(registry
+            .get_active_archive_nodes_at_height(4)
+            .unwrap()
+            .is_empty());
 
         // h=5: has A.
         let s5 = registry.get_active_archive_nodes_at_height(5).unwrap();
@@ -5701,14 +6623,16 @@ mod tests {
         };
 
         let (state, db, _dir) = setup();
-        let executor = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
+        let executor =
+            BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
         let registry = crate::node_registry::NodeRegistryExecutor::new(db.clone());
 
         // Register an archive at h=10.
         let archive = KeyPair::generate();
-        assert!(register_archive(&executor, &state, &archive, &proposer.address(), 10, 0)
-            .is_success());
+        assert!(
+            register_archive(&executor, &state, &archive, &proposer.address(), 10, 0).is_success()
+        );
 
         // Submit UpdateStatus(Slashed) at h=15 from the same account.
         // (Note: the V1 update_status doesn't restrict who can call it.)
@@ -5742,14 +6666,22 @@ mod tests {
         };
 
         let r = executor
-            .execute_tx(&update_tx(1, NodeStatus::Slashed), &proposer.address(), 15, 0)
+            .execute_tx(
+                &update_tx(1, NodeStatus::Slashed),
+                &proposer.address(),
+                15,
+                0,
+            )
             .unwrap();
         assert!(r.status.is_success());
 
         // After slashing at h=15, the active set is empty (the only archive
         // was slashed). Snapshot at h=15 reflects this.
         let s15 = registry.get_active_archive_nodes_at_height(15).unwrap();
-        assert!(s15.is_empty(), "slashed archive should not be in active set");
+        assert!(
+            s15.is_empty(),
+            "slashed archive should not be in active set"
+        );
 
         // Sanity: snapshot at h=10 still has the archive.
         let s10 = registry.get_active_archive_nodes_at_height(10).unwrap();
@@ -5761,7 +6693,12 @@ mod tests {
         // to h=15 (which is true regardless), and that the snapshot count
         // didn't grow — which the dedup guard ensures by short-circuiting.
         let r2 = executor
-            .execute_tx(&update_tx(2, NodeStatus::Slashed), &proposer.address(), 20, 0)
+            .execute_tx(
+                &update_tx(2, NodeStatus::Slashed),
+                &proposer.address(),
+                20,
+                0,
+            )
             .unwrap();
         assert!(r2.status.is_success());
         let s20 = registry.get_active_archive_nodes_at_height(20).unwrap();
@@ -5781,7 +6718,8 @@ mod tests {
         };
 
         let (state, db, _dir) = setup();
-        let executor = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
+        let executor =
+            BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
         let registry = crate::node_registry::NodeRegistryExecutor::new(db.clone());
 
@@ -5824,11 +6762,8 @@ mod tests {
             };
             let h = tx_v2.signing_hash();
             let s = sign(h.as_bytes(), sender.private_key());
-            let signed = SignedTransaction::new_v2(
-                tx_v2,
-                *s.as_bytes(),
-                *sender.public_key().as_bytes(),
-            );
+            let signed =
+                SignedTransaction::new_v2(tx_v2, *s.as_bytes(), *sender.public_key().as_bytes());
 
             let result = executor
                 .execute_tx(&signed, &proposer.address(), 1, 0)
@@ -5840,7 +6775,9 @@ mod tests {
                 result.status,
                 TxStatus::Failed(22),
                 "case {} (pubkey {:?}) should produce Failed(22), got {:?}",
-                i, bad_pubkey, result.status
+                i,
+                bad_pubkey,
+                result.status
             );
             assert_eq!(
                 result.status.description(),
@@ -5853,7 +6790,9 @@ mod tests {
             assert!(
                 stored.is_none(),
                 "case {} ({:?}): low-order key was wrongly persisted as {:?}",
-                i, bad_pubkey, stored
+                i,
+                bad_pubkey,
+                stored
             );
         }
     }
@@ -5883,7 +6822,8 @@ mod tests {
         };
 
         let (state, db, _dir) = setup();
-        let executor = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
+        let executor =
+            BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
 
         let sender = KeyPair::generate();
         let proposer = KeyPair::generate();
@@ -5915,7 +6855,8 @@ mod tests {
         };
         let signing_hash = tx_v2.signing_hash();
         let sig = sign(signing_hash.as_bytes(), sender.private_key());
-        let signed = SignedTransaction::new_v2(tx_v2, *sig.as_bytes(), *sender.public_key().as_bytes());
+        let signed =
+            SignedTransaction::new_v2(tx_v2, *sig.as_bytes(), *sender.public_key().as_bytes());
 
         const EXPECTED_HEIGHT: u64 = 42;
         let result = executor
@@ -6028,13 +6969,20 @@ mod tests {
         let result = executor
             .execute_tx(&signed, &proposer.address(), 100, 0)
             .unwrap();
-        assert_eq!(result.status, TxStatus::Failed(40), "gate must reject when None");
+        assert_eq!(
+            result.status,
+            TxStatus::Failed(40),
+            "gate must reject when None"
+        );
         assert_eq!(result.fee_paid, 0, "gate rejection must not consume fee");
 
         // Sanity: the sender's encryption pubkey was NOT persisted.
         let registry = crate::node_registry::NodeRegistryExecutor::new(db.clone());
         assert!(
-            registry.get_encryption_pubkey(&sender.address()).unwrap().is_none(),
+            registry
+                .get_encryption_pubkey(&sender.address())
+                .unwrap()
+                .is_none(),
             "V2 op rejected by gate must not produce side effects"
         );
     }
@@ -6092,6 +7040,1267 @@ mod tests {
             registry.get_encryption_pubkey(&sender.address()).unwrap(),
             Some([7u8; 32]),
             "V2 dispatch should have persisted the encryption pubkey"
+        );
+    }
+
+    // ── C1 compute-pool execution-path seam (issue #130) ─────────────────────
+
+    /// Build an empty block for the block-apply path (mirrors the block helper
+    /// in `tests/contract_reorg_and_root.rs`).
+    fn compute_pool_test_block(height: u64, proposer: &KeyPair) -> Block {
+        let header = BlockHeader::new(
+            Hash::ZERO,
+            height,
+            1000,
+            Hash::ZERO,
+            Hash::ZERO,
+            *proposer.public_key().as_bytes(),
+        );
+        Block::new(header, vec![])
+    }
+
+    /// Under the production default gate (`compute_pool_enabled_from_height ==
+    /// None`) the compute-pool execution path is fully INERT: running a block
+    /// through the real `execute_block` apply seam constructs no manager and
+    /// writes no C1 state / journal, and the reorg-revert seam is a clean no-op.
+    #[test]
+    fn compute_pool_execution_path_is_inert_under_dormant_gate() {
+        use crate::compute_pool_store::ComputePoolStore;
+
+        let (state, db, _dir) = setup();
+        // Production default: the gate is `None` (closed at every height).
+        let params = ChainParams::default();
+        assert_eq!(
+            params.compute_pool_enabled_from_height, None,
+            "production default must keep the compute-pool gate dormant"
+        );
+        let executor = BlockExecutor::new(state.clone(), db.clone(), params);
+
+        // Apply a block through the REAL block-application path.
+        let proposer = KeyPair::generate();
+        let blk = compute_pool_test_block(1, &proposer);
+        executor.execute_block(&blk, Hash::ZERO, &[]).unwrap();
+
+        // The apply seam touched nothing: both C1 column families are empty.
+        let store = ComputePoolStore::new(&db);
+        assert!(
+            store.load_state_map().unwrap().is_empty(),
+            "dormant gate must not write any C1 state rows during block-apply"
+        );
+        assert!(
+            !store.has_journal(1).unwrap(),
+            "dormant gate must not write any C1 revert journal during block-apply"
+        );
+
+        // The unified reorg-revert path is a clean no-op under the dormant gate
+        // (no account/contract/C1 diff at this height).
+        state.revert_block_state_diffs(1).unwrap();
+        assert!(
+            store.load_state_map().unwrap().is_empty(),
+            "dormant reorg-revert must touch nothing"
+        );
+    }
+
+    /// With the gate test-enabled (test-local `ChainParams`, the same idiom other
+    /// executor gate tests use — NOT a committed genesis flip), the full
+    /// apply→persist→reorg-revert lifecycle runs end-to-end through the gated
+    /// seams. The apply seam is driven with a real operation source standing in
+    /// for #125's not-yet-existing `ComputePool` dispatch.
+    #[test]
+    fn compute_pool_execution_path_full_lifecycle_when_enabled() {
+        use crate::compute_pool::{
+            ComputePoolModel, ExposureInputs, JobId, UnitId, UnitSizing, UnitState, WorkUnit,
+        };
+        use crate::compute_pool_store::ComputePoolStore;
+
+        let (state, db, _dir) = setup();
+        // Test-local gate at height 0; `ChainParams::default()` stays `None`.
+        let params = ChainParams {
+            compute_pool_enabled_from_height: Some(0),
+            ..ChainParams::default()
+        };
+        let executor = BlockExecutor::new(state.clone(), db.clone(), params);
+
+        let job = JobId::from_bytes([1; 32]);
+        let unit = UnitId::from_bytes([2; 32]);
+        let height = 5u64;
+
+        // APPLY: drive a real compute-pool transition through the gated apply
+        // seam (the operation source #125's dispatch will eventually supply).
+        executor
+            .apply_compute_pool_ops(height, |m: &mut ComputePoolModel| {
+                m.create_job(
+                    job,
+                    Address::new([9; 20]),
+                    1,
+                    vec![WorkUnit {
+                        job_id: job,
+                        unit_id: unit,
+                        predecessors: vec![],
+                        required_inputs: vec![],
+                        generation: 0,
+                        state: UnitState::Blocked,
+                    }],
+                    &[UnitSizing { slots: 0 }],
+                    1,
+                    0,
+                    1_000,
+                    ExposureInputs {
+                        q: 100,
+                        reprovision_allowance: 10,
+                        job_max_retention_files: 0,
+                        max_reassignments_per_file: 2,
+                        reassign_reimb: 5,
+                    },
+                    1_000_000,
+                )
+                .map(|_| ())
+            })
+            .unwrap();
+
+        // PERSIST: the transition landed as C1 rows + a per-height revert journal.
+        let store = ComputePoolStore::new(&db);
+        assert!(
+            store.get_job(&job).unwrap().is_some(),
+            "job persisted through the apply seam"
+        );
+        assert!(!store.load_state_map().unwrap().is_empty());
+        assert!(
+            store.has_journal(height).unwrap(),
+            "per-height revert journal written by the apply seam"
+        );
+
+        // REORG-REVERT: the unified atomic reorg path (account+contract+C1 in one
+        // batch) rolls this block's C1 state back.
+        state.revert_block_state_diffs(height).unwrap();
+        assert!(
+            store.get_job(&job).unwrap().is_none(),
+            "job reverted on reorg"
+        );
+        assert!(
+            store.load_state_map().unwrap().is_empty(),
+            "all C1 rows reverted on reorg"
+        );
+        assert!(
+            !store.has_journal(height).unwrap(),
+            "revert journal consumed on reorg"
+        );
+
+        // Idempotent: reverting an already-consumed height is a clean no-op.
+        state.revert_block_state_diffs(height).unwrap();
+    }
+
+    /// Helper: apply a one-job C1 transition at `height` through the gated apply
+    /// seam (stand-in for #125's dispatch operation source).
+    fn apply_one_job(executor: &BlockExecutor, height: u64, seed: u8) {
+        use crate::compute_pool::{
+            ComputePoolModel, ExposureInputs, JobId, UnitId, UnitSizing, UnitState, WorkUnit,
+        };
+        let job = JobId::from_bytes([seed; 32]);
+        let unit = UnitId::from_bytes([seed.wrapping_add(1); 32]);
+        executor
+            .apply_compute_pool_ops(height, move |m: &mut ComputePoolModel| {
+                m.create_job(
+                    job,
+                    Address::new([9; 20]),
+                    1,
+                    vec![WorkUnit {
+                        job_id: job,
+                        unit_id: unit,
+                        predecessors: vec![],
+                        required_inputs: vec![],
+                        generation: 0,
+                        state: UnitState::Blocked,
+                    }],
+                    &[UnitSizing { slots: 0 }],
+                    1,
+                    0,
+                    1_000,
+                    ExposureInputs {
+                        q: 100,
+                        reprovision_allowance: 10,
+                        job_max_retention_files: 0,
+                        max_reassignments_per_file: 2,
+                        reassign_reimb: 5,
+                    },
+                    1_000_000,
+                )
+                .map(|_| ())
+            })
+            .unwrap();
+    }
+
+    /// DORMANT IDENTITY (state commitment): under the production default gate the
+    /// state root is INDEPENDENT of C1 state — injecting arbitrary C1 rows must not
+    /// change the computed block root. This proves compute-pool state cannot affect
+    /// consensus while dormant, i.e. the commitment fold is a strict no-op under
+    /// `None` and dormant roots are byte-for-byte unchanged by this change.
+    #[test]
+    fn compute_pool_commitment_is_noop_under_dormant_gate() {
+        let (state, db, _dir) = setup();
+        let executor = BlockExecutor::new(state.clone(), db.clone(), ChainParams::default());
+
+        let proposer = KeyPair::generate();
+        let blk = compute_pool_test_block(1, &proposer);
+        let empty_diff = ContractStateDiff::new();
+
+        let root_before = executor
+            .compute_block_state_root(&blk, &[], &empty_diff)
+            .unwrap();
+
+        // Inject arbitrary bytes into the C1 state CF (domain-prefixed junk).
+        db.put(
+            sumchain_storage::cf::COMPUTE_POOL_STATE,
+            &[0x01, 9, 9, 9],
+            b"junk-c1-state",
+        )
+        .unwrap();
+
+        let root_after = executor
+            .compute_block_state_root(&blk, &[], &empty_diff)
+            .unwrap();
+
+        assert_eq!(
+            root_before, root_after,
+            "under the dormant None gate, C1 state must NOT be folded into the root"
+        );
+    }
+
+    /// STATE COMMITMENT (enabled): once the gate is open, C1 state IS bound into
+    /// the block state root — the same injected rows that were invisible above now
+    /// change the root, so validators cannot diverge on compute-pool state
+    /// undetected. Complements the dormant-identity test.
+    #[test]
+    fn compute_pool_commitment_binds_state_when_gate_open() {
+        let (state, db, _dir) = setup();
+        let params = ChainParams {
+            compute_pool_enabled_from_height: Some(0),
+            ..ChainParams::default()
+        };
+        let executor = BlockExecutor::new(state.clone(), db.clone(), params);
+
+        let proposer = KeyPair::generate();
+        let blk = compute_pool_test_block(1, &proposer);
+        let empty_diff = ContractStateDiff::new();
+
+        let root_empty = executor
+            .compute_block_state_root(&blk, &[], &empty_diff)
+            .unwrap();
+
+        db.put(
+            sumchain_storage::cf::COMPUTE_POOL_STATE,
+            &[0x01, 9, 9, 9],
+            b"junk-c1-state",
+        )
+        .unwrap();
+
+        let root_with_c1 = executor
+            .compute_block_state_root(&blk, &[], &empty_diff)
+            .unwrap();
+
+        assert_ne!(
+            root_empty, root_with_c1,
+            "with the gate open, C1 state must be committed into the block root"
+        );
+    }
+
+    /// STATE-COMMITMENT differential golden (issue #163): under the dormant gate
+    /// the COMPLETE block-root preimage is byte-for-byte the PRE-#163 algorithm
+    /// (C1 fold contributes nothing), and under an open gate it is exactly that
+    /// preimage with the 32-byte C1 digest inserted at the DOCUMENTED position —
+    /// after the supply fold, before the previous-state-root mix.
+    #[test]
+    fn compute_pool_root_none_identical_open_appends_digest_at_documented_offset() {
+        use crate::compute_pool_store::ComputePoolStore;
+
+        let (state, db, _dir) = setup();
+        // Both executors share this state/db. Contracts gate CLOSED (default),
+        // supply uncorrected (fresh db ⇒ None), empty block/receipts, prev state
+        // root == ZERO ⇒ the ONLY preimage difference is the C1 fold.
+        let ex_none = BlockExecutor::new(state.clone(), db.clone(), ChainParams::default());
+        let ex_open = BlockExecutor::new(
+            state.clone(),
+            db.clone(),
+            ChainParams {
+                compute_pool_enabled_from_height: Some(0),
+                ..ChainParams::default()
+            },
+        );
+
+        let proposer = KeyPair::generate();
+        let blk = compute_pool_test_block(1, &proposer);
+        let empty_contract = ContractStateDiff::new();
+
+        // A known C1 row so the committed digest is non-trivial.
+        db.put(
+            sumchain_storage::cf::COMPUTE_POOL_STATE,
+            &[0x01, 0x02, 0x03],
+            &[0xAA, 0xBB],
+        )
+        .unwrap();
+        let cp_digest = ComputePoolStore::new(&db).state_digest().unwrap();
+
+        // Reconstruct the PRE-#163 preimage for these controlled inputs:
+        // height ‖ parent_hash ‖ timestamp ‖ tx_root ‖ prev_state_root.
+        let mut pre163 = Vec::new();
+        pre163.extend_from_slice(&blk.height().to_be_bytes());
+        pre163.extend_from_slice(blk.header.parent_hash.as_bytes());
+        pre163.extend_from_slice(&blk.header.timestamp.to_be_bytes());
+        pre163.extend_from_slice(blk.header.tx_root.as_bytes());
+        let prefix_len = pre163.len(); // everything before the prev-root mix
+        pre163.extend_from_slice(state.state_root().as_bytes());
+
+        // Gate None: byte-for-byte the pre-#163 preimage hash (C1 fold inert),
+        // even though a C1 row is present in the DB.
+        assert_eq!(
+            ex_none
+                .compute_block_state_root(&blk, &[], &empty_contract)
+                .unwrap(),
+            Hash::hash(&pre163),
+            "under None gate the root must equal the pre-#163 preimage hash"
+        );
+
+        // Gate open: the same preimage with the 32-byte C1 digest inserted at the
+        // documented offset (after supply fold, before prev-root mix).
+        let mut open_preimage = pre163[..prefix_len].to_vec();
+        open_preimage.extend_from_slice(cp_digest.as_bytes());
+        open_preimage.extend_from_slice(state.state_root().as_bytes());
+        assert_eq!(
+            open_preimage.len(),
+            pre163.len() + 32,
+            "open-gate preimage must be the closed preimage plus exactly 32 bytes"
+        );
+        assert_eq!(
+            ex_open
+                .compute_block_state_root(&blk, &[], &empty_contract)
+                .unwrap(),
+            Hash::hash(&open_preimage),
+            "open-gate root must be the closed preimage + the 32-byte C1 digest at the documented offset"
+        );
+    }
+
+    /// STATE-COMMITMENT differential (issue #127, Item 2): under the dormant BEACON
+    /// gate the block-root preimage is byte-for-byte the pre-beacon algorithm (the
+    /// beacon fold contributes nothing even with a beacon row present), and under an
+    /// open beacon gate it is exactly that preimage with the 32-byte beacon digest
+    /// inserted at the documented offset (after the supply/C1 folds, before the
+    /// previous-state-root mix).
+    #[test]
+    fn beacon_root_none_identical_open_appends_digest_at_documented_offset() {
+        use crate::beacon_store::BeaconStore;
+
+        let (state, db, _dir) = setup();
+        // Contracts + supply + compute-pool all inert (default/None, fresh db), empty
+        // block/receipts, prev state root == ZERO ⇒ the ONLY preimage difference is
+        // the beacon fold.
+        let ex_none = BlockExecutor::new(state.clone(), db.clone(), ChainParams::default());
+        let ex_open = BlockExecutor::new(
+            state.clone(),
+            db.clone(),
+            ChainParams {
+                beacon_enabled_from_height: Some(0),
+                ..ChainParams::default()
+            },
+        );
+
+        let proposer = KeyPair::generate();
+        let blk = compute_pool_test_block(1, &proposer);
+        let empty_contract = ContractStateDiff::new();
+
+        // A known beacon row so the committed digest is non-trivial.
+        db.put(
+            sumchain_storage::cf::BEACON_STATE,
+            &[0x01, 0x00, 0x00, 0x00, 0x00],
+            &[0xAB, 0xCD],
+        )
+        .unwrap();
+        let beacon_digest = BeaconStore::new(&db).state_digest().unwrap();
+
+        // Pre-beacon preimage: height ‖ parent_hash ‖ timestamp ‖ tx_root ‖ prev_root.
+        let mut pre = Vec::new();
+        pre.extend_from_slice(&blk.height().to_be_bytes());
+        pre.extend_from_slice(blk.header.parent_hash.as_bytes());
+        pre.extend_from_slice(&blk.header.timestamp.to_be_bytes());
+        pre.extend_from_slice(blk.header.tx_root.as_bytes());
+        let prefix_len = pre.len();
+        pre.extend_from_slice(state.state_root().as_bytes());
+
+        // Gate None: byte-for-byte the pre-beacon preimage hash (fold inert), even
+        // though a beacon row is present in the DB.
+        assert_eq!(
+            ex_none
+                .compute_block_state_root(&blk, &[], &empty_contract)
+                .unwrap(),
+            Hash::hash(&pre),
+            "under None gate the root must equal the pre-beacon preimage hash"
+        );
+
+        // Gate open: same preimage with the 32-byte beacon digest at the documented
+        // offset (after the supply/C1 folds, before the prev-root mix).
+        let mut open_preimage = pre[..prefix_len].to_vec();
+        open_preimage.extend_from_slice(beacon_digest.as_bytes());
+        open_preimage.extend_from_slice(state.state_root().as_bytes());
+        assert_eq!(open_preimage.len(), pre.len() + 32);
+        assert_eq!(
+            ex_open
+                .compute_block_state_root(&blk, &[], &empty_contract)
+                .unwrap(),
+            Hash::hash(&open_preimage),
+            "open-gate root must be the closed preimage + the 32-byte beacon digest at the documented offset"
+        );
+    }
+
+    // ── Per-tx receipt path (issue #127): valid op → SUCCESS + materialize/persist ──
+
+    /// Build a signed `BeaconSetup` registration tx from `signer` (chain_id 1, epoch
+    /// 0) carrying a REAL `EK_j` + PoP. `bad_pop` swaps in a wrong PoP to force a
+    /// runtime crypto failure.
+    fn beacon_reg_tx(
+        signer: &KeyPair,
+        secret_seed: u8,
+        bad_pop: bool,
+        fee: u128,
+    ) -> SignedTransaction {
+        use sumchain_beacon_crypto::SecretScalar;
+        use sumchain_primitives::beacon_wire::{BeaconOperation, RegisterBeaconKeyV1};
+        use sumchain_primitives::{BeaconTxData, TransactionV2, TxPayload};
+
+        let mut sk_bytes = [0u8; 32];
+        sk_bytes[0] = secret_seed;
+        let sk = SecretScalar::from_bytes_le(&sk_bytes).unwrap();
+        let pop = if bad_pop {
+            let mut other = [0u8; 32];
+            other[0] = secret_seed.wrapping_add(1);
+            SecretScalar::from_bytes_le(&other).unwrap().pop_prove()
+        } else {
+            sk.pop_prove()
+        };
+        let reg = RegisterBeaconKeyV1 {
+            chain_id: 1,
+            epoch: 0,
+            ek_j: sk.public_g1().to_compressed(),
+            pop: pop.to_compressed(),
+        };
+        let data = BeaconTxData::from_operation(&BeaconOperation::RegisterBeaconKey(reg)).unwrap();
+        let tx = TransactionV2 {
+            chain_id: 1,
+            from: signer.address(),
+            fee,
+            nonce: 0,
+            payload: TxPayload::BeaconSetup(data),
+        };
+        let sig = sign(tx.signing_hash().as_bytes(), signer.private_key());
+        SignedTransaction::new_v2(tx, *sig.as_bytes(), *signer.public_key().as_bytes())
+    }
+
+    fn beacon_open_params() -> ChainParams {
+        ChainParams {
+            beacon_enabled_from_height: Some(0),
+            beacon_params: Some(sumchain_genesis::BeaconParamsConfig {
+                f: 1,
+                c: 1,
+                t: 2,
+                q_dkg: 3,
+                n: 5,
+            }),
+            // Schedule (strict phase separation): epoch 0 boundary at height 1, 1000
+            // blocks/epoch. KeyRegistration window is positions [0,100] = heights
+            // [1,101], so the boundary block (height 1, `height == epoch_start`) is also
+            // a key-registration block: it snapshots MEMBERSHIP and a `RegisterBeaconKey`
+            // op is in its window. Heights 1..=50 (all used by the tests) are in the key
+            // window.
+            beacon_schedule: Some(sumchain_primitives::beacon_schedule::BeaconSchedule {
+                start_height: 1,
+                epoch_length: 1000,
+                key_cutoff_offset: 100,
+                deal_start_offset: 200,
+                deal_cutoff_offset: 300,
+                complaint_start_offset: 400,
+                complaint_deadline_offset: 500,
+            }),
+            ..ChainParams::with_v2_enabled()
+        }
+    }
+
+    /// 5 validators (the epoch snapshot); index 0 signs the beacon tx.
+    fn beacon_validators() -> (Vec<KeyPair>, Vec<[u8; 32]>) {
+        let vs: Vec<KeyPair> = (0..5).map(|_| KeyPair::generate()).collect();
+        let pubs: Vec<[u8; 32]> = vs.iter().map(|k| *k.public_key().as_bytes()).collect();
+        (vs, pubs)
+    }
+
+    fn fund(state: &StateManager, addr: &Address, balance: u128) {
+        state
+            .put_account(
+                addr,
+                &sumchain_storage::schema::AccountState { balance, nonce: 0 },
+            )
+            .unwrap();
+    }
+
+    fn beacon_block_with(height: u64, proposer: &[u8; 32], txs: Vec<SignedTransaction>) -> Block {
+        let header = BlockHeader::new(Hash::ZERO, height, 1000, Hash::ZERO, Hash::ZERO, *proposer);
+        Block::new(header, txs)
+    }
+
+    #[test]
+    fn beacon_gate_open_valid_tx_succeeds_and_persists() {
+        let (state, db, _dir) = setup();
+        let params = beacon_open_params();
+        let fee = params.min_fee;
+        let executor = BlockExecutor::new(state.clone(), db.clone(), params);
+        let (vs, pubs) = beacon_validators();
+        fund(&state, &vs[0].address(), fee + 1000);
+
+        let tx = beacon_reg_tx(&vs[0], 7, false, fee);
+        let blk = beacon_block_with(1, vs[0].public_key().as_bytes(), vec![tx]);
+        let (receipts, _root, _sd, _cd) = executor.execute_block(&blk, Hash::ZERO, &pubs).unwrap();
+
+        assert_eq!(receipts.len(), 1);
+        assert!(
+            receipts[0].is_success(),
+            "VALID beacon tx must SUCCEED (got {:?})",
+            receipts[0].status
+        );
+        // Runtime state materialized + persisted (exactly one journal at height 1).
+        let store = crate::beacon_store::BeaconStore::new(&db);
+        assert!(
+            store
+                .load_state_map()
+                .unwrap()
+                .contains_key(&crate::beacon_store::key_row_key(0, 0)),
+            "registrant key persisted at membership index 0"
+        );
+        assert!(
+            store.has_journal(1).unwrap(),
+            "one beacon journal at the block height"
+        );
+    }
+
+    #[test]
+    fn beacon_gate_open_invalid_tx_fails_closed_no_state() {
+        let (state, db, _dir) = setup();
+        let params = beacon_open_params();
+        let fee = params.min_fee;
+        let executor = BlockExecutor::new(state.clone(), db.clone(), params);
+        let (vs, pubs) = beacon_validators();
+        fund(&state, &vs[0].address(), fee + 1000);
+
+        // A registration with a WRONG PoP → runtime PopInvalid → FAIL CLOSED.
+        let tx = beacon_reg_tx(&vs[0], 7, true, fee);
+        let blk = beacon_block_with(1, vs[0].public_key().as_bytes(), vec![tx]);
+        let (receipts, _root, _sd, _cd) = executor.execute_block(&blk, Hash::ZERO, &pubs).unwrap();
+
+        assert!(!receipts[0].is_success(), "invalid beacon tx fails closed");
+        // The invalid op wrote NO DKG state (no key row). Height 1 IS the epoch boundary,
+        // so the MEMBERSHIP snapshot is persisted regardless of the failed op
+        // (Correction 1) — but nothing the op would have produced.
+        let store = crate::beacon_store::BeaconStore::new(&db);
+        let rows = store.load_state_map().unwrap();
+        assert!(
+            !rows.contains_key(&crate::beacon_store::key_row_key(0, 0)),
+            "invalid op produced no key row"
+        );
+        assert_eq!(
+            store.get_membership(0).unwrap(),
+            Some(pubs.clone()),
+            "boundary snapshot persisted independent of the failed op"
+        );
+    }
+
+    #[test]
+    fn beacon_gate_none_tx_fails_closed_no_state() {
+        let (state, db, _dir) = setup();
+        // Gate CLOSED (default) but V2 enabled so the beacon payload still dispatches.
+        let params = ChainParams::with_v2_enabled();
+        let fee = params.min_fee;
+        let executor = BlockExecutor::new(state.clone(), db.clone(), params);
+        let (vs, pubs) = beacon_validators();
+        fund(&state, &vs[0].address(), fee + 1000);
+
+        // Even a well-formed, valid-crypto op is rejected (dormant) with the generic
+        // failure receipt and writes NO beacon state/journal — byte/state-identical to
+        // the pre-per-tx-wiring fail-closed seam.
+        let tx = beacon_reg_tx(&vs[0], 7, false, fee);
+        let blk = beacon_block_with(1, vs[0].public_key().as_bytes(), vec![tx]);
+        let (receipts, _root, _sd, _cd) = executor.execute_block(&blk, Hash::ZERO, &pubs).unwrap();
+
+        assert!(
+            !receipts[0].is_success(),
+            "dormant gate: beacon tx fails closed"
+        );
+        let store = crate::beacon_store::BeaconStore::new(&db);
+        assert!(
+            store.load_state_map().unwrap().is_empty(),
+            "None gate: no beacon state"
+        );
+        assert!(
+            !store.has_journal(1).unwrap(),
+            "None gate: no beacon journal"
+        );
+    }
+
+    #[test]
+    fn beacon_mixed_block_valid_and_invalid() {
+        let (state, db, _dir) = setup();
+        let params = beacon_open_params();
+        let fee = params.min_fee;
+        let executor = BlockExecutor::new(state.clone(), db.clone(), params);
+        let (vs, pubs) = beacon_validators();
+        fund(&state, &vs[0].address(), fee + 1000);
+        fund(&state, &vs[1].address(), fee + 1000);
+
+        // Signer index 0: valid registration. Signer index 1: bad PoP → fail closed.
+        let good = beacon_reg_tx(&vs[0], 7, false, fee);
+        let bad = beacon_reg_tx(&vs[1], 9, true, fee);
+        let blk = beacon_block_with(1, vs[0].public_key().as_bytes(), vec![good, bad]);
+        let (receipts, _root, _sd, _cd) = executor.execute_block(&blk, Hash::ZERO, &pubs).unwrap();
+
+        assert!(receipts[0].is_success(), "valid op succeeds");
+        assert!(!receipts[1].is_success(), "invalid op fails closed");
+        // Only the valid op's state is materialized (index 0 keyed, index 1 not).
+        let store = crate::beacon_store::BeaconStore::new(&db);
+        let rows = store.load_state_map().unwrap();
+        assert!(rows.contains_key(&crate::beacon_store::key_row_key(0, 0)));
+        assert!(!rows.contains_key(&crate::beacon_store::key_row_key(0, 1)));
+    }
+
+    #[test]
+    fn beacon_block_reorg_reverts_beacon_state_atomically() {
+        let (state, db, _dir) = setup();
+        let params = beacon_open_params();
+        let fee = params.min_fee;
+        let executor = BlockExecutor::new(state.clone(), db.clone(), params);
+        let (vs, pubs) = beacon_validators();
+        fund(&state, &vs[0].address(), fee + 1000);
+
+        let tx = beacon_reg_tx(&vs[0], 7, false, fee);
+        let blk = beacon_block_with(1, vs[0].public_key().as_bytes(), vec![tx]);
+        executor.execute_block(&blk, Hash::ZERO, &pubs).unwrap();
+        let store = crate::beacon_store::BeaconStore::new(&db);
+        assert!(
+            !store.load_state_map().unwrap().is_empty(),
+            "beacon state persisted"
+        );
+        assert!(store.has_journal(1).unwrap());
+
+        // Reorg: revert height 1 → beacon rows (key + boundary membership) + journal all
+        // roll back atomically.
+        state.revert_block_state_diffs(1).unwrap();
+        assert!(
+            store.load_state_map().unwrap().is_empty(),
+            "beacon state reverted"
+        );
+        assert!(!store.has_journal(1).unwrap(), "beacon journal consumed");
+    }
+
+    /// RESTART between blocks reproduces the same beacon state as uninterrupted
+    /// execution: a fresh executor rehydrates the persisted state and its next block
+    /// yields the identical beacon state digest.
+    #[test]
+    fn beacon_restart_between_blocks_matches_uninterrupted() {
+        // Share ONE fixed validator set + tx set across both runs so the only
+        // difference is whether a restart occurs between the two blocks.
+        let (vs, pubs) = beacon_validators();
+        let run = |restart: bool| -> sumchain_primitives::Hash {
+            let (state, db, _dir) = setup();
+            let fee = beacon_open_params().min_fee;
+            fund(&state, &vs[0].address(), fee + 1000);
+            fund(&state, &vs[1].address(), fee + 1000);
+            let ex = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
+            // Block 1: reg from vs[0].
+            let b1 = beacon_block_with(
+                1,
+                vs[0].public_key().as_bytes(),
+                vec![beacon_reg_tx(&vs[0], 7, false, fee)],
+            );
+            ex.execute_block(&b1, Hash::ZERO, &pubs).unwrap();
+            // Optionally simulate a restart with a brand-new executor over the same db.
+            let ex2 = if restart {
+                BlockExecutor::new(state.clone(), db.clone(), beacon_open_params())
+            } else {
+                ex
+            };
+            // Block 2: reg from vs[1] (must rehydrate vs[0]'s key first).
+            let b2 = beacon_block_with(
+                2,
+                vs[1].public_key().as_bytes(),
+                vec![beacon_reg_tx(&vs[1], 8, false, fee)],
+            );
+            ex2.execute_block(&b2, Hash::ZERO, &pubs).unwrap();
+            crate::beacon_store::BeaconStore::new(&db)
+                .state_digest()
+                .unwrap()
+        };
+        assert_eq!(
+            run(true),
+            run(false),
+            "restart-between-blocks == uninterrupted"
+        );
+    }
+
+    /// REORG then REPLAY reproduces identical receipts, beacon rows, and state digest.
+    #[test]
+    fn beacon_reorg_replay_reproduces_state() {
+        let (state, db, _dir) = setup();
+        let (vs, pubs) = beacon_validators();
+        let fee = beacon_open_params().min_fee;
+        fund(&state, &vs[0].address(), fee + 1000);
+        let ex = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
+        let blk = beacon_block_with(
+            1,
+            vs[0].public_key().as_bytes(),
+            vec![beacon_reg_tx(&vs[0], 7, false, fee)],
+        );
+
+        let (r1, _root1, _, _) = ex.execute_block(&blk, Hash::ZERO, &pubs).unwrap();
+        let digest1 = crate::beacon_store::BeaconStore::new(&db)
+            .state_digest()
+            .unwrap();
+        assert!(r1[0].is_success());
+
+        state.revert_block_state_diffs(1).unwrap();
+        // A fresh executor replays the identical block.
+        let ex2 = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
+        let (r2, _root2, _, _) = ex2.execute_block(&blk, Hash::ZERO, &pubs).unwrap();
+        let digest2 = crate::beacon_store::BeaconStore::new(&db)
+            .state_digest()
+            .unwrap();
+        assert_eq!(r1[0].is_success(), r2[0].is_success());
+        assert_eq!(
+            digest1, digest2,
+            "reorg-then-replay reproduces identical beacon state"
+        );
+    }
+
+    /// A FAILED op does not erase an earlier VALID op's state, and does not mutate its
+    /// own state (all-or-none per op; earlier accepted state persists).
+    #[test]
+    fn beacon_failed_op_does_not_erase_earlier_valid_op() {
+        let (state, db, _dir) = setup();
+        let (vs, pubs) = beacon_validators();
+        let fee = beacon_open_params().min_fee;
+        fund(&state, &vs[0].address(), fee + 1000);
+        fund(&state, &vs[1].address(), fee + 1000);
+        let ex = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
+        // valid reg (vs[0]) THEN invalid reg (vs[1], bad PoP).
+        let blk = beacon_block_with(
+            1,
+            vs[0].public_key().as_bytes(),
+            vec![
+                beacon_reg_tx(&vs[0], 7, false, fee),
+                beacon_reg_tx(&vs[1], 9, true, fee),
+            ],
+        );
+        let (r, _root, _, _) = ex.execute_block(&blk, Hash::ZERO, &pubs).unwrap();
+        assert!(r[0].is_success(), "valid op1 succeeds");
+        assert!(!r[1].is_success(), "invalid op2 fails closed");
+        let store = crate::beacon_store::BeaconStore::new(&db);
+        let rows = store.load_state_map().unwrap();
+        assert!(
+            rows.contains_key(&crate::beacon_store::key_row_key(0, 0)),
+            "op1's key survives op2's failure"
+        );
+        assert!(
+            !rows.contains_key(&crate::beacon_store::key_row_key(0, 1)),
+            "op2 mutated no state"
+        );
+    }
+
+    /// Equivocation EVIDENCE (two conflicting authenticated registrations) survives
+    /// RESTART: the persisted KEY_EQUIV evidence is rehydrated and re-persisted.
+    #[test]
+    fn beacon_equivocation_evidence_survives_restart() {
+        let (state, db, _dir) = setup();
+        let (vs, pubs) = beacon_validators();
+        let fee = beacon_open_params().min_fee;
+        fund(&state, &vs[0].address(), fee + 1000);
+        let ex = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
+        // Block 1: vs[0] registers key A (seed 7) then key B (seed 8) → equivocation.
+        let blk = beacon_block_with(
+            1,
+            vs[0].public_key().as_bytes(),
+            vec![
+                beacon_reg_tx(&vs[0], 7, false, fee),
+                beacon_reg_tx(&vs[0], 8, false, fee),
+            ],
+        );
+        ex.execute_block(&blk, Hash::ZERO, &pubs).unwrap();
+        let has_equiv = |db: &Database| {
+            crate::beacon_store::BeaconStore::new(db)
+                .load_state_map()
+                .unwrap()
+                .keys()
+                .any(|k| k.first() == Some(&0x09)) // KEY_EQUIV domain
+        };
+        assert!(has_equiv(&db), "key-equivocation evidence persisted");
+
+        // Restart: a fresh executor runs a later block; the evidence must survive.
+        let ex2 = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
+        let blk2 = beacon_block_with(
+            2,
+            vs[0].public_key().as_bytes(),
+            vec![beacon_reg_tx(&vs[1], 9, false, fee)],
+        );
+        fund(&state, &vs[1].address(), fee + 1000);
+        ex2.execute_block(&blk2, Hash::ZERO, &pubs).unwrap();
+        assert!(has_equiv(&db), "equivocation evidence survives restart");
+    }
+
+    /// A PERSISTENCE FAILURE aborts the whole block — the block errors and no beacon
+    /// state is committed (all-or-none, like the C1 single-batch guarantee).
+    #[test]
+    fn beacon_persistence_failure_aborts_block() {
+        let (state, db, _dir) = setup();
+        let (vs, pubs) = beacon_validators();
+        let fee = beacon_open_params().min_fee;
+        fund(&state, &vs[0].address(), fee + 1000);
+        // Pre-write a journal at height 1 so `persist_transition`'s duplicate-height
+        // guard makes the block's beacon persist FAIL.
+        db.put(
+            sumchain_storage::cf::BEACON_STATE_DIFFS,
+            &1u64.to_be_bytes(),
+            b"x",
+        )
+        .unwrap();
+        let ex = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
+        let blk = beacon_block_with(
+            1,
+            vs[0].public_key().as_bytes(),
+            vec![beacon_reg_tx(&vs[0], 7, false, fee)],
+        );
+        assert!(
+            ex.execute_block(&blk, Hash::ZERO, &pubs).is_err(),
+            "persist failure aborts the block"
+        );
+        // No beacon KEY row was committed (the atomic batch never ran).
+        let rows = crate::beacon_store::BeaconStore::new(&db)
+            .load_state_map()
+            .unwrap();
+        assert!(
+            !rows.contains_key(&crate::beacon_store::key_row_key(0, 0)),
+            "no state committed on persist failure"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Correction 1 — MEMBERSHIP FREEZES AT THE EPOCH BOUNDARY (not the first op)
+    // -----------------------------------------------------------------------
+
+    /// The boundary block (`height == epoch_start`) snapshots + persists the epoch
+    /// membership INDEPENDENT of any beacon tx — a block with ZERO beacon txs still
+    /// freezes the epoch_start validator set.
+    #[test]
+    fn beacon_membership_snapshots_at_boundary_without_any_op() {
+        let (state, db, _dir) = setup();
+        let (vs, pubs) = beacon_validators();
+        let ex = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
+        let blk = beacon_block_with(1, vs[0].public_key().as_bytes(), vec![]);
+        ex.execute_block(&blk, Hash::ZERO, &pubs).unwrap();
+        assert_eq!(
+            crate::beacon_store::BeaconStore::new(&db)
+                .get_membership(0)
+                .unwrap(),
+            Some(pubs.clone()),
+            "epoch_start membership persisted with no beacon tx in the block"
+        );
+    }
+
+    /// (a) A validator-set change AFTER `epoch_start` does NOT alter that epoch's
+    /// membership: a later same-epoch block LOADS the frozen snapshot (never
+    /// re-samples the active set), so an op from a member of the epoch_start set still
+    /// succeeds even after that member is churned out of the active set.
+    #[test]
+    fn beacon_membership_frozen_against_post_boundary_validator_change() {
+        let (state, db, _dir) = setup();
+        let fee = beacon_open_params().min_fee;
+        let (vs, pubs) = beacon_validators();
+        fund(&state, &vs[0].address(), fee + 1000);
+        let ex = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
+        // Boundary (height 1): snapshot the active set for epoch 0.
+        ex.execute_block(
+            &beacon_block_with(1, vs[0].public_key().as_bytes(), vec![]),
+            Hash::ZERO,
+            &pubs,
+        )
+        .unwrap();
+        // Height 2 (same epoch, key window) with a DIFFERENT active set that DROPS vs[0].
+        let churned: Vec<[u8; 32]> =
+            vec![[0x51; 32], [0x52; 32], [0x53; 32], [0x54; 32], [0x55; 32]];
+        let reg = beacon_reg_tx(&vs[0], 7, false, fee);
+        let (r, _, _, _) = ex
+            .execute_block(
+                &beacon_block_with(2, vs[1].public_key().as_bytes(), vec![reg]),
+                Hash::ZERO,
+                &churned,
+            )
+            .unwrap();
+        assert!(
+            r[0].is_success(),
+            "a member of the FROZEN epoch_start set registers despite active-set churn"
+        );
+        assert_eq!(
+            crate::beacon_store::BeaconStore::new(&db)
+                .get_membership(0)
+                .unwrap(),
+            Some(pubs.clone()),
+            "epoch membership unchanged by post-boundary validator churn"
+        );
+    }
+
+    /// (b) An epoch whose FIRST beacon op arrives LATE still gets the epoch_start
+    /// membership: the boundary block (no op) freezes the set; a much later same-epoch
+    /// op — under a different active set — keys against the epoch_start snapshot.
+    #[test]
+    fn beacon_late_first_op_uses_epoch_start_membership() {
+        let (state, db, _dir) = setup();
+        let fee = beacon_open_params().min_fee;
+        let (vs, pubs) = beacon_validators();
+        fund(&state, &vs[0].address(), fee + 1000);
+        let ex = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
+        // Boundary block with NO beacon op.
+        ex.execute_block(
+            &beacon_block_with(1, vs[0].public_key().as_bytes(), vec![]),
+            Hash::ZERO,
+            &pubs,
+        )
+        .unwrap();
+        // The FIRST op arrives at height 50 (still epoch 0's key window) under a churned set.
+        let churned: Vec<[u8; 32]> =
+            vec![[0x61; 32], [0x62; 32], [0x63; 32], [0x64; 32], [0x65; 32]];
+        let reg = beacon_reg_tx(&vs[0], 7, false, fee);
+        let (r, _, _, _) = ex
+            .execute_block(
+                &beacon_block_with(50, vs[0].public_key().as_bytes(), vec![reg]),
+                Hash::ZERO,
+                &churned,
+            )
+            .unwrap();
+        assert!(
+            r[0].is_success(),
+            "late first op keyed against the epoch_start membership"
+        );
+        let store = crate::beacon_store::BeaconStore::new(&db);
+        assert!(
+            store
+                .load_state_map()
+                .unwrap()
+                .contains_key(&crate::beacon_store::key_row_key(0, 0)),
+            "late op keyed at membership index 0 from the epoch_start snapshot"
+        );
+        assert_eq!(store.get_membership(0).unwrap(), Some(pubs.clone()));
+    }
+
+    /// (c) RESTART and REORG across the boundary reproduce the IDENTICAL snapshot.
+    #[test]
+    fn beacon_boundary_snapshot_survives_restart_and_reorg() {
+        let (vs, pubs) = beacon_validators();
+
+        // RESTART across the boundary: a fresh executor over the same db keeps the
+        // snapshot, and a later same-epoch block loads (does not re-sample) it.
+        {
+            let (state, db, _dir) = setup();
+            let fee = beacon_open_params().min_fee;
+            fund(&state, &vs[0].address(), fee + 1000);
+            let ex = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
+            ex.execute_block(
+                &beacon_block_with(
+                    1,
+                    vs[0].public_key().as_bytes(),
+                    vec![beacon_reg_tx(&vs[0], 7, false, fee)],
+                ),
+                Hash::ZERO,
+                &pubs,
+            )
+            .unwrap();
+            let store = crate::beacon_store::BeaconStore::new(&db);
+            let snap = store.get_membership(0).unwrap();
+            assert_eq!(snap, Some(pubs.clone()));
+            let ex2 = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
+            let churn: Vec<[u8; 32]> = vec![[9u8; 32]; 5];
+            ex2.execute_block(
+                &beacon_block_with(2, vs[0].public_key().as_bytes(), vec![]),
+                Hash::ZERO,
+                &churn,
+            )
+            .unwrap();
+            assert_eq!(
+                store.get_membership(0).unwrap(),
+                snap,
+                "restart across the boundary reproduces the identical snapshot"
+            );
+        }
+
+        // REORG across the boundary: revert the boundary block, then replay it with the
+        // SAME active set → identical snapshot.
+        {
+            let (state, db, _dir) = setup();
+            let fee = beacon_open_params().min_fee;
+            fund(&state, &vs[0].address(), fee + 1000);
+            let ex = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
+            ex.execute_block(
+                &beacon_block_with(
+                    1,
+                    vs[0].public_key().as_bytes(),
+                    vec![beacon_reg_tx(&vs[0], 7, false, fee)],
+                ),
+                Hash::ZERO,
+                &pubs,
+            )
+            .unwrap();
+            let store = crate::beacon_store::BeaconStore::new(&db);
+            let snap = store.get_membership(0).unwrap();
+            assert_eq!(snap, Some(pubs.clone()));
+            state.revert_block_state_diffs(1).unwrap();
+            assert_eq!(
+                store.get_membership(0).unwrap(),
+                None,
+                "boundary revert removed the snapshot"
+            );
+            let ex2 = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
+            ex2.execute_block(
+                &beacon_block_with(
+                    1,
+                    vs[0].public_key().as_bytes(),
+                    vec![beacon_reg_tx(&vs[0], 7, false, fee)],
+                ),
+                Hash::ZERO,
+                &pubs,
+            )
+            .unwrap();
+            assert_eq!(
+                store.get_membership(0).unwrap(),
+                snap,
+                "reorg replay across the boundary reproduces the identical snapshot"
+            );
+        }
+    }
+
+    /// Correction 2 — STRICT PHASE SEPARATION end-to-end: a `RegisterBeaconKey` op is
+    /// valid ONLY in the KeyRegistration window; in the DEAL window (the block's derived
+    /// phase is `Deal`) the runtime's `check_phase` rejects it → fail closed, no state.
+    #[test]
+    fn beacon_op_outside_its_phase_window_fails_closed() {
+        let (state, db, _dir) = setup();
+        let fee = beacon_open_params().min_fee;
+        let (vs, pubs) = beacon_validators();
+        fund(&state, &vs[0].address(), fee + 1000);
+        let ex = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
+        // Boundary block establishes the epoch-0 membership snapshot.
+        ex.execute_block(
+            &beacon_block_with(1, vs[0].public_key().as_bytes(), vec![]),
+            Hash::ZERO,
+            &pubs,
+        )
+        .unwrap();
+        // Height 250 (position 249) is in the DEAL window; a registration is out of its
+        // KeyRegistration window there and is rejected.
+        let reg = beacon_reg_tx(&vs[0], 7, false, fee);
+        let (r, _, _, _) = ex
+            .execute_block(
+                &beacon_block_with(250, vs[0].public_key().as_bytes(), vec![reg]),
+                Hash::ZERO,
+                &pubs,
+            )
+            .unwrap();
+        assert!(
+            !r[0].is_success(),
+            "registration outside its window fails closed"
+        );
+        assert!(
+            !crate::beacon_store::BeaconStore::new(&db)
+                .load_state_map()
+                .unwrap()
+                .contains_key(&crate::beacon_store::key_row_key(0, 0)),
+            "no key row from an out-of-window registration"
+        );
+    }
+
+    /// ATOMIC REORG REVERT: a reverted block rolls back account AND C1 state in a
+    /// SINGLE `revert_block_state_diffs` call (one write batch), so the two
+    /// families cannot end up partially reverted.
+    #[test]
+    fn compute_pool_reorg_reverts_account_and_c1_in_one_call() {
+        use crate::compute_pool::JobId;
+        use crate::compute_pool_store::ComputePoolStore;
+        use sumchain_storage::schema::AccountState;
+
+        let (state, db, _dir) = setup();
+        let params = ChainParams {
+            compute_pool_enabled_from_height: Some(0),
+            ..ChainParams::default()
+        };
+        let executor = BlockExecutor::new(state.clone(), db.clone(), params);
+
+        let height = 7u64;
+        let acct = Address::new([0x33; 20]);
+
+        // Post-block state: an account mutation (with a saved StateDiff) AND a C1
+        // transition (with its per-height journal), both finalized at `height`.
+        state
+            .put_account(
+                &acct,
+                &AccountState {
+                    balance: 50,
+                    nonce: 1,
+                },
+            )
+            .unwrap();
+        let mut sd = StateDiff::new();
+        sd.add_change(
+            acct,
+            Some(AccountState {
+                balance: 100,
+                nonce: 0,
+            }),
+            AccountState {
+                balance: 50,
+                nonce: 1,
+            },
+        );
+        state.save_state_diff(height, sd).unwrap();
+        apply_one_job(&executor, height, 0x44);
+
+        let store = ComputePoolStore::new(&db);
+        assert!(store
+            .get_job(&JobId::from_bytes([0x44; 32]))
+            .unwrap()
+            .is_some());
+        assert!(store.has_journal(height).unwrap());
+
+        // ONE call reverts BOTH families atomically.
+        state.revert_block_state_diffs(height).unwrap();
+
+        assert_eq!(
+            state.get_balance(&acct).unwrap(),
+            100,
+            "account reverted to pre-block balance"
+        );
+        assert!(
+            store
+                .get_job(&JobId::from_bytes([0x44; 32]))
+                .unwrap()
+                .is_none(),
+            "C1 job reverted in the same call"
+        );
+        assert!(
+            store.load_state_map().unwrap().is_empty(),
+            "all C1 rows reverted"
+        );
+        assert!(!store.has_journal(height).unwrap(), "C1 journal consumed");
+    }
+
+    /// A forced C1 revert failure (a corrupt journal) must abort the UNIFIED
+    /// `revert_block_state_diffs` BEFORE commit, so account (and contract) state
+    /// can never be reverted independently of C1 — all families revert or none.
+    #[test]
+    fn forced_c1_revert_failure_cannot_revert_account_independently() {
+        use crate::compute_pool::JobId;
+        use crate::compute_pool_store::ComputePoolStore;
+        use sumchain_storage::{cf, schema::AccountState};
+
+        let (state, db, _dir) = setup();
+        let params = ChainParams {
+            compute_pool_enabled_from_height: Some(0),
+            ..ChainParams::default()
+        };
+        let executor = BlockExecutor::new(state.clone(), db.clone(), params);
+
+        let height = 7u64;
+        let acct = Address::new([0x33; 20]);
+
+        // Post-block state: an account mutation (with its StateDiff) AND a C1
+        // transition (with its per-height journal), both finalized at `height`.
+        state
+            .put_account(
+                &acct,
+                &AccountState {
+                    balance: 50,
+                    nonce: 1,
+                },
+            )
+            .unwrap();
+        let mut sd = StateDiff::new();
+        sd.add_change(
+            acct,
+            Some(AccountState {
+                balance: 100,
+                nonce: 0,
+            }),
+            AccountState {
+                balance: 50,
+                nonce: 1,
+            },
+        );
+        state.save_state_diff(height, sd).unwrap();
+        apply_one_job(&executor, height, 0x44);
+        let store = ComputePoolStore::new(&db);
+        assert!(store.has_journal(height).unwrap());
+
+        // Force a C1 revert failure: overwrite the journal with undecodable bytes
+        // (too short for the fixint length prefix -> c1_decode errors in
+        // stage_block_revert, before anything is committed).
+        db.put(
+            cf::COMPUTE_POOL_STATE_DIFFS,
+            &height.to_be_bytes(),
+            &[0xFFu8; 4],
+        )
+        .unwrap();
+
+        // The unified revert MUST abort — nothing committed.
+        assert!(
+            state.revert_block_state_diffs(height).is_err(),
+            "corrupt C1 journal aborts the unified revert before commit"
+        );
+
+        // Account is NOT reverted independently; the C1 rows are likewise NOT
+        // reverted, and the corrupt journal is preserved for retry — all-or-none.
+        assert_eq!(
+            state.get_balance(&acct).unwrap(),
+            50,
+            "account NOT reverted while the C1 revert failed (all-or-none)"
+        );
+        assert!(
+            store
+                .get_job(&JobId::from_bytes([0x44; 32]))
+                .unwrap()
+                .is_some(),
+            "C1 rows NOT reverted either (the whole revert aborted)"
+        );
+        assert!(
+            store.has_journal(height).unwrap(),
+            "corrupt C1 journal preserved for retry"
+        );
+    }
+
+    /// Even with the gate test-enabled, the LIVE block-apply seam
+    /// (`execute_block`) still writes nothing, because there is no `ComputePool`
+    /// operation source on the live path yet — that is #125's gate-closed
+    /// dispatch. This pins the flagged #125 dependency: the seam is wired, but
+    /// inert until #125 supplies per-block operations.
+    #[test]
+    fn compute_pool_execute_block_is_noop_without_a_125_operation_source() {
+        use crate::compute_pool_store::ComputePoolStore;
+
+        let (state, db, _dir) = setup();
+        let params = ChainParams {
+            compute_pool_enabled_from_height: Some(0),
+            ..ChainParams::default()
+        };
+        let executor = BlockExecutor::new(state.clone(), db.clone(), params);
+
+        let proposer = KeyPair::generate();
+        let blk = compute_pool_test_block(1, &proposer);
+        executor.execute_block(&blk, Hash::ZERO, &[]).unwrap();
+
+        let store = ComputePoolStore::new(&db);
+        assert!(
+            store.load_state_map().unwrap().is_empty(),
+            "no C1 rows: execute_block has no #125 operation source yet"
+        );
+        assert!(
+            !store.has_journal(1).unwrap(),
+            "no C1 journal: the empty live transition writes nothing"
         );
     }
 }
