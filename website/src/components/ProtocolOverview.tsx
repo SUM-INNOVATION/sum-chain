@@ -64,7 +64,7 @@ const TOPICS: Topic[] = [
     ],
     href: '/compute',
     cta: 'Compute & attestation',
-    productHref: 'https://omninode.suminnovation.xyz',
+    productHref: 'https://omninode.sumchain.io',
     productCta: 'Open OmniNode',
   },
   {

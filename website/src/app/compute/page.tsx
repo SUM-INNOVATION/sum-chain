@@ -126,12 +126,12 @@ export default function ComputePage() {
               This page describes the on-chain attestation protocol. <strong>OmniNode</strong> is the
               application built on it, request verifiable AI inference settled against SUM Chain. See{' '}
               <a
-                href="https://omninode.suminnovation.xyz"
+                href="https://omninode.sumchain.io"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="font-medium text-accent-soft underline underline-offset-2 hover:text-foreground"
               >
-                omninode.suminnovation.xyz ↗
+                omninode.sumchain.io ↗
               </a>
               .
             </Callout>
@@ -141,7 +141,7 @@ export default function ComputePage() {
 
       <SourceLinks
         links={[
-          { label: 'OmniNode · omninode.suminnovation.xyz', href: 'https://omninode.suminnovation.xyz' },
+          { label: 'OmniNode · omninode.sumchain.io', href: 'https://omninode.sumchain.io' },
           { label: 'INFERENCE-ATTESTATION.md', href: 'https://github.com/SUM-INNOVATION/sum-chain/blob/main/docs/subprotocols/INFERENCE-ATTESTATION.md' },
           { label: 'inference-settlement.md', href: 'https://github.com/SUM-INNOVATION/sum-chain/blob/main/docs/subprotocols/inference-settlement.md' },
         ]}
