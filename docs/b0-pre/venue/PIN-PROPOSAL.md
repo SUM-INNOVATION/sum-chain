@@ -7,7 +7,9 @@ inserted here, and nothing in `VENUE.md` / the scripts is changed. Values are pr
 verified against their primary source by `scripts/verify_pins.sh`, and only then submitted
 for owner ratification in a separate step.
 
-Bound to canonical commit `5994bed018fdf38d4913b5b166dd5a662d9cf919`.
+Pins are verified and ratified against the tree of the owner-ratified source commit
+(`RATIFIED_SOURCE_COMMIT`; see RUNBOOK.md §1), not a hard-coded hash — so this proposal
+does not go stale when the venue pipeline is corrected.
 
 ## Why pins, and the ratification rule
 
@@ -24,7 +26,7 @@ verification passes — never automatically.
 |---|-----|-------------------------------|--------------------------------|
 | 1 | `BASE_IMAGE` + `BASE_DIGEST` (per-arch) | the base image's registry, resolved **by digest** | `docker manifest inspect "$BASE_IMAGE@$BASE_DIGEST"` must resolve; the returned manifest's `platform.architecture` must equal the target arch; digest must be a full `sha256:<64hex>` (never a tag) |
 | 2 | `APT_SNAPSHOT` | the distro's immutable snapshot service (e.g. a dated `snapshot.debian.org` / `snapshot.ubuntu.com` URL) | the snapshot URL is reachable, immutable (date-pinned, not a rolling mirror), and produces a byte-identical package index across two fetches |
-| 3 | `RUSTUP_INIT_SHA256` (per-arch) | the official Rust release channel (`static.rust-lang.org/rustup/.../rustup-init`) for **Rust 1.88.0** | download `rustup-init` for the arch, recompute `sha256`, compare to the proposed value |
+| 3 | `rustup_init.<arch>` — per-arch `url` + `sha256` (ratified into `RUSTUP_INIT_SHA256`) | the official Rust release channel (`static.rust-lang.org/rustup/.../rustup-init`) for **Rust 1.88.0** | download the proposed `url` for the arch, recompute `sha256`, compare to the proposed value |
 | 4 | SP1 tool identity — `sp1-verifier 6.3.1` | the pinned SP1 release artifact (its immutable download URL / registry identity) | download the declared `artifact_identity`, recompute the declared `checksum_algorithm` checksum, compare to the declared `checksum_hex` |
 | 5 | RISC Zero tool identities — `risc0-zkvm 3.0.5`, `risc0-groth16 3.0.4` | the pinned RISC Zero release artifacts | same download → recompute → compare as (4), per tool |
 
@@ -38,14 +40,20 @@ Notes:
 
 ## Proposed-value file (operator fills; kept OUT of the repo until ratified)
 
-`verify_pins.sh` reads a proposed-pins file of this shape (example keys, **no values**):
+`verify_pins.sh` reads a proposed-pins file of exactly this shape (this is the single
+authoritative schema — the script is the contract, this document mirrors it). Values are
+shown **empty**; a committed, byte-identical UNRATIFIED example lives at
+`tools/b0-pre-candidates/scripts/tests/fixtures/proposed-pins.documented-shape.json`.
 
 ```json
 {
   "base_image": "",
   "base_digest": { "x86_64": "", "aarch64": "" },
   "apt_snapshot": "",
-  "rustup_init_sha256": { "x86_64": "", "aarch64": "" },
+  "rustup_init": {
+    "x86_64": { "url": "", "sha256": "" },
+    "aarch64": { "url": "", "sha256": "" }
+  },
   "tool_identities": [
     { "name": "sp1-verifier",  "version": "6.3.1", "artifact_identity": "", "checksum_algorithm": "sha256", "checksum_hex": "", "install_entrypoint": "" },
     { "name": "risc0-zkvm",    "version": "3.0.5", "artifact_identity": "", "checksum_algorithm": "sha256", "checksum_hex": "", "install_entrypoint": "" },
@@ -53,6 +61,14 @@ Notes:
   ]
 }
 ```
+
+The exact keys `verify_pins.sh` reads (any absent/empty value fails closed):
+`base_image`; `base_digest.<arch>`; `apt_snapshot`; `rustup_init.<arch>.url` and
+`rustup_init.<arch>.sha256` (per arch — the installer URL to fetch *and* its expected
+`sha256`); and each `tool_identities[i]` with `name`, `version`, `artifact_identity`,
+`checksum_algorithm` (must be `sha256`), `checksum_hex`, `install_entrypoint`. `<arch>`
+is `x86_64` and `aarch64`. The per-arch `rustup_init.<arch>.sha256` is what the owner
+ratifies into the `RUSTUP_INIT_SHA256` build input.
 
 ## Verification (automated)
 
