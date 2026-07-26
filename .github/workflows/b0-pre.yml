@@ -14,6 +14,7 @@ on:
       - "tools/b0-pre-vmat/**"
       - "tools/b0-pre-validator/**"
       - "tools/b0-pre-independent/**"
+      - "tools/b0-pre-candidates/scripts/**"
       - "docs/b0-pre/**"
       - ".github/workflows/b0-pre.yml"
       - "rust-toolchain.toml"
@@ -23,6 +24,7 @@ on:
       - "tools/b0-pre-vmat/**"
       - "tools/b0-pre-validator/**"
       - "tools/b0-pre-independent/**"
+      - "tools/b0-pre-candidates/scripts/**"
       - "docs/b0-pre/**"
       - ".github/workflows/b0-pre.yml"
       - "rust-toolchain.toml"
@@ -71,6 +73,13 @@ jobs:
       # --- Isolation / dependency boundaries ---------------------------------
       - name: Workspace exclusion + no production dependency
         run: bash "$VAL/scripts/check_no_prod_dep.sh"
+
+      # --- Venue-script guards: disk-free portability (Blocker 4) + pin-schema
+      #     reconciliation (Blocker 1a). Runs bash -n, shellcheck -S error, and the
+      #     deterministic unit tests on native GNU/Linux (ubuntu-latest) — this is the
+      #     native-GNU verification for the df -Pk portability fix. No toolchain/venue.
+      - name: B0-PRE venue-script tests (bash -n, shellcheck, disk_free_gib, pin schema)
+        run: bash tools/b0-pre-candidates/scripts/tests/run.sh
 
       # --- Shared canonical primitive as an independent CI authority ----------
       # b0-pre-vmat is the SOLE canonical verifier-material encoding + identity +

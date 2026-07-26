@@ -3,8 +3,8 @@
 #
 # ONE push-button, read-only, off-venue-SAFE check that the authoritative pipeline
 # is READY to target the OFFICIAL candidate guests (guest-core + the two thin
-# candidate wrappers) — WITHOUT a GPU, a prover toolchain, or cloud credits. It
-# exercises every non-proving, non-GPU part and prints a precise VERIFIED-vs-GATED
+# candidate wrappers) — WITHOUT a prover toolchain, a container build, or cloud credits. It
+# exercises every non-proving, venue-independent part and prints a precise VERIFIED-vs-GATED
 # boundary, so that when a native Linux venue + credits arrive the actual
 # prove/measure run is push-button.
 #
@@ -208,7 +208,7 @@ fi
 hdr "GATED / VENUE-REQUIRED — a native Linux venue + cloud credits (NOT exercised here)"
 cat <<'GATED'
   The following are intentionally NOT produced off-venue and remain blocked on a
-  native Linux + Docker venue with a GPU / prover toolchain and cloud credits:
+  native Linux + Docker venue with the pinned prover toolchain and cloud credits/compute:
     - two clean OCI builder-image builds + their content-addressed manifest digests
     - in-container `cargo generate-lockfile` -> the authoritative candidate Cargo.lock(s)
     - verifier-material extraction (SP1 per-arch; RISC Zero native x86_64 ONLY)
@@ -218,6 +218,10 @@ cat <<'GATED'
     - measured cost (cycles, proof bytes, verify/prove/setup ns, RSS)
     - populated GuestProgramAllowlistV1 / r0_guest_set_hash
     - the real b0_pre_spec_hash (protocol .hash)  <-- stays UNWRITTEN
+  A GPU is not required by these invoked authoritative commands (`cargo prove build` /
+  `cargo risczero build` and the Groth16 verify run on CPU; GPU is optional acceleration
+  only, never a gate). What is required is a native Linux + Docker venue, the pinned
+  prover toolchain, and cloud credits/compute.
   See docs/b0-pre/venue/{VENUE.md,RUNBOOK.md} and docs/b0-pre/GUEST_SOURCE.md.
 GATED
 
@@ -226,7 +230,7 @@ if [ "$fail" = 0 ]; then
   printf 'LOCAL PREFLIGHT PASS\n'
   printf 'AUTHORITATIVE VENUE EXECUTION: NOT RUN\n'
   printf '\n'
-  printf 'Every non-GPU/non-credit readiness check passed, and the prove/measure stages\n'
+  printf 'Every venue-independent (non-proving, non-credit) readiness check passed, and the prove/measure stages\n'
   printf 'remain VENUE-REQUIRED (see above). A green local preflight does NOT establish\n'
   printf 'authoritative venue readiness; nothing was fabricated.\n'
   exit 0

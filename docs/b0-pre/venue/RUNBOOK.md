@@ -6,10 +6,16 @@ It is **provider-neutral**: identical commands run on AWS EC2, Azure VMs, or any
 Linux machine. It does **not** provision infrastructure (no Terraform, no cloud API
 calls) — you bring two hosts, this runbook uses them.
 
-> The workflow is pinned to the canonical `main` merge commit
-> **`5994bed018fdf38d4913b5b166dd5a662d9cf919`**. Evidence produced from any other commit
-> is non-authoritative (VENUE.md §4) and must be discarded. Nothing here commits, pushes,
-> computes the real `b0_pre_spec_hash`, or mutates `main`.
+> The workflow binds to a single **ratified source commit**, supplied out-of-band as
+> `RATIFIED_SOURCE_COMMIT` from the same owner-ratified record as the venue-input pins
+> (see `PIN-PROPOSAL.md` §Ratification). It is deliberately **not** hard-coded here: a
+> runbook cannot authoritatively pin the very commit that must already contain it, and a
+> hard-coded hash goes stale the moment the pipeline is corrected. Both hosts export the
+> **same** value, so both bind the same commit; each bundle records that commit as its
+> `source_commit`, and any mismatch fails closed (VENUE.md §4). The ratified commit MUST
+> be one whose tree already carries this complete venue pipeline (this runbook, the
+> official guests, and `scripts/`). Nothing here commits, pushes, computes the real
+> `b0_pre_spec_hash`, or mutates `main`.
 
 ## 0. Prerequisites (both hosts)
 
@@ -28,12 +34,22 @@ calls) — you bring two hosts, this runbook uses them.
 ## 1. Prepare each host (identical on HOST_X64 and HOST_ARM)
 
 ```sh
-# clone at the EXACT canonical commit; refuse to proceed from any other HEAD.
+# The ratified source commit comes from the owner-ratified record (NOT invented here),
+# supplied alongside the pins below and IDENTICAL on both hosts. It must be a commit
+# whose tree already carries this complete venue pipeline (runbook + official guests +
+# scripts) — e.g. the ratified `main` merge commit.
+export RATIFIED_SOURCE_COMMIT=...   # from the ratified record; same value on HOST_X64 and HOST_ARM
+
+# clone, check out THAT commit, and refuse to proceed unless HEAD matches it AND the
+# checked-out tree actually contains the pipeline (fail closed on either).
 git clone https://github.com/SUM-INNOVATION/sum-chain.git
 cd sum-chain
-git checkout 5994bed018fdf38d4913b5b166dd5a662d9cf919
-test "$(git rev-parse HEAD)" = "5994bed018fdf38d4913b5b166dd5a662d9cf919" \
+[ -n "${RATIFIED_SOURCE_COMMIT:-}" ] || { echo "RATIFIED_SOURCE_COMMIT unset (owner-ratified) — abort"; exit 1; }
+git checkout "$RATIFIED_SOURCE_COMMIT"
+test "$(git rev-parse HEAD)" = "$RATIFIED_SOURCE_COMMIT" \
   || { echo "WRONG COMMIT — abort"; exit 1; }
+test -f tools/b0-pre-candidates/scripts/run_authoritative.sh \
+  || { echo "ratified commit lacks the venue pipeline — abort"; exit 1; }
 
 # ratified immutable venue-input pins (values from the ratified PIN-PROPOSAL, NOT invented here)
 export BASE_IMAGE=...            # immutable base image ref
@@ -57,7 +73,8 @@ bash tools/b0-pre-candidates/scripts/preflight_venue.sh          # fast structur
 bash tools/b0-pre-candidates/scripts/preflight_venue.sh --deep   # + cargo offline proofs
 ```
 
-Expect `READY: every non-GPU/non-credit venue-readiness check passed.` On a real venue
+Expect `LOCAL PREFLIGHT PASS` — every venue-independent (non-proving, non-credit)
+readiness check passed. On a real venue
 host the fail-closed sub-check is skipped (the authoritative run is available there and
 must not be launched by the preflight); the readiness assertions still apply.
 
@@ -101,6 +118,15 @@ bash tools/b0-pre-candidates/scripts/run_authoritative.sh import-verify /run/b0p
 
 Both must report `import-verified` (every hash recomputed, every typed record bound).
 
+`import-verify` is an **internal** check: it recomputes every file hash and re-binds
+every typed record, and deliberately does **not** require the ratified `pins.env` /
+`RATIFIED_SOURCE_COMMIT`, so any reviewer can run it on a returned bundle without holding
+the out-of-band ratification record. A clean `import-verify` means the bundle is
+internally consistent; it does **not** make the bundle eligible for aggregation or
+selection. The ratified-commit authority — both bundles must report the **same**
+`RATIFIED_SOURCE_COMMIT` — is enforced at `aggregate` (Step 5), the boundary where
+bundles become eligible to feed Stage-6 / selection.
+
 ## 5. Aggregate + assemble + ingest (one host)
 
 ```sh
@@ -123,8 +149,10 @@ Before proposing any Stage-1 evidence upstream (VENUE.md §6):
    bit-for-bit.
 2. Confirm the committed artifact upstream is still `not_finalizable` and no `.hash`
    exists.
-3. Record each per-arch bundle's `source_commit` = `5994bed018fdf38d4913b5b166dd5a662d9cf919`
-   in the evidence set.
+3. Record each per-arch bundle's `source_commit` = `$RATIFIED_SOURCE_COMMIT` in the
+   evidence set; both hosts must record the same ratified commit. `run_authoritative.sh`
+   binds it from `git rev-parse HEAD`, and independent import-verify re-reads it, so a
+   diverging host is caught on aggregation.
 4. Retain only the committable set (VENUE.md §7): locks, canonical verifier-material
    artifacts, minimal fixtures, hashes, provenance, telemetry — never caches / `target/`
    / OCI layers / proof blobs.

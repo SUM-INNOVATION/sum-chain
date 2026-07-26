@@ -1,0 +1,15 @@
+{
+  "_status": "UNRATIFIED EXAMPLE — documented shape only. Empty placeholder values; NOT real pins; do not ratify. Mirrors docs/b0-pre/venue/PIN-PROPOSAL.md and the exact keys verify_pins.sh reads. Extra underscore-prefixed keys are ignored by verify_pins.sh.",
+  "base_image": "",
+  "base_digest": { "x86_64": "", "aarch64": "" },
+  "apt_snapshot": "",
+  "rustup_init": {
+    "x86_64": { "url": "", "sha256": "" },
+    "aarch64": { "url": "", "sha256": "" }
+  },
+  "tool_identities": [
+    { "name": "sp1-verifier",  "version": "6.3.1", "artifact_identity": "", "checksum_algorithm": "sha256", "checksum_hex": "", "install_entrypoint": "" },
+    { "name": "risc0-zkvm",    "version": "3.0.5", "artifact_identity": "", "checksum_algorithm": "sha256", "checksum_hex": "", "install_entrypoint": "" },
+    { "name": "risc0-groth16", "version": "3.0.4", "artifact_identity": "", "checksum_algorithm": "sha256", "checksum_hex": "", "install_entrypoint": "" }
+  ]
+}

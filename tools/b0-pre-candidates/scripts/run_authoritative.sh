@@ -86,6 +86,19 @@ PY
   fi
 }
 
+# The source_commit RECORDED in a sealed bundle's immutable manifest
+# (PerArchEvidenceBundleV1.source_commit in arch-evidence-manifest.json). Unlike
+# evidence_source_commit's authoritative branch (which returns THIS host's HEAD), this
+# reads the commit the bundle was sealed under, so an aggregation host can cross-check
+# both returned bundles regardless of its own checkout.
+bundle_recorded_source_commit() {
+  local ev="$1"
+  python3 - "$ev/arch-evidence-manifest.json" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1]))["source_commit"])
+PY
+}
+
 # The builder image digest a producer recorded for (candidate, arch) in the work dir.
 builder_digest_of() {
   local cand="$1" arch="$2" work="$3"
@@ -178,12 +191,15 @@ produce_arch_authoritative() {
   local arch="$1" schema_arch="$2" evidence="$3" work="$4"
 
   note "== Stage 0: environment gates (before any resolution/build) =="
+  # Source-commit authority FIRST: require the owner-ratified RATIFIED_SOURCE_COMMIT,
+  # exactly 40 lowercase hex, equal to HEAD, on a clean checkout — before any
+  # resolution/build/extraction/evidence generation. This also enforces the clean-tree
+  # requirement (folds in the former standalone dirty-tree refusal).
+  require_ratified_source_commit "$ROOT"
   require_native_arch "$arch"
   require_linux_oci_builder
   require_free_gib "$work" 100
   require_cmd python3
-  [ -z "$(git -C "$ROOT" status --porcelain 2>/dev/null || echo dirty)" ] \
-    || die "source tree is not clean; refuse to build from a dirty state"
   require_no_preexisting_lock "$ROOT/candidates/sp1"
   require_no_preexisting_lock "$ROOT/candidates/risc0"
 
@@ -393,6 +409,23 @@ aggregate() {
   note "== independently import-verify BOTH sealed per-arch bundles =="
   vv import-bundle "$x86" || die "x86_64 sealed bundle failed import verification"
   vv import-bundle "$arm" || die "aarch64 sealed bundle failed import verification"
+
+  note "== source-commit authority: both bundles must report the SAME ratified commit =="
+  local sc_x86 sc_arm
+  sc_x86="$(bundle_recorded_source_commit "$x86")" || die "cannot read x86_64 bundle source_commit (arch-evidence-manifest.json)"
+  sc_arm="$(bundle_recorded_source_commit "$arm")" || die "cannot read aarch64 bundle source_commit (arch-evidence-manifest.json)"
+  [ "$sc_x86" = "$sc_arm" ] \
+    || die "bundle source_commit disagreement: x86_64=$sc_x86 aarch64=$sc_arm (both must be the one ratified commit)"
+  if is_dryrun; then
+    note "DRY-RUN: bundles agree on synthetic source_commit ($sc_x86); RATIFIED_SOURCE_COMMIT not required for the TEST_ONLY control-flow check"
+  else
+    [ -n "${RATIFIED_SOURCE_COMMIT:-}" ] \
+      || nyr "RATIFIED_SOURCE_COMMIT is required to aggregate authoritative bundles (from the ratified pins.env); it is absent"
+    is_ratified_commit_format "$RATIFIED_SOURCE_COMMIT" \
+      || die "RATIFIED_SOURCE_COMMIT must be exactly 40 lowercase hex chars: '$RATIFIED_SOURCE_COMMIT'"
+    [ "$sc_x86" = "$RATIFIED_SOURCE_COMMIT" ] \
+      || die "bundle source_commit ($sc_x86) != RATIFIED_SOURCE_COMMIT ($RATIFIED_SOURCE_COMMIT); refusing aggregation"
+  fi
 
   note "== cross-architecture aggregation from the TWO TYPED bundles (no directory copy) =="
   local agg="$work/aggregate"

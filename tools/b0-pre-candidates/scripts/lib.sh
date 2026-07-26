@@ -53,6 +53,34 @@ require_linux_oci_builder() {
   docker info >/dev/null 2>&1 || die "OCI builder daemon is not running/reachable"
 }
 
+# A ratified source commit is EXACTLY 40 lowercase hex (a full git SHA-1). Rejects
+# uppercase, non-hex, truncation, and 64-hex. Returns 0/non-0; prints nothing.
+is_ratified_commit_format() {
+  printf '%s' "${1:-}" | grep -Eq '^[0-9a-f]{40}$'
+}
+
+# Fail-closed authoritative source-commit authority: bind the run to the owner-ratified
+# `RATIFIED_SOURCE_COMMIT` (from the ratified pins.env). Enforced at authoritative Stage 0
+# and at the authoritative import/aggregate boundary — NOT in generic preflight/dev
+# checks. Requires the variable present, exactly 40 lowercase hex, EQUAL to <repo>'s
+# checked-out HEAD, and a clean checkout. The producer separately records the ACTUAL HEAD
+# into every typed evidence record; given this gate, that recorded HEAD IS the ratified
+# commit, so two operators cannot accidentally agree on a wrong commit. Must run BEFORE
+# any dependency resolution, image build, guest build, or evidence generation.
+require_ratified_source_commit() {
+  local repo="${1:-.}" want="${RATIFIED_SOURCE_COMMIT:-}" head
+  [ -n "$want" ] \
+    || nyr "RATIFIED_SOURCE_COMMIT is required for an authoritative run (from the ratified pins.env); it is absent"
+  is_ratified_commit_format "$want" \
+    || die "RATIFIED_SOURCE_COMMIT must be exactly 40 lowercase hex chars (uppercase/non-hex/truncated/64-hex rejected): '$want'"
+  head="$(git -C "$repo" rev-parse HEAD 2>/dev/null)" \
+    || die "cannot resolve git HEAD in '$repo' for the source-commit authority check"
+  [ "$head" = "$want" ] \
+    || die "checked-out HEAD ($head) does not equal RATIFIED_SOURCE_COMMIT ($want); refusing authoritative Stage 0"
+  [ -z "$(git -C "$repo" status --porcelain 2>/dev/null)" ] \
+    || die "checkout is not clean; authoritative evidence requires a pristine checkout of the ratified commit"
+}
+
 # Minimum free space (GiB) on a given path.
 require_free_gib() {
   local path="$1" min="$2" free
@@ -61,11 +89,31 @@ require_free_gib() {
 }
 
 # ---- Disk telemetry primitives ---------------------------------------------
-# Free whole-GiB available on the filesystem holding PATH (0 if unknown).
+# Parse whole-GiB available from POSIX `df -Pk` output supplied on stdin. POSIX `-P`
+# guarantees the filesystem is reported on a single data row (NR==2) with columns
+#   Filesystem  1024-blocks  Used  Available  Capacity  Mounted-on
+# so column 4 is Available in KiB on BOTH GNU coreutils and BSD/macOS `df`. Emits whole
+# GiB (floor); emits 0 for header-only / blank / non-numeric input so a caller's gate
+# fails closed on unknown free space rather than proceeding. Split out from
+# disk_free_gib so the KiB->GiB parse is unit-testable against canned df output.
+df_avail_gib_from_posix_k() {
+  awk 'NR==2 {
+         if ($4 ~ /^[0-9]+$/) { printf "%d", int($4 / 1024 / 1024) } else { printf "0" }
+         seen = 1
+       }
+       END { if (!seen) printf "0" }'
+}
+
+# Free whole-GiB available on the filesystem holding PATH (0 if unknown/unreadable).
+# Uses the POSIX-portable `df -Pk` (1024-byte blocks) rather than the BSD-only `df -g`
+# (GNU coreutils rejects `-g` with "invalid option", which previously made every Linux
+# host report 0 and fail Stage 0). `-Pk` parses identically on GNU/Linux and macOS.
+# Fail-closed: any df error (missing path, permission) or unparseable output yields 0,
+# which trips the `require_free_gib` / `require_headroom_gib` >= N GiB gates.
 disk_free_gib() {
-  local path="$1" free
-  free="$(df -Pg "$path" 2>/dev/null | awk 'NR==2{print $4}')" || free=0
-  printf '%s' "${free:-0}"
+  local path="$1" out
+  out="$(df -Pk "$path" 2>/dev/null)" || { printf '0'; return; }
+  printf '%s' "$(printf '%s\n' "$out" | df_avail_gib_from_posix_k)"
 }
 
 # Disk used (whole MiB) by a directory tree; 0 if it does not exist.
