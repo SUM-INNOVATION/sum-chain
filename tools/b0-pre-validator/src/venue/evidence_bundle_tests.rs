@@ -149,7 +149,11 @@ fn write_bundle_files(dir: &Path, arch: &str) {
                 "test_only": false,
             }));
         }
-        write(dir, &tool_binding_file(c), serde_json::to_vec_pretty(&bindings).unwrap().as_slice());
+        // Tool binding: SP1 on both arches; RISC Zero x86_64 ONLY (VENUE.md §2 — there is
+        // no aarch64 RISC Zero toolchain to install and bind).
+        if c == "Sp1" || arch == "X86_64" {
+            write(dir, &tool_binding_file(c), serde_json::to_vec_pretty(&bindings).unwrap().as_slice());
+        }
 
         // Stage-5 result (SP1 on both arches; RISC0 x86_64 only)
         let want_stage5 = c == "Sp1" || arch == "X86_64";
@@ -330,8 +334,10 @@ fn a_tool_binding_whose_verified_hash_lies_is_rejected() {
 
 #[test]
 fn a_tool_binding_bound_to_the_wrong_container_is_rejected() {
+    // SP1 is the candidate that carries a tool binding on aarch64; RISC Zero does not
+    // (VENUE.md §2). The equivalent RISC Zero case is covered on x86_64 below.
     let dir = sealed_bundle("toolcont", "Aarch64");
-    rewrite_json(&dir, &tool_binding_file("Risc0"), |v| {
+    rewrite_json(&dir, &tool_binding_file("Sp1"), |v| {
         v[0]["container_digest"] = serde_json::json!(oci("some-other-image"));
     });
     reseal(&dir, "Aarch64");
@@ -482,4 +488,140 @@ fn a_swapped_lock_is_caught_by_recomputed_provenance() {
     // the provenance hash no longer matches the (swapped) exported bytes.
     assert!(matches!(err, EvidenceError::Lock { .. }), "got {err}");
     std::fs::remove_dir_all(&dir).ok();
+}
+
+// ---- Architecture acceptance contract (VENUE.md §2) --------------------------
+//
+// x86_64 carries SP1 **and** the RISC Zero material (verifier material, Stage-5 result,
+// tool binding). aarch64 carries SP1 only: Groth16 / `stark2snark` / verifier-material
+// extraction are native-x86_64-only, and upstream publishes no aarch64-linux RISC Zero
+// artifact, so there is no aarch64 RISC Zero tool identity to install, verify, or bind.
+// The bundle file set is compared exactly in both directions, so a missing RISC Zero
+// file on x86_64 and an extra one on aarch64 are both refused.
+
+/// The three files that constitute "RISC Zero material" for the arch contract.
+fn risc0_material_names() -> Vec<String> {
+    risc0_material_files()
+}
+
+#[test]
+fn x86_bundle_missing_risc0_material_is_rejected() {
+    for name in risc0_material_names() {
+        let dir = tmpdir("x86-missing-r0");
+        write_bundle_files(&dir, "X86_64");
+        std::fs::remove_file(dir.join(&name)).expect("remove a required RISC Zero file");
+        let err = seal(&dir, "X86_64", COMMIT)
+            .expect_err("an x86_64 bundle without RISC Zero material must be refused");
+        assert!(
+            matches!(&err, EvidenceError::MissingFile { name: n } if *n == name),
+            "removing {name} should be MissingFile, got {err}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[test]
+fn x86_bundle_with_risc0_material_is_accepted() {
+    let dir = sealed_bundle("x86-with-r0", "X86_64");
+    let imported = import_verify(&dir).expect("a complete x86_64 bundle must import");
+    assert_eq!(imported.arch, "X86_64");
+    assert!(
+        imported.risc0_extractor_json.is_some(),
+        "x86_64 must carry RISC Zero verifier material"
+    );
+    // Both candidates bound a verified tool on x86_64.
+    let bound: Vec<&str> = imported
+        .tool_bindings
+        .iter()
+        .map(|b| b.candidate.as_str())
+        .collect();
+    assert!(bound.contains(&"Sp1"), "x86_64 must bind SP1: {bound:?}");
+    assert!(bound.contains(&"Risc0"), "x86_64 must bind RISC Zero: {bound:?}");
+    for name in risc0_material_names() {
+        assert!(dir.join(&name).exists(), "x86_64 bundle must carry {name}");
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn arm_bundle_without_risc0_material_is_accepted() {
+    let dir = sealed_bundle("arm-no-r0", "Aarch64");
+    let imported = import_verify(&dir).expect("an aarch64 SP1-only bundle must import");
+    assert_eq!(imported.arch, "Aarch64");
+    assert!(
+        imported.risc0_extractor_json.is_none(),
+        "aarch64 must not carry RISC Zero verifier material"
+    );
+    let bound: Vec<&str> = imported
+        .tool_bindings
+        .iter()
+        .map(|b| b.candidate.as_str())
+        .collect();
+    assert_eq!(bound, vec!["Sp1"], "aarch64 binds SP1 only, got {bound:?}");
+    for name in risc0_material_names() {
+        assert!(
+            !dir.join(&name).exists(),
+            "aarch64 bundle must not carry {name}"
+        );
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn arm_bundle_carrying_risc0_material_is_rejected() {
+    // Each RISC Zero file, introduced on its own into an otherwise valid aarch64
+    // bundle, must be refused as unexpected/ineligible — never silently accepted.
+    for name in risc0_material_names() {
+        let dir = tmpdir("arm-with-r0");
+        write_bundle_files(&dir, "Aarch64");
+        // Borrow the genuine x86_64 bytes: the point is that the FILE is ineligible on
+        // aarch64, not that its contents happen to be malformed.
+        let src = tmpdir("arm-with-r0-src");
+        write_bundle_files(&src, "X86_64");
+        std::fs::copy(src.join(&name), dir.join(&name)).expect("plant RISC Zero material");
+
+        let err = seal(&dir, "Aarch64", COMMIT)
+            .expect_err("aarch64 carrying RISC Zero material must be refused");
+        assert!(
+            matches!(&err, EvidenceError::UnmanifestedFile { name: n } if *n == name),
+            "planting {name} on aarch64 should be UnmanifestedFile, got {err}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&src).ok();
+    }
+}
+
+#[test]
+fn aggregation_sources_risc0_material_only_from_x86() {
+    let x86 = sealed_bundle("agg-x86", "X86_64");
+    let arm = sealed_bundle("agg-arm", "Aarch64");
+    let ix = import_verify(&x86).expect("x86 import");
+    let ia = import_verify(&arm).expect("arm import");
+
+    let x86_r0 = ix
+        .risc0_extractor_json
+        .clone()
+        .expect("x86_64 supplies the RISC Zero material");
+    assert!(
+        ia.risc0_extractor_json.is_none(),
+        "aarch64 supplies no RISC Zero material at all"
+    );
+
+    let agg = aggregate_imported(&[ix, ia]).expect("typed cross-arch aggregate");
+    assert_eq!(
+        agg.venue.risc0_extractor_json, x86_r0,
+        "aggregate RISC Zero material must be exactly the x86_64 bundle's bytes"
+    );
+
+    // An aarch64-only aggregate cannot produce RISC Zero material at all.
+    let arm_only = sealed_bundle("agg-arm-only", "Aarch64");
+    let ia2 = import_verify(&arm_only).expect("arm import");
+    assert!(
+        aggregate_imported(&[ia2]).is_err(),
+        "aggregation from aarch64 alone must fail: it has no RISC Zero material"
+    );
+
+    std::fs::remove_dir_all(&x86).ok();
+    std::fs::remove_dir_all(&arm).ok();
+    std::fs::remove_dir_all(&arm_only).ok();
 }

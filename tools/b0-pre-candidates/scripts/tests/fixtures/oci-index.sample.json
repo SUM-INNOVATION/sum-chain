@@ -1,0 +1,58 @@
+{
+  "_status": "TEST_ONLY SYNTHETIC OCI index fixture. Digests are derived from fixed labels and are NOT real registry content; never usable as a pin.",
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.index.v1+json",
+  "manifests": [
+    {
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "size": 1021,
+      "digest": "sha256:9b4e0b9b92f9d325ca0d20b6f5e39bfd1db7fe537a9e4e2452210c0a0cca07ab",
+      "platform": {
+        "architecture": "amd64",
+        "os": "linux"
+      }
+    },
+    {
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "size": 1041,
+      "digest": "sha256:9c2e2296cfb3d21d3405e4bc8891efc4708fa116965b730930fd5b7cb74e566f",
+      "platform": {
+        "architecture": "arm64",
+        "os": "linux",
+        "variant": "v8"
+      }
+    },
+    {
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "size": 1041,
+      "digest": "sha256:93415ee97b3362c1707e588e023b32dacaedb52275a9147b8d45270cebfff518",
+      "platform": {
+        "architecture": "arm",
+        "os": "linux",
+        "variant": "v7"
+      }
+    },
+    {
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "size": 562,
+      "digest": "sha256:4de28f7922deb3bee2d8d8fcc253d27d1a49b2b82363c9a0d49bebf3a0151df6",
+      "platform": {
+        "architecture": "unknown",
+        "os": "unknown"
+      },
+      "annotations": {
+        "vnd.docker.reference.type": "attestation-manifest",
+        "vnd.docker.reference.digest": "sha256:9b4e0b9b92f9d325ca0d20b6f5e39bfd1db7fe537a9e4e2452210c0a0cca07ab"
+      }
+    },
+    {
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "size": 1021,
+      "digest": "sha256:04f1c4ce821006b220e7d6efb31ce938d8da196091846f8ad07dc05a313ae096",
+      "platform": {
+        "architecture": "amd64",
+        "os": "windows"
+      }
+    }
+  ]
+}

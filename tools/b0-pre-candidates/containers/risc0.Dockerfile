@@ -9,35 +9,82 @@
 # arm64.
 #
 # Reproducibility inputs are REQUIRED build-args with no defaults / placeholders:
-#   BASE_IMAGE           e.g. docker.io/library/debian
-#   BASE_DIGEST          immutable sha256:<64hex> of the base image (per-arch)
-#   APT_SNAPSHOT         snapshot.debian.org timestamp for exact OS packages
-#   RUSTUP_INIT_SHA256   sha256 of the per-arch rustup-init
-#   RUST_VERSION         must be exactly 1.88.0
+#   BASE_IMAGE                      e.g. docker.io/library/debian
+#   BASE_DIGEST                     immutable sha256:<64hex> of the base image (per-arch)
+#   APT_DEBIAN_URL                  pinned immutable snapshot base URL (trailing '/')
+#   APT_DEBIAN_INRELEASE_SHA256     expected sha256 of that snapshot's bookworm InRelease
+#   APT_SECURITY_URL                pinned immutable debian-security snapshot base URL
+#   APT_SECURITY_INRELEASE_SHA256   expected sha256 of its bookworm-security InRelease
+#   RUSTUP_INIT_URL                 EXACT immutable per-arch rustup archive URL
+#   RUSTUP_INIT_SHA256              sha256 of that exact rustup-init artifact
+#   RUST_VERSION                    must be exactly 1.88.0
 
 ARG BASE_IMAGE
 ARG BASE_DIGEST
 FROM ${BASE_IMAGE}@${BASE_DIGEST}
 
-ARG APT_SNAPSHOT
+# BASE_IMAGE/BASE_DIGEST are declared BEFORE `FROM`, which makes them global build args
+# that fall OUT OF SCOPE inside the build stage. They must be re-declared here or every
+# in-stage reference expands to the empty string — which silently defeated the
+# fail-closed BASE_DIGEST check below.
+ARG BASE_IMAGE
+ARG BASE_DIGEST
+
+ARG APT_DEBIAN_URL
+ARG APT_DEBIAN_INRELEASE_SHA256
+ARG APT_SECURITY_URL
+ARG APT_SECURITY_INRELEASE_SHA256
+ARG RUSTUP_INIT_URL
 ARG RUSTUP_INIT_SHA256
 ARG RUST_VERSION=1.88.0
 
-RUN test -n "${BASE_DIGEST}" && test -n "${APT_SNAPSHOT}" \
- && test -n "${RUSTUP_INIT_SHA256}" && test "${RUST_VERSION}" = "1.88.0" \
- || (echo "NOT_YET_REPRODUCED: missing immutable base digest / apt snapshot / rustup checksum / RUST_VERSION!=1.88.0" >&2; exit 3)
+# Fail closed BEFORE any work. This gate tests the actual VALUES, not merely that the
+# args were named: each digest/checksum must have the right shape, so a truncated,
+# uppercased, or placeholder value is refused here rather than deep inside a build.
+RUN printf '%s' "${BASE_DIGEST}"                  | grep -Eq '^sha256:[0-9a-f]{64}$' \
+ && printf '%s' "${APT_DEBIAN_INRELEASE_SHA256}"   | grep -Eq '^[0-9a-f]{64}$' \
+ && printf '%s' "${APT_SECURITY_INRELEASE_SHA256}" | grep -Eq '^[0-9a-f]{64}$' \
+ && printf '%s' "${RUSTUP_INIT_SHA256}"            | grep -Eq '^[0-9a-f]{64}$' \
+ && test -n "${APT_DEBIAN_URL}" && test -n "${APT_SECURITY_URL}" && test -n "${RUSTUP_INIT_URL}" \
+ && test "${RUST_VERSION}" = "1.88.0" \
+ || (echo "NOT_YET_REPRODUCED: immutable base digest / pinned apt snapshot URLs+InRelease hashes / rustup URL+checksum absent or malformed, or RUST_VERSION!=1.88.0" >&2; exit 3)
 
+# Exact OS packages from the two pinned snapshots, and ONLY from them. The base image
+# ships deb822 /etc/apt/sources.list.d/debian.sources pointing at the ROLLING
+# deb.debian.org mirror, which previously stayed active alongside the snapshot; every
+# pre-existing source is removed before the first apt update and an assertion refuses
+# the build if any rolling Debian source survives.
 RUN set -eux; \
-    printf 'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/%s/ bookworm main\n' "${APT_SNAPSHOT}" > /etc/apt/sources.list; \
-    printf 'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/%s/ bookworm-security main\n' "${APT_SNAPSHOT}" >> /etc/apt/sources.list; \
+    rm -f /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list; \
+    printf 'deb [check-valid-until=no] %s bookworm main\n' "${APT_DEBIAN_URL}" > /etc/apt/sources.list; \
+    printf 'deb [check-valid-until=no] %s bookworm-security main\n' "${APT_SECURITY_URL}" >> /etc/apt/sources.list; \
+    if grep -RIqsE '(deb|security)\.debian\.org' /etc/apt/sources.list /etc/apt/sources.list.d/; then \
+      echo "REFUSED: a rolling Debian apt source is still active after pinning" >&2; exit 4; \
+    fi; \
     apt-get -o Acquire::Check-Valid-Until=false update; \
+    inrel_deb="$(ls /var/lib/apt/lists/*_dists_bookworm_InRelease)"; \
+    inrel_sec="$(ls /var/lib/apt/lists/*_dists_bookworm-security_InRelease)"; \
+    echo "${APT_DEBIAN_INRELEASE_SHA256}  ${inrel_deb}"   | sha256sum -c -; \
+    echo "${APT_SECURITY_INRELEASE_SHA256}  ${inrel_sec}" | sha256sum -c -; \
     apt-get install -y --no-install-recommends ca-certificates curl build-essential pkg-config libssl-dev git; \
     rm -rf /var/lib/apt/lists/*
 
+# Rust 1.88.0 via the EXACT immutable rustup archive artifact the ratified record names;
+# the mutable unversioned rustup/dist path is refused.
 RUN set -eux; \
     arch="$(uname -m)"; \
-    url="https://static.rust-lang.org/rustup/dist/${arch}-unknown-linux-gnu/rustup-init"; \
-    curl -fsSL "$url" -o /tmp/rustup-init; \
+    case "${RUSTUP_INIT_URL}" in \
+      */rustup/dist/*) echo "REFUSED: RUSTUP_INIT_URL uses the mutable unversioned rustup/dist path" >&2; exit 5 ;; \
+    esac; \
+    case "${RUSTUP_INIT_URL}" in \
+      https://static.rust-lang.org/rustup/archive/*/rustup-init) ;; \
+      *) echo "REFUSED: RUSTUP_INIT_URL is not an immutable https rustup archive URL: ${RUSTUP_INIT_URL}" >&2; exit 5 ;; \
+    esac; \
+    case "${RUSTUP_INIT_URL}" in \
+      *"/${arch}-unknown-linux-gnu/rustup-init") ;; \
+      *) echo "REFUSED: RUSTUP_INIT_URL is not for this builder's architecture ${arch}: ${RUSTUP_INIT_URL}" >&2; exit 5 ;; \
+    esac; \
+    curl -fsSL "${RUSTUP_INIT_URL}" -o /tmp/rustup-init; \
     echo "${RUSTUP_INIT_SHA256}  /tmp/rustup-init" | sha256sum -c -; \
     chmod +x /tmp/rustup-init; \
     /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain "${RUST_VERSION}"; \

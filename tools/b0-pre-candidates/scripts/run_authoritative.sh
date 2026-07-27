@@ -241,7 +241,7 @@ produce_arch_authoritative() {
   disk_stage "stage4-verifier-material" "$work"
 
   note "== Stage 5b: real tool identities (download->verify->install->verify->bind) -> work =="
-  bash "$HERE/tool_identities.sh" "$work"
+  bash "$HERE/tool_identities.sh" "$work" "$arch"
 
   note "== Stage 5c: per-candidate genuine verifier fixture + mutation execution -> typed record -> work =="
   require_headroom_gib "$work" 10 "Stage 5 verifier fixture + mutation execution"
@@ -381,11 +381,14 @@ assemble_evidence() {
     cp "$work/$c.Cargo.lock"            "$ev/$c.Cargo.lock"
     cp "$work/$c.lock-provenance.json"  "$ev/$c.lock-provenance.json"
     cp "$work/$c.stage2-audit.json"     "$ev/$c.stage2-audit.json"
-    cp "$work/$c.tool-binding.json"     "$ev/$c.tool-binding.json"
   done
+  # SP1 binds a tool on both architectures; RISC Zero on x86_64 ONLY, matching
+  # `required_files` in the validator (VENUE.md §2).
+  cp "$work/Sp1.tool-binding.json"      "$ev/Sp1.tool-binding.json"
   cp "$work/Sp1.stage5-result.json"     "$ev/Sp1.stage5-result.json"
   cp "$work/sp1-verifier-material.json" "$ev/sp1-verifier-material.json"
   if [ "$arch" = "x86_64" ]; then
+    cp "$work/Risc0.tool-binding.json"      "$ev/Risc0.tool-binding.json"
     cp "$work/Risc0.stage5-result.json"     "$ev/Risc0.stage5-result.json"
     cp "$work/risc0-verifier-material.json" "$ev/risc0-verifier-material.json"
   fi

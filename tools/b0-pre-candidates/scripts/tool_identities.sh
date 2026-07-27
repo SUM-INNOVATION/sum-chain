@@ -14,17 +14,20 @@
 # is now DERIVED from the verified binding, so it is a projection of verified
 # evidence, never an unverified copy.
 #
-# It NEVER invents installer URLs/checksums; the owner supplies real metadata via
-# SP1_TOOL_IDENTITY / RISC0_TOOL_IDENTITY. Off-venue that metadata is absent
-# ([MISS]) and there is no network/toolchain, so it fails closed.
+# It NEVER invents installer URLs/checksums; the owner supplies real metadata via the
+# PER-ARCH variables SP1_TOOL_IDENTITY_X86_64 / SP1_TOOL_IDENTITY_AARCH64 /
+# RISC0_TOOL_IDENTITY_X86_64. Off-venue that metadata is absent ([MISS]) and there is no
+# network/toolchain, so it fails closed.
 #
 # OFF-VENUE dry run (SUMCHAIN_B0PRE_DRYRUN=1) emits real-SHAPED files whose installer
 # metadata is UNMISTAKABLY SYNTHETIC (carries the TEST_ONLY_SYNTHETIC sentinel) and
 # whose binding records are test_only=true — never mistakable for real metadata.
 #
-# Usage: tool_identities.sh <out_dir>
-# Authoritative env: SP1_TOOL_IDENTITY, RISC0_TOOL_IDENTITY (owner metadata files),
-#                    SP1_BUILDER_DIGEST, RISC0_BUILDER_DIGEST (sha256:...), SOURCE_COMMIT.
+# Usage: tool_identities.sh <out_dir> <x86_64|aarch64>
+# Authoritative env (from the ratified pins.env — one variable PER (candidate, arch), so a
+# swapped or cross-architecture identity is impossible to supply silently):
+#   SP1_TOOL_IDENTITY_X86_64, SP1_TOOL_IDENTITY_AARCH64, RISC0_TOOL_IDENTITY_X86_64,
+#   SP1_BUILDER_DIGEST, RISC0_BUILDER_DIGEST (sha256:...), SOURCE_COMMIT.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
@@ -33,7 +36,9 @@ ROOT="$(cd "$HERE/.." && pwd)"
 require_cmd python3
 
 out="${1:-}"
+arch="${2:-}"
 [ -n "$out" ] || die "output directory argument required"
+case "$arch" in x86_64|aarch64) ;; *) die "arch argument must be x86_64|aarch64 (got '${arch:-}')" ;; esac
 mkdir -p "$out"
 
 # Frozen pins (mirror run_authoritative.sh / docs/b0-pre/venue/VENUE.md audit policy; not invented).
@@ -81,20 +86,38 @@ PY
 }
 
 if is_dryrun; then
+  # The dry run mirrors the real architecture contract: SP1 on both architectures,
+  # RISC Zero on x86_64 only (VENUE.md §2). Emitting a synthetic aarch64 RISC Zero
+  # binding would model a bundle the validator now refuses.
   emit_dry Sp1  "$RUST" "sp1-verifier:$SP1_VER"
-  emit_dry Risc0 "$RUST" "risc0-zkvm:$R0_ZKVM,risc0-groth16:$R0_G16"
-  note "wrote SYNTHETIC (sentinel-marked) $out/{Sp1,Risc0}.{tool,tool-binding}.json"
+  if [ "$arch" = "x86_64" ]; then
+    emit_dry Risc0 "$RUST" "risc0-zkvm:$R0_ZKVM,risc0-groth16:$R0_G16"
+    note "wrote SYNTHETIC (sentinel-marked) $out/{Sp1,Risc0}.{tool,tool-binding}.json"
+  else
+    note "wrote SYNTHETIC (sentinel-marked) $out/Sp1.{tool,tool-binding}.json (arch=$arch: RISC Zero is x86_64-only)"
+  fi
   exit 0
 fi
 
 # AUTHORITATIVE: download -> verify checksum -> install -> verify binary -> bind, per
 # declared proof tool. Absent owner metadata / bindings is fail-closed; nothing invented.
-[ -n "${SP1_TOOL_IDENTITY:-}" ]   || nyr "SP1_TOOL_IDENTITY (owner-supplied real installer metadata) is required"
-[ -n "${RISC0_TOOL_IDENTITY:-}" ] || nyr "RISC0_TOOL_IDENTITY (owner-supplied real installer metadata) is required"
-[ -f "$SP1_TOOL_IDENTITY" ]   || die "SP1_TOOL_IDENTITY file $SP1_TOOL_IDENTITY not found"
-[ -f "$RISC0_TOOL_IDENTITY" ] || die "RISC0_TOOL_IDENTITY file $RISC0_TOOL_IDENTITY not found"
+#
+# The per-arch identity is selected only AFTER the native-architecture gate succeeds, and
+# `resolve_tool_identity_file` additionally requires the metadata file to declare the arch
+# it is for. A missing, cross-architecture, or swapped identity therefore fails BEFORE any
+# download, install, build, or evidence generation.
+require_native_arch "$arch"
+SP1_TOOL_IDENTITY="$(resolve_tool_identity_file Sp1 "$arch")"
 require_full_sha256_digest SP1_BUILDER_DIGEST "${SP1_BUILDER_DIGEST:-}"
-require_full_sha256_digest RISC0_BUILDER_DIGEST "${RISC0_BUILDER_DIGEST:-}"
+# RISC Zero is native-x86_64-only (docs/b0-pre/venue/VENUE.md §2) and upstream publishes
+# no aarch64-linux artifact, so there is no aarch64 RISC Zero identity to select — and,
+# matching that, an aarch64 evidence bundle carries no RISC Zero tool binding at all
+# (`required_files` in the validator). On aarch64 this candidate is skipped rather than
+# binding x86_64 bytes as aarch64 evidence, which the former single-variable contract did.
+if [ "$arch" = "x86_64" ]; then
+  RISC0_TOOL_IDENTITY="$(resolve_tool_identity_file Risc0 "$arch")"
+  require_full_sha256_digest RISC0_BUILDER_DIGEST "${RISC0_BUILDER_DIGEST:-}"
+fi
 [ -n "${SOURCE_COMMIT:-}" ] || nyr "SOURCE_COMMIT (clean source commit the run is bound to) is required"
 require_cmd curl
 
@@ -184,5 +207,9 @@ PY
   note "verified + bound $n proof tool(s) for $cand -> $out/$cand.tool-binding.json (authoritative entry) + derived $cand.tool.json"
 }
 
-process_candidate Sp1   "$SP1_TOOL_IDENTITY"   "$SP1_BUILDER_DIGEST"
-process_candidate Risc0 "$RISC0_TOOL_IDENTITY" "$RISC0_BUILDER_DIGEST"
+process_candidate Sp1 "$SP1_TOOL_IDENTITY" "$SP1_BUILDER_DIGEST"
+if [ "$arch" = "x86_64" ]; then
+  process_candidate Risc0 "$RISC0_TOOL_IDENTITY" "$RISC0_BUILDER_DIGEST"
+else
+  note "arch=$arch: no RISC Zero tool binding (x86_64-only per docs/b0-pre/venue/VENUE.md §2; the aarch64 bundle does not carry one)"
+fi

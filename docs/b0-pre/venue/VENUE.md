@@ -42,6 +42,28 @@ pass — sourcing RISC Zero material from the x86_64 bundle. A per-arch producer
 only that arch's evidence; the aarch64 producer never attempts RISC Zero, and an
 aarch64 bundle carrying RISC Zero material is refused on import.
 
+### Bundle architecture acceptance contract (enforced by `required_files`)
+
+| | x86_64 bundle | aarch64 bundle |
+|---|---|---|
+| SP1 tool binding, Stage-5 result, verifier material | **required** | **required** |
+| `risc0-verifier-material.json` | **required** | **refused** |
+| `Risc0.stage5-result.json` | **required** | **refused** |
+| `Risc0.tool-binding.json` | **required** | **refused** |
+| `Risc0` container / native / lock / lock-provenance / Stage-2 records | required | required |
+
+"RISC Zero material" is exactly the three files above: everything that requires a
+natively executed RISC Zero toolchain. There is no aarch64-linux RISC Zero artifact to
+install, verify, or bind, so an aarch64 bundle carries no RISC Zero tool binding at all.
+Both candidates still contribute container and dependency-graph records on both
+architectures — those come from the pinned builder image and in-container lock
+resolution, neither of which needs a prover.
+
+The bundle file set is compared **exactly in both directions**: an x86_64 bundle missing
+any RISC Zero file is refused as missing, and an aarch64 bundle containing any of them is
+refused as unmanifested/ineligible. Aggregation sources the RISC Zero material solely
+from the x86_64 bundle, and aggregating from aarch64 alone cannot produce it.
+
 ## 3. What the venue produces (and only the venue)
 
 1. Candidate `Cargo.lock` files, resolved **inside** the pinned container, that
@@ -62,11 +84,62 @@ aarch64 bundle carrying RISC Zero material is refused on import.
    the immutable non-code material actually consumed by the pinned terminal
    verifier, proven by an executable contract fixture that is
    `TEST_ONLY / NON_SELECTION / INVALID_FOR_R0 / NOT_AN_OFFICIAL_GUEST`.
-5. Complete tool identities per candidate: for each proof tool, its name, version,
-   immutable artifact identity or URL, checksum algorithm, full checksum, and
-   installation command / entrypoint. A version string alone does not preregister
-   the executable bytes; **authoritative assembly is fail-closed on any absent or
-   synthetic tool-identity value** and never invents an installer URL/checksum.
+5. Complete tool identities per candidate **and per architecture**: for each proof
+   tool, its name, version, target architecture, immutable artifact identity or URL,
+   checksum algorithm, full checksum, and installation command / entrypoint. A version
+   string alone does not preregister the executable bytes; **authoritative assembly is
+   fail-closed on any absent, synthetic, cross-architecture, or swapped tool-identity
+   value** and never invents an installer URL/checksum. SP1 ships different bytes per
+   architecture, so the ratified record names one identity per (candidate, arch);
+   RISC Zero is x86_64-only under §2 and has no aarch64 identity.
+
+### Provenance model for pinned tool artifacts
+
+A verified checksum is not a signature, and the two are never recorded as equivalent.
+The upstreams differ in what they publish, and the venue records which applies:
+
+- Base image — registry content-addressing **plus** published in-toto SBOM attestations.
+- OS packages — immutable snapshot service, `InRelease` **OpenPGP-signed** and verified
+  by apt, **and** pinned by sha256 (hash pinning supplements signature verification; it
+  never replaces it).
+- `rustup-init` — publisher-published checksum sidecar, **no signature**.
+- SP1 and RISC Zero — **no author signature and no build-provenance attestation**.
+
+For SP1 and RISC Zero the owner has confirmed ratification on an explicit
+**checksum provenance** model, and only this:
+
+1. the primary GitHub release asset,
+2. the GitHub-published asset digest,
+3. an independent re-download and re-hash,
+4. the release tag-to-commit mapping,
+5. the binary's self-reported identity.
+
+This is **checksum provenance, not signed provenance**. It is deliberately weaker, must
+never be described or recorded as signed provenance, and a successful download is never
+by itself provenance.
+
+### The APT http bootstrap exception (narrow, and what it costs)
+
+The two pinned `snapshot.debian.org` locators — and nothing else — may be fetched over
+plain http. The pinned base image carries no `ca-certificates` before the first package
+installation, so apt cannot use TLS for the very sources that install them. The exception
+is **not** generalized to Rust, GitHub, container registries, or any tool artifact; those
+are https-only, with the initial and effective hosts exact-matched.
+
+Protections that remain in force: the initial host must be exactly
+`snapshot.debian.org`; an arbitrary http host is refused; an apt locator may not be
+redirected to another origin and an https pin may not be downgraded to http; the exact
+expected `InRelease` sha256 must match **before** any package is installed; and apt's
+OpenPGP verification stays enabled.
+
+What http does cost: an on-path attacker can attempt **denial of service** or **replay**
+of previously served bytes. Neither is prevented, and neither is claimed to be. What http
+does **not** permit is **accepted-content substitution**: bytes are accepted only if they
+satisfy both the pinned `InRelease` sha256 — an exact preimage an attacker cannot forge —
+and the archive-keyring OpenPGP signature. Package payloads are in turn bound by the
+hashes inside that signed Release metadata, so substituted packages are rejected
+downstream as well. A successful replay is therefore confined to exactly the snapshot the
+owner already pinned.
 
 ### Digest representation (one coherent form)
 
