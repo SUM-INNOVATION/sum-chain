@@ -11,8 +11,11 @@
 #
 # Usage:
 #   build_container.sh <sp1|risc0> <x86_64|aarch64> <out_dir>
-# Required env (venue-supplied immutable inputs):
-#   BASE_IMAGE BASE_DIGEST APT_SNAPSHOT RUSTUP_INIT_SHA256
+# Required env (venue-supplied immutable inputs, from the ratified pins.env):
+#   BASE_IMAGE BASE_DIGEST
+#   APT_DEBIAN_URL APT_DEBIAN_INRELEASE_SHA256
+#   APT_SECURITY_URL APT_SECURITY_INRELEASE_SHA256
+#   RUSTUP_INIT_URL RUSTUP_INIT_SHA256
 #
 # OFF-VENUE dry run (no Docker / toolchains): SUMCHAIN_B0PRE_DRYRUN=1 emits
 # real-SHAPED sample files matching the exact production schema, for the
@@ -113,8 +116,24 @@ require_cmd tar
 require_full_sha256_digest BASE_DIGEST "${BASE_DIGEST:-}"
 reject_placeholder BASE_DIGEST "${BASE_DIGEST:-}"
 [ -n "${BASE_IMAGE:-}" ]  || nyr "BASE_IMAGE (immutable base) is required"
-[ -n "${APT_SNAPSHOT:-}" ] || nyr "APT_SNAPSHOT (pinned OS package snapshot) is required"
+[ -n "${APT_DEBIAN_URL:-}" ] || nyr "APT_DEBIAN_URL (pinned immutable Debian snapshot base URL) is required"
+[ -n "${APT_DEBIAN_INRELEASE_SHA256:-}" ] || nyr "APT_DEBIAN_INRELEASE_SHA256 (expected bookworm InRelease sha256) is required"
+[ -n "${APT_SECURITY_URL:-}" ] || nyr "APT_SECURITY_URL (pinned immutable debian-security snapshot base URL) is required"
+[ -n "${APT_SECURITY_INRELEASE_SHA256:-}" ] || nyr "APT_SECURITY_INRELEASE_SHA256 (expected bookworm-security InRelease sha256) is required"
+[ -n "${RUSTUP_INIT_URL:-}" ] || nyr "RUSTUP_INIT_URL (exact immutable per-arch rustup archive URL) is required"
 [ -n "${RUSTUP_INIT_SHA256:-}" ] || nyr "RUSTUP_INIT_SHA256 (Rust 1.88.0 installer checksum) is required"
+# The pinned apt sources must be immutable snapshot services, never a rolling mirror,
+# and the rustup artifact must be the EXACT immutable archive locator for THIS arch.
+require_apt_pin_url APT_DEBIAN_URL   "$APT_DEBIAN_URL"   || die "APT_DEBIAN_URL is not a pinned immutable snapshot URL"
+require_apt_pin_url APT_SECURITY_URL "$APT_SECURITY_URL" || die "APT_SECURITY_URL is not a pinned immutable snapshot URL"
+require_https_primary_url RUSTUP_INIT_URL "$RUSTUP_INIT_URL" || die "RUSTUP_INIT_URL is not an allow-listed https primary URL"
+case "$RUSTUP_INIT_URL" in
+  */rustup/dist/*) die "RUSTUP_INIT_URL uses the MUTABLE unversioned rustup/dist path; pin rustup/archive/<version>/ instead" ;;
+esac
+case "$RUSTUP_INIT_URL" in
+  *"/$arch-unknown-linux-gnu/rustup-init") ;;
+  *) die "RUSTUP_INIT_URL is not the rustup-init for arch '$arch' (cross-architecture pin): $RUSTUP_INIT_URL" ;;
+esac
 
 df="$ROOT/containers/$candidate.Dockerfile"
 [ -f "$df" ] || die "missing Dockerfile $df"
@@ -155,7 +174,11 @@ build_once() {
     --platform "linux/$oci_arch" \
     --build-arg "BASE_IMAGE=$BASE_IMAGE" \
     --build-arg "BASE_DIGEST=$BASE_DIGEST" \
-    --build-arg "APT_SNAPSHOT=$APT_SNAPSHOT" \
+    --build-arg "APT_DEBIAN_URL=$APT_DEBIAN_URL" \
+    --build-arg "APT_DEBIAN_INRELEASE_SHA256=$APT_DEBIAN_INRELEASE_SHA256" \
+    --build-arg "APT_SECURITY_URL=$APT_SECURITY_URL" \
+    --build-arg "APT_SECURITY_INRELEASE_SHA256=$APT_SECURITY_INRELEASE_SHA256" \
+    --build-arg "RUSTUP_INIT_URL=$RUSTUP_INIT_URL" \
     --build-arg "RUSTUP_INIT_SHA256=$RUSTUP_INIT_SHA256" \
     --build-arg "RUST_VERSION=1.88.0" \
     --output "type=oci,dest=$tar" \
@@ -199,8 +222,14 @@ tar1_hex="$(blake3_hex_file "$L1")"; tar2_hex="$(blake3_hex_file "$L2")"
 cmd_log="$out/${candidate}.${arch}.command.log"
 {
   printf 'docker build --no-cache --file %s --platform linux/%s --output type=oci ...(build-args pinned)\n' "$df" "$oci_arch"
-  printf 'BASE_IMAGE=%s BASE_DIGEST=%s APT_SNAPSHOT=%s RUST_VERSION=1.88.0\n' \
-    "$BASE_IMAGE" "$BASE_DIGEST" "$APT_SNAPSHOT"
+  printf 'BASE_IMAGE=%s BASE_DIGEST=%s RUST_VERSION=1.88.0\n' \
+    "$BASE_IMAGE" "$BASE_DIGEST"
+  printf 'APT_DEBIAN_URL=%s APT_DEBIAN_INRELEASE_SHA256=%s\n' \
+    "$APT_DEBIAN_URL" "$APT_DEBIAN_INRELEASE_SHA256"
+  printf 'APT_SECURITY_URL=%s APT_SECURITY_INRELEASE_SHA256=%s\n' \
+    "$APT_SECURITY_URL" "$APT_SECURITY_INRELEASE_SHA256"
+  printf 'RUSTUP_INIT_URL=%s RUSTUP_INIT_SHA256=%s\n' \
+    "$RUSTUP_INIT_URL" "$RUSTUP_INIT_SHA256"
   # The build context is the curated staged guest-source graph, not the raw tree; bind
   # its exact identity here (this line is BLAKE3-hashed into command_log_blake3 below).
   printf 'build_context=curated-staged-guest-graph staged_context_blake3=%s (candidate+guest-core+sumchain-wire+curated-root+guest-fixtures; no unrelated crate)\n' "$staged_ctx_b3"

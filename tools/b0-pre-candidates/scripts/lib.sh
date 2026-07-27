@@ -306,3 +306,270 @@ staged_context_blake3() {
       printf '%s %s\n' "$f" "$(b3sum "$f" | awk '{print $1}')"
     done ) | b3sum | awk '{print $1}'
 }
+
+# ---- Immutable-pin URL / host validation (findings F1, F6, F7) ---------------
+#
+# The former allow-list matched a URL's host with a substring test against a
+# space-joined string, accepted any redirect target, and named the stale delivery
+# host `objects.githubusercontent.com`. GitHub now serves release assets from
+# `release-assets.githubusercontent.com`. These helpers replace that with EXACT host
+# matching over BOTH the initial URL and the effective (post-redirect) URL, and refuse
+# any non-HTTPS scheme so a redirect cannot silently downgrade the transport.
+
+# Scheme of a URL, lowercased ("" when unparseable).
+url_scheme() { printf '%s' "${1:-}" | sed -n 's|^\([A-Za-z][A-Za-z0-9+.-]*\)://.*|\1|p' | tr '[:upper:]' '[:lower:]'; }
+
+# Host of a URL, lowercased, without userinfo or :port ("" when unparseable).
+url_host() {
+  printf '%s' "${1:-}" \
+    | sed -n 's|^[A-Za-z][A-Za-z0-9+.-]*://\([^/?#]*\).*|\1|p' \
+    | sed 's|^.*@||; s|:[0-9]*$||' \
+    | tr '[:upper:]' '[:lower:]'
+}
+
+# EXACT host membership. `$2...` are the allowed hosts as separate words. A host is
+# accepted only on a whole-string match, so `evil-github.com` and
+# `github.com.attacker.net` are refused where a substring test would have passed.
+host_in_allowlist() {
+  local host="${1:-}" h
+  [ -n "$host" ] || return 1
+  shift
+  for h in "$@"; do [ "$host" = "$h" ] && return 0; done
+  return 1
+}
+
+# The hosts an artifact pin may be FETCHED FROM initially (the value the owner ratifies).
+PIN_INITIAL_HOSTS="static.rust-lang.org github.com codeload.github.com"
+# The additional hosts a primary URL may REDIRECT to. GitHub release assets are
+# delivered from release-assets.githubusercontent.com (observed 2026-07); the older
+# objects.githubusercontent.com is retained because GitHub has not withdrawn it.
+PIN_REDIRECT_HOSTS="release-assets.githubusercontent.com objects.githubusercontent.com"
+# The immutable APT snapshot services.
+PIN_APT_HOSTS="snapshot.debian.org snapshot.ubuntu.com"
+# The ONLY host where plain http is tolerated, and only for the two pinned snapshot
+# locators. The exception exists because the pinned Debian base image carries no
+# ca-certificates before the first package installation, so apt cannot use TLS for the
+# very sources that install them. It is deliberately NOT generalized to Rust, GitHub,
+# container registries, or any tool artifact — those are https-only (see
+# require_https_primary_url).
+#
+# What the exception does and does not cost:
+#   * http permits an on-path attacker to DENY service or REPLAY previously served
+#     bytes. Neither is prevented here, and neither is claimed to be.
+#   * http does NOT permit accepted-content substitution. Bytes are accepted only if
+#     they satisfy BOTH the pinned InRelease sha256 (an exact preimage the attacker
+#     cannot forge) AND apt's OpenPGP verification against the Debian archive keyring.
+#     Package payloads are in turn bound by the hashes inside that signed Release
+#     metadata, so substituted packages are rejected downstream as well. A replay is
+#     therefore confined to exactly the snapshot the owner already pinned.
+PIN_APT_HTTP_HOST="snapshot.debian.org"
+
+# An artifact pin URL: HTTPS only, exact-host allow-listed. Prints nothing on success.
+require_https_primary_url() {
+  local what="$1" url="${2:-}" scheme host
+  scheme="$(url_scheme "$url")"; host="$(url_host "$url")"
+  [ -n "$host" ] || { printf 'unparseable URL for %s: %s\n' "$what" "$url" >&2; return 1; }
+  [ "$scheme" = "https" ] \
+    || { printf '%s must use https (got %s): %s\n' "$what" "${scheme:-none}" "$url" >&2; return 1; }
+  # shellcheck disable=SC2086
+  host_in_allowlist "$host" $PIN_INITIAL_HOSTS \
+    || { printf "%s host '%s' is not an allow-listed primary source: %s\n" "$what" "$host" "$url" >&2; return 1; }
+  return 0
+}
+
+# An APT snapshot pin URL: exact-host allow-listed immutable snapshot service, and — for
+# plain http — the ONE host the narrow bootstrap exception covers. Integrity never rests
+# on the transport: the InRelease bytes are OpenPGP-verified by apt AND pinned by sha256.
+require_apt_pin_url() {
+  local what="$1" url="${2:-}" scheme host
+  scheme="$(url_scheme "$url")"; host="$(url_host "$url")"
+  [ -n "$host" ] || { printf 'unparseable URL for %s: %s\n' "$what" "$url" >&2; return 1; }
+  case "$scheme" in http|https) ;; *) printf '%s must be http(s) (got %s)\n' "$what" "${scheme:-none}" >&2; return 1 ;; esac
+  # shellcheck disable=SC2086
+  host_in_allowlist "$host" $PIN_APT_HOSTS \
+    || { printf "%s host '%s' is not an immutable snapshot service: %s\n" "$what" "$host" "$url" >&2; return 1; }
+  if [ "$scheme" = "http" ] && [ "$host" != "$PIN_APT_HTTP_HOST" ]; then
+    printf "%s: plain http is permitted ONLY for %s (got host '%s'); use https\n" \
+      "$what" "$PIN_APT_HTTP_HOST" "$host" >&2
+    return 1
+  fi
+  case "$url" in */) ;; *) printf '%s must end in "/" (it is a repository base URL): %s\n' "$what" "$url" >&2; return 1 ;; esac
+  return 0
+}
+
+# PURE policy over an APT (initial URL, effective URL) pair — no network. The snapshot
+# service answers a pinned locator with a redirect to a content-addressed path on the
+# SAME host, so the effective host must equal the initial host exactly: an apt pin may
+# never be redirected to another origin, and an https pin may never be downgraded to
+# http. Prints the effective host on success.
+require_apt_effective_url() {
+  local what="$1" url="${2:-}" eff="${3:-}" host eff_host scheme eff_scheme
+  host="$(url_host "$url")";     scheme="$(url_scheme "$url")"
+  eff_host="$(url_host "$eff")"; eff_scheme="$(url_scheme "$eff")"
+  [ -n "$eff_host" ] || { printf '%s: unparseable effective URL: %s\n' "$what" "$eff" >&2; return 1; }
+  [ "$eff_host" = "$host" ] \
+    || { printf "%s: redirected off the pinned snapshot host ('%s' -> '%s')\n" "$what" "$host" "$eff_host" >&2; return 1; }
+  case "$eff_scheme" in http|https) ;; *) printf '%s: effective URL scheme %s is not http(s)\n' "$what" "${eff_scheme:-none}" >&2; return 1 ;; esac
+  if [ "$scheme" = "https" ] && [ "$eff_scheme" != "https" ]; then
+    printf '%s: https pin was downgraded to %s by redirect: %s\n' "$what" "$eff_scheme" "$eff" >&2
+    return 1
+  fi
+  printf '%s' "$eff_host"
+  return 0
+}
+
+# Resolve an APT locator's redirect chain WITHOUT downloading the body, then apply the
+# pure policy above.
+require_apt_redirect_chain() {
+  local what="$1" url="${2:-}" eff
+  eff="$(curl -sSL -o /dev/null -w '%{url_effective}' --max-redirs 5 "$url" 2>/dev/null)" || {
+    printf '%s: could not resolve redirect chain for %s\n' "$what" "$url" >&2; return 1; }
+  require_apt_effective_url "$what" "$url" "$eff"
+}
+
+# PURE decision over an (initial URL, effective URL) pair — no network. Accepts only
+# when the initial URL is an allow-listed https primary AND the effective URL is https on
+# either that same primary host or an allow-listed delivery host. Split out from the
+# fetching wrapper so the redirect policy is unit-testable offline.
+# Prints the effective host on success.
+require_allowed_effective_url() {
+  local what="$1" url="${2:-}" eff="${3:-}" eff_host eff_scheme
+  require_https_primary_url "$what" "$url" || return 1
+  eff_host="$(url_host "$eff")"; eff_scheme="$(url_scheme "$eff")"
+  [ -n "$eff_host" ] || { printf '%s: unparseable effective URL: %s\n' "$what" "$eff" >&2; return 1; }
+  [ "$eff_scheme" = "https" ] \
+    || { printf '%s: redirect downgraded transport to %s: %s\n' "$what" "${eff_scheme:-none}" "$eff" >&2; return 1; }
+  # shellcheck disable=SC2086
+  host_in_allowlist "$eff_host" $PIN_INITIAL_HOSTS $PIN_REDIRECT_HOSTS \
+    || { printf "%s: redirect target host '%s' is not allow-listed\n" "$what" "$eff_host" >&2; return 1; }
+  printf '%s' "$eff_host"
+  return 0
+}
+
+# Resolve a URL's redirect chain WITHOUT downloading the body, then apply the pure
+# policy above to the (initial, effective) pair.
+require_allowed_redirect_chain() {
+  local what="$1" url="${2:-}" eff
+  require_https_primary_url "$what" "$url" || return 1
+  eff="$(curl -sSL -o /dev/null -w '%{url_effective}' --max-redirs 5 "$url" 2>/dev/null)" || {
+    printf '%s: could not resolve redirect chain for %s\n' "$what" "$url" >&2; return 1; }
+  require_allowed_effective_url "$what" "$url" "$eff"
+}
+
+# ---- OCI index platform validation (finding F5) ------------------------------
+#
+# PIN-PROPOSAL.md documented that the base manifest's platform.architecture must equal
+# the target arch, but nothing implemented it: `docker manifest inspect` resolves any
+# digest regardless of platform, so the two per-arch digests could be SWAPPED and still
+# pass. These helpers enumerate the immutable INDEX's child manifests and bind each
+# proposed digest to its declared platform. Purely metadata — no image is ever run, so
+# the check holds identically on a host with QEMU/binfmt registered.
+
+# verify_oci_index_platforms <index.json> <x86_64_digest> <aarch64_digest>
+# Exit 0 only when BOTH digests are children of that index AND each declares the
+# expected linux platform. Prints one diagnostic line per failure.
+verify_oci_index_platforms() {
+  python3 - "$1" "$2" "$3" <<'PY'
+import json, sys
+
+index_path, want_x86, want_arm = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    doc = json.load(open(index_path))
+except Exception as exc:                                  # noqa: BLE001
+    sys.exit(f"cannot parse OCI index {index_path}: {exc}")
+
+children = doc.get("manifests")
+if not isinstance(children, list) or not children:
+    sys.exit("OCI index carries no 'manifests' array (is this an index/manifest list?)")
+
+by_digest = {}
+for m in children:
+    if isinstance(m, dict) and isinstance(m.get("digest"), str):
+        by_digest[m["digest"]] = m.get("platform") or {}
+
+# (proposed digest, expected OCI architecture, label)
+expect = ((want_x86, "amd64", "x86_64"), (want_arm, "arm64", "aarch64"))
+errors = []
+for digest, want_arch, label in expect:
+    plat = by_digest.get(digest)
+    if plat is None:
+        errors.append(f"base_digest.{label} {digest} is NOT a child of the pinned index")
+        continue
+    got_os, got_arch = plat.get("os"), plat.get("architecture")
+    if got_os != "linux":
+        errors.append(f"base_digest.{label} declares os={got_os!r}, expected 'linux'")
+    if got_arch != want_arch:
+        errors.append(
+            f"base_digest.{label} declares platform.architecture={got_arch!r}, "
+            f"expected {want_arch!r} (swapped or wrong-arch digest)"
+        )
+
+if want_x86 == want_arm:
+    errors.append("base_digest.x86_64 and base_digest.aarch64 are the same digest")
+
+if errors:
+    sys.exit("; ".join(errors))
+print("ok")
+PY
+}
+
+# ---- Per-architecture tool identities (finding F3) ---------------------------
+#
+# SP1 ships genuinely different bytes per architecture and RISC Zero publishes no
+# aarch64-linux artifact at all, so a single SP1_TOOL_IDENTITY / RISC0_TOOL_IDENTITY
+# variable could not describe both hosts: on aarch64 the old contract would have
+# downloaded the x86_64 RISC Zero tarball and bound an x86_64 binary as aarch64
+# evidence. The ratified record now names one variable per (candidate, arch).
+
+# tool_identity_var <Sp1|Risc0> <x86_64|aarch64> -> the ratified variable NAME.
+tool_identity_var() {
+  case "$1/$2" in
+    Sp1/x86_64)   printf 'SP1_TOOL_IDENTITY_X86_64' ;;
+    Sp1/aarch64)  printf 'SP1_TOOL_IDENTITY_AARCH64' ;;
+    Risc0/x86_64) printf 'RISC0_TOOL_IDENTITY_X86_64' ;;
+    Risc0/aarch64)
+      die "RISC Zero has no aarch64 tool identity: Groth16 / verifier-material extraction is native-x86_64-only (docs/b0-pre/venue/VENUE.md §2) and upstream publishes no aarch64-linux artifact" ;;
+    *) die "no tool-identity variable for candidate='$1' arch='$2'" ;;
+  esac
+}
+
+# Resolve the ratified tool-identity FILE for (candidate, native arch), fail-closed on
+# an absent variable, a missing file, or a file whose declared `arch` is not this host's
+# — which is what catches a swapped or cross-architecture identity BEFORE any download,
+# install, build, or evidence generation.
+resolve_tool_identity_file() {
+  local cand="$1" arch="$2" var path declared
+  var="$(tool_identity_var "$cand" "$arch")"
+  eval "path=\${$var:-}"
+  [ -n "$path" ] || nyr "$var (owner-ratified per-arch tool-identity metadata) is required"
+  [ -f "$path" ] || die "$var file $path not found"
+  declared="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("arch",""))' "$path" 2>/dev/null || true)"
+  [ -n "$declared" ] \
+    || die "$var file $path does not declare an \"arch\" field; refusing an unlabelled tool identity"
+  [ "$declared" = "$arch" ] \
+    || die "$var file $path declares arch='$declared' but this native host is '$arch' (cross-architecture or swapped identity)"
+  printf '%s' "$path"
+}
+
+# ---- Pinned-only APT sources (finding F4) ------------------------------------
+#
+# The Debian bookworm base image ships NO /etc/apt/sources.list; it ships deb822
+# /etc/apt/sources.list.d/debian.sources pointing at the ROLLING deb.debian.org mirror.
+# Writing sources.list alone left that rolling source active alongside the pinned
+# snapshot, so apt could take a newer package from deb.debian.org and silently defeat
+# APT_SNAPSHOT. The Dockerfiles remove every pre-existing source before the first apt
+# update and then assert that none survives, using EXACTLY this pattern.
+ROLLING_APT_SOURCE_RE='(deb|security)\.debian\.org'
+
+# Exit non-zero if any apt source under <root> still references a rolling Debian mirror.
+# <root> is a filesystem prefix so the same rule can be unit-tested against a fabricated
+# /etc/apt tree without a container.
+assert_no_rolling_apt_sources() {
+  local root="${1:-}"
+  [ -n "$root" ] || { printf 'assert_no_rolling_apt_sources: root required\n' >&2; return 2; }
+  if grep -RIqsE "$ROLLING_APT_SOURCE_RE" "$root/etc/apt/sources.list" "$root/etc/apt/sources.list.d/" 2>/dev/null; then
+    printf 'REFUSED: a rolling Debian apt source is still active under %s\n' "$root" >&2
+    return 1
+  fi
+  return 0
+}

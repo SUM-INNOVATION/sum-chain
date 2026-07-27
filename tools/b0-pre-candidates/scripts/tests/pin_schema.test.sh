@@ -22,15 +22,21 @@ command -v python3 >/dev/null 2>&1 || { echo "SKIP: python3 absent (verify_pins 
 # The exact dotted paths verify_pins.sh reads via pget (kept in lockstep with the
 # script; a schema change in one must change the other).
 read_paths='base_image
+base_index_digest
 base_digest.x86_64
 base_digest.aarch64
-apt_snapshot
+apt.debian_url
+apt.debian_inrelease_sha256
+apt.debian_security_url
+apt.debian_security_inrelease_sha256
+rustup_init.version
 rustup_init.x86_64.url
 rustup_init.x86_64.sha256
 rustup_init.aarch64.url
 rustup_init.aarch64.sha256
 tool_identities[0].name
 tool_identities[0].version
+tool_identities[0].arch
 tool_identities[0].artifact_identity
 tool_identities[0].checksum_algorithm
 tool_identities[0].checksum_hex
@@ -62,8 +68,9 @@ $read_paths
 EOF
 [ "$miss" = 0 ] && ok "documented fixture resolves every verify_pins.sh read-path (JSON shape only; NOT a valid/ratified pin set)"
 
-# 2. Discrimination: the OLD wrong shape must FAIL the read-path check (proves the test
-#    catches drift; rustup_init_sha256 has no per-arch .url).
+# 2. Discrimination: both RETIRED shapes must FAIL the read-path check (proves the test
+#    catches drift). `rustup_init_sha256` has no per-arch `.url`; the scalar
+#    `apt_snapshot` timestamp has no `apt.debian_url` / InRelease hash fields.
 wrong="$TMPD/pinschema.wrong.$$.json"
 cat > "$wrong" <<'JSON'
 { "base_image":"", "base_digest":{"x86_64":"","aarch64":""}, "apt_snapshot":"",
@@ -75,7 +82,19 @@ if path_present "$wrong" "rustup_init.x86_64.url" 2>/dev/null; then
 else
   ok "control: old rustup_init_sha256 shape correctly FAILS the read-path check"
 fi
+if path_present "$wrong" "apt.debian_inrelease_sha256" 2>/dev/null; then
+  bad "control: retired apt_snapshot shape unexpectedly satisfied apt.debian_inrelease_sha256"
+else
+  ok "control: retired scalar apt_snapshot shape correctly FAILS the read-path check"
+fi
 rm -f "$wrong"
+
+# 2b. The committed fixture must NOT have regressed to the retired keys.
+if path_present "$FIXTURE" "apt_snapshot" 2>/dev/null; then
+  bad "fixture still carries the retired scalar apt_snapshot key"
+else
+  ok "fixture carries no retired apt_snapshot key"
+fi
 
 if ! command -v curl >/dev/null 2>&1; then
   echo "SKIP tests 3-4: curl absent (verify_pins requires it); structural checks above stand"

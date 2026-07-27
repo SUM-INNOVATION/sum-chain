@@ -72,9 +72,26 @@ fn stage5_file(c: &str) -> String {
 const SP1_MATERIAL: &str = "sp1-verifier-material.json";
 const RISC0_MATERIAL: &str = "risc0-verifier-material.json";
 
-/// The exact set of required file names for a per-arch bundle. x86_64 additionally
-/// carries the RISC Zero verifier material + RISC Zero Stage-5 result (§2:
-/// x86_64-only); aarch64 must NOT.
+/// The exact set of required file names for a per-arch bundle.
+///
+/// Architecture acceptance contract (`docs/b0-pre/venue/VENUE.md` §2):
+///
+/// * **x86_64** — SP1 **and** the RISC Zero material: the RISC Zero verifier material,
+///   the RISC Zero Stage-5 result, and the RISC Zero tool binding.
+/// * **aarch64** — **SP1 only** for everything that requires a natively executed RISC
+///   Zero toolchain. Groth16 / `stark2snark` / verifier-material extraction are
+///   native-x86_64-only and upstream publishes no aarch64-linux RISC Zero artifact, so
+///   there is no aarch64 RISC Zero tool identity to download, install, verify, or bind.
+///
+/// Both candidates still contribute their *container* and *dependency-graph* records on
+/// both architectures (`Risc0.container.json`, `Risc0.native.json`, `Risc0.Cargo.lock`,
+/// `Risc0.lock-provenance.json`, `Risc0.stage2-audit.json`): those are produced by the
+/// pinned builder image and the in-container lock resolution, neither of which needs a
+/// RISC Zero prover to run. What aarch64 must NOT carry is RISC Zero **material**.
+///
+/// Because the bundle file set is compared EXACTLY in both directions, an aarch64 bundle
+/// that carries any RISC Zero material is refused as an unmanifested/ineligible file
+/// rather than silently accepted.
 pub fn required_files(arch: &str) -> Vec<String> {
     let mut v = Vec::new();
     for c in CANDIDATES {
@@ -83,16 +100,37 @@ pub fn required_files(arch: &str) -> Vec<String> {
         v.push(lock_file(c));
         v.push(lock_prov_file(c));
         v.push(stage2_file(c));
-        v.push(tool_binding_file(c));
     }
+    v.push(tool_binding_file("Sp1"));
     v.push(stage5_file("Sp1"));
     v.push(SP1_MATERIAL.to_string());
     if arch == arch_bundle::ARCH_X86_64 {
+        v.push(tool_binding_file("Risc0"));
         v.push(stage5_file("Risc0"));
         v.push(RISC0_MATERIAL.to_string());
     }
     v.sort();
     v
+}
+
+/// The RISC Zero material an x86_64 bundle MUST carry and an aarch64 bundle MUST NOT.
+/// Kept next to `required_files` so the two can never drift apart.
+pub fn risc0_material_files() -> Vec<String> {
+    vec![
+        tool_binding_file("Risc0"),
+        stage5_file("Risc0"),
+        RISC0_MATERIAL.to_string(),
+    ]
+}
+
+/// Candidates that contribute a verified tool binding on `arch`. SP1 on both; RISC Zero
+/// on x86_64 only, for the same reason its material is x86_64-only.
+fn tool_binding_candidates(arch: &str) -> &'static [&'static str] {
+    if arch == arch_bundle::ARCH_X86_64 {
+        &["Sp1", "Risc0"]
+    } else {
+        &["Sp1"]
+    }
 }
 
 /// One manifested file: its name, the BLAKE3 (bare 64-hex) of its bytes, and its
@@ -731,9 +769,11 @@ pub fn import_verify(dir: &Path) -> Result<ImportedArchBundle, EvidenceError> {
         stage2_reports.push(rec);
     }
 
-    // (11) tool bindings — BOTH candidates, verified + bound.
+    // (11) tool bindings — verified + bound. SP1 on both architectures; RISC Zero on
+    //      x86_64 ONLY (VENUE.md §2: there is no aarch64 RISC Zero toolchain to install
+    //      and bind, so an aarch64 bundle carries no RISC Zero tool binding at all).
     let mut tool_bindings: Vec<ToolBindingRecord> = Vec::new();
-    for c in CANDIDATES {
+    for c in tool_binding_candidates(&arch).iter().copied() {
         let tf = tool_binding_file(c);
         let recs: Vec<ToolBindingRecord> = parse(&tf, &read_file(dir, &tf)?)?;
         if recs.is_empty() {
@@ -1020,10 +1060,14 @@ pub fn write_test_only_bundle_dir(dir: &Path, arch: &str) -> Result<(), String> 
                 "install_entrypoint":format!("cargo:{name}@{ver}"),
                 "container_digest":builder,"source_commit":commit,"test_only":false}));
         }
-        w(
-            &tool_binding_file(c),
-            &serde_json::to_vec_pretty(&bindings).unwrap(),
-        )?;
+        // RISC Zero contributes a tool binding on x86_64 ONLY (VENUE.md §2); on aarch64
+        // the bundle carries no RISC Zero tool binding at all.
+        if c == "Sp1" || arch == arch_bundle::ARCH_X86_64 {
+            w(
+                &tool_binding_file(c),
+                &serde_json::to_vec_pretty(&bindings).unwrap(),
+            )?;
+        }
         if c == "Sp1" || arch == arch_bundle::ARCH_X86_64 {
             let cases: Vec<serde_json::Value> = crate::venue::stage5::REQUIRED_MUTATION_CASES
                 .iter()

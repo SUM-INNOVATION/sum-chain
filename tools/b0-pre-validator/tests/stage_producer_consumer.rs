@@ -69,7 +69,10 @@ fn generate_stage6_inputs(work: &Path) {
     }
     dry("resolve_lock.sh", &["sp1", w]);
     dry("resolve_lock.sh", &["risc0", w]);
-    dry("tool_identities.sh", &[w]);
+    // x86_64: the architecture that carries BOTH candidates' tool bindings. aarch64
+    // binds SP1 only (VENUE.md §2), so the Stage-6 aggregate inputs are generated here
+    // from the x86_64 contract.
+    dry("tool_identities.sh", &[w, "x86_64"]);
     // the real aggregation logic runs for real (no dry env needed).
     run("aggregate_stage6_inputs.sh", &[w]);
 

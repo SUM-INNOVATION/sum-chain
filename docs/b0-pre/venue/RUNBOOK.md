@@ -52,13 +52,39 @@ test -f tools/b0-pre-candidates/scripts/run_authoritative.sh \
   || { echo "ratified commit lacks the venue pipeline — abort"; exit 1; }
 
 # ratified immutable venue-input pins (values from the ratified PIN-PROPOSAL, NOT invented here)
-export BASE_IMAGE=...            # immutable base image ref
-export BASE_DIGEST=sha256:...    # per-arch base manifest digest (use this host's arch)
-export APT_SNAPSHOT=...          # pinned OS package snapshot
-export RUSTUP_INIT_SHA256=...    # Rust 1.88.0 installer checksum for THIS arch
-export SP1_TOOL_IDENTITY=...     # path to the ratified SP1 tool-identity metadata
-export RISC0_TOOL_IDENTITY=...   # path to the ratified RISC Zero tool-identity metadata
+
+# --- identical on BOTH hosts ---
+export BASE_IMAGE=...                      # immutable base image ref
+export APT_DEBIAN_URL=...                  # pinned immutable snapshot base URL, trailing '/'
+export APT_DEBIAN_INRELEASE_SHA256=...     # expected sha256 of its bookworm InRelease
+export APT_SECURITY_URL=...                # pinned immutable debian-security snapshot base URL
+export APT_SECURITY_INRELEASE_SHA256=...   # expected sha256 of its bookworm-security InRelease
+
+# --- THIS host's architecture only ---
+export BASE_DIGEST=sha256:...              # per-arch base manifest digest, a child of the pinned index
+export RUSTUP_INIT_URL=...                 # EXACT immutable rustup archive URL for THIS arch
+export RUSTUP_INIT_SHA256=...              # sha256 of that exact artifact
+
+# --- tool identities: ONE file per (candidate, architecture) ---
+# Each file declares the arch it is for; the producer selects it only after the native-arch
+# gate passes and refuses a file whose declared arch is not this host's, so a swapped or
+# cross-architecture identity fails before any download, build, or evidence.
+export SP1_TOOL_IDENTITY_X86_64=...        # on HOST_X64
+export SP1_TOOL_IDENTITY_AARCH64=...       # on HOST_ARM
+export RISC0_TOOL_IDENTITY_X86_64=...      # HOST_X64 ONLY — RISC Zero is native-x86_64-only
 ```
+
+> **Architecture acceptance contract (aarch64 RISC Zero).** There is no
+> `RISC0_TOOL_IDENTITY_AARCH64`, and that is correct rather than a gap: VENUE.md §2 keeps
+> Groth16 / `stark2snark` / verifier-material extraction native-x86_64-only, and upstream
+> publishes no aarch64-linux RISC Zero artifact. The validator's `required_files()` matches
+> that policy — an **x86_64** bundle must carry the RISC Zero material
+> (`risc0-verifier-material.json`, `Risc0.stage5-result.json`, `Risc0.tool-binding.json`)
+> and an **aarch64** bundle must not carry any of it. `tool_identities.sh` skips RISC Zero
+> on aarch64 rather than binding x86_64 bytes as aarch64 evidence, which the former
+> single-variable contract would have done. Both candidates still contribute their
+> container and dependency-graph records on both architectures; those need the pinned
+> builder image, not a RISC Zero prover.
 
 ## 1b. Preflight before spending venue time (off-venue safe, read-only)
 
