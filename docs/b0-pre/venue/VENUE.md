@@ -225,11 +225,16 @@ metrics recorded in provenance — they never gate qualification, candidate
 selection, or the B0-FINAL tie-break. (This is a preregistration correction:
 the former `>= 16`-core / `>= 64`-GiB / 35%-cap proving-resource gate is removed.)
 
-- **Benchmark fairness** comes from running *both* candidates under identical
-  controlled conditions on the same physical host per architecture (same cpuset,
-  memory limit, governor, isolation, workload, warmup, and iteration policy) and
-  recording all configured/detected resources — not from excluding weaker devices
-  or requiring a particular absolute host size.
+- **Benchmark fairness** is a *within-architecture, same-physical-host candidate
+  pairing*: for each architecture, SP1 and RISC Zero (RISC Zero on x86_64 only) run
+  on the **same physical host** under identical controlled conditions (same cpuset,
+  memory limit, governor, isolation, workload, warmup, and iteration policy), and all
+  configured/detected resources are recorded. Fairness comes from that per-host pairing,
+  not from excluding weaker devices or requiring a particular absolute host size. It
+  does **not** require the x86_64 and aarch64 hosts to match each other in core count,
+  memory, or any absolute size — only that each candidate pair shares its own host. No
+  minimum ARM (or x86) host size is imposed; in particular there is no 16-core ARM
+  restriction (the former `>= 16`-core proving-resource gate was removed, above).
 - The **35% resource budget** is a recommended *default local operating policy* an
   operator may configure for their device. It is not consensus, proof validity,
   candidate selection, or hardware eligibility.

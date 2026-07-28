@@ -110,6 +110,21 @@ print(b["builder_oci_digest"])
 PY
 }
 
+# Defect 2: the runnable, VERIFIED local image reference for a (candidate, arch). build_
+# container.sh loaded the verified OCI layout into the daemon, PROVED the loaded image
+# corresponds to it, and wrote a TYPED, versioned sidecar (candidate/arch/manifest+config
+# digests/runnable image id). Every in-container `docker run --pull never` below uses THIS
+# proven identity — never the never-loaded `oci:local/...` placeholder. resolve_runnable_ref
+# revalidates every field against THIS (candidate, arch) and the CURRENT verified
+# container.json manifest digest, and confirms the image is still loaded; a malformed,
+# stale (prior run / prior source commit), cross-candidate, cross-architecture, or
+# missing-image sidecar fails closed.
+runnable_ref_of() {
+  local cand="$1" arch="$2" work="$3" cur
+  cur="$(builder_digest_of "$cand" "$arch" "$work")"
+  resolve_runnable_ref "$work/$cand.$arch.runnable-ref" "$cand" "$arch" "$cur" "$ROOT"
+}
+
 # ---- Disk telemetry ---------------------------------------------------------
 # Records free space at start, per-stage free + work-dir usage, the PEAK work-dir usage,
 # and the FINAL retained evidence size into $work/disk-telemetry.tsv. Each large stage is
@@ -211,12 +226,16 @@ produce_arch_authoritative() {
 
   note "== Stage 1: resolve candidate locks INSIDE the pinned builder image -> work =="
   require_headroom_gib "$work" 10 "Stage 1 in-container lock resolution"
-  local sp1_builder risc0_builder
+  local sp1_builder risc0_builder sp1_ref risc0_ref
   sp1_builder="$(builder_digest_of sp1 "$arch" "$work")"
   risc0_builder="$(builder_digest_of risc0 "$arch" "$work")"
-  SCHEMA_ARCH="$schema_arch" BUILDER_IMAGE_REF="oci:local/b0pre-sp1-$arch" \
+  # Defect 2: run inside the VERIFIED, loaded image content addresses (not oci:local/...,
+  # which was never loaded). BUILDER_IMAGE_DIGEST stays the recorded manifest identity.
+  sp1_ref="$(runnable_ref_of sp1 "$arch" "$work")"
+  risc0_ref="$(runnable_ref_of risc0 "$arch" "$work")"
+  SCHEMA_ARCH="$schema_arch" BUILDER_IMAGE_REF="$sp1_ref" \
     BUILDER_IMAGE_DIGEST="$sp1_builder" bash "$HERE/resolve_lock.sh" sp1 "$work"
-  SCHEMA_ARCH="$schema_arch" BUILDER_IMAGE_REF="oci:local/b0pre-risc0-$arch" \
+  SCHEMA_ARCH="$schema_arch" BUILDER_IMAGE_REF="$risc0_ref" \
     BUILDER_IMAGE_DIGEST="$risc0_builder" bash "$HERE/resolve_lock.sh" risc0 "$work"
 
   note "== Stage 2: PER-CANDIDATE in-container cargo metadata + audit -> typed record -> work =="
@@ -241,7 +260,21 @@ produce_arch_authoritative() {
   disk_stage "stage4-verifier-material" "$work"
 
   note "== Stage 5b: real tool identities (download->verify->install->verify->bind) -> work =="
-  bash "$HERE/tool_identities.sh" "$work" "$arch"
+  # Defect 3: thread the VERIFIED per-candidate builder manifest digests and the ratified
+  # source commit into tool_identities.sh, which binds them as each ToolBindingRecord's
+  # container_digest / source_commit. sp1_builder / risc0_builder are builder_digest_of()
+  # over the two-clean-build-verified container.json (never a synthetic value or a mutable
+  # tag), and tool_src_commit is the clean ratified HEAD (== RATIFIED_SOURCE_COMMIT, already
+  # asserted in Stage 0). RISC Zero is threaded ONLY on x86_64; aarch64 stays SP1-only
+  # (VENUE.md §2), so no RISC Zero identity reaches an aarch64 bundle.
+  local tool_src_commit; tool_src_commit="$(git -C "$ROOT" rev-parse HEAD)"
+  if [ "$arch" = "x86_64" ]; then
+    SP1_BUILDER_DIGEST="$sp1_builder" RISC0_BUILDER_DIGEST="$risc0_builder" \
+      SOURCE_COMMIT="$tool_src_commit" bash "$HERE/tool_identities.sh" "$work" "$arch"
+  else
+    SP1_BUILDER_DIGEST="$sp1_builder" SOURCE_COMMIT="$tool_src_commit" \
+      bash "$HERE/tool_identities.sh" "$work" "$arch"
+  fi
 
   note "== Stage 5c: per-candidate genuine verifier fixture + mutation execution -> typed record -> work =="
   require_headroom_gib "$work" 10 "Stage 5 verifier fixture + mutation execution"
@@ -269,7 +302,7 @@ STAGE2_ALLOWED_LICENSES='["MIT","Apache-2.0","MIT OR Apache-2.0","Apache-2.0 OR 
 produce_stage2() {
   local cand="$1" arch="$2" schema_arch="$3" work="$4"
   local lc; lc="$(printf '%s' "$cand" | tr '[:upper:]' '[:lower:]')"
-  local ref="oci:local/b0pre-$lc-$arch"
+  local ref; ref="$(runnable_ref_of "$lc" "$arch" "$work")"  # Defect 2: verified loaded image
   local builder commit lock_hex
   builder="$(builder_digest_of "$lc" "$arch" "$work")"
   commit="$(git -C "$ROOT" rev-parse HEAD)"
@@ -327,7 +360,7 @@ PY
 produce_stage5() {
   local cand="$1" arch="$2" schema_arch="$3" work="$4"
   local lc; lc="$(printf '%s' "$cand" | tr '[:upper:]' '[:lower:]')"
-  local ref="oci:local/b0pre-$lc-$arch"
+  local ref; ref="$(runnable_ref_of "$lc" "$arch" "$work")"  # Defect 2: verified loaded image
   local builder commit tool_hex
   builder="$(builder_digest_of "$lc" "$arch" "$work")"
   commit="$(git -C "$ROOT" rev-parse HEAD)"

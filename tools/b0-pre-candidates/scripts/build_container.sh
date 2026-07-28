@@ -141,6 +141,30 @@ df="$ROOT/containers/$candidate.Dockerfile"
   || die "source tree is not clean; refuse to build from a dirty state"
 source_commit="$(git -C "$ROOT" rev-parse HEAD)"
 
+# Defect 1 (clean-build reproducibility): pin ALL build metadata timestamps to a single
+# deterministic epoch — the ratified source commit's committer date — so the two clean
+# --no-cache builds below (and any independent re-run from the same commit) produce a
+# byte-identical image config (`created` + per-step history timestamps) and, via the OCI
+# exporter's rewrite-timestamp=true, byte-identical layer file mtimes. PROVE the value
+# comes from the EXACT checked-out HEAD that equals RATIFIED_SOURCE_COMMIT (Stage 0 already
+# asserted this on a clean tree; re-assert here as defense in depth), derive the epoch from
+# that explicit commit, and validate it is a well-formed positive base-10 integer BEFORE
+# Docker. Requires BuildKit >= 0.11 (rewrite-timestamp); an older builder fails closed on
+# the unknown export option rather than silently emitting nondeterministic layers.
+[ -n "${RATIFIED_SOURCE_COMMIT:-}" ] \
+  || nyr "RATIFIED_SOURCE_COMMIT is required to derive a deterministic SOURCE_DATE_EPOCH (from the ratified pins.env)"
+[ "$source_commit" = "$RATIFIED_SOURCE_COMMIT" ] \
+  || die "HEAD ($source_commit) != RATIFIED_SOURCE_COMMIT ($RATIFIED_SOURCE_COMMIT); refusing to derive a build epoch from an unratified commit"
+SOURCE_DATE_EPOCH="$(git -C "$ROOT" show -s --format=%ct "$source_commit")"
+require_valid_source_date_epoch "$SOURCE_DATE_EPOCH"
+export SOURCE_DATE_EPOCH
+
+# Stale-state defense (Defect 2 hardening): remove any runnable-ref sidecar (and its temp)
+# from a prior or failed run for THIS (candidate, arch) BEFORE building, so a failed or new
+# build can never reuse a previously loaded image reference. The sidecar is (re)written
+# atomically only after full verification below.
+rm -f "$out/$candidate.$arch.runnable-ref" "$out/$candidate.$arch.runnable-ref.tmp"
+
 # Stage the CURATED, MINIMAL, reproduced-layout build context (only the official guest
 # dep graph: candidate workspace + guest-core + sumchain-wire + curated workspace root +
 # frozen guest fixtures — NO unrelated production crate). This is the authoritative
@@ -169,9 +193,15 @@ build_once() {
   # layout export only; never a registry push. --platform pins the native platform
   # descriptor into the exported layout (emulation is already barred above).
   local tar="$1" log="$2"
+  # SOURCE_DATE_EPOCH pins the config `created` + history timestamps; the exporter's
+  # rewrite-timestamp=true normalizes every produced layer's file mtimes to that epoch.
+  # Together they remove the two nondeterministic-byte sources the venue observed
+  # (differing config `created` and differing layer digests) WITHOUT weakening the
+  # manifest-identity equality gate below.
   docker build --no-cache \
     --file "$df" \
     --platform "linux/$oci_arch" \
+    --build-arg "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" \
     --build-arg "BASE_IMAGE=$BASE_IMAGE" \
     --build-arg "BASE_DIGEST=$BASE_DIGEST" \
     --build-arg "APT_DEBIAN_URL=$APT_DEBIAN_URL" \
@@ -181,7 +211,7 @@ build_once() {
     --build-arg "RUSTUP_INIT_URL=$RUSTUP_INIT_URL" \
     --build-arg "RUSTUP_INIT_SHA256=$RUSTUP_INIT_SHA256" \
     --build-arg "RUST_VERSION=1.88.0" \
-    --output "type=oci,dest=$tar" \
+    --output "type=oci,dest=$tar,rewrite-timestamp=true" \
     "$STAGE" >"$log" 2>&1
 }
 
@@ -212,6 +242,63 @@ m1="$(oci_manifest_digest "$L1" "$D1" "$E1")"
 m2="$(oci_manifest_digest "$L2" "$D2" "$E2")"
 [ "$m1" = "$m2" ] || die "two clean builds diverge in OCI manifest identity: $m1 != $m2 (candidate=$candidate arch=$arch)"
 builder_digest="$m1"
+
+# Defect 2: the verified OCI layout was previously never loaded — downstream
+# `docker run --pull never oci:local/...` referenced an image the daemon never had, so
+# every in-container stage would have failed. Load the VERIFIED build-1 layout and PROVE
+# the loaded image corresponds to it BEFORE anything runs inside it. No fifth build, no
+# re-derivation; no mutable tag stands in for the verified identity; --pull never; no
+# registry push. The proven-identity reference (a verified content address) is handed to
+# the downstream stages via a work-dir sidecar that run_authoritative.sh reads.
+config_digest="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["config_digest"])' "$E1")"
+printf '%s' "$config_digest" | grep -Eq '^sha256:[0-9a-f]{64}$' \
+  || die "config digest from the verified manifest is malformed: '$config_digest' (candidate=$candidate arch=$arch)"
+# docker load consumes the EXACT verified OCI archive (requires an OCI-archive-capable
+# image store, e.g. containerd); it never rebuilds or re-derives the image.
+load_out="$(docker load --input "$L1" 2>&1)" \
+  || die "docker load of the verified OCI layout failed (OCI-archive load / containerd image store required): $load_out"
+loaded_id="$(printf '%s\n' "$load_out" | grep -oE 'sha256:[0-9a-f]{64}' | head -n1)"
+[ -n "$loaded_id" ] || die "could not determine the loaded image id from 'docker load' output: $load_out"
+# PROVE correspondence: the loaded image id is the content address the daemon addresses
+# the image by — the MANIFEST digest (== builder_digest) under the containerd image store,
+# or the image CONFIG digest under the classic store. Either is a verified content address
+# OF THIS layout, so require a match against one of them; anything else (incl. synthetic)
+# fails closed and no unverified image runs.
+vv_verify() { cargo run --quiet --locked --manifest-path "$VAL" --bin venue-verify -- verify-runtime-image "$1" "$2" >/dev/null 2>&1; }
+if vv_verify "$builder_digest" "$loaded_id"; then
+  id_kind="manifest digest"
+elif vv_verify "$config_digest" "$loaded_id"; then
+  id_kind="config digest"
+else
+  die "loaded image id ($loaded_id) corresponds to NEITHER the verified manifest digest ($builder_digest) NOR its config digest ($config_digest); refusing to run an unverified image (candidate=$candidate arch=$arch)"
+fi
+# The runnable reference IS the verified content address the daemon just proved (no mutable
+# tag in the trust path). Write the TYPED, versioned sidecar ATOMICALLY (temp + mv), only
+# now that both clean builds matched, the layout was manifest+config content-verified,
+# docker load succeeded, and the loaded id matched a verified content address. It binds the
+# exact SOURCE COMMIT + candidate / arch / manifest+config digests / runnable image id so
+# run_authoritative.sh revalidates it against the current build and refuses a
+# stale/prior-source/cross-candidate/cross-arch one. Bind source_commit explicitly (a
+# docs-only / orchestration-only commit can preserve the manifest, so the manifest is not a
+# proxy for source identity): require it is 40 lowercase hex and equals BOTH HEAD and
+# RATIFIED_SOURCE_COMMIT at write time.
+is_ratified_commit_format "$source_commit" \
+  || die "source_commit is not 40 lowercase hex: '$source_commit' (candidate=$candidate arch=$arch)"
+[ "$source_commit" = "$(git -C "$ROOT" rev-parse HEAD)" ] \
+  || die "HEAD moved since build start; refusing to write a runnable-ref sidecar (candidate=$candidate arch=$arch)"
+[ "$source_commit" = "$RATIFIED_SOURCE_COMMIT" ] \
+  || die "source_commit ($source_commit) != RATIFIED_SOURCE_COMMIT ($RATIFIED_SOURCE_COMMIT); refusing to write runnable-ref sidecar"
+sidecar="$out/$candidate.$arch.runnable-ref"
+python3 - "$sidecar.tmp" "$candidate" "$arch" "$source_commit" "$builder_digest" "$config_digest" "$loaded_id" <<'PY'
+import json, sys
+p, cand, arch, commit, mani, cfg, img = sys.argv[1:8]
+json.dump({"schema": "b0pre-runnable-ref-v1", "candidate": cand, "arch": arch,
+           "source_commit": commit, "manifest_digest": mani, "config_digest": cfg,
+           "runnable_image_id": img}, open(p, "w"), indent=2)
+open(p, "a").write("\n")
+PY
+mv -f "$sidecar.tmp" "$sidecar"
+note "loaded + verified runnable image $candidate/$arch: $loaded_id (matched verified $id_kind; typed sidecar written atomically; downstream uses --pull never, no push)"
 
 # The raw exported-tar byte hashes are retained ONLY as raw-artifact witnesses
 # (BLAKE3), never presented as the manifest identity.

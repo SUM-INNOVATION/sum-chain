@@ -35,6 +35,11 @@ ARG APT_SECURITY_INRELEASE_SHA256
 ARG RUSTUP_INIT_URL
 ARG RUSTUP_INIT_SHA256
 ARG RUST_VERSION=1.88.0
+# Defect 1 (reproducibility): SOURCE_DATE_EPOCH is supplied by build_container.sh (the
+# ratified commit's committer date). BuildKit uses it to pin the image config `created`
+# and per-step history timestamps; the exporter's rewrite-timestamp=true normalizes every
+# layer file mtime to it. Declared explicitly so it is a consumed, documented input.
+ARG SOURCE_DATE_EPOCH
 
 # Fail closed BEFORE any work. This gate tests the actual VALUES, not merely that the
 # args were named: each digest/checksum must have the right shape, so a truncated,
@@ -69,7 +74,13 @@ RUN set -eux; \
     echo "${APT_DEBIAN_INRELEASE_SHA256}  ${inrel_deb}"   | sha256sum -c -; \
     echo "${APT_SECURITY_INRELEASE_SHA256}  ${inrel_sec}" | sha256sum -c -; \
     apt-get install -y --no-install-recommends ca-certificates curl build-essential pkg-config libssl-dev git; \
-    rm -rf /var/lib/apt/lists/*
+    : "reproducibility: drop ONLY the build-time-content artifacts whose CONTENT embeds \
+       wall-clock timestamps (apt/dpkg/alternatives/bootstrap logs; rewrite-timestamp fixes \
+       mtimes, not content) plus the apt package lists — explicit paths, IN THIS LAYER. The \
+       dpkg database (/var/lib/dpkg/status), installed package contents, CA trust roots, the \
+       dynamic-linker cache, and the toolchain are all KEPT for later stages"; \
+    rm -rf /var/lib/apt/lists/* \
+           /var/log/apt /var/log/dpkg.log /var/log/alternatives.log /var/log/bootstrap.log
 
 # Rust 1.88.0 via the EXACT immutable rustup archive artifact the ratified record names.
 # The former hard-coded, unversioned rustup distribution path always served the newest
@@ -92,7 +103,9 @@ RUN set -eux; \
     echo "${RUSTUP_INIT_SHA256}  /tmp/rustup-init" | sha256sum -c -; \
     chmod +x /tmp/rustup-init; \
     /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain "${RUST_VERSION}"; \
-    rm -f /tmp/rustup-init
+    : "reproducibility: remove rustup download/tmp scratch (fetch-order/temp bytes); the \
+       installed toolchain itself is content-deterministic"; \
+    rm -rf /tmp/rustup-init /root/.rustup/downloads /root/.rustup/tmp
 ENV PATH="/root/.cargo/bin:${PATH}"
 RUN rustc --version | grep -q "${RUST_VERSION}"
 

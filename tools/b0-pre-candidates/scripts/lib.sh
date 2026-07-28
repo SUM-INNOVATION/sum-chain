@@ -81,6 +81,65 @@ require_ratified_source_commit() {
     || die "checkout is not clean; authoritative evidence requires a pristine checkout of the ratified commit"
 }
 
+# A SOURCE_DATE_EPOCH must be a non-empty base-10 integer, positive, and within a sane
+# width (<= 18 digits, safely under int64) so it cannot overflow the builder's timestamp
+# handling. Rejects empty / non-numeric / negative (the '-' is non-digit) / overflow.
+require_valid_source_date_epoch() {
+  local v="${1:-}"
+  case "$v" in ''|*[!0-9]*) die "SOURCE_DATE_EPOCH must be a non-empty base-10 integer (got '${v}')" ;; esac
+  [ "${#v}" -le 18 ] || die "SOURCE_DATE_EPOCH is too large (overflow risk): '$v'"
+  [ "$v" -ge 1 ] || die "SOURCE_DATE_EPOCH must be positive: '$v'"
+}
+
+# Parse + fully validate a TYPED runnable-ref sidecar and echo its runnable image id, or
+# fail closed. The sidecar (written by build_container.sh ONLY after both clean builds
+# match, the layout is content-verified, docker load succeeds, and the loaded id matches a
+# verified content address) binds candidate, arch, the exact SOURCE COMMIT, the verified
+# manifest + config digests, and the loaded runnable image id. This refuses, in order and
+# before touching the daemon for the field cases: a missing/malformed sidecar, a wrong/
+# absent schema, a cross-candidate or cross-architecture record, malformed digests, a
+# source_commit that is not 40 lowercase hex OR != current HEAD OR != RATIFIED_SOURCE_COMMIT
+# (the AUTHORITATIVE source-identity gate — a docs-only / orchestration-only commit can
+# preserve the image manifest, so manifest equality is NEVER a proxy for source identity),
+# a STALE manifest != the current verified build (defense in depth), and finally an image
+# no longer present in the daemon. Args:
+#   <sidecar_file> <candidate> <arch> <current_verified_manifest_digest> [repo_dir]
+resolve_runnable_ref() {
+  local f="$1" cand="$2" arch="$3" cur_manifest="$4" repo="${5:-.}" line
+  [ -f "$f" ] || die "missing verified runnable-ref sidecar $f (build+load+verify must run first)"
+  require_cmd python3
+  line="$(python3 -c 'import json,sys
+d=json.load(open(sys.argv[1]))
+print("\t".join(str(d.get(k,"")) for k in ("schema","candidate","arch","source_commit","manifest_digest","config_digest","runnable_image_id")))' "$f" 2>/dev/null)" \
+    || die "runnable-ref sidecar $f is not valid JSON (malformed)"
+  local schema sc_cand sc_arch sc_commit sc_manifest sc_config sc_image
+  IFS=$'\t' read -r schema sc_cand sc_arch sc_commit sc_manifest sc_config sc_image <<< "$line"
+  [ "$schema" = "b0pre-runnable-ref-v1" ] || die "runnable-ref sidecar $f wrong/absent schema (got '${schema:-<none>}')"
+  [ "$sc_cand" = "$cand" ] || die "cross-candidate runnable-ref sidecar: '$sc_cand' != '$cand'"
+  [ "$sc_arch" = "$arch" ] || die "cross-architecture runnable-ref sidecar: '$sc_arch' != '$arch'"
+  printf '%s' "$sc_manifest" | grep -Eq '^sha256:[0-9a-f]{64}$' || die "runnable-ref sidecar manifest_digest malformed: '$sc_manifest'"
+  printf '%s' "$sc_config"   | grep -Eq '^sha256:[0-9a-f]{64}$' || die "runnable-ref sidecar config_digest malformed: '$sc_config'"
+  printf '%s' "$sc_image"    | grep -Eq '^sha256:[0-9a-f]{64}$' || die "runnable-ref sidecar runnable_image_id malformed: '$sc_image'"
+  # AUTHORITATIVE source-identity gate (NOT manifest inequality): source_commit must be a
+  # full 40 lowercase hex equal to BOTH the current HEAD and RATIFIED_SOURCE_COMMIT.
+  is_ratified_commit_format "$sc_commit" \
+    || die "runnable-ref sidecar source_commit is not 40 lowercase hex: '${sc_commit:-<none>}'"
+  local head; head="$(git -C "$repo" rev-parse HEAD 2>/dev/null)" \
+    || die "cannot resolve current HEAD in '$repo' to validate the runnable-ref sidecar source_commit"
+  [ "$sc_commit" = "$head" ] \
+    || die "stale runnable-ref sidecar: source_commit $sc_commit != current HEAD $head (prior run / prior source commit)"
+  [ -n "${RATIFIED_SOURCE_COMMIT:-}" ] \
+    || nyr "RATIFIED_SOURCE_COMMIT is required to validate the runnable-ref sidecar source_commit"
+  [ "$sc_commit" = "$RATIFIED_SOURCE_COMMIT" ] \
+    || die "runnable-ref sidecar source_commit $sc_commit != RATIFIED_SOURCE_COMMIT $RATIFIED_SOURCE_COMMIT (HEAD/RATIFIED disagreement)"
+  # Defense in depth: the sidecar manifest must also equal the current verified build.
+  [ "$sc_manifest" = "$cur_manifest" ] \
+    || die "stale runnable-ref sidecar: manifest $sc_manifest != current verified build $cur_manifest"
+  docker image inspect "$sc_image" >/dev/null 2>&1 \
+    || die "runnable image $sc_image referenced by the sidecar is no longer loaded in the daemon"
+  printf '%s' "$sc_image"
+}
+
 # Minimum free space (GiB) on a given path.
 require_free_gib() {
   local path="$1" min="$2" free
