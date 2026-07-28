@@ -57,6 +57,20 @@ for df in sp1 risc0; do
   has "$DF" '/root/.rustup/downloads' \
     && ok "$df.Dockerfile drops rustup download scratch in-layer" \
     || bad "$df.Dockerfile does not drop rustup download scratch"
+  # ldconfig aux-cache (authoritative x86 r2): the ONE remaining nondeterministic file.
+  # Gather the deletion tokens (the rm -rf ... continuation block) and assert it removes
+  # EXACTLY /var/cache/ldconfig/aux-cache, uses no broad wildcard, and never deletes the
+  # runtime linker cache /etc/ld.so.cache.
+  del_tokens="$(awk '/rm -rf/{c=1} c{print} c&&!/\\$/{c=0}' "$DF")"
+  printf '%s' "$del_tokens" | grep -qF '/var/cache/ldconfig/aux-cache' \
+    && ok "$df.Dockerfile removes exactly /var/cache/ldconfig/aux-cache" \
+    || bad "$df.Dockerfile does not remove /var/cache/ldconfig/aux-cache"
+  grep -qF '/var/cache/ldconfig/*' "$DF" \
+    && bad "$df.Dockerfile uses a broad /var/cache/ldconfig/* wildcard removal" \
+    || ok "$df.Dockerfile avoids a broad /var/cache/ldconfig wildcard"
+  printf '%s' "$del_tokens" | grep -qF '/etc/ld.so.cache' \
+    && bad "$df.Dockerfile deletes the runtime linker cache /etc/ld.so.cache" \
+    || ok "$df.Dockerfile keeps the runtime linker cache /etc/ld.so.cache"
 done
 
 # --- SOURCE_DATE_EPOCH input validation (item 2) ---
@@ -77,6 +91,90 @@ has "$BC" '[ "$source_commit" = "$RATIFIED_SOURCE_COMMIT" ]' \
   && ok "epoch source proven == RATIFIED_SOURCE_COMMIT" || bad "epoch source not proven == RATIFIED_SOURCE_COMMIT"
 n_assign="$(grep -cF 'SOURCE_DATE_EPOCH="$(git -C "$ROOT" show' "$BC")"
 [ "$n_assign" = "1" ] && ok "SOURCE_DATE_EPOCH computed exactly once (same value for both clean builds)" || bad "SOURCE_DATE_EPOCH computed $n_assign times (must be 1)"
+
+# --- ldconfig aux-cache empirical validation (opt-in Docker; authoritative x86 r2) ---
+# Build an apt image that CREATES /var/cache/ldconfig/aux-cache (ldconfig runs during the
+# apt install) and applies the EXACT reproducibility cleanup, twice under SOURCE_DATE_EPOCH
+# + rewrite-timestamp. The two clean builds must be manifest-identical (aux-cache was the
+# single differing file at x86 r2). In-build gating checks prove aux-cache is gone while the
+# runtime linker cache + dpkg DB are kept and programs/libs resolve; runtime checks prove
+# ldconfig can recreate aux-cache in a container without changing the committed image.
+if [ "${B0PRE_DOCKER_IT:-0}" = "1" ] && command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  TMPD="${TMPDIR:-/tmp}"; VAL="$SCRIPTS/../../b0-pre-validator/Cargo.toml"
+  arch="$(uname -m | sed 's/aarch64/arm64/;s/x86_64/amd64/')"
+  vvm() { cargo run --quiet --locked --manifest-path "$VAL" --bin venue-verify -- oci-manifest "$1" "$arch" | python3 -c 'import json,sys;print(json.load(sys.stdin)["manifest_digest"])'; }
+  DD="$TMPD/ldconf.$$"; rm -rf "$DD"; mkdir -p "$DD"
+  cat > "$DD/Dockerfile" <<'DF'
+# syntax=docker/dockerfile:1
+ARG SOURCE_DATE_EPOCH
+FROM debian:bookworm-slim
+RUN set -eux; apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates curl; \
+    rm -rf /var/lib/apt/lists/* \
+           /var/log/apt /var/log/dpkg.log /var/log/alternatives.log /var/log/bootstrap.log \
+           /var/cache/ldconfig/aux-cache
+# In-build gating checks (NO ldconfig here — running it would recreate aux-cache in-layer).
+RUN set -eux; \
+    test ! -e /var/cache/ldconfig/aux-cache; \
+    test -e /etc/ld.so.cache; \
+    test -f /var/lib/dpkg/status; \
+    dpkg -l ca-certificates | grep -q '^ii'; \
+    ldd "$(command -v curl)" >/dev/null; \
+    curl --version >/dev/null; \
+    echo AUX-INBUILD-OK
+DF
+  docker pull debian:bookworm-slim >/dev/null 2>&1 || true
+  bargs="--no-cache --build-arg SOURCE_DATE_EPOCH=1700000000 --file $DD/Dockerfile"
+  if docker build $bargs --output "type=oci,dest=$DD/a1.tar,rewrite-timestamp=true" "$DD" >"$DD/a1.log" 2>&1 \
+     && docker build $bargs --output "type=oci,dest=$DD/a2.tar,rewrite-timestamp=true" "$DD" >"$DD/a2.log" 2>&1; then
+    mkdir -p "$DD/l1" "$DD/l2"; tar -xf "$DD/a1.tar" -C "$DD/l1"; tar -xf "$DD/a2.tar" -C "$DD/l2"
+    am1="$(vvm "$DD/l1")"; am2="$(vvm "$DD/l2")"
+    { [ -n "$am1" ] && [ "$am1" = "$am2" ]; } \
+      && ok "(docker) aux-cache-removed apt image: two clean builds manifest-identical ($am1)" \
+      || bad "(docker) aux-cache-removed apt image builds diverge: $am1 != $am2"
+    lo="$(docker load --input "$DD/a1.tar" 2>&1)"; lid="$(printf '%s\n' "$lo" | grep -oE 'sha256:[0-9a-f]{64}' | head -n1)"
+    if [ -n "$lid" ]; then
+      docker run --rm --pull never "$lid" test ! -e /var/cache/ldconfig/aux-cache >/dev/null 2>&1 \
+        && ok "(docker) committed image has NO aux-cache at runtime" || bad "(docker) committed image still carries aux-cache"
+      docker run --rm --pull never "$lid" sh -c 'ldconfig && test -e /var/cache/ldconfig/aux-cache' >/dev/null 2>&1 \
+        && ok "(docker) ldconfig recreates aux-cache inside a container" || bad "(docker) ldconfig could not recreate aux-cache in a container"
+      docker run --rm --pull never "$lid" test ! -e /var/cache/ldconfig/aux-cache >/dev/null 2>&1 \
+        && ok "(docker) committed image unchanged after container-side ldconfig (aux-cache not required at runtime)" || bad "(docker) committed image changed by container-side ldconfig"
+      docker run --rm --pull never "$lid" sh -c 'ldd "$(command -v curl)" >/dev/null && curl --version >/dev/null' >/dev/null 2>&1 \
+        && ok "(docker) shared libs resolve + program runs WITHOUT aux-cache" || bad "(docker) program/ldd failed without aux-cache"
+      docker rmi "$lid" >/dev/null 2>&1 || true
+    else bad "(docker) could not load the aux-cache-removed image: $lo"; fi
+  else
+    bad "(docker) aux-cache repro build failed: $(tail -n2 "$DD/a1.log" 2>/dev/null)"
+  fi
+  rm -rf "$DD"
+  # Full health image (apt + rustup + the new cleanup): ldd resolves cargo/rustc after the fix.
+  HD="$TMPD/ldconf-rust.$$"; rm -rf "$HD"; mkdir -p "$HD"
+  cat > "$HD/Dockerfile" <<'DF'
+# syntax=docker/dockerfile:1
+FROM debian:bookworm-slim
+RUN set -eux; apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates curl build-essential pkg-config libssl-dev git; \
+    rm -rf /var/lib/apt/lists/* /var/log/apt /var/log/dpkg.log /var/log/alternatives.log /var/log/bootstrap.log /var/cache/ldconfig/aux-cache
+RUN set -eux; curl -fsSL https://sh.rustup.rs -o /tmp/r.sh; sh /tmp/r.sh -y --no-modify-path --profile minimal --default-toolchain 1.88.0; \
+    rm -rf /tmp/r.sh /root/.rustup/downloads /root/.rustup/tmp
+ENV PATH="/root/.cargo/bin:${PATH}"
+RUN set -eux; \
+    test ! -e /var/cache/ldconfig/aux-cache; test -e /etc/ld.so.cache; \
+    rustc --version | grep -q '1[.]88[.]0'; cargo --version; \
+    ldd "$(command -v cargo)" >/dev/null; ldd "$(command -v rustc)" >/dev/null; \
+    echo AUX-RUST-HEALTH-OK
+DF
+  if docker build --no-cache -t b0pre-auxrust "$HD" >"$HD/b.log" 2>&1; then
+    ok "(docker) rust health image: ldd resolves cargo+rustc, aux-cache absent, ld.so.cache present after the fix"
+    docker rmi b0pre-auxrust >/dev/null 2>&1 || true
+  else
+    bad "(docker) rust health build failed: $(tail -n3 "$HD/b.log" 2>/dev/null)"
+  fi
+  rm -rf "$HD"
+else
+  echo "SKIP (docker): aux-cache empirical validation gated behind B0PRE_DOCKER_IT=1 + reachable daemon"
+fi
 
 echo "----"
 if [ "$fails" -eq 0 ]; then echo "build_reproducibility: ALL SOURCE-LEVEL CHECKS PASS (empirical two-build equality: venue / tier C)"; exit 0

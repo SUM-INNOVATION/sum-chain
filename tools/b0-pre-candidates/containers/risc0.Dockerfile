@@ -73,12 +73,18 @@ RUN set -eux; \
     echo "${APT_SECURITY_INRELEASE_SHA256}  ${inrel_sec}" | sha256sum -c -; \
     apt-get install -y --no-install-recommends ca-certificates curl build-essential pkg-config libssl-dev git; \
     : "reproducibility: drop ONLY the build-time-content artifacts whose CONTENT embeds \
-       wall-clock timestamps (apt/dpkg/alternatives/bootstrap logs; rewrite-timestamp fixes \
-       mtimes, not content) plus the apt package lists — explicit paths, IN THIS LAYER. The \
-       dpkg database (/var/lib/dpkg/status), installed package contents, CA trust roots, the \
-       dynamic-linker cache, and the toolchain are all KEPT for later stages"; \
+       wall-clock timestamps — the apt/dpkg/alternatives/bootstrap logs, and ldconfig's \
+       DISPOSABLE auxiliary optimization cache /var/cache/ldconfig/aux-cache (created by the \
+       apt install above; it records wall-clock timestamps + inode observations that \
+       SOURCE_DATE_EPOCH / tar-timestamp rewriting CANNOT normalize — the last remaining \
+       nondeterministic file at authoritative x86 r2) — plus the apt package lists. Explicit \
+       paths, IN THIS LAYER, after the last apt/package op that creates them. KEPT: the \
+       RUNTIME dynamic-linker cache /etc/ld.so.cache, the rest of /var/cache/ldconfig, the \
+       dpkg database (/var/lib/dpkg/status), installed package contents, CA trust roots, and \
+       the toolchain — all needed by later stages"; \
     rm -rf /var/lib/apt/lists/* \
-           /var/log/apt /var/log/dpkg.log /var/log/alternatives.log /var/log/bootstrap.log
+           /var/log/apt /var/log/dpkg.log /var/log/alternatives.log /var/log/bootstrap.log \
+           /var/cache/ldconfig/aux-cache
 
 # Rust 1.88.0 via the EXACT immutable rustup archive artifact the ratified record names;
 # the mutable unversioned rustup/dist path is refused.
