@@ -57,7 +57,7 @@ use b0_pre_validator::venue::lock_provenance::{
     recompute_lock_hash, verify_in_container_provenance, LockProvenance,
 };
 use b0_pre_validator::venue::oci_layout::{
-    extract_manifest_identity, verify_runtime_image_identity,
+    extract_config_digest, extract_manifest_identity, verify_runtime_image_identity,
 };
 use b0_pre_validator::venue::stage4::{enforce_stage4_arch, Extractor};
 use b0_pre_validator::venue::stage5::{self, Stage5Result};
@@ -72,17 +72,23 @@ fn read_str(path: &str) -> Result<String, String> {
 }
 
 fn oci_manifest(layout_dir: &str, oci_arch: &str) -> Result<String, String> {
-    let id = extract_manifest_identity(std::path::Path::new(layout_dir), oci_arch)
-        .map_err(|e| e.to_string())?;
+    let root = std::path::Path::new(layout_dir);
+    let id = extract_manifest_identity(root, oci_arch).map_err(|e| e.to_string())?;
+    // The manifest's config content address: docker reports it as the loaded image id, so
+    // the OCI-layout -> daemon bridge (verify-runtime-image) compares the loaded image to
+    // this value. Extracted + content-verified here so both the manifest identity and the
+    // runnable identity come from the SAME verified parse.
+    let config_digest = extract_config_digest(root, &id.digest).map_err(|e| e.to_string())?;
     let platform = id.platform.map(
         |p| serde_json::json!({ "architecture": p.architecture, "os": p.os, "variant": p.variant }),
     );
     Ok(serde_json::json!({
         "manifest_digest": id.digest,
+        "config_digest": config_digest,
         "media_type": id.media_type,
         "platform": platform,
-        "note": "OCI manifest content address parsed from index.json + blob re-hash; \
-                 NOT sha256(exported tar)",
+        "note": "OCI manifest + config content addresses parsed from index.json + blob \
+                 re-hash; NOT sha256(exported tar)",
     })
     .to_string())
 }

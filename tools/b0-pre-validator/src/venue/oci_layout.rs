@@ -254,6 +254,43 @@ pub fn extract_manifest_identity(
     Ok(selected)
 }
 
+/// Read the selected image manifest blob and return its config descriptor digest,
+/// re-verifying the config blob's own content address. `docker load` reports this digest
+/// as the loaded image id (`docker inspect --format '{{.Id}}'`), so the OCI-layout ->
+/// daemon bridge ([`verify_runtime_image_identity`]) compares the loaded image's id to
+/// THIS value to prove the running image IS the verified layout — without a registry, a
+/// second build, or a mutable tag. Fails closed on a missing/tampered manifest or config
+/// blob, or a non-sha256 config digest.
+pub fn extract_config_digest(
+    layout_root: &Path,
+    manifest_digest: &str,
+) -> Result<String, OciError> {
+    #[derive(Deserialize)]
+    struct ImageManifestFile {
+        config: ConfigDescriptor,
+    }
+    #[derive(Deserialize)]
+    struct ConfigDescriptor {
+        digest: String,
+    }
+    require_sha256_digest(manifest_digest)?;
+    let mpath = blob_path(layout_root, manifest_digest)?;
+    let mbytes = match std::fs::read(&mpath) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(OciError::BlobMissing {
+                digest: manifest_digest.to_string(),
+            })
+        }
+        Err(e) => return Err(OciError::Io(e.to_string())),
+    };
+    let m: ImageManifestFile =
+        serde_json::from_slice(&mbytes).map_err(|e| OciError::Parse(e.to_string()))?;
+    require_sha256_digest(&m.config.digest)?;
+    verify_blob_content_address(layout_root, &m.config.digest)?;
+    Ok(m.config.digest)
+}
+
 /// Blocker 2: prove the image the runtime loaded is the exact verified image.
 ///
 /// `build_container.sh` exports the OCI layout as `type=oci,dest=<tar>`; before any
@@ -459,5 +496,49 @@ mod tests {
             verify_runtime_image_identity(&recorded, "sha256:TEST_ONLY_SYNTHETIC"),
             Err(OciError::BadDigest(_))
         ));
+    }
+
+    #[test]
+    fn extracts_and_content_verifies_the_config_digest() {
+        let root = tmpdir();
+        write_marker(&root);
+        // A config blob + a manifest that references it by content address.
+        let config_blob =
+            br#"{"architecture":"amd64","os":"linux","rootfs":{"type":"layers","diff_ids":[]}}"#;
+        let config_digest = write_blob(&root, config_blob); // sha256:<config>
+        let manifest_blob = format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json",
+                "config":{{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"{config_digest}","size":{}}},
+                "layers":[]}}"#,
+            config_blob.len()
+        );
+        let manifest_digest = write_blob(&root, manifest_blob.as_bytes());
+        let index = format!(
+            r#"{{"schemaVersion":2,"manifests":[{{"mediaType":"m","digest":"{manifest_digest}","size":1,
+                "platform":{{"architecture":"amd64","os":"linux"}}}}]}}"#
+        );
+        std::fs::write(root.join("index.json"), index.as_bytes()).unwrap();
+
+        let id = extract_manifest_identity(&root, "amd64").unwrap();
+        let cfg = extract_config_digest(&root, &id.digest).unwrap();
+        assert_eq!(
+            cfg, config_digest,
+            "config digest is the manifest's config content address"
+        );
+        // ...and it is exactly the loaded-image-id the daemon bridge compares against.
+        assert_eq!(cfg, format!("sha256:{}", sha256::hex_digest(config_blob)));
+
+        // Tamper the config blob -> content-address mismatch -> fail closed.
+        let hex = config_digest.strip_prefix("sha256:").unwrap();
+        std::fs::write(
+            root.join("blobs").join("sha256").join(hex),
+            b"TAMPERED-config",
+        )
+        .unwrap();
+        assert!(matches!(
+            extract_config_digest(&root, &id.digest),
+            Err(OciError::ContentAddressMismatch { .. })
+        ));
+        std::fs::remove_dir_all(&root).ok();
     }
 }
