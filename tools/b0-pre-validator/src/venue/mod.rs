@@ -16,6 +16,7 @@
 
 pub mod arch_bundle;
 pub mod audit;
+pub mod cargo_lock;
 pub mod evidence_bundle;
 pub mod lock_provenance;
 pub mod oci_layout;

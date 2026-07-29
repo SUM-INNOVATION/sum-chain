@@ -93,6 +93,50 @@ from the x86_64 bundle, and aggregating from aarch64 alone cannot produce it.
    architecture, so the ratified record names one identity per (candidate, arch);
    RISC Zero is x86_64-only under §2 and has no aarch64 identity.
 
+   The proof-tool identity above is **upstream proof provenance**. It is NOT the Stage-5
+   verifier identity: the Stage-5 terminal verification and its mutation cases are
+   performed by the pinned verifier **SDK library** compiled inside the verified image,
+   not by any installed CLI. Conflating the two would attribute the verification result
+   to a tool that did not produce it. See the Stage-5 verifier identity below.
+
+### Stage-5 verifier identity (schema v2): the verifier that actually ran
+
+A Stage-5 result (`Stage5Result`, `schema_version = 2`) attributes the terminal-verifier
+run **causally**, via hash-backed fields only:
+
+- `verifier_executed_binary_sha256` — SHA-256 of the EXACT verifier-runner executable
+  that was built inside the verified image, located, hashed, and then executed **directly**
+  (never an unbound `cargo run`, whose bytes are unidentified). This hash is
+  **venue-verified**: the venue hashes the exact file it executes, in the same container,
+  with no swap window. It is **NOT independently recomputable at import** unless the binary
+  itself is sealed or reproducibly rebuilt — the importer does not re-run Docker, so this
+  value is not claimed to be import-proven.
+- `verifier_sdk_lock_blake3` — the domain-separated `BLAKE3(CARGO_LOCK_TAG ‖ bytes)` of the
+  runner's resolved dependency lock, which IS sealed as `<Candidate>.stage5-runner.lock`.
+  The importer **recomputes** this from the sealed lock bytes and **structurally parses**
+  the lock (never a text grep), requiring it to pin exactly `verifier_sdk_name` @
+  `verifier_sdk_version` from a registry source with a checksum. An altered/swapped lock,
+  a wrong version/source/checksum, or a missing SDK package is refused.
+- `verifier_sdk_name` / `verifier_sdk_version` — the pinned terminal-verifier SDK
+  (`sp1-verifier` 6.3.1 / `risc0-zkvm` 3.0.5), cross-checked against the sealed lock.
+- `container_digest` / `command_log_blake3_hex` — the two-clean-build-verified image the
+  verifier ran inside, and the exact command sequence.
+- `verifier_identity` is a **descriptive label only**; authority is exclusively the
+  hash-backed fields above. `proof_producer_tool_identity` is OPTIONAL upstream provenance,
+  set only when the proving tool is causally established, and never substitutes for the
+  verifier identity.
+
+**Schema evolution / backward-compatibility boundary.** Authoritative eligibility is
+explicit by `schema_version`: only the current version is eligible. A v1 (or unversioned)
+record — which bound a non-causal installed-CLI hash — remains readable for historical
+inspection but is **permanently ineligible** for new authoritative evidence and is refused
+by the importer. An unknown future version fails closed.
+
+**Independent reproduction fails closed.** A second operator re-running the venue must
+reproduce the verifier identity (the sealed runner lock's domain-separated hash + its
+structurally-pinned SDK) and the sealed bundle's content hash. Any disagreement is refused
+at import/aggregation; agreement is required, never assumed.
+
 ### Provenance model for pinned tool artifacts
 
 A verified checksum is not a signature, and the two are never recorded as equivalent.

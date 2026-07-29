@@ -117,6 +117,14 @@ case "$CAND_LC" in
   sp1)   FIXTURE_ENV="SP1_G16_FIXTURE";   CAND=Sp1 ;;
   risc0) FIXTURE_ENV="RISC0_G16_FIXTURE"; CAND=Risc0 ;;
 esac
+# The verifier runner's binary name + the pinned terminal-verifier SDK identity. These
+# name the EXACT executable that is built, hashed, and executed directly in Stage-5 (the
+# causal verifier identity bound into the v2 Stage-5 record — never a free-text label or
+# an unrelated installed CLI). Kept in lockstep with the runner Cargo.toml below.
+case "$CAND_LC" in
+  sp1)   RUNNER_BIN_NAME="b0-pre-sp1-stage5-runner";   VERIFIER_SDK_NAME="sp1-verifier"; VERIFIER_SDK_VERSION="6.3.1" ;;
+  risc0) RUNNER_BIN_NAME="b0-pre-risc0-stage5-runner"; VERIFIER_SDK_NAME="risc0-zkvm";   VERIFIER_SDK_VERSION="3.0.5" ;;
+esac
 FIXTURE_PATH="$(printf '%s' "${!FIXTURE_ENV:-}")"
 if [ -n "$FIXTURE_PATH" ]; then
   [ -f "$FIXTURE_PATH" ] || nyr "$FIXTURE_ENV points to '$FIXTURE_PATH', which is not a readable file"
@@ -487,6 +495,10 @@ docker run --rm --pull never \
   bash -lc 'cd /out/_runner && cargo generate-lockfile' \
   || die "in-container 'cargo generate-lockfile' failed for the $CAND_LC Stage-5 runner (no unlocked build is attempted)"
 [ -s "$OUT_DIR/_runner/Cargo.lock" ] || die "runner Cargo.lock was not generated in-container for $CAND_LC"
+# VALIDATE the generated lock (step 1 of the causal sequence): it must be a parseable
+# Cargo.lock, not an empty or malformed file, before anything is built against it.
+grep -qE '^version[[:space:]]*=|^\[\[package\]\]' "$OUT_DIR/_runner/Cargo.lock" \
+  || die "in-container runner Cargo.lock for $CAND_LC is not a parseable lock"
 cp "$OUT_DIR/_runner/Cargo.lock" "$OUT_DIR/runner-cargo.lock"
 RUNNER_LOCK_B3="$(blake3_hex_file "$OUT_DIR/runner-cargo.lock")"
 {
@@ -494,23 +506,51 @@ RUNNER_LOCK_B3="$(blake3_hex_file "$OUT_DIR/runner-cargo.lock")"
   printf 'verifier-material-manifest-identity\tblake3:%s\n' "$MAT_ID"
 } >> "$CMD_LOG"
 
-# ---- PHASE B: run the genuine verifier + mutations with the BOUND lock -------------
-# $OUT_DIR is bind-mounted at /out; the genuine fixture is mounted read-only at
-# /fixture.json; the cargo target is container-ephemeral so no build scratch pollutes
-# the evidence. `--locked` is valid now: PHASE A generated the lock this runs against.
-RUN_CMD="docker run --rm --pull never -v $OUT_DIR:/out -v $FIXTURE_ABS:/fixture.json:ro -e CARGO_TARGET_DIR=/tmp/b0pre-stage5-target $VERIFIER_REF bash -lc 'cd /out/_runner && cargo run --quiet --release --locked -- /fixture.json /out'"
-printf '%s\n' "$RUN_CMD" >> "$CMD_LOG"
-docker run --rm --pull never \
-  -v "$OUT_DIR:/out" \
-  -v "$FIXTURE_ABS:/fixture.json:ro" \
-  -e CARGO_TARGET_DIR=/tmp/b0pre-stage5-target \
-  "$VERIFIER_REF" \
-  bash -lc 'cd /out/_runner && cargo run --quiet --release --locked -- /fixture.json /out' \
-  || die "genuine in-container $CAND_LC verifier fixture run failed closed (verifier did not reproduce, toolchain absent, or a mutation could not be evaluated)"
+# ---- PHASE B: BUILD the verifier runner, HASH the exact executable, then EXECUTE THAT
+# EXACT FILE directly (S1 causal correction — never an unbound `cargo run`, whose bytes
+# are not identified) ----------------------------------------------------------------
+# Causal sequence, all in ONE container invocation so the file that is hashed is byte-for-
+# byte the file that runs (no swap window): (2) `cargo build --release --locked` against
+# the PHASE-A lock; (3) locate the exact runner binary + `sha256sum` it into
+# /out/runner-bin.sha256; (4) EXECUTE that exact path directly with `exec`. $OUT_DIR is
+# bind-mounted at /out; the genuine fixture is read-only at /fixture.json; the cargo
+# target is container-ephemeral so no build scratch pollutes the evidence.
+printf '# S1 causal verifier execution (build -> hash exact binary -> exec that exact file)\n' >> "$CMD_LOG"
+printf 'causal_build_hash_exec_runner %s /out/_runner %s %s %s\n' \
+  "$VERIFIER_REF" "$RUNNER_BIN_NAME" "$OUT_DIR" "$FIXTURE_ABS" >> "$CMD_LOG"
+# Shared production core (lib.sh): build -> hash the EXACT binary -> exec that file. The
+# real-container E2E drives the IDENTICAL function, so the security-critical sequence has
+# exactly one implementation.
+causal_build_hash_exec_runner "$VERIFIER_REF" "/out/_runner" "$RUNNER_BIN_NAME" "$OUT_DIR" "$FIXTURE_ABS" \
+  || die "genuine in-container $CAND_LC verifier build+run failed closed (verifier did not reproduce, toolchain absent, or a mutation could not be evaluated)"
 
 # The runner MUST have produced mutations.json; missing output is a fail-closed refusal
 # (never a fabricated stand-in).
 [ -s "$OUT_DIR/mutations.json" ] || die "runner did not emit mutations.json for $CAND_LC"
+
+# The EXACT executed-binary SHA-256 (written in-container from the same file that ran).
+[ -s "$OUT_DIR/runner-bin.sha256" ] || die "runner-bin.sha256 (executed verifier identity) was not produced for $CAND_LC"
+RUNNER_BIN_SHA256="$(tr -d ' \n' < "$OUT_DIR/runner-bin.sha256")"
+printf '%s' "$RUNNER_BIN_SHA256" | grep -Eq '^[0-9a-f]{64}$' \
+  || die "runner-bin.sha256 for $CAND_LC is not a bare 64-hex sha256: '$RUNNER_BIN_SHA256'"
+printf 'verifier-executed-binary\t%s\tsha256:%s\n' "$RUNNER_BIN_NAME" "$RUNNER_BIN_SHA256" >> "$CMD_LOG"
+
+# Emit the CAUSAL verifier binding for produce_stage5 -> the v2 Stage-5 params: the exact
+# executed binary sha256 + the pinned SDK identity. The dependency-lock hash is NOT
+# emitted here: produce_stage5 computes the DOMAIN-SEPARATED lock hash from the sealed
+# runner-cargo.lock (the value import recomputes), so there is one authoritative rule.
+python3 - "$OUT_DIR/verifier-binding.json" "$RUNNER_BIN_SHA256" \
+  "$VERIFIER_SDK_NAME" "$VERIFIER_SDK_VERSION" <<'PY' \
+  || die "failed to emit verifier-binding.json for $CAND_LC"
+import json, sys
+path, bin_sha, sdk_name, sdk_ver = sys.argv[1:5]
+json.dump({
+    "verifier_executed_binary_sha256": bin_sha,
+    "verifier_sdk_name": sdk_name,
+    "verifier_sdk_version": sdk_ver,
+}, open(path, "w"), indent=2)
+open(path, "a").write("\n")
+PY
 
 # ---- build fixtures.json from the exported raw artifacts (host paths) --------------
 # Each raw artifact must exist and be non-empty (stage5-generate hashes its bytes and

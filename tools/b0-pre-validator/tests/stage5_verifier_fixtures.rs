@@ -119,8 +119,11 @@ fn build_inputs(out: &Path, rejected: &[bool]) -> Stage5Inputs {
         &serde_json::to_string_pretty(&serde_json::json!({
             "candidate": "Sp1",
             "arch": "X86_64",
-            "verifier_identity": "pinned-sp1-terminal-verifier",
-            "tool_identity_hex": "a".repeat(64),
+            "verifier_identity": "sp1-verifier terminal Groth16 (descriptive)",
+            "verifier_executed_binary_sha256": "a".repeat(64),
+            "verifier_sdk_lock_blake3": "d".repeat(64),
+            "verifier_sdk_name": "sp1-verifier",
+            "verifier_sdk_version": "6.3.1",
             "container_digest": format!("sha256:{}", "b".repeat(64)),
             "source_commit": "c".repeat(40),
         }))
@@ -193,8 +196,14 @@ fn harness_output_shapes_feed_stage5_generate_and_derive_a_pass() {
     for (field, expect) in [
         ("candidate", "Sp1"),
         ("arch", "X86_64"),
-        ("verifier_identity", "pinned-sp1-terminal-verifier"),
-        ("tool_identity_hex", &"a".repeat(64)[..]),
+        (
+            "verifier_identity",
+            "sp1-verifier terminal Groth16 (descriptive)",
+        ),
+        ("verifier_executed_binary_sha256", &"a".repeat(64)[..]),
+        ("verifier_sdk_lock_blake3", &"d".repeat(64)[..]),
+        ("verifier_sdk_name", "sp1-verifier"),
+        ("verifier_sdk_version", "6.3.1"),
         (
             "container_digest",
             &format!("sha256:{}", "b".repeat(64))[..],
@@ -582,16 +591,54 @@ fn harness_generates_runner_lock_in_container_before_any_locked_build() {
     let gen = src
         .find("cargo generate-lockfile'")
         .expect("harness must generate the runner lock in-container (executed command)");
-    let locked_run = src
-        .find("cargo run --quiet --release --locked")
-        .expect("harness must run the verifier with --locked against that lock");
-    assert!(
-        gen < locked_run,
-        "the in-container `cargo generate-lockfile` must precede the `--locked` build"
-    );
     assert!(
         !src.contains("generate-lockfile --locked"),
         "cargo generate-lockfile must not run with --locked against an unlocked fresh package"
+    );
+    // S1 causal correction: the harness CALLS the shared production core
+    // `causal_build_hash_exec_runner` (lib.sh) — it does NOT inline its own build/run, and
+    // never an unbound `cargo run` for the verifier (its bytes would be unidentified). The
+    // shared core is exercised by BOTH the producer and the real-container E2E.
+    let call = src
+        .find("causal_build_hash_exec_runner ")
+        .expect("harness must call the shared causal_build_hash_exec_runner (lib.sh)");
+    assert!(
+        gen < call,
+        "the in-container `cargo generate-lockfile` must precede the causal build/exec call"
+    );
+    assert!(
+        !src.contains("cargo run --quiet --release --locked -- /fixture.json"),
+        "S1: the verifier must NOT be launched via an unbound `cargo run` (execute the exact hashed binary)"
+    );
+
+    // The shared core (lib.sh) is the ONE implementation of the causal sequence: build
+    // (--locked) -> `sha256sum` the EXACT binary -> `exec` that file directly, in order.
+    let libsh = harness().parent().unwrap().join("lib.sh");
+    let lib = std::fs::read_to_string(&libsh).unwrap();
+    let core = lib
+        .split_once("causal_build_hash_exec_runner() {")
+        .expect("lib.sh must define causal_build_hash_exec_runner")
+        .1;
+    let core = core
+        .split_once("\n}\n")
+        .expect("causal_build_hash_exec_runner body")
+        .0;
+    let build = core
+        .find("cargo build --quiet --release --locked")
+        .expect("shared core must BUILD the runner with --locked");
+    let hash = core
+        .find("sha256sum")
+        .expect("shared core must sha256sum the exact binary");
+    let exec = core
+        .find("exec ")
+        .expect("shared core must exec the exact binary directly");
+    assert!(
+        build < hash && hash < exec,
+        "S1 causal order in the shared core: build (--locked) -> hash the exact binary -> exec that file"
+    );
+    assert!(
+        !core.contains("cargo run"),
+        "S1: the shared core must never launch the verifier via an unbound `cargo run`"
     );
 }
 

@@ -12,11 +12,12 @@ rc=0
 
 echo "== bash -n (syntax) =="
 for s in lib.sh verify_pins.sh run_authoritative.sh build_container.sh preflight_venue.sh \
-         tool_identities.sh resolve_lock.sh \
+         tool_identities.sh resolve_lock.sh extract_material.sh verifier_fixtures.sh prove_fixture.sh \
          tests/disk_free_gib.test.sh tests/pin_schema.test.sh tests/source_authority.test.sh \
          tests/pin_url_policy.test.sh tests/oci_platform.test.sh tests/tool_identity_arch.test.sh \
          tests/apt_pins.test.sh tests/tool_identity_threading.test.sh tests/oci_daemon_bridge.test.sh \
-         tests/build_reproducibility.test.sh tests/runnable_ref_sidecar.test.sh tests/rustup_components.test.sh tests/run.sh; do
+         tests/build_reproducibility.test.sh tests/runnable_ref_sidecar.test.sh tests/rustup_components.test.sh \
+         tests/e2e_v2_produce_chain.test.sh tests/run.sh; do
   f="$SCRIPTS/$s"
   [ -f "$f" ] || continue
   if bash -n "$f"; then echo "  ok  $s"; else echo "  FAIL $s"; rc=1; fi
@@ -27,6 +28,7 @@ if command -v shellcheck >/dev/null 2>&1; then
   if shellcheck -x -S error \
       "$SCRIPTS/lib.sh" "$SCRIPTS/verify_pins.sh" "$SCRIPTS/preflight_venue.sh" "$SCRIPTS/run_authoritative.sh" \
       "$SCRIPTS/build_container.sh" "$SCRIPTS/tool_identities.sh" "$SCRIPTS/resolve_lock.sh" \
+      "$SCRIPTS/extract_material.sh" \
       "$SCRIPTS/tests/disk_free_gib.test.sh" "$SCRIPTS/tests/pin_schema.test.sh" \
       "$SCRIPTS/tests/source_authority.test.sh" "$SCRIPTS/tests/pin_url_policy.test.sh" \
       "$SCRIPTS/tests/oci_platform.test.sh" "$SCRIPTS/tests/tool_identity_arch.test.sh" \
@@ -54,6 +56,8 @@ bash "$HERE/oci_daemon_bridge.test.sh" || rc=1
 bash "$HERE/build_reproducibility.test.sh"   || rc=1
 bash "$HERE/runnable_ref_sidecar.test.sh"    || rc=1
 bash "$HERE/rustup_components.test.sh"       || rc=1
+# Opt-in real-container v2 produce-chain E2E (SKIPs unless B0PRE_DOCKER_IT=1 + a daemon).
+bash "$HERE/e2e_v2_produce_chain.test.sh"    || rc=1
 
 echo "----"
 if [ "$rc" = 0 ]; then echo "B0-PRE script tests: ALL PASS"; else echo "B0-PRE script tests: FAILURES" >&2; fi

@@ -40,7 +40,10 @@
 # verifier material is NON_SELECTION/TEST_ONLY, so Stage-1 classifies the aggregated
 # bundle TEST_ONLY and it can NEVER finalize. Dry-run output is never authoritative.
 set -euo pipefail
-HERE="$(cd "$(dirname "$0")" && pwd)"
+# Resolve HERE from ${BASH_SOURCE[0]} (this file), NOT $0 (the caller): a script that
+# SOURCES this file must still locate lib.sh relative to THIS file, not relative to the
+# sourcing script. When executed, ${BASH_SOURCE[0]} == $0, so this is unchanged there.
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 # shellcheck source=lib.sh
 . "$HERE/lib.sh"
@@ -244,15 +247,21 @@ produce_arch_authoritative() {
   produce_stage2 Risc0 "$arch" "$schema_arch" "$work"
   disk_stage "stage2-audit" "$work"
 
-  note "== Stage 4-5: extract verifier material INSIDE the pinned builder -> work =="
+  note "== Stage 4-5: extract verifier material INSIDE the pinned builder (curated context) -> work =="
   require_headroom_gib "$work" 10 "Stage 4-5 verifier-material extraction"
-  cargo run --quiet --locked --manifest-path "$ROOT/harness/sp1-verifier-material/Cargo.toml" \
-    > "$work/sp1-verifier-material.json" || die "SP1 verifier-material extraction failed closed"
+  # D2 (authoritative x86 r4-followup fix): the standalone material harness has NO
+  # committed lock and needs container-only crates, so the former HOST `cargo run
+  # --locked` always failed closed. extract_material.sh runs the extraction INSIDE the
+  # VERIFIED builder over a curated, minimal, authenticated context (this harness +
+  # b0-pre-vmat only), generates+validates the harness lock in-container, consumes it
+  # read-only, and binds the material to the builder/context/lock/source identities.
+  # sp1 material -> sp1 builder, risc0 material -> risc0 builder (the verified loaded refs).
+  SCHEMA_ARCH="$schema_arch" BUILDER_IMAGE_REF="$sp1_ref" \
+    BUILDER_IMAGE_DIGEST="$sp1_builder" bash "$HERE/extract_material.sh" sp1 "$work"
   if [ "$arch" = "x86_64" ]; then
     require_native_arch x86_64
-    cargo run --quiet --locked --manifest-path "$ROOT/harness/risc0-verifier-material/Cargo.toml" \
-      > "$work/risc0-verifier-material.json" \
-      || die "RISC Zero verifier-material extraction failed closed (native x86_64 only)"
+    SCHEMA_ARCH="$schema_arch" BUILDER_IMAGE_REF="$risc0_ref" \
+      BUILDER_IMAGE_DIGEST="$risc0_builder" bash "$HERE/extract_material.sh" risc0 "$work"
   else
     note "arch=$arch: skipping RISC Zero extraction (x86_64-only per docs/b0-pre/venue/VENUE.md §2)"
   fi
@@ -306,7 +315,14 @@ produce_stage2() {
   local builder commit lock_hex
   builder="$(builder_digest_of "$lc" "$arch" "$work")"
   commit="$(git -C "$ROOT" rev-parse HEAD)"
-  lock_hex="$(vv lock-hash "$work/$cand.Cargo.lock")" || die "lock-hash failed for $cand"
+  # D1 (authoritative x86 r4 fix): resolve_lock.sh generated the lock in an ephemeral
+  # container and exported it to the HOST; that container is gone and the fresh Stage-2
+  # container starts from the same (intentionally lock-less) image. Validate the Stage-1
+  # resolved lock and take its verified content hash (the identity — the host path is not
+  # evidence); it is then bind-mounted READ-ONLY at the workspace Cargo.lock so
+  # `cargo metadata/audit --locked` can succeed. Stage 2 never regenerates or updates it.
+  local hostlock="$work/$cand.Cargo.lock" prov="$work/$cand.lock-provenance.json"
+  lock_hex="$(require_stage1_lock "$hostlock" "$prov" "$cand" "$VAL")"
 
   local meta="$work/$cand.cargo-metadata.json"
   local advis="$work/$cand.cargo-audit.json"
@@ -314,19 +330,32 @@ produce_stage2() {
   # The candidate workspace lives at its reproduced repo-relative path in the staged
   # builder image (see stage_context.sh); metadata/audit run there over the full graph.
   local cdir; cdir="$(incontainer_candidate_dir "$lc")"
+  local incontainer_lock="$cdir/Cargo.lock"
+  # STRICT read-only single-FILE mount: the ONLY host path entering the container is the
+  # validated lock, mounted at its logical workspace destination (no writable bind, no
+  # whole-workspace/source mount). The command log records the lock CONTENT HASH + the
+  # logical in-container destination (never the host absolute path); command_log_blake3_hex
+  # binds that — and lock_blake3_hex binds the content address — into the typed Stage-2 record.
   {
-    printf 'docker run --rm --pull never %s cargo metadata --format-version 1 --locked (cwd=%s)\n' "$builder" "$cdir"
-    printf 'docker run --rm --pull never %s cargo audit --json (cwd=%s)\n' "$builder" "$cdir"
+    printf 'run_stage2_locked <verified-image> %s <stage1-lock blake3=%s> %s "cargo metadata --format-version 1 --locked"\n' "$cdir" "$lock_hex" "$incontainer_lock"
+    printf 'run_stage2_locked <verified-image> %s <stage1-lock blake3=%s> %s "cargo audit --json"\n' "$cdir" "$lock_hex" "$incontainer_lock"
   } > "$cmdlog"
-  docker run --rm --pull never "$ref" \
-    bash -c "cd $cdir && cargo metadata --format-version 1 --locked" \
-    > "$meta" 2>>"$cmdlog" || die "in-container cargo metadata failed for $cand"
+  # TOCTOU: the lock must be byte-unchanged between validation and the container reads.
+  [ "$(vv lock-hash "$hostlock")" = "$lock_hex" ] \
+    || die "Stage-1 lock changed between validation and Stage-2 execution for $cand"
+  # Shared production core (lib.sh: run_stage2_locked) — the read-only lock-mount mechanic;
+  # the real-container E2E drives the IDENTICAL function.
+  run_stage2_locked "$ref" "$cdir" "$hostlock" "$incontainer_lock" \
+    "cargo metadata --format-version 1 --locked" "$meta" 2>>"$cmdlog" \
+    || die "in-container cargo metadata --locked failed for $cand (Stage-1 lock mount)"
   # cargo audit EXITS NON-ZERO when it finds advisories; capture its JSON regardless so
   # the typed audit gate classifies them (fatal). An empty/non-JSON body fails generation.
-  docker run --rm --pull never "$ref" \
-    bash -c "cd $cdir && cargo audit --json" \
-    > "$advis" 2>>"$cmdlog" || true
+  run_stage2_locked "$ref" "$cdir" "$hostlock" "$incontainer_lock" \
+    "cargo audit --json" "$advis" 2>>"$cmdlog" || true
   [ -s "$advis" ] || die "in-container cargo audit produced no output for $cand"
+  # The read-only mount must not have mutated the host lock (Stage 2 cannot modify it).
+  [ "$(vv lock-hash "$hostlock")" = "$lock_hex" ] \
+    || die "host Stage-1 lock was modified during Stage 2 for $cand (read-only mount violated)"
 
   local tool_id db_snap
   tool_id="$(docker run --rm --pull never "$ref" bash -c 'cargo --version; cargo audit --version' \
@@ -361,12 +390,13 @@ produce_stage5() {
   local cand="$1" arch="$2" schema_arch="$3" work="$4"
   local lc; lc="$(printf '%s' "$cand" | tr '[:upper:]' '[:lower:]')"
   local ref; ref="$(runnable_ref_of "$lc" "$arch" "$work")"  # Defect 2: verified loaded image
-  local builder commit tool_hex
+  local builder commit
   builder="$(builder_digest_of "$lc" "$arch" "$work")"
   commit="$(git -C "$ROOT" rev-parse HEAD)"
-  # bind Stage-5 to the VERIFIED installed-binary identity (the first tool binding).
-  tool_hex="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[0]["installed_binary_sha256_hex"])' \
-    "$work/$cand.tool-binding.json")" || die "cannot read tool identity for $cand"
+  # S1 correction: Stage 5 is NO LONGER bound to a proof-tool CLI's installed-binary hash
+  # (that binary never runs the verifier — the SDK library does). The CAUSAL verifier
+  # identity — the exact executed runner binary + its dependency lock + SDK name/version —
+  # is emitted by verifier_fixtures.sh into $outdir/verifier-binding.json below.
 
   local outdir="$work/$cand.stage5"; mkdir -p "$outdir"
   local cmdlog="$work/$cand.stage5.cmd.log"
@@ -383,15 +413,40 @@ produce_stage5() {
     || die "Stage-5 verifier fixture execution failed for $cand"
   [ -f "$outdir/fixtures.json" ] && [ -f "$outdir/mutations.json" ] \
     || die "verifier fixture harness did not emit fixtures.json + mutations.json for $cand"
+  # The CAUSAL verifier binding (exact executed runner binary sha256 + its dependency lock
+  # BLAKE3 + pinned SDK name/version) the harness produced by building, hashing, and
+  # executing that exact file directly.
+  local vbind="$outdir/verifier-binding.json"
+  [ -f "$vbind" ] \
+    || die "verifier fixture harness did not emit verifier-binding.json (causal verifier identity) for $cand"
+  [ -f "$outdir/runner-cargo.lock" ] \
+    || die "verifier fixture harness did not export the runner Cargo.lock (sealed dependency evidence) for $cand"
+  # The runner lock is content-addressed with the SAME domain-separated rule as candidate
+  # locks (BLAKE3(CARGO_LOCK_TAG ‖ bytes)); import recomputes THIS value from the sealed
+  # lock bytes, so bind that — not verifier_fixtures' plain BLAKE3 — into the record.
+  local sdk_lock_hex; sdk_lock_hex="$(vv lock-hash "$outdir/runner-cargo.lock")" \
+    || die "domain-separated lock-hash of the runner lock failed for $cand"
 
   local params="$work/$cand.stage5-params.json"
-  python3 - "$params" "$cand" "$schema_arch" "$builder" "$commit" "$tool_hex" "$lc" <<'PY'
+  python3 - "$params" "$cand" "$schema_arch" "$builder" "$commit" "$vbind" "$sdk_lock_hex" <<'PY'
 import json, sys
-path, cand, arch, digest, commit, tool, lc = sys.argv[1:8]
+path, cand, arch, digest, commit, vbind, sdk_lock_hex = sys.argv[1:8]
+vb = json.load(open(vbind))
+for k in ("verifier_executed_binary_sha256", "verifier_sdk_name", "verifier_sdk_version"):
+    if not vb.get(k):
+        sys.exit(f"verifier-binding.json missing causal field {k!r}")
 json.dump({
     "candidate": cand, "arch": arch,
-    "verifier_identity": f"pinned-{lc}-terminal-verifier",
-    "tool_identity_hex": tool, "container_digest": digest, "source_commit": commit,
+    # Descriptive label ONLY; authority is the hash-backed verifier_* fields below.
+    "verifier_identity": f"{vb['verifier_sdk_name']} {vb['verifier_sdk_version']} terminal verifier (descriptive)",
+    "verifier_executed_binary_sha256": vb["verifier_executed_binary_sha256"],
+    # Domain-separated hash of the SEALED runner lock (import recomputes + matches this).
+    "verifier_sdk_lock_blake3": sdk_lock_hex,
+    "verifier_sdk_name": vb["verifier_sdk_name"],
+    "verifier_sdk_version": vb["verifier_sdk_version"],
+    "container_digest": digest, "source_commit": commit,
+    # No proof_producer_tool_identity: the upstream prover CLI is NOT causally established
+    # on this path (VENUE-UNEXECUTED / externally-suppliable fixture), so no claim is made.
 }, open(path, "w"), indent=2)
 PY
   vv stage5-generate "$params" "$outdir/fixtures.json" "$outdir/mutations.json" "$cmdlog" \
@@ -419,10 +474,15 @@ assemble_evidence() {
   # `required_files` in the validator (VENUE.md §2).
   cp "$work/Sp1.tool-binding.json"      "$ev/Sp1.tool-binding.json"
   cp "$work/Sp1.stage5-result.json"     "$ev/Sp1.stage5-result.json"
+  # Seal the EXACT verifier runner lock so import recomputes its domain-separated hash
+  # (== the Stage-5 record's verifier_sdk_lock_blake3) and structurally verifies the
+  # pinned SDK. Produced in-container by verifier_fixtures.sh at $work/Sp1.stage5/.
+  cp "$work/Sp1.stage5/runner-cargo.lock" "$ev/Sp1.stage5-runner.lock"
   cp "$work/sp1-verifier-material.json" "$ev/sp1-verifier-material.json"
   if [ "$arch" = "x86_64" ]; then
     cp "$work/Risc0.tool-binding.json"      "$ev/Risc0.tool-binding.json"
     cp "$work/Risc0.stage5-result.json"     "$ev/Risc0.stage5-result.json"
+    cp "$work/Risc0.stage5/runner-cargo.lock" "$ev/Risc0.stage5-runner.lock"
     cp "$work/risc0-verifier-material.json" "$ev/risc0-verifier-material.json"
   fi
 }
@@ -510,10 +570,21 @@ aggregate() {
   fi
 }
 
-cmd="${1:-}"; shift || true
-case "$cmd" in
-  produce-arch)  produce_arch "${1:-}" "${2:-}" ;;
-  import-verify) import_verify "${1:-}" ;;
-  aggregate)     aggregate "${1:-}" "${2:-}" "${3:-}" ;;
-  *) die "usage: run_authoritative.sh <produce-arch <arch> <evidence_dir> | import-verify <evidence_dir> | aggregate <x86_dir> <arm_dir> <workdir>>" ;;
-esac
+# Source-execution guard (shell execution identity, NOT a bypass env var): the
+# authoritative dispatch runs ONLY when this file is EXECUTED as a program
+# (`bash run_authoritative.sh ...`), where ${BASH_SOURCE[0]} == $0. When another
+# script SOURCES this file (e.g. the TEST_ONLY real-container E2E harness reusing
+# produce_stage2 / assemble_evidence without the authoritative Stage-0 gate),
+# ${BASH_SOURCE[0]} != $0 and NO command is dispatched — sourcing can therefore never
+# trigger an authoritative produce/aggregate. There is deliberately no environment
+# variable that re-enables dispatch on source, so authoritative execution cannot
+# accidentally inherit one.
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+  cmd="${1:-}"; shift || true
+  case "$cmd" in
+    produce-arch)  produce_arch "${1:-}" "${2:-}" ;;
+    import-verify) import_verify "${1:-}" ;;
+    aggregate)     aggregate "${1:-}" "${2:-}" "${3:-}" ;;
+    *) die "usage: run_authoritative.sh <produce-arch <arch> <evidence_dir> | import-verify <evidence_dir> | aggregate <x86_dir> <arm_dir> <workdir>>" ;;
+  esac
+fi

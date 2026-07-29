@@ -30,7 +30,7 @@ use crate::schema::stage6::{NativeBuild, OciBuild};
 use super::arch_bundle::{self, AggregatedVenueInputs, ArchBundleError, PerArchBundle};
 use super::audit::Stage2AuditRecord;
 use super::lock_provenance::{verify_in_container_provenance, LockBinding, LockProvenance};
-use super::stage5::Stage5Result;
+use super::stage5::{self, Stage5Result};
 use super::tool_install::{InstallMode, ToolBindingRecord};
 
 /// The frozen sealed-bundle kind + schema version.
@@ -69,6 +69,13 @@ fn tool_binding_file(c: &str) -> String {
 fn stage5_file(c: &str) -> String {
     format!("{c}.stage5-result.json")
 }
+/// The EXACT verifier runner `Cargo.lock`, sealed so import can recompute its
+/// domain-separated hash (== the Stage-5 record's `verifier_sdk_lock_blake3`) and
+/// structurally verify it pins the declared terminal-verifier SDK. Present wherever a
+/// Stage-5 result is (SP1 both arches, RISC Zero x86_64 only).
+fn stage5_runner_lock_file(c: &str) -> String {
+    format!("{c}.stage5-runner.lock")
+}
 const SP1_MATERIAL: &str = "sp1-verifier-material.json";
 const RISC0_MATERIAL: &str = "risc0-verifier-material.json";
 
@@ -103,10 +110,12 @@ pub fn required_files(arch: &str) -> Vec<String> {
     }
     v.push(tool_binding_file("Sp1"));
     v.push(stage5_file("Sp1"));
+    v.push(stage5_runner_lock_file("Sp1"));
     v.push(SP1_MATERIAL.to_string());
     if arch == arch_bundle::ARCH_X86_64 {
         v.push(tool_binding_file("Risc0"));
         v.push(stage5_file("Risc0"));
+        v.push(stage5_runner_lock_file("Risc0"));
         v.push(RISC0_MATERIAL.to_string());
     }
     v.sort();
@@ -347,7 +356,7 @@ impl std::fmt::Display for EvidenceError {
             }
             EvidenceError::Stage5ToolUnbound { candidate } => write!(
                 f,
-                "{candidate} Stage-5 tool_identity_hex is not bound to any verified tool binding"
+                "{candidate} Stage-5 proof_producer_tool_identity is set but references no verified tool binding"
             ),
             EvidenceError::CandidateCoverage { kind, candidate } => {
                 write!(f, "missing {kind} evidence for candidate {candidate}")
@@ -820,7 +829,25 @@ pub fn import_verify(dir: &Path) -> Result<ImportedArchBundle, EvidenceError> {
     }
     for c in stage5_candidates {
         let s5f = stage5_file(c);
-        let res: Stage5Result = parse(&s5f, &read_file(dir, &s5f)?)?;
+        let raw = read_file(dir, &s5f)?;
+        // Reject an inadequate v1 / unversioned Stage-5 record with a CLEAR trust error
+        // BEFORE strict decode: v1 bound the SHA-256 of a downloaded+installed proof-tool
+        // CLI as the "tool identity", which the verifier SDK library never runs — a false
+        // causal claim. Only the current schema (which binds the executed verifier binary
+        // + its dependency lock) is eligible for authoritative evidence.
+        let ver = stage5::peek_stage5_schema_version(&raw);
+        if ver != stage5::STAGE5_SCHEMA_VERSION {
+            return Err(EvidenceError::Stage5 {
+                candidate: c.to_string(),
+                error: format!(
+                    "schema_version {ver} is not the authoritative-eligible v{} \
+                     (a v1/unversioned Stage-5 record binds a non-causal installed CLI, \
+                     not the executed verifier, and is refused)",
+                    stage5::STAGE5_SCHEMA_VERSION
+                ),
+            });
+        }
+        let res: Stage5Result = parse(&s5f, &raw)?;
         res.validate().map_err(|e| EvidenceError::Stage5 {
             candidate: c.to_string(),
             error: e.to_string(),
@@ -851,14 +878,60 @@ pub fn import_verify(dir: &Path) -> Result<ImportedArchBundle, EvidenceError> {
                 expected,
             });
         }
-        // Stage-5 must be bound to a VERIFIED tool binding for this candidate.
-        let bound = tool_bindings
-            .iter()
-            .any(|t| t.candidate == c && t.installed_binary_sha256_hex == res.tool_identity_hex);
-        if !bound {
-            return Err(EvidenceError::Stage5ToolUnbound {
+        // v2 verifier identity is SELF-CONTAINED and CAUSAL. Content-address the SEALED
+        // verifier runner lock and prove the record's dependency binding:
+        //   (a) recompute the domain-separated lock hash (BLAKE3(CARGO_LOCK_TAG ‖ bytes) —
+        //       the same rule as candidate locks) and require it to EQUAL the record's
+        //       verifier_sdk_lock_blake3 (the runner lock was not altered / swapped); and
+        //   (b) STRUCTURALLY parse the lock (never a text grep) and require it to pin the
+        //       declared verifier SDK (verifier_sdk_name @ verifier_sdk_version) exactly
+        //       once, from a registry source, with a checksum (wrong version / source /
+        //       checksum are refused).
+        // The runner lock file is candidate-named + in THIS arch bundle (exact-set), and
+        // its hash matches a record already bound to candidate/arch/container/source — so
+        // the lock is bound to all of those. (The executed-binary sha256 is VENUE-verified
+        // by hashing the exact executed file; it is not independently recomputable at
+        // import unless the binary itself is sealed or reproducibly rebuilt — not claimed
+        // here as import-proven.)
+        let rl_name = stage5_runner_lock_file(c);
+        let rl_bytes = read_file(dir, &rl_name)?;
+        let rl_recomputed = crate::venue::lock_provenance::recompute_lock_hash(&rl_bytes);
+        if rl_recomputed != res.verifier_sdk_lock_blake3 {
+            return Err(EvidenceError::Stage5 {
                 candidate: c.to_string(),
+                error: format!(
+                    "verifier runner lock hash mismatch: recomputed {rl_recomputed} != record verifier_sdk_lock_blake3 {} (altered/swapped runner lock)",
+                    res.verifier_sdk_lock_blake3
+                ),
             });
+        }
+        let pkgs = crate::venue::cargo_lock::parse_packages(&rl_bytes).map_err(|e| {
+            EvidenceError::Stage5 {
+                candidate: c.to_string(),
+                error: format!("verifier runner lock parse failed: {e}"),
+            }
+        })?;
+        crate::venue::cargo_lock::require_sdk_package(
+            &pkgs,
+            &res.verifier_sdk_name,
+            &res.verifier_sdk_version,
+        )
+        .map_err(|e| EvidenceError::Stage5 {
+            candidate: c.to_string(),
+            error: format!("verifier runner lock SDK binding invalid: {e}"),
+        })?;
+        //
+        // The OPTIONAL upstream proof-producer identity, when present, is separate
+        // provenance and MUST reference a verified tool binding for this candidate.
+        if let Some(prover) = &res.proof_producer_tool_identity {
+            let bound = tool_bindings
+                .iter()
+                .any(|t| t.candidate == c && t.installed_binary_sha256_hex == *prover);
+            if !bound {
+                return Err(EvidenceError::Stage5ToolUnbound {
+                    candidate: c.to_string(),
+                });
+            }
         }
         stage5_results.push(res);
     }
@@ -1073,12 +1146,30 @@ pub fn write_test_only_bundle_dir(dir: &Path, arch: &str) -> Result<(), String> 
                 .iter()
                 .map(|n| serde_json::json!({"name":n,"expected_rejected":true,"actual_rejected":true}))
                 .collect();
-            let s5 = serde_json::json!({"candidate":c,"arch":arch,
+            // The SEALED verifier runner lock pins the candidate's terminal-verifier SDK;
+            // its domain-separated hash is the record's verifier_sdk_lock_blake3, which
+            // import recomputes + structurally verifies.
+            let (sdk_name, sdk_ver) = if c == "Sp1" {
+                ("sp1-verifier", "6.3.1")
+            } else {
+                ("risc0-zkvm", "3.0.5")
+            };
+            let runner_lock = crate::venue::cargo_lock::synthetic_runner_lock(sdk_name, sdk_ver);
+            let runner_lock_hash =
+                crate::venue::lock_provenance::recompute_lock_hash(runner_lock.as_bytes());
+            w(&stage5_runner_lock_file(c), runner_lock.as_bytes())?;
+            let s5 = serde_json::json!({
+                "schema_version": crate::venue::stage5::STAGE5_SCHEMA_VERSION,
+                "candidate":c,"arch":arch,
                 "fixture_hashes":[{"label":"terminal-proof","blake3_hex":bh(&format!("fx-{lc}-{arch}")),"byte_len":512}],
-                "verifier_identity":format!("pinned-{lc}-verifier@1"),"mutation_cases":cases,
-                "tool_identity_hex":first_installed,"container_digest":builder,"source_commit":commit,
+                "verifier_identity":format!("{sdk_name} {sdk_ver} terminal (descriptive)"),"mutation_cases":cases,
+                "verifier_executed_binary_sha256":bh(&format!("runbin-{lc}-{arch}")),
+                "verifier_sdk_lock_blake3":runner_lock_hash,
+                "verifier_sdk_name":sdk_name,"verifier_sdk_version":sdk_ver,
+                "container_digest":builder,"source_commit":commit,
                 "command_log_blake3_hex":bh(&format!("stage5cmd-{lc}-{arch}")),
                 "overall_pass":true});
+            let _ = &first_installed;
             w(&stage5_file(c), &serde_json::to_vec_pretty(&s5).unwrap())?;
         }
     }

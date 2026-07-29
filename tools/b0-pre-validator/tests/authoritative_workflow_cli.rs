@@ -182,9 +182,11 @@ fn aggregate_does_no_post_verification_copy_out_of_the_arch_directories() {
         .split_once("\naggregate() {")
         .expect("aggregate() function must exist")
         .1;
+    // aggregate() is the last function; the source-execution guard (`if
+    // [ "${BASH_SOURCE[0]}" = ... ]`) follows the function definitions and gates dispatch.
     let body = after
-        .split_once("\ncmd=")
-        .expect("dispatch must follow aggregate()")
+        .split_once("\nif [ \"${BASH_SOURCE[0]}\"")
+        .expect("source-execution guard must follow aggregate()")
         .0;
     assert!(
         !body.contains("cp "),

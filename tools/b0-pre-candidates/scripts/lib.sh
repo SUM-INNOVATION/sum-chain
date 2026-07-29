@@ -114,6 +114,139 @@ canonicalize_rustup_components() {
   mv -f "$comp.sorted" "$comp"
 }
 
+# Validate a Stage-1 resolved candidate lock before it is bind-mounted READ-ONLY into a
+# fresh Stage-2 container, and echo its verified domain-separated BLAKE3 hash (the lock
+# IDENTITY — a host absolute path is never evidence). Fail closed unless the lock is:
+# present, a REGULAR file, NOT a symlink, non-empty, parseable as a Cargo.lock (a version
+# header and/or [[package]] tables), candidate-specific and generated-in-container per its
+# provenance, and its recomputed hash EQUALS the Stage-1 recorded lock_blake3_hex. This is
+# the same content-address gate resolve_lock.sh / verify-lock use; here it re-binds the
+# handed-off lock to Stage 2. Args:
+#   <lock_file> <provenance_json> <schema_candidate> <validator_manifest>
+require_stage1_lock() {
+  local lock="$1" prov="$2" cand="$3" val="$4" recomputed p_hash p_cand p_origin
+  [ -e "$lock" ] || die "Stage-1 resolved lock absent (Stage 2 needs it mounted): $lock"
+  [ ! -L "$lock" ] || die "Stage-1 lock is a symlink; refused (must be a regular file): $lock"
+  [ -f "$lock" ] || die "Stage-1 lock is not a regular file: $lock"
+  [ -s "$lock" ] || die "Stage-1 lock is empty: $lock"
+  grep -qE '^version[[:space:]]*=|^\[\[package\]\]' "$lock" \
+    || die "Stage-1 lock is not a parseable Cargo.lock (no version header / [[package]]): $lock"
+  [ -f "$prov" ] || die "Stage-1 lock provenance absent: $prov"
+  require_cmd python3
+  p_cand="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("candidate",""))' "$prov" 2>/dev/null || true)"
+  p_origin="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("origin",""))' "$prov" 2>/dev/null || true)"
+  p_hash="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("lock_blake3_hex",""))' "$prov" 2>/dev/null || true)"
+  [ "$p_cand" = "$cand" ] \
+    || die "Stage-1 lock provenance candidate '$p_cand' != '$cand' (cross-candidate / swapped lock)"
+  [ "$p_origin" = "generated-in-container" ] \
+    || die "Stage-1 lock provenance origin '$p_origin' != generated-in-container (host-originated lock refused)"
+  printf '%s' "$p_hash" | grep -Eq '^[0-9a-f]{64}$' || die "Stage-1 lock provenance hash malformed: '$p_hash'"
+  recomputed="$(cargo run --quiet --locked --manifest-path "$val" --bin venue-verify -- lock-hash "$lock")" \
+    || die "Stage-1 lock hash recomputation failed for $lock"
+  [ "$recomputed" = "$p_hash" ] \
+    || die "Stage-1 lock hash mismatch: recomputed $recomputed != provenance $p_hash (tampered / stale lock)"
+  printf '%s' "$recomputed"
+}
+
+# The exact verifier-material harness subdirectory (under $ROOT/harness) for a candidate.
+material_harness_subdir() {
+  case "${1:-}" in
+    sp1)   printf 'sp1-verifier-material' ;;
+    risc0) printf 'risc0-verifier-material' ;;
+    *) die "material_harness_subdir: candidate must be sp1|risc0 (got '${1:-}')" ;;
+  esac
+}
+
+# The reproduced in-container path of the material harness. It MUST reproduce the exact
+# repo-relative layout so the harness's `b0-pre-vmat = { path = "../../../b0-pre-vmat" }`
+# resolves to $INCONTAINER_ROOT/tools/b0-pre-vmat inside the curated context.
+incontainer_material_dir() { printf 'tools/b0-pre-candidates/harness/%s' "$1"; }
+# The single leaf path-dep of every material harness (reproduced in-container path).
+INCONTAINER_VMAT_RELPATH="tools/b0-pre-vmat"
+
+# Validate a GENERATED-IN-CONTAINER verifier-material lock + its provenance (the D2
+# analogue of require_stage1_lock). Fail-closed on absent/symlink/non-regular/empty/
+# unparseable lock, absent provenance, harness mismatch (swapped), host origin, malformed
+# or mismatched hash. Prints the recomputed domain-separated lock hash on success.
+require_material_lock() {
+  local lock="$1" prov="$2" harness="$3" val="$4" recomputed p_hash p_harness p_origin
+  [ -e "$lock" ] || die "material lock absent (extraction needs it validated + mounted): $lock"
+  [ ! -L "$lock" ] || die "material lock is a symlink; refused (must be a regular file): $lock"
+  [ -f "$lock" ] || die "material lock is not a regular file: $lock"
+  [ -s "$lock" ] || die "material lock is empty: $lock"
+  grep -qE '^version[[:space:]]*=|^\[\[package\]\]' "$lock" \
+    || die "material lock is not a parseable Cargo.lock (no version header / [[package]]): $lock"
+  [ -f "$prov" ] || die "material lock provenance absent: $prov"
+  require_cmd python3
+  p_harness="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("harness",""))' "$prov" 2>/dev/null || true)"
+  p_origin="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("origin",""))' "$prov" 2>/dev/null || true)"
+  p_hash="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("lock_blake3_hex",""))' "$prov" 2>/dev/null || true)"
+  [ "$p_harness" = "$harness" ] \
+    || die "material lock provenance harness '$p_harness' != '$harness' (cross-harness / swapped lock)"
+  [ "$p_origin" = "generated-in-container" ] \
+    || die "material lock provenance origin '$p_origin' != generated-in-container (host-originated lock refused)"
+  printf '%s' "$p_hash" | grep -Eq '^[0-9a-f]{64}$' || die "material lock provenance hash malformed: '$p_hash'"
+  recomputed="$(cargo run --quiet --locked --manifest-path "$val" --bin venue-verify -- lock-hash "$lock")" \
+    || die "material lock hash recomputation failed for $lock"
+  [ "$recomputed" = "$p_hash" ] \
+    || die "material lock hash mismatch: recomputed $recomputed != provenance $p_hash (tampered / stale lock)"
+  printf '%s' "$recomputed"
+}
+
+# ---- Shared in-builder Docker cores (ONE implementation for producer + E2E) ----------
+# These are the exact docker-run cores the authoritative producer uses. They are factored
+# here so the real-container E2E drives the IDENTICAL logic (never a reconstructed command
+# sequence): a divergence would be a bug in one caller, not two.
+
+# Generate a Cargo.lock for the crate at $incontainer_dir INSIDE $image (bash -c, matching
+# resolve_lock.sh / produce_stage2) and write the bytes to $out_lock. NO host/venue gates
+# — callers (resolve_lock.sh) add the clean-tree / digest / origin gates; the E2E calls it
+# directly over a fixture. Stderr flows to the caller (which may capture a log).
+gen_lock_in_container() {
+  local image="$1" incontainer_dir="$2" out_lock="$3"
+  require_cmd docker
+  docker run --rm --pull never "$image" \
+    bash -c "cd $incontainer_dir && cargo generate-lockfile && cat Cargo.lock" > "$out_lock" \
+    || return 1
+  [ -s "$out_lock" ]
+}
+
+# The S1 causal verifier-execution core: BUILD the runner (--locked) inside $image, HASH
+# the EXACT resulting binary, and EXEC that file directly (never an unbound `cargo run`,
+# whose bytes are unidentified) — all in ONE container invocation so the hashed file is
+# byte-for-byte the executed file. The runner crate is at $incontainer_runner_dir with its
+# Cargo.lock already generated; $host_out is bind-mounted at /out; the executed-binary
+# sha256 is written to /out/runner-bin.sha256 and the runner lock copied to
+# /out/runner-cargo.lock; optional $fixture_host mounts read-only at /fixture.json. Uses
+# `bash -lc` (the pinned image resolves the toolchain on the login PATH). Shared by
+# verifier_fixtures.sh (real Stage 5) and the real-container E2E.
+causal_build_hash_exec_runner() {
+  local image="$1" incontainer_runner_dir="$2" bin_name="$3" host_out="$4" fixture_host="${5:-}"
+  require_cmd docker
+  local binpath="/tmp/b0pre-stage5-target/release/$bin_name"
+  local fmount=() farg=""
+  if [ -n "$fixture_host" ]; then fmount=(-v "$fixture_host:/fixture.json:ro"); farg="/fixture.json"; fi
+  # `${fmount[@]+...}` guards the empty-array case under `set -u` on bash 3.2 (macOS);
+  # bash 4+ (the Linux venue + CI) expands identically.
+  docker run --rm --pull never -v "$host_out:/out" ${fmount[@]+"${fmount[@]}"} \
+    -e CARGO_TARGET_DIR=/tmp/b0pre-stage5-target "$image" \
+    bash -lc "cd $incontainer_runner_dir && cargo build --quiet --release --locked && [ -x '$binpath' ] || { echo 'runner binary absent after build' >&2; exit 1; }; sha256sum '$binpath' | awk '{print \$1}' > /out/runner-bin.sha256 && cp $incontainer_runner_dir/Cargo.lock /out/runner-cargo.lock && exec '$binpath' $farg /out"
+}
+
+# The Stage-2 read-only-locked execution core: bind-mount the validated Stage-1 lock
+# READ-ONLY at $incontainer_lock and run one `cargo … --locked` command ($cmd, e.g.
+# `cargo metadata --format-version 1 --locked` or `cargo audit --json`) in $image at
+# $cdir, writing stdout to $out. The lock is CONSUMED read-only; nothing is written into
+# the candidate workspace. Shared by produce_stage2 (D1) and the real-container E2E so the
+# read-only-mount mechanic is one implementation.
+run_stage2_locked() {
+  local image="$1" cdir="$2" hostlock="$3" incontainer_lock="$4" cmd="$5" out="$6"
+  require_cmd docker
+  docker run --rm --pull never \
+    --mount "type=bind,source=$hostlock,target=$incontainer_lock,readonly" \
+    "$image" bash -c "cd $cdir && $cmd" > "$out"
+}
+
 # Parse + fully validate a TYPED runnable-ref sidecar and echo its runnable image id, or
 # fail closed. The sidecar (written by build_container.sh ONLY after both clean builds
 # match, the layout is content-verified, docker load succeeds, and the loaded id matches a

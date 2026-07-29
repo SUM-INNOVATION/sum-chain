@@ -81,6 +81,32 @@ jobs:
       - name: B0-PRE venue-script tests (bash -n, shellcheck, disk_free_gib, pin schema)
         run: bash tools/b0-pre-candidates/scripts/tests/run.sh
 
+      # --- Lightweight REAL-CONTAINER v2 seal->import E2E (REQUIRED execution; bounded) --
+      # ONE continuous real-container flow driving the ACTUAL production seam functions (the
+      # shared lib.sh cores + the real venue-verify subcommands) with lightweight fixtures:
+      # Stage-1 lock -> require_stage1_lock -> read-only Stage-2 `cargo metadata --locked`
+      # (D1) -> causal Stage-5 (build the runner, hash the EXACT binary, exec that file) ->
+      # vv stage5-generate (schema-v2) -> inject into an assembled bundle -> vv seal-bundle
+      # -> vv import-bundle (import VERIFIED) -> post-seal mutations all fail closed. It
+      # prints REAL_CONTAINER_V2_SEAL_IMPORT_PASS only after import verification.
+      #
+      # REQUIRED-execution mode (B0PRE_E2E_REQUIRED=1): the test treats unavailable Docker /
+      # a skipped run as a FAILURE, and this step ALSO asserts the terminal marker is
+      # present — so a SKIP, a missing marker, or a `timeout` all fail the required check
+      # (never an intermittent network-dependent pass). ubuntu-latest ships a native Docker
+      # daemon. The genuine-proof SP1/RISC Zero candidate smoke is native-x86 ONLY
+      # (docs/b0-pre/venue/S1-V2-X86-SMOKE.md) and is NOT run in CI.
+      - name: Real-container v2 seal->import E2E (required; bounded 15m; marker-asserted)
+        env:
+          B0PRE_E2E_REQUIRED: "1"
+        run: |
+          set -o pipefail
+          out="$(timeout 900 bash tools/b0-pre-candidates/scripts/tests/e2e_v2_produce_chain.test.sh 2>&1)"; rc=$?
+          printf '%s\n' "$out"
+          [ "$rc" -eq 0 ] || { echo "::error::real-container E2E exited $rc (timeout=124 / failure)"; exit 1; }
+          printf '%s\n' "$out" | grep -q '^REAL_CONTAINER_V2_SEAL_IMPORT_PASS$' \
+            || { echo "::error::required terminal marker REAL_CONTAINER_V2_SEAL_IMPORT_PASS absent"; exit 1; }
+
       # --- Shared canonical primitive as an independent CI authority ----------
       # b0-pre-vmat is the SOLE canonical verifier-material encoding + identity +
       # stamp-policy implementation (a blake3-only leaf the validator AND the venue

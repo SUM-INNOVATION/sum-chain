@@ -86,9 +86,8 @@ gen_cmd="$out/$schema_cand.generate-lockfile.cmd"
 gen_log="$out/$schema_cand.generate-lockfile.log"
 printf 'docker run --rm --pull never %s bash -c "cd %s && cargo generate-lockfile" (candidate=%s; full staged path-dep graph)\n' \
   "$BUILDER_IMAGE_DIGEST" "$cand_dir" "$candidate" > "$gen_cmd"
-docker run --rm --pull never "$BUILDER_IMAGE_REF" \
-  bash -c "cd $cand_dir && cargo generate-lockfile && cat Cargo.lock" \
-  > "$dest" 2> "$gen_log" \
+# Shared production core (lib.sh): the real-container E2E drives the IDENTICAL generation.
+gen_lock_in_container "$BUILDER_IMAGE_REF" "$cand_dir" "$dest" 2> "$gen_log" \
   || die "in-container 'cargo generate-lockfile' failed for $candidate (no host lock is substituted)"
 [ -s "$dest" ] || die "in-container lock export for $candidate is empty; refusing"
 

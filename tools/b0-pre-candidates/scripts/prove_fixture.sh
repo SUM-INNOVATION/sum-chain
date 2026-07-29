@@ -22,9 +22,13 @@
 #   env: VERIFIER_REF  pinned builder image the prover toolchain runs INSIDE
 #        CMD_LOG       command-log file the exact in-container prove commands append to
 #        SCHEMA_ARCH   X86_64 | Aarch64
-#        TOOL_BINDING  path to the BOUND prover tool identity (<Cand>.tool-binding.json);
-#                      the pinned prover is installed from this verified identity, never
-#                      an invented URL/checksum (a version string alone is not evidence)
+#        TOOL_BINDING  path to the BOUND prover tool identity (<Cand>.tool-binding.json),
+#                      RECORDED as upstream proof-tool provenance for this fixture. It is
+#                      NOT claimed to have installed or caused the proof: the prover SDK is
+#                      pinned in the runner crate + locked in-container, the guest-build
+#                      toolchain is baked into the verified image, and this fixture is
+#                      self-labeled NON_SELECTION (it never enters the authoritative
+#                      bundle). No causal claim is made for the binding here.
 #   optional env: PROVER_GUEST_INPUT  path to the frozen guest's fixed input bytes
 #
 # Emits <out_fixture.json>: {stamp:[4 non-selection stamps], candidate, + the genuine
@@ -95,7 +99,7 @@ CAND_DIR="$(incontainer_candidate_dir "$CAND_LC")"
 require_cmd docker
 require_cmd python3
 require_cmd b3sum
-[ -n "${TOOL_BINDING:-}" ] || nyr "TOOL_BINDING (path to the bound prover tool identity <Cand>.tool-binding.json) is required to install the pinned prover"
+[ -n "${TOOL_BINDING:-}" ] || nyr "TOOL_BINDING (path to the bound prover tool identity <Cand>.tool-binding.json) is required as recorded upstream proof-tool provenance (NOT claimed to install/cause the proof; this fixture is NON_SELECTION)"
 [ -f "$TOOL_BINDING" ]     || nyr "TOOL_BINDING points to '$TOOL_BINDING', which is not a readable file"
 
 OUT_DIR="$(cd "$(dirname "$OUT_FIXTURE")" && pwd)"
@@ -195,9 +199,10 @@ fn main() -> ExitCode {
     }
 }
 RUST
-  # The frozen SP1 guest ELF is built with the pinned SP1 guest toolchain (cargo-prove
-  # installed from the bound tool identity), then proved by the runner. Built from the
-  # staged candidate path so the guest-core/sumchain-wire path deps resolve.
+  # The frozen SP1 guest ELF is built with the pinned SP1 guest toolchain (cargo-prove,
+  # baked into the verified image), then proved by the runner. The TOOL_BINDING is recorded
+  # upstream provenance, not claimed as the cause of this NON_SELECTION fixture. Built from
+  # the staged candidate path so the guest-core/sumchain-wire path deps resolve.
   BUILD_GUEST="cd $CAND_DIR/guest && cargo prove build --output-directory /out/guest --elf-name guest.elf"
   ELF_PATH="/out/guest/guest.elf"
 else
@@ -306,7 +311,7 @@ fi
 GEN_CMD="docker run --rm --pull never -v $OUT_DIR:/out -e CARGO_TARGET_DIR=/tmp/b0pre-prove-target $VERIFIER_REF bash -lc 'cd /out/_prover && cargo generate-lockfile'"
 {
   printf '# Stage-5 GENUINE fixture generation (prove frozen %s guest) inside %s\n' "$CAND_LC" "$VERIFIER_REF"
-  printf '# pinned prover installed from bound tool identity %s\n' "$TOOL_BINDING"
+  printf '# upstream proof-tool provenance recorded (NOT claimed to cause this NON_SELECTION fixture): %s\n' "$TOOL_BINDING"
   printf '%s\n' "$GEN_CMD"
 } >> "$CMD_LOG"
 docker run --rm --pull never \

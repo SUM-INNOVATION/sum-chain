@@ -54,37 +54,93 @@ pub struct Stage5FixtureHash {
     pub byte_len: u64,
 }
 
-/// The strict Stage-5 result for one candidate on one architecture.
+/// The current Stage-5 result schema version.
+///
+/// v1 (unversioned, or `schema_version` == 1) bound `tool_identity_hex` — the SHA-256 of
+/// a downloaded+installed proof-tool CLI binary — as the Stage-5 tool identity. That was
+/// a FALSE causal claim: the Stage-5 fixtures + mutation rejections are produced by the
+/// pinned verifier SDK *library* compiled inside the verified image, which the installed
+/// CLI binary never runs. v2 instead binds the VERIFIER THAT ACTUALLY RAN — the exact
+/// executed runner binary, its resolved dependency lock, and its SDK name/version — so
+/// the attribution is causal. v1 remains decodable only to be REFUSED: it is INELIGIBLE
+/// for authoritative evidence because its attribution is insufficient.
+pub const STAGE5_SCHEMA_VERSION: u16 = 2;
+
+/// The strict Stage-5 result for one candidate on one architecture (schema v2).
+///
+/// Authority for "which verifier produced this" comes EXCLUSIVELY from the hash-backed
+/// `verifier_executed_binary_sha256` / `verifier_sdk_lock_blake3` / `verifier_sdk_name` /
+/// `verifier_sdk_version` fields bound to the `container_digest` it ran inside and the
+/// `command_log_blake3_hex` of the exact commands. `verifier_identity` is a DESCRIPTIVE
+/// label only and is never trusted as identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Stage5Result {
+    /// REQUIRED schema version. Only [`STAGE5_SCHEMA_VERSION`] is eligible for
+    /// authoritative evidence; an absent/older version is refused by [`Self::validate`].
+    pub schema_version: u16,
     pub candidate: String,
     pub arch: String,
     /// The fixture + raw-artifact hashes the verifier consumed (at least one).
     pub fixture_hashes: Vec<Stage5FixtureHash>,
-    /// The pinned terminal-verifier identity (e.g. its binary / image identity).
+    /// A DESCRIPTIVE label only (e.g. "sp1-verifier terminal Groth16"). Authority comes
+    /// EXCLUSIVELY from the hash-backed verifier_* fields below; this string is never
+    /// trusted as identity and may not stand in for the executed binary + dependency set.
     pub verifier_identity: String,
     /// EVERY required mutation case, each with expected-and-actual rejection.
     pub mutation_cases: Vec<Stage5MutationCase>,
-    /// The verified proof-tool identity the run was bound to (bare 64-hex, e.g.
-    /// the installed-binary hash from the tool binding).
-    pub tool_identity_hex: String,
-    /// The builder-image `sha256:<64hex>` digest the fixtures ran inside.
+    /// SHA-256 (bare 64-hex) of the EXACT verifier-runner executable that was located and
+    /// executed directly (not an unbound `cargo run`) to produce this result.
+    pub verifier_executed_binary_sha256: String,
+    /// BLAKE3 (bare 64-hex) of the verifier runner's resolved, in-container dependency
+    /// lock — the transitive graph that pinned the verifier SDK bytes actually compiled.
+    pub verifier_sdk_lock_blake3: String,
+    /// The pinned verifier SDK crate name (e.g. `sp1-verifier`).
+    pub verifier_sdk_name: String,
+    /// The pinned verifier SDK version (e.g. `6.3.1`).
+    pub verifier_sdk_version: String,
+    /// The builder-image `sha256:<64hex>` digest the verifier ran inside.
     pub container_digest: String,
     /// The clean source commit (40/64-hex).
     pub source_commit: String,
     /// Bound to the exact in-container commands that ran the verifier + mutations
     /// (bare 64-hex BLAKE3 of the command log).
     pub command_log_blake3_hex: String,
+    /// OPTIONAL upstream proof-producer tool identity (bare 64-hex) — set ONLY when the
+    /// tool that produced the proof being verified is CAUSALLY established (authenticated
+    /// delivery + rehash-at-point-of-use + that exact binary executed). It is separate
+    /// upstream provenance and NEVER a substitute for the verifier identity above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proof_producer_tool_identity: Option<String>,
     /// The OVERALL pass. Validation requires it to equal the value DERIVED from the
     /// individual cases (all required present, each rejected); a lying `true` is
     /// refused.
     pub overall_pass: bool,
 }
 
+/// Peek the `schema_version` of a raw Stage-5 record WITHOUT a strict decode, so the
+/// importer can reject an inadequate v1 (or unversioned) record with a clear trust error
+/// instead of a generic parse failure. Returns 0 when the field is absent or unparseable.
+pub fn peek_stage5_schema_version(raw: &[u8]) -> u16 {
+    #[derive(Deserialize)]
+    struct V {
+        #[serde(default)]
+        schema_version: u16,
+    }
+    serde_json::from_slice::<V>(raw)
+        .map(|v| v.schema_version)
+        .unwrap_or(0)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stage5Error {
     Missing(&'static str),
+    /// The record's `schema_version` is not the authoritative-eligible
+    /// [`STAGE5_SCHEMA_VERSION`] (e.g. an inadequate v1 record whose attribution binds a
+    /// non-causal installed CLI instead of the executed verifier).
+    UnsupportedSchemaVersion {
+        got: u16,
+    },
     UnknownCandidate {
         candidate: String,
     },
@@ -126,6 +182,13 @@ impl std::fmt::Display for Stage5Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Stage5Error::Missing(field) => write!(f, "required Stage-5 field {field} is empty"),
+            Stage5Error::UnsupportedSchemaVersion { got } => write!(
+                f,
+                "Stage-5 schema_version {got} is not the authoritative-eligible v{} \
+                 (a v1/unversioned record binds a non-causal installed CLI, not the \
+                 executed verifier, and is refused for authoritative evidence)",
+                STAGE5_SCHEMA_VERSION
+            ),
             Stage5Error::UnknownCandidate { candidate } => {
                 write!(f, "unknown candidate {candidate:?}")
             }
@@ -218,6 +281,13 @@ impl Stage5Result {
     /// closed. The container-digest / source-commit binding shape is checked here;
     /// binding those to the manifest is done by the evidence-bundle importer.
     pub fn validate(&self) -> Result<(), Stage5Error> {
+        // Only the current schema version is eligible; an inadequate v1/unversioned
+        // record is refused BEFORE any other check (its attribution is non-causal).
+        if self.schema_version != STAGE5_SCHEMA_VERSION {
+            return Err(Stage5Error::UnsupportedSchemaVersion {
+                got: self.schema_version,
+            });
+        }
         if !known_candidate(&self.candidate) {
             return Err(Stage5Error::UnknownCandidate {
                 candidate: self.candidate.clone(),
@@ -228,11 +298,31 @@ impl Stage5Result {
                 arch: self.arch.clone(),
             });
         }
+        // `verifier_identity` is a descriptive label; require it be non-empty but it is
+        // NOT the authority — the hash-backed fields below are.
         if self.verifier_identity.trim().is_empty() {
             return Err(Stage5Error::Missing("verifier_identity"));
         }
-        if !is_hex64(&self.tool_identity_hex) {
-            return Err(Stage5Error::BadHash("tool_identity_hex"));
+        // The CAUSAL verifier identity: the executed binary + its dependency lock, plus a
+        // non-empty SDK name/version. These are what bind "the verifier that actually ran".
+        if !is_hex64(&self.verifier_executed_binary_sha256) {
+            return Err(Stage5Error::BadHash("verifier_executed_binary_sha256"));
+        }
+        if !is_hex64(&self.verifier_sdk_lock_blake3) {
+            return Err(Stage5Error::BadHash("verifier_sdk_lock_blake3"));
+        }
+        if self.verifier_sdk_name.trim().is_empty() {
+            return Err(Stage5Error::Missing("verifier_sdk_name"));
+        }
+        if self.verifier_sdk_version.trim().is_empty() {
+            return Err(Stage5Error::Missing("verifier_sdk_version"));
+        }
+        // The optional upstream proof-producer identity, when present, must be a bare
+        // 64-hex identity (it is separate provenance, never the verifier authority).
+        if let Some(p) = &self.proof_producer_tool_identity {
+            if !is_hex64(p) {
+                return Err(Stage5Error::BadHash("proof_producer_tool_identity"));
+            }
         }
         if self.source_commit.trim().is_empty() {
             return Err(Stage5Error::Missing("source_commit"));
@@ -291,10 +381,19 @@ impl Stage5Result {
 pub struct Stage5BindParams {
     pub candidate: String,
     pub arch: String,
+    /// Descriptive label only (see [`Stage5Result::verifier_identity`]).
     pub verifier_identity: String,
-    pub tool_identity_hex: String,
+    /// SHA-256 (bare 64-hex) of the exact executed verifier-runner binary.
+    pub verifier_executed_binary_sha256: String,
+    /// BLAKE3 (bare 64-hex) of the verifier runner's resolved dependency lock.
+    pub verifier_sdk_lock_blake3: String,
+    pub verifier_sdk_name: String,
+    pub verifier_sdk_version: String,
     pub container_digest: String,
     pub source_commit: String,
+    /// Optional upstream proof-producer identity (bare 64-hex), only when causally bound.
+    #[serde(default)]
+    pub proof_producer_tool_identity: Option<String>,
 }
 
 /// One raw fixture/receipt/material artifact the verifier consumed: a label and the
@@ -345,15 +444,20 @@ impl Stage5Result {
             })
             .collect();
         let mut result = Stage5Result {
+            schema_version: STAGE5_SCHEMA_VERSION,
             candidate: params.candidate.clone(),
             arch: params.arch.clone(),
             fixture_hashes,
             verifier_identity: params.verifier_identity.clone(),
             mutation_cases,
-            tool_identity_hex: params.tool_identity_hex.clone(),
+            verifier_executed_binary_sha256: params.verifier_executed_binary_sha256.clone(),
+            verifier_sdk_lock_blake3: params.verifier_sdk_lock_blake3.clone(),
+            verifier_sdk_name: params.verifier_sdk_name.clone(),
+            verifier_sdk_version: params.verifier_sdk_version.clone(),
             container_digest: params.container_digest.clone(),
             source_commit: params.source_commit.clone(),
             command_log_blake3_hex: super::to_hex(blake3::hash(command_log_bytes).as_bytes()),
+            proof_producer_tool_identity: params.proof_producer_tool_identity.clone(),
             overall_pass: false,
         };
         // DERIVE the overall pass from the individual results; never read a supplied one.
@@ -382,6 +486,7 @@ mod tests {
 
     fn good_result(candidate: &str, arch: &str) -> Stage5Result {
         Stage5Result {
+            schema_version: STAGE5_SCHEMA_VERSION,
             candidate: candidate.into(),
             arch: arch.into(),
             fixture_hashes: vec![Stage5FixtureHash {
@@ -389,15 +494,19 @@ mod tests {
                 blake3_hex: h("fixture"),
                 byte_len: 1234,
             }],
-            verifier_identity: "pinned-terminal-verifier@1".into(),
+            verifier_identity: "sp1-verifier terminal Groth16 (descriptive)".into(),
             mutation_cases: REQUIRED_MUTATION_CASES
                 .iter()
                 .map(|n| full_case(n))
                 .collect(),
-            tool_identity_hex: h("tool"),
+            verifier_executed_binary_sha256: h("runner-binary"),
+            verifier_sdk_lock_blake3: h("runner-lock"),
+            verifier_sdk_name: "sp1-verifier".into(),
+            verifier_sdk_version: "6.3.1".into(),
             container_digest: format!("sha256:{}", h("container")),
             source_commit: "a".repeat(40),
             command_log_blake3_hex: h("stage5-cmd"),
+            proof_producer_tool_identity: None,
             overall_pass: true,
         }
     }
@@ -482,10 +591,10 @@ mod tests {
     #[test]
     fn malformed_identities_and_hashes_are_rejected() {
         let mut r = good_result("Sp1", "X86_64");
-        r.tool_identity_hex = "not-hex".into();
+        r.verifier_executed_binary_sha256 = "not-hex".into();
         assert!(matches!(
             r.validate(),
-            Err(Stage5Error::BadHash("tool_identity_hex"))
+            Err(Stage5Error::BadHash("verifier_executed_binary_sha256"))
         ));
         let mut r2 = good_result("Sp1", "X86_64");
         r2.container_digest = "deadbeef".into();
@@ -501,16 +610,85 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn v1_or_unversioned_schema_is_ineligible_for_authoritative() {
+        // A v1 record (schema_version != current) is refused BEFORE any other check —
+        // its non-causal installed-CLI attribution is insufficient for authoritative use.
+        let mut r = good_result("Sp1", "X86_64");
+        r.schema_version = 1;
+        assert!(matches!(
+            r.validate(),
+            Err(Stage5Error::UnsupportedSchemaVersion { got: 1 })
+        ));
+        let mut r0 = good_result("Sp1", "X86_64");
+        r0.schema_version = 0;
+        assert!(matches!(
+            r0.validate(),
+            Err(Stage5Error::UnsupportedSchemaVersion { got: 0 })
+        ));
+    }
+
+    #[test]
+    fn missing_causal_verifier_bindings_are_rejected() {
+        let mut r = good_result("Sp1", "X86_64");
+        r.verifier_sdk_lock_blake3 = "xyz".into();
+        assert!(matches!(
+            r.validate(),
+            Err(Stage5Error::BadHash("verifier_sdk_lock_blake3"))
+        ));
+        let mut r2 = good_result("Sp1", "X86_64");
+        r2.verifier_sdk_name = "  ".into();
+        assert!(matches!(
+            r2.validate(),
+            Err(Stage5Error::Missing("verifier_sdk_name"))
+        ));
+        let mut r3 = good_result("Sp1", "X86_64");
+        r3.verifier_sdk_version = "".into();
+        assert!(matches!(
+            r3.validate(),
+            Err(Stage5Error::Missing("verifier_sdk_version"))
+        ));
+    }
+
+    #[test]
+    fn optional_proof_producer_identity_when_present_must_be_hex64() {
+        let mut r = good_result("Sp1", "X86_64");
+        r.proof_producer_tool_identity = Some("not-hex".into());
+        assert!(matches!(
+            r.validate(),
+            Err(Stage5Error::BadHash("proof_producer_tool_identity"))
+        ));
+        // A well-formed optional identity is accepted (it is separate provenance).
+        r.proof_producer_tool_identity = Some(h("prover-cli"));
+        assert!(r.validate().is_ok());
+    }
+
+    #[test]
+    fn peek_schema_version_reads_v1_and_v2_and_junk() {
+        let v2 = serde_json::to_vec(&good_result("Sp1", "X86_64")).unwrap();
+        assert_eq!(peek_stage5_schema_version(&v2), STAGE5_SCHEMA_VERSION);
+        // A v1-shaped record (no schema_version) peeks as 0 -> importer treats as ineligible.
+        assert_eq!(
+            peek_stage5_schema_version(br#"{"candidate":"Sp1","tool_identity_hex":"x"}"#),
+            0
+        );
+        assert_eq!(peek_stage5_schema_version(b"not json"), 0);
+    }
+
     // ---- raw execution outcomes → typed, bound generation -----------------
 
     fn s5_bind() -> Stage5BindParams {
         Stage5BindParams {
             candidate: "Sp1".into(),
             arch: "X86_64".into(),
-            verifier_identity: "pinned-terminal-verifier@1".into(),
-            tool_identity_hex: h("tool"),
+            verifier_identity: "sp1-verifier terminal Groth16 (descriptive)".into(),
+            verifier_executed_binary_sha256: h("runner-binary"),
+            verifier_sdk_lock_blake3: h("runner-lock"),
+            verifier_sdk_name: "sp1-verifier".into(),
+            verifier_sdk_version: "6.3.1".into(),
             container_digest: format!("sha256:{}", h("container")),
             source_commit: "a".repeat(40),
+            proof_producer_tool_identity: None,
         }
     }
     fn all_rejected() -> Vec<Stage5MutationOutcome> {

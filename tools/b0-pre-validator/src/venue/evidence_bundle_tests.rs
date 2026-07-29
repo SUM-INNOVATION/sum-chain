@@ -162,17 +162,31 @@ fn write_bundle_files(dir: &Path, arch: &str) {
                 .iter()
                 .map(|n| serde_json::json!({"name": n, "expected_rejected": true, "actual_rejected": true}))
                 .collect();
+            let (sdk_name, sdk_ver) = if c == "Sp1" {
+                ("sp1-verifier", "6.3.1")
+            } else {
+                ("risc0-zkvm", "3.0.5")
+            };
+            let runner_lock = crate::venue::cargo_lock::synthetic_runner_lock(sdk_name, sdk_ver);
+            let runner_lock_hash =
+                crate::venue::lock_provenance::recompute_lock_hash(runner_lock.as_bytes());
+            write(dir, &stage5_runner_lock_file(c), runner_lock.as_bytes());
             let s5 = serde_json::json!({
+                "schema_version": crate::venue::stage5::STAGE5_SCHEMA_VERSION,
                 "candidate": c, "arch": arch,
                 "fixture_hashes": [{"label":"terminal-proof","blake3_hex": bh(&format!("fx-{lc}-{arch}")),"byte_len": 512}],
-                "verifier_identity": format!("pinned-{lc}-verifier@1"),
+                "verifier_identity": format!("{sdk_name} {sdk_ver} terminal (descriptive)"),
                 "mutation_cases": cases,
-                "tool_identity_hex": first_installed,
+                "verifier_executed_binary_sha256": bh(&format!("runbin-{lc}-{arch}")),
+                "verifier_sdk_lock_blake3": runner_lock_hash,
+                "verifier_sdk_name": sdk_name,
+                "verifier_sdk_version": sdk_ver,
                 "container_digest": builder_digest,
                 "source_commit": COMMIT,
                 "command_log_blake3_hex": bh(&format!("stage5cmd-{lc}-{arch}")),
                 "overall_pass": true,
             });
+            let _ = &first_installed;
             write(dir, &stage5_file(c), serde_json::to_vec_pretty(&s5).unwrap().as_slice());
         }
     }
@@ -412,17 +426,136 @@ fn an_incomplete_stage2_graph_is_rejected() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-// ---- Adversarial: a Stage-5 result not bound to a verified tool is rejected --
+// ---- Adversarial: an unbound OPTIONAL proof-producer identity is rejected ----
+// (v2: the verifier identity is self-contained/causal; only the optional upstream
+// proof_producer_tool_identity, when present, must reference a verified tool binding.)
 
 #[test]
-fn a_stage5_result_unbound_from_the_tool_is_rejected() {
+fn a_stage5_optional_proof_producer_unbound_from_a_tool_is_rejected() {
     let dir = sealed_bundle("s5unbound", "Aarch64");
     rewrite_json(&dir, &stage5_file("Sp1"), |v| {
-        v["tool_identity_hex"] = serde_json::json!(bh("not-the-installed-binary"));
+        v["proof_producer_tool_identity"] =
+            serde_json::json!(bh("not-the-installed-binary"));
     });
     reseal(&dir, "Aarch64");
     let err = import_verify(&dir).unwrap_err();
     assert!(matches!(err, EvidenceError::Stage5ToolUnbound { .. }), "got {err}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ---- Adversarial: an inadequate v1 (unversioned) Stage-5 record is refused for
+// authoritative import (its non-causal installed-CLI attribution is insufficient). ----
+
+#[test]
+fn a_v1_unversioned_stage5_record_is_rejected_as_inadequate() {
+    let dir = sealed_bundle("s5v1", "Aarch64");
+    rewrite_json(&dir, &stage5_file("Sp1"), |v| {
+        // Downgrade to a v1-shaped record: drop the schema_version + the causal verifier
+        // bindings, reintroduce the old installed-CLI tool_identity_hex.
+        let obj = v.as_object_mut().unwrap();
+        obj.remove("schema_version");
+        obj.remove("verifier_executed_binary_sha256");
+        obj.remove("verifier_sdk_lock_blake3");
+        obj.remove("verifier_sdk_name");
+        obj.remove("verifier_sdk_version");
+        obj.insert("tool_identity_hex".into(), serde_json::json!(bh("installed-cli")));
+    });
+    reseal(&dir, "Aarch64");
+    let err = import_verify(&dir).unwrap_err();
+    assert!(
+        matches!(err, EvidenceError::Stage5 { .. }),
+        "a v1 Stage-5 record must be refused as inadequate for authoritative import; got {err}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ---- Adversarial: sealed verifier-runner-lock binding negatives (S1 v2) ------
+// The Stage-5 record's verifier_sdk_lock_blake3 must equal the domain-separated hash of
+// the SEALED runner lock, which must structurally pin the declared SDK from a registry
+// source with a checksum. Each mutation below is content-addressed and re-sealed, so the
+// manifest is internally consistent and the RECORD/lock cross-check is what rejects it.
+
+#[test]
+fn an_altered_runner_lock_is_rejected_by_hash_recompute() {
+    let dir = sealed_bundle("rl_altered", "Aarch64");
+    // Replace the sealed runner lock with a DIFFERENT (still valid-shaped) lock; the
+    // record's verifier_sdk_lock_blake3 now no longer matches the recomputed hash.
+    let other = crate::venue::cargo_lock::synthetic_runner_lock("sp1-verifier", "6.3.1")
+        + "\n# tampered trailer changes the bytes + hash\n";
+    write(&dir, &stage5_runner_lock_file("Sp1"), other.as_bytes());
+    reseal(&dir, "Aarch64");
+    let err = import_verify(&dir).unwrap_err();
+    assert!(
+        matches!(&err, EvidenceError::Stage5 { error, .. } if error.contains("runner lock hash mismatch")),
+        "altered runner lock must fail the domain-separated hash recompute; got {err}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_wrong_sdk_version_in_the_record_is_rejected() {
+    let dir = sealed_bundle("rl_ver", "Aarch64");
+    // Lock still pins 6.3.1; the record claims a different version -> structural mismatch.
+    rewrite_json(&dir, &stage5_file("Sp1"), |v| {
+        v["verifier_sdk_version"] = serde_json::json!("6.3.0");
+    });
+    reseal(&dir, "Aarch64");
+    let err = import_verify(&dir).unwrap_err();
+    assert!(
+        matches!(&err, EvidenceError::Stage5 { error, .. } if error.contains("SDK binding invalid")),
+        "a record SDK version that disagrees with the sealed lock must be rejected; got {err}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_wrong_sdk_name_in_the_record_is_rejected() {
+    let dir = sealed_bundle("rl_name", "Aarch64");
+    rewrite_json(&dir, &stage5_file("Sp1"), |v| {
+        v["verifier_sdk_name"] = serde_json::json!("not-the-verifier-crate");
+    });
+    reseal(&dir, "Aarch64");
+    let err = import_verify(&dir).unwrap_err();
+    assert!(
+        matches!(&err, EvidenceError::Stage5 { error, .. } if error.contains("SDK binding invalid")),
+        "a record SDK name absent from the sealed lock must be rejected; got {err}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_runner_lock_with_a_non_registry_sdk_source_is_rejected() {
+    let dir = sealed_bundle("rl_src", "Aarch64");
+    // A path-sourced SDK cannot pin the published bytes; content-address it + update the
+    // record hash so the hash check passes and the SOURCE check is what rejects it.
+    let path_lock =
+        "# path-sourced SDK (unpinnable)\nversion = 3\n\n[[package]]\nname = \"sp1-verifier\"\nversion = \"6.3.1\"\n"
+            .to_string();
+    let h = crate::venue::lock_provenance::recompute_lock_hash(path_lock.as_bytes());
+    write(&dir, &stage5_runner_lock_file("Sp1"), path_lock.as_bytes());
+    rewrite_json(&dir, &stage5_file("Sp1"), |v| {
+        v["verifier_sdk_lock_blake3"] = serde_json::json!(h);
+    });
+    reseal(&dir, "Aarch64");
+    let err = import_verify(&dir).unwrap_err();
+    assert!(
+        matches!(&err, EvidenceError::Stage5 { error, .. } if error.contains("SDK binding invalid")),
+        "a runner lock whose SDK has no registry source must be rejected; got {err}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_missing_runner_lock_is_rejected_as_missing_required_file() {
+    let dir = sealed_bundle("rl_missing", "Aarch64");
+    std::fs::remove_file(dir.join(stage5_runner_lock_file("Sp1"))).unwrap();
+    // Re-seal would refuse (exact-set: missing file); prove seal itself catches it.
+    std::fs::remove_file(dir.join(MANIFEST_FILE)).ok();
+    let err = seal(&dir, "Aarch64", COMMIT).unwrap_err();
+    assert!(
+        matches!(err, EvidenceError::MissingFile { .. }),
+        "a bundle missing the sealed runner lock must be refused at seal; got {err}"
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 
