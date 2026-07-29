@@ -91,6 +91,29 @@ require_valid_source_date_epoch() {
   [ "$v" -ge 1 ] || die "SOURCE_DATE_EPOCH must be positive: '$v'"
 }
 
+# Canonicalize a rustup toolchain `lib/rustlib/components` file to bytewise C-locale
+# lexical order IN PLACE, preserving multiplicity, atomically. rustup writes this file in
+# concurrent task-completion order (the authoritative x86 r3 nondeterminism), yet it is the
+# unordered SET of installed components — order is not semantically significant. This is the
+# REFERENCE implementation; both Dockerfiles inline the identical sequence (they cannot
+# source lib.sh). Fails closed on missing/empty/malformed content or an unexpected duplicate
+# (rustup components are unique by contract). Deliberately NOT `sort -u`: multiplicity is
+# preserved so a duplicate surfaces instead of being silently hidden. Steps: sort to a
+# sibling, verify the sorted multiset is unchanged (no line added/lost), verify no duplicate,
+# verify the result is sorted, then move into place; temporaries are removed on any failure.
+canonicalize_rustup_components() {
+  local comp="$1"
+  [ -s "$comp" ] || die "rustup components file missing or empty: $comp"
+  if grep -qvE '^[A-Za-z0-9._+-]+$' "$comp"; then die "malformed (non-token) line in rustup components: $comp"; fi
+  LC_ALL=C sort "$comp" > "$comp.sorted" || { rm -f "$comp.sorted"; die "sort failed for $comp"; }
+  LC_ALL=C sort "$comp" > "$comp.a"; LC_ALL=C sort "$comp.sorted" > "$comp.b"
+  if ! cmp -s "$comp.a" "$comp.b"; then rm -f "$comp.sorted" "$comp.a" "$comp.b"; die "component multiset changed by canonicalization: $comp"; fi
+  if [ -n "$(uniq -d "$comp.sorted")" ]; then rm -f "$comp.sorted" "$comp.a" "$comp.b"; die "unexpected duplicate component in $comp"; fi
+  if ! LC_ALL=C sort -c "$comp.sorted"; then rm -f "$comp.sorted" "$comp.a" "$comp.b"; die "canonicalized rustup components not sorted: $comp"; fi
+  rm -f "$comp.a" "$comp.b"
+  mv -f "$comp.sorted" "$comp"
+}
+
 # Parse + fully validate a TYPED runnable-ref sidecar and echo its runnable image id, or
 # fail closed. The sidecar (written by build_container.sh ONLY after both clean builds
 # match, the layout is content-verified, docker load succeeds, and the loaded id matches a
