@@ -61,7 +61,6 @@ VAL="$VALDIR/Cargo.toml"
 T="$(mktemp -d "$HOME/.b0-e2e-v2-XXXXXX")"; trap 'rm -rf "$T"' EXIT
 F=0; pass(){ printf 'ok    %s\n' "$1"; }; fail(){ printf 'FAIL  %s\n' "$1"; F=1; }
 vvh(){ "$VV" lock-hash "$1"; }
-b3(){ printf '%s' "$1" | b3sum | awk '{print $1}'; }
 imports(){ "$VV" import-bundle "$1" >/dev/null 2>"$2"; }   # rc + stderr file
 
 # Source the REAL production functions (Q6 source-execution guard -> no authoritative
@@ -104,7 +103,13 @@ EV="$T/evidence"; mkdir -p "$EV"
 "$VV" emit-test-only-bundle "$EV" Aarch64 >/dev/null 2>"$T/emit.err" \
   && pass "production assembler emitted a complete aarch64 bundle base" || { fail "emit-test-only-bundle"; cat "$T/emit.err"; exit 1; }
 COMMIT="abcdef0123456789abcdef0123456789abcdef01"          # matches write_test_only_bundle_dir
-SP1_DIG="sha256:$(b3 'builder-sp1-Aarch64')"               # matches oci("builder-sp1-Aarch64")
+# Read the base bundle's Sp1 BUILDER-role digest directly from its container.json (robust;
+# no b3sum dependency, no coupling to the digest-derivation formula). Our injected v2
+# Stage-5 evidence must carry exactly this container_digest.
+SP1_DIG="$(python3 -c 'import json,sys
+b=json.load(open(sys.argv[1]))
+print(next(e["builder_oci_digest"] for e in b if e.get("role")=="builder"))' "$EV/Sp1.container.json")"
+printf '%s' "$SP1_DIG" | grep -Eq '^sha256:[0-9a-f]{64}$' || { fail "could not read Sp1 builder digest from bundle"; exit 1; }
 
 # ===== Stage 1 (shared gen) + validate (real) =====
 gen_lock_in_container "$FIMG" "$CDIR_IN" "$T/Sp1.Cargo.lock" >/dev/null 2>&1 \

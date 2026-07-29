@@ -100,11 +100,11 @@ jobs:
         env:
           B0PRE_E2E_REQUIRED: "1"
         run: |
-          set -o pipefail
-          out="$(timeout 900 bash tools/b0-pre-candidates/scripts/tests/e2e_v2_produce_chain.test.sh 2>&1)"; rc=$?
-          printf '%s\n' "$out"
-          [ "$rc" -eq 0 ] || { echo "::error::real-container E2E exited $rc (timeout=124 / failure)"; exit 1; }
-          printf '%s\n' "$out" | grep -q '^REAL_CONTAINER_V2_SEAL_IMPORT_PASS$' \
+          set +e
+          timeout 900 bash tools/b0-pre-candidates/scripts/tests/e2e_v2_produce_chain.test.sh 2>&1 | tee /tmp/e2e.out
+          rc=${PIPESTATUS[0]}
+          [ "$rc" -eq 0 ] || { echo "::error::real-container E2E exited $rc (124=timeout)"; exit 1; }
+          grep -q '^REAL_CONTAINER_V2_SEAL_IMPORT_PASS$' /tmp/e2e.out \
             || { echo "::error::required terminal marker REAL_CONTAINER_V2_SEAL_IMPORT_PASS absent"; exit 1; }
 
       # --- Shared canonical primitive as an independent CI authority ----------
