@@ -109,6 +109,23 @@ RUN set -eux; \
     echo "${RUSTUP_INIT_SHA256}  /tmp/rustup-init" | sha256sum -c -; \
     chmod +x /tmp/rustup-init; \
     /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain "${RUST_VERSION}"; \
+    : "reproducibility (authoritative x86 r3): rustup writes lib/rustlib/components in \
+       concurrent task-completion order — the one nondeterministic file after aux-cache \
+       (#173). Its ORDER is not semantically significant (rustup treats it as the unordered \
+       SET of installed components), so canonicalize it to bytewise C-locale lexical order \
+       IN THIS LAYER, preserving multiplicity (NOT sort -u — an unexpected duplicate must \
+       surface; rustup components are unique by contract), atomically: sort to a sibling, \
+       verify the multiset is unchanged + duplicate-free + sorted, then move; temporaries \
+       are removed on failure. See lib.sh canonicalize_rustup_components (the reference)."; \
+    comp="/root/.rustup/toolchains/${RUST_VERSION}-${arch}-unknown-linux-gnu/lib/rustlib/components"; \
+    if [ ! -s "$comp" ]; then echo "REFUSED: rustup components file missing or empty: $comp" >&2; exit 6; fi; \
+    if grep -qvE '^[A-Za-z0-9._+-]+$' "$comp"; then echo "REFUSED: malformed (non-token) line in rustup components: $comp" >&2; exit 6; fi; \
+    LC_ALL=C sort "$comp" > "$comp.sorted" || { rm -f "$comp.sorted"; echo "REFUSED: sort failed for $comp" >&2; exit 6; }; \
+    LC_ALL=C sort "$comp" > "$comp.a"; LC_ALL=C sort "$comp.sorted" > "$comp.b"; \
+    if ! cmp -s "$comp.a" "$comp.b"; then rm -f "$comp.sorted" "$comp.a" "$comp.b"; echo "REFUSED: component multiset changed by canonicalization" >&2; exit 6; fi; \
+    if [ -n "$(uniq -d "$comp.sorted")" ]; then rm -f "$comp.sorted" "$comp.a" "$comp.b"; echo "REFUSED: unexpected duplicate component in $comp" >&2; exit 6; fi; \
+    if ! LC_ALL=C sort -c "$comp.sorted"; then rm -f "$comp.sorted" "$comp.a" "$comp.b"; echo "REFUSED: canonicalized rustup components not sorted" >&2; exit 6; fi; \
+    rm -f "$comp.a" "$comp.b"; mv -f "$comp.sorted" "$comp"; \
     : "reproducibility: remove rustup download/tmp scratch (fetch-order/temp bytes); the \
        installed toolchain itself is content-deterministic"; \
     rm -rf /tmp/rustup-init /root/.rustup/downloads /root/.rustup/tmp
