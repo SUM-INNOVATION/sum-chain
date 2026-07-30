@@ -329,6 +329,74 @@ preflight_builder_capability() {
   note "builder-image capability preflight PASSED (arch=$want_uname; cargo + cargo-audit present${want_ca_ver:+, cargo-audit ~ $want_ca_ver})"
 }
 
+# ---- Canonical, DETERMINISTIC in-container provisioning paths (Item 7: fixed paths, no
+# wall-clock / host-generated locations). These are the SINGLE source of truth shared by the
+# Dockerfile provisioning recipes (which PLACE the executables here) and preflight_prover_capability
+# (which RESOLVES them here). cargo subcommands live on an ISOLATED verified PATH dir; r0vm lives at
+# the EXACT RISC0_SERVER_PATH file; cargo-audit is built into an isolated prefix; the recorded
+# executable SHA-256s (venue evidence, NOT source pins) go under the evidence dir.
+B0PRE_PROVER_BIN_DIR="/opt/b0pre/prover-bin"
+B0PRE_RISC0_SERVER_DIR="/opt/b0pre/risc0-server"
+B0PRE_RISC0_SERVER_PATH="/opt/b0pre/risc0-server/r0vm"
+B0PRE_AUDIT_PREFIX="/opt/b0pre/audit-prefix"
+B0PRE_EVIDENCE_DIR="/opt/b0pre/evidence"
+
+# PROVER-toolchain CAPABILITY preflight (Item 6, prover half). Companion to
+# preflight_builder_capability: BEFORE Stage 5 runs inside a VERIFIED builder image, assert the
+# image carries the pinned PROVER executables provisioned by the declarative verified-extraction
+# recipe — validating VERSIONS/IDENTITIES via each tool's EXACT declared version argv, never a bare
+# `command -v`. The per-candidate/arch matrix (golden `prover_archives`, VENUE.md §2):
+#   * sp1  (x86_64 AND aarch64): `cargo-prove` on the isolated PATH; `cargo-prove prove --version`
+#     must carry the pinned SP1 release commit.
+#   * risc0 (x86_64 ONLY): `cargo-risczero` on the isolated PATH (`cargo-risczero risczero --version`)
+#     AND `r0vm` at the EXACT RISC0_SERVER_PATH (`r0vm --version`), both carrying the pinned RISC Zero
+#     release version. RISC Zero is never provisioned on aarch64 — asking to validate risc0/aarch64 is
+#     a hard refusal, not a skip (the caller skips it by arch, mirroring extract_material).
+# A missing / mis-versioned prover tool fails closed here, not deep inside Stage 5. Args:
+#   <image> <sp1|risc0> <arch> [sp1_release_commit] [risc0_release_version] [risc0_server_path]
+preflight_prover_capability() {
+  local image="$1" candidate="$2" arch="$3"
+  local want_sp1_commit="${4:-}" want_risc0_ver="${5:-}" r0vm_path="${6:-$B0PRE_RISC0_SERVER_PATH}"
+  require_cmd docker
+  case "$candidate" in sp1|risc0) ;; *) die "preflight_prover_capability: candidate must be sp1|risc0 (got '$candidate')" ;; esac
+  case "$arch" in x86_64|aarch64) ;; *) die "preflight_prover_capability: unsupported arch '$arch' (want x86_64|aarch64)" ;; esac
+  # Resolve one line of a tool's EXACT declared version argv inside the production non-login shell
+  # (RT-2: bash -c, never bash -lc); empty on any absence/failure. The argv is the tool's own
+  # (matching the ratified `version_argv` in prover_archives), invoked by absolute/PATH name so a
+  # cargo-subcommand indirection can never mask a missing binary.
+  local ver
+  case "$candidate" in
+    sp1)
+      ver="$(docker run --rm --pull never "$image" bash -c 'command -v cargo-prove >/dev/null && cargo-prove prove --version' 2>/dev/null | head -n1 | sed 's/[[:space:]]*$//' || true)"
+      [ -n "$ver" ] \
+        || die "builder image ($candidate/$arch): cargo-prove is absent from the production PATH (Stage-5 SP1 prove cannot execute; a missing prover is never a proof)"
+      if [ -n "$want_sp1_commit" ]; then
+        grep -q "$want_sp1_commit" <<<"$ver" \
+          || die "builder image ($candidate/$arch): cargo-prove version '$ver' does not carry the pinned SP1 release commit '$want_sp1_commit'"
+      fi
+      note "prover capability preflight PASSED ($candidate/$arch: cargo-prove present${want_sp1_commit:+ ~ $want_sp1_commit})"
+      ;;
+    risc0)
+      [ "$arch" = x86_64 ] \
+        || die "preflight_prover_capability: RISC Zero prover is x86_64-only (VENUE.md §2); refuse to validate risc0 on $arch"
+      ver="$(docker run --rm --pull never "$image" bash -c 'command -v cargo-risczero >/dev/null && cargo-risczero risczero --version' 2>/dev/null | head -n1 | sed 's/[[:space:]]*$//' || true)"
+      [ -n "$ver" ] \
+        || die "builder image ($candidate/$arch): cargo-risczero is absent from the production PATH (RISC Zero Stage-5 cannot execute)"
+      local r0ver
+      r0ver="$(docker run --rm --pull never -e "RISC0_SERVER_PATH=$r0vm_path" "$image" bash -c '[ -x "$RISC0_SERVER_PATH" ] && "$RISC0_SERVER_PATH" --version' 2>/dev/null | head -n1 | sed 's/[[:space:]]*$//' || true)"
+      [ -n "$r0ver" ] \
+        || die "builder image ($candidate/$arch): r0vm is absent or non-executable at RISC0_SERVER_PATH=$r0vm_path (RISC Zero Stage-5 cannot execute)"
+      if [ -n "$want_risc0_ver" ]; then
+        grep -q "$want_risc0_ver" <<<"$ver" \
+          || die "builder image ($candidate/$arch): cargo-risczero version '$ver' does not carry the pinned RISC Zero '$want_risc0_ver'"
+        grep -q "$want_risc0_ver" <<<"$r0ver" \
+          || die "builder image ($candidate/$arch): r0vm version '$r0ver' does not carry the pinned RISC Zero '$want_risc0_ver'"
+      fi
+      note "prover capability preflight PASSED ($candidate/$arch: cargo-risczero + r0vm present${want_risc0_ver:+ ~ $want_risc0_ver}; r0vm at $r0vm_path)"
+      ;;
+  esac
+}
+
 # Parse + fully validate a TYPED runnable-ref sidecar and echo its runnable image id, or
 # fail closed. The sidecar (written by build_container.sh ONLY after both clean builds
 # match, the layout is content-verified, docker load succeeds, and the loaded id matches a
@@ -492,6 +560,10 @@ sha256_hex_stdin() {
   fi
 }
 
+# True iff the argument is a bare 64-hex (lowercase) sha256. Shared by verify_pins.sh and the
+# declarative verified-extraction mechanism.
+is_bare_sha256() { printf '%s' "${1:-}" | grep -Eq '^[0-9a-f]{64}$'; }
+
 # A deterministic, non-placeholder bare 64-hex value derived from a label. Used by
 # the dry-run producers to emit real-SHAPED sample digests off-venue (no real image
 # is built). NOT an authoritative digest.
@@ -646,6 +718,14 @@ stage_container_context() {
   cp "$repo/docs/b0-pre/exp/exp_table_q16.json.hash"     "$stage/docs/b0-pre/exp/exp_table_q16.json.hash"
   # 5) the curated minimal workspace root (sumchain-wire inheritance only).
   write_curated_workspace_root "$stage/Cargo.toml"
+  # 6) the SINGLE, tested declarative prover-toolchain provisioner (owner ruling: the Dockerfiles
+  #    must NOT call host lib.sh; they COPY + run this exact staged file — the same one
+  #    tests/verified_extraction.test.sh exercises with crafted archives — so there is no
+  #    unverified second implementation). Staged at a stable, isolated context path; its bytes are
+  #    folded into staged_context_blake3 (build evidence), binding the provisioner identity.
+  mkdir -p "$stage/provisioning"
+  cp "$ROOT/scripts/provision_prover_toolchain.sh" "$stage/provisioning/provision_prover_toolchain.sh"
+  chmod 0755 "$stage/provisioning/provision_prover_toolchain.sh"
   # Belt-and-suspenders: no Cargo.lock may exist anywhere in the staged context (the
   # authoritative lock is generated in-container and bound; a host lock is refused).
   find "$stage" -type f -name Cargo.lock -delete 2>/dev/null || true

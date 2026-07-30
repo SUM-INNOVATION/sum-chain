@@ -145,6 +145,40 @@ case "$RUSTUP_INIT_URL" in
   *) die "RUSTUP_INIT_URL is not the rustup-init for arch '$arch' (cross-architecture pin): $RUSTUP_INIT_URL" ;;
 esac
 
+# ---- Prover + audit provisioning pins (Items 2/4). Fail closed (NOT_YET_REPRODUCED) when absent —
+# exactly like the rustup pin: the builder cannot provision cargo-audit / the prover without them,
+# and these values stay UNRATIFIED until the native venue supplies them. cargo-audit is built
+# in-builder from the verified crate + packaged lock on BOTH candidates + arches. The prover archive
+# members are candidate/arch-specific (SP1 cargo-prove on both arches; RISC Zero cargo-risczero+r0vm
+# x86_64-only — sharing ONE archive). Shapes are re-validated inside the Dockerfile before any fetch.
+[ -n "${CARGO_AUDIT_VERSION:-}" ]               || nyr "CARGO_AUDIT_VERSION (cargo-audit built in-builder) is required"
+[ -n "${CARGO_AUDIT_CRATE_URL:-}" ]             || nyr "CARGO_AUDIT_CRATE_URL (immutable crates.io .crate URL) is required"
+[ -n "${CARGO_AUDIT_CRATE_SHA256:-}" ]          || nyr "CARGO_AUDIT_CRATE_SHA256 (crate checksum, verified pre-extract) is required"
+[ -n "${CARGO_AUDIT_PACKAGED_LOCK_SHA256:-}" ]  || nyr "CARGO_AUDIT_PACKAGED_LOCK_SHA256 (packaged Cargo.lock checksum, --locked) is required"
+case "$candidate" in
+  sp1)
+    [ -n "${SP1_ARCHIVE_URL:-}" ]           || nyr "SP1_ARCHIVE_URL (immutable SP1 prover archive URL, arch=$arch) is required"
+    [ -n "${SP1_ARCHIVE_SHA256:-}" ]        || nyr "SP1_ARCHIVE_SHA256 (whole-archive checksum, verified pre-extract) is required"
+    [ -n "${CARGO_PROVE_MEMBER_PATH:-}" ]   || nyr "CARGO_PROVE_MEMBER_PATH (declared cargo-prove archive member) is required"
+    [ -n "${CARGO_PROVE_MEMBER_SHA256:-}" ] || nyr "CARGO_PROVE_MEMBER_SHA256 (cargo-prove member checksum) is required"
+    [ -n "${CARGO_PROVE_MEMBER_SIZE:-}" ]   || nyr "CARGO_PROVE_MEMBER_SIZE (cargo-prove member byte size) is required"
+    ;;
+  risc0)
+    if [ "$arch" = "x86_64" ]; then
+      [ -n "${RISC0_ARCHIVE_URL:-}" ]             || nyr "RISC0_ARCHIVE_URL (immutable RISC Zero toolchain archive URL) is required"
+      [ -n "${RISC0_ARCHIVE_SHA256:-}" ]          || nyr "RISC0_ARCHIVE_SHA256 (whole-archive checksum, verified pre-extract) is required"
+      [ -n "${CARGO_RISCZERO_MEMBER_PATH:-}" ]    || nyr "CARGO_RISCZERO_MEMBER_PATH (declared cargo-risczero archive member) is required"
+      [ -n "${CARGO_RISCZERO_MEMBER_SHA256:-}" ]  || nyr "CARGO_RISCZERO_MEMBER_SHA256 (cargo-risczero member checksum) is required"
+      [ -n "${CARGO_RISCZERO_MEMBER_SIZE:-}" ]    || nyr "CARGO_RISCZERO_MEMBER_SIZE (cargo-risczero member byte size) is required"
+      [ -n "${R0VM_MEMBER_PATH:-}" ]              || nyr "R0VM_MEMBER_PATH (declared r0vm archive member, SHARED archive) is required"
+      [ -n "${R0VM_MEMBER_SHA256:-}" ]            || nyr "R0VM_MEMBER_SHA256 (r0vm member checksum) is required"
+      [ -n "${R0VM_MEMBER_SIZE:-}" ]              || nyr "R0VM_MEMBER_SIZE (r0vm member byte size) is required"
+    else
+      note "arch=$arch: RISC Zero prover pins not required (cargo-risczero + r0vm are x86_64-only; the arm64 risc0 image records the builder manifest only)"
+    fi
+    ;;
+esac
+
 df="$ROOT/containers/$candidate.Dockerfile"
 [ -f "$df" ] || die "missing Dockerfile $df"
 [ -z "$(git -C "$ROOT" status --porcelain 2>/dev/null || echo dirty)" ] \
@@ -211,6 +245,35 @@ build_once() {
   # layout export only; never a registry push. --platform pins the native platform
   # descriptor into the exported layout (emulation is already barred above).
   local tar="$1" log="$2"
+  # Candidate/arch-specific prover build-args: pass ONLY the ones this Dockerfile declares (SP1's
+  # cargo-prove on both arches; RISC Zero's cargo-risczero+r0vm x86_64-only) so no build-arg is
+  # left unconsumed. cargo-audit's are passed for both candidates + arches. Every value was gated
+  # NOT_YET_REPRODUCED above; the Dockerfile re-validates each shape before any fetch/extract.
+  local -a prover_args=()
+  case "$candidate" in
+    sp1)
+      prover_args+=(
+        --build-arg "SP1_ARCHIVE_URL=$SP1_ARCHIVE_URL"
+        --build-arg "SP1_ARCHIVE_SHA256=$SP1_ARCHIVE_SHA256"
+        --build-arg "CARGO_PROVE_MEMBER_PATH=$CARGO_PROVE_MEMBER_PATH"
+        --build-arg "CARGO_PROVE_MEMBER_SHA256=$CARGO_PROVE_MEMBER_SHA256"
+        --build-arg "CARGO_PROVE_MEMBER_SIZE=$CARGO_PROVE_MEMBER_SIZE"
+      ) ;;
+    risc0)
+      if [ "$arch" = "x86_64" ]; then
+        prover_args+=(
+          --build-arg "RISC0_ARCHIVE_URL=$RISC0_ARCHIVE_URL"
+          --build-arg "RISC0_ARCHIVE_SHA256=$RISC0_ARCHIVE_SHA256"
+          --build-arg "CARGO_RISCZERO_MEMBER_PATH=$CARGO_RISCZERO_MEMBER_PATH"
+          --build-arg "CARGO_RISCZERO_MEMBER_SHA256=$CARGO_RISCZERO_MEMBER_SHA256"
+          --build-arg "CARGO_RISCZERO_MEMBER_SIZE=$CARGO_RISCZERO_MEMBER_SIZE"
+          --build-arg "R0VM_MEMBER_PATH=$R0VM_MEMBER_PATH"
+          --build-arg "R0VM_MEMBER_SHA256=$R0VM_MEMBER_SHA256"
+          --build-arg "R0VM_MEMBER_SIZE=$R0VM_MEMBER_SIZE"
+        )
+      fi
+      ;;
+  esac
   # SOURCE_DATE_EPOCH pins the config `created` + history timestamps; the exporter's
   # rewrite-timestamp=true normalizes every produced layer's file mtimes to that epoch.
   # Together they remove the two nondeterministic-byte sources the venue observed
@@ -229,6 +292,11 @@ build_once() {
     --build-arg "RUSTUP_INIT_URL=$RUSTUP_INIT_URL" \
     --build-arg "RUSTUP_INIT_SHA256=$RUSTUP_INIT_SHA256" \
     --build-arg "RUST_VERSION=1.88.0" \
+    --build-arg "CARGO_AUDIT_VERSION=$CARGO_AUDIT_VERSION" \
+    --build-arg "CARGO_AUDIT_CRATE_URL=$CARGO_AUDIT_CRATE_URL" \
+    --build-arg "CARGO_AUDIT_CRATE_SHA256=$CARGO_AUDIT_CRATE_SHA256" \
+    --build-arg "CARGO_AUDIT_PACKAGED_LOCK_SHA256=$CARGO_AUDIT_PACKAGED_LOCK_SHA256" \
+    ${prover_args[@]+"${prover_args[@]}"} \
     --output "type=oci,dest=$tar,rewrite-timestamp=true" \
     "$STAGE" >"$log" 2>&1
 }
@@ -355,6 +423,23 @@ cmd_log="$out/${candidate}.${arch}.command.log"
     "$APT_SECURITY_URL" "$APT_SECURITY_INRELEASE_SHA256"
   printf 'RUSTUP_INIT_URL=%s RUSTUP_INIT_SHA256=%s\n' \
     "$RUSTUP_INIT_URL" "$RUSTUP_INIT_SHA256"
+  # Provisioning pins bound into the build evidence (Items 2/4): cargo-audit built in-builder from
+  # the verified crate + packaged lock (BOTH candidates/arches); the candidate/arch-specific prover
+  # archive members. The provision script's own bytes are already bound via staged_context_blake3.
+  printf 'CARGO_AUDIT_VERSION=%s CARGO_AUDIT_CRATE_URL=%s CARGO_AUDIT_CRATE_SHA256=%s CARGO_AUDIT_PACKAGED_LOCK_SHA256=%s (exe-sha256 = venue evidence, recorded in-image at /opt/b0pre/evidence)\n' \
+    "$CARGO_AUDIT_VERSION" "$CARGO_AUDIT_CRATE_URL" "$CARGO_AUDIT_CRATE_SHA256" "$CARGO_AUDIT_PACKAGED_LOCK_SHA256"
+  case "$candidate" in
+    sp1)
+      printf 'SP1_ARCHIVE_URL=%s SP1_ARCHIVE_SHA256=%s CARGO_PROVE_MEMBER=%s sha256=%s size=%s delivery=isolated\n' \
+        "$SP1_ARCHIVE_URL" "$SP1_ARCHIVE_SHA256" "$CARGO_PROVE_MEMBER_PATH" "$CARGO_PROVE_MEMBER_SHA256" "$CARGO_PROVE_MEMBER_SIZE" ;;
+    risc0)
+      if [ "$arch" = "x86_64" ]; then
+        printf 'RISC0_ARCHIVE_URL=%s RISC0_ARCHIVE_SHA256=%s CARGO_RISCZERO_MEMBER=%s sha256=%s size=%s delivery=isolated R0VM_MEMBER=%s sha256=%s size=%s delivery=risc0server (shared archive)\n' \
+          "$RISC0_ARCHIVE_URL" "$RISC0_ARCHIVE_SHA256" "$CARGO_RISCZERO_MEMBER_PATH" "$CARGO_RISCZERO_MEMBER_SHA256" "$CARGO_RISCZERO_MEMBER_SIZE" "$R0VM_MEMBER_PATH" "$R0VM_MEMBER_SHA256" "$R0VM_MEMBER_SIZE"
+      else
+        printf 'RISC Zero prover NOT provisioned on arch=%s (x86_64-only; builder-manifest record only)\n' "$arch"
+      fi ;;
+  esac
   # The build context is the curated staged guest-source graph, not the raw tree; bind
   # its exact identity here (this line is BLAKE3-hashed into command_log_blake3 below).
   printf 'build_context=curated-staged-guest-graph staged_context_blake3=%s (candidate+guest-core+sumchain-wire+curated-root+guest-fixtures; no unrelated crate)\n' "$staged_ctx_b3"

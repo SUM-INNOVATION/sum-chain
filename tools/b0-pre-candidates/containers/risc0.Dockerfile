@@ -128,28 +128,98 @@ RUN set -eux; \
 ENV PATH="/root/.cargo/bin:${PATH}"
 RUN rustc --version | grep -q "${RUST_VERSION}"
 
-# PROVER + AUDIT TOOLCHAIN PROVISIONING — NOT YET IMPLEMENTED (RT-3 / RT-1, authoritative
-# x86 smoke). This image provisions ONLY the base + apt + rustup/cargo 1.88. It does NOT
-# install:
-#   * cargo-audit (Stage-2 `cargo audit` requires it) + a pinned RustSec advisory DB;
-#   * the RISC Zero prover toolchain matching 3.0.5 (x86_64 ONLY — RISC Zero is never
-#     installed on aarch64, VENUE.md §2).
-# When implemented, the prover toolchain is delivered by DECLARATIVE, VERIFIED ARCHIVE-MEMBER
-# EXTRACTION — NOT a `curl | tar` entrypoint and NOT `rzup` (production never invokes it).
-# Each executable is a pinned-archive member with its own identity (archive member + member
-# sha256 + version argv/output + point-of-use sha256): `cargo-prove` (x86_64 + aarch64),
-# `cargo-risczero` (x86_64), and `r0vm` (x86_64), where `cargo-risczero` and `r0vm` SHARE one
-# archive. Cargo subcommands are delivered on an ISOLATED verified PATH; `r0vm` via the exact
-# verified `RISC0_SERVER_PATH`. The schema/consumer that requires — and FAILS CLOSED on the
-# absence of — every one of those fields is `venue::prover_archive` (`venue-verify
-# prover-archive-check`); its member/version/point-of-use values are venue-resolved and stay
-# UNRATIFIED until the native x86 venue supplies them.
-# There is NO ENTRYPOINT; earlier comments referring to an "authoritative entrypoint" that
-# installs these were aspirational and are removed. Installing them requires owner-ratified
-# immutable pins (artifact URL + checksum + install method), like RUSTUP_INIT_URL/SHA256;
-# see docs/b0-pre/venue/PIN-PROPOSAL.md + PIN-COVERAGE.md. Until those pins are ratified and
-# consumed here, the builder-capability preflight fails closed and Stage 2 / Stage 5 cannot
-# execute their audit / prove steps.
+# ============================================================================================
+# AUDIT + PROVER TOOLCHAIN PROVISIONING (declarative, verified, reproducibility-preserving).
+# All inputs are REQUIRED build-args with no defaults; a missing/malformed value fails closed
+# BEFORE any fetch. NO ENTRYPOINT, NO `rzup`, NO `curl | tar`: the prover executables are
+# delivered by the staged, tested verified-archive-member extractor. RISC Zero (`cargo-risczero`
+# + `r0vm`) is x86_64-ONLY (VENUE.md §2); cargo-audit is provisioned on BOTH arches because
+# Stage-2 `cargo audit` runs for risc0 on aarch64 too.
+# ============================================================================================
+
+# ---- (Item 4) cargo-audit, BUILT IN THIS BUILDER from the verified crate + packaged lock (both
+# arches). The Ubuntu host binary is NEVER copied in; the executable SHA-256 is VENUE EVIDENCE,
+# never a source pin. `--locked` binds the packaged Cargo.lock so the dependency graph cannot drift.
+ARG CARGO_AUDIT_VERSION
+ARG CARGO_AUDIT_CRATE_URL
+ARG CARGO_AUDIT_CRATE_SHA256
+ARG CARGO_AUDIT_PACKAGED_LOCK_SHA256
+RUN set -eux; \
+    printf '%s' "${CARGO_AUDIT_VERSION}"              | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; \
+    printf '%s' "${CARGO_AUDIT_CRATE_SHA256}"         | grep -Eq '^[0-9a-f]{64}$'; \
+    printf '%s' "${CARGO_AUDIT_PACKAGED_LOCK_SHA256}" | grep -Eq '^[0-9a-f]{64}$'; \
+    test -n "${CARGO_AUDIT_CRATE_URL}" || { echo "REFUSED: CARGO_AUDIT_CRATE_URL is empty" >&2; exit 7; }; \
+    case "${CARGO_AUDIT_CRATE_URL}" in \
+      https://static.crates.io/crates/cargo-audit/cargo-audit-${CARGO_AUDIT_VERSION}.crate) ;; \
+      https://crates.io/api/v1/crates/cargo-audit/${CARGO_AUDIT_VERSION}/download) ;; \
+      *) echo "REFUSED: CARGO_AUDIT_CRATE_URL is not the immutable crates.io .crate path for ${CARGO_AUDIT_VERSION}: ${CARGO_AUDIT_CRATE_URL}" >&2; exit 7 ;; \
+    esac; \
+    mkdir -p /opt/b0pre/evidence /tmp/ca-build; \
+    curl -fsSL "${CARGO_AUDIT_CRATE_URL}" -o /tmp/ca-build/cargo-audit.crate; \
+    echo "${CARGO_AUDIT_CRATE_SHA256}  /tmp/ca-build/cargo-audit.crate" | sha256sum -c -; \
+    tar -xzf /tmp/ca-build/cargo-audit.crate -C /tmp/ca-build; \
+    src="/tmp/ca-build/cargo-audit-${CARGO_AUDIT_VERSION}"; \
+    test -f "$src/Cargo.lock" || { echo "REFUSED: packaged Cargo.lock absent in the cargo-audit crate" >&2; exit 7; }; \
+    echo "${CARGO_AUDIT_PACKAGED_LOCK_SHA256}  $src/Cargo.lock" | sha256sum -c -; \
+    CARGO_INCREMENTAL=0 CARGO_NET_GIT_FETCH_WITH_CLI=false \
+      cargo install --locked --path "$src" --bin cargo-audit --root /opt/b0pre/audit-prefix; \
+    "/opt/b0pre/audit-prefix/bin/cargo-audit" --version | grep -q "${CARGO_AUDIT_VERSION}"; \
+    sha256sum /opt/b0pre/audit-prefix/bin/cargo-audit | awk '{print $1}' > /opt/b0pre/evidence/cargo-audit.exe.sha256; \
+    : "reproducibility: remove ALL crate build scratch + cargo download caches IN THIS LAYER"; \
+    rm -rf /tmp/ca-build /root/.cargo/registry/cache /root/.cargo/registry/src /root/.cargo/git
+
+# ---- (Items 2/3) RISC Zero prover `cargo-risczero` + `r0vm` (x86_64 ONLY) — a SINGLE SHARED
+# archive — by DECLARATIVE VERIFIED ARCHIVE-MEMBER EXTRACTION using the SAME staged, tested
+# provisioner (the one tests/verified_extraction.test.sh exercises; NOT host lib.sh, NOT a second
+# implementation). `cargo-risczero` lands on the ISOLATED verified PATH dir; `r0vm` at the EXACT
+# RISC0_SERVER_PATH. On aarch64 this step is SKIPPED (RISC Zero never installs on aarch64); the
+# arm64 risc0 image records the builder manifest only. Members' size + SHA-256 are verified before
+# chmod and re-hashed at the point of use; executable SHA-256s are recorded as venue evidence.
+ARG RISC0_ARCHIVE_URL
+ARG RISC0_ARCHIVE_SHA256
+ARG CARGO_RISCZERO_MEMBER_PATH
+ARG CARGO_RISCZERO_MEMBER_SHA256
+ARG CARGO_RISCZERO_MEMBER_SIZE
+ARG R0VM_MEMBER_PATH
+ARG R0VM_MEMBER_SHA256
+ARG R0VM_MEMBER_SIZE
+COPY provisioning/provision_prover_toolchain.sh /usr/local/lib/b0pre/provision_prover_toolchain.sh
+RUN set -eux; \
+    mkdir -p /opt/b0pre/evidence /opt/b0pre/prover-bin /opt/b0pre/risc0-server; \
+    if [ "$(uname -m)" != "x86_64" ]; then \
+      echo "arch=$(uname -m): SKIP RISC Zero prover provisioning (cargo-risczero + r0vm are x86_64-only per VENUE.md §2)"; \
+    else \
+      printf '%s' "${RISC0_ARCHIVE_SHA256}"           | grep -Eq '^[0-9a-f]{64}$'; \
+      printf '%s' "${CARGO_RISCZERO_MEMBER_SHA256}"   | grep -Eq '^[0-9a-f]{64}$'; \
+      printf '%s' "${CARGO_RISCZERO_MEMBER_SIZE}"     | grep -Eq '^[0-9]+$'; \
+      printf '%s' "${R0VM_MEMBER_SHA256}"             | grep -Eq '^[0-9a-f]{64}$'; \
+      printf '%s' "${R0VM_MEMBER_SIZE}"               | grep -Eq '^[0-9]+$'; \
+      test -n "${RISC0_ARCHIVE_URL}"          || { echo "REFUSED: RISC0_ARCHIVE_URL is empty" >&2; exit 8; }; \
+      test -n "${CARGO_RISCZERO_MEMBER_PATH}" || { echo "REFUSED: CARGO_RISCZERO_MEMBER_PATH is empty" >&2; exit 8; }; \
+      test -n "${R0VM_MEMBER_PATH}"           || { echo "REFUSED: R0VM_MEMBER_PATH is empty" >&2; exit 8; }; \
+      mkdir -p /tmp/prov; \
+      curl -fsSL "${RISC0_ARCHIVE_URL}" -o /tmp/prov/risc0-toolchain.tar.gz; \
+      bash /usr/local/lib/b0pre/provision_prover_toolchain.sh \
+        /tmp/prov/risc0-toolchain.tar.gz "${RISC0_ARCHIVE_SHA256}" \
+        /opt/b0pre/prover-bin /opt/b0pre/risc0-server \
+        "${CARGO_RISCZERO_MEMBER_PATH}:${CARGO_RISCZERO_MEMBER_SHA256}:${CARGO_RISCZERO_MEMBER_SIZE}:isolated" \
+        "${R0VM_MEMBER_PATH}:${R0VM_MEMBER_SHA256}:${R0VM_MEMBER_SIZE}:risc0server"; \
+      "/opt/b0pre/prover-bin/cargo-risczero" risczero --version; \
+      "/opt/b0pre/risc0-server/r0vm" --version; \
+      sha256sum /opt/b0pre/prover-bin/cargo-risczero | awk '{print $1}' > /opt/b0pre/evidence/cargo-risczero.exe.sha256; \
+      sha256sum /opt/b0pre/risc0-server/r0vm         | awk '{print $1}' > /opt/b0pre/evidence/r0vm.exe.sha256; \
+      : "reproducibility: remove the downloaded archive scratch IN THIS LAYER"; \
+      rm -rf /tmp/prov; \
+    fi
+
+# The audit prefix + isolated prover PATH + the canonical RISC0_SERVER_PATH become part of the
+# PRODUCTION non-login environment so `cargo audit`, `cargo risczero`, and `r0vm` resolve under the
+# exact `bash -c` the producer uses (RT-2). cargo + cargo-audit are asserted on BOTH arches; the
+# x86-only RISC Zero prover presence is asserted by preflight_prover_capability (x86 gate).
+ENV PATH="/opt/b0pre/audit-prefix/bin:/opt/b0pre/prover-bin:/root/.cargo/bin:${PATH}"
+ENV RISC0_SERVER_PATH="/opt/b0pre/risc0-server/r0vm"
+RUN command -v cargo cargo-audit >/dev/null \
+ || (echo "REFUSED: production non-login PATH does not resolve cargo + cargo-audit" >&2; exit 9)
 
 WORKDIR /work
 # CURATED, MINIMAL build context: the docker context is the reproduced repo-relative

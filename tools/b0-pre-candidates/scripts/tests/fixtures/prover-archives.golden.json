@@ -1,0 +1,61 @@
+{
+  "_status": "GOLDEN content-addressed prover-archive identities (UNRATIFIED proposal). The member/archive SHA-256, sizes, and exact per-arch version outputs are pinned here; a golden test fails closed on any drift. Archive URLs are venue-provided build ARGs verified against archive_sha256 at build time — they are NOT the content-addressed pin. Provenance = the transferred content-addressed venue report (below); these values were re-verified 64-hex before recording.",
+  "provenance": {
+    "correction_report_sha256": "c154072fc4db443cf072796cb083f575423583f9af0657809eb833820f77bacc",
+    "sp1_release_tag": "v6.3.1",
+    "sp1_release_tag_commit": "8252c2905ce32964df68248117015c61ebb854db",
+    "sp1_release_short_commit": "8252c29",
+    "risc0_release": "3.0.5"
+  },
+  "archives": {
+    "sp1-prover-x86_64": {
+      "arch": "x86_64",
+      "archive_sha256": "c9d6ee7667fa9e0a2302324a6bb0295c55f6acf0e17a242ad11ee45767bb08df",
+      "members": {
+        "cargo-prove": {
+          "member_sha256": "e21aa7bd13ace2049ca5115ba89236cbf1d3cf716aa6dafc35c10fab6ac7e969",
+          "version_invocation": "cargo-prove prove --version",
+          "version_output": "cargo-prove sp1 (8252c29 2026-06-25T11:50:01.543258355Z)",
+          "expected_release_commit": "8252c29",
+          "delivery": "isolated-path"
+        }
+      }
+    },
+    "sp1-prover-aarch64": {
+      "arch": "aarch64",
+      "archive_sha256": "9befbd3f5eead2c150579daf8d40bb25550a295dfcc406bf8ea53eaffe9aeed2",
+      "archive_url": "https://github.com/succinctlabs/sp1/releases/download/v6.3.1/cargo_prove_v6.3.1_linux_arm64.tar.gz",
+      "members": {
+        "cargo-prove": {
+          "member_sha256": "b2591c397f0ee377d5db08ee84dc4cf902e9c247a8fd09b4c41ee5a77a86149f",
+          "member_size_bytes": 45420240,
+          "version_invocation": "cargo-prove prove --version",
+          "version_output": "cargo-prove sp1 (8252c29 2026-06-25T11:49:20.735796629Z)",
+          "expected_release_commit": "8252c29",
+          "delivery": "isolated-path"
+        }
+      }
+    },
+    "risc0-toolchain-x86_64": {
+      "arch": "x86_64",
+      "archive_sha256": "936ef988b78f20e3bd9f80e375f3adc934b13addc6ae2680f2e5fc0bcc966158",
+      "members": {
+        "cargo-risczero": {
+          "member_sha256": "45aba69689cef25d81237f3ff62456fc96ff1e23f75adfcd16f7c8b8c1606619",
+          "member_size_bytes": 15355120,
+          "version_invocation": "cargo-risczero risczero --version",
+          "version_output": "cargo-risczero 3.0.5",
+          "expected_release_commit": "3.0.5",
+          "delivery": "isolated-path"
+        },
+        "r0vm": {
+          "member_sha256": "36c016a5bb2ded5bd1f8f92cc487e6ffaeb1e95ec05850c983081a0f716b515b",
+          "version_invocation": "r0vm --version",
+          "version_output": "risc0-r0vm 3.0.5",
+          "expected_release_commit": "3.0.5",
+          "delivery": "risc0-server-path"
+        }
+      }
+    }
+  }
+}

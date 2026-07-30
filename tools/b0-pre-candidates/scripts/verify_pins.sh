@@ -41,6 +41,10 @@ APT_SECURITY_SUITE="bookworm-security"
 REQUIRED_CARGO_AUDIT_VERSION="0.22.2"
 # The canonical RustSec advisory database the Stage-2 audit runs against (READ-ONLY, pinned).
 ADVISORY_DB_REPO="https://github.com/rustsec/advisory-db"
+# The SP1 v6.3.1 release short commit that cargo-prove's arch-specific version output must carry.
+SP1_PROVER_RELEASE_COMMIT="8252c29"
+# The transcription-error r0vm member SHA the venue explicitly forbade — must never be pinned.
+FORBIDDEN_R0VM_MEMBER_SHA256="36c01a65bb2ded5bd1f8f92cc487e6ffaeb1e95ec05850c983081a0f716b515b"
 
 fail=0
 pass() { printf 'PASS  %s\n' "$*"; }
@@ -72,7 +76,7 @@ sha256_of_url() {
 }
 
 is_full_sha256_digest() { printf '%s' "${1#sha256:}" | grep -Eq '^[0-9a-f]{64}$' && [ "${1#sha256:}" != "$1" ]; }
-is_bare_sha256()        { printf '%s' "${1:-}" | grep -Eq '^[0-9a-f]{64}$'; }
+# is_bare_sha256 is defined in lib.sh (shared with the verified-extraction mechanism).
 
 # ---- (1) base image: immutable index + per-arch child platform binding -------
 base_image="$(pget base_image)"
@@ -316,6 +320,75 @@ except Exception: print("")' 2>/dev/null || true)"
       bad "advisory_db.git_tree MISMATCH: pinned=$adv_tree but commit $adv_commit has tree $api_tree upstream"
     fi
   fi
+fi
+
+# ---- (8) prover archives: declarative member identities (cargo-prove x86+aarch64, cargo-risczero
+# x86, r0vm x86). The archive members are content-verified IN-IMAGE by the staged provisioner
+# (provision_prover_toolchain.sh) after extraction; here we validate the PIN SHAPE + coverage +
+# the shared-archive / delivery / no-rzup / forbidden-transcription rules. No rzup anywhere.
+pa_count="$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1])).get("prover_archives",[])))' "$PINS" 2>/dev/null || echo 0)"
+if [ "$pa_count" -eq 0 ]; then
+  bad "prover_archives is missing/empty (need cargo-prove x86_64+aarch64, cargo-risczero x86_64, r0vm x86_64)"
+fi
+seen_cp_x86=0; seen_cp_arm=0; seen_cr_x86=0; seen_r0_x86=0
+risczero_archive_id=""; r0vm_archive_id=""
+i=0
+while [ "$i" -lt "$pa_count" ]; do
+  a_name="$(pget "prover_archives[$i].archive_name")"
+  a_arch="$(pget "prover_archives[$i].arch")"
+  a_sha="$(pget "prover_archives[$i].archive_sha256")"
+  case "$a_arch" in x86_64|aarch64) ;; *) bad "prover_archives[$i] arch must be x86_64|aarch64 (got '$a_arch')"; i=$((i+1)); continue ;; esac
+  is_bare_sha256 "$a_sha" || bad "prover_archives[$i] ($a_name/$a_arch) archive_sha256 is not bare 64-hex: '$a_sha'"
+  m_count="$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["prover_archives"]['"$i"'].get("members",[])))' "$PINS" 2>/dev/null || echo 0)"
+  [ "$m_count" -ge 1 ] || bad "prover_archives[$i] ($a_name/$a_arch) has no members"
+  j=0
+  while [ "$j" -lt "$m_count" ]; do
+    exe="$(pget "prover_archives[$i].members[$j].executable_name")"
+    msha="$(pget "prover_archives[$i].members[$j].member_sha256")"
+    msize="$(pget "prover_archives[$i].members[$j].member_size_bytes")"
+    vargv="$(pget "prover_archives[$i].members[$j].version_argv")"
+    vout="$(pget "prover_archives[$i].members[$j].version_output")"
+    relc="$(pget "prover_archives[$i].members[$j].expected_release_commit")"
+    deliv="$(pget "prover_archives[$i].members[$j].delivery")"
+    [ "$exe" = "rzup" ] && bad "prover_archives[$i] declares an rzup member (rzup is never used)"
+    [ -n "$exe" ] || bad "prover_archives[$i].members[$j] executable_name empty"
+    is_bare_sha256 "$msha" || bad "prover_archives[$i] ($exe) member_sha256 is not bare 64-hex: '$msha'"
+    printf '%s' "$msize" | grep -Eq '^[1-9][0-9]*$' || bad "prover_archives[$i] ($exe) member_size_bytes must be a positive integer: '$msize'"
+    [ -n "$vargv" ] || bad "prover_archives[$i] ($exe) version_argv empty"
+    printf '%s' "$vargv" | grep -Eq "(^| )$exe( |$)|^cargo " || bad "prover_archives[$i] version_argv does not name $exe: '$vargv'"
+    [ -n "$vout" ] || bad "prover_archives[$i] ($exe) version_output empty"
+    if [ -n "$relc" ]; then
+      grep <<<"$vout" -qF "$relc" || bad "prover_archives[$i] ($exe) version_output lacks the expected release identity '$relc'"
+    fi
+    # the transcription-error r0vm value must never be pinned.
+    [ "$msha" = "$FORBIDDEN_R0VM_MEMBER_SHA256" ] && bad "prover_archives[$i] ($exe) pins the FORBIDDEN r0vm transcription value"
+    case "$exe/$deliv" in
+      cargo-prove/isolated-path|cargo-risczero/isolated-path|r0vm/risc0-server-path) ;;
+      cargo-*/isolated-path) bad "prover_archives[$i] cargo subcommand $exe must use isolated-path (got '$deliv')" ;;
+      r0vm/*) bad "prover_archives[$i] r0vm must use risc0-server-path (got '$deliv')" ;;
+      *) bad "prover_archives[$i] ($exe) invalid delivery '$deliv'" ;;
+    esac
+    # RISC Zero executables are x86_64 only.
+    case "$exe/$a_arch" in cargo-risczero/aarch64|r0vm/aarch64) bad "prover_archives[$i] $exe on aarch64 (RISC Zero is x86_64-only, VENUE.md §2)" ;; esac
+    case "$exe/$a_arch" in
+      cargo-prove/x86_64) seen_cp_x86=1 ;;
+      cargo-prove/aarch64) seen_cp_arm=1 ;;
+      cargo-risczero/x86_64) seen_cr_x86=1; risczero_archive_id="$a_name/$a_arch/$a_sha" ;;
+      r0vm/x86_64) seen_r0_x86=1; r0vm_archive_id="$a_name/$a_arch/$a_sha" ;;
+    esac
+    j=$((j+1))
+  done
+  i=$((i+1))
+done
+[ "$seen_cp_x86" = 1 ] || bad "prover_archives: no cargo-prove for x86_64"
+[ "$seen_cp_arm" = 1 ] || bad "prover_archives: no cargo-prove for aarch64"
+[ "$seen_cr_x86" = 1 ] || bad "prover_archives: no cargo-risczero for x86_64"
+[ "$seen_r0_x86" = 1 ] || bad "prover_archives: no r0vm for x86_64"
+# cargo-risczero + r0vm MUST be members of ONE shared archive identity.
+if [ "$seen_cr_x86" = 1 ] && [ "$seen_r0_x86" = 1 ]; then
+  [ "$risczero_archive_id" = "$r0vm_archive_id" ] \
+    && pass "prover_archives: cargo-prove x86_64+aarch64, cargo-risczero x86_64, r0vm x86_64 (cargo-risczero + r0vm share one archive); shapes + delivery + no-rzup verified" \
+    || bad "prover_archives: cargo-risczero ($risczero_archive_id) and r0vm ($r0vm_archive_id) are NOT the same shared archive"
 fi
 
 echo "----"

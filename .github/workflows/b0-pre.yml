@@ -79,7 +79,19 @@ jobs:
       #     deterministic unit tests on native GNU/Linux (ubuntu-latest) — this is the
       #     native-GNU verification for the df -Pk portability fix. No toolchain/venue.
       - name: B0-PRE venue-script tests (bash -n, shellcheck, disk_free_gib, pin schema)
-        run: bash tools/b0-pre-candidates/scripts/tests/run.sh
+        run: |
+          set +e
+          bash tools/b0-pre-candidates/scripts/tests/run.sh 2>&1 | tee /tmp/run.out
+          rc=${PIPESTATUS[0]}
+          [ "$rc" -eq 0 ] || { echo "::error::B0-PRE venue-script suite exited $rc"; exit 1; }
+          # These no-docker CONTRACT tests have NO opt-in gate (they cannot legitimately skip on
+          # ubuntu-latest, which ships python3/tar/coreutils), so assert each terminal marker is
+          # present: a silent skip (e.g. a missing interpreter) would otherwise pass rc=0. Covers
+          # the declarative extraction, the prover-archive pin block, and the provisioning recipe.
+          for m in VERIFIED_EXTRACTION_PASS PIN_PROVER_ARCHIVES_PASS PROVISIONING_RECIPE_PASS; do
+            grep -q "^$m\$" /tmp/run.out \
+              || { echo "::error::required no-docker contract marker $m absent (test skipped or did not run)"; exit 1; }
+          done
 
       # --- Lightweight REAL-CONTAINER v2 seal->import E2E (REQUIRED execution; bounded) --
       # ONE continuous real-container flow driving the ACTUAL production seam functions (the

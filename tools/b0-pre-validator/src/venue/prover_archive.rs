@@ -55,8 +55,17 @@ pub struct ArchiveMemberExecutable {
     /// The exact argv used to capture the version (trusted; e.g. `["cargo","prove","--version"]`
     /// or `["r0vm","--version"]`). MANDATORY and non-empty.
     pub version_invocation: Vec<String>,
-    /// The exact version output the invocation produced. VENUE-resolved; MANDATORY.
+    /// The exact version output the invocation produced. VENUE-resolved; MANDATORY. It is
+    /// ARCH-SPECIFIC and is NOT required to match the other architecture's output (e.g. cargo-prove
+    /// embeds a per-build timestamp that differs across arches).
     pub version_output: String,
+    /// OPTIONAL expected release identity that MUST appear verbatim in `version_output` — the token
+    /// that IS stable across architectures even when the full output differs. For `cargo-prove`
+    /// this is the SP1 release's short commit (which the venue further validates as a prefix of the
+    /// ratified `vX.Y.Z` tag commit); for a tool whose output literally carries its version this is
+    /// that version. When present it is required; a `version_output` not containing it fails closed.
+    #[serde(default)]
+    pub expected_release_commit: Option<String>,
     /// SHA-256 (bare 64-hex) recomputed at the POINT OF USE (the binary actually invoked).
     /// VENUE-resolved; MANDATORY. Must equal `member_sha256` (extract == use).
     pub point_of_use_sha256: String,
@@ -112,6 +121,12 @@ pub enum ProverArchiveError {
     Risc0NotX86 { executable: String, arch: String },
     /// `version_invocation`'s first token does not name the executable it versions.
     VersionInvocationMismatch { executable: String, first: String },
+    /// The pinned expected release identity (e.g. cargo-prove's SP1 short commit) did not appear in
+    /// the arch-specific version output.
+    VersionMissingRelease {
+        executable: String,
+        expected: String,
+    },
     /// Authoritative mode was handed synthetic metadata (fails closed off-venue).
     SyntheticRefused { field: &'static str },
     /// TEST_ONLY mode was handed metadata that is not unmistakably synthetic.
@@ -164,6 +179,14 @@ impl std::fmt::Display for ProverArchiveError {
                 f,
                 "RISC Zero executable {executable:?} declares arch {arch:?}; cargo-risczero and \
                  r0vm are native-x86_64-only (VENUE.md §2)"
+            ),
+            ProverArchiveError::VersionMissingRelease {
+                executable,
+                expected,
+            } => write!(
+                f,
+                "version output for {executable:?} does not contain the pinned release identity \
+                 {expected:?}"
             ),
             ProverArchiveError::VersionInvocationMismatch { executable, first } => write!(
                 f,
@@ -244,6 +267,19 @@ impl ArchiveMemberExecutable {
         // MANDATORY venue value.
         if self.version_output.trim().is_empty() {
             return Err(ProverArchiveError::Missing("version_output"));
+        }
+        // If an expected release identity is pinned, the (arch-specific) version output MUST carry
+        // it verbatim — the stable cross-arch anchor even when the full output differs by timestamp.
+        if let Some(rel) = &self.expected_release_commit {
+            if rel.trim().is_empty() {
+                return Err(ProverArchiveError::Missing("expected_release_commit"));
+            }
+            if !self.version_output.contains(rel.trim()) {
+                return Err(ProverArchiveError::VersionMissingRelease {
+                    executable: self.executable_name.clone(),
+                    expected: rel.trim().to_string(),
+                });
+            }
         }
         // MANDATORY venue value — empty fails closed, non-hex is BadHash.
         if self.point_of_use_sha256.trim().is_empty() {
@@ -473,6 +509,7 @@ mod tests {
             member_sha256: member_hash.into(),
             version_invocation: invocation.iter().map(|s| s.to_string()).collect(),
             version_output: format!("{SENT} {exe} 3.0.5"),
+            expected_release_commit: None,
             point_of_use_sha256: member_hash.into(),
             delivery,
             arch: arch.into(),
@@ -684,5 +721,52 @@ mod tests {
         // An unknown field is rejected (deny_unknown_fields).
         let bad = s.replace("\"members\"", "\"bogus\":1,\"members\"");
         assert!(serde_json::from_str::<ProverArchive>(&bad).is_err());
+    }
+
+    // cargo-prove ships an arch-specific version output whose ONLY stable cross-arch anchor is the
+    // SP1 release short commit; the x86 and aarch64 outputs differ by embedded timestamp. Both must
+    // validate against the SAME expected_release_commit, and NEITHER is required to equal the other.
+    fn cargo_prove_member(arch: &str, output: &str, member_hash: &str) -> ArchiveMemberExecutable {
+        ArchiveMemberExecutable {
+            executable_name: "cargo-prove".into(),
+            archive_member: "cargo-prove".into(),
+            member_sha256: member_hash.into(),
+            version_invocation: vec!["cargo-prove".into(), "prove".into(), "--version".into()],
+            version_output: output.into(),
+            expected_release_commit: Some("8252c29".into()), // prefix of the ratified v6.3.1 tag commit
+            point_of_use_sha256: member_hash.into(),
+            delivery: Delivery::IsolatedPath,
+            arch: arch.into(),
+        }
+    }
+
+    #[test]
+    fn cargo_prove_arch_specific_outputs_share_the_release_commit() {
+        // The real verified x86 + aarch64 outputs (different timestamps) both validate.
+        let x86 = cargo_prove_member(
+            "x86_64",
+            "cargo-prove sp1 (8252c29 2026-06-25T11:50:01.543258355Z)",
+            &"a".repeat(64),
+        );
+        let arm = cargo_prove_member(
+            "aarch64",
+            "cargo-prove sp1 (8252c29 2026-06-25T11:49:20.735796629Z)",
+            &"b".repeat(64),
+        );
+        assert_ne!(
+            x86.version_output, arm.version_output,
+            "outputs differ by timestamp"
+        );
+        assert_eq!(x86.validate("x86_64", ArchiveMode::Authoritative), Ok(()));
+        assert_eq!(arm.validate("aarch64", ArchiveMode::Authoritative), Ok(()));
+    }
+
+    #[test]
+    fn cargo_prove_output_without_the_release_commit_is_refused() {
+        let bad = cargo_prove_member("x86_64", "cargo-prove sp1 (deadbee ...)", &"a".repeat(64));
+        assert!(matches!(
+            bad.validate("x86_64", ArchiveMode::Authoritative),
+            Err(ProverArchiveError::VersionMissingRelease { .. })
+        ));
     }
 }

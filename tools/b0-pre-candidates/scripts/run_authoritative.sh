@@ -237,6 +237,17 @@ produce_arch_authoritative() {
   # use. Absent, the gate still requires cargo-audit to be present + self-report a version.
   preflight_builder_capability "$sp1_ref"   "$arch" "${CARGO_AUDIT_PIN_VERSION:-}" "${CARGO_AUDIT_EXPECTED_EXE_SHA256:-}"
   preflight_builder_capability "$risc0_ref" "$arch" "${CARGO_AUDIT_PIN_VERSION:-}" "${CARGO_AUDIT_EXPECTED_EXE_SHA256:-}"
+  # Item 6 (prover half): validate the pinned PROVER executables the declarative recipe provisioned.
+  # SP1's `cargo-prove` is provisioned on BOTH arches; RISC Zero's `cargo-risczero` + `r0vm` are
+  # x86_64-only (VENUE.md §2), so the risc0 prover gate runs ONLY on x86_64 — mirroring the Stage-4/5
+  # extraction skip below. Expected version/commit come from the pins (env); the RISC0_SERVER_PATH
+  # defaults to the canonical provisioning path when unset.
+  preflight_prover_capability "$sp1_ref" sp1 "$arch" "${SP1_PROVER_RELEASE_COMMIT:-}"
+  if [ "$arch" = "x86_64" ]; then
+    preflight_prover_capability "$risc0_ref" risc0 "$arch" "" "${RISC0_RELEASE_VERSION:-}" "${RISC0_SERVER_PATH:-}"
+  else
+    note "arch=$arch: skipping RISC Zero prover capability preflight (cargo-risczero + r0vm are x86_64-only per docs/b0-pre/venue/VENUE.md §2)"
+  fi
 
   note "== Stage 2: PER-CANDIDATE in-container cargo metadata + audit -> typed record -> work =="
   require_headroom_gib "$work" 5 "Stage 2 in-container cargo metadata + audit"

@@ -48,7 +48,12 @@ cargo_audit.packaged_lock_sha256
 advisory_db.repo
 advisory_db.commit
 advisory_db.git_tree
-advisory_db.content_blake3'
+advisory_db.content_blake3
+prover_archives[0].arch
+prover_archives[0].archive_sha256
+prover_archives[0].members[0].executable_name
+prover_archives[0].members[0].member_sha256
+prover_archives[0].members[0].delivery'
 
 # Exit 0 iff the pget-style dotted path resolves in the JSON file (value may be empty).
 path_present() { # <json> <dotted.path>

@@ -30,7 +30,7 @@ docker version >/dev/null 2>&1 || skip_or_fail "docker daemon not reachable"
 # shellcheck source=../lib.sh
 . "$SCR/lib.sh" >/dev/null 2>&1
 
-T="$(mktemp -d "$HOME/.b0-cap-XXXXXX")"; trap 'rm -rf "$T"; docker rmi -f b0-cap-good b0-cap-noaudit b0-cap-badver b0-cap-loginpath >/dev/null 2>&1 || true' EXIT
+T="$(mktemp -d "$HOME/.b0-cap-XXXXXX")"; trap 'rm -rf "$T"; docker rmi -f b0-cap-good b0-cap-noaudit b0-cap-badver b0-cap-loginpath b0-cap-sp1prove b0-cap-sp1noprove b0-cap-sp1badcommit b0-cap-r0good b0-cap-r0nor0vm >/dev/null 2>&1 || true' EXIT
 F=0; ok(){ printf 'ok    %s\n' "$1"; }; bad(){ printf 'FAIL  %s\n' "$1" >&2; F=1; }
 
 # preflight_builder_capability calls `die` (exit 2) on failure; run it in a SUBSHELL so a
@@ -38,6 +38,10 @@ F=0; ok(){ printf 'ok    %s\n' "$1"; }; bad(){ printf 'FAIL  %s\n' "$1" >&2; F=1
 gate() { ( preflight_builder_capability "$@" ) >/dev/null 2>&1; }
 expect_pass() { local label="$1"; shift; if gate "$@"; then ok "$label (gate PASSES)"; else bad "$label — gate should PASS but failed"; fi; }
 expect_fail() { local label="$1"; shift; if gate "$@"; then bad "$label — gate should FAIL CLOSED but passed"; else ok "$label (gate fails closed)"; fi; }
+# Item 6 prover half: preflight_prover_capability (cargo-prove / cargo-risczero / r0vm).
+pgate() { ( preflight_prover_capability "$@" ) >/dev/null 2>&1; }
+pexpect_pass() { local label="$1"; shift; if pgate "$@"; then ok "$label (prover gate PASSES)"; else bad "$label — prover gate should PASS but failed"; fi; }
+pexpect_fail() { local label="$1"; shift; if pgate "$@"; then bad "$label — prover gate should FAIL CLOSED but passed"; else ok "$label (prover gate fails closed)"; fi; }
 
 # Native arch of this host's containers (colima is aarch64; CI amd64) — used to build a real
 # arch-mismatch negative by declaring the OTHER arch.
@@ -122,6 +126,67 @@ if docker run --rm --pull never b0-cap-loginpath bash -lc 'command -v cargo carg
 else
   bad "RT-2 control: login shell should have resolved the tools"
 fi
+
+# ---- prover-capability (Item 6, prover half): cargo-prove (SP1) / cargo-risczero + r0vm (RISC Zero)
+# shims. cargo-prove reports its release commit in the version line; cargo-risczero + r0vm report the
+# RISC Zero version; r0vm is resolved at the EXACT RISC0_SERVER_PATH (not a cargo subcommand). Values
+# mirror the golden prover_archives (SP1 release commit 8252c29; RISC Zero 3.0.5).
+R0VM_PATH="/opt/b0pre/risc0-server/r0vm"
+printf '#!/bin/sh\necho "cargo-prove sp1 (8252c29 2026-06-25T11:50:01.543258355Z)"\n' > "$T/cargo-prove"
+printf '#!/bin/sh\necho "cargo-prove sp1 (deadbee 2026-06-25T11:50:01.543258355Z)"\n' > "$T/cargo-prove-badcommit"
+printf '#!/bin/sh\necho "cargo-risczero 3.0.5"\n' > "$T/cargo-risczero"
+printf '#!/bin/sh\necho "risc0-r0vm 3.0.5"\n'     > "$T/r0vm"
+
+# sp1 prover-good: cargo + cargo-prove on ENV PATH.
+cat > "$T/Dockerfile.sp1prove" <<EOF
+FROM $BASE
+COPY cargo /usr/local/bin/cargo
+COPY cargo-prove /usr/local/bin/cargo-prove
+RUN chmod +x /usr/local/bin/cargo /usr/local/bin/cargo-prove
+EOF
+build_img b0-cap-sp1prove "$T/Dockerfile.sp1prove"
+# sp1 cargo-prove absent.
+cat > "$T/Dockerfile.sp1noprove" <<EOF
+FROM $BASE
+COPY cargo /usr/local/bin/cargo
+RUN chmod +x /usr/local/bin/cargo
+EOF
+build_img b0-cap-sp1noprove "$T/Dockerfile.sp1noprove"
+# sp1 cargo-prove present but WRONG release commit.
+cat > "$T/Dockerfile.sp1badcommit" <<EOF
+FROM $BASE
+COPY cargo /usr/local/bin/cargo
+COPY cargo-prove-badcommit /usr/local/bin/cargo-prove
+RUN chmod +x /usr/local/bin/cargo /usr/local/bin/cargo-prove
+EOF
+build_img b0-cap-sp1badcommit "$T/Dockerfile.sp1badcommit"
+# risc0 prover-good: cargo + cargo-risczero on PATH + r0vm at the exact RISC0_SERVER_PATH.
+cat > "$T/Dockerfile.r0good" <<EOF
+FROM $BASE
+COPY cargo /usr/local/bin/cargo
+COPY cargo-risczero /usr/local/bin/cargo-risczero
+COPY r0vm $R0VM_PATH
+RUN chmod +x /usr/local/bin/cargo /usr/local/bin/cargo-risczero $R0VM_PATH
+EOF
+build_img b0-cap-r0good "$T/Dockerfile.r0good"
+# risc0 cargo-risczero present but r0vm ABSENT at RISC0_SERVER_PATH.
+cat > "$T/Dockerfile.r0nor0vm" <<EOF
+FROM $BASE
+COPY cargo /usr/local/bin/cargo
+COPY cargo-risczero /usr/local/bin/cargo-risczero
+RUN chmod +x /usr/local/bin/cargo /usr/local/bin/cargo-risczero
+EOF
+build_img b0-cap-r0nor0vm "$T/Dockerfile.r0nor0vm"
+
+# SP1: cargo-prove present with the pinned release commit PASSES; absent / wrong-commit FAIL.
+pexpect_pass "sp1 prover good (cargo-prove @ 8252c29)"          b0-cap-sp1prove     sp1 "$NARCH" "8252c29"
+pexpect_fail "sp1 cargo-prove absent"                          b0-cap-sp1noprove   sp1 "$NARCH" "8252c29"
+pexpect_fail "sp1 cargo-prove wrong release commit (deadbee)"  b0-cap-sp1badcommit sp1 "$NARCH" "8252c29"
+# RISC Zero: cargo-risczero + r0vm@RISC0_SERVER_PATH with version 3.0.5 PASSES; r0vm-missing FAILS;
+# a risc0 request on aarch64 is refused x86-only regardless of image contents.
+pexpect_pass "risc0 prover good (cargo-risczero + r0vm @ 3.0.5)" b0-cap-r0good  risc0 x86_64 "" "3.0.5" "$R0VM_PATH"
+pexpect_fail "risc0 r0vm missing at RISC0_SERVER_PATH"           b0-cap-r0nor0vm risc0 x86_64 "" "3.0.5" "$R0VM_PATH"
+pexpect_fail "risc0 declared aarch64 (RISC Zero is x86_64-only)" b0-cap-r0good  risc0 aarch64 "" "3.0.5" "$R0VM_PATH"
 
 echo "----"
 if [ "$F" = 0 ]; then

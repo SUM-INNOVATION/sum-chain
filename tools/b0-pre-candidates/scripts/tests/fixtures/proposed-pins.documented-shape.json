@@ -31,5 +31,20 @@
     "commit": "",
     "git_tree": "",
     "content_blake3": ""
-  }
+  },
+  "prover_archives": [
+    { "archive_name": "sp1-prover", "arch": "x86_64", "archive_url": "", "archive_sha256": "",
+      "members": [
+        { "executable_name": "cargo-prove", "member_path": "cargo-prove", "member_sha256": "", "member_size_bytes": 0, "version_argv": "cargo-prove prove --version", "version_output": "", "expected_release_commit": "8252c29", "delivery": "isolated-path" }
+      ] },
+    { "archive_name": "sp1-prover", "arch": "aarch64", "archive_url": "", "archive_sha256": "",
+      "members": [
+        { "executable_name": "cargo-prove", "member_path": "cargo-prove", "member_sha256": "", "member_size_bytes": 0, "version_argv": "cargo-prove prove --version", "version_output": "", "expected_release_commit": "8252c29", "delivery": "isolated-path" }
+      ] },
+    { "archive_name": "risc0-toolchain", "arch": "x86_64", "archive_url": "", "archive_sha256": "",
+      "members": [
+        { "executable_name": "cargo-risczero", "member_path": "cargo-risczero", "member_sha256": "", "member_size_bytes": 0, "version_argv": "cargo-risczero risczero --version", "version_output": "", "expected_release_commit": "3.0.5", "delivery": "isolated-path" },
+        { "executable_name": "r0vm", "member_path": "r0vm", "member_sha256": "", "member_size_bytes": 0, "version_argv": "r0vm --version", "version_output": "", "expected_release_commit": "3.0.5", "delivery": "risc0-server-path" }
+      ] }
+  ]
 }

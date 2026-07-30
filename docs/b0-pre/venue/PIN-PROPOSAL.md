@@ -31,6 +31,7 @@ verification passes — never automatically.
 | 5 | RISC Zero tool identities — `risc0-zkvm 3.0.5`, `risc0-groth16 3.0.4`, **x86_64 only** | the pinned RISC Zero release artifacts | same host/redirect/download/compare as (4). An `aarch64` RISC Zero entry is **refused**: Groth16 and verifier-material extraction are native-x86_64-only (VENUE.md §2) |
 | 6 | `cargo_audit` — `version` + `crate_sha256` + `source_commit` + `packaged_lock_sha256` | the pinned crates.io release `cargo-audit-<version>.crate` at `static.crates.io` | `version` must be the required cargo-audit release; the `.crate` is downloaded from `static.crates.io` and its `sha256` must equal `crate_sha256`; the packaged `cargo-audit-<version>/Cargo.lock` is extracted from that **same verified tarball** and its `sha256` must equal `packaged_lock_sha256` (pinning the auditor's own dependency graph); `source_commit` is a 40-hex provenance field (the tag the release was cut from), format-checked here |
 | 7 | `advisory_db` — `repo` + `commit` + `git_tree` + `content_blake3` | the canonical RustSec `advisory-db` GitHub repository | `repo` must be the canonical `https://github.com/rustsec/advisory-db`; the GitHub commits API resolves `commit` → its tree sha, which must equal `git_tree` (a swapped commit or fabricated tree fails without cloning history); `content_blake3` is the canonical checkout digest (domain-separated BLAKE3, `ADVDB_CHECKOUT_TAG`), format-checked here and **re-derived in full at produce time** by `venue-verify checkout-digest` over the READ-ONLY mounted checkout (and reproduced by an independent reference in the validator test suite) |
+| 8 | `prover_archives` — per (archive, arch): `archive_url` + `archive_sha256`, and per **member**: `executable_name` + `member_path` + `member_sha256` + `member_size_bytes` + `version_argv` + `version_output` + `expected_release_commit` + `delivery` | the pinned SP1 / RISC Zero prover release **archives** and the exact executables inside them | `verify_pins.sh` validates the SHAPE + COVERAGE + shared-archive + delivery + no-`rzup` invariants (each `archive_sha256` / `member_sha256` a bare 64-hex; `member_size_bytes` a positive integer; `version_output` carries `expected_release_commit`; `delivery` is `isolated-path` for cargo subcommands and `risc0-server-path` for `r0vm`; `cargo-prove` present for **x86_64 AND aarch64**, `cargo-risczero` + `r0vm` **x86_64-only** and **sharing one archive**; a swapped-arch / wrong-member / wrong-size / altered-digest / incorrect-version / forbidden-`r0vm` value all fail closed). The **member bytes** are content-verified **in-image** by the staged provisioner (below), and the same values are golden-tested against the transferred content-addressed venue report |
 
 Notes:
 - The **base image** identity IS the pinned per-arch digest, and it must belong to the
@@ -91,7 +92,22 @@ shown **empty**; a committed, byte-identical UNRATIFIED example lives at
     "commit": "",
     "git_tree": "",
     "content_blake3": ""
-  }
+  },
+  "prover_archives": [
+    { "archive_name": "sp1-prover", "arch": "x86_64", "archive_url": "", "archive_sha256": "",
+      "members": [
+        { "executable_name": "cargo-prove", "member_path": "cargo-prove", "member_sha256": "", "member_size_bytes": 0, "version_argv": "cargo-prove prove --version", "version_output": "", "expected_release_commit": "8252c29", "delivery": "isolated-path" }
+      ] },
+    { "archive_name": "sp1-prover", "arch": "aarch64", "archive_url": "", "archive_sha256": "",
+      "members": [
+        { "executable_name": "cargo-prove", "member_path": "cargo-prove", "member_sha256": "", "member_size_bytes": 0, "version_argv": "cargo-prove prove --version", "version_output": "", "expected_release_commit": "8252c29", "delivery": "isolated-path" }
+      ] },
+    { "archive_name": "risc0-toolchain", "arch": "x86_64", "archive_url": "", "archive_sha256": "",
+      "members": [
+        { "executable_name": "cargo-risczero", "member_path": "cargo-risczero", "member_sha256": "", "member_size_bytes": 0, "version_argv": "cargo-risczero risczero --version", "version_output": "", "expected_release_commit": "3.0.5", "delivery": "isolated-path" },
+        { "executable_name": "r0vm", "member_path": "r0vm", "member_sha256": "", "member_size_bytes": 0, "version_argv": "r0vm --version", "version_output": "", "expected_release_commit": "3.0.5", "delivery": "risc0-server-path" }
+      ] }
+  ]
 }
 ```
 
@@ -103,9 +119,11 @@ and `rustup_init.<arch>.sha256` (per arch — the exact immutable installer URL 
 *and* its expected `sha256`); each `tool_identities[i]` with `name`, `version`,
 `arch`, `artifact_identity`, `checksum_algorithm` (must be `sha256`), `checksum_hex`,
 `install_entrypoint`; `cargo_audit.version`, `cargo_audit.crate_sha256`,
-`cargo_audit.source_commit`, `cargo_audit.packaged_lock_sha256`; and `advisory_db.repo`,
-`advisory_db.commit`, `advisory_db.git_tree`, `advisory_db.content_blake3`. `<arch>` is
-`x86_64` and `aarch64`.
+`cargo_audit.source_commit`, `cargo_audit.packaged_lock_sha256`; `advisory_db.repo`,
+`advisory_db.commit`, `advisory_db.git_tree`, `advisory_db.content_blake3`; and, per
+`prover_archives[i]`, `arch` + `archive_sha256` and, per `members[j]`, `executable_name`,
+`member_path`, `member_sha256`, `member_size_bytes`, `version_argv`, `version_output`,
+`expected_release_commit`, and `delivery`. `<arch>` is `x86_64` and `aarch64`.
 
 The `cargo_audit` + `advisory_db` blocks bind the Stage-2 supply-chain auditor and the
 database it runs against. `cargo-audit` runs INSIDE the pinned builder image with the
@@ -137,6 +155,50 @@ the advisory-DB `commit` + `git_tree` + `content_blake3`.
 Required tool-identity coverage: `sp1-verifier` for **both** architectures, and
 `risc0-zkvm` + `risc0-groth16` for **x86_64 only**. Anything less fails closed; a RISC
 Zero entry declaring `aarch64` is refused outright.
+
+### Declarative prover provisioning (how `prover_archives` is consumed in-image)
+
+The prover executables are provisioned into each candidate builder by **declarative, verified
+archive-member extraction** — never a `curl | tar` entrypoint and never `rzup` (production never
+invokes it). The mechanism is one staged, self-contained script,
+`scripts/provision_prover_toolchain.sh`, which `stage_context.sh` copies **byte-identically** into
+the curated Docker build context (`provisioning/provision_prover_toolchain.sh`, its bytes folded
+into `staged_context_blake3`) and both Dockerfiles `COPY` + run. It is the SAME file the host
+crafted-archive suite (`tests/verified_extraction.test.sh`) exercises — there is no second,
+unverified implementation, and the Dockerfiles do **not** call host `lib.sh`. Given a downloaded
+archive and the complete declared member set it, in order: (1) verifies the whole-archive
+`archive_sha256` **before** extraction; (2) enumerates every entry and refuses symlinks/hardlinks,
+absolute paths, `..` traversal, duplicates, and any regular member that is not declared (and
+requires every declared member present); (3) extracts **only** the declared members; (4) verifies
+each member's `member_size_bytes` + `member_sha256` **before** `chmod`; (5) places it and re-hashes
+at the point of use.
+
+Canonical, deterministic in-image paths (Item 7 — fixed, no wall-clock / host-generated locations):
+
+| Executable | Delivery | In-image location |
+|------------|----------|-------------------|
+| `cargo-prove` (SP1, x86_64 + aarch64) | `isolated-path` | `/opt/b0pre/prover-bin/cargo-prove` (on the production PATH) |
+| `cargo-risczero` (RISC Zero, x86_64) | `isolated-path` | `/opt/b0pre/prover-bin/cargo-risczero` (on the production PATH) |
+| `r0vm` (RISC Zero, x86_64) | `risc0-server-path` | `/opt/b0pre/risc0-server/r0vm` = `RISC0_SERVER_PATH` |
+
+`cargo-audit` is **built in each Debian builder** from the verified crate + packaged lock (pin 6)
+into `/opt/b0pre/audit-prefix/bin/cargo-audit`; the Ubuntu host binary is never copied in. Each
+provisioned executable's SHA-256 is recorded in-image under `/opt/b0pre/evidence/` as **venue
+evidence** (reproduced by an independent same-arch operator), never a source pin. All build scratch
+(downloaded archives, crate build dir, cargo caches) is removed **in the same layer** so the
+two-clean-build manifest-equality gate is not weakened.
+
+**Builder-image capability preflight (Item 6).** Before Stage 2 / Stage 5 run, each verified builder
+image is asserted — as early as possible, under the production non-login `bash -c` (RT-2) — to carry
+its pinned capabilities, validating VERSIONS/IDENTITIES via each tool's exact declared `version_argv`
+(never a bare `command -v`). A mis-provisioned image fails closed here, not deep inside a stage:
+
+| Candidate / arch | Required capabilities (identity + version) |
+|------------------|--------------------------------------------|
+| `sp1` x86_64 | `cargo`, `cargo-audit`@version, `cargo-prove` carrying SP1 release commit |
+| `sp1` aarch64 | `cargo`, `cargo-audit`@version, `cargo-prove` carrying SP1 release commit |
+| `risc0` x86_64 | `cargo`, `cargo-audit`@version, `cargo-risczero`@`3.0.5`, `r0vm`@`3.0.5` at `RISC0_SERVER_PATH` |
+| `risc0` aarch64 | `cargo`, `cargo-audit`@version (RISC Zero prover **not** provisioned — x86_64-only; the arm64 risc0 image records the builder manifest only) |
 
 The ratified build inputs derived from this record are `RUSTUP_INIT_URL` +
 `RUSTUP_INIT_SHA256` (per arch), the four `APT_*` fields (identical on both hosts), and
