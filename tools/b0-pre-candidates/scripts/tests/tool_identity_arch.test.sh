@@ -37,7 +37,7 @@ command -v python3 >/dev/null 2>&1 || { echo "SKIP: python3 absent"; exit 0; }
 # extraction native-x86_64-only, and upstream ships no aarch64-linux artifact.
 out="$( (tool_identity_var Risc0 aarch64) 2>&1 )"; rc=$?
 check_rc "Risc0/aarch64 refused" 2 $rc
-printf '%s' "$out" | grep -q "native-x86_64-only" \
+grep -q "native-x86_64-only" <<<"$out" \
   && ok "Risc0/aarch64 refusal cites the VENUE architecture rule" \
   || bad "Risc0/aarch64 refusal should cite the x86_64-only rule; got: $out"
 
@@ -63,7 +63,7 @@ check_rc "identity file without an \"arch\" field -> refused" 2 $?
 
 out="$( (SP1_TOOL_IDENTITY_X86_64="$WRONG" resolve_tool_identity_file Sp1 x86_64) 2>&1 )"; rc=$?
 check_rc "cross-architecture identity (aarch64 file under the x86_64 variable) -> refused" 2 $rc
-printf '%s' "$out" | grep -q "cross-architecture or swapped identity" \
+grep -q "cross-architecture or swapped identity" <<<"$out" \
   && ok "swapped identity refusal names the cause" || bad "refusal should name the swap; got: $out"
 
 got="$( (SP1_TOOL_IDENTITY_X86_64="$GOOD" resolve_tool_identity_file Sp1 x86_64) 2>/dev/null )"
@@ -87,7 +87,7 @@ for t in d["tool_identities"]:
 json.dump(d, open(sys.argv[2], "w"))
 PY
 out="$(bash "$VERIFY" "$probe" 2>&1)"
-printf '%s' "$out" | grep -q "RISC Zero is native-x86_64-only" \
+grep -q "RISC Zero is native-x86_64-only" <<<"$out" \
   && ok "proposal carrying an aarch64 RISC Zero identity rejected" \
   || bad "an aarch64 RISC Zero tool identity must be rejected; got: $out"
 rm -f "$probe"

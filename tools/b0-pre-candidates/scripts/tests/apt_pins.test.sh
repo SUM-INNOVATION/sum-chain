@@ -131,7 +131,7 @@ ok "both Dockerfiles declare the four exact APT fields + RUSTUP_INIT_URL"
 
 # ---- 3. missing apt fields fail closed (offline) ----------------------------
 out="$(bash "$VERIFY" "$FIXTURE" 2>&1)"
-printf '%s' "$out" | grep -q "apt.debian_url / apt.debian_inrelease_sha256 missing" \
+grep -q "apt.debian_url / apt.debian_inrelease_sha256 missing" <<<"$out" \
   && ok "empty apt fields fail closed" || bad "empty apt fields must fail closed; got: $out"
 
 # ---- 4. live snapshot behaviour (network-gated, values derived at runtime) --
@@ -161,23 +161,23 @@ PY
     }
 
     p="$(mkpins "$U_A" "$H_A")"; out="$(bash "$VERIFY" "$p" 2>&1)"; rm -f "$p"
-    printf '%s' "$out" | grep -q "apt.debian InRelease sha256 matches the pinned value" \
+    grep -q "apt.debian InRelease sha256 matches the pinned value" <<<"$out" \
       && ok "exact snapshot URL + InRelease hash accepted" \
-      || bad "the exact snapshot URL/hash pair must be accepted; got: $(printf '%s' "$out" | grep -i apt)"
+      || bad "the exact snapshot URL/hash pair must be accepted; got: $(grep -i apt <<<"$out")"
 
     # F8: a URL that serves a DIFFERENT (nearest-preceding) snapshot than the pinned
     # hash must be rejected, even though the service responds 200 for both.
     p="$(mkpins "$U_B" "$H_A")"; out="$(bash "$VERIFY" "$p" 2>&1)"; rm -f "$p"
-    printf '%s' "$out" | grep -q "served a DIFFERENT snapshot than pinned" \
+    grep -q "served a DIFFERENT snapshot than pinned" <<<"$out" \
       && ok "timestamp serving a preceding snapshot rejected by content hash" \
-      || bad "a URL serving different bytes than the pinned hash must be rejected; got: $(printf '%s' "$out" | grep -i apt)"
+      || bad "a URL serving different bytes than the pinned hash must be rejected; got: $(grep -i apt <<<"$out")"
 
     # A mutated expected hash must be rejected against the correct URL.
     MUT="${H_A%?}$( [ "${H_A: -1}" = "0" ] && echo 1 || echo 0 )"
     p="$(mkpins "$U_A" "$MUT")"; out="$(bash "$VERIFY" "$p" 2>&1)"; rm -f "$p"
-    printf '%s' "$out" | grep -q "InRelease sha256 MISMATCH" \
+    grep -q "InRelease sha256 MISMATCH" <<<"$out" \
       && ok "mutated InRelease hash rejected" \
-      || bad "a mutated InRelease hash must be rejected; got: $(printf '%s' "$out" | grep -i apt)"
+      || bad "a mutated InRelease hash must be rejected; got: $(grep -i apt <<<"$out")"
   fi
 fi
 

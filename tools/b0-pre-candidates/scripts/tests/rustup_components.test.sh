@@ -39,7 +39,7 @@ printf '%s\n%s\n%s\n' "$L1" "$L1" "$L3" > "$D/dup"; ( canonicalize_rustup_compon
 ls "$D"/*.sorted "$D"/*.a "$D"/*.b >/dev/null 2>&1 && bad "temporary files leaked" || ok "no temporary files leaked (success or failure)"
 # item 5 (function): the reference does NOT use sort -u
 fn="$(awk '/^canonicalize_rustup_components\(\)/{f=1} f{print} f&&/^}/{exit}' "$LIB")"
-if printf '%s' "$fn" | grep -vE '^[[:space:]]*#' | grep -qF 'sort -u'; then
+if grep -vE '^[[:space:]]*#' <<<"$fn" | grep -qF 'sort -u'; then
   bad "canonicalize_rustup_components uses sort -u in code"
 else
   ok "item5: reference code uses plain sort + uniq -d (no sort -u), multiplicity preserved"

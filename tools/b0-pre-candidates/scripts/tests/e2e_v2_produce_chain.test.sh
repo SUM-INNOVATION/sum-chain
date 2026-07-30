@@ -110,7 +110,7 @@ COMMIT="abcdef0123456789abcdef0123456789abcdef01"          # matches write_test_
 SP1_DIG="$(python3 -c 'import json,sys
 b=json.load(open(sys.argv[1]))
 print(next(e["builder_oci_digest"] for e in b if e.get("role")=="builder"))' "$EV/Sp1.container.json")"
-printf '%s' "$SP1_DIG" | grep -Eq '^sha256:[0-9a-f]{64}$' || { fail "could not read Sp1 builder digest from bundle"; exit 1; }
+grep -Eq '^sha256:[0-9a-f]{64}$' <<<"$SP1_DIG" || { fail "could not read Sp1 builder digest from bundle"; exit 1; }
 
 # ===== Stage 1 (shared gen) + validate (real) =====
 gen_lock_in_container "$FIMG" "$CDIR_IN" "$T/Sp1.Cargo.lock" >/dev/null 2>&1 \

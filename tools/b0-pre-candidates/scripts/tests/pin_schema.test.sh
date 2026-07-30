@@ -111,8 +111,8 @@ d["rustup_init"]["x86_64"]["sha256"] = "0" * 64
 json.dump(d, open(sys.argv[2], "w"))
 PY
   probe_out="$(bash "$VERIFY" "$probe" 2>&1)"; probe_rc=$?
-  if printf '%s' "$probe_out" | grep -q "example.invalid" \
-     && printf '%s' "$probe_out" | grep -qi "not an allow-listed primary source"; then
+  if grep -q "example.invalid" <<<"$probe_out" \
+     && grep -qi "not an allow-listed primary source" <<<"$probe_out"; then
     ok "verify_pins resolves rustup_init.x86_64.url (non-primary host rejected)"
   else
     bad "verify_pins did not resolve rustup_init.x86_64.url; output: $probe_out"
@@ -123,12 +123,12 @@ PY
   # 4. The committed empty/UNRATIFIED fixture: JSON parses, but pin VERIFICATION fails
   #    closed. A shape-valid empty proposal is NOT an acceptable ratified pin set.
   empty_out="$(bash "$VERIFY" "$FIXTURE" 2>&1)"; empty_rc=$?
-  if [ "$empty_rc" -ne 0 ] && printf '%s' "$empty_out" | grep -qi "NOT eligible for ratification"; then
+  if [ "$empty_rc" -ne 0 ] && grep -qi "NOT eligible for ratification" <<<"$empty_out"; then
     ok "empty/UNRATIFIED fixture FAILS pin verification (fail-closed rc=$empty_rc; not eligible for ratification)"
   else
     bad "empty fixture must FAIL verification with 'NOT eligible'; rc=$empty_rc out: $empty_out"
   fi
-  if printf '%s' "$empty_out" | grep -qi "Traceback"; then
+  if grep -qi "Traceback" <<<"$empty_out"; then
     bad "verify_pins emitted a python traceback (structure did not parse)"
   else
     ok "fixture parses as JSON but verification rejects the empty pins (shape-valid != ratified)"

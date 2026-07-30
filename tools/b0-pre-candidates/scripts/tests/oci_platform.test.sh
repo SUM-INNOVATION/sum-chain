@@ -50,7 +50,7 @@ fi
 
 # 2. THE regression this exists for: swapping the two digests must be rejected.
 out="$(verify_oci_index_platforms "$FIX" "$ARM" "$AMD" 2>&1)"
-if [ $? -ne 0 ] && printf '%s' "$out" | grep -q "swapped or wrong-arch digest"; then
+if [ $? -ne 0 ] && grep -q "swapped or wrong-arch digest" <<<"$out"; then
   ok "SWAPPED per-arch digests rejected (no image executed)"
 else
   bad "swapped digests must be rejected; got: $out"
@@ -58,7 +58,7 @@ fi
 
 # 3. a digest that is not a child of the pinned index is rejected
 out="$(verify_oci_index_platforms "$FIX" "$ABSENT" "$ARM" 2>&1)"
-if [ $? -ne 0 ] && printf '%s' "$out" | grep -q "NOT a child of the pinned index"; then
+if [ $? -ne 0 ] && grep -q "NOT a child of the pinned index" <<<"$out"; then
   ok "digest outside the pinned index rejected"
 else
   bad "non-child digest must be rejected; got: $out"
@@ -66,7 +66,7 @@ fi
 
 # 4. a child of the index but the WRONG linux architecture (arm/v7) is rejected
 out="$(verify_oci_index_platforms "$FIX" "$AMD" "$ARMV7" 2>&1)"
-if [ $? -ne 0 ] && printf '%s' "$out" | grep -q "platform.architecture"; then
+if [ $? -ne 0 ] && grep -q "platform.architecture" <<<"$out"; then
   ok "wrong-architecture child (linux/arm/v7 as aarch64) rejected"
 else
   bad "wrong-arch child must be rejected; got: $out"
@@ -74,7 +74,7 @@ fi
 
 # 5. right architecture, wrong OS (windows/amd64) is rejected
 out="$(verify_oci_index_platforms "$FIX" "$WIN" "$ARM" 2>&1)"
-if [ $? -ne 0 ] && printf '%s' "$out" | grep -q "expected 'linux'"; then
+if [ $? -ne 0 ] && grep -q "expected 'linux'" <<<"$out"; then
   ok "non-linux child (windows/amd64) rejected"
 else
   bad "non-linux child must be rejected; got: $out"
@@ -92,7 +92,7 @@ fi
 tmp="${TMPDIR:-/tmp}/ociplat.$$.json"
 printf '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json"}\n' > "$tmp"
 out="$(verify_oci_index_platforms "$tmp" "$AMD" "$ARM" 2>&1)"
-if [ $? -ne 0 ] && printf '%s' "$out" | grep -q "no 'manifests' array"; then
+if [ $? -ne 0 ] && grep -q "no 'manifests' array" <<<"$out"; then
   ok "single manifest (not an index) rejected"
 else
   bad "a non-index document must be rejected; got: $out"

@@ -62,13 +62,13 @@ for df in sp1 risc0; do
   # EXACTLY /var/cache/ldconfig/aux-cache, uses no broad wildcard, and never deletes the
   # runtime linker cache /etc/ld.so.cache.
   del_tokens="$(awk '/rm -rf/{c=1} c{print} c&&!/\\$/{c=0}' "$DF")"
-  printf '%s' "$del_tokens" | grep -qF '/var/cache/ldconfig/aux-cache' \
+  grep -qF '/var/cache/ldconfig/aux-cache' <<<"$del_tokens" \
     && ok "$df.Dockerfile removes exactly /var/cache/ldconfig/aux-cache" \
     || bad "$df.Dockerfile does not remove /var/cache/ldconfig/aux-cache"
   grep -qF '/var/cache/ldconfig/*' "$DF" \
     && bad "$df.Dockerfile uses a broad /var/cache/ldconfig/* wildcard removal" \
     || ok "$df.Dockerfile avoids a broad /var/cache/ldconfig wildcard"
-  printf '%s' "$del_tokens" | grep -qF '/etc/ld.so.cache' \
+  grep -qF '/etc/ld.so.cache' <<<"$del_tokens" \
     && bad "$df.Dockerfile deletes the runtime linker cache /etc/ld.so.cache" \
     || ok "$df.Dockerfile keeps the runtime linker cache /etc/ld.so.cache"
 done

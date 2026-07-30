@@ -56,7 +56,7 @@ check "missing path -> 0" 0 "$(disk_free_gib "/no/such/path/xyzzy_$$")"
 
 # 7. Live regression: a real filesystem is observed as > 0, NOT stuck at 0.
 live="$(disk_free_gib "$HERE")"
-if printf '%s' "$live" | grep -Eq '^[0-9]+$' && [ "$live" -gt 0 ]; then
+if grep -Eq '^[0-9]+$' <<<"$live" && [ "$live" -gt 0 ]; then
   printf 'ok    real fs observed > 0 (=%s GiB)\n' "$live"
 else
   printf 'FAIL  real fs should be > 0, got "%s"\n' "$live" >&2; fails=$((fails + 1))

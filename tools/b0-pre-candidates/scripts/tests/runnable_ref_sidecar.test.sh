@@ -54,7 +54,7 @@ mk "$D/baddig.json" "$S" sp1 x86_64 "$HEAD" "not-a-digest" "$CFG" "$IMG"
 # same manifest/config/image, DIFFERENT source_commit -> must fail (manifest is NOT a proxy).
 mk "$D/diffsrc.json" "$S" sp1 x86_64 "$OTHER" "$CUR" "$CFG" "$IMG"
 out="$( ( resolve_runnable_ref "$D/diffsrc.json" sp1 x86_64 "$CUR" "$REPO" ) 2>&1 )"
-{ printf '%s' "$out" | grep -qi 'source_commit .* != current HEAD'; } \
+{ grep -qi 'source_commit .* != current HEAD' <<<"$out"; } \
   && ok "same manifest+config+image but DIFFERENT source_commit fails closed (source identity, not manifest)" \
   || bad "different source_commit not fail-closed: $out"
 # malformed / missing / uppercase / truncated source_commit
@@ -71,14 +71,14 @@ mk "$D/src_trunc.json" "$S" sp1 x86_64 "${HEAD:0:20}" "$CUR" "$CFG" "$IMG"
 # commit is a different one -> must fail on the RATIFIED check.
 mk "$D/src_head.json" "$S" sp1 x86_64 "$HEAD" "$CUR" "$CFG" "$IMG"
 out="$( ( RATIFIED_SOURCE_COMMIT="$OTHER" resolve_runnable_ref "$D/src_head.json" sp1 x86_64 "$CUR" "$REPO" ) 2>&1 )"
-{ printf '%s' "$out" | grep -qi 'RATIFIED_SOURCE_COMMIT'; } \
+{ grep -qi 'RATIFIED_SOURCE_COMMIT' <<<"$out"; } \
   && ok "HEAD/RATIFIED_SOURCE_COMMIT disagreement fails closed" \
   || bad "HEAD/RATIFIED disagreement not fail-closed: $out"
 
 # stale MANIFEST (defense in depth): valid source_commit but manifest != current build.
 mk "$D/stalemani.json" "$S" sp1 x86_64 "$HEAD" "sha256:$(h d)" "$CFG" "$IMG"
 out="$( ( resolve_runnable_ref "$D/stalemani.json" sp1 x86_64 "$CUR" "$REPO" ) 2>&1 )"
-{ printf '%s' "$out" | grep -qi 'manifest .* != current verified build'; } \
+{ grep -qi 'manifest .* != current verified build' <<<"$out"; } \
   && ok "stale manifest (defense in depth) fails closed" || bad "stale manifest not fail-closed: $out"
 
 # --- image-existence cases (opt-in Docker) ---
@@ -100,17 +100,17 @@ fi
 
 # --- build_container.sh source guarantees ---
 bc="$(cat "$SCRIPTS/build_container.sh")"
-printf '%s' "$bc" | grep -q 'rm -f "\$out/\$candidate.\$arch.runnable-ref" "\$out/\$candidate.\$arch.runnable-ref.tmp"' \
+grep -q 'rm -f "\$out/\$candidate.\$arch.runnable-ref" "\$out/\$candidate.\$arch.runnable-ref.tmp"' <<<"$bc" \
   && ok "build_container.sh invalidates the sidecar BEFORE building (no stale reuse)" \
   || bad "build_container.sh does not invalidate the sidecar before building"
-printf '%s' "$bc" | grep -q 'mv -f "\$sidecar.tmp" "\$sidecar"' && printf '%s' "$bc" | grep -q 'b0pre-runnable-ref-v1' \
+grep -q 'mv -f "\$sidecar.tmp" "\$sidecar"' <<<"$bc" && grep -q 'b0pre-runnable-ref-v1' <<<"$bc" \
   && ok "build_container.sh writes the TYPED sidecar atomically (temp + mv) after verification" \
   || bad "build_container.sh does not write the typed sidecar atomically"
-printf '%s' "$bc" | grep -q '"source_commit": commit' \
+grep -q '"source_commit": commit' <<<"$bc" \
   && ok "build_container.sh records source_commit in the sidecar" || bad "build_container.sh does not record source_commit"
-{ printf '%s' "$bc" | grep -q 'is_ratified_commit_format "\$source_commit"' \
-  && printf '%s' "$bc" | grep -q '\[ "\$source_commit" = "\$RATIFIED_SOURCE_COMMIT" \]' \
-  && printf '%s' "$bc" | grep -q '\[ "\$source_commit" = "\$(git -C "\$ROOT" rev-parse HEAD)" \]'; } \
+{ grep -q 'is_ratified_commit_format "\$source_commit"' <<<"$bc" \
+  && grep -q '\[ "\$source_commit" = "\$RATIFIED_SOURCE_COMMIT" \]' <<<"$bc" \
+  && grep -q '\[ "\$source_commit" = "\$(git -C "\$ROOT" rev-parse HEAD)" \]' <<<"$bc"; } \
   && ok "build_container.sh requires source_commit == 40-hex == HEAD == RATIFIED before writing" \
   || bad "build_container.sh does not assert source_commit == HEAD == RATIFIED before writing"
 if printf '%s\n' "$bc" | awk '/verify-runtime-image/{v=NR} /mv -f "\$sidecar.tmp"/{m=NR} END{exit !(v&&m&&m>v)}'; then

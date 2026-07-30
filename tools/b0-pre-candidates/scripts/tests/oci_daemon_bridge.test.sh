@@ -31,18 +31,18 @@ command -v python3 >/dev/null 2>&1 || { echo "SKIP: python3 absent"; exit 0; }
 # ---- (A) source wiring ----------------------------------------------------------------
 bc="$(cat "$SCRIPTS/build_container.sh")"
 ra="$(cat "$SCRIPTS/run_authoritative.sh")"
-printf '%s' "$bc" | grep -q 'docker load --input "\$L1"' \
+grep -q 'docker load --input "\$L1"' <<<"$bc" \
   && ok "build_container.sh loads the verified OCI layout into the daemon" \
   || bad "build_container.sh does not load the verified layout"
-{ printf '%s' "$bc" | grep -q 'verify-runtime-image' \
-  && printf '%s' "$bc" | grep -q 'vv_verify "\$builder_digest" "\$loaded_id"' \
-  && printf '%s' "$bc" | grep -q 'vv_verify "\$config_digest" "\$loaded_id"'; } \
+{ grep -q 'verify-runtime-image' <<<"$bc" \
+  && grep -q 'vv_verify "\$builder_digest" "\$loaded_id"' <<<"$bc" \
+  && grep -q 'vv_verify "\$config_digest" "\$loaded_id"' <<<"$bc"; } \
   && ok "build_container.sh proves loaded-image == verified manifest OR config digest before use" \
   || bad "build_container.sh does not verify runtime-image correspondence"
-printf '%s' "$bc" | grep -q 'runnable-ref' \
+grep -q 'runnable-ref' <<<"$bc" \
   && ok "build_container.sh records the verified runnable ref (sidecar)" \
   || bad "build_container.sh does not record a runnable ref"
-printf '%s' "$ra" | grep -q 'runnable_ref_of' \
+grep -q 'runnable_ref_of' <<<"$ra" \
   && ok "run_authoritative.sh consumes the verified runnable ref" \
   || bad "run_authoritative.sh does not use runnable_ref_of"
 # Only ACTUAL code references count (explanatory comments about the removed placeholder
@@ -55,7 +55,7 @@ else
 fi
 # --pull never remains on every in-container docker run; no registry push anywhere.
 run_lines="$(printf '%s\n' "$ra" | grep -E 'docker run')"
-if printf '%s' "$run_lines" | grep -E 'docker run' | grep -qv -- '--pull never'; then
+if grep -E 'docker run' <<<"$run_lines" | grep -qv -- '--pull never'; then
   bad "a docker run without --pull never exists"
 else
   ok "every docker run keeps --pull never enforced"

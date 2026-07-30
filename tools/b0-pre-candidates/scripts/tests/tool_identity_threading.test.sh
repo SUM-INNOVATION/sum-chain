@@ -27,14 +27,14 @@ GOOD_DIGEST="sha256:$Z64"
 
 # ---- (A) source-level threading assertions --------------------------------------------
 src="$(cat "$RA")"
-printf '%s' "$src" | grep -q 'SP1_BUILDER_DIGEST="\$sp1_builder"' \
+grep -q 'SP1_BUILDER_DIGEST="\$sp1_builder"' <<<"$src" \
   && ok "threads SP1_BUILDER_DIGEST from the verified sp1 builder digest" \
   || bad "SP1_BUILDER_DIGEST not threaded from \$sp1_builder"
-printf '%s' "$src" | grep -q 'RISC0_BUILDER_DIGEST="\$risc0_builder"' \
+grep -q 'RISC0_BUILDER_DIGEST="\$risc0_builder"' <<<"$src" \
   && ok "threads RISC0_BUILDER_DIGEST from the verified risc0 builder digest (x86_64 branch)" \
   || bad "RISC0_BUILDER_DIGEST not threaded from \$risc0_builder"
-printf '%s' "$src" | grep -Eq 'SOURCE_COMMIT="\$tool_src_commit"' \
-  && printf '%s' "$src" | grep -Eq 'tool_src_commit="\$\(git -C "\$ROOT" rev-parse HEAD\)"' \
+grep -Eq 'SOURCE_COMMIT="\$tool_src_commit"' <<<"$src" \
+  && grep -Eq 'tool_src_commit="\$\(git -C "\$ROOT" rev-parse HEAD\)"' <<<"$src" \
   && ok "threads SOURCE_COMMIT from the clean ratified HEAD (git rev-parse HEAD)" \
   || bad "SOURCE_COMMIT not threaded from git HEAD"
 # The x86_64 branch carries RISC0; the aarch64 branch must NOT (ARM stays SP1-only).
@@ -83,13 +83,13 @@ run_ti() { # sets global RC and MSG; args are VAR=VAL ...
 
 # b1. missing SP1_BUILDER_DIGEST (fixture + source commit present) -> fail closed
 run_ti "SP1_TOOL_IDENTITY_${HARCH_U}=$FIX" "SOURCE_COMMIT=$Z64"
-{ [ "$RC" -ne 0 ] && printf '%s' "$MSG" | grep -qi 'SP1_BUILDER_DIGEST'; } \
+{ [ "$RC" -ne 0 ] && grep -qi 'SP1_BUILDER_DIGEST' <<<"$MSG"; } \
   && ok "missing SP1_BUILDER_DIGEST fails closed (rc=$RC)" \
   || bad "missing SP1_BUILDER_DIGEST not fail-closed (rc=$RC): $MSG"
 
 # b2. malformed SP1_BUILDER_DIGEST -> fail closed
 run_ti "SP1_TOOL_IDENTITY_${HARCH_U}=$FIX" "SP1_BUILDER_DIGEST=not-a-digest" "SOURCE_COMMIT=$Z64"
-{ [ "$RC" -ne 0 ] && printf '%s' "$MSG" | grep -qi 'SP1_BUILDER_DIGEST'; } \
+{ [ "$RC" -ne 0 ] && grep -qi 'SP1_BUILDER_DIGEST' <<<"$MSG"; } \
   && ok "malformed SP1_BUILDER_DIGEST fails closed (rc=$RC)" \
   || bad "malformed SP1_BUILDER_DIGEST not fail-closed (rc=$RC): $MSG"
 
@@ -101,7 +101,7 @@ if [ "$HARCH" = x86_64 ]; then
   run_ti "SP1_TOOL_IDENTITY_X86_64=$FIX" "SP1_BUILDER_DIGEST=$GOOD_DIGEST" \
          "RISC0_TOOL_IDENTITY_X86_64=$FIXR" "RISC0_BUILDER_DIGEST=$GOOD_DIGEST"
 fi
-{ [ "$RC" -ne 0 ] && printf '%s' "$MSG" | grep -qi 'SOURCE_COMMIT'; } \
+{ [ "$RC" -ne 0 ] && grep -qi 'SOURCE_COMMIT' <<<"$MSG"; } \
   && ok "missing SOURCE_COMMIT fails closed (rc=$RC)" \
   || bad "missing SOURCE_COMMIT not fail-closed (rc=$RC): $MSG"
 
@@ -109,7 +109,7 @@ fi
 OTHER=x86_64; [ "$HARCH" = x86_64 ] && OTHER=aarch64
 FIXX="$(mk_fixture "$OTHER")"
 run_ti "SP1_TOOL_IDENTITY_${HARCH_U}=$FIXX" "SP1_BUILDER_DIGEST=$GOOD_DIGEST" "SOURCE_COMMIT=$Z64"
-{ [ "$RC" -ne 0 ] && printf '%s' "$MSG" | grep -qiE 'cross-architecture|declares arch'; } \
+{ [ "$RC" -ne 0 ] && grep -qiE 'cross-architecture|declares arch' <<<"$MSG"; } \
   && ok "cross-architecture tool identity fails closed (rc=$RC)" \
   || bad "cross-architecture identity not fail-closed (rc=$RC): $MSG"
 
@@ -121,13 +121,13 @@ if [ "$HARCH" = x86_64 ]; then
 else
   run_ti "SP1_TOOL_IDENTITY_AARCH64=$FIX" "SP1_BUILDER_DIGEST=$GOOD_DIGEST" "SOURCE_COMMIT=$Z64"
 fi
-{ [ "$RC" -ne 0 ] && printf '%s' "$MSG" | grep -qi 'download of declared artifact failed'; } \
+{ [ "$RC" -ne 0 ] && grep -qi 'download of declared artifact failed' <<<"$MSG"; } \
   && ok "correct threaded digests+commit accepted (reaches download; gates passed)" \
   || bad "correct values did not pass the identity gates (rc=$RC): $MSG"
 
 # b6. ARM SP1-only: on aarch64, no RISC Zero identity is required or bound.
 if [ "$HARCH" = aarch64 ]; then
-  printf '%s' "$MSG" | grep -qi 'RISC0' \
+  grep -qi 'RISC0' <<<"$MSG" \
     && bad "aarch64 run referenced RISC Zero (should be SP1-only): $MSG" \
     || ok "aarch64 stays SP1-only (no RISC Zero identity required/bound)"
 else

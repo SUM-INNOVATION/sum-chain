@@ -139,22 +139,22 @@ PY
 }
 
 out="$(probe "https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init")"
-printf '%s' "$out" | grep -q "MUTABLE unversioned rustup/dist" \
+grep -q "MUTABLE unversioned rustup/dist" <<<"$out" \
   && ok "unversioned rustup/dist URL rejected (mutable 'latest' artifact)" \
   || bad "the mutable rustup/dist path must be rejected; got: $out"
 
 out="$(probe "$RUSTUP_ARM")"
-printf '%s' "$out" | grep -q "not the exact immutable archive locator" \
+grep -q "not the exact immutable archive locator" <<<"$out" \
   && ok "rustup URL architecture swap rejected (aarch64 URL under the x86_64 key)" \
   || bad "an architecture-swapped rustup URL must be rejected; got: $out"
 
 out="$(probe "https://static.rust-lang.org/rustup/archive/1.28.0/x86_64-unknown-linux-gnu/rustup-init")"
-printf '%s' "$out" | grep -q "not the exact immutable archive locator" \
+grep -q "not the exact immutable archive locator" <<<"$out" \
   && ok "wrong rustup version in the archive locator rejected" \
   || bad "a non-1.29.0 archive locator must be rejected; got: $out"
 
 out="$(probe "$RUSTUP_X86")"
-printf '%s' "$out" | grep -qE "MUTABLE unversioned|not the exact immutable archive locator" \
+grep -qE "MUTABLE unversioned|not the exact immutable archive locator" <<<"$out" \
   && bad "the exact immutable archive URL must pass URL policy; got: $out" \
   || ok "exact immutable rustup archive URL accepted by URL policy"
 
