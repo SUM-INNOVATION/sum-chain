@@ -2068,6 +2068,26 @@ mod tests {
         ));
     }
 
+    // Smoke NEGATIVE #1: a REAL (non-synthetic) tool identity in a TEST_ONLY / NON_SELECTION
+    // bundle is rejected. This is the inverse of the synthetic-in-authoritative guard: the
+    // TEST_ONLY ⇒ synthetic invariant refuses to seal real tool identities under a smoke
+    // classification, so a smoke bundle can only ever carry the synthetic sentinel identity.
+    #[test]
+    fn real_tool_identity_in_a_test_only_bundle_is_rejected() {
+        for class in [
+            BundleClassification::TestOnly,
+            BundleClassification::NonSelection,
+        ] {
+            let mut b = valid_bundle(); // valid_bundle() carries REAL, non-synthetic identities
+            b.classification = class;
+            // identities left REAL on purpose -> the non-authoritative path must reject them.
+            assert!(
+                matches!(b.validate(), Err(Stage1BundleError::ToolIdentity(_))),
+                "{class:?} bundle with a real tool identity must be rejected (TEST_ONLY => synthetic)"
+            );
+        }
+    }
+
     #[test]
     fn valid_bundle_with_full_reproducibility_evidence_still_accepts() {
         // sanity: the extended, cross-checked valid_bundle still passes end to end.

@@ -17,10 +17,13 @@
 pub mod arch_bundle;
 pub mod audit;
 pub mod cargo_lock;
+pub mod checkout_digest;
 pub mod evidence_bundle;
 pub mod lock_provenance;
 pub mod oci_layout;
+pub mod prover_archive;
 pub mod sha256;
+pub mod smoke;
 pub mod stage4;
 pub mod stage5;
 pub mod tool_install;

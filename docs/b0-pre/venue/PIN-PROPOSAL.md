@@ -29,6 +29,8 @@ verification passes — never automatically.
 | 3 | `rustup_init.version` + `rustup_init.<arch>` — per-arch `url` + `sha256` (ratified into `RUSTUP_INIT_URL` / `RUSTUP_INIT_SHA256`) | the official Rust release channel, **immutable archive** path `static.rust-lang.org/rustup/archive/<version>/<target>/rustup-init` | `version` must be the required rustup release; the URL must be the exact immutable archive locator for that version **and that architecture**; the unversioned `rustup/dist/` path is refused outright; then download and recompute `sha256` |
 | 4 | SP1 tool identity — `sp1-verifier 6.3.1`, **one entry per architecture** | the pinned SP1 release artifact (its immutable download URL) | the initial URL must be an allow-listed **https** primary host and its effective (post-redirect) host must be an allow-listed delivery host, exact-matched; then download the declared `artifact_identity`, recompute the checksum, compare to `checksum_hex` |
 | 5 | RISC Zero tool identities — `risc0-zkvm 3.0.5`, `risc0-groth16 3.0.4`, **x86_64 only** | the pinned RISC Zero release artifacts | same host/redirect/download/compare as (4). An `aarch64` RISC Zero entry is **refused**: Groth16 and verifier-material extraction are native-x86_64-only (VENUE.md §2) |
+| 6 | `cargo_audit` — `version` + `crate_sha256` + `source_commit` + `packaged_lock_sha256` | the pinned crates.io release `cargo-audit-<version>.crate` at `static.crates.io` | `version` must be the required cargo-audit release; the `.crate` is downloaded from `static.crates.io` and its `sha256` must equal `crate_sha256`; the packaged `cargo-audit-<version>/Cargo.lock` is extracted from that **same verified tarball** and its `sha256` must equal `packaged_lock_sha256` (pinning the auditor's own dependency graph); `source_commit` is a 40-hex provenance field (the tag the release was cut from), format-checked here |
+| 7 | `advisory_db` — `repo` + `commit` + `git_tree` + `content_blake3` | the canonical RustSec `advisory-db` GitHub repository | `repo` must be the canonical `https://github.com/rustsec/advisory-db`; the GitHub commits API resolves `commit` → its tree sha, which must equal `git_tree` (a swapped commit or fabricated tree fails without cloning history); `content_blake3` is the canonical checkout digest (domain-separated BLAKE3, `ADVDB_CHECKOUT_TAG`), format-checked here and **re-derived in full at produce time** by `venue-verify checkout-digest` over the READ-ONLY mounted checkout (and reproduced by an independent reference in the validator test suite) |
 
 Notes:
 - The **base image** identity IS the pinned per-arch digest, and it must belong to the
@@ -77,7 +79,19 @@ shown **empty**; a committed, byte-identical UNRATIFIED example lives at
     { "name": "sp1-verifier",  "version": "6.3.1", "arch": "aarch64", "artifact_identity": "", "checksum_algorithm": "sha256", "checksum_hex": "", "install_entrypoint": "" },
     { "name": "risc0-zkvm",    "version": "3.0.5", "arch": "x86_64",  "artifact_identity": "", "checksum_algorithm": "sha256", "checksum_hex": "", "install_entrypoint": "" },
     { "name": "risc0-groth16", "version": "3.0.4", "arch": "x86_64",  "artifact_identity": "", "checksum_algorithm": "sha256", "checksum_hex": "", "install_entrypoint": "" }
-  ]
+  ],
+  "cargo_audit": {
+    "version": "0.22.2",
+    "crate_sha256": "",
+    "source_commit": "",
+    "packaged_lock_sha256": ""
+  },
+  "advisory_db": {
+    "repo": "https://github.com/rustsec/advisory-db",
+    "commit": "",
+    "git_tree": "",
+    "content_blake3": ""
+  }
 }
 ```
 
@@ -86,9 +100,39 @@ The exact keys `verify_pins.sh` reads (any absent/empty value fails closed):
 `apt.debian_inrelease_sha256`, `apt.debian_security_url`,
 `apt.debian_security_inrelease_sha256`; `rustup_init.version`, `rustup_init.<arch>.url`
 and `rustup_init.<arch>.sha256` (per arch — the exact immutable installer URL to fetch
-*and* its expected `sha256`); and each `tool_identities[i]` with `name`, `version`,
+*and* its expected `sha256`); each `tool_identities[i]` with `name`, `version`,
 `arch`, `artifact_identity`, `checksum_algorithm` (must be `sha256`), `checksum_hex`,
-`install_entrypoint`. `<arch>` is `x86_64` and `aarch64`.
+`install_entrypoint`; `cargo_audit.version`, `cargo_audit.crate_sha256`,
+`cargo_audit.source_commit`, `cargo_audit.packaged_lock_sha256`; and `advisory_db.repo`,
+`advisory_db.commit`, `advisory_db.git_tree`, `advisory_db.content_blake3`. `<arch>` is
+`x86_64` and `aarch64`.
+
+The `cargo_audit` + `advisory_db` blocks bind the Stage-2 supply-chain auditor and the
+database it runs against. `cargo-audit` runs INSIDE the pinned builder image with the
+advisory DB mounted **READ-ONLY** and `--no-fetch --stale` (the structured, non-executable
+audit policy — never an operator-supplied command string), so the scan can neither fetch,
+update, nor mutate the pinned database.
+
+**cargo-audit executable identity — source pins vs venue evidence.** The auditor's identity is
+split deliberately, because a binary compiled from source at the venue is not, by itself, an
+owner-preregistered artifact:
+
+- **Owner-ratified source inputs** (verified by `verify_pins.sh`): the crate + `version`, the
+  `.crate` `crate_sha256`, the packaged `packaged_lock_sha256`, and the Rust toolchain + build
+  environment (the same pinned `rustup`/`cargo 1.88.0` builder the rest of B0-PRE uses).
+- **Venue evidence** (bound into the Stage-2 record, NOT a source pin): the exact installed
+  executable `cargo_audit_executable_sha256` and the `cargo audit --version` output.
+- **Point of use:** the executable hash is recomputed at the moment of the scan and must match
+  the venue-recorded value.
+- **Independent reproduction:** a second, independent, SAME-ARCHITECTURE operator MUST reproduce
+  the executable identity from the ratified source inputs. If the two same-arch builds do NOT
+  reproduce, the first observed binary hash is **not** blessed retroactively — the run stops and
+  either an immutable first-party binary is distributed and pinned, or a stronger build-provenance
+  model is bound. `verify_pins.sh` therefore never treats the executable SHA as a pin; it verifies
+  the source inputs, and the executable identity is established by venue evidence + reproduction.
+
+The Stage-2 record binds the cargo-audit version + executable SHA-256 (venue evidence, above) and
+the advisory-DB `commit` + `git_tree` + `content_blake3`.
 
 Required tool-identity coverage: `sp1-verifier` for **both** architectures, and
 `risc0-zkvm` + `risc0-groth16` for **x86_64 only**. Anything less fails closed; a RISC

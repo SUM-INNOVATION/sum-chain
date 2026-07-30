@@ -35,6 +35,18 @@ pub const EXP_CERT_TAG: [u8; 32] = pad32(b"SUMCHAIN/B0PRE/EXPCERT/v1");
 pub const VERIFIER_MATERIAL_TAG: [u8; 32] = pad32(b"SUMCHAIN/B0PRE/VMAT/v1");
 pub const CARGO_LOCK_TAG: [u8; 32] = pad32(b"SUMCHAIN/B0PRE/CARGOLOCK/v1");
 pub const CONTAINER_TAG: [u8; 32] = pad32(b"SUMCHAIN/B0PRE/CONTAINER/v1");
+/// Domain tag for the canonical advisory-database checkout-content digest (policy A):
+/// `BLAKE3(ADVDB_CHECKOUT_TAG ‖ entry_count ‖ sorted (relpath,type,mode,symlink|content))`.
+pub const ADVDB_CHECKOUT_TAG: [u8; 32] = pad32(b"SUMCHAIN/B0PRE/ADVDB/v1");
+/// Domain tag for the TEST_ONLY smoke SOURCE binding (strengthened Option A). Distinct from
+/// every authoritative source/runnable-ref domain: a smoke source binding hashed under THIS tag
+/// can never collide with, or be read as, an authoritative source identity. The binding's
+/// classification + PR-head are inside this hash, so editing either after sealing breaks it.
+pub const SMOKE_SOURCE_TAG: [u8; 32] = pad32(b"SUMCHAIN/B0PRE/SMOKESRC/v1");
+/// Domain tag for the TEST_ONLY smoke real-execution ATTESTATION (the real, checksum-verified
+/// prover/verifier executables that actually ran). Distinct from the authoritative tool-binding
+/// domain: an attestation is smoke evidence ONLY and is never an authoritative tool-binding.
+pub const SMOKE_ATTEST_TAG: [u8; 32] = pad32(b"SUMCHAIN/B0PRE/SMOKEATT/v1");
 
 // --- Variable-length hash-prefix tags (exact terminator; not zero-padded) ---
 pub const FIXTURE_PREFIX: &[u8] = b"SUMCHAIN/B0-PRE/FIXTURE/v1\0";
@@ -87,6 +99,9 @@ mod tests {
         ("VERIFIER_MATERIAL", VERIFIER_MATERIAL_TAG),
         ("CARGO_LOCK", CARGO_LOCK_TAG),
         ("CONTAINER", CONTAINER_TAG),
+        ("ADVDB_CHECKOUT", ADVDB_CHECKOUT_TAG),
+        ("SMOKE_SOURCE", SMOKE_SOURCE_TAG),
+        ("SMOKE_ATTEST", SMOKE_ATTEST_TAG),
     ];
 
     #[test]

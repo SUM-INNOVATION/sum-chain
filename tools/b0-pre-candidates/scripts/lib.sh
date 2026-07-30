@@ -253,6 +253,82 @@ run_stage2_locked() {
     "$image" bash -c "cd $cdir && $cmd" > "$out"
 }
 
+# Stage-2 AUDIT execution (D1 + advisory-DB pin). Like run_stage2_locked, but ALSO bind-mounts
+# the pinned advisory-DB checkout READ-ONLY at $incontainer_db and runs the cargo-audit argv
+# the TRUSTED caller constructed from the structured audit policy (never an operator-supplied
+# command string). Because the DB bind is readonly and the constructed argv always carries
+# --no-fetch --stale, the scan can neither fetch nor update nor mutate the pinned database:
+# a missing or altered DB is a hard failure downstream, never a silently-clean audit. Args:
+#   <image> <cdir> <hostlock> <incontainer_lock> <hostdb> <incontainer_db> <out> <argv...>
+run_stage2_audit_locked() {
+  local image="$1" cdir="$2" hostlock="$3" incontainer_lock="$4" hostdb="$5" incontainer_db="$6" out="$7"
+  shift 7
+  require_cmd docker
+  [ "$#" -ge 1 ] || die "run_stage2_audit_locked: empty audit argv (the trusted caller must construct it from the audit policy)"
+  local argv_str; printf -v argv_str '%q ' "$@"
+  docker run --rm --pull never \
+    --mount "type=bind,source=$hostlock,target=$incontainer_lock,readonly" \
+    --mount "type=bind,source=$hostdb,target=$incontainer_db,readonly" \
+    "$image" bash -c "cd $(printf '%q' "$cdir") && $argv_str" > "$out"
+}
+
+# Builder-image CAPABILITY preflight (Item 6). BEFORE Stage 2 / Stage 5 run inside a VERIFIED
+# builder image, assert — AS EARLY AS POSSIBLE — that the image actually carries the pinned
+# capabilities, validating VERSIONS + IDENTITIES (never a bare `command -v`). Fails closed with
+# a SPECIFIC message on: an unsupported/mismatched architecture; cargo absent from the
+# PRODUCTION non-login PATH; cargo-audit absent, the wrong version, or (when an EXPECTED value
+# is supplied) the wrong executable SHA-256; and the RT-2 hazard — the tools not resolving under
+# the production NON-login `bash -c` shell (a login `bash -lc` sources /etc/profile and can DROP
+# the image ENV PATH, so we assert the non-login resolution the producer actually uses). The
+# advisory-DB checkout identity is verified by produce_stage2 against the pins; this gate
+# confirms the AUDITOR TOOL itself is present + correct so a mis-provisioned image is rejected
+# here, not deep inside Stage 2.
+#
+# cargo-audit identity model (PIN-PROPOSAL.md §6): the ratified inputs are the crate + version +
+# crate checksum + packaged-lock checksum + Rust toolchain + build env. The executable SHA-256
+# is VENUE EVIDENCE — recorded here, re-checked at point of use, and reproduced by an independent
+# same-arch operator; it is NEVER treated as an owner-ratified source pin. So the version arg is
+# the ratified pin, and the sha arg is the venue-recorded EXPECTED executable hash. Args:
+#   <image> <arch> [ratified_cargo_audit_version] [venue_expected_cargo_audit_exe_sha256]
+preflight_builder_capability() {
+  local image="$1" arch="$2" want_ca_ver="${3:-}" want_ca_sha="${4:-}"
+  require_cmd docker
+  # 1. Architecture: the in-container `uname -m` must map to the declared arch.
+  local want_uname
+  case "$arch" in
+    x86_64|X86_64)         want_uname=x86_64 ;;
+    aarch64|Aarch64|arm64) want_uname=aarch64 ;;
+    *) die "preflight_builder_capability: unsupported arch '$arch' (want x86_64|aarch64)" ;;
+  esac
+  local uname_m; uname_m="$(docker run --rm --pull never "$image" bash -c 'uname -m' 2>/dev/null || true)"
+  [ "$uname_m" = "$want_uname" ] \
+    || die "builder-image arch mismatch: container uname -m='${uname_m:-<none>}' != expected '$want_uname' for arch $arch"
+  # 2. cargo on the PRODUCTION non-login PATH (RT-2: bash -c, NOT bash -lc).
+  docker run --rm --pull never "$image" bash -c 'command -v cargo >/dev/null' 2>/dev/null \
+    || die "builder image: cargo is not on the production non-login PATH (bash -c)"
+  # 3. cargo-audit present + VERSION validated (not just presence). Absent => Stage-2 audit
+  #    cannot execute; a missing tool is never a clean audit.
+  local ca_ver
+  ca_ver="$(docker run --rm --pull never "$image" bash -c 'command -v cargo-audit >/dev/null && cargo audit --version' 2>/dev/null | head -n1 | sed 's/[[:space:]]*$//' || true)"
+  [ -n "$ca_ver" ] \
+    || die "builder image: cargo-audit is absent from the production PATH (Stage-2 audit cannot execute; a missing tool is never a clean audit)"
+  if [ -n "$want_ca_ver" ]; then
+    grep -q "$want_ca_ver" <<<"$ca_ver" \
+      || die "builder image: cargo-audit version '$ca_ver' does not contain the pinned '$want_ca_ver'"
+  fi
+  # 4. cargo-audit executable IDENTITY (when a pin is supplied): hash the exact binary.
+  if [ -n "$want_ca_sha" ]; then
+    local ca_sha
+    ca_sha="$(docker run --rm --pull never "$image" bash -c 'p="$(command -v cargo-audit)"; [ -n "$p" ] && sha256sum "$p" | cut -d" " -f1' 2>/dev/null || true)"
+    [ "$ca_sha" = "$want_ca_sha" ] \
+      || die "builder image: cargo-audit executable sha256 '${ca_sha:-<none>}' != pinned '$want_ca_sha'"
+  fi
+  # 5. RT-2 guard: the tools resolve under the PRODUCTION non-login shell the producer uses.
+  docker run --rm --pull never "$image" bash -c 'command -v cargo cargo-audit >/dev/null' 2>/dev/null \
+    || die "builder image: production non-login shell (bash -c) does not resolve cargo + cargo-audit (RT-2 login-PATH loss)"
+  note "builder-image capability preflight PASSED (arch=$want_uname; cargo + cargo-audit present${want_ca_ver:+, cargo-audit ~ $want_ca_ver})"
+}
+
 # Parse + fully validate a TYPED runnable-ref sidecar and echo its runnable image id, or
 # fail closed. The sidecar (written by build_container.sh ONLY after both clean builds
 # match, the layout is content-verified, docker load succeeds, and the loaded id matches a
@@ -299,6 +375,43 @@ print("\t".join(str(d.get(k,"")) for k in ("schema","candidate","arch","source_c
     || die "stale runnable-ref sidecar: manifest $sc_manifest != current verified build $cur_manifest"
   docker image inspect "$sc_image" >/dev/null 2>&1 \
     || die "runnable image $sc_image referenced by the sidecar is no longer loaded in the daemon"
+  printf '%s' "$sc_image"
+}
+
+# TEST_ONLY smoke resolver: validate a SMOKE runnable-ref sidecar (schema
+# b0pre-smoke-runnable-ref-v1, classification TEST_ONLY) and echo its runnable image id, or fail
+# closed. This is the SEPARATE reader the smoke entry point uses; the authoritative
+# resolve_runnable_ref above REJECTS this sidecar outright (its `schema` != b0pre-runnable-ref-v1),
+# so a smoke image can never be consumed on the authoritative path. It binds the clean PR-head as
+# source_pr_head and NEVER requires or accepts RATIFIED_SOURCE_COMMIT. Args:
+#   <sidecar_file> <candidate> <arch> <current_verified_manifest_digest> <expected_pr_head> [repo_dir]
+resolve_smoke_runnable_ref() {
+  local f="$1" cand="$2" arch="$3" cur_manifest="$4" pr_head="$5" repo="${6:-.}" line
+  [ -f "$f" ] || die "missing smoke runnable-ref sidecar $f (smoke build+load+verify must run first)"
+  require_cmd python3
+  line="$(python3 -c 'import json,sys
+d=json.load(open(sys.argv[1]))
+print("\t".join(str(d.get(k,"")) for k in ("schema","classification","candidate","arch","source_pr_head","manifest_digest","config_digest","runnable_image_id")))' "$f" 2>/dev/null)" \
+    || die "smoke runnable-ref sidecar $f is not valid JSON (malformed)"
+  local schema cls sc_cand sc_arch sc_prhead sc_manifest sc_config sc_image
+  IFS=$'\t' read -r schema cls sc_cand sc_arch sc_prhead sc_manifest sc_config sc_image <<< "$line"
+  [ "$schema" = "b0pre-smoke-runnable-ref-v1" ] || die "smoke sidecar $f wrong/absent schema (got '${schema:-<none>}')"
+  [ "$cls" = "TEST_ONLY" ] || die "smoke sidecar $f classification must be TEST_ONLY (got '${cls:-<none>}')"
+  [ "$sc_cand" = "$cand" ] || die "cross-candidate smoke sidecar: '$sc_cand' != '$cand'"
+  [ "$sc_arch" = "$arch" ] || die "cross-architecture smoke sidecar: '$sc_arch' != '$arch'"
+  printf '%s' "$sc_manifest" | grep -Eq '^sha256:[0-9a-f]{64}$' || die "smoke sidecar manifest_digest malformed: '$sc_manifest'"
+  printf '%s' "$sc_config"   | grep -Eq '^sha256:[0-9a-f]{64}$' || die "smoke sidecar config_digest malformed: '$sc_config'"
+  printf '%s' "$sc_image"    | grep -Eq '^sha256:[0-9a-f]{64}$' || die "smoke sidecar runnable_image_id malformed: '$sc_image'"
+  # PR-head source identity (NOT ratified): 40 lowercase hex, equal to current HEAD and the
+  # expected clean PR-head. RATIFIED_SOURCE_COMMIT is never consulted here.
+  printf '%s' "$sc_prhead" | grep -Eq '^[0-9a-f]{40}$' || die "smoke sidecar source_pr_head is not 40 lowercase hex: '${sc_prhead:-<none>}'"
+  local head; head="$(git -C "$repo" rev-parse HEAD 2>/dev/null)" \
+    || die "cannot resolve current HEAD in '$repo' to validate the smoke sidecar source_pr_head"
+  [ "$sc_prhead" = "$head" ] || die "stale smoke sidecar: source_pr_head $sc_prhead != current HEAD $head"
+  [ "$sc_prhead" = "$pr_head" ] || die "smoke sidecar source_pr_head $sc_prhead != expected clean PR-head $pr_head"
+  [ "$sc_manifest" = "$cur_manifest" ] || die "stale smoke sidecar: manifest $sc_manifest != current verified build $cur_manifest"
+  docker image inspect "$sc_image" >/dev/null 2>&1 \
+    || die "smoke runnable image $sc_image referenced by the sidecar is no longer loaded in the daemon"
   printf '%s' "$sc_image"
 }
 

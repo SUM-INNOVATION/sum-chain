@@ -729,7 +729,23 @@ pub fn import_verify(dir: &Path) -> Result<ImportedArchBundle, EvidenceError> {
     let mut stage2_reports: Vec<Stage2AuditRecord> = Vec::new();
     for c in CANDIDATES {
         let sf = stage2_file(c);
-        let rec: Stage2AuditRecord = parse(&sf, &read_file(dir, &sf)?)?;
+        let raw = read_file(dir, &sf)?;
+        // Reject an inadequate v1/unversioned Stage-2 record with a CLEAR trust error before
+        // strict decode: v1 carried a free-text advisory-DB snapshot + no executed-cargo-audit
+        // identity, insufficient to reproduce/verify the scan. Only the current schema is
+        // authoritative-eligible.
+        let ver = crate::venue::audit::peek_stage2_schema_version(&raw);
+        if ver != crate::venue::audit::STAGE2_SCHEMA_VERSION {
+            return Err(EvidenceError::Stage2 {
+                candidate: c.to_string(),
+                error: format!(
+                    "schema_version {ver} is not the authoritative-eligible v{} \
+                     (a v1/unversioned Stage-2 record is refused)",
+                    crate::venue::audit::STAGE2_SCHEMA_VERSION
+                ),
+            });
+        }
+        let rec: Stage2AuditRecord = parse(&sf, &raw)?;
         rec.validate().map_err(|e| EvidenceError::Stage2 {
             candidate: c.to_string(),
             error: e.to_string(),
@@ -1103,11 +1119,14 @@ pub fn write_test_only_bundle_dir(dir: &Path, arch: &str) -> Result<(), String> 
                 serde_json::json!({"name":"risc0-zkvm-platform","version":"2.2.2","source":"registry","license":"Apache-2.0"}),
             ]
         };
-        let stage2 = serde_json::json!({"candidate":c,"arch":arch,"lock_blake3_hex":lock_hash,
+        let stage2 = serde_json::json!({"schema_version":crate::venue::audit::STAGE2_SCHEMA_VERSION,
+            "candidate":c,"arch":arch,"lock_blake3_hex":lock_hash,
             "container_digest":builder,"source_commit":commit,
             "command_log_blake3_hex":bh(&format!("stage2cmd-{lc}-{arch}")),
-            "audit_tool_identity":"cargo-metadata 1.0 + cargo-audit 0.21",
-            "advisory_db_snapshot":"rustsec-db@2026-07-01",
+            "audit_tool_identity":"cargo-metadata 1.0 + cargo-audit 0.22.2",
+            "cargo_audit_version":"0.22.2","cargo_audit_executable_sha256":bh(&format!("ca-{arch}")),
+            "advisory_db":{"commit":"a".repeat(40),"git_tree":"b".repeat(40),"content_blake3":bh("advdb")},
+            "audit_policy":{"database_update_allowed":false,"stale_snapshot_permitted":true,"output_format":"json","database_source":"runtime-read-only-mount"},
             "allowed_licenses":["MIT","Apache-2.0","MIT OR Apache-2.0"],"nodes":nodes,"advisories":[]});
         w(
             &stage2_file(c),

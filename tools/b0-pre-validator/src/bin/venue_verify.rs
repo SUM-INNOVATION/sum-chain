@@ -100,6 +100,98 @@ fn lock_hash(lock_path: &str) -> Result<String, String> {
     Ok(recompute_lock_hash(&read(lock_path)?))
 }
 
+fn checkout_digest(path: &str) -> Result<String, String> {
+    // The canonical, deterministic content digest of a checked-out tree (the pinned RustSec
+    // advisory-database checkout under policy A). Independently reproducible; fails closed on
+    // unsupported types / duplicate paths / traversal. A top-level .git dir is excluded.
+    b0_pre_validator::venue::checkout_digest::canonical_checkout_digest(std::path::Path::new(path))
+        .map_err(|e| e.to_string())
+}
+
+fn prover_archive_check(mode_str: &str, archives_path: &str) -> Result<String, String> {
+    // Item 8: validate a set of prover ARCHIVE-MEMBER identities (cargo-prove x86+aarch64,
+    // cargo-risczero x86, r0vm x86; cargo-risczero + r0vm share one archive). Every venue
+    // value (member sha256, native version output, point-of-use sha256) is MANDATORY and
+    // FAILS CLOSED when absent — no placeholder is inserted. These records are UNRATIFIED and
+    // deliberately NOT bound to a source commit (final source ratification waits for merge).
+    use b0_pre_validator::venue::prover_archive::{
+        validate_prover_archive_set, ArchiveMode, ProverArchive,
+    };
+    let mode = match mode_str {
+        "authoritative" => ArchiveMode::Authoritative,
+        "test-only" => ArchiveMode::TestOnly,
+        other => {
+            return Err(format!(
+                "mode must be authoritative|test-only (got {other:?})"
+            ))
+        }
+    };
+    let archives: Vec<ProverArchive> =
+        serde_json::from_str(&read_str(archives_path)?).map_err(|e| {
+            format!("bad prover-archives JSON (expected an array of ProverArchive): {e}")
+        })?;
+    validate_prover_archive_set(&archives, mode).map_err(|e| e.to_string())?;
+    Ok(format!(
+        "prover archive-member set VALID ({} archive(s), mode={mode_str}): cargo-prove \
+         x86_64+aarch64, cargo-risczero x86_64, r0vm x86_64 (cargo-risczero + r0vm share one \
+         archive); every member/version/point-of-use value present and consistent (UNRATIFIED)",
+        archives.len()
+    ))
+}
+
+fn smoke_attest_check(path: &str) -> Result<String, String> {
+    // Validate a TEST_ONLY smoke real-execution ATTESTATION (the real, checksum-verified
+    // executables that actually ran). It is smoke evidence ONLY — never an authoritative
+    // tool-binding. Prints its domain-separated identity hash.
+    use b0_pre_validator::venue::smoke::SmokeExecutionAttestation;
+    let a: SmokeExecutionAttestation = serde_json::from_str(&read_str(path)?)
+        .map_err(|e| format!("bad smoke attestation JSON: {e}"))?;
+    a.validate().map_err(|e| e.to_string())?;
+    Ok(format!(
+        "smoke execution attestation VALID (candidate={} arch={} pr_head={} execs={}); \
+         attestation_hash={} (TEST_ONLY smoke evidence — NOT an authoritative tool-binding)",
+        a.candidate,
+        a.arch,
+        a.source_pr_head,
+        a.executables.len(),
+        a.attestation_hash()
+    ))
+}
+
+fn smoke_source_check(path: &str) -> Result<String, String> {
+    // Validate a TEST_ONLY smoke SOURCE binding. Its classification can only be
+    // TEST_ONLY/NON_SELECTION; authoritative readers reject it. Prints its sealed hash (which
+    // binds classification + PR-head, so editing either after sealing breaks it).
+    use b0_pre_validator::venue::smoke::SmokeSourceBinding;
+    let s: SmokeSourceBinding = serde_json::from_str(&read_str(path)?)
+        .map_err(|e| format!("bad smoke source-binding JSON: {e}"))?;
+    s.validate().map_err(|e| e.to_string())?;
+    Ok(format!(
+        "smoke source binding VALID (classification={} pr_head={}); sealed_hash={} \
+         (never satisfies RATIFIED_SOURCE_COMMIT; authoritative readers reject this record)",
+        s.classification.as_str(),
+        s.source_pr_head,
+        s.sealed_hash()
+    ))
+}
+
+fn smoke_substitute(
+    attest_path: &str,
+    observed_path: &str,
+    sentinel: &str,
+) -> Result<String, String> {
+    // Verify the real-execution attestation AGREES with the actual Stage-5 outputs, then emit the
+    // EXPLICIT, LOGGED plan to substitute the unmistakably-synthetic sentinel identity into the
+    // sealed TEST_ONLY bundle. Fails closed on a missing / mismatched attestation.
+    use b0_pre_validator::venue::smoke::{plan_synthetic_substitution, SmokeExecutionAttestation};
+    let a: SmokeExecutionAttestation = serde_json::from_str(&read_str(attest_path)?)
+        .map_err(|e| format!("bad smoke attestation JSON: {e}"))?;
+    let observed: Vec<String> = serde_json::from_str(&read_str(observed_path)?)
+        .map_err(|e| format!("bad observed-outputs JSON (expected an array of blake3 hex): {e}"))?;
+    let log = plan_synthetic_substitution(&a, &observed, sentinel).map_err(|e| e.to_string())?;
+    serde_json::to_string_pretty(&log).map_err(|e| e.to_string())
+}
+
 fn verify_lock(prov_path: &str, lock_path: &str) -> Result<String, String> {
     let prov: LockProvenance =
         serde_json::from_str(&read_str(prov_path)?).map_err(|e| format!("bad provenance: {e}"))?;
@@ -490,6 +582,15 @@ fn run() -> Result<String, String> {
             verify_runtime_image(recorded, runtime)
         }
         [cmd, lock] if cmd == "lock-hash" => lock_hash(lock),
+        [cmd, path] if cmd == "checkout-digest" => checkout_digest(path),
+        [cmd, mode, archives] if cmd == "prover-archive-check" => {
+            prover_archive_check(mode, archives)
+        }
+        [cmd, path] if cmd == "smoke-attest-check" => smoke_attest_check(path),
+        [cmd, path] if cmd == "smoke-source-check" => smoke_source_check(path),
+        [cmd, attest, observed, sentinel] if cmd == "smoke-substitute" => {
+            smoke_substitute(attest, observed, sentinel)
+        }
         [cmd, prov, lock] if cmd == "verify-lock" => verify_lock(prov, lock),
         [cmd, mode, declared, artifact, installed] if cmd == "verify-tool" => {
             verify_tool(mode, declared, artifact, installed)
@@ -517,7 +618,9 @@ fn run() -> Result<String, String> {
                 .map(|()| format!("wrote TEST_ONLY per-arch evidence bundle to {dir} (arch={sa})"))
         }
         _ => Err(
-            "usage: venue-verify <oci-manifest|verify-runtime-image|lock-hash|verify-lock|\
+            "usage: venue-verify <oci-manifest|verify-runtime-image|checkout-digest|\
+             prover-archive-check|smoke-attest-check|smoke-source-check|smoke-substitute|\
+             lock-hash|verify-lock|\
              verify-tool|stage2-audit|stage2-generate|stage2-record|stage4-guard|verify-stage5|\
              stage5-generate|import-arch|aggregate-arches|seal-bundle|import-bundle|\
              aggregate-bundles|emit-test-only-bundle> ..."

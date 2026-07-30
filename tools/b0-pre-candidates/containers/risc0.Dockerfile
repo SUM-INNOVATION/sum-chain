@@ -132,8 +132,18 @@ RUN rustc --version | grep -q "${RUST_VERSION}"
 # x86 smoke). This image provisions ONLY the base + apt + rustup/cargo 1.88. It does NOT
 # install:
 #   * cargo-audit (Stage-2 `cargo audit` requires it) + a pinned RustSec advisory DB;
-#   * the RISC Zero toolchain (`rzup` / `r0vm` / `cargo risczero`) matching 3.0.5 (x86_64
-#     ONLY — RISC Zero is never installed on aarch64, VENUE.md §2).
+#   * the RISC Zero prover toolchain matching 3.0.5 (x86_64 ONLY — RISC Zero is never
+#     installed on aarch64, VENUE.md §2).
+# When implemented, the prover toolchain is delivered by DECLARATIVE, VERIFIED ARCHIVE-MEMBER
+# EXTRACTION — NOT a `curl | tar` entrypoint and NOT `rzup` (production never invokes it).
+# Each executable is a pinned-archive member with its own identity (archive member + member
+# sha256 + version argv/output + point-of-use sha256): `cargo-prove` (x86_64 + aarch64),
+# `cargo-risczero` (x86_64), and `r0vm` (x86_64), where `cargo-risczero` and `r0vm` SHARE one
+# archive. Cargo subcommands are delivered on an ISOLATED verified PATH; `r0vm` via the exact
+# verified `RISC0_SERVER_PATH`. The schema/consumer that requires — and FAILS CLOSED on the
+# absence of — every one of those fields is `venue::prover_archive` (`venue-verify
+# prover-archive-check`); its member/version/point-of-use values are venue-resolved and stay
+# UNRATIFIED until the native x86 venue supplies them.
 # There is NO ENTRYPOINT; earlier comments referring to an "authoritative entrypoint" that
 # installs these were aspirational and are removed. Installing them requires owner-ratified
 # immutable pins (artifact URL + checksum + install method), like RUSTUP_INIT_URL/SHA256;

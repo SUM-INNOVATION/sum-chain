@@ -20,7 +20,8 @@
 #     effective (post-redirect) URL (F6, F7).
 #
 # Usage: verify_pins.sh <proposed-pins.json>
-# Requires: python3, curl, a sha256 tool (sha256sum/shasum), docker (base index resolution).
+# Requires: python3, curl, a sha256 tool (sha256sum/shasum), tar (cargo-audit .crate lock
+# extraction), docker (base index resolution).
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=lib.sh
@@ -36,6 +37,10 @@ REQUIRED_RUSTUP_VERSION="1.29.0"
 # The suites both Dockerfiles enable from the two pinned snapshot sources.
 APT_DEBIAN_SUITE="bookworm"
 APT_SECURITY_SUITE="bookworm-security"
+# The Stage-2 supply-chain auditor the producer pins (see docs/b0-pre/venue/PIN-PROPOSAL.md).
+REQUIRED_CARGO_AUDIT_VERSION="0.22.2"
+# The canonical RustSec advisory database the Stage-2 audit runs against (READ-ONLY, pinned).
+ADVISORY_DB_REPO="https://github.com/rustsec/advisory-db"
 
 fail=0
 pass() { printf 'PASS  %s\n' "$*"; }
@@ -226,6 +231,92 @@ done
 [ "$seen_sp1_arm" = 1 ] || bad "no verified sp1-verifier tool identity for aarch64"
 [ "$seen_r0_zkvm" = 1 ] || bad "no verified risc0-zkvm tool identity for x86_64"
 [ "$seen_r0_g16"  = 1 ] || bad "no verified risc0-groth16 tool identity for x86_64"
+
+# ---- (6) cargo-audit: version + crate sha256 (primary source) + packaged Cargo.lock -----
+# The Stage-2 auditor is pinned to an EXACT crates.io release. The strong primary-source
+# binding is the .crate file's sha256 re-derived from static.crates.io; the packaged
+# Cargo.lock sha256 (extracted from that same verified tarball) additionally pins the
+# auditor's own dependency graph. source_commit is a format-checked provenance field (the
+# upstream tag the release was cut from); it is not itself fetched here.
+ca_version="$(pget cargo_audit.version)"
+ca_crate_sha="$(pget cargo_audit.crate_sha256)"
+ca_commit="$(pget cargo_audit.source_commit)"
+ca_lock_sha="$(pget cargo_audit.packaged_lock_sha256)"
+if [ -z "$ca_version" ] || [ -z "$ca_crate_sha" ] || [ -z "$ca_commit" ] || [ -z "$ca_lock_sha" ]; then
+  bad "cargo_audit block incomplete (need version / crate_sha256 / source_commit / packaged_lock_sha256)"
+else
+  if [ "$ca_version" != "$REQUIRED_CARGO_AUDIT_VERSION" ]; then
+    bad "cargo_audit.version is '$ca_version'; the producer pins cargo-audit $REQUIRED_CARGO_AUDIT_VERSION"
+  fi
+  is_bare_sha256 "$ca_crate_sha" || bad "cargo_audit.crate_sha256 is not a bare 64-hex sha256: $ca_crate_sha"
+  is_bare_sha256 "$ca_lock_sha"  || bad "cargo_audit.packaged_lock_sha256 is not a bare 64-hex sha256: $ca_lock_sha"
+  printf '%s' "$ca_commit" | grep -Eq '^[0-9a-f]{40}$' || bad "cargo_audit.source_commit is not a 40-hex commit: $ca_commit"
+  if is_bare_sha256 "$ca_crate_sha" && is_bare_sha256 "$ca_lock_sha"; then
+    crate_url="https://static.crates.io/crates/cargo-audit/cargo-audit-$ca_version.crate"
+    tmpcrate="$(mktemp)"
+    if ! curl -fsSL --max-redirs 5 --proto '=https' "$crate_url" -o "$tmpcrate"; then
+      bad "cargo-audit .crate not reachable at its primary source: $crate_url"
+    else
+      got_crate="$(sha256_hex_stdin < "$tmpcrate")"
+      if [ "$got_crate" = "$ca_crate_sha" ]; then
+        pass "cargo-audit $ca_version .crate sha256 matches primary source (static.crates.io)"
+      else
+        bad "cargo-audit .crate sha256 MISMATCH (source=$got_crate pinned=$ca_crate_sha)"
+      fi
+      # Extract ONLY the packaged Cargo.lock from the verified tarball and hash it. A crate
+      # whose sha256 matched but whose lock differs cannot occur (the tarball is immutable);
+      # this binds the exact dependency graph the auditor itself was built against.
+      got_lock="$(tar -xzOf "$tmpcrate" "cargo-audit-$ca_version/Cargo.lock" 2>/dev/null | sha256_hex_stdin || true)"
+      if [ -z "$got_lock" ]; then
+        bad "could not extract cargo-audit-$ca_version/Cargo.lock from the .crate (packaged lock absent)"
+      elif [ "$got_lock" = "$ca_lock_sha" ]; then
+        pass "cargo-audit $ca_version packaged Cargo.lock sha256 matches the verified .crate"
+      else
+        bad "cargo-audit packaged Cargo.lock sha256 MISMATCH (crate=$got_lock pinned=$ca_lock_sha)"
+      fi
+    fi
+    rm -f "$tmpcrate"
+  fi
+fi
+
+# ---- (7) advisory-DB: repo + commit + tree (primary source) + content digest ------------
+# The Stage-2 audit runs against a READ-ONLY checkout of the RustSec advisory-db at an EXACT
+# commit. The primary-source binding re-derives the commit's TREE sha from the canonical
+# GitHub repo (curl-only, no clone) and matches it to the pinned tree — so a swapped commit
+# or a fabricated tree fails without fetching the whole history. content_blake3 is the
+# canonical checkout digest (tags.rs ADVDB_CHECKOUT_TAG); it is format-checked here and
+# re-derived in full at produce time by `venue-verify checkout-digest` over the mounted
+# checkout (and reproduced by the independent reference in the validator test suite).
+adv_repo="$(pget advisory_db.repo)"
+adv_commit="$(pget advisory_db.commit)"
+adv_tree="$(pget advisory_db.git_tree)"
+adv_content="$(pget advisory_db.content_blake3)"
+if [ -z "$adv_repo" ] || [ -z "$adv_commit" ] || [ -z "$adv_tree" ] || [ -z "$adv_content" ]; then
+  bad "advisory_db block incomplete (need repo / commit / git_tree / content_blake3)"
+else
+  [ "$adv_repo" = "$ADVISORY_DB_REPO" ] || bad "advisory_db.repo is '$adv_repo'; the pinned canonical source is $ADVISORY_DB_REPO"
+  printf '%s' "$adv_commit" | grep -Eq '^[0-9a-f]{40}$' || bad "advisory_db.commit is not a 40-hex commit: $adv_commit"
+  printf '%s' "$adv_tree"   | grep -Eq '^[0-9a-f]{40}$' || bad "advisory_db.git_tree is not a 40-hex tree: $adv_tree"
+  is_bare_sha256 "$adv_content" || bad "advisory_db.content_blake3 is not a bare 64-hex digest: $adv_content"
+  if [ "$adv_repo" = "$ADVISORY_DB_REPO" ] \
+     && printf '%s' "$adv_commit" | grep -Eq '^[0-9a-f]{40}$' \
+     && printf '%s' "$adv_tree" | grep -Eq '^[0-9a-f]{40}$'; then
+    # GitHub commits API returns the commit's tree sha; this binds commit -> tree from the
+    # canonical repo using only curl (RFC-compliant; no working tree materialized here).
+    api="https://api.github.com/repos/rustsec/advisory-db/commits/$adv_commit"
+    api_tree="$(curl -fsSL --max-redirs 5 --proto '=https' -H 'Accept: application/vnd.github+json' "$api" 2>/dev/null \
+                | python3 -c 'import json,sys
+try: print(json.load(sys.stdin)["commit"]["tree"]["sha"])
+except Exception: print("")' 2>/dev/null || true)"
+    if [ -z "$api_tree" ]; then
+      bad "advisory_db.commit $adv_commit not resolvable at the canonical GitHub repo (or API unreachable): $api"
+    elif [ "$api_tree" = "$adv_tree" ]; then
+      pass "advisory_db commit $adv_commit -> tree $adv_tree confirmed by the canonical repo (content_blake3 re-derived at produce time)"
+    else
+      bad "advisory_db.git_tree MISMATCH: pinned=$adv_tree but commit $adv_commit has tree $api_tree upstream"
+    fi
+  fi
+fi
 
 echo "----"
 if [ "$fail" -eq 0 ]; then

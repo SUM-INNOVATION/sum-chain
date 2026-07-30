@@ -385,14 +385,57 @@ pub fn require_candidate_pins(
     Ok(())
 }
 
-/// The bound Stage-2 audit record: the in-container-DERIVED resolved graph +
-/// advisories + license allow-list, bound to the resolved lock hash, the builder
-/// container digest, the clean source commit, the architecture, and the exact
-/// audit-tool identity / advisory-DB snapshot. Stage 6 (via the evidence bundle)
-/// REQUIRES this — not a bare externally-supplied graph.
+/// The current Stage-2 audit-record schema version.
+///
+/// v1 (unversioned) recorded a FREE-TEXT `advisory_db_snapshot` ("git rev / date") and no
+/// executed-cargo-audit identity — insufficient to reproduce or verify the scan. v2 binds
+/// the advisory database by immutable git commit + tree + a canonical content digest, binds
+/// the exact cargo-audit executable + version used, and records STRUCTURED audit-policy
+/// fields (never a free-form command). v1 remains decodable for historical inspection but is
+/// INELIGIBLE for new authoritative evidence; unknown versions fail closed.
+pub const STAGE2_SCHEMA_VERSION: u16 = 2;
+
+/// Structured, non-executable Stage-2 audit policy (policy A). Trusted code constructs the
+/// actual `cargo audit` argv from these; the command log records the exact argv that ran.
+/// Storing a free-form command string as authority would invite command-injection and
+/// semantic drift, so it is deliberately NOT a field here.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditPolicy {
+    /// Whether the advisory DB may be updated during the audit. MUST be `false` (forbidden).
+    pub database_update_allowed: bool,
+    /// Whether a stale (pinned) snapshot is permitted. MUST be `true`.
+    pub stale_snapshot_permitted: bool,
+    /// Output format. MUST be `"json"`.
+    pub output_format: String,
+    /// How the DB is provided. MUST be `"runtime-read-only-mount"` (a runtime-controlled,
+    /// read-only checkout — never a build-time-baked or writable path).
+    pub database_source: String,
+}
+
+/// The pinned advisory database identity (policy A): immutable VCS identity (commit + tree)
+/// AND the canonical materialized-checkout content digest (see `checkout_digest`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdvisoryDbIdentity {
+    /// Upstream VCS commit (40-hex).
+    pub commit: String,
+    /// Upstream VCS tree (40-hex) at that commit.
+    pub git_tree: String,
+    /// Canonical BLAKE3 (bare 64-hex) of the materialized read-only checkout content.
+    pub content_blake3: String,
+}
+
+/// The bound Stage-2 audit record (schema v2): the in-container-DERIVED resolved graph +
+/// advisories + license allow-list, bound to the resolved lock hash, the builder container
+/// digest, the clean source commit, the architecture, the EXACT cargo-audit executable +
+/// version, the pinned advisory-DB identity, and the structured audit policy. Stage 6 (via
+/// the evidence bundle) REQUIRES this — not a bare externally-supplied graph.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Stage2AuditRecord {
+    /// REQUIRED schema version. Only [`STAGE2_SCHEMA_VERSION`] is authoritative-eligible.
+    pub schema_version: u16,
     pub candidate: String,
     pub arch: String,
     /// Bound to the resolved candidate lock hash (bare 64-hex BLAKE3).
@@ -404,18 +447,50 @@ pub struct Stage2AuditRecord {
     /// (bare 64-hex BLAKE3 of the command log). A record whose graph was produced by
     /// a different command sequence than the one hashed here is not this evidence.
     pub command_log_blake3_hex: String,
-    /// The exact audit-tool identity (e.g. `cargo-metadata 1.x + cargo-audit 0.y`).
+    /// Descriptive audit-tool label (e.g. `cargo-metadata 1.x + cargo-audit 0.y`). Authority
+    /// is the hash-backed cargo-audit fields below, not this string.
     pub audit_tool_identity: String,
-    /// The advisory-DB snapshot the scan ran against (git rev / date).
-    pub advisory_db_snapshot: String,
+    /// The exact cargo-audit version the invocation self-reported. VENUE EVIDENCE (recorded
+    /// from `cargo audit --version` at the venue), bound to the ratified crate/version pin.
+    pub cargo_audit_version: String,
+    /// SHA-256 (bare 64-hex) of the exact cargo-audit executable that ran the scan. This is
+    /// VENUE EVIDENCE, NOT an owner-ratified source pin: the ratified inputs are the crate +
+    /// version + crate checksum + packaged-lock checksum + Rust toolchain + build environment
+    /// (see PIN-PROPOSAL.md §6). This hash is recorded at the venue, re-checked at the point of
+    /// use, and MUST be independently reproduced by a second same-architecture operator; if the
+    /// two same-arch builds do not reproduce, the executable identity is NOT blessed — an
+    /// immutable first-party binary or a stronger build-provenance model is required instead.
+    pub cargo_audit_executable_sha256: String,
+    /// The pinned advisory-DB identity the scan ran against (commit + tree + content digest).
+    pub advisory_db: AdvisoryDbIdentity,
+    /// The structured, non-executable audit policy the scan enforced.
+    pub audit_policy: AuditPolicy,
     pub allowed_licenses: Vec<String>,
     /// The DERIVED-in-container resolved graph (dependency/source/license nodes).
     pub nodes: Vec<CrateNode>,
     pub advisories: Vec<Advisory>,
 }
 
+/// Peek a raw Stage-2 record's `schema_version` without a strict decode, so the importer can
+/// reject an inadequate v1/unversioned record with a clear trust error (0 if absent).
+pub fn peek_stage2_schema_version(raw: &[u8]) -> u16 {
+    #[derive(serde::Deserialize)]
+    struct V {
+        #[serde(default)]
+        schema_version: u16,
+    }
+    serde_json::from_slice::<V>(raw)
+        .map(|v| v.schema_version)
+        .unwrap_or(0)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stage2RecordError {
+    /// The record's `schema_version` is not [`STAGE2_SCHEMA_VERSION`] (e.g. an inadequate v1
+    /// record with a free-text advisory-DB snapshot and no executed-cargo-audit identity).
+    UnsupportedSchemaVersion {
+        got: u16,
+    },
     UnknownCandidate {
         candidate: String,
     },
@@ -424,6 +499,8 @@ pub enum Stage2RecordError {
     },
     Missing(&'static str),
     BadHash(&'static str),
+    /// A structured audit-policy field held a disallowed value.
+    BadPolicy(&'static str),
     BadContainerDigest {
         digest: String,
     },
@@ -444,9 +521,19 @@ impl std::fmt::Display for Stage2RecordError {
                 write!(f, "unknown candidate {candidate:?}")
             }
             Stage2RecordError::UnknownArch { arch } => write!(f, "unknown architecture {arch:?}"),
+            Stage2RecordError::UnsupportedSchemaVersion { got } => write!(
+                f,
+                "Stage-2 schema_version {got} is not the authoritative-eligible v{} \
+                 (a v1/unversioned record's free-text advisory-DB snapshot + missing \
+                 executed-cargo-audit identity are insufficient and are refused)",
+                STAGE2_SCHEMA_VERSION
+            ),
             Stage2RecordError::Missing(field) => write!(f, "Stage-2 record field {field} is empty"),
             Stage2RecordError::BadHash(field) => {
                 write!(f, "Stage-2 record {field} is not bare 64-hex")
+            }
+            Stage2RecordError::BadPolicy(field) => {
+                write!(f, "Stage-2 audit policy {field} holds a disallowed value")
             }
             Stage2RecordError::BadContainerDigest { digest } => {
                 write!(f, "Stage-2 record container_digest invalid: {digest:?}")
@@ -475,6 +562,12 @@ fn is_hex64(s: &str) -> bool {
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 
+fn is_hex40(s: &str) -> bool {
+    s.len() == 40
+        && s.bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+}
+
 impl Stage2AuditRecord {
     /// Validate the record: known candidate/arch, well-formed non-synthetic
     /// bindings, a NON-FATAL audit over the derived graph, and the required-crate
@@ -482,6 +575,13 @@ impl Stage2AuditRecord {
     /// the caller can retain the recorded prereleases. Binding the lock hash /
     /// container digest to the resolved lock is done by the evidence-bundle importer.
     pub fn validate(&self) -> Result<AuditReport, Stage2RecordError> {
+        // Only the current schema version is authoritative-eligible; an inadequate v1
+        // record is refused before any other check.
+        if self.schema_version != STAGE2_SCHEMA_VERSION {
+            return Err(Stage2RecordError::UnsupportedSchemaVersion {
+                got: self.schema_version,
+            });
+        }
         if required_pins_for(&self.candidate).is_none() {
             return Err(Stage2RecordError::UnknownCandidate {
                 candidate: self.candidate.clone(),
@@ -512,8 +612,45 @@ impl Stage2AuditRecord {
         if self.audit_tool_identity.trim().is_empty() {
             return Err(Stage2RecordError::Missing("audit_tool_identity"));
         }
-        if self.advisory_db_snapshot.trim().is_empty() {
-            return Err(Stage2RecordError::Missing("advisory_db_snapshot"));
+        // The EXACT executed cargo-audit identity (authority; the label above is descriptive).
+        if self.cargo_audit_version.trim().is_empty() {
+            return Err(Stage2RecordError::Missing("cargo_audit_version"));
+        }
+        if !is_hex64(&self.cargo_audit_executable_sha256) {
+            return Err(Stage2RecordError::BadHash("cargo_audit_executable_sha256"));
+        }
+        // The pinned advisory-DB identity: commit + tree (40-hex) + canonical content digest.
+        if !is_hex40(&self.advisory_db.commit) {
+            return Err(Stage2RecordError::BadHash("advisory_db.commit"));
+        }
+        if !is_hex40(&self.advisory_db.git_tree) {
+            return Err(Stage2RecordError::BadHash("advisory_db.git_tree"));
+        }
+        if !is_hex64(&self.advisory_db.content_blake3) {
+            return Err(Stage2RecordError::BadHash("advisory_db.content_blake3"));
+        }
+        // The structured policy invariants (policy A): DB update forbidden, stale permitted,
+        // JSON output, runtime-controlled read-only DB source. A free-form command is never
+        // stored; trusted code builds the argv and the command log records what actually ran.
+        if self.audit_policy.database_update_allowed {
+            return Err(Stage2RecordError::BadPolicy(
+                "database_update_allowed (must be false)",
+            ));
+        }
+        if !self.audit_policy.stale_snapshot_permitted {
+            return Err(Stage2RecordError::BadPolicy(
+                "stale_snapshot_permitted (must be true)",
+            ));
+        }
+        if self.audit_policy.output_format != "json" {
+            return Err(Stage2RecordError::BadPolicy(
+                "output_format (must be \"json\")",
+            ));
+        }
+        if self.audit_policy.database_source != "runtime-read-only-mount" {
+            return Err(Stage2RecordError::BadPolicy(
+                "database_source (must be \"runtime-read-only-mount\")",
+            ));
         }
         // required-crate coverage (rejects empty/incomplete graphs).
         require_candidate_pins(&self.nodes, &self.candidate)
@@ -544,7 +681,10 @@ pub struct Stage2BindParams {
     pub lock_blake3_hex: String,
     pub source_commit: String,
     pub audit_tool_identity: String,
-    pub advisory_db_snapshot: String,
+    pub cargo_audit_version: String,
+    pub cargo_audit_executable_sha256: String,
+    pub advisory_db: AdvisoryDbIdentity,
+    pub audit_policy: AuditPolicy,
     pub allowed_licenses: Vec<String>,
 }
 
@@ -642,6 +782,7 @@ impl Stage2AuditRecord {
         let nodes = parse_cargo_metadata(cargo_metadata_raw).map_err(Stage2RecordError::Parse)?;
         let advisories = parse_cargo_audit(cargo_audit_raw).map_err(Stage2RecordError::Parse)?;
         let record = Stage2AuditRecord {
+            schema_version: STAGE2_SCHEMA_VERSION,
             candidate: params.candidate.clone(),
             arch: params.arch.clone(),
             lock_blake3_hex: params.lock_blake3_hex.clone(),
@@ -649,7 +790,10 @@ impl Stage2AuditRecord {
             source_commit: params.source_commit.clone(),
             command_log_blake3_hex: super::to_hex(blake3::hash(command_log_bytes).as_bytes()),
             audit_tool_identity: params.audit_tool_identity.clone(),
-            advisory_db_snapshot: params.advisory_db_snapshot.clone(),
+            cargo_audit_version: params.cargo_audit_version.clone(),
+            cargo_audit_executable_sha256: params.cargo_audit_executable_sha256.clone(),
+            advisory_db: params.advisory_db.clone(),
+            audit_policy: params.audit_policy.clone(),
             allowed_licenses: params.allowed_licenses.clone(),
             nodes,
             advisories,
@@ -835,8 +979,25 @@ mod tests {
         ));
     }
 
+    fn t_advdb() -> AdvisoryDbIdentity {
+        AdvisoryDbIdentity {
+            commit: "ab".repeat(20),
+            git_tree: "cd".repeat(20),
+            content_blake3: "ef".repeat(32),
+        }
+    }
+    fn t_policy() -> AuditPolicy {
+        AuditPolicy {
+            database_update_allowed: false,
+            stale_snapshot_permitted: true,
+            output_format: "json".into(),
+            database_source: "runtime-read-only-mount".into(),
+        }
+    }
+
     fn sp1_record() -> Stage2AuditRecord {
         Stage2AuditRecord {
+            schema_version: STAGE2_SCHEMA_VERSION,
             candidate: "Sp1".into(),
             arch: "X86_64".into(),
             lock_blake3_hex: super::super::to_hex(blake3::hash(b"sp1-lock").as_bytes()),
@@ -848,8 +1009,11 @@ mod tests {
             command_log_blake3_hex: super::super::to_hex(
                 blake3::hash(b"sp1-stage2-cmd").as_bytes(),
             ),
-            audit_tool_identity: "cargo-metadata 1.0 + cargo-audit 0.21".into(),
-            advisory_db_snapshot: "rustsec-db@2026-07-01".into(),
+            audit_tool_identity: "cargo-metadata 1.0 + cargo-audit 0.22.2".into(),
+            cargo_audit_version: "0.22.2".into(),
+            cargo_audit_executable_sha256: "ca".repeat(32),
+            advisory_db: t_advdb(),
+            audit_policy: t_policy(),
             allowed_licenses: ["MIT", "Apache-2.0", "MIT OR Apache-2.0"]
                 .iter()
                 .map(|s| s.to_string())
@@ -903,11 +1067,28 @@ mod tests {
             rec.validate(),
             Err(Stage2RecordError::BadContainerDigest { .. })
         ));
+        // v2: a policy that permits DB update (moving DB) is refused.
         let mut rec2 = sp1_record();
-        rec2.advisory_db_snapshot = "  ".into();
+        rec2.audit_policy.database_update_allowed = true;
         assert!(matches!(
             rec2.validate(),
-            Err(Stage2RecordError::Missing("advisory_db_snapshot"))
+            Err(Stage2RecordError::BadPolicy(
+                "database_update_allowed (must be false)"
+            ))
+        ));
+        // v2: a malformed advisory-DB commit is refused.
+        let mut rec3 = sp1_record();
+        rec3.advisory_db.commit = "nothex".into();
+        assert!(matches!(
+            rec3.validate(),
+            Err(Stage2RecordError::BadHash("advisory_db.commit"))
+        ));
+        // v1 (unversioned) is ineligible for authoritative evidence.
+        let mut rec4 = sp1_record();
+        rec4.schema_version = 1;
+        assert!(matches!(
+            rec4.validate(),
+            Err(Stage2RecordError::UnsupportedSchemaVersion { got: 1 })
         ));
     }
 
@@ -923,8 +1104,11 @@ mod tests {
             ),
             lock_blake3_hex: super::super::to_hex(blake3::hash(b"sp1-lock").as_bytes()),
             source_commit: "a".repeat(40),
-            audit_tool_identity: "cargo-metadata 1.0 + cargo-audit 0.21".into(),
-            advisory_db_snapshot: "rustsec-db@2026-07-01".into(),
+            audit_tool_identity: "cargo-metadata 1.0 + cargo-audit 0.22.2".into(),
+            cargo_audit_version: "0.22.2".into(),
+            cargo_audit_executable_sha256: "ca".repeat(32),
+            advisory_db: t_advdb(),
+            audit_policy: t_policy(),
             allowed_licenses: ["MIT", "Apache-2.0", "MIT OR Apache-2.0"]
                 .iter()
                 .map(|s| s.to_string())

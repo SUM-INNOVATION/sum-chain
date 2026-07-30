@@ -40,7 +40,15 @@ tool_identities[0].arch
 tool_identities[0].artifact_identity
 tool_identities[0].checksum_algorithm
 tool_identities[0].checksum_hex
-tool_identities[0].install_entrypoint'
+tool_identities[0].install_entrypoint
+cargo_audit.version
+cargo_audit.crate_sha256
+cargo_audit.source_commit
+cargo_audit.packaged_lock_sha256
+advisory_db.repo
+advisory_db.commit
+advisory_db.git_tree
+advisory_db.content_blake3'
 
 # Exit 0 iff the pget-style dotted path resolves in the JSON file (value may be empty).
 path_present() { # <json> <dotted.path>

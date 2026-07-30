@@ -26,10 +26,20 @@ ROOT="$(cd "$HERE/.." && pwd)"
 # shellcheck source=lib.sh
 . "$HERE/lib.sh"
 
-candidate="${1:-}"; arch="${2:-}"; out="${3:-}"
+candidate="${1:-}"; arch="${2:-}"; out="${3:-}"; build_mode="${4:-authoritative}"
 case "$candidate" in sp1|risc0) ;; *) die "candidate must be sp1|risc0 (got '${candidate:-}')" ;; esac
 case "$arch" in x86_64|aarch64) ;; *) die "arch must be x86_64|aarch64 (got '${arch:-}')" ;; esac
 [ -n "$out" ] || die "output directory argument required"
+# Build mode is an EXPLICIT positional argument (NOT an inheritable env var). `smoke` produces a
+# distinct, TEST_ONLY-only runnable-ref sidecar schema (b0pre-smoke-runnable-ref-v1) that the
+# authoritative resolver REJECTS; it can never emit an authoritative sidecar. It is only reachable
+# by the separate public smoke entry point (smoke.sh), never by the authoritative producer.
+case "$build_mode" in
+  authoritative) ;;
+  smoke) [ -z "${RATIFIED_SOURCE_COMMIT:-}" ] \
+           || die "smoke build refuses to run with RATIFIED_SOURCE_COMMIT set (smoke is TEST_ONLY, never authoritative)" ;;
+  *) die "build mode must be authoritative|smoke (got '$build_mode')" ;;
+esac
 mkdir -p "$out"
 
 # The Stage-1 schema names arches X86_64 / Aarch64 (== the Arch enum variants).
@@ -151,10 +161,18 @@ source_commit="$(git -C "$ROOT" rev-parse HEAD)"
 # that explicit commit, and validate it is a well-formed positive base-10 integer BEFORE
 # Docker. Requires BuildKit >= 0.11 (rewrite-timestamp); an older builder fails closed on
 # the unknown export option rather than silently emitting nondeterministic layers.
-[ -n "${RATIFIED_SOURCE_COMMIT:-}" ] \
-  || nyr "RATIFIED_SOURCE_COMMIT is required to derive a deterministic SOURCE_DATE_EPOCH (from the ratified pins.env)"
-[ "$source_commit" = "$RATIFIED_SOURCE_COMMIT" ] \
-  || die "HEAD ($source_commit) != RATIFIED_SOURCE_COMMIT ($RATIFIED_SOURCE_COMMIT); refusing to derive a build epoch from an unratified commit"
+if [ "$build_mode" = smoke ]; then
+  # Smoke: the deterministic epoch comes from the EXACT clean PR-head (already HEAD on a clean
+  # tree). No RATIFIED_SOURCE_COMMIT is required or accepted — a smoke build is TEST_ONLY and
+  # emits only a smoke-schema sidecar the authoritative resolver rejects.
+  [ "$source_commit" = "$(git -C "$ROOT" rev-parse HEAD)" ] \
+    || die "HEAD moved since build start; refusing smoke build epoch (candidate=$candidate arch=$arch)"
+else
+  [ -n "${RATIFIED_SOURCE_COMMIT:-}" ] \
+    || nyr "RATIFIED_SOURCE_COMMIT is required to derive a deterministic SOURCE_DATE_EPOCH (from the ratified pins.env)"
+  [ "$source_commit" = "$RATIFIED_SOURCE_COMMIT" ] \
+    || die "HEAD ($source_commit) != RATIFIED_SOURCE_COMMIT ($RATIFIED_SOURCE_COMMIT); refusing to derive a build epoch from an unratified commit"
+fi
 SOURCE_DATE_EPOCH="$(git -C "$ROOT" show -s --format=%ct "$source_commit")"
 require_valid_source_date_epoch "$SOURCE_DATE_EPOCH"
 export SOURCE_DATE_EPOCH
@@ -286,10 +304,29 @@ is_ratified_commit_format "$source_commit" \
   || die "source_commit is not 40 lowercase hex: '$source_commit' (candidate=$candidate arch=$arch)"
 [ "$source_commit" = "$(git -C "$ROOT" rev-parse HEAD)" ] \
   || die "HEAD moved since build start; refusing to write a runnable-ref sidecar (candidate=$candidate arch=$arch)"
-[ "$source_commit" = "$RATIFIED_SOURCE_COMMIT" ] \
-  || die "source_commit ($source_commit) != RATIFIED_SOURCE_COMMIT ($RATIFIED_SOURCE_COMMIT); refusing to write runnable-ref sidecar"
 sidecar="$out/$candidate.$arch.runnable-ref"
-python3 - "$sidecar.tmp" "$candidate" "$arch" "$source_commit" "$builder_digest" "$config_digest" "$loaded_id" <<'PY'
+if [ "$build_mode" = smoke ]; then
+  # SMOKE sidecar: a DISTINCT schema (b0pre-smoke-runnable-ref-v1) carrying an explicit TEST_ONLY
+  # classification + source_pr_head. The authoritative resolver (lib.sh resolve_runnable_ref)
+  # requires schema == b0pre-runnable-ref-v1, so it REJECTS this record outright — a smoke image
+  # can never be consumed on the authoritative path even if the source field were edited. Only
+  # resolve_smoke_runnable_ref accepts it.
+  python3 - "$sidecar.tmp" "$candidate" "$arch" "$source_commit" "$builder_digest" "$config_digest" "$loaded_id" <<'PY'
+import json, sys
+p, cand, arch, pr_head, mani, cfg, img = sys.argv[1:8]
+json.dump({"schema": "b0pre-smoke-runnable-ref-v1", "classification": "TEST_ONLY",
+           "candidate": cand, "arch": arch, "source_pr_head": pr_head,
+           "manifest_digest": mani, "config_digest": cfg, "runnable_image_id": img},
+          open(p, "w"), indent=2)
+open(p, "a").write("\n")
+PY
+else
+  # Authoritative: bind source_commit explicitly and require it equal RATIFIED_SOURCE_COMMIT (a
+  # docs-only / orchestration-only commit can preserve the manifest, so the manifest is not a
+  # proxy for source identity).
+  [ "$source_commit" = "$RATIFIED_SOURCE_COMMIT" ] \
+    || die "source_commit ($source_commit) != RATIFIED_SOURCE_COMMIT ($RATIFIED_SOURCE_COMMIT); refusing to write runnable-ref sidecar"
+  python3 - "$sidecar.tmp" "$candidate" "$arch" "$source_commit" "$builder_digest" "$config_digest" "$loaded_id" <<'PY'
 import json, sys
 p, cand, arch, commit, mani, cfg, img = sys.argv[1:8]
 json.dump({"schema": "b0pre-runnable-ref-v1", "candidate": cand, "arch": arch,
@@ -297,8 +334,9 @@ json.dump({"schema": "b0pre-runnable-ref-v1", "candidate": cand, "arch": arch,
            "runnable_image_id": img}, open(p, "w"), indent=2)
 open(p, "a").write("\n")
 PY
+fi
 mv -f "$sidecar.tmp" "$sidecar"
-note "loaded + verified runnable image $candidate/$arch: $loaded_id (matched verified $id_kind; typed sidecar written atomically; downstream uses --pull never, no push)"
+note "loaded + verified runnable image $candidate/$arch ($build_mode): $loaded_id (matched verified $id_kind; typed sidecar written atomically; downstream uses --pull never, no push)"
 
 # The raw exported-tar byte hashes are retained ONLY as raw-artifact witnesses
 # (BLAKE3), never presented as the manifest identity.

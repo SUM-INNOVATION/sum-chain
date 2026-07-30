@@ -107,6 +107,35 @@ jobs:
           grep -q '^REAL_CONTAINER_V2_SEAL_IMPORT_PASS$' /tmp/e2e.out \
             || { echo "::error::required terminal marker REAL_CONTAINER_V2_SEAL_IMPORT_PASS absent"; exit 1; }
 
+      # --- REQUIRED Docker/network CONTRACT tests (must EXECUTE, never skip) --------------
+      # The default `run.sh` step above lets the Docker/network tests SKIP (no opt-in flags), so
+      # by themselves they would never exercise the new Stage-2-audit / pin-verification /
+      # capability contract in CI. This step turns them ON in EXECUTE mode and asserts, per test,
+      # a terminal marker — so a SKIP (marker absent), a non-zero exit, or a `timeout` (124) all
+      # FAIL the required check. It covers: cargo-audit + advisory-DB pin verification against
+      # their real primary sources; and the builder-image capability preflight incl. the
+      # missing / wrong-version / wrong-arch / RT-2 tool NEGATIVES. (The Stage2AuditRecord v2
+      # audit path itself — generate/validate/version-gate/import — is exercised by the always-run
+      # validator unit suite; it is not gated behind Docker.) ubuntu-latest provides Docker + net.
+      - name: Required Docker/network contract tests (pin-verify + capability preflight; marker-asserted)
+        env:
+          B0PRE_DOCKER_IT: "1"
+          B0PRE_PIN_NET_IT: "1"
+          B0PRE_E2E_REQUIRED: "1"
+          B0PRE_PIN_NET_REQUIRED: "1"
+        run: |
+          set +e
+          timeout 600 bash tools/b0-pre-candidates/scripts/tests/pin_cargo_audit_advdb.test.sh 2>&1 | tee /tmp/pin.out
+          rc=${PIPESTATUS[0]}
+          [ "$rc" -eq 0 ] || { echo "::error::pin cargo-audit/advisory contract test exited $rc (124=timeout)"; exit 1; }
+          grep -q '^PIN_CARGO_AUDIT_ADVDB_PASS$' /tmp/pin.out \
+            || { echo "::error::pin contract marker PIN_CARGO_AUDIT_ADVDB_PASS absent (skipped or failed)"; exit 1; }
+          timeout 600 bash tools/b0-pre-candidates/scripts/tests/builder_capability.test.sh 2>&1 | tee /tmp/cap.out
+          rc=${PIPESTATUS[0]}
+          [ "$rc" -eq 0 ] || { echo "::error::builder capability preflight test exited $rc (124=timeout)"; exit 1; }
+          grep -q '^BUILDER_CAPABILITY_PASS$' /tmp/cap.out \
+            || { echo "::error::capability contract marker BUILDER_CAPABILITY_PASS absent (skipped or failed)"; exit 1; }
+
       # --- Shared canonical primitive as an independent CI authority ----------
       # b0-pre-vmat is the SOLE canonical verifier-material encoding + identity +
       # stamp-policy implementation (a blake3-only leaf the validator AND the venue

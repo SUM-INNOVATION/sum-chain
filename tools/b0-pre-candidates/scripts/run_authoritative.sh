@@ -241,6 +241,17 @@ produce_arch_authoritative() {
   SCHEMA_ARCH="$schema_arch" BUILDER_IMAGE_REF="$risc0_ref" \
     BUILDER_IMAGE_DIGEST="$risc0_builder" bash "$HERE/resolve_lock.sh" risc0 "$work"
 
+  note "== Stage 1b: builder-image CAPABILITY preflight (fail closed BEFORE Stage 2 executes) =="
+  # Item 6: validate — as early as technically possible, inside each VERIFIED builder image —
+  # arch + cargo + cargo-audit VERSION/IDENTITY + the RT-2 non-login PATH, so a mis-provisioned
+  # image (no cargo-audit, wrong version/hash, wrong arch, login-PATH loss) is rejected here,
+  # not deep inside Stage 2. cargo-audit VERSION comes from the RATIFIED crate/version pin; the
+  # executable SHA-256 is VENUE EVIDENCE (recorded + reproduced by an independent same-arch
+  # operator — NOT a source pin), threaded as an EXPECTED value the gate re-checks at point of
+  # use. Absent, the gate still requires cargo-audit to be present + self-report a version.
+  preflight_builder_capability "$sp1_ref"   "$arch" "${CARGO_AUDIT_PIN_VERSION:-}" "${CARGO_AUDIT_EXPECTED_EXE_SHA256:-}"
+  preflight_builder_capability "$risc0_ref" "$arch" "${CARGO_AUDIT_PIN_VERSION:-}" "${CARGO_AUDIT_EXPECTED_EXE_SHA256:-}"
+
   note "== Stage 2: PER-CANDIDATE in-container cargo metadata + audit -> typed record -> work =="
   require_headroom_gib "$work" 5 "Stage 2 in-container cargo metadata + audit"
   produce_stage2 Sp1   "$arch" "$schema_arch" "$work"
@@ -331,14 +342,64 @@ produce_stage2() {
   # builder image (see stage_context.sh); metadata/audit run there over the full graph.
   local cdir; cdir="$(incontainer_candidate_dir "$lc")"
   local incontainer_lock="$cdir/Cargo.lock"
-  # STRICT read-only single-FILE mount: the ONLY host path entering the container is the
-  # validated lock, mounted at its logical workspace destination (no writable bind, no
-  # whole-workspace/source mount). The command log records the lock CONTENT HASH + the
-  # logical in-container destination (never the host absolute path); command_log_blake3_hex
-  # binds that — and lock_blake3_hex binds the content address — into the typed Stage-2 record.
+  # STRICT read-only mounts: the ONLY host paths entering the container are (a) the validated
+  # Stage-1 lock, mounted at its logical workspace destination, and (b) the pinned advisory-DB
+  # checkout, mounted READ-ONLY at $incontainer_db for `cargo audit --db`. No writable bind, no
+  # whole-workspace/source mount. The command log records the lock CONTENT HASH, the logical
+  # in-container destinations, the advisory-DB identity, and the EXACT constructed audit argv
+  # (never a host absolute path); command_log_blake3_hex binds that — and lock_blake3_hex binds
+  # the content address — into the typed Stage-2 record.
+
+  # ---- Pinned advisory-DB checkout (READ-ONLY): resolve + fully verify identity, then bind it.
+  # The checkout is a venue-provisioned read-only git checkout of the RustSec advisory-db at the
+  # PROPOSED-pinned commit. Its identity (commit + tree + canonical content digest) is verified
+  # against the EXPECTED values the venue supplies from the proposed pins — never hardcoded here,
+  # never fetched during an authoritative run. Absent provisioning or any mismatch fails closed:
+  # a missing or altered advisory DB is NEVER a clean audit.
+  local advdb="${ADVISORY_DB_CHECKOUT:-}"
+  [ -n "$advdb" ] && [ -d "$advdb" ] \
+    || nyr "Stage-2 audit for $cand requires a provisioned READ-ONLY advisory-DB checkout at \$ADVISORY_DB_CHECKOUT (RustSec advisory-db at the proposed-pinned commit)"
+  local exp_commit="${ADVISORY_DB_EXPECTED_COMMIT:-}"
+  local exp_tree="${ADVISORY_DB_EXPECTED_TREE:-}"
+  local exp_content="${ADVISORY_DB_EXPECTED_CONTENT_BLAKE3:-}"
+  [ -n "$exp_commit" ] && [ -n "$exp_tree" ] && [ -n "$exp_content" ] \
+    || nyr "Stage-2 audit for $cand requires the EXPECTED advisory-DB identity from the proposed pins (\$ADVISORY_DB_EXPECTED_COMMIT / _TREE / _CONTENT_BLAKE3)"
+  local advdb_commit advdb_tree advdb_content
+  advdb_commit="$(git -C "$advdb" rev-parse HEAD 2>/dev/null || true)"
+  [ -n "$advdb_commit" ] || die "advisory-DB checkout $advdb is not a git checkout (cannot resolve HEAD)"
+  advdb_tree="$(git -C "$advdb" rev-parse 'HEAD^{tree}' 2>/dev/null || true)"
+  [ -n "$advdb_tree" ] || die "advisory-DB checkout $advdb: cannot resolve HEAD tree"
+  advdb_content="$(vv checkout-digest "$advdb")" \
+    || die "advisory-DB checkout $advdb: cannot compute canonical content digest"
+  [ "$advdb_commit" = "$exp_commit" ] \
+    || die "advisory-DB commit $advdb_commit != expected pinned $exp_commit"
+  [ "$advdb_tree" = "$exp_tree" ] \
+    || die "advisory-DB tree $advdb_tree != expected pinned $exp_tree"
+  [ "$advdb_content" = "$exp_content" ] \
+    || die "advisory-DB canonical content digest $advdb_content != expected pinned $exp_content (the checkout was altered)"
+
+  # ---- Structured, NON-executable audit policy (mirrors AuditPolicy in audit.rs; validate()
+  # rejects any record whose policy deviates). TRUSTED CODE below constructs the cargo-audit
+  # argv FROM these fields — no operator-supplied command string is ever executed as authority.
+  local pol_db_update="false"                   # database_update_allowed  -> --no-fetch
+  local pol_stale="true"                        # stale_snapshot_permitted -> --stale
+  local pol_format="json"                       # output_format            -> --json
+  local pol_dbsource="runtime-read-only-mount"  # database_source          -> --db <ro-mount>
+  local incontainer_db="/b0pre/advisory-db"
+  local -a audit_argv=(cargo audit --db "$incontainer_db")
+  [ "$pol_db_update" = "false" ] && audit_argv+=(--no-fetch) \
+    || die "audit policy invariant: database_update_allowed must be false"
+  [ "$pol_stale" = "true" ] && audit_argv+=(--stale) \
+    || die "audit policy invariant: stale_snapshot_permitted must be true"
+  [ "$pol_format" = "json" ] && audit_argv+=(--json) \
+    || die "audit policy invariant: output_format must be json"
+  [ "$pol_dbsource" = "runtime-read-only-mount" ] \
+    || die "audit policy invariant: database_source must be runtime-read-only-mount"
+
   {
     printf 'run_stage2_locked <verified-image> %s <stage1-lock blake3=%s> %s "cargo metadata --format-version 1 --locked"\n' "$cdir" "$lock_hex" "$incontainer_lock"
-    printf 'run_stage2_locked <verified-image> %s <stage1-lock blake3=%s> %s "cargo audit --json"\n' "$cdir" "$lock_hex" "$incontainer_lock"
+    printf 'run_stage2_audit_locked <verified-image> %s <stage1-lock blake3=%s> %s <advisory-db commit=%s content=%s ro-mount=%s> %s\n' \
+      "$cdir" "$lock_hex" "$incontainer_lock" "$advdb_commit" "$advdb_content" "$incontainer_db" "${audit_argv[*]}"
   } > "$cmdlog"
   # TOCTOU: the lock must be byte-unchanged between validation and the container reads.
   [ "$(vv lock-hash "$hostlock")" = "$lock_hex" ] \
@@ -354,10 +415,12 @@ produce_stage2() {
   # error), so the exit code alone is ambiguous; the reliable signal is a VALID cargo-audit
   # JSON body. A missing tool (exit 127), an empty body, or an unparseable body is a HARD
   # failure — NEVER silently converted into a clean audit. A genuine advisory finding is
-  # preserved as valid JSON and classified (fatal) by `vv stage2-generate` downstream.
+  # preserved as valid JSON and classified (fatal) by `vv stage2-generate` downstream. The
+  # audit runs with the advisory-DB mounted READ-ONLY and --no-fetch --stale, so it can never
+  # fetch, update, or mutate the pinned database.
   local audit_rc=0
-  run_stage2_locked "$ref" "$cdir" "$hostlock" "$incontainer_lock" \
-    "cargo audit --json" "$advis" 2>>"$cmdlog" || audit_rc=$?
+  run_stage2_audit_locked "$ref" "$cdir" "$hostlock" "$incontainer_lock" \
+    "$advdb" "$incontainer_db" "$advis" "${audit_argv[@]}" 2>>"$cmdlog" || audit_rc=$?
   [ "$audit_rc" != 127 ] \
     || die "Stage-2 audit could NOT execute for $cand: cargo-audit is not installed in the builder image (exit 127) — a missing tool is never a clean audit"
   [ -s "$advis" ] \
@@ -367,26 +430,51 @@ d=json.load(open(sys.argv[1]))
 assert isinstance(d, dict) and "vulnerabilities" in d
 ' "$advis" 2>/dev/null \
     || die "Stage-2 audit output for $cand is not valid cargo-audit JSON (parse/shape failure; audit could not execute; not a clean audit)"
-  # The read-only mount must not have mutated the host lock (Stage 2 cannot modify it).
+  # The read-only mounts must not have mutated the host lock (Stage 2 cannot modify it).
   [ "$(vv lock-hash "$hostlock")" = "$lock_hex" ] \
     || die "host Stage-1 lock was modified during Stage 2 for $cand (read-only mount violated)"
 
-  local tool_id db_snap
-  tool_id="$(docker run --rm --pull never "$ref" bash -c 'cargo --version; cargo audit --version' \
-    2>/dev/null | tr '\n' ' ' | sed 's/  */ /g; s/ *$//')"
-  db_snap="$(python3 -c 'import json,sys
-d=json.load(open(sys.argv[1])).get("database",{})
-print(d.get("last-commit") or d.get("last-updated") or "unknown")' "$advis" 2>/dev/null || echo unknown)"
+  # cargo-audit identity: the EXACT version output (the unusual `cargo-audit-audit <ver>` form
+  # is captured verbatim as the bound invocation `cargo audit --version`) + the SHA-256 of the
+  # exact executable that ran the scan. Both come from the SAME verified builder image; absence
+  # fails closed (never inferred or defaulted). The executable SHA-256 is VENUE EVIDENCE bound
+  # into the record — NOT an owner-ratified source pin (the ratified inputs are the crate +
+  # version + checksum + packaged-lock checksum + Rust toolchain + build env); it is reproduced
+  # by an independent same-arch operator, else the identity is not blessed (PIN-PROPOSAL.md §6).
+  local ca_ver ca_sha tool_id
+  ca_ver="$(docker run --rm --pull never "$ref" bash -c 'cargo audit --version' 2>/dev/null | head -n1 | sed 's/[[:space:]]*$//' || true)"
+  [ -n "$ca_ver" ] \
+    || die "Stage-2: could not capture the cargo-audit version (\`cargo audit --version\`) in the builder image for $cand"
+  ca_sha="$(docker run --rm --pull never "$ref" bash -c 'p="$(command -v cargo-audit)"; [ -n "$p" ] && sha256sum "$p" | cut -d" " -f1' 2>/dev/null || true)"
+  grep -Eq '^[0-9a-f]{64}$' <<<"$ca_sha" \
+    || die "Stage-2: could not compute the cargo-audit executable SHA-256 in the builder image for $cand"
+  tool_id="$(docker run --rm --pull never "$ref" bash -c 'cargo --version; cargo audit --version' 2>/dev/null | tr '\n' ' ' | sed 's/  */ /g; s/ *$//' || true)"
 
   local params="$work/$cand.stage2-params.json"
   python3 - "$params" "$cand" "$schema_arch" "$builder" "$lock_hex" "$commit" \
-    "${tool_id:-cargo + cargo-audit (in-container)}" "$db_snap" "$STAGE2_ALLOWED_LICENSES" <<'PY'
+    "${tool_id:-cargo + cargo-audit (in-container)}" "$ca_ver" "$ca_sha" \
+    "$advdb_commit" "$advdb_tree" "$advdb_content" \
+    "$pol_db_update" "$pol_stale" "$pol_format" "$pol_dbsource" \
+    "$STAGE2_ALLOWED_LICENSES" <<'PY'
 import json, sys
-path, cand, arch, digest, lock, commit, tool, db, licenses = sys.argv[1:10]
+(path, cand, arch, digest, lock, commit, tool, ca_ver, ca_sha,
+ db_commit, db_tree, db_content,
+ pol_update, pol_stale, pol_format, pol_dbsource, licenses) = sys.argv[1:18]
 json.dump({
     "candidate": cand, "arch": arch, "container_digest": digest,
     "lock_blake3_hex": lock, "source_commit": commit,
-    "audit_tool_identity": tool, "advisory_db_snapshot": db,
+    "audit_tool_identity": tool,
+    "cargo_audit_version": ca_ver,
+    "cargo_audit_executable_sha256": ca_sha,
+    "advisory_db": {
+        "commit": db_commit, "git_tree": db_tree, "content_blake3": db_content,
+    },
+    "audit_policy": {
+        "database_update_allowed": pol_update == "true",
+        "stale_snapshot_permitted": pol_stale == "true",
+        "output_format": pol_format,
+        "database_source": pol_dbsource,
+    },
     "allowed_licenses": json.loads(licenses),
 }, open(path, "w"), indent=2)
 PY
@@ -584,6 +672,13 @@ aggregate() {
   fi
 }
 
+# The first-class TEST_ONLY / NON_SELECTION smoke is a SEPARATE public entry point — scripts/
+# smoke.sh — NOT a subcommand here. It must NEVER share the authoritative producer's dispatch or
+# machinery: it drives the real candidate seams under a DISTINCT smoke source-authority (its own
+# SmokeSourceBinding + b0pre-smoke-runnable-ref-v1 sidecar the authoritative resolver rejects),
+# emits a real-execution attestation SEPARATE from a synthetic-sealed TEST_ONLY bundle, and can
+# never finalize. See smoke.sh + venue::smoke.
+
 # Source-execution guard (shell execution identity, NOT a bypass env var): the
 # authoritative dispatch runs ONLY when this file is EXECUTED as a program
 # (`bash run_authoritative.sh ...`), where ${BASH_SOURCE[0]} == $0. When another
@@ -599,6 +694,6 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
     produce-arch)  produce_arch "${1:-}" "${2:-}" ;;
     import-verify) import_verify "${1:-}" ;;
     aggregate)     aggregate "${1:-}" "${2:-}" "${3:-}" ;;
-    *) die "usage: run_authoritative.sh <produce-arch <arch> <evidence_dir> | import-verify <evidence_dir> | aggregate <x86_dir> <arm_dir> <workdir>>" ;;
+    *) die "usage: run_authoritative.sh <produce-arch <arch> <evidence_dir> | import-verify <evidence_dir> | aggregate <x86_dir> <arm_dir> <workdir>> (the TEST_ONLY smoke is a SEPARATE entry point: smoke.sh)" ;;
   esac
 fi

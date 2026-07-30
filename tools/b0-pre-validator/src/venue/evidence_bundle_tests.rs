@@ -114,13 +114,17 @@ fn write_bundle_files(dir: &Path, arch: &str) {
             ]
         };
         let stage2 = serde_json::json!({
+            "schema_version": crate::venue::audit::STAGE2_SCHEMA_VERSION,
             "candidate": c, "arch": arch,
             "lock_blake3_hex": lock_hash,
             "container_digest": builder_digest,
             "source_commit": COMMIT,
             "command_log_blake3_hex": bh(&format!("stage2cmd-{c}-{arch}")),
-            "audit_tool_identity": "cargo-metadata 1.0 + cargo-audit 0.21",
-            "advisory_db_snapshot": "rustsec-db@2026-07-01",
+            "audit_tool_identity": "cargo-metadata 1.0 + cargo-audit 0.22.2",
+            "cargo_audit_version": "0.22.2",
+            "cargo_audit_executable_sha256": bh(&format!("ca-{c}-{arch}")),
+            "advisory_db": {"commit": "a".repeat(40), "git_tree": "b".repeat(40), "content_blake3": bh("advdb")},
+            "audit_policy": {"database_update_allowed": false, "stale_snapshot_permitted": true, "output_format": "json", "database_source": "runtime-read-only-mount"},
             "allowed_licenses": ["MIT","Apache-2.0","MIT OR Apache-2.0"],
             "nodes": nodes,
             "advisories": [],
