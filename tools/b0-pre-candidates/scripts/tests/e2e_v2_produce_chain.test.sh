@@ -83,11 +83,12 @@ publish = false
 itoa = "=1.0.11"
 E
 printf 'fn main(){println!("{}", itoa::Buffer::new().format(1u8));}\n' > "$CTX$CDIR_IN/src/main.rs"
-# Build the Dockerfile via printf (no heredoc): the shared causal core runs `bash -lc`, so
-# the fixture image mirrors the pinned venue image by putting cargo on the login PATH.
+# Build the Dockerfile via printf (no heredoc). NO artificial PATH repair: the shared
+# cores run NON-login `bash -c`, which honors the base image's `ENV PATH` (cargo on PATH)
+# exactly as the pinned venue image does — the fixture must not repair a PATH defect that
+# would be absent from production (RT-2).
 {
   printf 'FROM %s\n' "$IMG"
-  printf 'RUN mkdir -p /etc/profile.d && printf "export PATH=/usr/local/cargo/bin:\\$PATH\\n" > /etc/profile.d/cargo.sh\n'
   printf 'COPY .%s /work/tools/b0-pre-candidates/candidates/sp1\n' "$CDIR_IN"
   printf 'RUN rm -f %s/Cargo.lock\n' "$CDIR_IN"
 } > "$T/Dockerfile"

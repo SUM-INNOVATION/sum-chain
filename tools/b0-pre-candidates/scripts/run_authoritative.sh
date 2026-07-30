@@ -348,11 +348,25 @@ produce_stage2() {
   run_stage2_locked "$ref" "$cdir" "$hostlock" "$incontainer_lock" \
     "cargo metadata --format-version 1 --locked" "$meta" 2>>"$cmdlog" \
     || die "in-container cargo metadata --locked failed for $cand (Stage-1 lock mount)"
-  # cargo audit EXITS NON-ZERO when it finds advisories; capture its JSON regardless so
-  # the typed audit gate classifies them (fatal). An empty/non-JSON body fails generation.
+  # Stage-2 audit MUST distinguish "audit EXECUTED" (clean, or found advisories) from
+  # "audit could NOT execute" (cargo-audit missing, advisory-DB failure, crash, empty or
+  # unparseable output). cargo audit exits 0 (clean) or non-zero (advisories found OR an
+  # error), so the exit code alone is ambiguous; the reliable signal is a VALID cargo-audit
+  # JSON body. A missing tool (exit 127), an empty body, or an unparseable body is a HARD
+  # failure — NEVER silently converted into a clean audit. A genuine advisory finding is
+  # preserved as valid JSON and classified (fatal) by `vv stage2-generate` downstream.
+  local audit_rc=0
   run_stage2_locked "$ref" "$cdir" "$hostlock" "$incontainer_lock" \
-    "cargo audit --json" "$advis" 2>>"$cmdlog" || true
-  [ -s "$advis" ] || die "in-container cargo audit produced no output for $cand"
+    "cargo audit --json" "$advis" 2>>"$cmdlog" || audit_rc=$?
+  [ "$audit_rc" != 127 ] \
+    || die "Stage-2 audit could NOT execute for $cand: cargo-audit is not installed in the builder image (exit 127) — a missing tool is never a clean audit"
+  [ -s "$advis" ] \
+    || die "Stage-2 audit produced NO output for $cand (audit could not execute; not a clean audit)"
+  python3 -c 'import json,sys
+d=json.load(open(sys.argv[1]))
+assert isinstance(d, dict) and "vulnerabilities" in d
+' "$advis" 2>/dev/null \
+    || die "Stage-2 audit output for $cand is not valid cargo-audit JSON (parse/shape failure; audit could not execute; not a clean audit)"
   # The read-only mount must not have mutated the host lock (Stage 2 cannot modify it).
   [ "$(vv lock-hash "$hostlock")" = "$lock_hex" ] \
     || die "host Stage-1 lock was modified during Stage 2 for $cand (read-only mount violated)"

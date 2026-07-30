@@ -308,7 +308,9 @@ if [ -n "${PROVER_GUEST_INPUT:-}" ]; then
 fi
 
 # ---- PHASE A: generate the prover-runner lock IN-CONTAINER, then BIND it -----------
-GEN_CMD="docker run --rm --pull never -v $OUT_DIR:/out -e CARGO_TARGET_DIR=/tmp/b0pre-prove-target $VERIFIER_REF bash -lc 'cd /out/_prover && cargo generate-lockfile'"
+# NON-login `bash -c` (RT-2): honors the image's `ENV PATH` (cargo + the pinned prover
+# toolchain on PATH); a login shell resets PATH via /etc/profile and loses them.
+GEN_CMD="docker run --rm --pull never -v $OUT_DIR:/out -e CARGO_TARGET_DIR=/tmp/b0pre-prove-target $VERIFIER_REF bash -c 'cd /out/_prover && cargo generate-lockfile'"
 {
   printf '# Stage-5 GENUINE fixture generation (prove frozen %s guest) inside %s\n' "$CAND_LC" "$VERIFIER_REF"
   printf '# upstream proof-tool provenance recorded (NOT claimed to cause this NON_SELECTION fixture): %s\n' "$TOOL_BINDING"
@@ -318,7 +320,7 @@ docker run --rm --pull never \
   -v "$OUT_DIR:/out" \
   -e CARGO_TARGET_DIR=/tmp/b0pre-prove-target \
   "$VERIFIER_REF" \
-  bash -lc 'cd /out/_prover && cargo generate-lockfile' \
+  bash -c 'cd /out/_prover && cargo generate-lockfile' \
   || die "in-container 'cargo generate-lockfile' failed for the $CAND_LC prover-runner (no unlocked build is attempted)"
 [ -s "$OUT_DIR/_prover/Cargo.lock" ] || die "prover-runner Cargo.lock was not generated in-container for $CAND_LC"
 cp "$OUT_DIR/_prover/Cargo.lock" "$OUT_DIR/prover-runner-cargo.lock"
@@ -327,7 +329,7 @@ printf 'prove-runner-cargo-lock\tprover-runner-cargo.lock\tblake3:%s\n' "$PROVER
 
 # ---- PHASE B: build the frozen guest ELF + PROVE it, emit the stamped fixture ------
 mkdir -p "$OUT_DIR/guest"
-RUN_CMD="docker run --rm --pull never -v $OUT_DIR:/out $INPUT_MOUNT -e CARGO_TARGET_DIR=/tmp/b0pre-prove-target $VERIFIER_REF bash -lc '$BUILD_GUEST && cd /out/_prover && cargo run --quiet --release --locked -- $ELF_PATH /out/$FIXTURE_NAME $INPUT_ARG'"
+RUN_CMD="docker run --rm --pull never -v $OUT_DIR:/out $INPUT_MOUNT -e CARGO_TARGET_DIR=/tmp/b0pre-prove-target $VERIFIER_REF bash -c '$BUILD_GUEST && cd /out/_prover && cargo run --quiet --release --locked -- $ELF_PATH /out/$FIXTURE_NAME $INPUT_ARG'"
 printf '%s\n' "$RUN_CMD" >> "$CMD_LOG"
 # shellcheck disable=SC2086  # INPUT_MOUNT intentionally expands to 0-or-2 docker args
 docker run --rm --pull never \
@@ -335,7 +337,7 @@ docker run --rm --pull never \
   $INPUT_MOUNT \
   -e CARGO_TARGET_DIR=/tmp/b0pre-prove-target \
   "$VERIFIER_REF" \
-  bash -lc "$BUILD_GUEST && cd /out/_prover && cargo run --quiet --release --locked -- $ELF_PATH /out/$FIXTURE_NAME $INPUT_ARG" \
+  bash -c "$BUILD_GUEST && cd /out/_prover && cargo run --quiet --release --locked -- $ELF_PATH /out/$FIXTURE_NAME $INPUT_ARG" \
   || die "genuine in-container $CAND_LC guest build + Groth16 proving failed closed (toolchain absent, guest not built, or proving did not reproduce)"
 
 # The genuine fixture must exist, be non-empty, and carry the four NON-SELECTION stamps

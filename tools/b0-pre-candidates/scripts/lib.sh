@@ -217,9 +217,15 @@ gen_lock_in_container() {
 # byte-for-byte the executed file. The runner crate is at $incontainer_runner_dir with its
 # Cargo.lock already generated; $host_out is bind-mounted at /out; the executed-binary
 # sha256 is written to /out/runner-bin.sha256 and the runner lock copied to
-# /out/runner-cargo.lock; optional $fixture_host mounts read-only at /fixture.json. Uses
-# `bash -lc` (the pinned image resolves the toolchain on the login PATH). Shared by
-# verifier_fixtures.sh (real Stage 5) and the real-container E2E.
+# /out/runner-cargo.lock; optional $fixture_host mounts read-only at /fixture.json.
+#
+# DETERMINISTIC EXECUTION ENVIRONMENT (RT-2 fix, authoritative x86 smoke): uses a
+# NON-login `bash -c`, NOT `bash -lc`. The pinned builder image puts cargo on PATH via
+# `ENV PATH="/root/.cargo/bin:$PATH"`, which a non-login shell honors; a LOGIN shell runs
+# /etc/profile, which overwrites PATH and drops /root/.cargo/bin, so `cargo` is not found.
+# The Stage-1/2/material steps already use `bash -c`; this brings Stage 5 in line so the
+# real image, the tests, and the smoke share one environment. Shared by verifier_fixtures.sh
+# (real Stage 5) and the real-container E2E.
 causal_build_hash_exec_runner() {
   local image="$1" incontainer_runner_dir="$2" bin_name="$3" host_out="$4" fixture_host="${5:-}"
   require_cmd docker
@@ -230,7 +236,7 @@ causal_build_hash_exec_runner() {
   # bash 4+ (the Linux venue + CI) expands identically.
   docker run --rm --pull never -v "$host_out:/out" ${fmount[@]+"${fmount[@]}"} \
     -e CARGO_TARGET_DIR=/tmp/b0pre-stage5-target "$image" \
-    bash -lc "cd $incontainer_runner_dir && cargo build --quiet --release --locked && [ -x '$binpath' ] || { echo 'runner binary absent after build' >&2; exit 1; }; sha256sum '$binpath' | awk '{print \$1}' > /out/runner-bin.sha256 && cp $incontainer_runner_dir/Cargo.lock /out/runner-cargo.lock && exec '$binpath' $farg /out"
+    bash -c "cd $incontainer_runner_dir && cargo build --quiet --release --locked && [ -x '$binpath' ] || { echo 'runner binary absent after build' >&2; exit 1; }; sha256sum '$binpath' | awk '{print \$1}' > /out/runner-bin.sha256 && cp $incontainer_runner_dir/Cargo.lock /out/runner-cargo.lock && exec '$binpath' $farg /out"
 }
 
 # The Stage-2 read-only-locked execution core: bind-mount the validated Stage-1 lock

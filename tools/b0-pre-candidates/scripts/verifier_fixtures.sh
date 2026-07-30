@@ -483,7 +483,9 @@ cp "$FIXTURE_ABS" "$OUT_DIR/genuine-fixture.json"
 # A fresh package has no lock, so it is generated inside the pinned image with
 # `cargo generate-lockfile` (NOT --locked) and exported; its BLAKE3 is recorded before
 # any verification runs. The build in PHASE B then runs `--locked` against THIS lock.
-GEN_CMD="docker run --rm --pull never -v $OUT_DIR:/out -e CARGO_TARGET_DIR=/tmp/b0pre-stage5-target $VERIFIER_REF bash -lc 'cd /out/_runner && cargo generate-lockfile'"
+# NON-login `bash -c` (RT-2): the image exposes cargo via `ENV PATH`; a login shell would
+# reset PATH via /etc/profile and lose /root/.cargo/bin. Consistent with Stage 1/2/material.
+GEN_CMD="docker run --rm --pull never -v $OUT_DIR:/out -e CARGO_TARGET_DIR=/tmp/b0pre-stage5-target $VERIFIER_REF bash -c 'cd /out/_runner && cargo generate-lockfile'"
 {
   printf '# Stage-5 genuine verifier+mutation run for %s (%s) inside %s\n' "$CAND_LC" "$SCHEMA_ARCH" "$VERIFIER_REF"
   printf '%s\n' "$GEN_CMD"
@@ -492,7 +494,7 @@ docker run --rm --pull never \
   -v "$OUT_DIR:/out" \
   -e CARGO_TARGET_DIR=/tmp/b0pre-stage5-target \
   "$VERIFIER_REF" \
-  bash -lc 'cd /out/_runner && cargo generate-lockfile' \
+  bash -c 'cd /out/_runner && cargo generate-lockfile' \
   || die "in-container 'cargo generate-lockfile' failed for the $CAND_LC Stage-5 runner (no unlocked build is attempted)"
 [ -s "$OUT_DIR/_runner/Cargo.lock" ] || die "runner Cargo.lock was not generated in-container for $CAND_LC"
 # VALIDATE the generated lock (step 1 of the causal sequence): it must be a parseable

@@ -128,9 +128,18 @@ RUN set -eux; \
 ENV PATH="/root/.cargo/bin:${PATH}"
 RUN rustc --version | grep -q "${RUST_VERSION}"
 
-# The RISC Zero toolchain (rzup / r0vm matching 3.0.5) is installed by the
-# authoritative entrypoint from a pinned version; not baked with a floating
-# installer here.
+# PROVER + AUDIT TOOLCHAIN PROVISIONING — NOT YET IMPLEMENTED (RT-3 / RT-1, authoritative
+# x86 smoke). This image provisions ONLY the base + apt + rustup/cargo 1.88. It does NOT
+# install:
+#   * cargo-audit (Stage-2 `cargo audit` requires it) + a pinned RustSec advisory DB;
+#   * the RISC Zero toolchain (`rzup` / `r0vm` / `cargo risczero`) matching 3.0.5 (x86_64
+#     ONLY — RISC Zero is never installed on aarch64, VENUE.md §2).
+# There is NO ENTRYPOINT; earlier comments referring to an "authoritative entrypoint" that
+# installs these were aspirational and are removed. Installing them requires owner-ratified
+# immutable pins (artifact URL + checksum + install method), like RUSTUP_INIT_URL/SHA256;
+# see docs/b0-pre/venue/PIN-PROPOSAL.md + PIN-COVERAGE.md. Until those pins are ratified and
+# consumed here, the builder-capability preflight fails closed and Stage 2 / Stage 5 cannot
+# execute their audit / prove steps.
 
 WORKDIR /work
 # CURATED, MINIMAL build context: the docker context is the reproduced repo-relative
