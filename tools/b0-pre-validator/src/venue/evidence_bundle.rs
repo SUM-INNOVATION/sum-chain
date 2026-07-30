@@ -37,6 +37,54 @@ use super::tool_install::{InstallMode, ToolBindingRecord};
 pub const EVIDENCE_BUNDLE_KIND: &str = "b0-pre-per-arch-evidence-bundle-v1";
 pub const EVIDENCE_BUNDLE_SCHEMA_VERSION: u32 = 1;
 
+/// A DISTINCT bundle_kind for the first-class TEST_ONLY smoke (strengthened Option A). A smoke
+/// bundle carries all the REAL producer records PLUS the smoke-only source binding / attestation
+/// / substitution-log files, and its ONE synthetic substitution is the Stage-5b tool binding. The
+/// distinct kind is the explicit, sealed classification signal: [`import_verify`] (Authoritative,
+/// the default) REQUIRES [`EVIDENCE_BUNDLE_KIND`] and so REJECTS a smoke bundle outright, while
+/// [`import_verify_test_only`] REQUIRES this kind. There is NO env-var / inferred / permissive
+/// fallback between them.
+pub const SMOKE_BUNDLE_KIND: &str = "b0-pre-per-arch-smoke-evidence-bundle-v1";
+
+/// Import mode — an EXPLICIT, typed selector. `Authoritative` is the only mode the default
+/// `import_verify` / `seal` use; `TestOnly` is reachable ONLY through the explicit
+/// `import_verify_test_only` / `seal_test_only` APIs and their unmistakably-named CLI commands.
+/// Authoritative import is never weakened: it still rejects every synthetic identity and any
+/// smoke-only file. TestOnly import is STRICTER, not weaker (see [`import_verify_test_only`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportMode {
+    Authoritative,
+    TestOnly,
+}
+
+impl ImportMode {
+    fn bundle_kind(self) -> &'static str {
+        match self {
+            ImportMode::Authoritative => EVIDENCE_BUNDLE_KIND,
+            ImportMode::TestOnly => SMOKE_BUNDLE_KIND,
+        }
+    }
+    /// The tool-binding validation mode. Authoritative refuses synthetic; TestOnly REQUIRES the
+    /// unmistakably-synthetic Stage-5b sentinel.
+    fn tool_install_mode(self) -> InstallMode {
+        match self {
+            ImportMode::Authoritative => InstallMode::Authoritative,
+            ImportMode::TestOnly => InstallMode::TestOnly,
+        }
+    }
+}
+
+/// The smoke-only sealed files (present ONLY in a TestOnly bundle): the smoke source binding and,
+/// per candidate that carries a Stage-5 result, the real-execution attestation + the explicit
+/// substitution log. Kept next to [`required_files`] so the two can never drift apart.
+pub const SMOKE_SOURCE_BINDING_FILE: &str = "smoke-source-binding.json";
+fn smoke_attestation_file(c: &str) -> String {
+    format!("{c}.smoke-attestation.json")
+}
+fn substitution_log_file(c: &str) -> String {
+    format!("{c}.substitution-log.json")
+}
+
 /// The sealed manifest file name (never itself listed in `files`).
 pub const MANIFEST_FILE: &str = "arch-evidence-manifest.json";
 
@@ -119,6 +167,25 @@ pub fn required_files(arch: &str) -> Vec<String> {
         v.push(RISC0_MATERIAL.to_string());
     }
     v.sort();
+    v
+}
+
+/// The exact required-file set for `arch` under an import `mode`. Authoritative == exactly
+/// [`required_files`] (byte-for-byte the existing set). TestOnly == that set PLUS the smoke-only
+/// files: the one `smoke-source-binding.json`, and per Stage-5-carrying candidate the
+/// `<Cand>.smoke-attestation.json` + `<Cand>.substitution-log.json`. Because the file set is
+/// compared EXACTLY in both directions, an Authoritative bundle carrying any smoke file is
+/// refused as unmanifested, and a smoke bundle missing any smoke file is refused as missing.
+pub fn required_files_mode(arch: &str, mode: ImportMode) -> Vec<String> {
+    let mut v = required_files(arch);
+    if mode == ImportMode::TestOnly {
+        v.push(SMOKE_SOURCE_BINDING_FILE.to_string());
+        for c in tool_binding_candidates(arch).iter().copied() {
+            v.push(smoke_attestation_file(c));
+            v.push(substitution_log_file(c));
+        }
+        v.sort();
+    }
     v
 }
 
@@ -296,6 +363,13 @@ pub enum EvidenceError {
         kind: &'static str,
         candidate: String,
     },
+    /// A TEST_ONLY smoke rule (strengthened Option A) was violated: the smoke source binding, a
+    /// per-candidate real-execution attestation, or the substitution log binding attestation to
+    /// the actual Stage-5 output was absent / malformed / inconsistent. Authoritative import never
+    /// reaches this (it rejects the smoke bundle_kind first).
+    Smoke {
+        detail: String,
+    },
 }
 
 impl std::fmt::Display for EvidenceError {
@@ -306,9 +380,11 @@ impl std::fmt::Display for EvidenceError {
             EvidenceError::SchemaVersion { got } => {
                 write!(f, "manifest schema_version must be {EVIDENCE_BUNDLE_SCHEMA_VERSION}, got {got}")
             }
-            EvidenceError::BundleKind { got } => {
-                write!(f, "manifest bundle_kind must be {EVIDENCE_BUNDLE_KIND:?}, got {got:?}")
-            }
+            EvidenceError::BundleKind { got } => write!(
+                f,
+                "manifest bundle_kind {got:?} does not match the import mode (authoritative expects \
+                 {EVIDENCE_BUNDLE_KIND:?}; TEST_ONLY smoke expects {SMOKE_BUNDLE_KIND:?})"
+            ),
             EvidenceError::UnknownArch { arch } => write!(f, "unknown bundle arch {arch:?}"),
             EvidenceError::BadSourceCommit { commit } => {
                 write!(f, "bundle source_commit invalid: {commit:?}")
@@ -361,6 +437,7 @@ impl std::fmt::Display for EvidenceError {
             EvidenceError::CandidateCoverage { kind, candidate } => {
                 write!(f, "missing {kind} evidence for candidate {candidate}")
             }
+            EvidenceError::Smoke { detail } => write!(f, "TEST_ONLY smoke rule violated: {detail}"),
         }
     }
 }
@@ -423,6 +500,18 @@ pub fn seal(
     arch: &str,
     source_commit: &str,
 ) -> Result<PerArchEvidenceBundleV1, EvidenceError> {
+    seal_mode(dir, arch, source_commit, ImportMode::Authoritative)
+}
+
+/// Seal a per-arch bundle under an explicit [`ImportMode`]. `Authoritative` is byte-for-byte the
+/// existing seal (kind [`EVIDENCE_BUNDLE_KIND`], the [`required_files`] set); `TestOnly` seals the
+/// smoke kind ([`SMOKE_BUNDLE_KIND`]) over the extended [`required_files_mode`] set.
+pub fn seal_mode(
+    dir: &Path,
+    arch: &str,
+    source_commit: &str,
+    mode: ImportMode,
+) -> Result<PerArchEvidenceBundleV1, EvidenceError> {
     if !is_known_arch(arch) {
         return Err(EvidenceError::UnknownArch {
             arch: arch.to_string(),
@@ -433,7 +522,7 @@ pub fn seal(
             commit: source_commit.to_string(),
         });
     }
-    let required: BTreeSet<String> = required_files(arch).into_iter().collect();
+    let required: BTreeSet<String> = required_files_mode(arch, mode).into_iter().collect();
     // The directory must contain exactly the required files (the manifest is written
     // afterwards). Any extra file is refused; any missing file is refused.
     let mut present: BTreeSet<String> = BTreeSet::new();
@@ -469,7 +558,7 @@ pub fn seal(
     let content = content_hash(arch, source_commit, &files);
     let manifest = PerArchEvidenceBundleV1 {
         schema_version: EVIDENCE_BUNDLE_SCHEMA_VERSION,
-        bundle_kind: EVIDENCE_BUNDLE_KIND.to_string(),
+        bundle_kind: mode.bundle_kind().to_string(),
         arch: arch.to_string(),
         source_commit: source_commit.to_string(),
         files,
@@ -511,6 +600,27 @@ fn builder_digest_for(builds: &[OciBuild], candidate: &str) -> Option<String> {
 /// decodes and validates every typed record and binds them to ONE arch + source
 /// commit. Returns the in-memory typed bundle for aggregation.
 pub fn import_verify(dir: &Path) -> Result<ImportedArchBundle, EvidenceError> {
+    import_verify_mode(dir, ImportMode::Authoritative)
+}
+
+/// Explicit TEST_ONLY smoke import (strengthened Option A). It is STRICTER than Authoritative,
+/// not weaker: on top of the full authoritative record + hash + seal verification it REQUIRES the
+/// smoke bundle kind, the smoke source binding (classification TEST_ONLY / NON_SELECTION, bound to
+/// the sealed source commit), an unmistakably-synthetic Stage-5b tool binding, a real-execution
+/// attestation per candidate, and an explicit substitution log binding that attestation to the
+/// ACTUAL Stage-5 executed binary. It NEVER accepts an authoritative bundle, a real Stage-5b
+/// binding, or a bundle missing the substitution evidence. There is no env-var / inferred path
+/// here — the caller selects this explicitly.
+pub fn import_verify_test_only(dir: &Path) -> Result<ImportedArchBundle, EvidenceError> {
+    import_verify_mode(dir, ImportMode::TestOnly)
+}
+
+/// Import-verify under an explicit [`ImportMode`]. Authoritative is byte-for-byte the prior
+/// behavior; TestOnly additionally enforces the smoke rules (see [`import_verify_test_only`]).
+pub fn import_verify_mode(
+    dir: &Path,
+    mode: ImportMode,
+) -> Result<ImportedArchBundle, EvidenceError> {
     // (1) sealed manifest.
     let manifest_bytes = read_file(dir, MANIFEST_FILE)?;
     let manifest: PerArchEvidenceBundleV1 = parse(MANIFEST_FILE, &manifest_bytes)?;
@@ -519,7 +629,9 @@ pub fn import_verify(dir: &Path) -> Result<ImportedArchBundle, EvidenceError> {
             got: manifest.schema_version,
         });
     }
-    if manifest.bundle_kind != EVIDENCE_BUNDLE_KIND {
+    // The bundle KIND is the explicit, sealed classification: Authoritative import requires the
+    // authoritative kind (and so rejects a smoke bundle here), TestOnly requires the smoke kind.
+    if manifest.bundle_kind != mode.bundle_kind() {
         return Err(EvidenceError::BundleKind {
             got: manifest.bundle_kind,
         });
@@ -536,8 +648,8 @@ pub fn import_verify(dir: &Path) -> Result<ImportedArchBundle, EvidenceError> {
     }
     let arch = manifest.arch.clone();
 
-    // (2) coverage: the manifest must list EXACTLY the required files for this arch.
-    let required: BTreeSet<String> = required_files(&arch).into_iter().collect();
+    // (2) coverage: the manifest must list EXACTLY the required files for this arch + mode.
+    let required: BTreeSet<String> = required_files_mode(&arch, mode).into_iter().collect();
     let listed: BTreeSet<String> = manifest.files.iter().map(|f| f.name.clone()).collect();
     if listed.len() != manifest.files.len() {
         return Err(EvidenceError::Parse {
@@ -809,7 +921,9 @@ pub fn import_verify(dir: &Path) -> Result<ImportedArchBundle, EvidenceError> {
         }
         let expected = builder_digest_for(&builds, c).unwrap_or_default();
         for rec in &recs {
-            rec.validate(InstallMode::Authoritative)
+            // Authoritative refuses a synthetic identity; TestOnly REQUIRES the synthetic Stage-5b
+            // sentinel. This is the ONE record whose acceptance differs by mode.
+            rec.validate(mode.tool_install_mode())
                 .map_err(|e| EvidenceError::Tool {
                     candidate: c.to_string(),
                     error: e.to_string(),
@@ -950,6 +1064,97 @@ pub fn import_verify(dir: &Path) -> Result<ImportedArchBundle, EvidenceError> {
             }
         }
         stage5_results.push(res);
+    }
+
+    // (TestOnly) strengthened Option A smoke rules — STRICTER than authoritative, reached ONLY for
+    // a smoke bundle (the authoritative path already rejected the smoke bundle_kind). Every rule
+    // MUST hold. The authoritative records above were verified identically to an authoritative
+    // bundle; the ONLY relaxations are the synthetic Stage-5b tool binding (validated TestOnly in
+    // step 11) and the presence of the smoke-only files — and each of those is here required and
+    // cross-bound, so the smoke bundle can never masquerade as (or be finalized as) authoritative.
+    if mode == ImportMode::TestOnly {
+        use crate::venue::smoke::{
+            SmokeClass, SmokeExecutionAttestation, SmokeSourceBinding, SubstitutionLog,
+        };
+        let smoke_err = |d: String| EvidenceError::Smoke { detail: d };
+        let host_arch = match arch.as_str() {
+            "X86_64" => "x86_64",
+            "Aarch64" => "aarch64",
+            other => other,
+        };
+        // (a) the smoke SOURCE binding: classification TEST_ONLY / NON_SELECTION, bound to the
+        //     sealed source commit (the clean PR-head).
+        let src: SmokeSourceBinding = parse(
+            SMOKE_SOURCE_BINDING_FILE,
+            &read_file(dir, SMOKE_SOURCE_BINDING_FILE)?,
+        )?;
+        src.validate()
+            .map_err(|e| smoke_err(format!("source binding: {e}")))?;
+        match src.classification {
+            SmokeClass::TestOnly | SmokeClass::NonSelection => {}
+        }
+        if src.source_pr_head != manifest.source_commit {
+            return Err(smoke_err(format!(
+                "source binding pr_head {} != sealed source_commit {}",
+                src.source_pr_head, manifest.source_commit
+            )));
+        }
+        // (b) per Stage-5-carrying candidate: a synthetic Stage-5b tool binding (already validated
+        //     synthetic in step 11), a real-execution attestation, and a substitution log binding
+        //     that attestation to the ACTUAL Stage-5 executed binary.
+        for c in tool_binding_candidates(&arch).iter().copied() {
+            let tb = tool_bindings
+                .iter()
+                .find(|t| t.candidate == c)
+                .ok_or_else(|| smoke_err(format!("{c}: no tool binding to substitute")))?;
+            let af = smoke_attestation_file(c);
+            let att: SmokeExecutionAttestation = parse(&af, &read_file(dir, &af)?)?;
+            att.validate()
+                .map_err(|e| smoke_err(format!("{c} attestation: {e}")))?;
+            if att.candidate != c {
+                return Err(smoke_err(format!(
+                    "{c} attestation candidate {} != {c}",
+                    att.candidate
+                )));
+            }
+            if att.arch != host_arch {
+                return Err(smoke_err(format!(
+                    "{c} attestation arch {} != bundle arch {host_arch}",
+                    att.arch
+                )));
+            }
+            let sf = substitution_log_file(c);
+            let sub: SubstitutionLog = parse(&sf, &read_file(dir, &sf)?)?;
+            // the substitution log is OF this exact attestation ...
+            if sub.attestation_hash != att.attestation_hash() {
+                return Err(smoke_err(format!(
+                    "{c}: substitution attestation_hash does not match the attestation"
+                )));
+            }
+            // ... and its synthetic sentinel is EXACTLY the synthetic identity sealed into the
+            // bundle's tool binding (so the substitution is of the identity actually present).
+            if sub.synthetic_sentinel != tb.artifact_identity {
+                return Err(smoke_err(format!(
+                    "{c}: substitution sentinel != the sealed synthetic tool-binding identity"
+                )));
+            }
+            // CAUSAL binding: the attestation must attest the EXACT binary the Stage-5 result
+            // recorded as executed — so the sealed synthetic identity substitutes for a REAL run.
+            let s5 = stage5_results
+                .iter()
+                .find(|r| r.candidate == c)
+                .ok_or_else(|| smoke_err(format!("{c}: no Stage-5 result to bind")))?;
+            if !att
+                .executables
+                .iter()
+                .any(|e| e.point_of_use_sha256 == s5.verifier_executed_binary_sha256)
+            {
+                return Err(smoke_err(format!(
+                    "{c}: attestation does not attest the Stage-5 executed binary {}",
+                    s5.verifier_executed_binary_sha256
+                )));
+            }
+        }
     }
 
     Ok(ImportedArchBundle {

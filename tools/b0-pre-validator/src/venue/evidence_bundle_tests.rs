@@ -762,3 +762,341 @@ fn aggregation_sources_risc0_material_only_from_x86() {
     std::fs::remove_dir_all(&arm).ok();
     std::fs::remove_dir_all(&arm_only).ok();
 }
+
+// ============================================================================
+// Strengthened Option A: the TEST_ONLY smoke bundle trust-path (crafted, complete,
+// locally sealed + imported — no x86 venue needed to validate the quarantine logic).
+//
+// A smoke bundle = every REAL producer record (as written by `write_bundle_files`) with the
+// ONE synthetic substitution being the Stage-5b tool binding, PLUS the smoke-only files:
+// `smoke-source-binding.json`, `<Cand>.smoke-attestation.json`, `<Cand>.substitution-log.json`.
+// It is sealed under `ImportMode::TestOnly` (kind `SMOKE_BUNDLE_KIND`).
+//   * `import_verify_test_only` ACCEPTS it under the strict smoke rules.
+//   * `import_verify` (Authoritative) REJECTS the IDENTICAL bytes (bundle_kind).
+// ============================================================================
+use crate::venue::smoke::{
+    SmokeClass, SmokeExecutable, SmokeExecutionAttestation, SmokeSourceBinding, SubstitutionLog,
+};
+
+fn host_arch(arch: &str) -> &'static str {
+    if arch == "X86_64" {
+        "x86_64"
+    } else {
+        "aarch64"
+    }
+}
+fn synthetic_stage5b_id(c: &str) -> String {
+    format!("TEST_ONLY_SYNTHETIC://{}-stage5b-verifier", c.to_lowercase())
+}
+fn runbin(c: &str, arch: &str) -> String {
+    // MUST equal the Stage-5 result's verifier_executed_binary_sha256 in write_bundle_files.
+    bh(&format!("runbin-{}-{arch}", c.to_lowercase()))
+}
+
+fn write_synthetic_tool_binding(dir: &Path, c: &str, arch: &str) {
+    let builder = oci(&format!("builder-{}-{arch}", c.to_lowercase()));
+    let bindings = serde_json::json!([{
+        "candidate": c, "name": "stage5b-verifier", "version": "0.0.0",
+        "artifact_identity": synthetic_stage5b_id(c), "checksum_algorithm": "sha256",
+        "declared_checksum_hex": bh("syn-decl"), "verified_artifact_hex": bh("syn-decl"),
+        "installed_binary_sha256_hex": bh("syn-inst"),
+        "install_entrypoint": format!("TEST_ONLY_SYNTHETIC:cargo:{}-stage5b", c.to_lowercase()),
+        "container_digest": builder, "source_commit": COMMIT, "test_only": true,
+    }]);
+    write(dir, &tool_binding_file(c), serde_json::to_vec_pretty(&bindings).unwrap().as_slice());
+}
+fn write_real_tool_binding(dir: &Path, c: &str, arch: &str) {
+    let builder = oci(&format!("builder-{}-{arch}", c.to_lowercase()));
+    let declared = bh("artifact-real");
+    let bindings = serde_json::json!([{
+        "candidate": c, "name": "sp1-verifier", "version": "6.3.1",
+        "artifact_identity": "https://fixtures.invalid/sp1-verifier-6.3.1.tar",
+        "checksum_algorithm": "sha256", "declared_checksum_hex": declared,
+        "verified_artifact_hex": declared, "installed_binary_sha256_hex": bh("installed-real"),
+        "install_entrypoint": "cargo:sp1-verifier@6.3.1",
+        "container_digest": builder, "source_commit": COMMIT, "test_only": false,
+    }]);
+    write(dir, &tool_binding_file(c), serde_json::to_vec_pretty(&bindings).unwrap().as_slice());
+}
+
+fn smoke_attestation(c: &str, arch: &str) -> SmokeExecutionAttestation {
+    SmokeExecutionAttestation {
+        schema_version: 1,
+        classification: SmokeClass::TestOnly,
+        candidate: c.to_string(),
+        arch: host_arch(arch).to_string(),
+        container_digest: oci(&format!("builder-{}-{arch}", c.to_lowercase())),
+        source_pr_head: COMMIT.to_string(),
+        executables: vec![SmokeExecutable {
+            executable_name: "stage5-runner".into(),
+            version_output: "sp1-verifier 6.3.1".into(),
+            checksum_verified_hex: bh("dl"),
+            point_of_use_sha256: runbin(c, arch), // == the Stage-5 executed binary
+            produced_output_blake3: bh("out"),
+        }],
+    }
+}
+
+fn write_smoke_bundle_files(dir: &Path, arch: &str) {
+    write_bundle_files(dir, arch);
+    let src = SmokeSourceBinding {
+        schema_version: 1,
+        classification: SmokeClass::TestOnly,
+        source_pr_head: COMMIT.to_string(),
+        note: "crafted smoke bundle".into(),
+    };
+    write(dir, SMOKE_SOURCE_BINDING_FILE, serde_json::to_vec_pretty(&src).unwrap().as_slice());
+    for c in tool_binding_candidates(arch).iter().copied() {
+        write_synthetic_tool_binding(dir, c, arch);
+        let att = smoke_attestation(c, arch);
+        write(dir, &smoke_attestation_file(c), serde_json::to_vec_pretty(&att).unwrap().as_slice());
+        let sub = SubstitutionLog {
+            reason: "crafted".into(),
+            real_executables: vec![("stage5-runner".into(), runbin(c, arch))],
+            synthetic_sentinel: synthetic_stage5b_id(c),
+            attestation_hash: att.attestation_hash(),
+        };
+        write(dir, &substitution_log_file(c), serde_json::to_vec_pretty(&sub).unwrap().as_slice());
+    }
+}
+fn sealed_smoke_bundle(tag: &str, arch: &str) -> PathBuf {
+    let dir = tmpdir(tag);
+    write_smoke_bundle_files(&dir, arch);
+    seal_mode(&dir, arch, COMMIT, ImportMode::TestOnly).expect("seal a complete smoke bundle");
+    dir
+}
+fn reseal_smoke(dir: &Path, arch: &str) {
+    std::fs::remove_file(dir.join(MANIFEST_FILE)).ok();
+    seal_mode(dir, arch, COMMIT, ImportMode::TestOnly).expect("reseal smoke");
+}
+
+// ---- ACCEPTANCE + the one-way quarantine ------------------------------------
+#[test]
+fn smoke_testonly_accepts_and_authoritative_rejects_the_identical_bundle() {
+    for arch in ["X86_64", "Aarch64"] {
+        let dir = sealed_smoke_bundle("smoke-ok", arch);
+        import_verify_test_only(&dir).expect("TestOnly import must accept a valid smoke bundle");
+        // The IDENTICAL sealed bytes: Authoritative import rejects on bundle_kind (quarantine).
+        assert!(
+            matches!(import_verify(&dir), Err(EvidenceError::BundleKind { .. })),
+            "Authoritative import must reject the smoke bundle"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[test]
+fn testonly_cannot_import_an_authoritative_bundle() {
+    let dir = sealed_bundle("auth-for-testonly", "X86_64");
+    assert!(
+        matches!(import_verify_test_only(&dir), Err(EvidenceError::BundleKind { .. })),
+        "TestOnly import must reject an authoritative bundle"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn authoritative_import_refuses_a_synthetic_stage5b_binding() {
+    // Authoritative-KIND bundle whose Stage-5b tool binding is synthetic -> rejected.
+    let dir = tmpdir("auth-synthetic-tb");
+    write_bundle_files(&dir, "X86_64");
+    write_synthetic_tool_binding(&dir, "Sp1", "X86_64");
+    write_synthetic_tool_binding(&dir, "Risc0", "X86_64");
+    seal(&dir, "X86_64", COMMIT).expect("seal authoritative");
+    assert!(
+        matches!(import_verify(&dir), Err(EvidenceError::Tool { .. })),
+        "Authoritative import must refuse a synthetic tool binding"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ---- TestOnly is STRICTER: each smoke rule, mutated, must fail ---------------
+#[test]
+fn testonly_refuses_a_real_stage5b_binding() {
+    let dir = tmpdir("smoke-real-tb");
+    write_smoke_bundle_files(&dir, "X86_64");
+    write_real_tool_binding(&dir, "Sp1", "X86_64"); // non-synthetic -> TestOnly must refuse
+    reseal_smoke(&dir, "X86_64");
+    assert!(matches!(import_verify_test_only(&dir), Err(EvidenceError::Tool { .. })));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn testonly_refuses_missing_attestation_or_substitution() {
+    // Missing attestation -> the exact required-file set rejects it at seal time.
+    let dir = tmpdir("smoke-no-att");
+    write_smoke_bundle_files(&dir, "X86_64");
+    std::fs::remove_file(dir.join(smoke_attestation_file("Sp1"))).unwrap();
+    assert!(matches!(
+        seal_mode(&dir, "X86_64", COMMIT, ImportMode::TestOnly),
+        Err(EvidenceError::MissingFile { .. })
+    ));
+    std::fs::remove_dir_all(&dir).ok();
+    // Missing substitution log -> likewise.
+    let dir = tmpdir("smoke-no-sub");
+    write_smoke_bundle_files(&dir, "X86_64");
+    std::fs::remove_file(dir.join(substitution_log_file("Sp1"))).unwrap();
+    assert!(matches!(
+        seal_mode(&dir, "X86_64", COMMIT, ImportMode::TestOnly),
+        Err(EvidenceError::MissingFile { .. })
+    ));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn testonly_refuses_attestation_that_disagrees_with_stage5_execution() {
+    let dir = tmpdir("smoke-att-disagree");
+    write_smoke_bundle_files(&dir, "X86_64");
+    // Break the causal binding: attestation point-of-use != the Stage-5 executed binary.
+    let mut att = smoke_attestation("Sp1", "X86_64");
+    att.executables[0].point_of_use_sha256 = bh("a-different-binary");
+    write(&dir, &smoke_attestation_file("Sp1"), serde_json::to_vec_pretty(&att).unwrap().as_slice());
+    // keep the substitution log consistent with THIS attestation so we isolate the causal check.
+    let sub = SubstitutionLog {
+        reason: "x".into(),
+        real_executables: vec![("stage5-runner".into(), att.executables[0].point_of_use_sha256.clone())],
+        synthetic_sentinel: synthetic_stage5b_id("Sp1"),
+        attestation_hash: att.attestation_hash(),
+    };
+    write(&dir, &substitution_log_file("Sp1"), serde_json::to_vec_pretty(&sub).unwrap().as_slice());
+    reseal_smoke(&dir, "X86_64");
+    assert!(matches!(import_verify_test_only(&dir), Err(EvidenceError::Smoke { .. })));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn testonly_refuses_substitution_not_bound_to_attestation_or_sealed_identity() {
+    // (a) substitution attestation_hash mismatch.
+    let dir = tmpdir("smoke-sub-hash");
+    write_smoke_bundle_files(&dir, "X86_64");
+    rewrite_json(&dir, &substitution_log_file("Sp1"), |v| {
+        v["attestation_hash"] = serde_json::json!(bh("wrong-hash"));
+    });
+    reseal_smoke(&dir, "X86_64");
+    assert!(matches!(import_verify_test_only(&dir), Err(EvidenceError::Smoke { .. })));
+    std::fs::remove_dir_all(&dir).ok();
+    // (b) substitution sentinel != the sealed synthetic tool-binding identity.
+    let dir = tmpdir("smoke-sub-sentinel");
+    write_smoke_bundle_files(&dir, "X86_64");
+    rewrite_json(&dir, &substitution_log_file("Sp1"), |v| {
+        v["synthetic_sentinel"] = serde_json::json!("TEST_ONLY_SYNTHETIC://something-else");
+    });
+    reseal_smoke(&dir, "X86_64");
+    assert!(matches!(import_verify_test_only(&dir), Err(EvidenceError::Smoke { .. })));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn testonly_refuses_source_binding_not_bound_to_sealed_commit() {
+    let dir = tmpdir("smoke-src-commit");
+    write_smoke_bundle_files(&dir, "X86_64");
+    rewrite_json(&dir, SMOKE_SOURCE_BINDING_FILE, |v| {
+        v["source_pr_head"] = serde_json::json!("f".repeat(40));
+    });
+    reseal_smoke(&dir, "X86_64");
+    assert!(matches!(import_verify_test_only(&dir), Err(EvidenceError::Smoke { .. })));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn smoke_v1_stage5result_is_refused() {
+    let dir = tmpdir("smoke-v1-stage5");
+    write_smoke_bundle_files(&dir, "X86_64");
+    rewrite_json(&dir, &stage5_file("Sp1"), |v| {
+        let o = v.as_object_mut().unwrap();
+        o.remove("schema_version");
+        o.remove("verifier_executed_binary_sha256");
+        o.remove("verifier_sdk_lock_blake3");
+        o.insert("tool_identity_hex".into(), serde_json::json!("a".repeat(64)));
+    });
+    reseal_smoke(&dir, "X86_64");
+    assert!(matches!(
+        import_verify_test_only(&dir),
+        Err(EvidenceError::Stage5 { .. } | EvidenceError::Parse { .. })
+    ));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn smoke_altered_sealed_runner_lock_is_refused() {
+    let dir = tmpdir("smoke-alter-lock");
+    write_smoke_bundle_files(&dir, "X86_64");
+    seal_mode(&dir, "X86_64", COMMIT, ImportMode::TestOnly).expect("seal");
+    // tamper the sealed runner lock AFTER sealing -> recomputed hash != manifest.
+    let lf = stage5_runner_lock_file("Sp1");
+    let mut bytes = std::fs::read(dir.join(&lf)).unwrap();
+    bytes.extend_from_slice(b"\n# tampered\n");
+    std::fs::write(dir.join(&lf), &bytes).unwrap();
+    assert!(matches!(import_verify_test_only(&dir), Err(EvidenceError::FileHashMismatch { .. })));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn smoke_post_seal_source_or_classification_mutation_is_refused() {
+    // (a) mutate the sealed manifest source_commit -> content hash / commit check fails.
+    let dir = sealed_smoke_bundle("smoke-mutate-src", "X86_64");
+    rewrite_json(&dir, MANIFEST_FILE, |v| {
+        v["source_commit"] = serde_json::json!("b".repeat(40));
+    });
+    assert!(import_verify_test_only(&dir).is_err(), "post-seal source mutation must be refused");
+    std::fs::remove_dir_all(&dir).ok();
+    // (b) mutate the sealed source-binding classification -> file hash mismatch.
+    let dir = sealed_smoke_bundle("smoke-mutate-cls", "X86_64");
+    rewrite_json(&dir, SMOKE_SOURCE_BINDING_FILE, |v| {
+        v["classification"] = serde_json::json!("NON_SELECTION");
+    });
+    assert!(
+        matches!(import_verify_test_only(&dir), Err(EvidenceError::FileHashMismatch { .. })),
+        "post-seal classification mutation must break the seal"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ---- LINEAGE: every sealed file is the real producer output; ONLY Stage-5b is synthetic -----
+#[test]
+fn smoke_bundle_lineage_only_stage5b_synthetic_every_file_is_producer_output() {
+    for arch in ["X86_64", "Aarch64"] {
+        let dir = tmpdir("smoke-lineage");
+        write_smoke_bundle_files(&dir, arch);
+        // Capture the producer output bytes per file BEFORE sealing.
+        let mut producer: std::collections::BTreeMap<String, Vec<u8>> = Default::default();
+        for name in required_files_mode(arch, ImportMode::TestOnly) {
+            producer.insert(name.clone(), std::fs::read(dir.join(&name)).unwrap());
+        }
+        let manifest = seal_mode(&dir, arch, COMMIT, ImportMode::TestOnly).expect("seal smoke");
+        // (a) byte/hash equality: every sealed file == its producer output (seal added nothing).
+        assert_eq!(manifest.files.len(), producer.len());
+        for mf in &manifest.files {
+            let bytes = producer.get(&mf.name).expect("sealed file was a producer output");
+            assert_eq!(
+                mf.blake3_hex,
+                crate::venue::to_hex(blake3::hash(bytes).as_bytes()),
+                "sealed {} != its producer output",
+                mf.name
+            );
+            assert_eq!(mf.byte_len, bytes.len() as u64);
+        }
+        // (b) ONLY the Stage-5b tool binding is synthetic. Every REAL substantive record (container,
+        //     native, lock, provenance, stage2 audit, stage5 result, runner lock, material) MUST
+        //     be free of the synthetic sentinel — proving nothing but the tool identity was
+        //     substituted. (The smoke-only files legitimately reference the sentinel.)
+        for (name, bytes) in &producer {
+            let smoke_only = name.ends_with(".tool-binding.json")
+                || name == SMOKE_SOURCE_BINDING_FILE
+                || name.ends_with(".smoke-attestation.json")
+                || name.ends_with(".substitution-log.json");
+            let has_sentinel = String::from_utf8_lossy(bytes).contains("TEST_ONLY_SYNTHETIC");
+            if name.ends_with(".tool-binding.json") {
+                assert!(has_sentinel, "{name} must carry the synthetic Stage-5b sentinel");
+            }
+            if !smoke_only {
+                assert!(
+                    !has_sentinel,
+                    "REAL producer record {name} must NOT carry the synthetic sentinel (lineage)"
+                );
+            }
+        }
+        import_verify_test_only(&dir).expect("the lineage smoke bundle imports TestOnly");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}

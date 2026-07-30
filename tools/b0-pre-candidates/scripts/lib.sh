@@ -532,6 +532,28 @@ INCONTAINER_ROOT="/work"
 # sumchain-wire at /work/crates/sumchain-wire, exactly as in the source tree.
 incontainer_candidate_dir() { printf '%s/tools/b0-pre-candidates/candidates/%s' "$INCONTAINER_ROOT" "$1"; }
 
+# The Stage-1 schema arch name (X86_64 / Aarch64) for a host arch. Shared by the authoritative
+# producer and the TEST_ONLY smoke so both map arches identically (single source of truth).
+schema_arch_of() {
+  case "$1" in
+    x86_64|amd64) printf 'X86_64' ;;
+    aarch64|arm64) printf 'Aarch64' ;;
+    *) die "arch must be x86_64|aarch64 (got '${1:-}')" ;;
+  esac
+}
+
+# The builder-image digest a producer recorded for (candidate, arch) in the work dir. Shared by
+# the authoritative producer and the TEST_ONLY smoke (read-only accessor over container.json).
+builder_digest_of() {
+  local cand="$1" arch="$2" work="$3"
+  python3 - "$work/$cand.$arch.container.json" <<'PY'
+import json, sys
+builds = json.load(open(sys.argv[1]))
+b = next(x for x in builds if x["role"] == "builder")
+print(b["builder_oci_digest"])
+PY
+}
+
 # The real repo root (two levels above tools/b0-pre-candidates). ROOT is set by every
 # script that sources this lib to tools/b0-pre-candidates.
 repo_root() { (cd "$ROOT/../.." && pwd); }

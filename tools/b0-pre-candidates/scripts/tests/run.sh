@@ -14,7 +14,7 @@ echo "== bash -n (syntax) =="
 for s in lib.sh verify_pins.sh run_authoritative.sh build_container.sh preflight_venue.sh smoke.sh \
          tool_identities.sh resolve_lock.sh extract_material.sh verifier_fixtures.sh prove_fixture.sh \
          tests/disk_free_gib.test.sh tests/pin_schema.test.sh tests/pin_cargo_audit_advdb.test.sh tests/source_authority.test.sh \
-         tests/smoke_guards.test.sh \
+         tests/smoke_guards.test.sh tests/smoke_orchestration.test.sh \
          tests/pin_url_policy.test.sh tests/oci_platform.test.sh tests/tool_identity_arch.test.sh \
          tests/apt_pins.test.sh tests/tool_identity_threading.test.sh tests/oci_daemon_bridge.test.sh \
          tests/build_reproducibility.test.sh tests/runnable_ref_sidecar.test.sh tests/rustup_components.test.sh \
@@ -30,6 +30,7 @@ if command -v shellcheck >/dev/null 2>&1; then
       "$SCRIPTS/lib.sh" "$SCRIPTS/verify_pins.sh" "$SCRIPTS/preflight_venue.sh" "$SCRIPTS/run_authoritative.sh" \
       "$SCRIPTS/build_container.sh" "$SCRIPTS/tool_identities.sh" "$SCRIPTS/resolve_lock.sh" \
       "$SCRIPTS/extract_material.sh" "$SCRIPTS/smoke.sh" "$SCRIPTS/tests/smoke_guards.test.sh" \
+      "$SCRIPTS/tests/smoke_orchestration.test.sh" \
       "$SCRIPTS/tests/disk_free_gib.test.sh" "$SCRIPTS/tests/pin_schema.test.sh" \
       "$SCRIPTS/tests/source_authority.test.sh" "$SCRIPTS/tests/pin_url_policy.test.sh" \
       "$SCRIPTS/tests/oci_platform.test.sh" "$SCRIPTS/tests/tool_identity_arch.test.sh" \
@@ -52,6 +53,9 @@ bash "$HERE/pin_schema.test.sh"        || rc=1
 bash "$HERE/pin_cargo_audit_advdb.test.sh"   || rc=1
 # TEST_ONLY smoke source-authority guards + smoke/authoritative schema split (no Docker/network).
 bash "$HERE/smoke_guards.test.sh"      || rc=1
+# TEST_ONLY smoke post-build orchestration: source guard, failure propagation, output isolation,
+# marker absence on failure, and the three authoritative rejection proofs (no Docker/network).
+bash "$HERE/smoke_orchestration.test.sh"  || rc=1
 bash "$HERE/source_authority.test.sh"  || rc=1
 bash "$HERE/pin_url_policy.test.sh"    || rc=1
 bash "$HERE/oci_platform.test.sh"      || rc=1

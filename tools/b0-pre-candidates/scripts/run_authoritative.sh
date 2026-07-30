@@ -64,13 +64,8 @@ vv() {
   fi
 }
 
-schema_arch_of() {
-  case "$1" in
-    x86_64|amd64) printf 'X86_64' ;;
-    aarch64|arm64) printf 'Aarch64' ;;
-    *) die "arch must be x86_64|aarch64 (got '${1:-}')" ;;
-  esac
-}
+# schema_arch_of + builder_digest_of moved to lib.sh (shared single source of truth for the
+# authoritative producer AND the TEST_ONLY smoke).
 
 # The single source_commit every typed record in a sealed-candidate evidence dir is
 # bound to. `seal-bundle` records it; `import-bundle` then binds every typed record to
@@ -102,16 +97,7 @@ print(json.load(open(sys.argv[1]))["source_commit"])
 PY
 }
 
-# The builder image digest a producer recorded for (candidate, arch) in the work dir.
-builder_digest_of() {
-  local cand="$1" arch="$2" work="$3"
-  python3 - "$work/$cand.$arch.container.json" <<'PY'
-import json, sys
-builds = json.load(open(sys.argv[1]))
-b = next(x for x in builds if x["role"] == "builder")
-print(b["builder_oci_digest"])
-PY
-}
+# builder_digest_of / schema_arch_of are defined in lib.sh (shared with the TEST_ONLY smoke).
 
 # Defect 2: the runnable, VERIFIED local image reference for a (candidate, arch). build_
 # container.sh loaded the verified OCI layout into the daemon, PROVED the loaded image
@@ -320,9 +306,13 @@ STAGE2_ALLOWED_LICENSES='["MIT","Apache-2.0","MIT OR Apache-2.0","Apache-2.0 OR 
 # source-commit/commands). No operator-authored graph/advisory JSON is accepted; a fatal
 # finding (wrong pin, bad source, advisory, disallowed license) exits non-zero.
 produce_stage2() {
-  local cand="$1" arch="$2" schema_arch="$3" work="$4"
+  local cand="$1" arch="$2" schema_arch="$3" work="$4" ref_override="${5:-}"
   local lc; lc="$(printf '%s' "$cand" | tr '[:upper:]' '[:lower:]')"
-  local ref; ref="$(runnable_ref_of "$lc" "$arch" "$work")"  # Defect 2: verified loaded image
+  # Ref resolution is the CALLER's seam: the authoritative producer passes nothing and the
+  # verified AUTHORITATIVE runnable ref is resolved here (byte-for-byte the prior behavior); the
+  # separate TEST_ONLY smoke passes its resolve_smoke_runnable_ref image. The record binding below
+  # is otherwise IDENTICAL in both modes.
+  local ref; ref="${ref_override:-$(runnable_ref_of "$lc" "$arch" "$work")}"  # Defect 2: verified loaded image
   local builder commit lock_hex
   builder="$(builder_digest_of "$lc" "$arch" "$work")"
   commit="$(git -C "$ROOT" rev-parse HEAD)"
@@ -489,9 +479,11 @@ PY
 # from the individual outcomes (a supplied pass is NEVER accepted), hashes the raw
 # artifacts, and binds the record. No operator-authored result JSON is accepted.
 produce_stage5() {
-  local cand="$1" arch="$2" schema_arch="$3" work="$4"
+  local cand="$1" arch="$2" schema_arch="$3" work="$4" ref_override="${5:-}"
   local lc; lc="$(printf '%s' "$cand" | tr '[:upper:]' '[:lower:]')"
-  local ref; ref="$(runnable_ref_of "$lc" "$arch" "$work")"  # Defect 2: verified loaded image
+  # Caller-provided ref seam (see produce_stage2): authoritative resolves the verified ref here;
+  # the TEST_ONLY smoke passes its smoke ref. The causal Stage-5 binding is identical in both.
+  local ref; ref="${ref_override:-$(runnable_ref_of "$lc" "$arch" "$work")}"  # Defect 2: verified loaded image
   local builder commit
   builder="$(builder_digest_of "$lc" "$arch" "$work")"
   commit="$(git -C "$ROOT" rev-parse HEAD)"

@@ -320,7 +320,8 @@ impl SmokeSourceBinding {
 /// The EXPLICIT, LOGGED record of substituting the synthetic sentinel identity for the real one
 /// in the sealed TEST_ONLY bundle. Returned only after the attestation AGREES with the actual
 /// Stage-5 execution — the substitution is never silent.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SubstitutionLog {
     pub reason: String,
     /// The real executables (name + point-of-use hash) the smoke actually ran, preserved in the

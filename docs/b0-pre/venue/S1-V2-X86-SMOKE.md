@@ -24,11 +24,34 @@ a ratified source commit, and all outputs stay **outside** authoritative evidenc
 
 ## What to run
 
-The smoke drives the **actual production seam functions** (sourced; the Q6 guard prevents
-authoritative dispatch) against the **real** candidate builder images + the real
-`harness/{sp1,risc0}-verifier-material` and `verifier_fixtures.sh` runners, with a
-genuine/externally-supplied Groth16 fixture per candidate (`SP1_G16_FIXTURE`,
-`RISC0_G16_FIXTURE`). For each candidate `c ∈ {sp1, risc0}` and `arch=x86_64`:
+Run the single first-class command — the separate public TEST_ONLY entry point that drives the
+complete continuous path (real build → capability preflight → Stage-1 lock → Stage-2 audit →
+material → causal Stage-5 → real `SmokeExecutionAttestation` → verified explicit synthetic
+substitution → TEST_ONLY assembly → seal → import → the three rejection proofs → terminal marker):
+
+```sh
+# On the native x86_64 Linux venue, at the EXACT clean PR-head, with the proposed pins +
+# TEST_ONLY toolchain provisioning available to build_container.sh (BASE_IMAGE / APT_* /
+# RUSTUP_INIT_* / the in-image cargo-audit + advisory-DB + prover toolchain), plus:
+#   ADVISORY_DB_CHECKOUT               read-only pinned RustSec advisory-db checkout
+#   CARGO_AUDIT_PIN_VERSION            ratified cargo-audit version (e.g. 0.22.2)
+#   CARGO_AUDIT_EXPECTED_EXE_SHA256    venue-recorded cargo-audit executable sha256 (reproduced)
+export SMOKE=$HOME/b0-s1v2-smoke.$(git rev-parse HEAD)   # OUTSIDE docs/ and the authoritative dirs
+bash tools/b0-pre-candidates/scripts/smoke.sh "$SMOKE"
+```
+
+On success it prints the terminal marker `X86_REAL_CANDIDATE_SMOKE_PASS` — and ONLY after every
+stage and every rejection proof passed. It refuses to run with `RATIFIED_SOURCE_COMMIT` set or any
+bypass variable, on a dirty tree, or with an output path under the repository / `docs/`. A missing
+provisioned pin or tool value fails closed with its exact name; nothing is fabricated. The smoke
+uses the SHARED production cores (`lib.sh` / `extract_material.sh`: `gen_lock_in_container`,
+`run_stage2_locked`, `run_stage2_audit_locked`, `extract_material_core`,
+`causal_build_hash_exec_runner`, `preflight_builder_capability`) via `build_container.sh smoke`
+(the distinct `b0pre-smoke-runnable-ref-v1` sidecar the authoritative resolver rejects) — it never
+duplicates production logic and never touches the authoritative dispatch.
+
+The continuous path, per candidate `c ∈ {sp1, risc0}` (SP1 on eligible arches; RISC Zero
+`arch=x86_64` only) — this is exactly what the command above executes:
 
 1. **Builder image + Stage-1 lock.** Build the pinned builder; `resolve_lock.sh c $SMOKE`
    generates the candidate lock in-container; confirm `require_stage1_lock` accepts it.
@@ -48,13 +71,43 @@ genuine/externally-supplied Groth16 fixture per candidate (`SP1_G16_FIXTURE`,
    Import must recompute every hash — including the sealed runner locks' domain-separated
    BLAKE3 — and structurally confirm each pins its SDK (sp1-verifier 6.3.1 / risc0-zkvm
    3.0.5) from a registry source with a checksum.
-6. **Rejection proofs (must FAIL closed).**
-   - Feed the sealed TEST_ONLY aggregate to authoritative finalization
-     (`stage6-assemble` → `stage1-ingest`): it MUST refuse (non-`AUTHORITATIVE_STAGE1`
-     classification / non-ratified source commit).
-   - Downgrade one `Stage5Result` to v1 (drop `schema_version` + the causal fields,
-     reinstate `tool_identity_hex`), reseal, re-import: import MUST refuse it as inadequate.
-   - Alter a sealed runner lock (or its SDK version/source), reseal, re-import: MUST refuse.
+6. **Rejection proofs (must FAIL closed).** The command runs these three automatically
+   (`smoke_rejection_proofs`), each of which MUST be refused, before it emits the marker:
+   - **P1** — the authoritative `resolve_runnable_ref` rejects the smoke `b0pre-smoke-runnable-ref-v1`
+     sidecar (distinct schema); a smoke image can never be consumed on the authoritative path.
+   - **P2** — authoritative `stage1-ingest` rejects the smoke `SmokeSourceBinding` (it is not a
+     stage1-result-bundle, and `SmokeClass` has no authoritative variant).
+   - **P3** — authoritative `stage1-ingest` refuses the sealed TEST_ONLY per-arch evidence
+     (non-`AUTHORITATIVE_STAGE1` classification; never finalizable).
+   Additional manual deep checks (recommended alongside): downgrade one `Stage5Result` to v1 and
+   re-import (must refuse as inadequate); alter a sealed runner lock / its SDK version/source and
+   re-import (must refuse).
+
+## Sealed-artifact lineage (every substantive record is the REAL producer output)
+
+The smoke assembles the sealed bundle from the **real** producer outputs via the shared real
+assembler (`assemble_evidence`); the **one** synthetic substitution is the Stage-5b tool binding.
+`emit-test-only-bundle` / `write_test_only_bundle_dir` are **never** used. Every equality below is
+asserted by the Rust lineage test
+`evidence_bundle_tests::smoke_bundle_lineage_only_stage5b_synthetic_every_file_is_producer_output`
+(sealed-file hash == producer-output hash for every file; no synthetic sentinel in any real record).
+
+| Sealed artifact | Producing function (real) | Source (work) path | Classification | Hash-equality asserted |
+|---|---|---|---|---|
+| `<Cand>.container.json` / `.native.json` | `build_container.sh smoke` (two clean builds) | `$work/<cand>.<arch>.container.json` / `.native.json` | real | ✅ |
+| `<Cand>.Cargo.lock` / `.lock-provenance.json` | `resolve_lock.sh` (`gen_lock_in_container`) | `$work/<Cand>.Cargo.lock` / `.lock-provenance.json` | real | ✅ |
+| `<Cand>.stage2-audit.json` | `produce_stage2` (`run_stage2_audit_locked` + `venue-verify stage2-generate`) | `$work/<Cand>.stage2-audit.json` | real | ✅ |
+| `<material>.json` | `extract_material.sh` (`extract_material_core`) | `$work/<material>.json` | real | ✅ |
+| `<Cand>.stage5-result.json` | `produce_stage5` (`causal_build_hash_exec_runner` + `stage5-generate`) | `$work/<Cand>.stage5-result.json` | real | ✅ |
+| `<Cand>.stage5-runner.lock` | `produce_stage5` (`verifier_fixtures.sh`) | `$work/<Cand>.stage5/runner-cargo.lock` | real | ✅ |
+| `<Cand>.tool-binding.json` | `smoke_write_synthetic_tool_binding` | `$work/<Cand>.tool-binding.json` | **SYNTHETIC (the one)** | ✅ |
+| `smoke-source-binding.json` | `smoke_write_source_binding` | `$SMOKE/smoke-source-binding.json` | TEST_ONLY classification | ✅ |
+| `<Cand>.smoke-attestation.json` | `smoke_build_attestation_and_substitution` | `$work/<Cand>.smoke-attestation.json` | real-execution attestation | ✅ |
+| `<Cand>.substitution-log.json` | `venue-verify smoke-substitute` | `$work/<Cand>.substitution-log.json` | explicit logged substitution | ✅ |
+
+The importer additionally cross-binds these: the attestation's point-of-use SHA-256 == the Stage-5
+result's `verifier_executed_binary_sha256` (causal), the substitution log's `attestation_hash` == the
+attestation's hash, and the substitution's `synthetic_sentinel` == the sealed tool-binding identity.
 
 ## Evidence checklist (capture into `$SMOKE`, outside authoritative dirs)
 

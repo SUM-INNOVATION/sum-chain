@@ -504,24 +504,45 @@ fn verify_stage5(result_path: &str) -> Result<String, String> {
 
 /// Blocker 1 + 7: seal a curated per-arch bundle directory into an immutable,
 /// hashed manifest.
-fn seal_bundle(dir: &str, arch_arg: &str, source_commit: &str) -> Result<String, String> {
+fn seal_bundle_mode(
+    dir: &str,
+    arch_arg: &str,
+    source_commit: &str,
+    mode: evidence_bundle::ImportMode,
+) -> Result<String, String> {
     let arch = schema_arch(arch_arg)?;
-    let manifest = evidence_bundle::seal(std::path::Path::new(dir), arch, source_commit)
+    let manifest = evidence_bundle::seal_mode(std::path::Path::new(dir), arch, source_commit, mode)
         .map_err(|e| e.to_string())?;
+    let kind = match mode {
+        evidence_bundle::ImportMode::Authoritative => "authoritative",
+        evidence_bundle::ImportMode::TestOnly => "TEST_ONLY smoke",
+    };
     Ok(format!(
-        "sealed per-arch evidence bundle {dir} (arch={arch}, {} files, content={})",
+        "sealed {kind} per-arch evidence bundle {dir} (arch={arch}, {} files, content={})",
         manifest.files.len(),
         manifest.bundle_content_hash
     ))
 }
+fn seal_bundle(dir: &str, arch_arg: &str, source_commit: &str) -> Result<String, String> {
+    seal_bundle_mode(
+        dir,
+        arch_arg,
+        source_commit,
+        evidence_bundle::ImportMode::Authoritative,
+    )
+}
 
 /// Blocker 1: full typed import verification of a sealed per-arch bundle.
-fn import_bundle(dir: &str) -> Result<String, String> {
-    let imported =
-        evidence_bundle::import_verify(std::path::Path::new(dir)).map_err(|e| e.to_string())?;
+fn import_bundle_mode(dir: &str, mode: evidence_bundle::ImportMode) -> Result<String, String> {
+    let imported = evidence_bundle::import_verify_mode(std::path::Path::new(dir), mode)
+        .map_err(|e| e.to_string())?;
+    let kind = match mode {
+        evidence_bundle::ImportMode::Authoritative => "authoritative",
+        evidence_bundle::ImportMode::TestOnly => "TEST_ONLY smoke",
+    };
     Ok(format!(
-        "per-arch evidence bundle {dir} import-verified: arch={} builds={} native={} locks={} \
-         stage2={} tools={} stage5={} risc0_material={} content={}",
+        "{kind} per-arch evidence bundle {dir} import-verified: arch={} builds={} native={} \
+         locks={} stage2={} tools={} stage5={} risc0_material={} content={}",
         imported.arch,
         imported.builds.len(),
         imported.native.len(),
@@ -532,6 +553,9 @@ fn import_bundle(dir: &str) -> Result<String, String> {
         imported.risc0_extractor_json.is_some(),
         imported.content_hash,
     ))
+}
+fn import_bundle(dir: &str) -> Result<String, String> {
+    import_bundle_mode(dir, evidence_bundle::ImportMode::Authoritative)
 }
 
 /// Blocker 1 + 7: cross-arch aggregation from TWO import-verified TYPED bundles
@@ -602,7 +626,13 @@ fn run() -> Result<String, String> {
         [cmd, dir] if cmd == "import-arch" => import_arch(dir),
         [cmd, x86, arm, out] if cmd == "aggregate-arches" => aggregate_arches(x86, arm, out),
         [cmd, dir, arch, commit] if cmd == "seal-bundle" => seal_bundle(dir, arch, commit),
+        [cmd, dir, arch, commit] if cmd == "seal-bundle-test-only" => {
+            seal_bundle_mode(dir, arch, commit, evidence_bundle::ImportMode::TestOnly)
+        }
         [cmd, dir] if cmd == "import-bundle" => import_bundle(dir),
+        [cmd, dir] if cmd == "import-bundle-test-only" => {
+            import_bundle_mode(dir, evidence_bundle::ImportMode::TestOnly)
+        }
         [cmd, x86, arm, out] if cmd == "aggregate-bundles" => aggregate_bundles(x86, arm, out),
         [cmd, extractor, target, host, container] if cmd == "stage4-guard" => {
             stage4_guard(extractor, target, host, container)
@@ -622,7 +652,8 @@ fn run() -> Result<String, String> {
              prover-archive-check|smoke-attest-check|smoke-source-check|smoke-substitute|\
              lock-hash|verify-lock|\
              verify-tool|stage2-audit|stage2-generate|stage2-record|stage4-guard|verify-stage5|\
-             stage5-generate|import-arch|aggregate-arches|seal-bundle|import-bundle|\
+             stage5-generate|import-arch|aggregate-arches|seal-bundle|seal-bundle-test-only|\
+             import-bundle|import-bundle-test-only|\
              aggregate-bundles|emit-test-only-bundle> ..."
                 .into(),
         ),
