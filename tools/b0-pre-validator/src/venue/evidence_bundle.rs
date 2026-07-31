@@ -1313,7 +1313,10 @@ pub fn write_test_only_bundle_dir(dir: &Path, arch: &str) -> Result<(), String> 
         )?;
         let nodes: Vec<serde_json::Value> = if c == "Sp1" {
             vec![
-                serde_json::json!({"name":"sp1","version":"6.3.1","source":"registry","license":"MIT OR Apache-2.0"}),
+                serde_json::json!({"name":"sp1-sdk","version":"6.3.1","source":"registry","license":"MIT OR Apache-2.0"}),
+                serde_json::json!({"name":"sp1-verifier","version":"6.3.1","source":"registry","license":"MIT OR Apache-2.0"}),
+                serde_json::json!({"name":"sp1-build","version":"6.3.1","source":"registry","license":"MIT OR Apache-2.0"}),
+                serde_json::json!({"name":"sp1-zkvm","version":"6.3.1","source":"registry","license":"MIT OR Apache-2.0"}),
                 serde_json::json!({"name":"p3-field","version":"0.1.0-alpha.1","source":"registry","license":"MIT"}),
             ]
         } else {

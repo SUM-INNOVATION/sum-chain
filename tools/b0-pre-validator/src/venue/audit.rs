@@ -19,11 +19,22 @@ use std::collections::BTreeMap;
 
 /// The pinned SELECTED proof-stack releases (VENUE.md §5 / `run_authoritative.sh`).
 /// A selected proof-stack crate resolving to any other version is fatal.
+///
+/// These are the crates each candidate's manifests DIRECTLY declare (`candidates/<c>/host` deps
+/// and build-deps, and `candidates/<c>/guest` deps), by their EXACT published names. SP1 publishes
+/// no crate named bare `sp1`; its stack is `sp1-sdk`, `sp1-verifier`, `sp1-build` (host) and
+/// `sp1-zkvm` (guest), and RISC Zero's is `risc0-zkvm`, `risc0-groth16`, `risc0-build` (host) and
+/// `risc0-zkvm-platform` (guest). This list is exactly the union of [`required_pins_for`] over the
+/// candidates (asserted by the `proof_stack_pins_are_the_union_of_required_pins...` test), so the
+/// version-check list and the coverage list never drift.
 pub const PROOF_STACK_PINS: &[(&str, &str)] = &[
-    ("sp1", "6.3.1"),
+    ("sp1-sdk", "6.3.1"),
+    ("sp1-verifier", "6.3.1"),
+    ("sp1-build", "6.3.1"),
+    ("sp1-zkvm", "6.3.1"),
     ("risc0-zkvm", "3.0.5"),
-    ("risc0-build", "3.0.5"),
     ("risc0-groth16", "3.0.4"),
+    ("risc0-build", "3.0.5"),
     ("risc0-zkvm-platform", "2.2.2"),
 ];
 
@@ -289,14 +300,23 @@ pub fn audit_graph(
 /// INCOMPLETE (the proof-stack was not actually resolved) and is rejected — a
 /// pass over an empty/incomplete graph is meaningless.
 ///
-/// SP1's requirement is the `sp1` crate at 6.3.1; RISC Zero's is its four pinned
-/// crates (VENUE.md §5). These mirror [`PROOF_STACK_PINS`], not a second policy.
+/// Each candidate's proof-stack coverage set is the crates its own manifests DIRECTLY declare, by
+/// EXACT published name + pinned version (VENUE.md §5 / `candidates/<c>/{host,guest}/Cargo.toml`).
+/// SP1's set is `sp1-sdk`, `sp1-verifier`, `sp1-build` (host) and `sp1-zkvm` (guest); RISC Zero's is
+/// `risc0-zkvm`, `risc0-groth16`, `risc0-build` (host) and `risc0-zkvm-platform` (guest). There is NO
+/// crate literally named `sp1`, so a completeness gate demanding one is unsatisfiable by any correct
+/// SP1 graph. These mirror [`PROOF_STACK_PINS`] (their union), not a second policy.
 pub fn required_pins_for(candidate: &str) -> Option<&'static [(&'static str, &'static str)]> {
-    const SP1: &[(&str, &str)] = &[("sp1", "6.3.1")];
+    const SP1: &[(&str, &str)] = &[
+        ("sp1-sdk", "6.3.1"),
+        ("sp1-verifier", "6.3.1"),
+        ("sp1-build", "6.3.1"),
+        ("sp1-zkvm", "6.3.1"),
+    ];
     const RISC0: &[(&str, &str)] = &[
         ("risc0-zkvm", "3.0.5"),
-        ("risc0-build", "3.0.5"),
         ("risc0-groth16", "3.0.4"),
+        ("risc0-build", "3.0.5"),
         ("risc0-zkvm-platform", "2.2.2"),
     ];
     match candidate {
@@ -818,13 +838,28 @@ mod tests {
 
     const ALLOWED: &[&str] = &["MIT", "Apache-2.0", "MIT OR Apache-2.0", "BSD-3-Clause"];
 
-    /// A clean graph: correct pins, registry sources, allowed licenses, and the
-    /// expected p3-* prereleases (recorded, not fatal).
+    fn find_mut<'a>(g: &'a mut [CrateNode], name: &str) -> &'a mut CrateNode {
+        g.iter_mut()
+            .find(|c| c.name == name)
+            .expect("node present in fixture")
+    }
+
+    /// A clean graph: the real per-candidate proof-stack crates at their pins, registry
+    /// sources, allowed licenses, and the expected p3-* prereleases (recorded, not fatal).
     fn clean_graph() -> Vec<CrateNode> {
         vec![
-            n("sp1", "6.3.1", Source::Registry, "MIT OR Apache-2.0"),
+            n("sp1-sdk", "6.3.1", Source::Registry, "MIT OR Apache-2.0"),
+            n(
+                "sp1-verifier",
+                "6.3.1",
+                Source::Registry,
+                "MIT OR Apache-2.0",
+            ),
+            n("sp1-build", "6.3.1", Source::Registry, "MIT OR Apache-2.0"),
+            n("sp1-zkvm", "6.3.1", Source::Registry, "MIT OR Apache-2.0"),
             n("risc0-zkvm", "3.0.5", Source::Registry, "Apache-2.0"),
             n("risc0-groth16", "3.0.4", Source::Registry, "Apache-2.0"),
+            n("risc0-build", "3.0.5", Source::Registry, "Apache-2.0"),
             n(
                 "risc0-zkvm-platform",
                 "2.2.2",
@@ -854,7 +889,7 @@ mod tests {
     #[test]
     fn wrong_pinned_version_is_fatal() {
         let mut g = clean_graph();
-        g[0].version = "6.3.0".into(); // sp1 not at its pin
+        find_mut(&mut g, "sp1-sdk").version = "6.3.0".into(); // a pinned crate off its pin
         let r = audit_graph(&g, &[], ALLOWED);
         assert!(r.is_fatal());
         assert!(r
@@ -865,7 +900,7 @@ mod tests {
     #[test]
     fn git_or_path_source_on_proof_stack_is_fatal() {
         let mut g = clean_graph();
-        g[1].source = Source::Git; // risc0-zkvm from git
+        find_mut(&mut g, "sp1-verifier").source = Source::Git; // a proof-stack crate from git
         let r = audit_graph(&g, &[], ALLOWED);
         assert!(r
             .fatal_findings()
@@ -892,11 +927,11 @@ mod tests {
     #[test]
     fn disallowed_or_missing_license_is_fatal() {
         let mut g = clean_graph();
-        g[6].license = Some("GPL-3.0".into());
+        find_mut(&mut g, "serde").license = Some("GPL-3.0".into());
         assert!(audit_graph(&g, &[], ALLOWED)
             .fatal_findings()
             .any(|k| matches!(k, FatalKind::DisallowedLicense { .. })));
-        g[6].license = None;
+        find_mut(&mut g, "serde").license = None;
         assert!(audit_graph(&g, &[], ALLOWED)
             .fatal_findings()
             .any(|k| matches!(k, FatalKind::UnlicensedCrate { .. })));
@@ -923,9 +958,33 @@ mod tests {
 
     // ---- Blocker 5: required-crate coverage + bound Stage-2 record ----------
 
+    /// A realistic resolved SP1 6.3.1 graph: the four candidate-declared crates that MUST be
+    /// covered (sp1-sdk/sp1-verifier/sp1-build/sp1-zkvm), plus transitive `sp1-*` crates that
+    /// resolve alongside them but are not individually pinned, plus a recorded prerelease dep and
+    /// an unrelated crate. There is deliberately NO crate literally named `sp1`.
     fn sp1_graph() -> Vec<CrateNode> {
         vec![
-            n("sp1", "6.3.1", Source::Registry, "MIT OR Apache-2.0"),
+            n("sp1-sdk", "6.3.1", Source::Registry, "MIT OR Apache-2.0"),
+            n(
+                "sp1-verifier",
+                "6.3.1",
+                Source::Registry,
+                "MIT OR Apache-2.0",
+            ),
+            n("sp1-build", "6.3.1", Source::Registry, "MIT OR Apache-2.0"),
+            n("sp1-zkvm", "6.3.1", Source::Registry, "MIT OR Apache-2.0"),
+            n(
+                "sp1-core-machine",
+                "6.3.1",
+                Source::Registry,
+                "MIT OR Apache-2.0",
+            ),
+            n(
+                "sp1-primitives",
+                "6.3.1",
+                Source::Registry,
+                "MIT OR Apache-2.0",
+            ),
             n("p3-field", "0.1.0-alpha.1", Source::Registry, "MIT"),
             n("serde", "1.0.200", Source::Registry, "MIT OR Apache-2.0"),
         ]
@@ -976,6 +1035,165 @@ mod tests {
         assert!(matches!(
             require_candidate_pins(&unrelated, "Sp1"),
             Err(GraphCoverageError::RequiredCrateAbsent { .. })
+        ));
+    }
+
+    // ---- SMOKE-BLOCKED-003 regression: the required-crate NAMES must be crates SP1 publishes ----
+
+    /// REGRESSION for SMOKE-BLOCKED-003: SP1 6.3.1 publishes NO crate literally named `sp1` (its
+    /// crates are all `sp1-*`), so the old `("sp1","6.3.1")` completeness pin was unsatisfiable by
+    /// every correct SP1 graph and deterministically failed Stage 2. The contract now requires the
+    /// four candidate-declared crates, and a realistic SP1 graph (which never contains bare `sp1`)
+    /// is ACCEPTED.
+    #[test]
+    fn realistic_sp1_6_3_1_graph_without_a_bare_sp1_crate_is_accepted() {
+        let g = sp1_graph();
+        assert!(
+            g.iter().all(|c| c.name != "sp1"),
+            "a real SP1 graph contains no bare `sp1` crate"
+        );
+        assert!(g
+            .iter()
+            .any(|c| c.name == "sp1-sdk" && c.version == "6.3.1"));
+        assert_eq!(require_candidate_pins(&g, "Sp1"), Ok(()));
+        // the impossible historical requirement (a crate literally named `sp1`) must not return.
+        assert!(
+            required_pins_for("Sp1")
+                .unwrap()
+                .iter()
+                .all(|(n, _)| *n != "sp1"),
+            "no required SP1 crate may be the nonexistent bare `sp1`"
+        );
+    }
+
+    /// PROOF_STACK_PINS (the version-check list) is EXACTLY the union of `required_pins_for` (the
+    /// coverage list) over the candidates, and every required crate is a real `<stack>-<component>`
+    /// name — never a bare stack name. This is the invariant whose absence let the bare-`sp1` bug
+    /// live in two places at once.
+    #[test]
+    fn proof_stack_pins_are_the_union_of_required_pins_and_name_real_crates() {
+        use std::collections::BTreeSet;
+        let mut union: BTreeSet<(&str, &str)> = BTreeSet::new();
+        for cand in ["Sp1", "Risc0"] {
+            for (nm, v) in required_pins_for(cand).unwrap() {
+                assert!(
+                    *nm != "sp1" && *nm != "risc0",
+                    "required crate {nm} is a bare stack name that no candidate publishes"
+                );
+                assert!(
+                    nm.starts_with("sp1-") || nm.starts_with("risc0-"),
+                    "required crate {nm} is not a real proof-stack crate name"
+                );
+                union.insert((nm, v));
+            }
+        }
+        let pins: BTreeSet<(&str, &str)> =
+            PROOF_STACK_PINS.iter().map(|(nm, v)| (*nm, *v)).collect();
+        assert_eq!(
+            pins, union,
+            "PROOF_STACK_PINS must equal the union of required_pins_for over candidates"
+        );
+        assert!(required_pins_for("Nope").is_none());
+    }
+
+    /// The completeness gate fails closed on every way a required crate can be absent/wrong — for
+    /// SP1 AND RISC Zero — and a cross-candidate graph cannot satisfy the other candidate.
+    #[test]
+    fn coverage_fails_closed_on_missing_wrong_version_duplicate_renamed_and_cross_candidate() {
+        // missing: drop sp1-verifier.
+        let mut g = sp1_graph();
+        g.retain(|c| c.name != "sp1-verifier");
+        assert!(matches!(
+            require_candidate_pins(&g, "Sp1"),
+            Err(GraphCoverageError::RequiredCrateAbsent { crate_name, .. }) if crate_name == "sp1-verifier"
+        ));
+        // wrong version: sp1-build resolved at 6.3.0 (present-at-pin count is 0).
+        let mut g = sp1_graph();
+        find_mut(&mut g, "sp1-build").version = "6.3.0".into();
+        assert!(matches!(
+            require_candidate_pins(&g, "Sp1"),
+            Err(GraphCoverageError::RequiredCrateAbsent { crate_name, version })
+                if crate_name == "sp1-build" && version == "6.3.1"
+        ));
+        // duplicated at the pinned version: two sp1-sdk 6.3.1.
+        let mut g = sp1_graph();
+        g.push(n("sp1-sdk", "6.3.1", Source::Registry, "MIT OR Apache-2.0"));
+        assert!(matches!(
+            require_candidate_pins(&g, "Sp1"),
+            Err(GraphCoverageError::RequiredCrateDuplicated { crate_name, .. }) if crate_name == "sp1-sdk"
+        ));
+        // renamed: the historical bare `sp1` present does NOT cover the real sp1-zkvm requirement.
+        let mut g = sp1_graph();
+        g.retain(|c| c.name != "sp1-zkvm");
+        g.push(n("sp1", "6.3.1", Source::Registry, "MIT OR Apache-2.0"));
+        assert!(matches!(
+            require_candidate_pins(&g, "Sp1"),
+            Err(GraphCoverageError::RequiredCrateAbsent { crate_name, .. }) if crate_name == "sp1-zkvm"
+        ));
+        // cross-candidate: neither candidate's graph satisfies the other's coverage.
+        assert!(matches!(
+            require_candidate_pins(&sp1_graph(), "Risc0"),
+            Err(GraphCoverageError::RequiredCrateAbsent { .. })
+        ));
+        assert!(matches!(
+            require_candidate_pins(&risc0_graph(), "Sp1"),
+            Err(GraphCoverageError::RequiredCrateAbsent { .. })
+        ));
+    }
+
+    /// Unrelated `sp1-*` / `risc0-*` packages (not the required set) cannot accidentally satisfy
+    /// coverage — the match is exact `(name, version)`, never a prefix / substring / version-only.
+    #[test]
+    fn unrelated_stack_prefixed_crates_do_not_satisfy_coverage() {
+        let sp1_soup = vec![
+            n(
+                "sp1-core-machine",
+                "6.3.1",
+                Source::Registry,
+                "MIT OR Apache-2.0",
+            ),
+            n(
+                "sp1-primitives",
+                "6.3.1",
+                Source::Registry,
+                "MIT OR Apache-2.0",
+            ),
+            n(
+                "sp1-recursion-executor",
+                "6.3.1",
+                Source::Registry,
+                "MIT OR Apache-2.0",
+            ),
+        ];
+        assert!(matches!(
+            require_candidate_pins(&sp1_soup, "Sp1"),
+            Err(GraphCoverageError::RequiredCrateAbsent { .. })
+        ));
+        let risc0_soup = vec![
+            n("risc0-binfmt", "3.0.5", Source::Registry, "Apache-2.0"),
+            n(
+                "risc0-circuit-rv32im",
+                "3.0.5",
+                Source::Registry,
+                "Apache-2.0",
+            ),
+        ];
+        assert!(matches!(
+            require_candidate_pins(&risc0_soup, "Risc0"),
+            Err(GraphCoverageError::RequiredCrateAbsent { .. })
+        ));
+    }
+
+    /// RISC Zero's correct graph is accepted; a wrong RISC Zero version fails closed — equivalent
+    /// negative coverage to SP1.
+    #[test]
+    fn risc0_correct_graph_accepted_wrong_version_fails_closed() {
+        assert_eq!(require_candidate_pins(&risc0_graph(), "Risc0"), Ok(()));
+        let mut g = risc0_graph();
+        find_mut(&mut g, "risc0-zkvm-platform").version = "2.2.1".into();
+        assert!(matches!(
+            require_candidate_pins(&g, "Risc0"),
+            Err(GraphCoverageError::RequiredCrateAbsent { crate_name, .. }) if crate_name == "risc0-zkvm-platform"
         ));
     }
 
@@ -1033,7 +1251,7 @@ mod tests {
     #[test]
     fn bound_stage2_record_rejects_incomplete_graph() {
         let mut rec = sp1_record();
-        rec.nodes.retain(|c| c.name != "sp1"); // remove the pinned crate
+        rec.nodes.retain(|c| c.name != "sp1-sdk"); // remove a required pinned crate
         assert!(matches!(
             rec.validate(),
             Err(Stage2RecordError::Coverage(
@@ -1045,7 +1263,7 @@ mod tests {
     #[test]
     fn bound_stage2_record_rejects_fatal_audit() {
         let mut rec = sp1_record();
-        rec.nodes[0].version = "6.3.0".into(); // sp1 off its pin -> fatal AND missing pin
+        find_mut(&mut rec.nodes, "sp1-sdk").version = "6.3.0".into(); // off its pin -> fatal AND missing pin
         assert!(rec.validate().is_err());
         // isolate the fatal-audit path: keep the pin present but add a git proof-stack.
         let mut rec2 = sp1_record();
@@ -1120,16 +1338,20 @@ mod tests {
     // member (source null, license null) — exercises all three `Source` variants.
     const META_MIXED: &str = r#"{
       "packages": [
-        {"name":"sp1","version":"6.3.1","source":"registry+https://github.com/rust-lang/crates.io-index","license":"MIT OR Apache-2.0"},
+        {"name":"sp1-sdk","version":"6.3.1","source":"registry+https://github.com/rust-lang/crates.io-index","license":"MIT OR Apache-2.0"},
         {"name":"somegit","version":"0.1.0","source":"git+https://github.com/x/y#abc","license":"MIT"},
-        {"name":"b0-pre-candidate-sp1","version":"0.0.0","source":null,"license":null}
+        {"name":"b0-pre-candidate-sp1-host","version":"0.0.0","source":null,"license":null}
       ],
       "workspace_members": [], "resolve": null
     }"#;
-    // Audit-valid fixture (mirrors the known-good sp1_graph): all registry + licensed.
+    // Audit-valid fixture (mirrors the known-good sp1_graph): the four required SP1 crates at
+    // their pins, plus a prerelease and an unrelated crate; all registry + licensed.
     const META_VALID: &str = r#"{
       "packages": [
-        {"name":"sp1","version":"6.3.1","source":"registry+https://github.com/rust-lang/crates.io-index","license":"MIT OR Apache-2.0"},
+        {"name":"sp1-sdk","version":"6.3.1","source":"registry+https://github.com/rust-lang/crates.io-index","license":"MIT OR Apache-2.0"},
+        {"name":"sp1-verifier","version":"6.3.1","source":"registry+https://github.com/rust-lang/crates.io-index","license":"MIT OR Apache-2.0"},
+        {"name":"sp1-build","version":"6.3.1","source":"registry+https://github.com/rust-lang/crates.io-index","license":"MIT OR Apache-2.0"},
+        {"name":"sp1-zkvm","version":"6.3.1","source":"registry+https://github.com/rust-lang/crates.io-index","license":"MIT OR Apache-2.0"},
         {"name":"p3-field","version":"0.1.0-alpha.1","source":"registry+https://github.com/rust-lang/crates.io-index","license":"MIT"},
         {"name":"serde","version":"1.0.200","source":"registry+https://github.com/rust-lang/crates.io-index","license":"MIT OR Apache-2.0"}
       ], "workspace_members": [], "resolve": null
@@ -1140,7 +1362,7 @@ mod tests {
     fn parse_cargo_metadata_maps_sources_and_licenses() {
         let nodes = parse_cargo_metadata(META_MIXED).expect("parse");
         assert_eq!(nodes.len(), 3);
-        let sp1 = nodes.iter().find(|n| n.name == "sp1").unwrap();
+        let sp1 = nodes.iter().find(|n| n.name == "sp1-sdk").unwrap();
         assert_eq!(sp1.source, Source::Registry);
         assert_eq!(sp1.license.as_deref(), Some("MIT OR Apache-2.0"));
         assert_eq!(
@@ -1150,7 +1372,7 @@ mod tests {
         // source: null -> Path (workspace/local); license null -> None.
         let local = nodes
             .iter()
-            .find(|n| n.name == "b0-pre-candidate-sp1")
+            .find(|n| n.name == "b0-pre-candidate-sp1-host")
             .unwrap();
         assert_eq!(local.source, Source::Path);
         assert!(local.license.is_none());
@@ -1177,7 +1399,7 @@ mod tests {
         let rec = Stage2AuditRecord::generate(&sp1_bind(), META_VALID, NO_VULNS, log)
             .expect("valid graph generates a record");
         assert_eq!(rec.candidate, "Sp1");
-        assert_eq!(rec.nodes.len(), 3);
+        assert_eq!(rec.nodes.len(), 6);
         assert!(rec.advisories.is_empty());
         // the command-log hash is DERIVED here from the raw log, not supplied.
         assert_eq!(
@@ -1206,7 +1428,7 @@ mod tests {
     #[test]
     fn stage2_generate_rejects_an_unresolved_advisory() {
         let vuln = r#"{"vulnerabilities":{"found":true,"count":1,"list":[
-            {"advisory":{"id":"RUSTSEC-2024-0002","package":"sp1"}}]}}"#;
+            {"advisory":{"id":"RUSTSEC-2024-0002","package":"sp1-sdk"}}]}}"#;
         let err = Stage2AuditRecord::generate(&sp1_bind(), META_VALID, vuln, b"log").unwrap_err();
         assert!(matches!(err, Stage2RecordError::FatalAudit { .. }));
     }
