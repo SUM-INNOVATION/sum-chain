@@ -1,5 +1,5 @@
 {
-  "_status": "GOLDEN content-addressed prover-archive identities (UNRATIFIED proposal). The member/archive SHA-256, sizes, and exact per-arch version outputs are pinned here; a golden test fails closed on any drift. Archive URLs are venue-provided build ARGs verified against archive_sha256 at build time — they are NOT the content-addressed pin. Provenance = the transferred content-addressed venue report (below); these values were re-verified 64-hex before recording.",
+  "_status": "GOLDEN content-addressed prover-archive identities (UNRATIFIED proposal). Pinned here for ALL FOUR members: archive SHA-256, member SHA-256, member_size_bytes, and the exact per-arch version outputs; the golden test asserts every one and fails closed on any drift. The two x86_64 member sizes (cargo-prove 53287520, r0vm 108998816) were independently derived by verified extraction from the content-pinned primary archives (whole-archive SHA-256 verified before any read; tar header size == safely-extracted regular-file byte count; member SHA-256 re-verified against the pinned value); the aarch64 cargo-prove (45420240) and x86_64 cargo-risczero (15355120) sizes were re-verified the same way. Archive URLs are venue-provided build ARGs verified against archive_sha256 at build time — they are NOT the content-addressed pin. Provenance = the transferred content-addressed venue report (below); every hash was re-verified 64-hex before recording.",
   "provenance": {
     "correction_report_sha256": "c154072fc4db443cf072796cb083f575423583f9af0657809eb833820f77bacc",
     "sp1_release_tag": "v6.3.1",
@@ -14,6 +14,7 @@
       "members": {
         "cargo-prove": {
           "member_sha256": "e21aa7bd13ace2049ca5115ba89236cbf1d3cf716aa6dafc35c10fab6ac7e969",
+          "member_size_bytes": 53287520,
           "version_invocation": "cargo-prove prove --version",
           "version_output": "cargo-prove sp1 (8252c29 2026-06-25T11:50:01.543258355Z)",
           "expected_release_commit": "8252c29",
@@ -50,6 +51,7 @@
         },
         "r0vm": {
           "member_sha256": "36c016a5bb2ded5bd1f8f92cc487e6ffaeb1e95ec05850c983081a0f716b515b",
+          "member_size_bytes": 108998816,
           "version_invocation": "r0vm --version",
           "version_output": "risc0-r0vm 3.0.5",
           "expected_release_commit": "3.0.5",

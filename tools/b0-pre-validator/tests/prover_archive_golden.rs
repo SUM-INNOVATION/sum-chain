@@ -26,6 +26,16 @@ const R0VM_X86_FORBIDDEN: &str = "36c01a65bb2ded5bd1f8f92cc487e6ffaeb1e95ec05850
 const SP1_ARCHIVE_X86: &str = "c9d6ee7667fa9e0a2302324a6bb0295c55f6acf0e17a242ad11ee45767bb08df";
 const SP1_ARCHIVE_ARM: &str = "9befbd3f5eead2c150579daf8d40bb25550a295dfcc406bf8ea53eaffe9aeed2";
 const RISC0_ARCHIVE_X86: &str = "936ef988b78f20e3bd9f80e375f3adc934b13addc6ae2680f2e5fc0bcc966158";
+// Member byte sizes (member_size_bytes). verify_pins.sh requires each member to carry a positive
+// integer, so ALL FOUR are pinned + asserted here (previously the fixture omitted the two x86_64
+// sizes and no test caught it). The x86_64 sizes were independently derived by verified extraction
+// from the content-pinned archives (whole-archive SHA verified pre-read; tar header size ==
+// safely-extracted regular-file byte count; member SHA re-verified); the aarch64 cargo-prove and
+// x86_64 cargo-risczero sizes were re-verified the same way.
+const CARGO_PROVE_X86_SIZE: u64 = 53_287_520;
+const CARGO_PROVE_ARM_SIZE: u64 = 45_420_240;
+const CARGO_RISCZERO_X86_SIZE: u64 = 15_355_120;
+const R0VM_X86_SIZE: u64 = 108_998_816;
 
 fn hex64(s: &str) -> bool {
     s.len() == 64
@@ -95,6 +105,87 @@ fn manifest_matches_the_golden_constants_exactly() {
     assert!(
         !MANIFEST.contains(R0VM_X86_FORBIDDEN),
         "forbidden r0vm value leaked into the manifest"
+    );
+}
+
+// The golden member-size contract: the four known members equal their pinned golden sizes AND
+// every member across the manifest carries a positive member_size_bytes (no gap). Returns Err on
+// any drift, absence, or non-positive value — the fail-closed check the positive + negative tests
+// share (it mirrors what verify_pins.sh enforces on the proposal at the shell consumer).
+fn member_sizes_satisfy_golden(m: &serde_json::Value) -> Result<(), String> {
+    let a = &m["archives"];
+    for (k, exe, want) in [
+        ("sp1-prover-x86_64", "cargo-prove", CARGO_PROVE_X86_SIZE),
+        ("sp1-prover-aarch64", "cargo-prove", CARGO_PROVE_ARM_SIZE),
+        (
+            "risc0-toolchain-x86_64",
+            "cargo-risczero",
+            CARGO_RISCZERO_X86_SIZE,
+        ),
+        ("risc0-toolchain-x86_64", "r0vm", R0VM_X86_SIZE),
+    ] {
+        match a[k]["members"][exe]["member_size_bytes"].as_u64() {
+            None => {
+                return Err(format!(
+                    "{k}/{exe} member_size_bytes missing or not an integer"
+                ))
+            }
+            Some(v) if v != want => {
+                return Err(format!("{k}/{exe} member_size_bytes {v} != golden {want}"))
+            }
+            Some(_) => {}
+        }
+    }
+    for (an, av) in a.as_object().unwrap() {
+        for (mn, mv) in av["members"].as_object().unwrap() {
+            match mv["member_size_bytes"].as_u64() {
+                Some(v) if v > 0 => {}
+                _ => {
+                    return Err(format!(
+                        "{an}/{mn} member_size_bytes missing or non-positive"
+                    ))
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn manifest_pins_all_four_member_sizes() {
+    // Regression guard for the fixture gap where cargo-prove x86_64 and r0vm carried NO
+    // member_size_bytes (yet verify_pins.sh requires a positive integer per member).
+    member_sizes_satisfy_golden(&manifest())
+        .expect("golden manifest must pin all four member sizes");
+}
+
+#[test]
+fn member_size_drift_or_absence_fails_closed() {
+    // changed size -> drift detected.
+    let mut changed = manifest();
+    changed["archives"]["sp1-prover-x86_64"]["members"]["cargo-prove"]["member_size_bytes"] =
+        serde_json::json!(CARGO_PROVE_X86_SIZE + 1);
+    assert!(
+        member_sizes_satisfy_golden(&changed).is_err(),
+        "a changed member size must fail closed"
+    );
+    // missing size (key removed) -> absence detected.
+    let mut missing = manifest();
+    missing["archives"]["risc0-toolchain-x86_64"]["members"]["r0vm"]
+        .as_object_mut()
+        .unwrap()
+        .remove("member_size_bytes");
+    assert!(
+        member_sizes_satisfy_golden(&missing).is_err(),
+        "a missing member size must fail closed"
+    );
+    // zero size -> non-positive rejected (mirrors verify_pins.sh's positive-integer gate).
+    let mut zero = manifest();
+    zero["archives"]["sp1-prover-aarch64"]["members"]["cargo-prove"]["member_size_bytes"] =
+        serde_json::json!(0);
+    assert!(
+        member_sizes_satisfy_golden(&zero).is_err(),
+        "a zero member size must fail closed"
     );
 }
 
