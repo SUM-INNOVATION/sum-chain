@@ -38,7 +38,14 @@ grep -Eq 'SOURCE_COMMIT="\$tool_src_commit"' <<<"$src" \
   && ok "threads SOURCE_COMMIT from the clean ratified HEAD (git rev-parse HEAD)" \
   || bad "SOURCE_COMMIT not threaded from git HEAD"
 # The x86_64 branch carries RISC0; the aarch64 branch must NOT (ARM stays SP1-only).
-if printf '%s' "$src" | awk '/if \[ "\$arch" = "x86_64" \]; then/{x=1} x&&/RISC0_BUILDER_DIGEST/{print;exit}' | grep -q RISC0; then
+# Single awk over a here-string whose EXIT STATUS is the answer — no `printf |` producer and no
+# downstream `grep -q`, so nothing can take SIGPIPE when the match is found early (the former
+# `printf | awk exit | grep -q` raced under `set -o pipefail`: printf SIGPIPE -> false FAIL).
+if awk '
+  /if \[ "\$arch" = "x86_64" \]; then/ { in_x86 = 1 }
+  in_x86 && /RISC0_BUILDER_DIGEST/ { found = 1; exit }
+  END { exit(found ? 0 : 1) }
+' <<<"$src"; then
   ok "x86_64 branch threads RISC0_BUILDER_DIGEST"
 else
   bad "x86_64 branch does not thread RISC0_BUILDER_DIGEST"

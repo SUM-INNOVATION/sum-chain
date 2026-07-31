@@ -60,7 +60,10 @@ if grep -E 'docker run' <<<"$run_lines" | grep -qv -- '--pull never'; then
 else
   ok "every docker run keeps --pull never enforced"
 fi
-if printf '%s\n%s' "$bc" "$ra" | grep -qE 'docker (push|--push)|--output[^\n]*push=true|type=registry'; then
+# Grep a here-string, not a `printf | grep -q` pipe: the two joined sources exceed the pipe
+# buffer, so if a push pattern appeared, grep -q would close early and printf would SIGPIPE under
+# `set -o pipefail` — masking the very violation this asserts. The here-string has no such race.
+if grep -qE 'docker (push|--push)|--output[^\n]*push=true|type=registry' <<<"$(printf '%s\n%s' "$bc" "$ra")"; then
   bad "a registry push path exists"
 else
   ok "no registry push anywhere (build or run)"
