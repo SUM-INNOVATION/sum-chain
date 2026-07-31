@@ -147,6 +147,14 @@ jobs:
           [ "$rc" -eq 0 ] || { echo "::error::builder capability preflight test exited $rc (124=timeout)"; exit 1; }
           grep -q '^BUILDER_CAPABILITY_PASS$' /tmp/cap.out \
             || { echo "::error::capability contract marker BUILDER_CAPABILITY_PASS absent (skipped or failed)"; exit 1; }
+          # cargo-audit .global-cache reproducibility: four clean cargo-audit provisioning builds ->
+          # CARGO_HOME content-diff (sole divergence = .global-cache without the fix; byte-identical +
+          # absent with it) + runtime health. Bounded 40m (four from-source cargo-audit builds).
+          timeout 2400 bash tools/b0-pre-candidates/scripts/tests/cargo_audit_global_cache.test.sh 2>&1 | tee /tmp/gc.out
+          rc=${PIPESTATUS[0]}
+          [ "$rc" -eq 0 ] || { echo "::error::cargo-audit .global-cache reproducibility test exited $rc (124=timeout)"; exit 1; }
+          grep -q '^CARGO_AUDIT_GLOBAL_CACHE_PASS$' /tmp/gc.out \
+            || { echo "::error::reproducibility contract marker CARGO_AUDIT_GLOBAL_CACHE_PASS absent (skipped or failed)"; exit 1; }
 
       # --- Shared canonical primitive as an independent CI authority ----------
       # b0-pre-vmat is the SOLE canonical verifier-material encoding + identity +

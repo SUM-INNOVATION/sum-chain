@@ -166,7 +166,17 @@ RUN set -eux; \
     "/opt/b0pre/audit-prefix/bin/cargo-audit" --version | grep -q "${CARGO_AUDIT_VERSION}"; \
     sha256sum /opt/b0pre/audit-prefix/bin/cargo-audit | awk '{print $1}' > /opt/b0pre/evidence/cargo-audit.exe.sha256; \
     : "reproducibility: remove ALL crate build scratch + cargo download caches IN THIS LAYER"; \
-    rm -rf /tmp/ca-build /root/.cargo/registry/cache /root/.cargo/registry/src /root/.cargo/git
+    rm -rf /tmp/ca-build /root/.cargo/registry/cache /root/.cargo/registry/src /root/.cargo/git; \
+    : "reproducibility (authoritative x86 two-clean-build divergence — the SOLE divergent byte source \
+       at SP1 two-build equality): cargo 1.88 writes a DISPOSABLE SQLite cache-GC tracker at \
+       /root/.cargo/.global-cache whose registry/global_data rows embed wall-clock last-use timestamps \
+       (identical size, differing SQLite page content across two clean builds). SOURCE_DATE_EPOCH + tar \
+       timestamp rewriting CANNOT normalize embedded SQLite content. Delete EXACTLY that one file, HERE, \
+       AFTER the last cargo op (the cargo install above) in this layer and before it commits. NOT a \
+       wildcard; the toolchain (/root/.cargo/bin), /opt/b0pre/audit-prefix, the installed cargo-audit + \
+       its recorded evidence, and runtime linker state are all KEPT. An ephemeral stage container may \
+       recreate it without changing this committed image."; \
+    rm -f /root/.cargo/.global-cache
 
 # ---- (Items 2/3) RISC Zero prover `cargo-risczero` + `r0vm` (x86_64 ONLY) — a SINGLE SHARED
 # archive — by DECLARATIVE VERIFIED ARCHIVE-MEMBER EXTRACTION using the SAME staged, tested

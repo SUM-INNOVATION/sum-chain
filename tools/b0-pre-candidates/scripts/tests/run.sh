@@ -14,7 +14,7 @@ echo "== bash -n (syntax) =="
 for s in lib.sh verify_pins.sh run_authoritative.sh build_container.sh preflight_venue.sh smoke.sh provision_prover_toolchain.sh \
          tool_identities.sh resolve_lock.sh extract_material.sh verifier_fixtures.sh prove_fixture.sh \
          tests/disk_free_gib.test.sh tests/pin_schema.test.sh tests/pin_cargo_audit_advdb.test.sh tests/pin_prover_archives.test.sh tests/source_authority.test.sh \
-         tests/smoke_guards.test.sh tests/smoke_orchestration.test.sh tests/verified_extraction.test.sh tests/provisioning_recipe.test.sh \
+         tests/smoke_guards.test.sh tests/smoke_orchestration.test.sh tests/verified_extraction.test.sh tests/provisioning_recipe.test.sh tests/cargo_audit_global_cache.test.sh \
          tests/pin_url_policy.test.sh tests/oci_platform.test.sh tests/tool_identity_arch.test.sh \
          tests/apt_pins.test.sh tests/tool_identity_threading.test.sh tests/oci_daemon_bridge.test.sh \
          tests/build_reproducibility.test.sh tests/runnable_ref_sidecar.test.sh tests/rustup_components.test.sh \
@@ -31,7 +31,7 @@ if command -v shellcheck >/dev/null 2>&1; then
       "$SCRIPTS/build_container.sh" "$SCRIPTS/tool_identities.sh" "$SCRIPTS/resolve_lock.sh" \
       "$SCRIPTS/extract_material.sh" "$SCRIPTS/smoke.sh" "$SCRIPTS/provision_prover_toolchain.sh" "$SCRIPTS/tests/smoke_guards.test.sh" \
       "$SCRIPTS/tests/smoke_orchestration.test.sh" "$SCRIPTS/tests/verified_extraction.test.sh" \
-      "$SCRIPTS/tests/provisioning_recipe.test.sh" \
+      "$SCRIPTS/tests/provisioning_recipe.test.sh" "$SCRIPTS/tests/cargo_audit_global_cache.test.sh" \
       "$SCRIPTS/tests/disk_free_gib.test.sh" "$SCRIPTS/tests/pin_schema.test.sh" \
       "$SCRIPTS/tests/source_authority.test.sh" "$SCRIPTS/tests/pin_url_policy.test.sh" \
       "$SCRIPTS/tests/oci_platform.test.sh" "$SCRIPTS/tests/tool_identity_arch.test.sh" \
@@ -76,6 +76,9 @@ bash "$HERE/runnable_ref_sidecar.test.sh"    || rc=1
 bash "$HERE/rustup_components.test.sh"       || rc=1
 # Opt-in builder-image capability preflight negatives (SKIPs unless B0PRE_DOCKER_IT=1 + a daemon).
 bash "$HERE/builder_capability.test.sh"      || rc=1
+# Opt-in real-Docker cargo-audit .global-cache reproducibility proof (two-build manifest identity;
+# SKIPs unless B0PRE_DOCKER_IT=1 + a daemon).
+bash "$HERE/cargo_audit_global_cache.test.sh" || rc=1
 # Opt-in real-container v2 produce-chain E2E (SKIPs unless B0PRE_DOCKER_IT=1 + a daemon).
 bash "$HERE/e2e_v2_produce_chain.test.sh"    || rc=1
 

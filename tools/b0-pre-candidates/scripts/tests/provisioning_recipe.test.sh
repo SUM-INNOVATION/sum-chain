@@ -54,6 +54,29 @@ for df in "$SP1" "$R0"; do
   has "$df" 'rm -rf /tmp/ca-build'                                 && ok "$b: cargo-audit build scratch removed in-layer" || bad "$b: cargo-audit scratch not removed in-layer"
 done
 
+# ---- 3b. Reproducibility: the cargo-audit RUN layer deletes EXACTLY cargo's disposable
+#          /root/.cargo/.global-cache (the SQLite cache-GC tracker that embeds wall-clock last-use
+#          timestamps — the sole divergent byte source at SP1 two-clean-build equality), AFTER the
+#          last cargo op in the layer, WITHOUT a broad /root/.cargo sweep and WITHOUT removing the
+#          toolchain, audit-prefix, or the installed cargo-audit.
+for df in "$SP1" "$R0"; do
+  b="$(basename "$df")"
+  has_code "$df" 'rm -f /root/\.cargo/\.global-cache' && ok "$b: removes exactly /root/.cargo/.global-cache" || bad "$b: missing exact .global-cache removal"
+  # the removal is AFTER the last 'cargo install' (the last cargo op) in the layer.
+  ci_line="$(grep -nE 'cargo install --locked --path' "$df" | tail -1 | cut -d: -f1)"
+  gc_line="$(grep -nE 'rm -f /root/\.cargo/\.global-cache' "$df" | tail -1 | cut -d: -f1)"
+  if [ -n "$ci_line" ] && [ -n "$gc_line" ] && [ "$gc_line" -gt "$ci_line" ]; then
+    ok "$b: .global-cache removal (line $gc_line) is AFTER the cargo install (line $ci_line)"
+  else
+    bad "$b: .global-cache removal not proven after the last cargo op (ci=$ci_line gc=$gc_line)"
+  fi
+  # NO broad /root/.cargo sweep, NO wildcard, toolchain + audit-prefix + cargo-audit KEPT.
+  hasnt_code "$df" 'rm [^;]*/root/\.cargo([^/.]|$)' && ok "$b: no bare/broad /root/.cargo removal" || bad "$b: broad /root/.cargo removal present"
+  hasnt_code "$df" '/root/\.cargo/\*'               && ok "$b: no /root/.cargo/* wildcard"        || bad "$b: /root/.cargo/* wildcard present"
+  hasnt_code "$df" 'rm[^;]*/root/\.cargo/bin'       && ok "$b: keeps /root/.cargo/bin (toolchain)" || bad "$b: removes the toolchain bin"
+  hasnt_code "$df" 'rm[^;]*/opt/b0pre/audit-prefix' && ok "$b: keeps /opt/b0pre/audit-prefix + cargo-audit" || bad "$b: removes the audit prefix"
+done
+
 # ---- 4. Prover provisioning via the STAGED verified extractor (Items 2/3).
 has "$SP1" 'COPY provisioning/provision_prover_toolchain\.sh' && ok "sp1: COPYs the staged provisioner"   || bad "sp1: does not COPY the staged provisioner"
 has "$R0"  'COPY provisioning/provision_prover_toolchain\.sh' && ok "risc0: COPYs the staged provisioner" || bad "risc0: does not COPY the staged provisioner"
