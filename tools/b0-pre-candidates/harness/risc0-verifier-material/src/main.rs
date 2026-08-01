@@ -58,8 +58,23 @@ fn extract_entries() -> Vec<RawMaterial> {
     use risc0_zkvm::Groth16ReceiptVerifierParameters;
     let p = Groth16ReceiptVerifierParameters::default();
 
-    // The Groth16 verifying key bytes actually used by the verify path.
-    let groth16_vk = p.verifying_key.to_bytes();
+    // The Groth16 verifying-key identity actually bound by the verify path.
+    //
+    // ENCODING (pinned upstream, do not change without re-deriving the vector below):
+    // the 32-byte `risc0_binfmt::Digestible` struct digest of `risc0_groth16::VerifyingKey`
+    // (tagged SHA-256 `tagged_struct("risc0_groth16.VerifyingKey", [α_g1, β_g2, γ_g2, δ_g2, IC])`,
+    // risc0-groth16 3.0.4 `verifier.rs`). This is the VK's EXACT contribution to
+    // `Groth16ReceiptVerifierParameters::digest()` (risc0-zkvm 3.0.5 `receipt/groth16.rs`, which
+    // hashes `[control_root, bn254_control_id, verifying_key.digest()]`) — the value
+    // `Groth16Receipt::verify` compares against `verifier_parameters`. We deliberately do NOT use
+    // ark `serialize_uncompressed` (risc0's serde wire form): the verify path binds the digest, not
+    // the serialized bytes, and none of the other three roles use raw serialization either.
+    // Accessed via the same `risc0_zkvm::sha::Digestible` path as `verifier_params` (blanket-impl
+    // over `risc0_binfmt::Digestible`); `as_bytes()` is the fixed 32-byte big-endian digest.
+    // A future risc0 SDK bump that alters this is caught by `tests/vk_vector.rs`.
+    let groth16_vk = risc0_zkvm::sha::Digestible::digest(&p.verifying_key)
+        .as_bytes()
+        .to_vec();
     // control_root and bn254 control id are pinned digests for this version.
     let control_root = p.control_root.as_bytes().to_vec();
     let control_id = p.bn254_control_id.as_bytes().to_vec();

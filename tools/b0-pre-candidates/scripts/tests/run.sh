@@ -13,7 +13,7 @@ rc=0
 echo "== bash -n (syntax) =="
 for s in lib.sh verify_pins.sh run_authoritative.sh build_container.sh preflight_venue.sh smoke.sh provision_prover_toolchain.sh \
          tool_identities.sh resolve_lock.sh extract_material.sh verifier_fixtures.sh prove_fixture.sh \
-         tests/disk_free_gib.test.sh tests/pin_schema.test.sh tests/pin_cargo_audit_advdb.test.sh tests/pin_prover_archives.test.sh tests/source_authority.test.sh tests/blake3_cluster_pin.test.sh \
+         tests/disk_free_gib.test.sh tests/pin_schema.test.sh tests/pin_cargo_audit_advdb.test.sh tests/pin_prover_archives.test.sh tests/source_authority.test.sh tests/blake3_cluster_pin.test.sh tests/risc0_harness_pins.test.sh \
          tests/smoke_guards.test.sh tests/smoke_orchestration.test.sh tests/verified_extraction.test.sh tests/provisioning_recipe.test.sh tests/cargo_audit_global_cache.test.sh \
          tests/pin_url_policy.test.sh tests/oci_platform.test.sh tests/tool_identity_arch.test.sh \
          tests/apt_pins.test.sh tests/tool_identity_threading.test.sh tests/oci_daemon_bridge.test.sh \
@@ -33,7 +33,7 @@ if command -v shellcheck >/dev/null 2>&1; then
       "$SCRIPTS/tests/smoke_orchestration.test.sh" "$SCRIPTS/tests/verified_extraction.test.sh" \
       "$SCRIPTS/tests/provisioning_recipe.test.sh" "$SCRIPTS/tests/cargo_audit_global_cache.test.sh" \
       "$SCRIPTS/tests/disk_free_gib.test.sh" "$SCRIPTS/tests/pin_schema.test.sh" \
-      "$SCRIPTS/tests/blake3_cluster_pin.test.sh" \
+      "$SCRIPTS/tests/blake3_cluster_pin.test.sh" "$SCRIPTS/tests/risc0_harness_pins.test.sh" \
       "$SCRIPTS/tests/source_authority.test.sh" "$SCRIPTS/tests/pin_url_policy.test.sh" \
       "$SCRIPTS/tests/oci_platform.test.sh" "$SCRIPTS/tests/tool_identity_arch.test.sh" \
       "$SCRIPTS/tests/apt_pins.test.sh" "$SCRIPTS/tests/tool_identity_threading.test.sh" \
@@ -56,6 +56,8 @@ bash "$HERE/pin_cargo_audit_advdb.test.sh"   || rc=1
 # blake3 shared-leaf cluster pin invariant (Part 1, no network) + shared-leaf conflict
 # repro (Part 2, opt-in network; SKIPs unless B0PRE_PIN_NET_IT=1 / B0PRE_PIN_NET_REQUIRED=1).
 bash "$HERE/blake3_cluster_pin.test.sh"      || rc=1
+# RISC0 harness MSRV exact-pin policy: exact pins, rust-version contract, no resolver fallback.
+bash "$HERE/risc0_harness_pins.test.sh"       || rc=1
 # prover-archive pin block: positive + full negative matrix (no Docker/network).
 bash "$HERE/pin_prover_archives.test.sh"  || rc=1
 # TEST_ONLY smoke source-authority guards + smoke/authoritative schema split (no Docker/network).

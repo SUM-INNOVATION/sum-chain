@@ -2,6 +2,10 @@
 name = "b0-pre-risc0-verifier-material"
 version = "0.0.0"
 edition = "2021"
+# The compiler contract for this harness: it builds under the pinned venue toolchain
+# (Rust 1.88). Documentary — resolution is constrained by the exact pins below, not by
+# Cargo's incompatible-rust-versions fallback (which is deliberately NOT enabled).
+rust-version = "1.88"
 publish = false
 license = "MIT OR Apache-2.0"
 description = "Deterministic extraction + contract test for the immutable material consumed by the pinned RISC Zero 3.0.5 Groth16 receipt verifier. Builds/runs only on a native x86_64 container venue."
@@ -22,3 +26,17 @@ risc0-groth16 = "=3.0.4"
 # which is exact-pinned =1.6.1, so it moves with the cluster to avoid version skew.
 blake3 = "=1.6.1"
 serde_json = { version = "=1.0.149", features = ["arbitrary_precision"] }
+# SMOKE-BLOCKED-006: the pinned RISC Zero 3.0.5 stack pulls transitive crates whose rolling
+# MSRV floats past the pinned Rust 1.88 on a fresh in-container lock. These direct exact pins
+# INTENTIONALLY constrain those transitive ranges (via Cargo unification) down to the newest
+# versions whose MSRV is <= 1.88 — without loosening any range or enabling resolver fallback:
+#   - ruint: sole consumer risc0-binfmt 3.0.5 (req ^1.15.0); MSRV jumped to 1.90 at 1.18.0.
+#     =1.17.2 (MSRV 1.85) is the newest satisfying ^1.15.0. default-features=false + serde/borsh
+#     mirrors risc0-binfmt's request so unification adds no features.
+#   - enum-ordinalize (+ its derive): reached via educe 0.6.0 (req ^4.2) from the ark-*/
+#     risc0-groth16 stack; MSRV jumped to 1.89 at 4.4.0. =4.3.2 (MSRV 1.68) is the newest
+#     satisfying ^4.2. The derive is pinned identically because 4.3.2's derive req ^4.3 would
+#     otherwise float the macro back to 4.4.x.
+ruint = { version = "=1.17.2", default-features = false, features = ["serde", "borsh"] }
+enum-ordinalize = "=4.3.2"
+enum-ordinalize-derive = "=4.3.2"
