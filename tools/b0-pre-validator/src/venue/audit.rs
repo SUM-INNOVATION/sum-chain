@@ -35,7 +35,7 @@ pub const PROOF_STACK_PINS: &[(&str, &str)] = &[
     ("risc0-zkvm", "3.0.5"),
     ("risc0-groth16", "3.0.4"),
     ("risc0-build", "3.0.5"),
-    ("risc0-zkvm-platform", "2.2.2"),
+    ("risc0-zkvm-platform", "2.2.3"),
 ];
 
 /// The crate-name prefixes that identify proof-stack crates for the source rule.
@@ -213,6 +213,10 @@ pub fn audit_graph(
 ) -> AuditReport {
     let mut findings = Vec::new();
 
+    // Build the SPDX policy from the allow-list ONCE. A misconfigured (unparsable) allow-list
+    // yields None -> every license expression is DENIED (fail closed), never silently widened.
+    let policy = super::license_policy::LicensePolicy::from_allow_list(allowed_licenses).ok();
+
     // (1) selected proof-stack pins: a pinned crate present in the graph must be at
     //     its exact pinned version.
     for (name, expected) in PROOF_STACK_PINS {
@@ -236,12 +240,19 @@ pub fn audit_graph(
                 source: n.source,
             }));
         }
-        // license allow-list
+        // license policy: standards-based SPDX evaluation (NOT a byte-exact string match). A
+        // license-file-only package (no expression) and any expression not satisfiable under the
+        // permitted atoms/exceptions both fail closed.
         match &n.license {
             None => findings.push(Finding::Fatal(FatalKind::UnlicensedCrate {
                 crate_name: n.name.clone(),
             })),
-            Some(lic) if !allowed_licenses.contains(&lic.as_str()) => {
+            Some(lic)
+                if !policy
+                    .as_ref()
+                    .map(|p| p.allows_expression(lic))
+                    .unwrap_or(false) =>
+            {
                 findings.push(Finding::Fatal(FatalKind::DisallowedLicense {
                     crate_name: n.name.clone(),
                     license: lic.clone(),
@@ -317,7 +328,7 @@ pub fn required_pins_for(candidate: &str) -> Option<&'static [(&'static str, &'s
         ("risc0-zkvm", "3.0.5"),
         ("risc0-groth16", "3.0.4"),
         ("risc0-build", "3.0.5"),
-        ("risc0-zkvm-platform", "2.2.2"),
+        ("risc0-zkvm-platform", "2.2.3"),
     ];
     match candidate {
         "Sp1" => Some(SP1),
@@ -862,7 +873,7 @@ mod tests {
             n("risc0-build", "3.0.5", Source::Registry, "Apache-2.0"),
             n(
                 "risc0-zkvm-platform",
-                "2.2.2",
+                "2.2.3",
                 Source::Registry,
                 "Apache-2.0",
             ),
@@ -997,7 +1008,7 @@ mod tests {
             n("risc0-groth16", "3.0.4", Source::Registry, "Apache-2.0"),
             n(
                 "risc0-zkvm-platform",
-                "2.2.2",
+                "2.2.3",
                 Source::Registry,
                 "Apache-2.0",
             ),

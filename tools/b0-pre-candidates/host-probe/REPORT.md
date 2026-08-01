@@ -5,7 +5,7 @@ NOT_FOR_B0_PRE_FINALIZATION
 purpose: early resolution/anomaly signal only; not reproducible, not authoritative, not container-derived
 policy: prerelease findings below are RECORDED for the venue audit, not a verdict. The
         stable-only rule binds the selected candidate release (sp1 6.3.1 / risc0 3.0.5 /
-        3.0.4 / 2.2.2); the transitive graph is subject to the security/source/reproducibility
+        3.0.4 / 2.2.3); the transitive graph is subject to the security/source/reproducibility
         gates. See docs/b0-pre/venue/VENUE.md 'Version / audit policy'.
 
 == candidate: sp1 ==
@@ -25,7 +25,7 @@ resolved proof-stack crate versions (direct pins):
   "risc0-build"	"3.0.5"
   "risc0-groth16"	"3.0.4"
   "risc0-zkvm"	"3.0.5"
-  "risc0-zkvm-platform"	"2.2.2"
+  "risc0-zkvm-platform"	"2.2.3"
 prerelease crates in graph: none
 git-sourced dependencies: 0
 duplicate proof-stack versions: none detected

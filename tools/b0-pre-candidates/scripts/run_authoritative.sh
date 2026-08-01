@@ -308,7 +308,12 @@ produce_arch_authoritative() {
 # The canonical B0-PRE license allow-list (docs/b0-pre/venue/VENUE.md §5). A resolved crate whose license
 # is not one of these is a FATAL Stage-2 finding held for review — never silently
 # accepted, and never operator-widened at run time.
-STAGE2_ALLOWED_LICENSES='["MIT","Apache-2.0","MIT OR Apache-2.0","Apache-2.0 OR MIT","BSD-2-Clause","BSD-3-Clause","ISC","Unicode-DFS-2016","Apache-2.0 WITH LLVM-exception","MPL-2.0","Zlib","CC0-1.0","Unlicense"]'
+# MUST mirror the canonical Rust const b0_pre_validator::venue::license_policy::STAGE2_ALLOWED_LICENSES
+# verbatim (anti-drift test: stage2_allowed_licenses_mirrors_run_authoritative). The validator
+# evaluates each crate license as an SPDX EXPRESSION (OR/AND/WITH, legacy `/`) against the atoms
+# these entries name — never a byte-exact string match. Owner-approved 2026-07-31 (SMOKE-BLOCKED-004):
+# Unicode-3.0, CDLA-Permissive-2.0 (obligations in docs/b0-pre/venue/THIRD-PARTY-LICENSES.md).
+STAGE2_ALLOWED_LICENSES='["MIT","Apache-2.0","MIT OR Apache-2.0","Apache-2.0 OR MIT","BSD-2-Clause","BSD-3-Clause","ISC","Unicode-DFS-2016","Apache-2.0 WITH LLVM-exception","MPL-2.0","Zlib","CC0-1.0","Unlicense","Unicode-3.0","CDLA-Permissive-2.0"]'
 
 # Real per-candidate Stage-2 GENERATION. Runs `cargo metadata` + `cargo audit` INSIDE the
 # pinned builder container, captures the RAW output + the exact command log + the

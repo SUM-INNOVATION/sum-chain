@@ -1,0 +1,3189 @@
+{
+  "nodes": [
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "addchain",
+      "source": "registry",
+      "version": "0.2.1"
+    },
+    {
+      "license": "Apache-2.0 OR MIT",
+      "name": "addr2line",
+      "source": "registry",
+      "version": "0.25.1"
+    },
+    {
+      "license": "0BSD OR MIT OR Apache-2.0",
+      "name": "adler2",
+      "source": "registry",
+      "version": "2.0.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "ahash",
+      "source": "registry",
+      "version": "0.8.12"
+    },
+    {
+      "license": "Unlicense OR MIT",
+      "name": "aho-corasick",
+      "source": "registry",
+      "version": "1.1.4"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "allocator-api2",
+      "source": "registry",
+      "version": "0.2.21"
+    },
+    {
+      "license": "MIT/Apache-2.0",
+      "name": "android_system_properties",
+      "source": "registry",
+      "version": "0.1.5"
+    },
+    {
+      "license": "MIT",
+      "name": "ansi_term",
+      "source": "registry",
+      "version": "0.12.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "anstream",
+      "source": "registry",
+      "version": "1.0.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "anstyle",
+      "source": "registry",
+      "version": "1.0.14"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "anstyle-parse",
+      "source": "registry",
+      "version": "1.0.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "anstyle-query",
+      "source": "registry",
+      "version": "1.1.5"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "anstyle-wincon",
+      "source": "registry",
+      "version": "3.0.11"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "anyhow",
+      "source": "registry",
+      "version": "1.0.104"
+    },
+    {
+      "license": "BSD-2-Clause",
+      "name": "arrayref",
+      "source": "registry",
+      "version": "0.3.9"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "arrayvec",
+      "source": "registry",
+      "version": "0.7.8"
+    },
+    {
+      "license": "Apache-2.0/MIT",
+      "name": "async-scoped",
+      "source": "registry",
+      "version": "0.9.0"
+    },
+    {
+      "license": "MIT",
+      "name": "async-stream",
+      "source": "registry",
+      "version": "0.3.6"
+    },
+    {
+      "license": "MIT",
+      "name": "async-stream-impl",
+      "source": "registry",
+      "version": "0.3.6"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "async-trait",
+      "source": "registry",
+      "version": "0.1.91"
+    },
+    {
+      "license": "Apache-2.0/MIT",
+      "name": "atomic",
+      "source": "registry",
+      "version": "0.6.1"
+    },
+    {
+      "license": "Apache-2.0 OR MIT",
+      "name": "atomic-waker",
+      "source": "registry",
+      "version": "1.1.2"
+    },
+    {
+      "license": "Apache-2.0 OR MIT",
+      "name": "autocfg",
+      "source": "registry",
+      "version": "1.5.1"
+    },
+    {
+      "license": "MIT",
+      "name": "axum",
+      "source": "registry",
+      "version": "0.7.9"
+    },
+    {
+      "license": "MIT",
+      "name": "axum-core",
+      "source": "registry",
+      "version": "0.4.5"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "b0-pre-candidate-sp1-guest",
+      "source": "path",
+      "version": "0.0.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "b0-pre-candidate-sp1-host",
+      "source": "path",
+      "version": "0.0.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "b0-pre-guest-core",
+      "source": "path",
+      "version": "0.0.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "backtrace",
+      "source": "registry",
+      "version": "0.3.76"
+    },
+    {
+      "license": "Apache-2.0 OR MIT",
+      "name": "base16ct",
+      "source": "registry",
+      "version": "0.2.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "base64",
+      "source": "registry",
+      "version": "0.22.1"
+    },
+    {
+      "license": "Apache-2.0 OR MIT",
+      "name": "base64ct",
+      "source": "registry",
+      "version": "1.8.3"
+    },
+    {
+      "license": "MIT",
+      "name": "bincode",
+      "source": "registry",
+      "version": "1.3.3"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "bitflags",
+      "source": "registry",
+      "version": "2.13.1"
+    },
+    {
+      "license": "MIT",
+      "name": "bitvec",
+      "source": "registry",
+      "version": "1.1.1"
+    },
+    {
+      "license": "CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception",
+      "name": "blake3",
+      "source": "registry",
+      "version": "1.8.5"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "block-buffer",
+      "source": "registry",
+      "version": "0.10.4"
+    },
+    {
+      "license": "MIT/Apache-2.0",
+      "name": "bs58",
+      "source": "registry",
+      "version": "0.5.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "bumpalo",
+      "source": "registry",
+      "version": "3.20.3"
+    },
+    {
+      "license": "MIT",
+      "name": "byte-slice-cast",
+      "source": "registry",
+      "version": "1.2.3"
+    },
+    {
+      "license": "Zlib OR Apache-2.0 OR MIT",
+      "name": "bytemuck",
+      "source": "registry",
+      "version": "1.25.2"
+    },
+    {
+      "license": "Zlib OR Apache-2.0 OR MIT",
+      "name": "bytemuck_derive",
+      "source": "registry",
+      "version": "1.11.0"
+    },
+    {
+      "license": "Unlicense OR MIT",
+      "name": "byteorder",
+      "source": "registry",
+      "version": "1.5.0"
+    },
+    {
+      "license": "MIT",
+      "name": "bytes",
+      "source": "registry",
+      "version": "1.12.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "camino",
+      "source": "registry",
+      "version": "1.2.5"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "cargo-platform",
+      "source": "registry",
+      "version": "0.1.9"
+    },
+    {
+      "license": "MIT",
+      "name": "cargo_metadata",
+      "source": "registry",
+      "version": "0.18.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "cc",
+      "source": "registry",
+      "version": "1.4.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "cfg-if",
+      "source": "registry",
+      "version": "1.0.4"
+    },
+    {
+      "license": "MIT",
+      "name": "cfg_aliases",
+      "source": "registry",
+      "version": "0.2.2"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "chacha20",
+      "source": "registry",
+      "version": "0.10.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "chrono",
+      "source": "registry",
+      "version": "0.4.45"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "clap",
+      "source": "registry",
+      "version": "4.6.5"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "clap_builder",
+      "source": "registry",
+      "version": "4.6.5"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "clap_derive",
+      "source": "registry",
+      "version": "4.6.4"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "clap_lex",
+      "source": "registry",
+      "version": "1.1.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "colorchoice",
+      "source": "registry",
+      "version": "1.0.5"
+    },
+    {
+      "license": "MIT",
+      "name": "console",
+      "source": "registry",
+      "version": "0.15.11"
+    },
+    {
+      "license": "MIT",
+      "name": "const-default",
+      "source": "registry",
+      "version": "1.0.0"
+    },
+    {
+      "license": "Apache-2.0 OR MIT",
+      "name": "const-oid",
+      "source": "registry",
+      "version": "0.9.6"
+    },
+    {
+      "license": "Zlib",
+      "name": "const_format",
+      "source": "registry",
+      "version": "0.2.36"
+    },
+    {
+      "license": "Zlib",
+      "name": "const_format_proc_macros",
+      "source": "registry",
+      "version": "0.2.34"
+    },
+    {
+      "license": "CC0-1.0 OR MIT-0 OR Apache-2.0",
+      "name": "constant_time_eq",
+      "source": "registry",
+      "version": "0.4.2"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "core-foundation-sys",
+      "source": "registry",
+      "version": "0.8.7"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "cpufeatures",
+      "source": "registry",
+      "version": "0.2.17"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "cpufeatures",
+      "source": "registry",
+      "version": "0.3.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "crash-context",
+      "source": "registry",
+      "version": "0.6.3"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "crash-handler",
+      "source": "registry",
+      "version": "0.7.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "crc32fast",
+      "source": "registry",
+      "version": "1.5.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "critical-section",
+      "source": "registry",
+      "version": "1.2.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "crossbeam",
+      "source": "registry",
+      "version": "0.8.4"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "crossbeam-channel",
+      "source": "registry",
+      "version": "0.5.16"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "crossbeam-deque",
+      "source": "registry",
+      "version": "0.8.7"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "crossbeam-epoch",
+      "source": "registry",
+      "version": "0.9.20"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "crossbeam-queue",
+      "source": "registry",
+      "version": "0.3.13"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "crossbeam-utils",
+      "source": "registry",
+      "version": "0.8.22"
+    },
+    {
+      "license": "MIT",
+      "name": "crunchy",
+      "source": "registry",
+      "version": "0.2.4"
+    },
+    {
+      "license": "Apache-2.0 OR MIT",
+      "name": "crypto-bigint",
+      "source": "registry",
+      "version": "0.5.5"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "crypto-common",
+      "source": "registry",
+      "version": "0.1.6"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "dashu",
+      "source": "registry",
+      "version": "0.4.4"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "dashu-base",
+      "source": "registry",
+      "version": "0.4.3"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "dashu-float",
+      "source": "registry",
+      "version": "0.4.5"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "dashu-int",
+      "source": "registry",
+      "version": "0.4.3"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "dashu-macros",
+      "source": "registry",
+      "version": "0.4.2"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "dashu-ratio",
+      "source": "registry",
+      "version": "0.4.4"
+    },
+    {
+      "license": "MIT",
+      "name": "deepsize2",
+      "source": "registry",
+      "version": "0.1.0"
+    },
+    {
+      "license": "MIT",
+      "name": "deepsize_derive2",
+      "source": "registry",
+      "version": "0.1.0"
+    },
+    {
+      "license": "Apache-2.0 OR MIT",
+      "name": "der",
+      "source": "registry",
+      "version": "0.7.10"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "deranged",
+      "source": "registry",
+      "version": "0.5.8"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "derive-where",
+      "source": "registry",
+      "version": "1.6.1"
+    },
+    {
+      "license": "MIT",
+      "name": "derive_more",
+      "source": "registry",
+      "version": "1.0.0"
+    },
+    {
+      "license": "MIT",
+      "name": "derive_more-impl",
+      "source": "registry",
+      "version": "1.0.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "digest",
+      "source": "registry",
+      "version": "0.10.7"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "dirs",
+      "source": "registry",
+      "version": "5.0.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "dirs-sys",
+      "source": "registry",
+      "version": "0.4.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "displaydoc",
+      "source": "registry",
+      "version": "0.2.7"
+    },
+    {
+      "license": "MIT/Apache-2.0",
+      "name": "downcast-rs",
+      "source": "registry",
+      "version": "1.2.1"
+    },
+    {
+      "license": "MPL-2.0",
+      "name": "dynasm",
+      "source": "registry",
+      "version": "3.2.1"
+    },
+    {
+      "license": "MPL-2.0",
+      "name": "dynasmrt",
+      "source": "registry",
+      "version": "3.2.1"
+    },
+    {
+      "license": "Apache-2.0 OR MIT",
+      "name": "ecdsa",
+      "source": "registry",
+      "version": "0.16.9"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "either",
+      "source": "registry",
+      "version": "1.17.0"
+    },
+    {
+      "license": "MIT/Apache-2.0",
+      "name": "elf",
+      "source": "registry",
+      "version": "0.7.4"
+    },
+    {
+      "license": "Apache-2.0 OR MIT",
+      "name": "elliptic-curve",
+      "source": "registry",
+      "version": "0.13.8"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "embedded-alloc",
+      "source": "registry",
+      "version": "0.6.0"
+    },
+    {
+      "license": "Apache-2.0 OR MIT",
+      "name": "encode_unicode",
+      "source": "registry",
+      "version": "1.0.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "enum-map",
+      "source": "registry",
+      "version": "2.7.3"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "enum-map-derive",
+      "source": "registry",
+      "version": "0.17.0"
+    },
+    {
+      "license": "Apache-2.0 OR MIT",
+      "name": "equivalent",
+      "source": "registry",
+      "version": "1.0.2"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "errno",
+      "source": "registry",
+      "version": "0.3.14"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "eventsource-stream",
+      "source": "registry",
+      "version": "0.2.3"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "eyre",
+      "source": "registry",
+      "version": "0.6.12"
+    },
+    {
+      "license": "Apache-2.0 OR MIT",
+      "name": "fastrand",
+      "source": "registry",
+      "version": "2.5.0"
+    },
+    {
+      "license": "MIT/Apache-2.0",
+      "name": "ff",
+      "source": "registry",
+      "version": "0.13.1"
+    },
+    {
+      "license": "MIT/Apache-2.0",
+      "name": "ff_derive",
+      "source": "registry",
+      "version": "0.13.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "find-msvc-tools",
+      "source": "registry",
+      "version": "0.1.9"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "fixedbitset",
+      "source": "registry",
+      "version": "0.5.7"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "flate2",
+      "source": "registry",
+      "version": "1.1.9"
+    },
+    {
+      "license": "Apache-2.0 / MIT",
+      "name": "fnv",
+      "source": "registry",
+      "version": "1.0.7"
+    },
+    {
+      "license": "Zlib",
+      "name": "foldhash",
+      "source": "registry",
+      "version": "0.1.5"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "form_urlencoded",
+      "source": "registry",
+      "version": "1.2.2"
+    },
+    {
+      "license": "MIT",
+      "name": "funty",
+      "source": "registry",
+      "version": "2.0.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "futures",
+      "source": "registry",
+      "version": "0.3.33"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "futures-channel",
+      "source": "registry",
+      "version": "0.3.33"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "futures-core",
+      "source": "registry",
+      "version": "0.3.33"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "futures-executor",
+      "source": "registry",
+      "version": "0.3.33"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "futures-io",
+      "source": "registry",
+      "version": "0.3.33"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "futures-macro",
+      "source": "registry",
+      "version": "0.3.33"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "futures-sink",
+      "source": "registry",
+      "version": "0.3.33"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "futures-task",
+      "source": "registry",
+      "version": "0.3.33"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "futures-util",
+      "source": "registry",
+      "version": "0.3.33"
+    },
+    {
+      "license": "MIT/Apache-2.0",
+      "name": "gcd",
+      "source": "registry",
+      "version": "2.3.0"
+    },
+    {
+      "license": "MIT",
+      "name": "gen_ops",
+      "source": "registry",
+      "version": "0.4.0"
+    },
+    {
+      "license": "MIT",
+      "name": "generic-array",
+      "source": "registry",
+      "version": "0.14.9"
+    },
+    {
+      "license": "MIT",
+      "name": "generic-array",
+      "source": "registry",
+      "version": "1.1.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "getrandom",
+      "source": "registry",
+      "version": "0.2.17"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "getrandom",
+      "source": "registry",
+      "version": "0.3.4"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "getrandom",
+      "source": "registry",
+      "version": "0.4.3"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "gimli",
+      "source": "registry",
+      "version": "0.32.3"
+    },
+    {
+      "license": "MIT/Apache-2.0",
+      "name": "group",
+      "source": "registry",
+      "version": "0.13.0"
+    },
+    {
+      "license": "MIT",
+      "name": "h2",
+      "source": "registry",
+      "version": "0.4.15"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "hashbrown",
+      "source": "registry",
+      "version": "0.12.3"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "hashbrown",
+      "source": "registry",
+      "version": "0.14.5"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "hashbrown",
+      "source": "registry",
+      "version": "0.15.5"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "hashbrown",
+      "source": "registry",
+      "version": "0.17.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "heck",
+      "source": "registry",
+      "version": "0.5.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "hermit-abi",
+      "source": "registry",
+      "version": "0.5.2"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "hex",
+      "source": "registry",
+      "version": "0.4.3"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "hmac",
+      "source": "registry",
+      "version": "0.12.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "http",
+      "source": "registry",
+      "version": "1.5.0"
+    },
+    {
+      "license": "MIT",
+      "name": "http-body",
+      "source": "registry",
+      "version": "1.1.0"
+    },
+    {
+      "license": "MIT",
+      "name": "http-body-util",
+      "source": "registry",
+      "version": "0.1.4"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "httparse",
+      "source": "registry",
+      "version": "1.10.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "httpdate",
+      "source": "registry",
+      "version": "1.0.3"
+    },
+    {
+      "license": "MIT",
+      "name": "hyper",
+      "source": "registry",
+      "version": "1.11.0"
+    },
+    {
+      "license": "Apache-2.0 OR ISC OR MIT",
+      "name": "hyper-rustls",
+      "source": "registry",
+      "version": "0.27.9"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "hyper-timeout",
+      "source": "registry",
+      "version": "0.5.2"
+    },
+    {
+      "license": "MIT",
+      "name": "hyper-util",
+      "source": "registry",
+      "version": "0.1.20"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "iana-time-zone",
+      "source": "registry",
+      "version": "0.1.65"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "iana-time-zone-haiku",
+      "source": "registry",
+      "version": "0.1.2"
+    },
+    {
+      "license": "Unicode-3.0",
+      "name": "icu_collections",
+      "source": "registry",
+      "version": "2.2.0"
+    },
+    {
+      "license": "Unicode-3.0",
+      "name": "icu_locale_core",
+      "source": "registry",
+      "version": "2.2.0"
+    },
+    {
+      "license": "Unicode-3.0",
+      "name": "icu_normalizer",
+      "source": "registry",
+      "version": "2.2.0"
+    },
+    {
+      "license": "Unicode-3.0",
+      "name": "icu_normalizer_data",
+      "source": "registry",
+      "version": "2.2.0"
+    },
+    {
+      "license": "Unicode-3.0",
+      "name": "icu_properties",
+      "source": "registry",
+      "version": "2.2.0"
+    },
+    {
+      "license": "Unicode-3.0",
+      "name": "icu_properties_data",
+      "source": "registry",
+      "version": "2.2.0"
+    },
+    {
+      "license": "Unicode-3.0",
+      "name": "icu_provider",
+      "source": "registry",
+      "version": "2.2.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "idna",
+      "source": "registry",
+      "version": "1.1.0"
+    },
+    {
+      "license": "Apache-2.0 OR MIT",
+      "name": "idna_adapter",
+      "source": "registry",
+      "version": "1.2.2"
+    },
+    {
+      "license": "Apache-2.0/MIT",
+      "name": "impl-trait-for-tuples",
+      "source": "registry",
+      "version": "0.2.3"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "indenter",
+      "source": "registry",
+      "version": "0.3.4"
+    },
+    {
+      "license": "Apache-2.0 OR MIT",
+      "name": "indexmap",
+      "source": "registry",
+      "version": "1.9.3"
+    },
+    {
+      "license": "Apache-2.0 OR MIT",
+      "name": "indexmap",
+      "source": "registry",
+      "version": "2.14.0"
+    },
+    {
+      "license": "MIT",
+      "name": "indicatif",
+      "source": "registry",
+      "version": "0.17.11"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "ipnet",
+      "source": "registry",
+      "version": "2.12.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "is_terminal_polyfill",
+      "source": "registry",
+      "version": "1.70.2"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "itertools",
+      "source": "registry",
+      "version": "0.12.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "itertools",
+      "source": "registry",
+      "version": "0.14.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "itoa",
+      "source": "registry",
+      "version": "1.0.18"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "js-sys",
+      "source": "registry",
+      "version": "0.3.103"
+    },
+    {
+      "license": "Apache-2.0 OR MIT",
+      "name": "k256",
+      "source": "registry",
+      "version": "0.13.4"
+    },
+    {
+      "license": "Zlib",
+      "name": "konst",
+      "source": "registry",
+      "version": "0.2.20"
+    },
+    {
+      "license": "Zlib",
+      "name": "konst_macro_rules",
+      "source": "registry",
+      "version": "0.2.19"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "lazy_static",
+      "source": "registry",
+      "version": "1.5.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "libc",
+      "source": "registry",
+      "version": "0.2.189"
+    },
+    {
+      "license": "MIT",
+      "name": "libm",
+      "source": "registry",
+      "version": "0.2.16"
+    },
+    {
+      "license": "MIT",
+      "name": "libredox",
+      "source": "registry",
+      "version": "0.1.18"
+    },
+    {
+      "license": "Apache-2.0/MIT",
+      "name": "linked_list_allocator",
+      "source": "registry",
+      "version": "0.10.6"
+    },
+    {
+      "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+      "name": "linux-raw-sys",
+      "source": "registry",
+      "version": "0.12.1"
+    },
+    {
+      "license": "Unicode-3.0",
+      "name": "litemap",
+      "source": "registry",
+      "version": "0.8.2"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "lock_api",
+      "source": "registry",
+      "version": "0.4.14"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "log",
+      "source": "registry",
+      "version": "0.4.33"
+    },
+    {
+      "license": "MIT",
+      "name": "lru",
+      "source": "registry",
+      "version": "0.12.5"
+    },
+    {
+      "license": "MIT OR Apache-2.0 OR Zlib",
+      "name": "lru-slab",
+      "source": "registry",
+      "version": "0.1.2"
+    },
+    {
+      "license": "BSD-2-Clause OR MIT OR Apache-2.0",
+      "name": "mach2",
+      "source": "registry",
+      "version": "0.4.3"
+    },
+    {
+      "license": "MIT",
+      "name": "matchers",
+      "source": "registry",
+      "version": "0.2.0"
+    },
+    {
+      "license": "MIT AND BSD-3-Clause",
+      "name": "matchit",
+      "source": "registry",
+      "version": "0.7.3"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "md-5",
+      "source": "registry",
+      "version": "0.10.6"
+    },
+    {
+      "license": "Unlicense OR MIT",
+      "name": "memchr",
+      "source": "registry",
+      "version": "2.8.3"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "memfd",
+      "source": "registry",
+      "version": "0.6.5"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "memmap2",
+      "source": "registry",
+      "version": "0.9.11"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "mime",
+      "source": "registry",
+      "version": "0.3.17"
+    },
+    {
+      "license": "MIT/Apache-2.0",
+      "name": "minimal-lexical",
+      "source": "registry",
+      "version": "0.2.1"
+    },
+    {
+      "license": "MIT OR Zlib OR Apache-2.0",
+      "name": "miniz_oxide",
+      "source": "registry",
+      "version": "0.8.9"
+    },
+    {
+      "license": "MIT",
+      "name": "mio",
+      "source": "registry",
+      "version": "1.2.2"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "mti",
+      "source": "registry",
+      "version": "1.1.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "multimap",
+      "source": "registry",
+      "version": "0.10.1"
+    },
+    {
+      "license": "MIT",
+      "name": "nom",
+      "source": "registry",
+      "version": "7.1.3"
+    },
+    {
+      "license": "Apache-2.0 OR MIT",
+      "name": "ntapi",
+      "source": "registry",
+      "version": "0.4.3"
+    },
+    {
+      "license": "MIT",
+      "name": "nu-ansi-term",
+      "source": "registry",
+      "version": "0.50.3"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "num",
+      "source": "registry",
+      "version": "0.4.3"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "num-bigint",
+      "source": "registry",
+      "version": "0.3.3"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "num-bigint",
+      "source": "registry",
+      "version": "0.4.8"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "num-complex",
+      "source": "registry",
+      "version": "0.4.6"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "num-conv",
+      "source": "registry",
+      "version": "0.2.2"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "num-integer",
+      "source": "registry",
+      "version": "0.1.46"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "num-iter",
+      "source": "registry",
+      "version": "0.1.46"
+    },
+    {
+      "license": "Apache-2.0",
+      "name": "num-modular",
+      "source": "registry",
+      "version": "0.6.4"
+    },
+    {
+      "license": "Apache-2.0",
+      "name": "num-order",
+      "source": "registry",
+      "version": "1.2.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "num-rational",
+      "source": "registry",
+      "version": "0.4.2"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "num-traits",
+      "source": "registry",
+      "version": "0.2.19"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "num_cpus",
+      "source": "registry",
+      "version": "1.17.0"
+    },
+    {
+      "license": "BSD-3-Clause OR MIT OR Apache-2.0",
+      "name": "num_enum",
+      "source": "registry",
+      "version": "0.5.11"
+    },
+    {
+      "license": "BSD-3-Clause OR MIT OR Apache-2.0",
+      "name": "num_enum_derive",
+      "source": "registry",
+      "version": "0.5.11"
+    },
+    {
+      "license": "MIT",
+      "name": "number_prefix",
+      "source": "registry",
+      "version": "0.4.0"
+    },
+    {
+      "license": "Apache-2.0 OR MIT",
+      "name": "object",
+      "source": "registry",
+      "version": "0.37.3"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "once_cell",
+      "source": "registry",
+      "version": "1.21.4"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "once_cell_polyfill",
+      "source": "registry",
+      "version": "1.70.2"
+    },
+    {
+      "license": "Apache-2.0",
+      "name": "opentelemetry",
+      "source": "registry",
+      "version": "0.23.0"
+    },
+    {
+      "license": "MPL-2.0",
+      "name": "option-ext",
+      "source": "registry",
+      "version": "0.2.0"
+    },
+    {
+      "license": "Apache-2.0 OR MIT",
+      "name": "p256",
+      "source": "registry",
+      "version": "0.13.2"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "p3-air",
+      "source": "registry",
+      "version": "0.4.3-succinct"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "p3-baby-bear",
+      "source": "registry",
+      "version": "0.4.3-succinct"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "p3-bn254-fr",
+      "source": "registry",
+      "version": "0.4.3-succinct"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "p3-challenger",
+      "source": "registry",
+      "version": "0.4.3-succinct"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "p3-commit",
+      "source": "registry",
+      "version": "0.4.3-succinct"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "p3-dft",
+      "source": "registry",
+      "version": "0.4.3-succinct"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "p3-field",
+      "source": "registry",
+      "version": "0.4.3-succinct"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "p3-fri",
+      "source": "registry",
+      "version": "0.4.3-succinct"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "p3-interpolation",
+      "source": "registry",
+      "version": "0.4.3-succinct"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "p3-keccak-air",
+      "source": "registry",
+      "version": "0.4.3-succinct"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "p3-koala-bear",
+      "source": "registry",
+      "version": "0.4.3-succinct"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "p3-matrix",
+      "source": "registry",
+      "version": "0.4.3-succinct"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "p3-maybe-rayon",
+      "source": "registry",
+      "version": "0.4.3-succinct"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "p3-mds",
+      "source": "registry",
+      "version": "0.4.3-succinct"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "p3-merkle-tree",
+      "source": "registry",
+      "version": "0.4.3-succinct"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "p3-poseidon2",
+      "source": "registry",
+      "version": "0.4.3-succinct"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "p3-symmetric",
+      "source": "registry",
+      "version": "0.4.3-succinct"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "p3-uni-stark",
+      "source": "registry",
+      "version": "0.4.3-succinct"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "p3-util",
+      "source": "registry",
+      "version": "0.4.3-succinct"
+    },
+    {
+      "license": "Apache-2.0",
+      "name": "parity-scale-codec",
+      "source": "registry",
+      "version": "3.7.5"
+    },
+    {
+      "license": "Apache-2.0",
+      "name": "parity-scale-codec-derive",
+      "source": "registry",
+      "version": "3.7.5"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "parking_lot",
+      "source": "registry",
+      "version": "0.12.5"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "parking_lot_core",
+      "source": "registry",
+      "version": "0.9.12"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "paste",
+      "source": "registry",
+      "version": "1.0.15"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "pastey",
+      "source": "registry",
+      "version": "0.2.3"
+    },
+    {
+      "license": "Apache-2.0 OR MIT",
+      "name": "pem-rfc7468",
+      "source": "registry",
+      "version": "0.7.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "percent-encoding",
+      "source": "registry",
+      "version": "2.3.2"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "petgraph",
+      "source": "registry",
+      "version": "0.7.1"
+    },
+    {
+      "license": "Apache-2.0 OR MIT",
+      "name": "pin-project",
+      "source": "registry",
+      "version": "1.1.13"
+    },
+    {
+      "license": "Apache-2.0 OR MIT",
+      "name": "pin-project-internal",
+      "source": "registry",
+      "version": "1.1.13"
+    },
+    {
+      "license": "Apache-2.0 OR MIT",
+      "name": "pin-project-lite",
+      "source": "registry",
+      "version": "0.2.17"
+    },
+    {
+      "license": "Apache-2.0 OR MIT",
+      "name": "pkcs8",
+      "source": "registry",
+      "version": "0.10.2"
+    },
+    {
+      "license": "Apache-2.0 OR MIT",
+      "name": "portable-atomic",
+      "source": "registry",
+      "version": "1.14.0"
+    },
+    {
+      "license": "Unicode-3.0",
+      "name": "potential_utf",
+      "source": "registry",
+      "version": "0.1.5"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "powerfmt",
+      "source": "registry",
+      "version": "0.2.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "ppv-lite86",
+      "source": "registry",
+      "version": "0.2.21"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "prettyplease",
+      "source": "registry",
+      "version": "0.2.37"
+    },
+    {
+      "license": "Apache-2.0 OR MIT",
+      "name": "primeorder",
+      "source": "registry",
+      "version": "0.13.6"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "proc-macro-crate",
+      "source": "registry",
+      "version": "1.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "proc-macro-crate",
+      "source": "registry",
+      "version": "3.5.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "proc-macro-error-attr2",
+      "source": "registry",
+      "version": "2.0.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "proc-macro-error2",
+      "source": "registry",
+      "version": "2.0.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "proc-macro2",
+      "source": "registry",
+      "version": "1.0.107"
+    },
+    {
+      "license": "Apache-2.0",
+      "name": "prost",
+      "source": "registry",
+      "version": "0.13.5"
+    },
+    {
+      "license": "Apache-2.0",
+      "name": "prost-build",
+      "source": "registry",
+      "version": "0.13.5"
+    },
+    {
+      "license": "Apache-2.0",
+      "name": "prost-derive",
+      "source": "registry",
+      "version": "0.13.5"
+    },
+    {
+      "license": "Apache-2.0",
+      "name": "prost-types",
+      "source": "registry",
+      "version": "0.13.5"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "quinn",
+      "source": "registry",
+      "version": "0.11.11"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "quinn-proto",
+      "source": "registry",
+      "version": "0.11.16"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "quinn-udp",
+      "source": "registry",
+      "version": "0.5.15"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "quote",
+      "source": "registry",
+      "version": "1.0.47"
+    },
+    {
+      "license": "MIT OR Apache-2.0 OR LGPL-2.1-or-later",
+      "name": "r-efi",
+      "source": "registry",
+      "version": "5.3.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0 OR LGPL-2.1-or-later",
+      "name": "r-efi",
+      "source": "registry",
+      "version": "6.0.0"
+    },
+    {
+      "license": "MIT",
+      "name": "radium",
+      "source": "registry",
+      "version": "0.7.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "rand",
+      "source": "registry",
+      "version": "0.8.7"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "rand",
+      "source": "registry",
+      "version": "0.10.2"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "rand_chacha",
+      "source": "registry",
+      "version": "0.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "rand_core",
+      "source": "registry",
+      "version": "0.6.4"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "rand_core",
+      "source": "registry",
+      "version": "0.10.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "rand_pcg",
+      "source": "registry",
+      "version": "0.10.2"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "range-set-blaze",
+      "source": "registry",
+      "version": "0.1.16"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "rayon",
+      "source": "registry",
+      "version": "1.12.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "rayon-core",
+      "source": "registry",
+      "version": "1.13.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "rayon-scan",
+      "source": "registry",
+      "version": "0.1.1"
+    },
+    {
+      "license": "MIT",
+      "name": "redox_syscall",
+      "source": "registry",
+      "version": "0.5.18"
+    },
+    {
+      "license": "MIT",
+      "name": "redox_users",
+      "source": "registry",
+      "version": "0.4.6"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "regex",
+      "source": "registry",
+      "version": "1.13.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "regex-automata",
+      "source": "registry",
+      "version": "0.4.16"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "regex-syntax",
+      "source": "registry",
+      "version": "0.8.11"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "reqwest",
+      "source": "registry",
+      "version": "0.12.28"
+    },
+    {
+      "license": "Apache-2.0 OR MIT",
+      "name": "rfc6979",
+      "source": "registry",
+      "version": "0.4.0"
+    },
+    {
+      "license": "Apache-2.0 AND ISC",
+      "name": "ring",
+      "source": "registry",
+      "version": "0.17.14"
+    },
+    {
+      "license": "MIT/Apache-2.0",
+      "name": "rlsf",
+      "source": "registry",
+      "version": "0.2.3"
+    },
+    {
+      "license": "Apache-2.0",
+      "name": "rrs-succinct",
+      "source": "registry",
+      "version": "0.2.0"
+    },
+    {
+      "license": "MIT/Apache-2.0",
+      "name": "rustc-demangle",
+      "source": "registry",
+      "version": "0.1.28"
+    },
+    {
+      "license": "Apache-2.0 OR MIT",
+      "name": "rustc-hash",
+      "source": "registry",
+      "version": "2.1.3"
+    },
+    {
+      "license": "MIT/Apache-2.0",
+      "name": "rustc-hex",
+      "source": "registry",
+      "version": "2.1.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "rustc_version",
+      "source": "registry",
+      "version": "0.4.1"
+    },
+    {
+      "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+      "name": "rustix",
+      "source": "registry",
+      "version": "1.1.4"
+    },
+    {
+      "license": "Apache-2.0 OR ISC OR MIT",
+      "name": "rustls",
+      "source": "registry",
+      "version": "0.23.43"
+    },
+    {
+      "license": "Apache-2.0 OR ISC OR MIT",
+      "name": "rustls-pemfile",
+      "source": "registry",
+      "version": "2.2.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "rustls-pki-types",
+      "source": "registry",
+      "version": "1.15.1"
+    },
+    {
+      "license": "ISC",
+      "name": "rustls-webpki",
+      "source": "registry",
+      "version": "0.103.13"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "rustversion",
+      "source": "registry",
+      "version": "1.0.23"
+    },
+    {
+      "license": "MIT",
+      "name": "ruzstd",
+      "source": "registry",
+      "version": "0.8.3"
+    },
+    {
+      "license": "Apache-2.0 OR BSL-1.0",
+      "name": "ryu",
+      "source": "registry",
+      "version": "1.0.23"
+    },
+    {
+      "license": "Apache-2.0",
+      "name": "scale-info",
+      "source": "registry",
+      "version": "2.11.6"
+    },
+    {
+      "license": "Apache-2.0",
+      "name": "scale-info-derive",
+      "source": "registry",
+      "version": "2.11.6"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "scopeguard",
+      "source": "registry",
+      "version": "1.2.0"
+    },
+    {
+      "license": "Apache-2.0 OR MIT",
+      "name": "sec1",
+      "source": "registry",
+      "version": "0.7.3"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "semver",
+      "source": "registry",
+      "version": "1.0.28"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "serde",
+      "source": "registry",
+      "version": "1.0.229"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "serde-big-array",
+      "source": "registry",
+      "version": "0.5.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "serde_arrays",
+      "source": "registry",
+      "version": "0.2.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "serde_core",
+      "source": "registry",
+      "version": "1.0.229"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "serde_derive",
+      "source": "registry",
+      "version": "1.0.229"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "serde_json",
+      "source": "registry",
+      "version": "1.0.151"
+    },
+    {
+      "license": "MIT/Apache-2.0",
+      "name": "serde_urlencoded",
+      "source": "registry",
+      "version": "0.7.1"
+    },
+    {
+      "license": "Apache-2.0 OR MIT",
+      "name": "serdect",
+      "source": "registry",
+      "version": "0.2.0"
+    },
+    {
+      "license": "MIT",
+      "name": "serial_test",
+      "source": "registry",
+      "version": "3.5.0"
+    },
+    {
+      "license": "MIT",
+      "name": "serial_test_derive",
+      "source": "registry",
+      "version": "3.5.0"
+    },
+    {
+      "license": "BSD-3-Clause",
+      "name": "sha1_smol",
+      "source": "registry",
+      "version": "1.0.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "sha2",
+      "source": "registry",
+      "version": "0.10.9"
+    },
+    {
+      "license": "MIT",
+      "name": "sharded-slab",
+      "source": "registry",
+      "version": "0.1.7"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "shlex",
+      "source": "registry",
+      "version": "2.0.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "signal-hook-registry",
+      "source": "registry",
+      "version": "1.4.8"
+    },
+    {
+      "license": "Apache-2.0 OR MIT",
+      "name": "signature",
+      "source": "registry",
+      "version": "2.2.0"
+    },
+    {
+      "license": "MIT",
+      "name": "simd-adler32",
+      "source": "registry",
+      "version": "0.3.10"
+    },
+    {
+      "license": "MIT",
+      "name": "slab",
+      "source": "registry",
+      "version": "0.4.12"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "slop-air",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "slop-algebra",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "slop-alloc",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "slop-baby-bear",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "slop-basefold",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "slop-basefold-prover",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "slop-bn254",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "slop-challenger",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "slop-commit",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "slop-dft",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "slop-fri",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "slop-futures",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "slop-jagged",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "slop-keccak-air",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "slop-koala-bear",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "slop-matrix",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "slop-maybe-rayon",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "slop-merkle-tree",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "slop-multilinear",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "slop-poseidon2",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "slop-primitives",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "slop-stacked",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "slop-sumcheck",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "slop-symmetric",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "slop-tensor",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "slop-uni-stark",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "slop-utils",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "slop-whir",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "smallvec",
+      "source": "registry",
+      "version": "1.15.2"
+    },
+    {
+      "license": "Apache-2.0",
+      "name": "snowbridge-amcl",
+      "source": "registry",
+      "version": "1.0.2"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "socket2",
+      "source": "registry",
+      "version": "0.5.10"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "socket2",
+      "source": "registry",
+      "version": "0.6.5"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "sp1-build",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "sp1-core-executor",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "sp1-core-executor-runner",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "sp1-core-executor-runner-binary",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "sp1-core-machine",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "sp1-curves",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "sp1-derive",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "sp1-hypercube",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "sp1-jit",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "sp1-lib",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "sp1-primitives",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "sp1-prover",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "sp1-prover-types",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "sp1-recursion-circuit",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "sp1-recursion-compiler",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "sp1-recursion-executor",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "sp1-recursion-gnark-ffi",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "sp1-recursion-machine",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "sp1-sdk",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "sp1-verifier",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "sp1-zkvm",
+      "source": "registry",
+      "version": "6.3.1"
+    },
+    {
+      "license": "MIT",
+      "name": "spin",
+      "source": "registry",
+      "version": "0.9.9"
+    },
+    {
+      "license": "Apache-2.0 OR MIT",
+      "name": "spki",
+      "source": "registry",
+      "version": "0.7.3"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "stable_deref_trait",
+      "source": "registry",
+      "version": "1.2.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "static_assertions",
+      "source": "registry",
+      "version": "1.1.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "strength_reduce",
+      "source": "registry",
+      "version": "0.2.4"
+    },
+    {
+      "license": "MIT",
+      "name": "strsim",
+      "source": "registry",
+      "version": "0.11.1"
+    },
+    {
+      "license": "MIT",
+      "name": "struct-reflection",
+      "source": "registry",
+      "version": "0.1.0"
+    },
+    {
+      "license": "MIT",
+      "name": "struct-reflection-derive",
+      "source": "registry",
+      "version": "0.1.0"
+    },
+    {
+      "license": "MIT",
+      "name": "strum",
+      "source": "registry",
+      "version": "0.27.2"
+    },
+    {
+      "license": "MIT",
+      "name": "strum_macros",
+      "source": "registry",
+      "version": "0.27.2"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "subenum",
+      "source": "registry",
+      "version": "1.2.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "substrate-bn-succinct-rs",
+      "source": "registry",
+      "version": "0.6.0"
+    },
+    {
+      "license": "BSD-3-Clause",
+      "name": "subtle",
+      "source": "registry",
+      "version": "2.6.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "sumchain-wire",
+      "source": "path",
+      "version": "0.3.0"
+    },
+    {
+      "license": "MIT/Apache-2.0",
+      "name": "symlink",
+      "source": "registry",
+      "version": "0.1.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "syn",
+      "source": "registry",
+      "version": "1.0.109"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "syn",
+      "source": "registry",
+      "version": "2.0.119"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "syn",
+      "source": "registry",
+      "version": "3.0.3"
+    },
+    {
+      "license": "Apache-2.0",
+      "name": "sync_wrapper",
+      "source": "registry",
+      "version": "1.0.2"
+    },
+    {
+      "license": "MIT",
+      "name": "synstructure",
+      "source": "registry",
+      "version": "0.13.2"
+    },
+    {
+      "license": "MIT",
+      "name": "sysinfo",
+      "source": "registry",
+      "version": "0.30.13"
+    },
+    {
+      "license": "MIT",
+      "name": "tap",
+      "source": "registry",
+      "version": "1.0.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "tempfile",
+      "source": "registry",
+      "version": "3.27.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "thiserror",
+      "source": "registry",
+      "version": "1.0.69"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "thiserror",
+      "source": "registry",
+      "version": "2.0.19"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "thiserror-impl",
+      "source": "registry",
+      "version": "1.0.69"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "thiserror-impl",
+      "source": "registry",
+      "version": "2.0.19"
+    },
+    {
+      "license": "MIT/Apache-2.0",
+      "name": "thousands",
+      "source": "registry",
+      "version": "0.2.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "thread_local",
+      "source": "registry",
+      "version": "1.1.10"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "time",
+      "source": "registry",
+      "version": "0.3.54"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "time-core",
+      "source": "registry",
+      "version": "0.1.9"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "time-macros",
+      "source": "registry",
+      "version": "0.2.32"
+    },
+    {
+      "license": "CC0-1.0",
+      "name": "tiny-keccak",
+      "source": "registry",
+      "version": "2.0.2"
+    },
+    {
+      "license": "Unicode-3.0",
+      "name": "tinystr",
+      "source": "registry",
+      "version": "0.8.3"
+    },
+    {
+      "license": "Zlib OR Apache-2.0 OR MIT",
+      "name": "tinyvec",
+      "source": "registry",
+      "version": "1.12.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0 OR Zlib",
+      "name": "tinyvec_macros",
+      "source": "registry",
+      "version": "0.1.1"
+    },
+    {
+      "license": "MIT",
+      "name": "tokio",
+      "source": "registry",
+      "version": "1.53.1"
+    },
+    {
+      "license": "MIT",
+      "name": "tokio-macros",
+      "source": "registry",
+      "version": "2.7.2"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "tokio-rustls",
+      "source": "registry",
+      "version": "0.26.4"
+    },
+    {
+      "license": "MIT",
+      "name": "tokio-stream",
+      "source": "registry",
+      "version": "0.1.19"
+    },
+    {
+      "license": "MIT",
+      "name": "tokio-util",
+      "source": "registry",
+      "version": "0.7.19"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "toml_datetime",
+      "source": "registry",
+      "version": "0.6.11"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "toml_datetime",
+      "source": "registry",
+      "version": "1.1.1+spec-1.1.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "toml_edit",
+      "source": "registry",
+      "version": "0.19.15"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "toml_edit",
+      "source": "registry",
+      "version": "0.25.13+spec-1.1.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "toml_parser",
+      "source": "registry",
+      "version": "1.1.3+spec-1.1.0"
+    },
+    {
+      "license": "MIT",
+      "name": "tonic",
+      "source": "registry",
+      "version": "0.12.3"
+    },
+    {
+      "license": "MIT",
+      "name": "tonic-build",
+      "source": "registry",
+      "version": "0.12.3"
+    },
+    {
+      "license": "MIT",
+      "name": "tower",
+      "source": "registry",
+      "version": "0.4.13"
+    },
+    {
+      "license": "MIT",
+      "name": "tower",
+      "source": "registry",
+      "version": "0.5.3"
+    },
+    {
+      "license": "MIT",
+      "name": "tower-http",
+      "source": "registry",
+      "version": "0.6.11"
+    },
+    {
+      "license": "MIT",
+      "name": "tower-layer",
+      "source": "registry",
+      "version": "0.3.3"
+    },
+    {
+      "license": "MIT",
+      "name": "tower-service",
+      "source": "registry",
+      "version": "0.3.3"
+    },
+    {
+      "license": "MIT",
+      "name": "tracing",
+      "source": "registry",
+      "version": "0.1.44"
+    },
+    {
+      "license": "MIT",
+      "name": "tracing-appender",
+      "source": "registry",
+      "version": "0.2.5"
+    },
+    {
+      "license": "MIT",
+      "name": "tracing-attributes",
+      "source": "registry",
+      "version": "0.1.31"
+    },
+    {
+      "license": "MIT",
+      "name": "tracing-core",
+      "source": "registry",
+      "version": "0.1.36"
+    },
+    {
+      "license": "MIT",
+      "name": "tracing-forest",
+      "source": "registry",
+      "version": "0.1.6"
+    },
+    {
+      "license": "MIT",
+      "name": "tracing-log",
+      "source": "registry",
+      "version": "0.2.0"
+    },
+    {
+      "license": "MIT",
+      "name": "tracing-subscriber",
+      "source": "registry",
+      "version": "0.3.23"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "transpose",
+      "source": "registry",
+      "version": "0.2.3"
+    },
+    {
+      "license": "MIT",
+      "name": "try-lock",
+      "source": "registry",
+      "version": "0.2.5"
+    },
+    {
+      "license": "MIT",
+      "name": "twox-hash",
+      "source": "registry",
+      "version": "2.1.3"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "typeid_prefix",
+      "source": "registry",
+      "version": "1.2.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "typeid_suffix",
+      "source": "registry",
+      "version": "1.3.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "typenum",
+      "source": "registry",
+      "version": "1.20.1"
+    },
+    {
+      "license": "(MIT OR Apache-2.0) AND Unicode-3.0",
+      "name": "unicode-ident",
+      "source": "registry",
+      "version": "1.0.24"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "unicode-width",
+      "source": "registry",
+      "version": "0.2.2"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "unicode-xid",
+      "source": "registry",
+      "version": "0.2.6"
+    },
+    {
+      "license": "ISC",
+      "name": "untrusted",
+      "source": "registry",
+      "version": "0.9.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "url",
+      "source": "registry",
+      "version": "2.5.8"
+    },
+    {
+      "license": "Apache-2.0 OR MIT",
+      "name": "utf8_iter",
+      "source": "registry",
+      "version": "1.0.4"
+    },
+    {
+      "license": "Apache-2.0 OR MIT",
+      "name": "utf8parse",
+      "source": "registry",
+      "version": "0.2.2"
+    },
+    {
+      "license": "Apache-2.0 OR MIT",
+      "name": "uuid",
+      "source": "registry",
+      "version": "1.24.0"
+    },
+    {
+      "license": "MIT",
+      "name": "valuable",
+      "source": "registry",
+      "version": "0.1.1"
+    },
+    {
+      "license": "MIT/Apache-2.0",
+      "name": "vec_map",
+      "source": "registry",
+      "version": "0.8.2"
+    },
+    {
+      "license": "MIT/Apache-2.0",
+      "name": "version_check",
+      "source": "registry",
+      "version": "0.9.5"
+    },
+    {
+      "license": "MIT",
+      "name": "want",
+      "source": "registry",
+      "version": "0.3.1"
+    },
+    {
+      "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+      "name": "wasi",
+      "source": "registry",
+      "version": "0.11.1+wasi-snapshot-preview1"
+    },
+    {
+      "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+      "name": "wasip2",
+      "source": "registry",
+      "version": "1.0.4+wasi-0.2.12"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "wasm-bindgen",
+      "source": "registry",
+      "version": "0.2.126"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "wasm-bindgen-futures",
+      "source": "registry",
+      "version": "0.4.76"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "wasm-bindgen-macro",
+      "source": "registry",
+      "version": "0.2.126"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "wasm-bindgen-macro-support",
+      "source": "registry",
+      "version": "0.2.126"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "wasm-bindgen-shared",
+      "source": "registry",
+      "version": "0.2.126"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "wasm-streams",
+      "source": "registry",
+      "version": "0.4.2"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "web-sys",
+      "source": "registry",
+      "version": "0.3.103"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "web-time",
+      "source": "registry",
+      "version": "1.1.0"
+    },
+    {
+      "license": "CDLA-Permissive-2.0",
+      "name": "webpki-roots",
+      "source": "registry",
+      "version": "1.0.9"
+    },
+    {
+      "license": "MIT/Apache-2.0",
+      "name": "winapi",
+      "source": "registry",
+      "version": "0.3.9"
+    },
+    {
+      "license": "MIT/Apache-2.0",
+      "name": "winapi-i686-pc-windows-gnu",
+      "source": "registry",
+      "version": "0.4.0"
+    },
+    {
+      "license": "MIT/Apache-2.0",
+      "name": "winapi-x86_64-pc-windows-gnu",
+      "source": "registry",
+      "version": "0.4.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "windows",
+      "source": "registry",
+      "version": "0.52.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "windows-core",
+      "source": "registry",
+      "version": "0.52.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "windows-core",
+      "source": "registry",
+      "version": "0.62.2"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "windows-implement",
+      "source": "registry",
+      "version": "0.60.2"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "windows-interface",
+      "source": "registry",
+      "version": "0.59.3"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "windows-link",
+      "source": "registry",
+      "version": "0.2.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "windows-result",
+      "source": "registry",
+      "version": "0.4.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "windows-strings",
+      "source": "registry",
+      "version": "0.5.1"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "windows-sys",
+      "source": "registry",
+      "version": "0.48.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "windows-sys",
+      "source": "registry",
+      "version": "0.52.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "windows-sys",
+      "source": "registry",
+      "version": "0.59.0"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "windows-sys",
+      "source": "registry",
+      "version": "0.61.2"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "windows-targets",
+      "source": "registry",
+      "version": "0.48.5"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "windows-targets",
+      "source": "registry",
+      "version": "0.52.6"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "windows_aarch64_gnullvm",
+      "source": "registry",
+      "version": "0.48.5"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "windows_aarch64_gnullvm",
+      "source": "registry",
+      "version": "0.52.6"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "windows_aarch64_msvc",
+      "source": "registry",
+      "version": "0.48.5"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "windows_aarch64_msvc",
+      "source": "registry",
+      "version": "0.52.6"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "windows_i686_gnu",
+      "source": "registry",
+      "version": "0.48.5"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "windows_i686_gnu",
+      "source": "registry",
+      "version": "0.52.6"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "windows_i686_gnullvm",
+      "source": "registry",
+      "version": "0.52.6"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "windows_i686_msvc",
+      "source": "registry",
+      "version": "0.48.5"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "windows_i686_msvc",
+      "source": "registry",
+      "version": "0.52.6"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "windows_x86_64_gnu",
+      "source": "registry",
+      "version": "0.48.5"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "windows_x86_64_gnu",
+      "source": "registry",
+      "version": "0.52.6"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "windows_x86_64_gnullvm",
+      "source": "registry",
+      "version": "0.48.5"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "windows_x86_64_gnullvm",
+      "source": "registry",
+      "version": "0.52.6"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "windows_x86_64_msvc",
+      "source": "registry",
+      "version": "0.48.5"
+    },
+    {
+      "license": "MIT OR Apache-2.0",
+      "name": "windows_x86_64_msvc",
+      "source": "registry",
+      "version": "0.52.6"
+    },
+    {
+      "license": "MIT",
+      "name": "winnow",
+      "source": "registry",
+      "version": "0.5.40"
+    },
+    {
+      "license": "MIT",
+      "name": "winnow",
+      "source": "registry",
+      "version": "1.0.4"
+    },
+    {
+      "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+      "name": "wit-bindgen",
+      "source": "registry",
+      "version": "0.57.1"
+    },
+    {
+      "license": "Unicode-3.0",
+      "name": "writeable",
+      "source": "registry",
+      "version": "0.6.3"
+    },
+    {
+      "license": "MIT",
+      "name": "wyz",
+      "source": "registry",
+      "version": "0.5.1"
+    },
+    {
+      "license": "Unicode-3.0",
+      "name": "yoke",
+      "source": "registry",
+      "version": "0.8.3"
+    },
+    {
+      "license": "Unicode-3.0",
+      "name": "yoke-derive",
+      "source": "registry",
+      "version": "0.8.2"
+    },
+    {
+      "license": "BSD-2-Clause OR Apache-2.0 OR MIT",
+      "name": "zerocopy",
+      "source": "registry",
+      "version": "0.8.55"
+    },
+    {
+      "license": "BSD-2-Clause OR Apache-2.0 OR MIT",
+      "name": "zerocopy-derive",
+      "source": "registry",
+      "version": "0.8.55"
+    },
+    {
+      "license": "Unicode-3.0",
+      "name": "zerofrom",
+      "source": "registry",
+      "version": "0.1.8"
+    },
+    {
+      "license": "Unicode-3.0",
+      "name": "zerofrom-derive",
+      "source": "registry",
+      "version": "0.1.7"
+    },
+    {
+      "license": "Apache-2.0 OR MIT",
+      "name": "zeroize",
+      "source": "registry",
+      "version": "1.9.0"
+    },
+    {
+      "license": "Unicode-3.0",
+      "name": "zerotrie",
+      "source": "registry",
+      "version": "0.2.4"
+    },
+    {
+      "license": "Unicode-3.0",
+      "name": "zerovec",
+      "source": "registry",
+      "version": "0.11.6"
+    },
+    {
+      "license": "Unicode-3.0",
+      "name": "zerovec-derive",
+      "source": "registry",
+      "version": "0.11.3"
+    },
+    {
+      "license": "MIT",
+      "name": "zmij",
+      "source": "registry",
+      "version": "1.0.23"
+    }
+  ],
+  "provenance": {
+    "arch": "X86_64",
+    "builder_container_digest": "sha256:2b38036628803ca2613b717b9b015cede28c41aa57034749992d310a3b5fd152",
+    "candidate": "Sp1",
+    "canonical_nodes_sha256": "1f671178686ccfc8280fc0e1c67b86083139b2625113374559c2fcae7810a32d",
+    "lock_blake3_hex": "41931aed51b6ba79272f20db74130ada464d89c76a059dcf71e6cd1a85467d8a",
+    "original_metadata_sha256": "48453e70be6d6f0f2eb657e88b7c5b620e99f6a09a5bd957f527b5d86c6fe076",
+    "package_count": 529,
+    "projection": "LOSSLESS policy projection: parse_cargo_metadata(original) -> CrateNode{name,version,source,license} — the complete set of fields Stage-2 policy consumes",
+    "source_head": "cb365a4ac73b13116941409614bef1ceeba66925"
+  }
+}

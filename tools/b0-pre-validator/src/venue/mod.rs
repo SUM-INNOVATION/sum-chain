@@ -19,6 +19,7 @@ pub mod audit;
 pub mod cargo_lock;
 pub mod checkout_digest;
 pub mod evidence_bundle;
+pub mod license_policy;
 pub mod lock_provenance;
 pub mod oci_layout;
 pub mod prover_archive;

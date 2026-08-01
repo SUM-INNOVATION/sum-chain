@@ -11,7 +11,7 @@ RISC Zero candidate.
 
 - Direct pins (exact): `risc0-zkvm = 3.0.5` (guest env + host), `risc0-groth16 =
   3.0.4`, `risc0-build = 3.0.5` (host). The guest-side platform crate
-  (`risc0-zkvm-platform = 2.2.2`) resolves transitively from `risc0-zkvm 3.0.5`.
+  (`risc0-zkvm-platform = 2.2.3`) resolves transitively from `risc0-zkvm 3.0.5`.
 - Official guest source: **present** (`guest/src/main.rs` →
   `b0_pre_guest_core::run`); its semantics are locally verified by the
   `b0-pre-guest-core` tests (no prover toolchain needed). See

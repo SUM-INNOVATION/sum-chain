@@ -1324,7 +1324,7 @@ pub fn write_test_only_bundle_dir(dir: &Path, arch: &str) -> Result<(), String> 
                 serde_json::json!({"name":"risc0-zkvm","version":"3.0.5","source":"registry","license":"Apache-2.0"}),
                 serde_json::json!({"name":"risc0-build","version":"3.0.5","source":"registry","license":"Apache-2.0"}),
                 serde_json::json!({"name":"risc0-groth16","version":"3.0.4","source":"registry","license":"Apache-2.0"}),
-                serde_json::json!({"name":"risc0-zkvm-platform","version":"2.2.2","source":"registry","license":"Apache-2.0"}),
+                serde_json::json!({"name":"risc0-zkvm-platform","version":"2.2.3","source":"registry","license":"Apache-2.0"}),
             ]
         };
         let stage2 = serde_json::json!({"schema_version":crate::venue::audit::STAGE2_SCHEMA_VERSION,

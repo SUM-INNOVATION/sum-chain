@@ -219,7 +219,7 @@ transitive graph:
 
 - **Fatal** (candidate ineligible): the selected release is not the pinned stable
   version (`sp1 = 6.3.1`, `risc0-zkvm/build = 3.0.5`, `risc0-groth16 = 3.0.4`,
-  `risc0-zkvm-platform = 2.2.2`); an unexpected `git`/`path` source on a
+  `risc0-zkvm-platform = 2.2.3`); an unexpected `git`/`path` source on a
   proof-stack crate; duplicate *incompatible* proof-stack versions; an unresolved
   security advisory; a license outside the allow-list.
 - **Recorded, not auto-fatal**: transitive **prerelease** crates. SP1's Plonky3

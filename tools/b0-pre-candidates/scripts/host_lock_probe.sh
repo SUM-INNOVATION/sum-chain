@@ -34,7 +34,7 @@ emit "NOT_FOR_B0_PRE_FINALIZATION"
 emit "purpose: early resolution/anomaly signal only; not reproducible, not authoritative, not container-derived"
 emit "policy: prerelease findings below are RECORDED for the venue audit, not a verdict. The"
 emit "        stable-only rule binds the selected candidate release (sp1 6.3.1 / risc0 3.0.5 /"
-emit "        3.0.4 / 2.2.2); the transitive graph is subject to the security/source/reproducibility"
+emit "        3.0.4 / 2.2.3); the transitive graph is subject to the security/source/reproducibility"
 emit "        gates. See docs/b0-pre/venue/VENUE.md 'Version / audit policy'."
 emit ""
 

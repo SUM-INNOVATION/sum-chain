@@ -48,3 +48,4 @@ schemars = "=0.8.21"
 # default-features off: we only validate local in-memory schemas, so drop the
 # HTTP `$ref` resolver (reqwest/tower-http/url/icu) — dead weight and advisory surface.
 jsonschema = { version = "=0.18.1", default-features = false }
+spdx = { version = "=0.13.4", default-features = false }
