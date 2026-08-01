@@ -17,5 +17,8 @@ description = "Deterministic extraction + contract test for the immutable materi
 b0-pre-vmat = { path = "../../../b0-pre-vmat" }
 risc0-zkvm = "=3.0.5"
 risc0-groth16 = "=3.0.4"
-blake3 = "=1.5.4"
+# Cluster-pinned identically with b0-pre-vmat (=1.6.1, SMOKE-BLOCKED-005). risc0-zkvm
+# 3.0.5 alone resolves fine at 1.5.4, but this harness shares the b0-pre-vmat leaf,
+# which is exact-pinned =1.6.1, so it moves with the cluster to avoid version skew.
+blake3 = "=1.6.1"
 serde_json = { version = "=1.0.149", features = ["arbitrary_precision"] }

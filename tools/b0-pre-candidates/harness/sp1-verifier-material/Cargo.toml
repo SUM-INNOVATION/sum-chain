@@ -16,5 +16,10 @@ description = "Deterministic extraction + contract test for the immutable materi
 [dependencies]
 b0-pre-vmat = { path = "../../../b0-pre-vmat" }
 sp1-verifier = "=6.3.1"
-blake3 = "=1.5.4"
+# =1.6.1 is the minimum exact version satisfying sp1-verifier 6.3.1's blake3 ^1.6.1
+# requirement (SMOKE-BLOCKED-005). Exact-pinned identically across the b0-pre-vmat
+# cluster (this harness + b0-pre-vmat + b0-pre-validator + the risc0 harness) so the
+# shared identity leaf resolves to one blake3 everywhere. Not a range; the harness
+# lock is generated fresh in-container and never host-substituted.
+blake3 = "=1.6.1"
 serde_json = { version = "=1.0.149", features = ["arbitrary_precision"] }

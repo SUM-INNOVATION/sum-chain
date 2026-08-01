@@ -10,5 +10,12 @@ description = "B0-PRE (#123) shared canonical verifier-material primitive: the O
 # validator would otherwise drag serde/schemars/jsonschema/num-* into the tiny
 # extractor crates (option B), and no published leaf exposes this format (option
 # C: VerifierMaterialManifestV1 lives only in b0-pre-validator).
+#
+# blake3 is exact-pinned identically across the whole b0-pre-vmat cluster
+# (this leaf + b0-pre-validator + the sp1/risc0 verifier-material harnesses) so the
+# shared identity primitive resolves to ONE version everywhere — no cross-consumer
+# skew. Moved =1.5.4 -> =1.6.1 (SMOKE-BLOCKED-005): sp1-verifier 6.3.1 requires
+# blake3 ^1.6.1, and this shared leaf sits in that graph, so the whole cluster moves
+# together. 1.6.1 is the minimum exact version satisfying ^1.6.1.
 [dependencies]
-blake3 = "=1.5.4"
+blake3 = "=1.6.1"
