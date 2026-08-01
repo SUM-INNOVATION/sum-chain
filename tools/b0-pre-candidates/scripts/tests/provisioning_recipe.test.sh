@@ -75,6 +75,22 @@ for df in "$SP1" "$R0"; do
   hasnt_code "$df" '/root/\.cargo/\*'               && ok "$b: no /root/.cargo/* wildcard"        || bad "$b: /root/.cargo/* wildcard present"
   hasnt_code "$df" 'rm[^;]*/root/\.cargo/bin'       && ok "$b: keeps /root/.cargo/bin (toolchain)" || bad "$b: removes the toolchain bin"
   hasnt_code "$df" 'rm[^;]*/opt/b0pre/audit-prefix' && ok "$b: keeps /opt/b0pre/audit-prefix + cargo-audit" || bad "$b: removes the audit prefix"
+
+  # Reproducibility (sparse-index cache): remove the EXACT directory /root/.cargo/registry/index (its
+  # .cache/<crate> entries retain live registry revalidation state that diverges across two clean
+  # builds), AFTER the last cargo op, as the complete directory — NOT a nested wildcard, find, or a
+  # broad registry sweep. cargo recreates it on the next online op; the toolchain + audit-prefix stay.
+  has_code "$df" 'rm -rf /root/\.cargo/registry/index' && ok "$b: removes exactly /root/.cargo/registry/index" || bad "$b: missing exact registry/index removal"
+  ix_line="$(grep -nE 'rm -rf /root/\.cargo/registry/index' "$df" | tail -1 | cut -d: -f1)"
+  if [ -n "$ci_line" ] && [ -n "$ix_line" ] && [ "$ix_line" -gt "$ci_line" ]; then
+    ok "$b: registry/index removal (line $ix_line) is AFTER the cargo install (line $ci_line)"
+  else
+    bad "$b: registry/index removal not proven after the last cargo op (ci=$ci_line ix=$ix_line)"
+  fi
+  hasnt_code "$df" 'registry/index/[^ ";]*\*'       && ok "$b: no nested registry/index wildcard"  || bad "$b: nested registry/index wildcard present"
+  hasnt_code "$df" 'rm[^;]*registry/index/\.cache'  && ok "$b: removes the whole registry/index dir, not just its .cache subdir" || bad "$b: removes a nested .cache path instead of the exact dir"
+  hasnt_code "$df" 'rm[^;]*/root/\.cargo/registry/\*' && ok "$b: no /root/.cargo/registry/* wildcard" || bad "$b: registry/* wildcard present"
+  hasnt_code "$df" 'find[^;]*/root/\.cargo'          && ok "$b: no find-based cargo cache deletion"   || bad "$b: find-based cargo deletion present"
 done
 
 # ---- 4. Prover provisioning via the STAGED verified extractor (Items 2/3).

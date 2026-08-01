@@ -176,7 +176,15 @@ RUN set -eux; \
        wildcard; the toolchain (/root/.cargo/bin), /opt/b0pre/audit-prefix, the installed cargo-audit + \
        its recorded evidence, and runtime linker state are all KEPT. An ephemeral stage container may \
        recreate it without changing this committed image."; \
-    rm -f /root/.cargo/.global-cache
+    rm -f /root/.cargo/.global-cache; \
+    : "reproducibility (sparse-index cache — the 357-path systematic divergence the two-clean-build \
+       proof exposed): /root/.cargo/registry/index is cargo's crates.io SPARSE-INDEX checkout; its \
+       .cache/<crate> entries retain live registry revalidation state (per-file cache headers) that \
+       differs across two clean builds. Remove the EXACT directory HERE, AFTER the last cargo op (the \
+       cargo install above) in this layer; NOT a wildcard or find. cargo recreates it on the next \
+       online operation. The toolchain (/root/.cargo/bin), /opt/b0pre/audit-prefix, and the installed \
+       cargo-audit + its recorded evidence are all KEPT."; \
+    rm -rf /root/.cargo/registry/index
 
 # ---- (Items 2/3) RISC Zero prover `cargo-risczero` + `r0vm` (x86_64 ONLY) — a SINGLE SHARED
 # archive — by DECLARATIVE VERIFIED ARCHIVE-MEMBER EXTRACTION using the SAME staged, tested
