@@ -465,17 +465,18 @@ fn generation_enforces_the_risc0_x86_64_only_rule() {
 
 #[test]
 fn generation_command_path_proves_and_never_cans_a_fixture() {
-    // Structural guard on the venue-UNEXECUTED command path: it PROVES a frozen guest
-    // (genuine prover SDK), stamps the fixture NON-SELECTION, generates its lock
-    // in-container before any --locked build, and contains no canned/synthetic proof.
+    // Structural guard on the command path: it PROVES a frozen guest (genuine prover SDK) with
+    // the terminal Groth16 backend running UNDER the Docker invocation firewall, stamps the
+    // fixture NON-SELECTION, generates the prover-runner lock before any --locked build, and
+    // contains no canned/synthetic proof.
     let src = std::fs::read_to_string(prove_fixture()).unwrap();
     assert!(
         src.contains("cargo run --quiet --release --locked"),
-        "prover-runner must run --locked against its in-container-generated lock"
+        "prover-runner must run --locked against its bound lock"
     );
     let gen = src
-        .find("cargo generate-lockfile'")
-        .expect("in-container lock gen");
+        .find("cargo generate-lockfile")
+        .expect("host-side prover-runner lock generation");
     let run = src.find("cargo run --quiet --release --locked").unwrap();
     assert!(
         gen < run,
@@ -485,10 +486,22 @@ fn generation_command_path_proves_and_never_cans_a_fixture() {
         !src.contains("generate-lockfile --locked"),
         "generate-lockfile must not run --locked against a fresh package"
     );
-    // proves a real guest ELF (not a canned proof) and stamps it non-selection.
+    // The terminal Groth16 backend the pinned SDK invokes runs under the firewall (host-side),
+    // never docker-in-docker; the firewall attestation is bound into the sealed lineage.
     assert!(
-        src.contains("cargo prove build") && src.contains("cargo risczero build"),
-        "generation must build the frozen guest with the pinned prover toolchain"
+        src.contains("docker_firewall.sh") && src.contains("under the Docker firewall"),
+        "generation must run the terminal Groth16 backend under the Docker invocation firewall"
+    );
+    // proves a real guest ELF (not a canned proof): SP1 builds the guest in the pinned container
+    // (`cargo prove build`); RISC Zero builds it host-side via `risc0_build::embed_methods()`
+    // (owner decision B — no `cargo risczero build` CLI / guest-builder image).
+    assert!(
+        src.contains("cargo prove build") && src.contains("embed_methods"),
+        "generation must build the frozen guest with the pinned prover toolchain (SP1 cargo prove build; RISC0 embed_methods)"
+    );
+    assert!(
+        !src.contains("cargo risczero build"),
+        "RISC Zero guest must NOT use the cargo-risczero CLI / guest-builder image (owner decision B)"
     );
     assert!(
         src.contains("NOT_AN_OFFICIAL_GUEST") && src.contains("b0_pre_guest_core::run"),

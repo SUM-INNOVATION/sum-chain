@@ -1,0 +1,5 @@
+{
+ "contract_version": "v3",
+ "_note": "legacy v3 pin proposal; parses but is INELIGIBLE for capability-complete Stage-5",
+ "base_image": "ghcr.io/example/base"
+}

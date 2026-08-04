@@ -38,6 +38,14 @@ pub const CONTAINER_TAG: [u8; 32] = pad32(b"SUMCHAIN/B0PRE/CONTAINER/v1");
 /// Domain tag for the canonical advisory-database checkout-content digest (policy A):
 /// `BLAKE3(ADVDB_CHECKOUT_TAG ‖ entry_count ‖ sorted (relpath,type,mode,symlink|content))`.
 pub const ADVDB_CHECKOUT_TAG: [u8; 32] = pad32(b"SUMCHAIN/B0PRE/ADVDB/v1");
+/// Domain tag for the canonical PROVISIONED-TREE content digest (`provisioned_tree`):
+/// the deterministic content digest of an extracted provisioning tree (a proving
+/// circuit runtime tree, a guest-toolchain tree, or a prover backend/data tree).
+/// Distinct construction from ADVDB: it digests EVERY entry with no `.git`
+/// exclusion (an extracted archive is fully-known content), so its digests never
+/// collide with, and are never read as, an ADVDB checkout digest. Structure:
+/// `BLAKE3(PROVISIONED_TREE_TAG ‖ entry_count ‖ sorted (relpath,type,mode,symlink|content))`.
+pub const PROVISIONED_TREE_TAG: [u8; 32] = pad32(b"SUMCHAIN/B0PRE/PROVTREE/v1");
 /// Domain tag for the TEST_ONLY smoke SOURCE binding (strengthened Option A). Distinct from
 /// every authoritative source/runnable-ref domain: a smoke source binding hashed under THIS tag
 /// can never collide with, or be read as, an authoritative source identity. The binding's
@@ -100,6 +108,7 @@ mod tests {
         ("CARGO_LOCK", CARGO_LOCK_TAG),
         ("CONTAINER", CONTAINER_TAG),
         ("ADVDB_CHECKOUT", ADVDB_CHECKOUT_TAG),
+        ("PROVISIONED_TREE", PROVISIONED_TREE_TAG),
         ("SMOKE_SOURCE", SMOKE_SOURCE_TAG),
         ("SMOKE_ATTEST", SMOKE_ATTEST_TAG),
     ];

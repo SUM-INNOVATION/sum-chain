@@ -73,7 +73,14 @@ RUN set -eux; \
     inrel_sec="$(ls /var/lib/apt/lists/*_dists_bookworm-security_InRelease)"; \
     echo "${APT_DEBIAN_INRELEASE_SHA256}  ${inrel_deb}"   | sha256sum -c -; \
     echo "${APT_SECURITY_INRELEASE_SHA256}  ${inrel_sec}" | sha256sum -c -; \
-    apt-get install -y --no-install-recommends ca-certificates curl build-essential pkg-config libssl-dev git; \
+    : "protobuf-compiler is REQUIRED at build time by sp1-prover-types (gRPC codegen); pinned to \
+       the EXACT version supplied by the pinned Debian snapshot (verified present on amd64+arm64), \
+       provisioned SOLELY through this immutable APT provenance — no curl installer, no moving \
+       release. protoc --version is recorded as venue evidence + capability-checked"; \
+    apt-get install -y --no-install-recommends ca-certificates curl build-essential pkg-config libssl-dev git protobuf-compiler=3.21.12-3+deb12u1; \
+    mkdir -p /opt/b0pre/evidence; \
+    protoc --version | tee /opt/b0pre/evidence/protoc.version; \
+    protoc --version | grep -q '3.21.12' || { echo "REFUSED: protoc is not the pinned 3.21.12" >&2; exit 8; }; \
     : "reproducibility: drop ONLY the build-time-content artifacts whose CONTENT embeds \
        wall-clock timestamps — the apt/dpkg/alternatives/bootstrap logs, and ldconfig's \
        DISPOSABLE auxiliary optimization cache /var/cache/ldconfig/aux-cache (created by the \
@@ -221,6 +228,31 @@ RUN set -eux; \
     : "reproducibility: remove the downloaded archive scratch IN THIS LAYER; the placed executable \
        + its recorded exe-sha256 (venue evidence) survive"; \
     rm -rf /tmp/prov
+
+# ---- SP1 GUEST COMPILER toolchain (succinct-1.94.0-64bit), by verified TREE extraction using the
+# SINGLE staged provisioner provision_guest_toolchain.sh. This is the toolchain `cargo prove build`
+# compiles the frozen guest with. OWNER CONTENT PIN: authority is the whole-archive SHA-256
+# (verified BEFORE extraction) plus the PROVISIONED_TREE/v1 digest re-verified at point of use by
+# the producer. The URL is an IMMUTABLE release asset; the sha256 is the authority (NO mutable tag,
+# NO rzup, NO network resolution beyond fetching the pinned asset). Provisioned at a fixed path and
+# linked as the rustup toolchain "succinct".
+ARG SP1_GUEST_TOOLCHAIN_URL
+ARG SP1_GUEST_TOOLCHAIN_SHA256
+COPY provisioning/provision_guest_toolchain.sh /usr/local/lib/b0pre/provision_guest_toolchain.sh
+RUN set -eux; \
+    printf '%s' "${SP1_GUEST_TOOLCHAIN_SHA256}" | grep -Eq '^[0-9a-f]{64}$'; \
+    test -n "${SP1_GUEST_TOOLCHAIN_URL}" || { echo "REFUSED: SP1_GUEST_TOOLCHAIN_URL is empty" >&2; exit 8; }; \
+    mkdir -p /tmp/gtc /opt/b0pre/evidence; \
+    curl -fsSL "${SP1_GUEST_TOOLCHAIN_URL}" -o /tmp/gtc/succinct.tar.gz; \
+    bash /usr/local/lib/b0pre/provision_guest_toolchain.sh \
+      /tmp/gtc/succinct.tar.gz "${SP1_GUEST_TOOLCHAIN_SHA256}" \
+      succinct-toolchain /opt/b0pre/sp1-succinct-toolchain; \
+    rustup toolchain link succinct /opt/b0pre/sp1-succinct-toolchain; \
+    rustup run succinct rustc --version; \
+    sha256sum /opt/b0pre/sp1-succinct-toolchain/bin/rustc | awk '{print $1}' > /opt/b0pre/evidence/succinct-rustc.sha256; \
+    : "reproducibility: remove the downloaded archive scratch IN THIS LAYER; the extracted toolchain \
+       tree survives"; \
+    rm -rf /tmp/gtc
 
 # The audit prefix + isolated prover PATH become part of the PRODUCTION non-login PATH so
 # `cargo audit` and `cargo prove` resolve under the exact `bash -c` the producer uses (RT-2).

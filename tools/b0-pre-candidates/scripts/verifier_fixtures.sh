@@ -131,9 +131,28 @@ if [ -n "$FIXTURE_PATH" ]; then
   note "using externally-supplied genuine $CAND_LC fixture: $FIXTURE_PATH"
 else
   FIXTURE_PATH="$OUT_DIR/generated-fixture.json"
+  # GENUINE guest input: the frozen official statement+witness bytes the guest proves. The
+  # guest fails-closed on a false/malformed envelope (no valid receipt), so a real input is
+  # mandatory. Emit it DETERMINISTICALLY from the frozen workload fixture if the caller did
+  # not supply a path (both candidates prove the same candidate-neutral statement, so one
+  # blob serves both). No proof/receipt/program-id is produced here — input bytes only.
+  guest_input="${PROVER_GUEST_INPUT:-}"
+  if [ -z "$guest_input" ]; then
+    official="$HERE/../../../docs/b0-pre/fixtures/workload/official.json"
+    [ -f "$official" ] || die "frozen official workload fixture not found at $official (cannot emit the guest input)"
+    command -v cargo >/dev/null 2>&1 || die "host cargo is required to emit the frozen guest input"
+    # Scratch CARGO_TARGET_DIR so the host build of guest-core never writes into the (clean) tree.
+    ( cd "$HERE/.." && CARGO_TARGET_DIR="$OUT_DIR/_emit-target" cargo run --quiet \
+        --manifest-path guest-core/Cargo.toml \
+        --example emit_official_guest_input -- "$official" "$OUT_DIR/guestin" ) \
+      || die "emitting the official guest input failed (guest-core did not accept the frozen workload)"
+    guest_input="$OUT_DIR/guestin/tlg.guestin.bin"
+    [ -s "$guest_input" ] || die "guest input blob was not produced at $guest_input"
+    note "emitted frozen official guest input (tlg statement) -> $guest_input"
+  fi
   VERIFIER_REF="$VERIFIER_REF" CMD_LOG="$CMD_LOG" SCHEMA_ARCH="$SCHEMA_ARCH" \
     TOOL_BINDING="$WORK_DIR/$CAND.tool-binding.json" \
-    PROVER_GUEST_INPUT="${PROVER_GUEST_INPUT:-}" \
+    PROVER_GUEST_INPUT="$guest_input" \
     bash "$HERE/prove_fixture.sh" "$CAND_LC" "$ARCH" "$FIXTURE_PATH" \
     || die "genuine $CAND_LC fixture generation failed closed (no official guest source / pinned toolchain / bound prover identity); no synthetic fixture is substituted"
 fi
@@ -182,6 +201,10 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 license = "MIT OR Apache-2.0"
+# The pinned in-container Rust toolchain (matches the builder image's RUST_VERSION); with the
+# MSRV-aware resolver the lock resolves to toolchain-compatible dependency versions (see the
+# RISC Zero runner for the rationale).
+rust-version = "1.88.0"
 
 # Pinned to the SP1 6.3.1 terminal Groth16 verifier. Verification is genuine; no
 # outcome is hardcoded. Runs only inside the pinned container venue. The Cargo.lock is
@@ -307,6 +330,13 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 license = "MIT OR Apache-2.0"
+# The pinned in-container Rust toolchain (matches the builder image's RUST_VERSION). With the
+# MSRV-aware resolver (CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback on generate-lockfile),
+# this makes the resolver pick the newest dependency versions COMPATIBLE with this toolchain
+# instead of transitive crates that require a newer rustc (e.g. enum-ordinalize 4.4.2 / ruint
+# 1.20.0, which demand rustc >= 1.89/1.90). Stage 1/2 never compile, so they tolerate those; the
+# verifier runner DOES compile in-container, so it must resolve to toolchain-compatible versions.
+rust-version = "1.88.0"
 
 # Pinned to RISC Zero 3.0.5. Verification is genuine (Receipt::verify(image_id));
 # no outcome is hardcoded. Runs only on a native x86_64 container venue. The
@@ -331,8 +361,19 @@ TOML
 use std::fs;
 use std::process::ExitCode;
 
-use risc0_zkvm::sha::Digest;
+use risc0_zkvm::sha::{Digest, Digestible};
 use risc0_zkvm::{Groth16ReceiptVerifierParameters, Receipt, VerifierContext};
+
+// risc0_zkvm::sha::Digest does NOT implement FromStr; construct it from its 32 raw bytes
+// (`Digest: From<[u8; 32]>`). A non-32-byte value fails closed (never a fabricated digest).
+fn parse_digest(s: &str) -> Result<Digest, String> {
+    let bytes = hexbytes(s)?;
+    let arr: [u8; 32] = bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| format!("digest is not 32 bytes (got {})", bytes.len()))?;
+    Ok(Digest::from(arr))
+}
 
 fn hex(b: &[u8]) -> String {
     use std::fmt::Write as _;
@@ -369,7 +410,7 @@ fn run() -> Result<(), String> {
     // A wrong venue-confirmed codec fails HERE (fail closed), never fabricates.
     let receipt: Receipt =
         bincode::deserialize(&receipt_bytes).map_err(|e| format!("INELIGIBLE: cannot decode pinned Receipt: {e}"))?;
-    let image_id: Digest = image_id_hex.parse().map_err(|e| format!("bad image_id hex: {e:?}"))?;
+    let image_id: Digest = parse_digest(&image_id_hex).map_err(|e| format!("bad image_id hex: {e}"))?;
     if receipt.journal.bytes.is_empty() {
         return Err("INELIGIBLE: empty journal (no public output)".into());
     }
@@ -379,9 +420,13 @@ fn run() -> Result<(), String> {
         .verify(image_id)
         .map_err(|e| format!("INELIGIBLE: genuine RISC Zero Groth16 receipt did not verify: {e:?}"))?;
 
-    // The immutable Groth16 verifier material actually consumed by the verify path.
+    // The immutable Groth16 verifier material actually consumed by the verify path, recorded by
+    // its CANONICAL identity — NOT a bincode/serde re-encoding. `VerifyingKey` has no `to_bytes`,
+    // but its canonical identity is `verifying_key.digest()` (the exact 32-byte digest that
+    // `Groth16ReceiptVerifierParameters::digest()` folds in and that `Receipt::verify` enforces via
+    // the receipt's `verifier_parameters`). The control root is likewise its canonical 32 bytes.
     let params = Groth16ReceiptVerifierParameters::default();
-    let vk_bytes = params.verifying_key.to_bytes();
+    let vk_bytes = params.verifying_key.digest().as_bytes().to_vec();
     let control_root_bytes = params.control_root.as_bytes().to_vec();
 
     let w = |name: &str, bytes: &[u8]| -> Result<(), String> {
@@ -406,7 +451,7 @@ fn run() -> Result<(), String> {
         if let Some(c) = bad.last_mut() {
             *c = if *c == b'0' { b'1' } else { b'0' };
         }
-        match String::from_utf8_lossy(&bad).parse::<Digest>() {
+        match parse_digest(&String::from_utf8_lossy(&bad)) {
             Ok(bad_id) => receipt.verify(bad_id).is_err(),
             Err(_) => true, // an unparsable claim is a rejection
         }
@@ -420,7 +465,7 @@ fn run() -> Result<(), String> {
         if let Some(c) = cr.last_mut() {
             *c = if *c == b'0' { b'1' } else { b'0' };
         }
-        match String::from_utf8_lossy(&cr).parse::<Digest>() {
+        match parse_digest(&String::from_utf8_lossy(&cr)) {
             Ok(different_root) => {
                 swapped.control_root = different_root;
                 let ctx = VerifierContext::default().with_groth16_verifier_parameters(swapped);
@@ -485,7 +530,11 @@ cp "$FIXTURE_ABS" "$OUT_DIR/genuine-fixture.json"
 # any verification runs. The build in PHASE B then runs `--locked` against THIS lock.
 # NON-login `bash -c` (RT-2): the image exposes cargo via `ENV PATH`; a login shell would
 # reset PATH via /etc/profile and lose /root/.cargo/bin. Consistent with Stage 1/2/material.
-GEN_CMD="docker run --rm --pull never -v $OUT_DIR:/out -e CARGO_TARGET_DIR=/tmp/b0pre-stage5-target $VERIFIER_REF bash -c 'cd /out/_runner && cargo generate-lockfile'"
+# MSRV-aware resolution: with the runner's `rust-version` pin, `incompatible-rust-versions=fallback`
+# makes `cargo generate-lockfile` pick the newest dependency versions COMPATIBLE with the pinned
+# in-container toolchain, rather than transitive crates that demand a newer rustc (which would then
+# fail the `cargo build --locked` below). The verifier runner compiles in-container, unlike Stage 1/2.
+GEN_CMD="docker run --rm --pull never -v $OUT_DIR:/out -e CARGO_TARGET_DIR=/tmp/b0pre-stage5-target -e CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback $VERIFIER_REF bash -c 'cd /out/_runner && cargo generate-lockfile'"
 {
   printf '# Stage-5 genuine verifier+mutation run for %s (%s) inside %s\n' "$CAND_LC" "$SCHEMA_ARCH" "$VERIFIER_REF"
   printf '%s\n' "$GEN_CMD"
@@ -493,6 +542,7 @@ GEN_CMD="docker run --rm --pull never -v $OUT_DIR:/out -e CARGO_TARGET_DIR=/tmp/
 docker run --rm --pull never \
   -v "$OUT_DIR:/out" \
   -e CARGO_TARGET_DIR=/tmp/b0pre-stage5-target \
+  -e CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback \
   "$VERIFIER_REF" \
   bash -c 'cd /out/_runner && cargo generate-lockfile' \
   || die "in-container 'cargo generate-lockfile' failed for the $CAND_LC Stage-5 runner (no unlocked build is attempted)"

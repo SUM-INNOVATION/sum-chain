@@ -726,6 +726,11 @@ stage_container_context() {
   mkdir -p "$stage/provisioning"
   cp "$ROOT/scripts/provision_prover_toolchain.sh" "$stage/provisioning/provision_prover_toolchain.sh"
   chmod 0755 "$stage/provisioning/provision_prover_toolchain.sh"
+  # Companion verified-TREE provisioner for the guest COMPILER toolchains (SP1 succinct /
+  # RISC Zero r0). Same staged-file discipline (COPIED + run in-container, no host lib.sh);
+  # tests/guest_toolchain_provision.test.sh exercises it. Its bytes fold into staged_context_blake3.
+  cp "$ROOT/scripts/provision_guest_toolchain.sh" "$stage/provisioning/provision_guest_toolchain.sh"
+  chmod 0755 "$stage/provisioning/provision_guest_toolchain.sh"
   # Belt-and-suspenders: no Cargo.lock may exist anywhere in the staged context (the
   # authoritative lock is generated in-container and bound; a host lock is refused).
   find "$stage" -type f -name Cargo.lock -delete 2>/dev/null || true

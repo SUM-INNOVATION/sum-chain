@@ -165,10 +165,16 @@ toolchain provisioning are the remaining venue inputs) — nothing fabricated"
   if [ "$scand" = "Sp1" ] || [ "$arch" = "x86_64" ]; then
     SCHEMA_ARCH="$sarch" BUILDER_IMAGE_REF="$ref" BUILDER_IMAGE_DIGEST="$builder" \
       bash "$HERE/extract_material.sh" "$cand" "$work" || die "smoke material extraction failed for $cand"
+    # Stage-5b BEFORE Stage-5c: the tool binding (here the ONE TEST_ONLY synthetic substitute)
+    # MUST exist before produce_stage5, which CONSUMES it as recorded proof-tool provenance
+    # (verifier_fixtures.sh -> prove_fixture.sh requires TOOL_BINDING). Mirrors the authoritative
+    # ordering (run_authoritative.sh Stage 5b tool identities -> Stage 5c produce_stage5).
+    smoke_write_synthetic_tool_binding "$work" "$scand" "$builder" "$pr_head"
     produce_stage5 "$scand" "$arch" "$sarch" "$work" "$ref" || die "smoke Stage-5 FATAL for $cand"
     smoke_require "Stage-5 result (real)" "$work/$scand.stage5-result.json" --json
     smoke_require "Stage-5 sealed runner lock (real)" "$work/$scand.stage5/runner-cargo.lock"
-    smoke_write_synthetic_tool_binding "$work" "$scand" "$builder" "$pr_head"
+    # The attestation MUST stay after produce_stage5: it reads back verifier_executed_binary_sha256
+    # from the Stage-5 result.
     smoke_build_attestation_and_substitution "$ref" "$scand" "$host" "$builder" "$pr_head" "$work"
   fi
 }

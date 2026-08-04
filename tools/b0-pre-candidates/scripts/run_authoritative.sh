@@ -402,6 +402,24 @@ produce_stage2() {
   [ "$pol_dbsource" = "runtime-read-only-mount" ] \
     || die "audit policy invariant: database_source must be runtime-read-only-mount"
 
+  # ---- Structured advisory-exception policy (the committed authority). The AUTHORITATIVE
+  # accept/fatal decision is the typed policy applied by `vv stage2-generate` below (which RECORDS
+  # each accepted advisory as an accepted_exception finding — Stage 2 never reports "0
+  # vulnerabilities"). Here, trusted code derives the cargo-audit `--ignore` argv FROM the policy as
+  # its EXECUTION REPRESENTATION for THIS candidate, and runs it as an independent fail-closed
+  # cross-check: with the accepted set ignored, cargo audit must report NO residual finding. The
+  # SAME policy file is used for TEST_ONLY and authoritative evaluation (this is the shared producer).
+  local exc_policy="$ROOT/policy/stage2-advisory-exceptions.json"
+  [ -f "$exc_policy" ] || die "Stage-2 advisory-exception policy missing: $exc_policy"
+  local -a ignore_argv=()
+  while IFS= read -r _adv_id; do
+    [ -n "$_adv_id" ] && ignore_argv+=(--ignore "$_adv_id")
+  done < <(python3 -c 'import json,sys
+d=json.load(open(sys.argv[1])); cand=sys.argv[2]
+for e in d.get("exceptions",[]):
+    if e.get("candidate")==cand:
+        print(e["advisory_id"])' "$exc_policy" "$cand")
+
   {
     printf 'run_stage2_locked <verified-image> %s <stage1-lock blake3=%s> %s "cargo metadata --format-version 1 --locked"\n' "$cdir" "$lock_hex" "$incontainer_lock"
     printf 'run_stage2_audit_locked <verified-image> %s <stage1-lock blake3=%s> %s <advisory-db commit=%s content=%s ro-mount=%s> %s\n' \
@@ -439,6 +457,25 @@ assert isinstance(d, dict) and "vulnerabilities" in d
   # The read-only mounts must not have mutated the host lock (Stage 2 cannot modify it).
   [ "$(vv lock-hash "$hostlock")" = "$lock_hex" ] \
     || die "host Stage-1 lock was modified during Stage 2 for $cand (read-only mount violated)"
+
+  # EXECUTION REPRESENTATION + fail-closed cross-check of the policy: re-run cargo audit with the
+  # policy-derived `--ignore` set applied. It MUST exit 0 (no residual finding) — a non-accepted
+  # advisory would remain and fail the run here, independent of the typed classification below.
+  # Unmaintained warnings do not fail cargo audit, so they are preserved normally. SP1 (no
+  # exceptions) has an empty ignore set and skips the cross-check.
+  if [ "${#ignore_argv[@]}" -gt 0 ]; then
+    local -a audit_ignore_argv=(cargo audit --db "$incontainer_db" --no-fetch --stale --json "${ignore_argv[@]}")
+    printf '# cargo-audit EXECUTION REPRESENTATION of the accepted advisory exceptions (must exit 0):\n' >> "$cmdlog"
+    printf 'run_stage2_audit_locked <verified-image> %s <stage1-lock blake3=%s> %s %s\n' \
+      "$cdir" "$lock_hex" "$incontainer_lock" "${audit_ignore_argv[*]}" >> "$cmdlog"
+    local ignore_out ignore_rc=0
+    ignore_out="$(mktemp)"
+    run_stage2_audit_locked "$ref" "$cdir" "$hostlock" "$incontainer_lock" \
+      "$advdb" "$incontainer_db" "$ignore_out" "${audit_ignore_argv[@]}" 2>>"$cmdlog" || ignore_rc=$?
+    rm -f "$ignore_out"
+    [ "$ignore_rc" = 0 ] \
+      || die "Stage-2 advisory-exception cross-check FAILED for $cand: with the reviewed --ignore set applied, cargo audit still reported a finding (exit $ignore_rc) — a NON-accepted advisory is present (fail closed)"
+  fi
 
   # cargo-audit identity: the EXACT version output (the unusual `cargo-audit-audit <ver>` form
   # is captured verbatim as the bound invocation `cargo audit --version`) + the SHA-256 of the
@@ -484,8 +521,8 @@ json.dump({
     "allowed_licenses": json.loads(licenses),
 }, open(path, "w"), indent=2)
 PY
-  vv stage2-generate "$params" "$meta" "$advis" "$cmdlog" "$work/$cand.stage2-audit.json" \
-    || die "Stage-2 generation FATAL for $cand (audit finding / parse / binding); candidate ineligible"
+  vv stage2-generate "$params" "$meta" "$advis" "$cmdlog" "$work/$cand.stage2-audit.json" "$exc_policy" \
+    || die "Stage-2 generation FATAL for $cand (audit finding / parse / binding / exception policy); candidate ineligible"
 }
 
 # Real per-candidate Stage-5 GENERATION. Runs the pinned terminal verifier on a genuine

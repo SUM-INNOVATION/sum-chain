@@ -391,6 +391,29 @@ if [ "$seen_cr_x86" = 1 ] && [ "$seen_r0_x86" = 1 ]; then
     || bad "prover_archives: cargo-risczero ($risczero_archive_id) and r0vm ($r0vm_archive_id) are NOT the same shared archive"
 fi
 
+# ---- v4 capability blocks: guest toolchains + Groth16 circuit + OCI backends -----------------
+# When the proposal declares the v4 contract, verify its three Stage-5 capability blocks against
+# the FROZEN identity set via the typed pin-contract checker (the same evaluate_contract the venue
+# runs). Primary-source re-derivation of the multi-GB circuit / ~100MB toolchain archives is NOT
+# performed here — those are owner content pins whose AUTHORITY is the independently-reproduced
+# provisioned-tree/runtime-tree BLAKE3 digests frozen in the contract; this asserts the declared
+# identities equal that reproduced set and fail-closes on any drift.
+cv="$(pget contract_version)"
+if [ "$cv" = "v4" ]; then
+  VAL="$HERE/../../b0-pre-validator/Cargo.toml"
+  if [ -n "${VENUE_VERIFY_BIN:-}" ] && [ -x "${VENUE_VERIFY_BIN}" ]; then
+    if "$VENUE_VERIFY_BIN" pin-contract-check "$PINS" >/dev/null 2>&1; then
+      pass "v4 capability blocks: guest toolchains + Groth16 circuit runtime tree + OCI backends match the frozen Stage-5 identity set (pin-contract-check)"
+    else bad "v4 capability blocks failed the typed pin-contract check (venue-verify pin-contract-check)"; fi
+  elif command -v cargo >/dev/null 2>&1; then
+    if cargo run --quiet --locked --manifest-path "$VAL" --bin venue-verify -- pin-contract-check "$PINS" >/dev/null 2>&1; then
+      pass "v4 capability blocks: guest toolchains + Groth16 circuit runtime tree + OCI backends match the frozen Stage-5 identity set (pin-contract-check)"
+    else bad "v4 capability blocks failed the typed pin-contract check (venue-verify pin-contract-check)"; fi
+  else
+    bad "v4 contract declared but neither VENUE_VERIFY_BIN nor cargo is available to run pin-contract-check"
+  fi
+fi
+
 echo "----"
 if [ "$fail" -eq 0 ]; then
   note "all proposed pins verified against their primary sources (this is a PRECONDITION for ratification, not ratification)"

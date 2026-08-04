@@ -162,6 +162,10 @@ case "$candidate" in
     [ -n "${CARGO_PROVE_MEMBER_PATH:-}" ]   || nyr "CARGO_PROVE_MEMBER_PATH (declared cargo-prove archive member) is required"
     [ -n "${CARGO_PROVE_MEMBER_SHA256:-}" ] || nyr "CARGO_PROVE_MEMBER_SHA256 (cargo-prove member checksum) is required"
     [ -n "${CARGO_PROVE_MEMBER_SIZE:-}" ]   || nyr "CARGO_PROVE_MEMBER_SIZE (cargo-prove member byte size) is required"
+    # SP1 GUEST compiler toolchain (succinct-1.94.0-64bit) — required on BOTH arches (ARM SP1 is
+    # eligible for guest compilation/identity/verify; only terminal Groth16 is x86-only).
+    [ -n "${SP1_GUEST_TOOLCHAIN_URL:-}" ]    || nyr "SP1_GUEST_TOOLCHAIN_URL (immutable succinct guest-toolchain archive URL, arch=$arch) is required"
+    [ -n "${SP1_GUEST_TOOLCHAIN_SHA256:-}" ] || nyr "SP1_GUEST_TOOLCHAIN_SHA256 (succinct toolchain whole-archive checksum, verified pre-extract) is required"
     ;;
   risc0)
     if [ "$arch" = "x86_64" ]; then
@@ -173,6 +177,9 @@ case "$candidate" in
       [ -n "${R0VM_MEMBER_PATH:-}" ]              || nyr "R0VM_MEMBER_PATH (declared r0vm archive member, SHARED archive) is required"
       [ -n "${R0VM_MEMBER_SHA256:-}" ]            || nyr "R0VM_MEMBER_SHA256 (r0vm member checksum) is required"
       [ -n "${R0VM_MEMBER_SIZE:-}" ]              || nyr "R0VM_MEMBER_SIZE (r0vm member byte size) is required"
+      # RISC Zero GUEST compiler toolchain (r0.1.91.1) for the embed_methods LOCAL build (x86-only).
+      [ -n "${RISC0_GUEST_TOOLCHAIN_URL:-}" ]     || nyr "RISC0_GUEST_TOOLCHAIN_URL (immutable r0.1.91.1 guest-toolchain archive URL) is required"
+      [ -n "${RISC0_GUEST_TOOLCHAIN_SHA256:-}" ]  || nyr "RISC0_GUEST_TOOLCHAIN_SHA256 (r0 toolchain whole-archive checksum, verified pre-extract) is required"
     else
       note "arch=$arch: RISC Zero prover pins not required (cargo-risczero + r0vm are x86_64-only; the arm64 risc0 image records the builder manifest only)"
     fi
@@ -258,6 +265,8 @@ build_once() {
         --build-arg "CARGO_PROVE_MEMBER_PATH=$CARGO_PROVE_MEMBER_PATH"
         --build-arg "CARGO_PROVE_MEMBER_SHA256=$CARGO_PROVE_MEMBER_SHA256"
         --build-arg "CARGO_PROVE_MEMBER_SIZE=$CARGO_PROVE_MEMBER_SIZE"
+        --build-arg "SP1_GUEST_TOOLCHAIN_URL=$SP1_GUEST_TOOLCHAIN_URL"
+        --build-arg "SP1_GUEST_TOOLCHAIN_SHA256=$SP1_GUEST_TOOLCHAIN_SHA256"
       ) ;;
     risc0)
       if [ "$arch" = "x86_64" ]; then
@@ -270,6 +279,8 @@ build_once() {
           --build-arg "R0VM_MEMBER_PATH=$R0VM_MEMBER_PATH"
           --build-arg "R0VM_MEMBER_SHA256=$R0VM_MEMBER_SHA256"
           --build-arg "R0VM_MEMBER_SIZE=$R0VM_MEMBER_SIZE"
+          --build-arg "RISC0_GUEST_TOOLCHAIN_URL=$RISC0_GUEST_TOOLCHAIN_URL"
+          --build-arg "RISC0_GUEST_TOOLCHAIN_SHA256=$RISC0_GUEST_TOOLCHAIN_SHA256"
         )
       fi
       ;;

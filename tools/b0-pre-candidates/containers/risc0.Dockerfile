@@ -71,7 +71,14 @@ RUN set -eux; \
     inrel_sec="$(ls /var/lib/apt/lists/*_dists_bookworm-security_InRelease)"; \
     echo "${APT_DEBIAN_INRELEASE_SHA256}  ${inrel_deb}"   | sha256sum -c -; \
     echo "${APT_SECURITY_INRELEASE_SHA256}  ${inrel_sec}" | sha256sum -c -; \
-    apt-get install -y --no-install-recommends ca-certificates curl build-essential pkg-config libssl-dev git; \
+    : "protobuf-compiler is REQUIRED at build time by the risc0-zkvm server/proto codegen; pinned \
+       to the EXACT version supplied by the pinned Debian snapshot (verified present on amd64+arm64), \
+       provisioned SOLELY through this immutable APT provenance — no curl installer, no moving \
+       release. protoc --version is recorded as venue evidence + capability-checked"; \
+    apt-get install -y --no-install-recommends ca-certificates curl build-essential pkg-config libssl-dev git protobuf-compiler=3.21.12-3+deb12u1; \
+    mkdir -p /opt/b0pre/evidence; \
+    protoc --version | tee /opt/b0pre/evidence/protoc.version; \
+    protoc --version | grep -q '3.21.12' || { echo "REFUSED: protoc is not the pinned 3.21.12" >&2; exit 8; }; \
     : "reproducibility: drop ONLY the build-time-content artifacts whose CONTENT embeds \
        wall-clock timestamps — the apt/dpkg/alternatives/bootstrap logs, and ldconfig's \
        DISPOSABLE auxiliary optimization cache /var/cache/ldconfig/aux-cache (created by the \
@@ -230,12 +237,45 @@ RUN set -eux; \
       rm -rf /tmp/prov; \
     fi
 
+# ---- RISC Zero GUEST COMPILER toolchain (r0.1.91.1), by verified TREE extraction into an ISOLATED,
+# in-image RISC0_HOME (x86_64 ONLY — RISC Zero guest proving is native-x86 per VENUE.md §2). This is
+# the OFFICIAL `risc0_build::embed_methods()` local path (owner decision B): NO `cargo risczero build`
+# CLI, NO `risc0-guest-builder` docker image, NO rzup exec, NO network resolution beyond the pinned
+# release asset, NO inherited ~/.risc0, NO mutable tag. The provisioner lays the pinned toolchain tree
+# at $RISC0_HOME/toolchains/v1.91.1-rust-x86_64-unknown-linux-gnu and writes the deterministic
+# first-party settings.toml (rust=1.91.1) + .rzup sentinel. Authority = whole-archive sha256 (verified
+# BEFORE extraction) + PROVISIONED_TREE/v1 re-verified at point of use by the producer.
+ARG RISC0_GUEST_TOOLCHAIN_URL
+ARG RISC0_GUEST_TOOLCHAIN_SHA256
+COPY provisioning/provision_guest_toolchain.sh /usr/local/lib/b0pre/provision_guest_toolchain.sh
+RUN set -eux; \
+    if [ "$(uname -m)" != "x86_64" ]; then \
+      echo "arch=$(uname -m): SKIP RISC Zero guest toolchain (embed_methods proving is x86_64-only per VENUE.md §2)"; \
+    else \
+      printf '%s' "${RISC0_GUEST_TOOLCHAIN_SHA256}" | grep -Eq '^[0-9a-f]{64}$'; \
+      test -n "${RISC0_GUEST_TOOLCHAIN_URL}" || { echo "REFUSED: RISC0_GUEST_TOOLCHAIN_URL is empty" >&2; exit 8; }; \
+      mkdir -p /tmp/gtc /opt/b0pre/evidence; \
+      curl -fsSL "${RISC0_GUEST_TOOLCHAIN_URL}" -o /tmp/gtc/r0.tar.gz; \
+      R0_TC_VERSION=1.91.1 R0_TC_PLATFORM=x86_64-unknown-linux-gnu \
+        bash /usr/local/lib/b0pre/provision_guest_toolchain.sh \
+        /tmp/gtc/r0.tar.gz "${RISC0_GUEST_TOOLCHAIN_SHA256}" \
+        risc0-home /opt/b0pre/risc0-home; \
+      "/opt/b0pre/risc0-home/toolchains/v1.91.1-rust-x86_64-unknown-linux-gnu/bin/rustc" --version; \
+      sha256sum /opt/b0pre/risc0-home/settings.toml | awk '{print $1}' > /opt/b0pre/evidence/risc0-settings.sha256; \
+      sha256sum /opt/b0pre/risc0-home/toolchains/v1.91.1-rust-x86_64-unknown-linux-gnu/bin/rustc | awk '{print $1}' > /opt/b0pre/evidence/risc0-rustc.sha256; \
+      rm -rf /tmp/gtc; \
+    fi
+
 # The audit prefix + isolated prover PATH + the canonical RISC0_SERVER_PATH become part of the
 # PRODUCTION non-login environment so `cargo audit`, `cargo risczero`, and `r0vm` resolve under the
 # exact `bash -c` the producer uses (RT-2). cargo + cargo-audit are asserted on BOTH arches; the
 # x86-only RISC Zero prover presence is asserted by preflight_prover_capability (x86 gate).
 ENV PATH="/opt/b0pre/audit-prefix/bin:/opt/b0pre/prover-bin:/root/.cargo/bin:${PATH}"
 ENV RISC0_SERVER_PATH="/opt/b0pre/risc0-server/r0vm"
+# The isolated, in-image RISC0_HOME the producer's embed_methods build resolves the pinned r0.1.91.1
+# toolchain from (settings.toml + .rzup + toolchains/). A FIXED image path — never a host path,
+# never an inherited ~/.risc0, never a mutable resolution.
+ENV RISC0_HOME="/opt/b0pre/risc0-home"
 RUN command -v cargo cargo-audit >/dev/null \
  || (echo "REFUSED: production non-login PATH does not resolve cargo + cargo-audit" >&2; exit 9)
 

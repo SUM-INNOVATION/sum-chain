@@ -68,7 +68,7 @@ fn load(raw: &str) -> Fixture {
 }
 
 fn license_findings(nodes: &[CrateNode], allow: &[&str]) -> Vec<String> {
-    audit_graph(nodes, &[], allow)
+    audit_graph(nodes, &[], allow, &[])
         .fatal_findings()
         .filter_map(|k| match k {
             FatalKind::DisallowedLicense {
@@ -194,7 +194,7 @@ fn both_authentic_graphs_pass_required_crate_coverage() {
 fn both_authentic_graphs_have_no_fatal_findings_end_to_end() {
     for (raw, cand) in [(SP1_FIXTURE, "Sp1"), (RISC0_FIXTURE, "Risc0")] {
         let fx = load(raw);
-        let r = audit_graph(&fx.nodes, &[], STAGE2_ALLOWED_LICENSES);
+        let r = audit_graph(&fx.nodes, &[], STAGE2_ALLOWED_LICENSES, &[]);
         assert!(
             !r.is_fatal(),
             "{cand}: authentic graph must have no fatal finding, got {:?}",

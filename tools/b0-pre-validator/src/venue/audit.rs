@@ -71,6 +71,169 @@ pub struct Advisory {
     pub resolved: bool,
 }
 
+/// A STRUCTURED, reviewed advisory exception. NOT a bare `--ignore`: a specific advisory in a
+/// specific candidate's proof-stack graph, accepted because the vulnerable code path is not
+/// reachable in this execution mode. Every field is required and validated; the advisory is still
+/// RECORDED as an `accepted_exception` finding (never hidden, never "0 vulnerabilities"), and the
+/// cargo-audit `--ignore` argv is built FROM these fields as their execution representation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdvisoryException {
+    /// The candidate this exception is scoped to (e.g. "Risc0"). NEVER "Sp1".
+    pub candidate: String,
+    /// The bound SDK pin, `"<crate>=<version>"` (e.g. "risc0-zkvm=3.0.5"); must be resolved
+    /// at that exact version in the graph, else the exception is stale (fail closed).
+    pub sdk: String,
+    /// `RUSTSEC-YYYY-NNNN`.
+    pub advisory_id: String,
+    /// The EXACT affected crate + version; a different version does NOT match (fail closed).
+    pub affected_crate: String,
+    pub affected_version: String,
+    /// BLAKE3 (bare 64-hex) of the frozen reachability-evidence document this exception rests on.
+    pub source_feature_graph_hash: String,
+    /// Why the finding is accepted and its applicability to THIS execution mode.
+    pub justification: String,
+    pub applicability: String,
+    /// The policy version that approved this exception.
+    pub approving_policy_version: String,
+    /// The conditions that invalidate this exception and force re-review.
+    pub review_trigger: String,
+}
+
+/// A structured advisory-exception policy (the committed authority). Trusted code builds the
+/// cargo-audit `--ignore` argv from this; the acceptance decision lives here, not in a flag string.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdvisoryExceptionPolicy {
+    pub policy_version: String,
+    /// Optional human-facing classification/notes (recorded, format only — not authority).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classification: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(default)]
+    pub exceptions: Vec<AdvisoryException>,
+}
+
+/// Why an advisory-exception policy is refused (all fail closed).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExceptionPolicyError {
+    /// An exception scoped to SP1 (or any candidate that must stay exception-free).
+    ExceptionForForbiddenCandidate { advisory_id: String, candidate: String },
+    /// The exception's candidate does not match the audit's candidate.
+    CandidateMismatch { advisory_id: String, expected: String, got: String },
+    /// A required field is empty.
+    MissingField { advisory_id: String, field: &'static str },
+    /// `advisory_id` is not a well-formed RUSTSEC id.
+    BadAdvisoryId { advisory_id: String },
+    /// Two exceptions bind the same (advisory, crate, version).
+    Duplicate { advisory_id: String, crate_name: String, version: String },
+    /// The bound (crate, version) is NOT present in the resolved graph (stale binding).
+    StaleBinding { advisory_id: String, crate_name: String, version: String },
+    /// The bound SDK pin is not present at that exact version in the graph.
+    SdkMismatch { advisory_id: String, sdk: String },
+}
+
+impl std::fmt::Display for ExceptionPolicyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExceptionPolicyError::ExceptionForForbiddenCandidate { advisory_id, candidate } =>
+                write!(f, "advisory exception {advisory_id} is scoped to forbidden candidate {candidate} (must stay exception-free)"),
+            ExceptionPolicyError::CandidateMismatch { advisory_id, expected, got } =>
+                write!(f, "advisory exception {advisory_id} candidate {got} != audit candidate {expected}"),
+            ExceptionPolicyError::MissingField { advisory_id, field } =>
+                write!(f, "advisory exception {advisory_id} missing required field {field}"),
+            ExceptionPolicyError::BadAdvisoryId { advisory_id } =>
+                write!(f, "advisory exception has malformed advisory id {advisory_id:?}"),
+            ExceptionPolicyError::Duplicate { advisory_id, crate_name, version } =>
+                write!(f, "duplicate advisory exception {advisory_id} for {crate_name} {version}"),
+            ExceptionPolicyError::StaleBinding { advisory_id, crate_name, version } =>
+                write!(f, "advisory exception {advisory_id} binds {crate_name} {version} which is ABSENT from the resolved graph (stale)"),
+            ExceptionPolicyError::SdkMismatch { advisory_id, sdk } =>
+                write!(f, "advisory exception {advisory_id} bound SDK {sdk} is not resolved at that version in the graph"),
+        }
+    }
+}
+
+/// Forbidden exception candidates: SP1 must pass Stage 2 with zero findings and carry NO exception.
+const EXCEPTION_FORBIDDEN_CANDIDATES: &[&str] = &["Sp1"];
+
+fn advisory_id_ok(id: &str) -> bool {
+    // RUSTSEC-YYYY-NNNN  (8 + 4 + 1 + 4 = 17 chars)
+    let b = id.as_bytes();
+    id.len() == 17
+        && id.starts_with("RUSTSEC-")
+        && b[12] == b'-'
+        && b[8..12].iter().all(u8::is_ascii_digit)
+        && b[13..17].iter().all(u8::is_ascii_digit)
+}
+
+/// Validate + scope the exception policy to `candidate`, against the resolved `nodes`. Rejects
+/// (fail closed) any forbidden-candidate exception, malformed id, missing field, duplicate, stale
+/// (crate,version) binding, or SDK-pin mismatch. Returns the candidate-scoped exceptions to apply.
+pub fn scope_and_validate_exceptions<'a>(
+    candidate: &str,
+    exceptions: &'a [AdvisoryException],
+    nodes: &[CrateNode],
+) -> Result<Vec<&'a AdvisoryException>, ExceptionPolicyError> {
+    use std::collections::BTreeSet;
+    // GLOBAL guards over the WHOLE policy (not just the scoped subset): a forbidden-candidate
+    // exception, a malformed id, a missing field, or a duplicate is rejected regardless of which
+    // candidate is being audited — so a bad exception can never sit latent in the policy.
+    let mut seen: BTreeSet<(&str, &str, &str)> = BTreeSet::new();
+    for e in exceptions {
+        if EXCEPTION_FORBIDDEN_CANDIDATES.contains(&e.candidate.as_str()) {
+            return Err(ExceptionPolicyError::ExceptionForForbiddenCandidate {
+                advisory_id: e.advisory_id.clone(),
+                candidate: e.candidate.clone(),
+            });
+        }
+        if !advisory_id_ok(&e.advisory_id) {
+            return Err(ExceptionPolicyError::BadAdvisoryId { advisory_id: e.advisory_id.clone() });
+        }
+        for (field, val) in [
+            ("candidate", &e.candidate), ("sdk", &e.sdk),
+            ("affected_crate", &e.affected_crate), ("affected_version", &e.affected_version),
+            ("source_feature_graph_hash", &e.source_feature_graph_hash),
+            ("justification", &e.justification), ("applicability", &e.applicability),
+            ("approving_policy_version", &e.approving_policy_version),
+            ("review_trigger", &e.review_trigger),
+        ] {
+            if val.trim().is_empty() {
+                return Err(ExceptionPolicyError::MissingField { advisory_id: e.advisory_id.clone(), field });
+            }
+        }
+        if !seen.insert((&e.advisory_id, &e.affected_crate, &e.affected_version)) {
+            return Err(ExceptionPolicyError::Duplicate {
+                advisory_id: e.advisory_id.clone(),
+                crate_name: e.affected_crate.clone(),
+                version: e.affected_version.clone(),
+            });
+        }
+    }
+    // Scope to THIS candidate + bind each scoped exception to the resolved graph.
+    let mut scoped = Vec::new();
+    for e in exceptions.iter().filter(|e| e.candidate == candidate) {
+        if !nodes.iter().any(|n| n.name == e.affected_crate && n.version == e.affected_version) {
+            return Err(ExceptionPolicyError::StaleBinding {
+                advisory_id: e.advisory_id.clone(),
+                crate_name: e.affected_crate.clone(),
+                version: e.affected_version.clone(),
+            });
+        }
+        let (sdk_name, sdk_ver) = e.sdk.split_once('=').ok_or_else(|| ExceptionPolicyError::SdkMismatch {
+            advisory_id: e.advisory_id.clone(), sdk: e.sdk.clone(),
+        })?;
+        if !nodes.iter().any(|n| n.name == sdk_name && n.version == sdk_ver) {
+            return Err(ExceptionPolicyError::SdkMismatch { advisory_id: e.advisory_id.clone(), sdk: e.sdk.clone() });
+        }
+        scoped.push(e);
+    }
+    Ok(scoped)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Finding {
     /// Candidate ineligible — any fatal finding fails Stage 2 closed.
@@ -110,6 +273,15 @@ pub enum FatalKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecordedKind {
     Prerelease { crate_name: String, version: String },
+    /// A security advisory ACCEPTED under a structured, reviewed exception (see
+    /// [`AdvisoryException`]). It is STILL recorded as a finding — the audit never reports
+    /// "0 vulnerabilities" — but it is not auto-fatal.
+    AcceptedAdvisoryException {
+        crate_name: String,
+        version: String,
+        advisory_id: String,
+        policy_version: String,
+    },
 }
 
 /// The machine-readable Stage-2 audit report.
@@ -172,6 +344,15 @@ impl AuditReport {
                 } => serde_json::json!({
                     "kind": "prerelease", "crate": crate_name, "version": version
                 }),
+                RecordedKind::AcceptedAdvisoryException {
+                    crate_name,
+                    version,
+                    advisory_id,
+                    policy_version,
+                } => serde_json::json!({
+                    "kind": "accepted_exception", "crate": crate_name, "version": version,
+                    "advisory": advisory_id, "policy_version": policy_version
+                }),
             })
             .collect();
         serde_json::json!({
@@ -210,6 +391,7 @@ pub fn audit_graph(
     nodes: &[CrateNode],
     advisories: &[Advisory],
     allowed_licenses: &[&str],
+    exceptions: &[&AdvisoryException],
 ) -> AuditReport {
     let mut findings = Vec::new();
 
@@ -291,13 +473,35 @@ pub fn audit_graph(
         }
     }
 
-    // (4) unresolved advisories.
+    // (4) unresolved advisories. Each is FATAL unless a structured, reviewed exception (already
+    //     scoped + validated + graph-bound by the caller) matches it EXACTLY by advisory id, crate,
+    //     and the crate's RESOLVED version in this graph. A matching exception downgrades it to a
+    //     RECORDED accepted_exception (still reported); anything else — a new advisory, a different
+    //     affected version, a different crate — has no match and stays FATAL (fail closed).
     for a in advisories {
         if !a.resolved {
-            findings.push(Finding::Fatal(FatalKind::UnresolvedAdvisory {
-                crate_name: a.crate_name.clone(),
-                id: a.id.clone(),
-            }));
+            let resolved_versions: Vec<&str> = nodes
+                .iter()
+                .filter(|n| n.name == a.crate_name)
+                .map(|n| n.version.as_str())
+                .collect();
+            let matched = exceptions.iter().find(|e| {
+                e.advisory_id == a.id
+                    && e.affected_crate == a.crate_name
+                    && resolved_versions.contains(&e.affected_version.as_str())
+            });
+            match matched {
+                Some(e) => findings.push(Finding::Recorded(RecordedKind::AcceptedAdvisoryException {
+                    crate_name: a.crate_name.clone(),
+                    version: e.affected_version.clone(),
+                    advisory_id: a.id.clone(),
+                    policy_version: e.approving_policy_version.clone(),
+                })),
+                None => findings.push(Finding::Fatal(FatalKind::UnresolvedAdvisory {
+                    crate_name: a.crate_name.clone(),
+                    id: a.id.clone(),
+                })),
+            }
         }
     }
 
@@ -500,6 +704,11 @@ pub struct Stage2AuditRecord {
     /// The DERIVED-in-container resolved graph (dependency/source/license nodes).
     pub nodes: Vec<CrateNode>,
     pub advisories: Vec<Advisory>,
+    /// The structured, reviewed advisory exceptions APPLIED to this candidate's audit (each
+    /// scoped to `candidate`, graph-bound, and RECORDED as an accepted_exception finding). Empty
+    /// for a candidate with no accepted advisories (e.g. SP1, which must stay exception-free).
+    #[serde(default)]
+    pub advisory_exceptions: Vec<AdvisoryException>,
 }
 
 /// Peek a raw Stage-2 record's `schema_version` without a strict decode, so the importer can
@@ -532,6 +741,9 @@ pub enum Stage2RecordError {
     BadHash(&'static str),
     /// A structured audit-policy field held a disallowed value.
     BadPolicy(&'static str),
+    /// A structured advisory-exception policy was invalid (forbidden candidate, stale binding,
+    /// version/SDK mismatch, missing field, duplicate, or an out-of-scope exception on the record).
+    BadExceptionPolicy(String),
     BadContainerDigest {
         digest: String,
     },
@@ -562,6 +774,9 @@ impl std::fmt::Display for Stage2RecordError {
             Stage2RecordError::Missing(field) => write!(f, "Stage-2 record field {field} is empty"),
             Stage2RecordError::BadHash(field) => {
                 write!(f, "Stage-2 record {field} is not bare 64-hex")
+            }
+            Stage2RecordError::BadExceptionPolicy(msg) => {
+                write!(f, "Stage-2 advisory-exception policy refused: {msg}")
             }
             Stage2RecordError::BadPolicy(field) => {
                 write!(f, "Stage-2 audit policy {field} holds a disallowed value")
@@ -686,9 +901,22 @@ impl Stage2AuditRecord {
         // required-crate coverage (rejects empty/incomplete graphs).
         require_candidate_pins(&self.nodes, &self.candidate)
             .map_err(Stage2RecordError::Coverage)?;
-        // the audit itself must not be fatal.
+        // Re-validate + re-scope the recorded advisory exceptions against THIS record's candidate +
+        // resolved graph (a tampered record — e.g. an exception moved onto SP1, a stale binding, a
+        // wrong version — is rejected here at import time, not just at generation).
+        let scoped = scope_and_validate_exceptions(&self.candidate, &self.advisory_exceptions, &self.nodes)
+            .map_err(|e| Stage2RecordError::BadExceptionPolicy(e.to_string()))?;
+        // Every recorded exception must have been in-scope for this candidate (none dropped by the
+        // scope filter): a record must not carry an exception it did not actually apply.
+        if scoped.len() != self.advisory_exceptions.len() {
+            return Err(Stage2RecordError::BadExceptionPolicy(
+                "record carries advisory exceptions not scoped to its own candidate".to_string(),
+            ));
+        }
+        // the audit itself must not be fatal (advisories matched by a scoped exception are recorded,
+        // not fatal; any other advisory stays fatal).
         let allowed: Vec<&str> = self.allowed_licenses.iter().map(String::as_str).collect();
-        let report = audit_graph(&self.nodes, &self.advisories, &allowed);
+        let report = audit_graph(&self.nodes, &self.advisories, &allowed, &scoped);
         if report.is_fatal() {
             return Err(Stage2RecordError::FatalAudit {
                 count: report.fatal_findings().count(),
@@ -809,9 +1037,20 @@ impl Stage2AuditRecord {
         cargo_metadata_raw: &str,
         cargo_audit_raw: &str,
         command_log_bytes: &[u8],
+        exception_policy: &AdvisoryExceptionPolicy,
     ) -> Result<Stage2AuditRecord, Stage2RecordError> {
         let nodes = parse_cargo_metadata(cargo_metadata_raw).map_err(Stage2RecordError::Parse)?;
         let advisories = parse_cargo_audit(cargo_audit_raw).map_err(Stage2RecordError::Parse)?;
+        // Scope + validate the committed exception policy to THIS candidate against the resolved
+        // graph (fail closed on a forbidden-candidate/malformed/duplicate/stale/mismatched
+        // exception), then RECORD exactly the applied set — the same reviewed policy is used for
+        // TEST_ONLY and authoritative evaluation (this generator is the single shared path).
+        let advisory_exceptions: Vec<AdvisoryException> =
+            scope_and_validate_exceptions(&params.candidate, &exception_policy.exceptions, &nodes)
+                .map_err(|e| Stage2RecordError::BadExceptionPolicy(e.to_string()))?
+                .into_iter()
+                .cloned()
+                .collect();
         let record = Stage2AuditRecord {
             schema_version: STAGE2_SCHEMA_VERSION,
             candidate: params.candidate.clone(),
@@ -828,6 +1067,7 @@ impl Stage2AuditRecord {
             allowed_licenses: params.allowed_licenses.clone(),
             nodes,
             advisories,
+            advisory_exceptions,
         };
         record.validate()?;
         Ok(record)
@@ -885,7 +1125,7 @@ mod tests {
 
     #[test]
     fn clean_graph_has_no_fatal_and_records_prereleases() {
-        let r = audit_graph(&clean_graph(), &[], ALLOWED);
+        let r = audit_graph(&clean_graph(), &[], ALLOWED, &[]);
         assert!(
             !r.is_fatal(),
             "clean graph must not be fatal: {:?}",
@@ -901,7 +1141,7 @@ mod tests {
     fn wrong_pinned_version_is_fatal() {
         let mut g = clean_graph();
         find_mut(&mut g, "sp1-sdk").version = "6.3.0".into(); // a pinned crate off its pin
-        let r = audit_graph(&g, &[], ALLOWED);
+        let r = audit_graph(&g, &[], ALLOWED, &[]);
         assert!(r.is_fatal());
         assert!(r
             .fatal_findings()
@@ -912,7 +1152,7 @@ mod tests {
     fn git_or_path_source_on_proof_stack_is_fatal() {
         let mut g = clean_graph();
         find_mut(&mut g, "sp1-verifier").source = Source::Git; // a proof-stack crate from git
-        let r = audit_graph(&g, &[], ALLOWED);
+        let r = audit_graph(&g, &[], ALLOWED, &[]);
         assert!(r
             .fatal_findings()
             .any(|k| matches!(k, FatalKind::UnexpectedSource { .. })));
@@ -926,24 +1166,24 @@ mod tests {
             id: "RUSTSEC-0000-0000".into(),
             resolved: false,
         }];
-        assert!(audit_graph(&g, &unresolved, ALLOWED).is_fatal());
+        assert!(audit_graph(&g, &unresolved, ALLOWED, &[]).is_fatal());
         let resolved = [Advisory {
             crate_name: "serde".into(),
             id: "RUSTSEC-0000-0000".into(),
             resolved: true,
         }];
-        assert!(!audit_graph(&g, &resolved, ALLOWED).is_fatal());
+        assert!(!audit_graph(&g, &resolved, ALLOWED, &[]).is_fatal());
     }
 
     #[test]
     fn disallowed_or_missing_license_is_fatal() {
         let mut g = clean_graph();
         find_mut(&mut g, "serde").license = Some("GPL-3.0".into());
-        assert!(audit_graph(&g, &[], ALLOWED)
+        assert!(audit_graph(&g, &[], ALLOWED, &[])
             .fatal_findings()
             .any(|k| matches!(k, FatalKind::DisallowedLicense { .. })));
         find_mut(&mut g, "serde").license = None;
-        assert!(audit_graph(&g, &[], ALLOWED)
+        assert!(audit_graph(&g, &[], ALLOWED, &[])
             .fatal_findings()
             .any(|k| matches!(k, FatalKind::UnlicensedCrate { .. })));
     }
@@ -953,7 +1193,7 @@ mod tests {
         let mut g = clean_graph();
         // a second, incompatible risc0-zkvm major in the graph.
         g.push(n("risc0-zkvm", "2.0.0", Source::Registry, "Apache-2.0"));
-        let r = audit_graph(&g, &[], ALLOWED);
+        let r = audit_graph(&g, &[], ALLOWED, &[]);
         assert!(r
             .fatal_findings()
             .any(|k| matches!(k, FatalKind::DuplicateIncompatible { .. })));
@@ -1249,6 +1489,7 @@ mod tests {
                 .collect(),
             nodes: sp1_graph(),
             advisories: vec![],
+            advisory_exceptions: vec![],
         }
     }
 
@@ -1257,6 +1498,155 @@ mod tests {
         let rec = sp1_record();
         let report = rec.validate().expect("clean Stage-2 record");
         assert_eq!(report.recorded_findings().count(), 1); // the p3-* prerelease
+    }
+
+    // ---- structured advisory-exception subsystem (RISC0 rsa + tracing-subscriber) ----------
+    const RSA_ADV: &str = "RUSTSEC-2023-0071";
+    const TRC_ADV: &str = "RUSTSEC-2025-0055";
+
+    fn ex(candidate: &str, adv: &str, crate_name: &str, ver: &str) -> AdvisoryException {
+        AdvisoryException {
+            candidate: candidate.into(),
+            sdk: "risc0-zkvm=3.0.5".into(),
+            advisory_id: adv.into(),
+            affected_crate: crate_name.into(),
+            affected_version: ver.into(),
+            source_feature_graph_hash: "ab".repeat(32),
+            justification: "compiled host tooling; vulnerable path not reachable in this mode".into(),
+            applicability: "compiled-unreachable-in-this-execution-mode".into(),
+            approving_policy_version: "test.1".into(),
+            review_trigger: "any SDK/crate-version/feature-set/runner/lockfile/execution-mode change".into(),
+        }
+    }
+    fn risc0_graph_with_advisory_crates() -> Vec<CrateNode> {
+        vec![
+            n("risc0-zkvm", "3.0.5", Source::Registry, "Apache-2.0"),
+            n("risc0-groth16", "3.0.4", Source::Registry, "Apache-2.0"),
+            n("risc0-build", "3.0.5", Source::Registry, "Apache-2.0"),
+            n("risc0-zkvm-platform", "2.2.3", Source::Registry, "Apache-2.0"),
+            n("rsa", "0.9.10", Source::Registry, "MIT OR Apache-2.0"),
+            n("tracing-subscriber", "0.2.25", Source::Registry, "MIT"),
+        ]
+    }
+    fn adv(crate_name: &str, id: &str) -> Advisory {
+        Advisory { crate_name: crate_name.into(), id: id.into(), resolved: false }
+    }
+    fn risc0_advisories() -> Vec<Advisory> {
+        vec![adv("rsa", RSA_ADV), adv("tracing-subscriber", TRC_ADV)]
+    }
+    fn valid_exceptions() -> Vec<AdvisoryException> {
+        vec![
+            ex("Risc0", RSA_ADV, "rsa", "0.9.10"),
+            ex("Risc0", TRC_ADV, "tracing-subscriber", "0.2.25"),
+        ]
+    }
+
+    #[test]
+    fn accepted_exceptions_are_recorded_findings_never_zero_vulns_and_not_fatal() {
+        let nodes = risc0_graph_with_advisory_crates();
+        let exc = valid_exceptions();
+        let scoped = scope_and_validate_exceptions("Risc0", &exc, &nodes)
+            .expect("valid policy");
+        assert_eq!(scoped.len(), 2);
+        let report = audit_graph(&nodes, &risc0_advisories(), ALLOWED, &scoped);
+        assert!(!report.is_fatal(), "accepted exceptions must not be fatal");
+        let accepted = report
+            .recorded_findings()
+            .filter(|k| matches!(k, RecordedKind::AcceptedAdvisoryException { .. }))
+            .count();
+        // NEVER "0 vulnerabilities": both advisories are RECORDED as accepted_exception findings.
+        assert_eq!(accepted, 2);
+    }
+
+    #[test]
+    fn exception_cannot_mask_a_different_affected_version() {
+        // policy accepts rsa 0.9.10; the graph now resolves rsa 0.9.11 (un-reviewed) -> stale/fatal.
+        let mut nodes = risc0_graph_with_advisory_crates();
+        find_mut(&mut nodes, "rsa").version = "0.9.11".into();
+        assert!(matches!(
+            scope_and_validate_exceptions("Risc0", &valid_exceptions(), &nodes),
+            Err(ExceptionPolicyError::StaleBinding { .. })
+        ));
+    }
+
+    #[test]
+    fn exception_for_sp1_fails_closed() {
+        let nodes = risc0_graph_with_advisory_crates();
+        let exc = vec![ex("Sp1", RSA_ADV, "rsa", "0.9.10")];
+        assert!(matches!(
+            scope_and_validate_exceptions("Risc0", &exc, &nodes),
+            Err(ExceptionPolicyError::ExceptionForForbiddenCandidate { .. })
+        ));
+        // And Risc0-scoped exceptions never scope INTO an SP1 audit.
+        let sp1exc = valid_exceptions();
+        let sp1graph = sp1_graph();
+        let sp1_scoped = scope_and_validate_exceptions("Sp1", &sp1exc, &sp1graph)
+            .expect("risc0 exceptions simply do not apply to SP1");
+        assert!(sp1_scoped.is_empty());
+    }
+
+    #[test]
+    fn exception_cannot_mask_a_new_unlisted_advisory() {
+        let nodes = risc0_graph_with_advisory_crates();
+        let exc = valid_exceptions();
+        let scoped = scope_and_validate_exceptions("Risc0", &exc, &nodes).unwrap();
+        let mut advs = risc0_advisories();
+        advs.push(adv("rsa", "RUSTSEC-2099-9999")); // a NEW, unlisted advisory
+        let report = audit_graph(&nodes, &advs, ALLOWED, &scoped);
+        assert!(report.is_fatal(), "a newly reachable/unlisted advisory must stay fatal");
+    }
+
+    #[test]
+    fn exception_with_stale_crate_binding_is_refused() {
+        let mut nodes = risc0_graph_with_advisory_crates();
+        nodes.retain(|c| c.name != "rsa"); // rsa resolved away
+        assert!(matches!(
+            scope_and_validate_exceptions("Risc0", &valid_exceptions(), &nodes),
+            Err(ExceptionPolicyError::StaleBinding { .. })
+        ));
+    }
+
+    #[test]
+    fn duplicate_exception_is_refused() {
+        let nodes = risc0_graph_with_advisory_crates();
+        let mut exc = valid_exceptions();
+        exc.push(ex("Risc0", RSA_ADV, "rsa", "0.9.10"));
+        assert!(matches!(
+            scope_and_validate_exceptions("Risc0", &exc, &nodes),
+            Err(ExceptionPolicyError::Duplicate { .. })
+        ));
+    }
+
+    #[test]
+    fn exception_missing_justification_is_refused() {
+        let nodes = risc0_graph_with_advisory_crates();
+        let mut e = ex("Risc0", RSA_ADV, "rsa", "0.9.10");
+        e.justification = "   ".into();
+        assert!(matches!(
+            scope_and_validate_exceptions("Risc0", std::slice::from_ref(&e), &nodes),
+            Err(ExceptionPolicyError::MissingField { field: "justification", .. })
+        ));
+    }
+
+    #[test]
+    fn exception_with_wrong_sdk_binding_is_refused() {
+        let mut nodes = risc0_graph_with_advisory_crates();
+        find_mut(&mut nodes, "risc0-zkvm").version = "3.0.6".into();
+        assert!(matches!(
+            scope_and_validate_exceptions("Risc0", &valid_exceptions(), &nodes),
+            Err(ExceptionPolicyError::SdkMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn a_record_with_an_out_of_scope_exception_is_rejected() {
+        // A tampered record: an SP1 record carrying a Risc0 exception must fail closed at validate.
+        let mut rec = sp1_record();
+        rec.advisory_exceptions = vec![ex("Risc0", RSA_ADV, "rsa", "0.9.10")];
+        assert!(matches!(
+            rec.validate(),
+            Err(Stage2RecordError::BadExceptionPolicy(_))
+        ));
     }
 
     #[test]
@@ -1407,7 +1797,7 @@ mod tests {
     #[test]
     fn stage2_generate_builds_a_valid_bound_record_from_raw_output() {
         let log = b"docker run ... cargo metadata --locked && cargo audit --json\n";
-        let rec = Stage2AuditRecord::generate(&sp1_bind(), META_VALID, NO_VULNS, log)
+        let rec = Stage2AuditRecord::generate(&sp1_bind(), META_VALID, NO_VULNS, log, &AdvisoryExceptionPolicy::default())
             .expect("valid graph generates a record");
         assert_eq!(rec.candidate, "Sp1");
         assert_eq!(rec.nodes.len(), 6);
@@ -1426,12 +1816,12 @@ mod tests {
         // sp1 (present at its pin, so coverage passes) carries a disallowed license ->
         // fatal audit -> no record is emitted.
         let bad = META_VALID.replacen("MIT OR Apache-2.0", "GPL-3.0-only", 1);
-        let err = Stage2AuditRecord::generate(&sp1_bind(), &bad, NO_VULNS, b"log").unwrap_err();
+        let err = Stage2AuditRecord::generate(&sp1_bind(), &bad, NO_VULNS, b"log", &AdvisoryExceptionPolicy::default()).unwrap_err();
         assert!(matches!(err, Stage2RecordError::FatalAudit { .. }));
         // and a wrong pin is rejected too, at the coverage gate (before the audit).
         let wrong = META_VALID.replace("\"6.3.1\"", "\"6.3.0\"");
         assert!(matches!(
-            Stage2AuditRecord::generate(&sp1_bind(), &wrong, NO_VULNS, b"log").unwrap_err(),
+            Stage2AuditRecord::generate(&sp1_bind(), &wrong, NO_VULNS, b"log", &AdvisoryExceptionPolicy::default()).unwrap_err(),
             Stage2RecordError::Coverage(_)
         ));
     }
@@ -1440,7 +1830,7 @@ mod tests {
     fn stage2_generate_rejects_an_unresolved_advisory() {
         let vuln = r#"{"vulnerabilities":{"found":true,"count":1,"list":[
             {"advisory":{"id":"RUSTSEC-2024-0002","package":"sp1-sdk"}}]}}"#;
-        let err = Stage2AuditRecord::generate(&sp1_bind(), META_VALID, vuln, b"log").unwrap_err();
+        let err = Stage2AuditRecord::generate(&sp1_bind(), META_VALID, vuln, b"log", &AdvisoryExceptionPolicy::default()).unwrap_err();
         assert!(matches!(err, Stage2RecordError::FatalAudit { .. }));
     }
 }

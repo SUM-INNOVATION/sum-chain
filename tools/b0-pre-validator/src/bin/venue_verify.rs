@@ -108,6 +108,56 @@ fn checkout_digest(path: &str) -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
+fn content_store(op: &str, store: &str, arg: &str) -> Result<String, String> {
+    // Digest-addressed venue content store for the multi-GB Stage-5 inputs. Objects are
+    // addressed by their PROVISIONED_TREE/v1 (trees) or SHA-256 (blobs) digest; a resolve
+    // RE-HASHES the stored bytes and fails closed on any drift, so a resolved path is only ever
+    // returned after its content re-hashes to the digest that addressed it. The portable
+    // proposal carries only digests — never machine-specific store paths.
+    use b0_pre_validator::venue::content_store as cs;
+    let store = std::path::Path::new(store);
+    match op {
+        "put-tree" => cs::put_tree(store, std::path::Path::new(arg)).map_err(|e| e.to_string()),
+        "resolve-tree" => cs::resolve_tree(store, arg)
+            .map(|p| p.display().to_string())
+            .map_err(|e| e.to_string()),
+        "put-blob" => cs::put_blob(store, std::path::Path::new(arg)).map_err(|e| e.to_string()),
+        "resolve-blob" => cs::resolve_blob(store, arg)
+            .map(|p| p.display().to_string())
+            .map_err(|e| e.to_string()),
+        other => Err(format!("content-store op must be put-tree|resolve-tree|put-blob|resolve-blob (got {other:?})")),
+    }
+}
+
+fn pin_contract_check(path: &str) -> Result<String, String> {
+    // Evaluate the versioned pin/proposal contract: v2/v3 parse but are INELIGIBLE for
+    // capability-complete Stage-5; v4 requires the guest-toolchain / Groth16-circuit /
+    // OCI-backend blocks and is capability-complete only when every value matches the frozen
+    // reconciled Stage-5 identity set; an unknown version FAILS CLOSED. Never ratifies.
+    use b0_pre_validator::venue::pin_contract::{evaluate_contract, Capability};
+    let bytes = read(path)?;
+    let json = String::from_utf8(bytes).map_err(|_| "pin-contract JSON is not valid UTF-8".to_string())?;
+    let ev = evaluate_contract(&json).map_err(|e| e.to_string())?;
+    match ev.capability {
+        Capability::Complete => Ok(ev.summary),
+        Capability::Ineligible { reason } => {
+            // Parsing succeeded (historical evidence) but this is NOT capability-complete.
+            // Report it as a REFUSAL so a venue gating on Stage-5 capability fails closed.
+            Err(format!("INELIGIBLE: {reason}"))
+        }
+    }
+}
+
+fn provisioned_tree_digest(path: &str) -> Result<String, String> {
+    // The canonical, deterministic content digest (PROVISIONED_TREE/v1) of an extracted
+    // provisioning tree — a proving circuit runtime tree, a guest-toolchain tree, or a prover
+    // backend/data tree. Domain-separated from ADVDB and excludes nothing (an extracted
+    // archive is fully-known content). Independently reproducible; fails closed on unsupported
+    // types / duplicate paths / traversal. Used to populate and re-verify v4 provisioning pins.
+    b0_pre_validator::venue::provisioned_tree::provisioned_tree_digest(std::path::Path::new(path))
+        .map_err(|e| e.to_string())
+}
+
 fn prover_archive_check(mode_str: &str, archives_path: &str) -> Result<String, String> {
     // Item 8: validate a set of prover ARCHIVE-MEMBER identities (cargo-prove x86+aarch64,
     // cargo-risczero x86, r0vm x86; cargo-risczero + r0vm share one archive). Every venue
@@ -336,7 +386,9 @@ fn stage2_audit(
     let licenses: Vec<String> = serde_json::from_str(&read_str(licenses_path)?)
         .map_err(|e| format!("bad licenses: {e}"))?;
     let allowed: Vec<&str> = licenses.iter().map(String::as_str).collect();
-    let report = audit::audit_graph(&nodes, &advisories, &allowed);
+    // Raw graph audit (inspection command): NO advisory exceptions are applied here — accepted
+    // exceptions flow only through the bound Stage-2 record producer (`stage2-generate`).
+    let report = audit::audit_graph(&nodes, &advisories, &allowed, &[]);
     if std::path::Path::new(out_path).exists() {
         return Err(format!("refusing to overwrite existing {out_path}"));
     }
@@ -419,6 +471,7 @@ fn stage2_generate(
     audit_path: &str,
     command_log_path: &str,
     out_path: &str,
+    exception_policy_path: Option<&str>,
 ) -> Result<String, String> {
     let params: audit::Stage2BindParams = serde_json::from_str(&read_str(params_path)?)
         .map_err(|e| format!("bad Stage-2 bind params: {e}"))?;
@@ -426,11 +479,20 @@ fn stage2_generate(
     let audit_raw = read_str(audit_path)?;
     let command_log = std::fs::read(command_log_path)
         .map_err(|e| format!("cannot read command log {command_log_path}: {e}"))?;
+    // The committed, structured advisory-exception policy (authority). Absent -> no accepted
+    // exceptions (the default: every advisory stays fatal). A present-but-unparsable policy fails
+    // closed rather than being silently treated as empty.
+    let exception_policy: audit::AdvisoryExceptionPolicy = match exception_policy_path {
+        Some(p) => serde_json::from_str(&read_str(p)?)
+            .map_err(|e| format!("bad advisory-exception policy {p}: {e}"))?,
+        None => audit::AdvisoryExceptionPolicy::default(),
+    };
     if Path::new(out_path).exists() {
         return Err(format!("refusing to overwrite existing {out_path}"));
     }
-    let record = Stage2AuditRecord::generate(&params, &metadata_raw, &audit_raw, &command_log)
-        .map_err(|e| e.to_string())?;
+    let record =
+        Stage2AuditRecord::generate(&params, &metadata_raw, &audit_raw, &command_log, &exception_policy)
+            .map_err(|e| e.to_string())?;
     let json = serde_json::to_string_pretty(&record).map_err(|e| format!("serialize: {e}"))?;
     std::fs::write(out_path, format!("{json}\n")).map_err(|e| format!("write {out_path}: {e}"))?;
     Ok(format!(
@@ -607,6 +669,9 @@ fn run() -> Result<String, String> {
         }
         [cmd, lock] if cmd == "lock-hash" => lock_hash(lock),
         [cmd, path] if cmd == "checkout-digest" => checkout_digest(path),
+        [cmd, path] if cmd == "provisioned-tree-digest" => provisioned_tree_digest(path),
+        [cmd, path] if cmd == "pin-contract-check" => pin_contract_check(path),
+        [cmd, op, store, arg] if cmd == "content-store" => content_store(op, store, arg),
         [cmd, mode, archives] if cmd == "prover-archive-check" => {
             prover_archive_check(mode, archives)
         }
@@ -621,7 +686,10 @@ fn run() -> Result<String, String> {
         }
         [cmd, graph, adv, lic, out] if cmd == "stage2-audit" => stage2_audit(graph, adv, lic, out),
         [cmd, params, metadata, adv, cmdlog, out] if cmd == "stage2-generate" => {
-            stage2_generate(params, metadata, adv, cmdlog, out)
+            stage2_generate(params, metadata, adv, cmdlog, out, None)
+        }
+        [cmd, params, metadata, adv, cmdlog, out, policy] if cmd == "stage2-generate" => {
+            stage2_generate(params, metadata, adv, cmdlog, out, Some(policy))
         }
         [cmd, dir] if cmd == "import-arch" => import_arch(dir),
         [cmd, x86, arm, out] if cmd == "aggregate-arches" => aggregate_arches(x86, arm, out),
@@ -649,6 +717,7 @@ fn run() -> Result<String, String> {
         }
         _ => Err(
             "usage: venue-verify <oci-manifest|verify-runtime-image|checkout-digest|\
+             provisioned-tree-digest|pin-contract-check|content-store|\
              prover-archive-check|smoke-attest-check|smoke-source-check|smoke-substitute|\
              lock-hash|verify-lock|\
              verify-tool|stage2-audit|stage2-generate|stage2-record|stage4-guard|verify-stage5|\

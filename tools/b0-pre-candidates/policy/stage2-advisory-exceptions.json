@@ -1,0 +1,32 @@
+{
+  "policy_version": "2026-08-04.1",
+  "classification": "REVIEWED STRUCTURED ADVISORY EXCEPTIONS \u2014 B0-PRE Stage-2 supply-chain audit",
+  "evidence": "RISC0-STAGE2-ADVISORY-REACHABILITY.md (source_feature_graph_hash = its BLAKE3)",
+  "note": "Each exception is RECORDED as an accepted_exception finding (Stage-2 never reports 0 vulnerabilities). Same reviewed policy for TEST_ONLY and authoritative. SP1 must remain exception-free. Fail closed on any additional advisory, crate/version mismatch, stale binding, duplicate, missing field, or SP1-scoped exception.",
+  "exceptions": [
+    {
+      "candidate": "Risc0",
+      "sdk": "risc0-zkvm=3.0.5",
+      "advisory_id": "RUSTSEC-2023-0071",
+      "affected_crate": "rsa",
+      "affected_version": "0.9.10",
+      "source_feature_graph_hash": "f1ff2dc4d84efb741ff5cb0ef7b0db3e4e8dc10d83b9baf046dce9688c57eddc",
+      "justification": "rsa is reached only via rzup (the RISC Zero toolchain manager), which uses RSA solely to verify signatures on DOWNLOADED toolchain archives. Owner decision B provisions the guest toolchain once by verified-tree extraction into an isolated RISC0_HOME and builds RISC0_BUILD_LOCKED=1 with no rzup network resolution and no downloads; the terminal backend runs --network none. The rsa signature-verification path is therefore never executed.",
+      "applicability": "compiled-into-host-tooling-but-unreachable-in-this-execution-mode",
+      "approving_policy_version": "2026-08-04.1",
+      "review_trigger": "any change to the SDK (risc0-zkvm/risc0-groth16 version), the affected crate version, the feature set, the proving runner, the resolved lockfile, or the execution mode (e.g. enabling Bonsai remote proving, which would exercise rsa)"
+    },
+    {
+      "candidate": "Risc0",
+      "sdk": "risc0-zkvm=3.0.5",
+      "advisory_id": "RUSTSEC-2025-0055",
+      "affected_crate": "tracing-subscriber",
+      "affected_version": "0.2.25",
+      "source_feature_graph_hash": "f1ff2dc4d84efb741ff5cb0ef7b0db3e4e8dc10d83b9baf046dce9688c57eddc",
+      "justification": "tracing-subscriber 0.2.25 is reached only via the arkworks ark-relations crate (an optional feature dep), not as a live logging subscriber. No fmt subscriber is initialized anywhere in the compiled host graph (no tracing_subscriber::fmt/FmtSubscriber/fmt::init in risc0-zkvm host or ark-relations), so the vulnerable ANSI-formatting code is never executed; the actual Groth16 snark runs in the pinned docker rapidsnark backend, not host ark-groth16; and the proving path logs only trusted frozen statement/witness data.",
+      "applicability": "compiled-into-host-tooling-but-unreachable-in-this-execution-mode",
+      "approving_policy_version": "2026-08-04.1",
+      "review_trigger": "any change to the SDK (risc0-zkvm/risc0-groth16 version), the affected crate version, the feature set, the proving runner, the resolved lockfile, or the execution mode (e.g. initializing a fmt subscriber over untrusted input, which would exercise the tracing-subscriber path)"
+    }
+  ]
+}
