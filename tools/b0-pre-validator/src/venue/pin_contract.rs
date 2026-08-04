@@ -54,13 +54,41 @@ pub const APPLEDOUBLE_SIZE: u64 = 163;
 
 /// The 7 approved REAL runtime members `(name, size, sha256)` — the ENTIRE runtime tree.
 pub const CIRCUIT_REAL_MEMBERS: &[(&str, u64, &str)] = &[
-    ("Groth16Verifier.sol", 26_770, "d5e777120d9f675aefcc8c0c8786d4043acb8e063646e60818564b44fb2ec457"),
-    ("SP1VerifierGroth16.sol", 3_236, "48e1db5baca3b102242ebd88280b3689a088076688146cd0d98876f5dacb76d0"),
-    ("constraints.json", 111_997_113, "1fb0b3d5f59c45b8f41973b111604aba2402db3c8e887074300ab8d164def92b"),
-    ("groth16_circuit.bin", 2_437_991_441, "d6a66be2702206e2b1a20bebf7096142864feac9e399a309e5e6e00353264cbc"),
-    ("groth16_pk.bin", 5_862_173_061, "c3760e0e3b58487f8704680d5b3ad32a9fbca9f3cb0749d69055c4f1271ca167"),
-    ("groth16_vk.bin", 492, "4388a21c687fdd5f218d7e3d13190cac4c5355818d3605fd5fb811df468ee696"),
-    ("groth16_witness.json", 2_802_920, "ee2ac8e094712a87ec3b0dc50ed39704aa90ee066ce4c5bf6160d54f04014c94"),
+    (
+        "Groth16Verifier.sol",
+        26_770,
+        "d5e777120d9f675aefcc8c0c8786d4043acb8e063646e60818564b44fb2ec457",
+    ),
+    (
+        "SP1VerifierGroth16.sol",
+        3_236,
+        "48e1db5baca3b102242ebd88280b3689a088076688146cd0d98876f5dacb76d0",
+    ),
+    (
+        "constraints.json",
+        111_997_113,
+        "1fb0b3d5f59c45b8f41973b111604aba2402db3c8e887074300ab8d164def92b",
+    ),
+    (
+        "groth16_circuit.bin",
+        2_437_991_441,
+        "d6a66be2702206e2b1a20bebf7096142864feac9e399a309e5e6e00353264cbc",
+    ),
+    (
+        "groth16_pk.bin",
+        5_862_173_061,
+        "c3760e0e3b58487f8704680d5b3ad32a9fbca9f3cb0749d69055c4f1271ca167",
+    ),
+    (
+        "groth16_vk.bin",
+        492,
+        "4388a21c687fdd5f218d7e3d13190cac4c5355818d3605fd5fb811df468ee696",
+    ),
+    (
+        "groth16_witness.json",
+        2_802_920,
+        "ee2ac8e094712a87ec3b0dc50ed39704aa90ee066ce4c5bf6160d54f04014c94",
+    ),
 ];
 
 /// The 8 approved AppleDouble sidecar names (bound in the inventory, NEVER installed to runtime).
@@ -77,15 +105,24 @@ pub const CIRCUIT_APPLEDOUBLE_NAMES: &[&str] = &[
 
 /// Expected guest toolchain trees `(framework, arch, archive_sha256, provisioned_tree_blake3)`.
 pub const EXPECTED_TOOLCHAINS: &[(&str, &str, &str, &str)] = &[
-    ("sp1", "x86_64",
-     "12c94435d41bfe4e20131bbcce40b35abd32270ad792befc653af4e3fabc192f",
-     "802e2e88c7443fd4d67c2c948c55517147e730b60ecb01cffe6e5e8ee5015f3e"),
-    ("sp1", "aarch64",
-     "81722d5c2bc7f371ce305f447ea4b6ffed9dfb1b60ac2978706b00e1ff9b503d",
-     "48c94ec9e0fa94037c196b37d24d877ab476b117aeac40c8d559ef9003e3946e"),
-    ("risc0", "x86_64",
-     "e082a1dc44abdef1d95460295a70218eb294ab999b834570ec932d05641cce5d",
-     "25f52f319aba77506aa9414639fd28299ab574a46708511e9698a41fa6993acd"),
+    (
+        "sp1",
+        "x86_64",
+        "12c94435d41bfe4e20131bbcce40b35abd32270ad792befc653af4e3fabc192f",
+        "802e2e88c7443fd4d67c2c948c55517147e730b60ecb01cffe6e5e8ee5015f3e",
+    ),
+    (
+        "sp1",
+        "aarch64",
+        "81722d5c2bc7f371ce305f447ea4b6ffed9dfb1b60ac2978706b00e1ff9b503d",
+        "48c94ec9e0fa94037c196b37d24d877ab476b117aeac40c8d559ef9003e3946e",
+    ),
+    (
+        "risc0",
+        "x86_64",
+        "e082a1dc44abdef1d95460295a70218eb294ab999b834570ec932d05641cce5d",
+        "25f52f319aba77506aa9414639fd28299ab574a46708511e9698a41fa6993acd",
+    ),
 ];
 
 /// A frozen expected OCI proving backend. Every OCI identity occupies a DISTINCT, explicitly
@@ -128,9 +165,12 @@ pub const EXPECTED_OCI_BACKENDS: &[ExpectedOci] = &[
     ExpectedOci {
         name: "sp1-gnark",
         index_digest: "sha256:e1a1cd62838b561ca301f9b2c26475c4a92bfe0e2c916e9bba213062e1548c4d",
-        amd64_manifest_digest: "sha256:be8555f1ad90870acd8c6ec7fd3ba0b1a2133ea9cddf25e130665aa651129e54",
+        amd64_manifest_digest:
+            "sha256:be8555f1ad90870acd8c6ec7fd3ba0b1a2133ea9cddf25e130665aa651129e54",
         config_digest: "sha256:ceb60d80f46cd8e5869abd778f26dc34c4f3bab205f3d1d5275e532121cced4e",
-        attestation_digest: Some("sha256:6ade751e47f161a6d351675c72619ca9f9dff685c41962985e40e2b2289696b9"),
+        attestation_digest: Some(
+            "sha256:6ade751e47f161a6d351675c72619ca9f9dff685c41962985e40e2b2289696b9",
+        ),
         entrypoint: "/gnark-cli",
     },
     // RISC Zero Groth16/stark2snark prover image. config is the amd64 manifest 7f173963's
@@ -140,7 +180,8 @@ pub const EXPECTED_OCI_BACKENDS: &[ExpectedOci] = &[
     ExpectedOci {
         name: "risc0-groth16",
         index_digest: "sha256:a4f80ce2e0b8e2bb7637a93c37136a6776ac00ec843a3fdf1c67b1d5ffea64ee",
-        amd64_manifest_digest: "sha256:7f173963196570b7a71816ed70565a4579264c5d2e3e0ecb028102538ad0e331",
+        amd64_manifest_digest:
+            "sha256:7f173963196570b7a71816ed70565a4579264c5d2e3e0ecb028102538ad0e331",
         config_digest: "sha256:f6f756b0899c29d869d6a01fbbded3887a8f51429653177ee4b3ffad294324cd",
         attestation_digest: None,
         entrypoint: "/app/prover.sh",
@@ -201,15 +242,28 @@ pub enum PinContractError {
     /// A v4 contract is missing a REQUIRED new block.
     MissingBlock(&'static str),
     /// A declared value is malformed (bad hex / bad digest / bad size / bad arch / …).
-    Malformed { field: String, detail: String },
+    Malformed {
+        field: String,
+        detail: String,
+    },
     /// A declared value does not match the frozen reconciled Stage-5 identity.
-    IdentityMismatch { field: String, expected: String, got: String },
+    IdentityMismatch {
+        field: String,
+        expected: String,
+        got: String,
+    },
     /// An extra/altered/unexpected member or sidecar.
-    UnexpectedMember { detail: String },
+    UnexpectedMember {
+        detail: String,
+    },
     /// An aarch64 terminal-Groth16 capability was declared (forbidden).
-    ArmTerminalGroth16 { detail: String },
+    ArmTerminalGroth16 {
+        detail: String,
+    },
     /// A synthetic / TEST_ONLY marker appeared on the authoritative capability path.
-    Synthetic { field: String },
+    Synthetic {
+        field: String,
+    },
 }
 
 impl std::fmt::Display for PinContractError {
@@ -221,7 +275,10 @@ impl std::fmt::Display for PinContractError {
                 "no authoritative contract_version (and no legacy _contract_version); fail closed"
             ),
             PinContractError::UnknownVersion(v) => {
-                write!(f, "unknown contract_version {v:?} (expected v2|v3|v4); fail closed")
+                write!(
+                    f,
+                    "unknown contract_version {v:?} (expected v2|v3|v4); fail closed"
+                )
             }
             PinContractError::MissingBlock(b) => {
                 write!(f, "v4 contract is missing required block {b:?}")
@@ -229,7 +286,11 @@ impl std::fmt::Display for PinContractError {
             PinContractError::Malformed { field, detail } => {
                 write!(f, "malformed {field}: {detail}")
             }
-            PinContractError::IdentityMismatch { field, expected, got } => write!(
+            PinContractError::IdentityMismatch {
+                field,
+                expected,
+                got,
+            } => write!(
                 f,
                 "identity mismatch at {field}: expected {expected}, got {got}"
             ),
@@ -241,7 +302,10 @@ impl std::fmt::Display for PinContractError {
                 "aarch64 terminal-Groth16 capability is forbidden: {detail}"
             ),
             PinContractError::Synthetic { field } => {
-                write!(f, "synthetic/TEST_ONLY marker on the authoritative pin path at {field}")
+                write!(
+                    f,
+                    "synthetic/TEST_ONLY marker on the authoritative pin path at {field}"
+                )
             }
         }
     }
@@ -349,7 +413,9 @@ struct RawContract {
 
 fn require_hex64(field: &str, v: &str) -> Result<(), PinContractError> {
     if is_synthetic(v) {
-        return Err(PinContractError::Synthetic { field: field.to_string() });
+        return Err(PinContractError::Synthetic {
+            field: field.to_string(),
+        });
     }
     if is_hex64(v) {
         Ok(())
@@ -364,13 +430,17 @@ fn require_hex64(field: &str, v: &str) -> Result<(), PinContractError> {
 /// `sha256:<64 lowercase hex>` — an immutable digest, never a mutable tag.
 fn require_oci_digest(field: &str, v: &str) -> Result<(), PinContractError> {
     if is_synthetic(v) {
-        return Err(PinContractError::Synthetic { field: field.to_string() });
+        return Err(PinContractError::Synthetic {
+            field: field.to_string(),
+        });
     }
     match v.strip_prefix("sha256:") {
         Some(hex) if is_hex64(hex) => Ok(()),
         _ => Err(PinContractError::Malformed {
             field: field.to_string(),
-            detail: format!("not an immutable sha256:<64hex> digest (a mutable tag is refused): {v:?}"),
+            detail: format!(
+                "not an immutable sha256:<64hex> digest (a mutable tag is refused): {v:?}"
+            ),
         }),
     }
 }
@@ -396,7 +466,9 @@ fn validate_guest_toolchains(pins: &[GuestToolchainPin]) -> Result<(), PinContra
             ("risc0", "aarch64") => {
                 return Err(PinContractError::Malformed {
                     field: key,
-                    detail: "RISC Zero is native-x86_64-only; an aarch64 RISC Zero toolchain is refused".into(),
+                    detail:
+                        "RISC Zero is native-x86_64-only; an aarch64 RISC Zero toolchain is refused"
+                            .into(),
                 })
             }
             _ => {
@@ -407,7 +479,10 @@ fn validate_guest_toolchains(pins: &[GuestToolchainPin]) -> Result<(), PinContra
             }
         }
         require_hex64(&format!("{key}.archive_sha256"), &p.archive_sha256)?;
-        require_hex64(&format!("{key}.provisioned_tree_blake3"), &p.provisioned_tree_blake3)?;
+        require_hex64(
+            &format!("{key}.provisioned_tree_blake3"),
+            &p.provisioned_tree_blake3,
+        )?;
         if p.ratification != "unratified" {
             return Err(PinContractError::Malformed {
                 field: format!("{key}.ratification"),
@@ -422,16 +497,22 @@ fn validate_guest_toolchains(pins: &[GuestToolchainPin]) -> Result<(), PinContra
                 detail: "no frozen expectation for this framework/arch".into(),
             })?;
         expect_eq(&format!("{key}.archive_sha256"), exp.2, &p.archive_sha256)?;
-        expect_eq(&format!("{key}.provisioned_tree_blake3"), exp.3, &p.provisioned_tree_blake3)?;
+        expect_eq(
+            &format!("{key}.provisioned_tree_blake3"),
+            exp.3,
+            &p.provisioned_tree_blake3,
+        )?;
     }
     // Coverage: all three expected toolchains must be present.
     for (fw, ar, _, _) in EXPECTED_TOOLCHAINS {
         if !pins.iter().any(|p| p.framework == *fw && p.arch == *ar) {
-            return Err(PinContractError::MissingBlock("guest_toolchains: missing a required framework/arch"))
-                .map_err(|_| PinContractError::Malformed {
-                    field: "guest_toolchains".into(),
-                    detail: format!("missing required toolchain {fw}/{ar}"),
-                });
+            return Err(PinContractError::MissingBlock(
+                "guest_toolchains: missing a required framework/arch",
+            ))
+            .map_err(|_| PinContractError::Malformed {
+                field: "guest_toolchains".into(),
+                detail: format!("missing required toolchain {fw}/{ar}"),
+            });
         }
     }
     Ok(())
@@ -445,8 +526,15 @@ fn validate_circuit(a: &Groth16CircuitArtifactPin) -> Result<(), PinContractErro
         });
     }
     require_hex64("groth16_circuit_artifact.archive_sha256", &a.archive_sha256)?;
-    require_hex64("groth16_circuit_artifact.runtime_tree_blake3", &a.runtime_tree_blake3)?;
-    expect_eq("groth16_circuit_artifact.archive_sha256", CIRCUIT_ARCHIVE_SHA256, &a.archive_sha256)?;
+    require_hex64(
+        "groth16_circuit_artifact.runtime_tree_blake3",
+        &a.runtime_tree_blake3,
+    )?;
+    expect_eq(
+        "groth16_circuit_artifact.archive_sha256",
+        CIRCUIT_ARCHIVE_SHA256,
+        &a.archive_sha256,
+    )?;
     if a.archive_size_bytes != CIRCUIT_ARCHIVE_SIZE {
         return Err(PinContractError::IdentityMismatch {
             field: "groth16_circuit_artifact.archive_size_bytes".into(),
@@ -474,10 +562,13 @@ fn validate_circuit(a: &Groth16CircuitArtifactPin) -> Result<(), PinContractErro
                     .ok_or_else(|| PinContractError::UnexpectedMember {
                         detail: format!("real member not in the approved set: {:?}", m.path),
                     })?;
-                let sha = m.sha256.as_deref().ok_or_else(|| PinContractError::Malformed {
-                    field: format!("member {:?}.sha256", m.path),
-                    detail: "real member requires sha256".into(),
-                })?;
+                let sha = m
+                    .sha256
+                    .as_deref()
+                    .ok_or_else(|| PinContractError::Malformed {
+                        field: format!("member {:?}.sha256", m.path),
+                        detail: "real member requires sha256".into(),
+                    })?;
                 require_hex64(&format!("member {:?}.sha256", m.path), sha)?;
                 let size = m.size.ok_or_else(|| PinContractError::Malformed {
                     field: format!("member {:?}.size", m.path),
@@ -499,18 +590,31 @@ fn validate_circuit(a: &Groth16CircuitArtifactPin) -> Result<(), PinContractErro
             "appledouble" => {
                 if !CIRCUIT_APPLEDOUBLE_NAMES.contains(&m.path.as_str()) {
                     return Err(PinContractError::UnexpectedMember {
-                        detail: format!("AppleDouble sidecar not in the approved set: {:?}", m.path),
+                        detail: format!(
+                            "AppleDouble sidecar not in the approved set: {:?}",
+                            m.path
+                        ),
                     });
                 }
-                let sha = m.sha256.as_deref().ok_or_else(|| PinContractError::Malformed {
-                    field: format!("member {:?}.sha256", m.path),
-                    detail: "AppleDouble requires sha256".into(),
-                })?;
+                let sha = m
+                    .sha256
+                    .as_deref()
+                    .ok_or_else(|| PinContractError::Malformed {
+                        field: format!("member {:?}.sha256", m.path),
+                        detail: "AppleDouble requires sha256".into(),
+                    })?;
                 // Every AppleDouble is the same inert 163-byte blob.
-                expect_eq(&format!("member {:?}.sha256", m.path), APPLEDOUBLE_SHA256, sha)?;
+                expect_eq(
+                    &format!("member {:?}.sha256", m.path),
+                    APPLEDOUBLE_SHA256,
+                    sha,
+                )?;
                 if m.size != Some(APPLEDOUBLE_SIZE) {
                     return Err(PinContractError::UnexpectedMember {
-                        detail: format!("AppleDouble {:?} size {:?} != {}", m.path, m.size, APPLEDOUBLE_SIZE),
+                        detail: format!(
+                            "AppleDouble {:?} size {:?} != {}",
+                            m.path, m.size, APPLEDOUBLE_SIZE
+                        ),
                     });
                 }
                 if seen_ad.contains(&m.path.as_str()) {
@@ -518,7 +622,12 @@ fn validate_circuit(a: &Groth16CircuitArtifactPin) -> Result<(), PinContractErro
                         detail: format!("duplicate AppleDouble {:?}", m.path),
                     });
                 }
-                seen_ad.push(CIRCUIT_APPLEDOUBLE_NAMES.iter().find(|n| **n == m.path).unwrap());
+                seen_ad.push(
+                    CIRCUIT_APPLEDOUBLE_NAMES
+                        .iter()
+                        .find(|n| **n == m.path)
+                        .unwrap(),
+                );
             }
             "dir" => {
                 if seen_dir {
@@ -537,12 +646,20 @@ fn validate_circuit(a: &Groth16CircuitArtifactPin) -> Result<(), PinContractErro
     }
     if seen_real.len() != CIRCUIT_REAL_MEMBERS.len() {
         return Err(PinContractError::UnexpectedMember {
-            detail: format!("expected {} real members, saw {}", CIRCUIT_REAL_MEMBERS.len(), seen_real.len()),
+            detail: format!(
+                "expected {} real members, saw {}",
+                CIRCUIT_REAL_MEMBERS.len(),
+                seen_real.len()
+            ),
         });
     }
     if seen_ad.len() != CIRCUIT_APPLEDOUBLE_NAMES.len() {
         return Err(PinContractError::UnexpectedMember {
-            detail: format!("expected {} AppleDouble sidecars, saw {}", CIRCUIT_APPLEDOUBLE_NAMES.len(), seen_ad.len()),
+            detail: format!(
+                "expected {} AppleDouble sidecars, saw {}",
+                CIRCUIT_APPLEDOUBLE_NAMES.len(),
+                seen_ad.len()
+            ),
         });
     }
 
@@ -577,7 +694,10 @@ fn validate_oci_backends(backends: &[OciBackendPin]) -> Result<(), PinContractEr
         // A usable Stage-5 backend is linux/amd64 ONLY. An arm64/aarch64 usable backend =
         // an ARM terminal-Groth16 capability, which is forbidden (RISC Zero arm64 is
         // unsupported and is REJECTED, never recorded as a usable pin).
-        if b.platform == "linux/arm64" || b.platform.ends_with("arm64") || b.platform.ends_with("aarch64") {
+        if b.platform == "linux/arm64"
+            || b.platform.ends_with("arm64")
+            || b.platform.ends_with("aarch64")
+        {
             return Err(PinContractError::ArmTerminalGroth16 {
                 detail: format!("{key} declares a usable platform {:?}", b.platform),
             });
@@ -589,7 +709,10 @@ fn validate_oci_backends(backends: &[OciBackendPin]) -> Result<(), PinContractEr
             });
         }
         require_oci_digest(&format!("{key}.index_digest"), &b.index_digest)?;
-        require_oci_digest(&format!("{key}.amd64_manifest_digest"), &b.amd64_manifest_digest)?;
+        require_oci_digest(
+            &format!("{key}.amd64_manifest_digest"),
+            &b.amd64_manifest_digest,
+        )?;
         require_oci_digest(&format!("{key}.config_digest"), &b.config_digest)?;
         require_oci_digest(&format!("{key}.loaded_image_id"), &b.loaded_image_id)?;
         if let Some(att) = &b.attestation_digest {
@@ -614,7 +737,9 @@ fn validate_oci_backends(backends: &[OciBackendPin]) -> Result<(), PinContractEr
         if b.index_digest == b.config_digest {
             return Err(PinContractError::Malformed {
                 field: key.clone(),
-                detail: "config_digest equals index_digest (config was NOT resolved from the manifest)".into(),
+                detail:
+                    "config_digest equals index_digest (config was NOT resolved from the manifest)"
+                        .into(),
             });
         }
         if b.amd64_manifest_digest == b.config_digest {
@@ -628,7 +753,8 @@ fn validate_oci_backends(backends: &[OciBackendPin]) -> Result<(), PinContractEr
         if b.loaded_image_id == b.index_digest {
             return Err(PinContractError::Malformed {
                 field: format!("{key}.loaded_image_id"),
-                detail: "loaded_image_id equals the index digest (must equal the config digest)".into(),
+                detail: "loaded_image_id equals the index digest (must equal the config digest)"
+                    .into(),
             });
         }
         if b.loaded_image_id == b.amd64_manifest_digest {
@@ -652,9 +778,21 @@ fn validate_oci_backends(backends: &[OciBackendPin]) -> Result<(), PinContractEr
                 field: key.clone(),
                 detail: format!("no frozen expectation for backend {:?}", b.name),
             })?;
-        expect_eq(&format!("{key}.index_digest"), exp.index_digest, &b.index_digest)?;
-        expect_eq(&format!("{key}.amd64_manifest_digest"), exp.amd64_manifest_digest, &b.amd64_manifest_digest)?;
-        expect_eq(&format!("{key}.config_digest"), exp.config_digest, &b.config_digest)?;
+        expect_eq(
+            &format!("{key}.index_digest"),
+            exp.index_digest,
+            &b.index_digest,
+        )?;
+        expect_eq(
+            &format!("{key}.amd64_manifest_digest"),
+            exp.amd64_manifest_digest,
+            &b.amd64_manifest_digest,
+        )?;
+        expect_eq(
+            &format!("{key}.config_digest"),
+            exp.config_digest,
+            &b.config_digest,
+        )?;
         // loaded_image_id is already proven == config_digest above; it therefore matches exp too.
         expect_eq(&format!("{key}.entrypoint"), exp.entrypoint, &b.entrypoint)?;
         // Attestation presence + value must match the frozen expectation exactly.
@@ -670,7 +808,8 @@ fn validate_oci_backends(backends: &[OciBackendPin]) -> Result<(), PinContractEr
             (None, Some(_)) => {
                 return Err(PinContractError::Malformed {
                     field: format!("{key}.attestation_digest"),
-                    detail: "declared an attestation digest but this backend's index carries none".into(),
+                    detail: "declared an attestation digest but this backend's index carries none"
+                        .into(),
                 })
             }
         }
@@ -704,7 +843,11 @@ pub fn evaluate_contract(json: &str) -> Result<ContractEvaluation, PinContractEr
 
     match version {
         ContractVersion::V2 | ContractVersion::V3 => {
-            let src = if legacy { " (legacy _contract_version)" } else { "" };
+            let src = if legacy {
+                " (legacy _contract_version)"
+            } else {
+                ""
+            };
             Ok(ContractEvaluation {
                 version,
                 capability: Capability::Ineligible {
@@ -796,7 +939,9 @@ mod tests {
                     "entrypoint": e.entrypoint
                 });
                 if let Some(att) = e.attestation_digest {
-                    o.as_object_mut().unwrap().insert("attestation_digest".into(), serde_json::json!(att));
+                    o.as_object_mut()
+                        .unwrap()
+                        .insert("attestation_digest".into(), serde_json::json!(att));
                 }
                 o
             })
@@ -838,7 +983,9 @@ mod tests {
 
     #[test]
     fn legacy_underscore_v3_is_ineligible() {
-        let e = eval(&serde_json::json!({"_contract_version": "v3 (v2 base + …)", "base_image": "x"})).unwrap();
+        let e =
+            eval(&serde_json::json!({"_contract_version": "v3 (v2 base + …)", "base_image": "x"}))
+                .unwrap();
         assert_eq!(e.version, ContractVersion::V3);
         assert!(matches!(e.capability, Capability::Ineligible { .. }));
     }
@@ -853,42 +1000,63 @@ mod tests {
 
     #[test]
     fn missing_version_fails_closed() {
-        assert!(matches!(eval(&serde_json::json!({"base_image": "x"})), Err(PinContractError::MissingVersion)));
+        assert!(matches!(
+            eval(&serde_json::json!({"base_image": "x"})),
+            Err(PinContractError::MissingVersion)
+        ));
     }
 
     #[test]
     fn v4_missing_a_block_fails_closed() {
         let mut v = valid_v4();
         v.as_object_mut().unwrap().remove("oci_backends");
-        assert!(matches!(eval(&v), Err(PinContractError::MissingBlock("oci_backends"))));
+        assert!(matches!(
+            eval(&v),
+            Err(PinContractError::MissingBlock("oci_backends"))
+        ));
         let mut v2 = valid_v4();
         v2.as_object_mut().unwrap().remove("guest_toolchains");
-        assert!(matches!(eval(&v2), Err(PinContractError::MissingBlock("guest_toolchains"))));
+        assert!(matches!(
+            eval(&v2),
+            Err(PinContractError::MissingBlock("guest_toolchains"))
+        ));
     }
 
     #[test]
     fn altered_circuit_member_hash_fails_closed() {
         let mut v = valid_v4();
         // Corrupt groth16_pk.bin's sha256.
-        let members = v["groth16_circuit_artifact"]["members"].as_array_mut().unwrap();
+        let members = v["groth16_circuit_artifact"]["members"]
+            .as_array_mut()
+            .unwrap();
         for m in members.iter_mut() {
             if m["path"] == "groth16_pk.bin" {
-                m["sha256"] = serde_json::json!("0000000000000000000000000000000000000000000000000000000000000000");
+                m["sha256"] = serde_json::json!(
+                    "0000000000000000000000000000000000000000000000000000000000000000"
+                );
             }
         }
-        assert!(matches!(eval(&v), Err(PinContractError::IdentityMismatch { .. })));
+        assert!(matches!(
+            eval(&v),
+            Err(PinContractError::IdentityMismatch { .. })
+        ));
     }
 
     #[test]
     fn altered_circuit_member_size_fails_closed() {
         let mut v = valid_v4();
-        let members = v["groth16_circuit_artifact"]["members"].as_array_mut().unwrap();
+        let members = v["groth16_circuit_artifact"]["members"]
+            .as_array_mut()
+            .unwrap();
         for m in members.iter_mut() {
             if m["path"] == "groth16_vk.bin" {
                 m["size"] = serde_json::json!(999);
             }
         }
-        assert!(matches!(eval(&v), Err(PinContractError::UnexpectedMember { .. })));
+        assert!(matches!(
+            eval(&v),
+            Err(PinContractError::UnexpectedMember { .. })
+        ));
     }
 
     #[test]
@@ -897,7 +1065,10 @@ mod tests {
         v["groth16_circuit_artifact"]["members"].as_array_mut().unwrap().push(
             serde_json::json!({"path": "._evil", "kind": "appledouble", "size": APPLEDOUBLE_SIZE, "sha256": APPLEDOUBLE_SHA256}),
         );
-        assert!(matches!(eval(&v), Err(PinContractError::UnexpectedMember { .. })));
+        assert!(matches!(
+            eval(&v),
+            Err(PinContractError::UnexpectedMember { .. })
+        ));
     }
 
     #[test]
@@ -907,13 +1078,17 @@ mod tests {
             .as_array_mut()
             .unwrap()
             .push(serde_json::json!("._groth16_pk.bin"));
-        assert!(matches!(eval(&v), Err(PinContractError::UnexpectedMember { .. })));
+        assert!(matches!(
+            eval(&v),
+            Err(PinContractError::UnexpectedMember { .. })
+        ));
     }
 
     #[test]
     fn mutable_tag_oci_ref_fails_closed() {
         let mut v = valid_v4();
-        v["oci_backends"][0]["index_digest"] = serde_json::json!("ghcr.io/succinctlabs/sp1-gnark:v6.1.0");
+        v["oci_backends"][0]["index_digest"] =
+            serde_json::json!("ghcr.io/succinctlabs/sp1-gnark:v6.1.0");
         assert!(matches!(eval(&v), Err(PinContractError::Malformed { .. })));
     }
 
@@ -921,7 +1096,10 @@ mod tests {
     fn arm64_backend_fails_closed() {
         let mut v = valid_v4();
         v["oci_backends"][0]["platform"] = serde_json::json!("linux/arm64");
-        assert!(matches!(eval(&v), Err(PinContractError::ArmTerminalGroth16 { .. })));
+        assert!(matches!(
+            eval(&v),
+            Err(PinContractError::ArmTerminalGroth16 { .. })
+        ));
     }
 
     // ---- OCI identity conflation matrix (index / manifest / config / image-id / attestation) ----
@@ -930,7 +1108,10 @@ mod tests {
     fn loaded_image_id_equals_config_is_required() {
         // Sanity: the valid fixture has loaded_image_id == config_digest.
         let v = valid_v4();
-        assert_eq!(v["oci_backends"][0]["loaded_image_id"], v["oci_backends"][0]["config_digest"]);
+        assert_eq!(
+            v["oci_backends"][0]["loaded_image_id"],
+            v["oci_backends"][0]["config_digest"]
+        );
         assert_eq!(eval(&v).unwrap().capability, Capability::Complete);
     }
 
@@ -977,13 +1158,19 @@ mod tests {
         let man = v["oci_backends"][0]["amd64_manifest_digest"].clone();
         v["oci_backends"][0]["index_digest"] = man;
         v["oci_backends"][0]["amd64_manifest_digest"] = idx;
-        assert!(matches!(eval(&v), Err(PinContractError::IdentityMismatch { .. })));
+        assert!(matches!(
+            eval(&v),
+            Err(PinContractError::IdentityMismatch { .. })
+        ));
     }
 
     #[test]
     fn sp1_missing_attestation_fails_closed() {
         let mut v = valid_v4();
-        v["oci_backends"][0].as_object_mut().unwrap().remove("attestation_digest");
+        v["oci_backends"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("attestation_digest");
         assert!(matches!(eval(&v), Err(PinContractError::Malformed { .. })));
     }
 
@@ -993,7 +1180,9 @@ mod tests {
         let mut v = valid_v4();
         v["oci_backends"][1].as_object_mut().unwrap().insert(
             "attestation_digest".into(),
-            serde_json::json!("sha256:6ade751e47f161a6d351675c72619ca9f9dff685c41962985e40e2b2289696b9"),
+            serde_json::json!(
+                "sha256:6ade751e47f161a6d351675c72619ca9f9dff685c41962985e40e2b2289696b9"
+            ),
         );
         assert!(matches!(eval(&v), Err(PinContractError::Malformed { .. })));
     }
@@ -1006,15 +1195,24 @@ mod tests {
         let (name, digest) = REJECTED_OCI_BACKENDS[0];
         assert_eq!(name, "risc0-guest-builder");
         let mut v = valid_v4();
-        v["oci_backends"].as_array_mut().unwrap().push(serde_json::json!({
-            "name": name, "platform": "linux/amd64",
-            "index_digest": digest, "amd64_manifest_digest": digest,
-            "config_digest": digest, "loaded_image_id": digest, "entrypoint": "/no"
-        }));
-        assert!(matches!(eval(&v), Err(PinContractError::Malformed { .. }) | Err(PinContractError::IdentityMismatch { .. })));
+        v["oci_backends"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "name": name, "platform": "linux/amd64",
+                "index_digest": digest, "amd64_manifest_digest": digest,
+                "config_digest": digest, "loaded_image_id": digest, "entrypoint": "/no"
+            }));
+        assert!(matches!(
+            eval(&v),
+            Err(PinContractError::Malformed { .. })
+                | Err(PinContractError::IdentityMismatch { .. })
+        ));
         // And it is never in the accepted set.
-        assert!(!EXPECTED_OCI_BACKENDS.iter().any(|e| e.name == name),
-            "guest-builder must never be an accepted backend");
+        assert!(
+            !EXPECTED_OCI_BACKENDS.iter().any(|e| e.name == name),
+            "guest-builder must never be an accepted backend"
+        );
     }
 
     #[test]
@@ -1024,7 +1222,10 @@ mod tests {
         let bogus = "sha256:1234567890123456789012345678901234567890123456789012345678901234";
         v["oci_backends"][0]["config_digest"] = serde_json::json!(bogus);
         v["oci_backends"][0]["loaded_image_id"] = serde_json::json!(bogus);
-        assert!(matches!(eval(&v), Err(PinContractError::IdentityMismatch { .. })));
+        assert!(matches!(
+            eval(&v),
+            Err(PinContractError::IdentityMismatch { .. })
+        ));
     }
 
     #[test]
@@ -1032,7 +1233,10 @@ mod tests {
         let mut v = valid_v4();
         v["guest_toolchains"][0]["provisioned_tree_blake3"] =
             serde_json::json!("1111111111111111111111111111111111111111111111111111111111111111");
-        assert!(matches!(eval(&v), Err(PinContractError::IdentityMismatch { .. })));
+        assert!(matches!(
+            eval(&v),
+            Err(PinContractError::IdentityMismatch { .. })
+        ));
     }
 
     #[test]

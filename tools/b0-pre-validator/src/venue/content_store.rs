@@ -28,13 +28,25 @@ use super::{is_hex64, sha256, to_hex};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContentStoreError {
-    Io { path: String, detail: String },
+    Io {
+        path: String,
+        detail: String,
+    },
     /// The digest was not exactly 64 lowercase-hex (rejected before any path use).
-    BadDigest { digest: String },
+    BadDigest {
+        digest: String,
+    },
     /// The addressed object is not present in the store.
-    Missing { kind: &'static str, digest: String },
+    Missing {
+        kind: &'static str,
+        digest: String,
+    },
     /// The stored bytes re-hashed to a value other than the digest that addressed them.
-    IntegrityMismatch { kind: &'static str, expected: String, got: String },
+    IntegrityMismatch {
+        kind: &'static str,
+        expected: String,
+        got: String,
+    },
     /// A tree could not be digested (unsafe member, traversal, unsupported type, …).
     Tree(ProvisionedTreeError),
 }
@@ -67,7 +79,10 @@ impl From<ProvisionedTreeError> for ContentStoreError {
 }
 
 fn io<E: std::fmt::Display>(path: &Path, e: E) -> ContentStoreError {
-    ContentStoreError::Io { path: path.display().to_string(), detail: e.to_string() }
+    ContentStoreError::Io {
+        path: path.display().to_string(),
+        detail: e.to_string(),
+    }
 }
 
 /// Validate a digest is exactly 64 lowercase-hex — the ONLY values allowed as a path component.
@@ -75,7 +90,9 @@ fn checked_digest(digest: &str) -> Result<&str, ContentStoreError> {
     if is_hex64(digest) {
         Ok(digest)
     } else {
-        Err(ContentStoreError::BadDigest { digest: digest.to_string() })
+        Err(ContentStoreError::BadDigest {
+            digest: digest.to_string(),
+        })
     }
 }
 
@@ -105,14 +122,19 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<(), ContentStoreError> {
         } else if ft.is_file() {
             std::fs::copy(&from, &to).map_err(|e| io(&from, e))?;
             let exec = md.permissions().mode() & 0o111 != 0;
-            std::fs::set_permissions(&to, std::fs::Permissions::from_mode(if exec { 0o755 } else { 0o644 }))
-                .map_err(|e| io(&to, e))?;
+            std::fs::set_permissions(
+                &to,
+                std::fs::Permissions::from_mode(if exec { 0o755 } else { 0o644 }),
+            )
+            .map_err(|e| io(&to, e))?;
         } else {
             // Unsupported type; the re-digest of the destination would fail closed anyway, but
             // refuse here so nothing partial is stored.
-            return Err(ContentStoreError::Tree(ProvisionedTreeError::UnsupportedType {
-                path: from.display().to_string(),
-            }));
+            return Err(ContentStoreError::Tree(
+                ProvisionedTreeError::UnsupportedType {
+                    path: from.display().to_string(),
+                },
+            ));
         }
     }
     Ok(())
@@ -161,7 +183,10 @@ pub fn resolve_tree(store: &Path, digest: &str) -> Result<PathBuf, ContentStoreE
     let digest = checked_digest(digest)?;
     let path = trees_dir(store).join(digest);
     if !path.is_dir() {
-        return Err(ContentStoreError::Missing { kind: "tree", digest: digest.to_string() });
+        return Err(ContentStoreError::Missing {
+            kind: "tree",
+            digest: digest.to_string(),
+        });
     }
     let have = provisioned_tree_digest(&path)?;
     if have != digest {
@@ -180,9 +205,15 @@ pub fn put_blob(store: &Path, src: &Path) -> Result<String, ContentStoreError> {
     let digest = to_hex(&sha256::digest(&bytes));
     let dest = blobs_dir(store).join(&digest);
     if dest.exists() {
-        let have = to_hex(&sha256::digest(&std::fs::read(&dest).map_err(|e| io(&dest, e))?));
+        let have = to_hex(&sha256::digest(
+            &std::fs::read(&dest).map_err(|e| io(&dest, e))?,
+        ));
         if have != digest {
-            return Err(ContentStoreError::IntegrityMismatch { kind: "blob", expected: digest, got: have });
+            return Err(ContentStoreError::IntegrityMismatch {
+                kind: "blob",
+                expected: digest,
+                got: have,
+            });
         }
         return Ok(digest);
     }
@@ -199,9 +230,14 @@ pub fn resolve_blob(store: &Path, digest: &str) -> Result<PathBuf, ContentStoreE
     let digest = checked_digest(digest)?;
     let path = blobs_dir(store).join(digest);
     if !path.is_file() {
-        return Err(ContentStoreError::Missing { kind: "blob", digest: digest.to_string() });
+        return Err(ContentStoreError::Missing {
+            kind: "blob",
+            digest: digest.to_string(),
+        });
     }
-    let have = to_hex(&sha256::digest(&std::fs::read(&path).map_err(|e| io(&path, e))?));
+    let have = to_hex(&sha256::digest(
+        &std::fs::read(&path).map_err(|e| io(&path, e))?,
+    ));
     if have != digest {
         return Err(ContentStoreError::IntegrityMismatch {
             kind: "blob",
@@ -248,7 +284,11 @@ mod tests {
     }
     fn sample(root: &Path) {
         write(&root.join("bin/prover"), b"#!/bin/sh\nexec prover\n");
-        std::fs::set_permissions(root.join("bin/prover"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(
+            root.join("bin/prover"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
         write(&root.join("lib/data.bin"), b"\x00\x01\x02circuit\x03\x04");
         write(&root.join("VERSION"), b"v6.1.0\n");
     }
@@ -262,7 +302,11 @@ mod tests {
         let put = put_tree(&store, &src).unwrap();
         assert_eq!(put, want, "put returns the provisioned-tree digest");
         let resolved = resolve_tree(&store, &want).unwrap();
-        assert_eq!(provisioned_tree_digest(&resolved).unwrap(), want, "re-hash on resolve matches");
+        assert_eq!(
+            provisioned_tree_digest(&resolved).unwrap(),
+            want,
+            "re-hash on resolve matches"
+        );
         std::fs::remove_dir_all(&store).ok();
         std::fs::remove_dir_all(&src).ok();
     }
@@ -283,8 +327,14 @@ mod tests {
     fn resolve_missing_fails_closed() {
         let store = tmp("miss");
         let bogus = "0".repeat(64);
-        assert!(matches!(resolve_tree(&store, &bogus), Err(ContentStoreError::Missing { .. })));
-        assert!(matches!(resolve_blob(&store, &bogus), Err(ContentStoreError::Missing { .. })));
+        assert!(matches!(
+            resolve_tree(&store, &bogus),
+            Err(ContentStoreError::Missing { .. })
+        ));
+        assert!(matches!(
+            resolve_blob(&store, &bogus),
+            Err(ContentStoreError::Missing { .. })
+        ));
         std::fs::remove_dir_all(&store).ok();
     }
 
@@ -292,9 +342,28 @@ mod tests {
     fn bad_digest_is_refused_before_path_use() {
         let store = tmp("baddig");
         // Traversal attempt + non-hex: must be refused by the digest check, never touch the FS.
-        for d in ["../../etc", "../escape", "not-hex", "ABCDEF", &"g".repeat(64), &"0".repeat(63)] {
-            assert!(matches!(resolve_tree(&store, d), Err(ContentStoreError::BadDigest { .. })), "tree {d}");
-            assert!(matches!(resolve_blob(&store, d), Err(ContentStoreError::BadDigest { .. })), "blob {d}");
+        for d in [
+            "../../etc",
+            "../escape",
+            "not-hex",
+            "ABCDEF",
+            &"g".repeat(64),
+            &"0".repeat(63),
+        ] {
+            assert!(
+                matches!(
+                    resolve_tree(&store, d),
+                    Err(ContentStoreError::BadDigest { .. })
+                ),
+                "tree {d}"
+            );
+            assert!(
+                matches!(
+                    resolve_blob(&store, d),
+                    Err(ContentStoreError::BadDigest { .. })
+                ),
+                "blob {d}"
+            );
         }
         std::fs::remove_dir_all(&store).ok();
     }
@@ -325,7 +394,10 @@ mod tests {
         assert_eq!(std::fs::read(&r).unwrap(), b"hello circuit bytes");
         // Tamper.
         write(&blobs_dir(&store).join(&d), b"different");
-        assert!(matches!(resolve_blob(&store, &d), Err(ContentStoreError::IntegrityMismatch { .. })));
+        assert!(matches!(
+            resolve_blob(&store, &d),
+            Err(ContentStoreError::IntegrityMismatch { .. })
+        ));
         std::fs::remove_dir_all(&store).ok();
     }
 
@@ -337,8 +409,14 @@ mod tests {
         std::fs::set_permissions(src.join("run"), std::fs::Permissions::from_mode(0o755)).unwrap();
         let d = put_tree(&store, &src).unwrap();
         let r = resolve_tree(&store, &d).unwrap();
-        let mode = std::fs::metadata(r.join("run")).unwrap().permissions().mode();
-        assert!(mode & 0o111 != 0, "exec bit preserved so the digest matches");
+        let mode = std::fs::metadata(r.join("run"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert!(
+            mode & 0o111 != 0,
+            "exec bit preserved so the digest matches"
+        );
         std::fs::remove_dir_all(&store).ok();
         std::fs::remove_dir_all(&src).ok();
     }

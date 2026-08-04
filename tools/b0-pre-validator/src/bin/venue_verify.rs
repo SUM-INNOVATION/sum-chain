@@ -125,7 +125,9 @@ fn content_store(op: &str, store: &str, arg: &str) -> Result<String, String> {
         "resolve-blob" => cs::resolve_blob(store, arg)
             .map(|p| p.display().to_string())
             .map_err(|e| e.to_string()),
-        other => Err(format!("content-store op must be put-tree|resolve-tree|put-blob|resolve-blob (got {other:?})")),
+        other => Err(format!(
+            "content-store op must be put-tree|resolve-tree|put-blob|resolve-blob (got {other:?})"
+        )),
     }
 }
 
@@ -136,7 +138,8 @@ fn pin_contract_check(path: &str) -> Result<String, String> {
     // reconciled Stage-5 identity set; an unknown version FAILS CLOSED. Never ratifies.
     use b0_pre_validator::venue::pin_contract::{evaluate_contract, Capability};
     let bytes = read(path)?;
-    let json = String::from_utf8(bytes).map_err(|_| "pin-contract JSON is not valid UTF-8".to_string())?;
+    let json =
+        String::from_utf8(bytes).map_err(|_| "pin-contract JSON is not valid UTF-8".to_string())?;
     let ev = evaluate_contract(&json).map_err(|e| e.to_string())?;
     match ev.capability {
         Capability::Complete => Ok(ev.summary),
@@ -490,9 +493,14 @@ fn stage2_generate(
     if Path::new(out_path).exists() {
         return Err(format!("refusing to overwrite existing {out_path}"));
     }
-    let record =
-        Stage2AuditRecord::generate(&params, &metadata_raw, &audit_raw, &command_log, &exception_policy)
-            .map_err(|e| e.to_string())?;
+    let record = Stage2AuditRecord::generate(
+        &params,
+        &metadata_raw,
+        &audit_raw,
+        &command_log,
+        &exception_policy,
+    )
+    .map_err(|e| e.to_string())?;
     let json = serde_json::to_string_pretty(&record).map_err(|e| format!("serialize: {e}"))?;
     std::fs::write(out_path, format!("{json}\n")).map_err(|e| format!("write {out_path}: {e}"))?;
     Ok(format!(

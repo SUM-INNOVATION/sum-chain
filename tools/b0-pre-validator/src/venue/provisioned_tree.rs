@@ -75,14 +75,20 @@ impl std::fmt::Display for ProvisionedTreeError {
                 write!(f, "io error at {path:?}: {detail}")
             }
             ProvisionedTreeError::UnsafePath { path } => {
-                write!(f, "unsafe/non-canonical relative path (traversal): {path:?}")
+                write!(
+                    f,
+                    "unsafe/non-canonical relative path (traversal): {path:?}"
+                )
             }
             ProvisionedTreeError::UnsafeSymlinkTarget { path, target } => write!(
                 f,
                 "symlink {path:?} has an unsafe target {target:?} (absolute or contains `..`)"
             ),
             ProvisionedTreeError::UnsupportedType { path } => {
-                write!(f, "unsupported file type at {path:?} (not regular/symlink/dir)")
+                write!(
+                    f,
+                    "unsupported file type at {path:?} (not regular/symlink/dir)"
+                )
             }
             ProvisionedTreeError::DuplicatePath { path } => {
                 write!(f, "duplicate relative path in provisioning tree: {path:?}")
@@ -217,7 +223,9 @@ fn walk(
 /// relative-path bytes so iteration is deterministic bytewise (C-locale) order. This is the
 /// exact set of entries the digest is computed over; a caller can also render it as an
 /// auditable member inventory.
-pub fn collect_inventory(root: &Path) -> Result<BTreeMap<Vec<u8>, EntryKind>, ProvisionedTreeError> {
+pub fn collect_inventory(
+    root: &Path,
+) -> Result<BTreeMap<Vec<u8>, EntryKind>, ProvisionedTreeError> {
     let mut entries: BTreeMap<Vec<u8>, EntryKind> = BTreeMap::new();
     walk(root, Path::new(""), &mut entries)?;
     Ok(entries)
@@ -282,8 +290,11 @@ mod tests {
 
     fn sample(root: &Path) {
         write(&root.join("bin/cargo-prove"), b"ELF...\n");
-        std::fs::set_permissions(root.join("bin/cargo-prove"), std::fs::Permissions::from_mode(0o755))
-            .unwrap();
+        std::fs::set_permissions(
+            root.join("bin/cargo-prove"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
         write(&root.join("lib/rustlib/components"), b"rust-std\n");
         write(&root.join("version"), b"succinct-1.94.0-64bit\n");
     }
@@ -296,7 +307,10 @@ mod tests {
         sample(&b);
         let da = provisioned_tree_digest(&a).unwrap();
         let db = provisioned_tree_digest(&b).unwrap();
-        assert_eq!(da, db, "identical content in two locations -> identical digest");
+        assert_eq!(
+            da, db,
+            "identical content in two locations -> identical digest"
+        );
         assert_eq!(da.len(), 64);
         assert_eq!(provisioned_tree_digest(&a).unwrap(), da);
         std::fs::remove_dir_all(&a).ok();
@@ -312,7 +326,10 @@ mod tests {
         sample(&a);
         let prov = provisioned_tree_digest(&a).unwrap();
         let advdb = super::super::checkout_digest::canonical_checkout_digest(&a).unwrap();
-        assert_ne!(prov, advdb, "domain separation: PROVTREE != ADVDB for the same tree");
+        assert_ne!(
+            prov, advdb,
+            "domain separation: PROVTREE != ADVDB for the same tree"
+        );
         std::fs::remove_dir_all(&a).ok();
     }
 
@@ -364,7 +381,10 @@ mod tests {
         let before = provisioned_tree_digest(&a).unwrap();
         std::fs::set_permissions(a.join("x"), std::fs::Permissions::from_mode(0o755)).unwrap();
         let after = provisioned_tree_digest(&a).unwrap();
-        assert_ne!(before, after, "flipping the exec bit must change the digest");
+        assert_ne!(
+            before, after,
+            "flipping the exec bit must change the digest"
+        );
         std::fs::remove_dir_all(&a).ok();
     }
 
@@ -430,8 +450,11 @@ mod tests {
     /// file, a plain file, a nested dir, and a safe relative symlink.
     fn golden_tree(root: &Path) {
         write(&root.join("bin/prover"), b"#!/bin/sh\nexec prover\n");
-        std::fs::set_permissions(root.join("bin/prover"), std::fs::Permissions::from_mode(0o755))
-            .unwrap();
+        std::fs::set_permissions(
+            root.join("bin/prover"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
         write(&root.join("lib/data.bin"), b"\x00\x01\x02circuit\x03\x04");
         write(&root.join("VERSION"), b"v6.1.0\n");
         for p in ["lib/data.bin", "VERSION"] {
