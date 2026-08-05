@@ -211,6 +211,90 @@ gen_lock_in_container() {
   [ -s "$out_lock" ]
 }
 
+# Vendor the candidate's FULL third-party graph (exact locked versions) inside the pinned
+# builder image and export the crate sources to the host as a tar on STDOUT — the same
+# no-writable-mount export posture as gen_lock_in_container. The validated Stage-1 lock is
+# bind-mounted READ-ONLY at its logical workspace destination so `cargo vendor --locked`
+# reproduces exactly the resolved graph (`--versioned-dirs` forces every dir to
+# `<name>-<version>`, the layout the notice generator addresses). The tar carries only crate
+# SOURCES; the notice manifest hashes the license TEXTS it extracts, so tar ordering/metadata
+# never enter any identity. Network is permitted (same pinned-registry posture as the Stage-1
+# online resolve); the sources are re-bound to the lock + content-hashed downstream, not trusted.
+vendor_graph_in_container() {
+  local image="$1" cdir="$2" hostlock="$3" incontainer_lock="$4" out_tar="$5"
+  require_cmd docker
+  docker run --rm --pull never \
+    --mount "type=bind,source=$hostlock,target=$incontainer_lock,readonly" \
+    "$image" bash -c "cd $cdir && rm -rf /tmp/b0pre-vendor && cargo vendor --locked --versioned-dirs /tmp/b0pre-vendor >/dev/null && tar -c -C /tmp/b0pre-vendor ." > "$out_tar" \
+    || return 1
+  [ -s "$out_tar" ]
+}
+
+# Safely extract an UNTRUSTED (venue-produced) uncompressed tar into an empty destination,
+# applying the project's established safe-extraction rules BEFORE any file is written (the same
+# discipline as provision_prover_toolchain.sh): enumerate EVERY entry (verbose, type flag visible)
+# and REFUSE any absolute path, `..` traversal, symlink/hardlink, or non-regular/non-directory
+# (device/fifo) entry, and REFUSE duplicate regular-file member names — then extract with
+# --no-same-owner. GNU + BSD tar both print the type flag as the first char of the mode column
+# ('-' regular, 'd' dir, 'l' symlink, 'h' hardlink, 'c'/'b' device, 'p' fifo); the member name is
+# the last field. Fails closed at the first violation.
+safe_extract_tar() {
+  local tar_file="$1" dest="$2"
+  require_cmd tar
+  [ -s "$tar_file" ] || die "safe_extract_tar: archive absent/empty: $tar_file"
+  local listing
+  listing="$(tar -tvf "$tar_file")" || die "safe_extract_tar: cannot list $tar_file"
+  local reg_members=""
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    local type_char name
+    type_char="$(printf '%s' "$line" | cut -c1)"
+    name="$(printf '%s' "$line" | awk '{print $NF}')"
+    case "$name" in
+      /*|*..*) die "safe_extract_tar: unsafe entry path (absolute or ..): $name" ;;
+    esac
+    case "$type_char" in
+      l|h) die "safe_extract_tar: link entry refused: $name" ;;
+      d|-) ;;
+      *)   die "safe_extract_tar: non-regular/non-directory entry refused ('$type_char'): $name" ;;
+    esac
+    [ "$type_char" = "-" ] && reg_members="$reg_members$name
+"
+  done <<EOF
+$listing
+EOF
+  local dups
+  dups="$(printf '%s' "$reg_members" | sed '/^$/d' | LC_ALL=C sort | uniq -d)"
+  [ -z "$dups" ] || die "safe_extract_tar: duplicate member entries: $(printf '%s' "$dups" | tr '\n' ' ')"
+  mkdir -p "$dest"
+  tar -x --no-same-owner -C "$dest" -f "$tar_file" || die "safe_extract_tar: extraction failed: $tar_file"
+}
+
+# Enumerate the crate NAMES LINKED INTO the artifact for one build TARGET — the NORMAL (runtime
+# library) dependency closure (no build-deps, no dev-deps), inside the pinned image with the validated
+# lock mounted read-only. Metadata-only (no target toolchain needed); platform-gated crates for OTHER
+# targets are excluded. Redistribution follows what ships in the binary, so build-time tooling (e.g.
+# `risc0-build` and its tree) and macOS/Windows-only crates are correctly out of scope.
+cargo_tree_target_in_container() {
+  local image="$1" cdir="$2" hostlock="$3" incontainer_lock="$4" target="$5"
+  require_cmd docker
+  docker run --rm --pull never \
+    --mount "type=bind,source=$hostlock,target=$incontainer_lock,readonly" \
+    "$image" bash -c "cd $cdir && cargo tree --locked --target $target -e normal --prefix none --no-dedupe" 2>/dev/null \
+    | sed -E 's/ v[0-9].*$//; s/ \(.*$//' | grep -vE '^$'
+}
+
+# Emit `cargo metadata --filter-platform <target>` (the platform-resolved graph WITH dep_kinds) to
+# STDOUT, inside the pinned image with the validated lock mounted read-only. Used to build the sealed
+# target-closure record; `dep_kinds[].kind == null` marks NORMAL (runtime-linked) edges.
+cargo_metadata_target_in_container() {
+  local image="$1" cdir="$2" hostlock="$3" incontainer_lock="$4" target="$5"
+  require_cmd docker
+  docker run --rm --pull never \
+    --mount "type=bind,source=$hostlock,target=$incontainer_lock,readonly" \
+    "$image" bash -c "cd $cdir && cargo metadata --locked --filter-platform $target --format-version 1" 2>/dev/null
+}
+
 # The S1 causal verifier-execution core: BUILD the runner (--locked) inside $image, HASH
 # the EXACT resulting binary, and EXEC that file directly (never an unbound `cargo run`,
 # whose bytes are unidentified) — all in ONE container invocation so the hashed file is

@@ -30,6 +30,7 @@ pub mod sha256;
 pub mod smoke;
 pub mod stage4;
 pub mod stage5;
+pub mod third_party_notices;
 pub mod tool_install;
 
 /// Lowercase-hex of a byte slice (shared by the venue submodules).

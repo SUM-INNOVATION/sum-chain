@@ -616,6 +616,9 @@ assemble_evidence() {
     cp "$work/$c.Cargo.lock"            "$ev/$c.Cargo.lock"
     cp "$work/$c.lock-provenance.json"  "$ev/$c.lock-provenance.json"
     cp "$work/$c.stage2-audit.json"     "$ev/$c.stage2-audit.json"
+    # Third-party license notices + the target-closure they were scoped against (resolve_lock.sh).
+    cp "$work/$c.third-party-notices.json" "$ev/$c.third-party-notices.json"
+    cp "$work/$c.target-closure.json"      "$ev/$c.target-closure.json"
   done
   # SP1 binds a tool on both architectures; RISC Zero on x86_64 ONLY, matching
   # `required_files` in the validator (VENUE.md §2).

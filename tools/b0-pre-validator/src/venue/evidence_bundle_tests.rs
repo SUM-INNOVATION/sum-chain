@@ -134,6 +134,37 @@ fn write_bundle_files(dir: &Path, arch: &str) {
         });
         write(dir, &stage2_file(c), serde_json::to_vec_pretty(&stage2).unwrap().as_slice());
 
+        // third-party notices + sealed target-closure from this candidate's (empty-graph) lock.
+        let closure = crate::venue::third_party_notices::TargetClosure {
+            schema_version: crate::venue::third_party_notices::TARGET_CLOSURE_SCHEMA_VERSION,
+            candidate: c.to_string(),
+            arch: arch.to_string(),
+            venue_targets: vec!["x86_64-unknown-linux-gnu".to_string()],
+            features: vec![],
+            lock_blake3_hex: lock_hash.clone(),
+            stage2_graph_blake3_hex: lock_hash.clone(),
+            roots: vec!["synthetic-root\u{1f}0.0.0\u{1f}".to_string()],
+            nodes: vec![crate::venue::third_party_notices::ClosureNode {
+                name: "synthetic-root".to_string(),
+                version: "0.0.0".to_string(),
+                source: String::new(),
+                checksum: None,
+                normal_deps: vec![],
+            }],
+        };
+        let notices = crate::venue::third_party_notices::generate(
+            c,
+            arch,
+            &lock_hash,
+            std::str::from_utf8(&lock_bytes).unwrap(),
+            std::path::Path::new("/nonexistent-vendor-root-empty-graph"),
+            None,
+            Some(&closure),
+        )
+        .unwrap();
+        write(dir, &notices_file(c), serde_json::to_vec_pretty(&notices).unwrap().as_slice());
+        write(dir, &notices_closure_file(c), serde_json::to_vec_pretty(&closure).unwrap().as_slice());
+
         // tool bindings (verified == declared; bound to builder + source commit)
         let mut bindings = Vec::new();
         let mut first_installed = String::new();
@@ -431,6 +462,95 @@ fn an_incomplete_stage2_graph_is_rejected() {
     let err = import_verify(&dir).unwrap_err();
     assert!(matches!(err, EvidenceError::Stage2 { .. }), "got {err}");
     std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_bundle_missing_third_party_notices_is_rejected_at_seal() {
+    // A bundle that cannot produce a candidate's third-party notice manifest is refused at seal
+    // (exact required-file set), so it can never import and therefore never finalize.
+    let dir = sealed_bundle("notices_missing", "Aarch64");
+    std::fs::remove_file(dir.join(notices_file("Risc0"))).unwrap();
+    std::fs::remove_file(dir.join(MANIFEST_FILE)).ok();
+    let err = seal(&dir, "Aarch64", COMMIT).unwrap_err();
+    assert!(
+        matches!(err, EvidenceError::MissingFile { .. }),
+        "a bundle missing third-party notices must be refused at seal; got {err}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_notice_manifest_bound_to_the_wrong_lock_is_rejected() {
+    // Re-binding the notice manifest to a different lock hash (a notice set generated for another
+    // graph) is refused: notices are useless unless bound to THIS candidate's resolved lock.
+    let dir = sealed_bundle("notices_wrong_lock", "Aarch64");
+    rewrite_json(&dir, &notices_file("Sp1"), |v| {
+        v["lock_blake3_hex"] = serde_json::json!("f".repeat(64));
+    });
+    reseal(&dir, "Aarch64");
+    let err = import_verify(&dir).unwrap_err();
+    assert!(matches!(err, EvidenceError::Notices { .. }), "got {err}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_notice_manifest_with_a_crate_not_in_the_lock_is_rejected() {
+    // An extra notice entry not present in the sealed lock is refused (fail closed both ways: the
+    // covered set must EQUAL the lock's third-party set, no phantom coverage).
+    let dir = sealed_bundle("notices_extra", "Aarch64");
+    rewrite_json(&dir, &notices_file("Sp1"), |v| {
+        let entries = v["entries"].as_array_mut().unwrap();
+        entries.push(serde_json::json!({
+            "name": "phantom-crate",
+            "version": "9.9.9",
+            "source": "registry+https://github.com/rust-lang/crates.io-index",
+            "spdx": "MIT",
+            "notice_source": "crate-file",
+            "notices": [{"path": "LICENSE", "sha256": crate::venue::sha256::hex_digest(b"x"), "text": "x"}],
+        }));
+    });
+    reseal(&dir, "Aarch64");
+    let err = import_verify(&dir).unwrap_err();
+    assert!(matches!(err, EvidenceError::Notices { .. }), "got {err}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_bundle_missing_target_closure_is_rejected_at_seal() {
+    // A bundle that cannot produce a candidate's target-closure record is refused at seal, so the
+    // not-redistributed classification can never go unverified.
+    let dir = sealed_bundle("closure_missing", "Aarch64");
+    std::fs::remove_file(dir.join(notices_closure_file("Risc0"))).unwrap();
+    std::fs::remove_file(dir.join(MANIFEST_FILE)).ok();
+    let err = seal(&dir, "Aarch64", COMMIT).unwrap_err();
+    assert!(
+        matches!(err, EvidenceError::MissingFile { .. }),
+        "a bundle missing the target closure must be refused at seal; got {err}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_target_closure_unbound_from_lock_or_stage2_is_rejected() {
+    // Re-binding the closure to a different lock is refused (the closure could otherwise be swapped).
+    let dir = sealed_bundle("closure_lock", "Aarch64");
+    rewrite_json(&dir, &notices_closure_file("Sp1"), |v| {
+        v["lock_blake3_hex"] = serde_json::json!("f".repeat(64));
+    });
+    reseal(&dir, "Aarch64");
+    let err = import_verify(&dir).unwrap_err();
+    assert!(matches!(err, EvidenceError::Notices { .. }), "got {err}");
+    std::fs::remove_dir_all(&dir).ok();
+
+    // Re-binding to a different Stage-2 graph identity is refused.
+    let dir2 = sealed_bundle("closure_s2", "Aarch64");
+    rewrite_json(&dir2, &notices_closure_file("Sp1"), |v| {
+        v["stage2_graph_blake3_hex"] = serde_json::json!("e".repeat(64));
+    });
+    reseal(&dir2, "Aarch64");
+    let err2 = import_verify(&dir2).unwrap_err();
+    assert!(matches!(err2, EvidenceError::Notices { .. }), "got {err2}");
+    std::fs::remove_dir_all(&dir2).ok();
 }
 
 // ---- Adversarial: an unbound OPTIONAL proof-producer identity is rejected ----

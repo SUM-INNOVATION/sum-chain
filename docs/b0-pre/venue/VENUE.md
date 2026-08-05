@@ -51,6 +51,7 @@ aarch64 bundle carrying RISC Zero material is refused on import.
 | `Risc0.stage5-result.json` | **required** | **refused** |
 | `Risc0.tool-binding.json` | **required** | **refused** |
 | `Risc0` container / native / lock / lock-provenance / Stage-2 records | required | required |
+| `<Candidate>.third-party-notices.json` + `<Candidate>.target-closure.json` (both candidates) | required | required |
 
 "RISC Zero material" is exactly the three files above: everything that requires a
 natively executed RISC Zero toolchain. There is no aarch64-linux RISC Zero artifact to
@@ -58,6 +59,13 @@ install, verify, or bind, so an aarch64 bundle carries no RISC Zero tool binding
 Both candidates still contribute container and dependency-graph records on both
 architectures — those come from the pinned builder image and in-container lock
 resolution, neither of which needs a prover.
+
+Each candidate also carries a `<Candidate>.third-party-notices.json` on both architectures:
+the copyright/permission notices + license texts of every third-party crate in that
+candidate's resolved lock, collected from the crates' own files, bound to the lock, and
+required by `import-bundle` (fail-closed on any missing/incomplete/mis-bound notice set — an
+artifact whose notices are absent cannot import and therefore cannot finalize). See
+`THIRD-PARTY-LICENSES.md` §"Mechanized notice packaging".
 
 The bundle file set is compared **exactly in both directions**: an x86_64 bundle missing
 any RISC Zero file is refused as missing, and an aarch64 bundle containing any of them is

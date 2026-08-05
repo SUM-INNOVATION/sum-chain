@@ -35,3 +35,83 @@ likewise only ever avoidable OR-alternatives.
 Any future required atom or `WITH` exception beyond this list is a fresh owner decision (add it to
 `STAGE2_ALLOWED_LICENSES` — the anti-drift test keeps producer and validator in lockstep) and must
 be recorded here with its obligations before use.
+
+## Mechanized notice packaging (sealed, lock-bound, fail-closed)
+
+The "must carry the corresponding notices/license texts" handling above is no longer a manual
+obligation — it is a **sealed evidence artifact** in every per-arch bundle, produced and verified by
+`venue::third_party_notices`:
+
+- **Artifact.** Each per-arch bundle carries one `<Candidate>.third-party-notices.json` per candidate
+  (`Sp1`, `Risc0`) on **both** architectures — the same both-candidates/both-arches footprint as the
+  candidate `Cargo.lock` and Stage-2 audit it is derived from, because the redistribution obligation
+  follows the resolved graph, not the prover. It is one of the `required_files` (VENUE.md §2), so a
+  bundle missing it is refused at `seal-bundle` (exact file-set) and at `import-bundle`.
+- **Generation (producer, online phase).** `resolve_lock.sh` vendors the EXACT locked graph inside the
+  pinned builder image (`cargo vendor --locked --versioned-dirs`) and `venue-verify notices-generate`
+  collects, for **every** third-party (registry/git) crate in that candidate's lock, its declared SPDX
+  expression plus the verbatim text (and SHA-256) of every license/copyright/notice file the crate
+  ships. Path/workspace crates are first-party and recorded as such, not redistributed. **Fail closed:**
+  a registry crate that declares a license but ships no collectable notice file (and no readable
+  `license-file`) aborts generation — a missing license is never a clean notice set.
+- **Binding + enforcement (validator).** The manifest is bound to that candidate's domain-separated
+  lock hash. `import-bundle` re-derives the third-party set from the sealed `Cargo.lock` and requires
+  **exactly one entry per locked third-party crate** — no missing/extra — each either carrying its
+  license text (`crate-file` / `ratified-map`, text-vs-SHA verified) **or** classified
+  `not-redistributed` (see target-scoping below); it refuses a manifest bound to a different lock. It
+  does NOT require every locked crate to carry a notice — only those the artifact actually
+  redistributes. Because the finalization pipeline (`aggregate-bundles → import → stage1-ingest`)
+  traverses import, **an artifact whose required notices are absent, incomplete, or mis-classified
+  cannot import and therefore cannot finalize.** (This is a runtime import gate; it does not alter the
+  `b0_pre_spec_hash` surface.)
+
+The two atoms above (`Unicode-3.0`, `CDLA-Permissive-2.0`) and every MIT/Apache/BSD/ISC/… crate are
+covered uniformly by this mechanism where the crate ships its own license file. For the real graphs,
+most crates do; the remainder are handled by the two mechanisms below.
+
+### Target-scoping — notices cover only what the artifact redistributes
+
+The resolved lock is multi-platform, but a per-arch artifact only redistributes the crates **linked
+into the binary** — the NORMAL (runtime-library) dependency closure for its build target(s), not
+build-time tooling or macOS/Windows-only crates. `resolve_lock.sh` seals a **target-closure record**
+(`<Candidate>.target-closure.json`): the platform-resolved normal-dependency graph from
+`cargo metadata --filter-platform <triple>` inside the pinned image, for the venue's Linux targets
+(SP1: `x86_64-` + `aarch64-unknown-linux-gnu`; RISC Zero: `x86_64-` only), with **nodes = every lock
+package** so the closure cannot omit a locked crate. A crate outside the normal closure of the
+workspace roots — a build-only dependency (e.g. `risc0-build`'s tree) or a platform-gated one
+(`metal`→`block`, `winapi-*-pc-windows-gnu`) — is classified `not-redistributed` and carries no notice.
+
+Crucially, the classification is **not trusted from the producer**: `import-bundle` reads the sealed
+closure, independently **recomputes** the normal-dependency closure by graph reachability (full
+package identity — name, version, source — so versions are never conflated), and requires every notice
+entry's `crate-file` / `ratified-map` / `not-redistributed` classification to match exactly. The
+closure is bound to the candidate lock hash (== the Stage-2 audit's lock identity, tying it to the
+same audited graph) and its third-party node set must equal the lock's; a mis-labelled crate,
+target/graph drift, an omitted/added closure node, or an altered binding all fail closed.
+
+### Ratified per-family upstream notice map (`policy/third-party-notice-map.json`)
+
+Some crates redistributed on Linux declare a permissive SPDX license but ship **no license file**
+(normal crates.io packaging). The owner-ratified map supplies the missing text per family; `generate`
+consults it only for a no-file crate and **fails closed** if the crate is uncovered, the declared SPDX
+mismatches, or the covering family is not owner-approved. Families are one of two forms:
+
+- **Real upstream text** — the crate's actual upstream license file(s), fetched once and pinned by
+  commit + SHA-256 (e.g. `succinctlabs/sp1` covers the `sp1-*`/`slop-*` family; `Plonky3/Plonky3` the
+  `p3-*-succinct` family).
+- **Attested fallback** — for crates whose upstream ships no text at all, a per-crate
+  `CanonicalAttestation` records the exhaustive search (published tag / history / parent workspace /
+  README / source headers / crates.io), the declared SPDX, the verbatim `Cargo.toml` authors (reference
+  only — copyright is **never** synthesized), and requires **individual owner approval** (`kind`):
+  - `apache-or-branch` — the SPDX offers Apache-2.0 as an OR alternative; the canonical Apache-2.0 body
+    is carried (with the upstream `NOTICE` absence confirmed, per Apache §4(d)).
+  - `fork-lineage` — a fork whose upstream dropped the file; the sibling/parent project's **real** MIT
+    text (with its copyright) is carried.
+  - `mit-risk-acceptance` — an un-removable, un-bumpable transitive SDK dependency that declares MIT but
+    ships no copyright notice anywhere; the owner records an explicit risk acceptance and the crate's
+    crates.io ownership, and the canonical MIT body is carried. Reserved for genuinely un-fixable deps.
+
+`import-bundle` verifies the manifest's map-sourced texts are self-consistent (sha) and provenance-
+tagged; a producer/CI step (`notices-verify … <map>`) additionally re-binds every map-sourced entry
+byte-for-byte to the committed ratified map. The committed map is structurally re-validated by
+`tests/notice_map.rs`.

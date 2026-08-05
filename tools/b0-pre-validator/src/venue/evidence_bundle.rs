@@ -111,6 +111,22 @@ fn lock_prov_file(c: &str) -> String {
 fn stage2_file(c: &str) -> String {
     format!("{c}.stage2-audit.json")
 }
+/// The per-candidate third-party NOTICE manifest: the copyright/permission notices + license
+/// texts of EVERY third-party crate the candidate's resolved graph redistributes, bound to that
+/// candidate's `Cargo.lock` (see [`crate::venue::third_party_notices`]). Present for BOTH
+/// candidates on BOTH architectures, exactly like the lock and the Stage-2 audit it is derived
+/// from, because the redistribution obligation follows the resolved graph, not the prover.
+fn notices_file(c: &str) -> String {
+    format!("{c}.third-party-notices.json")
+}
+/// The sealed per-candidate TARGET-CLOSURE record: the platform-resolved normal-dependency graph
+/// (`cargo metadata --filter-platform`) the notice set was target-scoped against. `import-bundle`
+/// independently RECOMPUTES the redistributed set from it and requires every notice entry's
+/// classification to match, so the `not-redistributed` marking is never trusted. Same both-candidate
+/// / both-arch footprint as the notice manifest.
+fn notices_closure_file(c: &str) -> String {
+    format!("{c}.target-closure.json")
+}
 fn tool_binding_file(c: &str) -> String {
     format!("{c}.tool-binding.json")
 }
@@ -155,6 +171,8 @@ pub fn required_files(arch: &str) -> Vec<String> {
         v.push(lock_file(c));
         v.push(lock_prov_file(c));
         v.push(stage2_file(c));
+        v.push(notices_file(c));
+        v.push(notices_closure_file(c));
     }
     v.push(tool_binding_file("Sp1"));
     v.push(stage5_file("Sp1"));
@@ -250,6 +268,9 @@ pub struct ImportedArchBundle {
     pub lock_bindings: Vec<LockBinding>,
     pub tool_bindings: Vec<ToolBindingRecord>,
     pub stage2_reports: Vec<Stage2AuditRecord>,
+    /// The VERIFIED per-candidate third-party NOTICE manifests (complete + lock-bound). Their
+    /// presence is a finalization precondition: a bundle that cannot produce them does not import.
+    pub third_party_notices: Vec<crate::venue::third_party_notices::ThirdPartyNotices>,
     pub stage5_results: Vec<Stage5Result>,
     /// Item 6: the VERIFIED candidate lock bytes retained during import (each hash
     /// was already checked against its provenance record), so cross-arch aggregation
@@ -336,6 +357,11 @@ pub enum EvidenceError {
         candidate: String,
         error: String,
     },
+    /// A third-party NOTICE manifest was rejected (missing/incomplete/unbound/altered).
+    Notices {
+        candidate: String,
+        error: String,
+    },
     /// A tool binding record was rejected.
     Tool {
         candidate: String,
@@ -419,6 +445,9 @@ impl std::fmt::Display for EvidenceError {
             }
             EvidenceError::Stage2 { candidate, error } => {
                 write!(f, "{candidate} Stage-2 audit rejected: {error}")
+            }
+            EvidenceError::Notices { candidate, error } => {
+                write!(f, "{candidate} third-party notices rejected: {error}")
             }
             EvidenceError::Tool { candidate, error } => {
                 write!(f, "{candidate} tool binding rejected: {error}")
@@ -906,6 +935,77 @@ pub fn import_verify_mode(
         stage2_reports.push(rec);
     }
 
+    // (10b) Third-party NOTICE packaging — BOTH candidates, bound + COMPLETE (fail closed).
+    //       The sealed notice manifest must carry the copyright/permission notices + license
+    //       texts of EVERY third-party crate in the candidate's resolved lock (the same lock the
+    //       Stage-2 audit is bound to). `verify_against_lock` re-derives the required third-party
+    //       set from the sealed lock and refuses any missing / extra / empty / text-vs-sha
+    //       mismatch, and rejects a manifest bound to a different lock. Collection integrity
+    //       (that each text is the crate's OWN license file, uncollectable => refuse) is
+    //       established at generation time in the producer; here we verify completeness, binding,
+    //       and byte integrity of what was sealed. An artifact whose notices are absent or
+    //       incomplete cannot import, and therefore cannot finalize.
+    let mut notice_manifests: Vec<crate::venue::third_party_notices::ThirdPartyNotices> =
+        Vec::new();
+    for c in CANDIDATES {
+        let nf = notices_file(c);
+        let raw = read_file(dir, &nf)?;
+        let notices: crate::venue::third_party_notices::ThirdPartyNotices = parse(&nf, &raw)?;
+        if notices.candidate != c {
+            return Err(EvidenceError::Notices {
+                candidate: c.to_string(),
+                error: format!("record candidate {:?} != {c}", notices.candidate),
+            });
+        }
+        if notices.arch != arch {
+            return Err(EvidenceError::ArchBinding {
+                file: nf.clone(),
+                got: notices.arch.clone(),
+            });
+        }
+        let lock_hash = lock_bindings
+            .iter()
+            .find(|b| b.candidate == c)
+            .map(|b| b.lock_blake3_hex.clone())
+            .unwrap_or_default();
+        let lock_bytes = verified_locks
+            .iter()
+            .find(|(cand, _)| cand == c)
+            .map(|(_, b)| b.clone())
+            .unwrap_or_default();
+        let lock_str = String::from_utf8(lock_bytes).map_err(|_| EvidenceError::Notices {
+            candidate: c.to_string(),
+            error: "sealed candidate lock is not UTF-8".to_string(),
+        })?;
+        notices
+            .verify_against_lock(&lock_hash, &lock_str)
+            .map_err(|e| EvidenceError::Notices {
+                candidate: c.to_string(),
+                error: e.to_string(),
+            })?;
+        // (10c) Independently RECOMPUTE the target closure + require every entry's redistribution
+        //       classification to match — the `not-redistributed` marking is never trusted from the
+        //       producer. Bound to the candidate lock hash (which fully determines the resolved
+        //       graph) via the Stage-2 record's own `lock_blake3_hex`, tying the closure to the same
+        //       audited graph; and separately the closure's third-party node set must EQUAL the
+        //       lock's, so no locked crate can be hidden. Target / feature / graph drift is rejected.
+        let stage2_graph = stage2_reports
+            .iter()
+            .find(|r| r.candidate == c)
+            .map(|r| r.lock_blake3_hex.clone())
+            .unwrap_or_default();
+        let cf = notices_closure_file(c);
+        let closure: crate::venue::third_party_notices::TargetClosure =
+            parse(&cf, &read_file(dir, &cf)?)?;
+        notices
+            .verify_classification(&closure, &lock_str, &lock_hash, &stage2_graph)
+            .map_err(|e| EvidenceError::Notices {
+                candidate: c.to_string(),
+                error: e.to_string(),
+            })?;
+        notice_manifests.push(notices);
+    }
+
     // (11) tool bindings — verified + bound. SP1 on both architectures; RISC Zero on
     //      x86_64 ONLY (VENUE.md §2: there is no aarch64 RISC Zero toolchain to install
     //      and bind, so an aarch64 bundle carries no RISC Zero tool binding at all).
@@ -1167,6 +1267,7 @@ pub fn import_verify_mode(
         lock_bindings,
         tool_bindings,
         stage2_reports,
+        third_party_notices: notice_manifests,
         stage5_results,
         verified_locks,
         content_hash: manifest.bundle_content_hash,
@@ -1339,6 +1440,45 @@ pub fn write_test_only_bundle_dir(dir: &Path, arch: &str) -> Result<(), String> 
         w(
             &stage2_file(c),
             &serde_json::to_vec_pretty(&stage2).unwrap(),
+        )?;
+        // Third-party notices + the sealed target-closure. The synthetic fixture lock carries no
+        // `[[package]]` rows, so the third-party set is empty and the closure has only a synthetic
+        // root; the REAL graph/closure paths are exercised by `third_party_notices` unit tests and
+        // the producer. Import still verifies both are present, bound, and internally consistent.
+        let closure = crate::venue::third_party_notices::TargetClosure {
+            schema_version: crate::venue::third_party_notices::TARGET_CLOSURE_SCHEMA_VERSION,
+            candidate: c.to_string(),
+            arch: arch.to_string(),
+            venue_targets: vec!["x86_64-unknown-linux-gnu".to_string()],
+            features: vec![],
+            lock_blake3_hex: lock_hash.clone(),
+            stage2_graph_blake3_hex: lock_hash.clone(),
+            roots: vec!["synthetic-root\u{1f}0.0.0\u{1f}".to_string()],
+            nodes: vec![crate::venue::third_party_notices::ClosureNode {
+                name: "synthetic-root".to_string(),
+                version: "0.0.0".to_string(),
+                source: String::new(),
+                checksum: None,
+                normal_deps: vec![],
+            }],
+        };
+        let notices = crate::venue::third_party_notices::generate(
+            c,
+            arch,
+            &lock_hash,
+            std::str::from_utf8(&lock_bytes).unwrap(),
+            std::path::Path::new("/nonexistent-vendor-root-empty-graph"),
+            None,
+            Some(&closure),
+        )
+        .unwrap();
+        w(
+            &notices_file(c),
+            &serde_json::to_vec_pretty(&notices).unwrap(),
+        )?;
+        w(
+            &notices_closure_file(c),
+            &serde_json::to_vec_pretty(&closure).unwrap(),
         )?;
         let tools: Vec<(&str, &str)> = if c == "Sp1" {
             vec![("sp1-verifier", "6.3.1")]

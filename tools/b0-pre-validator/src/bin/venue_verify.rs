@@ -61,6 +61,7 @@ use b0_pre_validator::venue::oci_layout::{
 };
 use b0_pre_validator::venue::stage4::{enforce_stage4_arch, Extractor};
 use b0_pre_validator::venue::stage5::{self, Stage5Result};
+use b0_pre_validator::venue::third_party_notices;
 use b0_pre_validator::venue::tool_install::{install_and_bind, DeclaredArtifact, InstallMode};
 
 fn read(path: &str) -> Result<Vec<u8>, String> {
@@ -373,6 +374,130 @@ fn aggregate_arches(x86_dir: &str, arm_dir: &str, out_dir: &str) -> Result<Strin
     write("risc0-verifier-material.json", &agg.risc0_extractor_json)?;
     Ok(format!(
         "cross-architecture aggregate written to {out_dir} (RISC Zero material sourced from x86_64)"
+    ))
+}
+
+/// Generate the per-candidate third-party NOTICE manifest from the sealed candidate lock + a
+/// materialized crate-source (`cargo vendor`) root. Fails closed on any registry crate whose
+/// notice is uncollectable, and refuses to overwrite an existing output.
+#[allow(clippy::too_many_arguments)]
+fn notices_generate(
+    candidate: &str,
+    arch: &str,
+    lock_blake3_hex: &str,
+    lock_path: &str,
+    vendor_root: &str,
+    out_path: &str,
+    map_path: Option<&str>,
+    scope_path: Option<&str>,
+) -> Result<String, String> {
+    let candidate = match candidate {
+        "Sp1" | "Risc0" => candidate,
+        other => return Err(format!("candidate must be Sp1|Risc0, got {other:?}")),
+    };
+    let arch = schema_arch(arch)?;
+    let lock = read_str(lock_path)?;
+    if std::path::Path::new(out_path).exists() {
+        return Err(format!("refusing to overwrite existing {out_path}"));
+    }
+    let map = match map_path {
+        Some(p) => Some(
+            third_party_notices::RatifiedNoticeMap::load(&read_str(p)?)
+                .map_err(|e| e.to_string())?,
+        ),
+        None => None,
+    };
+    // Optional target-scoping: the sealed `TargetClosure` record (the platform-resolved normal-dep
+    // graph). generate recomputes the redistributed set from it (full package identity); a crate not
+    // in the closure carries no notice. import-bundle re-verifies the classification against it.
+    let closure = match scope_path {
+        Some(p) => Some(
+            serde_json::from_str::<third_party_notices::TargetClosure>(&read_str(p)?)
+                .map_err(|e| format!("bad target-closure file: {e}"))?,
+        ),
+        None => None,
+    };
+    let notices = third_party_notices::generate(
+        candidate,
+        arch,
+        lock_blake3_hex,
+        &lock,
+        std::path::Path::new(vendor_root),
+        map.as_ref(),
+        closure.as_ref(),
+    )
+    .map_err(|e| e.to_string())?;
+    let json =
+        serde_json::to_vec_pretty(&notices).map_err(|e| format!("serialize notices: {e}"))?;
+    std::fs::write(out_path, json).map_err(|e| format!("write {out_path}: {e}"))?;
+    Ok(format!(
+        "third-party notices generated for {candidate} ({arch}): {} third-party crate(s), {} first-party, content_blake3={} -> {out_path}",
+        notices.entries.len(),
+        notices.first_party.len(),
+        notices.content_blake3()
+    ))
+}
+
+/// Independently verify a NOTICE manifest's redistribution classification against a sealed
+/// target-closure record: recompute the normal-dependency closure and require every entry's
+/// classification to match (the `not-redistributed` marking is never trusted). Producer/CI + import.
+fn notices_verify_classification(
+    notices_path: &str,
+    closure_path: &str,
+    lock_path: &str,
+    lock_blake3_hex: &str,
+    stage2_graph_blake3_hex: &str,
+) -> Result<String, String> {
+    let lock = read_str(lock_path)?;
+    let notices: third_party_notices::ThirdPartyNotices =
+        serde_json::from_str(&read_str(notices_path)?).map_err(|e| format!("bad notices: {e}"))?;
+    let closure: third_party_notices::TargetClosure =
+        serde_json::from_str(&read_str(closure_path)?).map_err(|e| format!("bad closure: {e}"))?;
+    notices
+        .verify_classification(&closure, &lock, lock_blake3_hex, stage2_graph_blake3_hex)
+        .map_err(|e| e.to_string())?;
+    let redist = closure.redistributed().len();
+    Ok(format!(
+        "classification verified for {} ({}): {redist} redistributed of {} entries, closure bound to lock {lock_blake3_hex}",
+        notices.candidate,
+        notices.arch,
+        notices.entries.len()
+    ))
+}
+
+/// Verify a third-party NOTICE manifest is well-formed, bound to the given lock, and COVERS the
+/// lock's third-party set exactly (fail closed). Standalone check for the producer cross-verify.
+fn notices_verify(
+    lock_blake3_hex: &str,
+    lock_path: &str,
+    notices_path: &str,
+    map_path: Option<&str>,
+) -> Result<String, String> {
+    let lock = read_str(lock_path)?;
+    let notices: third_party_notices::ThirdPartyNotices =
+        serde_json::from_str(&read_str(notices_path)?).map_err(|e| format!("bad notices: {e}"))?;
+    notices
+        .verify_against_lock(lock_blake3_hex, &lock)
+        .map_err(|e| e.to_string())?;
+    let map_note = match map_path {
+        Some(p) => {
+            let map = third_party_notices::RatifiedNoticeMap::load(&read_str(p)?)
+                .map_err(|e| e.to_string())?;
+            notices
+                .verify_map_sources(&map)
+                .map_err(|e| e.to_string())?;
+            format!(
+                ", map-sourced entries bound to ratified map {}",
+                map.policy_version
+            )
+        }
+        None => String::new(),
+    };
+    Ok(format!(
+        "third-party notices verified for {} ({}): {} crate(s) covered, bound to lock {lock_blake3_hex}{map_note}",
+        notices.candidate,
+        notices.arch,
+        notices.entries.len()
     ))
 }
 
@@ -693,6 +818,33 @@ fn run() -> Result<String, String> {
             verify_tool(mode, declared, artifact, installed)
         }
         [cmd, graph, adv, lic, out] if cmd == "stage2-audit" => stage2_audit(graph, adv, lic, out),
+        [cmd, cand, arch, lockhash, lock, vendor, out] if cmd == "notices-generate" => {
+            notices_generate(cand, arch, lockhash, lock, vendor, out, None, None)
+        }
+        [cmd, cand, arch, lockhash, lock, vendor, out, map] if cmd == "notices-generate" => {
+            notices_generate(cand, arch, lockhash, lock, vendor, out, Some(map), None)
+        }
+        [cmd, cand, arch, lockhash, lock, vendor, out, map, scope] if cmd == "notices-generate" => {
+            notices_generate(
+                cand,
+                arch,
+                lockhash,
+                lock,
+                vendor,
+                out,
+                Some(map),
+                Some(scope),
+            )
+        }
+        [cmd, lockhash, lock, notices] if cmd == "notices-verify" => {
+            notices_verify(lockhash, lock, notices, None)
+        }
+        [cmd, lockhash, lock, notices, map] if cmd == "notices-verify" => {
+            notices_verify(lockhash, lock, notices, Some(map))
+        }
+        [cmd, notices, closure, lock, lockhash, s2] if cmd == "notices-verify-classification" => {
+            notices_verify_classification(notices, closure, lock, lockhash, s2)
+        }
         [cmd, params, metadata, adv, cmdlog, out] if cmd == "stage2-generate" => {
             stage2_generate(params, metadata, adv, cmdlog, out, None)
         }
@@ -728,7 +880,8 @@ fn run() -> Result<String, String> {
              provisioned-tree-digest|pin-contract-check|content-store|\
              prover-archive-check|smoke-attest-check|smoke-source-check|smoke-substitute|\
              lock-hash|verify-lock|\
-             verify-tool|stage2-audit|stage2-generate|stage2-record|stage4-guard|verify-stage5|\
+             verify-tool|stage2-audit|stage2-generate|stage2-record|\
+             notices-generate|notices-verify|stage4-guard|verify-stage5|\
              stage5-generate|import-arch|aggregate-arches|seal-bundle|seal-bundle-test-only|\
              import-bundle|import-bundle-test-only|\
              aggregate-bundles|emit-test-only-bundle> ..."
