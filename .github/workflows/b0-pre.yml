@@ -142,6 +142,15 @@ jobs:
           [ "$rc" -eq 0 ] || { echo "::error::pin cargo-audit/advisory contract test exited $rc (124=timeout)"; exit 1; }
           grep -q '^PIN_CARGO_AUDIT_ADVDB_PASS$' /tmp/pin.out \
             || { echo "::error::pin contract marker PIN_CARGO_AUDIT_ADVDB_PASS absent (skipped or failed)"; exit 1; }
+          # prover-archive AUTHORITY: download the real immutable prover archives and independently
+          # verify (whole-archive sha256, safe complete enumeration, complete member set, each
+          # member size+sha256) via the single verified-extraction impl; every archive sha + member
+          # sha/size one-char mutation refused. Closes the archive_sha256/member_sha256 authority gap.
+          timeout 600 bash tools/b0-pre-candidates/scripts/tests/pin_prover_archive_authority.test.sh 2>&1 | tee /tmp/pa.out
+          rc=${PIPESTATUS[0]}
+          [ "$rc" -eq 0 ] || { echo "::error::prover-archive authority test exited $rc (124=timeout)"; exit 1; }
+          grep -q '^PIN_PROVER_ARCHIVE_AUTHORITY_PASS$' /tmp/pa.out \
+            || { echo "::error::prover-archive authority marker PIN_PROVER_ARCHIVE_AUTHORITY_PASS absent (skipped or failed)"; exit 1; }
           timeout 600 bash tools/b0-pre-candidates/scripts/tests/builder_capability.test.sh 2>&1 | tee /tmp/cap.out
           rc=${PIPESTATUS[0]}
           [ "$rc" -eq 0 ] || { echo "::error::builder capability preflight test exited $rc (124=timeout)"; exit 1; }

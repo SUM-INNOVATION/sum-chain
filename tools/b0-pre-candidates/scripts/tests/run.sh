@@ -13,7 +13,7 @@ rc=0
 echo "== bash -n (syntax) =="
 for s in lib.sh verify_pins.sh run_authoritative.sh build_container.sh preflight_venue.sh smoke.sh provision_prover_toolchain.sh \
          tool_identities.sh resolve_lock.sh extract_material.sh verifier_fixtures.sh prove_fixture.sh \
-         tests/disk_free_gib.test.sh tests/pin_schema.test.sh tests/pin_cargo_audit_advdb.test.sh tests/pin_prover_archives.test.sh tests/source_authority.test.sh tests/blake3_cluster_pin.test.sh tests/risc0_harness_pins.test.sh \
+         tests/disk_free_gib.test.sh tests/pin_schema.test.sh tests/pin_cargo_audit_advdb.test.sh tests/pin_prover_archives.test.sh tests/pin_prover_archive_authority.test.sh tests/source_authority.test.sh tests/blake3_cluster_pin.test.sh tests/risc0_harness_pins.test.sh \
          tests/smoke_guards.test.sh tests/smoke_orchestration.test.sh tests/verified_extraction.test.sh tests/provisioning_recipe.test.sh tests/cargo_audit_global_cache.test.sh \
          tests/pin_url_policy.test.sh tests/oci_platform.test.sh tests/tool_identity_arch.test.sh \
          tests/apt_pins.test.sh tests/tool_identity_threading.test.sh tests/oci_daemon_bridge.test.sh \
@@ -58,8 +58,11 @@ bash "$HERE/pin_cargo_audit_advdb.test.sh"   || rc=1
 bash "$HERE/blake3_cluster_pin.test.sh"      || rc=1
 # RISC0 harness MSRV exact-pin policy: exact pins, rust-version contract, no resolver fallback.
 bash "$HERE/risc0_harness_pins.test.sh"       || rc=1
-# prover-archive pin block: positive + full negative matrix (no Docker/network).
+# prover-archive pin block: positive + full negative matrix + tool-identity cross-check (no Docker/network).
 bash "$HERE/pin_prover_archives.test.sh"  || rc=1
+# prover-archive AUTHORITY: real archives through the single verified-extraction impl; every archive
+# sha + member sha/size one-char mutation refused (needs network; SKIPs unless B0PRE_PIN_NET_IT=1).
+bash "$HERE/pin_prover_archive_authority.test.sh"  || rc=1
 # TEST_ONLY smoke source-authority guards + smoke/authoritative schema split (no Docker/network).
 bash "$HERE/smoke_guards.test.sh"      || rc=1
 # TEST_ONLY smoke post-build orchestration: source guard, failure propagation, output isolation,

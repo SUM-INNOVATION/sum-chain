@@ -18,10 +18,16 @@
 #     fails without executing either image (F5).
 #   * download hosts are matched EXACTLY, over https, on both the initial and the
 #     effective (post-redirect) URL (F6, F7).
+#   * each prover archive is DOWNLOADED and independently verified through the single
+#     verified-extraction implementation (provision_prover_toolchain.sh): whole-archive
+#     sha256, safe complete enumeration, complete member set, and every member's byte-size +
+#     sha256 — and its archive_sha256 is cross-bound to the primary-source-verified
+#     tool_identity checksum for the same url. member_sha256/archive_sha256 no longer rely on
+#     a shape check plus in-image trust; they now have an independently verified duplicate.
 #
 # Usage: verify_pins.sh <proposed-pins.json>
 # Requires: python3, curl, a sha256 tool (sha256sum/shasum), tar (cargo-audit .crate lock
-# extraction), docker (base index resolution).
+# extraction + prover archive member extraction), docker (base index resolution).
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=lib.sh
@@ -389,6 +395,72 @@ if [ "$seen_cr_x86" = 1 ] && [ "$seen_r0_x86" = 1 ]; then
   [ "$risczero_archive_id" = "$r0vm_archive_id" ] \
     && pass "prover_archives: cargo-prove x86_64+aarch64, cargo-risczero x86_64, r0vm x86_64 (cargo-risczero + r0vm share one archive); shapes + delivery + no-rzup verified" \
     || bad "prover_archives: cargo-risczero ($risczero_archive_id) and r0vm ($r0vm_archive_id) are NOT the same shared archive"
+fi
+
+# ---- (5b) prover archive AUTHORITY: download each immutable archive and INDEPENDENTLY verify it
+# through the SINGLE verified-extraction implementation (provision_prover_toolchain.sh): whole-
+# archive sha256 BEFORE reading, safe COMPLETE enumeration, complete-member-set (no undeclared
+# member, no missing member), and each declared member's byte-size + sha256. Also cross-bind each
+# archive_sha256 to the independently primary-source-verified tool_identity checksum for the SAME
+# url (the risc0 archive is shared across risc0-zkvm + risc0-groth16). This closes the
+# archive_sha256/member_sha256 authority gap: before this, those pins had NO independently verified
+# duplicate — they were shape-checked here, then trusted to the in-image extractor at build time.
+if [ "$pa_count" -gt 0 ]; then
+  ptmp="$(mktemp -d)"
+  i=0
+  while [ "$i" -lt "$pa_count" ]; do
+    a_name="$(pget "prover_archives[$i].archive_name")"
+    a_arch="$(pget "prover_archives[$i].arch")"
+    a_url="$(pget "prover_archives[$i].archive_url")"
+    a_sha="$(pget "prover_archives[$i].archive_sha256")"
+    if [ -z "$a_url" ]; then bad "prover_archives[$i] ($a_name/$a_arch) archive_url missing — cannot independently verify"; i=$((i + 1)); continue; fi
+    # (a) cross-bind archive_sha256 to the tool_identity checksum for the SAME url (independent duplicate)
+    ti_sha="$(python3 - "$PINS" "$a_url" <<'PY' 2>/dev/null || true
+import json, sys
+d = json.load(open(sys.argv[1])); url = sys.argv[2]
+hits = {t.get("checksum_hex", "") for t in d.get("tool_identities", []) if t.get("artifact_identity") == url}
+print(next(iter(hits)) if len(hits) == 1 else "")
+PY
+)"
+    if [ -z "$ti_sha" ]; then
+      bad "prover_archives[$i] ($a_name/$a_arch) archive_url has no unique tool_identity cross-binding: $a_url"; i=$((i + 1)); continue
+    elif [ "$ti_sha" != "$a_sha" ]; then
+      bad "prover_archives[$i] ($a_name/$a_arch) archive_sha256 ($a_sha) != tool_identity checksum ($ti_sha) for the same url"; i=$((i + 1)); continue
+    fi
+    # (b) build the COMPLETE member spec set (member_path:sha256:size:delivery) from the pins
+    specs=""
+    m_count="$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["prover_archives"]['"$i"'].get("members",[])))' "$PINS" 2>/dev/null || echo 0)"
+    spec_ok=1
+    j=0
+    while [ "$j" -lt "$m_count" ]; do
+      mp="$(pget "prover_archives[$i].members[$j].member_path")"
+      ms="$(pget "prover_archives[$i].members[$j].member_sha256")"
+      mz="$(pget "prover_archives[$i].members[$j].member_size_bytes")"
+      md="$(pget "prover_archives[$i].members[$j].delivery")"
+      case "$md" in
+        isolated-path)    dv="isolated" ;;
+        risc0-server-path) dv="risc0server" ;;
+        *) bad "prover_archives[$i].members[$j] ($mp) unknown delivery '$md'"; spec_ok=0; dv="isolated" ;;
+      esac
+      specs="$specs $mp:$ms:$mz:$dv"
+      j=$((j + 1))
+    done
+    if [ "$m_count" -lt 1 ] || [ "$spec_ok" -ne 1 ]; then bad "prover_archives[$i] ($a_name/$a_arch) has no usable member spec set"; i=$((i + 1)); continue; fi
+    # (c) download + INDEPENDENTLY verify via the single verified-extraction implementation (temp
+    # placement, discarded). provision_prover_toolchain.sh `die`s (exit 4) on ANY mismatch; run as a
+    # child process so its failure is captured as a non-zero rc here rather than aborting verify_pins.
+    af="$ptmp/a$i.tgz"
+    if ! curl -fsSL --max-redirs 5 "$a_url" -o "$af"; then bad "prover_archives[$i] ($a_name/$a_arch) archive not reachable: $a_url"; i=$((i + 1)); continue; fi
+    # shellcheck disable=SC2086  # $specs is an intentional word-split list of member specs
+    if bash "$HERE/provision_prover_toolchain.sh" "$af" "$a_sha" "$ptmp/iso$i" "$ptmp/r0$i" $specs >/dev/null 2>"$ptmp/e$i"; then
+      pass "prover_archives[$i] ($a_name/$a_arch) archive sha256 + $m_count member(s) independently verified via the single verified-extraction implementation; archive cross-bound to the tool_identity checksum"
+    else
+      bad "prover_archives[$i] ($a_name/$a_arch) independent archive/member verification FAILED: $(head -1 "$ptmp/e$i" 2>/dev/null)"
+    fi
+    rm -f "$af"
+    i=$((i + 1))
+  done
+  rm -rf "$ptmp"
 fi
 
 # ---- v4 capability blocks: guest toolchains + Groth16 circuit + OCI backends -----------------

@@ -71,6 +71,28 @@ build 'pa[2]["members"][0]["executable_name"]="rzup"' "$T/m.json";          expe
 build 'pa[2]["members"].pop(1); pa.append({"archive_name":"r0vm-only","arch":"x86_64","archive_url":"","archive_sha256":"a"*64,"members":[{"executable_name":"r0vm","member_path":"r0vm","member_sha256":R0,"member_size_bytes":15000000,"version_argv":"r0vm --version","version_output":"risc0-r0vm 3.0.5","expected_release_commit":"3.0.5","delivery":"risc0-server-path"}]})' "$T/m.json"; expect_fail "cargo-risczero + r0vm not sharing one archive refused" "NOT the same shared archive"
 build 'pa.pop(1)' "$T/m.json";                                              expect_fail "missing cargo-prove aarch64 refused" "no cargo-prove for aarch64"
 
+# ---- (5b) tool-identity cross-check (no network — a cross-check failure short-circuits BEFORE any
+# archive download, so these run offline). The prover archive_sha256 must equal the independently
+# primary-source-verified tool_identity.checksum_hex for the SAME artifact url.
+xbuild(){ # writes prover_archives + tool_identities sharing one url; $1 mutates, $2 = out path
+  MUT="$1" OUT="$2" python3 - <<'PY'
+import json, os
+URL = "https://github.com/succinctlabs/sp1/releases/download/v6.3.1/cargo_prove_v6.3.1_linux_amd64.tar.gz"
+SHA = "c9d6ee7667fa9e0a2302324a6bb0295c55f6acf0e17a242ad11ee45767bb08df"
+pa = [{"archive_name":"sp1-prover","arch":"x86_64","archive_url":URL,"archive_sha256":SHA,
+       "members":[{"executable_name":"cargo-prove","member_path":"cargo-prove","member_sha256":"a"*64,
+                   "member_size_bytes":1,"version_argv":"cargo-prove prove --version",
+                   "version_output":"cargo-prove sp1 (8252c29 x)","expected_release_commit":"8252c29","delivery":"isolated-path"}]}]
+ti = [{"name":"sp1-verifier","version":"6.3.1","arch":"x86_64","artifact_identity":URL,
+       "checksum_algorithm":"sha256","checksum_hex":SHA,"install_entrypoint":"cargo-prove"}]
+mut = os.environ["MUT"]
+if mut: exec(mut)
+json.dump({"prover_archives":pa,"tool_identities":ti}, open(os.environ["OUT"],"w"))
+PY
+}
+xbuild 'pa[0]["archive_sha256"]="b"*64' "$T/m.json";                        expect_fail "prover archive_sha256 != tool_identity checksum refused" "!= tool_identity checksum"
+xbuild 'pa[0]["archive_url"]="https://github.com/x/y/releases/download/v1/other.tgz"' "$T/m.json"; expect_fail "prover archive_url with no matching tool_identity refused" "no unique tool_identity cross-binding"
+
 echo "----"
 if [ "$F" = 0 ]; then echo "PIN_PROVER_ARCHIVES_PASS"; echo "pin_prover_archives: ALL TESTS PASS"; exit 0
 else echo "pin_prover_archives: FAILURE(S)" >&2; exit 1; fi
