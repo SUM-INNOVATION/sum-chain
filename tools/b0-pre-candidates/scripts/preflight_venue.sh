@@ -19,12 +19,18 @@
 # preflight is NOT authoritative venue readiness. Non-zero = a readiness check
 # failed (or a fabricated venue artifact leaked in).
 #
-# Usage: preflight_venue.sh [--deep]
+# Usage: preflight_venue.sh [--deep] [--mode=preregistration|measurement]
 #   --deep  additionally run the cargo-backed OFFLINE proofs: the container-context
 #           staging test (proves the staged guest graph resolves under `cargo
 #           metadata --offline`) and the guest-core official-workload acceptance
 #           example. Needs the validator + guest-core deps already fetched; if
 #           `cargo` is absent the deep proofs are SKIPPED (not failed) with a note.
+#   --mode  lifecycle phase (default: preregistration).
+#           preregistration = the real b0_pre_spec_hash is NOT written yet
+#             (committed artifact not_finalizable, no spec-hash sidecar).
+#           measurement     = the spec hash is merged (committed artifact
+#             finalizable, b0-pre-protocol-v1.json.hash == the merged hash);
+#             --deep then emits the MATERIALIZED official guest inputs.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
@@ -32,11 +38,22 @@ REPO="$(cd "$ROOT/../.." && pwd)"
 DOCS="$REPO/docs/b0-pre"
 VAL="$ROOT/../b0-pre-validator/Cargo.toml"
 
+# The real, merged b0_pre_spec_hash (measurement mode binds to EXACTLY this).
+MERGED_SPEC_HASH="201cfcb80e94a5a7845dc3380cde32171d40f325ae2bacde9547f3c0da3c4df3"
+
 DEEP=0
-case "${1:-}" in
-  --deep) DEEP=1 ;;
-  "") ;;
-  *) printf 'usage: preflight_venue.sh [--deep]\n' >&2; exit 2 ;;
+MODE=preregistration
+for arg in "$@"; do
+  case "$arg" in
+    --deep) DEEP=1 ;;
+    --mode=*) MODE="${arg#--mode=}" ;;
+    --mode) printf 'preflight_venue.sh: use --mode=<preregistration|measurement>\n' >&2; exit 2 ;;
+    *) printf 'usage: preflight_venue.sh [--deep] [--mode=preregistration|measurement]\n' >&2; exit 2 ;;
+  esac
+done
+case "$MODE" in
+  preregistration|measurement) ;;
+  *) printf 'preflight_venue.sh: --mode must be preregistration|measurement (got %s)\n' "$MODE" >&2; exit 2 ;;
 esac
 
 fail=0
@@ -154,18 +171,17 @@ for cand in sp1 risc0; do
 done
 
 # ---------------------------------------------------------------------------
-hdr "3. PROTOCOL BOUNDARY (not_finalizable; zero fabricated venue artifacts)"
+hdr "3. PROTOCOL BOUNDARY (lifecycle mode: $MODE)"
 check "finalization_readiness.sh: artifact internally consistent" \
       "finalization_readiness.sh reported an inconsistency" \
       bash "$ROOT/../b0-pre-validator/scripts/finalization_readiness.sh"
-check "protocol artifact state = not_finalizable" \
-      "protocol artifact is not not_finalizable" \
-      grep -q '"state": "not_finalizable"' "$DOCS/protocol/b0-pre-protocol-v1.json"
-if [ -e "$DOCS/protocol/b0-pre-protocol-v1.json.hash" ] || [ -e "$DOCS/protocol/b0-pre-protocol-v1.hash" ]; then
-  bad "a protocol .hash exists (the real b0_pre_spec_hash must NOT be written yet)"
-else
-  pass "no protocol .hash written (b0_pre_spec_hash stays blocked)"
-fi
+# Single-source-of-truth lifecycle guard (lib.sh). Run it in a SUBSHELL (bash -c) so
+# its fail-closed `die` (exit 2) is reported as a preflight FAIL, never a preflight
+# abort; the guard enforces the mode-specific committed-state invariant.
+check "lifecycle guard ($MODE) matches the committed protocol state" \
+      "lifecycle guard ($MODE) rejected the committed protocol state" \
+      bash -c '. "$1" && b0pre_lifecycle_guard "$2" "$3" "$4"' _ \
+        "$HERE/lib.sh" "$MODE" "$DOCS" "$MERGED_SPEC_HASH"
 
 # ---------------------------------------------------------------------------
 hdr "4. FAIL-CLOSED OFF-VENUE (no venue => no fabricated success)"
@@ -194,11 +210,20 @@ if [ "$DEEP" = 1 ]; then
     check "container_context_staging test (staged graph resolves under cargo --offline)" \
           "container_context_staging test failed" \
           cargo test --locked --manifest-path "$VAL" --test container_context_staging
-    check "guest-core ACCEPTS both official statements + emits input blobs (no proof)" \
-          "guest-core official-workload acceptance example failed" \
-          cargo run --quiet --manifest-path "$ROOT/guest-core/Cargo.toml" \
-            --example emit_official_guest_input -- \
-            "$DOCS/fixtures/workload/official.json" "$stage_root/guestin"
+    if [ "$MODE" = measurement ]; then
+      check "guest-core emits MATERIALIZED official inputs bound to the merged spec hash" \
+            "guest-core measurement-mode emission (materialize_final) failed" \
+            cargo run --quiet --manifest-path "$ROOT/guest-core/Cargo.toml" \
+              --example emit_official_guest_input -- \
+              --measurement "$MERGED_SPEC_HASH" \
+              "$DOCS/fixtures/workload/official.json" "$stage_root/guestin"
+    else
+      check "guest-core ACCEPTS both official statements + emits input blobs (no proof)" \
+            "guest-core official-workload acceptance example failed" \
+            cargo run --quiet --manifest-path "$ROOT/guest-core/Cargo.toml" \
+              --example emit_official_guest_input -- \
+              "$DOCS/fixtures/workload/official.json" "$stage_root/guestin"
+    fi
   else
     skip "deep cargo proofs (cargo not on PATH)"
   fi

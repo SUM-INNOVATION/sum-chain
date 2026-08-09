@@ -1098,3 +1098,57 @@ assert_no_rolling_apt_sources() {
   fi
   return 0
 }
+
+# Lifecycle-mode boundary guard for the committed protocol artifact (read-only, no
+# network). The two frozen lifecycle phases have OPPOSITE invariants and this splits
+# them EXPLICITLY so neither can be run against the wrong repository state:
+#
+#   * preregistration : the real b0_pre_spec_hash must NOT exist yet — the committed
+#                       artifact is `not_finalizable` and NO spec-hash sidecar
+#                       (`b0-pre-protocol-v1.json.hash` or the legacy `.hash`) exists.
+#   * measurement     : the spec hash IS merged — the committed artifact is
+#                       `finalizable` AND the committed `b0-pre-protocol-v1.json.hash`
+#                       equals EXACTLY <expected_spec_hash> (64 lowercase hex).
+#
+# die (exit 2) with a precise REFUSED on any mismatch; prints a one-line PASS note
+# otherwise. <docs_dir> is the `docs/b0-pre` root so the guard is unit-testable
+# against fabricated fixture trees without the live repository.
+# Usage: b0pre_lifecycle_guard <preregistration|measurement> <docs_dir> [<expected_spec_hash>]
+b0pre_lifecycle_guard() {
+  local mode="${1:-}" docs="${2:-}" want_hash="${3:-}"
+  [ -n "$mode" ] && [ -n "$docs" ] || die "b0pre_lifecycle_guard: usage <preregistration|measurement> <docs_dir> [<expected_spec_hash>]"
+  local art="$docs/protocol/b0-pre-protocol-v1.json"
+  local hashfile="$docs/protocol/b0-pre-protocol-v1.json.hash"
+  local legacy="$docs/protocol/b0-pre-protocol-v1.hash"
+  [ -f "$art" ] || die "lifecycle guard: committed artifact not found at $art"
+  case "$mode" in
+    preregistration)
+      grep -q '"state": "not_finalizable"' "$art" \
+        || die "preregistration: committed artifact must be not_finalizable"
+      if [ -e "$hashfile" ] || [ -e "$legacy" ]; then
+        die "preregistration: a spec-hash sidecar exists (b0_pre_spec_hash must NOT be written yet)"
+      fi
+      note "lifecycle: preregistration OK — not_finalizable, no spec-hash sidecar"
+      ;;
+    measurement)
+      [ -n "$want_hash" ] || die "measurement: <expected_spec_hash> is required"
+      case "$want_hash" in
+        *[!0-9a-f]* | "") die "measurement: expected spec hash must be lowercase hex" ;;
+      esac
+      [ "${#want_hash}" -eq 64 ] || die "measurement: expected spec hash must be 64 hex chars"
+      grep -q '"state": "finalizable"' "$art" \
+        || die "measurement: committed artifact must be finalizable"
+      if grep -q '"state": "not_finalizable"' "$art"; then
+        die "measurement: committed artifact must not carry state not_finalizable"
+      fi
+      [ -f "$hashfile" ] || die "measurement: committed spec-hash sidecar $hashfile is required"
+      local got; got="$(tr -d '[:space:]' < "$hashfile")"
+      [ "$got" = "$want_hash" ] \
+        || die "measurement: committed b0_pre_spec_hash '$got' != expected '$want_hash'"
+      note "lifecycle: measurement OK — finalizable, b0_pre_spec_hash $want_hash"
+      ;;
+    *)
+      die "lifecycle guard: mode must be preregistration|measurement (got '$mode')"
+      ;;
+  esac
+}

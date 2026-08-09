@@ -18,7 +18,7 @@ for s in lib.sh verify_pins.sh run_authoritative.sh build_container.sh preflight
          tests/pin_url_policy.test.sh tests/oci_platform.test.sh tests/tool_identity_arch.test.sh \
          tests/apt_pins.test.sh tests/tool_identity_threading.test.sh tests/oci_daemon_bridge.test.sh \
          tests/build_reproducibility.test.sh tests/runnable_ref_sidecar.test.sh tests/rustup_components.test.sh \
-         tests/builder_capability.test.sh tests/e2e_v2_produce_chain.test.sh tests/run.sh; do
+         tests/builder_capability.test.sh tests/e2e_v2_produce_chain.test.sh tests/lifecycle_mode.test.sh tests/run.sh; do
   f="$SCRIPTS/$s"
   [ -f "$f" ] || continue
   if bash -n "$f"; then echo "  ok  $s"; else echo "  FAIL $s"; rc=1; fi
@@ -38,7 +38,8 @@ if command -v shellcheck >/dev/null 2>&1; then
       "$SCRIPTS/tests/oci_platform.test.sh" "$SCRIPTS/tests/tool_identity_arch.test.sh" \
       "$SCRIPTS/tests/apt_pins.test.sh" "$SCRIPTS/tests/tool_identity_threading.test.sh" \
       "$SCRIPTS/tests/oci_daemon_bridge.test.sh" "$SCRIPTS/tests/build_reproducibility.test.sh" \
-      "$SCRIPTS/tests/runnable_ref_sidecar.test.sh" "$SCRIPTS/tests/rustup_components.test.sh" "$SCRIPTS/tests/run.sh"; then
+      "$SCRIPTS/tests/runnable_ref_sidecar.test.sh" "$SCRIPTS/tests/rustup_components.test.sh" \
+      "$SCRIPTS/tests/lifecycle_mode.test.sh" "$SCRIPTS/tests/run.sh"; then
     echo "  ok  no error-level findings"
   else
     echo "  FAIL shellcheck error-level findings"; rc=1
@@ -50,6 +51,9 @@ fi
 echo "== unit tests =="
 bash "$HERE/disk_free_gib.test.sh"     || rc=1
 bash "$HERE/pin_schema.test.sh"        || rc=1
+# Lifecycle-mode boundary guard: preregistration (hash unwritten) vs measurement
+# (committed .json.hash == merged b0_pre_spec_hash). No Docker/network.
+bash "$HERE/lifecycle_mode.test.sh"    || rc=1
 # Opt-in primary-source verification of the cargo-audit + advisory-DB pin blocks (needs
 # network; SKIPs cleanly unless B0PRE_PIN_NET_IT=1 / B0PRE_PIN_NET_REQUIRED=1).
 bash "$HERE/pin_cargo_audit_advdb.test.sh"   || rc=1
