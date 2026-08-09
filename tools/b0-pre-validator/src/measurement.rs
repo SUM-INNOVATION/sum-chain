@@ -28,6 +28,10 @@ use crate::schema::envelope::{ArtifactHash, R0ProofArtifactEnvelopeV1};
 use crate::schema::provenance::ArchRunProvenanceV1;
 use crate::schema::verifier_material::VerifierMaterialManifestV1;
 
+/// The allowlist canonical bytes plus one per-candidate evidence bundle each — the
+/// content of a committed measurement vector.
+pub type MeasurementVector = (Vec<u8>, Vec<(Candidate, Evidence)>);
+
 /// Whether `candidate` can produce a NATIVE terminal proof on `arch`. RISC Zero's
 /// Groth16 receipt path is x86_64-only (VENUE §2); on aarch64 it is native-ineligible
 /// — never emulated, never synthesized. SP1 is native on both arches.
@@ -314,6 +318,285 @@ pub fn orchestrate_grid(
         rss,
         malformed_corpus_result_hash: ids.malformed_corpus_result_hash,
     })
+}
+
+/// Compact length-prefixed transport for a committed real-orchestrator vector: the
+/// canonical guest-allowlist bytes plus one per-candidate evidence bundle each.
+/// This is an envelope only — it carries NO bundle hash or aggregate; both the
+/// reference and the independent verifier recompute everything from the records
+/// inside. Format: magic `B0PREMEASVEC1`, then `u32 len‖bytes` for the allowlist,
+/// then `u32 n_bundles`, then per bundle: `u16 candidate`, four record lists (each
+/// `u32 count` then `u32 len‖bytes`), then `u32 len‖bytes` for verifier_material and
+/// result_set. All integers big-endian.
+pub fn serialize_vector(allowlist_canonical: &[u8], bundles: &[(Candidate, Evidence)]) -> Vec<u8> {
+    fn put(out: &mut Vec<u8>, b: &[u8]) {
+        out.extend_from_slice(&(b.len() as u32).to_be_bytes());
+        out.extend_from_slice(b);
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(b"B0PREMEASVEC1");
+    put(&mut out, allowlist_canonical);
+    out.extend_from_slice(&(bundles.len() as u32).to_be_bytes());
+    for (c, ev) in bundles {
+        out.extend_from_slice(&c.to_repr().to_be_bytes());
+        for list in [&ev.samples, &ev.rss, &ev.envelopes, &ev.provenances] {
+            out.extend_from_slice(&(list.len() as u32).to_be_bytes());
+            for r in list {
+                put(&mut out, r);
+            }
+        }
+        put(&mut out, &ev.verifier_material);
+        put(&mut out, &ev.result_set);
+    }
+    out
+}
+
+/// Parse a vector produced by [`serialize_vector`]. Returns the allowlist canonical
+/// bytes and the per-candidate bundles.
+pub fn parse_vector(bytes: &[u8]) -> Result<MeasurementVector, String> {
+    let mut p = 0usize;
+    let take = |p: &mut usize, n: usize| -> Result<&[u8], String> {
+        let s = bytes.get(*p..*p + n).ok_or("vector truncated")?;
+        *p += n;
+        Ok(s)
+    };
+    let u32_at = |p: &mut usize| -> Result<usize, String> {
+        let b = take(p, 4)?;
+        Ok(u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize)
+    };
+    let blob = |p: &mut usize| -> Result<Vec<u8>, String> {
+        let n = u32_at(p)?;
+        Ok(take(p, n)?.to_vec())
+    };
+    if take(&mut p, 13)? != b"B0PREMEASVEC1" {
+        return Err("bad magic".into());
+    }
+    let allowlist = blob(&mut p)?;
+    let n_bundles = u32_at(&mut p)?;
+    let mut bundles = Vec::new();
+    for _ in 0..n_bundles {
+        let cb = take(&mut p, 2)?;
+        let candidate = Candidate::from_repr(u16::from_be_bytes([cb[0], cb[1]]))
+            .map_err(|_| "bad candidate".to_string())?;
+        let mut lists: Vec<Vec<Vec<u8>>> = Vec::with_capacity(4);
+        for _ in 0..4 {
+            let count = u32_at(&mut p)?;
+            let mut v = Vec::with_capacity(count);
+            for _ in 0..count {
+                v.push(blob(&mut p)?);
+            }
+            lists.push(v);
+        }
+        let verifier_material = blob(&mut p)?;
+        let result_set = blob(&mut p)?;
+        let mut it = lists.into_iter();
+        bundles.push((
+            candidate,
+            Evidence {
+                samples: it.next().unwrap(),
+                rss: it.next().unwrap(),
+                envelopes: it.next().unwrap(),
+                provenances: it.next().unwrap(),
+                verifier_material,
+                result_set,
+            },
+        ));
+    }
+    if p != bytes.len() {
+        return Err("trailing bytes".into());
+    }
+    Ok((allowlist, bundles))
+}
+
+/// Build the ONE canonical committed measurement vector deterministically through
+/// the real orchestrator: SP1's complete native matrix (both arches → qualifies) and
+/// RISC Zero's genuine x86_64-only matrix (aarch64 absent → the frozen verifier
+/// derives `MeasuredProofGrid`). Bound to the merged `b0_pre_spec_hash`. Returns the
+/// allowlist canonical bytes and the two bundles. No hand-authored result sets.
+pub fn deterministic_demo_vector() -> MeasurementVector {
+    use crate::enums::VerifierMaterialRole::{ControlId, ControlRoot, Groth16Vk, VerifierParams};
+    use crate::schema::allowlist::BuilderArch;
+
+    fn dv(tag: &[u8]) -> [u8; 32] {
+        let mut h = blake3::Hasher::new();
+        h.update(b"b0-pre-measurement-vector/v1");
+        h.update(tag);
+        h.finalize().into()
+    }
+    fn hex32(s: &str) -> [u8; 32] {
+        let mut a = [0u8; 32];
+        for (i, byte) in a.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).expect("hex");
+        }
+        a
+    }
+    // Merged, ratified b0_pre_spec_hash.
+    let spec = hex32("201cfcb80e94a5a7845dc3380cde32171d40f325ae2bacde9547f3c0da3c4df3");
+
+    let sp1_material = VerifierMaterialManifestV1::from_canonical(
+        Candidate::Sp1,
+        [(Groth16Vk, 292u64, dv(b"sp1-vk"))],
+    );
+    let risc0_material = VerifierMaterialManifestV1::from_canonical(
+        Candidate::Risc0,
+        [
+            (Groth16Vk, 256, dv(b"r0-vk")),
+            (ControlRoot, 32, dv(b"r0-cr")),
+            (ControlId, 32, dv(b"r0-ci")),
+            (VerifierParams, 32, dv(b"r0-vp")),
+        ],
+    );
+
+    // Venue-built guest identities -> populated allowlist -> canonical guest-set hash.
+    let builds = [
+        GuestBuild {
+            candidate: Candidate::Sp1,
+            guest_source_tree_hash: dv(b"sp1-src"),
+            candidate_dep_lock_hash: dv(b"sp1-lock"),
+            builder_arches: vec![
+                BuilderArch {
+                    arch: Arch::X86_64,
+                    builder_container_digest: dv(b"sp1-bx"),
+                },
+                BuilderArch {
+                    arch: Arch::Aarch64,
+                    builder_container_digest: dv(b"sp1-ba"),
+                },
+            ],
+            guest_image_hash: dv(b"sp1-img"),
+            program_id: dv(b"sp1-prog"),
+            verifier_material_manifest_hash: sp1_material.identity().unwrap(),
+            build_command_hash: dv(b"sp1-cmd"),
+            reproducible: true,
+        },
+        GuestBuild {
+            candidate: Candidate::Risc0,
+            guest_source_tree_hash: dv(b"r0-src"),
+            candidate_dep_lock_hash: dv(b"r0-lock"),
+            builder_arches: vec![BuilderArch {
+                arch: Arch::X86_64,
+                builder_container_digest: dv(b"r0-bx"),
+            }],
+            guest_image_hash: dv(b"r0-img"),
+            program_id: dv(b"r0-prog"),
+            verifier_material_manifest_hash: risc0_material.identity().unwrap(),
+            build_command_hash: dv(b"r0-cmd"),
+            reproducible: true,
+        },
+    ];
+    let allowlist = official_allowlist(spec, &builds);
+    let guest_set = r0_guest_set_hash(&allowlist);
+
+    let prov = |arch: Arch, role: ProvenanceRole| -> ProvenanceFacts {
+        let (cpuset, mem, phys, logical, ram) = match role {
+            ProvenanceRole::Proving => (5u32, 22u64 << 30, 16u32, 32u32, 64u64 << 30),
+            ProvenanceRole::Verification => (2u32, 4u64 << 30, 2u32, 4u32, 4u64 << 30),
+        };
+        ProvenanceFacts {
+            arch,
+            role,
+            source_commit: "eff3aae18b49969212c4c1493da20f97af195de2".to_string(),
+            dirty_tree_flag: false,
+            builder_container_digest: dv(b"builder"),
+            host_os: "linux".into(),
+            kernel: "6.8.0".into(),
+            cpu_vendor: "GenuineIntel".into(),
+            cpu_model: "reference".into(),
+            physical_core_count: phys,
+            logical_cpu_count: logical,
+            total_ram_bytes: ram,
+            configured_cpuset_core_limit: cpuset,
+            configured_memory_limit_bytes: mem,
+            governor: "performance".into(),
+            turbo_enabled: false,
+            clock_source: "tsc".into(),
+            cgroup_version: 2,
+            cgroup_scope_label: "b0-pre.slice".into(),
+            benchmark_harness_source_hash: dv(b"runner"),
+            raw_environment_capture_hash: dv(b"envcap"),
+        }
+    };
+    let mut all_prov = Vec::new();
+    for a in [Arch::X86_64, Arch::Aarch64] {
+        for r in [ProvenanceRole::Proving, ProvenanceRole::Verification] {
+            all_prov.push(prov(a, r));
+        }
+    }
+
+    let cell = |cand: &str, arch: Arch, s: StatementIndex, iter: u32| -> CellFacts {
+        let key = [cand.as_bytes(), &[arch.to_repr(), s.to_repr(), iter as u8]].concat();
+        CellFacts {
+            arch,
+            statement: s,
+            iteration: iter,
+            proof_hash: dv(&key),
+            artifact_hashes: vec![("receipt".to_string(), dv(&[b"rcpt", &key[..]].concat()))],
+            prove_ns: 5_000_000_000 + iter as u64,
+            setup_ns: 1_000_000,
+            proof_bytes: 200 + iter as u64,
+            verify_ns: (0..100)
+                .map(|r| 40_000_000 + (r as u64) * 1000 + iter as u64)
+                .collect(),
+            proving_run_rss_bytes: (2u64 << 30) + iter as u64,
+            verify_batch_rss_bytes: (100u64 << 20) + iter as u64,
+        }
+    };
+    let grid = |cand: &str, arches: &[Arch]| -> Vec<CellFacts> {
+        let mut v = Vec::new();
+        for &a in arches {
+            for s in [StatementIndex::Tlg, StatementIndex::SelectToken] {
+                for iter in 0..crate::consts::OFFICIAL_ITERATIONS_PER_CELL {
+                    v.push(cell(cand, a, s, iter));
+                }
+            }
+        }
+        v
+    };
+
+    let sp1_ids = RunIdentities {
+        candidate: Candidate::Sp1,
+        guest_program_id: dv(b"sp1-prog"),
+        candidate_dep_lock_hash: dv(b"sp1-lock"),
+        container_image_digest: dv(b"sp1-container"),
+        verifier_material: sp1_material,
+        official_statement_hash_tlg: dv(b"stmt-tlg"),
+        official_statement_hash_st: dv(b"stmt-st"),
+        rss_context_hash: dv(b"rss-ctx"),
+        malformed_corpus_result_hash: dv(b"malformed"),
+    };
+    let risc0_ids = RunIdentities {
+        candidate: Candidate::Risc0,
+        guest_program_id: dv(b"r0-prog"),
+        candidate_dep_lock_hash: dv(b"r0-lock"),
+        container_image_digest: dv(b"r0-container"),
+        verifier_material: risc0_material,
+        official_statement_hash_tlg: dv(b"stmt-tlg"),
+        official_statement_hash_st: dv(b"stmt-st"),
+        rss_context_hash: dv(b"rss-ctx"),
+        malformed_corpus_result_hash: dv(b"malformed"),
+    };
+
+    let sp1_ev = orchestrate_grid(
+        spec,
+        guest_set,
+        &sp1_ids,
+        &all_prov,
+        &grid("sp1", &[Arch::X86_64, Arch::Aarch64]),
+    )
+    .expect("sp1 assembles");
+    let risc0_ev = orchestrate_grid(
+        spec,
+        guest_set,
+        &risc0_ids,
+        &all_prov,
+        &grid("risc0", &[Arch::X86_64]),
+    )
+    .expect("risc0 assembles");
+
+    (
+        allowlist.encode(),
+        vec![(Candidate::Sp1, sp1_ev), (Candidate::Risc0, risc0_ev)],
+    )
 }
 
 #[cfg(test)]
