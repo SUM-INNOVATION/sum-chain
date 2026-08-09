@@ -374,6 +374,291 @@ fn verify_rss_value(a: Arch, iter: u32) -> u64 {
     (100u64 << 20) + (a.to_repr() as u64) * 4096 + iter as u64
 }
 
+fn stmt_index_of(h: [u8; 32], tlg: [u8; 32], st: [u8; 32]) -> Result<StatementIndex, String> {
+    if h == tlg {
+        Ok(StatementIndex::Tlg)
+    } else if h == st {
+        Ok(StatementIndex::SelectToken)
+    } else {
+        Err("statement binding".into())
+    }
+}
+
+/// The RAW typed records a grid run produces, plus the run identities. This is the
+/// ONLY input to [`assemble_result_set`]: the caller (synthetic `generate_with` or
+/// the real venue orchestrator) supplies the already-bound records; the assembler
+/// owns every DERIVED value — sort keys, bundle hashes, aggregates, completeness,
+/// qualification, and the result-set encoding. Callers therefore NEVER compute a
+/// bundle hash or an aggregate, and there is exactly one canonical bundle algorithm
+/// ([`bundle_hash`], kept private).
+///
+/// Record order in `envelopes` / `samples` / `rss` / `provenances` is preserved
+/// verbatim into the `Evidence` byte vectors; the result-set's bundles and
+/// measured-proof / provenance references are re-derived and canonically ordered.
+pub struct AssemblyInput {
+    pub candidate: Candidate,
+    pub b0_pre_spec_hash: [u8; 32],
+    pub r0_guest_set_hash: [u8; 32],
+    pub official_statement_hash_tlg: [u8; 32],
+    pub official_statement_hash_st: [u8; 32],
+    pub verifier_material: VerifierMaterialManifestV1,
+    pub provenances: Vec<ArchRunProvenanceV1>,
+    pub envelopes: Vec<R0ProofArtifactEnvelopeV1>,
+    pub samples: Vec<BenchmarkSampleV1>,
+    pub rss: Vec<BenchmarkRssRecordV1>,
+    pub malformed_corpus_result_hash: [u8; 32],
+}
+
+/// Assemble the canonical `R0ResultSetV1` + `Evidence` from raw typed records.
+///
+/// This is the SINGLE canonical assembler; `generate_with` (synthetic) and the real
+/// venue orchestrator both delegate here so the sort keys, bundle hashes, and
+/// aggregates have exactly one implementation. `verify_evidence` remains an
+/// INDEPENDENT re-derivation of everything this produces.
+///
+/// Fail-closed: every record must bind the run's `b0_pre_spec_hash`,
+/// `r0_guest_set_hash`, candidate, and verifier-material identity; every proof /
+/// sample statement must resolve to one of the two official statement hashes. The
+/// completeness counts are the ACTUAL record counts (a short/duplicated grid stays
+/// short here and is rejected downstream by `validate_official_completeness`, never
+/// papered over).
+pub fn assemble_result_set(input: &AssemblyInput) -> Result<Evidence, String> {
+    let spec = input.b0_pre_spec_hash;
+    let gs = input.r0_guest_set_hash;
+    let cand = input.candidate;
+    let tlg = input.official_statement_hash_tlg;
+    let st = input.official_statement_hash_st;
+    let vmat = input
+        .verifier_material
+        .identity()
+        .map_err(|e| format!("verifier-material identity: {e}"))?;
+
+    // Guardrail: every record binds both hashes + the candidate + the material.
+    for p in &input.provenances {
+        if p.b0_pre_spec_hash != spec
+            || p.r0_guest_set_hash != gs
+            || p.candidate != cand
+            || p.verifier_material_manifest_hash != vmat
+        {
+            return Err("provenance binding".into());
+        }
+    }
+    for e in &input.envelopes {
+        if e.b0_pre_spec_hash != spec
+            || e.r0_guest_set_hash != gs
+            || e.candidate != cand
+            || e.verifier_material_manifest_hash != vmat
+        {
+            return Err("envelope binding".into());
+        }
+    }
+    for s in &input.samples {
+        if s.b0_pre_spec_hash != spec
+            || s.r0_guest_set_hash != gs
+            || s.candidate != cand
+            || s.verifier_material_manifest_hash != vmat
+        {
+            return Err("sample binding".into());
+        }
+    }
+    for r in &input.rss {
+        if r.b0_pre_spec_hash != spec
+            || r.r0_guest_set_hash != gs
+            || r.candidate != cand
+            || r.verifier_material_manifest_hash != vmat
+        {
+            return Err("rss binding".into());
+        }
+    }
+
+    // Measured-proof references (canonically ordered by arch, statement, iteration).
+    let mut measured_proofs = Vec::with_capacity(input.envelopes.len());
+    for e in &input.envelopes {
+        measured_proofs.push(MeasuredProofRef {
+            arch: e.arch,
+            statement_index: stmt_index_of(e.computation_statement_hash, tlg, st)?,
+            iteration_index: e.iteration_index,
+            envelope_hash: crate::hashing::plain(&e.encode()),
+        });
+    }
+    measured_proofs.sort_by_key(|m| {
+        (
+            m.arch.to_repr(),
+            m.statement_index.to_repr(),
+            m.iteration_index,
+        )
+    });
+
+    // Provenance references (canonically ordered by arch, role).
+    let mut arch_provenance: Vec<ArchProvenanceRef> = input
+        .provenances
+        .iter()
+        .map(|p| ArchProvenanceRef {
+            arch: p.arch,
+            role: p.provenance_role,
+            provenance_hash: p.provenance_hash(),
+        })
+        .collect();
+    arch_provenance.sort_by_key(|r| (r.arch.to_repr(), r.role.to_repr()));
+
+    // Sample bundles, keyed (arch, statement, metric); each hashed over its records
+    // sorted by (proof_hash, iteration_index) — the one canonical bundle algorithm.
+    let mut sgroups: HashMap<(u8, u8, u8), Vec<RawRec>> = HashMap::new();
+    let mut verify_by_arch: HashMap<u8, Vec<u64>> = HashMap::new();
+    let mut max_pb = 0u64;
+    for s in &input.samples {
+        let si = stmt_index_of(s.computation_statement_hash, tlg, st)?;
+        sgroups
+            .entry((s.arch.to_repr(), si.to_repr(), s.metric_kind.to_repr()))
+            .or_default()
+            .push(((s.proof_hash, s.iteration_index), s.encode()));
+        if s.metric_kind == MetricKind::HostVerifyNs {
+            verify_by_arch
+                .entry(s.arch.to_repr())
+                .or_default()
+                .push(s.value);
+        }
+        if s.metric_kind == MetricKind::ProofBytes {
+            max_pb = max_pb.max(s.value);
+        }
+    }
+    let mut sample_bundles = Vec::new();
+    for a in ARCHES {
+        for s in STMTS {
+            for m in BUNDLE_METRICS {
+                if let Some(recs) = sgroups.get(&(a.to_repr(), s.to_repr(), m.to_repr())) {
+                    let (h, c) = bundle_hash(SAMPLEBUNDLE_PREFIX, recs.clone());
+                    sample_bundles.push(SampleBundle {
+                        arch: a,
+                        statement_index: s,
+                        metric_kind: m,
+                        sample_kind: SampleKind::Measured,
+                        sample_count: c,
+                        bundle_hash: h,
+                    });
+                }
+            }
+        }
+    }
+
+    // RSS bundles, keyed (arch, scope).
+    let mut rgroups: HashMap<(u8, u8), Vec<RawRec>> = HashMap::new();
+    let mut vrss_by_arch: HashMap<u8, Vec<u64>> = HashMap::new();
+    for r in &input.rss {
+        rgroups
+            .entry((r.arch.to_repr(), r.rss_scope.to_repr()))
+            .or_default()
+            .push(((r.proof_hash, r.run_index), r.encode()));
+        if r.rss_scope == RssScope::VerifyBatch {
+            vrss_by_arch
+                .entry(r.arch.to_repr())
+                .or_default()
+                .push(r.peak_rss_bytes);
+        }
+    }
+    let mut rss_bundles = Vec::new();
+    for a in ARCHES {
+        for scope in [RssScope::ProvingRun, RssScope::VerifyBatch] {
+            if let Some(recs) = rgroups.get(&(a.to_repr(), scope.to_repr())) {
+                let (h, c) = bundle_hash(RSSBUNDLE_PREFIX, recs.clone());
+                rss_bundles.push(RssBundle {
+                    arch: a,
+                    rss_scope: scope,
+                    record_count: c,
+                    bundle_hash: h,
+                });
+            }
+        }
+    }
+
+    // Aggregates over whatever arches are genuinely present (a missing arch stays
+    // missing — it is not synthesized; downstream completeness rejects the grid).
+    let worst_p99 = ARCHES
+        .iter()
+        .filter_map(|a| {
+            verify_by_arch.get(&a.to_repr()).map(|v| {
+                let mut v = v.clone();
+                v.sort_unstable();
+                nearest_rank_p99(&v).unwrap_or(0)
+            })
+        })
+        .max()
+        .unwrap_or(0);
+    let worst_vrss = ARCHES
+        .iter()
+        .filter_map(|a| {
+            vrss_by_arch
+                .get(&a.to_repr())
+                .and_then(|v| v.iter().max().copied())
+        })
+        .max()
+        .unwrap_or(0);
+    let qualification = crate::validation::official_qualification(worst_p99);
+    let failure_codes = crate::validation::qualification_failure_codes(worst_p99);
+    let vmat_total = input
+        .verifier_material
+        .verifier_material_bytes()
+        .map_err(|e| format!("verifier-material total: {e}"))?;
+
+    let rs = R0ResultSetV1 {
+        b0_pre_spec_hash: spec,
+        r0_guest_set_hash: gs,
+        candidate: cand,
+        verifier_material_manifest_hash: vmat,
+        official_statement_hash_tlg: tlg,
+        official_statement_hash_st: st,
+        arch_provenance,
+        measured_proofs,
+        sample_bundles,
+        rss_bundles,
+        malformed_corpus_result_hash: input.malformed_corpus_result_hash,
+        cycle_bundle: None,
+        completeness: Completeness {
+            measured_proof_count: input.envelopes.len() as u32,
+            verify_timing_sample_count: input
+                .samples
+                .iter()
+                .filter(|s| s.metric_kind == MetricKind::HostVerifyNs)
+                .count() as u32,
+            proving_time_sample_count: input
+                .samples
+                .iter()
+                .filter(|s| s.metric_kind == MetricKind::HostProveWrapNs)
+                .count() as u32,
+            proving_run_rss_count: input
+                .rss
+                .iter()
+                .filter(|r| r.rss_scope == RssScope::ProvingRun)
+                .count() as u32,
+            verify_batch_rss_count: input
+                .rss
+                .iter()
+                .filter(|r| r.rss_scope == RssScope::VerifyBatch)
+                .count() as u32,
+        },
+        aggregates: Aggregates {
+            max_proof_bytes: max_pb as u32,
+            worst_arch_p99_verify_ns: worst_p99,
+            verifier_material_bytes: vmat_total,
+            worst_arch_verifier_rss_bytes: worst_vrss,
+        },
+        qualification_result: qualification,
+        failure_codes,
+    };
+
+    Ok(Evidence {
+        samples: input.samples.iter().map(|s| s.encode()).collect(),
+        rss: input.rss.iter().map(|r| r.encode()).collect(),
+        envelopes: input.envelopes.iter().map(|e| e.encode()).collect(),
+        provenances: input.provenances.iter().map(|p| p.encode()).collect(),
+        verifier_material: input
+            .verifier_material
+            .encode()
+            .map_err(|e| format!("verifier-material encode: {e}"))?,
+        result_set: rs.encode(),
+    })
+}
+
 fn bundle_hash(prefix: &[u8], mut recs: Vec<RawRec>) -> ([u8; 32], u32) {
     recs.sort_by_key(|r| r.0);
     let mut h = blake3::Hasher::new();
@@ -384,6 +669,7 @@ fn bundle_hash(prefix: &[u8], mut recs: Vec<RawRec>) -> ([u8; 32], u32) {
     (h.finalize().into(), recs.len() as u32)
 }
 
+#[derive(Debug, Clone)]
 pub struct Evidence {
     pub samples: Vec<Vec<u8>>,
     pub rss: Vec<Vec<u8>>,
@@ -416,227 +702,107 @@ pub fn generate_candidate(candidate: Candidate) -> Evidence {
 
 fn generate_with(candidate: Candidate, env: &Env) -> Evidence {
     let ids = ids_for(candidate);
-    let mut samples = Vec::new();
-    let mut rss_records = Vec::new();
-    let mut envelopes = Vec::new();
-    let mut provenances = Vec::new();
 
+    // Provenances (4: arch × role). Envelopes bind the PROVING provenance hash.
+    let mut provenances = Vec::new();
     let mut proving_prov: HashMap<u8, [u8; 32]> = HashMap::new();
-    let mut arch_provenance = Vec::new();
     for a in ARCHES {
         for role in [ProvenanceRole::Proving, ProvenanceRole::Verification] {
             let p = provenance(a, role, ids, env);
-            let h = p.provenance_hash();
             if role == ProvenanceRole::Proving {
-                proving_prov.insert(a.to_repr(), h);
+                proving_prov.insert(a.to_repr(), p.provenance_hash());
             }
-            arch_provenance.push(ArchProvenanceRef {
-                arch: a,
-                role,
-                provenance_hash: h,
-            });
-            provenances.push(p.encode());
+            provenances.push(p);
         }
     }
 
-    let mut measured_proofs = Vec::new();
-    // (arch, stmt, metric) -> raw records
-    let mut sbundle: HashMap<(u8, u8, u8), Vec<RawRec>> = HashMap::new();
-    let mut prss: HashMap<u8, Vec<RawRec>> = HashMap::new();
-    let mut vrss: HashMap<u8, Vec<RawRec>> = HashMap::new();
-    let mut verify_by_arch: HashMap<u8, Vec<u64>> = HashMap::new();
-    let mut vrss_by_arch: HashMap<u8, Vec<u64>> = HashMap::new();
-    let mut max_pb = 0u64;
-
+    // The 2×2×10 grid, in canonical order: per cell one envelope, REPS verify
+    // samples, one each prove/setup/proof_bytes, and one proving + one verify RSS.
+    // Raw typed records only — the shared assembler derives every bundle/aggregate.
+    let mut envelopes = Vec::new();
+    let mut samples = Vec::new();
+    let mut rss_records = Vec::new();
     for a in ARCHES {
         for s in STMTS {
             for iter in 0..crate::consts::OFFICIAL_ITERATIONS_PER_CELL {
                 let ph = proof_hash(a, s, iter);
-                let eb = envelope(a, s, iter, proving_prov[&a.to_repr()], ids).encode();
-                measured_proofs.push(MeasuredProofRef {
-                    arch: a,
-                    statement_index: s,
-                    iteration_index: iter,
-                    envelope_hash: crate::hashing::plain(&eb),
-                });
-                envelopes.push(eb);
+                envelopes.push(envelope(a, s, iter, proving_prov[&a.to_repr()], ids));
                 for rep in 0..REPS {
-                    let v = verify_value(a, s, iter, rep);
-                    let b = sample(
+                    samples.push(sample(
                         a,
                         s,
                         MetricKind::HostVerifyNs,
                         Unit::Nanoseconds,
-                        v,
+                        verify_value(a, s, iter, rep),
                         rep,
                         ph,
                         ids,
-                    )
-                    .encode();
-                    sbundle
-                        .entry((a.to_repr(), s.to_repr(), 5))
-                        .or_default()
-                        .push(((ph, rep), b.clone()));
-                    verify_by_arch.entry(a.to_repr()).or_default().push(v);
-                    samples.push(b);
+                    ));
                 }
-                let push = |sbundle: &mut HashMap<(u8, u8, u8), Vec<RawRec>>,
-                            samples: &mut Vec<Vec<u8>>,
-                            m: MetricKind,
-                            u: Unit,
-                            v: u64| {
-                    let b = sample(a, s, m, u, v, iter, ph, ids).encode();
-                    sbundle
-                        .entry((a.to_repr(), s.to_repr(), m.to_repr()))
-                        .or_default()
-                        .push(((ph, iter), b.clone()));
-                    samples.push(b);
-                };
-                push(
-                    &mut sbundle,
-                    &mut samples,
+                samples.push(sample(
+                    a,
+                    s,
                     MetricKind::HostProveWrapNs,
                     Unit::Nanoseconds,
                     prove_value(a, s, iter),
-                );
-                push(
-                    &mut sbundle,
-                    &mut samples,
+                    iter,
+                    ph,
+                    ids,
+                ));
+                samples.push(sample(
+                    a,
+                    s,
                     MetricKind::HostSetupNs,
                     Unit::Nanoseconds,
                     setup_value(iter),
-                );
-                let pbv = proof_bytes_value(iter);
-                max_pb = max_pb.max(pbv);
-                push(
-                    &mut sbundle,
-                    &mut samples,
+                    iter,
+                    ph,
+                    ids,
+                ));
+                samples.push(sample(
+                    a,
+                    s,
                     MetricKind::ProofBytes,
                     Unit::Bytes,
-                    pbv,
-                );
-
-                let prb = rss(
+                    proof_bytes_value(iter),
+                    iter,
+                    ph,
+                    ids,
+                ));
+                rss_records.push(rss(
                     a,
                     RssScope::ProvingRun,
                     proving_rss_value(iter),
                     iter,
                     ph,
                     ids,
-                )
-                .encode();
-                prss.entry(a.to_repr())
-                    .or_default()
-                    .push(((ph, iter), prb.clone()));
-                rss_records.push(prb);
-                let vrv = verify_rss_value(a, iter);
-                vrss_by_arch.entry(a.to_repr()).or_default().push(vrv);
-                let vrb = rss(a, RssScope::VerifyBatch, vrv, iter, ph, ids).encode();
-                vrss.entry(a.to_repr())
-                    .or_default()
-                    .push(((ph, iter), vrb.clone()));
-                rss_records.push(vrb);
+                ));
+                rss_records.push(rss(
+                    a,
+                    RssScope::VerifyBatch,
+                    verify_rss_value(a, iter),
+                    iter,
+                    ph,
+                    ids,
+                ));
             }
         }
     }
 
-    let mut sample_bundles = Vec::new();
-    for a in ARCHES {
-        for s in STMTS {
-            for m in BUNDLE_METRICS {
-                let recs = sbundle[&(a.to_repr(), s.to_repr(), m.to_repr())].clone();
-                let (h, c) = bundle_hash(SAMPLEBUNDLE_PREFIX, recs);
-                sample_bundles.push(SampleBundle {
-                    arch: a,
-                    statement_index: s,
-                    metric_kind: m,
-                    sample_kind: SampleKind::Measured,
-                    sample_count: c,
-                    bundle_hash: h,
-                });
-            }
-        }
-    }
-    let mut rss_bundles = Vec::new();
-    for a in ARCHES {
-        for (scope, coll) in [
-            (RssScope::ProvingRun, &prss),
-            (RssScope::VerifyBatch, &vrss),
-        ] {
-            let (h, c) = bundle_hash(RSSBUNDLE_PREFIX, coll[&a.to_repr()].clone());
-            rss_bundles.push(RssBundle {
-                arch: a,
-                rss_scope: scope,
-                record_count: c,
-                bundle_hash: h,
-            });
-        }
-    }
-
-    let worst_p99 = ARCHES
-        .iter()
-        .map(|a| {
-            let mut v = verify_by_arch[&a.to_repr()].clone();
-            v.sort_unstable();
-            nearest_rank_p99(&v).unwrap()
-        })
-        .max()
-        .unwrap();
-    let worst_vrss = ARCHES
-        .iter()
-        .map(|a| *vrss_by_arch[&a.to_repr()].iter().max().unwrap())
-        .max()
-        .unwrap();
-    let qualification = crate::validation::official_qualification(worst_p99);
-    let failure_codes = crate::validation::qualification_failure_codes(worst_p99);
-
-    // Per-candidate verifier-material total: the Σ byte_len of THIS candidate's
-    // own canonical manifest — never a shared cross-candidate constant.
-    let vmm = verifier_material_for(ids);
-    let vmat_total = vmm
-        .verifier_material_bytes()
-        .expect("verifier-material total overflow");
-
-    let rs = R0ResultSetV1 {
+    assemble_result_set(&AssemblyInput {
+        candidate,
         b0_pre_spec_hash: spec_hash(),
         r0_guest_set_hash: guest_set_hash(),
-        candidate: ids.candidate,
-        verifier_material_manifest_hash: vmat_id(ids),
         official_statement_hash_tlg: stmt_hash(StatementIndex::Tlg),
         official_statement_hash_st: stmt_hash(StatementIndex::SelectToken),
-        arch_provenance,
-        measured_proofs,
-        sample_bundles,
-        rss_bundles,
-        malformed_corpus_result_hash: id(b"malformed"),
-        cycle_bundle: None,
-        completeness: Completeness {
-            measured_proof_count: 40,
-            verify_timing_sample_count: 4000,
-            proving_time_sample_count: 40,
-            proving_run_rss_count: 40,
-            verify_batch_rss_count: 40,
-        },
-        aggregates: Aggregates {
-            max_proof_bytes: max_pb as u32,
-            worst_arch_p99_verify_ns: worst_p99,
-            verifier_material_bytes: vmat_total,
-            worst_arch_verifier_rss_bytes: worst_vrss,
-        },
-        qualification_result: qualification,
-        failure_codes,
-    };
-
-    Evidence {
+        verifier_material: verifier_material_for(ids),
+        provenances,
+        envelopes,
         samples,
         rss: rss_records,
-        envelopes,
-        provenances,
-        verifier_material: vmm
-            .encode()
-            .expect("harness verifier-material manifest encodes"),
-        result_set: rs.encode(),
-    }
+        malformed_corpus_result_hash: id(b"malformed"),
+    })
+    .expect("synthetic grid assembles")
 }
 
 fn stmt_of(h: [u8; 32], tlg: [u8; 32], st: [u8; 32]) -> Result<u8, String> {
@@ -1038,6 +1204,36 @@ mod tests {
         f(&mut rs);
         e.result_set = rs.encode();
         e
+    }
+
+    fn evidence_fingerprint(ev: &Evidence) -> String {
+        let mut h = blake3::Hasher::new();
+        for v in [&ev.samples, &ev.rss, &ev.envelopes, &ev.provenances] {
+            for r in v {
+                h.update(r);
+            }
+        }
+        h.update(&ev.verifier_material);
+        h.update(&ev.result_set);
+        h.finalize().to_hex().to_string()
+    }
+
+    /// GUARDRAIL: routing `generate_with` through the shared `assemble_result_set`
+    /// must not change a single output byte. These fingerprints of the FULL Evidence
+    /// (every record + verifier material + result set) were frozen BEFORE the shared
+    /// assembler existed; any drift here is a refactor regression, not a new golden.
+    #[test]
+    fn generate_output_is_byte_stable() {
+        assert_eq!(
+            evidence_fingerprint(&generate()),
+            "042dfaa60147b80bce7d1bbc5c10b823270d5eeb49ea965ff789d3682795d988",
+            "SP1 generate() output drifted from the pre-refactor bytes"
+        );
+        assert_eq!(
+            evidence_fingerprint(&generate_candidate(Candidate::Risc0)),
+            "6222018df8ea0f9f734e55636b067d95072058d546a15e6117f0fb2149d2476a",
+            "RISC0 generate_candidate() output drifted from the pre-refactor bytes"
+        );
     }
 
     #[test]

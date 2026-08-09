@@ -26,6 +26,7 @@ pub mod golden;
 pub mod harness;
 pub mod hashing;
 pub mod json;
+pub mod measurement;
 pub mod merkle;
 pub mod protocol;
 pub mod schema;
