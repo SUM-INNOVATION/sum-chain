@@ -5,8 +5,9 @@
 //! tooling, but it *does* independently re-derive the deterministic identities
 //! the artifact embeds — model id, both official statement template hashes, and
 //! the exp-table hash — and asserts the committed artifact matches, byte for
-//! byte on the hex. It also confirms the artifact is not finalized (no
-//! fabricated implementation-produced fields have leaked in).
+//! byte on the hex. It also confirms the committed artifact is the finalized
+//! normative form carrying only the real Stage-1 fields (no guest-closure /
+//! post-spec field has leaked in).
 
 use b0_pre_independent::workload;
 
@@ -67,22 +68,42 @@ fn artifact_identities_match_independent_derivation() {
 }
 
 #[test]
-fn artifact_is_not_finalized_and_carries_no_fabricated_fields() {
+fn artifact_is_finalized_and_carries_only_real_stage1_fields() {
     let art: serde_json::Value = serde_json::from_str(ARTIFACT).unwrap();
-    assert_eq!(art["finalization"]["state"], "not_finalizable");
-    // every implementation-produced field is absent (pending_inputs is empty)
-    assert_eq!(
-        art["pending_inputs"].as_object().unwrap().len(),
-        0,
-        "no implementation-produced field may be present until it truly exists"
-    );
+    // the committed artifact is the finalized normative form
+    assert_eq!(art["finalization"]["state"], "finalizable");
     assert_eq!(
         art["finalization"]["blocked_on"].as_array().unwrap().len(),
-        3,
-        "exactly three Stage-1 categories block finalization"
+        0,
+        "a finalized artifact is blocked on nothing"
     );
-    // guest closure must not appear as a Stage-1 pending input anywhere
+    // pending_inputs carries EXACTLY the three Stage-1 categories, each populated
+    let pi = art["pending_inputs"].as_object().unwrap();
+    let mut keys: Vec<&str> = pi.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "candidate_container_digests",
+            "cargo_lock_hashes",
+            "verifier_material_manifests"
+        ],
+        "pending_inputs must hold exactly the three Stage-1 categories"
+    );
+    for k in &keys {
+        assert!(
+            !pi[*k].as_array().unwrap().is_empty(),
+            "Stage-1 category {k} must be populated in the finalized artifact"
+        );
+    }
+    // no guest closure / post-spec field may appear as a Stage-1 pending input
     let dump = serde_json::to_string(&art["pending_inputs"]).unwrap();
     assert!(!dump.contains("r0_guest_set_hash"));
     assert!(!dump.contains("guest_program_identities"));
+    assert!(!dump.contains("guest_program_id"));
+    assert!(!dump.contains("allowlist"));
+    // and no top-level selection / guest-set-hash field leaked in
+    let top = art.as_object().unwrap();
+    assert!(!top.contains_key("selected_candidate"));
+    assert!(!top.contains_key("r0_guest_set_hash"));
 }

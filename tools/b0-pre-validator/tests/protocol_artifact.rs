@@ -1,6 +1,7 @@
-//! The committed normative artifact is byte-locked to `protocol::frozen()`,
-//! strict-parses, validates against its committed schema, is `not_finalizable`,
-//! and rejects unknown fields.
+//! The committed normative artifact is byte-locked to
+//! `protocol::ratified_finalized()`, strict-parses, validates against its
+//! committed schema, is `finalizable`, and rejects unknown fields. The
+//! `frozen()` preregistration template stays permanently `not_finalizable`.
 
 use b0_pre_validator::protocol::B0PreProtocolV1;
 
@@ -14,19 +15,58 @@ const SCHEMA: &str = include_str!(concat!(
 ));
 
 #[test]
-fn artifact_byte_locked_to_frozen_model() {
+fn artifact_byte_locked_to_ratified_finalized_model() {
     let regen = format!(
         "{}\n",
-        serde_json::to_string_pretty(&B0PreProtocolV1::frozen()).unwrap()
+        serde_json::to_string_pretty(&B0PreProtocolV1::ratified_finalized()).unwrap()
     );
     assert_eq!(
         regen, ARTIFACT,
-        "committed artifact drifted from protocol::frozen(); re-run `cargo run --example emit_protocol`"
+        "committed artifact drifted from protocol::ratified_finalized(); re-run `cargo run --example emit_protocol`"
     );
 }
 
 #[test]
-fn artifact_is_not_finalizable_and_semantically_consistent() {
+fn committed_artifact_is_finalizable_and_semantically_consistent() {
+    // The committed normative artifact is the owner-RATIFIED, FINALIZED form.
+    let p = B0PreProtocolV1::ratified_finalized();
+    assert!(p.is_finalizable());
+    assert_eq!(p.finalization.state, "finalizable");
+    assert!(
+        p.finalization.blocked_on.is_empty(),
+        "finalized artifact is blocked on nothing"
+    );
+    assert!(
+        p.semantic_violations().is_empty(),
+        "{:?}",
+        p.semantic_violations()
+    );
+    // all three Stage-1 categories are resolved (present)
+    assert!(p.pending_inputs.candidate_container_digests.is_some());
+    assert!(p.pending_inputs.cargo_lock_hashes.is_some());
+    assert!(p.pending_inputs.verifier_material_manifests.is_some());
+    // both official statements present, distinct indices
+    assert_eq!(p.official_statements.statements.len(), 2);
+    assert_ne!(
+        p.official_statements.statements[0].statement_index,
+        p.official_statements.statements[1].statement_index
+    );
+    // toolchains stay distinct (1.85 floor vs 1.88 container)
+    assert_ne!(
+        p.toolchains.validator_tool_rust_floor,
+        p.toolchains.candidate_container_rust
+    );
+    // the committed bytes parse back to exactly this artifact
+    let from_file: B0PreProtocolV1 = serde_json::from_str(ARTIFACT).unwrap();
+    assert_eq!(
+        serde_json::to_string_pretty(&from_file).unwrap(),
+        serde_json::to_string_pretty(&p).unwrap()
+    );
+}
+
+#[test]
+fn frozen_template_is_not_finalizable_and_semantically_consistent() {
+    // The frozen() preregistration template stays permanently not_finalizable.
     let p = B0PreProtocolV1::frozen();
     assert!(!p.is_finalizable());
     assert_eq!(p.finalization.state, "not_finalizable");
@@ -53,6 +93,18 @@ fn artifact_is_not_finalizable_and_semantically_consistent() {
     assert_ne!(
         p.toolchains.validator_tool_rust_floor,
         p.toolchains.candidate_container_rust
+    );
+    // frozen() and ratified_finalized() differ ONLY in finalization + pending_inputs
+    let mut frozen_v = serde_json::to_value(&p).unwrap();
+    let mut ratified_v = serde_json::to_value(B0PreProtocolV1::ratified_finalized()).unwrap();
+    for v in [&mut frozen_v, &mut ratified_v] {
+        let o = v.as_object_mut().unwrap();
+        o.remove("finalization");
+        o.remove("pending_inputs");
+    }
+    assert_eq!(
+        frozen_v, ratified_v,
+        "every key other than finalization + pending_inputs must be byte-identical"
     );
 }
 

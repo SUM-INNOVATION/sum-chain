@@ -20,6 +20,17 @@ const EXP_CERT_HASH: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../docs/b0-pre/exp/exp_table_certificate.json.hash"
 ));
+const SPEC_HASH_FILE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../docs/b0-pre/protocol/b0-pre-protocol-v1.json.hash"
+));
+const COMMITTED_ARTIFACT: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../docs/b0-pre/protocol/b0-pre-protocol-v1.json"
+));
+
+/// The real, owner-ratified `b0_pre_spec_hash`.
+const REAL_SPEC_HASH: &str = "201cfcb80e94a5a7845dc3380cde32171d40f325ae2bacde9547f3c0da3c4df3";
 
 fn hx(b: &[u8]) -> String {
     use std::fmt::Write;
@@ -51,6 +62,36 @@ fn golden_vectors_reproduced_from_test_artifact() {
     );
     assert_eq!(preimage.len() as u64, g["preimage_len"].as_u64().unwrap());
     assert_eq!(hx(&hash), g["preimage_blake3"].as_str().unwrap());
+}
+
+#[test]
+fn ratified_finalized_produces_the_real_spec_hash() {
+    let p = B0PreProtocolV1::ratified_finalized();
+    assert!(p.is_finalizable());
+    assert!(
+        p.semantic_violations().is_empty(),
+        "{:?}",
+        p.semantic_violations()
+    );
+
+    // the crate computes the real b0_pre_spec_hash
+    let hash = protocol_hash(&p).expect("real b0_pre_spec_hash");
+    assert_eq!(hx(&hash), REAL_SPEC_HASH, "real b0_pre_spec_hash");
+
+    // the committed .json.hash sidecar is exactly that hash + one trailing newline
+    assert_eq!(
+        SPEC_HASH_FILE,
+        format!("{REAL_SPEC_HASH}\n"),
+        "sidecar must be the real hash + exactly one trailing newline"
+    );
+
+    // end-to-end: the committed normative JSON itself hashes to the real spec hash
+    let from_file: B0PreProtocolV1 = serde_json::from_str(COMMITTED_ARTIFACT).unwrap();
+    assert_eq!(
+        hx(&protocol_hash(&from_file).unwrap()),
+        REAL_SPEC_HASH,
+        "committed b0-pre-protocol-v1.json must hash to the real b0_pre_spec_hash"
+    );
 }
 
 #[test]
@@ -184,6 +225,7 @@ fn every_committed_json_fixture_strict_parses() {
     let base = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/b0-pre");
     let fixtures = [
         "protocol/b0-pre-protocol-v1.json",
+        "protocol/b0-pre-stage1-ratified-bundle.json",
         "protocol/hash-golden.json",
         "exp/exp_table_q16.json",
         "exp/exp_table_certificate.json",

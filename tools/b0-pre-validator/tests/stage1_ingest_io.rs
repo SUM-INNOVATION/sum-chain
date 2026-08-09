@@ -204,7 +204,14 @@ fn committed_artifact_target_is_refused() {
     let after = std::fs::read(&committed).ok();
     assert_eq!(before, after, "committed artifact must be untouched");
     let text = String::from_utf8(after.unwrap()).unwrap();
-    assert!(text.contains("\"not_finalizable\""));
+    // the committed normative artifact is the finalized form and stays intact
+    // (the string "not_finalizable" still appears in the normative rule prose, so
+    // pin the finalization STATE field specifically rather than any substring)
+    assert!(
+        text.contains("\"state\": \"finalizable\"")
+            && !text.contains("\"state\": \"not_finalizable\""),
+        "committed artifact must remain the finalized normative artifact"
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 

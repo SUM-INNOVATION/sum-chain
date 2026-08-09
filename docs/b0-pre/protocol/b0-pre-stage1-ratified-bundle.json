@@ -1,0 +1,281 @@
+{
+  "schema_version": 1,
+  "bundle_kind": "b0-pre-stage1-result-bundle-v1",
+  "classification": "AUTHORITATIVE_STAGE1",
+  "all_reproducible": true,
+  "candidate_container_digests": [
+    {
+      "candidate": "Sp1",
+      "role": "base",
+      "arch": "X86_64",
+      "image_digest": "sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e",
+      "image_digest_build1": "sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e",
+      "image_digest_build2": "sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e",
+      "base_image_ref": "docker.io/library/debian",
+      "base_image_digest": "sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e",
+      "builder_oci_ref": "oci:local/b0pre-sp1-x86_64",
+      "builder_oci_digest": "sha256:e02fcff3b552689519334da1af66c96e4b162b84fb57977dbab2948c45448dc9",
+      "source_commit_hex": "eff3aae18b49969212c4c1493da20f97af195de2",
+      "build_command_log_blake3_hex": "88d130eb9837f8b1123f075deec10a51774e345954edce207cd869609f84da9f",
+      "raw_build_output_blake3_hex": "aa6ebaa49ad21856f9996bb8d915e7e3a2e46a9f8bdc23841ac93395feb2b50c",
+      "domain_ascii": "SUMCHAIN/B0PRE/CONTAINER/v1"
+    },
+    {
+      "candidate": "Sp1",
+      "role": "builder",
+      "arch": "X86_64",
+      "image_digest": "sha256:e02fcff3b552689519334da1af66c96e4b162b84fb57977dbab2948c45448dc9",
+      "image_digest_build1": "sha256:e02fcff3b552689519334da1af66c96e4b162b84fb57977dbab2948c45448dc9",
+      "image_digest_build2": "sha256:e02fcff3b552689519334da1af66c96e4b162b84fb57977dbab2948c45448dc9",
+      "base_image_ref": "docker.io/library/debian",
+      "base_image_digest": "sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e",
+      "builder_oci_ref": "oci:local/b0pre-sp1-x86_64",
+      "builder_oci_digest": "sha256:e02fcff3b552689519334da1af66c96e4b162b84fb57977dbab2948c45448dc9",
+      "source_commit_hex": "eff3aae18b49969212c4c1493da20f97af195de2",
+      "build_command_log_blake3_hex": "5973c7b1a389f53adbd52012cb0dc39615677aff7d14fff768b1a1389a7f9566",
+      "raw_build_output_blake3_hex": "a6af84e40d5a17815daf15eb56b46529c42894ae4b79490e49176f0b32a160b8",
+      "domain_ascii": "SUMCHAIN/B0PRE/CONTAINER/v1"
+    },
+    {
+      "candidate": "Risc0",
+      "role": "base",
+      "arch": "X86_64",
+      "image_digest": "sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e",
+      "image_digest_build1": "sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e",
+      "image_digest_build2": "sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e",
+      "base_image_ref": "docker.io/library/debian",
+      "base_image_digest": "sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e",
+      "builder_oci_ref": "oci:local/b0pre-risc0-x86_64",
+      "builder_oci_digest": "sha256:0504021c55895cc67a53b159c10df68cb16339a447cb35b7d4a9fe9a4d3607de",
+      "source_commit_hex": "eff3aae18b49969212c4c1493da20f97af195de2",
+      "build_command_log_blake3_hex": "88d130eb9837f8b1123f075deec10a51774e345954edce207cd869609f84da9f",
+      "raw_build_output_blake3_hex": "aa6ebaa49ad21856f9996bb8d915e7e3a2e46a9f8bdc23841ac93395feb2b50c",
+      "domain_ascii": "SUMCHAIN/B0PRE/CONTAINER/v1"
+    },
+    {
+      "candidate": "Risc0",
+      "role": "builder",
+      "arch": "X86_64",
+      "image_digest": "sha256:0504021c55895cc67a53b159c10df68cb16339a447cb35b7d4a9fe9a4d3607de",
+      "image_digest_build1": "sha256:0504021c55895cc67a53b159c10df68cb16339a447cb35b7d4a9fe9a4d3607de",
+      "image_digest_build2": "sha256:0504021c55895cc67a53b159c10df68cb16339a447cb35b7d4a9fe9a4d3607de",
+      "base_image_ref": "docker.io/library/debian",
+      "base_image_digest": "sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e",
+      "builder_oci_ref": "oci:local/b0pre-risc0-x86_64",
+      "builder_oci_digest": "sha256:0504021c55895cc67a53b159c10df68cb16339a447cb35b7d4a9fe9a4d3607de",
+      "source_commit_hex": "eff3aae18b49969212c4c1493da20f97af195de2",
+      "build_command_log_blake3_hex": "7f1b063b5087c29626eb5cbfdf3e428fedad2a89b8e604256e1b04a0d24b7f43",
+      "raw_build_output_blake3_hex": "6930299fa40b8b10f6244bc3aa0b30e8c9326acf9bf52442106da5b64c37d983",
+      "domain_ascii": "SUMCHAIN/B0PRE/CONTAINER/v1"
+    },
+    {
+      "candidate": "Sp1",
+      "role": "base",
+      "arch": "Aarch64",
+      "image_digest": "sha256:9b67294679b30e5d6ab257b40594feeb4a4b81f7fcf4131f4decf0d6a212a9b0",
+      "image_digest_build1": "sha256:9b67294679b30e5d6ab257b40594feeb4a4b81f7fcf4131f4decf0d6a212a9b0",
+      "image_digest_build2": "sha256:9b67294679b30e5d6ab257b40594feeb4a4b81f7fcf4131f4decf0d6a212a9b0",
+      "base_image_ref": "docker.io/library/debian",
+      "base_image_digest": "sha256:9b67294679b30e5d6ab257b40594feeb4a4b81f7fcf4131f4decf0d6a212a9b0",
+      "builder_oci_ref": "oci:local/b0pre-sp1-aarch64",
+      "builder_oci_digest": "sha256:0be61c8f1bf0fd7c5e32978cc8b12f3051f638b563c783b7980bd13fdd3ddb6b",
+      "source_commit_hex": "eff3aae18b49969212c4c1493da20f97af195de2",
+      "build_command_log_blake3_hex": "aade4f09a347ab5e0db2cd33f80d45205c8d7caa072f6c8b44dca47d1962d735",
+      "raw_build_output_blake3_hex": "5ce333c00a29369413eb87c7d41925f74f9d587dc763f5547b13326d2c3e90f1",
+      "domain_ascii": "SUMCHAIN/B0PRE/CONTAINER/v1"
+    },
+    {
+      "candidate": "Sp1",
+      "role": "builder",
+      "arch": "Aarch64",
+      "image_digest": "sha256:0be61c8f1bf0fd7c5e32978cc8b12f3051f638b563c783b7980bd13fdd3ddb6b",
+      "image_digest_build1": "sha256:0be61c8f1bf0fd7c5e32978cc8b12f3051f638b563c783b7980bd13fdd3ddb6b",
+      "image_digest_build2": "sha256:0be61c8f1bf0fd7c5e32978cc8b12f3051f638b563c783b7980bd13fdd3ddb6b",
+      "base_image_ref": "docker.io/library/debian",
+      "base_image_digest": "sha256:9b67294679b30e5d6ab257b40594feeb4a4b81f7fcf4131f4decf0d6a212a9b0",
+      "builder_oci_ref": "oci:local/b0pre-sp1-aarch64",
+      "builder_oci_digest": "sha256:0be61c8f1bf0fd7c5e32978cc8b12f3051f638b563c783b7980bd13fdd3ddb6b",
+      "source_commit_hex": "eff3aae18b49969212c4c1493da20f97af195de2",
+      "build_command_log_blake3_hex": "5a3ba3fe1ee91d993293d764f85fbc18605d9064ebfd2c7007d4a430c8bd244a",
+      "raw_build_output_blake3_hex": "93e142d3a6a3ea550b4b81fa2c4d10f8c81543a6459eade0f64d293ef0589fb7",
+      "domain_ascii": "SUMCHAIN/B0PRE/CONTAINER/v1"
+    },
+    {
+      "candidate": "Risc0",
+      "role": "base",
+      "arch": "Aarch64",
+      "image_digest": "sha256:9b67294679b30e5d6ab257b40594feeb4a4b81f7fcf4131f4decf0d6a212a9b0",
+      "image_digest_build1": "sha256:9b67294679b30e5d6ab257b40594feeb4a4b81f7fcf4131f4decf0d6a212a9b0",
+      "image_digest_build2": "sha256:9b67294679b30e5d6ab257b40594feeb4a4b81f7fcf4131f4decf0d6a212a9b0",
+      "base_image_ref": "docker.io/library/debian",
+      "base_image_digest": "sha256:9b67294679b30e5d6ab257b40594feeb4a4b81f7fcf4131f4decf0d6a212a9b0",
+      "builder_oci_ref": "oci:local/b0pre-risc0-aarch64",
+      "builder_oci_digest": "sha256:123879fa6c02a1c9ec68165187be054f193e6b9603d21f104b6b9d6e132f48c7",
+      "source_commit_hex": "eff3aae18b49969212c4c1493da20f97af195de2",
+      "build_command_log_blake3_hex": "aade4f09a347ab5e0db2cd33f80d45205c8d7caa072f6c8b44dca47d1962d735",
+      "raw_build_output_blake3_hex": "5ce333c00a29369413eb87c7d41925f74f9d587dc763f5547b13326d2c3e90f1",
+      "domain_ascii": "SUMCHAIN/B0PRE/CONTAINER/v1"
+    },
+    {
+      "candidate": "Risc0",
+      "role": "builder",
+      "arch": "Aarch64",
+      "image_digest": "sha256:123879fa6c02a1c9ec68165187be054f193e6b9603d21f104b6b9d6e132f48c7",
+      "image_digest_build1": "sha256:123879fa6c02a1c9ec68165187be054f193e6b9603d21f104b6b9d6e132f48c7",
+      "image_digest_build2": "sha256:123879fa6c02a1c9ec68165187be054f193e6b9603d21f104b6b9d6e132f48c7",
+      "base_image_ref": "docker.io/library/debian",
+      "base_image_digest": "sha256:9b67294679b30e5d6ab257b40594feeb4a4b81f7fcf4131f4decf0d6a212a9b0",
+      "builder_oci_ref": "oci:local/b0pre-risc0-aarch64",
+      "builder_oci_digest": "sha256:123879fa6c02a1c9ec68165187be054f193e6b9603d21f104b6b9d6e132f48c7",
+      "source_commit_hex": "eff3aae18b49969212c4c1493da20f97af195de2",
+      "build_command_log_blake3_hex": "bea49da7fb89d348fbc34f913fae8e25284a30ce54f66a98f29aefdf0aec132d",
+      "raw_build_output_blake3_hex": "288cc59348b7fd442548c8d3fba124dde46bc47fcbf64b8b34681fc7b2742463",
+      "domain_ascii": "SUMCHAIN/B0PRE/CONTAINER/v1"
+    }
+  ],
+  "cargo_lock_hashes": [
+    {
+      "candidate": "Sp1",
+      "blake3_hex": "efbb1818198e703a7842784319d9c1e50ca93750e52adcc14b967960f880bb60",
+      "domain_ascii": "SUMCHAIN/B0PRE/CARGOLOCK/v1"
+    },
+    {
+      "candidate": "Risc0",
+      "blake3_hex": "357730ce885222980fe9de277f04841f3beeb78c107e33e867eb5dd13cd7c782",
+      "domain_ascii": "SUMCHAIN/B0PRE/CARGOLOCK/v1"
+    }
+  ],
+  "verifier_material_manifests": [
+    {
+      "candidate": "Sp1",
+      "stamp": [
+        "TEST_ONLY",
+        "NON_SELECTION",
+        "INVALID_FOR_R0",
+        "NOT_AN_OFFICIAL_GUEST"
+      ],
+      "entries": [
+        {
+          "role": "groth16_vk",
+          "label": "groth16_vk",
+          "byte_len": 492,
+          "blake3_hex": "33ad4e9867046065a1c5e6a1eb30f06522ca427c9c0cc0a6d5f6dbe0eefde198"
+        }
+      ],
+      "total_bytes": 492,
+      "manifest_hash_hex": "aeae35b3be8e948643a1aa000c070be35b671d3643c17973158fe9caa835b8b9",
+      "domain_ascii": "SUMCHAIN/B0PRE/VMAT/v1"
+    },
+    {
+      "candidate": "Risc0",
+      "stamp": [
+        "TEST_ONLY",
+        "NON_SELECTION",
+        "INVALID_FOR_R0",
+        "NOT_AN_OFFICIAL_GUEST"
+      ],
+      "entries": [
+        {
+          "role": "groth16_vk",
+          "label": "groth16_vk",
+          "byte_len": 32,
+          "blake3_hex": "fcc9056cafe0c832f171efcd5efb8be6bb543623fe2c76ea47a5a639df01f10d"
+        },
+        {
+          "role": "control_root",
+          "label": "control_root",
+          "byte_len": 32,
+          "blake3_hex": "2e9792eb19d618cd81680ca2a58e7b3f11e5f077877caaa377c3ec99060df0f4"
+        },
+        {
+          "role": "control_id",
+          "label": "control_id",
+          "byte_len": 32,
+          "blake3_hex": "76f6504218fcc02e8434e68f25186765615b943f60b69e190c9761e65a0ede3b"
+        },
+        {
+          "role": "verifier_params",
+          "label": "verifier_params",
+          "byte_len": 32,
+          "blake3_hex": "33e49cd6c6931797b2df564441600b254ceb8e04d24746f43c5786c6ea30b572"
+        }
+      ],
+      "total_bytes": 128,
+      "manifest_hash_hex": "1d7d07b83b9942af66614a97ef30c54832149ce853e5f020c20d9dd1254c460c",
+      "domain_ascii": "SUMCHAIN/B0PRE/VMAT/v1"
+    }
+  ],
+  "native_build_provenance": [
+    {
+      "candidate": "Sp1",
+      "arch": "X86_64",
+      "host_arch": "X86_64",
+      "native_arch": true,
+      "two_build_reproducible": true
+    },
+    {
+      "candidate": "Risc0",
+      "arch": "X86_64",
+      "host_arch": "X86_64",
+      "native_arch": true,
+      "two_build_reproducible": true
+    },
+    {
+      "candidate": "Sp1",
+      "arch": "Aarch64",
+      "host_arch": "Aarch64",
+      "native_arch": true,
+      "two_build_reproducible": true
+    },
+    {
+      "candidate": "Risc0",
+      "arch": "Aarch64",
+      "host_arch": "Aarch64",
+      "native_arch": true,
+      "two_build_reproducible": true
+    }
+  ],
+  "tool_identities": [
+    {
+      "candidate": "Sp1",
+      "rust_version": "1.88.0",
+      "proof_tools": [
+        {
+          "name": "sp1-verifier",
+          "version": "6.3.1",
+          "artifact_identity": "https://github.com/succinctlabs/sp1/releases/download/v6.3.1/cargo_prove_v6.3.1_linux_amd64.tar.gz",
+          "checksum_algorithm": "sha256",
+          "checksum_hex": "c9d6ee7667fa9e0a2302324a6bb0295c55f6acf0e17a242ad11ee45767bb08df",
+          "install_entrypoint": "curl -fsSL https://github.com/succinctlabs/sp1/releases/download/v6.3.1/cargo_prove_v6.3.1_linux_amd64.tar.gz | tar -xzO cargo-prove > \"$TOOL_INSTALL_DEST\" && chmod +x \"$TOOL_INSTALL_DEST\""
+        }
+      ]
+    },
+    {
+      "candidate": "Risc0",
+      "rust_version": "1.88.0",
+      "proof_tools": [
+        {
+          "name": "risc0-zkvm",
+          "version": "3.0.5",
+          "artifact_identity": "https://github.com/risc0/risc0/releases/download/v3.0.5/cargo-risczero-x86_64-unknown-linux-gnu.tgz",
+          "checksum_algorithm": "sha256",
+          "checksum_hex": "936ef988b78f20e3bd9f80e375f3adc934b13addc6ae2680f2e5fc0bcc966158",
+          "install_entrypoint": "curl -fsSL https://github.com/risc0/risc0/releases/download/v3.0.5/cargo-risczero-x86_64-unknown-linux-gnu.tgz | tar -xzO r0vm > \"$TOOL_INSTALL_DEST\" && chmod +x \"$TOOL_INSTALL_DEST\""
+        },
+        {
+          "name": "risc0-groth16",
+          "version": "3.0.4",
+          "artifact_identity": "https://github.com/risc0/risc0/releases/download/v3.0.5/cargo-risczero-x86_64-unknown-linux-gnu.tgz",
+          "checksum_algorithm": "sha256",
+          "checksum_hex": "936ef988b78f20e3bd9f80e375f3adc934b13addc6ae2680f2e5fc0bcc966158",
+          "install_entrypoint": "curl -fsSL https://github.com/risc0/risc0/releases/download/v3.0.5/cargo-risczero-x86_64-unknown-linux-gnu.tgz | tar -xzO cargo-risczero > \"$TOOL_INSTALL_DEST\" && chmod +x \"$TOOL_INSTALL_DEST\""
+        }
+      ]
+    }
+  ],
+  "reproducibility": {
+    "all_container_digests_two_build_reproducible": true,
+    "in_container_lock_resolution": true,
+    "verifier_material_reproduced": true
+  }
+}

@@ -1,8 +1,11 @@
 //! Emit the normative B0-PRE protocol artifact `b0-pre-protocol-v1.json`.
 //!
-//! The artifact is assembled purely from the crate's frozen definitions and is
-//! `not_finalizable` (every implementation-produced field is absent). Committed
-//! as pretty JSON for review; the hash preimage canonicalizes it separately.
+//! The committed artifact is the owner-RATIFIED, FINALIZED form
+//! ([`B0PreProtocolV1::ratified_finalized`]): the `frozen()` preregistration
+//! template with its three Stage-1 categories resolved through the production
+//! Stage-1 ingestion transition. It is `finalizable`, so `protocol_hash()` of it
+//! is the real `b0_pre_spec_hash`. Committed as pretty JSON for review; the hash
+//! preimage canonicalizes it separately.
 
 use std::fs;
 use std::path::Path;
@@ -10,16 +13,13 @@ use std::path::Path;
 use b0_pre_validator::protocol::B0PreProtocolV1;
 
 fn main() {
-    let p = B0PreProtocolV1::frozen();
+    let p = B0PreProtocolV1::ratified_finalized();
     assert!(
         p.semantic_violations().is_empty(),
-        "frozen artifact has semantic violations: {:?}",
+        "ratified artifact has semantic violations: {:?}",
         p.semantic_violations()
     );
-    assert!(
-        !p.is_finalizable(),
-        "frozen artifact must be not_finalizable"
-    );
+    assert!(p.is_finalizable(), "ratified artifact must be finalizable");
 
     let json = serde_json::to_string_pretty(&p).expect("serialize");
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/b0-pre/protocol");

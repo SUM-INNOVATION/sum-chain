@@ -2,12 +2,8 @@
   "artifact_id": "b0-pre-protocol-v1",
   "spec_version": "b0-pre/v11",
   "finalization": {
-    "state": "not_finalizable",
-    "blocked_on": [
-      "candidate_container_digests",
-      "cargo_lock_hashes",
-      "verifier_material_manifests"
-    ],
+    "state": "finalizable",
+    "blocked_on": [],
     "note": "Blocked until the three Stage-1 categories exist: candidate container digests (base + per-arch builder), candidate dependency lock hashes, and candidate verifier-material manifests. Guest closure (r0_guest_set_hash, guest-program identities, populated allowlist) is post-spec-hash and is NOT required here. No fabricated values are inserted; protocol_hash refuses to run until then."
   },
   "toolchains": {
@@ -917,5 +913,90 @@
     ],
     "note": "Two stages, in order. Stage 1 hashes only the material above into b0_pre_spec_hash before any guest exists. Guests then embed that hash, so r0_guest_set_hash and guest identities are derived afterwards and can never feed back into the spec-hash preimage."
   },
-  "pending_inputs": {}
+  "pending_inputs": {
+    "candidate_container_digests": [
+      {
+        "candidate": "Sp1",
+        "role": "base",
+        "arch": "X86_64",
+        "image_digest": "sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e",
+        "domain_ascii": "SUMCHAIN/B0PRE/CONTAINER/v1"
+      },
+      {
+        "candidate": "Sp1",
+        "role": "builder",
+        "arch": "X86_64",
+        "image_digest": "sha256:e02fcff3b552689519334da1af66c96e4b162b84fb57977dbab2948c45448dc9",
+        "domain_ascii": "SUMCHAIN/B0PRE/CONTAINER/v1"
+      },
+      {
+        "candidate": "Risc0",
+        "role": "base",
+        "arch": "X86_64",
+        "image_digest": "sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e",
+        "domain_ascii": "SUMCHAIN/B0PRE/CONTAINER/v1"
+      },
+      {
+        "candidate": "Risc0",
+        "role": "builder",
+        "arch": "X86_64",
+        "image_digest": "sha256:0504021c55895cc67a53b159c10df68cb16339a447cb35b7d4a9fe9a4d3607de",
+        "domain_ascii": "SUMCHAIN/B0PRE/CONTAINER/v1"
+      },
+      {
+        "candidate": "Sp1",
+        "role": "base",
+        "arch": "Aarch64",
+        "image_digest": "sha256:9b67294679b30e5d6ab257b40594feeb4a4b81f7fcf4131f4decf0d6a212a9b0",
+        "domain_ascii": "SUMCHAIN/B0PRE/CONTAINER/v1"
+      },
+      {
+        "candidate": "Sp1",
+        "role": "builder",
+        "arch": "Aarch64",
+        "image_digest": "sha256:0be61c8f1bf0fd7c5e32978cc8b12f3051f638b563c783b7980bd13fdd3ddb6b",
+        "domain_ascii": "SUMCHAIN/B0PRE/CONTAINER/v1"
+      },
+      {
+        "candidate": "Risc0",
+        "role": "base",
+        "arch": "Aarch64",
+        "image_digest": "sha256:9b67294679b30e5d6ab257b40594feeb4a4b81f7fcf4131f4decf0d6a212a9b0",
+        "domain_ascii": "SUMCHAIN/B0PRE/CONTAINER/v1"
+      },
+      {
+        "candidate": "Risc0",
+        "role": "builder",
+        "arch": "Aarch64",
+        "image_digest": "sha256:123879fa6c02a1c9ec68165187be054f193e6b9603d21f104b6b9d6e132f48c7",
+        "domain_ascii": "SUMCHAIN/B0PRE/CONTAINER/v1"
+      }
+    ],
+    "cargo_lock_hashes": [
+      {
+        "name": "Sp1",
+        "blake3_hex": "efbb1818198e703a7842784319d9c1e50ca93750e52adcc14b967960f880bb60",
+        "domain_ascii": "SUMCHAIN/B0PRE/CARGOLOCK/v1"
+      },
+      {
+        "name": "Risc0",
+        "blake3_hex": "357730ce885222980fe9de277f04841f3beeb78c107e33e867eb5dd13cd7c782",
+        "domain_ascii": "SUMCHAIN/B0PRE/CARGOLOCK/v1"
+      }
+    ],
+    "verifier_material_manifests": [
+      {
+        "candidate": "Sp1",
+        "manifest_hash_hex": "aeae35b3be8e948643a1aa000c070be35b671d3643c17973158fe9caa835b8b9",
+        "total_bytes": 492,
+        "domain_ascii": "SUMCHAIN/B0PRE/VMAT/v1"
+      },
+      {
+        "candidate": "Risc0",
+        "manifest_hash_hex": "1d7d07b83b9942af66614a97ef30c54832149ce853e5f020c20d9dd1254c460c",
+        "total_bytes": 128,
+        "domain_ascii": "SUMCHAIN/B0PRE/VMAT/v1"
+      }
+    ]
+  }
 }

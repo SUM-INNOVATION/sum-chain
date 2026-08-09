@@ -1155,6 +1155,39 @@ impl B0PreProtocolV1 {
             pending_inputs: pending,
         }
     }
+
+    /// The owner-RATIFIED, FINALIZED normative B0-PRE artifact: [`frozen()`] with
+    /// its three Stage-1 categories resolved by the real, owner-ratified venue
+    /// evidence, produced through the SAME production Stage-1 ingestion transition
+    /// the `stage1-ingest` binary runs —
+    /// [`crate::schema::stage1_bundle::build_finalizable_artifact`], never a second
+    /// finalization algorithm. [`frozen()`] itself stays the permanently
+    /// `not_finalizable` preregistration template; this constructor is the sole
+    /// finalized form, and the committed normative artifact is byte-locked to it.
+    ///
+    /// The embedded ratified Stage-1 result bundle
+    /// (`docs/b0-pre/protocol/b0-pre-stage1-ratified-bundle.json`, classification
+    /// `AUTHORITATIVE_STAGE1`) is the deterministic cross-architecture aggregate
+    /// `6c7537d3…314c` — assembled by `stage6-assemble` from the two independently
+    /// import-verified per-architecture evidence bundles, x86_64 `63cb7ab7…c6ca`
+    /// and aarch64 `de63a1e5…16e2` — at source evidence head
+    /// `eff3aae18b49969212c4c1493da20f97af195de2`. It binds exactly the eight
+    /// candidate container digests (base + per-arch builder for {SP1, RISC Zero}),
+    /// the two candidate dependency-lock identities, and the two candidate
+    /// verifier-material manifests. It carries NO guest identity, allowlist, or
+    /// guest-set hash — those are post-spec-hash (B0-FINAL). `protocol_hash()` of
+    /// this artifact is the real `b0_pre_spec_hash`.
+    ///
+    /// [`frozen()`]: B0PreProtocolV1::frozen
+    pub fn ratified_finalized() -> Self {
+        const RATIFIED_STAGE1_BUNDLE: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/b0-pre/protocol/b0-pre-stage1-ratified-bundle.json"
+        ));
+        crate::schema::stage1_bundle::build_finalizable_artifact(RATIFIED_STAGE1_BUNDLE).expect(
+            "the owner-ratified Stage-1 result bundle must ingest to a finalizable artifact",
+        )
+    }
 }
 
 fn frozen_lifecycle() -> Lifecycle {

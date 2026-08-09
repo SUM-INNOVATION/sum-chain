@@ -32,8 +32,9 @@ use b0_pre_validator::durable::write_durably;
 use b0_pre_validator::schema::stage1_bundle::build_finalizable_artifact;
 
 /// The committed normative artifact, resolved at compile time. `<out>` must never
-/// resolve to this path — the pipeline emits a finalizable artifact and the
-/// committed one must stay `not_finalizable`.
+/// resolve to this path — the committed normative artifact is the reviewed,
+/// emitter-produced finalized artifact (`emit_protocol`); an ad-hoc ingest run
+/// writes a temp target and must never overwrite it.
 const COMMITTED_ARTIFACT: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../docs/b0-pre/protocol/b0-pre-protocol-v1.json"
@@ -68,7 +69,8 @@ fn run() -> Result<String, String> {
     let bundle_path = PathBuf::from(bundle_path);
     let out_path = PathBuf::from(out_path);
 
-    // Guard: never write the committed normative artifact to a finalizable state.
+    // Guard: an ad-hoc ingest run must never overwrite the committed normative
+    // artifact; it is (re)generated only through the reviewed emitter.
     if resolve(&out_path) == resolve(Path::new(COMMITTED_ARTIFACT)) {
         return Err(
             "refusing to write the committed normative artifact; <out> must be a temp target"

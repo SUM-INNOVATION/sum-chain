@@ -42,6 +42,42 @@ fn resolving_exactly_the_three_categories_makes_it_finalizable() {
 }
 
 #[test]
+fn ratified_finalized_equals_stage1_ingestion_of_the_ratified_bundle() {
+    // The owner-RATIFIED, FINALIZED artifact is EXACTLY the production Stage-1
+    // ingestion (`build_finalizable_artifact` — the same transition `stage1-ingest`
+    // runs) applied to the committed owner-ratified Stage-1 result bundle,
+    // byte-for-byte. There is no second finalization algorithm.
+    const RATIFIED_BUNDLE: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/b0-pre/protocol/b0-pre-stage1-ratified-bundle.json"
+    ));
+    let ingested =
+        b0_pre_validator::schema::stage1_bundle::build_finalizable_artifact(RATIFIED_BUNDLE)
+            .expect("ratified Stage-1 bundle must ingest");
+    let ratified = B0PreProtocolV1::ratified_finalized();
+    assert_eq!(
+        serde_json::to_string_pretty(&ingested).unwrap(),
+        serde_json::to_string_pretty(&ratified).unwrap(),
+        "ratified_finalized() must equal Stage-1 ingestion of the ratified bundle, byte-for-byte"
+    );
+
+    // The ingestion strictly starts from frozen(): only `finalization` and
+    // `pending_inputs` differ from the not_finalizable preregistration template;
+    // every protocol/rule key is byte-identical.
+    let mut frozen_v = serde_json::to_value(B0PreProtocolV1::frozen()).unwrap();
+    let mut ratified_v = serde_json::to_value(&ratified).unwrap();
+    for v in [&mut frozen_v, &mut ratified_v] {
+        let o = v.as_object_mut().unwrap();
+        o.remove("finalization");
+        o.remove("pending_inputs");
+    }
+    assert_eq!(
+        frozen_v, ratified_v,
+        "frozen() and ratified_finalized() must differ ONLY in finalization + pending_inputs"
+    );
+}
+
+#[test]
 fn pending_inputs_has_no_field_capable_of_accepting_guest_closure() {
     // Every field a fully-populated PendingInputs can serialize — there is no
     // slot for a guest identity or the guest-set hash.

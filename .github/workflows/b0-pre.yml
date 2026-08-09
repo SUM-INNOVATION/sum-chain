@@ -255,15 +255,19 @@ jobs:
       - name: Fixture identities
         run: bash "$VAL/scripts/verify_fixtures.sh"
 
-      # --- Finalization is blocked -------------------------------------------
-      - name: Protocol hashing is blocked until candidate-produced fields exist
+      # --- Finalization is complete ------------------------------------------
+      - name: Protocol is finalized and carries the real b0_pre_spec_hash
         run: |
           bash "$VAL/scripts/finalization_readiness.sh"
+          grep -q '"state": "finalizable"' docs/b0-pre/protocol/b0-pre-protocol-v1.json \
+            || { echo "artifact must be finalizable at this stage"; exit 1; }
           grep -q '"state": "not_finalizable"' docs/b0-pre/protocol/b0-pre-protocol-v1.json \
-            || { echo "artifact must be not_finalizable at this stage"; exit 1; }
-          if [ -e docs/b0-pre/protocol/b0-pre-protocol-v1.hash ]; then
-            echo "final b0_pre_spec_hash must NOT be written while inputs are absent"; exit 1
-          fi
+            && { echo "finalized artifact must not carry state not_finalizable"; exit 1; } || true
+          test -f docs/b0-pre/protocol/b0-pre-protocol-v1.json.hash \
+            || { echo "the real b0_pre_spec_hash sidecar must be committed"; exit 1; }
+          grep -qx '201cfcb80e94a5a7845dc3380cde32171d40f325ae2bacde9547f3c0da3c4df3' \
+            docs/b0-pre/protocol/b0-pre-protocol-v1.json.hash \
+            || { echo "committed b0_pre_spec_hash sidecar mismatch"; exit 1; }
 
       - name: Diff check (whitespace / conflict markers)
         run: git diff --check
