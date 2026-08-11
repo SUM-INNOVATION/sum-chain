@@ -6,6 +6,11 @@ publish = false
 license = "MIT OR Apache-2.0"
 description = "B0-PRE (#123) independent cross-checker: a from-scratch re-derivation of the deterministic B0-PRE artifacts (exp table, fixtures, statement bytes, hashes) used to hold the reference validator to byte-for-byte agreement. Shares no executor code with b0-pre-validator."
 
+# Independent verifier CLI: re-verifies an ACTUAL produced package vector from scratch.
+[[bin]]
+name = "b0-pre-independent-verify"
+path = "src/bin/verify_package.rs"
+
 # Pinned per B0-PRE plan §1. Intentionally minimal: no schemars/jsonschema and
 # no shared code with the reference validator, so agreement is meaningful.
 [dependencies]

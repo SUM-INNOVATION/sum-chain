@@ -1,0 +1,29 @@
+[package]
+name = "b0-pre-measure-core"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "B0-FINAL measurement runner CORE (backend-agnostic). Owns the proving backend TRAIT (the sole crypto boundary), independent guest-identity binding + checked proof verification, container-cgroup + native RSS capture, real timing, the RawFacts emission contract, self-binary + backend-identity evidence binding, and fail-closed orchestration. Always compiles + is fully unit-tested off-venue via a test-only mock backend; the SP1/RISC0 SDK impls live in the venue-compiled runner crates behind --features real-backend."
+
+[dependencies]
+blake3 = "=1.6.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "=1.0.149", features = ["arbitrary_precision"] }
+# The candidate-neutral official guest computation. The runner recomputes the expected
+# statement journal (`computation_statement_hash`) from the materialized input HOST-SIDE and
+# binds every proof/receipt to it — so a valid proof for a different input cannot enter a cell.
+# No SDK: this compiles + is tested off-venue.
+b0-pre-guest-core = { path = "../b0-pre-candidates/guest-core" }
+# Peak-RSS of the NATIVE verification process (getrusage). The PROVING RSS is read from
+# the backend container's cgroup, never getrusage. libc is only the getrusage syscall
+# wrapper (not part of the crypto-identity pin cluster), so a compatible range is used so
+# it unifies with the SDK crates' libc requirement in the runner crates.
+libc = "0.2"
+
+# NB: the E2E contract test validates an emitted fragment against the REAL validator by
+# shelling out to its `measure-produce --validate` binary (built with the validator's own
+# lock), NOT via a dev-dependency — a path dep drags the validator's heavier transitive
+# graph (icu/time needing a newer rustc) into this light crate's resolution.
+
+[workspace]

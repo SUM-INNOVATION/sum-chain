@@ -1152,3 +1152,65 @@ b0pre_lifecycle_guard() {
       ;;
   esac
 }
+
+# ===========================================================================================
+# B0-FINAL measurement identity helpers (ADDITIVE; unused by R5). Both the phase-1 identity
+# emitter (derive_guest_set.sh) and the measurement orchestrator (measure_fragment.sh) call
+# these so the identities they derive are BYTE-IDENTICAL — a precondition for cross-arch
+# reconciliation and the phase-1<->measurement identity compare.
+# ===========================================================================================
+
+# Canonical, ARCH-NEUTRAL, deterministic guest build-recipe hash (BLAKE3). The arch-specific
+# builder image is bound separately as builder_container_digest (per-arch), never in the recipe.
+b0_build_recipe_hash() { # <sp1|risc0>
+  local recipe
+  case "$1" in
+    sp1)   recipe='b0-final-guest-recipe/v1|sp1|cargo prove build --output-directory /out/guest --elf-name guest.elf' ;;
+    risc0) recipe='b0-final-guest-recipe/v1|risc0|risc0_build::embed_methods(pinned-local-r0-toolchain,B0_VENUE_EMBED=1)' ;;
+    *) return 1 ;;
+  esac
+  printf '%s' "$recipe" | b3sum | awk '{print $1}'
+}
+
+# Toolchain identity (BLAKE3, 64-hex) bound to the RATIFIED provisioned toolchain — never a
+# synthetic label. sp1: the pinned builder IMAGE digest (the SP1 toolchain lives inside it);
+# risc0: the pinned local r0 toolchain TREE (PROVER_RISC0_HOME), hashed deterministically.
+b0_toolchain_identity() { # <sp1|risc0> <sp1-image-id | r0-home-dir>
+  case "$1" in
+    sp1)
+      printf 'b0-final-toolchain/v1|sp1|%s' "$2" | b3sum | awk '{print $1}'
+      ;;
+    risc0)
+      [ -d "$2" ] || return 1
+      { printf 'b0-final-toolchain/v1|risc0|'
+        ( cd "$2" && find . -type f | LC_ALL=C sort | while IFS= read -r f; do b3sum "$f"; done )
+      } | b3sum | awk '{print $1}'
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+# The OWNER-RATIFIED hash of docs/b0-pre/venue/toolchain-authority.v1.json. The toolchain
+# authority is that content-addressed committed record, VERIFIED against this constant before a
+# value is sourced — so the expected toolchain identity is never an unauthenticated operator
+# environment variable. Update BOTH the record and this constant in the same reviewed commit.
+B0_RATIFIED_TOOLCHAIN_AUTHORITY_B3="e9ccf26c782a8de569a2b7a3af028edfe425384dc65c5562957a0ed9930392a9"
+
+# Print the RATIFIED expected toolchain identity for <Cand> <arch>, sourced ONLY from the
+# content-addressed authority record AFTER verifying its hash equals the ratified constant.
+# Fail-closed on a tampered/wrong-hash record or a missing/malformed entry.
+b0_ratified_toolchain_identity() { # <Sp1|Risc0> <x86_64|aarch64> <authority-record-path>
+  local cand="$1" arch="$2" rec="$3"
+  [ -f "$rec" ] || { echo "toolchain-authority record not found: $rec" >&2; return 1; }
+  local got; got="$(b3sum "$rec" | awk '{print $1}')"
+  [ "$got" = "$B0_RATIFIED_TOOLCHAIN_AUTHORITY_B3" ] \
+    || { echo "toolchain-authority record hash $got != ratified $B0_RATIFIED_TOOLCHAIN_AUTHORITY_B3 (tampered/unratified record)" >&2; return 1; }
+  python3 - "$rec" "$cand/$arch" <<'PY'
+import json, sys
+rec = json.load(open(sys.argv[1])); key = sys.argv[2]
+v = (rec.get("entries") or {}).get(key)
+if not (isinstance(v, str) and len(v) == 64 and all(c in "0123456789abcdef" for c in v)):
+    sys.exit(f"authority record has no valid ratified toolchain identity for {key}")
+print(v)
+PY
+}

@@ -10,6 +10,10 @@ description = "B0-PRE (#123) reference validator: byte-exact encoders, strict/ca
 # all-or-nothing durable write. Wired into run_authoritative.sh (no loose host-side
 # JSON parsing). Hyphenated name for shell invocation.
 [[bin]]
+name = "measure-produce"
+path = "src/bin/measure_produce.rs"
+
+[[bin]]
 name = "stage1-ingest"
 path = "src/bin/stage1_ingest.rs"
 

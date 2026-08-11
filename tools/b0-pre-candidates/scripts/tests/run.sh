@@ -11,14 +11,14 @@ SCRIPTS="$(cd "$HERE/.." && pwd)"
 rc=0
 
 echo "== bash -n (syntax) =="
-for s in lib.sh verify_pins.sh run_authoritative.sh build_container.sh preflight_venue.sh smoke.sh provision_prover_toolchain.sh \
+for s in lib.sh verify_pins.sh run_authoritative.sh measure_fragment.sh derive_guest_set.sh build_container.sh preflight_venue.sh smoke.sh provision_prover_toolchain.sh \
          tool_identities.sh resolve_lock.sh extract_material.sh verifier_fixtures.sh prove_fixture.sh \
          tests/disk_free_gib.test.sh tests/pin_schema.test.sh tests/pin_cargo_audit_advdb.test.sh tests/pin_prover_archives.test.sh tests/pin_prover_archive_authority.test.sh tests/source_authority.test.sh tests/blake3_cluster_pin.test.sh tests/risc0_harness_pins.test.sh \
          tests/smoke_guards.test.sh tests/smoke_orchestration.test.sh tests/verified_extraction.test.sh tests/provisioning_recipe.test.sh tests/cargo_audit_global_cache.test.sh \
          tests/pin_url_policy.test.sh tests/oci_platform.test.sh tests/tool_identity_arch.test.sh \
          tests/apt_pins.test.sh tests/tool_identity_threading.test.sh tests/oci_daemon_bridge.test.sh \
          tests/build_reproducibility.test.sh tests/runnable_ref_sidecar.test.sh tests/rustup_components.test.sh \
-         tests/builder_capability.test.sh tests/e2e_v2_produce_chain.test.sh tests/lifecycle_mode.test.sh tests/run.sh; do
+         tests/builder_capability.test.sh tests/e2e_v2_produce_chain.test.sh tests/lifecycle_mode.test.sh tests/toolchain_authority.test.sh tests/run.sh; do
   f="$SCRIPTS/$s"
   [ -f "$f" ] || continue
   if bash -n "$f"; then echo "  ok  $s"; else echo "  FAIL $s"; rc=1; fi
@@ -39,7 +39,7 @@ if command -v shellcheck >/dev/null 2>&1; then
       "$SCRIPTS/tests/apt_pins.test.sh" "$SCRIPTS/tests/tool_identity_threading.test.sh" \
       "$SCRIPTS/tests/oci_daemon_bridge.test.sh" "$SCRIPTS/tests/build_reproducibility.test.sh" \
       "$SCRIPTS/tests/runnable_ref_sidecar.test.sh" "$SCRIPTS/tests/rustup_components.test.sh" \
-      "$SCRIPTS/tests/lifecycle_mode.test.sh" "$SCRIPTS/tests/run.sh"; then
+      "$SCRIPTS/tests/lifecycle_mode.test.sh" "$SCRIPTS/measure_fragment.sh" "$SCRIPTS/derive_guest_set.sh" "$SCRIPTS/tests/toolchain_authority.test.sh" "$SCRIPTS/tests/run.sh"; then
     echo "  ok  no error-level findings"
   else
     echo "  FAIL shellcheck error-level findings"; rc=1
@@ -54,6 +54,14 @@ bash "$HERE/pin_schema.test.sh"        || rc=1
 # Lifecycle-mode boundary guard: preregistration (hash unwritten) vs measurement
 # (committed .json.hash == merged b0_pre_spec_hash). No Docker/network.
 bash "$HERE/lifecycle_mode.test.sh"    || rc=1
+# B0-FINAL toolchain-authority: ratified identity sourced only from the hash-verified
+# content-addressed record; tampered record refused. No Docker/venue.
+bash "$HERE/toolchain_authority.test.sh" || rc=1
+# NB: the B0-FINAL measurement runner is now checked-in Rust (tools/b0-pre-measure-core +
+# the b0-pre-measure-{sp1,risc0} runners + b0-pre-host-provenance), unit-tested in those
+# crates' own suites and CI-compiled with --features real-backend; the venue orchestration
+# is measure_fragment.sh (bash -n + shellcheck above). There is no shell measurement unit
+# test here anymore because there are no shell measurement boundaries to mock.
 # Opt-in primary-source verification of the cargo-audit + advisory-DB pin blocks (needs
 # network; SKIPs cleanly unless B0PRE_PIN_NET_IT=1 / B0PRE_PIN_NET_REQUIRED=1).
 bash "$HERE/pin_cargo_audit_advdb.test.sh"   || rc=1

@@ -14,7 +14,11 @@ on:
       - "tools/b0-pre-vmat/**"
       - "tools/b0-pre-validator/**"
       - "tools/b0-pre-independent/**"
-      - "tools/b0-pre-candidates/scripts/**"
+      - "tools/b0-pre-measure-core/**"
+      - "tools/b0-pre-measure-sp1/**"
+      - "tools/b0-pre-measure-risc0/**"
+      - "tools/b0-pre-host-provenance/**"
+      - "tools/b0-pre-candidates/**"
       - "docs/b0-pre/**"
       - ".github/workflows/b0-pre.yml"
       - "rust-toolchain.toml"
@@ -24,7 +28,11 @@ on:
       - "tools/b0-pre-vmat/**"
       - "tools/b0-pre-validator/**"
       - "tools/b0-pre-independent/**"
-      - "tools/b0-pre-candidates/scripts/**"
+      - "tools/b0-pre-measure-core/**"
+      - "tools/b0-pre-measure-sp1/**"
+      - "tools/b0-pre-measure-risc0/**"
+      - "tools/b0-pre-host-provenance/**"
+      - "tools/b0-pre-candidates/**"
       - "docs/b0-pre/**"
       - ".github/workflows/b0-pre.yml"
       - "rust-toolchain.toml"
@@ -41,6 +49,10 @@ env:
   VMAT: tools/b0-pre-vmat
   VAL: tools/b0-pre-validator
   IND: tools/b0-pre-independent
+  MEAS_CORE: tools/b0-pre-measure-core
+  MEAS_SP1: tools/b0-pre-measure-sp1
+  MEAS_RISC0: tools/b0-pre-measure-risc0
+  PROV: tools/b0-pre-host-provenance
 
 jobs:
   b0-pre:
@@ -50,7 +62,7 @@ jobs:
 
       # rustup reads rust-toolchain.toml (channel 1.85.0) — the single source of
       # truth for the validator-tool compatibility floor. The distinct candidate
-      # container toolchain (Rust 1.88.0) is NOT installed here.
+      # container toolchain (Rust 1.90.0) is NOT installed here.
       - name: Set up pinned toolchain (validator-tool floor)
         run: |
           rustup show
@@ -220,6 +232,50 @@ jobs:
 
       - name: Test (independent)
         run: cargo test --locked --manifest-path "$IND/Cargo.toml"
+
+      # --- B0-FINAL measurement producer crates -------------------------------
+      # Core + provenance reader are backend-agnostic (no SDK): full fmt/clippy/test
+      # off-venue. The core suite includes the E2E contract test (mock backend -> full
+      # fragment -> validated against the REAL validator's measure-produce binary).
+      - name: Measurement core + provenance reader (fmt/clippy/test)
+        run: |
+          cargo fmt --manifest-path "$MEAS_CORE/Cargo.toml" --check
+          cargo fmt --manifest-path "$PROV/Cargo.toml" --check
+          cargo clippy --manifest-path "$MEAS_CORE/Cargo.toml" --all-targets -- -D warnings
+          cargo clippy --manifest-path "$PROV/Cargo.toml" --all-targets -- -D warnings
+          cargo test --manifest-path "$MEAS_CORE/Cargo.toml"
+          cargo test --manifest-path "$PROV/Cargo.toml"
+
+      # The real SP1/RISC Zero SDK code path MUST compile here even though CI cannot perform
+      # venue proving. The runners refuse to build WITHOUT --features real-backend (no mock
+      # path in a production binary); WITH it they type-check the SDK usage. RISC Zero's
+      # embed_methods uses the CI stub (B0_VENUE_EMBED unset -> empty ELF, runtime-refused),
+      # so the crate compiles without the guest toolchain.
+      - name: Real-backend runners compile (SP1 + RISC Zero)
+        run: |
+          # fmt is toolchain-agnostic — run it on the 1.85 validator-tool floor.
+          cargo fmt --manifest-path "$MEAS_SP1/Cargo.toml" --check
+          cargo fmt --manifest-path "$MEAS_RISC0/Cargo.toml" --check
+          # SP1's prover build scripts need protoc (prost-build); the venue container provides it.
+          sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+          # The SP1 6.3.1 / RISC Zero 3.0.5 SDKs declare rust-version 1.88/1.89/1.90 across the stack (ruint needs 1.90) (the same venue
+          # container toolchain that builds the guests + provers); the pinned 1.85 floor cannot
+          # resolve them. Install + use 1.90.0 for THIS step only (`+1.90.0` overrides the
+          # rust-toolchain.toml floor). embed_methods is NOT run (no B0_VENUE_EMBED) so the CI
+          # stub is used and no guest toolchain is needed — this only type-checks the SDK path.
+          rustup toolchain install 1.90.0 --profile minimal --component clippy >/dev/null 2>&1
+          cargo +1.90.0 build   --features real-backend --manifest-path "$MEAS_SP1/Cargo.toml"
+          cargo +1.90.0 build   --features real-backend --manifest-path "$MEAS_RISC0/Cargo.toml"
+          cargo +1.90.0 clippy  --features real-backend --manifest-path "$MEAS_SP1/Cargo.toml" -- -D warnings
+          cargo +1.90.0 clippy  --features real-backend --manifest-path "$MEAS_RISC0/Cargo.toml" -- -D warnings
+
+      # Guard condition #1: a production runner must NOT build without real-backend. Use 1.90.0
+      # (installed above) so resolution SUCCEEDS and the build fails specifically on the
+      # compile_error — the actual refuse-without-feature guarantee, not an SDK-resolution miss.
+      - name: Production runners refuse to build without real-backend
+        run: |
+          ! cargo +1.90.0 build --manifest-path "$MEAS_SP1/Cargo.toml" 2>/dev/null
+          ! cargo +1.90.0 build --manifest-path "$MEAS_RISC0/Cargo.toml" 2>/dev/null
 
       # Explicit headline guarantees (reuse compiled artifacts; fast).
       - name: Both official statements byte-locked (both crates)

@@ -1,0 +1,9 @@
+{
+  "kind": "b0-final-toolchain-authority/v1",
+  "status": "OWNER-RATIFIED CONTENT-ADDRESSED RECORD. The per-(candidate,arch) values are the ratified b0_toolchain_identity outputs (BLAKE3 over the pinned SP1 builder-image digest / the pinned local r0 toolchain tree). This file's own BLAKE3 is pinned as B0_RATIFIED_TOOLCHAIN_AUTHORITY_B3 in scripts/lib.sh and is verified before any value is sourced, so the authority is a hash-verified committed record — never an operator environment assertion. To ratify real venue values: replace the entries below AND update B0_RATIFIED_TOOLCHAIN_AUTHORITY_B3 in the SAME reviewed commit; the placeholder values below deliberately never match a real toolchain, so measurement fails closed until ratified.",
+  "entries": {
+    "Sp1/x86_64": "0000000000000000000000000000000000000000000000000000000000000000",
+    "Sp1/aarch64": "1111111111111111111111111111111111111111111111111111111111111111",
+    "Risc0/x86_64": "2222222222222222222222222222222222222222222222222222222222222222"
+  }
+}

@@ -1,0 +1,20 @@
+[package]
+name = "b0-pre-host-provenance"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "B0-FINAL venue host/cgroup provenance READER. Reads the real host facts (git dirty, turbo, clocksource, physical+logical cores, effective cpuset, cgroup path/version, memory limit, governor) that the measurement RawFacts require. Fail-closed on any unreadable/ambiguous field; NO hard-coded provenance. Filesystem root is injectable so the parsing is unit-tested off-venue; git state is resolved by the binary."
+
+[[bin]]
+name = "b0-pre-host-provenance"
+path = "src/main.rs"
+
+[dependencies]
+# blake3 cluster-pinned identically with the other B0 tool crates. No heavy prover
+# deps: this crate compiles + tests everywhere (it only reads files).
+blake3 = "=1.6.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "=1.0.149", features = ["arbitrary_precision"] }
+
+[workspace]

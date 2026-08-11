@@ -29,6 +29,40 @@ ATTEST="${B0PRE_FIREWALL_ATTEST:-}";  [ -n "$ATTEST" ] || refuse "B0PRE_FIREWALL
 PROOF_DIR="${B0PRE_PROOF_DIR:-}";     [ -n "$PROOF_DIR" ] || refuse "B0PRE_PROOF_DIR unset"
 CONTENT_STORE="${B0PRE_CONTENT_STORE:-}"
 
+# B0-FINAL MEASUREMENT extension (ADDITIVE; unset in R5 / prove_fixture.sh, so behaviour
+# there is byte-identical). When B0PRE_PROVING_CGROUP is set to a dedicated, delegated,
+# freshly-reset cgroup path (relative to B0PRE_CGROUP_ROOT, default /sys/fs/cgroup), the
+# PROVE backend container is placed in it via --cgroup-parent and its PEAK memory is read
+# from that cgroup afterwards — the correct proving-RSS source (getrusage on the runner
+# would miss the container). The measurement runner reads these attestation fields and
+# FAILS CLOSED if they are absent, so a proving RSS is never silently unmeasured.
+PROVING_CGROUP="${B0PRE_PROVING_CGROUP:-}"
+CGROUP_ROOT="${B0PRE_CGROUP_ROOT:-/sys/fs/cgroup}"
+read_cgroup_peak() { # <abs cgroup dir> -> prints peak bytes, or non-zero if unavailable
+  local d="$1"; [ -n "$d" ] || return 1
+  if [ -f "$d/memory.peak" ]; then cat "$d/memory.peak" 2>/dev/null
+  elif [ -f "$d/memory.max_usage_in_bytes" ]; then cat "$d/memory.max_usage_in_bytes" 2>/dev/null
+  else return 1; fi
+}
+# Create a FRESH, EXCLUSIVE, per-cell child cgroup under the delegated proving parent so the
+# prove container's peak memory is isolated (never a shared/cumulative parent). Verifies the
+# parent + child are cgroup-v2, the child is brand new (unique path) and EMPTY (no unrelated
+# processes), and a peak file exists. Prints "<relative-for-cgroup-parent>\t<abs>". Fail closed.
+make_fresh_cell_cgroup() {
+  [ -n "$PROVING_CGROUP" ] || { echo "REFUSED: B0PRE_PROVING_CGROUP unset for measurement" >&2; return 1; }
+  [ -f "$CGROUP_ROOT/cgroup.controllers" ] || { echo "REFUSED: not cgroup v2 at $CGROUP_ROOT" >&2; return 1; }
+  local parent="$CGROUP_ROOT/$PROVING_CGROUP"
+  [ -d "$parent" ] || { echo "REFUSED: delegated proving parent cgroup absent: $parent" >&2; return 1; }
+  local rel="$PROVING_CGROUP/cell-$$-$RANDOM$RANDOM"
+  local abs="$CGROUP_ROOT/$rel"
+  [ ! -e "$abs" ] || { echo "REFUSED: cell cgroup path already exists (not fresh): $abs" >&2; return 1; }
+  mkdir "$abs" 2>/dev/null || { echo "REFUSED: cannot create fresh cell cgroup $abs (delegation/permissions)" >&2; return 1; }
+  # Exclusivity: a fresh cgroup must contain NO processes.
+  if [ -s "$abs/cgroup.procs" ]; then echo "REFUSED: fresh cell cgroup is not empty: $abs" >&2; rmdir "$abs" 2>/dev/null; return 1; fi
+  [ -e "$abs/memory.peak" ] || [ -e "$abs/memory.max_usage_in_bytes" ] || { echo "REFUSED: cell cgroup exposes no peak-memory file: $abs" >&2; rmdir "$abs" 2>/dev/null; return 1; }
+  printf '%s\t%s' "$rel" "$abs"
+}
+
 # --- recursion guard: real docker must be an ABSOLUTE, executable path that is NOT this firewall ---
 case "$REAL_DOCKER" in /*) ;; *) refuse "B0PRE_REAL_DOCKER must be absolute: $REAL_DOCKER" ;; esac
 [ -x "$REAL_DOCKER" ] || refuse "real docker not executable: $REAL_DOCKER"
@@ -130,11 +164,11 @@ reconcile_oci() { # <repo> <manifest_digest> <config_digest>
 }
 
 now_attest() { # append the JSON attestation record
-  local cand="$1" rewritten="$2" recon="$3" mountmap="$4" prehash="$5" posthash="$6" outhash="$7" status="$8" permmap="${9:-}"
+  local cand="$1" rewritten="$2" recon="$3" mountmap="$4" prehash="$5" posthash="$6" outhash="$7" status="$8" permmap="${9:-}" peak="${10:-}" cgid="${11:-}"
   local ddg dver
   dver="$(run_real --version 2>/dev/null | head -1)"
   ddg="$(sha "$rd")"
-  python3 - "$ATTEST" "$cand" "$INTERCEPTED_ARGV" "$rewritten" "$ddg" "$dver" "$recon" "$mountmap" "$prehash" "$posthash" "$outhash" "$status" "$permmap" <<'PY'
+  python3 - "$ATTEST" "$cand" "$INTERCEPTED_ARGV" "$rewritten" "$ddg" "$dver" "$recon" "$mountmap" "$prehash" "$posthash" "$outhash" "$status" "$permmap" "$peak" "$cgid" <<'PY'
 import json,sys
 p=sys.argv[1]
 rec={"kind":"b0pre-docker-firewall-exec/v1","candidate":sys.argv[2],
@@ -144,6 +178,12 @@ rec={"kind":"b0pre-docker-firewall-exec/v1","candidate":sys.argv[2],
  "input_hashes_pre":sys.argv[9],"input_hashes_post":sys.argv[10],
  "output_hashes":sys.argv[11],"exit_status":int(sys.argv[12]),
  "ephemeral_perms":sys.argv[13]}
+# ADDITIVE B0-FINAL measurement fields: only present when the PROVE backend ran in a
+# dedicated cgroup whose peak memory was measured (empty in R5 / verify, absent from JSON).
+peak, cgid = sys.argv[14], sys.argv[15]
+if peak and cgid:
+    rec["proving_container_peak_rss_bytes"]=int(peak)
+    rec["proving_cgroup_identity"]=cgid
 open(p,"a").write(json.dumps(rec)+"\n")
 PY
 }
@@ -195,8 +235,16 @@ sp1_backend() {
   [ -n "$recon" ] || { rm -f "$copy"; refuse "SP1 $label backend OCI reconciliation returned no result"; }
   local ref="$SP1_REPO@$SP1_MANIFEST"
   local mmap="/circuit(ro)=$c_canon $inp_target(rw-COPY,canonical-unmounted)=$copy<-$inp_canon /output(rw)=$o_canon"
+  # B0-FINAL measurement: place the PROVE (witness) container in a FRESH, EXCLUSIVE per-cell
+  # cgroup so its PEAK memory is isolated; verify (proof) is left unchanged. No-op when unset (R5).
+  local -a cgroup_args=(); local mpeak="" mcgid="" mcgrel=""
+  if [ "$label" = witness ] && [ -n "$PROVING_CGROUP" ]; then
+    local cg; cg="$(make_fresh_cell_cgroup)" || { rm -f "$copy"; refuse "measurement: could not establish a fresh exclusive proving cgroup"; }
+    mcgrel="${cg%%$'\t'*}"; mcgid="${cg##*$'\t'}"
+    cgroup_args=(--cgroup-parent "$mcgrel")
+  fi
   local -a rw=(run --rm --pull never --network none --read-only
-    --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:rw,nosuid,nodev,noexec,size=1g
+    --cap-drop ALL --security-opt no-new-privileges "${cgroup_args[@]}" --tmpfs /tmp:rw,nosuid,nodev,noexec,size=1g
     --mount "type=bind,source=$c_canon,target=/circuit,readonly"
     --mount "type=bind,source=$copy,target=$inp_target"
     --mount "type=bind,source=$o_canon,target=/output"
@@ -212,8 +260,15 @@ sp1_backend() {
   local permmap="circuit(canonical,ro):$(perms "$c_canon") ${label}_copy(ephemeral,rw):$(perms "$copy") output(ephemeral,rw):$(perms "$o_canon")"
   rm -f "$copy"
   local pre="canonical:$canon_h,copy_pre:$copy_pre" post="copy_post:$copy_post,canonical_post:$canon_post"
-  [ "$canon_post" = "$canon_h" ] || { now_attest "sp1-$label" "$rewritten" "$recon" "$mmap" "$pre" "$post" "$outh" "$st" "$permmap"; refuse "CANONICAL SP1 $label input was mutated (it was never mounted)"; }
-  now_attest "sp1-$label" "$rewritten" "$recon" "$mmap" "$pre" "$post" "$outh" "$st" "$permmap"
+  # Measurement: read the PROVE container's peak from its FRESH per-cell cgroup; fail closed
+  # if unavailable OR zero (never emit an unmeasured/empty proving RSS). Then remove the cell cgroup.
+  if [ -n "$mcgid" ]; then
+    mpeak="$(read_cgroup_peak "$mcgid" || true)"
+    { [ -n "$mpeak" ] && [ "$mpeak" -gt 0 ] 2>/dev/null; } || { rmdir "$mcgid" 2>/dev/null; rm -f "$copy"; refuse "measurement: SP1 proving cgroup peak unavailable or zero at $mcgid"; }
+    rmdir "$mcgid" 2>/dev/null || true
+  fi
+  [ "$canon_post" = "$canon_h" ] || { now_attest "sp1-$label" "$rewritten" "$recon" "$mmap" "$pre" "$post" "$outh" "$st" "$permmap" "$mpeak" "$mcgid"; refuse "CANONICAL SP1 $label input was mutated (it was never mounted)"; }
+  now_attest "sp1-$label" "$rewritten" "$recon" "$mmap" "$pre" "$post" "$outh" "$st" "$permmap" "$mpeak" "$mcgid"
   exit "$st"
 }
 
@@ -271,8 +326,16 @@ elif [ "$is_r0" = 1 ]; then
   [ -n "$recon" ] || refuse "RISC Zero backend OCI reconciliation returned no result"
   pre="seal:$(sha "$seal"),input:$(sha "$inj")"
   MMAP="/mnt(rw,output)=$w_canon seal.r0(ro-overlay) input.json(ro-overlay)"
+  # B0-FINAL measurement: RISC Zero's only backend call IS the stark2snark prove, so place
+  # it in a FRESH, EXCLUSIVE per-cell cgroup and read its peak. No-op when unset (R5).
+  declare -a r0_cgroup_args=(); r0_mpeak=""; r0_mcgid=""; r0_mcgrel=""
+  if [ -n "$PROVING_CGROUP" ]; then
+    r0_cg="$(make_fresh_cell_cgroup)" || refuse "measurement: could not establish a fresh exclusive proving cgroup"
+    r0_mcgrel="${r0_cg%%$'\t'*}"; r0_mcgid="${r0_cg##*$'\t'}"
+    r0_cgroup_args=(--cgroup-parent "$r0_mcgrel")
+  fi
   declare -a RW=(run --rm --pull never --network none --read-only
-    --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:rw,nosuid,nodev,exec,size=2g
+    --cap-drop ALL --security-opt no-new-privileges "${r0_cgroup_args[@]}" --tmpfs /tmp:rw,nosuid,nodev,exec,size=2g
     --mount "type=bind,source=$w_canon,target=/mnt"
     --mount "type=bind,source=$seal,target=/mnt/seal.r0,readonly"
     --mount "type=bind,source=$inj,target=/mnt/input.json,readonly"
@@ -285,8 +348,13 @@ elif [ "$is_r0" = 1 ]; then
   # the immutable image, never mounted); only this fresh per-proof work dir + its files are made
   # accessible — no canonical/content-store object is touched.
   permmap="workdir(ephemeral,rw):$(perms "$w_canon") seal.r0(ephemeral,ro-input):$(perms "$seal") input.json(ephemeral,ro-input):$(perms "$inj") proof.json(ephemeral,output):$(perms "$w_canon/proof.json")"
-  [ "$pre" = "$post" ] || { now_attest risc0 "$REWRITTEN" "$recon" "$MMAP" "$pre" "$post" "$outh" "$status" "$permmap"; refuse "RISC Zero inputs were MUTATED during proving"; }
-  now_attest risc0 "$REWRITTEN" "$recon" "$MMAP" "$pre" "$post" "$outh" "$status" "$permmap"
+  if [ -n "$r0_mcgid" ]; then
+    r0_mpeak="$(read_cgroup_peak "$r0_mcgid" || true)"
+    { [ -n "$r0_mpeak" ] && [ "$r0_mpeak" -gt 0 ] 2>/dev/null; } || { rmdir "$r0_mcgid" 2>/dev/null; refuse "measurement: RISC Zero proving cgroup peak unavailable or zero at $r0_mcgid"; }
+    rmdir "$r0_mcgid" 2>/dev/null || true
+  fi
+  [ "$pre" = "$post" ] || { now_attest risc0 "$REWRITTEN" "$recon" "$MMAP" "$pre" "$post" "$outh" "$status" "$permmap" "$r0_mpeak" "$r0_mcgid"; refuse "RISC Zero inputs were MUTATED during proving"; }
+  now_attest risc0 "$REWRITTEN" "$recon" "$MMAP" "$pre" "$post" "$outh" "$status" "$permmap" "$r0_mpeak" "$r0_mcgid"
   exit "$status"
 fi
 

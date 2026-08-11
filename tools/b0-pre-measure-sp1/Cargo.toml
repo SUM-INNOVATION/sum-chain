@@ -1,0 +1,30 @@
+[package]
+name = "b0-pre-measure-sp1"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "B0-FINAL SP1 measurement runner (venue). Real SP1 6.3.1 Groth16 proving behind --features real-backend; the production binary refuses to build without it. Guest identity (verifying-key hash) is derived from the actual built ELF via the SDK; verifier material is derived from the pinned sp1-verifier crate through the shared b0_pre_vmat canonical primitive. Measurement/binding/emission/RSS all live in b0-pre-measure-core; the ONLY venue-only piece is the SDK/Docker crypto."
+
+[[bin]]
+name = "b0-pre-measure-sp1"
+path = "src/main.rs"
+
+[features]
+# Enabling the real SP1 SDK is what makes this a runnable production binary. CI builds
+# with this feature to type-check the crypto path; the venue builds+runs it.
+real-backend = ["dep:sp1-sdk", "dep:sp1-verifier"]
+
+[dependencies]
+b0-pre-measure-core = { path = "../b0-pre-measure-core" }
+blake3 = "=1.6.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "=1.0.149", features = ["arbitrary_precision"] }
+
+# Venue-only crypto boundary — the SAME pins prove_fixture.sh's runner uses. Optional so
+# the crate's non-crypto surface still parses everywhere; the bin requires them (below).
+# Verifier material comes from the harness bin's JSON (core parser), so no b0_pre_vmat dep.
+sp1-sdk = { version = "=6.3.1", features = ["blocking"], optional = true }
+sp1-verifier = { version = "=6.3.1", optional = true }
+
+[workspace]
