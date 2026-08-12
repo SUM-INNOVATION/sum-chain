@@ -1194,7 +1194,7 @@ b0_toolchain_identity() { # <sp1|risc0> <sp1-image-id | r0-home-dir>
 # authority is that content-addressed committed record, VERIFIED against this constant before a
 # value is sourced — so the expected toolchain identity is never an unauthenticated operator
 # environment variable. Update BOTH the record and this constant in the same reviewed commit.
-B0_RATIFIED_TOOLCHAIN_AUTHORITY_B3="e9ccf26c782a8de569a2b7a3af028edfe425384dc65c5562957a0ed9930392a9"
+B0_RATIFIED_TOOLCHAIN_AUTHORITY_B3="b9b82ad4193075e728c8870c3a97d083f0e2064e406094021cbc44f9441dd866"
 
 # Print the RATIFIED expected toolchain identity for <Cand> <arch>, sourced ONLY from the
 # content-addressed authority record AFTER verifying its hash equals the ratified constant.

@@ -1,9 +1,9 @@
 {
   "kind": "b0-final-toolchain-authority/v1",
-  "status": "OWNER-RATIFIED CONTENT-ADDRESSED RECORD. The per-(candidate,arch) values are the ratified b0_toolchain_identity outputs (BLAKE3 over the pinned SP1 builder-image digest / the pinned local r0 toolchain tree). This file's own BLAKE3 is pinned as B0_RATIFIED_TOOLCHAIN_AUTHORITY_B3 in scripts/lib.sh and is verified before any value is sourced, so the authority is a hash-verified committed record — never an operator environment assertion. To ratify real venue values: replace the entries below AND update B0_RATIFIED_TOOLCHAIN_AUTHORITY_B3 in the SAME reviewed commit; the placeholder values below deliberately never match a real toolchain, so measurement fails closed until ratified.",
+  "status": "OWNER-RATIFIED CONTENT-ADDRESSED RECORD for source commit af875ee03dbb69ddf16638f73928a8351300cd9a. The per-(candidate,arch) values are the ratified b0_toolchain_identity outputs derived from FRESH NATIVE reproducible-builder evidence at af875ee0. Sp1/x86_64 and Sp1/aarch64 come from two clean/no-cache SP1 builder builds per architecture (reproducible-builder evidence archives: sha256 ef95774e9471d7dd144c8028bcaad45431a2caf2e6f6badba0f6933381098711 for x86_64, sha256 2dc7856b08910e4ca3da31cb01c1efa9f72bfa79b0959e4d72ed461d818ace0a for aarch64). Risc0/x86_64 comes from the verified RISC Zero provisioned-tree evidence. RISC Zero is native-x86_64-only (VENUE.md section 2), so there is deliberately NO Risc0/aarch64 entry. This file's own BLAKE3 is pinned as B0_RATIFIED_TOOLCHAIN_AUTHORITY_B3 in scripts/lib.sh and is verified before any value is sourced, so the authority is a hash-verified committed record - never an operator environment assertion. The prior fail-closed placeholder values are superseded.",
   "entries": {
-    "Sp1/x86_64": "0000000000000000000000000000000000000000000000000000000000000000",
-    "Sp1/aarch64": "1111111111111111111111111111111111111111111111111111111111111111",
-    "Risc0/x86_64": "2222222222222222222222222222222222222222222222222222222222222222"
+    "Sp1/x86_64": "4367170fa04c2ab4e00ae4371c0a61c07581a2d6ee35309e1f84f3410d675f5c",
+    "Sp1/aarch64": "7cbd722e676e1f9c50cb785e17bb6670eef2f5a2752ab067237b42e833451cc0",
+    "Risc0/x86_64": "e8872e7631627130f08c025a83a49d8b46fe91a1300ed5b07d225fa98f1617ff"
   }
 }

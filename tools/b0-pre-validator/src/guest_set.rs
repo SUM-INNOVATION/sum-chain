@@ -26,8 +26,10 @@ pub const MERGED_SPEC_HASH_HEX: &str =
 
 /// The ratified source commit the guest MUST be built from — the exact owner-ratified
 /// checkout, not merely a commit all records agree on. A different (even clean) commit is
-/// refused. (B0-FINAL ratified base; update to the ratified merge SHA when this branch merges.)
-pub const RATIFIED_SOURCE_COMMIT: &str = "b654331ed6a88d88ec07a4ea1409c3cd714f9940";
+/// refused. This is the frozen MEASURED-CANDIDATE source (the merged B0-FINAL head af875ee0);
+/// it is deliberately NOT advanced to the toolchain-authority commit SHA (that is separate
+/// operational tooling/authority metadata, not the measured source).
+pub const RATIFIED_SOURCE_COMMIT: &str = "af875ee03dbb69ddf16638f73928a8351300cd9a";
 
 /// Domain tag for the coordination-manifest content address.
 const MANIFEST_DOMAIN: &[u8] = b"b0-final-guest-set-manifest/v1";
@@ -611,5 +613,15 @@ mod tests {
         assert!(authenticate_manifest(&forged, &gs)
             .unwrap_err()
             .contains("forged/altered"));
+    }
+
+    #[test]
+    fn source_authority_is_af875ee0() {
+        // The frozen measured-candidate source authority is af875ee0 (the merged B0-FINAL
+        // head), NOT the authority-record commit SHA (operational tooling/authority metadata).
+        assert_eq!(
+            RATIFIED_SOURCE_COMMIT,
+            "af875ee03dbb69ddf16638f73928a8351300cd9a"
+        );
     }
 }

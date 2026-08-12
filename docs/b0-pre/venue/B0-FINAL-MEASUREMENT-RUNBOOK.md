@@ -41,22 +41,31 @@ pins, or guest logic, and **no candidate is selected** (that is B0-FINAL aggrega
    an operator env var. Its committed values are a **fail-closed template**; the owner ratifies
    the real values (replacing the entries AND the `lib.sh` constant in one reviewed commit)
    before measurement, or every build's toolchain check refuses.
+6. **Explicit, verified Cargo (never rely on login PATH).** A fresh, non-login venue shell may
+   not have `cargo` on `PATH` (rustup exports it from the login profile). Pin an explicit,
+   verified path once and invoke `"$CARGO"` for every build/run/test below — never a bare
+   `cargo`:
+   ```
+   export CARGO="${CARGO:-$HOME/.cargo/bin/cargo}"
+   [ -x "$CARGO" ] || { echo "REFUSED: verified cargo not executable at $CARGO" >&2; exit 1; }
+   "$CARGO" --version
+   ```
 
 ## 1. Build the real binaries (once per host)
 
 ```
 # SP1 runner (native SP1 6.3.1 SDK):
-cargo build --release --features real-backend --manifest-path tools/b0-pre-measure-sp1/Cargo.toml
+"$CARGO" build --release --features real-backend --manifest-path tools/b0-pre-measure-sp1/Cargo.toml
 
 # RISC Zero runner (x86_64 host only): embed_methods builds the frozen guest with the pinned
 # LOCAL r0 toolchain — B0_VENUE_EMBED=1 + the isolated RISC0_HOME turn the real build on.
 B0_VENUE_EMBED=1 RISC0_HOME="$PROVER_RISC0_HOME" \
-  cargo build --release --features real-backend --manifest-path tools/b0-pre-measure-risc0/Cargo.toml
+  "$CARGO" build --release --features real-backend --manifest-path tools/b0-pre-measure-risc0/Cargo.toml
 
 # provenance reader + verifier-material harnesses:
-cargo build --release --manifest-path tools/b0-pre-host-provenance/Cargo.toml
-cargo build --release --manifest-path tools/b0-pre-candidates/harness/sp1-verifier-material/Cargo.toml
-cargo build --release --manifest-path tools/b0-pre-candidates/harness/risc0-verifier-material/Cargo.toml
+"$CARGO" build --release --manifest-path tools/b0-pre-host-provenance/Cargo.toml
+"$CARGO" build --release --manifest-path tools/b0-pre-candidates/harness/sp1-verifier-material/Cargo.toml
+"$CARGO" build --release --manifest-path tools/b0-pre-candidates/harness/risc0-verifier-material/Cargo.toml
 ```
 
 The runners **refuse to build** without `--features real-backend` (there is no mock or
@@ -147,7 +156,7 @@ attestation `attestation-<candidate>-<arch>.json` (binds the **production binary
 ## 3. Validate fragments early
 
 ```
-cargo run --release --manifest-path tools/b0-pre-validator/Cargo.toml --bin measure-produce -- \
+"$CARGO" run --release --manifest-path tools/b0-pre-validator/Cargo.toml --bin measure-produce -- \
   --validate <merged-raw-facts.json>
 ```
 
@@ -178,7 +187,7 @@ Independently re-verify the ACTUAL produced package (not just the committed fixt
 from-scratch verifier, and confirm its derived verdicts:
 
 ```
-cargo run --release --manifest-path tools/b0-pre-independent/Cargo.toml \
+"$CARGO" run --release --manifest-path tools/b0-pre-independent/Cargo.toml \
   --bin b0-pre-independent-verify -- "$OUT/package/real-orchestrator-vector.bin"
 #  -> {"r0_guest_set_hash":"…","candidates":[{"candidate":1,"verdict":"qualified"},
 #                                            {"candidate":2,"verdict":"incomplete_or_rejected:…"}]}
@@ -186,8 +195,8 @@ cargo run --release --manifest-path tools/b0-pre-independent/Cargo.toml \
 
 The committed-fixture agreement tests remain a separate regression gate:
 ```
-cargo test --manifest-path tools/b0-pre-validator/Cargo.toml  --test producer_vector
-cargo test --manifest-path tools/b0-pre-independent/Cargo.toml --test producer_vector
+"$CARGO" test --manifest-path tools/b0-pre-validator/Cargo.toml  --test producer_vector
+"$CARGO" test --manifest-path tools/b0-pre-independent/Cargo.toml --test producer_vector
 ```
 
 ## 5. Preservation / archive
