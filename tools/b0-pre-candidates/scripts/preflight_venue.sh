@@ -37,6 +37,10 @@ ROOT="$(cd "$HERE/.." && pwd)"
 REPO="$(cd "$ROOT/../.." && pwd)"
 DOCS="$REPO/docs/b0-pre"
 VAL="$ROOT/../b0-pre-validator/Cargo.toml"
+# The committed-candidate-lock AUTHORITY (single source of truth shared with the CI workspace guard
+# b0-pre-validator/scripts/check_no_prod_dep.sh) — same canonical paths + ratified hashes, no drift.
+# shellcheck source=committed_lock_authority.sh
+. "$HERE/committed_lock_authority.sh"
 
 # The real, merged b0_pre_spec_hash (measurement mode binds to EXACTLY this).
 MERGED_SPEC_HASH="201cfcb80e94a5a7845dc3380cde32171d40f325ae2bacde9547f3c0da3c4df3"
@@ -115,17 +119,21 @@ done
 check "guest-core path-deps ../../../crates/sumchain-wire (frozen wire types, no mirror)" \
       "guest-core does not path-dep ../../../crates/sumchain-wire" \
       grep -Eq 'sumchain-wire[[:space:]]*=.*path[[:space:]]*=[[:space:]]*"\.\./\.\./\.\./crates/sumchain-wire"' "$ROOT/guest-core/Cargo.toml"
-# No COMMITTED lock anywhere in the guest graph (the authoritative lock is venue-
-# generated). A host-only, gitignored guest-core/Cargo.lock left by `cargo test` is
-# fine — it is never committed and stage_context.sh strips it (verified in §2), so
-# this checks GIT-TRACKED files only, not on-disk build artifacts.
-tracked_locks="$(git -C "$REPO" ls-files -- \
-  tools/b0-pre-candidates/candidates tools/b0-pre-candidates/guest-core 2>/dev/null \
-  | grep -E '(^|/)Cargo\.lock$' || true)"
-if [ -n "$tracked_locks" ]; then
-  bad "committed Cargo.lock(s) in the guest graph: $tracked_locks"
+# Committed candidate locks are the DEPENDENCY-SELECTION AUTHORITY (shared with the CI guard): the
+# two canonical candidate Cargo.locks MUST be present, Git-tracked, regular, non-symlink, nonempty,
+# and byte-identical to their ratified SHA-256; the venue materializes THEIR exact graph under
+# `cargo --locked` (mounted read-only) and never reselects (`cargo generate-lockfile` is forbidden).
+require_committed_lock_authority "$REPO" || fail=1
+# Exact-set: NO OTHER committed Cargo.lock may exist in the guest graph — not guest-core's, not a
+# candidate guest's, not an extra candidate's. A host-only, gitignored guest-core/Cargo.lock left by
+# `cargo test` is fine (never committed; stage_context.sh strips it, verified in §2) — this checks
+# GIT-TRACKED files only, not on-disk build artifacts.
+extra_locks="$(committed_lock_authority_extra_locks "$REPO" \
+  tools/b0-pre-candidates/candidates tools/b0-pre-candidates/guest-core)"
+if [ -n "$extra_locks" ]; then
+  bad "unexpected committed Cargo.lock(s) in the guest graph (only the two authority locks are allowed): $extra_locks"
 else
-  pass "no committed Cargo.lock in the guest graph (locks are venue-generated)"
+  pass "no unexpected committed Cargo.lock in the guest graph (exact authority set)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -164,9 +172,9 @@ for cand in sp1 risc0; do
          "$cand staged context leaks the other candidate ($other)" \
          test -e "$s/tools/b0-pre-candidates/candidates/$other"
   if has_lock_in "$s"; then
-    bad "$cand staged context carries a Cargo.lock (must be venue-generated)"
+    bad "$cand staged context carries a Cargo.lock (the committed authority lock is mounted read-only at build time, never baked into the staged context)"
   else
-    pass "$cand staged context carries no Cargo.lock"
+    pass "$cand staged context carries no Cargo.lock (the committed authority lock is mounted read-only, not staged)"
   fi
 done
 

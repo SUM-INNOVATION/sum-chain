@@ -11,7 +11,7 @@ SCRIPTS="$(cd "$HERE/.." && pwd)"
 rc=0
 
 echo "== bash -n (syntax) =="
-for s in lib.sh verify_pins.sh run_authoritative.sh measure_fragment.sh derive_guest_set.sh build_container.sh preflight_venue.sh smoke.sh provision_prover_toolchain.sh \
+for s in lib.sh verify_pins.sh run_authoritative.sh measure_fragment.sh derive_guest_set.sh build_container.sh preflight_venue.sh committed_lock_authority.sh smoke.sh provision_prover_toolchain.sh \
          tool_identities.sh resolve_lock.sh extract_material.sh verifier_fixtures.sh prove_fixture.sh \
          docker_firewall.sh validate_cgroup_measurement.sh probe_cgroup_privilege.sh tests/docker_firewall.test.sh tests/docker_firewall_cgroup.test.sh tests/cgroup_evidence.test.sh \
          tests/disk_free_gib.test.sh tests/pin_schema.test.sh tests/pin_cargo_audit_advdb.test.sh tests/pin_prover_archives.test.sh tests/pin_prover_archive_authority.test.sh tests/source_authority.test.sh tests/blake3_cluster_pin.test.sh tests/risc0_harness_pins.test.sh \
@@ -19,7 +19,7 @@ for s in lib.sh verify_pins.sh run_authoritative.sh measure_fragment.sh derive_g
          tests/pin_url_policy.test.sh tests/oci_platform.test.sh tests/tool_identity_arch.test.sh \
          tests/apt_pins.test.sh tests/tool_identity_threading.test.sh tests/oci_daemon_bridge.test.sh \
          tests/build_reproducibility.test.sh tests/runnable_ref_sidecar.test.sh tests/rustup_components.test.sh \
-         tests/builder_capability.test.sh tests/e2e_v2_produce_chain.test.sh tests/lifecycle_mode.test.sh tests/toolchain_authority.test.sh tests/lock_reconciliation.test.sh tests/run.sh; do
+         tests/builder_capability.test.sh tests/e2e_v2_produce_chain.test.sh tests/lifecycle_mode.test.sh tests/toolchain_authority.test.sh tests/lock_reconciliation.test.sh tests/committed_lock_authority.test.sh tests/run.sh; do
   f="$SCRIPTS/$s"
   [ -f "$f" ] || continue
   if bash -n "$f"; then echo "  ok  $s"; else echo "  FAIL $s"; rc=1; fi
@@ -35,6 +35,7 @@ if command -v shellcheck >/dev/null 2>&1; then
   if shellcheck -x -S error \
       "$SCRIPTS/lib.sh" "$SCRIPTS/verify_pins.sh" "$SCRIPTS/preflight_venue.sh" "$SCRIPTS/run_authoritative.sh" \
       "$SCRIPTS/build_container.sh" "$SCRIPTS/tool_identities.sh" "$SCRIPTS/resolve_lock.sh" \
+      "$SCRIPTS/committed_lock_authority.sh" "$SCRIPTS/tests/committed_lock_authority.test.sh" \
       "$SCRIPTS/extract_material.sh" "$SCRIPTS/smoke.sh" "$SCRIPTS/provision_prover_toolchain.sh" "$SCRIPTS/tests/smoke_guards.test.sh" \
       "$SCRIPTS/tests/smoke_orchestration.test.sh" "$SCRIPTS/tests/verified_extraction.test.sh" \
       "$SCRIPTS/tests/provisioning_recipe.test.sh" "$SCRIPTS/tests/cargo_audit_global_cache.test.sh" \
@@ -119,6 +120,10 @@ bash "$HERE/docker_firewall_cgroup.test.sh"   || rc=1
 # Cgroup validation evidence encoder: independent-parser JSON tests (empty fields, control chars,
 # type preservation, one object per line, fail-closed with no partial line).
 bash "$HERE/cgroup_evidence.test.sh"          || rc=1
+# Shared committed-candidate-lock AUTHORITY (single source of truth for the CI workspace guard +
+# venue measurement preflight): positive + missing/untracked/empty/symlink/mutation/swapped/
+# wrong-path + exact-set, and `preflight_venue.sh --mode=measurement` reaches the next gate.
+bash "$HERE/committed_lock_authority.test.sh" || rc=1
 
 echo "----"
 if [ "$rc" = 0 ]; then echo "B0-PRE script tests: ALL PASS"; else echo "B0-PRE script tests: FAILURES" >&2; fi
