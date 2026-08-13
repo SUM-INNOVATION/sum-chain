@@ -28,6 +28,7 @@ use crate::measurement::{
     GuestBuild, ProvenanceFacts, RunIdentities,
 };
 use crate::schema::allowlist::BuilderArch;
+use crate::schema::provenance::{DvfsProvenance, HypervisorUnobservableDvfs};
 use crate::schema::verifier_material::VerifierMaterialManifestV1;
 
 /// The merged, finalized `b0_pre_spec_hash`. Measurement mode binds to EXACTLY this.
@@ -100,13 +101,72 @@ pub struct ProvFacts {
     pub total_ram_bytes: u64,
     pub configured_cpuset_core_limit: u32,
     pub configured_memory_limit_bytes: u64,
-    pub governor: String,
-    pub turbo_enabled: bool,
+    pub dvfs: DvfsFacts,
     pub clock_source: String,
     pub cgroup_version: u8,
     pub cgroup_scope_label: String,
     pub benchmark_harness_source_hash: String,
     pub raw_environment_capture_hash: String,
+}
+
+/// JSON twin of the host-provenance DVFS state (matches `b0-pre-host-provenance`'s `DvfsState`).
+/// Deserialized from the runner's facts; converted to the sealed [`DvfsProvenance`] schema type.
+#[derive(Deserialize, Clone)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DvfsFacts {
+    Observable {
+        turbo_enabled: bool,
+        governor: String,
+    },
+    HypervisorManagedUnobservable {
+        cpu_arch: String,
+        cpu_identity: String,
+        virtualization: String,
+        virtualization_source: String,
+        absent_controls: Vec<String>,
+        raw_evidence_blake3: String,
+    },
+}
+
+impl DvfsFacts {
+    /// Convert to the sealed schema type (parsing the evidence hash hex). Fails closed on bad hex.
+    fn to_schema(&self) -> Result<DvfsProvenance, String> {
+        Ok(match self {
+            DvfsFacts::Observable {
+                turbo_enabled,
+                governor,
+            } => DvfsProvenance::Observable {
+                turbo_enabled: *turbo_enabled,
+                governor: governor.clone(),
+            },
+            DvfsFacts::HypervisorManagedUnobservable {
+                cpu_arch,
+                cpu_identity,
+                virtualization,
+                virtualization_source,
+                absent_controls,
+                raw_evidence_blake3,
+            } => DvfsProvenance::HypervisorManagedUnobservable(HypervisorUnobservableDvfs {
+                cpu_arch: cpu_arch.clone(),
+                cpu_identity: cpu_identity.clone(),
+                virtualization: virtualization.clone(),
+                virtualization_source: virtualization_source.clone(),
+                absent_controls: absent_controls.clone(),
+                raw_evidence_blake3: hex32(raw_evidence_blake3, "prov.dvfs.raw_evidence_blake3")?,
+            }),
+        })
+    }
+
+    /// Is this an OBSERVED turbo-enabled host? (The unobservable state is never turbo-enabled.)
+    fn observed_turbo_enabled(&self) -> bool {
+        matches!(
+            self,
+            DvfsFacts::Observable {
+                turbo_enabled: true,
+                ..
+            }
+        )
+    }
 }
 
 #[derive(Deserialize, Clone)]
@@ -284,7 +344,7 @@ pub fn validate_raw_facts(raw: &RawFacts) -> Result<(), String> {
             return Err(format!("{}: no provenance snapshots", c.candidate));
         }
         for p in &c.provenance {
-            if p.turbo_enabled {
+            if p.dvfs.observed_turbo_enabled() {
                 return Err(format!(
                     "{}: turbo ENABLED on {} host; refused",
                     c.candidate, p.arch
@@ -407,7 +467,7 @@ pub fn produce(raw: &RawFacts) -> Result<MeasurementPackage, String> {
 
         // turbo preflight: refuse a turbo-enabled host (never alter the host).
         for p in &c.provenance {
-            if p.turbo_enabled {
+            if p.dvfs.observed_turbo_enabled() {
                 return Err(format!(
                     "{}: turbo is ENABLED on the {} host; refusing (the runner never alters host settings)",
                     c.candidate, p.arch
@@ -496,8 +556,7 @@ fn prov_facts(p: &ProvFacts) -> Result<ProvenanceFacts, String> {
         total_ram_bytes: p.total_ram_bytes,
         configured_cpuset_core_limit: p.configured_cpuset_core_limit,
         configured_memory_limit_bytes: p.configured_memory_limit_bytes,
-        governor: p.governor.clone(),
-        turbo_enabled: p.turbo_enabled,
+        dvfs: p.dvfs.to_schema()?,
         clock_source: p.clock_source.clone(),
         cgroup_version: p.cgroup_version,
         cgroup_scope_label: p.cgroup_scope_label.clone(),
@@ -563,8 +622,10 @@ pub fn dry_run_raw_facts() -> RawFacts {
             total_ram_bytes: ram,
             configured_cpuset_core_limit: cpuset,
             configured_memory_limit_bytes: mem,
-            governor: "performance".into(),
-            turbo_enabled: false,
+            dvfs: DvfsFacts::Observable {
+                turbo_enabled: false,
+                governor: "performance".into(),
+            },
             clock_source: "tsc".into(),
             cgroup_version: 2,
             cgroup_scope_label: "b0-pre.slice".into(),
@@ -745,7 +806,10 @@ mod tests {
     #[test]
     fn refuses_turbo_enabled_host() {
         let mut f = dry_run_raw_facts();
-        f.candidates[0].provenance[0].turbo_enabled = true;
+        f.candidates[0].provenance[0].dvfs = DvfsFacts::Observable {
+            turbo_enabled: true,
+            governor: "performance".into(),
+        };
         assert!(produce(&f).unwrap_err().to_lowercase().contains("turbo"));
     }
 

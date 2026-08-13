@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use b0_pre_host_provenance::{read_host_facts, HostFacts};
+use b0_pre_host_provenance::{read_host_facts, DvfsState, HostFacts};
 
 struct Tree {
     root: PathBuf,
@@ -105,8 +105,10 @@ fn valid_host_parses_to_exact_facts() {
             total_ram_bytes: 33554432u64 * 1024,
             configured_cpuset_core_limit: 2,
             configured_memory_limit_bytes: 17179869184,
-            governor: "performance".into(),
-            turbo_enabled: false,
+            dvfs: DvfsState::Observable {
+                turbo_enabled: false,
+                governor: "performance".into(),
+            },
             clock_source: "tsc".into(),
             cgroup_version: 2,
             cgroup_scope_label: "/b0-final.slice/measure".into(),
@@ -118,7 +120,10 @@ fn valid_host_parses_to_exact_facts() {
 fn turbo_enabled_is_read_not_assumed() {
     let t = valid_x86("turbo-on");
     t.w("sys/devices/system/cpu/intel_pstate/no_turbo", "0\n");
-    assert!(read_host_facts(t.root()).unwrap().turbo_enabled);
+    match read_host_facts(t.root()).unwrap().dvfs {
+        DvfsState::Observable { turbo_enabled, .. } => assert!(turbo_enabled),
+        other => panic!("expected Observable, got {other:?}"),
+    }
 }
 
 #[test]

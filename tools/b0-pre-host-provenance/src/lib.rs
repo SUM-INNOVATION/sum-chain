@@ -13,6 +13,8 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 /// Host facts read purely from the filesystem root (everything except git state, which
 /// the binary resolves separately, and the caller-supplied build/role/arch identities).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,8 +28,7 @@ pub struct HostFacts {
     pub total_ram_bytes: u64,
     pub configured_cpuset_core_limit: u32,
     pub configured_memory_limit_bytes: u64,
-    pub governor: String,
-    pub turbo_enabled: bool,
+    pub dvfs: DvfsState,
     pub clock_source: String,
     pub cgroup_version: u8,
     pub cgroup_scope_label: String,
@@ -287,8 +288,7 @@ pub fn read_host_facts(root: &Path) -> Result<HostFacts, String> {
         .map_err(|e| format!("read proc/meminfo: {e}"))?;
     let total_ram_bytes = parse_meminfo_total_bytes(&meminfo)?;
 
-    let turbo_enabled = read_turbo_enabled(root)?;
-    let governor = read_uniform_governor(root)?;
+    let dvfs = read_dvfs_state(root)?;
     let clock_source = read_trimmed_at(
         root,
         "sys/devices/system/clocksource/clocksource0/current_clocksource",
@@ -315,12 +315,203 @@ pub fn read_host_facts(root: &Path) -> Result<HostFacts, String> {
         total_ram_bytes,
         configured_cpuset_core_limit,
         configured_memory_limit_bytes,
-        governor,
-        turbo_enabled,
+        dvfs,
         clock_source,
         cgroup_version,
         cgroup_scope_label,
     })
+}
+
+// ============================ DVFS provenance state (turbo/governor) ============================
+//
+// Two SEMANTICALLY-DISTINCT states. `Observable` is the ORDINARY state: the standard turbo +
+// per-CPU governor control surfaces are present and read directly (an OBSERVED DVFS, e.g. turbo
+// disabled + performance governor). `HypervisorManagedUnobservable` is a DISTINCT state — NEVER
+// encoded as `turbo=false` / `performance` — for a host that exposes NO DVFS control surface at
+// all because a hypervisor owns DVFS (observed only on native aarch64 under the ratified
+// Microsoft/Azure venue). It carries STRUCTURED evidence positively proving that case. A
+// partially-observable or contradictory host is REFUSED (fail closed), never mapped into either
+// state.
+
+/// A lowercase-hex encoding of bytes (bare, no prefix).
+fn hex_lower(b: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::with_capacity(b.len() * 2);
+    for x in b {
+        let _ = write!(s, "{x:02x}");
+    }
+    s
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DvfsState {
+    /// The ordinary, directly-observed DVFS state (turbo + uniform governor read from sysfs).
+    Observable {
+        turbo_enabled: bool,
+        governor: String,
+    },
+    /// DVFS is owned by the hypervisor and NO control surface is observable (native aarch64 +
+    /// Microsoft venue). Carries structured proof; never means `turbo=false`/`performance`.
+    HypervisorManagedUnobservable(HypervisorManagedDvfsEvidence),
+}
+
+/// STRUCTURED (never free-form) evidence for [`DvfsState::HypervisorManagedUnobservable`]. Every
+/// field is a positively-recorded observation used for eligibility; `raw_evidence_blake3` binds
+/// ALL of them so the eligibility decision is over exactly the recorded observations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HypervisorManagedDvfsEvidence {
+    /// The native CPU architecture PROVEN from `/proc/cpuinfo` (never the caller's `--arch`).
+    pub cpu_arch: String,
+    /// The `/proc/cpuinfo` CPU implementer/part identity that proves the arch.
+    pub cpu_identity: String,
+    /// The positively-observed virtualization vendor (must be `microsoft`).
+    pub virtualization: String,
+    /// Where the virtualization vendor was observed (`path=value`).
+    pub virtualization_source: String,
+    /// Each DVFS control surface CONFIRMED ABSENT (sorted, exact repo-relative sysfs paths).
+    pub absent_controls: Vec<String>,
+    /// `BLAKE3(domain ‖ canonical(all fields above))` — binds every observation used for eligibility.
+    pub raw_evidence_blake3: String,
+}
+
+/// Positively observe Microsoft (Azure) virtualization via DMI. Returns `(vendor, source)` only
+/// when the DMI system vendor is exactly `Microsoft Corporation`.
+fn microsoft_virtualization(root: &Path) -> Option<(String, String)> {
+    let v = read_trimmed_at(root, "sys/class/dmi/id/sys_vendor")
+        .ok()
+        .filter(|s| !s.is_empty())?;
+    if v == "Microsoft Corporation" {
+        Some((
+            "microsoft".to_string(),
+            format!("/sys/class/dmi/id/sys_vendor={v}"),
+        ))
+    } else {
+        None
+    }
+}
+
+/// Prove native aarch64 from `/proc/cpuinfo`: ARM exposes `CPU implementer` + `CPU part` and NO
+/// x86 `vendor_id` / `model name`. Returns the identity string, or `None` if not provably aarch64.
+fn native_aarch64_identity(root: &Path) -> Option<String> {
+    let text = read_trimmed_at(root, "proc/cpuinfo").ok()?;
+    let field = |k: &str| -> Option<String> {
+        text.lines().find_map(|l| {
+            l.split_once(':')
+                .and_then(|(a, b)| (a.trim() == k).then(|| b.trim().to_string()))
+        })
+    };
+    // x86 markers disqualify (must be UNAMBIGUOUSLY aarch64).
+    if field("vendor_id").is_some() || field("model name").is_some() {
+        return None;
+    }
+    let implementer = field("CPU implementer")?;
+    let part = field("CPU part")?;
+    Some(format!("CPU implementer={implementer} CPU part={part}"))
+}
+
+/// The DVFS control surfaces, partitioned into (present, absent). The host is "unobservable" ONLY
+/// when EVERY surface is absent; any present surface while turbo/governor are not fully readable is
+/// partial/contradictory (refused).
+fn dvfs_control_surfaces(root: &Path) -> (Vec<String>, Vec<String>) {
+    let base = "sys/devices/system/cpu";
+    let mut present = Vec::new();
+    let mut absent = Vec::new();
+    let mut check = |rel: String, exists: bool| {
+        if exists {
+            present.push(rel);
+        } else {
+            absent.push(rel);
+        }
+    };
+    check(
+        format!("{base}/intel_pstate/no_turbo"),
+        root.join(format!("{base}/intel_pstate/no_turbo")).exists(),
+    );
+    check(
+        format!("{base}/cpufreq/boost"),
+        root.join(format!("{base}/cpufreq/boost")).exists(),
+    );
+    // Any per-CPU `cpuN/cpufreq/scaling_governor`.
+    let any_governor = std::fs::read_dir(root.join(base))
+        .ok()
+        .map(|it| {
+            it.flatten().any(|e| {
+                let n = e.file_name().to_string_lossy().to_string();
+                n.strip_prefix("cpu")
+                    .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
+                    && e.path().join("cpufreq/scaling_governor").exists()
+            })
+        })
+        .unwrap_or(false);
+    check(
+        format!("{base}/cpuN/cpufreq/scaling_governor"),
+        any_governor,
+    );
+    // A usable cpufreq driver/control surface (cpu0's cpufreq dir).
+    check(
+        format!("{base}/cpu0/cpufreq"),
+        root.join(format!("{base}/cpu0/cpufreq")).exists(),
+    );
+    (present, absent)
+}
+
+/// Determine the host DVFS provenance state, fail-closed. Fully observable → [`DvfsState::Observable`]
+/// (byte-for-byte the current turbo/governor behaviour). Otherwise the ONLY accepted non-observable
+/// state is [`DvfsState::HypervisorManagedUnobservable`], and ONLY when EVERY control surface is
+/// absent AND the host is provably native aarch64 under positively-observed Microsoft virtualization;
+/// a partially-observable / contradictory / wrong-arch / wrong-hypervisor host is refused.
+pub fn read_dvfs_state(root: &Path) -> Result<DvfsState, String> {
+    // Fully OBSERVABLE (ordinary): both standard controls read directly.
+    if let (Ok(turbo_enabled), Ok(governor)) =
+        (read_turbo_enabled(root), read_uniform_governor(root))
+    {
+        return Ok(DvfsState::Observable {
+            turbo_enabled,
+            governor,
+        });
+    }
+    // Not fully observable. Any control surface present here means partial/contradictory evidence.
+    let (present, mut absent) = dvfs_control_surfaces(root);
+    if !present.is_empty() {
+        return Err(format!(
+            "DVFS partially observable / contradictory: control surface(s) present but turbo/governor \
+             not fully readable: {present:?}; refusing (neither observable nor hypervisor-unobservable)"
+        ));
+    }
+    // EVERY control surface is absent — the sanctioned unobservable case requires PROVEN native
+    // aarch64 + POSITIVELY-observed Microsoft virtualization.
+    let cpu_identity = native_aarch64_identity(root).ok_or_else(|| {
+        "hypervisor-unobservable DVFS requires PROVEN native aarch64 (cpuinfo CPU implementer/part, \
+         no x86 markers); refusing"
+            .to_string()
+    })?;
+    let (virtualization, virtualization_source) =
+        microsoft_virtualization(root).ok_or_else(|| {
+            "hypervisor-unobservable DVFS requires POSITIVELY-observed Microsoft virtualization \
+         (/sys/class/dmi/id/sys_vendor=Microsoft Corporation); refusing"
+                .to_string()
+        })?;
+    absent.sort();
+    let canonical = format!(
+        "b0-final-dvfs-unobservable/v1|arch=aarch64|id={cpu_identity}|virt={virtualization}|\
+         virt_src={virtualization_source}|absent={}",
+        absent.join(",")
+    );
+    let mut h = blake3::Hasher::new();
+    h.update(b"b0-final-dvfs-unobservable-evidence/v1\0");
+    h.update(canonical.as_bytes());
+    let raw_evidence_blake3 = hex_lower(h.finalize().as_bytes());
+    Ok(DvfsState::HypervisorManagedUnobservable(
+        HypervisorManagedDvfsEvidence {
+            cpu_arch: "aarch64".to_string(),
+            cpu_identity,
+            virtualization,
+            virtualization_source,
+            absent_controls: absent,
+            raw_evidence_blake3,
+        },
+    ))
 }
 
 #[cfg(test)]
@@ -359,5 +550,127 @@ mod tests {
             ("0x41".into(), "0xd0c".into())
         );
         assert!(parse_cpuinfo_identity("processor: 0\n").is_err());
+    }
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn tree(files: &[(&str, &str)]) -> PathBuf {
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let base = std::env::temp_dir().join(format!(
+            "b0-dvfs-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        for (p, body) in files {
+            let f = base.join(p);
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(f, body).unwrap();
+        }
+        base
+    }
+
+    const ARM_CPUINFO: &str =
+        "processor\t: 0\nBogoMIPS\t: 50.00\nCPU implementer\t: 0x41\nCPU part\t: 0xd0c\n";
+    const X86_CPUINFO: &str = "processor\t: 0\nvendor_id\t: GenuineIntel\nmodel name\t: Xeon\n";
+
+    // Observable (ordinary) x86: standard controls present + read directly -> exact current behaviour.
+    #[test]
+    fn observable_x86_disabled_turbo_is_ordinary_state() {
+        let root = tree(&[
+            ("proc/cpuinfo", X86_CPUINFO),
+            ("sys/devices/system/cpu/intel_pstate/no_turbo", "1\n"),
+            (
+                "sys/devices/system/cpu/cpu0/cpufreq/scaling_governor",
+                "performance\n",
+            ),
+        ]);
+        match read_dvfs_state(&root).unwrap() {
+            DvfsState::Observable {
+                turbo_enabled,
+                governor,
+            } => {
+                assert!(!turbo_enabled);
+                assert_eq!(governor, "performance");
+            }
+            other => panic!("expected Observable, got {other:?}"),
+        }
+    }
+
+    // Native aarch64 + Microsoft venue + EVERY control surface absent -> the distinct unobservable
+    // state, with bound structured evidence. NEVER turbo=false/performance. Deterministic.
+    #[test]
+    fn azure_aarch64_all_absent_is_hypervisor_unobservable_with_bound_evidence() {
+        let files: &[(&str, &str)] = &[
+            ("proc/cpuinfo", ARM_CPUINFO),
+            ("sys/class/dmi/id/sys_vendor", "Microsoft Corporation\n"),
+        ];
+        let root = tree(files);
+        let st = read_dvfs_state(&root).unwrap();
+        let ev = match &st {
+            DvfsState::HypervisorManagedUnobservable(e) => e,
+            other => panic!("expected HypervisorManagedUnobservable, got {other:?}"),
+        };
+        assert_eq!(ev.cpu_arch, "aarch64");
+        assert_eq!(ev.virtualization, "microsoft");
+        assert!(ev
+            .absent_controls
+            .iter()
+            .any(|c| c.contains("intel_pstate/no_turbo")));
+        assert!(ev
+            .absent_controls
+            .iter()
+            .any(|c| c.contains("scaling_governor")));
+        assert_eq!(ev.raw_evidence_blake3.len(), 64);
+        assert!(!matches!(st, DvfsState::Observable { .. }));
+        // identical observations -> identical bound evidence hash
+        match read_dvfs_state(&tree(files)).unwrap() {
+            DvfsState::HypervisorManagedUnobservable(e2) => {
+                assert_eq!(e2.raw_evidence_blake3, ev.raw_evidence_blake3)
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    // x86 with no control surfaces is NOT the sanctioned case (must be PROVEN native aarch64).
+    #[test]
+    fn x86_all_absent_is_refused_not_unobservable() {
+        let root = tree(&[
+            ("proc/cpuinfo", X86_CPUINFO),
+            ("sys/class/dmi/id/sys_vendor", "Microsoft Corporation\n"),
+        ]);
+        assert!(read_dvfs_state(&root).is_err());
+    }
+
+    // aarch64 with no controls but NOT Microsoft virtualization -> refused (wrong hypervisor).
+    #[test]
+    fn aarch64_all_absent_but_not_microsoft_is_refused() {
+        let root = tree(&[
+            ("proc/cpuinfo", ARM_CPUINFO),
+            ("sys/class/dmi/id/sys_vendor", "QEMU\n"),
+        ]);
+        assert!(read_dvfs_state(&root).is_err());
+        // and with NO dmi vendor at all
+        let root2 = tree(&[("proc/cpuinfo", ARM_CPUINFO)]);
+        assert!(read_dvfs_state(&root2).is_err());
+    }
+
+    // aarch64 + Microsoft but a PARTIAL control surface present -> contradictory -> refused.
+    #[test]
+    fn aarch64_microsoft_but_partial_control_present_is_refused() {
+        let boost = tree(&[
+            ("proc/cpuinfo", ARM_CPUINFO),
+            ("sys/class/dmi/id/sys_vendor", "Microsoft Corporation\n"),
+            ("sys/devices/system/cpu/cpufreq/boost", "1\n"),
+        ]);
+        assert!(read_dvfs_state(&boost).is_err());
+        let gov = tree(&[
+            ("proc/cpuinfo", ARM_CPUINFO),
+            ("sys/class/dmi/id/sys_vendor", "Microsoft Corporation\n"),
+            (
+                "sys/devices/system/cpu/cpu0/cpufreq/scaling_governor",
+                "performance\n",
+            ),
+        ]);
+        assert!(read_dvfs_state(&gov).is_err());
     }
 }

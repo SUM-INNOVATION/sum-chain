@@ -7,7 +7,7 @@
 use crate::consts;
 use crate::enums::{Arch, MetricKind, ProvenanceRole, RssScope, SampleKind, StatementIndex};
 use crate::schema::envelope::R0ProofArtifactEnvelopeV1;
-use crate::schema::provenance::ArchRunProvenanceV1;
+use crate::schema::provenance::{recompute_dvfs_evidence_hash, ArchRunProvenanceV1, DvfsProvenance};
 use crate::schema::result_set::R0ResultSetV1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -196,13 +196,40 @@ pub fn provenance_eligible(p: &ArchRunProvenanceV1) -> Result<(), Reason> {
     if p.configured_memory_limit_bytes > p.total_ram_bytes {
         return Err(Reason::ProvenanceIneligible("memlimit_exceeds_ram"));
     }
-    // Controlled-benchmark measurement integrity (both roles). Not a
-    // hardware-size gate; excludes no device class.
-    if p.governor != "performance" {
-        return Err(Reason::ProvenanceIneligible("governor"));
-    }
-    if p.turbo_enabled {
-        return Err(Reason::ProvenanceIneligible("turbo"));
+    // Controlled-benchmark measurement integrity (both roles). Not a hardware-size gate; excludes
+    // no device class. DVFS is a SUM: Observable is the ordinary governor+turbo gate;
+    // HypervisorManagedUnobservable is a DISTINCT state (NEVER turbo=false/performance) accepted
+    // ONLY under PROVEN native aarch64 + Microsoft venue with the raw evidence independently
+    // recomputed and no contradiction with the surrounding provenance arch.
+    match &p.dvfs {
+        DvfsProvenance::Observable {
+            turbo_enabled,
+            governor,
+        } => {
+            if governor != "performance" {
+                return Err(Reason::ProvenanceIneligible("governor"));
+            }
+            if *turbo_enabled {
+                return Err(Reason::ProvenanceIneligible("turbo"));
+            }
+        }
+        DvfsProvenance::HypervisorManagedUnobservable(e) => {
+            // cpu_arch must be aarch64 AND agree with the record's own arch (not caller-selected).
+            if e.cpu_arch != "aarch64" || p.arch != Arch::Aarch64 {
+                return Err(Reason::ProvenanceIneligible("dvfs_unobservable_arch"));
+            }
+            if e.virtualization != "microsoft" {
+                return Err(Reason::ProvenanceIneligible("dvfs_unobservable_virt"));
+            }
+            // Structured evidence must exist (a control-surface absence set) and its bound hash
+            // must independently recompute to the recorded value (same rule all three verifiers use).
+            if e.absent_controls.is_empty() {
+                return Err(Reason::ProvenanceIneligible("dvfs_unobservable_no_evidence"));
+            }
+            if recompute_dvfs_evidence_hash(e) != e.raw_evidence_blake3 {
+                return Err(Reason::ProvenanceIneligible("dvfs_unobservable_evidence_hash"));
+            }
+        }
     }
     if p.dirty_tree_flag {
         return Err(Reason::ProvenanceIneligible("dirty"));
@@ -273,11 +300,8 @@ pub fn paired_environment_consistent(
     if a.configured_memory_limit_bytes != b.configured_memory_limit_bytes {
         return Err(m("memlimit"));
     }
-    if a.governor != b.governor {
-        return Err(m("governor"));
-    }
-    if a.turbo_enabled != b.turbo_enabled {
-        return Err(m("turbo"));
+    if a.dvfs != b.dvfs {
+        return Err(m("dvfs"));
     }
     if a.clock_source != b.clock_source {
         return Err(m("clock_source"));

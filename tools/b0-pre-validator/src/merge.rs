@@ -197,7 +197,7 @@ mod tests {
             "cpu_vendor": "GenuineIntel", "cpu_model": "Xeon", "physical_core_count": 8,
             "logical_cpu_count": 8, "total_ram_bytes": 34359738368u64,
             "configured_cpuset_core_limit": 8, "configured_memory_limit_bytes": 34359738368u64,
-            "governor": "performance", "turbo_enabled": false, "clock_source": "tsc",
+            "dvfs": {"kind": "observable", "turbo_enabled": false, "governor": "performance"}, "clock_source": "tsc",
             "cgroup_version": 2, "cgroup_scope_label": "/b0.slice", "benchmark_harness_source_hash": h("d1"),
             "raw_environment_capture_hash": h("d2")
         })

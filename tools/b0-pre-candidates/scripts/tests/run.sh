@@ -13,16 +13,22 @@ rc=0
 echo "== bash -n (syntax) =="
 for s in lib.sh verify_pins.sh run_authoritative.sh measure_fragment.sh derive_guest_set.sh build_container.sh preflight_venue.sh smoke.sh provision_prover_toolchain.sh \
          tool_identities.sh resolve_lock.sh extract_material.sh verifier_fixtures.sh prove_fixture.sh \
+         docker_firewall.sh validate_cgroup_measurement.sh probe_cgroup_privilege.sh tests/docker_firewall.test.sh tests/docker_firewall_cgroup.test.sh tests/cgroup_evidence.test.sh \
          tests/disk_free_gib.test.sh tests/pin_schema.test.sh tests/pin_cargo_audit_advdb.test.sh tests/pin_prover_archives.test.sh tests/pin_prover_archive_authority.test.sh tests/source_authority.test.sh tests/blake3_cluster_pin.test.sh tests/risc0_harness_pins.test.sh \
          tests/smoke_guards.test.sh tests/smoke_orchestration.test.sh tests/verified_extraction.test.sh tests/provisioning_recipe.test.sh tests/cargo_audit_global_cache.test.sh \
          tests/pin_url_policy.test.sh tests/oci_platform.test.sh tests/tool_identity_arch.test.sh \
          tests/apt_pins.test.sh tests/tool_identity_threading.test.sh tests/oci_daemon_bridge.test.sh \
          tests/build_reproducibility.test.sh tests/runnable_ref_sidecar.test.sh tests/rustup_components.test.sh \
-         tests/builder_capability.test.sh tests/e2e_v2_produce_chain.test.sh tests/lifecycle_mode.test.sh tests/toolchain_authority.test.sh tests/run.sh; do
+         tests/builder_capability.test.sh tests/e2e_v2_produce_chain.test.sh tests/lifecycle_mode.test.sh tests/toolchain_authority.test.sh tests/lock_reconciliation.test.sh tests/run.sh; do
   f="$SCRIPTS/$s"
   [ -f "$f" ] || continue
   if bash -n "$f"; then echo "  ok  $s"; else echo "  FAIL $s"; rc=1; fi
 done
+# The cgroup evidence emitter is Python (not bash): in-memory compile as the syntax gate (writes no
+# bytecode file, so it never leaves a stray __pycache__ in the tree).
+if command -v python3 >/dev/null 2>&1 && [ -f "$SCRIPTS/emit_cgroup_evidence.py" ]; then
+  if python3 -c 'import sys; compile(open(sys.argv[1]).read(), sys.argv[1], "exec")' "$SCRIPTS/emit_cgroup_evidence.py"; then echo "  ok  emit_cgroup_evidence.py (compile)"; else echo "  FAIL emit_cgroup_evidence.py"; rc=1; fi
+fi
 
 if command -v shellcheck >/dev/null 2>&1; then
   echo "== shellcheck -x -S error (source-follow SC1091 is info-level, not gated) =="
@@ -39,7 +45,9 @@ if command -v shellcheck >/dev/null 2>&1; then
       "$SCRIPTS/tests/apt_pins.test.sh" "$SCRIPTS/tests/tool_identity_threading.test.sh" \
       "$SCRIPTS/tests/oci_daemon_bridge.test.sh" "$SCRIPTS/tests/build_reproducibility.test.sh" \
       "$SCRIPTS/tests/runnable_ref_sidecar.test.sh" "$SCRIPTS/tests/rustup_components.test.sh" \
-      "$SCRIPTS/tests/lifecycle_mode.test.sh" "$SCRIPTS/measure_fragment.sh" "$SCRIPTS/derive_guest_set.sh" "$SCRIPTS/tests/toolchain_authority.test.sh" "$SCRIPTS/tests/run.sh"; then
+      "$SCRIPTS/tests/lifecycle_mode.test.sh" "$SCRIPTS/measure_fragment.sh" "$SCRIPTS/derive_guest_set.sh" "$SCRIPTS/tests/toolchain_authority.test.sh" \
+      "$SCRIPTS/docker_firewall.sh" "$SCRIPTS/validate_cgroup_measurement.sh" "$SCRIPTS/probe_cgroup_privilege.sh" \
+      "$SCRIPTS/tests/docker_firewall.test.sh" "$SCRIPTS/tests/docker_firewall_cgroup.test.sh" "$SCRIPTS/tests/run.sh"; then
     echo "  ok  no error-level findings"
   else
     echo "  FAIL shellcheck error-level findings"; rc=1
@@ -102,6 +110,15 @@ bash "$HERE/builder_capability.test.sh"      || rc=1
 bash "$HERE/cargo_audit_global_cache.test.sh" || rc=1
 # Opt-in real-container v2 produce-chain E2E (SKIPs unless B0PRE_DOCKER_IT=1 + a daemon).
 bash "$HERE/e2e_v2_produce_chain.test.sh"    || rc=1
+# Docker invocation firewall: authorized-grammar rewrite + security negatives (smart stub docker).
+bash "$HERE/docker_firewall.test.sh"          || rc=1
+# Driver-aware proving-cgroup measurement: cgroupfs + systemd lifecycle + fail-closed guards
+# (extracted firewall helpers; the real systemd peak capture is venue-validated by
+# validate_cgroup_measurement.sh before Commit A — mocks alone do not close item D).
+bash "$HERE/docker_firewall_cgroup.test.sh"   || rc=1
+# Cgroup validation evidence encoder: independent-parser JSON tests (empty fields, control chars,
+# type preservation, one object per line, fail-closed with no partial line).
+bash "$HERE/cgroup_evidence.test.sh"          || rc=1
 
 echo "----"
 if [ "$rc" = 0 ]; then echo "B0-PRE script tests: ALL PASS"; else echo "B0-PRE script tests: FAILURES" >&2; fi

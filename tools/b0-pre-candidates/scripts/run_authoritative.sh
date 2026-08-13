@@ -204,8 +204,8 @@ produce_arch_authoritative() {
   require_linux_oci_builder
   require_free_gib "$work" 100
   require_cmd python3
-  require_no_preexisting_lock "$ROOT/candidates/sp1"
-  require_no_preexisting_lock "$ROOT/candidates/risc0"
+  require_committed_lock "$ROOT/candidates/sp1"
+  require_committed_lock "$ROOT/candidates/risc0"
 
   note "== Stage 3: two clean OCI builds per candidate (this arch), compare MANIFEST identities -> work =="
   require_headroom_gib "$work" 80 "Stage 3 two-clean-builds (both candidates)"

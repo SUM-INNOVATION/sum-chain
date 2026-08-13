@@ -225,6 +225,16 @@ pub enum NoticeError {
         version: String,
         detail: String,
     },
+    /// A FETCHED-UPSTREAM family covers this crate NAME, but the EXACT package identity
+    /// `(name, version, source)` or the published archive checksum does not match the family's
+    /// binding. Such a family is NEVER a wildcard: it applies only to the one exact package it was
+    /// fetched for; another version/source or a same-name package fails closed.
+    FetchedUpstreamIdentityMismatch {
+        name: String,
+        version: String,
+        family: String,
+        detail: String,
+    },
 }
 
 impl std::fmt::Display for NoticeError {
@@ -288,6 +298,15 @@ impl std::fmt::Display for NoticeError {
                 f,
                 "{name} {version} redistribution classification does not match the target closure: {detail}"
             ),
+            NoticeError::FetchedUpstreamIdentityMismatch {
+                name,
+                version,
+                family,
+                detail,
+            } => write!(
+                f,
+                "{name} {version} does not match the exact package identity bound by fetched-upstream family {family:?} (not a wildcard): {detail}"
+            ),
         }
     }
 }
@@ -345,6 +364,30 @@ pub struct CanonicalAttestation {
 
 /// One ratified upstream-notice family: a set of crate NAMES that share one upstream license text,
 /// with the exact SPDX the covered crates must declare and the pinned notice text(s).
+/// For a FETCHED-UPSTREAM family — the notice text IS the crate's OWN license, fetched from
+/// the upstream repository at an EXACT commit because the PUBLISHED crate ships no license file.
+/// The loader verifies crate/version/source identity, the upstream commit (a 40-hex commit,
+/// NEVER a tag) + its resolution authority, and the published crate's absence of license files;
+/// the exact license bytes/hashes are verified via the family `notices` (sha-true). Mutually
+/// exclusive with `attestation` (there is no canonical fallback and no synthesized copyright).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FetchedUpstream {
+    pub crate_name: String,
+    pub crate_version: String,
+    /// The exact Cargo source, e.g. `registry+https://github.com/rust-lang/crates.io-index`.
+    pub crate_source: String,
+    /// SHA-256 of the exact published `.crate` whose absence-of-license was determined.
+    pub published_crate_sha256: String,
+    /// The PUBLISHED crate ships NO license file (that is why the upstream text is fetched).
+    pub published_license_files_absent: bool,
+    pub repository: String,
+    /// The EXACT upstream commit the license bytes were fetched at (40-hex; NEVER a tag).
+    pub commit: String,
+    /// How the commit was resolved (e.g. `.cargo_vcs_info.json`).
+    pub commit_authority: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NoticeFamily {
@@ -363,6 +406,11 @@ pub struct NoticeFamily {
     /// text. Requires individual owner approval; a family WITH real upstream texts omits it.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub attestation: Option<CanonicalAttestation>,
+    /// Present iff this is a fetched-upstream family whose notice texts ARE the crate's own
+    /// license files, fetched from upstream at an exact commit (the published crate ships none).
+    /// Mutually exclusive with `attestation`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub fetched_upstream: Option<FetchedUpstream>,
 }
 
 impl NoticeFamily {
@@ -450,6 +498,65 @@ impl RatifiedNoticeMap {
                     return Err(NoticeError::BadMap(format!(
                         "crate {c} covered by two families ({other} and {})",
                         fam.id
+                    )));
+                }
+            }
+            // A FETCHED-UPSTREAM family (real upstream license text): verify the structured
+            // provenance is exact + well-formed and mutually exclusive with a canonical
+            // attestation. A nonexistent-tag substitution (commit not 40-hex), a missing crate
+            // identity, a non-64-hex published-crate sha, or a claim that the published crate DID
+            // ship a license all fail closed here.
+            if let Some(fu) = &fam.fetched_upstream {
+                if fam.attestation.is_some() {
+                    return Err(NoticeError::BadMap(format!(
+                        "family {} has both fetched_upstream and a canonical attestation",
+                        fam.id
+                    )));
+                }
+                if fu.crate_name.trim().is_empty()
+                    || fu.crate_version.trim().is_empty()
+                    || fu.crate_source.trim().is_empty()
+                    || fu.repository.trim().is_empty()
+                    || fu.commit_authority.trim().is_empty()
+                {
+                    return Err(NoticeError::BadMap(format!(
+                        "family {} fetched_upstream has an empty required field",
+                        fam.id
+                    )));
+                }
+                if !fam.covers.iter().any(|c| c == &fu.crate_name) {
+                    return Err(NoticeError::BadMap(format!(
+                        "family {} fetched_upstream crate {:?} is not in covers",
+                        fam.id, fu.crate_name
+                    )));
+                }
+                let is_hex64 = |s: &str| {
+                    s.len() == 64
+                        && s.bytes()
+                            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+                };
+                if !is_hex64(&fu.published_crate_sha256) {
+                    return Err(NoticeError::BadMap(format!(
+                        "family {} fetched_upstream published_crate_sha256 is not 64-hex",
+                        fam.id
+                    )));
+                }
+                if !fu.published_license_files_absent {
+                    return Err(NoticeError::BadMap(format!(
+                        "family {} fetched_upstream must record the published crate ships no license file",
+                        fam.id
+                    )));
+                }
+                // The upstream commit MUST be an exact 40-hex commit — NEVER a tag.
+                let commit_ok = fu.commit.len() == 40
+                    && fu
+                        .commit
+                        .bytes()
+                        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase());
+                if !commit_ok {
+                    return Err(NoticeError::BadMap(format!(
+                        "family {} fetched_upstream commit {:?} is not a 40-hex commit (tags are refused)",
+                        fam.id, fu.commit
                     )));
                 }
             }
@@ -1239,6 +1346,36 @@ pub fn generate(
                     family_spdx: fam.spdx.clone(),
                 });
             }
+            // Step 2: a FETCHED-UPSTREAM family binds an EXACT (name, version, source) package
+            // identity + the published archive checksum. It is NEVER a wildcard: it applies ONLY to
+            // that one exact package. A different version/source, or a same-name package with a
+            // different checksum, fails closed here (the family does not cover it).
+            if let Some(fu) = &fam.fetched_upstream {
+                let src = p.source.as_deref().unwrap_or("");
+                let ck = p.checksum.as_deref().unwrap_or("");
+                if fu.crate_name != p.name
+                    || fu.crate_version != p.version
+                    || fu.crate_source != src
+                    || fu.published_crate_sha256 != ck
+                {
+                    return Err(NoticeError::FetchedUpstreamIdentityMismatch {
+                        name: p.name.clone(),
+                        version: p.version.clone(),
+                        family: fam.id.clone(),
+                        detail: format!(
+                            "family binds ({}, {}, {}) checksum {}; package is ({}, {}, {}) checksum {}",
+                            fu.crate_name,
+                            fu.crate_version,
+                            fu.crate_source,
+                            fu.published_crate_sha256,
+                            p.name,
+                            p.version,
+                            src,
+                            ck
+                        ),
+                    });
+                }
+            }
             used_map = true;
             (
                 NoticeSource::RatifiedMap,
@@ -1595,6 +1732,82 @@ checksum = "bbbb"
         assert!(matches!(
             generate("Risc0", "X86_64", &"cd".repeat(32), LOCK, &root, None, None),
             Err(NoticeError::UncoveredByMap { .. })
+        ));
+    }
+
+    #[test]
+    fn fetched_upstream_family_matches_exact_identity_and_rejects_others() {
+        let commit = "4a8cdb44891ed57b8ff5a023b6bec7137c48708f";
+        let ck = "10d60334b3b2e7c9d91ef8150abfb6fa4c1c39ebbcf4a81c2e346aad939fee3e";
+        let mit = "MIT License text\n";
+        let apache = "Apache-2.0 License text\n";
+        let map_json = serde_json::json!({
+            "policy_version": "t",
+            "families": [{
+                "id": "knurling-defmt-parser",
+                "spdx": "MIT OR Apache-2.0",
+                "upstream_provenance": format!("https://github.com/knurling-rs/defmt @ {commit}"),
+                "covers": ["defmt-parser"],
+                "notices": [
+                    {"path": "LICENSE-APACHE", "sha256": sha256_hex(apache.as_bytes()), "text": apache},
+                    {"path": "LICENSE-MIT", "sha256": sha256_hex(mit.as_bytes()), "text": mit},
+                ],
+                "fetched_upstream": {
+                    "crate_name": "defmt-parser", "crate_version": "1.0.0", "crate_source": REG,
+                    "published_crate_sha256": ck, "published_license_files_absent": true,
+                    "repository": "https://github.com/knurling-rs/defmt",
+                    "commit": commit, "commit_authority": ".cargo_vcs_info.json",
+                },
+            }],
+        })
+        .to_string();
+        let map = RatifiedNoticeMap::load(&map_json).expect("defmt map loads");
+        let lh = "cd".repeat(32);
+        let defmt_toml = "[package]\nname = \"defmt-parser\"\nlicense = \"MIT OR Apache-2.0\"\n";
+        let lock = format!(
+            "\n[[package]]\nname = \"b0-pre-candidate-risc0-guest\"\nversion = \"0.0.0\"\n\n\
+             [[package]]\nname = \"defmt-parser\"\nversion = \"1.0.0\"\nsource = \"{REG}\"\n\
+             checksum = \"{ck}\"\n"
+        );
+
+        // EXACT (name, version, source, checksum) -> resolves through the fetched-upstream family.
+        let root = tmp("defmt-ok");
+        vendor_crate(
+            &root,
+            "defmt-parser",
+            "1.0.0",
+            defmt_toml,
+            &[("src/lib.rs", "// no license")],
+        );
+        let n = generate("Risc0", "X86_64", &lh, &lock, &root, Some(&map), None).expect("generate");
+        let e = n
+            .entries
+            .iter()
+            .find(|e| e.name == "defmt-parser")
+            .expect("defmt-parser entry");
+        assert_eq!(e.map_family.as_deref(), Some("knurling-defmt-parser"));
+        assert_eq!(e.notices.len(), 2);
+
+        // WRONG VERSION (same name+source) -> the family is NOT a wildcard -> fail closed.
+        let lock_v2 = lock.replace("version = \"1.0.0\"", "version = \"2.0.0\"");
+        let root2 = tmp("defmt-v2");
+        vendor_crate(
+            &root2,
+            "defmt-parser",
+            "2.0.0",
+            defmt_toml,
+            &[("src/lib.rs", "// no license")],
+        );
+        assert!(matches!(
+            generate("Risc0", "X86_64", &lh, &lock_v2, &root2, Some(&map), None),
+            Err(NoticeError::FetchedUpstreamIdentityMismatch { .. })
+        ));
+
+        // WRONG CHECKSUM (same name/version/source, e.g. a same-name substitute) -> fail closed.
+        let lock_ck = lock.replace(ck, &"0".repeat(64));
+        assert!(matches!(
+            generate("Risc0", "X86_64", &lh, &lock_ck, &root, Some(&map), None),
+            Err(NoticeError::FetchedUpstreamIdentityMismatch { .. })
         ));
     }
 

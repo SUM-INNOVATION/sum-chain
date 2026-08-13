@@ -23,6 +23,148 @@ fn read_bool(r: &mut Reader, ctx: &'static str) -> Result<bool, DecodeError> {
     }
 }
 
+/// Read a `u8`-length-prefixed ASCII string (fail closed on non-ASCII).
+fn read_u8_ascii(r: &mut Reader, ctx: &'static str) -> Result<String, DecodeError> {
+    let n = r.read_u8(ctx)?;
+    let b = r.read_bytes(n as usize, ctx)?;
+    if !b.iter().all(|c| c.is_ascii()) {
+        return Err(DecodeError::BadValue { ctx });
+    }
+    Ok(String::from_utf8(b.to_vec()).expect("ascii"))
+}
+
+/// The DVFS (turbo/governor) provenance state — a SUM type so the hypervisor-unobservable case is
+/// explicit and can NEVER be interpreted as `turbo=false`/`performance`.
+///
+/// * `Observable` — the ordinary directly-observed state; its `(governor, turbo_enabled)` body is
+///   encoded exactly as the pre-v2 flat fields (preserving Observable eligibility SEMANTICS; the
+///   full v2 record is intentionally not byte-compatible with v1, which the version bump enforces).
+/// * `HypervisorManagedUnobservable` — no DVFS control surface exists (hypervisor owns DVFS);
+///   carries STRUCTURED evidence whose `raw_evidence_blake3` is independently recomputed + verified.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DvfsProvenance {
+    Observable {
+        turbo_enabled: bool,
+        governor: String,
+    },
+    HypervisorManagedUnobservable(HypervisorUnobservableDvfs),
+}
+
+/// Structured evidence for [`DvfsProvenance::HypervisorManagedUnobservable`]. `absent_controls` is
+/// canonical: strictly sorted + unique (the decoder rejects any other order or a duplicate).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HypervisorUnobservableDvfs {
+    pub cpu_arch: String,
+    pub cpu_identity: String,
+    pub virtualization: String,
+    pub virtualization_source: String,
+    pub absent_controls: Vec<String>,
+    pub raw_evidence_blake3: [u8; 32],
+}
+
+/// Recompute the DVFS unobservable evidence hash — the SAME domain-separated rule the
+/// host-provenance reader and the independent verifier use, so all three agree byte-for-byte:
+/// `BLAKE3("b0-final-dvfs-unobservable-evidence/v1\0" ‖ canonical)`.
+pub fn recompute_dvfs_evidence_hash(e: &HypervisorUnobservableDvfs) -> [u8; 32] {
+    let canonical = format!(
+        "b0-final-dvfs-unobservable/v1|arch={}|id={}|virt={}|virt_src={}|absent={}",
+        e.cpu_arch,
+        e.cpu_identity,
+        e.virtualization,
+        e.virtualization_source,
+        e.absent_controls.join(",")
+    );
+    let mut h = blake3::Hasher::new();
+    h.update(b"b0-final-dvfs-unobservable-evidence/v1\0");
+    h.update(canonical.as_bytes());
+    *h.finalize().as_bytes()
+}
+
+impl DvfsProvenance {
+    pub fn encode(&self, w: &mut Writer) {
+        match self {
+            DvfsProvenance::Observable {
+                turbo_enabled,
+                governor,
+            } => {
+                w.u8(0);
+                w.u16(governor.len() as u16);
+                w.bytes(governor.as_bytes());
+                w.u8(u8::from(*turbo_enabled));
+            }
+            DvfsProvenance::HypervisorManagedUnobservable(e) => {
+                w.u8(1);
+                w.u8(e.cpu_arch.len() as u8);
+                w.bytes(e.cpu_arch.as_bytes());
+                w.u16(e.cpu_identity.len() as u16);
+                w.bytes(e.cpu_identity.as_bytes());
+                w.u8(e.virtualization.len() as u8);
+                w.bytes(e.virtualization.as_bytes());
+                w.u16(e.virtualization_source.len() as u16);
+                w.bytes(e.virtualization_source.as_bytes());
+                w.u8(e.absent_controls.len() as u8);
+                for c in &e.absent_controls {
+                    w.u16(c.len() as u16);
+                    w.bytes(c.as_bytes());
+                }
+                w.bytes(&e.raw_evidence_blake3);
+            }
+        }
+    }
+
+    pub fn decode(r: &mut Reader) -> Result<Self, DecodeError> {
+        match r.read_u8("DvfsProvenance.tag")? {
+            0 => {
+                let governor = r.read_ascii_str(32, "DvfsProvenance.governor")?;
+                let turbo_enabled = read_bool(r, "DvfsProvenance.turbo_enabled")?;
+                Ok(DvfsProvenance::Observable {
+                    turbo_enabled,
+                    governor,
+                })
+            }
+            1 => {
+                let cpu_arch = read_u8_ascii(r, "DvfsProvenance.cpu_arch")?;
+                let cpu_identity = r.read_ascii_str(128, "DvfsProvenance.cpu_identity")?;
+                let virtualization = read_u8_ascii(r, "DvfsProvenance.virtualization")?;
+                let virtualization_source =
+                    r.read_ascii_str(256, "DvfsProvenance.virtualization_source")?;
+                let n = r.read_u8("DvfsProvenance.absent_controls.count")?;
+                let mut absent_controls = Vec::with_capacity(n as usize);
+                let mut prev: Option<String> = None;
+                for _ in 0..n {
+                    let c = r.read_ascii_str(128, "DvfsProvenance.absent_control")?;
+                    // Canonical: strictly sorted + unique.
+                    if let Some(p) = &prev {
+                        if p.as_str() >= c.as_str() {
+                            return Err(DecodeError::BadValue {
+                                ctx: "DvfsProvenance.absent_controls_sorted_unique",
+                            });
+                        }
+                    }
+                    prev = Some(c.clone());
+                    absent_controls.push(c);
+                }
+                let raw_evidence_blake3 =
+                    r.read_array::<32>("DvfsProvenance.raw_evidence_blake3")?;
+                Ok(DvfsProvenance::HypervisorManagedUnobservable(
+                    HypervisorUnobservableDvfs {
+                        cpu_arch,
+                        cpu_identity,
+                        virtualization,
+                        virtualization_source,
+                        absent_controls,
+                        raw_evidence_blake3,
+                    },
+                ))
+            }
+            v => Err(DecodeError::BadFixedScalar {
+                ctx: "DvfsProvenance.tag",
+                value: v as u64,
+            }),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ArchRunProvenanceV1 {
     pub provenance_role: ProvenanceRole,
@@ -45,8 +187,7 @@ pub struct ArchRunProvenanceV1 {
     pub total_ram_bytes: u64,
     pub configured_cpuset_core_limit: u32,
     pub configured_memory_limit_bytes: u64,
-    pub governor: String,
-    pub turbo_enabled: bool,
+    pub dvfs: DvfsProvenance,
     pub clock_source: String,
     pub cgroup_version: u8,
     pub cgroup_scope_label: String,
@@ -57,7 +198,10 @@ pub struct ArchRunProvenanceV1 {
 impl ArchRunProvenanceV1 {
     pub fn encode(&self) -> Vec<u8> {
         let mut w = Writer::new();
-        w.u16(consts::SCHEMA_VERSION);
+        // Provenance-LOCAL schema version (v2 = DvfsProvenance sum type). Deliberately NOT the
+        // global `consts::SCHEMA_VERSION`, so advancing this record's layout does not disturb the
+        // canonical bytes of any other (R0 protocol or measurement) record.
+        w.u16(consts::ARCH_RUN_PROVENANCE_SCHEMA_VERSION);
         w.u8(self.provenance_role.to_repr());
         w.bytes(&self.b0_pre_spec_hash);
         w.bytes(&self.r0_guest_set_hash);
@@ -83,9 +227,7 @@ impl ArchRunProvenanceV1 {
         w.u64(self.total_ram_bytes);
         w.u32(self.configured_cpuset_core_limit);
         w.u64(self.configured_memory_limit_bytes);
-        w.u16(self.governor.len() as u16);
-        w.bytes(self.governor.as_bytes());
-        w.u8(if self.turbo_enabled { 1 } else { 0 });
+        self.dvfs.encode(&mut w);
         w.u16(self.clock_source.len() as u16);
         w.bytes(self.clock_source.as_bytes());
         w.u8(self.cgroup_version);
@@ -102,7 +244,9 @@ impl ArchRunProvenanceV1 {
 
     pub fn decode(r: &mut Reader) -> Result<Self, DecodeError> {
         let sv = r.read_u16("ArchRunProvenanceV1.schema_version")?;
-        if sv != consts::SCHEMA_VERSION {
+        // Precise local-version gate: a pre-DVFS (v1) provenance record is rejected here, naming
+        // this record's own schema_version and the offending value — no other record is affected.
+        if sv != consts::ARCH_RUN_PROVENANCE_SCHEMA_VERSION {
             return Err(DecodeError::BadFixedScalar {
                 ctx: "ArchRunProvenanceV1.schema_version",
                 value: sv as u64,
@@ -151,8 +295,7 @@ impl ArchRunProvenanceV1 {
             r.read_u32("ArchRunProvenanceV1.configured_cpuset_core_limit")?;
         let configured_memory_limit_bytes =
             r.read_u64("ArchRunProvenanceV1.configured_memory_limit_bytes")?;
-        let governor = r.read_ascii_str(32, "ArchRunProvenanceV1.governor")?;
-        let turbo_enabled = read_bool(r, "ArchRunProvenanceV1.turbo_enabled")?;
+        let dvfs = DvfsProvenance::decode(r)?;
         let clock_source = r.read_ascii_str(32, "ArchRunProvenanceV1.clock_source")?;
         let cgroup_version = r.read_u8("ArchRunProvenanceV1.cgroup_version")?;
         if cgroup_version != 1 && cgroup_version != 2 {
@@ -187,8 +330,7 @@ impl ArchRunProvenanceV1 {
             total_ram_bytes,
             configured_cpuset_core_limit,
             configured_memory_limit_bytes,
-            governor,
-            turbo_enabled,
+            dvfs,
             clock_source,
             cgroup_version,
             cgroup_scope_label,
@@ -231,8 +373,10 @@ mod tests {
             total_ram_bytes: 64 * (1 << 30),
             configured_cpuset_core_limit: 5,
             configured_memory_limit_bytes: 22 * (1 << 30),
-            governor: "performance".into(),
-            turbo_enabled: false,
+            dvfs: DvfsProvenance::Observable {
+                turbo_enabled: false,
+                governor: "performance".into(),
+            },
             clock_source: "tsc".into(),
             cgroup_version: 2,
             cgroup_scope_label: "b0-pre.slice".into(),
@@ -282,11 +426,14 @@ mod tests {
     #[test]
     fn over_long_string_rejected() {
         let mut p = sample();
-        p.governor = "x".repeat(33); // max 32
+        p.dvfs = DvfsProvenance::Observable {
+            turbo_enabled: false,
+            governor: "x".repeat(33), // max 32
+        };
         assert!(matches!(
             ArchRunProvenanceV1::decode_exact(&p.encode()),
             Err(DecodeError::LengthExceedsMax {
-                ctx: "ArchRunProvenanceV1.governor",
+                ctx: "DvfsProvenance.governor",
                 ..
             })
         ));
@@ -304,6 +451,105 @@ mod tests {
         assert!(matches!(
             ArchRunProvenanceV1::decode_exact(&long),
             Err(DecodeError::TrailingBytes { .. })
+        ));
+    }
+}
+
+#[cfg(test)]
+mod dvfs_codec_tests {
+    use super::*;
+
+    fn enc(d: &DvfsProvenance) -> Vec<u8> {
+        let mut w = Writer::new();
+        d.encode(&mut w);
+        w.into_bytes()
+    }
+    fn dec(b: &[u8]) -> Result<DvfsProvenance, DecodeError> {
+        let mut r = Reader::new(b);
+        let d = DvfsProvenance::decode(&mut r)?;
+        r.finish("DvfsProvenance")?;
+        Ok(d)
+    }
+    fn unobs() -> HypervisorUnobservableDvfs {
+        let mut e = HypervisorUnobservableDvfs {
+            cpu_arch: "aarch64".into(),
+            cpu_identity: "CPU implementer=0x41 CPU part=0xd0c".into(),
+            virtualization: "microsoft".into(),
+            virtualization_source: "/sys/class/dmi/id/sys_vendor=Microsoft Corporation".into(),
+            absent_controls: vec![
+                "a/intel_pstate/no_turbo".into(),
+                "b/cpufreq/boost".into(),
+                "c/scaling_governor".into(),
+            ],
+            raw_evidence_blake3: [0u8; 32],
+        };
+        e.raw_evidence_blake3 = recompute_dvfs_evidence_hash(&e);
+        e
+    }
+
+    #[test]
+    fn observable_roundtrips() {
+        let d = DvfsProvenance::Observable {
+            turbo_enabled: false,
+            governor: "performance".into(),
+        };
+        assert_eq!(dec(&enc(&d)).unwrap(), d);
+    }
+
+    #[test]
+    fn unobservable_roundtrips_and_recompute_matches() {
+        let d = DvfsProvenance::HypervisorManagedUnobservable(unobs());
+        let back = dec(&enc(&d)).unwrap();
+        assert_eq!(back, d);
+        match back {
+            DvfsProvenance::HypervisorManagedUnobservable(e) => {
+                assert_eq!(recompute_dvfs_evidence_hash(&e), e.raw_evidence_blake3);
+                // Shared cross-implementation golden: the independent verifier
+                // (`b0-pre-independent`, tests/dvfs_unobservable_cross_impl.rs) pins the SAME
+                // value for the SAME evidence, so the domain-separated hash rule cannot diverge.
+                let mut hexs = String::new();
+                for b in e.raw_evidence_blake3 {
+                    hexs.push_str(&format!("{b:02x}"));
+                }
+                assert_eq!(
+                    hexs,
+                    "6aa1924a8679315c415be5f0769a29c36b602ba2477b7fc79868354ea892b7c6"
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn unknown_tag_fails_closed() {
+        assert!(matches!(
+            dec(&[2u8]),
+            Err(DecodeError::BadFixedScalar {
+                ctx: "DvfsProvenance.tag",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn absent_controls_must_be_sorted_and_unique() {
+        let mut unsorted = unobs();
+        unsorted.absent_controls = vec!["zzz".into(), "aaa".into()];
+        assert!(matches!(
+            dec(&enc(&DvfsProvenance::HypervisorManagedUnobservable(
+                unsorted
+            ))),
+            Err(DecodeError::BadValue {
+                ctx: "DvfsProvenance.absent_controls_sorted_unique"
+            })
+        ));
+        let mut dup = unobs();
+        dup.absent_controls = vec!["dup".into(), "dup".into()];
+        assert!(matches!(
+            dec(&enc(&DvfsProvenance::HypervisorManagedUnobservable(dup))),
+            Err(DecodeError::BadValue {
+                ctx: "DvfsProvenance.absent_controls_sorted_unique"
+            })
         ));
     }
 }

@@ -134,8 +134,13 @@ if [ "$CAND" = sp1 ]; then
   # #3: toolchain identity bound to the ratified pinned builder image (not a label).
   TOOLCHAIN_IDENTITY="$(b0_toolchain_identity sp1 "$IMAGE_ID")"
 else
-  # RISC Zero has no builder container: the guest is embedded via embed_methods at runner
-  # BUILD time; its container identity is the runner binary's own hash.
+  # In the MEASUREMENT/proving path RISC Zero uses no builder container: the guest is embedded via
+  # embed_methods at runner BUILD time with the pinned LOCAL r0 toolchain, so the toolchain
+  # AUTHORITY derives from the provisioned local RISC0 toolchain tree (below) and the container
+  # identity here is the runner binary's own hash. NOTE: a native x86 RISC0 builder container IS
+  # still required for authoritative LOCK generation and build stages (resolve_lock.sh /
+  # build_container.sh) — only this measurement/embed path is builder-container-free. RISC0
+  # aarch64 proving/material remains ineligible and absent.
   CONTAINER_IMAGE_DIGEST="$(b3 "$MEASURE_RUNNER")"
   BUILDER_DIGEST="$CONTAINER_IMAGE_DIGEST"
   # #3: toolchain identity = the pinned local r0 toolchain tree (PROVER_RISC0_HOME).

@@ -76,7 +76,7 @@ require_full_sha256_digest BUILDER_IMAGE_DIGEST "${BUILDER_IMAGE_DIGEST:-}"
 reject_placeholder BUILDER_IMAGE_DIGEST "${BUILDER_IMAGE_DIGEST:-}"
 arch="${SCHEMA_ARCH:-}"
 case "$arch" in X86_64|Aarch64) ;; *) die "SCHEMA_ARCH must be X86_64|Aarch64 (got '${arch:-}')" ;; esac
-require_no_preexisting_lock "$ROOT/candidates/$candidate"
+require_committed_lock "$ROOT/candidates/$candidate"
 [ -z "$(git -C "$ROOT" status --porcelain 2>/dev/null || echo dirty)" ] \
   || die "source tree is not clean; refuse to resolve from a dirty state"
 source_commit="$(git -C "$ROOT" rev-parse HEAD)"
@@ -115,17 +115,33 @@ gen_lock_in_container "$BUILDER_IMAGE_REF" "$cand_dir" "$dest" 2> "$gen_log" \
   || die "in-container 'cargo generate-lockfile' failed for $candidate (no host lock is substituted)"
 [ -s "$dest" ] || die "in-container lock export for $candidate is empty; refusing"
 
+# The COMMITTED candidate lock is the SOURCE OF TRUTH; the freshly generated in-container lock is
+# an independent execution CHECK. Require EXACT byte equality (owner contract); the committed lock
+# is authoritative and is NEVER regenerated or rewritten. (require_committed_lock above already
+# refused a missing/symlink/empty committed lock; re-assert at compare time.)
+committed_lock="$ROOT/candidates/$candidate/Cargo.lock"
+{ [ -f "$committed_lock" ] && [ ! -L "$committed_lock" ] && [ -s "$committed_lock" ]; } \
+  || die "committed source-of-truth lock missing/symlink/empty at compare time: $committed_lock"
+cmp -s "$dest" "$committed_lock" \
+  || die "in-container generated lock for $candidate is NOT byte-identical to the committed source-of-truth lock $committed_lock; refusing (the committed lock is authoritative and is never regenerated/rewritten)"
+
 cmdlog_hex="$(blake3_hex_file "$gen_cmd")"
-# Recompute the domain-separated lock hash from the EXPORTED bytes (never a claim).
+# Recompute the domain-separated lock hashes from the EXPORTED bytes (never a claim) — BOTH the
+# generated lock and the committed source-of-truth lock — and require them equal (byte-identity,
+# re-checked as defence in depth beyond the cmp above).
 lock_hex="$(cargo run --quiet --locked --manifest-path "$VAL" --bin venue-verify -- lock-hash "$dest")" \
   || die "lock-hash recomputation failed for $dest"
+committed_lock_hex="$(cargo run --quiet --locked --manifest-path "$VAL" --bin venue-verify -- lock-hash "$committed_lock")" \
+  || die "committed lock-hash recomputation failed for $committed_lock"
+[ "$lock_hex" = "$committed_lock_hex" ] \
+  || die "generated lock hash ($lock_hex) != committed lock hash ($committed_lock_hex) for $candidate; refusing"
 
 # Record the generated-in-container provenance bound to (candidate, arch,
 # container_digest, source_commit, command_log, lock_hash).
 prov="$out/$schema_cand.lock-provenance.json"
-python3 - "$prov" "$schema_cand" "$arch" "$BUILDER_IMAGE_DIGEST" "$source_commit" "$cmdlog_hex" "$lock_hex" <<'PY'
+python3 - "$prov" "$schema_cand" "$arch" "$BUILDER_IMAGE_DIGEST" "$source_commit" "$cmdlog_hex" "$lock_hex" "$committed_lock_hex" <<'PY'
 import json, sys
-path, cand, arch, digest, commit, cmdlog, lockhash = sys.argv[1:8]
+path, cand, arch, digest, commit, cmdlog, lockhash, committed_lockhash = sys.argv[1:9]
 with open(path, "w") as f:
     json.dump({
         "candidate": cand,
@@ -135,15 +151,17 @@ with open(path, "w") as f:
         "source_commit": commit,
         "command_log_blake3_hex": cmdlog,
         "lock_blake3_hex": lockhash,
+        "committed_lock_blake3_hex": committed_lockhash,
     }, f, indent=2)
     f.write("\n")
 PY
 
-# Independently re-verify: reject a host origin and recompute the hash from the
-# exported bytes again (defence in depth — the resolver's recorded hash is not trusted).
+# Independently re-verify: reject a host origin, recompute BOTH hashes from the exported (generated)
+# bytes and the committed source-of-truth bytes, and require generated == committed (defence in
+# depth — the resolver's recorded hashes are not trusted; the committed lock is never rewritten).
 cargo run --quiet --locked --manifest-path "$VAL" --bin venue-verify -- \
-  verify-lock "$prov" "$dest" \
-  || die "lock provenance verification failed (host-originated lock or hash mismatch)"
+  verify-lock "$prov" "$dest" "$committed_lock" \
+  || die "lock provenance verification failed (host origin, hash mismatch, or generated!=committed)"
 
 note "recorded in-container $dest + provenance $prov"
 

@@ -1,7 +1,18 @@
 //! Frozen scalars, dimensions, official bounds, and decoder maxima (plan §2/§8/§20).
 
 // Fixed scalars (a byte carrying any other value is rejected on decode).
+// Global binary-schema version, shared by the R0 protocol records (statement, derived-input,
+// envelope, allowlist) and the measurement family (bench, result-set, verifier-material). It stays
+// 1: none of those layouts changed, so their canonical bytes/hashes are frozen (the encoding-golden
+// regression lock guards the R0 records, whose bytes/hashes are finalized). NOTHING but
+// ArchRunProvenanceV1 changed layout, so NOTHING but its own local version below advances.
 pub const SCHEMA_VERSION: u16 = 1;
+// ArchRunProvenanceV1 ONLY. Its canonical layout changed in isolation: the flat
+// (governor, turbo_enabled) DVFS fields became the `DvfsProvenance` sum type (adding the explicit
+// hypervisor-managed-unobservable state). This LOCAL version bumps to 2 so a pre-DVFS provenance
+// record is rejected on decode with a precise local-version error, without disturbing any other
+// record's bytes. No finalized protocol/R5 artifact is a binary schema record.
+pub const ARCH_RUN_PROVENANCE_SCHEMA_VERSION: u16 = 2;
 pub const ALGORITHM_VERSION: u16 = 1;
 pub const SOFTMAX_VARIANT_ID: u16 = 1;
 pub const TOKEN_INPUT_SCHEME_ID: u16 = 1;

@@ -26,7 +26,7 @@ use crate::enums::{
 };
 use crate::schema::bench::{BenchmarkRssRecordV1, BenchmarkSampleV1};
 use crate::schema::envelope::R0ProofArtifactEnvelopeV1;
-use crate::schema::provenance::ArchRunProvenanceV1;
+use crate::schema::provenance::{ArchRunProvenanceV1, DvfsProvenance};
 use crate::schema::result_set::{
     Aggregates, ArchProvenanceRef, Completeness, MeasuredProofRef, R0ResultSetV1, RssBundle,
     SampleBundle,
@@ -261,8 +261,10 @@ fn provenance(a: Arch, role: ProvenanceRole, ids: Ids, env: &Env) -> ArchRunProv
         total_ram_bytes: r.ram,
         configured_cpuset_core_limit: r.cpuset,
         configured_memory_limit_bytes: r.mem,
-        governor: env.governor.clone(),
-        turbo_enabled: env.turbo,
+        dvfs: DvfsProvenance::Observable {
+            turbo_enabled: env.turbo,
+            governor: env.governor.clone(),
+        },
         clock_source: env.clock_source.clone(),
         cgroup_version: env.cgroup_version,
         cgroup_scope_label: env.cgroup_scope_label.clone(),
@@ -1222,17 +1224,23 @@ mod tests {
     /// must not change a single output byte. These fingerprints of the FULL Evidence
     /// (every record + verifier material + result set) were frozen BEFORE the shared
     /// assembler existed; any drift here is a refactor regression, not a new golden.
+    /// (Re-frozen for the `ArchRunProvenanceV1` DVFS sum-type transition: only the
+    /// provenance records changed — their local version advanced to 2 and each carries
+    /// the DVFS tag byte — while every other record (samples/rss/envelopes/verifier
+    /// material/result set) stays at the unchanged global schema version 1. The
+    /// fingerprint moved because the embedded provenance bytes did; this is that one
+    /// sanctioned move.)
     #[test]
     fn generate_output_is_byte_stable() {
         assert_eq!(
             evidence_fingerprint(&generate()),
-            "042dfaa60147b80bce7d1bbc5c10b823270d5eeb49ea965ff789d3682795d988",
-            "SP1 generate() output drifted from the pre-refactor bytes"
+            "9992d256d46691f74ef7a7194e0f1dcc3bc7d208743b950f0e52fcc325d8aa1d",
+            "SP1 generate() output drifted from the frozen DVFS-transition bytes"
         );
         assert_eq!(
             evidence_fingerprint(&generate_candidate(Candidate::Risc0)),
-            "6222018df8ea0f9f734e55636b067d95072058d546a15e6117f0fb2149d2476a",
-            "RISC0 generate_candidate() output drifted from the pre-refactor bytes"
+            "d767ec6e9a17e63f9d923a6e4519f21d487b310c12b84bcec2b720d14572520e",
+            "RISC0 generate_candidate() output drifted from the frozen DVFS-transition bytes"
         );
     }
 

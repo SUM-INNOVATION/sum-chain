@@ -149,7 +149,11 @@ pub struct ExpectedOci {
 /// build a guest — a DIFFERENT toolchain (r0.1.88.0) than the pinned local `r0.1.91.1`, fetched
 /// from a mutable tag over the network. The owner rejected that path: RISC Zero guest
 /// compilation uses the pinned LOCAL toolchain via `risc0_build::embed_methods()` (no docker, no
-/// network, no rzup exec). This digest is recorded ONLY as rejected/unused audit evidence — it
+/// network, no rzup exec) — this concerns GUEST COMPILATION only. A native x86 RISC0 builder
+/// container is still required for authoritative lock generation and build stages; the RISC0
+/// toolchain authority derives from the provisioned local RISC0 toolchain tree, and RISC0 aarch64
+/// proving/material remains ineligible and absent. This digest is recorded ONLY as rejected/unused
+/// audit evidence — it
 /// is NEVER an accepted Stage-5 backend, and a v4 contract that declares it as one fails closed
 /// (it is absent from [`EXPECTED_OCI_BACKENDS`], and [`REJECTED_OCI_BACKENDS`] names it so the
 /// refusal is explicit rather than incidental).

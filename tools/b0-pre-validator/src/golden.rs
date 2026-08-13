@@ -15,7 +15,7 @@ use crate::schema::manifest::{
     InputManifestV1, InputSlotDescriptorV1, OutputManifestV1, SlotDescriptorV1,
 };
 use crate::schema::object::ObjectCommitmentV1;
-use crate::schema::provenance::ArchRunProvenanceV1;
+use crate::schema::provenance::{ArchRunProvenanceV1, DvfsProvenance};
 use crate::schema::result_set::{
     Aggregates, ArchProvenanceRef, Completeness, MeasuredProofRef, R0ResultSetV1, RssBundle,
     SampleBundle,
@@ -300,8 +300,10 @@ pub fn official_provenance_proving() -> ArchRunProvenanceV1 {
         total_ram_bytes: 64u64 << 30,
         configured_cpuset_core_limit: 5,
         configured_memory_limit_bytes: 22u64 << 30,
-        governor: "performance".into(),
-        turbo_enabled: false,
+        dvfs: DvfsProvenance::Observable {
+            turbo_enabled: false,
+            governor: "performance".into(),
+        },
         clock_source: "tsc".into(),
         cgroup_version: 2,
         cgroup_scope_label: "b0-pre.slice".into(),

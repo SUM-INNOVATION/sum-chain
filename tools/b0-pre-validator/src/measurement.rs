@@ -25,7 +25,7 @@ use crate::harness::{assemble_result_set, AssemblyInput, Evidence};
 use crate::schema::allowlist::{GuestProgramAllowlistV1, GuestProgramEntryV1};
 use crate::schema::bench::{BenchmarkRssRecordV1, BenchmarkSampleV1};
 use crate::schema::envelope::{ArtifactHash, R0ProofArtifactEnvelopeV1};
-use crate::schema::provenance::ArchRunProvenanceV1;
+use crate::schema::provenance::{ArchRunProvenanceV1, DvfsProvenance};
 use crate::schema::verifier_material::VerifierMaterialManifestV1;
 
 /// The allowlist canonical bytes plus one per-candidate evidence bundle each — the
@@ -68,8 +68,7 @@ pub struct ProvenanceFacts {
     pub total_ram_bytes: u64,
     pub configured_cpuset_core_limit: u32,
     pub configured_memory_limit_bytes: u64,
-    pub governor: String,
-    pub turbo_enabled: bool,
+    pub dvfs: DvfsProvenance,
     pub clock_source: String,
     pub cgroup_version: u8,
     pub cgroup_scope_label: String,
@@ -186,8 +185,7 @@ pub fn orchestrate_grid(
             total_ram_bytes: pf.total_ram_bytes,
             configured_cpuset_core_limit: pf.configured_cpuset_core_limit,
             configured_memory_limit_bytes: pf.configured_memory_limit_bytes,
-            governor: pf.governor.clone(),
-            turbo_enabled: pf.turbo_enabled,
+            dvfs: pf.dvfs.clone(),
             clock_source: pf.clock_source.clone(),
             cgroup_version: pf.cgroup_version,
             cgroup_scope_label: pf.cgroup_scope_label.clone(),
@@ -507,8 +505,10 @@ pub fn deterministic_demo_vector() -> MeasurementVector {
             total_ram_bytes: ram,
             configured_cpuset_core_limit: cpuset,
             configured_memory_limit_bytes: mem,
-            governor: "performance".into(),
-            turbo_enabled: false,
+            dvfs: DvfsProvenance::Observable {
+                turbo_enabled: false,
+                governor: "performance".into(),
+            },
             clock_source: "tsc".into(),
             cgroup_version: 2,
             cgroup_scope_label: "b0-pre.slice".into(),
@@ -661,8 +661,10 @@ mod tests {
             total_ram_bytes: ram,
             configured_cpuset_core_limit: cpuset,
             configured_memory_limit_bytes: mem,
-            governor: "performance".into(),
-            turbo_enabled: false,
+            dvfs: DvfsProvenance::Observable {
+                turbo_enabled: false,
+                governor: "performance".into(),
+            },
             clock_source: "tsc".into(),
             cgroup_version: 2,
             cgroup_scope_label: "b0-pre.slice".into(),
@@ -982,7 +984,10 @@ mod tests {
         let mut prov = all_provenance();
         for p in &mut prov {
             if p.role == ProvenanceRole::Verification {
-                p.turbo_enabled = true;
+                p.dvfs = DvfsProvenance::Observable {
+                    turbo_enabled: true,
+                    governor: "performance".into(),
+                };
             }
         }
         let ev = orchestrate_grid(

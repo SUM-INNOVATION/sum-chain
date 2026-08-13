@@ -246,11 +246,17 @@ fn smoke_substitute(
     serde_json::to_string_pretty(&log).map_err(|e| e.to_string())
 }
 
-fn verify_lock(prov_path: &str, lock_path: &str) -> Result<String, String> {
+fn verify_lock(
+    prov_path: &str,
+    generated_path: &str,
+    committed_path: &str,
+) -> Result<String, String> {
     let prov: LockProvenance =
         serde_json::from_str(&read_str(prov_path)?).map_err(|e| format!("bad provenance: {e}"))?;
-    let exported = read(lock_path)?;
-    let binding = verify_in_container_provenance(&prov, &exported).map_err(|e| e.to_string())?;
+    let generated = read(generated_path)?;
+    let committed = read(committed_path)?;
+    let binding =
+        verify_in_container_provenance(&prov, &generated, &committed).map_err(|e| e.to_string())?;
     Ok(serde_json::json!({
         "accepted": true,
         "candidate": binding.candidate,
@@ -813,7 +819,9 @@ fn run() -> Result<String, String> {
         [cmd, attest, observed, sentinel] if cmd == "smoke-substitute" => {
             smoke_substitute(attest, observed, sentinel)
         }
-        [cmd, prov, lock] if cmd == "verify-lock" => verify_lock(prov, lock),
+        [cmd, prov, generated, committed] if cmd == "verify-lock" => {
+            verify_lock(prov, generated, committed)
+        }
         [cmd, mode, declared, artifact, installed] if cmd == "verify-tool" => {
             verify_tool(mode, declared, artifact, installed)
         }

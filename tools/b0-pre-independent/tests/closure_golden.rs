@@ -5,7 +5,7 @@
 use b0_pre_independent::closure::{
     decode_allowlist, decode_env, decode_prov, decode_result_set, decode_rss, decode_sample,
     decode_vm, envelope_binds, paired_environment_consistent, provenance_eligible, provenance_hash,
-    validate_completeness, Allowlist, ResultSet, Vm,
+    validate_completeness, Allowlist, Dvfs, ResultSet, Vm,
 };
 
 const V: &str = include_str!("../../../docs/b0-pre/fixtures/closure-golden/vectors.json");
@@ -84,11 +84,11 @@ fn independent_closure_agrees_on_valid_and_rejects_mutations() {
         Err("physical_core_count")
     );
     let mut diff_gov = decode_prov(&pv_bytes).unwrap();
-    diff_gov.governor = "powersave".into();
-    assert_eq!(
-        paired_environment_consistent(&pv, &diff_gov),
-        Err("governor")
-    );
+    diff_gov.dvfs = Dvfs::Observable {
+        turbo: false,
+        governor: "powersave".into(),
+    };
+    assert_eq!(paired_environment_consistent(&pv, &diff_gov), Err("dvfs"));
 
     // --- allowlist (empty): guest-set hash ---
     let al_bytes = unhex(&s(&["valid", "allowlist_empty", "bytes"]));

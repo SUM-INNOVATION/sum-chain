@@ -11,7 +11,7 @@ use std::time::Instant;
 use crate::backend::{BuildCtx, ProvingBackend};
 use crate::binding::{bind_and_check, check_verifier_material_matches, VerifierMaterial};
 use crate::facts::{
-    BuilderFacts, CandidateFacts, CellFactsJson, GuestFacts, ProvFacts, VmEntryFacts,
+    BuilderFacts, CandidateFacts, CellFactsJson, DvfsFacts, GuestFacts, ProvFacts, VmEntryFacts,
 };
 use crate::{hex, native_eligible, Arch, RunnerAttestation};
 
@@ -78,7 +78,13 @@ pub fn run_arch_fragment(
         return Err("no provenance records supplied for the fragment".into());
     }
     for p in &cfg.provenance {
-        if p.turbo_enabled {
+        if matches!(
+            &p.dvfs,
+            DvfsFacts::Observable {
+                turbo_enabled: true,
+                ..
+            }
+        ) {
             return Err(format!("turbo ENABLED on {} host; refused", p.arch));
         }
     }
@@ -441,8 +447,10 @@ mod tests {
                 total_ram_bytes: 34359738368,
                 configured_cpuset_core_limit: 8,
                 configured_memory_limit_bytes: 34359738368,
-                governor: "performance".into(),
-                turbo_enabled: false,
+                dvfs: DvfsFacts::Observable {
+                    turbo_enabled: false,
+                    governor: "performance".into(),
+                },
                 clock_source: "tsc".into(),
                 cgroup_version: 2,
                 cgroup_scope_label: "/b0-final.slice/measure".into(),

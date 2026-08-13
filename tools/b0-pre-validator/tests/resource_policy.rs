@@ -11,7 +11,7 @@ use b0_pre_validator::enums::{Arch, Candidate, ProvenanceRole};
 use b0_pre_validator::golden;
 use b0_pre_validator::harness;
 use b0_pre_validator::protocol::B0PreProtocolV1;
-use b0_pre_validator::schema::provenance::ArchRunProvenanceV1;
+use b0_pre_validator::schema::provenance::{ArchRunProvenanceV1, DvfsProvenance};
 use b0_pre_validator::validation::{self, Reason};
 
 fn proving() -> ArchRunProvenanceV1 {
@@ -196,8 +196,12 @@ fn paired_environment_mismatch_rejected() {
         ("total_ram_bytes", |p| p.total_ram_bytes = 999u64 << 30),
         ("cpuset", |p| p.configured_cpuset_core_limit += 1),
         ("memlimit", |p| p.configured_memory_limit_bytes += 1),
-        ("governor", |p| p.governor = "powersave".into()),
-        ("turbo", |p| p.turbo_enabled = true),
+        ("dvfs", |p| {
+            p.dvfs = DvfsProvenance::Observable {
+                turbo_enabled: true,
+                governor: "powersave".into(),
+            }
+        }),
         ("clock_source", |p| p.clock_source = "hpet".into()),
         ("cgroup_version", |p| p.cgroup_version = 1),
         ("cgroup_scope_label", |p| {

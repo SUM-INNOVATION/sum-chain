@@ -50,6 +50,27 @@ pub struct VmEntryFacts {
     pub hash: String,
 }
 
+/// JSON twin of the host-provenance DVFS state (matches `b0-pre-host-provenance`'s `DvfsState`
+/// and the validator's reader). `Observable` is the ordinary turbo+governor state;
+/// `HypervisorManagedUnobservable` is the distinct native-aarch64/Microsoft state (never
+/// turbo=false/performance), carrying structured evidence.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DvfsFacts {
+    Observable {
+        turbo_enabled: bool,
+        governor: String,
+    },
+    HypervisorManagedUnobservable {
+        cpu_arch: String,
+        cpu_identity: String,
+        virtualization: String,
+        virtualization_source: String,
+        absent_controls: Vec<String>,
+        raw_evidence_blake3: String,
+    },
+}
+
 /// Provenance is produced by the separately-tested `b0-pre-host-provenance` binary; the
 /// runner reads its JSON into this struct (validating shape) and re-emits it verbatim.
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -68,8 +89,7 @@ pub struct ProvFacts {
     pub total_ram_bytes: u64,
     pub configured_cpuset_core_limit: u32,
     pub configured_memory_limit_bytes: u64,
-    pub governor: String,
-    pub turbo_enabled: bool,
+    pub dvfs: DvfsFacts,
     pub clock_source: String,
     pub cgroup_version: u8,
     pub cgroup_scope_label: String,

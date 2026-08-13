@@ -120,7 +120,7 @@ fi
 require_native_arch "$arch"
 require_linux_oci_builder
 require_free_gib "$out" 100
-require_no_preexisting_lock "$ROOT/candidates/$candidate"
+require_committed_lock "$ROOT/candidates/$candidate"
 require_cmd b3sum
 require_cmd tar
 require_full_sha256_digest BASE_DIGEST "${BASE_DIGEST:-}"

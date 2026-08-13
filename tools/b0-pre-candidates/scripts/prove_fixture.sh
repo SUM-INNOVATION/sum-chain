@@ -407,7 +407,9 @@ fn run() -> Result<(), String> {
         "image_id": hex(image_id.as_bytes()),
         "note": "genuine RISC Zero 3.0.5 Groth16 receipt of a frozen NON-OFFICIAL guest, built via \
                  risc0_build::embed_methods() with the pinned local r0.1.91.1 toolchain (no docker \
-                 guest-builder) + proved under the Docker firewall + self-verified. Guest identity \
+                 guest-builder IMAGE; the guest embed uses the pinned LOCAL r0 toolchain, but a \
+                 native x86 RISC0 builder container is still required for authoritative lock/build \
+                 stages) + proved under the Docker firewall + self-verified. Guest identity \
                  never enters the normative artifact.",
     });
     fs::write(out, serde_json::to_string_pretty(&fixture).map_err(|e| e.to_string())?)

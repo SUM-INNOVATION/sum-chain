@@ -169,7 +169,8 @@ fn enc_prov(arch: u8, role: u8, ids: Ids, env: &Env) -> Vec<u8> {
         env.verification
     };
     let mut b = Vec::new();
-    b.extend_from_slice(&1u16.to_le_bytes());
+    // Provenance-LOCAL schema version v2 (DvfsProvenance sum type); every other record stays v1.
+    b.extend_from_slice(&2u16.to_le_bytes());
     b.push(role);
     b.extend_from_slice(&id(b"spec"));
     b.extend_from_slice(&id(b"guest_set"));
@@ -192,6 +193,8 @@ fn enc_prov(arch: u8, role: u8, ids: Ids, env: &Env) -> Vec<u8> {
     b.extend_from_slice(&r.ram.to_le_bytes());
     b.extend_from_slice(&r.cpuset.to_le_bytes());
     b.extend_from_slice(&r.mem.to_le_bytes());
+    // DvfsProvenance::Observable: tag(0) ‖ u16 gov_len ‖ governor ‖ u8 turbo.
+    b.push(0u8);
     push_str(&mut b, env.governor.as_bytes());
     b.push(if env.turbo { 1 } else { 0 });
     push_str(&mut b, env.clock_source.as_bytes());

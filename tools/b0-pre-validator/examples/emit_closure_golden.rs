@@ -83,7 +83,10 @@ fn main() {
     prov_weak.physical_core_count = 8;
 
     let mut prov_gov = golden::official_provenance_proving();
-    prov_gov.governor = "powersave".into();
+    prov_gov.dvfs = b0_pre_validator::schema::provenance::DvfsProvenance::Observable {
+        turbo_enabled: false,
+        governor: "powersave".into(),
+    };
 
     let mut env_bad_gs = golden::official_envelope();
     env_bad_gs.r0_guest_set_hash[0] ^= 0x01;

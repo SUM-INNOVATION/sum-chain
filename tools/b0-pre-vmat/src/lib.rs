@@ -35,7 +35,9 @@ pub const fn pad32(s: &[u8]) -> [u8; 32] {
 }
 
 /// Frozen verifier-material manifest schema version (== validator
-/// `consts::SCHEMA_VERSION`).
+/// `consts::SCHEMA_VERSION`). Stays 1: the VMAT layout did NOT change. The
+/// `ArchRunProvenanceV1` DVFS sum-type transition advances only that record's OWN
+/// local version (`consts::ARCH_RUN_PROVENANCE_SCHEMA_VERSION`), never this global one.
 pub const SCHEMA_VERSION: u16 = 1;
 
 /// Candidate wire discriminants (== validator `Candidate::to_repr()`).

@@ -63,6 +63,286 @@ make_fresh_cell_cgroup() {
   printf '%s\t%s' "$rel" "$abs"
 }
 
+# Detect Docker's DAEMON cgroup driver. Prints "systemd" | "cgroupfs". Fail closed on anything
+# else: an unrecognized/undetected driver means unknown peak semantics, so measurement must not run.
+detect_cgroup_driver() {
+  local d; d="$(run_real info --format '{{.CgroupDriver}}' 2>/dev/null)"
+  case "$d" in
+    systemd|cgroupfs) printf '%s' "$d" ;;
+    *) echo "REFUSED: unknown/undetected Docker cgroup driver: '${d:-<none>}'" >&2; return 1 ;;
+  esac
+}
+
+# systemd driver ONLY: derive a fresh, unique, SLASH-FREE child slice name of the delegated proving
+# parent. systemd encodes hierarchy in the '-'-separated name, so `<stem>-cellNONCE.slice` is a
+# descendant of `<stem>.slice` (== $PROVING_CGROUP). The nonce is alnum-only (a '-' would insert an
+# extra systemd hierarchy level). Fail closed unless the proving parent is itself a `*.slice`, and
+# require the slice name to be absent everywhere under the cgroup root (freshness). Prints the name.
+make_fresh_cell_slice() {
+  [ -n "$PROVING_CGROUP" ] || { echo "REFUSED: B0PRE_PROVING_CGROUP unset for measurement" >&2; return 1; }
+  local base; base="$(basename "$PROVING_CGROUP")"
+  case "$base" in
+    *.slice) ;;
+    *) echo "REFUSED: systemd driver requires B0PRE_PROVING_CGROUP to be a *.slice, got: $PROVING_CGROUP" >&2; return 1 ;;
+  esac
+  local stem="${base%.slice}"
+  # B0PRE_CELL_NONCE is a TEST-ONLY determinism hook (unset in production -> random). A predictable
+  # cell name is harmless: the per-cell slice is still freshness-checked + hierarchy-authenticated.
+  local nonce; nonce="${B0PRE_CELL_NONCE:-$(printf '%s' "p$$r${RANDOM}r${RANDOM}" | tr -cd 'a-zA-Z0-9')}"
+  nonce="$(printf '%s' "$nonce" | tr -cd 'a-zA-Z0-9')"
+  [ -n "$nonce" ] || { echo "REFUSED: could not derive a cell-slice nonce" >&2; return 1; }
+  local slice="${stem}-cell${nonce}.slice"
+  if find "$CGROUP_ROOT" -type d -name "$slice" -print -quit 2>/dev/null | grep -q .; then
+    echo "REFUSED: fresh cell slice already present (not fresh): $slice" >&2; return 1
+  fi
+  printf '%s' "$slice"
+}
+
+# systemd hierarchy semantics: a slice named `a-b-c.slice` lives at
+# $CGROUP_ROOT/a.slice/a-b.slice/a-b-c.slice (each '-' is ONE hierarchy level). Resolve a slice NAME
+# to its canonical cgroup-v2 directory. This is DELIBERATELY not the same as a manually-created flat
+# $CGROUP_ROOT/<name> directory — the observed venue has BOTH a flat /sys/fs/cgroup/<parent>.slice
+# (manual, unrelated) and the real systemd hierarchy; measurement must use the hierarchical one.
+systemd_slice_dir() {
+  local name="$1" stem rest part acc="" path="$CGROUP_ROOT"
+  case "$name" in *.slice) ;; *) return 1 ;; esac
+  stem="${name%.slice}"; rest="$stem"
+  [ -n "$stem" ] || return 1
+  while [ -n "$rest" ]; do
+    part="${rest%%-*}"
+    if [ "$part" = "$rest" ]; then rest=""; else rest="${rest#*-}"; fi
+    [ -n "$part" ] || return 1
+    if [ -z "$acc" ]; then acc="$part"; else acc="$acc-$part"; fi
+    path="$path/$acc.slice"
+  done
+  printf '%s' "$path"
+}
+
+# STRICTLY validate the per-cell systemd unit name before it is ever passed to `systemctl stop`.
+# Args: <unit> <authenticated-scope-path> <authenticated-cell-dir> <expected-proving-hierarchy>.
+# The unit MUST: match exactly `b0-final-proving-cell<alnum>.slice` (no slash/space/metachar/traversal/
+# wildcard/operator input); equal the basename of the authenticated per-cell dir; be the immediate
+# parent of the authenticated live docker scope; resolve beneath the expected proving hierarchy; and
+# its own hierarchical path must equal the authenticated cell dir (name<->path agreement). Returns 0
+# only if EVERY check holds — so a stop can never target an ancestor, a shared slice, or injected input.
+validate_cell_unit() {
+  local unit="$1" scope="$2" cell_dir="$3" proving_hier="$4"
+  printf '%s' "$unit" | LC_ALL=C grep -Eq '^b0-final-proving-cell[a-zA-Z0-9]+\.slice$' || return 1
+  [ "$(basename "$cell_dir")" = "$unit" ] || return 1
+  [ "$(dirname "$scope")" = "$cell_dir" ] || return 1
+  case "$cell_dir/" in "$proving_hier"/*) ;; *) return 1 ;; esac
+  [ "$cell_dir" != "$proving_hier" ] || return 1
+  [ "$cell_dir" = "$(systemd_slice_dir "$unit")" ] || return 1
+  return 0
+}
+
+# Integrity gate for a privileged executable (sudo / systemctl). It MUST be an absolute path, an
+# existing REGULAR file (not a symlink), owned by root (B0PRE_EXE_OWNER overrides the expected owner
+# for TESTS ONLY; the venue never sets it), and NOT writable by group or other. Returns 0 only if all
+# hold — so the firewall never invokes a tamperable or attacker-writable privileged binary.
+check_root_exe() {
+  local p="$1" owner mode perm gw ow
+  case "$p" in /*) ;; *) return 1 ;; esac
+  [ -e "$p" ] || return 1
+  [ -L "$p" ] && return 1
+  [ -f "$p" ] || return 1
+  owner="$(stat -c '%U' "$p" 2>/dev/null || stat -f '%Su' "$p" 2>/dev/null)"
+  [ "$owner" = "${B0PRE_EXE_OWNER:-root}" ] || return 1
+  mode="$(stat -c '%a' "$p" 2>/dev/null || stat -f '%Lp' "$p" 2>/dev/null)"
+  [ -n "$mode" ] || return 1
+  perm="${mode: -3}"; gw="${perm:1:1}"; ow="${perm:2:1}"
+  case "$gw" in 2|3|6|7) return 1 ;; esac
+  case "$ow" in 2|3|6|7) return 1 ;; esac
+  [ -x "$p" ] || return 1
+  return 0
+}
+
+# Resolve a started container's ACTUAL cgroup-v2 directory (never a guessed path). Preference order:
+#   1. live PID inspection: docker inspect .State.Pid -> /proc/<pid>/cgroup (the kernel's own view);
+#   2. fallback (container exited before we caught the PID): locate the persisted
+#      `docker-<fullcid>.scope` dir by the container's real id (still present pre-removal).
+# Prints the absolute dir under $CGROUP_ROOT, or returns non-zero.
+capture_container_cgroup() {
+  local cid="$1" i=0 pid rel status
+  while [ "$i" -lt 200 ]; do
+    pid="$(run_real inspect -f '{{.State.Pid}}' "$cid" 2>/dev/null)"
+    if [ -n "$pid" ] && [ "$pid" -gt 0 ] 2>/dev/null && [ -r "/proc/$pid/cgroup" ]; then
+      rel="$(awk -F'::' '/^0::/{print $2; exit}' "/proc/$pid/cgroup" 2>/dev/null)"
+      if [ -n "$rel" ] && [ -d "$CGROUP_ROOT$rel" ]; then printf '%s' "$CGROUP_ROOT$rel"; return 0; fi
+    fi
+    status="$(run_real inspect -f '{{.State.Status}}' "$cid" 2>/dev/null)"
+    case "$status" in exited|dead) break ;; esac
+    i=$((i + 1))
+  done
+  local scope; scope="$(find "$CGROUP_ROOT" -type d -name "docker-$cid.scope" -print -quit 2>/dev/null)"
+  [ -n "$scope" ] && { printf '%s' "$scope"; return 0; }
+  return 1
+}
+
+# Execute the PROVE backend, driver-aware. $1 = measure (1|0). The remaining args (after '--') are
+# the `docker run` arguments EXCLUDING the leading `run`, `--rm`, and any `--cgroup-parent` (this
+# function supplies those). Sets MB_STATUS (backend exit code), MB_PEAK (peak bytes | ""), MB_CGID
+# (cgroup identity | ""). Fail closed: refuses on unknown driver, ambiguous/missing scope, failed
+# lifecycle, or a zero/absent peak while measuring. Sandbox flags/mounts/image are IDENTICAL across
+# drivers — only how the container's peak is isolated + read differs.
+run_measured_backend() {
+  local measure="$1"; shift
+  [ "${1:-}" = "--" ] && shift
+  local -a base=("$@")
+  MB_STATUS=""; MB_PEAK=""; MB_CGID=""; MB_CLEANUP_OK=1; MB_CLEANUP_DETAIL=""
+  MB_TEARDOWN_ARGV=""; MB_TEARDOWN_RC=""; MB_TEARDOWN_STDERR=""
+
+  if [ "$measure" != 1 ]; then
+    run_real run --rm "${base[@]}"; MB_STATUS=$?
+    return 0
+  fi
+
+  local driver; driver="$(detect_cgroup_driver)" || refuse "measurement: Docker cgroup driver detection failed"
+
+  if [ "$driver" = cgroupfs ]; then
+    # PROVEN path: pre-create a fresh EXCLUSIVE child cgroup, pass it via --cgroup-parent, read its
+    # peak after the (self-removing) run. Byte-for-byte the pre-existing measurement behavior.
+    local cg rel abs
+    cg="$(make_fresh_cell_cgroup)" || refuse "measurement: could not establish a fresh exclusive proving cgroup (cgroupfs)"
+    rel="${cg%%$'\t'*}"; abs="${cg##*$'\t'}"
+    run_real run --rm --cgroup-parent "$rel" "${base[@]}"; MB_STATUS=$?
+    local pk; pk="$(read_cgroup_peak "$abs" || true)"
+    { [ -n "$pk" ] && [ "$pk" -gt 0 ] 2>/dev/null; } || { rmdir "$abs" 2>/dev/null; refuse "measurement: SP1/RISC0 proving cgroup peak unavailable or zero at $abs (cgroupfs)"; }
+    rmdir "$abs" 2>/dev/null || true
+    MB_PEAK="$pk"; MB_CGID="cgroupfs:$abs"
+    return 0
+  fi
+
+  # driver == systemd: Docker places the container in a systemd-managed hierarchy — NOT under a
+  # manually-created flat $CGROUP_ROOT/<parent>.slice dir — and `--rm` tears down the transient
+  # docker-<id>.scope (and its memory.peak) before it can be read. Translate the authorized run into a
+  # create/start/inspect/wait/read/remove lifecycle: resolve the container's OWN scope from its live
+  # PID, authenticate it against the EXPECTED systemd hierarchy, and read the peak from the UNIQUE
+  # PER-CELL SLICE (which aggregates exactly this one container and survives briefly after the child
+  # scope exits). Never substitute an ancestor/shared-slice peak.
+  local cell name cid cell_dir proving_hier
+  cell="$(make_fresh_cell_slice)" || refuse "measurement: could not derive a fresh proving cell slice (systemd)"
+  cell_dir="$(systemd_slice_dir "$cell")" || refuse "measurement: could not resolve systemd hierarchy for cell slice $cell (systemd)"
+  proving_hier="$(systemd_slice_dir "$(basename "$PROVING_CGROUP")")" || refuse "measurement: could not resolve systemd hierarchy for proving parent $PROVING_CGROUP (systemd)"
+  # Freshness at the EXPECTED hierarchical path (NOT the flat manual dir): the per-cell slice must not
+  # pre-exist.
+  [ ! -e "$cell_dir" ] || refuse "measurement: per-cell slice already present (not fresh): $cell_dir (systemd)"
+  name="b0prove-$$-${RANDOM}${RANDOM}"
+  run_real inspect "$name" >/dev/null 2>&1 && refuse "measurement: proving container name already exists: $name (systemd)"
+  cid="$(run_real create --name "$name" --cgroup-parent "$cell" "${base[@]}" 2>/dev/null)" \
+    || refuse "measurement: could not create proving container under slice $cell (systemd)"
+  [ -n "$cid" ] || refuse "measurement: empty container id from docker create (systemd)"
+  [ ! -e "$cell_dir/docker-$cid.scope" ] \
+    || { run_real rm -f "$cid" >/dev/null 2>&1; refuse "measurement: container scope pre-exists (not fresh): $cell_dir/docker-$cid.scope (systemd)"; }
+  run_real start "$cid" >/dev/null 2>&1 \
+    || { run_real rm -f "$cid" >/dev/null 2>&1; refuse "measurement: could not start proving container $cid (systemd)"; }
+
+  # Authenticate the live scope against the EXPECTED systemd hierarchy.
+  local scope; scope="$(capture_container_cgroup "$cid")" \
+    || { run_real rm -f "$cid" >/dev/null 2>&1; refuse "measurement: could not resolve the live proving scope (systemd)"; }
+  # (1) immediate parent is exactly the unique per-cell slice at its hierarchical path;
+  [ "$(dirname "$scope")" = "$cell_dir" ] \
+    || { run_real rm -f "$cid" >/dev/null 2>&1; refuse "measurement: scope parent '$(dirname "$scope")' != expected per-cell slice '$cell_dir' (systemd)"; }
+  # (2) it is the container's OWN scope;
+  [ "$(basename "$scope")" = "docker-$cid.scope" ] \
+    || { run_real rm -f "$cid" >/dev/null 2>&1; refuse "measurement: resolved scope '$(basename "$scope")' is not docker-$cid.scope (systemd)"; }
+  # (3) the per-cell slice sits BENEATH the expected proving hierarchy (never the flat manual dir);
+  case "$cell_dir/" in
+    "$proving_hier"/*) ;;
+    *) run_real rm -f "$cid" >/dev/null 2>&1; refuse "measurement: per-cell slice '$cell_dir' is not beneath the expected proving hierarchy '$proving_hier' (systemd)" ;;
+  esac
+  # (4) the per-cell slice contains EXACTLY ONE scope (no unrelated child aggregated into the peak).
+  local nscope; nscope="$(find "$cell_dir" -mindepth 1 -maxdepth 1 -type d -name '*.scope' 2>/dev/null | wc -l | tr -d ' ')"
+  { [ "$nscope" = 1 ] && [ -d "$cell_dir/docker-$cid.scope" ]; } \
+    || { run_real rm -f "$cid" >/dev/null 2>&1; refuse "measurement: per-cell slice must contain exactly one scope (docker-$cid.scope), found $nscope (systemd)"; }
+
+  # Race-safe peak: monitor the AUTHENTICATED per-cell slice's memory.peak while the container is live
+  # (keep the max), read it once more after wait if it still exists, and use the max of the
+  # authenticated observations. memory.peak is monotonic, so this is the true high-water mark.
+  local best=0 cur running
+  while :; do
+    cur="$(read_cgroup_peak "$cell_dir" 2>/dev/null || true)"
+    if [ -n "$cur" ] && [ "$cur" -gt "$best" ] 2>/dev/null; then best="$cur"; fi
+    running="$(run_real inspect -f '{{.State.Running}}' "$cid" 2>/dev/null)"
+    [ "$running" = true ] || break
+    sleep 0.5
+  done
+  local st; st="$(run_real wait "$cid" 2>/dev/null)"
+  case "$st" in ''|*[!0-9]*) run_real rm -f "$cid" >/dev/null 2>&1; refuse "measurement: could not read proving container exit code (systemd)" ;; esac
+  if [ -d "$cell_dir" ]; then
+    cur="$(read_cgroup_peak "$cell_dir" 2>/dev/null || true)"
+    if [ -n "$cur" ] && [ "$cur" -gt "$best" ] 2>/dev/null; then best="$cur"; fi
+  fi
+  run_real logs "$cid" || true
+  [ "$best" -gt 0 ] 2>/dev/null \
+    || { run_real rm -f "$cid" >/dev/null 2>&1; refuse "measurement: no authenticated nonzero peak observed on the per-cell slice $cell_dir (systemd)"; }
+
+  # The measurement is captured. From here a CLEANUP failure must NOT discard the workload status:
+  # publish the outputs now, then tear down; on ANY teardown failure set MB_CLEANUP_OK=0 (+ detail) and
+  # RETURN so the caller records the workload status in evidence before failing the measurement.
+  MB_STATUS="$st"; MB_PEAK="$best"; MB_CGID="systemd:$cell(peak-from-per-cell-slice)=$cell_dir"
+
+  # Remove the container (removes docker-<id>.scope). Docker leaves the IMPLICITLY-created per-cell
+  # systemd SLICE loaded/active, so we must stop EXACTLY that unit — but only after proving it inert.
+  run_real rm "$cid" >/dev/null 2>&1 || run_real rm -f "$cid" >/dev/null 2>&1 \
+    || { MB_CLEANUP_OK=0; MB_CLEANUP_DETAIL="could not remove container $cid"; return 0; }
+  run_real inspect "$cid" >/dev/null 2>&1 \
+    && { MB_CLEANUP_OK=0; MB_CLEANUP_DETAIL="container $cid still present after rm"; return 0; }
+  [ ! -e "$cell_dir/docker-$cid.scope" ] \
+    || { MB_CLEANUP_OK=0; MB_CLEANUP_DETAIL="docker scope still present after rm: $cell_dir/docker-$cid.scope"; return 0; }
+  if [ -d "$cell_dir" ]; then
+    [ ! -s "$cell_dir/cgroup.procs" ] \
+      || { MB_CLEANUP_OK=0; MB_CLEANUP_DETAIL="per-cell slice still has processes (cgroup.procs nonempty): $cell_dir"; return 0; }
+    local kids; kids="$(find "$cell_dir" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1)"
+    [ -z "$kids" ] \
+      || { MB_CLEANUP_OK=0; MB_CLEANUP_DETAIL="per-cell slice still has a child cgroup/scope: $kids"; return 0; }
+  fi
+
+  # Stop EXACTLY the authenticated per-cell unit (never an ancestor/shared slice). Strictly validate
+  # the internally-generated unit name first, then use the absolute owner-approved systemctl.
+  if ! validate_cell_unit "$cell" "$scope" "$cell_dir" "$proving_hier"; then
+    MB_CLEANUP_OK=0; MB_CLEANUP_DETAIL="refusing systemctl stop: per-cell unit '$cell' failed strict validation"; return 0
+  fi
+  # Privileged teardown uses EXACTLY: /usr/bin/sudo -n /usr/bin/systemctl stop -- <cell>. Direct
+  # systemd management needs interactive auth on the venue, so the ONLY privileged step (`stop`) goes
+  # through a narrow passwordless-sudo rule. Integrity-check both binaries first; the post-stop
+  # `is-active` reads below are UNPRIVILEGED (no sudo). Nothing else runs as root — not the firewall,
+  # Docker, the prover, or the measurement process; sudo is never used for systemd-run.
+  local SUDO="${B0PRE_SUDO:-/usr/bin/sudo}" SYSTEMCTL="${B0PRE_SYSTEMCTL:-/usr/bin/systemctl}"
+  check_root_exe "$SUDO" \
+    || { MB_CLEANUP_OK=0; MB_CLEANUP_DETAIL="sudo executable integrity check failed for '$SUDO' (must be an absolute, root-owned, non-symlink regular file, not group/other writable)"; return 0; }
+  check_root_exe "$SYSTEMCTL" \
+    || { MB_CLEANUP_OK=0; MB_CLEANUP_DETAIL="systemctl executable integrity check failed for '$SYSTEMCTL' (must be an absolute, root-owned, non-symlink regular file, not group/other writable)"; return 0; }
+  # Built as ARGV (no shell evaluation), in a sanitized env, non-interactive (-n) so a prompt is
+  # impossible. `$cell` is the internally-generated, strictly-validated unit name.
+  MB_TEARDOWN_ARGV="$SUDO -n $SYSTEMCTL stop -- $cell"
+  local so src; so="$(env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin "$SUDO" -n "$SYSTEMCTL" stop -- "$cell" 2>&1)"; src=$?
+  MB_TEARDOWN_RC="$src"; MB_TEARDOWN_STDERR="$so"
+  if [ "$src" -ne 0 ]; then
+    MB_CLEANUP_OK=0; MB_CLEANUP_DETAIL="'sudo -n systemctl stop -- $cell' was refused (rc=$src): ${so}; VENUE PROVISIONING REQUIRED: a NARROW passwordless-sudo rule permitting EXACTLY '/usr/bin/systemctl stop -- b0-final-proving-cell*.slice' for the venue user (no unrestricted sudo; no sudoers/polkit change beyond that exact rule; do not run the firewall/Docker/prover as root)"; return 0
+  fi
+  # After stop: the unit must go inactive/not-found AND its cgroup dir must disappear (bounded wait).
+  local w=0
+  while [ "$w" -lt 20 ]; do
+    local act; act="$("$SYSTEMCTL" is-active -- "$cell" 2>/dev/null || true)"
+    case "$act" in active|activating|deactivating|reloading) ;; *) [ ! -e "$cell_dir" ] && break ;; esac
+    w=$((w + 1)); sleep 0.25
+  done
+  local act2; act2="$("$SYSTEMCTL" is-active -- "$cell" 2>/dev/null || true)"
+  case "$act2" in
+    active|activating|deactivating|reloading) MB_CLEANUP_OK=0; MB_CLEANUP_DETAIL="per-cell unit $cell still '$act2' after stop"; return 0 ;;
+  esac
+  [ ! -e "$cell_dir" ] \
+    || { MB_CLEANUP_OK=0; MB_CLEANUP_DETAIL="per-cell cgroup dir remains after stop: $cell_dir"; return 0; }
+  [ ! -e "$cell_dir/docker-$cid.scope" ] \
+    || { MB_CLEANUP_OK=0; MB_CLEANUP_DETAIL="scope reappeared after stop"; return 0; }
+  run_real inspect "$cid" >/dev/null 2>&1 \
+    && { MB_CLEANUP_OK=0; MB_CLEANUP_DETAIL="container reappeared after stop"; return 0; }
+  # The shared proving hierarchy (proving/final/root slices) was never targeted and remains loaded.
+  MB_CGID="systemd:$cell(peak-from-per-cell-slice;unit-stopped)=$cell_dir"
+  return 0
+}
+
 # --- recursion guard: real docker must be an ABSOLUTE, executable path that is NOT this firewall ---
 case "$REAL_DOCKER" in /*) ;; *) refuse "B0PRE_REAL_DOCKER must be absolute: $REAL_DOCKER" ;; esac
 [ -x "$REAL_DOCKER" ] || refuse "real docker not executable: $REAL_DOCKER"
@@ -235,22 +515,21 @@ sp1_backend() {
   [ -n "$recon" ] || { rm -f "$copy"; refuse "SP1 $label backend OCI reconciliation returned no result"; }
   local ref="$SP1_REPO@$SP1_MANIFEST"
   local mmap="/circuit(ro)=$c_canon $inp_target(rw-COPY,canonical-unmounted)=$copy<-$inp_canon /output(rw)=$o_canon"
-  # B0-FINAL measurement: place the PROVE (witness) container in a FRESH, EXCLUSIVE per-cell
-  # cgroup so its PEAK memory is isolated; verify (proof) is left unchanged. No-op when unset (R5).
-  local -a cgroup_args=(); local mpeak="" mcgid="" mcgrel=""
-  if [ "$label" = witness ] && [ -n "$PROVING_CGROUP" ]; then
-    local cg; cg="$(make_fresh_cell_cgroup)" || { rm -f "$copy"; refuse "measurement: could not establish a fresh exclusive proving cgroup"; }
-    mcgrel="${cg%%$'\t'*}"; mcgid="${cg##*$'\t'}"
-    cgroup_args=(--cgroup-parent "$mcgrel")
-  fi
-  local -a rw=(run --rm --pull never --network none --read-only
-    --cap-drop ALL --security-opt no-new-privileges "${cgroup_args[@]}" --tmpfs /tmp:rw,nosuid,nodev,noexec,size=1g
+  # B0-FINAL measurement: place the PROVE (witness) container in a FRESH, EXCLUSIVE per-cell cgroup
+  # so its PEAK memory is isolated; the verify (proof) call is left unmeasured. Driver-aware inside
+  # run_measured_backend (cgroupfs keeps the pre-created child + `run --rm`; systemd uses a
+  # create/start/inspect/wait/remove lifecycle). No-op when PROVING_CGROUP is unset (R5 / verify).
+  local measure=0
+  { [ "$label" = witness ] && [ -n "$PROVING_CGROUP" ]; } && measure=1
+  local -a base=(--pull never --network none --read-only
+    --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:rw,nosuid,nodev,noexec,size=1g
     --mount "type=bind,source=$c_canon,target=/circuit,readonly"
     --mount "type=bind,source=$copy,target=$inp_target"
     --mount "type=bind,source=$o_canon,target=/output"
     "$ref" "${cargs[@]}")
-  local rewritten="${rw[*]}"
-  run_real "${rw[@]}"; local st=$?
+  local rewritten="run --rm ${base[*]}"
+  run_measured_backend "$measure" -- "${base[@]}"
+  local st="$MB_STATUS" mpeak="$MB_PEAK" mcgid="$MB_CGID"
   [ -n "${B0PRE_DIAG:-}" ] && { mkdir -p "$B0PRE_DIAG"; cp -f "$o_canon" "$B0PRE_DIAG/$label-output.bin" 2>/dev/null; printf '%s status=%s output_size=%s\n' "$label" "$st" "$(wc -c <"$o_canon" 2>/dev/null)" >> "$B0PRE_DIAG/diag.log"; }
   local copy_post canon_post outh
   copy_post="$(sha "$copy")"; canon_post="$(sha "$inp_canon")"
@@ -260,15 +539,11 @@ sp1_backend() {
   local permmap="circuit(canonical,ro):$(perms "$c_canon") ${label}_copy(ephemeral,rw):$(perms "$copy") output(ephemeral,rw):$(perms "$o_canon")"
   rm -f "$copy"
   local pre="canonical:$canon_h,copy_pre:$copy_pre" post="copy_post:$copy_post,canonical_post:$canon_post"
-  # Measurement: read the PROVE container's peak from its FRESH per-cell cgroup; fail closed
-  # if unavailable OR zero (never emit an unmeasured/empty proving RSS). Then remove the cell cgroup.
-  if [ -n "$mcgid" ]; then
-    mpeak="$(read_cgroup_peak "$mcgid" || true)"
-    { [ -n "$mpeak" ] && [ "$mpeak" -gt 0 ] 2>/dev/null; } || { rmdir "$mcgid" 2>/dev/null; rm -f "$copy"; refuse "measurement: SP1 proving cgroup peak unavailable or zero at $mcgid"; }
-    rmdir "$mcgid" 2>/dev/null || true
-  fi
   [ "$canon_post" = "$canon_h" ] || { now_attest "sp1-$label" "$rewritten" "$recon" "$mmap" "$pre" "$post" "$outh" "$st" "$permmap" "$mpeak" "$mcgid"; refuse "CANONICAL SP1 $label input was mutated (it was never mounted)"; }
   now_attest "sp1-$label" "$rewritten" "$recon" "$mmap" "$pre" "$post" "$outh" "$st" "$permmap" "$mpeak" "$mcgid"
+  # Cleanup failure fails the measurement, but the workload status ($st) is already retained in the
+  # attestation above.
+  [ "${MB_CLEANUP_OK:-1}" = 1 ] || refuse "measurement cleanup FAILED (SP1 $label workload exit $st retained in attestation): ${MB_CLEANUP_DETAIL:-}"
   exit "$st"
 }
 
@@ -326,35 +601,32 @@ elif [ "$is_r0" = 1 ]; then
   [ -n "$recon" ] || refuse "RISC Zero backend OCI reconciliation returned no result"
   pre="seal:$(sha "$seal"),input:$(sha "$inj")"
   MMAP="/mnt(rw,output)=$w_canon seal.r0(ro-overlay) input.json(ro-overlay)"
-  # B0-FINAL measurement: RISC Zero's only backend call IS the stark2snark prove, so place
-  # it in a FRESH, EXCLUSIVE per-cell cgroup and read its peak. No-op when unset (R5).
-  declare -a r0_cgroup_args=(); r0_mpeak=""; r0_mcgid=""; r0_mcgrel=""
-  if [ -n "$PROVING_CGROUP" ]; then
-    r0_cg="$(make_fresh_cell_cgroup)" || refuse "measurement: could not establish a fresh exclusive proving cgroup"
-    r0_mcgrel="${r0_cg%%$'\t'*}"; r0_mcgid="${r0_cg##*$'\t'}"
-    r0_cgroup_args=(--cgroup-parent "$r0_mcgrel")
-  fi
-  declare -a RW=(run --rm --pull never --network none --read-only
-    --cap-drop ALL --security-opt no-new-privileges "${r0_cgroup_args[@]}" --tmpfs /tmp:rw,nosuid,nodev,exec,size=2g
+  # B0-FINAL measurement: RISC Zero's only backend call IS the stark2snark prove, so place it in a
+  # FRESH, EXCLUSIVE per-cell cgroup and read its peak (driver-aware inside run_measured_backend:
+  # cgroupfs keeps the pre-created child + `run --rm`; systemd uses a create/start/inspect/wait/remove
+  # lifecycle). No-op when PROVING_CGROUP is unset (R5).
+  r0_measure=0
+  [ -n "$PROVING_CGROUP" ] && r0_measure=1
+  declare -a r0_base=(--pull never --network none --read-only
+    --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:rw,nosuid,nodev,exec,size=2g
     --mount "type=bind,source=$w_canon,target=/mnt"
     --mount "type=bind,source=$seal,target=/mnt/seal.r0,readonly"
     --mount "type=bind,source=$inj,target=/mnt/input.json,readonly"
     "$DIGEST_REF")
-  REWRITTEN="${RW[*]}"
-  run_real "${RW[@]}"; status=$?
+  REWRITTEN="run --rm ${r0_base[*]}"
+  run_measured_backend "$r0_measure" -- "${r0_base[@]}"
+  status="$MB_STATUS"; r0_mpeak="$MB_PEAK"; r0_mcgid="$MB_CGID"
   post="seal:$(sha "$seal"),input:$(sha "$inj")"
   outh="proof.json:$(sha "$w_canon/proof.json")"
   # RISC0's /mnt inputs are SDK-produced ephemeral intermediates (the pinned circuit is baked into
   # the immutable image, never mounted); only this fresh per-proof work dir + its files are made
   # accessible — no canonical/content-store object is touched.
   permmap="workdir(ephemeral,rw):$(perms "$w_canon") seal.r0(ephemeral,ro-input):$(perms "$seal") input.json(ephemeral,ro-input):$(perms "$inj") proof.json(ephemeral,output):$(perms "$w_canon/proof.json")"
-  if [ -n "$r0_mcgid" ]; then
-    r0_mpeak="$(read_cgroup_peak "$r0_mcgid" || true)"
-    { [ -n "$r0_mpeak" ] && [ "$r0_mpeak" -gt 0 ] 2>/dev/null; } || { rmdir "$r0_mcgid" 2>/dev/null; refuse "measurement: RISC Zero proving cgroup peak unavailable or zero at $r0_mcgid"; }
-    rmdir "$r0_mcgid" 2>/dev/null || true
-  fi
+  # (the fresh proving cgroup's peak is captured + verified nonzero inside run_measured_backend)
   [ "$pre" = "$post" ] || { now_attest risc0 "$REWRITTEN" "$recon" "$MMAP" "$pre" "$post" "$outh" "$status" "$permmap" "$r0_mpeak" "$r0_mcgid"; refuse "RISC Zero inputs were MUTATED during proving"; }
   now_attest risc0 "$REWRITTEN" "$recon" "$MMAP" "$pre" "$post" "$outh" "$status" "$permmap" "$r0_mpeak" "$r0_mcgid"
+  # Cleanup failure fails the measurement, but the workload status ($status) is already retained above.
+  [ "${MB_CLEANUP_OK:-1}" = 1 ] || refuse "measurement cleanup FAILED (RISC Zero workload exit $status retained in attestation): ${MB_CLEANUP_DETAIL:-}"
   exit "$status"
 fi
 

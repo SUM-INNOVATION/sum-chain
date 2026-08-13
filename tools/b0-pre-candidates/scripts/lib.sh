@@ -619,10 +619,17 @@ require_headroom_gib() {
     || die "insufficient disk headroom for ${stage}: need >= ${min}GiB free at $path, have ${free:-0}GiB"
 }
 
-# The candidate must NOT already carry a lock (locks come only from the venue).
-require_no_preexisting_lock() {
-  local dir="$1"
-  [ -f "$dir/Cargo.lock" ] && die "unexpected pre-existing $dir/Cargo.lock; authoritative locks come only from the venue"
+# The committed candidate Cargo.lock is the SOURCE OF TRUTH (candidates/.gitignore keeps it
+# committed and intentionally NOT ignored). It MUST be present, a regular, non-empty, non-symlink
+# file. The authoritative resolver regenerates a fresh lock IN-CONTAINER and requires it
+# byte-identical to this committed lock (resolve_lock.sh); the committed lock is never rewritten
+# during an authoritative run. A host-supplied / injected lock is still refused there.
+require_committed_lock() {
+  local dir="$1" lock="$1/Cargo.lock"
+  [ -e "$lock" ] || die "committed source-of-truth lock absent: $lock (it MUST be committed; the venue never writes a fresh lock into the tree)"
+  [ ! -L "$lock" ] || die "committed lock is a symlink (refused): $lock"
+  [ -f "$lock" ] || die "committed lock is not a regular file: $lock"
+  [ -s "$lock" ] || die "committed lock is empty: $lock"
   true
 }
 

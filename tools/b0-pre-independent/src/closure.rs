@@ -312,6 +312,95 @@ pub fn decode_rss(b: &[u8]) -> Result<Rss, E> {
 
 // ---------- ArchRunProvenanceV1 ----------
 
+/// Independent mirror of the reference `DvfsProvenance` sum type: `Observable` is the
+/// ordinary directly-observed governor+turbo state; `Unobservable` is the DISTINCT
+/// hypervisor-managed state (never turbo=false/performance) carrying structured evidence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Dvfs {
+    Observable { turbo: bool, governor: String },
+    Unobservable(Unobservable),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unobservable {
+    pub cpu_arch: String,
+    pub cpu_identity: String,
+    pub virtualization: String,
+    pub virtualization_source: String,
+    pub absent_controls: Vec<String>,
+    pub raw_evidence_blake3: [u8; 32],
+}
+
+/// Domain-separated DVFS unobservable evidence hash — the byte-identical rule the
+/// reference validator and the host-provenance reader also use, so all three agree:
+/// `BLAKE3("b0-final-dvfs-unobservable-evidence/v1\0" ‖ canonical)`.
+pub fn recompute_dvfs_evidence_hash(e: &Unobservable) -> [u8; 32] {
+    let canonical = format!(
+        "b0-final-dvfs-unobservable/v1|arch={}|id={}|virt={}|virt_src={}|absent={}",
+        e.cpu_arch,
+        e.cpu_identity,
+        e.virtualization,
+        e.virtualization_source,
+        e.absent_controls.join(",")
+    );
+    let mut h = blake3::Hasher::new();
+    h.update(b"b0-final-dvfs-unobservable-evidence/v1\0");
+    h.update(canonical.as_bytes());
+    *h.finalize().as_bytes()
+}
+
+/// Read a `u8`-length-prefixed printable-ASCII string (mirrors the reference `read_u8_ascii`).
+fn rd_u8_ascii(r: &mut Rd<'_>) -> Result<String, E> {
+    let n = r.u8()? as usize;
+    let s = r.take(n)?;
+    if !s.iter().all(|&b| (0x20..=0x7E).contains(&b)) {
+        return Err(E::Value);
+    }
+    Ok(String::from_utf8(s.to_vec()).expect("ascii"))
+}
+
+/// Decode the `DvfsProvenance` sum type (tag 0 = Observable, tag 1 = Unobservable),
+/// mirroring the reference byte layout exactly. Unknown tag and non-canonical
+/// (non-strictly-sorted / duplicate) absent-control ordering fail closed.
+fn decode_dvfs(r: &mut Rd<'_>) -> Result<Dvfs, E> {
+    match r.u8()? {
+        0 => {
+            let governor = r.str16(32)?;
+            let turbo = boolean(r.u8()?)?;
+            Ok(Dvfs::Observable { turbo, governor })
+        }
+        1 => {
+            let cpu_arch = rd_u8_ascii(r)?;
+            let cpu_identity = r.str16(128)?;
+            let virtualization = rd_u8_ascii(r)?;
+            let virtualization_source = r.str16(256)?;
+            let n = r.u8()?;
+            let mut absent_controls = Vec::with_capacity(n as usize);
+            let mut prev: Option<String> = None;
+            for _ in 0..n {
+                let c = r.str16(128)?;
+                if let Some(p) = &prev {
+                    if p.as_str() >= c.as_str() {
+                        return Err(E::Value);
+                    }
+                }
+                prev = Some(c.clone());
+                absent_controls.push(c);
+            }
+            let raw_evidence_blake3 = r.arr::<32>()?;
+            Ok(Dvfs::Unobservable(Unobservable {
+                cpu_arch,
+                cpu_identity,
+                virtualization,
+                virtualization_source,
+                absent_controls,
+                raw_evidence_blake3,
+            }))
+        }
+        _ => Err(E::Value),
+    }
+}
+
 pub struct Prov {
     pub role: u8,
     pub spec: [u8; 32],
@@ -331,8 +420,7 @@ pub struct Prov {
     pub ram: u64,
     pub cpuset: u32,
     pub memlimit: u64,
-    pub governor: String,
-    pub turbo: bool,
+    pub dvfs: Dvfs,
     pub clock_source: String,
     pub cgroup_version: u8,
     pub cgroup_scope_label: String,
@@ -341,7 +429,9 @@ pub struct Prov {
 
 pub fn decode_prov(b: &[u8]) -> Result<Prov, E> {
     let mut r = Rd::new(b);
-    if r.u16()? != 1 {
+    // Provenance-LOCAL schema version: v2 (the DvfsProvenance sum type). A pre-DVFS v1 record is
+    // rejected here; the global schema version of every OTHER record stays 1 (unchanged layout).
+    if r.u16()? != 2 {
         return Err(E::Value);
     }
     let role = one_of(r.u8()?, 1)?;
@@ -374,8 +464,7 @@ pub fn decode_prov(b: &[u8]) -> Result<Prov, E> {
     let ram = r.u64()?;
     let cpuset = r.u32()?;
     let memlimit = r.u64()?;
-    let governor = r.str16(32)?;
-    let turbo = boolean(r.u8()?)?;
+    let dvfs = decode_dvfs(&mut r)?;
     let clock_source = r.str16(32)?;
     let cgroup_version = r.u8()?;
     if cgroup_version != 1 && cgroup_version != 2 {
@@ -404,8 +493,7 @@ pub fn decode_prov(b: &[u8]) -> Result<Prov, E> {
         ram,
         cpuset,
         memlimit,
-        governor,
-        turbo,
+        dvfs,
         clock_source,
         cgroup_version,
         cgroup_scope_label,
@@ -435,11 +523,33 @@ pub fn provenance_eligible(p: &Prov) -> Result<(), &'static str> {
     if p.memlimit > p.ram {
         return Err("memlimit_exceeds_ram");
     }
-    if p.governor != "performance" {
-        return Err("governor");
-    }
-    if p.turbo {
-        return Err("turbo");
+    // DVFS is a SUM: Observable is the ordinary governor+turbo gate; Unobservable is a DISTINCT
+    // state (NEVER turbo=false/performance) accepted ONLY under proven native aarch64 + Microsoft
+    // venue with the raw evidence independently recomputed and no contradiction with the record arch.
+    match &p.dvfs {
+        Dvfs::Observable { turbo, governor } => {
+            if governor != "performance" {
+                return Err("governor");
+            }
+            if *turbo {
+                return Err("turbo");
+            }
+        }
+        Dvfs::Unobservable(e) => {
+            // aarch64 == 2 (frozen Arch discriminant); the record's own arch must agree.
+            if e.cpu_arch != "aarch64" || p.arch != 2 {
+                return Err("dvfs_unobservable_arch");
+            }
+            if e.virtualization != "microsoft" {
+                return Err("dvfs_unobservable_virt");
+            }
+            if e.absent_controls.is_empty() {
+                return Err("dvfs_unobservable_no_evidence");
+            }
+            if recompute_dvfs_evidence_hash(e) != e.raw_evidence_blake3 {
+                return Err("dvfs_unobservable_evidence_hash");
+            }
+        }
     }
     if p.dirty {
         return Err("dirty");
@@ -502,11 +612,8 @@ pub fn paired_environment_consistent(a: &Prov, b: &Prov) -> Result<(), &'static 
     if a.memlimit != b.memlimit {
         return Err("memlimit");
     }
-    if a.governor != b.governor {
-        return Err("governor");
-    }
-    if a.turbo != b.turbo {
-        return Err("turbo");
+    if a.dvfs != b.dvfs {
+        return Err("dvfs");
     }
     if a.clock_source != b.clock_source {
         return Err("clock_source");

@@ -833,12 +833,17 @@ pub fn import_verify_mode(
         let pf = lock_prov_file(c);
         let prov: LockProvenance = parse(&pf, &read_file(dir, &pf)?)?;
         let lock_bytes = read_file(dir, &lock_file(c))?;
-        let binding = verify_in_container_provenance(&prov, &lock_bytes).map_err(|e| {
-            EvidenceError::Lock {
-                candidate: c.to_string(),
-                error: e.to_string(),
-            }
-        })?;
+        // The sealed bundle carries the ONE lock: the committed source-of-truth lock, which
+        // the venue proved byte-identical to the in-container generated lock at resolve time.
+        // Re-verify it against BOTH recorded hashes — generated and committed must each equal
+        // the sealed bytes (and thereby each other).
+        let binding =
+            verify_in_container_provenance(&prov, &lock_bytes, &lock_bytes).map_err(|e| {
+                EvidenceError::Lock {
+                    candidate: c.to_string(),
+                    error: e.to_string(),
+                }
+            })?;
         if binding.arch != arch {
             return Err(EvidenceError::ArchBinding {
                 file: pf.clone(),
@@ -1407,7 +1412,9 @@ pub fn write_test_only_bundle_dir(dir: &Path, arch: &str) -> Result<(), String> 
         let prov = serde_json::json!({"candidate":c,"arch":arch,
             "origin":crate::venue::lock_provenance::IN_CONTAINER_ORIGIN,
             "container_digest":builder,"source_commit":commit,
-            "command_log_blake3_hex":bh(&format!("lockcmd-{lc}-{arch}")),"lock_blake3_hex":lock_hash});
+            "command_log_blake3_hex":bh(&format!("lockcmd-{lc}-{arch}")),"lock_blake3_hex":lock_hash.clone(),
+            // The sealed lock is the committed source-of-truth (byte-identical to generated).
+            "committed_lock_blake3_hex":lock_hash});
         w(
             &lock_prov_file(c),
             &serde_json::to_vec_pretty(&prov).unwrap(),

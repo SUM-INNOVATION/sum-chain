@@ -96,6 +96,8 @@ fn write_bundle_files(dir: &Path, arch: &str) {
             "source_commit": COMMIT,
             "command_log_blake3_hex": bh(&format!("lockcmd-{lc}-{arch}")),
             "lock_blake3_hex": lock_hash,
+            // The sealed lock is the committed source-of-truth (venue proved byte-identity).
+            "committed_lock_blake3_hex": lock_hash,
         });
         write(dir, &lock_prov_file(c), serde_json::to_vec_pretty(&prov).unwrap().as_slice());
 
