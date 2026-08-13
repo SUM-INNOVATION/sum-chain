@@ -26,10 +26,11 @@ pub const MERGED_SPEC_HASH_HEX: &str =
 
 /// The ratified source commit the guest MUST be built from — the exact owner-ratified
 /// checkout, not merely a commit all records agree on. A different (even clean) commit is
-/// refused. This is the frozen MEASURED-CANDIDATE source (the merged B0-FINAL head af875ee0);
-/// it is deliberately NOT advanced to the toolchain-authority commit SHA (that is separate
-/// operational tooling/authority metadata, not the measured source).
-pub const RATIFIED_SOURCE_COMMIT: &str = "af875ee03dbb69ddf16638f73928a8351300cd9a";
+/// refused. This is the frozen MEASURED-CANDIDATE source: the x86-validated measured-source head
+/// 507281e2. It binds the validated PRE-BINDING source, NOT this source-binding commit itself, and
+/// is deliberately independent of the toolchain-authority builder-evidence commit (af875ee0),
+/// which is separate operational tooling/authority metadata, not the measured source.
+pub const RATIFIED_SOURCE_COMMIT: &str = "507281e21e95a6a98e3480e25e12d1baab586e07";
 
 /// Domain tag for the coordination-manifest content address.
 const MANIFEST_DOMAIN: &[u8] = b"b0-final-guest-set-manifest/v1";
@@ -616,12 +617,13 @@ mod tests {
     }
 
     #[test]
-    fn source_authority_is_af875ee0() {
-        // The frozen measured-candidate source authority is af875ee0 (the merged B0-FINAL
-        // head), NOT the authority-record commit SHA (operational tooling/authority metadata).
+    fn source_authority_is_507281e2() {
+        // The frozen measured-candidate source authority is 507281e2 (the x86-validated
+        // measured-source head), NOT the authority-record commit SHA (operational tooling/authority
+        // metadata) and NOT this source-binding commit itself.
         assert_eq!(
             RATIFIED_SOURCE_COMMIT,
-            "af875ee03dbb69ddf16638f73928a8351300cd9a"
+            "507281e21e95a6a98e3480e25e12d1baab586e07"
         );
     }
 }
