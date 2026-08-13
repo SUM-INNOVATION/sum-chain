@@ -7,6 +7,7 @@
 //!     ACCEPTED (positive), and
 //!   * every contradiction (x86 arch, wrong hypervisor, missing evidence, tampered evidence hash,
 //!     non-canonical absent-control ordering, unknown DVFS tag) is REJECTED (negatives),
+//!
 //! and pins the domain-separated evidence hash to a shared golden so the three implementations
 //! cannot silently diverge on the hashing rule.
 
@@ -27,8 +28,7 @@ const ABSENT: [&str; 3] = [
 ];
 /// Shared golden: BLAKE3("b0-final-dvfs-unobservable-evidence/v1\0" ‖ canonical) over the values
 /// above. The reference validator recomputes the identical value (pinned in its provenance tests).
-const EVIDENCE_GOLDEN: &str =
-    "6aa1924a8679315c415be5f0769a29c36b602ba2477b7fc79868354ea892b7c6";
+const EVIDENCE_GOLDEN: &str = "6aa1924a8679315c415be5f0769a29c36b602ba2477b7fc79868354ea892b7c6";
 
 fn canonical_unobs() -> Unobservable {
     let mut e = Unobservable {
@@ -112,8 +112,12 @@ fn enc_prov_with_dvfs(role: u8, arch: u8, dvfs_body: &[u8]) -> Vec<u8> {
 
 /// A freshly-decoded canonical (aarch64, proving) unobservable provenance record (`Prov` is not Clone).
 fn fresh() -> Prov {
-    decode_prov(&enc_prov_with_dvfs(0, 2, &enc_unobs_body(&canonical_unobs())))
-        .expect("canonical unobservable record decodes")
+    decode_prov(&enc_prov_with_dvfs(
+        0,
+        2,
+        &enc_unobs_body(&canonical_unobs()),
+    ))
+    .expect("canonical unobservable record decodes")
 }
 
 #[test]
@@ -138,7 +142,12 @@ fn native_aarch64_microsoft_unobservable_is_accepted() {
 #[test]
 fn unobservable_negatives_all_rejected() {
     // x86 arch (discriminant 1) while the evidence claims aarch64 -> arch contradiction.
-    let x86 = decode_prov(&enc_prov_with_dvfs(0, 1, &enc_unobs_body(&canonical_unobs()))).unwrap();
+    let x86 = decode_prov(&enc_prov_with_dvfs(
+        0,
+        1,
+        &enc_unobs_body(&canonical_unobs()),
+    ))
+    .unwrap();
     assert_eq!(provenance_eligible(&x86), Err("dvfs_unobservable_arch"));
 
     // aarch64 record but the evidence's own cpu_arch claims x86_64 -> arch contradiction.
@@ -160,7 +169,10 @@ fn unobservable_negatives_all_rejected() {
     if let Dvfs::Unobservable(e) = &mut empty.dvfs {
         e.absent_controls.clear();
     }
-    assert_eq!(provenance_eligible(&empty), Err("dvfs_unobservable_no_evidence"));
+    assert_eq!(
+        provenance_eligible(&empty),
+        Err("dvfs_unobservable_no_evidence")
+    );
 
     // tampered evidence hash.
     let mut bad_hash = fresh();

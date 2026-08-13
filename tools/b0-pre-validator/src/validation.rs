@@ -7,7 +7,9 @@
 use crate::consts;
 use crate::enums::{Arch, MetricKind, ProvenanceRole, RssScope, SampleKind, StatementIndex};
 use crate::schema::envelope::R0ProofArtifactEnvelopeV1;
-use crate::schema::provenance::{recompute_dvfs_evidence_hash, ArchRunProvenanceV1, DvfsProvenance};
+use crate::schema::provenance::{
+    recompute_dvfs_evidence_hash, ArchRunProvenanceV1, DvfsProvenance,
+};
 use crate::schema::result_set::R0ResultSetV1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -224,10 +226,14 @@ pub fn provenance_eligible(p: &ArchRunProvenanceV1) -> Result<(), Reason> {
             // Structured evidence must exist (a control-surface absence set) and its bound hash
             // must independently recompute to the recorded value (same rule all three verifiers use).
             if e.absent_controls.is_empty() {
-                return Err(Reason::ProvenanceIneligible("dvfs_unobservable_no_evidence"));
+                return Err(Reason::ProvenanceIneligible(
+                    "dvfs_unobservable_no_evidence",
+                ));
             }
             if recompute_dvfs_evidence_hash(e) != e.raw_evidence_blake3 {
-                return Err(Reason::ProvenanceIneligible("dvfs_unobservable_evidence_hash"));
+                return Err(Reason::ProvenanceIneligible(
+                    "dvfs_unobservable_evidence_hash",
+                ));
             }
         }
     }
