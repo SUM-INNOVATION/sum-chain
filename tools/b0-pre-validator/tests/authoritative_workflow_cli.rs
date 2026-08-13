@@ -127,6 +127,8 @@ fn authoritative_dry_run_drives_only_the_sealed_workflow_and_never_finalizes() {
         "Sp1.native.json",
         "Sp1.Cargo.lock",
         "Sp1.lock-provenance.json",
+        "Sp1.locked-commands.json",
+        "Sp1.vendor-inventory.json",
         "Sp1.stage2-audit.json",
         "Sp1.tool-binding.json",
         "Sp1.stage5-result.json",

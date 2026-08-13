@@ -35,6 +35,19 @@ pub const EXP_CERT_TAG: [u8; 32] = pad32(b"SUMCHAIN/B0PRE/EXPCERT/v1");
 pub const VERIFIER_MATERIAL_TAG: [u8; 32] = pad32(b"SUMCHAIN/B0PRE/VMAT/v1");
 pub const CARGO_LOCK_TAG: [u8; 32] = pad32(b"SUMCHAIN/B0PRE/CARGOLOCK/v1");
 pub const CONTAINER_TAG: [u8; 32] = pad32(b"SUMCHAIN/B0PRE/CONTAINER/v1");
+/// Domain tag for the canonical RETAINED locked-command-log artifact (the exact `cargo … --locked`
+/// argv/context/exit the venue executed to materialize the committed lock):
+/// `BLAKE3(LOCK_CMDLOG_TAG ‖ canonical_artifact_bytes)`. Distinct from any other lock hash so a
+/// command log can never be read as, or collide with, a Cargo.lock / closure / vendor identity.
+pub const LOCK_CMDLOG_TAG: [u8; 32] = pad32(b"SUMCHAIN/B0PRE/LOCKCMDLOG/v1");
+/// Domain tag for the canonical RETAINED vendor-input inventory (per vendored file: package
+/// coords + relpath + size + content sha256, canonical order):
+/// `BLAKE3(VENDOR_INV_TAG ‖ canonical_artifact_bytes)`.
+pub const VENDOR_INV_TAG: [u8; 32] = pad32(b"SUMCHAIN/B0PRE/VENDORINV/v1");
+/// Domain tag for the RETAINED materialized target-closure artifact identity:
+/// `BLAKE3(MAT_CLOSURE_TAG ‖ canonical_artifact_bytes)`. Bound (lock_blake3_hex) to the committed
+/// lock; distinct domain from the Stage-6 closure-encoding golden.
+pub const MAT_CLOSURE_TAG: [u8; 32] = pad32(b"SUMCHAIN/B0PRE/MATCLOSURE/v1");
 /// Domain tag for the canonical advisory-database checkout-content digest (policy A):
 /// `BLAKE3(ADVDB_CHECKOUT_TAG ‖ entry_count ‖ sorted (relpath,type,mode,symlink|content))`.
 pub const ADVDB_CHECKOUT_TAG: [u8; 32] = pad32(b"SUMCHAIN/B0PRE/ADVDB/v1");

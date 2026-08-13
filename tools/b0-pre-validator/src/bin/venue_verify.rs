@@ -9,7 +9,9 @@
 //!       (content-addressed digest + platform), re-verifying the manifest blob's
 //!       content address. NOT sha256(exported tar). (Blocker 5)
 //!
-//!   venue-verify verify-lock <provenance.json> <committed_Cargo.lock>
+//!   venue-verify verify-lock <provenance.json> <committed_Cargo.lock> \
+//!       <locked-commands.json> <vendor-inventory.json> <target-closure.json>
+//!   venue-verify lock-artifact-hash <command-log|vendor-inventory|closure> <artifact.json>
 //!       Accept a candidate lock ONLY with committed-source-of-truth provenance: the
 //!       committed lock was materialized under Cargo --locked (never regenerated), its
 //!       recorded SHA-256 + domain-separated BLAKE3 recompute from the committed bytes,
@@ -56,7 +58,7 @@ use b0_pre_validator::venue::arch_bundle::{aggregate, import_verify, PerArchBund
 use b0_pre_validator::venue::audit::{self, Advisory, CrateNode, Stage2AuditRecord};
 use b0_pre_validator::venue::evidence_bundle;
 use b0_pre_validator::venue::lock_provenance::{
-    recompute_lock_hash, verify_committed_source_lock, LockProvenance,
+    recompute_lock_hash, verify_committed_source_lock, LockArtifacts, LockProvenance,
 };
 use b0_pre_validator::venue::oci_layout::{
     extract_config_digest, extract_manifest_identity, verify_runtime_image_identity,
@@ -248,12 +250,27 @@ fn smoke_substitute(
     serde_json::to_string_pretty(&log).map_err(|e| e.to_string())
 }
 
-fn verify_lock(prov_path: &str, committed_path: &str) -> Result<String, String> {
+fn verify_lock(
+    prov_path: &str,
+    committed_path: &str,
+    command_log_path: &str,
+    vendor_inventory_path: &str,
+    closure_path: &str,
+) -> Result<String, String> {
     let prov: LockProvenance =
         serde_json::from_str(&read_str(prov_path)?).map_err(|e| format!("bad provenance: {e}"))?;
     let committed = read(committed_path)?;
+    // The three RETAINED canonical artifacts the verifier RECOMPUTES each provenance identity from.
+    let command_log = read(command_log_path)?;
+    let vendor_inventory = read(vendor_inventory_path)?;
+    let closure = read(closure_path)?;
+    let artifacts = LockArtifacts {
+        command_log: &command_log,
+        vendor_inventory: &vendor_inventory,
+        closure: &closure,
+    };
     let binding =
-        verify_committed_source_lock(&prov, &committed).map_err(|e| e.to_string())?;
+        verify_committed_source_lock(&prov, &committed, &artifacts).map_err(|e| e.to_string())?;
     Ok(serde_json::json!({
         "accepted": true,
         "candidate": binding.candidate,
@@ -270,6 +287,24 @@ fn verify_lock(prov_path: &str, committed_path: &str) -> Result<String, String> 
 
 fn crate_committed_origin() -> &'static str {
     b0_pre_validator::venue::lock_provenance::COMMITTED_SOURCE_ORIGIN
+}
+
+/// Producer helper: print the domain-separated identity of a canonical retained lock artifact so
+/// the venue can embed EXACTLY the value the verifier recomputes (single source of truth).
+fn lock_artifact_hash(kind: &str, path: &str) -> Result<String, String> {
+    use b0_pre_validator::venue::lock_artifacts as la;
+    let bytes = read(path)?;
+    let h = match kind {
+        "command-log" => la::recompute_command_log_hash(&bytes),
+        "vendor-inventory" => la::recompute_vendor_inventory_hash(&bytes),
+        "closure" => la::recompute_materialized_closure_hash(&bytes),
+        other => {
+            return Err(format!(
+                "unknown artifact kind {other:?} (command-log|vendor-inventory|closure)"
+            ))
+        }
+    };
+    Ok(h)
 }
 
 fn verify_tool(
@@ -823,7 +858,10 @@ fn run() -> Result<String, String> {
         [cmd, attest, observed, sentinel] if cmd == "smoke-substitute" => {
             smoke_substitute(attest, observed, sentinel)
         }
-        [cmd, prov, committed] if cmd == "verify-lock" => verify_lock(prov, committed),
+        [cmd, prov, committed, cmdlog, vendor, closure] if cmd == "verify-lock" => {
+            verify_lock(prov, committed, cmdlog, vendor, closure)
+        }
+        [cmd, kind, path] if cmd == "lock-artifact-hash" => lock_artifact_hash(kind, path),
         [cmd, mode, declared, artifact, installed] if cmd == "verify-tool" => {
             verify_tool(mode, declared, artifact, installed)
         }
@@ -889,7 +927,7 @@ fn run() -> Result<String, String> {
             "usage: venue-verify <oci-manifest|verify-runtime-image|checkout-digest|\
              provisioned-tree-digest|pin-contract-check|content-store|\
              prover-archive-check|smoke-attest-check|smoke-source-check|smoke-substitute|\
-             lock-hash|verify-lock|\
+             lock-hash|verify-lock|lock-artifact-hash|\
              verify-tool|stage2-audit|stage2-generate|stage2-record|\
              notices-generate|notices-verify|stage4-guard|verify-stage5|\
              stage5-generate|import-arch|aggregate-arches|seal-bundle|seal-bundle-test-only|\

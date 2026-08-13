@@ -18,8 +18,20 @@
 //! a moving registry — any such reselection is a defect, never authoritative provenance.
 
 use super::is_hex64;
+use super::lock_artifacts::{self, ArtifactError};
 use crate::hashing::prefixed;
 use crate::tags::CARGO_LOCK_TAG;
+
+/// The three canonical RETAINED artifacts the verifier RECOMPUTES the provenance's artifact
+/// identities from — supplied as bytes so a caller cannot present a hash without its bytes.
+pub struct LockArtifacts<'a> {
+    /// `<Cand>.locked-commands.json` — the exact `cargo … --locked` command log.
+    pub command_log: &'a [u8],
+    /// `<Cand>.vendor-inventory.json` — per-vendored-file package coords + path + size + sha256.
+    pub vendor_inventory: &'a [u8],
+    /// `<Cand>.target-closure.json` — the lock-bound materialized target closure.
+    pub closure: &'a [u8],
+}
 
 /// The ONE accepted candidate-lock origin: the committed source-of-truth lock, materialized under
 /// Cargo LOCKED semantics inside the pinned builder image. Anything else (a host lock, or a
@@ -102,6 +114,16 @@ pub enum LockError {
     BadVendorInputs,
     /// A required field was empty.
     Missing(&'static str),
+    /// A RETAINED artifact (command log / vendor inventory / materialized closure) failed
+    /// recomputation or structural/semantic validation. A well-formed FALSE hash cannot pass:
+    /// the identity is recomputed from the supplied artifact bytes.
+    Artifact(ArtifactError),
+}
+
+impl From<ArtifactError> for LockError {
+    fn from(e: ArtifactError) -> Self {
+        LockError::Artifact(e)
+    }
 }
 
 impl std::fmt::Display for LockError {
@@ -138,6 +160,7 @@ impl std::fmt::Display for LockError {
             LockError::Missing(field) => {
                 write!(f, "required lock-provenance field {field} is empty")
             }
+            LockError::Artifact(e) => write!(f, "{e}"),
         }
     }
 }
@@ -175,6 +198,7 @@ fn is_real_container_digest(d: &str) -> bool {
 pub fn verify_committed_source_lock(
     prov: &LockProvenance,
     committed_bytes: &[u8],
+    artifacts: &LockArtifacts,
 ) -> Result<LockBinding, LockError> {
     if prov.candidate.trim().is_empty() {
         return Err(LockError::Missing("candidate"));
@@ -248,13 +272,38 @@ pub fn verify_committed_source_lock(
             post: prov.post_lock_sha256_hex.clone(),
         });
     }
-    // (6) Materialized-closure + vendored-input identities must be present (64-hex).
+    // (6) Materialized-closure + vendored-input identities must be well-formed (64-hex) — fast fail
+    //     before the (more expensive) recomputation from the supplied artifact bytes.
     if !is_hex64(&prov.materialized_closure_blake3_hex) {
         return Err(LockError::BadClosureIdentity);
     }
     if !is_hex64(&prov.vendor_inputs_blake3_hex) {
         return Err(LockError::BadVendorInputs);
     }
+    // (7) RECOMPUTE each artifact identity FROM the supplied artifact bytes and require it equals
+    //     the provenance-recorded hash, plus structural + semantic validation. This is what closes
+    //     the shape-only gap: a well-formed FALSE hash cannot pass without the matching bytes, and
+    //     the command log must prove `--locked` with no `generate-lockfile`.
+    lock_artifacts::verify_command_log(
+        artifacts.command_log,
+        &prov.locked_command_log_blake3_hex,
+        &prov.candidate,
+        &prov.arch,
+        &prov.container_digest,
+    )?;
+    lock_artifacts::verify_vendor_inventory(
+        artifacts.vendor_inventory,
+        &prov.vendor_inputs_blake3_hex,
+        &prov.candidate,
+        &prov.arch,
+    )?;
+    lock_artifacts::verify_materialized_closure(
+        artifacts.closure,
+        &prov.materialized_closure_blake3_hex,
+        &prov.candidate,
+        &prov.arch,
+        &b3_recomputed,
+    )?;
     Ok(LockBinding {
         candidate: prov.candidate.clone(),
         arch: prov.arch.clone(),
@@ -278,31 +327,106 @@ mod tests {
         )
     }
 
-    /// Provenance for an authoritative run that materialized the committed lock under --locked.
-    fn good_prov(bytes: &[u8]) -> LockProvenance {
-        LockProvenance {
-            candidate: "Risc0".into(),
-            arch: "X86_64".into(),
+    fn hex(label: &str) -> String {
+        super::super::sha256::hex_digest(label.as_bytes())
+    }
+
+    /// A canonical, valid locked-command-log artifact bound to (cand, arch, digest).
+    fn command_log_bytes(cand: &str, arch: &str, digest: &str) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "schema": lock_artifacts::COMMAND_LOG_SCHEMA,
+            "candidate": cand, "arch": arch, "builder_container_digest": digest,
+            "commands": [
+                {"op":"vendor","argv":["cargo","vendor","--locked","--versioned-dirs","/tmp/v"],
+                 "cwd":"/work/c","target":"","exit_status":0},
+                {"op":"metadata","argv":["cargo","metadata","--locked","--filter-platform",
+                 "x86_64-unknown-linux-gnu","--format-version","1"],
+                 "cwd":"/work/c","target":"x86_64-unknown-linux-gnu","exit_status":0}
+            ]
+        }))
+        .unwrap()
+    }
+
+    /// A canonical, valid vendor-input inventory with one registry entry.
+    fn vendor_inventory_bytes(cand: &str, arch: &str) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "schema": lock_artifacts::VENDOR_INVENTORY_SCHEMA,
+            "candidate": cand, "arch": arch,
+            "entries": [
+                {"name":"http-body-util","version":"0.1.4",
+                 "source":"registry+https://github.com/rust-lang/crates.io-index",
+                 "checksum": hex("hbu-checksum"),
+                 "path":"http-body-util-0.1.4/src/lib.rs","size":10u64,"sha256": hex("hbu-lib")}
+            ]
+        }))
+        .unwrap()
+    }
+
+    /// A canonical, lock-bound materialized-closure artifact.
+    fn closure_bytes(cand: &str, arch: &str, lock_b3: &str) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1u16, "candidate": cand, "arch": arch,
+            "venue_targets": ["x86_64-unknown-linux-gnu"], "features": [],
+            "lock_blake3_hex": lock_b3, "stage2_graph_blake3_hex": lock_b3,
+            "roots": [], "nodes": []
+        }))
+        .unwrap()
+    }
+
+    struct Case {
+        prov: LockProvenance,
+        cmdlog: Vec<u8>,
+        inv: Vec<u8>,
+        closure: Vec<u8>,
+    }
+    impl Case {
+        fn artifacts(&self) -> LockArtifacts {
+            LockArtifacts {
+                command_log: &self.cmdlog,
+                vendor_inventory: &self.inv,
+                closure: &self.closure,
+            }
+        }
+    }
+
+    /// A full authoritative-shaped case: provenance whose three artifact identities RECOMPUTE from
+    /// the accompanying canonical artifacts.
+    fn good_case(lock: &[u8]) -> Case {
+        let cand = "Risc0";
+        let arch = "X86_64";
+        let digest = real_digest("builder-risc0-x86_64");
+        let cmdlog = command_log_bytes(cand, arch, &digest);
+        let inv = vendor_inventory_bytes(cand, arch);
+        let lock_b3 = recompute_lock_hash(lock);
+        let closure = closure_bytes(cand, arch, &lock_b3);
+        let prov = LockProvenance {
+            candidate: cand.into(),
+            arch: arch.into(),
             origin: COMMITTED_SOURCE_ORIGIN.into(),
-            container_digest: real_digest("builder-risc0-x86_64"),
+            container_digest: digest,
             source_commit: "a".repeat(40),
-            committed_lock_sha256_hex: recompute_lock_sha256(bytes),
-            committed_lock_blake3_hex: recompute_lock_hash(bytes),
-            post_lock_sha256_hex: recompute_lock_sha256(bytes),
-            locked_command_log_blake3_hex: super::super::to_hex(
-                blake3::hash(b"cargo metadata --locked; cargo vendor --locked").as_bytes(),
+            committed_lock_sha256_hex: recompute_lock_sha256(lock),
+            committed_lock_blake3_hex: lock_b3,
+            post_lock_sha256_hex: recompute_lock_sha256(lock),
+            locked_command_log_blake3_hex: lock_artifacts::recompute_command_log_hash(&cmdlog),
+            materialized_closure_blake3_hex: lock_artifacts::recompute_materialized_closure_hash(
+                &closure,
             ),
-            materialized_closure_blake3_hex: super::super::to_hex(
-                blake3::hash(b"closure").as_bytes(),
-            ),
-            vendor_inputs_blake3_hex: super::super::to_hex(blake3::hash(b"vendor").as_bytes()),
+            vendor_inputs_blake3_hex: lock_artifacts::recompute_vendor_inventory_hash(&inv),
+        };
+        Case {
+            prov,
+            cmdlog,
+            inv,
+            closure,
         }
     }
 
     #[test]
     fn accepts_materialized_committed_lock() {
         let lock = b"# committed Cargo.lock\nversion = 3\n";
-        let binding = verify_committed_source_lock(&good_prov(lock), lock).unwrap();
+        let c = good_case(lock);
+        let binding = verify_committed_source_lock(&c.prov, lock, &c.artifacts()).unwrap();
         assert_eq!(binding.candidate, "Risc0");
         assert_eq!(binding.lock_blake3_hex, recompute_lock_hash(lock));
     }
@@ -315,10 +439,10 @@ mod tests {
             "host-path:/home/dev/candidates/risc0/Cargo.lock",
             "host",
         ] {
-            let mut prov = good_prov(lock);
-            prov.origin = bad.into();
+            let mut c = good_case(lock);
+            c.prov.origin = bad.into();
             assert!(matches!(
-                verify_committed_source_lock(&prov, lock),
+                verify_committed_source_lock(&c.prov, lock, &c.artifacts()),
                 Err(LockError::WrongOrigin { .. })
             ));
         }
@@ -326,12 +450,11 @@ mod tests {
 
     #[test]
     fn rejects_lock_mutated_during_resolution() {
-        // The committed lock's post-run sha256 differs from its pre-run sha256 -> Cargo rewrote it.
         let lock = b"# committed\nversion = 3\n";
-        let mut prov = good_prov(lock);
-        prov.post_lock_sha256_hex = recompute_lock_sha256(b"# mutated\nversion = 3\n");
+        let mut c = good_case(lock);
+        c.prov.post_lock_sha256_hex = recompute_lock_sha256(b"# mutated\nversion = 3\n");
         assert!(matches!(
-            verify_committed_source_lock(&prov, lock),
+            verify_committed_source_lock(&c.prov, lock, &c.artifacts()),
             Err(LockError::LockMutatedDuringResolution { .. })
         ));
     }
@@ -339,19 +462,19 @@ mod tests {
     #[test]
     fn rejects_altered_committed_lock_vs_recorded_hash() {
         let lock = b"# real committed lock\nversion = 3\n";
-        let prov = good_prov(lock); // hashes recorded over `lock`
+        let c = good_case(lock); // hashes recorded over `lock`
         let altered = b"# the committed lock was altered on disk\nversion = 3\n";
-        let e = verify_committed_source_lock(&prov, altered).unwrap_err();
+        let e = verify_committed_source_lock(&c.prov, altered, &c.artifacts()).unwrap_err();
         assert!(matches!(e, LockError::HashMismatch { .. }));
     }
 
     #[test]
     fn recompute_is_over_bytes_so_a_lying_recorded_hash_fails() {
         let lock = b"# real committed lock\nversion = 3\n";
-        let mut lying = good_prov(lock);
-        lying.committed_lock_blake3_hex = "f".repeat(64);
+        let mut c = good_case(lock);
+        c.prov.committed_lock_blake3_hex = "f".repeat(64);
         assert!(matches!(
-            verify_committed_source_lock(&lying, lock),
+            verify_committed_source_lock(&c.prov, lock, &c.artifacts()),
             Err(LockError::HashMismatch {
                 which: "committed-blake3",
                 ..
@@ -362,15 +485,15 @@ mod tests {
     #[test]
     fn rejects_synthetic_or_truncated_container_digest() {
         let lock = b"lock";
-        let mut prov = good_prov(lock);
-        prov.container_digest = format!("{}://x", super::super::TEST_ONLY_SENTINEL);
+        let mut c = good_case(lock);
+        c.prov.container_digest = format!("{}://x", super::super::TEST_ONLY_SENTINEL);
         assert!(matches!(
-            verify_committed_source_lock(&prov, lock),
+            verify_committed_source_lock(&c.prov, lock, &c.artifacts()),
             Err(LockError::BadContainerDigest { .. })
         ));
-        prov.container_digest = "sha256:deadbeef".into();
+        c.prov.container_digest = "sha256:deadbeef".into();
         assert!(matches!(
-            verify_committed_source_lock(&prov, lock),
+            verify_committed_source_lock(&c.prov, lock, &c.artifacts()),
             Err(LockError::BadContainerDigest { .. })
         ));
     }
@@ -378,18 +501,37 @@ mod tests {
     #[test]
     fn rejects_missing_closure_or_vendor_identity() {
         let lock = b"version = 3\n";
-        let mut p1 = good_prov(lock);
-        p1.materialized_closure_blake3_hex = String::new();
+        let mut c1 = good_case(lock);
+        c1.prov.materialized_closure_blake3_hex = String::new();
         assert!(matches!(
-            verify_committed_source_lock(&p1, lock),
+            verify_committed_source_lock(&c1.prov, lock, &c1.artifacts()),
             Err(LockError::BadClosureIdentity)
         ));
-        let mut p2 = good_prov(lock);
-        p2.vendor_inputs_blake3_hex = "xyz".into();
+        let mut c2 = good_case(lock);
+        c2.prov.vendor_inputs_blake3_hex = "xyz".into();
         assert!(matches!(
-            verify_committed_source_lock(&p2, lock),
+            verify_committed_source_lock(&c2.prov, lock, &c2.artifacts()),
             Err(LockError::BadVendorInputs)
         ));
+    }
+
+    #[test]
+    fn well_formed_false_artifact_hash_is_refused() {
+        // The exact defect: a well-formed 64-hex value that no artifact recomputes to.
+        let lock = b"version = 3\n";
+        for mutate in ["closure", "vendor", "cmdlog"] {
+            let mut c = good_case(lock);
+            match mutate {
+                "closure" => c.prov.materialized_closure_blake3_hex = hex("bogus-but-wellformed"),
+                "vendor" => c.prov.vendor_inputs_blake3_hex = hex("bogus-but-wellformed"),
+                _ => c.prov.locked_command_log_blake3_hex = hex("bogus-but-wellformed"),
+            }
+            let e = verify_committed_source_lock(&c.prov, lock, &c.artifacts()).unwrap_err();
+            assert!(
+                matches!(e, LockError::Artifact(ArtifactError::HashMismatch { .. })),
+                "{mutate}: expected artifact hash mismatch, got {e:?}"
+            );
+        }
     }
 
     #[test]

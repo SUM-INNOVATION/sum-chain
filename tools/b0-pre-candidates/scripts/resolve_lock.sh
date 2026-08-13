@@ -132,18 +132,11 @@ case "$candidate" in
   sp1)   venue_targets="x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu" ;;
   risc0) venue_targets="x86_64-unknown-linux-gnu" ;;
 esac
-locked_cmd="$out/$schema_cand.materialize.locked.cmd"
-{
-  printf 'MATERIALIZE the COMMITTED candidate Cargo.lock under Cargo LOCKED semantics (candidate=%s, arch=%s)\n' "$candidate" "$arch"
-  printf '# committed lock mounted READ-ONLY at %s; `cargo generate-lockfile` and every unlocked command are FORBIDDEN\n' "$incontainer_lock"
-  printf 'docker run --rm --pull never --mount type=bind,source=<committed_Cargo.lock>,target=%s,readonly %s bash -c "cd %s && cargo vendor --locked --versioned-dirs /tmp/b0pre-vendor"\n' \
-    "$incontainer_lock" "$BUILDER_IMAGE_DIGEST" "$cand_dir"
-  for t in $venue_targets; do
-    printf 'docker run --rm --pull never --mount type=bind,source=<committed_Cargo.lock>,target=%s,readonly %s bash -c "cd %s && cargo metadata --locked --filter-platform %s --format-version 1"\n' \
-      "$incontainer_lock" "$BUILDER_IMAGE_DIGEST" "$cand_dir" "$t"
-  done
-} > "$locked_cmd"
-cmdlog_hex="$(blake3_hex_file "$locked_cmd")"
+# The canonical RETAINED locked-command-log artifact ($schema_cand.locked-commands.json) is built
+# AFTER the commands run (below), recording each command's exact executed argv / cwd / target /
+# builder identity / exit status — structured data, never shell prose. `venue-verify
+# lock-artifact-hash` computes the identity the verifier recomputes.
+locked_cmd_json="$out/$schema_cand.locked-commands.json"
 
 # (4) MATERIALIZE the committed graph under --locked inside the pinned image. The committed lock is
 #     mounted READ-ONLY, so Cargo physically cannot rewrite the authority, and --locked makes Cargo
@@ -161,9 +154,19 @@ vendor_graph_in_container "$BUILDER_IMAGE_REF" "$cand_dir" "$dest" "$incontainer
 rm -rf "$vendor_dir"
 # Pre-enumerated safe extraction (reject absolute/traversal/link/device/duplicate BEFORE writing).
 safe_extract_tar "$vendor_tar" "$vendor_dir"
-# The exact downloaded per-file content identity of the vendored inputs — a substituted or altered
-# vendored byte changes this hash, so a tampered vendor tree is caught.
-vendor_inputs_hex="$(vendor_inputs_identity "$vendor_dir")"
+# Build the RETAINED canonical VENDOR-INPUT INVENTORY: for every vendored file required by the
+# committed graph, its package (name, version, source, checksum), relative path, size, and content
+# sha256, in strictly canonical (name, version, source, path) order. This authenticates the vendor
+# tree WITHOUT retaining it; a substituted/altered vendored byte changes a file sha256, and a
+# missing/extra file changes the set — either breaks the recomputed identity. The package coords
+# come from the committed lock (the authority); the files from the materialized tree.
+vendor_inv_json="$out/$schema_cand.vendor-inventory.json"
+build_vendor_inventory "$committed_lock" "$vendor_dir" "$schema_cand" "$arch" "$vendor_inv_json" \
+  || die "failed to build the vendor-input inventory for $candidate"
+[ -s "$vendor_inv_json" ] || die "empty vendor-input inventory for $candidate"
+vendor_inputs_hex="$(cargo run --quiet --locked --manifest-path "$VAL" --bin venue-verify -- \
+  lock-artifact-hash vendor-inventory "$vendor_inv_json")" \
+  || die "vendor-inventory hash recomputation failed for $candidate"
 is_bare_sha256 "$vendor_inputs_hex" || die "vendor-inputs identity malformed for $candidate: '$vendor_inputs_hex'"
 
 # The owner-ratified per-family upstream notice map: supplies the real license text for crates that
@@ -228,10 +231,23 @@ closure = {"schema_version": 1, "candidate": cand, "arch": arch, "venue_targets"
 json.dump(closure, open(out, "w"), indent=1)
 PY
 [ -s "$closure_file" ] || die "failed to build target-closure for $candidate"
-# The materialized-closure identity: the domain-free BLAKE3 of the sealed target-closure record
-# produced under --locked (nodes = the exact locked package set).
-closure_hex="$(blake3_hex_file "$closure_file")"
+# The materialized-closure identity: the domain-separated BLAKE3 of the sealed target-closure record
+# (the SAME artifact the verifier recomputes; nodes = the exact locked package set).
+closure_hex="$(cargo run --quiet --locked --manifest-path "$VAL" --bin venue-verify -- \
+  lock-artifact-hash closure "$closure_file")" \
+  || die "materialized-closure hash recomputation failed for $candidate"
 is_bare_sha256 "$closure_hex" || die "materialized-closure identity malformed for $candidate: '$closure_hex'"
+
+# The RETAINED canonical LOCKED-COMMAND LOG: every materialization command above succeeded (each was
+# `|| die`), so record the exact executed argv / cwd / target / builder identity with exit_status 0.
+# Structured argv arrays (never shell prose); proves `--locked` and contains no generate-lockfile.
+build_locked_command_log "$schema_cand" "$arch" "$BUILDER_IMAGE_DIGEST" "$cand_dir" "$locked_cmd_json" "$venue_targets" \
+  || die "failed to build the locked-command log for $candidate"
+[ -s "$locked_cmd_json" ] || die "empty locked-command log for $candidate"
+cmdlog_hex="$(cargo run --quiet --locked --manifest-path "$VAL" --bin venue-verify -- \
+  lock-artifact-hash command-log "$locked_cmd_json")" \
+  || die "locked-command-log hash recomputation failed for $candidate"
+is_bare_sha256 "$cmdlog_hex" || die "locked-command-log identity malformed for $candidate: '$cmdlog_hex'"
 
 # (5) POST-materialization byte-equality: no Cargo command rewrote the authority. Both the exported
 #     copy AND the committed source-of-truth lock on disk must still be byte-identical to the pre-run
@@ -274,10 +290,12 @@ with open(path, "w") as f:
 PY
 
 # Independently re-verify (the resolver's recorded values are not trusted): reject a wrong origin, a
-# mutated lock, or a hash that does not recompute from the committed bytes.
+# mutated lock, or a hash that does not recompute from the committed bytes, AND RECOMPUTE each of the
+# three retained-artifact identities from the artifacts themselves (command log, vendor inventory,
+# closure) — a well-formed false hash without its bytes cannot pass.
 cargo run --quiet --locked --manifest-path "$VAL" --bin venue-verify -- \
-  verify-lock "$prov" "$committed_lock" \
-  || die "committed-source-of-truth lock provenance verification failed (wrong origin, hash-vs-bytes mismatch, mutated lock, or missing binding)"
+  verify-lock "$prov" "$committed_lock" "$locked_cmd_json" "$vendor_inv_json" "$closure_file" \
+  || die "committed-source-of-truth lock provenance verification failed (wrong origin, hash-vs-bytes mismatch, mutated lock, invalid/mis-bound retained artifact, or missing binding)"
 
 note "materialized committed $dest + provenance $prov"
 
@@ -318,6 +336,9 @@ cargo run --quiet --locked --manifest-path "$VAL" --bin venue-verify -- \
   notices-verify-classification "$out/$schema_cand.third-party-notices.json" "$closure_file" "$dest" "$lock_hex" "$lock_hex" \
   || die "third-party notices classification does not match the recomputed target closure for $candidate"
 rm -rf "$meta_dir"
-rm -f "$vendor_tar"; rm -rf "$vendor_dir"   # transport artifacts; the manifest carries the texts
-rm -f "$locked_cmd"                          # transport; provenance carries locked_command_log_blake3_hex
-note "recorded $out/$schema_cand.third-party-notices.json + $schema_cand.target-closure.json (lock-bound, target-scoped)"
+rm -f "$vendor_tar"; rm -rf "$vendor_dir"   # transport artifacts; the RETAINED vendor inventory
+                                            # ($schema_cand.vendor-inventory.json) authenticates them.
+# RETAINED (sealed) canonical artifacts, NOT deleted: $schema_cand.locked-commands.json,
+# $schema_cand.vendor-inventory.json, $schema_cand.target-closure.json — the verifier RECOMPUTES the
+# three provenance identities from these.
+note "recorded $out/$schema_cand.third-party-notices.json + $schema_cand.target-closure.json + $schema_cand.locked-commands.json + $schema_cand.vendor-inventory.json (lock-bound, target-scoped)"

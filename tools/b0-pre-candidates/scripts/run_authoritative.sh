@@ -615,8 +615,13 @@ assemble_evidence() {
     cp "$work/$lc.$arch.native.json"    "$ev/$c.native.json"
     cp "$work/$c.Cargo.lock"            "$ev/$c.Cargo.lock"
     cp "$work/$c.lock-provenance.json"  "$ev/$c.lock-provenance.json"
+    # The RETAINED canonical lock-verification artifacts the import RECOMPUTES the provenance's three
+    # artifact identities from (resolve_lock.sh): the locked-command log + the vendor-input inventory.
+    cp "$work/$c.locked-commands.json"  "$ev/$c.locked-commands.json"
+    cp "$work/$c.vendor-inventory.json" "$ev/$c.vendor-inventory.json"
     cp "$work/$c.stage2-audit.json"     "$ev/$c.stage2-audit.json"
-    # Third-party license notices + the target-closure they were scoped against (resolve_lock.sh).
+    # Third-party license notices + the target-closure they were scoped against (resolve_lock.sh);
+    # the target-closure is ALSO the lock provenance's materialized-closure artifact.
     cp "$work/$c.third-party-notices.json" "$ev/$c.third-party-notices.json"
     cp "$work/$c.target-closure.json"      "$ev/$c.target-closure.json"
   done

@@ -21,6 +21,7 @@ pub mod checkout_digest;
 pub mod content_store;
 pub mod evidence_bundle;
 pub mod license_policy;
+pub mod lock_artifacts;
 pub mod lock_provenance;
 pub mod oci_layout;
 pub mod pin_contract;

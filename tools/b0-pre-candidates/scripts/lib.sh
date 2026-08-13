@@ -277,36 +277,92 @@ EOF
   tar -x --no-same-owner -C "$dest" -f "$tar_file" || die "safe_extract_tar: extraction failed: $tar_file"
 }
 
-# Deterministic 64-hex identity of a materialized vendor tree — the EXACT downloaded per-file
-# content. A manifest of "<relpath>\0<sha256>" for every regular file, LC_ALL=C sorted, hashed with
-# BLAKE3 (b3sum reads the manifest from stdin). Any substituted or altered vendored byte changes a
-# file's sha256 and thus this identity, so a tampered vendor tree is caught. Recorded as
-# `vendor_inputs_blake3_hex` in the committed-source-of-truth lock provenance.
-vendor_inputs_identity() {
-  local dir="$1"
-  require_cmd b3sum
+# Build the RETAINED canonical VENDOR-INPUT INVENTORY (b0-final-vendor-input-inventory/v1). For every
+# vendored file required by the committed graph, bind its package (name, version, source, checksum
+# from the committed lock — the authority), its relative path, size, and content sha256, in strictly
+# canonical (name, version, source, path) order. This authenticates the vendor tree WITHOUT retaining
+# it: a substituted/altered byte changes a file sha256, a missing/extra file changes the set. Only
+# registry crates are vendored; a missing versioned dir for a locked registry crate fails closed.
+# Args: <committed_lock> <vendor_dir> <schema_candidate> <arch> <out_json>
+build_vendor_inventory() {
+  local lock="$1" vdir="$2" cand="$3" arch="$4" out="$5"
   require_cmd python3
-  [ -d "$dir" ] || die "vendor_inputs_identity: vendor dir absent: $dir"
-  python3 - "$dir" <<'PY' | b3sum | awk '{print $1}'
-import hashlib, os, sys
-root = sys.argv[1]
+  [ -f "$lock" ] || die "build_vendor_inventory: committed lock absent: $lock"
+  [ -d "$vdir" ] || die "build_vendor_inventory: vendor dir absent: $vdir"
+  python3 - "$lock" "$vdir" "$cand" "$arch" "$out" <<'PY'
+import json, os, sys, hashlib
+lock, vdir, cand, arch, out = sys.argv[1:6]
+pkgs, cur = [], None
+for line in open(lock):
+    t = line.strip()
+    if t == "[[package]]":
+        if cur: pkgs.append(cur)
+        cur = {}
+    elif cur is not None:
+        if t.startswith('name = '): cur['name'] = t.split('"')[1]
+        elif t.startswith('version = '): cur['version'] = t.split('"')[1]
+        elif t.startswith('source = '): cur['source'] = t.split('"')[1]
+        elif t.startswith('checksum = '): cur['checksum'] = t.split('"')[1]
+if cur: pkgs.append(cur)
 entries = []
-for dirpath, dirnames, filenames in os.walk(root):
-    dirnames.sort()
-    for fn in sorted(filenames):
-        p = os.path.join(dirpath, fn)
-        # Skip symlinks / non-regular entries (safe_extract_tar already refused links, but the
-        # vendor tree is defence-in-depth untrusted): only regular-file bytes enter the identity.
-        if os.path.islink(p) or not os.path.isfile(p):
-            continue
-        rel = os.path.relpath(p, root)
-        h = hashlib.sha256()
-        with open(p, "rb") as fh:
-            for chunk in iter(lambda: fh.read(1 << 20), b""):
-                h.update(chunk)
-        entries.append(f"{rel}\0{h.hexdigest()}")
-entries.sort()
-sys.stdout.buffer.write(("\n".join(entries) + "\n").encode())
+for p in pkgs:
+    src = p.get('source', '')
+    if not src.startswith('registry+'):
+        continue  # only registry crates are vendored (no git/path deps in these graphs)
+    chk = p.get('checksum', '')
+    d = f"{p['name']}-{p['version']}"  # cargo vendor --versioned-dirs layout
+    droot = os.path.join(vdir, d)
+    if not os.path.isdir(droot):
+        sys.stderr.write(f"vendored dir missing for locked registry crate {d}\n")
+        sys.exit(1)
+    for dp, dns, fns in os.walk(droot):
+        dns.sort()
+        for fn in sorted(fns):
+            fp = os.path.join(dp, fn)
+            if os.path.islink(fp) or not os.path.isfile(fp):
+                continue
+            rel = os.path.relpath(fp, vdir)
+            h = hashlib.sha256()
+            with open(fp, 'rb') as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b''):
+                    h.update(chunk)
+            entries.append({"name": p['name'], "version": p['version'], "source": src,
+                            "checksum": chk, "path": rel, "size": os.path.getsize(fp),
+                            "sha256": h.hexdigest()})
+entries.sort(key=lambda e: (e['name'], e['version'], e['source'], e['path']))
+obj = {"schema": "b0-final-vendor-input-inventory/v1", "candidate": cand, "arch": arch,
+       "entries": entries}
+with open(out, 'w') as f:
+    json.dump(obj, f, indent=1, sort_keys=True)
+    f.write("\n")
+PY
+}
+
+# Build the RETAINED canonical LOCKED-COMMAND LOG (b0-final-locked-command-log/v1): the exact
+# `cargo … --locked` argv / cwd / target / builder identity / exit status the venue executed to
+# materialize the committed lock (vendor once + metadata per target). Called only AFTER every command
+# succeeded (each was `|| die`), so exit_status is 0. Structured argv arrays — never shell prose.
+# Args: <schema_candidate> <arch> <builder_digest> <in_container_cwd> <out_json> <venue_targets>
+build_locked_command_log() {
+  local cand="$1" arch="$2" digest="$3" cwd="$4" out="$5" targets="$6"
+  require_cmd python3
+  python3 - "$out" "$cand" "$arch" "$digest" "$cwd" "$targets" <<'PY'
+import json, sys
+out, cand, arch, digest, cwd, targets = sys.argv[1:7]
+commands = [{
+    "op": "vendor",
+    "argv": ["cargo", "vendor", "--locked", "--versioned-dirs", "/tmp/b0pre-vendor"],
+    "cwd": cwd, "target": "", "exit_status": 0}]
+for t in targets.split():
+    commands.append({
+        "op": "metadata",
+        "argv": ["cargo", "metadata", "--locked", "--filter-platform", t, "--format-version", "1"],
+        "cwd": cwd, "target": t, "exit_status": 0})
+obj = {"schema": "b0-final-locked-command-log/v1", "candidate": cand, "arch": arch,
+       "builder_container_digest": digest, "commands": commands}
+with open(out, 'w') as f:
+    json.dump(obj, f, indent=1, sort_keys=True)
+    f.write("\n")
 PY
 }
 

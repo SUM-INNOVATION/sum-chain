@@ -29,7 +29,9 @@ use crate::schema::stage6::{NativeBuild, OciBuild};
 
 use super::arch_bundle::{self, AggregatedVenueInputs, ArchBundleError, PerArchBundle};
 use super::audit::Stage2AuditRecord;
-use super::lock_provenance::{verify_committed_source_lock, LockBinding, LockProvenance};
+use super::lock_provenance::{
+    verify_committed_source_lock, LockArtifacts, LockBinding, LockProvenance,
+};
 use super::stage5::{self, Stage5Result};
 use super::tool_install::{InstallMode, ToolBindingRecord};
 
@@ -127,6 +129,18 @@ fn notices_file(c: &str) -> String {
 fn notices_closure_file(c: &str) -> String {
     format!("{c}.target-closure.json")
 }
+/// The RETAINED canonical locked-command-log artifact: the exact `cargo … --locked` argv / context
+/// / builder identity / exit status the venue executed to MATERIALIZE the committed lock. Sealed so
+/// import RECOMPUTES `locked_command_log_blake3_hex` from it and refuses a caller-supplied hash.
+fn locked_commands_file(c: &str) -> String {
+    format!("{c}.locked-commands.json")
+}
+/// The RETAINED canonical vendor-input inventory: per vendored file, package coords + relpath +
+/// size + content sha256, in canonical order. Sealed so import RECOMPUTES `vendor_inputs_blake3_hex`
+/// from it (and structurally validates it), authenticating the vendor tree without retaining it.
+fn vendor_inventory_file(c: &str) -> String {
+    format!("{c}.vendor-inventory.json")
+}
 fn tool_binding_file(c: &str) -> String {
     format!("{c}.tool-binding.json")
 }
@@ -170,6 +184,8 @@ pub fn required_files(arch: &str) -> Vec<String> {
         v.push(native_file(c));
         v.push(lock_file(c));
         v.push(lock_prov_file(c));
+        v.push(locked_commands_file(c));
+        v.push(vendor_inventory_file(c));
         v.push(stage2_file(c));
         v.push(notices_file(c));
         v.push(notices_closure_file(c));
@@ -833,15 +849,29 @@ pub fn import_verify_mode(
         let pf = lock_prov_file(c);
         let prov: LockProvenance = parse(&pf, &read_file(dir, &pf)?)?;
         let lock_bytes = read_file(dir, &lock_file(c))?;
+        // The three RETAINED canonical artifacts the verifier RECOMPUTES the provenance's artifact
+        // identities from (each is a sealed, manifested required file; a missing one is refused
+        // upstream by the exact-set file check). Passing the bytes makes a caller-supplied hash
+        // without its bytes impossible to accept.
+        let command_log = read_file(dir, &locked_commands_file(c))?;
+        let vendor_inventory = read_file(dir, &vendor_inventory_file(c))?;
+        let closure_bytes = read_file(dir, &notices_closure_file(c))?;
+        let artifacts = LockArtifacts {
+            command_log: &command_log,
+            vendor_inventory: &vendor_inventory,
+            closure: &closure_bytes,
+        };
         // The sealed bundle carries the ONE lock: the committed source-of-truth lock. The venue
         // materialized that exact committed graph under Cargo `--locked` (never regenerated it),
         // and recorded the committed lock's pre/post byte-identity. Re-verify the sealed bytes
-        // against the recorded committed SHA-256 + domain-separated BLAKE3 and the pre==post
-        // byte-equality invariant.
+        // against the recorded committed SHA-256 + domain-separated BLAKE3, the pre==post
+        // byte-equality invariant, and RECOMPUTE each retained-artifact identity from its bytes.
         let binding =
-            verify_committed_source_lock(&prov, &lock_bytes).map_err(|e| EvidenceError::Lock {
-                candidate: c.to_string(),
-                error: e.to_string(),
+            verify_committed_source_lock(&prov, &lock_bytes, &artifacts).map_err(|e| {
+                EvidenceError::Lock {
+                    candidate: c.to_string(),
+                    error: e.to_string(),
+                }
             })?;
         if binding.arch != arch {
             return Err(EvidenceError::ArchBinding {
@@ -1409,22 +1439,71 @@ pub fn write_test_only_bundle_dir(dir: &Path, arch: &str) -> Result<(), String> 
         w(&lock_file(c), &lock_bytes)?;
         let lock_sha = crate::venue::lock_provenance::recompute_lock_sha256(&lock_bytes);
         let lock_hash = crate::venue::lock_provenance::recompute_lock_hash(&lock_bytes);
+        // Build the three RETAINED canonical artifacts FIRST, so the provenance records their REAL
+        // recomputed identities (never a synthetic label): import RECOMPUTES each from these bytes.
+        // (a) locked command log — a valid vendor + metadata `--locked` log bound to (c, arch,
+        //     builder). Structured argv (never shell prose); proves --locked + no generate-lockfile.
+        let cmdlog = serde_json::json!({
+        "schema": crate::venue::lock_artifacts::COMMAND_LOG_SCHEMA,
+        "candidate": c, "arch": arch, "builder_container_digest": builder,
+        "commands": [
+            {"op":"vendor",
+             "argv":["cargo","vendor","--locked","--versioned-dirs","/tmp/b0pre-vendor"],
+             "cwd": format!("/work/tools/b0-pre-candidates/candidates/{lc}"),
+             "target":"", "exit_status":0},
+            {"op":"metadata",
+             "argv":["cargo","metadata","--locked","--filter-platform",
+                     "x86_64-unknown-linux-gnu","--format-version","1"],
+             "cwd": format!("/work/tools/b0-pre-candidates/candidates/{lc}"),
+             "target":"x86_64-unknown-linux-gnu", "exit_status":0}
+        ]});
+        let cmdlog_bytes = serde_json::to_vec_pretty(&cmdlog).unwrap();
+        // (b) vendor inventory — the synthetic fixture graph is empty, so it has no entries.
+        let vendor_inv = serde_json::json!({
+            "schema": crate::venue::lock_artifacts::VENDOR_INVENTORY_SCHEMA,
+            "candidate": c, "arch": arch, "entries": []});
+        let vendor_inv_bytes = serde_json::to_vec_pretty(&vendor_inv).unwrap();
+        // (c) materialized closure — lock-bound; serialize ONCE and hash those exact bytes (the same
+        //     bytes are sealed as `<Cand>.target-closure.json`).
+        let closure = crate::venue::third_party_notices::TargetClosure {
+            schema_version: crate::venue::third_party_notices::TARGET_CLOSURE_SCHEMA_VERSION,
+            candidate: c.to_string(),
+            arch: arch.to_string(),
+            venue_targets: vec!["x86_64-unknown-linux-gnu".to_string()],
+            features: vec![],
+            lock_blake3_hex: lock_hash.clone(),
+            stage2_graph_blake3_hex: lock_hash.clone(),
+            roots: vec!["synthetic-root\u{1f}0.0.0\u{1f}".to_string()],
+            nodes: vec![crate::venue::third_party_notices::ClosureNode {
+                name: "synthetic-root".to_string(),
+                version: "0.0.0".to_string(),
+                source: String::new(),
+                checksum: None,
+                normal_deps: vec![],
+            }],
+        };
+        let closure_bytes = serde_json::to_vec_pretty(&closure).unwrap();
         // The sealed lock is the COMMITTED source-of-truth, materialized under Cargo --locked; the
-        // committed SHA-256 + domain-separated BLAKE3 recompute from these exact bytes, and the
-        // post-run sha256 equals the pre-run (committed) sha256 (Cargo did not rewrite it).
+        // committed SHA-256 + domain-separated BLAKE3 recompute from these exact bytes, the post-run
+        // sha256 equals the pre-run sha256, and the three artifact identities RECOMPUTE from (a)-(c).
         let prov = serde_json::json!({"candidate":c,"arch":arch,
             "origin":crate::venue::lock_provenance::COMMITTED_SOURCE_ORIGIN,
             "container_digest":builder,"source_commit":commit,
             "committed_lock_sha256_hex":lock_sha.clone(),
             "committed_lock_blake3_hex":lock_hash,
             "post_lock_sha256_hex":lock_sha,
-            "locked_command_log_blake3_hex":bh(&format!("lockcmd-{lc}-{arch}")),
-            "materialized_closure_blake3_hex":bh(&format!("closure-{lc}-{arch}")),
-            "vendor_inputs_blake3_hex":bh(&format!("vendor-{lc}-{arch}"))});
+            "locked_command_log_blake3_hex":
+                crate::venue::lock_artifacts::recompute_command_log_hash(&cmdlog_bytes),
+            "materialized_closure_blake3_hex":
+                crate::venue::lock_artifacts::recompute_materialized_closure_hash(&closure_bytes),
+            "vendor_inputs_blake3_hex":
+                crate::venue::lock_artifacts::recompute_vendor_inventory_hash(&vendor_inv_bytes)});
         w(
             &lock_prov_file(c),
             &serde_json::to_vec_pretty(&prov).unwrap(),
         )?;
+        w(&locked_commands_file(c), &cmdlog_bytes)?;
+        w(&vendor_inventory_file(c), &vendor_inv_bytes)?;
         let nodes: Vec<serde_json::Value> = if c == "Sp1" {
             vec![
                 serde_json::json!({"name":"sp1-sdk","version":"6.3.1","source":"registry","license":"MIT OR Apache-2.0"}),
@@ -1454,27 +1533,11 @@ pub fn write_test_only_bundle_dir(dir: &Path, arch: &str) -> Result<(), String> 
             &stage2_file(c),
             &serde_json::to_vec_pretty(&stage2).unwrap(),
         )?;
-        // Third-party notices + the sealed target-closure. The synthetic fixture lock carries no
-        // `[[package]]` rows, so the third-party set is empty and the closure has only a synthetic
-        // root; the REAL graph/closure paths are exercised by `third_party_notices` unit tests and
-        // the producer. Import still verifies both are present, bound, and internally consistent.
-        let closure = crate::venue::third_party_notices::TargetClosure {
-            schema_version: crate::venue::third_party_notices::TARGET_CLOSURE_SCHEMA_VERSION,
-            candidate: c.to_string(),
-            arch: arch.to_string(),
-            venue_targets: vec!["x86_64-unknown-linux-gnu".to_string()],
-            features: vec![],
-            lock_blake3_hex: lock_hash.clone(),
-            stage2_graph_blake3_hex: lock_hash.clone(),
-            roots: vec!["synthetic-root\u{1f}0.0.0\u{1f}".to_string()],
-            nodes: vec![crate::venue::third_party_notices::ClosureNode {
-                name: "synthetic-root".to_string(),
-                version: "0.0.0".to_string(),
-                source: String::new(),
-                checksum: None,
-                normal_deps: vec![],
-            }],
-        };
+        // Third-party notices + the sealed target-closure (built above as `closure`/`closure_bytes`).
+        // The synthetic fixture lock carries no `[[package]]` rows, so the third-party set is empty
+        // and the closure has only a synthetic root; the REAL graph/closure paths are exercised by
+        // `third_party_notices` unit tests and the producer. Import verifies both are present, bound,
+        // and internally consistent, and RECOMPUTES the closure identity from the sealed bytes.
         let notices = crate::venue::third_party_notices::generate(
             c,
             arch,
@@ -1489,10 +1552,7 @@ pub fn write_test_only_bundle_dir(dir: &Path, arch: &str) -> Result<(), String> 
             &notices_file(c),
             &serde_json::to_vec_pretty(&notices).unwrap(),
         )?;
-        w(
-            &notices_closure_file(c),
-            &serde_json::to_vec_pretty(&closure).unwrap(),
-        )?;
+        w(&notices_closure_file(c), &closure_bytes)?;
         let tools: Vec<(&str, &str)> = if c == "Sp1" {
             vec![("sp1-verifier", "6.3.1")]
         } else {

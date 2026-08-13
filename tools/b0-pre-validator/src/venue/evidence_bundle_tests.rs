@@ -93,9 +93,49 @@ fn write_bundle_files(dir: &Path, arch: &str) {
         write(dir, &lock_file(c), &lock_bytes);
         let lock_sha = recompute_lock_sha256(&lock_bytes);
         let lock_hash = recompute_lock_hash(&lock_bytes);
+        // The three RETAINED canonical artifacts, hashed as the verifier RECOMPUTES them.
+        use crate::venue::lock_artifacts as la;
+        let cmdlog = serde_json::json!({
+            "schema": la::COMMAND_LOG_SCHEMA,
+            "candidate": c, "arch": arch, "builder_container_digest": builder_digest,
+            "commands": [
+                {"op":"vendor",
+                 "argv":["cargo","vendor","--locked","--versioned-dirs","/tmp/b0pre-vendor"],
+                 "cwd": format!("/work/tools/b0-pre-candidates/candidates/{lc}"),
+                 "target":"", "exit_status":0},
+                {"op":"metadata",
+                 "argv":["cargo","metadata","--locked","--filter-platform",
+                         "x86_64-unknown-linux-gnu","--format-version","1"],
+                 "cwd": format!("/work/tools/b0-pre-candidates/candidates/{lc}"),
+                 "target":"x86_64-unknown-linux-gnu", "exit_status":0}
+            ]});
+        let cmdlog_bytes = serde_json::to_vec_pretty(&cmdlog).unwrap();
+        let vendor_inv = serde_json::json!({
+            "schema": la::VENDOR_INVENTORY_SCHEMA,
+            "candidate": c, "arch": arch, "entries": []});
+        let vendor_inv_bytes = serde_json::to_vec_pretty(&vendor_inv).unwrap();
+        // materialized closure (lock-bound); serialize once and hash those exact bytes.
+        let closure = crate::venue::third_party_notices::TargetClosure {
+            schema_version: crate::venue::third_party_notices::TARGET_CLOSURE_SCHEMA_VERSION,
+            candidate: c.to_string(),
+            arch: arch.to_string(),
+            venue_targets: vec!["x86_64-unknown-linux-gnu".to_string()],
+            features: vec![],
+            lock_blake3_hex: lock_hash.clone(),
+            stage2_graph_blake3_hex: lock_hash.clone(),
+            roots: vec!["synthetic-root\u{1f}0.0.0\u{1f}".to_string()],
+            nodes: vec![crate::venue::third_party_notices::ClosureNode {
+                name: "synthetic-root".to_string(),
+                version: "0.0.0".to_string(),
+                source: String::new(),
+                checksum: None,
+                normal_deps: vec![],
+            }],
+        };
+        let closure_bytes = serde_json::to_vec_pretty(&closure).unwrap();
         // The sealed lock is the COMMITTED source-of-truth, materialized under Cargo --locked: the
-        // committed SHA-256 + domain-separated BLAKE3 recompute from these bytes and the post-run
-        // sha256 equals the pre-run (committed) sha256.
+        // committed SHA-256 + domain-separated BLAKE3 recompute from these bytes, the post-run sha256
+        // equals the pre-run sha256, and the three artifact identities RECOMPUTE from the artifacts.
         let prov = serde_json::json!({
             "candidate": c, "arch": arch, "origin": COMMITTED_SOURCE_ORIGIN,
             "container_digest": builder_digest,
@@ -103,11 +143,13 @@ fn write_bundle_files(dir: &Path, arch: &str) {
             "committed_lock_sha256_hex": lock_sha,
             "committed_lock_blake3_hex": lock_hash,
             "post_lock_sha256_hex": lock_sha,
-            "locked_command_log_blake3_hex": bh(&format!("lockcmd-{lc}-{arch}")),
-            "materialized_closure_blake3_hex": bh(&format!("closure-{lc}-{arch}")),
-            "vendor_inputs_blake3_hex": bh(&format!("vendor-{lc}-{arch}")),
+            "locked_command_log_blake3_hex": la::recompute_command_log_hash(&cmdlog_bytes),
+            "materialized_closure_blake3_hex": la::recompute_materialized_closure_hash(&closure_bytes),
+            "vendor_inputs_blake3_hex": la::recompute_vendor_inventory_hash(&vendor_inv_bytes),
         });
         write(dir, &lock_prov_file(c), serde_json::to_vec_pretty(&prov).unwrap().as_slice());
+        write(dir, &locked_commands_file(c), &cmdlog_bytes);
+        write(dir, &vendor_inventory_file(c), &vendor_inv_bytes);
 
         // stage2 audit (clean graph with the required pinned crates)
         let nodes: Vec<serde_json::Value> = if c == "Sp1" {
@@ -144,24 +186,8 @@ fn write_bundle_files(dir: &Path, arch: &str) {
         });
         write(dir, &stage2_file(c), serde_json::to_vec_pretty(&stage2).unwrap().as_slice());
 
-        // third-party notices + sealed target-closure from this candidate's (empty-graph) lock.
-        let closure = crate::venue::third_party_notices::TargetClosure {
-            schema_version: crate::venue::third_party_notices::TARGET_CLOSURE_SCHEMA_VERSION,
-            candidate: c.to_string(),
-            arch: arch.to_string(),
-            venue_targets: vec!["x86_64-unknown-linux-gnu".to_string()],
-            features: vec![],
-            lock_blake3_hex: lock_hash.clone(),
-            stage2_graph_blake3_hex: lock_hash.clone(),
-            roots: vec!["synthetic-root\u{1f}0.0.0\u{1f}".to_string()],
-            nodes: vec![crate::venue::third_party_notices::ClosureNode {
-                name: "synthetic-root".to_string(),
-                version: "0.0.0".to_string(),
-                source: String::new(),
-                checksum: None,
-                normal_deps: vec![],
-            }],
-        };
+        // third-party notices from this candidate's (empty-graph) lock; the sealed target-closure is
+        // the exact `closure_bytes` hashed into the provenance above.
         let notices = crate::venue::third_party_notices::generate(
             c,
             arch,
@@ -173,7 +199,7 @@ fn write_bundle_files(dir: &Path, arch: &str) {
         )
         .unwrap();
         write(dir, &notices_file(c), serde_json::to_vec_pretty(&notices).unwrap().as_slice());
-        write(dir, &notices_closure_file(c), serde_json::to_vec_pretty(&closure).unwrap().as_slice());
+        write(dir, &notices_closure_file(c), &closure_bytes);
 
         // tool bindings (verified == declared; bound to builder + source commit)
         let mut bindings = Vec::new();
@@ -542,14 +568,20 @@ fn a_bundle_missing_target_closure_is_rejected_at_seal() {
 
 #[test]
 fn a_target_closure_unbound_from_lock_or_stage2_is_rejected() {
-    // Re-binding the closure to a different lock is refused (the closure could otherwise be swapped).
+    // Re-binding the closure to a different lock is refused. The target-closure IS also the
+    // lock-bound materialized-closure artifact, so ANY closure mutation now breaks the lock
+    // provenance's `materialized_closure_blake3_hex` recomputation first (a strictly stronger
+    // refusal) — Lock OR Notices are both valid rejections.
     let dir = sealed_bundle("closure_lock", "Aarch64");
     rewrite_json(&dir, &notices_closure_file("Sp1"), |v| {
         v["lock_blake3_hex"] = serde_json::json!("f".repeat(64));
     });
     reseal(&dir, "Aarch64");
     let err = import_verify(&dir).unwrap_err();
-    assert!(matches!(err, EvidenceError::Notices { .. }), "got {err}");
+    assert!(
+        matches!(err, EvidenceError::Lock { .. } | EvidenceError::Notices { .. }),
+        "got {err}"
+    );
     std::fs::remove_dir_all(&dir).ok();
 
     // Re-binding to a different Stage-2 graph identity is refused.
@@ -559,7 +591,10 @@ fn a_target_closure_unbound_from_lock_or_stage2_is_rejected() {
     });
     reseal(&dir2, "Aarch64");
     let err2 = import_verify(&dir2).unwrap_err();
-    assert!(matches!(err2, EvidenceError::Notices { .. }), "got {err2}");
+    assert!(
+        matches!(err2, EvidenceError::Lock { .. } | EvidenceError::Notices { .. }),
+        "got {err2}"
+    );
     std::fs::remove_dir_all(&dir2).ok();
 }
 
@@ -758,6 +793,73 @@ fn a_swapped_lock_is_caught_by_recomputed_provenance() {
     // the provenance hash no longer matches the (swapped) exported bytes.
     assert!(matches!(err, EvidenceError::Lock { .. }), "got {err}");
     std::fs::remove_dir_all(&dir).ok();
+}
+
+// ---- Sealed-bundle import INHERITS the retained-artifact refusals -------------
+// The lock provenance's three artifact identities are RECOMPUTED from the sealed
+// `<Cand>.locked-commands.json` / `<Cand>.vendor-inventory.json` / `<Cand>.target-closure.json`
+// during import, so a mutated / semantically-invalid / missing artifact is refused there too.
+
+#[test]
+fn sealed_import_refuses_a_mutated_command_log_by_recompute() {
+    // exit_status flipped, provenance hash NOT updated -> recompute mismatch at import.
+    let dir = sealed_bundle("art_cmdlog_hash", "Aarch64");
+    rewrite_json(&dir, &locked_commands_file("Sp1"), |v| {
+        v["commands"][0]["exit_status"] = serde_json::json!(1);
+    });
+    reseal(&dir, "Aarch64");
+    assert!(matches!(import_verify(&dir).unwrap_err(), EvidenceError::Lock { .. }));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn sealed_import_refuses_a_semantically_invalid_command_log() {
+    // generate-lockfile injected AND the provenance hash updated to match -> the SEMANTIC check
+    // (not just recompute) refuses at import.
+    let dir = sealed_bundle("art_cmdlog_sem", "Aarch64");
+    rewrite_json(&dir, &locked_commands_file("Sp1"), |v| {
+        v["commands"][0]["argv"] = serde_json::json!(["cargo", "generate-lockfile"]);
+    });
+    let bytes = std::fs::read(dir.join(locked_commands_file("Sp1"))).unwrap();
+    let h = crate::venue::lock_artifacts::recompute_command_log_hash(&bytes);
+    rewrite_json(&dir, &lock_prov_file("Sp1"), |v| {
+        v["locked_command_log_blake3_hex"] = serde_json::json!(h);
+    });
+    reseal(&dir, "Aarch64");
+    assert!(matches!(import_verify(&dir).unwrap_err(), EvidenceError::Lock { .. }));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn sealed_import_refuses_a_mutated_vendor_inventory_by_recompute() {
+    // the synthetic bundle's inventory is empty; adding a stray entry changes the bytes.
+    let dir = sealed_bundle("art_vendor", "Aarch64");
+    rewrite_json(&dir, &vendor_inventory_file("Sp1"), |v| {
+        v["entries"] = serde_json::json!([{
+            "name":"x","version":"0.1.0",
+            "source":"registry+https://github.com/rust-lang/crates.io-index",
+            "checksum": crate::venue::sha256::hex_digest(b"c"),
+            "path":"x-0.1.0/src/lib.rs","size":1u64,"sha256": crate::venue::sha256::hex_digest(b"f")
+        }]);
+    });
+    reseal(&dir, "Aarch64");
+    assert!(matches!(import_verify(&dir).unwrap_err(), EvidenceError::Lock { .. }));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_bundle_missing_a_retained_artifact_is_refused_at_seal() {
+    for name in [locked_commands_file("Sp1"), vendor_inventory_file("Sp1")] {
+        let dir = tmpdir("art_missing");
+        write_bundle_files(&dir, "Aarch64");
+        std::fs::remove_file(dir.join(&name)).unwrap();
+        let err = seal(&dir, "Aarch64", COMMIT).unwrap_err();
+        assert!(
+            matches!(err, EvidenceError::MissingFile { .. }),
+            "removing {name}: got {err}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
 
 // ---- Architecture acceptance contract (VENUE.md §2) --------------------------
