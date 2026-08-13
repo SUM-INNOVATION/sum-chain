@@ -9,7 +9,10 @@
 #      + verifier-material-harness paths (nothing else may depend on it)
 #   5. b0-pre-vmat is a pure blake3-only leaf: no edge to the validator/independent
 #      crates (no cycle) and no candidate/guest/proof-stack edge
-#   6. no committed candidate Cargo.lock (locks are generated in-container only)
+#   6. the committed candidate Cargo.locks are the DEPENDENCY-SELECTION AUTHORITY: each canonical
+#      lock is present, Git-tracked, a regular non-symlink nonempty file, and byte-identical to its
+#      ratified SHA-256. The venue materializes THESE exact bytes under `cargo --locked`;
+#      unconstrained in-container reselection (`cargo generate-lockfile`) is forbidden.
 #
 # ROOT resolves from this script's location, or from $CHECK_ROOT when set (the
 # regression harness points it at a fixture).
@@ -23,6 +26,11 @@ cd "$ROOT"
 fail=0
 note() { printf '%s\n' "$*"; }
 bad()  { printf 'FAIL: %s\n' "$*"; fail=1; }
+
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+  else shasum -a 256 "$1" | awk '{print $1}'; fi
+}
 
 # 1. workspace excludes tools/
 if grep -Eq '^\s*exclude\s*=\s*\[[^]]*"tools"' Cargo.toml; then
@@ -82,17 +90,35 @@ if [ -f "$VMAT_TOML" ]; then
   fi
 fi
 
-# 6. no committed candidate Cargo.lock (the in-container build generates them;
-#    a committed one is forbidden).
-cand_lock=0
-for lk in \
-  tools/b0-pre-candidates/candidates/sp1/Cargo.lock \
-  tools/b0-pre-candidates/candidates/risc0/Cargo.lock; do
-  if [ -e "$lk" ]; then
-    bad "committed candidate Cargo.lock present (must be generated in-container): $lk"
-    cand_lock=1
+# 6. the committed candidate Cargo.locks are the DEPENDENCY-SELECTION AUTHORITY. Each canonical lock
+#    MUST be present, Git-tracked, a regular non-symlink nonempty file, and byte-identical to its
+#    ratified SHA-256. The venue materializes THESE exact bytes under `cargo --locked`; unconstrained
+#    in-container reselection (`cargo generate-lockfile`) is forbidden. Only the two exact committed
+#    files are accepted.
+check_committed_lock() {  # <relpath> <ratified-sha256>
+  local lk="$1" want="$2" got
+  if [ ! -e "$lk" ]; then
+    bad "committed candidate lock ABSENT (it is the dependency-selection authority): $lk"; return
   fi
-done
-[ "$cand_lock" = 0 ] && note "PASS: no committed candidate Cargo.lock"
+  if [ -L "$lk" ]; then
+    bad "committed candidate lock is a symlink (must be a regular file): $lk"; return
+  fi
+  if [ ! -f "$lk" ]; then
+    bad "committed candidate lock is not a regular file: $lk"; return
+  fi
+  if [ ! -s "$lk" ]; then
+    bad "committed candidate lock is empty: $lk"; return
+  fi
+  if ! git ls-files --error-unmatch -- "$lk" >/dev/null 2>&1; then
+    bad "committed candidate lock is not Git-tracked (must be committed, not an untracked drop-in): $lk"; return
+  fi
+  got="$(sha256_of "$lk")"
+  if [ "$got" != "$want" ]; then
+    bad "committed candidate lock SHA-256 mismatch (the materialized-under---locked authority is byte-frozen): $lk got $got != ratified $want"; return
+  fi
+  note "PASS: committed candidate lock authority OK ($lk sha256 $want)"
+}
+check_committed_lock tools/b0-pre-candidates/candidates/sp1/Cargo.lock   f48494fedb427bf0cea5f357f3637d4219ac324419b8623e6a660a510157e57c
+check_committed_lock tools/b0-pre-candidates/candidates/risc0/Cargo.lock 8949ae62ca2e30c9ecec19efe58a7260c4c527975aa5903a22be6edddaf8be8f
 
 exit "$fail"
