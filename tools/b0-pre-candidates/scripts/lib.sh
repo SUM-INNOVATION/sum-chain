@@ -114,37 +114,44 @@ canonicalize_rustup_components() {
   mv -f "$comp.sorted" "$comp"
 }
 
-# Validate a Stage-1 resolved candidate lock before it is bind-mounted READ-ONLY into a
-# fresh Stage-2 container, and echo its verified domain-separated BLAKE3 hash (the lock
-# IDENTITY — a host absolute path is never evidence). Fail closed unless the lock is:
-# present, a REGULAR file, NOT a symlink, non-empty, parseable as a Cargo.lock (a version
-# header and/or [[package]] tables), candidate-specific and generated-in-container per its
-# provenance, and its recomputed hash EQUALS the Stage-1 recorded lock_blake3_hex. This is
-# the same content-address gate resolve_lock.sh / verify-lock use; here it re-binds the
-# handed-off lock to Stage 2. Args:
+# Validate the COMMITTED candidate lock (materialized under --locked, exported from Stage 1) before
+# it is bind-mounted READ-ONLY into a fresh Stage-2 container, and echo its verified domain-separated
+# BLAKE3 hash (the lock IDENTITY — a host absolute path is never evidence). Fail closed unless the
+# lock is: present, a REGULAR file, NOT a symlink, non-empty, parseable as a Cargo.lock (a version
+# header and/or [[package]] tables), candidate-specific and committed-source-of-truth per its
+# provenance, its recomputed domain-separated BLAKE3 EQUALS the recorded committed_lock_blake3_hex,
+# and its recomputed plain SHA-256 EQUALS the recorded committed_lock_sha256_hex. This re-binds the
+# handed-off committed lock to Stage 2 (the full origin / pre-post / closure / vendor verification is
+# done by `verify-lock` at resolve time and re-checked in the sealed bundle by import-bundle). Args:
 #   <lock_file> <provenance_json> <schema_candidate> <validator_manifest>
 require_stage1_lock() {
-  local lock="$1" prov="$2" cand="$3" val="$4" recomputed p_hash p_cand p_origin
-  [ -e "$lock" ] || die "Stage-1 resolved lock absent (Stage 2 needs it mounted): $lock"
-  [ ! -L "$lock" ] || die "Stage-1 lock is a symlink; refused (must be a regular file): $lock"
-  [ -f "$lock" ] || die "Stage-1 lock is not a regular file: $lock"
-  [ -s "$lock" ] || die "Stage-1 lock is empty: $lock"
+  local lock="$1" prov="$2" cand="$3" val="$4" recomputed p_hash p_sha p_cand p_origin recomputed_sha
+  [ -e "$lock" ] || die "committed candidate lock absent (Stage 2 needs it mounted): $lock"
+  [ ! -L "$lock" ] || die "committed candidate lock is a symlink; refused (must be a regular file): $lock"
+  [ -f "$lock" ] || die "committed candidate lock is not a regular file: $lock"
+  [ -s "$lock" ] || die "committed candidate lock is empty: $lock"
   grep -qE '^version[[:space:]]*=|^\[\[package\]\]' "$lock" \
-    || die "Stage-1 lock is not a parseable Cargo.lock (no version header / [[package]]): $lock"
-  [ -f "$prov" ] || die "Stage-1 lock provenance absent: $prov"
+    || die "committed candidate lock is not a parseable Cargo.lock (no version header / [[package]]): $lock"
+  [ -f "$prov" ] || die "committed candidate lock provenance absent: $prov"
   require_cmd python3
   p_cand="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("candidate",""))' "$prov" 2>/dev/null || true)"
   p_origin="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("origin",""))' "$prov" 2>/dev/null || true)"
-  p_hash="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("lock_blake3_hex",""))' "$prov" 2>/dev/null || true)"
+  p_hash="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("committed_lock_blake3_hex",""))' "$prov" 2>/dev/null || true)"
+  p_sha="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("committed_lock_sha256_hex",""))' "$prov" 2>/dev/null || true)"
   [ "$p_cand" = "$cand" ] \
-    || die "Stage-1 lock provenance candidate '$p_cand' != '$cand' (cross-candidate / swapped lock)"
-  [ "$p_origin" = "generated-in-container" ] \
-    || die "Stage-1 lock provenance origin '$p_origin' != generated-in-container (host-originated lock refused)"
-  printf '%s' "$p_hash" | grep -Eq '^[0-9a-f]{64}$' || die "Stage-1 lock provenance hash malformed: '$p_hash'"
+    || die "committed lock provenance candidate '$p_cand' != '$cand' (cross-candidate / swapped lock)"
+  [ "$p_origin" = "committed-source-of-truth" ] \
+    || die "committed lock provenance origin '$p_origin' != committed-source-of-truth (host-originated or reselected lock refused)"
+  printf '%s' "$p_hash" | grep -Eq '^[0-9a-f]{64}$' || die "committed lock provenance blake3 malformed: '$p_hash'"
+  printf '%s' "$p_sha"  | grep -Eq '^[0-9a-f]{64}$' || die "committed lock provenance sha256 malformed: '$p_sha'"
   recomputed="$(cargo run --quiet --locked --manifest-path "$val" --bin venue-verify -- lock-hash "$lock")" \
-    || die "Stage-1 lock hash recomputation failed for $lock"
+    || die "committed lock-hash recomputation failed for $lock"
   [ "$recomputed" = "$p_hash" ] \
-    || die "Stage-1 lock hash mismatch: recomputed $recomputed != provenance $p_hash (tampered / stale lock)"
+    || die "committed lock blake3 mismatch: recomputed $recomputed != provenance $p_hash (tampered / stale lock)"
+  recomputed_sha="$(sha256_hex_stdin < "$lock")" \
+    || die "committed lock sha256 recomputation failed for $lock"
+  [ "$recomputed_sha" = "$p_sha" ] \
+    || die "committed lock sha256 mismatch: recomputed $recomputed_sha != provenance $p_sha (tampered / stale lock)"
   printf '%s' "$recomputed"
 }
 
@@ -268,6 +275,39 @@ EOF
   [ -z "$dups" ] || die "safe_extract_tar: duplicate member entries: $(printf '%s' "$dups" | tr '\n' ' ')"
   mkdir -p "$dest"
   tar -x --no-same-owner -C "$dest" -f "$tar_file" || die "safe_extract_tar: extraction failed: $tar_file"
+}
+
+# Deterministic 64-hex identity of a materialized vendor tree — the EXACT downloaded per-file
+# content. A manifest of "<relpath>\0<sha256>" for every regular file, LC_ALL=C sorted, hashed with
+# BLAKE3 (b3sum reads the manifest from stdin). Any substituted or altered vendored byte changes a
+# file's sha256 and thus this identity, so a tampered vendor tree is caught. Recorded as
+# `vendor_inputs_blake3_hex` in the committed-source-of-truth lock provenance.
+vendor_inputs_identity() {
+  local dir="$1"
+  require_cmd b3sum
+  require_cmd python3
+  [ -d "$dir" ] || die "vendor_inputs_identity: vendor dir absent: $dir"
+  python3 - "$dir" <<'PY' | b3sum | awk '{print $1}'
+import hashlib, os, sys
+root = sys.argv[1]
+entries = []
+for dirpath, dirnames, filenames in os.walk(root):
+    dirnames.sort()
+    for fn in sorted(filenames):
+        p = os.path.join(dirpath, fn)
+        # Skip symlinks / non-regular entries (safe_extract_tar already refused links, but the
+        # vendor tree is defence-in-depth untrusted): only regular-file bytes enter the identity.
+        if os.path.islink(p) or not os.path.isfile(p):
+            continue
+        rel = os.path.relpath(p, root)
+        h = hashlib.sha256()
+        with open(p, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        entries.append(f"{rel}\0{h.hexdigest()}")
+entries.sort()
+sys.stdout.buffer.write(("\n".join(entries) + "\n").encode())
+PY
 }
 
 # Enumerate the crate NAMES LINKED INTO the artifact for one build TARGET — the NORMAL (runtime

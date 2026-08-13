@@ -9,10 +9,12 @@
 //!       (content-addressed digest + platform), re-verifying the manifest blob's
 //!       content address. NOT sha256(exported tar). (Blocker 5)
 //!
-//!   venue-verify verify-lock <provenance.json> <exported_Cargo.lock>
-//!       Accept a candidate lock ONLY with generated-in-container provenance and a
-//!       hash recomputed from the exported bytes; reject any host-originated lock.
-//!       (Blocker 2)
+//!   venue-verify verify-lock <provenance.json> <committed_Cargo.lock>
+//!       Accept a candidate lock ONLY with committed-source-of-truth provenance: the
+//!       committed lock was materialized under Cargo --locked (never regenerated), its
+//!       recorded SHA-256 + domain-separated BLAKE3 recompute from the committed bytes,
+//!       and the post-run sha256 equals the pre-run (committed) sha256. Reject any
+//!       host-originated or reselected lock. (Blocker 2)
 //!
 //!   venue-verify verify-tool <authoritative|test-only> <declared.json> \
 //!                            <artifact_bytes> <installed_binary>
@@ -54,7 +56,7 @@ use b0_pre_validator::venue::arch_bundle::{aggregate, import_verify, PerArchBund
 use b0_pre_validator::venue::audit::{self, Advisory, CrateNode, Stage2AuditRecord};
 use b0_pre_validator::venue::evidence_bundle;
 use b0_pre_validator::venue::lock_provenance::{
-    recompute_lock_hash, verify_in_container_provenance, LockProvenance,
+    recompute_lock_hash, verify_committed_source_lock, LockProvenance,
 };
 use b0_pre_validator::venue::oci_layout::{
     extract_config_digest, extract_manifest_identity, verify_runtime_image_identity,
@@ -246,26 +248,28 @@ fn smoke_substitute(
     serde_json::to_string_pretty(&log).map_err(|e| e.to_string())
 }
 
-fn verify_lock(
-    prov_path: &str,
-    generated_path: &str,
-    committed_path: &str,
-) -> Result<String, String> {
+fn verify_lock(prov_path: &str, committed_path: &str) -> Result<String, String> {
     let prov: LockProvenance =
         serde_json::from_str(&read_str(prov_path)?).map_err(|e| format!("bad provenance: {e}"))?;
-    let generated = read(generated_path)?;
     let committed = read(committed_path)?;
     let binding =
-        verify_in_container_provenance(&prov, &generated, &committed).map_err(|e| e.to_string())?;
+        verify_committed_source_lock(&prov, &committed).map_err(|e| e.to_string())?;
     Ok(serde_json::json!({
         "accepted": true,
         "candidate": binding.candidate,
         "arch": binding.arch,
+        "origin": crate_committed_origin(),
         "container_digest": binding.container_digest,
         "source_commit": binding.source_commit,
         "lock_blake3_hex": binding.lock_blake3_hex,
+        "materialized_closure_blake3_hex": binding.materialized_closure_blake3_hex,
+        "vendor_inputs_blake3_hex": binding.vendor_inputs_blake3_hex,
     })
     .to_string())
+}
+
+fn crate_committed_origin() -> &'static str {
+    b0_pre_validator::venue::lock_provenance::COMMITTED_SOURCE_ORIGIN
 }
 
 fn verify_tool(
@@ -819,9 +823,7 @@ fn run() -> Result<String, String> {
         [cmd, attest, observed, sentinel] if cmd == "smoke-substitute" => {
             smoke_substitute(attest, observed, sentinel)
         }
-        [cmd, prov, generated, committed] if cmd == "verify-lock" => {
-            verify_lock(prov, generated, committed)
-        }
+        [cmd, prov, committed] if cmd == "verify-lock" => verify_lock(prov, committed),
         [cmd, mode, declared, artifact, installed] if cmd == "verify-tool" => {
             verify_tool(mode, declared, artifact, installed)
         }

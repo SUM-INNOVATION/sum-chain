@@ -29,7 +29,7 @@ use crate::schema::stage6::{NativeBuild, OciBuild};
 
 use super::arch_bundle::{self, AggregatedVenueInputs, ArchBundleError, PerArchBundle};
 use super::audit::Stage2AuditRecord;
-use super::lock_provenance::{verify_in_container_provenance, LockBinding, LockProvenance};
+use super::lock_provenance::{verify_committed_source_lock, LockBinding, LockProvenance};
 use super::stage5::{self, Stage5Result};
 use super::tool_install::{InstallMode, ToolBindingRecord};
 
@@ -833,16 +833,15 @@ pub fn import_verify_mode(
         let pf = lock_prov_file(c);
         let prov: LockProvenance = parse(&pf, &read_file(dir, &pf)?)?;
         let lock_bytes = read_file(dir, &lock_file(c))?;
-        // The sealed bundle carries the ONE lock: the committed source-of-truth lock, which
-        // the venue proved byte-identical to the in-container generated lock at resolve time.
-        // Re-verify it against BOTH recorded hashes — generated and committed must each equal
-        // the sealed bytes (and thereby each other).
+        // The sealed bundle carries the ONE lock: the committed source-of-truth lock. The venue
+        // materialized that exact committed graph under Cargo `--locked` (never regenerated it),
+        // and recorded the committed lock's pre/post byte-identity. Re-verify the sealed bytes
+        // against the recorded committed SHA-256 + domain-separated BLAKE3 and the pre==post
+        // byte-equality invariant.
         let binding =
-            verify_in_container_provenance(&prov, &lock_bytes, &lock_bytes).map_err(|e| {
-                EvidenceError::Lock {
-                    candidate: c.to_string(),
-                    error: e.to_string(),
-                }
+            verify_committed_source_lock(&prov, &lock_bytes).map_err(|e| EvidenceError::Lock {
+                candidate: c.to_string(),
+                error: e.to_string(),
             })?;
         if binding.arch != arch {
             return Err(EvidenceError::ArchBinding {
@@ -1408,13 +1407,20 @@ pub fn write_test_only_bundle_dir(dir: &Path, arch: &str) -> Result<(), String> 
         let lock_bytes =
             format!("# {c} in-container Cargo.lock ({arch})\nversion = 3\n").into_bytes();
         w(&lock_file(c), &lock_bytes)?;
+        let lock_sha = crate::venue::lock_provenance::recompute_lock_sha256(&lock_bytes);
         let lock_hash = crate::venue::lock_provenance::recompute_lock_hash(&lock_bytes);
+        // The sealed lock is the COMMITTED source-of-truth, materialized under Cargo --locked; the
+        // committed SHA-256 + domain-separated BLAKE3 recompute from these exact bytes, and the
+        // post-run sha256 equals the pre-run (committed) sha256 (Cargo did not rewrite it).
         let prov = serde_json::json!({"candidate":c,"arch":arch,
-            "origin":crate::venue::lock_provenance::IN_CONTAINER_ORIGIN,
+            "origin":crate::venue::lock_provenance::COMMITTED_SOURCE_ORIGIN,
             "container_digest":builder,"source_commit":commit,
-            "command_log_blake3_hex":bh(&format!("lockcmd-{lc}-{arch}")),"lock_blake3_hex":lock_hash.clone(),
-            // The sealed lock is the committed source-of-truth (byte-identical to generated).
-            "committed_lock_blake3_hex":lock_hash});
+            "committed_lock_sha256_hex":lock_sha.clone(),
+            "committed_lock_blake3_hex":lock_hash,
+            "post_lock_sha256_hex":lock_sha,
+            "locked_command_log_blake3_hex":bh(&format!("lockcmd-{lc}-{arch}")),
+            "materialized_closure_blake3_hex":bh(&format!("closure-{lc}-{arch}")),
+            "vendor_inputs_blake3_hex":bh(&format!("vendor-{lc}-{arch}"))});
         w(
             &lock_prov_file(c),
             &serde_json::to_vec_pretty(&prov).unwrap(),

@@ -1,7 +1,9 @@
 // Adversarial + structural tests for the sealed, hashed, immutable per-arch
 // evidence bundle (Blocker 1 + 7 + the Blocker 8 platform binding).
 use super::*;
-use crate::venue::lock_provenance::{recompute_lock_hash, IN_CONTAINER_ORIGIN};
+use crate::venue::lock_provenance::{
+    recompute_lock_hash, recompute_lock_sha256, COMMITTED_SOURCE_ORIGIN,
+};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 fn tmpdir(tag: &str) -> PathBuf {
@@ -89,15 +91,21 @@ fn write_bundle_files(dir: &Path, arch: &str) {
         // lock + provenance
         let lock_bytes = format!("# {c} in-container Cargo.lock ({arch})\nversion = 3\n").into_bytes();
         write(dir, &lock_file(c), &lock_bytes);
+        let lock_sha = recompute_lock_sha256(&lock_bytes);
         let lock_hash = recompute_lock_hash(&lock_bytes);
+        // The sealed lock is the COMMITTED source-of-truth, materialized under Cargo --locked: the
+        // committed SHA-256 + domain-separated BLAKE3 recompute from these bytes and the post-run
+        // sha256 equals the pre-run (committed) sha256.
         let prov = serde_json::json!({
-            "candidate": c, "arch": arch, "origin": IN_CONTAINER_ORIGIN,
+            "candidate": c, "arch": arch, "origin": COMMITTED_SOURCE_ORIGIN,
             "container_digest": builder_digest,
             "source_commit": COMMIT,
-            "command_log_blake3_hex": bh(&format!("lockcmd-{lc}-{arch}")),
-            "lock_blake3_hex": lock_hash,
-            // The sealed lock is the committed source-of-truth (venue proved byte-identity).
+            "committed_lock_sha256_hex": lock_sha,
             "committed_lock_blake3_hex": lock_hash,
+            "post_lock_sha256_hex": lock_sha,
+            "locked_command_log_blake3_hex": bh(&format!("lockcmd-{lc}-{arch}")),
+            "materialized_closure_blake3_hex": bh(&format!("closure-{lc}-{arch}")),
+            "vendor_inputs_blake3_hex": bh(&format!("vendor-{lc}-{arch}")),
         });
         write(dir, &lock_prov_file(c), serde_json::to_vec_pretty(&prov).unwrap().as_slice());
 

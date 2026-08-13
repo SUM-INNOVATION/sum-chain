@@ -116,7 +116,10 @@ grep -Eq '^sha256:[0-9a-f]{64}$' <<<"$SP1_DIG" || { fail "could not read Sp1 bui
 gen_lock_in_container "$FIMG" "$CDIR_IN" "$T/Sp1.Cargo.lock" >/dev/null 2>&1 \
   && pass "Stage 1: gen_lock_in_container (shared fn) produced the candidate lock" || fail "gen_lock_in_container"
 LH="$(vvh "$T/Sp1.Cargo.lock")"
-P="$T/Sp1.lock-provenance.json" LH="$LH" D="$SP1_DIG" C="$COMMIT" python3 -c 'import json,os;json.dump({"candidate":"Sp1","arch":"Aarch64","origin":"generated-in-container","container_digest":os.environ["D"],"source_commit":os.environ["C"],"command_log_blake3_hex":"c"*64,"lock_blake3_hex":os.environ["LH"]},open(os.environ["P"],"w"))'
+SH="$(sha256_hex_stdin < "$T/Sp1.Cargo.lock")"
+# committed-source-of-truth provenance over the mounted lock (this fixture lock stands in for the
+# committed one): the recorded committed sha256/blake3 recompute from these exact bytes.
+P="$T/Sp1.lock-provenance.json" LH="$LH" SH="$SH" D="$SP1_DIG" C="$COMMIT" python3 -c 'import json,os;json.dump({"candidate":"Sp1","arch":"Aarch64","origin":"committed-source-of-truth","container_digest":os.environ["D"],"source_commit":os.environ["C"],"committed_lock_sha256_hex":os.environ["SH"],"committed_lock_blake3_hex":os.environ["LH"],"post_lock_sha256_hex":os.environ["SH"],"locked_command_log_blake3_hex":"c"*64,"materialized_closure_blake3_hex":"d"*64,"vendor_inputs_blake3_hex":"e"*64},open(os.environ["P"],"w"))'
 ( require_stage1_lock "$T/Sp1.Cargo.lock" "$T/Sp1.lock-provenance.json" Sp1 "$VAL" ) >/dev/null 2>"$T/rsl.err" \
   && pass "Stage 1: require_stage1_lock (real fn) accepts it" || { fail "require_stage1_lock"; cat "$T/rsl.err"; }
 
