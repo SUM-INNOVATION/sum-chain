@@ -162,15 +162,23 @@ fn default_env() -> Env {
     }
 }
 
-fn enc_prov(arch: u8, role: u8, ids: Ids, env: &Env) -> Vec<u8> {
+fn enc_prov(
+    arch: u8,
+    role: u8,
+    ids: Ids,
+    env: &Env,
+    cpuset_chain_addr: [u8; 32],
+    runner_att_addr: [u8; 32],
+) -> Vec<u8> {
     let r = if role == 0 {
         env.proving
     } else {
         env.verification
     };
     let mut b = Vec::new();
-    // Provenance-LOCAL schema version v2 (DvfsProvenance sum type); every other record stays v1.
-    b.extend_from_slice(&2u16.to_le_bytes());
+    // Provenance-LOCAL schema version v3 (DvfsProvenance sum type + effective-cpuset provenance +
+    // runner-attestation address tail); every other record stays v1.
+    b.extend_from_slice(&3u16.to_le_bytes());
     b.push(role);
     b.extend_from_slice(&id(b"spec"));
     b.extend_from_slice(&id(b"guest_set"));
@@ -202,10 +210,150 @@ fn enc_prov(arch: u8, role: u8, ids: Ids, env: &Env) -> Vec<u8> {
     push_str(&mut b, env.cgroup_scope_label.as_bytes());
     b.extend_from_slice(&env.harness_hash);
     b.extend_from_slice(&env.envcap_hash);
+    // v3 tail: effective-cpuset provenance summary (leaf-observed here) + two content addresses.
+    let cpuset_raw = format!("0-{}", r.cpuset.saturating_sub(1));
+    push_str(&mut b, env.cgroup_scope_label.as_bytes()); // cpuset_source_cgroup_path (leaf)
+    push_str(&mut b, cpuset_raw.as_bytes()); // cpuset_raw
+    b.push(0); // cpuset_inherited = false (leaf-observed)
+    b.extend_from_slice(&cpuset_chain_addr); // cpuset_probe_chain_blake3 (address of the retained chain)
+    b.extend_from_slice(&runner_att_addr); // runner_attestation_blake3 (address of the retained attestation)
     b
 }
-fn prov_h(arch: u8, role: u8, ids: Ids, env: &Env) -> [u8; 32] {
-    crate::prefixed(tags::ARCHPROV_PREFIX, &enc_prov(arch, role, ids, env))
+
+const CPUSET_CHAIN_KIND_H: &[u8; 32] = b"b0-final-cpuset-probe-chain-v1\0\0";
+
+/// Encode one retained observation (matches the reference layout, little-endian).
+fn enc_obs_h(b: &mut Vec<u8>, state: u8, raw: &str) {
+    b.push(state);
+    push_str(b, raw.as_bytes()); // raw
+    push_str(b, b"regular"); // file_type
+    b.push(0); // is_symlink
+    b.push(1);
+    b.extend_from_slice(&1u64.to_le_bytes()); // dev Some(1)
+    b.push(1);
+    b.extend_from_slice(&2u64.to_le_bytes()); // inode Some(2)
+    b.push(1);
+    b.extend_from_slice(&(raw.len() as u64).to_le_bytes()); // size Some(len)
+    b.push(1);
+    b.extend_from_slice(&0u64.to_le_bytes()); // mtime_secs Some(0)
+    b.push(1);
+    b.extend_from_slice(&0u64.to_le_bytes()); // mtime_nanos Some(0)
+    b.push(0); // read_error_class None
+}
+
+/// Encode a leaf-observed `CpusetProbeChainV1` (independent); returns (bytes, address).
+#[allow(clippy::too_many_arguments)]
+fn enc_cpuset_chain(
+    candidate: u16,
+    arch: u8,
+    role: u8,
+    spec: &[u8; 32],
+    gs: &[u8; 32],
+    scope: &str,
+    raw: &str,
+    cpuset: u32,
+) -> (Vec<u8>, [u8; 32]) {
+    let mut b = Vec::new();
+    b.extend_from_slice(CPUSET_CHAIN_KIND_H);
+    b.extend_from_slice(&1u16.to_le_bytes());
+    b.extend_from_slice(&candidate.to_le_bytes());
+    b.push(arch);
+    b.push(role);
+    b.extend_from_slice(spec);
+    b.extend_from_slice(gs);
+    push_str(&mut b, scope.as_bytes()); // leaf_scope
+    push_str(&mut b, scope.as_bytes()); // source (leaf-observed)
+    push_str(&mut b, raw.as_bytes()); // summary_raw
+    b.push(0); // summary_inherited false
+    b.extend_from_slice(&cpuset.to_le_bytes()); // summary_count
+    b.extend_from_slice(&1u32.to_le_bytes()); // entry_count
+    push_str(&mut b, scope.as_bytes()); // entry cgroup_path
+    b.extend_from_slice(&0u32.to_le_bytes()); // order 0
+    enc_obs_h(&mut b, 2, raw);
+    enc_obs_h(&mut b, 2, raw);
+    let chain = closure::decode_cpuset_chain(&b).expect("self-encoded chain decodes");
+    let addr = closure::cpuset_chain_address(&chain);
+    (b, addr)
+}
+
+const PHASE1_IDENTITY_KIND_H: &[u8; 32] = b"b0-final-phase1-identity-rec-v1\0";
+
+/// Encode a `Phase1IdentityRecordV1` (independent); returns (bytes, domain-separated address).
+fn enc_identity_record(
+    candidate: u16,
+    arch: u8,
+    source: &str,
+    tooling_commit: &str,
+    tooling_pathset: &str,
+    spec: &[u8; 32],
+    production_binary: &[u8; 32],
+) -> (Vec<u8>, [u8; 32]) {
+    let mut b = Vec::new();
+    let hexs = |b: &mut Vec<u8>, s: &str| {
+        b.push(s.len() as u8);
+        b.extend_from_slice(s.as_bytes());
+    };
+    b.extend_from_slice(PHASE1_IDENTITY_KIND_H);
+    b.extend_from_slice(&1u16.to_le_bytes());
+    b.extend_from_slice(&candidate.to_le_bytes());
+    b.push(arch);
+    hexs(&mut b, source);
+    hexs(&mut b, tooling_commit);
+    hexs(&mut b, tooling_pathset);
+    b.extend_from_slice(spec);
+    b.extend_from_slice(production_binary);
+    let addr = closure::identity_record_address(&b);
+    (b, addr)
+}
+
+/// Encode a `RunnerAttestationV1` (independent, version 4); returns (bytes, address).
+fn enc_runner_attestation(
+    candidate: u16,
+    role: u8,
+    arch: u8,
+    spec: &[u8; 32],
+    gs: &[u8; 32],
+    measured: &str,
+    phase1_identity_record_addr: [u8; 32],
+) -> (Vec<u8>, [u8; 32]) {
+    let mut b = Vec::new();
+    let hexs = |b: &mut Vec<u8>, s: &str| {
+        b.push(s.len() as u8);
+        b.extend_from_slice(s.as_bytes());
+    };
+    // BYTE-IDENTICAL to the reference synthetic attestation (measurement::synth_runner_attestation
+    // with a blake3(seed) seeder), so the two independent generators produce the same provenance bytes
+    // and thus the same result_set_hash.
+    let seed = |s: &[u8]| *blake3::hash(s).as_bytes();
+    b.extend_from_slice(&4u16.to_le_bytes());
+    b.extend_from_slice(&candidate.to_le_bytes());
+    b.push(role);
+    b.extend_from_slice(spec);
+    b.extend_from_slice(gs);
+    b.push(arch);
+    hexs(&mut b, "1234567890abcdef1234567890abcdef12345678"); // execution_tooling_checkout_head
+    hexs(&mut b, "1234567890abcdef1234567890abcdef12345678"); // ratified_tooling_commit
+    hexs(&mut b, &"70".repeat(32)); // ratified_pathset
+    hexs(&mut b, &"70".repeat(32)); // recomputed_pathset
+    hexs(&mut b, measured); // measured_source_commit
+    hexs(&mut b, measured); // build_git_sha
+    b.extend_from_slice(&seed(b"measured-ctx"));
+    b.extend_from_slice(&seed(b"runner-sha256"));
+    b.extend_from_slice(&seed(b"runner-blake3"));
+    b.extend_from_slice(&seed(b"builder"));
+    b.extend_from_slice(&seed(b"pb-sha256"));
+    b.extend_from_slice(&seed(b"pb-blake3"));
+    b.extend_from_slice(&seed(b"protoc-sha256"));
+    b.extend_from_slice(&seed(b"protoc-blake3"));
+    let v = b"libprotoc 3.21.12";
+    b.push(v.len() as u8);
+    b.extend_from_slice(v);
+    b.extend_from_slice(&seed(b"docker-argv"));
+    b.extend_from_slice(&seed(b"repro-pair"));
+    b.extend_from_slice(&seed(b"runner-blake3")); // phase1 == runner_blake3 (continuity)
+    b.extend_from_slice(&phase1_identity_record_addr); // bound retained Phase-1 identity record
+    let addr = closure::runner_attestation_address(&b);
+    (b, addr)
 }
 
 fn enc_env(arch: u8, stmt: u8, iter: u32, pprov: [u8; 32], ids: Ids) -> Vec<u8> {
@@ -317,6 +465,9 @@ pub struct Evidence {
     pub rss: Vec<Vec<u8>>,
     pub envelopes: Vec<Vec<u8>>,
     pub provenances: Vec<Vec<u8>>,
+    pub cpuset_chains: Vec<Vec<u8>>,
+    pub runner_attestations: Vec<Vec<u8>>,
+    pub identity_records: Vec<Vec<u8>>,
     pub verifier_material: Vec<u8>,
     pub result_set: Vec<u8>,
 }
@@ -349,16 +500,62 @@ fn generate_with(candidate: u16, env: &Env) -> Evidence {
     let mut envelopes = Vec::new();
     let mut provenances = Vec::new();
 
+    let mut cpuset_chains = Vec::new();
+    let mut runner_attestations = Vec::new();
+    let mut identity_records = Vec::new();
     let mut arch_prov: Vec<(u8, u8, [u8; 32])> = Vec::new();
     let mut proving: HashMap<u8, [u8; 32]> = HashMap::new();
+    let spec = id(b"spec");
+    let gs = id(b"guest_set");
+    let production_binary = *blake3::hash(b"runner-blake3").as_bytes();
     for a in ARCHES {
         for role in [0u8, 1] {
-            let h = prov_h(a, role, ids, env);
+            let rres = if role == 0 {
+                env.proving
+            } else {
+                env.verification
+            };
+            let raw = format!("0-{}", rres.cpuset.saturating_sub(1));
+            let (chain_bytes, chain_addr) = enc_cpuset_chain(
+                ids.candidate,
+                a,
+                role,
+                &spec,
+                &gs,
+                &env.cgroup_scope_label,
+                &raw,
+                rres.cpuset,
+            );
+            // Retained Phase-1 identity record (byte-identical to the reference synth record); its
+            // domain-separated address is bound into the runner attestation.
+            let (rec_bytes, rec_addr) = enc_identity_record(
+                ids.candidate,
+                a,
+                &"0".repeat(40),
+                "1234567890abcdef1234567890abcdef12345678",
+                &"70".repeat(32),
+                &spec,
+                &production_binary,
+            );
+            let (att_bytes, att_addr) = enc_runner_attestation(
+                ids.candidate,
+                role,
+                a,
+                &spec,
+                &gs,
+                &"0".repeat(40),
+                rec_addr,
+            );
+            let pb = enc_prov(a, role, ids, env, chain_addr, att_addr);
+            let h = crate::prefixed(tags::ARCHPROV_PREFIX, &pb);
             if role == 0 {
                 proving.insert(a, h);
             }
             arch_prov.push((a, role, h));
-            provenances.push(enc_prov(a, role, ids, env));
+            provenances.push(pb);
+            cpuset_chains.push(chain_bytes);
+            runner_attestations.push(att_bytes);
+            identity_records.push(rec_bytes);
         }
     }
 
@@ -467,6 +664,9 @@ fn generate_with(candidate: u16, env: &Env) -> Evidence {
         rss,
         envelopes,
         provenances,
+        cpuset_chains,
+        runner_attestations,
+        identity_records,
         verifier_material: enc_vmat_ids(ids),
         result_set,
     }
@@ -593,6 +793,42 @@ pub fn verify_evidence(ev: &Evidence) -> Result<Recomputed, String> {
             proving.insert(p.arch, h);
         }
     }
+    // Retained artifacts (independent recomputation): exactly one cpuset-chain + one runner-attestation
+    // per provenance (SAME order). Decode each from the retained bytes, recompute its address, re-run
+    // the structural rules, and bind it to its provenance. A hash-only field is never trusted alone.
+    if ev.cpuset_chains.len() != ev.provenances.len() {
+        return Err("retained cpuset-chain count != provenance count".into());
+    }
+    if ev.runner_attestations.len() != ev.provenances.len() {
+        return Err("retained runner-attestation count != provenance count".into());
+    }
+    if ev.identity_records.len() != ev.provenances.len() {
+        return Err("retained identity-record count != provenance count".into());
+    }
+    let mut artifact_keys: HashSet<(u8, u8)> = HashSet::new();
+    for (i, pb) in ev.provenances.iter().enumerate() {
+        let p = closure::decode_prov(pb).map_err(|e| format!("prov: {e:?}"))?;
+        let chain = closure::decode_cpuset_chain(&ev.cpuset_chains[i])
+            .map_err(|e| format!("cpuset chain: {e:?}"))?;
+        let ca = closure::cpuset_chain_address(&chain);
+        closure::bind_cpuset_chain(&chain, &p, ca).map_err(|e| format!("cpuset chain: {e}"))?;
+        let att = closure::decode_runner_attestation(&ev.runner_attestations[i])
+            .map_err(|e| format!("runner attestation: {e:?}"))?;
+        let aa = closure::runner_attestation_address(&ev.runner_attestations[i]);
+        closure::bind_runner_attestation(&att, &p, aa)
+            .map_err(|e| format!("runner attestation: {e}"))?;
+        // Sealed-import runner continuity anchored to the independently-decoded retained record; the
+        // per-provenance binding + count is the exact record↔provenance correspondence.
+        let rec = closure::decode_identity_record(&ev.identity_records[i])
+            .map_err(|e| format!("identity record: {e:?}"))?;
+        let ra = closure::identity_record_address(&ev.identity_records[i]);
+        closure::bind_identity_record(&rec, &att, ra)
+            .map_err(|e| format!("runner continuity: {e}"))?;
+        if !artifact_keys.insert((p.arch, p.role)) {
+            return Err("duplicate retained artifact (arch, role)".into());
+        }
+    }
+
     for (a, r, h) in &rs.arch_provenance {
         match prov_h.get(&(*a, *r)) {
             Some(x) if x == h => {}
@@ -850,6 +1086,9 @@ mod tests {
             rss: ev.rss.clone(),
             envelopes: ev.envelopes.clone(),
             provenances: ev.provenances.clone(),
+            cpuset_chains: ev.cpuset_chains.clone(),
+            runner_attestations: ev.runner_attestations.clone(),
+            identity_records: ev.identity_records.clone(),
             verifier_material: ev.verifier_material.clone(),
             result_set: ev.result_set.clone(),
         }

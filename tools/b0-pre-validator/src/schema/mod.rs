@@ -8,12 +8,15 @@
 
 pub mod allowlist;
 pub mod bench;
+pub mod cpuset_chain;
 pub mod derived_input;
 pub mod envelope;
+pub mod identity_record;
 pub mod manifest;
 pub mod object;
 pub mod provenance;
 pub mod result_set;
+pub mod runner_attestation;
 pub mod stage1_bundle;
 pub mod stage6;
 pub mod statement;

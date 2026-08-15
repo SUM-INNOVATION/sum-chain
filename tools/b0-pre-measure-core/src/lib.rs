@@ -117,4 +117,9 @@ pub struct GuestIdentityRecord {
     pub real_backend: bool,
     pub real_guest_embedded: bool,
     pub b0_pre_spec_hash: String,
+    /// Two-root MEASUREMENT-TOOLING authority the identity was derived with (distinct from
+    /// `source_commit`, the measured source). Verified against the tooling authority, never compared
+    /// to `RATIFIED_SOURCE_COMMIT`.
+    pub tooling_commit: String,
+    pub tooling_pathset_blake3: String,
 }

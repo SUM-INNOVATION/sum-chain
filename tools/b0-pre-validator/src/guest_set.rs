@@ -55,6 +55,12 @@ pub struct GuestIdentityRecord {
     pub real_backend: bool,
     pub real_guest_embedded: bool,
     pub b0_pre_spec_hash: String,
+    // ---- two-root authority: the MEASUREMENT-TOOLING checkout the identity was derived with. This
+    // is the SECOND, independent authority; it is verified against the tooling authority
+    // (`tooling_authority::verify_tooling_authority`) and is NEVER compared to
+    // `RATIFIED_SOURCE_COMMIT` (the measured source, bound by `source_commit` above). ----
+    pub tooling_commit: String,
+    pub tooling_pathset_blake3: String,
 }
 
 /// Strictly LOWERCASE hex (an uppercase digit is a non-canonical identity → reject; a
@@ -167,12 +173,28 @@ fn validate_record(r: &GuestIdentityRecord, spec_hex: &str) -> Result<(Candidate
         ));
     }
     hexn(&r.source_commit, 20, "source_commit")?;
-    // EXACT source authority: the guest must be built from the ratified commit, not merely a
-    // commit the records agree on. A different (even clean) commit is refused.
+    // EXACT MEASURED-SOURCE authority: the guest must be built from the ratified MEASURED source, not
+    // merely a commit the records agree on. A different (even clean) commit is refused. This binds the
+    // guest/program identity to the frozen source ONLY.
     if r.source_commit != RATIFIED_SOURCE_COMMIT {
         return Err(format!(
             "{}/{}: source commit {} != ratified {RATIFIED_SOURCE_COMMIT}",
             r.candidate, r.arch, r.source_commit
+        ));
+    }
+    // Two-root separation: the MEASUREMENT-TOOLING authority is a DISTINCT, independently-shaped
+    // identity. Here we validate its SHAPE (40-hex tooling commit, 64-hex path-set digest); the
+    // equality binding to the ratified tooling authority is a SEPARATE gate
+    // (`verify_ratified_tooling_authority`). We deliberately NEVER compare `tooling_commit` to
+    // `RATIFIED_SOURCE_COMMIT` — conflating the tooling head with the measured source is the exact
+    // defect the two-root model removes.
+    hexn(&r.tooling_commit, 20, "tooling_commit")?;
+    hex32(&r.tooling_pathset_blake3, "tooling_pathset_blake3")?;
+    if r.tooling_commit == RATIFIED_SOURCE_COMMIT {
+        return Err(format!(
+            "{}/{}: tooling_commit equals the measured-source RATIFIED_SOURCE_COMMIT; the two-root \
+             model forbids conflating tooling with measured source",
+            r.candidate, r.arch
         ));
     }
     // The toolchain identity must be a real derived 64-hex identity (bound to the ratified
@@ -231,6 +253,13 @@ fn reconcile_sp1(
             &arm.build_command_hash,
         ),
         ("source_commit", &x86.source_commit, &arm.source_commit),
+        // Two-root: both native SP1 builds must share ONE tooling authority (same tooling root).
+        ("tooling_commit", &x86.tooling_commit, &arm.tooling_commit),
+        (
+            "tooling_pathset_blake3",
+            &x86.tooling_pathset_blake3,
+            &arm.tooling_pathset_blake3,
+        ),
     ] {
         if a != b {
             return Err(format!(
@@ -311,11 +340,30 @@ fn record_digest(r: &GuestIdentityRecord) -> [u8; 32] {
         &r.build_command_hash,
         &r.production_binary_blake3,
         &r.b0_pre_spec_hash,
+        &r.tooling_commit,
+        &r.tooling_pathset_blake3,
     ] {
         h.update(&(f.len() as u32).to_be_bytes());
         h.update(f.as_bytes());
     }
     *h.finalize().as_bytes()
+}
+
+/// The SEPARATE tooling-authority gate (two-root model). Verifies every record's `tooling_commit` +
+/// `tooling_pathset_blake3` against the ratified MEASUREMENT-TOOLING authority
+/// ([`crate::tooling_authority::verify_tooling_authority`]) — NOT against `RATIFIED_SOURCE_COMMIT`.
+/// This is deliberately DISTINCT from `derive_guest_set` (which binds the measured source): the venue
+/// calls both. While the tooling authority is UNBOUND (Commit A), this refuses every record, so no
+/// official run can proceed until Commit B binds the tooling authority.
+pub fn verify_ratified_tooling_authority(records: &[GuestIdentityRecord]) -> Result<(), String> {
+    for r in records {
+        crate::tooling_authority::verify_tooling_authority(
+            &r.tooling_commit,
+            &r.tooling_pathset_blake3,
+        )
+        .map_err(|e| format!("{}/{}: tooling authority: {e}", r.candidate, r.arch))?;
+    }
+    Ok(())
 }
 
 /// Derive the canonical guest set from the typed identity records. Fail-closed on every
@@ -471,6 +519,10 @@ mod tests {
             real_backend: true,
             real_guest_embedded: true,
             b0_pre_spec_hash: MERGED_SPEC_HASH_HEX.into(),
+            // Tooling authority: a DISTINCT commit (never the measured-source RATIFIED_SOURCE_COMMIT)
+            // shared across both SP1 arches (one tooling root), plus a 64-hex path-set digest.
+            tooling_commit: "a".repeat(40),
+            tooling_pathset_blake3: "f0".repeat(32),
         }
     }
     fn eligible() -> Vec<GuestIdentityRecord> {
@@ -614,6 +666,61 @@ mod tests {
         assert!(authenticate_manifest(&forged, &gs)
             .unwrap_err()
             .contains("forged/altered"));
+    }
+
+    #[test]
+    fn tooling_commit_equal_to_measured_source_is_refused() {
+        // Two-root separation: a record whose tooling_commit == the measured-source RATIFIED commit
+        // (i.e. the two roots collapsed onto one commit) is refused.
+        let mut r = eligible();
+        for rec in &mut r {
+            rec.tooling_commit = RATIFIED_SOURCE_COMMIT.into();
+        }
+        assert!(derive_guest_set(&r, MERGED_SPEC_HASH_HEX)
+            .unwrap_err()
+            .contains("conflating tooling with measured source"));
+    }
+
+    #[test]
+    fn malformed_tooling_authority_shape_is_refused() {
+        let mut r = eligible();
+        r[0].tooling_pathset_blake3 = "zz".repeat(32); // not hex
+        assert!(derive_guest_set(&r, MERGED_SPEC_HASH_HEX)
+            .unwrap_err()
+            .to_lowercase()
+            .contains("hex"));
+        let mut r2 = eligible();
+        r2[0].tooling_commit = "a".repeat(39); // wrong length
+        assert!(derive_guest_set(&r2, MERGED_SPEC_HASH_HEX).is_err());
+    }
+
+    #[test]
+    fn sp1_cross_arch_tooling_disagreement_is_refused() {
+        let mut r = eligible();
+        r[1].tooling_commit = "b".repeat(40); // aarch64 tooling != x86 tooling
+        assert!(derive_guest_set(&r, MERGED_SPEC_HASH_HEX)
+            .unwrap_err()
+            .contains("disagree on tooling_commit"));
+    }
+
+    #[test]
+    fn ratified_tooling_authority_gate_refuses_non_ratified_records() {
+        // Durable contract, independent of whether the tooling authority is currently UNBOUND
+        // (Commit A) or bound (Commit B): the distinct tooling-authority gate refuses records whose
+        // tooling commit / path-set digest are not the ratified measurement-tooling authority.
+        // `eligible()` carries a deliberately non-ratified tooling identity ("a"*40 / "f0"*32), so the
+        // gate must reject it, and the refusal is scoped to the tooling-authority check. We assert the
+        // durable refusal semantics only — never the transient sentinel text — so this test holds
+        // before and after Commit B binds the authority. derive_guest_set still succeeds because it
+        // binds only the measured source; the tooling gate is the distinct second check.
+        assert!(derive_guest_set(&eligible(), MERGED_SPEC_HASH_HEX).is_ok());
+        let e = verify_ratified_tooling_authority(&eligible()).expect_err(
+            "non-ratified tooling identity must be refused by the tooling-authority gate",
+        );
+        assert!(
+            e.contains("tooling authority"),
+            "refusal must be scoped to the tooling-authority gate: {e}"
+        );
     }
 
     #[test]

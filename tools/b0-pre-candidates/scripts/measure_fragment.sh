@@ -33,6 +33,9 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 # shellcheck source=lib.sh
 . "$HERE/lib.sh"
+# Two-root authority resolver (measured source vs measurement tooling).
+# shellcheck source=two_root_authority.sh
+. "$HERE/two_root_authority.sh"
 
 CAND="${1:-}"; ARCH="${2:-}"; OUT="${3:-}"
 case "$CAND" in sp1|risc0) ;; *) die "candidate must be sp1|risc0 (got '${CAND:-}')" ;; esac
@@ -48,9 +51,20 @@ need_env() { [ -n "${!1:-}" ] || die "required env $1 is unset"; }
 # Identities marked (DERIVED) below are NOT accepted from the caller — the producer derives
 # them from the actual checkout / lock / build command / image and cross-checks. The
 # guest-set hash is consumed from a phase-1 DERIVED file (never a raw operator value).
+# TWO-ROOT authority: measured source (source_commit/clean-tree) and reviewed tooling are SEPARATE
+# clean checkouts, supplied explicitly. The measurement record's source_commit comes ONLY from the
+# measured root; the tooling authority (commit + path-set digest) is bound into the runner attestation
+# and is NEVER compared to the measured source.
+need_env B0_MEASURED_SOURCE_ROOT
+need_env B0_TOOLING_ROOT
+require_two_roots --measured-source-root "$B0_MEASURED_SOURCE_ROOT" --tooling-root "$B0_TOOLING_ROOT"
 for v in SPEC_HASH MEASURE_RUNNER MEASURE_PRODUCE VMAT_BIN PROV_BIN PROVER_FIREWALL_SH \
          PROVER_REAL_DOCKER PROVING_CGROUP GUEST_SET_MANIFEST IDENTITY_RECORDS OFFICIAL_JSON \
-         RSS_CONTEXT_HASH MALFORMED_CORPUS_RESULT_HASH HARNESS_SOURCE_HASH REPO_DIR; do need_env "$v"; done
+         RSS_CONTEXT_HASH MALFORMED_CORPUS_RESULT_HASH HARNESS_SOURCE_HASH; do need_env "$v"; done
+# source_commit/clean-tree are read from the MEASURED root (never the tooling checkout HEAD). The
+# runner binds B0_TOOLING_COMMIT + B0_TOOLING_PATHSET_BLAKE3 into the per-arch runner attestation.
+REPO_DIR="$B0_MEASURED_ROOT"
+export B0_TOOLING_COMMIT B0_TOOLING_PATHSET_BLAKE3 B0_MEASURED_COMMIT
 [ "$CAND" = sp1 ] && need_env VERIFIER_REF
 case "$CAND" in sp1) CANDCAP=Sp1 ;; risc0) CANDCAP=Risc0 ;; esac
 
@@ -218,6 +232,7 @@ RUNNER_ARGS=(
   --arch "$ARCH" --spec-hash "$SPEC_HASH" --guest-set-hash "$R0_GUEST_SET_HASH"
   --input-tlg "$IN_TLG" --input-st "$IN_ST" --verifier-material "$VMAT_JSON"
   --provenance "$PROV_JSON" --container-image-digest "$CONTAINER_IMAGE_DIGEST"
+  --identity-records "$IDENTITY_RECORDS"
   --statement-hash-tlg "$STATEMENT_HASH_TLG" --statement-hash-st "$STATEMENT_HASH_ST"
   --rss-context-hash "$RSS_CONTEXT_HASH" --malformed-corpus-result-hash "$MALFORMED_CORPUS_RESULT_HASH"
   --guest-source-tree-hash "$GUEST_SOURCE_TREE_HASH" --candidate-dep-lock-hash "$CANDIDATE_DEP_LOCK_HASH"

@@ -46,15 +46,15 @@ impl<'a> Rd<'a> {
 
 fn parse(bytes: &[u8]) -> (Vec<u8>, Vec<(u16, harness::Evidence)>) {
     let mut r = Rd { b: bytes, p: 0 };
-    assert_eq!(r.take(13), b"B0PREMEASVEC1", "bad magic");
+    assert_eq!(r.take(13), b"B0PREMEASVEC3", "bad magic");
     let allowlist = r.blob();
     let n = r.u32();
     let mut bundles = Vec::new();
     for _ in 0..n {
         let cb = r.take(2);
         let candidate = u16::from_be_bytes([cb[0], cb[1]]);
-        let mut lists: Vec<Vec<Vec<u8>>> = Vec::with_capacity(4);
-        for _ in 0..4 {
+        let mut lists: Vec<Vec<Vec<u8>>> = Vec::with_capacity(7);
+        for _ in 0..7 {
             let count = r.u32();
             let mut v = Vec::with_capacity(count);
             for _ in 0..count {
@@ -72,6 +72,9 @@ fn parse(bytes: &[u8]) -> (Vec<u8>, Vec<(u16, harness::Evidence)>) {
                 rss: it.next().unwrap(),
                 envelopes: it.next().unwrap(),
                 provenances: it.next().unwrap(),
+                cpuset_chains: it.next().unwrap(),
+                runner_attestations: it.next().unwrap(),
+                identity_records: it.next().unwrap(),
                 verifier_material,
                 result_set,
             },
@@ -103,6 +106,9 @@ fn clone_ev(ev: &harness::Evidence) -> harness::Evidence {
         rss: ev.rss.clone(),
         envelopes: ev.envelopes.clone(),
         provenances: ev.provenances.clone(),
+        cpuset_chains: ev.cpuset_chains.clone(),
+        runner_attestations: ev.runner_attestations.clone(),
+        identity_records: ev.identity_records.clone(),
         verifier_material: ev.verifier_material.clone(),
         result_set: ev.result_set.clone(),
     }

@@ -78,7 +78,7 @@ fn enc_unobs_body(e: &Unobservable) -> Vec<u8> {
 /// reference byte layout exactly (provenance-local schema version 2). `arch`: 1 = x86_64, 2 = aarch64.
 fn enc_prov_with_dvfs(role: u8, arch: u8, dvfs_body: &[u8]) -> Vec<u8> {
     let mut b = Vec::new();
-    b.extend_from_slice(&2u16.to_le_bytes()); // provenance-local schema version
+    b.extend_from_slice(&3u16.to_le_bytes()); // provenance-local schema version (v3)
     b.push(role);
     b.extend_from_slice(&[1u8; 32]); // b0_pre_spec_hash
     b.extend_from_slice(&[2u8; 32]); // r0_guest_set_hash
@@ -107,6 +107,12 @@ fn enc_prov_with_dvfs(role: u8, arch: u8, dvfs_body: &[u8]) -> Vec<u8> {
     push_u16(&mut b, b"b0.slice"); // cgroup_scope_label
     b.extend_from_slice(&[7u8; 32]); // benchmark_harness_source_hash
     b.extend_from_slice(&[8u8; 32]); // raw_environment_capture_hash
+                                     // v3 tail: effective-cpuset provenance summary (leaf-observed) + two content-address hashes.
+    push_u16(&mut b, b"b0.slice"); // cpuset_source_cgroup_path (== leaf scope)
+    push_u16(&mut b, b"0-1"); // cpuset_raw (2 cpus, matches configured_cpuset_core_limit=2)
+    b.push(0); // cpuset_inherited = false
+    b.extend_from_slice(&[9u8; 32]); // cpuset_probe_chain_blake3
+    b.extend_from_slice(&[10u8; 32]); // runner_attestation_blake3
     b
 }
 

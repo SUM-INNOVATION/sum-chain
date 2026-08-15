@@ -8,12 +8,15 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
+use serde::Deserialize;
+
 use crate::backend::{BuildCtx, ProvingBackend};
 use crate::binding::{bind_and_check, check_verifier_material_matches, VerifierMaterial};
 use crate::facts::{
-    BuilderFacts, CandidateFacts, CellFactsJson, DvfsFacts, GuestFacts, ProvFacts, VmEntryFacts,
+    BuilderFacts, CandidateFacts, CellFactsJson, DvfsFacts, GuestFacts, IdentityRecordFacts,
+    ProvFacts, VmEntryFacts,
 };
-use crate::{hex, native_eligible, Arch, RunnerAttestation};
+use crate::{hex, native_eligible, Arch, Candidate, RunnerAttestation};
 
 pub const ITERATIONS: u32 = 10;
 pub const VERIFY_SAMPLES: usize = 100;
@@ -37,7 +40,70 @@ pub struct RunConfig {
     pub statements: Vec<StatementInput>,
     pub verifier_material: VerifierMaterial,
     pub provenance: Vec<ProvFacts>,
+    /// Complete Phase-1 identity record set (mandatory runner-continuity input).
+    pub identity_records: Vec<crate::facts::IdentityRecordFacts>,
     pub work_dir: PathBuf,
+}
+
+/// Select the single Phase-1 identity record that belongs to THIS fragment's own
+/// `(candidate, arch)` out of the already-authenticated full identity-record set (the same
+/// file `measure_fragment.sh` re-derives the guest set from). The runner therefore carries
+/// forward exactly one AUTHENTIC record — never a caller-fabricated `vec![]`, and never a
+/// record belonging to another candidate or arch. Fail-closed:
+///   * RISC Zero is x86_64-only, so a RISC0/aarch64 fragment can never select a record;
+///   * a malformed record set is refused;
+///   * the `(candidate, arch)` match must be UNIQUE — zero matches (missing or cross-candidate)
+///     and more than one match (duplicate) are both refused.
+///
+/// The returned record is the continuity subset the fragment retains; `merge_fragments` later
+/// assembles the per-candidate sets from these per-fragment singletons.
+pub fn select_fragment_identity_record(
+    records_json: &str,
+    candidate: Candidate,
+    arch: Arch,
+) -> Result<IdentityRecordFacts, String> {
+    // Refuse before touching the set: a non-eligible fragment must never select anything.
+    if !native_eligible(candidate, arch) {
+        return Err(format!(
+            "{}/{} is not natively eligible (RISC Zero is x86_64-only); no identity record is selectable",
+            candidate.as_str(),
+            arch.as_str()
+        ));
+    }
+    // The authenticated set holds full Phase-1 records; we read only the continuity subset plus
+    // the `candidate` discriminator (serde ignores every other field).
+    #[derive(Deserialize)]
+    struct Selectable {
+        candidate: String,
+        arch: String,
+        source_commit: String,
+        tooling_commit: String,
+        tooling_pathset_blake3: String,
+        b0_pre_spec_hash: String,
+        production_binary_blake3: String,
+    }
+    let records: Vec<Selectable> = serde_json::from_str(records_json)
+        .map_err(|e| format!("parse phase-1 identity records: {e}"))?;
+    let (want_c, want_a) = (candidate.as_str(), arch.as_str());
+    let mut hits = records
+        .into_iter()
+        .filter(|r| r.candidate == want_c && r.arch == want_a);
+    let rec = hits
+        .next()
+        .ok_or_else(|| format!("no phase-1 identity record for {want_c}/{want_a}"))?;
+    if hits.next().is_some() {
+        return Err(format!(
+            "multiple phase-1 identity records for {want_c}/{want_a}; refusing an ambiguous set"
+        ));
+    }
+    Ok(IdentityRecordFacts {
+        arch: rec.arch,
+        source_commit: rec.source_commit,
+        tooling_commit: rec.tooling_commit,
+        tooling_pathset_blake3: rec.tooling_pathset_blake3,
+        b0_pre_spec_hash: rec.b0_pre_spec_hash,
+        production_binary_blake3: rec.production_binary_blake3,
+    })
 }
 
 fn vm_entry_facts(vm: &VerifierMaterial) -> Vec<VmEntryFacts> {
@@ -197,6 +263,7 @@ pub fn run_arch_fragment(
         verifier_material: vm_entry_facts(&cfg.verifier_material),
         provenance: cfg.provenance.clone(),
         cells,
+        identity_records: cfg.identity_records.clone(),
     };
 
     let attestation = RunnerAttestation {
@@ -456,8 +523,53 @@ mod tests {
                 cgroup_scope_label: "/b0-final.slice/measure".into(),
                 benchmark_harness_source_hash: h("d1"),
                 raw_environment_capture_hash: h("d2"),
+                cpuset_source_cgroup_path: "/b0-final.slice/measure".into(),
+                cpuset_raw: "0-7".into(),
+                cpuset_inherited: false,
+                cpuset_probe_chain: vec![crate::facts::CpusetProbeEntryFacts {
+                    cgroup_path: "/b0-final.slice/measure".into(),
+                    order: 0,
+                    first: leaf_obs(),
+                    second: leaf_obs(),
+                }],
+                runner_attestation: crate::facts::RunnerAttestationFacts {
+                    build_target_arch: arch.into(),
+                    execution_tooling_checkout_head: "1234567890abcdef1234567890abcdef12345678"
+                        .into(),
+                    ratified_tooling_commit: "1234567890abcdef1234567890abcdef12345678".into(),
+                    ratified_pathset_blake3: h("70"),
+                    recomputed_pathset_blake3: h("70"),
+                    measured_source_commit: "0".repeat(40),
+                    build_git_sha: "0".repeat(40),
+                    measured_source_context_blake3: h("c7"),
+                    runner_sha256: h("52"),
+                    runner_blake3: h("53"),
+                    immutable_builder_identity: h("a5"),
+                    protobuf_authority_sha256: h("5b"),
+                    protobuf_authority_blake3: h("5c"),
+                    native_protoc_sha256: h("60"),
+                    native_protoc_blake3: h("61"),
+                    native_protoc_version: "libprotoc 3.21.12".into(),
+                    docker_argv_blake3: h("d0"),
+                    reproducibility_pair_blake3: h("2a"),
+                },
             })
             .collect()
+    }
+
+    fn leaf_obs() -> crate::facts::CpusetObsFacts {
+        crate::facts::CpusetObsFacts {
+            state: "readable-nonempty".into(),
+            raw: Some("0-7".into()),
+            file_type: "regular".into(),
+            is_symlink: false,
+            dev: Some(1),
+            inode: Some(2),
+            size: Some(3),
+            mtime_secs: Some(0),
+            mtime_nanos: Some(0),
+            read_error_class: None,
+        }
     }
 
     fn cfg(arch: Arch, prov_arch_str: &str) -> RunConfig {
@@ -483,7 +595,21 @@ mod tests {
             ],
             verifier_material: vm(),
             provenance: provs(prov_arch_str),
+            identity_records: vec![idrec(prov_arch_str)],
             work_dir: std::env::temp_dir().join(format!("b0wd-{}", std::process::id())),
+        }
+    }
+
+    // Phase-1 identity record matching provs()'s runner attestation (production_binary_blake3 == the
+    // runner_blake3 h("53"); same measured-source/tooling/spec).
+    fn idrec(arch: &str) -> crate::facts::IdentityRecordFacts {
+        crate::facts::IdentityRecordFacts {
+            arch: arch.to_string(),
+            source_commit: "0".repeat(40),
+            tooling_commit: "1234567890abcdef1234567890abcdef12345678".to_string(),
+            tooling_pathset_blake3: h("70"),
+            b0_pre_spec_hash: MERGED_SPEC.to_string(),
+            production_binary_blake3: h("53"),
         }
     }
 
@@ -503,7 +629,100 @@ mod tests {
         m.cells.extend(arm.cells);
         m.provenance.extend(arm.provenance);
         m.guest.builder.extend(arm.guest.builder);
+        m.identity_records.extend(arm.identity_records);
         m
+    }
+
+    // A full Phase-1 record as it appears in the authenticated identity-records file: the
+    // continuity subset plus the `candidate` discriminator and UNRELATED fields the selector
+    // must ignore (guest_image_hash, clean_tree).
+    fn idrec_json(candidate: &str, arch: &str, pbb: &str) -> String {
+        format!(
+            r#"{{"candidate":"{candidate}","arch":"{arch}","source_commit":"{src}","tooling_commit":"{tc}","tooling_pathset_blake3":"{ps}","b0_pre_spec_hash":"{spec}","production_binary_blake3":"{pbb}","guest_image_hash":"{extra}","clean_tree":true}}"#,
+            src = "0".repeat(40),
+            tc = "1234567890abcdef1234567890abcdef12345678",
+            ps = h("70"),
+            spec = MERGED_SPEC,
+            extra = h("ab"),
+        )
+    }
+    fn idset(recs: &[String]) -> String {
+        format!("[{}]", recs.join(","))
+    }
+    // The full authentic eligible set: Sp1/x86, Sp1/aarch64, Risc0/x86 (each a distinct binary hash).
+    fn full_set() -> String {
+        idset(&[
+            idrec_json("Sp1", "x86_64", &h("11")),
+            idrec_json("Sp1", "aarch64", &h("22")),
+            idrec_json("Risc0", "x86_64", &h("33")),
+        ])
+    }
+
+    #[test]
+    fn select_identity_valid_unique_and_ignores_unrelated_records() {
+        // Each fragment selects EXACTLY its own record — never another candidate/arch, never the
+        // whole set — and the untyped extra fields are ignored.
+        let set = full_set();
+        let sp1x = select_fragment_identity_record(&set, Candidate::Sp1, Arch::X86_64).unwrap();
+        assert_eq!(sp1x.arch, "x86_64");
+        assert_eq!(sp1x.production_binary_blake3, h("11"));
+        assert_eq!(sp1x.b0_pre_spec_hash, MERGED_SPEC);
+        let sp1a = select_fragment_identity_record(&set, Candidate::Sp1, Arch::Aarch64).unwrap();
+        assert_eq!(sp1a.arch, "aarch64");
+        assert_eq!(sp1a.production_binary_blake3, h("22"));
+        let r0x = select_fragment_identity_record(&set, Candidate::Risc0, Arch::X86_64).unwrap();
+        assert_eq!(r0x.arch, "x86_64");
+        assert_eq!(r0x.production_binary_blake3, h("33"));
+    }
+
+    #[test]
+    fn select_identity_missing_arch_refused() {
+        // Sp1 present only for x86_64 -> selecting Sp1/aarch64 is refused.
+        let set = idset(&[idrec_json("Sp1", "x86_64", &h("11"))]);
+        let e = select_fragment_identity_record(&set, Candidate::Sp1, Arch::Aarch64).unwrap_err();
+        assert!(
+            e.contains("no phase-1 identity record for Sp1/aarch64"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn select_identity_duplicate_refused() {
+        let set = idset(&[
+            idrec_json("Sp1", "x86_64", &h("11")),
+            idrec_json("Sp1", "x86_64", &h("aa")),
+        ]);
+        let e = select_fragment_identity_record(&set, Candidate::Sp1, Arch::X86_64).unwrap_err();
+        assert!(
+            e.contains("multiple phase-1 identity records for Sp1/x86_64"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn select_identity_cross_candidate_refused() {
+        // The matching ARCH exists only under the OTHER candidate -> Sp1/x86_64 is refused.
+        let set = idset(&[idrec_json("Risc0", "x86_64", &h("33"))]);
+        let e = select_fragment_identity_record(&set, Candidate::Sp1, Arch::X86_64).unwrap_err();
+        assert!(
+            e.contains("no phase-1 identity record for Sp1/x86_64"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn select_identity_risc0_aarch64_refused() {
+        // Refused before the set is even parsed (native ineligibility).
+        let set = idset(&[idrec_json("Risc0", "aarch64", &h("44"))]);
+        let e = select_fragment_identity_record(&set, Candidate::Risc0, Arch::Aarch64).unwrap_err();
+        assert!(e.contains("not natively eligible"), "{e}");
+    }
+
+    #[test]
+    fn select_identity_malformed_refused() {
+        let e = select_fragment_identity_record("{ not json", Candidate::Sp1, Arch::X86_64)
+            .unwrap_err();
+        assert!(e.contains("parse phase-1 identity records"), "{e}");
     }
 
     #[test]

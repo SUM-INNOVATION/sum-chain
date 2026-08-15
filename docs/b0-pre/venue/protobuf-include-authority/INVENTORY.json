@@ -1,0 +1,28 @@
+{
+  "files": [
+    {
+      "blake3": "bf3b623753e1cfc0b492197436d1412de2255a851f7e60b19dc554ff8c38a46f",
+      "path": "google/protobuf/empty.proto",
+      "sha256": "c6d0c8af3d26047a7f3717beb43f7032f5afe71c0c1b9162cd4a1a363629f273",
+      "size": 2363
+    }
+  ],
+  "import_closure": [
+    "google/protobuf/empty.proto"
+  ],
+  "mount_target": "/usr/include/google/protobuf",
+  "schema": "b0-final-protobuf-include-authority/v1",
+  "upstream": {
+    "annotated_tag_object_sha": "f502b8e9c831bda0bea57d9cbeefca3eb76e4254",
+    "google_protobuf_version_macro": 3021012,
+    "license": "BSD-3-Clause (Google, 2008)",
+    "protoc_version": "3.21.12",
+    "release_tag": "v21.12",
+    "repo": "https://github.com/protocolbuffers/protobuf",
+    "source_archive": "protobuf-cpp-3.21.12.tar.gz",
+    "source_archive_blake3": "697239ff8b9c58af3f92d58407094f75b42169f80a4c490d2a092c7b301e2a06",
+    "source_archive_sha256": "4eab9b524aa5913c6fffb20b2a8abf5ef7f95a80bc0701f3a6dbb4c607f73460",
+    "source_archive_size": 4842303,
+    "target_commit": "f0dc78d7e6e331b8c6bb2d5283e06aa26883ca7c"
+  }
+}

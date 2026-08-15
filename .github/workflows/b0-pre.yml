@@ -59,6 +59,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Check out the PR's own HEAD commit (not the synthetic shallow merge ref) with FULL history
+          # so the validation-bundle selftest in run.sh can resolve Commit A — the parent of the
+          # Commit-B authority binding — for the post-B identity derivation: `git rev-parse Commit-A`
+          # and `git diff Commit-A..HEAD`, which must equal the sole excluded tooling_authority.rs.
+          # The default depth-1 merge ref lacks Commit A and makes HEAD a merge commit, both of which
+          # break that derivation. On push (post-merge) github.sha is the head; the PR event uses head.sha.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
 
       # rustup reads rust-toolchain.toml (channel 1.85.0) — the single source of
       # truth for the validator-tool compatibility floor. The distinct candidate
@@ -73,6 +82,17 @@ jobs:
           rustc --version
           cargo --version
           rustc --version | grep -q '1.85' || { echo "expected Rust 1.85 floor"; exit 1; }
+
+      # b3sum (BLAKE3 CLI) is required by tooling_pathset.sh and the validation-bundle content-binding
+      # selftest in run.sh below. ubuntu-latest ships it in apt (universe); cargo is the fallback.
+      # BLAKE3 output is fixed by the algorithm, so an unpinned b3sum cannot change any tooling/bundle
+      # digest — it only needs to be PRESENT for the shell path-set/bundle producers.
+      - name: Install b3sum (BLAKE3 CLI)
+        run: |
+          if command -v b3sum >/dev/null 2>&1; then b3sum --version; exit 0; fi
+          if sudo apt-get update -qq && sudo apt-get install -y b3sum; then :; else cargo install b3sum --locked; fi
+          command -v b3sum >/dev/null 2>&1 || { echo "::error::b3sum install failed"; exit 1; }
+          b3sum --version
 
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@v2

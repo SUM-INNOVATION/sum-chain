@@ -309,6 +309,11 @@ pub fn official_provenance_proving() -> ArchRunProvenanceV1 {
         cgroup_scope_label: "b0-pre.slice".into(),
         benchmark_harness_source_hash: [0x1A; 32],
         raw_environment_capture_hash: [0x1B; 32],
+        cpuset_source_cgroup_path: "/b0-pre.slice".into(),
+        cpuset_raw: "0-4".into(),
+        cpuset_inherited: false,
+        cpuset_probe_chain_blake3: [0x1C; 32],
+        runner_attestation_blake3: [0x1D; 32],
     }
 }
 

@@ -35,7 +35,9 @@ mod real {
     };
     use b0_pre_measure_core::binding::parse_harness_verifier_material;
     use b0_pre_measure_core::facts::ProvFacts;
-    use b0_pre_measure_core::run::{run_arch_fragment, RunConfig, StatementInput};
+    use b0_pre_measure_core::run::{
+        run_arch_fragment, select_fragment_identity_record, RunConfig, StatementInput,
+    };
     use b0_pre_measure_core::{
         hex, production_binary_blake3, Arch, Candidate, GuestIdentityRecord,
     };
@@ -291,6 +293,10 @@ mod real {
             real_backend: true,
             real_guest_embedded: cfg!(real_guest_embedded),
             b0_pre_spec_hash: spec_hash,
+            // Two-root: the MEASUREMENT-TOOLING authority the derivation ran under (supplied by the
+            // orchestrator from the SEPARATE tooling root, never inferred from the measured source).
+            tooling_commit: req(args, "--tooling-commit")?,
+            tooling_pathset_blake3: req(args, "--tooling-pathset-blake3")?,
         };
         println!(
             "{}",
@@ -341,6 +347,18 @@ mod real {
             firewall_attest: PathBuf::from(req(&args, "--firewall-attest")?),
         };
 
+        // Runner continuity: carry forward exactly THIS fragment's own authentic Phase-1 identity
+        // record, uniquely SELECTED (candidate=Risc0 + x86_64) from the already-authenticated full
+        // identity-record set the orchestrator re-derived the guest set from — never a fabricated
+        // empty vec, never another candidate/arch's record. Missing/duplicate/malformed refuses;
+        // Risc0/aarch64 is refused (unreachable here — arch is x86_64 by the guard above).
+        let identity_records = vec![select_fragment_identity_record(
+            &std::fs::read_to_string(req(&args, "--identity-records")?)
+                .map_err(|e| format!("read identity records: {e}"))?,
+            Candidate::Risc0,
+            arch,
+        )?];
+
         let cfg = RunConfig {
             arch,
             spec_hash: spec_hash.clone(),
@@ -365,6 +383,7 @@ mod real {
                     .map_err(|e| format!("read verifier-material json: {e}"))?,
             )?,
             provenance,
+            identity_records,
             work_dir: PathBuf::from(arg(&args, "--work-dir").unwrap_or_else(|| ".".into())),
         };
 

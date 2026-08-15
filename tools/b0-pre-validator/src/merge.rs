@@ -156,6 +156,8 @@ pub fn merge_fragments(spec_hex: &str, fragments: &[Value]) -> Result<Value, Str
     };
     sp1["cells"] = concat("cells")?;
     sp1["provenance"] = concat("provenance")?;
+    // Runner continuity survives the merge: concat the per-arch Phase-1 identity records (x86 + arm).
+    sp1["identity_records"] = concat("identity_records")?;
     let mut builders = sp1x
         .pointer("/guest/builder")
         .and_then(|x| x.as_array())
@@ -189,7 +191,25 @@ mod tests {
     fn h(x: &str) -> String {
         x.repeat(32)
     }
+    fn cpuset_obs() -> Value {
+        json!({"state": "readable-nonempty", "raw": "0-7", "file_type": "regular", "is_symlink": false, "dev": 1u64, "inode": 2u64, "size": 3u64, "mtime_secs": 0i64, "mtime_nanos": 0i64})
+    }
+    fn runner_attestation(arch: &str) -> Value {
+        json!({
+            "build_target_arch": arch,
+            "execution_tooling_checkout_head": "1234567890abcdef1234567890abcdef12345678",
+            "ratified_tooling_commit": "1234567890abcdef1234567890abcdef12345678",
+            "ratified_pathset_blake3": h("70"), "recomputed_pathset_blake3": h("70"),
+            "measured_source_commit": crate::guest_set::RATIFIED_SOURCE_COMMIT,
+            "build_git_sha": crate::guest_set::RATIFIED_SOURCE_COMMIT,
+            "measured_source_context_blake3": h("c7"), "runner_sha256": h("52"), "runner_blake3": h("53"),
+            "immutable_builder_identity": h("b0"), "protobuf_authority_sha256": h("5b"), "protobuf_authority_blake3": h("5c"),
+            "native_protoc_sha256": h("60"), "native_protoc_blake3": h("61"), "native_protoc_version": "libprotoc 3.21.12",
+            "docker_argv_blake3": h("d0"), "reproducibility_pair_blake3": h("2a")
+        })
+    }
     fn prov(arch: &str, role: &str) -> Value {
+        let chain = json!([{"cgroup_path": "/b0.slice", "order": 0, "first": cpuset_obs(), "second": cpuset_obs()}]);
         json!({
             "arch": arch, "role": role, "source_commit": crate::guest_set::RATIFIED_SOURCE_COMMIT,
             "dirty_tree_flag": false,
@@ -199,7 +219,10 @@ mod tests {
             "configured_cpuset_core_limit": 8, "configured_memory_limit_bytes": 34359738368u64,
             "dvfs": {"kind": "observable", "turbo_enabled": false, "governor": "performance"}, "clock_source": "tsc",
             "cgroup_version": 2, "cgroup_scope_label": "/b0.slice", "benchmark_harness_source_hash": h("d1"),
-            "raw_environment_capture_hash": h("d2")
+            "raw_environment_capture_hash": h("d2"),
+            "cpuset_source_cgroup_path": "/b0.slice", "cpuset_raw": "0-7", "cpuset_inherited": false,
+            "cpuset_probe_chain": chain,
+            "runner_attestation": runner_attestation(arch)
         })
     }
     fn cells(arch: &str) -> Vec<Value> {
@@ -235,7 +258,17 @@ mod tests {
             },
             "verifier_material": [{"role": "Groth16Vk", "byte_len": 292u64, "hash": vk}],
             "provenance": [prov(arch, "Proving"), prov(arch, "Verification")],
-            "cells": cells(arch)
+            "cells": cells(arch),
+            // Phase-1 identity record (runner continuity): production_binary_blake3 == the provenance
+            // runner attestation's runner_blake3 (h("53")); same measured-source/tooling/spec.
+            "identity_records": [{
+                "arch": arch,
+                "source_commit": crate::guest_set::RATIFIED_SOURCE_COMMIT,
+                "tooling_commit": "1234567890abcdef1234567890abcdef12345678",
+                "tooling_pathset_blake3": h("70"),
+                "b0_pre_spec_hash": SPEC,
+                "production_binary_blake3": h("53")
+            }]
         })
     }
     const SPEC: &str = "201cfcb80e94a5a7845dc3380cde32171d40f325ae2bacde9547f3c0da3c4df3";
@@ -263,6 +296,60 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    // DIRECT merge → produce → verify: the retained cpuset + runner artifacts AND Phase-1 runner
+    // continuity survive the fragment merge (previously only transitively covered).
+    #[test]
+    fn merge_produce_verify_preserves_retention_and_continuity() {
+        use crate::measurement::parse_vector;
+        use crate::producer::{produce, RawFacts};
+        use crate::schema::runner_attestation::RunnerAttestationV1;
+
+        let merged = merge_fragments(
+            SPEC,
+            &[
+                frag("Sp1", "x86_64"),
+                frag("Sp1", "aarch64"),
+                frag("Risc0", "x86_64"),
+            ],
+        )
+        .unwrap();
+        let raw: RawFacts = serde_json::from_value(merged).expect("merged -> RawFacts");
+        // produce() enforces runner continuity + artifact retention during assembly (the merge fixture
+        // uses a non-reference verify cpuset, so the qualification verdict itself is not the point).
+        let pkg = produce(&raw).expect("merged facts produce");
+        let (_al, bundles) = parse_vector(&pkg.vector).unwrap();
+        for (_c, ev) in &bundles {
+            assert_eq!(ev.cpuset_chains.len(), ev.provenances.len());
+            assert_eq!(ev.runner_attestations.len(), ev.provenances.len());
+            // The retained Phase-1 identity artifact survives the merge and is independently decoded +
+            // bound to its attestation at final import.
+            assert_eq!(ev.identity_records.len(), ev.provenances.len());
+            for (ab, rb) in ev.runner_attestations.iter().zip(&ev.identity_records) {
+                let att = RunnerAttestationV1::decode_exact(ab).unwrap();
+                att.check_runner_continuity()
+                    .expect("runner continuity survives the merge");
+                let rec = crate::schema::identity_record::Phase1IdentityRecordV1::decode_exact(rb)
+                    .unwrap();
+                att.check_bound_identity_record(&rec)
+                    .expect("retained identity record binds after merge");
+            }
+        }
+
+        // Negative THROUGH the merge: a substituted Phase-1 runner binary in a fragment → produce
+        // refuses (tooling authority unchanged).
+        let mut bad = frag("Sp1", "x86_64");
+        bad["identity_records"][0]["production_binary_blake3"] = json!(h("99"));
+        let merged2 = merge_fragments(
+            SPEC,
+            &[bad, frag("Sp1", "aarch64"), frag("Risc0", "x86_64")],
+        )
+        .unwrap();
+        let raw2: RawFacts = serde_json::from_value(merged2).unwrap();
+        assert!(produce(&raw2)
+            .unwrap_err()
+            .contains("production_binary_blake3 != measurement runner_blake3"));
     }
 
     #[test]

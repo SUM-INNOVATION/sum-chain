@@ -11,7 +11,7 @@ SCRIPTS="$(cd "$HERE/.." && pwd)"
 rc=0
 
 echo "== bash -n (syntax) =="
-for s in lib.sh verify_pins.sh run_authoritative.sh measure_fragment.sh derive_guest_set.sh build_container.sh preflight_venue.sh committed_lock_authority.sh smoke.sh provision_prover_toolchain.sh \
+for s in lib.sh verify_pins.sh run_authoritative.sh measure_fragment.sh derive_guest_set.sh build_container.sh preflight_venue.sh committed_lock_authority.sh smoke.sh provision_prover_toolchain.sh make_validation_bundle.sh tooling_pathset.sh \
          tool_identities.sh resolve_lock.sh extract_material.sh verifier_fixtures.sh prove_fixture.sh \
          docker_firewall.sh validate_cgroup_measurement.sh probe_cgroup_privilege.sh tests/docker_firewall.test.sh tests/docker_firewall_cgroup.test.sh tests/cgroup_evidence.test.sh \
          tests/disk_free_gib.test.sh tests/pin_schema.test.sh tests/pin_cargo_audit_advdb.test.sh tests/pin_prover_archives.test.sh tests/pin_prover_archive_authority.test.sh tests/source_authority.test.sh tests/blake3_cluster_pin.test.sh tests/risc0_harness_pins.test.sh \
@@ -47,6 +47,7 @@ if command -v shellcheck >/dev/null 2>&1; then
       "$SCRIPTS/tests/oci_daemon_bridge.test.sh" "$SCRIPTS/tests/build_reproducibility.test.sh" \
       "$SCRIPTS/tests/runnable_ref_sidecar.test.sh" "$SCRIPTS/tests/rustup_components.test.sh" \
       "$SCRIPTS/tests/lifecycle_mode.test.sh" "$SCRIPTS/measure_fragment.sh" "$SCRIPTS/derive_guest_set.sh" "$SCRIPTS/tests/toolchain_authority.test.sh" \
+      "$SCRIPTS/make_validation_bundle.sh" "$SCRIPTS/tooling_pathset.sh" \
       "$SCRIPTS/docker_firewall.sh" "$SCRIPTS/validate_cgroup_measurement.sh" "$SCRIPTS/probe_cgroup_privilege.sh" \
       "$SCRIPTS/tests/docker_firewall.test.sh" "$SCRIPTS/tests/docker_firewall_cgroup.test.sh" "$SCRIPTS/tests/run.sh"; then
     echo "  ok  no error-level findings"
@@ -124,6 +125,11 @@ bash "$HERE/cgroup_evidence.test.sh"          || rc=1
 # venue measurement preflight): positive + missing/untracked/empty/symlink/mutation/swapped/
 # wrong-path + exact-set, and `preflight_venue.sh --mode=measurement` reaches the next gate.
 bash "$HERE/committed_lock_authority.test.sh" || rc=1
+# Two-root VALIDATION-BUNDLE content binding: the bundle's tooling-inventory.txt is the canonical
+# path-set preimage (every included file's BLAKE3), MANIFEST binds the ratified Commit A + path-set
+# digest (never PENDING), and the content address transitively binds the whole tooling payload —
+# a one-byte change to any included file, or any inventory/MANIFEST tamper, is refused. No Docker/network.
+bash "$SCRIPTS/make_validation_bundle.sh" --selftest || rc=1
 
 echo "----"
 if [ "$rc" = 0 ]; then echo "B0-PRE script tests: ALL PASS"; else echo "B0-PRE script tests: FAILURES" >&2; fi

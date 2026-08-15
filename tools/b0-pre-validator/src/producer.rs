@@ -28,7 +28,12 @@ use crate::measurement::{
     GuestBuild, ProvenanceFacts, RunIdentities,
 };
 use crate::schema::allowlist::BuilderArch;
-use crate::schema::provenance::{DvfsProvenance, HypervisorUnobservableDvfs};
+use crate::schema::identity_record::Phase1IdentityRecordV1;
+use crate::schema::provenance::{
+    check_cpuset_probe_chain, cpuset_probe_chain_hash, CpusetObsV1, CpusetProbeEntryV1,
+    DvfsProvenance, HypervisorUnobservableDvfs,
+};
+use crate::schema::runner_attestation::RunnerAttestationV1;
 use crate::schema::verifier_material::VerifierMaterialManifestV1;
 
 /// The merged, finalized `b0_pre_spec_hash`. Measurement mode binds to EXACTLY this.
@@ -59,6 +64,23 @@ pub struct CandidateFacts {
     pub verifier_material: Vec<VmEntryFacts>,
     pub provenance: Vec<ProvFacts>,
     pub cells: Vec<CellFactsJson>,
+    /// The complete typed Phase-1 `GuestIdentityRecord` set for this candidate (one per eligible
+    /// arch) — MANDATORY input for runner-continuity. Carries `production_binary_blake3` (the
+    /// compiled runner that emitted the guest identity), which is required to equal the measurement
+    /// `runner_blake3`. SP1: {x86_64, aarch64}; RISC0: {x86_64} (never aarch64).
+    pub identity_records: Vec<IdentityRecordFacts>,
+}
+
+/// The continuity-relevant subset of the Phase-1 `GuestIdentityRecord` (measurement-only; NEVER added
+/// to `GuestProgramAllowlistV1`). `GuestBuild` drops `production_binary_blake3`, so it is carried here.
+#[derive(Deserialize, Clone)]
+pub struct IdentityRecordFacts {
+    pub arch: String,
+    pub source_commit: String,
+    pub tooling_commit: String,
+    pub tooling_pathset_blake3: String,
+    pub b0_pre_spec_hash: String,
+    pub production_binary_blake3: String,
 }
 
 #[derive(Deserialize)]
@@ -107,6 +129,150 @@ pub struct ProvFacts {
     pub cgroup_scope_label: String,
     pub benchmark_harness_source_hash: String,
     pub raw_environment_capture_hash: String,
+    // ---- v3: effective-cpuset provenance (summary + full retained chain) + runner attestation ----
+    pub cpuset_source_cgroup_path: String,
+    pub cpuset_raw: String,
+    pub cpuset_inherited: bool,
+    pub cpuset_probe_chain: Vec<CpusetProbeEntryJson>,
+    pub runner_attestation: RunnerAttestationJson,
+}
+
+/// JSON twin of the host-provenance reader's `CpusetObservation`.
+#[derive(Deserialize, Clone)]
+pub struct CpusetObsJson {
+    /// "absent" | "readable-empty" | "readable-nonempty" (reader kebab-case).
+    pub state: String,
+    #[serde(default)]
+    pub raw: Option<String>,
+    pub file_type: String,
+    pub is_symlink: bool,
+    #[serde(default)]
+    pub dev: Option<u64>,
+    #[serde(default)]
+    pub inode: Option<u64>,
+    #[serde(default)]
+    pub size: Option<u64>,
+    #[serde(default)]
+    pub mtime_secs: Option<i64>,
+    #[serde(default)]
+    pub mtime_nanos: Option<i64>,
+    #[serde(default)]
+    pub read_error_class: Option<String>,
+}
+
+/// JSON twin of the reader's `CpusetProbeEntry`.
+#[derive(Deserialize, Clone)]
+pub struct CpusetProbeEntryJson {
+    pub cgroup_path: String,
+    pub order: u32,
+    pub first: CpusetObsJson,
+    pub second: CpusetObsJson,
+}
+
+impl CpusetObsJson {
+    fn to_schema(&self) -> Result<CpusetObsV1, String> {
+        let state = match self.state.as_str() {
+            "absent" => 0u8,
+            "readable-empty" => 1,
+            "readable-nonempty" => 2,
+            other => return Err(format!("bad cpuset observation state {other:?}")),
+        };
+        Ok(CpusetObsV1 {
+            state,
+            raw: self.raw.clone().unwrap_or_default(),
+            file_type: self.file_type.clone(),
+            is_symlink: self.is_symlink,
+            dev: self.dev,
+            inode: self.inode,
+            size: self.size,
+            mtime_secs: self.mtime_secs,
+            mtime_nanos: self.mtime_nanos,
+            read_error_class: self.read_error_class.clone(),
+        })
+    }
+}
+impl CpusetProbeEntryJson {
+    fn to_schema(&self) -> Result<CpusetProbeEntryV1, String> {
+        Ok(CpusetProbeEntryV1 {
+            cgroup_path: self.cgroup_path.clone(),
+            order: self.order,
+            first: self.first.to_schema()?,
+            second: self.second.to_schema()?,
+        })
+    }
+}
+
+/// JSON twin of [`RunnerAttestationV1`] (all 32-byte digests as lowercase hex).
+#[derive(Deserialize, Clone)]
+pub struct RunnerAttestationJson {
+    pub build_target_arch: String,
+    pub execution_tooling_checkout_head: String,
+    pub ratified_tooling_commit: String,
+    pub ratified_pathset_blake3: String,
+    pub recomputed_pathset_blake3: String,
+    pub measured_source_commit: String,
+    pub build_git_sha: String,
+    pub measured_source_context_blake3: String,
+    pub runner_sha256: String,
+    pub runner_blake3: String,
+    pub immutable_builder_identity: String,
+    pub protobuf_authority_sha256: String,
+    pub protobuf_authority_blake3: String,
+    pub native_protoc_sha256: String,
+    pub native_protoc_blake3: String,
+    pub native_protoc_version: String,
+    pub docker_argv_blake3: String,
+    pub reproducibility_pair_blake3: String,
+}
+
+impl RunnerAttestationJson {
+    fn to_schema(&self) -> Result<RunnerAttestationV1, String> {
+        Ok(RunnerAttestationV1 {
+            // Binding placeholders: the orchestrator injects the run's candidate/role/spec/guest_set
+            // (the venue JSON twin carries only the arch + venue-produced fields).
+            candidate: Candidate::Sp1,
+            provenance_role: ProvenanceRole::Proving,
+            b0_pre_spec_hash: [0; 32],
+            r0_guest_set_hash: [0; 32],
+            build_target_arch: parse_arch(&self.build_target_arch)?,
+            execution_tooling_checkout_head: self.execution_tooling_checkout_head.clone(),
+            ratified_tooling_commit: self.ratified_tooling_commit.clone(),
+            ratified_pathset_blake3: self.ratified_pathset_blake3.clone(),
+            recomputed_pathset_blake3: self.recomputed_pathset_blake3.clone(),
+            measured_source_commit: self.measured_source_commit.clone(),
+            build_git_sha: self.build_git_sha.clone(),
+            measured_source_context_blake3: hex32(
+                &self.measured_source_context_blake3,
+                "runner.measured_source_context_blake3",
+            )?,
+            runner_sha256: hex32(&self.runner_sha256, "runner.runner_sha256")?,
+            runner_blake3: hex32(&self.runner_blake3, "runner.runner_blake3")?,
+            immutable_builder_identity: hex32(
+                &self.immutable_builder_identity,
+                "runner.immutable_builder_identity",
+            )?,
+            protobuf_authority_sha256: hex32(
+                &self.protobuf_authority_sha256,
+                "runner.protobuf_authority_sha256",
+            )?,
+            protobuf_authority_blake3: hex32(
+                &self.protobuf_authority_blake3,
+                "runner.protobuf_authority_blake3",
+            )?,
+            native_protoc_sha256: hex32(&self.native_protoc_sha256, "runner.native_protoc_sha256")?,
+            native_protoc_blake3: hex32(&self.native_protoc_blake3, "runner.native_protoc_blake3")?,
+            native_protoc_version: self.native_protoc_version.clone(),
+            docker_argv_blake3: hex32(&self.docker_argv_blake3, "runner.docker_argv_blake3")?,
+            reproducibility_pair_blake3: hex32(
+                &self.reproducibility_pair_blake3,
+                "runner.reproducibility_pair_blake3",
+            )?,
+            // Runner-continuity placeholders: the orchestrator resolves the retained Phase-1 identity
+            // record and sets both from it (production_binary_blake3 + its domain-separated address).
+            phase1_production_binary_blake3: [0; 32],
+            phase1_identity_record_blake3: [0; 32],
+        })
+    }
 }
 
 /// JSON twin of the host-provenance DVFS state (matches `b0-pre-host-provenance`'s `DvfsState`).
@@ -493,9 +659,70 @@ pub fn produce(raw: &RawFacts) -> Result<MeasurementPackage, String> {
             )?,
         };
 
+        // RUNNER CONTINUITY: the complete typed Phase-1 identity record set is a MANDATORY input.
+        // Validate the exact eligible arch set for this candidate (no missing/duplicate/Risc0-aarch64),
+        // then for each provenance resolve its arch's record and require the Phase-1 runner binary
+        // (production_binary_blake3) EQUAL the measurement runner (runner_blake3), plus the same
+        // candidate/arch/measured-source/tooling/spec on both sides.
+        validate_identity_set(cand, &c.identity_records)?;
+        // Build ONE retained, independently-addressed Phase-1 identity record per arch from the
+        // mandatory identity set. These are RETAINED in the sealed package; sealed import decodes them
+        // from scratch and re-checks continuity against them (not against a copied hash claim).
+        let mut retained_ids: Vec<Phase1IdentityRecordV1> = Vec::new();
+        for idr in &c.identity_records {
+            retained_ids.push(Phase1IdentityRecordV1 {
+                candidate: cand,
+                arch: parse_arch(&idr.arch)?,
+                source_commit: idr.source_commit.clone(),
+                tooling_commit: idr.tooling_commit.clone(),
+                tooling_pathset_blake3: idr.tooling_pathset_blake3.clone(),
+                b0_pre_spec_hash: hex32(&idr.b0_pre_spec_hash, "identity.b0_pre_spec_hash")?,
+                production_binary_blake3: hex32(
+                    &idr.production_binary_blake3,
+                    "identity.production_binary_blake3",
+                )?,
+            });
+        }
         let mut provenances = Vec::new();
         for p in &c.provenance {
-            provenances.push(prov_facts(p)?);
+            let mut pf = prov_facts(p)?;
+            let arch = parse_arch(&p.arch)?;
+            let rec = retained_ids
+                .iter()
+                .find(|r| r.arch == arch)
+                .ok_or_else(|| format!("missing Phase-1 identity record for arch {}", p.arch))?;
+            let att = &pf.runner_attestation;
+            if rec.source_commit != att.measured_source_commit {
+                return Err(format!(
+                    "{}/{}: Phase-1 source_commit != measurement measured_source_commit",
+                    c.candidate, p.arch
+                ));
+            }
+            if rec.tooling_commit != att.ratified_tooling_commit
+                || rec.tooling_pathset_blake3 != att.ratified_pathset_blake3
+            {
+                return Err(format!(
+                    "{}/{}: Phase-1 tooling authority != measurement tooling authority",
+                    c.candidate, p.arch
+                ));
+            }
+            if rec.b0_pre_spec_hash != spec {
+                return Err(format!(
+                    "{}/{}: Phase-1 spec != run spec",
+                    c.candidate, p.arch
+                ));
+            }
+            if rec.production_binary_blake3 != att.runner_blake3 {
+                return Err(format!(
+                    "{}/{}: Phase-1 production_binary_blake3 != measurement runner_blake3 (a \
+                     different compiled runner binary was used)",
+                    c.candidate, p.arch
+                ));
+            }
+            // Carry the RETAINED record; orchestrate_grid binds the attestation to it (sets the two
+            // phase1 fields from the record) and seals it as a mandatory package artifact.
+            pf.phase1_identity_record = rec.clone();
+            provenances.push(pf);
         }
         let mut cells = Vec::new();
         for cell in &c.cells {
@@ -538,6 +765,39 @@ fn build_material(c: &CandidateFacts) -> Result<VerifierMaterialManifestV1, Stri
 }
 
 fn prov_facts(p: &ProvFacts) -> Result<ProvenanceFacts, String> {
+    // Effective-cpuset provenance: reconstruct the retained probe chain, re-run ALL canonical
+    // inheritance rules over it (nearest-first ordering, first==second, ancestor-of-leaf, stop at
+    // the first readable-nonempty source, count recomputed from raw, inherited flag), and content
+    // address the chain. The summary + count are the record-bound fields; the chain is retained
+    // evidence bound by its address.
+    let chain: Vec<CpusetProbeEntryV1> = p
+        .cpuset_probe_chain
+        .iter()
+        .map(CpusetProbeEntryJson::to_schema)
+        .collect::<Result<_, _>>()?;
+    check_cpuset_probe_chain(
+        &chain,
+        &p.cgroup_scope_label,
+        &p.cpuset_source_cgroup_path,
+        &p.cpuset_raw,
+        p.cpuset_inherited,
+        p.configured_cpuset_core_limit,
+    )?;
+    let cpuset_probe_chain_blake3 = cpuset_probe_chain_hash(&chain);
+
+    // Runner attestation: parse, run SELF-consistency (build_git_sha==measured, recomputed==ratified
+    // path set, protoc version). The measured-source binding to RATIFIED_SOURCE_COMMIT and the tooling
+    // authority binding are enforced by the venue preflight + the validator's two-authority gate, not
+    // by this per-record twin conversion. Content address it for the record.
+    let attestation = p.runner_attestation.to_schema()?;
+    attestation.check_self_consistency()?;
+    if attestation.build_target_arch != parse_arch(&p.arch)? {
+        return Err(format!(
+            "runner attestation arch {:?} != provenance arch {}",
+            attestation.build_target_arch, p.arch
+        ));
+    }
+
     Ok(ProvenanceFacts {
         arch: parse_arch(&p.arch)?,
         role: parse_role(&p.role)?,
@@ -568,7 +828,70 @@ fn prov_facts(p: &ProvFacts) -> Result<ProvenanceFacts, String> {
             &p.raw_environment_capture_hash,
             "raw_environment_capture_hash",
         )?,
+        cpuset_source_cgroup_path: p.cpuset_source_cgroup_path.clone(),
+        cpuset_raw: p.cpuset_raw.clone(),
+        cpuset_inherited: p.cpuset_inherited,
+        cpuset_probe_chain_blake3,
+        cpuset_chain_entries: chain,
+        runner_attestation: attestation,
+        // Placeholder: produce() overwrites this with the resolved retained Phase-1 identity record.
+        phase1_identity_record: Phase1IdentityRecordV1 {
+            candidate: Candidate::Sp1,
+            arch: parse_arch(&p.arch)?,
+            source_commit: "0".repeat(40),
+            tooling_commit: "1".repeat(40),
+            tooling_pathset_blake3: "7".repeat(64),
+            b0_pre_spec_hash: [0; 32],
+            production_binary_blake3: [0; 32],
+        },
     })
+}
+
+/// Validate the complete Phase-1 identity record set for a candidate: exact eligible arch set, no
+/// duplicate, no `Risc0/aarch64`, and each record well-formed.
+fn is_hex_len(s: &str, n: usize) -> bool {
+    s.len() == n
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+fn validate_identity_set(cand: Candidate, records: &[IdentityRecordFacts]) -> Result<(), String> {
+    use std::collections::BTreeSet;
+    let mut arches: BTreeSet<u8> = BTreeSet::new();
+    for r in records {
+        let a = parse_arch(&r.arch)?;
+        if cand == Candidate::Risc0 && a == Arch::Aarch64 {
+            return Err(
+                "Risc0/aarch64 Phase-1 identity record is native-ineligible; refused".into(),
+            );
+        }
+        if !arches.insert(a.to_repr()) {
+            return Err(format!(
+                "duplicate Phase-1 identity record for arch {}",
+                r.arch
+            ));
+        }
+        if !is_hex_len(&r.source_commit, 40) || !is_hex_len(&r.tooling_commit, 40) {
+            return Err("identity source_commit/tooling_commit must be 40 lowercase hex".into());
+        }
+        hex32(&r.tooling_pathset_blake3, "identity.tooling_pathset_blake3")?;
+        hex32(&r.b0_pre_spec_hash, "identity.b0_pre_spec_hash")?;
+        hex32(
+            &r.production_binary_blake3,
+            "identity.production_binary_blake3",
+        )?;
+    }
+    let want: BTreeSet<u8> = match cand {
+        Candidate::Sp1 => [Arch::X86_64.to_repr(), Arch::Aarch64.to_repr()]
+            .into_iter()
+            .collect(),
+        Candidate::Risc0 => [Arch::X86_64.to_repr()].into_iter().collect(),
+    };
+    if arches != want {
+        return Err(format!(
+            "{cand:?}: Phase-1 identity set arches {arches:?} != required {want:?}"
+        ));
+    }
+    Ok(())
 }
 
 fn cell_facts(c: &CellFactsJson) -> Result<CellFacts, String> {
@@ -607,6 +930,21 @@ pub fn dry_run_raw_facts() -> RawFacts {
         } else {
             (2, 4u64 << 30, 2, 4, 4u64 << 30)
         };
+        let cpuset_raw = if cpuset == 5 { "0-4" } else { "0-1" }.to_string();
+        let obs = CpusetObsJson {
+            state: "readable-nonempty".into(),
+            raw: Some(cpuset_raw.clone()),
+            file_type: "regular".into(),
+            is_symlink: false,
+            dev: Some(1),
+            inode: Some(2),
+            size: Some(cpuset_raw.len() as u64),
+            mtime_secs: Some(0),
+            mtime_nanos: Some(0),
+            read_error_class: None,
+        };
+        let tooling = "1234567890abcdef1234567890abcdef12345678".to_string();
+        let pathset = dv("tooling-pathset");
         ProvFacts {
             arch: arch.into(),
             role: role.into(),
@@ -631,6 +969,38 @@ pub fn dry_run_raw_facts() -> RawFacts {
             cgroup_scope_label: "b0-pre.slice".into(),
             benchmark_harness_source_hash: dv("runner"),
             raw_environment_capture_hash: dv("envcap"),
+            cpuset_source_cgroup_path: "b0-pre.slice".into(),
+            cpuset_raw: cpuset_raw.clone(),
+            cpuset_inherited: false,
+            // Leaf-observed single-entry chain (order 0 = readable-nonempty source).
+            cpuset_probe_chain: vec![CpusetProbeEntryJson {
+                cgroup_path: "b0-pre.slice".into(),
+                order: 0,
+                first: obs.clone(),
+                second: obs.clone(),
+            }],
+            runner_attestation: RunnerAttestationJson {
+                build_target_arch: arch.into(),
+                // Off-venue placeholder tooling identity (the tooling authority + measured-source
+                // binding are enforced at the venue, not in this deterministic dry run).
+                execution_tooling_checkout_head: tooling.clone(),
+                ratified_tooling_commit: tooling.clone(),
+                ratified_pathset_blake3: pathset.clone(),
+                recomputed_pathset_blake3: pathset.clone(),
+                measured_source_commit: "eff3aae18b49969212c4c1493da20f97af195de2".into(),
+                build_git_sha: "eff3aae18b49969212c4c1493da20f97af195de2".into(),
+                measured_source_context_blake3: dv("measured-ctx"),
+                runner_sha256: dv("runner-sha256"),
+                runner_blake3: dv("runner-blake3"),
+                immutable_builder_identity: dv("builder"),
+                protobuf_authority_sha256: dv("pb-sha256"),
+                protobuf_authority_blake3: dv("pb-blake3"),
+                native_protoc_sha256: dv("protoc-sha256"),
+                native_protoc_blake3: dv("protoc-blake3"),
+                native_protoc_version: "libprotoc 3.21.12".into(),
+                docker_argv_blake3: dv("docker-argv"),
+                reproducibility_pair_blake3: dv("repro-pair"),
+            },
         }
     };
     let cell = |cand: &str, arch: &str, s: &str, iter: u32| -> CellFactsJson {
@@ -686,6 +1056,21 @@ pub fn dry_run_raw_facts() -> RawFacts {
             })
             .collect(),
     };
+    // Phase-1 identity records matching each provenance's runner attestation (production_binary_blake3
+    // == the dry-run runner_blake3; same measured-source/tooling/spec).
+    let idrecs = |arches: &[&str]| -> Vec<IdentityRecordFacts> {
+        arches
+            .iter()
+            .map(|a| IdentityRecordFacts {
+                arch: (*a).into(),
+                source_commit: "eff3aae18b49969212c4c1493da20f97af195de2".into(),
+                tooling_commit: "1234567890abcdef1234567890abcdef12345678".into(),
+                tooling_pathset_blake3: dv("tooling-pathset"),
+                b0_pre_spec_hash: MERGED_SPEC_HASH_HEX.into(),
+                production_binary_blake3: dv("runner-blake3"),
+            })
+            .collect()
+    };
     let sp1 = CandidateFacts {
         candidate: "Sp1".into(),
         container_image_digest: dv("sp1-container"),
@@ -701,6 +1086,7 @@ pub fn dry_run_raw_facts() -> RawFacts {
         }],
         provenance: provset(&["x86_64", "aarch64"]),
         cells: grid("sp1", &["x86_64", "aarch64"]),
+        identity_records: idrecs(&["x86_64", "aarch64"]),
     };
     let risc0 = CandidateFacts {
         candidate: "Risc0".into(),
@@ -735,6 +1121,7 @@ pub fn dry_run_raw_facts() -> RawFacts {
         // RISC Zero: x86_64-only provenance AND cells (aarch64 genuinely absent).
         provenance: provset(&["x86_64"]),
         cells: grid("r0", &["x86_64"]),
+        identity_records: idrecs(&["x86_64"]),
     };
     RawFacts {
         lifecycle_mode: "measurement".into(),
@@ -779,6 +1166,69 @@ mod tests {
         // inventory names both verdicts + the content address.
         let inv = pkg.inventory();
         assert_eq!(inv["package_id"], hx(&pkg.package_id));
+    }
+
+    // RUNNER CONTINUITY — positive: the three eligible mappings (Sp1/x86, Sp1/arm, Risc0/x86) all
+    // resolve a Phase-1 identity record whose production_binary_blake3 == the measurement runner_blake3,
+    // and the retained attestation re-enforces it on import.
+    #[test]
+    fn runner_continuity_positive_all_three_mappings() {
+        let pkg = produce(&dry_run_raw_facts()).expect("produces");
+        let (_al, bundles) = parse_vector(&pkg.vector).unwrap();
+        let mut seen = std::collections::BTreeSet::new();
+        for (c, ev) in &bundles {
+            for ab in &ev.runner_attestations {
+                let a = crate::schema::runner_attestation::RunnerAttestationV1::decode_exact(ab)
+                    .unwrap();
+                a.check_runner_continuity()
+                    .expect("phase1 == runner_blake3");
+                seen.insert((format!("{c:?}"), format!("{:?}", a.build_target_arch)));
+            }
+            // import re-enforces continuity via bind_runner_attestation
+            let _ = verify_evidence(ev);
+        }
+        assert!(seen.contains(&("Sp1".into(), "X86_64".into())));
+        assert!(seen.contains(&("Sp1".into(), "Aarch64".into())));
+        assert!(seen.contains(&("Risc0".into(), "X86_64".into())));
+    }
+
+    // RUNNER CONTINUITY — negatives, mutating ONLY the runner binary on ONE side while leaving the
+    // shared tooling authority (commit + path-set) untouched.
+    #[test]
+    fn runner_continuity_negatives() {
+        // (a) Phase-1 production_binary_blake3 changed → != measurement runner_blake3 → refuse.
+        let mut raw = dry_run_raw_facts();
+        raw.candidates[0].identity_records[0].production_binary_blake3 = "aa".repeat(32);
+        assert!(produce(&raw)
+            .unwrap_err()
+            .contains("production_binary_blake3 != measurement runner_blake3"));
+        // (b) measurement runner_blake3 changed → != Phase-1 → refuse (tooling authority unchanged).
+        let mut raw = dry_run_raw_facts();
+        raw.candidates[0].provenance[0]
+            .runner_attestation
+            .runner_blake3 = "bb".repeat(32);
+        assert!(produce(&raw).is_err());
+        // (c) missing identity record for an arch → refuse.
+        let mut raw = dry_run_raw_facts();
+        raw.candidates[0].identity_records.pop(); // drop SP1 aarch64 record
+        assert!(produce(&raw)
+            .unwrap_err()
+            .to_lowercase()
+            .contains("identity set"));
+        // (d) Risc0/aarch64 identity record → refuse.
+        let mut raw = dry_run_raw_facts();
+        let mut extra = raw.candidates[1].identity_records[0].clone();
+        extra.arch = "aarch64".into();
+        raw.candidates[1].identity_records.push(extra);
+        assert!(produce(&raw).unwrap_err().contains("Risc0/aarch64"));
+        // (e) duplicate candidate/arch identity → refuse.
+        let mut raw = dry_run_raw_facts();
+        let dup = raw.candidates[0].identity_records[0].clone();
+        raw.candidates[0].identity_records.push(dup);
+        assert!(produce(&raw)
+            .unwrap_err()
+            .to_lowercase()
+            .contains("identity"));
     }
 
     #[test]

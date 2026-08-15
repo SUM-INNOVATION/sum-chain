@@ -110,8 +110,8 @@ grep -q '"source_commit": commit' <<<"$bc" \
   && ok "build_container.sh records source_commit in the sidecar" || bad "build_container.sh does not record source_commit"
 { grep -q 'is_ratified_commit_format "\$source_commit"' <<<"$bc" \
   && grep -q '\[ "\$source_commit" = "\$RATIFIED_SOURCE_COMMIT" \]' <<<"$bc" \
-  && grep -q '\[ "\$source_commit" = "\$(git -C "\$ROOT" rev-parse HEAD)" \]' <<<"$bc"; } \
-  && ok "build_container.sh requires source_commit == 40-hex == HEAD == RATIFIED before writing" \
+  && grep -q '\[ "\$source_commit" = "\$(git -C "\$SRC_ROOT" rev-parse HEAD)" \]' <<<"$bc"; } \
+  && ok "build_container.sh requires source_commit == 40-hex == measured HEAD == RATIFIED before writing" \
   || bad "build_container.sh does not assert source_commit == HEAD == RATIFIED before writing"
 if printf '%s\n' "$bc" | awk '/verify-runtime-image/{v=NR} /mv -f "\$sidecar.tmp"/{m=NR} END{exit !(v&&m&&m>v)}'; then
   ok "atomic sidecar write happens only after the load-correspondence verification"

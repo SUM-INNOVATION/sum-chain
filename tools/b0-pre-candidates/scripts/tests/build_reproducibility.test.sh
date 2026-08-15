@@ -21,7 +21,7 @@ has() { grep -qF -- "$2" "$1"; }
 BC="$SCRIPTS/build_container.sh"
 # Deterministic epoch derived from the exact ratified commit (not wall clock, not a
 # floating HEAD). The detailed epoch-validation checks are in the item-2 section below.
-has "$BC" 'SOURCE_DATE_EPOCH="$(git -C "$ROOT" show -s --format=%ct "$source_commit")"' \
+has "$BC" 'SOURCE_DATE_EPOCH="$(git -C "$SRC_ROOT" show -s --format=%ct "$source_commit")"' \
   && ok "SOURCE_DATE_EPOCH derived from the ratified commit's committer date" \
   || bad "SOURCE_DATE_EPOCH not derived from the ratified commit"
 has "$BC" '--build-arg "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH"' \
@@ -83,13 +83,13 @@ done
 ( require_valid_source_date_epoch -5 ) >/dev/null 2>&1 && bad "epoch: negative accepted" || ok "epoch: negative rejected"
 ( require_valid_source_date_epoch 12345678901234567890 ) >/dev/null 2>&1 && bad "epoch: 20-digit overflow accepted" || ok "epoch: overflow rejected"
 # source-level: derived from the EXACT ratified commit, proven == RATIFIED, validated pre-Docker.
-has "$BC" 'SOURCE_DATE_EPOCH="$(git -C "$ROOT" show -s --format=%ct "$source_commit")"' \
+has "$BC" 'SOURCE_DATE_EPOCH="$(git -C "$SRC_ROOT" show -s --format=%ct "$source_commit")"' \
   && ok "epoch derived from the exact ratified commit (not a floating HEAD)" || bad "epoch not derived from the explicit ratified commit"
 has "$BC" 'require_valid_source_date_epoch "$SOURCE_DATE_EPOCH"' \
   && ok "epoch validated before Docker" || bad "epoch not validated before Docker"
 has "$BC" '[ "$source_commit" = "$RATIFIED_SOURCE_COMMIT" ]' \
   && ok "epoch source proven == RATIFIED_SOURCE_COMMIT" || bad "epoch source not proven == RATIFIED_SOURCE_COMMIT"
-n_assign="$(grep -cF 'SOURCE_DATE_EPOCH="$(git -C "$ROOT" show' "$BC")"
+n_assign="$(grep -cF 'SOURCE_DATE_EPOCH="$(git -C "$SRC_ROOT" show' "$BC")"
 [ "$n_assign" = "1" ] && ok "SOURCE_DATE_EPOCH computed exactly once (same value for both clean builds)" || bad "SOURCE_DATE_EPOCH computed $n_assign times (must be 1)"
 
 # --- ldconfig aux-cache empirical validation (opt-in Docker; authoritative x86 r2) ---

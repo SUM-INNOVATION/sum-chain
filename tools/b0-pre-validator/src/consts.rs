@@ -7,12 +7,17 @@
 // regression lock guards the R0 records, whose bytes/hashes are finalized). NOTHING but
 // ArchRunProvenanceV1 changed layout, so NOTHING but its own local version below advances.
 pub const SCHEMA_VERSION: u16 = 1;
-// ArchRunProvenanceV1 ONLY. Its canonical layout changed in isolation: the flat
-// (governor, turbo_enabled) DVFS fields became the `DvfsProvenance` sum type (adding the explicit
-// hypervisor-managed-unobservable state). This LOCAL version bumps to 2 so a pre-DVFS provenance
-// record is rejected on decode with a precise local-version error, without disturbing any other
-// record's bytes. No finalized protocol/R5 artifact is a binary schema record.
-pub const ARCH_RUN_PROVENANCE_SCHEMA_VERSION: u16 = 2;
+// ArchRunProvenanceV1 ONLY. Its canonical layout changed in isolation and bumps in isolation, so a
+// stale provenance record is rejected on decode with a precise local-version error without disturbing
+// any other record's bytes. No finalized protocol/R5 artifact is a binary schema record.
+//   * v2: the flat (governor, turbo_enabled) DVFS fields became the `DvfsProvenance` sum type.
+//   * v3: the canonical tail gained the effective-cpuset PROVENANCE (inheritance-aware source path +
+//     raw set + inherited flag + a content address over the retained nearest-first probe chain) and a
+//     content address over the per-arch RUNNER ATTESTATION (tooling/measured authority separation,
+//     runner + protobuf + native-protoc + docker-argv binding). Both retained-evidence blobs travel
+//     out of band and are recomputed + verified by the validator and the independent verifier; only
+//     their 32-byte domain-separated addresses live in the fixed canonical record.
+pub const ARCH_RUN_PROVENANCE_SCHEMA_VERSION: u16 = 3;
 pub const ALGORITHM_VERSION: u16 = 1;
 pub const SOFTMAX_VARIANT_ID: u16 = 1;
 pub const TOKEN_INPUT_SCHEME_ID: u16 = 1;

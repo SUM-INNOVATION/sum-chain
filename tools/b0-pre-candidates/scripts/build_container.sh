@@ -40,6 +40,28 @@ case "$build_mode" in
            || die "smoke build refuses to run with RATIFIED_SOURCE_COMMIT set (smoke is TEST_ONLY, never authoritative)" ;;
   *) die "build mode must be authoritative|smoke (got '$build_mode')" ;;
 esac
+# TWO-ROOT: the SOURCE tree that determines source_commit / clean-tree / build epoch is the MEASURED
+# source root, supplied EXPLICITLY for authoritative builds — never assumed to be this script's own
+# tooling tree (`$ROOT`). The Dockerfile/build recipe stays in the tooling tree; the source gates
+# below all apply to `$SRC_ROOT`.
+if [ "$build_mode" = smoke ]; then
+  SRC_ROOT="$ROOT" # TEST_ONLY: a smoke build measures the local PR head.
+elif is_dryrun; then
+  # DRY-RUN plumbing smoke (no Docker / no real build): not an authoritative measurement, so the
+  # measured root is OPTIONAL and falls back to the tooling tree. The explicit-root requirement below
+  # applies only to a REAL authoritative build.
+  SRC_ROOT="${B0_MEASURED_SOURCE_ROOT:-$ROOT}"
+  [ -L "$SRC_ROOT" ] && die "measured source root is a symlink (refused)"
+  SRC_ROOT="$(cd "$SRC_ROOT" && pwd -P)"
+else
+  [ -n "${B0_MEASURED_SOURCE_ROOT:-}" ] \
+    || die "authoritative build requires B0_MEASURED_SOURCE_ROOT (the measured source root); refusing to assume the tooling tree is the source"
+  [ -L "$B0_MEASURED_SOURCE_ROOT" ] && die "measured source root is a symlink (refused)"
+  [ -d "$B0_MEASURED_SOURCE_ROOT" ] || die "measured source root is not a directory: $B0_MEASURED_SOURCE_ROOT"
+  SRC_ROOT="$(cd "$B0_MEASURED_SOURCE_ROOT" && pwd -P)"
+  [ "$SRC_ROOT" != "$ROOT" ] \
+    || die "measured source root must differ from the tooling tree (two clean roots are mandatory)"
+fi
 mkdir -p "$out"
 
 # The Stage-1 schema names arches X86_64 / Aarch64 (== the Arch enum variants).
@@ -188,9 +210,9 @@ esac
 
 df="$ROOT/containers/$candidate.Dockerfile"
 [ -f "$df" ] || die "missing Dockerfile $df"
-[ -z "$(git -C "$ROOT" status --porcelain 2>/dev/null || echo dirty)" ] \
-  || die "source tree is not clean; refuse to build from a dirty state"
-source_commit="$(git -C "$ROOT" rev-parse HEAD)"
+[ -z "$(git -C "$SRC_ROOT" status --porcelain 2>/dev/null || echo dirty)" ] \
+  || die "measured source tree is not clean; refuse to build from a dirty state"
+source_commit="$(git -C "$SRC_ROOT" rev-parse HEAD)"
 
 # Defect 1 (clean-build reproducibility): pin ALL build metadata timestamps to a single
 # deterministic epoch — the ratified source commit's committer date — so the two clean
@@ -206,15 +228,15 @@ if [ "$build_mode" = smoke ]; then
   # Smoke: the deterministic epoch comes from the EXACT clean PR-head (already HEAD on a clean
   # tree). No RATIFIED_SOURCE_COMMIT is required or accepted — a smoke build is TEST_ONLY and
   # emits only a smoke-schema sidecar the authoritative resolver rejects.
-  [ "$source_commit" = "$(git -C "$ROOT" rev-parse HEAD)" ] \
+  [ "$source_commit" = "$(git -C "$SRC_ROOT" rev-parse HEAD)" ] \
     || die "HEAD moved since build start; refusing smoke build epoch (candidate=$candidate arch=$arch)"
 else
   [ -n "${RATIFIED_SOURCE_COMMIT:-}" ] \
     || nyr "RATIFIED_SOURCE_COMMIT is required to derive a deterministic SOURCE_DATE_EPOCH (from the ratified pins.env)"
   [ "$source_commit" = "$RATIFIED_SOURCE_COMMIT" ] \
-    || die "HEAD ($source_commit) != RATIFIED_SOURCE_COMMIT ($RATIFIED_SOURCE_COMMIT); refusing to derive a build epoch from an unratified commit"
+    || die "measured HEAD ($source_commit) != RATIFIED_SOURCE_COMMIT ($RATIFIED_SOURCE_COMMIT); refusing to derive a build epoch from an unratified commit"
 fi
-SOURCE_DATE_EPOCH="$(git -C "$ROOT" show -s --format=%ct "$source_commit")"
+SOURCE_DATE_EPOCH="$(git -C "$SRC_ROOT" show -s --format=%ct "$source_commit")"
 require_valid_source_date_epoch "$SOURCE_DATE_EPOCH"
 export SOURCE_DATE_EPOCH
 
@@ -381,8 +403,8 @@ fi
 # RATIFIED_SOURCE_COMMIT at write time.
 is_ratified_commit_format "$source_commit" \
   || die "source_commit is not 40 lowercase hex: '$source_commit' (candidate=$candidate arch=$arch)"
-[ "$source_commit" = "$(git -C "$ROOT" rev-parse HEAD)" ] \
-  || die "HEAD moved since build start; refusing to write a runnable-ref sidecar (candidate=$candidate arch=$arch)"
+[ "$source_commit" = "$(git -C "$SRC_ROOT" rev-parse HEAD)" ] \
+  || die "measured HEAD moved since build start; refusing to write a runnable-ref sidecar (candidate=$candidate arch=$arch)"
 sidecar="$out/$candidate.$arch.runnable-ref"
 if [ "$build_mode" = smoke ]; then
   # SMOKE sidecar: a DISTINCT schema (b0pre-smoke-runnable-ref-v1) carrying an explicit TEST_ONLY

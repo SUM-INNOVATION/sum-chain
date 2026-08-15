@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use b0_pre_host_provenance::{read_host_facts, DvfsState, HostFacts};
+use b0_pre_host_provenance::{read_host_facts, CpusetState, DvfsState};
 
 struct Tree {
     root: PathBuf,
@@ -93,27 +93,198 @@ fn valid_x86(name: &str) -> Tree {
 fn valid_host_parses_to_exact_facts() {
     let t = valid_x86("valid");
     let f = read_host_facts(t.root()).expect("valid host parses");
+    // Deterministic summary facts (probe-chain stat facts inode/mtime are asserted structurally
+    // below, not by exact value).
+    assert_eq!(f.host_os, "Linux");
+    assert_eq!(f.kernel, "6.1.0-venue");
+    assert_eq!(f.cpu_vendor, "GenuineIntel");
+    assert_eq!(f.cpu_model, "Xeon Gold");
+    assert_eq!(f.physical_core_count, 2);
+    assert_eq!(f.logical_cpu_count, 2);
+    assert_eq!(f.total_ram_bytes, 33554432u64 * 1024);
+    assert_eq!(f.configured_cpuset_core_limit, 2);
+    assert_eq!(f.cpuset_source_cgroup_path, "/b0-final.slice/measure");
+    assert_eq!(f.cpuset_raw, "0-1");
+    assert!(!f.cpuset_inherited);
+    assert_eq!(f.configured_memory_limit_bytes, 17179869184);
     assert_eq!(
-        f,
-        HostFacts {
-            host_os: "Linux".into(),
-            kernel: "6.1.0-venue".into(),
-            cpu_vendor: "GenuineIntel".into(),
-            cpu_model: "Xeon Gold".into(),
-            physical_core_count: 2,
-            logical_cpu_count: 2,
-            total_ram_bytes: 33554432u64 * 1024,
-            configured_cpuset_core_limit: 2,
-            configured_memory_limit_bytes: 17179869184,
-            dvfs: DvfsState::Observable {
-                turbo_enabled: false,
-                governor: "performance".into(),
-            },
-            clock_source: "tsc".into(),
-            cgroup_version: 2,
-            cgroup_scope_label: "/b0-final.slice/measure".into(),
+        f.dvfs,
+        DvfsState::Observable {
+            turbo_enabled: false,
+            governor: "performance".into(),
         }
     );
+    assert_eq!(f.clock_source, "tsc");
+    assert_eq!(f.cgroup_version, 2);
+    assert_eq!(f.cgroup_scope_label, "/b0-final.slice/measure");
+    // Leaf-observed: the probe chain is exactly one entry (the leaf, order 0) with a stable,
+    // readable-nonempty, double-read effective set and captured stat facts.
+    assert_eq!(f.cpuset_probe_chain.len(), 1);
+    let e = &f.cpuset_probe_chain[0];
+    assert_eq!(e.cgroup_path, "/b0-final.slice/measure");
+    assert_eq!(e.order, 0);
+    assert_eq!(e.first, e.second); // two complete observations must agree
+    assert_eq!(e.first.state, CpusetState::ReadableNonempty);
+    assert_eq!(e.first.raw.as_deref(), Some("0-1"));
+    assert_eq!(e.first.file_type, "regular");
+    assert!(!e.first.is_symlink);
+    assert_eq!(e.first.size, Some(4)); // "0-1\n"
+    assert!(e.first.inode.is_some() && e.first.dev.is_some() && e.first.mtime_secs.is_some());
+    assert!(e.first.read_error_class.is_none());
+}
+
+// ---- cpuset inheritance (x86 systemd hierarchy: leaf scope lacks the cpuset controller) --------
+
+#[test]
+fn inherited_cpuset_from_nearest_ancestor() {
+    // The process leaf is a deep tmux scope that does NOT expose cpuset.cpus.effective; the ancestor
+    // /b0-final.slice/measure does (valid_x86 wrote "0-1"). The reader must INHERIT it and bind the
+    // source, raw, and inherited=true — never refuse, never default to all host CPUs.
+    let t = valid_x86("inherited");
+    t.w(
+        "proc/self/cgroup",
+        "0::/b0-final.slice/measure/tmux-spawn.scope\n",
+    );
+    // the leaf carries memory (isolating the cpuset test) but NOT a cpuset controller file.
+    t.w(
+        "sys/fs/cgroup/b0-final.slice/measure/tmux-spawn.scope/memory.max",
+        "17179869184\n",
+    );
+    let f = read_host_facts(t.root()).expect("inherited cpuset resolves");
+    assert_eq!(f.configured_cpuset_core_limit, 2);
+    assert_eq!(f.cpuset_source_cgroup_path, "/b0-final.slice/measure");
+    assert_eq!(f.cpuset_raw, "0-1");
+    assert!(f.cpuset_inherited);
+    assert_eq!(
+        f.cgroup_scope_label,
+        "/b0-final.slice/measure/tmux-spawn.scope"
+    );
+    // The canonical probe chain: leaf (order 0, Absent) -> immediate parent (order 1, the selected
+    // ReadableNonempty source). It stops AT the source: no entry after it, no skipped level.
+    assert_eq!(f.cpuset_probe_chain.len(), 2);
+    let leaf = &f.cpuset_probe_chain[0];
+    assert_eq!(leaf.order, 0);
+    assert_eq!(leaf.cgroup_path, "/b0-final.slice/measure/tmux-spawn.scope");
+    assert_eq!(leaf.first.state, CpusetState::Absent);
+    assert_eq!(leaf.first.file_type, "absent");
+    assert_eq!(leaf.first, leaf.second);
+    let src = &f.cpuset_probe_chain[1];
+    assert_eq!(src.order, 1);
+    assert_eq!(src.cgroup_path, "/b0-final.slice/measure");
+    assert_eq!(src.first.state, CpusetState::ReadableNonempty);
+    assert_eq!(src.first.raw.as_deref(), Some("0-1"));
+    assert_eq!(src.first, src.second);
+}
+
+#[test]
+fn leaf_observed_takes_precedence_over_ancestor() {
+    // The leaf exposes cpuset -> leaf-observed (inherited=false), even though an ancestor also does.
+    let t = valid_x86("leaf-wins");
+    t.w(
+        "proc/self/cgroup",
+        "0::/b0-final.slice/measure/tmux.scope\n",
+    );
+    t.w(
+        "sys/fs/cgroup/b0-final.slice/measure/tmux.scope/cpuset.cpus.effective",
+        "3\n",
+    );
+    t.w(
+        "sys/fs/cgroup/b0-final.slice/measure/tmux.scope/memory.max",
+        "17179869184\n",
+    );
+    let f = read_host_facts(t.root()).expect("leaf-observed resolves");
+    assert_eq!(f.configured_cpuset_core_limit, 1);
+    assert_eq!(
+        f.cpuset_source_cgroup_path,
+        "/b0-final.slice/measure/tmux.scope"
+    );
+    assert_eq!(f.cpuset_raw, "3");
+    assert!(!f.cpuset_inherited);
+}
+
+#[test]
+fn no_cpuset_anywhere_in_chain_refuses_never_defaults_to_all() {
+    // Neither the leaf nor any ancestor exposes cpuset -> REFUSE (never fall back to logical=2).
+    let t = valid_x86("no-cpuset");
+    t.w(
+        "proc/self/cgroup",
+        "0::/b0-final.slice/measure/tmux.scope\n",
+    );
+    t.rm("sys/fs/cgroup/b0-final.slice/measure/cpuset.cpus.effective");
+    t.w(
+        "sys/fs/cgroup/b0-final.slice/measure/tmux.scope/memory.max",
+        "17179869184\n",
+    );
+    let e = read_host_facts(t.root()).unwrap_err();
+    assert!(e.contains("cpuset"), "{e}");
+}
+
+#[test]
+fn malformed_ancestor_cpuset_refuses() {
+    let t = valid_x86("malformed");
+    t.w(
+        "proc/self/cgroup",
+        "0::/b0-final.slice/measure/tmux.scope\n",
+    );
+    t.w(
+        "sys/fs/cgroup/b0-final.slice/measure/cpuset.cpus.effective",
+        "not-a-cpu-list\n",
+    );
+    t.w(
+        "sys/fs/cgroup/b0-final.slice/measure/tmux.scope/memory.max",
+        "17179869184\n",
+    );
+    assert!(read_host_facts(t.root()).is_err());
+}
+
+#[test]
+fn symlink_cpuset_source_refuses() {
+    let t = valid_x86("symlink");
+    t.rm("sys/fs/cgroup/b0-final.slice/measure/cpuset.cpus.effective");
+    // Replace the leaf effective-cpuset with a symlink -> refused (no redirection out of the tree).
+    let link = t
+        .root()
+        .join("sys/fs/cgroup/b0-final.slice/measure/cpuset.cpus.effective");
+    std::os::unix::fs::symlink("/etc/hostname", &link).unwrap();
+    let e = read_host_facts(t.root()).unwrap_err();
+    assert!(e.contains("symlink"), "{e}");
+}
+
+#[test]
+fn nonregular_cpuset_fails_immediately_and_does_not_skip_to_farther_valid() {
+    // Rule 1: an ambiguous (non-regular) cpuset at a NEARER cgroup fails immediately — the reader
+    // must NOT skip it to reach a valid farther ancestor.
+    let t = valid_x86("nonreg");
+    t.w(
+        "proc/self/cgroup",
+        "0::/b0-final.slice/measure/tmux.scope\n",
+    );
+    t.w(
+        "sys/fs/cgroup/b0-final.slice/measure/tmux.scope/memory.max",
+        "17179869184\n",
+    );
+    // leaf tmux.scope: no cpuset (absent). middle /b0-final.slice/measure: a DIRECTORY at the cpuset
+    // path (non-regular/ambiguous). farther /b0-final.slice: a VALID cpuset that must NOT be reached.
+    t.rm("sys/fs/cgroup/b0-final.slice/measure/cpuset.cpus.effective");
+    std::fs::create_dir_all(
+        t.root()
+            .join("sys/fs/cgroup/b0-final.slice/measure/cpuset.cpus.effective"),
+    )
+    .unwrap();
+    t.w("sys/fs/cgroup/b0-final.slice/cpuset.cpus.effective", "0\n");
+    let e = read_host_facts(t.root()).unwrap_err();
+    assert!(
+        e.contains("not a regular file") || e.contains("ambiguous"),
+        "{e}"
+    );
+}
+
+#[test]
+fn noncanonical_cgroup_scope_refuses() {
+    let t = valid_x86("noncanon");
+    t.w("proc/self/cgroup", "0::/b0-final.slice/../measure\n");
+    let e = read_host_facts(t.root()).unwrap_err();
+    assert!(e.contains("non-canonical") || e.contains("ancestor"), "{e}");
 }
 
 #[test]

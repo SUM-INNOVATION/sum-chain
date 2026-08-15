@@ -26,7 +26,24 @@ pub struct HostFacts {
     pub physical_core_count: u32,
     pub logical_cpu_count: u32,
     pub total_ram_bytes: u64,
+    /// The canonical effective CPU count. When the process leaf cgroup does not expose the cpuset
+    /// controller, this is the INHERITED effective set resolved from the nearest ancestor (never a
+    /// default-to-all-host-CPUs). The source + raw + inherited-flag below bind exactly where it came
+    /// from so eligibility can independently recompute and verify the ancestor relationship.
     pub configured_cpuset_core_limit: u32,
+    /// The cgroup path (cgroup-root-relative, e.g. `/user.slice`) the effective cpuset was READ from:
+    /// the process leaf itself when leaf-observed, else the nearest ancestor that exposes it.
+    pub cpuset_source_cgroup_path: String,
+    /// The RAW `cpuset.cpus.effective` string (e.g. `0-3,7`) read from the source cgroup — bound so a
+    /// verifier recomputes `configured_cpuset_core_limit` from it and refuses any raw/count mismatch.
+    pub cpuset_raw: String,
+    /// false = the value was observed at the process leaf; true = it was INHERITED from an ancestor
+    /// because the leaf did not expose a readable nonempty `cpuset.cpus.effective`.
+    pub cpuset_inherited: bool,
+    /// The CANONICAL nearest-first probe chain from the process leaf (order 0) up to AND INCLUDING
+    /// the selected source, one entry per visited cgroup with its observation state + stat/double-read
+    /// evidence. The verifier recomputes "nearest ancestor" from this — never from a leaf/source pair.
+    pub cpuset_probe_chain: Vec<CpusetProbeEntry>,
     pub configured_memory_limit_bytes: u64,
     pub dvfs: DvfsState,
     pub clock_source: String,
@@ -259,20 +276,244 @@ fn read_memory_limit(root: &Path, version: u8, scope: &str, total_ram: u64) -> R
     }
 }
 
-fn read_cpuset_limit(root: &Path, version: u8, scope: &str, logical: u32) -> Result<u32, String> {
-    let path = if version == 2 {
-        cgroup_dir(root, 2, scope, "").join("cpuset.cpus.effective")
+/// The effective-cpuset file name for a cgroup version (v2 exposes the kernel-computed
+/// `cpuset.cpus.effective`; v1 exposes `cpuset.cpus` under the cpuset controller mount).
+fn cpuset_effective_file(version: u8) -> &'static str {
+    if version == 2 {
+        "cpuset.cpus.effective"
     } else {
-        cgroup_dir(root, 1, scope, "cpuset").join("cpuset.cpus")
-    };
-    match read_trimmed(&path) {
-        Ok(s) if !s.is_empty() => count_cpu_list(&s),
-        // An empty v2 cpuset.cpus.effective is only valid when it means "inherit all";
-        // a MISSING file is a refusal, not "all".
-        Ok(_) if version == 2 => Ok(logical),
-        Ok(_) => Err(format!("empty cpuset at {}", path.display())),
-        Err(e) => Err(e),
+        "cpuset.cpus"
     }
+}
+
+/// The CANONICAL ancestor chain of a cgroup scope path, NEAREST-FIRST: the leaf itself, then each
+/// parent, down to the hierarchy root `/`. Refuses a non-canonical path (`.`/`..` component) so a
+/// crafted scope can never traverse out of the cgroup root.
+fn cgroup_ancestor_chain(scope: &str) -> Result<Vec<String>, String> {
+    if !scope.starts_with('/') {
+        return Err(format!("cgroup scope is not absolute: {scope:?}"));
+    }
+    let mut comps: Vec<&str> = Vec::new();
+    for c in scope.split('/') {
+        if c.is_empty() {
+            continue; // leading / trailing / doubled slash
+        }
+        if c == "." || c == ".." {
+            return Err(format!("non-canonical cgroup scope component in {scope:?}"));
+        }
+        comps.push(c);
+    }
+    let mut chain = Vec::with_capacity(comps.len() + 1);
+    for i in (0..=comps.len()).rev() {
+        chain.push(if i == 0 {
+            "/".to_string()
+        } else {
+            format!("/{}", comps[..i].join("/"))
+        });
+    }
+    Ok(chain)
+}
+
+/// True iff `ancestor` is the same cgroup as `leaf` or a canonical ancestor of it. Both are
+/// cgroup-root-relative absolute paths (`/`, `/user.slice`, `/user.slice/session.scope`). This is
+/// the exact relationship the eligibility check (validator + independent verifier) recomputes.
+pub fn cgroup_path_is_ancestor_or_self(ancestor: &str, leaf: &str) -> bool {
+    if ancestor == leaf || ancestor == "/" {
+        return true;
+    }
+    matches!(leaf.strip_prefix(ancestor), Some(rest) if rest.starts_with('/'))
+}
+
+/// The RETAINED `cpuset.cpus.effective` state at one probed cgroup. Only these three states are ever
+/// retained (they are the states that allow ascent or select a source). A read error, a malformed
+/// value, a symlink, or a non-regular/ambiguous file is NEVER retained — it fails the resolution
+/// immediately (a read error is not an inheritable "absence").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CpusetState {
+    /// The effective-cpuset file does not exist at this cgroup (the leaf tmux-scope case) — ascend.
+    Absent,
+    /// The file exists and is empty — ascend.
+    ReadableEmpty,
+    /// The file exists and holds a nonempty, canonically-valid CPU set — the selected source.
+    ReadableNonempty,
+}
+
+/// One complete authenticated observation of the effective-cpuset file at a cgroup: its state, raw
+/// bytes (when readable), and the file-identity stat facts needed to detect replacement between the
+/// two reads of a single entry. `read_error_class` is only ever set on the failure diagnostic (a
+/// read error fails immediately), so it is `None` in every RETAINED observation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CpusetObservation {
+    pub state: CpusetState,
+    pub raw: Option<String>,
+    /// "absent" | "regular" | "symlink" | "other".
+    pub file_type: String,
+    pub is_symlink: bool,
+    pub dev: Option<u64>,
+    pub inode: Option<u64>,
+    pub size: Option<u64>,
+    pub mtime_secs: Option<i64>,
+    pub mtime_nanos: Option<i64>,
+    pub read_error_class: Option<String>,
+}
+
+/// One entry of the canonical nearest-first probe chain. Retains TWO complete observations that MUST
+/// be equal — detecting the leaf or an ancestor changing state during resolution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CpusetProbeEntry {
+    /// Canonical cgroup-root-relative path of this probed cgroup (never a host-absolute path).
+    pub cgroup_path: String,
+    /// Position in the ancestor chain: 0 = the process leaf, 1 = its immediate parent, ...
+    pub order: u32,
+    pub first: CpusetObservation,
+    pub second: CpusetObservation,
+}
+
+/// A resolved effective cpuset bound to exactly where it was read, plus the canonical probe chain.
+struct CpusetResolution {
+    count: u32,
+    source_cgroup_path: String,
+    raw: String,
+    inherited: bool,
+    probe_chain: Vec<CpusetProbeEntry>,
+}
+
+/// Take ONE complete observation of the effective-cpuset file at a cgroup. Fail-closed (never a
+/// retained observation) on: a stat error other than not-found, a symlink, a non-regular file, a
+/// read error (permission/I/O), or a malformed nonempty CPU set. Absent and readable-empty are
+/// benign (ascendable) states; a canonically-valid nonempty set is a source.
+fn observe_cpuset(root: &Path, version: u8, cg: &str) -> Result<CpusetObservation, String> {
+    use std::os::unix::fs::MetadataExt;
+    let v1_controller = if version == 2 { "" } else { "cpuset" };
+    let path = cgroup_dir(root, version, cg, v1_controller).join(cpuset_effective_file(version));
+    let mut o = CpusetObservation {
+        state: CpusetState::Absent,
+        raw: None,
+        file_type: "absent".to_string(),
+        is_symlink: false,
+        dev: None,
+        inode: None,
+        size: None,
+        mtime_secs: None,
+        mtime_nanos: None,
+        read_error_class: None,
+    };
+    let lmeta = match std::fs::symlink_metadata(&path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(o), // absent -> ascendable
+        Err(e) => {
+            return Err(format!(
+                "cpuset stat error at {} ({:?})",
+                path.display(),
+                e.kind()
+            ))
+        }
+    };
+    let ft = lmeta.file_type();
+    o.dev = Some(lmeta.dev());
+    o.inode = Some(lmeta.ino());
+    o.size = Some(lmeta.size());
+    o.mtime_secs = Some(lmeta.mtime());
+    o.mtime_nanos = Some(lmeta.mtime_nsec());
+    if ft.is_symlink() {
+        o.is_symlink = true;
+        o.file_type = "symlink".to_string();
+        return Err(format!(
+            "cpuset source is a symlink (refused): {}",
+            path.display()
+        ));
+    }
+    if !ft.is_file() {
+        o.file_type = "other".to_string();
+        return Err(format!(
+            "cpuset source is not a regular file (ambiguous, refused): {}",
+            path.display()
+        ));
+    }
+    o.file_type = "regular".to_string();
+    match std::fs::read_to_string(&path) {
+        Ok(s) => {
+            let t = s.trim();
+            if t.is_empty() {
+                o.state = CpusetState::ReadableEmpty;
+                o.raw = Some(String::new());
+            } else {
+                // A malformed / invalid CPU syntax FAILS immediately (never ascend past it).
+                count_cpu_list(t)?;
+                o.state = CpusetState::ReadableNonempty;
+                o.raw = Some(t.to_string());
+            }
+        }
+        // A read error is NOT an inheritable absence — fail immediately.
+        Err(e) => {
+            return Err(format!(
+                "cpuset read error at {} ({:?})",
+                path.display(),
+                e.kind()
+            ))
+        }
+    }
+    Ok(o)
+}
+
+/// Probe one cgroup with TWO complete observations and require they are equal (state + raw + file
+/// identity), detecting a replacement / state change during resolution.
+fn probe_cpuset_entry(
+    root: &Path,
+    version: u8,
+    cg: &str,
+    order: u32,
+) -> Result<CpusetProbeEntry, String> {
+    let first = observe_cpuset(root, version, cg)?;
+    let second = observe_cpuset(root, version, cg)?;
+    if first != second {
+        return Err(format!(
+            "cpuset observation at {cg:?} changed between reads (first != second)"
+        ));
+    }
+    Ok(CpusetProbeEntry {
+        cgroup_path: cg.to_string(),
+        order,
+        first,
+        second,
+    })
+}
+
+/// Resolve the effective cpuset for the process leaf cgroup, building the CANONICAL nearest-first
+/// probe chain (the live reader verifies live ancestry + observations; the producer binds the
+/// retained evidence). Read the leaf first; if it does not expose a readable nonempty effective
+/// cpuset (the x86 systemd case, where the leaf tmux scope lacks the cpuset controller), walk ONLY
+/// the canonical ancestor chain and take the NEAREST cgroup with a stable readable-nonempty valid CPU
+/// set. Entries before the source are stable-absent or stable-readable-empty only; the chain stops
+/// AT the source (no entries after it). Never search siblings; never default to all host CPUs.
+fn resolve_cpuset(root: &Path, version: u8, leaf_scope: &str) -> Result<CpusetResolution, String> {
+    let file = cpuset_effective_file(version);
+    let chain = cgroup_ancestor_chain(leaf_scope)?;
+    let mut probe_chain: Vec<CpusetProbeEntry> = Vec::new();
+    for (idx, cg) in chain.iter().enumerate() {
+        let entry = probe_cpuset_entry(root, version, cg, idx as u32)?;
+        match entry.first.state {
+            CpusetState::ReadableNonempty => {
+                // The FIRST readable-nonempty entry is the selected source; the chain stops here.
+                let raw = entry.first.raw.clone().expect("nonempty carries raw");
+                let count = count_cpu_list(&raw)?;
+                probe_chain.push(entry);
+                return Ok(CpusetResolution {
+                    count,
+                    source_cgroup_path: cg.clone(),
+                    raw,
+                    inherited: idx != 0, // idx 0 is the leaf; anything above it is inherited
+                    probe_chain,
+                });
+            }
+            // Stable absent / readable-empty -> record and ascend. (Errors already failed above.)
+            CpusetState::Absent | CpusetState::ReadableEmpty => probe_chain.push(entry),
+        }
+    }
+    Err(format!(
+        "no cgroup in the canonical ancestor chain of {leaf_scope:?} exposes a readable nonempty {file}"
+    ))
 }
 
 /// Read every host fact from `root`. Fail-closed on any unreadable/ambiguous source.
@@ -300,10 +541,22 @@ pub fn read_host_facts(root: &Path) -> Result<HostFacts, String> {
         1
     };
     let cgroup_scope_label = read_cgroup_scope(root)?;
+    // The leaf scope must be canonical (no `.`/`..` component) BEFORE any cgroup path is joined, so
+    // neither the memory nor the cpuset resolution can traverse out of the cgroup root.
+    cgroup_ancestor_chain(&cgroup_scope_label)?;
     let configured_memory_limit_bytes =
         read_memory_limit(root, cgroup_version, &cgroup_scope_label, total_ram_bytes)?;
-    let configured_cpuset_core_limit =
-        read_cpuset_limit(root, cgroup_version, &cgroup_scope_label, logical_cpu_count)?;
+    // Resolve the effective cpuset with inheritance: leaf-observed when the process leaf exposes it,
+    // else the nearest canonical ancestor. Bind the source path + raw + inherited flag so eligibility
+    // can independently recompute the count and verify the ancestor relationship.
+    let cpuset = resolve_cpuset(root, cgroup_version, &cgroup_scope_label)?;
+    // Defence in depth: the recorded source must be a real ancestor of (or equal to) the leaf.
+    if !cgroup_path_is_ancestor_or_self(&cpuset.source_cgroup_path, &cgroup_scope_label) {
+        return Err(format!(
+            "resolved cpuset source {:?} is not an ancestor of the process leaf {:?}",
+            cpuset.source_cgroup_path, cgroup_scope_label
+        ));
+    }
 
     Ok(HostFacts {
         host_os,
@@ -313,7 +566,11 @@ pub fn read_host_facts(root: &Path) -> Result<HostFacts, String> {
         physical_core_count,
         logical_cpu_count,
         total_ram_bytes,
-        configured_cpuset_core_limit,
+        configured_cpuset_core_limit: cpuset.count,
+        cpuset_source_cgroup_path: cpuset.source_cgroup_path,
+        cpuset_raw: cpuset.raw,
+        cpuset_inherited: cpuset.inherited,
+        cpuset_probe_chain: cpuset.probe_chain,
         configured_memory_limit_bytes,
         dvfs,
         clock_source,

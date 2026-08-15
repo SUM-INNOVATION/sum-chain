@@ -1,0 +1,5 @@
+bundle-content-address/protobuf-include-authority-v1
+formula SHA256/BLAKE3( "b0-final-protobuf-include-authority/v1\0" || canonical(INVENTORY.json) )
+preimage_len 1126
+content_address_sha256 65b7a61f069be4f709de94f72c696529a69596749e6dc24ac543ee6d72af9161
+content_address_blake3 7b5551d278fc33095bddde84339ef73c0d777f65e206de60aecd8cbf9c8f3623

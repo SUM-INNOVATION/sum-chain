@@ -18,6 +18,9 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 # shellcheck source=lib.sh
 . "$HERE/lib.sh"
+# Two-root authority resolver (measured source vs measurement tooling).
+# shellcheck source=two_root_authority.sh
+. "$HERE/two_root_authority.sh"
 
 need_env() { [ -n "${!1:-}" ] || die "required env $1 is unset"; }
 b3() { b3sum "$1" | awk '{print $1}'; }
@@ -32,7 +35,16 @@ case "$MODE" in
     [ -n "$OUT_REC" ] || die "output record path required"
     [ "$CAND" = risc0 ] && [ "$ARCH" = aarch64 ] && die "RISC Zero aarch64 identity is native-ineligible; refused"
     require_native_arch "$ARCH"
-    for v in SPEC_HASH MEASURE_RUNNER VMAT_BIN PROV_BIN REPO_DIR; do need_env "$v"; done
+    # TWO-ROOT authority: the FROZEN measured source and the REVIEWED tooling are SEPARATE clean
+    # checkouts, supplied explicitly (never inferred). Guest/source identity derives ONLY from the
+    # measured root; the runner/scripts are the tooling root; the tooling authority is bound
+    # separately into the record. Refuses same/nested/dirty/wrong-commit roots + cross-root swaps.
+    need_env B0_MEASURED_SOURCE_ROOT
+    need_env B0_TOOLING_ROOT
+    require_two_roots --measured-source-root "$B0_MEASURED_SOURCE_ROOT" --tooling-root "$B0_TOOLING_ROOT"
+    for v in SPEC_HASH MEASURE_RUNNER VMAT_BIN PROV_BIN; do need_env "$v"; done
+    # source_commit/clean-tree are read from the MEASURED root (never the tooling checkout HEAD).
+    REPO_DIR="$B0_MEASURED_ROOT"
     [ "$CAND" = sp1 ] && need_env VERIFIER_REF
     [ "$CAND" = sp1 ] && need_env PROVER_REAL_DOCKER
     require_cmd b3sum; require_cmd python3
@@ -43,8 +55,9 @@ case "$MODE" in
     RATIFIED_TC="$(b0_ratified_toolchain_identity "$CANDCAP" "$ARCH" "$TOOLCHAIN_AUTHORITY_RECORD")" \
       || die "ratified toolchain authority record unavailable/invalid (hash-verify or entry lookup failed)"
 
-    GUEST_DIR="$ROOT/candidates/$CAND/guest"; LOCK="$ROOT/candidates/$CAND/Cargo.lock"
-    [ -d "$GUEST_DIR" ] && [ -s "$LOCK" ] || die "candidate guest tree / lock absent"
+    # Guest source + committed lock come ONLY from the MEASURED root (frozen source identity).
+    GUEST_DIR="$B0_MEASURED_ROOT/candidates/$CAND/guest"; LOCK="$B0_MEASURED_ROOT/candidates/$CAND/Cargo.lock"
+    [ -d "$GUEST_DIR" ] && [ -s "$LOCK" ] || die "candidate guest tree / lock absent in measured root"
     TREE_HASH="$(cd "$GUEST_DIR" && find . -type f -not -path './target/*' | LC_ALL=C sort | while IFS= read -r f; do b3 "$f"; done | b3_stdin)"
     LOCK_HASH="$(b3 "$LOCK")"
     # source commit + clean-tree from the tested provenance reader (git-backed), never assumed.
@@ -64,7 +77,10 @@ case "$MODE" in
       local -a idargs=(--emit-identity --arch "$ARCH" --spec-hash "$SPEC_HASH"
         --guest-source-tree-hash "$TREE_HASH" --candidate-dep-lock-hash "$LOCK_HASH"
         --build-command-hash "$RECIPE_HASH" --source-commit "$SRC_COMMIT" --clean-tree "$CLEAN"
-        --verifier-material "$VMAT_JSON")
+        --verifier-material "$VMAT_JSON"
+        # Two-root: bind the SEPARATE tooling authority into the identity record (never compared to
+        # the measured source; verified against the tooling authority by the validator).
+        --tooling-commit "$B0_TOOLING_COMMIT" --tooling-pathset-blake3 "$B0_TOOLING_PATHSET_BLAKE3")
       if [ "$CAND" = sp1 ]; then
         local incand; incand="$(incontainer_candidate_dir sp1)"
         local rd; rd="$(readlink -f "$PROVER_REAL_DOCKER")"

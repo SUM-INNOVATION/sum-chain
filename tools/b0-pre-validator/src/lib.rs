@@ -34,6 +34,7 @@ pub mod producer;
 pub mod protocol;
 pub mod schema;
 pub mod tags;
+pub mod tooling_authority;
 pub mod transformer;
 pub mod validation;
 pub mod venue;

@@ -24,9 +24,103 @@ use crate::enums::{
 use crate::harness::{assemble_result_set, AssemblyInput, Evidence};
 use crate::schema::allowlist::{GuestProgramAllowlistV1, GuestProgramEntryV1};
 use crate::schema::bench::{BenchmarkRssRecordV1, BenchmarkSampleV1};
+use crate::schema::cpuset_chain::CpusetProbeChainV1;
 use crate::schema::envelope::{ArtifactHash, R0ProofArtifactEnvelopeV1};
-use crate::schema::provenance::{ArchRunProvenanceV1, DvfsProvenance};
+use crate::schema::identity_record::Phase1IdentityRecordV1;
+use crate::schema::provenance::{
+    cpuset_probe_chain_hash, ArchRunProvenanceV1, CpusetObsV1, CpusetProbeEntryV1, DvfsProvenance,
+};
+use crate::schema::runner_attestation::RunnerAttestationV1;
 use crate::schema::verifier_material::VerifierMaterialManifestV1;
+
+/// A single-entry, leaf-observed cpuset probe chain (readable-nonempty leaf). The real venue chain
+/// comes from the host-provenance reader; this builds a canonical, structurally-valid chain for the
+/// synthetic/dry-run assembly paths so the retained artifact is always present.
+pub fn leaf_cpuset_chain(scope: &str, raw: &str) -> Vec<CpusetProbeEntryV1> {
+    let obs = CpusetObsV1 {
+        state: 2,
+        raw: raw.to_string(),
+        file_type: "regular".into(),
+        is_symlink: false,
+        dev: Some(1),
+        inode: Some(2),
+        size: Some(raw.len() as u64),
+        mtime_secs: Some(0),
+        mtime_nanos: Some(0),
+        read_error_class: None,
+    };
+    vec![CpusetProbeEntryV1 {
+        cgroup_path: scope.to_string(),
+        order: 0,
+        first: obs.clone(),
+        second: obs,
+    }]
+}
+
+/// The domain-separated address of a leaf-observed chain (matches [`cpuset_probe_chain_hash`]).
+pub fn leaf_cpuset_chain_address(scope: &str, raw: &str) -> [u8; 32] {
+    cpuset_probe_chain_hash(&leaf_cpuset_chain(scope, raw))
+}
+
+/// A synthetic Phase-1 identity record for the synthetic/dry-run assembly paths, matching the synth
+/// runner attestation (same measured-source/tooling/spec; `production_binary_blake3` == the attestation
+/// `runner_blake3`). NEVER used on the real path (which builds the record from the venue identity set).
+pub fn synth_phase1_identity_record(
+    candidate: Candidate,
+    arch: Arch,
+    measured_source_commit: &str,
+    spec: [u8; 32],
+    production_binary_blake3: [u8; 32],
+) -> Phase1IdentityRecordV1 {
+    Phase1IdentityRecordV1 {
+        candidate,
+        arch,
+        source_commit: measured_source_commit.to_string(),
+        tooling_commit: "1234567890abcdef1234567890abcdef12345678".to_string(),
+        tooling_pathset_blake3: "70".repeat(32),
+        b0_pre_spec_hash: spec,
+        production_binary_blake3,
+    }
+}
+
+/// A runner attestation for synthetic/dry-run assembly. `hex32`/`ctx` binding fields are placeholders
+/// the orchestrator overwrites with the run's candidate/role/spec/guest_set; the venue-produced fields
+/// carry deterministic self-consistent values (build_git_sha == measured_source_commit; recomputed ==
+/// ratified path-set; protoc version fixed). NEVER used on the real path (which parses the venue JSON).
+pub fn synth_runner_attestation(
+    arch: Arch,
+    measured_source_commit: &str,
+    seed: &dyn Fn(&str) -> [u8; 32],
+) -> RunnerAttestationV1 {
+    RunnerAttestationV1 {
+        candidate: Candidate::Sp1,
+        provenance_role: ProvenanceRole::Proving,
+        b0_pre_spec_hash: [0; 32],
+        r0_guest_set_hash: [0; 32],
+        build_target_arch: arch,
+        execution_tooling_checkout_head: "1234567890abcdef1234567890abcdef12345678".into(),
+        ratified_tooling_commit: "1234567890abcdef1234567890abcdef12345678".into(),
+        ratified_pathset_blake3: "70".repeat(32),
+        recomputed_pathset_blake3: "70".repeat(32),
+        measured_source_commit: measured_source_commit.to_string(),
+        build_git_sha: measured_source_commit.to_string(),
+        measured_source_context_blake3: seed("measured-ctx"),
+        runner_sha256: seed("runner-sha256"),
+        runner_blake3: seed("runner-blake3"),
+        immutable_builder_identity: seed("builder"),
+        protobuf_authority_sha256: seed("pb-sha256"),
+        protobuf_authority_blake3: seed("pb-blake3"),
+        native_protoc_sha256: seed("protoc-sha256"),
+        native_protoc_blake3: seed("protoc-blake3"),
+        native_protoc_version: "libprotoc 3.21.12".into(),
+        docker_argv_blake3: seed("docker-argv"),
+        reproducibility_pair_blake3: seed("repro-pair"),
+        // Runner continuity: the Phase-1 runner binary equals the measurement runner (runner_blake3).
+        phase1_production_binary_blake3: seed("runner-blake3"),
+        // Placeholder; the orchestrator/harness sets this from the retained Phase-1 identity record.
+        phase1_identity_record_blake3: [0; 32],
+    }
+}
 
 /// The allowlist canonical bytes plus one per-candidate evidence bundle each — the
 /// content of a committed measurement vector.
@@ -74,6 +168,20 @@ pub struct ProvenanceFacts {
     pub cgroup_scope_label: String,
     pub benchmark_harness_source_hash: [u8; 32],
     pub raw_environment_capture_hash: [u8; 32],
+    pub cpuset_source_cgroup_path: String,
+    pub cpuset_raw: String,
+    pub cpuset_inherited: bool,
+    pub cpuset_probe_chain_blake3: [u8; 32],
+    /// The full retained probe-chain entries (the address's preimage) — the orchestrator seals these
+    /// as a `CpusetProbeChainV1` artifact bound to this provenance.
+    pub cpuset_chain_entries: Vec<CpusetProbeEntryV1>,
+    /// The parsed runner attestation (venue fields + arch; candidate/role/spec/guest_set binding is
+    /// INJECTED by the orchestrator, which then computes `runner_attestation_blake3`).
+    pub runner_attestation: RunnerAttestationV1,
+    /// The RETAINED Phase-1 identity record for this provenance's arch. The orchestrator binds the
+    /// attestation to it (sets `phase1_production_binary_blake3` + `phase1_identity_record_blake3`) and
+    /// seals it as a mandatory package artifact for independent sealed-import re-checking.
+    pub phase1_identity_record: Phase1IdentityRecordV1,
 }
 
 /// Raw per-cell measured facts the venue records (never derived).
@@ -160,10 +268,56 @@ pub fn orchestrate_grid(
         .identity()
         .map_err(|e| format!("verifier-material identity: {e}"))?;
 
-    // Build provenance records (inject derived hashes); index proving hashes per arch.
+    // Build provenance records (inject derived hashes); index proving hashes per arch. For each
+    // provenance we ALSO build its retained artifacts (cpuset chain + runner attestation), inject the
+    // candidate/run/provenance binding, and derive the two content addresses FROM the artifacts — so
+    // the sealed package's addresses are provably backed by retained bytes, never asserted alone.
     let mut built_prov = Vec::with_capacity(provenances.len());
+    let mut built_chains: Vec<CpusetProbeChainV1> = Vec::with_capacity(provenances.len());
+    let mut built_atts: Vec<RunnerAttestationV1> = Vec::with_capacity(provenances.len());
+    let mut built_ids: Vec<Phase1IdentityRecordV1> = Vec::with_capacity(provenances.len());
     let mut proving_prov: HashMap<u8, [u8; 32]> = HashMap::new();
     for pf in provenances {
+        // The RETAINED Phase-1 identity record for this provenance, with the run spec + candidate/arch
+        // bound. Its domain-separated address anchors the attestation's continuity.
+        let mut rec = pf.phase1_identity_record.clone();
+        rec.b0_pre_spec_hash = spec;
+        rec.candidate = ids.candidate;
+        rec.arch = pf.arch;
+        // Inject the run/provenance binding into the venue-produced attestation, bind it to the
+        // retained record (continuity), and derive its address.
+        let mut att = pf.runner_attestation.clone();
+        att.candidate = ids.candidate;
+        att.provenance_role = pf.role;
+        att.b0_pre_spec_hash = spec;
+        att.r0_guest_set_hash = guest_set;
+        att.build_target_arch = pf.arch;
+        att.phase1_production_binary_blake3 = rec.production_binary_blake3;
+        att.phase1_identity_record_blake3 = rec.hash();
+        let runner_attestation_blake3 = att.hash();
+        // Build the retained cpuset-chain artifact bound to this provenance.
+        let chain = CpusetProbeChainV1 {
+            candidate: ids.candidate,
+            arch: pf.arch,
+            provenance_role: pf.role,
+            b0_pre_spec_hash: spec,
+            r0_guest_set_hash: guest_set,
+            leaf_scope: pf.cgroup_scope_label.clone(),
+            source_cgroup_path: pf.cpuset_source_cgroup_path.clone(),
+            summary_raw: pf.cpuset_raw.clone(),
+            summary_inherited: pf.cpuset_inherited,
+            summary_count: pf.configured_cpuset_core_limit,
+            entries: pf.cpuset_chain_entries.clone(),
+        };
+        chain.structural_check()?;
+        if chain.bound_address() != pf.cpuset_probe_chain_blake3 {
+            return Err(
+                "cpuset chain entries do not hash to the declared cpuset_probe_chain_blake3".into(),
+            );
+        }
+        // Runner continuity anchored to the retained record (the same check sealed import re-runs).
+        att.check_runner_continuity()?;
+        att.check_bound_identity_record(&rec)?;
         let p = ArchRunProvenanceV1 {
             provenance_role: pf.role,
             b0_pre_spec_hash: spec,
@@ -191,11 +345,19 @@ pub fn orchestrate_grid(
             cgroup_scope_label: pf.cgroup_scope_label.clone(),
             benchmark_harness_source_hash: pf.benchmark_harness_source_hash,
             raw_environment_capture_hash: pf.raw_environment_capture_hash,
+            cpuset_source_cgroup_path: pf.cpuset_source_cgroup_path.clone(),
+            cpuset_raw: pf.cpuset_raw.clone(),
+            cpuset_inherited: pf.cpuset_inherited,
+            cpuset_probe_chain_blake3: pf.cpuset_probe_chain_blake3,
+            runner_attestation_blake3,
         };
         if pf.role == ProvenanceRole::Proving {
             proving_prov.insert(pf.arch.to_repr(), p.provenance_hash());
         }
         built_prov.push(p);
+        built_chains.push(chain);
+        built_atts.push(att);
+        built_ids.push(rec);
     }
 
     let csh_of = |s: StatementIndex| match s {
@@ -311,6 +473,9 @@ pub fn orchestrate_grid(
         official_statement_hash_st: ids.official_statement_hash_st,
         verifier_material: ids.verifier_material.clone(),
         provenances: built_prov,
+        cpuset_chains: built_chains,
+        runner_attestations: built_atts,
+        identity_records: built_ids,
         envelopes,
         samples,
         rss,
@@ -332,12 +497,23 @@ pub fn serialize_vector(allowlist_canonical: &[u8], bundles: &[(Candidate, Evide
         out.extend_from_slice(b);
     }
     let mut out = Vec::new();
-    out.extend_from_slice(b"B0PREMEASVEC1");
+    // VEC3: retained-artifact lists (cpuset_chains, runner_attestations, identity_records), each
+    // aligned with the provenance list, so the sealed package carries the canonical bytes behind every
+    // content-address AND the authentic Phase-1 identity record — not the address/copied claim alone.
+    out.extend_from_slice(b"B0PREMEASVEC3");
     put(&mut out, allowlist_canonical);
     out.extend_from_slice(&(bundles.len() as u32).to_be_bytes());
     for (c, ev) in bundles {
         out.extend_from_slice(&c.to_repr().to_be_bytes());
-        for list in [&ev.samples, &ev.rss, &ev.envelopes, &ev.provenances] {
+        for list in [
+            &ev.samples,
+            &ev.rss,
+            &ev.envelopes,
+            &ev.provenances,
+            &ev.cpuset_chains,
+            &ev.runner_attestations,
+            &ev.identity_records,
+        ] {
             out.extend_from_slice(&(list.len() as u32).to_be_bytes());
             for r in list {
                 put(&mut out, r);
@@ -366,7 +542,7 @@ pub fn parse_vector(bytes: &[u8]) -> Result<MeasurementVector, String> {
         let n = u32_at(p)?;
         Ok(take(p, n)?.to_vec())
     };
-    if take(&mut p, 13)? != b"B0PREMEASVEC1" {
+    if take(&mut p, 13)? != b"B0PREMEASVEC3" {
         return Err("bad magic".into());
     }
     let allowlist = blob(&mut p)?;
@@ -376,8 +552,8 @@ pub fn parse_vector(bytes: &[u8]) -> Result<MeasurementVector, String> {
         let cb = take(&mut p, 2)?;
         let candidate = Candidate::from_repr(u16::from_be_bytes([cb[0], cb[1]]))
             .map_err(|_| "bad candidate".to_string())?;
-        let mut lists: Vec<Vec<Vec<u8>>> = Vec::with_capacity(4);
-        for _ in 0..4 {
+        let mut lists: Vec<Vec<Vec<u8>>> = Vec::with_capacity(7);
+        for _ in 0..7 {
             let count = u32_at(&mut p)?;
             let mut v = Vec::with_capacity(count);
             for _ in 0..count {
@@ -395,6 +571,9 @@ pub fn parse_vector(bytes: &[u8]) -> Result<MeasurementVector, String> {
                 rss: it.next().unwrap(),
                 envelopes: it.next().unwrap(),
                 provenances: it.next().unwrap(),
+                cpuset_chains: it.next().unwrap(),
+                runner_attestations: it.next().unwrap(),
+                identity_records: it.next().unwrap(),
                 verifier_material,
                 result_set,
             },
@@ -514,6 +693,29 @@ pub fn deterministic_demo_vector() -> MeasurementVector {
             cgroup_scope_label: "b0-pre.slice".into(),
             benchmark_harness_source_hash: dv(b"runner"),
             raw_environment_capture_hash: dv(b"envcap"),
+            cpuset_source_cgroup_path: "b0-pre.slice".into(),
+            cpuset_raw: if cpuset == 5 { "0-4" } else { "0-1" }.into(),
+            cpuset_inherited: false,
+            cpuset_probe_chain_blake3: leaf_cpuset_chain_address(
+                "b0-pre.slice",
+                if cpuset == 5 { "0-4" } else { "0-1" },
+            ),
+            cpuset_chain_entries: leaf_cpuset_chain(
+                "b0-pre.slice",
+                if cpuset == 5 { "0-4" } else { "0-1" },
+            ),
+            runner_attestation: synth_runner_attestation(
+                arch,
+                "eff3aae18b49969212c4c1493da20f97af195de2",
+                &|s: &str| dv(s.as_bytes()),
+            ),
+            phase1_identity_record: synth_phase1_identity_record(
+                Candidate::Sp1,
+                arch,
+                "eff3aae18b49969212c4c1493da20f97af195de2",
+                [0; 32],
+                dv(b"runner-blake3"),
+            ),
         }
     };
     let mut all_prov = Vec::new();
@@ -670,6 +872,27 @@ mod tests {
             cgroup_scope_label: "b0-pre.slice".into(),
             benchmark_harness_source_hash: h(b"harness"),
             raw_environment_capture_hash: h(b"envcap"),
+            cpuset_source_cgroup_path: "b0-pre.slice".into(),
+            cpuset_raw: if cpuset == 5 { "0-4" } else { "0-1" }.into(),
+            cpuset_inherited: false,
+            cpuset_probe_chain_blake3: leaf_cpuset_chain_address(
+                "b0-pre.slice",
+                if cpuset == 5 { "0-4" } else { "0-1" },
+            ),
+            cpuset_chain_entries: leaf_cpuset_chain(
+                "b0-pre.slice",
+                if cpuset == 5 { "0-4" } else { "0-1" },
+            ),
+            runner_attestation: synth_runner_attestation(arch, &"0".repeat(40), &|s: &str| {
+                h(s.as_bytes())
+            }),
+            phase1_identity_record: synth_phase1_identity_record(
+                Candidate::Sp1,
+                arch,
+                &"0".repeat(40),
+                [0; 32],
+                h(b"runner-blake3"),
+            ),
         }
     }
 

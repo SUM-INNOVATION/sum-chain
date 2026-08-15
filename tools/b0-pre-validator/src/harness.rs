@@ -25,12 +25,15 @@ use crate::enums::{
     Unit, VerifierMaterialRole,
 };
 use crate::schema::bench::{BenchmarkRssRecordV1, BenchmarkSampleV1};
+use crate::schema::cpuset_chain::CpusetProbeChainV1;
 use crate::schema::envelope::R0ProofArtifactEnvelopeV1;
+use crate::schema::identity_record::Phase1IdentityRecordV1;
 use crate::schema::provenance::{ArchRunProvenanceV1, DvfsProvenance};
 use crate::schema::result_set::{
     Aggregates, ArchProvenanceRef, Completeness, MeasuredProofRef, R0ResultSetV1, RssBundle,
     SampleBundle,
 };
+use crate::schema::runner_attestation::RunnerAttestationV1;
 use crate::schema::verifier_material::{VerifierMaterialEntry, VerifierMaterialManifestV1};
 use crate::tags::{RSSBUNDLE_PREFIX, SAMPLEBUNDLE_PREFIX};
 use crate::validation::nearest_rank_p99;
@@ -235,12 +238,61 @@ fn vmat_id(ids: Ids) -> [u8; 32] {
         .expect("harness verifier-material manifest encodes")
 }
 
-fn provenance(a: Arch, role: ProvenanceRole, ids: Ids, env: &Env) -> ArchRunProvenanceV1 {
+/// Build a synthetic provenance record PLUS its two retained artifacts, all mutually consistent
+/// (the two content addresses are derived FROM the artifacts, never placeholders).
+fn provenance(
+    a: Arch,
+    role: ProvenanceRole,
+    ids: Ids,
+    env: &Env,
+) -> (
+    ArchRunProvenanceV1,
+    CpusetProbeChainV1,
+    RunnerAttestationV1,
+    Phase1IdentityRecordV1,
+) {
     let r = match role {
         ProvenanceRole::Proving => env.proving,
         ProvenanceRole::Verification => env.verification,
     };
-    ArchRunProvenanceV1 {
+    let scope = env.cgroup_scope_label.clone();
+    let raw = format!("0-{}", r.cpuset.saturating_sub(1));
+    let entries = crate::measurement::leaf_cpuset_chain(&scope, &raw);
+    let cpuset_probe_chain_blake3 = crate::schema::provenance::cpuset_probe_chain_hash(&entries);
+    // The retained Phase-1 identity record (production_binary_blake3 == the synth runner_blake3).
+    let record = crate::measurement::synth_phase1_identity_record(
+        ids.candidate,
+        a,
+        &"0".repeat(40),
+        spec_hash(),
+        *blake3::hash(b"runner-blake3").as_bytes(),
+    );
+    // Attestation with the run/provenance binding injected + bound to the retained record.
+    let mut att = crate::measurement::synth_runner_attestation(a, &"0".repeat(40), &|s: &str| {
+        *blake3::hash(s.as_bytes()).as_bytes()
+    });
+    att.candidate = ids.candidate;
+    att.provenance_role = role;
+    att.b0_pre_spec_hash = spec_hash();
+    att.r0_guest_set_hash = guest_set_hash();
+    att.build_target_arch = a;
+    att.phase1_production_binary_blake3 = record.production_binary_blake3;
+    att.phase1_identity_record_blake3 = record.hash();
+    let runner_attestation_blake3 = att.hash();
+    let chain = CpusetProbeChainV1 {
+        candidate: ids.candidate,
+        arch: a,
+        provenance_role: role,
+        b0_pre_spec_hash: spec_hash(),
+        r0_guest_set_hash: guest_set_hash(),
+        leaf_scope: scope.clone(),
+        source_cgroup_path: scope.clone(),
+        summary_raw: raw.clone(),
+        summary_inherited: false,
+        summary_count: r.cpuset,
+        entries,
+    };
+    let p = ArchRunProvenanceV1 {
         provenance_role: role,
         b0_pre_spec_hash: spec_hash(),
         r0_guest_set_hash: guest_set_hash(),
@@ -270,7 +322,13 @@ fn provenance(a: Arch, role: ProvenanceRole, ids: Ids, env: &Env) -> ArchRunProv
         cgroup_scope_label: env.cgroup_scope_label.clone(),
         benchmark_harness_source_hash: env.harness_hash,
         raw_environment_capture_hash: env.envcap_hash,
-    }
+        cpuset_source_cgroup_path: scope,
+        cpuset_raw: raw,
+        cpuset_inherited: false,
+        cpuset_probe_chain_blake3,
+        runner_attestation_blake3,
+    };
+    (p, chain, att, record)
 }
 
 fn envelope(
@@ -405,6 +463,14 @@ pub struct AssemblyInput {
     pub official_statement_hash_st: [u8; 32],
     pub verifier_material: VerifierMaterialManifestV1,
     pub provenances: Vec<ArchRunProvenanceV1>,
+    /// Retained cpuset probe-chain artifacts, one per provenance (SAME order); the assembler binds
+    /// each to its provenance and rejects a mismatch before encoding.
+    pub cpuset_chains: Vec<CpusetProbeChainV1>,
+    /// Retained runner-attestation artifacts, one per provenance (SAME order).
+    pub runner_attestations: Vec<RunnerAttestationV1>,
+    /// Retained Phase-1 identity-record artifacts, one per provenance (SAME order); the assembler binds
+    /// each to its runner attestation and rejects a mismatch before encoding.
+    pub identity_records: Vec<Phase1IdentityRecordV1>,
     pub envelopes: Vec<R0ProofArtifactEnvelopeV1>,
     pub samples: Vec<BenchmarkSampleV1>,
     pub rss: Vec<BenchmarkRssRecordV1>,
@@ -648,17 +714,88 @@ pub fn assemble_result_set(input: &AssemblyInput) -> Result<Evidence, String> {
         failure_codes,
     };
 
+    // Retained artifacts: exactly one per provenance (SAME order), each bound to its provenance
+    // BEFORE encoding — the sealed package can never carry a chain/attestation that does not
+    // recompute to its provenance's address (the importer re-checks this from the bytes alone).
+    if input.cpuset_chains.len() != input.provenances.len() {
+        return Err("retained cpuset-chain count != provenance count".into());
+    }
+    if input.runner_attestations.len() != input.provenances.len() {
+        return Err("retained runner-attestation count != provenance count".into());
+    }
+    for (p, c) in input.provenances.iter().zip(&input.cpuset_chains) {
+        bind_cpuset_chain(c, p)?;
+    }
+    for (p, a) in input.provenances.iter().zip(&input.runner_attestations) {
+        bind_runner_attestation(a, p)?;
+    }
+    // Retained Phase-1 identity records: one per provenance; bind each runner attestation to its
+    // record (address + triple runner-binary equality + candidate/arch/measured-source/tooling/spec)
+    // BEFORE encoding, and require the exact identity set — the sealed package carries the authentic
+    // Phase-1 anchor, not a copied hash.
+    if input.identity_records.len() != input.provenances.len() {
+        return Err("retained identity-record count != provenance count".into());
+    }
+    for (a, r) in input
+        .runner_attestations
+        .iter()
+        .zip(&input.identity_records)
+    {
+        a.check_bound_identity_record(r)?;
+    }
+    // (The EXACT identity set is enforced by the producer's `validate_identity_set` on the mandatory
+    // input and re-enforced at sealed import in `verify_evidence`; the synthetic harness legitimately
+    // fingerprints a superset per candidate, so it is not gated in the shared assembler.)
+
     Ok(Evidence {
         samples: input.samples.iter().map(|s| s.encode()).collect(),
         rss: input.rss.iter().map(|r| r.encode()).collect(),
         envelopes: input.envelopes.iter().map(|e| e.encode()).collect(),
         provenances: input.provenances.iter().map(|p| p.encode()).collect(),
+        cpuset_chains: input.cpuset_chains.iter().map(|c| c.encode()).collect(),
+        runner_attestations: input
+            .runner_attestations
+            .iter()
+            .map(|a| a.encode())
+            .collect(),
+        identity_records: input.identity_records.iter().map(|r| r.encode()).collect(),
         verifier_material: input
             .verifier_material
             .encode()
             .map_err(|e| format!("verifier-material encode: {e}"))?,
         result_set: rs.encode(),
     })
+}
+
+/// The EXACT retained Phase-1 identity set for a candidate: distinct arches must be exactly the
+/// eligible set (Sp1 {x86_64, aarch64}, Risc0 {x86_64}); never Risc0/aarch64, missing, or extra.
+pub fn require_exact_identity_set(
+    candidate: Candidate,
+    records: &[Phase1IdentityRecordV1],
+) -> Result<(), String> {
+    use std::collections::BTreeSet;
+    let mut arches: BTreeSet<u8> = BTreeSet::new();
+    for r in records {
+        if r.candidate != candidate {
+            return Err("retained identity record candidate != bundle candidate".into());
+        }
+        if candidate == Candidate::Risc0 && r.arch == Arch::Aarch64 {
+            return Err("retained Risc0/aarch64 identity record; refused".into());
+        }
+        arches.insert(r.arch.to_repr());
+    }
+    let want: BTreeSet<u8> = match candidate {
+        Candidate::Sp1 => [Arch::X86_64.to_repr(), Arch::Aarch64.to_repr()]
+            .into_iter()
+            .collect(),
+        Candidate::Risc0 => [Arch::X86_64.to_repr()].into_iter().collect(),
+    };
+    if arches != want {
+        return Err(format!(
+            "retained identity set arches {arches:?} != required {want:?}"
+        ));
+    }
+    Ok(())
 }
 
 fn bundle_hash(prefix: &[u8], mut recs: Vec<RawRec>) -> ([u8; 32], u32) {
@@ -677,8 +814,68 @@ pub struct Evidence {
     pub rss: Vec<Vec<u8>>,
     pub envelopes: Vec<Vec<u8>>,
     pub provenances: Vec<Vec<u8>>,
+    /// Retained canonical `CpusetProbeChainV1` bytes, one per provenance (SAME order).
+    pub cpuset_chains: Vec<Vec<u8>>,
+    /// Retained canonical `RunnerAttestationV1` bytes, one per provenance (SAME order).
+    pub runner_attestations: Vec<Vec<u8>>,
+    /// Retained canonical `Phase1IdentityRecordV1` bytes, one per provenance (SAME order).
+    pub identity_records: Vec<Vec<u8>>,
     pub verifier_material: Vec<u8>,
     pub result_set: Vec<u8>,
+}
+
+/// Bind a retained cpuset-chain artifact to its provenance record (production side; the importer
+/// re-derives this independently). Structural rules + address + candidate/arch/run/summary binding.
+pub fn bind_cpuset_chain(
+    chain: &CpusetProbeChainV1,
+    p: &ArchRunProvenanceV1,
+) -> Result<(), String> {
+    chain.structural_check()?;
+    if chain.candidate != p.candidate
+        || chain.arch != p.arch
+        || chain.provenance_role != p.provenance_role
+        || chain.b0_pre_spec_hash != p.b0_pre_spec_hash
+        || chain.r0_guest_set_hash != p.r0_guest_set_hash
+    {
+        return Err(
+            "cpuset chain binding (candidate/arch/role/spec/guest_set) != provenance".into(),
+        );
+    }
+    if chain.source_cgroup_path != p.cpuset_source_cgroup_path
+        || chain.summary_raw != p.cpuset_raw
+        || chain.summary_inherited != p.cpuset_inherited
+        || chain.summary_count != p.configured_cpuset_core_limit
+    {
+        return Err("cpuset chain summary != provenance summary".into());
+    }
+    if chain.bound_address() != p.cpuset_probe_chain_blake3 {
+        return Err("cpuset chain address != provenance cpuset_probe_chain_blake3".into());
+    }
+    Ok(())
+}
+
+/// Bind a retained runner-attestation artifact to its provenance record.
+pub fn bind_runner_attestation(
+    att: &RunnerAttestationV1,
+    p: &ArchRunProvenanceV1,
+) -> Result<(), String> {
+    att.check_self_consistency()?;
+    // Runner continuity: the Phase-1 identity runner binary == the measurement runner binary.
+    att.check_runner_continuity()?;
+    if att.candidate != p.candidate
+        || att.provenance_role != p.provenance_role
+        || att.build_target_arch != p.arch
+        || att.b0_pre_spec_hash != p.b0_pre_spec_hash
+        || att.r0_guest_set_hash != p.r0_guest_set_hash
+    {
+        return Err(
+            "runner attestation binding (candidate/arch/role/spec/guest_set) != provenance".into(),
+        );
+    }
+    if att.hash() != p.runner_attestation_blake3 {
+        return Err("runner attestation address != provenance runner_attestation_blake3".into());
+    }
+    Ok(())
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -705,16 +902,22 @@ pub fn generate_candidate(candidate: Candidate) -> Evidence {
 fn generate_with(candidate: Candidate, env: &Env) -> Evidence {
     let ids = ids_for(candidate);
 
-    // Provenances (4: arch × role). Envelopes bind the PROVING provenance hash.
+    // Provenances (4: arch × role) + their retained artifacts. Envelopes bind the PROVING prov hash.
     let mut provenances = Vec::new();
+    let mut cpuset_chains = Vec::new();
+    let mut runner_attestations = Vec::new();
+    let mut identity_records = Vec::new();
     let mut proving_prov: HashMap<u8, [u8; 32]> = HashMap::new();
     for a in ARCHES {
         for role in [ProvenanceRole::Proving, ProvenanceRole::Verification] {
-            let p = provenance(a, role, ids, env);
+            let (p, chain, att, rec) = provenance(a, role, ids, env);
             if role == ProvenanceRole::Proving {
                 proving_prov.insert(a.to_repr(), p.provenance_hash());
             }
             provenances.push(p);
+            cpuset_chains.push(chain);
+            runner_attestations.push(att);
+            identity_records.push(rec);
         }
     }
 
@@ -799,6 +1002,9 @@ fn generate_with(candidate: Candidate, env: &Env) -> Evidence {
         official_statement_hash_st: stmt_hash(StatementIndex::SelectToken),
         verifier_material: verifier_material_for(ids),
         provenances,
+        cpuset_chains,
+        runner_attestations,
+        identity_records,
         envelopes,
         samples,
         rss: rss_records,
@@ -882,6 +1088,48 @@ pub fn verify_evidence(ev: &Evidence) -> Result<Recomputed, String> {
             );
         }
     }
+    // Retained artifacts: EXACTLY one cpuset-chain + one runner-attestation per provenance (SAME
+    // order). Decode each from the retained bytes, structurally re-validate, recompute its
+    // domain-separated address, and require it equals the bound provenance field + binds the same
+    // candidate/arch/run/provenance. A hash-only provenance field is thereby never trusted alone;
+    // missing/extra (count), malformed (decode), swapped (binding), mutated / well-formed-false hash
+    // (address) all refuse here.
+    if ev.cpuset_chains.len() != ev.provenances.len() {
+        return Err("retained cpuset-chain count != provenance count".into());
+    }
+    if ev.runner_attestations.len() != ev.provenances.len() {
+        return Err("retained runner-attestation count != provenance count".into());
+    }
+    if ev.identity_records.len() != ev.provenances.len() {
+        return Err("retained identity-record count != provenance count".into());
+    }
+    let mut artifact_keys: HashSet<(u8, u8)> = HashSet::new();
+    for (i, pb) in ev.provenances.iter().enumerate() {
+        let p = ArchRunProvenanceV1::decode_exact(pb).map_err(|e| format!("prov: {e}"))?;
+        let chain =
+            crate::schema::cpuset_chain::CpusetProbeChainV1::decode_exact(&ev.cpuset_chains[i])
+                .map_err(|e| format!("cpuset chain artifact: {e}"))?;
+        bind_cpuset_chain(&chain, &p).map_err(|e| format!("cpuset chain: {e}"))?;
+        let att = RunnerAttestationV1::decode_exact(&ev.runner_attestations[i])
+            .map_err(|e| format!("runner attestation artifact: {e}"))?;
+        bind_runner_attestation(&att, &p).map_err(|e| format!("runner attestation: {e}"))?;
+        // Sealed-import runner CONTINUITY, anchored to the INDEPENDENTLY-decoded retained Phase-1
+        // identity record: recompute its address, require it equals the attestation's bound address,
+        // and require production_binary_blake3 == phase1_production_binary_blake3 == runner_blake3 +
+        // the same candidate/arch/measured-source/tooling/spec. This per-provenance binding, together
+        // with the count check above, is the EXACT record↔provenance correspondence (a dropped/extra
+        // record fails the count; a swapped/cross-candidate/replaced record fails the binding). The
+        // eligible mapping (no Risc0/aarch64) is enforced by the producer's `validate_identity_set` on
+        // the mandatory input and by native-eligibility of the measurement cells.
+        let rec = Phase1IdentityRecordV1::decode_exact(&ev.identity_records[i])
+            .map_err(|e| format!("identity record artifact: {e}"))?;
+        att.check_bound_identity_record(&rec)
+            .map_err(|e| format!("runner continuity: {e}"))?;
+        if !artifact_keys.insert((p.arch.to_repr(), p.provenance_role.to_repr())) {
+            return Err("duplicate retained artifact (arch, role)".into());
+        }
+    }
+
     for ap in &rs.arch_provenance {
         match prov_h.get(&(ap.arch.to_repr(), ap.role.to_repr())) {
             Some(h) if *h == ap.provenance_hash => {}
@@ -1196,6 +1444,9 @@ mod tests {
             rss: ev.rss.clone(),
             envelopes: ev.envelopes.clone(),
             provenances: ev.provenances.clone(),
+            cpuset_chains: ev.cpuset_chains.clone(),
+            runner_attestations: ev.runner_attestations.clone(),
+            identity_records: ev.identity_records.clone(),
             verifier_material: ev.verifier_material.clone(),
             result_set: ev.result_set.clone(),
         }
@@ -1210,7 +1461,15 @@ mod tests {
 
     fn evidence_fingerprint(ev: &Evidence) -> String {
         let mut h = blake3::Hasher::new();
-        for v in [&ev.samples, &ev.rss, &ev.envelopes, &ev.provenances] {
+        for v in [
+            &ev.samples,
+            &ev.rss,
+            &ev.envelopes,
+            &ev.provenances,
+            &ev.cpuset_chains,
+            &ev.runner_attestations,
+            &ev.identity_records,
+        ] {
             for r in v {
                 h.update(r);
             }
@@ -1224,23 +1483,23 @@ mod tests {
     /// must not change a single output byte. These fingerprints of the FULL Evidence
     /// (every record + verifier material + result set) were frozen BEFORE the shared
     /// assembler existed; any drift here is a refactor regression, not a new golden.
-    /// (Re-frozen for the `ArchRunProvenanceV1` DVFS sum-type transition: only the
-    /// provenance records changed — their local version advanced to 2 and each carries
-    /// the DVFS tag byte — while every other record (samples/rss/envelopes/verifier
-    /// material/result set) stays at the unchanged global schema version 1. The
-    /// fingerprint moved because the embedded provenance bytes did; this is that one
+    /// (Re-frozen for the `ArchRunProvenanceV1` v3 transition: only the provenance records changed —
+    /// their local version advanced to 3 and each gained the effective-cpuset provenance summary +
+    /// probe-chain content address + runner-attestation content address — while every other record
+    /// (samples/rss/envelopes/verifier material/result set) stays at the unchanged global schema
+    /// version 1. The fingerprint moved because the embedded provenance bytes did; this is that one
     /// sanctioned move.)
     #[test]
     fn generate_output_is_byte_stable() {
         assert_eq!(
             evidence_fingerprint(&generate()),
-            "9992d256d46691f74ef7a7194e0f1dcc3bc7d208743b950f0e52fcc325d8aa1d",
-            "SP1 generate() output drifted from the frozen DVFS-transition bytes"
+            "4235b3c62aec81347c0a559ca22b9ac4333f2fc87c1fd93ec089f9b5f547a773",
+            "SP1 generate() output drifted from the frozen (retained cpuset+attestation+identity) bytes"
         );
         assert_eq!(
             evidence_fingerprint(&generate_candidate(Candidate::Risc0)),
-            "d767ec6e9a17e63f9d923a6e4519f21d487b310c12b84bcec2b720d14572520e",
-            "RISC0 generate_candidate() output drifted from the frozen DVFS-transition bytes"
+            "7f564c928acf37c7573c638d3f605013c2a9d217452e742e279fb351aa8fcaa0",
+            "RISC0 generate_candidate() output drifted from the frozen (retained cpuset+attestation+identity) bytes"
         );
     }
 
@@ -1254,6 +1513,105 @@ mod tests {
         let r = verify_evidence(&ev).expect("valid");
         assert!(r.qualification);
         assert_eq!(r.verifier_material_bytes, 292); // SP1's own per-candidate total
+    }
+
+    // Retained-artifact refusals on import: a hash-only provenance field is never trusted alone.
+    #[test]
+    fn retained_cpuset_chain_refusals() {
+        assert!(verify_evidence(&generate()).is_ok());
+        // missing (count)
+        let mut e = clone_ev(&generate());
+        e.cpuset_chains.pop();
+        assert!(verify_evidence(&e)
+            .unwrap_err()
+            .contains("cpuset-chain count"));
+        // extra (count)
+        let mut e = clone_ev(&generate());
+        e.cpuset_chains.push(e.cpuset_chains[0].clone());
+        assert!(verify_evidence(&e)
+            .unwrap_err()
+            .contains("cpuset-chain count"));
+        // mutated bytes (== a well-formed-false address: recomputed != declared)
+        let mut e = clone_ev(&generate());
+        let n = e.cpuset_chains[0].len();
+        e.cpuset_chains[0][n - 1] ^= 1;
+        assert!(verify_evidence(&e).is_err());
+        // swapped across (arch, role) → binding refuses
+        let mut e = clone_ev(&generate());
+        e.cpuset_chains.swap(0, 3);
+        assert!(verify_evidence(&e)
+            .unwrap_err()
+            .to_lowercase()
+            .contains("cpuset chain"));
+    }
+
+    #[test]
+    fn retained_runner_attestation_refusals() {
+        // missing (count)
+        let mut e = clone_ev(&generate());
+        e.runner_attestations.pop();
+        assert!(verify_evidence(&e)
+            .unwrap_err()
+            .contains("runner-attestation count"));
+        // mutated bytes → recomputed address != declared
+        let mut e = clone_ev(&generate());
+        let n = e.runner_attestations[0].len();
+        e.runner_attestations[0][n - 1] ^= 1;
+        assert!(verify_evidence(&e).is_err());
+        // swapped across (arch, role) → binding refuses
+        let mut e = clone_ev(&generate());
+        e.runner_attestations.swap(0, 3);
+        assert!(verify_evidence(&e)
+            .unwrap_err()
+            .to_lowercase()
+            .contains("runner attestation"));
+    }
+
+    // Sealed-import retained Phase-1 identity-record refusals (the continuity anchor).
+    #[test]
+    fn retained_identity_record_refusals() {
+        assert!(verify_evidence(&generate()).is_ok());
+        // dropped record (count)
+        let mut e = clone_ev(&generate());
+        e.identity_records.pop();
+        assert!(verify_evidence(&e)
+            .unwrap_err()
+            .contains("identity-record count"));
+        // extra record (count)
+        let mut e = clone_ev(&generate());
+        e.identity_records.push(e.identity_records[0].clone());
+        assert!(verify_evidence(&e)
+            .unwrap_err()
+            .contains("identity-record count"));
+        // tampered record bytes → address no longer matches the attestation's bound address
+        let mut e = clone_ev(&generate());
+        let n = e.identity_records[0].len();
+        e.identity_records[0][n - 1] ^= 1;
+        assert!(verify_evidence(&e).is_err());
+        // swapped records across (arch, role) → binding (candidate/arch or address) refuses
+        let mut e = clone_ev(&generate());
+        e.identity_records.swap(0, 3);
+        assert!(verify_evidence(&e).is_err());
+        // cross-candidate: a record from candidate B cannot back candidate A's attestation
+        let a = generate();
+        let b = generate_candidate(Candidate::Risc0);
+        let mut e = clone_ev(&a);
+        e.identity_records[0] = b.identity_records[0].clone();
+        assert!(verify_evidence(&e).is_err());
+    }
+
+    // Cross-candidate substitution: a chain/attestation from candidate B cannot back candidate A's
+    // provenance (the candidate binding differs).
+    #[test]
+    fn cross_candidate_artifact_substitution_refused() {
+        let a = generate(); // Sp1
+        let b = generate_candidate(Candidate::Risc0);
+        let mut e = clone_ev(&a);
+        e.cpuset_chains[0] = b.cpuset_chains[0].clone();
+        assert!(verify_evidence(&e).is_err());
+        let mut e2 = clone_ev(&a);
+        e2.runner_attestations[0] = b.runner_attestations[0].clone();
+        assert!(verify_evidence(&e2).is_err());
     }
 
     /// TEST_ONLY synthetic RISC Zero material total: the Σ of the four synthetic

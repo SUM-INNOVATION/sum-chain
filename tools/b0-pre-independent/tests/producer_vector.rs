@@ -33,15 +33,15 @@ impl<'a> Rd<'a> {
 
 fn parse(bytes: &[u8]) -> (Vec<u8>, Vec<(u16, harness::Evidence)>) {
     let mut r = Rd { b: bytes, p: 0 };
-    assert_eq!(r.take(13), b"B0PREMEASVEC1", "bad magic");
+    assert_eq!(r.take(13), b"B0PREMEASVEC3", "bad magic");
     let allowlist = r.blob();
     let n = r.u32();
     let mut bundles = Vec::new();
     for _ in 0..n {
         let cb = r.take(2);
         let candidate = u16::from_be_bytes([cb[0], cb[1]]);
-        let mut lists: Vec<Vec<Vec<u8>>> = Vec::with_capacity(4);
-        for _ in 0..4 {
+        let mut lists: Vec<Vec<Vec<u8>>> = Vec::with_capacity(7);
+        for _ in 0..7 {
             let count = r.u32();
             let mut v = Vec::with_capacity(count);
             for _ in 0..count {
@@ -59,6 +59,9 @@ fn parse(bytes: &[u8]) -> (Vec<u8>, Vec<(u16, harness::Evidence)>) {
                 rss: it.next().unwrap(),
                 envelopes: it.next().unwrap(),
                 provenances: it.next().unwrap(),
+                cpuset_chains: it.next().unwrap(),
+                runner_attestations: it.next().unwrap(),
+                identity_records: it.next().unwrap(),
                 verifier_material,
                 result_set,
             },
@@ -125,6 +128,9 @@ fn independent_rejects_tampered_producer_vector() {
         rss: sp1.rss.clone(),
         envelopes: sp1.envelopes.clone(),
         provenances: sp1.provenances.clone(),
+        cpuset_chains: sp1.cpuset_chains.clone(),
+        runner_attestations: sp1.runner_attestations.clone(),
+        identity_records: sp1.identity_records.clone(),
         verifier_material: sp1.verifier_material.clone(),
         result_set: sp1.result_set.clone(),
     };
@@ -132,5 +138,79 @@ fn independent_rejects_tampered_producer_vector() {
     assert!(
         harness::verify_evidence(&m).is_err(),
         "tampered sample rejected"
+    );
+
+    // Retained-artifact refusals (independent import): a hash-only provenance field is not enough.
+    let mk = || harness::Evidence {
+        samples: sp1.samples.clone(),
+        rss: sp1.rss.clone(),
+        envelopes: sp1.envelopes.clone(),
+        provenances: sp1.provenances.clone(),
+        cpuset_chains: sp1.cpuset_chains.clone(),
+        runner_attestations: sp1.runner_attestations.clone(),
+        identity_records: sp1.identity_records.clone(),
+        verifier_material: sp1.verifier_material.clone(),
+        result_set: sp1.result_set.clone(),
+    };
+    // dropped chain (count)
+    let mut m = mk();
+    m.cpuset_chains.pop();
+    assert!(
+        harness::verify_evidence(&m).is_err(),
+        "missing cpuset chain rejected"
+    );
+    // mutated chain byte (recomputed address != declared)
+    let mut m = mk();
+    let n = m.cpuset_chains[0].len();
+    m.cpuset_chains[0][n - 1] ^= 1;
+    assert!(
+        harness::verify_evidence(&m).is_err(),
+        "mutated cpuset chain rejected"
+    );
+    // swapped chains across (arch, role) → binding
+    let mut m = mk();
+    m.cpuset_chains.swap(0, 3);
+    assert!(
+        harness::verify_evidence(&m).is_err(),
+        "swapped cpuset chains rejected"
+    );
+    // mutated runner attestation byte
+    let mut m = mk();
+    let n = m.runner_attestations[0].len();
+    m.runner_attestations[0][n - 1] ^= 1;
+    assert!(
+        harness::verify_evidence(&m).is_err(),
+        "mutated runner attestation rejected"
+    );
+    // dropped attestation (count)
+    let mut m = mk();
+    m.runner_attestations.pop();
+    assert!(
+        harness::verify_evidence(&m).is_err(),
+        "missing runner attestation rejected"
+    );
+
+    // Retained Phase-1 identity-record refusals (independent sealed-import continuity anchor).
+    // dropped record (count)
+    let mut m = mk();
+    m.identity_records.pop();
+    assert!(
+        harness::verify_evidence(&m).is_err(),
+        "missing identity record rejected"
+    );
+    // tampered record bytes (address != attestation bound address)
+    let mut m = mk();
+    let n = m.identity_records[0].len();
+    m.identity_records[0][n - 1] ^= 1;
+    assert!(
+        harness::verify_evidence(&m).is_err(),
+        "tampered identity record rejected"
+    );
+    // swapped records across (arch, role) → binding
+    let mut m = mk();
+    m.identity_records.swap(0, 3);
+    assert!(
+        harness::verify_evidence(&m).is_err(),
+        "swapped identity records rejected"
     );
 }
