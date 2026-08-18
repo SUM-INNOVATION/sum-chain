@@ -18,7 +18,7 @@ for s in lib.sh verify_pins.sh run_authoritative.sh measure_fragment.sh derive_g
          tests/smoke_guards.test.sh tests/smoke_orchestration.test.sh tests/verified_extraction.test.sh tests/provisioning_recipe.test.sh tests/cargo_audit_global_cache.test.sh \
          tests/pin_url_policy.test.sh tests/oci_platform.test.sh tests/tool_identity_arch.test.sh \
          tests/apt_pins.test.sh tests/tool_identity_threading.test.sh tests/oci_daemon_bridge.test.sh \
-         tests/build_reproducibility.test.sh tests/runnable_ref_sidecar.test.sh tests/rustup_components.test.sh \
+         tests/build_reproducibility.test.sh tests/runnable_ref_sidecar.test.sh tests/rustup_components.test.sh tests/runner_path_independence.test.sh double_build_runner.sh b0_rustc_remap_wrapper.sh \
          tests/builder_capability.test.sh tests/e2e_v2_produce_chain.test.sh tests/lifecycle_mode.test.sh tests/toolchain_authority.test.sh tests/lock_reconciliation.test.sh tests/committed_lock_authority.test.sh tests/run.sh; do
   f="$SCRIPTS/$s"
   [ -f "$f" ] || continue
@@ -46,6 +46,7 @@ if command -v shellcheck >/dev/null 2>&1; then
       "$SCRIPTS/tests/apt_pins.test.sh" "$SCRIPTS/tests/tool_identity_threading.test.sh" \
       "$SCRIPTS/tests/oci_daemon_bridge.test.sh" "$SCRIPTS/tests/build_reproducibility.test.sh" \
       "$SCRIPTS/tests/runnable_ref_sidecar.test.sh" "$SCRIPTS/tests/rustup_components.test.sh" \
+      "$SCRIPTS/tests/runner_path_independence.test.sh" "$SCRIPTS/double_build_runner.sh" "$SCRIPTS/b0_rustc_remap_wrapper.sh" \
       "$SCRIPTS/tests/lifecycle_mode.test.sh" "$SCRIPTS/measure_fragment.sh" "$SCRIPTS/derive_guest_set.sh" "$SCRIPTS/tests/toolchain_authority.test.sh" \
       "$SCRIPTS/make_validation_bundle.sh" "$SCRIPTS/tooling_pathset.sh" \
       "$SCRIPTS/docker_firewall.sh" "$SCRIPTS/validate_cgroup_measurement.sh" "$SCRIPTS/probe_cgroup_privilege.sh" \
@@ -103,6 +104,10 @@ bash "$HERE/apt_pins.test.sh"          || rc=1
 bash "$HERE/tool_identity_threading.test.sh" || rc=1
 bash "$HERE/oci_daemon_bridge.test.sh" || rc=1
 bash "$HERE/build_reproducibility.test.sh"   || rc=1
+# Runner path-independence recipe guards: source-level controls + fast pre-build refusal negatives
+# (bad flags, non-hex identities, non-exec wrapper, symlink/identical source roots, ambient RUSTFLAGS).
+# The empirical two-build byte-identity runs on Linux (Docker gate) + CI's real-backend double-build.
+bash "$HERE/runner_path_independence.test.sh" || rc=1
 bash "$HERE/runnable_ref_sidecar.test.sh"    || rc=1
 bash "$HERE/rustup_components.test.sh"       || rc=1
 # Opt-in builder-image capability preflight negatives (SKIPs unless B0PRE_DOCKER_IT=1 + a daemon).

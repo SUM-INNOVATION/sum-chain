@@ -250,6 +250,11 @@ fn provenance(
     CpusetProbeChainV1,
     RunnerAttestationV1,
     Phase1IdentityRecordV1,
+    crate::schema::runner_build_recipe::RunnerBuildRecipeV1,
+    crate::schema::rustc_invocation_inventory::RustcInvocationInventoryV1,
+    crate::schema::rustc_invocation_inventory::RustcInvocationInventoryV1,
+    crate::schema::runner_double_build_proof::RunnerDoubleBuildProofV1,
+    crate::schema::runner_leakage_report::RunnerLeakageReportV1,
 ) {
     let r = match role {
         ProvenanceRole::Proving => env.proving,
@@ -278,6 +283,22 @@ fn provenance(
     att.build_target_arch = a;
     att.phase1_production_binary_blake3 = record.production_binary_blake3;
     att.phase1_identity_record_blake3 = record.hash();
+    // Retained runner path-independence five-artifact set (built for THIS candidate/arch); set the
+    // attestation's v6 fields to their addresses so `check_bound_runner_recipe` binds them.
+    let (recipe, inventory_a, inventory_b, proof, leakage) =
+        crate::measurement::synth_runner_recipe_artifacts(
+            ids.candidate,
+            a,
+            &"0".repeat(40),
+            &|s: &str| *blake3::hash(s.as_bytes()).as_bytes(),
+        );
+    att.runner_build_recipe_blake3 = recipe.hash();
+    att.rustc_invocation_inventory_a_blake3 = inventory_a.hash();
+    att.rustc_invocation_inventory_b_blake3 = inventory_b.hash();
+    att.runner_double_build_proof_blake3 = proof.hash();
+    att.runner_leakage_report_blake3 = leakage.hash();
+    att.per_arch_toolchain_identity = recipe.per_arch_toolchain_identity;
+    att.runner_build_recipe_id = recipe.recipe_id;
     let runner_attestation_blake3 = att.hash();
     let chain = CpusetProbeChainV1 {
         candidate: ids.candidate,
@@ -328,7 +349,17 @@ fn provenance(
         cpuset_probe_chain_blake3,
         runner_attestation_blake3,
     };
-    (p, chain, att, record)
+    (
+        p,
+        chain,
+        att,
+        record,
+        recipe,
+        inventory_a,
+        inventory_b,
+        proof,
+        leakage,
+    )
 }
 
 fn envelope(
@@ -471,6 +502,15 @@ pub struct AssemblyInput {
     /// Retained Phase-1 identity-record artifacts, one per provenance (SAME order); the assembler binds
     /// each to its runner attestation and rejects a mismatch before encoding.
     pub identity_records: Vec<Phase1IdentityRecordV1>,
+    /// Retained runner path-independence artifacts, one per provenance (SAME order): build recipe,
+    /// build-A + build-B rustc invocation inventories, double-build proof, leakage report. The assembler
+    /// binds each set to its runner attestation (`check_bound_runner_recipe`) before encoding.
+    pub recipes: Vec<crate::schema::runner_build_recipe::RunnerBuildRecipeV1>,
+    pub inventories_a: Vec<crate::schema::rustc_invocation_inventory::RustcInvocationInventoryV1>,
+    pub inventories_b: Vec<crate::schema::rustc_invocation_inventory::RustcInvocationInventoryV1>,
+    pub double_build_proofs:
+        Vec<crate::schema::runner_double_build_proof::RunnerDoubleBuildProofV1>,
+    pub leakage_reports: Vec<crate::schema::runner_leakage_report::RunnerLeakageReportV1>,
     pub envelopes: Vec<R0ProofArtifactEnvelopeV1>,
     pub samples: Vec<BenchmarkSampleV1>,
     pub rss: Vec<BenchmarkRssRecordV1>,
@@ -743,6 +783,25 @@ pub fn assemble_result_set(input: &AssemblyInput) -> Result<Evidence, String> {
     {
         a.check_bound_identity_record(r)?;
     }
+    // Retained runner path-independence set: one per provenance; bind each runner attestation to its
+    // (recipe, inventory A, inventory B, double-build proof, leakage) via `check_bound_runner_recipe`.
+    if input.recipes.len() != input.provenances.len()
+        || input.inventories_a.len() != input.provenances.len()
+        || input.inventories_b.len() != input.provenances.len()
+        || input.double_build_proofs.len() != input.provenances.len()
+        || input.leakage_reports.len() != input.provenances.len()
+    {
+        return Err("retained runner-recipe artifact count != provenance count".into());
+    }
+    for (i, a) in input.runner_attestations.iter().enumerate() {
+        a.check_bound_runner_recipe(
+            &input.recipes[i],
+            &input.inventories_a[i],
+            &input.inventories_b[i],
+            &input.double_build_proofs[i],
+            &input.leakage_reports[i],
+        )?;
+    }
     // (The EXACT identity set is enforced by the producer's `validate_identity_set` on the mandatory
     // input and re-enforced at sealed import in `verify_evidence`; the synthetic harness legitimately
     // fingerprints a superset per candidate, so it is not gated in the shared assembler.)
@@ -759,6 +818,15 @@ pub fn assemble_result_set(input: &AssemblyInput) -> Result<Evidence, String> {
             .map(|a| a.encode())
             .collect(),
         identity_records: input.identity_records.iter().map(|r| r.encode()).collect(),
+        recipes: input.recipes.iter().map(|r| r.encode()).collect(),
+        inventories_a: input.inventories_a.iter().map(|r| r.encode()).collect(),
+        inventories_b: input.inventories_b.iter().map(|r| r.encode()).collect(),
+        double_build_proofs: input
+            .double_build_proofs
+            .iter()
+            .map(|r| r.encode())
+            .collect(),
+        leakage_reports: input.leakage_reports.iter().map(|r| r.encode()).collect(),
         verifier_material: input
             .verifier_material
             .encode()
@@ -820,6 +888,16 @@ pub struct Evidence {
     pub runner_attestations: Vec<Vec<u8>>,
     /// Retained canonical `Phase1IdentityRecordV1` bytes, one per provenance (SAME order).
     pub identity_records: Vec<Vec<u8>>,
+    /// Retained canonical `RunnerBuildRecipeV1` bytes, one per provenance (SAME order).
+    pub recipes: Vec<Vec<u8>>,
+    /// Retained build-A `RustcInvocationInventoryV1` bytes, one per provenance (SAME order).
+    pub inventories_a: Vec<Vec<u8>>,
+    /// Retained build-B `RustcInvocationInventoryV1` bytes, one per provenance (SAME order).
+    pub inventories_b: Vec<Vec<u8>>,
+    /// Retained canonical `RunnerDoubleBuildProofV1` bytes, one per provenance (SAME order).
+    pub double_build_proofs: Vec<Vec<u8>>,
+    /// Retained canonical `RunnerLeakageReportV1` bytes, one per provenance (SAME order).
+    pub leakage_reports: Vec<Vec<u8>>,
     pub verifier_material: Vec<u8>,
     pub result_set: Vec<u8>,
 }
@@ -907,10 +985,16 @@ fn generate_with(candidate: Candidate, env: &Env) -> Evidence {
     let mut cpuset_chains = Vec::new();
     let mut runner_attestations = Vec::new();
     let mut identity_records = Vec::new();
+    let mut recipes = Vec::new();
+    let mut inventories_a = Vec::new();
+    let mut inventories_b = Vec::new();
+    let mut double_build_proofs = Vec::new();
+    let mut leakage_reports = Vec::new();
     let mut proving_prov: HashMap<u8, [u8; 32]> = HashMap::new();
     for a in ARCHES {
         for role in [ProvenanceRole::Proving, ProvenanceRole::Verification] {
-            let (p, chain, att, rec) = provenance(a, role, ids, env);
+            let (p, chain, att, rec, recipe, inv_a, inv_b, proof, leak) =
+                provenance(a, role, ids, env);
             if role == ProvenanceRole::Proving {
                 proving_prov.insert(a.to_repr(), p.provenance_hash());
             }
@@ -918,6 +1002,11 @@ fn generate_with(candidate: Candidate, env: &Env) -> Evidence {
             cpuset_chains.push(chain);
             runner_attestations.push(att);
             identity_records.push(rec);
+            recipes.push(recipe);
+            inventories_a.push(inv_a);
+            inventories_b.push(inv_b);
+            double_build_proofs.push(proof);
+            leakage_reports.push(leak);
         }
     }
 
@@ -1005,6 +1094,11 @@ fn generate_with(candidate: Candidate, env: &Env) -> Evidence {
         cpuset_chains,
         runner_attestations,
         identity_records,
+        recipes,
+        inventories_a,
+        inventories_b,
+        double_build_proofs,
+        leakage_reports,
         envelopes,
         samples,
         rss: rss_records,
@@ -1103,6 +1197,14 @@ pub fn verify_evidence(ev: &Evidence) -> Result<Recomputed, String> {
     if ev.identity_records.len() != ev.provenances.len() {
         return Err("retained identity-record count != provenance count".into());
     }
+    if ev.recipes.len() != ev.provenances.len()
+        || ev.inventories_a.len() != ev.provenances.len()
+        || ev.inventories_b.len() != ev.provenances.len()
+        || ev.double_build_proofs.len() != ev.provenances.len()
+        || ev.leakage_reports.len() != ev.provenances.len()
+    {
+        return Err("retained runner-recipe artifact count != provenance count".into());
+    }
     let mut artifact_keys: HashSet<(u8, u8)> = HashSet::new();
     for (i, pb) in ev.provenances.iter().enumerate() {
         let p = ArchRunProvenanceV1::decode_exact(pb).map_err(|e| format!("prov: {e}"))?;
@@ -1125,6 +1227,34 @@ pub fn verify_evidence(ev: &Evidence) -> Result<Recomputed, String> {
             .map_err(|e| format!("identity record artifact: {e}"))?;
         att.check_bound_identity_record(&rec)
             .map_err(|e| format!("runner continuity: {e}"))?;
+        // Sealed-import runner PATH-INDEPENDENCE, anchored to the INDEPENDENTLY-decoded retained
+        // five-artifact set: recipe (exact bytes), build-A + build-B inventories (exact remap argv +
+        // record-address agreement), double-build proof (runner A==B==attested; RISC0 guest A==B), and
+        // the cross-bound leakage report. Re-run the SAME binding the assembler enforced at production.
+        let recipe =
+            crate::schema::runner_build_recipe::RunnerBuildRecipeV1::decode_exact(&ev.recipes[i])
+                .map_err(|e| format!("runner build recipe artifact: {e}"))?;
+        let inv_a =
+            crate::schema::rustc_invocation_inventory::RustcInvocationInventoryV1::decode_exact(
+                &ev.inventories_a[i],
+            )
+            .map_err(|e| format!("build-A invocation inventory artifact: {e}"))?;
+        let inv_b =
+            crate::schema::rustc_invocation_inventory::RustcInvocationInventoryV1::decode_exact(
+                &ev.inventories_b[i],
+            )
+            .map_err(|e| format!("build-B invocation inventory artifact: {e}"))?;
+        let proof =
+            crate::schema::runner_double_build_proof::RunnerDoubleBuildProofV1::decode_exact(
+                &ev.double_build_proofs[i],
+            )
+            .map_err(|e| format!("runner double-build proof artifact: {e}"))?;
+        let leakage = crate::schema::runner_leakage_report::RunnerLeakageReportV1::decode_exact(
+            &ev.leakage_reports[i],
+        )
+        .map_err(|e| format!("runner leakage report artifact: {e}"))?;
+        att.check_bound_runner_recipe(&recipe, &inv_a, &inv_b, &proof, &leakage)
+            .map_err(|e| format!("runner path-independence: {e}"))?;
         if !artifact_keys.insert((p.arch.to_repr(), p.provenance_role.to_repr())) {
             return Err("duplicate retained artifact (arch, role)".into());
         }
@@ -1447,6 +1577,11 @@ mod tests {
             cpuset_chains: ev.cpuset_chains.clone(),
             runner_attestations: ev.runner_attestations.clone(),
             identity_records: ev.identity_records.clone(),
+            recipes: ev.recipes.clone(),
+            inventories_a: ev.inventories_a.clone(),
+            inventories_b: ev.inventories_b.clone(),
+            double_build_proofs: ev.double_build_proofs.clone(),
+            leakage_reports: ev.leakage_reports.clone(),
             verifier_material: ev.verifier_material.clone(),
             result_set: ev.result_set.clone(),
         }
@@ -1469,6 +1604,11 @@ mod tests {
             &ev.cpuset_chains,
             &ev.runner_attestations,
             &ev.identity_records,
+            &ev.recipes,
+            &ev.inventories_a,
+            &ev.inventories_b,
+            &ev.double_build_proofs,
+            &ev.leakage_reports,
         ] {
             for r in v {
                 h.update(r);
@@ -1483,23 +1623,29 @@ mod tests {
     /// must not change a single output byte. These fingerprints of the FULL Evidence
     /// (every record + verifier material + result set) were frozen BEFORE the shared
     /// assembler existed; any drift here is a refactor regression, not a new golden.
-    /// (Re-frozen for the `ArchRunProvenanceV1` v3 transition: only the provenance records changed —
-    /// their local version advanced to 3 and each gained the effective-cpuset provenance summary +
-    /// probe-chain content address + runner-attestation content address — while every other record
-    /// (samples/rss/envelopes/verifier material/result set) stays at the unchanged global schema
-    /// version 1. The fingerprint moved because the embedded provenance bytes did; this is that one
+    /// (Re-frozen for the RUNNER PATH-INDEPENDENCE v5 transition: the runner attestation gained its five
+    /// v5 fields (the three retained-artifact addresses + per-arch toolchain identity + structural recipe
+    /// id) and the Evidence gained three retained per-provenance artifact lists — recipes / inventories /
+    /// leakage_reports — now folded into this fingerprint. The attestation + the new lists moved the
+    /// bytes; every other record stays at the unchanged global schema version 1. This is that one
     /// sanctioned move.)
+    ///
+    /// (Re-frozen for the CANONICAL-BUILD-PATH correction: the runner recipe is v3 — it gained
+    /// `canonical_build_path`, renamed each side's `source_from` -> `original_root`, and dropped the
+    /// source remap so each side carries TWO remaps (cargo, target). The double-build proof is v2 — each
+    /// side gained the authenticated `origin_manifest_blake3` + `materialized_manifest_blake3` addresses
+    /// (4-way source-input equality). These moved the recipe/proof bytes folded into this fingerprint.)
     #[test]
     fn generate_output_is_byte_stable() {
         assert_eq!(
             evidence_fingerprint(&generate()),
-            "4235b3c62aec81347c0a559ca22b9ac4333f2fc87c1fd93ec089f9b5f547a773",
-            "SP1 generate() output drifted from the frozen (retained cpuset+attestation+identity) bytes"
+            "752fdf3a8e17b8309ac557830c313d03b2f652cfa7729e8d16855e4a2d0b403e",
+            "SP1 generate() output drifted from the frozen (retained cpuset+attestation+identity+recipe) bytes"
         );
         assert_eq!(
             evidence_fingerprint(&generate_candidate(Candidate::Risc0)),
-            "7f564c928acf37c7573c638d3f605013c2a9d217452e742e279fb351aa8fcaa0",
-            "RISC0 generate_candidate() output drifted from the frozen (retained cpuset+attestation+identity) bytes"
+            "10762fa7de658b66fccc942d8b43888548b2f4c7b9aa1f29a9c96884b82404ce",
+            "RISC0 generate_candidate() output drifted from the frozen (retained cpuset+attestation+identity+recipe) bytes"
         );
     }
 

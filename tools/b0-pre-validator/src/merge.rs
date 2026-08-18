@@ -208,6 +208,49 @@ mod tests {
             "docker_argv_blake3": h("d0"), "reproducibility_pair_blake3": h("2a")
         })
     }
+    fn runner_recipe(arch: &str) -> Value {
+        let enc_hex = |t: &str| -> String {
+            use std::fmt::Write as _;
+            let s = format!("--remap-path-prefix=/b0-input/{t}/cargo=/b0/cargo\u{1f}--remap-path-prefix=/b0-input/{t}/target=/b0/target");
+            s.bytes().fold(String::new(), |mut acc, b| {
+                let _ = write!(acc, "{b:02x}");
+                acc
+            })
+        };
+        let rec_addr = |t: &str| -> String {
+            let body = format!("b0-final-rustc-invocation/v2\nkind=compile\nremap_arg=--remap-path-prefix=/b0-input/{t}/cargo=/b0/cargo\nremap_arg=--remap-path-prefix=/b0-input/{t}/target=/b0/target");
+            blake3::hash(body.as_bytes()).to_hex().to_string()
+        };
+        let side = |t: &str, s: u64, e: u64| {
+            json!({
+                "original_root": format!("/b0-input/{t}/tooling"),
+                "cargo_from": format!("/b0-input/{t}/cargo"),
+                "target_from": format!("/b0-input/{t}/target"),
+                "encoded_rustflags_hex": enc_hex(t),
+                "runner_sha256": h("52"), "runner_blake3": h("53"),
+                "guest_image_id": h("e4"), "guest_methods_blake3": h("e5"),
+                "origin_manifest_blake3": h("77"), "materialized_manifest_blake3": h("77"),
+                "start_unix": s, "end_unix": e,
+                "invocations": [{"kind": "compile", "remap_args": [
+                    format!("--remap-path-prefix=/b0-input/{t}/cargo=/b0/cargo"),
+                    format!("--remap-path-prefix=/b0-input/{t}/target=/b0/target")],
+                    "record_address": rec_addr(t)}]
+            })
+        };
+        json!({
+            "candidate": "sp1", "arch": arch,
+            "manifest_path": "tools/b0-pre-measure-sp1/Cargo.toml",
+            "artifact_path": "release/b0-pre-measure-sp1", "cargo_ident": "cargo", "b0_venue_embed": "0",
+            "canonical_build_path": "/b0/tooling",
+            "per_arch_toolchain_identity": h("e2"), "wrapper_blake3": h("e3"),
+            "build_argv": ["cargo","build","--release","--locked","--features","real-backend","--manifest-path","tools/b0-pre-measure-sp1/Cargo.toml"],
+            "build_env": [["BUILD_GIT_SHA", crate::guest_set::RATIFIED_SOURCE_COMMIT], ["SOURCE_DATE_EPOCH","0"], ["B0_VENUE_EMBED","0"]],
+            "build_a": side("a", 100, 200), "build_b": side("b", 200, 300), "byte_equal": true,
+            "leakage_refused_prefixes": ["/b0-input/a/tooling","/b0-input/a/cargo","/b0-input/a/target","/b0-input/b/tooling","/b0-input/b/cargo","/b0-input/b/target","/tmp/b0-evid"],
+            "leakage_permitted_prefixes": ["/b0/cargo", "/b0/target", "/b0/tooling"],
+            "leakage_clean": true, "evidence_root": "/tmp/b0-evid"
+        })
+    }
     fn prov(arch: &str, role: &str) -> Value {
         let chain = json!([{"cgroup_path": "/b0.slice", "order": 0, "first": cpuset_obs(), "second": cpuset_obs()}]);
         json!({
@@ -222,7 +265,8 @@ mod tests {
             "raw_environment_capture_hash": h("d2"),
             "cpuset_source_cgroup_path": "/b0.slice", "cpuset_raw": "0-7", "cpuset_inherited": false,
             "cpuset_probe_chain": chain,
-            "runner_attestation": runner_attestation(arch)
+            "runner_attestation": runner_attestation(arch),
+            "runner_recipe": runner_recipe(arch)
         })
     }
     fn cells(arch: &str) -> Vec<Value> {

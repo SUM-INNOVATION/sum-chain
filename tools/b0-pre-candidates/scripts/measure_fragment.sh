@@ -61,6 +61,12 @@ require_two_roots --measured-source-root "$B0_MEASURED_SOURCE_ROOT" --tooling-ro
 for v in SPEC_HASH MEASURE_RUNNER MEASURE_PRODUCE VMAT_BIN PROV_BIN PROVER_FIREWALL_SH \
          PROVER_REAL_DOCKER PROVING_CGROUP GUEST_SET_MANIFEST IDENTITY_RECORDS OFFICIAL_JSON \
          RSS_CONTEXT_HASH MALFORMED_CORPUS_RESULT_HASH HARNESS_SOURCE_HASH; do need_env "$v"; done
+# The runner path-independence recipe facts for THIS fragment's runner (emitted by
+# double_build_runner.sh at the reproducible runner-build stage). MANDATORY: the measurement runner's
+# ProvFacts requires `runner_recipe`, so a fragment cannot be produced without it. The validator turns
+# these facts into the three retained artifacts and recomputes the structural recipe id.
+need_env B0_RUNNER_RECIPE_JSON
+[ -s "$B0_RUNNER_RECIPE_JSON" ] || die "B0_RUNNER_RECIPE_JSON does not name a non-empty file: $B0_RUNNER_RECIPE_JSON"
 # source_commit/clean-tree are read from the MEASURED root (never the tooling checkout HEAD). The
 # runner binds B0_TOOLING_COMMIT + B0_TOOLING_PATHSET_BLAKE3 into the per-arch runner attestation.
 REPO_DIR="$B0_MEASURED_ROOT"
@@ -183,6 +189,35 @@ prov_role() {
     || die "provenance read failed for role $1"
 }
 { printf '['; prov_role Proving; printf ','; prov_role Verification; printf ']'; } > "$PROV_JSON"
+# Splice the runner path-independence recipe facts into EACH provenance role (both roles ran on the
+# same reproducible runner binary → the same recipe). The measurement runner re-emits provenance
+# verbatim into the fragment, so this is the injection point; its ProvFacts requires runner_recipe.
+python3 - "$PROV_JSON" "$B0_RUNNER_RECIPE_JSON" <<'PY' || die "failed to splice runner_recipe into provenance"
+import json, sys
+prov_path, recipe_path = sys.argv[1], sys.argv[2]
+recipe = json.load(open(recipe_path, encoding="utf-8"))
+required = {"candidate", "arch", "manifest_path", "artifact_path", "cargo_ident", "b0_venue_embed",
+           "canonical_build_path", "per_arch_toolchain_identity", "wrapper_blake3", "build_argv",
+           "build_env", "build_a", "build_b", "byte_equal", "leakage_refused_prefixes",
+           "leakage_permitted_prefixes", "leakage_clean", "evidence_root"}
+missing = required - set(recipe)
+if missing:
+    sys.exit(f"runner_recipe facts missing keys: {sorted(missing)}")
+side_required = {"original_root", "cargo_from", "target_from", "encoded_rustflags_hex",
+                "runner_sha256", "runner_blake3", "guest_image_id", "guest_methods_blake3",
+                "origin_manifest_blake3", "materialized_manifest_blake3",
+                "start_unix", "end_unix", "invocations"}
+for which in ("build_a", "build_b"):
+    sm = side_required - set(recipe[which])
+    if sm:
+        sys.exit(f"runner_recipe {which} missing keys: {sorted(sm)}")
+prov = json.load(open(prov_path, encoding="utf-8"))
+if not isinstance(prov, list) or not prov:
+    sys.exit("provenance JSON is not a non-empty array")
+for entry in prov:
+    entry["runner_recipe"] = recipe
+json.dump(prov, open(prov_path, "w", encoding="utf-8"), indent=2)
+PY
 
 # ---- #4: bind the MEASUREMENT build to the PHASE-1 identity (exact equality) ----------------
 # Re-derive THIS build's identity via --emit-identity and require it to EXACTLY match the

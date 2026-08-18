@@ -33,7 +33,7 @@ impl<'a> Rd<'a> {
 
 fn parse(bytes: &[u8]) -> (Vec<u8>, Vec<(u16, harness::Evidence)>) {
     let mut r = Rd { b: bytes, p: 0 };
-    assert_eq!(r.take(13), b"B0PREMEASVEC3", "bad magic");
+    assert_eq!(r.take(13), b"B0PREMEASVEC5", "bad magic");
     let allowlist = r.blob();
     let n = r.u32();
     let mut bundles = Vec::new();
@@ -41,7 +41,7 @@ fn parse(bytes: &[u8]) -> (Vec<u8>, Vec<(u16, harness::Evidence)>) {
         let cb = r.take(2);
         let candidate = u16::from_be_bytes([cb[0], cb[1]]);
         let mut lists: Vec<Vec<Vec<u8>>> = Vec::with_capacity(7);
-        for _ in 0..7 {
+        for _ in 0..12 {
             let count = r.u32();
             let mut v = Vec::with_capacity(count);
             for _ in 0..count {
@@ -62,6 +62,11 @@ fn parse(bytes: &[u8]) -> (Vec<u8>, Vec<(u16, harness::Evidence)>) {
                 cpuset_chains: it.next().unwrap(),
                 runner_attestations: it.next().unwrap(),
                 identity_records: it.next().unwrap(),
+                recipes: it.next().unwrap(),
+                inventories_a: it.next().unwrap(),
+                inventories_b: it.next().unwrap(),
+                double_build_proofs: it.next().unwrap(),
+                leakage_reports: it.next().unwrap(),
                 verifier_material,
                 result_set,
             },
@@ -131,6 +136,11 @@ fn independent_rejects_tampered_producer_vector() {
         cpuset_chains: sp1.cpuset_chains.clone(),
         runner_attestations: sp1.runner_attestations.clone(),
         identity_records: sp1.identity_records.clone(),
+        recipes: sp1.recipes.clone(),
+        inventories_a: sp1.inventories_a.clone(),
+        inventories_b: sp1.inventories_b.clone(),
+        double_build_proofs: sp1.double_build_proofs.clone(),
+        leakage_reports: sp1.leakage_reports.clone(),
         verifier_material: sp1.verifier_material.clone(),
         result_set: sp1.result_set.clone(),
     };
@@ -149,6 +159,11 @@ fn independent_rejects_tampered_producer_vector() {
         cpuset_chains: sp1.cpuset_chains.clone(),
         runner_attestations: sp1.runner_attestations.clone(),
         identity_records: sp1.identity_records.clone(),
+        recipes: sp1.recipes.clone(),
+        inventories_a: sp1.inventories_a.clone(),
+        inventories_b: sp1.inventories_b.clone(),
+        double_build_proofs: sp1.double_build_proofs.clone(),
+        leakage_reports: sp1.leakage_reports.clone(),
         verifier_material: sp1.verifier_material.clone(),
         result_set: sp1.result_set.clone(),
     };

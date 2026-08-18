@@ -36,7 +36,7 @@ type ParsedVector = (Vec<u8>, Vec<(u16, harness::Evidence)>);
 
 fn parse(bytes: &[u8]) -> Result<ParsedVector, String> {
     let mut r = Rd { b: bytes, p: 0 };
-    if r.take(13)? != b"B0PREMEASVEC3" {
+    if r.take(13)? != b"B0PREMEASVEC5" {
         return Err("bad container magic".into());
     }
     let allowlist = r.blob()?;
@@ -45,8 +45,8 @@ fn parse(bytes: &[u8]) -> Result<ParsedVector, String> {
     for _ in 0..n {
         let cb = r.take(2)?;
         let candidate = u16::from_be_bytes([cb[0], cb[1]]);
-        let mut lists: Vec<Vec<Vec<u8>>> = Vec::with_capacity(7);
-        for _ in 0..7 {
+        let mut lists: Vec<Vec<Vec<u8>>> = Vec::with_capacity(12);
+        for _ in 0..12 {
             let count = r.u32()?;
             let mut v = Vec::with_capacity(count);
             for _ in 0..count {
@@ -67,6 +67,11 @@ fn parse(bytes: &[u8]) -> Result<ParsedVector, String> {
                 cpuset_chains: it.next().unwrap(),
                 runner_attestations: it.next().unwrap(),
                 identity_records: it.next().unwrap(),
+                recipes: it.next().unwrap(),
+                inventories_a: it.next().unwrap(),
+                inventories_b: it.next().unwrap(),
+                double_build_proofs: it.next().unwrap(),
+                leakage_reports: it.next().unwrap(),
                 verifier_material,
                 result_set,
             },

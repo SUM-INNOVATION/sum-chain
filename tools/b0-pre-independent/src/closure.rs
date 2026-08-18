@@ -1320,6 +1320,16 @@ pub struct RunnerAtt {
     pub phase1_production_binary_blake3: [u8; 32],
     pub phase1_identity_record_blake3: [u8; 32],
     pub ratified_tooling_commit: String,
+    // v6 runner path-independence
+    pub runner_build_recipe_blake3: [u8; 32],
+    pub rustc_invocation_inventory_a_blake3: [u8; 32],
+    pub rustc_invocation_inventory_b_blake3: [u8; 32],
+    pub runner_double_build_proof_blake3: [u8; 32],
+    pub runner_leakage_report_blake3: [u8; 32],
+    pub per_arch_toolchain_identity: [u8; 32],
+    pub runner_build_recipe_id: [u8; 32],
+    pub protobuf_authority_sha256: [u8; 32],
+    pub protobuf_authority_blake3: [u8; 32],
 }
 
 fn hexstr(r: &mut Rd, n: usize) -> Result<String, E> {
@@ -1339,7 +1349,7 @@ fn hexstr(r: &mut Rd, n: usize) -> Result<String, E> {
 
 pub fn decode_runner_attestation(b: &[u8]) -> Result<RunnerAtt, E> {
     let mut r = Rd::new(b);
-    if r.u16()? != 4 {
+    if r.u16()? != 6 {
         return Err(E::Value);
     }
     let candidate = candidate(r.u16()?)?;
@@ -1357,8 +1367,8 @@ pub fn decode_runner_attestation(b: &[u8]) -> Result<RunnerAtt, E> {
     let _runner_sha = r.arr::<32>()?;
     let runner_blake3 = r.arr::<32>()?;
     let _builder = r.arr::<32>()?;
-    let _pb_sha = r.arr::<32>()?;
-    let _pb_blake = r.arr::<32>()?;
+    let protobuf_authority_sha256 = r.arr::<32>()?;
+    let protobuf_authority_blake3 = r.arr::<32>()?;
     let _protoc_sha = r.arr::<32>()?;
     let _protoc_blake = r.arr::<32>()?;
     let vlen = r.u8()? as u32;
@@ -1373,6 +1383,13 @@ pub fn decode_runner_attestation(b: &[u8]) -> Result<RunnerAtt, E> {
     let _repro = r.arr::<32>()?;
     let phase1_production_binary_blake3 = r.arr::<32>()?;
     let phase1_identity_record_blake3 = r.arr::<32>()?;
+    let runner_build_recipe_blake3 = r.arr::<32>()?;
+    let rustc_invocation_inventory_a_blake3 = r.arr::<32>()?;
+    let rustc_invocation_inventory_b_blake3 = r.arr::<32>()?;
+    let runner_double_build_proof_blake3 = r.arr::<32>()?;
+    let runner_leakage_report_blake3 = r.arr::<32>()?;
+    let per_arch_toolchain_identity = r.arr::<32>()?;
+    let runner_build_recipe_id = r.arr::<32>()?;
     r.end()?;
     Ok(RunnerAtt {
         candidate,
@@ -1389,6 +1406,15 @@ pub fn decode_runner_attestation(b: &[u8]) -> Result<RunnerAtt, E> {
         phase1_production_binary_blake3,
         phase1_identity_record_blake3,
         ratified_tooling_commit,
+        runner_build_recipe_blake3,
+        rustc_invocation_inventory_a_blake3,
+        rustc_invocation_inventory_b_blake3,
+        runner_double_build_proof_blake3,
+        runner_leakage_report_blake3,
+        per_arch_toolchain_identity,
+        runner_build_recipe_id,
+        protobuf_authority_sha256,
+        protobuf_authority_blake3,
     })
 }
 
@@ -1572,4 +1598,984 @@ pub fn require_exact_identity_set(candidate: u16, records: &[IdentityRec]) -> Re
         return Err("retained identity set arches != required".into());
     }
     Ok(())
+}
+
+// ============ v6: runner path-independence (independent from-scratch mirror, exact bytes) ============
+const RUNNER_BUILD_RECIPE_KIND: &[u8; 32] = b"b0-final-runner-build-recipe-v3\0";
+const RUNNER_BUILD_RECIPE_PREFIX: &[u8] = b"b0-final-runner-build-recipe/v3\0";
+const RUSTC_INV_KIND: &[u8; 32] = b"b0-final-rustc-invoc-inv-v2\0\0\0\0\0";
+const RUSTC_INV_PREFIX: &[u8] = b"b0-final-rustc-invocation-inventory/v2\0";
+const DBP_KIND: &[u8; 32] = b"b0-final-runner-dbl-build-proof0";
+const DBP_PREFIX: &[u8] = b"b0-final-runner-double-build-proof/v2\0";
+const REPRO_PAIR_DOMAIN: &[u8] = b"b0-final-runner-reproducibility-pair/v1\0";
+const LEAK_KIND: &[u8; 32] = b"b0-final-runner-leak-report-v2\0\0";
+const LEAK_PREFIX: &[u8] = b"b0-final-runner-leakage-report/v2\0";
+const CANON_TOOLING: &str = "/b0/tooling";
+const CANON_CARGO: &str = "/b0/cargo";
+const CANON_TARGET: &str = "/b0/target";
+const REMAP_RECIPE_DOMAIN: &str = "b0-final-runner-remap-recipe/v1";
+const UNIT_SEP: u8 = 0x1f;
+const INVOCATION_RECORD_HEADER: &str = "b0-final-rustc-invocation/v2";
+
+fn str16(r: &mut Rd, max: usize) -> Result<String, E> {
+    let len = r.u16()? as usize;
+    if len > max {
+        return Err(E::Value);
+    }
+    let s = r.take(len)?;
+    if !s.iter().all(|&c| (0x20..=0x7e).contains(&c)) {
+        return Err(E::Value);
+    }
+    Ok(String::from_utf8(s.to_vec()).expect("ascii"))
+}
+fn blob32(r: &mut Rd, max: usize) -> Result<Vec<u8>, E> {
+    let n = r.u32()? as usize;
+    if n > max {
+        return Err(E::Value);
+    }
+    Ok(r.take(n)?.to_vec())
+}
+fn vec_str(r: &mut Rd, maxcount: usize, maxstr: usize) -> Result<Vec<String>, E> {
+    let n = r.u32()? as usize;
+    if n > maxcount {
+        return Err(E::Value);
+    }
+    let mut v = Vec::with_capacity(n);
+    for _ in 0..n {
+        v.push(str16(r, maxstr)?);
+    }
+    Ok(v)
+}
+/// Parse a `--remap-path-prefix=FROM=TO` arg into `(from, to)`.
+fn parse_remap_arg(s: &str) -> Result<(String, String), String> {
+    let rest = s
+        .strip_prefix("--remap-path-prefix=")
+        .ok_or_else(|| "not a --remap-path-prefix arg".to_string())?;
+    let eq = rest
+        .rfind('=')
+        .ok_or_else(|| "remap arg has no FROM=TO".to_string())?;
+    Ok((rest[..eq].to_string(), rest[eq + 1..].to_string()))
+}
+
+pub fn compute_recipe_id(measured_source_commit: &str, wrapper_blake3: &[u8; 32]) -> [u8; 32] {
+    use std::fmt::Write as _;
+    let mut wh = String::with_capacity(64);
+    for b in wrapper_blake3 {
+        let _ = write!(wh, "{b:02x}");
+    }
+    let pre = format!(
+        "{REMAP_RECIPE_DOMAIN}|build_at={CANON_TOOLING}|remap:cargo_home={CANON_CARGO},target={CANON_TARGET}|encoded_rustflags=unit-separator-2-remap|flags=--locked|SOURCE_DATE_EPOCH=0|BUILD_GIT_SHA={measured_source_commit}|toolchain=ratified-per-arch(authority-record)|wrapper_blake3={wh}"
+    );
+    *blake3::hash(pre.as_bytes()).as_bytes()
+}
+
+pub struct RecipeSide {
+    pub original_root: String,
+    pub cargo_from: String,
+    pub target_from: String,
+    pub encoded_rustflags: Vec<u8>,
+}
+impl RecipeSide {
+    fn decode(r: &mut Rd) -> Result<Self, E> {
+        Ok(Self {
+            original_root: str16(r, 4096)?,
+            cargo_from: str16(r, 4096)?,
+            target_from: str16(r, 4096)?,
+            encoded_rustflags: blob32(r, 65536)?,
+        })
+    }
+    fn parse_two_remaps(&self) -> Result<[(String, String); 2], String> {
+        let parts: Vec<&[u8]> = self.encoded_rustflags.split(|&b| b == UNIT_SEP).collect();
+        if parts.len() != 2 {
+            return Err("encoded rustflags is not exactly two unit-separated remaps".into());
+        }
+        let mut out: Vec<(String, String)> = Vec::with_capacity(2);
+        for p in parts {
+            let s = std::str::from_utf8(p).map_err(|_| "remap arg not UTF-8".to_string())?;
+            out.push(parse_remap_arg(s)?);
+        }
+        Ok([out[0].clone(), out[1].clone()])
+    }
+    fn check(&self, which: &str) -> Result<(), String> {
+        let [(f0, t0), (f1, t1)] = self.parse_two_remaps()?;
+        if f0 != self.cargo_from || t0 != CANON_CARGO {
+            return Err(format!("build {which} cargo remap != recipe root"));
+        }
+        if f1 != self.target_from || t1 != CANON_TARGET {
+            return Err(format!("build {which} target remap != recipe root"));
+        }
+        for (a, b) in [
+            (&self.original_root, &self.cargo_from),
+            (&self.original_root, &self.target_from),
+            (&self.cargo_from, &self.target_from),
+        ] {
+            if a == b {
+                return Err(format!("build {which} roots not distinct"));
+            }
+            if b.starts_with(&format!("{a}/")) || a.starts_with(&format!("{b}/")) {
+                return Err(format!("build {which} roots overlap"));
+            }
+        }
+        Ok(())
+    }
+}
+
+pub struct BuildRecipe {
+    pub candidate: u16,
+    pub arch: u8,
+    pub recipe_id: [u8; 32],
+    pub build_argv: Vec<String>,
+    pub build_env: Vec<(String, String)>,
+    pub manifest_path: String,
+    pub cargo_ident: String,
+    pub b0_venue_embed: String,
+    pub canonical_build_path: String,
+    pub build_a: RecipeSide,
+    pub build_b: RecipeSide,
+    pub measured_source_commit: String,
+    pub tooling_commit: String,
+    pub tooling_pathset_blake3: String,
+    pub per_arch_toolchain_identity: [u8; 32],
+    pub protobuf_authority_sha256: [u8; 32],
+    pub protobuf_authority_blake3: [u8; 32],
+    pub wrapper_blake3: [u8; 32],
+}
+pub fn decode_runner_build_recipe(b: &[u8]) -> Result<BuildRecipe, E> {
+    let mut r = Rd::new(b);
+    r.tag32(RUNNER_BUILD_RECIPE_KIND)?;
+    if r.u16()? != 3 {
+        return Err(E::Value);
+    }
+    let candidate = candidate(r.u16()?)?;
+    let arch = arch(r.u8()?)?;
+    let recipe_id = r.arr::<32>()?;
+    let build_argv = vec_str(&mut r, 64, 4096)?;
+    let env_n = r.u32()? as usize;
+    if env_n > 64 {
+        return Err(E::Value);
+    }
+    let mut build_env = Vec::with_capacity(env_n);
+    for _ in 0..env_n {
+        let k = str16(&mut r, 256)?;
+        let v = str16(&mut r, 4096)?;
+        build_env.push((k, v));
+    }
+    let manifest_path = str16(&mut r, 4096)?;
+    let _artifact_path = str16(&mut r, 4096)?;
+    let cargo_ident = str16(&mut r, 4096)?;
+    let b0_venue_embed = str16(&mut r, 8)?;
+    let canonical_build_path = str16(&mut r, 4096)?;
+    let build_a = RecipeSide::decode(&mut r)?;
+    let build_b = RecipeSide::decode(&mut r)?;
+    let measured_source_commit = hexstr(&mut r, 40)?;
+    let tooling_commit = hexstr(&mut r, 40)?;
+    let tooling_pathset_blake3 = hexstr(&mut r, 64)?;
+    let per_arch_toolchain_identity = r.arr::<32>()?;
+    let protobuf_authority_sha256 = r.arr::<32>()?;
+    let protobuf_authority_blake3 = r.arr::<32>()?;
+    let wrapper_blake3 = r.arr::<32>()?;
+    r.end()?;
+    Ok(BuildRecipe {
+        candidate,
+        arch,
+        recipe_id,
+        build_argv,
+        build_env,
+        manifest_path,
+        cargo_ident,
+        b0_venue_embed,
+        canonical_build_path,
+        build_a,
+        build_b,
+        measured_source_commit,
+        tooling_commit,
+        tooling_pathset_blake3,
+        per_arch_toolchain_identity,
+        protobuf_authority_sha256,
+        protobuf_authority_blake3,
+        wrapper_blake3,
+    })
+}
+pub fn runner_build_recipe_address(b: &[u8]) -> [u8; 32] {
+    crate::prefixed(RUNNER_BUILD_RECIPE_PREFIX, b)
+}
+
+pub struct InvEntry {
+    pub kind: String,
+    pub remap_args: Vec<String>,
+    pub record_address: [u8; 32],
+}
+impl InvEntry {
+    fn reconstruct(&self) -> String {
+        let mut s = String::from(INVOCATION_RECORD_HEADER);
+        s.push_str("\nkind=");
+        s.push_str(&self.kind);
+        for a in &self.remap_args {
+            s.push_str("\nremap_arg=");
+            s.push_str(a);
+        }
+        s
+    }
+}
+pub struct InvInventory {
+    pub candidate: u16,
+    pub arch: u8,
+    pub build_tag: u8,
+    pub entries: Vec<InvEntry>,
+}
+pub fn decode_rustc_invocation_inventory(b: &[u8]) -> Result<InvInventory, E> {
+    let mut r = Rd::new(b);
+    r.tag32(RUSTC_INV_KIND)?;
+    if r.u16()? != 2 {
+        return Err(E::Value);
+    }
+    let candidate = candidate(r.u16()?)?;
+    let arch = arch(r.u8()?)?;
+    let build_tag = r.u8()?;
+    if build_tag > 1 {
+        return Err(E::Value);
+    }
+    let count = r.u32()? as usize;
+    if count == 0 || count > 4096 {
+        return Err(E::Value);
+    }
+    let mut prev: Option<Vec<u8>> = None;
+    let mut entries = Vec::new();
+    for _ in 0..count {
+        let kind = str16(&mut r, 16)?;
+        if kind != "compile" && kind != "probe" {
+            return Err(E::Value);
+        }
+        let nargs = r.u32()? as usize;
+        if nargs > 16 {
+            return Err(E::Value);
+        }
+        let mut remap_args = Vec::with_capacity(nargs);
+        for _ in 0..nargs {
+            remap_args.push(str16(&mut r, 8192)?);
+        }
+        let record_address = r.arr::<32>()?;
+        // Rebuild the entry's canonical key (matches the validator encode) for the ascending check.
+        let mut key = Vec::new();
+        key.extend_from_slice(&(kind.len() as u16).to_le_bytes());
+        key.extend_from_slice(kind.as_bytes());
+        key.extend_from_slice(&(remap_args.len() as u32).to_le_bytes());
+        for a in &remap_args {
+            key.extend_from_slice(&(a.len() as u16).to_le_bytes());
+            key.extend_from_slice(a.as_bytes());
+        }
+        key.extend_from_slice(&record_address);
+        if let Some(pk) = &prev {
+            if *pk >= key {
+                return Err(E::Value);
+            }
+        }
+        prev = Some(key);
+        entries.push(InvEntry {
+            kind,
+            remap_args,
+            record_address,
+        });
+    }
+    r.end()?;
+    Ok(InvInventory {
+        candidate,
+        arch,
+        build_tag,
+        entries,
+    })
+}
+pub fn rustc_invocation_inventory_address(b: &[u8]) -> [u8; 32] {
+    crate::prefixed(RUSTC_INV_PREFIX, b)
+}
+
+pub struct ProofSide {
+    pub original_root: String,
+    pub cargo_from: String,
+    pub target_from: String,
+    pub runner_sha256: [u8; 32],
+    pub runner_blake3: [u8; 32],
+    pub guest_image_id: [u8; 32],
+    pub guest_methods_blake3: [u8; 32],
+    pub inventory_address: [u8; 32],
+    pub origin_manifest_blake3: [u8; 32],
+    pub materialized_manifest_blake3: [u8; 32],
+    pub start_unix: u64,
+    pub end_unix: u64,
+}
+impl ProofSide {
+    fn decode(r: &mut Rd) -> Result<Self, E> {
+        Ok(Self {
+            original_root: str16(r, 4096)?,
+            cargo_from: str16(r, 4096)?,
+            target_from: str16(r, 4096)?,
+            runner_sha256: r.arr::<32>()?,
+            runner_blake3: r.arr::<32>()?,
+            guest_image_id: r.arr::<32>()?,
+            guest_methods_blake3: r.arr::<32>()?,
+            inventory_address: r.arr::<32>()?,
+            origin_manifest_blake3: r.arr::<32>()?,
+            materialized_manifest_blake3: r.arr::<32>()?,
+            start_unix: r.u64()?,
+            end_unix: r.u64()?,
+        })
+    }
+}
+pub struct DoubleBuildProof {
+    pub candidate: u16,
+    pub arch: u8,
+    pub wrapper_blake3: [u8; 32],
+    pub build_a: ProofSide,
+    pub build_b: ProofSide,
+    pub byte_equal: bool,
+    pub reproducibility_pair_blake3: [u8; 32],
+}
+impl DoubleBuildProof {
+    fn compute_repro(a: &ProofSide, b: &ProofSide) -> [u8; 32] {
+        let mut h = blake3::Hasher::new();
+        h.update(REPRO_PAIR_DOMAIN);
+        h.update(&a.runner_sha256);
+        h.update(&a.runner_blake3);
+        h.update(&b.runner_sha256);
+        h.update(&b.runner_blake3);
+        *h.finalize().as_bytes()
+    }
+}
+pub fn decode_runner_double_build_proof(b: &[u8]) -> Result<DoubleBuildProof, E> {
+    let mut r = Rd::new(b);
+    r.tag32(DBP_KIND)?;
+    if r.u16()? != 2 {
+        return Err(E::Value);
+    }
+    let candidate = candidate(r.u16()?)?;
+    let arch = arch(r.u8()?)?;
+    let wrapper_blake3 = r.arr::<32>()?;
+    let build_a = ProofSide::decode(&mut r)?;
+    let build_b = ProofSide::decode(&mut r)?;
+    let byte_equal = match r.u8()? {
+        0 => false,
+        1 => true,
+        _ => return Err(E::Value),
+    };
+    let reproducibility_pair_blake3 = r.arr::<32>()?;
+    r.end()?;
+    Ok(DoubleBuildProof {
+        candidate,
+        arch,
+        wrapper_blake3,
+        build_a,
+        build_b,
+        byte_equal,
+        reproducibility_pair_blake3,
+    })
+}
+pub fn runner_double_build_proof_address(b: &[u8]) -> [u8; 32] {
+    crate::prefixed(DBP_PREFIX, b)
+}
+
+pub struct LeakReport {
+    pub candidate: u16,
+    pub arch: u8,
+    pub scanned_binary_blake3: [u8; 32],
+    pub clean: bool,
+    pub evidence_root: String,
+    pub refused: Vec<String>,
+    pub permitted: Vec<String>,
+}
+pub fn decode_runner_leakage_report(b: &[u8]) -> Result<LeakReport, E> {
+    let mut r = Rd::new(b);
+    r.tag32(LEAK_KIND)?;
+    if r.u16()? != 2 {
+        return Err(E::Value);
+    }
+    let candidate = candidate(r.u16()?)?;
+    let arch = arch(r.u8()?)?;
+    let scanned_binary_blake3 = r.arr::<32>()?;
+    let clean = match r.u8()? {
+        0 => false,
+        1 => true,
+        _ => return Err(E::Value),
+    };
+    let evidence_root = str16(&mut r, 8192)?;
+    fn read_list(r: &mut Rd, max: usize) -> Result<Vec<String>, E> {
+        let n = r.u32()? as usize;
+        if n > max {
+            return Err(E::Value);
+        }
+        let mut v = Vec::new();
+        let mut prev: Option<String> = None;
+        for _ in 0..n {
+            let s = str16(r, 8192)?;
+            if let Some(p) = &prev {
+                if *p >= s {
+                    return Err(E::Value);
+                }
+            }
+            prev = Some(s.clone());
+            v.push(s);
+        }
+        Ok(v)
+    }
+    let refused = read_list(&mut r, 4096)?;
+    let permitted = read_list(&mut r, 16)?;
+    r.end()?;
+    Ok(LeakReport {
+        candidate,
+        arch,
+        scanned_binary_blake3,
+        clean,
+        evidence_root,
+        refused,
+        permitted,
+    })
+}
+pub fn runner_leakage_report_address(b: &[u8]) -> [u8; 32] {
+    crate::prefixed(LEAK_PREFIX, b)
+}
+
+/// Bind the retained runner path-independence FIVE-artifact set to the attestation (independent mirror
+/// of the validator's `check_bound_runner_recipe`).
+#[allow(clippy::too_many_arguments)]
+pub fn bind_runner_recipe(
+    a: &RunnerAtt,
+    recipe: &BuildRecipe,
+    recipe_addr: [u8; 32],
+    inv_a: &InvInventory,
+    inv_a_addr: [u8; 32],
+    inv_b: &InvInventory,
+    inv_b_addr: [u8; 32],
+    proof: &DoubleBuildProof,
+    proof_addr: [u8; 32],
+    leak: &LeakReport,
+    leak_addr: [u8; 32],
+) -> Result<(), String> {
+    // 1. addresses
+    if recipe_addr != a.runner_build_recipe_blake3 {
+        return Err("recipe address".into());
+    }
+    if inv_a_addr != a.rustc_invocation_inventory_a_blake3 {
+        return Err("inventory A address".into());
+    }
+    if inv_b_addr != a.rustc_invocation_inventory_b_blake3 {
+        return Err("inventory B address".into());
+    }
+    if proof_addr != a.runner_double_build_proof_blake3 {
+        return Err("double-build proof address".into());
+    }
+    if leak_addr != a.runner_leakage_report_blake3 {
+        return Err("leakage address".into());
+    }
+    // 2. recipe self-consistency over retained bytes + structural id
+    if recipe.b0_venue_embed != "0" && recipe.b0_venue_embed != "1" {
+        return Err("recipe b0_venue_embed invalid".into());
+    }
+    // EXACT canonical argv: `<cargo> [+tc] build --release --locked --features real-backend
+    // --manifest-path <manifest>` — no duplicates, no extra features/subcommands/args, no alternate
+    // manifest (a token-presence check would accept all of those).
+    {
+        let mut want: Vec<&str> = recipe.cargo_ident.split_whitespace().collect();
+        match want.len() {
+            1 => {}
+            2 if want[1].starts_with('+') => {}
+            _ => return Err("recipe cargo_ident must be `<cargo>` or `<cargo> +<tc>`".into()),
+        }
+        want.extend_from_slice(&[
+            "build",
+            "--release",
+            "--locked",
+            "--features",
+            "real-backend",
+            "--manifest-path",
+            recipe.manifest_path.as_str(),
+        ]);
+        let got: Vec<&str> = recipe.build_argv.iter().map(String::as_str).collect();
+        if got != want {
+            return Err("recipe build argv is not the exact canonical command".into());
+        }
+    }
+    // EXACT canonical env: [(BUILD_GIT_SHA, measured), (SOURCE_DATE_EPOCH, "0"), (B0_VENUE_EMBED, embed)]
+    // — no duplicate/omission/conflict/extra.
+    {
+        let want: [(&str, &str); 3] = [
+            ("BUILD_GIT_SHA", recipe.measured_source_commit.as_str()),
+            ("SOURCE_DATE_EPOCH", "0"),
+            ("B0_VENUE_EMBED", recipe.b0_venue_embed.as_str()),
+        ];
+        if recipe.build_env.len() != want.len() {
+            return Err("recipe build_env is not the canonical 3-entry vector".into());
+        }
+        for (i, (k, v)) in want.iter().enumerate() {
+            if recipe.build_env[i].0 != *k || recipe.build_env[i].1 != *v {
+                return Err("recipe build_env entry != canonical".into());
+            }
+        }
+    }
+    if recipe.canonical_build_path != CANON_TOOLING {
+        return Err("recipe canonical_build_path != ratified /b0/tooling".into());
+    }
+    recipe.build_a.check("A")?;
+    recipe.build_b.check("B")?;
+    if recipe.build_a.original_root == recipe.build_b.original_root {
+        return Err("recipe build A and B share the same original checkout root".into());
+    }
+    if recipe.recipe_id != compute_recipe_id(&recipe.measured_source_commit, &recipe.wrapper_blake3)
+    {
+        return Err("recipe id != recomputed".into());
+    }
+    if recipe.recipe_id != a.runner_build_recipe_id {
+        return Err("recipe id != attestation".into());
+    }
+    if compute_recipe_id(&a.measured_source_commit, &recipe.wrapper_blake3)
+        != a.runner_build_recipe_id
+    {
+        return Err("attestation recipe id != recomputed".into());
+    }
+    // 3. recipe <-> attestation
+    if recipe.candidate != a.candidate || recipe.arch != a.arch {
+        return Err("recipe candidate/arch".into());
+    }
+    if recipe.measured_source_commit != a.measured_source_commit {
+        return Err("recipe measured source".into());
+    }
+    if recipe.tooling_commit != a.ratified_tooling_commit
+        || recipe.tooling_pathset_blake3 != a.ratified_pathset
+    {
+        return Err("recipe tooling".into());
+    }
+    if recipe.protobuf_authority_sha256 != a.protobuf_authority_sha256
+        || recipe.protobuf_authority_blake3 != a.protobuf_authority_blake3
+    {
+        return Err("recipe protobuf".into());
+    }
+    if recipe.per_arch_toolchain_identity != a.per_arch_toolchain_identity {
+        return Err("recipe toolchain".into());
+    }
+    // 4. inventories prove per-build remaps + record-address agreement
+    let prove =
+        |inv: &InvInventory, side: &RecipeSide, tag: u8, which: &str| -> Result<(), String> {
+            if inv.candidate != a.candidate || inv.arch != a.arch {
+                return Err(format!("inventory {which} candidate/arch"));
+            }
+            if inv.build_tag != tag {
+                return Err(format!("inventory {which} build tag"));
+            }
+            let mut compiles = 0usize;
+            for e in &inv.entries {
+                if *blake3::hash(e.reconstruct().as_bytes()).as_bytes() != e.record_address {
+                    return Err(format!(
+                        "inventory {which} record address != BLAKE3(record)"
+                    ));
+                }
+                if e.kind != "compile" {
+                    continue;
+                }
+                compiles += 1;
+                if e.remap_args.len() != 2 {
+                    return Err(format!("inventory {which} compile has != 2 remap args"));
+                }
+                let want = [
+                    (side.cargo_from.as_str(), CANON_CARGO),
+                    (side.target_from.as_str(), CANON_TARGET),
+                ];
+                for (i, arg) in e.remap_args.iter().enumerate() {
+                    let (f, t) = parse_remap_arg(arg)?;
+                    if f != want[i].0 || t != want[i].1 {
+                        return Err(format!("inventory {which} compile remap != recipe root"));
+                    }
+                }
+            }
+            if compiles == 0 {
+                return Err(format!("inventory {which} has no compile"));
+            }
+            Ok(())
+        };
+    prove(inv_a, &recipe.build_a, 0, "A")?;
+    prove(inv_b, &recipe.build_b, 1, "B")?;
+    // 5. double-build proof
+    if proof.candidate != a.candidate || proof.arch != a.arch {
+        return Err("proof candidate/arch".into());
+    }
+    if proof.wrapper_blake3 != recipe.wrapper_blake3 {
+        return Err("proof wrapper != recipe".into());
+    }
+    if proof.build_a.original_root != recipe.build_a.original_root
+        || proof.build_a.cargo_from != recipe.build_a.cargo_from
+        || proof.build_a.target_from != recipe.build_a.target_from
+        || proof.build_b.original_root != recipe.build_b.original_root
+        || proof.build_b.cargo_from != recipe.build_b.cargo_from
+        || proof.build_b.target_from != recipe.build_b.target_from
+    {
+        return Err("proof roots != recipe roots".into());
+    }
+    if proof.build_a.original_root == proof.build_b.original_root {
+        return Err("proof build A and B share the same original checkout root".into());
+    }
+    // Authenticated 4-way: origin_A == materialized_A, origin_B == materialized_B, origin_A == origin_B.
+    if proof.build_a.origin_manifest_blake3 != proof.build_a.materialized_manifest_blake3 {
+        return Err("proof build A materialized manifest != origin manifest".into());
+    }
+    if proof.build_b.origin_manifest_blake3 != proof.build_b.materialized_manifest_blake3 {
+        return Err("proof build B materialized manifest != origin manifest".into());
+    }
+    if proof.build_a.origin_manifest_blake3 != proof.build_b.origin_manifest_blake3 {
+        return Err(
+            "proof build A and B origin manifests differ (not the same build inputs)".into(),
+        );
+    }
+    if proof.build_a.inventory_address != inv_a_addr
+        || proof.build_b.inventory_address != inv_b_addr
+    {
+        return Err("proof inventory address != retained".into());
+    }
+    if proof.build_a.runner_sha256 != proof.build_b.runner_sha256
+        || proof.build_a.runner_blake3 != proof.build_b.runner_blake3
+    {
+        return Err("runner A != runner B".into());
+    }
+    let eq = proof.build_a.runner_sha256 == proof.build_b.runner_sha256
+        && proof.build_a.runner_blake3 == proof.build_b.runner_blake3;
+    if proof.byte_equal != eq {
+        return Err("proof byte_equal != retained hashes".into());
+    }
+    if proof.candidate == 2 // Risc0 repr
+        && (proof.build_a.guest_image_id != proof.build_b.guest_image_id
+            || proof.build_a.guest_methods_blake3 != proof.build_b.guest_methods_blake3)
+    {
+        return Err("RISC0 embedded guest A != B".into());
+    }
+    if DoubleBuildProof::compute_repro(&proof.build_a, &proof.build_b)
+        != proof.reproducibility_pair_blake3
+    {
+        return Err("reproducibility pair != recomputed".into());
+    }
+    if proof.build_b.start_unix < proof.build_a.end_unix {
+        return Err("proof build B started before A finished".into());
+    }
+    if proof.build_a.runner_blake3 != a.runner_blake3 {
+        return Err("proof runner != attested runner".into());
+    }
+    // 6. leakage cross-bound to the recipe roots + evidence root
+    if leak.candidate != a.candidate || leak.arch != a.arch {
+        return Err("leakage candidate/arch".into());
+    }
+    if !leak.clean {
+        return Err("leakage not clean".into());
+    }
+    let want = {
+        let mut v = vec![
+            CANON_CARGO.to_string(),
+            CANON_TARGET.to_string(),
+            CANON_TOOLING.to_string(),
+        ];
+        v.sort();
+        v
+    };
+    if leak.permitted != want {
+        return Err("leakage permitted != canonical".into());
+    }
+    let refused: std::collections::BTreeSet<&str> =
+        leak.refused.iter().map(|s| s.as_str()).collect();
+    for req in [
+        recipe.build_a.original_root.as_str(),
+        recipe.build_a.cargo_from.as_str(),
+        recipe.build_a.target_from.as_str(),
+        recipe.build_b.original_root.as_str(),
+        recipe.build_b.cargo_from.as_str(),
+        recipe.build_b.target_from.as_str(),
+        leak.evidence_root.as_str(),
+    ] {
+        if !refused.contains(req) {
+            return Err("leakage refused set omits a required root".into());
+        }
+    }
+    if leak.scanned_binary_blake3 != a.runner_blake3 {
+        return Err("leakage scanned != runner".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod runner_recipe_bind_tests {
+    //! Independent mirror of the validator's `check_bound_runner_recipe` negatives (5-artifact set).
+    //! Addresses are matched by equality; the structs are built directly with the new fields.
+    use super::*;
+
+    fn h(n: u8) -> [u8; 32] {
+        [n; 32]
+    }
+    fn enc(t: &str) -> Vec<u8> {
+        format!("--remap-path-prefix=/b0-input/{t}/cargo=/b0/cargo\u{1f}--remap-path-prefix=/b0-input/{t}/target=/b0/target").into_bytes()
+    }
+    fn side(t: &str) -> RecipeSide {
+        RecipeSide {
+            original_root: format!("/b0-input/{t}/tooling"),
+            cargo_from: format!("/b0-input/{t}/cargo"),
+            target_from: format!("/b0-input/{t}/target"),
+            encoded_rustflags: enc(t),
+        }
+    }
+    fn inv(t: &str, tag: u8) -> InvInventory {
+        let remap_args = vec![
+            format!("--remap-path-prefix=/b0-input/{t}/cargo=/b0/cargo"),
+            format!("--remap-path-prefix=/b0-input/{t}/target=/b0/target"),
+        ];
+        let e = InvEntry {
+            kind: "compile".into(),
+            record_address: {
+                let mut s = String::from(INVOCATION_RECORD_HEADER);
+                s.push_str("\nkind=compile");
+                for a in &remap_args {
+                    s.push_str("\nremap_arg=");
+                    s.push_str(a);
+                }
+                *blake3::hash(s.as_bytes()).as_bytes()
+            },
+            remap_args,
+        };
+        InvInventory {
+            candidate: 1,
+            arch: 1,
+            build_tag: tag,
+            entries: vec![e],
+        }
+    }
+    fn pside(t: &str, inv_addr: [u8; 32], s: u64, e: u64) -> ProofSide {
+        ProofSide {
+            original_root: format!("/b0-input/{t}/tooling"),
+            cargo_from: format!("/b0-input/{t}/cargo"),
+            target_from: format!("/b0-input/{t}/target"),
+            runner_sha256: h(30),
+            runner_blake3: h(9),
+            guest_image_id: h(0),
+            guest_methods_blake3: h(31),
+            inventory_address: inv_addr,
+            origin_manifest_blake3: h(21),
+            materialized_manifest_blake3: h(21),
+            start_unix: s,
+            end_unix: e,
+        }
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn set() -> (
+        RunnerAtt,
+        BuildRecipe,
+        [u8; 32],
+        InvInventory,
+        [u8; 32],
+        InvInventory,
+        [u8; 32],
+        DoubleBuildProof,
+        [u8; 32],
+        LeakReport,
+        [u8; 32],
+    ) {
+        let msc = "5".repeat(40);
+        let wrapper = h(7);
+        let rid = compute_recipe_id(&msc, &wrapper);
+        let inv_a = inv("a", 0);
+        let inv_b = inv("b", 1);
+        // Independent-style addresses (equality-matched, not real content hashes here).
+        let (recipe_addr, inv_a_addr, inv_b_addr, proof_addr, leak_addr) =
+            (h(20), h(21), h(22), h(23), h(24));
+        let fa = pside("a", inv_a_addr, 100, 200);
+        let fb = pside("b", inv_b_addr, 200, 300);
+        let proof = DoubleBuildProof {
+            candidate: 1,
+            arch: 1,
+            wrapper_blake3: wrapper,
+            reproducibility_pair_blake3: DoubleBuildProof::compute_repro(&fa, &fb),
+            build_a: fa,
+            build_b: fb,
+            byte_equal: true,
+        };
+        let recipe = BuildRecipe {
+            candidate: 1,
+            arch: 1,
+            recipe_id: rid,
+            build_argv: [
+                "cargo",
+                "build",
+                "--release",
+                "--locked",
+                "--features",
+                "real-backend",
+                "--manifest-path",
+                "tools/b0-pre-measure-sp1/Cargo.toml",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+            build_env: vec![
+                ("BUILD_GIT_SHA".into(), msc.clone()),
+                ("SOURCE_DATE_EPOCH".into(), "0".into()),
+                ("B0_VENUE_EMBED".into(), "0".into()),
+            ],
+            manifest_path: "tools/b0-pre-measure-sp1/Cargo.toml".into(),
+            cargo_ident: "cargo".into(),
+            b0_venue_embed: "0".into(),
+            canonical_build_path: "/b0/tooling".into(),
+            build_a: side("a"),
+            build_b: side("b"),
+            measured_source_commit: msc.clone(),
+            tooling_commit: "1".repeat(40),
+            tooling_pathset_blake3: "b".repeat(64),
+            per_arch_toolchain_identity: h(8),
+            protobuf_authority_sha256: h(5),
+            protobuf_authority_blake3: h(6),
+            wrapper_blake3: wrapper,
+        };
+        let mut permitted = vec![
+            CANON_CARGO.to_string(),
+            CANON_TARGET.to_string(),
+            CANON_TOOLING.to_string(),
+        ];
+        permitted.sort();
+        let mut refused = vec![
+            "/b0-input/a/tooling".to_string(),
+            "/b0-input/a/cargo".into(),
+            "/b0-input/a/target".into(),
+            "/b0-input/b/tooling".into(),
+            "/b0-input/b/cargo".into(),
+            "/b0-input/b/target".into(),
+            "/tmp/b0-evid".into(),
+        ];
+        refused.sort();
+        let leak = LeakReport {
+            candidate: 1,
+            arch: 1,
+            scanned_binary_blake3: h(9),
+            clean: true,
+            evidence_root: "/tmp/b0-evid".into(),
+            refused,
+            permitted,
+        };
+        let att = RunnerAtt {
+            candidate: 1,
+            role: 0,
+            arch: 1,
+            spec: h(0),
+            guest_set: h(0),
+            measured_source_commit: msc.clone(),
+            build_git_sha: msc,
+            ratified_pathset: "b".repeat(64),
+            recomputed_pathset: "b".repeat(64),
+            protoc_version: "libprotoc 3.21.12".into(),
+            runner_blake3: h(9),
+            phase1_production_binary_blake3: h(9),
+            phase1_identity_record_blake3: h(0),
+            ratified_tooling_commit: "1".repeat(40),
+            runner_build_recipe_blake3: recipe_addr,
+            rustc_invocation_inventory_a_blake3: inv_a_addr,
+            rustc_invocation_inventory_b_blake3: inv_b_addr,
+            runner_double_build_proof_blake3: proof_addr,
+            runner_leakage_report_blake3: leak_addr,
+            per_arch_toolchain_identity: h(8),
+            runner_build_recipe_id: rid,
+            protobuf_authority_sha256: h(5),
+            protobuf_authority_blake3: h(6),
+        };
+        (
+            att,
+            recipe,
+            recipe_addr,
+            inv_a,
+            inv_a_addr,
+            inv_b,
+            inv_b_addr,
+            proof,
+            proof_addr,
+            leak,
+            leak_addr,
+        )
+    }
+
+    #[test]
+    fn positive_binds() {
+        let (a, r, ra, ia, iaa, ib, iba, p, pa, l, la) = set();
+        bind_runner_recipe(&a, &r, ra, &ia, iaa, &ib, iba, &p, pa, &l, la).unwrap();
+    }
+
+    #[test]
+    fn wrong_recipe_address_refused() {
+        let (a, r, _ra, ia, iaa, ib, iba, p, pa, l, la) = set();
+        assert!(
+            bind_runner_recipe(&a, &r, h(99), &ia, iaa, &ib, iba, &p, pa, &l, la)
+                .unwrap_err()
+                .contains("recipe address")
+        );
+    }
+
+    #[test]
+    fn cross_arch_refused() {
+        let (mut a, r, ra, ia, iaa, ib, iba, p, pa, l, la) = set();
+        a.arch = 2;
+        assert!(
+            bind_runner_recipe(&a, &r, ra, &ia, iaa, &ib, iba, &p, pa, &l, la)
+                .unwrap_err()
+                .contains("candidate/arch")
+        );
+    }
+
+    #[test]
+    fn inventory_from_not_matching_recipe_refused() {
+        let (a, r, ra, _ia, iaa, ib, iba, p, pa, l, la) = set();
+        // Build-A inventory that proves DIFFERENT roots than the recipe's build A.
+        let bad = inv("x", 0);
+        // Rebind the proof/attestation address to the bad inventory so the address check passes.
+        let mut a = a;
+        a.rustc_invocation_inventory_a_blake3 = iaa;
+        let mut p = p;
+        let _ = &mut p;
+        assert!(
+            bind_runner_recipe(&a, &r, ra, &bad, iaa, &ib, iba, &p, pa, &l, la)
+                .unwrap_err()
+                .contains("recipe root")
+        );
+    }
+
+    #[test]
+    fn leakage_omits_root_refused() {
+        let (a, r, ra, ia, iaa, ib, iba, p, pa, mut l, la) = set();
+        l.refused.retain(|s| s != "/b0-input/b/cargo");
+        assert!(
+            bind_runner_recipe(&a, &r, ra, &ia, iaa, &ib, iba, &p, pa, &l, la)
+                .unwrap_err()
+                .contains("omits a required root")
+        );
+    }
+
+    #[test]
+    fn scanned_other_binary_refused() {
+        let (mut a, r, ra, ia, iaa, ib, iba, p, pa, l, la) = set();
+        a.runner_blake3 = h(77);
+        assert!(
+            bind_runner_recipe(&a, &r, ra, &ia, iaa, &ib, iba, &p, pa, &l, la)
+                .unwrap_err()
+                .contains("attested runner")
+        );
+    }
+
+    #[test]
+    fn unfaithful_materialization_refused() {
+        let (a, r, ra, ia, iaa, ib, iba, mut p, pa, l, la) = set();
+        p.build_b.materialized_manifest_blake3 = h(99);
+        assert!(
+            bind_runner_recipe(&a, &r, ra, &ia, iaa, &ib, iba, &p, pa, &l, la)
+                .unwrap_err()
+                .contains("materialized manifest != origin")
+        );
+    }
+
+    #[test]
+    fn differing_origin_manifests_refused() {
+        let (a, r, ra, ia, iaa, ib, iba, mut p, pa, l, la) = set();
+        p.build_b.origin_manifest_blake3 = h(98);
+        p.build_b.materialized_manifest_blake3 = h(98);
+        assert!(
+            bind_runner_recipe(&a, &r, ra, &ia, iaa, &ib, iba, &p, pa, &l, la)
+                .unwrap_err()
+                .contains("origin manifests differ")
+        );
+    }
 }

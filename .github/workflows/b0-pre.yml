@@ -120,7 +120,7 @@ jobs:
           # ubuntu-latest, which ships python3/tar/coreutils), so assert each terminal marker is
           # present: a silent skip (e.g. a missing interpreter) would otherwise pass rc=0. Covers
           # the declarative extraction, the prover-archive pin block, and the provisioning recipe.
-          for m in VERIFIED_EXTRACTION_PASS PIN_PROVER_ARCHIVES_PASS PROVISIONING_RECIPE_PASS; do
+          for m in VERIFIED_EXTRACTION_PASS PIN_PROVER_ARCHIVES_PASS PROVISIONING_RECIPE_PASS RUNNER_PATH_INDEPENDENCE_PASS; do
             grep -q "^$m\$" /tmp/run.out \
               || { echo "::error::required no-docker contract marker $m absent (test skipped or did not run)"; exit 1; }
           done
@@ -288,6 +288,72 @@ jobs:
           cargo +1.90.0 build   --features real-backend --manifest-path "$MEAS_RISC0/Cargo.toml"
           cargo +1.90.0 clippy  --features real-backend --manifest-path "$MEAS_SP1/Cargo.toml" -- -D warnings
           cargo +1.90.0 clippy  --features real-backend --manifest-path "$MEAS_RISC0/Cargo.toml" -- -D warnings
+
+      # RUNNER-CRATE PATH-INDEPENDENCE (CI scope; STUB embed): prove the real-backend RISC Zero runner
+      # CRATE + its full RISC Zero SDK dependency closure are BYTE-REPRODUCIBLE when built from two
+      # GENUINELY-DISTINCT original checkout roots, BOTH materialized + compiled at the one ratified
+      # canonical build path /b0/tooling — via the SAME double_build_runner.sh + transparent wrapper the
+      # venue uses. Building at a single canonical source path makes rustc's package -Cmetadata/
+      # StableCrateId universal (--remap-path-prefix cannot neutralize it — it rewrites source LOCATIONS,
+      # not the metadata hash), which is what makes the two runners byte-identical; the distinct original
+      # roots never reach the compiler and are proven not to affect the bytes (leakage-refused). Only
+      # CARGO_HOME/target are remapped -> /b0/{cargo,target} (2 remaps; exact CARGO_ENCODED_RUSTFLAGS;
+      # --release --locked --features real-backend; ambient-flag refusal; exact-prefix leakage scan).
+      # embed_methods here is the CI STUB (no guest toolchain in CI — see build.rs), so THIS STEP IS NOT
+      # the real-embed §G proof and never claims to be. The REAL RISC0 guest embed (B0_VENUE_EMBED=1) is
+      # proven ONLY by the VENUE runbook double-build (docs/b0-pre/venue/RUNNER-PATH-INDEPENDENCE.md).
+      # (Two clean SDK builds at the canonical path — the deliberate cost.)
+      - name: RISC Zero runner-crate canonical-path double-build (stub embed; not the real-embed proof)
+        run: |
+          set -euo pipefail
+          SCRIPTS="$PWD/tools/b0-pre-candidates/scripts"
+          WRAP="$SCRIPTS/b0_rustc_remap_wrapper.sh"
+          chmod +x "$WRAP" "$SCRIPTS/double_build_runner.sh"
+          # Two genuinely different ORIGINAL checkout roots: full source-only checkouts (workspace +
+          # every transitive path dep intact) at distinct absolute paths. git archive => no target/.git.
+          # /b0 must be writable: the script materializes each checkout at the canonical path /b0/tooling.
+          sudo mkdir -p /b0-input/a /b0-input/b /b0-build /b0 && sudo chown "$(id -un)" /b0-input/a /b0-input/b /b0-build /b0
+          git archive HEAD | tar -x -C /b0-input/a
+          git archive HEAD | tar -x -C /b0-input/b
+          TC=$(printf 'a%.0s' {1..64})                              # per-arch toolchain identity is venue-bound; placeholder for the CI stub embed
+          SHA=507281e21e95a6a98e3480e25e12d1baab586e07              # RATIFIED_SOURCE_COMMIT (BUILD_GIT_SHA), frozen
+          # Typed build spec: the script CONSTRUCTS + enforces + retains the exact argv (no opaque cmd).
+          # --embed 0 = stub embed (CI has no guest toolchain). Toolchain override 1.90.0 via --toolchain.
+          bash "$SCRIPTS/double_build_runner.sh" \
+            --candidate risc0 --manifest tools/b0-pre-measure-risc0/Cargo.toml \
+            --artifact release/b0-pre-measure-risc0 --toolchain 1.90.0 --embed 0 \
+            --src-a /b0-input/a --src-b /b0-input/b --root-a /b0-build/a --root-b /b0-build/b \
+            --canonical-build-path /b0/tooling \
+            --arch x86_64 --expect-build-git-sha "$SHA" \
+            --wrapper "$WRAP" --per-arch-toolchain-identity "$TC" --recipe-out /b0-build/recipe.json
+          echo "=== emitted runner-recipe facts ==="; cat /b0-build/recipe.json
+          # Fail-closed shape assertion (the validator producer re-validates these facts fully at import).
+          python3 -c '
+          import json
+          d=json.load(open("/b0-build/recipe.json"))
+          need={"candidate","arch","manifest_path","artifact_path","cargo_ident","b0_venue_embed","canonical_build_path","per_arch_toolchain_identity","wrapper_blake3","build_argv","build_env","build_a","build_b","byte_equal","leakage_refused_prefixes","leakage_permitted_prefixes","leakage_clean","evidence_root"}
+          assert not (need-set(d)), sorted(need-set(d))
+          assert d["leakage_clean"] is True and d["byte_equal"] is True
+          assert d["canonical_build_path"]=="/b0/tooling", d["canonical_build_path"]
+          # Canonical build argv is EXACTLY cargo_ident (a cargo + optional +toolchain) followed by the
+          # fixed subcommand/flags — the SAME construction the Rust validator check_argv enforces. Kept as
+          # FULL-VECTOR equality (never a prefix / token-presence test).
+          def canonical_argv(ci, mp): return ci.split()+["build","--release","--locked","--features","real-backend","--manifest-path",mp]
+          # Coverage for BOTH cargo forms + a reject (self-test of the equality this step relies on):
+          assert canonical_argv("cargo","M")==["cargo","build","--release","--locked","--features","real-backend","--manifest-path","M"]
+          assert canonical_argv("cargo +1.90.0","M")==["cargo","+1.90.0","build","--release","--locked","--features","real-backend","--manifest-path","M"]
+          assert canonical_argv("cargo","M")!=["cargo","build","--release","--features","real-backend","--manifest-path","M"]  # missing --locked -> reject
+          assert d["build_argv"]==canonical_argv(d["cargo_ident"],d["manifest_path"]), d["build_argv"]
+          assert d["build_a"]["original_root"]!=d["build_b"]["original_root"], "A/B share an original root"
+          for s in ("build_a","build_b"):
+              assert any(i["kind"]=="compile" and len(i["remap_args"])==2 for i in d[s]["invocations"]), s
+          for r in (d["build_a"]["original_root"],d["build_b"]["original_root"],d["evidence_root"]):
+              assert r in d["leakage_refused_prefixes"], r
+          # Authenticated 4-way source-input equality (origin A/B, materialized A/B) — all equal 64-hex.
+          mans={d["build_a"]["origin_manifest_blake3"],d["build_a"]["materialized_manifest_blake3"],
+                d["build_b"]["origin_manifest_blake3"],d["build_b"]["materialized_manifest_blake3"]}
+          assert len(mans)==1 and len(next(iter(mans)))==64, ("source-input manifests not all-equal 64-hex", mans)
+          print("recipe facts shape OK (exact-bytes, A/B distinct origins, canonical path, authenticated 4-way manifests, cross-bound leakage)")'
 
       # Guard condition #1: a production runner must NOT build without real-backend. Use 1.90.0
       # (installed above) so resolution SUCCEEDS and the build fails specifically on the

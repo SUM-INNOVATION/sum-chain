@@ -115,6 +115,59 @@ pub struct ProvFacts {
     pub cpuset_inherited: bool,
     pub cpuset_probe_chain: Vec<CpusetProbeEntryFacts>,
     pub runner_attestation: RunnerAttestationFacts,
+    // ---- v5: runner path-independence recipe facts (produced by double_build_runner.sh; carried
+    // verbatim by the runner and re-validated by b0-pre-validator's producer) ----
+    pub runner_recipe: RunnerRecipeFacts,
+}
+
+/// Serialize/Deserialize twin of the venue runner-build recipe facts (exact bytes for BOTH builds). The
+/// validator builds the five retained artifacts (`RunnerBuildRecipeV1`, build-A + build-B
+/// `RustcInvocationInventoryV1`, `RunnerDoubleBuildProofV1`, `RunnerLeakageReportV1`) from these; the
+/// structural recipe id + canonical destinations + derived hashes are recomputed there, never trusted.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct RunnerRecipeFacts {
+    pub candidate: String,
+    pub arch: String,
+    pub manifest_path: String,
+    pub artifact_path: String,
+    pub cargo_ident: String,
+    pub b0_venue_embed: String,
+    pub canonical_build_path: String,
+    pub per_arch_toolchain_identity: String,
+    pub wrapper_blake3: String,
+    pub build_argv: Vec<String>,
+    pub build_env: Vec<(String, String)>,
+    pub build_a: BuildSideFacts,
+    pub build_b: BuildSideFacts,
+    pub byte_equal: bool,
+    pub leakage_refused_prefixes: Vec<String>,
+    pub leakage_permitted_prefixes: Vec<String>,
+    pub leakage_clean: bool,
+    pub evidence_root: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct BuildSideFacts {
+    pub original_root: String,
+    pub cargo_from: String,
+    pub target_from: String,
+    pub encoded_rustflags_hex: String,
+    pub runner_sha256: String,
+    pub runner_blake3: String,
+    pub guest_image_id: String,
+    pub guest_methods_blake3: String,
+    pub origin_manifest_blake3: String,
+    pub materialized_manifest_blake3: String,
+    pub start_unix: u64,
+    pub end_unix: u64,
+    pub invocations: Vec<RustcInvocationFacts>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct RustcInvocationFacts {
+    pub kind: String,
+    pub remap_args: Vec<String>,
+    pub record_address: String,
 }
 
 /// Serialize/Deserialize twin of the host-provenance reader's `CpusetObservation`; `state` is the

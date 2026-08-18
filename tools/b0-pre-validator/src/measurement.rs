@@ -92,6 +92,8 @@ pub fn synth_runner_attestation(
     measured_source_commit: &str,
     seed: &dyn Fn(&str) -> [u8; 32],
 ) -> RunnerAttestationV1 {
+    let (recipe, inv_a, inv_b, proof, leak) =
+        synth_runner_recipe_artifacts(Candidate::Sp1, arch, measured_source_commit, seed);
     RunnerAttestationV1 {
         candidate: Candidate::Sp1,
         provenance_role: ProvenanceRole::Proving,
@@ -99,27 +101,197 @@ pub fn synth_runner_attestation(
         r0_guest_set_hash: [0; 32],
         build_target_arch: arch,
         execution_tooling_checkout_head: "1234567890abcdef1234567890abcdef12345678".into(),
-        ratified_tooling_commit: "1234567890abcdef1234567890abcdef12345678".into(),
-        ratified_pathset_blake3: "70".repeat(32),
-        recomputed_pathset_blake3: "70".repeat(32),
+        ratified_tooling_commit: recipe.tooling_commit.clone(),
+        ratified_pathset_blake3: recipe.tooling_pathset_blake3.clone(),
+        recomputed_pathset_blake3: recipe.tooling_pathset_blake3.clone(),
         measured_source_commit: measured_source_commit.to_string(),
         build_git_sha: measured_source_commit.to_string(),
         measured_source_context_blake3: seed("measured-ctx"),
-        runner_sha256: seed("runner-sha256"),
-        runner_blake3: seed("runner-blake3"),
+        runner_sha256: proof.build_a.runner_sha256,
+        runner_blake3: proof.build_a.runner_blake3,
         immutable_builder_identity: seed("builder"),
-        protobuf_authority_sha256: seed("pb-sha256"),
-        protobuf_authority_blake3: seed("pb-blake3"),
+        protobuf_authority_sha256: recipe.protobuf_authority_sha256,
+        protobuf_authority_blake3: recipe.protobuf_authority_blake3,
         native_protoc_sha256: seed("protoc-sha256"),
         native_protoc_blake3: seed("protoc-blake3"),
         native_protoc_version: "libprotoc 3.21.12".into(),
         docker_argv_blake3: seed("docker-argv"),
-        reproducibility_pair_blake3: seed("repro-pair"),
+        reproducibility_pair_blake3: proof.reproducibility_pair_blake3,
         // Runner continuity: the Phase-1 runner binary equals the measurement runner (runner_blake3).
-        phase1_production_binary_blake3: seed("runner-blake3"),
+        phase1_production_binary_blake3: proof.build_a.runner_blake3,
         // Placeholder; the orchestrator/harness sets this from the retained Phase-1 identity record.
         phase1_identity_record_blake3: [0; 32],
+        // Runner path-independence: addresses of the five synthetic retained artifacts.
+        runner_build_recipe_blake3: recipe.hash(),
+        rustc_invocation_inventory_a_blake3: inv_a.hash(),
+        rustc_invocation_inventory_b_blake3: inv_b.hash(),
+        runner_double_build_proof_blake3: proof.hash(),
+        runner_leakage_report_blake3: leak.hash(),
+        per_arch_toolchain_identity: recipe.per_arch_toolchain_identity,
+        runner_build_recipe_id: recipe.recipe_id,
     }
+}
+
+/// The five synthetic, self-consistent retained runner-build artifacts matching
+/// [`synth_runner_attestation`] (TEST_ONLY vector orchestration; NEVER the real venue path):
+/// recipe (exact bytes), build-A + build-B inventories, double-build proof, leakage report.
+#[allow(clippy::type_complexity)]
+pub fn synth_runner_recipe_artifacts(
+    candidate: Candidate,
+    arch: Arch,
+    measured_source_commit: &str,
+    seed: &dyn Fn(&str) -> [u8; 32],
+) -> (
+    crate::schema::runner_build_recipe::RunnerBuildRecipeV1,
+    crate::schema::rustc_invocation_inventory::RustcInvocationInventoryV1,
+    crate::schema::rustc_invocation_inventory::RustcInvocationInventoryV1,
+    crate::schema::runner_double_build_proof::RunnerDoubleBuildProofV1,
+    crate::schema::runner_leakage_report::RunnerLeakageReportV1,
+) {
+    use crate::schema::runner_build_recipe::{
+        BuildSide, RunnerBuildRecipeV1, CANON_CARGO, CANON_TARGET, CANON_TOOLING, UNIT_SEP,
+    };
+    use crate::schema::runner_double_build_proof::{BuildFacts, RunnerDoubleBuildProofV1};
+    use crate::schema::runner_leakage_report::RunnerLeakageReportV1;
+    use crate::schema::rustc_invocation_inventory::{canonical_inventory, InvocationRecord};
+    let wrapper = seed("wrapper-blake3");
+    let (manifest, artifact) = match candidate {
+        Candidate::Sp1 => (
+            "tools/b0-pre-measure-sp1/Cargo.toml",
+            "release/b0-pre-measure-sp1",
+        ),
+        Candidate::Risc0 => (
+            "tools/b0-pre-measure-risc0/Cargo.toml",
+            "release/b0-pre-measure-risc0",
+        ),
+    };
+    let enc = |cargo: &str, target: &str| -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(format!("--remap-path-prefix={cargo}={CANON_CARGO}").as_bytes());
+        v.push(UNIT_SEP);
+        v.extend_from_slice(format!("--remap-path-prefix={target}={CANON_TARGET}").as_bytes());
+        v
+    };
+    let side = |t: &str| BuildSide {
+        original_root: format!("/b0-input/{t}/tooling"),
+        cargo_from: format!("/b0-input/{t}/cargo"),
+        target_from: format!("/b0-input/{t}/target"),
+        encoded_rustflags: enc(
+            &format!("/b0-input/{t}/cargo"),
+            &format!("/b0-input/{t}/target"),
+        ),
+    };
+    let recipe = RunnerBuildRecipeV1 {
+        candidate,
+        arch,
+        recipe_id: RunnerBuildRecipeV1::compute_recipe_id(measured_source_commit, &wrapper),
+        build_argv: vec![
+            "cargo".into(),
+            "build".into(),
+            "--release".into(),
+            "--locked".into(),
+            "--features".into(),
+            "real-backend".into(),
+            "--manifest-path".into(),
+            manifest.into(),
+        ],
+        build_env: vec![
+            ("BUILD_GIT_SHA".into(), measured_source_commit.to_string()),
+            ("SOURCE_DATE_EPOCH".into(), "0".into()),
+            ("B0_VENUE_EMBED".into(), "0".into()),
+        ],
+        manifest_path: manifest.into(),
+        artifact_path: artifact.into(),
+        cargo_ident: "cargo".into(),
+        b0_venue_embed: "0".into(),
+        canonical_build_path: CANON_TOOLING.into(),
+        build_a: side("a"),
+        build_b: side("b"),
+        measured_source_commit: measured_source_commit.to_string(),
+        tooling_commit: "1234567890abcdef1234567890abcdef12345678".into(),
+        tooling_pathset_blake3: "70".repeat(32),
+        per_arch_toolchain_identity: seed("per-arch-toolchain"),
+        protobuf_authority_sha256: seed("pb-sha256"),
+        protobuf_authority_blake3: seed("pb-blake3"),
+        wrapper_blake3: wrapper,
+    };
+    let compile_rec = |t: &str| {
+        let mut rec = InvocationRecord {
+            kind: "compile".into(),
+            remap_args: vec![
+                format!("--remap-path-prefix=/b0-input/{t}/cargo={CANON_CARGO}"),
+                format!("--remap-path-prefix=/b0-input/{t}/target={CANON_TARGET}"),
+            ],
+            record_address: [0; 32],
+        };
+        rec.record_address = rec.recompute_address();
+        rec
+    };
+    let inv_a = canonical_inventory(candidate, arch, 0, vec![compile_rec("a")]);
+    let inv_b = canonical_inventory(candidate, arch, 1, vec![compile_rec("b")]);
+    let runner_sha = seed("runner-sha256");
+    let runner_b3 = seed("runner-blake3");
+    let guest_img = if candidate == Candidate::Risc0 {
+        seed("guest-img")
+    } else {
+        [0; 32]
+    };
+    let guest_mb = seed("guest-methods");
+    let src_manifest = seed("source-input-manifest");
+    let facts = |t: &str, inv_addr: [u8; 32], s: u64, e: u64| BuildFacts {
+        original_root: format!("/b0-input/{t}/tooling"),
+        cargo_from: format!("/b0-input/{t}/cargo"),
+        target_from: format!("/b0-input/{t}/target"),
+        runner_sha256: runner_sha,
+        runner_blake3: runner_b3,
+        guest_image_id: guest_img,
+        guest_methods_blake3: guest_mb,
+        inventory_address: inv_addr,
+        origin_manifest_blake3: src_manifest,
+        materialized_manifest_blake3: src_manifest,
+        start_unix: s,
+        end_unix: e,
+    };
+    let fa = facts("a", inv_a.hash(), 100, 200);
+    let fb = facts("b", inv_b.hash(), 200, 300);
+    let proof = RunnerDoubleBuildProofV1 {
+        candidate,
+        arch,
+        wrapper_blake3: wrapper,
+        reproducibility_pair_blake3: RunnerDoubleBuildProofV1::compute_reproducibility_pair(
+            &fa, &fb,
+        ),
+        build_a: fa,
+        build_b: fb,
+        byte_equal: true,
+    };
+    let mut refused = vec![
+        "/b0-input/a/tooling".to_string(),
+        "/b0-input/a/cargo".to_string(),
+        "/b0-input/a/target".to_string(),
+        "/b0-input/b/tooling".to_string(),
+        "/b0-input/b/cargo".to_string(),
+        "/b0-input/b/target".to_string(),
+        "/tmp/b0-evid".to_string(),
+    ];
+    refused.sort();
+    refused.dedup();
+    let mut permitted = vec![
+        CANON_CARGO.to_string(),
+        CANON_TARGET.to_string(),
+        CANON_TOOLING.to_string(),
+    ];
+    permitted.sort();
+    let leak = RunnerLeakageReportV1 {
+        candidate,
+        arch,
+        scanned_binary_blake3: runner_b3,
+        clean: true,
+        evidence_root: "/tmp/b0-evid".into(),
+        refused_prefixes: refused,
+        permitted_prefixes: permitted,
+    };
+    (recipe, inv_a, inv_b, proof, leak)
 }
 
 /// The allowlist canonical bytes plus one per-candidate evidence bundle each — the
@@ -182,6 +354,17 @@ pub struct ProvenanceFacts {
     /// attestation to it (sets `phase1_production_binary_blake3` + `phase1_identity_record_blake3`) and
     /// seals it as a mandatory package artifact for independent sealed-import re-checking.
     pub phase1_identity_record: Phase1IdentityRecordV1,
+    /// The RETAINED runner path-independence artifact set (venue-produced). The orchestrator injects
+    /// candidate/arch, sets the attestation's v6 addresses (+ per-arch toolchain + structural recipe
+    /// id) from them, binds via `check_bound_runner_recipe`, and seals them as mandatory artifacts.
+    pub runner_build_recipe: crate::schema::runner_build_recipe::RunnerBuildRecipeV1,
+    pub rustc_invocation_inventory_a:
+        crate::schema::rustc_invocation_inventory::RustcInvocationInventoryV1,
+    pub rustc_invocation_inventory_b:
+        crate::schema::rustc_invocation_inventory::RustcInvocationInventoryV1,
+    pub runner_double_build_proof:
+        crate::schema::runner_double_build_proof::RunnerDoubleBuildProofV1,
+    pub runner_leakage_report: crate::schema::runner_leakage_report::RunnerLeakageReportV1,
 }
 
 /// Raw per-cell measured facts the venue records (never derived).
@@ -276,6 +459,18 @@ pub fn orchestrate_grid(
     let mut built_chains: Vec<CpusetProbeChainV1> = Vec::with_capacity(provenances.len());
     let mut built_atts: Vec<RunnerAttestationV1> = Vec::with_capacity(provenances.len());
     let mut built_ids: Vec<Phase1IdentityRecordV1> = Vec::with_capacity(provenances.len());
+    let mut built_recipes: Vec<crate::schema::runner_build_recipe::RunnerBuildRecipeV1> =
+        Vec::with_capacity(provenances.len());
+    let mut built_invs_a: Vec<
+        crate::schema::rustc_invocation_inventory::RustcInvocationInventoryV1,
+    > = Vec::with_capacity(provenances.len());
+    let mut built_invs_b: Vec<
+        crate::schema::rustc_invocation_inventory::RustcInvocationInventoryV1,
+    > = Vec::with_capacity(provenances.len());
+    let mut built_proofs: Vec<crate::schema::runner_double_build_proof::RunnerDoubleBuildProofV1> =
+        Vec::with_capacity(provenances.len());
+    let mut built_leaks: Vec<crate::schema::runner_leakage_report::RunnerLeakageReportV1> =
+        Vec::with_capacity(provenances.len());
     let mut proving_prov: HashMap<u8, [u8; 32]> = HashMap::new();
     for pf in provenances {
         // The RETAINED Phase-1 identity record for this provenance, with the run spec + candidate/arch
@@ -294,6 +489,34 @@ pub fn orchestrate_grid(
         att.build_target_arch = pf.arch;
         att.phase1_production_binary_blake3 = rec.production_binary_blake3;
         att.phase1_identity_record_blake3 = rec.hash();
+        // The RETAINED runner path-independence artifact set (venue-produced), candidate/arch bound;
+        // inject the attestation's v6 addresses + per-arch toolchain + structural recipe id from them.
+        let mut recipe = pf.runner_build_recipe.clone();
+        recipe.candidate = ids.candidate;
+        recipe.arch = pf.arch;
+        let mut inventory_a = pf.rustc_invocation_inventory_a.clone();
+        inventory_a.candidate = ids.candidate;
+        inventory_a.arch = pf.arch;
+        inventory_a.build_tag = 0;
+        let mut inventory_b = pf.rustc_invocation_inventory_b.clone();
+        inventory_b.candidate = ids.candidate;
+        inventory_b.arch = pf.arch;
+        inventory_b.build_tag = 1;
+        let mut proof = pf.runner_double_build_proof.clone();
+        proof.candidate = ids.candidate;
+        proof.arch = pf.arch;
+        proof.build_a.inventory_address = inventory_a.hash();
+        proof.build_b.inventory_address = inventory_b.hash();
+        let mut leakage = pf.runner_leakage_report.clone();
+        leakage.candidate = ids.candidate;
+        leakage.arch = pf.arch;
+        att.runner_build_recipe_blake3 = recipe.hash();
+        att.rustc_invocation_inventory_a_blake3 = inventory_a.hash();
+        att.rustc_invocation_inventory_b_blake3 = inventory_b.hash();
+        att.runner_double_build_proof_blake3 = proof.hash();
+        att.runner_leakage_report_blake3 = leakage.hash();
+        att.per_arch_toolchain_identity = recipe.per_arch_toolchain_identity;
+        att.runner_build_recipe_id = recipe.recipe_id;
         let runner_attestation_blake3 = att.hash();
         // Build the retained cpuset-chain artifact bound to this provenance.
         let chain = CpusetProbeChainV1 {
@@ -318,6 +541,9 @@ pub fn orchestrate_grid(
         // Runner continuity anchored to the retained record (the same check sealed import re-runs).
         att.check_runner_continuity()?;
         att.check_bound_identity_record(&rec)?;
+        // Runner path-independence anchored to the retained five-artifact set (the same check sealed
+        // import re-runs): recipe, inventory A, inventory B, double-build proof, leakage report.
+        att.check_bound_runner_recipe(&recipe, &inventory_a, &inventory_b, &proof, &leakage)?;
         let p = ArchRunProvenanceV1 {
             provenance_role: pf.role,
             b0_pre_spec_hash: spec,
@@ -358,6 +584,11 @@ pub fn orchestrate_grid(
         built_chains.push(chain);
         built_atts.push(att);
         built_ids.push(rec);
+        built_recipes.push(recipe);
+        built_invs_a.push(inventory_a);
+        built_invs_b.push(inventory_b);
+        built_proofs.push(proof);
+        built_leaks.push(leakage);
     }
 
     let csh_of = |s: StatementIndex| match s {
@@ -476,6 +707,11 @@ pub fn orchestrate_grid(
         cpuset_chains: built_chains,
         runner_attestations: built_atts,
         identity_records: built_ids,
+        recipes: built_recipes,
+        inventories_a: built_invs_a,
+        inventories_b: built_invs_b,
+        double_build_proofs: built_proofs,
+        leakage_reports: built_leaks,
         envelopes,
         samples,
         rss,
@@ -497,10 +733,11 @@ pub fn serialize_vector(allowlist_canonical: &[u8], bundles: &[(Candidate, Evide
         out.extend_from_slice(b);
     }
     let mut out = Vec::new();
-    // VEC3: retained-artifact lists (cpuset_chains, runner_attestations, identity_records), each
-    // aligned with the provenance list, so the sealed package carries the canonical bytes behind every
-    // content-address AND the authentic Phase-1 identity record — not the address/copied claim alone.
-    out.extend_from_slice(b"B0PREMEASVEC3");
+    // VEC4: retained-artifact lists (cpuset_chains, runner_attestations, identity_records, and the
+    // three runner path-independence artifacts: recipes, inventories, leakage_reports), each aligned
+    // with the provenance list, so the sealed package carries the canonical bytes behind every
+    // content-address — not the address/copied claim alone.
+    out.extend_from_slice(b"B0PREMEASVEC5");
     put(&mut out, allowlist_canonical);
     out.extend_from_slice(&(bundles.len() as u32).to_be_bytes());
     for (c, ev) in bundles {
@@ -513,6 +750,11 @@ pub fn serialize_vector(allowlist_canonical: &[u8], bundles: &[(Candidate, Evide
             &ev.cpuset_chains,
             &ev.runner_attestations,
             &ev.identity_records,
+            &ev.recipes,
+            &ev.inventories_a,
+            &ev.inventories_b,
+            &ev.double_build_proofs,
+            &ev.leakage_reports,
         ] {
             out.extend_from_slice(&(list.len() as u32).to_be_bytes());
             for r in list {
@@ -542,7 +784,7 @@ pub fn parse_vector(bytes: &[u8]) -> Result<MeasurementVector, String> {
         let n = u32_at(p)?;
         Ok(take(p, n)?.to_vec())
     };
-    if take(&mut p, 13)? != b"B0PREMEASVEC3" {
+    if take(&mut p, 13)? != b"B0PREMEASVEC5" {
         return Err("bad magic".into());
     }
     let allowlist = blob(&mut p)?;
@@ -552,8 +794,8 @@ pub fn parse_vector(bytes: &[u8]) -> Result<MeasurementVector, String> {
         let cb = take(&mut p, 2)?;
         let candidate = Candidate::from_repr(u16::from_be_bytes([cb[0], cb[1]]))
             .map_err(|_| "bad candidate".to_string())?;
-        let mut lists: Vec<Vec<Vec<u8>>> = Vec::with_capacity(7);
-        for _ in 0..7 {
+        let mut lists: Vec<Vec<Vec<u8>>> = Vec::with_capacity(12);
+        for _ in 0..12 {
             let count = u32_at(&mut p)?;
             let mut v = Vec::with_capacity(count);
             for _ in 0..count {
@@ -574,6 +816,11 @@ pub fn parse_vector(bytes: &[u8]) -> Result<MeasurementVector, String> {
                 cpuset_chains: it.next().unwrap(),
                 runner_attestations: it.next().unwrap(),
                 identity_records: it.next().unwrap(),
+                recipes: it.next().unwrap(),
+                inventories_a: it.next().unwrap(),
+                inventories_b: it.next().unwrap(),
+                double_build_proofs: it.next().unwrap(),
+                leakage_reports: it.next().unwrap(),
                 verifier_material,
                 result_set,
             },
@@ -664,6 +911,8 @@ pub fn deterministic_demo_vector() -> MeasurementVector {
     let allowlist = official_allowlist(spec, &builds);
     let guest_set = r0_guest_set_hash(&allowlist);
 
+    const PROV_MSC: &str = "eff3aae18b49969212c4c1493da20f97af195de2";
+    let prov_seed = |s: &str| dv(s.as_bytes());
     let prov = |arch: Arch, role: ProvenanceRole| -> ProvenanceFacts {
         let (cpuset, mem, phys, logical, ram) = match role {
             ProvenanceRole::Proving => (5u32, 22u64 << 30, 16u32, 32u32, 64u64 << 30),
@@ -716,6 +965,41 @@ pub fn deterministic_demo_vector() -> MeasurementVector {
                 [0; 32],
                 dv(b"runner-blake3"),
             ),
+            runner_build_recipe: synth_runner_recipe_artifacts(
+                Candidate::Sp1,
+                arch,
+                PROV_MSC,
+                &prov_seed,
+            )
+            .0,
+            rustc_invocation_inventory_a: synth_runner_recipe_artifacts(
+                Candidate::Sp1,
+                arch,
+                PROV_MSC,
+                &prov_seed,
+            )
+            .1,
+            rustc_invocation_inventory_b: synth_runner_recipe_artifacts(
+                Candidate::Sp1,
+                arch,
+                PROV_MSC,
+                &prov_seed,
+            )
+            .2,
+            runner_double_build_proof: synth_runner_recipe_artifacts(
+                Candidate::Sp1,
+                arch,
+                PROV_MSC,
+                &prov_seed,
+            )
+            .3,
+            runner_leakage_report: synth_runner_recipe_artifacts(
+                Candidate::Sp1,
+                arch,
+                PROV_MSC,
+                &prov_seed,
+            )
+            .4,
         }
     };
     let mut all_prov = Vec::new();
@@ -893,6 +1177,41 @@ mod tests {
                 [0; 32],
                 h(b"runner-blake3"),
             ),
+            runner_build_recipe: synth_runner_recipe_artifacts(
+                Candidate::Sp1,
+                arch,
+                &"0".repeat(40),
+                &|s: &str| h(s.as_bytes()),
+            )
+            .0,
+            rustc_invocation_inventory_a: synth_runner_recipe_artifacts(
+                Candidate::Sp1,
+                arch,
+                &"0".repeat(40),
+                &|s: &str| h(s.as_bytes()),
+            )
+            .1,
+            rustc_invocation_inventory_b: synth_runner_recipe_artifacts(
+                Candidate::Sp1,
+                arch,
+                &"0".repeat(40),
+                &|s: &str| h(s.as_bytes()),
+            )
+            .2,
+            runner_double_build_proof: synth_runner_recipe_artifacts(
+                Candidate::Sp1,
+                arch,
+                &"0".repeat(40),
+                &|s: &str| h(s.as_bytes()),
+            )
+            .3,
+            runner_leakage_report: synth_runner_recipe_artifacts(
+                Candidate::Sp1,
+                arch,
+                &"0".repeat(40),
+                &|s: &str| h(s.as_bytes()),
+            )
+            .4,
         }
     }
 

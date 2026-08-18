@@ -553,6 +553,73 @@ mod tests {
                     docker_argv_blake3: h("d0"),
                     reproducibility_pair_blake3: h("2a"),
                 },
+                runner_recipe: {
+                    let side = |t: &str, s: u64, e: u64| crate::facts::BuildSideFacts {
+                        original_root: format!("/b0-input/{t}/tooling"),
+                        cargo_from: format!("/b0-input/{t}/cargo"),
+                        target_from: format!("/b0-input/{t}/target"),
+                        encoded_rustflags_hex: "1f".into(),
+                        runner_sha256: h("52"),
+                        runner_blake3: h("53"),
+                        guest_image_id: h("e4"),
+                        guest_methods_blake3: h("e5"),
+                        origin_manifest_blake3: h("77"),
+                        materialized_manifest_blake3: h("77"),
+                        start_unix: s,
+                        end_unix: e,
+                        invocations: vec![crate::facts::RustcInvocationFacts {
+                            kind: "compile".into(),
+                            remap_args: vec![
+                                format!("--remap-path-prefix=/b0-input/{t}/cargo=/b0/cargo"),
+                                format!("--remap-path-prefix=/b0-input/{t}/target=/b0/target"),
+                            ],
+                            record_address: h("e6"),
+                        }],
+                    };
+                    crate::facts::RunnerRecipeFacts {
+                        candidate: "sp1".into(),
+                        arch: arch.into(),
+                        manifest_path: "tools/b0-pre-measure-sp1/Cargo.toml".into(),
+                        artifact_path: "release/b0-pre-measure-sp1".into(),
+                        cargo_ident: "cargo".into(),
+                        b0_venue_embed: "0".into(),
+                        canonical_build_path: "/b0/tooling".into(),
+                        per_arch_toolchain_identity: h("e2"),
+                        wrapper_blake3: h("e3"),
+                        build_argv: [
+                            "cargo",
+                            "build",
+                            "--release",
+                            "--locked",
+                            "--features",
+                            "real-backend",
+                            "--manifest-path",
+                            "tools/b0-pre-measure-sp1/Cargo.toml",
+                        ]
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect(),
+                        build_env: vec![
+                            ("BUILD_GIT_SHA".into(), "0".repeat(40)),
+                            ("SOURCE_DATE_EPOCH".into(), "0".into()),
+                            ("B0_VENUE_EMBED".into(), "0".into()),
+                        ],
+                        build_a: side("a", 100, 200),
+                        build_b: side("b", 200, 300),
+                        byte_equal: true,
+                        leakage_refused_prefixes: vec![
+                            "/b0-input/a/tooling".into(),
+                            "/tmp/b0-evid".into(),
+                        ],
+                        leakage_permitted_prefixes: vec![
+                            "/b0/cargo".into(),
+                            "/b0/target".into(),
+                            "/b0/tooling".into(),
+                        ],
+                        leakage_clean: true,
+                        evidence_root: "/tmp/b0-evid".into(),
+                    }
+                },
             })
             .collect()
     }

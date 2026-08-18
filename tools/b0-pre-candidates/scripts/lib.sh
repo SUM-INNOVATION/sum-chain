@@ -1275,6 +1275,171 @@ b0_build_recipe_hash() { # <sp1|risc0>
   printf '%s' "$recipe" | b3sum | awk '{print $1}'
 }
 
+# ============================================================================================
+# Canonical RUNNER-BUILD path-independence recipe (cross-arch: SP1/x86, SP1/aarch64, RISC0/x86).
+#
+# The runner SOURCE is MATERIALIZED at the fixed ratified build path /b0/tooling and built THERE, so
+# rustc's package `-Cmetadata`/StableCrateId (which encodes the absolute source path and which
+# `--remap-path-prefix` cannot touch — it rewrites compiler-visible source LOCATIONS only) is universal
+# and the runner is byte-identical regardless of where the operator's checkout lived. The two per-build
+# CARGO_HOME / target roots stay distinct and are remapped -> the FIXED canonical destinations below via
+# CARGO_ENCODED_RUSTFLAGS (unit-separator delimited, so no space/shell parsing can alter the recipe),
+# enforced by the transparent, output-neutral wrapper b0_rustc_remap_wrapper.sh (two remaps per compile:
+# cargo-home + target; the source is canonical by construction and needs no remap). The RECIPE is
+# byte-identical across arches (it names the canonical build path + destinations + policy + the RULE
+# "use the ratified per-arch toolchain", never a specific toolchain digest); the actual per-arch
+# toolchain identity is bound SEPARATELY in the runner attestation.
+# ============================================================================================
+B0_REMAP_TOOLING='/b0/tooling'   # the ratified canonical BUILD path (source materialized here); permitted prefix
+B0_REMAP_CARGO='/b0/cargo'
+B0_REMAP_TARGET='/b0/target'
+B0_RUNNER_REMAP_RECIPE_DOMAIN='b0-final-runner-remap-recipe/v1'
+
+# Canonicalize an actual build-input root: require ABSOLUTE, existing directory, NOT a symlink, and
+# `readlink -f`-stable; refuse relative/symlink/missing and any canonical destination used as a FROM.
+# Prints the canonical absolute path.
+b0_canonicalize_root() { # <label> <path>
+  local label="$1" p="$2" rp
+  [ -n "$p" ] || { echo "$label root is empty" >&2; return 1; }
+  case "$p" in /*) ;; *) echo "$label root is not absolute: $p" >&2; return 1 ;; esac
+  [ ! -L "$p" ] || { echo "$label root is a symlink (refused): $p" >&2; return 1; }
+  [ -d "$p" ] || { echo "$label root is not an existing directory: $p" >&2; return 1; }
+  rp="$(readlink -f "$p" 2>/dev/null || (cd "$p" 2>/dev/null && pwd -P))" \
+    || { echo "$label root does not canonicalize: $p" >&2; return 1; }
+  [ -n "$rp" ] || { echo "$label root does not canonicalize: $p" >&2; return 1; }
+  case "$rp" in
+    "$B0_REMAP_TOOLING"|"$B0_REMAP_CARGO"|"$B0_REMAP_TARGET")
+      echo "$label root is a canonical destination (refused as a FROM path): $rp" >&2; return 1 ;;
+  esac
+  printf '%s' "$rp"
+}
+
+# Canonical CARGO_ENCODED_RUSTFLAGS (unit-separator delimited) for the two remapped roots (cargo-home,
+# target). The SOURCE is NOT remapped — it is materialized at the canonical build path /b0/tooling and
+# is universal by construction. Refuses non-absolute/symlink roots, roots equal to a canonical
+# destination, and overlapping/nested cargo/target roots.
+b0_canonical_encoded_rustflags() { # <cargo_home> <target_dir>
+  local cargo target us
+  cargo="$(b0_canonicalize_root cargo-home "$1")" || return 1
+  target="$(b0_canonicalize_root target "$2")" || return 1
+  case "$target/" in "$cargo"/*) echo "recipe roots overlap: target nested under cargo" >&2; return 1 ;; esac
+  case "$cargo/" in "$target"/*) echo "recipe roots overlap: cargo nested under target" >&2; return 1 ;; esac
+  [ "$cargo" != "$target" ] \
+    || { echo "recipe roots are not distinct (cargo=$cargo target=$target)" >&2; return 1; }
+  us="$(printf '\037')"
+  printf -- '--remap-path-prefix=%s=%s%s--remap-path-prefix=%s=%s' \
+    "$cargo" "$B0_REMAP_CARGO" "$us" "$target" "$B0_REMAP_TARGET"
+}
+
+# Cross-arch STRUCTURAL recipe id (BLAKE3, 64-hex): describes the RULE, never a toolchain digest, so
+# it is byte-identical for SP1/x86, SP1/aarch64, RISC0/x86. Binds the canonical BUILD path, the two
+# canonical remap destinations, the encoded-flags format, --locked, SOURCE_DATE_EPOCH=0,
+# BUILD_GIT_SHA=<measured source>, the ratified-per-arch-toolchain RULE, and the wrapper's own hash.
+b0_runner_remap_recipe_id() { # <measured_source_commit_40hex> <wrapper_blake3_64hex>
+  local msc="$1" wh="$2"
+  printf '%s' "$msc" | grep -Eq '^[0-9a-f]{40}$' || { echo "recipe-id: measured source commit must be 40-hex" >&2; return 1; }
+  printf '%s' "$wh"  | grep -Eq '^[0-9a-f]{64}$' || { echo "recipe-id: wrapper blake3 must be 64-hex" >&2; return 1; }
+  printf '%s|build_at=%s|remap:cargo_home=%s,target=%s|encoded_rustflags=unit-separator-2-remap|flags=--locked|SOURCE_DATE_EPOCH=0|BUILD_GIT_SHA=%s|toolchain=ratified-per-arch(authority-record)|wrapper_blake3=%s' \
+    "$B0_RUNNER_REMAP_RECIPE_DOMAIN" "$B0_REMAP_TOOLING" "$B0_REMAP_CARGO" "$B0_REMAP_TARGET" "$msc" "$wh" \
+    | b3sum | awk '{print $1}'
+}
+
+# ============================================================================================
+# Authenticated FULL-BUILD-INPUT source manifest for the shared materialization boundary.
+#
+# A distinct source PATH alone does not prove A and B (and their materializations at the canonical
+# build path) carry the SAME bytes. `b0_source_manifest` walks a build-input tree and emits a canonical,
+# LC_ALL=C-sorted manifest — one line per entry, regular file `f <octal-mode> <size> <blake3>  <relpath>`
+# / directory `d <octal-mode> - -  <relpath>` — covering EVERY file (not just the 164-file tooling set:
+# Cargo manifests/locks and other inputs live outside it). It FAILS CLOSED on any entry that is not a
+# regular file or directory (symlink / device / socket / FIFO), any control character in a name, and any
+# ".." path component. The repo tracks ZERO symlinks/submodules, so no reviewed rule permits any other
+# entry type. `b0_source_manifest_addr` returns the domain-separated BLAKE3 of that manifest — the
+# content address the double-build proof binds so both import verifiers can enforce
+#   origin_A == origin_B == materialized_A == materialized_B.
+# ============================================================================================
+B0_SOURCE_MANIFEST_DOMAIN='b0-final-source-input-manifest/v1'
+# Portable stat (GNU first, BSD fallback). Only internal consistency is required (same host, one run).
+b0_stat_mode() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null; }
+b0_stat_size() { stat -c '%s' "$1" 2>/dev/null || stat -f '%z' "$1" 2>/dev/null; }
+b0_source_manifest() { # <root> ; prints canonical manifest to stdout; fail-closed (non-zero) on refusal
+  local root="$1"
+  [ -d "$root" ] || { echo "manifest: not a directory: $root" >&2; return 1; }
+  ( cd "$root" || exit 1
+    # Refuse ANY entry that is neither a regular file nor a directory (symlink/device/socket/FIFO).
+    # Capture the full list (no `head`/early-close, so a pipefail SIGPIPE can never invert the check).
+    local bad; bad="$(find . -mindepth 1 ! -type f ! -type d -print 2>/dev/null)"
+    if [ -n "$bad" ]; then
+      echo "manifest: refused non-regular entry (symlink/device/socket/fifo) under $root: ${bad%%$'\n'*}" >&2
+      exit 3
+    fi
+    local p rel
+    while IFS= read -r p; do
+      rel="${p#./}"
+      case "$rel" in *[[:cntrl:]]*) echo "manifest: control character in path '$rel'" >&2; exit 4 ;; esac
+      case "/$rel/" in */../*) echo "manifest: traversal component in '$rel'" >&2; exit 5 ;; esac
+      if [ -d "$p" ]; then
+        printf 'd %s - -  %s\n' "$(b0_stat_mode "$p")" "$rel"
+      elif [ -f "$p" ]; then
+        printf 'f %s %s %s  %s\n' "$(b0_stat_mode "$p")" "$(b0_stat_size "$p")" \
+          "$(b3sum "$p" | awk '{print $1}')" "$rel"
+      else
+        echo "manifest: unexpected entry type: '$rel'" >&2; exit 6
+      fi
+    done < <(LC_ALL=C find . -mindepth 1 \( -type f -o -type d \) -print | LC_ALL=C sort)
+  )
+}
+b0_source_manifest_addr() { # <root> ; prints the 64-hex domain-separated BLAKE3 of the manifest
+  local m; m="$(b0_source_manifest "$1")" || return 1
+  { printf '%s\0' "$B0_SOURCE_MANIFEST_DOMAIN"; printf '%s' "$m"; } | b3sum | awk '{print $1}'
+}
+
+# ============================================================================================
+# Runner leakage scan — the guarantee is the ABSENCE of uncontrolled absolute PATH PREFIXES and
+# uncontrolled PATH COMPONENTS in the reproducible runner, NOT the absence of a bare username/hostname
+# substring. The username/hostname matter only where they form a path (e.g. /home/<user>): ordinary
+# prose that merely contains the word (like "measurement runner") is NOT a leak. So the username/
+# hostname are matched ONLY as a complete path component — `/<name>/` (component boundary) or a
+# path-ending `/<name>` — never as a bare substring.
+# ============================================================================================
+# True iff <component> appears in <text> as a COMPLETE path component: preceded by `/` and followed by
+# `/`, end-of-line, or any character that cannot continue a filename component ([^A-Za-z0-9._-]). So
+# `/home/runner` and `/tmp/runner/x` hit; `measurement runner`, `prerunner`, `runner_api`,
+# `/home/runner_api` do NOT.
+b0_path_component_hit() { # <component> <text>  -> exit 0 iff present as a full path component
+  local comp="$1" text="$2" esc
+  [ -n "$comp" ] || return 1
+  esc="$(printf '%s' "$comp" | sed 's/[^A-Za-z0-9]/\\&/g')"   # escape every non-alnum -> ERE literal
+  printf '%s\n' "$text" | grep -Eq "/${esc}([^A-Za-z0-9._-]|\$)"
+}
+# Fail-closed leakage scan over <text> (the runner's `strings`). Refuses on the FIRST hit and prints a
+# classified token: an exact uncontrolled absolute-path PREFIX (source/cargo/target/evidence/work/HOME/
+# TMPDIR/...), or the username/hostname as a PATH COMPONENT. Returns 0 (clean) only if none hit.
+b0_leakage_scan() { # <text> <refused-prefixes-newline-separated> <username> <hostname>
+  local text="$1" refused="$2" user="$3" host="$4" p
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    if printf '%s\n' "$text" | grep -Fq -- "$p"; then printf 'path-prefix:%s\n' "$p"; return 1; fi
+  done <<EOF
+$refused
+EOF
+  if [ -n "$user" ] && b0_path_component_hit "$user" "$text"; then printf 'user-path-component:/%s\n' "$user"; return 1; fi
+  if [ -n "$host" ] && b0_path_component_hit "$host" "$text"; then printf 'host-path-component:/%s\n' "$host"; return 1; fi
+  return 0
+}
+
+# Refuse ambient rustflags that could inject/alter flags: any nonempty RUSTFLAGS or
+# CARGO_BUILD_RUSTFLAGS, and an inherited CARGO_ENCODED_RUSTFLAGS unless it EQUALS <canonical>.
+b0_refuse_ambient_rustflags() { # <canonical_encoded_rustflags>
+  local canon="$1"
+  [ -z "${RUSTFLAGS:-}" ] || { echo "ambient RUSTFLAGS set (refused; recipe uses canonical CARGO_ENCODED_RUSTFLAGS)" >&2; return 1; }
+  [ -z "${CARGO_BUILD_RUSTFLAGS:-}" ] || { echo "ambient CARGO_BUILD_RUSTFLAGS set (refused)" >&2; return 1; }
+  if [ -n "${CARGO_ENCODED_RUSTFLAGS:-}" ] && [ "${CARGO_ENCODED_RUSTFLAGS}" != "$canon" ]; then
+    echo "inherited CARGO_ENCODED_RUSTFLAGS != canonical recipe value (refused)" >&2; return 1
+  fi
+  return 0
+}
+
 # Toolchain identity (BLAKE3, 64-hex) bound to the RATIFIED provisioned toolchain — never a
 # synthetic label. sp1: the pinned builder IMAGE digest (the SP1 toolchain lives inside it);
 # risc0: the pinned local r0 toolchain TREE (PROVER_RISC0_HOME), hashed deterministically.

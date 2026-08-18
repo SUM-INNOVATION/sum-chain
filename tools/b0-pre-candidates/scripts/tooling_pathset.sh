@@ -55,6 +55,9 @@ GLOBS=(
   'tools/b0-pre-measure-core/src/*.rs'    'tools/b0-pre-measure-core/Cargo.toml'
   'tools/b0-pre-measure-sp1/src/*.rs'     'tools/b0-pre-measure-sp1/Cargo.toml'
   'tools/b0-pre-measure-risc0/src/*.rs'   'tools/b0-pre-measure-risc0/Cargo.toml'
+  # The RISC Zero build script canonicalizes the embedded guest's methods.rs (§G runner
+  # path-independence); it materially affects the runner binary identity, so it is reviewed tooling.
+  'tools/b0-pre-measure-risc0/build.rs'
   'tools/b0-pre-validator/src/*.rs' 'tools/b0-pre-validator/src/bin/*.rs' 'tools/b0-pre-validator/src/schema/*.rs' 'tools/b0-pre-validator/src/venue/*.rs' 'tools/b0-pre-validator/Cargo.toml'
   'tools/b0-pre-independent/src/*.rs' 'tools/b0-pre-independent/src/bin/*.rs' 'tools/b0-pre-independent/Cargo.toml'
   # Durable, repository-carried protobuf include authority (mandatory content-addressed input).

@@ -46,7 +46,7 @@ impl<'a> Rd<'a> {
 
 fn parse(bytes: &[u8]) -> (Vec<u8>, Vec<(u16, harness::Evidence)>) {
     let mut r = Rd { b: bytes, p: 0 };
-    assert_eq!(r.take(13), b"B0PREMEASVEC3", "bad magic");
+    assert_eq!(r.take(13), b"B0PREMEASVEC5", "bad magic");
     let allowlist = r.blob();
     let n = r.u32();
     let mut bundles = Vec::new();
@@ -54,7 +54,7 @@ fn parse(bytes: &[u8]) -> (Vec<u8>, Vec<(u16, harness::Evidence)>) {
         let cb = r.take(2);
         let candidate = u16::from_be_bytes([cb[0], cb[1]]);
         let mut lists: Vec<Vec<Vec<u8>>> = Vec::with_capacity(7);
-        for _ in 0..7 {
+        for _ in 0..12 {
             let count = r.u32();
             let mut v = Vec::with_capacity(count);
             for _ in 0..count {
@@ -75,6 +75,11 @@ fn parse(bytes: &[u8]) -> (Vec<u8>, Vec<(u16, harness::Evidence)>) {
                 cpuset_chains: it.next().unwrap(),
                 runner_attestations: it.next().unwrap(),
                 identity_records: it.next().unwrap(),
+                recipes: it.next().unwrap(),
+                inventories_a: it.next().unwrap(),
+                inventories_b: it.next().unwrap(),
+                double_build_proofs: it.next().unwrap(),
+                leakage_reports: it.next().unwrap(),
                 verifier_material,
                 result_set,
             },
@@ -109,6 +114,11 @@ fn clone_ev(ev: &harness::Evidence) -> harness::Evidence {
         cpuset_chains: ev.cpuset_chains.clone(),
         runner_attestations: ev.runner_attestations.clone(),
         identity_records: ev.identity_records.clone(),
+        recipes: ev.recipes.clone(),
+        inventories_a: ev.inventories_a.clone(),
+        inventories_b: ev.inventories_b.clone(),
+        double_build_proofs: ev.double_build_proofs.clone(),
+        leakage_reports: ev.leakage_reports.clone(),
         verifier_material: ev.verifier_material.clone(),
         result_set: ev.result_set.clone(),
     }

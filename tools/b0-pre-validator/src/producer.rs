@@ -135,6 +135,58 @@ pub struct ProvFacts {
     pub cpuset_inherited: bool,
     pub cpuset_probe_chain: Vec<CpusetProbeEntryJson>,
     pub runner_attestation: RunnerAttestationJson,
+    // ---- v6: runner path-independence recipe facts (venue-produced by double_build_runner.sh) ----
+    pub runner_recipe: RunnerRecipeJson,
+}
+
+/// JSON twin of the venue runner-build recipe facts (exact bytes for BOTH builds). The producer builds
+/// the five retained, independently-addressed artifacts (`RunnerBuildRecipeV1`, build-A + build-B
+/// `RustcInvocationInventoryV1`, `RunnerDoubleBuildProofV1`, `RunnerLeakageReportV1`) from these facts;
+/// the structural recipe id + canonical destinations + derived hashes are recomputed (never trusted).
+#[derive(Deserialize, Clone)]
+pub struct RunnerRecipeJson {
+    pub candidate: String,
+    pub arch: String,
+    pub manifest_path: String,
+    pub artifact_path: String,
+    pub cargo_ident: String,
+    pub b0_venue_embed: String,
+    pub canonical_build_path: String,
+    pub per_arch_toolchain_identity: String,
+    pub wrapper_blake3: String,
+    pub build_argv: Vec<String>,
+    pub build_env: Vec<(String, String)>,
+    pub build_a: BuildSideJson,
+    pub build_b: BuildSideJson,
+    pub byte_equal: bool,
+    pub leakage_refused_prefixes: Vec<String>,
+    pub leakage_permitted_prefixes: Vec<String>,
+    pub leakage_clean: bool,
+    pub evidence_root: String,
+}
+
+#[derive(Deserialize, Clone)]
+pub struct BuildSideJson {
+    pub original_root: String,
+    pub cargo_from: String,
+    pub target_from: String,
+    pub encoded_rustflags_hex: String,
+    pub runner_sha256: String,
+    pub runner_blake3: String,
+    pub guest_image_id: String,
+    pub guest_methods_blake3: String,
+    pub origin_manifest_blake3: String,
+    pub materialized_manifest_blake3: String,
+    pub start_unix: u64,
+    pub end_unix: u64,
+    pub invocations: Vec<InvocationRecordJson>,
+}
+
+#[derive(Deserialize, Clone)]
+pub struct InvocationRecordJson {
+    pub kind: String,
+    pub remap_args: Vec<String>,
+    pub record_address: String,
 }
 
 /// JSON twin of the host-provenance reader's `CpusetObservation`.
@@ -271,6 +323,16 @@ impl RunnerAttestationJson {
             // record and sets both from it (production_binary_blake3 + its domain-separated address).
             phase1_production_binary_blake3: [0; 32],
             phase1_identity_record_blake3: [0; 32],
+            // Runner path-independence placeholders: the orchestrator builds the three retained
+            // artifacts from the venue recipe facts and injects their addresses + per-arch toolchain +
+            // structural recipe id.
+            runner_build_recipe_blake3: [0; 32],
+            rustc_invocation_inventory_a_blake3: [0; 32],
+            rustc_invocation_inventory_b_blake3: [0; 32],
+            runner_double_build_proof_blake3: [0; 32],
+            runner_leakage_report_blake3: [0; 32],
+            per_arch_toolchain_identity: [0; 32],
+            runner_build_recipe_id: [0; 32],
         })
     }
 }
@@ -365,6 +427,19 @@ fn hex32(s: &str, ctx: &str) -> Result<[u8; 32], String> {
             u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).map_err(|_| format!("{ctx}: bad hex"))?;
     }
     Ok(a)
+}
+
+/// Decode an even-length lowercase-hex string to raw bytes (e.g. the exact CARGO_ENCODED_RUSTFLAGS,
+/// which contains non-printable `\x1f` separators and so travels hex-encoded in the venue facts).
+fn hexbytes(s: &str, ctx: &str) -> Result<Vec<u8>, String> {
+    if s.len() % 2 != 0 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(format!("{ctx}: expected even-length lowercase hex"));
+    }
+    (0..s.len() / 2)
+        .map(|i| {
+            u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).map_err(|_| format!("{ctx}: bad hex"))
+        })
+        .collect()
 }
 fn parse_candidate(s: &str) -> Result<Candidate, String> {
     match s {
@@ -798,6 +873,147 @@ fn prov_facts(p: &ProvFacts) -> Result<ProvenanceFacts, String> {
         ));
     }
 
+    // ---- v6: build the FIVE retained runner path-independence artifacts from the venue recipe facts
+    // (exact bytes for both builds). The structural recipe id + canonical destinations + derived hashes
+    // are RECOMPUTED (never trusted); each artifact is self/consistency-checked here and re-anchored at
+    // sealed import.
+    let rr = &p.runner_recipe;
+    let cand = attestation.candidate;
+    let arch = attestation.build_target_arch;
+    let wrapper_blake3 = hex32(&rr.wrapper_blake3, "recipe.wrapper_blake3")?;
+    let build_side =
+        |b: &BuildSideJson| -> Result<crate::schema::runner_build_recipe::BuildSide, String> {
+            Ok(crate::schema::runner_build_recipe::BuildSide {
+                original_root: b.original_root.clone(),
+                cargo_from: b.cargo_from.clone(),
+                target_from: b.target_from.clone(),
+                encoded_rustflags: hexbytes(
+                    &b.encoded_rustflags_hex,
+                    "recipe.encoded_rustflags_hex",
+                )?,
+            })
+        };
+    let runner_build_recipe = {
+        use crate::schema::runner_build_recipe::RunnerBuildRecipeV1;
+        let rec = RunnerBuildRecipeV1 {
+            candidate: cand,
+            arch,
+            recipe_id: RunnerBuildRecipeV1::compute_recipe_id(
+                &attestation.measured_source_commit,
+                &wrapper_blake3,
+            ),
+            build_argv: rr.build_argv.clone(),
+            build_env: rr.build_env.clone(),
+            manifest_path: rr.manifest_path.clone(),
+            artifact_path: rr.artifact_path.clone(),
+            cargo_ident: rr.cargo_ident.clone(),
+            b0_venue_embed: rr.b0_venue_embed.clone(),
+            canonical_build_path: rr.canonical_build_path.clone(),
+            build_a: build_side(&rr.build_a)?,
+            build_b: build_side(&rr.build_b)?,
+            measured_source_commit: attestation.measured_source_commit.clone(),
+            tooling_commit: attestation.ratified_tooling_commit.clone(),
+            tooling_pathset_blake3: attestation.ratified_pathset_blake3.clone(),
+            per_arch_toolchain_identity: hex32(
+                &rr.per_arch_toolchain_identity,
+                "recipe.per_arch_toolchain_identity",
+            )?,
+            protobuf_authority_sha256: attestation.protobuf_authority_sha256,
+            protobuf_authority_blake3: attestation.protobuf_authority_blake3,
+            wrapper_blake3,
+        };
+        rec.check_self_consistent()?;
+        rec
+    };
+    let build_inventory = |b: &BuildSideJson,
+                           tag: u8|
+     -> Result<
+        crate::schema::rustc_invocation_inventory::RustcInvocationInventoryV1,
+        String,
+    > {
+        use crate::schema::rustc_invocation_inventory::{canonical_inventory, InvocationRecord};
+        let recs: Vec<InvocationRecord> = b
+            .invocations
+            .iter()
+            .map(|i| {
+                Ok::<_, String>(InvocationRecord {
+                    kind: i.kind.clone(),
+                    remap_args: i.remap_args.clone(),
+                    record_address: hex32(&i.record_address, "recipe.invocation.record_address")?,
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(canonical_inventory(cand, arch, tag, recs))
+    };
+    let rustc_invocation_inventory_a = build_inventory(&rr.build_a, 0)?;
+    let rustc_invocation_inventory_b = build_inventory(&rr.build_b, 1)?;
+    let runner_double_build_proof = {
+        use crate::schema::runner_double_build_proof::{BuildFacts, RunnerDoubleBuildProofV1};
+        let facts = |b: &BuildSideJson, inv_addr: [u8; 32]| -> Result<BuildFacts, String> {
+            Ok(BuildFacts {
+                original_root: b.original_root.clone(),
+                cargo_from: b.cargo_from.clone(),
+                target_from: b.target_from.clone(),
+                runner_sha256: hex32(&b.runner_sha256, "recipe.runner_sha256")?,
+                runner_blake3: hex32(&b.runner_blake3, "recipe.runner_blake3")?,
+                guest_image_id: hex32(&b.guest_image_id, "recipe.guest_image_id")?,
+                guest_methods_blake3: hex32(
+                    &b.guest_methods_blake3,
+                    "recipe.guest_methods_blake3",
+                )?,
+                inventory_address: inv_addr,
+                origin_manifest_blake3: hex32(
+                    &b.origin_manifest_blake3,
+                    "recipe.origin_manifest_blake3",
+                )?,
+                materialized_manifest_blake3: hex32(
+                    &b.materialized_manifest_blake3,
+                    "recipe.materialized_manifest_blake3",
+                )?,
+                start_unix: b.start_unix,
+                end_unix: b.end_unix,
+            })
+        };
+        let fa = facts(&rr.build_a, rustc_invocation_inventory_a.hash())?;
+        let fb = facts(&rr.build_b, rustc_invocation_inventory_b.hash())?;
+        RunnerDoubleBuildProofV1 {
+            candidate: cand,
+            arch,
+            wrapper_blake3,
+            reproducibility_pair_blake3: RunnerDoubleBuildProofV1::compute_reproducibility_pair(
+                &fa, &fb,
+            ),
+            build_a: fa,
+            build_b: fb,
+            byte_equal: rr.byte_equal,
+        }
+    };
+    let runner_leakage_report = {
+        use crate::schema::runner_leakage_report::RunnerLeakageReportV1;
+        let mut refused = rr.leakage_refused_prefixes.clone();
+        refused.sort();
+        refused.dedup();
+        let mut permitted = rr.leakage_permitted_prefixes.clone();
+        permitted.sort();
+        permitted.dedup();
+        let lk = RunnerLeakageReportV1 {
+            candidate: cand,
+            arch,
+            scanned_binary_blake3: attestation.runner_blake3,
+            clean: rr.leakage_clean,
+            evidence_root: rr.evidence_root.clone(),
+            refused_prefixes: refused,
+            permitted_prefixes: permitted,
+        };
+        lk.check_clean_and_exact(&runner_build_recipe)?;
+        lk
+    };
+    runner_double_build_proof.check_double_build(
+        &runner_build_recipe,
+        &rustc_invocation_inventory_a,
+        &rustc_invocation_inventory_b,
+    )?;
+
     Ok(ProvenanceFacts {
         arch: parse_arch(&p.arch)?,
         role: parse_role(&p.role)?,
@@ -834,6 +1050,11 @@ fn prov_facts(p: &ProvFacts) -> Result<ProvenanceFacts, String> {
         cpuset_probe_chain_blake3,
         cpuset_chain_entries: chain,
         runner_attestation: attestation,
+        runner_build_recipe,
+        rustc_invocation_inventory_a,
+        rustc_invocation_inventory_b,
+        runner_double_build_proof,
+        runner_leakage_report,
         // Placeholder: produce() overwrites this with the resolved retained Phase-1 identity record.
         phase1_identity_record: Phase1IdentityRecordV1 {
             candidate: Candidate::Sp1,
@@ -1000,6 +1221,98 @@ pub fn dry_run_raw_facts() -> RawFacts {
                 native_protoc_version: "libprotoc 3.21.12".into(),
                 docker_argv_blake3: dv("docker-argv"),
                 reproducibility_pair_blake3: dv("repro-pair"),
+            },
+            runner_recipe: {
+                let enc_hex = |t: &str| -> String {
+                    use std::fmt::Write as _;
+                    let s = format!(
+                        "--remap-path-prefix=/b0-input/{t}/cargo=/b0/cargo\u{1f}--remap-path-prefix=/b0-input/{t}/target=/b0/target"
+                    );
+                    s.bytes().fold(String::new(), |mut acc, b| {
+                        let _ = write!(acc, "{b:02x}");
+                        acc
+                    })
+                };
+                let rec_addr = |t: &str| -> String {
+                    let body = format!(
+                        "b0-final-rustc-invocation/v2\nkind=compile\nremap_arg=--remap-path-prefix=/b0-input/{t}/cargo=/b0/cargo\nremap_arg=--remap-path-prefix=/b0-input/{t}/target=/b0/target"
+                    );
+                    blake3::hash(body.as_bytes()).to_hex().to_string()
+                };
+                let side = |t: &str, s: u64, e: u64| BuildSideJson {
+                    original_root: format!("/b0-input/{t}/tooling"),
+                    cargo_from: format!("/b0-input/{t}/cargo"),
+                    target_from: format!("/b0-input/{t}/target"),
+                    encoded_rustflags_hex: enc_hex(t),
+                    runner_sha256: dv("runner-sha256"),
+                    runner_blake3: dv("runner-blake3"),
+                    guest_image_id: dv("guest-img"),
+                    guest_methods_blake3: dv("guest-methods"),
+                    origin_manifest_blake3: dv("src-manifest"),
+                    materialized_manifest_blake3: dv("src-manifest"),
+                    start_unix: s,
+                    end_unix: e,
+                    invocations: vec![InvocationRecordJson {
+                        kind: "compile".into(),
+                        remap_args: vec![
+                            format!("--remap-path-prefix=/b0-input/{t}/cargo=/b0/cargo"),
+                            format!("--remap-path-prefix=/b0-input/{t}/target=/b0/target"),
+                        ],
+                        record_address: rec_addr(t),
+                    }],
+                };
+                let mut refused: Vec<String> = ["a", "b"]
+                    .iter()
+                    .flat_map(|t| {
+                        vec![
+                            format!("/b0-input/{t}/tooling"),
+                            format!("/b0-input/{t}/cargo"),
+                            format!("/b0-input/{t}/target"),
+                        ]
+                    })
+                    .collect();
+                refused.push("/tmp/b0-evid".into());
+                refused.sort();
+                RunnerRecipeJson {
+                    candidate: "sp1".into(),
+                    arch: arch.into(),
+                    manifest_path: "tools/b0-pre-measure-sp1/Cargo.toml".into(),
+                    artifact_path: "release/b0-pre-measure-sp1".into(),
+                    cargo_ident: "cargo".into(),
+                    b0_venue_embed: "0".into(),
+                    canonical_build_path: "/b0/tooling".into(),
+                    per_arch_toolchain_identity: dv("per-arch-toolchain"),
+                    wrapper_blake3: dv("wrapper-blake3"),
+                    build_argv: vec![
+                        "cargo".into(),
+                        "build".into(),
+                        "--release".into(),
+                        "--locked".into(),
+                        "--features".into(),
+                        "real-backend".into(),
+                        "--manifest-path".into(),
+                        "tools/b0-pre-measure-sp1/Cargo.toml".into(),
+                    ],
+                    build_env: vec![
+                        (
+                            "BUILD_GIT_SHA".into(),
+                            "eff3aae18b49969212c4c1493da20f97af195de2".into(),
+                        ),
+                        ("SOURCE_DATE_EPOCH".into(), "0".into()),
+                        ("B0_VENUE_EMBED".into(), "0".into()),
+                    ],
+                    build_a: side("a", 100, 200),
+                    build_b: side("b", 200, 300),
+                    byte_equal: true,
+                    leakage_refused_prefixes: refused,
+                    leakage_permitted_prefixes: vec![
+                        "/b0/cargo".into(),
+                        "/b0/target".into(),
+                        "/b0/tooling".into(),
+                    ],
+                    leakage_clean: true,
+                    evidence_root: "/tmp/b0-evid".into(),
+                }
             },
         }
     };

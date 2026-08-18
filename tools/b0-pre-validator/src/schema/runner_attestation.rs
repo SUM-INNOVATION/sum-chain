@@ -23,7 +23,7 @@ use crate::enums::{Arch, Candidate, ProvenanceRole};
 /// runner-CONTINUITY field (`phase1_production_binary_blake3`); v4 added
 /// `phase1_identity_record_blake3`, the domain-separated address of the RETAINED Phase-1 identity
 /// record, so continuity is anchored to an independently-decoded record, not a copied hash claim.
-pub const RUNNER_ATTESTATION_SCHEMA_VERSION: u16 = 4;
+pub const RUNNER_ATTESTATION_SCHEMA_VERSION: u16 = 6;
 
 /// Domain separation for [`RunnerAttestationV1::hash`].
 pub const RUNNER_ATTESTATION_PREFIX: &[u8] = b"b0-final-runner-attestation/v1\0";
@@ -87,6 +87,25 @@ pub struct RunnerAttestationV1 {
     /// equals this, then requires the record's `production_binary_blake3` equals BOTH the field above
     /// and `runner_blake3` — anchoring continuity to an independently-decoded record.
     pub phase1_identity_record_blake3: [u8; 32],
+    // ---- v6: runner-build PATH-INDEPENDENCE (five retained, independently-addressed artifacts) ----
+    /// Domain-separated address of the retained [`super::runner_build_recipe::RunnerBuildRecipeV1`].
+    pub runner_build_recipe_blake3: [u8; 32],
+    /// Domain-separated address of build A's retained
+    /// [`super::rustc_invocation_inventory::RustcInvocationInventoryV1`].
+    pub rustc_invocation_inventory_a_blake3: [u8; 32],
+    /// Domain-separated address of build B's retained inventory.
+    pub rustc_invocation_inventory_b_blake3: [u8; 32],
+    /// Domain-separated address of the retained
+    /// [`super::runner_double_build_proof::RunnerDoubleBuildProofV1`].
+    pub runner_double_build_proof_blake3: [u8; 32],
+    /// Domain-separated address of the retained [`super::runner_leakage_report::RunnerLeakageReportV1`].
+    pub runner_leakage_report_blake3: [u8; 32],
+    /// The ACTUAL per-arch toolchain identity — bound SEPARATELY from the cross-arch structural recipe
+    /// id (so the recipe id stays identity-free); must equal the recipe's per-arch toolchain.
+    pub per_arch_toolchain_identity: [u8; 32],
+    /// The cross-arch STRUCTURAL runner-build recipe id (identical for SP1/x86, SP1/aarch64, RISC0/x86);
+    /// recomputed at import and required to equal the retained recipe's id + the arch-free structural id.
+    pub runner_build_recipe_id: [u8; 32],
 }
 
 fn write_hexstr(w: &mut Writer, s: &str) {
@@ -156,6 +175,13 @@ impl RunnerAttestationV1 {
         w.bytes(&self.reproducibility_pair_blake3);
         w.bytes(&self.phase1_production_binary_blake3);
         w.bytes(&self.phase1_identity_record_blake3);
+        w.bytes(&self.runner_build_recipe_blake3);
+        w.bytes(&self.rustc_invocation_inventory_a_blake3);
+        w.bytes(&self.rustc_invocation_inventory_b_blake3);
+        w.bytes(&self.runner_double_build_proof_blake3);
+        w.bytes(&self.runner_leakage_report_blake3);
+        w.bytes(&self.per_arch_toolchain_identity);
+        w.bytes(&self.runner_build_recipe_id);
         w.into_bytes()
     }
 
@@ -215,6 +241,20 @@ impl RunnerAttestationV1 {
             r.read_array::<32>("RunnerAttestationV1.phase1_production_binary_blake3")?;
         let phase1_identity_record_blake3 =
             r.read_array::<32>("RunnerAttestationV1.phase1_identity_record_blake3")?;
+        let runner_build_recipe_blake3 =
+            r.read_array::<32>("RunnerAttestationV1.runner_build_recipe_blake3")?;
+        let rustc_invocation_inventory_a_blake3 =
+            r.read_array::<32>("RunnerAttestationV1.rustc_invocation_inventory_a_blake3")?;
+        let rustc_invocation_inventory_b_blake3 =
+            r.read_array::<32>("RunnerAttestationV1.rustc_invocation_inventory_b_blake3")?;
+        let runner_double_build_proof_blake3 =
+            r.read_array::<32>("RunnerAttestationV1.runner_double_build_proof_blake3")?;
+        let runner_leakage_report_blake3 =
+            r.read_array::<32>("RunnerAttestationV1.runner_leakage_report_blake3")?;
+        let per_arch_toolchain_identity =
+            r.read_array::<32>("RunnerAttestationV1.per_arch_toolchain_identity")?;
+        let runner_build_recipe_id =
+            r.read_array::<32>("RunnerAttestationV1.runner_build_recipe_id")?;
         Ok(Self {
             candidate,
             provenance_role,
@@ -240,6 +280,13 @@ impl RunnerAttestationV1 {
             reproducibility_pair_blake3,
             phase1_production_binary_blake3,
             phase1_identity_record_blake3,
+            runner_build_recipe_blake3,
+            rustc_invocation_inventory_a_blake3,
+            rustc_invocation_inventory_b_blake3,
+            runner_double_build_proof_blake3,
+            runner_leakage_report_blake3,
+            per_arch_toolchain_identity,
+            runner_build_recipe_id,
         })
     }
 
@@ -342,6 +389,101 @@ impl RunnerAttestationV1 {
         Ok(())
     }
 
+    /// SEALED-IMPORT runner PATH-INDEPENDENCE anchor: bind this attestation to the FIVE
+    /// INDEPENDENTLY-decoded retained artifacts (recipe, inventory A, inventory B, double-build proof,
+    /// leakage report). Requires each artifact's domain-separated address equals the bound field; the
+    /// recipe is self-consistent over its RETAINED BYTES (argv proves --release/--locked/--features
+    /// real-backend; each side's exact encoded rustflags decode to the canonical remaps for its roots;
+    /// A/B source roots genuinely differ; recomputed cross-arch structural id) and matches the
+    /// attestation's measured source / tooling / protobuf / per-arch toolchain / candidate / arch; the
+    /// double-build proof re-proves runner A == runner B == THIS runner (and, RISC0, guest A == B),
+    /// binds both inventories (each proving its build's exact remaps + record-address agreement), and
+    /// recomputes the reproducibility pair (which must equal the attestation's); and the leakage report
+    /// is clean, permits exactly the canonical three, and its refused set CONTAINS every A/B root + the
+    /// evidence root. A missing/extra/swapped/mutated/forged or cross-arch artifact is refused against
+    /// independent anchors, not a copied claim.
+    #[allow(clippy::too_many_arguments)]
+    pub fn check_bound_runner_recipe(
+        &self,
+        recipe: &super::runner_build_recipe::RunnerBuildRecipeV1,
+        inventory_a: &super::rustc_invocation_inventory::RustcInvocationInventoryV1,
+        inventory_b: &super::rustc_invocation_inventory::RustcInvocationInventoryV1,
+        proof: &super::runner_double_build_proof::RunnerDoubleBuildProofV1,
+        leakage: &super::runner_leakage_report::RunnerLeakageReportV1,
+    ) -> Result<(), String> {
+        // 1. addresses — every retained artifact re-addresses to its bound field.
+        if recipe.hash() != self.runner_build_recipe_blake3 {
+            return Err("retained RunnerBuildRecipeV1 address != attestation bound address".into());
+        }
+        if inventory_a.hash() != self.rustc_invocation_inventory_a_blake3 {
+            return Err("retained build-A RustcInvocationInventoryV1 address != bound".into());
+        }
+        if inventory_b.hash() != self.rustc_invocation_inventory_b_blake3 {
+            return Err("retained build-B RustcInvocationInventoryV1 address != bound".into());
+        }
+        if proof.hash() != self.runner_double_build_proof_blake3 {
+            return Err(
+                "retained RunnerDoubleBuildProofV1 address != attestation bound address".into(),
+            );
+        }
+        if leakage.hash() != self.runner_leakage_report_blake3 {
+            return Err(
+                "retained RunnerLeakageReportV1 address != attestation bound address".into(),
+            );
+        }
+        // 2. recipe self-consistency (over retained bytes) + structural id.
+        recipe.check_self_consistent()?;
+        if recipe.recipe_id != self.runner_build_recipe_id {
+            return Err("recipe id != attestation runner_build_recipe_id".into());
+        }
+        let recompute = super::runner_build_recipe::RunnerBuildRecipeV1::compute_recipe_id(
+            &self.measured_source_commit,
+            &recipe.wrapper_blake3,
+        );
+        if recompute != self.runner_build_recipe_id {
+            return Err(
+                "attestation runner_build_recipe_id != recomputed structural recipe id".into(),
+            );
+        }
+        // 3. recipe <-> attestation cross-binding.
+        if recipe.candidate != self.candidate || recipe.arch != self.build_target_arch {
+            return Err("recipe candidate/arch != attestation".into());
+        }
+        if recipe.measured_source_commit != self.measured_source_commit {
+            return Err("recipe measured_source_commit != attestation".into());
+        }
+        if recipe.tooling_commit != self.ratified_tooling_commit
+            || recipe.tooling_pathset_blake3 != self.ratified_pathset_blake3
+        {
+            return Err("recipe tooling authority != attestation".into());
+        }
+        if recipe.protobuf_authority_sha256 != self.protobuf_authority_sha256
+            || recipe.protobuf_authority_blake3 != self.protobuf_authority_blake3
+        {
+            return Err("recipe protobuf authority != attestation".into());
+        }
+        if recipe.per_arch_toolchain_identity != self.per_arch_toolchain_identity {
+            return Err("recipe per-arch toolchain identity != attestation".into());
+        }
+        // 4. double-build proof: re-proves A/B (binds both inventories + their remap proofs), verdict,
+        //    reproducibility pair, chronology, and RISC0 guest A == B.
+        proof.check_double_build(recipe, inventory_a, inventory_b)?;
+        if proof.build_a.runner_blake3 != self.runner_blake3
+            || proof.build_a.runner_sha256 != self.runner_sha256
+        {
+            return Err("double-build proof runner != the attested measurement runner".into());
+        }
+        // 5. leakage: clean + exact + refused CONTAINS every A/B root + evidence root; scanned THIS runner.
+        if leakage.candidate != self.candidate || leakage.arch != self.build_target_arch {
+            return Err("leakage report candidate/arch != attestation".into());
+        }
+        leakage.check_clean_and_exact(recipe)?;
+        if leakage.scanned_binary_blake3 != self.runner_blake3 {
+            return Err("leakage report scanned a binary != the measurement runner_blake3".into());
+        }
+        Ok(())
+    }
+
     /// Bind the attestation's measured source to the ratified measured source. Separate from the
     /// tooling authority (which is checked via [`crate::tooling_authority::verify_tooling_authority`]
     /// against the tooling commit + path-set digest, NEVER against the measured-source commit).
@@ -397,6 +539,13 @@ mod tests {
             // Runner continuity: the Phase-1 runner binary equals the measurement runner (runner_blake3).
             phase1_production_binary_blake3: [3; 32],
             phase1_identity_record_blake3: [11; 32],
+            runner_build_recipe_blake3: [13; 32],
+            rustc_invocation_inventory_a_blake3: [14; 32],
+            rustc_invocation_inventory_b_blake3: [18; 32],
+            runner_double_build_proof_blake3: [19; 32],
+            runner_leakage_report_blake3: [15; 32],
+            per_arch_toolchain_identity: [16; 32],
+            runner_build_recipe_id: [17; 32],
         }
     }
 
@@ -521,5 +670,177 @@ mod tests {
             .check_internal_consistency(&ratified)
             .unwrap_err()
             .contains("ratified measured source"));
+    }
+
+    // ---- runner path-independence binding (check_bound_runner_recipe, v6 five-artifact set) ---------
+    // A self-consistent (attestation, recipe, inventory A, inventory B, double-build proof, leakage) set.
+    // Negatives mutate the ATTESTATION (not the artifact) so the content addresses stay valid and each
+    // cross-check is isolated; the artifact-internal refusals (missing compile, forged record address,
+    // fourth remap, runner A!=B, forged repro pair, RISC0 guest A!=B, leakage omitting a root, argv
+    // missing --locked/--release, side root != encoded rustflags) are covered by the per-artifact tests.
+    type Bound = (
+        RunnerAttestationV1,
+        super::super::runner_build_recipe::RunnerBuildRecipeV1,
+        super::super::rustc_invocation_inventory::RustcInvocationInventoryV1,
+        super::super::rustc_invocation_inventory::RustcInvocationInventoryV1,
+        super::super::runner_double_build_proof::RunnerDoubleBuildProofV1,
+        super::super::runner_leakage_report::RunnerLeakageReportV1,
+    );
+
+    fn bound() -> Bound {
+        use super::super::runner_leakage_report::RunnerLeakageReportV1;
+        let (recipe, inv_a, inv_b, proof) = super::super::runner_double_build_proof::tests_parts();
+        // Leakage cross-bound to the same recipe; scanned == the proof runner; refused ⊇ all A/B roots.
+        let mut refused = vec![
+            recipe.build_a.original_root.clone(),
+            recipe.build_a.cargo_from.clone(),
+            recipe.build_a.target_from.clone(),
+            recipe.build_b.original_root.clone(),
+            recipe.build_b.cargo_from.clone(),
+            recipe.build_b.target_from.clone(),
+            "/tmp/b0-evid".to_string(),
+        ];
+        refused.sort();
+        refused.dedup();
+        let mut permitted = vec![
+            super::super::runner_build_recipe::CANON_CARGO.to_string(),
+            super::super::runner_build_recipe::CANON_TARGET.to_string(),
+            super::super::runner_build_recipe::CANON_TOOLING.to_string(),
+        ];
+        permitted.sort();
+        let leakage = RunnerLeakageReportV1 {
+            candidate: recipe.candidate,
+            arch: recipe.arch,
+            scanned_binary_blake3: proof.build_a.runner_blake3,
+            clean: true,
+            evidence_root: "/tmp/b0-evid".into(),
+            refused_prefixes: refused,
+            permitted_prefixes: permitted,
+        };
+        // Attestation composed to match every artifact.
+        let mut att = sample();
+        att.candidate = recipe.candidate;
+        att.build_target_arch = recipe.arch;
+        att.measured_source_commit = recipe.measured_source_commit.clone();
+        att.build_git_sha = recipe.measured_source_commit.clone();
+        att.ratified_tooling_commit = recipe.tooling_commit.clone();
+        att.ratified_pathset_blake3 = recipe.tooling_pathset_blake3.clone();
+        att.recomputed_pathset_blake3 = recipe.tooling_pathset_blake3.clone();
+        att.protobuf_authority_sha256 = recipe.protobuf_authority_sha256;
+        att.protobuf_authority_blake3 = recipe.protobuf_authority_blake3;
+        att.per_arch_toolchain_identity = recipe.per_arch_toolchain_identity;
+        att.runner_build_recipe_id = recipe.recipe_id;
+        att.runner_sha256 = proof.build_a.runner_sha256;
+        att.runner_blake3 = proof.build_a.runner_blake3;
+        att.phase1_production_binary_blake3 = proof.build_a.runner_blake3;
+        att.reproducibility_pair_blake3 = proof.reproducibility_pair_blake3;
+        att.runner_build_recipe_blake3 = recipe.hash();
+        att.rustc_invocation_inventory_a_blake3 = inv_a.hash();
+        att.rustc_invocation_inventory_b_blake3 = inv_b.hash();
+        att.runner_double_build_proof_blake3 = proof.hash();
+        att.runner_leakage_report_blake3 = leakage.hash();
+        (att, recipe, inv_a, inv_b, proof, leakage)
+    }
+
+    #[test]
+    fn bound_runner_recipe_positive() {
+        let (att, r, ia, ib, p, lk) = bound();
+        att.check_bound_runner_recipe(&r, &ia, &ib, &p, &lk)
+            .unwrap();
+    }
+
+    #[test]
+    fn bound_runner_recipe_address_mutations_refused() {
+        let (mut att, r, ia, ib, p, lk) = bound();
+        att.runner_build_recipe_blake3 = [0xAB; 32];
+        assert!(att
+            .check_bound_runner_recipe(&r, &ia, &ib, &p, &lk)
+            .unwrap_err()
+            .contains("RunnerBuildRecipeV1 address"));
+        let (mut att, r, ia, ib, p, lk) = bound();
+        att.rustc_invocation_inventory_a_blake3 = [0xAB; 32];
+        assert!(att
+            .check_bound_runner_recipe(&r, &ia, &ib, &p, &lk)
+            .unwrap_err()
+            .contains("build-A RustcInvocationInventoryV1 address"));
+        let (mut att, r, ia, ib, p, lk) = bound();
+        att.runner_double_build_proof_blake3 = [0xAB; 32];
+        assert!(att
+            .check_bound_runner_recipe(&r, &ia, &ib, &p, &lk)
+            .unwrap_err()
+            .contains("RunnerDoubleBuildProofV1 address"));
+        let (mut att, r, ia, ib, p, lk) = bound();
+        att.runner_leakage_report_blake3 = [0xAB; 32];
+        assert!(att
+            .check_bound_runner_recipe(&r, &ia, &ib, &p, &lk)
+            .unwrap_err()
+            .contains("RunnerLeakageReportV1 address"));
+    }
+
+    #[test]
+    fn bound_runner_recipe_recomputed_structural_id_refused() {
+        let (mut att, r, ia, ib, p, lk) = bound();
+        att.measured_source_commit = "6".repeat(40);
+        assert!(att
+            .check_bound_runner_recipe(&r, &ia, &ib, &p, &lk)
+            .unwrap_err()
+            .contains("recomputed structural recipe id"));
+    }
+
+    #[test]
+    fn bound_runner_recipe_cross_arch_refused() {
+        let (mut att, r, ia, ib, p, lk) = bound();
+        att.build_target_arch = Arch::Aarch64;
+        assert!(att
+            .check_bound_runner_recipe(&r, &ia, &ib, &p, &lk)
+            .unwrap_err()
+            .contains("recipe candidate/arch"));
+    }
+
+    #[test]
+    fn bound_runner_recipe_authority_and_repro_mutations_refused() {
+        let (mut att, r, ia, ib, p, lk) = bound();
+        att.ratified_tooling_commit = "9".repeat(40);
+        assert!(att
+            .check_bound_runner_recipe(&r, &ia, &ib, &p, &lk)
+            .unwrap_err()
+            .contains("tooling authority"));
+        let (mut att, r, ia, ib, p, lk) = bound();
+        att.protobuf_authority_sha256 = [0x7E; 32];
+        assert!(att
+            .check_bound_runner_recipe(&r, &ia, &ib, &p, &lk)
+            .unwrap_err()
+            .contains("protobuf authority"));
+        let (mut att, r, ia, ib, p, lk) = bound();
+        att.per_arch_toolchain_identity = [0x7E; 32];
+        assert!(att
+            .check_bound_runner_recipe(&r, &ia, &ib, &p, &lk)
+            .unwrap_err()
+            .contains("per-arch toolchain identity"));
+    }
+
+    #[test]
+    fn bound_runner_recipe_runner_and_scan_mutations_refused() {
+        // attested runner must equal the double-build proof runner.
+        let (mut att, r, ia, ib, p, lk) = bound();
+        att.runner_blake3 = [0x5A; 32];
+        // leakage.scanned still == proof runner, so the proof-runner check fires first.
+        assert!(att
+            .check_bound_runner_recipe(&r, &ia, &ib, &p, &lk)
+            .unwrap_err()
+            .contains("proof runner != the attested"));
+    }
+
+    #[test]
+    fn bound_recipe_bytes_mutated_stale_address_refused() {
+        // "Retained flags/argv changed with the old hash": the derived hashes are recomputed from the
+        // RETAINED BYTES, so mutating the argv changes the recipe's content address — which no longer
+        // equals the attestation's bound address.
+        let (att, mut r, ia, ib, p, lk) = bound();
+        r.build_argv.push("--offline".into()); // any argv change re-addresses the recipe
+        assert!(att
+            .check_bound_runner_recipe(&r, &ia, &ib, &p, &lk)
+            .unwrap_err()
+            .contains("RunnerBuildRecipeV1 address"));
     }
 }

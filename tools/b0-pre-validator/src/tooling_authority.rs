@@ -26,12 +26,11 @@
 pub const UNBOUND: &str = "UNBOUND";
 
 /// Commit B records Commit A's exact 40-hex commit SHA here. Until then: [`UNBOUND`].
-pub const RATIFIED_MEASUREMENT_TOOLING_COMMIT: &str = "f56e0c07a560d0a69898ef64808b56d351fa4fd6";
+pub const RATIFIED_MEASUREMENT_TOOLING_COMMIT: &str = UNBOUND;
 
 /// Commit B records the canonical tooling path-set digest (64-hex BLAKE3) here. Until then:
 /// [`UNBOUND`]. The digest is [`recompute_pathset_digest`] over the sorted inventory manifest.
-pub const RATIFIED_MEASUREMENT_TOOLING_PATHSET_BLAKE3: &str =
-    "f729676e65063a66d245c2691a54eed0e9a764597f8dcc0371d1e732656531c7";
+pub const RATIFIED_MEASUREMENT_TOOLING_PATHSET_BLAKE3: &str = UNBOUND;
 
 /// Domain separation for the tooling path-set digest. The preimage is the canonical MANIFEST TEXT:
 /// one line per inventory path, `"<file_blake3_hex>  <relpath>\n"`, sorted ascending by `relpath`
@@ -124,41 +123,14 @@ pub fn verify_tooling_authority(
 mod tests {
     use super::*;
 
-    // Commit B (authority binding) ratified the tooling authority to Commit A + the twice-recomputed
-    // path-set digest. These exercise the now-ACTIVE authority: the exact pair validates; an UNBOUND
-    // sentinel, a wrong commit, or a wrong path-set digest are each refused.
     #[test]
-    fn ratified_tooling_authority_validates_and_refuses_mismatches() {
-        // Bound (Commit B) — well-formed 40/64-hex, no longer the sentinel.
-        assert_ne!(RATIFIED_MEASUREMENT_TOOLING_COMMIT, UNBOUND);
-        assert_ne!(RATIFIED_MEASUREMENT_TOOLING_PATHSET_BLAKE3, UNBOUND);
-        assert!(is_hex40(RATIFIED_MEASUREMENT_TOOLING_COMMIT));
-        assert!(is_hex64(RATIFIED_MEASUREMENT_TOOLING_PATHSET_BLAKE3));
-        assert!(tooling_authority_is_bound());
-        // Positive: the exact ratified commit + digest is accepted.
-        assert!(verify_tooling_authority(
-            RATIFIED_MEASUREMENT_TOOLING_COMMIT,
-            RATIFIED_MEASUREMENT_TOOLING_PATHSET_BLAKE3,
-        )
-        .is_ok());
-        // UNBOUND observed (non-hex) is refused.
-        assert!(
-            verify_tooling_authority(UNBOUND, RATIFIED_MEASUREMENT_TOOLING_PATHSET_BLAKE3).is_err()
-        );
-        assert!(verify_tooling_authority(RATIFIED_MEASUREMENT_TOOLING_COMMIT, UNBOUND).is_err());
-        // Wrong tooling commit is refused (well-formed but != ratified).
-        assert!(verify_tooling_authority(
-            &"a".repeat(40),
-            RATIFIED_MEASUREMENT_TOOLING_PATHSET_BLAKE3
-        )
-        .unwrap_err()
-        .contains("!= ratified"));
-        // Wrong path-set digest is refused.
-        assert!(
-            verify_tooling_authority(RATIFIED_MEASUREMENT_TOOLING_COMMIT, &"b".repeat(64))
-                .unwrap_err()
-                .contains("path-set digest")
-        );
+    fn commit_a_ships_unbound_and_refuses() {
+        // Commit A invariant: both values are the sentinel, so nothing validates yet.
+        assert_eq!(RATIFIED_MEASUREMENT_TOOLING_COMMIT, UNBOUND);
+        assert_eq!(RATIFIED_MEASUREMENT_TOOLING_PATHSET_BLAKE3, UNBOUND);
+        assert!(!tooling_authority_is_bound());
+        let e = verify_tooling_authority(&"a".repeat(40), &"b".repeat(64)).unwrap_err();
+        assert!(e.contains("UNBOUND"), "{e}");
     }
 
     #[test]

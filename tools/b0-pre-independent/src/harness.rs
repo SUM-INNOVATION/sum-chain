@@ -307,6 +307,209 @@ fn enc_identity_record(
 }
 
 /// Encode a `RunnerAttestationV1` (independent, version 4); returns (bytes, address).
+fn str16w(b: &mut Vec<u8>, s: &str) {
+    b.extend_from_slice(&(s.len() as u16).to_le_bytes());
+    b.extend_from_slice(s.as_bytes());
+}
+fn hexsw(b: &mut Vec<u8>, s: &str) {
+    b.push(s.len() as u8);
+    b.extend_from_slice(s.as_bytes());
+}
+// BYTE-IDENTICAL synthetic runner path-independence FIVE-artifact set (mirrors
+// measurement::synth_runner_recipe_artifacts with a blake3(seed) seeder). Each returns
+// (canonical bytes, domain-separated address).
+fn seedb(s: &[u8]) -> [u8; 32] {
+    *blake3::hash(s).as_bytes()
+}
+fn cand_paths(candidate: u16) -> (&'static str, &'static str) {
+    if candidate == 2 {
+        (
+            "tools/b0-pre-measure-risc0/Cargo.toml",
+            "release/b0-pre-measure-risc0",
+        )
+    } else {
+        (
+            "tools/b0-pre-measure-sp1/Cargo.toml",
+            "release/b0-pre-measure-sp1",
+        )
+    }
+}
+fn enc_side(b: &mut Vec<u8>, t: &str) {
+    str16w(b, &format!("/b0-input/{t}/tooling")); // original_root (provenance only; not compiler-visible)
+    str16w(b, &format!("/b0-input/{t}/cargo"));
+    str16w(b, &format!("/b0-input/{t}/target"));
+    let enc = format!("--remap-path-prefix=/b0-input/{t}/cargo=/b0/cargo\u{1f}--remap-path-prefix=/b0-input/{t}/target=/b0/target");
+    b.extend_from_slice(&(enc.len() as u32).to_le_bytes());
+    b.extend_from_slice(enc.as_bytes());
+}
+fn enc_build_recipe(candidate: u16, arch: u8, measured: &str) -> (Vec<u8>, [u8; 32]) {
+    let wrapper = seedb(b"wrapper-blake3");
+    let recipe_id = closure::compute_recipe_id(measured, &wrapper);
+    let (manifest, artifact) = cand_paths(candidate);
+    let mut b = Vec::new();
+    b.extend_from_slice(b"b0-final-runner-build-recipe-v3\0");
+    b.extend_from_slice(&3u16.to_le_bytes());
+    b.extend_from_slice(&candidate.to_le_bytes());
+    b.push(arch);
+    b.extend_from_slice(&recipe_id);
+    // build_argv (8)
+    let argv = [
+        "cargo",
+        "build",
+        "--release",
+        "--locked",
+        "--features",
+        "real-backend",
+        "--manifest-path",
+        manifest,
+    ];
+    b.extend_from_slice(&(argv.len() as u32).to_le_bytes());
+    for s in argv {
+        str16w(&mut b, s);
+    }
+    // build_env (3)
+    let env: [(&str, &str); 3] = [
+        ("BUILD_GIT_SHA", measured),
+        ("SOURCE_DATE_EPOCH", "0"),
+        ("B0_VENUE_EMBED", "0"),
+    ];
+    b.extend_from_slice(&(env.len() as u32).to_le_bytes());
+    for (k, v) in env {
+        str16w(&mut b, k);
+        str16w(&mut b, v);
+    }
+    str16w(&mut b, manifest);
+    str16w(&mut b, artifact);
+    str16w(&mut b, "cargo");
+    str16w(&mut b, "0");
+    str16w(&mut b, "/b0/tooling"); // canonical_build_path
+    enc_side(&mut b, "a");
+    enc_side(&mut b, "b");
+    hexsw(&mut b, measured);
+    hexsw(&mut b, "1234567890abcdef1234567890abcdef12345678");
+    hexsw(&mut b, &"70".repeat(32));
+    b.extend_from_slice(&seedb(b"per-arch-toolchain"));
+    b.extend_from_slice(&seedb(b"pb-sha256"));
+    b.extend_from_slice(&seedb(b"pb-blake3"));
+    b.extend_from_slice(&wrapper);
+    let addr = closure::runner_build_recipe_address(&b);
+    (b, addr)
+}
+fn compile_record_address(t: &str) -> [u8; 32] {
+    let body = format!("b0-final-rustc-invocation/v2\nkind=compile\nremap_arg=--remap-path-prefix=/b0-input/{t}/cargo=/b0/cargo\nremap_arg=--remap-path-prefix=/b0-input/{t}/target=/b0/target");
+    *blake3::hash(body.as_bytes()).as_bytes()
+}
+fn enc_inv_inventory(candidate: u16, arch: u8, tag: u8) -> (Vec<u8>, [u8; 32]) {
+    let t = if tag == 0 { "a" } else { "b" };
+    let mut b = Vec::new();
+    b.extend_from_slice(b"b0-final-rustc-invoc-inv-v2\0\0\0\0\0");
+    b.extend_from_slice(&2u16.to_le_bytes());
+    b.extend_from_slice(&candidate.to_le_bytes());
+    b.push(arch);
+    b.push(tag);
+    b.extend_from_slice(&1u32.to_le_bytes()); // one compile entry
+    str16w(&mut b, "compile");
+    b.extend_from_slice(&2u32.to_le_bytes());
+    str16w(
+        &mut b,
+        &format!("--remap-path-prefix=/b0-input/{t}/cargo=/b0/cargo"),
+    );
+    str16w(
+        &mut b,
+        &format!("--remap-path-prefix=/b0-input/{t}/target=/b0/target"),
+    );
+    b.extend_from_slice(&compile_record_address(t));
+    let addr = closure::rustc_invocation_inventory_address(&b);
+    (b, addr)
+}
+fn enc_proof_side(
+    b: &mut Vec<u8>,
+    t: &str,
+    guest_img: &[u8; 32],
+    inv_addr: [u8; 32],
+    s: u64,
+    e: u64,
+) {
+    str16w(b, &format!("/b0-input/{t}/tooling"));
+    str16w(b, &format!("/b0-input/{t}/cargo"));
+    str16w(b, &format!("/b0-input/{t}/target"));
+    b.extend_from_slice(&seedb(b"runner-sha256"));
+    b.extend_from_slice(&seedb(b"runner-blake3"));
+    b.extend_from_slice(guest_img);
+    b.extend_from_slice(&seedb(b"guest-methods"));
+    b.extend_from_slice(&inv_addr);
+    b.extend_from_slice(&seedb(b"source-input-manifest")); // origin_manifest_blake3
+    b.extend_from_slice(&seedb(b"source-input-manifest")); // materialized_manifest_blake3 (== origin)
+    b.extend_from_slice(&s.to_le_bytes());
+    b.extend_from_slice(&e.to_le_bytes());
+}
+fn repro_pair() -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(b"b0-final-runner-reproducibility-pair/v1\0");
+    h.update(&seedb(b"runner-sha256"));
+    h.update(&seedb(b"runner-blake3"));
+    h.update(&seedb(b"runner-sha256"));
+    h.update(&seedb(b"runner-blake3"));
+    *h.finalize().as_bytes()
+}
+fn enc_double_build_proof(
+    candidate: u16,
+    arch: u8,
+    inv_a_addr: [u8; 32],
+    inv_b_addr: [u8; 32],
+) -> (Vec<u8>, [u8; 32]) {
+    let guest_img = if candidate == 2 {
+        seedb(b"guest-img")
+    } else {
+        [0u8; 32]
+    };
+    let mut b = Vec::new();
+    b.extend_from_slice(b"b0-final-runner-dbl-build-proof0");
+    b.extend_from_slice(&2u16.to_le_bytes());
+    b.extend_from_slice(&candidate.to_le_bytes());
+    b.push(arch);
+    b.extend_from_slice(&seedb(b"wrapper-blake3"));
+    enc_proof_side(&mut b, "a", &guest_img, inv_a_addr, 100, 200);
+    enc_proof_side(&mut b, "b", &guest_img, inv_b_addr, 200, 300);
+    b.push(1); // byte_equal
+    b.extend_from_slice(&repro_pair());
+    let addr = closure::runner_double_build_proof_address(&b);
+    (b, addr)
+}
+fn enc_leak_report(candidate: u16, arch: u8) -> (Vec<u8>, [u8; 32]) {
+    let mut b = Vec::new();
+    b.extend_from_slice(b"b0-final-runner-leak-report-v2\0\0");
+    b.extend_from_slice(&2u16.to_le_bytes());
+    b.extend_from_slice(&candidate.to_le_bytes());
+    b.push(arch);
+    b.extend_from_slice(&seedb(b"runner-blake3"));
+    b.push(1); // clean
+    str16w(&mut b, "/tmp/b0-evid"); // evidence_root
+                                    // refused: sorted union of the six A/B roots + evidence root
+    let mut refused = vec![
+        "/b0-input/a/tooling".to_string(),
+        "/b0-input/a/cargo".to_string(),
+        "/b0-input/a/target".to_string(),
+        "/b0-input/b/tooling".to_string(),
+        "/b0-input/b/cargo".to_string(),
+        "/b0-input/b/target".to_string(),
+        "/tmp/b0-evid".to_string(),
+    ];
+    refused.sort();
+    refused.dedup();
+    b.extend_from_slice(&(refused.len() as u32).to_le_bytes());
+    for s in &refused {
+        str16w(&mut b, s);
+    }
+    b.extend_from_slice(&3u32.to_le_bytes());
+    for s in ["/b0/cargo", "/b0/target", "/b0/tooling"] {
+        str16w(&mut b, s);
+    }
+    let addr = closure::runner_leakage_report_address(&b);
+    (b, addr)
+}
+
+#[allow(clippy::type_complexity)]
 fn enc_runner_attestation(
     candidate: u16,
     role: u8,
@@ -315,28 +518,33 @@ fn enc_runner_attestation(
     gs: &[u8; 32],
     measured: &str,
     phase1_identity_record_addr: [u8; 32],
-) -> (Vec<u8>, [u8; 32]) {
+) -> (
+    Vec<u8>,
+    [u8; 32],
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+) {
     let mut b = Vec::new();
     let hexs = |b: &mut Vec<u8>, s: &str| {
         b.push(s.len() as u8);
         b.extend_from_slice(s.as_bytes());
     };
-    // BYTE-IDENTICAL to the reference synthetic attestation (measurement::synth_runner_attestation
-    // with a blake3(seed) seeder), so the two independent generators produce the same provenance bytes
-    // and thus the same result_set_hash.
     let seed = |s: &[u8]| *blake3::hash(s).as_bytes();
-    b.extend_from_slice(&4u16.to_le_bytes());
+    b.extend_from_slice(&6u16.to_le_bytes());
     b.extend_from_slice(&candidate.to_le_bytes());
     b.push(role);
     b.extend_from_slice(spec);
     b.extend_from_slice(gs);
     b.push(arch);
-    hexs(&mut b, "1234567890abcdef1234567890abcdef12345678"); // execution_tooling_checkout_head
-    hexs(&mut b, "1234567890abcdef1234567890abcdef12345678"); // ratified_tooling_commit
-    hexs(&mut b, &"70".repeat(32)); // ratified_pathset
-    hexs(&mut b, &"70".repeat(32)); // recomputed_pathset
-    hexs(&mut b, measured); // measured_source_commit
-    hexs(&mut b, measured); // build_git_sha
+    hexs(&mut b, "1234567890abcdef1234567890abcdef12345678");
+    hexs(&mut b, "1234567890abcdef1234567890abcdef12345678");
+    hexs(&mut b, &"70".repeat(32));
+    hexs(&mut b, &"70".repeat(32));
+    hexs(&mut b, measured);
+    hexs(&mut b, measured);
     b.extend_from_slice(&seed(b"measured-ctx"));
     b.extend_from_slice(&seed(b"runner-sha256"));
     b.extend_from_slice(&seed(b"runner-blake3"));
@@ -349,11 +557,27 @@ fn enc_runner_attestation(
     b.push(v.len() as u8);
     b.extend_from_slice(v);
     b.extend_from_slice(&seed(b"docker-argv"));
-    b.extend_from_slice(&seed(b"repro-pair"));
-    b.extend_from_slice(&seed(b"runner-blake3")); // phase1 == runner_blake3 (continuity)
-    b.extend_from_slice(&phase1_identity_record_addr); // bound retained Phase-1 identity record
+    b.extend_from_slice(&repro_pair()); // reproducibility_pair == the double-build proof pair
+    b.extend_from_slice(&seed(b"runner-blake3")); // phase1 == runner_blake3
+    b.extend_from_slice(&phase1_identity_record_addr);
+    // v6: the five retained artifact addresses + per-arch toolchain + structural id.
+    let (recipe_b, recipe_addr) = enc_build_recipe(candidate, arch, measured);
+    let (inv_a, inv_a_addr) = enc_inv_inventory(candidate, arch, 0);
+    let (inv_b, inv_b_addr) = enc_inv_inventory(candidate, arch, 1);
+    let (proof_b, proof_addr) = enc_double_build_proof(candidate, arch, inv_a_addr, inv_b_addr);
+    let (leak_b, leak_addr) = enc_leak_report(candidate, arch);
+    b.extend_from_slice(&recipe_addr);
+    b.extend_from_slice(&inv_a_addr);
+    b.extend_from_slice(&inv_b_addr);
+    b.extend_from_slice(&proof_addr);
+    b.extend_from_slice(&leak_addr);
+    b.extend_from_slice(&seed(b"per-arch-toolchain"));
+    b.extend_from_slice(&closure::compute_recipe_id(
+        measured,
+        &seed(b"wrapper-blake3"),
+    ));
     let addr = closure::runner_attestation_address(&b);
-    (b, addr)
+    (b, addr, recipe_b, inv_a, inv_b, proof_b, leak_b)
 }
 
 fn enc_env(arch: u8, stmt: u8, iter: u32, pprov: [u8; 32], ids: Ids) -> Vec<u8> {
@@ -468,6 +692,11 @@ pub struct Evidence {
     pub cpuset_chains: Vec<Vec<u8>>,
     pub runner_attestations: Vec<Vec<u8>>,
     pub identity_records: Vec<Vec<u8>>,
+    pub recipes: Vec<Vec<u8>>,
+    pub inventories_a: Vec<Vec<u8>>,
+    pub inventories_b: Vec<Vec<u8>>,
+    pub double_build_proofs: Vec<Vec<u8>>,
+    pub leakage_reports: Vec<Vec<u8>>,
     pub verifier_material: Vec<u8>,
     pub result_set: Vec<u8>,
 }
@@ -503,6 +732,11 @@ fn generate_with(candidate: u16, env: &Env) -> Evidence {
     let mut cpuset_chains = Vec::new();
     let mut runner_attestations = Vec::new();
     let mut identity_records = Vec::new();
+    let mut recipes = Vec::new();
+    let mut inventories_a = Vec::new();
+    let mut inventories_b = Vec::new();
+    let mut double_build_proofs = Vec::new();
+    let mut leakage_reports = Vec::new();
     let mut arch_prov: Vec<(u8, u8, [u8; 32])> = Vec::new();
     let mut proving: HashMap<u8, [u8; 32]> = HashMap::new();
     let spec = id(b"spec");
@@ -537,7 +771,15 @@ fn generate_with(candidate: u16, env: &Env) -> Evidence {
                 &spec,
                 &production_binary,
             );
-            let (att_bytes, att_addr) = enc_runner_attestation(
+            let (
+                att_bytes,
+                att_addr,
+                recipe_bytes,
+                inv_a_bytes,
+                inv_b_bytes,
+                proof_bytes,
+                leak_bytes,
+            ) = enc_runner_attestation(
                 ids.candidate,
                 role,
                 a,
@@ -556,6 +798,11 @@ fn generate_with(candidate: u16, env: &Env) -> Evidence {
             cpuset_chains.push(chain_bytes);
             runner_attestations.push(att_bytes);
             identity_records.push(rec_bytes);
+            recipes.push(recipe_bytes);
+            inventories_a.push(inv_a_bytes);
+            inventories_b.push(inv_b_bytes);
+            double_build_proofs.push(proof_bytes);
+            leakage_reports.push(leak_bytes);
         }
     }
 
@@ -667,6 +914,11 @@ fn generate_with(candidate: u16, env: &Env) -> Evidence {
         cpuset_chains,
         runner_attestations,
         identity_records,
+        recipes,
+        inventories_a,
+        inventories_b,
+        double_build_proofs,
+        leakage_reports,
         verifier_material: enc_vmat_ids(ids),
         result_set,
     }
@@ -805,6 +1057,14 @@ pub fn verify_evidence(ev: &Evidence) -> Result<Recomputed, String> {
     if ev.identity_records.len() != ev.provenances.len() {
         return Err("retained identity-record count != provenance count".into());
     }
+    if ev.recipes.len() != ev.provenances.len()
+        || ev.inventories_a.len() != ev.provenances.len()
+        || ev.inventories_b.len() != ev.provenances.len()
+        || ev.double_build_proofs.len() != ev.provenances.len()
+        || ev.leakage_reports.len() != ev.provenances.len()
+    {
+        return Err("retained runner-recipe artifact count != provenance count".into());
+    }
     let mut artifact_keys: HashSet<(u8, u8)> = HashSet::new();
     for (i, pb) in ev.provenances.iter().enumerate() {
         let p = closure::decode_prov(pb).map_err(|e| format!("prov: {e:?}"))?;
@@ -824,6 +1084,37 @@ pub fn verify_evidence(ev: &Evidence) -> Result<Recomputed, String> {
         let ra = closure::identity_record_address(&ev.identity_records[i]);
         closure::bind_identity_record(&rec, &att, ra)
             .map_err(|e| format!("runner continuity: {e}"))?;
+        // Sealed-import runner PATH-INDEPENDENCE anchored to the independently-decoded retained
+        // five-artifact set (recipe, inventory A, inventory B, double-build proof, leakage report).
+        let recipe = closure::decode_runner_build_recipe(&ev.recipes[i])
+            .map_err(|e| format!("runner build recipe: {e:?}"))?;
+        let recipe_addr = closure::runner_build_recipe_address(&ev.recipes[i]);
+        let inv_a = closure::decode_rustc_invocation_inventory(&ev.inventories_a[i])
+            .map_err(|e| format!("build-A invocation inventory: {e:?}"))?;
+        let inv_a_addr = closure::rustc_invocation_inventory_address(&ev.inventories_a[i]);
+        let inv_b = closure::decode_rustc_invocation_inventory(&ev.inventories_b[i])
+            .map_err(|e| format!("build-B invocation inventory: {e:?}"))?;
+        let inv_b_addr = closure::rustc_invocation_inventory_address(&ev.inventories_b[i]);
+        let proof = closure::decode_runner_double_build_proof(&ev.double_build_proofs[i])
+            .map_err(|e| format!("runner double-build proof: {e:?}"))?;
+        let proof_addr = closure::runner_double_build_proof_address(&ev.double_build_proofs[i]);
+        let leak = closure::decode_runner_leakage_report(&ev.leakage_reports[i])
+            .map_err(|e| format!("runner leakage report: {e:?}"))?;
+        let leak_addr = closure::runner_leakage_report_address(&ev.leakage_reports[i]);
+        closure::bind_runner_recipe(
+            &att,
+            &recipe,
+            recipe_addr,
+            &inv_a,
+            inv_a_addr,
+            &inv_b,
+            inv_b_addr,
+            &proof,
+            proof_addr,
+            &leak,
+            leak_addr,
+        )
+        .map_err(|e| format!("runner path-independence: {e}"))?;
         if !artifact_keys.insert((p.arch, p.role)) {
             return Err("duplicate retained artifact (arch, role)".into());
         }
@@ -1089,6 +1380,11 @@ mod tests {
             cpuset_chains: ev.cpuset_chains.clone(),
             runner_attestations: ev.runner_attestations.clone(),
             identity_records: ev.identity_records.clone(),
+            recipes: ev.recipes.clone(),
+            inventories_a: ev.inventories_a.clone(),
+            inventories_b: ev.inventories_b.clone(),
+            double_build_proofs: ev.double_build_proofs.clone(),
+            leakage_reports: ev.leakage_reports.clone(),
             verifier_material: ev.verifier_material.clone(),
             result_set: ev.result_set.clone(),
         }
