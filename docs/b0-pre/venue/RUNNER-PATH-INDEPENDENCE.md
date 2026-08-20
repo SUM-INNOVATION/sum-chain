@@ -67,6 +67,7 @@ Run from a clean ratified checkout, with the pinned RISC Zero toolchain provisio
 
 ```bash
 SCRIPTS=tools/b0-pre-candidates/scripts
+. "$SCRIPTS/lib.sh"
 # Two GENUINELY-DISTINCT original checkout roots (identical content, different absolute paths). /b0 must
 # be writable: the script materializes each checkout at the canonical build path /b0/tooling and builds
 # there (this is what makes the runner path-independent — see the metadata-hash note above).
@@ -74,22 +75,66 @@ sudo mkdir -p /b0-input/a /b0-input/b /b0-build /b0 && sudo chown "$(id -un)" /b
 git archive HEAD | tar -x -C /b0-input/a
 git archive HEAD | tar -x -C /b0-input/b
 
+# ONE disclosed network PROVISIONING phase (this is the runner toolchain + offline-seed correction): the
+# exact committed dependency GRAPH SET (RISC0 = host runner lock + candidate WORKSPACE lock the guest is
+# built against) and the NATIVE host-toolchain attestation (x86 = 1.90.0). Everything after is OFFLINE.
+b0_runner_dependency_seed risc0 1.90.0 "$PWD" /b0-build/seeds /b0-build/dep-seed.json
+b0_host_toolchain_attestation 1.90.0 x86_64 /b0-build/host-tc.json
+
 bash "$SCRIPTS/double_build_runner.sh" \
   --candidate risc0 --manifest tools/b0-pre-measure-risc0/Cargo.toml \
   --artifact release/b0-pre-measure-risc0 --embed 1 --risc0-home "$PROVER_RISC0_HOME" \
+  --toolchain 1.90.0 \
   --src-a /b0-input/a --src-b /b0-input/b --root-a /b0-build/a --root-b /b0-build/b \
-  --canonical-build-path /b0/tooling \
+  --canonical-build-path /b0/tooling --guest-home /b0/guesthome \
   --arch x86_64 --expect-build-git-sha 507281e21e95a6a98e3480e25e12d1baab586e07 \
   --wrapper "$SCRIPTS/b0_rustc_remap_wrapper.sh" \
   --per-arch-toolchain-identity "$RISC0_PER_ARCH_TOOLCHAIN_IDENTITY" \
+  --dep-seed-dir /b0-build/seeds --dep-seed-json /b0-build/dep-seed.json \
+  --host-toolchain-attestation /b0-build/host-tc.json \
   --recipe-out /b0-build/recipe.risc0.x86_64.json
 ```
 
-`--embed 1` runs `risc0_build::embed_methods()` (build.rs) with the pinned toolchain and its `methods.rs`
-canonicalization. The script fails closed unless BOTH clean builds are byte-identical AND (RISC0) the
-embedded guest image id + canonical `methods.rs` digest are identical across build A and build B. On
-success it emits the retained recipe facts JSON, which the venue runner splices into each provenance role
-(`measure_fragment.sh`) and the validator/independent verifiers re-prove at sealed import.
+`--toolchain 1.90.0` is MANDATORY (the 1.85 rust-toolchain floor cannot resolve the runner lock; the
+ratified per-arch native toolchain is x86 = 1.90.0, ARM = 1.88.0). The build is OFFLINE: `--offline` +
+`CARGO_NET_OFFLINE=true`, every dependency materialized from `--dep-seed-dir` (host graph → each build's
+`CARGO_HOME`; the RISC0 guest workspace graph → the pinned canonical `--guest-home /b0/guesthome`, because
+`risc0_build` strips every `CARGO*` env from the guest sub-build and it can only be forced onto the
+controlled seed via `HOME`). `--embed 1` runs `risc0_build::embed_methods()` (build.rs) with the pinned
+toolchain and the §G `methods.rs` canonicalization (the guest ELF is COPIED into `OUT_DIR` and every
+build-specific path stripped; `RISC0_BUILD_LOCKED=1`). The script fails closed unless BOTH clean builds
+are byte-identical AND the embedded guest image id + guest ELF + canonical `methods.rs` are identical
+across build A and build B. It emits the retained recipe facts JSON (now also binding the dependency-seed
++ host-toolchain + (SP1) protoc authority addresses), which the venue runner splices into each provenance
+role and the validator/independent verifiers re-prove at sealed import.
+
+### SP1 (both arches; ARM = aarch64/1.88.0)
+
+SP1 is the same flow with `--candidate sp1 --toolchain <1.90.0|1.88.0> --embed 0` (no guest embed, so no
+`--guest-home`/`--risc0-home`) and the native protoc authority, since the SP1 SDK (prost-build) needs a
+`protoc` + the committed protobuf include-authority. The SP1 dependency seed is TWO graphs unioned into
+one host unit (the main runner lock + the checksum-bound nested `sp1-core-executor-runner` lock, whose
+`build.rs` runs a nested inner-binary build):
+
+```bash
+b0_runner_dependency_seed sp1 1.88.0 "$PWD" /b0-build/seeds-sp1 /b0-build/dep-seed.sp1.json
+b0_host_toolchain_attestation 1.88.0 aarch64 /b0-build/host-tc.sp1.json
+b0_protoc_authority sp1 aarch64 "$VENUE_PROTOC" "$PROTOC_INCLUDE_AUTHORITY" /b0-build/protoc-auth.json
+bash "$SCRIPTS/double_build_runner.sh" --candidate sp1 --manifest tools/b0-pre-measure-sp1/Cargo.toml \
+  --artifact release/b0-pre-measure-sp1 --embed 0 --toolchain 1.88.0 --arch aarch64 \
+  --src-a /b0-input/a --src-b /b0-input/b --root-a /b0-build/a --root-b /b0-build/b \
+  --canonical-build-path /b0/tooling --expect-build-git-sha <RATIFIED_SOURCE_COMMIT> \
+  --wrapper "$SCRIPTS/b0_rustc_remap_wrapper.sh" --per-arch-toolchain-identity "$SP1_PER_ARCH_TOOLCHAIN_IDENTITY" \
+  --dep-seed-dir /b0-build/seeds-sp1 --dep-seed-json /b0-build/dep-seed.sp1.json \
+  --host-toolchain-attestation /b0-build/host-tc.sp1.json \
+  --protoc "$VENUE_PROTOC" --protoc-include "$PROTOC_INCLUDE_AUTHORITY" --protoc-authority /b0-build/protoc-auth.json \
+  --recipe-out /b0-build/recipe.sp1.aarch64.json
+```
+
+The nested `sp1-core-executor-runner` build strips `CARGO_ENCODED_RUSTFLAGS` (its own comment: to avoid
+cross-compilation issues), so its compiles into `<target>/sp1-native-bins` carry no `--remap-path-prefix`;
+the wrapper records them `kind=nested` and does not remap-enforce them (they are path-independent by
+construction — VENUE-PROVEN byte-identical across the two path-distinct builds).
 
 The `per_arch_toolchain_identity` is bound SEPARATELY from the cross-arch structural recipe id (which is
 identical for SP1/x86, SP1/aarch64, RISC0/x86 and names only the RULE "use the ratified per-arch

@@ -317,6 +317,13 @@ jobs:
           git archive HEAD | tar -x -C /b0-input/b
           TC=$(printf 'a%.0s' {1..64})                              # per-arch toolchain identity is venue-bound; placeholder for the CI stub embed
           SHA=507281e21e95a6a98e3480e25e12d1baab586e07              # RATIFIED_SOURCE_COMMIT (BUILD_GIT_SHA), frozen
+          # Provision the OFFLINE dependency seed (the two-graph RISC0 seed: host runner + candidate
+          # workspace) + the native host-toolchain attestation from HEAD — the ONE disclosed network
+          # phase. The double-build then runs fully OFFLINE (--offline + CARGO_NET_OFFLINE), consuming
+          # only the materialized seed. This exercises the runner toolchain + offline-seed correction.
+          . "$SCRIPTS/lib.sh"
+          b0_runner_dependency_seed risc0 1.90.0 "$PWD" /b0-build/seeds /b0-build/dep-seed.json
+          b0_host_toolchain_attestation 1.90.0 x86_64 /b0-build/host-tc.json
           # Typed build spec: the script CONSTRUCTS + enforces + retains the exact argv (no opaque cmd).
           # --embed 0 = stub embed (CI has no guest toolchain). Toolchain override 1.90.0 via --toolchain.
           bash "$SCRIPTS/double_build_runner.sh" \
@@ -325,7 +332,9 @@ jobs:
             --src-a /b0-input/a --src-b /b0-input/b --root-a /b0-build/a --root-b /b0-build/b \
             --canonical-build-path /b0/tooling \
             --arch x86_64 --expect-build-git-sha "$SHA" \
-            --wrapper "$WRAP" --per-arch-toolchain-identity "$TC" --recipe-out /b0-build/recipe.json
+            --wrapper "$WRAP" --per-arch-toolchain-identity "$TC" --recipe-out /b0-build/recipe.json \
+            --dep-seed-dir /b0-build/seeds --dep-seed-json /b0-build/dep-seed.json \
+            --host-toolchain-attestation /b0-build/host-tc.json
           echo "=== emitted runner-recipe facts ==="; cat /b0-build/recipe.json
           # Fail-closed shape assertion (the validator producer re-validates these facts fully at import).
           python3 -c '
@@ -338,11 +347,12 @@ jobs:
           # Canonical build argv is EXACTLY cargo_ident (a cargo + optional +toolchain) followed by the
           # fixed subcommand/flags — the SAME construction the Rust validator check_argv enforces. Kept as
           # FULL-VECTOR equality (never a prefix / token-presence test).
-          def canonical_argv(ci, mp): return ci.split()+["build","--release","--locked","--features","real-backend","--manifest-path",mp]
-          # Coverage for BOTH cargo forms + a reject (self-test of the equality this step relies on):
-          assert canonical_argv("cargo","M")==["cargo","build","--release","--locked","--features","real-backend","--manifest-path","M"]
-          assert canonical_argv("cargo +1.90.0","M")==["cargo","+1.90.0","build","--release","--locked","--features","real-backend","--manifest-path","M"]
-          assert canonical_argv("cargo","M")!=["cargo","build","--release","--features","real-backend","--manifest-path","M"]  # missing --locked -> reject
+          def canonical_argv(ci, mp): return ci.split()+["build","--release","--locked","--offline","--features","real-backend","--manifest-path",mp]
+          # Coverage for BOTH cargo forms + a reject (self-test of the equality this step relies on).
+          # `--offline` is part of the canonical argv (the runner toolchain + offline-seed correction).
+          assert canonical_argv("cargo","M")==["cargo","build","--release","--locked","--offline","--features","real-backend","--manifest-path","M"]
+          assert canonical_argv("cargo +1.90.0","M")==["cargo","+1.90.0","build","--release","--locked","--offline","--features","real-backend","--manifest-path","M"]
+          assert canonical_argv("cargo","M")!=["cargo","build","--release","--locked","--features","real-backend","--manifest-path","M"]  # missing --offline -> reject
           assert d["build_argv"]==canonical_argv(d["cargo_ident"],d["manifest_path"]), d["build_argv"]
           assert d["build_a"]["original_root"]!=d["build_b"]["original_root"], "A/B share an original root"
           for s in ("build_a","build_b"):
@@ -353,7 +363,12 @@ jobs:
           mans={d["build_a"]["origin_manifest_blake3"],d["build_a"]["materialized_manifest_blake3"],
                 d["build_b"]["origin_manifest_blake3"],d["build_b"]["materialized_manifest_blake3"]}
           assert len(mans)==1 and len(next(iter(mans)))==64, ("source-input manifests not all-equal 64-hex", mans)
-          print("recipe facts shape OK (exact-bytes, A/B distinct origins, canonical path, authenticated 4-way manifests, cross-bound leakage)")'
+          # Offline dependency-provisioning facts (runner toolchain + offline-seed correction): the build
+          # ran OFFLINE and bound the two-graph dependency seed + native host-toolchain authorities.
+          assert d["offline"] is True and d["cargo_net_offline"] is True, "recipe not marked offline"
+          assert len(d["dependency_seed"]["address"])==64, d["dependency_seed"]
+          assert len(d["host_toolchain_attestation"]["address"])==64, d["host_toolchain_attestation"]
+          print("recipe facts shape OK (exact-bytes, A/B distinct origins, canonical path, authenticated 4-way manifests, cross-bound leakage, offline dependency seed + host-toolchain authorities)")'
 
       # Guard condition #1: a production runner must NOT build without real-backend. Use 1.90.0
       # (installed above) so resolution SUCCEEDS and the build fails specifically on the

@@ -26,12 +26,11 @@
 pub const UNBOUND: &str = "UNBOUND";
 
 /// Commit B records Commit A's exact 40-hex commit SHA here. Until then: [`UNBOUND`].
-pub const RATIFIED_MEASUREMENT_TOOLING_COMMIT: &str = "b1393739af6ad046738ab573ff387c0319043fe0";
+pub const RATIFIED_MEASUREMENT_TOOLING_COMMIT: &str = "UNBOUND";
 
 /// Commit B records the canonical tooling path-set digest (64-hex BLAKE3) here. Until then:
 /// [`UNBOUND`]. The digest is [`recompute_pathset_digest`] over the sorted inventory manifest.
-pub const RATIFIED_MEASUREMENT_TOOLING_PATHSET_BLAKE3: &str =
-    "199e90b3c884dbdce7ffcbaa62ec67e2b6bd2ba82167494f055995da05255b23";
+pub const RATIFIED_MEASUREMENT_TOOLING_PATHSET_BLAKE3: &str = "UNBOUND";
 
 /// Domain separation for the tooling path-set digest. The preimage is the canonical MANIFEST TEXT:
 /// one line per inventory path, `"<file_blake3_hex>  <relpath>\n"`, sorted ascending by `relpath`
@@ -127,33 +126,42 @@ mod tests {
     // Commit B (authority binding) ratified the tooling authority to Commit A + the twice-recomputed
     // path-set digest. These exercise the now-ACTIVE authority: the exact pair validates; an UNBOUND
     // sentinel, a wrong commit, or a wrong path-set digest are each refused.
+    // STATE-TOLERANT across the two-commit ratification: it holds in Commit A (both consts UNBOUND,
+    // fail-closed) AND in Commit B (both consts bound to Commit A's SHA + the path-set digest). Commit B
+    // edits ONLY the two consts above; this test needs no change between the commits.
     #[test]
     fn ratified_tooling_authority_validates_and_refuses_mismatches() {
-        assert_ne!(RATIFIED_MEASUREMENT_TOOLING_COMMIT, UNBOUND);
-        assert_ne!(RATIFIED_MEASUREMENT_TOOLING_PATHSET_BLAKE3, UNBOUND);
-        assert!(is_hex40(RATIFIED_MEASUREMENT_TOOLING_COMMIT));
-        assert!(is_hex64(RATIFIED_MEASUREMENT_TOOLING_PATHSET_BLAKE3));
-        assert!(tooling_authority_is_bound());
-        assert!(verify_tooling_authority(
-            RATIFIED_MEASUREMENT_TOOLING_COMMIT,
-            RATIFIED_MEASUREMENT_TOOLING_PATHSET_BLAKE3,
-        )
-        .is_ok());
-        assert!(
-            verify_tooling_authority(UNBOUND, RATIFIED_MEASUREMENT_TOOLING_PATHSET_BLAKE3).is_err()
-        );
-        assert!(verify_tooling_authority(RATIFIED_MEASUREMENT_TOOLING_COMMIT, UNBOUND).is_err());
-        assert!(verify_tooling_authority(
-            &"a".repeat(40),
-            RATIFIED_MEASUREMENT_TOOLING_PATHSET_BLAKE3
-        )
-        .unwrap_err()
-        .contains("!= ratified"));
-        assert!(
-            verify_tooling_authority(RATIFIED_MEASUREMENT_TOOLING_COMMIT, &"b".repeat(64))
-                .unwrap_err()
-                .contains("path-set digest")
-        );
+        if tooling_authority_is_bound() {
+            // Commit B (BOUND): the exact ratified pair validates; a wrong commit / wrong digest is refused.
+            assert!(is_hex40(RATIFIED_MEASUREMENT_TOOLING_COMMIT));
+            assert!(is_hex64(RATIFIED_MEASUREMENT_TOOLING_PATHSET_BLAKE3));
+            assert!(verify_tooling_authority(
+                RATIFIED_MEASUREMENT_TOOLING_COMMIT,
+                RATIFIED_MEASUREMENT_TOOLING_PATHSET_BLAKE3,
+            )
+            .is_ok());
+            assert!(
+                verify_tooling_authority(RATIFIED_MEASUREMENT_TOOLING_COMMIT, UNBOUND).is_err()
+            );
+            assert!(verify_tooling_authority(
+                &"a".repeat(40),
+                RATIFIED_MEASUREMENT_TOOLING_PATHSET_BLAKE3
+            )
+            .unwrap_err()
+            .contains("!= ratified"));
+            assert!(
+                verify_tooling_authority(RATIFIED_MEASUREMENT_TOOLING_COMMIT, &"b".repeat(64))
+                    .unwrap_err()
+                    .contains("path-set digest")
+            );
+        } else {
+            // Commit A (UNBOUND): fail-closed — every run refused until Commit B binds the authority.
+            assert_eq!(RATIFIED_MEASUREMENT_TOOLING_COMMIT, UNBOUND);
+            assert_eq!(RATIFIED_MEASUREMENT_TOOLING_PATHSET_BLAKE3, UNBOUND);
+            assert!(verify_tooling_authority(&"a".repeat(40), &"b".repeat(64)).is_err());
+        }
+        // Both states refuse an UNBOUND observed value.
+        assert!(verify_tooling_authority(UNBOUND, &"b".repeat(64)).is_err());
     }
 
     #[test]

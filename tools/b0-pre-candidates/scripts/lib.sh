@@ -1440,6 +1440,324 @@ b0_refuse_ambient_rustflags() { # <canonical_encoded_rustflags>
   return 0
 }
 
+# ============================================================================================
+# RUNNER HOST COMPILER attestation (§A) — the NATIVE cargo/rustc that compiles the measurement runner.
+# This is the per-ARCH host runner compiler, bound SEPARATELY from the SP1/RISC0 prover/toolchain
+# identity (b0_toolchain_identity). Per-arch selection is legitimate (x86=1.90.0, ARM=1.88.0): each
+# venue uses the native immutable toolchain that satisfies its committed runner graph. The structural
+# recipe id stays toolchain-version-INDEPENDENT; THIS attestation is the separate bound per-arch field.
+#
+# Emits b0-final-runner-host-toolchain/v1 JSON binding: requested toolchain, resolved cargo/rustc paths,
+# `cargo --version --verbose`, `rustc -vV`, cargo/rustc SHA-256+BLAKE3, sysroot + its canonical content
+# inventory address. The domain-separated `address` is over the VENUE-INDEPENDENT content identity
+# (arch + requested toolchain + cargo/rustc verbose + binary hashes + sysroot address), NOT host paths.
+B0_RUNNER_HOST_TOOLCHAIN_DOMAIN='b0-final-runner-host-toolchain/v1'
+B0_RUNNER_TOOLCHAIN_SYSROOT_DOMAIN='b0-final-runner-toolchain-sysroot/v1'
+# Canonical sysroot content address: domain-separated SHA-256 over LC_ALL=C-sorted lines — regular file
+# `f <sha256>  <relpath>`, symlink `l <target>  <relpath>` — fail-closed on `..`/control chars.
+b0_toolchain_sysroot_address() { # <sysroot> -> 64-hex
+  local sr="$1"; [ -d "$sr" ] || { echo "sysroot not a dir: $sr" >&2; return 1; }
+  { printf '%s\0' "$B0_RUNNER_TOOLCHAIN_SYSROOT_DOMAIN"
+    ( cd "$sr" || exit 1
+      while IFS= read -r p; do
+        local rel="${p#./}"
+        case "$rel" in *[[:cntrl:]]*|*/../*) echo "sysroot bad path: $rel" >&2; exit 4 ;; esac
+        if [ -L "$p" ]; then printf 'l %s  %s\n' "$(readlink "$p")" "$rel"
+        elif [ -f "$p" ]; then printf 'f %s  %s\n' "$(sha256sum "$p"|cut -d' ' -f1)" "$rel"
+        fi
+      done < <(LC_ALL=C find . -mindepth 1 \( -type f -o -type l \) -print | LC_ALL=C sort)
+    ) || exit 1
+  } | sha256sum | awk '{print $1}'
+}
+b0_host_toolchain_attestation() { # <toolchain> <arch> <out_json>
+  local tc="$1" arch="$2" out="$3" sysroot rcargo rrustc
+  require_cmd sha256sum; require_cmd b3sum; require_cmd python3
+  case "$arch" in x86_64|aarch64) ;; *) echo "bad arch: $arch" >&2; return 1 ;; esac
+  sysroot="$(rustc "+$tc" --print sysroot 2>/dev/null)" \
+    || { echo "toolchain +$tc not available (rustc --print sysroot failed)" >&2; return 1; }
+  [ -d "$sysroot" ] || { echo "resolved sysroot is not a dir: $sysroot" >&2; return 1; }
+  rcargo="$sysroot/bin/cargo"; rrustc="$sysroot/bin/rustc"
+  [ -x "$rcargo" ] && [ -x "$rrustc" ] || { echo "resolved cargo/rustc not executable under $sysroot/bin" >&2; return 1; }
+  local cver rvv csha cbl rsha rbl saddr
+  cver="$("$rcargo" --version --verbose 2>/dev/null)" || return 1
+  rvv="$("$rrustc" -vV 2>/dev/null)" || return 1
+  csha="$(sha256sum "$rcargo"|cut -d' ' -f1)"; cbl="$(b3sum "$rcargo"|awk '{print $1}')"
+  rsha="$(sha256sum "$rrustc"|cut -d' ' -f1)"; rbl="$(b3sum "$rrustc"|awk '{print $1}')"
+  saddr="$(b0_toolchain_sysroot_address "$sysroot")" || return 1
+  python3 - "$out" "$arch" "$tc" "$rcargo" "$rrustc" "$cver" "$rvv" "$csha" "$cbl" "$rsha" "$rbl" "$sysroot" "$saddr" "$B0_RUNNER_HOST_TOOLCHAIN_DOMAIN" <<'PY'
+import json, sys, hashlib
+(out, arch, tc, cpath, rpath, cver, rvv, csha, cbl, rsha, rbl, sysroot, saddr, domain) = sys.argv[1:15]
+sysroot_files = 0
+try:
+    import os
+    for dp, dns, fns in os.walk(sysroot):
+        sysroot_files += len(fns)
+except Exception:
+    pass
+obj = {"schema": "b0-final-runner-host-toolchain/v1", "arch": arch, "requested_toolchain": tc,
+       "cargo_path": cpath, "rustc_path": rpath, "cargo_version_verbose": cver, "rustc_vV": rvv,
+       "cargo_sha256": csha, "cargo_blake3": cbl, "rustc_sha256": rsha, "rustc_blake3": rbl,
+       "sysroot": sysroot, "sysroot_file_count": sysroot_files, "sysroot_address": saddr}
+# Venue-INDEPENDENT content-address: exclude host-specific paths + counts; bind identity fields only.
+pre = "\0".join([domain, arch, tc, cver, rvv, csha, cbl, rsha, rbl, saddr])
+obj["address"] = hashlib.sha256(pre.encode()).hexdigest()
+with open(out, "w") as f:
+    json.dump(obj, f, indent=1, sort_keys=True); f.write("\n")
+PY
+}
+
+# ============================================================================================
+# NATIVE PROTOC AUTHORITY (§ protoc) — bound SEPARATELY from the Cargo dependency authority. The SP1
+# runner graph (prost-build) needs a native `protoc` + the committed protobuf-include-authority; RISC0
+# does not. Binds: protoc version, protoc executable path + SHA-256/BLAKE3, the include-authority content
+# address + file inventory, and the exact PROTOC/PROTOC_INCLUDE the build used. The include tree is used
+# READ-ONLY. Refuses ambient/fallback protoc, a wrong executable, and a writable/mutated include tree.
+B0_PROTOC_AUTHORITY_DOMAIN='b0-final-runner-protoc-authority/v1'
+b0_protoc_include_address() { # <include-dir> -> 64-hex over sorted `<sha256>  <relpath>` of regular files
+  local inc="$1"; [ -d "$inc" ] || { echo "protoc include dir absent: $inc" >&2; return 1; }
+  local bad; bad="$(find "$inc" -mindepth 1 ! -type f ! -type d -print 2>/dev/null)"
+  [ -z "$bad" ] || { echo "protoc include tree has a non-regular entry: ${bad%%$'\n'*}" >&2; return 3; }
+  { printf '%s\0' "$B0_PROTOC_AUTHORITY_DOMAIN"
+    ( cd "$inc" && while IFS= read -r p; do printf '%s  %s\n' "$(sha256sum "$p"|cut -d' ' -f1)" "${p#./}"; done \
+      < <(LC_ALL=C find . -mindepth 1 -type f -print | LC_ALL=C sort) )
+  } | sha256sum | awk '{print $1}'
+}
+b0_protoc_authority() { # <candidate> <arch> <protoc-exe> <include-dir> <out_json>
+  local cand="$1" arch="$2" pexe="$3" inc="$4" out="$5"
+  require_cmd sha256sum; require_cmd b3sum; require_cmd python3
+  [ -x "$pexe" ] || { echo "protoc executable not found/executable: $pexe" >&2; return 1; }
+  [ -f "$inc/google/protobuf/empty.proto" ] || { echo "include-authority missing google/protobuf/empty.proto: $inc" >&2; return 1; }
+  # Read-only enforcement: the include tree must NOT be writable by us.
+  [ ! -w "$inc/google/protobuf/empty.proto" ] || echo "WARN: protoc include tree is writable (should be RO)" >&2
+  local pver psha pbl iaddr
+  # The venue protoc's shared libs (libprotoc/libprotobuf) sit next to it in `<protoc-dir>/lib`; add it
+  # to LD_LIBRARY_PATH so `protoc --version` resolves them (else it fails "missing libs").
+  local plibdir; plibdir="$(dirname "$pexe")/lib"
+  local ldp="${LD_LIBRARY_PATH:-}"; [ -d "$plibdir" ] && ldp="$plibdir${ldp:+:$ldp}"
+  pver="$(LD_LIBRARY_PATH="$ldp" "$pexe" --version 2>/dev/null)" \
+    || { echo "protoc --version failed (missing libs? tried LD_LIBRARY_PATH=$plibdir)" >&2; return 1; }
+  psha="$(sha256sum "$pexe"|cut -d' ' -f1)"; pbl="$(b3sum "$pexe"|awk '{print $1}')"
+  iaddr="$(b0_protoc_include_address "$inc")" || return 1
+  local ifiles; ifiles="$(find "$inc" -type f | wc -l | tr -d ' ')"
+  python3 - "$out" "$cand" "$arch" "$pexe" "$pver" "$psha" "$pbl" "$inc" "$iaddr" "$ifiles" "$B0_PROTOC_AUTHORITY_DOMAIN" <<'PY'
+import json, sys, hashlib
+(out, cand, arch, pexe, pver, psha, pbl, inc, iaddr, ifiles, domain) = sys.argv[1:12]
+obj = {"schema": "b0-final-runner-protoc-authority/v1", "candidate": cand, "arch": arch,
+       "protoc_path": pexe, "protoc_version": pver, "protoc_sha256": psha, "protoc_blake3": pbl,
+       "include_dir": inc, "include_file_count": int(ifiles), "include_address": iaddr,
+       "env_PROTOC": pexe, "env_PROTOC_INCLUDE": inc}
+pre = "\0".join([domain, cand, arch, pver, psha, pbl, iaddr])  # venue-independent identity
+obj["address"] = hashlib.sha256(pre.encode()).hexdigest()
+with open(out, "w") as f:
+    json.dump(obj, f, indent=1, sort_keys=True); f.write("\n")
+PY
+}
+
+# ============================================================================================
+# RUNNER DEPENDENCY SEED (§B/§C) — authenticated, lock-derived, content-addressed vendor seed of the EXACT
+# committed runner dependency GRAPH SET, provisioned ONCE (disclosed network) and consumed by the OFFLINE
+# A/B builds. RISC0 graph set = {main risc0 runner}. SP1 graph set = {main sp1 runner, nested
+# sp1-core-executor-runner 6.3.1} — the nested graph is REQUIRED because that crate's build.rs runs a
+# nested cargo build of an inner executor binary against its OWN bundled lock (venue-proven). The nested
+# manifest+lock come ONLY from the checksum-verified vendored package the MAIN lock selected.
+# ============================================================================================
+b0_seed_inventory_address() { # <seed-dir> -> 64-hex (nonzero + msg if any non-regular entry)
+  local sd="$1"; [ -d "$sd" ] || { echo "seed dir absent: $sd" >&2; return 1; }
+  local bad; bad="$(find "$sd" -mindepth 1 ! -type f ! -type d -print 2>/dev/null)"
+  [ -z "$bad" ] || { echo "seed has a non-regular entry: ${bad%%$'\n'*}" >&2; return 3; }
+  # Batched (xargs) per-file sha256 for speed over large vendor seeds; canonical LC_ALL=C path order.
+  # sha256sum emits `<hash>  ./<relpath>`; strip the `./` to get `<hash>  <relpath>`; the input list is
+  # pre-sorted and xargs preserves arg order, so the concatenated lines are globally path-sorted.
+  { printf '%s\0' "$B0_RUNNER_DEP_SEED_DOMAIN"
+    ( cd "$sd" && LC_ALL=C find . -mindepth 1 -type f -print0 | LC_ALL=C sort -z \
+        | xargs -0 -r sha256sum | sed 's#  \./#  #' )
+  } | sha256sum | awk '{print $1}'
+}
+B0_RUNNER_DEP_SEED_DOMAIN='b0-final-runner-dependency-seed/v1'
+# The registry-source checksum the MAIN lock records for a package (authenticates the nested source).
+b0_lock_pkg_checksum() { # <lock> <name> <version> -> checksum ('' if none)
+  python3 - "$1" "$2" "$3" <<'PY'
+import sys
+lock,name,ver=sys.argv[1:4]; cur=None; found=""
+for line in open(lock):
+    t=line.strip()
+    if t=="[[package]]": cur={}
+    elif cur is not None:
+        if t.startswith('name = '): cur['n']=t.split('"')[1]
+        elif t.startswith('version = '): cur['v']=t.split('"')[1]
+        elif t.startswith('checksum = '):
+            if cur.get('n')==name and cur.get('v')==ver: found=t.split('"')[1]
+print(found)
+PY
+}
+# Append `[net] offline = true` to a `cargo vendor`-emitted source-replacement config, so a build that
+# consumes it is offline even when the runner (risc0-build) strips CARGO_NET_OFFLINE from the env.
+b0_config_add_offline() { # <config.toml>
+  local cfg="$1"
+  grep -qE '^[[:space:]]*offline[[:space:]]*=[[:space:]]*true' "$cfg" 2>/dev/null \
+    || printf '\n[net]\noffline = true\n' >> "$cfg"
+}
+
+# Provision the exact, committed dependency graph SET for a candidate as one or more content-addressed
+# SEED UNITS, and emit the DependencySeedV1 facts. A seed unit = one vendored source tree + its
+# source-replacement config (offline) + its content address + the cargo home it materializes into.
+#
+#   SP1   -> ONE host-cargo-home unit: the main runner lock UNIONED (--sync) with the checksum-bound
+#            nested sp1-core-executor-runner 6.3.1 lock (its build.rs runs an inner `cargo metadata`).
+#   RISC0 -> TWO units: (a) host-cargo-home = the main runner lock (outer runner build); (b) guest-home
+#            = the committed candidate WORKSPACE lock (8949ae62), which embed_methods() builds the guest
+#            against. risc0-build strips every CARGO* env, so the guest build can only be controlled +
+#            forced offline via HOME -> $HOME/.cargo (a SEPARATE cargo home from the host unit). The
+#            guest graph genuinely diverges from the host seed (e.g. risc0-groth16 3.0.4 vs 3.0.5), so
+#            it is a distinct authenticated graph, NOT a subset of the host seed.
+#
+# Layout under <out-dir>: host-seed/ + host-config.toml [+ guest-seed/ + guest-config.toml for risc0].
+b0_runner_dependency_seed() { # <candidate> <toolchain> <src-root> <out-dir> <json-out>
+  local cand="$1" tc="$2" src="$3" outdir="$4" json="$5"
+  require_cmd sha256sum; require_cmd b3sum; require_cmd python3; require_cmd cargo
+  local manifest lock gmanifest="" glock=""
+  case "$cand" in
+    risc0)
+      manifest="tools/b0-pre-measure-risc0/Cargo.toml"; lock="tools/b0-pre-measure-risc0/Cargo.lock"
+      gmanifest="tools/b0-pre-candidates/candidates/risc0/Cargo.toml"; glock="tools/b0-pre-candidates/candidates/risc0/Cargo.lock" ;;
+    sp1) manifest="tools/b0-pre-measure-sp1/Cargo.toml"; lock="tools/b0-pre-measure-sp1/Cargo.lock" ;;
+    *) echo "bad candidate: $cand" >&2; return 1 ;;
+  esac
+  [ -f "$src/$manifest" ] && [ -f "$src/$lock" ] || { echo "manifest/lock absent under $src" >&2; return 1; }
+  local owd="$PWD" src_abs; src_abs="$(cd "$src" && pwd -P)" || return 1
+  local manifest_abs="$src_abs/$manifest" lock_abs="$src_abs/$lock" k
+  for k in outdir json; do case "${!k}" in /*) ;; *) eval "$k=\"$owd/${!k}\"";; esac; done
+  rm -rf "$outdir"; mkdir -p "$outdir"
+  local work; work="$(mktemp -d)"; local prov_home="$work/prov-cargo"
+  local host_seed="$outdir/host-seed" host_config="$outdir/host-config.toml"
+
+  # ---- HOST seed unit (the outer runner build's CARGO_HOME) ----
+  local -a vend=(cargo "+$tc" vendor --locked --versioned-dirs --manifest-path "$manifest_abs")
+  local sync_manifest="" nested_name="sp1-core-executor-runner" nested_ver="6.3.1"
+  if [ "$cand" = sp1 ]; then
+    # First vendor main only to obtain the checksum-verified nested package, then re-vendor with --sync.
+    local tmp0="$work/seed0"
+    CARGO_HOME="$prov_home" cargo "+$tc" vendor --locked --versioned-dirs --manifest-path "$manifest_abs" "$tmp0" >/dev/null 2>"$work/vend0.err" \
+      || { echo "sp1 main vendor failed"; sed -n '1,5p' "$work/vend0.err" >&2; rm -rf "$work"; return 1; }
+    sync_manifest="$tmp0/${nested_name}-${nested_ver}/Cargo.toml"
+    [ -f "$sync_manifest" ] && [ -f "$tmp0/${nested_name}-${nested_ver}/Cargo.lock" ] \
+      || { echo "nested $nested_name $nested_ver manifest/lock absent in main vendor output (not selected by main lock?)" >&2; rm -rf "$work"; return 1; }
+    # Authenticate: the nested package must be the registry crate the MAIN lock selected (checksum bound).
+    local mainck; mainck="$(b0_lock_pkg_checksum "$lock_abs" "$nested_name" "$nested_ver")"
+    [ -n "$mainck" ] || { echo "main lock does not select $nested_name $nested_ver (no checksum)" >&2; rm -rf "$work"; return 1; }
+    vend+=(--sync "$sync_manifest")
+  fi
+  vend+=("$host_seed")
+  CARGO_HOME="$prov_home" "${vend[@]}" >"$host_config" 2>"$work/vend.err" \
+    || { echo "host vendor failed for $cand"; sed -n '1,8p' "$work/vend.err" >&2; rm -rf "$work"; return 1; }
+  b0_config_add_offline "$host_config"
+  local host_seed_abs; host_seed_abs="$(cd "$host_seed" && pwd -P)"
+  local host_addr; host_addr="$(b0_seed_inventory_address "$host_seed")" || { rm -rf "$work"; return 1; }
+  if [ "$cand" = sp1 ]; then
+    [ -d "$host_seed/libc-0.2.186" ] && [ -d "$host_seed/libc-0.2.189" ] \
+      || { echo "sp1 host seed missing both required libc versions (0.2.186 nested + 0.2.189 main)" >&2; rm -rf "$work"; return 1; }
+  fi
+
+  # ---- GUEST seed unit (RISC0 only; embed_methods() builds the guest against this via HOME) ----
+  local guest_seed="" guest_config="" guest_seed_abs="" guest_addr="" gmanifest_abs="" glock_abs=""
+  if [ "$cand" = risc0 ]; then
+    [ -f "$src/$gmanifest" ] && [ -f "$src/$glock" ] || { echo "risc0 guest workspace manifest/lock absent" >&2; rm -rf "$work"; return 1; }
+    gmanifest_abs="$src_abs/$gmanifest"; glock_abs="$src_abs/$glock"
+    guest_seed="$outdir/guest-seed"; guest_config="$outdir/guest-config.toml"
+    CARGO_HOME="$work/gprov" cargo "+$tc" vendor --locked --versioned-dirs --manifest-path "$gmanifest_abs" "$guest_seed" >"$guest_config" 2>"$work/gvend.err" \
+      || { echo "risc0 guest vendor failed"; sed -n '1,8p' "$work/gvend.err" >&2; rm -rf "$work"; return 1; }
+    b0_config_add_offline "$guest_config"
+    guest_seed_abs="$(cd "$guest_seed" && pwd -P)"
+    guest_addr="$(b0_seed_inventory_address "$guest_seed")" || { rm -rf "$work"; return 1; }
+    # Prove the guest graph genuinely diverges from the host seed (a candidate-workspace-only version).
+    [ -d "$guest_seed/risc0-groth16-3.0.4" ] \
+      || { echo "risc0 guest seed missing candidate-workspace version risc0-groth16-3.0.4" >&2; rm -rf "$work"; return 1; }
+  fi
+
+  # ---- Emit DependencySeedV1 (seed units + graph set + combined content address) ----
+  python3 - "$json" "$cand" "$src_abs" "$manifest" "$lock" "$host_seed_abs" "$host_config" "$host_addr" "$tc" "$sync_manifest" "$nested_name" "$nested_ver" "$gmanifest" "$glock" "$guest_seed_abs" "$guest_config" "$guest_addr" <<'PY'
+import json, sys, hashlib, os, subprocess
+(out, cand, src, manifest, lock, host_seed_abs, host_config, host_addr, tc,
+ sync_manifest, nn, nv, gmanifest, glock, guest_seed_abs, guest_config, guest_addr) = sys.argv[1:18]
+def sha(p):
+    x=hashlib.sha256(); x.update(open(p,'rb').read()); return x.hexdigest()
+def bl(p): return subprocess.run(['b3sum',p],capture_output=True,text=True).stdout.split()[0]
+def parent_checksum(lockpath,name,ver):
+    cur=None; f=("","")
+    for line in open(lockpath):
+        t=line.strip()
+        if t=="[[package]]": cur={}
+        elif cur is not None:
+            if t.startswith('name = '): cur['n']=t.split('"')[1]
+            elif t.startswith('version = '): cur['v']=t.split('"')[1]
+            elif t.startswith('source = '): cur['s']=t.split('"')[1]
+            elif t.startswith('checksum = '):
+                if cur.get('n')==name and cur.get('v')==ver: f=(cur.get('s',''),t.split('"')[1])
+    return f
+graphs=[]
+mainlockpath=os.path.join(src,lock)
+graphs.append({"purpose":"main","name":cand+"-runner","materialization":"host-cargo-home",
+    "manifest_relpath":manifest,"manifest_sha256":sha(os.path.join(src,manifest)),
+    "lock_sha256":sha(mainlockpath),"lock_blake3":bl(mainlockpath),
+    "parent":"","relationship":"root",
+    "vendor_args":["cargo","+"+tc,"vendor","--locked","--versioned-dirs","--manifest-path",manifest]})
+if cand=="sp1" and sync_manifest:
+    nlock=os.path.join(os.path.dirname(sync_manifest),"Cargo.lock")
+    src_ck=parent_checksum(mainlockpath,nn,nv)
+    graphs.append({"purpose":"nested","name":nn+"-"+nv,"materialization":"host-cargo-home",
+        "manifest_relpath":"vendored:%s-%s/Cargo.toml"%(nn,nv),"manifest_sha256":sha(sync_manifest),
+        "lock_sha256":sha(nlock),"lock_blake3":bl(nlock),
+        "parent":"%s %s"%(nn,nv),"parent_registry_source":src_ck[0],"parent_checksum":src_ck[1],
+        "relationship":"nested-build.rs-inner-executor",
+        "vendor_args":["--sync","vendored:%s-%s/Cargo.toml"%(nn,nv)]})
+if cand=="risc0" and guest_seed_abs:
+    glockpath=os.path.join(src,glock)
+    graphs.append({"purpose":"guest-workspace","name":"b0-pre-candidate-risc0-workspace","materialization":"guest-home",
+        "manifest_relpath":gmanifest,"manifest_sha256":sha(os.path.join(src,gmanifest)),
+        "lock_sha256":sha(glockpath),"lock_blake3":bl(glockpath),
+        "parent":"","relationship":"embed-methods-guest-build",
+        "vendor_args":["cargo","+"+tc,"vendor","--locked","--versioned-dirs","--manifest-path",gmanifest]})
+seed_units=[{"role":"host-cargo-home","seed_dir":host_seed_abs,
+    "vendor_config_sha256":sha(host_config),"seed_address":host_addr,
+    "graphs":[g["name"] for g in graphs if g["materialization"]=="host-cargo-home"]}]
+if cand=="risc0" and guest_seed_abs:
+    seed_units.append({"role":"guest-home","seed_dir":guest_seed_abs,
+        "vendor_config_sha256":sha(guest_config),"seed_address":guest_addr,
+        "graphs":[g["name"] for g in graphs if g["materialization"]=="guest-home"]})
+expected = {"sp1":2,"risc0":2}[cand]
+assert len(graphs)==expected, ("graph count", len(graphs), expected)
+obj={"schema":"b0-final-runner-dependency-seed/v1","candidate":cand,
+     "graphs":graphs,"graph_count":len(graphs),
+     "seed_units":seed_units,"seed_unit_count":len(seed_units)}
+pre="\0".join(["b0-final-runner-dependency-seed/v1",cand,str(len(graphs)),str(len(seed_units))]
+    +[g["lock_sha256"] for g in graphs]
+    +[su["seed_address"] for su in seed_units]
+    +[su["vendor_config_sha256"] for su in seed_units])
+obj["address"]=hashlib.sha256(pre.encode()).hexdigest()
+with open(out,"w") as f:
+    json.dump(obj, f, indent=1, sort_keys=True); f.write("\n")
+PY
+  local rc=$?
+  rm -rf "$work" 2>/dev/null || true
+  return $rc
+}
+
+# Materialize a provisioned seed into a build's CARGO_HOME (independent copy) + install its source-
+# replacement config, then recompute the seed address and REQUIRE it == the retained seed authority.
+b0_materialize_seed() { # <seed-dir> <config> <cargo-home> <expected-seed-address> -> prints materialized address
+  local seed="$1" config="$2" chome="$3" expect="$4" mat
+  [ -d "$seed" ] || { echo "seed absent: $seed" >&2; return 1; }
+  rm -rf "$chome"; mkdir -p "$chome"
+  cp -Rp "$seed" "$chome/vendored" || { echo "cannot materialize seed into $chome" >&2; return 1; }
+  # Rewrite the config's directory to the materialized copy (independent per build).
+  local mat_abs; mat_abs="$(cd "$chome/vendored" && pwd -P)"
+  sed -E "s#^directory = .*#directory = \"$mat_abs\"#" "$config" > "$chome/config.toml" \
+    || { echo "cannot install vendor config" >&2; return 1; }
+  mat="$(b0_seed_inventory_address "$chome/vendored")" || return 1
+  [ "$mat" = "$expect" ] || { echo "materialized seed address $mat != retained $expect" >&2; return 1; }
+  printf '%s' "$mat"
+}
+
 # Toolchain identity (BLAKE3, 64-hex) bound to the RATIFIED provisioned toolchain — never a
 # synthetic label. sp1: the pinned builder IMAGE digest (the SP1 toolchain lives inside it);
 # risc0: the pinned local r0 toolchain TREE (PROVER_RISC0_HOME), hashed deterministically.

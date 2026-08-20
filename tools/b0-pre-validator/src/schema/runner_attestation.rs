@@ -23,7 +23,7 @@ use crate::enums::{Arch, Candidate, ProvenanceRole};
 /// runner-CONTINUITY field (`phase1_production_binary_blake3`); v4 added
 /// `phase1_identity_record_blake3`, the domain-separated address of the RETAINED Phase-1 identity
 /// record, so continuity is anchored to an independently-decoded record, not a copied hash claim.
-pub const RUNNER_ATTESTATION_SCHEMA_VERSION: u16 = 6;
+pub const RUNNER_ATTESTATION_SCHEMA_VERSION: u16 = 7;
 
 /// Domain separation for [`RunnerAttestationV1::hash`].
 pub const RUNNER_ATTESTATION_PREFIX: &[u8] = b"b0-final-runner-attestation/v1\0";
@@ -106,6 +106,18 @@ pub struct RunnerAttestationV1 {
     /// The cross-arch STRUCTURAL runner-build recipe id (identical for SP1/x86, SP1/aarch64, RISC0/x86);
     /// recomputed at import and required to equal the retained recipe's id + the arch-free structural id.
     pub runner_build_recipe_id: [u8; 32],
+    // ---- v7: OFFLINE dependency-provisioning authorities (runner toolchain + offline seed correction).
+    // Each is the SHA-256 content address the venue authority JSON records; on import both verifiers
+    // re-parse the retained JSON, recompute the address from scratch, and require it EQUAL these. ----
+    /// Address of the retained [`crate::venue::host_toolchain::HostToolchainAttestationV1`] — the NATIVE
+    /// per-arch cargo/rustc the runner was built with (x86 1.90.0 / ARM 1.88.0).
+    pub host_toolchain_attestation_address: [u8; 32],
+    /// Address of the retained [`crate::venue::dependency_seed::DependencySeedV1`] — the exact committed
+    /// dependency graph SET the OFFLINE build consumed (SP1 2-graph/1-unit; RISC0 2-graph/2-unit).
+    pub dependency_seed_address: [u8; 32],
+    /// Address of the retained [`crate::venue::protoc_authority::ProtocAuthorityV1`] (SP1 only; ALL-ZERO
+    /// for RISC0, which needs no protoc).
+    pub protoc_authority_address: [u8; 32],
 }
 
 fn write_hexstr(w: &mut Writer, s: &str) {
@@ -182,6 +194,10 @@ impl RunnerAttestationV1 {
         w.bytes(&self.runner_leakage_report_blake3);
         w.bytes(&self.per_arch_toolchain_identity);
         w.bytes(&self.runner_build_recipe_id);
+        // v7
+        w.bytes(&self.host_toolchain_attestation_address);
+        w.bytes(&self.dependency_seed_address);
+        w.bytes(&self.protoc_authority_address);
         w.into_bytes()
     }
 
@@ -255,6 +271,12 @@ impl RunnerAttestationV1 {
             r.read_array::<32>("RunnerAttestationV1.per_arch_toolchain_identity")?;
         let runner_build_recipe_id =
             r.read_array::<32>("RunnerAttestationV1.runner_build_recipe_id")?;
+        let host_toolchain_attestation_address =
+            r.read_array::<32>("RunnerAttestationV1.host_toolchain_attestation_address")?;
+        let dependency_seed_address =
+            r.read_array::<32>("RunnerAttestationV1.dependency_seed_address")?;
+        let protoc_authority_address =
+            r.read_array::<32>("RunnerAttestationV1.protoc_authority_address")?;
         Ok(Self {
             candidate,
             provenance_role,
@@ -287,6 +309,9 @@ impl RunnerAttestationV1 {
             runner_leakage_report_blake3,
             per_arch_toolchain_identity,
             runner_build_recipe_id,
+            host_toolchain_attestation_address,
+            dependency_seed_address,
+            protoc_authority_address,
         })
     }
 
@@ -546,6 +571,9 @@ mod tests {
             runner_leakage_report_blake3: [15; 32],
             per_arch_toolchain_identity: [16; 32],
             runner_build_recipe_id: [17; 32],
+            host_toolchain_attestation_address: [20; 32],
+            dependency_seed_address: [21; 32],
+            protoc_authority_address: [22; 32],
         }
     }
 

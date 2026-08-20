@@ -40,11 +40,19 @@ while [ "$k" -le "$#" ]; do
       nk=$((k+1)); [ "$nk" -le "$#" ] || wdie "--remap-path-prefix with no value"
       remaps+=("${!nk}"); k=$((k+2)); continue ;;
     --remap-path-prefix=*) remaps+=("${a#--remap-path-prefix=}") ;;
+    --out-dir) nk=$((k+1)); [ "$nk" -le "$#" ] && out_dir="${!nk}" ;;
+    --out-dir=*) out_dir="${a#--out-dir=}" ;;
     *.rs) is_compile=1 ;;
     --emit=*|--emit) is_compile=1 ;;
   esac
   k=$((k+1))
 done
+# The sp1-core-executor-runner build.rs builds an inner HOST binary into `<target>/sp1-native-bins`,
+# stripping CARGO_ENCODED_RUSTFLAGS (its own comment: "avoid cross-compilation issues"), so those
+# compiles carry NO remaps. Its path-independence is provided separately (canonical cargo-home); it is
+# recorded but NOT remap-enforced here. Detected by the fixed nested target-dir segment.
+is_nested=0
+case "${out_dir:-}" in */sp1-native-bins/*|*/sp1-native-bins) is_nested=1 ;; esac
 
 seen_cargo=0 seen_target=0
 n_remaps=${#remaps[@]}
@@ -60,7 +68,9 @@ if [ "$n_remaps" -gt 0 ]; then
   done
 fi
 
-if [ "$is_compile" -eq 1 ]; then
+if [ "$is_compile" -eq 1 ] && [ "$is_nested" -eq 1 ]; then
+  kind=nested   # sp1-core-executor-runner inner host-binary build (canonical cargo-home; not remap-enforced)
+elif [ "$is_compile" -eq 1 ]; then
   [ "$n_remaps" -eq 2 ] || wdie "compile invocation has $n_remaps --remap-path-prefix args (require exactly 2: cargo-home + target)"
   [ "$seen_cargo"   -eq 1 ] || wdie "compile is missing/duplicating the cargo-home remap -> $CANON_CARGO (count=$seen_cargo)"
   [ "$seen_target"  -eq 1 ] || wdie "compile is missing/duplicating the target remap -> $CANON_TARGET (count=$seen_target)"

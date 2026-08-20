@@ -129,6 +129,10 @@ pub fn synth_runner_attestation(
         runner_leakage_report_blake3: leak.hash(),
         per_arch_toolchain_identity: recipe.per_arch_toolchain_identity,
         runner_build_recipe_id: recipe.recipe_id,
+        // v7 offline-provisioning authority addresses (synthetic, deterministic seeds).
+        host_toolchain_attestation_address: seed("host-toolchain-addr"),
+        dependency_seed_address: seed("dependency-seed-addr"),
+        protoc_authority_address: seed("protoc-authority-addr"),
     }
 }
 
@@ -350,6 +354,11 @@ pub struct ProvenanceFacts {
     /// The parsed runner attestation (venue fields + arch; candidate/role/spec/guest_set binding is
     /// INJECTED by the orchestrator, which then computes `runner_attestation_blake3`).
     pub runner_attestation: RunnerAttestationV1,
+    /// v7 offline-provisioning authority addresses (from the recipe facts) the orchestrator binds into
+    /// the attestation: the NATIVE host toolchain, the dependency graph-set seed, and (SP1) protoc.
+    pub host_toolchain_attestation_address: [u8; 32],
+    pub dependency_seed_address: [u8; 32],
+    pub protoc_authority_address: [u8; 32],
     /// The RETAINED Phase-1 identity record for this provenance's arch. The orchestrator binds the
     /// attestation to it (sets `phase1_production_binary_blake3` + `phase1_identity_record_blake3`) and
     /// seals it as a mandatory package artifact for independent sealed-import re-checking.
@@ -517,6 +526,11 @@ pub fn orchestrate_grid(
         att.runner_leakage_report_blake3 = leakage.hash();
         att.per_arch_toolchain_identity = recipe.per_arch_toolchain_identity;
         att.runner_build_recipe_id = recipe.recipe_id;
+        // v7: bind the offline-provisioning authority addresses (host toolchain / dependency seed /
+        // protoc) the venue recipe facts carried.
+        att.host_toolchain_attestation_address = pf.host_toolchain_attestation_address;
+        att.dependency_seed_address = pf.dependency_seed_address;
+        att.protoc_authority_address = pf.protoc_authority_address;
         let runner_attestation_blake3 = att.hash();
         // Build the retained cpuset-chain artifact bound to this provenance.
         let chain = CpusetProbeChainV1 {
@@ -921,6 +935,10 @@ pub fn deterministic_demo_vector() -> MeasurementVector {
         ProvenanceFacts {
             arch,
             role,
+            // Match the synth attestation's seeded v7 authority addresses (dv == prov_seed).
+            host_toolchain_attestation_address: dv(b"host-toolchain-addr"),
+            dependency_seed_address: dv(b"dependency-seed-addr"),
+            protoc_authority_address: dv(b"protoc-authority-addr"),
             source_commit: "eff3aae18b49969212c4c1493da20f97af195de2".to_string(),
             dirty_tree_flag: false,
             builder_container_digest: dv(b"builder"),
@@ -1135,6 +1153,9 @@ mod tests {
         ProvenanceFacts {
             arch,
             role,
+            host_toolchain_attestation_address: [20; 32],
+            dependency_seed_address: [21; 32],
+            protoc_authority_address: [22; 32],
             source_commit: "0".repeat(40),
             dirty_tree_flag: false,
             builder_container_digest: h(b"builder"),

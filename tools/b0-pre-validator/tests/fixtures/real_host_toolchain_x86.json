@@ -1,0 +1,17 @@
+{
+ "address": "53e760bfa246b90712b8aa7a91634237506b06734b0731481484d0ac197714fe",
+ "arch": "x86_64",
+ "cargo_blake3": "e1b6466a347ebabe69d5be823736ee75d9283356c94324b94f2f097fd5dcd316",
+ "cargo_path": "/home/azureuser/.rustup/toolchains/1.90.0-x86_64-unknown-linux-gnu/bin/cargo",
+ "cargo_sha256": "51de284e8bb0d03dcee595a0fb1cb3a952fe9e7e4b953a8b1467b7f71725b561",
+ "cargo_version_verbose": "cargo 1.90.0 (840b83a10 2025-07-30)\nrelease: 1.90.0\ncommit-hash: 840b83a10fb0e039a83f4d70ad032892c287570a\ncommit-date: 2025-07-30\nhost: x86_64-unknown-linux-gnu\nlibgit2: 1.9.1 (sys:0.20.2 vendored)\nlibcurl: 8.14.1-DEV (sys:0.4.82+curl-8.14.1 vendored ssl:OpenSSL/3.5.0)\nssl: OpenSSL 3.5.0 8 Apr 2025\nos: Ubuntu 24.4.0 (noble) [64-bit]",
+ "requested_toolchain": "1.90.0",
+ "rustc_blake3": "15e762ba8cad17d33265f4763a53e14199ad7e13595eb24c32e89a671816e0fb",
+ "rustc_path": "/home/azureuser/.rustup/toolchains/1.90.0-x86_64-unknown-linux-gnu/bin/rustc",
+ "rustc_sha256": "e6abf55ab1859e7c990be77fd593f51661ea99fb2fde626ae9f4108aaa34e7fa",
+ "rustc_vV": "rustc 1.90.0 (1159e78c4 2025-09-14)\nbinary: rustc\ncommit-hash: 1159e78c4747b02ef996e55082b704c09b970588\ncommit-date: 2025-09-14\nhost: x86_64-unknown-linux-gnu\nrelease: 1.90.0\nLLVM version: 20.1.8",
+ "schema": "b0-final-runner-host-toolchain/v1",
+ "sysroot": "/home/azureuser/.rustup/toolchains/1.90.0-x86_64-unknown-linux-gnu",
+ "sysroot_address": "b216980895872d542a2ab4fb1758359ff1e0c70ce97b344eb490197254bad70e",
+ "sysroot_file_count": 125
+}

@@ -1349,7 +1349,7 @@ fn hexstr(r: &mut Rd, n: usize) -> Result<String, E> {
 
 pub fn decode_runner_attestation(b: &[u8]) -> Result<RunnerAtt, E> {
     let mut r = Rd::new(b);
-    if r.u16()? != 6 {
+    if r.u16()? != 7 {
         return Err(E::Value);
     }
     let candidate = candidate(r.u16()?)?;
@@ -1390,6 +1390,12 @@ pub fn decode_runner_attestation(b: &[u8]) -> Result<RunnerAtt, E> {
     let runner_leakage_report_blake3 = r.arr::<32>()?;
     let per_arch_toolchain_identity = r.arr::<32>()?;
     let runner_build_recipe_id = r.arr::<32>()?;
+    // v7: offline-provisioning authority addresses (host toolchain / dependency seed / protoc). Read to
+    // advance the reader; they are covered by the canonical-bytes attestation address (which this
+    // independent verifier re-hashes over the exact retained bytes).
+    let _host_toolchain_attestation_address = r.arr::<32>()?;
+    let _dependency_seed_address = r.arr::<32>()?;
+    let _protoc_authority_address = r.arr::<32>()?;
     r.end()?;
     Ok(RunnerAtt {
         candidate,

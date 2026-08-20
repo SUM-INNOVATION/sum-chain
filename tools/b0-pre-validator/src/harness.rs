@@ -1635,16 +1635,19 @@ mod tests {
     /// source remap so each side carries TWO remaps (cargo, target). The double-build proof is v2 — each
     /// side gained the authenticated `origin_manifest_blake3` + `materialized_manifest_blake3` addresses
     /// (4-way source-input equality). These moved the recipe/proof bytes folded into this fingerprint.)
+    /// (Re-frozen for the RUNNER TOOLCHAIN + OFFLINE-SEED correction: the runner attestation is v7 — it
+    /// gained the three v7 offline-provisioning authority addresses (host toolchain / dependency seed /
+    /// protoc). These moved the attestation bytes folded into this fingerprint.)
     #[test]
     fn generate_output_is_byte_stable() {
         assert_eq!(
             evidence_fingerprint(&generate()),
-            "752fdf3a8e17b8309ac557830c313d03b2f652cfa7729e8d16855e4a2d0b403e",
+            "ede8dd4e691bbf2c3ffcefd8f8b71c3dff5746cb28ee7ebe6c9077936edf4176",
             "SP1 generate() output drifted from the frozen (retained cpuset+attestation+identity+recipe) bytes"
         );
         assert_eq!(
             evidence_fingerprint(&generate_candidate(Candidate::Risc0)),
-            "10762fa7de658b66fccc942d8b43888548b2f4c7b9aa1f29a9c96884b82404ce",
+            "f1d97699e11aa8141b7e08dd5f72a17863156fb8ecbe5759ec0330b6f42d8d8c",
             "RISC0 generate_candidate() output drifted from the frozen (retained cpuset+attestation+identity+recipe) bytes"
         );
     }

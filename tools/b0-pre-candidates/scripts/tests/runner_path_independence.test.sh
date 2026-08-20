@@ -15,6 +15,7 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPTS="$(cd "$HERE/.." && pwd)"
 BUILD_RS="$(cd "$SCRIPTS/../../b0-pre-measure-risc0" && pwd)/build.rs"
+EMBED_CANON="$(cd "$SCRIPTS/../../b0-pre-measure-risc0" && pwd)/src/embed_canon.rs"
 set +e
 fails=0
 ok()  { printf 'ok    %s\n' "$1"; }
@@ -48,7 +49,7 @@ has "$DBR" 'SOURCE_DATE_EPOCH=0'                      "double_build preserves SO
 has "$DBR" 'BUILD_GIT_SHA="$EXPECT_SHA"'             "double_build exports the measured BUILD_GIT_SHA"
 has "$DBR" 'NOT reproducible'                         "double_build requires the two builds byte-identical"
 # Canonical, ENFORCED, RETAINED build argv (no opaque --build-cmd).
-has "$DBR" 'ARGV+=(build --release --locked --features real-backend --manifest-path' "double_build constructs the canonical --release --locked --features real-backend argv"
+has "$DBR" 'ARGV+=(build --release --locked --offline --features real-backend --manifest-path' "double_build constructs the canonical --release --locked --offline --features real-backend argv"
 has "$DBR" 'canonical argv missing required token'    "double_build asserts the argv carries the required flags (never an unproven claim)"
 has "$DBR" 'B0_VENUE_EMBED="$EMBED"'                 "double_build binds the explicit B0_VENUE_EMBED state"
 has "$DBR" 'RISC0 embedded guest image id differs'    "double_build requires (RISC0) the embedded guest byte-identical across A and B"
@@ -86,10 +87,16 @@ has "$WRAP" 'B0_RUSTC_EVIDENCE_DIR'                   "wrapper refuses an unreco
 # measure_fragment splices the recipe facts into every provenance role (mandatory).
 has "$MF" 'need_env B0_RUNNER_RECIPE_JSON'            "measure_fragment requires the runner-recipe facts"
 has "$MF" 'entry["runner_recipe"] = recipe'          "measure_fragment splices runner_recipe into each provenance role"
-# RISC0 methods.rs canonicalization (§G): env!(OUT_DIR) include form + fail-closed.
+# RISC0 methods.rs canonicalization (§G): the guest ELF (which risc0-build writes under
+# <target>/riscv-guest, never OUT_DIR) is COPIED into OUT_DIR + verified, and the _ELF include is
+# rewritten to the env!(OUT_DIR) form. The pure string/path logic lives in src/embed_canon.rs
+# (shared with the crate so `cargo test` runs its unit tests); build.rs does the fs copy + hashing.
 has "$BUILD_RS" 'canonicalize_methods_rs'             "risc0 build.rs canonicalizes methods.rs (§G)"
-has "$BUILD_RS" 'concat!(env!(\"OUT_DIR\")'           "risc0 methods.rs _ELF include rewritten to the env!(OUT_DIR) form"
-has "$BUILD_RS" 'refusing to emit a possibly path-dependent runner' "risc0 canonicalization is fail-closed if codegen changes"
+has "$BUILD_RS" 'copy guest ELF into OUT_DIR'         "risc0 build.rs copies the guest ELF into OUT_DIR (risc0-build leaves it under riscv-guest)"
+has "$BUILD_RS" 'RISC0_BUILD_LOCKED'                  "risc0 build.rs forces the guest sub-build --locked (RISC0_BUILD_LOCKED=1)"
+has "$BUILD_RS" 'remove_var("RUSTC_WRAPPER")'         "risc0 build.rs removes RUSTC_WRAPPER for the guest sub-build (path-independent by canonical HOME+source)"
+has "$EMBED_CANON" 'concat!(env!(\"OUT_DIR\")'        "risc0 methods.rs _ELF include rewritten to the env!(OUT_DIR) form"
+has "$EMBED_CANON" 'refusing to emit a possibly path-dependent runner' "risc0 canonicalization is fail-closed if codegen changes"
 # B0_VENUE_EMBED is a STRICT tri-state (1=real, 0/unset=stub, else refuse) — not "non-empty == real".
 has "$BUILD_RS" 'fn decide_embed'                     "risc0 build.rs isolates the embed decision (decide_embed)"
 has "$BUILD_RS" 'Some("1") => Ok(Embed::Real)'        "risc0 embed: only \"1\" selects the real embed"
@@ -100,6 +107,11 @@ echo "== (B) fast refusal negatives (no build reached) =="
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$WORK/srcA" "$WORK/srcB"
 HEX40="$(printf '5%.0s' $(seq 40))"; HEX64="$(printf 'a%.0s' $(seq 64))"
+# The four offline-provisioning flags are PRESENCE-checked in the required-flag loop; the dep-seed /
+# protoc STRUCTURE is validated LATER (after the cheap literal-pin + wrapper + source gates), so these
+# non-existent placeholder paths let each spelled-out negative reach the SPECIFIC cheap refusal it
+# exercises (the base()-using negatives refuse at parse time or before --toolchain, so they omit these).
+DSF=(--toolchain 1.90.0 --dep-seed-dir "$WORK/ds" --dep-seed-json "$WORK/dsj" --host-toolchain-attestation "$WORK/htc")
 # Common valid flags that get PAST parsing to reach a specific refusal; each negative overrides one.
 n=0
 base() { # <root-suffix> ; echoes the common valid flag set (distinct roots per call)
@@ -116,31 +128,31 @@ refused() { # <desc> <substr>
 }
 
 # shellcheck disable=SC2046
-run_dbr $(base)                                        # missing --recipe-out
+run_dbr $(base)                                        # missing --recipe-out (checked before --toolchain)
 refused "missing --recipe-out refused" "required flag is missing"
 # shellcheck disable=SC2046
-run_dbr $(base) --recipe-out "$WORK/r.json" --embed 2  # duplicate --embed (already in base)
+run_dbr $(base) --recipe-out "$WORK/r.json" --embed 2  # duplicate --embed (parse-time, before required loop)
 refused "duplicate flag refused" "duplicate --embed"
-# non-64-hex toolchain identity (override --per-arch-toolchain-identity by appending a duplicate? use a fresh set)
+# non-64-hex toolchain identity
 run_dbr --candidate sp1 --manifest tools/runner/Cargo.toml --artifact release/runner --embed 0 \
   --src-a "$WORK/srcA" --src-b "$WORK/srcB" --root-a "$WORK/rT1" --root-b "$WORK/rT2" --canonical-build-path /b0/tooling --arch x86_64 \
-  --expect-build-git-sha "$HEX40" --wrapper "$WRAP" --per-arch-toolchain-identity nothex --recipe-out "$WORK/r.json"
+  --expect-build-git-sha "$HEX40" --wrapper "$WRAP" --per-arch-toolchain-identity nothex --recipe-out "$WORK/r.json" "${DSF[@]}"
 refused "non-64-hex toolchain identity refused" "64 lowercase hex"
 # non-40-hex build-git-sha
 run_dbr --candidate sp1 --manifest tools/runner/Cargo.toml --artifact release/runner --embed 0 \
   --src-a "$WORK/srcA" --src-b "$WORK/srcB" --root-a "$WORK/rT3" --root-b "$WORK/rT4" --canonical-build-path /b0/tooling --arch x86_64 \
-  --expect-build-git-sha deadbeef --wrapper "$WRAP" --per-arch-toolchain-identity "$HEX64" --recipe-out "$WORK/r.json"
+  --expect-build-git-sha deadbeef --wrapper "$WRAP" --per-arch-toolchain-identity "$HEX64" --recipe-out "$WORK/r.json" "${DSF[@]}"
 refused "non-40-hex build-git-sha refused" "40 lowercase hex"
 # bad --embed
 run_dbr --candidate sp1 --manifest tools/runner/Cargo.toml --artifact release/runner --embed 9 \
   --src-a "$WORK/srcA" --src-b "$WORK/srcB" --root-a "$WORK/rT5" --root-b "$WORK/rT6" --canonical-build-path /b0/tooling --arch x86_64 \
-  --expect-build-git-sha "$HEX40" --wrapper "$WRAP" --per-arch-toolchain-identity "$HEX64" --recipe-out "$WORK/r.json"
+  --expect-build-git-sha "$HEX40" --wrapper "$WRAP" --per-arch-toolchain-identity "$HEX64" --recipe-out "$WORK/r.json" "${DSF[@]}"
 refused "bad --embed refused" "--embed must be 0|1"
 # non-executable wrapper
 touch "$WORK/notexec.sh"; chmod -x "$WORK/notexec.sh"
 run_dbr --candidate sp1 --manifest tools/runner/Cargo.toml --artifact release/runner --embed 0 \
   --src-a "$WORK/srcA" --src-b "$WORK/srcB" --root-a "$WORK/rT7" --root-b "$WORK/rT8" --canonical-build-path /b0/tooling --arch x86_64 \
-  --expect-build-git-sha "$HEX40" --wrapper "$WORK/notexec.sh" --per-arch-toolchain-identity "$HEX64" --recipe-out "$WORK/r.json"
+  --expect-build-git-sha "$HEX40" --wrapper "$WORK/notexec.sh" --per-arch-toolchain-identity "$HEX64" --recipe-out "$WORK/r.json" "${DSF[@]}"
 refused "non-executable wrapper refused" "not executable"
 # unknown/extra argument
 # shellcheck disable=SC2046
@@ -149,34 +161,40 @@ refused "unknown flag refused" "unknown/extra argument"
 # IDENTICAL original checkout roots (distinguishes nothing)
 run_dbr --candidate sp1 --manifest tools/runner/Cargo.toml --artifact release/runner --embed 0 \
   --src-a "$WORK/srcA" --src-b "$WORK/srcA" --root-a "$WORK/rT9" --root-b "$WORK/rT10" --canonical-build-path /b0/tooling --arch x86_64 \
-  --expect-build-git-sha "$HEX40" --wrapper "$WRAP" --per-arch-toolchain-identity "$HEX64" --recipe-out "$WORK/r.json"
+  --expect-build-git-sha "$HEX40" --wrapper "$WRAP" --per-arch-toolchain-identity "$HEX64" --recipe-out "$WORK/r.json" "${DSF[@]}"
 refused "identical original roots refused" "SAME original root"
-# MISSING --canonical-build-path (now a required flag)
+# MISSING --canonical-build-path (required, checked before --toolchain)
 run_dbr --candidate sp1 --manifest tools/runner/Cargo.toml --artifact release/runner --embed 0 \
   --src-a "$WORK/srcA" --src-b "$WORK/srcB" --root-a "$WORK/rT15" --root-b "$WORK/rT16" --arch x86_64 \
-  --expect-build-git-sha "$HEX40" --wrapper "$WRAP" --per-arch-toolchain-identity "$HEX64" --recipe-out "$WORK/r.json"
+  --expect-build-git-sha "$HEX40" --wrapper "$WRAP" --per-arch-toolchain-identity "$HEX64" --recipe-out "$WORK/r.json" "${DSF[@]}"
 refused "missing --canonical-build-path refused" "required flag is missing"
 # NON-LITERAL (relative) --canonical-build-path — refused by the literal pin before any filesystem work
 run_dbr --candidate sp1 --manifest tools/runner/Cargo.toml --artifact release/runner --embed 0 \
   --src-a "$WORK/srcA" --src-b "$WORK/srcB" --root-a "$WORK/rT17" --root-b "$WORK/rT18" --canonical-build-path relative/path --arch x86_64 \
-  --expect-build-git-sha "$HEX40" --wrapper "$WRAP" --per-arch-toolchain-identity "$HEX64" --recipe-out "$WORK/r.json"
+  --expect-build-git-sha "$HEX40" --wrapper "$WRAP" --per-arch-toolchain-identity "$HEX64" --recipe-out "$WORK/r.json" "${DSF[@]}"
 refused "relative canonical build path refused (literal pin)" "must be EXACTLY /b0/tooling"
 # WRONG ABSOLUTE --canonical-build-path (e.g. /b0/tooling/.. or another dir) — refused by the literal pin
 run_dbr --candidate sp1 --manifest tools/runner/Cargo.toml --artifact release/runner --embed 0 \
   --src-a "$WORK/srcA" --src-b "$WORK/srcB" --root-a "$WORK/rT19" --root-b "$WORK/rT20" --canonical-build-path /b0/tooling/.. --arch x86_64 \
-  --expect-build-git-sha "$HEX40" --wrapper "$WRAP" --per-arch-toolchain-identity "$HEX64" --recipe-out "$WORK/r.json"
+  --expect-build-git-sha "$HEX40" --wrapper "$WRAP" --per-arch-toolchain-identity "$HEX64" --recipe-out "$WORK/r.json" "${DSF[@]}"
 refused "traversal canonical build path refused (literal pin)" "must be EXACTLY /b0/tooling"
 # symlinked source root
 ln -s "$WORK/srcA" "$WORK/srclink"
 run_dbr --candidate sp1 --manifest tools/runner/Cargo.toml --artifact release/runner --embed 0 \
   --src-a "$WORK/srclink" --src-b "$WORK/srcB" --root-a "$WORK/rT11" --root-b "$WORK/rT12" --canonical-build-path /b0/tooling --arch x86_64 \
-  --expect-build-git-sha "$HEX40" --wrapper "$WRAP" --per-arch-toolchain-identity "$HEX64" --recipe-out "$WORK/r.json"
+  --expect-build-git-sha "$HEX40" --wrapper "$WRAP" --per-arch-toolchain-identity "$HEX64" --recipe-out "$WORK/r.json" "${DSF[@]}"
 refused "symlinked source root refused" "symlink"
-# ambient RUSTFLAGS injection (reaches the recipe env assembly, refused before any build)
-OUT="$(RUSTFLAGS='-C target-cpu=native' "$DBR" --candidate sp1 --manifest tools/runner/Cargo.toml \
+# ambient RUSTFLAGS injection (refused LATE — after the dep-seed gate + ENC assembly). Give it a minimal
+# VALID risc0 dependency-seed + host-toolchain attestation (risc0 needs no protoc) so it reaches that
+# specific refusal instead of the earlier dep-seed-structure gate.
+VDS="$WORK/vds"; mkdir -p "$VDS/host-seed"; : > "$VDS/host-config.toml"
+printf '{"candidate":"risc0","seed_units":[{"role":"host-cargo-home","seed_address":"%s"}]}\n' "$HEX64" > "$WORK/vdsj.json"
+: > "$WORK/vhtc.json"
+VDSF=(--toolchain 1.90.0 --dep-seed-dir "$VDS" --dep-seed-json "$WORK/vdsj.json" --host-toolchain-attestation "$WORK/vhtc.json")
+OUT="$(RUSTFLAGS='-C target-cpu=native' "$DBR" --candidate risc0 --manifest tools/runner/Cargo.toml \
   --artifact release/runner --embed 0 --src-a "$WORK/srcA" --src-b "$WORK/srcB" --root-a "$WORK/rT13" \
   --root-b "$WORK/rT14" --canonical-build-path /b0/tooling --arch x86_64 --expect-build-git-sha "$HEX40" --wrapper "$WRAP" \
-  --per-arch-toolchain-identity "$HEX64" --recipe-out "$WORK/r.json" 2>&1 1>/dev/null)"; RC=$?
+  --per-arch-toolchain-identity "$HEX64" --recipe-out "$WORK/r.json" "${VDSF[@]}" 2>&1 1>/dev/null)"; RC=$?
 refused "ambient RUSTFLAGS refused" "ambient RUSTFLAGS"
 
 echo "== (C) build.rs embed-selection execution test (0=stub, 1=real, else refuse) =="

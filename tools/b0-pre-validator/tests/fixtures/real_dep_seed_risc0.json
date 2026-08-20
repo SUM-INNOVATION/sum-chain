@@ -1,0 +1,69 @@
+{
+ "address": "2f5b1cd11b13dbd26ba1251dbac47c94dd680c1a3293309ae5b9a79102222308",
+ "candidate": "risc0",
+ "graph_count": 2,
+ "graphs": [
+  {
+   "lock_blake3": "5c50a50ae1e672657d012bbe74d8e4e1c30d5499dbc8e5678fe7c611148cdf30",
+   "lock_sha256": "c0f8a7882aa9cd0ba1913a5ddd749c04d45ca36dcdfe2deb4ecebe6acec8a265",
+   "manifest_relpath": "tools/b0-pre-measure-risc0/Cargo.toml",
+   "manifest_sha256": "cb6cf15ade84ed8594e7def0bff7063fa5f18594e6b0b4fe545c222600170ef5",
+   "materialization": "host-cargo-home",
+   "name": "risc0-runner",
+   "parent": "",
+   "purpose": "main",
+   "relationship": "root",
+   "vendor_args": [
+    "cargo",
+    "+1.90.0",
+    "vendor",
+    "--locked",
+    "--versioned-dirs",
+    "--manifest-path",
+    "tools/b0-pre-measure-risc0/Cargo.toml"
+   ]
+  },
+  {
+   "lock_blake3": "a82995730a277b3b805dae2f355ddc49e458ca52ff39ff2c1050689395e1b2d2",
+   "lock_sha256": "8949ae62ca2e30c9ecec19efe58a7260c4c527975aa5903a22be6edddaf8be8f",
+   "manifest_relpath": "tools/b0-pre-candidates/candidates/risc0/Cargo.toml",
+   "manifest_sha256": "019e5186af01c0358b26ea19e9710d432c8fc849f8645db82e91f0ab6010757d",
+   "materialization": "guest-home",
+   "name": "b0-pre-candidate-risc0-workspace",
+   "parent": "",
+   "purpose": "guest-workspace",
+   "relationship": "embed-methods-guest-build",
+   "vendor_args": [
+    "cargo",
+    "+1.90.0",
+    "vendor",
+    "--locked",
+    "--versioned-dirs",
+    "--manifest-path",
+    "tools/b0-pre-candidates/candidates/risc0/Cargo.toml"
+   ]
+  }
+ ],
+ "schema": "b0-final-runner-dependency-seed/v1",
+ "seed_unit_count": 2,
+ "seed_units": [
+  {
+   "graphs": [
+    "risc0-runner"
+   ],
+   "role": "host-cargo-home",
+   "seed_address": "e68a174a99da5c7515b2f08b8dc51c136725ce7ca76fa5c373035433d03adf6e",
+   "seed_dir": "/work/b0-runner-x86det-2cdc4674/twograph/seeds/host-seed",
+   "vendor_config_sha256": "772eb420d1331f7266ce3fef5b41286d958a3cadff53c72e8f0f2f7b58eae0a7"
+  },
+  {
+   "graphs": [
+    "b0-pre-candidate-risc0-workspace"
+   ],
+   "role": "guest-home",
+   "seed_address": "acd271cb07f9ad997da654c29cd167dab3367708d40bf3795fd99defa49581a9",
+   "seed_dir": "/work/b0-runner-x86det-2cdc4674/twograph/seeds/guest-seed",
+   "vendor_config_sha256": "5a62753b9ba75d38879b475363897405bbb54fc3f4be30e8113e84798baf7f60"
+  }
+ ]
+}

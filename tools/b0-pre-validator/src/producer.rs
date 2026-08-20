@@ -163,6 +163,36 @@ pub struct RunnerRecipeJson {
     pub leakage_permitted_prefixes: Vec<String>,
     pub leakage_clean: bool,
     pub evidence_root: String,
+    // ---- offline dependency provisioning (this correction); serde-default so pre-correction recipe
+    // fixtures still parse. The `address` fields are the venue authorities' own domain-separated
+    // addresses; the producer binds them into the v7 attestation and both verifiers recompute them. ----
+    #[serde(default)]
+    pub offline: bool,
+    #[serde(default)]
+    pub cargo_net_offline: bool,
+    #[serde(default)]
+    pub dependency_seed: AuthorityRefJson,
+    #[serde(default)]
+    pub host_toolchain_attestation: AuthorityRefJson,
+    #[serde(default)]
+    pub protoc_authority: Option<AuthorityRefJson>,
+    #[serde(default)]
+    pub risc0_guest_embed: Option<GuestEmbedJson>,
+}
+
+#[derive(Deserialize, Clone, Default)]
+pub struct AuthorityRefJson {
+    pub address: String,
+    #[serde(default)]
+    pub json_sha256: String,
+}
+
+#[derive(Deserialize, Clone, Default)]
+pub struct GuestEmbedJson {
+    pub guest_elf_sha256: String,
+    pub guest_elf_blake3: String,
+    #[serde(default)]
+    pub risc0_build_locked: bool,
 }
 
 #[derive(Deserialize, Clone)]
@@ -333,6 +363,11 @@ impl RunnerAttestationJson {
             runner_leakage_report_blake3: [0; 32],
             per_arch_toolchain_identity: [0; 32],
             runner_build_recipe_id: [0; 32],
+            // v7 offline-provisioning authority addresses: orchestrator-injected from the recipe facts
+            // (verified against the retained authority JSONs) — placeholders here.
+            host_toolchain_attestation_address: [0; 32],
+            dependency_seed_address: [0; 32],
+            protoc_authority_address: [0; 32],
         })
     }
 }
@@ -427,6 +462,16 @@ fn hex32(s: &str, ctx: &str) -> Result<[u8; 32], String> {
             u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).map_err(|_| format!("{ctx}: bad hex"))?;
     }
     Ok(a)
+}
+
+/// Like [`hex32`] but an EMPTY string yields the all-zero address — used for the v7 offline-provisioning
+/// authority addresses so pre-correction recipe fixtures (which lack these fields) still convert.
+fn opt_hex32(s: &str, ctx: &str) -> Result<[u8; 32], String> {
+    if s.is_empty() {
+        Ok([0u8; 32])
+    } else {
+        hex32(s, ctx)
+    }
 }
 
 /// Decode an even-length lowercase-hex string to raw bytes (e.g. the exact CARGO_ENCODED_RUSTFLAGS,
@@ -1017,6 +1062,20 @@ fn prov_facts(p: &ProvFacts) -> Result<ProvenanceFacts, String> {
     Ok(ProvenanceFacts {
         arch: parse_arch(&p.arch)?,
         role: parse_role(&p.role)?,
+        // v7 offline-provisioning authority addresses from the recipe facts (empty -> zero for
+        // pre-correction fixtures). RISC0 has no protoc -> None -> zero.
+        host_toolchain_attestation_address: opt_hex32(
+            &p.runner_recipe.host_toolchain_attestation.address,
+            "recipe.host_toolchain_attestation.address",
+        )?,
+        dependency_seed_address: opt_hex32(
+            &p.runner_recipe.dependency_seed.address,
+            "recipe.dependency_seed.address",
+        )?,
+        protoc_authority_address: match &p.runner_recipe.protoc_authority {
+            Some(pa) => opt_hex32(&pa.address, "recipe.protoc_authority.address")?,
+            None => [0u8; 32],
+        },
         source_commit: p.source_commit.clone(),
         dirty_tree_flag: p.dirty_tree_flag,
         builder_container_digest: hex32(
@@ -1312,6 +1371,21 @@ pub fn dry_run_raw_facts() -> RawFacts {
                     ],
                     leakage_clean: true,
                     evidence_root: "/tmp/b0-evid".into(),
+                    offline: true,
+                    cargo_net_offline: true,
+                    dependency_seed: AuthorityRefJson {
+                        address: dv("dep-seed-addr"),
+                        json_sha256: dv("dep-seed-json"),
+                    },
+                    host_toolchain_attestation: AuthorityRefJson {
+                        address: dv("host-tc-addr"),
+                        json_sha256: dv("host-tc-json"),
+                    },
+                    protoc_authority: Some(AuthorityRefJson {
+                        address: dv("protoc-addr"),
+                        json_sha256: dv("protoc-json"),
+                    }),
+                    risc0_guest_embed: None,
                 }
             },
         }

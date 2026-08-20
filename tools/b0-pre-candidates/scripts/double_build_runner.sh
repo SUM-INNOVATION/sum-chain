@@ -31,7 +31,12 @@
 #       --src-a <dir> --src-b <dir> --root-a <dir> --root-b <dir> --canonical-build-path <dir>
 #       --arch <x86_64|aarch64> --expect-build-git-sha <40-hex> --wrapper <path>
 #       --per-arch-toolchain-identity <64-hex> --embed <0|1> --recipe-out <path>
-#       [--cargo <path>] [--toolchain <name>] [--risc0-home <dir>]
+#       --toolchain <name> --dep-seed-dir <dir> --dep-seed-json <path>
+#       --host-toolchain-attestation <path>
+#       [--cargo <path>] [--risc0-home <dir>] [--guest-home /b0/guesthome (RISC0 embed)]
+#       [--protoc <exe> --protoc-include <dir> --protoc-authority <path> (SP1)]
+# The build is OFFLINE: every dependency comes from --dep-seed-dir (provisioned once with
+# b0_runner_dependency_seed), materialized independently per build; --toolchain is MANDATORY.
 # --src-a/--src-b are the two DISTINCT original checkout roots (their content must be identical; only
 # their PATHS differ). --canonical-build-path is the ratified build path both are materialized at.
 set -euo pipefail
@@ -56,6 +61,10 @@ to_hex()      { od -An -v -tx1 "$1" | tr -d ' \n'; }
 # --- explicit typed flags (no positional / env args; unknown / extra / missing / dup => die) -------
 CAND=""; MANIFEST=""; ARTIFACT=""; SRC_A=""; SRC_B=""; ROOT_A=""; ROOT_B=""; CANON_BUILD=""; ARCH=""; EXPECT_SHA=""
 WRAPPER=""; TOOLCHAIN_IDENTITY=""; EMBED=""; RECIPE_OUT=""; CARGO="cargo"; TOOLCHAIN=""; RISC0_HOME_IN=""
+# Offline dependency provisioning (this correction): the provisioned dependency-seed dir + its
+# DependencySeedV1 facts, the pinned canonical guest HOME (RISC0 real embed), the protoc/include
+# authority (SP1), and the retained toolchain/protoc attestation JSONs bound into the recipe facts.
+DEP_SEED_DIR=""; DEP_SEED_JSON=""; GUEST_HOME=""; PROTOC_IN=""; PROTOC_INCLUDE_IN=""; HOST_TC_ATTEST=""; PROTOC_AUTHORITY=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --candidate) [ "$#" -ge 2 ] || die "--candidate requires a value"; [ -z "$CAND" ] || die "duplicate --candidate"; CAND="$2"; shift 2 ;;
@@ -73,14 +82,21 @@ while [ "$#" -gt 0 ]; do
     --embed)     [ "$#" -ge 2 ] || die "--embed requires a value"; [ -z "$EMBED" ] || die "duplicate --embed"; EMBED="$2"; shift 2 ;;
     --recipe-out)[ "$#" -ge 2 ] || die "--recipe-out requires a value"; [ -z "$RECIPE_OUT" ] || die "duplicate --recipe-out"; RECIPE_OUT="$2"; shift 2 ;;
     --cargo)     [ "$#" -ge 2 ] || die "--cargo requires a value"; CARGO="$2"; shift 2 ;;
-    --toolchain) [ "$#" -ge 2 ] || die "--toolchain requires a value"; TOOLCHAIN="$2"; shift 2 ;;
+    --toolchain) [ "$#" -ge 2 ] || die "--toolchain requires a value"; [ -z "$TOOLCHAIN" ] || die "duplicate --toolchain"; TOOLCHAIN="$2"; shift 2 ;;
     --risc0-home)[ "$#" -ge 2 ] || die "--risc0-home requires a value"; RISC0_HOME_IN="$2"; shift 2 ;;
+    --dep-seed-dir) [ "$#" -ge 2 ] || die "--dep-seed-dir requires a value"; [ -z "$DEP_SEED_DIR" ] || die "duplicate --dep-seed-dir"; DEP_SEED_DIR="$2"; shift 2 ;;
+    --dep-seed-json)[ "$#" -ge 2 ] || die "--dep-seed-json requires a value"; [ -z "$DEP_SEED_JSON" ] || die "duplicate --dep-seed-json"; DEP_SEED_JSON="$2"; shift 2 ;;
+    --guest-home) [ "$#" -ge 2 ] || die "--guest-home requires a value"; [ -z "$GUEST_HOME" ] || die "duplicate --guest-home"; GUEST_HOME="$2"; shift 2 ;;
+    --protoc) [ "$#" -ge 2 ] || die "--protoc requires a value"; [ -z "$PROTOC_IN" ] || die "duplicate --protoc"; PROTOC_IN="$2"; shift 2 ;;
+    --protoc-include) [ "$#" -ge 2 ] || die "--protoc-include requires a value"; [ -z "$PROTOC_INCLUDE_IN" ] || die "duplicate --protoc-include"; PROTOC_INCLUDE_IN="$2"; shift 2 ;;
+    --host-toolchain-attestation) [ "$#" -ge 2 ] || die "--host-toolchain-attestation requires a value"; [ -z "$HOST_TC_ATTEST" ] || die "duplicate --host-toolchain-attestation"; HOST_TC_ATTEST="$2"; shift 2 ;;
+    --protoc-authority) [ "$#" -ge 2 ] || die "--protoc-authority requires a value"; [ -z "$PROTOC_AUTHORITY" ] || die "duplicate --protoc-authority"; PROTOC_AUTHORITY="$2"; shift 2 ;;
     *) die "unknown/extra argument: $1" ;;
   esac
 done
 [ -n "$CAND" ] || die "--candidate is required"
 case "$CAND" in sp1|risc0) ;; *) die "--candidate must be sp1|risc0 (got '$CAND')" ;; esac
-for req in MANIFEST ARTIFACT SRC_A SRC_B ROOT_A ROOT_B CANON_BUILD ARCH EXPECT_SHA WRAPPER TOOLCHAIN_IDENTITY EMBED RECIPE_OUT; do
+for req in MANIFEST ARTIFACT SRC_A SRC_B ROOT_A ROOT_B CANON_BUILD ARCH EXPECT_SHA WRAPPER TOOLCHAIN_IDENTITY EMBED RECIPE_OUT TOOLCHAIN DEP_SEED_DIR DEP_SEED_JSON HOST_TC_ATTEST; do
   [ -n "${!req}" ] || die "a required flag is missing (--${req})"
 done
 case "$ARCH" in x86_64|aarch64) ;; *) die "--arch must be x86_64|aarch64 (got '$ARCH')" ;; esac
@@ -88,6 +104,12 @@ case "$EMBED" in 0|1) ;; *) die "--embed must be 0|1 (B0_VENUE_EMBED state) (got
 printf '%s' "$EXPECT_SHA" | grep -Eq '^[0-9a-f]{40}$' || die "--expect-build-git-sha must be exactly 40 lowercase hex: '$EXPECT_SHA'"
 printf '%s' "$TOOLCHAIN_IDENTITY" | grep -Eq '^[0-9a-f]{64}$' || die "--per-arch-toolchain-identity must be exactly 64 lowercase hex"
 [ "$CAND" = risc0 ] && [ "$EMBED" = 1 ] && [ -z "$RISC0_HOME_IN" ] && die "--risc0-home is required for a RISC0 real embed (--embed 1)"
+
+# The offline dependency-seed + host-toolchain + (SP1) protoc provisioning INPUTS are validated LATER
+# (see "offline provisioning inputs" below) — AFTER the pure-string literal-pin + the wrapper + the
+# source-distinction gates — so those cheap refusals fire first and no filesystem check precedes the
+# literal pin. `--toolchain` (mandatory) and the four provisioning flags are already PRESENCE-checked in
+# the required-flag loop above; here only the format checks precede the pin.
 
 # GAP 1 (literal pin, pure-string gate — runs BEFORE any filesystem check or mutation): the canonical
 # build path is PINNED to the exact literal /b0/tooling (the ratified cross-venue build location the
@@ -126,6 +148,51 @@ SRC_B_MANIFEST_ADDR="$(b0_source_manifest_addr "$SRC_B_CANON")" \
 [ "$SRC_A_MANIFEST_ADDR" = "$SRC_B_MANIFEST_ADDR" ] \
   || die "--src-a and --src-b have DIFFERENT build-input manifests ($SRC_A_MANIFEST_ADDR != $SRC_B_MANIFEST_ADDR); the origins are not the same content"
 
+# --- offline provisioning inputs (this correction; validated HERE, after all pure-string + source gates
+# so those cheap refusals fire first and no filesystem check precedes the literal pin) -----------------
+# The build is OFFLINE (`--offline` + CARGO_NET_OFFLINE=true); every dependency comes from the
+# pre-provisioned, content-addressed dependency SEED (never the network / an ambient cargo home). The
+# host runner graph materializes into each build's CARGO_HOME; RISC0's guest workspace graph (which
+# embed_methods builds the guest against, with all CARGO* env stripped by risc0-build) materializes into
+# a PINNED canonical guest HOME. `--toolchain` is MANDATORY (a bare `cargo` on the 1.85 floor cannot
+# resolve the runner lock — the exact venue blocker this correction fixes).
+[ -d "$DEP_SEED_DIR/host-seed" ] && [ -f "$DEP_SEED_DIR/host-config.toml" ] \
+  || die "--dep-seed-dir must contain host-seed/ + host-config.toml (provision with b0_runner_dependency_seed): $DEP_SEED_DIR"
+[ -f "$DEP_SEED_JSON" ] || die "--dep-seed-json is not a file: $DEP_SEED_JSON"
+[ -f "$HOST_TC_ATTEST" ] || die "--host-toolchain-attestation is not a file: $HOST_TC_ATTEST"
+# The dependency-seed facts must be for THIS candidate; read the retained per-unit seed addresses.
+DEP_SEED_CAND="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("candidate",""))' "$DEP_SEED_JSON")" \
+  || die "cannot read --dep-seed-json"
+[ "$DEP_SEED_CAND" = "$CAND" ] || die "--dep-seed-json candidate '$DEP_SEED_CAND' != --candidate '$CAND'"
+HOST_SEED_ADDR="$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print([u["seed_address"] for u in d["seed_units"] if u["role"]=="host-cargo-home"][0])' "$DEP_SEED_JSON")" \
+  || die "--dep-seed-json has no host-cargo-home seed unit"
+printf '%s' "$HOST_SEED_ADDR" | grep -Eq '^[0-9a-f]{64}$' || die "host seed address is not 64-hex"
+GUEST_SEED_ADDR=""
+if [ "$CAND" = risc0 ] && [ "$EMBED" = 1 ]; then
+  [ -n "$GUEST_HOME" ] || die "--guest-home is required for a RISC0 real embed (--embed 1)"
+  GUEST_HOME_REQUIRED='/b0/guesthome'
+  [ "$GUEST_HOME" = "$GUEST_HOME_REQUIRED" ] \
+    || die "--guest-home must be EXACTLY $GUEST_HOME_REQUIRED (the pinned canonical guest home; got '$GUEST_HOME')"
+  [ -d "$DEP_SEED_DIR/guest-seed" ] && [ -f "$DEP_SEED_DIR/guest-config.toml" ] \
+    || die "RISC0 --dep-seed-dir must contain guest-seed/ + guest-config.toml (two-graph seed)"
+  GUEST_SEED_ADDR="$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print([u["seed_address"] for u in d["seed_units"] if u["role"]=="guest-home"][0])' "$DEP_SEED_JSON")" \
+    || die "RISC0 --dep-seed-json has no guest-home seed unit"
+  printf '%s' "$GUEST_SEED_ADDR" | grep -Eq '^[0-9a-f]{64}$' || die "guest seed address is not 64-hex"
+fi
+PROTOC_ABS=""; PROTOC_INCLUDE_ABS=""; PROTOC_LIBDIR=""
+if [ "$CAND" = sp1 ]; then
+  [ -n "$PROTOC_IN" ] && [ -n "$PROTOC_INCLUDE_IN" ] && [ -n "$PROTOC_AUTHORITY" ] \
+    || die "SP1 requires --protoc, --protoc-include, and --protoc-authority (native_protoc authority)"
+  PROTOC_ABS="$(readlink -f "$PROTOC_IN" 2>/dev/null || true)"
+  [ -n "$PROTOC_ABS" ] && [ -x "$PROTOC_ABS" ] || die "--protoc is not an executable: $PROTOC_IN"
+  PROTOC_INCLUDE_ABS="$(cd "$PROTOC_INCLUDE_IN" 2>/dev/null && pwd -P)" || die "--protoc-include is not a directory: $PROTOC_INCLUDE_IN"
+  [ -f "$PROTOC_INCLUDE_ABS/google/protobuf/empty.proto" ] || die "--protoc-include lacks google/protobuf/empty.proto (wrong include authority)"
+  [ -f "$PROTOC_AUTHORITY" ] || die "--protoc-authority is not a file: $PROTOC_AUTHORITY"
+  # The venue protoc's shared libs (libprotoc/libprotobuf) sit next to it in `<protoc-dir>/lib`.
+  PROTOC_LIBDIR="$(dirname "$PROTOC_ABS")/lib"
+  [ -d "$PROTOC_LIBDIR" ] || PROTOC_LIBDIR=""   # some venues put libs on the system path
+fi
+
 for r in "$ROOT_A" "$ROOT_B"; do [ ! -L "$r" ] || die "build root is a symlink (refused): $r"; done
 prepare_root() {
   local r="$1" name="$2"
@@ -146,16 +213,18 @@ mkdir -p "$CARGO_A" "$TARGET_A" "$CARGO_B" "$TARGET_B"
 # SUCCESS path uses the explicit fail-hard cleanup in run_one (GAP 5), and the GAP 5 failure path
 # `trap - EXIT`s to PRESERVE the diagnostics under $work.
 CANON_ABS=""
-work="$(mktemp -d)"; trap 'rm -rf "$work"; [ -n "${CANON_ABS:-}" ] && rm -rf "$CANON_ABS"' EXIT
+GUEST_HOME_ABS=""   # set below under the lock (RISC0 real embed only); a pinned /b0/guesthome
+work="$(mktemp -d)"; trap 'rm -rf "$work"; [ -n "${CANON_ABS:-}" ] && rm -rf "$CANON_ABS"; [ -n "${GUEST_HOME_ABS:-}" ] && rm -rf "$GUEST_HOME_ABS"' EXIT
 EVID_A="$work/evid-a"; EVID_B="$work/evid-b"; mkdir -p "$EVID_A" "$EVID_B"
 
 # --- canonical, enforced, RETAINED build argv (exact vector) --------------------------------------
 CARGO_IDENT="$CARGO"; [ -n "$TOOLCHAIN" ] && CARGO_IDENT="$CARGO +$TOOLCHAIN"
 declare -a ARGV=("$CARGO"); [ -n "$TOOLCHAIN" ] && ARGV+=("+$TOOLCHAIN")
-ARGV+=(build --release --locked --features real-backend --manifest-path "$MANIFEST")
+ARGV+=(build --release --locked --offline --features real-backend --manifest-path "$MANIFEST")
 # The argv MUST carry the reproducibility-relevant flags; construct-then-assert (never claim unproven).
+# `--offline` (with CARGO_NET_OFFLINE=true in run_one) forbids ANY network access after provisioning.
 _argvline=" ${ARGV[*]} "
-for need in ' build ' ' --release ' ' --locked ' ' --features real-backend ' " --manifest-path $MANIFEST "; do
+for need in ' build ' ' --release ' ' --locked ' ' --offline ' ' --features real-backend ' " --manifest-path $MANIFEST "; do
   case "$_argvline" in *"$need"*) ;; *) die "canonical argv missing required token: '$need'" ;; esac
 done
 
@@ -201,6 +270,27 @@ done
 # Start from a clean, ABSENT canonical path (run_one materializes it fresh per build under the held lock).
 rm -rf "$CANON_ABS" || die "cannot clean the canonical build path $CANON_ABS"
 
+# --- PINNED canonical guest HOME (/b0/guesthome) — RISC0 real embed only ----------------------------
+# risc0-build strips every CARGO* env before building the guest, so the ONLY way to force the guest
+# onto the controlled, offline seed is HOME -> $HOME/.cargo. It is PINNED to a fixed canonical path so
+# the guest ELF is byte-identical across the two path-distinct builds (which cannot be --remap'd, as
+# risc0-build overwrites CARGO_ENCODED_RUSTFLAGS). Re-materialized fresh per build under the held lock.
+if [ "$CAND" = risc0 ] && [ "$EMBED" = 1 ]; then
+  [ "$GUEST_HOME" = "$(dirname "$CANON_REQUIRED")/guesthome" ] || die "internal: guest-home pin drift"
+  if [ -e "$GUEST_HOME" ]; then
+    [ ! -L "$GUEST_HOME" ] || die "$GUEST_HOME is a symlink (refused)"
+    [ -d "$GUEST_HOME" ] || die "$GUEST_HOME exists and is not a directory (refused)"
+    [ "$(readlink -f "$GUEST_HOME")" = "$GUEST_HOME" ] || die "$GUEST_HOME resolves elsewhere (alias refused)"
+  fi
+  GUEST_HOME_ABS="$GUEST_HOME"
+  for r in "$SRC_A_CANON" "$SRC_B_CANON" "$A_ABS" "$B_ABS" "$CARGO_A" "$TARGET_A" "$CARGO_B" "$TARGET_B" "$CANON_ABS" "$work"; do
+    [ "$GUEST_HOME_ABS" != "$r" ] || die "guest home coincides with a root: $GUEST_HOME_ABS"
+    case "$GUEST_HOME_ABS/" in "$r"/*) die "guest home nested under a root: $r" ;; esac
+    case "$r/" in "$GUEST_HOME_ABS"/*) die "a root is nested under the guest home: $r" ;; esac
+  done
+  rm -rf "$GUEST_HOME_ABS" || die "cannot clean the guest home $GUEST_HOME_ABS"
+fi
+
 # --- RISC0 embedded-guest identity from a build's OUT_DIR methods.rs (canonical form) --------------
 # image id from `..._ID: [u32; 8] = [...]` (packed LE, 64-hex); methods.rs digest binds the canonical
 # include form + the id. For a stub build (embed=0) the guest is empty -> zero id, empty-elf digest.
@@ -241,8 +331,17 @@ run_one() {
   local tag="$1" src="$2" cargo="$3" target="$4" enc="$5" evid="$6" origin_addr="$7" last mat_addr
   local -a envv=(BUILD_GIT_SHA="$EXPECT_SHA" SOURCE_DATE_EPOCH=0 B0_VENUE_EMBED="$EMBED"
     CARGO_HOME="$cargo" CARGO_TARGET_DIR="$target" CARGO_ENCODED_RUSTFLAGS="$enc"
+    CARGO_NET_OFFLINE=true
     RUSTC_WRAPPER="$WRAPPER_ABS" B0_RUSTC_EVIDENCE_DIR="$evid")
-  [ "$CAND" = risc0 ] && [ "$EMBED" = 1 ] && envv+=(RISC0_HOME="$RISC0_HOME_IN")
+  if [ "$CAND" = risc0 ] && [ "$EMBED" = 1 ]; then
+    # HOME forces the CARGO*-stripped guest sub-build onto the controlled guest seed; RISC0_BUILD_LOCKED
+    # forces it --locked to the committed candidate workspace lock.
+    envv+=(RISC0_HOME="$RISC0_HOME_IN" HOME="$GUEST_HOME_ABS" RISC0_BUILD_LOCKED=1)
+  fi
+  if [ "$CAND" = sp1 ]; then
+    envv+=(PROTOC="$PROTOC_ABS" PROTOC_INCLUDE="$PROTOC_INCLUDE_ABS")
+    [ -d "$PROTOC_LIBDIR" ] && envv+=(LD_LIBRARY_PATH="$PROTOC_LIBDIR")
+  fi
   # Materialize this build's source at the canonical build path (fresh copy; mode-preserving; $src only).
   rm -rf "$CANON_ABS" || die "cannot clean canonical build path: $CANON_ABS"
   cp -Rp "$src" "$CANON_ABS" || die "cannot materialize $tag source at canonical build path: $src -> $CANON_ABS"
@@ -253,6 +352,17 @@ run_one() {
   [ "$mat_addr" = "$origin_addr" ] \
     || die "build $tag: materialized manifest $mat_addr != origin manifest $origin_addr (materialization not faithful / stale content)"
   MAT_ADDR[$tag]="$mat_addr"
+  # Materialize the pre-provisioned dependency seed into THIS build's cargo home(s) — an INDEPENDENT
+  # copy, each address-verified against the retained seed authority (offline; never the network / an
+  # ambient cargo home). Host graph -> this build's CARGO_HOME; RISC0 guest graph -> the pinned guest
+  # HOME (re-materialized fresh per build at the same canonical path, so the guest ELF is identical).
+  b0_materialize_seed "$DEP_SEED_DIR/host-seed" "$DEP_SEED_DIR/host-config.toml" "$cargo" "$HOST_SEED_ADDR" >/dev/null \
+    || die "build $tag: host dependency-seed materialization/verification failed (seed != retained authority)"
+  if [ "$CAND" = risc0 ] && [ "$EMBED" = 1 ]; then
+    rm -rf "$GUEST_HOME_ABS" || die "build $tag: cannot clean guest home $GUEST_HOME_ABS"
+    b0_materialize_seed "$DEP_SEED_DIR/guest-seed" "$DEP_SEED_DIR/guest-config.toml" "$GUEST_HOME_ABS/.cargo" "$GUEST_SEED_ADDR" >/dev/null \
+      || die "build $tag: guest dependency-seed materialization/verification failed (seed != retained authority)"
+  fi
   T_START[$tag]="$(date +%s)"
   if ! (cd "$CANON_ABS" && env -u RUSTFLAGS -u CARGO_BUILD_RUSTFLAGS "${envv[@]}" "${ARGV[@]}" >/dev/null 2>&1); then
     die "clean build $tag FAILED (canonical_src=$CANON_ABS target=$target argv='${ARGV[*]}')"
@@ -328,12 +438,45 @@ ARGV_JSON="$(printf '%s\n' "${ARGV[@]}" | python3 -c 'import json,sys; print(jso
 ENV_JSON="$(python3 -c 'import json,sys; print(json.dumps([["BUILD_GIT_SHA",sys.argv[1]],["SOURCE_DATE_EPOCH","0"],["B0_VENUE_EMBED",sys.argv[2]]]))' "$EXPECT_SHA" "$EMBED")"
 REFUSED_JSON="$(printf '%s\n' "${REFUSED_ROOTS[@]}" | python3 -c 'import json,sys; print(json.dumps(sorted({l.rstrip(chr(10)) for l in sys.stdin if l.strip()})))')"
 
+# --- provisioning facts (offline dependency seed + host-toolchain + protoc authorities) -------------
+# Each authority's OWN internal domain-separated `address` is bound; the validator + independent
+# verifier recompute it from the retained JSON and require equality (from-scratch decoding).
+DEP_SEED_ADDR="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["address"])' "$DEP_SEED_JSON")" || die "dep-seed json missing address"
+DEP_SEED_JSON_SHA="$(sha256_file "$DEP_SEED_JSON")"
+HOST_TC_ADDR="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["address"])' "$HOST_TC_ATTEST")" || die "host-toolchain-attestation missing address"
+HOST_TC_SHA="$(sha256_file "$HOST_TC_ATTEST")"
+PROTOC_AUTH_ADDR=""; PROTOC_AUTH_SHA=""
+if [ "$CAND" = sp1 ]; then
+  PROTOC_AUTH_ADDR="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["address"])' "$PROTOC_AUTHORITY")" || die "protoc-authority missing address"
+  PROTOC_AUTH_SHA="$(sha256_file "$PROTOC_AUTHORITY")"
+fi
+# RISC0 real embed: the guest-embed facts sidecar build.rs wrote into each OUT_DIR must be byte-equal
+# across A and B (guest ELF SHA-256/BLAKE3 + image id identical across the path-distinct builds; A.10).
+GUEST_ELF_SHA=""; GUEST_ELF_B3=""
+if [ "$CAND" = risc0 ] && [ "$EMBED" = 1 ]; then
+  gfa="$(find "$TARGET_A/release/build" -maxdepth 3 -path '*b0-pre-measure-risc0*/out/b0_guest_embed_facts.json' 2>/dev/null | LC_ALL=C sort | head -1)"
+  gfb="$(find "$TARGET_B/release/build" -maxdepth 3 -path '*b0-pre-measure-risc0*/out/b0_guest_embed_facts.json' 2>/dev/null | LC_ALL=C sort | head -1)"
+  [ -f "$gfa" ] && [ -f "$gfb" ] || die "guest-embed facts sidecar missing from build A/B OUT_DIR (real embed did not canonicalize)"
+  cmp -s "$gfa" "$gfb" || die "guest-embed facts differ between build A and B (guest ELF/image id not reproducible)"
+  GUEST_ELF_SHA="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["guest_elf_sha256"])' "$gfa")"
+  GUEST_ELF_B3="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["guest_elf_blake3"])' "$gfa")"
+fi
+EXTRA_JSON="$(python3 -c '
+import json,sys
+d={"offline":True,"cargo_net_offline":True,
+   "dependency_seed":{"address":sys.argv[1],"json_sha256":sys.argv[2]},
+   "host_toolchain_attestation":{"address":sys.argv[3],"json_sha256":sys.argv[4]}}
+if sys.argv[5]: d["protoc_authority"]={"address":sys.argv[5],"json_sha256":sys.argv[6]}
+if sys.argv[7]: d["risc0_guest_embed"]={"guest_elf_sha256":sys.argv[7],"guest_elf_blake3":sys.argv[8],"risc0_build_locked":True}
+print(json.dumps(d))
+' "$DEP_SEED_ADDR" "$DEP_SEED_JSON_SHA" "$HOST_TC_ADDR" "$HOST_TC_SHA" "$PROTOC_AUTH_ADDR" "$PROTOC_AUTH_SHA" "$GUEST_ELF_SHA" "$GUEST_ELF_B3")"
+
 python3 - "$RECIPE_OUT" "$CAND" "$ARCH" "$MANIFEST" "$ARTIFACT" "$CARGO_IDENT" "$EMBED" \
   "$TOOLCHAIN_IDENTITY" "$WRAPPER_B3" "$ARGV_JSON" "$ENV_JSON" "$REFUSED_JSON" \
   "$SRC_A_CANON" "$CARGO_A" "$TARGET_A" "$ENC_A_HEX" "${RUN_SHA[a]}" "${RUN_B3[a]}" "${G_IMG[a]}" "${G_MB[a]}" "${T_START[a]}" "${T_END[a]}" "$EVID_A" \
   "$SRC_B_CANON" "$CARGO_B" "$TARGET_B" "$ENC_B_HEX" "${RUN_SHA[b]}" "${RUN_B3[b]}" "${G_IMG[b]}" "${G_MB[b]}" "${T_START[b]}" "${T_END[b]}" "$EVID_B" \
   "$work" "$CANON_ABS" \
-  "$SRC_A_MANIFEST_ADDR" "${MAT_ADDR[a]}" "$SRC_B_MANIFEST_ADDR" "${MAT_ADDR[b]}" <<'PY' || die "failed to emit runner-recipe facts JSON"
+  "$SRC_A_MANIFEST_ADDR" "${MAT_ADDR[a]}" "$SRC_B_MANIFEST_ADDR" "${MAT_ADDR[b]}" "$EXTRA_JSON" "$CAND" <<'PY' || die "failed to emit runner-recipe facts JSON"
 import json, os, sys
 a = sys.argv
 (out, cand, arch, manifest, artifact, cargo_ident, embed, toolchain, wrapper_b3, argv_json, env_json, refused_json) = a[1:13]
@@ -351,6 +494,12 @@ def build(off, orig_addr, mat_addr):
                 kind = line[5:]
             elif line.startswith('remap_arg='):
                 remap_args.append(line[len('remap_arg='):])
+        # The sp1-core-executor-runner nested `sp1-native-bins` compiles (kind=nested) carry no remaps
+        # (that vendored build.rs strips CARGO_ENCODED_RUSTFLAGS). They stay RAW EVIDENCE in the evidence
+        # dir but are NOT bound into the remap-enforced inventory (kind is compile|probe there); their
+        # path-independence is proven by the A/B runner byte-identity, not by a remap count.
+        if kind == 'nested':
+            continue
         invs.append({'kind': kind, 'remap_args': remap_args, 'record_address': name[:-4]})
     return {
         'original_root': orig, 'cargo_from': cargo, 'target_from': target,
@@ -367,9 +516,14 @@ doc = {
     'canonical_build_path': a[36],
     'build_a': ba, 'build_b': bb, 'byte_equal': True,
     'leakage_refused_prefixes': json.loads(refused_json),
-    'leakage_permitted_prefixes': ['/b0/cargo', '/b0/target', '/b0/tooling'], 'leakage_clean': True,
+    'leakage_permitted_prefixes': (['/b0/cargo', '/b0/target', '/b0/tooling', '/b0/guesthome']
+                                   if a[42] == 'risc0' else ['/b0/cargo', '/b0/target', '/b0/tooling']),
+    'leakage_clean': True,
     'evidence_root': a[35],
 }
+# Merge the provisioning facts (offline dependency seed + host-toolchain + protoc authorities + RISC0
+# guest-embed A/B equality). No key collides with the fields above.
+doc.update(json.loads(a[41]))
 if not any(i['kind'] == 'compile' for i in ba['invocations']):
     sys.exit('build A recorded no compile invocation')
 if not any(i['kind'] == 'compile' for i in bb['invocations']):

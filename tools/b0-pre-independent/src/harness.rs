@@ -533,7 +533,7 @@ fn enc_runner_attestation(
         b.extend_from_slice(s.as_bytes());
     };
     let seed = |s: &[u8]| *blake3::hash(s).as_bytes();
-    b.extend_from_slice(&6u16.to_le_bytes());
+    b.extend_from_slice(&7u16.to_le_bytes());
     b.extend_from_slice(&candidate.to_le_bytes());
     b.push(role);
     b.extend_from_slice(spec);
@@ -576,6 +576,10 @@ fn enc_runner_attestation(
         measured,
         &seed(b"wrapper-blake3"),
     ));
+    // v7: offline-provisioning authority addresses (host toolchain / dependency seed / protoc).
+    b.extend_from_slice(&seed(b"host-toolchain-addr"));
+    b.extend_from_slice(&seed(b"dependency-seed-addr"));
+    b.extend_from_slice(&seed(b"protoc-authority-addr"));
     let addr = closure::runner_attestation_address(&b);
     (b, addr, recipe_b, inv_a, inv_b, proof_b, leak_b)
 }

@@ -14,6 +14,12 @@ compile_error!(
      proving path — the test-only mock lives in b0-pre-measure-core's cfg(test)."
 );
 
+// §G guest-embed canonicalization helpers (pure string/path logic), shared VERBATIM with build.rs
+// (which includes the same file via `#[path]`). Declared here so `cargo test` exercises its unit
+// tests; the runner binary never calls these at runtime (`#![allow(dead_code)]` inside the module).
+#[cfg(feature = "real-backend")]
+mod embed_canon;
+
 #[cfg(feature = "real-backend")]
 fn main() -> std::process::ExitCode {
     match real::cli_main() {
