@@ -82,17 +82,33 @@ case "$MODE" in
         # the measured source; verified against the tooling authority by the validator).
         --tooling-commit "$B0_TOOLING_COMMIT" --tooling-pathset-blake3 "$B0_TOOLING_PATHSET_BLAKE3")
       if [ "$CAND" = sp1 ]; then
-        local incand; incand="$(incontainer_candidate_dir sp1)"
         local rd; rd="$(readlink -f "$PROVER_REAL_DOCKER")"
-        "$rd" run --rm --pull never -v "$d:/out" -e CARGO_TARGET_DIR=/tmp/b0pre-guest-target \
-          "$VERIFIER_REF" bash -c "cd $incand/guest && cargo prove build --output-directory /out/guest --elf-name guest.elf" \
-          || die "SP1 guest build $1 failed"
-        [ -s "$d/guest/guest.elf" ] || die "SP1 guest ELF $1 absent"
+        # CONSUME the ONE canonical SP1 guest artifact — NEVER rebuild. SP1's per-arch succinct
+        # cross-compiler diverges across build hosts, so the grid's single-program requirement is met
+        # by distributing the exact x86-authoritative ELF bytes to every arch. There is NO local
+        # `cargo prove build` fallback for the official SP1 guest: a missing/invalid package refuses.
+        need_env CANONICAL_SP1_GUEST_PKG
+        [ -d "$CANONICAL_SP1_GUEST_PKG" ] || die "canonical SP1 guest package absent: $CANONICAL_SP1_GUEST_PKG"
+        bash "$HERE/produce_canonical_sp1_guest.sh" verify "$CANONICAL_SP1_GUEST_PKG" >&2 \
+          || die "canonical SP1 guest package failed independent verification; refusing"
+        local canon_man="$CANONICAL_SP1_GUEST_PKG/canonical-sp1-guest-artifact.v1.json"
+        local canon_elf="$CANONICAL_SP1_GUEST_PKG/guest.elf"
+        [ -s "$canon_man" ] && [ -s "$canon_elf" ] || die "canonical SP1 guest package incomplete"
+        # bind: the artifact must be the guest of THIS ratified measured source.
+        local art_msc; art_msc="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["measured_source_commit"])' "$canon_man")"
+        [ "$art_msc" = "$SRC_COMMIT" ] || die "canonical artifact measured_source_commit $art_msc != measured $SRC_COMMIT"
+        local art_addr; art_addr="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["address"])' "$canon_man")"
+        # use the retained ELF bytes verbatim; the runner derives program_id/guest_image_hash from
+        # THESE bytes, so both arches necessarily agree (that is the shared-program guarantee).
+        mkdir -p "$d/guest"; cp "$canon_elf" "$d/guest/guest.elf"
+        # builder/toolchain identify THIS proving venue's ratified image (per-arch; reconcile_sp1 keeps
+        # both). The shared guest identity is bound via --canonical-sp1-guest-artifact-address.
         local img; img="$("$rd" image inspect --format '{{.Id}}' "$VERIFIER_REF" 2>/dev/null || true)"
         case "$img" in sha256:*) ;; *) die "VERIFIER_REF did not reconcile to an immutable image id" ;; esac
         local tc; tc="$(b0_toolchain_identity sp1 "$img")"
         [ "$tc" = "$RATIFIED_TC" ] || die "SP1 toolchain identity $tc != ratified $RATIFIED_TC"
-        idargs+=(--guest-elf "$d/guest/guest.elf" --builder-digest "${img#sha256:}" --toolchain-identity "$tc")
+        idargs+=(--guest-elf "$d/guest/guest.elf" --builder-digest "${img#sha256:}" --toolchain-identity "$tc" \
+                 --canonical-sp1-guest-artifact-address "$art_addr")
       else
         # #1: the RISC Zero guest is embedded at runner BUILD time, so a genuine second build
         # is a fresh `cargo build --features real-backend` with B0_VENUE_EMBED=1 into a SEPARATE
@@ -124,12 +140,15 @@ case "$MODE" in
     RECDIR="${2:-}"; OUTDIR="${3:-}"
     [ -d "$RECDIR" ] || die "records dir required"
     [ -n "$OUTDIR" ] || die "out dir required"
-    for v in SPEC_HASH MEASURE_PRODUCE; do need_env "$v"; done
+    for v in SPEC_HASH MEASURE_PRODUCE CANONICAL_SP1_GUEST_PKG; do need_env "$v"; done
     [ -x "$MEASURE_PRODUCE" ] || die "MEASURE_PRODUCE not executable"
+    [ -d "$CANONICAL_SP1_GUEST_PKG" ] || die "canonical SP1 guest package absent: $CANONICAL_SP1_GUEST_PKG"
     recs="$(mktemp)"; trap 'rm -f "$recs"' EXIT
     # Concatenate the per-(candidate,arch) records into one JSON array.
     { printf '['; first=1; for f in "$RECDIR"/*.json; do [ -f "$f" ] || continue; [ "$first" = 1 ] || printf ','; cat "$f"; first=0; done; printf ']'; } > "$recs"
-    "$MEASURE_PRODUCE" --guest-set "$recs" "$OUTDIR" || die "guest-set assembly refused (eligible-set / reconciliation rule failed)"
+    # v8: measure-produce re-decodes the ONE canonical SP1 guest artifact from its retained bytes and
+    # requires every SP1 record to reference exactly it; it is then sealed as a mandatory member.
+    "$MEASURE_PRODUCE" --guest-set "$recs" "$OUTDIR" "$CANONICAL_SP1_GUEST_PKG" || die "guest-set assembly refused (eligible-set / reconciliation / canonical-artifact rule failed)"
     note "assembled guest set -> $OUTDIR (coordination-manifest.json, r0_guest_set_hash.txt, guest-allowlist.bin)"
     ;;
   *) die "usage: derive_guest_set.sh <emit <sp1|risc0> <arch> <out_record.json> | assemble <records_dir> <out_dir>>" ;;

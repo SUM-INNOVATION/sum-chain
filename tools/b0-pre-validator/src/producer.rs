@@ -178,6 +178,10 @@ pub struct RunnerRecipeJson {
     pub protoc_authority: Option<AuthorityRefJson>,
     #[serde(default)]
     pub risc0_guest_embed: Option<GuestEmbedJson>,
+    /// v8: the ONE canonical SP1 guest artifact this measurement consumed (SP1 only). Its SHA-256
+    /// address is bound into the attestation; absent for RISC0.
+    #[serde(default)]
+    pub canonical_sp1_guest_artifact: Option<AuthorityRefJson>,
 }
 
 #[derive(Deserialize, Clone, Default)]
@@ -368,6 +372,8 @@ impl RunnerAttestationJson {
             host_toolchain_attestation_address: [0; 32],
             dependency_seed_address: [0; 32],
             protoc_authority_address: [0; 32],
+            // v8 injected by the orchestrator from the recipe facts (like the v7 addresses above).
+            canonical_sp1_guest_artifact_address: [0; 32],
         })
     }
 }
@@ -1076,6 +1082,11 @@ fn prov_facts(p: &ProvFacts) -> Result<ProvenanceFacts, String> {
             Some(pa) => opt_hex32(&pa.address, "recipe.protoc_authority.address")?,
             None => [0u8; 32],
         },
+        // v8: SP1 carries the canonical guest artifact address; RISC0 (None) -> zero.
+        canonical_sp1_guest_artifact_address: match &p.runner_recipe.canonical_sp1_guest_artifact {
+            Some(a) => opt_hex32(&a.address, "recipe.canonical_sp1_guest_artifact.address")?,
+            None => [0u8; 32],
+        },
         source_commit: p.source_commit.clone(),
         dirty_tree_flag: p.dirty_tree_flag,
         builder_container_digest: hex32(
@@ -1381,6 +1392,7 @@ pub fn dry_run_raw_facts() -> RawFacts {
                         address: dv("host-tc-addr"),
                         json_sha256: dv("host-tc-json"),
                     },
+                    canonical_sp1_guest_artifact: None,
                     protoc_authority: Some(AuthorityRefJson {
                         address: dv("protoc-addr"),
                         json_sha256: dv("protoc-json"),

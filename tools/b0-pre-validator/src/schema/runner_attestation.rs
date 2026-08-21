@@ -23,7 +23,7 @@ use crate::enums::{Arch, Candidate, ProvenanceRole};
 /// runner-CONTINUITY field (`phase1_production_binary_blake3`); v4 added
 /// `phase1_identity_record_blake3`, the domain-separated address of the RETAINED Phase-1 identity
 /// record, so continuity is anchored to an independently-decoded record, not a copied hash claim.
-pub const RUNNER_ATTESTATION_SCHEMA_VERSION: u16 = 7;
+pub const RUNNER_ATTESTATION_SCHEMA_VERSION: u16 = 8;
 
 /// Domain separation for [`RunnerAttestationV1::hash`].
 pub const RUNNER_ATTESTATION_PREFIX: &[u8] = b"b0-final-runner-attestation/v1\0";
@@ -118,6 +118,13 @@ pub struct RunnerAttestationV1 {
     /// Address of the retained [`crate::venue::protoc_authority::ProtocAuthorityV1`] (SP1 only; ALL-ZERO
     /// for RISC0, which needs no protoc).
     pub protoc_authority_address: [u8; 32],
+    // ---- v8: the ONE canonical SP1 guest artifact this measurement PROVED. This is the SAME SHA-256
+    // address the Phase-1 identity record bound, so measurement-time and Phase-1 guest identity MUST
+    // agree — the grid measures the exact shared program, never a locally rebuilt one. SP1 ONLY;
+    // ALL-ZERO for RISC0 (which embeds its own locked native guest — a non-zero value there is refused).
+    /// SHA-256 address of the retained
+    /// [`crate::venue::canonical_sp1_guest_artifact::CanonicalSp1GuestArtifactV1`].
+    pub canonical_sp1_guest_artifact_address: [u8; 32],
 }
 
 fn write_hexstr(w: &mut Writer, s: &str) {
@@ -198,6 +205,8 @@ impl RunnerAttestationV1 {
         w.bytes(&self.host_toolchain_attestation_address);
         w.bytes(&self.dependency_seed_address);
         w.bytes(&self.protoc_authority_address);
+        // v8
+        w.bytes(&self.canonical_sp1_guest_artifact_address);
         w.into_bytes()
     }
 
@@ -277,6 +286,8 @@ impl RunnerAttestationV1 {
             r.read_array::<32>("RunnerAttestationV1.dependency_seed_address")?;
         let protoc_authority_address =
             r.read_array::<32>("RunnerAttestationV1.protoc_authority_address")?;
+        let canonical_sp1_guest_artifact_address =
+            r.read_array::<32>("RunnerAttestationV1.canonical_sp1_guest_artifact_address")?;
         Ok(Self {
             candidate,
             provenance_role,
@@ -312,6 +323,7 @@ impl RunnerAttestationV1 {
             host_toolchain_attestation_address,
             dependency_seed_address,
             protoc_authority_address,
+            canonical_sp1_guest_artifact_address,
         })
     }
 
@@ -410,6 +422,45 @@ impl RunnerAttestationV1 {
         }
         if rec.b0_pre_spec_hash != self.b0_pre_spec_hash {
             return Err("retained Phase-1 spec != attestation spec".into());
+        }
+        Ok(())
+    }
+
+    /// v8: bind the RETAINED canonical SP1 guest artifact (the ONE ELF distributed to every arch) to
+    /// this SP1 measurement attestation. The artifact self-verifies (shape + double-build + address)
+    /// against the ratified measured source, its retained ELF bytes reproduce every sealed identity,
+    /// and its address EQUALS the address this attestation bound — so the measurement proved exactly the
+    /// shared program, never a locally rebuilt one.
+    pub fn check_bound_canonical_sp1_guest_artifact(
+        &self,
+        art: &crate::venue::canonical_sp1_guest_artifact::CanonicalSp1GuestArtifactV1,
+        elf: &[u8],
+    ) -> Result<(), String> {
+        if self.candidate != Candidate::Sp1 {
+            return Err(
+                "canonical SP1 guest artifact bound to a non-SP1 attestation; refused".into(),
+            );
+        }
+        let addr = art.verify(&self.measured_source_commit)?;
+        art.verify_elf(elf)?;
+        if addr != self.canonical_sp1_guest_artifact_address {
+            return Err(
+                "canonical SP1 guest artifact address != attestation's bound address (measurement-time \
+                 and Phase-1 guest identity disagree)"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
+    /// v8: a RISC0 (or any non-SP1) attestation must carry NO canonical SP1 guest artifact address — it
+    /// embeds its own locked native guest. A non-zero value is a cross-candidate substitution attempt.
+    pub fn check_no_canonical_sp1_guest_artifact(&self) -> Result<(), String> {
+        if self.canonical_sp1_guest_artifact_address != [0u8; 32] {
+            return Err(
+                "non-SP1 attestation carries a canonical SP1 guest artifact address; refused"
+                    .into(),
+            );
         }
         Ok(())
     }
@@ -574,6 +625,7 @@ mod tests {
             host_toolchain_attestation_address: [20; 32],
             dependency_seed_address: [21; 32],
             protoc_authority_address: [22; 32],
+            canonical_sp1_guest_artifact_address: [23; 32],
         }
     }
 

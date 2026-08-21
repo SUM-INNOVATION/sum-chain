@@ -297,6 +297,13 @@ mod real {
             // orchestrator from the SEPARATE tooling root, never inferred from the measured source).
             tooling_commit: req(args, "--tooling-commit")?,
             tooling_pathset_blake3: req(args, "--tooling-pathset-blake3")?,
+            // SP1 consumes the ONE canonical guest artifact (never rebuilds it): the `--guest-elf`
+            // read above IS the distributed ELF, so `program_id`/`guest_image_hash` were derived from
+            // those exact bytes, and this address binds WHICH sealed artifact they came from.
+            canonical_sp1_guest_artifact_address: req(
+                args,
+                "--canonical-sp1-guest-artifact-address",
+            )?,
         };
         println!(
             "{}",
@@ -305,8 +312,39 @@ mod real {
         Ok(())
     }
 
+    /// Derive ONLY the SP1 zkVM identity (`program_id` = verifying-key hash, `guest_image_hash`
+    /// = BLAKE3 of the ELF) from an EXISTING guest ELF — no build, no measurement. Used by the
+    /// canonical-guest producer to seal, and by consumers to recompute, the identity of the
+    /// distributed ELF bytes WITHOUT ever invoking `cargo prove build`.
+    fn derive_guest_identity(args: &[String]) -> Result<(), String> {
+        let elf =
+            std::fs::read(req(args, "--guest-elf")?).map_err(|e| format!("read guest ELF: {e}"))?;
+        let backend = Sp1Backend {
+            elf,
+            guest_source_tree_hash: String::new(),
+            candidate_dep_lock_hash: String::new(),
+            build_command_hash: String::new(),
+            builder_container_digest: String::new(),
+            arch: Arch::X86_64, // identity derives from the ELF alone; arch is immaterial here
+            firewall_attest: PathBuf::from("/dev/null"),
+            vkey_hash: RefCell::new(None),
+        };
+        let guest = backend.build_guest(&BuildCtx {
+            arch: Arch::X86_64,
+            work_dir: PathBuf::from("."),
+        })?;
+        println!(
+            "{{\"program_id\":\"{}\",\"guest_image_hash\":\"{}\"}}",
+            guest.program_id, guest.guest_image_hash
+        );
+        Ok(())
+    }
+
     pub fn cli_main() -> Result<(), String> {
         let args: Vec<String> = std::env::args().collect();
+        if args.iter().any(|a| a == "--derive-guest-identity") {
+            return derive_guest_identity(&args);
+        }
         if args.iter().any(|a| a == "--emit-identity") {
             return emit_identity(&args);
         }
@@ -319,6 +357,62 @@ mod real {
         }
         let elf = std::fs::read(req(&args, "--guest-elf")?)
             .map_err(|e| format!("read guest ELF: {e}"))?;
+        // v8: the measurement runner INDEPENDENTLY verifies the executed ELF against the sealed
+        // canonical guest artifact BEFORE any proving — the grid must measure the exact distributed
+        // program, never a substituted or locally rebuilt ELF. The executed bytes' size, BLAKE3
+        // (== guest_image_hash) and SP1 program id (verifying-key hash, re-derived here via the SDK)
+        // MUST equal the artifact. (The whole-ELF SHA-256 is additionally re-checked by the harness'
+        // independent package verification before this runner is invoked.)
+        {
+            let man_path = req(&args, "--canonical-sp1-guest-artifact")?;
+            let man: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(&man_path)
+                    .map_err(|e| format!("read canonical artifact manifest: {e}"))?,
+            )
+            .map_err(|e| format!("parse canonical artifact manifest: {e}"))?;
+            let want = |k: &str| {
+                man.get(k)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            };
+            if man.get("schema").and_then(|v| v.as_str())
+                != Some("b0-final-canonical-sp1-guest-artifact/v1")
+            {
+                return Err("canonical artifact manifest has wrong schema".into());
+            }
+            if elf.len() as u64
+                != man
+                    .get("elf_size")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(u64::MAX)
+            {
+                return Err("executed ELF size != canonical artifact".into());
+            }
+            let gih = hex(blake3::hash(&elf).as_bytes());
+            if gih != want("guest_image_hash") || gih != want("elf_blake3") {
+                return Err("executed ELF blake3/guest_image_hash != canonical artifact".into());
+            }
+            let verifier = Sp1Backend {
+                elf: elf.clone(),
+                guest_source_tree_hash: String::new(),
+                candidate_dep_lock_hash: String::new(),
+                build_command_hash: String::new(),
+                builder_container_digest: String::new(),
+                arch,
+                firewall_attest: PathBuf::from("/dev/null"),
+                vkey_hash: RefCell::new(None),
+            };
+            let gid = verifier.build_guest(&BuildCtx {
+                arch,
+                work_dir: PathBuf::from("."),
+            })?;
+            if gid.program_id != want("program_id") {
+                return Err(
+                    "executed ELF program_id != canonical artifact (guest substitution)".into(),
+                );
+            }
+        }
         let input_tlg = std::fs::read(req(&args, "--input-tlg")?)
             .map_err(|e| format!("read Tlg input: {e}"))?;
         let input_st = std::fs::read(req(&args, "--input-st")?)

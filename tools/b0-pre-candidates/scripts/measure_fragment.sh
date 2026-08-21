@@ -138,17 +138,24 @@ BUILD_COMMAND_HASH="$(b0_build_recipe_hash "$CAND")" || die "unknown build recip
 
 # ---- guest build (SP1 only; RISC Zero guest is embedded in the runner) --------------------
 GUEST_ELF="$SCRATCH/guest/guest.elf"
+CANONICAL_SP1_GUEST_ARTIFACT_ADDRESS=""
 if [ "$CAND" = sp1 ]; then
   mkdir -p "$SCRATCH/guest"
-  incand="$(incontainer_candidate_dir sp1)"
-  # #6: reconcile VERIFIER_REF to an immutable image identity BEFORE building — it must be
-  # present locally (pull-never) and expose a content-addressed image Id.
+  # CONSUME the ONE canonical SP1 guest artifact — NEVER rebuild. Every proving arch measures the
+  # SAME program by using the exact x86-authoritative ELF bytes; there is no local cargo prove build
+  # fallback. A missing/invalid package refuses (never a synthetic or locally-rebuilt ELF).
+  need_env CANONICAL_SP1_GUEST_PKG
+  [ -d "$CANONICAL_SP1_GUEST_PKG" ] || die "canonical SP1 guest package absent: $CANONICAL_SP1_GUEST_PKG"
+  bash "$ROOT/scripts/produce_canonical_sp1_guest.sh" verify "$CANONICAL_SP1_GUEST_PKG" >&2 \
+    || die "canonical SP1 guest package failed independent verification; refusing"
+  [ -s "$CANONICAL_SP1_GUEST_PKG/guest.elf" ] || die "canonical SP1 guest package ELF absent"
+  cp "$CANONICAL_SP1_GUEST_PKG/guest.elf" "$GUEST_ELF"
+  CANONICAL_SP1_GUEST_ARTIFACT_ADDRESS="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["address"])' "$CANONICAL_SP1_GUEST_PKG/canonical-sp1-guest-artifact.v1.json")"
+  # #6: builder/toolchain identify THIS proving venue's ratified image (proving runs inside it); the
+  # SHARED guest is bound by the canonical artifact address above, not by a local build.
   IMAGE_ID="$("$REAL_DOCKER" image inspect --format '{{.Id}}' "$VERIFIER_REF" 2>/dev/null || true)"
   case "$IMAGE_ID" in sha256:*) ;; *) die "VERIFIER_REF $VERIFIER_REF did not reconcile to an immutable sha256 image id (pull-never); refusing" ;; esac
-  "$REAL_DOCKER" run --rm --pull never -v "$SCRATCH:/out" -e CARGO_TARGET_DIR=/tmp/b0pre-guest-target \
-    "$VERIFIER_REF" bash -c "cd $incand/guest && cargo prove build --output-directory /out/guest --elf-name guest.elf" \
-    || die "in-container SP1 guest ELF build failed (no synthetic ELF is substituted)"
-  [ -s "$GUEST_ELF" ] || die "SP1 guest ELF not produced at $GUEST_ELF"
+  [ -s "$GUEST_ELF" ] || die "SP1 guest ELF not present at $GUEST_ELF"
   CONTAINER_IMAGE_DIGEST="${IMAGE_ID#sha256:}"
   BUILDER_DIGEST="$CONTAINER_IMAGE_DIGEST"
   # #3: toolchain identity bound to the ratified pinned builder image (not a label).
@@ -192,10 +199,15 @@ prov_role() {
 # Splice the runner path-independence recipe facts into EACH provenance role (both roles ran on the
 # same reproducible runner binary → the same recipe). The measurement runner re-emits provenance
 # verbatim into the fragment, so this is the injection point; its ProvFacts requires runner_recipe.
-python3 - "$PROV_JSON" "$B0_RUNNER_RECIPE_JSON" <<'PY' || die "failed to splice runner_recipe into provenance"
+python3 - "$PROV_JSON" "$B0_RUNNER_RECIPE_JSON" "$CANONICAL_SP1_GUEST_ARTIFACT_ADDRESS" <<'PY' || die "failed to splice runner_recipe into provenance"
 import json, sys
-prov_path, recipe_path = sys.argv[1], sys.argv[2]
+prov_path, recipe_path, canon_addr = sys.argv[1], sys.argv[2], sys.argv[3]
 recipe = json.load(open(recipe_path, encoding="utf-8"))
+# v8: SP1 measurement CONSUMED the ONE canonical guest artifact — bind its SHA-256 address into the
+# runner_recipe (which becomes the RunnerAttestation's canonical_sp1_guest_artifact_address). RISC0
+# leaves this empty (it embeds its own locked native guest).
+if canon_addr:
+    recipe["canonical_sp1_guest_artifact"] = {"address": canon_addr}
 required = {"candidate", "arch", "manifest_path", "artifact_path", "cargo_ident", "b0_venue_embed",
            "canonical_build_path", "per_arch_toolchain_identity", "wrapper_blake3", "build_argv",
            "build_env", "build_a", "build_b", "byte_equal", "leakage_refused_prefixes",
@@ -274,7 +286,8 @@ RUNNER_ARGS=(
   --build-command-hash "$BUILD_COMMAND_HASH" --builder-digest "$BUILDER_DIGEST"
   --firewall-attest "$FW_ATTEST" --work-dir "$SCRATCH" --out "$FRAG" --attest-out "$ATTEST_OUT"
 )
-[ "$CAND" = sp1 ] && RUNNER_ARGS+=(--guest-elf "$GUEST_ELF")
+[ "$CAND" = sp1 ] && RUNNER_ARGS+=(--guest-elf "$GUEST_ELF" \
+  --canonical-sp1-guest-artifact "$CANONICAL_SP1_GUEST_PKG/canonical-sp1-guest-artifact.v1.json")
 
 env PATH="$FWDIR:$PATH" \
   B0PRE_REAL_DOCKER="$REAL_DOCKER" B0PRE_FIREWALL_ATTEST="$FW_ATTEST" \

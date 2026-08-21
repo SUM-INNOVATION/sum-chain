@@ -303,6 +303,8 @@ mod real {
             // orchestrator from the SEPARATE tooling root, never inferred from the measured source).
             tooling_commit: req(args, "--tooling-commit")?,
             tooling_pathset_blake3: req(args, "--tooling-pathset-blake3")?,
+            // RISC0 embeds its own locked NATIVE guest (not the shared SP1 artifact): never set.
+            canonical_sp1_guest_artifact_address: String::new(),
         };
         println!(
             "{}",

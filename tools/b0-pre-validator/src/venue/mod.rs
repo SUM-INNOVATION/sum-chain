@@ -16,6 +16,7 @@
 
 pub mod arch_bundle;
 pub mod audit;
+pub mod canonical_sp1_guest_artifact;
 pub mod cargo_lock;
 pub mod checkout_digest;
 pub mod content_store;

@@ -1638,16 +1638,19 @@ mod tests {
     /// (Re-frozen for the RUNNER TOOLCHAIN + OFFLINE-SEED correction: the runner attestation is v7 — it
     /// gained the three v7 offline-provisioning authority addresses (host toolchain / dependency seed /
     /// protoc). These moved the attestation bytes folded into this fingerprint.)
+    // (Re-frozen for the CANONICAL SP1 GUEST ARTIFACT correction: the runner attestation is v8 — it
+    // gained the canonical_sp1_guest_artifact_address (the ONE shared SP1 guest ELF bound at
+    // measurement time). This moved the attestation bytes folded into this fingerprint.)
     #[test]
     fn generate_output_is_byte_stable() {
         assert_eq!(
             evidence_fingerprint(&generate()),
-            "ede8dd4e691bbf2c3ffcefd8f8b71c3dff5746cb28ee7ebe6c9077936edf4176",
+            "2b69f16636c326cd6360df5512120bd316e216609c06cace636eaf23824d94a5",
             "SP1 generate() output drifted from the frozen (retained cpuset+attestation+identity+recipe) bytes"
         );
         assert_eq!(
             evidence_fingerprint(&generate_candidate(Candidate::Risc0)),
-            "f1d97699e11aa8141b7e08dd5f72a17863156fb8ecbe5759ec0330b6f42d8d8c",
+            "0830919365ef3b0974f358767078af2ff64b01627239a81126f783e109b6b614",
             "RISC0 generate_candidate() output drifted from the frozen (retained cpuset+attestation+identity+recipe) bytes"
         );
     }

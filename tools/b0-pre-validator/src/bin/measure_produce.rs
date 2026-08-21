@@ -17,7 +17,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use b0_pre_validator::guest_set::{
-    authenticate_manifest, derive_guest_set, GuestIdentityRecord, MERGED_SPEC_HASH_HEX,
+    authenticate_manifest, derive_guest_set, verify_canonical_sp1_guest_artifact,
+    GuestIdentityRecord, MERGED_SPEC_HASH_HEX,
 };
 use b0_pre_validator::merge::merge_fragments;
 use b0_pre_validator::producer::{dry_run_raw_facts, produce, validate_raw_facts, RawFacts};
@@ -74,6 +75,9 @@ fn run() -> Result<String, String> {
     if mode == "--guest-set" {
         let records_path = args.next().ok_or("missing <identity-records.json>")?;
         let out = args.next().ok_or("missing <out_dir>")?;
+        let canon_pkg = args
+            .next()
+            .ok_or("missing <canonical-sp1-guest-package-dir> (v8: the ONE shared SP1 guest)")?;
         if args.next().is_some() {
             return Err("too many arguments".into());
         }
@@ -81,10 +85,33 @@ fn run() -> Result<String, String> {
             .map_err(|e| format!("read {records_path}: {e}"))?;
         let records: Vec<GuestIdentityRecord> =
             serde_json::from_str(&text).map_err(|e| format!("parse identity records: {e}"))?;
+        // v8: re-decode the canonical SP1 guest artifact from its RETAINED package bytes and require
+        // every SP1 record to reference exactly it (address + program_id + guest_image_hash). Never a
+        // copied hash — the manifest is parsed and the ELF re-hashed here.
+        let canon_dir = PathBuf::from(&canon_pkg);
+        let canon_manifest = std::fs::read(canon_dir.join("canonical-sp1-guest-artifact.v1.json"))
+            .map_err(|e| format!("read canonical artifact manifest: {e}"))?;
+        let canon_elf = std::fs::read(canon_dir.join("guest.elf"))
+            .map_err(|e| format!("read canonical artifact ELF: {e}"))?;
+        let canon_addr =
+            verify_canonical_sp1_guest_artifact(&records, &canon_manifest, &canon_elf)?;
         let gs = derive_guest_set(&records, MERGED_SPEC_HASH_HEX)?;
         let out_dir = PathBuf::from(out);
         std::fs::create_dir_all(&out_dir)
             .map_err(|e| format!("mkdir {}: {e}", out_dir.display()))?;
+        // v8: retain the canonical artifact BYTES as mandatory, uniquely-addressed members of the
+        // sealed guest set — downstream re-decodes them from scratch, never a copied hash.
+        let mem = out_dir.join("canonical-sp1-guest");
+        std::fs::create_dir_all(&mem).map_err(|e| format!("mkdir canonical member: {e}"))?;
+        std::fs::write(
+            mem.join("canonical-sp1-guest-artifact.v1.json"),
+            &canon_manifest,
+        )
+        .map_err(|e| format!("write canonical manifest member: {e}"))?;
+        std::fs::write(mem.join("guest.elf"), &canon_elf)
+            .map_err(|e| format!("write canonical ELF member: {e}"))?;
+        std::fs::write(mem.join("address.txt"), format!("{canon_addr}\n"))
+            .map_err(|e| format!("write canonical address member: {e}"))?;
         std::fs::write(out_dir.join("guest-allowlist.bin"), gs.allowlist.encode())
             .map_err(|e| format!("write allowlist: {e}"))?;
         std::fs::write(

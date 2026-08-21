@@ -122,4 +122,9 @@ pub struct GuestIdentityRecord {
     /// to `RATIFIED_SOURCE_COMMIT`.
     pub tooling_commit: String,
     pub tooling_pathset_blake3: String,
+    /// SP1 ONLY: the canonical SP1 guest artifact address this identity was derived from (the single
+    /// x86-built ELF distributed to every arch). Empty for RISC0. Both SP1 arches bind the SAME
+    /// address — the shared-program gate `guest_set::reconcile_sp1` refuses any divergence.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub canonical_sp1_guest_artifact_address: String,
 }

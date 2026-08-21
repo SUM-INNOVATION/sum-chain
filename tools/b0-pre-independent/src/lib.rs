@@ -12,6 +12,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod canonical_sp1_guest;
 pub mod closure;
 pub mod enc;
 pub mod exp;

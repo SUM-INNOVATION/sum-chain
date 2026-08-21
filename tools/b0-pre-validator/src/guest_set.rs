@@ -61,6 +61,12 @@ pub struct GuestIdentityRecord {
     // `RATIFIED_SOURCE_COMMIT` (the measured source, bound by `source_commit` above). ----
     pub tooling_commit: String,
     pub tooling_pathset_blake3: String,
+    // ---- SP1 ONLY: the canonical SP1 guest artifact this identity CONSUMED (never rebuilt). The
+    // single x86-authoritative ELF is distributed to every arch; both SP1 records bind the SAME
+    // address, which is exactly how the shared-program requirement is enforced (reconcile_sp1
+    // refuses a divergent address). Empty for RISC0 (which embeds its own locked native guest). ----
+    #[serde(default)]
+    pub canonical_sp1_guest_artifact_address: String,
 }
 
 /// Strictly LOWERCASE hex (an uppercase digit is a non-canonical identity → reject; a
@@ -215,6 +221,25 @@ fn validate_record(r: &GuestIdentityRecord, spec_hex: &str) -> Result<(Candidate
     ] {
         hex32(v, ctx)?;
     }
+    // Canonical SP1 guest artifact: SP1 identities are DERIVED from the single distributed ELF, so
+    // every SP1 record MUST bind a 64-hex artifact address; RISC0 embeds its own locked native guest
+    // and must NOT carry one (a stray address there would be a candidate/arch substitution attempt).
+    match cand {
+        Candidate::Sp1 => {
+            hex32(
+                &r.canonical_sp1_guest_artifact_address,
+                "canonical_sp1_guest_artifact_address",
+            )?;
+        }
+        Candidate::Risc0 => {
+            if !r.canonical_sp1_guest_artifact_address.is_empty() {
+                return Err(format!(
+                    "{}/{}: RISC0 record carries a canonical SP1 guest artifact address; rejected",
+                    r.candidate, r.arch
+                ));
+            }
+        }
+    }
     Ok((cand, arch))
 }
 
@@ -259,6 +284,14 @@ fn reconcile_sp1(
             "tooling_pathset_blake3",
             &x86.tooling_pathset_blake3,
             &arm.tooling_pathset_blake3,
+        ),
+        // THE shared-program gate: both arches consumed the SAME canonical guest artifact. This is
+        // what makes "one program, measured on every host" true after per-arch cross-compile
+        // divergence — program_id agrees BECAUSE both derive it from these exact distributed bytes.
+        (
+            "canonical_sp1_guest_artifact_address",
+            &x86.canonical_sp1_guest_artifact_address,
+            &arm.canonical_sp1_guest_artifact_address,
         ),
     ] {
         if a != b {
@@ -342,6 +375,7 @@ fn record_digest(r: &GuestIdentityRecord) -> [u8; 32] {
         &r.b0_pre_spec_hash,
         &r.tooling_commit,
         &r.tooling_pathset_blake3,
+        &r.canonical_sp1_guest_artifact_address,
     ] {
         h.update(&(f.len() as u32).to_be_bytes());
         h.update(f.as_bytes());
@@ -466,6 +500,61 @@ pub fn derive_guest_set(
     })
 }
 
+/// v8: re-decode the ONE canonical SP1 guest artifact FROM ITS RETAINED BYTES (manifest + ELF) and
+/// require the assembled SP1 identity records to reference EXACTLY it. This is the measure-produce /
+/// sealed-import re-check of the shared-program mapping — never a copied hash: the manifest is parsed
+/// and its address recomputed, the ELF is re-hashed, and every SP1 record's canonical address,
+/// program_id and guest_image_hash MUST equal the artifact. RISC0 records must carry none. Returns the
+/// artifact's recomputed 64-hex address (the single address both SP1 arches share).
+pub fn verify_canonical_sp1_guest_artifact(
+    records: &[GuestIdentityRecord],
+    manifest_json: &[u8],
+    elf: &[u8],
+) -> Result<String, String> {
+    use crate::venue::canonical_sp1_guest_artifact::CanonicalSp1GuestArtifactV1;
+    let art = CanonicalSp1GuestArtifactV1::from_json(manifest_json)?;
+    art.verify(RATIFIED_SOURCE_COMMIT)?; // shape + double-build + address self-consistency
+    art.verify_elf(elf)?; // size + sha256 + blake3 + guest_image_hash from the retained ELF bytes
+    let mut saw_sp1 = false;
+    for r in records {
+        match parse_candidate(&r.candidate)? {
+            Candidate::Sp1 => {
+                saw_sp1 = true;
+                if r.canonical_sp1_guest_artifact_address != art.address {
+                    return Err(format!(
+                        "{}/{}: record canonical artifact address != the retained artifact address",
+                        r.candidate, r.arch
+                    ));
+                }
+                if r.program_id != art.program_id {
+                    return Err(format!(
+                        "{}/{}: record program_id != canonical artifact program_id",
+                        r.candidate, r.arch
+                    ));
+                }
+                if r.guest_image_hash != art.guest_image_hash {
+                    return Err(format!(
+                        "{}/{}: record guest_image_hash != canonical artifact guest_image_hash",
+                        r.candidate, r.arch
+                    ));
+                }
+            }
+            Candidate::Risc0 => {
+                if !r.canonical_sp1_guest_artifact_address.is_empty() {
+                    return Err(format!(
+                        "{}/{}: RISC0 record carries a canonical SP1 guest artifact address; refused",
+                        r.candidate, r.arch
+                    ));
+                }
+            }
+        }
+    }
+    if !saw_sp1 {
+        return Err("no SP1 identity record to bind the canonical guest artifact to".into());
+    }
+    Ok(art.address)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -523,6 +612,12 @@ mod tests {
             // shared across both SP1 arches (one tooling root), plus a 64-hex path-set digest.
             tooling_commit: "a".repeat(40),
             tooling_pathset_blake3: "f0".repeat(32),
+            // SP1 arches share ONE canonical artifact address; RISC0 carries none.
+            canonical_sp1_guest_artifact_address: if cand == "Sp1" {
+                "ca".repeat(32)
+            } else {
+                String::new()
+            },
         }
     }
     fn eligible() -> Vec<GuestIdentityRecord> {

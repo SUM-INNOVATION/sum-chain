@@ -133,6 +133,8 @@ pub fn synth_runner_attestation(
         host_toolchain_attestation_address: seed("host-toolchain-addr"),
         dependency_seed_address: seed("dependency-seed-addr"),
         protoc_authority_address: seed("protoc-authority-addr"),
+        // v8 canonical SP1 guest artifact address (synthetic; SP1 candidate in this synth path).
+        canonical_sp1_guest_artifact_address: seed("canonical-sp1-guest-addr"),
     }
 }
 
@@ -359,6 +361,9 @@ pub struct ProvenanceFacts {
     pub host_toolchain_attestation_address: [u8; 32],
     pub dependency_seed_address: [u8; 32],
     pub protoc_authority_address: [u8; 32],
+    /// v8: address of the ONE canonical SP1 guest artifact this measurement proved (SP1 only; ALL-ZERO
+    /// for RISC0). Bound into the attestation so measurement-time == Phase-1 guest identity.
+    pub canonical_sp1_guest_artifact_address: [u8; 32],
     /// The RETAINED Phase-1 identity record for this provenance's arch. The orchestrator binds the
     /// attestation to it (sets `phase1_production_binary_blake3` + `phase1_identity_record_blake3`) and
     /// seals it as a mandatory package artifact for independent sealed-import re-checking.
@@ -531,6 +536,14 @@ pub fn orchestrate_grid(
         att.host_toolchain_attestation_address = pf.host_toolchain_attestation_address;
         att.dependency_seed_address = pf.dependency_seed_address;
         att.protoc_authority_address = pf.protoc_authority_address;
+        // v8: only SP1 measurements consume the shared canonical guest artifact; RISC0 embeds its own
+        // locked native guest, so its attestation carries NO canonical address (enforced here, not
+        // merely trusted from the recipe facts).
+        att.canonical_sp1_guest_artifact_address = if att.candidate == Candidate::Sp1 {
+            pf.canonical_sp1_guest_artifact_address
+        } else {
+            [0u8; 32]
+        };
         let runner_attestation_blake3 = att.hash();
         // Build the retained cpuset-chain artifact bound to this provenance.
         let chain = CpusetProbeChainV1 {
@@ -558,6 +571,12 @@ pub fn orchestrate_grid(
         // Runner path-independence anchored to the retained five-artifact set (the same check sealed
         // import re-runs): recipe, inventory A, inventory B, double-build proof, leakage report.
         att.check_bound_runner_recipe(&recipe, &inventory_a, &inventory_b, &proof, &leakage)?;
+        // v8: a RISC0 attestation must carry NO canonical SP1 guest artifact address (cross-candidate
+        // substitution guard). SP1's address is bound from the harness-verified package and re-decoded
+        // against the retained artifact bytes at guest-set assembly.
+        if att.candidate == Candidate::Risc0 {
+            att.check_no_canonical_sp1_guest_artifact()?;
+        }
         let p = ArchRunProvenanceV1 {
             provenance_role: pf.role,
             b0_pre_spec_hash: spec,
@@ -939,6 +958,7 @@ pub fn deterministic_demo_vector() -> MeasurementVector {
             host_toolchain_attestation_address: dv(b"host-toolchain-addr"),
             dependency_seed_address: dv(b"dependency-seed-addr"),
             protoc_authority_address: dv(b"protoc-authority-addr"),
+            canonical_sp1_guest_artifact_address: dv(b"canonical-sp1-guest-addr"),
             source_commit: "eff3aae18b49969212c4c1493da20f97af195de2".to_string(),
             dirty_tree_flag: false,
             builder_container_digest: dv(b"builder"),
@@ -1156,6 +1176,7 @@ mod tests {
             host_toolchain_attestation_address: [20; 32],
             dependency_seed_address: [21; 32],
             protoc_authority_address: [22; 32],
+            canonical_sp1_guest_artifact_address: [23; 32],
             source_commit: "0".repeat(40),
             dirty_tree_flag: false,
             builder_container_digest: h(b"builder"),

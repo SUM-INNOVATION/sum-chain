@@ -1330,6 +1330,8 @@ pub struct RunnerAtt {
     pub runner_build_recipe_id: [u8; 32],
     pub protobuf_authority_sha256: [u8; 32],
     pub protobuf_authority_blake3: [u8; 32],
+    // v8: the canonical SP1 guest artifact address (SP1 only; all-zero for RISC0).
+    pub canonical_sp1_guest_artifact_address: [u8; 32],
 }
 
 fn hexstr(r: &mut Rd, n: usize) -> Result<String, E> {
@@ -1349,7 +1351,7 @@ fn hexstr(r: &mut Rd, n: usize) -> Result<String, E> {
 
 pub fn decode_runner_attestation(b: &[u8]) -> Result<RunnerAtt, E> {
     let mut r = Rd::new(b);
-    if r.u16()? != 7 {
+    if r.u16()? != 8 {
         return Err(E::Value);
     }
     let candidate = candidate(r.u16()?)?;
@@ -1396,6 +1398,9 @@ pub fn decode_runner_attestation(b: &[u8]) -> Result<RunnerAtt, E> {
     let _host_toolchain_attestation_address = r.arr::<32>()?;
     let _dependency_seed_address = r.arr::<32>()?;
     let _protoc_authority_address = r.arr::<32>()?;
+    // v8: the canonical SP1 guest artifact address (SP1 only; all-zero for RISC0). CAPTURED (not
+    // discarded) so the independent verifier can re-check the same measurement-time == Phase-1 mapping.
+    let canonical_sp1_guest_artifact_address = r.arr::<32>()?;
     r.end()?;
     Ok(RunnerAtt {
         candidate,
@@ -1421,6 +1426,7 @@ pub fn decode_runner_attestation(b: &[u8]) -> Result<RunnerAtt, E> {
         runner_build_recipe_id,
         protobuf_authority_sha256,
         protobuf_authority_blake3,
+        canonical_sp1_guest_artifact_address,
     })
 }
 
@@ -2480,6 +2486,7 @@ mod runner_recipe_bind_tests {
             runner_build_recipe_id: rid,
             protobuf_authority_sha256: h(5),
             protobuf_authority_blake3: h(6),
+            canonical_sp1_guest_artifact_address: h(7),
         };
         (
             att,
