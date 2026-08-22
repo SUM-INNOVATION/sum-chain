@@ -452,8 +452,6 @@ mod real {
             container_image_digest: req(&args, "--container-image-digest")?,
             statement_hash_tlg: req(&args, "--statement-hash-tlg")?,
             statement_hash_st: req(&args, "--statement-hash-st")?,
-            rss_context_hash: req(&args, "--rss-context-hash")?,
-            malformed_corpus_result_hash: req(&args, "--malformed-corpus-result-hash")?,
             statements: vec![
                 StatementInput {
                     label: "Tlg",

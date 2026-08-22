@@ -60,6 +60,10 @@ GLOBS=(
   'tools/b0-pre-measure-risc0/build.rs'
   'tools/b0-pre-validator/src/*.rs' 'tools/b0-pre-validator/src/bin/*.rs' 'tools/b0-pre-validator/src/schema/*.rs' 'tools/b0-pre-validator/src/venue/*.rs' 'tools/b0-pre-validator/Cargo.toml'
   'tools/b0-pre-independent/src/*.rs' 'tools/b0-pre-independent/src/bin/*.rs' 'tools/b0-pre-independent/Cargo.toml'
+  # The malformed-corpus report generator: runs the FIXED ordered corpus through the real guest boundary
+  # and emits the retained MalformedCorpusReportV1 bound into the measurement-input authority. It is a
+  # STANDALONE workspace, so its committed lock pins its build determinism and is part of the identity.
+  'tools/b0-pre-malformed-corpus/src/*.rs' 'tools/b0-pre-malformed-corpus/Cargo.toml' 'tools/b0-pre-malformed-corpus/Cargo.lock'
   # Durable, repository-carried protobuf include authority (mandatory content-addressed input).
   'docs/b0-pre/venue/protobuf-include-authority/INVENTORY.json'
   'docs/b0-pre/venue/protobuf-include-authority/CONTENT-ADDRESS.txt'

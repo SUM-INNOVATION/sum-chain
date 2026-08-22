@@ -18,6 +18,8 @@ pub mod enc;
 pub mod exp;
 pub mod fixed;
 pub mod harness;
+pub mod malformed_corpus_report;
+pub mod measurement_input_authority;
 pub mod merkle;
 pub mod rd;
 pub mod tags;

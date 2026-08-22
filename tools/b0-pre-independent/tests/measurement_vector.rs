@@ -46,8 +46,11 @@ impl<'a> Rd<'a> {
 
 fn parse(bytes: &[u8]) -> (Vec<u8>, Vec<(u16, harness::Evidence)>) {
     let mut r = Rd { b: bytes, p: 0 };
-    assert_eq!(r.take(13), b"B0PREMEASVEC5", "bad magic");
+    assert_eq!(r.take(13), b"B0PREMEASVEC6", "bad magic");
     let allowlist = r.blob();
+    let _mia = r.blob();
+    let _report = r.blob();
+    let _inv = r.blob();
     let n = r.u32();
     let mut bundles = Vec::new();
     for _ in 0..n {

@@ -262,6 +262,7 @@ pub fn decode_sample(b: &[u8]) -> Result<Sample, E> {
 pub struct Rss {
     pub spec: [u8; 32],
     pub guest_set: [u8; 32],
+    pub stmt: [u8; 32],
     pub candidate: u16,
     pub vmat: [u8; 32],
     pub program: [u8; 32],
@@ -282,7 +283,7 @@ pub fn decode_rss(b: &[u8]) -> Result<Rss, E> {
     }
     let spec = r.arr::<32>()?;
     let guest_set = r.arr::<32>()?;
-    let _stmt = r.arr::<32>()?;
+    let stmt = r.arr::<32>()?;
     let candidate = candidate(r.u16()?)?;
     let program = r.arr::<32>()?;
     let vmat = r.arr::<32>()?;
@@ -297,6 +298,7 @@ pub fn decode_rss(b: &[u8]) -> Result<Rss, E> {
     Ok(Rss {
         spec,
         guest_set,
+        stmt,
         candidate,
         vmat,
         program,
@@ -748,6 +750,7 @@ pub struct ResultSet {
     pub measured_proofs: Vec<(u8, u8, u32, [u8; 32])>,
     pub sample_bundles: Vec<(u8, u8, u8, u8, u32, [u8; 32])>, // arch, stmt, metric, sk, count, hash
     pub rss_bundles: Vec<(u8, u8, u32, [u8; 32])>,            // arch, scope, count, hash
+    pub malformed_corpus_result_hash: [u8; 32],
     pub completeness: (u32, u32, u32, u32, u32),
     pub aggregates: (u32, u64, u64, u64),
     pub qualification: bool,
@@ -832,7 +835,7 @@ pub fn decode_result_set(b: &[u8]) -> Result<ResultSet, E> {
         rss_bundles.push((a, sc, count, h));
     }
 
-    let _malformed = r.arr::<32>()?;
+    let malformed_corpus_result_hash = r.arr::<32>()?;
     if boolean(r.u8()?)? {
         let _cc = r.u32()?;
         let _ch = r.arr::<32>()?;
@@ -872,6 +875,7 @@ pub fn decode_result_set(b: &[u8]) -> Result<ResultSet, E> {
         measured_proofs,
         sample_bundles,
         rss_bundles,
+        malformed_corpus_result_hash,
         completeness,
         aggregates,
         qualification,
@@ -1332,6 +1336,7 @@ pub struct RunnerAtt {
     pub protobuf_authority_blake3: [u8; 32],
     // v8: the canonical SP1 guest artifact address (SP1 only; all-zero for RISC0).
     pub canonical_sp1_guest_artifact_address: [u8; 32],
+    pub measurement_input_authority_address: [u8; 32],
 }
 
 fn hexstr(r: &mut Rd, n: usize) -> Result<String, E> {
@@ -1349,9 +1354,10 @@ fn hexstr(r: &mut Rd, n: usize) -> Result<String, E> {
     Ok(String::from_utf8(s.to_vec()).expect("hex"))
 }
 
+// v9: independent mirror of RunnerAttestationV1 — decodes the measurement-input authority address.
 pub fn decode_runner_attestation(b: &[u8]) -> Result<RunnerAtt, E> {
     let mut r = Rd::new(b);
-    if r.u16()? != 8 {
+    if r.u16()? != 9 {
         return Err(E::Value);
     }
     let candidate = candidate(r.u16()?)?;
@@ -1401,6 +1407,8 @@ pub fn decode_runner_attestation(b: &[u8]) -> Result<RunnerAtt, E> {
     // v8: the canonical SP1 guest artifact address (SP1 only; all-zero for RISC0). CAPTURED (not
     // discarded) so the independent verifier can re-check the same measurement-time == Phase-1 mapping.
     let canonical_sp1_guest_artifact_address = r.arr::<32>()?;
+    // v9: the measurement-wide MeasurementInputAuthorityV1 address (ALL candidates).
+    let measurement_input_authority_address = r.arr::<32>()?;
     r.end()?;
     Ok(RunnerAtt {
         candidate,
@@ -1427,6 +1435,7 @@ pub fn decode_runner_attestation(b: &[u8]) -> Result<RunnerAtt, E> {
         protobuf_authority_sha256,
         protobuf_authority_blake3,
         canonical_sp1_guest_artifact_address,
+        measurement_input_authority_address,
     })
 }
 
@@ -2487,6 +2496,7 @@ mod runner_recipe_bind_tests {
             protobuf_authority_sha256: h(5),
             protobuf_authority_blake3: h(6),
             canonical_sp1_guest_artifact_address: h(7),
+            measurement_input_authority_address: h(4),
         };
         (
             att,

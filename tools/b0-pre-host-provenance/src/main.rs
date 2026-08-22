@@ -7,7 +7,13 @@
 //! Usage:
 //!   b0-pre-host-provenance <arch> <role> \
 //!     --root <fs-root=/> --repo <git-repo> \
-//!     --builder-digest <sha256:...> --harness-source-hash <blake3-hex> [--out <file>]
+//!     --builder-digest <sha256:...> --tooling-root <clean tooling root> [--out <file>]
+//!
+//! The `benchmark_harness_source_hash` is COMPUTED from the clean tooling root's canonical
+//! benchmark-harness source inventory (see [`b0_pre_host_provenance::harness_source_inventory`]) —
+//! never a caller-supplied value. `--emit-harness-inventory --tooling-root <root> [--out <manifest>]`
+//! prints that inventory's digest (and writes the retained manifest preimage) for the
+//! measurement-input-authority generator.
 
 use std::path::Path;
 use std::process::{Command, ExitCode};
@@ -61,6 +67,17 @@ fn git_state(repo: &Path) -> Result<(String, bool), String> {
 
 fn run() -> Result<String, String> {
     let args: Vec<String> = std::env::args().collect();
+    // Emit-only mode: the retained harness-source inventory manifest (--out) + its digest (stdout),
+    // for the measurement-input-authority generator. No host facts are read.
+    if args.iter().any(|a| a == "--emit-harness-inventory") {
+        let root = arg(&args, "--tooling-root").ok_or("--tooling-root is required")?;
+        let (manifest, digest) =
+            b0_pre_host_provenance::harness_source_inventory(Path::new(&root))?;
+        if let Some(path) = arg(&args, "--out") {
+            std::fs::write(&path, &manifest).map_err(|e| format!("write {path}: {e}"))?;
+        }
+        return Ok(hex(&digest));
+    }
     let arch = args.get(1).ok_or("usage: <arch> <role> [flags]")?.clone();
     let role = args.get(2).ok_or("usage: <arch> <role> [flags]")?.clone();
     match arch.as_str() {
@@ -70,13 +87,15 @@ fn run() -> Result<String, String> {
     let root = arg(&args, "--root").unwrap_or_else(|| "/".into());
     let repo = arg(&args, "--repo").ok_or("--repo <git-repo> is required")?;
     let builder_digest = arg(&args, "--builder-digest").ok_or("--builder-digest is required")?;
-    let harness_source_hash =
-        arg(&args, "--harness-source-hash").ok_or("--harness-source-hash is required")?;
-    if harness_source_hash.len() != 64
-        || !harness_source_hash.bytes().all(|b| b.is_ascii_hexdigit())
-    {
-        return Err("--harness-source-hash must be 64 hex chars (blake3)".into());
-    }
+    // The benchmark-harness source hash is COMPUTED from the clean tooling root's canonical harness
+    // inventory — never accepted as a caller value, and never the runner binary hash. The retained
+    // manifest bytes (bound into the measurement-input-authority + recomputed by both verifiers) are
+    // emitted separately via --emit-harness-inventory.
+    let tooling_root =
+        arg(&args, "--tooling-root").ok_or("--tooling-root <clean tooling root> is required")?;
+    let (_harness_manifest, harness_digest) =
+        b0_pre_host_provenance::harness_source_inventory(Path::new(&tooling_root))?;
+    let harness_source_hash = hex(&harness_digest);
 
     let root = Path::new(&root);
     let facts = read_host_facts(root)?;

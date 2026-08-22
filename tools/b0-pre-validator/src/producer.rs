@@ -50,6 +50,17 @@ pub struct RawFacts {
     pub lifecycle_mode: String,
     pub b0_pre_spec_hash: String,
     pub candidates: Vec<CandidateFacts>,
+    /// The retained measurement-input artifacts (VEC6): the assembled MeasurementInputAuthorityV1 JSON,
+    /// the complete MalformedCorpusReportV1 JSON, and the complete benchmark-harness source inventory
+    /// manifest. Populated by `measure-produce --facts` from the pre-grid generated files; the producer
+    /// verifies + seals them, and derives every candidate's `malformed_corpus_result_hash` from the
+    /// report (never an operator value).
+    #[serde(default)]
+    pub measurement_input_authority: String,
+    #[serde(default)]
+    pub malformed_corpus_report: String,
+    #[serde(default)]
+    pub harness_source_inventory: String,
 }
 
 #[derive(Deserialize)]
@@ -58,8 +69,6 @@ pub struct CandidateFacts {
     pub container_image_digest: String,
     pub statement_hash_tlg: String,
     pub statement_hash_st: String,
-    pub rss_context_hash: String,
-    pub malformed_corpus_result_hash: String,
     pub guest: GuestFacts,
     pub verifier_material: Vec<VmEntryFacts>,
     pub provenance: Vec<ProvFacts>,
@@ -374,6 +383,8 @@ impl RunnerAttestationJson {
             protoc_authority_address: [0; 32],
             // v8 injected by the orchestrator from the recipe facts (like the v7 addresses above).
             canonical_sp1_guest_artifact_address: [0; 32],
+            // v9 injected by the orchestrator from the recipe facts.
+            measurement_input_authority_address: [0; 32],
         })
     }
 }
@@ -596,6 +607,41 @@ pub(crate) fn hx(b: &[u8]) -> String {
 /// 2-statement x 10-iteration grid, 100 verification samples per cell, present
 /// provenance, disabled turbo, and well-formed hex identities. It NEVER assembles or
 /// proves; `produce` re-runs the authoritative checks through the canonical assembler.
+/// Refuse ANY legacy caller-supplied measurement-input hash in a facts / fragment JSON. All three were
+/// REMOVED by the MeasurementInputAuthorityV1 correction — RSS context is derived per-cell, the
+/// malformed-corpus result is the retained report's address, and the harness-source hash is the
+/// provenance-computed inventory digest — so a JSON carrying any of them is a stale or forged operator
+/// input and is refused (never silently ignored). Note `benchmark_harness_source_hash` (the legitimate
+/// provenance-computed inventory digest) is NOT one of these keys.
+pub fn refuse_legacy_operator_hashes(v: &serde_json::Value) -> Result<(), String> {
+    const LEGACY: &[&str] = &[
+        "rss_context_hash",
+        "malformed_corpus_result_hash",
+        "harness_source_hash",
+    ];
+    match v {
+        serde_json::Value::Object(m) => {
+            for (k, val) in m {
+                if LEGACY.contains(&k.as_str()) {
+                    return Err(format!(
+                        "legacy operator hash `{k}` present in facts JSON; removed by the \
+                         measurement-input-authority correction (derived from retained artifacts now)"
+                    ));
+                }
+                refuse_legacy_operator_hashes(val)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Array(a) => {
+            for x in a {
+                refuse_legacy_operator_hashes(x)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
 pub fn validate_raw_facts(raw: &RawFacts) -> Result<(), String> {
     if raw.lifecycle_mode != "measurement" {
         return Err(format!(
@@ -713,6 +759,34 @@ pub fn produce(raw: &RawFacts) -> Result<MeasurementPackage, String> {
     validate_raw_facts(raw)?;
     let spec = hex32(&raw.b0_pre_spec_hash, "b0_pre_spec_hash")?;
 
+    // FAIL-CLOSED measurement-input authority gate: decode the retained MeasurementInputAuthorityV1 +
+    // its malformed-corpus report + harness-source inventory (never operator hashes), verify the
+    // authority self-consistency + its bindings to the retained report/inventory bytes, and derive the
+    // report address. `measurement_input_authority_address` is injected into every attestation; the
+    // report address becomes every candidate's `malformed_corpus_result_hash`. (The venue pre-grid gate
+    // additionally ties the authority's tooling commit/path-set to the ratified tooling authority.)
+    let mia = crate::venue::measurement_input_authority::MeasurementInputAuthorityV1::from_json(
+        raw.measurement_input_authority.as_bytes(),
+    )?;
+    let mia_address = mia.verify(
+        crate::guest_set::RATIFIED_SOURCE_COMMIT,
+        &raw.b0_pre_spec_hash,
+    )?;
+    mia.verify_binds(
+        raw.harness_source_inventory.as_bytes(),
+        raw.malformed_corpus_report.as_bytes(),
+        crate::guest_set::RATIFIED_SOURCE_COMMIT,
+        &raw.b0_pre_spec_hash,
+    )?;
+    let malformed_report_addr =
+        crate::venue::malformed_corpus_report::MalformedCorpusReportV1::from_json(
+            raw.malformed_corpus_report.as_bytes(),
+        )?
+        .verify(
+            crate::guest_set::RATIFIED_SOURCE_COMMIT,
+            &raw.b0_pre_spec_hash,
+        )?;
+
     // --- build the guest allowlist from the built identities -> canonical guest-set ---
     let mut builds = Vec::new();
     for c in &raw.candidates {
@@ -778,11 +852,8 @@ pub fn produce(raw: &RawFacts) -> Result<MeasurementPackage, String> {
             verifier_material: material,
             official_statement_hash_tlg: hex32(&c.statement_hash_tlg, "statement_hash_tlg")?,
             official_statement_hash_st: hex32(&c.statement_hash_st, "statement_hash_st")?,
-            rss_context_hash: hex32(&c.rss_context_hash, "rss_context_hash")?,
-            malformed_corpus_result_hash: hex32(
-                &c.malformed_corpus_result_hash,
-                "malformed_corpus_result_hash",
-            )?,
+            // DERIVED from the retained malformed-corpus report address (never an operator value).
+            malformed_corpus_result_hash: malformed_report_addr,
         };
 
         // RUNNER CONTINUITY: the complete typed Phase-1 identity record set is a MANDATORY input.
@@ -856,7 +927,7 @@ pub fn produce(raw: &RawFacts) -> Result<MeasurementPackage, String> {
         }
 
         // orchestrate_grid itself refuses a native-ineligible (RISC0/aarch64) cell.
-        let ev = orchestrate_grid(spec, guest_set, &ids, &provenances, &cells)?;
+        let ev = orchestrate_grid(spec, guest_set, &ids, &provenances, &cells, mia_address)?;
         // The frozen verifier INDEPENDENTLY re-derives the verdict.
         let verdict = match crate::harness::verify_evidence(&ev) {
             Ok(r) if r.qualification => CandidateVerdict::Qualified,
@@ -867,7 +938,13 @@ pub fn produce(raw: &RawFacts) -> Result<MeasurementPackage, String> {
         bundles.push((cand, ev));
     }
 
-    let vector = serialize_vector(&allowlist.encode(), &bundles);
+    let vector = serialize_vector(
+        &allowlist.encode(),
+        raw.measurement_input_authority.as_bytes(),
+        raw.malformed_corpus_report.as_bytes(),
+        raw.harness_source_inventory.as_bytes(),
+        &bundles,
+    );
     let package_id = crate::hashing::plain(&vector);
     Ok(MeasurementPackage {
         vector,
@@ -1087,6 +1164,9 @@ fn prov_facts(p: &ProvFacts) -> Result<ProvenanceFacts, String> {
             Some(a) => opt_hex32(&a.address, "recipe.canonical_sp1_guest_artifact.address")?,
             None => [0u8; 32],
         },
+        // v9: placeholder — the measurement-wide authority address is NOT a recipe string; `produce`
+        // decodes the retained MIA bytes and injects the derived address into EVERY attestation.
+        measurement_input_authority_address: [0u8; 32],
         source_commit: p.source_commit.clone(),
         dirty_tree_flag: p.dirty_tree_flag,
         builder_container_digest: hex32(
@@ -1475,8 +1555,6 @@ pub fn dry_run_raw_facts() -> RawFacts {
         container_image_digest: dv("sp1-container"),
         statement_hash_tlg: dv("stmt-tlg"),
         statement_hash_st: dv("stmt-st"),
-        rss_context_hash: dv("rss-ctx"),
-        malformed_corpus_result_hash: dv("malformed"),
         guest: guest("sp1", &["x86_64", "aarch64"]),
         verifier_material: vec![VmEntryFacts {
             role: "Groth16Vk".into(),
@@ -1492,8 +1570,6 @@ pub fn dry_run_raw_facts() -> RawFacts {
         container_image_digest: dv("r0-container"),
         statement_hash_tlg: dv("stmt-tlg"),
         statement_hash_st: dv("stmt-st"),
-        rss_context_hash: dv("rss-ctx"),
-        malformed_corpus_result_hash: dv("malformed"),
         guest: guest("r0", &["x86_64"]),
         verifier_material: vec![
             VmEntryFacts {
@@ -1526,6 +1602,23 @@ pub fn dry_run_raw_facts() -> RawFacts {
         lifecycle_mode: "measurement".into(),
         b0_pre_spec_hash: MERGED_SPEC_HASH_HEX.into(),
         candidates: vec![sp1, risc0],
+        // TEST_ONLY fixtures (bind the non-authoritative sentinel tooling commit 1234…5678; measured
+        // 507281e2 / spec 201cfcb8): the retained MeasurementInputAuthorityV1 + its malformed-corpus
+        // report + harness-source inventory. These exercise encoding/verification mechanics only — the
+        // production `--verify-authority` gate REFUSES the sentinel — and the venue generates the REAL
+        // authority from the clean ratified tree (see docs/b0-pre/fixtures/.../README.md).
+        measurement_input_authority: include_str!(
+            "../../../docs/b0-pre/fixtures/measurement-input-authority/measurement-input-authority.v1.json"
+        )
+        .to_string(),
+        malformed_corpus_report: include_str!(
+            "../../../docs/b0-pre/fixtures/measurement-input-authority/malformed-corpus-report.v1.json"
+        )
+        .to_string(),
+        harness_source_inventory: include_str!(
+            "../../../docs/b0-pre/fixtures/measurement-input-authority/harness-source-inventory.txt"
+        )
+        .to_string(),
     }
 }
 
@@ -1534,6 +1627,41 @@ mod tests {
     use super::*;
     use crate::harness::verify_evidence;
     use crate::measurement::parse_vector;
+
+    #[test]
+    fn legacy_operator_hashes_are_refused_not_ignored() {
+        // Each of the three removed operator inputs must be refused wherever it appears — top level,
+        // nested in a candidate, or nested in an array element — so a stale/forged facts JSON cannot
+        // slip an unauthenticated measurement input past the derived authority.
+        for (where_, jv) in [
+            (
+                "top-level rss_context_hash",
+                serde_json::json!({ "rss_context_hash": "00".repeat(32) }),
+            ),
+            (
+                "top-level malformed_corpus_result_hash",
+                serde_json::json!({ "malformed_corpus_result_hash": "11".repeat(32) }),
+            ),
+            (
+                "top-level harness_source_hash",
+                serde_json::json!({ "harness_source_hash": "22".repeat(32) }),
+            ),
+            (
+                "nested-in-candidate",
+                serde_json::json!({ "candidates": [ { "candidate": "Sp1", "rss_context_hash": "33".repeat(32) } ] }),
+            ),
+        ] {
+            let e =
+                refuse_legacy_operator_hashes(&jv).expect_err(&format!("{where_} must be refused"));
+            assert!(e.contains("legacy operator hash"), "{where_}: {e}");
+        }
+        // The legitimate provenance-computed inventory digest key is NOT a legacy operator hash.
+        let ok = serde_json::json!({ "benchmark_harness_source_hash": "44".repeat(32) });
+        assert!(
+            refuse_legacy_operator_hashes(&ok).is_ok(),
+            "benchmark_harness_source_hash must not be mistaken for the legacy harness_source_hash"
+        );
+    }
 
     #[test]
     fn dry_run_produces_and_verifies_both_verdicts() {
@@ -1549,7 +1677,7 @@ mod tests {
         ));
         // The package vector is accepted by the frozen verifier for SP1 and rejected
         // (as MeasuredProofGrid) for RISC0.
-        let (_al, bundles) = parse_vector(&pkg.vector).unwrap();
+        let (_al, _mia, _report, _inv, bundles) = parse_vector(&pkg.vector).unwrap();
         for (c, ev) in &bundles {
             match c {
                 Candidate::Sp1 => assert!(verify_evidence(ev).unwrap().qualification),
@@ -1573,7 +1701,7 @@ mod tests {
     #[test]
     fn runner_continuity_positive_all_three_mappings() {
         let pkg = produce(&dry_run_raw_facts()).expect("produces");
-        let (_al, bundles) = parse_vector(&pkg.vector).unwrap();
+        let (_al, _mia, _report, _inv, bundles) = parse_vector(&pkg.vector).unwrap();
         let mut seen = std::collections::BTreeSet::new();
         for (c, ev) in &bundles {
             for ab in &ev.runner_attestations {

@@ -61,7 +61,7 @@ case "$MODE" in
     TREE_HASH="$(cd "$GUEST_DIR" && find . -type f -not -path './target/*' | LC_ALL=C sort | while IFS= read -r f; do b3 "$f"; done | b3_stdin)"
     LOCK_HASH="$(b3 "$LOCK")"
     # source commit + clean-tree from the tested provenance reader (git-backed), never assumed.
-    PROVJSON="$("$PROV_BIN" "$ARCH" Proving --repo "$REPO_DIR" --builder-digest "$(printf '0%.0s' {1..64})" --harness-source-hash "$(printf '0%.0s' {1..64})")" \
+    PROVJSON="$("$PROV_BIN" "$ARCH" Proving --repo "$REPO_DIR" --builder-digest "$(printf '0%.0s' {1..64})" --tooling-root "$B0_TOOLING_ROOT")" \
       || die "provenance read (for source commit / clean tree) failed"
     SRC_COMMIT="$(printf '%s' "$PROVJSON" | grep -o '"source_commit": *"[0-9a-f]*"' | head -1 | grep -o '[0-9a-f]\{40\}')"
     DIRTY="$(printf '%s' "$PROVJSON" | grep -o '"dirty_tree_flag": *\(true\|false\)' | head -1 | grep -o 'true\|false')"

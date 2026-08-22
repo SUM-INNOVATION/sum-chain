@@ -118,6 +118,33 @@ verify RSS from `getrusage`. The build-provenance identities (source-tree, dep-l
 build-command, container/builder digests) are **derived by the orchestrator** from the actual
 checkout / lock / build command / reconciled image — they are NOT accepted from the caller.
 
+### 3.0 Generate the measurement-input authority (deterministic, pre-grid)
+
+Before any proving cell, generate the ONE sealed `MeasurementInputAuthorityV1` package from the clean
+two-root checkout. This is fully deterministic — the same clean measured-source + tooling roots reproduce
+byte-identical members and addresses — and REPLACES the three former caller-supplied hashes with retained,
+recomputable artifacts:
+
+```
+export MALFORMED_CORPUS_BIN=tools/b0-pre-malformed-corpus/target/release/b0-pre-malformed-corpus
+bash tools/b0-pre-candidates/scripts/produce_measurement_input_authority.sh produce \
+  "$B0_MEASURED_SOURCE_ROOT" "$B0_TOOLING_ROOT" "$OFFICIAL_JSON" "$B0_MEASUREMENT_AUTHORITY_PKG"
+# Independent verification of the sealed package (decode + cross-bind + tooling==RATIFIED):
+bash tools/b0-pre-candidates/scripts/produce_measurement_input_authority.sh verify \
+  "$B0_MEASUREMENT_AUTHORITY_PKG"
+```
+
+The package holds `measurement-input-authority.v1.json` (the unifier: spec/workload + measured/tooling
+identity + the harness-source inventory address + the malformed-corpus report address + the RSS
+statement-binding policy), plus the retained `malformed-corpus-report.v1.json` (the fixed ordered corpus
+run through the real guest boundary, retaining each member's exact bytes + stable refusal class) and
+`harness-source-inventory.txt` (the canonical causal source-closure manifest). `measure_fragment.sh`
+re-runs the **fail-fast gate** (`measure-produce --verify-authority`) before proving each fragment — it
+refuses a stale package whose tooling commit/path-set ≠ the ratified measurement tooling — and embeds the
+three members byte-identical into every fragment, so `--merge-fragments` refuses any byte or address
+disagreement across fragments. All three members are MANDATORY; a package or fragment missing any of them
+is refused.
+
 ```
 export SPEC_HASH=201cfcb80e94a5a7845dc3380cde32171d40f325ae2bacde9547f3c0da3c4df3
 export GUEST_SET_MANIFEST=set/coordination-manifest.json  # phase-1 output (transfer-verified)
@@ -130,8 +157,12 @@ export PROVER_REAL_DOCKER=/usr/bin/docker                # ABSOLUTE, pre-verifie
 export PROVING_CGROUP=b0-final-proving.slice             # delegated, resettable (see §0.2)
 export VMAT_BIN=target/release/sp1-verifier-material     # risc0-verifier-material for RISC0
 export PROV_BIN=target/release/b0-pre-host-provenance
-# ratified result/harness inputs (cross-checked against the workload; not build assertions):
-export RSS_CONTEXT_HASH=…  MALFORMED_CORPUS_RESULT_HASH=…  HARNESS_SOURCE_HASH=…
+# The ONE sealed measurement-input authority package (generated deterministically in §3.0 below).
+# There are NO caller-supplied RSS_CONTEXT_HASH / MALFORMED_CORPUS_RESULT_HASH / HARNESS_SOURCE_HASH:
+# RSS context is bound per-cell, the malformed-corpus result is the retained report's own address, and
+# the harness-source hash is the provenance-computed inventory digest — all three are DERIVED and sealed
+# in this package, and a facts JSON carrying any of the three legacy variables is REFUSED.
+export B0_MEASUREMENT_AUTHORITY_PKG="$OUT/measurement-input-authority"
 
 # x86_64 venue — SP1 then RISC Zero:
 MEASURE_RUNNER=target/release/b0-pre-measure-sp1 VERIFIER_REF=<pinned sp1 builder image> \

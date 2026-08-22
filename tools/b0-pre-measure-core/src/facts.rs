@@ -18,8 +18,6 @@ pub struct CandidateFacts {
     pub container_image_digest: String,
     pub statement_hash_tlg: String,
     pub statement_hash_st: String,
-    pub rss_context_hash: String,
-    pub malformed_corpus_result_hash: String,
     pub guest: GuestFacts,
     pub verifier_material: Vec<VmEntryFacts>,
     pub provenance: Vec<ProvFacts>,

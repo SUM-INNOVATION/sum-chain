@@ -35,8 +35,6 @@ pub struct RunConfig {
     pub container_image_digest: String,
     pub statement_hash_tlg: String,
     pub statement_hash_st: String,
-    pub rss_context_hash: String,
-    pub malformed_corpus_result_hash: String,
     pub statements: Vec<StatementInput>,
     pub verifier_material: VerifierMaterial,
     pub provenance: Vec<ProvFacts>,
@@ -242,8 +240,6 @@ pub fn run_arch_fragment(
         container_image_digest: cfg.container_image_digest.clone(),
         statement_hash_tlg: cfg.statement_hash_tlg.clone(),
         statement_hash_st: cfg.statement_hash_st.clone(),
-        rss_context_hash: cfg.rss_context_hash.clone(),
-        malformed_corpus_result_hash: cfg.malformed_corpus_result_hash.clone(),
         guest: GuestFacts {
             guest_source_tree_hash: guest.guest_source_tree_hash.clone(),
             candidate_dep_lock_hash: guest.candidate_dep_lock_hash.clone(),
@@ -648,8 +644,6 @@ mod tests {
             container_image_digest: h("f0"),
             statement_hash_tlg: TLG_CSH.to_string(),
             statement_hash_st: SELECT_CSH.to_string(),
-            rss_context_hash: h("f3"),
-            malformed_corpus_result_hash: h("f4"),
             statements: vec![
                 StatementInput {
                     label: "Tlg",

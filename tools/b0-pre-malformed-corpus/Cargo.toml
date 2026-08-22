@@ -1,0 +1,23 @@
+[package]
+name = "b0-pre-malformed-corpus"
+version = "0.0.0"
+edition = "2021"
+description = "B0-FINAL malformed-corpus report GENERATOR. Runs a fixed, ordered corpus of malformed guest inputs through the REAL guest boundary (b0-pre-guest-core::run) and emits the retained, content-addressed MalformedCorpusReportV1 that REPLACES the former caller-supplied malformed_corpus_result_hash. Tool-only, workspace-excluded; depends on the frozen measured guest-core + blake3."
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "b0-pre-malformed-corpus"
+path = "src/main.rs"
+
+[dependencies]
+# The FROZEN measured guest computation (candidate-neutral decode+verify boundary). Same path the
+# measurement runner uses for statement recompute; the corpus is exercised against exactly it.
+b0-pre-guest-core = { path = "../b0-pre-candidates/guest-core" }
+# The frozen wire codec that owns `DecodeError` (guest-core does not re-export it); the generator maps
+# each variant to its stable discriminant. Same path guest-core resolves, so one unified package.
+sumchain-wire = { path = "../../crates/sumchain-wire" }
+# Member-byte index digest. Output-stable across the blake3 version cluster (1.5/1.6).
+blake3 = "1.5"
+serde_json = { version = "=1.0.149", features = ["arbitrary_precision"] }
+
+[workspace]

@@ -1,0 +1,11 @@
+{
+  "schema": "b0-final-measurement-input-authority/v1",
+  "b0_pre_spec_hash": "201cfcb80e94a5a7845dc3380cde32171d40f325ae2bacde9547f3c0da3c4df3",
+  "measured_source_commit": "507281e21e95a6a98e3480e25e12d1baab586e07",
+  "tooling_commit": "1234567890abcdef1234567890abcdef12345678",
+  "tooling_pathset_blake3": "480083de0af929947cfd3716878cb161de2ca420da5928b8a6c901a0b307ff0c",
+  "harness_source_inventory_address": "c8d179ba17503c4035f517d5e5f23c008fdb790efad059e9909b248fa913b041",
+  "malformed_corpus_report_address": "83525ef85739e94445e923c80ee4af885d7a782b9612933405120293d976710b",
+  "rss_statement_binding_policy": "per-cell-statement/v1",
+  "address": "5326ea30b6c9d9c6b82091feca3170f995aaa7762f8ff4042e5b59ad78fac19d"
+}

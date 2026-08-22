@@ -63,11 +63,58 @@ fn run() -> Result<String, String> {
             return Err("too many arguments".into());
         }
         let text = std::fs::read_to_string(&facts).map_err(|e| format!("read {facts}: {e}"))?;
+        let jv: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| format!("parse raw facts: {e}"))?;
+        b0_pre_validator::producer::refuse_legacy_operator_hashes(&jv)?;
         let raw: RawFacts =
             serde_json::from_str(&text).map_err(|e| format!("parse raw facts: {e}"))?;
         validate_raw_facts(&raw)?;
         return Ok(format!(
             "RawFacts at {facts} are structurally valid for measurement"
+        ));
+    }
+    // FAIL-FAST PRE-GRID authority gate: the venue runs this on the retained MeasurementInputAuthorityV1
+    // + its malformed-corpus report + harness-source inventory BEFORE any proving cell. It decodes +
+    // cross-binds all three (report + inventory addresses independently recomputed from the retained
+    // bytes) AND ties the authority to the RATIFIED measurement-tooling authority (commit + path-set) —
+    // so a valid OLD authority package (bound to superseded tooling) can never be reused after source
+    // edits change the tooling.
+    if mode == "--verify-authority" {
+        let mia_p = args
+            .next()
+            .ok_or("missing <measurement-input-authority.v1.json>")?;
+        let report_p = args
+            .next()
+            .ok_or("missing <malformed-corpus-report.v1.json>")?;
+        let inv_p = args
+            .next()
+            .ok_or("missing <harness-source-inventory.txt>")?;
+        if args.next().is_some() {
+            return Err("too many arguments".into());
+        }
+        let mia_b = std::fs::read(&mia_p).map_err(|e| format!("read {mia_p}: {e}"))?;
+        let report_b = std::fs::read(&report_p).map_err(|e| format!("read {report_p}: {e}"))?;
+        let inv_b = std::fs::read(&inv_p).map_err(|e| format!("read {inv_p}: {e}"))?;
+        let mia = b0_pre_validator::venue::measurement_input_authority::MeasurementInputAuthorityV1::from_json(
+            &mia_b,
+        )?;
+        mia.verify(
+            b0_pre_validator::guest_set::RATIFIED_SOURCE_COMMIT,
+            MERGED_SPEC_HASH_HEX,
+        )?;
+        mia.verify_binds(
+            &inv_b,
+            &report_b,
+            b0_pre_validator::guest_set::RATIFIED_SOURCE_COMMIT,
+            MERGED_SPEC_HASH_HEX,
+        )?;
+        mia.verify_tooling_ratified(
+            b0_pre_validator::tooling_authority::RATIFIED_MEASUREMENT_TOOLING_COMMIT,
+            b0_pre_validator::tooling_authority::RATIFIED_MEASUREMENT_TOOLING_PATHSET_BLAKE3,
+        )?;
+        return Ok(format!(
+            "measurement-input authority verified + tooling-bound: address {}",
+            mia.address
         ));
     }
     // Phase-1 guest-closure: derive the canonical r0_guest_set_hash from the typed, verified
@@ -177,6 +224,9 @@ fn run() -> Result<String, String> {
             return Err("too many arguments".into());
         }
         let text = std::fs::read_to_string(&facts).map_err(|e| format!("read {facts}: {e}"))?;
+        let jv: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| format!("parse raw facts: {e}"))?;
+        b0_pre_validator::producer::refuse_legacy_operator_hashes(&jv)?;
         let raw: RawFacts =
             serde_json::from_str(&text).map_err(|e| format!("parse raw facts: {e}"))?;
         let rtext = std::fs::read_to_string(&records_path)

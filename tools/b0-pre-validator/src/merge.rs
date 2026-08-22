@@ -68,6 +68,29 @@ fn agree(a: &Value, b: &Value, ptr: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// A measurement-wide field EVERY fragment must carry byte-identically (the retained authority / report
+/// / inventory). Refuses absence, an empty value, or ANY disagreement across the fragment set — so a
+/// valid old authority package can never be mixed with fragments produced under a different one.
+fn fragment_field_agree<'a>(fragments: &'a [Value], key: &str) -> Result<&'a Value, String> {
+    let first = fragments
+        .first()
+        .and_then(|f| f.get(key))
+        .filter(|v| v.as_str().map(|s| !s.is_empty()).unwrap_or(false))
+        .ok_or_else(|| format!("fragment missing/empty {key}"))?;
+    for f in fragments {
+        match f.get(key) {
+            Some(v) if v == first => {}
+            Some(_) => {
+                return Err(format!(
+                    "fragments disagree on {key} (byte/address mismatch across the fragment set)"
+                ))
+            }
+            None => return Err(format!("fragment missing {key}")),
+        }
+    }
+    Ok(first)
+}
+
 /// Merge the fragments into canonical `RawFacts` JSON (validated). `fragments` are the
 /// per-(candidate,arch) `CandidateFacts` emitted by `measure_fragment.sh`.
 pub fn merge_fragments(spec_hex: &str, fragments: &[Value]) -> Result<Value, String> {
@@ -79,6 +102,10 @@ pub fn merge_fragments(spec_hex: &str, fragments: &[Value]) -> Result<Value, Str
     let mut by_key: BTreeMap<(String, String), &Value> = BTreeMap::new();
     let mut all_commits: Vec<String> = Vec::new();
     for f in fragments {
+        // No fragment may carry a legacy caller-supplied measurement-input hash (all three were
+        // removed by the measurement-input-authority correction; the report/inventory/RSS values are
+        // derived from retained artifacts). Refuse, never silently ignore.
+        crate::producer::refuse_legacy_operator_hashes(f)?;
         let cand = fragment_candidate(f)?;
         let arch = fragment_arch(f)?;
         if cand == "Risc0" && arch == "aarch64" {
@@ -126,8 +153,6 @@ pub fn merge_fragments(spec_hex: &str, fragments: &[Value]) -> Result<Value, Str
         "/candidate",
         "/statement_hash_tlg",
         "/statement_hash_st",
-        "/rss_context_hash",
-        "/malformed_corpus_result_hash",
         "/guest/program_id",
         "/guest/guest_image_hash",
         "/guest/guest_source_tree_hash",
@@ -171,10 +196,20 @@ pub fn merge_fragments(spec_hex: &str, fragments: &[Value]) -> Result<Value, Str
     );
     sp1["guest"]["builder"] = Value::Array(builders);
 
+    // Every fragment MUST carry byte-identical measurement-input authority + malformed-corpus report +
+    // harness-source inventory; disagreement is refused. The single agreed set flows to the merged
+    // RawFacts (top-level), where `produce` decodes + verifies it and derives the report/MIA addresses.
+    let mia = fragment_field_agree(fragments, "measurement_input_authority")?.clone();
+    let report = fragment_field_agree(fragments, "malformed_corpus_report")?.clone();
+    let inv = fragment_field_agree(fragments, "harness_source_inventory")?.clone();
+
     let raw = json!({
         "lifecycle_mode": "measurement",
         "b0_pre_spec_hash": spec_hex,
         "candidates": [sp1, risc0.clone()],
+        "measurement_input_authority": mia,
+        "malformed_corpus_report": report,
+        "harness_source_inventory": inv,
     });
 
     // Fail-closed: the merged RawFacts must pass the full structural validation.
@@ -293,7 +328,6 @@ mod tests {
         json!({
             "candidate": cand, "container_image_digest": h("f0"),
             "statement_hash_tlg": h("f1"), "statement_hash_st": h("f2"),
-            "rss_context_hash": h("f3"), "malformed_corpus_result_hash": h("f4"),
             "guest": {
                 "guest_source_tree_hash": h("a2"), "candidate_dep_lock_hash": h("a3"),
                 "guest_image_hash": img, "program_id": prog, "build_command_hash": h("a4"),
@@ -312,7 +346,17 @@ mod tests {
                 "tooling_pathset_blake3": h("70"),
                 "b0_pre_spec_hash": SPEC,
                 "production_binary_blake3": h("53")
-            }]
+            }],
+            // Every fragment carries byte-identical measurement-input authority + report + inventory.
+            "measurement_input_authority": include_str!(
+                "../../../docs/b0-pre/fixtures/measurement-input-authority/measurement-input-authority.v1.json"
+            ),
+            "malformed_corpus_report": include_str!(
+                "../../../docs/b0-pre/fixtures/measurement-input-authority/malformed-corpus-report.v1.json"
+            ),
+            "harness_source_inventory": include_str!(
+                "../../../docs/b0-pre/fixtures/measurement-input-authority/harness-source-inventory.txt"
+            ),
         })
     }
     const SPEC: &str = "201cfcb80e94a5a7845dc3380cde32171d40f325ae2bacde9547f3c0da3c4df3";
@@ -363,7 +407,7 @@ mod tests {
         // produce() enforces runner continuity + artifact retention during assembly (the merge fixture
         // uses a non-reference verify cpuset, so the qualification verdict itself is not the point).
         let pkg = produce(&raw).expect("merged facts produce");
-        let (_al, bundles) = parse_vector(&pkg.vector).unwrap();
+        let (_al, _mia, _report, _inv, bundles) = parse_vector(&pkg.vector).unwrap();
         for (_c, ev) in &bundles {
             assert_eq!(ev.cpuset_chains.len(), ev.provenances.len());
             assert_eq!(ev.runner_attestations.len(), ev.provenances.len());

@@ -25,8 +25,13 @@
 #   MEASURE_RUNNER  VMAT_BIN  PROV_BIN         # repo-built binaries
 #   PROVER_FIREWALL_SH  PROVER_REAL_DOCKER  PROVING_CGROUP
 #   BUILDER_DIGEST  CONTAINER_IMAGE_DIGEST  GUEST_SOURCE_TREE_HASH  CANDIDATE_DEP_LOCK_HASH
-#   BUILD_COMMAND_HASH  STATEMENT_HASH_TLG  STATEMENT_HASH_ST  RSS_CONTEXT_HASH
-#   MALFORMED_CORPUS_RESULT_HASH  HARNESS_SOURCE_HASH  REPO_DIR
+#   BUILD_COMMAND_HASH  STATEMENT_HASH_TLG  STATEMENT_HASH_ST
+#   REPO_DIR
+# (RSS context is derived per-cell from the authenticated statement; the benchmark-harness source
+#  hash is COMPUTED by the provenance reader from the clean tooling root — neither is operator-supplied.)
+#   B0_MEASUREMENT_AUTHORITY_PKG  # sealed measurement-input authority package (produce_measurement_input_authority.sh):
+#                                 # measurement-input-authority.v1.json + malformed-corpus-report.v1.json + harness-source-inventory.txt.
+#                                 # Verified fail-fast before proving; its bytes are embedded byte-identical into every fragment.
 #   SP1 only: VERIFIER_REF (pinned builder image the guest ELF builds inside)
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -59,14 +64,26 @@ need_env B0_MEASURED_SOURCE_ROOT
 need_env B0_TOOLING_ROOT
 require_two_roots --measured-source-root "$B0_MEASURED_SOURCE_ROOT" --tooling-root "$B0_TOOLING_ROOT"
 for v in SPEC_HASH MEASURE_RUNNER MEASURE_PRODUCE VMAT_BIN PROV_BIN PROVER_FIREWALL_SH \
-         PROVER_REAL_DOCKER PROVING_CGROUP GUEST_SET_MANIFEST IDENTITY_RECORDS OFFICIAL_JSON \
-         RSS_CONTEXT_HASH MALFORMED_CORPUS_RESULT_HASH HARNESS_SOURCE_HASH; do need_env "$v"; done
+         PROVER_REAL_DOCKER PROVING_CGROUP GUEST_SET_MANIFEST IDENTITY_RECORDS OFFICIAL_JSON; do need_env "$v"; done
 # The runner path-independence recipe facts for THIS fragment's runner (emitted by
 # double_build_runner.sh at the reproducible runner-build stage). MANDATORY: the measurement runner's
 # ProvFacts requires `runner_recipe`, so a fragment cannot be produced without it. The validator turns
 # these facts into the three retained artifacts and recomputes the structural recipe id.
 need_env B0_RUNNER_RECIPE_JSON
 [ -s "$B0_RUNNER_RECIPE_JSON" ] || die "B0_RUNNER_RECIPE_JSON does not name a non-empty file: $B0_RUNNER_RECIPE_JSON"
+# The ONE sealed measurement-input authority package (produced pre-grid by
+# produce_measurement_input_authority.sh): the unified MeasurementInputAuthorityV1 JSON + the retained
+# malformed-corpus report + the harness-source inventory manifest. Every fragment carries these three
+# byte-identical, and merge_fragments refuses any disagreement. The retained BYTES travel — never a
+# standalone operator address string.
+need_env B0_MEASUREMENT_AUTHORITY_PKG
+[ -d "$B0_MEASUREMENT_AUTHORITY_PKG" ] || die "measurement-input authority package absent: $B0_MEASUREMENT_AUTHORITY_PKG"
+MIA_JSON="$B0_MEASUREMENT_AUTHORITY_PKG/measurement-input-authority.v1.json"
+REPORT_JSON="$B0_MEASUREMENT_AUTHORITY_PKG/malformed-corpus-report.v1.json"
+INVENTORY_TXT="$B0_MEASUREMENT_AUTHORITY_PKG/harness-source-inventory.txt"
+for f in "$MIA_JSON" "$REPORT_JSON" "$INVENTORY_TXT"; do
+  [ -s "$f" ] || die "measurement-input authority package missing/empty member: $f"
+done
 # source_commit/clean-tree are read from the MEASURED root (never the tooling checkout HEAD). The
 # runner binds B0_TOOLING_COMMIT + B0_TOOLING_PATHSET_BLAKE3 into the per-arch runner attestation.
 REPO_DIR="$B0_MEASURED_ROOT"
@@ -85,6 +102,14 @@ for b in "$MEASURE_RUNNER" "$MEASURE_PRODUCE" "$VMAT_BIN" "$PROV_BIN" "$PROVER_F
   [ -x "$b" ] || die "required executable not found/executable: $b"
 done
 require_cmd b3sum
+
+# ---- FAIL-FAST PRE-GRID GATE: the measurement-input authority must decode + cross-bind + tie its
+# tooling identity to RATIFIED before ANY proving cell starts. This refuses a stale authority package
+# (one whose tooling commit/path-set does not equal the ratified measurement tooling) so a valid old
+# MIA cannot be reused after subsequent source edits. Runs before the guest build / prove of THIS
+# fragment; measure-produce recomputes the address from the retained bytes (no operator address string).
+"$MEASURE_PRODUCE" --verify-authority "$MIA_JSON" "$REPORT_JSON" "$INVENTORY_TXT" >&2 \
+  || die "measurement-input authority failed the pre-grid fail-fast gate (decode/cross-bind/tooling-ratified); refusing to prove"
 # #6: the guest build uses the ABSOLUTE, pre-verified Docker binary — never `docker` from PATH.
 REAL_DOCKER="$(readlink -f "$PROVER_REAL_DOCKER" 2>/dev/null || echo "$PROVER_REAL_DOCKER")"
 case "$REAL_DOCKER" in /*) ;; *) die "PROVER_REAL_DOCKER must be an absolute path: $REAL_DOCKER" ;; esac
@@ -192,7 +217,7 @@ VMAT_JSON="$SCRATCH/verifier-material.json"
 PROV_JSON="$SCRATCH/provenance.json"
 prov_role() {
   "$PROV_BIN" "$ARCH" "$1" --repo "$REPO_DIR" --builder-digest "$BUILDER_DIGEST" \
-    --harness-source-hash "$HARNESS_SOURCE_HASH" \
+    --tooling-root "$B0_TOOLING_ROOT" \
     || die "provenance read failed for role $1"
 }
 { printf '['; prov_role Proving; printf ','; prov_role Verification; printf ']'; } > "$PROV_JSON"
@@ -281,7 +306,6 @@ RUNNER_ARGS=(
   --provenance "$PROV_JSON" --container-image-digest "$CONTAINER_IMAGE_DIGEST"
   --identity-records "$IDENTITY_RECORDS"
   --statement-hash-tlg "$STATEMENT_HASH_TLG" --statement-hash-st "$STATEMENT_HASH_ST"
-  --rss-context-hash "$RSS_CONTEXT_HASH" --malformed-corpus-result-hash "$MALFORMED_CORPUS_RESULT_HASH"
   --guest-source-tree-hash "$GUEST_SOURCE_TREE_HASH" --candidate-dep-lock-hash "$CANDIDATE_DEP_LOCK_HASH"
   --build-command-hash "$BUILD_COMMAND_HASH" --builder-digest "$BUILDER_DIGEST"
   --firewall-attest "$FW_ATTEST" --work-dir "$SCRATCH" --out "$FRAG" --attest-out "$ATTEST_OUT"
@@ -299,6 +323,20 @@ env PATH="$FWDIR:$PATH" \
 [ -s "$FRAG" ] || die "runner did not emit a fragment"
 [ -s "$ATTEST_OUT" ] || die "runner did not emit a runner attestation"
 [ -s "$FW_ATTEST" ] || die "firewall recorded no execution attestation; refusing"
+
+# Embed the retained authority BYTES into this fragment as top-level string members. Every fragment
+# carries byte-identical measurement_input_authority / malformed_corpus_report / harness_source_inventory;
+# merge_fragments agrees them byte-for-byte and refuses any disagreement, and produce() re-verifies the
+# MIA + derives the malformed-corpus result hash from the retained report (never an operator hash).
+python3 - "$FRAG" "$MIA_JSON" "$REPORT_JSON" "$INVENTORY_TXT" <<'PY' || die "failed to embed measurement-input authority bytes into the fragment"
+import json, sys
+frag_path, mia, report, inv = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+frag = json.load(open(frag_path, encoding="utf-8"))
+frag["measurement_input_authority"] = open(mia, encoding="utf-8").read()
+frag["malformed_corpus_report"] = open(report, encoding="utf-8").read()
+frag["harness_source_inventory"] = open(inv, encoding="utf-8").read()
+json.dump(frag, open(frag_path, "w", encoding="utf-8"), indent=2)
+PY
 
 # Success: keep the fragment + attestations; drop only the scratch.
 trap - EXIT

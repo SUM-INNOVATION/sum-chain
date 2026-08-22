@@ -32,14 +32,23 @@ impl<'a> Rd<'a> {
     }
 }
 
-type ParsedVector = (Vec<u8>, Vec<(u16, harness::Evidence)>);
+type ParsedVector = (
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<(u16, harness::Evidence)>,
+);
 
 fn parse(bytes: &[u8]) -> Result<ParsedVector, String> {
     let mut r = Rd { b: bytes, p: 0 };
-    if r.take(13)? != b"B0PREMEASVEC5" {
+    if r.take(13)? != b"B0PREMEASVEC6" {
         return Err("bad container magic".into());
     }
     let allowlist = r.blob()?;
+    let measurement_input_authority = r.blob()?;
+    let malformed_corpus_report = r.blob()?;
+    let harness_source_inventory = r.blob()?;
     let n = r.u32()?;
     let mut bundles = Vec::new();
     for _ in 0..n {
@@ -80,7 +89,13 @@ fn parse(bytes: &[u8]) -> Result<ParsedVector, String> {
     if r.p != bytes.len() {
         return Err("trailing bytes after the vector".into());
     }
-    Ok((allowlist, bundles))
+    Ok((
+        allowlist,
+        measurement_input_authority,
+        malformed_corpus_report,
+        harness_source_inventory,
+        bundles,
+    ))
 }
 
 fn hx(b: &[u8]) -> String {
@@ -97,7 +112,36 @@ fn run() -> Result<String, String> {
         .nth(1)
         .ok_or("usage: b0-pre-independent-verify <real-orchestrator-vector.bin>")?;
     let bytes = std::fs::read(&path).map_err(|e| format!("read {path}: {e}"))?;
-    let (allowlist, bundles) = parse(&bytes)?;
+    let (allowlist, mia_bytes, report_bytes, inventory_bytes, bundles) = parse(&bytes)?;
+    // Independent import of the retained VEC6 measurement-input authority: the three retained blobs
+    // (MIA JSON + malformed-corpus report + harness-source inventory manifest) are MANDATORY — a real
+    // official package always seals them, so a vector missing any of them is refused (never skipped).
+    // Re-decode + recompute the authority address (own SHA-256) and require it to bind the independently
+    // recomputed harness-source inventory address (own BLAKE3) + malformed-corpus report address (own
+    // SHA-256, full from-scratch report verification).
+    const MEASURED: &str = "507281e21e95a6a98e3480e25e12d1baab586e07";
+    const SPEC: &str = "201cfcb80e94a5a7845dc3380cde32171d40f325ae2bacde9547f3c0da3c4df3";
+    if mia_bytes.is_empty() || report_bytes.is_empty() || inventory_bytes.is_empty() {
+        return Err(
+            "measurement-input authority incomplete: the MIA / malformed-corpus report / harness-source \
+             inventory retained bytes are all mandatory in an official package"
+                .into(),
+        );
+    }
+    let authority: ([u8; 32], [u8; 32]) = {
+        let mia =
+            b0_pre_independent::measurement_input_authority::MeasurementInputAuthority::from_json(
+                &mia_bytes,
+            )?;
+        let mia_addr = mia.verify(MEASURED, SPEC)?;
+        mia.verify_binds(&inventory_bytes, &report_bytes, MEASURED, SPEC)?;
+        let mut report_addr = [0u8; 32];
+        for (i, b) in report_addr.iter_mut().enumerate() {
+            *b = u8::from_str_radix(&mia.malformed_corpus_report_address[i * 2..i * 2 + 2], 16)
+                .map_err(|_| "MIA report address not hex")?;
+        }
+        (mia_addr, report_addr)
+    };
     closure::decode_allowlist(&allowlist).map_err(|e| format!("allowlist decode: {e:?}"))?;
     let gs = closure::Allowlist::guest_set_hash(&allowlist);
     if bundles.is_empty() {
@@ -111,6 +155,23 @@ fn run() -> Result<String, String> {
             return Err(format!(
                 "candidate {candidate}: result-set guest-set hash != the recomputed allowlist guest-set hash"
             ));
+        }
+        // Every fragment is bound to the ONE package authority: the result-set's malformed hash IS the
+        // report address, and every runner attestation binds the authority's own address.
+        let (mia_addr, report_addr) = authority;
+        if rs.malformed_corpus_result_hash != report_addr {
+            return Err(format!(
+                "candidate {candidate}: result-set malformed_corpus_result_hash != authority report address"
+            ));
+        }
+        for ab in &ev.runner_attestations {
+            let att = closure::decode_runner_attestation(ab)
+                .map_err(|e| format!("candidate {candidate}: attestation decode: {e:?}"))?;
+            if att.measurement_input_authority_address != mia_addr {
+                return Err(format!(
+                    "candidate {candidate}: runner attestation does not bind the package measurement-input authority"
+                ));
+            }
         }
         let verdict = match harness::verify_evidence(ev) {
             Ok(v) if v.qualification => "qualified".to_string(),

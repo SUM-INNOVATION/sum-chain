@@ -533,7 +533,7 @@ fn enc_runner_attestation(
         b.extend_from_slice(s.as_bytes());
     };
     let seed = |s: &[u8]| *blake3::hash(s).as_bytes();
-    b.extend_from_slice(&8u16.to_le_bytes());
+    b.extend_from_slice(&9u16.to_le_bytes());
     b.extend_from_slice(&candidate.to_le_bytes());
     b.push(role);
     b.extend_from_slice(spec);
@@ -582,6 +582,9 @@ fn enc_runner_attestation(
     b.extend_from_slice(&seed(b"protoc-authority-addr"));
     // v8: canonical SP1 guest artifact address (SP1 fixture uses the same seed as the reference synth).
     b.extend_from_slice(&seed(b"canonical-sp1-guest-addr"));
+    // v9: measurement-input authority address (bound per attestation; verify_package cross-checks it
+    // against the ONE package authority — here it is a fixture seed for the harness-only path).
+    b.extend_from_slice(&seed(b"measurement-input-authority-addr"));
     let addr = closure::runner_attestation_address(&b);
     (b, addr, recipe_b, inv_a, inv_b, proof_b, leak_b)
 }
@@ -640,13 +643,13 @@ fn enc_sample(
     b
 }
 
-fn enc_rss(arch: u8, scope: u8, peak: u64, run: u32, ph: [u8; 32], ids: Ids) -> Vec<u8> {
+fn enc_rss(arch: u8, stmt: u8, scope: u8, peak: u64, run: u32, ph: [u8; 32], ids: Ids) -> Vec<u8> {
     let mut b = Vec::new();
     b.extend_from_slice(&tags::BENCH_RSS);
     b.extend_from_slice(&1u16.to_le_bytes());
     b.extend_from_slice(&id(b"spec"));
     b.extend_from_slice(&id(b"guest_set"));
-    b.extend_from_slice(&id(b"rss-context"));
+    b.extend_from_slice(&stmt_hash(stmt));
     b.extend_from_slice(&ids.candidate.to_le_bytes());
     b.extend_from_slice(&ids.program);
     b.extend_from_slice(&vmat_id(ids));
@@ -850,12 +853,12 @@ fn generate_with(candidate: u16, env: &Env) -> Evidence {
                     samples.push(b);
                 }
                 max_pb = max_pb.max(proof_bytes_value(iter));
-                let b = enc_rss(a, 0, proving_rss_value(iter), iter, ph, ids);
+                let b = enc_rss(a, s, 0, proving_rss_value(iter), iter, ph, ids);
                 prss.entry(a).or_default().push(((ph, iter), b.clone()));
                 rss.push(b);
                 let vrv = verify_rss_value(a, iter);
                 vrss_by_arch.entry(a).or_default().push(vrv);
-                let b = enc_rss(a, 1, vrv, iter, ph, ids);
+                let b = enc_rss(a, s, 1, vrv, iter, ph, ids);
                 vrss.entry(a).or_default().push(((ph, iter), b.clone()));
                 rss.push(b);
             }
@@ -1136,6 +1139,8 @@ pub fn verify_evidence(ev: &Evidence) -> Result<Recomputed, String> {
     // envelopes
     let mut proof_hashes: HashSet<[u8; 32]> = HashSet::new();
     let mut env_hash: HashMap<(u8, u8, u32), [u8; 32]> = HashMap::new();
+    // proof_hash -> statement index of the proof envelope (binds each RSS record to its cell's statement).
+    let mut statement_of: HashMap<[u8; 32], u8> = HashMap::new();
     for b in &ev.envelopes {
         let e = closure::decode_env(b).map_err(|e| format!("env: {e:?}"))?;
         if e.b0_pre_spec_hash != spec
@@ -1153,6 +1158,10 @@ pub fn verify_evidence(ev: &Evidence) -> Result<Recomputed, String> {
         locks.insert(e.candidate_dep_lock_hash);
         if !proof_hashes.insert(e.proof_hash) {
             return Err("dup proof hash".into());
+        }
+        // Refuse a conflicting duplicate proof_hash -> statement mapping (never last-write-wins).
+        if statement_of.insert(e.proof_hash, si).is_some() {
+            return Err("conflicting duplicate proof_hash -> statement mapping".into());
         }
         if env_hash
             .insert((e.arch, si, e.iteration_index), crate::plain(b))
@@ -1242,6 +1251,12 @@ pub fn verify_evidence(ev: &Evidence) -> Result<Recomputed, String> {
         }
         if !proof_hashes.contains(&r.proof_hash) {
             return Err("rss orphan".into());
+        }
+        // Independent mirror: an RSS record must bind the same statement as the proof envelope
+        // bearing this proof_hash (closes the caller-supplied-global RSS redirect gap).
+        let rsi = stmt_of(r.stmt)?;
+        if statement_of.get(&r.proof_hash) != Some(&rsi) {
+            return Err("rss statement != proof-envelope statement".into());
         }
         programs.insert(r.program);
         locks.insert(r.lock);

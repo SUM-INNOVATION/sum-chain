@@ -26,6 +26,8 @@ pub mod host_toolchain;
 pub mod license_policy;
 pub mod lock_artifacts;
 pub mod lock_provenance;
+pub mod malformed_corpus_report;
+pub mod measurement_input_authority;
 pub mod oci_layout;
 pub mod pin_contract;
 pub mod protoc_authority;

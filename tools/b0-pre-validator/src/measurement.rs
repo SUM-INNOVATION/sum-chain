@@ -135,6 +135,7 @@ pub fn synth_runner_attestation(
         protoc_authority_address: seed("protoc-authority-addr"),
         // v8 canonical SP1 guest artifact address (synthetic; SP1 candidate in this synth path).
         canonical_sp1_guest_artifact_address: seed("canonical-sp1-guest-addr"),
+        measurement_input_authority_address: seed("measurement-input-authority-addr"),
     }
 }
 
@@ -302,7 +303,15 @@ pub fn synth_runner_recipe_artifacts(
 
 /// The allowlist canonical bytes plus one per-candidate evidence bundle each — the
 /// content of a committed measurement vector.
-pub type MeasurementVector = (Vec<u8>, Vec<(Candidate, Evidence)>);
+/// `(allowlist, measurement_input_authority_json, malformed_corpus_report_json,
+/// harness_source_inventory_manifest, bundles)` — the VEC6 layout.
+pub type MeasurementVector = (
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<(Candidate, Evidence)>,
+);
 
 /// Whether `candidate` can produce a NATIVE terminal proof on `arch`. RISC Zero's
 /// Groth16 receipt path is x86_64-only (VENUE §2); on aarch64 it is native-ineligible
@@ -364,6 +373,9 @@ pub struct ProvenanceFacts {
     /// v8: address of the ONE canonical SP1 guest artifact this measurement proved (SP1 only; ALL-ZERO
     /// for RISC0). Bound into the attestation so measurement-time == Phase-1 guest identity.
     pub canonical_sp1_guest_artifact_address: [u8; 32],
+    /// v9: the measurement-wide MeasurementInputAuthorityV1 address (ALL candidates), injected into the
+    /// attestation.
+    pub measurement_input_authority_address: [u8; 32],
     /// The RETAINED Phase-1 identity record for this provenance's arch. The orchestrator binds the
     /// attestation to it (sets `phase1_production_binary_blake3` + `phase1_identity_record_blake3`) and
     /// seals it as a mandatory package artifact for independent sealed-import re-checking.
@@ -405,7 +417,6 @@ pub struct RunIdentities {
     pub verifier_material: VerifierMaterialManifestV1,
     pub official_statement_hash_tlg: [u8; 32],
     pub official_statement_hash_st: [u8; 32],
-    pub rss_context_hash: [u8; 32],
     pub malformed_corpus_result_hash: [u8; 32],
 }
 
@@ -459,6 +470,9 @@ pub fn orchestrate_grid(
     ids: &RunIdentities,
     provenances: &[ProvenanceFacts],
     cells: &[CellFacts],
+    // The measurement-wide MeasurementInputAuthorityV1 address, derived by `produce` from the retained
+    // authority bytes and injected into EVERY attestation (never a recipe address string).
+    measurement_input_authority_address: [u8; 32],
 ) -> Result<Evidence, String> {
     let vmat = ids
         .verifier_material
@@ -544,6 +558,10 @@ pub fn orchestrate_grid(
         } else {
             [0u8; 32]
         };
+        // v9: EVERY candidate binds the measurement-wide authority address (the shared measurement-input
+        // context), derived by `produce` from the retained MIA bytes — never candidate-gated, never a
+        // recipe string.
+        att.measurement_input_authority_address = measurement_input_authority_address;
         let runner_attestation_blake3 = att.hash();
         // Build the retained cpuset-chain artifact bound to this provenance.
         let chain = CpusetProbeChainV1 {
@@ -713,7 +731,12 @@ pub fn orchestrate_grid(
         let mk_rss = |scope: RssScope, peak: u64| BenchmarkRssRecordV1 {
             b0_pre_spec_hash: spec,
             r0_guest_set_hash: guest_set,
-            computation_statement_hash: ids.rss_context_hash,
+            // Each RSS record binds the statement of the cell it measures (identical to that cell's
+            // proof envelope + samples, keyed by the shared `proof_hash`) — NOT a caller-supplied
+            // global. The verifier re-derives `stmt_of(computation_statement_hash)` and requires it
+            // to equal the statement of the envelope carrying the same `proof_hash`, so an operator
+            // cannot redirect a cell's RSS to another statement.
+            computation_statement_hash: csh,
             candidate: ids.candidate,
             guest_program_id: ids.guest_program_id,
             verifier_material_manifest_hash: vmat,
@@ -760,18 +783,28 @@ pub fn orchestrate_grid(
 /// then `u32 n_bundles`, then per bundle: `u16 candidate`, four record lists (each
 /// `u32 count` then `u32 len‖bytes`), then `u32 len‖bytes` for verifier_material and
 /// result_set. All integers big-endian.
-pub fn serialize_vector(allowlist_canonical: &[u8], bundles: &[(Candidate, Evidence)]) -> Vec<u8> {
+pub fn serialize_vector(
+    allowlist_canonical: &[u8],
+    measurement_input_authority: &[u8],
+    malformed_corpus_report: &[u8],
+    harness_source_inventory: &[u8],
+    bundles: &[(Candidate, Evidence)],
+) -> Vec<u8> {
     fn put(out: &mut Vec<u8>, b: &[u8]) {
         out.extend_from_slice(&(b.len() as u32).to_be_bytes());
         out.extend_from_slice(b);
     }
     let mut out = Vec::new();
-    // VEC4: retained-artifact lists (cpuset_chains, runner_attestations, identity_records, and the
-    // three runner path-independence artifacts: recipes, inventories, leakage_reports), each aligned
-    // with the provenance list, so the sealed package carries the canonical bytes behind every
-    // content-address — not the address/copied claim alone.
-    out.extend_from_slice(b"B0PREMEASVEC5");
+    // VEC6: adds three TOP-LEVEL retained measurement-input blobs after the allowlist — the
+    // MeasurementInputAuthorityV1 JSON, the complete MalformedCorpusReportV1 JSON, and the complete
+    // benchmark-harness source inventory manifest — so both verifiers re-decode the report + inventory
+    // and recompute the two addresses the authority binds (never a duplicated caller hash).
+    // (VEC5 added the retained-artifact lists; VEC4 the runner path-independence artifacts.)
+    out.extend_from_slice(b"B0PREMEASVEC6");
     put(&mut out, allowlist_canonical);
+    put(&mut out, measurement_input_authority);
+    put(&mut out, malformed_corpus_report);
+    put(&mut out, harness_source_inventory);
     out.extend_from_slice(&(bundles.len() as u32).to_be_bytes());
     for (c, ev) in bundles {
         out.extend_from_slice(&c.to_repr().to_be_bytes());
@@ -817,10 +850,13 @@ pub fn parse_vector(bytes: &[u8]) -> Result<MeasurementVector, String> {
         let n = u32_at(p)?;
         Ok(take(p, n)?.to_vec())
     };
-    if take(&mut p, 13)? != b"B0PREMEASVEC5" {
+    if take(&mut p, 13)? != b"B0PREMEASVEC6" {
         return Err("bad magic".into());
     }
     let allowlist = blob(&mut p)?;
+    let measurement_input_authority = blob(&mut p)?;
+    let malformed_corpus_report = blob(&mut p)?;
+    let harness_source_inventory = blob(&mut p)?;
     let n_bundles = u32_at(&mut p)?;
     let mut bundles = Vec::new();
     for _ in 0..n_bundles {
@@ -862,7 +898,13 @@ pub fn parse_vector(bytes: &[u8]) -> Result<MeasurementVector, String> {
     if p != bytes.len() {
         return Err("trailing bytes".into());
     }
-    Ok((allowlist, bundles))
+    Ok((
+        allowlist,
+        measurement_input_authority,
+        malformed_corpus_report,
+        harness_source_inventory,
+        bundles,
+    ))
 }
 
 /// Build the ONE canonical committed measurement vector deterministically through
@@ -959,6 +1001,7 @@ pub fn deterministic_demo_vector() -> MeasurementVector {
             dependency_seed_address: dv(b"dependency-seed-addr"),
             protoc_authority_address: dv(b"protoc-authority-addr"),
             canonical_sp1_guest_artifact_address: dv(b"canonical-sp1-guest-addr"),
+            measurement_input_authority_address: dv(b"measurement-input-authority-addr"),
             source_commit: "eff3aae18b49969212c4c1493da20f97af195de2".to_string(),
             dirty_tree_flag: false,
             builder_container_digest: dv(b"builder"),
@@ -1085,7 +1128,6 @@ pub fn deterministic_demo_vector() -> MeasurementVector {
         verifier_material: sp1_material,
         official_statement_hash_tlg: dv(b"stmt-tlg"),
         official_statement_hash_st: dv(b"stmt-st"),
-        rss_context_hash: dv(b"rss-ctx"),
         malformed_corpus_result_hash: dv(b"malformed"),
     };
     let risc0_ids = RunIdentities {
@@ -1096,7 +1138,6 @@ pub fn deterministic_demo_vector() -> MeasurementVector {
         verifier_material: risc0_material,
         official_statement_hash_tlg: dv(b"stmt-tlg"),
         official_statement_hash_st: dv(b"stmt-st"),
-        rss_context_hash: dv(b"rss-ctx"),
         malformed_corpus_result_hash: dv(b"malformed"),
     };
 
@@ -1106,6 +1147,7 @@ pub fn deterministic_demo_vector() -> MeasurementVector {
         &sp1_ids,
         &all_prov,
         &grid("sp1", &[Arch::X86_64, Arch::Aarch64]),
+        [7u8; 32],
     )
     .expect("sp1 assembles");
     let risc0_ev = orchestrate_grid(
@@ -1114,11 +1156,15 @@ pub fn deterministic_demo_vector() -> MeasurementVector {
         &risc0_ids,
         &all_prov,
         &grid("risc0", &[Arch::X86_64]),
+        [7u8; 32],
     )
     .expect("risc0 assembles");
 
     (
         allowlist.encode(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
         vec![(Candidate::Sp1, sp1_ev), (Candidate::Risc0, risc0_ev)],
     )
 }
@@ -1159,7 +1205,6 @@ mod tests {
             verifier_material: sp1_material(),
             official_statement_hash_tlg: h(b"tlg"),
             official_statement_hash_st: h(b"st"),
-            rss_context_hash: h(b"rss-ctx"),
             malformed_corpus_result_hash: h(b"malformed"),
         }
     }
@@ -1177,6 +1222,7 @@ mod tests {
             dependency_seed_address: [21; 32],
             protoc_authority_address: [22; 32],
             canonical_sp1_guest_artifact_address: [23; 32],
+            measurement_input_authority_address: [24; 32],
             source_commit: "0".repeat(40),
             dirty_tree_flag: false,
             builder_container_digest: h(b"builder"),
@@ -1335,6 +1381,7 @@ mod tests {
             &ids(),
             &all_provenance(),
             &grid(&[Arch::X86_64, Arch::Aarch64]),
+            [7u8; 32],
         )
         .expect("assembles");
         // The frozen verifier INDEPENDENTLY re-derives every bundle + aggregate.
@@ -1380,7 +1427,7 @@ mod tests {
         );
         let cells = vec![cell(Arch::Aarch64, StatementIndex::Tlg, 0)];
         assert!(
-            orchestrate_grid(SPEC, h(b"gs"), &r0, &all_provenance(), &cells)
+            orchestrate_grid(SPEC, h(b"gs"), &r0, &all_provenance(), &cells, [7u8; 32])
                 .unwrap_err()
                 .contains("native-ineligible")
         );
@@ -1415,6 +1462,7 @@ mod tests {
             &r0,
             &all_provenance(),
             &grid(&[Arch::X86_64]),
+            [7u8; 32],
         )
         .expect("assembles the genuine partial matrix");
         let err = verify_evidence(&ev).expect_err("incomplete grid must be rejected");
@@ -1429,7 +1477,7 @@ mod tests {
         let mut cells = grid(&[Arch::X86_64, Arch::Aarch64]);
         // Duplicate the first cell (same arch/stmt/iteration) -> not a valid grid.
         cells.push(cell(Arch::X86_64, StatementIndex::Tlg, 0));
-        let res = orchestrate_grid(SPEC, h(b"gs"), &ids(), &all_provenance(), &cells);
+        let res = orchestrate_grid(SPEC, h(b"gs"), &ids(), &all_provenance(), &cells, [7u8; 32]);
         // Either assembly (duplicate measured-proof key) or verification rejects it.
         let rejected = match res {
             Err(_) => true,
@@ -1442,7 +1490,8 @@ mod tests {
     fn missing_cell_is_rejected() {
         let mut cells = grid(&[Arch::X86_64, Arch::Aarch64]);
         cells.pop(); // drop one cell -> incomplete grid
-        let ev = orchestrate_grid(SPEC, h(b"gs"), &ids(), &all_provenance(), &cells).unwrap();
+        let ev =
+            orchestrate_grid(SPEC, h(b"gs"), &ids(), &all_provenance(), &cells, [7u8; 32]).unwrap();
         assert!(
             verify_evidence(&ev).is_err(),
             "a missing cell must be rejected"
@@ -1457,6 +1506,7 @@ mod tests {
             &ids(),
             &all_provenance(),
             &grid(&[Arch::X86_64, Arch::Aarch64]),
+            [7u8; 32],
         )
         .unwrap();
         verify_evidence(&ev).expect("baseline verifies");
@@ -1481,6 +1531,7 @@ mod tests {
             &ids(),
             &all_provenance(),
             &grid(&[Arch::X86_64, Arch::Aarch64]),
+            [7u8; 32],
         )
         .unwrap();
         let mut s = BenchmarkSampleV1::decode_exact(&ev.samples[0]).unwrap();
@@ -1500,6 +1551,7 @@ mod tests {
             &ids(),
             &all_provenance(),
             &grid(&[Arch::X86_64, Arch::Aarch64]),
+            [7u8; 32],
         )
         .unwrap();
         let mut rs = R0ResultSetV1::decode_exact(&ev.result_set).unwrap();
@@ -1517,7 +1569,8 @@ mod tests {
         // 99 verify samples in one cell instead of 100 -> short sample count.
         let mut cells = grid(&[Arch::X86_64, Arch::Aarch64]);
         cells[0].verify_ns.pop();
-        let ev = orchestrate_grid(SPEC, h(b"gs"), &ids(), &all_provenance(), &cells).unwrap();
+        let ev =
+            orchestrate_grid(SPEC, h(b"gs"), &ids(), &all_provenance(), &cells, [7u8; 32]).unwrap();
         assert!(
             verify_evidence(&ev).is_err(),
             "a short verification-sample count must be rejected"
@@ -1532,6 +1585,7 @@ mod tests {
             &ids(),
             &all_provenance(),
             &grid(&[Arch::X86_64, Arch::Aarch64]),
+            [7u8; 32],
         )
         .unwrap();
         ev.rss.pop();
@@ -1549,6 +1603,7 @@ mod tests {
             &ids(),
             &all_provenance(),
             &grid(&[Arch::X86_64, Arch::Aarch64]),
+            [7u8; 32],
         )
         .unwrap();
         let mut rs = R0ResultSetV1::decode_exact(&ev.result_set).unwrap();
@@ -1580,6 +1635,7 @@ mod tests {
             &ids(),
             &prov,
             &grid(&[Arch::X86_64, Arch::Aarch64]),
+            [7u8; 32],
         )
         .unwrap();
         assert!(

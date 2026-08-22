@@ -23,7 +23,10 @@ use crate::enums::{Arch, Candidate, ProvenanceRole};
 /// runner-CONTINUITY field (`phase1_production_binary_blake3`); v4 added
 /// `phase1_identity_record_blake3`, the domain-separated address of the RETAINED Phase-1 identity
 /// record, so continuity is anchored to an independently-decoded record, not a copied hash claim.
-pub const RUNNER_ATTESTATION_SCHEMA_VERSION: u16 = 8;
+// v9 added `measurement_input_authority_address`: the SHA-256 address of the retained
+// MeasurementInputAuthorityV1 (measurement-wide) this fragment ran under — unifying the derived
+// harness-source inventory + malformed-corpus report addresses + the RSS statement-binding policy.
+pub const RUNNER_ATTESTATION_SCHEMA_VERSION: u16 = 9;
 
 /// Domain separation for [`RunnerAttestationV1::hash`].
 pub const RUNNER_ATTESTATION_PREFIX: &[u8] = b"b0-final-runner-attestation/v1\0";
@@ -125,6 +128,12 @@ pub struct RunnerAttestationV1 {
     /// SHA-256 address of the retained
     /// [`crate::venue::canonical_sp1_guest_artifact::CanonicalSp1GuestArtifactV1`].
     pub canonical_sp1_guest_artifact_address: [u8; 32],
+    // ---- v9: the retained MeasurementInputAuthorityV1 (measurement-wide) this fragment ran under.
+    // NON-ZERO for EVERY candidate (the authority is shared across the grid); a fragment whose
+    // attestation does not bind the package's authority address is refused.
+    /// SHA-256 address of the retained
+    /// [`crate::venue::measurement_input_authority::MeasurementInputAuthorityV1`].
+    pub measurement_input_authority_address: [u8; 32],
 }
 
 fn write_hexstr(w: &mut Writer, s: &str) {
@@ -207,6 +216,8 @@ impl RunnerAttestationV1 {
         w.bytes(&self.protoc_authority_address);
         // v8
         w.bytes(&self.canonical_sp1_guest_artifact_address);
+        // v9
+        w.bytes(&self.measurement_input_authority_address);
         w.into_bytes()
     }
 
@@ -288,6 +299,8 @@ impl RunnerAttestationV1 {
             r.read_array::<32>("RunnerAttestationV1.protoc_authority_address")?;
         let canonical_sp1_guest_artifact_address =
             r.read_array::<32>("RunnerAttestationV1.canonical_sp1_guest_artifact_address")?;
+        let measurement_input_authority_address =
+            r.read_array::<32>("RunnerAttestationV1.measurement_input_authority_address")?;
         Ok(Self {
             candidate,
             provenance_role,
@@ -324,6 +337,7 @@ impl RunnerAttestationV1 {
             dependency_seed_address,
             protoc_authority_address,
             canonical_sp1_guest_artifact_address,
+            measurement_input_authority_address,
         })
     }
 
@@ -459,6 +473,25 @@ impl RunnerAttestationV1 {
         if self.canonical_sp1_guest_artifact_address != [0u8; 32] {
             return Err(
                 "non-SP1 attestation carries a canonical SP1 guest artifact address; refused"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
+    /// v9: EVERY fragment (all candidates/arches) MUST bind the ONE measurement-input authority address
+    /// of the package it is sealed in — the shared measurement-input context. A zero or mismatched value
+    /// is refused (an unbound or mis-bound fragment).
+    pub fn check_bound_measurement_input_authority(
+        &self,
+        authority_address: &[u8; 32],
+    ) -> Result<(), String> {
+        if self.measurement_input_authority_address == [0u8; 32] {
+            return Err("runner attestation carries no measurement-input authority address".into());
+        }
+        if &self.measurement_input_authority_address != authority_address {
+            return Err(
+                "runner attestation measurement_input_authority_address != package authority address"
                     .into(),
             );
         }
@@ -626,6 +659,7 @@ mod tests {
             dependency_seed_address: [21; 32],
             protoc_authority_address: [22; 32],
             canonical_sp1_guest_artifact_address: [23; 32],
+            measurement_input_authority_address: [24; 32],
         }
     }
 

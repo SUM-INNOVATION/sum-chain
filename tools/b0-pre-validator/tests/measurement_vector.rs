@@ -40,8 +40,8 @@ fn spec_bytes() -> [u8; 32] {
 fn vector_is_deterministically_regenerable() {
     // Re-run the real orchestrator; the bytes and fingerprint must match the
     // committed fixture exactly. Drift => re-run emit_measurement_vector + review.
-    let (allowlist, bundles) = deterministic_demo_vector();
-    let bytes = serialize_vector(&allowlist, &bundles);
+    let (allowlist, mia, report, inv, bundles) = deterministic_demo_vector();
+    let bytes = serialize_vector(&allowlist, &mia, &report, &inv, &bundles);
     assert_eq!(
         bytes.len(),
         VECTOR.len(),
@@ -60,7 +60,8 @@ fn vector_is_deterministically_regenerable() {
 
 #[test]
 fn both_bundles_verify_exactly_as_the_frozen_rules_require() {
-    let (allowlist_bytes, bundles) = parse_vector(VECTOR).expect("vector parses");
+    let (allowlist_bytes, _mia, _report, _inv, bundles) =
+        parse_vector(VECTOR).expect("vector parses");
     // Recompute the canonical guest-set hash from the committed allowlist.
     let gs = GuestProgramAllowlistV1::decode_exact(&allowlist_bytes)
         .expect("allowlist decodes")

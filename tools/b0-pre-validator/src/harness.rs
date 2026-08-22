@@ -419,6 +419,7 @@ fn sample(
 
 fn rss(
     a: Arch,
+    s: StatementIndex,
     scope: RssScope,
     peak: u64,
     run: u32,
@@ -428,7 +429,7 @@ fn rss(
     BenchmarkRssRecordV1 {
         b0_pre_spec_hash: spec_hash(),
         r0_guest_set_hash: guest_set_hash(),
-        computation_statement_hash: id(b"rss-context"),
+        computation_statement_hash: stmt_hash(s),
         candidate: ids.candidate,
         guest_program_id: ids.program,
         verifier_material_manifest_hash: vmat_id(ids),
@@ -1065,6 +1066,7 @@ fn generate_with(candidate: Candidate, env: &Env) -> Evidence {
                 ));
                 rss_records.push(rss(
                     a,
+                    s,
                     RssScope::ProvingRun,
                     proving_rss_value(iter),
                     iter,
@@ -1073,6 +1075,7 @@ fn generate_with(candidate: Candidate, env: &Env) -> Evidence {
                 ));
                 rss_records.push(rss(
                     a,
+                    s,
                     RssScope::VerifyBatch,
                     verify_rss_value(a, iter),
                     iter,
@@ -1271,6 +1274,9 @@ pub fn verify_evidence(ev: &Evidence) -> Result<Recomputed, String> {
     let mut grid: BTreeSet<(u8, u8, u32)> = BTreeSet::new();
     let mut proof_hashes: BTreeSet<[u8; 32]> = BTreeSet::new();
     let mut env_hash: HashMap<(u8, u8, u32), [u8; 32]> = HashMap::new();
+    // proof_hash -> statement index of the proof envelope (used to bind each RSS record to the
+    // statement of the cell it actually measures).
+    let mut statement_of: HashMap<[u8; 32], u8> = HashMap::new();
     for b in &ev.envelopes {
         let e = R0ProofArtifactEnvelopeV1::decode_exact(b).map_err(|e| format!("env: {e}"))?;
         if e.encode() != *b {
@@ -1294,6 +1300,12 @@ pub fn verify_evidence(ev: &Evidence) -> Result<Recomputed, String> {
         }
         if !proof_hashes.insert(e.proof_hash) {
             return Err("duplicate proof hash".into());
+        }
+        // Refuse a conflicting duplicate proof_hash -> statement mapping (never last-write-wins);
+        // combined with the `proof_hashes` uniqueness check above, every proof_hash resolves to
+        // exactly one envelope statement.
+        if statement_of.insert(e.proof_hash, si).is_some() {
+            return Err("conflicting duplicate proof_hash -> statement mapping".into());
         }
         env_hash.insert(
             (e.arch.to_repr(), si, e.iteration_index),
@@ -1405,6 +1417,13 @@ pub fn verify_evidence(ev: &Evidence) -> Result<Recomputed, String> {
         }
         if !proof_hashes.contains(&r.proof_hash) {
             return Err("rss orphan".into());
+        }
+        // Each RSS record MUST bind the same statement as the proof envelope bearing this proof_hash.
+        // Envelopes and samples are already stmt_of-checked; without this an operator could redirect a
+        // cell's RSS to any statement (the old caller-supplied global `rss_context_hash`).
+        let rsi = stmt_of(r.computation_statement_hash, tlg, st)?;
+        if statement_of.get(&r.proof_hash) != Some(&rsi) {
+            return Err("rss statement != proof-envelope statement".into());
         }
         programs.insert(r.guest_program_id);
         locks.insert(r.candidate_dep_lock_hash);
@@ -1641,16 +1660,20 @@ mod tests {
     // (Re-frozen for the CANONICAL SP1 GUEST ARTIFACT correction: the runner attestation is v8 — it
     // gained the canonical_sp1_guest_artifact_address (the ONE shared SP1 guest ELF bound at
     // measurement time). This moved the attestation bytes folded into this fingerprint.)
+    // (Re-frozen for the MEASUREMENT-INPUT-AUTHORITY correction: the runner attestation is v9 — it
+    // gained the measurement_input_authority_address (the ONE retained MeasurementInputAuthorityV1 the
+    // package binds). This moved the attestation bytes folded into this fingerprint. The value here is a
+    // fixed synthetic seed, so the golden is independent of the draft fixtures.)
     #[test]
     fn generate_output_is_byte_stable() {
         assert_eq!(
             evidence_fingerprint(&generate()),
-            "2b69f16636c326cd6360df5512120bd316e216609c06cace636eaf23824d94a5",
+            "bad3efa6e2a8951c33ef2a402b1bd8491996597dfcdfaaa3c26ccf89403775d9",
             "SP1 generate() output drifted from the frozen (retained cpuset+attestation+identity+recipe) bytes"
         );
         assert_eq!(
             evidence_fingerprint(&generate_candidate(Candidate::Risc0)),
-            "0830919365ef3b0974f358767078af2ff64b01627239a81126f783e109b6b614",
+            "fbdcac4bd5208031d9e8bb2b44a368c1f2ca6da7466360c3f50a492d5dd2c51a",
             "RISC0 generate_candidate() output drifted from the frozen (retained cpuset+attestation+identity+recipe) bytes"
         );
     }

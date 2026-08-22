@@ -12,8 +12,141 @@
 //! value must never silently enter authoritative measurement evidence.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use serde::{Deserialize, Serialize};
+
+// ============== benchmark-harness source inventory (verifier-material causal closure) =============
+//
+// `benchmark_harness_source_hash` is the domain-separated BLAKE3 of a CANONICAL, EXPLICIT inventory of
+// the exact benchmark-harness source inputs — the causal closure that determines the verifier material
+// — computed from the CLEAN tooling root. It is NEVER a caller-supplied 64-hex value, and it is NOT the
+// runner binary hash (that is separately attested).
+//
+// Included = both verifier-material harness crates (Cargo.toml + src + tests), the shared `b0-pre-vmat`
+// canonical primitive (Cargo.toml + committed Cargo.lock + src), and `extract_material.sh` whose bytes
+// bind the lock + builder that produce the material. EXCLUDED, deliberately: the measurement RUNNER
+// sources (`b0-pre-measure-*`) — already bound independently by the tooling path-set authority AND each
+// runner attestation's `production_binary_blake3`; and `b0-pre-vmat/.gitignore` (not a build input).
+// The set is an EXPLICIT git pathspec list, never a recursive directory hash.
+pub const HARNESS_SOURCE_DOMAIN: &[u8] = b"b0-final-benchmark-harness-source/v1\0";
+
+const HARNESS_SOURCE_GLOBS: &[&str] = &[
+    "tools/b0-pre-candidates/harness/sp1-verifier-material/Cargo.toml",
+    "tools/b0-pre-candidates/harness/sp1-verifier-material/src/*.rs",
+    "tools/b0-pre-candidates/harness/sp1-verifier-material/tests/*.rs",
+    "tools/b0-pre-candidates/harness/risc0-verifier-material/Cargo.toml",
+    "tools/b0-pre-candidates/harness/risc0-verifier-material/src/*.rs",
+    "tools/b0-pre-candidates/harness/risc0-verifier-material/tests/*.rs",
+    "tools/b0-pre-vmat/Cargo.toml",
+    "tools/b0-pre-vmat/Cargo.lock",
+    "tools/b0-pre-vmat/src/*.rs",
+    "tools/b0-pre-candidates/scripts/extract_material.sh",
+];
+// Directories whose ENTIRE tracked contents (minus the documented exclude) MUST be covered by the
+// globs — so a new harness file fails closed until it is explicitly listed.
+const HARNESS_SOURCE_DIRS: &[&str] = &["tools/b0-pre-candidates/harness/", "tools/b0-pre-vmat/"];
+const HARNESS_SOURCE_EXCLUDE: &[&str] = &["tools/b0-pre-vmat/.gitignore"];
+
+fn git_lines(root: &Path, args: &[&str]) -> Result<Vec<String>, String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .map_err(|e| format!("run git {args:?}: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|s| s.to_string())
+        .collect())
+}
+
+/// Compute the canonical benchmark-harness source manifest + its domain-separated BLAKE3 digest from
+/// the CLEAN tooling root. Fail-closed: git unavailable, an untracked helper under the harness dirs, a
+/// tracked harness file not covered by the explicit globs, a symlink / non-regular git mode, or an
+/// unreadable file all REFUSE. The manifest is the retained preimage — one canonical line per input,
+/// `"<blake3_hex> <git_mode> <size>  <relpath>\n"`, LC_ALL=C sorted by relpath.
+pub fn harness_source_inventory(tooling_root: &Path) -> Result<(String, [u8; 32]), String> {
+    // No untracked helper may be smuggled under the harness dirs.
+    let mut others = vec!["ls-files", "--others", "--exclude-standard", "--"];
+    others.extend(HARNESS_SOURCE_DIRS);
+    if let Some(u) = git_lines(tooling_root, &others)?
+        .iter()
+        .find(|s| !s.is_empty())
+    {
+        return Err(format!("untracked file under harness source dirs: {u}"));
+    }
+    // Canonical inventory: tracked files matched by the explicit globs ("<mode> <obj> <stage>\t<path>").
+    let mut ls = vec!["ls-files", "-s", "--"];
+    ls.extend(HARNESS_SOURCE_GLOBS);
+    let mut modes: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    for line in git_lines(tooling_root, &ls)? {
+        if line.is_empty() {
+            continue;
+        }
+        let (meta, path) = line
+            .split_once('\t')
+            .ok_or_else(|| format!("git ls-files -s line has no tab: {line:?}"))?;
+        let mode = meta
+            .split_whitespace()
+            .next()
+            .ok_or_else(|| format!("git ls-files -s line has no mode: {line:?}"))?;
+        if mode != "100644" && mode != "100755" {
+            return Err(format!(
+                "harness source {path} has non-regular git mode {mode}"
+            ));
+        }
+        modes.insert(path.to_string(), mode.to_string());
+    }
+    if modes.is_empty() {
+        return Err("harness source inventory is empty (globs matched nothing)".into());
+    }
+    // Completeness: every tracked file under the harness DIRS (minus the documented exclude) must be
+    // covered, so a new harness file fails closed until listed.
+    let mut dir_ls = vec!["ls-files", "--"];
+    dir_ls.extend(HARNESS_SOURCE_DIRS);
+    for p in git_lines(tooling_root, &dir_ls)? {
+        if p.is_empty() || HARNESS_SOURCE_EXCLUDE.contains(&p.as_str()) {
+            continue;
+        }
+        if !modes.contains_key(&p) {
+            return Err(format!(
+                "tracked harness file absent from the canonical inventory globs (list it or exclude it): {p}"
+            ));
+        }
+    }
+    // BTreeMap already yields relpaths in ASCII byte order (LC_ALL=C).
+    let mut manifest = String::new();
+    for (rel, mode) in &modes {
+        let abs = tooling_root.join(rel);
+        let meta = std::fs::symlink_metadata(&abs).map_err(|e| format!("stat {rel}: {e}"))?;
+        if meta.file_type().is_symlink() {
+            return Err(format!("harness source {rel} is a symlink (refused)"));
+        }
+        let bytes = std::fs::read(&abs).map_err(|e| format!("read {rel}: {e}"))?;
+        let bh = hex_lower(blake3::hash(&bytes).as_bytes());
+        use std::fmt::Write as _;
+        let _ = writeln!(manifest, "{bh} {mode} {}  {rel}", bytes.len());
+    }
+    let digest = recompute_harness_source_digest(&manifest);
+    Ok((manifest, digest))
+}
+
+/// Domain-separated BLAKE3 of a canonical harness-source manifest preimage — the value BOTH verifiers
+/// recompute from the retained manifest bytes (mirrors the tooling-path-set digest formula, distinct
+/// domain).
+pub fn recompute_harness_source_digest(manifest: &str) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(HARNESS_SOURCE_DOMAIN);
+    h.update(manifest.as_bytes());
+    *h.finalize().as_bytes()
+}
 
 /// Host facts read purely from the filesystem root (everything except git state, which
 /// the binary resolves separately, and the caller-supplied build/role/arch identities).
