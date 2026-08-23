@@ -131,6 +131,8 @@ pub struct RunnerRecipeFacts {
     pub cargo_ident: String,
     pub b0_venue_embed: String,
     pub canonical_build_path: String,
+    /// The literal canonical compiler-visible CARGO_HOME (== /b0/cargo), materialized fresh per build.
+    pub canonical_cargo_home: String,
     pub per_arch_toolchain_identity: String,
     pub wrapper_blake3: String,
     pub build_argv: Vec<String>,
@@ -138,6 +140,9 @@ pub struct RunnerRecipeFacts {
     pub build_a: BuildSideFacts,
     pub build_b: BuildSideFacts,
     pub byte_equal: bool,
+    /// The fresh-per-build cargo dependency-seed materialization equality (origin == materialized_A ==
+    /// materialized_B).
+    pub cargo_seed: CargoSeedFacts,
     pub leakage_refused_prefixes: Vec<String>,
     pub leakage_permitted_prefixes: Vec<String>,
     pub leakage_clean: bool,
@@ -145,9 +150,15 @@ pub struct RunnerRecipeFacts {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct CargoSeedFacts {
+    pub origin_address: String,
+    pub materialized_a: String,
+    pub materialized_b: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct BuildSideFacts {
     pub original_root: String,
-    pub cargo_from: String,
     pub target_from: String,
     pub encoded_rustflags_hex: String,
     pub runner_sha256: String,

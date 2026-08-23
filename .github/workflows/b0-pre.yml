@@ -340,10 +340,14 @@ jobs:
           python3 -c '
           import json
           d=json.load(open("/b0-build/recipe.json"))
-          need={"candidate","arch","manifest_path","artifact_path","cargo_ident","b0_venue_embed","canonical_build_path","per_arch_toolchain_identity","wrapper_blake3","build_argv","build_env","build_a","build_b","byte_equal","leakage_refused_prefixes","leakage_permitted_prefixes","leakage_clean","evidence_root"}
+          need={"candidate","arch","manifest_path","artifact_path","cargo_ident","b0_venue_embed","canonical_build_path","canonical_cargo_home","per_arch_toolchain_identity","wrapper_blake3","build_argv","build_env","build_a","build_b","byte_equal","cargo_seed","leakage_refused_prefixes","leakage_permitted_prefixes","leakage_clean","evidence_root"}
           assert not (need-set(d)), sorted(need-set(d))
           assert d["leakage_clean"] is True and d["byte_equal"] is True
           assert d["canonical_build_path"]=="/b0/tooling", d["canonical_build_path"]
+          # Canonical /b0/cargo correction: the compiler-visible cargo home is the literal canonical
+          # /b0/cargo (materialized fresh per build, NOT remapped); it is a PERMITTED prefix, never refused.
+          assert d["canonical_cargo_home"]=="/b0/cargo", d["canonical_cargo_home"]
+          assert "/b0/cargo" in d["leakage_permitted_prefixes"], d["leakage_permitted_prefixes"]
           # Canonical build argv is EXACTLY cargo_ident (a cargo + optional +toolchain) followed by the
           # fixed subcommand/flags — the SAME construction the Rust validator check_argv enforces. Kept as
           # FULL-VECTOR equality (never a prefix / token-presence test).
@@ -355,10 +359,16 @@ jobs:
           assert canonical_argv("cargo","M")!=["cargo","build","--release","--locked","--features","real-backend","--manifest-path","M"]  # missing --offline -> reject
           assert d["build_argv"]==canonical_argv(d["cargo_ident"],d["manifest_path"]), d["build_argv"]
           assert d["build_a"]["original_root"]!=d["build_b"]["original_root"], "A/B share an original root"
+          # Exactly ONE remap per compile (the per-build target -> /b0/target); the canonical cargo home
+          # is NOT remapped (canonical-by-construction), so a 2-remap compile would be the old regime.
           for s in ("build_a","build_b"):
-              assert any(i["kind"]=="compile" and len(i["remap_args"])==2 for i in d[s]["invocations"]), s
+              assert any(i["kind"]=="compile" and i["remap_args"]==["--remap-path-prefix=%s=/b0/target"%d[s]["target_from"]] for i in d[s]["invocations"]), s
           for r in (d["build_a"]["original_root"],d["build_b"]["original_root"],d["evidence_root"]):
               assert r in d["leakage_refused_prefixes"], r
+          # Fresh-per-build cargo dependency-seed materialization equality: origin == materialized_A ==
+          # materialized_B (single 64-hex value). The sealed-import anchor re-authenticates it vs the seed.
+          cs=d["cargo_seed"]
+          assert cs["origin_address"]==cs["materialized_a"]==cs["materialized_b"] and len(cs["origin_address"])==64, cs
           # Authenticated 4-way source-input equality (origin A/B, materialized A/B) — all equal 64-hex.
           mans={d["build_a"]["origin_manifest_blake3"],d["build_a"]["materialized_manifest_blake3"],
                 d["build_b"]["origin_manifest_blake3"],d["build_b"]["materialized_manifest_blake3"]}

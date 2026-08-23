@@ -71,6 +71,13 @@ for v in SPEC_HASH MEASURE_RUNNER MEASURE_PRODUCE VMAT_BIN PROV_BIN PROVER_FIREW
 # these facts into the three retained artifacts and recomputes the structural recipe id.
 need_env B0_RUNNER_RECIPE_JSON
 [ -s "$B0_RUNNER_RECIPE_JSON" ] || die "B0_RUNNER_RECIPE_JSON does not name a non-empty file: $B0_RUNNER_RECIPE_JSON"
+# The AUTHENTICATED per-candidate dependency-seed JSON — the SAME file double_build_runner.sh consumed as
+# --dep-seed-json at the reproducible runner-build stage (its host-cargo-home unit is what /b0/cargo was
+# fail-hard materialized against). Embedded byte-identically into this fragment (verified below against
+# the recipe's dependency_seed.json_sha256), sealed into the VEC7 package, and re-authenticated by the
+# sealed-import cargo dependency-seed anchor. A fragment cannot be produced without it.
+need_env B0_DEP_SEED_JSON
+[ -s "$B0_DEP_SEED_JSON" ] || die "B0_DEP_SEED_JSON does not name a non-empty file: $B0_DEP_SEED_JSON"
 # The ONE sealed measurement-input authority package (produced pre-grid by
 # produce_measurement_input_authority.sh): the unified MeasurementInputAuthorityV1 JSON + the retained
 # malformed-corpus report + the harness-source inventory manifest. Every fragment carries these three
@@ -234,13 +241,20 @@ recipe = json.load(open(recipe_path, encoding="utf-8"))
 if canon_addr:
     recipe["canonical_sp1_guest_artifact"] = {"address": canon_addr}
 required = {"candidate", "arch", "manifest_path", "artifact_path", "cargo_ident", "b0_venue_embed",
-           "canonical_build_path", "per_arch_toolchain_identity", "wrapper_blake3", "build_argv",
-           "build_env", "build_a", "build_b", "byte_equal", "leakage_refused_prefixes",
+           "canonical_build_path", "canonical_cargo_home", "per_arch_toolchain_identity",
+           "wrapper_blake3", "build_argv", "build_env", "build_a", "build_b", "byte_equal",
+           "cargo_seed", "leakage_refused_prefixes",
            "leakage_permitted_prefixes", "leakage_clean", "evidence_root"}
 missing = required - set(recipe)
 if missing:
     sys.exit(f"runner_recipe facts missing keys: {sorted(missing)}")
-side_required = {"original_root", "cargo_from", "target_from", "encoded_rustflags_hex",
+# The compiler-visible cargo home is the literal canonical /b0/cargo (fresh per build, NOT remapped), so
+# each side has NO per-build cargo_from; the fresh-per-build seed equality lives in the top-level cargo_seed.
+seed_required = {"origin_address", "materialized_a", "materialized_b"}
+sm = seed_required - set(recipe["cargo_seed"])
+if sm:
+    sys.exit(f"runner_recipe cargo_seed missing keys: {sorted(sm)}")
+side_required = {"original_root", "target_from", "encoded_rustflags_hex",
                 "runner_sha256", "runner_blake3", "guest_image_id", "guest_methods_blake3",
                 "origin_manifest_blake3", "materialized_manifest_blake3",
                 "start_unix", "end_unix", "invocations"}
@@ -291,6 +305,25 @@ for f in ["program_id", "guest_image_hash", "guest_source_tree_hash", "candidate
         sys.exit(f"{f} differs: measurement {meas.get(f)!r} != phase-1 {p1.get(f)!r}")
 PY
 
+# ---- AUTHORITY/SEED verification GATE — BEFORE proving --------------------------------------
+# Fail-fast so the expensive measurement proving NEVER runs against an unauthenticated or mismatched
+# dependency seed: the dep-seed the runner recipe authenticated must be byte-identical here (its sha256 ==
+# the recipe facts' dependency_seed.json_sha256) and candidate-matching. (The identical bytes are embedded
+# into the fragment after proving, sealed into VEC7, and re-authenticated by the sealed-import anchor.)
+python3 - "$B0_DEP_SEED_JSON" "$B0_RUNNER_RECIPE_JSON" "$CAND" <<'PY' || die "dependency-seed verification gate failed (pre-proving)"
+import json, sys, hashlib
+dep_path, recipe_path, cand = sys.argv[1], sys.argv[2], sys.argv[3]
+dep_bytes = open(dep_path, "rb").read()
+recipe = json.load(open(recipe_path, encoding="utf-8"))
+want = recipe.get("dependency_seed", {}).get("json_sha256", "")
+got = hashlib.sha256(dep_bytes).hexdigest()
+if not want or got != want:
+    sys.exit(f"dep-seed sha256 {got} != recipe dependency_seed.json_sha256 {want!r}")
+dep = json.loads(dep_bytes)
+if dep.get("candidate") != cand:
+    sys.exit(f"dep-seed candidate {dep.get('candidate')!r} != fragment candidate {cand!r}")
+PY
+
 # ---- proving environment: firewall on PATH + dedicated proving cgroup ----------------------
 FWDIR="$SCRATCH/_fw"; mkdir -p "$FWDIR"
 cp "$PROVER_FIREWALL_SH" "$FWDIR/docker"; chmod 0755 "$FWDIR/docker"
@@ -335,6 +368,29 @@ frag = json.load(open(frag_path, encoding="utf-8"))
 frag["measurement_input_authority"] = open(mia, encoding="utf-8").read()
 frag["malformed_corpus_report"] = open(report, encoding="utf-8").read()
 frag["harness_source_inventory"] = open(inv, encoding="utf-8").read()
+json.dump(frag, open(frag_path, "w", encoding="utf-8"), indent=2)
+PY
+
+# Embed the AUTHENTICATED per-candidate dependency-seed JSON as a top-level string member, tied
+# byte-for-byte to what the runner-recipe flow authenticated: the file's sha256 MUST equal the recipe
+# facts' dependency_seed.json_sha256, and its candidate MUST match this fragment. produce() re-seals it
+# into VEC7 and the sealed-import anchor re-authenticates it against every double-build proof's cargo seed
+# origin; merge_fragments additionally requires the two SP1 fragments to carry it byte-identically.
+python3 - "$FRAG" "$B0_DEP_SEED_JSON" "$B0_RUNNER_RECIPE_JSON" "$CAND" <<'PY' || die "failed to embed the authenticated dependency-seed into the fragment"
+import json, sys, hashlib
+frag_path, dep_path, recipe_path, cand = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+dep_bytes = open(dep_path, "rb").read()
+recipe = json.load(open(recipe_path, encoding="utf-8"))
+want_sha = recipe.get("dependency_seed", {}).get("json_sha256", "")
+got_sha = hashlib.sha256(dep_bytes).hexdigest()
+if not want_sha or got_sha != want_sha:
+    sys.exit(f"dependency-seed json sha256 {got_sha} != recipe dependency_seed.json_sha256 {want_sha!r} "
+             "(the embedded dep-seed is not the byte-identical artifact the runner recipe authenticated)")
+dep = json.loads(dep_bytes)
+if dep.get("candidate") != cand:
+    sys.exit(f"dependency-seed candidate {dep.get('candidate')!r} != fragment candidate {cand!r}")
+frag = json.load(open(frag_path, encoding="utf-8"))
+frag["dependency_seed_json"] = dep_bytes.decode("utf-8")
 json.dump(frag, open(frag_path, "w", encoding="utf-8"), indent=2)
 PY
 

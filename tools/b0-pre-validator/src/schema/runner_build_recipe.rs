@@ -5,33 +5,44 @@
 //! `/b0/tooling`) and compiled THERE both times, so rustc's package `-Cmetadata`/StableCrateId (which
 //! encodes the absolute source path and which `--remap-path-prefix` CANNOT neutralize) is universal and
 //! the runner is byte-identical across the two genuinely-distinct ORIGINAL checkout roots. Those original
-//! roots never reach the compiler; they are retained as provenance + leakage-refused. Only the two
-//! per-build CARGO_HOME / target roots are remapped (TWO `--remap-path-prefix` args -> /b0/cargo,
-//! /b0/target). It retains the exact canonical build ARGV (`build --release --locked --features
-//! real-backend --manifest-path <manifest>`), the reproducibility-relevant ENV (BUILD_GIT_SHA /
-//! SOURCE_DATE_EPOCH / B0_VENUE_EMBED), the manifest/artifact paths, the cargo identity, and for BOTH
-//! build A and build B the exact `CARGO_ENCODED_RUSTFLAGS` bytes (unit separators included) plus that
-//! build's original root / CARGO_HOME / target. Every derived hash (effective encoded-rustflags digest,
-//! argv digest) is recomputed from the retained bytes at import — never trusted. No structural recipe id
-//! may claim `--locked`/`--release`/`--features real-backend` unless the retained argv proves it, which
-//! [`check_self_consistent`] enforces. Its domain-separated [`hash`] is bound by
-//! `RunnerAttestationV1.runner_build_recipe_blake3`.
+//! roots never reach the compiler; they are retained as provenance + leakage-refused.
+//!
+//! The compiler-visible CARGO_HOME is the SINGLE canonical [`CANON_CARGO`] (`/b0/cargo`) for BOTH builds
+//! — materialized FRESH per build (removed fail-hard before + after), so a canonical PATH that is never
+//! SHARED build state. It is canonical-BY-CONSTRUCTION and therefore NOT remapped: the SP1 nested
+//! `sp1-core-executor-runner` build strips `CARGO_ENCODED_RUSTFLAGS`, so the only way its vendored-dep
+//! source paths are path-independent is for the cargo home itself to be canonical. Only the per-build
+//! target root is remapped — exactly ONE `--remap-path-prefix` arg (`<target> -> /b0/target`); retaining a
+//! fake cargo-home remap (an identity map that no longer reflects the effective mapping) is refused.
+//!
+//! It retains the exact canonical build ARGV (`build --release --locked --features real-backend
+//! --manifest-path <manifest>`), the reproducibility-relevant ENV (BUILD_GIT_SHA / SOURCE_DATE_EPOCH /
+//! B0_VENUE_EMBED), the manifest/artifact paths, the cargo identity, and for BOTH build A and build B the
+//! exact `CARGO_ENCODED_RUSTFLAGS` bytes plus that build's original root / target root. Every derived hash
+//! (effective encoded-rustflags digest, argv digest) is recomputed from the retained bytes at import —
+//! never trusted. No structural recipe id may claim `--locked`/`--release`/`--features real-backend`
+//! unless the retained argv proves it, which [`check_self_consistent`] enforces. Its domain-separated
+//! [`hash`] is bound by `RunnerAttestationV1.runner_build_recipe_blake3`.
 
 use crate::codec::{DecodeError, Reader, Writer};
 use crate::enums::{Arch, Candidate};
 
-pub const RUNNER_BUILD_RECIPE_SCHEMA_VERSION: u16 = 3;
-pub const RUNNER_BUILD_RECIPE_KIND: &[u8; 32] = b"b0-final-runner-build-recipe-v3\0";
-pub const RUNNER_BUILD_RECIPE_PREFIX: &[u8] = b"b0-final-runner-build-recipe/v3\0";
+pub const RUNNER_BUILD_RECIPE_SCHEMA_VERSION: u16 = 4;
+pub const RUNNER_BUILD_RECIPE_KIND: &[u8; 32] = b"b0-final-runner-build-recipe-v4\0";
+pub const RUNNER_BUILD_RECIPE_PREFIX: &[u8] = b"b0-final-runner-build-recipe/v4\0";
 
 /// The fixed ratified canonical BUILD path — where the runner source is materialized + compiled (never a
 /// host path), and the compiler-visible source root for BOTH build A and B. Also a permitted prefix.
 pub const CANON_TOOLING: &str = "/b0/tooling";
-/// The fixed compiler-visible remap destinations for CARGO_HOME / target (never a host path).
+/// The fixed compiler-visible CARGO_HOME — the literal canonical cargo home, materialized fresh per build
+/// (canonical-by-construction; NOT a remap destination). Also a permitted prefix.
 pub const CANON_CARGO: &str = "/b0/cargo";
+/// The fixed remap destination for the per-build target root (never a host path). Also a permitted prefix.
 pub const CANON_TARGET: &str = "/b0/target";
 
-/// The unit separator that delimits the two remaps inside `CARGO_ENCODED_RUSTFLAGS`.
+/// The unit separator that would delimit multiple remaps inside `CARGO_ENCODED_RUSTFLAGS`. With the
+/// canonical cargo home there is exactly ONE remap (the target), so a well-formed value carries no
+/// separator; the constant is retained for the strict single-remap parse.
 pub const UNIT_SEP: u8 = 0x1f;
 
 /// The structural recipe-id domain (mirrors `lib.sh b0_runner_remap_recipe_id`). The preimage names the
@@ -41,14 +52,15 @@ pub const UNIT_SEP: u8 = 0x1f;
 pub const RUNNER_REMAP_RECIPE_DOMAIN: &str = "b0-final-runner-remap-recipe/v1";
 
 /// The exact bytes of ONE build side (A or B): its DISTINCT original checkout root (provenance only —
-/// never compiler-visible), its remapped CARGO_HOME / target roots, and the exact encoded rustflags.
+/// never compiler-visible), its remapped target root, and the exact encoded rustflags. There is no
+/// per-build cargo root: the compiler-visible cargo home is the shared canonical [`CANON_CARGO`]
+/// (top-level `canonical_cargo_home`), materialized fresh per build and NOT remapped.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BuildSide {
     /// The build's original checkout root (materialized at the canonical build path; NOT remapped).
     pub original_root: String,
-    pub cargo_from: String,
     pub target_from: String,
-    /// Exact `CARGO_ENCODED_RUSTFLAGS` bytes (two `--remap-path-prefix=FROM=TO` args, `\x1f`-delimited).
+    /// Exact `CARGO_ENCODED_RUSTFLAGS` bytes (exactly one `--remap-path-prefix=FROM=TO` arg; the target).
     pub encoded_rustflags: Vec<u8>,
 }
 
@@ -69,6 +81,9 @@ pub struct RunnerBuildRecipeV1 {
     pub b0_venue_embed: String,
     /// The ratified canonical build path both A and B were materialized + compiled at (== [`CANON_TOOLING`]).
     pub canonical_build_path: String,
+    /// The literal canonical compiler-visible CARGO_HOME both A and B used (== [`CANON_CARGO`]);
+    /// materialized fresh per build, canonical-by-construction, NOT remapped.
+    pub canonical_cargo_home: String,
     pub build_a: BuildSide,
     pub build_b: BuildSide,
     pub measured_source_commit: String, // 40-hex
@@ -156,41 +171,36 @@ fn r_vec_str(
 impl BuildSide {
     fn encode(&self, w: &mut Writer) {
         w_str(w, &self.original_root);
-        w_str(w, &self.cargo_from);
         w_str(w, &self.target_from);
         w_blob(w, &self.encoded_rustflags);
     }
     fn decode(r: &mut Reader, ctx: &'static str) -> Result<Self, DecodeError> {
         Ok(Self {
             original_root: r_str(r, 4096, ctx)?,
-            cargo_from: r_str(r, 4096, ctx)?,
             target_from: r_str(r, 4096, ctx)?,
             encoded_rustflags: r_blob(r, 65536, ctx)?,
         })
     }
-    /// Parse the exact encoded rustflags into the two `(from, to)` remaps, in argv order.
-    /// Enforces: exactly two `--remap-path-prefix=FROM=TO` args, `\x1f`-delimited, no third (the source
-    /// is NOT remapped — it is canonical by construction).
-    pub fn parse_two_remaps(&self) -> Result<[(String, String); 2], String> {
+    /// Parse the exact encoded rustflags into the SINGLE `(from, to)` remap, in argv order.
+    /// Enforces: exactly ONE `--remap-path-prefix=FROM=TO` arg, no `\x1f` separator, no second remap
+    /// (neither the source NOR the canonical cargo home is remapped — both canonical by construction).
+    pub fn parse_one_remap(&self) -> Result<(String, String), String> {
         let parts: Vec<&[u8]> = self.encoded_rustflags.split(|&b| b == UNIT_SEP).collect();
-        if parts.len() != 2 {
+        if parts.len() != 1 {
             return Err(format!(
-                "encoded rustflags is not exactly two unit-separated remaps ({} parts)",
+                "encoded rustflags is not exactly one remap ({} unit-separated parts; the canonical \
+                 cargo home is not remapped)",
                 parts.len()
             ));
         }
-        let mut out: Vec<(String, String)> = Vec::with_capacity(2);
-        for p in parts {
-            let s = std::str::from_utf8(p).map_err(|_| "remap arg is not UTF-8".to_string())?;
-            let rest = s
-                .strip_prefix("--remap-path-prefix=")
-                .ok_or_else(|| format!("not a --remap-path-prefix arg: {s:?}"))?;
-            let eq = rest
-                .rfind('=')
-                .ok_or_else(|| format!("remap arg has no FROM=TO: {s:?}"))?;
-            out.push((rest[..eq].to_string(), rest[eq + 1..].to_string()));
-        }
-        Ok([out[0].clone(), out[1].clone()])
+        let s = std::str::from_utf8(parts[0]).map_err(|_| "remap arg is not UTF-8".to_string())?;
+        let rest = s
+            .strip_prefix("--remap-path-prefix=")
+            .ok_or_else(|| format!("not a --remap-path-prefix arg: {s:?}"))?;
+        let eq = rest
+            .rfind('=')
+            .ok_or_else(|| format!("remap arg has no FROM=TO: {s:?}"))?;
+        Ok((rest[..eq].to_string(), rest[eq + 1..].to_string()))
     }
     /// The derived BLAKE3 of the exact encoded-rustflags bytes (convenience; recomputed from bytes).
     pub fn effective_encoded_rustflags_blake3(&self) -> [u8; 32] {
@@ -208,7 +218,7 @@ impl RunnerBuildRecipeV1 {
             let _ = write!(wh, "{b:02x}");
         }
         let pre = format!(
-            "{RUNNER_REMAP_RECIPE_DOMAIN}|build_at={CANON_TOOLING}|remap:cargo_home={CANON_CARGO},target={CANON_TARGET}|encoded_rustflags=unit-separator-2-remap|flags=--locked|SOURCE_DATE_EPOCH=0|BUILD_GIT_SHA={measured_source_commit}|toolchain=ratified-per-arch(authority-record)|wrapper_blake3={wh}"
+            "{RUNNER_REMAP_RECIPE_DOMAIN}|build_at={CANON_TOOLING}|cargo_home={CANON_CARGO}(canonical-by-construction,fresh-per-build)|remap:target={CANON_TARGET}|encoded_rustflags=unit-separator-1-remap|flags=--locked|SOURCE_DATE_EPOCH=0|BUILD_GIT_SHA={measured_source_commit}|toolchain=ratified-per-arch(authority-record)|wrapper_blake3={wh}"
         );
         *blake3::hash(pre.as_bytes()).as_bytes()
     }
@@ -241,6 +251,7 @@ impl RunnerBuildRecipeV1 {
         w_str(&mut w, &self.cargo_ident);
         w_str(&mut w, &self.b0_venue_embed);
         w_str(&mut w, &self.canonical_build_path);
+        w_str(&mut w, &self.canonical_cargo_home);
         self.build_a.encode(&mut w);
         self.build_b.encode(&mut w);
         w_hexstr(&mut w, &self.measured_source_commit);
@@ -295,6 +306,7 @@ impl RunnerBuildRecipeV1 {
         let cargo_ident = r_str(r, 4096, "RunnerBuildRecipeV1.cargo_ident")?;
         let b0_venue_embed = r_str(r, 8, "RunnerBuildRecipeV1.b0_venue_embed")?;
         let canonical_build_path = r_str(r, 4096, "RunnerBuildRecipeV1.canonical_build_path")?;
+        let canonical_cargo_home = r_str(r, 4096, "RunnerBuildRecipeV1.canonical_cargo_home")?;
         let build_a = BuildSide::decode(r, "RunnerBuildRecipeV1.build_a")?;
         let build_b = BuildSide::decode(r, "RunnerBuildRecipeV1.build_b")?;
         let measured_source_commit = r_hexstr(r, 40, "RunnerBuildRecipeV1.measured_source_commit")?;
@@ -318,6 +330,7 @@ impl RunnerBuildRecipeV1 {
             cargo_ident,
             b0_venue_embed,
             canonical_build_path,
+            canonical_cargo_home,
             build_a,
             build_b,
             measured_source_commit,
@@ -402,44 +415,45 @@ impl RunnerBuildRecipeV1 {
         Ok(())
     }
 
-    /// A build side's encoded rustflags MUST decode to exactly the two canonical remaps for THAT side's
-    /// remapped roots (cargo->/b0/cargo, target->/b0/target), in that order. The original root is NOT
-    /// remapped (it is materialized at the canonical build path), but it must be distinct + non-overlapping
-    /// from the cargo/target roots.
+    /// A build side's encoded rustflags MUST decode to exactly the ONE canonical target remap for THAT
+    /// side's target root (target->/b0/target), and no second remap. Neither the original root nor the
+    /// canonical cargo home is remapped (both canonical by construction), but the original root must be
+    /// distinct + non-overlapping from the target root.
     fn check_side(side: &BuildSide, which: &str) -> Result<(), String> {
-        let [(f0, t0), (f1, t1)] = side
-            .parse_two_remaps()
+        let (f0, t0) = side
+            .parse_one_remap()
             .map_err(|e| format!("build {which} encoded rustflags: {e}"))?;
-        if f0 != side.cargo_from || t0 != CANON_CARGO {
+        if f0 != side.target_from || t0 != CANON_TARGET {
             return Err(format!(
-                "build {which} cargo remap {f0}={t0} != {}={CANON_CARGO}",
-                side.cargo_from
-            ));
-        }
-        if f1 != side.target_from || t1 != CANON_TARGET {
-            return Err(format!(
-                "build {which} target remap {f1}={t1} != {}={CANON_TARGET}",
+                "build {which} target remap {f0}={t0} != {}={CANON_TARGET}",
                 side.target_from
             ));
         }
-        for (a, b) in [
-            (&side.original_root, &side.cargo_from),
-            (&side.original_root, &side.target_from),
-            (&side.cargo_from, &side.target_from),
-        ] {
-            if a == b {
-                return Err(format!("build {which} roots not distinct: {a}"));
-            }
-            if b.starts_with(&format!("{a}/")) || a.starts_with(&format!("{b}/")) {
-                return Err(format!("build {which} roots overlap: {a} / {b}"));
-            }
+        if side.original_root == side.target_from {
+            return Err(format!(
+                "build {which} roots not distinct: {}",
+                side.original_root
+            ));
+        }
+        if side
+            .target_from
+            .starts_with(&format!("{}/", side.original_root))
+            || side
+                .original_root
+                .starts_with(&format!("{}/", side.target_from))
+        {
+            return Err(format!(
+                "build {which} roots overlap: {} / {}",
+                side.original_root, side.target_from
+            ));
         }
         Ok(())
     }
 
     /// Fail-closed self-consistency over the RETAINED bytes: argv proves the flags; each side's exact
-    /// encoded rustflags decode to the two canonical cargo/target remaps; the canonical build path is the
-    /// ratified /b0/tooling; A and B expose GENUINELY DIFFERENT original checkout roots (the distinction
+    /// encoded rustflags decode to the ONE canonical target remap (the canonical cargo home is NOT
+    /// remapped); the canonical build path is the ratified /b0/tooling and the canonical cargo home is
+    /// the ratified /b0/cargo; A and B expose GENUINELY DIFFERENT original checkout roots (the distinction
     /// the canonical-path build neutralizes); the structural recipe id recomputes.
     pub fn check_self_consistent(&self) -> Result<(), String> {
         if self.b0_venue_embed != "0" && self.b0_venue_embed != "1" {
@@ -451,6 +465,12 @@ impl RunnerBuildRecipeV1 {
             return Err(format!(
                 "canonical_build_path {} != ratified {CANON_TOOLING}",
                 self.canonical_build_path
+            ));
+        }
+        if self.canonical_cargo_home != CANON_CARGO {
+            return Err(format!(
+                "canonical_cargo_home {} != ratified {CANON_CARGO}",
+                self.canonical_cargo_home
             ));
         }
         Self::check_side(&self.build_a, "A")?;
@@ -478,12 +498,8 @@ pub(crate) fn tests_sample() -> RunnerBuildRecipeV1 {
 mod tests {
     use super::*;
 
-    fn enc(cargo: &str, target: &str) -> Vec<u8> {
-        let mut v = Vec::new();
-        v.extend_from_slice(format!("--remap-path-prefix={cargo}={CANON_CARGO}").as_bytes());
-        v.push(UNIT_SEP);
-        v.extend_from_slice(format!("--remap-path-prefix={target}={CANON_TARGET}").as_bytes());
-        v
+    fn enc(target: &str) -> Vec<u8> {
+        format!("--remap-path-prefix={target}={CANON_TARGET}").into_bytes()
     }
 
     pub(crate) fn sample() -> RunnerBuildRecipeV1 {
@@ -513,17 +529,16 @@ mod tests {
             cargo_ident: "cargo".into(),
             b0_venue_embed: "0".into(),
             canonical_build_path: CANON_TOOLING.into(),
+            canonical_cargo_home: CANON_CARGO.into(),
             build_a: BuildSide {
                 original_root: "/b0-input/a/tooling".into(),
-                cargo_from: "/b0-input/a/cargo".into(),
                 target_from: "/b0-input/a/target".into(),
-                encoded_rustflags: enc("/b0-input/a/cargo", "/b0-input/a/target"),
+                encoded_rustflags: enc("/b0-input/a/target"),
             },
             build_b: BuildSide {
                 original_root: "/b0-input/b/tooling".into(),
-                cargo_from: "/b0-input/b/cargo".into(),
                 target_from: "/b0-input/b/target".into(),
-                encoded_rustflags: enc("/b0-input/b/cargo", "/b0-input/b/target"),
+                encoded_rustflags: enc("/b0-input/b/target"),
             },
             measured_source_commit: msc,
             tooling_commit: "1".repeat(40),
@@ -569,13 +584,13 @@ mod tests {
     }
 
     #[test]
-    fn side_cargo_root_not_matching_encoded_rustflags_refused() {
+    fn side_target_root_not_matching_encoded_rustflags_refused() {
         let mut a = sample();
-        a.build_a.cargo_from = "/b0-input/a/OTHER".into(); // encoded rustflags still says .../cargo
+        a.build_a.target_from = "/b0-input/a/OTHER".into(); // encoded rustflags still says .../target
         assert!(a
             .check_self_consistent()
             .unwrap_err()
-            .contains("cargo remap"));
+            .contains("target remap"));
     }
 
     #[test]
@@ -586,6 +601,16 @@ mod tests {
             .check_self_consistent()
             .unwrap_err()
             .contains("canonical_build_path"));
+    }
+
+    #[test]
+    fn wrong_canonical_cargo_home_refused() {
+        let mut a = sample();
+        a.canonical_cargo_home = "/b0-input/a/cargo".into();
+        assert!(a
+            .check_self_consistent()
+            .unwrap_err()
+            .contains("canonical_cargo_home"));
     }
 
     #[test]
@@ -643,16 +668,18 @@ mod tests {
     }
 
     #[test]
-    fn build_b_missing_remap_refused() {
-        // Build A valid; build B's encoded rustflags carries only ONE remap.
+    fn build_b_second_remap_refused() {
+        // Build A valid; build B's encoded rustflags carries a SECOND remap (a fake cargo-home remap).
         let mut a = sample();
-        let mut one = Vec::new();
-        one.extend_from_slice(b"--remap-path-prefix=/b0-input/b/cargo=/b0/cargo");
-        a.build_b.encoded_rustflags = one;
+        let mut two = Vec::new();
+        two.extend_from_slice(b"--remap-path-prefix=/b0-input/b/target=/b0/target");
+        two.push(UNIT_SEP);
+        two.extend_from_slice(b"--remap-path-prefix=/b0-input/b/cargo=/b0/cargo");
+        a.build_b.encoded_rustflags = two;
         assert!(a
             .check_self_consistent()
             .unwrap_err()
-            .contains("not exactly two"));
+            .contains("not exactly one remap"));
     }
 
     #[test]

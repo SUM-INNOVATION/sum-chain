@@ -33,7 +33,7 @@ impl<'a> Rd<'a> {
 
 fn parse(bytes: &[u8]) -> (Vec<u8>, Vec<(u16, harness::Evidence)>) {
     let mut r = Rd { b: bytes, p: 0 };
-    assert_eq!(r.take(13), b"B0PREMEASVEC6", "bad magic");
+    assert_eq!(r.take(13), b"B0PREMEASVEC7", "bad magic");
     let allowlist = r.blob();
     let _mia = r.blob();
     let _report = r.blob();
@@ -52,6 +52,8 @@ fn parse(bytes: &[u8]) -> (Vec<u8>, Vec<(u16, harness::Evidence)>) {
             }
             lists.push(v);
         }
+        // VEC7: the per-candidate DependencySeedV1 JSON blob (after the 12 lists, before verifier_material).
+        let dependency_seed_json = r.blob();
         let verifier_material = r.blob();
         let result_set = r.blob();
         let mut it = lists.into_iter();
@@ -70,6 +72,7 @@ fn parse(bytes: &[u8]) -> (Vec<u8>, Vec<(u16, harness::Evidence)>) {
                 inventories_b: it.next().unwrap(),
                 double_build_proofs: it.next().unwrap(),
                 leakage_reports: it.next().unwrap(),
+                dependency_seed_json,
                 verifier_material,
                 result_set,
             },
@@ -144,6 +147,7 @@ fn independent_rejects_tampered_producer_vector() {
         inventories_b: sp1.inventories_b.clone(),
         double_build_proofs: sp1.double_build_proofs.clone(),
         leakage_reports: sp1.leakage_reports.clone(),
+        dependency_seed_json: sp1.dependency_seed_json.clone(),
         verifier_material: sp1.verifier_material.clone(),
         result_set: sp1.result_set.clone(),
     };
@@ -167,6 +171,7 @@ fn independent_rejects_tampered_producer_vector() {
         inventories_b: sp1.inventories_b.clone(),
         double_build_proofs: sp1.double_build_proofs.clone(),
         leakage_reports: sp1.leakage_reports.clone(),
+        dependency_seed_json: sp1.dependency_seed_json.clone(),
         verifier_material: sp1.verifier_material.clone(),
         result_set: sp1.result_set.clone(),
     };

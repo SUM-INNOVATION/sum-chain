@@ -321,6 +321,21 @@ fn hexsw(b: &mut Vec<u8>, s: &str) {
 fn seedb(s: &[u8]) -> [u8; 32] {
     *blake3::hash(s).as_bytes()
 }
+/// The FIXED synthetic cargo seed-content address every synthetic assembly path uses as the double-build
+/// proof's `cargo_seed_origin` (== materialized A == B) AND the host-cargo-home seed-content of the
+/// synthetic `DependencySeedV1`. Seed-fn-independent, so the proof and the sealed dependency-seed are
+/// mutually consistent. Byte-identical to the reference `measurement::synth_cargo_seed_content`.
+fn synth_cargo_seed_content() -> [u8; 32] {
+    *blake3::hash(b"b0-final-synth-cargo-seed-content/v1").as_bytes()
+}
+/// The synthetic self-consistent `DependencySeedV1` for `candidate` (1 = SP1, 2 = RISC0) matching
+/// [`synth_cargo_seed_content`]: returns `(json_bytes, record_address)`. The synthetic attestation's
+/// `dependency_seed_address` is set to `record_address` and the bundle seals `json_bytes`, so the
+/// sealed-import cargo dependency-seed anchor accepts.
+fn synth_dependency_seed(candidate: u16) -> (Vec<u8>, [u8; 32]) {
+    let cand = if candidate == 2 { "risc0" } else { "sp1" };
+    crate::dependency_seed::DependencySeedV1::synthetic_json(cand, synth_cargo_seed_content())
+}
 fn cand_paths(candidate: u16) -> (&'static str, &'static str) {
     if candidate == 2 {
         (
@@ -336,9 +351,9 @@ fn cand_paths(candidate: u16) -> (&'static str, &'static str) {
 }
 fn enc_side(b: &mut Vec<u8>, t: &str) {
     str16w(b, &format!("/b0-input/{t}/tooling")); // original_root (provenance only; not compiler-visible)
-    str16w(b, &format!("/b0-input/{t}/cargo"));
     str16w(b, &format!("/b0-input/{t}/target"));
-    let enc = format!("--remap-path-prefix=/b0-input/{t}/cargo=/b0/cargo\u{1f}--remap-path-prefix=/b0-input/{t}/target=/b0/target");
+    // Exactly ONE remap: the target (the canonical cargo home is NOT remapped).
+    let enc = format!("--remap-path-prefix=/b0-input/{t}/target=/b0/target");
     b.extend_from_slice(&(enc.len() as u32).to_le_bytes());
     b.extend_from_slice(enc.as_bytes());
 }
@@ -347,8 +362,8 @@ fn enc_build_recipe(candidate: u16, arch: u8, measured: &str) -> (Vec<u8>, [u8; 
     let recipe_id = closure::compute_recipe_id(measured, &wrapper);
     let (manifest, artifact) = cand_paths(candidate);
     let mut b = Vec::new();
-    b.extend_from_slice(b"b0-final-runner-build-recipe-v3\0");
-    b.extend_from_slice(&3u16.to_le_bytes());
+    b.extend_from_slice(b"b0-final-runner-build-recipe-v4\0");
+    b.extend_from_slice(&4u16.to_le_bytes());
     b.extend_from_slice(&candidate.to_le_bytes());
     b.push(arch);
     b.extend_from_slice(&recipe_id);
@@ -383,6 +398,7 @@ fn enc_build_recipe(candidate: u16, arch: u8, measured: &str) -> (Vec<u8>, [u8; 
     str16w(&mut b, "cargo");
     str16w(&mut b, "0");
     str16w(&mut b, "/b0/tooling"); // canonical_build_path
+    str16w(&mut b, "/b0/cargo"); // canonical_cargo_home
     enc_side(&mut b, "a");
     enc_side(&mut b, "b");
     hexsw(&mut b, measured);
@@ -396,7 +412,7 @@ fn enc_build_recipe(candidate: u16, arch: u8, measured: &str) -> (Vec<u8>, [u8; 
     (b, addr)
 }
 fn compile_record_address(t: &str) -> [u8; 32] {
-    let body = format!("b0-final-rustc-invocation/v2\nkind=compile\nremap_arg=--remap-path-prefix=/b0-input/{t}/cargo=/b0/cargo\nremap_arg=--remap-path-prefix=/b0-input/{t}/target=/b0/target");
+    let body = format!("b0-final-rustc-invocation/v2\nkind=compile\nremap_arg=--remap-path-prefix=/b0-input/{t}/target=/b0/target");
     *blake3::hash(body.as_bytes()).as_bytes()
 }
 fn enc_inv_inventory(candidate: u16, arch: u8, tag: u8) -> (Vec<u8>, [u8; 32]) {
@@ -409,11 +425,7 @@ fn enc_inv_inventory(candidate: u16, arch: u8, tag: u8) -> (Vec<u8>, [u8; 32]) {
     b.push(tag);
     b.extend_from_slice(&1u32.to_le_bytes()); // one compile entry
     str16w(&mut b, "compile");
-    b.extend_from_slice(&2u32.to_le_bytes());
-    str16w(
-        &mut b,
-        &format!("--remap-path-prefix=/b0-input/{t}/cargo=/b0/cargo"),
-    );
+    b.extend_from_slice(&1u32.to_le_bytes()); // exactly ONE remap arg (the target)
     str16w(
         &mut b,
         &format!("--remap-path-prefix=/b0-input/{t}/target=/b0/target"),
@@ -431,7 +443,6 @@ fn enc_proof_side(
     e: u64,
 ) {
     str16w(b, &format!("/b0-input/{t}/tooling"));
-    str16w(b, &format!("/b0-input/{t}/cargo"));
     str16w(b, &format!("/b0-input/{t}/target"));
     b.extend_from_slice(&seedb(b"runner-sha256"));
     b.extend_from_slice(&seedb(b"runner-blake3"));
@@ -440,6 +451,7 @@ fn enc_proof_side(
     b.extend_from_slice(&inv_addr);
     b.extend_from_slice(&seedb(b"source-input-manifest")); // origin_manifest_blake3
     b.extend_from_slice(&seedb(b"source-input-manifest")); // materialized_manifest_blake3 (== origin)
+    b.extend_from_slice(&synth_cargo_seed_content()); // materialized_cargo_seed_blake3 (== seed origin)
     b.extend_from_slice(&s.to_le_bytes());
     b.extend_from_slice(&e.to_le_bytes());
 }
@@ -465,12 +477,13 @@ fn enc_double_build_proof(
     };
     let mut b = Vec::new();
     b.extend_from_slice(b"b0-final-runner-dbl-build-proof0");
-    b.extend_from_slice(&2u16.to_le_bytes());
+    b.extend_from_slice(&3u16.to_le_bytes());
     b.extend_from_slice(&candidate.to_le_bytes());
     b.push(arch);
     b.extend_from_slice(&seedb(b"wrapper-blake3"));
     enc_proof_side(&mut b, "a", &guest_img, inv_a_addr, 100, 200);
     enc_proof_side(&mut b, "b", &guest_img, inv_b_addr, 200, 300);
+    b.extend_from_slice(&synth_cargo_seed_content()); // cargo_seed_origin_blake3 (== A == B)
     b.push(1); // byte_equal
     b.extend_from_slice(&repro_pair());
     let addr = closure::runner_double_build_proof_address(&b);
@@ -485,13 +498,12 @@ fn enc_leak_report(candidate: u16, arch: u8) -> (Vec<u8>, [u8; 32]) {
     b.extend_from_slice(&seedb(b"runner-blake3"));
     b.push(1); // clean
     str16w(&mut b, "/tmp/b0-evid"); // evidence_root
-                                    // refused: sorted union of the six A/B roots + evidence root
+                                    // refused: sorted union of the four A/B roots + evidence root
+                                    // (the canonical cargo home /b0/cargo is PERMITTED, never refused)
     let mut refused = vec![
         "/b0-input/a/tooling".to_string(),
-        "/b0-input/a/cargo".to_string(),
         "/b0-input/a/target".to_string(),
         "/b0-input/b/tooling".to_string(),
-        "/b0-input/b/cargo".to_string(),
         "/b0-input/b/target".to_string(),
         "/tmp/b0-evid".to_string(),
     ];
@@ -576,9 +588,12 @@ fn enc_runner_attestation(
         measured,
         &seed(b"wrapper-blake3"),
     ));
-    // v7: offline-provisioning authority addresses (host toolchain / dependency seed / protoc).
+    // v7: offline-provisioning authority addresses (host toolchain / dependency seed / protoc). The
+    // dependency-seed address is the self-consistent synthetic DependencySeedV1 record address whose
+    // host-cargo-home seed-content == this proof's cargo seed origin, so the sealed-import cargo
+    // dependency-seed anchor accepts (byte-identical to the reference synth path).
     b.extend_from_slice(&seed(b"host-toolchain-addr"));
-    b.extend_from_slice(&seed(b"dependency-seed-addr"));
+    b.extend_from_slice(&synth_dependency_seed(candidate).1);
     b.extend_from_slice(&seed(b"protoc-authority-addr"));
     // v8: canonical SP1 guest artifact address (SP1 fixture uses the same seed as the reference synth).
     b.extend_from_slice(&seed(b"canonical-sp1-guest-addr"));
@@ -706,6 +721,10 @@ pub struct Evidence {
     pub inventories_b: Vec<Vec<u8>>,
     pub double_build_proofs: Vec<Vec<u8>>,
     pub leakage_reports: Vec<Vec<u8>>,
+    /// Retained per-CANDIDATE `DependencySeedV1` JSON bytes (VEC7). Decoded + authenticated from scratch at
+    /// sealed import and cross-bound to every provenance's double-build proof (the cargo seed origin
+    /// anchor); shared across this bundle's arches (the vendored dependency graph is arch-independent).
+    pub dependency_seed_json: Vec<u8>,
     pub verifier_material: Vec<u8>,
     pub result_set: Vec<u8>,
 }
@@ -928,6 +947,9 @@ fn generate_with(candidate: u16, env: &Env) -> Evidence {
         inventories_b,
         double_build_proofs,
         leakage_reports,
+        // Seal the self-consistent DependencySeedV1 whose host-cargo-home seed-content == every proof's
+        // cargo seed origin (same candidate + host seed the attestations bound their dependency_seed_address to).
+        dependency_seed_json: synth_dependency_seed(ids.candidate).0,
         verifier_material: enc_vmat_ids(ids),
         result_set,
     }
@@ -1074,6 +1096,12 @@ pub fn verify_evidence(ev: &Evidence) -> Result<Recomputed, String> {
     {
         return Err("retained runner-recipe artifact count != provenance count".into());
     }
+    // Decode + authenticate the retained per-candidate DependencySeedV1 ONCE from the sealed VEC7 bytes;
+    // each provenance's cargo-seed origin anchors to this same record below (a missing/empty/ill-formed
+    // blob fails here).
+    let dependency_seed =
+        crate::dependency_seed::DependencySeedV1::from_json(&ev.dependency_seed_json)
+            .map_err(|e| format!("retained dependency-seed artifact: {e}"))?;
     let mut artifact_keys: HashSet<(u8, u8)> = HashSet::new();
     for (i, pb) in ev.provenances.iter().enumerate() {
         let p = closure::decode_prov(pb).map_err(|e| format!("prov: {e:?}"))?;
@@ -1124,6 +1152,13 @@ pub fn verify_evidence(ev: &Evidence) -> Result<Recomputed, String> {
             leak_addr,
         )
         .map_err(|e| format!("runner path-independence: {e}"))?;
+        // Sealed-import cargo dependency-SEED anchor: authenticate the retained per-candidate
+        // DependencySeedV1 from scratch and require the proof's cargo seed origin == its host-cargo-home
+        // seed-content address AND the record's authenticated address == the attestation's bound
+        // dependency_seed_address. Defeats a mutually-edited proof (forged origin==A==B, authentic seed
+        // unchanged) via the origin==content check, and an edit-both via the seed's own authority binding.
+        closure::bind_dependency_seed(&att, &proof, &dependency_seed)
+            .map_err(|e| format!("cargo dependency-seed anchor: {e}"))?;
         if !artifact_keys.insert((p.arch, p.role)) {
             return Err("duplicate retained artifact (arch, role)".into());
         }
@@ -1406,6 +1441,7 @@ mod tests {
             inventories_b: ev.inventories_b.clone(),
             double_build_proofs: ev.double_build_proofs.clone(),
             leakage_reports: ev.leakage_reports.clone(),
+            dependency_seed_json: ev.dependency_seed_json.clone(),
             verifier_material: ev.verifier_material.clone(),
             result_set: ev.result_set.clone(),
         }

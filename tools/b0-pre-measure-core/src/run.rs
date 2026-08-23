@@ -552,7 +552,6 @@ mod tests {
                 runner_recipe: {
                     let side = |t: &str, s: u64, e: u64| crate::facts::BuildSideFacts {
                         original_root: format!("/b0-input/{t}/tooling"),
-                        cargo_from: format!("/b0-input/{t}/cargo"),
                         target_from: format!("/b0-input/{t}/target"),
                         encoded_rustflags_hex: "1f".into(),
                         runner_sha256: h("52"),
@@ -565,10 +564,9 @@ mod tests {
                         end_unix: e,
                         invocations: vec![crate::facts::RustcInvocationFacts {
                             kind: "compile".into(),
-                            remap_args: vec![
-                                format!("--remap-path-prefix=/b0-input/{t}/cargo=/b0/cargo"),
-                                format!("--remap-path-prefix=/b0-input/{t}/target=/b0/target"),
-                            ],
+                            remap_args: vec![format!(
+                                "--remap-path-prefix=/b0-input/{t}/target=/b0/target"
+                            )],
                             record_address: h("e6"),
                         }],
                     };
@@ -580,6 +578,7 @@ mod tests {
                         cargo_ident: "cargo".into(),
                         b0_venue_embed: "0".into(),
                         canonical_build_path: "/b0/tooling".into(),
+                        canonical_cargo_home: "/b0/cargo".into(),
                         per_arch_toolchain_identity: h("e2"),
                         wrapper_blake3: h("e3"),
                         build_argv: [
@@ -603,6 +602,11 @@ mod tests {
                         build_a: side("a", 100, 200),
                         build_b: side("b", 200, 300),
                         byte_equal: true,
+                        cargo_seed: crate::facts::CargoSeedFacts {
+                            origin_address: h("5c"),
+                            materialized_a: h("5c"),
+                            materialized_b: h("5c"),
+                        },
                         leakage_refused_prefixes: vec![
                             "/b0-input/a/tooling".into(),
                             "/tmp/b0-evid".into(),

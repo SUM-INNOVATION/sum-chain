@@ -14,6 +14,7 @@
 
 pub mod canonical_sp1_guest;
 pub mod closure;
+pub mod dependency_seed;
 pub mod enc;
 pub mod exp;
 pub mod fixed;

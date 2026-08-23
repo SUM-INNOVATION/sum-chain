@@ -1,27 +1,33 @@
 //! `RunnerDoubleBuildProofV1` — the RETAINED proof that TWO clean builds from genuinely-distinct ORIGINAL
-//! checkout roots — both materialized + compiled at the one canonical build path — produced the SAME
-//! runner (and, for RISC Zero, the SAME embedded guest). It holds, for BOTH build A and build B
-//! independently: that build's original root / CARGO_HOME / target roots, its runner SHA-256 + BLAKE3,
-//! its RISC Zero embedded-guest image id + canonical methods.rs digest, its rustc-invocation inventory
-//! ADDRESS, its authenticated ORIGIN + MATERIALIZED full-build-input manifest addresses, and its
-//! start/end timestamps; plus the shared wrapper identity, the derived byte-equality verdict, and the
-//! reproducibility-pair digest (recomputed from the A/B runner hashes).
+//! checkout roots — both materialized + compiled at the one canonical build path, both using the one
+//! canonical cargo home materialized FRESH per build — produced the SAME runner (and, for RISC Zero, the
+//! SAME embedded guest). It holds, for BOTH build A and build B independently: that build's original root
+//! / target root, its runner SHA-256 + BLAKE3, its RISC Zero embedded-guest image id + canonical
+//! methods.rs digest, its rustc-invocation inventory ADDRESS, its authenticated ORIGIN + MATERIALIZED
+//! full-build-input manifest addresses, its MATERIALIZED cargo dependency-seed inventory address, and its
+//! start/end timestamps; plus the shared wrapper identity, the retained cargo dependency-seed ORIGIN
+//! authority address, the derived byte-equality verdict, and the reproducibility-pair digest (recomputed
+//! from the A/B runner hashes).
 //!
 //! At sealed import both verifiers, against `RunnerBuildRecipeV1` and the two retained inventories,
 //! require: A and B original roots genuinely DIFFER and equal the recipe's per-build roots; the
 //! authenticated source inputs agree 4-way (origin_A == materialized_A == origin_B == materialized_B);
-//! each inventory address matches the retained inventory and that inventory proves the canonical remaps
-//! for its build; runner A == runner B (sha256 AND blake3); for RISC0 embedded guest A == B; the verdict
-//! and reproducibility pair recompute; and build B started only after build A finished.
+//! the fresh-per-build cargo dependency seed agrees 3-way (origin == materialized_A == materialized_B),
+//! proving each build independently materialized the SAME authenticated seed into the canonical cargo
+//! home (canonical path != shared build state); each inventory address matches the retained inventory and
+//! that inventory proves the canonical target remap for its build; runner A == runner B (sha256 AND
+//! blake3); for RISC0 embedded guest A == B; the verdict and reproducibility pair recompute; and build B
+//! started only after build A finished. The origin seed address is anchored to the authenticated
+//! `DependencySeedV1` at the attestation binding.
 
 use super::runner_build_recipe::RunnerBuildRecipeV1;
 use super::rustc_invocation_inventory::RustcInvocationInventoryV1;
 use crate::codec::{DecodeError, Reader, Writer};
 use crate::enums::{Arch, Candidate};
 
-pub const RUNNER_DOUBLE_BUILD_PROOF_SCHEMA_VERSION: u16 = 2;
+pub const RUNNER_DOUBLE_BUILD_PROOF_SCHEMA_VERSION: u16 = 3;
 pub const RUNNER_DOUBLE_BUILD_PROOF_KIND: &[u8; 32] = b"b0-final-runner-dbl-build-proof0";
-pub const RUNNER_DOUBLE_BUILD_PROOF_PREFIX: &[u8] = b"b0-final-runner-double-build-proof/v2\0";
+pub const RUNNER_DOUBLE_BUILD_PROOF_PREFIX: &[u8] = b"b0-final-runner-double-build-proof/v3\0";
 pub const REPRODUCIBILITY_PAIR_DOMAIN: &[u8] = b"b0-final-runner-reproducibility-pair/v1\0";
 
 use super::runner_build_recipe::{r_str, w_str};
@@ -29,7 +35,6 @@ use super::runner_build_recipe::{r_str, w_str};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BuildFacts {
     pub original_root: String,
-    pub cargo_from: String,
     pub target_from: String,
     pub runner_sha256: [u8; 32],
     pub runner_blake3: [u8; 32],
@@ -44,6 +49,10 @@ pub struct BuildFacts {
     /// Authenticated manifest address of the source AS MATERIALIZED at the canonical build path (must
     /// equal `origin_manifest_blake3` — the materialization reproduced the origin exactly).
     pub materialized_manifest_blake3: [u8; 32],
+    /// Inventory address of the cargo dependency SEED as MATERIALIZED FRESH into the canonical cargo home
+    /// /b0/cargo for THIS build (must equal the proof's `cargo_seed_origin_blake3` — this build got an
+    /// independent, authentic copy of the retained seed authority; never a shared/carried cache).
+    pub materialized_cargo_seed_blake3: [u8; 32],
     pub start_unix: u64,
     pub end_unix: u64,
 }
@@ -51,7 +60,6 @@ pub struct BuildFacts {
 impl BuildFacts {
     fn encode(&self, w: &mut Writer) {
         w_str(w, &self.original_root);
-        w_str(w, &self.cargo_from);
         w_str(w, &self.target_from);
         w.bytes(&self.runner_sha256);
         w.bytes(&self.runner_blake3);
@@ -60,13 +68,13 @@ impl BuildFacts {
         w.bytes(&self.inventory_address);
         w.bytes(&self.origin_manifest_blake3);
         w.bytes(&self.materialized_manifest_blake3);
+        w.bytes(&self.materialized_cargo_seed_blake3);
         w.u64(self.start_unix);
         w.u64(self.end_unix);
     }
     fn decode(r: &mut Reader, ctx: &'static str) -> Result<Self, DecodeError> {
         Ok(Self {
             original_root: r_str(r, 4096, ctx)?,
-            cargo_from: r_str(r, 4096, ctx)?,
             target_from: r_str(r, 4096, ctx)?,
             runner_sha256: r.read_array::<32>(ctx)?,
             runner_blake3: r.read_array::<32>(ctx)?,
@@ -75,6 +83,7 @@ impl BuildFacts {
             inventory_address: r.read_array::<32>(ctx)?,
             origin_manifest_blake3: r.read_array::<32>(ctx)?,
             materialized_manifest_blake3: r.read_array::<32>(ctx)?,
+            materialized_cargo_seed_blake3: r.read_array::<32>(ctx)?,
             start_unix: r.read_u64(ctx)?,
             end_unix: r.read_u64(ctx)?,
         })
@@ -88,6 +97,10 @@ pub struct RunnerDoubleBuildProofV1 {
     pub wrapper_blake3: [u8; 32],
     pub build_a: BuildFacts,
     pub build_b: BuildFacts,
+    /// The retained cargo dependency-seed ORIGIN authority address (the seed inventory address the venue
+    /// authenticated against `DependencySeedV1`'s host-cargo-home unit). Both builds' fresh
+    /// materializations must equal this; it is anchored to the authenticated seed at attestation binding.
+    pub cargo_seed_origin_blake3: [u8; 32],
     pub byte_equal: bool,
     pub reproducibility_pair_blake3: [u8; 32],
 }
@@ -113,6 +126,7 @@ impl RunnerDoubleBuildProofV1 {
         w.bytes(&self.wrapper_blake3);
         self.build_a.encode(&mut w);
         self.build_b.encode(&mut w);
+        w.bytes(&self.cargo_seed_origin_blake3);
         w.u8(self.byte_equal as u8);
         w.bytes(&self.reproducibility_pair_blake3);
         w.into_bytes()
@@ -144,6 +158,8 @@ impl RunnerDoubleBuildProofV1 {
         let wrapper_blake3 = r.read_array::<32>("RunnerDoubleBuildProofV1.wrapper_blake3")?;
         let build_a = BuildFacts::decode(r, "RunnerDoubleBuildProofV1.build_a")?;
         let build_b = BuildFacts::decode(r, "RunnerDoubleBuildProofV1.build_b")?;
+        let cargo_seed_origin_blake3 =
+            r.read_array::<32>("RunnerDoubleBuildProofV1.cargo_seed_origin_blake3")?;
         let byte_equal = match r.read_u8("RunnerDoubleBuildProofV1.byte_equal")? {
             0 => false,
             1 => true,
@@ -161,6 +177,7 @@ impl RunnerDoubleBuildProofV1 {
             wrapper_blake3,
             build_a,
             build_b,
+            cargo_seed_origin_blake3,
             byte_equal,
             reproducibility_pair_blake3,
         })
@@ -193,10 +210,7 @@ impl RunnerDoubleBuildProofV1 {
                        s: &super::runner_build_recipe::BuildSide,
                        w: &str|
          -> Result<(), String> {
-            if f.original_root != s.original_root
-                || f.cargo_from != s.cargo_from
-                || f.target_from != s.target_from
-            {
+            if f.original_root != s.original_root || f.target_from != s.target_from {
                 return Err(format!(
                     "double-build proof build {w} roots != recipe build {w} roots"
                 ));
@@ -224,6 +238,23 @@ impl RunnerDoubleBuildProofV1 {
         }
         if self.build_a.origin_manifest_blake3 != self.build_b.origin_manifest_blake3 {
             return Err("double-build proof: build A and build B origin manifests differ (not the same build inputs)".into());
+        }
+        // Fresh-per-build cargo dependency SEED: each build independently materialized the SAME
+        // authenticated seed into the canonical cargo home /b0/cargo — origin == materialized_A ==
+        // materialized_B (canonical path != shared build state). The origin address is anchored to the
+        // authenticated `DependencySeedV1` at the attestation binding; here we prove the 3-way equality
+        // and that it is a real (non-zero) address.
+        if self.cargo_seed_origin_blake3 == [0u8; 32] {
+            return Err(
+                "double-build proof: cargo dependency-seed origin address is all-zero (unbound seed)"
+                    .into(),
+            );
+        }
+        if self.build_a.materialized_cargo_seed_blake3 != self.cargo_seed_origin_blake3 {
+            return Err("double-build proof: build A materialized cargo seed != seed origin (a build got a different/carried seed)".into());
+        }
+        if self.build_b.materialized_cargo_seed_blake3 != self.cargo_seed_origin_blake3 {
+            return Err("double-build proof: build B materialized cargo seed != seed origin (a build got a different/carried seed)".into());
         }
         // Inventories: addresses match the retained inventories, correct build tags, prove remaps.
         if inv_a.hash() != self.build_a.inventory_address {
@@ -295,14 +326,11 @@ mod tests {
     use super::super::rustc_invocation_inventory::{canonical_inventory, InvocationRecord};
     use super::*;
 
-    fn compile_rec(cargo: &str, target: &str) -> InvocationRecord {
-        use super::super::runner_build_recipe::{CANON_CARGO, CANON_TARGET};
+    fn compile_rec(target: &str) -> InvocationRecord {
+        use super::super::runner_build_recipe::CANON_TARGET;
         let mut rec = InvocationRecord {
             kind: "compile".into(),
-            remap_args: vec![
-                format!("--remap-path-prefix={cargo}={CANON_CARGO}"),
-                format!("--remap-path-prefix={target}={CANON_TARGET}"),
-            ],
+            remap_args: vec![format!("--remap-path-prefix={target}={CANON_TARGET}")],
             record_address: [0; 32],
         };
         rec.record_address = rec.recompute_address();
@@ -320,23 +348,16 @@ mod tests {
             recipe.candidate,
             recipe.arch,
             0,
-            vec![compile_rec(
-                &recipe.build_a.cargo_from,
-                &recipe.build_a.target_from,
-            )],
+            vec![compile_rec(&recipe.build_a.target_from)],
         );
         let inv_b = canonical_inventory(
             recipe.candidate,
             recipe.arch,
             1,
-            vec![compile_rec(
-                &recipe.build_b.cargo_from,
-                &recipe.build_b.target_from,
-            )],
+            vec![compile_rec(&recipe.build_b.target_from)],
         );
         let fa = BuildFacts {
             original_root: recipe.build_a.original_root.clone(),
-            cargo_from: recipe.build_a.cargo_from.clone(),
             target_from: recipe.build_a.target_from.clone(),
             runner_sha256: [11; 32],
             runner_blake3: [12; 32],
@@ -345,12 +366,12 @@ mod tests {
             inventory_address: inv_a.hash(),
             origin_manifest_blake3: [21; 32],
             materialized_manifest_blake3: [21; 32],
+            materialized_cargo_seed_blake3: [31; 32],
             start_unix: 100,
             end_unix: 200,
         };
         let fb = BuildFacts {
             original_root: recipe.build_b.original_root.clone(),
-            cargo_from: recipe.build_b.cargo_from.clone(),
             target_from: recipe.build_b.target_from.clone(),
             runner_sha256: [11; 32],
             runner_blake3: [12; 32],
@@ -359,6 +380,7 @@ mod tests {
             inventory_address: inv_b.hash(),
             origin_manifest_blake3: [21; 32],
             materialized_manifest_blake3: [21; 32],
+            materialized_cargo_seed_blake3: [31; 32],
             start_unix: 200,
             end_unix: 300,
         };
@@ -366,6 +388,7 @@ mod tests {
             candidate: recipe.candidate,
             arch: recipe.arch,
             wrapper_blake3: recipe.wrapper_blake3,
+            cargo_seed_origin_blake3: [31; 32],
             reproducibility_pair_blake3: RunnerDoubleBuildProofV1::compute_reproducibility_pair(
                 &fa, &fb,
             ),
@@ -431,6 +454,26 @@ mod tests {
             .check_double_build(&recipe, &inv_a, &inv_b)
             .unwrap_err()
             .contains("reproducibility_pair"));
+    }
+
+    #[test]
+    fn cargo_seed_mismatch_and_unbound_refused() {
+        // Build B materialized a DIFFERENT (or carried) cargo seed than the origin authority -> refused.
+        let (recipe, inv_a, inv_b, mut proof) = parts();
+        proof.build_b.materialized_cargo_seed_blake3 = [77; 32];
+        assert!(proof
+            .check_double_build(&recipe, &inv_a, &inv_b)
+            .unwrap_err()
+            .contains("build B materialized cargo seed != seed origin"));
+        // An all-zero origin address (unbound seed) is refused even if A/B match it.
+        let (recipe, inv_a, inv_b, mut proof) = parts();
+        proof.cargo_seed_origin_blake3 = [0; 32];
+        proof.build_a.materialized_cargo_seed_blake3 = [0; 32];
+        proof.build_b.materialized_cargo_seed_blake3 = [0; 32];
+        assert!(proof
+            .check_double_build(&recipe, &inv_a, &inv_b)
+            .unwrap_err()
+            .contains("all-zero"));
     }
 
     #[test]

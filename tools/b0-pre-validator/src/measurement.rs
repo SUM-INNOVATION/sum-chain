@@ -83,6 +83,30 @@ pub fn synth_phase1_identity_record(
     }
 }
 
+/// The FIXED synthetic cargo seed-content address every synthetic assembly path uses as the
+/// double-build proof's `cargo_seed_origin` (and the host-cargo-home seed-content of the synthetic
+/// [`DependencySeedV1`]). Seed-fn-independent, so harness + demo produce identical, mutually-consistent
+/// dependency-seed artifacts. NEVER the real venue path.
+pub fn synth_cargo_seed_content() -> [u8; 32] {
+    *blake3::hash(b"b0-final-synth-cargo-seed-content/v1").as_bytes()
+}
+
+/// The synthetic self-consistent [`DependencySeedV1`] for `candidate` matching [`synth_cargo_seed_content`]:
+/// returns `(json_bytes, record_address)`. The synthetic attestation's `dependency_seed_address` is set to
+/// `record_address` and the bundle seals `json_bytes`, so the sealed-import cargo dependency-seed anchor
+/// accepts. NEVER the real venue path (which retains the venue-produced dependency-seed JSON).
+pub fn synth_dependency_seed(candidate: Candidate) -> (Vec<u8>, [u8; 32]) {
+    let cand = match candidate {
+        Candidate::Sp1 => "sp1",
+        Candidate::Risc0 => "risc0",
+    };
+    let (json, addr, _host) = crate::venue::dependency_seed::DependencySeedV1::synthetic_json(
+        cand,
+        synth_cargo_seed_content(),
+    );
+    (json, addr)
+}
+
 /// A runner attestation for synthetic/dry-run assembly. `hex32`/`ctx` binding fields are placeholders
 /// the orchestrator overwrites with the run's candidate/role/spec/guest_set; the venue-produced fields
 /// carry deterministic self-consistent values (build_git_sha == measured_source_commit; recomputed ==
@@ -156,7 +180,7 @@ pub fn synth_runner_recipe_artifacts(
     crate::schema::runner_leakage_report::RunnerLeakageReportV1,
 ) {
     use crate::schema::runner_build_recipe::{
-        BuildSide, RunnerBuildRecipeV1, CANON_CARGO, CANON_TARGET, CANON_TOOLING, UNIT_SEP,
+        BuildSide, RunnerBuildRecipeV1, CANON_CARGO, CANON_TARGET, CANON_TOOLING,
     };
     use crate::schema::runner_double_build_proof::{BuildFacts, RunnerDoubleBuildProofV1};
     use crate::schema::runner_leakage_report::RunnerLeakageReportV1;
@@ -172,21 +196,13 @@ pub fn synth_runner_recipe_artifacts(
             "release/b0-pre-measure-risc0",
         ),
     };
-    let enc = |cargo: &str, target: &str| -> Vec<u8> {
-        let mut v = Vec::new();
-        v.extend_from_slice(format!("--remap-path-prefix={cargo}={CANON_CARGO}").as_bytes());
-        v.push(UNIT_SEP);
-        v.extend_from_slice(format!("--remap-path-prefix={target}={CANON_TARGET}").as_bytes());
-        v
+    let enc = |target: &str| -> Vec<u8> {
+        format!("--remap-path-prefix={target}={CANON_TARGET}").into_bytes()
     };
     let side = |t: &str| BuildSide {
         original_root: format!("/b0-input/{t}/tooling"),
-        cargo_from: format!("/b0-input/{t}/cargo"),
         target_from: format!("/b0-input/{t}/target"),
-        encoded_rustflags: enc(
-            &format!("/b0-input/{t}/cargo"),
-            &format!("/b0-input/{t}/target"),
-        ),
+        encoded_rustflags: enc(&format!("/b0-input/{t}/target")),
     };
     let recipe = RunnerBuildRecipeV1 {
         candidate,
@@ -212,6 +228,7 @@ pub fn synth_runner_recipe_artifacts(
         cargo_ident: "cargo".into(),
         b0_venue_embed: "0".into(),
         canonical_build_path: CANON_TOOLING.into(),
+        canonical_cargo_home: CANON_CARGO.into(),
         build_a: side("a"),
         build_b: side("b"),
         measured_source_commit: measured_source_commit.to_string(),
@@ -225,10 +242,9 @@ pub fn synth_runner_recipe_artifacts(
     let compile_rec = |t: &str| {
         let mut rec = InvocationRecord {
             kind: "compile".into(),
-            remap_args: vec![
-                format!("--remap-path-prefix=/b0-input/{t}/cargo={CANON_CARGO}"),
-                format!("--remap-path-prefix=/b0-input/{t}/target={CANON_TARGET}"),
-            ],
+            remap_args: vec![format!(
+                "--remap-path-prefix=/b0-input/{t}/target={CANON_TARGET}"
+            )],
             record_address: [0; 32],
         };
         rec.record_address = rec.recompute_address();
@@ -245,9 +261,11 @@ pub fn synth_runner_recipe_artifacts(
     };
     let guest_mb = seed("guest-methods");
     let src_manifest = seed("source-input-manifest");
+    // FIXED (seed-fn-independent) synthetic cargo seed-content address, so every synthetic assembly path
+    // (harness + demo) shares one host seed and can build the SAME self-consistent DependencySeedV1.
+    let cargo_seed = synth_cargo_seed_content();
     let facts = |t: &str, inv_addr: [u8; 32], s: u64, e: u64| BuildFacts {
         original_root: format!("/b0-input/{t}/tooling"),
-        cargo_from: format!("/b0-input/{t}/cargo"),
         target_from: format!("/b0-input/{t}/target"),
         runner_sha256: runner_sha,
         runner_blake3: runner_b3,
@@ -256,6 +274,7 @@ pub fn synth_runner_recipe_artifacts(
         inventory_address: inv_addr,
         origin_manifest_blake3: src_manifest,
         materialized_manifest_blake3: src_manifest,
+        materialized_cargo_seed_blake3: cargo_seed,
         start_unix: s,
         end_unix: e,
     };
@@ -265,6 +284,7 @@ pub fn synth_runner_recipe_artifacts(
         candidate,
         arch,
         wrapper_blake3: wrapper,
+        cargo_seed_origin_blake3: cargo_seed,
         reproducibility_pair_blake3: RunnerDoubleBuildProofV1::compute_reproducibility_pair(
             &fa, &fb,
         ),
@@ -274,10 +294,8 @@ pub fn synth_runner_recipe_artifacts(
     };
     let mut refused = vec![
         "/b0-input/a/tooling".to_string(),
-        "/b0-input/a/cargo".to_string(),
         "/b0-input/a/target".to_string(),
         "/b0-input/b/tooling".to_string(),
-        "/b0-input/b/cargo".to_string(),
         "/b0-input/b/target".to_string(),
         "/tmp/b0-evid".to_string(),
     ];
@@ -334,6 +352,7 @@ pub fn native_matrix(candidate: Candidate) -> Vec<Arch> {
 /// Raw per-(arch,role) environment/provenance facts the venue captures. No derived
 /// identity hashes — the orchestrator injects `b0_pre_spec_hash`, `r0_guest_set_hash`,
 /// candidate, program, lock, and verifier-material identity.
+#[derive(Clone)]
 pub struct ProvenanceFacts {
     pub arch: Arch,
     pub role: ProvenanceRole,
@@ -473,7 +492,14 @@ pub fn orchestrate_grid(
     // The measurement-wide MeasurementInputAuthorityV1 address, derived by `produce` from the retained
     // authority bytes and injected into EVERY attestation (never a recipe address string).
     measurement_input_authority_address: [u8; 32],
+    // The retained per-CANDIDATE DependencySeedV1 JSON bytes to SEAL + authenticate. REQUIRED (no
+    // synthesize-on-absent fallback in this production assembler): the assembler decodes + anchors it and
+    // seals it into the VEC7 bundle, so the cargo seed origin is NEVER producer-trusted. The synthetic
+    // vector generators call [`orchestrate_grid_synthetic`] (TEST_ONLY), which constructs the record and
+    // stamps its address onto the synthetic attestations before delegating here.
+    dependency_seed_json: &[u8],
 ) -> Result<Evidence, String> {
+    let dependency_seed_json: Vec<u8> = dependency_seed_json.to_vec();
     let vmat = ids
         .verifier_material
         .identity()
@@ -768,11 +794,43 @@ pub fn orchestrate_grid(
         inventories_b: built_invs_b,
         double_build_proofs: built_proofs,
         leakage_reports: built_leaks,
+        dependency_seed_json,
         envelopes,
         samples,
         rss,
         malformed_corpus_result_hash: ids.malformed_corpus_result_hash,
     })
+}
+
+/// TEST_ONLY synthetic wrapper around [`orchestrate_grid`]: constructs the self-consistent
+/// [`synth_dependency_seed`] for `ids.candidate`, STAMPS its record address onto every provenance's
+/// attestation (the shared synthetic facts carry a candidate-agnostic placeholder), and delegates to the
+/// production assembler with the synthesized bytes. NEVER a production path — production callers
+/// (`produce`) pass the REAL retained dependency-seed bytes to `orchestrate_grid` directly, and a
+/// synthesize-on-absent fallback deliberately does NOT exist there. Used only by the deterministic demo
+/// vector generator + the measurement tests (pre-seal synthetic evidence).
+pub fn orchestrate_grid_synthetic(
+    spec: [u8; 32],
+    guest_set: [u8; 32],
+    ids: &RunIdentities,
+    provenances: &[ProvenanceFacts],
+    cells: &[CellFacts],
+    measurement_input_authority_address: [u8; 32],
+) -> Result<Evidence, String> {
+    let (dep_json, dep_addr) = synth_dependency_seed(ids.candidate);
+    let mut pfs = provenances.to_vec();
+    for pf in &mut pfs {
+        pf.dependency_seed_address = dep_addr;
+    }
+    orchestrate_grid(
+        spec,
+        guest_set,
+        ids,
+        &pfs,
+        cells,
+        measurement_input_authority_address,
+        &dep_json,
+    )
 }
 
 /// Compact length-prefixed transport for a committed real-orchestrator vector: the
@@ -795,12 +853,16 @@ pub fn serialize_vector(
         out.extend_from_slice(b);
     }
     let mut out = Vec::new();
-    // VEC6: adds three TOP-LEVEL retained measurement-input blobs after the allowlist — the
+    // VEC7: adds a per-CANDIDATE retained DependencySeedV1 JSON blob per bundle (after result_set) — so
+    // both verifiers re-decode + authenticate the dependency-seed record from scratch and anchor each
+    // double-build proof's cargo seed origin to its host-cargo-home seed-content address (never a
+    // producer-trusted origin).
+    // VEC6 adds three TOP-LEVEL retained measurement-input blobs after the allowlist — the
     // MeasurementInputAuthorityV1 JSON, the complete MalformedCorpusReportV1 JSON, and the complete
     // benchmark-harness source inventory manifest — so both verifiers re-decode the report + inventory
     // and recompute the two addresses the authority binds (never a duplicated caller hash).
     // (VEC5 added the retained-artifact lists; VEC4 the runner path-independence artifacts.)
-    out.extend_from_slice(b"B0PREMEASVEC6");
+    out.extend_from_slice(b"B0PREMEASVEC7");
     put(&mut out, allowlist_canonical);
     put(&mut out, measurement_input_authority);
     put(&mut out, malformed_corpus_report);
@@ -827,6 +889,7 @@ pub fn serialize_vector(
                 put(&mut out, r);
             }
         }
+        put(&mut out, &ev.dependency_seed_json);
         put(&mut out, &ev.verifier_material);
         put(&mut out, &ev.result_set);
     }
@@ -850,7 +913,7 @@ pub fn parse_vector(bytes: &[u8]) -> Result<MeasurementVector, String> {
         let n = u32_at(p)?;
         Ok(take(p, n)?.to_vec())
     };
-    if take(&mut p, 13)? != b"B0PREMEASVEC6" {
+    if take(&mut p, 13)? != b"B0PREMEASVEC7" {
         return Err("bad magic".into());
     }
     let allowlist = blob(&mut p)?;
@@ -872,6 +935,7 @@ pub fn parse_vector(bytes: &[u8]) -> Result<MeasurementVector, String> {
             }
             lists.push(v);
         }
+        let dependency_seed_json = blob(&mut p)?;
         let verifier_material = blob(&mut p)?;
         let result_set = blob(&mut p)?;
         let mut it = lists.into_iter();
@@ -890,6 +954,7 @@ pub fn parse_vector(bytes: &[u8]) -> Result<MeasurementVector, String> {
                 inventories_b: it.next().unwrap(),
                 double_build_proofs: it.next().unwrap(),
                 leakage_reports: it.next().unwrap(),
+                dependency_seed_json,
                 verifier_material,
                 result_set,
             },
@@ -1141,7 +1206,7 @@ pub fn deterministic_demo_vector() -> MeasurementVector {
         malformed_corpus_result_hash: dv(b"malformed"),
     };
 
-    let sp1_ev = orchestrate_grid(
+    let sp1_ev = orchestrate_grid_synthetic(
         spec,
         guest_set,
         &sp1_ids,
@@ -1150,7 +1215,7 @@ pub fn deterministic_demo_vector() -> MeasurementVector {
         [7u8; 32],
     )
     .expect("sp1 assembles");
-    let risc0_ev = orchestrate_grid(
+    let risc0_ev = orchestrate_grid_synthetic(
         spec,
         guest_set,
         &risc0_ids,
@@ -1375,7 +1440,7 @@ mod tests {
     #[test]
     fn sp1_real_input_grid_produces_and_verifies() {
         let gs = h(b"guest-set");
-        let ev = orchestrate_grid(
+        let ev = orchestrate_grid_synthetic(
             SPEC,
             gs,
             &ids(),
@@ -1426,11 +1491,16 @@ mod tests {
             ],
         );
         let cells = vec![cell(Arch::Aarch64, StatementIndex::Tlg, 0)];
-        assert!(
-            orchestrate_grid(SPEC, h(b"gs"), &r0, &all_provenance(), &cells, [7u8; 32])
-                .unwrap_err()
-                .contains("native-ineligible")
-        );
+        assert!(orchestrate_grid_synthetic(
+            SPEC,
+            h(b"gs"),
+            &r0,
+            &all_provenance(),
+            &cells,
+            [7u8; 32]
+        )
+        .unwrap_err()
+        .contains("native-ineligible"));
     }
 
     #[test]
@@ -1456,7 +1526,7 @@ mod tests {
         );
         // Only x86 cells exist — the native matrix is genuinely incomplete. Assembly
         // succeeds (nothing fabricated); the FROZEN verifier derives the failure.
-        let ev = orchestrate_grid(
+        let ev = orchestrate_grid_synthetic(
             SPEC,
             h(b"gs"),
             &r0,
@@ -1477,7 +1547,14 @@ mod tests {
         let mut cells = grid(&[Arch::X86_64, Arch::Aarch64]);
         // Duplicate the first cell (same arch/stmt/iteration) -> not a valid grid.
         cells.push(cell(Arch::X86_64, StatementIndex::Tlg, 0));
-        let res = orchestrate_grid(SPEC, h(b"gs"), &ids(), &all_provenance(), &cells, [7u8; 32]);
+        let res = orchestrate_grid_synthetic(
+            SPEC,
+            h(b"gs"),
+            &ids(),
+            &all_provenance(),
+            &cells,
+            [7u8; 32],
+        );
         // Either assembly (duplicate measured-proof key) or verification rejects it.
         let rejected = match res {
             Err(_) => true,
@@ -1490,8 +1567,15 @@ mod tests {
     fn missing_cell_is_rejected() {
         let mut cells = grid(&[Arch::X86_64, Arch::Aarch64]);
         cells.pop(); // drop one cell -> incomplete grid
-        let ev =
-            orchestrate_grid(SPEC, h(b"gs"), &ids(), &all_provenance(), &cells, [7u8; 32]).unwrap();
+        let ev = orchestrate_grid_synthetic(
+            SPEC,
+            h(b"gs"),
+            &ids(),
+            &all_provenance(),
+            &cells,
+            [7u8; 32],
+        )
+        .unwrap();
         assert!(
             verify_evidence(&ev).is_err(),
             "a missing cell must be rejected"
@@ -1500,7 +1584,7 @@ mod tests {
 
     #[test]
     fn post_result_threshold_mutation_is_rejected() {
-        let ev = orchestrate_grid(
+        let ev = orchestrate_grid_synthetic(
             SPEC,
             h(b"gs"),
             &ids(),
@@ -1525,7 +1609,7 @@ mod tests {
     fn altered_proof_binding_is_rejected() {
         // Re-point one sample's proof_hash to a foreign value -> orphaned sample
         // (no matching envelope); the frozen verifier rejects it.
-        let mut ev = orchestrate_grid(
+        let mut ev = orchestrate_grid_synthetic(
             SPEC,
             h(b"gs"),
             &ids(),
@@ -1545,7 +1629,7 @@ mod tests {
 
     #[test]
     fn wrong_bundle_aggregate_is_rejected() {
-        let ev = orchestrate_grid(
+        let ev = orchestrate_grid_synthetic(
             SPEC,
             h(b"gs"),
             &ids(),
@@ -1569,8 +1653,15 @@ mod tests {
         // 99 verify samples in one cell instead of 100 -> short sample count.
         let mut cells = grid(&[Arch::X86_64, Arch::Aarch64]);
         cells[0].verify_ns.pop();
-        let ev =
-            orchestrate_grid(SPEC, h(b"gs"), &ids(), &all_provenance(), &cells, [7u8; 32]).unwrap();
+        let ev = orchestrate_grid_synthetic(
+            SPEC,
+            h(b"gs"),
+            &ids(),
+            &all_provenance(),
+            &cells,
+            [7u8; 32],
+        )
+        .unwrap();
         assert!(
             verify_evidence(&ev).is_err(),
             "a short verification-sample count must be rejected"
@@ -1579,7 +1670,7 @@ mod tests {
 
     #[test]
     fn missing_rss_record_is_rejected() {
-        let mut ev = orchestrate_grid(
+        let mut ev = orchestrate_grid_synthetic(
             SPEC,
             h(b"gs"),
             &ids(),
@@ -1597,7 +1688,7 @@ mod tests {
 
     #[test]
     fn altered_guest_set_hash_is_rejected() {
-        let ev = orchestrate_grid(
+        let ev = orchestrate_grid_synthetic(
             SPEC,
             h(b"gs"),
             &ids(),
@@ -1629,7 +1720,7 @@ mod tests {
                 };
             }
         }
-        let ev = orchestrate_grid(
+        let ev = orchestrate_grid_synthetic(
             SPEC,
             h(b"gs"),
             &ids(),

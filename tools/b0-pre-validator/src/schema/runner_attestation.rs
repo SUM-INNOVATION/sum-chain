@@ -593,6 +593,63 @@ impl RunnerAttestationV1 {
         Ok(())
     }
 
+    /// SEALED-IMPORT cargo dependency-SEED anchor: bind the double-build proof's fresh-per-build cargo
+    /// seed to the INDEPENDENTLY-retained, from-scratch-authenticated [`DependencySeedV1`] — so the seed
+    /// origin is NOT producer-trusted. The caller passes the decoded retained record (from the sealed
+    /// per-candidate `dependency_seed_json`); this method authenticates it and cross-binds:
+    ///   * `dependency_seed.verify(candidate)` recomputes + authenticates the record address AND the
+    ///     per-candidate graph/unit shape (schema, counts, roles, all hashes 64-hex, recompute==address);
+    ///     it refuses a cross-candidate seed here (candidate mismatch);
+    ///   * that authenticated record address == this attestation's `dependency_seed_address` (the runner
+    ///     attestation BINDS the retained dependency-seed artifact address — a swapped/mutated record
+    ///     re-addresses and fails THIS check);
+    ///   * `proof.cargo_seed_origin_blake3` == the record's canonical host-cargo-home SEED-CONTENT address
+    ///     (`materialized_A == materialized_B == origin` is enforced by [`RunnerDoubleBuildProofV1`]'s own
+    ///     `check_double_build`, so origin is anchored to the authenticated seed, defeating a
+    ///     mutually-edited proof that substitutes origin/A/B to a matching forged value);
+    ///   * the proof's candidate/arch agree with this attestation.
+    ///
+    /// Together: a forged origin/A/B (authentic seed unchanged) fails the origin==content check; editing
+    /// BOTH the proof AND the retained seed to agree fails the record-address==dependency_seed_address
+    /// check (the seed's own authority binding). Cross-arch is caught by the proof candidate/arch check;
+    /// cross-candidate by `verify`.
+    pub fn check_bound_dependency_seed(
+        &self,
+        proof: &super::runner_double_build_proof::RunnerDoubleBuildProofV1,
+        dependency_seed: &crate::venue::dependency_seed::DependencySeedV1,
+    ) -> Result<(), String> {
+        let candidate_str = match self.candidate {
+            Candidate::Sp1 => "sp1",
+            Candidate::Risc0 => "risc0",
+        };
+        // Authenticates the record from scratch (shape + recompute==address); refuses a cross-candidate
+        // seed; returns the authenticated 32-byte record address.
+        let record_address = dependency_seed.verify(candidate_str)?;
+        if record_address != self.dependency_seed_address {
+            return Err(
+                "retained DependencySeedV1 record address != attestation dependency_seed_address \
+                 (swapped/mutated/unbound dependency-seed artifact)"
+                    .into(),
+            );
+        }
+        // The proof this seed anchors must be THIS attestation's candidate/arch (cross-arch/candidate guard).
+        if proof.candidate != self.candidate || proof.arch != self.build_target_arch {
+            return Err(
+                "double-build proof candidate/arch != attestation (dependency-seed anchor)".into(),
+            );
+        }
+        let content_address = dependency_seed.host_cargo_home_seed_address()?;
+        if proof.cargo_seed_origin_blake3 != content_address {
+            return Err(
+                "double-build proof cargo_seed_origin != retained dependency-seed host-cargo-home \
+                 seed-content address (a producer-trusted / mutually-edited origin, not the authentic \
+                 authenticated seed)"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
     /// Bind the attestation's measured source to the ratified measured source. Separate from the
     /// tooling authority (which is checked via [`crate::tooling_authority::verify_tooling_authority`]
     /// against the tooling commit + path-set digest, NEVER against the measured-source commit).
@@ -807,10 +864,8 @@ mod tests {
         // Leakage cross-bound to the same recipe; scanned == the proof runner; refused ⊇ all A/B roots.
         let mut refused = vec![
             recipe.build_a.original_root.clone(),
-            recipe.build_a.cargo_from.clone(),
             recipe.build_a.target_from.clone(),
             recipe.build_b.original_root.clone(),
-            recipe.build_b.cargo_from.clone(),
             recipe.build_b.target_from.clone(),
             "/tmp/b0-evid".to_string(),
         ];
@@ -956,5 +1011,102 @@ mod tests {
             .check_bound_runner_recipe(&r, &ia, &ib, &p, &lk)
             .unwrap_err()
             .contains("RunnerBuildRecipeV1 address"));
+    }
+
+    // ---- cargo dependency-SEED anchor (check_bound_dependency_seed) --------------------------------
+    // A consistent (attestation, double-build proof, retained DependencySeedV1) triple: the proof's cargo
+    // seed origin (== materialized A == materialized B, from `tests_parts`, all [31;32]) equals the
+    // dep-seed's host-cargo-home seed-content; the attestation binds the dep-seed's authenticated record
+    // address. This is the anchor that defeats a mutually-edited proof.
+    fn dep_seed_triple() -> (
+        RunnerAttestationV1,
+        super::super::runner_double_build_proof::RunnerDoubleBuildProofV1,
+        crate::venue::dependency_seed::DependencySeedV1,
+    ) {
+        use crate::venue::dependency_seed::DependencySeedV1;
+        let (_r, _ia, _ib, proof) = super::super::runner_double_build_proof::tests_parts();
+        let host = [31u8; 32]; // == proof.cargo_seed_origin == materialized A/B in tests_parts
+        let (json, record_addr, _content) = DependencySeedV1::synthetic_json("sp1", host);
+        let seed = DependencySeedV1::from_json(&json).expect("synthetic dep-seed parses");
+        let mut att = sample(); // Sp1 / X86_64
+        att.dependency_seed_address = record_addr;
+        (att, proof, seed)
+    }
+
+    #[test]
+    fn dependency_seed_anchor_positive() {
+        let (att, proof, seed) = dep_seed_triple();
+        att.check_bound_dependency_seed(&proof, &seed).unwrap();
+    }
+
+    #[test]
+    fn dependency_seed_anchor_mutually_edited_proof_refused() {
+        // THE DECISIVE NEGATIVE: forge origin == A == B to the SAME value (so the proof's OWN 3-way
+        // equality still holds) but keep the AUTHENTIC retained seed. The anchor refuses because the
+        // origin no longer equals the independently-authenticated seed's host-cargo-home content.
+        let (att, mut proof, seed) = dep_seed_triple();
+        let forged = [0x99u8; 32];
+        // origin == A == B == forged: the proof's OWN 3-way equality (check_double_build) still holds, so
+        // ONLY the anchor to the independently-authenticated retained seed catches this substitution.
+        proof.cargo_seed_origin_blake3 = forged;
+        proof.build_a.materialized_cargo_seed_blake3 = forged;
+        proof.build_b.materialized_cargo_seed_blake3 = forged;
+        assert!(att
+            .check_bound_dependency_seed(&proof, &seed)
+            .unwrap_err()
+            .contains("cargo_seed_origin != retained dependency-seed"));
+    }
+
+    #[test]
+    fn dependency_seed_anchor_edit_both_refused_via_record_address() {
+        // Editing BOTH the proof (origin/A/B) AND the retained seed's host content to agree STILL fails:
+        // mutating the seed's host unit seed_address changes its recomputed record address, which no
+        // longer equals the attestation's bound dependency_seed_address (the seed's own authority binding).
+        use crate::venue::dependency_seed::DependencySeedV1;
+        let (att, mut proof, _seed) = dep_seed_triple();
+        let forged = [0x99u8; 32];
+        proof.cargo_seed_origin_blake3 = forged;
+        proof.build_a.materialized_cargo_seed_blake3 = forged;
+        proof.build_b.materialized_cargo_seed_blake3 = forged;
+        let (json2, _addr2, _c) = DependencySeedV1::synthetic_json("sp1", forged); // host == forged
+        let seed2 = DependencySeedV1::from_json(&json2).unwrap();
+        assert!(att
+            .check_bound_dependency_seed(&proof, &seed2)
+            .unwrap_err()
+            .contains("record address != attestation dependency_seed_address"));
+    }
+
+    #[test]
+    fn dependency_seed_anchor_cross_candidate_refused() {
+        // A risc0 dependency-seed under an sp1 attestation is refused by verify(candidate).
+        use crate::venue::dependency_seed::DependencySeedV1;
+        let (att, proof, _seed) = dep_seed_triple(); // att candidate = Sp1
+        let (json_r0, _a, _c) = DependencySeedV1::synthetic_json("risc0", [31u8; 32]);
+        let seed_r0 = DependencySeedV1::from_json(&json_r0).unwrap();
+        assert!(att
+            .check_bound_dependency_seed(&proof, &seed_r0)
+            .unwrap_err()
+            .to_lowercase()
+            .contains("candidate"));
+    }
+
+    #[test]
+    fn dependency_seed_anchor_cross_arch_refused() {
+        let (mut att, proof, seed) = dep_seed_triple();
+        att.build_target_arch = Arch::Aarch64; // proof.arch stays X86_64
+        assert!(att
+            .check_bound_dependency_seed(&proof, &seed)
+            .unwrap_err()
+            .contains("candidate/arch"));
+    }
+
+    #[test]
+    fn dependency_seed_anchor_mutated_record_refused() {
+        // A mutated retained seed (a changed graph hash, `address` left stale) recomputes to a different
+        // address and is refused by its own authority binding.
+        let (att, proof, seed) = dep_seed_triple();
+        let mut bad = seed.clone();
+        bad.graphs[0].lock_sha256 = "0".repeat(64);
+        assert!(att.check_bound_dependency_seed(&proof, &bad).is_err());
     }
 }

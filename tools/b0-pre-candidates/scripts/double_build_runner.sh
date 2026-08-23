@@ -119,6 +119,10 @@ printf '%s' "$TOOLCHAIN_IDENTITY" | grep -Eq '^[0-9a-f]{64}$' || die "--per-arch
 CANON_REQUIRED='/b0/tooling'
 [ "$CANON_BUILD" = "$CANON_REQUIRED" ] \
   || die "--canonical-build-path must be EXACTLY $CANON_REQUIRED (got '$CANON_BUILD')"
+# The PINNED canonical compiler-visible cargo home (matches b0_rustc_remap_wrapper.sh CANON_CARGO and
+# lib.sh B0_REMAP_CARGO). It is materialized FRESH per build under the same /b0 lock and removed
+# fail-hard before + after each build — a canonical PATH, never SHARED build state carried A->B.
+CANON_CARGO='/b0/cargo'
 
 require_cmd cmp; require_cmd strings; require_cmd b3sum; require_cmd date; require_cmd python3; require_cmd readlink; require_cmd od
 
@@ -207,14 +211,19 @@ A_ABS="$(cd "$ROOT_A" && pwd -P)"; B_ABS="$(cd "$ROOT_B" && pwd -P)"
 [ "$A_ABS" != "$B_ABS" ] || die "--root-a and --root-b must be DISTINCT"
 case "$B_ABS/" in "$A_ABS"/*) die "--root-b nested under --root-a" ;; esac
 case "$A_ABS/" in "$B_ABS"/*) die "--root-a nested under --root-b" ;; esac
-CARGO_A="$A_ABS/cargo"; TARGET_A="$A_ABS/target"; CARGO_B="$B_ABS/cargo"; TARGET_B="$B_ABS/target"
-mkdir -p "$CARGO_A" "$TARGET_A" "$CARGO_B" "$TARGET_B"
+# TARGETS are per-build + distinct + remapped. The compiler-visible CARGO_HOME is the SINGLE canonical
+# CANON_CARGO (/b0/cargo, set below under the lock), materialized FRESH per build and removed fail-hard
+# before + after each build — a canonical PATH that is never SHARED build state across A and B.
+TARGET_A="$A_ABS/target"; TARGET_B="$B_ABS/target"
+mkdir -p "$TARGET_A" "$TARGET_B"
 # CANON_ABS is set below (under the lock); the trap is a BEST-EFFORT backstop for early exits — the
 # SUCCESS path uses the explicit fail-hard cleanup in run_one (GAP 5), and the GAP 5 failure path
 # `trap - EXIT`s to PRESERVE the diagnostics under $work.
 CANON_ABS=""
+CARGO_LOCKED=""     # set to CANON_CARGO below under the lock; the trap only removes /b0/cargo once WE hold
+                    # the lock, so an early exit before acquiring it cannot delete another run's cargo home
 GUEST_HOME_ABS=""   # set below under the lock (RISC0 real embed only); a pinned /b0/guesthome
-work="$(mktemp -d)"; trap 'rm -rf "$work"; [ -n "${CANON_ABS:-}" ] && rm -rf "$CANON_ABS"; [ -n "${GUEST_HOME_ABS:-}" ] && rm -rf "$GUEST_HOME_ABS"' EXIT
+work="$(mktemp -d)"; trap 'rm -rf "$work"; [ -n "${CANON_ABS:-}" ] && rm -rf "$CANON_ABS"; [ -n "${CARGO_LOCKED:-}" ] && rm -rf "$CARGO_LOCKED"; [ -n "${GUEST_HOME_ABS:-}" ] && rm -rf "$GUEST_HOME_ABS"' EXIT
 EVID_A="$work/evid-a"; EVID_B="$work/evid-b"; mkdir -p "$EVID_A" "$EVID_B"
 
 # --- canonical, enforced, RETAINED build argv (exact vector) --------------------------------------
@@ -228,11 +237,14 @@ for need in ' build ' ' --release ' ' --locked ' ' --offline ' ' --features real
   case "$_argvline" in *"$need"*) ;; *) die "canonical argv missing required token: '$need'" ;; esac
 done
 
-# Two remaps per side (cargo-home, target); the SOURCE is NOT remapped (canonical by construction).
-ENC_A="$(b0_canonical_encoded_rustflags "$CARGO_A" "$TARGET_A")" || die "cannot build canonical encoded rustflags for build A"
-ENC_B="$(b0_canonical_encoded_rustflags "$CARGO_B" "$TARGET_B")" || die "cannot build canonical encoded rustflags for build B"
+# ONE remap per side (the distinct per-build TARGET root -> /b0/target); the SOURCE (materialized at
+# /b0/tooling) and the CARGO_HOME (the literal canonical /b0/cargo, materialized fresh per build) are NOT
+# remapped — both universal by construction. A/B differ ONLY in the target root (distinct originals still
+# vary the pre-materialization source path), so ENC_A != ENC_B by the distinct targets.
+ENC_A="$(b0_canonical_encoded_rustflags "$TARGET_A")" || die "cannot build canonical encoded rustflags for build A"
+ENC_B="$(b0_canonical_encoded_rustflags "$TARGET_B")" || die "cannot build canonical encoded rustflags for build B"
 b0_refuse_ambient_rustflags "$ENC_A" || die "ambient rustflags refused"
-[ "$ENC_A" != "$ENC_B" ] || die "builds A and B present identical CARGO_ENCODED_RUSTFLAGS; distinct cargo/target roots required"
+[ "$ENC_A" != "$ENC_B" ] || die "builds A and B present identical CARGO_ENCODED_RUSTFLAGS; distinct target roots required"
 
 # --- CANONICAL build path (/b0/tooling): the SHARED materialization boundary — LOCKED, PINNED, and the
 # location where BOTH builds' source is materialized + compiled. Building at one fixed absolute path
@@ -254,21 +266,33 @@ LOCKFILE="$CANON_PARENT/.b0-tooling.lock"
 exec 9>"$LOCKFILE" || die "cannot open the canonical-path lock file $LOCKFILE"
 flock -n 9 || die "another run holds the canonical-path lock ($LOCKFILE); refusing (no silent wait)"
 
-# GAP 1 (filesystem alias defence, under the lock, BEFORE any deletion): the pinned literal itself must
-# not be a symlink or resolve elsewhere.
-if [ -e "$CANON_REQUIRED" ]; then
-  [ ! -L "$CANON_REQUIRED" ] || die "$CANON_REQUIRED is a symlink (refused)"
-  [ -d "$CANON_REQUIRED" ] || die "$CANON_REQUIRED exists and is not a directory (refused)"
-  [ "$(readlink -f "$CANON_REQUIRED")" = "$CANON_REQUIRED" ] || die "$CANON_REQUIRED resolves elsewhere (alias refused)"
-fi
-CANON_ABS="$CANON_REQUIRED"   # the PINNED literal (never operator-canonicalized to some other path)
-for r in "$SRC_A_CANON" "$SRC_B_CANON" "$A_ABS" "$B_ABS" "$CARGO_A" "$TARGET_A" "$CARGO_B" "$TARGET_B" "$work"; do
-  [ "$CANON_ABS" != "$r" ] || die "canonical build path coincides with a root: $CANON_ABS"
-  case "$CANON_ABS/" in "$r"/*) die "canonical build path nested under a root: $r" ;; esac
-  case "$r/" in "$CANON_ABS"/*) die "a root is nested under the canonical build path: $r" ;; esac
+# GAP 1 (filesystem alias defence, under the lock, BEFORE any deletion): each pinned literal itself must
+# not be a symlink or resolve elsewhere — the canonical build path /b0/tooling AND the canonical cargo
+# home /b0/cargo.
+for pinned in "$CANON_REQUIRED" "$CANON_CARGO"; do
+  if [ -e "$pinned" ]; then
+    [ ! -L "$pinned" ] || die "$pinned is a symlink (refused)"
+    [ -d "$pinned" ] || die "$pinned exists and is not a directory (refused)"
+    [ "$(readlink -f "$pinned")" = "$pinned" ] || die "$pinned resolves elsewhere (alias refused)"
+  fi
 done
-# Start from a clean, ABSENT canonical path (run_one materializes it fresh per build under the held lock).
+CANON_ABS="$CANON_REQUIRED"   # the PINNED literal (never operator-canonicalized to some other path)
+CARGO_LOCKED="$CANON_CARGO"   # now WE hold the lock -> the trap may clean /b0/cargo on exit
+# Neither canonical path may coincide with or nest against any root, and the two canonical paths must be
+# distinct + non-nested from each other (/b0/tooling vs /b0/cargo).
+for canon in "$CANON_ABS" "$CANON_CARGO"; do
+  for r in "$SRC_A_CANON" "$SRC_B_CANON" "$A_ABS" "$B_ABS" "$TARGET_A" "$TARGET_B" "$work"; do
+    [ "$canon" != "$r" ] || die "canonical path coincides with a root: $canon"
+    case "$canon/" in "$r"/*) die "canonical path $canon nested under a root: $r" ;; esac
+    case "$r/" in "$canon"/*) die "a root is nested under the canonical path $canon: $r" ;; esac
+  done
+done
+[ "$CANON_ABS" != "$CANON_CARGO" ] || die "internal: /b0/tooling and /b0/cargo coincide"
+case "$CANON_CARGO/" in "$CANON_ABS"/*) die "/b0/cargo nested under /b0/tooling" ;; esac
+case "$CANON_ABS/" in "$CANON_CARGO"/*) die "/b0/tooling nested under /b0/cargo" ;; esac
+# Start from clean, ABSENT canonical paths (run_one materializes each fresh per build under the held lock).
 rm -rf "$CANON_ABS" || die "cannot clean the canonical build path $CANON_ABS"
+rm -rf "$CANON_CARGO" || die "cannot clean the canonical cargo home $CANON_CARGO"
 
 # --- PINNED canonical guest HOME (/b0/guesthome) — RISC0 real embed only ----------------------------
 # risc0-build strips every CARGO* env before building the guest, so the ONLY way to force the guest
@@ -283,7 +307,7 @@ if [ "$CAND" = risc0 ] && [ "$EMBED" = 1 ]; then
     [ "$(readlink -f "$GUEST_HOME")" = "$GUEST_HOME" ] || die "$GUEST_HOME resolves elsewhere (alias refused)"
   fi
   GUEST_HOME_ABS="$GUEST_HOME"
-  for r in "$SRC_A_CANON" "$SRC_B_CANON" "$A_ABS" "$B_ABS" "$CARGO_A" "$TARGET_A" "$CARGO_B" "$TARGET_B" "$CANON_ABS" "$work"; do
+  for r in "$SRC_A_CANON" "$SRC_B_CANON" "$A_ABS" "$B_ABS" "$TARGET_A" "$TARGET_B" "$CANON_ABS" "$CANON_CARGO" "$work"; do
     [ "$GUEST_HOME_ABS" != "$r" ] || die "guest home coincides with a root: $GUEST_HOME_ABS"
     case "$GUEST_HOME_ABS/" in "$r"/*) die "guest home nested under a root: $r" ;; esac
     case "$r/" in "$GUEST_HOME_ABS"/*) die "a root is nested under the guest home: $r" ;; esac
@@ -326,11 +350,15 @@ PY
 # Each build MATERIALIZES its distinct original root at the single canonical build path and compiles
 # THERE (so the compiler-visible source path is identical for A and B), with that build's distinct
 # CARGO_HOME/target (remapped). The original root's path never reaches the compiler.
-declare -A RUN_SHA RUN_B3 G_IMG G_MB T_START T_END MAT_ADDR
+declare -A RUN_SHA RUN_B3 G_IMG G_MB T_START T_END MAT_ADDR MAT_CARGO
 run_one() {
-  local tag="$1" src="$2" cargo="$3" target="$4" enc="$5" evid="$6" origin_addr="$7" last mat_addr
+  local tag="$1" src="$2" target="$3" enc="$4" evid="$5" origin_addr="$6" last mat_addr mat_cargo
+  # The compiler-visible cargo home is ALWAYS the literal canonical /b0/cargo (NOT a per-build root): the
+  # SP1 nested `sp1-core-executor-runner` build strips CARGO_ENCODED_RUSTFLAGS, so the ONLY way its
+  # vendored-dep source paths are path-independent is for the cargo home itself to be canonical. It is
+  # re-materialized FRESH per build (removed fail-hard before + after), so canonical path != shared state.
   local -a envv=(BUILD_GIT_SHA="$EXPECT_SHA" SOURCE_DATE_EPOCH=0 B0_VENUE_EMBED="$EMBED"
-    CARGO_HOME="$cargo" CARGO_TARGET_DIR="$target" CARGO_ENCODED_RUSTFLAGS="$enc"
+    CARGO_HOME="$CANON_CARGO" CARGO_TARGET_DIR="$target" CARGO_ENCODED_RUSTFLAGS="$enc"
     CARGO_NET_OFFLINE=true
     RUSTC_WRAPPER="$WRAPPER_ABS" B0_RUSTC_EVIDENCE_DIR="$evid")
   if [ "$CAND" = risc0 ] && [ "$EMBED" = 1 ]; then
@@ -352,12 +380,17 @@ run_one() {
   [ "$mat_addr" = "$origin_addr" ] \
     || die "build $tag: materialized manifest $mat_addr != origin manifest $origin_addr (materialization not faithful / stale content)"
   MAT_ADDR[$tag]="$mat_addr"
-  # Materialize the pre-provisioned dependency seed into THIS build's cargo home(s) — an INDEPENDENT
-  # copy, each address-verified against the retained seed authority (offline; never the network / an
-  # ambient cargo home). Host graph -> this build's CARGO_HOME; RISC0 guest graph -> the pinned guest
-  # HOME (re-materialized fresh per build at the same canonical path, so the guest ELF is identical).
-  b0_materialize_seed "$DEP_SEED_DIR/host-seed" "$DEP_SEED_DIR/host-config.toml" "$cargo" "$HOST_SEED_ADDR" >/dev/null \
+  # Materialize the pre-provisioned dependency seed into the canonical cargo home /b0/cargo — an
+  # INDEPENDENT, FRESH copy for THIS build, address-verified against the retained seed authority (offline;
+  # never the network / an ambient cargo home). Remove /b0/cargo FAIL-HARD first so no cache or generated
+  # state from the previous build survives (canonical path != shared state); capture the materialized
+  # inventory address so the recipe can bind seed-origin == materialized-A == materialized-B equality.
+  # Host graph -> canonical /b0/cargo; RISC0 guest graph -> the pinned guest HOME (also re-materialized
+  # fresh per build at the same canonical path, so the guest ELF is identical).
+  rm -rf "$CANON_CARGO" || die "build $tag: cannot clean canonical cargo home before materialization: $CANON_CARGO"
+  mat_cargo="$(b0_materialize_seed "$DEP_SEED_DIR/host-seed" "$DEP_SEED_DIR/host-config.toml" "$CANON_CARGO" "$HOST_SEED_ADDR")" \
     || die "build $tag: host dependency-seed materialization/verification failed (seed != retained authority)"
+  MAT_CARGO[$tag]="$mat_cargo"
   if [ "$CAND" = risc0 ] && [ "$EMBED" = 1 ]; then
     rm -rf "$GUEST_HOME_ABS" || die "build $tag: cannot clean guest home $GUEST_HOME_ABS"
     b0_materialize_seed "$DEP_SEED_DIR/guest-seed" "$DEP_SEED_DIR/guest-config.toml" "$GUEST_HOME_ABS/.cargo" "$GUEST_SEED_ADDR" >/dev/null \
@@ -375,17 +408,22 @@ run_one() {
   RUN_SHA[$tag]="$(sha256_file "$work/artifact.$tag")"
   RUN_B3[$tag]="$(blake3_file "$work/artifact.$tag")"
   read -r "G_IMG[$tag]" "G_MB[$tag]" <<<"$(guest_identity "$target")"
-  # GAP 5: authoritative cleanup — a failure to remove the canonical source FAILS the run (never leave
-  # authoritative source behind while reporting success); `trap - EXIT` preserves the diagnostics ($work,
-  # which holds the retained artifacts + rustc-invocation evidence, all OUTSIDE the canonical path).
-  if ! rm -rf "$CANON_ABS"; then
+  # GAP 5: authoritative cleanup — remove BOTH the canonical source AND the canonical cargo home FAIL-HARD
+  # (never leave authoritative source, nor a populated shared cargo home, behind while reporting success;
+  # the next build re-materializes a fresh independent seed, so no cache/generated state is carried A->B).
+  # `trap - EXIT` preserves the diagnostics ($work, which holds the retained artifacts + rustc-invocation
+  # evidence, all OUTSIDE the canonical paths).
+  local cleanup_fail=""
+  rm -rf "$CANON_ABS"   || cleanup_fail="canonical source $CANON_ABS"
+  rm -rf "$CANON_CARGO" || cleanup_fail="${cleanup_fail:+$cleanup_fail + }canonical cargo home $CANON_CARGO"
+  if [ -n "$cleanup_fail" ]; then
     trap - EXIT
-    die "build $tag: FAILED to remove canonical source $CANON_ABS; authoritative source may remain. Diagnostics preserved at $work"
+    die "build $tag: FAILED to remove $cleanup_fail; authoritative state may remain. Diagnostics preserved at $work"
   fi
 }
-run_one a "$SRC_A_CANON" "$CARGO_A" "$TARGET_A" "$ENC_A" "$EVID_A" "$SRC_A_MANIFEST_ADDR"
+run_one a "$SRC_A_CANON" "$TARGET_A" "$ENC_A" "$EVID_A" "$SRC_A_MANIFEST_ADDR"
 log "build A done: sha256=${RUN_SHA[a]} blake3=${RUN_B3[a]} guest_img=${G_IMG[a]}"
-run_one b "$SRC_B_CANON" "$CARGO_B" "$TARGET_B" "$ENC_B" "$EVID_B" "$SRC_B_MANIFEST_ADDR"
+run_one b "$SRC_B_CANON" "$TARGET_B" "$ENC_B" "$EVID_B" "$SRC_B_MANIFEST_ADDR"
 log "build B done: sha256=${RUN_SHA[b]} blake3=${RUN_B3[b]} guest_img=${G_IMG[b]}"
 
 # Separation: build B started only after build A finished; each artifact preserved immediately.
@@ -418,7 +456,10 @@ fi
 # absence of the bare username/hostname as ordinary substrings (prose like "measurement runner" is not
 # a leak). The exact-prefix refused set travels in the recipe facts (leakage_refused_prefixes).
 strings_out="$(strings -a "$work/artifact.a" 2>/dev/null || true)"
-REFUSED_ROOTS=("$SRC_A_CANON" "$SRC_B_CANON" "$CARGO_A" "$CARGO_B" "$TARGET_A" "$TARGET_B" "$EVID_A" "$EVID_B" "$work")
+# The canonical cargo home /b0/cargo is a PERMITTED prefix (it legitimately appears in the nested SP1
+# binary), NOT refused: there is no longer a per-build cargo root to leak. The refused set is exactly the
+# per-build source/target/evidence staging roots + HOME/TMPDIR.
+REFUSED_ROOTS=("$SRC_A_CANON" "$SRC_B_CANON" "$TARGET_A" "$TARGET_B" "$EVID_A" "$EVID_B" "$work")
 [ -n "${HOME:-}" ] && REFUSED_ROOTS+=("$HOME")
 [ -n "${TMPDIR:-}" ] && REFUSED_ROOTS+=("${TMPDIR%/}")
 hn="$(hostname 2>/dev/null || true)"
@@ -427,6 +468,26 @@ if hit="$(b0_leakage_scan "$strings_out" "$REFUSED_LIST" "${USER:-}" "$hn")"; th
   : # clean
 else
   log "leakage: $hit"; die "reproducibility leakage: artifact embeds an uncontrolled path-prefix/component: $hit"
+fi
+# Also leakage-scan the NESTED sp1-core-executor-runner host binary(ies) DIRECTLY (shared, tested
+# b0_scan_nested_sp1_host_bins). Its build.rs strips CARGO_ENCODED_RUSTFLAGS, so no remap protects it: its
+# path-independence relies ENTIRELY on the canonical /b0/cargo home. The helper enumerates the DIRECT-CHILD
+# executables of sp1-native-bins/release via a FULL-CONSUMPTION NUL array (NO head / early-closing pipeline,
+# so a multi-thousand-file nested target dir can never SIGPIPE the pipeline under `set -euo pipefail`),
+# enforces the ratified expected host-binary basename set, leakage-scans EACH executable, and returns the
+# retained per-binary evidence (sorted relname + sha256 + blake3 + size + scan result). Fail-closed on a
+# symlink/non-regular/unreadable candidate, empty executable set, wrong basename set, or ANY leakage.
+NESTED_HOST_BIN_EVID=""
+if [ "$CAND" = sp1 ]; then
+  nb_release="$TARGET_A/sp1-native-bins/release"
+  nerr="$work/nested-scan.err"
+  NESTED_HOST_BIN_EVID="$(b0_scan_nested_sp1_host_bins "$nb_release" "$REFUSED_LIST" "${USER:-}" "$hn" "$TARGET_A" 2>"$nerr")" \
+    || die "nested sp1 host-binary leakage/authority check failed: $(cat "$nerr" 2>/dev/null)"
+  while IFS="$(printf '\t')" read -r rel sha _b3 sz st; do
+    [ -n "$rel" ] && log "nested sp1 host binary authenticated + leakage-$st: $rel (sha256=$sha size=$sz)"
+  done <<EOF
+$NESTED_HOST_BIN_EVID
+EOF
 fi
 log "reproducible runner verified (candidate=$CAND arch=$ARCH): blake3=${RUN_B3[a]}; no uncontrolled path-prefix/component leakage"
 
@@ -473,15 +534,20 @@ print(json.dumps(d))
 
 python3 - "$RECIPE_OUT" "$CAND" "$ARCH" "$MANIFEST" "$ARTIFACT" "$CARGO_IDENT" "$EMBED" \
   "$TOOLCHAIN_IDENTITY" "$WRAPPER_B3" "$ARGV_JSON" "$ENV_JSON" "$REFUSED_JSON" \
-  "$SRC_A_CANON" "$CARGO_A" "$TARGET_A" "$ENC_A_HEX" "${RUN_SHA[a]}" "${RUN_B3[a]}" "${G_IMG[a]}" "${G_MB[a]}" "${T_START[a]}" "${T_END[a]}" "$EVID_A" \
-  "$SRC_B_CANON" "$CARGO_B" "$TARGET_B" "$ENC_B_HEX" "${RUN_SHA[b]}" "${RUN_B3[b]}" "${G_IMG[b]}" "${G_MB[b]}" "${T_START[b]}" "${T_END[b]}" "$EVID_B" \
-  "$work" "$CANON_ABS" \
-  "$SRC_A_MANIFEST_ADDR" "${MAT_ADDR[a]}" "$SRC_B_MANIFEST_ADDR" "${MAT_ADDR[b]}" "$EXTRA_JSON" "$CAND" <<'PY' || die "failed to emit runner-recipe facts JSON"
+  "$SRC_A_CANON" "$TARGET_A" "$ENC_A_HEX" "${RUN_SHA[a]}" "${RUN_B3[a]}" "${G_IMG[a]}" "${G_MB[a]}" "${T_START[a]}" "${T_END[a]}" "$EVID_A" \
+  "$SRC_B_CANON" "$TARGET_B" "$ENC_B_HEX" "${RUN_SHA[b]}" "${RUN_B3[b]}" "${G_IMG[b]}" "${G_MB[b]}" "${T_START[b]}" "${T_END[b]}" "$EVID_B" \
+  "$work" "$CANON_ABS" "$CANON_CARGO" \
+  "$SRC_A_MANIFEST_ADDR" "${MAT_ADDR[a]}" "$SRC_B_MANIFEST_ADDR" "${MAT_ADDR[b]}" \
+  "$HOST_SEED_ADDR" "${MAT_CARGO[a]}" "${MAT_CARGO[b]}" \
+  "$EXTRA_JSON" "$CAND" "$NESTED_HOST_BIN_EVID" <<'PY' || die "failed to emit runner-recipe facts JSON"
 import json, os, sys
 a = sys.argv
 (out, cand, arch, manifest, artifact, cargo_ident, embed, toolchain, wrapper_b3, argv_json, env_json, refused_json) = a[1:13]
 def build(off, orig_addr, mat_addr):
-    orig, cargo, target, enc_hex, rsha, rb3, gimg, gmb, ts, te, evid = a[off:off+11]
+    # No per-build cargo_from: the compiler-visible cargo home is the literal canonical /b0/cargo for BOTH
+    # builds (top-level canonical_cargo_home), re-materialized fresh per build. Retaining a per-build cargo
+    # root here would be a fake identity mapping, so the field is dropped (honest effective mapping).
+    orig, target, enc_hex, rsha, rb3, gimg, gmb, ts, te, evid = a[off:off+10]
     invs = []
     for name in sorted(os.listdir(evid)):
         if not name.endswith('.rec'):
@@ -497,33 +563,54 @@ def build(off, orig_addr, mat_addr):
         # The sp1-core-executor-runner nested `sp1-native-bins` compiles (kind=nested) carry no remaps
         # (that vendored build.rs strips CARGO_ENCODED_RUSTFLAGS). They stay RAW EVIDENCE in the evidence
         # dir but are NOT bound into the remap-enforced inventory (kind is compile|probe there); their
-        # path-independence is proven by the A/B runner byte-identity, not by a remap count.
+        # path-independence is proven by the canonical /b0/cargo home + the A/B runner byte-identity, not
+        # by a remap count.
         if kind == 'nested':
             continue
         invs.append({'kind': kind, 'remap_args': remap_args, 'record_address': name[:-4]})
     return {
-        'original_root': orig, 'cargo_from': cargo, 'target_from': target,
+        'original_root': orig, 'target_from': target,
         'encoded_rustflags_hex': enc_hex, 'runner_sha256': rsha, 'runner_blake3': rb3,
         'guest_image_id': gimg, 'guest_methods_blake3': gmb, 'start_unix': int(ts), 'end_unix': int(te),
         'origin_manifest_blake3': orig_addr, 'materialized_manifest_blake3': mat_addr,
         'invocations': invs,
     }
-ba = build(13, a[37], a[38]); bb = build(24, a[39], a[40])
+ba = build(13, a[36], a[37]); bb = build(23, a[38], a[39])
 doc = {
     'candidate': cand, 'arch': arch, 'manifest_path': manifest, 'artifact_path': artifact,
     'cargo_ident': cargo_ident, 'b0_venue_embed': embed, 'per_arch_toolchain_identity': toolchain,
     'wrapper_blake3': wrapper_b3, 'build_argv': json.loads(argv_json), 'build_env': json.loads(env_json),
-    'canonical_build_path': a[36],
+    'canonical_build_path': a[34],
+    'canonical_cargo_home': a[35],
     'build_a': ba, 'build_b': bb, 'byte_equal': True,
+    # Fresh-per-build dependency-seed materialization at /b0/cargo: the retained seed authority and BOTH
+    # per-build materialized inventory addresses must be one and the same (proves each build got an
+    # independent, authentic, identical seed — never a shared/carried cache).
+    'cargo_seed': {'origin_address': a[40], 'materialized_a': a[41], 'materialized_b': a[42]},
     'leakage_refused_prefixes': json.loads(refused_json),
     'leakage_permitted_prefixes': (['/b0/cargo', '/b0/target', '/b0/tooling', '/b0/guesthome']
-                                   if a[42] == 'risc0' else ['/b0/cargo', '/b0/target', '/b0/tooling']),
+                                   if a[44] == 'risc0' else ['/b0/cargo', '/b0/target', '/b0/tooling']),
     'leakage_clean': True,
-    'evidence_root': a[35],
+    'evidence_root': a[33],
 }
+# Retained nested SP1 host-binary evidence (SP1 only; empty for RISC0): the sorted relname + sha256 +
+# blake3 + size + scan result for each direct-child executable of sp1-native-bins/release that
+# b0_scan_nested_sp1_host_bins authenticated + leakage-scanned. Parsed from its TSV (rel\tsha\tblake3\tsize\tscan).
+nhb = []
+for line in a[45].splitlines():
+    if not line.strip():
+        continue
+    parts = line.split('\t')
+    if len(parts) != 5:
+        sys.exit('malformed nested host-binary evidence line: %r' % line)
+    rel, sha, b3, sz, scan = parts
+    nhb.append({'relpath': rel, 'sha256': sha, 'blake3': b3, 'size': int(sz), 'scan': scan})
+doc['nested_host_binaries'] = nhb
+if cand == 'sp1' and not nhb:
+    sys.exit('SP1 recipe has no nested host-binary evidence')
 # Merge the provisioning facts (offline dependency seed + host-toolchain + protoc authorities + RISC0
 # guest-embed A/B equality). No key collides with the fields above.
-doc.update(json.loads(a[41]))
+doc.update(json.loads(a[43]))
 if not any(i['kind'] == 'compile' for i in ba['invocations']):
     sys.exit('build A recorded no compile invocation')
 if not any(i['kind'] == 'compile' for i in bb['invocations']):
@@ -533,6 +620,10 @@ mans = {ba['origin_manifest_blake3'], bb['origin_manifest_blake3'],
         ba['materialized_manifest_blake3'], bb['materialized_manifest_blake3']}
 if len(mans) != 1 or not (len(mans.pop()) == 64):
     sys.exit('source-input manifests are not all equal 64-hex (origin A/B, materialized A/B)')
+# The 3-way dependency-seed authentication (retained authority + materialized A/B) must all agree.
+seeds = {doc['cargo_seed']['origin_address'], doc['cargo_seed']['materialized_a'], doc['cargo_seed']['materialized_b']}
+if len(seeds) != 1 or not (len(seeds.pop()) == 64):
+    sys.exit('cargo dependency-seed materializations are not all equal 64-hex (origin, materialized A/B)')
 with open(out, 'w', encoding='utf-8') as f:
     json.dump(doc, f, indent=2)
     f.write('\n')

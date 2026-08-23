@@ -42,7 +42,7 @@ type ParsedVector = (
 
 fn parse(bytes: &[u8]) -> Result<ParsedVector, String> {
     let mut r = Rd { b: bytes, p: 0 };
-    if r.take(13)? != b"B0PREMEASVEC6" {
+    if r.take(13)? != b"B0PREMEASVEC7" {
         return Err("bad container magic".into());
     }
     let allowlist = r.blob()?;
@@ -63,6 +63,9 @@ fn parse(bytes: &[u8]) -> Result<ParsedVector, String> {
             }
             lists.push(v);
         }
+        // VEC7: the per-candidate retained DependencySeedV1 JSON blob is written AFTER the 12 lists and
+        // BEFORE verifier_material.
+        let dependency_seed_json = r.blob()?;
         let verifier_material = r.blob()?;
         let result_set = r.blob()?;
         let mut it = lists.into_iter();
@@ -81,6 +84,7 @@ fn parse(bytes: &[u8]) -> Result<ParsedVector, String> {
                 inventories_b: it.next().unwrap(),
                 double_build_proofs: it.next().unwrap(),
                 leakage_reports: it.next().unwrap(),
+                dependency_seed_json,
                 verifier_material,
                 result_set,
             },

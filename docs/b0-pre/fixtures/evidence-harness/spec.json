@@ -2,7 +2,7 @@
   "label": "NON_SELECTION / TEST_ONLY",
   "seed": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
   "expected": {
-    "result_set_hash": "343e75fcceb24a164738f63a6f84ea8591d11e4e1031db5076855ebc22d5b818",
+    "result_set_hash": "a4177ece5c25f5eb5877d72d61891c06d430ecc9b5b786c887b09a3bb5aafdcf",
     "worst_arch_p99_verify_ns": 59609120,
     "max_proof_bytes": 209,
     "verifier_material_bytes": 292,

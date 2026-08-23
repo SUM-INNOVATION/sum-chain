@@ -2,8 +2,9 @@
 //! runner binary. It records the scanned binary's BLAKE3, the permitted absolute prefixes (exactly
 //! /b0/cargo,/b0/target,/b0/tooling), the refused prefixes the scan confirmed ABSENT, and the
 //! evidence/temp root the wrapper wrote under. At sealed import both verifiers CROSS-BIND it to
-//! `RunnerBuildRecipeV1`: the refused set must CONTAIN every retained A/B original / CARGO_HOME / target
-//! root AND the evidence root (a merely nonempty set is insufficient); the scan must be clean; the
+//! `RunnerBuildRecipeV1`: the refused set must CONTAIN every retained A/B original + target root AND the
+//! evidence root (a merely nonempty set is insufficient); the canonical cargo home /b0/cargo is a
+//! PERMITTED prefix, NOT refused (there is no per-build cargo root to leak); the scan must be clean; the
 //! permitted set must be exactly the canonical three; and the scanned binary must be the measurement
 //! runner. Its domain-separated [`hash`] is bound by `RunnerAttestationV1.runner_leakage_report_blake3`.
 
@@ -148,10 +149,8 @@ impl RunnerLeakageReportV1 {
             self.refused_prefixes.iter().map(|s| s.as_str()).collect();
         let mut required = vec![
             recipe.build_a.original_root.as_str(),
-            recipe.build_a.cargo_from.as_str(),
             recipe.build_a.target_from.as_str(),
             recipe.build_b.original_root.as_str(),
-            recipe.build_b.cargo_from.as_str(),
             recipe.build_b.target_from.as_str(),
             self.evidence_root.as_str(),
         ];
@@ -180,10 +179,8 @@ mod tests {
         let rc = recipe();
         let mut refused = vec![
             rc.build_a.original_root.clone(),
-            rc.build_a.cargo_from.clone(),
             rc.build_a.target_from.clone(),
             rc.build_b.original_root.clone(),
-            rc.build_b.cargo_from.clone(),
             rc.build_b.target_from.clone(),
             "/tmp/b0-evid".to_string(),
         ];
@@ -211,8 +208,8 @@ mod tests {
     #[test]
     fn refused_omitting_a_root_refused() {
         let mut a = sample();
-        // Drop build B's cargo root from the refused set.
-        let drop = recipe().build_b.cargo_from;
+        // Drop build B's target root from the refused set.
+        let drop = recipe().build_b.target_from;
         a.refused_prefixes.retain(|s| s != &drop);
         assert!(a
             .check_clean_and_exact(&recipe())

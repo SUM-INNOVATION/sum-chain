@@ -4,13 +4,14 @@
 //! record per invocation (`b0-final-rustc-invocation/v2`); the inventory is their sorted, de-duplicated
 //! union tagged with its build. At import both verifiers decode it from scratch and, against the
 //! corresponding build side of `RunnerBuildRecipeV1`, prove: at least one real crate COMPILE; every
-//! compile carries EXACTLY two remap args whose FROM roots equal that build's retained CARGO_HOME /
-//! target roots and whose destinations are exactly /b0/cargo,/b0/target (the source is NOT remapped —
-//! it is compiled at the canonical build path); no third remap; and each record's content address
-//! re-derives from the exact record bytes. Its domain-separated [`hash`] is bound (per build) by the
-//! runner double-build proof + attestation.
+//! compile carries EXACTLY ONE remap arg whose FROM root equals that build's retained target root and
+//! whose destination is exactly /b0/target (neither the source NOR the canonical cargo home is remapped —
+//! the source is compiled at the canonical build path /b0/tooling and the cargo home is the literal
+//! canonical /b0/cargo); no second remap; and each record's content address re-derives from the exact
+//! record bytes. Its domain-separated [`hash`] is bound (per build) by the runner double-build proof +
+//! attestation.
 
-use super::runner_build_recipe::{r_str, w_str, BuildSide, CANON_CARGO, CANON_TARGET};
+use super::runner_build_recipe::{r_str, w_str, BuildSide, CANON_TARGET};
 use crate::codec::{DecodeError, Reader, Writer};
 use crate::enums::{Arch, Candidate};
 
@@ -188,8 +189,9 @@ impl RustcInvocationInventoryV1 {
     }
 
     /// Fail-closed: for the given build SIDE (the recipe's build_a or build_b roots), at least one
-    /// COMPILE; every compile carries exactly the two canonical remap args for those roots and no
-    /// third; and EVERY record's content address re-derives from its exact bytes.
+    /// COMPILE; every compile carries exactly the ONE canonical target remap for that build's target
+    /// root and no second (the canonical cargo home is NOT remapped); and EVERY record's content address
+    /// re-derives from its exact bytes.
     pub fn check_proves_remaps(&self, side: &BuildSide) -> Result<(), String> {
         let mut compiles = 0usize;
         for e in &self.entries {
@@ -201,27 +203,19 @@ impl RustcInvocationInventoryV1 {
                 continue;
             }
             compiles += 1;
-            if e.remap_args.len() != 2 {
+            if e.remap_args.len() != 1 {
                 return Err(format!(
-                    "compile invocation has {} remap args (require exactly 2, no third)",
+                    "compile invocation has {} remap args (require exactly 1: the target; the \
+                     canonical cargo home is not remapped)",
                     e.remap_args.len()
                 ));
             }
-            let mut parsed = Vec::with_capacity(2);
-            for a in &e.remap_args {
-                parsed.push(parse_remap_arg(a)?);
-            }
-            let want = [
-                (side.cargo_from.as_str(), CANON_CARGO),
-                (side.target_from.as_str(), CANON_TARGET),
-            ];
-            for (i, (wf, wt)) in want.iter().enumerate() {
-                if parsed[i].0 != *wf || parsed[i].1 != *wt {
-                    return Err(format!(
-                        "compile remap #{i} is {}={} != {wf}={wt} (recipe side root)",
-                        parsed[i].0, parsed[i].1
-                    ));
-                }
+            let (f, t) = parse_remap_arg(&e.remap_args[0])?;
+            if f != side.target_from || t != CANON_TARGET {
+                return Err(format!(
+                    "compile remap is {f}={t} != {}={CANON_TARGET} (recipe side target root)",
+                    side.target_from
+                ));
             }
         }
         if compiles == 0 {
@@ -256,11 +250,8 @@ pub fn canonical_inventory(
 mod tests {
     use super::*;
 
-    fn compile_rec(cargo: &str, target: &str) -> InvocationRecord {
-        let remap_args = vec![
-            format!("--remap-path-prefix={cargo}={CANON_CARGO}"),
-            format!("--remap-path-prefix={target}={CANON_TARGET}"),
-        ];
+    fn compile_rec(target: &str) -> InvocationRecord {
+        let remap_args = vec![format!("--remap-path-prefix={target}={CANON_TARGET}")];
         let mut rec = InvocationRecord {
             kind: "compile".into(),
             remap_args,
@@ -273,7 +264,6 @@ mod tests {
     fn side() -> BuildSide {
         BuildSide {
             original_root: "/b0-input/a/tooling".into(),
-            cargo_from: "/b0-input/a/cargo".into(),
             target_from: "/b0-input/a/target".into(),
             encoded_rustflags: vec![],
         }
@@ -291,10 +281,7 @@ mod tests {
             Candidate::Sp1,
             Arch::X86_64,
             0,
-            vec![
-                compile_rec("/b0-input/a/cargo", "/b0-input/a/target"),
-                probe,
-            ],
+            vec![compile_rec("/b0-input/a/target"), probe],
         )
     }
 
@@ -330,17 +317,17 @@ mod tests {
             Candidate::Sp1,
             Arch::X86_64,
             0,
-            vec![compile_rec("/b0-input/a/OTHER", "/b0-input/a/target")],
+            vec![compile_rec("/b0-input/a/OTHER")],
         );
         assert!(inv
             .check_proves_remaps(&side())
             .unwrap_err()
-            .contains("recipe side root"));
+            .contains("recipe side target root"));
     }
 
     #[test]
     fn forged_record_address_refused() {
-        let mut rec = compile_rec("/b0-input/a/cargo", "/b0-input/a/target");
+        let mut rec = compile_rec("/b0-input/a/target");
         rec.record_address = [0xAB; 32]; // no longer BLAKE3(record bytes)
         let inv = canonical_inventory(Candidate::Sp1, Arch::X86_64, 0, vec![rec]);
         assert!(inv
@@ -350,15 +337,16 @@ mod tests {
     }
 
     #[test]
-    fn third_remap_refused() {
-        let mut rec = compile_rec("/b0-input/a/cargo", "/b0-input/a/target");
+    fn second_remap_refused() {
+        // A fake cargo-home remap alongside the target remap is refused (only the target is remapped).
+        let mut rec = compile_rec("/b0-input/a/target");
         rec.remap_args
-            .push("--remap-path-prefix=/x=/b0/cargo".into());
+            .push("--remap-path-prefix=/b0-input/a/cargo=/b0/cargo".into());
         rec.record_address = rec.recompute_address();
         let inv = canonical_inventory(Candidate::Sp1, Arch::X86_64, 0, vec![rec]);
         assert!(inv
             .check_proves_remaps(&side())
             .unwrap_err()
-            .contains("exactly 2"));
+            .contains("exactly 1"));
     }
 }

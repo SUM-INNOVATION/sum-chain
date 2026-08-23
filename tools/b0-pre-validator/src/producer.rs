@@ -78,6 +78,13 @@ pub struct CandidateFacts {
     /// compiled runner that emitted the guest identity), which is required to equal the measurement
     /// `runner_blake3`. SP1: {x86_64, aarch64}; RISC0: {x86_64} (never aarch64).
     pub identity_records: Vec<IdentityRecordFacts>,
+    /// The retained per-candidate `DependencySeedV1` JSON (the venue `--dep-seed-json` bytes). Sealed
+    /// into the bundle and authenticated at import; every provenance's double-build proof cargo-seed
+    /// origin is anchored to its host-cargo-home seed-content address (never producer-trusted).
+    /// serde-default so pre-correction facts parse; an empty value fails closed at `produce` (the anchor
+    /// decodes it from scratch).
+    #[serde(default)]
+    pub dependency_seed_json: String,
 }
 
 /// The continuity-relevant subset of the Phase-1 `GuestIdentityRecord` (measurement-only; NEVER added
@@ -161,6 +168,11 @@ pub struct RunnerRecipeJson {
     pub cargo_ident: String,
     pub b0_venue_embed: String,
     pub canonical_build_path: String,
+    /// The literal canonical compiler-visible CARGO_HOME (== /b0/cargo), materialized fresh per build.
+    /// serde-default so pre-correction recipe fixtures parse; an empty value is refused by
+    /// `check_self_consistent`.
+    #[serde(default)]
+    pub canonical_cargo_home: String,
     pub per_arch_toolchain_identity: String,
     pub wrapper_blake3: String,
     pub build_argv: Vec<String>,
@@ -191,6 +203,21 @@ pub struct RunnerRecipeJson {
     /// address is bound into the attestation; absent for RISC0.
     #[serde(default)]
     pub canonical_sp1_guest_artifact: Option<AuthorityRefJson>,
+    /// The fresh-per-build cargo dependency-seed materialization equality (origin == materialized_A ==
+    /// materialized_B). serde-default so pre-correction recipe fixtures parse; the producer maps these
+    /// into the double-build proof, where the 3-way equality + non-zero origin is re-verified.
+    #[serde(default)]
+    pub cargo_seed: CargoSeedJson,
+}
+
+#[derive(Deserialize, Clone, Default)]
+pub struct CargoSeedJson {
+    #[serde(default)]
+    pub origin_address: String,
+    #[serde(default)]
+    pub materialized_a: String,
+    #[serde(default)]
+    pub materialized_b: String,
 }
 
 #[derive(Deserialize, Clone, Default)]
@@ -211,7 +238,6 @@ pub struct GuestEmbedJson {
 #[derive(Deserialize, Clone)]
 pub struct BuildSideJson {
     pub original_root: String,
-    pub cargo_from: String,
     pub target_from: String,
     pub encoded_rustflags_hex: String,
     pub runner_sha256: String,
@@ -926,8 +952,18 @@ pub fn produce(raw: &RawFacts) -> Result<MeasurementPackage, String> {
             cells.push(cell_facts(cell)?);
         }
 
-        // orchestrate_grid itself refuses a native-ineligible (RISC0/aarch64) cell.
-        let ev = orchestrate_grid(spec, guest_set, &ids, &provenances, &cells, mia_address)?;
+        // orchestrate_grid itself refuses a native-ineligible (RISC0/aarch64) cell. The retained
+        // per-candidate dependency-seed JSON is SEALED + authenticated; every double-build proof's cargo
+        // seed origin is anchored to its host-cargo-home seed-content address (real path: Some).
+        let ev = orchestrate_grid(
+            spec,
+            guest_set,
+            &ids,
+            &provenances,
+            &cells,
+            mia_address,
+            c.dependency_seed_json.as_bytes(),
+        )?;
         // The frozen verifier INDEPENDENTLY re-derives the verdict.
         let verdict = match crate::harness::verify_evidence(&ev) {
             Ok(r) if r.qualification => CandidateVerdict::Qualified,
@@ -1013,7 +1049,6 @@ fn prov_facts(p: &ProvFacts) -> Result<ProvenanceFacts, String> {
         |b: &BuildSideJson| -> Result<crate::schema::runner_build_recipe::BuildSide, String> {
             Ok(crate::schema::runner_build_recipe::BuildSide {
                 original_root: b.original_root.clone(),
-                cargo_from: b.cargo_from.clone(),
                 target_from: b.target_from.clone(),
                 encoded_rustflags: hexbytes(
                     &b.encoded_rustflags_hex,
@@ -1037,6 +1072,7 @@ fn prov_facts(p: &ProvFacts) -> Result<ProvenanceFacts, String> {
             cargo_ident: rr.cargo_ident.clone(),
             b0_venue_embed: rr.b0_venue_embed.clone(),
             canonical_build_path: rr.canonical_build_path.clone(),
+            canonical_cargo_home: rr.canonical_cargo_home.clone(),
             build_a: build_side(&rr.build_a)?,
             build_b: build_side(&rr.build_b)?,
             measured_source_commit: attestation.measured_source_commit.clone(),
@@ -1077,10 +1113,12 @@ fn prov_facts(p: &ProvFacts) -> Result<ProvenanceFacts, String> {
     let rustc_invocation_inventory_b = build_inventory(&rr.build_b, 1)?;
     let runner_double_build_proof = {
         use crate::schema::runner_double_build_proof::{BuildFacts, RunnerDoubleBuildProofV1};
-        let facts = |b: &BuildSideJson, inv_addr: [u8; 32]| -> Result<BuildFacts, String> {
+        let facts = |b: &BuildSideJson,
+                     inv_addr: [u8; 32],
+                     mat_cargo_seed: [u8; 32]|
+         -> Result<BuildFacts, String> {
             Ok(BuildFacts {
                 original_root: b.original_root.clone(),
-                cargo_from: b.cargo_from.clone(),
                 target_from: b.target_from.clone(),
                 runner_sha256: hex32(&b.runner_sha256, "recipe.runner_sha256")?,
                 runner_blake3: hex32(&b.runner_blake3, "recipe.runner_blake3")?,
@@ -1098,16 +1136,41 @@ fn prov_facts(p: &ProvFacts) -> Result<ProvenanceFacts, String> {
                     &b.materialized_manifest_blake3,
                     "recipe.materialized_manifest_blake3",
                 )?,
+                materialized_cargo_seed_blake3: mat_cargo_seed,
                 start_unix: b.start_unix,
                 end_unix: b.end_unix,
             })
         };
-        let fa = facts(&rr.build_a, rustc_invocation_inventory_a.hash())?;
-        let fb = facts(&rr.build_b, rustc_invocation_inventory_b.hash())?;
+        // Fresh-per-build cargo dependency-seed materialization equality: the venue authenticated each
+        // build's materialized /b0/cargo seed against the retained authority (origin) fail-hard; carry
+        // origin + per-build materialized addresses so the 3-way equality is re-verified from bytes.
+        let cargo_seed_origin_blake3 = hex32(
+            &rr.cargo_seed.origin_address,
+            "recipe.cargo_seed.origin_address",
+        )?;
+        let mat_cargo_a = hex32(
+            &rr.cargo_seed.materialized_a,
+            "recipe.cargo_seed.materialized_a",
+        )?;
+        let mat_cargo_b = hex32(
+            &rr.cargo_seed.materialized_b,
+            "recipe.cargo_seed.materialized_b",
+        )?;
+        let fa = facts(
+            &rr.build_a,
+            rustc_invocation_inventory_a.hash(),
+            mat_cargo_a,
+        )?;
+        let fb = facts(
+            &rr.build_b,
+            rustc_invocation_inventory_b.hash(),
+            mat_cargo_b,
+        )?;
         RunnerDoubleBuildProofV1 {
             candidate: cand,
             arch,
             wrapper_blake3,
+            cargo_seed_origin_blake3,
             reproducibility_pair_blake3: RunnerDoubleBuildProofV1::compute_reproducibility_pair(
                 &fa, &fb,
             ),
@@ -1295,7 +1358,25 @@ pub fn dry_run_raw_facts() -> RawFacts {
         h.update(tag.as_bytes());
         hx(h.finalize().as_bytes())
     }
-    let prov = |arch: &str, role: &str| -> ProvFacts {
+    let prov = |cand: &str, arch: &str, role: &str| -> ProvFacts {
+        // The self-consistent synthetic dependency-seed for THIS candidate: its record address anchors
+        // the attestation's dependency_seed_address, and its host-cargo-home content == the proof's cargo
+        // seed origin (the fixed synthetic cargo seed content). Deterministic; TEST_ONLY.
+        let dep_candidate = if cand == "Sp1" || cand == "sp1" {
+            crate::enums::Candidate::Sp1
+        } else {
+            crate::enums::Candidate::Risc0
+        };
+        let hexb = |bytes: &[u8]| -> String {
+            use std::fmt::Write as _;
+            bytes.iter().fold(String::new(), |mut a, b| {
+                let _ = write!(a, "{b:02x}");
+                a
+            })
+        };
+        let (_dep_json, dep_addr) = crate::measurement::synth_dependency_seed(dep_candidate);
+        let dep_addr_hex: String = hexb(&dep_addr);
+        let cargo_seed_hex: String = hexb(&crate::measurement::synth_cargo_seed_content());
         let (cpuset, mem, phys, log, ram) = if role == "Proving" {
             (5u32, 22u64 << 30, 16u32, 32u32, 64u64 << 30)
         } else {
@@ -1375,9 +1456,7 @@ pub fn dry_run_raw_facts() -> RawFacts {
             runner_recipe: {
                 let enc_hex = |t: &str| -> String {
                     use std::fmt::Write as _;
-                    let s = format!(
-                        "--remap-path-prefix=/b0-input/{t}/cargo=/b0/cargo\u{1f}--remap-path-prefix=/b0-input/{t}/target=/b0/target"
-                    );
+                    let s = format!("--remap-path-prefix=/b0-input/{t}/target=/b0/target");
                     s.bytes().fold(String::new(), |mut acc, b| {
                         let _ = write!(acc, "{b:02x}");
                         acc
@@ -1385,13 +1464,12 @@ pub fn dry_run_raw_facts() -> RawFacts {
                 };
                 let rec_addr = |t: &str| -> String {
                     let body = format!(
-                        "b0-final-rustc-invocation/v2\nkind=compile\nremap_arg=--remap-path-prefix=/b0-input/{t}/cargo=/b0/cargo\nremap_arg=--remap-path-prefix=/b0-input/{t}/target=/b0/target"
+                        "b0-final-rustc-invocation/v2\nkind=compile\nremap_arg=--remap-path-prefix=/b0-input/{t}/target=/b0/target"
                     );
                     blake3::hash(body.as_bytes()).to_hex().to_string()
                 };
                 let side = |t: &str, s: u64, e: u64| BuildSideJson {
                     original_root: format!("/b0-input/{t}/tooling"),
-                    cargo_from: format!("/b0-input/{t}/cargo"),
                     target_from: format!("/b0-input/{t}/target"),
                     encoded_rustflags_hex: enc_hex(t),
                     runner_sha256: dv("runner-sha256"),
@@ -1404,10 +1482,9 @@ pub fn dry_run_raw_facts() -> RawFacts {
                     end_unix: e,
                     invocations: vec![InvocationRecordJson {
                         kind: "compile".into(),
-                        remap_args: vec![
-                            format!("--remap-path-prefix=/b0-input/{t}/cargo=/b0/cargo"),
-                            format!("--remap-path-prefix=/b0-input/{t}/target=/b0/target"),
-                        ],
+                        remap_args: vec![format!(
+                            "--remap-path-prefix=/b0-input/{t}/target=/b0/target"
+                        )],
                         record_address: rec_addr(t),
                     }],
                 };
@@ -1416,7 +1493,6 @@ pub fn dry_run_raw_facts() -> RawFacts {
                     .flat_map(|t| {
                         vec![
                             format!("/b0-input/{t}/tooling"),
-                            format!("/b0-input/{t}/cargo"),
                             format!("/b0-input/{t}/target"),
                         ]
                     })
@@ -1431,6 +1507,7 @@ pub fn dry_run_raw_facts() -> RawFacts {
                     cargo_ident: "cargo".into(),
                     b0_venue_embed: "0".into(),
                     canonical_build_path: "/b0/tooling".into(),
+                    canonical_cargo_home: "/b0/cargo".into(),
                     per_arch_toolchain_identity: dv("per-arch-toolchain"),
                     wrapper_blake3: dv("wrapper-blake3"),
                     build_argv: vec![
@@ -1465,7 +1542,7 @@ pub fn dry_run_raw_facts() -> RawFacts {
                     offline: true,
                     cargo_net_offline: true,
                     dependency_seed: AuthorityRefJson {
-                        address: dv("dep-seed-addr"),
+                        address: dep_addr_hex.clone(),
                         json_sha256: dv("dep-seed-json"),
                     },
                     host_toolchain_attestation: AuthorityRefJson {
@@ -1478,6 +1555,11 @@ pub fn dry_run_raw_facts() -> RawFacts {
                         json_sha256: dv("protoc-json"),
                     }),
                     risc0_guest_embed: None,
+                    cargo_seed: CargoSeedJson {
+                        origin_address: cargo_seed_hex.clone(),
+                        materialized_a: cargo_seed_hex.clone(),
+                        materialized_b: cargo_seed_hex.clone(),
+                    },
                 }
             },
         }
@@ -1511,11 +1593,11 @@ pub fn dry_run_raw_facts() -> RawFacts {
         }
         v
     };
-    let provset = |arches: &[&str]| -> Vec<ProvFacts> {
+    let provset = |cand: &str, arches: &[&str]| -> Vec<ProvFacts> {
         let mut v = Vec::new();
         for a in arches {
             for r in ["Proving", "Verification"] {
-                v.push(prov(a, r));
+                v.push(prov(cand, a, r));
             }
         }
         v
@@ -1561,9 +1643,13 @@ pub fn dry_run_raw_facts() -> RawFacts {
             byte_len: 292,
             hash: dv("sp1-vk"),
         }],
-        provenance: provset(&["x86_64", "aarch64"]),
+        provenance: provset("sp1", &["x86_64", "aarch64"]),
         cells: grid("sp1", &["x86_64", "aarch64"]),
         identity_records: idrecs(&["x86_64", "aarch64"]),
+        dependency_seed_json: String::from_utf8(
+            crate::measurement::synth_dependency_seed(crate::enums::Candidate::Sp1).0,
+        )
+        .expect("synthetic dependency-seed JSON is UTF-8"),
     };
     let risc0 = CandidateFacts {
         candidate: "Risc0".into(),
@@ -1594,9 +1680,13 @@ pub fn dry_run_raw_facts() -> RawFacts {
             },
         ],
         // RISC Zero: x86_64-only provenance AND cells (aarch64 genuinely absent).
-        provenance: provset(&["x86_64"]),
+        provenance: provset("risc0", &["x86_64"]),
         cells: grid("r0", &["x86_64"]),
         identity_records: idrecs(&["x86_64"]),
+        dependency_seed_json: String::from_utf8(
+            crate::measurement::synth_dependency_seed(crate::enums::Candidate::Risc0).0,
+        )
+        .expect("synthetic dependency-seed JSON is UTF-8"),
     };
     RawFacts {
         lifecycle_mode: "measurement".into(),

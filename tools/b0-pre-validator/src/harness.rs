@@ -299,6 +299,19 @@ fn provenance(
     att.runner_leakage_report_blake3 = leakage.hash();
     att.per_arch_toolchain_identity = recipe.per_arch_toolchain_identity;
     att.runner_build_recipe_id = recipe.recipe_id;
+    // Cargo dependency-SEED anchor (synth): bind the attestation's dependency_seed_address to a
+    // self-consistent DependencySeedV1 whose host-cargo-home seed-content == THIS proof's cargo seed
+    // origin, so the sealed-import anchor accepts. The matching JSON is sealed at the AssemblyInput site
+    // (generate_with) — same candidate + host seed => identical record + address, deterministically.
+    let dep_cand = match ids.candidate {
+        Candidate::Sp1 => "sp1",
+        Candidate::Risc0 => "risc0",
+    };
+    att.dependency_seed_address = crate::venue::dependency_seed::DependencySeedV1::synthetic_json(
+        dep_cand,
+        proof.cargo_seed_origin_blake3,
+    )
+    .1;
     let runner_attestation_blake3 = att.hash();
     let chain = CpusetProbeChainV1 {
         candidate: ids.candidate,
@@ -512,6 +525,9 @@ pub struct AssemblyInput {
     pub double_build_proofs:
         Vec<crate::schema::runner_double_build_proof::RunnerDoubleBuildProofV1>,
     pub leakage_reports: Vec<crate::schema::runner_leakage_report::RunnerLeakageReportV1>,
+    /// The retained per-CANDIDATE `DependencySeedV1` JSON bytes; the assembler decodes + authenticates it
+    /// and anchors each provenance's double-build proof cargo-seed origin to it before encoding.
+    pub dependency_seed_json: Vec<u8>,
     pub envelopes: Vec<R0ProofArtifactEnvelopeV1>,
     pub samples: Vec<BenchmarkSampleV1>,
     pub rss: Vec<BenchmarkRssRecordV1>,
@@ -794,6 +810,10 @@ pub fn assemble_result_set(input: &AssemblyInput) -> Result<Evidence, String> {
     {
         return Err("retained runner-recipe artifact count != provenance count".into());
     }
+    // Decode + authenticate the retained per-candidate DependencySeedV1 ONCE (the same record anchors
+    // every provenance's cargo seed at sealed import).
+    let dependency_seed =
+        crate::venue::dependency_seed::DependencySeedV1::from_json(&input.dependency_seed_json)?;
     for (i, a) in input.runner_attestations.iter().enumerate() {
         a.check_bound_runner_recipe(
             &input.recipes[i],
@@ -802,6 +822,9 @@ pub fn assemble_result_set(input: &AssemblyInput) -> Result<Evidence, String> {
             &input.double_build_proofs[i],
             &input.leakage_reports[i],
         )?;
+        // Cargo dependency-SEED anchor: origin of the fresh-per-build /b0/cargo seed == the authenticated
+        // retained DependencySeedV1's host-cargo-home seed-content address (never producer-trusted).
+        a.check_bound_dependency_seed(&input.double_build_proofs[i], &dependency_seed)?;
     }
     // (The EXACT identity set is enforced by the producer's `validate_identity_set` on the mandatory
     // input and re-enforced at sealed import in `verify_evidence`; the synthetic harness legitimately
@@ -828,6 +851,7 @@ pub fn assemble_result_set(input: &AssemblyInput) -> Result<Evidence, String> {
             .map(|r| r.encode())
             .collect(),
         leakage_reports: input.leakage_reports.iter().map(|r| r.encode()).collect(),
+        dependency_seed_json: input.dependency_seed_json.clone(),
         verifier_material: input
             .verifier_material
             .encode()
@@ -899,6 +923,10 @@ pub struct Evidence {
     pub double_build_proofs: Vec<Vec<u8>>,
     /// Retained canonical `RunnerLeakageReportV1` bytes, one per provenance (SAME order).
     pub leakage_reports: Vec<Vec<u8>>,
+    /// Retained per-CANDIDATE `DependencySeedV1` JSON bytes (VEC7). Decoded + authenticated from scratch
+    /// at sealed import and cross-bound to every provenance's double-build proof (the cargo seed origin
+    /// anchor); shared across this bundle's arches (the vendored dependency graph is arch-independent).
+    pub dependency_seed_json: Vec<u8>,
     pub verifier_material: Vec<u8>,
     pub result_set: Vec<u8>,
 }
@@ -1100,6 +1128,16 @@ fn generate_with(candidate: Candidate, env: &Env) -> Evidence {
         recipes,
         inventories_a,
         inventories_b,
+        // Seal the self-consistent DependencySeedV1 whose host-cargo-home seed-content == every proof's
+        // cargo seed origin (same candidate + host seed the provenances bound to their attestations).
+        dependency_seed_json: crate::venue::dependency_seed::DependencySeedV1::synthetic_json(
+            match candidate {
+                Candidate::Sp1 => "sp1",
+                Candidate::Risc0 => "risc0",
+            },
+            double_build_proofs[0].cargo_seed_origin_blake3,
+        )
+        .0,
         double_build_proofs,
         leakage_reports,
         envelopes,
@@ -1208,6 +1246,11 @@ pub fn verify_evidence(ev: &Evidence) -> Result<Recomputed, String> {
     {
         return Err("retained runner-recipe artifact count != provenance count".into());
     }
+    // Decode the retained per-candidate DependencySeedV1 ONCE from the sealed bytes; each provenance's
+    // cargo-seed origin anchors to this same authenticated record below (a missing/empty blob fails here).
+    let dependency_seed =
+        crate::venue::dependency_seed::DependencySeedV1::from_json(&ev.dependency_seed_json)
+            .map_err(|e| format!("retained dependency-seed artifact: {e}"))?;
     let mut artifact_keys: HashSet<(u8, u8)> = HashSet::new();
     for (i, pb) in ev.provenances.iter().enumerate() {
         let p = ArchRunProvenanceV1::decode_exact(pb).map_err(|e| format!("prov: {e}"))?;
@@ -1258,6 +1301,14 @@ pub fn verify_evidence(ev: &Evidence) -> Result<Recomputed, String> {
         .map_err(|e| format!("runner leakage report artifact: {e}"))?;
         att.check_bound_runner_recipe(&recipe, &inv_a, &inv_b, &proof, &leakage)
             .map_err(|e| format!("runner path-independence: {e}"))?;
+        // Sealed-import cargo dependency-SEED anchor: decode + authenticate the retained per-candidate
+        // DependencySeedV1 from scratch and require the proof's cargo seed origin == its host-cargo-home
+        // seed-content address AND the record's authenticated address == the attestation's bound
+        // dependency_seed_address. Defeats a mutually-edited proof: a forged origin/A/B (authentic seed
+        // unchanged) fails origin==content; editing both proof and seed fails the seed's own
+        // record-address==dependency_seed_address authority binding.
+        att.check_bound_dependency_seed(&proof, &dependency_seed)
+            .map_err(|e| format!("cargo dependency-seed anchor: {e}"))?;
         if !artifact_keys.insert((p.arch.to_repr(), p.provenance_role.to_repr())) {
             return Err("duplicate retained artifact (arch, role)".into());
         }
@@ -1601,6 +1652,7 @@ mod tests {
             inventories_b: ev.inventories_b.clone(),
             double_build_proofs: ev.double_build_proofs.clone(),
             leakage_reports: ev.leakage_reports.clone(),
+            dependency_seed_json: ev.dependency_seed_json.clone(),
             verifier_material: ev.verifier_material.clone(),
             result_set: ev.result_set.clone(),
         }
@@ -1664,16 +1716,27 @@ mod tests {
     // gained the measurement_input_authority_address (the ONE retained MeasurementInputAuthorityV1 the
     // package binds). This moved the attestation bytes folded into this fingerprint. The value here is a
     // fixed synthetic seed, so the golden is independent of the draft fixtures.)
+    // (Re-frozen for the CARGO DEPENDENCY-SEED ANCHOR: the measurement vector is VEC7 — each bundle seals
+    // the per-candidate DependencySeedV1 JSON, decoded + authenticated at import to anchor every
+    // double-build proof's cargo seed origin to its host-cargo-home seed-content address. This added the
+    // sealed dependency-seed bytes folded into this fingerprint.)
+    // (Re-frozen for the CANONICAL CARGO-HOME correction: the runner recipe is v4 — the compiler-visible
+    // CARGO_HOME is the literal canonical /b0/cargo (fresh per build, NOT remapped), so each side dropped
+    // its `cargo_from` and now carries exactly ONE remap (target); the recipe gained
+    // `canonical_cargo_home` and a new 1-remap structural recipe id. The double-build proof is v3 — each
+    // side gained `materialized_cargo_seed_blake3` and the proof gained `cargo_seed_origin_blake3` (the
+    // 3-way fresh-per-build seed equality). These moved the recipe/proof bytes folded into this
+    // fingerprint.)
     #[test]
     fn generate_output_is_byte_stable() {
         assert_eq!(
             evidence_fingerprint(&generate()),
-            "bad3efa6e2a8951c33ef2a402b1bd8491996597dfcdfaaa3c26ccf89403775d9",
+            "eda8230255506f7d2625b8ccd061b91deccced4e16e70491a89ad48900ff8100",
             "SP1 generate() output drifted from the frozen (retained cpuset+attestation+identity+recipe) bytes"
         );
         assert_eq!(
             evidence_fingerprint(&generate_candidate(Candidate::Risc0)),
-            "fbdcac4bd5208031d9e8bb2b44a368c1f2ca6da7466360c3f50a492d5dd2c51a",
+            "2b828f93fba84a8e56c8083425f21e82fd9c8d32a51b5d60f9ca196e24645c24",
             "RISC0 generate_candidate() output drifted from the frozen (retained cpuset+attestation+identity+recipe) bytes"
         );
     }

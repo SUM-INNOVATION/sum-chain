@@ -1281,18 +1281,20 @@ b0_build_recipe_hash() { # <sp1|risc0>
 # The runner SOURCE is MATERIALIZED at the fixed ratified build path /b0/tooling and built THERE, so
 # rustc's package `-Cmetadata`/StableCrateId (which encodes the absolute source path and which
 # `--remap-path-prefix` cannot touch — it rewrites compiler-visible source LOCATIONS only) is universal
-# and the runner is byte-identical regardless of where the operator's checkout lived. The two per-build
-# CARGO_HOME / target roots stay distinct and are remapped -> the FIXED canonical destinations below via
-# CARGO_ENCODED_RUSTFLAGS (unit-separator delimited, so no space/shell parsing can alter the recipe),
-# enforced by the transparent, output-neutral wrapper b0_rustc_remap_wrapper.sh (two remaps per compile:
-# cargo-home + target; the source is canonical by construction and needs no remap). The RECIPE is
+# and the runner is byte-identical regardless of where the operator's checkout lived. The compiler-visible
+# CARGO_HOME is the LITERAL canonical /b0/cargo (materialized fresh per build, canonical by construction,
+# NOT remapped); only the per-build target root is remapped -> the FIXED canonical /b0/target destination
+# via CARGO_ENCODED_RUSTFLAGS, enforced by the transparent, output-neutral wrapper
+# b0_rustc_remap_wrapper.sh (exactly ONE remap per compile: target; the source AND the canonical cargo
+# home are canonical by construction and need no remap). The RECIPE is
 # byte-identical across arches (it names the canonical build path + destinations + policy + the RULE
 # "use the ratified per-arch toolchain", never a specific toolchain digest); the actual per-arch
 # toolchain identity is bound SEPARATELY in the runner attestation.
 # ============================================================================================
 B0_REMAP_TOOLING='/b0/tooling'   # the ratified canonical BUILD path (source materialized here); permitted prefix
-B0_REMAP_CARGO='/b0/cargo'
-B0_REMAP_TARGET='/b0/target'
+B0_REMAP_CARGO='/b0/cargo'       # the canonical compiler-visible CARGO_HOME (materialized fresh per build); NOT a
+                                 # remap destination — canonical-by-construction; permitted prefix
+B0_REMAP_TARGET='/b0/target'     # the ONLY remap destination (each per-build target root -> here)
 B0_RUNNER_REMAP_RECIPE_DOMAIN='b0-final-runner-remap-recipe/v1'
 
 # Canonicalize an actual build-input root: require ABSOLUTE, existing directory, NOT a symlink, and
@@ -1314,32 +1316,34 @@ b0_canonicalize_root() { # <label> <path>
   printf '%s' "$rp"
 }
 
-# Canonical CARGO_ENCODED_RUSTFLAGS (unit-separator delimited) for the two remapped roots (cargo-home,
-# target). The SOURCE is NOT remapped — it is materialized at the canonical build path /b0/tooling and
-# is universal by construction. Refuses non-absolute/symlink roots, roots equal to a canonical
-# destination, and overlapping/nested cargo/target roots.
-b0_canonical_encoded_rustflags() { # <cargo_home> <target_dir>
-  local cargo target us
-  cargo="$(b0_canonicalize_root cargo-home "$1")" || return 1
-  target="$(b0_canonicalize_root target "$2")" || return 1
-  case "$target/" in "$cargo"/*) echo "recipe roots overlap: target nested under cargo" >&2; return 1 ;; esac
-  case "$cargo/" in "$target"/*) echo "recipe roots overlap: cargo nested under target" >&2; return 1 ;; esac
-  [ "$cargo" != "$target" ] \
-    || { echo "recipe roots are not distinct (cargo=$cargo target=$target)" >&2; return 1; }
-  us="$(printf '\037')"
-  printf -- '--remap-path-prefix=%s=%s%s--remap-path-prefix=%s=%s' \
-    "$cargo" "$B0_REMAP_CARGO" "$us" "$target" "$B0_REMAP_TARGET"
+# Canonical CARGO_ENCODED_RUSTFLAGS (unit-separator delimited) — ONE remap: the per-build TARGET root ->
+# the canonical /b0/target. The SOURCE is NOT remapped (materialized + compiled at the canonical build
+# path /b0/tooling, universal by construction) and the CARGO_HOME is NOT remapped either: the
+# compiler-visible cargo home is the literal canonical /b0/cargo (materialized fresh per build), so Cargo
+# already sees /b0/cargo and a cargo-home remap would be a FAKE identity mapping — omitted so the recipe's
+# remap inventory reflects the ACTUAL effective mapping. This is also what makes the nested SP1
+# sp1-native-bins build (which strips the remap rustflags) path-independent BY CONSTRUCTION: it compiles
+# vendored deps out of the canonical /b0/cargo, not a per-build home. Refuses non-absolute/symlink target
+# roots and a target equal to a canonical destination.
+b0_canonical_encoded_rustflags() { # <target_dir>
+  local target
+  target="$(b0_canonicalize_root target "$1")" || return 1
+  case "$target" in "$B0_REMAP_CARGO"|"$B0_REMAP_TOOLING") echo "target root coincides with a canonical destination: $target" >&2; return 1 ;; esac
+  printf -- '--remap-path-prefix=%s=%s' "$target" "$B0_REMAP_TARGET"
 }
 
 # Cross-arch STRUCTURAL recipe id (BLAKE3, 64-hex): describes the RULE, never a toolchain digest, so
-# it is byte-identical for SP1/x86, SP1/aarch64, RISC0/x86. Binds the canonical BUILD path, the two
-# canonical remap destinations, the encoded-flags format, --locked, SOURCE_DATE_EPOCH=0,
-# BUILD_GIT_SHA=<measured source>, the ratified-per-arch-toolchain RULE, and the wrapper's own hash.
+# it is byte-identical for SP1/x86, SP1/aarch64, RISC0/x86. Binds the canonical BUILD path, the canonical
+# cargo home (canonical-by-construction: the literal /b0/cargo, materialized fresh per build — NOT
+# remapped), the ONE canonical remap destination (target), the encoded-flags format, --locked,
+# SOURCE_DATE_EPOCH=0, BUILD_GIT_SHA=<measured source>, the ratified-per-arch-toolchain RULE, and the
+# wrapper's own hash. (The v2 form bound a fake cargo-home remap + a 2-remap encoding; this v3 form binds
+# the actual effective mapping: /b0/cargo canonical-by-construction + a single target remap.)
 b0_runner_remap_recipe_id() { # <measured_source_commit_40hex> <wrapper_blake3_64hex>
   local msc="$1" wh="$2"
   printf '%s' "$msc" | grep -Eq '^[0-9a-f]{40}$' || { echo "recipe-id: measured source commit must be 40-hex" >&2; return 1; }
   printf '%s' "$wh"  | grep -Eq '^[0-9a-f]{64}$' || { echo "recipe-id: wrapper blake3 must be 64-hex" >&2; return 1; }
-  printf '%s|build_at=%s|remap:cargo_home=%s,target=%s|encoded_rustflags=unit-separator-2-remap|flags=--locked|SOURCE_DATE_EPOCH=0|BUILD_GIT_SHA=%s|toolchain=ratified-per-arch(authority-record)|wrapper_blake3=%s' \
+  printf '%s|build_at=%s|cargo_home=%s(canonical-by-construction,fresh-per-build)|remap:target=%s|encoded_rustflags=unit-separator-1-remap|flags=--locked|SOURCE_DATE_EPOCH=0|BUILD_GIT_SHA=%s|toolchain=ratified-per-arch(authority-record)|wrapper_blake3=%s' \
     "$B0_RUNNER_REMAP_RECIPE_DOMAIN" "$B0_REMAP_TOOLING" "$B0_REMAP_CARGO" "$B0_REMAP_TARGET" "$msc" "$wh" \
     | b3sum | awk '{print $1}'
 }
@@ -1426,6 +1430,55 @@ EOF
   if [ -n "$user" ] && b0_path_component_hit "$user" "$text"; then printf 'user-path-component:/%s\n' "$user"; return 1; fi
   if [ -n "$host" ] && b0_path_component_hit "$host" "$text"; then printf 'host-path-component:/%s\n' "$host"; return 1; fi
   return 0
+}
+
+# The ratified expected nested SP1 host-binary basename SET — the host binary the pinned nested crate
+# `sp1-core-executor-runner` 6.3.1 (see b0_runner_dependency_seed) produces. Enforced as a STRONGER
+# authority than the executable bit alone: the qualifying executable set must EQUAL this exactly, so a
+# smuggled extra executable OR a missing nested binary is refused. Space-separated if ever more than one.
+B0_EXPECTED_NESTED_SP1_HOST_BINS="sp1-core-executor-runner-binary"
+
+# Leakage-scan the nested SP1 host binary(ies). <release_dir> is the nested sp1-core-executor-runner
+# `sp1-native-bins/release` output directory. Enumerates its DIRECT-CHILD regular, NON-symlink, EXECUTABLE
+# host binaries (deps/.fingerprint/build/incremental are subdirectories, excluded by the depth-1 walk) via
+# a FULL-CONSUMPTION NUL array — NO `head`, no early-closing pipeline — so a multi-thousand-file nested
+# target dir can NEVER SIGPIPE the pipeline (rc 141) under `set -euo pipefail`. Enforces the ratified
+# expected basename set, then leakage-scans EACH executable. On success prints one TSV evidence line per
+# binary: "<relpath-under-troot>\t<sha256>\t<blake3>\t<size>\tclean". Fail-closed (returns 1 + a stderr
+# reason) on: missing / symlink / non-directory release dir; a symlink / non-regular / unreadable
+# candidate; an EMPTY executable set; a basename set != the ratified expected; or leakage in ANY executable.
+b0_scan_nested_sp1_host_bins() { # <release_dir> <refused-newline-list> <user> <host> <target_root>
+  local rd="$1" refused="$2" user="$3" host="$4" troot="$5" f
+  [ -e "$rd" ] || { echo "nested release dir not found: $rd" >&2; return 1; }
+  [ ! -L "$rd" ] || { echo "nested release dir is a symlink (refused): $rd" >&2; return 1; }
+  [ -d "$rd" ] || { echo "nested release path is not a directory (refused): $rd" >&2; return 1; }
+  # Direct-child regular non-symlink executables, NUL-sorted into an array (full consumption; no head).
+  local -a execs=()
+  while IFS= read -r -d '' f; do execs+=("$f"); done \
+    < <(find "$rd" -maxdepth 1 -type f ! -type l -perm -u+x -print0 | LC_ALL=C sort -z)
+  [ "${#execs[@]}" -ge 1 ] || { echo "no qualifying nested host executable under $rd" >&2; return 1; }
+  # Ratified basename-set enforcement (stronger than exec bits alone).
+  local -a bns=(); for f in "${execs[@]}"; do bns+=("$(basename "$f")"); done
+  local got want
+  got="$(printf '%s\n' "${bns[@]}" | LC_ALL=C sort | tr '\n' ' ')"
+  # shellcheck disable=SC2086
+  want="$(printf '%s\n' $B0_EXPECTED_NESTED_SP1_HOST_BINS | LC_ALL=C sort | tr '\n' ' ')"
+  [ "$got" = "$want" ] || { echo "nested host-binary set [$got] != ratified expected [$want]" >&2; return 1; }
+  # Scan EACH executable; emit its evidence line.
+  for f in "${execs[@]}"; do
+    [ ! -L "$f" ] || { echo "nested candidate is a symlink (refused): $f" >&2; return 1; }
+    [ -f "$f" ]   || { echo "nested candidate is not a regular file (refused): $f" >&2; return 1; }
+    [ -r "$f" ]   || { echo "nested candidate is unreadable (refused): $f" >&2; return 1; }
+    local ns hit
+    ns="$(strings -a "$f" 2>/dev/null || true)"
+    if hit="$(b0_leakage_scan "$ns" "$refused" "$user" "$host")"; then :; else
+      echo "nested host binary $(basename "$f") leakage: $hit" >&2; return 1
+    fi
+    local rel sz sha b3
+    rel="${f#"$troot"/}"; sz="$(wc -c <"$f" | tr -d ' ')"
+    sha="$(sha256sum "$f" | cut -d' ' -f1)"; b3="$(b3sum "$f" | cut -d' ' -f1)"
+    printf '%s\t%s\t%s\t%s\tclean\n' "$rel" "$sha" "$b3" "$sz"
+  done
 }
 
 # Refuse ambient rustflags that could inject/alter flags: any nonempty RUSTFLAGS or

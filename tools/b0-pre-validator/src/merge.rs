@@ -115,6 +115,23 @@ pub fn merge_fragments(spec_hex: &str, fragments: &[Value]) -> Result<Value, Str
             return Err(format!("duplicate fragment for {cand}/{arch}"));
         }
         all_commits.extend(fragment_commits(f)?);
+        // Cargo dependency-SEED: every fragment must carry a NON-EMPTY, well-formed, candidate-MATCHING
+        // DependencySeedV1 (defense-in-depth before produce; the sealed-import anchor re-authenticates it).
+        // `verify(candidate)` refuses a mutated (recompute!=address) or swapped/cross-candidate seed here.
+        let dep = f
+            .get("dependency_seed_json")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| format!("fragment {cand}/{arch} missing/empty dependency_seed_json"))?;
+        let cand_lc = match cand.as_str() {
+            "Sp1" => "sp1",
+            "Risc0" => "risc0",
+            other => return Err(format!("fragment has unknown candidate {other}")),
+        };
+        crate::venue::dependency_seed::DependencySeedV1::from_json(dep.as_bytes())
+            .map_err(|e| format!("fragment {cand}/{arch} dependency_seed_json parse: {e}"))?
+            .verify(cand_lc)
+            .map_err(|e| format!("fragment {cand}/{arch} dependency-seed authenticity: {e}"))?;
     }
     // Exactly the eligible set.
     let want = [("Sp1", "x86_64"), ("Sp1", "aarch64"), ("Risc0", "x86_64")];
@@ -159,6 +176,9 @@ pub fn merge_fragments(spec_hex: &str, fragments: &[Value]) -> Result<Value, Str
         "/guest/candidate_dep_lock_hash",
         "/guest/build_command_hash",
         "/verifier_material",
+        // The cargo dependency seed is per-CANDIDATE (arch-independent): the two SP1 fragments MUST carry
+        // byte-identical dependency_seed_json (candidate correspondence + byte identity through merge).
+        "/dependency_seed_json",
     ] {
         agree(sp1x, sp1a, ptr)?;
     }
@@ -243,23 +263,39 @@ mod tests {
             "docker_argv_blake3": h("d0"), "reproducibility_pair_blake3": h("2a")
         })
     }
-    fn runner_recipe(arch: &str) -> Value {
+    fn runner_recipe(cand: &str, arch: &str) -> Value {
+        // Anchor-consistent synthetic dependency-seed values: the recipe's dependency_seed.address is the
+        // synthetic record address for THIS candidate, and cargo_seed == the fixed synthetic host content.
+        let dep_candidate = if cand == "Sp1" {
+            crate::enums::Candidate::Sp1
+        } else {
+            crate::enums::Candidate::Risc0
+        };
+        let hexb = |bytes: &[u8]| -> String {
+            use std::fmt::Write as _;
+            bytes.iter().fold(String::new(), |mut a, b| {
+                let _ = write!(a, "{b:02x}");
+                a
+            })
+        };
+        let dep_addr_hex: String =
+            hexb(&crate::measurement::synth_dependency_seed(dep_candidate).1);
+        let cargo_seed_hex: String = hexb(&crate::measurement::synth_cargo_seed_content());
         let enc_hex = |t: &str| -> String {
             use std::fmt::Write as _;
-            let s = format!("--remap-path-prefix=/b0-input/{t}/cargo=/b0/cargo\u{1f}--remap-path-prefix=/b0-input/{t}/target=/b0/target");
+            let s = format!("--remap-path-prefix=/b0-input/{t}/target=/b0/target");
             s.bytes().fold(String::new(), |mut acc, b| {
                 let _ = write!(acc, "{b:02x}");
                 acc
             })
         };
         let rec_addr = |t: &str| -> String {
-            let body = format!("b0-final-rustc-invocation/v2\nkind=compile\nremap_arg=--remap-path-prefix=/b0-input/{t}/cargo=/b0/cargo\nremap_arg=--remap-path-prefix=/b0-input/{t}/target=/b0/target");
+            let body = format!("b0-final-rustc-invocation/v2\nkind=compile\nremap_arg=--remap-path-prefix=/b0-input/{t}/target=/b0/target");
             blake3::hash(body.as_bytes()).to_hex().to_string()
         };
         let side = |t: &str, s: u64, e: u64| {
             json!({
                 "original_root": format!("/b0-input/{t}/tooling"),
-                "cargo_from": format!("/b0-input/{t}/cargo"),
                 "target_from": format!("/b0-input/{t}/target"),
                 "encoded_rustflags_hex": enc_hex(t),
                 "runner_sha256": h("52"), "runner_blake3": h("53"),
@@ -267,7 +303,6 @@ mod tests {
                 "origin_manifest_blake3": h("77"), "materialized_manifest_blake3": h("77"),
                 "start_unix": s, "end_unix": e,
                 "invocations": [{"kind": "compile", "remap_args": [
-                    format!("--remap-path-prefix=/b0-input/{t}/cargo=/b0/cargo"),
                     format!("--remap-path-prefix=/b0-input/{t}/target=/b0/target")],
                     "record_address": rec_addr(t)}]
             })
@@ -276,17 +311,19 @@ mod tests {
             "candidate": "sp1", "arch": arch,
             "manifest_path": "tools/b0-pre-measure-sp1/Cargo.toml",
             "artifact_path": "release/b0-pre-measure-sp1", "cargo_ident": "cargo", "b0_venue_embed": "0",
-            "canonical_build_path": "/b0/tooling",
+            "canonical_build_path": "/b0/tooling", "canonical_cargo_home": "/b0/cargo",
             "per_arch_toolchain_identity": h("e2"), "wrapper_blake3": h("e3"),
             "build_argv": ["cargo","build","--release","--locked","--features","real-backend","--manifest-path","tools/b0-pre-measure-sp1/Cargo.toml"],
             "build_env": [["BUILD_GIT_SHA", crate::guest_set::RATIFIED_SOURCE_COMMIT], ["SOURCE_DATE_EPOCH","0"], ["B0_VENUE_EMBED","0"]],
             "build_a": side("a", 100, 200), "build_b": side("b", 200, 300), "byte_equal": true,
-            "leakage_refused_prefixes": ["/b0-input/a/tooling","/b0-input/a/cargo","/b0-input/a/target","/b0-input/b/tooling","/b0-input/b/cargo","/b0-input/b/target","/tmp/b0-evid"],
+            "dependency_seed": {"address": dep_addr_hex, "json_sha256": h("ds")},
+            "cargo_seed": {"origin_address": cargo_seed_hex.clone(), "materialized_a": cargo_seed_hex.clone(), "materialized_b": cargo_seed_hex},
+            "leakage_refused_prefixes": ["/b0-input/a/tooling","/b0-input/a/target","/b0-input/b/tooling","/b0-input/b/target","/tmp/b0-evid"],
             "leakage_permitted_prefixes": ["/b0/cargo", "/b0/target", "/b0/tooling"],
             "leakage_clean": true, "evidence_root": "/tmp/b0-evid"
         })
     }
-    fn prov(arch: &str, role: &str) -> Value {
+    fn prov(cand: &str, arch: &str, role: &str) -> Value {
         let chain = json!([{"cgroup_path": "/b0.slice", "order": 0, "first": cpuset_obs(), "second": cpuset_obs()}]);
         json!({
             "arch": arch, "role": role, "source_commit": crate::guest_set::RATIFIED_SOURCE_COMMIT,
@@ -301,7 +338,7 @@ mod tests {
             "cpuset_source_cgroup_path": "/b0.slice", "cpuset_raw": "0-7", "cpuset_inherited": false,
             "cpuset_probe_chain": chain,
             "runner_attestation": runner_attestation(arch),
-            "runner_recipe": runner_recipe(arch)
+            "runner_recipe": runner_recipe(cand, arch)
         })
     }
     fn cells(arch: &str) -> Vec<Value> {
@@ -335,8 +372,17 @@ mod tests {
                 "builder": [{"arch": arch, "builder_container_digest": builder}]
             },
             "verifier_material": [{"role": "Groth16Vk", "byte_len": 292u64, "hash": vk}],
-            "provenance": [prov(arch, "Proving"), prov(arch, "Verification")],
+            "provenance": [prov(cand, arch, "Proving"), prov(cand, arch, "Verification")],
             "cells": cells(arch),
+            "dependency_seed_json": String::from_utf8(
+                crate::measurement::synth_dependency_seed(if cand == "Sp1" {
+                    crate::enums::Candidate::Sp1
+                } else {
+                    crate::enums::Candidate::Risc0
+                })
+                .0,
+            )
+            .expect("synthetic dependency-seed JSON is UTF-8"),
             // Phase-1 identity record (runner continuity): production_binary_blake3 == the provenance
             // runner attestation's runner_blake3 (h("53")); same measured-source/tooling/spec.
             "identity_records": [{
@@ -475,6 +521,49 @@ mod tests {
         let e = merge_fragments(SPEC, &[frag("Sp1", "x86_64"), arm, frag("Risc0", "x86_64")])
             .unwrap_err();
         assert!(e.contains("disagree on /guest/program_id"), "{e}");
+    }
+
+    #[test]
+    fn dependency_seed_missing_mutated_swapped_and_skew_refused() {
+        use crate::venue::dependency_seed::DependencySeedV1;
+        // MISSING/empty dependency_seed_json in a fragment -> refused.
+        let mut nf = frag("Sp1", "x86_64");
+        nf.as_object_mut().unwrap().remove("dependency_seed_json");
+        let e = merge_fragments(SPEC, &[nf, frag("Sp1", "aarch64"), frag("Risc0", "x86_64")])
+            .unwrap_err()
+            .to_lowercase();
+        assert!(e.contains("dependency_seed_json"), "{e}");
+
+        // MUTATED seed (corrupt a graph hash inside the JSON, leave `address` stale) -> authenticity fail.
+        let mut mf = frag("Sp1", "x86_64");
+        {
+            let mut dep: Value =
+                serde_json::from_str(mf["dependency_seed_json"].as_str().unwrap()).unwrap();
+            dep["graphs"][0]["lock_sha256"] = json!("0".repeat(64));
+            mf["dependency_seed_json"] = json!(serde_json::to_string(&dep).unwrap());
+        }
+        let e = merge_fragments(SPEC, &[mf, frag("Sp1", "aarch64"), frag("Risc0", "x86_64")])
+            .unwrap_err()
+            .to_lowercase();
+        assert!(
+            e.contains("authenticity") || e.contains("dependency-seed"),
+            "{e}"
+        );
+
+        // SWAPPED/cross-candidate: RISC0's seed on an SP1 fragment -> verify(candidate) refuses.
+        let mut sf = frag("Sp1", "x86_64");
+        sf["dependency_seed_json"] = frag("Risc0", "x86_64")["dependency_seed_json"].clone();
+        assert!(
+            merge_fragments(SPEC, &[sf, frag("Sp1", "aarch64"), frag("Risc0", "x86_64")]).is_err()
+        );
+
+        // BYTE-IDENTITY skew: the two SP1 fragments carry DIFFERENT (but individually valid) sp1 seeds.
+        let (other_sp1_json, _addr, _c) = DependencySeedV1::synthetic_json("sp1", [7u8; 32]);
+        let mut arm = frag("Sp1", "aarch64");
+        arm["dependency_seed_json"] = json!(String::from_utf8(other_sp1_json).unwrap());
+        let e = merge_fragments(SPEC, &[frag("Sp1", "x86_64"), arm, frag("Risc0", "x86_64")])
+            .unwrap_err();
+        assert!(e.contains("disagree on /dependency_seed_json"), "{e}");
     }
 
     #[test]
