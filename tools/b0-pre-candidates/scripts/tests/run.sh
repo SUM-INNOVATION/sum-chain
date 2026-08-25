@@ -19,7 +19,7 @@ for s in lib.sh verify_pins.sh run_authoritative.sh measure_fragment.sh derive_g
          tests/pin_url_policy.test.sh tests/oci_platform.test.sh tests/tool_identity_arch.test.sh \
          tests/apt_pins.test.sh tests/tool_identity_threading.test.sh tests/oci_daemon_bridge.test.sh \
          tests/build_reproducibility.test.sh tests/runnable_ref_sidecar.test.sh tests/rustup_components.test.sh tests/runner_path_independence.test.sh double_build_runner.sh b0_rustc_remap_wrapper.sh \
-         tests/builder_capability.test.sh tests/e2e_v2_produce_chain.test.sh tests/lifecycle_mode.test.sh tests/toolchain_authority.test.sh tests/lock_reconciliation.test.sh tests/committed_lock_authority.test.sh tests/run.sh; do
+         tests/builder_capability.test.sh tests/e2e_v2_produce_chain.test.sh tests/lifecycle_mode.test.sh tests/toolchain_authority.test.sh tests/lock_reconciliation.test.sh tests/committed_lock_authority.test.sh tests/measure_fragment_preflight.test.sh tests/run.sh; do
   f="$SCRIPTS/$s"
   [ -f "$f" ] || continue
   if bash -n "$f"; then echo "  ok  $s"; else echo "  FAIL $s"; rc=1; fi
@@ -130,6 +130,12 @@ bash "$HERE/cgroup_evidence.test.sh"          || rc=1
 # venue measurement preflight): positive + missing/untracked/empty/symlink/mutation/swapped/
 # wrong-path + exact-set, and `preflight_venue.sh --mode=measurement` reaches the next gate.
 bash "$HERE/committed_lock_authority.test.sh" || rc=1
+# B0-FINAL grid cell pre-proving guest-set / canonical-package gate (the v8 `--guest-set` 3-arg contract):
+# drives the ACTUAL measure_fragment pre-proving path for SP1 + RISC0 with a valid TEST_ONLY guest set —
+# 3-arg succeeds + derived set matches; missing / wrong / mutated canonical package refuses; NO proving
+# runner launches. SKIPs cleanly if cargo/git/b3sum are absent (fast no-toolchain runners); the dedicated
+# b0-pre.yml step runs it with the toolchain present so it is enforced, never silently skipped, in CI.
+bash "$HERE/measure_fragment_preflight.test.sh" || rc=1
 # Two-root VALIDATION-BUNDLE content binding: the bundle's tooling-inventory.txt is the canonical
 # path-set preimage (every included file's BLAKE3), MANIFEST binds the ratified Commit A + path-set
 # digest (never PENDING), and the content address transitively binds the whole tooling payload —

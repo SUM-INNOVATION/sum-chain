@@ -1,0 +1,41 @@
+{
+ "address": "c4401e7c5c5d3138bc37569fb9d8ab1ef05d22f5dadd68f0cba13d042db85a9f",
+ "build_a": {
+  "elf_blake3": "b48877d616b9afde2453e540f1f11342cbc94ebed99d0242d67a90b1d74e79d7",
+  "elf_sha256": "e9e7f54e662b2f5a084eb863fbd7286131096669d071a355262d9e624eaedabf"
+ },
+ "build_argv": "cargo prove build --locked --output-directory /out/guest --elf-name guest.elf",
+ "build_b": {
+  "elf_blake3": "b48877d616b9afde2453e540f1f11342cbc94ebed99d0242d67a90b1d74e79d7",
+  "elf_sha256": "e9e7f54e662b2f5a084eb863fbd7286131096669d071a355262d9e624eaedabf"
+ },
+ "build_env_address": "adb41f7df524d30822515207944bce907eab152d299b571e9d449f144d131fe3",
+ "builder_config_digest": "db450e1aa586f97456abfb755e2d4e0d9c98873f78280950941fc6d56f8d5caf",
+ "builder_image_id": "db450e1aa586f97456abfb755e2d4e0d9c98873f78280950941fc6d56f8d5caf",
+ "builder_platform": "linux/amd64",
+ "candidate": "sp1",
+ "canonical_build_arch": "x86_64",
+ "command_log_address": "6d73b73f744866527dfb70a78e30cfb70f30ce9abdb90a88be445db2304cc04f",
+ "dependency_seed_address": "87372d95babe6907cbba0bb0c82bc823da83032204056e254690053fc0170a4c",
+ "double_build_proof": {
+  "blake3_equal": true,
+  "byte_identical": true,
+  "cmp_ok": true,
+  "sha256_equal": true,
+  "wallclock_separated": true
+ },
+ "elf_blake3": "b48877d616b9afde2453e540f1f11342cbc94ebed99d0242d67a90b1d74e79d7",
+ "elf_sha256": "e9e7f54e662b2f5a084eb863fbd7286131096669d071a355262d9e624eaedabf",
+ "elf_size": 285120,
+ "guest_image_hash": "b48877d616b9afde2453e540f1f11342cbc94ebed99d0242d67a90b1d74e79d7",
+ "guest_lock_blake3": "b2ea124cc84bc14f998b47a88984b6331a6590b2c72cf341a2ec6ad23e9a6265",
+ "guest_lock_sha256": "f48494fedb427bf0cea5f357f3637d4219ac324419b8623e6a660a510157e57c",
+ "measured_source_commit": "507281e21e95a6a98e3480e25e12d1baab586e07",
+ "program_id": "001c9c55aa73323951c6d6a83f06a318305876a044ca1a1a9fe1d556e9ebfad6",
+ "schema": "b0-final-canonical-sp1-guest-artifact/v1",
+ "sp1_toolchain_identity": "4367170fa04c2ab4e00ae4371c0a61c07581a2d6ee35309e1f84f3410d675f5c",
+ "staged_context_blake3": "",
+ "tooling_commit": "272225c7c315d31c2bc4b3afb27c80cb0b42f4cf",
+ "tooling_pathset_blake3": "e7847e33ff93483844c22d5b4bda43370db404251ca88bd8579b036d1a054231",
+ "vendor_config_sha256": "acdf85025834f1fb9480a272f1dd2741066c9a4e35aae1fc479118f299067f93"
+}

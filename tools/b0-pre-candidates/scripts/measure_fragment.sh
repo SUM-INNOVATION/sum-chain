@@ -115,8 +115,18 @@ require_cmd b3sum
 # (one whose tooling commit/path-set does not equal the ratified measurement tooling) so a valid old
 # MIA cannot be reused after subsequent source edits. Runs before the guest build / prove of THIS
 # fragment; measure-produce recomputes the address from the retained bytes (no operator address string).
-"$MEASURE_PRODUCE" --verify-authority "$MIA_JSON" "$REPORT_JSON" "$INVENTORY_TXT" >&2 \
-  || die "measurement-input authority failed the pre-grid fail-fast gate (decode/cross-bind/tooling-ratified); refusing to prove"
+# TEST_ONLY preflight (B0PRE_TESTONLY_PREFLIGHT=1): used ONLY by the CI smoke that drives THIS
+# pre-proving path without a ratified MIA or a prover. It skips ONLY this MIA fail-fast gate (which has
+# its own dedicated --verify-authority + sentinel-refusal tests) and, below, EXITS before any
+# materialize/build/prove — so it can never emit a fragment or launch a proving runner (it cannot
+# fabricate a measurement). NEVER set in production; unset, the production path runs the gate as before.
+B0PRE_TESTONLY_PREFLIGHT="${B0PRE_TESTONLY_PREFLIGHT:-0}"
+if [ "$B0PRE_TESTONLY_PREFLIGHT" = 1 ]; then
+  note "TEST_ONLY preflight: SKIPPING the MIA fail-fast gate (covered by dedicated tests); will exit before proving"
+else
+  "$MEASURE_PRODUCE" --verify-authority "$MIA_JSON" "$REPORT_JSON" "$INVENTORY_TXT" >&2 \
+    || die "measurement-input authority failed the pre-grid fail-fast gate (decode/cross-bind/tooling-ratified); refusing to prove"
+fi
 # #6: the guest build uses the ABSOLUTE, pre-verified Docker binary — never `docker` from PATH.
 REAL_DOCKER="$(readlink -f "$PROVER_REAL_DOCKER" 2>/dev/null || echo "$PROVER_REAL_DOCKER")"
 case "$REAL_DOCKER" in /*) ;; *) die "PROVER_REAL_DOCKER must be an absolute path: $REAL_DOCKER" ;; esac
@@ -133,15 +143,49 @@ SCRATCH="$OUT/_scratch-$CAND-$ARCH"; rm -rf "$SCRATCH"; mkdir -p "$SCRATCH"
 # provided coordination manifest by requiring its FULL bytes to equal the re-derived manifest
 # (every field — a forged manifest that copies the manifest_hash cannot pass). Require THIS
 # fragment's own (candidate,arch) identity to be present in the records. Then use the derived hash.
+# The ONE shared canonical SP1 guest artifact package is MANDATORY for EVERY cell (SP1 AND RISC0): the
+# v8 `--guest-set` re-derivation re-decodes it from its retained bytes and requires every SP1 identity
+# record to reference exactly it. Require + verify it HERE — before ANY candidate-specific proving work —
+# and bind its address to the phase-1 records, so a missing / wrong / mutated / superseded / substituted
+# package is refused BEFORE proving (defence beyond the manifest cmp below and beyond the SP1 ELF consume).
+need_env CANONICAL_SP1_GUEST_PKG
+[ -d "$CANONICAL_SP1_GUEST_PKG" ] || die "canonical SP1 guest package absent: $CANONICAL_SP1_GUEST_PKG"
+bash "$ROOT/scripts/produce_canonical_sp1_guest.sh" verify "$CANONICAL_SP1_GUEST_PKG" >&2 \
+  || die "canonical SP1 guest package failed independent verification (mutated/superseded); refusing before proving"
+_CANON_ADDR="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["address"])' "$CANONICAL_SP1_GUEST_PKG/canonical-sp1-guest-artifact.v1.json")" \
+  || die "cannot read canonical SP1 guest artifact address"
+printf '%s' "$_CANON_ADDR" | grep -Eq '^[0-9a-f]{64}$' || die "canonical SP1 guest artifact address malformed: '$_CANON_ADDR'"
+python3 - "$IDENTITY_RECORDS" "$_CANON_ADDR" <<'PY' || die "canonical artifact address not referenced by all SP1 records (wrong/substituted package); refusing before proving"
+import json, sys
+recs = json.load(open(sys.argv[1], encoding="utf-8")); want = sys.argv[2]
+if not isinstance(recs, list) or not recs:
+    sys.exit("identity records is not a non-empty JSON array")
+sp1 = [r for r in recs if r.get("candidate") == "Sp1"]
+if not sp1:
+    sys.exit("no SP1 identity records present")
+for r in sp1:
+    if r.get("canonical_sp1_guest_artifact_address") != want:
+        sys.exit("an SP1 record's canonical_sp1_guest_artifact_address != the supplied canonical package address")
+PY
 _gsver="$SCRATCH/_gsver"; mkdir -p "$_gsver"
-"$MEASURE_PRODUCE" --guest-set "$IDENTITY_RECORDS" "$_gsver" >/dev/null 2>&1 \
-  || die "guest-set re-derivation from identity records failed (records incomplete/invalid)"
+# v8 CLI contract: --guest-set <identity-records> <out-dir> <canonical-sp1-guest-package-dir>. The canonical
+# package is the MANDATORY 3rd argument for EVERY cell (each cell re-derives the COMPLETE shared set, which
+# includes the ONE shared SP1 guest — RISC0/x86 included).
+"$MEASURE_PRODUCE" --guest-set "$IDENTITY_RECORDS" "$_gsver" "$CANONICAL_SP1_GUEST_PKG" >/dev/null 2>&1 \
+  || die "guest-set re-derivation from identity records + canonical guest package failed (records/package incomplete/invalid)"
 cmp -s "$GUEST_SET_MANIFEST" "$_gsver/coordination-manifest.json" \
   || die "coordination manifest bytes != independently re-derived manifest (forged/altered manifest)"
 R0_GUEST_SET_HASH="$(tr -d ' \t\n' < "$_gsver/r0_guest_set_hash.txt")"
 printf '%s' "$R0_GUEST_SET_HASH" | grep -Eq '^[0-9a-f]{64}$' || die "re-derived r0_guest_set_hash is malformed"
 grep -q "\"candidate\": *\"$CANDCAP\"" "$IDENTITY_RECORDS" && grep -q "\"arch\": *\"$ARCH\"" "$IDENTITY_RECORDS" \
   || die "this fragment's own ($CANDCAP/$ARCH) built identity is absent from the phase-1 records"
+# TEST_ONLY preflight exit: every pre-proving guest-set / canonical-package / manifest / identity gate has
+# PASSED. Stop HERE — before materialize inputs, guest build, provenance, and the proving runner — so the CI
+# smoke can assert the pre-proving path with NO proving runner launched and NO fragment emitted.
+if [ "$B0PRE_TESTONLY_PREFLIGHT" = 1 ]; then
+  echo "MEASURE_FRAGMENT_PREFLIGHT_OK candidate=$CAND arch=$ARCH r0_guest_set_hash=$R0_GUEST_SET_HASH"
+  exit 0
+fi
 FRAG="$OUT/facts-$CAND-$ARCH.json"; ATTEST_OUT="$OUT/attestation-$CAND-$ARCH.json"
 FW_ATTEST="$OUT/$CAND.firewall-attestation.jsonl"; : > "$FW_ATTEST"
 # Fail-closed cleanup: any error removes the partial fragment + scratch (no partial evidence).

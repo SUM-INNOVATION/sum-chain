@@ -1,0 +1,20 @@
+{
+  "candidate": "Risc0",
+  "arch": "x86_64",
+  "source_commit": "507281e21e95a6a98e3480e25e12d1baab586e07",
+  "clean_tree": true,
+  "guest_source_tree_hash": "ecdcf384cc2c6cecca4e436611ea9b02dd5c10654ec845dd319534519f75f8fe",
+  "candidate_dep_lock_hash": "a82995730a277b3b805dae2f355ddc49e458ca52ff39ff2c1050689395e1b2d2",
+  "guest_image_hash": "c84f1baf3dc8ecdb54aec0b9763e402f3e0de59385fb8c5115db420148db0331",
+  "program_id": "c044bb02cafce6f52ebe38dc1c6d00cf2e29f5bee15066a4081289239ae9a184",
+  "builder_container_digest": "a9908caa9a22af71653771557a713573dc3558136e36bd247c3a9e152742e477",
+  "toolchain_identity": "e8872e7631627130f08c025a83a49d8b46fe91a1300ed5b07d225fa98f1617ff",
+  "verifier_material_manifest_hash": "1d7d07b83b9942af66614a97ef30c54832149ce853e5f020c20d9dd1254c460c",
+  "build_command_hash": "d0476b35d342d69acde7027a6748d75371793247a0770e14d2171f8a7673596c",
+  "production_binary_blake3": "a9908caa9a22af71653771557a713573dc3558136e36bd247c3a9e152742e477",
+  "real_backend": true,
+  "real_guest_embedded": true,
+  "b0_pre_spec_hash": "201cfcb80e94a5a7845dc3380cde32171d40f325ae2bacde9547f3c0da3c4df3",
+  "tooling_commit": "272225c7c315d31c2bc4b3afb27c80cb0b42f4cf",
+  "tooling_pathset_blake3": "e7847e33ff93483844c22d5b4bda43370db404251ca88bd8579b036d1a054231"
+}

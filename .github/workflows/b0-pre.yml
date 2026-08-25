@@ -120,7 +120,7 @@ jobs:
           # ubuntu-latest, which ships python3/tar/coreutils), so assert each terminal marker is
           # present: a silent skip (e.g. a missing interpreter) would otherwise pass rc=0. Covers
           # the declarative extraction, the prover-archive pin block, and the provisioning recipe.
-          for m in VERIFIED_EXTRACTION_PASS PIN_PROVER_ARCHIVES_PASS PROVISIONING_RECIPE_PASS RUNNER_PATH_INDEPENDENCE_PASS; do
+          for m in VERIFIED_EXTRACTION_PASS PIN_PROVER_ARCHIVES_PASS PROVISIONING_RECIPE_PASS RUNNER_PATH_INDEPENDENCE_PASS MEASURE_FRAGMENT_PREFLIGHT_SMOKE_PASS; do
             grep -q "^$m\$" /tmp/run.out \
               || { echo "::error::required no-docker contract marker $m absent (test skipped or did not run)"; exit 1; }
           done
