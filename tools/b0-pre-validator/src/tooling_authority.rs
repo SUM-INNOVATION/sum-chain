@@ -26,11 +26,12 @@
 pub const UNBOUND: &str = "UNBOUND";
 
 /// Commit B records Commit A's exact 40-hex commit SHA here. Until then: [`UNBOUND`].
-pub const RATIFIED_MEASUREMENT_TOOLING_COMMIT: &str = UNBOUND;
+pub const RATIFIED_MEASUREMENT_TOOLING_COMMIT: &str = "9af079647591f1f042c3cd1b55e1a414538780a0";
 
 /// Commit B records the canonical tooling path-set digest (64-hex BLAKE3) here. Until then:
 /// [`UNBOUND`]. The digest is [`recompute_pathset_digest`] over the sorted inventory manifest.
-pub const RATIFIED_MEASUREMENT_TOOLING_PATHSET_BLAKE3: &str = UNBOUND;
+pub const RATIFIED_MEASUREMENT_TOOLING_PATHSET_BLAKE3: &str =
+    "0931bc6b60626850a842ea2089db93d8969b378c021c6bb4a3dfc264e05142ed";
 
 /// Domain separation for the tooling path-set digest. The preimage is the canonical MANIFEST TEXT:
 /// one line per inventory path, `"<file_blake3_hex>  <relpath>\n"`, sorted ascending by `relpath`
