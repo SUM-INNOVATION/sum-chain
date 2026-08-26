@@ -949,11 +949,16 @@ impl B0PreProtocolV1 {
                 proving_run_rss: consts::OFFICIAL_PROVING_RUN_RSS,
                 verify_batch_rss: consts::OFFICIAL_VERIFY_BATCH_RSS,
                 provenance_snapshots: consts::OFFICIAL_PROVENANCE_SNAPSHOTS,
-                grid_rule: "Measured grid: 2 statements x 2 architectures x 10 iterations = 40 \
-                            measured proofs, in canonical ascending order."
+                grid_rule: "Measured grid (reviewed two-cell model): 2 statements x 1 architecture \
+                            (x86_64) x 10 iterations = 20 measured proofs, in canonical ascending \
+                            order. Terminal native measurement is eligible on x86_64 ONLY for both \
+                            candidates; aarch64 terminal Groth16 (SP1) and RISC0/aarch64 are \
+                            ratified-unsupported and never measured, so no measured proof may exist \
+                            on aarch64 (measurement never implies ARM performance). The SP1/aarch64 \
+                            identity is retained in the guest set, not as a measurement."
                     .into(),
-                provenance_rule: "4 provenance snapshots: {x86_64, aarch64} x {proving, \
-                                  verification}."
+                provenance_rule: "2 provenance snapshots: {x86_64} x {proving, verification}. No \
+                                  aarch64 snapshot may exist - aarch64 is never natively measured."
                     .into(),
                 non_mixability_rule: "Every record must bind the same spec/guest-set/candidate/ \
                                       material/program/lock/container identities; mixed evidence is \
@@ -1020,7 +1025,11 @@ impl B0PreProtocolV1 {
                     "verifier identity / security (verifier material bound and authentic)".into(),
                     "reproducibility (digest-pinned container, lock hashes, guest identities)"
                         .into(),
-                    "cross-architecture semantic equivalence (x86_64 and aarch64 agree)".into(),
+                    "cross-architecture guest-IDENTITY equivalence (the arch-independent program_id \
+                     reconciles across the x86_64 + aarch64 guest builders - a retained identity, \
+                     NOT a measurement; terminal native measurement is x86_64-only and never \
+                     implies ARM performance was measured)"
+                        .into(),
                     "stable / no-advisory dependency policy".into(),
                     "validator-side verification limits (verify p99 and per-block budget)".into(),
                 ],

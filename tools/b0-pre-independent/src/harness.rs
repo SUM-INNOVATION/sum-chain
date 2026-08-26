@@ -20,7 +20,9 @@ pub const P99_GATE_NS: u64 = crate::closure::P99_GATE_NS;
 pub const VERIFIER_MATERIAL_BYTES: u64 = 292;
 const REPS: u32 = 100;
 const ITERS: u32 = 10;
-const ARCHES: [u8; 2] = [1, 2];
+// Reviewed two-cell measurement model: each candidate is measured on x86_64 (repr 1) ONLY.
+// SP1/aarch64 terminal Groth16 and RISC0/aarch64 are ratified-UNSUPPORTED and never measured.
+const ARCHES: [u8; 1] = [1];
 const STMTS: [u8; 2] = [0, 1];
 const BUNDLE_METRICS: [u8; 4] = [4, 5, 6, 7]; // prove, verify, setup, proof_bytes
 
@@ -1005,7 +1007,7 @@ fn enc_result_set(
     }
     b.extend_from_slice(&id(b"malformed"));
     b.push(0);
-    for c in [40u32, 4000, 40, 40, 40] {
+    for c in [20u32, 2000, 20, 20, 20] {
         b.extend_from_slice(&c.to_le_bytes());
     }
     b.extend_from_slice(&agg.0.to_le_bytes());
@@ -1054,8 +1056,8 @@ pub fn verify_evidence(ev: &Evidence) -> Result<Recomputed, String> {
     let mut locks: HashSet<[u8; 32]> = HashSet::new();
     let mut containers: HashSet<[u8; 32]> = HashSet::new();
 
-    // provenances
-    if ev.provenances.len() != 4 {
+    // provenances: x86_64-only two-cell model → ARCHES.len() arches × {proving, verification} roles.
+    if ev.provenances.len() != ARCHES.len() * 2 {
         return Err("provenance count".into());
     }
     let mut prov_h: HashMap<(u8, u8), [u8; 32]> = HashMap::new();
@@ -1215,7 +1217,7 @@ pub fn verify_evidence(ev: &Evidence) -> Result<Recomputed, String> {
             }
         }
     }
-    if env_hash.len() != 40 {
+    if env_hash.len() != ARCHES.len() * STMTS.len() * ITERS as usize {
         return Err("grid size".into());
     }
     for (a, s, it, h) in &rs.measured_proofs {
@@ -1467,9 +1469,9 @@ mod tests {
     #[test]
     fn generated_verifies() {
         let ev = generate();
-        assert_eq!(ev.envelopes.len(), 40);
-        assert_eq!(ev.samples.len(), 4000 + 40 + 40 + 40);
-        assert_eq!(ev.rss.len(), 80);
+        assert_eq!(ev.envelopes.len(), 20);
+        assert_eq!(ev.samples.len(), 2000 + 20 + 20 + 20);
+        assert_eq!(ev.rss.len(), 40);
         let r = verify_evidence(&ev).expect("valid");
         assert!(r.qualification);
         assert_eq!(r.verifier_material_bytes, 292);

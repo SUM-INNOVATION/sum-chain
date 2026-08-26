@@ -30,7 +30,7 @@ const COMMITTED_ARTIFACT: &str = include_str!(concat!(
 ));
 
 /// The real, owner-ratified `b0_pre_spec_hash`.
-const REAL_SPEC_HASH: &str = "201cfcb80e94a5a7845dc3380cde32171d40f325ae2bacde9547f3c0da3c4df3";
+const REAL_SPEC_HASH: &str = "e933e7325c2639a48d8e25f20746d0f8abc822dee9fcfa87c2e6cdec226cf2a2";
 
 fn hx(b: &[u8]) -> String {
     use std::fmt::Write;

@@ -4,7 +4,6 @@
 //! seed are both refused. (The independent-import leg of the same chain is covered in
 //! `tools/b0-pre-independent/tests/`, which re-verifies the produced VEC7 bytes + its own negatives.)
 
-use b0_pre_validator::enums::Candidate;
 use b0_pre_validator::harness::verify_evidence;
 use b0_pre_validator::measurement::parse_vector;
 use b0_pre_validator::producer::{dry_run_raw_facts, produce};
@@ -17,7 +16,7 @@ use b0_pre_validator::schema::result_set::R0ResultSetV1;
 #[test]
 fn e2e_raw_facts_produce_import_positive() {
     let pkg = produce(&dry_run_raw_facts()).expect("dry-run facts produce a VEC7 package");
-    let (allowlist_bytes, _mia, _report, _inv, bundles) =
+    let (allowlist_bytes, _mia, _report, _inv, _elig, bundles) =
         parse_vector(&pkg.vector).expect("VEC7 vector parses");
     let gs = GuestProgramAllowlistV1::decode_exact(&allowlist_bytes)
         .expect("allowlist decodes")
@@ -30,19 +29,13 @@ fn e2e_raw_facts_produce_import_positive() {
         );
         let rs = R0ResultSetV1::decode_exact(&ev.result_set).unwrap();
         assert_eq!(rs.r0_guest_set_hash, gs);
-        match candidate {
-            Candidate::Sp1 => assert!(
-                verify_evidence(ev).unwrap().qualification,
-                "SP1 verifies through the sealed-import dependency-seed anchor"
-            ),
-            Candidate::Risc0 => {
-                let e = verify_evidence(ev).unwrap_err();
-                assert!(
-                    e.contains("MeasuredProofGrid") || e.contains("completeness"),
-                    "RISC0 x86-only → completeness-disqualified (anchor already passed); got: {e}"
-                );
-            }
-        }
+        // Two-cell model: BOTH candidates carry their complete x86_64-only native matrix and verify +
+        // qualify through the sealed-import dependency-seed anchor.
+        let _ = candidate;
+        assert!(
+            verify_evidence(ev).unwrap().qualification,
+            "each x86-only measurement cell verifies + qualifies through the anchor"
+        );
     }
 }
 

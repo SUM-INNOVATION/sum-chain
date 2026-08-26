@@ -18,7 +18,7 @@ const FINGERPRINT: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../docs/b0-pre/fixtures/measurement-vector/real-orchestrator-vector.bin.blake3"
 ));
-const MERGED_SPEC_HEX: &str = "201cfcb80e94a5a7845dc3380cde32171d40f325ae2bacde9547f3c0da3c4df3";
+const MERGED_SPEC_HEX: &str = "e933e7325c2639a48d8e25f20746d0f8abc822dee9fcfa87c2e6cdec226cf2a2";
 
 fn hx(b: &[u8]) -> String {
     use std::fmt::Write as _;
@@ -40,8 +40,8 @@ fn spec_bytes() -> [u8; 32] {
 fn vector_is_deterministically_regenerable() {
     // Re-run the real orchestrator; the bytes and fingerprint must match the
     // committed fixture exactly. Drift => re-run emit_measurement_vector + review.
-    let (allowlist, mia, report, inv, bundles) = deterministic_demo_vector();
-    let bytes = serialize_vector(&allowlist, &mia, &report, &inv, &bundles);
+    let (allowlist, mia, report, inv, elig, bundles) = deterministic_demo_vector();
+    let bytes = serialize_vector(&allowlist, &mia, &report, &inv, &elig, &bundles);
     assert_eq!(
         bytes.len(),
         VECTOR.len(),
@@ -60,7 +60,7 @@ fn vector_is_deterministically_regenerable() {
 
 #[test]
 fn both_bundles_verify_exactly_as_the_frozen_rules_require() {
-    let (allowlist_bytes, _mia, _report, _inv, bundles) =
+    let (allowlist_bytes, _mia, _report, _inv, _elig, bundles) =
         parse_vector(VECTOR).expect("vector parses");
     // Recompute the canonical guest-set hash from the committed allowlist.
     let gs = GuestProgramAllowlistV1::decode_exact(&allowlist_bytes)
@@ -81,21 +81,25 @@ fn both_bundles_verify_exactly_as_the_frozen_rules_require() {
             rs.r0_guest_set_hash, gs,
             "binds the canonical guest-set hash recomputed from the allowlist"
         );
+        // Two-cell model: BOTH candidates carry their complete x86_64-only native matrix (20 proofs)
+        // and BOTH verify + qualify — they are the two eligible measurement cells. aarch64 is never
+        // measured, so no bundle implies ARM performance.
+        assert_eq!(
+            rs.completeness.measured_proof_count, 20,
+            "x86_64-only grid → 20 measured proofs"
+        );
+        for m in &rs.measured_proofs {
+            assert_eq!(
+                m.arch,
+                b0_pre_validator::enums::Arch::X86_64,
+                "no aarch64 measured cell may exist"
+            );
+        }
+        let r = verify_evidence(ev).expect("complete x86_64-only native matrix verifies");
+        assert!(r.qualification, "p99 < gate → qualifies");
         match candidate {
-            Candidate::Sp1 => {
-                saw_sp1 = true;
-                let r = verify_evidence(ev).expect("SP1 complete native matrix verifies");
-                assert!(r.qualification, "SP1 qualifies (p99 < gate)");
-                assert_eq!(rs.completeness.measured_proof_count, 40);
-            }
-            Candidate::Risc0 => {
-                saw_risc0 = true;
-                let e = verify_evidence(ev).expect_err("RISC0 x86-only matrix is disqualified");
-                assert!(
-                    e.contains("MeasuredProofGrid") || e.contains("completeness"),
-                    "RISC0 aarch64 absent -> incomplete grid; got: {e}"
-                );
-            }
+            Candidate::Sp1 => saw_sp1 = true,
+            Candidate::Risc0 => saw_risc0 = true,
         }
     }
     assert!(saw_sp1 && saw_risc0, "both candidate bundles present");

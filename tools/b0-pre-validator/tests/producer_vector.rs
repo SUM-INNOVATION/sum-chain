@@ -1,10 +1,9 @@
 //! The committed producer self-test vector (TEST-ONLY): deterministically
 //! regenerable by `measure-produce --dry-run`, and accepted byte-for-byte by the
-//! reference verifier for SP1 (qualified) and rejected for RISC0 (x86-only →
-//! `MeasuredProofGrid`). The independent crate re-verifies the same bytes in
-//! `tools/b0-pre-independent/tests/producer_vector.rs`.
+//! reference verifier for BOTH candidates (each carries its complete x86_64-only
+//! native matrix under the reviewed two-cell model). The independent crate
+//! re-verifies the same bytes in `tools/b0-pre-independent/tests/producer_vector.rs`.
 
-use b0_pre_validator::enums::Candidate;
 use b0_pre_validator::harness::verify_evidence;
 use b0_pre_validator::hashing;
 use b0_pre_validator::measurement::parse_vector;
@@ -47,7 +46,7 @@ fn producer_selftest_vector_is_deterministically_regenerable() {
 
 #[test]
 fn producer_vector_both_bundles_verify_and_bind_guest_set() {
-    let (allowlist_bytes, _mia, _report, _inv, bundles) =
+    let (allowlist_bytes, _mia, _report, _inv, _elig, bundles) =
         parse_vector(VECTOR).expect("vector parses");
     let gs = GuestProgramAllowlistV1::decode_exact(&allowlist_bytes)
         .expect("allowlist decodes")
@@ -59,15 +58,16 @@ fn producer_vector_both_bundles_verify_and_bind_guest_set() {
             rs.r0_guest_set_hash, gs,
             "record binds the guest-set hash recomputed from the allowlist"
         );
-        match candidate {
-            Candidate::Sp1 => assert!(verify_evidence(ev).unwrap().qualification),
-            Candidate::Risc0 => {
-                let e = verify_evidence(ev).unwrap_err();
-                assert!(
-                    e.contains("MeasuredProofGrid") || e.contains("completeness"),
-                    "RISC0 x86-only → disqualified; got: {e}"
-                );
-            }
+        // Two-cell model: both candidates carry their complete x86_64-only native matrix and both
+        // verify + qualify (the two eligible measurement cells). No aarch64 measured cell exists.
+        assert_eq!(rs.completeness.measured_proof_count, 20);
+        for m in &rs.measured_proofs {
+            assert_eq!(m.arch, b0_pre_validator::enums::Arch::X86_64);
         }
+        let _ = candidate;
+        assert!(
+            verify_evidence(ev).unwrap().qualification,
+            "each x86-only measurement cell verifies + qualifies"
+        );
     }
 }

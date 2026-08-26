@@ -1,11 +1,13 @@
 //! Deterministic R0 evidence harness (NON_SELECTION / TEST_ONLY).
 //!
-//! `generate()` builds the full canonical evidence grid from a compact seed —
-//! 40 proof envelopes; 4000 measured `host_verify_ns`, 40 `host_prove_wrap_ns`,
-//! 40 `proof_bytes`, and 40 `host_setup_ns` samples; 40 proving-run + 40
-//! verify-batch RSS records; 4 provenance snapshots; and the canonical
-//! verifier-material manifest — plus the `R0ResultSetV1` whose bundle hashes and
-//! aggregates are *derived from* those raw records.
+//! `generate()` builds the full canonical evidence grid from a compact seed.
+//! Reviewed two-cell model (x86_64-only native measurement) —
+//! 20 proof envelopes; 2000 measured `host_verify_ns`, 20 `host_prove_wrap_ns`,
+//! 20 `proof_bytes`, and 20 `host_setup_ns` samples; 20 proving-run + 20
+//! verify-batch RSS records; 2 provenance snapshots (x86_64 × {proving,
+//! verification}); and the canonical verifier-material manifest — plus the
+//! `R0ResultSetV1` whose bundle hashes and aggregates are *derived from* those
+//! raw records. No aarch64 measurement exists (aarch64 is identity-only).
 //!
 //! `verify_evidence()` decodes every record, enforces the full binding matrix
 //! (spec/guest-set/candidate/material/program/lock/container/statement/
@@ -54,7 +56,12 @@ const RISC0_CONTROL_ROOT_BYTES: u64 = 32;
 const RISC0_CONTROL_ID_BYTES: u64 = 32;
 const RISC0_VERIFIER_PARAMS_BYTES: u64 = 32;
 const REPS: u32 = 100;
-const ARCHES: [Arch; 2] = [Arch::X86_64, Arch::Aarch64];
+// Reviewed two-cell model: x86_64 is the SOLE native-measurement-eligible
+// architecture. aarch64 terminal Groth16 is ratified-unsupported for both
+// candidates (see `measurement::native_eligible` + the eligibility matrix), so no
+// aarch64 measured cell, provenance snapshot, or aggregate may exist. Iterating
+// this set is how the assembler/verifier guarantee they never imply ARM was measured.
+const ARCHES: [Arch; 1] = [Arch::X86_64];
 const STMTS: [StatementIndex; 2] = [StatementIndex::Tlg, StatementIndex::SelectToken];
 // bundle metric order per cell (ascending discriminant): prove(4), verify(5), setup(6), proof_bytes(7)
 const BUNDLE_METRICS: [MetricKind; 4] = [
@@ -1039,7 +1046,7 @@ fn generate_with(candidate: Candidate, env: &Env) -> Evidence {
         }
     }
 
-    // The 2×2×10 grid, in canonical order: per cell one envelope, REPS verify
+    // The 1×2×10 grid (x86_64 only), in canonical order: per cell one envelope, REPS verify
     // samples, one each prove/setup/proof_bytes, and one proving + one verify RSS.
     // Raw typed records only — the shared assembler derives every bundle/aggregate.
     let mut envelopes = Vec::new();
@@ -1189,8 +1196,9 @@ pub fn verify_evidence(ev: &Evidence) -> Result<Recomputed, String> {
     let mut locks: HashSet<[u8; 32]> = HashSet::new();
     let mut containers: HashSet<[u8; 32]> = HashSet::new();
 
-    // provenances (exactly 4; each eligible; hashes bound; proving hashes per arch)
-    if ev.provenances.len() != 4 {
+    // provenances (exactly the official set — x86_64 × {proving,verification} under
+    // the two-cell model; each eligible; hashes bound; proving hashes per arch)
+    if ev.provenances.len() != crate::consts::OFFICIAL_PROVENANCE_SNAPSHOTS as usize {
         return Err("provenance count".into());
     }
     let mut prov_h: HashMap<(u8, u8), [u8; 32]> = HashMap::new();
@@ -1731,12 +1739,12 @@ mod tests {
     fn generate_output_is_byte_stable() {
         assert_eq!(
             evidence_fingerprint(&generate()),
-            "eda8230255506f7d2625b8ccd061b91deccced4e16e70491a89ad48900ff8100",
+            "ed2300a2c154dca61bc398da4dcfa62fc76acea9e6f28d4f82275b6c6f47d703",
             "SP1 generate() output drifted from the frozen (retained cpuset+attestation+identity+recipe) bytes"
         );
         assert_eq!(
             evidence_fingerprint(&generate_candidate(Candidate::Risc0)),
-            "2b828f93fba84a8e56c8083425f21e82fd9c8d32a51b5d60f9ca196e24645c24",
+            "f4c0e55930ea42b589b1b620412512878e949c2611958775c18d4b0d6c78cbeb",
             "RISC0 generate_candidate() output drifted from the frozen (retained cpuset+attestation+identity+recipe) bytes"
         );
     }
@@ -1744,10 +1752,11 @@ mod tests {
     #[test]
     fn generated_evidence_verifies() {
         let ev = generate();
-        assert_eq!(ev.envelopes.len(), 40);
-        assert_eq!(ev.samples.len(), 4000 + 40 + 40 + 40); // + host_setup_ns
-        assert_eq!(ev.rss.len(), 80);
-        assert_eq!(ev.provenances.len(), 4);
+        // Two-cell model: x86_64-only grid → 20 cells, 2 provenance snapshots.
+        assert_eq!(ev.envelopes.len(), 20);
+        assert_eq!(ev.samples.len(), 2000 + 20 + 20 + 20); // + host_setup_ns
+        assert_eq!(ev.rss.len(), 40);
+        assert_eq!(ev.provenances.len(), 2);
         let r = verify_evidence(&ev).expect("valid");
         assert!(r.qualification);
         assert_eq!(r.verifier_material_bytes, 292); // SP1's own per-candidate total
@@ -1776,7 +1785,7 @@ mod tests {
         assert!(verify_evidence(&e).is_err());
         // swapped across (arch, role) → binding refuses
         let mut e = clone_ev(&generate());
-        e.cpuset_chains.swap(0, 3);
+        e.cpuset_chains.swap(0, 1);
         assert!(verify_evidence(&e)
             .unwrap_err()
             .to_lowercase()
@@ -1798,7 +1807,7 @@ mod tests {
         assert!(verify_evidence(&e).is_err());
         // swapped across (arch, role) → binding refuses
         let mut e = clone_ev(&generate());
-        e.runner_attestations.swap(0, 3);
+        e.runner_attestations.swap(0, 1);
         assert!(verify_evidence(&e)
             .unwrap_err()
             .to_lowercase()
@@ -1826,10 +1835,10 @@ mod tests {
         let n = e.identity_records[0].len();
         e.identity_records[0][n - 1] ^= 1;
         assert!(verify_evidence(&e).is_err());
-        // swapped records across (arch, role) → binding (candidate/arch or address) refuses
-        let mut e = clone_ev(&generate());
-        e.identity_records.swap(0, 3);
-        assert!(verify_evidence(&e).is_err());
+        // NOTE (two-cell model): both retained identity records are x86_64 (proving + verification
+        // provenance) and a Phase-1 identity record carries no role, so they are byte-identical —
+        // swapping them is a genuine no-op and (correctly) NOT a refusal. The wrong-slot binding is
+        // instead exercised by the cross-candidate substitution below, and by tampered bytes above.
         // cross-candidate: a record from candidate B cannot back candidate A's attestation
         let a = generate();
         let b = generate_candidate(Candidate::Risc0);

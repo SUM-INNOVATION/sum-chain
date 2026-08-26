@@ -8,15 +8,23 @@
 use crate::rd::{Rd, E};
 use crate::tags;
 
-// Frozen completeness (documented; plan §13/§23).
+// Frozen completeness under the reviewed two-cell measurement model (each candidate is measured on
+// x86_64 ONLY; SP1/aarch64 terminal Groth16 and RISC0/aarch64 are ratified-UNSUPPORTED). x86_64-only
+// grid = 1 arch × 2 statements × 10 iters = 20 measured proofs; 2000 verify-timing samples; 20 each of
+// prove-time / proof-bytes / setup / proving-run-rss / verify-batch-rss. `ITERS` stays 10.
 const ITERS: u32 = 10;
-const MEASURED_PROOFS: u32 = 40;
-const VERIFY_TIMING: u32 = 4000;
-const PROVE_TIME: u32 = 40;
-const PROOF_BYTES: u32 = 40;
-const SETUP_SAMPLES: u32 = 40;
-const PROVING_RSS: u32 = 40;
-const VERIFY_RSS: u32 = 40;
+const MEASURED_PROOFS: u32 = 20;
+const VERIFY_TIMING: u32 = 2000;
+const PROVE_TIME: u32 = 20;
+const PROOF_BYTES: u32 = 20;
+const SETUP_SAMPLES: u32 = 20;
+const PROVING_RSS: u32 = 20;
+const VERIFY_RSS: u32 = 20;
+
+/// The natively-measured arch set (x86_64 = repr 1 ONLY). Named const so the grid / provenance-set
+/// loops are not `single_element_loop` clippy violations. A fabricated aarch64 (repr 2) measurement is
+/// refused because it cannot appear in the expected grid built from this set.
+const ARCHES: [u8; 1] = [1];
 
 fn candidate(v: u16) -> Result<u16, E> {
     if v == 1 || v == 2 {
@@ -900,7 +908,7 @@ fn ord<K: Ord + Copy>(prev: &mut Option<K>, key: K) -> Result<(), E> {
 
 pub fn validate_completeness(rs: &ResultSet) -> Result<(), &'static str> {
     let mut grid = Vec::new();
-    for a in [1u8, 2] {
+    for a in ARCHES {
         for s in [0u8, 1] {
             for i in 0..ITERS {
                 grid.push((a, s, i));
@@ -912,7 +920,7 @@ pub fn validate_completeness(rs: &ResultSet) -> Result<(), &'static str> {
         return Err("measured_proof_grid");
     }
     let mut pset = Vec::new();
-    for a in [1u8, 2] {
+    for a in ARCHES {
         for role in [0u8, 1] {
             pset.push((a, role));
         }

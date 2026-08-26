@@ -148,67 +148,64 @@ fn h(seed: u8, i: usize) -> [u8; 32] {
     a
 }
 
-/// A result set that satisfies every frozen completeness rule (§13/§23): the
-/// exact 40-proof grid, the 4-provenance set, correct counts, and bundle sums.
+/// A result set that satisfies every frozen completeness rule (§13/§23) under the
+/// reviewed two-cell model: the exact 20-proof x86_64-only grid, the 2-provenance
+/// set (x86_64 × {proving,verification}), correct counts, and bundle sums. No
+/// aarch64 measured cell/provenance exists — aarch64 terminal measurement is
+/// ratified-unsupported and must never appear as measurement evidence.
 pub fn official_result_set() -> R0ResultSetV1 {
+    // x86_64 is the sole native-measurement-eligible architecture.
+    let arch = Arch::X86_64;
     let mut measured_proofs = Vec::new();
-    for arch in [Arch::X86_64, Arch::Aarch64] {
-        for stmt in [StatementIndex::Tlg, StatementIndex::SelectToken] {
-            for iter in 0..crate::consts::OFFICIAL_ITERATIONS_PER_CELL {
-                measured_proofs.push(MeasuredProofRef {
-                    arch,
-                    statement_index: stmt,
-                    iteration_index: iter,
-                    envelope_hash: h(0x20, measured_proofs.len()),
-                });
-            }
+    for stmt in [StatementIndex::Tlg, StatementIndex::SelectToken] {
+        for iter in 0..crate::consts::OFFICIAL_ITERATIONS_PER_CELL {
+            measured_proofs.push(MeasuredProofRef {
+                arch,
+                statement_index: stmt,
+                iteration_index: iter,
+                envelope_hash: h(0x20, measured_proofs.len()),
+            });
         }
     }
     let mut arch_provenance = Vec::new();
-    for arch in [Arch::X86_64, Arch::Aarch64] {
-        for role in [ProvenanceRole::Proving, ProvenanceRole::Verification] {
-            arch_provenance.push(ArchProvenanceRef {
-                arch,
-                role,
-                provenance_hash: h(0x30, arch_provenance.len()),
-            });
-        }
+    for role in [ProvenanceRole::Proving, ProvenanceRole::Verification] {
+        arch_provenance.push(ArchProvenanceRef {
+            arch,
+            role,
+            provenance_hash: h(0x30, arch_provenance.len()),
+        });
     }
     let mut sample_bundles = Vec::new();
-    for arch in [Arch::X86_64, Arch::Aarch64] {
-        for stmt in [StatementIndex::Tlg, StatementIndex::SelectToken] {
-            for metric in [
-                MetricKind::HostProveWrapNs,
-                MetricKind::HostVerifyNs,
-                MetricKind::HostSetupNs,
-                MetricKind::ProofBytes,
-            ] {
-                let sample_count = if matches!(metric, MetricKind::HostVerifyNs) {
-                    1000
-                } else {
-                    10
-                };
-                sample_bundles.push(SampleBundle {
-                    arch,
-                    statement_index: stmt,
-                    metric_kind: metric,
-                    sample_kind: SampleKind::Measured,
-                    sample_count,
-                    bundle_hash: h(0x40, sample_bundles.len()),
-                });
-            }
+    for stmt in [StatementIndex::Tlg, StatementIndex::SelectToken] {
+        for metric in [
+            MetricKind::HostProveWrapNs,
+            MetricKind::HostVerifyNs,
+            MetricKind::HostSetupNs,
+            MetricKind::ProofBytes,
+        ] {
+            let sample_count = if matches!(metric, MetricKind::HostVerifyNs) {
+                1000
+            } else {
+                10
+            };
+            sample_bundles.push(SampleBundle {
+                arch,
+                statement_index: stmt,
+                metric_kind: metric,
+                sample_kind: SampleKind::Measured,
+                sample_count,
+                bundle_hash: h(0x40, sample_bundles.len()),
+            });
         }
     }
     let mut rss_bundles = Vec::new();
-    for arch in [Arch::X86_64, Arch::Aarch64] {
-        for scope in [RssScope::ProvingRun, RssScope::VerifyBatch] {
-            rss_bundles.push(RssBundle {
-                arch,
-                rss_scope: scope,
-                record_count: 20,
-                bundle_hash: h(0x50, rss_bundles.len()),
-            });
-        }
+    for scope in [RssScope::ProvingRun, RssScope::VerifyBatch] {
+        rss_bundles.push(RssBundle {
+            arch,
+            rss_scope: scope,
+            record_count: 20,
+            bundle_hash: h(0x50, rss_bundles.len()),
+        });
     }
     R0ResultSetV1 {
         b0_pre_spec_hash: RS_SPEC_HASH,
@@ -224,11 +221,11 @@ pub fn official_result_set() -> R0ResultSetV1 {
         malformed_corpus_result_hash: [6; 32],
         cycle_bundle: None,
         completeness: Completeness {
-            measured_proof_count: 40,
-            verify_timing_sample_count: 4000,
-            proving_time_sample_count: 40,
-            proving_run_rss_count: 40,
-            verify_batch_rss_count: 40,
+            measured_proof_count: 20,
+            verify_timing_sample_count: 2000,
+            proving_time_sample_count: 20,
+            proving_run_rss_count: 20,
+            verify_batch_rss_count: 20,
         },
         aggregates: Aggregates {
             max_proof_bytes: 260,

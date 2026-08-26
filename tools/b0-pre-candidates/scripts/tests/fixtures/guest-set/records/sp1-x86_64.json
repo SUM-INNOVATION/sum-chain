@@ -14,7 +14,7 @@
   "production_binary_blake3": "803eced8e0a966b6f5f755264a404c4d24378f5a25883246a28321575aa3939a",
   "real_backend": true,
   "real_guest_embedded": true,
-  "b0_pre_spec_hash": "201cfcb80e94a5a7845dc3380cde32171d40f325ae2bacde9547f3c0da3c4df3",
+  "b0_pre_spec_hash": "e933e7325c2639a48d8e25f20746d0f8abc822dee9fcfa87c2e6cdec226cf2a2",
   "tooling_commit": "272225c7c315d31c2bc4b3afb27c80cb0b42f4cf",
   "tooling_pathset_blake3": "e7847e33ff93483844c22d5b4bda43370db404251ca88bd8579b036d1a054231",
   "canonical_sp1_guest_artifact_address": "c4401e7c5c5d3138bc37569fb9d8ab1ef05d22f5dadd68f0cba13d042db85a9f"

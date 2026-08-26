@@ -47,7 +47,7 @@ mod real {
     use sp1_sdk::blocking::{Elf, ProveRequest, Prover, ProverClient, SP1Stdin};
     use sp1_sdk::{HashableKey, ProvingKey};
 
-    const MERGED_SPEC: &str = "201cfcb80e94a5a7845dc3380cde32171d40f325ae2bacde9547f3c0da3c4df3";
+    const MERGED_SPEC: &str = "e933e7325c2639a48d8e25f20746d0f8abc822dee9fcfa87c2e6cdec226cf2a2";
 
     /// Real SP1 backend. Holds the built guest ELF + build provenance + the firewall
     /// attestation path from which the PROVING-CONTAINER cgroup peak is read.

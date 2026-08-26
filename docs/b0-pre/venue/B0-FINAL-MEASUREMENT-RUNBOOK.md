@@ -1,7 +1,18 @@
-# B0-FINAL official measurement runbook (x86_64 + aarch64 operators)
+# B0-FINAL official measurement runbook (x86_64 measurement; x86_64 + aarch64 identity)
 
 Produces the official R0 measurement grid bound to the merged, finalized
-`b0_pre_spec_hash = 201cfcb80e94a5a7845dc3380cde32171d40f325ae2bacde9547f3c0da3c4df3`.
+`b0_pre_spec_hash = e933e7325c2639a48d8e25f20746d0f8abc822dee9fcfa87c2e6cdec226cf2a2`.
+
+**Reviewed two-cell measurement model.** Terminal native measurement is eligible on **x86_64 only**,
+for **both** candidates: the two measurement cells are **SP1/x86_64** and **RISC0/x86_64**. SP1/aarch64
+terminal Groth16 (no first-party linux/arm64 gnark backend) and RISC0/aarch64 are **ratified-UNSUPPORTED**
+and are **never measured** — `measure_fragment.sh` refuses them before any proving. The **identity** set
+stays **three** records (SP1/x86_64, SP1/aarch64, RISC0/x86_64): the SP1 guest is *built* for aarch64 as
+an identity in the shared guest set, but that identity is NEVER a measurement or proof. The eligibility/
+unsupported model is carried as a retained, content-addressed `EligibilityMatrixV1` record, bound by
+address into the `MeasurementInputAuthorityV1` and re-decoded + recomputed by both verifiers. The prior
+`201cfcb8…` spec and any package/MIA/records/fragments bound to it are **superseded** — every production
+path refuses the old spec after this migration.
 
 The measurement producer is **checked-in Rust**, not shell scaffolding:
 
@@ -79,9 +90,14 @@ eligible guests are built and reconciled — not handed in by an operator.
 
 **On each host, emit the reproducible identity record** (builds the guest TWICE and requires a
 byte-identical typed record — no proof, no measurement):
+Phase 1 builds all **three** guest identities (SP1/x86_64, SP1/aarch64, RISC0/x86_64). SP1/aarch64 is an
+**identity-only** guest build — it enters the shared guest set (its arch-independent program_id reconciles
+across both SP1 builders) but is NEVER measured. This step emits reproducible identity records; it runs no
+proof and no measurement.
+
 ```
 # x86_64 venue:
-SPEC_HASH=201cfcb8…4df3  REPO_DIR="$PWD"  PROVER_REAL_DOCKER=/usr/bin/docker \
+SPEC_HASH=e933e732…f2a2  REPO_DIR="$PWD"  PROVER_REAL_DOCKER=/usr/bin/docker \
   MEASURE_RUNNER=target/release/b0-pre-measure-sp1  VMAT_BIN=target/release/sp1-verifier-material \
   PROV_BIN=target/release/b0-pre-host-provenance  VERIFIER_REF=<pinned sp1 builder> \
   bash tools/b0-pre-candidates/scripts/derive_guest_set.sh emit sp1   x86_64 records/sp1-x86_64.json
@@ -89,7 +105,7 @@ SPEC_HASH=…  REPO_DIR="$PWD"  MEASURE_RUNNER=target/release/b0-pre-measure-ris
   VMAT_BIN=target/release/risc0-verifier-material  PROV_BIN=… \
   bash tools/b0-pre-candidates/scripts/derive_guest_set.sh emit risc0 x86_64 records/risc0-x86_64.json
 
-# aarch64 venue (SP1 only):
+# aarch64 venue (SP1 IDENTITY only — builds the guest, emits the identity record; NO measurement):
 … MEASURE_RUNNER=target/release/b0-pre-measure-sp1  VERIFIER_REF=<pinned sp1 builder, aarch64> \
   bash tools/b0-pre-candidates/scripts/derive_guest_set.sh emit sp1 aarch64 records/sp1-aarch64.json
 ```
@@ -136,17 +152,20 @@ bash tools/b0-pre-candidates/scripts/produce_measurement_input_authority.sh veri
 
 The package holds `measurement-input-authority.v1.json` (the unifier: spec/workload + measured/tooling
 identity + the harness-source inventory address + the malformed-corpus report address + the RSS
-statement-binding policy), plus the retained `malformed-corpus-report.v1.json` (the fixed ordered corpus
-run through the real guest boundary, retaining each member's exact bytes + stable refusal class) and
-`harness-source-inventory.txt` (the canonical causal source-closure manifest). `measure_fragment.sh`
-re-runs the **fail-fast gate** (`measure-produce --verify-authority`) before proving each fragment — it
-refuses a stale package whose tooling commit/path-set ≠ the ratified measurement tooling — and embeds the
-three members byte-identical into every fragment, so `--merge-fragments` refuses any byte or address
-disagreement across fragments. All three members are MANDATORY; a package or fragment missing any of them
-is refused.
+statement-binding policy + the **eligibility-matrix address**), plus the retained
+`malformed-corpus-report.v1.json` (the fixed ordered corpus run through the real guest boundary, retaining
+each member's exact bytes + stable refusal class), `harness-source-inventory.txt` (the canonical causal
+source-closure manifest), and `eligibility-matrix.v1.json` (the retained `EligibilityMatrixV1`: the FROZEN
+two-cell model — 3 identity cells, 2 native-measurement cells, exact unsupported set — self-addressed by
+SHA-256 over its frozen preimage). `measure_fragment.sh` re-runs the **fail-fast gate**
+(`measure-produce --verify-authority`, which now also decodes + recomputes the eligibility record and
+requires the authority to bind exactly its address) before proving each fragment — it refuses a stale
+package whose tooling commit/path-set ≠ the ratified measurement tooling — and embeds **all four** members
+byte-identical into every fragment, so `--merge-fragments` refuses any byte or address disagreement across
+fragments. All four members are MANDATORY; a package or fragment missing any of them is refused.
 
 ```
-export SPEC_HASH=201cfcb80e94a5a7845dc3380cde32171d40f325ae2bacde9547f3c0da3c4df3
+export SPEC_HASH=e933e7325c2639a48d8e25f20746d0f8abc822dee9fcfa87c2e6cdec226cf2a2
 export GUEST_SET_MANIFEST=set/coordination-manifest.json  # phase-1 output (transfer-verified)
 export IDENTITY_RECORDS=records/all.json                  # the 3 identity records (JSON array)
 export MEASURE_PRODUCE=tools/b0-pre-validator/target/release/measure-produce
@@ -172,15 +191,16 @@ MEASURE_RUNNER=target/release/b0-pre-measure-risc0 VMAT_BIN=target/release/risc0
   PROVER_R0VM_DIR=<pinned r0vm dir> PROVER_RISC0_HOME="$PROVER_RISC0_HOME" \
   bash tools/b0-pre-candidates/scripts/measure_fragment.sh risc0 x86_64 "$OUT"
 
-# aarch64 venue — SP1 ONLY (a RISC-Zero-aarch64 run is REFUSED by both the orchestrator
-# and the runner; never fabricated):
-MEASURE_RUNNER=target/release/b0-pre-measure-sp1 VERIFIER_REF=<pinned sp1 builder, aarch64> \
-  bash tools/b0-pre-candidates/scripts/measure_fragment.sh sp1   aarch64 "$OUT"
+# NO aarch64 MEASUREMENT. SP1/aarch64 terminal Groth16 and RISC0/aarch64 are ratified-UNSUPPORTED:
+# measure_fragment.sh refuses them BEFORE any proving (native-ineligible; never emulated / QEMU / network
+# prover / native-gnark / fabricated). The SP1/aarch64 identity lives only in the Phase-1 guest set above.
+# The two measurement cells are exactly SP1/x86_64 and RISC0/x86_64.
 ```
 
 Each invocation writes `"$OUT"/facts-<candidate>-<arch>.json` (a **RawFacts fragment**: 2
-statements × 10 iterations, **100 verification samples per proof**, real timings, proof
-bytes/hash, container-cgroup proving RSS, native verify RSS, host provenance), a runner
+statements × **1 architecture (x86_64)** × 10 iterations = **20 measured proofs**, **100 verification
+samples per proof**, real timings, proof bytes/hash, container-cgroup proving RSS, native verify RSS, host
+provenance — every measured cell is x86_64; no aarch64 cell may exist), a runner
 attestation `attestation-<candidate>-<arch>.json` (binds the **production binary BLAKE3** +
 **enabled backend identity**, `real_backend: true`), and the firewall execution attestation.
 
@@ -193,14 +213,15 @@ attestation `attestation-<candidate>-<arch>.json` (binds the **production binary
 
 ## 4. Coordinate + assemble the official package
 
-Do NOT hand-merge JSON. Merge the per-(candidate,arch) fragments with the typed producer step
-(rejects duplicate/missing/extra fragments, verifies SP1 cross-arch identity + source/spec
-agreement, combines SP1 x86+ARM, preserves RISC Zero x86-only):
+Do NOT hand-merge JSON. Merge **exactly the two** measurement fragments with the typed producer step
+(requires EXACTLY {SP1/x86_64, RISC0/x86_64}; rejects duplicate/missing/extra fragments and refuses an
+SP1/aarch64 or RISC0/aarch64 measurement fragment as ratified-unsupported; verifies source/spec agreement
++ byte-identical measurement-input authority incl. the eligibility record across both fragments):
 
 ```
 MP=tools/b0-pre-validator/target/release/measure-produce
 $MP --merge-fragments "$OUT/merged" \
-  "$OUT"/facts-sp1-x86_64.json "$OUT"/facts-sp1-aarch64.json "$OUT"/facts-risc0-x86_64.json
+  "$OUT"/facts-sp1-x86_64.json "$OUT"/facts-risc0-x86_64.json
 ```
 
 Produce the package, BOUND to the phase-1 guest set. The identity RECORDS are a required
@@ -221,7 +242,11 @@ from-scratch verifier, and confirm its derived verdicts:
 "$CARGO" run --release --manifest-path tools/b0-pre-independent/Cargo.toml \
   --bin b0-pre-independent-verify -- "$OUT/package/real-orchestrator-vector.bin"
 #  -> {"r0_guest_set_hash":"…","candidates":[{"candidate":1,"verdict":"qualified"},
-#                                            {"candidate":2,"verdict":"incomplete_or_rejected:…"}]}
+#                                            {"candidate":2,"verdict":"qualified"}]}
+# Two-cell model: BOTH SP1/x86_64 and RISC0/x86_64 carry their COMPLETE x86_64-only native matrix (20
+# proofs) and both verify + qualify. Neither is an "incomplete native matrix" — x86_64 IS the complete
+# native matrix. Aggregation/selection use ONLY these two eligible measurement cells and never imply ARM
+# performance was measured. Selecting the B0-FINAL candidate is B0-FINAL aggregation, not this runbook.
 ```
 
 The committed-fixture agreement tests remain a separate regression gate:
@@ -238,7 +263,18 @@ deallocate the VMs only after the package is mirrored and independently re-verif
 
 ## Non-negotiables
 
-- Never fabricate a RISC-Zero-aarch64 record; never emulate; never edit the finalized spec
-  hash / protocol / thresholds / guest logic.
+- **Two-cell model.** Measure ONLY SP1/x86_64 and RISC0/x86_64. Never fabricate, emulate, QEMU, network-
+  prove, native-gnark, or otherwise synthesize an SP1/aarch64 or RISC0/aarch64 measurement or proof — both
+  are ratified-UNSUPPORTED and refused before proving. Never imply ARM performance was measured.
+- **Three identities, two measurements.** The guest set retains three identity records (SP1/x86_64,
+  SP1/aarch64, RISC0/x86_64); exactly two of them are measurement cells. The SP1/aarch64 identity is never
+  a measurement. The retained eligibility record + its MIA binding are MANDATORY; a package/fragment
+  missing the eligibility record, or whose eligibility model disagrees with the enforced native
+  eligibility, is refused.
+- **Superseded spec.** The finalized `b0_pre_spec_hash` is `e933e732…f2a2`. The prior `201cfcb8…` spec and
+  any MIA / records / identities / fragments / packages bound to it are superseded and refused — never mix
+  old and new.
+- Never edit the finalized spec hash / protocol / thresholds / guest logic outside a reviewed authority
+  cycle.
 - The `measure-produce --dry-run` package is TEST-ONLY synthetic scaffolding and must never
   be presented as measurement evidence.

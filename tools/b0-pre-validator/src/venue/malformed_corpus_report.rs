@@ -227,7 +227,7 @@ mod tests {
     use super::*;
 
     const MEASURED: &str = "507281e21e95a6a98e3480e25e12d1baab586e07";
-    const SPEC: &str = "201cfcb80e94a5a7845dc3380cde32171d40f325ae2bacde9547f3c0da3c4df3";
+    const SPEC: &str = "e933e7325c2639a48d8e25f20746d0f8abc822dee9fcfa87c2e6cdec226cf2a2";
     const REPORT_JSON: &str = include_str!(
         "../../../../docs/b0-pre/fixtures/measurement-input-authority/malformed-corpus-report.v1.json"
     );

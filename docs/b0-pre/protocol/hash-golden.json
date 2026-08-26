@@ -1,8 +1,8 @@
 {
   "label": "TEST_ONLY canonical preimage golden vectors; synthetic finalizable artifact; NOT the real b0_pre_spec_hash",
   "spec_prefix_hex": "53554d434841494e2f42302d5052452f535045432f76310a",
-  "canonical_json_len": 26041,
-  "canonical_json_blake3": "58a8096759cf7decbbe92c0888bd476fd42d3cf31a4cac1f720bbed74fcde512",
-  "preimage_len": 26065,
-  "preimage_blake3": "a1669f080d37244309ca72c6cb3011392defe52c8619565b48580c89715f3fd4"
+  "canonical_json_len": 26667,
+  "canonical_json_blake3": "f02dc9afcdb2f0d24a546931833324246080f0f0bbd67ffc709a8eaa4950240f",
+  "preimage_len": 26691,
+  "preimage_blake3": "b7ba05af738d79b12bcb9d68ff9b8bf2f8c0b86b3688ce92a28521d003657a56"
 }

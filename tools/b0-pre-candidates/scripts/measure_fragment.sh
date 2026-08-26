@@ -47,9 +47,18 @@ case "$CAND" in sp1|risc0) ;; *) die "candidate must be sp1|risc0 (got '${CAND:-
 case "$ARCH" in x86_64|aarch64) ;; *) die "arch must be x86_64|aarch64 (got '${ARCH:-}')" ;; esac
 [ -n "$OUT" ] || die "output dir argument required"
 
-# Native eligibility FIRST: RISC Zero is x86_64-only; refuse a RISC-Zero-aarch64 fragment
-# before any build/prove (the runner also refuses, defence in depth).
-[ "$CAND" = risc0 ] && [ "$ARCH" = aarch64 ] && die "RISC Zero is native-ineligible on aarch64; refused (never fabricated)"
+# Native terminal-MEASUREMENT eligibility FIRST — refuse an ineligible (candidate,arch) BEFORE any
+# build/prove (the runner refuses too; defence in depth). The two-cell model: only SP1/x86_64 and
+# RISC0/x86_64 are natively terminal-measurable. Explicitly unsupported (ratified fail-closed):
+#   * RISC0/aarch64            — RISC Zero Groth16 receipt path is x86_64-only (VENUE §2).
+#   * SP1/aarch64 terminal Groth16 — no first-party linux/arm64 gnark backend exists (sp1-gnark is
+#     amd64-only; the stark2snark wrap `docker run`s that image), so it cannot run natively on aarch64.
+# Governing authority: the retained EligibilityMatrixV1 (bound into the MIA) + arm-sp1-stage5
+# no-arm-gnark-evidence (CONFIRMED). NEVER emulate/QEMU, NEVER a remote/network prover, NEVER
+# native-gnark, NEVER a fabricated aarch64 proof. The SP1/aarch64 *identity* is Phase-1 eligible and
+# stays in the guest set, but it is NEVER a measurement or proof.
+[ "$CAND" = risc0 ] && [ "$ARCH" = aarch64 ] && die "RISC0/aarch64 is native-ineligible for terminal measurement; refused before proving (ratified unsupported: risc0-aarch64-x86-only; never fabricated)"
+[ "$CAND" = sp1 ]   && [ "$ARCH" = aarch64 ] && die "SP1/aarch64 terminal Groth16 is native-ineligible (no arm64 gnark backend); refused before proving (ratified unsupported: sp1-aarch64-groth16-no-arm-backend; never emulated/network/native-gnark/fabricated)"
 require_native_arch "$ARCH"
 
 need_env() { [ -n "${!1:-}" ] || die "required env $1 is unset"; }
@@ -88,7 +97,8 @@ need_env B0_MEASUREMENT_AUTHORITY_PKG
 MIA_JSON="$B0_MEASUREMENT_AUTHORITY_PKG/measurement-input-authority.v1.json"
 REPORT_JSON="$B0_MEASUREMENT_AUTHORITY_PKG/malformed-corpus-report.v1.json"
 INVENTORY_TXT="$B0_MEASUREMENT_AUTHORITY_PKG/harness-source-inventory.txt"
-for f in "$MIA_JSON" "$REPORT_JSON" "$INVENTORY_TXT"; do
+ELIG_JSON="$B0_MEASUREMENT_AUTHORITY_PKG/eligibility-matrix.v1.json"
+for f in "$MIA_JSON" "$REPORT_JSON" "$INVENTORY_TXT" "$ELIG_JSON"; do
   [ -s "$f" ] || die "measurement-input authority package missing/empty member: $f"
 done
 # source_commit/clean-tree are read from the MEASURED root (never the tooling checkout HEAD). The
@@ -98,13 +108,13 @@ export B0_TOOLING_COMMIT B0_TOOLING_PATHSET_BLAKE3 B0_MEASURED_COMMIT
 [ "$CAND" = sp1 ] && need_env VERIFIER_REF
 case "$CAND" in sp1) CANDCAP=Sp1 ;; risc0) CANDCAP=Risc0 ;; esac
 
-MERGED_SPEC="201cfcb80e94a5a7845dc3380cde32171d40f325ae2bacde9547f3c0da3c4df3"
+MERGED_SPEC="e933e7325c2639a48d8e25f20746d0f8abc822dee9fcfa87c2e6cdec226cf2a2"
 [ "$SPEC_HASH" = "$MERGED_SPEC" ] || die "SPEC_HASH $SPEC_HASH != merged finalized $MERGED_SPEC"
 # Frozen ratified computation-statement hashes (== the guest journals). The runner
 # INDEPENDENTLY recomputes each from the materialized input and refuses on mismatch, so
 # these are cross-checked, not trusted.
-STATEMENT_HASH_TLG="36fd69cb75ea6e7c91ce37932aca0158c3d9c8cb9a364bc66c55d27a43372d30"
-STATEMENT_HASH_ST="264e8a9339fa7e768e16fbecb38351564a7710472ce66ea2478a9fc6f214192b"
+STATEMENT_HASH_TLG="cd27d48ce81a0211539ac7685fa9548457779ccf769e5731d92bdf706635de86"
+STATEMENT_HASH_ST="26574240d194c1d4a28505559c51e5381e057ee4c559edd53abea8c257db0749"
 for b in "$MEASURE_RUNNER" "$MEASURE_PRODUCE" "$VMAT_BIN" "$PROV_BIN" "$PROVER_FIREWALL_SH"; do
   [ -x "$b" ] || die "required executable not found/executable: $b"
 done
@@ -124,7 +134,7 @@ B0PRE_TESTONLY_PREFLIGHT="${B0PRE_TESTONLY_PREFLIGHT:-0}"
 if [ "$B0PRE_TESTONLY_PREFLIGHT" = 1 ]; then
   note "TEST_ONLY preflight: SKIPPING the MIA fail-fast gate (covered by dedicated tests); will exit before proving"
 else
-  "$MEASURE_PRODUCE" --verify-authority "$MIA_JSON" "$REPORT_JSON" "$INVENTORY_TXT" >&2 \
+  "$MEASURE_PRODUCE" --verify-authority "$MIA_JSON" "$REPORT_JSON" "$INVENTORY_TXT" "$ELIG_JSON" >&2 \
     || die "measurement-input authority failed the pre-grid fail-fast gate (decode/cross-bind/tooling-ratified); refusing to prove"
 fi
 # #6: the guest build uses the ABSOLUTE, pre-verified Docker binary — never `docker` from PATH.
@@ -402,16 +412,18 @@ env PATH="$FWDIR:$PATH" \
 [ -s "$FW_ATTEST" ] || die "firewall recorded no execution attestation; refusing"
 
 # Embed the retained authority BYTES into this fragment as top-level string members. Every fragment
-# carries byte-identical measurement_input_authority / malformed_corpus_report / harness_source_inventory;
-# merge_fragments agrees them byte-for-byte and refuses any disagreement, and produce() re-verifies the
-# MIA + derives the malformed-corpus result hash from the retained report (never an operator hash).
-python3 - "$FRAG" "$MIA_JSON" "$REPORT_JSON" "$INVENTORY_TXT" <<'PY' || die "failed to embed measurement-input authority bytes into the fragment"
+# carries byte-identical measurement_input_authority / malformed_corpus_report / harness_source_inventory
+# / eligibility_matrix; merge_fragments agrees them byte-for-byte and refuses any disagreement, and
+# produce() re-verifies the MIA (incl. the eligibility-matrix address it binds), derives the
+# malformed-corpus result hash from the retained report, and cross-checks the two-cell eligibility model.
+python3 - "$FRAG" "$MIA_JSON" "$REPORT_JSON" "$INVENTORY_TXT" "$ELIG_JSON" <<'PY' || die "failed to embed measurement-input authority bytes into the fragment"
 import json, sys
-frag_path, mia, report, inv = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+frag_path, mia, report, inv, elig = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
 frag = json.load(open(frag_path, encoding="utf-8"))
 frag["measurement_input_authority"] = open(mia, encoding="utf-8").read()
 frag["malformed_corpus_report"] = open(report, encoding="utf-8").read()
 frag["harness_source_inventory"] = open(inv, encoding="utf-8").read()
+frag["eligibility_matrix"] = open(elig, encoding="utf-8").read()
 json.dump(frag, open(frag_path, "w", encoding="utf-8"), indent=2)
 PY
 

@@ -43,7 +43,7 @@ VAL="$ROOT/../b0-pre-validator/Cargo.toml"
 . "$HERE/committed_lock_authority.sh"
 
 # The real, merged b0_pre_spec_hash (measurement mode binds to EXACTLY this).
-MERGED_SPEC_HASH="201cfcb80e94a5a7845dc3380cde32171d40f325ae2bacde9547f3c0da3c4df3"
+MERGED_SPEC_HASH="e933e7325c2639a48d8e25f20746d0f8abc822dee9fcfa87c2e6cdec226cf2a2"
 
 DEEP=0
 MODE=preregistration

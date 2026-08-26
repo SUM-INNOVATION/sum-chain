@@ -397,8 +397,14 @@ run_one() {
       || die "build $tag: guest dependency-seed materialization/verification failed (seed != retained authority)"
   fi
   T_START[$tag]="$(date +%s)"
-  if ! (cd "$CANON_ABS" && env -u RUSTFLAGS -u CARGO_BUILD_RUSTFLAGS "${envv[@]}" "${ARGV[@]}" >/dev/null 2>&1); then
-    die "clean build $tag FAILED (canonical_src=$CANON_ABS target=$target argv='${ARGV[*]}')"
+  # Retain the FULL build stdout+stderr (diagnostic only — not part of the artifact/recipe) so a failure
+  # is never classified "transient" without the underlying compiler error. $work is outside the canonical
+  # paths and preserved on success-drop, so the log survives for post-mortem.
+  local blog="$work/build.$tag.log"
+  if ! (cd "$CANON_ABS" && env -u RUSTFLAGS -u CARGO_BUILD_RUSTFLAGS "${envv[@]}" "${ARGV[@]}" >"$blog" 2>&1); then
+    log "clean build $tag FAILED — retained build output at $blog; last 60 lines:"
+    tail -n 60 "$blog" >&2 2>/dev/null || true
+    die "clean build $tag FAILED (canonical_src=$CANON_ABS target=$target argv='${ARGV[*]}'); full build output retained at $blog"
   fi
   T_END[$tag]="$(date +%s)"
   last="$target/$ARTIFACT"

@@ -24,6 +24,12 @@ pub struct MeasurementInputAuthority {
     pub harness_source_inventory_address: String,
     pub malformed_corpus_report_address: String,
     pub rss_statement_binding_policy: String,
+    /// Address of the retained eligibility/unsupported matrix (`EligibilityMatrix`) — the reviewed
+    /// two-cell measurement model (3 identities, 2 native-measurement cells, the exact unsupported
+    /// set). Bound here so the authority ties the package to the ratified eligibility policy;
+    /// `verify_binds` recomputes it from the retained eligibility-record bytes with the crate's OWN
+    /// SHA-256.
+    pub eligibility_matrix_address: String,
     pub address: String,
 }
 
@@ -49,6 +55,7 @@ impl MeasurementInputAuthority {
             self.harness_source_inventory_address.as_str(),
             self.malformed_corpus_report_address.as_str(),
             self.rss_statement_binding_policy.as_str(),
+            self.eligibility_matrix_address.as_str(),
         ];
         to_hex(&sha256(parts.join("\0").as_bytes()))
     }
@@ -74,6 +81,7 @@ impl MeasurementInputAuthority {
             &self.tooling_pathset_blake3,
             &self.harness_source_inventory_address,
             &self.malformed_corpus_report_address,
+            &self.eligibility_matrix_address,
         ] {
             if !is_hex_of(v, 64) {
                 return Err("independent: MIA bound address not 64-hex".into());
@@ -100,6 +108,7 @@ impl MeasurementInputAuthority {
         &self,
         harness_inventory_manifest: &[u8],
         malformed_report_json: &[u8],
+        eligibility_record_json: &[u8],
         expect_measured_commit: &str,
         expect_spec_hash: &str,
     ) -> Result<(), String> {
@@ -113,6 +122,16 @@ impl MeasurementInputAuthority {
         if to_hex(&report_addr) != self.malformed_corpus_report_address {
             return Err("independent: MIA report address != retained report".into());
         }
+        // eligibility/unsupported matrix: independently DECODE the retained record and RECOMPUTE its
+        // address with the crate's OWN SHA-256 (the two-cell model: 3 identities, 2 native-measurement
+        // cells, exact unsupported set). The authority must bind EXACTLY that address — a fabricated /
+        // edited eligibility record, or one whose model disagrees with the ratified matrix, is refused.
+        let elig =
+            crate::eligibility_matrix::EligibilityMatrix::from_json(eligibility_record_json)?;
+        let elig_addr = elig.verify(expect_spec_hash)?;
+        if to_hex(&elig_addr) != self.eligibility_matrix_address {
+            return Err("independent: MIA eligibility-matrix address != retained record".into());
+        }
         Ok(())
     }
 }
@@ -122,7 +141,7 @@ mod tests {
     use super::*;
 
     const MEASURED: &str = "507281e21e95a6a98e3480e25e12d1baab586e07";
-    const SPEC: &str = "201cfcb80e94a5a7845dc3380cde32171d40f325ae2bacde9547f3c0da3c4df3";
+    const SPEC: &str = "e933e7325c2639a48d8e25f20746d0f8abc822dee9fcfa87c2e6cdec226cf2a2";
     const MIA_JSON: &str = include_str!(
         "../../../docs/b0-pre/fixtures/measurement-input-authority/measurement-input-authority.v1.json"
     );
@@ -131,6 +150,10 @@ mod tests {
     );
     const INVENTORY: &str = include_str!(
         "../../../docs/b0-pre/fixtures/measurement-input-authority/harness-source-inventory.txt"
+    );
+    // The committed two-cell eligibility record whose independently recomputed address the draft MIA binds.
+    const ELIG_JSON: &str = include_str!(
+        "../../../docs/b0-pre/fixtures/measurement-input-authority/eligibility-matrix.v1.json"
     );
 
     fn mia() -> MeasurementInputAuthority {
@@ -143,15 +166,27 @@ mod tests {
     fn independent_authority_verifies_and_binds() {
         let m = mia();
         m.verify(MEASURED, SPEC).expect("shape/self-consistency");
-        m.verify_binds(INVENTORY.as_bytes(), REPORT_JSON.as_bytes(), MEASURED, SPEC)
-            .expect("binds retained bytes");
+        m.verify_binds(
+            INVENTORY.as_bytes(),
+            REPORT_JSON.as_bytes(),
+            ELIG_JSON.as_bytes(),
+            MEASURED,
+            SPEC,
+        )
+        .expect("binds retained bytes");
     }
 
     #[test]
     fn independent_swapped_bytes_refused() {
         let m = mia();
         assert!(m
-            .verify_binds(REPORT_JSON.as_bytes(), INVENTORY.as_bytes(), MEASURED, SPEC)
+            .verify_binds(
+                REPORT_JSON.as_bytes(),
+                INVENTORY.as_bytes(),
+                ELIG_JSON.as_bytes(),
+                MEASURED,
+                SPEC
+            )
             .is_err());
     }
 
@@ -163,9 +198,36 @@ mod tests {
         m.verify(MEASURED, SPEC)
             .expect("re-addressed MIA internally consistent");
         let e = m
-            .verify_binds(INVENTORY.as_bytes(), REPORT_JSON.as_bytes(), MEASURED, SPEC)
+            .verify_binds(
+                INVENTORY.as_bytes(),
+                REPORT_JSON.as_bytes(),
+                ELIG_JSON.as_bytes(),
+                MEASURED,
+                SPEC,
+            )
             .expect_err("bound report != retained report refused");
         assert!(e.contains("report address != retained report"), "{e}");
+    }
+
+    #[test]
+    fn independent_mutually_edited_eligibility_refused() {
+        // A self-consistently re-addressed MIA that binds a DIFFERENT eligibility address than the
+        // retained record hashes to: verify() passes but verify_binds() refuses.
+        let mut m = mia();
+        m.eligibility_matrix_address = "a".repeat(64);
+        m.address = m.recompute_address();
+        m.verify(MEASURED, SPEC)
+            .expect("re-addressed MIA internally consistent");
+        let e = m
+            .verify_binds(
+                INVENTORY.as_bytes(),
+                REPORT_JSON.as_bytes(),
+                ELIG_JSON.as_bytes(),
+                MEASURED,
+                SPEC,
+            )
+            .expect_err("bound eligibility != retained record refused");
+        assert!(e.contains("eligibility-matrix address"), "{e}");
     }
 
     #[test]

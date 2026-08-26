@@ -14,7 +14,7 @@ SCR="$(cd "$HERE/.." && pwd)"
 # shellcheck source=../lib.sh
 . "$SCR/lib.sh" >/dev/null 2>&1
 
-MERGED="201cfcb80e94a5a7845dc3380cde32171d40f325ae2bacde9547f3c0da3c4df3"
+MERGED="e933e7325c2639a48d8e25f20746d0f8abc822dee9fcfa87c2e6cdec226cf2a2"
 T="$(mktemp -d "${TMPDIR:-/tmp}/b0-lifecycle-XXXXXX")"; trap 'rm -rf "$T"' EXIT
 F=0; ok(){ printf 'ok    %s\n' "$1"; }; bad(){ printf 'FAIL  %s\n' "$1" >&2; F=1; }
 

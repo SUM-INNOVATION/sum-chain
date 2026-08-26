@@ -26,8 +26,8 @@ fn main() {
     // VEC6: the demo vector carries the three retained top-level authority blobs (measurement-input
     // authority JSON + malformed-corpus report + harness-source inventory manifest) alongside the
     // allowlist and the per-candidate bundles.
-    let (allowlist, mia, report, inventory, bundles) = deterministic_demo_vector();
-    let bytes = serialize_vector(&allowlist, &mia, &report, &inventory, &bundles);
+    let (allowlist, mia, report, inventory, elig, bundles) = deterministic_demo_vector();
+    let bytes = serialize_vector(&allowlist, &mia, &report, &inventory, &elig, &bundles);
     let fp = hx(&hashing::plain(&bytes));
 
     let dir =

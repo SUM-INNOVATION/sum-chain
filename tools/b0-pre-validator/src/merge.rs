@@ -61,13 +61,6 @@ fn fragment_commits(f: &Value) -> Result<Vec<String>, String> {
         .collect())
 }
 
-fn agree(a: &Value, b: &Value, ptr: &str) -> Result<(), String> {
-    if a.pointer(ptr) != b.pointer(ptr) {
-        return Err(format!("SP1 x86_64/aarch64 fragments disagree on {ptr}"));
-    }
-    Ok(())
-}
-
 /// A measurement-wide field EVERY fragment must carry byte-identically (the retained authority / report
 /// / inventory). Refuses absence, an empty value, or ANY disagreement across the fragment set — so a
 /// valid old authority package can never be mixed with fragments produced under a different one.
@@ -111,6 +104,16 @@ pub fn merge_fragments(spec_hex: &str, fragments: &[Value]) -> Result<Value, Str
         if cand == "Risc0" && arch == "aarch64" {
             return Err("a RISC-Zero-aarch64 fragment is native-ineligible; rejected".into());
         }
+        // Two-cell model: an SP1/aarch64 MEASUREMENT fragment is a fabricated ARM terminal Groth16
+        // proof — SP1/aarch64 is ratified-unsupported (no first-party arm64 gnark backend). Its
+        // identity travels in the guest set, never as a measurement fragment. Refuse it explicitly.
+        if cand == "Sp1" && arch == "aarch64" {
+            return Err(
+                "an SP1/aarch64 measurement fragment is ratified-unsupported \
+                (terminal Groth16 has no arm64 gnark backend); never a measurement — rejected"
+                    .into(),
+            );
+        }
         if by_key.insert((cand.clone(), arch.clone()), f).is_some() {
             return Err(format!("duplicate fragment for {cand}/{arch}"));
         }
@@ -133,11 +136,13 @@ pub fn merge_fragments(spec_hex: &str, fragments: &[Value]) -> Result<Value, Str
             .verify(cand_lc)
             .map_err(|e| format!("fragment {cand}/{arch} dependency-seed authenticity: {e}"))?;
     }
-    // Exactly the eligible set.
-    let want = [("Sp1", "x86_64"), ("Sp1", "aarch64"), ("Risc0", "x86_64")];
+    // Exactly the two natively terminal-measurable cells (two-cell model). SP1/aarch64 terminal Groth16
+    // and RISC0/aarch64 are ratified unsupported (see EligibilityMatrixV1) — never a measurement fragment.
+    // The SP1/aarch64 *identity* still travels in the Phase-1 guest set; it is NOT a measurement.
+    let want = [("Sp1", "x86_64"), ("Risc0", "x86_64")];
     if by_key.len() != want.len() {
         return Err(format!(
-            "expected exactly {} fragments (Sp1 x86_64/aarch64, Risc0 x86_64), got {}",
+            "expected exactly {} measurement fragments (Sp1 x86_64, Risc0 x86_64), got {}",
             want.len(),
             by_key.len()
         ));
@@ -148,8 +153,12 @@ pub fn merge_fragments(spec_hex: &str, fragments: &[Value]) -> Result<Value, Str
             .copied()
             .ok_or_else(|| format!("missing eligible fragment {c}/{a}"))
     };
-    let sp1x = get("Sp1", "x86_64")?;
-    let sp1a = get("Sp1", "aarch64")?;
+    // Two-cell model: SP1 is measured natively on x86_64 ONLY, and RISC0 on x86_64 ONLY. SP1/aarch64
+    // terminal Groth16 is ratified unsupported (no first-party arm64 gnark backend) — there is NO
+    // SP1/aarch64 measurement fragment to reconcile; its Phase-1 *identity* travels in the shared guest
+    // set (records/all.json), never as a measurement. So the merged SP1 candidate is the x86 fragment
+    // as-is (its own x86 cells/provenance/builder/identity record).
+    let sp1 = get("Sp1", "x86_64")?.clone();
     let risc0 = get("Risc0", "x86_64")?;
 
     // EXACT source authority: every fragment must be from the ratified commit — not merely a
@@ -163,65 +172,14 @@ pub fn merge_fragments(spec_hex: &str, fragments: &[Value]) -> Result<Value, Str
         }
     }
 
-    // SP1 x86/aarch64 must agree on the genuinely ARCH-NEUTRAL fields only. `container_image_digest`
-    // is per-arch (each native builder image) and is preserved per-arch in the builder + provenance
-    // records — it is NOT compared here (comparing it would repeat the cross-arch reconciliation bug).
-    for ptr in [
-        "/candidate",
-        "/statement_hash_tlg",
-        "/statement_hash_st",
-        "/guest/program_id",
-        "/guest/guest_image_hash",
-        "/guest/guest_source_tree_hash",
-        "/guest/candidate_dep_lock_hash",
-        "/guest/build_command_hash",
-        "/verifier_material",
-        // The cargo dependency seed is per-CANDIDATE (arch-independent): the two SP1 fragments MUST carry
-        // byte-identical dependency_seed_json (candidate correspondence + byte identity through merge).
-        "/dependency_seed_json",
-    ] {
-        agree(sp1x, sp1a, ptr)?;
-    }
-
-    // Merge SP1: concat cells + provenance + builder records (x86 then aarch64).
-    let mut sp1 = sp1x.clone();
-    let concat = |field: &str| -> Result<Value, String> {
-        let mut v = sp1x
-            .get(field)
-            .and_then(|x| x.as_array())
-            .cloned()
-            .ok_or_else(|| format!("sp1 x86 fragment missing {field}"))?;
-        v.extend(
-            sp1a.get(field)
-                .and_then(|x| x.as_array())
-                .cloned()
-                .ok_or_else(|| format!("sp1 aarch64 fragment missing {field}"))?,
-        );
-        Ok(Value::Array(v))
-    };
-    sp1["cells"] = concat("cells")?;
-    sp1["provenance"] = concat("provenance")?;
-    // Runner continuity survives the merge: concat the per-arch Phase-1 identity records (x86 + arm).
-    sp1["identity_records"] = concat("identity_records")?;
-    let mut builders = sp1x
-        .pointer("/guest/builder")
-        .and_then(|x| x.as_array())
-        .cloned()
-        .ok_or("sp1 x86 guest.builder missing")?;
-    builders.extend(
-        sp1a.pointer("/guest/builder")
-            .and_then(|x| x.as_array())
-            .cloned()
-            .ok_or("sp1 aarch64 guest.builder missing")?,
-    );
-    sp1["guest"]["builder"] = Value::Array(builders);
-
     // Every fragment MUST carry byte-identical measurement-input authority + malformed-corpus report +
-    // harness-source inventory; disagreement is refused. The single agreed set flows to the merged
-    // RawFacts (top-level), where `produce` decodes + verifies it and derives the report/MIA addresses.
+    // harness-source inventory + eligibility/unsupported matrix; disagreement is refused. The single
+    // agreed set flows to the merged RawFacts (top-level), where `produce` decodes + verifies it and
+    // derives the report/MIA addresses and cross-checks the two-cell eligibility model.
     let mia = fragment_field_agree(fragments, "measurement_input_authority")?.clone();
     let report = fragment_field_agree(fragments, "malformed_corpus_report")?.clone();
     let inv = fragment_field_agree(fragments, "harness_source_inventory")?.clone();
+    let eligibility = fragment_field_agree(fragments, "eligibility_matrix")?.clone();
 
     let raw = json!({
         "lifecycle_mode": "measurement",
@@ -230,6 +188,7 @@ pub fn merge_fragments(spec_hex: &str, fragments: &[Value]) -> Result<Value, Str
         "measurement_input_authority": mia,
         "malformed_corpus_report": report,
         "harness_source_inventory": inv,
+        "eligibility_matrix": eligibility,
     });
 
     // Fail-closed: the merged RawFacts must pass the full structural validation.
@@ -361,7 +320,17 @@ mod tests {
         } else {
             (h("22"), h("bb"), h("ee"))
         };
-        let builder = if arch == "x86_64" { h("b0") } else { h("b1") };
+        // Two-cell model: the SP1 GUEST identity spans BOTH arches (its arch-independent program_id
+        // reconciles across x86_64 + aarch64 builders — the retained 3-identity guest set), even
+        // though SP1 is terminal-measured on x86_64 only. RISC0 is x86_64-only throughout.
+        let builders = if cand == "Sp1" {
+            json!([
+                {"arch": "x86_64", "builder_container_digest": h("b0")},
+                {"arch": "aarch64", "builder_container_digest": h("b1")}
+            ])
+        } else {
+            json!([{"arch": "x86_64", "builder_container_digest": h("b0")}])
+        };
         json!({
             "candidate": cand, "container_image_digest": h("f0"),
             "statement_hash_tlg": h("f1"), "statement_hash_st": h("f2"),
@@ -369,7 +338,7 @@ mod tests {
                 "guest_source_tree_hash": h("a2"), "candidate_dep_lock_hash": h("a3"),
                 "guest_image_hash": img, "program_id": prog, "build_command_hash": h("a4"),
                 "reproducible": true,
-                "builder": [{"arch": arch, "builder_container_digest": builder}]
+                "builder": builders
             },
             "verifier_material": [{"role": "Groth16Vk", "byte_len": 292u64, "hash": vk}],
             "provenance": [prov(cand, arch, "Proving"), prov(cand, arch, "Verification")],
@@ -403,25 +372,25 @@ mod tests {
             "harness_source_inventory": include_str!(
                 "../../../docs/b0-pre/fixtures/measurement-input-authority/harness-source-inventory.txt"
             ),
+            // The retained two-cell eligibility matrix (byte-identical across fragments), built through
+            // the sole canonical constructor and bound by address into the measurement-input authority.
+            "eligibility_matrix":
+                crate::venue::eligibility_matrix::EligibilityMatrixV1::canonical(SPEC).to_json(),
         })
     }
-    const SPEC: &str = "201cfcb80e94a5a7845dc3380cde32171d40f325ae2bacde9547f3c0da3c4df3";
+    const SPEC: &str = "e933e7325c2639a48d8e25f20746d0f8abc822dee9fcfa87c2e6cdec226cf2a2";
 
     #[test]
     fn eligible_fragments_merge_and_validate() {
-        let raw = merge_fragments(
-            SPEC,
-            &[
-                frag("Sp1", "x86_64"),
-                frag("Sp1", "aarch64"),
-                frag("Risc0", "x86_64"),
-            ],
-        )
-        .unwrap();
+        // Two-cell model: EXACTLY two measurement fragments (Sp1/x86_64, Risc0/x86_64).
+        let raw = merge_fragments(SPEC, &[frag("Sp1", "x86_64"), frag("Risc0", "x86_64")]).unwrap();
         let cands = raw["candidates"].as_array().unwrap();
+        assert_eq!(cands.len(), 2);
         let sp1 = &cands[0];
-        assert_eq!(sp1["cells"].as_array().unwrap().len(), 40); // x86 20 + arm 20
-        assert_eq!(sp1["provenance"].as_array().unwrap().len(), 4);
+        // x86_64-only measurement: 20 cells, 2 provenance snapshots (proving + verification).
+        assert_eq!(sp1["cells"].as_array().unwrap().len(), 20);
+        assert_eq!(sp1["provenance"].as_array().unwrap().len(), 2);
+        // The SP1 GUEST identity still spans both arches (retained 3-identity guest set).
         assert_eq!(
             sp1.pointer("/guest/builder")
                 .unwrap()
@@ -430,6 +399,10 @@ mod tests {
                 .len(),
             2
         );
+        // Every measured cell is x86_64 — never an aarch64 (ARM) measurement.
+        for cell in sp1["cells"].as_array().unwrap() {
+            assert_eq!(cell["arch"], "x86_64");
+        }
     }
 
     // DIRECT merge → produce → verify: the retained cpuset + runner artifacts AND Phase-1 runner
@@ -440,20 +413,13 @@ mod tests {
         use crate::producer::{produce, RawFacts};
         use crate::schema::runner_attestation::RunnerAttestationV1;
 
-        let merged = merge_fragments(
-            SPEC,
-            &[
-                frag("Sp1", "x86_64"),
-                frag("Sp1", "aarch64"),
-                frag("Risc0", "x86_64"),
-            ],
-        )
-        .unwrap();
+        let merged =
+            merge_fragments(SPEC, &[frag("Sp1", "x86_64"), frag("Risc0", "x86_64")]).unwrap();
         let raw: RawFacts = serde_json::from_value(merged).expect("merged -> RawFacts");
         // produce() enforces runner continuity + artifact retention during assembly (the merge fixture
         // uses a non-reference verify cpuset, so the qualification verdict itself is not the point).
         let pkg = produce(&raw).expect("merged facts produce");
-        let (_al, _mia, _report, _inv, bundles) = parse_vector(&pkg.vector).unwrap();
+        let (_al, _mia, _report, _inv, _elig, bundles) = parse_vector(&pkg.vector).unwrap();
         for (_c, ev) in &bundles {
             assert_eq!(ev.cpuset_chains.len(), ev.provenances.len());
             assert_eq!(ev.runner_attestations.len(), ev.provenances.len());
@@ -475,11 +441,7 @@ mod tests {
         // refuses (tooling authority unchanged).
         let mut bad = frag("Sp1", "x86_64");
         bad["identity_records"][0]["production_binary_blake3"] = json!(h("99"));
-        let merged2 = merge_fragments(
-            SPEC,
-            &[bad, frag("Sp1", "aarch64"), frag("Risc0", "x86_64")],
-        )
-        .unwrap();
+        let merged2 = merge_fragments(SPEC, &[bad, frag("Risc0", "x86_64")]).unwrap();
         let raw2: RawFacts = serde_json::from_value(merged2).unwrap();
         assert!(produce(&raw2)
             .unwrap_err()
@@ -488,8 +450,9 @@ mod tests {
 
     #[test]
     fn missing_extra_and_duplicate_are_refused() {
-        // missing SP1 aarch64
-        assert!(merge_fragments(SPEC, &[frag("Sp1", "x86_64"), frag("Risc0", "x86_64")]).is_err());
+        // Two-cell model: EXACTLY {Sp1/x86_64, Risc0/x86_64}.
+        // missing a measurement fragment (only SP1/x86_64 present)
+        assert!(merge_fragments(SPEC, &[frag("Sp1", "x86_64")]).is_err());
         // duplicate SP1 x86
         assert!(merge_fragments(
             SPEC,
@@ -501,12 +464,21 @@ mod tests {
         )
         .unwrap_err()
         .contains("duplicate"));
-        // extra RISC0 aarch64
+        // extra SP1 aarch64 measurement fragment (ratified-unsupported — never a measurement)
         assert!(merge_fragments(
             SPEC,
             &[
                 frag("Sp1", "x86_64"),
                 frag("Sp1", "aarch64"),
+                frag("Risc0", "x86_64"),
+            ]
+        )
+        .is_err());
+        // extra RISC0 aarch64 (native-ineligible)
+        assert!(merge_fragments(
+            SPEC,
+            &[
+                frag("Sp1", "x86_64"),
                 frag("Risc0", "x86_64"),
                 frag("Risc0", "aarch64")
             ]
@@ -515,21 +487,27 @@ mod tests {
     }
 
     #[test]
-    fn sp1_cross_arch_identity_skew_is_refused() {
-        let mut arm = frag("Sp1", "aarch64");
-        arm["guest"]["program_id"] = json!(h("99")); // != x86 program id
+    fn sp1_aarch64_measurement_fragment_is_refused_as_unsupported() {
+        // Two-cell model: there is NO SP1/aarch64 measurement fragment to reconcile — a fabricated
+        // one (an ARM terminal Groth16 proof) is refused with the ratified-unsupported reason before
+        // any merge/skew logic. The SP1/aarch64 identity lives only in the guest set.
+        let arm = frag("Sp1", "aarch64");
         let e = merge_fragments(SPEC, &[frag("Sp1", "x86_64"), arm, frag("Risc0", "x86_64")])
             .unwrap_err();
-        assert!(e.contains("disagree on /guest/program_id"), "{e}");
+        assert!(
+            e.contains("SP1/aarch64 measurement fragment is ratified-unsupported"),
+            "{e}"
+        );
     }
 
     #[test]
-    fn dependency_seed_missing_mutated_swapped_and_skew_refused() {
-        use crate::venue::dependency_seed::DependencySeedV1;
+    fn dependency_seed_missing_mutated_and_swapped_refused() {
+        // Two-cell model: two measurement fragments (Sp1/x86_64, Risc0/x86_64). There is no second
+        // SP1 fragment, so the former cross-arch byte-identity skew case no longer applies.
         // MISSING/empty dependency_seed_json in a fragment -> refused.
         let mut nf = frag("Sp1", "x86_64");
         nf.as_object_mut().unwrap().remove("dependency_seed_json");
-        let e = merge_fragments(SPEC, &[nf, frag("Sp1", "aarch64"), frag("Risc0", "x86_64")])
+        let e = merge_fragments(SPEC, &[nf, frag("Risc0", "x86_64")])
             .unwrap_err()
             .to_lowercase();
         assert!(e.contains("dependency_seed_json"), "{e}");
@@ -542,7 +520,7 @@ mod tests {
             dep["graphs"][0]["lock_sha256"] = json!("0".repeat(64));
             mf["dependency_seed_json"] = json!(serde_json::to_string(&dep).unwrap());
         }
-        let e = merge_fragments(SPEC, &[mf, frag("Sp1", "aarch64"), frag("Risc0", "x86_64")])
+        let e = merge_fragments(SPEC, &[mf, frag("Risc0", "x86_64")])
             .unwrap_err()
             .to_lowercase();
         assert!(
@@ -553,52 +531,47 @@ mod tests {
         // SWAPPED/cross-candidate: RISC0's seed on an SP1 fragment -> verify(candidate) refuses.
         let mut sf = frag("Sp1", "x86_64");
         sf["dependency_seed_json"] = frag("Risc0", "x86_64")["dependency_seed_json"].clone();
-        assert!(
-            merge_fragments(SPEC, &[sf, frag("Sp1", "aarch64"), frag("Risc0", "x86_64")]).is_err()
-        );
-
-        // BYTE-IDENTITY skew: the two SP1 fragments carry DIFFERENT (but individually valid) sp1 seeds.
-        let (other_sp1_json, _addr, _c) = DependencySeedV1::synthetic_json("sp1", [7u8; 32]);
-        let mut arm = frag("Sp1", "aarch64");
-        arm["dependency_seed_json"] = json!(String::from_utf8(other_sp1_json).unwrap());
-        let e = merge_fragments(SPEC, &[frag("Sp1", "x86_64"), arm, frag("Risc0", "x86_64")])
-            .unwrap_err();
-        assert!(e.contains("disagree on /dependency_seed_json"), "{e}");
+        assert!(merge_fragments(SPEC, &[sf, frag("Risc0", "x86_64")]).is_err());
     }
 
     #[test]
     fn non_ratified_commit_is_refused() {
-        // All fragments consistently bound to a DIFFERENT clean commit — still refused.
-        let (mut x, mut a, mut r) = (
-            frag("Sp1", "x86_64"),
-            frag("Sp1", "aarch64"),
-            frag("Risc0", "x86_64"),
-        );
-        for f in [&mut x, &mut a, &mut r] {
+        // Both measurement fragments consistently bound to a DIFFERENT clean commit — still refused.
+        let (mut x, mut r) = (frag("Sp1", "x86_64"), frag("Risc0", "x86_64"));
+        for f in [&mut x, &mut r] {
             for p in f["provenance"].as_array_mut().unwrap() {
                 p["source_commit"] = json!("c".repeat(40));
             }
         }
-        assert!(merge_fragments(SPEC, &[x, a, r])
+        assert!(merge_fragments(SPEC, &[x, r])
             .unwrap_err()
             .contains("ratified"));
     }
 
     #[test]
-    fn differing_sp1_container_identities_accepted_but_guest_substitution_refused() {
-        // Legitimate per-arch native builder images differ — MUST be accepted.
-        let mut x = frag("Sp1", "x86_64");
-        let mut a = frag("Sp1", "aarch64");
-        x["container_image_digest"] = json!(h("c0"));
-        a["container_image_digest"] = json!(h("c1"));
-        assert!(merge_fragments(SPEC, &[x, a, frag("Risc0", "x86_64")]).is_ok());
-        // But substituting the guest identity across arches is refused.
-        let mut a2 = frag("Sp1", "aarch64");
-        a2["guest"]["program_id"] = json!(h("99"));
-        assert!(
-            merge_fragments(SPEC, &[frag("Sp1", "x86_64"), a2, frag("Risc0", "x86_64")])
-                .unwrap_err()
-                .contains("program_id")
+    fn sp1_guest_carries_both_builder_identities() {
+        // Two-cell model: the single SP1/x86_64 measurement fragment carries the FULL SP1 guest
+        // identity — both x86_64 and aarch64 builder digests — so the merged candidate reproduces
+        // the ratified 3-identity guest set even though only x86_64 is terminal-measured.
+        let raw = merge_fragments(SPEC, &[frag("Sp1", "x86_64"), frag("Risc0", "x86_64")]).unwrap();
+        let sp1 = &raw["candidates"].as_array().unwrap()[0];
+        let builders = sp1.pointer("/guest/builder").unwrap().as_array().unwrap();
+        assert_eq!(builders.len(), 2);
+        let arches: std::collections::BTreeSet<&str> = builders
+            .iter()
+            .map(|b| b["arch"].as_str().unwrap())
+            .collect();
+        assert!(arches.contains("x86_64") && arches.contains("aarch64"));
+        // RISC0 guest identity is x86_64-only (RISC0/aarch64 is not even an identity).
+        let risc0 = &raw["candidates"].as_array().unwrap()[1];
+        assert_eq!(
+            risc0
+                .pointer("/guest/builder")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
         );
     }
 }

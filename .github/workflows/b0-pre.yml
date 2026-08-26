@@ -418,6 +418,11 @@ jobs:
           cargo run --locked --manifest-path "$VAL/Cargo.toml" --example emit_protocol_hash_golden
           cargo run --locked --manifest-path "$VAL/Cargo.toml" --example emit_stage1_bundle_schema
           git diff --exit-code -- docs/b0-pre/protocol
+          # Two-cell measurement-input authority triple (eligibility + report + MIA) is byte-reproducible
+          # (re-spec + re-address through the reference crate's own preimages).
+          cargo run --locked --manifest-path "$VAL/Cargo.toml" --example emit_measurement_input_authority
+          cargo run --locked --manifest-path "$VAL/Cargo.toml" --example emit_measurement_vector
+          git diff --exit-code -- docs/b0-pre/fixtures/measurement-input-authority docs/b0-pre/fixtures/measurement-vector
 
       - name: Fixture identities
         run: bash "$VAL/scripts/verify_fixtures.sh"
@@ -432,7 +437,7 @@ jobs:
             && { echo "finalized artifact must not carry state not_finalizable"; exit 1; } || true
           test -f docs/b0-pre/protocol/b0-pre-protocol-v1.json.hash \
             || { echo "the real b0_pre_spec_hash sidecar must be committed"; exit 1; }
-          grep -qx '201cfcb80e94a5a7845dc3380cde32171d40f325ae2bacde9547f3c0da3c4df3' \
+          grep -qx 'e933e7325c2639a48d8e25f20746d0f8abc822dee9fcfa87c2e6cdec226cf2a2' \
             docs/b0-pre/protocol/b0-pre-protocol-v1.json.hash \
             || { echo "committed b0_pre_spec_hash sidecar mismatch"; exit 1; }
 

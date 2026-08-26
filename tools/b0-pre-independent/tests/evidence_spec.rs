@@ -21,10 +21,10 @@ fn independent_evidence_matches_reference_spec() {
     let e = &j["expected"];
 
     let ev = harness::generate();
-    // sanity on the generated grid
-    assert_eq!(ev.envelopes.len(), 40);
-    assert_eq!(ev.samples.len(), 4120); // 4000 verify + 40 prove + 40 proof_bytes + 40 setup
-    assert_eq!(ev.rss.len(), 80);
+    // sanity on the generated grid (reviewed two-cell model: x86_64-only, 20 measured proofs)
+    assert_eq!(ev.envelopes.len(), 20);
+    assert_eq!(ev.samples.len(), 2060); // 2000 verify + 20 prove + 20 proof_bytes + 20 setup
+    assert_eq!(ev.rss.len(), 40);
 
     let r = harness::verify_evidence(&ev).expect("valid");
     assert_eq!(

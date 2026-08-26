@@ -15,6 +15,7 @@
 pub mod canonical_sp1_guest;
 pub mod closure;
 pub mod dependency_seed;
+pub mod eligibility_matrix;
 pub mod enc;
 pub mod exp;
 pub mod fixed;
@@ -22,6 +23,7 @@ pub mod harness;
 pub mod malformed_corpus_report;
 pub mod measurement_input_authority;
 pub mod merkle;
+pub mod protocol_hash;
 pub mod rd;
 pub mod tags;
 pub mod transformer;

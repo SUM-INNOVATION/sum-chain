@@ -322,8 +322,9 @@ pub fn synth_runner_recipe_artifacts(
 /// The allowlist canonical bytes plus one per-candidate evidence bundle each — the
 /// content of a committed measurement vector.
 /// `(allowlist, measurement_input_authority_json, malformed_corpus_report_json,
-/// harness_source_inventory_manifest, bundles)` — the VEC6 layout.
+/// harness_source_inventory_manifest, eligibility_matrix_json, bundles)` — the VEC8 layout.
 pub type MeasurementVector = (
+    Vec<u8>,
     Vec<u8>,
     Vec<u8>,
     Vec<u8>,
@@ -331,11 +332,21 @@ pub type MeasurementVector = (
     Vec<(Candidate, Evidence)>,
 );
 
-/// Whether `candidate` can produce a NATIVE terminal proof on `arch`. RISC Zero's
-/// Groth16 receipt path is x86_64-only (VENUE §2); on aarch64 it is native-ineligible
-/// — never emulated, never synthesized. SP1 is native on both arches.
+/// Whether `candidate` can produce a NATIVE terminal proof on `arch` — native terminal-MEASUREMENT
+/// eligibility under the reviewed two-cell model. Only x86_64 is terminal-measurable:
+///
+/// * RISC0/aarch64 — the RISC Zero Groth16 receipt path is x86_64-only (VENUE section 2).
+/// * SP1/aarch64 terminal Groth16 — no first-party linux/arm64 gnark backend exists (`sp1-gnark` is
+///   amd64-only; the stark2snark wrap `docker run`s that image), so it cannot run natively on aarch64.
+///
+/// Both are ratified fail-closed — see [`crate::venue::eligibility_matrix::EligibilityMatrixV1`], whose
+/// `native_measurement_eligible` MUST agree with this function (checked in its `verify`). The SP1/aarch64
+/// *identity* stays Phase-1 eligible (the guest set), but is NEVER a measurement. Never emulated/synthesized.
 pub fn native_eligible(candidate: Candidate, arch: Arch) -> bool {
-    !matches!((candidate, arch), (Candidate::Risc0, Arch::Aarch64))
+    matches!(
+        (candidate, arch),
+        (Candidate::Sp1, Arch::X86_64) | (Candidate::Risc0, Arch::X86_64)
+    )
 }
 
 /// The arches on which `candidate` must produce native measurements, derived
@@ -846,6 +857,7 @@ pub fn serialize_vector(
     measurement_input_authority: &[u8],
     malformed_corpus_report: &[u8],
     harness_source_inventory: &[u8],
+    eligibility_matrix: &[u8],
     bundles: &[(Candidate, Evidence)],
 ) -> Vec<u8> {
     fn put(out: &mut Vec<u8>, b: &[u8]) {
@@ -862,11 +874,16 @@ pub fn serialize_vector(
     // benchmark-harness source inventory manifest — so both verifiers re-decode the report + inventory
     // and recompute the two addresses the authority binds (never a duplicated caller hash).
     // (VEC5 added the retained-artifact lists; VEC4 the runner path-independence artifacts.)
-    out.extend_from_slice(b"B0PREMEASVEC7");
+    // VEC8 adds a FIFTH top-level retained blob after the harness inventory — the EligibilityMatrixV1
+    // JSON (the reviewed two-cell model: 3 identities, 2 native-measurement cells, exact unsupported
+    // set) — bound by address into the MeasurementInputAuthorityV1, so both verifiers re-decode +
+    // recompute it and confirm the authority binds exactly it.
+    out.extend_from_slice(b"B0PREMEASVEC8");
     put(&mut out, allowlist_canonical);
     put(&mut out, measurement_input_authority);
     put(&mut out, malformed_corpus_report);
     put(&mut out, harness_source_inventory);
+    put(&mut out, eligibility_matrix);
     out.extend_from_slice(&(bundles.len() as u32).to_be_bytes());
     for (c, ev) in bundles {
         out.extend_from_slice(&c.to_repr().to_be_bytes());
@@ -913,13 +930,14 @@ pub fn parse_vector(bytes: &[u8]) -> Result<MeasurementVector, String> {
         let n = u32_at(p)?;
         Ok(take(p, n)?.to_vec())
     };
-    if take(&mut p, 13)? != b"B0PREMEASVEC7" {
+    if take(&mut p, 13)? != b"B0PREMEASVEC8" {
         return Err("bad magic".into());
     }
     let allowlist = blob(&mut p)?;
     let measurement_input_authority = blob(&mut p)?;
     let malformed_corpus_report = blob(&mut p)?;
     let harness_source_inventory = blob(&mut p)?;
+    let eligibility_matrix = blob(&mut p)?;
     let n_bundles = u32_at(&mut p)?;
     let mut bundles = Vec::new();
     for _ in 0..n_bundles {
@@ -968,14 +986,18 @@ pub fn parse_vector(bytes: &[u8]) -> Result<MeasurementVector, String> {
         measurement_input_authority,
         malformed_corpus_report,
         harness_source_inventory,
+        eligibility_matrix,
         bundles,
     ))
 }
 
 /// Build the ONE canonical committed measurement vector deterministically through
-/// the real orchestrator: SP1's complete native matrix (both arches → qualifies) and
-/// RISC Zero's genuine x86_64-only matrix (aarch64 absent → the frozen verifier
-/// derives `MeasuredProofGrid`). Bound to the merged `b0_pre_spec_hash`. Returns the
+/// the real orchestrator. Reviewed two-cell model: BOTH candidates carry their
+/// complete x86_64-only native matrix (SP1/x86_64 and RISC0/x86_64 — the two
+/// native-measurement-eligible cells). aarch64 terminal measurement is
+/// ratified-unsupported for both, so no aarch64 cell/provenance is present; a
+/// fabricated aarch64 cell would be refused by the orchestrator as
+/// native-ineligible. Bound to the merged `b0_pre_spec_hash`. Returns the
 /// allowlist canonical bytes and the two bundles. No hand-authored result sets.
 pub fn deterministic_demo_vector() -> MeasurementVector {
     use crate::enums::VerifierMaterialRole::{ControlId, ControlRoot, Groth16Vk, VerifierParams};
@@ -995,7 +1017,7 @@ pub fn deterministic_demo_vector() -> MeasurementVector {
         a
     }
     // Merged, ratified b0_pre_spec_hash.
-    let spec = hex32("201cfcb80e94a5a7845dc3380cde32171d40f325ae2bacde9547f3c0da3c4df3");
+    let spec = hex32("e933e7325c2639a48d8e25f20746d0f8abc822dee9fcfa87c2e6cdec226cf2a2");
 
     let sp1_material = VerifierMaterialManifestV1::from_canonical(
         Candidate::Sp1,
@@ -1148,11 +1170,11 @@ pub fn deterministic_demo_vector() -> MeasurementVector {
             .4,
         }
     };
+    // Two-cell model: x86_64-only provenance (no aarch64 snapshot may exist).
+    let x86 = Arch::X86_64;
     let mut all_prov = Vec::new();
-    for a in [Arch::X86_64, Arch::Aarch64] {
-        for r in [ProvenanceRole::Proving, ProvenanceRole::Verification] {
-            all_prov.push(prov(a, r));
-        }
+    for r in [ProvenanceRole::Proving, ProvenanceRole::Verification] {
+        all_prov.push(prov(x86, r));
     }
 
     let cell = |cand: &str, arch: Arch, s: StatementIndex, iter: u32| -> CellFacts {
@@ -1211,7 +1233,7 @@ pub fn deterministic_demo_vector() -> MeasurementVector {
         guest_set,
         &sp1_ids,
         &all_prov,
-        &grid("sp1", &[Arch::X86_64, Arch::Aarch64]),
+        &grid("sp1", &[Arch::X86_64]),
         [7u8; 32],
     )
     .expect("sp1 assembles");
@@ -1229,6 +1251,10 @@ pub fn deterministic_demo_vector() -> MeasurementVector {
         allowlist.encode(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
+        // VEC8 eligibility blob: this minimal serialize/parse demo carries empty top-level authority
+        // blobs (MIA/report/inventory/eligibility) — it exercises the bundle path, not the authority
+        // path (the full producer-selftest vector carries the real eligibility record + MIA binding).
         Vec::new(),
         vec![(Candidate::Sp1, sp1_ev), (Candidate::Risc0, risc0_ev)],
     )
@@ -1368,12 +1394,12 @@ mod tests {
         }
     }
 
+    // Two-cell model: the complete provenance set is x86_64 only (proving +
+    // verification). No aarch64 snapshot — aarch64 is never measured.
     fn all_provenance() -> Vec<ProvenanceFacts> {
         let mut v = Vec::new();
-        for a in [Arch::X86_64, Arch::Aarch64] {
-            for r in [ProvenanceRole::Proving, ProvenanceRole::Verification] {
-                v.push(prov_facts(a, r));
-            }
+        for r in [ProvenanceRole::Proving, ProvenanceRole::Verification] {
+            v.push(prov_facts(Arch::X86_64, r));
         }
         v
     }
@@ -1445,7 +1471,7 @@ mod tests {
             gs,
             &ids(),
             &all_provenance(),
-            &grid(&[Arch::X86_64, Arch::Aarch64]),
+            &grid(&[Arch::X86_64]),
             [7u8; 32],
         )
         .expect("assembles");
@@ -1456,17 +1482,20 @@ mod tests {
         let rs = R0ResultSetV1::decode_exact(&ev.result_set).unwrap();
         assert_eq!(rs.b0_pre_spec_hash, SPEC);
         assert_eq!(rs.r0_guest_set_hash, gs);
-        assert_eq!(rs.completeness.measured_proof_count, 40);
+        // Two-cell model: x86_64-only grid → 20 measured proofs (was 40).
+        assert_eq!(rs.completeness.measured_proof_count, 20);
     }
 
     #[test]
-    fn risc0_native_matrix_is_x86_only() {
-        assert_eq!(
-            native_matrix(Candidate::Sp1),
-            vec![Arch::X86_64, Arch::Aarch64]
-        );
+    fn native_matrix_is_x86_only_for_both_candidates() {
+        // Reviewed two-cell model: aarch64 terminal measurement is ratified-unsupported
+        // for BOTH candidates. SP1/aarch64 is identity-only, never measured.
+        assert_eq!(native_matrix(Candidate::Sp1), vec![Arch::X86_64]);
         assert_eq!(native_matrix(Candidate::Risc0), vec![Arch::X86_64]);
+        assert!(!native_eligible(Candidate::Sp1, Arch::Aarch64));
         assert!(!native_eligible(Candidate::Risc0, Arch::Aarch64));
+        assert!(native_eligible(Candidate::Sp1, Arch::X86_64));
+        assert!(native_eligible(Candidate::Risc0, Arch::X86_64));
     }
 
     #[test]
@@ -1504,7 +1533,25 @@ mod tests {
     }
 
     #[test]
-    fn risc0_x86_only_grid_is_a_genuine_incomplete_matrix_rejected_as_grid() {
+    fn sp1_aarch64_cell_is_refused_never_synthesized() {
+        // Two-cell model: SP1/aarch64 terminal Groth16 is ratified-unsupported. A
+        // fabricated aarch64 SP1 cell must be refused before any measurement is
+        // synthesized — never treated as an ARM measurement.
+        let cells = vec![cell(Arch::Aarch64, StatementIndex::Tlg, 0)];
+        assert!(orchestrate_grid_synthetic(
+            SPEC,
+            h(b"gs"),
+            &ids(), // ids() is the SP1 candidate
+            &all_provenance(),
+            &cells,
+            [7u8; 32]
+        )
+        .unwrap_err()
+        .contains("native-ineligible"));
+    }
+
+    #[test]
+    fn risc0_x86_only_grid_is_complete_and_verifies_under_two_cell() {
         let mut r0 = ids();
         r0.candidate = Candidate::Risc0;
         r0.verifier_material = VerifierMaterialManifestV1::from_canonical(
@@ -1524,8 +1571,9 @@ mod tests {
                 ),
             ],
         );
-        // Only x86 cells exist — the native matrix is genuinely incomplete. Assembly
-        // succeeds (nothing fabricated); the FROZEN verifier derives the failure.
+        // Reviewed two-cell model: x86_64 IS RISC0's complete native matrix. The
+        // x86-only grid is therefore complete (20 proofs) and the frozen verifier
+        // ACCEPTS it — this is one of the two eligible measurement cells.
         let ev = orchestrate_grid_synthetic(
             SPEC,
             h(b"gs"),
@@ -1534,17 +1582,16 @@ mod tests {
             &grid(&[Arch::X86_64]),
             [7u8; 32],
         )
-        .expect("assembles the genuine partial matrix");
-        let err = verify_evidence(&ev).expect_err("incomplete grid must be rejected");
-        assert!(
-            err.contains("completeness") || err.contains("MeasuredProofGrid"),
-            "got: {err}"
-        );
+        .expect("assembles the complete x86-only matrix");
+        let r = verify_evidence(&ev).expect("x86-only RISC0 is a complete two-cell measurement");
+        let rs = R0ResultSetV1::decode_exact(&ev.result_set).unwrap();
+        assert_eq!(rs.completeness.measured_proof_count, 20);
+        assert!(r.qualification, "40ms p99 < 75ms gate qualifies");
     }
 
     #[test]
     fn duplicate_cell_is_rejected() {
-        let mut cells = grid(&[Arch::X86_64, Arch::Aarch64]);
+        let mut cells = grid(&[Arch::X86_64]);
         // Duplicate the first cell (same arch/stmt/iteration) -> not a valid grid.
         cells.push(cell(Arch::X86_64, StatementIndex::Tlg, 0));
         let res = orchestrate_grid_synthetic(
@@ -1565,7 +1612,7 @@ mod tests {
 
     #[test]
     fn missing_cell_is_rejected() {
-        let mut cells = grid(&[Arch::X86_64, Arch::Aarch64]);
+        let mut cells = grid(&[Arch::X86_64]);
         cells.pop(); // drop one cell -> incomplete grid
         let ev = orchestrate_grid_synthetic(
             SPEC,
@@ -1589,7 +1636,7 @@ mod tests {
             h(b"gs"),
             &ids(),
             &all_provenance(),
-            &grid(&[Arch::X86_64, Arch::Aarch64]),
+            &grid(&[Arch::X86_64]),
             [7u8; 32],
         )
         .unwrap();
@@ -1614,7 +1661,7 @@ mod tests {
             h(b"gs"),
             &ids(),
             &all_provenance(),
-            &grid(&[Arch::X86_64, Arch::Aarch64]),
+            &grid(&[Arch::X86_64]),
             [7u8; 32],
         )
         .unwrap();
@@ -1634,7 +1681,7 @@ mod tests {
             h(b"gs"),
             &ids(),
             &all_provenance(),
-            &grid(&[Arch::X86_64, Arch::Aarch64]),
+            &grid(&[Arch::X86_64]),
             [7u8; 32],
         )
         .unwrap();
@@ -1651,7 +1698,7 @@ mod tests {
     #[test]
     fn missing_verification_samples_are_rejected() {
         // 99 verify samples in one cell instead of 100 -> short sample count.
-        let mut cells = grid(&[Arch::X86_64, Arch::Aarch64]);
+        let mut cells = grid(&[Arch::X86_64]);
         cells[0].verify_ns.pop();
         let ev = orchestrate_grid_synthetic(
             SPEC,
@@ -1675,7 +1722,7 @@ mod tests {
             h(b"gs"),
             &ids(),
             &all_provenance(),
-            &grid(&[Arch::X86_64, Arch::Aarch64]),
+            &grid(&[Arch::X86_64]),
             [7u8; 32],
         )
         .unwrap();
@@ -1693,7 +1740,7 @@ mod tests {
             h(b"gs"),
             &ids(),
             &all_provenance(),
-            &grid(&[Arch::X86_64, Arch::Aarch64]),
+            &grid(&[Arch::X86_64]),
             [7u8; 32],
         )
         .unwrap();
@@ -1725,7 +1772,7 @@ mod tests {
             h(b"gs"),
             &ids(),
             &prov,
-            &grid(&[Arch::X86_64, Arch::Aarch64]),
+            &grid(&[Arch::X86_64]),
             [7u8; 32],
         )
         .unwrap();

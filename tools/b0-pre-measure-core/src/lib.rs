@@ -47,8 +47,21 @@ impl Arch {
     }
 }
 
-/// Native eligibility (mirrors the validator): RISC Zero is x86_64-only; SP1 both.
+/// Native TERMINAL-MEASUREMENT eligibility (mirrors the validator's `native_eligible`, reviewed
+/// two-cell model): x86_64 ONLY, for both candidates. SP1/aarch64 terminal Groth16 (no first-party
+/// arm64 gnark backend) and RISC0/aarch64 are ratified-UNSUPPORTED and never built or proven.
 pub fn native_eligible(c: Candidate, a: Arch) -> bool {
+    matches!(
+        (c, a),
+        (Candidate::Sp1, Arch::X86_64) | (Candidate::Risc0, Arch::X86_64)
+    )
+}
+
+/// IDENTITY eligibility — the three Phase-1 guest identities that form the shared guest set:
+/// SP1/x86_64, SP1/aarch64, RISC0/x86_64. The SP1/aarch64 guest is *built* as an identity (its
+/// arch-independent program_id reconciles across both SP1 builders) but is NEVER measured. Used to
+/// select/emit identity records; the measure/prove path uses [`native_eligible`] (x86_64-only).
+pub fn identity_eligible(c: Candidate, a: Arch) -> bool {
     match c {
         Candidate::Risc0 => a == Arch::X86_64,
         Candidate::Sp1 => true,

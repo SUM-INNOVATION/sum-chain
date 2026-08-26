@@ -1,11 +1,12 @@
 {
   "schema": "b0-final-measurement-input-authority/v1",
-  "b0_pre_spec_hash": "201cfcb80e94a5a7845dc3380cde32171d40f325ae2bacde9547f3c0da3c4df3",
+  "b0_pre_spec_hash": "e933e7325c2639a48d8e25f20746d0f8abc822dee9fcfa87c2e6cdec226cf2a2",
   "measured_source_commit": "507281e21e95a6a98e3480e25e12d1baab586e07",
   "tooling_commit": "1234567890abcdef1234567890abcdef12345678",
   "tooling_pathset_blake3": "480083de0af929947cfd3716878cb161de2ca420da5928b8a6c901a0b307ff0c",
   "harness_source_inventory_address": "c8d179ba17503c4035f517d5e5f23c008fdb790efad059e9909b248fa913b041",
-  "malformed_corpus_report_address": "83525ef85739e94445e923c80ee4af885d7a782b9612933405120293d976710b",
+  "malformed_corpus_report_address": "20b3eef0f314d908eb6806df564abb49600bd666a627e618d7fa176175386bb5",
   "rss_statement_binding_policy": "per-cell-statement/v1",
-  "address": "5326ea30b6c9d9c6b82091feca3170f995aaa7762f8ff4042e5b59ad78fac19d"
+  "eligibility_matrix_address": "2a2804b0b6057cdae47b0aaed733f1b94ef7d2894888a73bc3cbcc3949363fe1",
+  "address": "944c33ab1db45a7ed92bd3620e7dd86993c5dc59cf3ade2bc74dc7ac66ed7c09"
 }

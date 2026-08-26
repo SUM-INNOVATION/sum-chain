@@ -70,14 +70,19 @@ pub const LOCAL_RESOURCE_BUDGET_DEFAULT_PERCENT: u32 = 35;
 pub const OUTPUT_MANIFEST_MAX_SLOTS: u32 = 256;
 pub const INPUT_MANIFEST_MAX_SLOTS: u32 = 8;
 
-// Frozen R0 evidence completeness, per candidate (§13/§23). Measurement grid is
-// 2 official statements × 2 architectures × 10 measured proofs.
+// Frozen R0 evidence completeness, per candidate (§13/§23). Reviewed two-cell
+// measurement model: terminal native measurement is eligible ONLY on x86_64 for
+// both candidates (SP1/aarch64 terminal Groth16 and RISC0/aarch64 are ratified
+// UNSUPPORTED — see `measurement::native_eligible` and the eligibility matrix).
+// aarch64 is retained as an IDENTITY (SP1/aarch64) but is never a measurement, so
+// no aarch64 measured cell or provenance snapshot may exist. Measurement grid is
+// therefore 2 official statements × 1 architecture (x86_64) × 10 measured proofs.
 pub const OFFICIAL_ITERATIONS_PER_CELL: u32 = 10;
-pub const OFFICIAL_MEASURED_PROOFS: u32 = 40; // 2 × 2 × 10
-pub const OFFICIAL_VERIFY_TIMING_SAMPLES: u32 = 4000; // 40 × 100
-pub const OFFICIAL_PROVE_TIME_SAMPLES: u32 = 40;
-pub const OFFICIAL_PROOF_BYTES_SAMPLES: u32 = 40;
-pub const OFFICIAL_SETUP_SAMPLES: u32 = 40; // one host_setup_ns per initialized verify batch
-pub const OFFICIAL_PROVING_RUN_RSS: u32 = 40;
-pub const OFFICIAL_VERIFY_BATCH_RSS: u32 = 40;
-pub const OFFICIAL_PROVENANCE_SNAPSHOTS: u32 = 4; // {x86,arm} × {proving,verification}
+pub const OFFICIAL_MEASURED_PROOFS: u32 = 20; // 1 × 2 × 10 (x86_64 only)
+pub const OFFICIAL_VERIFY_TIMING_SAMPLES: u32 = 2000; // 20 × 100
+pub const OFFICIAL_PROVE_TIME_SAMPLES: u32 = 20;
+pub const OFFICIAL_PROOF_BYTES_SAMPLES: u32 = 20;
+pub const OFFICIAL_SETUP_SAMPLES: u32 = 20; // one host_setup_ns per initialized verify batch
+pub const OFFICIAL_PROVING_RUN_RSS: u32 = 20;
+pub const OFFICIAL_VERIFY_BATCH_RSS: u32 = 20;
+pub const OFFICIAL_PROVENANCE_SNAPSHOTS: u32 = 2; // x86_64 × {proving,verification}

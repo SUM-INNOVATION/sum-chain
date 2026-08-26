@@ -38,7 +38,7 @@ use crate::schema::verifier_material::VerifierMaterialManifestV1;
 
 /// The merged, finalized `b0_pre_spec_hash`. Measurement mode binds to EXACTLY this.
 pub const MERGED_SPEC_HASH_HEX: &str =
-    "201cfcb80e94a5a7845dc3380cde32171d40f325ae2bacde9547f3c0da3c4df3";
+    "e933e7325c2639a48d8e25f20746d0f8abc822dee9fcfa87c2e6cdec226cf2a2";
 
 // ---------------------------------------------------------------------------
 // Raw-facts contract: what the venue runner writes. NO bundle hash, NO aggregate,
@@ -61,6 +61,12 @@ pub struct RawFacts {
     pub malformed_corpus_report: String,
     #[serde(default)]
     pub harness_source_inventory: String,
+    /// The retained eligibility/unsupported matrix (`EligibilityMatrixV1`) JSON — the reviewed
+    /// two-cell model (3 identities, 2 native-measurement cells, exact unsupported set). The producer
+    /// decodes + recomputes its address, requires the authority to bind exactly it, and cross-checks
+    /// the unsupported set. Sealed into the measurement container so both verifiers recompute it.
+    #[serde(default)]
+    pub eligibility_matrix: String,
 }
 
 #[derive(Deserialize)]
@@ -801,9 +807,46 @@ pub fn produce(raw: &RawFacts) -> Result<MeasurementPackage, String> {
     mia.verify_binds(
         raw.harness_source_inventory.as_bytes(),
         raw.malformed_corpus_report.as_bytes(),
+        raw.eligibility_matrix.as_bytes(),
         crate::guest_set::RATIFIED_SOURCE_COMMIT,
         &raw.b0_pre_spec_hash,
     )?;
+    // FAIL-CLOSED eligibility gate: independently decode + verify the retained eligibility/unsupported
+    // matrix (two-cell model) and cross-check that its native-measurement cells are EXACTLY the two
+    // candidate/arch pairs actually measured, and its unsupported set is EXACTLY the ratified pair.
+    // `verify_binds` already tied the MIA to this record's address; here we enforce the model against
+    // the actual candidates so a package can never measure a cell the matrix forbids.
+    let elig = crate::venue::eligibility_matrix::EligibilityMatrixV1::from_json(
+        raw.eligibility_matrix.as_bytes(),
+    )?;
+    elig.verify(&raw.b0_pre_spec_hash)?;
+    {
+        use std::collections::BTreeSet;
+        let want_measure: BTreeSet<(String, String)> =
+            elig.measurement_cells().into_iter().collect();
+        let mut have_measure: BTreeSet<(String, String)> = BTreeSet::new();
+        for c in &raw.candidates {
+            for cell in &c.cells {
+                have_measure.insert((c.candidate.clone(), cell.arch.clone()));
+            }
+        }
+        if have_measure != want_measure {
+            return Err(format!(
+                "eligibility matrix measurement cells {want_measure:?} != actual measured cells {have_measure:?} \
+                 (a package may only measure the ratified two-cell set)"
+            ));
+        }
+        let unsupported = elig.unsupported_cells();
+        let want_unsupported: Vec<(String, String)> = vec![
+            ("Sp1".into(), "aarch64".into()),
+            ("Risc0".into(), "aarch64".into()),
+        ];
+        if unsupported != want_unsupported {
+            return Err(format!(
+                "eligibility matrix unsupported set {unsupported:?} != ratified {want_unsupported:?}"
+            ));
+        }
+    }
     let malformed_report_addr =
         crate::venue::malformed_corpus_report::MalformedCorpusReportV1::from_json(
             raw.malformed_corpus_report.as_bytes(),
@@ -979,6 +1022,7 @@ pub fn produce(raw: &RawFacts) -> Result<MeasurementPackage, String> {
         raw.measurement_input_authority.as_bytes(),
         raw.malformed_corpus_report.as_bytes(),
         raw.harness_source_inventory.as_bytes(),
+        raw.eligibility_matrix.as_bytes(),
         &bundles,
     );
     let package_id = crate::hashing::plain(&vector);
@@ -1314,15 +1358,18 @@ fn validate_identity_set(cand: Candidate, records: &[IdentityRecordFacts]) -> Re
             "identity.production_binary_blake3",
         )?;
     }
-    let want: BTreeSet<u8> = match cand {
-        Candidate::Sp1 => [Arch::X86_64.to_repr(), Arch::Aarch64.to_repr()]
-            .into_iter()
-            .collect(),
-        Candidate::Risc0 => [Arch::X86_64.to_repr()].into_iter().collect(),
-    };
+    // Two-cell measurement model: a MEASUREMENT candidate carries exactly the identity records for the
+    // arches it is natively measured on (`native_matrix`). SP1/aarch64 is native-ineligible for terminal
+    // measurement (no arm64 gnark backend) so it is NOT a measurement candidate arch here — its Phase-1
+    // *identity* travels in the shared guest set (records/all.json → derive_guest_set, which independently
+    // requires all THREE identities), never as a measurement. Risc0 is x86_64-only as before.
+    let want: BTreeSet<u8> = crate::measurement::native_matrix(cand)
+        .iter()
+        .map(|a| a.to_repr())
+        .collect();
     if arches != want {
         return Err(format!(
-            "{cand:?}: Phase-1 identity set arches {arches:?} != required {want:?}"
+            "{cand:?}: measurement-candidate identity set arches {arches:?} != natively-measurable {want:?}"
         ));
     }
     Ok(())
@@ -1637,15 +1684,21 @@ pub fn dry_run_raw_facts() -> RawFacts {
         container_image_digest: dv("sp1-container"),
         statement_hash_tlg: dv("stmt-tlg"),
         statement_hash_st: dv("stmt-st"),
+        // Two-cell model: SP1's GUEST is built for BOTH arches (its arch-independent program_id
+        // reconciles across x86_64 + aarch64 builders — this is the retained 3-identity guest set and
+        // is what the ratified r0_guest_set_hash binds). But SP1 is natively TERMINAL-MEASURED on
+        // x86_64 ONLY (SP1/aarch64 terminal Groth16 is ratified unsupported), so its cells, provenance,
+        // and runner-continuity identity records are x86_64-only. The SP1/aarch64 guest identity thus
+        // travels in the guest set, never as a measurement.
         guest: guest("sp1", &["x86_64", "aarch64"]),
         verifier_material: vec![VmEntryFacts {
             role: "Groth16Vk".into(),
             byte_len: 292,
             hash: dv("sp1-vk"),
         }],
-        provenance: provset("sp1", &["x86_64", "aarch64"]),
-        cells: grid("sp1", &["x86_64", "aarch64"]),
-        identity_records: idrecs(&["x86_64", "aarch64"]),
+        provenance: provset("sp1", &["x86_64"]),
+        cells: grid("sp1", &["x86_64"]),
+        identity_records: idrecs(&["x86_64"]),
         dependency_seed_json: String::from_utf8(
             crate::measurement::synth_dependency_seed(crate::enums::Candidate::Sp1).0,
         )
@@ -1693,7 +1746,7 @@ pub fn dry_run_raw_facts() -> RawFacts {
         b0_pre_spec_hash: MERGED_SPEC_HASH_HEX.into(),
         candidates: vec![sp1, risc0],
         // TEST_ONLY fixtures (bind the non-authoritative sentinel tooling commit 1234…5678; measured
-        // 507281e2 / spec 201cfcb8): the retained MeasurementInputAuthorityV1 + its malformed-corpus
+        // 507281e2 / spec e933e732): the retained MeasurementInputAuthorityV1 + its malformed-corpus
         // report + harness-source inventory. These exercise encoding/verification mechanics only — the
         // production `--verify-authority` gate REFUSES the sentinel — and the venue generates the REAL
         // authority from the clean ratified tree (see docs/b0-pre/fixtures/.../README.md).
@@ -1709,6 +1762,12 @@ pub fn dry_run_raw_facts() -> RawFacts {
             "../../../docs/b0-pre/fixtures/measurement-input-authority/harness-source-inventory.txt"
         )
         .to_string(),
+        // The retained two-cell eligibility/unsupported matrix, built through the sole canonical
+        // constructor and bound (by address) into the MeasurementInputAuthorityV1 above.
+        eligibility_matrix: crate::venue::eligibility_matrix::EligibilityMatrixV1::canonical(
+            MERGED_SPEC_HASH_HEX,
+        )
+        .to_json(),
     }
 }
 
@@ -1756,42 +1815,39 @@ mod tests {
     #[test]
     fn dry_run_produces_and_verifies_both_verdicts() {
         let pkg = produce(&dry_run_raw_facts()).expect("produces");
-        // SP1 qualifies; RISC0's x86-only matrix is an incomplete native matrix.
+        // Reviewed two-cell model: BOTH candidates carry their complete x86_64-only native matrix,
+        // so BOTH qualify (each is one of the two eligible measurement cells). Neither is an
+        // "incomplete native matrix" any longer — x86_64 IS the complete native matrix.
         assert_eq!(
             pkg.verdicts[0],
             (Candidate::Sp1, CandidateVerdict::Qualified)
         );
-        assert!(matches!(
-            pkg.verdicts[1].1,
-            CandidateVerdict::IncompleteNativeMatrix(_)
-        ));
-        // The package vector is accepted by the frozen verifier for SP1 and rejected
-        // (as MeasuredProofGrid) for RISC0.
-        let (_al, _mia, _report, _inv, bundles) = parse_vector(&pkg.vector).unwrap();
-        for (c, ev) in &bundles {
-            match c {
-                Candidate::Sp1 => assert!(verify_evidence(ev).unwrap().qualification),
-                Candidate::Risc0 => {
-                    let e = verify_evidence(ev).unwrap_err();
-                    assert!(
-                        e.contains("MeasuredProofGrid") || e.contains("completeness"),
-                        "{e}"
-                    );
-                }
-            }
+        assert_eq!(
+            pkg.verdicts[1],
+            (Candidate::Risc0, CandidateVerdict::Qualified)
+        );
+        // The package vector is accepted by the frozen verifier for BOTH candidates.
+        let (_al, _mia, _report, _inv, _elig, bundles) = parse_vector(&pkg.vector).unwrap();
+        for (_c, ev) in &bundles {
+            assert!(
+                verify_evidence(ev).unwrap().qualification,
+                "both x86-only measurement cells verify + qualify"
+            );
         }
         // inventory names both verdicts + the content address.
         let inv = pkg.inventory();
         assert_eq!(inv["package_id"], hx(&pkg.package_id));
     }
 
-    // RUNNER CONTINUITY — positive: the three eligible mappings (Sp1/x86, Sp1/arm, Risc0/x86) all
+    // RUNNER CONTINUITY — positive: the two eligible MEASUREMENT mappings (Sp1/x86, Risc0/x86) each
     // resolve a Phase-1 identity record whose production_binary_blake3 == the measurement runner_blake3,
-    // and the retained attestation re-enforces it on import.
+    // and the retained attestation re-enforces it on import. Under the two-cell model there is NO
+    // SP1/aarch64 measurement runner (aarch64 terminal Groth16 is ratified-unsupported), so no
+    // aarch64 runner-continuity mapping exists — the SP1/aarch64 identity lives in the guest set.
     #[test]
-    fn runner_continuity_positive_all_three_mappings() {
+    fn runner_continuity_positive_both_measurement_mappings() {
         let pkg = produce(&dry_run_raw_facts()).expect("produces");
-        let (_al, _mia, _report, _inv, bundles) = parse_vector(&pkg.vector).unwrap();
+        let (_al, _mia, _report, _inv, _elig, bundles) = parse_vector(&pkg.vector).unwrap();
         let mut seen = std::collections::BTreeSet::new();
         for (c, ev) in &bundles {
             for ab in &ev.runner_attestations {
@@ -1804,9 +1860,11 @@ mod tests {
             // import re-enforces continuity via bind_runner_attestation
             let _ = verify_evidence(ev);
         }
+        // Exactly the two x86_64 measurement mappings — never an aarch64 measurement runner.
         assert!(seen.contains(&("Sp1".into(), "X86_64".into())));
-        assert!(seen.contains(&("Sp1".into(), "Aarch64".into())));
         assert!(seen.contains(&("Risc0".into(), "X86_64".into())));
+        assert!(!seen.contains(&("Sp1".into(), "Aarch64".into())));
+        assert!(!seen.iter().any(|(_, arch)| arch == "Aarch64"));
     }
 
     // RUNNER CONTINUITY — negatives, mutating ONLY the runner binary on ONE side while leaving the
@@ -1825,9 +1883,11 @@ mod tests {
             .runner_attestation
             .runner_blake3 = "bb".repeat(32);
         assert!(produce(&raw).is_err());
-        // (c) missing identity record for an arch → refuse.
+        // (c) missing identity record for a measured arch → refuse. Under the two-cell model SP1's
+        // measurement-candidate identity set is x86_64-only (its single record); dropping it leaves
+        // the set incomplete versus the natively-measurable arches.
         let mut raw = dry_run_raw_facts();
-        raw.candidates[0].identity_records.pop(); // drop SP1 aarch64 record
+        raw.candidates[0].identity_records.pop(); // drop SP1 x86_64 record → empty set
         assert!(produce(&raw)
             .unwrap_err()
             .to_lowercase()

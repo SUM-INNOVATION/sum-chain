@@ -13,7 +13,7 @@ const VECTOR: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../docs/b0-pre/fixtures/measurement-vector/real-orchestrator-vector.bin"
 ));
-const MERGED_SPEC_HEX: &str = "201cfcb80e94a5a7845dc3380cde32171d40f325ae2bacde9547f3c0da3c4df3";
+const MERGED_SPEC_HEX: &str = "e933e7325c2639a48d8e25f20746d0f8abc822dee9fcfa87c2e6cdec226cf2a2";
 
 fn spec_bytes() -> [u8; 32] {
     let mut a = [0u8; 32];
@@ -46,11 +46,12 @@ impl<'a> Rd<'a> {
 
 fn parse(bytes: &[u8]) -> (Vec<u8>, Vec<(u16, harness::Evidence)>) {
     let mut r = Rd { b: bytes, p: 0 };
-    assert_eq!(r.take(13), b"B0PREMEASVEC7", "bad magic");
+    assert_eq!(r.take(13), b"B0PREMEASVEC8", "bad magic");
     let allowlist = r.blob();
     let _mia = r.blob();
     let _report = r.blob();
     let _inv = r.blob();
+    let _elig = r.blob(); // VEC8: the retained eligibility/unsupported matrix JSON.
     let n = r.u32();
     let mut bundles = Vec::new();
     for _ in 0..n {
@@ -95,20 +96,13 @@ fn parse(bytes: &[u8]) -> (Vec<u8>, Vec<(u16, harness::Evidence)>) {
     (allowlist, bundles)
 }
 
-// Native-architecture validity: RISC Zero (candidate 2) may present NO aarch64
-// (arch == 2) proof cell — a fabricated RISC-Zero-ARM cell is refused here.
-fn native_arch_valid(candidate: u16, ev: &harness::Evidence) -> bool {
-    if candidate != 2 {
-        return true;
-    }
-    for e in &ev.envelopes {
-        if let Ok(env) = closure::decode_env(e) {
-            if env.arch == 2 {
-                return false;
-            }
-        }
-    }
-    true
+// Two-cell model: EVERY candidate is measured on x86_64 (arch == 1) ONLY. aarch64 (arch == 2) is
+// ratified-UNSUPPORTED and never measured, so no bundle — SP1 or RISC0 — may carry an aarch64 cell.
+// A fabricated aarch64 (repr 2) cell is refused here.
+fn x86_only(ev: &harness::Evidence) -> bool {
+    ev.envelopes
+        .iter()
+        .all(|e| closure::decode_env(e).map(|d| d.arch == 1).unwrap_or(false))
 }
 
 fn clone_ev(ev: &harness::Evidence) -> harness::Evidence {
@@ -143,26 +137,26 @@ fn independent_verifier_accepts_the_same_bytes_and_identities() {
     let mut saw_sp1 = false;
     let mut saw_risc0 = false;
     for (candidate, ev) in &bundles {
-        assert!(native_arch_valid(*candidate, ev), "native-arch validity");
+        // Two-cell model: both bundles carry their complete x86_64-only native matrix (20 measured
+        // proofs) and BOTH verify + qualify — they are the two eligible measurement cells.
+        assert!(x86_only(ev), "no aarch64 measured cell may exist");
         let rs = closure::decode_result_set(&ev.result_set).expect("result set decodes");
         assert_eq!(rs.b0_pre_spec_hash, spec, "binds merged spec hash");
         assert_eq!(rs.r0_guest_set_hash, gs, "binds recomputed guest-set hash");
+        assert_eq!(
+            rs.measured_proofs.len(),
+            20,
+            "x86_64-only grid → 20 measured proofs"
+        );
+        assert!(
+            rs.measured_proofs.iter().all(|m| m.0 == 1),
+            "every measured cell is x86_64"
+        );
+        let r = harness::verify_evidence(ev).expect("complete x86_64-only native matrix verifies");
+        assert!(r.qualification, "p99 < gate → qualifies");
         match candidate {
-            1 => {
-                saw_sp1 = true;
-                let r = harness::verify_evidence(ev).expect("SP1 complete matrix verifies");
-                assert!(r.qualification, "SP1 qualifies");
-            }
-            2 => {
-                saw_risc0 = true;
-                let e = harness::verify_evidence(ev).expect_err("RISC0 x86-only disqualified");
-                assert!(
-                    e.contains("MeasuredProofGrid")
-                        || e.to_lowercase().contains("grid")
-                        || e.contains("complete"),
-                    "RISC0 incomplete native matrix; got: {e}"
-                );
-            }
+            1 => saw_sp1 = true,
+            2 => saw_risc0 = true,
             other => panic!("unexpected candidate {other}"),
         }
     }
@@ -174,8 +168,9 @@ fn independent_negatives_all_rejected() {
     let (allowlist_bytes, bundles) = parse(VECTOR);
     let sp1 = &bundles.iter().find(|(c, _)| *c == 1).unwrap().1;
     let risc0 = &bundles.iter().find(|(c, _)| *c == 2).unwrap().1;
-    // sanity: the pristine SP1 bundle verifies.
+    // sanity: both pristine bundles verify + qualify (the two eligible x86_64 measurement cells).
     assert!(harness::verify_evidence(sp1).is_ok());
+    assert!(harness::verify_evidence(risc0).unwrap().qualification);
 
     // altered ordering/key + bundle hash: flip a byte inside one sample record.
     let mut m = clone_ev(sp1);
@@ -230,19 +225,10 @@ fn independent_negatives_all_rejected() {
         "a mutated allowlist must not match the bound guest-set"
     );
 
-    // fabricated RISC Zero ARM: inject an aarch64 envelope into the RISC0 bundle.
-    let mut m = clone_ev(risc0);
-    // Reuse the SP1 aarch64 envelope bytes as a foreign aarch64 cell; native check
-    // must reject it regardless of downstream verification.
-    let aarch64_env = sp1
-        .envelopes
-        .iter()
-        .find(|e| closure::decode_env(e).map(|d| d.arch == 2).unwrap_or(false))
-        .expect("sp1 has an aarch64 envelope")
-        .clone();
-    m.envelopes.push(aarch64_env);
+    // Two-cell model: neither bundle carries an aarch64 measured cell (aarch64 is ratified-UNSUPPORTED
+    // and never measured). A fabricated aarch64 cell would fail x86-only validity.
     assert!(
-        !native_arch_valid(2, &m),
-        "fabricated RISC-Zero-ARM cell rejected"
+        x86_only(sp1) && x86_only(risc0),
+        "both bundles are x86_64-only"
     );
 }

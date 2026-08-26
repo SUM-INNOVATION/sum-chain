@@ -55,7 +55,7 @@ mod real {
     // empty ELF, so a stub build can never produce a measurement.
     include!(concat!(env!("OUT_DIR"), "/methods.rs"));
 
-    const MERGED_SPEC: &str = "201cfcb80e94a5a7845dc3380cde32171d40f325ae2bacde9547f3c0da3c4df3";
+    const MERGED_SPEC: &str = "e933e7325c2639a48d8e25f20746d0f8abc822dee9fcfa87c2e6cdec226cf2a2";
 
     struct Risc0Backend {
         guest_source_tree_hash: String,

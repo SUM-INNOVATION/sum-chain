@@ -36,8 +36,10 @@ fn main() {
     let mut rs_qual = golden::official_result_set();
     rs_qual.failure_codes = vec![3];
 
+    // Two-cell model: only 2 provenance snapshots (x86_64 × {proving,verification}); swapping them
+    // breaks the canonical (arch,role) order.
     let mut rs_unsorted_prov = golden::official_result_set();
-    rs_unsorted_prov.arch_provenance.swap(0, 2);
+    rs_unsorted_prov.arch_provenance.swap(0, 1);
 
     // verifier material: unsorted and duplicate entries
     use b0_pre_validator::enums::{Candidate, VerifierMaterialRole};

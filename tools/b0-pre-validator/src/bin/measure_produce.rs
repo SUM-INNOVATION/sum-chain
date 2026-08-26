@@ -89,12 +89,14 @@ fn run() -> Result<String, String> {
         let inv_p = args
             .next()
             .ok_or("missing <harness-source-inventory.txt>")?;
+        let elig_p = args.next().ok_or("missing <eligibility-matrix.v1.json>")?;
         if args.next().is_some() {
             return Err("too many arguments".into());
         }
         let mia_b = std::fs::read(&mia_p).map_err(|e| format!("read {mia_p}: {e}"))?;
         let report_b = std::fs::read(&report_p).map_err(|e| format!("read {report_p}: {e}"))?;
         let inv_b = std::fs::read(&inv_p).map_err(|e| format!("read {inv_p}: {e}"))?;
+        let elig_b = std::fs::read(&elig_p).map_err(|e| format!("read {elig_p}: {e}"))?;
         let mia = b0_pre_validator::venue::measurement_input_authority::MeasurementInputAuthorityV1::from_json(
             &mia_b,
         )?;
@@ -105,6 +107,7 @@ fn run() -> Result<String, String> {
         mia.verify_binds(
             &inv_b,
             &report_b,
+            &elig_b,
             b0_pre_validator::guest_set::RATIFIED_SOURCE_COMMIT,
             MERGED_SPEC_HASH_HEX,
         )?;

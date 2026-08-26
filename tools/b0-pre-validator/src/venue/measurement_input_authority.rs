@@ -40,6 +40,11 @@ pub struct MeasurementInputAuthorityV1 {
     pub harness_source_inventory_address: String,
     pub malformed_corpus_report_address: String,
     pub rss_statement_binding_policy: String,
+    /// Address of the retained eligibility/unsupported matrix (`EligibilityMatrixV1`) — the reviewed
+    /// two-cell measurement model (3 identities, 2 native-measurement cells, the exact unsupported
+    /// set). Bound here so the authority ties the package to the ratified eligibility policy; both
+    /// verifiers recompute it from the retained eligibility-record bytes in `verify_binds`.
+    pub eligibility_matrix_address: String,
     pub address: String,
 }
 
@@ -65,6 +70,7 @@ impl MeasurementInputAuthorityV1 {
             self.harness_source_inventory_address.as_str(),
             self.malformed_corpus_report_address.as_str(),
             self.rss_statement_binding_policy.as_str(),
+            self.eligibility_matrix_address.as_str(),
         ];
         crate::venue::sha256::hex_digest(parts.join("\0").as_bytes())
     }
@@ -97,6 +103,10 @@ impl MeasurementInputAuthorityV1 {
                 "malformed_corpus_report_address",
                 &self.malformed_corpus_report_address,
             ),
+            (
+                "eligibility_matrix_address",
+                &self.eligibility_matrix_address,
+            ),
         ] {
             if !is_hex_of(v, 64) {
                 return Err(format!("measurement-input-authority: {nm} not 64-hex"));
@@ -123,6 +133,7 @@ impl MeasurementInputAuthorityV1 {
         &self,
         harness_inventory_manifest: &[u8],
         malformed_report_json: &[u8],
+        eligibility_record_json: &[u8],
         expect_measured_commit: &str,
         expect_spec_hash: &str,
     ) -> Result<(), String> {
@@ -144,6 +155,19 @@ impl MeasurementInputAuthorityV1 {
         let report_addr = report.verify(expect_measured_commit, expect_spec_hash)?;
         if crate::venue::to_hex(&report_addr) != self.malformed_corpus_report_address {
             return Err("measurement-input-authority: report address != retained report".into());
+        }
+        // eligibility/unsupported matrix: independently DECODE the retained record and RECOMPUTE its
+        // address (the two-cell model: 3 identities, 2 native-measurement cells, exact unsupported
+        // set). The authority must bind EXACTLY that address — a fabricated/edited eligibility record,
+        // or one whose model disagrees with `native_eligible`, is refused by `verify()` here.
+        let elig = crate::venue::eligibility_matrix::EligibilityMatrixV1::from_json(
+            eligibility_record_json,
+        )?;
+        let elig_addr = elig.verify(expect_spec_hash)?;
+        if crate::venue::to_hex(&elig_addr) != self.eligibility_matrix_address {
+            return Err(
+                "measurement-input-authority: eligibility-matrix address != retained record".into(),
+            );
         }
         Ok(())
     }
@@ -199,7 +223,7 @@ mod tests {
     use super::*;
 
     const MEASURED: &str = "507281e21e95a6a98e3480e25e12d1baab586e07";
-    const SPEC: &str = "201cfcb80e94a5a7845dc3380cde32171d40f325ae2bacde9547f3c0da3c4df3";
+    const SPEC: &str = "e933e7325c2639a48d8e25f20746d0f8abc822dee9fcfa87c2e6cdec226cf2a2";
     const MIA_JSON: &str = include_str!(
         "../../../../docs/b0-pre/fixtures/measurement-input-authority/measurement-input-authority.v1.json"
     );
@@ -213,13 +237,23 @@ mod tests {
     fn mia() -> MeasurementInputAuthorityV1 {
         MeasurementInputAuthorityV1::from_json(MIA_JSON.as_bytes()).expect("draft MIA parses")
     }
+    // The canonical two-cell eligibility record for this spec — its address is what the draft MIA binds.
+    fn elig() -> String {
+        crate::venue::eligibility_matrix::EligibilityMatrixV1::canonical(SPEC).to_json()
+    }
 
     #[test]
     fn draft_authority_verifies_and_binds_its_retained_bytes() {
         let m = mia();
         m.verify(MEASURED, SPEC).expect("shape/self-consistency");
-        m.verify_binds(INVENTORY.as_bytes(), REPORT_JSON.as_bytes(), MEASURED, SPEC)
-            .expect("binds the retained inventory + report");
+        m.verify_binds(
+            INVENTORY.as_bytes(),
+            REPORT_JSON.as_bytes(),
+            elig().as_bytes(),
+            MEASURED,
+            SPEC,
+        )
+        .expect("binds the retained inventory + report");
     }
 
     #[test]
@@ -228,7 +262,13 @@ mod tests {
         // neither recomputed address equals what the authority binds.
         let m = mia();
         let e = m
-            .verify_binds(REPORT_JSON.as_bytes(), INVENTORY.as_bytes(), MEASURED, SPEC)
+            .verify_binds(
+                REPORT_JSON.as_bytes(),
+                INVENTORY.as_bytes(),
+                elig().as_bytes(),
+                MEASURED,
+                SPEC,
+            )
             .expect_err("swapped retained bytes must be refused");
         assert!(
             e.contains("inventory address") || e.contains("report"),
@@ -247,7 +287,13 @@ mod tests {
         m.verify(MEASURED, SPEC)
             .expect("re-addressed MIA is internally consistent");
         let e = m
-            .verify_binds(INVENTORY.as_bytes(), REPORT_JSON.as_bytes(), MEASURED, SPEC)
+            .verify_binds(
+                INVENTORY.as_bytes(),
+                REPORT_JSON.as_bytes(),
+                elig().as_bytes(),
+                MEASURED,
+                SPEC,
+            )
             .expect_err("bound report address != retained report must be refused");
         assert!(e.contains("report address != retained report"), "{e}");
     }
@@ -260,7 +306,13 @@ mod tests {
         m.verify(MEASURED, SPEC)
             .expect("re-addressed MIA is internally consistent");
         let e = m
-            .verify_binds(INVENTORY.as_bytes(), REPORT_JSON.as_bytes(), MEASURED, SPEC)
+            .verify_binds(
+                INVENTORY.as_bytes(),
+                REPORT_JSON.as_bytes(),
+                elig().as_bytes(),
+                MEASURED,
+                SPEC,
+            )
             .expect_err("bound inventory address != retained manifest must be refused");
         assert!(
             e.contains("harness inventory address != retained manifest"),

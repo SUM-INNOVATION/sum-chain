@@ -26,27 +26,33 @@ pub enum Reason {
 }
 
 /// The exact set of `(arch, statement, iteration)` keys an official result set
-/// must contain — 2 architectures × 2 statements × 10 iterations, in canonical
-/// ascending order.
+/// must contain. Reviewed two-cell model: terminal native measurement is eligible
+/// on x86_64 ONLY (aarch64 terminal Groth16 is ratified-unsupported for both
+/// candidates), so the grid is 1 architecture (x86_64) × 2 statements × 10
+/// iterations, in canonical ascending order. A supplied aarch64 measured key is a
+/// fabricated ARM measurement and is refused here (`Reason::MeasuredProofGrid`).
 pub fn expected_proof_grid() -> Vec<(u8, u8, u32)> {
     let mut v = Vec::with_capacity(consts::OFFICIAL_MEASURED_PROOFS as usize);
-    for arch in [Arch::X86_64, Arch::Aarch64] {
-        for stmt in [StatementIndex::Tlg, StatementIndex::SelectToken] {
-            for iter in 0..consts::OFFICIAL_ITERATIONS_PER_CELL {
-                v.push((arch.to_repr(), stmt.to_repr(), iter));
-            }
+    // x86_64 only — the single native-measurement-eligible architecture.
+    let arch = Arch::X86_64;
+    for stmt in [StatementIndex::Tlg, StatementIndex::SelectToken] {
+        for iter in 0..consts::OFFICIAL_ITERATIONS_PER_CELL {
+            v.push((arch.to_repr(), stmt.to_repr(), iter));
         }
     }
     v
 }
 
-/// The exact 4 `(arch, role)` provenance snapshots.
+/// The exact 2 `(arch, role)` provenance snapshots — x86_64 × {proving,
+/// verification}. No aarch64 snapshot may exist: aarch64 is never measured under
+/// the two-cell model, so an aarch64 provenance record would imply an ARM
+/// measurement that did not happen.
 pub fn expected_provenance_set() -> Vec<(u8, u8)> {
     let mut v = Vec::with_capacity(consts::OFFICIAL_PROVENANCE_SNAPSHOTS as usize);
-    for arch in [Arch::X86_64, Arch::Aarch64] {
-        for role in [ProvenanceRole::Proving, ProvenanceRole::Verification] {
-            v.push((arch.to_repr(), role.to_repr()));
-        }
+    // x86_64 only — no aarch64 snapshot may exist under the two-cell model.
+    let arch = Arch::X86_64;
+    for role in [ProvenanceRole::Proving, ProvenanceRole::Verification] {
+        v.push((arch.to_repr(), role.to_repr()));
     }
     v
 }
@@ -441,7 +447,7 @@ mod tests {
     #[test]
     fn short_verify_bundle_sum_rejected() {
         let mut rs = golden::official_result_set();
-        // knock 1 off a host_verify_ns bundle so the measured sum != 4000
+        // knock 1 off a host_verify_ns bundle so the measured sum != 2000
         for b in &mut rs.sample_bundles {
             if matches!(b.metric_kind, MetricKind::HostVerifyNs) {
                 b.sample_count -= 1;

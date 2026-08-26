@@ -16,7 +16,7 @@ use crate::facts::{
     BuilderFacts, CandidateFacts, CellFactsJson, DvfsFacts, GuestFacts, IdentityRecordFacts,
     ProvFacts, VmEntryFacts,
 };
-use crate::{hex, native_eligible, Arch, Candidate, RunnerAttestation};
+use crate::{hex, identity_eligible, native_eligible, Arch, Candidate, RunnerAttestation};
 
 pub const ITERATIONS: u32 = 10;
 pub const VERIFY_SAMPLES: usize = 100;
@@ -60,10 +60,13 @@ pub fn select_fragment_identity_record(
     candidate: Candidate,
     arch: Arch,
 ) -> Result<IdentityRecordFacts, String> {
-    // Refuse before touching the set: a non-eligible fragment must never select anything.
-    if !native_eligible(candidate, arch) {
+    // Refuse before touching the set: a non-IDENTITY (candidate, arch) must never select anything. The
+    // three identities are SP1/x86_64, SP1/aarch64, RISC0/x86_64 (RISC0/aarch64 is not even an identity).
+    // The SP1/aarch64 identity is selectable here; the MEASUREMENT guard (`run_arch_fragment`, x86_64-only
+    // via `native_eligible`) separately refuses building/proving it.
+    if !identity_eligible(candidate, arch) {
         return Err(format!(
-            "{}/{} is not natively eligible (RISC Zero is x86_64-only); no identity record is selectable",
+            "{}/{} is not identity-eligible (RISC0/aarch64 is not a guest identity); no identity record is selectable",
             candidate.as_str(),
             arch.as_str()
         ));
@@ -124,10 +127,11 @@ pub fn run_arch_fragment(
 ) -> Result<(CandidateFacts, RunnerAttestation), String> {
     let candidate = backend.candidate();
 
-    // Native-eligibility guard FIRST: a RISC-Zero-aarch64 fragment is refused, never built.
+    // Native TERMINAL-MEASUREMENT guard FIRST (two-cell model, x86_64-only): a RISC-Zero-aarch64 OR
+    // SP1-aarch64 fragment is refused, never built or proven. SP1/aarch64 is an identity, not a measurement.
     if !native_eligible(candidate, cfg.arch) {
         return Err(format!(
-            "{} is native-ineligible on {}; refusing to build or prove",
+            "{} is native-ineligible on {} (terminal measurement is x86_64-only); refusing to build or prove",
             candidate.as_str(),
             cfg.arch.as_str()
         ));
@@ -285,10 +289,10 @@ mod tests {
     use std::path::PathBuf;
 
     // The merged, finalized b0_pre_spec_hash the validator binds measurement mode to.
-    const MERGED_SPEC: &str = "201cfcb80e94a5a7845dc3380cde32171d40f325ae2bacde9547f3c0da3c4df3";
+    const MERGED_SPEC: &str = "e933e7325c2639a48d8e25f20746d0f8abc822dee9fcfa87c2e6cdec226cf2a2";
     // Frozen materialized computation-statement hashes (== the guest journals).
-    const TLG_CSH: &str = "36fd69cb75ea6e7c91ce37932aca0158c3d9c8cb9a364bc66c55d27a43372d30";
-    const SELECT_CSH: &str = "264e8a9339fa7e768e16fbecb38351564a7710472ce66ea2478a9fc6f214192b";
+    const TLG_CSH: &str = "cd27d48ce81a0211539ac7685fa9548457779ccf769e5731d92bdf706635de86";
+    const SELECT_CSH: &str = "26574240d194c1d4a28505559c51e5381e057ee4c559edd53abea8c257db0749";
 
     fn h(x: &str) -> String {
         x.repeat(32)
@@ -689,15 +693,6 @@ mod tests {
         }
     }
 
-    fn merge_sp1(x86: CandidateFacts, arm: CandidateFacts) -> CandidateFacts {
-        let mut m = x86;
-        m.cells.extend(arm.cells);
-        m.provenance.extend(arm.provenance);
-        m.guest.builder.extend(arm.guest.builder);
-        m.identity_records.extend(arm.identity_records);
-        m
-    }
-
     // A full Phase-1 record as it appears in the authenticated identity-records file: the
     // continuity subset plus the `candidate` discriminator and UNRELATED fields the selector
     // must ignore (guest_image_hash, clean_tree).
@@ -777,10 +772,19 @@ mod tests {
 
     #[test]
     fn select_identity_risc0_aarch64_refused() {
-        // Refused before the set is even parsed (native ineligibility).
+        // Refused before the set is even parsed: RISC0/aarch64 is not even a guest identity.
         let set = idset(&[idrec_json("Risc0", "aarch64", &h("44"))]);
         let e = select_fragment_identity_record(&set, Candidate::Risc0, Arch::Aarch64).unwrap_err();
-        assert!(e.contains("not natively eligible"), "{e}");
+        assert!(e.contains("not identity-eligible"), "{e}");
+    }
+
+    #[test]
+    fn select_identity_sp1_aarch64_is_a_valid_identity() {
+        // Two-cell model: SP1/aarch64 IS a guest identity (selectable), even though it is never measured.
+        let set = idset(&[idrec_json("Sp1", "aarch64", &h("55"))]);
+        let rec = select_fragment_identity_record(&set, Candidate::Sp1, Arch::Aarch64)
+            .expect("SP1/aarch64 is a valid guest identity");
+        assert_eq!(rec.arch, "aarch64");
     }
 
     #[test]
@@ -793,28 +797,32 @@ mod tests {
     #[test]
     fn e2e_mock_fragment_grid_validates_against_the_real_validator() {
         let cg = cgroup_with_peak("e2e", 4_831_838_208);
-        // SP1: both arches -> 40 cells after merge.
-        let (sp1_x86, att) =
+        // Two-cell model: SP1/x86_64 and RISC0/x86_64 are the two measurement cells (20 cells each).
+        let (sp1, att) =
             run_arch_fragment(&mock(Candidate::Sp1, &cg), &cfg(Arch::X86_64, "x86_64"))
                 .expect("sp1 x86 fragment");
-        let (sp1_arm, _) =
-            run_arch_fragment(&mock(Candidate::Sp1, &cg), &cfg(Arch::Aarch64, "aarch64"))
-                .expect("sp1 arm fragment");
-        // RISC0: x86 only -> 20 cells.
         let (risc0, _) =
             run_arch_fragment(&mock(Candidate::Risc0, &cg), &cfg(Arch::X86_64, "x86_64"))
                 .expect("risc0 x86 fragment");
+        // SP1/aarch64 terminal measurement is ratified-UNSUPPORTED: run_arch_fragment refuses it,
+        // never builds or proves (the identity lives in the guest set, not here).
+        let e = run_arch_fragment(&mock(Candidate::Sp1, &cg), &cfg(Arch::Aarch64, "aarch64"))
+            .expect_err("SP1/aarch64 measurement must be refused");
+        assert!(e.contains("native-ineligible"), "{e}");
 
         // Evidence binds the mock: real_backend=false, binary hash present.
         assert!(!att.real_backend);
         assert_eq!(att.production_binary_blake3.len(), 64);
         assert_eq!(att.backend_identity, "MOCK-TEST-ONLY");
         // Proving RSS came from the container cgroup peak, not getrusage.
-        assert_eq!(sp1_x86.cells[0].proving_run_rss_bytes, 4_831_838_208);
+        assert_eq!(sp1.cells[0].proving_run_rss_bytes, 4_831_838_208);
 
-        let sp1 = merge_sp1(sp1_x86, sp1_arm);
-        assert_eq!(sp1.cells.len(), 40);
+        // Each candidate carries its complete x86_64-only native matrix: 20 cells.
+        assert_eq!(sp1.cells.len(), 20);
         assert_eq!(risc0.cells.len(), 20);
+        for c in sp1.cells.iter().chain(risc0.cells.iter()) {
+            assert_eq!(c.arch, "x86_64", "no aarch64 measured cell may exist");
+        }
 
         let raw = crate::facts::RawFacts {
             lifecycle_mode: "measurement".into(),

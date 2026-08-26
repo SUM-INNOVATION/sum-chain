@@ -36,9 +36,46 @@ for f in \
   protocol/b0-pre-protocol-v1.json protocol/b0-pre-protocol-v1.schema.json \
   protocol/hash-golden.json exp/exp_table_q16.json exp/exp_table_certificate.json \
   fixtures/workload/official.json fixtures/encoding-golden/vectors.json \
-  fixtures/closure-golden/vectors.json fixtures/evidence-harness/spec.json; do
+  fixtures/closure-golden/vectors.json fixtures/evidence-harness/spec.json \
+  fixtures/measurement-input-authority/measurement-input-authority.v1.json \
+  fixtures/measurement-input-authority/malformed-corpus-report.v1.json \
+  fixtures/measurement-input-authority/harness-source-inventory.txt \
+  fixtures/measurement-input-authority/eligibility-matrix.v1.json; do
   [ -s "$DOCS/$f" ] && note "PASS: fixture present $f" || bad "missing fixture $f"
 done
+
+# 2b. the MIA binds the eligibility record's address, and the eligibility record is the frozen two-cell
+#     model (3 identity cells, 2 native-measurement cells, exact unsupported set) self-addressed over its
+#     preimage. Structural cross-consistency (the authoritative recompute is in the Rust suite).
+python3 - "$DOCS/fixtures/measurement-input-authority" <<'PY' || fail=1
+import json, hashlib, sys
+d = sys.argv[1]
+ok = True
+def check(cond, msg):
+    global ok; print(("PASS: " if cond else "FAIL: ") + msg); ok = ok and cond
+mia = json.load(open(f"{d}/measurement-input-authority.v1.json"))
+elig = json.load(open(f"{d}/eligibility-matrix.v1.json"))
+# eligibility: exactly the 4 canonical rows, 2 measurement-eligible, 2 unsupported.
+rows = [(e["candidate"], e["arch"]) for e in elig["entries"]]
+check(rows == [("Sp1","x86_64"),("Sp1","aarch64"),("Risc0","x86_64"),("Risc0","aarch64")],
+      "eligibility rows are exactly the 4 canonical (candidate,arch) in order")
+meas = [(e["candidate"],e["arch"]) for e in elig["entries"] if e["native_measurement_eligible"]]
+unsup = [(e["candidate"],e["arch"]) for e in elig["entries"] if e["unsupported"]]
+check(meas == [("Sp1","x86_64"),("Risc0","x86_64")], "exactly two native-measurement cells (x86_64)")
+check(unsup == [("Sp1","aarch64"),("Risc0","aarch64")], "exactly the ratified unsupported set")
+# eligibility self-address recompute (SHA-256 over the frozen NUL-joined preimage).
+def b(x): return "true" if x else "false"
+parts = [elig["schema"], elig["b0_pre_spec_hash"], str(len(elig["entries"]))]
+for e in elig["entries"]:
+    parts += [e["candidate"], e["arch"], b(e["identity_eligible"]), b(e["native_measurement_eligible"]),
+              b(e["unsupported"]), e["reason_code"], e["backend"], e["backend_version"],
+              e["arch_manifest_evidence"], e["governing_authority"]]
+check(hashlib.sha256("\0".join(parts).encode()).hexdigest() == elig["address"],
+      "eligibility record address recomputes")
+check(mia["eligibility_matrix_address"] == elig["address"],
+      "MIA binds the eligibility record's address")
+sys.exit(0 if ok else 1)
+PY
 
 # 3. artifact embeds the committed digests and well-formed identities.
 tbl="$(tr -d '\n' < "$DOCS/exp/exp_table_q16.json.hash")"

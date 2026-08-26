@@ -18,8 +18,8 @@ SCR="$(cd "$HERE/.." && pwd)"          # .../b0-pre-candidates/scripts
 CROOT="$(cd "$SCR/.." && pwd)"         # .../b0-pre-candidates
 REPO="$(cd "$CROOT/../.." && pwd)"     # repo root
 FIX="$HERE/fixtures/guest-set"
-SPEC=201cfcb80e94a5a7845dc3380cde32171d40f325ae2bacde9547f3c0da3c4df3
-EXPECT_GS=3c5cd8e27e2ff425b23630506ca5e7fbac7ecf7cfcd62ba19f8d96f8b0b43623
+SPEC=e933e7325c2639a48d8e25f20746d0f8abc822dee9fcfa87c2e6cdec226cf2a2
+EXPECT_GS=4be497b79b4603eb11c6c45dcfd519b9e4d80de071b86c3cf76d5debb451b5f2
 SRC=507281e21e95a6a98e3480e25e12d1baab586e07
 WRONG_CANON_ADDR=8b063fdb061177f814ad33a21ac596b1b51b874ec871bb8d9de188721397312c
 export PATH="$HOME/.cargo/bin:$PATH"; [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env" 2>/dev/null
@@ -92,48 +92,52 @@ run_frag() { # <cand> <arch> <canon|-unset-> ; echoes rc; log at $WORK/out-<cand
 }
 no_prove() { [ ! -f "$PROVE_MARKER" ]; }
 
-echo "### POSITIVE: SP1/$HARCH preflight with the valid canonical package"
-rc="$(run_frag sp1 "$HARCH" "$CANON")"; log="$WORK/out-sp1-$HARCH/log"
-{ [ "$rc" = 0 ] && grep -q "MEASURE_FRAGMENT_PREFLIGHT_OK" "$log" && grep -q "r0_guest_set_hash=$EXPECT_GS" "$log"; } \
-  && ok "sp1/$HARCH: 3-arg preflight OK + derived guest-set matches expected" || { bad "sp1/$HARCH: preflight failed (rc=$rc)"; sed -n '$p' "$log"; }
-no_prove && ok "sp1/$HARCH: no proving runner launched" || bad "sp1/$HARCH: proving runner LAUNCHED"
-[ ! -s "$WORK/out-sp1-$HARCH/facts-sp1-$HARCH.json" ] && ok "sp1/$HARCH: no fragment emitted" || bad "sp1/$HARCH: fragment emitted"
-
-echo "### RISC0: native x86_64 -> positive preflight; aarch64 host -> RISC0/aarch64 must REFUSE (native-ineligible)"
+# Two-cell model: the two MEASUREMENT cells are SP1/x86_64 and RISC0/x86_64. measure_fragment refuses a
+# NON-NATIVE arch (no cross-arch on a host), and SP1/aarch64 + RISC0/aarch64 are ratified-UNSUPPORTED.
+# So the positive preflight + canonical-package negatives run ONLY on an x86_64 host; on an aarch64 host
+# there is NO positive measurement cell — both aarch64 candidates are refused (verified below).
 if [ "$HARCH" = x86_64 ]; then
-  rc="$(run_frag risc0 x86_64 "$CANON")"; log="$WORK/out-risc0-x86_64/log"
-  { [ "$rc" = 0 ] && grep -q "MEASURE_FRAGMENT_PREFLIGHT_OK" "$log" && grep -q "r0_guest_set_hash=$EXPECT_GS" "$log"; } \
-    && ok "risc0/x86_64: 3-arg preflight OK + derived guest-set matches expected" || { bad "risc0/x86_64: preflight failed (rc=$rc)"; sed -n '$p' "$log"; }
-  no_prove && ok "risc0/x86_64: no proving runner launched" || bad "risc0/x86_64: proving runner LAUNCHED"
-  [ ! -s "$WORK/out-risc0-x86_64/facts-risc0-x86_64.json" ] && ok "risc0/x86_64: no fragment emitted" || bad "risc0/x86_64: fragment emitted"
+  echo "### POSITIVE: SP1/x86_64 + RISC0/x86_64 preflight with the valid canonical package"
+  for cand in sp1 risc0; do
+    rc="$(run_frag "$cand" x86_64 "$CANON")"; log="$WORK/out-$cand-x86_64/log"
+    { [ "$rc" = 0 ] && grep -q "MEASURE_FRAGMENT_PREFLIGHT_OK" "$log" && grep -q "r0_guest_set_hash=$EXPECT_GS" "$log"; } \
+      && ok "$cand/x86_64: 3-arg preflight OK + derived guest-set matches expected" || { bad "$cand/x86_64: preflight failed (rc=$rc)"; sed -n '$p' "$log"; }
+    no_prove && ok "$cand/x86_64: no proving runner launched" || bad "$cand/x86_64: proving runner LAUNCHED"
+    [ ! -s "$WORK/out-$cand-x86_64/facts-$cand-x86_64.json" ] && ok "$cand/x86_64: no fragment emitted" || bad "$cand/x86_64: fragment emitted"
+  done
+
+  echo "### NEGATIVE (x86_64): missing canonical package refuses (before proving)"
+  rc="$(run_frag sp1 x86_64 -unset-)"
+  { [ "$rc" != 0 ] && grep -qiE "CANONICAL_SP1_GUEST_PKG|canonical SP1 guest package" "$WORK/out-sp1-x86_64/log"; } \
+    && ok "missing canonical package refuses" || bad "missing canonical package NOT refused (rc=$rc)"
+  no_prove && ok "missing-canonical: no proving runner launched" || bad "missing-canonical: proving LAUNCHED"
+
+  echo "### NEGATIVE (x86_64): mutated canonical package refuses (independent verify recompute)"
+  BADC="$WORK/canonical-mut"; cp -r "$CANON" "$BADC"
+  python3 -c 'import json,sys;p=sys.argv[1];d=json.load(open(p));d["program_id"]="0"*64;open(p,"w").write(json.dumps(d))' "$BADC/canonical-sp1-guest-artifact.v1.json"
+  rc="$(run_frag sp1 x86_64 "$BADC")"
+  [ "$rc" != 0 ] && ok "mutated canonical package refuses" || bad "mutated canonical package NOT refused"
+  no_prove && ok "mutated-canonical: no proving runner launched" || bad "mutated-canonical: proving LAUNCHED"
+
+  echo "### NEGATIVE (x86_64): wrong/substituted canonical package (valid pkg, address != records reference) refuses"
+  WRONGC="$WORK/canonical-wrong"; mkdir -p "$WRONGC"
+  cp "$REPO/tools/b0-pre-validator/tests/fixtures/real_canonical_sp1_guest.json" "$WRONGC/canonical-sp1-guest-artifact.v1.json"
+  cp "$REPO/tools/b0-pre-validator/tests/fixtures/real_canonical_sp1_guest.elf" "$WRONGC/guest.elf"
+  rc="$(run_frag sp1 x86_64 "$WRONGC")"
+  { [ "$rc" != 0 ] && grep -qiE "canonical artifact address not referenced|!= the supplied canonical" "$WORK/out-sp1-x86_64/log"; } \
+    && ok "wrong/substituted canonical ($WRONG_CANON_ADDR) refuses" || bad "wrong/substituted canonical NOT refused (rc=$rc)"
+  no_prove && ok "wrong-canonical: no proving runner launched" || bad "wrong-canonical: proving LAUNCHED"
 else
+  echo "### aarch64 host: BOTH cells ratified-UNSUPPORTED -> refused BEFORE proving (no measurement)"
+  rc="$(run_frag sp1 aarch64 "$CANON")"; log="$WORK/out-sp1-aarch64/log"
+  { [ "$rc" != 0 ] && grep -qiE "native-ineligible|ratified unsupported|sp1-aarch64-groth16-no-arm-backend" "$log"; } \
+    && ok "sp1/aarch64: refused (ratified-unsupported; identity-only)" || bad "sp1/aarch64: NOT refused (rc=$rc)"
+  no_prove && ok "sp1/aarch64: no proving runner launched" || bad "sp1/aarch64: proving runner LAUNCHED"
   rc="$(run_frag risc0 aarch64 "$CANON")"; log="$WORK/out-risc0-aarch64/log"
-  { [ "$rc" != 0 ] && grep -qiE "native-ineligible|RISC Zero is native-ineligible on aarch64" "$log"; } \
+  { [ "$rc" != 0 ] && grep -qiE "native-ineligible|risc0-aarch64-x86-only" "$log"; } \
     && ok "risc0/aarch64: refused (native-ineligible)" || bad "risc0/aarch64: NOT refused (rc=$rc)"
   no_prove && ok "risc0/aarch64: no proving runner launched" || bad "risc0/aarch64: proving runner LAUNCHED"
 fi
-
-echo "### NEGATIVE: missing canonical package refuses (before proving)"
-rc="$(run_frag sp1 "$HARCH" -unset-)"
-{ [ "$rc" != 0 ] && grep -qiE "CANONICAL_SP1_GUEST_PKG|canonical SP1 guest package" "$WORK/out-sp1-$HARCH/log"; } \
-  && ok "missing canonical package refuses" || bad "missing canonical package NOT refused (rc=$rc)"
-no_prove && ok "missing-canonical: no proving runner launched" || bad "missing-canonical: proving LAUNCHED"
-
-echo "### NEGATIVE: mutated canonical package refuses (independent verify recompute)"
-BADC="$WORK/canonical-mut"; cp -r "$CANON" "$BADC"
-python3 -c 'import json,sys;p=sys.argv[1];d=json.load(open(p));d["program_id"]="0"*64;open(p,"w").write(json.dumps(d))' "$BADC/canonical-sp1-guest-artifact.v1.json"
-rc="$(run_frag sp1 "$HARCH" "$BADC")"
-[ "$rc" != 0 ] && ok "mutated canonical package refuses" || bad "mutated canonical package NOT refused"
-no_prove && ok "mutated-canonical: no proving runner launched" || bad "mutated-canonical: proving LAUNCHED"
-
-echo "### NEGATIVE: wrong/substituted canonical package (valid pkg, address != records reference) refuses"
-WRONGC="$WORK/canonical-wrong"; mkdir -p "$WRONGC"
-cp "$REPO/tools/b0-pre-validator/tests/fixtures/real_canonical_sp1_guest.json" "$WRONGC/canonical-sp1-guest-artifact.v1.json"
-cp "$REPO/tools/b0-pre-validator/tests/fixtures/real_canonical_sp1_guest.elf" "$WRONGC/guest.elf"
-rc="$(run_frag sp1 "$HARCH" "$WRONGC")"
-{ [ "$rc" != 0 ] && grep -qiE "canonical artifact address not referenced|!= the supplied canonical" "$WORK/out-sp1-$HARCH/log"; } \
-  && ok "wrong/substituted canonical ($WRONG_CANON_ADDR) refuses" || bad "wrong/substituted canonical NOT refused (rc=$rc)"
-no_prove && ok "wrong-canonical: no proving runner launched" || bad "wrong-canonical: proving LAUNCHED"
 
 echo "### CLI CONTRACT: measure-produce --guest-set arg count"
 rm -rf "$WORK/gs2" "$WORK/gs3"; mkdir -p "$WORK/gs2" "$WORK/gs3"

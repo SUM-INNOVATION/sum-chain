@@ -45,17 +45,17 @@ use sumchain_wire::b0::statement::{self, R0ComputationStatementV2};
 // The real, merged `b0_pre_spec_hash` (commit 8ac6dc77; sidecar
 // docs/b0-pre/protocol/b0-pre-protocol-v1.json.hash).
 const MERGED_SPEC_HASH_HEX: &str =
-    "201cfcb80e94a5a7845dc3380cde32171d40f325ae2bacde9547f3c0da3c4df3";
+    "e933e7325c2639a48d8e25f20746d0f8abc822dee9fcfa87c2e6cdec226cf2a2";
 // Frozen official statement template hashes (== the committed normative artifact).
 const TLG_TEMPLATE_HASH_HEX: &str =
     "7301ee63f420bcb5b50c7be7802e6e242e068978c8200671569777ed212f9969";
 const SELECT_TEMPLATE_HASH_HEX: &str =
     "a31799c2f5740173a6088979e30d85c60eefeb2b4a15b0913cf5d2568768c72a";
-// Required materialized computation-statement hashes (spec hash inserted).
+// Required materialized computation-statement hashes (spec hash inserted; recomputed for e933e732).
 const TLG_REQUIRED_CSH_HEX: &str =
-    "36fd69cb75ea6e7c91ce37932aca0158c3d9c8cb9a364bc66c55d27a43372d30";
+    "cd27d48ce81a0211539ac7685fa9548457779ccf769e5731d92bdf706635de86";
 const SELECT_REQUIRED_CSH_HEX: &str =
-    "264e8a9339fa7e768e16fbecb38351564a7710472ce66ea2478a9fc6f214192b";
+    "26574240d194c1d4a28505559c51e5381e057ee4c559edd53abea8c257db0749";
 
 fn refuse(msg: &str) -> ! {
     eprintln!("REFUSED: {msg}");

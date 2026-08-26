@@ -21,6 +21,7 @@ pub mod cargo_lock;
 pub mod checkout_digest;
 pub mod content_store;
 pub mod dependency_seed;
+pub mod eligibility_matrix;
 pub mod evidence_bundle;
 pub mod host_toolchain;
 pub mod license_policy;

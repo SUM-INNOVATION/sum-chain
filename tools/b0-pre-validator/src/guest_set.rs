@@ -22,7 +22,7 @@ use crate::schema::allowlist::{BuilderArch, GuestProgramAllowlistV1};
 
 /// The merged, finalized `b0_pre_spec_hash` every record must bind.
 pub const MERGED_SPEC_HASH_HEX: &str =
-    "201cfcb80e94a5a7845dc3380cde32171d40f325ae2bacde9547f3c0da3c4df3";
+    "e933e7325c2639a48d8e25f20746d0f8abc822dee9fcfa87c2e6cdec226cf2a2";
 
 /// The ratified source commit the guest MUST be built from — the exact owner-ratified
 /// checkout, not merely a commit all records agree on. A different (even clean) commit is
