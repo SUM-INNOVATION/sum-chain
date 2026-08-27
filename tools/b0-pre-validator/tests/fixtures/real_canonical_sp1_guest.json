@@ -1,5 +1,5 @@
 {
- "address": "8b063fdb061177f814ad33a21ac596b1b51b874ec871bb8d9de188721397312c",
+ "address": "9301ad5c74701810c97373f63d3577e6722f01162a3f6d4ede09a70e3cb62f3a",
  "build_a": {
   "elf_blake3": "b48877d616b9afde2453e540f1f11342cbc94ebed99d0242d67a90b1d74e79d7",
   "elf_sha256": "e9e7f54e662b2f5a084eb863fbd7286131096669d071a355262d9e624eaedabf"
@@ -16,7 +16,7 @@
  "candidate": "sp1",
  "canonical_build_arch": "x86_64",
  "command_log_address": "6d73b73f744866527dfb70a78e30cfb70f30ce9abdb90a88be445db2304cc04f",
- "dependency_seed_address": "ea182c6223a621a43776c879ee6332adfbdbd25ea3e0fb6501d194d1690e19bc",
+ "dependency_seed_address": "87372d95babe6907cbba0bb0c82bc823da83032204056e254690053fc0170a4c",
  "double_build_proof": {
   "blake3_equal": true,
   "byte_identical": true,
@@ -37,5 +37,6 @@
  "staged_context_blake3": "",
  "tooling_commit": "2e8ffaa360fb248e88423be49b72c3b3d25d6594",
  "tooling_pathset_blake3": "db97218ea956e3e32a17ef564ca8a214bd23dc4092104b3b16633c926447f058",
- "vendor_config_sha256": "f6dba0fdf0e0ef68117bfe9a52897861375b0891cfea3985e700bd591f822d90"
+ "vendor_config_sha256": "acdf85025834f1fb9480a272f1dd2741066c9a4e35aae1fc479118f299067f93",
+ "dependency_seed_authority_address": "084d34a4ad5a4922d1b47c8bf6a1444c05e974005ef84afd7ed30c3f7ad8d122"
 }

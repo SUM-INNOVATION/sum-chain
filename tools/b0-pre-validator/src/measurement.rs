@@ -91,6 +91,12 @@ pub fn synth_cargo_seed_content() -> [u8; 32] {
     *blake3::hash(b"b0-final-synth-cargo-seed-content/v1").as_bytes()
 }
 
+/// FIXED synthetic risc0 toolchain-home authority manifest address (RISC0 real embed only). Byte-identical
+/// to the independent harness's `synth_risc0_home_content`, so both crates' generators agree cross-crate.
+pub fn synth_risc0_home_content() -> [u8; 32] {
+    *blake3::hash(b"b0-final-synth-risc0-home-authority/v1").as_bytes()
+}
+
 /// The synthetic self-consistent [`DependencySeedV1`] for `candidate` matching [`synth_cargo_seed_content`]:
 /// returns `(json_bytes, record_address)`. The synthetic attestation's `dependency_seed_address` is set to
 /// `record_address` and the bundle seals `json_bytes`, so the sealed-import cargo dependency-seed anchor
@@ -213,6 +219,7 @@ pub fn synth_runner_recipe_artifacts(
             "build".into(),
             "--release".into(),
             "--locked".into(),
+            "--offline".into(),
             "--features".into(),
             "real-backend".into(),
             "--manifest-path".into(),
@@ -264,6 +271,12 @@ pub fn synth_runner_recipe_artifacts(
     // FIXED (seed-fn-independent) synthetic cargo seed-content address, so every synthetic assembly path
     // (harness + demo) shares one host seed and can build the SAME self-consistent DependencySeedV1.
     let cargo_seed = synth_cargo_seed_content();
+    // RISC0 real embed only: a fixed synthetic risc0 toolchain-home authority address (3-way equal); SP1 = 0.
+    let risc0_home = if candidate == Candidate::Risc0 {
+        synth_risc0_home_content()
+    } else {
+        [0u8; 32]
+    };
     let facts = |t: &str, inv_addr: [u8; 32], s: u64, e: u64| BuildFacts {
         original_root: format!("/b0-input/{t}/tooling"),
         target_from: format!("/b0-input/{t}/target"),
@@ -275,6 +288,7 @@ pub fn synth_runner_recipe_artifacts(
         origin_manifest_blake3: src_manifest,
         materialized_manifest_blake3: src_manifest,
         materialized_cargo_seed_blake3: cargo_seed,
+        materialized_risc0_home_blake3: risc0_home,
         start_unix: s,
         end_unix: e,
     };
@@ -285,6 +299,7 @@ pub fn synth_runner_recipe_artifacts(
         arch,
         wrapper_blake3: wrapper,
         cargo_seed_origin_blake3: cargo_seed,
+        risc0_home_origin_blake3: risc0_home,
         reproducibility_pair_blake3: RunnerDoubleBuildProofV1::compute_reproducibility_pair(
             &fa, &fb,
         ),
@@ -306,6 +321,9 @@ pub fn synth_runner_recipe_artifacts(
         CANON_TARGET.to_string(),
         CANON_TOOLING.to_string(),
     ];
+    if candidate == Candidate::Risc0 {
+        permitted.push(crate::schema::runner_build_recipe::CANON_GUESTHOME.to_string());
+    }
     permitted.sort();
     let leak = RunnerLeakageReportV1 {
         candidate,
@@ -570,11 +588,37 @@ pub fn orchestrate_grid(
         let mut proof = pf.runner_double_build_proof.clone();
         proof.candidate = ids.candidate;
         proof.arch = pf.arch;
+        // The REAL produce() path builds the proof from the RECIPE's candidate (via `build_runner_artifacts`):
+        // RISC0 already carries the recipe's risc0 toolchain-home authority (non-zero, and `check_double_build`
+        // guarantees it) and SP1 is all-zero — that real risc0-home is PRESERVED here (identity == measurement).
+        // ONLY the TEST_ONLY synthetic path (`orchestrate_grid_synthetic`, whose provenance arrives SP1-shaped
+        // and never passes through `build_runner_artifacts`) arrives with an all-zero RISC0 risc0-home; supply
+        // the fixed synthetic authority for it. A real RISC0 proof is never all-zero here.
+        if ids.candidate == Candidate::Risc0 && proof.risc0_home_origin_blake3 == [0u8; 32] {
+            let r0 = synth_risc0_home_content();
+            proof.risc0_home_origin_blake3 = r0;
+            proof.build_a.materialized_risc0_home_blake3 = r0;
+            proof.build_b.materialized_risc0_home_blake3 = r0;
+        }
         proof.build_a.inventory_address = inventory_a.hash();
         proof.build_b.inventory_address = inventory_b.hash();
         let mut leakage = pf.runner_leakage_report.clone();
         leakage.candidate = ids.candidate;
         leakage.arch = pf.arch;
+        // Same TEST_ONLY accommodation as the risc0-home above: synthetic provenance arrives SP1-shaped
+        // (3 permitted prefixes). When re-labeled RISC0, add the pinned guest-embed HOME so the leakage
+        // matches the candidate-canonical permitted set. The real produce() path already carries it (the
+        // recipe's leakage permitted set is validated candidate-correctly in `build_runner_artifacts`), so
+        // this is a no-op there.
+        if ids.candidate == Candidate::Risc0
+            && !leakage
+                .permitted_prefixes
+                .iter()
+                .any(|p| p == "/b0/guesthome")
+        {
+            leakage.permitted_prefixes.push("/b0/guesthome".to_string());
+            leakage.permitted_prefixes.sort();
+        }
         att.runner_build_recipe_blake3 = recipe.hash();
         att.rustc_invocation_inventory_a_blake3 = inventory_a.hash();
         att.rustc_invocation_inventory_b_blake3 = inventory_b.hash();

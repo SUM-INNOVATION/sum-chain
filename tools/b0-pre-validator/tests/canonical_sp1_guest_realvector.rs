@@ -1,5 +1,5 @@
 use b0_pre_validator::venue::canonical_sp1_guest_artifact::CanonicalSp1GuestArtifactV1;
-const REAL_ADDR: &str = "8b063fdb061177f814ad33a21ac596b1b51b874ec871bb8d9de188721397312c";
+const REAL_ADDR: &str = "9301ad5c74701810c97373f63d3577e6722f01162a3f6d4ede09a70e3cb62f3a";
 const MEASURED: &str = "507281e21e95a6a98e3480e25e12d1baab586e07";
 #[test]
 fn real_canonical_artifact_recomputes_and_verifies() {

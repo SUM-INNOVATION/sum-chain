@@ -330,6 +330,10 @@ fn seedb(s: &[u8]) -> [u8; 32] {
 fn synth_cargo_seed_content() -> [u8; 32] {
     *blake3::hash(b"b0-final-synth-cargo-seed-content/v1").as_bytes()
 }
+/// Byte-identical to the reference `measurement::synth_risc0_home_content` (cross-crate agreement).
+fn synth_risc0_home_content() -> [u8; 32] {
+    *blake3::hash(b"b0-final-synth-risc0-home-authority/v1").as_bytes()
+}
 /// The synthetic self-consistent `DependencySeedV1` for `candidate` (1 = SP1, 2 = RISC0) matching
 /// [`synth_cargo_seed_content`]: returns `(json_bytes, record_address)`. The synthetic attestation's
 /// `dependency_seed_address` is set to `record_address` and the bundle seals `json_bytes`, so the
@@ -369,12 +373,13 @@ fn enc_build_recipe(candidate: u16, arch: u8, measured: &str) -> (Vec<u8>, [u8; 
     b.extend_from_slice(&candidate.to_le_bytes());
     b.push(arch);
     b.extend_from_slice(&recipe_id);
-    // build_argv (8)
+    // build_argv (9)
     let argv = [
         "cargo",
         "build",
         "--release",
         "--locked",
+        "--offline",
         "--features",
         "real-backend",
         "--manifest-path",
@@ -440,6 +445,7 @@ fn enc_proof_side(
     b: &mut Vec<u8>,
     t: &str,
     guest_img: &[u8; 32],
+    risc0_home: &[u8; 32],
     inv_addr: [u8; 32],
     s: u64,
     e: u64,
@@ -454,6 +460,7 @@ fn enc_proof_side(
     b.extend_from_slice(&seedb(b"source-input-manifest")); // origin_manifest_blake3
     b.extend_from_slice(&seedb(b"source-input-manifest")); // materialized_manifest_blake3 (== origin)
     b.extend_from_slice(&synth_cargo_seed_content()); // materialized_cargo_seed_blake3 (== seed origin)
+    b.extend_from_slice(risc0_home); // materialized_risc0_home_blake3 (== authority; 0 for SP1)
     b.extend_from_slice(&s.to_le_bytes());
     b.extend_from_slice(&e.to_le_bytes());
 }
@@ -477,15 +484,21 @@ fn enc_double_build_proof(
     } else {
         [0u8; 32]
     };
+    let risc0_home = if candidate == 2 {
+        synth_risc0_home_content()
+    } else {
+        [0u8; 32]
+    };
     let mut b = Vec::new();
     b.extend_from_slice(b"b0-final-runner-dbl-build-proof0");
-    b.extend_from_slice(&3u16.to_le_bytes());
+    b.extend_from_slice(&4u16.to_le_bytes());
     b.extend_from_slice(&candidate.to_le_bytes());
     b.push(arch);
     b.extend_from_slice(&seedb(b"wrapper-blake3"));
-    enc_proof_side(&mut b, "a", &guest_img, inv_a_addr, 100, 200);
-    enc_proof_side(&mut b, "b", &guest_img, inv_b_addr, 200, 300);
+    enc_proof_side(&mut b, "a", &guest_img, &risc0_home, inv_a_addr, 100, 200);
+    enc_proof_side(&mut b, "b", &guest_img, &risc0_home, inv_b_addr, 200, 300);
     b.extend_from_slice(&synth_cargo_seed_content()); // cargo_seed_origin_blake3 (== A == B)
+    b.extend_from_slice(&risc0_home); // risc0_home_origin_blake3 (== A == B; 0 for SP1)
     b.push(1); // byte_equal
     b.extend_from_slice(&repro_pair());
     let addr = closure::runner_double_build_proof_address(&b);
@@ -515,8 +528,15 @@ fn enc_leak_report(candidate: u16, arch: u8) -> (Vec<u8>, [u8; 32]) {
     for s in &refused {
         str16w(&mut b, s);
     }
-    b.extend_from_slice(&3u32.to_le_bytes());
-    for s in ["/b0/cargo", "/b0/target", "/b0/tooling"] {
+    // permitted: SP1 = the canonical three; RISC0 (candidate==2) also touches the pinned guest-embed
+    // HOME. Sorted + distinct (the decoder requires it).
+    let mut permitted: Vec<&str> = vec!["/b0/cargo", "/b0/target", "/b0/tooling"];
+    if candidate == 2 {
+        permitted.push("/b0/guesthome");
+    }
+    permitted.sort();
+    b.extend_from_slice(&(permitted.len() as u32).to_le_bytes());
+    for s in &permitted {
         str16w(&mut b, s);
     }
     let addr = closure::runner_leakage_report_address(&b);

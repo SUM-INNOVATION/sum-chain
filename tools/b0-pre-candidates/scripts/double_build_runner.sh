@@ -60,7 +60,7 @@ to_hex()      { od -An -v -tx1 "$1" | tr -d ' \n'; }
 
 # --- explicit typed flags (no positional / env args; unknown / extra / missing / dup => die) -------
 CAND=""; MANIFEST=""; ARTIFACT=""; SRC_A=""; SRC_B=""; ROOT_A=""; ROOT_B=""; CANON_BUILD=""; ARCH=""; EXPECT_SHA=""
-WRAPPER=""; TOOLCHAIN_IDENTITY=""; EMBED=""; RECIPE_OUT=""; CARGO="cargo"; TOOLCHAIN=""; RISC0_HOME_IN=""
+WRAPPER=""; TOOLCHAIN_IDENTITY=""; EMBED=""; RECIPE_OUT=""; RUNNER_OUT=""; CARGO="cargo"; TOOLCHAIN=""; RISC0_HOME_IN=""
 # Offline dependency provisioning (this correction): the provisioned dependency-seed dir + its
 # DependencySeedV1 facts, the pinned canonical guest HOME (RISC0 real embed), the protoc/include
 # authority (SP1), and the retained toolchain/protoc attestation JSONs bound into the recipe facts.
@@ -81,6 +81,7 @@ while [ "$#" -gt 0 ]; do
     --per-arch-toolchain-identity) [ "$#" -ge 2 ] || die "--per-arch-toolchain-identity requires a value"; [ -z "$TOOLCHAIN_IDENTITY" ] || die "duplicate --per-arch-toolchain-identity"; TOOLCHAIN_IDENTITY="$2"; shift 2 ;;
     --embed)     [ "$#" -ge 2 ] || die "--embed requires a value"; [ -z "$EMBED" ] || die "duplicate --embed"; EMBED="$2"; shift 2 ;;
     --recipe-out)[ "$#" -ge 2 ] || die "--recipe-out requires a value"; [ -z "$RECIPE_OUT" ] || die "duplicate --recipe-out"; RECIPE_OUT="$2"; shift 2 ;;
+    --runner-out)[ "$#" -ge 2 ] || die "--runner-out requires a value"; [ -z "$RUNNER_OUT" ] || die "duplicate --runner-out"; RUNNER_OUT="$2"; shift 2 ;;
     --cargo)     [ "$#" -ge 2 ] || die "--cargo requires a value"; CARGO="$2"; shift 2 ;;
     --toolchain) [ "$#" -ge 2 ] || die "--toolchain requires a value"; [ -z "$TOOLCHAIN" ] || die "duplicate --toolchain"; TOOLCHAIN="$2"; shift 2 ;;
     --risc0-home)[ "$#" -ge 2 ] || die "--risc0-home requires a value"; RISC0_HOME_IN="$2"; shift 2 ;;
@@ -172,7 +173,13 @@ HOST_SEED_ADDR="$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));pri
   || die "--dep-seed-json has no host-cargo-home seed unit"
 printf '%s' "$HOST_SEED_ADDR" | grep -Eq '^[0-9a-f]{64}$' || die "host seed address is not 64-hex"
 GUEST_SEED_ADDR=""
+# The SEALED risc0 toolchain-home AUTHORITY address (content+mode manifest of the read-only provisioned
+# home). Each per-build writable working copy is authenticated content-equal to THIS before use. RISC0 only.
+R0_SEALED_ADDR=""
 if [ "$CAND" = risc0 ] && [ "$EMBED" = 1 ]; then
+  R0_SEALED_ADDR="$(b0_source_manifest_addr "$RISC0_HOME_IN")" \
+    || die "--risc0-home $RISC0_HOME_IN is not a clean content-addressable tree (symlink/device/non-regular entry?)"
+  printf '%s' "$R0_SEALED_ADDR" | grep -Eq '^[0-9a-f]{64}$' || die "sealed risc0-home authority address is not 64-hex"
   [ -n "$GUEST_HOME" ] || die "--guest-home is required for a RISC0 real embed (--embed 1)"
   GUEST_HOME_REQUIRED='/b0/guesthome'
   [ "$GUEST_HOME" = "$GUEST_HOME_REQUIRED" ] \
@@ -223,7 +230,7 @@ CANON_ABS=""
 CARGO_LOCKED=""     # set to CANON_CARGO below under the lock; the trap only removes /b0/cargo once WE hold
                     # the lock, so an early exit before acquiring it cannot delete another run's cargo home
 GUEST_HOME_ABS=""   # set below under the lock (RISC0 real embed only); a pinned /b0/guesthome
-work="$(mktemp -d)"; trap 'rm -rf "$work"; [ -n "${CANON_ABS:-}" ] && rm -rf "$CANON_ABS"; [ -n "${CARGO_LOCKED:-}" ] && rm -rf "$CARGO_LOCKED"; [ -n "${GUEST_HOME_ABS:-}" ] && rm -rf "$GUEST_HOME_ABS"' EXIT
+work="$(mktemp -d)"; trap 'rm -rf "$work"; [ -n "${CANON_ABS:-}" ] && rm -rf "$CANON_ABS"; [ -n "${CARGO_LOCKED:-}" ] && rm -rf "$CARGO_LOCKED"; [ -n "${GUEST_HOME_ABS:-}" ] && rm -rf "$GUEST_HOME_ABS"; rm -rf /b0/risc0home 2>/dev/null' EXIT
 EVID_A="$work/evid-a"; EVID_B="$work/evid-b"; mkdir -p "$EVID_A" "$EVID_B"
 
 # --- canonical, enforced, RETAINED build argv (exact vector) --------------------------------------
@@ -350,7 +357,7 @@ PY
 # Each build MATERIALIZES its distinct original root at the single canonical build path and compiles
 # THERE (so the compiler-visible source path is identical for A and B), with that build's distinct
 # CARGO_HOME/target (remapped). The original root's path never reaches the compiler.
-declare -A RUN_SHA RUN_B3 G_IMG G_MB T_START T_END MAT_ADDR MAT_CARGO
+declare -A RUN_SHA RUN_B3 G_IMG G_MB T_START T_END MAT_ADDR MAT_CARGO R0_HOME_ADDR R0_TC_ID R0_MUT_CONFINED
 run_one() {
   local tag="$1" src="$2" target="$3" enc="$4" evid="$5" origin_addr="$6" last mat_addr mat_cargo
   # The compiler-visible cargo home is ALWAYS the literal canonical /b0/cargo (NOT a per-build root): the
@@ -364,7 +371,31 @@ run_one() {
   if [ "$CAND" = risc0 ] && [ "$EMBED" = 1 ]; then
     # HOME forces the CARGO*-stripped guest sub-build onto the controlled guest seed; RISC0_BUILD_LOCKED
     # forces it --locked to the committed candidate workspace lock.
-    envv+=(RISC0_HOME="$RISC0_HOME_IN" HOME="$GUEST_HOME_ABS" RISC0_BUILD_LOCKED=1)
+    # The ratified risc0 toolchain home (--risc0-home) is a SEALED, content-addressed authority and may be
+    # READ-ONLY; rzup (risc0-build) initializes WRITABLE state under RISC0_HOME. Materialize a FRESH copy at
+    # the FIXED canonical path per build — under this run's exclusive /b0 lock (held FD 9 through both
+    # builds) — so rzup writes WITHOUT mutating the sealed authority and the path is build-invariant (A==B).
+    # (1) fail-hard clean BEFORE (no mutable state from a prior build survives; canonical path != shared
+    # state); (2) mode-preserving copy; (3) AUTHENTICATE content-equal to the sealed authority BEFORE use
+    # (manifest incl. modes; the read-only copy still matches pre-chmod); (4) only THEN make it writable.
+    local R0_HOME_CANON="/b0/risc0home"
+    rm -rf "$R0_HOME_CANON" || die "build $tag: cannot fail-hard clean canonical risc0 home $R0_HOME_CANON before materialization"
+    cp -a "$RISC0_HOME_IN/." "$R0_HOME_CANON/" || die "build $tag: cannot materialize risc0 home $RISC0_HOME_IN -> $R0_HOME_CANON"
+    local r0_mat_addr; r0_mat_addr="$(b0_source_manifest_addr "$R0_HOME_CANON")" \
+      || die "build $tag: materialized risc0 home is not a clean content-addressable tree"
+    [ "$r0_mat_addr" = "$R0_SEALED_ADDR" ] \
+      || die "build $tag: materialized risc0 home $r0_mat_addr != sealed authority $R0_SEALED_ADDR (working copy not content-equal to the read-only authority)"
+    R0_HOME_ADDR[$tag]="$r0_mat_addr"
+    # R2: the ACTUAL toolchain identity (content-only, whole tree) that WILL compile/execute the guest MUST
+    # reconcile to the ratified per-arch identity — computed on the materialized tree AFTER materialization
+    # and immediately before use (chmod is content-invariant, so this is the identity the build sees).
+    local r0_tc_id; r0_tc_id="$(b0_toolchain_identity risc0 "$R0_HOME_CANON")" \
+      || die "build $tag: cannot compute the materialized risc0 toolchain identity"
+    [ "$r0_tc_id" = "$TOOLCHAIN_IDENTITY" ] \
+      || die "build $tag: materialized risc0 toolchain identity $r0_tc_id != ratified $TOOLCHAIN_IDENTITY (before use)"
+    R0_TC_ID[$tag]="$r0_tc_id"
+    chmod -R u+w "$R0_HOME_CANON" || die "build $tag: cannot make the authenticated risc0 home writable for rzup"
+    envv+=(RISC0_HOME="$R0_HOME_CANON" HOME="$GUEST_HOME_ABS" RISC0_BUILD_LOCKED=1)
   fi
   if [ "$CAND" = sp1 ]; then
     envv+=(PROTOC="$PROTOC_ABS" PROTOC_INCLUDE="$PROTOC_INCLUDE_ABS")
@@ -414,6 +445,28 @@ run_one() {
   RUN_SHA[$tag]="$(sha256_file "$work/artifact.$tag")"
   RUN_B3[$tag]="$(blake3_file "$work/artifact.$tag")"
   read -r "G_IMG[$tag]" "G_MB[$tag]" <<<"$(guest_identity "$target")"
+  # R3/R4: rzup may have written state under RISC0_HOME during the build. Recompute the toolchain identity
+  # (content-only, whole tree). If it is UNCHANGED, nothing mutated -> trivially confined. If CHANGED, the
+  # mutations MUST be confined to NON-toolchain metadata (top-level rzup state, NOT under toolchains/, the
+  # compiler): a per-file content diff vs the sealed authority is taken and ANY changed/added/removed path
+  # under toolchains/ is REFUSED. The mutation inventory is retained in $work (survives) for diagnostics,
+  # even though the writable copy is removed fail-hard just below.
+  if [ "$CAND" = risc0 ] && [ "$EMBED" = 1 ]; then
+    local r0_post_id r0_mut="$work/risc0home.mutations.$tag.txt"
+    r0_post_id="$(b0_toolchain_identity risc0 /b0/risc0home)" || die "build $tag: post-build risc0 toolchain identity failed"
+    if [ "$r0_post_id" = "$TOOLCHAIN_IDENTITY" ]; then
+      printf 'no content mutation: post-build toolchain identity == ratified %s\n' "$TOOLCHAIN_IDENTITY" > "$r0_mut"
+    else
+      ( cd /b0/risc0home && find . -type f | LC_ALL=C sort | while IFS= read -r f; do printf '%s  %s\n' "$(b3sum "$f"|awk '{print $1}')" "$f"; done ) > "$work/r0.post.$tag" \
+        || die "build $tag: post-build risc0 content manifest failed"
+      # lines present in exactly one of {sealed, post} = the mutated/added/removed files (content or path).
+      comm -3 <(LC_ALL=C sort "$R0_SEALED_CONTENT") <(LC_ALL=C sort "$work/r0.post.$tag") > "$r0_mut" || true
+      if awk '{print $NF}' "$r0_mut" | grep -qE '^\./toolchains/'; then
+        die "build $tag: rzup MUTATED the identity-covered toolchain compiler tree (toolchains/) — refusing (not confined to non-toolchain metadata). Inventory: $r0_mut"
+      fi
+    fi
+    R0_MUT_CONFINED[$tag]=true
+  fi
   # GAP 5: authoritative cleanup — remove BOTH the canonical source AND the canonical cargo home FAIL-HARD
   # (never leave authoritative source, nor a populated shared cargo home, behind while reporting success;
   # the next build re-materializes a fresh independent seed, so no cache/generated state is carried A->B).
@@ -422,11 +475,24 @@ run_one() {
   local cleanup_fail=""
   rm -rf "$CANON_ABS"   || cleanup_fail="canonical source $CANON_ABS"
   rm -rf "$CANON_CARGO" || cleanup_fail="${cleanup_fail:+$cleanup_fail + }canonical cargo home $CANON_CARGO"
+  # RISC0: fail-hard remove the writable risc0-home working copy AFTER the build too, so rzup's mutable
+  # state (settings/locks it wrote under RISC0_HOME) can NEVER be shared into the next build (A->B).
+  if [ "$CAND" = risc0 ] && [ "$EMBED" = 1 ]; then
+    rm -rf /b0/risc0home || cleanup_fail="${cleanup_fail:+$cleanup_fail + }canonical risc0 home /b0/risc0home"
+  fi
   if [ -n "$cleanup_fail" ]; then
     trap - EXIT
     die "build $tag: FAILED to remove $cleanup_fail; authoritative state may remain. Diagnostics preserved at $work"
   fi
 }
+# RISC0: retain the sealed authority's per-file CONTENT manifest ONCE (chmod-invariant), so each build's
+# post-build mutation inventory (any rzup writes) is diffed against the ratified read-only authority (R3/R4).
+R0_SEALED_CONTENT=""
+if [ "$CAND" = risc0 ] && [ "$EMBED" = 1 ]; then
+  R0_SEALED_CONTENT="$work/r0.sealed.content"
+  ( cd "$RISC0_HOME_IN" && find . -type f | LC_ALL=C sort | while IFS= read -r f; do printf '%s  %s\n' "$(b3sum "$f"|awk '{print $1}')" "$f"; done ) > "$R0_SEALED_CONTENT" \
+    || die "cannot compute sealed risc0 content manifest for the post-build mutation diff"
+fi
 run_one a "$SRC_A_CANON" "$TARGET_A" "$ENC_A" "$EVID_A" "$SRC_A_MANIFEST_ADDR"
 log "build A done: sha256=${RUN_SHA[a]} blake3=${RUN_B3[a]} guest_img=${G_IMG[a]}"
 run_one b "$SRC_B_CANON" "$TARGET_B" "$ENC_B" "$EVID_B" "$SRC_B_MANIFEST_ADDR"
@@ -500,6 +566,10 @@ log "reproducible runner verified (candidate=$CAND arch=$ARCH): blake3=${RUN_B3[
 # --- emit the rich runner-recipe facts JSON (exact bytes for A and B + double-build proof) ---------
 ENC_A_HEX="$(printf '%s' "$ENC_A" | od -An -v -tx1 | tr -d ' \n')"
 ENC_B_HEX="$(printf '%s' "$ENC_B" | od -An -v -tx1 | tr -d ' \n')"
+# build_argv is the EXACT executed argv — it INCLUDES `--offline` (cargo actually runs offline). The
+# `offline`/`cargo_net_offline` facts are REDUNDANT enforcement of the same truth, not a substitute for
+# retaining the flag in the argv. `RunnerBuildRecipeV1::check_argv` requires the canonical full vector to
+# contain exactly one `--offline`.
 ARGV_JSON="$(printf '%s\n' "${ARGV[@]}" | python3 -c 'import json,sys; print(json.dumps([l.rstrip("\n") for l in sys.stdin]))')"
 # Env retained as an ordered vector (only reproducibility-relevant keys).
 ENV_JSON="$(python3 -c 'import json,sys; print(json.dumps([["BUILD_GIT_SHA",sys.argv[1]],["SOURCE_DATE_EPOCH","0"],["B0_VENUE_EMBED",sys.argv[2]]]))' "$EXPECT_SHA" "$EMBED")"
@@ -535,8 +605,19 @@ d={"offline":True,"cargo_net_offline":True,
    "host_toolchain_attestation":{"address":sys.argv[3],"json_sha256":sys.argv[4]}}
 if sys.argv[5]: d["protoc_authority"]={"address":sys.argv[5],"json_sha256":sys.argv[6]}
 if sys.argv[7]: d["risc0_guest_embed"]={"guest_elf_sha256":sys.argv[7],"guest_elf_blake3":sys.argv[8],"risc0_build_locked":True}
+# Retained RISC0 toolchain-home authority evidence: the sealed read-only authority (content+mode manifest)
+# and each per-build materialized working copy, PROVEN content-equal to it before use (fresh per build,
+# under the exclusive /b0 lock, never shared as mutable state, fail-hard cleaned before AND after).
+if sys.argv[9]:
+    d["risc0_home_seed"]={"origin_address":sys.argv[9],"materialized_a":sys.argv[10],"materialized_b":sys.argv[11],
+                          "authenticated_content_equal":(sys.argv[9]==sys.argv[10]==sys.argv[11] and bool(sys.argv[10])),
+                          "toolchain_identity":sys.argv[12],
+                          "fresh_per_build":True,"under_canonical_path_lock":True,
+                          "not_shared_mutable_state":True,"fail_hard_cleaned_before_and_after":True,
+                          "post_build_mutation_confined_a":(sys.argv[13]=="true"),
+                          "post_build_mutation_confined_b":(sys.argv[14]=="true")}
 print(json.dumps(d))
-' "$DEP_SEED_ADDR" "$DEP_SEED_JSON_SHA" "$HOST_TC_ADDR" "$HOST_TC_SHA" "$PROTOC_AUTH_ADDR" "$PROTOC_AUTH_SHA" "$GUEST_ELF_SHA" "$GUEST_ELF_B3")"
+' "$DEP_SEED_ADDR" "$DEP_SEED_JSON_SHA" "$HOST_TC_ADDR" "$HOST_TC_SHA" "$PROTOC_AUTH_ADDR" "$PROTOC_AUTH_SHA" "$GUEST_ELF_SHA" "$GUEST_ELF_B3" "$R0_SEALED_ADDR" "${R0_HOME_ADDR[a]:-}" "${R0_HOME_ADDR[b]:-}" "${R0_TC_ID[a]:-}" "${R0_MUT_CONFINED[a]:-}" "${R0_MUT_CONFINED[b]:-}")"
 
 python3 - "$RECIPE_OUT" "$CAND" "$ARCH" "$MANIFEST" "$ARTIFACT" "$CARGO_IDENT" "$EMBED" \
   "$TOOLCHAIN_IDENTITY" "$WRAPPER_B3" "$ARGV_JSON" "$ENV_JSON" "$REFUSED_JSON" \
@@ -635,6 +716,17 @@ with open(out, 'w', encoding='utf-8') as f:
     f.write('\n')
 PY
 [ -s "$RECIPE_OUT" ] || die "runner-recipe facts JSON was not written: $RECIPE_OUT"
+
+# --runner-out: expose the AUTHENTICATED runner binary (build A, PROVEN byte-identical to build B above)
+# so a caller — Phase-1 RISC0 identity emission AND measurement — invokes the EXACT path-independent
+# artifact this double-build produced (canonical /b0/tooling), never a separate checkout-local build. Its
+# BLAKE3 equals the recipe's build_a.runner_blake3 (asserted here); consumers re-check that binding.
+if [ -n "$RUNNER_OUT" ]; then
+  cp -f "$work/artifact.a" "$RUNNER_OUT" || die "cannot write --runner-out $RUNNER_OUT"
+  chmod +x "$RUNNER_OUT" 2>/dev/null || true
+  _ro_b3="$(blake3_file "$RUNNER_OUT")"
+  [ "$_ro_b3" = "${RUN_B3[a]}" ] || die "--runner-out blake3 $_ro_b3 != authenticated runner ${RUN_B3[a]} (copy corrupted)"
+fi
 
 printf '# b0-final double-build reproducibility + path-independence attestation (v3)\n'
 printf 'candidate=%s\narch=%s\nbuild_git_sha=%s\nb0_venue_embed=%s\n' "$CAND" "$ARCH" "$EXPECT_SHA" "$EMBED"

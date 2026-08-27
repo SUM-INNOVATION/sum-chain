@@ -1275,6 +1275,35 @@ b0_build_recipe_hash() { # <sp1|risc0>
   printf '%s' "$recipe" | b3sum | awk '{print $1}'
 }
 
+# The ONE construction of the `--emit-identity` argument vector for the measurement runner, shared by
+# BOTH callers — the phase-1 guest-set identity path (derive_guest_set.sh) AND the measurement-build
+# identity re-derivation (measure_fragment.sh) — so the two can never drift from each other or from the
+# runner's `--emit-identity` CLI contract again (the drift that silently omitted --tooling-commit /
+# --tooling-pathset-blake3 / --canonical-sp1-guest-artifact-address from the measurement path). Every arg
+# the runner's `emit_identity` REQUIRES is produced here; the two `emit_identity_contract` tests assert
+# this set stays == the runner's `req(args, "--…")` set per candidate. Emits the tokens NUL-delimited so
+# the caller reconstructs the array robustly:  while IFS= read -r -d '' t; do a+=("$t"); done < <(...).
+# Fail-closed: SP1 REQUIRES a guest-elf AND a canonical-sp1-guest-artifact-address (both are `req` in the
+# SP1 runner); RISC0 takes neither (its guest is embedded at runner-build time).
+b0_emit_identity_args() { # <sp1|risc0> <arch> <spec> <tree_hash> <lock_hash> <recipe_hash> <builder_digest> <toolchain_identity> <source_commit> <clean_tree true|false> <vmat_json> <tooling_commit> <tooling_pathset_blake3> [<guest_elf> <canonical_sp1_artifact_address>]
+  local cand="$1" arch="$2" spec="$3" tree="$4" lock="$5" recipe="$6" bdigest="$7" tcid="$8" \
+        src="$9" clean="${10}" vmat="${11}" tcommit="${12}" tpathset="${13}" gelf="${14:-}" canonaddr="${15:-}"
+  case "$cand" in sp1|risc0) ;; *) echo "b0_emit_identity_args: candidate must be sp1|risc0 (got '$cand')" >&2; return 2 ;; esac
+  local a=( --emit-identity --arch "$arch" --spec-hash "$spec"
+    --guest-source-tree-hash "$tree" --candidate-dep-lock-hash "$lock"
+    --build-command-hash "$recipe" --builder-digest "$bdigest" --toolchain-identity "$tcid"
+    --source-commit "$src" --clean-tree "$clean" --verifier-material "$vmat"
+    # Two-root: the SEPARATE measurement-tooling authority the derivation ran under (never inferred from
+    # the measured source; verified against the tooling authority by the validator/independent import).
+    --tooling-commit "$tcommit" --tooling-pathset-blake3 "$tpathset" )
+  if [ "$cand" = sp1 ]; then
+    [ -n "$gelf" ]      || { echo "b0_emit_identity_args: SP1 requires a guest-elf path" >&2; return 2; }
+    [ -n "$canonaddr" ] || { echo "b0_emit_identity_args: SP1 requires a canonical-sp1-guest-artifact-address" >&2; return 2; }
+    a+=( --guest-elf "$gelf" --canonical-sp1-guest-artifact-address "$canonaddr" )
+  fi
+  local t; for t in "${a[@]}"; do printf '%s\0' "$t"; done
+}
+
 # ============================================================================================
 # Canonical RUNNER-BUILD path-independence recipe (cross-arch: SP1/x86, SP1/aarch64, RISC0/x86).
 #
@@ -1604,6 +1633,125 @@ obj["address"] = hashlib.sha256(pre.encode()).hexdigest()
 with open(out, "w") as f:
     json.dump(obj, f, indent=1, sort_keys=True); f.write("\n")
 PY
+}
+
+# Domain + shared content-address for the SP1 guest DEPENDENCY-SEED AUTHORITY (the once-provisioned,
+# content-addressed offline vendor seed). VENUE-INDEPENDENT preimage: it binds the seed inventory address
+# (which binds the exact vendored bytes), the guest lock, the vendor config, the pinned provisioning cargo
+# attestation + exact command, and the full crate package coordinates + crates.io checksums — never a local
+# path. provision + consume + BOTH sealed-import verifiers recompute this from the record and require
+# equality, so the seed authority cannot be forged or drift. Prints the 64-hex SHA-256 to stdout.
+B0_SP1_DEP_SEED_AUTHORITY_DOMAIN='b0-final-sp1-guest-dep-seed-authority/v1'
+b0_sp1_dep_seed_authority_address() { # <record.json>  (record WITHOUT trusting its own "address")
+  python3 - "$1" "$B0_SP1_DEP_SEED_AUTHORITY_DOMAIN" <<'PY'
+import json, sys, hashlib
+rec = json.load(open(sys.argv[1], encoding="utf-8")); domain = sys.argv[2]
+if rec.get("schema") != domain:
+    sys.exit(f"seed-authority schema {rec.get('schema')!r} != {domain}")
+p = rec["provisioning"]
+fields = [domain, rec["measured_source_commit"], rec["guest_lock_sha256"], rec["guest_lock_blake3"],
+          rec["seed_inventory_address"], rec["vendor_config_sha256"],
+          p["cargo_version"], p["cargo_bin_blake3"], p["toolchain"], p["command"],
+          str(rec["package_count"])]
+pkgs = rec["packages"]
+if len(pkgs) != rec["package_count"]:
+    sys.exit("package_count != len(packages)")
+# canonical order: sorted by (name, version); each contributes its coordinates + crates.io checksum
+for pk in sorted(pkgs, key=lambda x: (x["name"], x["version"])):
+    fields += [pk["name"], pk["version"], pk.get("source", ""), pk.get("crates_io_checksum", "")]
+sys.stdout.write(hashlib.sha256("\0".join(fields).encode()).hexdigest())
+PY
+}
+
+# The SUPERSEDED SP1 guest dep-seed (provisioned by ambient, unratified cargo 1.97.1; excludes the
+# cargo-1.90 VCS/dev metadata). The ratified cargo-1.90 seed must NEVER equal it; consume + provision refuse it.
+B0_SP1_DEP_SEED_SUPERSEDED_ADDR='8584a56d37b508de9648a1c1c4207648884a6c24e910e07cde7943473f219d6b'
+B0_SP1_DEP_SEED_RATIFIED_TOOLCHAIN='1.90.0-x86_64-unknown-linux-gnu'
+
+# Authenticate a sealed SP1 guest dep-seed PACKAGE and materialize its EXACT copied bytes into <dest>
+# ({vendor/,config.toml}) for an OFFLINE build. This is the ONE shared authentication both the canonical
+# guest producer and the tests drive, so they cannot drift. It re-authenticates the authority record from
+# scratch (own address recompute; .content-address agreement), enforces policy (NOT the superseded ambient
+# seed; provisioned by the ratified cargo 1.90.0; its guest lock is the caller's committed lock), then
+# verifies the sealed seed inventory address BOTH from the record and AFTER materialization (copied bytes
+# re-hash == sealed). Any missing / mutated / substituted / superseded / wrong-lock / wrong-toolchain seed
+# is REFUSED via `return 1` (NOT exit — callers wrap with `|| die`, tests assert the nonzero). On success
+# prints one line: `<authority_address> <seed_inventory_address> <vendor_config_sha256>`.
+b0_authenticate_sp1_guest_seed_pkg() { # <seed-pkg> <expected_guest_lock_sha256> <dest-seed-dir>
+  local seedpkg="${1:-}" want_lock="${2:-}" dest="${3:-}"
+  [ -n "$seedpkg" ] && [ -n "$want_lock" ] && [ -n "$dest" ] \
+    || { echo "REFUSED: b0_authenticate_sp1_guest_seed_pkg <seed-pkg> <expected_guest_lock_sha256> <dest-seed-dir>" >&2; return 1; }
+  local seedrec="$seedpkg/sp1-guest-dep-seed-authority.v1.json"
+  [ -d "$seedpkg/vendor" ] && [ -s "$seedpkg/config.toml" ] && [ -s "$seedrec" ] \
+    || { echo "REFUSED: SP1 guest dep-seed package incomplete (need vendor/ + config.toml + authority record): $seedpkg" >&2; return 1; }
+  local rec_addr got_addr sealed_seed_addr rec_tc rec_lock_sha
+  rec_addr="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["address"])' "$seedrec" 2>/dev/null)" \
+    || { echo "REFUSED: SP1 dep-seed authority record has no readable address" >&2; return 1; }
+  got_addr="$(b0_sp1_dep_seed_authority_address "$seedrec")" \
+    || { echo "REFUSED: SP1 dep-seed authority address recompute failed (record malformed)" >&2; return 1; }
+  [ "$rec_addr" = "$got_addr" ] \
+    || { echo "REFUSED: SP1 dep-seed authority address $rec_addr != recomputed $got_addr (record tampered)" >&2; return 1; }
+  { [ -f "$seedpkg/.content-address" ] && [ "$(tr -d ' \t\n' < "$seedpkg/.content-address")" = "$rec_addr" ]; } \
+    || { echo "REFUSED: SP1 dep-seed .content-address != authority record address (package tampered)" >&2; return 1; }
+  sealed_seed_addr="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["seed_inventory_address"])' "$seedrec" 2>/dev/null)" \
+    || { echo "REFUSED: SP1 dep-seed record has no seed_inventory_address" >&2; return 1; }
+  [ "$sealed_seed_addr" != "$B0_SP1_DEP_SEED_SUPERSEDED_ADDR" ] \
+    || { echo "REFUSED: SP1 dep-seed is the SUPERSEDED ambient-cargo-1.97.1 seed ($B0_SP1_DEP_SEED_SUPERSEDED_ADDR)" >&2; return 1; }
+  rec_tc="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["provisioning"]["toolchain"])' "$seedrec" 2>/dev/null)" \
+    || { echo "REFUSED: SP1 dep-seed record has no provisioning.toolchain" >&2; return 1; }
+  [ "$rec_tc" = "$B0_SP1_DEP_SEED_RATIFIED_TOOLCHAIN" ] \
+    || { echo "REFUSED: SP1 dep-seed not provisioned by ratified cargo 1.90.0 (toolchain $rec_tc); ambient cargo refused" >&2; return 1; }
+  rec_lock_sha="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["guest_lock_sha256"])' "$seedrec" 2>/dev/null)" \
+    || { echo "REFUSED: SP1 dep-seed record has no guest_lock_sha256" >&2; return 1; }
+  [ "$rec_lock_sha" = "$want_lock" ] \
+    || { echo "REFUSED: SP1 dep-seed guest_lock_sha256 $rec_lock_sha != expected $want_lock (seed is for a different lock)" >&2; return 1; }
+  # materialize COPIED bytes, then re-verify the copied inventory == sealed (verify AFTER materialization).
+  rm -rf "$dest"; mkdir -p "$dest"
+  cp -a "$seedpkg/vendor" "$dest/vendor" 2>/dev/null \
+    && cp -a "$seedpkg/config.toml" "$dest/config.toml" 2>/dev/null \
+    || { echo "REFUSED: SP1 dep-seed materialization copy failed" >&2; return 1; }
+  local mat_addr; mat_addr="$(b0_seed_inventory_address "$dest")" \
+    || { echo "REFUSED: materialized SP1 seed inventory address failed" >&2; return 1; }
+  [ "$mat_addr" = "$sealed_seed_addr" ] \
+    || { echo "REFUSED: materialized SP1 seed address $mat_addr != sealed $sealed_seed_addr (seed bytes corrupted/substituted)" >&2; return 1; }
+  local vcfg; vcfg="$(sha256sum "$dest/config.toml" | awk '{print $1}')"
+  printf '%s %s %s\n' "$rec_addr" "$sealed_seed_addr" "$vcfg"
+}
+
+# RISC0 Option B — the AUTHENTICATED double-build runner is the SINGLE source of truth for the RISC0 guest.
+# This is the ONE shared binding both Phase-1 identity emission (derive_guest_set.sh) and measurement
+# (measure_fragment.sh) drive, so the identity and the measurement CANNOT be derived from different runners:
+# each requires its runner's BLAKE3 to equal the recipe's authenticated build-A runner hash, for a RISC0
+# REAL embed (b0_venue_embed==1) on the expected arch. A checkout-local runner (different bytes — rustc
+# StableCrateId/-Cmetadata encodes the absolute source path, so a direct build cannot match) is REFUSED.
+# When <ratified_tc> is non-empty the recipe's per-arch toolchain identity must also equal it (Phase-1
+# passes it; measurement passes "" because it gates the LOCAL prover toolchain separately). Prints
+# "<runner_blake3> <guest_image_id>" on success; `return 1` (REFUSED) on any mismatch.
+b0_verify_risc0_authenticated_runner() { # <runner_bin> <recipe_json> <arch> [ratified_tc]
+  local runner="${1:-}" recipe="${2:-}" arch="${3:-}" ratified_tc="${4:-}"
+  [ -n "$runner" ] && [ -n "$recipe" ] && [ -n "$arch" ] \
+    || { echo "REFUSED: b0_verify_risc0_authenticated_runner <runner_bin> <recipe_json> <arch> [ratified_tc]" >&2; return 1; }
+  [ -x "$runner" ] || { echo "REFUSED: authenticated RISC0 runner absent/not-executable: $runner" >&2; return 1; }
+  [ -s "$recipe" ] || { echo "REFUSED: authenticated RISC0 runner recipe absent/empty: $recipe" >&2; return 1; }
+  local rec_rb3 rec_cand rec_arch rec_embed rec_tc rec_gimg
+  rec_rb3="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["build_a"]["runner_blake3"])' "$recipe" 2>/dev/null)" \
+    || { echo "REFUSED: recipe missing build_a.runner_blake3" >&2; return 1; }
+  rec_gimg="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["build_a"]["guest_image_id"])' "$recipe" 2>/dev/null)" \
+    || { echo "REFUSED: recipe missing build_a.guest_image_id" >&2; return 1; }
+  rec_cand="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["candidate"])' "$recipe" 2>/dev/null)"
+  rec_arch="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["arch"])' "$recipe" 2>/dev/null)"
+  rec_embed="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["b0_venue_embed"])' "$recipe" 2>/dev/null)"
+  rec_tc="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["per_arch_toolchain_identity"])' "$recipe" 2>/dev/null)"
+  local rb3; rb3="$(b3sum "$runner" | awk '{print $1}')"
+  [ "$rb3" = "$rec_rb3" ] \
+    || { echo "REFUSED: RISC0 runner blake3 $rb3 != recipe authenticated runner $rec_rb3 (not the double-build artifact; refusing checkout-local build)" >&2; return 1; }
+  [ "$rec_cand" = risc0 ] || { echo "REFUSED: recipe candidate $rec_cand != risc0" >&2; return 1; }
+  [ "$rec_arch" = "$arch" ] || { echo "REFUSED: recipe arch $rec_arch != $arch" >&2; return 1; }
+  [ "$rec_embed" = 1 ] || { echo "REFUSED: recipe b0_venue_embed $rec_embed != 1 (RISC0 identity requires a REAL embed)" >&2; return 1; }
+  if [ -n "$ratified_tc" ]; then
+    [ "$rec_tc" = "$ratified_tc" ] || { echo "REFUSED: recipe per_arch_toolchain_identity $rec_tc != ratified $ratified_tc" >&2; return 1; }
+  fi
+  printf '%s %s\n' "$rb3" "$rec_gimg"
 }
 
 # ============================================================================================

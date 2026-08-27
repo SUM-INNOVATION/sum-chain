@@ -95,21 +95,23 @@ produce() {
 
   local work; work="$(mktemp -d)"; trap 'rm -rf "${work:-}"' EXIT
 
-  # ---- offline guest dependency seed: vendor candidates/sp1 --locked (network ONCE), address it ----
-  note "materializing offline SP1 guest dependency seed (cargo vendor --locked)"
+  # ---- CONSUME the ONE authenticated, content-addressed OFFLINE dependency seed (NO live re-vendor) ----
+  # The seed was provisioned ONCE by provision_sp1_guest_seed.sh (the single disclosed cargo +1.90.0 vendor
+  # network step) and sealed. Here we ONLY verify + materialize COPIED bytes; we NEVER re-vendor and NEVER
+  # touch the network. A missing / mutated / substituted / superseded (8584a56d, ambient cargo 1.97.1) /
+  # wrong-lock / non-1.90 seed is refused. The A/B builds below run --locked --offline + --network none.
+  # ONE shared authentication (lib.sh b0_authenticate_sp1_guest_seed_pkg) the tests drive too, so producer
+  # and tests cannot drift: it re-authenticates the authority record from scratch, enforces policy (NOT the
+  # superseded 8584a56d ambient-1.97.1 seed; provisioned by the ratified cargo 1.90.0; guest lock == THIS
+  # committed lock), materializes the copied {vendor,config} bytes into $work/seed, and re-verifies the
+  # materialized inventory == sealed. Prints `<authority_addr> <seed_inventory_addr> <vendor_config_sha256>`.
+  [ -n "${B0_SP1_GUEST_DEP_SEED_PKG:-}" ] || die "B0_SP1_GUEST_DEP_SEED_PKG (the sealed, authenticated SP1 guest dep-seed package) is required"
+  local dep_seed_authority_address dep_seed_address vendor_config_sha256 _seedline
+  _seedline="$(b0_authenticate_sp1_guest_seed_pkg "$B0_SP1_GUEST_DEP_SEED_PKG" "$guest_lock_sha256" "$work/seed")" \
+    || die "SP1 guest dep-seed authentication failed (see REFUSED above)"
+  read -r dep_seed_authority_address dep_seed_address vendor_config_sha256 <<<"$_seedline"
   local seed="$work/seed/vendor" seed_config="$work/seed/config.toml"
-  mkdir -p "$work/seed"
-  ( cd "$B0_MEASURED_ROOT/candidates/sp1" \
-    && CARGO_HOME="$work/prov" cargo vendor --locked --versioned-dirs "$seed" ) >"$seed_config" 2>"$work/vendor.err" \
-    || { sed -n '1,8p' "$work/vendor.err" >&2; die "SP1 guest vendor failed"; }
-  # CANONICALIZE the vendor config's directory path: cargo vendor records the absolute (mktemp) vendor
-  # path, which varies per run and would make the seed address non-reproducible. The actual in-container
-  # build uses a FIXED /b0seed/vendor path (below), so the recorded path is provenance-inert — pin it to
-  # a canonical constant so two produces yield the identical seed address + vendor_config_sha256.
-  sed -i 's#^directory = .*#directory = "/b0/canonical/sp1-guest-vendor"#' "$seed_config"
-  b0_config_add_offline "$seed_config"
-  local dep_seed_address; dep_seed_address="$(b0_seed_inventory_address "$work/seed")" || die "seed inventory address failed"
-  local vendor_config_sha256; vendor_config_sha256="$(sha256sum "$seed_config" | awk '{print $1}')"
+  note "consumed sealed SP1 guest dep-seed authority $dep_seed_authority_address (seed $dep_seed_address; NO re-vendor; offline)"
 
   # ---- build the guest ELF TWICE in independent clean roots, OFFLINE (--network none) ----
   # Vendored crates mounted read-only at a FIXED path; a fixed source-replacement config
@@ -175,6 +177,7 @@ fields=dict(
   staged_context_blake3="",  # reserved; the guest workspace is the measured tree, addressed by the lock+source below
   guest_lock_sha256="$guest_lock_sha256", guest_lock_blake3="$guest_lock_blake3",
   dependency_seed_address="$dep_seed_address", vendor_config_sha256="$vendor_config_sha256",
+  dependency_seed_authority_address="$dep_seed_authority_address",
   builder_image_id="${img#sha256:}", builder_config_digest="$builder_config_digest",
   builder_platform="$builder_platform", sp1_toolchain_identity="$sp1_tc",
   build_argv="$CANON_BUILD_ARGV",
@@ -191,6 +194,7 @@ def addr(f):
       f["schema"], f["candidate"], f["canonical_build_arch"], f["measured_source_commit"],
       f["tooling_commit"], f["tooling_pathset_blake3"], f["staged_context_blake3"],
       f["guest_lock_sha256"], f["guest_lock_blake3"], f["dependency_seed_address"], f["vendor_config_sha256"],
+      f["dependency_seed_authority_address"],
       f["builder_image_id"], f["builder_config_digest"], f["builder_platform"], f["sp1_toolchain_identity"],
       f["build_argv"], f["build_env_address"], f["command_log_address"],
       f["build_a"]["elf_sha256"], f["build_b"]["elf_sha256"],
@@ -234,7 +238,8 @@ if f.get("guest_image_hash")!=re_bl: bad("guest_image_hash != blake3(ELF)")
 if not (f.get("build_a",{}).get("elf_sha256")==re_sha==f.get("build_b",{}).get("elf_sha256")): bad("A/B double-build proof does not match the sealed ELF")
 dbp=f.get("double_build_proof",{})
 if not all(dbp.get(k) for k in ("byte_identical","cmp_ok","sha256_equal","blake3_equal","wallclock_separated")): bad("incomplete/non-reproducible double-build proof")
-pre="\0".join([f[k] for k in ["schema","candidate","canonical_build_arch","measured_source_commit","tooling_commit","tooling_pathset_blake3","staged_context_blake3","guest_lock_sha256","guest_lock_blake3","dependency_seed_address","vendor_config_sha256","builder_image_id","builder_config_digest","builder_platform","sp1_toolchain_identity","build_argv","build_env_address","command_log_address"]]
+if not f.get("dependency_seed_authority_address"): bad("missing dependency_seed_authority_address (canonical guest not built from the sealed authenticated seed)")
+pre="\0".join([f[k] for k in ["schema","candidate","canonical_build_arch","measured_source_commit","tooling_commit","tooling_pathset_blake3","staged_context_blake3","guest_lock_sha256","guest_lock_blake3","dependency_seed_address","vendor_config_sha256","dependency_seed_authority_address","builder_image_id","builder_config_digest","builder_platform","sp1_toolchain_identity","build_argv","build_env_address","command_log_address"]]
     +[f["build_a"]["elf_sha256"],f["build_b"]["elf_sha256"],str(f["elf_size"]),f["elf_sha256"],f["elf_blake3"],f["program_id"],f["guest_image_hash"]])
 if hashlib.sha256(pre.encode()).hexdigest()!=f.get("address"): bad("artifact address recompute mismatch (manifest tampered)")
 print("artifact_address="+f["address"])

@@ -73,14 +73,13 @@ case "$MODE" in
     RECIPE_HASH="$(b0_build_recipe_hash "$CAND")" || die "unknown build recipe for $CAND"
     emit_once() { # <n>
       local d="$scratch/b$1"; mkdir -p "$d/guest"
-      # #2/#4: arch-neutral canonical recipe hash; #3: real toolchain identity (not a label).
-      local -a idargs=(--emit-identity --arch "$ARCH" --spec-hash "$SPEC_HASH"
-        --guest-source-tree-hash "$TREE_HASH" --candidate-dep-lock-hash "$LOCK_HASH"
-        --build-command-hash "$RECIPE_HASH" --source-commit "$SRC_COMMIT" --clean-tree "$CLEAN"
-        --verifier-material "$VMAT_JSON"
-        # Two-root: bind the SEPARATE tooling authority into the identity record (never compared to
-        # the measured source; verified against the tooling authority by the validator).
-        --tooling-commit "$B0_TOOLING_COMMIT" --tooling-pathset-blake3 "$B0_TOOLING_PATHSET_BLAKE3")
+      # Candidate-specific inputs to the SHARED --emit-identity contract: builder digest, real toolchain
+      # identity, the emitting runner binary, and — SP1 only — the distributed guest ELF + the canonical
+      # artifact address. The runner binary itself differs: SP1 emits from the shared MEASURE_RUNNER;
+      # RISC0 emits from a FRESH independently-built runner (guest embedded at build time) so two clean
+      # builds must agree. The argument VECTOR is then built by the ONE shared constructor
+      # (b0_emit_identity_args), identical to measure_fragment's measurement-build re-derivation.
+      local runner_bin builder_digest tc guest_elf="" canon_addr=""
       if [ "$CAND" = sp1 ]; then
         local rd; rd="$(readlink -f "$PROVER_REAL_DOCKER")"
         # CONSUME the ONE canonical SP1 guest artifact — NEVER rebuild. SP1's per-arch succinct
@@ -97,37 +96,57 @@ case "$MODE" in
         # bind: the artifact must be the guest of THIS ratified measured source.
         local art_msc; art_msc="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["measured_source_commit"])' "$canon_man")"
         [ "$art_msc" = "$SRC_COMMIT" ] || die "canonical artifact measured_source_commit $art_msc != measured $SRC_COMMIT"
-        local art_addr; art_addr="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["address"])' "$canon_man")"
+        canon_addr="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["address"])' "$canon_man")"
         # use the retained ELF bytes verbatim; the runner derives program_id/guest_image_hash from
         # THESE bytes, so both arches necessarily agree (that is the shared-program guarantee).
-        mkdir -p "$d/guest"; cp "$canon_elf" "$d/guest/guest.elf"
+        cp "$canon_elf" "$d/guest/guest.elf"; guest_elf="$d/guest/guest.elf"
         # builder/toolchain identify THIS proving venue's ratified image (per-arch; reconcile_sp1 keeps
         # both). The shared guest identity is bound via --canonical-sp1-guest-artifact-address.
         local img; img="$("$rd" image inspect --format '{{.Id}}' "$VERIFIER_REF" 2>/dev/null || true)"
         case "$img" in sha256:*) ;; *) die "VERIFIER_REF did not reconcile to an immutable image id" ;; esac
-        local tc; tc="$(b0_toolchain_identity sp1 "$img")"
+        tc="$(b0_toolchain_identity sp1 "$img")"
         [ "$tc" = "$RATIFIED_TC" ] || die "SP1 toolchain identity $tc != ratified $RATIFIED_TC"
-        idargs+=(--guest-elf "$d/guest/guest.elf" --builder-digest "${img#sha256:}" --toolchain-identity "$tc" \
-                 --canonical-sp1-guest-artifact-address "$art_addr")
+        builder_digest="${img#sha256:}"; runner_bin="$MEASURE_RUNNER"
       else
         # #1: the RISC Zero guest is embedded at runner BUILD time, so a genuine second build
-        # is a fresh `cargo build --features real-backend` with B0_VENUE_EMBED=1 into a SEPARATE
-        # target dir; both independently-built runner binaries must agree on the identity.
-        need_env RISC0_RUNNER_MANIFEST; need_env PROVER_RISC0_HOME
-        local tgt="$d/target"
-        ( cd "$ROOT/.." && B0_VENUE_EMBED=1 RISC0_HOME="$PROVER_RISC0_HOME" CARGO_TARGET_DIR="$tgt" \
-            cargo build --release --features real-backend --manifest-path "$RISC0_RUNNER_MANIFEST" ) \
-          || die "RISC Zero runner build $1 failed"
-        local rbin="$tgt/release/b0-pre-measure-risc0"
-        [ -x "$rbin" ] || die "RISC Zero runner binary $1 absent"
-        local tc; tc="$(b0_toolchain_identity risc0 "$PROVER_RISC0_HOME")"
+        # OPTION B — the AUTHENTICATED double-build is the SINGLE source of truth. RISC0 identity is
+        # derived from the EXACT runner double_build_runner.sh produced at the canonical /b0/tooling path
+        # (path-INDEPENDENT: rustc StableCrateId/-Cmetadata encodes the absolute source path, which a
+        # direct checkout-local build cannot neutralize). There is NO checkout-local build fallback: a
+        # missing authenticated runner / recipe, or a runner whose bytes != the recipe's authenticated
+        # runner, is REFUSED. The same authenticated runner drives measurement, so identity==measurement.
+        need_env PROVER_RISC0_HOME
+        need_env B0_RISC0_AUTHENTICATED_RUNNER   # --runner-out of double_build_runner (canonical /b0/tooling)
+        need_env B0_RUNNER_RECIPE_JSON           # its matching recipe facts
+        runner_bin="$B0_RISC0_AUTHENTICATED_RUNNER"
+        # ONE shared Option-B binding (lib.sh b0_verify_risc0_authenticated_runner): the runner's blake3 ==
+        # the recipe's authenticated build-A runner, for a RISC0 REAL embed on THIS arch under the ratified
+        # per-arch toolchain. measure_fragment drives the SAME helper, so identity and measurement cannot be
+        # derived from different runners. Returns the runner blake3 (== builder_digest) + the recipe's
+        # guest_image_id (bound below to the emitted program_id). No checkout-local build fallback.
+        local rec_gimg _rr
+        _rr="$(b0_verify_risc0_authenticated_runner "$runner_bin" "$B0_RUNNER_RECIPE_JSON" "$ARCH" "$RATIFIED_TC")" \
+          || die "RISC0 authenticated-runner verification failed (see REFUSED above)"
+        read -r builder_digest rec_gimg <<<"$_rr"
+        # #3: the LOCAL prover toolchain tree must also reconcile to the ratified identity.
+        tc="$(b0_toolchain_identity risc0 "$PROVER_RISC0_HOME")"
         [ "$tc" = "$RATIFIED_TC" ] || die "RISC0 toolchain identity $tc != ratified $RATIFIED_TC"
-        idargs+=(--builder-digest "$(b3 "$rbin")" --toolchain-identity "$tc")
-        # emit from THIS independently-built runner (not a single prebuilt one):
-        "$rbin" "${idargs[@]}" > "$d/record.json" || die "runner --emit-identity $1 failed"
-        return 0
       fi
-      "$MEASURE_RUNNER" "${idargs[@]}" > "$d/record.json" || die "runner --emit-identity $1 failed"
+      # ONE shared construction of the --emit-identity argument vector (lib.sh), byte-for-byte the same
+      # contract measure_fragment's measurement-build re-derivation uses, so the two cannot drift.
+      local -a idargs=()
+      while IFS= read -r -d '' _t; do idargs+=("$_t"); done < <(
+        b0_emit_identity_args "$CAND" "$ARCH" "$SPEC_HASH" "$TREE_HASH" "$LOCK_HASH" "$RECIPE_HASH" \
+          "$builder_digest" "$tc" "$SRC_COMMIT" "$CLEAN" "$VMAT_JSON" \
+          "$B0_TOOLING_COMMIT" "$B0_TOOLING_PATHSET_BLAKE3" "$guest_elf" "$canon_addr" ) \
+        || die "emit-identity argument construction failed (candidate contract)"
+      "$runner_bin" "${idargs[@]}" > "$d/record.json" || die "runner --emit-identity $1 failed"
+      if [ "$CAND" = risc0 ]; then
+        # the identity the AUTHENTICATED runner derived from its embedded guest MUST equal the recipe's
+        # path-independent guest_image_id — the double-build IS the single source of truth for the guest.
+        local got_pid; got_pid="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["program_id"])' "$d/record.json")"
+        [ "$got_pid" = "$rec_gimg" ] || die "RISC0 identity program_id $got_pid != authenticated recipe guest_image_id $rec_gimg (identity is not the double-build guest)"
+      fi
     }
     emit_once 1; emit_once 2
     # Two clean builds MUST yield a byte-identical guest identity record.

@@ -73,6 +73,56 @@ fn run() -> Result<String, String> {
             "RawFacts at {facts} are structurally valid for measurement"
         ));
     }
+    // TYPED runner-attestation generator: build the per-arch `provenance.json` runner_attestation from
+    // the retained recipe + Phase-1 identity record + authenticated scalar inputs, run the sealed-import
+    // self-consistency + continuity checks, emit canonical JSON, and re-decode + re-check before writing.
+    // The security-critical construction is typed here; `measure_fragment.sh` only splices the bytes.
+    if mode == "--gen-runner-attestation" {
+        let inputs_p = args.next().ok_or("missing <inputs.json>")?;
+        let recipe_p = args.next().ok_or("missing <recipe.json>")?;
+        let records_p = args.next().ok_or("missing <identity-records.json>")?;
+        let out_p = args.next().ok_or("missing <out.json>")?;
+        if args.next().is_some() {
+            return Err("too many arguments".into());
+        }
+        let inputs: b0_pre_validator::producer::RunnerAttestationGenInputs = serde_json::from_str(
+            &std::fs::read_to_string(&inputs_p).map_err(|e| format!("read {inputs_p}: {e}"))?,
+        )
+        .map_err(|e| format!("parse inputs {inputs_p}: {e}"))?;
+        let recipe: b0_pre_validator::producer::RunnerRecipeJson = serde_json::from_str(
+            &std::fs::read_to_string(&recipe_p).map_err(|e| format!("read {recipe_p}: {e}"))?,
+        )
+        .map_err(|e| format!("parse recipe {recipe_p}: {e}"))?;
+        let records: Vec<GuestIdentityRecord> = serde_json::from_str(
+            &std::fs::read_to_string(&records_p).map_err(|e| format!("read {records_p}: {e}"))?,
+        )
+        .map_err(|e| format!("parse identity records {records_p}: {e}"))?;
+        let bytes =
+            b0_pre_validator::producer::generate_runner_attestation(&inputs, &recipe, &records)?;
+        std::fs::write(&out_p, &bytes).map_err(|e| format!("write {out_p}: {e}"))?;
+        return Ok(format!(
+            "runner_attestation generated + self-verified for {}/{} -> {out_p}",
+            recipe.candidate, inputs.arch
+        ));
+    }
+    // PRE-PROVING provenance gate: run the SAME per-record binder + Phase-1 continuity the sealed importer
+    // runs over the COMPLETE assembled provenance.json, so no proof launches on an unacceptable record.
+    if mode == "--validate-provenance" {
+        let prov_p = args.next().ok_or("missing <provenance.json>")?;
+        let records_p = args.next().ok_or("missing <identity-records.json>")?;
+        if args.next().is_some() {
+            return Err("too many arguments".into());
+        }
+        let prov = std::fs::read_to_string(&prov_p).map_err(|e| format!("read {prov_p}: {e}"))?;
+        let records: Vec<GuestIdentityRecord> = serde_json::from_str(
+            &std::fs::read_to_string(&records_p).map_err(|e| format!("read {records_p}: {e}"))?,
+        )
+        .map_err(|e| format!("parse identity records {records_p}: {e}"))?;
+        let n = b0_pre_validator::producer::validate_provenance(&prov, &records)?;
+        return Ok(format!(
+            "provenance at {prov_p} accepted: {n} role(s) bound (self-consistency + recipe artifacts + Phase-1 continuity)"
+        ));
+    }
     // FAIL-FAST PRE-GRID authority gate: the venue runs this on the retained MeasurementInputAuthorityV1
     // + its malformed-corpus report + harness-source inventory BEFORE any proving cell. It decodes +
     // cross-binds all three (report + inventory addresses independently recomputed from the retained

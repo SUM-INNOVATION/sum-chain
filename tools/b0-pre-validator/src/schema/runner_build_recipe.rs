@@ -15,7 +15,7 @@
 //! target root is remapped — exactly ONE `--remap-path-prefix` arg (`<target> -> /b0/target`); retaining a
 //! fake cargo-home remap (an identity map that no longer reflects the effective mapping) is refused.
 //!
-//! It retains the exact canonical build ARGV (`build --release --locked --features real-backend
+//! It retains the exact canonical build ARGV (`build --release --locked --offline --features real-backend
 //! --manifest-path <manifest>`), the reproducibility-relevant ENV (BUILD_GIT_SHA / SOURCE_DATE_EPOCH /
 //! B0_VENUE_EMBED), the manifest/artifact paths, the cargo identity, and for BOTH build A and build B the
 //! exact `CARGO_ENCODED_RUSTFLAGS` bytes plus that build's original root / target root. Every derived hash
@@ -39,6 +39,10 @@ pub const CANON_TOOLING: &str = "/b0/tooling";
 pub const CANON_CARGO: &str = "/b0/cargo";
 /// The fixed remap destination for the per-build target root (never a host path). Also a permitted prefix.
 pub const CANON_TARGET: &str = "/b0/target";
+/// The fixed RISC0 guest-embed HOME, materialized fresh per build (canonical-by-construction, like
+/// [`CANON_CARGO`]). double_build_runner requires exactly this path for a RISC0 real embed, so the guest
+/// build legitimately touches it — a PERMITTED prefix for RISC0 ONLY (SP1 has no embedded guest home).
+pub const CANON_GUESTHOME: &str = "/b0/guesthome";
 
 /// The unit separator that would delimit multiple remaps inside `CARGO_ENCODED_RUSTFLAGS`. With the
 /// canonical cargo home there is exactly ONE remap (the target), so a well-formed value carries no
@@ -352,7 +356,7 @@ impl RunnerBuildRecipeV1 {
 
     /// The retained build argv MUST be EXACTLY the canonical typed command — not merely contain the
     /// required tokens. Shape (no duplicates, no extra features/subcommands/args, no alternate manifest):
-    ///   `<cargo> [+<toolchain>] build --release --locked --features real-backend --manifest-path <m>`
+    ///   `<cargo> [+<toolchain>] build --release --locked --offline --features real-backend --manifest-path <m>`
     /// where the leading tokens are exactly `cargo_ident.split_whitespace()` (a cargo executable and an
     /// optional `+toolchain`), and `<m>` is the retained `manifest_path`.
     fn check_argv(&self) -> Result<(), String> {
@@ -367,6 +371,7 @@ impl RunnerBuildRecipeV1 {
             "build",
             "--release",
             "--locked",
+            "--offline",
             "--features",
             "real-backend",
             "--manifest-path",
@@ -514,6 +519,7 @@ mod tests {
                 "build".into(),
                 "--release".into(),
                 "--locked".into(),
+                "--offline".into(),
                 "--features".into(),
                 "real-backend".into(),
                 "--manifest-path".into(),
@@ -636,6 +642,35 @@ mod tests {
         let mut b = sample();
         b.build_argv.insert(3, "--locked".into());
         assert!(b
+            .check_self_consistent()
+            .unwrap_err()
+            .contains("exact canonical command"));
+    }
+
+    // `--offline` is part of the exact canonical argv (the build IS offline). REMOVING it, or RELOCATING
+    // it, is refused by the full-vector equality — the argv must retain exactly one `--offline` in the
+    // canonical position.
+    #[test]
+    fn argv_missing_or_relocated_offline_refused() {
+        // Remove --offline entirely.
+        let mut a = sample();
+        a.build_argv.retain(|x| x != "--offline");
+        assert!(a
+            .check_self_consistent()
+            .unwrap_err()
+            .contains("exact canonical command"));
+        // Relocate --offline to the end (a different position than the canonical one).
+        let mut b = sample();
+        b.build_argv.retain(|x| x != "--offline");
+        b.build_argv.push("--offline".into());
+        assert!(b
+            .check_self_consistent()
+            .unwrap_err()
+            .contains("exact canonical command"));
+        // A DUPLICATE --offline (two of them) is refused.
+        let mut c = sample();
+        c.build_argv.insert(4, "--offline".into());
+        assert!(c
             .check_self_consistent()
             .unwrap_err()
             .contains("exact canonical command"));

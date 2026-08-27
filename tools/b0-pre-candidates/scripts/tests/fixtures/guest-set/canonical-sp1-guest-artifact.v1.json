@@ -1,5 +1,5 @@
 {
- "address": "c4401e7c5c5d3138bc37569fb9d8ab1ef05d22f5dadd68f0cba13d042db85a9f",
+ "address": "ebd804832f5950826489d92b19b1c07fc690a64fb8ae289369692ff7ca28852d",
  "build_a": {
   "elf_blake3": "b48877d616b9afde2453e540f1f11342cbc94ebed99d0242d67a90b1d74e79d7",
   "elf_sha256": "e9e7f54e662b2f5a084eb863fbd7286131096669d071a355262d9e624eaedabf"
@@ -37,5 +37,6 @@
  "staged_context_blake3": "",
  "tooling_commit": "272225c7c315d31c2bc4b3afb27c80cb0b42f4cf",
  "tooling_pathset_blake3": "e7847e33ff93483844c22d5b4bda43370db404251ca88bd8579b036d1a054231",
- "vendor_config_sha256": "acdf85025834f1fb9480a272f1dd2741066c9a4e35aae1fc479118f299067f93"
+ "vendor_config_sha256": "acdf85025834f1fb9480a272f1dd2741066c9a4e35aae1fc479118f299067f93",
+ "dependency_seed_authority_address": "084d34a4ad5a4922d1b47c8bf6a1444c05e974005ef84afd7ed30c3f7ad8d122"
 }

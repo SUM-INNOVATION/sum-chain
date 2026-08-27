@@ -19,7 +19,8 @@ for s in lib.sh verify_pins.sh run_authoritative.sh measure_fragment.sh derive_g
          tests/pin_url_policy.test.sh tests/oci_platform.test.sh tests/tool_identity_arch.test.sh \
          tests/apt_pins.test.sh tests/tool_identity_threading.test.sh tests/oci_daemon_bridge.test.sh \
          tests/build_reproducibility.test.sh tests/runnable_ref_sidecar.test.sh tests/rustup_components.test.sh tests/runner_path_independence.test.sh double_build_runner.sh b0_rustc_remap_wrapper.sh \
-         tests/builder_capability.test.sh tests/e2e_v2_produce_chain.test.sh tests/lifecycle_mode.test.sh tests/toolchain_authority.test.sh tests/lock_reconciliation.test.sh tests/committed_lock_authority.test.sh tests/measure_fragment_preflight.test.sh tests/run.sh; do
+         produce_canonical_sp1_guest.sh provision_sp1_guest_seed.sh \
+         tests/builder_capability.test.sh tests/e2e_v2_produce_chain.test.sh tests/lifecycle_mode.test.sh tests/toolchain_authority.test.sh tests/lock_reconciliation.test.sh tests/committed_lock_authority.test.sh tests/measure_fragment_preflight.test.sh tests/emit_identity_rederivation.test.sh tests/sp1_guest_dep_seed.test.sh tests/run.sh; do
   f="$SCRIPTS/$s"
   [ -f "$f" ] || continue
   if bash -n "$f"; then echo "  ok  $s"; else echo "  FAIL $s"; rc=1; fi
@@ -50,7 +51,8 @@ if command -v shellcheck >/dev/null 2>&1; then
       "$SCRIPTS/tests/lifecycle_mode.test.sh" "$SCRIPTS/measure_fragment.sh" "$SCRIPTS/derive_guest_set.sh" "$SCRIPTS/tests/toolchain_authority.test.sh" \
       "$SCRIPTS/make_validation_bundle.sh" "$SCRIPTS/tooling_pathset.sh" \
       "$SCRIPTS/docker_firewall.sh" "$SCRIPTS/validate_cgroup_measurement.sh" "$SCRIPTS/probe_cgroup_privilege.sh" \
-      "$SCRIPTS/tests/docker_firewall.test.sh" "$SCRIPTS/tests/docker_firewall_cgroup.test.sh" "$SCRIPTS/tests/run.sh"; then
+      "$SCRIPTS/produce_canonical_sp1_guest.sh" "$SCRIPTS/provision_sp1_guest_seed.sh" \
+      "$SCRIPTS/tests/docker_firewall.test.sh" "$SCRIPTS/tests/docker_firewall_cgroup.test.sh" "$SCRIPTS/tests/emit_identity_rederivation.test.sh" "$SCRIPTS/tests/sp1_guest_dep_seed.test.sh" "$SCRIPTS/tests/run.sh"; then
     echo "  ok  no error-level findings"
   else
     echo "  FAIL shellcheck error-level findings"; rc=1
@@ -136,6 +138,18 @@ bash "$HERE/committed_lock_authority.test.sh" || rc=1
 # runner launches. SKIPs cleanly if cargo/git/b3sum are absent (fast no-toolchain runners); the dedicated
 # b0-pre.yml step runs it with the toolchain present so it is enforced, never silently skipped, in CI.
 bash "$HERE/measure_fragment_preflight.test.sh" || rc=1
+# Measurement-build identity RE-DERIVATION contract (past the preflight boundary): the ONE shared
+# --emit-identity constructor emits a superset of the runner's req() set (per candidate), both callers
+# use it and neither hand-rolls the vector, and (with cargo, x86 host) measure_fragment is driven to the
+# _idargs re-derivation and REFUSES a wrong tooling_commit. This is the guard for the grid blocker where
+# measure_fragment silently dropped --tooling-commit/--tooling-pathset-blake3/--canonical-…-address.
+bash "$HERE/emit_identity_rederivation.test.sh" || rc=1
+# SP1 GUEST dependency-seed AUTHORITY (one authenticated, content-addressed OFFLINE vendor seed) + RISC0
+# Option-B authenticated-runner binding: the shared authenticator's full refusal matrix (missing / mutated
+# / substituted / superseded 8584a56d / wrong-lock / wrong-toolchain), determinism + path-independence, the
+# shared runner<->recipe helper both RISC0 phases drive, and source guards (offline, no re-vendor, no legacy
+# RISC0 build, seed authority bound into both verifier preimages). No network/Docker/toolchain.
+bash "$HERE/sp1_guest_dep_seed.test.sh" || rc=1
 # Two-root VALIDATION-BUNDLE content binding: the bundle's tooling-inventory.txt is the canonical
 # path-set preimage (every included file's BLAKE3), MANIFEST binds the ratified Commit A + path-set
 # digest (never PENDING), and the content address transitively binds the whole tooling payload —

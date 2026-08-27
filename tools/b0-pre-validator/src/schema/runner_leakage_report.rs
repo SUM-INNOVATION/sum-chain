@@ -9,7 +9,7 @@
 //! runner. Its domain-separated [`hash`] is bound by `RunnerAttestationV1.runner_leakage_report_blake3`.
 
 use super::runner_build_recipe::{
-    r_str, w_str, RunnerBuildRecipeV1, CANON_CARGO, CANON_TARGET, CANON_TOOLING,
+    r_str, w_str, RunnerBuildRecipeV1, CANON_CARGO, CANON_GUESTHOME, CANON_TARGET, CANON_TOOLING,
 };
 use crate::codec::{DecodeError, Reader, Writer};
 use crate::enums::{Arch, Candidate};
@@ -126,24 +126,35 @@ impl RunnerLeakageReportV1 {
         Ok(v)
     }
 
-    fn canonical_permitted() -> Vec<String> {
+    /// The canonical permitted-prefix set. SP1: the three fixed roots (cargo/target/tooling). RISC0: the
+    /// same three PLUS the pinned guest-embed HOME (`/b0/guesthome`), which the RISC0 guest build
+    /// materializes fresh per build and legitimately touches — SP1 has no embedded guest home.
+    fn canonical_permitted(candidate: Candidate) -> Vec<String> {
         let mut v = vec![
             CANON_CARGO.to_string(),
             CANON_TARGET.to_string(),
             CANON_TOOLING.to_string(),
         ];
+        if candidate == Candidate::Risc0 {
+            v.push(CANON_GUESTHOME.to_string());
+        }
         v.sort();
         v
     }
 
-    /// Fail-closed + CROSS-BOUND to the recipe: clean; permitted is exactly the canonical three; the
-    /// refused set CONTAINS every retained A/B original/CARGO_HOME/target root AND the evidence root.
+    /// Fail-closed + CROSS-BOUND to the recipe: clean; permitted is exactly the candidate-canonical set
+    /// (SP1: cargo/target/tooling; RISC0: + /b0/guesthome, keyed on the RECIPE's candidate); the refused
+    /// set CONTAINS every retained A/B original/CARGO_HOME/target root AND the evidence root.
     pub fn check_clean_and_exact(&self, recipe: &RunnerBuildRecipeV1) -> Result<(), String> {
         if !self.clean {
             return Err("leakage report is not clean".into());
         }
-        if self.permitted_prefixes != Self::canonical_permitted() {
-            return Err("leakage permitted set != the canonical /b0/{cargo,target,tooling}".into());
+        if self.permitted_prefixes != Self::canonical_permitted(recipe.candidate) {
+            return Err(
+                "leakage permitted set != the canonical set (SP1: /b0/{cargo,target,tooling}; RISC0: \
+                 + /b0/guesthome)"
+                    .into(),
+            );
         }
         let refused: std::collections::BTreeSet<&str> =
             self.refused_prefixes.iter().map(|s| s.as_str()).collect();
@@ -193,7 +204,7 @@ mod tests {
             clean: true,
             evidence_root: "/tmp/b0-evid".into(),
             refused_prefixes: refused,
-            permitted_prefixes: RunnerLeakageReportV1::canonical_permitted(),
+            permitted_prefixes: RunnerLeakageReportV1::canonical_permitted(rc.candidate),
         }
     }
 

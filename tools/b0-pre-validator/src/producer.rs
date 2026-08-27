@@ -20,7 +20,7 @@
 //! both verifiers accept, plus an inventory) — regenerating from the same raw facts
 //! yields byte-identical bytes and the same package id.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::enums::{Arch, Candidate, ProvenanceRole, StatementIndex, VerifierMaterialRole};
 use crate::measurement::{
@@ -129,7 +129,7 @@ pub struct VmEntryFacts {
     pub hash: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone)]
 pub struct ProvFacts {
     pub arch: String,
     pub role: String,
@@ -165,7 +165,7 @@ pub struct ProvFacts {
 /// the five retained, independently-addressed artifacts (`RunnerBuildRecipeV1`, build-A + build-B
 /// `RustcInvocationInventoryV1`, `RunnerDoubleBuildProofV1`, `RunnerLeakageReportV1`) from these facts;
 /// the structural recipe id + canonical destinations + derived hashes are recomputed (never trusted).
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Serialize, Clone)]
 pub struct RunnerRecipeJson {
     pub candidate: String,
     pub arch: String,
@@ -214,9 +214,15 @@ pub struct RunnerRecipeJson {
     /// into the double-build proof, where the 3-way equality + non-zero origin is re-verified.
     #[serde(default)]
     pub cargo_seed: CargoSeedJson,
+    /// (RISC0 real embed only) The fresh-per-build risc0 TOOLCHAIN-HOME working-copy authentication
+    /// equality (origin == materialized_A == materialized_B, each authenticated content-equal to the
+    /// sealed read-only authority). serde-default/absent for SP1; the producer maps it into the
+    /// double-build proof, where the 3-way equality + non-zero origin is re-verified from bytes.
+    #[serde(default)]
+    pub risc0_home_seed: Option<Risc0HomeSeedJson>,
 }
 
-#[derive(Deserialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 pub struct CargoSeedJson {
     #[serde(default)]
     pub origin_address: String,
@@ -226,14 +232,24 @@ pub struct CargoSeedJson {
     pub materialized_b: String,
 }
 
-#[derive(Deserialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
+pub struct Risc0HomeSeedJson {
+    #[serde(default)]
+    pub origin_address: String,
+    #[serde(default)]
+    pub materialized_a: String,
+    #[serde(default)]
+    pub materialized_b: String,
+}
+
+#[derive(Deserialize, Serialize, Clone, Default)]
 pub struct AuthorityRefJson {
     pub address: String,
     #[serde(default)]
     pub json_sha256: String,
 }
 
-#[derive(Deserialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 pub struct GuestEmbedJson {
     pub guest_elf_sha256: String,
     pub guest_elf_blake3: String,
@@ -241,7 +257,7 @@ pub struct GuestEmbedJson {
     pub risc0_build_locked: bool,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Serialize, Clone)]
 pub struct BuildSideJson {
     pub original_root: String,
     pub target_from: String,
@@ -257,7 +273,7 @@ pub struct BuildSideJson {
     pub invocations: Vec<InvocationRecordJson>,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Serialize, Clone)]
 pub struct InvocationRecordJson {
     pub kind: String,
     pub remap_args: Vec<String>,
@@ -265,7 +281,7 @@ pub struct InvocationRecordJson {
 }
 
 /// JSON twin of the host-provenance reader's `CpusetObservation`.
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Serialize, Clone)]
 pub struct CpusetObsJson {
     /// "absent" | "readable-empty" | "readable-nonempty" (reader kebab-case).
     pub state: String,
@@ -288,7 +304,7 @@ pub struct CpusetObsJson {
 }
 
 /// JSON twin of the reader's `CpusetProbeEntry`.
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Serialize, Clone)]
 pub struct CpusetProbeEntryJson {
     pub cgroup_path: String,
     pub order: u32,
@@ -329,8 +345,10 @@ impl CpusetProbeEntryJson {
     }
 }
 
-/// JSON twin of [`RunnerAttestationV1`] (all 32-byte digests as lowercase hex).
-#[derive(Deserialize, Clone)]
+/// JSON twin of [`RunnerAttestationV1`] (all 32-byte digests as lowercase hex). `Serialize` is
+/// derived so the typed generator (`generate_runner_attestation`) can emit canonical bytes for
+/// `provenance.json` and re-decode them for a round-trip check before returning success.
+#[derive(Deserialize, Serialize, Clone)]
 pub struct RunnerAttestationJson {
     pub build_target_arch: String,
     pub execution_tooling_checkout_head: String,
@@ -423,7 +441,7 @@ impl RunnerAttestationJson {
 
 /// JSON twin of the host-provenance DVFS state (matches `b0-pre-host-provenance`'s `DvfsState`).
 /// Deserialized from the runner's facts; converted to the sealed [`DvfsProvenance`] schema type.
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Serialize, Clone)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DvfsFacts {
     Observable {
@@ -1047,48 +1065,45 @@ fn build_material(c: &CandidateFacts) -> Result<VerifierMaterialManifestV1, Stri
     Ok(VerifierMaterialManifestV1::from_canonical(cand, entries))
 }
 
-fn prov_facts(p: &ProvFacts) -> Result<ProvenanceFacts, String> {
-    // Effective-cpuset provenance: reconstruct the retained probe chain, re-run ALL canonical
-    // inheritance rules over it (nearest-first ordering, first==second, ancestor-of-leaf, stop at
-    // the first readable-nonempty source, count recomputed from raw, inherited flag), and content
-    // address the chain. The summary + count are the record-bound fields; the chain is retained
-    // evidence bound by its address.
-    let chain: Vec<CpusetProbeEntryV1> = p
-        .cpuset_probe_chain
-        .iter()
-        .map(CpusetProbeEntryJson::to_schema)
-        .collect::<Result<_, _>>()?;
-    check_cpuset_probe_chain(
-        &chain,
-        &p.cgroup_scope_label,
-        &p.cpuset_source_cgroup_path,
-        &p.cpuset_raw,
-        p.cpuset_inherited,
-        p.configured_cpuset_core_limit,
-    )?;
-    let cpuset_probe_chain_blake3 = cpuset_probe_chain_hash(&chain);
+/// The FIVE retained runner path-independence artifacts derived from the venue recipe facts.
+pub(crate) struct RunnerArtifacts {
+    pub runner_build_recipe: crate::schema::runner_build_recipe::RunnerBuildRecipeV1,
+    pub rustc_invocation_inventory_a:
+        crate::schema::rustc_invocation_inventory::RustcInvocationInventoryV1,
+    pub rustc_invocation_inventory_b:
+        crate::schema::rustc_invocation_inventory::RustcInvocationInventoryV1,
+    pub runner_double_build_proof:
+        crate::schema::runner_double_build_proof::RunnerDoubleBuildProofV1,
+    pub runner_leakage_report: crate::schema::runner_leakage_report::RunnerLeakageReportV1,
+}
 
-    // Runner attestation: parse, run SELF-consistency (build_git_sha==measured, recomputed==ratified
-    // path set, protoc version). The measured-source binding to RATIFIED_SOURCE_COMMIT and the tooling
-    // authority binding are enforced by the venue preflight + the validator's two-authority gate, not
-    // by this per-record twin conversion. Content address it for the record.
-    let attestation = p.runner_attestation.to_schema()?;
-    attestation.check_self_consistency()?;
-    if attestation.build_target_arch != parse_arch(&p.arch)? {
-        return Err(format!(
-            "runner attestation arch {:?} != provenance arch {}",
-            attestation.build_target_arch, p.arch
-        ));
-    }
-
-    // ---- v6: build the FIVE retained runner path-independence artifacts from the venue recipe facts
-    // (exact bytes for both builds). The structural recipe id + canonical destinations + derived hashes
-    // are RECOMPUTED (never trusted); each artifact is self/consistency-checked here and re-anchored at
-    // sealed import.
-    let rr = &p.runner_recipe;
-    let cand = attestation.candidate;
+/// Build + self/consistency-check the five retained runner path-independence artifacts from the venue
+/// recipe facts. The structural recipe id, canonical destinations, and every derived hash are RECOMPUTED
+/// (never trusted). `attestation` supplies the run-bound scalars (candidate/arch/measured-source/tooling
+/// authority/protobuf authority/runner_blake3). Shared by [`prov_facts`] (sealed import) and
+/// [`generate_runner_attestation`] (venue pre-proving generation) so both compute an identical
+/// `RunnerDoubleBuildProofV1::reproducibility_pair_blake3`.
+pub(crate) fn build_runner_artifacts(
+    rr: &RunnerRecipeJson,
+    attestation: &RunnerAttestationV1,
+) -> Result<RunnerArtifacts, String> {
+    // The RECIPE is the candidate source of truth (it carries the candidate-specific risc0-home seed +
+    // leakage permitted set); the attestation's candidate is a pre-injection placeholder at the venue-facts
+    // stage. Driving `cand` from the recipe makes the RISC0 artifacts (risc0-home 3-way + /b0/guesthome
+    // leakage) validate correctly here — the same code the generator and sealed import both run.
+    let cand = parse_candidate_lenient(&rr.candidate)?;
     let arch = attestation.build_target_arch;
     let wrapper_blake3 = hex32(&rr.wrapper_blake3, "recipe.wrapper_blake3")?;
+    // The build IS offline: require BOTH the executed argv carry `--offline` (enforced below by
+    // `check_argv`'s full-vector equality — exactly one `--offline` in the canonical vector) AND the
+    // redundant offline facts be true. A false boolean while the argv is offline (or vice versa) is refused.
+    if !rr.offline || !rr.cargo_net_offline {
+        return Err(
+            "recipe is not marked offline: offline + cargo_net_offline must both be true (the build \
+             runs --offline; the argv and the facts must agree)"
+                .into(),
+        );
+    }
     let build_side =
         |b: &BuildSideJson| -> Result<crate::schema::runner_build_recipe::BuildSide, String> {
             Ok(crate::schema::runner_build_recipe::BuildSide {
@@ -1159,7 +1174,8 @@ fn prov_facts(p: &ProvFacts) -> Result<ProvenanceFacts, String> {
         use crate::schema::runner_double_build_proof::{BuildFacts, RunnerDoubleBuildProofV1};
         let facts = |b: &BuildSideJson,
                      inv_addr: [u8; 32],
-                     mat_cargo_seed: [u8; 32]|
+                     mat_cargo_seed: [u8; 32],
+                     mat_risc0_home: [u8; 32]|
          -> Result<BuildFacts, String> {
             Ok(BuildFacts {
                 original_root: b.original_root.clone(),
@@ -1181,6 +1197,7 @@ fn prov_facts(p: &ProvFacts) -> Result<ProvenanceFacts, String> {
                     "recipe.materialized_manifest_blake3",
                 )?,
                 materialized_cargo_seed_blake3: mat_cargo_seed,
+                materialized_risc0_home_blake3: mat_risc0_home,
                 start_unix: b.start_unix,
                 end_unix: b.end_unix,
             })
@@ -1200,21 +1217,41 @@ fn prov_facts(p: &ProvFacts) -> Result<ProvenanceFacts, String> {
             &rr.cargo_seed.materialized_b,
             "recipe.cargo_seed.materialized_b",
         )?;
+        // Fresh-per-build risc0 TOOLCHAIN-HOME working copy (RISC0 real embed only): origin + per-build
+        // materialized manifest addresses so the 3-way equality is re-verified from bytes. Absent for SP1.
+        // Gate on the PROOF candidate (== attestation candidate), so a recipe whose candidate field drifts
+        // from the sealed proof candidate can never smuggle a risc0-home into an SP1 proof (or omit it from
+        // a RISC0 proof — an absent seed on a RISC0 proof yields all-zero, which check_double_build refuses).
+        let (risc0_home_origin_blake3, mat_r0_a, mat_r0_b) = if cand == Candidate::Risc0 {
+            match &rr.risc0_home_seed {
+                Some(h) => (
+                    hex32(&h.origin_address, "recipe.risc0_home_seed.origin_address")?,
+                    hex32(&h.materialized_a, "recipe.risc0_home_seed.materialized_a")?,
+                    hex32(&h.materialized_b, "recipe.risc0_home_seed.materialized_b")?,
+                ),
+                None => ([0u8; 32], [0u8; 32], [0u8; 32]),
+            }
+        } else {
+            ([0u8; 32], [0u8; 32], [0u8; 32])
+        };
         let fa = facts(
             &rr.build_a,
             rustc_invocation_inventory_a.hash(),
             mat_cargo_a,
+            mat_r0_a,
         )?;
         let fb = facts(
             &rr.build_b,
             rustc_invocation_inventory_b.hash(),
             mat_cargo_b,
+            mat_r0_b,
         )?;
         RunnerDoubleBuildProofV1 {
             candidate: cand,
             arch,
             wrapper_blake3,
             cargo_seed_origin_blake3,
+            risc0_home_origin_blake3,
             reproducibility_pair_blake3: RunnerDoubleBuildProofV1::compute_reproducibility_pair(
                 &fa, &fb,
             ),
@@ -1248,6 +1285,306 @@ fn prov_facts(p: &ProvFacts) -> Result<ProvenanceFacts, String> {
         &rustc_invocation_inventory_a,
         &rustc_invocation_inventory_b,
     )?;
+    Ok(RunnerArtifacts {
+        runner_build_recipe,
+        rustc_invocation_inventory_a,
+        rustc_invocation_inventory_b,
+        runner_double_build_proof,
+        runner_leakage_report,
+    })
+}
+
+/// Venue-produced scalar inputs for [`generate_runner_attestation`] — assembled by
+/// `measure_fragment.sh` from the retained authorities (protobuf-include authority, builder evidence,
+/// tooling-pathset recompute, git HEAD). Everything security-critical (construction of the typed
+/// record, the binding checks, canonical serialization, and the round-trip) happens in the typed
+/// generator; these are only the authenticated scalar facts it binds. No shell assembles the object.
+#[derive(Deserialize)]
+pub struct RunnerAttestationGenInputs {
+    pub arch: String,
+    /// The venue-attested measured-source commit (must equal `guest_set::RATIFIED_SOURCE_COMMIT`).
+    pub source_commit: String,
+    /// `BUILD_GIT_SHA` the runner build was stamped with; defaults to `source_commit`.
+    #[serde(default)]
+    pub build_git_sha: Option<String>,
+    pub execution_tooling_checkout_head: String,
+    /// Path-set digest recomputed over the tooling root at run time (must equal the ratified constant).
+    pub recomputed_pathset_blake3: String,
+    pub immutable_builder_identity: String,
+    /// `staged_context_blake3` from `build_container.sh` (guest-source staged context).
+    pub measured_source_context_blake3: String,
+    pub protobuf_authority_sha256: String,
+    pub protobuf_authority_blake3: String,
+    pub native_protoc_sha256: String,
+    pub native_protoc_blake3: String,
+    pub native_protoc_version: String,
+    /// The exact controlled `docker run` argv + mount spec string (protobuf-include authority); the
+    /// generator content-addresses it (`docker_argv_blake3 = blake3(argv)`) — never shell.
+    pub docker_argv: String,
+}
+
+/// Candidate parse that accepts BOTH the capitalized identity-record spelling (`Sp1`/`Risc0`) and the
+/// lowercase recipe spelling the runner writes (`sp1`/`risc0`, from `double_build_runner --candidate`).
+/// The strict [`parse_candidate`] is retained for the capitalized fragment/candidate JSON.
+fn parse_candidate_lenient(s: &str) -> Result<Candidate, String> {
+    match s {
+        "Sp1" | "sp1" => Ok(Candidate::Sp1),
+        "Risc0" | "risc0" => Ok(Candidate::Risc0),
+        other => Err(format!("unknown candidate {other}")),
+    }
+}
+
+/// Resolve the UNIQUE Phase-1 identity record for `(candidate, arch)`; refuse missing/duplicate.
+fn resolve_phase1(
+    records: &[crate::guest_set::GuestIdentityRecord],
+    cand: Candidate,
+    arch: Arch,
+) -> Result<&crate::guest_set::GuestIdentityRecord, String> {
+    let mut it = records.iter().filter(|r| {
+        parse_candidate_lenient(&r.candidate)
+            .map(|c| c == cand)
+            .unwrap_or(false)
+            && parse_arch(&r.arch).map(|a| a == arch).unwrap_or(false)
+    });
+    let first = it
+        .next()
+        .ok_or_else(|| format!("no Phase-1 identity record for {cand:?}/{arch:?}"))?;
+    if it.next().is_some() {
+        return Err(format!(
+            "duplicate Phase-1 identity records for {cand:?}/{arch:?}"
+        ));
+    }
+    Ok(first)
+}
+
+/// The self-consistency + measured-source + tooling + Phase-1 continuity checks the SEALED importer
+/// enforces (`produce`'s per-provenance block + `RunnerAttestationV1::check_self_consistency`), applied
+/// to a venue `RunnerAttestationJson`. Shared by the generator (over its output, twice) and reused in
+/// spirit by [`validate_provenance`] (which additionally runs the full `prov_facts` recipe binder).
+fn check_generated_attestation(
+    json: &RunnerAttestationJson,
+    cand: Candidate,
+    arch: Arch,
+    phase1_records: &[crate::guest_set::GuestIdentityRecord],
+) -> Result<(), String> {
+    if json.measured_source_commit != crate::guest_set::RATIFIED_SOURCE_COMMIT {
+        return Err(format!(
+            "measured_source_commit {} != ratified source {}",
+            json.measured_source_commit,
+            crate::guest_set::RATIFIED_SOURCE_COMMIT
+        ));
+    }
+    let mut att = json.to_schema()?;
+    att.candidate = cand;
+    att.check_self_consistency()?;
+    if att.build_target_arch != arch {
+        return Err(format!(
+            "runner attestation arch {:?} != requested arch {arch:?}",
+            att.build_target_arch
+        ));
+    }
+    let rec = resolve_phase1(phase1_records, cand, arch)?;
+    if rec.source_commit != att.measured_source_commit {
+        return Err("Phase-1 source_commit != measurement measured_source_commit".into());
+    }
+    if rec.tooling_commit != att.ratified_tooling_commit
+        || rec.tooling_pathset_blake3 != att.ratified_pathset_blake3
+    {
+        return Err("Phase-1 tooling authority != measurement tooling authority".into());
+    }
+    if rec.b0_pre_spec_hash != crate::guest_set::MERGED_SPEC_HASH_HEX {
+        return Err("Phase-1 spec != merged spec hash".into());
+    }
+    if rec.production_binary_blake3 != hx(&att.runner_blake3) {
+        return Err(
+            "Phase-1 production_binary_blake3 != measurement runner_blake3 (a different compiled \
+             runner binary)"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+/// Typed generator for the per-arch `provenance.json` `runner_attestation`. Builds the 18-field venue
+/// twin from the retained recipe + Phase-1 record + authenticated scalar inputs (deriving
+/// `docker_argv_blake3` and — via the SHARED [`build_runner_artifacts`] the importer uses —
+/// `reproducibility_pair_blake3`), runs the sealed-import self-consistency + continuity checks, and
+/// emits canonical JSON bytes it immediately RE-DECODES and re-checks before returning. `measure_fragment`
+/// splices the returned bytes verbatim into every provenance role.
+pub fn generate_runner_attestation(
+    inputs: &RunnerAttestationGenInputs,
+    recipe: &RunnerRecipeJson,
+    phase1_records: &[crate::guest_set::GuestIdentityRecord],
+) -> Result<String, String> {
+    let cand = parse_candidate_lenient(&recipe.candidate)?;
+    let arch = parse_arch(&inputs.arch)?;
+    if parse_arch(&recipe.arch)? != arch {
+        return Err(format!(
+            "recipe arch {} != requested arch {}",
+            recipe.arch, inputs.arch
+        ));
+    }
+    // The measurement runner is a byte-identical double build (A == B).
+    if !recipe.byte_equal || recipe.build_a.runner_blake3 != recipe.build_b.runner_blake3 {
+        return Err(
+            "recipe is not a byte-equal double build (build_a.runner_blake3 != build_b)".into(),
+        );
+    }
+    let build_git_sha = inputs
+        .build_git_sha
+        .clone()
+        .unwrap_or_else(|| inputs.source_commit.clone());
+
+    // Provisional twin (real values except reproducibility_pair) drives the SHARED recipe-artifact
+    // builder; the pair is read back from the built double-build proof, so it is computed by the exact
+    // code the importer re-derives (the independent verifier cross-checks att pair == proof pair).
+    let provisional = RunnerAttestationJson {
+        build_target_arch: inputs.arch.clone(),
+        execution_tooling_checkout_head: inputs.execution_tooling_checkout_head.clone(),
+        ratified_tooling_commit: crate::tooling_authority::RATIFIED_MEASUREMENT_TOOLING_COMMIT
+            .to_string(),
+        ratified_pathset_blake3:
+            crate::tooling_authority::RATIFIED_MEASUREMENT_TOOLING_PATHSET_BLAKE3.to_string(),
+        recomputed_pathset_blake3: inputs.recomputed_pathset_blake3.clone(),
+        measured_source_commit: inputs.source_commit.clone(),
+        build_git_sha,
+        measured_source_context_blake3: inputs.measured_source_context_blake3.clone(),
+        runner_sha256: recipe.build_a.runner_sha256.clone(),
+        runner_blake3: recipe.build_a.runner_blake3.clone(),
+        immutable_builder_identity: inputs.immutable_builder_identity.clone(),
+        protobuf_authority_sha256: inputs.protobuf_authority_sha256.clone(),
+        protobuf_authority_blake3: inputs.protobuf_authority_blake3.clone(),
+        native_protoc_sha256: inputs.native_protoc_sha256.clone(),
+        native_protoc_blake3: inputs.native_protoc_blake3.clone(),
+        native_protoc_version: inputs.native_protoc_version.clone(),
+        docker_argv_blake3: blake3::hash(inputs.docker_argv.as_bytes())
+            .to_hex()
+            .to_string(),
+        reproducibility_pair_blake3: "0".repeat(64),
+    };
+    let mut att = provisional.to_schema()?;
+    att.candidate = cand; // to_schema hardcodes Sp1; the recipe candidate drives risc0-home handling
+    let arts = build_runner_artifacts(recipe, &att)?;
+    let repro = hx(&arts.runner_double_build_proof.reproducibility_pair_blake3);
+
+    let json = RunnerAttestationJson {
+        reproducibility_pair_blake3: repro,
+        ..provisional
+    };
+    check_generated_attestation(&json, cand, arch, phase1_records)?;
+
+    // Canonical bytes + round-trip: re-decode and re-check the emitted bytes before returning.
+    let bytes = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&json)
+            .map_err(|e| format!("serialize runner_attestation: {e}"))?
+    );
+    let reparsed: RunnerAttestationJson =
+        serde_json::from_str(&bytes).map_err(|e| format!("re-decode runner_attestation: {e}"))?;
+    check_generated_attestation(&reparsed, cand, arch, phase1_records)?;
+    Ok(bytes)
+}
+
+/// PRE-PROVING gate. Parse the COMPLETE assembled `provenance.json` and run the SAME per-record binder
+/// the sealed importer runs (`prov_facts` — attestation self-consistency, recipe path-independence
+/// artifacts, double-build proof) plus the Phase-1 continuity checks (`produce`'s block), refusing
+/// before any proof launches if the production provenance record is not acceptable. Returns the number
+/// of provenance roles validated. SP1 and RISC0 use this identical path.
+pub fn validate_provenance(
+    provenance_json: &str,
+    phase1_records: &[crate::guest_set::GuestIdentityRecord],
+) -> Result<usize, String> {
+    let provs: Vec<ProvFacts> =
+        serde_json::from_str(provenance_json).map_err(|e| format!("parse provenance: {e}"))?;
+    if provs.is_empty() {
+        return Err("provenance JSON is an empty array".into());
+    }
+    for p in &provs {
+        let cand = parse_candidate_lenient(&p.runner_recipe.candidate)?;
+        let arch = parse_arch(&p.arch)?;
+        // Full per-record binder (self-consistency + recipe artifacts + double-build proof).
+        let pf = prov_facts(p)?;
+        let att = &pf.runner_attestation;
+        if att.measured_source_commit != crate::guest_set::RATIFIED_SOURCE_COMMIT {
+            return Err(format!(
+                "{arch:?}: measured_source_commit {} != ratified source {}",
+                att.measured_source_commit,
+                crate::guest_set::RATIFIED_SOURCE_COMMIT
+            ));
+        }
+        let rec = resolve_phase1(phase1_records, cand, arch)?;
+        if rec.source_commit != att.measured_source_commit {
+            return Err(format!(
+                "{cand:?}/{arch:?}: Phase-1 source_commit != measurement measured_source_commit"
+            ));
+        }
+        if rec.tooling_commit != att.ratified_tooling_commit
+            || rec.tooling_pathset_blake3 != att.ratified_pathset_blake3
+        {
+            return Err(format!(
+                "{cand:?}/{arch:?}: Phase-1 tooling authority != measurement tooling authority"
+            ));
+        }
+        if rec.b0_pre_spec_hash != crate::guest_set::MERGED_SPEC_HASH_HEX {
+            return Err(format!(
+                "{cand:?}/{arch:?}: Phase-1 spec != merged spec hash"
+            ));
+        }
+        if rec.production_binary_blake3 != hx(&att.runner_blake3) {
+            return Err(format!(
+                "{cand:?}/{arch:?}: Phase-1 production_binary_blake3 != measurement runner_blake3"
+            ));
+        }
+    }
+    Ok(provs.len())
+}
+
+fn prov_facts(p: &ProvFacts) -> Result<ProvenanceFacts, String> {
+    // Effective-cpuset provenance: reconstruct the retained probe chain, re-run ALL canonical
+    // inheritance rules over it (nearest-first ordering, first==second, ancestor-of-leaf, stop at
+    // the first readable-nonempty source, count recomputed from raw, inherited flag), and content
+    // address the chain. The summary + count are the record-bound fields; the chain is retained
+    // evidence bound by its address.
+    let chain: Vec<CpusetProbeEntryV1> = p
+        .cpuset_probe_chain
+        .iter()
+        .map(CpusetProbeEntryJson::to_schema)
+        .collect::<Result<_, _>>()?;
+    check_cpuset_probe_chain(
+        &chain,
+        &p.cgroup_scope_label,
+        &p.cpuset_source_cgroup_path,
+        &p.cpuset_raw,
+        p.cpuset_inherited,
+        p.configured_cpuset_core_limit,
+    )?;
+    let cpuset_probe_chain_blake3 = cpuset_probe_chain_hash(&chain);
+
+    // Runner attestation: parse, run SELF-consistency (build_git_sha==measured, recomputed==ratified
+    // path set, protoc version). The measured-source binding to RATIFIED_SOURCE_COMMIT and the tooling
+    // authority binding are enforced by the venue preflight + the validator's two-authority gate, not
+    // by this per-record twin conversion. Content address it for the record.
+    let attestation = p.runner_attestation.to_schema()?;
+    attestation.check_self_consistency()?;
+    if attestation.build_target_arch != parse_arch(&p.arch)? {
+        return Err(format!(
+            "runner attestation arch {:?} != provenance arch {}",
+            attestation.build_target_arch, p.arch
+        ));
+    }
+
+    // ---- v6: build the FIVE retained runner path-independence artifacts from the venue recipe facts
+    // (exact bytes for both builds), self/consistency-checked. Shared with the typed provenance
+    // generator (`generate_runner_attestation`) so the venue-produced `reproducibility_pair_blake3`
+    // is computed by the SAME code the importer re-derives (a divergence would fail the independent
+    // cross-check `att.reproducibility_pair == proof.reproducibility_pair`).
+    let RunnerArtifacts {
+        runner_build_recipe,
+        rustc_invocation_inventory_a,
+        rustc_invocation_inventory_b,
+        runner_double_build_proof,
+        runner_leakage_report,
+    } = build_runner_artifacts(&p.runner_recipe, &attestation)?;
 
     Ok(ProvenanceFacts {
         arch: parse_arch(&p.arch)?,
@@ -1547,7 +1884,7 @@ pub fn dry_run_raw_facts() -> RawFacts {
                 refused.push("/tmp/b0-evid".into());
                 refused.sort();
                 RunnerRecipeJson {
-                    candidate: "sp1".into(),
+                    candidate: cand.into(),
                     arch: arch.into(),
                     manifest_path: "tools/b0-pre-measure-sp1/Cargo.toml".into(),
                     artifact_path: "release/b0-pre-measure-sp1".into(),
@@ -1562,6 +1899,7 @@ pub fn dry_run_raw_facts() -> RawFacts {
                         "build".into(),
                         "--release".into(),
                         "--locked".into(),
+                        "--offline".into(),
                         "--features".into(),
                         "real-backend".into(),
                         "--manifest-path".into(),
@@ -1579,11 +1917,17 @@ pub fn dry_run_raw_facts() -> RawFacts {
                     build_b: side("b", 200, 300),
                     byte_equal: true,
                     leakage_refused_prefixes: refused,
-                    leakage_permitted_prefixes: vec![
-                        "/b0/cargo".into(),
-                        "/b0/target".into(),
-                        "/b0/tooling".into(),
-                    ],
+                    leakage_permitted_prefixes: {
+                        let mut p: Vec<String> = vec![
+                            "/b0/cargo".into(),
+                            "/b0/target".into(),
+                            "/b0/tooling".into(),
+                        ];
+                        if cand == "risc0" || cand == "Risc0" {
+                            p.push("/b0/guesthome".into());
+                        }
+                        p
+                    },
                     leakage_clean: true,
                     evidence_root: "/tmp/b0-evid".into(),
                     offline: true,
@@ -1606,6 +1950,18 @@ pub fn dry_run_raw_facts() -> RawFacts {
                         origin_address: cargo_seed_hex.clone(),
                         materialized_a: cargo_seed_hex.clone(),
                         materialized_b: cargo_seed_hex.clone(),
+                    },
+                    // RISC0 real embed only: the fresh-per-build risc0 toolchain-home authority (3-way equal).
+                    // The producer maps this only when the PROOF candidate is RISC0; SP1 proofs force zero.
+                    risc0_home_seed: if cand == "Risc0" || cand == "risc0" {
+                        let r0 = hexb(&crate::measurement::synth_risc0_home_content());
+                        Some(Risc0HomeSeedJson {
+                            origin_address: r0.clone(),
+                            materialized_a: r0.clone(),
+                            materialized_b: r0,
+                        })
+                    } else {
+                        None
                     },
                 }
             },
@@ -1837,6 +2193,213 @@ mod tests {
         // inventory names both verdicts + the content address.
         let inv = pkg.inventory();
         assert_eq!(inv["package_id"], hx(&pkg.package_id));
+    }
+
+    // ---- TYPED runner-attestation GENERATOR (provenance producer gap fix) --------------------------
+    // A mutually-consistent fixture: the dry-run recipe (valid, self-checking double-build facts) + a
+    // Phase-1 identity record + venue scalar inputs, all bound to the REAL ratified constants (source
+    // commit, tooling authority, spec) so `generate_runner_attestation`'s production checks apply.
+    // idx 0 == Sp1, idx 1 == Risc0 (both exercise the identical generator path).
+    fn ratified_gen_fixture(
+        idx: usize,
+    ) -> (
+        RunnerRecipeJson,
+        RunnerAttestationGenInputs,
+        Vec<crate::guest_set::GuestIdentityRecord>,
+    ) {
+        let raw = dry_run_raw_facts();
+        let c = &raw.candidates[idx];
+        let p = &c.provenance[0];
+        let mut recipe = p.runner_recipe.clone();
+        // In production the runner is stamped BUILD_GIT_SHA == the measured source; the dry-run synth
+        // uses a placeholder. Bind it to the ratified source so the recipe self-consistency (build_env
+        // BUILD_GIT_SHA == measured_source_commit) holds under the generator's ratified measured source.
+        for kv in recipe.build_env.iter_mut() {
+            if kv.0 == "BUILD_GIT_SHA" {
+                kv.1 = crate::guest_set::RATIFIED_SOURCE_COMMIT.to_string();
+            }
+        }
+        // The dry-run synth hardcodes recipe.candidate = "sp1" for both cells (prov_facts ignores it,
+        // using the attestation's placeholder); the real double_build_runner writes the cell candidate.
+        recipe.candidate = c.candidate.to_lowercase();
+        let arch = p.arch.clone();
+        let runner_blake3 = recipe.build_a.runner_blake3.clone();
+        let rec = crate::guest_set::GuestIdentityRecord {
+            candidate: c.candidate.clone(),
+            arch: arch.clone(),
+            source_commit: crate::guest_set::RATIFIED_SOURCE_COMMIT.to_string(),
+            clean_tree: true,
+            guest_source_tree_hash: "11".repeat(32),
+            candidate_dep_lock_hash: "22".repeat(32),
+            guest_image_hash: "33".repeat(32),
+            program_id: "44".repeat(32),
+            builder_container_digest: "55".repeat(32),
+            toolchain_identity: "66".repeat(32),
+            verifier_material_manifest_hash: "77".repeat(32),
+            build_command_hash: "88".repeat(32),
+            production_binary_blake3: runner_blake3,
+            real_backend: true,
+            real_guest_embedded: true,
+            b0_pre_spec_hash: MERGED_SPEC_HASH_HEX.to_string(),
+            tooling_commit: crate::tooling_authority::RATIFIED_MEASUREMENT_TOOLING_COMMIT
+                .to_string(),
+            tooling_pathset_blake3:
+                crate::tooling_authority::RATIFIED_MEASUREMENT_TOOLING_PATHSET_BLAKE3.to_string(),
+            canonical_sp1_guest_artifact_address: String::new(),
+        };
+        let inputs = RunnerAttestationGenInputs {
+            arch,
+            source_commit: crate::guest_set::RATIFIED_SOURCE_COMMIT.to_string(),
+            build_git_sha: None,
+            execution_tooling_checkout_head:
+                crate::tooling_authority::RATIFIED_MEASUREMENT_TOOLING_COMMIT.to_string(),
+            recomputed_pathset_blake3:
+                crate::tooling_authority::RATIFIED_MEASUREMENT_TOOLING_PATHSET_BLAKE3.to_string(),
+            immutable_builder_identity: "aa".repeat(32),
+            measured_source_context_blake3: "bb".repeat(32),
+            protobuf_authority_sha256: "cc".repeat(32),
+            protobuf_authority_blake3: "dd".repeat(32),
+            native_protoc_sha256: "ee".repeat(32),
+            native_protoc_blake3: "ff".repeat(32),
+            native_protoc_version: "libprotoc 3.21.12".to_string(),
+            docker_argv: "docker run --rm --platform linux/amd64 -v /a:/b:ro builder@sha256:x"
+                .to_string(),
+        };
+        (recipe, inputs, vec![rec])
+    }
+
+    // e2e (per-record): real recipe + Phase-1 identity -> generated runner_attestation that passes the
+    // sealed-import self-consistency + continuity + double-build binding, for BOTH candidates. The
+    // generator computes reproducibility_pair via the SAME shared builder the importer re-derives.
+    #[test]
+    fn generate_runner_attestation_accepts_both_candidates() {
+        for idx in 0..2 {
+            let (recipe, inputs, records) = ratified_gen_fixture(idx);
+            let bytes = generate_runner_attestation(&inputs, &recipe, &records)
+                .unwrap_or_else(|e| panic!("generate idx {idx}: {e}"));
+            let json: RunnerAttestationJson = serde_json::from_str(&bytes).unwrap();
+            assert_eq!(
+                json.ratified_tooling_commit,
+                crate::tooling_authority::RATIFIED_MEASUREMENT_TOOLING_COMMIT
+            );
+            assert_eq!(
+                json.docker_argv_blake3,
+                blake3::hash(inputs.docker_argv.as_bytes())
+                    .to_hex()
+                    .to_string()
+            );
+            assert_ne!(json.reproducibility_pair_blake3, "0".repeat(64));
+            assert_eq!(json.runner_blake3, recipe.build_a.runner_blake3);
+            assert_eq!(json.measured_source_commit, json.build_git_sha);
+        }
+    }
+
+    // NEGATIVE: swapped identity — the Phase-1 production_binary_blake3 is not this runner.
+    #[test]
+    fn generate_refuses_swapped_identity() {
+        let (recipe, inputs, mut records) = ratified_gen_fixture(0);
+        records[0].production_binary_blake3 = "00".repeat(32);
+        assert!(generate_runner_attestation(&inputs, &recipe, &records).is_err());
+    }
+
+    // NEGATIVE: wrong runner hash — a byte-equal double build of a DIFFERENT binary than Phase-1 pinned.
+    #[test]
+    fn generate_refuses_wrong_runner_hash() {
+        let (mut recipe, inputs, records) = ratified_gen_fixture(0);
+        recipe.build_a.runner_blake3 = "09".repeat(32);
+        recipe.build_b.runner_blake3 = "09".repeat(32); // still byte-equal, but != Phase-1 pin
+        assert!(generate_runner_attestation(&inputs, &recipe, &records).is_err());
+    }
+
+    // NEGATIVE: wrong tooling authority in the Phase-1 record.
+    #[test]
+    fn generate_refuses_wrong_tooling() {
+        let (recipe, inputs, mut records) = ratified_gen_fixture(0);
+        records[0].tooling_commit = "0a".repeat(20);
+        assert!(generate_runner_attestation(&inputs, &recipe, &records).is_err());
+    }
+
+    // NEGATIVE: wrong recipe — not a byte-equal double build.
+    #[test]
+    fn generate_refuses_wrong_recipe() {
+        let (mut recipe, inputs, records) = ratified_gen_fixture(0);
+        recipe.byte_equal = false;
+        assert!(generate_runner_attestation(&inputs, &recipe, &records).is_err());
+    }
+
+    // NEGATIVE: dirty tooling root — recomputed path-set != ratified (self-consistency).
+    #[test]
+    fn generate_refuses_dirty_tooling_pathset() {
+        let (recipe, mut inputs, records) = ratified_gen_fixture(0);
+        inputs.recomputed_pathset_blake3 = "0b".repeat(32);
+        assert!(generate_runner_attestation(&inputs, &recipe, &records).is_err());
+    }
+
+    // NEGATIVE: measured source is not the ratified frozen source.
+    #[test]
+    fn generate_refuses_non_ratified_source() {
+        let (recipe, mut inputs, records) = ratified_gen_fixture(0);
+        inputs.source_commit = "0c".repeat(20);
+        assert!(generate_runner_attestation(&inputs, &recipe, &records).is_err());
+    }
+
+    // NEGATIVE: wrong native protoc version pin.
+    #[test]
+    fn generate_refuses_wrong_protoc_version() {
+        let (recipe, mut inputs, records) = ratified_gen_fixture(0);
+        inputs.native_protoc_version = "libprotoc 3.20.0".into();
+        assert!(generate_runner_attestation(&inputs, &recipe, &records).is_err());
+    }
+
+    // NEGATIVE: the argv is offline (contains --offline) but an offline FACT is false — the redundant
+    // enforcement must agree with the argv. Either boolean being false is refused.
+    #[test]
+    fn generate_refuses_recipe_not_marked_offline() {
+        let (mut recipe, inputs, records) = ratified_gen_fixture(0);
+        assert!(recipe.build_argv.iter().any(|a| a == "--offline"));
+        recipe.offline = false;
+        assert!(generate_runner_attestation(&inputs, &recipe, &records).is_err());
+        let (mut recipe2, inputs2, records2) = ratified_gen_fixture(0);
+        recipe2.cargo_net_offline = false;
+        assert!(generate_runner_attestation(&inputs2, &recipe2, &records2).is_err());
+    }
+
+    // NEGATIVE: the offline FACTS are true but the executed argv dropped --offline — refused by check_argv.
+    #[test]
+    fn generate_refuses_argv_missing_offline_while_facts_true() {
+        let (mut recipe, inputs, records) = ratified_gen_fixture(0);
+        assert!(recipe.offline && recipe.cargo_net_offline);
+        recipe.build_argv.retain(|a| a != "--offline");
+        assert!(generate_runner_attestation(&inputs, &recipe, &records).is_err());
+    }
+
+    // e2e (pre-proving gate): a generated runner_attestation spliced into a complete provenance record
+    // is ACCEPTED by `validate_provenance` (measure-runner parse -> per-record binder -> continuity);
+    // dropping the field (the exact venue bug) or mutually editing it is REFUSED before any proof.
+    #[test]
+    fn validate_provenance_accepts_generated_and_refuses_missing_or_edited() {
+        let (recipe, inputs, records) = ratified_gen_fixture(0);
+        let att_bytes = generate_runner_attestation(&inputs, &recipe, &records).unwrap();
+        let att: RunnerAttestationJson = serde_json::from_str(&att_bytes).unwrap();
+
+        let raw = dry_run_raw_facts();
+        let mut base = raw.candidates[0].provenance[0].clone();
+        base.runner_recipe = recipe.clone();
+        base.runner_attestation = att;
+
+        let prov_json = serde_json::to_string(&vec![&base]).unwrap();
+        assert_eq!(validate_provenance(&prov_json, &records).unwrap(), 1);
+
+        // NEGATIVE (missing): the field the runner requires is absent -> serde parse fails closed.
+        let mut v: serde_json::Value = serde_json::from_str(&prov_json).unwrap();
+        v[0].as_object_mut().unwrap().remove("runner_attestation");
+        let err = validate_provenance(&v.to_string(), &records).unwrap_err();
+        assert!(err.contains("runner_attestation"), "unexpected: {err}");
+
+        // NEGATIVE (mutually edited): flip measured source off the ratified frozen source -> refused.
+        let mut v2: serde_json::Value = serde_json::from_str(&prov_json).unwrap();
+        v2[0]["runner_attestation"]["measured_source_commit"] = serde_json::json!("0d".repeat(20));
+        assert!(validate_provenance(&v2.to_string(), &records).is_err());
     }
 
     // RUNNER CONTINUITY — positive: the two eligible MEASUREMENT mappings (Sp1/x86, Risc0/x86) each

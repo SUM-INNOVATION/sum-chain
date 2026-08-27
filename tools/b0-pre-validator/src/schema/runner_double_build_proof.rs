@@ -25,9 +25,9 @@ use super::rustc_invocation_inventory::RustcInvocationInventoryV1;
 use crate::codec::{DecodeError, Reader, Writer};
 use crate::enums::{Arch, Candidate};
 
-pub const RUNNER_DOUBLE_BUILD_PROOF_SCHEMA_VERSION: u16 = 3;
+pub const RUNNER_DOUBLE_BUILD_PROOF_SCHEMA_VERSION: u16 = 4;
 pub const RUNNER_DOUBLE_BUILD_PROOF_KIND: &[u8; 32] = b"b0-final-runner-dbl-build-proof0";
-pub const RUNNER_DOUBLE_BUILD_PROOF_PREFIX: &[u8] = b"b0-final-runner-double-build-proof/v3\0";
+pub const RUNNER_DOUBLE_BUILD_PROOF_PREFIX: &[u8] = b"b0-final-runner-double-build-proof/v4\0";
 pub const REPRODUCIBILITY_PAIR_DOMAIN: &[u8] = b"b0-final-runner-reproducibility-pair/v1\0";
 
 use super::runner_build_recipe::{r_str, w_str};
@@ -53,6 +53,10 @@ pub struct BuildFacts {
     /// /b0/cargo for THIS build (must equal the proof's `cargo_seed_origin_blake3` — this build got an
     /// independent, authentic copy of the retained seed authority; never a shared/carried cache).
     pub materialized_cargo_seed_blake3: [u8; 32],
+    /// (RISC0 real embed only) Content+mode manifest address of the risc0 TOOLCHAIN-HOME working copy this
+    /// build materialized FRESH at the fixed canonical path — authenticated content-equal to the sealed
+    /// read-only authority BEFORE use (must equal the proof's `risc0_home_origin_blake3`). All-zero for SP1.
+    pub materialized_risc0_home_blake3: [u8; 32],
     pub start_unix: u64,
     pub end_unix: u64,
 }
@@ -69,6 +73,7 @@ impl BuildFacts {
         w.bytes(&self.origin_manifest_blake3);
         w.bytes(&self.materialized_manifest_blake3);
         w.bytes(&self.materialized_cargo_seed_blake3);
+        w.bytes(&self.materialized_risc0_home_blake3);
         w.u64(self.start_unix);
         w.u64(self.end_unix);
     }
@@ -84,6 +89,7 @@ impl BuildFacts {
             origin_manifest_blake3: r.read_array::<32>(ctx)?,
             materialized_manifest_blake3: r.read_array::<32>(ctx)?,
             materialized_cargo_seed_blake3: r.read_array::<32>(ctx)?,
+            materialized_risc0_home_blake3: r.read_array::<32>(ctx)?,
             start_unix: r.read_u64(ctx)?,
             end_unix: r.read_u64(ctx)?,
         })
@@ -101,6 +107,10 @@ pub struct RunnerDoubleBuildProofV1 {
     /// authenticated against `DependencySeedV1`'s host-cargo-home unit). Both builds' fresh
     /// materializations must equal this; it is anchored to the authenticated seed at attestation binding.
     pub cargo_seed_origin_blake3: [u8; 32],
+    /// (RISC0 real embed only) The SEALED read-only risc0 toolchain-home AUTHORITY manifest address. Both
+    /// builds' fresh working copies must equal this (origin == materialized_A == materialized_B), proving
+    /// each build authenticated a content-equal copy of the ratified toolchain before use. All-zero for SP1.
+    pub risc0_home_origin_blake3: [u8; 32],
     pub byte_equal: bool,
     pub reproducibility_pair_blake3: [u8; 32],
 }
@@ -127,6 +137,7 @@ impl RunnerDoubleBuildProofV1 {
         self.build_a.encode(&mut w);
         self.build_b.encode(&mut w);
         w.bytes(&self.cargo_seed_origin_blake3);
+        w.bytes(&self.risc0_home_origin_blake3);
         w.u8(self.byte_equal as u8);
         w.bytes(&self.reproducibility_pair_blake3);
         w.into_bytes()
@@ -160,6 +171,8 @@ impl RunnerDoubleBuildProofV1 {
         let build_b = BuildFacts::decode(r, "RunnerDoubleBuildProofV1.build_b")?;
         let cargo_seed_origin_blake3 =
             r.read_array::<32>("RunnerDoubleBuildProofV1.cargo_seed_origin_blake3")?;
+        let risc0_home_origin_blake3 =
+            r.read_array::<32>("RunnerDoubleBuildProofV1.risc0_home_origin_blake3")?;
         let byte_equal = match r.read_u8("RunnerDoubleBuildProofV1.byte_equal")? {
             0 => false,
             1 => true,
@@ -178,6 +191,7 @@ impl RunnerDoubleBuildProofV1 {
             build_a,
             build_b,
             cargo_seed_origin_blake3,
+            risc0_home_origin_blake3,
             byte_equal,
             reproducibility_pair_blake3,
         })
@@ -255,6 +269,26 @@ impl RunnerDoubleBuildProofV1 {
         }
         if self.build_b.materialized_cargo_seed_blake3 != self.cargo_seed_origin_blake3 {
             return Err("double-build proof: build B materialized cargo seed != seed origin (a build got a different/carried seed)".into());
+        }
+        // Fresh-per-build RISC0 TOOLCHAIN-HOME working copy (RISC0 real embed only): each build materialized
+        // a copy of the SEALED read-only toolchain authority, AUTHENTICATED content-equal to it before use
+        // — origin == materialized_A == materialized_B (the sealed package + BOTH verifiers recompute this
+        // 3-way equality from the retained addresses, never a stored boolean). SP1 carries all-zero.
+        if self.candidate == Candidate::Risc0 {
+            if self.risc0_home_origin_blake3 == [0u8; 32] {
+                return Err("double-build proof: RISC0 toolchain-home authority address is all-zero (unbound)".into());
+            }
+            if self.build_a.materialized_risc0_home_blake3 != self.risc0_home_origin_blake3 {
+                return Err("double-build proof: build A materialized risc0 toolchain-home != sealed authority (not content-equal / a carried copy)".into());
+            }
+            if self.build_b.materialized_risc0_home_blake3 != self.risc0_home_origin_blake3 {
+                return Err("double-build proof: build B materialized risc0 toolchain-home != sealed authority (not content-equal / a carried copy)".into());
+            }
+        } else if self.risc0_home_origin_blake3 != [0u8; 32]
+            || self.build_a.materialized_risc0_home_blake3 != [0u8; 32]
+            || self.build_b.materialized_risc0_home_blake3 != [0u8; 32]
+        {
+            return Err("double-build proof: non-RISC0 candidate carries a risc0 toolchain-home address (must be all-zero)".into());
         }
         // Inventories: addresses match the retained inventories, correct build tags, prove remaps.
         if inv_a.hash() != self.build_a.inventory_address {
@@ -367,6 +401,7 @@ mod tests {
             origin_manifest_blake3: [21; 32],
             materialized_manifest_blake3: [21; 32],
             materialized_cargo_seed_blake3: [31; 32],
+            materialized_risc0_home_blake3: [0; 32],
             start_unix: 100,
             end_unix: 200,
         };
@@ -381,6 +416,7 @@ mod tests {
             origin_manifest_blake3: [21; 32],
             materialized_manifest_blake3: [21; 32],
             materialized_cargo_seed_blake3: [31; 32],
+            materialized_risc0_home_blake3: [0; 32],
             start_unix: 200,
             end_unix: 300,
         };
@@ -389,6 +425,7 @@ mod tests {
             arch: recipe.arch,
             wrapper_blake3: recipe.wrapper_blake3,
             cargo_seed_origin_blake3: [31; 32],
+            risc0_home_origin_blake3: [0; 32],
             reproducibility_pair_blake3: RunnerDoubleBuildProofV1::compute_reproducibility_pair(
                 &fa, &fb,
             ),
@@ -489,11 +526,63 @@ mod tests {
         proof.candidate = Candidate::Risc0;
         proof.build_a.inventory_address = inv_a.hash();
         proof.build_b.inventory_address = inv_b.hash();
+        // RISC0 requires a bound risc0 toolchain-home authority (3-way equal); set it so we reach the guest check.
+        proof.risc0_home_origin_blake3 = [42; 32];
+        proof.build_a.materialized_risc0_home_blake3 = [42; 32];
+        proof.build_b.materialized_risc0_home_blake3 = [42; 32];
         proof.build_a.guest_image_id = [1; 32];
         proof.build_b.guest_image_id = [2; 32];
         assert!(proof
             .check_double_build(&recipe, &inv_a, &inv_b)
             .unwrap_err()
             .contains("guest A != B"));
+    }
+
+    #[test]
+    fn risc0_home_authority_3way_enforced() {
+        // Build a valid RISC0 proof with a bound risc0 toolchain-home authority (origin == A == B).
+        let base = || {
+            let (mut recipe, mut inv_a, mut inv_b, mut proof) = parts();
+            recipe.candidate = Candidate::Risc0;
+            recipe.recipe_id = RunnerBuildRecipeV1::compute_recipe_id(
+                &recipe.measured_source_commit,
+                &recipe.wrapper_blake3,
+            );
+            inv_a.candidate = Candidate::Risc0;
+            inv_b.candidate = Candidate::Risc0;
+            proof.candidate = Candidate::Risc0;
+            proof.build_a.inventory_address = inv_a.hash();
+            proof.build_b.inventory_address = inv_b.hash();
+            proof.risc0_home_origin_blake3 = [42; 32];
+            proof.build_a.materialized_risc0_home_blake3 = [42; 32];
+            proof.build_b.materialized_risc0_home_blake3 = [42; 32];
+            (recipe, inv_a, inv_b, proof)
+        };
+        let (recipe, inv_a, inv_b, proof) = base();
+        proof.check_double_build(&recipe, &inv_a, &inv_b).unwrap();
+        // all-zero (unbound) authority refused
+        let (recipe, inv_a, inv_b, mut p) = base();
+        p.risc0_home_origin_blake3 = [0; 32];
+        p.build_a.materialized_risc0_home_blake3 = [0; 32];
+        p.build_b.materialized_risc0_home_blake3 = [0; 32];
+        assert!(p
+            .check_double_build(&recipe, &inv_a, &inv_b)
+            .unwrap_err()
+            .contains("all-zero"));
+        // build B materialized a DIFFERENT risc0-home than the sealed authority -> refused
+        let (recipe, inv_a, inv_b, mut p) = base();
+        p.build_b.materialized_risc0_home_blake3 = [7; 32];
+        assert!(p
+            .check_double_build(&recipe, &inv_a, &inv_b)
+            .unwrap_err()
+            .contains("build B materialized risc0 toolchain-home != sealed authority"));
+        // SP1 carrying a non-zero risc0-home address -> refused
+        let (recipe, inv_a, inv_b, mut p) = parts();
+        assert_eq!(p.candidate, recipe.candidate);
+        p.build_a.materialized_risc0_home_blake3 = [9; 32];
+        assert!(p
+            .check_double_build(&recipe, &inv_a, &inv_b)
+            .unwrap_err()
+            .contains("non-RISC0 candidate carries a risc0 toolchain-home address"));
     }
 }

@@ -131,8 +131,17 @@ require_cmd b3sum
 # materialize/build/prove — so it can never emit a fragment or launch a proving runner (it cannot
 # fabricate a measurement). NEVER set in production; unset, the production path runs the gate as before.
 B0PRE_TESTONLY_PREFLIGHT="${B0PRE_TESTONLY_PREFLIGHT:-0}"
-if [ "$B0PRE_TESTONLY_PREFLIGHT" = 1 ]; then
-  note "TEST_ONLY preflight: SKIPPING the MIA fail-fast gate (covered by dedicated tests); will exit before proving"
+# TEST_ONLY re-derivation (B0PRE_TESTONLY_REDERIVE=1): used ONLY by the CI test that drives THIS path all
+# the way to the measurement-build identity RE-DERIVATION (`--emit-identity` + the exact-match compare)
+# — PAST the preflight boundary — with a contract-enforcing stub runner, then EXITS before proving. It
+# skips ONLY the venue-only inputs that a CI host cannot produce (the MIA fail-fast gate, the SP1 docker
+# guest reconcile, and the toolchain-authority reconcile), injecting the builder/toolchain identity from
+# B0PRE_TESTONLY_BUILDER_DIGEST / B0PRE_TESTONLY_TOOLCHAIN_IDENTITY so the re-derivation compare runs
+# EXACTLY as in production. Like the preflight hook it EXITS before any prove and emits NO fragment, so
+# it can never fabricate a measurement. NEVER set in production.
+B0PRE_TESTONLY_REDERIVE="${B0PRE_TESTONLY_REDERIVE:-0}"
+if [ "$B0PRE_TESTONLY_PREFLIGHT" = 1 ] || [ "$B0PRE_TESTONLY_REDERIVE" = 1 ]; then
+  note "TEST_ONLY (${B0PRE_TESTONLY_PREFLIGHT:+preflight}${B0PRE_TESTONLY_REDERIVE:+ rederive}): SKIPPING the MIA fail-fast gate (covered by dedicated tests); will exit before proving"
 else
   "$MEASURE_PRODUCE" --verify-authority "$MIA_JSON" "$REPORT_JSON" "$INVENTORY_TXT" "$ELIG_JSON" >&2 \
     || die "measurement-input authority failed the pre-grid fail-fast gate (decode/cross-bind/tooling-ratified); refusing to prove"
@@ -239,13 +248,19 @@ if [ "$CAND" = sp1 ]; then
   CANONICAL_SP1_GUEST_ARTIFACT_ADDRESS="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["address"])' "$CANONICAL_SP1_GUEST_PKG/canonical-sp1-guest-artifact.v1.json")"
   # #6: builder/toolchain identify THIS proving venue's ratified image (proving runs inside it); the
   # SHARED guest is bound by the canonical artifact address above, not by a local build.
-  IMAGE_ID="$("$REAL_DOCKER" image inspect --format '{{.Id}}' "$VERIFIER_REF" 2>/dev/null || true)"
-  case "$IMAGE_ID" in sha256:*) ;; *) die "VERIFIER_REF $VERIFIER_REF did not reconcile to an immutable sha256 image id (pull-never); refusing" ;; esac
   [ -s "$GUEST_ELF" ] || die "SP1 guest ELF not present at $GUEST_ELF"
-  CONTAINER_IMAGE_DIGEST="${IMAGE_ID#sha256:}"
-  BUILDER_DIGEST="$CONTAINER_IMAGE_DIGEST"
-  # #3: toolchain identity bound to the ratified pinned builder image (not a label).
-  TOOLCHAIN_IDENTITY="$(b0_toolchain_identity sp1 "$IMAGE_ID")"
+  if [ "$B0PRE_TESTONLY_REDERIVE" = 1 ]; then
+    CONTAINER_IMAGE_DIGEST="${B0PRE_TESTONLY_BUILDER_DIGEST:?B0PRE_TESTONLY_REDERIVE requires B0PRE_TESTONLY_BUILDER_DIGEST}"
+    BUILDER_DIGEST="$CONTAINER_IMAGE_DIGEST"
+    TOOLCHAIN_IDENTITY="${B0PRE_TESTONLY_TOOLCHAIN_IDENTITY:?B0PRE_TESTONLY_REDERIVE requires B0PRE_TESTONLY_TOOLCHAIN_IDENTITY}"
+  else
+    IMAGE_ID="$("$REAL_DOCKER" image inspect --format '{{.Id}}' "$VERIFIER_REF" 2>/dev/null || true)"
+    case "$IMAGE_ID" in sha256:*) ;; *) die "VERIFIER_REF $VERIFIER_REF did not reconcile to an immutable sha256 image id (pull-never); refusing" ;; esac
+    CONTAINER_IMAGE_DIGEST="${IMAGE_ID#sha256:}"
+    BUILDER_DIGEST="$CONTAINER_IMAGE_DIGEST"
+    # #3: toolchain identity bound to the ratified pinned builder image (not a label).
+    TOOLCHAIN_IDENTITY="$(b0_toolchain_identity sp1 "$IMAGE_ID")"
+  fi
 else
   # In the MEASUREMENT/proving path RISC Zero uses no builder container: the guest is embedded via
   # embed_methods at runner BUILD time with the pinned LOCAL r0 toolchain, so the toolchain
@@ -256,18 +271,39 @@ else
   # aarch64 proving/material remains ineligible and absent.
   CONTAINER_IMAGE_DIGEST="$(b3 "$MEASURE_RUNNER")"
   BUILDER_DIGEST="$CONTAINER_IMAGE_DIGEST"
-  # #3: toolchain identity = the pinned local r0 toolchain tree (PROVER_RISC0_HOME).
-  need_env PROVER_RISC0_HOME
-  TOOLCHAIN_IDENTITY="$(b0_toolchain_identity risc0 "$PROVER_RISC0_HOME")" || die "RISC0 toolchain identity derivation failed"
+  # OPTION B — measurement rebuilds through the SAME canonical double-build recipe and MUST use the EXACT
+  # authenticated runner (path-independent at /b0/tooling). Require this measurement runner's bytes to
+  # equal the recipe's authenticated build-A runner: measurement runner hash == Phase-1 production runner
+  # hash by construction (Phase-1 consumed the same double-build artifact), so the guest image/program id
+  # necessarily agree. A checkout-local runner (different bytes) is refused here, BEFORE proving.
+  if [ "$B0PRE_TESTONLY_REDERIVE" = 1 ]; then
+    TOOLCHAIN_IDENTITY="${B0PRE_TESTONLY_TOOLCHAIN_IDENTITY:?B0PRE_TESTONLY_REDERIVE requires B0PRE_TESTONLY_TOOLCHAIN_IDENTITY}"
+  else
+    # ONE shared Option-B binding (lib.sh b0_verify_risc0_authenticated_runner) — the SAME helper Phase-1
+    # identity (derive_guest_set.sh) drives: the measurement runner's blake3 == the recipe's authenticated
+    # build-A runner, for a RISC0 REAL embed on THIS arch. Because Phase-1 consumed the same double-build
+    # artifact, measurement runner hash == Phase-1 runner hash, so the guest image/program id necessarily
+    # agree. A checkout-local runner (different bytes) is REFUSED here, BEFORE proving. ratified_tc is "":
+    # the LOCAL prover toolchain is gated separately below and against the content-addressed authority.
+    b0_verify_risc0_authenticated_runner "$MEASURE_RUNNER" "$B0_RUNNER_RECIPE_JSON" "$ARCH" "" >/dev/null \
+      || die "RISC0 measurement runner is not the authenticated double-build artifact (see REFUSED above); refusing to prove"
+    # #3: toolchain identity = the pinned local r0 toolchain tree (PROVER_RISC0_HOME).
+    need_env PROVER_RISC0_HOME
+    TOOLCHAIN_IDENTITY="$(b0_toolchain_identity risc0 "$PROVER_RISC0_HOME")" || die "RISC0 toolchain identity derivation failed"
+  fi
 fi
 # #2: the derived toolchain identity MUST equal the RATIFIED value sourced from the
 # hash-verified content-addressed toolchain-authority record (never an operator env). A
 # wrong-but-consistent toolchain is refused even if phase 1 and measurement agree.
-: "${TOOLCHAIN_AUTHORITY_RECORD:=$ROOT/../../docs/b0-pre/venue/toolchain-authority.v1.json}"
-RATIFIED_TC="$(b0_ratified_toolchain_identity "$CANDCAP" "$ARCH" "$TOOLCHAIN_AUTHORITY_RECORD")" \
-  || die "ratified toolchain authority record unavailable/invalid (hash-verify or entry lookup failed)"
-[ "$TOOLCHAIN_IDENTITY" = "$RATIFIED_TC" ] \
-  || die "toolchain identity $TOOLCHAIN_IDENTITY != ratified $RATIFIED_TC (wrong/unratified toolchain)"
+if [ "$B0PRE_TESTONLY_REDERIVE" = 1 ]; then
+  note "TEST_ONLY rederive: SKIPPING the toolchain-authority reconcile (injected identity; covered by dedicated toolchain-authority tests)"
+else
+  : "${TOOLCHAIN_AUTHORITY_RECORD:=$ROOT/../../docs/b0-pre/venue/toolchain-authority.v1.json}"
+  RATIFIED_TC="$(b0_ratified_toolchain_identity "$CANDCAP" "$ARCH" "$TOOLCHAIN_AUTHORITY_RECORD")" \
+    || die "ratified toolchain authority record unavailable/invalid (hash-verify or entry lookup failed)"
+  [ "$TOOLCHAIN_IDENTITY" = "$RATIFIED_TC" ] \
+    || die "toolchain identity $TOOLCHAIN_IDENTITY != ratified $RATIFIED_TC (wrong/unratified toolchain)"
+fi
 
 # ---- verifier material (the pinned harness bin; JSON manifest) -----------------------------
 VMAT_JSON="$SCRATCH/verifier-material.json"
@@ -276,6 +312,15 @@ VMAT_JSON="$SCRATCH/verifier-material.json"
 
 # ---- provenance: READ the real host/cgroup facts for Proving + Verification ----------------
 PROV_JSON="$SCRATCH/provenance.json"
+if [ "$B0PRE_TESTONLY_REDERIVE" = 1 ]; then
+  # TEST_ONLY rederive: the real host-provenance read + runner-recipe splice are venue-only (the recipe
+  # facts come from double_build_runner). Inject the minimal source_commit / dirty_tree_flag the
+  # re-derivation below reads, and skip the splice; the burn-in exercises the real provenance+recipe path.
+  note "TEST_ONLY rederive: SKIPPING host-provenance read + runner-recipe splice (injected source_commit)"
+  printf '[{"source_commit":"%s","dirty_tree_flag":%s}]' \
+    "${B0PRE_TESTONLY_SOURCE_COMMIT:?B0PRE_TESTONLY_REDERIVE requires B0PRE_TESTONLY_SOURCE_COMMIT}" \
+    "${B0PRE_TESTONLY_DIRTY:-false}" > "$PROV_JSON"
+else
 prov_role() {
   "$PROV_BIN" "$ARCH" "$1" --repo "$REPO_DIR" --builder-digest "$BUILDER_DIGEST" \
     --tooling-root "$B0_TOOLING_ROOT" \
@@ -324,6 +369,55 @@ for entry in prov:
 json.dump(prov, open(prov_path, "w", encoding="utf-8"), indent=2)
 PY
 
+# ---- runner_attestation: TYPED generation + verbatim splice (NEVER shell field-assembly) ---------
+# The security-critical 18-field record is built by `measure-produce --gen-runner-attestation`, which
+# constructs RunnerAttestationV1 from the retained recipe + Phase-1 identity record + authenticated
+# scalar inputs, derives docker_argv_blake3 + reproducibility_pair via the SAME code the importer
+# re-derives, runs the sealed-import self-consistency + continuity checks, emits canonical JSON, and
+# re-decodes it before returning. This shell only assembles authenticated SCALARS and splices the
+# returned bytes VERBATIM into every provenance role (no field reinterpretation). ProvFacts requires it.
+_RA_SRC="$(grep -o '"source_commit": *"[0-9a-f]\{40\}"' "$PROV_JSON" | head -1 | grep -o '[0-9a-f]\{40\}')"
+[ -n "$_RA_SRC" ] || die "runner_attestation: cannot read measured source_commit from provenance"
+_PB_CA="$B0_TOOLING_ROOT/docs/b0-pre/venue/protobuf-include-authority/CONTENT-ADDRESS.txt"
+[ -s "$_PB_CA" ] || die "runner_attestation: protobuf-include-authority CONTENT-ADDRESS missing: $_PB_CA"
+_PB_SHA="$(grep -oE 'content_address_sha256 [0-9a-f]{64}' "$_PB_CA" | awk '{print $2}')"
+_PB_B3="$(grep -oE 'content_address_blake3 [0-9a-f]{64}' "$_PB_CA" | awk '{print $2}')"
+[ -n "$_PB_SHA" ] && [ -n "$_PB_B3" ] || die "runner_attestation: protobuf-include-authority content address unreadable"
+need_env B0_PROTOC_AUTHORITY_JSON
+[ -s "$B0_PROTOC_AUTHORITY_JSON" ] || die "runner_attestation: B0_PROTOC_AUTHORITY_JSON missing: $B0_PROTOC_AUTHORITY_JSON"
+need_env B0_PROTOC_DOCKER_ARGV
+need_env B0_MEASURED_SOURCE_CONTEXT_BLAKE3
+_RA_INPUTS="$SCRATCH/runner-attestation-inputs.json"
+python3 - "$_RA_INPUTS" "$ARCH" "$_RA_SRC" "$B0_TOOLING_COMMIT" "$B0_TOOLING_PATHSET_BLAKE3" \
+  "$BUILDER_DIGEST" "$B0_MEASURED_SOURCE_CONTEXT_BLAKE3" "$_PB_SHA" "$_PB_B3" \
+  "$B0_PROTOC_AUTHORITY_JSON" "$B0_PROTOC_DOCKER_ARGV" <<'PY' || die "failed to assemble runner_attestation inputs"
+import json, sys
+(out, arch, src, tcommit, tpathset, builder, msctx, pbsha, pbb3, protoc_json, docker_argv) = sys.argv[1:12]
+pa = json.load(open(protoc_json, encoding="utf-8"))
+obj = {
+  "arch": arch, "source_commit": src, "execution_tooling_checkout_head": tcommit,
+  "recomputed_pathset_blake3": tpathset, "immutable_builder_identity": builder,
+  "measured_source_context_blake3": msctx,
+  "protobuf_authority_sha256": pbsha, "protobuf_authority_blake3": pbb3,
+  "native_protoc_sha256": pa["protoc_sha256"], "native_protoc_blake3": pa["protoc_blake3"],
+  "native_protoc_version": pa["protoc_version"], "docker_argv": docker_argv,
+}
+with open(out, "w", encoding="utf-8") as f:
+    json.dump(obj, f, indent=1); f.write("\n")
+PY
+_RA_OUT="$SCRATCH/runner-attestation.$CAND.$ARCH.json"
+"$MEASURE_PRODUCE" --gen-runner-attestation "$_RA_INPUTS" "$B0_RUNNER_RECIPE_JSON" "$IDENTITY_RECORDS" "$_RA_OUT" >&2 \
+  || die "typed runner_attestation generation failed closed"
+python3 - "$PROV_JSON" "$_RA_OUT" <<'PY' || die "failed to splice runner_attestation into provenance"
+import json, sys
+prov = json.load(open(sys.argv[1], encoding="utf-8"))
+att = json.load(open(sys.argv[2], encoding="utf-8"))
+for entry in prov:
+    entry["runner_attestation"] = att   # returned bytes spliced verbatim; fields never reinterpreted
+json.dump(prov, open(sys.argv[1], "w", encoding="utf-8"), indent=2)
+PY
+fi
+
 # ---- #4: bind the MEASUREMENT build to the PHASE-1 identity (exact equality) ----------------
 # Re-derive THIS build's identity via --emit-identity and require it to EXACTLY match the
 # phase-1 record for (candidate, arch): program/image id, guest image hash, source-tree, lock,
@@ -335,12 +429,17 @@ SRC_COMMIT="$(grep -o '"source_commit": *"[0-9a-f]\{40\}"' "$PROV_JSON" | head -
 _dirty="$(grep -o '"dirty_tree_flag": *\(true\|false\)' "$PROV_JSON" | head -1 | grep -o 'true\|false')"
 CLEAN=true; [ "$_dirty" = true ] && CLEAN=false
 MEAS_REC="$SCRATCH/measurement-identity.json"
-_idargs=( --emit-identity --arch "$ARCH" --spec-hash "$SPEC_HASH"
-  --guest-source-tree-hash "$GUEST_SOURCE_TREE_HASH" --candidate-dep-lock-hash "$CANDIDATE_DEP_LOCK_HASH"
-  --build-command-hash "$BUILD_COMMAND_HASH" --builder-digest "$BUILDER_DIGEST"
-  --toolchain-identity "$TOOLCHAIN_IDENTITY" --source-commit "$SRC_COMMIT" --clean-tree "$CLEAN"
-  --verifier-material "$VMAT_JSON" )
-[ "$CAND" = sp1 ] && _idargs+=(--guest-elf "$GUEST_ELF")
+# Build the --emit-identity argument vector through the ONE shared constructor (lib.sh), byte-for-byte
+# the SAME contract the phase-1 guest-set path (derive_guest_set.sh) uses, so the measurement path can
+# never again silently omit a required arg the runner enforces (it previously dropped --tooling-commit /
+# --tooling-pathset-blake3 / --canonical-sp1-guest-artifact-address, which the runner `req`s). RISC0
+# passes an unused guest-elf/canonical-address (the constructor ignores them for RISC0).
+_idargs=()
+while IFS= read -r -d '' _t; do _idargs+=("$_t"); done < <(
+  b0_emit_identity_args "$CAND" "$ARCH" "$SPEC_HASH" "$GUEST_SOURCE_TREE_HASH" "$CANDIDATE_DEP_LOCK_HASH" \
+    "$BUILD_COMMAND_HASH" "$BUILDER_DIGEST" "$TOOLCHAIN_IDENTITY" "$SRC_COMMIT" "$CLEAN" "$VMAT_JSON" \
+    "$B0_TOOLING_COMMIT" "$B0_TOOLING_PATHSET_BLAKE3" "$GUEST_ELF" "$CANONICAL_SP1_GUEST_ARTIFACT_ADDRESS" ) \
+  || die "measurement-build emit-identity argument construction failed (candidate contract)"
 "$MEASURE_RUNNER" "${_idargs[@]}" > "$MEAS_REC" || die "measurement-build identity emission failed"
 python3 - "$MEAS_REC" "$IDENTITY_RECORDS" "$CANDCAP" "$ARCH" <<'PY' || die "measurement-build identity != phase-1 identity; refusing to prove"
 import json, sys
@@ -351,13 +450,27 @@ p1 = [r for r in recs if r.get("candidate") == cand and r.get("arch") == arch]
 if len(p1) != 1:
     sys.exit("no unique phase-1 identity record for this fragment")
 p1 = p1[0]
+# The measurement build MUST reproduce the phase-1 identity EXACTLY — including the two-root tooling
+# binding (tooling_commit / tooling_pathset_blake3). Comparing them here means a WRONG tooling argument
+# in the measurement re-derivation is refused BEFORE proving (not merely an ABSENT one, which the runner
+# already rejects) — a different tooling authority between phase 1 and measurement can never be proved.
 for f in ["program_id", "guest_image_hash", "guest_source_tree_hash", "candidate_dep_lock_hash",
           "build_command_hash", "builder_container_digest", "toolchain_identity",
           "verifier_material_manifest_hash", "source_commit", "real_backend",
-          "real_guest_embedded", "b0_pre_spec_hash"]:
+          "real_guest_embedded", "b0_pre_spec_hash",
+          "tooling_commit", "tooling_pathset_blake3"]:
     if meas.get(f) != p1.get(f):
         sys.exit(f"{f} differs: measurement {meas.get(f)!r} != phase-1 {p1.get(f)!r}")
 PY
+# TEST_ONLY rederive exit: the measurement-build identity RE-DERIVATION (--emit-identity through the ONE
+# shared arg constructor) + the exact-match compare (incl. the two-root tooling binding) have PASSED —
+# past the preflight boundary, with the real runner CLI contract exercised. Stop HERE, before the
+# dependency-seed gate / firewall / proving, so the test asserts the re-derivation with NO proof launched
+# and NO fragment emitted (it can never fabricate a measurement).
+if [ "$B0PRE_TESTONLY_REDERIVE" = 1 ]; then
+  echo "MEASURE_FRAGMENT_REDERIVE_OK candidate=$CAND arch=$ARCH tooling_commit=$B0_TOOLING_COMMIT"
+  exit 0
+fi
 
 # ---- AUTHORITY/SEED verification GATE — BEFORE proving --------------------------------------
 # Fail-fast so the expensive measurement proving NEVER runs against an unauthenticated or mismatched
@@ -377,6 +490,14 @@ dep = json.loads(dep_bytes)
 if dep.get("candidate") != cand:
     sys.exit(f"dep-seed candidate {dep.get('candidate')!r} != fragment candidate {cand!r}")
 PY
+
+# ---- PRE-PROVING provenance gate: run the SAME per-record binder + Phase-1 continuity the sealed
+# importer runs over the COMPLETE assembled provenance.json (host facts + runner_recipe +
+# runner_attestation). No proof launches unless the production provenance record is accepted. This is
+# the fail-fast the venue runs BEFORE it spends hours proving; a malformed/missing/edited attestation,
+# a broken double-build, or a Phase-1 continuity break stops here.
+"$MEASURE_PRODUCE" --validate-provenance "$PROV_JSON" "$IDENTITY_RECORDS" >&2 \
+  || die "pre-proving provenance validation failed closed (refusing to prove an unacceptable record)"
 
 # ---- proving environment: firewall on PATH + dedicated proving cgroup ----------------------
 FWDIR="$SCRATCH/_fw"; mkdir -p "$FWDIR"

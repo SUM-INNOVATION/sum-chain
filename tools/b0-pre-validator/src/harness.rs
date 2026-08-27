@@ -1739,12 +1739,12 @@ mod tests {
     fn generate_output_is_byte_stable() {
         assert_eq!(
             evidence_fingerprint(&generate()),
-            "ed2300a2c154dca61bc398da4dcfa62fc76acea9e6f28d4f82275b6c6f47d703",
+            "96e284df988b8f53ace9574b88bcf3faf90e72dbc8a9157690c93ebdf6480ea4",
             "SP1 generate() output drifted from the frozen (retained cpuset+attestation+identity+recipe) bytes"
         );
         assert_eq!(
             evidence_fingerprint(&generate_candidate(Candidate::Risc0)),
-            "f4c0e55930ea42b589b1b620412512878e949c2611958775c18d4b0d6c78cbeb",
+            "d081d7e766066e98d554f67e39930402c7af8fb14689fb108ce920ef53daf7e1",
             "RISC0 generate_candidate() output drifted from the frozen (retained cpuset+attestation+identity+recipe) bytes"
         );
     }

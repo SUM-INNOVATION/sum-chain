@@ -1640,13 +1640,16 @@ const RUNNER_BUILD_RECIPE_PREFIX: &[u8] = b"b0-final-runner-build-recipe/v4\0";
 const RUSTC_INV_KIND: &[u8; 32] = b"b0-final-rustc-invoc-inv-v2\0\0\0\0\0";
 const RUSTC_INV_PREFIX: &[u8] = b"b0-final-rustc-invocation-inventory/v2\0";
 const DBP_KIND: &[u8; 32] = b"b0-final-runner-dbl-build-proof0";
-const DBP_PREFIX: &[u8] = b"b0-final-runner-double-build-proof/v3\0";
+const DBP_PREFIX: &[u8] = b"b0-final-runner-double-build-proof/v4\0";
 const REPRO_PAIR_DOMAIN: &[u8] = b"b0-final-runner-reproducibility-pair/v1\0";
 const LEAK_KIND: &[u8; 32] = b"b0-final-runner-leak-report-v2\0\0";
 const LEAK_PREFIX: &[u8] = b"b0-final-runner-leakage-report/v2\0";
 const CANON_TOOLING: &str = "/b0/tooling";
 const CANON_CARGO: &str = "/b0/cargo";
 const CANON_TARGET: &str = "/b0/target";
+// RISC0-only permitted prefix: the pinned guest-embed HOME the RISC0 guest build materializes fresh
+// per build (SP1 has no embedded guest home). Must match the validator's `CANON_GUESTHOME`.
+const CANON_GUESTHOME: &str = "/b0/guesthome";
 const REMAP_RECIPE_DOMAIN: &str = "b0-final-runner-remap-recipe/v1";
 const UNIT_SEP: u8 = 0x1f;
 const INVOCATION_RECORD_HEADER: &str = "b0-final-rustc-invocation/v2";
@@ -1931,6 +1934,7 @@ pub struct ProofSide {
     pub origin_manifest_blake3: [u8; 32],
     pub materialized_manifest_blake3: [u8; 32],
     pub materialized_cargo_seed_blake3: [u8; 32],
+    pub materialized_risc0_home_blake3: [u8; 32],
     pub start_unix: u64,
     pub end_unix: u64,
 }
@@ -1947,6 +1951,7 @@ impl ProofSide {
             origin_manifest_blake3: r.arr::<32>()?,
             materialized_manifest_blake3: r.arr::<32>()?,
             materialized_cargo_seed_blake3: r.arr::<32>()?,
+            materialized_risc0_home_blake3: r.arr::<32>()?,
             start_unix: r.u64()?,
             end_unix: r.u64()?,
         })
@@ -1959,6 +1964,7 @@ pub struct DoubleBuildProof {
     pub build_a: ProofSide,
     pub build_b: ProofSide,
     pub cargo_seed_origin_blake3: [u8; 32],
+    pub risc0_home_origin_blake3: [u8; 32],
     pub byte_equal: bool,
     pub reproducibility_pair_blake3: [u8; 32],
 }
@@ -1976,7 +1982,7 @@ impl DoubleBuildProof {
 pub fn decode_runner_double_build_proof(b: &[u8]) -> Result<DoubleBuildProof, E> {
     let mut r = Rd::new(b);
     r.tag32(DBP_KIND)?;
-    if r.u16()? != 3 {
+    if r.u16()? != 4 {
         return Err(E::Value);
     }
     let candidate = candidate(r.u16()?)?;
@@ -1985,6 +1991,7 @@ pub fn decode_runner_double_build_proof(b: &[u8]) -> Result<DoubleBuildProof, E>
     let build_a = ProofSide::decode(&mut r)?;
     let build_b = ProofSide::decode(&mut r)?;
     let cargo_seed_origin_blake3 = r.arr::<32>()?;
+    let risc0_home_origin_blake3 = r.arr::<32>()?;
     let byte_equal = match r.u8()? {
         0 => false,
         1 => true,
@@ -1999,6 +2006,7 @@ pub fn decode_runner_double_build_proof(b: &[u8]) -> Result<DoubleBuildProof, E>
         build_a,
         build_b,
         cargo_seed_origin_blake3,
+        risc0_home_origin_blake3,
         byte_equal,
         reproducibility_pair_blake3,
     })
@@ -2117,6 +2125,7 @@ pub fn bind_runner_recipe(
             "build",
             "--release",
             "--locked",
+            "--offline",
             "--features",
             "real-backend",
             "--manifest-path",
@@ -2263,6 +2272,35 @@ pub fn bind_runner_recipe(
     if proof.build_b.materialized_cargo_seed_blake3 != proof.cargo_seed_origin_blake3 {
         return Err("proof build B materialized cargo seed != seed origin".into());
     }
+    // Fresh-per-build RISC0 TOOLCHAIN-HOME working copy (RISC0 real embed only): each build materialized a
+    // copy of the SEALED read-only toolchain authority, authenticated content-equal to it before use —
+    // origin == materialized_A == materialized_B (recomputed here from the retained addresses, independent
+    // of the reference verifier). SP1 carries all-zero.
+    if proof.candidate == 2 {
+        if proof.risc0_home_origin_blake3 == [0u8; 32] {
+            return Err(
+                "proof RISC0 toolchain-home authority address is all-zero (unbound)".into(),
+            );
+        }
+        if proof.build_a.materialized_risc0_home_blake3 != proof.risc0_home_origin_blake3 {
+            return Err(
+                "proof build A materialized risc0 toolchain-home != sealed authority".into(),
+            );
+        }
+        if proof.build_b.materialized_risc0_home_blake3 != proof.risc0_home_origin_blake3 {
+            return Err(
+                "proof build B materialized risc0 toolchain-home != sealed authority".into(),
+            );
+        }
+    } else if proof.risc0_home_origin_blake3 != [0u8; 32]
+        || proof.build_a.materialized_risc0_home_blake3 != [0u8; 32]
+        || proof.build_b.materialized_risc0_home_blake3 != [0u8; 32]
+    {
+        return Err(
+            "proof non-RISC0 candidate carries a risc0 toolchain-home address (must be zero)"
+                .into(),
+        );
+    }
     if proof.build_a.inventory_address != inv_a_addr
         || proof.build_b.inventory_address != inv_b_addr
     {
@@ -2308,6 +2346,11 @@ pub fn bind_runner_recipe(
             CANON_TARGET.to_string(),
             CANON_TOOLING.to_string(),
         ];
+        if leak.candidate == 2 {
+            // RISC0: the guest-embed build also touches the pinned guest HOME (matches the validator's
+            // candidate-canonical permitted set); SP1 has no embedded guest home.
+            v.push(CANON_GUESTHOME.to_string());
+        }
         v.sort();
         v
     };
@@ -2432,6 +2475,7 @@ mod runner_recipe_bind_tests {
             origin_manifest_blake3: h(21),
             materialized_manifest_blake3: h(21),
             materialized_cargo_seed_blake3: h(31),
+            materialized_risc0_home_blake3: [0u8; 32],
             start_unix: s,
             end_unix: e,
         }
@@ -2466,6 +2510,7 @@ mod runner_recipe_bind_tests {
             arch: 1,
             wrapper_blake3: wrapper,
             cargo_seed_origin_blake3: h(31),
+            risc0_home_origin_blake3: [0u8; 32],
             reproducibility_pair_blake3: DoubleBuildProof::compute_repro(&fa, &fb),
             build_a: fa,
             build_b: fb,
@@ -2480,6 +2525,7 @@ mod runner_recipe_bind_tests {
                 "build",
                 "--release",
                 "--locked",
+                "--offline",
                 "--features",
                 "real-backend",
                 "--manifest-path",
