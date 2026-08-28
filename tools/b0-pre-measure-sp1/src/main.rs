@@ -16,6 +16,16 @@ compile_error!(
 
 #[cfg(feature = "real-backend")]
 fn main() -> std::process::ExitCode {
+    // FIRST — before any Tokio runtime/worker thread — confine the Docker scratch under the
+    // per-proof root (`B0PRE_PROOF_DIR`). The in-process gnark Groth16 backend creates its output
+    // via `std::env::temp_dir()`; without `TMPDIR` under the per-proof root the proving firewall
+    // refuses the mount. No-op off-venue (no `B0PRE_PROOF_DIR`).
+    if let Err(e) =
+        b0_pre_measure_core::confine_scratch_to_proof_root(b0_pre_measure_core::Candidate::Sp1)
+    {
+        eprintln!("INELIGIBLE: SP1 measurement runner failed closed: {e}");
+        return std::process::ExitCode::FAILURE;
+    }
     match real::cli_main() {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {

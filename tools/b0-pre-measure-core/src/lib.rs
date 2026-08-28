@@ -9,6 +9,9 @@ pub mod binding;
 pub mod facts;
 pub mod rss;
 pub mod run;
+pub mod scratch;
+
+pub use scratch::{confine_scratch_to_proof_root, plan_scratch_confinement, EnvDecision};
 
 use serde::Serialize;
 

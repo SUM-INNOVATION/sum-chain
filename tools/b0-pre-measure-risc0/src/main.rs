@@ -22,6 +22,15 @@ mod embed_canon;
 
 #[cfg(feature = "real-backend")]
 fn main() -> std::process::ExitCode {
+    // FIRST — before any Tokio runtime/worker thread — confine the Docker scratch under the
+    // per-proof root (`B0PRE_PROOF_DIR`): `TMPDIR` + `RISC0_WORK_DIR` (the stark2snark `/mnt` work
+    // dir the firewall checks). No-op off-venue (no `B0PRE_PROOF_DIR`).
+    if let Err(e) =
+        b0_pre_measure_core::confine_scratch_to_proof_root(b0_pre_measure_core::Candidate::Risc0)
+    {
+        eprintln!("INELIGIBLE: RISC Zero measurement runner failed closed: {e}");
+        return std::process::ExitCode::FAILURE;
+    }
     match real::cli_main() {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {

@@ -60,6 +60,18 @@ if [ "$(uname -m)" = "x86_64" ]; then
   # canonical witness must NOT be the mounted source (a COPY is)
   printf '%s' "$argv" | grep -Fq "source=$WORK/proof/witness,target=/witness" && fail "canonical witness was mounted (must be a copy)" || ok "canonical witness NOT mounted (copy adapter)"
 
+  # ---- NEGATIVE (regression): SP1 OUTPUT mount OUTSIDE the per-proof root is REFUSED. This is the
+  #      class that failed the burn-in: the gnark backend wrote to /tmp (TMPDIR unset), so the mount
+  #      escaped $B0PRE_PROOF_DIR. measure_fragment.sh + the Rust runner now confine TMPDIR under the
+  #      per-proof root; here we prove the firewall is the backstop that refuses an escaped mount. ----
+  mkdir -p "$WORK/escape"; : > "$WORK/escape/out"
+  if refuses run --rm -v "$WORK/cstore/circuit":/circuit -v "$WORK/proof/witness":/witness -v "$WORK/escape/out":/output "$SP1_IMG" prove --system groth16 /circuit /witness /output \
+     && grep -q "not under per-proof root" "$WORK/e"; then
+    ok "SP1 output mount outside per-proof root refused"
+  else
+    fail "SP1 output mount outside per-proof root NOT refused (firewall backstop missing)"
+  fi
+
   # ---- POSITIVE: authorized SP1 verify grammar ----
   rc="$(runfw run --rm -v "$WORK/cstore/circuit":/circuit -v "$WORK/proof/pf":/proof -v "$WORK/proof/out":/output "$SP1_IMG" verify --system groth16 --data-dir /circuit --proof-path /proof --vkey-hash 12 --committed-values-digest 34 --exit-code 0 --proof-nonce 0 --vk-root 56 --output-path /output)"
   [ "$rc" = 0 ] && ok "SP1 verify grammar accepted" || fail "SP1 verify grammar rejected (rc=$rc): $(head -1 "$WORK/e")"

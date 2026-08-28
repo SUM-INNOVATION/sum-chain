@@ -507,6 +507,17 @@ REAL_DOCKER="$(readlink -f "$PROVER_REAL_DOCKER" 2>/dev/null || echo "$PROVER_RE
 [ "$(readlink -f "$FWDIR/docker")" != "$REAL_DOCKER" ] || die "firewall recursion: installed docker resolves to the real docker"
 PROOF_DIR="$SCRATCH/_proof"; mkdir -p "$PROOF_DIR"
 
+# Confine the prover's Docker scratch/output UNDER the per-proof root so the firewall accepts the
+# mount (as prove_fixture.sh does): SP1's gnark Groth16 backend writes via TMPDIR (std::env::temp_dir),
+# RISC0's stark2snark writes into RISC0_WORK_DIR. This is a belt for the same routing the measurement
+# runners now enforce from Rust (b0-pre-measure-core::confine_scratch_to_proof_root); the two agree and
+# are idempotent. Without it the gnark scratch falls back to /tmp and the firewall refuses the mount.
+SCRATCH_CONFINE_ENV=(TMPDIR="$PROOF_DIR")
+if [ "$CAND" != sp1 ]; then
+  mkdir -p "$PROOF_DIR/r0-work"
+  SCRATCH_CONFINE_ENV+=(RISC0_WORK_DIR="$PROOF_DIR/r0-work")
+fi
+
 # ---- run the REAL measurement runner UNDER the firewall (proves + verifies + emits) --------
 RUNNER_ARGS=(
   --arch "$ARCH" --spec-hash "$SPEC_HASH" --guest-set-hash "$R0_GUEST_SET_HASH"
@@ -525,6 +536,7 @@ env PATH="$FWDIR:$PATH" \
   B0PRE_REAL_DOCKER="$REAL_DOCKER" B0PRE_FIREWALL_ATTEST="$FW_ATTEST" \
   B0PRE_PROOF_DIR="$PROOF_DIR" B0PRE_CONTENT_STORE="${PROVER_SP1_CONTENT_STORE:-$SCRATCH/_nostore}" \
   B0PRE_PROVING_CGROUP="$PROVING_CGROUP" \
+  "${SCRATCH_CONFINE_ENV[@]}" \
   "$MEASURE_RUNNER" "${RUNNER_ARGS[@]}" \
   || die "measurement runner failed closed (build/prove/verify/measure/bind did not complete)"
 
