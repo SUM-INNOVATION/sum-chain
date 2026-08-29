@@ -590,6 +590,7 @@ mod tests {
                             "build",
                             "--release",
                             "--locked",
+                            "--offline",
                             "--features",
                             "real-backend",
                             "--manifest-path",
@@ -606,6 +607,8 @@ mod tests {
                         build_a: side("a", 100, 200),
                         build_b: side("b", 200, 300),
                         byte_equal: true,
+                        offline: true,
+                        cargo_net_offline: true,
                         cargo_seed: crate::facts::CargoSeedFacts {
                             origin_address: h("5c"),
                             materialized_a: h("5c"),

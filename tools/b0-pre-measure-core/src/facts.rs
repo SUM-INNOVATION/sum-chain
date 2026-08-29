@@ -140,6 +140,15 @@ pub struct RunnerRecipeFacts {
     pub build_a: BuildSideFacts,
     pub build_b: BuildSideFacts,
     pub byte_equal: bool,
+    /// The build IS offline: `build_argv` carries exactly one `--offline`, and these redundant facts
+    /// must agree (`true`). The runner PRESERVES them from the spliced recipe into the fragment so the
+    /// validator's `--facts` offline gate (`build_runner_artifacts`) sees the truthful values; without
+    /// them here the runner would silently drop the fields on re-serialization. serde-default so
+    /// pre-correction recipe fixtures still parse.
+    #[serde(default)]
+    pub offline: bool,
+    #[serde(default)]
+    pub cargo_net_offline: bool,
     /// The fresh-per-build cargo dependency-seed materialization equality (origin == materialized_A ==
     /// materialized_B).
     pub cargo_seed: CargoSeedFacts,
