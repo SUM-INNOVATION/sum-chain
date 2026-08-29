@@ -114,8 +114,14 @@ pub struct ProvFacts {
     pub cpuset_probe_chain: Vec<CpusetProbeEntryFacts>,
     pub runner_attestation: RunnerAttestationFacts,
     // ---- v5: runner path-independence recipe facts (produced by double_build_runner.sh; carried
-    // verbatim by the runner and re-validated by b0-pre-validator's producer) ----
-    pub runner_recipe: RunnerRecipeFacts,
+    // VERBATIM by the runner and re-validated by b0-pre-validator's producer). Held as an OPAQUE JSON
+    // object, NOT a typed twin: a typed struct here silently DROPS any recipe field it does not
+    // declare (this is exactly how `offline`/`cargo_net_offline`/`risc0_home_seed`/… were lost), so
+    // the runner preserves the exact spliced recipe bytes and the validator re-decodes + re-validates
+    // every field on its own typed `RunnerRecipeJson`. The exact-field-set gate that REFUSES unknown
+    // recipe fields lives at the `measure_fragment.sh` splice (pre-proving), not on a fragile
+    // deny_unknown_fields twin that would have to track the recipe/producer field-set drift. ----
+    pub runner_recipe: serde_json::Value,
 }
 
 /// Serialize/Deserialize twin of the venue runner-build recipe facts (exact bytes for BOTH builds). The

@@ -381,6 +381,34 @@ mod tests {
     }
     const SPEC: &str = "e933e7325c2639a48d8e25f20746d0f8abc822dee9fcfa87c2e6cdec226cf2a2";
 
+    // Round-trip guard (defence-in-depth): merging the two real fragments must PRESERVE, in every merged
+    // provenance runner_recipe, both offline booleans AND the exact single --offline argv — for BOTH
+    // candidates. This is the "fragment -> merge" leg of the offline-preservation guarantee (the
+    // measure-core round-trip test covers "recipe -> fragment").
+    #[test]
+    fn merge_preserves_offline_booleans_and_exact_offline_argv() {
+        let raw = merge_fragments(SPEC, &[frag("Sp1", "x86_64"), frag("Risc0", "x86_64")]).unwrap();
+        for cand in raw["candidates"].as_array().unwrap() {
+            let cn = cand["candidate"].as_str().unwrap_or("?").to_string();
+            for prov in cand["provenance"].as_array().unwrap() {
+                let rr = &prov["runner_recipe"];
+                assert_eq!(rr["offline"], json!(true), "{cn}: merge preserved offline");
+                assert_eq!(
+                    rr["cargo_net_offline"],
+                    json!(true),
+                    "{cn}: merge preserved cargo_net_offline"
+                );
+                let n = rr["build_argv"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|v| v.as_str() == Some("--offline"))
+                    .count();
+                assert_eq!(n, 1, "{cn}: merge preserved exactly one --offline");
+            }
+        }
+    }
+
     #[test]
     fn eligible_fragments_merge_and_validate() {
         // Two-cell model: EXACTLY two measurement fragments (Sp1/x86_64, Risc0/x86_64).

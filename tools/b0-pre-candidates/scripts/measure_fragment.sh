@@ -339,14 +339,34 @@ recipe = json.load(open(recipe_path, encoding="utf-8"))
 # leaves this empty (it embeds its own locked native guest).
 if canon_addr:
     recipe["canonical_sp1_guest_artifact"] = {"address": canon_addr}
-required = {"candidate", "arch", "manifest_path", "artifact_path", "cargo_ident", "b0_venue_embed",
-           "canonical_build_path", "canonical_cargo_home", "per_arch_toolchain_identity",
-           "wrapper_blake3", "build_argv", "build_env", "build_a", "build_b", "byte_equal",
-           "cargo_seed", "leakage_refused_prefixes",
-           "leakage_permitted_prefixes", "leakage_clean", "evidence_root"}
-missing = required - set(recipe)
-if missing:
-    sys.exit(f"runner_recipe facts missing keys: {sorted(missing)}")
+# Candidate-neutral base key set. The build IS offline, so the redundant offline facts are REQUIRED here.
+base = {"candidate", "arch", "manifest_path", "artifact_path", "cargo_ident", "b0_venue_embed",
+        "canonical_build_path", "canonical_cargo_home", "per_arch_toolchain_identity",
+        "wrapper_blake3", "build_argv", "build_env", "build_a", "build_b", "byte_equal",
+        "cargo_seed", "leakage_refused_prefixes", "leakage_permitted_prefixes", "leakage_clean",
+        "evidence_root", "nested_host_binaries", "offline", "cargo_net_offline",
+        "dependency_seed", "host_toolchain_attestation"}
+cand = recipe.get("candidate")
+if cand == "sp1":
+    exact = base | {"protoc_authority", "canonical_sp1_guest_artifact"}
+elif cand == "risc0":
+    exact = base | {"risc0_guest_embed", "risc0_home_seed"}
+else:
+    sys.exit(f"runner_recipe unknown candidate {cand!r}")
+# EXACT-FIELD-SET / PARITY GATE (defence-in-depth): the recipe must carry EXACTLY the known candidate-aware
+# key set. A missing key (silent drop) OR an unknown key (drift/tampering) is refused HERE, BEFORE splicing
+# and proving — the runner then carries these exact bytes verbatim, so no field can be added or lost.
+got = set(recipe)
+if got != exact:
+    sys.exit(f"runner_recipe field-set mismatch (exact-parity gate): missing={sorted(exact-got)} unknown={sorted(got-exact)}")
+# EXPLICITLY require both offline booleans TRUE and the retained argv to carry exactly one --offline (the
+# argv and the facts must agree) — before splicing. Missing/false is impossible past the exact-set gate,
+# but assert the VALUES here so a false boolean or a stripped/duplicated --offline never reaches proving.
+if recipe.get("offline") is not True or recipe.get("cargo_net_offline") is not True:
+    sys.exit("runner_recipe not marked offline: offline AND cargo_net_offline must both be true (the build runs --offline)")
+_argv = recipe.get("build_argv") or []
+if sum(1 for a in _argv if a == "--offline") != 1:
+    sys.exit(f"runner_recipe build_argv must carry EXACTLY ONE --offline (offline build): {_argv}")
 # The compiler-visible cargo home is the literal canonical /b0/cargo (fresh per build, NOT remapped), so
 # each side has NO per-build cargo_from; the fresh-per-build seed equality lives in the top-level cargo_seed.
 seed_required = {"origin_address", "materialized_a", "materialized_b"}

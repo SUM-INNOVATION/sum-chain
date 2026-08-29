@@ -574,7 +574,9 @@ mod tests {
                             record_address: h("e6"),
                         }],
                     };
-                    crate::facts::RunnerRecipeFacts {
+                    // runner_recipe is now an opaque Value (verbatim carriage); build the typed test
+                    // recipe and convert, so the fixture stays type-checked while exercising the Value path.
+                    serde_json::to_value(crate::facts::RunnerRecipeFacts {
                         candidate: "sp1".into(),
                         arch: arch.into(),
                         manifest_path: "tools/b0-pre-measure-sp1/Cargo.toml".into(),
@@ -625,10 +627,72 @@ mod tests {
                         ],
                         leakage_clean: true,
                         evidence_root: "/tmp/b0-evid".into(),
-                    }
+                    })
+                    .expect("test runner_recipe to_value")
                 },
             })
             .collect()
+    }
+
+    // Round-trip guard (defence-in-depth): the runner carries runner_recipe VERBATIM. Deserializing a
+    // provenance array into Vec<ProvFacts> and re-serializing it (exactly what the venue runner does to
+    // EMIT THE FRAGMENT) MUST preserve both offline booleans, the exact single `--offline` argv, AND any
+    // recipe field a narrower typed twin would have dropped (e.g. risc0_home_seed / nested_host_binaries)
+    // — for BOTH candidates. This is the regression the A9-twin field-drop bug would reintroduce.
+    #[test]
+    fn runner_recipe_carried_verbatim_preserves_offline_and_all_fields() {
+        for (cand, manifest) in [
+            ("sp1", "tools/b0-pre-measure-sp1/Cargo.toml"),
+            ("risc0", "tools/b0-pre-measure-risc0/Cargo.toml"),
+        ] {
+            let recipe = serde_json::json!({
+                "candidate": cand, "arch": "x86_64", "manifest_path": manifest,
+                "build_argv": ["cargo","+1.90.0","build","--release","--locked","--offline",
+                               "--features","real-backend","--manifest-path", manifest],
+                "offline": true, "cargo_net_offline": true,
+                "dependency_seed": {"address":"aa","json_sha256":"bb"},
+                "host_toolchain_attestation": {"address":"cc","json_sha256":"dd"},
+                // fields a narrower typed twin would silently DROP (the exact bug class):
+                "risc0_home_seed": {"origin_address":"ee","materialized_a":"ee","materialized_b":"ee"},
+                "nested_host_binaries": [{"relpath":"x","sha256":"1","blake3":"2","size":3,"scan":"clean"}],
+            });
+            let mut prov = provs("x86_64");
+            for pf in prov.iter_mut() {
+                pf.runner_recipe = recipe.clone();
+            }
+            // Emit -> fragment bytes -> re-read: the runner's deserialize->serialize round-trip.
+            let bytes = serde_json::to_vec(&prov).expect("emit fragment");
+            let back: Vec<ProvFacts> = serde_json::from_slice(&bytes).expect("re-read fragment");
+            for pf in &back {
+                let rr = &pf.runner_recipe;
+                assert_eq!(
+                    rr["offline"],
+                    serde_json::Value::Bool(true),
+                    "{cand}: offline preserved"
+                );
+                assert_eq!(
+                    rr["cargo_net_offline"],
+                    serde_json::Value::Bool(true),
+                    "{cand}: cargo_net_offline preserved"
+                );
+                let n = rr["build_argv"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|v| v.as_str() == Some("--offline"))
+                    .count();
+                assert_eq!(n, 1, "{cand}: exactly one --offline in build_argv");
+                assert_eq!(
+                    rr["risc0_home_seed"]["origin_address"],
+                    serde_json::json!("ee"),
+                    "{cand}: field a typed twin would drop survives"
+                );
+                assert_eq!(
+                    rr, &recipe,
+                    "{cand}: runner_recipe carried byte-for-byte verbatim"
+                );
+            }
+        }
     }
 
     fn leaf_obs() -> crate::facts::CpusetObsFacts {
