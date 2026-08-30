@@ -347,6 +347,8 @@ pub type MeasurementVector = (
     Vec<u8>,
     Vec<u8>,
     Vec<u8>,
+    // VEC9: the retained Phase-1 guest-identity record set (encoded Phase1IdentityRecordV2 blobs).
+    Vec<Vec<u8>>,
     Vec<(Candidate, Evidence)>,
 );
 
@@ -902,6 +904,11 @@ pub fn serialize_vector(
     malformed_corpus_report: &[u8],
     harness_source_inventory: &[u8],
     eligibility_matrix: &[u8],
+    // VEC9: the complete, self-contained retained Phase-1 GUEST-IDENTITY record set (three encoded
+    // Phase1IdentityRecordV2 blobs, canonical order Sp1/x86_64, Sp1/aarch64, Risc0/x86_64). Both verifiers
+    // decode these from scratch, authenticate the exact set, DERIVE the allowlist + r0_guest_set_hash from
+    // them, and require the top-level allowlist / package guest-set / manifest to match — records-authoritative.
+    guest_identity_records_v2: &[Vec<u8>],
     bundles: &[(Candidate, Evidence)],
 ) -> Vec<u8> {
     fn put(out: &mut Vec<u8>, b: &[u8]) {
@@ -922,12 +929,20 @@ pub fn serialize_vector(
     // JSON (the reviewed two-cell model: 3 identities, 2 native-measurement cells, exact unsupported
     // set) — bound by address into the MeasurementInputAuthorityV1, so both verifiers re-decode +
     // recompute it and confirm the authority binds exactly it.
-    out.extend_from_slice(b"B0PREMEASVEC8");
+    // VEC9 adds the self-contained retained Phase-1 guest-identity record set (records-authoritative
+    // guest set) as a SIXTH top-level retained list after the eligibility matrix. The prior production
+    // vector version (VEC8) is REFUSED by the parser — a producer-baked-allowlist package can never be
+    // imported under the records-authoritative contract.
+    out.extend_from_slice(b"B0PREMEASVEC9");
     put(&mut out, allowlist_canonical);
     put(&mut out, measurement_input_authority);
     put(&mut out, malformed_corpus_report);
     put(&mut out, harness_source_inventory);
     put(&mut out, eligibility_matrix);
+    out.extend_from_slice(&(guest_identity_records_v2.len() as u32).to_be_bytes());
+    for r in guest_identity_records_v2 {
+        put(&mut out, r);
+    }
     out.extend_from_slice(&(bundles.len() as u32).to_be_bytes());
     for (c, ev) in bundles {
         out.extend_from_slice(&c.to_repr().to_be_bytes());
@@ -974,7 +989,16 @@ pub fn parse_vector(bytes: &[u8]) -> Result<MeasurementVector, String> {
         let n = u32_at(p)?;
         Ok(take(p, n)?.to_vec())
     };
-    if take(&mut p, 13)? != b"B0PREMEASVEC8" {
+    // Refuse the prior production vector version explicitly (records-authoritative contract): a VEC8
+    // package derived its guest set from a producer-baked allowlist and carries no retained V2 record set.
+    if bytes.get(0..13) == Some(b"B0PREMEASVEC8".as_slice()) {
+        return Err(
+            "sealed vector version B0PREMEASVEC8 is refused; the records-authoritative contract requires \
+             B0PREMEASVEC9 (retained Phase-1 guest-identity record set)"
+                .into(),
+        );
+    }
+    if take(&mut p, 13)? != b"B0PREMEASVEC9" {
         return Err("bad magic".into());
     }
     let allowlist = blob(&mut p)?;
@@ -982,6 +1006,13 @@ pub fn parse_vector(bytes: &[u8]) -> Result<MeasurementVector, String> {
     let malformed_corpus_report = blob(&mut p)?;
     let harness_source_inventory = blob(&mut p)?;
     let eligibility_matrix = blob(&mut p)?;
+    // VEC9: the retained Phase-1 guest-identity record set (canonical order Sp1/x86_64, Sp1/aarch64,
+    // Risc0/x86_64) — decoded/authenticated + used to DERIVE the guest set by both verifiers.
+    let n_guest_records = u32_at(&mut p)?;
+    let mut guest_identity_records_v2 = Vec::with_capacity(n_guest_records);
+    for _ in 0..n_guest_records {
+        guest_identity_records_v2.push(blob(&mut p)?);
+    }
     let n_bundles = u32_at(&mut p)?;
     let mut bundles = Vec::new();
     for _ in 0..n_bundles {
@@ -1031,6 +1062,7 @@ pub fn parse_vector(bytes: &[u8]) -> Result<MeasurementVector, String> {
         malformed_corpus_report,
         harness_source_inventory,
         eligibility_matrix,
+        guest_identity_records_v2,
         bundles,
     ))
 }
@@ -1118,6 +1150,88 @@ pub fn deterministic_demo_vector() -> MeasurementVector {
     let guest_set = r0_guest_set_hash(&allowlist);
 
     const PROV_MSC: &str = "eff3aae18b49969212c4c1493da20f97af195de2";
+    // TEST_ONLY VEC9 guest-identity record set for this minimal serialize/parse demo (empty top-level
+    // authority blobs). The full authority mirror is exercised by the real producer-selftest vector.
+    #[allow(clippy::too_many_arguments)]
+    let v2 = |c: Candidate,
+              a: Arch,
+              tree: [u8; 32],
+              lock: [u8; 32],
+              img: [u8; 32],
+              prog: [u8; 32],
+              builder: [u8; 32],
+              vmat: [u8; 32],
+              cmd: [u8; 32],
+              prodbin: [u8; 32]|
+     -> Vec<u8> {
+        crate::schema::identity_record::Phase1IdentityRecordV2 {
+            candidate: c,
+            arch: a,
+            source_commit: PROV_MSC.to_string(),
+            tooling_commit: "1".repeat(40),
+            tooling_pathset_blake3: "7".repeat(64),
+            b0_pre_spec_hash: spec,
+            production_binary_blake3: prodbin,
+            guest_source_tree_hash: tree,
+            candidate_dep_lock_hash: lock,
+            guest_image_hash: img,
+            program_id: prog,
+            builder_container_digest: builder,
+            verifier_material_manifest_hash: vmat,
+            build_command_hash: cmd,
+            toolchain_identity: if a == Arch::X86_64 {
+                "e0".repeat(32)
+            } else {
+                "e1".repeat(32)
+            },
+            canonical_sp1_guest_artifact_address: if c == Candidate::Sp1 {
+                "ca".repeat(32)
+            } else {
+                String::new()
+            },
+        }
+        .encode()
+    };
+    let sp1_vmat = sp1_material.identity().unwrap();
+    let r0_vmat = risc0_material.identity().unwrap();
+    let v2_records: Vec<Vec<u8>> = vec![
+        v2(
+            Candidate::Sp1,
+            Arch::X86_64,
+            dv(b"sp1-src"),
+            dv(b"sp1-lock"),
+            dv(b"sp1-img"),
+            dv(b"sp1-prog"),
+            dv(b"sp1-bx"),
+            sp1_vmat,
+            dv(b"sp1-cmd"),
+            dv(b"sp1-runner"),
+        ),
+        v2(
+            Candidate::Sp1,
+            Arch::Aarch64,
+            dv(b"sp1-src"),
+            dv(b"sp1-lock"),
+            dv(b"sp1-img"),
+            dv(b"sp1-prog"),
+            dv(b"sp1-ba"),
+            sp1_vmat,
+            dv(b"sp1-cmd"),
+            dv(b"sp1-runner-arm"),
+        ),
+        v2(
+            Candidate::Risc0,
+            Arch::X86_64,
+            dv(b"r0-src"),
+            dv(b"r0-lock"),
+            dv(b"r0-img"),
+            dv(b"r0-prog"),
+            dv(b"r0-bx"),
+            r0_vmat,
+            dv(b"r0-cmd"),
+            dv(b"r0-runner"),
+        ),
+    ];
     let prov_seed = |s: &str| dv(s.as_bytes());
     let prov = |arch: Arch, role: ProvenanceRole| -> ProvenanceFacts {
         let (cpuset, mem, phys, logical, ram) = match role {
@@ -1296,10 +1410,11 @@ pub fn deterministic_demo_vector() -> MeasurementVector {
         Vec::new(),
         Vec::new(),
         Vec::new(),
-        // VEC8 eligibility blob: this minimal serialize/parse demo carries empty top-level authority
-        // blobs (MIA/report/inventory/eligibility) — it exercises the bundle path, not the authority
-        // path (the full producer-selftest vector carries the real eligibility record + MIA binding).
+        // Minimal serialize/parse demo carries empty top-level authority blobs (MIA/report/inventory/
+        // eligibility) — it exercises the bundle path, not the authority path (the full producer-selftest
+        // vector carries the real eligibility record + MIA binding).
         Vec::new(),
+        v2_records,
         vec![(Candidate::Sp1, sp1_ev), (Candidate::Risc0, risc0_ev)],
     )
 }

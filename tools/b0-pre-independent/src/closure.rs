@@ -1634,6 +1634,363 @@ pub fn require_exact_identity_set(candidate: u16, records: &[IdentityRec]) -> Re
     Ok(())
 }
 
+// ==== v9: records-authoritative guest set — independent from-scratch mirror (Phase1IdentityRecordV2) ====
+//
+// The retained V2 record set is the AUTHORITATIVE source of the multi-arch guest set. This mirror decodes
+// the three V2 records from scratch, authenticates their canonical encoding, requires the EXACT canonical
+// set, then RE-DERIVES the allowlist bytes + r0_guest_set_hash FROM the records (reconciling the two SP1
+// arches into one entry) — never trusting the producer-baked allowlist. It cross-binds each V2 record to
+// its continuity V1 subset. V2 carries its OWN domain/kind (never decodes a V1 record and vice versa).
+const PHASE1_IDENTITY_V2_KIND: &[u8; 32] = b"b0-final-phase1-identity-rec-v2\0";
+const PHASE1_IDENTITY_V2_PREFIX: &[u8] = b"b0-final-phase1-identity-record/v2\0";
+
+#[derive(Clone)]
+pub struct IdentityRecV2 {
+    // continuity subset (cross-bound to the corresponding V1 record)
+    pub candidate: u16,
+    pub arch: u8,
+    pub source_commit: String,
+    pub tooling_commit: String,
+    pub tooling_pathset_blake3: String,
+    pub spec: [u8; 32],
+    pub production_binary_blake3: [u8; 32],
+    // full Phase-1 guest identity
+    pub guest_source_tree_hash: [u8; 32],
+    pub candidate_dep_lock_hash: [u8; 32],
+    pub guest_image_hash: [u8; 32],
+    pub program_id: [u8; 32],
+    pub builder_container_digest: [u8; 32],
+    pub verifier_material_manifest_hash: [u8; 32],
+    pub build_command_hash: [u8; 32],
+    pub toolchain_identity: String,                   // 64-hex
+    pub canonical_sp1_guest_artifact_address: String, // SP1: 64-hex; RISC0: empty
+}
+
+/// Read a hex string that is EITHER empty (len 0) OR exactly `n` hex chars.
+fn hexstr_0_or(r: &mut Rd, n: usize) -> Result<String, E> {
+    let len = r.u8()? as usize;
+    if len != 0 && len != n {
+        return Err(E::Value);
+    }
+    let s = r.take(len)?;
+    if !s
+        .iter()
+        .all(|&x| x.is_ascii_digit() || (b'a'..=b'f').contains(&x))
+    {
+        return Err(E::Value);
+    }
+    Ok(String::from_utf8(s.to_vec()).expect("hex"))
+}
+
+pub fn decode_identity_record_v2(b: &[u8]) -> Result<IdentityRecV2, E> {
+    let mut r = Rd::new(b);
+    r.tag32(PHASE1_IDENTITY_V2_KIND)?;
+    if r.u16()? != 1 {
+        return Err(E::Value);
+    }
+    let candidate = candidate(r.u16()?)?;
+    let arch = arch(r.u8()?)?;
+    let source_commit = hexstr(&mut r, 40)?;
+    let tooling_commit = hexstr(&mut r, 40)?;
+    let tooling_pathset_blake3 = hexstr(&mut r, 64)?;
+    let spec = r.arr::<32>()?;
+    let production_binary_blake3 = r.arr::<32>()?;
+    let guest_source_tree_hash = r.arr::<32>()?;
+    let candidate_dep_lock_hash = r.arr::<32>()?;
+    let guest_image_hash = r.arr::<32>()?;
+    let program_id = r.arr::<32>()?;
+    let builder_container_digest = r.arr::<32>()?;
+    let verifier_material_manifest_hash = r.arr::<32>()?;
+    let build_command_hash = r.arr::<32>()?;
+    let toolchain_identity = hexstr(&mut r, 64)?;
+    let canonical_sp1_guest_artifact_address = hexstr_0_or(&mut r, 64)?;
+    r.end()?;
+    Ok(IdentityRecV2 {
+        candidate,
+        arch,
+        source_commit,
+        tooling_commit,
+        tooling_pathset_blake3,
+        spec,
+        production_binary_blake3,
+        guest_source_tree_hash,
+        candidate_dep_lock_hash,
+        guest_image_hash,
+        program_id,
+        builder_container_digest,
+        verifier_material_manifest_hash,
+        build_command_hash,
+        toolchain_identity,
+        canonical_sp1_guest_artifact_address,
+    })
+}
+
+fn w_hexstr_v2(w: &mut Vec<u8>, s: &str) {
+    w.push(s.len() as u8);
+    w.extend_from_slice(s.as_bytes());
+}
+
+/// Canonical re-encode (mirror of `Phase1IdentityRecordV2::encode`, LE codec). Used to authenticate the
+/// retained record is canonically encoded (byte-identical re-encode) and to recompute its address.
+pub fn encode_identity_record_v2(v: &IdentityRecV2) -> Vec<u8> {
+    let mut w = Vec::new();
+    w.extend_from_slice(PHASE1_IDENTITY_V2_KIND);
+    w.extend_from_slice(&1u16.to_le_bytes());
+    w.extend_from_slice(&v.candidate.to_le_bytes());
+    w.push(v.arch);
+    w_hexstr_v2(&mut w, &v.source_commit);
+    w_hexstr_v2(&mut w, &v.tooling_commit);
+    w_hexstr_v2(&mut w, &v.tooling_pathset_blake3);
+    w.extend_from_slice(&v.spec);
+    w.extend_from_slice(&v.production_binary_blake3);
+    w.extend_from_slice(&v.guest_source_tree_hash);
+    w.extend_from_slice(&v.candidate_dep_lock_hash);
+    w.extend_from_slice(&v.guest_image_hash);
+    w.extend_from_slice(&v.program_id);
+    w.extend_from_slice(&v.builder_container_digest);
+    w.extend_from_slice(&v.verifier_material_manifest_hash);
+    w.extend_from_slice(&v.build_command_hash);
+    w_hexstr_v2(&mut w, &v.toolchain_identity);
+    w_hexstr_v2(&mut w, &v.canonical_sp1_guest_artifact_address);
+    w
+}
+
+/// Domain-separated V2 address = BLAKE3(prefix ‖ canonical bytes).
+pub fn identity_record_v2_address(canonical_bytes: &[u8]) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(PHASE1_IDENTITY_V2_PREFIX);
+    h.update(canonical_bytes);
+    *h.finalize().as_bytes()
+}
+
+/// True iff the V1 continuity record equals the V2 record's continuity subset (neither substitutable).
+pub fn v2_matches_v1_continuity(v1: &IdentityRec, v2: &IdentityRecV2) -> bool {
+    v1.candidate == v2.candidate
+        && v1.arch == v2.arch
+        && v1.source_commit == v2.source_commit
+        && v1.tooling_commit == v2.tooling_commit
+        && v1.tooling_pathset_blake3 == v2.tooling_pathset_blake3
+        && v1.spec == v2.spec
+        && v1.production_binary_blake3 == v2.production_binary_blake3
+}
+
+/// EXACT retained V2 identity set in canonical order: SP1/x86_64, SP1/aarch64 (identity-only), RISC0/x86_64.
+/// Refuses missing/duplicate/reordered/extra and RISC0/aarch64.
+pub fn require_exact_v2_identity_set(records: &[IdentityRecV2]) -> Result<(), String> {
+    let want: [(u16, u8); 3] = [(1, 1), (1, 2), (2, 1)];
+    if records.len() != want.len() {
+        return Err(format!(
+            "expected exactly {} retained V2 identity records (Sp1 x86_64/aarch64, Risc0 x86_64), got {}",
+            want.len(),
+            records.len()
+        ));
+    }
+    for (i, (wc, wa)) in want.iter().enumerate() {
+        if records[i].candidate != *wc || records[i].arch != *wa {
+            return Err(format!(
+                "retained V2 identity set member {i} != required canonical (candidate {wc}, arch {wa})"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn need_hex32_str(s: &str, ctx: &str) -> Result<[u8; 32], String> {
+    if s.len() != 64 {
+        return Err(format!("{ctx}: expected 64-hex, got {} chars", s.len()));
+    }
+    let mut o = [0u8; 32];
+    for (i, out) in o.iter_mut().enumerate() {
+        *out =
+            u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).map_err(|_| format!("{ctx}: not hex"))?;
+    }
+    Ok(o)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_allow_entry(
+    w: &mut Vec<u8>,
+    candidate: u16,
+    spec: &[u8; 32],
+    guest_source_tree_hash: &[u8; 32],
+    candidate_dep_lock_hash: &[u8; 32],
+    arches: &[(u8, [u8; 32])],
+    guest_image_hash: &[u8; 32],
+    program_id: &[u8; 32],
+    verifier_material_manifest_hash: &[u8; 32],
+    build_command_hash: &[u8; 32],
+    reproducible: bool,
+) {
+    w.extend_from_slice(&candidate.to_le_bytes());
+    w.extend_from_slice(spec);
+    w.extend_from_slice(guest_source_tree_hash);
+    w.extend_from_slice(candidate_dep_lock_hash);
+    w.push(arches.len() as u8);
+    for (a, d) in arches {
+        w.push(*a);
+        w.extend_from_slice(d);
+    }
+    w.extend_from_slice(guest_image_hash);
+    w.extend_from_slice(program_id);
+    w.extend_from_slice(verifier_material_manifest_hash);
+    w.extend_from_slice(build_command_hash);
+    w.push(if reproducible { 1 } else { 0 });
+}
+
+/// From-scratch mirror of `derive_guest_set`: validate each V2 record against the ratified measured source,
+/// merged spec, and two-root tooling shape; reconcile the two SP1 arches into one entry; then ENCODE the
+/// canonical allowlist bytes (mirror of `GuestProgramAllowlistV1::encode`) and compute the guest-set hash.
+/// Returns `(allowlist_bytes, r0_guest_set_hash)` — the caller requires the retained allowlist to equal
+/// these exact bytes. `spec_hex` is the merged finalized spec (64-hex); `measured_source` is ratified 40-hex.
+pub fn derive_guest_set_from_v2(
+    records: &[IdentityRecV2],
+    spec_hex: &str,
+    measured_source: &str,
+) -> Result<(Vec<u8>, [u8; 32]), String> {
+    require_exact_v2_identity_set(records)?;
+    let spec_bytes = need_hex32_str(spec_hex, "spec")?;
+    let sp1_x86 = &records[0];
+    let sp1_arm = &records[1];
+    let risc0_x86 = &records[2];
+
+    // Per-record admissibility (mirror of validate_record's identity-relevant rules).
+    for r in records {
+        if r.spec != spec_bytes {
+            return Err(format!(
+                "{}/{}: record spec != merged finalized spec",
+                r.candidate, r.arch
+            ));
+        }
+        // EXACT measured-source authority.
+        if r.source_commit != measured_source {
+            return Err(format!(
+                "{}/{}: source commit {} != ratified measured source",
+                r.candidate, r.arch, r.source_commit
+            ));
+        }
+        // Two-root separation: tooling_commit must be a 40-hex commit distinct from the measured source.
+        if r.tooling_commit.len() != 40 {
+            return Err(format!(
+                "{}/{}: tooling_commit not 40-hex",
+                r.candidate, r.arch
+            ));
+        }
+        if r.tooling_commit == measured_source {
+            return Err(format!(
+                "{}/{}: tooling_commit equals the measured-source commit (two-root model forbids conflation)",
+                r.candidate, r.arch
+            ));
+        }
+        // Canonical SP1 guest artifact: SP1 records MUST bind a 64-hex address; RISC0 must NOT carry one.
+        match r.candidate {
+            1 => {
+                if r.canonical_sp1_guest_artifact_address.len() != 64 {
+                    return Err(format!(
+                        "Sp1/{}: missing 64-hex canonical SP1 guest artifact address",
+                        r.arch
+                    ));
+                }
+            }
+            _ => {
+                if !r.canonical_sp1_guest_artifact_address.is_empty() {
+                    return Err(format!(
+                        "Risc0/{}: must NOT carry a canonical SP1 guest artifact address",
+                        r.arch
+                    ));
+                }
+            }
+        }
+    }
+
+    // All records share ONE reconciled source checkout.
+    if sp1_x86.source_commit != risc0_x86.source_commit {
+        return Err("records span different source commits".into());
+    }
+
+    // SP1 x86_64/aarch64 must agree on the shared guest identity + two-root authority + canonical artifact.
+    let disagree = |field: &str, ok: bool| -> Result<(), String> {
+        if ok {
+            Ok(())
+        } else {
+            Err(format!("SP1 x86_64/aarch64 disagree on {field}"))
+        }
+    };
+    disagree("program_id", sp1_x86.program_id == sp1_arm.program_id)?;
+    disagree(
+        "guest_image_hash",
+        sp1_x86.guest_image_hash == sp1_arm.guest_image_hash,
+    )?;
+    disagree(
+        "guest_source_tree_hash",
+        sp1_x86.guest_source_tree_hash == sp1_arm.guest_source_tree_hash,
+    )?;
+    disagree(
+        "candidate_dep_lock_hash",
+        sp1_x86.candidate_dep_lock_hash == sp1_arm.candidate_dep_lock_hash,
+    )?;
+    disagree(
+        "verifier_material_manifest_hash",
+        sp1_x86.verifier_material_manifest_hash == sp1_arm.verifier_material_manifest_hash,
+    )?;
+    disagree(
+        "build_command_hash",
+        sp1_x86.build_command_hash == sp1_arm.build_command_hash,
+    )?;
+    disagree(
+        "source_commit",
+        sp1_x86.source_commit == sp1_arm.source_commit,
+    )?;
+    disagree(
+        "tooling_commit",
+        sp1_x86.tooling_commit == sp1_arm.tooling_commit,
+    )?;
+    disagree(
+        "tooling_pathset_blake3",
+        sp1_x86.tooling_pathset_blake3 == sp1_arm.tooling_pathset_blake3,
+    )?;
+    disagree(
+        "canonical_sp1_guest_artifact_address",
+        sp1_x86.canonical_sp1_guest_artifact_address
+            == sp1_arm.canonical_sp1_guest_artifact_address,
+    )?;
+
+    // Encode the canonical allowlist: entries sorted by candidate.to_repr() (Sp1=1 then Risc0=2).
+    let mut al = Vec::new();
+    al.extend_from_slice(&1u16.to_le_bytes()); // SCHEMA_VERSION
+    al.extend_from_slice(&2u32.to_le_bytes()); // two entries
+    push_allow_entry(
+        &mut al,
+        1,
+        &spec_bytes,
+        &sp1_x86.guest_source_tree_hash,
+        &sp1_x86.candidate_dep_lock_hash,
+        &[
+            (1, sp1_x86.builder_container_digest),
+            (2, sp1_arm.builder_container_digest),
+        ],
+        &sp1_x86.guest_image_hash,
+        &sp1_x86.program_id,
+        &sp1_x86.verifier_material_manifest_hash,
+        &sp1_x86.build_command_hash,
+        true,
+    );
+    push_allow_entry(
+        &mut al,
+        2,
+        &spec_bytes,
+        &risc0_x86.guest_source_tree_hash,
+        &risc0_x86.candidate_dep_lock_hash,
+        &[(1, risc0_x86.builder_container_digest)],
+        &risc0_x86.guest_image_hash,
+        &risc0_x86.program_id,
+        &risc0_x86.verifier_material_manifest_hash,
+        &risc0_x86.build_command_hash,
+        true,
+    );
+    let gs = Allowlist::guest_set_hash(&al);
+    Ok((al, gs))
+}
+
 // ============ v6: runner path-independence (independent from-scratch mirror, exact bytes) ============
 const RUNNER_BUILD_RECIPE_KIND: &[u8; 32] = b"b0-final-runner-build-recipe-v4\0";
 const RUNNER_BUILD_RECIPE_PREFIX: &[u8] = b"b0-final-runner-build-recipe/v4\0";

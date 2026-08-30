@@ -26,7 +26,7 @@ use crate::enums::{Arch, Candidate, ProvenanceRole, StatementIndex, VerifierMate
 use crate::measurement::{
     orchestrate_grid, serialize_vector, CellFacts, ProvenanceFacts, RunIdentities,
 };
-use crate::schema::identity_record::Phase1IdentityRecordV1;
+use crate::schema::identity_record::{Phase1IdentityRecordV1, Phase1IdentityRecordV2};
 use crate::schema::provenance::{
     check_cpuset_probe_chain, cpuset_probe_chain_hash, CpusetObsV1, CpusetProbeEntryV1,
     DvfsProvenance, HypervisorUnobservableDvfs,
@@ -806,10 +806,22 @@ pub fn records_from_raw(raw: &RawFacts) -> Vec<crate::guest_set::GuestIdentityRe
             .map(|id| hx(&id))
             .unwrap_or_default();
         for b in &c.guest.builder {
+            // CROSS-BIND consistency: the retained V2 guest record must carry the SAME continuity
+            // (measured source / tooling authority / spec / runner binary) as the per-provenance
+            // Phase-1 V1 record for that arch. Pull it from the matching identity record; for the
+            // aarch64 SP1 identity-only arch (no per-provenance record) fall back to the candidate's
+            // first, which reconcile_sp1 requires to agree with x86 anyway.
+            let cont = c
+                .identity_records
+                .iter()
+                .find(|ir| ir.arch == b.arch)
+                .or_else(|| c.identity_records.first());
             out.push(crate::guest_set::GuestIdentityRecord {
                 candidate: c.candidate.clone(),
                 arch: b.arch.clone(),
-                source_commit: crate::guest_set::RATIFIED_SOURCE_COMMIT.to_string(),
+                source_commit: cont
+                    .map(|ir| ir.source_commit.clone())
+                    .unwrap_or_else(|| crate::guest_set::RATIFIED_SOURCE_COMMIT.to_string()),
                 clean_tree: true,
                 guest_source_tree_hash: c.guest.guest_source_tree_hash.clone(),
                 candidate_dep_lock_hash: c.guest.candidate_dep_lock_hash.clone(),
@@ -823,12 +835,20 @@ pub fn records_from_raw(raw: &RawFacts) -> Vec<crate::guest_set::GuestIdentityRe
                 },
                 verifier_material_manifest_hash: vmat.clone(),
                 build_command_hash: c.guest.build_command_hash.clone(),
-                production_binary_blake3: "99".repeat(32),
+                production_binary_blake3: cont
+                    .map(|ir| ir.production_binary_blake3.clone())
+                    .unwrap_or_else(|| "99".repeat(32)),
                 real_backend: true,
                 real_guest_embedded: true,
-                b0_pre_spec_hash: raw.b0_pre_spec_hash.clone(),
-                tooling_commit: "a".repeat(40),
-                tooling_pathset_blake3: "f0".repeat(32),
+                b0_pre_spec_hash: cont
+                    .map(|ir| ir.b0_pre_spec_hash.clone())
+                    .unwrap_or_else(|| raw.b0_pre_spec_hash.clone()),
+                tooling_commit: cont
+                    .map(|ir| ir.tooling_commit.clone())
+                    .unwrap_or_else(|| "a".repeat(40)),
+                tooling_pathset_blake3: cont
+                    .map(|ir| ir.tooling_pathset_blake3.clone())
+                    .unwrap_or_else(|| "f0".repeat(32)),
                 canonical_sp1_guest_artifact_address: if c.candidate == "Sp1" {
                     "ca".repeat(32)
                 } else {
@@ -838,6 +858,57 @@ pub fn records_from_raw(raw: &RawFacts) -> Vec<crate::guest_set::GuestIdentityRe
         }
     }
     out
+}
+
+/// Build the RETAINED Phase-1 guest-identity record set (three `Phase1IdentityRecordV2`) from the
+/// authoritative records, in the canonical order the sealed vector + both verifiers require:
+/// SP1/x86_64, SP1/aarch64 (identity-only), RISC0/x86_64. Refuses a missing eligible record.
+fn phase1_v2_records(
+    records: &[crate::guest_set::GuestIdentityRecord],
+) -> Result<Vec<Phase1IdentityRecordV2>, String> {
+    let want = [("Sp1", "x86_64"), ("Sp1", "aarch64"), ("Risc0", "x86_64")];
+    let mut out = Vec::with_capacity(3);
+    for (wc, wa) in want {
+        let r = records
+            .iter()
+            .find(|r| r.candidate == wc && r.arch == wa)
+            .ok_or_else(|| format!("authoritative Phase-1 records missing {wc}/{wa}"))?;
+        out.push(Phase1IdentityRecordV2 {
+            candidate: parse_candidate(&r.candidate)?,
+            arch: parse_arch(&r.arch)?,
+            source_commit: r.source_commit.clone(),
+            tooling_commit: r.tooling_commit.clone(),
+            tooling_pathset_blake3: r.tooling_pathset_blake3.clone(),
+            b0_pre_spec_hash: hex32(&r.b0_pre_spec_hash, "record.b0_pre_spec_hash")?,
+            production_binary_blake3: hex32(
+                &r.production_binary_blake3,
+                "record.production_binary_blake3",
+            )?,
+            guest_source_tree_hash: hex32(
+                &r.guest_source_tree_hash,
+                "record.guest_source_tree_hash",
+            )?,
+            candidate_dep_lock_hash: hex32(
+                &r.candidate_dep_lock_hash,
+                "record.candidate_dep_lock_hash",
+            )?,
+            guest_image_hash: hex32(&r.guest_image_hash, "record.guest_image_hash")?,
+            program_id: hex32(&r.program_id, "record.program_id")?,
+            builder_container_digest: hex32(
+                &r.builder_container_digest,
+                "record.builder_container_digest",
+            )?,
+            verifier_material_manifest_hash: hex32(
+                &r.verifier_material_manifest_hash,
+                "record.verifier_material_manifest_hash",
+            )?,
+            build_command_hash: hex32(&r.build_command_hash, "record.build_command_hash")?,
+            // Bound by the records digest; carried verbatim so both verifiers reproduce derive_guest_set.
+            toolchain_identity: r.toolchain_identity.clone(),
+            canonical_sp1_guest_artifact_address: r.canonical_sp1_guest_artifact_address.clone(),
+        });
+    }
+    Ok(out)
 }
 
 /// Verify each MEASURED fragment's guest identity equals its matching `(candidate, x86_64)` Phase-1
@@ -1138,12 +1209,20 @@ pub fn produce(
         bundles.push((cand, ev));
     }
 
+    // Retain the self-contained Phase-1 guest-identity record set (records-authoritative). The
+    // independent verifier decodes these from the sealed bytes ALONE, re-derives the allowlist + guest-set
+    // hash, and requires the retained allowlist / package guest-set to match — never trusting the producer.
+    let v2_encoded: Vec<Vec<u8>> = phase1_v2_records(records)?
+        .iter()
+        .map(|r| r.encode())
+        .collect();
     let vector = serialize_vector(
         &allowlist.encode(),
         raw.measurement_input_authority.as_bytes(),
         raw.malformed_corpus_report.as_bytes(),
         raw.harness_source_inventory.as_bytes(),
         raw.eligibility_matrix.as_bytes(),
+        &v2_encoded,
         &bundles,
     );
     let package_id = crate::hashing::plain(&vector);
@@ -1887,7 +1966,7 @@ pub fn dry_run_raw_facts() -> RawFacts {
         ProvFacts {
             arch: arch.into(),
             role: role.into(),
-            source_commit: "eff3aae18b49969212c4c1493da20f97af195de2".into(),
+            source_commit: "507281e21e95a6a98e3480e25e12d1baab586e07".into(),
             dirty_tree_flag: false,
             builder_container_digest: dv("builder"),
             host_os: "linux".into(),
@@ -1926,8 +2005,8 @@ pub fn dry_run_raw_facts() -> RawFacts {
                 ratified_tooling_commit: tooling.clone(),
                 ratified_pathset_blake3: pathset.clone(),
                 recomputed_pathset_blake3: pathset.clone(),
-                measured_source_commit: "eff3aae18b49969212c4c1493da20f97af195de2".into(),
-                build_git_sha: "eff3aae18b49969212c4c1493da20f97af195de2".into(),
+                measured_source_commit: "507281e21e95a6a98e3480e25e12d1baab586e07".into(),
+                build_git_sha: "507281e21e95a6a98e3480e25e12d1baab586e07".into(),
                 measured_source_context_blake3: dv("measured-ctx"),
                 runner_sha256: dv("runner-sha256"),
                 runner_blake3: dv("runner-blake3"),
@@ -2011,7 +2090,7 @@ pub fn dry_run_raw_facts() -> RawFacts {
                     build_env: vec![
                         (
                             "BUILD_GIT_SHA".into(),
-                            "eff3aae18b49969212c4c1493da20f97af195de2".into(),
+                            "507281e21e95a6a98e3480e25e12d1baab586e07".into(),
                         ),
                         ("SOURCE_DATE_EPOCH".into(), "0".into()),
                         ("B0_VENUE_EMBED".into(), "0".into()),
@@ -2130,7 +2209,7 @@ pub fn dry_run_raw_facts() -> RawFacts {
             .iter()
             .map(|a| IdentityRecordFacts {
                 arch: (*a).into(),
-                source_commit: "eff3aae18b49969212c4c1493da20f97af195de2".into(),
+                source_commit: "507281e21e95a6a98e3480e25e12d1baab586e07".into(),
                 tooling_commit: "1234567890abcdef1234567890abcdef12345678".into(),
                 tooling_pathset_blake3: dv("tooling-pathset"),
                 b0_pre_spec_hash: MERGED_SPEC_HASH_HEX.into(),
@@ -2230,6 +2309,163 @@ pub fn dry_run_raw_facts() -> RawFacts {
     }
 }
 
+fn arch_name(a: Arch) -> &'static str {
+    match a {
+        Arch::X86_64 => "x86_64",
+        Arch::Aarch64 => "aarch64",
+    }
+}
+fn candidate_name(c: Candidate) -> &'static str {
+    match c {
+        Candidate::Sp1 => "Sp1",
+        Candidate::Risc0 => "Risc0",
+    }
+}
+
+/// Convert a retained V2 record to the typed `GuestIdentityRecord` that `derive_guest_set` reconciles.
+fn v2_to_guest_record(v: &Phase1IdentityRecordV2) -> crate::guest_set::GuestIdentityRecord {
+    crate::guest_set::GuestIdentityRecord {
+        candidate: candidate_name(v.candidate).to_string(),
+        arch: arch_name(v.arch).to_string(),
+        source_commit: v.source_commit.clone(),
+        clean_tree: true,
+        guest_source_tree_hash: hx(&v.guest_source_tree_hash),
+        candidate_dep_lock_hash: hx(&v.candidate_dep_lock_hash),
+        guest_image_hash: hx(&v.guest_image_hash),
+        program_id: hx(&v.program_id),
+        builder_container_digest: hx(&v.builder_container_digest),
+        toolchain_identity: v.toolchain_identity.clone(),
+        verifier_material_manifest_hash: hx(&v.verifier_material_manifest_hash),
+        build_command_hash: hx(&v.build_command_hash),
+        production_binary_blake3: hx(&v.production_binary_blake3),
+        real_backend: true,
+        real_guest_embedded: true,
+        b0_pre_spec_hash: hx(&v.b0_pre_spec_hash),
+        tooling_commit: v.tooling_commit.clone(),
+        tooling_pathset_blake3: v.tooling_pathset_blake3.clone(),
+        canonical_sp1_guest_artifact_address: v.canonical_sp1_guest_artifact_address.clone(),
+    }
+}
+
+/// Require EXACTLY the three retained Phase-1 V2 records in canonical order (SP1/x86_64, SP1/aarch64,
+/// RISC0/x86_64) — refusing missing / duplicate / reordered / extra records and any RISC0/aarch64 record.
+fn require_exact_v2_identity_set(v2: &[Phase1IdentityRecordV2]) -> Result<(), String> {
+    let want = [
+        (Candidate::Sp1, Arch::X86_64),
+        (Candidate::Sp1, Arch::Aarch64),
+        (Candidate::Risc0, Arch::X86_64),
+    ];
+    if v2.len() != want.len() {
+        return Err(format!(
+            "retained Phase-1 V2 record set has {} records, expected exactly {}",
+            v2.len(),
+            want.len()
+        ));
+    }
+    for (i, (wc, wa)) in want.iter().enumerate() {
+        if v2[i].candidate != *wc || v2[i].arch != *wa {
+            return Err(format!(
+                "retained Phase-1 V2 record {i} is {:?}/{:?}, expected canonical {wc:?}/{wa:?} \
+                 (missing / duplicate / reordered / extra / RISC0-aarch64 record)",
+                v2[i].candidate, v2[i].arch
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// RECORDS-AUTHORITATIVE sealed-import verification (validator side; mirrored from-scratch by the
+/// independent verifier). Decodes the retained three-record V2 set FROM THE SEALED BYTES, authenticates
+/// each record's canonical encoding, requires the exact canonical set, DERIVES the multi-arch allowlist +
+/// `r0_guest_set_hash` from the records, requires the retained allowlist / every bundle guest-set to equal
+/// the derivation, cross-binds each per-provenance continuity V1 record to its V2 record, and requires the
+/// eligibility matrix to justify the SP1/aarch64 identity-only cell with no ARM measurement. Never trusts
+/// a producer-baked allowlist. Returns the records-derived `r0_guest_set_hash`.
+pub fn verify_sealed_import(vector: &[u8]) -> Result<[u8; 32], String> {
+    let (allowlist_bytes, _mia, _report, _inv, elig_bytes, v2_blobs, bundles) =
+        crate::measurement::parse_vector(vector)?;
+    // 1. Decode + authenticate the retained V2 records (canonical encoding), then the exact canonical set.
+    let mut v2 = Vec::with_capacity(v2_blobs.len());
+    for b in &v2_blobs {
+        let rec = Phase1IdentityRecordV2::decode_exact(b)
+            .map_err(|e| format!("retained V2 record decode: {e:?}"))?;
+        if rec.encode() != *b {
+            return Err(
+                "retained V2 record is not canonically encoded (address authentication failed)"
+                    .into(),
+            );
+        }
+        v2.push(rec);
+    }
+    require_exact_v2_identity_set(&v2)?;
+    // 2. DERIVE the authoritative multi-arch allowlist + guest set FROM the records (reconciles SP1 arches).
+    let records: Vec<_> = v2.iter().map(v2_to_guest_record).collect();
+    let gs = crate::guest_set::derive_guest_set(&records, MERGED_SPEC_HASH_HEX)?;
+    // 3. The retained allowlist MUST equal the records-derived allowlist (never a producer-baked one).
+    if allowlist_bytes != gs.allowlist.encode() {
+        return Err(
+            "retained allowlist != the allowlist derived from the Phase-1 record set".into(),
+        );
+    }
+    // 4. Eligibility: exactly the ratified unsupported set; SP1/aarch64 is identity-only (never measured).
+    let elig = crate::venue::eligibility_matrix::EligibilityMatrixV1::from_json(&elig_bytes)?;
+    elig.verify(MERGED_SPEC_HASH_HEX)?;
+    let want_unsupported = vec![
+        ("Sp1".to_string(), "aarch64".to_string()),
+        ("Risc0".to_string(), "aarch64".to_string()),
+    ];
+    if elig.unsupported_cells() != want_unsupported {
+        return Err(format!(
+            "eligibility unsupported set {:?} != ratified {want_unsupported:?}",
+            elig.unsupported_cells()
+        ));
+    }
+    // 5. Per-bundle: guest-set == derived; cross-bind V1<->V2; no ARM measurement.
+    let mut measured: std::collections::BTreeSet<(String, String)> =
+        std::collections::BTreeSet::new();
+    for (cand, ev) in &bundles {
+        let rs = crate::schema::result_set::R0ResultSetV1::decode_exact(&ev.result_set)
+            .map_err(|e| format!("result set: {e:?}"))?;
+        if rs.r0_guest_set_hash != gs.r0_guest_set_hash {
+            return Err("bundle guest-set hash != records-derived guest-set hash".into());
+        }
+        for irb in &ev.identity_records {
+            let v1 = Phase1IdentityRecordV1::decode_exact(irb)
+                .map_err(|e| format!("per-provenance V1 record: {e:?}"))?;
+            let m = v2
+                .iter()
+                .find(|r| r.candidate == v1.candidate && r.arch == v1.arch)
+                .ok_or("per-provenance V1 record has no matching V2 record (cross-bind)")?;
+            if m.continuity_v1() != v1 {
+                return Err(
+                    "V1<->V2 cross-bind mismatch: a record representation was independently substituted"
+                        .into(),
+                );
+            }
+        }
+        for mp in &rs.measured_proofs {
+            if mp.arch == Arch::Aarch64 {
+                return Err(
+                    "a bundle measured an aarch64 cell (ARM measurement is forbidden)".into(),
+                );
+            }
+            measured.insert((
+                candidate_name(*cand).to_string(),
+                arch_name(mp.arch).to_string(),
+            ));
+        }
+    }
+    // 6. The actual measured cells MUST equal the eligibility matrix's ratified measurement cells.
+    let want_measure: std::collections::BTreeSet<(String, String)> =
+        elig.measurement_cells().into_iter().collect();
+    if measured != want_measure {
+        return Err(format!(
+            "measured cells {measured:?} != eligibility measurement cells {want_measure:?}"
+        ));
+    }
+    Ok(gs.r0_guest_set_hash)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2290,7 +2526,7 @@ mod tests {
             (Candidate::Risc0, CandidateVerdict::Qualified)
         );
         // The package vector is accepted by the frozen verifier for BOTH candidates.
-        let (_al, _mia, _report, _inv, _elig, bundles) = parse_vector(&pkg.vector).unwrap();
+        let (_al, _mia, _report, _inv, _elig, _v2, bundles) = parse_vector(&pkg.vector).unwrap();
         for (_c, ev) in &bundles {
             assert!(
                 verify_evidence(ev).unwrap().qualification,
@@ -2521,7 +2757,7 @@ mod tests {
             &records_from_raw(&dry_run_raw_facts()),
         )
         .expect("produces");
-        let (_al, _mia, _report, _inv, _elig, bundles) = parse_vector(&pkg.vector).unwrap();
+        let (_al, _mia, _report, _inv, _elig, _v2, bundles) = parse_vector(&pkg.vector).unwrap();
         let mut seen = std::collections::BTreeSet::new();
         for (c, ev) in &bundles {
             for ab in &ev.runner_attestations {
@@ -2795,5 +3031,129 @@ mod tests {
         assert!(produce(&raw, &records)
             .unwrap_err()
             .contains("builder digest"));
+    }
+
+    #[test]
+    fn sealed_import_round_trips_records_authoritative() {
+        let raw = dry_run_raw_facts();
+        let recs = records_from_raw(&raw);
+        let pkg = produce(&raw, &recs).unwrap();
+        // The validator mirror re-derives the guest set from the RETAINED V2 records alone and matches.
+        assert_eq!(
+            verify_sealed_import(&pkg.vector)
+                .expect("records-authoritative sealed import verifies"),
+            pkg.r0_guest_set_hash
+        );
+    }
+
+    #[test]
+    fn sealed_import_refuses_vec8_version() {
+        let raw = dry_run_raw_facts();
+        let pkg = produce(&raw, &records_from_raw(&raw)).unwrap();
+        let mut v = pkg.vector.clone();
+        v[..13].copy_from_slice(b"B0PREMEASVEC8");
+        assert!(verify_sealed_import(&v)
+            .unwrap_err()
+            .contains("B0PREMEASVEC8"));
+    }
+
+    #[test]
+    fn sealed_import_core_refusals() {
+        use crate::measurement::{parse_vector, serialize_vector};
+        let raw = dry_run_raw_facts();
+        let pkg = produce(&raw, &records_from_raw(&raw)).unwrap();
+        let (al, mia, rep, inv, elig, v2, bundles) = parse_vector(&pkg.vector).unwrap();
+        let reser = |v2: &[Vec<u8>]| serialize_vector(&al, &mia, &rep, &inv, &elig, v2, &bundles);
+        // (a) tampered V2 guest identity (program_id) -> retained allowlist != records-derived allowlist.
+        //     Tamper RISC0/x86 (index 2): it has no SP1 arch-partner, so the allowlist-mismatch gate is
+        //     the FIRST refusal (tampering an SP1 record would trip reconcile_sp1's program_id agreement
+        //     check first — a valid but different refusal, exercised separately below).
+        {
+            let mut w = v2.clone();
+            let mut rec = Phase1IdentityRecordV2::decode_exact(&w[2]).unwrap();
+            rec.program_id = [0xab; 32];
+            w[2] = rec.encode();
+            assert!(verify_sealed_import(&reser(&w))
+                .unwrap_err()
+                .contains("allowlist"));
+        }
+        // (b) reordered set (swap SP1/x86 <-> RISC0/x86) -> canonical-order refusal
+        {
+            let mut w = v2.clone();
+            w.swap(0, 2);
+            assert!(verify_sealed_import(&reser(&w)).is_err());
+        }
+        // (c) dropped record -> exactly-three refusal
+        {
+            let mut w = v2.clone();
+            w.pop();
+            assert!(verify_sealed_import(&reser(&w))
+                .unwrap_err()
+                .contains("expected exactly"));
+        }
+        // (d) cross-bind: a V2 continuity field (production_binary, NOT in the allowlist) mutated -> the
+        //     per-provenance V1 record no longer matches its V2 record.
+        {
+            let mut w = v2.clone();
+            let mut rec = Phase1IdentityRecordV2::decode_exact(&w[0]).unwrap();
+            rec.production_binary_blake3 = [0xcd; 32];
+            w[0] = rec.encode();
+            assert!(verify_sealed_import(&reser(&w))
+                .unwrap_err()
+                .contains("cross-bind"));
+        }
+    }
+
+    #[test]
+    fn sealed_import_extended_refusals() {
+        use crate::measurement::{parse_vector, serialize_vector};
+        let raw = dry_run_raw_facts();
+        let pkg = produce(&raw, &records_from_raw(&raw)).unwrap();
+        let (al, mia, rep, inv, elig, v2, bundles) = parse_vector(&pkg.vector).unwrap();
+
+        // (e) swapped candidate/arch: relabel the SP1/x86 V2 record as RISC0 -> exact canonical-set refusal.
+        {
+            let mut w = v2.clone();
+            let mut rec = Phase1IdentityRecordV2::decode_exact(&w[0]).unwrap();
+            rec.candidate = Candidate::Risc0;
+            w[0] = rec.encode();
+            let v = serialize_vector(&al, &mia, &rep, &inv, &elig, &w, &bundles);
+            assert!(
+                verify_sealed_import(&v).is_err(),
+                "a candidate-relabelled V2 record must be refused"
+            );
+        }
+        // (f) altered eligibility matrix: corrupt its bytes -> eligibility decode/verify refusal.
+        {
+            let mut bad_elig = elig.clone();
+            bad_elig[0] ^= 0xff; // break the JSON document
+            let v = serialize_vector(&al, &mia, &rep, &inv, &bad_elig, &v2, &bundles);
+            assert!(
+                verify_sealed_import(&v).is_err(),
+                "a corrupted eligibility matrix must be refused"
+            );
+        }
+        // (g) edit-BOTH: mutate a V2 guest identity AND recompute the retained allowlist to match, so the
+        //     records-derived-allowlist gate passes -- but every bundle's result-set still binds the
+        //     ORIGINAL guest set, so the per-bundle guest-set gate refuses. Use RISC0/x86 (no SP1 reconcile
+        //     partner) so the edited records still derive a self-consistent allowlist.
+        {
+            let mut w = v2.clone();
+            let mut rec = Phase1IdentityRecordV2::decode_exact(&w[2]).unwrap();
+            rec.program_id = [0x11; 32];
+            w[2] = rec.encode();
+            let recs: Vec<_> = w
+                .iter()
+                .map(|b| v2_to_guest_record(&Phase1IdentityRecordV2::decode_exact(b).unwrap()))
+                .collect();
+            let derived = crate::guest_set::derive_guest_set(&recs, MERGED_SPEC_HASH_HEX).unwrap();
+            let edited_al = derived.allowlist.encode();
+            let v = serialize_vector(&edited_al, &mia, &rep, &inv, &elig, &w, &bundles);
+            let e = verify_sealed_import(&v).unwrap_err();
+            assert!(
+                e.contains("guest-set"),
+                "edit-both must fail the per-bundle guest-set gate: {e}"
+            );
+        }
     }
 }

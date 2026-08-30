@@ -53,6 +53,22 @@ fn r_hexstr(r: &mut Reader, n: usize, ctx: &'static str) -> Result<String, Decod
     }
     Ok(String::from_utf8(b.to_vec()).expect("ascii-hex"))
 }
+/// Read a hex string that is EITHER empty (len 0) OR exactly `n` hex chars (e.g. the SP1-only canonical
+/// guest artifact address: present as 64-hex for SP1, empty for RISC0).
+fn r_hexstr_0_or(r: &mut Reader, n: usize, ctx: &'static str) -> Result<String, DecodeError> {
+    let len = r.read_u8(ctx)? as usize;
+    if len != 0 && len != n {
+        return Err(DecodeError::BadValue { ctx });
+    }
+    let b = r.read_bytes(len, ctx)?;
+    if !b
+        .iter()
+        .all(|&c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+    {
+        return Err(DecodeError::BadValue { ctx });
+    }
+    Ok(String::from_utf8(b.to_vec()).expect("ascii-hex"))
+}
 
 impl Phase1IdentityRecordV1 {
     pub fn encode(&self) -> Vec<u8> {
@@ -119,6 +135,163 @@ impl Phase1IdentityRecordV1 {
     }
 }
 
+// ============================================================================================
+// Phase1IdentityRecordV2 — the RETAINED full GUEST-IDENTITY record (records-authoritative guest set).
+//
+// A SEPARATE type with its OWN domain/version discriminator; V1 is immutable and NEVER decodes V2 bytes
+// (and vice versa — the 32-byte kind tag differs). V2 carries the V1 continuity subset PLUS the full
+// Phase-1 guest identity. The producer retains EXACTLY three V2 records — SP1/x86_64, SP1/aarch64
+// (identity-only), RISC0/x86_64, in that canonical order — as a self-contained sealed member. Both the
+// validator and the independent verifier decode V2 from scratch, recompute its domain-separated address,
+// authenticate the exact set, DERIVE the multi-arch allowlist + r0_guest_set_hash from these records,
+// require the package's allowlist / guest-set hash / coordination manifest / records-digest to match,
+// CROSS-BIND each V2 record to its corresponding continuity V1 record (neither may be substituted), and
+// compare every measured x86_64 fragment's guest-identity fields to its record — so sealed import never
+// trusts a producer-baked allowlist.
+// ============================================================================================
+
+pub const PHASE1_IDENTITY_V2_SCHEMA_VERSION: u16 = 1;
+/// 32-byte kind tag — distinct from V1 so the two can never masquerade.
+pub const PHASE1_IDENTITY_V2_KIND: &[u8; 32] = b"b0-final-phase1-identity-rec-v2\0";
+/// Domain separation for [`Phase1IdentityRecordV2::hash`] — distinct from V1.
+pub const PHASE1_IDENTITY_V2_PREFIX: &[u8] = b"b0-final-phase1-identity-record/v2\0";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Phase1IdentityRecordV2 {
+    // ---- continuity subset (cross-bound to the corresponding Phase1IdentityRecordV1) ----
+    pub candidate: Candidate,
+    pub arch: Arch,
+    pub source_commit: String,
+    pub tooling_commit: String,
+    pub tooling_pathset_blake3: String,
+    pub b0_pre_spec_hash: [u8; 32],
+    pub production_binary_blake3: [u8; 32],
+    // ---- full Phase-1 guest identity ----
+    pub guest_source_tree_hash: [u8; 32],
+    pub candidate_dep_lock_hash: [u8; 32],
+    pub guest_image_hash: [u8; 32],
+    pub program_id: [u8; 32],
+    pub builder_container_digest: [u8; 32],
+    pub verifier_material_manifest_hash: [u8; 32],
+    pub build_command_hash: [u8; 32],
+    /// Per-arch toolchain identity (64-hex). Bound by the records digest; distinct per arch for SP1.
+    pub toolchain_identity: String,
+    /// SP1: the shared canonical guest artifact address (64-hex). RISC0: empty. Bound by the records digest.
+    pub canonical_sp1_guest_artifact_address: String,
+}
+
+impl Phase1IdentityRecordV2 {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.bytes(PHASE1_IDENTITY_V2_KIND);
+        w.u16(PHASE1_IDENTITY_V2_SCHEMA_VERSION);
+        w.u16(self.candidate.to_repr());
+        w.u8(self.arch.to_repr());
+        w_hexstr(&mut w, &self.source_commit);
+        w_hexstr(&mut w, &self.tooling_commit);
+        w_hexstr(&mut w, &self.tooling_pathset_blake3);
+        w.bytes(&self.b0_pre_spec_hash);
+        w.bytes(&self.production_binary_blake3);
+        w.bytes(&self.guest_source_tree_hash);
+        w.bytes(&self.candidate_dep_lock_hash);
+        w.bytes(&self.guest_image_hash);
+        w.bytes(&self.program_id);
+        w.bytes(&self.builder_container_digest);
+        w.bytes(&self.verifier_material_manifest_hash);
+        w.bytes(&self.build_command_hash);
+        w_hexstr(&mut w, &self.toolchain_identity);
+        w_hexstr(&mut w, &self.canonical_sp1_guest_artifact_address);
+        w.into_bytes()
+    }
+
+    pub fn hash(&self) -> [u8; 32] {
+        let mut h = blake3::Hasher::new();
+        h.update(PHASE1_IDENTITY_V2_PREFIX);
+        h.update(&self.encode());
+        *h.finalize().as_bytes()
+    }
+
+    /// The continuity subset this V2 record shares with its cross-bound [`Phase1IdentityRecordV1`].
+    pub fn continuity_v1(&self) -> Phase1IdentityRecordV1 {
+        Phase1IdentityRecordV1 {
+            candidate: self.candidate,
+            arch: self.arch,
+            source_commit: self.source_commit.clone(),
+            tooling_commit: self.tooling_commit.clone(),
+            tooling_pathset_blake3: self.tooling_pathset_blake3.clone(),
+            b0_pre_spec_hash: self.b0_pre_spec_hash,
+            production_binary_blake3: self.production_binary_blake3,
+        }
+    }
+
+    pub fn decode(r: &mut Reader) -> Result<Self, DecodeError> {
+        let kind = r.read_array::<32>("Phase1IdentityRecordV2.kind")?;
+        if &kind != PHASE1_IDENTITY_V2_KIND {
+            return Err(DecodeError::BadTag {
+                ctx: "Phase1IdentityRecordV2.kind",
+            });
+        }
+        let sv = r.read_u16("Phase1IdentityRecordV2.schema_version")?;
+        if sv != PHASE1_IDENTITY_V2_SCHEMA_VERSION {
+            return Err(DecodeError::BadFixedScalar {
+                ctx: "Phase1IdentityRecordV2.schema_version",
+                value: sv as u64,
+            });
+        }
+        let candidate = Candidate::from_repr(r.read_u16("Phase1IdentityRecordV2.candidate")?)?;
+        let arch = Arch::from_repr(r.read_u8("Phase1IdentityRecordV2.arch")?)?;
+        let source_commit = r_hexstr(r, 40, "Phase1IdentityRecordV2.source_commit")?;
+        let tooling_commit = r_hexstr(r, 40, "Phase1IdentityRecordV2.tooling_commit")?;
+        let tooling_pathset_blake3 =
+            r_hexstr(r, 64, "Phase1IdentityRecordV2.tooling_pathset_blake3")?;
+        let b0_pre_spec_hash = r.read_array::<32>("Phase1IdentityRecordV2.b0_pre_spec_hash")?;
+        let production_binary_blake3 =
+            r.read_array::<32>("Phase1IdentityRecordV2.production_binary_blake3")?;
+        let guest_source_tree_hash =
+            r.read_array::<32>("Phase1IdentityRecordV2.guest_source_tree_hash")?;
+        let candidate_dep_lock_hash =
+            r.read_array::<32>("Phase1IdentityRecordV2.candidate_dep_lock_hash")?;
+        let guest_image_hash = r.read_array::<32>("Phase1IdentityRecordV2.guest_image_hash")?;
+        let program_id = r.read_array::<32>("Phase1IdentityRecordV2.program_id")?;
+        let builder_container_digest =
+            r.read_array::<32>("Phase1IdentityRecordV2.builder_container_digest")?;
+        let verifier_material_manifest_hash =
+            r.read_array::<32>("Phase1IdentityRecordV2.verifier_material_manifest_hash")?;
+        let build_command_hash = r.read_array::<32>("Phase1IdentityRecordV2.build_command_hash")?;
+        let toolchain_identity = r_hexstr(r, 64, "Phase1IdentityRecordV2.toolchain_identity")?;
+        let canonical_sp1_guest_artifact_address = r_hexstr_0_or(
+            r,
+            64,
+            "Phase1IdentityRecordV2.canonical_sp1_guest_artifact_address",
+        )?;
+        Ok(Self {
+            candidate,
+            arch,
+            source_commit,
+            tooling_commit,
+            tooling_pathset_blake3,
+            b0_pre_spec_hash,
+            production_binary_blake3,
+            guest_source_tree_hash,
+            candidate_dep_lock_hash,
+            guest_image_hash,
+            program_id,
+            builder_container_digest,
+            verifier_material_manifest_hash,
+            build_command_hash,
+            toolchain_identity,
+            canonical_sp1_guest_artifact_address,
+        })
+    }
+
+    pub fn decode_exact(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut r = Reader::new(bytes);
+        let v = Self::decode(&mut r)?;
+        r.finish("Phase1IdentityRecordV2")?;
+        Ok(v)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,6 +346,65 @@ mod tests {
         assert!(matches!(
             Phase1IdentityRecordV1::decode_exact(&a.encode()),
             Err(DecodeError::BadValue { .. })
+        ));
+    }
+
+    fn sample_v2() -> Phase1IdentityRecordV2 {
+        Phase1IdentityRecordV2 {
+            candidate: Candidate::Sp1,
+            arch: Arch::X86_64,
+            source_commit: "5".repeat(40),
+            tooling_commit: "1".repeat(40),
+            tooling_pathset_blake3: "7".repeat(64),
+            b0_pre_spec_hash: [2; 32],
+            production_binary_blake3: [3; 32],
+            guest_source_tree_hash: [4; 32],
+            candidate_dep_lock_hash: [5; 32],
+            guest_image_hash: [6; 32],
+            program_id: [7; 32],
+            builder_container_digest: [8; 32],
+            verifier_material_manifest_hash: [9; 32],
+            build_command_hash: [10; 32],
+            toolchain_identity: "e".repeat(64),
+            canonical_sp1_guest_artifact_address: "c".repeat(64),
+        }
+    }
+
+    #[test]
+    fn v2_roundtrips_and_hash_domain_separated() {
+        let a = sample_v2();
+        assert_eq!(
+            Phase1IdentityRecordV2::decode_exact(&a.encode()).unwrap(),
+            a
+        );
+        // domain-separated address (not a bare hash of the bytes)
+        assert_ne!(a.hash(), *blake3::hash(&a.encode()).as_bytes());
+        // continuity projection matches the shared V1 subset
+        assert_eq!(a.continuity_v1().production_binary_blake3, [3; 32]);
+    }
+
+    #[test]
+    fn v1_and_v2_never_masquerade() {
+        // V1 MUST NOT decode V2 bytes and vice versa — the kind tags differ.
+        assert!(matches!(
+            Phase1IdentityRecordV1::decode_exact(&sample_v2().encode()),
+            Err(DecodeError::BadTag { .. })
+        ));
+        assert!(matches!(
+            Phase1IdentityRecordV2::decode_exact(&sample().encode()),
+            Err(DecodeError::BadTag { .. })
+        ));
+        // truncation + trailing bytes rejected for V2 too
+        let b = sample_v2().encode();
+        assert!(matches!(
+            Phase1IdentityRecordV2::decode_exact(&b[..b.len() - 1]),
+            Err(DecodeError::Truncated { .. })
+        ));
+        let mut long = b;
+        long.push(0);
+        assert!(matches!(
+            Phase1IdentityRecordV2::decode_exact(&long),
+            Err(DecodeError::TrailingBytes { .. })
         ));
     }
 }

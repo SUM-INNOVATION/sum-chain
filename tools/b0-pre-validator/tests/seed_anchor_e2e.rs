@@ -20,7 +20,7 @@ fn e2e_raw_facts_produce_import_positive() {
         &records_from_raw(&dry_run_raw_facts()),
     )
     .expect("dry-run facts produce a VEC7 package");
-    let (allowlist_bytes, _mia, _report, _inv, _elig, bundles) =
+    let (allowlist_bytes, _mia, _report, _inv, _elig, _v2, bundles) =
         parse_vector(&pkg.vector).expect("VEC7 vector parses");
     let gs = GuestProgramAllowlistV1::decode_exact(&allowlist_bytes)
         .expect("allowlist decodes")

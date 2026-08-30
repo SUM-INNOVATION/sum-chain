@@ -448,7 +448,7 @@ mod tests {
         // produce() enforces runner continuity + artifact retention during assembly (the merge fixture
         // uses a non-reference verify cpuset, so the qualification verdict itself is not the point).
         let pkg = produce(&raw, &records_from_raw(&raw)).expect("merged facts produce");
-        let (_al, _mia, _report, _inv, _elig, bundles) = parse_vector(&pkg.vector).unwrap();
+        let (_al, _mia, _report, _inv, _elig, _v2, bundles) = parse_vector(&pkg.vector).unwrap();
         for (_c, ev) in &bundles {
             assert_eq!(ev.cpuset_chains.len(), ev.provenances.len());
             assert_eq!(ev.runner_attestations.len(), ev.provenances.len());

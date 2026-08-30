@@ -50,7 +50,7 @@ fn producer_selftest_vector_is_deterministically_regenerable() {
 
 #[test]
 fn producer_vector_both_bundles_verify_and_bind_guest_set() {
-    let (allowlist_bytes, _mia, _report, _inv, _elig, bundles) =
+    let (allowlist_bytes, _mia, _report, _inv, _elig, _v2, bundles) =
         parse_vector(VECTOR).expect("vector parses");
     let gs = GuestProgramAllowlistV1::decode_exact(&allowlist_bytes)
         .expect("allowlist decodes")

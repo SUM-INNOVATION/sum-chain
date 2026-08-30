@@ -38,12 +38,23 @@ type ParsedVector = (
     Vec<u8>,
     Vec<u8>,
     Vec<u8>,
+    Vec<Vec<u8>>,
     Vec<(u16, harness::Evidence)>,
 );
 
 fn parse(bytes: &[u8]) -> Result<ParsedVector, String> {
     let mut r = Rd { b: bytes, p: 0 };
-    if r.take(13)? != b"B0PREMEASVEC8" {
+    let magic = r.take(13)?;
+    // VEC9 (records-authoritative). The prior production version (VEC8, producer-baked allowlist) is
+    // REFUSED — never silently accepted — so a package cannot be imported without the retained V2 set.
+    if magic == b"B0PREMEASVEC8" {
+        return Err(
+            "refusing prior production vector version B0PREMEASVEC8: the records-authoritative \
+             B0PREMEASVEC9 format (retained Phase-1 V2 identity set) is required"
+                .into(),
+        );
+    }
+    if magic != b"B0PREMEASVEC9" {
         return Err("bad container magic".into());
     }
     let allowlist = r.blob()?;
@@ -53,6 +64,13 @@ fn parse(bytes: &[u8]) -> Result<ParsedVector, String> {
     // VEC8: a FIFTH top-level retained blob after the harness inventory — the EligibilityMatrix JSON
     // (the reviewed two-cell model), bound by address into the MeasurementInputAuthority.
     let eligibility_matrix = r.blob()?;
+    // VEC9: a SIXTH top-level retained list after the eligibility matrix — the self-contained Phase-1
+    // guest-identity record set (three encoded Phase1IdentityRecordV2 blobs, canonical order).
+    let v2_count = r.u32()?;
+    let mut guest_identity_records_v2 = Vec::with_capacity(v2_count);
+    for _ in 0..v2_count {
+        guest_identity_records_v2.push(r.blob()?);
+    }
     let n = r.u32()?;
     let mut bundles = Vec::new();
     for _ in 0..n {
@@ -103,6 +121,7 @@ fn parse(bytes: &[u8]) -> Result<ParsedVector, String> {
         malformed_corpus_report,
         harness_source_inventory,
         eligibility_matrix,
+        guest_identity_records_v2,
         bundles,
     ))
 }
@@ -138,7 +157,8 @@ fn run() -> Result<String, String> {
         .nth(1)
         .ok_or("usage: b0-pre-independent-verify <real-orchestrator-vector.bin>")?;
     let bytes = std::fs::read(&path).map_err(|e| format!("read {path}: {e}"))?;
-    let (allowlist, mia_bytes, report_bytes, inventory_bytes, elig_bytes, bundles) = parse(&bytes)?;
+    let (allowlist, mia_bytes, report_bytes, inventory_bytes, elig_bytes, v2_blobs, bundles) =
+        parse(&bytes)?;
     // Independent import of the retained VEC6 measurement-input authority: the three retained blobs
     // (MIA JSON + malformed-corpus report + harness-source inventory manifest) are MANDATORY — a real
     // official package always seals them, so a vector missing any of them is refused (never skipped).
@@ -190,8 +210,34 @@ fn run() -> Result<String, String> {
             ));
         }
     }
+    // ---- Records-authoritative guest set (VEC9). Decode + authenticate the retained Phase-1 V2 set FROM
+    // SCRATCH, require the EXACT canonical set, DERIVE the allowlist + r0_guest_set_hash FROM the records
+    // (reconciling the two SP1 arches into one entry), and require the retained top-level allowlist to
+    // equal those exact bytes — the producer-baked allowlist is NEVER trusted.
+    let mut v2_recs = Vec::with_capacity(v2_blobs.len());
+    for b in &v2_blobs {
+        let rec = closure::decode_identity_record_v2(b)
+            .map_err(|e| format!("retained V2 identity record decode: {e:?}"))?;
+        // Authenticate the record address: the retained bytes MUST be the byte-identical canonical encode.
+        if closure::encode_identity_record_v2(&rec) != *b {
+            return Err(
+                "retained V2 identity record is not canonically encoded (address authentication failed)"
+                    .into(),
+            );
+        }
+        v2_recs.push(rec);
+    }
+    closure::require_exact_v2_identity_set(&v2_recs)?;
+    let (derived_allowlist, gs) = closure::derive_guest_set_from_v2(&v2_recs, SPEC, MEASURED)?;
+    // Structural sanity on the retained allowlist, then the AUTHORITATIVE byte-equality with the derivation.
     closure::decode_allowlist(&allowlist).map_err(|e| format!("allowlist decode: {e:?}"))?;
-    let gs = closure::Allowlist::guest_set_hash(&allowlist);
+    if allowlist != derived_allowlist {
+        return Err(
+            "retained allowlist != the allowlist derived from the retained Phase-1 V2 record set \
+             (records-authoritative mismatch)"
+                .into(),
+        );
+    }
     if bundles.is_empty() {
         return Err("no candidate bundles in the vector".into());
     }
@@ -209,7 +255,34 @@ fn run() -> Result<String, String> {
         // Record the actual measured (candidate, arch) cells for the eligibility cross-check below.
         let cand = candidate_name(*candidate)?;
         for m in &rs.measured_proofs {
+            // ARM is identity-only in the two-cell model — a measured aarch64 proof is forbidden.
+            if m.0 == 2 {
+                return Err(format!(
+                    "candidate {candidate}: measured an aarch64 cell (ARM measurement is forbidden)"
+                ));
+            }
             have_measure.insert((cand.to_string(), arch_name(m.0)?.to_string()));
+        }
+        // CROSS-BIND: every per-provenance V1 record decodes to a continuity subset that MUST equal its
+        // matching retained V2 record (neither representation substitutable). V2 carries the guest
+        // identity; V1 anchors runner continuity — a mutual edit of one is caught against the other.
+        for irb in &ev.identity_records {
+            let v1 = closure::decode_identity_record(irb).map_err(|e| {
+                format!("candidate {candidate}: per-provenance V1 record decode: {e:?}")
+            })?;
+            let m = v2_recs
+                .iter()
+                .find(|r| r.candidate == v1.candidate && r.arch == v1.arch)
+                .ok_or_else(|| {
+                    format!(
+                        "candidate {candidate}: per-provenance V1 record has no matching retained V2 record (cross-bind)"
+                    )
+                })?;
+            if !closure::v2_matches_v1_continuity(&v1, m) {
+                return Err(format!(
+                    "candidate {candidate}: V1<->V2 cross-bind mismatch (a record representation was independently substituted)"
+                ));
+            }
         }
         // Every fragment is bound to the ONE package authority: the result-set's malformed hash IS the
         // report address, and every runner attestation binds the authority's own address.

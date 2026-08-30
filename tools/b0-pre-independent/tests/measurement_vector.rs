@@ -44,14 +44,23 @@ impl<'a> Rd<'a> {
     }
 }
 
-fn parse(bytes: &[u8]) -> (Vec<u8>, Vec<(u16, harness::Evidence)>) {
+// (allowlist bytes, retained V2 record blobs, per-candidate bundles).
+type Parsed = (Vec<u8>, Vec<Vec<u8>>, Vec<(u16, harness::Evidence)>);
+
+fn parse(bytes: &[u8]) -> Parsed {
     let mut r = Rd { b: bytes, p: 0 };
-    assert_eq!(r.take(13), b"B0PREMEASVEC8", "bad magic");
+    assert_eq!(r.take(13), b"B0PREMEASVEC9", "bad magic");
     let allowlist = r.blob();
     let _mia = r.blob();
     let _report = r.blob();
     let _inv = r.blob();
     let _elig = r.blob(); // VEC8: the retained eligibility/unsupported matrix JSON.
+                          // VEC9: the self-contained retained Phase-1 guest-identity record set (three V2 blobs).
+    let v2_count = r.u32();
+    let mut v2_blobs = Vec::with_capacity(v2_count);
+    for _ in 0..v2_count {
+        v2_blobs.push(r.blob());
+    }
     let n = r.u32();
     let mut bundles = Vec::new();
     for _ in 0..n {
@@ -93,7 +102,22 @@ fn parse(bytes: &[u8]) -> (Vec<u8>, Vec<(u16, harness::Evidence)>) {
         ));
     }
     assert_eq!(r.p, bytes.len(), "trailing bytes");
-    (allowlist, bundles)
+    (allowlist, v2_blobs, bundles)
+}
+
+/// Decode + authenticate the retained V2 set exactly as the independent binary mirror does.
+fn decode_v2_set(v2_blobs: &[Vec<u8>]) -> Vec<closure::IdentityRecV2> {
+    let mut v2 = Vec::with_capacity(v2_blobs.len());
+    for b in v2_blobs {
+        let rec = closure::decode_identity_record_v2(b).expect("V2 record decodes");
+        assert_eq!(
+            closure::encode_identity_record_v2(&rec),
+            *b,
+            "retained V2 record is canonically encoded"
+        );
+        v2.push(rec);
+    }
+    v2
 }
 
 // Two-cell model: EVERY candidate is measured on x86_64 (arch == 1) ONLY. aarch64 (arch == 2) is
@@ -127,7 +151,13 @@ fn clone_ev(ev: &harness::Evidence) -> harness::Evidence {
 
 #[test]
 fn independent_verifier_accepts_the_same_bytes_and_identities() {
-    let (allowlist_bytes, bundles) = parse(VECTOR);
+    let (allowlist_bytes, v2_blobs, bundles) = parse(VECTOR);
+    // VEC9 minimal demo: this fixture is the serialize/parse + harness demo (empty top-level authority
+    // blobs); the FULL records-authoritative mirror (derive-from-records + cross-bind under the ratified
+    // measured source) is exercised on the producer-selftest fixture in `producer_vector.rs`. Here we still
+    // decode + authenticate the retained V2 set from scratch and require the EXACT canonical set.
+    let v2 = decode_v2_set(&v2_blobs);
+    closure::require_exact_v2_identity_set(&v2).expect("exactly the canonical V2 identity set");
     // Recompute the canonical guest-set hash from scratch and validate the allowlist.
     closure::decode_allowlist(&allowlist_bytes).expect("allowlist decodes");
     let gs = closure::Allowlist::guest_set_hash(&allowlist_bytes);
@@ -165,7 +195,7 @@ fn independent_verifier_accepts_the_same_bytes_and_identities() {
 
 #[test]
 fn independent_negatives_all_rejected() {
-    let (allowlist_bytes, bundles) = parse(VECTOR);
+    let (allowlist_bytes, v2_blobs, bundles) = parse(VECTOR);
     let sp1 = &bundles.iter().find(|(c, _)| *c == 1).unwrap().1;
     let risc0 = &bundles.iter().find(|(c, _)| *c == 2).unwrap().1;
     // sanity: both pristine bundles verify + qualify (the two eligible x86_64 measurement cells).
@@ -231,4 +261,9 @@ fn independent_negatives_all_rejected() {
         x86_only(sp1) && x86_only(risc0),
         "both bundles are x86_64-only"
     );
+
+    // VEC9: the retained V2 set decodes + authenticates canonically and is the exact canonical set. The
+    // records-authoritative derive/cross-bind negatives are exercised on the producer-selftest fixture.
+    let v2 = decode_v2_set(&v2_blobs);
+    closure::require_exact_v2_identity_set(&v2).expect("exactly the canonical V2 identity set");
 }
