@@ -6,7 +6,7 @@
 
 use b0_pre_validator::harness::verify_evidence;
 use b0_pre_validator::measurement::parse_vector;
-use b0_pre_validator::producer::{dry_run_raw_facts, produce};
+use b0_pre_validator::producer::{dry_run_raw_facts, produce, records_from_raw};
 use b0_pre_validator::schema::allowlist::GuestProgramAllowlistV1;
 use b0_pre_validator::schema::result_set::R0ResultSetV1;
 
@@ -15,7 +15,11 @@ use b0_pre_validator::schema::result_set::R0ResultSetV1;
 /// AFTER the anchor passes (so a green SP1 proves the anchor accepted the sealed dependency seed).
 #[test]
 fn e2e_raw_facts_produce_import_positive() {
-    let pkg = produce(&dry_run_raw_facts()).expect("dry-run facts produce a VEC7 package");
+    let pkg = produce(
+        &dry_run_raw_facts(),
+        &records_from_raw(&dry_run_raw_facts()),
+    )
+    .expect("dry-run facts produce a VEC7 package");
     let (allowlist_bytes, _mia, _report, _inv, _elig, bundles) =
         parse_vector(&pkg.vector).expect("VEC7 vector parses");
     let gs = GuestProgramAllowlistV1::decode_exact(&allowlist_bytes)
@@ -50,7 +54,8 @@ fn e2e_produce_refuses_missing_dependency_seed() {
         .find(|c| c.candidate == "Sp1")
         .expect("sp1 candidate");
     sp1.dependency_seed_json = String::new();
-    let err = produce(&raw).expect_err("missing dependency seed must be refused");
+    let err = produce(&raw, &records_from_raw(&raw))
+        .expect_err("missing dependency seed must be refused");
     let e = err.to_lowercase();
     assert!(
         e.contains("dependency") || e.contains("eof") || e.contains("parse"),
@@ -75,7 +80,8 @@ fn e2e_produce_refuses_swapped_cross_candidate_seed() {
         .find(|c| c.candidate == "Sp1")
         .expect("sp1 candidate")
         .dependency_seed_json = r0_seed;
-    let err = produce(&raw).expect_err("swapped cross-candidate dependency seed must be refused");
+    let err = produce(&raw, &records_from_raw(&raw))
+        .expect_err("swapped cross-candidate dependency seed must be refused");
     let e = err.to_lowercase();
     assert!(
         e.contains("candidate") || e.contains("dependency"),

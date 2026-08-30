@@ -24,10 +24,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::enums::{Arch, Candidate, ProvenanceRole, StatementIndex, VerifierMaterialRole};
 use crate::measurement::{
-    official_allowlist, orchestrate_grid, r0_guest_set_hash, serialize_vector, CellFacts,
-    GuestBuild, ProvenanceFacts, RunIdentities,
+    orchestrate_grid, serialize_vector, CellFacts, ProvenanceFacts, RunIdentities,
 };
-use crate::schema::allowlist::BuilderArch;
 use crate::schema::identity_record::Phase1IdentityRecordV1;
 use crate::schema::provenance::{
     check_cpuset_probe_chain, cpuset_probe_chain_hash, CpusetObsV1, CpusetProbeEntryV1,
@@ -792,7 +790,138 @@ pub fn validate_raw_facts(raw: &RawFacts) -> Result<(), String> {
 
 /// Produce a deterministic content-addressed measurement package from raw venue
 /// facts. Fail-closed on lifecycle mode, spec hash, turbo, and native-arch rules.
-pub fn produce(raw: &RawFacts) -> Result<MeasurementPackage, String> {
+/// Reconstruct the Phase-1 `GuestIdentityRecord` set a raw-facts bundle's fragments correspond to — one
+/// record per builder arch in each candidate's measured guest (SP1: x86_64 + aarch64; RISC0: x86_64),
+/// carrying the fragment's guest identity + per-arch builder digest + verifier-material identity. The
+/// authority fields (source = the ratified measured source; tooling / toolchain / production-binary are
+/// stable placeholders) are NOT bound by the guest set, so `derive_guest_set` over these reproduces the
+/// fragment-derived guest set exactly. Used by the DRY-RUN / TEST_ONLY vector path (no external records
+/// file) and by tests; the real `--facts` path uses the venue's authoritative `records/all.json`.
+pub fn records_from_raw(raw: &RawFacts) -> Vec<crate::guest_set::GuestIdentityRecord> {
+    let mut out = Vec::new();
+    for c in &raw.candidates {
+        let vmat = build_material(c)
+            .ok()
+            .and_then(|m| m.identity().ok())
+            .map(|id| hx(&id))
+            .unwrap_or_default();
+        for b in &c.guest.builder {
+            out.push(crate::guest_set::GuestIdentityRecord {
+                candidate: c.candidate.clone(),
+                arch: b.arch.clone(),
+                source_commit: crate::guest_set::RATIFIED_SOURCE_COMMIT.to_string(),
+                clean_tree: true,
+                guest_source_tree_hash: c.guest.guest_source_tree_hash.clone(),
+                candidate_dep_lock_hash: c.guest.candidate_dep_lock_hash.clone(),
+                guest_image_hash: c.guest.guest_image_hash.clone(),
+                program_id: c.guest.program_id.clone(),
+                builder_container_digest: b.builder_container_digest.clone(),
+                toolchain_identity: if b.arch == "x86_64" {
+                    "e0".repeat(32)
+                } else {
+                    "e1".repeat(32)
+                },
+                verifier_material_manifest_hash: vmat.clone(),
+                build_command_hash: c.guest.build_command_hash.clone(),
+                production_binary_blake3: "99".repeat(32),
+                real_backend: true,
+                real_guest_embedded: true,
+                b0_pre_spec_hash: raw.b0_pre_spec_hash.clone(),
+                tooling_commit: "a".repeat(40),
+                tooling_pathset_blake3: "f0".repeat(32),
+                canonical_sp1_guest_artifact_address: if c.candidate == "Sp1" {
+                    "ca".repeat(32)
+                } else {
+                    String::new()
+                },
+            });
+        }
+    }
+    out
+}
+
+/// Verify each MEASURED fragment's guest identity equals its matching `(candidate, x86_64)` Phase-1
+/// record. The records are the AUTHORITY for the guest set; this ensures a fragment can never bind a guest
+/// it did not measure — the measured program_id / guest-image / source-tree / dep-lock / build-command /
+/// verifier-material / x86_64 builder digest must all equal the record's. (Two-cell model: every measured
+/// fragment is x86_64; the SP1/aarch64 identity is record-only and has no fragment.)
+fn verify_fragments_consistent_with_records(
+    raw: &RawFacts,
+    records: &[crate::guest_set::GuestIdentityRecord],
+) -> Result<(), String> {
+    for c in &raw.candidates {
+        let rec = records
+            .iter()
+            .find(|r| r.candidate == c.candidate && r.arch == "x86_64")
+            .ok_or_else(|| {
+                format!(
+                    "no Phase-1 x86_64 identity record for measured candidate {}",
+                    c.candidate
+                )
+            })?;
+        for (field, frag, record) in [
+            ("program_id", &c.guest.program_id, &rec.program_id),
+            (
+                "guest_image_hash",
+                &c.guest.guest_image_hash,
+                &rec.guest_image_hash,
+            ),
+            (
+                "guest_source_tree_hash",
+                &c.guest.guest_source_tree_hash,
+                &rec.guest_source_tree_hash,
+            ),
+            (
+                "candidate_dep_lock_hash",
+                &c.guest.candidate_dep_lock_hash,
+                &rec.candidate_dep_lock_hash,
+            ),
+            (
+                "build_command_hash",
+                &c.guest.build_command_hash,
+                &rec.build_command_hash,
+            ),
+        ] {
+            if frag != record {
+                return Err(format!(
+                    "measured {}/x86_64 fragment {field} {frag} != Phase-1 record {record}",
+                    c.candidate
+                ));
+            }
+        }
+        // verifier-material identity: the fragment's material must reduce to the record's manifest hash.
+        let frag_vmat = build_material(c)?.identity().map_err(|e| e.to_string())?;
+        let rec_vmat = hex32(
+            &rec.verifier_material_manifest_hash,
+            "record.verifier_material_manifest_hash",
+        )?;
+        if frag_vmat != rec_vmat {
+            return Err(format!(
+                "measured {}/x86_64 verifier-material identity != Phase-1 record",
+                c.candidate
+            ));
+        }
+        // the x86_64 builder digest present in the fragment must equal the record's builder digest.
+        let x86 = c
+            .guest
+            .builder
+            .iter()
+            .find(|b| b.arch == "x86_64")
+            .ok_or_else(|| format!("measured {} fragment has no x86_64 builder", c.candidate))?;
+        if x86.builder_container_digest != rec.builder_container_digest {
+            return Err(format!(
+                "measured {}/x86_64 builder digest {} != Phase-1 record {}",
+                c.candidate, x86.builder_container_digest, rec.builder_container_digest
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub fn produce(
+    raw: &RawFacts,
+    records: &[crate::guest_set::GuestIdentityRecord],
+) -> Result<MeasurementPackage, String> {
     // --- lifecycle + spec-hash gate ---
     if raw.lifecycle_mode != "measurement" {
         return Err(format!(
@@ -874,42 +1003,16 @@ pub fn produce(raw: &RawFacts) -> Result<MeasurementPackage, String> {
             &raw.b0_pre_spec_hash,
         )?;
 
-    // --- build the guest allowlist from the built identities -> canonical guest-set ---
-    let mut builds = Vec::new();
-    for c in &raw.candidates {
-        let cand = parse_candidate(&c.candidate)?;
-        let mut arches = Vec::new();
-        for b in &c.guest.builder {
-            arches.push(BuilderArch {
-                arch: parse_arch(&b.arch)?,
-                builder_container_digest: hex32(
-                    &b.builder_container_digest,
-                    "builder_container_digest",
-                )?,
-            });
-        }
-        builds.push(GuestBuild {
-            candidate: cand,
-            guest_source_tree_hash: hex32(
-                &c.guest.guest_source_tree_hash,
-                "guest_source_tree_hash",
-            )?,
-            candidate_dep_lock_hash: hex32(
-                &c.guest.candidate_dep_lock_hash,
-                "candidate_dep_lock_hash",
-            )?,
-            builder_arches: arches,
-            guest_image_hash: hex32(&c.guest.guest_image_hash, "guest_image_hash")?,
-            program_id: hex32(&c.guest.program_id, "program_id")?,
-            verifier_material_manifest_hash: build_material(c)?
-                .identity()
-                .map_err(|e| e.to_string())?,
-            build_command_hash: hex32(&c.guest.build_command_hash, "build_command_hash")?,
-            reproducible: c.guest.reproducible,
-        });
-    }
-    let allowlist = official_allowlist(spec, &builds);
-    let guest_set = r0_guest_set_hash(&allowlist);
+    // --- AUTHORITATIVE guest set: the Phase-1 identity RECORDS (the bilaterally-verified 3-identity set),
+    //     NEVER the measurement fragments. The multi-arch SP1 guest (x86_64 + aarch64) is RECONCILED here
+    //     from the two SP1 records, so a single-arch x86_64 measurement fragment can neither fabricate nor
+    //     omit an arch (the exact failure mode that made a fragment-derived guest set diverge from the
+    //     3-identity set). Each measured fragment is then VERIFIED consistent with its matching
+    //     (candidate, x86_64) record, so a fragment can never bind a guest identity it did not measure. ---
+    let gs = crate::guest_set::derive_guest_set(records, &raw.b0_pre_spec_hash)?;
+    let allowlist = gs.allowlist.clone();
+    let guest_set = gs.r0_guest_set_hash;
+    verify_fragments_consistent_with_records(raw, records)?;
 
     // --- per-candidate orchestration through the ONE canonical assembler ---
     let mut bundles = Vec::new();
@@ -2170,7 +2273,11 @@ mod tests {
 
     #[test]
     fn dry_run_produces_and_verifies_both_verdicts() {
-        let pkg = produce(&dry_run_raw_facts()).expect("produces");
+        let pkg = produce(
+            &dry_run_raw_facts(),
+            &records_from_raw(&dry_run_raw_facts()),
+        )
+        .expect("produces");
         // Reviewed two-cell model: BOTH candidates carry their complete x86_64-only native matrix,
         // so BOTH qualify (each is one of the two eligible measurement cells). Neither is an
         // "incomplete native matrix" any longer — x86_64 IS the complete native matrix.
@@ -2409,7 +2516,11 @@ mod tests {
     // aarch64 runner-continuity mapping exists — the SP1/aarch64 identity lives in the guest set.
     #[test]
     fn runner_continuity_positive_both_measurement_mappings() {
-        let pkg = produce(&dry_run_raw_facts()).expect("produces");
+        let pkg = produce(
+            &dry_run_raw_facts(),
+            &records_from_raw(&dry_run_raw_facts()),
+        )
+        .expect("produces");
         let (_al, _mia, _report, _inv, _elig, bundles) = parse_vector(&pkg.vector).unwrap();
         let mut seen = std::collections::BTreeSet::new();
         for (c, ev) in &bundles {
@@ -2437,7 +2548,7 @@ mod tests {
         // (a) Phase-1 production_binary_blake3 changed → != measurement runner_blake3 → refuse.
         let mut raw = dry_run_raw_facts();
         raw.candidates[0].identity_records[0].production_binary_blake3 = "aa".repeat(32);
-        assert!(produce(&raw)
+        assert!(produce(&raw, &records_from_raw(&raw))
             .unwrap_err()
             .contains("production_binary_blake3 != measurement runner_blake3"));
         // (b) measurement runner_blake3 changed → != Phase-1 → refuse (tooling authority unchanged).
@@ -2445,13 +2556,13 @@ mod tests {
         raw.candidates[0].provenance[0]
             .runner_attestation
             .runner_blake3 = "bb".repeat(32);
-        assert!(produce(&raw).is_err());
+        assert!(produce(&raw, &records_from_raw(&raw)).is_err());
         // (c) missing identity record for a measured arch → refuse. Under the two-cell model SP1's
         // measurement-candidate identity set is x86_64-only (its single record); dropping it leaves
         // the set incomplete versus the natively-measurable arches.
         let mut raw = dry_run_raw_facts();
         raw.candidates[0].identity_records.pop(); // drop SP1 x86_64 record → empty set
-        assert!(produce(&raw)
+        assert!(produce(&raw, &records_from_raw(&raw))
             .unwrap_err()
             .to_lowercase()
             .contains("identity set"));
@@ -2460,12 +2571,14 @@ mod tests {
         let mut extra = raw.candidates[1].identity_records[0].clone();
         extra.arch = "aarch64".into();
         raw.candidates[1].identity_records.push(extra);
-        assert!(produce(&raw).unwrap_err().contains("Risc0/aarch64"));
+        assert!(produce(&raw, &records_from_raw(&raw))
+            .unwrap_err()
+            .contains("Risc0/aarch64"));
         // (e) duplicate candidate/arch identity → refuse.
         let mut raw = dry_run_raw_facts();
         let dup = raw.candidates[0].identity_records[0].clone();
         raw.candidates[0].identity_records.push(dup);
-        assert!(produce(&raw)
+        assert!(produce(&raw, &records_from_raw(&raw))
             .unwrap_err()
             .to_lowercase()
             .contains("identity"));
@@ -2473,8 +2586,16 @@ mod tests {
 
     #[test]
     fn produce_is_deterministic() {
-        let a = produce(&dry_run_raw_facts()).unwrap();
-        let b = produce(&dry_run_raw_facts()).unwrap();
+        let a = produce(
+            &dry_run_raw_facts(),
+            &records_from_raw(&dry_run_raw_facts()),
+        )
+        .unwrap();
+        let b = produce(
+            &dry_run_raw_facts(),
+            &records_from_raw(&dry_run_raw_facts()),
+        )
+        .unwrap();
         assert_eq!(a.package_id, b.package_id, "regeneration drift");
         assert_eq!(a.vector, b.vector);
     }
@@ -2483,14 +2604,18 @@ mod tests {
     fn refuses_wrong_spec_hash() {
         let mut f = dry_run_raw_facts();
         f.b0_pre_spec_hash = "0".repeat(64);
-        assert!(produce(&f).unwrap_err().contains("!= merged finalized"));
+        assert!(produce(&f, &records_from_raw(&f))
+            .unwrap_err()
+            .contains("!= merged finalized"));
     }
 
     #[test]
     fn refuses_non_measurement_mode() {
         let mut f = dry_run_raw_facts();
         f.lifecycle_mode = "preregistration".into();
-        assert!(produce(&f).unwrap_err().contains("must be `measurement`"));
+        assert!(produce(&f, &records_from_raw(&f))
+            .unwrap_err()
+            .contains("must be `measurement`"));
     }
 
     #[test]
@@ -2500,7 +2625,10 @@ mod tests {
             turbo_enabled: true,
             governor: "performance".into(),
         };
-        assert!(produce(&f).unwrap_err().to_lowercase().contains("turbo"));
+        assert!(produce(&f, &records_from_raw(&f))
+            .unwrap_err()
+            .to_lowercase()
+            .contains("turbo"));
     }
 
     #[test]
@@ -2510,7 +2638,9 @@ mod tests {
         let mut fake = f.candidates[1].cells[0].clone();
         fake.arch = "aarch64".into();
         f.candidates[1].cells.push(fake);
-        assert!(produce(&f).unwrap_err().contains("native-ineligible"));
+        assert!(produce(&f, &records_from_raw(&f))
+            .unwrap_err()
+            .contains("native-ineligible"));
     }
 
     #[test]
@@ -2518,7 +2648,9 @@ mod tests {
         let mut f = dry_run_raw_facts();
         f.candidates[0].cells[0].verify_ns.pop(); // 99 instead of 100
                                                   // pre-proving validation fails fast on a short sample count.
-        assert!(produce(&f).unwrap_err().contains("need 100"));
+        assert!(produce(&f, &records_from_raw(&f))
+            .unwrap_err()
+            .contains("need 100"));
     }
 
     #[test]
@@ -2578,7 +2710,7 @@ mod tests {
         for p in &mut f.candidates[0].provenance {
             p.dirty_tree_flag = true;
         }
-        let pkg = produce(&f).expect("assembles");
+        let pkg = produce(&f, &records_from_raw(&f)).expect("assembles");
         assert_ne!(
             pkg.verdicts[0].1,
             CandidateVerdict::Qualified,
@@ -2590,23 +2722,78 @@ mod tests {
     fn altered_guest_identity_changes_package_and_guest_set() {
         // Tampering a built identity changes the recomputed guest-set hash and the
         // content address — a modified runner/guest/container is detectable.
-        let base = produce(&dry_run_raw_facts()).unwrap();
+        let base = produce(
+            &dry_run_raw_facts(),
+            &records_from_raw(&dry_run_raw_facts()),
+        )
+        .unwrap();
         let mut f = dry_run_raw_facts();
         f.candidates[0].guest.program_id = "1".repeat(64);
-        let tampered = produce(&f).unwrap();
+        let tampered = produce(&f, &records_from_raw(&f)).unwrap();
         assert_ne!(base.r0_guest_set_hash, tampered.r0_guest_set_hash);
         assert_ne!(base.package_id, tampered.package_id);
     }
 
     #[test]
     fn altered_container_identity_changes_package() {
-        let base = produce(&dry_run_raw_facts()).unwrap();
+        let base = produce(
+            &dry_run_raw_facts(),
+            &records_from_raw(&dry_run_raw_facts()),
+        )
+        .unwrap();
         let mut f = dry_run_raw_facts();
         f.candidates[0].container_image_digest = "2".repeat(64);
-        let tampered = produce(&f).unwrap();
+        let tampered = produce(&f, &records_from_raw(&f)).unwrap();
         assert_ne!(
             base.package_id, tampered.package_id,
             "container identity is bound into every sample"
         );
+    }
+
+    #[test]
+    fn produce_binds_records_guest_set_even_when_fragment_is_x86_only() {
+        // The real-venue failure: the SP1 MEASUREMENT fragment carries ONLY its x86_64 builder, but the
+        // guest set spans x86_64 + aarch64 (from the 3-identity records). produce() must bind the package
+        // to the RECORDS-derived (multi-arch SP1) guest set, NOT the single-arch fragment.
+        let mut raw = dry_run_raw_facts();
+        raw.candidates[0]
+            .guest
+            .builder
+            .retain(|b| b.arch == "x86_64"); // x86_64-only, as the venue emits
+        assert_eq!(raw.candidates[0].guest.builder.len(), 1);
+        // Authoritative 3-identity records (both SP1 arches), as records/all.json carries.
+        let records = records_from_raw(&dry_run_raw_facts());
+        let pkg =
+            produce(&raw, &records).expect("x86-only fragment binds records-derived guest set");
+        let gs = crate::guest_set::derive_guest_set(&records, MERGED_SPEC_HASH_HEX).unwrap();
+        assert_eq!(
+            pkg.r0_guest_set_hash, gs.r0_guest_set_hash,
+            "package must bind the records-derived (multi-arch SP1) guest set, not the x86-only fragment"
+        );
+    }
+
+    #[test]
+    fn produce_refuses_fragment_inconsistent_with_records() {
+        // A fragment can never bind a guest it did not measure: tamper the measured guest program_id while
+        // the authoritative records stay fixed → the consistency gate refuses before assembling.
+        let records = records_from_raw(&dry_run_raw_facts()); // authoritative, untampered
+        let mut raw = dry_run_raw_facts();
+        raw.candidates[0].guest.program_id = "1".repeat(64); // measured guest != identity record
+        let err = produce(&raw, &records).unwrap_err();
+        assert!(
+            err.contains("fragment program_id") && err.contains("!= Phase-1 record"),
+            "expected a fragment-vs-record consistency refusal, got: {err}"
+        );
+        // A wrong x86_64 builder digest is likewise refused.
+        let records = records_from_raw(&dry_run_raw_facts());
+        let mut raw = dry_run_raw_facts();
+        for b in &mut raw.candidates[0].guest.builder {
+            if b.arch == "x86_64" {
+                b.builder_container_digest = "7".repeat(64);
+            }
+        }
+        assert!(produce(&raw, &records)
+            .unwrap_err()
+            .contains("builder digest"));
     }
 }

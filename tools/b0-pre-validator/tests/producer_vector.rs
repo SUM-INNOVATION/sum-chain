@@ -7,7 +7,7 @@
 use b0_pre_validator::harness::verify_evidence;
 use b0_pre_validator::hashing;
 use b0_pre_validator::measurement::parse_vector;
-use b0_pre_validator::producer::{dry_run_raw_facts, produce};
+use b0_pre_validator::producer::{dry_run_raw_facts, produce, records_from_raw};
 use b0_pre_validator::schema::allowlist::GuestProgramAllowlistV1;
 use b0_pre_validator::schema::result_set::R0ResultSetV1;
 
@@ -31,7 +31,11 @@ fn hx(b: &[u8]) -> String {
 
 #[test]
 fn producer_selftest_vector_is_deterministically_regenerable() {
-    let pkg = produce(&dry_run_raw_facts()).expect("producer dry-run assembles");
+    let pkg = produce(
+        &dry_run_raw_facts(),
+        &records_from_raw(&dry_run_raw_facts()),
+    )
+    .expect("producer dry-run assembles");
     assert!(
         pkg.vector == VECTOR,
         "measure-produce --dry-run drifted from the committed self-test vector; re-run it and review"

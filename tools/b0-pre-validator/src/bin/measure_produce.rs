@@ -295,7 +295,10 @@ fn run() -> Result<String, String> {
             authenticate_manifest(&mtext, &gs)?;
         }
         let out_dir = PathBuf::from(out);
-        let pkg = produce(&raw)?;
+        // produce() now binds the package to the AUTHORITATIVE guest set derived from these Phase-1
+        // records (reconciling the multi-arch SP1 guest) and verifies every measured fragment is
+        // consistent with its matching x86_64 record. The equality below is therefore an invariant belt.
+        let pkg = produce(&raw, &records)?;
         if pkg.r0_guest_set_hash != gs.r0_guest_set_hash {
             return Err(format!(
                 "package r0_guest_set_hash {} != re-derived phase-1 guest set {}; refusing",
@@ -322,7 +325,9 @@ fn run() -> Result<String, String> {
         return Err("too many arguments".into());
     }
 
-    let pkg = produce(&raw)?;
+    // DRY-RUN / TEST_ONLY: no external records file — reconstruct the Phase-1 records the synthetic
+    // fragments correspond to (reproduces the same guest set) so produce() binds records-authoritatively.
+    let pkg = produce(&raw, &b0_pre_validator::producer::records_from_raw(&raw))?;
     write_package(&out_dir, &pkg)?;
 
     let verdicts: Vec<String> = pkg

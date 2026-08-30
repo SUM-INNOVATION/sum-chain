@@ -439,7 +439,7 @@ mod tests {
     #[test]
     fn merge_produce_verify_preserves_retention_and_continuity() {
         use crate::measurement::parse_vector;
-        use crate::producer::{produce, RawFacts};
+        use crate::producer::{produce, records_from_raw, RawFacts};
         use crate::schema::runner_attestation::RunnerAttestationV1;
 
         let merged =
@@ -447,7 +447,7 @@ mod tests {
         let raw: RawFacts = serde_json::from_value(merged).expect("merged -> RawFacts");
         // produce() enforces runner continuity + artifact retention during assembly (the merge fixture
         // uses a non-reference verify cpuset, so the qualification verdict itself is not the point).
-        let pkg = produce(&raw).expect("merged facts produce");
+        let pkg = produce(&raw, &records_from_raw(&raw)).expect("merged facts produce");
         let (_al, _mia, _report, _inv, _elig, bundles) = parse_vector(&pkg.vector).unwrap();
         for (_c, ev) in &bundles {
             assert_eq!(ev.cpuset_chains.len(), ev.provenances.len());
@@ -472,7 +472,7 @@ mod tests {
         bad["identity_records"][0]["production_binary_blake3"] = json!(h("99"));
         let merged2 = merge_fragments(SPEC, &[bad, frag("Risc0", "x86_64")]).unwrap();
         let raw2: RawFacts = serde_json::from_value(merged2).unwrap();
-        assert!(produce(&raw2)
+        assert!(produce(&raw2, &records_from_raw(&raw2))
             .unwrap_err()
             .contains("production_binary_blake3 != measurement runner_blake3"));
     }

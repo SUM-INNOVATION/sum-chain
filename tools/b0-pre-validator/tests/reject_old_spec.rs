@@ -2,7 +2,9 @@
 //! superseded `201cfcb8…` spec — no mixed old MIA / records / identities / fragments / packages. The
 //! finalized spec is now `e933e732…`; anything bound to the old spec is a stale artifact and refused.
 
-use b0_pre_validator::producer::{dry_run_raw_facts, produce, MERGED_SPEC_HASH_HEX};
+use b0_pre_validator::producer::{
+    dry_run_raw_facts, produce, records_from_raw, MERGED_SPEC_HASH_HEX,
+};
 
 const OLD_SPEC: &str = "201cfcb80e94a5a7845dc3380cde32171d40f325ae2bacde9547f3c0da3c4df3";
 
@@ -19,7 +21,7 @@ fn merged_spec_is_the_new_two_cell_hash() {
 fn produce_refuses_the_old_spec() {
     let mut raw = dry_run_raw_facts();
     raw.b0_pre_spec_hash = OLD_SPEC.to_string();
-    let e = produce(&raw).expect_err("old-spec facts must be refused");
+    let e = produce(&raw, &records_from_raw(&raw)).expect_err("old-spec facts must be refused");
     assert!(e.contains("!= merged finalized"), "{e}");
 }
 
