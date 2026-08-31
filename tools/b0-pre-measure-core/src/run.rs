@@ -157,6 +157,16 @@ pub fn run_arch_fragment(
         }
     }
 
+    // A15 SCOPED VERIFICATION ENVELOPE: when the operator provisions the two ratified, already-delegated
+    // cgroups (B0PRE_PROVING_CGROUP_PATH + B0PRE_VERIFY_CGROUP_PATH), the runner PROVES in the full proving
+    // cgroup and moves ONLY the verification-timing phase into the controlled 2-core / 4-GiB verification
+    // cgroup. Off-venue / unit tests / dry-run: `None` ⇒ strict no-op (behaviour unchanged). Establish the
+    // proving envelope up front so proving runs with the full detected hardware.
+    let envelope = crate::envelope::EnvelopeController::from_env()?;
+    if let Some(env) = &envelope {
+        env.enter_proving()?;
+    }
+
     // Build the frozen guest ONCE; its identity is read from the built artifact/SDK.
     let guest = backend.build_guest(&BuildCtx {
         arch: cfg.arch,
@@ -207,6 +217,14 @@ pub fn run_arch_fragment(
                 &cfg.guest_set_hash,
             )?;
 
+            // A15: enter the controlled 2-core / 4-GiB VERIFICATION envelope and VALIDATE it fail-closed
+            // BEFORE any sample — migration/validation time is OUTSIDE the per-sample timing below, so it
+            // never contaminates the verify-latency measurement. Any envelope disagreement refuses here,
+            // before a single sample is recorded.
+            if let Some(env) = &envelope {
+                env.enter_verification()?;
+            }
+
             // 100 verification samples; ANY failure (crypto OR statement mismatch) refuses.
             let mut verify_ns = Vec::with_capacity(VERIFY_SAMPLES);
             for s in 0..VERIFY_SAMPLES {
@@ -216,7 +234,14 @@ pub fn run_arch_fragment(
                     .map_err(|e| format!("verification sample {s} failed: {e}"))?;
                 verify_ns.push(t.elapsed().as_nanos() as u64);
             }
+            // Capture verification RSS while STILL in the verification envelope (reflects the 2-core cell).
             let verify_batch_rss_bytes = backend.capture_verify_rss()?;
+
+            // A15: return to the full proving envelope (revalidated) before the next prove. Never a sample
+            // is taken during this transition.
+            if let Some(env) = &envelope {
+                env.enter_proving()?;
+            }
 
             // Proof hash binds both the proof bytes and its public inputs.
             let mut ph = blake3::Hasher::new();

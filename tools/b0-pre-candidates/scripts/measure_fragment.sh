@@ -326,7 +326,25 @@ prov_role() {
     --tooling-root "$B0_TOOLING_ROOT" \
     || die "provenance read failed for role $1"
 }
-{ printf '['; prov_role Proving; printf ','; prov_role Verification; printf ']'; } > "$PROV_JSON"
+# A15 two-envelope model: the VERIFICATION provenance MUST be read inside the operator-provisioned,
+# already-delegated 2-core / 4-GiB verification cgroup so the controlled chain-verification reference
+# envelope is captured truthfully (cpuset==2, mem==4GiB) — the runner separately migrates its own
+# verification-timing phase into the SAME cgroup, so the declared envelope matches where verification
+# actually runs. Proving stays in the full proving envelope. This SCRIPT (operator side) does the
+# migration by writing a subshell PID to the DELEGATED cgroup.procs; it NEVER creates/configures cgroups
+# or invokes sudo. Off-venue / when unset: the Verification provenance is read in the current cgroup as before.
+prov_role_verify() {
+  if [ -n "${B0PRE_VERIFY_CGROUP_PATH:-}" ]; then
+    ( echo "$BASHPID" > "$B0PRE_VERIFY_CGROUP_PATH/cgroup.procs" \
+        || die "A15: could not migrate provenance reader into verify cgroup $B0PRE_VERIFY_CGROUP_PATH (absent or not delegated)"
+      exec "$PROV_BIN" "$ARCH" Verification --repo "$REPO_DIR" --builder-digest "$BUILDER_DIGEST" \
+        --tooling-root "$B0_TOOLING_ROOT" ) \
+      || die "provenance read failed for role Verification (inside verify cgroup)"
+  else
+    prov_role Verification
+  fi
+}
+{ printf '['; prov_role Proving; printf ','; prov_role_verify; printf ']'; } > "$PROV_JSON"
 # Splice the runner path-independence recipe facts into EACH provenance role (both roles ran on the
 # same reproducible runner binary → the same recipe). The measurement runner re-emits provenance
 # verbatim into the fragment, so this is the injection point; its ProvFacts requires runner_recipe.
@@ -556,6 +574,8 @@ env PATH="$FWDIR:$PATH" \
   B0PRE_REAL_DOCKER="$REAL_DOCKER" B0PRE_FIREWALL_ATTEST="$FW_ATTEST" \
   B0PRE_PROOF_DIR="$PROOF_DIR" B0PRE_CONTENT_STORE="${PROVER_SP1_CONTENT_STORE:-$SCRATCH/_nostore}" \
   B0PRE_PROVING_CGROUP="$PROVING_CGROUP" \
+  B0PRE_PROVING_CGROUP_PATH="${B0PRE_PROVING_CGROUP_PATH:-}" \
+  B0PRE_VERIFY_CGROUP_PATH="${B0PRE_VERIFY_CGROUP_PATH:-}" \
   "${SCRATCH_CONFINE_ENV[@]}" \
   "$MEASURE_RUNNER" "${RUNNER_ARGS[@]}" \
   || die "measurement runner failed closed (build/prove/verify/measure/bind did not complete)"

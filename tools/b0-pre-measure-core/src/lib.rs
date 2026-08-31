@@ -6,11 +6,13 @@
 
 pub mod backend;
 pub mod binding;
+pub mod envelope;
 pub mod facts;
 pub mod rss;
 pub mod run;
 pub mod scratch;
 
+pub use envelope::{validate_verification_probe, EnvelopeController, EnvelopeProbe};
 pub use scratch::{confine_scratch_to_proof_root, plan_scratch_confinement, EnvDecision};
 
 use serde::Serialize;
