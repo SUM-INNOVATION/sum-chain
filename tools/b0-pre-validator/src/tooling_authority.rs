@@ -22,16 +22,35 @@
 //! (`tools/b0-pre-candidates/measurement_tooling_pathset.txt`), precisely so Commit B's edit here does
 //! not change the digest it records. Nothing else measurement-affecting is excluded.
 
-/// The explicit unbound sentinel. Both authority values hold this until Commit B binds them.
+/// The explicit unbound sentinel.
 pub const UNBOUND: &str = "UNBOUND";
 
-/// Commit B records Commit A's exact 40-hex commit SHA here. Until then: [`UNBOUND`].
-pub const RATIFIED_MEASUREMENT_TOOLING_COMMIT: &str = "be3a5cb151b42689b31574691ec1641bb1278bbf";
+/// **B0-PRE RETIRED (2026-09-01).** The B0 measurement phase is closed — RISC0 was selected and the
+/// official evidence sealed (retirement record: `docs/b0-final/B0-PRE-RETIREMENT.md`). The live
+/// tooling authority below is deliberately set back to [`UNBOUND`] so current `main` FAILS CLOSED and
+/// can no longer produce a new official B0 measurement. This is NOT the pre-binding Commit-A state —
+/// it is a terminal retirement, and `main` is never re-ratified (no new Commit B). Historical
+/// measurements are verified ONLY from the tagged historical commit/release below.
+pub const B0_PRE_RETIRED: bool = true;
 
-/// Commit B records the canonical tooling path-set digest (64-hex BLAKE3) here. Until then:
-/// [`UNBOUND`]. The digest is [`recompute_pathset_digest`] over the sorted inventory manifest.
-pub const RATIFIED_MEASUREMENT_TOOLING_PATHSET_BLAKE3: &str =
+/// Historical (now-retired) authority values, preserved for the record ONLY. They are NOT live and
+/// MUST NOT authorize a measurement on current `main`; check out [`HISTORICAL_MEASUREMENT_HEAD`]
+/// (immutable release [`HISTORICAL_EVIDENCE_RELEASE_TAG`]) to verify historical evidence.
+pub const HISTORICAL_TOOLING_COMMIT: &str = "be3a5cb151b42689b31574691ec1641bb1278bbf";
+pub const HISTORICAL_TOOLING_PATHSET_BLAKE3: &str =
     "e17877e38b5ada83f7d84b81bd25be0c3e1cd53e6a1a94fb555140371397a856";
+pub const HISTORICAL_MEASUREMENT_HEAD: &str = "9cccaa5ee6e038fb9dcb45af44ecb3cbdc2f48c6";
+pub const HISTORICAL_EVIDENCE_RELEASE_TAG: &str = "b0-final-evidence-60ace32c";
+pub const HISTORICAL_OFFICIAL_SEAL_BLAKE3: &str =
+    "60ace32cc2775fd38c3a4b9ea81f49686121cdd25a38db7a5ca5a0f4580bd600";
+
+/// Live ratified tooling commit — **retired ⇒ [`UNBOUND`]** (see [`B0_PRE_RETIRED`]). Historical
+/// value: [`HISTORICAL_TOOLING_COMMIT`].
+pub const RATIFIED_MEASUREMENT_TOOLING_COMMIT: &str = UNBOUND;
+
+/// Live ratified tooling path-set digest — **retired ⇒ [`UNBOUND`]** (see [`B0_PRE_RETIRED`]).
+/// Historical value: [`HISTORICAL_TOOLING_PATHSET_BLAKE3`].
+pub const RATIFIED_MEASUREMENT_TOOLING_PATHSET_BLAKE3: &str = UNBOUND;
 
 /// Domain separation for the tooling path-set digest. The preimage is the canonical MANIFEST TEXT:
 /// one line per inventory path, `"<file_blake3_hex>  <relpath>\n"`, sorted ascending by `relpath`
@@ -59,6 +78,26 @@ fn is_hex40(s: &str) -> bool {
 pub fn tooling_authority_is_bound() -> bool {
     is_hex40(RATIFIED_MEASUREMENT_TOOLING_COMMIT)
         && is_hex64(RATIFIED_MEASUREMENT_TOOLING_PATHSET_BLAKE3)
+}
+
+/// `true` iff B0-PRE is retired: measurement production is permanently disabled on this tree.
+pub fn b0_pre_retired() -> bool {
+    B0_PRE_RETIRED
+}
+
+/// Fail-closed retirement gate for every measurement-production entrypoint. Returns `Err` carrying
+/// the `B0_PRE_RETIRED` marker while retired, so current `main` refuses to produce a new official B0
+/// measurement. Historical evidence is verified from the tagged historical commit/release, not here.
+pub fn assert_not_retired() -> Result<(), String> {
+    if B0_PRE_RETIRED {
+        return Err(format!(
+            "B0_PRE_RETIRED: the B0 measurement phase is closed; current main cannot produce a new \
+             official B0 measurement. Verify historical evidence from tag \
+             {HISTORICAL_EVIDENCE_RELEASE_TAG} (commit {HISTORICAL_MEASUREMENT_HEAD}); see \
+             docs/b0-final/B0-PRE-RETIREMENT.md."
+        ));
+    }
+    Ok(())
 }
 
 /// The BLAKE3 digest of a canonical path-set MANIFEST TEXT (see [`PATHSET_DIGEST_DOMAIN`]). `manifest`
@@ -193,5 +232,32 @@ mod tests {
         assert!(!is_hex40(&"A".repeat(40))); // uppercase is non-canonical
         assert!(is_hex64(&"0".repeat(64)));
         assert!(!is_hex64(&"0".repeat(63)));
+    }
+
+    // #196 RETIREMENT: current `main` is retired — the live authority is UNBOUND, the explicit marker
+    // is set, and every measurement-production gate fails closed. Historical values are preserved
+    // (well-formed hex) for the record but are NOT live.
+    #[test]
+    fn b0_pre_is_retired_and_production_measurement_refuses() {
+        assert!(b0_pre_retired());
+        assert_eq!(RATIFIED_MEASUREMENT_TOOLING_COMMIT, UNBOUND);
+        assert_eq!(RATIFIED_MEASUREMENT_TOOLING_PATHSET_BLAKE3, UNBOUND);
+        assert!(!tooling_authority_is_bound());
+        let e = assert_not_retired().expect_err("retired tree must refuse production measurement");
+        assert!(
+            e.contains("B0_PRE_RETIRED"),
+            "refusal must carry the marker: {e}"
+        );
+        // the Rust authority gate also fails closed for any observed value while retired.
+        assert!(verify_tooling_authority(&"a".repeat(40), &"b".repeat(64)).is_err());
+        // historical values preserved for the record (well-formed, non-live).
+        assert!(is_hex40(HISTORICAL_TOOLING_COMMIT));
+        assert!(is_hex64(HISTORICAL_TOOLING_PATHSET_BLAKE3));
+        assert!(is_hex40(HISTORICAL_MEASUREMENT_HEAD));
+        assert!(is_hex64(HISTORICAL_OFFICIAL_SEAL_BLAKE3));
+        assert_eq!(
+            HISTORICAL_EVIDENCE_RELEASE_TAG,
+            "b0-final-evidence-60ace32c"
+        );
     }
 }
