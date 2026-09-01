@@ -1,0 +1,385 @@
+{
+  "authority": {
+    "b0_pre_spec_hash": "e933e7325c2639a48d8e25f20746d0f8abc822dee9fcfa87c2e6cdec226cf2a2",
+    "canonical_sp1_guest": "d72d98b5d453c28ee270506af92ee6adc41ffde608cea9a5798a8ebdf61103b2",
+    "eligibility": "2a2804b0b6057cdae47b0aaed733f1b94ef7d2894888a73bc3cbcc3949363fe1",
+    "fragment_risc0_x86_64_blake3": "b6090b05af95cbfca6cbbfeeba2513d5e6f855da5d2da7070a1e3f6845b18900",
+    "fragment_sp1_x86_64_blake3": "113958582eb54355e976c0bdfed3a6c70067822ad3b3ae2d868dd683fd573a65",
+    "measured_source_commit": "507281e21e95a6a98e3480e25e12d1baab586e07",
+    "measurement_head": "9cccaa5ee6e038fb9dcb45af44ecb3cbdc2f48c6",
+    "mia": "fe90a56c52857478ffb245531aaf623ccf71727918b232458faa39bf290b6ad8",
+    "official_seal_blake3": "60ace32cc2775fd38c3a4b9ea81f49686121cdd25a38db7a5ca5a0f4580bd600",
+    "package_id_blake3": "80ab5ecfbe7a24d96d02dad78db2e4aee712ea0b29a071c19893b0d83dd0f11b",
+    "r0_guest_set_hash": "11d059c7dbc37b3d80f0a0c1fcaee96ad5e0ba1916ba08bdb0f37e1a7d76401a",
+    "tooling_authority_commit": "be3a5cb151b42689b31574691ec1641bb1278bbf",
+    "tooling_pathset_blake3": "e17877e38b5ada83f7d84b81bd25be0c3e1cd53e6a1a94fb555140371397a856"
+  },
+  "closure_statement": "Closing B0 selects RISC0 and freezes ONLY the derivable performance subset above. It does NOT authorize placeholder economic, policy, or safety values, and it does NOT lift any downstream implementation-prohibition gate. Excluded constants remain owned and gated under their owner issues.",
+  "durable_evidence": {
+    "assets": [
+      {
+        "blake3": "a904316e65a2e7286ed3911d0f5d692e64e445477040cb0e7381249c2c7ec07f",
+        "id": "RA_kwDOQp_rU84gL9G7",
+        "name": "b0-final-official-evidence.tar",
+        "sha256": "fe18544a9b9ded74e58a267bd2f6d1577b7f677567d620f69aa94e012c04a8b7",
+        "size": 3123200
+      },
+      {
+        "blake3": "e01a9f3f22f9c3322179ae08164f5bdcf0f85270109c577f16b2d69303a12570",
+        "id": "RA_kwDOQp_rU84gL9G5",
+        "name": "b0-final-official-evidence-manifest.v1.json",
+        "sha256": "bf159c5cf5c487ba2103b2a00ebe71a9f1671c28e5595463c1ee0fe0fc09cd03",
+        "size": 7795
+      },
+      {
+        "blake3": "7ff11b18ad55082d39f968e8c6120ea17c9bcae53b3812e0cd89a357ee275ab8",
+        "id": "RA_kwDOQp_rU84gL9G6",
+        "name": "CHECKSUMS.txt",
+        "sha256": "d162e1090a31d3ad65ed9db062792684d393abedfba3549c1aa6855fe1eca1b3",
+        "size": 5010
+      }
+    ],
+    "committed_checksums": "docs/b0-final/CHECKSUMS.txt",
+    "committed_manifest": "docs/b0-final/b0-final-official-evidence-manifest.v1.json",
+    "member_count": 18,
+    "release_id": 380755330,
+    "release_tag": "b0-final-evidence-60ace32c",
+    "release_tag_commit": "9cccaa5ee6e038fb9dcb45af44ecb3cbdc2f48c6",
+    "release_url": "https://github.com/SUM-INNOVATION/sum-chain/releases/tag/b0-final-evidence-60ace32c"
+  },
+  "excluded_constants": [
+    {
+      "group": "economic_schedules_and_reimbursements",
+      "names": [
+        "C_layer",
+        "C_tok",
+        "C_sel",
+        "C_emit",
+        "B_offer",
+        "B_commit",
+        "B_check",
+        "accept_reimb",
+        "commit_verify_reimb",
+        "publish_reimb",
+        "observe_reimb",
+        "check_reimb",
+        "settle_reimb",
+        "reassign_reimb"
+      ],
+      "owner_issues": [
+        130,
+        132
+      ],
+      "reason": "absent from the preregistered measurement output; require economic modeling"
+    },
+    {
+      "group": "suspension_invite_reprovision_retention_policy_limits",
+      "names": [
+        "K_susp",
+        "W_susp",
+        "S_susp",
+        "N_invite_max",
+        "max_reprovisionable_units",
+        "max_attempts_per_unit",
+        "max_reassignments_per_file",
+        "max_retention_files_per_job",
+        "max_retention_updates_per_block",
+        "max_reverse_index_entries",
+        "max_work_units",
+        "max_contributors",
+        "max_generations"
+      ],
+      "owner_issues": [
+        130,
+        133,
+        129
+      ],
+      "reason": "policy limits; injected, never-baked B0 params (crates/state/src/compute_pool.rs); not a measurement output"
+    },
+    {
+      "group": "availability_ack_finality_durations",
+      "names": [
+        "D_avail",
+        "D_ack",
+        "D_final",
+        "output_availability_blocks"
+      ],
+      "owner_issues": [
+        133,
+        129
+      ],
+      "reason": "durations; not derivable from proving/verify performance"
+    },
+    {
+      "group": "beacon_dkg_windows_caps_message_limits",
+      "names": [
+        "W_deal",
+        "W_complaint",
+        "W_finalize",
+        "L_b",
+        "beacon_tx_caps",
+        "max_message_sizes",
+        "verification_budgets",
+        "retention_update_budgets"
+      ],
+      "owner_issues": [
+        127
+      ],
+      "reason": "sized from MEASURED PROPAGATION + honest-proposer count; propagation was never measured by B0; beacon derivation owned by BR1"
+    },
+    {
+      "group": "topology_crypto_security_consensus_safety",
+      "names": [
+        "topology_parameters",
+        "cryptographic_security_parameters",
+        "consensus_safety_parameters"
+      ],
+      "owner_issues": [
+        127,
+        126
+      ],
+      "reason": "security/topology parameters; performance may never weaken a security floor"
+    },
+    {
+      "group": "wire_and_onchain_verification_limits",
+      "names": [
+        "public_input_limit",
+        "proof_byte_limit",
+        "vk_limit"
+      ],
+      "owner_issues": [
+        125,
+        131
+      ],
+      "reason": "the frozen protocol makes proof bytes reported-only and verifier-material a per-candidate check with NO universal limit"
+    }
+  ],
+  "identities": {
+    "risc0_x86_64": {
+      "guest_image_hash": "9945fcb45c2a88b991a0a78136d84a9f81c003a66d7003243be03605083382b3",
+      "program_id": "f09c454a2eb7d5e7905196c17815efa07380c7ead00477433ed623519550b6cb"
+    },
+    "sp1_aarch64_identity_only": {
+      "program_id": "001c9c55aa73323951c6d6a83f06a318305876a044ca1a1a9fe1d556e9ebfad6"
+    },
+    "sp1_x86_64": {
+      "program_id": "001c9c55aa73323951c6d6a83f06a318305876a044ca1a1a9fe1d556e9ebfad6",
+      "toolchain_identity": "4367170fa04c2ab4e00ae4371c0a61c07581a2d6ee35309e1f84f3410d675f5c"
+    }
+  },
+  "included_constants": [
+    {
+      "name": "proof_system_id",
+      "note": "selected candidate discriminant 2",
+      "source": "selection:selected",
+      "unit": "candidate",
+      "value": "Risc0"
+    },
+    {
+      "name": "verify_p99_gate_ns",
+      "source": "protocol:qualification_gates.verify_p99_gate_ns",
+      "unit": "ns",
+      "value": 75000000
+    },
+    {
+      "name": "aggregate_verify_budget_ns_per_block",
+      "source": "protocol:qualification_gates.aggregate_verify_budget_ns_per_block",
+      "unit": "ns/block",
+      "value": 300000000
+    },
+    {
+      "name": "M_max_accepted_proofs_per_block",
+      "source": "protocol:qualification_gates.max_accepted_proofs_per_block",
+      "unit": "proofs/block",
+      "value": 4
+    },
+    {
+      "name": "reference_cpuset_cores",
+      "source": "protocol:qualification_gates.reference_cpuset_cores",
+      "unit": "cores",
+      "value": 2
+    },
+    {
+      "name": "reference_memory_bytes",
+      "source": "protocol:qualification_gates.reference_memory_bytes",
+      "unit": "bytes",
+      "value": 4294967296
+    },
+    {
+      "name": "V_verify_cost_selected_p99_ns",
+      "note": "RISC0 (selected) verify p99 = 3.2 ms; nearest-rank over host_verify_ns (host_setup_ns excluded)",
+      "source": "seal:risc0_verify_p99",
+      "unit": "ns",
+      "value": 3200000
+    },
+    {
+      "name": "max_output_tokens",
+      "source": "protocol:bounds.official.max_output_tokens",
+      "unit": "tokens",
+      "value": 8
+    },
+    {
+      "name": "max_cycles",
+      "note": "reported bound; official statements set 0",
+      "source": "protocol:bounds.official.max_cycles",
+      "unit": "cycles",
+      "value": 0
+    },
+    {
+      "name": "state_object_max_bytes",
+      "source": "protocol:bounds.official.max_state_bytes",
+      "unit": "bytes",
+      "value": 2761
+    },
+    {
+      "name": "max_manifest_slots",
+      "source": "protocol:bounds.official.max_manifest_slots",
+      "unit": "slots",
+      "value": 3
+    },
+    {
+      "name": "max_d_model",
+      "source": "protocol:bounds.official.max_d_model",
+      "unit": "dims",
+      "value": 8
+    },
+    {
+      "name": "max_seq_len",
+      "source": "protocol:bounds.official.max_seq_len",
+      "unit": "positions",
+      "value": 8
+    },
+    {
+      "name": "output_manifest_max_slots",
+      "source": "protocol:bounds.decoder_maxima.output_manifest_max_slots",
+      "unit": "slots",
+      "value": 256
+    },
+    {
+      "name": "input_manifest_max_slots",
+      "source": "protocol:bounds.decoder_maxima.input_manifest_max_slots",
+      "unit": "slots",
+      "value": 8
+    },
+    {
+      "name": "fixed_point_scale_log2",
+      "source": "protocol:versions.fixed_point_scale_log2",
+      "unit": "bits",
+      "value": 8
+    },
+    {
+      "name": "S_fixed_point_scale",
+      "source": "derived:pow2(protocol:versions.fixed_point_scale_log2)",
+      "unit": "scale",
+      "value": 256
+    },
+    {
+      "name": "schema_version",
+      "source": "protocol:versions.schema_version",
+      "unit": "version",
+      "value": 1
+    },
+    {
+      "name": "algorithm_version",
+      "source": "protocol:versions.algorithm_version",
+      "unit": "version",
+      "value": 1
+    },
+    {
+      "name": "softmax_variant_id",
+      "source": "protocol:versions.softmax_variant_id",
+      "unit": "id",
+      "value": 1
+    },
+    {
+      "name": "token_input_scheme_id",
+      "source": "protocol:versions.token_input_scheme_id",
+      "unit": "id",
+      "value": 1
+    },
+    {
+      "name": "fixed_point_version",
+      "source": "protocol:versions.fixed_point_version",
+      "unit": "version",
+      "value": 1
+    },
+    {
+      "name": "workload_arch_id",
+      "source": "protocol:versions.workload_arch_id",
+      "unit": "id",
+      "value": 1378877441
+    },
+    {
+      "name": "weight_schedule_version",
+      "note": "VERSION only; the C_layer/C_tok/C_sel/C_emit cost weights are EXCLUDED (economic)",
+      "source": "protocol:versions.weight_schedule_version",
+      "unit": "version",
+      "value": 0
+    },
+    {
+      "name": "output_manifest_schema_version",
+      "source": "protocol:versions.output_manifest_schema_version",
+      "unit": "version",
+      "value": 1
+    },
+    {
+      "name": "model_id",
+      "source": "protocol:official_statements.model_id_hex",
+      "unit": "blake3",
+      "value": "d3f7c07b230d2747b5e9365bec124f17f0948d03a55389ce0b6574101b8d4022"
+    }
+  ],
+  "kind": "b0-final-closure-record/v1",
+  "official": true,
+  "scope_exclusion": {
+    "consensus_safety": "none_selected",
+    "cryptographic_security": "none_selected",
+    "dkg": "none_selected",
+    "implementation_prohibition_gates": "preserved (downstream constants remain gated under their owner issues)",
+    "security_floors": "preserved",
+    "topology": "none_selected"
+  },
+  "selection": {
+    "bilateral_agreement": {
+      "agree": true,
+      "independent_guest_set": "11d059c7dbc37b3d80f0a0c1fcaee96ad5e0ba1916ba08bdb0f37e1a7d76401a",
+      "validator_guest_set": "11d059c7dbc37b3d80f0a0c1fcaee96ad5e0ba1916ba08bdb0f37e1a7d76401a"
+    },
+    "candidates": [
+      {
+        "candidate": "Sp1",
+        "discriminant": 1,
+        "evidence_retained_valid": true,
+        "failed_gates": [
+          3,
+          4
+        ],
+        "measured_verify_p99_ns": 212100000,
+        "verdict": "disqualified"
+      },
+      {
+        "candidate": "Risc0",
+        "discriminant": 2,
+        "evidence_retained_valid": true,
+        "failed_gates": [],
+        "measured_verify_p99_ns": 3200000,
+        "verdict": "qualified"
+      }
+    ],
+    "envelopes": {
+      "proving_cpuset_cores": 16,
+      "verify_cpuset_cores": 2,
+      "verify_inherited": false,
+      "verify_memory_bytes": 4294967296
+    },
+    "hard_fail": false,
+    "negatives": {
+      "records_negatives_refused": 10,
+      "vector_allowlist_tamper": "refused",
+      "vector_vec8_downgrade": "refused"
+    },
+    "selected": "Risc0",
+    "thresholds_unchanged_post_observation": true,
+    "unique_qualifier": "Risc0"
+  }
+}
