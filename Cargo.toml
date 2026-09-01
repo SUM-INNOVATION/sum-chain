@@ -21,6 +21,7 @@ members = [
     "crates/sumc-sdk-macros",
     "crates/bridge",
     "crates/integration-tests",
+    "crates/b0-final-closure-audit",
     "scripts",
 ]
 # B0-PRE (#123) host-side reproducibility tooling lives outside the workspace so it

@@ -1,0 +1,12 @@
+[package]
+name = "b0-final-closure-audit"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Deterministic, non-authoritative audit of the committed B0-FINAL closure record: recompute the frozen constants from the committed protocol, recompute the official seal from the committed evidence manifest, prove RISC0 is the unique qualifier, and refuse any changed seal/candidate/threshold/constant/evidence-digest/prohibited parameter. Reads only committed artifacts; runs no proofs and alters no ratified measurement authority."
+
+[dependencies]
+serde_json.workspace = true
+blake3.workspace = true
