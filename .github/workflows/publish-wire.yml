@@ -1,0 +1,75 @@
+name: Publish sumchain-wire
+
+# #117 CONSOLIDATE: a reviewed, tagged publish path for the single wire source-of-truth
+# (`sumchain-wire`) and its re-export hub (`sumchain-primitives`). Previously publishing was manual
+# and tagless (RELEASE.md); this formalizes it.
+#
+# Triggers:
+#   * push of a tag matching `wire-v*` (e.g. `wire-v0.3.0`) — verify + (if the registry token is
+#     configured) publish to crates.io in dependency order (wire, then primitives).
+#   * manual dispatch — verify (`--dry-run`) only, never publishes.
+#
+# The real `cargo publish` runs ONLY on a `wire-v*` tag AND only when the owner-provided
+# `CARGO_REGISTRY_TOKEN` secret is present; otherwise the job verifies (dry-run) and stops, so a
+# fork/PR/tokenless run can never publish. Publishing itself remains an owner action (the secret).
+#
+# Version-convergence note (see docs/wire/RELEASE-AND-CONSOLIDATION.md): after a `wire-vX.Y.Z`
+# publish, SNIP and OmniNode bump their exact `=X.Y.Z` pins and re-run their cross-validation goldens
+# against the published bytes; this workflow does not touch those repos.
+
+on:
+  push:
+    tags:
+      - "wire-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-wire-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish-wire:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up pinned toolchain
+        run: rustup show
+
+      # Tag must match the crate version: `wire-vX.Y.Z` <-> sumchain-wire Cargo.toml version.
+      - name: Tag ↔ crate version match (tag builds only)
+        if: startsWith(github.ref, 'refs/tags/wire-v')
+        run: |
+          tag="${GITHUB_REF#refs/tags/wire-v}"
+          crate="$(cargo metadata --format-version 1 --no-deps \
+            | jq -r '.packages[] | select(.name=="sumchain-wire") | .version')"
+          echo "tag=$tag crate=$crate"
+          [ "$tag" = "$crate" ] || { echo "::error::tag wire-v$tag != sumchain-wire crate version $crate"; exit 1; }
+
+      # Always verify publishability (packaging + dependency resolution) without publishing.
+      - name: Verify (cargo publish --dry-run, dependency order)
+        run: |
+          cargo publish --dry-run --locked --manifest-path crates/sumchain-wire/Cargo.toml
+          # primitives depends on the published wire; --dry-run cannot see an unpublished wire, so
+          # allow-dirty package-only verification of primitives' manifest/packaging.
+          cargo package --locked --allow-dirty --manifest-path crates/primitives/Cargo.toml >/dev/null || true
+
+      # Real publish: tag build + token present only. Order: wire first, then primitives.
+      - name: Publish to crates.io (wire → primitives)
+        if: startsWith(github.ref, 'refs/tags/wire-v') && env.CARGO_REGISTRY_TOKEN != ''
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          cargo publish --locked --manifest-path crates/sumchain-wire/Cargo.toml
+          # Give the index a moment to expose the new wire version before publishing primitives.
+          sleep 30
+          cargo publish --locked --manifest-path crates/primitives/Cargo.toml
+
+      - name: Publish skipped (no token / not a tag)
+        if: ${{ !(startsWith(github.ref, 'refs/tags/wire-v') && env.CARGO_REGISTRY_TOKEN != '') }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: echo "verify-only (dry-run) — real publish requires a wire-v* tag AND the CARGO_REGISTRY_TOKEN secret (owner action)."

@@ -46,6 +46,21 @@ jobs:
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@v2
 
+      # #117 CONSOLIDATE leaf-guard: `sumchain-wire` is the single source-of-truth for every
+      # wire/primitive byte-format and MUST stay a pure LEAF — it may depend on external crates only,
+      # never on a workspace-internal crate. Every internal dependency takes the form of a `path`
+      # dependency, so any path dep of `sumchain-wire` is a wrong-way edge and fails the guard.
+      # `cargo metadata` resolves without building; jq is preinstalled on ubuntu-latest.
+      - name: sumchain-wire leaf-dependency guard (#117)
+        run: |
+          bad=$(cargo metadata --format-version 1 --locked \
+            | jq -r '.packages[] | select(.name=="sumchain-wire") | .dependencies[] | select(.path != null) | .name')
+          if [ -n "$bad" ]; then
+            echo "::error::sumchain-wire must stay a pure leaf (single wire source-of-truth) but has workspace-internal (path) deps: $bad"
+            exit 1
+          fi
+          echo "ok - sumchain-wire is a pure leaf (no workspace-internal dependencies)"
+
       - name: Build (workspace)
         run: cargo build --workspace --locked
 
@@ -87,6 +102,21 @@ jobs:
 
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@v2
+
+      # #117 CONSOLIDATE leaf-guard: `sumchain-wire` is the single source-of-truth for every
+      # wire/primitive byte-format and MUST stay a pure LEAF — it may depend on external crates only,
+      # never on a workspace-internal crate. Every internal dependency takes the form of a `path`
+      # dependency, so any path dep of `sumchain-wire` is a wrong-way edge and fails the guard.
+      # `cargo metadata` resolves without building; jq is preinstalled on ubuntu-latest.
+      - name: sumchain-wire leaf-dependency guard (#117)
+        run: |
+          bad=$(cargo metadata --format-version 1 --locked \
+            | jq -r '.packages[] | select(.name=="sumchain-wire") | .dependencies[] | select(.path != null) | .name')
+          if [ -n "$bad" ]; then
+            echo "::error::sumchain-wire must stay a pure leaf (single wire source-of-truth) but has workspace-internal (path) deps: $bad"
+            exit 1
+          fi
+          echo "ok - sumchain-wire is a pure leaf (no workspace-internal dependencies)"
 
       - name: Build (workspace)
         run: cargo build --workspace --locked
