@@ -57,6 +57,17 @@ require_two_roots() {
   m_abs="$(_tr_realdir "$measured" measured)"
   t_abs="$(_tr_realdir "$tooling" tooling)"
 
+  # B0-PRE RETIREMENT GATE (#196). The B0 measurement phase is closed: production measurement is
+  # permanently disabled on a retired tooling tree. Refuse fail-closed BEFORE any authority work, so
+  # every shell producer that funnels through require_two_roots (measure_fragment, derive_guest_set,
+  # produce_canonical_sp1_guest, produce_measurement_input_authority) cannot produce a new official B0
+  # measurement. Historical evidence is verified from the tagged historical commit/release (see
+  # docs/b0-final/B0-PRE-RETIREMENT.md), never from current main.
+  if grep -qE '^pub const B0_PRE_RETIRED: bool = true;' \
+       "$t_abs/tools/b0-pre-validator/src/tooling_authority.rs" 2>/dev/null; then
+    _tr_die "B0_PRE_RETIRED: the B0 measurement phase is closed; this tooling tree cannot produce a new official B0 measurement (verify historical evidence from tag b0-final-evidence-60ace32c; see docs/b0-final/B0-PRE-RETIREMENT.md)"
+  fi
+
   # Distinct, non-nested (the exact defect the two-root model removes: one checkout serving both).
   [ "$m_abs" = "$t_abs" ] && _tr_die "measured and tooling roots are the SAME path ($m_abs); two clean roots are mandatory"
   case "$t_abs/" in "$m_abs"/*) _tr_die "tooling root is nested under measured root" ;; esac

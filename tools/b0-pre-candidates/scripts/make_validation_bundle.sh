@@ -86,10 +86,16 @@ extract_ratified_const() {
 # TOOLING_COMMIT, PATHSET_DIGEST, PATH_COUNT and writes the canonical preimage to $1.
 derive_identity() {
   local inv_out="$1"
+  # B0-PRE RETIREMENT GATE (#196): generating a validation bundle is a production-measurement action,
+  # disabled on a retired tooling tree. Fail-closed before any work.
+  if grep -qE '^pub const B0_PRE_RETIRED: bool = true;' \
+       "$ROOT/tools/b0-pre-validator/src/tooling_authority.rs" 2>/dev/null; then
+    die "B0_PRE_RETIRED: measurement tooling retired; cannot generate a validation bundle (see docs/b0-final/B0-PRE-RETIREMENT.md; verify historical evidence from tag b0-final-evidence-60ace32c)"
+  fi
   git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "not a git work tree: $ROOT"
   [ -z "$(git -C "$ROOT" status --porcelain)" ] \
     || die "refusing: working tree is dirty; the embedded tooling identity must derive from a clean checkout"
-  local head computed ratc ratd changed
+  local head computed ratc ratd
   head="$(git -C "$ROOT" rev-parse HEAD)"
   # Canonical path-set digest + preimage over the clean tooling root (fail-closed; no `|| true`).
   computed="$("$HERE/tooling_pathset.sh" --root "$ROOT" --require-clean --out "$inv_out")" \
@@ -110,9 +116,10 @@ derive_identity() {
       || die "recomputed included-file digest $computed != ratified $ratd"
     git -C "$ROOT" rev-parse -q --verify "${ratc}^{commit}" >/dev/null \
       || die "ratified tooling commit $ratc is not a commit in this repo"
-    changed="$(git -C "$ROOT" diff --name-only "$ratc" HEAD)"
-    [ "$changed" = "$EXCLUDE" ] \
-      || die "post-B tree differs from Commit A beyond the sole excluded file: [$(printf '%s' "$changed" | tr '\n' ' ')]"
+    # WHOLE-TREE B15 GUARD REMOVED (#196): the `git diff CommitA..HEAD == tooling_authority.rs`
+    # freeze check is retired with the measurement phase (and is unreachable once the live authority
+    # is UNBOUND, which takes the Commit-A branch above). Historical verification uses the tagged
+    # historical commit/release; see docs/b0-final/B0-PRE-RETIREMENT.md.
     TOOLING_COMMIT="$ratc"
     PATHSET_DIGEST="$ratd"
   fi

@@ -1,12 +1,17 @@
 name: B0-PRE tools
 
-# Clean-checkout CI for the workspace-excluded B0-PRE tool crates
-# (tools/b0-pre-vmat, tools/b0-pre-validator, tools/b0-pre-independent) and the
-# committed docs/b0-pre normative artifact + fixtures. The main "Rust CI" workflow
-# builds the sum-chain workspace, which excludes tools/, so these crates need
-# their own gate. This workflow deliberately does NOT download SP1 / RISC Zero
-# toolchains or build candidate containers; final b0_pre_spec_hash finalization
-# stays blocked until candidate-produced fields exist.
+# B0-PRE RETIRED (#196). The B0 measurement phase is closed — RISC0 was selected and the official
+# evidence sealed (release b0-final-evidence-60ace32c / commit 9cccaa5e; see docs/b0-final/). The
+# PRODUCTION MEASUREMENT WORKFLOW is disabled: current `main` cannot produce a new official B0
+# measurement (the live tooling authority is UNBOUND and every producer fails closed). This workflow
+# no longer runs the venue-script selftest, the real-container seal->import E2E, or the heavyweight
+# provisioning / real-backend-compile steps. It now only:
+#   * asserts the retirement marker + that production measurement refuses fail-closed, and
+#   * keeps the FROZEN tool crates (vmat / validator / independent / measure-core / host-provenance)
+#     COMPILING with their off-venue unit suites green.
+# Historical evidence is verified from the tagged historical commit/release, never current `main`
+# (docs/b0-final/B0-PRE-RETIREMENT.md). Full retire/retarget of the historical whole-tree B15 guard
+# for any future b0-pre tooling work remains tracked in #196.
 
 on:
   pull_request:
@@ -15,11 +20,10 @@ on:
       - "tools/b0-pre-validator/**"
       - "tools/b0-pre-independent/**"
       - "tools/b0-pre-measure-core/**"
-      - "tools/b0-pre-measure-sp1/**"
-      - "tools/b0-pre-measure-risc0/**"
       - "tools/b0-pre-host-provenance/**"
       - "tools/b0-pre-candidates/**"
       - "docs/b0-pre/**"
+      - "docs/b0-final/**"
       - ".github/workflows/b0-pre.yml"
       - "rust-toolchain.toml"
   push:
@@ -29,11 +33,10 @@ on:
       - "tools/b0-pre-validator/**"
       - "tools/b0-pre-independent/**"
       - "tools/b0-pre-measure-core/**"
-      - "tools/b0-pre-measure-sp1/**"
-      - "tools/b0-pre-measure-risc0/**"
       - "tools/b0-pre-host-provenance/**"
       - "tools/b0-pre-candidates/**"
       - "docs/b0-pre/**"
+      - "docs/b0-final/**"
       - ".github/workflows/b0-pre.yml"
       - "rust-toolchain.toml"
   workflow_dispatch:
@@ -50,8 +53,6 @@ env:
   VAL: tools/b0-pre-validator
   IND: tools/b0-pre-independent
   MEAS_CORE: tools/b0-pre-measure-core
-  MEAS_SP1: tools/b0-pre-measure-sp1
-  MEAS_RISC0: tools/b0-pre-measure-risc0
   PROV: tools/b0-pre-host-provenance
 
 jobs:
@@ -59,387 +60,57 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          # Check out the PR's own HEAD commit (not the synthetic shallow merge ref) with FULL history
-          # so the validation-bundle selftest in run.sh can resolve Commit A — the parent of the
-          # Commit-B authority binding — for the post-B identity derivation: `git rev-parse Commit-A`
-          # and `git diff Commit-A..HEAD`, which must equal the sole excluded tooling_authority.rs.
-          # The default depth-1 merge ref lacks Commit A and makes HEAD a merge commit, both of which
-          # break that derivation. On push (post-merge) github.sha is the head; the PR event uses head.sha.
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          fetch-depth: 0
 
-      # rustup reads rust-toolchain.toml (channel 1.85.0) — the single source of
-      # truth for the validator-tool compatibility floor. The distinct candidate
-      # container toolchain (Rust 1.90.0) is NOT installed here.
+      # rustup reads rust-toolchain.toml (channel 1.85.0) — the validator-tool compatibility floor.
       - name: Set up pinned toolchain (validator-tool floor)
         run: |
           rustup show
           rustup component add clippy rustfmt
 
-      - name: Show versions (MSRV evidence)
+      # --- B0-PRE RETIREMENT contract (#196) ---------------------------------
+      # Assert the retirement marker + UNBOUND live authority, and prove the shared production gate
+      # `require_two_roots` refuses fail-closed with B0_PRE_RETIRED. Marker-asserted.
+      - name: B0-PRE retirement contract (production measurement disabled; fail-closed)
         run: |
-          rustc --version
-          cargo --version
-          rustc --version | grep -q '1.85' || { echo "expected Rust 1.85 floor"; exit 1; }
+          set +e
+          bash tools/b0-pre-candidates/scripts/tests/b0_pre_retired.test.sh 2>&1 | tee /tmp/retired.out
+          rc=${PIPESTATUS[0]}
+          [ "$rc" -eq 0 ] || { echo "::error::B0-PRE retirement contract failed ($rc)"; exit 1; }
+          grep -q '^B0_PRE_RETIRED_TEST_PASS$' /tmp/retired.out \
+            || { echo "::error::retirement marker B0_PRE_RETIRED_TEST_PASS absent"; exit 1; }
 
-      # b3sum (BLAKE3 CLI) is required by tooling_pathset.sh and the validation-bundle content-binding
-      # selftest in run.sh below. ubuntu-latest ships it in apt (universe); cargo is the fallback.
-      # BLAKE3 output is fixed by the algorithm, so an unpinned b3sum cannot change any tooling/bundle
-      # digest — it only needs to be PRESENT for the shell path-set/bundle producers.
-      - name: Install b3sum (BLAKE3 CLI)
-        run: |
-          if command -v b3sum >/dev/null 2>&1; then b3sum --version; exit 0; fi
-          if sudo apt-get update -qq && sudo apt-get install -y b3sum; then :; else cargo install b3sum --locked; fi
-          command -v b3sum >/dev/null 2>&1 || { echo "::error::b3sum install failed"; exit 1; }
-          b3sum --version
-
-      - name: Cache cargo + target
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            ${{ env.VMAT }}
-            ${{ env.VAL }}
-            ${{ env.IND }}
-
-      # --- Isolation / dependency boundaries ---------------------------------
+      # --- Isolation / dependency boundary (unchanged by retirement) ---------
       - name: Workspace exclusion + no production dependency
         run: bash "$VAL/scripts/check_no_prod_dep.sh"
 
-      # --- Venue-script guards: disk-free portability (Blocker 4) + pin-schema
-      #     reconciliation (Blocker 1a). Runs bash -n, shellcheck -S error, and the
-      #     deterministic unit tests on native GNU/Linux (ubuntu-latest) — this is the
-      #     native-GNU verification for the df -Pk portability fix. No toolchain/venue.
-      - name: B0-PRE venue-script tests (bash -n, shellcheck, disk_free_gib, pin schema)
+      # --- Frozen tool crates still COMPILE + unit suites green (off-venue) ---
+      # No venue, no proving, no toolchain download. These prove the retired tooling remains buildable
+      # and that the retirement changes did not break the decoders/validators.
+      - name: b0-pre-vmat (test / clippy / fmt / locked)
         run: |
-          set +e
-          bash tools/b0-pre-candidates/scripts/tests/run.sh 2>&1 | tee /tmp/run.out
-          rc=${PIPESTATUS[0]}
-          [ "$rc" -eq 0 ] || { echo "::error::B0-PRE venue-script suite exited $rc"; exit 1; }
-          # These no-docker CONTRACT tests have NO opt-in gate (they cannot legitimately skip on
-          # ubuntu-latest, which ships python3/tar/coreutils), so assert each terminal marker is
-          # present: a silent skip (e.g. a missing interpreter) would otherwise pass rc=0. Covers
-          # the declarative extraction, the prover-archive pin block, and the provisioning recipe.
-          for m in VERIFIED_EXTRACTION_PASS PIN_PROVER_ARCHIVES_PASS PROVISIONING_RECIPE_PASS RUNNER_PATH_INDEPENDENCE_PASS MEASURE_FRAGMENT_PREFLIGHT_SMOKE_PASS EMIT_IDENTITY_REDERIVATION_TEST_PASS SP1_GUEST_DEP_SEED_TEST_PASS; do
-            grep -q "^$m\$" /tmp/run.out \
-              || { echo "::error::required no-docker contract marker $m absent (test skipped or did not run)"; exit 1; }
-          done
-
-      # --- Lightweight REAL-CONTAINER v2 seal->import E2E (REQUIRED execution; bounded) --
-      # ONE continuous real-container flow driving the ACTUAL production seam functions (the
-      # shared lib.sh cores + the real venue-verify subcommands) with lightweight fixtures:
-      # Stage-1 lock -> require_stage1_lock -> read-only Stage-2 `cargo metadata --locked`
-      # (D1) -> causal Stage-5 (build the runner, hash the EXACT binary, exec that file) ->
-      # vv stage5-generate (schema-v2) -> inject into an assembled bundle -> vv seal-bundle
-      # -> vv import-bundle (import VERIFIED) -> post-seal mutations all fail closed. It
-      # prints REAL_CONTAINER_V2_SEAL_IMPORT_PASS only after import verification.
-      #
-      # REQUIRED-execution mode (B0PRE_E2E_REQUIRED=1): the test treats unavailable Docker /
-      # a skipped run as a FAILURE, and this step ALSO asserts the terminal marker is
-      # present — so a SKIP, a missing marker, or a `timeout` all fail the required check
-      # (never an intermittent network-dependent pass). ubuntu-latest ships a native Docker
-      # daemon. The genuine-proof SP1/RISC Zero candidate smoke is native-x86 ONLY
-      # (docs/b0-pre/venue/S1-V2-X86-SMOKE.md) and is NOT run in CI.
-      - name: Real-container v2 seal->import E2E (required; bounded 15m; marker-asserted)
-        env:
-          B0PRE_E2E_REQUIRED: "1"
-        run: |
-          set +e
-          timeout 900 bash tools/b0-pre-candidates/scripts/tests/e2e_v2_produce_chain.test.sh 2>&1 | tee /tmp/e2e.out
-          rc=${PIPESTATUS[0]}
-          [ "$rc" -eq 0 ] || { echo "::error::real-container E2E exited $rc (124=timeout)"; exit 1; }
-          grep -q '^REAL_CONTAINER_V2_SEAL_IMPORT_PASS$' /tmp/e2e.out \
-            || { echo "::error::required terminal marker REAL_CONTAINER_V2_SEAL_IMPORT_PASS absent"; exit 1; }
-
-      # --- REQUIRED Docker/network CONTRACT tests (must EXECUTE, never skip) --------------
-      # The default `run.sh` step above lets the Docker/network tests SKIP (no opt-in flags), so
-      # by themselves they would never exercise the new Stage-2-audit / pin-verification /
-      # capability contract in CI. This step turns them ON in EXECUTE mode and asserts, per test,
-      # a terminal marker — so a SKIP (marker absent), a non-zero exit, or a `timeout` (124) all
-      # FAIL the required check. It covers: cargo-audit + advisory-DB pin verification against
-      # their real primary sources; and the builder-image capability preflight incl. the
-      # missing / wrong-version / wrong-arch / RT-2 tool NEGATIVES. (The Stage2AuditRecord v2
-      # audit path itself — generate/validate/version-gate/import — is exercised by the always-run
-      # validator unit suite; it is not gated behind Docker.) ubuntu-latest provides Docker + net.
-      - name: Required Docker/network contract tests (pin-verify + capability preflight; marker-asserted)
-        env:
-          B0PRE_DOCKER_IT: "1"
-          B0PRE_PIN_NET_IT: "1"
-          B0PRE_E2E_REQUIRED: "1"
-          B0PRE_PIN_NET_REQUIRED: "1"
-        run: |
-          set +e
-          timeout 600 bash tools/b0-pre-candidates/scripts/tests/pin_cargo_audit_advdb.test.sh 2>&1 | tee /tmp/pin.out
-          rc=${PIPESTATUS[0]}
-          [ "$rc" -eq 0 ] || { echo "::error::pin cargo-audit/advisory contract test exited $rc (124=timeout)"; exit 1; }
-          grep -q '^PIN_CARGO_AUDIT_ADVDB_PASS$' /tmp/pin.out \
-            || { echo "::error::pin contract marker PIN_CARGO_AUDIT_ADVDB_PASS absent (skipped or failed)"; exit 1; }
-          # prover-archive AUTHORITY: download the real immutable prover archives and independently
-          # verify (whole-archive sha256, safe complete enumeration, complete member set, each
-          # member size+sha256) via the single verified-extraction impl; every archive sha + member
-          # sha/size one-char mutation refused. Closes the archive_sha256/member_sha256 authority gap.
-          timeout 600 bash tools/b0-pre-candidates/scripts/tests/pin_prover_archive_authority.test.sh 2>&1 | tee /tmp/pa.out
-          rc=${PIPESTATUS[0]}
-          [ "$rc" -eq 0 ] || { echo "::error::prover-archive authority test exited $rc (124=timeout)"; exit 1; }
-          grep -q '^PIN_PROVER_ARCHIVE_AUTHORITY_PASS$' /tmp/pa.out \
-            || { echo "::error::prover-archive authority marker PIN_PROVER_ARCHIVE_AUTHORITY_PASS absent (skipped or failed)"; exit 1; }
-          timeout 600 bash tools/b0-pre-candidates/scripts/tests/builder_capability.test.sh 2>&1 | tee /tmp/cap.out
-          rc=${PIPESTATUS[0]}
-          [ "$rc" -eq 0 ] || { echo "::error::builder capability preflight test exited $rc (124=timeout)"; exit 1; }
-          grep -q '^BUILDER_CAPABILITY_PASS$' /tmp/cap.out \
-            || { echo "::error::capability contract marker BUILDER_CAPABILITY_PASS absent (skipped or failed)"; exit 1; }
-          # cargo-audit .global-cache reproducibility: four clean cargo-audit provisioning builds ->
-          # CARGO_HOME content-diff (sole divergence = .global-cache without the fix; byte-identical +
-          # absent with it) + runtime health. Bounded 40m (four from-source cargo-audit builds).
-          timeout 2400 bash tools/b0-pre-candidates/scripts/tests/cargo_audit_global_cache.test.sh 2>&1 | tee /tmp/gc.out
-          rc=${PIPESTATUS[0]}
-          [ "$rc" -eq 0 ] || { echo "::error::cargo-audit .global-cache reproducibility test exited $rc (124=timeout)"; exit 1; }
-          grep -q '^CARGO_AUDIT_GLOBAL_CACHE_PASS$' /tmp/gc.out \
-            || { echo "::error::reproducibility contract marker CARGO_AUDIT_GLOBAL_CACHE_PASS absent (skipped or failed)"; exit 1; }
-
-      # --- Shared canonical primitive as an independent CI authority ----------
-      # b0-pre-vmat is the SOLE canonical verifier-material encoding + identity +
-      # stamp-policy implementation (a blake3-only leaf the validator AND the venue
-      # extractors call). It gets its own locked test / clippy / fmt gate so a
-      # change under tools/b0-pre-vmat/** is verified on its own, not only
-      # transitively through the validator.
-      - name: b0-pre-vmat locked tests
-        run: cargo test --locked --manifest-path "$VMAT/Cargo.toml"
-
-      - name: b0-pre-vmat clippy -D warnings (all targets)
-        run: cargo clippy --locked --manifest-path "$VMAT/Cargo.toml" --all-targets -- -D warnings
-
-      - name: b0-pre-vmat format check
-        run: cargo fmt --manifest-path "$VMAT/Cargo.toml" --check
-
-      - name: b0-pre-vmat committed lockfile unchanged
-        run: |
-          cargo build --locked --manifest-path "$VMAT/Cargo.toml" --all-targets
+          cargo test   --locked --manifest-path "$VMAT/Cargo.toml"
+          cargo clippy --locked --manifest-path "$VMAT/Cargo.toml" --all-targets -- -D warnings
+          cargo fmt    --manifest-path "$VMAT/Cargo.toml" --check
+          cargo build  --locked --manifest-path "$VMAT/Cargo.toml" --all-targets
           git diff --exit-code -- "$VMAT/Cargo.lock"
 
-      - name: Lockfile pins + MSRV / no-network-stack boundary
-        run: bash "$VAL/scripts/verify_locks.sh"
-
-      # --- Committed-lock enforcement ----------------------------------------
-      # Building --locked must neither need nor produce a lockfile change.
-      - name: Build --locked (both tools)
+      - name: validator + independent (build / fmt / clippy / test, locked)
         run: |
-          cargo build --locked --manifest-path "$VAL/Cargo.toml" --all-targets
-          cargo build --locked --manifest-path "$IND/Cargo.toml" --all-targets
-
-      - name: Committed lockfiles unchanged
-        run: git diff --exit-code -- "$VAL/Cargo.lock" "$IND/Cargo.lock"
-
-      # --- Format / lint ------------------------------------------------------
-      - name: Format check (both tools)
-        run: |
-          cargo fmt --manifest-path "$VAL/Cargo.toml" --check
-          cargo fmt --manifest-path "$IND/Cargo.toml" --check
-
-      - name: Clippy -D warnings (both tools, all targets)
-        run: |
+          cargo build  --locked --manifest-path "$VAL/Cargo.toml" --all-targets
+          cargo build  --locked --manifest-path "$IND/Cargo.toml" --all-targets
+          git diff --exit-code -- "$VAL/Cargo.lock" "$IND/Cargo.lock"
+          cargo fmt    --manifest-path "$VAL/Cargo.toml" --check
+          cargo fmt    --manifest-path "$IND/Cargo.toml" --check
           cargo clippy --locked --manifest-path "$VAL/Cargo.toml" --all-targets -- -D warnings
           cargo clippy --locked --manifest-path "$IND/Cargo.toml" --all-targets -- -D warnings
+          cargo test   --locked --manifest-path "$VAL/Cargo.toml"
+          cargo test   --locked --manifest-path "$IND/Cargo.toml"
 
-      # --- Full test suites ---------------------------------------------------
-      # Covers strict/canonical JSON vectors, encoder-size + decoder-rejection
-      # suites, evidence-closure + adversarial matrices, exp-table generation /
-      # certification, transformer<->reference agreement, both official statement
-      # byte locks, witness-binding mutation matrices, and the protocol
-      # artifact / schema / hash suites (incl. jsonschema validation).
-      - name: Test (validator)
-        run: cargo test --locked --manifest-path "$VAL/Cargo.toml"
-
-      - name: Test (independent)
-        run: cargo test --locked --manifest-path "$IND/Cargo.toml"
-
-      # --- B0-FINAL measurement producer crates -------------------------------
-      # Core + provenance reader are backend-agnostic (no SDK): full fmt/clippy/test
-      # off-venue. The core suite includes the E2E contract test (mock backend -> full
-      # fragment -> validated against the REAL validator's measure-produce binary).
-      - name: Measurement core + provenance reader (fmt/clippy/test)
+      - name: measurement core + provenance reader (fmt / clippy / test)
         run: |
-          cargo fmt --manifest-path "$MEAS_CORE/Cargo.toml" --check
-          cargo fmt --manifest-path "$PROV/Cargo.toml" --check
+          cargo fmt    --manifest-path "$MEAS_CORE/Cargo.toml" --check
+          cargo fmt    --manifest-path "$PROV/Cargo.toml" --check
           cargo clippy --manifest-path "$MEAS_CORE/Cargo.toml" --all-targets -- -D warnings
           cargo clippy --manifest-path "$PROV/Cargo.toml" --all-targets -- -D warnings
-          cargo test --manifest-path "$MEAS_CORE/Cargo.toml"
-          cargo test --manifest-path "$PROV/Cargo.toml"
-
-      # The real SP1/RISC Zero SDK code path MUST compile here even though CI cannot perform
-      # venue proving. The runners refuse to build WITHOUT --features real-backend (no mock
-      # path in a production binary); WITH it they type-check the SDK usage. RISC Zero's
-      # embed_methods uses the CI stub (B0_VENUE_EMBED unset -> empty ELF, runtime-refused),
-      # so the crate compiles without the guest toolchain.
-      - name: Real-backend runners compile (SP1 + RISC Zero)
-        run: |
-          # fmt is toolchain-agnostic — run it on the 1.85 validator-tool floor.
-          cargo fmt --manifest-path "$MEAS_SP1/Cargo.toml" --check
-          cargo fmt --manifest-path "$MEAS_RISC0/Cargo.toml" --check
-          # SP1's prover build scripts need protoc (prost-build); the venue container provides it.
-          sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
-          # The SP1 6.3.1 / RISC Zero 3.0.5 SDKs declare rust-version 1.88/1.89/1.90 across the stack (ruint needs 1.90) (the same venue
-          # container toolchain that builds the guests + provers); the pinned 1.85 floor cannot
-          # resolve them. Install + use 1.90.0 for THIS step only (`+1.90.0` overrides the
-          # rust-toolchain.toml floor). embed_methods is NOT run (no B0_VENUE_EMBED) so the CI
-          # stub is used and no guest toolchain is needed — this only type-checks the SDK path.
-          rustup toolchain install 1.90.0 --profile minimal --component clippy >/dev/null 2>&1
-          cargo +1.90.0 build   --features real-backend --manifest-path "$MEAS_SP1/Cargo.toml"
-          cargo +1.90.0 build   --features real-backend --manifest-path "$MEAS_RISC0/Cargo.toml"
-          cargo +1.90.0 clippy  --features real-backend --manifest-path "$MEAS_SP1/Cargo.toml" -- -D warnings
-          cargo +1.90.0 clippy  --features real-backend --manifest-path "$MEAS_RISC0/Cargo.toml" -- -D warnings
-
-      # RUNNER-CRATE PATH-INDEPENDENCE (CI scope; STUB embed): prove the real-backend RISC Zero runner
-      # CRATE + its full RISC Zero SDK dependency closure are BYTE-REPRODUCIBLE when built from two
-      # GENUINELY-DISTINCT original checkout roots, BOTH materialized + compiled at the one ratified
-      # canonical build path /b0/tooling — via the SAME double_build_runner.sh + transparent wrapper the
-      # venue uses. Building at a single canonical source path makes rustc's package -Cmetadata/
-      # StableCrateId universal (--remap-path-prefix cannot neutralize it — it rewrites source LOCATIONS,
-      # not the metadata hash), which is what makes the two runners byte-identical; the distinct original
-      # roots never reach the compiler and are proven not to affect the bytes (leakage-refused). Only
-      # CARGO_HOME/target are remapped -> /b0/{cargo,target} (2 remaps; exact CARGO_ENCODED_RUSTFLAGS;
-      # --release --locked --features real-backend; ambient-flag refusal; exact-prefix leakage scan).
-      # embed_methods here is the CI STUB (no guest toolchain in CI — see build.rs), so THIS STEP IS NOT
-      # the real-embed §G proof and never claims to be. The REAL RISC0 guest embed (B0_VENUE_EMBED=1) is
-      # proven ONLY by the VENUE runbook double-build (docs/b0-pre/venue/RUNNER-PATH-INDEPENDENCE.md).
-      # (Two clean SDK builds at the canonical path — the deliberate cost.)
-      - name: RISC Zero runner-crate canonical-path double-build (stub embed; not the real-embed proof)
-        run: |
-          set -euo pipefail
-          SCRIPTS="$PWD/tools/b0-pre-candidates/scripts"
-          WRAP="$SCRIPTS/b0_rustc_remap_wrapper.sh"
-          chmod +x "$WRAP" "$SCRIPTS/double_build_runner.sh"
-          # Two genuinely different ORIGINAL checkout roots: full source-only checkouts (workspace +
-          # every transitive path dep intact) at distinct absolute paths. git archive => no target/.git.
-          # /b0 must be writable: the script materializes each checkout at the canonical path /b0/tooling.
-          sudo mkdir -p /b0-input/a /b0-input/b /b0-build /b0 && sudo chown "$(id -un)" /b0-input/a /b0-input/b /b0-build /b0
-          git archive HEAD | tar -x -C /b0-input/a
-          git archive HEAD | tar -x -C /b0-input/b
-          TC=$(printf 'a%.0s' {1..64})                              # per-arch toolchain identity is venue-bound; placeholder for the CI stub embed
-          SHA=507281e21e95a6a98e3480e25e12d1baab586e07              # RATIFIED_SOURCE_COMMIT (BUILD_GIT_SHA), frozen
-          # Provision the OFFLINE dependency seed (the two-graph RISC0 seed: host runner + candidate
-          # workspace) + the native host-toolchain attestation from HEAD — the ONE disclosed network
-          # phase. The double-build then runs fully OFFLINE (--offline + CARGO_NET_OFFLINE), consuming
-          # only the materialized seed. This exercises the runner toolchain + offline-seed correction.
-          . "$SCRIPTS/lib.sh"
-          b0_runner_dependency_seed risc0 1.90.0 "$PWD" /b0-build/seeds /b0-build/dep-seed.json
-          b0_host_toolchain_attestation 1.90.0 x86_64 /b0-build/host-tc.json
-          # Typed build spec: the script CONSTRUCTS + enforces + retains the exact argv (no opaque cmd).
-          # --embed 0 = stub embed (CI has no guest toolchain). Toolchain override 1.90.0 via --toolchain.
-          bash "$SCRIPTS/double_build_runner.sh" \
-            --candidate risc0 --manifest tools/b0-pre-measure-risc0/Cargo.toml \
-            --artifact release/b0-pre-measure-risc0 --toolchain 1.90.0 --embed 0 \
-            --src-a /b0-input/a --src-b /b0-input/b --root-a /b0-build/a --root-b /b0-build/b \
-            --canonical-build-path /b0/tooling \
-            --arch x86_64 --expect-build-git-sha "$SHA" \
-            --wrapper "$WRAP" --per-arch-toolchain-identity "$TC" --recipe-out /b0-build/recipe.json \
-            --dep-seed-dir /b0-build/seeds --dep-seed-json /b0-build/dep-seed.json \
-            --host-toolchain-attestation /b0-build/host-tc.json
-          echo "=== emitted runner-recipe facts ==="; cat /b0-build/recipe.json
-          # Fail-closed shape assertion (the validator producer re-validates these facts fully at import).
-          python3 -c '
-          import json
-          d=json.load(open("/b0-build/recipe.json"))
-          need={"candidate","arch","manifest_path","artifact_path","cargo_ident","b0_venue_embed","canonical_build_path","canonical_cargo_home","per_arch_toolchain_identity","wrapper_blake3","build_argv","build_env","build_a","build_b","byte_equal","cargo_seed","leakage_refused_prefixes","leakage_permitted_prefixes","leakage_clean","evidence_root"}
-          assert not (need-set(d)), sorted(need-set(d))
-          assert d["leakage_clean"] is True and d["byte_equal"] is True
-          assert d["canonical_build_path"]=="/b0/tooling", d["canonical_build_path"]
-          # Canonical /b0/cargo correction: the compiler-visible cargo home is the literal canonical
-          # /b0/cargo (materialized fresh per build, NOT remapped); it is a PERMITTED prefix, never refused.
-          assert d["canonical_cargo_home"]=="/b0/cargo", d["canonical_cargo_home"]
-          assert "/b0/cargo" in d["leakage_permitted_prefixes"], d["leakage_permitted_prefixes"]
-          # Canonical build argv is EXACTLY cargo_ident (a cargo + optional +toolchain) followed by the
-          # fixed subcommand/flags — the SAME construction the Rust validator check_argv enforces. Kept as
-          # FULL-VECTOR equality (never a prefix / token-presence test).
-          def canonical_argv(ci, mp): return ci.split()+["build","--release","--locked","--offline","--features","real-backend","--manifest-path",mp]
-          # Coverage for BOTH cargo forms + a reject (self-test of the equality this step relies on).
-          # `--offline` is part of the canonical argv (the runner toolchain + offline-seed correction).
-          assert canonical_argv("cargo","M")==["cargo","build","--release","--locked","--offline","--features","real-backend","--manifest-path","M"]
-          assert canonical_argv("cargo +1.90.0","M")==["cargo","+1.90.0","build","--release","--locked","--offline","--features","real-backend","--manifest-path","M"]
-          assert canonical_argv("cargo","M")!=["cargo","build","--release","--locked","--features","real-backend","--manifest-path","M"]  # missing --offline -> reject
-          assert d["build_argv"]==canonical_argv(d["cargo_ident"],d["manifest_path"]), d["build_argv"]
-          assert d["build_a"]["original_root"]!=d["build_b"]["original_root"], "A/B share an original root"
-          # Exactly ONE remap per compile (the per-build target -> /b0/target); the canonical cargo home
-          # is NOT remapped (canonical-by-construction), so a 2-remap compile would be the old regime.
-          for s in ("build_a","build_b"):
-              assert any(i["kind"]=="compile" and i["remap_args"]==["--remap-path-prefix=%s=/b0/target"%d[s]["target_from"]] for i in d[s]["invocations"]), s
-          for r in (d["build_a"]["original_root"],d["build_b"]["original_root"],d["evidence_root"]):
-              assert r in d["leakage_refused_prefixes"], r
-          # Fresh-per-build cargo dependency-seed materialization equality: origin == materialized_A ==
-          # materialized_B (single 64-hex value). The sealed-import anchor re-authenticates it vs the seed.
-          cs=d["cargo_seed"]
-          assert cs["origin_address"]==cs["materialized_a"]==cs["materialized_b"] and len(cs["origin_address"])==64, cs
-          # Authenticated 4-way source-input equality (origin A/B, materialized A/B) — all equal 64-hex.
-          mans={d["build_a"]["origin_manifest_blake3"],d["build_a"]["materialized_manifest_blake3"],
-                d["build_b"]["origin_manifest_blake3"],d["build_b"]["materialized_manifest_blake3"]}
-          assert len(mans)==1 and len(next(iter(mans)))==64, ("source-input manifests not all-equal 64-hex", mans)
-          # Offline dependency-provisioning facts (runner toolchain + offline-seed correction): the build
-          # ran OFFLINE and bound the two-graph dependency seed + native host-toolchain authorities.
-          assert d["offline"] is True and d["cargo_net_offline"] is True, "recipe not marked offline"
-          assert len(d["dependency_seed"]["address"])==64, d["dependency_seed"]
-          assert len(d["host_toolchain_attestation"]["address"])==64, d["host_toolchain_attestation"]
-          print("recipe facts shape OK (exact-bytes, A/B distinct origins, canonical path, authenticated 4-way manifests, cross-bound leakage, offline dependency seed + host-toolchain authorities)")'
-
-      # Guard condition #1: a production runner must NOT build without real-backend. Use 1.90.0
-      # (installed above) so resolution SUCCEEDS and the build fails specifically on the
-      # compile_error — the actual refuse-without-feature guarantee, not an SDK-resolution miss.
-      - name: Production runners refuse to build without real-backend
-        run: |
-          ! cargo +1.90.0 build --manifest-path "$MEAS_SP1/Cargo.toml" 2>/dev/null
-          ! cargo +1.90.0 build --manifest-path "$MEAS_RISC0/Cargo.toml" 2>/dev/null
-
-      # Explicit headline guarantees (reuse compiled artifacts; fast).
-      - name: Both official statements byte-locked (both crates)
-        run: |
-          cargo test --locked --manifest-path "$VAL/Cargo.toml" --test workload_official
-          cargo test --locked --manifest-path "$IND/Cargo.toml" --test workload_official
-
-      - name: Witness-binding mutation matrices
-        run: |
-          cargo test --locked --manifest-path "$VAL/Cargo.toml" workload::tests
-          cargo test --locked --manifest-path "$IND/Cargo.toml" workload::tests
-
-      - name: Exp-table certification + independent agreement
-        run: |
-          cargo test --locked --manifest-path "$VAL/Cargo.toml" exp::
-          cargo test --locked --manifest-path "$IND/Cargo.toml" --test exp_table
-
-      - name: Protocol artifact / schema / hash + independent identity lock
-        run: |
-          cargo test --locked --manifest-path "$VAL/Cargo.toml" --test protocol_artifact --test protocol_schema --test protocol_hash
-          cargo test --locked --manifest-path "$IND/Cargo.toml" --test protocol_identities
-
-      # --- Deterministic regeneration of committed docs -----------------------
-      # Re-emitting from the typed model must reproduce the committed bytes.
-      - name: Committed artifact / schema / golden are byte-reproducible
-        run: |
-          cargo run --locked --manifest-path "$VAL/Cargo.toml" --example emit_protocol
-          cargo run --locked --manifest-path "$VAL/Cargo.toml" --example emit_protocol_schema
-          cargo run --locked --manifest-path "$VAL/Cargo.toml" --example emit_protocol_hash_golden
-          cargo run --locked --manifest-path "$VAL/Cargo.toml" --example emit_stage1_bundle_schema
-          git diff --exit-code -- docs/b0-pre/protocol
-          # Two-cell measurement-input authority triple (eligibility + report + MIA) is byte-reproducible
-          # (re-spec + re-address through the reference crate's own preimages).
-          cargo run --locked --manifest-path "$VAL/Cargo.toml" --example emit_measurement_input_authority
-          cargo run --locked --manifest-path "$VAL/Cargo.toml" --example emit_measurement_vector
-          git diff --exit-code -- docs/b0-pre/fixtures/measurement-input-authority docs/b0-pre/fixtures/measurement-vector
-
-      - name: Fixture identities
-        run: bash "$VAL/scripts/verify_fixtures.sh"
-
-      # --- Finalization is complete ------------------------------------------
-      - name: Protocol is finalized and carries the real b0_pre_spec_hash
-        run: |
-          bash "$VAL/scripts/finalization_readiness.sh"
-          grep -q '"state": "finalizable"' docs/b0-pre/protocol/b0-pre-protocol-v1.json \
-            || { echo "artifact must be finalizable at this stage"; exit 1; }
-          grep -q '"state": "not_finalizable"' docs/b0-pre/protocol/b0-pre-protocol-v1.json \
-            && { echo "finalized artifact must not carry state not_finalizable"; exit 1; } || true
-          test -f docs/b0-pre/protocol/b0-pre-protocol-v1.json.hash \
-            || { echo "the real b0_pre_spec_hash sidecar must be committed"; exit 1; }
-          grep -qx 'e933e7325c2639a48d8e25f20746d0f8abc822dee9fcfa87c2e6cdec226cf2a2' \
-            docs/b0-pre/protocol/b0-pre-protocol-v1.json.hash \
-            || { echo "committed b0_pre_spec_hash sidecar mismatch"; exit 1; }
-
-      - name: Diff check (whitespace / conflict markers)
-        run: git diff --check
+          cargo test   --manifest-path "$MEAS_CORE/Cargo.toml"
+          cargo test   --manifest-path "$PROV/Cargo.toml"
