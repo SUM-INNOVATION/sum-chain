@@ -8,7 +8,17 @@ description = "P2P networking for SUM Chain using libp2p"
 
 [dependencies]
 sumchain-primitives = { path = "../primitives" }
-libp2p = { workspace = true }
+# De-umbrellaed (#202): individual libp2p sub-crates, NO libp2p-mdns (drops
+# hickory-proto / RUSTSEC-2026-0119 from the graph + lock). Discovery = bootnodes.
+libp2p-swarm = { workspace = true }
+libp2p-gossipsub = { workspace = true }
+libp2p-tcp = { workspace = true }
+libp2p-noise = { workspace = true }
+libp2p-yamux = { workspace = true }
+libp2p-identify = { workspace = true }
+libp2p-request-response = { workspace = true }
+libp2p-core = { workspace = true }
+libp2p-identity = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

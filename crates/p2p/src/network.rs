@@ -13,11 +13,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
-use libp2p::{
-    gossipsub::{self, IdentTopic}, mdns, noise,
-    swarm::{SwarmEvent},
-    tcp, yamux, Multiaddr, PeerId, Swarm,
-};
+use libp2p_gossipsub::{self as gossipsub, IdentTopic};
+use libp2p_noise as noise;
+use libp2p_tcp as tcp;
+use libp2p_yamux as yamux;
+use libp2p_swarm::{Swarm, SwarmEvent};
+use libp2p_core::{Multiaddr, Transport, upgrade::Version};
+use libp2p_identity::PeerId;
 use parking_lot::RwLock;
 use sumchain_primitives::{Block, SignedTransaction};
 use tokio::sync::{broadcast, mpsc};
@@ -440,22 +442,25 @@ impl NetworkService {
         *self.local_peer_id.write() = Some(local_peer_id);
         info!("Local peer ID: {}", local_peer_id);
 
-        // Build swarm
-        let mut swarm = libp2p::SwarmBuilder::with_existing_identity(local_key)
-            .with_tokio()
-            .with_tcp(
-                tcp::Config::default(),
-                noise::Config::new,
-                yamux::Config::default,
+        // Build swarm — manual transport (de-umbrellaed, #202). Equivalent to the
+        // former `SwarmBuilder::with_tokio().with_tcp(default, noise, yamux)`:
+        // TCP -> Noise (V1Lazy upgrade) -> Yamux, boxed; tokio executor; 60s idle.
+        let transport = tcp::tokio::Transport::new(tcp::Config::default())
+            .upgrade(Version::V1Lazy)
+            .authenticate(
+                noise::Config::new(&local_key)
+                    .map_err(|e| P2pError::Transport(e.to_string()))?,
             )
-            .map_err(|e| P2pError::Transport(e.to_string()))?
-            .with_behaviour(|key| {
-                SumChainBehaviour::new(PeerId::from(key.public()), self.config.enable_mdns)
-                    .expect("Failed to create behaviour")
-            })
-            .map_err(|e| P2pError::Transport(e.to_string()))?
-            .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
-            .build();
+            .multiplex(yamux::Config::default())
+            .boxed();
+
+        let behaviour =
+            SumChainBehaviour::new().map_err(|e| P2pError::Transport(e.to_string()))?;
+
+        let swarm_config = libp2p_swarm::Config::with_tokio_executor()
+            .with_idle_connection_timeout(Duration::from_secs(60));
+
+        let mut swarm = Swarm::new(transport, behaviour, local_peer_id, swarm_config);
 
         // Subscribe to topics
         swarm
@@ -488,7 +493,7 @@ impl NetworkService {
         // Pending sync response channels (stored locally since they can't be sent through channels)
         let mut pending_sync_responses: HashMap<
             SyncRequestId,
-            libp2p::request_response::ResponseChannel<SyncResponse>,
+            libp2p_request_response::ResponseChannel<SyncResponse>,
         > = HashMap::new();
         let next_request_id = AtomicU64::new(1);
 
@@ -585,9 +590,11 @@ impl NetworkService {
     /// Handle swarm events with sync support
     fn handle_swarm_event_with_sync(
         &self,
-        swarm: &mut Swarm<SumChainBehaviour>,
+        // Unused since mDNS removal (#202): swarm-mutating responses go through the
+        // NetworkCommand handler; this event handler only emits NetworkEvents.
+        _swarm: &mut Swarm<SumChainBehaviour>,
         event: SwarmEvent<SumChainBehaviourEvent>,
-        pending_sync_responses: &mut HashMap<SyncRequestId, libp2p::request_response::ResponseChannel<SyncResponse>>,
+        pending_sync_responses: &mut HashMap<SyncRequestId, libp2p_request_response::ResponseChannel<SyncResponse>>,
         next_request_id: &AtomicU64,
     ) {
         match event {
@@ -601,36 +608,8 @@ impl NetworkService {
                 self.handle_gossip_message(&message.topic, &message.data, propagation_source);
             }
 
-            SwarmEvent::Behaviour(SumChainBehaviourEvent::Mdns(mdns::Event::Discovered(
-                peers,
-            ))) => {
-                for (peer_id, addr) in peers {
-                    debug!("mDNS discovered peer: {} at {}", peer_id, addr);
-                    // Register peer with peer manager
-                    self.peer_manager.register_peer(peer_id, vec![addr.clone()]);
-
-                    // Check if we can connect
-                    if self.peer_manager.can_connect_outbound(&peer_id) {
-                        swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
-                        if let Err(e) = swarm.dial(addr) {
-                            debug!("Failed to dial discovered peer: {}", e);
-                            self.peer_manager.connection_failed(&peer_id);
-                        }
-                    } else {
-                        debug!("Skipping connection to {} (connection limits or backoff)", peer_id);
-                    }
-                }
-            }
-
-            SwarmEvent::Behaviour(SumChainBehaviourEvent::Mdns(mdns::Event::Expired(peers))) => {
-                for (peer_id, _) in peers {
-                    debug!("mDNS peer expired: {}", peer_id);
-                    swarm
-                        .behaviour_mut()
-                        .gossipsub
-                        .remove_explicit_peer(&peer_id);
-                }
-            }
+            // mDNS event arms removed (#202): mDNS discovery is gone; peers arrive via
+            // bootnodes (dialed at startup) + identify + gossipsub.
 
             SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
                 // Determine connection direction from endpoint
@@ -683,10 +662,10 @@ impl NetworkService {
     fn handle_sync_event(
         &self,
         event: SyncEvent,
-        pending_sync_responses: &mut HashMap<SyncRequestId, libp2p::request_response::ResponseChannel<SyncResponse>>,
+        pending_sync_responses: &mut HashMap<SyncRequestId, libp2p_request_response::ResponseChannel<SyncResponse>>,
         next_request_id: &AtomicU64,
     ) {
-        use libp2p::request_response::{Event, Message};
+        use libp2p_request_response::{Event, Message};
 
         match event {
             Event::Message { peer, message } => match message {
