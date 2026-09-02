@@ -1,12 +1,17 @@
 name: Publish sumchain-wire
 
 # #117 CONSOLIDATE: a reviewed, tagged publish path for the single wire source-of-truth
-# (`sumchain-wire`) and its re-export hub (`sumchain-primitives`). Previously publishing was manual
-# and tagless (RELEASE.md); this formalizes it.
+# (`sumchain-wire`), its re-export hub (`sumchain-primitives`), and the shared crypto crate
+# (`sumchain-crypto`). Previously publishing was manual and tagless (RELEASE.md); this formalizes it.
+#
+# The three crates share the workspace version, so a `wire-vX.Y.Z` tag releases all three at X.Y.Z.
+# Dependency order: wire (leaf) -> primitives (deps wire) -> crypto (deps primitives). Consumers
+# that pair primitives with crypto (e.g. OmniNode's settlement submit) need both at the same
+# version, so crypto ships in the same release set.
 #
 # Triggers:
 #   * push of a tag matching `wire-v*` (e.g. `wire-v0.3.0`) — verify + (if the registry token is
-#     configured) publish to crates.io in dependency order (wire, then primitives).
+#     configured) publish to crates.io in dependency order (wire, then primitives, then crypto).
 #   * manual dispatch — verify (`--dry-run`) only, never publishes.
 #
 # The real `cargo publish` runs ONLY on a `wire-v*` tag AND only when the owner-provided
@@ -53,20 +58,38 @@ jobs:
       - name: Verify (cargo publish --dry-run, dependency order)
         run: |
           cargo publish --dry-run --locked --manifest-path crates/sumchain-wire/Cargo.toml
-          # primitives depends on the published wire; --dry-run cannot see an unpublished wire, so
-          # allow-dirty package-only verification of primitives' manifest/packaging.
+          # primitives depends on the published wire, and crypto on the published primitives;
+          # --dry-run cannot see an unpublished upstream, so do allow-dirty package-only
+          # verification of their manifests/packaging.
           cargo package --locked --allow-dirty --manifest-path crates/primitives/Cargo.toml >/dev/null || true
+          cargo package --locked --allow-dirty --manifest-path crates/crypto/Cargo.toml >/dev/null || true
 
-      # Real publish: tag build + token present only. Order: wire first, then primitives.
-      - name: Publish to crates.io (wire → primitives)
+      # Real publish: tag build + token present only. Order: wire → primitives → crypto.
+      # Each publish is guarded so a re-run (or a partially-published release set) skips versions
+      # already on crates.io instead of failing on a duplicate-version error.
+      - name: Publish to crates.io (wire → primitives → crypto)
         if: startsWith(github.ref, 'refs/tags/wire-v') && env.CARGO_REGISTRY_TOKEN != ''
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
-          cargo publish --locked --manifest-path crates/sumchain-wire/Cargo.toml
-          # Give the index a moment to expose the new wire version before publishing primitives.
-          sleep 30
-          cargo publish --locked --manifest-path crates/primitives/Cargo.toml
+          publish_if_absent() {
+            local name="$1" manifest="$2"
+            local ver
+            ver="$(cargo metadata --format-version 1 --no-deps \
+              | jq -r --arg n "$name" '.packages[] | select(.name==$n) | .version')"
+            if curl -sf "https://crates.io/api/v1/crates/$name/$ver" \
+                 -H "User-Agent: sumchain-publish-wire" >/dev/null 2>&1; then
+              echo "$name $ver already on crates.io — skipping"
+            else
+              echo "publishing $name $ver"
+              cargo publish --locked --manifest-path "$manifest"
+              # Give the index a moment to expose the new version before the next crate.
+              sleep 30
+            fi
+          }
+          publish_if_absent sumchain-wire       crates/sumchain-wire/Cargo.toml
+          publish_if_absent sumchain-primitives crates/primitives/Cargo.toml
+          publish_if_absent sumchain-crypto     crates/crypto/Cargo.toml
 
       - name: Publish skipped (no token / not a tag)
         if: ${{ !(startsWith(github.ref, 'refs/tags/wire-v') && env.CARGO_REGISTRY_TOKEN != '') }}
