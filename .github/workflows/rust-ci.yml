@@ -29,7 +29,7 @@ jobs:
       - uses: actions/checkout@v4
 
       # rustup on the runner reads rust-toolchain.toml and installs the pinned
-      # channel (1.85.0). Single source of truth — no version hardcoded here, so
+      # channel (1.88.0). Single source of truth — no version hardcoded here, so
       # bumping rust-toolchain.toml updates CI automatically. `rustup show`
       # forces the install; clippy is in the default profile but added explicitly.
       - name: Set up pinned toolchain
