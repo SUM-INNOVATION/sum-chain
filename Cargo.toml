@@ -65,7 +65,20 @@ sha2 = "0.10"
 rocksdb = "0.22"
 
 # Networking
-libp2p = { version = "0.53", features = ["tokio", "gossipsub", "mdns", "noise", "tcp", "yamux", "macros", "identify", "request-response"] }
+# De-umbrellaed (#202): the `libp2p` umbrella declared `libp2p-mdns` (-> hickory-proto,
+# RUSTSEC-2026-0119) as an optional dep, which stays in Cargo.lock regardless of features.
+# Depending on the exact 0.53-bundle sub-crates instead — with NO libp2p-mdns — removes
+# libp2p-mdns + hickory-proto from the graph AND the lock. mDNS (LAN discovery) is dropped;
+# production + dev use explicit bootnodes (+ identify + gossipsub).
+libp2p-swarm = { version = "0.44", features = ["macros", "tokio"] }
+libp2p-gossipsub = "0.46"
+libp2p-tcp = { version = "0.41", features = ["tokio"] }
+libp2p-noise = "0.44"
+libp2p-yamux = "0.45"
+libp2p-identify = "0.44"
+libp2p-request-response = "0.26"
+libp2p-core = "0.41"
+libp2p-identity = { version = "0.2", features = ["ed25519", "peerid", "rand"] }
 
 # RPC
 jsonrpsee = { version = "0.21", features = ["server", "http-client", "macros"] }

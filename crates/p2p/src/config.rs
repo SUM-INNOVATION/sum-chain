@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use libp2p::Multiaddr;
+use libp2p_core::Multiaddr;
 use serde::{Deserialize, Serialize};
 
 /// Network configuration
@@ -44,7 +44,7 @@ impl Default for NetworkConfig {
 
 impl NetworkConfig {
     /// Parse listen address as Multiaddr
-    pub fn listen_multiaddr(&self) -> Result<Multiaddr, libp2p::multiaddr::Error> {
+    pub fn listen_multiaddr(&self) -> Result<Multiaddr, libp2p_core::multiaddr::Error> {
         self.listen_addr.parse()
     }
 

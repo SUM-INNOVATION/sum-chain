@@ -1235,7 +1235,7 @@ fn init_logging(level: &str, json: bool) -> Result<()> {
         .unwrap_or_else(|_| {
             // Default filter: set global level and reduce noise from dependencies
             EnvFilter::new(format!(
-                "{},libp2p=warn,libp2p_gossipsub=warn,libp2p_mdns=warn,yamux=warn,multistream_select=warn",
+                "{},libp2p=warn,libp2p_gossipsub=warn,yamux=warn,multistream_select=warn",
                 level
             ))
         });

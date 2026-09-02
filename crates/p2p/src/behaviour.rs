@@ -9,23 +9,26 @@
 //! - Message validation and deduplication
 //! - Eclipse attack prevention via mesh configuration
 
-use libp2p::{
-    gossipsub::{self, IdentTopic, MessageAuthenticity, ValidationMode, PeerScoreParams, PeerScoreThresholds, TopicScoreParams},
-    identify, mdns, request_response,
-    swarm::NetworkBehaviour, PeerId,
+use libp2p_gossipsub::{
+    self as gossipsub, IdentTopic, MessageAuthenticity, ValidationMode, PeerScoreParams,
+    PeerScoreThresholds, TopicScoreParams,
 };
+use libp2p_identify as identify;
+use libp2p_request_response as request_response;
+use libp2p_swarm::NetworkBehaviour;
 use std::time::Duration;
 
 use crate::sync::{self, SyncCodec, SyncRequest, SyncResponse};
 use crate::topics;
 
 /// Combined network behaviour
+// `prelude` points the derive at the libp2p-swarm sub-crate (de-umbrellaed, #202)
+// instead of the default `::libp2p::swarm::derive_prelude` umbrella path.
 #[derive(NetworkBehaviour)]
+#[behaviour(prelude = "libp2p_swarm::derive_prelude")]
 pub struct SumChainBehaviour {
     /// Gossipsub for message propagation
     pub gossipsub: gossipsub::Behaviour,
-    /// mDNS for local peer discovery
-    pub mdns: mdns::tokio::Behaviour,
     /// Identify protocol for peer info exchange
     pub identify: identify::Behaviour,
     /// Request-response for block sync
@@ -108,14 +111,14 @@ impl NetworkSecurityConfig {
 
 impl SumChainBehaviour {
     /// Create a new behaviour with the given peer ID (uses testnet config)
-    pub fn new(local_peer_id: PeerId, enable_mdns: bool) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::with_security_config(local_peer_id, enable_mdns, NetworkSecurityConfig::testnet())
+    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        Self::with_security_config(NetworkSecurityConfig::testnet())
     }
 
-    /// Create a new behaviour with custom security configuration
+    /// Create a new behaviour with custom security configuration.
+    // (No peer-id param: after mDNS removal (#202) nothing in the behaviour needs
+    // it; gossipsub/identify use their own signing keypairs.)
     pub fn with_security_config(
-        local_peer_id: PeerId,
-        enable_mdns: bool,
         security_config: NetworkSecurityConfig,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // Configure gossipsub with security-hardened settings
@@ -158,7 +161,7 @@ impl SumChainBehaviour {
 
         // Create gossipsub with or without peer scoring
         let mut gossipsub = gossipsub::Behaviour::new(
-            MessageAuthenticity::Signed(libp2p::identity::Keypair::generate_ed25519()),
+            MessageAuthenticity::Signed(libp2p_identity::Keypair::generate_ed25519()),
             gossipsub_config,
         )
         .map_err(|e| format!("Failed to create gossipsub: {}", e))?;
@@ -172,25 +175,14 @@ impl SumChainBehaviour {
                 .map_err(|e| format!("Failed to set peer scoring: {}", e))?;
         }
 
-        // Configure mDNS
-        let mdns = if enable_mdns {
-            mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)?
-        } else {
-            // Create disabled mDNS (will be ignored)
-            mdns::tokio::Behaviour::new(
-                mdns::Config {
-                    ttl: Duration::from_secs(0),
-                    query_interval: Duration::from_secs(u64::MAX),
-                    ..Default::default()
-                },
-                local_peer_id,
-            )?
-        };
+        // mDNS removed (#202): LAN-only discovery, not used by mainnet; dropped to
+        // exclude libp2p-mdns -> hickory-proto (RUSTSEC-2026-0119). Discovery is
+        // bootnodes + identify + gossipsub.
 
         // Configure identify
         let identify = identify::Behaviour::new(identify::Config::new(
             "/sumchain/1.0.0".to_string(),
-            libp2p::identity::Keypair::generate_ed25519().public(),
+            libp2p_identity::Keypair::generate_ed25519().public(),
         ));
 
         // Configure sync (request-response)
@@ -198,7 +190,6 @@ impl SumChainBehaviour {
 
         Ok(Self {
             gossipsub,
-            mdns,
             identify,
             sync,
         })
