@@ -6,6 +6,13 @@ authors.workspace = true
 license.workspace = true
 description = "P2P networking for SUM Chain using libp2p"
 
+[features]
+# OFF by default. mDNS is LAN-only local discovery; mainnet uses explicit
+# bootnodes (+ identify + gossipsub). Enabling it pulls libp2p-mdns ->
+# hickory-proto (RUSTSEC-2026-0119, #202). Dev/devnet: `--features mdns`.
+default = []
+mdns = ["libp2p/mdns"]
+
 [dependencies]
 sumchain-primitives = { path = "../primitives" }
 libp2p = { workspace = true }

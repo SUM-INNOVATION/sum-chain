@@ -13,8 +13,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
+#[cfg(feature = "mdns")]
+use libp2p::mdns;
 use libp2p::{
-    gossipsub::{self, IdentTopic}, mdns, noise,
+    gossipsub::{self, IdentTopic}, noise,
     swarm::{SwarmEvent},
     tcp, yamux, Multiaddr, PeerId, Swarm,
 };
@@ -601,6 +603,7 @@ impl NetworkService {
                 self.handle_gossip_message(&message.topic, &message.data, propagation_source);
             }
 
+            #[cfg(feature = "mdns")]
             SwarmEvent::Behaviour(SumChainBehaviourEvent::Mdns(mdns::Event::Discovered(
                 peers,
             ))) => {
@@ -622,6 +625,7 @@ impl NetworkService {
                 }
             }
 
+            #[cfg(feature = "mdns")]
             SwarmEvent::Behaviour(SumChainBehaviourEvent::Mdns(mdns::Event::Expired(peers))) => {
                 for (peer_id, _) in peers {
                     debug!("mDNS peer expired: {}", peer_id);

@@ -65,7 +65,11 @@ sha2 = "0.10"
 rocksdb = "0.22"
 
 # Networking
-libp2p = { version = "0.53", features = ["tokio", "gossipsub", "mdns", "noise", "tcp", "yamux", "macros", "identify", "request-response"] }
+# mDNS is intentionally NOT in the default feature set: it is LAN-only discovery,
+# not used by mainnet (bootnodes + identify + gossipsub cover production), and it
+# pulls the vulnerable libp2p-mdns -> hickory-proto (RUSTSEC-2026-0119, #202).
+# Dev/devnet opt in via `sumchain-p2p`'s off-by-default `mdns` feature.
+libp2p = { version = "0.53", features = ["tokio", "gossipsub", "noise", "tcp", "yamux", "macros", "identify", "request-response"] }
 
 # RPC
 jsonrpsee = { version = "0.21", features = ["server", "http-client", "macros"] }

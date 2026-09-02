@@ -11,9 +11,11 @@
 
 use libp2p::{
     gossipsub::{self, IdentTopic, MessageAuthenticity, ValidationMode, PeerScoreParams, PeerScoreThresholds, TopicScoreParams},
-    identify, mdns, request_response,
+    identify, request_response,
     swarm::NetworkBehaviour, PeerId,
 };
+#[cfg(feature = "mdns")]
+use libp2p::mdns;
 use std::time::Duration;
 
 use crate::sync::{self, SyncCodec, SyncRequest, SyncResponse};
@@ -24,7 +26,9 @@ use crate::topics;
 pub struct SumChainBehaviour {
     /// Gossipsub for message propagation
     pub gossipsub: gossipsub::Behaviour,
-    /// mDNS for local peer discovery
+    /// mDNS for local (LAN) peer discovery — dev/devnet only, behind the
+    /// off-by-default `mdns` feature (mainnet uses bootnodes).
+    #[cfg(feature = "mdns")]
     pub mdns: mdns::tokio::Behaviour,
     /// Identify protocol for peer info exchange
     pub identify: identify::Behaviour,
@@ -172,11 +176,14 @@ impl SumChainBehaviour {
                 .map_err(|e| format!("Failed to set peer scoring: {}", e))?;
         }
 
-        // Configure mDNS
+        // Configure mDNS (LAN discovery) — compiled only when the `mdns` feature
+        // is enabled (dev/devnet). Mainnet builds exclude it (and libp2p-mdns ->
+        // hickory-proto) entirely; discovery there is bootnodes + identify.
+        #[cfg(feature = "mdns")]
         let mdns = if enable_mdns {
             mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)?
         } else {
-            // Create disabled mDNS (will be ignored)
+            // Feature on but runtime-disabled: neutered mDNS (ttl 0, no queries).
             mdns::tokio::Behaviour::new(
                 mdns::Config {
                     ttl: Duration::from_secs(0),
@@ -186,6 +193,9 @@ impl SumChainBehaviour {
                 local_peer_id,
             )?
         };
+        // Without the feature, these params are unused; consume them explicitly.
+        #[cfg(not(feature = "mdns"))]
+        let _ = (&local_peer_id, enable_mdns);
 
         // Configure identify
         let identify = identify::Behaviour::new(identify::Config::new(
@@ -198,6 +208,7 @@ impl SumChainBehaviour {
 
         Ok(Self {
             gossipsub,
+            #[cfg(feature = "mdns")]
             mdns,
             identify,
             sync,

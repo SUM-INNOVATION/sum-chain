@@ -413,6 +413,11 @@ async fn main() -> Result<()> {
                     listen_addr: cfg.network.listen_addr,
                     bootnodes: cfg.network.bootnodes,
                     node_key_file: Some(node_key_file),
+                    // Fix: previously `cfg.network.mdns` was parsed but never wired
+                    // (enable_mdns fell back to Default=true). Now honored — and mDNS
+                    // is only compiled at all under the p2p `mdns` feature (off for
+                    // production), so in mainnet builds this is inert.
+                    enable_mdns: cfg.network.mdns,
                     ..Default::default()
                 },
                 cfg.rpc.addr.parse().context("Invalid RPC address")?,
