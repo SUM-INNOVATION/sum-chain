@@ -39,13 +39,7 @@ ignore = [
     # owner: execution / wasmer-runtime area   target: consolidated mainnet release
     # expiry: rkyv >= 0.8.17 in Cargo.lock
     "RUSTSEC-2026-0235",
-    # ── #204 PRODUCTION (hard mainnet blocker) ─────────────────────────────────
-    # time 0.3.44 — parse stack-exhaustion DoS. Fix (>=0.3.47) REQUIRES Rust 1.88 >
-    # pinned 1.85 MSRV, so remediation is a workspace-wide MSRV decision.
-    # path : bridge -> ethers -> ethers-providers -> jsonwebtoken -> simple_asn1 -> time
-    # owner: platform / toolchain (MSRV)   target: consolidated mainnet release
-    # expiry: workspace MSRV 1.85->1.88 lands AND time >= 0.3.47 in Cargo.lock
-    "RUSTSEC-2026-0009",
+    # ── #204 RESOLVED — time RUSTSEC-2026-0009 fixed by MSRV 1.85->1.88 + time>=0.3.47 (this PR). ──
     # ── #205 DEV (signed-release blocker absent security-owner acceptance) ──────
     # h2 0.3.27 — unbounded empty DATA frames DoS; 0 default-feature prod roots.
     # path : node/rpc -> jsonrpsee -> hyper-rustls/reqwest -> hyper 0.14 -> h2 0.3
