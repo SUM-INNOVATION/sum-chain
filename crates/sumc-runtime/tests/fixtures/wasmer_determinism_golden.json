@@ -1,0 +1,14 @@
+storage_write | deploy | ok=true | gas=10000 | ret= | class=ok | journal=cf1:5643fe73087c753a4f3474981c101877dcf58e69,cf2:5643fe73087c753a4f3474981c101877dcf58e69
+storage_write | call | ok=true | gas=6200 | ret= | class=ok | journal=cf0:5643fe73087c753a4f3474981c101877dcf58e693a6b
+storage_read_absent | deploy | ok=true | gas=10000 | ret= | class=ok | journal=cf1:5643fe73087c753a4f3474981c101877dcf58e69,cf2:5643fe73087c753a4f3474981c101877dcf58e69
+storage_read_absent | call | ok=true | gas=1201 | ret= | class=ok | journal=
+normal_return | deploy | ok=true | gas=10000 | ret= | class=ok | journal=cf1:5643fe73087c753a4f3474981c101877dcf58e69,cf2:5643fe73087c753a4f3474981c101877dcf58e69
+normal_return | call | ok=true | gas=1000 | ret=000000000000000000000000000000000000000000000000000000000000000000000000000000000000 | class=ok | journal=
+trap_unreachable | deploy | ok=true | gas=10000 | ret= | class=ok | journal=cf1:5643fe73087c753a4f3474981c101877dcf58e69,cf2:5643fe73087c753a4f3474981c101877dcf58e69
+trap_unreachable | call | ok=false | gas=1000 | ret= | class=revert | journal=
+trap_div_by_zero | deploy | ok=true | gas=10000 | ret= | class=ok | journal=cf1:5643fe73087c753a4f3474981c101877dcf58e69,cf2:5643fe73087c753a4f3474981c101877dcf58e69
+trap_div_by_zero | call | ok=false | gas=1000 | ret= | class=revert | journal=
+trap_oob_memory | deploy | ok=true | gas=10000 | ret= | class=ok | journal=cf1:5643fe73087c753a4f3474981c101877dcf58e69,cf2:5643fe73087c753a4f3474981c101877dcf58e69
+trap_oob_memory | call | ok=false | gas=1000 | ret= | class=revert | journal=
+method_not_found | deploy | ok=true | gas=10000 | ret= | class=ok | journal=cf1:5643fe73087c753a4f3474981c101877dcf58e69,cf2:5643fe73087c753a4f3474981c101877dcf58e69
+method_not_found | call | ok=false | gas=0 | ret= | class=MethodNotFound | journal=
