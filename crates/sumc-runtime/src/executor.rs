@@ -82,8 +82,17 @@ impl WasmEnv {
 
 /// Contract executor - compiles and runs WASM contracts
 pub struct ContractExecutor {
-    /// WASM engine store
-    store: RwLock<Store>,
+    /// Shared compiler engine. Wasmer 7's `Store` is `!Send` (it carries VM
+    /// handles and an on-called hook), so the executor must NOT hold one — it
+    /// would make `ContractExecutor` (and everything owning it, up through the
+    /// async consensus path) `!Send`. Instead we hold the `Engine` (Send+Sync)
+    /// and clone it into a fresh, short-lived `Store` inside each synchronous
+    /// deploy/call, never crossing an `.await`. Cloned engines share the same
+    /// engine id, so a `Module` compiled against one clone instantiates cleanly
+    /// into a `Store` built from another — keeping the compiled-module cache
+    /// valid. This is engine-behavior-neutral: the determinism golden proves the
+    /// consensus-visible output is byte-identical to the held-store design.
+    engine: wasmer::Engine,
     /// Compiled contract cache
     cache: RwLock<HashMap<CodeHash, Arc<CompiledContract>>>,
     /// Contract storage
@@ -95,15 +104,25 @@ pub struct ContractExecutor {
 impl ContractExecutor {
     /// Create a new contract executor
     pub fn new(storage: Arc<ContractStorage>) -> Self {
+        // Wasmer 7.x multi-backend refactor: a compiler config no longer converts
+        // directly into an `Engine`; it must go through the sys `EngineBuilder`.
+        // `Singlepass::default()` keeps the deterministic single-pass backend
+        // (identical codegen policy to 4.x — the determinism golden proves parity).
         let compiler = Singlepass::default();
-        let store = Store::new(compiler);
+        let engine: wasmer::Engine = wasmer::sys::EngineBuilder::new(compiler).engine().into();
 
         Self {
-            store: RwLock::new(store),
+            engine,
             cache: RwLock::new(HashMap::new()),
             storage,
             metadata: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// A fresh, short-lived `Store` for one deploy/call. Cloning `self.engine`
+    /// preserves the engine id, so cached `Module`s remain instantiable.
+    fn new_store(&self) -> Store {
+        Store::new(self.engine.clone())
     }
 
     /// Compute code hash
@@ -145,9 +164,9 @@ impl ContractExecutor {
             hex::encode(code_hash)
         );
 
-        // Compile and cache module
+        // Compile and cache module (fresh store; the compiled `Module` outlives it).
         let module = {
-            let mut store = self.store.write();
+            let store = self.new_store();
             Module::new(&store, &code)?
         };
 
@@ -362,7 +381,7 @@ impl ContractExecutor {
         let module = match compiled {
             Some(c) => c.module.clone(),
             None => {
-                let mut store = self.store.write();
+                let store = self.new_store();
                 let module = Module::new(&store, &code)?;
 
                 let mut cache = self.cache.write();
@@ -395,38 +414,40 @@ impl ContractExecutor {
         // Create WASM environment
         let wasm_env = WasmEnv::new(host_env.clone());
 
-        // Create instance with imports
-        let mut store = self.store.write();
-        let function_env = FunctionEnv::new(&mut *store, wasm_env);
+        // Create instance with imports. Fresh, short-lived store (never held
+        // across an await), cloned from the shared engine so `module` (possibly
+        // compiled against another clone) stays compatible.
+        let mut store = self.new_store();
+        let function_env = FunctionEnv::new(&mut store, wasm_env);
 
-        let imports = self.create_imports(&mut *store, &function_env);
+        let imports = self.create_imports(&mut store, &function_env);
 
-        let instance = Instance::new(&mut *store, &module, &imports)?;
+        let instance = Instance::new(&mut store, &module, &imports)?;
 
         // Get memory and set in environment
         if let Ok(memory) = instance.exports.get_memory("memory") {
-            function_env.as_mut(&mut *store).memory = Some(memory.clone());
+            function_env.as_mut(&mut store).memory = Some(memory.clone());
         }
         // Get the guest allocator so host functions can return variable-length
         // buffers (e.g. storage_read) into guest memory.
         if let Ok(alloc) = instance
             .exports
-            .get_typed_function::<i32, i32>(&*store, "alloc")
+            .get_typed_function::<i32, i32>(&store, "alloc")
         {
-            function_env.as_mut(&mut *store).alloc = Some(alloc);
+            function_env.as_mut(&mut store).alloc = Some(alloc);
         }
 
         // Find and call the method
         let func: TypedFunction<(i32, i32), i32> = instance
             .exports
-            .get_typed_function(&*store, method)
+            .get_typed_function(&store, method)
             .map_err(|_| RuntimeError::MethodNotFound(method.to_string()))?;
 
         // Allocate args in WASM memory
-        let (args_ptr, args_len) = self.write_to_memory(&instance, &mut *store, &args)?;
+        let (args_ptr, args_len) = self.write_to_memory(&instance, &mut store, &args)?;
 
         // Call the function
-        let result = func.call(&mut *store, args_ptr, args_len);
+        let result = func.call(&mut store, args_ptr, args_len);
 
         // Get events and logs
         let events = host_env.read().take_events();
@@ -436,7 +457,7 @@ impl ContractExecutor {
             Ok(ret_ptr) => {
                 // Read return value from memory
                 let return_value = if ret_ptr != 0 {
-                    self.read_from_memory(&instance, &*store, ret_ptr)?
+                    self.read_from_memory(&instance, &store, ret_ptr)?
                 } else {
                     Vec::new()
                 };

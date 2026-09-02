@@ -97,9 +97,11 @@ argon2 = "0.5"
 aes-gcm = "0.10"
 zeroize = { version = "1.7", features = ["derive"] }
 
-# WASM runtime for smart contracts
-wasmer = "4.2"
-wasmer-compiler-singlepass = "4.2"
+# WASM runtime for smart contracts (#203: 4.x -> 7.x; brings rkyv 0.8 for
+# RUSTSEC-2026-0235; MSRV 1.95 — see rust-toolchain.toml). Execution stays
+# dormant (contracts_enabled_from_height = None) until the migration gates pass.
+wasmer = "7.4"
+wasmer-compiler-singlepass = "7.4"
 
 # Ethereum bridge
 ethers = { version = "2.0", features = ["legacy"] }

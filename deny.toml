@@ -34,8 +34,8 @@ feature-depth = 1
 ignore = [
     # ── PRODUCTION (hard mainnet blockers) ──
     { id = "RUSTSEC-2026-0119", reason = "#202 hickory-proto 0.24->0.26 via node/rpc->p2p->libp2p-mdns; DoS O(n^2) name compression; expiry: hickory-proto>=0.26.1 in lock; not in beacon path" },
-    { id = "RUSTSEC-2026-0235", reason = "#203 rkyv 0.7->0.8 via state->sumc-runtime->wasmer; OOB read on malformed archive; expiry: rkyv>=0.8.17 in lock; not in beacon path" },
-    # #204 RESOLVED: time RUSTSEC-2026-0009 fixed by MSRV 1.85->1.88 + time>=0.3.47 (this PR).
+    # #203 RESOLVED: rkyv RUSTSEC-2026-0235 fixed by the wasmer 4.x->7.4 migration -- wasmer 7.4 pulls rkyv 0.8.18 (>=0.8.17) and rkyv 0.7.46 has left Cargo.lock.
+    # #204 RESOLVED: time RUSTSEC-2026-0009 fixed by MSRV 1.85->1.88 + time>=0.3.47.
     # ── DEV (signed-release blockers absent security-owner acceptance) ──
     { id = "RUSTSEC-2026-0258", reason = "#205 h2 0.3->0.4 via node/rpc->jsonrpsee->hyper 0.14 (0 default-feature prod roots); unbounded empty DATA frames DoS; expiry: h2>=0.4.16 or security-owner acceptance; not in beacon path" },
     { id = "RUSTSEC-2025-0009", reason = "#206 ring 0.16->0.17 via bridge->ethers->jsonwebtoken 8.3 (0 default-feature prod roots); AES panic under overflow-checks; expiry: ring 0.16 leaves lock or security-owner acceptance; not in beacon path" },

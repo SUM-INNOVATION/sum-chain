@@ -1,2 +1,5 @@
 [toolchain]
-channel = "1.88.0"
+# MSRV 1.95: required by wasmer / wasmer-compiler-singlepass 7.4 (#203 migration).
+# The frozen b0-pre tools are workspace-excluded and pinned to 1.85 separately
+# (RUSTUP_TOOLCHAIN in .github/workflows/b0-pre.yml), so this bump does not touch them.
+channel = "1.95.0"

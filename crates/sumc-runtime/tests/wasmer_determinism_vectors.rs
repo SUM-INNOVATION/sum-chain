@@ -74,6 +74,7 @@ fn classify_err(e: &RuntimeError) -> String {
         RuntimeError::HostFunction(_) => "HostFunction",
         RuntimeError::Serialization(_) => "Serialization",
         RuntimeError::Deserialization(_) => "Deserialization",
+        RuntimeError::EngineVersionMismatch { .. } => "EngineVersionMismatch",
     }
     .to_string()
 }
