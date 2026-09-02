@@ -23,15 +23,17 @@
 //! self-consistency; these are **NOT frozen consensus bytes**):
 //!   T-3  PROPOSED genesis-seed preimage layout + its BLAKE3 digest (synthetic in).
 //!   T-4  PROPOSED round-message + OUT preimage layout + BLAKE3 digest (synthetic).
-//!   T-5  PROPOSED domain-tag prefix-freeness (no proposed tag is a prefix of
-//!        another). The beacon/DLEQ/ECIES tag strings are owner decisions (spec
-//!        §12.1) that have not been adopted.
+//!   T-5  domain-tag prefix-freeness (no tag is a prefix of another). The ECIES
+//!        `:ctx` / `:hkdf-salt` tags are RATIFIED v1 (they byte-match the suite in
+//!        `sumchain-beacon-crypto`); the beacon genesis/round/out + DLEQ strings
+//!        remain the proposed transcript layout (spec §12.1).
 //!
-//! WHAT IS NOT LOCKED (bytes undetermined — see spec §14.2): RFC 9380 point-level
-//! hash-to-curve vectors and BLS sign/verify/PoP vectors (need a BLS12-381
-//! implementation not in this crate); DLEQ transcript bytes and ECIES ciphertext
-//! bytes (OPEN primitive choices); W1b tx ordinals and #125-owned encodings;
-//! activation heights / MARGIN. None of those are asserted here.
+//! WHAT IS NOT ASSERTED HERE (this crate carries no BLS/pairing code): the RFC 9380
+//! point-level hash-to-curve vectors and the BLS sign/verify/PoP/partial/combine
+//! vectors now live — byte-exact and cross-architecture — in `sumchain-beacon-crypto`
+//! (`vectors.rs`), and the ECIES ciphertext + `(key, nonce)` KATs in its `ecies.rs`;
+//! DLEQ transcript bytes, W1b tx ordinals and #125-owned encodings, and activation
+//! heights / MARGIN remain out of scope for this file.
 //!
 //! IMPORTANT: the T-3 / T-4 tags and layouts are PROPOSED owner decisions, not
 //! consensus; their inputs (`chain_id`, `genesis_params_hash`, compressed points)
@@ -51,18 +53,26 @@ const CS_POP: &str = "BLS_POP_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
 const CS_H2C: &str = "BLS12381G2_XMD:SHA-256_SSWU_RO_";
 
 // ---------------------------------------------------------------------------
-// PROPOSED domain-separation tags — OWNER DECISIONS, NOT ADOPTED. These are a
-// concrete #127 proposal (spec §12.1, §5.3, §8); they are NOT ratified consensus
-// strings. The T-3/T-4/T-5 checks below validate self-consistency of the
-// proposal, not any adopted byte layout.
+// Domain-separation tags. The two ECIES tags are RATIFIED v1 (#127 owner ruling):
+// they are the exact namespace strings implemented in `sumchain-beacon-crypto`
+// (`ecies.rs` `ECIES_CTX_DST` / `ECIES_HKDF_SALT`) — the HKDF-SHA-256 +
+// ChaCha20-Poly1305 suite. The superseded single-tag `:key`/`:aad` design is
+// GONE. The AEAD key/nonce are HKDF-Expand outputs under the info-labels
+// `aead-key` / `aead-nonce` appended AFTER the whole canonical context, so those
+// labels are suffixes, not standalone domain prefixes, and are not in this set.
+//
+// The beacon genesis/round/out and DLEQ tags below are the proposed transcript
+// layout (spec §12.1, §5.3): the T-3/T-4 checks validate concatenation ORDER and
+// field WIDTHS over EXPLICITLY SYNTHETIC inputs, not any live-chain byte value.
 // ---------------------------------------------------------------------------
 
 const TAG_GENESIS: &[u8] = b"OMNINODE-BEACON-GENESIS:v1:";
 const TAG_ROUND: &[u8] = b"OMNINODE-BEACON-ROUND:v1:";
 const TAG_OUT: &[u8] = b"OMNINODE-BEACON-OUT:v1:";
 const TAG_DLEQ: &[u8] = b"OMNINODE-DKG-DLEQ:v1:";
-const TAG_ECIES_KEY: &[u8] = b"OMNINODE-DKG-ECIES:v1:key";
-const TAG_ECIES_AAD: &[u8] = b"OMNINODE-DKG-ECIES:v1:aad";
+// RATIFIED v1 — must byte-match `sumchain-beacon-crypto::ecies` (drift is a bug).
+const TAG_ECIES_CTX: &[u8] = b"OMNINODE-DKG-ECIES:v1:ctx";
+const TAG_ECIES_HKDF_SALT: &[u8] = b"OMNINODE-DKG-ECIES:v1:hkdf-salt";
 
 fn sha256_hex(b: &[u8]) -> String {
     let mut h = Sha256::new();
@@ -247,8 +257,8 @@ fn t5_proposed_domain_tags_prefix_free() {
         TAG_ROUND,
         TAG_OUT,
         TAG_DLEQ,
-        TAG_ECIES_KEY,
-        TAG_ECIES_AAD,
+        TAG_ECIES_CTX,
+        TAG_ECIES_HKDF_SALT,
     ];
     for (i, a) in tags.iter().enumerate() {
         for (j, b) in tags.iter().enumerate() {

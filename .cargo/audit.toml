@@ -1,0 +1,30 @@
+# cargo-audit (RustSec) configuration — #127 item 5.
+#
+# `cargo audit` is the ACTIVE RustSec vulnerability gate (cargo-deny's advisory
+# loader cannot parse the current DB's CVSS-4.0 entries, so advisories run here
+# while license/source/duplicate policy runs under cargo-deny — see deny.toml).
+#
+# cargo audit FETCHES THE LIVE advisory database on every run, so a newly
+# published advisory against an already-present crate FAILS the build even though
+# it is not listed below. The list here is a small set of individually-justified,
+# TRACKED pre-existing advisories (SUM-INNOVATION/sum-chain#200), NONE in the
+# beacon crypto path, each needing a MAJOR cross-stack bump handled outside #127.
+# Reviewed snapshot: rustsec/advisory-db@4b27756f (2026-09-01).
+# Full context + license/dependency inventory: docs/security/DEPENDENCY-AUDIT.md.
+#
+# As each advisory is remediated (issue #200), delete its line so the gate
+# re-tightens. Keep this list in sync with deny.toml's [advisories].ignore.
+
+[advisories]
+ignore = [
+    # ── production-reachable; fix = major cross-stack bump (tracked #200) ──
+    "RUSTSEC-2026-0119", # hickory-proto 0.24 (sumchain-p2p) -> 0.26; DoS O(n^2) name compression
+    "RUSTSEC-2026-0235", # rkyv 0.7 (sumchain-state/consensus) -> 0.8; OOB read on malformed archive
+    "RUSTSEC-2026-0009", # time 0.3.44 -> 0.3.47 requires Rust 1.88 > pinned 1.85 MSRV; parse DoS
+    # ── ethers EVM-bridge client stack; 0 default-feature prod roots (tracked #200) ──
+    "RUSTSEC-2026-0258", # h2 0.3 -> 0.4; unbounded empty DATA frames DoS
+    "RUSTSEC-2025-0009", # ring 0.16 -> 0.17; AES panic under overflow-checks
+    "RUSTSEC-2026-0104", # rustls-webpki 0.101 -> 0.103; CRL-parse panic
+    "RUSTSEC-2026-0098", # rustls-webpki 0.101 -> 0.103; URI name-constraint acceptance
+    "RUSTSEC-2026-0099", # rustls-webpki 0.101 -> 0.103; wildcard name-constraint acceptance
+]

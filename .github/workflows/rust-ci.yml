@@ -61,6 +61,13 @@ jobs:
           fi
           echo "ok - sumchain-wire is a pure leaf (no workspace-internal dependencies)"
 
+      # #127 reconciliation guard: fail if any SUPERSEDED beacon construct (the dead
+      # ECIES :key/:aad tags, XChaCha20 / Ristretto / Curve25519 / zero-nonce in
+      # beacon code, hardcoded finality_depth(6), or the stale "carriers not landed"
+      # comment) re-appears. Ratified rejection NOTES in doc-comments/spec are allowed.
+      - name: BR1 reconciliation regression guard (#127)
+        run: bash scripts/br1-reconciliation-guard.sh
+
       - name: Build (workspace)
         run: cargo build --workspace --locked
 
@@ -72,6 +79,37 @@ jobs:
       # cleanup PR to avoid turning legacy warnings into unrelated blockers.
       - name: Clippy (workspace, tests)
         run: cargo clippy --workspace --tests --locked
+
+  supply-chain-audit:
+    # #127 item 5 — dependency supply-chain gate.
+    #   * cargo-deny  -> license / source / duplicate (multiple-versions) policy (deny.toml)
+    #   * cargo-audit -> RustSec advisories (.cargo/audit.toml tracked exceptions)
+    # cargo-audit runs the advisory check (cargo-deny's loader cannot parse the
+    # DB's CVSS-4.0 entries). Both tools are lockfile/metadata-based and
+    # architecture-independent, so a single lane suffices. cargo audit FETCHES the
+    # live advisory DB every run, so a NEW advisory not listed in .cargo/audit.toml
+    # FAILS the build — the tracked list only defers the pre-existing ones in #200.
+    #
+    # NOTE: like build-test-clippy-aarch64, this runs on every PR/push but is NOT
+    # yet a branch-protection required context. To make it a MERGE GATE, an admin
+    # must add `supply-chain-audit` to main's required status checks.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up pinned toolchain
+        run: rustup show
+
+      - name: Install cargo-deny + cargo-audit (prebuilt)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny,cargo-audit
+
+      - name: cargo-deny — license / source / duplicate policy
+        run: cargo deny --locked check licenses sources bans
+
+      - name: cargo-audit — RustSec advisories (fails on any advisory not tracked in .cargo/audit.toml)
+        run: cargo audit
 
   build-test-clippy-aarch64:
     # C3 (issue #127 dependency hardening): build/test/clippy the ENTIRE workspace
@@ -117,6 +155,13 @@ jobs:
             exit 1
           fi
           echo "ok - sumchain-wire is a pure leaf (no workspace-internal dependencies)"
+
+      # #127 reconciliation guard: fail if any SUPERSEDED beacon construct (the dead
+      # ECIES :key/:aad tags, XChaCha20 / Ristretto / Curve25519 / zero-nonce in
+      # beacon code, hardcoded finality_depth(6), or the stale "carriers not landed"
+      # comment) re-appears. Ratified rejection NOTES in doc-comments/spec are allowed.
+      - name: BR1 reconciliation regression guard (#127)
+        run: bash scripts/br1-reconciliation-guard.sh
 
       - name: Build (workspace)
         run: cargo build --workspace --locked
