@@ -54,6 +54,11 @@ env:
   IND: tools/b0-pre-independent
   MEAS_CORE: tools/b0-pre-measure-core
   PROV: tools/b0-pre-host-provenance
+  # The frozen B0-PRE measurement tools are pinned to their ratified 1.85.0
+  # compatibility floor, DECOUPLED from the workspace MSRV. RUSTUP_TOOLCHAIN
+  # overrides rust-toolchain.toml so a workspace MSRV bump (e.g. 1.88 for #204)
+  # never changes these frozen tools' toolchain or their clippy lint surface.
+  RUSTUP_TOOLCHAIN: "1.85.0"
 
 jobs:
   b0-pre:
@@ -61,11 +66,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # rustup reads rust-toolchain.toml (channel 1.85.0) — the validator-tool compatibility floor.
-      - name: Set up pinned toolchain (validator-tool floor)
+      # Pinned to the frozen validator-tool floor 1.85.0 via RUSTUP_TOOLCHAIN (see env),
+      # independent of the workspace rust-toolchain.toml. Install it explicitly so the
+      # override resolves even though the toolchain file names a newer channel.
+      - name: Set up pinned toolchain (frozen validator-tool floor 1.85.0)
         run: |
+          rustup toolchain install 1.85.0 --profile minimal --component clippy rustfmt
           rustup show
-          rustup component add clippy rustfmt
 
       # --- B0-PRE RETIREMENT contract (#196) ---------------------------------
       # Assert the retirement marker + UNBOUND live authority, and prove the shared production gate
