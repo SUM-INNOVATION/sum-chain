@@ -8,11 +8,18 @@
 //!
 //! ## Status: NOT ACTIVATED, NOT CONSENSUS
 //!
-//! Per `BR1-BEACON-SECURITY-SPEC-DRAFT.md`, only two elements are owner-RATIFIED:
-//! `G_enc = BLS12-381 G1` and the K-rotate key lifecycle. The ECIES/DLEQ/threshold
-//! construction implemented here is **reviewer-approved PROPOSED**, not adopted.
-//! The domain-separation strings ([`DST_DLEQ`]) and preimage layouts are PROPOSED
-//! (owner decisions, not frozen consensus bytes). This crate:
+//! Per `BR1-BEACON-SECURITY-SPEC-DRAFT.md` (RATIFIED v1, owner decision
+//! 2026-09-01, #127), the BR1 construction implemented here is the **v1
+//! specification**: the profile `f=1,c=1,T=2,Q_dkg=3,n=5`, the GJKR/Pedersen +
+//! Feldman DKG, threshold-BLS combine, the ECIES suite (BLS12-381 G1 / HKDF-
+//! SHA-256 / ChaCha20-Poly1305, §8), the DLEQ construction + tag
+//! ([`DST_DLEQ`] `OMNINODE-DKG-DLEQ:v1:`, §5.3), and the beacon GENESIS/ROUND/OUT
+//! domain tags + preimage layouts (§12.1) are all **RATIFIED v1 consensus
+//! bytes** (§15 decision table rows 22–26, 17–19). Open magnitudes only (e.g.
+//! `MARGIN`) remain governance-deferred. Even so, this crate stays **NOT
+//! ACTIVATED**: it is gate-closed, wires nothing into consensus execution, and
+//! activation additionally requires an independent cryptographic audit. This
+//! crate:
 //!
 //! * is a workspace **leaf** — no production crate depends on it;
 //! * confines the `blstrs`/`blst` dependency entirely behind the [`bls`] adapter;

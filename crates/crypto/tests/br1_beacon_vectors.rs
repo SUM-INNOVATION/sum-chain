@@ -19,14 +19,16 @@
 //!        for `BLS12381G2_XMD:SHA-256_SSWU_RO_`.
 //!   T-2  little-endian u64 encoding (a standard integer encoding).
 //!
-//! PROPOSED — OWNER DECISION, NOT ADOPTED (a concrete #127 proposal checked for
-//! self-consistency; these are **NOT frozen consensus bytes**):
-//!   T-3  PROPOSED genesis-seed preimage layout + its BLAKE3 digest (synthetic in).
-//!   T-4  PROPOSED round-message + OUT preimage layout + BLAKE3 digest (synthetic).
-//!   T-5  domain-tag prefix-freeness (no tag is a prefix of another). The ECIES
-//!        `:ctx` / `:hkdf-salt` tags are RATIFIED v1 (they byte-match the suite in
-//!        `sumchain-beacon-crypto`); the beacon genesis/round/out + DLEQ strings
-//!        remain the proposed transcript layout (spec §12.1).
+//! RATIFIED v1 layout (owner decision 2026-09-01, #127; spec banner + §15
+//! decision table rows 17–19, 22–26). These lock the ratified concatenation
+//! ORDER + field WIDTHS over fixture inputs; the byte-exact real-signature
+//! beacon_output KAT is in `crates/beacon-runtime/src/wire.rs`
+//! (`tests::beacon_output_kat_ratified_v1`):
+//!   T-3  genesis-seed preimage layout + its BLAKE3 digest (fixture inputs).
+//!   T-4  round-message + OUT preimage layout + BLAKE3 digest (fixture inputs).
+//!   T-5  domain-tag prefix-freeness (no tag is a prefix of another). All six
+//!        tags — beacon GENESIS/ROUND/OUT, DLEQ, and the two ECIES tags — are
+//!        RATIFIED v1 consensus bytes (spec §12.1, §5.3, §8).
 //!
 //! WHAT IS NOT ASSERTED HERE (this crate carries no BLS/pairing code): the RFC 9380
 //! point-level hash-to-curve vectors and the BLS sign/verify/PoP/partial/combine
@@ -35,11 +37,12 @@
 //! DLEQ transcript bytes, W1b tx ordinals and #125-owned encodings, and activation
 //! heights / MARGIN remain out of scope for this file.
 //!
-//! IMPORTANT: the T-3 / T-4 tags and layouts are PROPOSED owner decisions, not
-//! consensus; their inputs (`chain_id`, `genesis_params_hash`, compressed points)
-//! are **explicitly synthetic**. They check a proposed concatenation ORDER and
-//! field WIDTHS, not any adopted or live-chain value. They must never be read as
-//! the real chain's genesis seed or beacon output.
+//! IMPORTANT: the T-3 / T-4 tags and layouts are RATIFIED v1 consensus bytes, but
+//! their INPUTS here (`chain_id`, `genesis_params_hash`, the compressed-point
+//! slot) are fixture placeholders, not live-chain values — these checks lock the
+//! ratified concatenation ORDER + field WIDTHS, and must never be read as the real
+//! chain's genesis seed or beacon output. The real byte-exact output over a valid
+//! G2 signature is KAT-locked in `beacon-runtime` `wire.rs`.
 
 use sha2::{Digest, Sha256};
 
@@ -61,9 +64,10 @@ const CS_H2C: &str = "BLS12381G2_XMD:SHA-256_SSWU_RO_";
 // `aead-key` / `aead-nonce` appended AFTER the whole canonical context, so those
 // labels are suffixes, not standalone domain prefixes, and are not in this set.
 //
-// The beacon genesis/round/out and DLEQ tags below are the proposed transcript
-// layout (spec §12.1, §5.3): the T-3/T-4 checks validate concatenation ORDER and
-// field WIDTHS over EXPLICITLY SYNTHETIC inputs, not any live-chain byte value.
+// The beacon genesis/round/out and DLEQ tags below are RATIFIED v1 consensus
+// bytes (spec §12.1, §5.3): the T-3/T-4 checks validate the ratified concatenation
+// ORDER and field WIDTHS over fixture inputs (not any live-chain byte value); the
+// real-signature byte-exact output lives in beacon-runtime wire.rs.
 // ---------------------------------------------------------------------------
 
 const TAG_GENESIS: &[u8] = b"OMNINODE-BEACON-GENESIS:v1:";
@@ -134,8 +138,7 @@ fn t1_ciphersuite_identifier_bytes() {
 
 // ---------------------------------------------------------------------------
 // T-2 (NORMATIVE) — little-endian u64 encoding (a standard integer encoding).
-//   (Its *placement* in the beacon message layout, by contrast, is PROPOSED —
-//   see T-4.)
+//   (Its *placement* in the beacon message layout is RATIFIED v1 — see T-4.)
 // ---------------------------------------------------------------------------
 #[test]
 fn t2_u64_le_encoding() {
@@ -152,83 +155,87 @@ fn t2_u64_le_encoding() {
 }
 
 // ---------------------------------------------------------------------------
-// Synthetic (ILLUSTRATIVE, NOT LIVE) inputs for the PROPOSED T-3 / T-4 layouts.
-// They exercise a PROPOSED (owner decision, not adopted) concatenation order +
-// field widths only. Real chain_id / genesis_params_hash / points are
-// deployment-owned (chain_id encoding: #125/W1b).
+// Fixture inputs for the RATIFIED v1 T-3 / T-4 layout checks. These exercise the
+// ratified concatenation ORDER + field WIDTHS (u64_le chain_id/epoch/round + a
+// 96-byte compressed-G2 slot). The chain_id/genesis_params_hash values and the
+// compressed-point slot are fixture placeholders, NOT live-chain values; the
+// byte-exact vector over a REAL G2 signature is KAT-locked in
+// `crates/beacon-runtime/src/wire.rs` (`tests::beacon_output_kat_ratified_v1`).
+// This crate carries no BLS code, so it cannot mint a real point here — it locks
+// the layout, wire.rs locks the real bytes.
 // ---------------------------------------------------------------------------
-const SYN_CHAIN_ID: [u8; 4] = [0xAA, 0xBB, 0xCC, 0xDD];
+const SYN_CHAIN_ID: u64 = 0xAABB_CCDD; // u64_le, matching the ratified layout
 const SYN_GENESIS_PARAMS_HASH: [u8; 32] = [0x11; 32];
 const SYN_EPOCH: u64 = 7;
 const SYN_ROUND: u64 = 3;
-const SYN_SIGMA_PREV: [u8; 96] = [0x22; 96]; // stand-in compressed G2
-const SYN_SIGMA_R: [u8; 96] = [0x33; 96]; // stand-in compressed G2
+const SYN_SIGMA_PREV: [u8; 96] = [0x22; 96]; // compressed-G2 slot placeholder
+const SYN_SIGMA_R: [u8; 96] = [0x33; 96]; // compressed-G2 slot placeholder
 
 // ---------------------------------------------------------------------------
-// T-3 (PROPOSED — owner decision, NOT adopted) — genesis seed preimage layout +
-//   BLAKE3 digest. NOT frozen consensus bytes; validates a PROPOSED construction.
-//   Sigma_0_seed = blake3( TAG_GENESIS || chain_id || genesis_params_hash )
-//   Expected preimage hex + BLAKE3 digest independently computed (Python concat
-//   + `b3sum`); inputs synthetic.
+// T-3 (RATIFIED v1 layout, §12.1) — genesis seed preimage layout + BLAKE3 digest
+//   over fixture inputs. Locks the ratified concatenation ORDER + field WIDTHS:
+//   Sigma_0_seed = blake3( TAG_GENESIS || u64_le(chain_id) || genesis_params_hash )
+//   — matching `beacon_runtime::wire::genesis_seed`. The digest is over fixture
+//   inputs (NOT a live genesis seed); the real byte-exact authority is wire.rs.
 // ---------------------------------------------------------------------------
 #[test]
-fn t3_proposed_genesis_seed_layout() {
+fn t3_genesis_seed_layout_ratified_v1() {
     let mut pre = Vec::new();
     pre.extend_from_slice(TAG_GENESIS);
-    pre.extend_from_slice(&SYN_CHAIN_ID);
+    pre.extend_from_slice(&SYN_CHAIN_ID.to_le_bytes());
     pre.extend_from_slice(&SYN_GENESIS_PARAMS_HASH);
 
-    assert_eq!(pre.len(), 63, "genesis preimage length");
+    assert_eq!(pre.len(), 67, "genesis preimage length (27 tag + 8 u64_le + 32)");
     assert_eq!(
         hex::encode(&pre),
-        "4f4d4e494e4f44452d424541434f4e2d47454e455349533a76313aaabbccdd\
-1111111111111111111111111111111111111111111111111111111111111111",
-        "PROPOSED genesis preimage layout (order/widths) mismatch"
+        "4f4d4e494e4f44452d424541434f4e2d47454e455349533a76313addccbbaa000000001111111111111111111111111111111111111111111111111111111111111111",
+        "genesis preimage layout (order/widths) mismatch"
     );
-    // BLAKE3 digest cross-checked against the independent `b3sum` implementation.
-    // PROPOSED, synthetic inputs — NOT a consensus value.
     assert_eq!(
         blake3_hex(&pre),
-        "c4e8a81a8b3cc11b6e03fb6b48d1b88322bad4d598c912194f0f2e62b6e04481",
-        "PROPOSED genesis seed BLAKE3 digest (synthetic inputs) mismatch"
+        "478071a41e9880e12b300aa6b7dfdcc51c02a4dff45f4b65c300c770bf1dca50",
+        "genesis seed BLAKE3 digest (fixture inputs) mismatch"
     );
 }
 
 // ---------------------------------------------------------------------------
-// T-4 (PROPOSED — owner decision, NOT adopted) — round message + OUT preimage
-//   layouts + BLAKE3 digests. NOT frozen consensus bytes.
-//   m_r      = TAG_ROUND || chain_id || u64_le(epoch) || u64_le(round) || compress(Sigma_prev)
-//   beacon_r = blake3( TAG_OUT || chain_id || u64_le(epoch) || u64_le(round) || compress(Sigma_r) )
+// T-4 (RATIFIED v1 layout, §12.1) — round message + OUT preimage layouts + BLAKE3
+//   digests over fixture inputs. Locks the ratified ORDER + WIDTHS:
+//   m_r      = TAG_ROUND || u64_le(chain_id) || u64_le(epoch) || u64_le(round) || compress(Sigma_prev)
+//   beacon_r = blake3( TAG_OUT || u64_le(chain_id) || u64_le(epoch) || u64_le(round) || compress(Sigma_r) )
+//   — matching `beacon_runtime::wire::{round_message, beacon_output}`. The
+//   compressed-point slot is a fixture placeholder; the byte-exact real-signature
+//   beacon_output KAT is in wire.rs (`tests::beacon_output_kat_ratified_v1`).
 // ---------------------------------------------------------------------------
 #[test]
-fn t4_proposed_round_message_and_output_layout() {
+fn t4_round_message_and_output_layout_ratified_v1() {
     // Round signing message m_r (this is the message hashed to G2 at sign time;
     // its digest here just fingerprints the byte layout, it is not the signature).
     let mut mr = Vec::new();
     mr.extend_from_slice(TAG_ROUND);
-    mr.extend_from_slice(&SYN_CHAIN_ID);
+    mr.extend_from_slice(&SYN_CHAIN_ID.to_le_bytes());
     mr.extend_from_slice(&SYN_EPOCH.to_le_bytes());
     mr.extend_from_slice(&SYN_ROUND.to_le_bytes());
     mr.extend_from_slice(&SYN_SIGMA_PREV);
-    assert_eq!(mr.len(), 141, "m_r preimage length");
+    assert_eq!(mr.len(), 145, "m_r preimage length (25 tag + 8+8+8 + 96)");
     assert_eq!(
         blake3_hex(&mr),
-        "b0cc26af2ef05c05b096570b8a274cf5cad9b802c4cf2b8a6fef7b07b16bcf83",
-        "PROPOSED m_r layout BLAKE3 fingerprint (synthetic) mismatch"
+        "ccb2dec163335002f27baf715b09e03b0457a5cdf17763800dcba257a64b60dc",
+        "m_r layout BLAKE3 fingerprint (fixture) mismatch"
     );
 
     // Beacon OUT preimage + digest.
     let mut out = Vec::new();
     out.extend_from_slice(TAG_OUT);
-    out.extend_from_slice(&SYN_CHAIN_ID);
+    out.extend_from_slice(&SYN_CHAIN_ID.to_le_bytes());
     out.extend_from_slice(&SYN_EPOCH.to_le_bytes());
     out.extend_from_slice(&SYN_ROUND.to_le_bytes());
     out.extend_from_slice(&SYN_SIGMA_R);
-    assert_eq!(out.len(), 139, "OUT preimage length");
+    assert_eq!(out.len(), 143, "OUT preimage length (23 tag + 8+8+8 + 96)");
     assert_eq!(
         blake3_hex(&out),
-        "71ccc107238dd193b1397214570098f238c433e1b2a2ddaadbeff8598b1d8073",
-        "PROPOSED beacon OUT BLAKE3 digest (synthetic) mismatch"
+        "35b49a430c62f3f6b9ad576bfcd2adbac1e2ee82fed06a312f3f89cdbaecdee6",
+        "beacon OUT BLAKE3 digest (fixture) mismatch"
     );
 
     // Chaining sensitivity: flipping one byte of Sigma_prev changes m_r's digest
@@ -244,14 +251,14 @@ fn t4_proposed_round_message_and_output_layout() {
 }
 
 // ---------------------------------------------------------------------------
-// T-5 (PROPOSED — owner decision, NOT adopted) — domain-tag prefix-freeness.
-//   Every PROPOSED tag is used as a prefix before variable-length data; if one
-//   tag were a prefix of another, two distinct domains could produce colliding
-//   preimages. Assert pairwise: distinct and neither a prefix of the other.
-//   (spec §12.1, §5.3, §8) The tag strings themselves are NOT adopted consensus.
+// T-5 (RATIFIED v1, §12.1/§5.3/§8) — domain-tag prefix-freeness.
+//   Every tag is used as a prefix before variable-length data; if one tag were a
+//   prefix of another, two distinct domains could produce colliding preimages.
+//   Assert pairwise: distinct and neither a prefix of the other. All six tags
+//   are RATIFIED v1 consensus bytes.
 // ---------------------------------------------------------------------------
 #[test]
-fn t5_proposed_domain_tags_prefix_free() {
+fn t5_domain_tags_prefix_free_ratified_v1() {
     let tags: [&[u8]; 6] = [
         TAG_GENESIS,
         TAG_ROUND,
