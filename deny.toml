@@ -26,19 +26,22 @@ feature-depth = 1
 # pre-existing exceptions (see docs/security/DEPENDENCY-AUDIT.md + tracking issue).
 # ---------------------------------------------------------------------------
 [advisories]
+# Mirrors .cargo/audit.toml. Umbrella #200, six remediation tracks (#202-#207).
+# PRODUCTION tracks (#202/#203/#204) = HARD BLOCKERS for the consolidated mainnet
+# release; DEV tracks (#205/#206/#207) = signed-release blockers absent explicit
+# security-owner acceptance. Per-exception path/owner/target/expiry live in
+# .cargo/audit.toml and docs/security/DEPENDENCY-AUDIT.md.
 ignore = [
-    # ── PRODUCTION-reachable, fix requires a MAJOR bump outside #127 ──
-    { id = "RUSTSEC-2026-0119", reason = "hickory-proto 0.24 via sumchain-p2p; fix = 0.26 major bump (p2p/DNS stack); DoS (O(n^2) name compression); not in beacon path; tracked" },
-    { id = "RUSTSEC-2026-0235", reason = "rkyv 0.7 via sumchain-state/consensus; fix = 0.8 API migration; OOB read on malformed archive; not in beacon path; tracked" },
-    { id = "RUSTSEC-2026-0009", reason = "time 0.3.44; fix 0.3.47 REQUIRES Rust 1.88 > pinned 1.85 MSRV; stack-exhaustion DoS on adversarial parse; not in beacon path; tracked" },
-    # ── ethers EVM-bridge client stack (jsonwebtoken/reqwest/quinn); 0 production
-    #    roots under default features (reachable only via the optional bridge
-    #    integration / dev deps); fix requires a MAJOR bump ──
-    { id = "RUSTSEC-2026-0258", reason = "h2 0.3 via ethers bridge client (0 default-feature prod roots); fix = 0.4; unbounded empty DATA frames DoS; not in beacon path; tracked" },
-    { id = "RUSTSEC-2025-0009", reason = "ring 0.16 via jsonwebtoken/ethers bridge client (0 default-feature prod roots); fix = 0.17; AES panic under overflow-checks; not in beacon path; tracked" },
-    { id = "RUSTSEC-2026-0104", reason = "rustls-webpki 0.101 via ethers bridge client (0 default-feature prod roots); fix = 0.103; CRL-parse panic; not in beacon path; tracked" },
-    { id = "RUSTSEC-2026-0098", reason = "rustls-webpki 0.101 via ethers bridge client (0 default-feature prod roots); fix = 0.103; URI name-constraint acceptance; not in beacon path; tracked" },
-    { id = "RUSTSEC-2026-0099", reason = "rustls-webpki 0.101 via ethers bridge client (0 default-feature prod roots); fix = 0.103; wildcard name-constraint acceptance; not in beacon path; tracked" },
+    # ── PRODUCTION (hard mainnet blockers) ──
+    { id = "RUSTSEC-2026-0119", reason = "#202 hickory-proto 0.24->0.26 via node/rpc->p2p->libp2p-mdns; DoS O(n^2) name compression; expiry: hickory-proto>=0.26.1 in lock; not in beacon path" },
+    { id = "RUSTSEC-2026-0235", reason = "#203 rkyv 0.7->0.8 via state->sumc-runtime->wasmer; OOB read on malformed archive; expiry: rkyv>=0.8.17 in lock; not in beacon path" },
+    { id = "RUSTSEC-2026-0009", reason = "#204 time 0.3.44 via bridge->ethers->jsonwebtoken->simple_asn1; fix>=0.3.47 REQUIRES Rust 1.88 > pinned 1.85 MSRV; expiry: MSRV bump + time>=0.3.47; not in beacon path" },
+    # ── DEV (signed-release blockers absent security-owner acceptance) ──
+    { id = "RUSTSEC-2026-0258", reason = "#205 h2 0.3->0.4 via node/rpc->jsonrpsee->hyper 0.14 (0 default-feature prod roots); unbounded empty DATA frames DoS; expiry: h2>=0.4.16 or security-owner acceptance; not in beacon path" },
+    { id = "RUSTSEC-2025-0009", reason = "#206 ring 0.16->0.17 via bridge->ethers->jsonwebtoken 8.3 (0 default-feature prod roots); AES panic under overflow-checks; expiry: ring 0.16 leaves lock or security-owner acceptance; not in beacon path" },
+    { id = "RUSTSEC-2026-0104", reason = "#207 rustls-webpki 0.101 (legacy) via node/rpc->jsonrpsee->hyper-rustls 0.24->rustls 0.21 (0 default-feature prod roots); CRL-parse panic; expiry: 0.101 leaves lock or security-owner acceptance; not in beacon path" },
+    { id = "RUSTSEC-2026-0098", reason = "#207 rustls-webpki 0.101 (legacy); URI name-constraint acceptance; expiry: 0.101 leaves lock or security-owner acceptance; not in beacon path" },
+    { id = "RUSTSEC-2026-0099", reason = "#207 rustls-webpki 0.101 (legacy); wildcard name-constraint acceptance; expiry: 0.101 leaves lock or security-owner acceptance; not in beacon path" },
 ]
 
 # ---------------------------------------------------------------------------

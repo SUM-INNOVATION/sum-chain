@@ -8,7 +8,9 @@ the two automated gates that enforce them in CI.
 - **Workspace toolchain:** Rust `1.85.0` (pinned in `rust-toolchain.toml`).
 - **Dependency graph:** 734 packages (all targets, `all-features = true`).
 - **Reviewed advisory-db revision:** `rustsec/advisory-db@4b27756f` (2026-09-01).
-- **Tracking issue for residual advisories:** SUM-INNOVATION/sum-chain#200.
+- **Tracking:** umbrella SUM-INNOVATION/sum-chain#200, decomposed into six
+  remediation tracks — #202 (hickory-proto), #203 (rkyv 0.7→0.8), #204 (time +
+  MSRV), #205 (h2), #206 (ring), #207 (rustls-webpki legacy).
 
 > **Beacon crypto path is clean.** None of the advisories below are reachable
 > from `sumchain-beacon-crypto`, `sumchain-beacon-runtime`, or `sumchain-crypto`
@@ -77,7 +79,12 @@ not this reconciliation.
 
 ## RustSec advisories
 
-### Fixed in this change (semver-compatible bumps, zero API risk)
+### Fixed in this change (semver-compatible bumps)
+
+Semver-compatible (patch/minor) bumps — the compatibility guarantee is the
+crate authors', not a claim of zero risk; they are covered by the full
+`cargo build/test --workspace --locked` regression evidence retained for this
+change (1388 passed, 0 failed).
 
 | Advisory | Crate | Bump |
 |---|---|---|
@@ -87,23 +94,30 @@ not this reconciliation.
 | RUSTSEC-2026-0001 | rkyv | 0.7.45 → 0.7.46 |
 | RUSTSEC-2026-0049 | rustls-webpki | 0.103.8 → 0.103.10 |
 
-### Tracked exceptions (fix needs a MAJOR cross-stack bump — issue #200)
+### Tracked exceptions — six remediation tracks (umbrella #200)
 
-Each is individually justified in `.cargo/audit.toml` / `deny.toml`. The gate
-still fails on any advisory **not** on this list.
+Each track is individually justified in `.cargo/audit.toml` / `deny.toml`. The
+gate still fails on any advisory **not** on this list.
 
-| Advisory | Crate | Reach | Required fix |
-|---|---|---|---|
-| RUSTSEC-2026-0119 | hickory-proto 0.24 (sumchain-p2p) | production | → 0.26 (DNS stack) |
-| RUSTSEC-2026-0235 | rkyv 0.7 (sumchain-state/consensus) | production | → 0.8 (API migration) |
-| RUSTSEC-2026-0009 | time 0.3.44 | production | → 0.3.47 (**requires Rust 1.88 > pinned 1.85**) |
-| RUSTSEC-2026-0258 | h2 0.3 (ethers bridge) | 0 default-feature prod roots | → 0.4 |
-| RUSTSEC-2025-0009 | ring 0.16 (jsonwebtoken/ethers bridge) | 0 default-feature prod roots | → 0.17 |
-| RUSTSEC-2026-0104, -0098, -0099 | rustls-webpki 0.101 (ethers bridge) | 0 default-feature prod roots | → 0.103 |
+**Blocker classification.** The three PRODUCTION tracks are **hard blockers for
+the consolidated mainnet release**. The three DEV tracks are **signed-release
+blockers absent explicit security-owner acceptance**.
 
-`ring` / `rustls-webpki` / `h2` all arrive via the `ethers` EVM-bridge client
-stack; a coordinated `ethers` upgrade likely clears several at once. The `time`
-fix is coupled to a workspace MSRV bump (1.85 → 1.88).
+| Issue | Advisory | Crate → fix | Class | Dependency path | Owner | Target release | Expiry |
+|---|---|---|---|---|---|---|---|
+| #202 | RUSTSEC-2026-0119 | hickory-proto 0.24 → 0.26 | **PROD** (hard) | node/rpc → p2p → libp2p-mdns → hickory-proto | networking / p2p | consolidated mainnet | hickory-proto ≥ 0.26.1 in lock |
+| #203 | RUSTSEC-2026-0235 | rkyv 0.7 → 0.8 | **PROD** (hard) | consensus/node → state → sumc-runtime → wasmer → rkyv | execution / wasmer-runtime | consolidated mainnet | rkyv ≥ 0.8.17 in lock |
+| #204 | RUSTSEC-2026-0009 | time 0.3.44 → 0.3.47 | **PROD** (hard) | bridge → ethers → jsonwebtoken → simple_asn1 → time | platform / toolchain (MSRV) | consolidated mainnet | MSRV 1.85→1.88 **and** time ≥ 0.3.47 |
+| #205 | RUSTSEC-2026-0258 | h2 0.3 → 0.4 | dev | node/rpc → jsonrpsee → hyper 0.14 → h2 | bridge / RPC-client | signed release | h2 ≥ 0.4.16, or security-owner acceptance |
+| #206 | RUSTSEC-2025-0009 | ring 0.16 → 0.17 | dev | bridge → ethers → jsonwebtoken 8.3 → ring 0.16 | bridge / EVM-client | signed release | ring 0.16 leaves lock, or security-owner acceptance |
+| #207 | RUSTSEC-2026-0104/-0098/-0099 | rustls-webpki 0.101 → 0.103 | dev | node/rpc → jsonrpsee → hyper-rustls 0.24 → rustls 0.21 → rustls-webpki 0.101 | bridge / RPC-client | signed release | rustls-webpki 0.101 leaves lock, or security-owner acceptance |
+
+`time` reaches the graph via the same `ethers`/`jsonwebtoken` bridge stack as the
+dev tracks, but is a **production** track because its fix (≥ 0.3.47) requires a
+**workspace-wide MSRV bump** (Rust 1.85 → 1.88) — a production-wide decision, not
+a localized bridge bump. `ring` / `rustls-webpki` / `h2` all arrive via the
+`ethers` EVM-bridge client stack; a coordinated `ethers` / `jsonwebtoken` /
+`rustls` upgrade likely clears several dev tracks at once.
 
 ### Non-security warnings (documented, non-blocking)
 
@@ -116,9 +130,12 @@ audit`, not failed, and not broadly allowed:
 
 ## Maintenance
 
-- **Remediating an advisory (#200):** apply the version bump, then delete that
-  advisory's line from **both** `.cargo/audit.toml` and `deny.toml` so the gate
-  re-tightens. Keep the two lists identical.
+- **Remediating a track (#202–#207):** land the fix so the track's **expiry
+  condition** is met, then delete that advisory's line from **both**
+  `.cargo/audit.toml` and `deny.toml` so the gate re-tightens. Keep the two lists
+  identical. A dev track (#205/#206/#207) may alternatively be cleared for a
+  signed release by the **security-owner recording explicit acceptance** — record
+  that acceptance in the child issue before removing/annotating the line.
 - **Refreshing the snapshot:** re-run `cargo audit` and
   `cargo deny --locked list --layout crate > docs/security/dependency-license-inventory.txt`,
   and update the revision/date at the top of this file.
