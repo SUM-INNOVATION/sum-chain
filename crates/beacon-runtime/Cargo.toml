@@ -11,10 +11,10 @@ publish = false
 [dependencies]
 # The #127 crypto adapter (blstrs confined behind it) — the ONLY curve/pairing edge.
 sumchain-beacon-crypto = { path = "../beacon-crypto" }
-# The merged W1b beacon wire carriers (setup family: RegisterBeaconKey/DkgDeal/
-# DkgComplaint). The signing carriers (BeaconPartialV1/BeaconFinalizeV1) are not yet
-# in main's sumchain-wire (they land with #125); this crate mirrors their exact
-# layouts locally in `wire` until then — see that module.
+# The merged W1b beacon wire carriers. The setup family (RegisterBeaconKey/DkgDeal/
+# DkgComplaint) AND the signing carriers (BeaconPartialV1/BeaconFinalizeV1) all landed
+# in main's sumchain-wire via #164; this crate re-exports the canonical frozen types
+# (no local mirror) — see the `wire` module and its conformance test.
 sumchain-wire = { workspace = true }
 # BLAKE3 for the beacon genesis-seed / output hashing (draft §12.1). A plain hash;
 # NOT a pairing dep — the blstrs confinement invariant is unaffected.

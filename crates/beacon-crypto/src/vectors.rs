@@ -19,8 +19,8 @@ use crate::bls::test_support::{
 use crate::bls::{
     aggregate_g1, combine, commitment_poly_eval, dleq_prove, dleq_verify, eval_share_le,
     feldman_check, pop_verify, verify, verify_partial, DleqContext, DleqProof, G1Point,
-    PartialSignature, PublicKey, SecretScalar, Signature, G1_COMPRESSED_SIZE, G2_COMPRESSED_SIZE,
-    SCALAR_SIZE,
+    PartialSignature, Pop, PublicKey, SecretScalar, Signature, G1_COMPRESSED_SIZE,
+    G2_COMPRESSED_SIZE, SCALAR_SIZE,
 };
 use crate::BeaconCryptoError;
 
@@ -65,6 +65,20 @@ fn vec_sign_verify_and_pop_roundtrip() {
         hex::encode(pk.to_compressed())
     );
     println!("KAT sig(MSG)           = {}", hex::encode(sig_bytes));
+
+    // Committed byte-exact cross-architecture KATs (#127 reconciliation): these must be
+    // identical on x86_64 and aarch64 (both CI legs run this), pinning the G1 pubkey (48 B)
+    // and the G2 signature (96 B) of the ratified POP ciphersuite from the fixed seed 0x11.
+    assert_eq!(
+        hex::encode(pk.to_compressed()),
+        "b96f46bdfbd686121387b9581ef1b12c4d40a7110374bf576d6fbb9fded2d96660024883f085622d76fc552e909e1988",
+        "KAT drift: pubkey g1^sk(seed 0x11)"
+    );
+    assert_eq!(
+        hex::encode(sig_bytes),
+        "a1f0ef02e787f0f11db848fd8ae5f6f3709d83ac9cb59cb5b80945122b8fb0cb3e51045fb13e86931ff2ad535e4691f60065fd581a88fe1afab020f19156e27c8a6e791d1bbbc7b92a340959d016e0d0338279556859d1d45d21bbae2c0b0517",
+        "KAT drift: sign(MSG) under seed 0x11"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -178,6 +192,19 @@ fn vec_combine_exactly_t_equals_group_signature_and_is_subset_independent() {
         "KAT combined group sig= {}",
         hex::encode(c_12.to_compressed())
     );
+
+    // Committed byte-exact cross-architecture KATs (#127): the group public key (G1) and the
+    // exactly-T Lagrange-combined group signature (G2, threshold combination).
+    assert_eq!(
+        hex::encode(s.pk_e.to_compressed()),
+        "b96f46bdfbd686121387b9581ef1b12c4d40a7110374bf576d6fbb9fded2d96660024883f085622d76fc552e909e1988",
+        "KAT drift: group public key PK_E"
+    );
+    assert_eq!(
+        hex::encode(c_12.to_compressed()),
+        "a1f0ef02e787f0f11db848fd8ae5f6f3709d83ac9cb59cb5b80945122b8fb0cb3e51045fb13e86931ff2ad535e4691f60065fd581a88fe1afab020f19156e27c8a6e791d1bbbc7b92a340959d016e0d0338279556859d1d45d21bbae2c0b0517",
+        "KAT drift: exactly-T combined group signature"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -231,6 +258,13 @@ fn vec_dleq_prove_verify_positive_and_proof_roundtrip() {
     assert!(dleq_verify(&ctx, &h, &ek_pt, &r_pt, &d_pt, &proof2));
 
     println!("KAT DLEQ proof (c||z) = {}", hex::encode(bytes));
+
+    // Committed byte-exact cross-architecture KAT (#127): the 64-byte DLEQ proof (c‖z).
+    assert_eq!(
+        hex::encode(bytes),
+        "935ff3824599373516cc41424a845f53a879932217671b6bee13c6c0a91b314cb17f06ae76b03b3315d34dd5d4b9d8e9f2cfc7cfbb3ddafa9e617b8866eb470f",
+        "KAT drift: DLEQ proof (c||z)"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -277,6 +311,15 @@ fn vec_neg_non_subgroup_point_rejected() {
         Err(BeaconCryptoError::InvalidPoint)
     );
     println!("KAT non-subgroup G1   = {}", hex::encode(bytes));
+
+    // Committed byte-exact cross-architecture negative KAT (#127): this on-curve
+    // non-subgroup G1 encoding must be identical on both arches AND rejected by the
+    // mandatory subgroup check above.
+    assert_eq!(
+        hex::encode(bytes),
+        "801f3e5d7c9bbad9f81736557493b2d1f00f2e4d6c8baac9e80726456483a2c1e0ff1e3d5c7b9ab9d8f71635547392b1",
+        "KAT drift: non-subgroup G1 negative vector"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -468,5 +511,107 @@ fn vec_neg_combine_misuse() {
     assert_eq!(
         combine(&[p1, dup]).unwrap_err(),
         BeaconCryptoError::DuplicateEvaluationPoint(1)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// REGRESSION VECTORS (captured implementation outputs) — NOT an independent
+// cryptographic proof. Each pins a byte output of the ratified BR1 suite from fixed
+// inputs so an unintended change is caught, AND exercises canonical decoding +
+// subgroup membership + a targeted malformed / wrong-domain negative (not only byte
+// equality). The expected hex is the captured output of the ratified `blstrs` impl,
+// asserted identically on x86_64 + aarch64 (both CI legs) = cross-architecture
+// agreement. Provenance-of-correctness is the independent audit (activation blocker),
+// not these vectors.
+// ---------------------------------------------------------------------------
+
+/// Hash-to-curve KAT: fixed message + ratified signing DST → exact compressed G2 point.
+#[test]
+fn regression_kat_hash_to_curve_g2() {
+    use crate::bls::{DST_POP, DST_SIG};
+    use blstrs::G2Projective;
+    use group::Curve;
+    let bytes = G2Projective::hash_to_curve(MSG, DST_SIG, &[])
+        .to_affine()
+        .to_compressed();
+    println!("KAT h2c(MSG,DST_SIG)   = {}", hex::encode(bytes));
+    // canonical decode + subgroup membership (the checked decode enforces both).
+    let decoded = Signature::from_compressed(&bytes).expect("h2c point canonical + in-subgroup");
+    assert_eq!(decoded.to_compressed(), bytes, "h2c compressed round-trip");
+    // wrong-domain negative: the same message under the PoP DST is a different point.
+    let h_pop = G2Projective::hash_to_curve(MSG, DST_POP, &[])
+        .to_affine()
+        .to_compressed();
+    assert_ne!(
+        bytes, h_pop,
+        "hash-to-curve must be domain-separated (DST_SIG != DST_POP)"
+    );
+    assert_eq!(
+        hex::encode(bytes),
+        "8cb2278c488470570cd3221d215385bddbc6fbc3fa114f1cd4159f4e0293dfbed140708f6303feca2db0d0aaf74ed25c018806ff1e9be7b430b4a03dada0a6904972016d8ec25c7e16aed6f840807583c999d1a0b6752c4c742ac022495385e0",
+        "KAT drift: hash-to-curve H(MSG) under DST_SIG"
+    );
+}
+
+/// PoP KAT: fixed scalar/public key → exact compressed PoP, plus verification.
+#[test]
+fn regression_kat_pop() {
+    let sk = SecretScalar::from_bytes_le(&seed(0x11)).unwrap();
+    let pk = sk.public_key();
+    let pop = sk.pop_prove();
+    let bytes = pop.to_compressed();
+    println!("KAT PoP(seed0x11)      = {}", hex::encode(bytes));
+    assert!(pop_verify(&pk, &pop), "honest PoP must verify");
+    // canonical decode + subgroup membership.
+    let decoded = Pop::from_compressed(&bytes).expect("PoP canonical + in-subgroup");
+    assert_eq!(decoded.to_compressed(), bytes, "PoP compressed round-trip");
+    // wrong-key negative.
+    let other = SecretScalar::from_bytes_le(&seed(0x22))
+        .unwrap()
+        .public_key();
+    assert!(
+        !pop_verify(&other, &pop),
+        "PoP must not verify under the wrong key"
+    );
+    assert_eq!(hex::encode(bytes), "85302885aea59d4387adc6ba0c828e4f61c3cecf8492122e8e3803467f0d0be1d7086d7cdb2efe6a298d6c9224251c8e16b53771dd816d04c4ae7a098486bafba600f989ed7435bb4fc48dd4b18269405ae7629ae71f3cbb78cbbbe333f6db13", "KAT drift: PoP for seed 0x11");
+}
+
+/// Partial/combine KAT: exact partial per fixed signer, the fixed transcript inputs
+/// (evaluation points x_j = 1,2), and the exact final threshold signature.
+#[test]
+fn regression_kat_partials_and_combine() {
+    let s = build_sharing();
+    let b1 = s.shares[0].1.sign(MSG).to_compressed(); // partial at x=1
+    let b2 = s.shares[1].1.sign(MSG).to_compressed(); // partial at x=2
+    println!("KAT partial(x=1)       = {}", hex::encode(b1));
+    println!("KAT partial(x=2)       = {}", hex::encode(b2));
+    // per-signer verification under vk_j + canonical decode + subgroup.
+    let p1 = PartialSignature::new(s.shares[0].0, s.shares[0].1.sign(MSG));
+    let p2 = PartialSignature::new(s.shares[1].0, s.shares[1].1.sign(MSG));
+    assert!(
+        verify_partial(&s.shares[0].2, MSG, &p1),
+        "partial x=1 verifies under vk_1"
+    );
+    assert!(
+        verify_partial(&s.shares[1].2, MSG, &p2),
+        "partial x=2 verifies under vk_2"
+    );
+    assert_eq!(Signature::from_compressed(&b1).unwrap().to_compressed(), b1);
+    assert_eq!(Signature::from_compressed(&b2).unwrap().to_compressed(), b2);
+    // exactly-T combine over the fixed transcript {(1,p1),(2,p2)} → final threshold sig.
+    let final_sig = combine(&[p1, p2]).unwrap().to_compressed();
+    // wrong-domain negative: a partial over WRONG_MSG must not verify under vk_1.
+    let bad = PartialSignature::new(s.shares[0].0, s.shares[0].1.sign(WRONG_MSG));
+    assert!(
+        !verify_partial(&s.shares[0].2, MSG, &bad),
+        "wrong-message partial must not verify"
+    );
+    assert_eq!(hex::encode(b1), "a150c676172a230c79b4ae632c9da2b2c74af6acc65563f71c56d3c8c09d30e78f689e3fa4edfb3b52e1f7e76473228700b0e3df36fda86b6da74af7775b2ac86982681e0e8e69d5be5b6eba4fa7f83803a26c588af32d4bb32ab7dc42f33075", "KAT drift: partial x=1");
+    assert_eq!(hex::encode(b2), "b3314cd076f1e202a25893cb99b25f171f7885d17ed5c9a4da6c9a5474fca006c3be3604f802bde47e9e764230cf8e440b082c8b9e6c53c95f7f5d92b46832de6e0f267cdaf491d356e374387ddf382964f46675bb2cb148af6a28efb98bbb23", "KAT drift: partial x=2");
+    // the exactly-T combine reproduces the group signature (matches the combine KAT above).
+    assert_eq!(
+        hex::encode(final_sig),
+        "a1f0ef02e787f0f11db848fd8ae5f6f3709d83ac9cb59cb5b80945122b8fb0cb3e51045fb13e86931ff2ad535e4691f60065fd581a88fe1afab020f19156e27c8a6e791d1bbbc7b92a340959d016e0d0338279556859d1d45d21bbae2c0b0517",
+        "KAT drift: exactly-T threshold signature"
     );
 }

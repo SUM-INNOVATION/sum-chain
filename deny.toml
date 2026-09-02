@@ -1,0 +1,101 @@
+# Supply-chain policy for the sumchain workspace — cargo-deny (#127 item 5).
+#
+# Scope: license / source / duplicate (multiple-versions) policy — run in CI as
+# `cargo deny check licenses sources bans`. The RustSec vulnerability gate is run
+# separately as `cargo audit` (see .cargo/audit.toml): cargo-deny's own advisory
+# loader cannot parse the current DB's CVSS-4.0 entries, and the owner-specified
+# split is deny=license/source/duplicate, audit=RustSec anyway.
+#
+# The [advisories] ignore list below is kept in sync with .cargo/audit.toml as
+# DOCUMENTATION and for the day cargo-deny's loader supports CVSS 4.0; it is NOT
+# the live gate. It is NOT a blanket allow — each entry is an individually
+# justified, tracked pre-existing advisory (SUM-INNOVATION/sum-chain#200), none in
+# the beacon crypto path (sumchain-beacon-crypto / -beacon-runtime /
+# sumchain-crypto), each needing a MAJOR cross-stack bump handled outside #127.
+# Reviewed snapshot + full inventory: docs/security/DEPENDENCY-AUDIT.md.
+
+[graph]
+# Audit every target and feature combination (most conservative surface).
+all-features = true
+
+[output]
+feature-depth = 1
+
+# ---------------------------------------------------------------------------
+# Advisories — RustSec. Vulnerabilities fail; the entries below are tracked
+# pre-existing exceptions (see docs/security/DEPENDENCY-AUDIT.md + tracking issue).
+# ---------------------------------------------------------------------------
+[advisories]
+# Mirrors .cargo/audit.toml. Umbrella #200, six remediation tracks (#202-#207).
+# PRODUCTION tracks (#202/#203/#204) = HARD BLOCKERS for the consolidated mainnet
+# release; DEV tracks (#205/#206/#207) = signed-release blockers absent explicit
+# security-owner acceptance. Per-exception path/owner/target/expiry live in
+# .cargo/audit.toml and docs/security/DEPENDENCY-AUDIT.md.
+ignore = [
+    # ── PRODUCTION (hard mainnet blockers) ──
+    { id = "RUSTSEC-2026-0119", reason = "#202 hickory-proto 0.24->0.26 via node/rpc->p2p->libp2p-mdns; DoS O(n^2) name compression; expiry: hickory-proto>=0.26.1 in lock; not in beacon path" },
+    { id = "RUSTSEC-2026-0235", reason = "#203 rkyv 0.7->0.8 via state->sumc-runtime->wasmer; OOB read on malformed archive; expiry: rkyv>=0.8.17 in lock; not in beacon path" },
+    { id = "RUSTSEC-2026-0009", reason = "#204 time 0.3.44 via bridge->ethers->jsonwebtoken->simple_asn1; fix>=0.3.47 REQUIRES Rust 1.88 > pinned 1.85 MSRV; expiry: MSRV bump + time>=0.3.47; not in beacon path" },
+    # ── DEV (signed-release blockers absent security-owner acceptance) ──
+    { id = "RUSTSEC-2026-0258", reason = "#205 h2 0.3->0.4 via node/rpc->jsonrpsee->hyper 0.14 (0 default-feature prod roots); unbounded empty DATA frames DoS; expiry: h2>=0.4.16 or security-owner acceptance; not in beacon path" },
+    { id = "RUSTSEC-2025-0009", reason = "#206 ring 0.16->0.17 via bridge->ethers->jsonwebtoken 8.3 (0 default-feature prod roots); AES panic under overflow-checks; expiry: ring 0.16 leaves lock or security-owner acceptance; not in beacon path" },
+    { id = "RUSTSEC-2026-0104", reason = "#207 rustls-webpki 0.101 (legacy) via node/rpc->jsonrpsee->hyper-rustls 0.24->rustls 0.21 (0 default-feature prod roots); CRL-parse panic; expiry: 0.101 leaves lock or security-owner acceptance; not in beacon path" },
+    { id = "RUSTSEC-2026-0098", reason = "#207 rustls-webpki 0.101 (legacy); URI name-constraint acceptance; expiry: 0.101 leaves lock or security-owner acceptance; not in beacon path" },
+    { id = "RUSTSEC-2026-0099", reason = "#207 rustls-webpki 0.101 (legacy); wildcard name-constraint acceptance; expiry: 0.101 leaves lock or security-owner acceptance; not in beacon path" },
+]
+
+# ---------------------------------------------------------------------------
+# Licenses — allow-list derived from the actual dependency graph (734 crates).
+# Every entry is a permissive / file-level-copyleft license present in the tree;
+# OR-expressions resolve via any allowed member, AND-expressions require all.
+# ---------------------------------------------------------------------------
+[licenses]
+confidence-threshold = 0.9
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",     # ICU / unicode-ident etc. — permissive Unicode-DFS
+    "Unlicense",       # public-domain dedication (OR MIT in most cases)
+    "0BSD",
+    "CC0-1.0",         # constant_time_eq / tiny-keccak / more-asserts — PD dedication
+    "MPL-2.0",         # webpki-roots / attohttpc / dynasm etc. — FILE-level copyleft; unmodified use imposes no obligation on our sources
+    "BSL-1.0",         # xxhash-rust / ryu — Boost Software License, permissive
+    "OpenSSL",         # ONLY via the `ring` 0.16 clarify below (ethers bridge client); FSF Free/Libre
+]
+# `ring` (0.16) ships a non-SPDX LICENSE file (ISC/MIT/OpenSSL amalgam). Clarify
+# it to a concrete expression so the license check is deterministic rather than
+# unlicensed. ring is dev/test-only (0 production roots).
+[[licenses.clarify]]
+crate = "ring"
+expression = "ISC AND MIT AND OpenSSL"
+license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
+
+[licenses.private]
+ignore = true   # our own workspace crates (publish=false) need no license scan
+
+# ---------------------------------------------------------------------------
+# Bans — duplicate versions surfaced as warnings (documented, not failed:
+# a 734-crate graph legitimately carries transitive-version skew). Yanked/
+# wildcard hygiene stays visible.
+# ---------------------------------------------------------------------------
+[bans]
+multiple-versions = "warn"
+# Wildcard hygiene is deferred to #117 (version convergence / publish leaf-guard):
+# many publishable workspace crates currently inherit internal path deps without
+# an explicit version req, which crates.io forbids and cargo-deny reads as `*`.
+# That is a publish-readiness concern owned by #117, not this #127 reconciliation.
+wildcards = "allow"
+highlight = "all"
+
+# ---------------------------------------------------------------------------
+# Sources — only the canonical crates.io registry; no arbitrary git/registry.
+# ---------------------------------------------------------------------------
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

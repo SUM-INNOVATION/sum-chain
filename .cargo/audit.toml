@@ -1,0 +1,70 @@
+# cargo-audit (RustSec) configuration — #127 item 5.
+#
+# `cargo audit` is the ACTIVE RustSec vulnerability gate (cargo-deny's advisory
+# loader cannot parse the current DB's CVSS-4.0 entries, so advisories run here
+# while license/source/duplicate policy runs under cargo-deny — see deny.toml).
+#
+# cargo audit FETCHES THE LIVE advisory database on every run, so a newly
+# published advisory against an already-present crate FAILS the build even though
+# it is not listed below. The list here is a small set of individually-justified,
+# TRACKED pre-existing advisories, NONE in the beacon crypto path, each needing a
+# MAJOR cross-stack bump handled outside #127.
+#
+# Umbrella tracking issue: SUM-INNOVATION/sum-chain#200, decomposed into SIX
+# remediation tracks (#202–#207). Each exception below records its child issue,
+# dependency path, owning area, target release, and EXPIRY condition. When a track
+# is remediated, delete its line here AND in deny.toml so the gate re-tightens;
+# keep the two lists identical.
+#
+# Blocker classification:
+#   * PRODUCTION tracks (#202/#203/#204) — HARD BLOCKERS for the consolidated
+#     mainnet release.
+#   * DEV tracks (#205/#206/#207) — signed-release blockers ABSENT explicit
+#     security-owner acceptance.
+#
+# Reviewed snapshot: rustsec/advisory-db@4b27756f (2026-09-01).
+# Full context + license/dependency inventory: docs/security/DEPENDENCY-AUDIT.md.
+
+[advisories]
+ignore = [
+    # ── #202 PRODUCTION (hard mainnet blocker) ─────────────────────────────────
+    # hickory-proto 0.24.4 — DoS, O(n^2) name compression.
+    # path : node/rpc -> p2p -> libp2p -> libp2p-mdns -> hickory-proto
+    # owner: networking / p2p area   target: consolidated mainnet release
+    # expiry: hickory-proto >= 0.26.1 in Cargo.lock (advisory no longer fires)
+    "RUSTSEC-2026-0119",
+    # ── #203 PRODUCTION (hard mainnet blocker) ─────────────────────────────────
+    # rkyv 0.7.46 — OOB read on malformed Rc/Arc archives; fix needs 0.8 migration.
+    # path : consensus/node/rpc -> state -> sumc-runtime -> wasmer -> wasmer-compiler -> rkyv
+    # owner: execution / wasmer-runtime area   target: consolidated mainnet release
+    # expiry: rkyv >= 0.8.17 in Cargo.lock
+    "RUSTSEC-2026-0235",
+    # ── #204 PRODUCTION (hard mainnet blocker) ─────────────────────────────────
+    # time 0.3.44 — parse stack-exhaustion DoS. Fix (>=0.3.47) REQUIRES Rust 1.88 >
+    # pinned 1.85 MSRV, so remediation is a workspace-wide MSRV decision.
+    # path : bridge -> ethers -> ethers-providers -> jsonwebtoken -> simple_asn1 -> time
+    # owner: platform / toolchain (MSRV)   target: consolidated mainnet release
+    # expiry: workspace MSRV 1.85->1.88 lands AND time >= 0.3.47 in Cargo.lock
+    "RUSTSEC-2026-0009",
+    # ── #205 DEV (signed-release blocker absent security-owner acceptance) ──────
+    # h2 0.3.27 — unbounded empty DATA frames DoS; 0 default-feature prod roots.
+    # path : node/rpc -> jsonrpsee -> hyper-rustls/reqwest -> hyper 0.14 -> h2 0.3
+    # owner: bridge / RPC-client area   target: signed release
+    # expiry: h2 >= 0.4.16 in Cargo.lock, OR security-owner records acceptance
+    "RUSTSEC-2026-0258",
+    # ── #206 DEV (signed-release blocker absent security-owner acceptance) ──────
+    # ring 0.16.20 — AES panic under overflow-checks; 0 default-feature prod roots.
+    # path : bridge -> ethers -> ethers-providers -> jsonwebtoken 8.3 -> ring 0.16
+    # owner: bridge / EVM-client area   target: signed release
+    # expiry: ring 0.16.20 leaves Cargo.lock (>=0.17 only), OR security-owner accepts
+    "RUSTSEC-2025-0009",
+    # ── #207 DEV (signed-release blocker absent security-owner acceptance) ──────
+    # rustls-webpki 0.101.7 (legacy line) — CRL panic + name-constraint acceptance;
+    # 0 default-feature prod roots. (0.103.8->0.103.10 already fixed RUSTSEC-2026-0049.)
+    # path : node/rpc -> jsonrpsee -> hyper-rustls 0.24 -> rustls 0.21 -> rustls-webpki 0.101
+    # owner: bridge / RPC-client area   target: signed release
+    # expiry: rustls-webpki 0.101.x leaves Cargo.lock, OR security-owner accepts
+    "RUSTSEC-2026-0104",
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0099",
+]

@@ -1,14 +1,37 @@
-# BR1 — Scalar-Share DKG + Chained Threshold-BLS Beacon (Security Design DRAFT)
+# BR1 — Scalar-Share DKG + Chained Threshold-BLS Beacon (Security Design — RATIFIED v1)
 
-> # ⚠ DRAFT — NOT CONSENSUS
-> **This is a security-DESIGN draft, not an adopted specification.** With one
-> exception (below), nothing here is ratified, adopted reference behavior, or
-> consensus-normative. In particular, **the beacon domain-separation strings and
-> message/preimage layouts (§12, §5, §8) are OWNER DECISIONS that have NOT been
-> adopted** — they are PROPOSED constructions pending owner ratification, not
-> frozen consensus bytes. Only items fixed by an external standard (the BLS
-> ciphersuite draft, RFC 9380, SHA-256, BLAKE3, little-endian integer encoding)
-> are treated as normative here.
+> # ✅ RATIFIED v1 (owner decision, 2026-09-01, issue #127)
+> The BR1 **construction is owner-ratified as the v1 specification**, adopted as
+> implemented in `crates/beacon-crypto` + `crates/beacon-runtime`. **This header
+> supersedes every "DRAFT / PROPOSED / OPEN / RECOMMENDED / not adopted" statement
+> below for the ratified decisions listed here**; the body is retained as the
+> security-design rationale. **RATIFIED:** the profile `f=1, c=1, T=2, Q_dkg=3, n=5`;
+> GJKR/Pedersen + Feldman DKG over BLS12-381 `Fr`; G1 keys/commitments/ECIES + G2
+> signatures; the POP BLS ciphersuite on `blstrs 0.7.1` / `blst 0.3.16`; the beacon
+> GENESIS/ROUND/OUT + DLEQ domain tags and their exact byte/preimage layouts (§12, §5)
+> as **v1 consensus bytes**; complaint adjudication (4 objective verdicts), QUAL,
+> safe-halt (`|QUAL| < Q_dkg`), chained rounds, reorg handling, and
+> fresh-randomness-after-restart, all as implemented.
+> **ECIES (supersedes §8):** ECDH-in-G1 → **HKDF-SHA-256** (salt
+> `OMNINODE-DKG-ECIES:v1:hkdf-salt`, Expand labels `aead-key` / `aead-nonce`) →
+> **ChaCha20-Poly1305**, with a **deterministic HKDF-derived key AND 12-byte nonce**
+> and the `OMNINODE-DKG-ECIES:v1:ctx` context bound as both HKDF `info` and AEAD `aad`.
+> The earlier `blake3::derive_key` / XChaCha20-Poly1305 / fixed-zero nonce / `:key` /
+> `:aad` recommendations and the Curve25519/Ristretto `G_enc` alternative are
+> **REJECTED**.
+> **Finality:** the existing genesis `finality_depth` parameter (default 3); a
+> hardcoded `6` is rejected.
+> **Still OPEN (owned by #127, never derived from B0):** the beacon/DKG **window
+> magnitudes** and **`MARGIN`** — only their ordering, validation invariants, and
+> ownership are frozen; the magnitudes await measured ≥5-validator propagation
+> evidence (an activation blocker, not a #125 blocker).
+> **Activation remains GATED** (`beacon_enabled_from_height = None`) on all five
+> pre-activation blockers: independent cryptographic audit; committed cross-architecture
+> KATs; automated advisory/license gates; measured-propagation windows + `MARGIN`; and a
+> ≥5-validator adversarial devnet (invalid dealer, false complaint, one crash, `n=4`
+> refusal, safe halt, fork/reorg).
+> Items fixed by an external standard (the BLS ciphersuite draft, RFC 9380, SHA-256,
+> BLAKE3, little-endian integer encoding) remain normative as before.
 >
 > **RATIFIED EXCEPTION — key-lifecycle direction (owner decision, 2026-07).** The
 > owner has **ratified the K-rotate encryption-key lifecycle** as the **normative
@@ -498,45 +521,40 @@ DKG time and does not change if extra dealers qualify. The topology guard binds
 The DKG deal `DkgDealV1` carries, for each recipient `j`, an ECIES ciphertext of
 the **scalar** share `s_{ij} ∈ F_r`.
 
-### 8.1 Group `G_enc` (choice is OPEN — see §15/§16)
+### 8.1 Group `G_enc` — RATIFIED: BLS12-381 `G1`
 
 `G_enc` is the group in which encryption keys `EK_j = h^{ek_j}` live, generator
-`h`, order `ρ`. Two ratifiable instantiations (both give equivalent
-confidentiality/integrity; they differ in audit surface and performance, not in
-the security *goal*):
+`h = g1`, order `ρ = r`. **RATIFIED (E-A): BLS12-381 `G1`** — a single curve for the
+whole subsystem; DLEQ over G1; keys ~48 B compressed (reference:
+`celo-threshold-bls-rs`). **The independent Curve25519 / Ristretto255 alternative
+(E-B) is REJECTED** — it would add a second curve to the audit surface. The
+ECIES/DLEQ construction runs entirely over G1.
 
-- **(E-A) Reuse BLS12-381 `G1`** — `h = g1`, `ρ = r`. Single curve for the whole
-  subsystem; DLEQ over G1; keys ~48 B compressed. Reference: `celo-threshold-bls-rs`
-  encrypts shares to keys in the scheme's public-key group.
-- **(E-B) Independent Curve25519 / Ristretto255** — `h` the Ristretto basepoint,
-  `ρ` the Ristretto group order. Smaller/faster; reuses the curve already in the
-  SRC-201 stack (`crates/crypto/src/messaging.rs`); adds a *second* curve to the
-  audit surface, and DLEQ (§5) runs over Ristretto.
+### 8.2 KDF, AEAD, nonce, AAD — RATIFIED
 
-Whichever is ratified, the ECIES/DLEQ construction is structurally identical.
-
-### 8.2 KDF, AEAD, nonce, AAD (RECOMMENDED construction; exact primitives OPEN)
-
-Following the pattern already in-tree for SRC-201
-(`blake3::derive_key(context, dh) → XChaCha20-Poly1305 with header-as-AAD`):
+RATIFIED suite (HKDF-SHA-256 + ChaCha20-Poly1305, deterministic key AND nonce):
 
 ```
 per recipient j, dealer i:
-    r_{ij}  ←$ scalars mod ρ                # fresh ephemeral per (i,j)
-    R_{ij}  = h^{r_{ij}}                     # carrier, published in the deal
-    D_{ij}  = EK_j^{r_{ij}}                  # ECDH secret ( = R_{ij}^{ek_j} )
-    key     = KDF(context, serialize(D_{ij}))          # §8.3
-    aad     = ECIES_AAD(i, j, epoch, chain_id, R_{ij}) # §8.4  (transcript binding)
-    nonce   = fixed 96/192-bit zero nonce  OR  KDF-derived        # §8.5
-    ct_{ij} = AEAD_seal(key, nonce, aad, LE_bytes(s_{ij}))        # 32-byte scalar plaintext
+    r_{ij}  ←$ scalars mod r                 # fresh ephemeral per (i,j)
+    R_{ij}  = g1^{r_{ij}}                     # carrier, published in the deal
+    D_{ij}  = EK_j^{r_{ij}}                   # ECDH secret in G1 ( = R_{ij}^{ek_j} )
+    ctx     = ECIES_CTX(chain_id, epoch, i, j, R_{ij}, EK_j)  # §8.4 — 145 bytes
+    key     = HKDF-SHA-256-Expand(salt, IKM=ser_G1(D_{ij}), info=ctx, "aead-key")[32]
+    nonce   = HKDF-SHA-256-Expand(salt, IKM=ser_G1(D_{ij}), info=ctx, "aead-nonce")[12]
+    ct_{ij} = ChaCha20Poly1305_seal(key, nonce, aad=ctx, LE_bytes(s_{ij}))  # 32-byte plaintext
 ```
 
-- **KDF** — `blake3::derive_key(context = "OMNINODE-DKG-ECIES:v1:key", D_ij_bytes)`
-  → 32-byte key (RECOMMENDED, matches repo). Alternative: HKDF-SHA-256. **OPEN.**
-- **AEAD** — XChaCha20-Poly1305 (RECOMMENDED, matches repo) or AES-256-GCM.
-  **OPEN.** Provides confidentiality + integrity of the ciphertext.
-- **Plaintext** — the 32-byte canonical little-endian encoding of the scalar
-  `s_{ij}` (fixed length; no length side channel).
+- **KDF — RATIFIED: HKDF-SHA-256** (RFC 5869), salt `"OMNINODE-DKG-ECIES:v1:hkdf-salt"`,
+  two Expand calls over the full `ctx` with labels `"aead-key"` / `"aead-nonce"`. The
+  `blake3::derive_key` alternative is **REJECTED**.
+- **AEAD — RATIFIED: ChaCha20-Poly1305** (IETF, 96-bit nonce, 16-byte tag). Both the
+  32-byte key and the 12-byte nonce are HKDF outputs — **deterministic, no transmitted
+  nonce** (mandatory for complaint-time reproducibility). XChaCha20-Poly1305 /
+  AES-256-GCM / any fixed-zero nonce are **REJECTED**.
+- **Plaintext** — the 32-byte canonical little-endian encoding of the scalar `s_{ij}`
+  (fixed length; no length side channel); a post-decrypt `< r` canonical-scalar check is
+  mandatory.
 
 ### 8.3 Symmetric key derivation
 
@@ -544,30 +562,33 @@ per recipient j, dealer i:
 per `(i, j)`, `D_{ij}` (hence `key`) is unique per ciphertext; nonce reuse across
 messages is therefore not a hazard even with a fixed nonce.
 
-### 8.4 Associated data and transcript binding
+### 8.4 Context binding (HKDF `info` + AEAD `aad`) — RATIFIED
 
-`aad` MUST bind the ciphertext to its context so a ciphertext cannot be replayed
-into another `(dealer, recipient, epoch, chain)` slot or re-paired with a
-different carrier:
+A single 145-byte context `ctx` binds the ciphertext to its slot so it cannot be
+replayed into another `(dealer, recipient, epoch, chain)` or re-paired with a
+different carrier. It is bound identically as the HKDF `info` (§8.2) **and** the AEAD
+`aad`:
 
 ```
-ECIES_AAD = "OMNINODE-DKG-ECIES:v1:aad"
-          ‖ chain_id
+ECIES_CTX = "OMNINODE-DKG-ECIES:v1:ctx"        # 25 bytes
+          ‖ u64_le(chain_id)
           ‖ u64_le(epoch)
           ‖ u32_le(i) ‖ u32_le(j)
-          ‖ serialize(R_{ij})
+          ‖ ser_G1(R_{ij})                      # 48 bytes
+          ‖ ser_G1(EK_j)                        # 48 bytes
 ```
 
-Binding `R_{ij}` into the AAD ties the AEAD tag to the exact carrier used in the
-DLEQ statement (§5.2), so complaint adjudication (§6.1) verifies over the same
-transcript the sender authenticated.
+Binding both `R_{ij}` and the recipient key `EK_j` ties the AEAD tag AND the derived
+key/nonce to the exact carrier used in the DLEQ statement (§5.2), so complaint
+adjudication (§6.1) re-derives over the same transcript the sender authenticated.
 
-### 8.5 Nonce derivation
+### 8.5 Nonce derivation — RATIFIED: HKDF-derived (deterministic)
 
-Because `key` is unique per ciphertext (§8.3), a **fixed all-zero nonce** is
-sound (RECOMMENDED, minimises bytes on-chain). A KDF-derived nonce
-(`nonce = KDF(context_nonce, D_{ij})[..N]`) is an equally-sound alternative.
-**OPEN** which is ratified; both avoid catastrophic nonce reuse.
+The 12-byte nonce is an **HKDF-SHA-256 Expand output** over `ctx` with the
+`"aead-nonce"` label (§8.2) — deterministic, unique per ciphertext (`D_{ij}` is fresh
+per `(i,j)`), and reproducible at complaint time. **A fixed/all-zero nonce is
+REJECTED:** a DKG ciphertext must be deterministically re-derivable during
+adjudication, so the nonce is bound into the KDF, never fixed or transmitted.
 
 ### 8.6 Security goals — what IS and IS NOT guaranteed
 
@@ -664,7 +685,7 @@ ECIES ciphertexts are), so reverting transcripts leaks **no shares**; `sk_j` and
 - **Fresh DKG per epoch.** Group keys are not carried across epochs; a reorg that
   crosses an epoch boundary re-runs the DKG.
 - **Consume-after boundary (§12.3).** A beacon output may be *consumed* only after
-  it is buried by `finality_depth (6) + MARGIN`. An output that a reorg could
+  it is buried by `finality_depth + MARGIN`. An output that a reorg could
   revert is therefore never consumed, so a "reveal-then-revert" observation cannot
   have influenced any consumer — withholding buys **delay, not bias**.
 - **No hard finality assumed.** The design never claims identical-across-reorg
@@ -716,7 +737,7 @@ Every validator MUST observe all of the following:
    is a protocol violation.
 5. **Bounded retention.** The private key MUST be retained through **that epoch's
    complaint deadline PLUS its finality/reorg margin** — i.e. at least until
-   `max(complaint_deadline, last_referencing_block + finality_depth(6) + MARGIN)`
+   `max(complaint_deadline, last_referencing_block + finality_depth + MARGIN)`
    (magnitudes OPEN) — so late complaints and reorg replay can still be adjudicated
    (§11.3).
 6. **Secure retirement.** When that bounded window ends, the private key MUST be
@@ -772,7 +793,7 @@ on-chain processes remain sound while a key is still decryptable:
   to let honest parties reproduce the decryption. Retiring before the complaint
   deadline would strand valid complaints.
 - **Finality safety.** An epoch-`e` transcript is only settled once buried by
-  `finality_depth(6) + MARGIN` (magnitudes OPEN). Retaining until then ensures a key
+  `finality_depth + MARGIN` (magnitudes OPEN). Retaining until then ensures a key
   is available for any adjudication that can still be triggered on a not-yet-final
   block.
 - **Reorg safety.** A reorg (§10) can revert and re-present epoch-`e` deals on the
@@ -989,18 +1010,18 @@ implementation). `X` = owned by another issue / prohibited to fix here.
 | 14 | `f=1, c=1, T=2, Q_dkg=3`; `n_crypto≥4`, `n_product≥5` | **N** | #127 | §1.2 |
 | 15 | Deterministic complaint adjudication (no count/majority) | **N** | #127 | §6.1 |
 | 16 | Objective-only penalties; absence never slashed | **N** | #127 | §6.4 |
-| 17 | Beacon tags GENESIS/ROUND/OUT + chaining layout | **P — owner decision, not adopted** | #127 owner decision | §12.1 (PROPOSED) |
-| 18 | `u64_le`/`compress(·)` primitives **N**; their placement in the beacon layout **P** | **N** primitives / **P** layout | LE + blst (primitives); #127 owner decision (layout) | §12.1 |
-| 19 | BLAKE3 / SHA-256 algorithms **N**; the *choice to use* BLAKE3 for beacon seed/output **P** | **N** algorithms / **P** beacon use | BLAKE3, RFC 9380 (algorithms); #127 owner decision (beacon use) | §12.1 / §2.1 |
-| 20 | Consume-after `≥ finality_depth(6) + MARGIN` | **P** (rule) / `MARGIN` **O** | #127 owner decision (rule); `MARGIN` open | §12.3 |
+| 17 | Beacon tags GENESIS/ROUND/OUT + chaining layout | **RATIFIED v1 (consensus bytes)** | owner-ratified | §12.1 |
+| 18 | `u64_le`/`compress(·)` primitives **N**; their placement in the beacon layout | **N** primitives / **RATIFIED v1** layout | LE + blst (primitives); owner-ratified (layout) | §12.1 |
+| 19 | BLAKE3 / SHA-256 algorithms **N**; the *choice to use* BLAKE3 for beacon seed/output | **N** algorithms / **RATIFIED v1** beacon use | BLAKE3, RFC 9380 (algorithms); owner-ratified (beacon use) | §12.1 / §2.1 |
+| 20 | Consume-after `≥ finality_depth + MARGIN` | **RATIFIED v1** (rule) / `MARGIN` magnitude **O** | owner-ratified (rule); `MARGIN` magnitude open — measured propagation | §12.3 |
 | 21 | DLEQ statement + prover/verifier equations | **N** | Chaum-Pedersen | §5.2, §5.4, §5.5 |
-| 22 | DLEQ Fiat-Shamir serialisation + `HashToScalar` | **O** | ratify | RFC 9380 `hash_to_field` w/ `DST_DLEQ` (§5.3) |
-| 23 | DLEQ domain tag string `OMNINODE-DKG-DLEQ:v1:` | **P — owner decision, not adopted** | #127 tag proposal | §5.3 |
-| 24 | ECIES group `G_enc` (E-A G1 vs E-B Ristretto) | **O** (engineering) | ratify | see §8.1, §16-note |
-| 25 | ECIES KDF (BLAKE3-derive-key vs HKDF-SHA-256) | **O** | ratify | BLAKE3-derive-key (repo pattern) |
-| 26 | ECIES AEAD (XChaCha20-Poly1305 vs AES-256-GCM) | **O** | ratify | XChaCha20-Poly1305 (repo pattern) |
-| 27 | ECIES nonce (fixed-zero vs KDF-derived) | **O** | ratify | fixed-zero (unique key per ct) |
-| 28 | ECIES AAD transcript binding fields | **N** (security goal: MUST bind i,j,epoch,chain,R) / tag strings + exact bytes **P** | #127 security goal (binding); #127 tag proposal (`OMNINODE-DKG-ECIES:v1:*`) | §8.4 |
+| 22 | DLEQ Fiat-Shamir serialisation + `HashToScalar` | **RATIFIED v1** | owner-ratified | RFC 9380 `hash_to_field` w/ `DST_DLEQ` (§5.3) |
+| 23 | DLEQ domain tag string `OMNINODE-DKG-DLEQ:v1:` | **RATIFIED v1 (consensus bytes)** | owner-ratified | §5.3 |
+| 24 | ECIES group `G_enc` | **RATIFIED v1** | owner-ratified | **BLS12-381 G1** (E-A); Ristretto (E-B) REJECTED — §8.1 |
+| 25 | ECIES KDF | **RATIFIED v1** | owner-ratified | **HKDF-SHA-256** (salt/labels §8.2); `blake3::derive_key` REJECTED |
+| 26 | ECIES AEAD | **RATIFIED v1** | owner-ratified | **ChaCha20-Poly1305**; XChaCha20 / AES-256-GCM REJECTED |
+| 27 | ECIES nonce | **RATIFIED v1** | owner-ratified | **HKDF-derived (deterministic)**; fixed-zero REJECTED — §8.5 |
+| 28 | ECIES context (`:ctx`) binding fields + exact bytes | **RATIFIED v1** | owner-ratified | binds chain_id,epoch,i,j,R_ij,EK_j as HKDF `info` + AEAD `aad` — §8.4 |
 | 29 | Encryption-key lifetime (static long-lived vs per-epoch rotated) | **RATIFIED — K-rotate (owner decision, 2026-07); normative rules in §11** | owner-ratified | §11, §16.1 |
 | 30 | W1b tx ordinals 28/29; on-chain op encodings | **X** | #125 / W1b | reference only |
 | 31 | Activation height `beacon_enabled_from_height` | **X** | ops / #127 gate | `None` until audit passes |
@@ -1040,7 +1061,7 @@ weighed; the owner ratified **K-rotate**:
   - *Forward secrecy:* a later single-key compromise exposes **at most one epoch's**
     shares; matches the issue's stated "per-epoch key rotation (forward secrecy)".
   - *Retention rule (must be spelled out):* the private key MUST live at least until
-    `max(complaint_window_end, block_of_last_referencing_deal + finality_depth(6) +
+    `max(complaint_window_end, block_of_last_referencing_deal + finality_depth +
     MARGIN)`, then be zeroized. Erasing earlier breaks complaint adjudication /
     reorg replay; erasing later erodes the forward-secrecy benefit.
   - *Model changes this forces (owner must weigh):*
@@ -1078,15 +1099,12 @@ path. The normative rules are in §11. The exact retention magnitude (`finality_
 `MARGIN`) and CF encoding remain OPEN — this decision fixes the direction and rules,
 not those bytes/magnitudes.
 
-### 16.2 Engineering-only note — ECIES curve choice (decision-table #24)
+### 16.2 RATIFIED — ECIES curve choice (decision-table #24)
 
-**(E-A) reuse BLS12-381 G1** vs **(E-B) independent Ristretto255** give
-*equivalent* confidentiality/integrity; they differ in audit surface (one curve vs
-two) and performance, **not** in security goal. This is flagged as an engineering
-decision for the implementers/auditors, **not** escalated as a security dispute.
-Recommendation: **(E-B)** if minimising bytes/latency and reusing the audited
-SRC-201 curve stack is preferred; **(E-A)** if a single-curve audit surface is
-preferred. Either is acceptable.
+`G_enc` is **RATIFIED as BLS12-381 G1 (E-A)** — a single-curve audit surface for the
+whole subsystem. The independent Curve25519 / Ristretto255 alternative (E-B) is
+**REJECTED** (it would add a second curve to the audit surface). No open dispute
+remains.
 
 ---
 
@@ -1104,8 +1122,12 @@ preferred. Either is acceptable.
 
 ---
 
-*End of BR1 beacon security-design DRAFT. Refs #127. DRAFT — NOT CONSENSUS: no
-implementation, no activation, no adopted/ratified beacon layout. The K-rotate
-key-lifecycle direction (§11, §16.1) is RATIFIED (owner decision, 2026-07); beacon
-domain strings/layouts and all other constructions remain PROPOSED pending owner
-ratification.*
+*End of BR1 beacon security-design record. Refs #127. **RATIFIED v1** (owner decision,
+2026-09-01): the construction — profile, DKG, placement, BLS/POP ciphersuite, ECIES
+suite (HKDF-SHA-256 / ChaCha20-Poly1305 / deterministic nonce over G1), beacon domain
+strings + layouts (v1 consensus bytes), adjudication, QUAL, safe-halt, chained rounds,
+reorg handling, and the K-rotate key-lifecycle direction — is adopted as implemented.
+**Activation remains gated** (`beacon_enabled_from_height = None`) on the pre-activation
+blockers (independent audit, cross-arch KATs, advisory/license automation,
+measured-propagation windows + `MARGIN`, ≥5-validator adversarial devnet); the window
+magnitudes and `MARGIN` remain the only OPEN items.*

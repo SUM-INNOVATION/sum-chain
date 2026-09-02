@@ -24,10 +24,12 @@
 //! DLEQ-pinned `D_{ij}` plus the public context, so complaint adjudication (§6.1)
 //! reproduces the decryption bit-for-bit. There is no RNG and no clock here.
 //!
-//! **Status.** The suite (HKDF-SHA-256 + ChaCha20-Poly1305) is `PROPOSED — OWNER
-//! DECISION` (§8.2, §15 #25–#28), **not** ratified; only `G_enc = G1` and K-rotate
-//! are ratified. The domain strings below are PROPOSED tags, not frozen consensus
-//! bytes.
+//! **Status.** RATIFIED v1 (#127 owner ruling): `G_enc = G1`, ECDH-in-G1 →
+//! HKDF-SHA-256 → ChaCha20-Poly1305 with a deterministic HKDF `(key, nonce)`, plus
+//! K-rotate. XChaCha20, a fixed/zero nonce, a `D_ij`-only nonce, Ristretto, and the
+//! superseded single-tag `:key`/`:aad` design are REJECTED. The domain strings
+//! below are the frozen v1 consensus bytes. Beacon *activation* stays gated on an
+//! independent cryptographic audit and the other pre-activation blockers.
 
 use crate::bls::{scalar_le_is_canonical, G1Point, G1_COMPRESSED_SIZE};
 use crate::{BeaconCryptoError, Result};
@@ -292,6 +294,15 @@ mod tests {
         let recovered = ecies_open(&d, &ctx, &ct).unwrap();
         assert_eq!(*recovered, share, "open recovers the sealed share");
         println!("KAT ECIES ct = {}", hex::encode(ct));
+
+        // Committed byte-exact cross-architecture KAT (#127): the 48-byte ECIES ciphertext
+        // of the ratified suite (ECDH-in-G1 → HKDF-SHA-256 → ChaCha20-Poly1305, deterministic
+        // HKDF key+nonce, :ctx bound as info+aad). Identical on x86_64 and aarch64.
+        assert_eq!(
+            hex::encode(ct),
+            "5ee00710541feb8276bdd0cd54d643f3088e8983d0d812aec8f6501cc2a8533627131ac219d186abe54fff280e2c16db",
+            "KAT drift: ECIES ciphertext (ratified suite)"
+        );
     }
 
     #[test]
@@ -341,5 +352,81 @@ mod tests {
             ecies_seal(&d, &ctx, &non_canonical).unwrap_err(),
             BeaconCryptoError::NonCanonicalScalar
         );
+    }
+
+    // ── #127 item 4: deterministic (key, nonce) safety ──────────────────────────
+    // Drives `derive_key_nonce` directly. The derived pair MUST (a) reproduce exactly
+    // at complaint time from identical inputs, and (b) change if ANY of chain, epoch,
+    // dealer, recipient, R_ij, EK_j, or the ephemeral (restart) randomness changes —
+    // with NO (key, nonce) reuse across distinct inputs.
+
+    /// `(ek_seed, r_seed, chain, epoch, i, j)` → the derived `(key, nonce)`.
+    fn kn(
+        ek_seed: u8,
+        r_seed: u8,
+        chain: u64,
+        epoch: u64,
+        i: u32,
+        j: u32,
+    ) -> ([u8; AEAD_KEY_LEN], [u8; AEAD_NONCE_LEN]) {
+        let ek = SecretScalar::from_bytes_le(&seed(ek_seed)).unwrap();
+        let r = SecretScalar::from_bytes_le(&seed(r_seed)).unwrap();
+        let ek_pt = ek.public_g1();
+        let r_pt = r.public_g1();
+        let d = ek.ecdh(&r_pt).unwrap();
+        let ctx = EciesContext {
+            chain_id: chain,
+            epoch,
+            dealer_i: i,
+            recipient_j: j,
+            r_ij: r_pt,
+            ek_j: ek_pt,
+        };
+        let (key, nonce) = derive_key_nonce(&d, &ctx.to_bytes());
+        (*key, nonce)
+    }
+
+    /// Complaint-time reproduction: identical full input re-derives the identical
+    /// `(key, nonce)` — the property an adjudicator relies on to recompute a
+    /// ciphertext. Tested SEPARATELY from fresh-deal uniqueness (below).
+    #[test]
+    fn ecies_kdf_reproduces_deterministically_at_complaint_time() {
+        assert_eq!(
+            kn(0x11, 0x22, 9, 7, 3, 4),
+            kn(0x11, 0x22, 9, 7, 3, 4),
+            "identical inputs must reproduce the identical (key, nonce)"
+        );
+    }
+
+    /// Fresh-deal uniqueness: changing ANY bound input changes BOTH key and nonce,
+    /// and no `(key, nonce)` pair (nor any nonce alone) repeats across distinct inputs.
+    #[test]
+    fn ecies_kdf_pair_changes_on_every_field_and_never_reuses() {
+        let base = kn(0x11, 0x22, 9, 7, 3, 4);
+        let variants = [
+            ("chain", kn(0x11, 0x22, 10, 7, 3, 4)),
+            ("epoch", kn(0x11, 0x22, 9, 8, 3, 4)),
+            ("dealer", kn(0x11, 0x22, 9, 7, 5, 4)),
+            ("recipient", kn(0x11, 0x22, 9, 7, 3, 6)),
+            ("EK_j", kn(0x31, 0x22, 9, 7, 3, 4)), // new recipient key
+            ("R_ij", kn(0x11, 0x41, 9, 7, 3, 4)), // new carrier
+            ("restart-randomness", kn(0x11, 0x52, 9, 7, 3, 4)), // fresh ephemeral on restart
+        ];
+        for (name, v) in &variants {
+            assert_ne!(v.0, base.0, "key must change when {name} changes");
+            assert_ne!(v.1, base.1, "nonce must change when {name} changes");
+        }
+        // No (key, nonce) pair — and no nonce alone — repeats across all tested inputs.
+        let mut pairs: Vec<([u8; AEAD_KEY_LEN], [u8; AEAD_NONCE_LEN])> = vec![base];
+        pairs.extend(variants.iter().map(|(_, v)| *v));
+        for a in 0..pairs.len() {
+            for b in (a + 1)..pairs.len() {
+                assert_ne!(
+                    pairs[a], pairs[b],
+                    "(key, nonce) reuse across distinct inputs"
+                );
+                assert_ne!(pairs[a].1, pairs[b].1, "nonce reuse across distinct inputs");
+            }
+        }
     }
 }
