@@ -58,6 +58,40 @@ if hits=$(grep -rniE 'not (yet )?landed|carriers?.*not.*land|land(ed)?[^.]*#125'
   echo "$hits"
 fi
 
+# ── Set D — beacon-output / chaining layout is RATIFIED v1 (#127 §12.1); no ──
+# stale PROPOSED / not-adopted / not-frozen labels may remain on its CODE
+# surfaces. `wire.rs` and the crypto vector leaf are fully-ratified beacon
+# surfaces, so ANY such phrase in them is a reconciliation regression.
+if hits=$(grep -rniE 'proposed|not adopted|not frozen consensus' \
+            crates/beacon-runtime/src/wire.rs \
+            crates/crypto/tests/br1_beacon_vectors.rs 2>/dev/null); then
+  err "stale PROPOSED/not-adopted label on a RATIFIED v1 beacon-output surface (wire.rs / vector test)"
+  echo "$hits"
+fi
+# The spec §12.1 heading must not re-acquire a PROPOSED marker.
+if hits=$(grep -nE '^###[[:space:]]*12\.1' \
+            docs/design/BR1-BEACON-SECURITY-SPEC-DRAFT.md 2>/dev/null \
+          | grep -iE 'proposed|not adopted'); then
+  err "spec §12.1 heading re-marked PROPOSED (beacon chaining layout is RATIFIED v1)"
+  echo "$hits"
+fi
+
+# ── Set E — the beacon_output KAT must stay present and byte-locked. ──
+# Value drift is caught by the test at run time; this guards against silent
+# removal or edit of the test / its frozen vectors (a real G2 signature KAT over
+# the ratified domain tag + LE preimage + canonical 96-byte compression).
+KAT_NEEDLES=(
+  'fn beacon_output_kat_ratified_v1'                                    # the KAT test
+  'fn beacon_output_negatives'                                          # the negatives
+  '6904ae11981e78d560b34500bb42b1749085c45ed68c7a7bfe3d26f9e3e92104'   # beacon_output KAT
+  'b208df346c7cabeded73631e962cde964f9f551da77a344decb6e92b06ef4446'   # compressed Sigma_r KAT
+)
+for needle in "${KAT_NEEDLES[@]}"; do
+  if ! grep -qF "$needle" crates/beacon-runtime/src/wire.rs; then
+    err "beacon_output KAT missing or altered in wire.rs (expected: $needle)"
+  fi
+done
+
 if [ "$fail" -ne 0 ]; then
   echo "BR1 reconciliation guard FAILED — see errors above." >&2
   exit 1

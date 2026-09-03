@@ -106,7 +106,7 @@ blockers absent explicit security-owner acceptance**.
 | Issue | Advisory | Crate → fix | Class | Dependency path | Owner | Target release | Expiry |
 |---|---|---|---|---|---|---|---|
 | #202 | RUSTSEC-2026-0119 | hickory-proto 0.24 → 0.26 | **PROD** (hard) | node/rpc → p2p → libp2p-mdns → hickory-proto | networking / p2p | consolidated mainnet | hickory-proto ≥ 0.26.1 in lock |
-| #203 | RUSTSEC-2026-0235 | rkyv 0.7 → 0.8 | **PROD** (hard) | consensus/node → state → sumc-runtime → wasmer → rkyv | execution / wasmer-runtime | consolidated mainnet | rkyv ≥ 0.8.17 in lock |
+| ~~#203~~ **RESOLVED** | RUSTSEC-2026-0235 | rkyv 0.7 → 0.8 ✅ | **PROD** (hard) — cleared | consensus/node → state → sumc-runtime → wasmer → rkyv | execution / wasmer-runtime | ✅ done | **met**: wasmer 4.x→5.0.6 migration brought rkyv **0.8.18** (≥ 0.8.17) and rkyv 0.7.46 left the lock; exception removed. (5.0.6 = last MIT Singlepass; 6.0.0+ is BUSL-1.1 — see WASMER-5-MIGRATION.md) |
 | #204 | RUSTSEC-2026-0009 | time 0.3.44 → 0.3.47 | **PROD** (hard) | bridge → ethers → jsonwebtoken → simple_asn1 → time | platform / toolchain (MSRV) | consolidated mainnet | MSRV 1.85→1.88 **and** time ≥ 0.3.47 |
 | #205 | RUSTSEC-2026-0258 | h2 0.3 → 0.4 | dev | node/rpc → jsonrpsee → hyper 0.14 → h2 | bridge / RPC-client | signed release | h2 ≥ 0.4.16, or security-owner acceptance |
 | #206 | RUSTSEC-2025-0009 | ring 0.16 → 0.17 | dev | bridge → ethers → jsonwebtoken 8.3 → ring 0.16 | bridge / EVM-client | signed release | ring 0.16 leaves lock, or security-owner acceptance |
