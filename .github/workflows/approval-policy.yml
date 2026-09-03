@@ -1,5 +1,23 @@
 name: Approval policy
 
+# ⚠️ DEPRECATED (#219) — superseded by `automated-review.yml`.
+#
+# This mechanism runs ONLY on review events, which is exactly the defect #219
+# fixes: after a branch update (forced by strict "must be up to date") no review
+# event fires on the new head, so the required check is never produced and the PR
+# stalls at "Expected" until a human re-approves the new head — and an approval
+# can be re-associated to a head the reviewer never saw.
+#
+# It is intentionally RETAINED for now: the branch-protection ruleset still lists
+# `approval-policy` as required, so deleting this file before the one-time ruleset
+# change would leave that check permanently unproduced and deadlock every merge.
+#
+# Removal order (see docs/governance/AUTOMATED-REVIEW.md):
+#   1. merge the PR that adds `automated-review.yml` (this file still required);
+#   2. perform the one-time ruleset change (require `automated-review`; drop
+#      `approval-policy` and the human-approval count);
+#   3. then delete this workflow in a trivial follow-up.
+#
 # Enforces the conditional approval policy from CONTRIBUTING.md:
 #   - PR authored by an admin/maintainer -> requires >= 1 admin/maintainer approval
 #   - PR authored by anyone else         -> requires >= 2 admin/maintainer approvals
