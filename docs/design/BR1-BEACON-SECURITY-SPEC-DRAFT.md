@@ -840,14 +840,15 @@ and is documented, not eliminated.
 
 ## 12. Beacon chaining domains and the consume-after boundary
 
-### 12.1 Domain-separated messages (PROPOSED — owner decision, NOT adopted)
+### 12.1 Domain-separated messages (RATIFIED v1 — consensus bytes, #127)
 
-> **PROPOSED, not consensus.** The tag strings (`GENESIS`/`ROUND`/`OUT`), the
-> concatenation order, and the field widths below are #127 **owner decisions that
-> have not been ratified**. They are presented as a concrete, self-consistent
-> proposal for review, **not** as frozen consensus bytes. Only the underlying
-> primitives — BLAKE3, SHA-256, and little-endian integer encoding — are
-> standard-fixed; the *layout that uses them* is proposed.
+> **RATIFIED v1 consensus bytes** (owner decision 2026-09-01, #127; see the
+> banner + §15 decision table rows 17–19). The tag strings (`GENESIS`/`ROUND`/
+> `OUT`), the concatenation order, and the field widths below are the frozen v1
+> layout. The underlying primitives — BLAKE3, SHA-256, and little-endian integer
+> encoding — are standard-fixed; the *layout that uses them* is now ratified.
+> Locked by a byte-exact KAT over a real G2 signature in
+> `crates/beacon-runtime/src/wire.rs` (`tests::beacon_output_kat_ratified_v1`).
 
 ```
 genesis seed:   Sigma_0_seed = blake3( "OMNINODE-BEACON-GENESIS:v1:"
