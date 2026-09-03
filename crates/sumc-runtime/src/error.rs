@@ -64,6 +64,14 @@ pub enum RuntimeError {
 
     #[error("Deserialization error: {0}")]
     Deserialization(String),
+
+    /// The WASM execution engine this binary was built with does not match the
+    /// engine identity the caller requires. Consensus-critical: contract
+    /// execution is only equivalent across nodes that share an engine identity
+    /// (see [`crate::ENGINE_IDENTITY`]). Refusing here prevents a node running a
+    /// divergent engine from executing contracts and forking the chain. (#203)
+    #[error("Engine version mismatch: expected {expected}, this binary is {found}")]
+    EngineVersionMismatch { expected: String, found: String },
 }
 
 pub type Result<T> = std::result::Result<T, RuntimeError>;

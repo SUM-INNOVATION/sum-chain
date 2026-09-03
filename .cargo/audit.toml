@@ -33,13 +33,10 @@ ignore = [
     # owner: networking / p2p area   target: consolidated mainnet release
     # expiry: hickory-proto >= 0.26.1 in Cargo.lock (advisory no longer fires)
     "RUSTSEC-2026-0119",
-    # ── #203 PRODUCTION (hard mainnet blocker) ─────────────────────────────────
-    # rkyv 0.7.46 — OOB read on malformed Rc/Arc archives; fix needs 0.8 migration.
-    # path : consensus/node/rpc -> state -> sumc-runtime -> wasmer -> wasmer-compiler -> rkyv
-    # owner: execution / wasmer-runtime area   target: consolidated mainnet release
-    # expiry: rkyv >= 0.8.17 in Cargo.lock
-    "RUSTSEC-2026-0235",
-    # ── #204 RESOLVED — time RUSTSEC-2026-0009 fixed by MSRV 1.85->1.88 + time>=0.3.47 (this PR). ──
+    # ── #203 RESOLVED — rkyv RUSTSEC-2026-0235 fixed by the wasmer 4.x->7.4 migration
+    #    (this PR): wasmer 7.4 pulls rkyv 0.8.18 (>= 0.8.17), and rkyv 0.7.46 has left
+    #    Cargo.lock entirely. Expiry condition met; exception removed. ──
+    # ── #204 RESOLVED — time RUSTSEC-2026-0009 fixed by MSRV 1.85->1.88 + time>=0.3.47. ──
     # ── #205 DEV (signed-release blocker absent security-owner acceptance) ──────
     # h2 0.3.27 — unbounded empty DATA frames DoS; 0 default-feature prod roots.
     # path : node/rpc -> jsonrpsee -> hyper-rustls/reqwest -> hyper 0.14 -> h2 0.3
