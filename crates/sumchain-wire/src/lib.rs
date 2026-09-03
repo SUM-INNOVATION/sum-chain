@@ -51,6 +51,7 @@ pub mod messaging;
 pub mod node_registry;
 pub mod policy_account;
 pub mod property;
+pub mod registry_wire;
 pub mod staking;
 pub mod supply;
 pub mod storage_metadata;
