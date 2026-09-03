@@ -53,6 +53,23 @@ Designated checks and gate paths live in `.github/automated-review.config.json`
 fresh run and a fresh verdict. Concurrency is `cancel-in-progress: true`: a
 superseded run is cancelled and the new head's run is authoritative.
 
+### Why reviews are also a trigger (clause 4 would otherwise deadlock)
+
+The workflow additionally runs on `pull_request_review`
+(`submitted`, `dismissed`). This is **additive**, not a return to the old
+review-event-only design: the PR-lifecycle triggers above already produce a
+verdict for every head on their own, so the check is never *only* driven by
+reviews.
+
+It is required to make clause 4 usable. A gate-changing PR needs an admin
+approval **on the current head**, but an approval is not a PR lifecycle event, so
+without this trigger the check would keep its pre-approval (failing) verdict.
+Pushing a commit to force a re-run does not help either: `dismiss_stale_reviews`
+drops the approval on the new head, so *approve → push → dismissed → approve*
+loops indefinitely, leaving a manual "Re-run jobs" as the only escape. With the
+review trigger, approving simply re-evaluates the current head and the gate
+clears.
+
 ### Policy integrity, and the residual risk (stated precisely)
 
 **Guaranteed:** the gate job checks out **`base.sha`**, so the decision script and
