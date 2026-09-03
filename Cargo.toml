@@ -97,9 +97,16 @@ argon2 = "0.5"
 aes-gcm = "0.10"
 zeroize = { version = "1.7", features = ["derive"] }
 
-# WASM runtime for smart contracts
-wasmer = "4.2"
-wasmer-compiler-singlepass = "4.2"
+# WASM runtime for smart contracts (#203).
+# Pinned to the LAST MIT-licensed release: Wasmer relicensed the Singlepass
+# compiler to BUSL-1.1 at v6.0.0 (production use restricted to Wasmer Sponsors).
+# 5.0.6 keeps Singlepass MIT AND already depends on rkyv ^0.8.8 (resolves to
+# >=0.8.17), which clears RUSTSEC-2026-0235 — the actual #203 goal. Exact pins
+# (`=`) so a routine bump cannot cross into a BUSL 6.x release; the deny.toml
+# license allow-list (no BUSL entry) is the backstop. MSRV 5.0.6 = 1.81 (<= our
+# 1.88), so no toolchain bump. Execution stays dormant until the migration gates.
+wasmer = "=5.0.6"
+wasmer-compiler-singlepass = "=5.0.6"
 
 # Ethereum bridge
 ethers = { version = "2.0", features = ["legacy"] }
