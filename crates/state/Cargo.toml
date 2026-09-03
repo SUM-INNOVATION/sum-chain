@@ -23,6 +23,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 parking_lot = { workspace = true }
 hex = { workspace = true }
+blake3 = { workspace = true }
 lru = "0.12"
 
 [dev-dependencies]
