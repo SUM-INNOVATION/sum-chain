@@ -11,10 +11,11 @@
 //! and `encode / try_encode / decode / decode_exact` where `decode_exact` rejects
 //! trailing bytes via `Reader::finish`. Op discriminants OR the ComputePool op
 //! namespace `0xC100` (#217 A2). The dispatch enum peeks the leading 7-byte magic
-//! (like `BeaconOperation`). When all ops land, a `ComputePoolTxData` serde
-//! wrapper will carry the opaque canonical `op_bytes: Vec<u8>` inside `TxPayload`
-//! (replace-in-place at the reserved ordinal 27); that integration is deferred so
-//! it happens once, after every op carrier exists (see the deferred list below).
+//! (like `BeaconOperation`). The `ComputePoolTxData` serde wrapper
+//! (`crate::transaction`) carries the opaque canonical `op_bytes: Vec<u8>` inside
+//! `TxPayload::ComputePool` at ordinal 27 (the reserved slot, filled in place,
+//! #130). EXECUTION stays gate-closed; mempool admission rejects ComputePool txs
+//! while dormant.
 //!
 //! ## Encoding rulings (owner, 2026-09-02)
 //! * **Ids that REFERENCE an existing entity are carried** as `[u8; 32]`

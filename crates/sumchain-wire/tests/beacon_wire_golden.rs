@@ -5,7 +5,7 @@
 //!  * the five carrier encodings (`schema_version = 1`);
 //!  * the `0xBE01..=0xBE05` beacon op sub-tags;
 //!  * the two-slot **phase** allocation `TxType::BeaconSetup = 28` /
-//!    `BeaconSigning = 29` and their `from_byte` mapping (27 stays C1-reserved);
+//!    `BeaconSigning = 29` and their `from_byte` mapping (27 is C1/ComputePool, #130);
 //!  * the `TxPayload` bincode encoding of a beacon transaction (the appended
 //!    declaration ordinals 27/28, and the frozen carrier bytes embedded verbatim).
 //!
@@ -14,7 +14,10 @@
 //! (append-only — never edit an existing constant; only add new ones).
 
 use sumchain_wire::beacon_wire::*;
-use sumchain_wire::transaction::{BeaconTxData, TransactionV2, TxPayload, TxType};
+use sumchain_wire::compute_pool_wire::{CancelJobV1, ComputePoolOperation};
+use sumchain_wire::transaction::{
+    BeaconTxData, ComputePoolTxData, TransactionV2, TxPayload, TxType,
+};
 use sumchain_wire::Address;
 
 // ── Frozen carrier encodings (schema_version = 1). ─────────────────────────────
@@ -163,14 +166,15 @@ fn op_subtags_are_frozen() {
     }
 }
 
-// ── (4) Top-level TxType ordinals are FROZEN; 27 stays C1-reserved. ────────────
+// ── (4) Top-level TxType ordinals are FROZEN; 27 is C1/ComputePool. ────────────
 #[test]
 fn txtype_ordinals_are_frozen_and_stable() {
     // Discriminants never change.
+    assert_eq!(TxType::ComputePool as u8, 27);
     assert_eq!(TxType::BeaconSetup as u8, 28);
     assert_eq!(TxType::BeaconSigning as u8, 29);
-    // from_byte mapping: 27 unregistered (C1), 28/29 the beacon phases.
-    assert_eq!(TxType::from_byte(27), None);
+    // from_byte mapping: 27 is C1/ComputePool (#130), 28/29 the beacon phases.
+    assert_eq!(TxType::from_byte(27), Some(TxType::ComputePool));
     assert_eq!(TxType::from_byte(28), Some(TxType::BeaconSetup));
     assert_eq!(TxType::from_byte(29), Some(TxType::BeaconSigning));
     // The phase→ordinal split reported by the ops matches the frozen slots.
@@ -215,8 +219,8 @@ fn txpayload_beacon_bincode_is_frozen_and_roundtrips() {
 
     // The outer bincode enum tag (declaration ordinal) sits right after
     // chain_id(u64=8) + from(20) + fee(Balance=u128=16) + nonce(u64=8) = offset
-    // 52, as a u32_le. Thanks to the reserved `ComputePoolReserved` slot at
-    // position 27, each beacon variant's positional tag EQUALS its TxType
+    // 52, as a u32_le. Thanks to the `ComputePool` slot at position 27 (#130,
+    // filled in place), each beacon variant's positional tag EQUALS its TxType
     // discriminant: BeaconSetup = 28, BeaconSigning = 29. Freezing this guards the
     // 1:1 correspondence against any reorder that would shift the frozen bytes.
     const TAG_OFFSET: usize = 8 + 20 + 16 + 8;
@@ -251,21 +255,40 @@ fn txpayload_beacon_bincode_is_frozen_and_roundtrips() {
     }
 }
 
-// ── (6) The reserved C1 positional slot 27 is unconstructable + decode-rejected. ─
+// ── (6) The C1/ComputePool slot 27 now decodes (replace-in-place, #130). ────────
 #[test]
-fn computepool_reserved_slot_27_rejects_at_decode() {
-    // Take a valid BeaconSetup tx (positional tag 28) and rewrite its outer enum
-    // tag to 27 (the reserved C1 slot). Decoding MUST fail: the reserved slot holds
-    // an uninhabited type, so bincode finds no valid inner variant. This proves a
-    // tx claiming tag 27 can never masquerade as a usable payload.
+fn computepool_slot_27_decodes_and_roundtrips() {
+    // C1/ComputePool (#130) filled the former reserved slot 27 IN PLACE: a tag-27
+    // tx now decodes to `TxPayload::ComputePool` and round-trips, with positional
+    // tag == TxType::ComputePool == 27 — and the beacon variants above STILL sit at
+    // 28/29 (proven in test (5)), so no beacon bytes shifted. EXECUTION stays
+    // gate-closed; this is purely the wire surface.
+    let op = ComputePoolOperation::CancelJob(CancelJobV1 { job_id: [0x5a; 32] });
+    let cp = TransactionV2 {
+        chain_id: 0x0102_0304_0506_0708,
+        from: Address::new([0x11; 20]),
+        fee: 1000,
+        nonce: 7,
+        payload: TxPayload::ComputePool(ComputePoolTxData::from_operation(&op).unwrap()),
+    };
+    let bytes = cp.to_bytes();
+
     const TAG_OFFSET: usize = 8 + 20 + 16 + 8;
-    let mut bytes = unhex(TX_SETUP_HEX);
-    bytes[TAG_OFFSET..TAG_OFFSET + 4].copy_from_slice(&27u32.to_le_bytes());
-    assert!(
-        TransactionV2::from_bytes(&bytes).is_err(),
-        "outer tag 27 (reserved C1 slot) must be rejected at decode"
-    );
-    // And unknown tags above the registered range likewise reject.
+    let tag = u32::from_le_bytes(bytes[TAG_OFFSET..TAG_OFFSET + 4].try_into().unwrap());
+    assert_eq!(tag, 27, "ComputePool positional tag must equal TxType 27");
+    assert_eq!(tag as u8, TxType::ComputePool as u8);
+
+    let back = TransactionV2::from_bytes(&bytes).unwrap();
+    assert_eq!(back, cp);
+    assert_eq!(back.tx_type(), TxType::ComputePool);
+    assert_eq!(back.tx_type() as u8, 27);
+    if let TxPayload::ComputePool(d) = &back.payload {
+        assert_eq!(d.decode_operation().unwrap(), op);
+    } else {
+        panic!("expected ComputePool payload");
+    }
+
+    // Unknown tags above the registered range (30+) still reject at decode.
     let mut bytes30 = unhex(TX_SETUP_HEX);
     bytes30[TAG_OFFSET..TAG_OFFSET + 4].copy_from_slice(&30u32.to_le_bytes());
     assert!(TransactionV2::from_bytes(&bytes30).is_err());

@@ -490,6 +490,7 @@ impl RpcServer {
             TxType::InferenceSettlement => "InferenceSettlement",
             TxType::InferenceAttestationV2 => "InferenceAttestationV2",
             TxType::Supply => "Supply",
+            TxType::ComputePool => "ComputePool",
             TxType::BeaconSetup => "BeaconSetup",
             TxType::BeaconSigning => "BeaconSigning",
         }
@@ -540,8 +541,12 @@ impl RpcServer {
                 .decode_operation()
                 .ok()
                 .map(|op| ident(format!("{:?}", op.wire_op()))),
-            // Uninhabited reserved C1 slot 27 — unconstructable; unreachable.
-            TxPayload::ComputePoolReserved(never) => match *never {},
+            // C1/ComputePool (#130): surface the decoded op id for observability;
+            // malformed bytes display as no action (non-panicking display path).
+            TxPayload::ComputePool(d) => d
+                .decode_operation()
+                .ok()
+                .map(|op| ident(format!("ComputePool:{:#06x}", op.op()))),
         };
 
         let asset_ref = match payload {

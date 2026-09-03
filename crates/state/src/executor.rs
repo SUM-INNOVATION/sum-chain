@@ -1827,9 +1827,22 @@ impl BlockExecutor {
                             }),
                         }
                     }
-                    // Uninhabited reserved C1/ComputePool slot 27 — unconstructable
-                    // (a decoded tx can never carry it); unreachable.
-                    TxPayload::ComputePoolReserved(never) => match *never {},
+                    TxPayload::ComputePool(_cp_data) => {
+                        // C1/ComputePool (#130). Registered payload (TxType 27).
+                        // EXECUTION is gate-CLOSED: `compute_pool_enabled_from_height`
+                        // is None (production default) and no pool executor is wired
+                        // yet, so a decoded ComputePool tx is refused FAIL-CLOSED with
+                        // NO state mutation and NO fee charged (byte/state-identical to
+                        // a chain that never saw it) — the dormant seam, mirroring
+                        // beacon at 28/29. Mempool admission rejects these upstream; this
+                        // is defense-in-depth. When C1 activates, this routes to the
+                        // pool executor. No numeric receipt code is allocated yet.
+                        Ok(TxExecutionResult {
+                            tx_hash,
+                            status: TxStatus::Failed(0),
+                            fee_paid: 0,
+                        })
+                    }
                     TxPayload::BeaconSetup(beacon_data) | TxPayload::BeaconSigning(beacon_data) => {
                         // BR1 randomness beacon (#127). Registered payload (TxType
                         // 28/29). Re-routed through the per-block accumulator built at
@@ -2891,7 +2904,14 @@ impl BlockExecutor {
                     "Supply is only supported in V2 transactions".to_string(),
                 ));
             }
-            TxPayload::ComputePoolReserved(never) => match *never {}, // uninhabited reserved slot 27
+            TxPayload::ComputePool(_) => {
+                // C1/ComputePool ops are a V2-only subprotocol; mirror the adjacent
+                // rejections on this (currently unreached) legacy path. The
+                // authoritative gate-closed handling lives in the V2 dispatch above.
+                return Err(StateError::InvalidOperation(
+                    "ComputePool ops are only supported in V2 transactions".to_string(),
+                ));
+            }
             TxPayload::BeaconSetup(_) | TxPayload::BeaconSigning(_) => {
                 // BR1 beacon ops are a V2-only subprotocol; mirror the adjacent
                 // rejections on this (currently unreached) legacy path. The

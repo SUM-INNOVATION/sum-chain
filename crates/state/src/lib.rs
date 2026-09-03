@@ -134,6 +134,16 @@ pub enum StateError {
     #[error("Beacon subprotocol not activated at this height")]
     BeaconNotActivated,
 
+    /// C1/ComputePool subprotocol is gate-closed (`compute_pool_enabled_from_height`
+    /// = None by default, fail-closed pending #130). ComputePool payloads
+    /// (`TxPayload::ComputePool`) are deterministically rejected at mempool admission
+    /// so a gate-closed ComputePool tx never enters the mempool; no receipt
+    /// (admission only). The executor independently rejects any ComputePool tx that
+    /// reaches execution with the generic `Failed(0)` receipt, mutating no state
+    /// (no ComputePool-specific receipt code is frozen).
+    #[error("ComputePool subprotocol not activated at this height")]
+    ComputePoolNotActivated,
+
     /// An education record with the same identity is already in-flight
     /// in the mempool, OR already committed in a Phase 2 education CF.
     /// Rejected at admission; no receipt (admission only).
