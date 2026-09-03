@@ -51,37 +51,40 @@ builds with `npm run build` in `sdk/typescript`.
 
 ## Review policy
 
-`main` is protected. Approval count depends on who authored the PR, and
-approvals only count from **admins or maintainers** (repo permission `admin` or
-`maintain`):
+`main` is protected, and the gate is an **independent automated review** rather
+than a human-approval count (#219). See
+[docs/governance/AUTOMATED-REVIEW.md](docs/governance/AUTOMATED-REVIEW.md).
 
-- **PRs authored by an admin/maintainer** require **1** approving review from
-  another admin/maintainer.
-- **All other PRs** (non-admin / outside contributors) require **2** approving
-  reviews from admins/maintainers.
-- A PR author's own review never counts, and stale approvals are dismissed on
-  new commits.
+The required [`automated-review`](.github/workflows/automated-review.yml) check
+runs on PR `opened` / `synchronize` / `reopened` / `ready_for_review`, so a fresh
+verdict is always produced for the **current head**. It passes only when all of:
 
-This conditional "1 if the author is an admin/maintainer, otherwise 2" rule is **not expressible in
-native branch protection or CODEOWNERS**, so it is enforced by the
-[`approval-policy`](.github/workflows/approval-policy.yml) GitHub Action, which
-is wired in as a **required status check**. It runs **only on review events**
-(and `workflow_dispatch` for manual recovery) — never on PR open/synchronize —
-so before anyone reviews there is no run and **no red mark**: the required
-`approval-policy` check is simply absent, which GitHub shows as
-"Expected — waiting for status" (pending/blocking, not red). A qualifying
-approval turns the check **green** and the PR is mergeable automatically; a new
-commit dismisses the stale approval and the check returns to waiting until
-re-review. It writes **no commit statuses** and its per-PR concurrency does
-**not** cancel (runs queue), so there are **no canceled marks**. The check only
-shows failing if a review is submitted that genuinely does not satisfy the
-policy (e.g. a non-admin approval); with admin/maintainer reviewers it never goes
-red. (GitHub no longer lets a workflow publish a custom "pending" check-run, so
-the gate is the workflow job's own pass/absent state.) `.github/CODEOWNERS`
-keeps a single
-owner entry (`* @sunhaoxiangwang`); native **"Require review from Code Owners"
-is intentionally left OFF** — with a single-owner CODEOWNERS it would deadlock
-the owner's own PRs (no other code owner could approve them).
+1. the run's head SHA **is** the PR's current head (never an older reviewed head);
+2. the branch is **up to date** with `main` (strict, unchanged);
+3. every designated CI/security check is `completed` + `success` **on that head**
+   (a success recorded against an older head does not count); and
+4. if the PR touches a **governance gate file**, a qualifying admin/maintainer
+   **approval on the current head** exists.
+
+So an ordinary PR needs **no human approval** — it merges once its checks are
+green on the current head. Human sign-off stays mandatory for exactly one class:
+**changing the gate itself** (clause 4). The policy is a pure function in
+`.github/scripts/automated_review.py` with unit tests
+(`automated_review_test.py`, run by the `automated-review-tests` job).
+
+This replaced the previous conditional "1 approval if the author is an
+admin/maintainer, otherwise 2" rule enforced by
+[`approval-policy`](.github/workflows/approval-policy.yml), which ran **only on
+review events**. Because strict up-to-date forces a branch update after every
+other merge, and no review event fires on the new head, that check was never
+produced there and the PR stalled at "Expected — waiting for status" until a
+human re-approved — the recurring toil #219 removes. `approval-policy` is
+deprecated and retained only until the one-time ruleset switch documented above.
+
+`.github/CODEOWNERS` keeps a single owner entry (`* @sunhaoxiangwang`); native
+**"Require review from Code Owners" is intentionally left OFF** — with a
+single-owner CODEOWNERS it would deadlock the owner's own PRs (no other code
+owner could approve them).
 
 ## Branch protection setup (maintainers)
 
