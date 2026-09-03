@@ -24,12 +24,27 @@ name: Automated review
 #   5. Re-asserts strict "branch must be up to date" (behind_by == 0). It does not
 #      replace that branch-protection rule — both stay on.
 #
-# SECURITY — the evaluator is never the PR's own code:
-#   `pull_request` (NOT `pull_request_target`) runs the workflow file from the
-#   BASE branch, with a read-only token and no secrets. The gate job additionally
-#   checks out `base.sha`, so the script + config it executes are the base's
-#   versions. A PR's edits to those files are DETECTED via the API diff (rule 4)
-#   and never executed. Fork PRs are evaluated identically.
+# SECURITY — scope and residual risk (stated precisely, not overclaimed):
+#   * `pull_request` (NOT `pull_request_target`) gives a read-only token and no
+#     secrets, and its check-run attaches to the PR's HEAD SHA — which is what a
+#     required status check must land on. (`pull_request_target` would run the
+#     BASE's workflow file, but its run attaches to the base SHA and so cannot
+#     satisfy a head-SHA required check; and GitHub no longer lets a workflow
+#     publish its own check-run/status to the head. Hence `pull_request`.)
+#   * POLICY INTEGRITY IS GUARANTEED: this job checks out `base.sha`, so the
+#     decision script and config it executes are always the BASE's versions. A
+#     PR cannot change the policy logic that judges it; its edits to those files
+#     are DETECTED via the API diff (clause 4) and never executed.
+#   * RESIDUAL RISK, honestly: on `pull_request` the *workflow file itself* comes
+#     from the merge ref, so a PR that rewrites THIS file (e.g. to skip the
+#     script) would run its rewritten version. Clause 4 cannot catch that, since
+#     the gutted job never calls the script. Deleting/renaming the job is safe —
+#     the required `automated-review` context is then never produced and the PR
+#     stays blocked — but a trivially-passing rewrite is not self-detectable.
+#     Mitigate at the platform layer: restrict `.github/workflows/**` via a
+#     ruleset path rule, or require admin review for `.github/**` changes. See
+#     docs/governance/AUTOMATED-REVIEW.md ("Residual risk").
+#   Fork PRs are evaluated identically (read-only token, no secrets).
 #
 # There is deliberately NO `workflow_dispatch` recovery path: GitHub does not
 # count a manually-dispatched run toward a PR's required checks, so offering one

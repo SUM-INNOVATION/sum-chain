@@ -53,15 +53,40 @@ Designated checks and gate paths live in `.github/automated-review.config.json`
 fresh run and a fresh verdict. Concurrency is `cancel-in-progress: true`: a
 superseded run is cancelled and the new head's run is authoritative.
 
-### The evaluator is never the PR's own code
+### Policy integrity, and the residual risk (stated precisely)
 
-`pull_request` (deliberately **not** `pull_request_target`) runs the workflow file
-from the **base** branch with a read-only token and no secrets. The gate job also
-checks out `base.sha`, so the script and config it executes are the **base's**
-versions. A PR's edits to those files are *detected* through the API diff
-(clause 4) and never executed. Fork PRs are evaluated identically — they simply
-cannot tamper with the evaluator, and a fork PR touching a gate file still needs
-the admin approval.
+**Guaranteed:** the gate job checks out **`base.sha`**, so the decision script and
+config it executes are always the **base's** versions. A PR **cannot change the
+policy logic that judges it**; its edits to those files are *detected* through the
+API diff (clause 4) and never executed. Fork PRs are evaluated identically
+(read-only token, no secrets), and a fork PR touching a gate file still needs the
+admin approval.
+
+**Why `pull_request` and not `pull_request_target`:** a required status check must
+land on the PR's **head SHA**. `pull_request` runs attach there.
+`pull_request_target` would run the **base's** workflow file — attractive for
+tamper-resistance — but its run attaches to the **base** SHA, so it cannot satisfy
+a head-SHA required check; and GitHub no longer permits a workflow to publish its
+own check-run/status onto the head (the constraint the previous mechanism also
+hit). So `pull_request` is the only trigger that actually gates.
+
+**Residual risk (not overclaimed):** with `pull_request`, the *workflow file
+itself* comes from the merge ref. A PR that **rewrites
+`.github/workflows/automated-review.yml`** (e.g. to skip the script) would run its
+rewritten version, and clause 4 cannot catch that because the gutted job never
+calls the script.
+
+- **Deleting or renaming the job is safe**: the required `automated-review`
+  context is then never produced, so the PR stays blocked.
+- **A trivially-passing rewrite is not self-detectable.** Mitigate at the
+  **platform** layer, which is where this class of risk belongs:
+  - add a ruleset **"Restrict file paths"** rule covering `.github/workflows/**`
+    (and `.github/scripts/**`), **or**
+  - require admin review for `.github/**` changes.
+
+  Note this repo deliberately leaves native **"Require review from Code Owners"
+  OFF** (a single-owner `CODEOWNERS` would deadlock the owner's own PRs), so the
+  path-restriction rule is the recommended form.
 
 There is intentionally **no `workflow_dispatch`** path: a dispatched run cannot
 satisfy a PR's required check, so offering one only misleads.
@@ -87,7 +112,12 @@ In **Settings → Rules → Rulesets → the `main` ruleset** (or Branch protect
    - ✅ Existing required CI checks (`build-test-clippy`,
      `build-test-clippy-aarch64`, `supply-chain-audit`) stay required — clause 3
      additionally binds them to the current head.
-5. **Then** delete `.github/workflows/approval-policy.yml` in a trivial follow-up
+5. **Recommended (closes the residual risk above):** add a **"Restrict file
+   paths"** rule to the same ruleset covering `.github/workflows/**` and
+   `.github/scripts/**`, so a PR cannot rewrite the gate workflow to trivially
+   pass. Without it, clause 4 covers *script/config* tampering but not a rewrite
+   of the workflow file itself.
+6. **Then** delete `.github/workflows/approval-policy.yml` in a trivial follow-up
    PR (it is retained until this step so the still-required `approval-policy`
    check cannot become permanently unproduced).
 
