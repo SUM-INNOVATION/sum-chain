@@ -81,10 +81,18 @@ produced there and the PR stalled at "Expected — waiting for status" until a
 human re-approved — the recurring toil #219 removes. `approval-policy` is
 deprecated and retained only until the one-time ruleset switch documented above.
 
-`.github/CODEOWNERS` keeps a single owner entry (`* @sunhaoxiangwang`); native
-**"Require review from Code Owners" is intentionally left OFF** — with a
-single-owner CODEOWNERS it would deadlock the owner's own PRs (no other code
-owner could approve them).
+`.github/CODEOWNERS` is **path-scoped to the governance files** (the gate workflow,
+its scripts, and CODEOWNERS itself), with **two** owners. That lets native
+**"Require review from Code Owners" be enabled** while ordinary PRs still need no
+human approval: code-owner review is demanded only for PRs touching owned paths.
+
+This replaces the previous whole-tree entry (`* @sunhaoxiangwang`), under which
+code-owner review had to stay OFF — a single owner cannot approve their own PR,
+so it deadlocked the owner's changes. Scoping the file and naming two owners
+removes both problems. It is the compensating control for setting the approval
+count to zero, standing in for the ruleset "Restrict file paths" rule, which
+GitHub rejects on this organization's plan
+(see [docs/governance/AUTOMATED-REVIEW.md](docs/governance/AUTOMATED-REVIEW.md)).
 
 ## Branch protection setup (maintainers)
 
