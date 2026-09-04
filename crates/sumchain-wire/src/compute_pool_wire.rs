@@ -44,6 +44,31 @@
 //! `DeclineWorkUnitV1`, `ExpireWorkUnitV1`, `CancelJobV1`, `AssignWorkUnitV1`,
 //! `ReassignWorkUnitV1`.
 //!
+//! ## The eight ops at a glance (#213)
+//!
+//! Every carrier is FIXED-WIDTH, so `LEN` is exact — there is no length prefix
+//! and no variable field anywhere in the family.
+//!
+//! | op | magic | type | LEN |
+//! |---|---|---|---|
+//! | `0xC101` | `CPJBv1\0` | [`CreateComputePoolJobV1`] | 77 |
+//! | `0xC102` | `CPOFv1\0` | [`PublishBondedOfferV1`] | 53 |
+//! | `0xC103` | `CPACv1\0` | [`AcceptWorkUnitV1`] | 129 |
+//! | `0xC104` | `CPDCv1\0` | [`DeclineWorkUnitV1`] | 81 |
+//! | `0xC105` | `CPEXv1\0` | [`ExpireWorkUnitV1`] | 81 |
+//! | `0xC106` | `CPCNv1\0` | [`CancelJobV1`] | 41 |
+//! | `0xC107` | `CPASv1\0` | [`AssignWorkUnitV1`] | 81 |
+//! | `0xC108` | `CPRAv1\0` | [`ReassignWorkUnitV1`] | 81 |
+//!
+//! Per-op byte-offset tables are on each type; the ordinal-27 **routing prefix**
+//! is on [`WorkItemRef`]. Frozen golden vectors for all eight (plus the prefix
+//! offsets) live in `tests/compute_pool_wire_golden.rs`, which is append-only.
+//! The same tables are mirrored in `docs/design/C1-COMPUTEPOOL-OPS.md`.
+//!
+//! **Architecture independence is structural:** every field is fixed-width and
+//! explicitly little-endian and no encoder consults host layout, so the vectors
+//! are identical on x86_64 and aarch64 — CI runs the suite on both.
+//!
 //! * `AssignWorkUnit`/`ReassignWorkUnit` carry only a `WorkItemRef`; their
 //!   winner/score (binding the RATIFIED v1 `beacon_output`, #223) is
 //!   consensus-computed in the dormant execution layer, not on the wire.
@@ -69,6 +94,21 @@ pub const OP_REASSIGN_UNIT: u16 = COMPUTE_POOL_OP_NAMESPACE | 0x08;
 
 /// A work-item coordinate on the wire: `job_id ‖ unit_id ‖ generation`
 /// (draft §F routing order). 72 bytes.
+///
+/// This is the **ordinal-27 routing prefix**. It is embedded verbatim at the same
+/// place in every op that targets a work item (accept / decline / expire / assign
+/// / reassign), i.e. at absolute offset `+9`, immediately after that op's 9-byte
+/// `MAGIC ‖ schema_version` header:
+///
+/// | off (in prefix) | size | field | notes |
+/// |---|---|---|---|
+/// | 0 | 32 | `job_id` | derived (§K); references an existing job |
+/// | 32 | 32 | `unit_id` | derived (§K) from `job_id` + `unit_index` |
+/// | 64 | 8 | `generation` | `u64` **LE**; carried in FULL (anti-stale) |
+///
+/// Carrying `generation` in full is what makes a stale-generation reference
+/// unambiguous: the same `(job, unit)` at a different generation is different
+/// bytes and cannot be substituted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WorkItemRef {
     pub job_id: [u8; 32],
@@ -96,6 +136,14 @@ impl WorkItemRef {
 // ===========================================================================
 
 /// Create a compute-pool job (op `0xC101`), 77 B fixed.
+///
+/// | off | size | field |
+/// |---|---|---|
+/// | 0 | 7 | `MAGIC = "CPJBv1\0"` |
+/// | 7 | 2 | `schema_version` `u16` LE `= 1` |
+/// | 9 | 32 | `client_job_salt` |
+/// | 41 | 32 | `graph_definition_root` |
+/// | 73 | 4 | `unit_count` `u32` LE |
 ///
 /// The op **commits** its dependency graph rather than inlining it: the graph's
 /// canonical encoding ([`crate::compute_pool_graph::GraphDefinitionV1`]) hashes
@@ -196,7 +244,17 @@ impl CreateComputePoolJobV1 {
 // 1. PublishBondedOfferV1
 // ===========================================================================
 
-/// Publish a bonded capacity offer. `offer_bond_id` is DERIVED at execution from
+/// Publish a bonded capacity offer (op `0xC102`), 53 B fixed.
+///
+/// | off | size | field |
+/// |---|---|---|
+/// | 0 | 7 | `MAGIC = "CPOFv1\0"` |
+/// | 7 | 2 | `schema_version` `u16` LE `= 1` |
+/// | 9 | 8 | `offer_seq` `u64` LE |
+/// | 17 | 16 | `offered_bytes` `u128` LE |
+/// | 33 | 20 | `payment_addr` |
+///
+/// `offer_bond_id` is DERIVED at execution from
 /// the chain id, the sender, and `offer_seq` (draft §K:288), so it is not carried
 /// (a submitter cannot present a forged id). `identity` (= the sender),
 /// `bond_locked` (`B_offer`, a governance value), and the internal `active` flag
@@ -250,7 +308,17 @@ impl PublishBondedOfferV1 {
 // 2. AcceptWorkUnitV1
 // ===========================================================================
 
-/// Accept an assigned work unit. References the assigned work item (full
+/// Accept an assigned work unit (op `0xC103`), 129 B fixed.
+///
+/// | off | size | field |
+/// |---|---|---|
+/// | 0 | 7 | `MAGIC = "CPACv1\0"` |
+/// | 7 | 2 | `schema_version` `u16` LE `= 1` |
+/// | 9 | 72 | [`WorkItemRef`] — the routing prefix (`job_id ‖ unit_id ‖ generation`) |
+/// | 81 | 32 | `commit_bond_id` |
+/// | 113 | 16 | `accepted_bytes` `u128` LE |
+///
+/// References the assigned work item (full
 /// `WorkItemRef`, generation included) and takes a commit-bond handle
 /// (`commit_bond_id`; the `B_commit` amount is a governance value, not carried).
 /// The winning `offer_bond_id` is NOT carried — it is DERIVED from the assignment
@@ -308,8 +376,24 @@ impl AcceptWorkUnitV1 {
 // permissionless timeout-expiry — is an execution-layer rule, not a wire field.)
 // ===========================================================================
 
+// Defines a work-item-only op carrier: decline `0xC104`, expire `0xC105`,
+// assign `0xC107`, reassign `0xC108`. Each generated type carries its own
+// byte-offset table (emitted below); `ops_do_not_cross_decode` in the golden
+// suite proves the shared layout cannot be confused across ops.
 macro_rules! work_item_op {
     ($name:ident, $magic:literal, $ctx:literal) => {
+        #[doc = concat!("`", $ctx, "` — work-item op, 81 B fixed.")]
+        #[doc = ""]
+        #[doc = "| off | size | field |"]
+        #[doc = "|---|---|---|"]
+        #[doc = concat!("| 0 | 7 | `MAGIC = ", stringify!($magic), "` |")]
+        #[doc = "| 7 | 2 | `schema_version` `u16` LE `= 1` |"]
+        #[doc = "| 9 | 72 | [`WorkItemRef`] — the routing prefix (`job_id ‖ unit_id ‖ generation`) |"]
+        #[doc = ""]
+        #[doc = "The four work-item ops share this layout, differing only in `MAGIC`"]
+        #[doc = "and op id. That is safe because the magics are pairwise distinct and"]
+        #[doc = "each decoder checks its own, so one op's bytes are rejected by a"]
+        #[doc = "sibling decoder and can never be reinterpreted as another op."]
         #[derive(Clone, Debug, PartialEq, Eq)]
         pub struct $name {
             pub work_item: WorkItemRef,
@@ -370,7 +454,15 @@ work_item_op!(ReassignWorkUnitV1, b"CPRAv1\0", "ReassignWorkUnitV1");
 // 5. CancelJobV1
 // ===========================================================================
 
-/// Cancel a job (references it by id). Actor = the job requester (tx sender);
+/// Cancel a job (op `0xC106`), 41 B fixed.
+///
+/// | off | size | field |
+/// |---|---|---|
+/// | 0 | 7 | `MAGIC = "CPCNv1\0"` |
+/// | 7 | 2 | `schema_version` `u16` LE `= 1` |
+/// | 9 | 32 | `job_id` |
+///
+/// References the job by id. Actor = the job requester (tx sender);
 /// refunds/burns are settlement concerns applied at execution.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CancelJobV1 {
