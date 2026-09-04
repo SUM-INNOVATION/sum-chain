@@ -23,7 +23,7 @@ use libp2p_identity::PeerId;
 use parking_lot::RwLock;
 use sumchain_primitives::{Block, SignedTransaction};
 use tokio::sync::{broadcast, mpsc};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::behaviour::{SumChainBehaviour, SumChainBehaviourEvent, SyncEvent};
 use crate::config::NetworkConfig;
@@ -480,12 +480,34 @@ impl NetworkService {
 
         info!("Listening on {}", listen_addr);
 
-        // Connect to bootnodes
+        // Connect to bootnodes.
+        //
+        // A node with bootnodes configured but NONE reachable has no way to find
+        // peers (mDNS is gone, #202), so it can never become ready. That state
+        // used to be invisible: unparseable entries were dropped silently and a
+        // rejected dial was only a `warn!`, which is how the devnet ran on a
+        // `/dns4/` bootnode address nothing could resolve (#237). Report it.
+        for (entry, reason) in self.config.undialable_bootnodes() {
+            error!("Unusable bootnode {}: {}", entry, reason);
+        }
+
+        let configured = self.config.bootnodes.len();
+        let mut accepted = 0usize;
         for addr in self.config.bootnode_multiaddrs() {
             info!("Connecting to bootnode: {}", addr);
-            if let Err(e) = swarm.dial(addr.clone()) {
-                warn!("Failed to dial bootnode {}: {}", addr, e);
+            match swarm.dial(addr.clone()) {
+                Ok(()) => accepted += 1,
+                Err(e) => warn!("Failed to dial bootnode {}: {}", addr, e),
             }
+        }
+        if configured > 0 && accepted == 0 {
+            error!(
+                "No usable bootnode: all {} configured bootnode(s) were rejected. \
+                 With mDNS removed this node cannot discover peers and will not \
+                 become ready. Bootnodes must be literal /ip4/ or /ip6/ multiaddrs \
+                 — this transport has no DNS resolution layer (see #237).",
+                configured
+            );
         }
 
         *self.running.write() = true;
