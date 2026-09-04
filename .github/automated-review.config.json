@@ -7,7 +7,6 @@
   ],
   "gate_paths": [
     ".github/workflows/automated-review.yml",
-    ".github/workflows/approval-policy.yml",
     ".github/scripts/automated_review.py",
     ".github/scripts/automated_review_test.py",
     ".github/automated-review.config.json",

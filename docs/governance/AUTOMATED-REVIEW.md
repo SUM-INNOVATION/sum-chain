@@ -172,9 +172,43 @@ In **Settings → Rules → Rulesets → the `main` ruleset** (or Branch protect
    `required_approving_review_count` is `0` (a PR touching a governance path must
    be blocked until a code owner approves); if that combination does not enforce,
    keep approvals at `1`.
-6. **Then** delete `.github/workflows/approval-policy.yml` in a trivial follow-up
-   PR (it is retained until this step so the still-required `approval-policy`
-   check cannot become permanently unproduced).
+6. ✅ **Done** — `.github/workflows/approval-policy.yml` has been deleted. It was
+   retained until this point so the (then still-required) `approval-policy` check
+   could not become permanently unproduced and deadlock every merge.
+
+## Status: the transition is COMPLETE and verified
+
+`main` protection is now:
+
+| setting | value |
+|---|---|
+| required checks | `automated-review`, `build-test-clippy` (strict) |
+| required approvals | **0** |
+| require review from Code Owners | **on** (path-scoped) |
+| enforce admins | on |
+| force push / deletion | blocked |
+
+Verified empirically with a controlled A/B pair, both with every required check
+green and `approvals = 0`:
+
+| PR | path | `automated-review` | result |
+|---|---|---|---|
+| owned, non-gate (`.github/workflows/health-e2e.yml`) | owned | pass | **BLOCKED** — code-owner review required |
+| ordinary (README only) | unowned | pass | **CLEAN** — merged with zero human approvals |
+
+The pair differs only in whether the path is owned, so it isolates the control:
+`require_code_owner_reviews` **does** enforce at `required_approving_review_count:
+0`, while ordinary PRs need no human.
+
+### Operational note: re-run a gate PR's first `automated-review`
+
+For a PR that changes a gate path, the first run happens *before* the admin
+approval exists, so clause 4 correctly fails it. Approving fires a fresh run that
+passes, but the earlier **failing check-run of the same name remains on the head**
+and keeps the required context red. Re-run that failed run (Actions → the failed
+`automated-review` run → *Re-run jobs*) once the approval is in place. A future
+improvement is to have the job wait for the approval when it detects a gate change
+rather than concluding early.
 
 Equivalent REST (illustrative — the UI is preferred):
 
