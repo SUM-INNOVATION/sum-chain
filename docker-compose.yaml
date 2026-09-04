@@ -66,7 +66,18 @@ services:
     environment:
       - RUST_LOG=info,sumchain=debug
     networks:
-      - sumchain
+      sumchain:
+        # DEVNET-ONLY. Pinned so the other containers can dial a bootnode by a
+        # literal /ip4/ address (see #237): the p2p transport has no DNS
+        # resolution layer, so a /dns4/ multiaddr is MultiaddrNotSupported.
+        #
+        # RFC1918 private address inside this compose network's own
+        # 172.28.0.0/16 subnet (declared under `networks:` below). It is NOT a
+        # routable/public address, is the only pinned address in this file, and
+        # must never be copied into Rust source, genesis, consensus bytes, or
+        # any production default. Kubernetes deployments cannot use this
+        # approach at all — pod IPs are dynamic — so #237 tracks the real fix.
+        ipv4_address: 172.28.0.11
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8546/health"]
       interval: 30s
@@ -94,12 +105,15 @@ services:
       - "/ip4/0.0.0.0/tcp/30303"
       - "--rpc-addr"
       - "0.0.0.0:8545"
-      # Compose's internal DNS resolves `validator-1` to its container IP;
-      # libp2p `/dns4/` multiaddrs work natively. If the p2p stack ever swaps
-      # to a DNS-incompatible backend, fall back to a static IPAM
-      # `ipv4_address` per service and use `/ip4/172.28.0.X/tcp/30303` here.
+      # MUST be a literal IP (#237). libp2p resolves multiaddrs through its own
+      # transport stack, never through compose's DNS, and this stack is
+      # TCP -> Noise -> Yamux with NO DNS layer: a `/dns4/` bootnode is rejected
+      # as MultiaddrNotSupported. (Adding libp2p's DNS transport would pull
+      # libp2p-dns -> hickory-resolver -> hickory-proto, reintroducing the
+      # RUSTSEC-2026-0119 advisory that #202 removes.) validator-1 pins
+      # ipv4_address 172.28.0.11 on the sumchain network for exactly this.
       - "--bootnodes"
-      - "/dns4/validator-1/tcp/30303"
+      - "/ip4/172.28.0.11/tcp/30303"
     volumes:
       - validator-2-data:/data
       - ./genesis/local_genesis.json:/config/genesis.json:ro
@@ -142,7 +156,7 @@ services:
       - "--rpc-addr"
       - "0.0.0.0:8545"
       - "--bootnodes"
-      - "/dns4/validator-1/tcp/30303"
+      - "/ip4/172.28.0.11/tcp/30303"
     volumes:
       - validator-3-data:/data
       - ./genesis/local_genesis.json:/config/genesis.json:ro
@@ -186,7 +200,7 @@ services:
       - "--rpc-addr"
       - "0.0.0.0:8545"
       - "--bootnodes"
-      - "/dns4/validator-1/tcp/30303"
+      - "/ip4/172.28.0.11/tcp/30303"
     volumes:
       - fullnode-data:/data
       - ./genesis/local_genesis.json:/config/genesis.json:ro

@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use libp2p::PeerId;
+use libp2p_identity::PeerId;
 use parking_lot::RwLock;
 use sumchain_primitives::{Block, BlockHeight, Hash};
 use tokio::sync::mpsc;

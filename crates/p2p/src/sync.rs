@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::prelude::*;
-use libp2p::request_response::{self, Codec, ProtocolSupport};
-use libp2p::StreamProtocol;
+use libp2p_request_response::{self as request_response, Codec, ProtocolSupport};
+use libp2p_swarm::StreamProtocol;
 use serde::{Deserialize, Serialize};
 use sumchain_primitives::{Block, BlockHeight, Hash};
 
