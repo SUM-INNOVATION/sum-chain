@@ -39,18 +39,43 @@
 //! * **No numeric receipt codes are allocated yet.**
 //!
 //! ## Scope of this module
-//! Wire operations whose **complete bytes are determined** by the ratified rulings:
-//! `PublishBondedOfferV1`, `AcceptWorkUnitV1`, `DeclineWorkUnitV1`,
-//! `ExpireWorkUnitV1`, `CancelJobV1`, `AssignWorkUnitV1`, `ReassignWorkUnitV1`
-//! (seven ops). `AssignWorkUnit`/`ReassignWorkUnit` carry only a `WorkItemRef`;
-//! their winner/score (which binds the now-on-main RATIFIED v1 `beacon_output`,
-//! #223) is consensus-computed in the dormant execution layer, not on the wire.
+//! All **eight** C1 ops, each byte-determined by a ratified ruling:
+//! `CreateComputePoolJobV1`, `PublishBondedOfferV1`, `AcceptWorkUnitV1`,
+//! `DeclineWorkUnitV1`, `ExpireWorkUnitV1`, `CancelJobV1`, `AssignWorkUnitV1`,
+//! `ReassignWorkUnitV1`.
 //!
-//! DEFERRED (not landed — would freeze invented bytes):
-//! * `CreateComputePoolJobV1` — genuinely **blocked** (#227): the graph
-//!   representation, the dependency-edge encoding, and the derived-id rules are
-//!   NOT byte-complete in the current model/draft. Op id `0xC101` is held
-//!   reserved (`OP_CREATE_JOB_RESERVED`); NOT guessed here.
+//! ## The eight ops at a glance (#213)
+//!
+//! Every carrier is FIXED-WIDTH, so `LEN` is exact — there is no length prefix
+//! and no variable field anywhere in the family.
+//!
+//! | op | magic | type | LEN |
+//! |---|---|---|---|
+//! | `0xC101` | `CPJBv1\0` | [`CreateComputePoolJobV1`] | 77 |
+//! | `0xC102` | `CPOFv1\0` | [`PublishBondedOfferV1`] | 53 |
+//! | `0xC103` | `CPACv1\0` | [`AcceptWorkUnitV1`] | 129 |
+//! | `0xC104` | `CPDCv1\0` | [`DeclineWorkUnitV1`] | 81 |
+//! | `0xC105` | `CPEXv1\0` | [`ExpireWorkUnitV1`] | 81 |
+//! | `0xC106` | `CPCNv1\0` | [`CancelJobV1`] | 41 |
+//! | `0xC107` | `CPASv1\0` | [`AssignWorkUnitV1`] | 81 |
+//! | `0xC108` | `CPRAv1\0` | [`ReassignWorkUnitV1`] | 81 |
+//!
+//! Per-op byte-offset tables are on each type; the ordinal-27 **routing prefix**
+//! is on [`WorkItemRef`]. Frozen golden vectors for all eight (plus the prefix
+//! offsets) live in `tests/compute_pool_wire_golden.rs`, which is append-only.
+//! The same tables are mirrored in `docs/design/C1-COMPUTEPOOL-OPS.md`.
+//!
+//! **Architecture independence is structural:** every field is fixed-width and
+//! explicitly little-endian and no encoder consults host layout, so the vectors
+//! are identical on x86_64 and aarch64 — CI runs the suite on both.
+//!
+//! * `AssignWorkUnit`/`ReassignWorkUnit` carry only a `WorkItemRef`; their
+//!   winner/score (binding the RATIFIED v1 `beacon_output`, #223) is
+//!   consensus-computed in the dormant execution layer, not on the wire.
+//! * `CreateComputePoolJobV1` (#227) **commits** its dependency graph as a single
+//!   `graph_definition_root`; the graph's canonical encoding, the pool identifier
+//!   KDFs and the ceiling-derived structural limits live in
+//!   [`crate::compute_pool_graph`].
 
 use crate::address::Address;
 use crate::b0::codec::{DecodeError, Reader, Writer};
@@ -58,7 +83,7 @@ use crate::b0::codec::{DecodeError, Reader, Writer};
 /// ComputePool op namespace (#217 A2): op discriminants are `0xC100 | op`.
 pub const COMPUTE_POOL_OP_NAMESPACE: u16 = 0xC100;
 
-pub const OP_CREATE_JOB_RESERVED: u16 = COMPUTE_POOL_OP_NAMESPACE | 0x01; // deferred: blocked on byte-complete graph/edge/derived-id codec (#227)
+pub const OP_CREATE_JOB: u16 = COMPUTE_POOL_OP_NAMESPACE | 0x01;
 pub const OP_PUBLISH_OFFER: u16 = COMPUTE_POOL_OP_NAMESPACE | 0x02;
 pub const OP_ACCEPT_UNIT: u16 = COMPUTE_POOL_OP_NAMESPACE | 0x03;
 pub const OP_DECLINE_UNIT: u16 = COMPUTE_POOL_OP_NAMESPACE | 0x04;
@@ -69,6 +94,21 @@ pub const OP_REASSIGN_UNIT: u16 = COMPUTE_POOL_OP_NAMESPACE | 0x08;
 
 /// A work-item coordinate on the wire: `job_id ‖ unit_id ‖ generation`
 /// (draft §F routing order). 72 bytes.
+///
+/// This is the **ordinal-27 routing prefix**. It is embedded verbatim at the same
+/// place in every op that targets a work item (accept / decline / expire / assign
+/// / reassign), i.e. at absolute offset `+9`, immediately after that op's 9-byte
+/// `MAGIC ‖ schema_version` header:
+///
+/// | off (in prefix) | size | field | notes |
+/// |---|---|---|---|
+/// | 0 | 32 | `job_id` | derived (§K); references an existing job |
+/// | 32 | 32 | `unit_id` | derived (§K) from `job_id` + `unit_index` |
+/// | 64 | 8 | `generation` | `u64` **LE**; carried in FULL (anti-stale) |
+///
+/// Carrying `generation` in full is what makes a stale-generation reference
+/// unambiguous: the same `(job, unit)` at a different generation is different
+/// bytes and cannot be substituted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WorkItemRef {
     pub job_id: [u8; 32],
@@ -92,10 +132,129 @@ impl WorkItemRef {
 }
 
 // ===========================================================================
+// 0. CreateComputePoolJobV1  (#227)
+// ===========================================================================
+
+/// Create a compute-pool job (op `0xC101`), 77 B fixed.
+///
+/// | off | size | field |
+/// |---|---|---|
+/// | 0 | 7 | `MAGIC = "CPJBv1\0"` |
+/// | 7 | 2 | `schema_version` `u16` LE `= 1` |
+/// | 9 | 32 | `client_job_salt` |
+/// | 41 | 32 | `graph_definition_root` |
+/// | 73 | 4 | `unit_count` `u32` LE |
+///
+/// The op **commits** its dependency graph rather than inlining it: the graph's
+/// canonical encoding ([`crate::compute_pool_graph::GraphDefinitionV1`]) hashes
+/// to `graph_definition_root` under the pool graph domain (ratified B5).
+///
+/// * `client_job_salt` — the only `job_id` input a submitter provides; execution
+///   recomputes `job_id` from the chain id, the **transaction sender**, the
+///   sender's nonce and this salt (§K), so the id cannot be forged.
+/// * `unit_count` — a cheap early bound, cross-checked against the revealed
+///   graph (`Inconsistent` on mismatch).
+/// * **No economic operand.** Per the owner ruling, amounts (the base quote `q`,
+///   bonds, allowances, reimbursements) are governance/state — `requester_debit`
+///   is computed at execution from governance params and the job's structure.
+/// * **No `sizing` list.** Per-unit `retention_slots` lives *inside* the graph so
+///   the commitment binds it (it drives retention and funding).
+/// * **No authorization field.** The requester is the tx sender; `job_id` binds
+///   sender + nonce, so authority is implicit in the derivation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CreateComputePoolJobV1 {
+    pub client_job_salt: [u8; 32],
+    pub graph_definition_root: [u8; 32],
+    pub unit_count: u32,
+}
+
+impl CreateComputePoolJobV1 {
+    pub const MAGIC: [u8; 7] = *b"CPJBv1\0";
+    pub const SCHEMA_VERSION: u16 = 1;
+    pub const LEN: usize = 7 + 2 + 32 + 32 + 4; // 77
+
+    pub fn validate(&self) -> Result<(), DecodeError> {
+        // The declared unit_count can never exceed what the graph ceiling allows.
+        if self.unit_count > crate::compute_pool_graph::GraphDefinitionV1::MAX_UNITS {
+            return Err(DecodeError::CountExceedsMax {
+                ctx: "CreateComputePoolJobV1.unit_count",
+                count: self.unit_count as u64,
+                max: crate::compute_pool_graph::GraphDefinitionV1::MAX_UNITS as u64,
+            });
+        }
+        Ok(())
+    }
+
+    fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.bytes(&Self::MAGIC);
+        w.u16(Self::SCHEMA_VERSION);
+        w.bytes(&self.client_job_salt);
+        w.bytes(&self.graph_definition_root);
+        w.u32(self.unit_count);
+        w.into_bytes()
+    }
+
+    pub fn try_encode(&self) -> Result<Vec<u8>, DecodeError> {
+        self.validate()?;
+        Ok(self.encode())
+    }
+
+    pub fn decode(r: &mut Reader) -> Result<Self, DecodeError> {
+        check_magic(r, &Self::MAGIC, "CreateComputePoolJobV1")?;
+        check_schema(r, Self::SCHEMA_VERSION, "CreateComputePoolJobV1.schema_version")?;
+        let client_job_salt = r.read_array::<32>("CreateComputePoolJobV1.client_job_salt")?;
+        let graph_definition_root =
+            r.read_array::<32>("CreateComputePoolJobV1.graph_definition_root")?;
+        let unit_count = r.read_u32("CreateComputePoolJobV1.unit_count")?;
+        let v = Self {
+            client_job_salt,
+            graph_definition_root,
+            unit_count,
+        };
+        v.validate()?;
+        Ok(v)
+    }
+
+    pub fn decode_exact(bytes: &[u8]) -> Result<Self, DecodeError> {
+        decode_exact(bytes, Self::decode, "CreateComputePoolJobV1")
+    }
+
+    /// Bind a revealed graph to this commitment: the root must match and the
+    /// declared `unit_count` must equal the graph's.
+    pub fn verify_graph(
+        &self,
+        graph: &crate::compute_pool_graph::GraphDefinitionV1,
+    ) -> Result<(), DecodeError> {
+        if graph.units.len() as u64 != self.unit_count as u64 {
+            return Err(DecodeError::Inconsistent {
+                ctx: "CreateComputePoolJobV1.unit_count vs GraphDefinitionV1",
+            });
+        }
+        if graph.root()? != self.graph_definition_root {
+            return Err(DecodeError::Inconsistent {
+                ctx: "CreateComputePoolJobV1.graph_definition_root",
+            });
+        }
+        Ok(())
+    }
+}
+
+// ===========================================================================
 // 1. PublishBondedOfferV1
 // ===========================================================================
 
-/// Publish a bonded capacity offer. `offer_bond_id` is DERIVED at execution from
+/// Publish a bonded capacity offer (op `0xC102`), 53 B fixed.
+///
+/// | off | size | field |
+/// |---|---|---|
+/// | 0 | 7 | `MAGIC = "CPOFv1\0"` |
+/// | 7 | 2 | `schema_version` `u16` LE `= 1` |
+/// | 9 | 8 | `offer_seq` `u64` LE |
+/// | 17 | 16 | `offered_bytes` `u128` LE |
+/// | 33 | 20 | `payment_addr` |
+///
+/// `offer_bond_id` is DERIVED at execution from
 /// the chain id, the sender, and `offer_seq` (draft §K:288), so it is not carried
 /// (a submitter cannot present a forged id). `identity` (= the sender),
 /// `bond_locked` (`B_offer`, a governance value), and the internal `active` flag
@@ -149,7 +308,17 @@ impl PublishBondedOfferV1 {
 // 2. AcceptWorkUnitV1
 // ===========================================================================
 
-/// Accept an assigned work unit. References the assigned work item (full
+/// Accept an assigned work unit (op `0xC103`), 129 B fixed.
+///
+/// | off | size | field |
+/// |---|---|---|
+/// | 0 | 7 | `MAGIC = "CPACv1\0"` |
+/// | 7 | 2 | `schema_version` `u16` LE `= 1` |
+/// | 9 | 72 | [`WorkItemRef`] — the routing prefix (`job_id ‖ unit_id ‖ generation`) |
+/// | 81 | 32 | `commit_bond_id` |
+/// | 113 | 16 | `accepted_bytes` `u128` LE |
+///
+/// References the assigned work item (full
 /// `WorkItemRef`, generation included) and takes a commit-bond handle
 /// (`commit_bond_id`; the `B_commit` amount is a governance value, not carried).
 /// The winning `offer_bond_id` is NOT carried — it is DERIVED from the assignment
@@ -207,8 +376,24 @@ impl AcceptWorkUnitV1 {
 // permissionless timeout-expiry — is an execution-layer rule, not a wire field.)
 // ===========================================================================
 
+// Defines a work-item-only op carrier: decline `0xC104`, expire `0xC105`,
+// assign `0xC107`, reassign `0xC108`. Each generated type carries its own
+// byte-offset table (emitted below); `ops_do_not_cross_decode` in the golden
+// suite proves the shared layout cannot be confused across ops.
 macro_rules! work_item_op {
     ($name:ident, $magic:literal, $ctx:literal) => {
+        #[doc = concat!("`", $ctx, "` — work-item op, 81 B fixed.")]
+        #[doc = ""]
+        #[doc = "| off | size | field |"]
+        #[doc = "|---|---|---|"]
+        #[doc = concat!("| 0 | 7 | `MAGIC = ", stringify!($magic), "` |")]
+        #[doc = "| 7 | 2 | `schema_version` `u16` LE `= 1` |"]
+        #[doc = "| 9 | 72 | [`WorkItemRef`] — the routing prefix (`job_id ‖ unit_id ‖ generation`) |"]
+        #[doc = ""]
+        #[doc = "The four work-item ops share this layout, differing only in `MAGIC`"]
+        #[doc = "and op id. That is safe because the magics are pairwise distinct and"]
+        #[doc = "each decoder checks its own, so one op's bytes are rejected by a"]
+        #[doc = "sibling decoder and can never be reinterpreted as another op."]
         #[derive(Clone, Debug, PartialEq, Eq)]
         pub struct $name {
             pub work_item: WorkItemRef,
@@ -269,7 +454,15 @@ work_item_op!(ReassignWorkUnitV1, b"CPRAv1\0", "ReassignWorkUnitV1");
 // 5. CancelJobV1
 // ===========================================================================
 
-/// Cancel a job (references it by id). Actor = the job requester (tx sender);
+/// Cancel a job (op `0xC106`), 41 B fixed.
+///
+/// | off | size | field |
+/// |---|---|---|
+/// | 0 | 7 | `MAGIC = "CPCNv1\0"` |
+/// | 7 | 2 | `schema_version` `u16` LE `= 1` |
+/// | 9 | 32 | `job_id` |
+///
+/// References the job by id. Actor = the job requester (tx sender);
 /// refunds/burns are settlement concerns applied at execution.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CancelJobV1 {
@@ -318,6 +511,7 @@ impl CancelJobV1 {
 /// the discriminant is recovered by peeking the leading 7-byte magic.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ComputePoolOperation {
+    CreateJob(CreateComputePoolJobV1),
     PublishOffer(PublishBondedOfferV1),
     AcceptUnit(AcceptWorkUnitV1),
     DeclineUnit(DeclineWorkUnitV1),
@@ -330,6 +524,7 @@ pub enum ComputePoolOperation {
 impl ComputePoolOperation {
     pub fn op(&self) -> u16 {
         match self {
+            ComputePoolOperation::CreateJob(_) => OP_CREATE_JOB,
             ComputePoolOperation::PublishOffer(_) => OP_PUBLISH_OFFER,
             ComputePoolOperation::AcceptUnit(_) => OP_ACCEPT_UNIT,
             ComputePoolOperation::DeclineUnit(_) => OP_DECLINE_UNIT,
@@ -342,6 +537,7 @@ impl ComputePoolOperation {
 
     pub fn try_encode(&self) -> Result<Vec<u8>, DecodeError> {
         match self {
+            ComputePoolOperation::CreateJob(v) => v.try_encode(),
             ComputePoolOperation::PublishOffer(v) => v.try_encode(),
             ComputePoolOperation::AcceptUnit(v) => v.try_encode(),
             ComputePoolOperation::DeclineUnit(v) => v.try_encode(),
@@ -356,6 +552,9 @@ impl ComputePoolOperation {
         let mut r = Reader::new(bytes);
         let magic = r.peek_array::<7>("ComputePoolOperation.magic")?;
         let op = match &magic {
+            m if *m == CreateComputePoolJobV1::MAGIC => {
+                ComputePoolOperation::CreateJob(CreateComputePoolJobV1::decode(&mut r)?)
+            }
             m if *m == PublishBondedOfferV1::MAGIC => {
                 ComputePoolOperation::PublishOffer(PublishBondedOfferV1::decode(&mut r)?)
             }
@@ -430,6 +629,13 @@ mod tests {
         WorkItemRef { job_id: [0x11; 32], unit_id: [0x22; 32], generation: 5 }
     }
 
+    fn create_job() -> CreateComputePoolJobV1 {
+        CreateComputePoolJobV1 {
+            client_job_salt: [0xAA; 32],
+            graph_definition_root: [0xBB; 32],
+            unit_count: 3,
+        }
+    }
     fn publish_offer() -> PublishBondedOfferV1 {
         PublishBondedOfferV1 { offer_seq: 9, offered_bytes: 1 << 40, payment_addr: addr(0x07) }
     }
@@ -444,8 +650,7 @@ mod tests {
         assert_eq!(OP_CANCEL_JOB, 0xC106);
         assert_eq!(OP_ASSIGN_UNIT, 0xC107);
         assert_eq!(OP_REASSIGN_UNIT, 0xC108);
-        // Still deferred: create-job (blocked on byte-complete graph codec, #227).
-        assert_eq!(OP_CREATE_JOB_RESERVED, 0xC101);
+        assert_eq!(OP_CREATE_JOB, 0xC101);
     }
 
     #[test]
@@ -464,6 +669,7 @@ mod tests {
     #[test]
     fn roundtrip_all_ops() {
         let ops = [
+            ComputePoolOperation::CreateJob(create_job()),
             ComputePoolOperation::PublishOffer(publish_offer()),
             ComputePoolOperation::AcceptUnit(accept()),
             ComputePoolOperation::DeclineUnit(DeclineWorkUnitV1 { work_item: wi() }),
@@ -476,12 +682,12 @@ mod tests {
             let bytes = op.try_encode().unwrap();
             assert_eq!(ComputePoolOperation::decode_exact(&bytes).unwrap(), op);
         }
-        // All seven implemented ops have distinct op ids (create-job reserved).
+        // All eight ops have distinct op ids.
         let ids: std::collections::BTreeSet<u16> = [
-            OP_PUBLISH_OFFER, OP_ACCEPT_UNIT, OP_DECLINE_UNIT, OP_EXPIRE_UNIT,
-            OP_CANCEL_JOB, OP_ASSIGN_UNIT, OP_REASSIGN_UNIT,
+            OP_CREATE_JOB, OP_PUBLISH_OFFER, OP_ACCEPT_UNIT, OP_DECLINE_UNIT,
+            OP_EXPIRE_UNIT, OP_CANCEL_JOB, OP_ASSIGN_UNIT, OP_REASSIGN_UNIT,
         ].into_iter().collect();
-        assert_eq!(ids.len(), 7, "op ids must be distinct");
+        assert_eq!(ids.len(), 8, "op ids must be distinct");
     }
 
     #[test]
