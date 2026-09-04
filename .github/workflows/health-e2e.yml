@@ -61,3 +61,5 @@ jobs:
           name: health-e2e-evidence
           path: ${{ runner.temp }}/health-e2e-evidence.log
           if-no-files-found: warn
+
+# codeowner-enforcement verification (#219) — temporary, will be closed unmerged
