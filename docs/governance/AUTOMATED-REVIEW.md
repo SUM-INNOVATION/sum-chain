@@ -95,15 +95,44 @@ calls the script.
 
 - **Deleting or renaming the job is safe**: the required `automated-review`
   context is then never produced, so the PR stays blocked.
-- **A trivially-passing rewrite is not self-detectable.** Mitigate at the
-  **platform** layer, which is where this class of risk belongs:
-  - add a ruleset **"Restrict file paths"** rule covering `.github/workflows/**`
-    (and `.github/scripts/**`), **or**
-  - require admin review for `.github/**` changes.
+- **A trivially-passing rewrite is not self-detectable.** This must be mitigated
+  at the **platform** layer — see the compensating control below.
 
-  Note this repo deliberately leaves native **"Require review from Code Owners"
-  OFF** (a single-owner `CODEOWNERS` would deadlock the owner's own PRs), so the
-  path-restriction rule is the recommended form.
+### The compensating control: scoped `CODEOWNERS`
+
+The intended mitigation was a ruleset **"Restrict file paths"** rule over
+`.github/workflows/**` and `.github/scripts/**`. **GitHub rejects that rule on
+this organization's plan** — `POST /repos/.../rulesets` returns
+`422 Validation Failed — Invalid rule 'file_path_restriction'`. This was verified
+to be a *plan* limitation, not a payload error: an otherwise-identical ruleset
+using `non_fast_forward` is accepted, so rulesets themselves work here; only that
+rule is Enterprise-gated.
+
+The equivalent guarantee is available on any plan through a **path-scoped**
+`CODEOWNERS` plus **Require review from Code Owners**:
+
+```
+/.github/workflows/   @sunhaoxiangwang @Mike-Mans
+/.github/scripts/     @sunhaoxiangwang @Mike-Mans
+/.github/CODEOWNERS   @sunhaoxiangwang @Mike-Mans
+```
+
+Because code-owner review is demanded **only for PRs touching owned paths**, this
+yields exactly the intended split:
+
+| PR touches | human approval required? |
+|---|---|
+| ordinary code | **no** — merges on `automated-review` alone |
+| a governance path above | **yes** — a code-owner approval, and the author cannot self-approve |
+
+Two owners are named deliberately. A single-owner entry (`* @sunhaoxiangwang`,
+the previous content) would deadlock the owner's own governance PRs — precisely
+why whole-tree code-owner review was left OFF before. **Scoping** the file and
+naming **two** owners removes both objections, so `require_code_owner_reviews`
+can now be enabled safely.
+
+`.github/CODEOWNERS` is itself a `gate_path`, so weakening it is a gate change and
+takes clause 4.
 
 There is intentionally **no `workflow_dispatch`** path: a dispatched run cannot
 satisfy a PR's required check, so offering one only misleads.
@@ -129,11 +158,20 @@ In **Settings → Rules → Rulesets → the `main` ruleset** (or Branch protect
    - ✅ Existing required CI checks (`build-test-clippy`,
      `build-test-clippy-aarch64`, `supply-chain-audit`) stay required — clause 3
      additionally binds them to the current head.
-5. **Recommended (closes the residual risk above):** add a **"Restrict file
-   paths"** rule to the same ruleset covering `.github/workflows/**` and
-   `.github/scripts/**`, so a PR cannot rewrite the gate workflow to trivially
-   pass. Without it, clause 4 covers *script/config* tampering but not a rewrite
-   of the workflow file itself.
+5. **Required (closes the residual risk above) — enable "Require review from Code
+   Owners".** This is the compensating control for setting approvals to `0`; the
+   ruleset "Restrict file paths" rule is **rejected on this plan** (see above).
+   With the path-scoped `CODEOWNERS`, ordinary PRs still need no human approval,
+   while any PR touching `.github/workflows/**`, `.github/scripts/**` or
+   `.github/CODEOWNERS` needs a code-owner approval.
+
+   ⚠️ **Do not set approvals to `0` unless this is enabled.** Zero approvals plus
+   no path-scoped control would leave a PR free to rewrite the gate workflow to
+   trivially pass, with no human in the loop — the one vector clause 4 cannot
+   catch. Verify empirically that `require_code_owner_reviews` still enforces when
+   `required_approving_review_count` is `0` (a PR touching a governance path must
+   be blocked until a code owner approves); if that combination does not enforce,
+   keep approvals at `1`.
 6. **Then** delete `.github/workflows/approval-policy.yml` in a trivial follow-up
    PR (it is retained until this step so the still-required `approval-policy`
    check cannot become permanently unproduced).
