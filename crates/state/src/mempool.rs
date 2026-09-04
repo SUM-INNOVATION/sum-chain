@@ -202,6 +202,10 @@ impl Mempool {
         // while the subprotocol is gate-closed (the default; fail-closed pending
         // #127). No-op for any non-beacon payload.
         self.check_beacon_admission(&tx)?;
+        // C1/ComputePool (#130) admission: deterministically reject ComputePool
+        // payloads while the subprotocol is gate-closed (the default; fail-closed
+        // pending #130). No-op for any non-ComputePool payload.
+        self.check_compute_pool_admission(&tx)?;
 
         // Check mempool size
         if self.txs.read().len() >= self.config.max_size {
@@ -652,6 +656,26 @@ impl Mempool {
             TxPayload::BeaconSetup(_) | TxPayload::BeaconSigning(_) => {
                 Err(StateError::BeaconNotActivated)
             }
+            _ => Ok(()),
+        }
+    }
+
+    /// C1/ComputePool (#130) admission. `Ok(())` for any non-ComputePool payload.
+    /// For a `TxPayload::ComputePool`, the subprotocol is **gate-closed** and
+    /// fail-closed pending #130, so admission **deterministically rejects** with
+    /// [`StateError::ComputePoolNotActivated`] — no ComputePool tx enters the
+    /// mempool, no receipt, no state. The executor independently rejects any
+    /// ComputePool tx that reaches execution, so both seams are closed. (When
+    /// `compute_pool_enabled_from_height` becomes openable this should consult the
+    /// gate via a wired admission context, exactly like beacon/inference/education;
+    /// until then the unconditional fail-closed rejection is the correct dormant
+    /// stance.)
+    fn check_compute_pool_admission(&self, tx: &SignedTransaction) -> Result<()> {
+        let TxInner::V2(v2_tx) = &tx.inner else {
+            return Ok(());
+        };
+        match &v2_tx.payload {
+            TxPayload::ComputePool(_) => Err(StateError::ComputePoolNotActivated),
             _ => Ok(()),
         }
     }

@@ -11,10 +11,11 @@
 //! and `encode / try_encode / decode / decode_exact` where `decode_exact` rejects
 //! trailing bytes via `Reader::finish`. Op discriminants OR the ComputePool op
 //! namespace `0xC100` (#217 A2). The dispatch enum peeks the leading 7-byte magic
-//! (like `BeaconOperation`). When all ops land, a `ComputePoolTxData` serde
-//! wrapper will carry the opaque canonical `op_bytes: Vec<u8>` inside `TxPayload`
-//! (replace-in-place at the reserved ordinal 27); that integration is deferred so
-//! it happens once, after every op carrier exists (see the deferred list below).
+//! (like `BeaconOperation`). The `ComputePoolTxData` serde wrapper
+//! (`crate::transaction`) carries the opaque canonical `op_bytes: Vec<u8>` inside
+//! `TxPayload::ComputePool` at ordinal 27 (the reserved slot, filled in place,
+//! #130). EXECUTION stays gate-closed; mempool admission rejects ComputePool txs
+//! while dormant.
 //!
 //! ## Encoding rulings (owner, 2026-09-02)
 //! * **Ids that REFERENCE an existing entity are carried** as `[u8; 32]`
@@ -38,18 +39,18 @@
 //! * **No numeric receipt codes are allocated yet.**
 //!
 //! ## Scope of this module
-//! Only wire operations whose **complete bytes are determined** by the ratified
-//! rulings are landed here (owner ruling, 2026-09-02): `PublishBondedOfferV1`,
-//! `AcceptWorkUnitV1`, `DeclineWorkUnitV1`, `ExpireWorkUnitV1`, `CancelJobV1`.
+//! Wire operations whose **complete bytes are determined** by the ratified rulings:
+//! `PublishBondedOfferV1`, `AcceptWorkUnitV1`, `DeclineWorkUnitV1`,
+//! `ExpireWorkUnitV1`, `CancelJobV1`, `AssignWorkUnitV1`, `ReassignWorkUnitV1`
+//! (seven ops). `AssignWorkUnit`/`ReassignWorkUnit` carry only a `WorkItemRef`;
+//! their winner/score (which binds the now-on-main RATIFIED v1 `beacon_output`,
+//! #223) is consensus-computed in the dormant execution layer, not on the wire.
 //!
 //! DEFERRED (not landed — would freeze invented bytes):
-//! * `CreateComputePoolJobV1` — genuinely **blocked**: the graph representation,
-//!   the dependency-edge encoding, and the derived-id rules are NOT byte-complete
-//!   in the current model/draft. Tracked as a linked blocker; it will be
-//!   implemented once its graph format is byte-complete. NOT guessed here.
-//! * `AssignWorkUnit` and `ReassignWorkUnit` — both consume the beacon output /
-//!   assignment score (the winner-selection edge). Implemented together against
-//!   the locked `beacon_output` KAT once #223/#225 merges.
+//! * `CreateComputePoolJobV1` — genuinely **blocked** (#227): the graph
+//!   representation, the dependency-edge encoding, and the derived-id rules are
+//!   NOT byte-complete in the current model/draft. Op id `0xC101` is held
+//!   reserved (`OP_CREATE_JOB_RESERVED`); NOT guessed here.
 
 use crate::address::Address;
 use crate::b0::codec::{DecodeError, Reader, Writer};
@@ -57,17 +58,14 @@ use crate::b0::codec::{DecodeError, Reader, Writer};
 /// ComputePool op namespace (#217 A2): op discriminants are `0xC100 | op`.
 pub const COMPUTE_POOL_OP_NAMESPACE: u16 = 0xC100;
 
-// Reserved (deferred, not landed): create-job is blocked on a byte-complete
-// graph/edge/derived-id codec; assign/reassign are beacon-dependent (#223). The
-// op ids are held so the numbering stays stable when each carrier lands.
-pub const OP_CREATE_JOB_RESERVED: u16 = COMPUTE_POOL_OP_NAMESPACE | 0x01;
+pub const OP_CREATE_JOB_RESERVED: u16 = COMPUTE_POOL_OP_NAMESPACE | 0x01; // deferred: blocked on byte-complete graph/edge/derived-id codec (#227)
 pub const OP_PUBLISH_OFFER: u16 = COMPUTE_POOL_OP_NAMESPACE | 0x02;
 pub const OP_ACCEPT_UNIT: u16 = COMPUTE_POOL_OP_NAMESPACE | 0x03;
 pub const OP_DECLINE_UNIT: u16 = COMPUTE_POOL_OP_NAMESPACE | 0x04;
 pub const OP_EXPIRE_UNIT: u16 = COMPUTE_POOL_OP_NAMESPACE | 0x05;
 pub const OP_CANCEL_JOB: u16 = COMPUTE_POOL_OP_NAMESPACE | 0x06;
-pub const OP_ASSIGN_UNIT_RESERVED: u16 = COMPUTE_POOL_OP_NAMESPACE | 0x07;
-pub const OP_REASSIGN_UNIT_RESERVED: u16 = COMPUTE_POOL_OP_NAMESPACE | 0x08;
+pub const OP_ASSIGN_UNIT: u16 = COMPUTE_POOL_OP_NAMESPACE | 0x07;
+pub const OP_REASSIGN_UNIT: u16 = COMPUTE_POOL_OP_NAMESPACE | 0x08;
 
 /// A work-item coordinate on the wire: `job_id ‖ unit_id ‖ generation`
 /// (draft §F routing order). 72 bytes.
@@ -251,6 +249,23 @@ work_item_op!(DeclineWorkUnitV1, b"CPDCv1\0", "DeclineWorkUnitV1");
 work_item_op!(ExpireWorkUnitV1, b"CPEXv1\0", "ExpireWorkUnitV1");
 
 // ===========================================================================
+// 6/7. Assign / Reassign — target a work item (full WorkItemRef).
+//
+// The wire body is ONLY the work-item reference. The winner (offer_bond_id,
+// payment_addr, score) is CONSENSUS-COMPUTED at execution from pool state and the
+// BR1 beacon output — NOT submitter-provided — so it is not carried. Both ops
+// drive a `-> Assigned` transition via the deterministic winner selection, whose
+// score binds the (RATIFIED v1, #223) `beacon_output`:
+//   score preimage = "OMNINODE-POOL-ASSIGN:v1:" ‖ beacon ‖ job_id ‖ unit_id ‖
+//                    generation(u64) ‖ payment_addr ‖ offer_bond_id
+// That selection lives in the (dormant) execution layer; this module fixes only
+// the op-carrier bytes. Same `WorkItemRef` shape as decline/expire (distinct
+// magics/op ids); generation is carried in full (anti-stale).
+// ===========================================================================
+work_item_op!(AssignWorkUnitV1, b"CPASv1\0", "AssignWorkUnitV1");
+work_item_op!(ReassignWorkUnitV1, b"CPRAv1\0", "ReassignWorkUnitV1");
+
+// ===========================================================================
 // 5. CancelJobV1
 // ===========================================================================
 
@@ -308,6 +323,8 @@ pub enum ComputePoolOperation {
     DeclineUnit(DeclineWorkUnitV1),
     ExpireUnit(ExpireWorkUnitV1),
     CancelJob(CancelJobV1),
+    AssignUnit(AssignWorkUnitV1),
+    ReassignUnit(ReassignWorkUnitV1),
 }
 
 impl ComputePoolOperation {
@@ -318,6 +335,8 @@ impl ComputePoolOperation {
             ComputePoolOperation::DeclineUnit(_) => OP_DECLINE_UNIT,
             ComputePoolOperation::ExpireUnit(_) => OP_EXPIRE_UNIT,
             ComputePoolOperation::CancelJob(_) => OP_CANCEL_JOB,
+            ComputePoolOperation::AssignUnit(_) => OP_ASSIGN_UNIT,
+            ComputePoolOperation::ReassignUnit(_) => OP_REASSIGN_UNIT,
         }
     }
 
@@ -328,6 +347,8 @@ impl ComputePoolOperation {
             ComputePoolOperation::DeclineUnit(v) => v.try_encode(),
             ComputePoolOperation::ExpireUnit(v) => v.try_encode(),
             ComputePoolOperation::CancelJob(v) => v.try_encode(),
+            ComputePoolOperation::AssignUnit(v) => v.try_encode(),
+            ComputePoolOperation::ReassignUnit(v) => v.try_encode(),
         }
     }
 
@@ -349,6 +370,12 @@ impl ComputePoolOperation {
             }
             m if *m == CancelJobV1::MAGIC => {
                 ComputePoolOperation::CancelJob(CancelJobV1::decode(&mut r)?)
+            }
+            m if *m == AssignWorkUnitV1::MAGIC => {
+                ComputePoolOperation::AssignUnit(AssignWorkUnitV1::decode(&mut r)?)
+            }
+            m if *m == ReassignWorkUnitV1::MAGIC => {
+                ComputePoolOperation::ReassignUnit(ReassignWorkUnitV1::decode(&mut r)?)
             }
             _ => return Err(DecodeError::BadTag { ctx: "ComputePoolOperation" }),
         };
@@ -415,11 +442,10 @@ mod tests {
         assert_eq!(OP_PUBLISH_OFFER, 0xC102);
         assert_eq!(OP_ACCEPT_UNIT, 0xC103);
         assert_eq!(OP_CANCEL_JOB, 0xC106);
-        // Deferred (reserved, not landed): create-job (blocked on graph codec),
-        // assign/reassign (beacon-dependent, #223).
+        assert_eq!(OP_ASSIGN_UNIT, 0xC107);
+        assert_eq!(OP_REASSIGN_UNIT, 0xC108);
+        // Still deferred: create-job (blocked on byte-complete graph codec, #227).
         assert_eq!(OP_CREATE_JOB_RESERVED, 0xC101);
-        assert_eq!(OP_ASSIGN_UNIT_RESERVED, 0xC107);
-        assert_eq!(OP_REASSIGN_UNIT_RESERVED, 0xC108);
     }
 
     #[test]
@@ -443,11 +469,19 @@ mod tests {
             ComputePoolOperation::DeclineUnit(DeclineWorkUnitV1 { work_item: wi() }),
             ComputePoolOperation::ExpireUnit(ExpireWorkUnitV1 { work_item: wi() }),
             ComputePoolOperation::CancelJob(CancelJobV1 { job_id: [0x55; 32] }),
+            ComputePoolOperation::AssignUnit(AssignWorkUnitV1 { work_item: wi() }),
+            ComputePoolOperation::ReassignUnit(ReassignWorkUnitV1 { work_item: wi() }),
         ];
         for op in ops {
             let bytes = op.try_encode().unwrap();
             assert_eq!(ComputePoolOperation::decode_exact(&bytes).unwrap(), op);
         }
+        // All seven implemented ops have distinct op ids (create-job reserved).
+        let ids: std::collections::BTreeSet<u16> = [
+            OP_PUBLISH_OFFER, OP_ACCEPT_UNIT, OP_DECLINE_UNIT, OP_EXPIRE_UNIT,
+            OP_CANCEL_JOB, OP_ASSIGN_UNIT, OP_REASSIGN_UNIT,
+        ].into_iter().collect();
+        assert_eq!(ids.len(), 7, "op ids must be distinct");
     }
 
     #[test]

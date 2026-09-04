@@ -626,6 +626,38 @@ pub trait AssignmentScorer {
     fn score(&self, beacon: &Beacon, ctx: &ScoreContext<'_>) -> Score;
 }
 
+/// BLAKE3 `derive_key` context for the ratified v1 assignment score (#130/#217 B8).
+pub const ASSIGN_SCORE_CONTEXT: &str = "OMNINODE-POOL-ASSIGN:v1:";
+
+/// The ratified v1 assignment scorer. Now byte-complete: BR1's `beacon_output` is
+/// RATIFIED v1 (#223, on main) and the id/address encodings are fixed-width, so
+/// the preimage is frozen. The score is a pure function of `(beacon, context)`,
+/// hence proposer-independent:
+///
+/// ```text
+/// score = BLAKE3::derive_key(
+///     "OMNINODE-POOL-ASSIGN:v1:",
+///     beacon[32] ‖ job_id[32] ‖ unit_id[32] ‖ generation(u64 LE) ‖
+///     payment_addr[20] ‖ offer_bond_id[32])
+/// ```
+///
+/// `beacon` is BR1's `beacon_output` (opaque 32 bytes to C1). DORMANT: reached
+/// only on the (gate-closed) assignment path.
+pub struct RatifiedAssignmentScorer;
+
+impl AssignmentScorer for RatifiedAssignmentScorer {
+    fn score(&self, beacon: &Beacon, ctx: &ScoreContext<'_>) -> Score {
+        let mut m = Vec::with_capacity(32 + 32 + 32 + 8 + 20 + 32);
+        m.extend_from_slice(beacon.as_bytes());
+        m.extend_from_slice(ctx.job_id.as_bytes());
+        m.extend_from_slice(ctx.unit_id.as_bytes());
+        m.extend_from_slice(&ctx.generation.to_le_bytes());
+        m.extend_from_slice(ctx.payment_addr.as_bytes());
+        m.extend_from_slice(ctx.offer_bond_id.as_bytes());
+        Score::from_bytes(blake3::derive_key(ASSIGN_SCORE_CONTEXT, &m))
+    }
+}
+
 /// Typed seam for `DerivedInputCommitmentV1`. C1 does not choose the preimage;
 /// it implements the ratified same-predecessor-manifest structural guard on
 /// [`WorkUnit`] instead.
@@ -1038,6 +1070,54 @@ mod tests {
             offer_bond_id: offer(bond),
             payment_addr: addr(pay),
         }
+    }
+
+    /// The RATIFIED v1 `beacon_output` KAT value (crates/beacon-runtime/src/wire.rs
+    /// `tests::beacon_output_kat_ratified_v1`, #223, now on main). Binding the
+    /// assignment score to this exact value is the point of #217 B8.
+    const BEACON_OUTPUT_KAT: [u8; 32] = [
+        0x69, 0x04, 0xae, 0x11, 0x98, 0x1e, 0x78, 0xd5, 0x60, 0xb3, 0x45, 0x00, 0xbb, 0x42, 0xb1,
+        0x74, 0x90, 0x85, 0xc4, 0x5e, 0xd6, 0x8c, 0x7a, 0x7b, 0xfe, 0x3d, 0x26, 0xf9, 0xe3, 0xe9,
+        0x21, 0x04,
+    ];
+
+    #[test]
+    fn ratified_assignment_score_kat_binds_beacon_output() {
+        let bk = Beacon::from_bytes(BEACON_OUTPUT_KAT);
+        let (j, u, pay, ob) = (job(0x11), unit(0x22), addr(0x07), offer(0x33));
+        let ctx = ScoreContext {
+            job_id: &j,
+            unit_id: &u,
+            generation: 5,
+            payment_addr: &pay,
+            offer_bond_id: &ob,
+        };
+        let s = RatifiedAssignmentScorer.score(&bk, &ctx);
+
+        // Independent recomputation of the exact ratified preimage (a separate path
+        // from RatifiedAssignmentScorer::score).
+        let mut m = Vec::new();
+        m.extend_from_slice(&BEACON_OUTPUT_KAT);
+        m.extend_from_slice(&[0x11u8; 32]); // job_id
+        m.extend_from_slice(&[0x22u8; 32]); // unit_id
+        m.extend_from_slice(&5u64.to_le_bytes()); // generation
+        m.extend_from_slice(&[0x07u8; 20]); // payment_addr
+        m.extend_from_slice(&[0x33u8; 32]); // offer_bond_id
+        assert_eq!(*s.as_bytes(), blake3::derive_key(ASSIGN_SCORE_CONTEXT, &m));
+
+        // Frozen KAT (regression vector).
+        assert_eq!(hex::encode(s.as_bytes()), "7639c7ce3be9fd2c5e5366233f6eec6748212218cfc52592858ff3ba90f7e527");
+
+        // Binds the beacon output: a different beacon yields a different score.
+        assert_ne!(s, RatifiedAssignmentScorer.score(&beacon(0x00), &ctx));
+
+        // Binds every context field (local bindings keep the refs alive).
+        let (j2, u2, a2, o2) = (job(0x99), unit(0x99), addr(0x99), offer(0x99));
+        assert_ne!(s, RatifiedAssignmentScorer.score(&bk, &ScoreContext { job_id: &j2, ..ctx }));
+        assert_ne!(s, RatifiedAssignmentScorer.score(&bk, &ScoreContext { unit_id: &u2, ..ctx }));
+        assert_ne!(s, RatifiedAssignmentScorer.score(&bk, &ScoreContext { generation: 6, ..ctx }));
+        assert_ne!(s, RatifiedAssignmentScorer.score(&bk, &ScoreContext { payment_addr: &a2, ..ctx }));
+        assert_ne!(s, RatifiedAssignmentScorer.score(&bk, &ScoreContext { offer_bond_id: &o2, ..ctx }));
     }
 
     fn simple_unit(j: JobId, u: UnitId) -> WorkUnit {

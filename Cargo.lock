@@ -6271,6 +6271,7 @@ name = "sumchain-state"
 version = "0.3.0"
 dependencies = [
  "bincode",
+ "blake3",
  "hex",
  "lru",
  "parking_lot",
