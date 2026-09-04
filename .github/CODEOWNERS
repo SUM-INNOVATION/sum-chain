@@ -1,6 +1,24 @@
 # Code owners for SUM Chain.
 #
-# GitHub requires an approving review from a code owner on every pull request
-# to a protected branch (see CONTRIBUTING.md → Review policy). One entry, the
-# repo owner/admin, owns the whole tree.
-* @sunhaoxiangwang
+# SCOPED DELIBERATELY (#219). This file is NOT a whole-tree owner list: it names
+# owners only for the GOVERNANCE paths, so that "Require review from Code Owners"
+# can be enabled WITHOUT forcing a human approval on every ordinary PR.
+#
+# Why this exists: the automated-review gate (docs/governance/AUTOMATED-REVIEW.md)
+# replaces the human-approval count for ordinary PRs, but its clause 4 cannot
+# catch a PR that rewrites the gate WORKFLOW itself to trivially pass. The
+# intended compensating control was a ruleset "Restrict file paths" rule; GitHub
+# rejects that rule on this org's plan (422, Enterprise-gated). CODEOWNERS +
+# "Require review from Code Owners" gives the same guarantee on any plan:
+# a PR touching these paths requires a code-owner approval; every other PR
+# requires none.
+#
+# TWO owners are named on purpose. A single-owner entry would deadlock the
+# owner's own governance PRs (an author cannot approve their own PR) — the exact
+# reason whole-tree code-owner review was previously left OFF.
+#
+# Keep this in sync with `gate_paths` in .github/automated-review.config.json.
+
+/.github/workflows/   @sunhaoxiangwang @Mike-Mans
+/.github/scripts/     @sunhaoxiangwang @Mike-Mans
+/.github/CODEOWNERS   @sunhaoxiangwang @Mike-Mans
