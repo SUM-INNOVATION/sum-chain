@@ -44,7 +44,7 @@
 //!
 //! | Ordinal | Owner | Beacon family (phase) | Registered? |
 //! |---------|-------|-----------------------|-------------|
-//! | `27` | **C1 / ComputePool (#130)** — [`C1_COMPUTE_POOL_TXTYPE_RESERVED`] | NOT the beacon; W1b must not take 27. | **No** — reserved, unregistered (`from_byte(27) == None`). |
+//! | `27` | **C1 / ComputePool (#130)** — [`C1_COMPUTE_POOL_TXTYPE_RESERVED`] (value 27; name historical) | NOT the beacon; W1b must not take 27. | **Yes** — `TxType::ComputePool` (#130 filled the slot in place; EXECUTION gate-closed). |
 //! | `28` | **W1b beacon** — [`W1B_BEACON_DKG_TXTYPE`] | DKG / **epoch-setup**: key registration, deal, complaint. | **Yes** — `TxType::BeaconSetup`. |
 //! | `29` | **W1b beacon** — [`W1B_BEACON_SIGN_TXTYPE`] | **signing / output**: per-round partials, finalization. | **Yes** — `TxType::BeaconSigning`. |
 //!
@@ -1527,13 +1527,18 @@ mod tests {
     }
 
     #[test]
-    fn beacon_band_registered_in_txtype_c1_slot_still_reserved() {
-        // Owner OPTION B (2026-07): the beacon phase band 28/29 is now REGISTERED
-        // in the canonical `TxType` (byte-frozen wire layout; EXECUTION stays
-        // gate-closed). C1's slot 27 remains an UNREGISTERED reservation — no
-        // compute-pool carrier exists yet, so `from_byte(27)` is still `None`.
+    fn beacon_band_and_c1_slot_registered_in_txtype() {
+        // The beacon phase band 28/29 and C1's slot 27 are now all REGISTERED in the
+        // canonical `TxType` (byte-frozen wire layout; EXECUTION stays gate-closed).
+        // C1/ComputePool (#130) filled slot 27 in place, so `from_byte(27)` is now
+        // `Some(ComputePool)` (the `..._RESERVED` constant name is historical — the
+        // byte value 27 is unchanged).
         use crate::transaction::TxType;
-        assert!(TxType::from_byte(C1_COMPUTE_POOL_TXTYPE_RESERVED).is_none());
+        assert_eq!(
+            TxType::from_byte(C1_COMPUTE_POOL_TXTYPE_RESERVED),
+            Some(TxType::ComputePool)
+        );
+        assert_eq!(TxType::ComputePool as u8, C1_COMPUTE_POOL_TXTYPE_RESERVED);
         assert_eq!(
             TxType::from_byte(W1B_BEACON_DKG_TXTYPE),
             Some(TxType::BeaconSetup)

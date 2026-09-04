@@ -31,11 +31,15 @@ fn tx_type_governance_ordinal_locked() {
     assert_eq!(TxType::from_byte(22), Some(TxType::Education));
     // 24 is InferenceSettlement (issue #61, appended after Governance); 25 is
     // InferenceAttestationV2 (issue #79, sponsored attestation); 26 is Supply
-    // (800B supply correction / service grants); 27 is free.
+    // (800B supply correction / service grants); 27 is ComputePool (#130, filled
+    // in place); 28/29 are the beacon families (#125).
     assert_eq!(TxType::from_byte(24), Some(TxType::InferenceSettlement));
     assert_eq!(TxType::from_byte(25), Some(TxType::InferenceAttestationV2));
     assert_eq!(TxType::from_byte(26), Some(TxType::Supply));
-    assert_eq!(TxType::from_byte(27), None);
+    assert_eq!(TxType::from_byte(27), Some(TxType::ComputePool));
+    assert_eq!(TxType::from_byte(28), Some(TxType::BeaconSetup));
+    assert_eq!(TxType::from_byte(29), Some(TxType::BeaconSigning));
+    assert_eq!(TxType::from_byte(30), None);
 }
 
 #[test]
