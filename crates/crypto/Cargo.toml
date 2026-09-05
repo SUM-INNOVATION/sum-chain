@@ -11,7 +11,7 @@ keywords = ["sumchain", "blockchain", "ed25519", "x25519", "chacha20poly1305"]
 categories = ["cryptography", "cryptography::cryptocurrencies"]
 
 [dependencies]
-sumchain-primitives = { version = "0.3.0", path = "../primitives" }
+sumchain-primitives = { version = "0.4.0", path = "../primitives" }
 ed25519-dalek = { workspace = true }
 blake3 = { workspace = true }
 rand = { workspace = true }
