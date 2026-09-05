@@ -231,6 +231,55 @@ pub enum NetworkCommand {
     },
 }
 
+
+/// How long a single bootnode DNS lookup may take (#237). Bounded so a
+/// black-holed resolver cannot wedge startup or stall the event loop.
+pub const BOOTNODE_DNS_TIMEOUT: Duration = Duration::from_secs(5);
+/// How often an isolated node re-resolves and re-dials its bootnodes.
+pub const BOOTNODE_RETRY: Duration = Duration::from_secs(30);
+
+/// Resolve every configured bootnode through the OS resolver and dial **all**
+/// resulting literal addresses.
+///
+/// Returns how many dials the swarm accepted. Every failure is reported at
+/// `error!` with its typed reason: a bootnode that resolves to nothing, or whose
+/// dial is rejected, is the difference between a node that joins the network and
+/// one that sits at `/ready = 503` forever — and it used to be a silent `warn!`
+/// (#237).
+async fn dial_bootnodes(
+    swarm: &mut Swarm<SumChainBehaviour>,
+    config: &NetworkConfig,
+    phase: &str,
+) -> usize {
+    let resolved = crate::dns::resolve_all(
+        config.bootnode_multiaddrs(),
+        BOOTNODE_DNS_TIMEOUT,
+    )
+    .await;
+
+    for (entry, reason) in &resolved.failures {
+        error!("bootnode {} unusable ({}): {}", entry, phase, reason);
+    }
+
+    let mut accepted = 0usize;
+    for addr in &resolved.addrs {
+        info!("dialing bootnode ({}): {}", phase, addr);
+        match swarm.dial(addr.clone()) {
+            Ok(()) => accepted += 1,
+            Err(e) => error!("bootnode dial rejected ({}): {} -> {}", phase, addr, e),
+        }
+    }
+    debug!(
+        "bootnodes ({}): {} configured, {} address(es) resolved, {} dial(s) accepted, {} failure(s)",
+        phase,
+        config.bootnodes.len(),
+        resolved.addrs.len(),
+        accepted,
+        resolved.failures.len()
+    );
+    accepted
+}
+
 /// Network service
 pub struct NetworkService {
     /// Network configuration
@@ -492,25 +541,28 @@ impl NetworkService {
         }
 
         let configured = self.config.bootnodes.len();
-        let mut accepted = 0usize;
-        for addr in self.config.bootnode_multiaddrs() {
-            info!("Connecting to bootnode: {}", addr);
-            match swarm.dial(addr.clone()) {
-                Ok(()) => accepted += 1,
-                Err(e) => warn!("Failed to dial bootnode {}: {}", addr, e),
-            }
-        }
+        let mut accepted = dial_bootnodes(&mut swarm, &self.config, "startup").await;
         if configured > 0 && accepted == 0 {
             error!(
-                "No usable bootnode: all {} configured bootnode(s) were rejected. \
-                 With mDNS removed this node cannot discover peers and will not \
-                 become ready. Bootnodes must be literal /ip4/ or /ip6/ multiaddrs \
-                 — this transport has no DNS resolution layer (see #237).",
-                configured
+                "No usable bootnode: all {} configured bootnode(s) failed to resolve \
+                 or dial. With mDNS removed this node cannot discover peers and will \
+                 not become ready (see #237). Retrying every {}s.",
+                configured,
+                BOOTNODE_RETRY.as_secs()
             );
         }
+        let _ = &mut accepted;
 
         *self.running.write() = true;
+
+        // Re-resolve and re-dial bootnodes while this node has no peers. A DNS
+        // name is not resolved once and cached forever: a Kubernetes pod that
+        // restarts comes back at a different address, and the stale literal we
+        // dialed at startup is then dead. Re-resolution is what makes the
+        // /dns4 → /ip4 rewrite safe in an orchestrated environment (#237).
+        let mut bootnode_retry = tokio::time::interval(BOOTNODE_RETRY);
+        bootnode_retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        bootnode_retry.tick().await; // the first tick completes immediately
 
         // Pending sync response channels (stored locally since they can't be sent through channels)
         let mut pending_sync_responses: HashMap<
@@ -530,6 +582,18 @@ impl NetworkService {
                         &mut pending_sync_responses,
                         &next_request_id,
                     );
+                }
+
+                // Bootnode retry: only while isolated, so a healthy node never
+                // re-dials and a wedged one keeps trying with a fresh lookup.
+                _ = bootnode_retry.tick() => {
+                    if self.peers.read().is_empty() && !self.config.bootnodes.is_empty() {
+                        warn!(
+                            "no peers connected; re-resolving {} bootnode(s)",
+                            self.config.bootnodes.len()
+                        );
+                        dial_bootnodes(&mut swarm, &self.config, "retry").await;
+                    }
                 }
 
                 // Handle commands

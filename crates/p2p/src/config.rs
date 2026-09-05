@@ -58,43 +58,21 @@ impl NetworkConfig {
 
     /// Bootnode entries that can never be dialed, each with an actionable reason.
     ///
-    /// Two classes are unreachable and were previously discarded in silence
-    /// (`bootnode_multiaddrs` drops parse failures, and a rejected dial was only
-    /// a `warn!`), which is how a devnet ran for months on a bootnode address
-    /// nothing could resolve — see #237:
+    /// Only **unparseable** entries qualify now. They were previously discarded
+    /// in silence by `bootnode_multiaddrs`'s `filter_map(...ok())`, which is part
+    /// of how a devnet ran for months on a bootnode nothing could reach (#237).
     ///
-    /// * **unparseable** multiaddr strings;
-    /// * **DNS-based** multiaddrs (`/dns`, `/dns4`, `/dns6`, `/dnsaddr`). The
-    ///   transport stack is TCP → Noise → Yamux with **no DNS resolution layer**,
-    ///   so libp2p rejects these as `MultiaddrNotSupported`. It resolves names
-    ///   through its own transport, never through the host or a container
-    ///   runtime's DNS. Adding libp2p's DNS transport would pull
-    ///   `libp2p-dns → hickory-resolver → hickory-proto` and reintroduce
-    ///   RUSTSEC-2026-0119, which #202 exists to remove — so the fix is to
-    ///   configure a literal `/ip4/…` or `/ip6/…` address instead.
+    /// DNS multiaddrs (`/dns`, `/dns4`, `/dns6`, `/dnsaddr`) are **no longer**
+    /// reported here: [`crate::dns`] resolves them through the OS resolver and
+    /// dials the resulting literal addresses, so they are dialable again. A DNS
+    /// name that fails to resolve is reported at dial time with its typed reason
+    /// — which is the right place, since resolvability is a runtime property, not
+    /// a property of the configured string.
     pub fn undialable_bootnodes(&self) -> Vec<(String, &'static str)> {
-        use libp2p_core::multiaddr::Protocol;
         self.bootnodes
             .iter()
-            .filter_map(|entry| match entry.parse::<Multiaddr>() {
-                Err(_) => Some((entry.clone(), "not a valid multiaddr")),
-                Ok(addr) => addr
-                    .iter()
-                    .any(|p| {
-                        matches!(
-                            p,
-                            Protocol::Dns(_)
-                                | Protocol::Dns4(_)
-                                | Protocol::Dns6(_)
-                                | Protocol::Dnsaddr(_)
-                        )
-                    })
-                    .then_some((
-                        entry.clone(),
-                        "DNS multiaddr, but this transport has no DNS resolution \
-                         layer (use a literal /ip4/ or /ip6/ address)",
-                    )),
-            })
+            .filter(|entry| entry.parse::<Multiaddr>().is_err())
+            .map(|entry| (entry.clone(), "not a valid multiaddr"))
             .collect()
     }
 }
@@ -110,27 +88,29 @@ mod bootnode_reachability_tests {
         }
     }
 
-    /// The #237 regression guard: a DNS bootnode is unusable, because the
-    /// transport (TCP -> Noise -> Yamux) has no DNS resolution layer. Proven
-    /// against the real transport: dialing `/dns4/...` returns
-    /// `MultiaddrNotSupported` while `/ip4/...` is accepted.
+    /// DNS bootnodes are dialable again (#237): `crate::dns` resolves them
+    /// through the OS resolver and dials the literal results, so they must NOT
+    /// be reported unusable. This is the inverse of the guard that stood here
+    /// before the resolver existed — it fails if the old behaviour returns.
     #[test]
-    fn dns_bootnodes_are_reported_unusable() {
+    fn dns_bootnodes_are_no_longer_reported_unusable() {
         for entry in [
             "/dns4/validator-1/tcp/30303",
             "/dns6/validator-1/tcp/30303",
             "/dns/validator-1/tcp/30303",
-            "/dnsaddr/example.invalid",
+            "/dns4/sumchain-validator-1-0.sumchain-validator-1.sumchain.svc.cluster.local/tcp/30303",
         ] {
-            let bad = cfg(&[entry]).undialable_bootnodes();
-            assert_eq!(bad.len(), 1, "{entry} should be reported unusable");
-            assert_eq!(bad[0].0, entry);
-            assert!(bad[0].1.contains("DNS"), "reason should name the cause");
+            assert_eq!(
+                cfg(&[entry]).undialable_bootnodes(),
+                vec![],
+                "{entry} is resolvable via the OS resolver and must not be refused"
+            );
+            // It must also survive parsing into the dialable set.
+            assert_eq!(cfg(&[entry]).bootnode_multiaddrs().len(), 1);
         }
     }
 
-    /// Literal addresses — what the devnet must use — are accepted, with or
-    /// without a `/p2p/<PeerId>` suffix.
+    /// Literal addresses stay usable and skip the resolver entirely.
     #[test]
     fn literal_ip_bootnodes_are_usable() {
         let c = cfg(&[
@@ -142,19 +122,6 @@ mod bootnode_reachability_tests {
         assert_eq!(c.undialable_bootnodes(), vec![]);
     }
 
-    /// A `/p2p/` suffix whose PeerId is a placeholder does not parse, so the
-    /// whole entry is unusable. `configs/bft-config.toml` ships exactly that
-    /// shape (`.../p2p/12D3KooWBootNode1...`); before this change such an entry
-    /// disappeared without a word.
-    #[test]
-    fn placeholder_peer_id_is_reported_not_silently_dropped() {
-        let c = cfg(&["/ip4/10.0.1.10/tcp/9933/p2p/12D3KooWBootNode1..."]);
-        let bad = c.undialable_bootnodes();
-        assert_eq!(bad.len(), 1);
-        assert_eq!(bad[0].1, "not a valid multiaddr");
-        assert!(c.bootnode_multiaddrs().is_empty());
-    }
-
     /// A malformed entry used to vanish inside `filter_map(...ok())`.
     #[test]
     fn unparseable_bootnodes_are_not_dropped_silently() {
@@ -162,8 +129,20 @@ mod bootnode_reachability_tests {
         let bad = c.undialable_bootnodes();
         assert_eq!(bad.len(), 1);
         assert_eq!(bad[0].0, "not-a-multiaddr");
-        // It is still absent from the dialable set — that is the silent part.
+        assert_eq!(bad[0].1, "not a valid multiaddr");
         assert_eq!(c.bootnode_multiaddrs().len(), 1);
+    }
+
+    /// A `/p2p/` suffix whose PeerId is a placeholder does not parse, so the
+    /// whole entry is unusable. `configs/bft-config.toml` ships exactly that
+    /// shape; before this it disappeared without a word.
+    #[test]
+    fn placeholder_peer_id_is_reported_not_silently_dropped() {
+        let c = cfg(&["/ip4/10.0.1.10/tcp/9933/p2p/12D3KooWBootNode1..."]);
+        let bad = c.undialable_bootnodes();
+        assert_eq!(bad.len(), 1);
+        assert_eq!(bad[0].1, "not a valid multiaddr");
+        assert!(c.bootnode_multiaddrs().is_empty());
     }
 
     #[test]
