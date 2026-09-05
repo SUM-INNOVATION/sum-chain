@@ -5,7 +5,7 @@
 use std::fs;
 use std::path::Path;
 
-use libp2p::identity::Keypair;
+use libp2p_identity::Keypair;
 use tracing::{info, warn};
 
 use crate::{P2pError, Result};
@@ -112,7 +112,7 @@ pub fn generate_and_save_keypair(path: &Path) -> Result<Keypair> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use libp2p::PeerId;
+    use libp2p_identity::PeerId;
     use tempfile::TempDir;
 
     #[test]

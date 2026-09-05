@@ -7,7 +7,8 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
-use libp2p::{Multiaddr, PeerId};
+use libp2p_core::Multiaddr;
+use libp2p_identity::PeerId;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
