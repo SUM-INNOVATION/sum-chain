@@ -99,15 +99,19 @@ impl std::fmt::Display for EthAddress {
     }
 }
 
-impl From<ethers::types::Address> for EthAddress {
-    fn from(addr: ethers::types::Address) -> Self {
+// Address conversions are a byte-for-byte reinterpretation of the same 20 bytes
+// in both directions -- alloy's `Address` is a newtype over [u8; 20] exactly as
+// ethers' was, so migrating (#206) cannot move an address. Proven in
+// tests/abi_parity.rs.
+impl From<ethabi::ethereum_types::H160> for EthAddress {
+    fn from(addr: ethabi::ethereum_types::H160) -> Self {
         EthAddress(addr.0)
     }
 }
 
-impl From<EthAddress> for ethers::types::Address {
+impl From<EthAddress> for ethabi::ethereum_types::H160 {
     fn from(addr: EthAddress) -> Self {
-        ethers::types::Address::from(addr.0)
+        ethabi::ethereum_types::H160::from(addr.0)
     }
 }
 

@@ -12,7 +12,8 @@ sumchain-crypto = { path = "../crypto" }
 sumchain-storage = { path = "../storage" }
 
 # Ethereum interaction
-ethers = { workspace = true }
+reqwest = { version = "0.12", features = ["json"] }
+ethabi = { workspace = true }
 k256 = { workspace = true }
 
 # Async
@@ -38,4 +39,5 @@ parking_lot = { workspace = true }
 blake3 = { workspace = true }
 
 [dev-dependencies]
+hex = "0.4"
 tempfile = "3.10"
