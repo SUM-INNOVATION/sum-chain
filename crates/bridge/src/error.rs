@@ -77,18 +77,17 @@ pub enum BridgeError {
 
 pub type Result<T> = std::result::Result<T, BridgeError>;
 
-impl From<ethers::providers::ProviderError> for BridgeError {
-    fn from(e: ethers::providers::ProviderError) -> Self {
+// The provider is now a minimal reqwest JSON-RPC client (#206), so transport
+// failures arrive as reqwest errors rather than a provider-crate error type.
+impl From<reqwest::Error> for BridgeError {
+    fn from(e: reqwest::Error) -> Self {
         BridgeError::EthereumRpc(e.to_string())
     }
 }
 
-impl From<ethers::contract::ContractError<ethers::providers::Provider<ethers::providers::Http>>>
-    for BridgeError
-{
-    fn from(
-        e: ethers::contract::ContractError<ethers::providers::Provider<ethers::providers::Http>>,
-    ) -> Self {
+// ABI encode/decode failures surface as contract-call errors.
+impl From<ethabi::Error> for BridgeError {
+    fn from(e: ethabi::Error) -> Self {
         BridgeError::ContractCall(e.to_string())
     }
 }

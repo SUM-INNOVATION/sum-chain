@@ -410,10 +410,16 @@ impl RpcServer {
             self.timeout_config.max_connections
         );
 
-        let server = Server::builder()
+        // jsonrpsee 0.24+ moved these limits off ServerBuilder onto ServerConfig
+        // (#205/#207). The VALUES are unchanged — same limits, new plumbing.
+        let config = jsonrpsee::server::ServerConfig::builder()
             .max_connections(self.timeout_config.max_connections)
             .max_request_body_size(self.timeout_config.max_request_body_size)
             .max_response_body_size(self.timeout_config.max_response_body_size)
+            .build();
+
+        let server = Server::builder()
+            .set_config(config)
             .build(addr)
             .await?;
 

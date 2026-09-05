@@ -81,7 +81,7 @@ libp2p-core = "0.41"
 libp2p-identity = { version = "0.2", features = ["ed25519", "peerid", "rand"] }
 
 # RPC
-jsonrpsee = { version = "0.21", features = ["server", "http-client", "macros"] }
+jsonrpsee = { version = "0.26", features = ["server", "http-client", "macros"] }
 tower = "0.4"
 tower-http = { version = "0.5", features = ["cors"] }
 hyper = { version = "1.0", features = ["full"] }
@@ -122,7 +122,17 @@ wasmer = "=5.0.6"
 wasmer-compiler-singlepass = "=5.0.6"
 
 # Ethereum bridge
-ethers = { version = "2.0", features = ["legacy"] }
+# Ethereum ABI + primitive types for the bridge (#206). `ethabi` is the mature
+# MIT-licensed standalone crate that `ethers::abi` was itself built on, so the
+# encodings are byte-identical to the removed ethers implementation by
+# construction rather than by coincidence — see crates/bridge/tests/abi_parity.rs.
+#
+# Alloy was evaluated and rejected: every Alloy version requires rustc >= 1.90
+# (alloy-primitives -> ruint ^1.16), and 1.90 does not link wasmer 5.0.6 on
+# x86_64-linux (undefined __rust_probestack, #246). wasmer is pinned at =5.0.6
+# because 6.0.0 relicensed Singlepass to BUSL-1.1 (#203/#222), so the MSRV cannot
+# advance while that pin stands.
+ethabi = "18"
 k256 = "0.13"
 
 [profile.release]
