@@ -51,59 +51,45 @@ builds with `npm run build` in `sdk/typescript`.
 
 ## Review policy
 
-`main` is protected, and the gate is an **independent automated review** rather
-than a human-approval count (#219). See
-[docs/governance/AUTOMATED-REVIEW.md](docs/governance/AUTOMATED-REVIEW.md).
+`main` is protected. Merging a pull request needs:
 
-The required [`automated-review`](.github/workflows/automated-review.yml) check
-runs on PR `opened` / `synchronize` / `reopened` / `ready_for_review`, so a fresh
-verdict is always produced for the **current head**. It passes only when all of:
+1. **one approving human review** (ordinary code review), and
+2. **green CI**: `build-test-clippy`, `build-test-clippy-aarch64` and
+   `supply-chain-audit`, with **"require branches to be up to date"** on.
 
-1. the run's head SHA **is** the PR's current head (never an older reviewed head);
-2. the branch is **up to date** with `main` (strict, unchanged);
-3. every designated CI/security check is `completed` + `success` **on that head**
-   (a success recorded against an older head does not count); and
-4. if the PR touches a **governance gate file**, a qualifying admin/maintainer
-   **approval on the current head** exists.
+That is all. Review here is a **development control** — it is not chain
+consensus or runtime authority.
 
-So an ordinary PR needs **no human approval** — it merges once its checks are
-green on the current head. Human sign-off stays mandatory for exactly one class:
-**changing the gate itself** (clause 4). The policy is a pure function in
-`.github/scripts/automated_review.py` with unit tests
-(`automated_review_test.py`, run by the `automated-review-tests` job).
+### No repository-governance automation
 
-This replaced the previous conditional "1 approval if the author is an
-admin/maintainer, otherwise 2" rule enforced by
-[`approval-policy`](.github/workflows/approval-policy.yml), which ran **only on
-review events**. Because strict up-to-date forces a branch update after every
-other merge, and no review event fires on the new head, that check was never
-produced there and the PR stalled at "Expected — waiting for status" until a
-human re-approved — the recurring toil #219 removes. `approval-policy` is
-deprecated and retained only until the one-time ruleset switch documented above.
+This repository does **not** run approval bots, automated GitHub reviewers,
+governance workflows, or CODEOWNERS gating machinery. An earlier iteration (#219)
+built an "automated review" workflow that replaced the human approval count with
+a scripted policy check; it was removed in #239.
 
-`.github/CODEOWNERS` is **path-scoped to the governance files** (the gate workflow,
-its scripts, and CODEOWNERS itself), with **two** owners. That lets native
-**"Require review from Code Owners" be enabled** while ordinary PRs still need no
-human approval: code-owner review is demanded only for PRs touching owned paths.
+The reason is worth keeping: **automation means deterministic protocol validation
+and execution performed directly by on-chain code.** The chain must not depend on
+a human authority, board, administrator, or manual approval to execute a valid
+state transition. CI and code review are how *developers* keep the tree healthy;
+they are not, and must not become, a substitute for on-chain validation. If a rule
+matters to the protocol, it belongs in consensus code with tests and vectors — not
+in a `.github/` workflow.
 
-This replaces the previous whole-tree entry (`* @sunhaoxiangwang`), under which
-code-owner review had to stay OFF — a single owner cannot approve their own PR,
-so it deadlocked the owner's changes. Scoping the file and naming two owners
-removes both problems. It is the compensating control for setting the approval
-count to zero, standing in for the ruleset "Restrict file paths" rule, which
-GitHub rejects on this organization's plan
-(see [docs/governance/AUTOMATED-REVIEW.md](docs/governance/AUTOMATED-REVIEW.md)).
+`.github/CODEOWNERS` is therefore advisory: it suggests a default reviewer and
+gates nothing ("Require review from Code Owners" is off).
 
 ## Branch protection setup (maintainers)
 
-Applied via the GitHub API/UI once the repository is public (branch protection
-is unavailable on private repositories under the free plan). The exact command:
+Applied via the GitHub API/UI:
 
 ```bash
 gh api -X PUT repos/SUM-INNOVATION/sum-chain/branches/main/protection \
   -H "Accept: application/vnd.github+json" --input - <<'JSON'
 {
-  "required_status_checks": { "strict": true, "contexts": ["approval-policy"] },
+  "required_status_checks": {
+    "strict": true,
+    "contexts": ["build-test-clippy", "build-test-clippy-aarch64", "supply-chain-audit"]
+  },
   "enforce_admins": true,
   "required_pull_request_reviews": {
     "dismiss_stale_reviews": true,
@@ -121,12 +107,13 @@ Equivalent UI settings under **Settings → Branches** for `main`:
 
 1. **Require a pull request before merging** → **Require approvals: 1** →
    **Dismiss stale pull request approvals when new commits are pushed**.
-   (Leave **Require review from Code Owners** unchecked — the `approval-policy`
-   check enforces the real rule.)
-2. **Require status checks to pass before merging** → **Require branches to be
-   up to date** → add the **`approval-policy`** check (and CI once green).
+   Leave **Require review from Code Owners** unchecked.
+2. **Require status checks to pass before merging** → **Require branches to be up
+   to date** → require `build-test-clippy`, `build-test-clippy-aarch64` and
+   `supply-chain-audit`.
 3. **Do not allow bypassing the above settings** (**enforce admins**).
 4. **Block force pushes** and **restrict deletions** for `main`.
 
-The native single-approval count is a floor; the **`approval-policy` required
-check** enforces the conditional 1-vs-2 admin/maintainer rule.
+The devnet health/readiness E2E (`health-e2e.yml`) also runs on pull requests. It
+is not a required context because it builds and boots a 3-validator compose
+stack, but a red E2E should be treated as blocking in practice.
