@@ -7,6 +7,7 @@
 pub mod behaviour;
 pub mod block_syncer;
 pub mod config;
+pub mod dns;
 pub mod network;
 pub mod node_key;
 pub mod peer_manager;
