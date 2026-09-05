@@ -271,7 +271,7 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
 name = "b0-final-closure-audit"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "blake3",
  "serde_json",
@@ -5504,7 +5504,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "sumc-runtime"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bincode",
  "blake3",
@@ -5525,7 +5525,7 @@ dependencies = [
 
 [[package]]
 name = "sumc-sdk"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bincode",
  "blake3",
@@ -5538,7 +5538,7 @@ dependencies = [
 
 [[package]]
 name = "sumc-sdk-macros"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5547,7 +5547,7 @@ dependencies = [
 
 [[package]]
 name = "sumchain-beacon-crypto"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "blst",
  "blstrs",
@@ -5564,7 +5564,7 @@ dependencies = [
 
 [[package]]
 name = "sumchain-beacon-runtime"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "blake3",
  "hex",
@@ -5575,7 +5575,7 @@ dependencies = [
 
 [[package]]
 name = "sumchain-bridge"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5599,7 +5599,7 @@ dependencies = [
 
 [[package]]
 name = "sumchain-consensus"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "bincode",
@@ -5618,7 +5618,7 @@ dependencies = [
 
 [[package]]
 name = "sumchain-crypto"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bincode",
  "blake3",
@@ -5639,7 +5639,7 @@ dependencies = [
 
 [[package]]
 name = "sumchain-genesis"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bs58",
  "hex",
@@ -5653,7 +5653,7 @@ dependencies = [
 
 [[package]]
 name = "sumchain-integration-tests"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bincode",
  "serde",
@@ -5674,7 +5674,7 @@ dependencies = [
 
 [[package]]
 name = "sumchain-nft"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bincode",
  "hex",
@@ -5689,7 +5689,7 @@ dependencies = [
 
 [[package]]
 name = "sumchain-node"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "bincode",
@@ -5718,7 +5718,7 @@ dependencies = [
 
 [[package]]
 name = "sumchain-p2p"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "bincode",
@@ -5744,7 +5744,7 @@ dependencies = [
 
 [[package]]
 name = "sumchain-primitives"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bincode",
  "blake3",
@@ -5762,7 +5762,7 @@ dependencies = [
 
 [[package]]
 name = "sumchain-rpc"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "bincode",
@@ -5809,7 +5809,7 @@ dependencies = [
 
 [[package]]
 name = "sumchain-state"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bincode",
  "blake3",
@@ -5833,7 +5833,7 @@ dependencies = [
 
 [[package]]
 name = "sumchain-storage"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bincode",
  "blake3",
@@ -5850,7 +5850,7 @@ dependencies = [
 
 [[package]]
 name = "sumchain-token"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bincode",
  "hex",
@@ -5861,7 +5861,7 @@ dependencies = [
 
 [[package]]
 name = "sumchain-wallet"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -5888,7 +5888,7 @@ dependencies = [
 
 [[package]]
 name = "sumchain-wire"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bincode",
  "blake3",
