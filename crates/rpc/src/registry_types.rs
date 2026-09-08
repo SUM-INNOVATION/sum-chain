@@ -312,12 +312,67 @@ mod tests {
         assert!(run(&r).admissible);
     }
 
+    /// `approval_threshold_bps` is range-checked against what the basis-point
+    /// unit implies (`0..=10000`), NOT against a ratified mainnet default —
+    /// that value is #212's to decide. The boundary is inclusive at 10000.
+    ///
+    /// The wire decoder accepts any `u16` here, so this branch is reachable
+    /// with real encoded bytes rather than only via a constructed struct.
+    #[test]
+    fn threshold_boundaries() {
+        // In range: admitted (nothing else about the record is wrong).
+        for bps in [0u16, 1, 5_000, 9_999, 10_000] {
+            let mut r = good_record();
+            r.approval_threshold_bps = bps;
+            let out = run(&r);
+            assert!(
+                out.admissible,
+                "bps {bps} is within 0..=10000 and must be admitted, got {:?}",
+                out.refusals
+            );
+        }
+
+        // Out of range: refused, with the offending value echoed back.
+        for bps in [10_001u16, 20_000, u16::MAX] {
+            let mut r = good_record();
+            r.approval_threshold_bps = bps;
+            let out = run(&r);
+            assert!(!out.admissible, "bps {bps} exceeds 10000 and must refuse");
+            assert!(
+                out.refusals.contains(&RefusalReason::ThresholdOutOfRange {
+                    approval_threshold_bps: bps
+                }),
+                "bps {bps} must produce threshold_out_of_range, got {:?}",
+                out.refusals
+            );
+            // It is the ONLY complaint — an out-of-range threshold must not
+            // cascade into unrelated refusals.
+            assert_eq!(out.refusals.len(), 1, "bps {bps}: {:?}", out.refusals);
+        }
+    }
+
+    /// The threshold refusal survives the real encode/decode round trip, so the
+    /// branch is not reachable only through an in-memory struct.
+    #[test]
+    fn threshold_out_of_range_survives_the_wire() {
+        let mut r = good_record();
+        r.approval_threshold_bps = u16::MAX;
+        let bytes = r.try_encode().expect("encodes");
+        assert_eq!(bytes.len(), RegistryRecordV1::LEN);
+        let decoded = RegistryRecordV1::decode_exact(&bytes).expect("decoder accepts the bytes");
+        assert_eq!(decoded.approval_threshold_bps, u16::MAX);
+        let out = dry_run_admit(&bytes, ctx());
+        assert!(!out.admissible);
+        assert_eq!(out.refusals[0].tag(), "threshold_out_of_range");
+    }
+
     /// Every problem is reported at once, so an operator does not fix one field
     /// per round trip.
     #[test]
     fn all_refusals_are_reported_together_and_in_a_stable_order() {
         let mut r = good_record();
         r.proof_system_id = 99;
+        r.approval_threshold_bps = u16::MAX;
         r.audit_commitment = [0; 32];
         r.status = RegistryStatus::Disabled;
         r.activation_height = 1;
@@ -328,6 +383,7 @@ mod tests {
             tags,
             vec![
                 "unknown_proof_system",
+                "threshold_out_of_range",
                 "commitment_unset",
                 "not_admissible_status",
                 "activation_height_not_future",
@@ -336,6 +392,138 @@ mod tests {
         );
         // Deterministic: repeated runs agree exactly.
         assert_eq!(run(&r), out);
+    }
+
+    /// All three commitments unset at once still emit in fixed source order.
+    #[test]
+    fn commitment_unset_order_is_fixed_across_all_three() {
+        let mut r = good_record();
+        r.audit_commitment = [0; 32];
+        r.source_commitment = [0; 32];
+        r.ceremony_commitment = [0; 32];
+        let out = run(&r);
+        let which: Vec<&str> = out
+            .refusals
+            .iter()
+            .filter_map(|x| match x {
+                RefusalReason::CommitmentUnset { which } => Some(*which),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            which,
+            vec![
+                "audit_commitment",
+                "source_commitment",
+                "ceremony_commitment"
+            ]
+        );
+    }
+
+    /// The serialized shape is the client contract: the `reason` tag AND every
+    /// payload field, for EVERY variant. `detail` is human-facing and may gain
+    /// precision, so its presence and type are asserted rather than its text.
+    #[test]
+    fn every_refusal_variant_serializes_with_its_exact_tag_and_payload() {
+        let malformed = serde_json::to_value(RefusalReason::MalformedRecord {
+            kind: "truncated",
+            detail: "some decoder message".to_string(),
+        })
+        .unwrap();
+        assert_eq!(malformed["reason"], "malformed_record");
+        assert_eq!(malformed["kind"], "truncated");
+        assert!(malformed["detail"].is_string());
+
+        let unknown =
+            serde_json::to_value(RefusalReason::UnknownProofSystem { proof_system_id: 7 }).unwrap();
+        assert_eq!(unknown["reason"], "unknown_proof_system");
+        assert_eq!(unknown["proof_system_id"], 7);
+
+        let threshold = serde_json::to_value(RefusalReason::ThresholdOutOfRange {
+            approval_threshold_bps: u16::MAX,
+        })
+        .unwrap();
+        assert_eq!(threshold["reason"], "threshold_out_of_range");
+        assert_eq!(threshold["approval_threshold_bps"], u16::MAX);
+
+        let commitment = serde_json::to_value(RefusalReason::CommitmentUnset {
+            which: "audit_commitment",
+        })
+        .unwrap();
+        assert_eq!(commitment["reason"], "commitment_unset");
+        assert_eq!(commitment["which"], "audit_commitment");
+
+        let status =
+            serde_json::to_value(RefusalReason::NotAdmissibleStatus { status: "disabled" })
+                .unwrap();
+        assert_eq!(status["reason"], "not_admissible_status");
+        assert_eq!(status["status"], "disabled");
+
+        let activation = serde_json::to_value(RefusalReason::ActivationHeightNotFuture {
+            activation_height: 5,
+            chain_height: 100,
+        })
+        .unwrap();
+        assert_eq!(activation["reason"], "activation_height_not_future");
+        assert_eq!(activation["activation_height"], 5);
+        assert_eq!(activation["chain_height"], 100);
+    }
+
+    /// Pins the six variants explicitly enumerated below and their serialized tags.
+    /// Future variants require updating this list and the payload assertions above.
+    #[test]
+    fn refusal_variant_tags_are_exactly_the_six_documented_ones() {
+        let all = [
+            RefusalReason::MalformedRecord {
+                kind: "bad_tag",
+                detail: String::new(),
+            },
+            RefusalReason::UnknownProofSystem { proof_system_id: 0 },
+            RefusalReason::ThresholdOutOfRange {
+                approval_threshold_bps: 0,
+            },
+            RefusalReason::CommitmentUnset {
+                which: "audit_commitment",
+            },
+            RefusalReason::NotAdmissibleStatus { status: "disabled" },
+            RefusalReason::ActivationHeightNotFuture {
+                activation_height: 0,
+                chain_height: 0,
+            },
+        ];
+        let tags: Vec<&str> = all.iter().map(|r| r.tag()).collect();
+        assert_eq!(
+            tags,
+            vec![
+                "malformed_record",
+                "unknown_proof_system",
+                "threshold_out_of_range",
+                "commitment_unset",
+                "not_admissible_status",
+                "activation_height_not_future",
+            ]
+        );
+        // The `tag()` accessor and the serialized `reason` field are the same
+        // contract and must not drift apart.
+        for r in &all {
+            let v = serde_json::to_value(r).unwrap();
+            assert_eq!(v["reason"], r.tag(), "tag() disagrees with serde for {r:?}");
+        }
+    }
+
+    /// A refused result serializes with the refusals present, mirroring the
+    /// admitted-shape assertion below.
+    #[test]
+    fn refused_result_serializes_with_its_reasons() {
+        let out = DryRunResult::refused(vec![RefusalReason::ThresholdOutOfRange {
+            approval_threshold_bps: 10_001,
+        }]);
+        let v = serde_json::to_value(&out).unwrap();
+        assert_eq!(v["admissible"], false);
+        let arr = v["refusals"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["reason"], "threshold_out_of_range");
+        assert_eq!(arr[0]["approval_threshold_bps"], 10_001);
     }
 
     /// The serialized tag is the client contract.
