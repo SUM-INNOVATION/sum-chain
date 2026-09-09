@@ -4629,6 +4629,7 @@ dependencies = [
  "sumchain-primitives",
  "sumchain-state",
  "sumchain-storage",
+ "sumchain-wire",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",

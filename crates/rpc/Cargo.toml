@@ -19,6 +19,7 @@ jsonrpsee = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sumchain-wire = { workspace = true }
 hex = { workspace = true }
 bs58 = { workspace = true }
 thiserror = { workspace = true }
