@@ -110,11 +110,49 @@ fn an_execution_view_cannot_publish() {
     let (failed, _stderr) = rejected(
         "let mut c = sumchain_storage::candidate::CandidateExecution::new(db, 1024);\n\
          let v = c.view();\n\
-         let _b = v.into_batch();",
+         let _b = v.publish();",
     );
     assert!(
         failed,
         "ExecutionView must not expose publication; execution helpers receive \
          only the view and must not be able to commit"
+    );
+}
+
+#[test]
+fn the_two_operand_comparison_does_not_exist() {
+    // `verify(h, h)` was the forgeable shape: it proved a comparison occurred
+    // and nothing about where either side came from. It is DELETED, not merely
+    // hidden — a crate-private version would still be reachable from every
+    // future caller inside the crate. The only verification path is
+    // `verify_for_block`, which reads the expected root from the block.
+    let (failed, stderr) = rejected(
+        "let c = sumchain_storage::candidate::CandidateExecution::new(db, 1024);\n\
+         let h = sumchain_primitives::Hash::ZERO;\n\
+         let _ = c.verify_computed_root(h, h);",
+    );
+    assert!(
+        failed,
+        "a two-operand root comparison must not exist; verification must read \
+         the expected root from the block itself"
+    );
+    assert!(
+        stderr.contains("private") || stderr.contains("verify_computed_root"),
+        "expected a privacy error:\n{stderr}"
+    );
+}
+
+#[test]
+fn a_transition_cannot_be_built_with_fields_missing() {
+    // Every field is private and there is one constructor taking all of them.
+    let (failed, _stderr) = rejected(
+        "let _t = sumchain_storage::candidate::CanonicalTransition { \n\
+             block_hash: sumchain_primitives::Hash::ZERO,\n\
+         };",
+    );
+    assert!(
+        failed,
+        "CanonicalTransition fields must be private, so a partially-specified \
+         transition cannot be constructed"
     );
 }

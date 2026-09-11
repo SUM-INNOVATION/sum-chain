@@ -3,6 +3,7 @@
 //! State management and transaction execution for SUM Chain.
 //! Handles account balances, nonces, and transaction application.
 
+pub mod candidate_block;
 pub mod agreement_executor;
 pub mod beacon_executor;
 pub mod beacon_manager;
