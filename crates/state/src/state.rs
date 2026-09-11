@@ -322,7 +322,7 @@ impl StateManager {
                 match old_state {
                     Some(state) => {
                         let bytes = bincode::serialize(state).map_err(|e| {
-                            StateError::InvalidOperation(format!("account encode: {}", e))
+                            StateError::InvalidOperation(format!("account encode: {e}"))
                         })?;
                         batch.put(cf::STATE, &key, &bytes)?;
                     }

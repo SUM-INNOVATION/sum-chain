@@ -43,6 +43,7 @@
 //! The `ConsensusEngine` trait provides a common interface for both implementations,
 //! allowing future migration to BFT or PoS when ready.
 
+pub mod reorg;
 pub mod bft;
 pub mod engine;
 pub mod poa;
