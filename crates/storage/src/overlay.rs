@@ -52,6 +52,32 @@
 //! be described as one — real memory use is strictly higher by an amount this
 //! module does not attempt to model.
 //!
+//! ## What the limit does and does not bound
+//!
+//! The limit is enforced before this module owns any copy: the new value is
+//! measured through a borrowed slice, and the pre-image through a pinned
+//! RocksDB slice, so an oversized write is refused before either is
+//! materialised into an application buffer. Every owned buffer is then built
+//! with `try_reserve_exact`, so an allocation failure is reported rather than
+//! aborting the process.
+//!
+//! That is the whole of the guarantee, and it is worth being exact about where
+//! it stops:
+//!
+//! * RocksDB may materialise or decompress a block internally before handing
+//!   back the pinned slice. That memory is inside RocksDB, is not counted here,
+//!   and is not prevented by refusing the write afterwards.
+//! * `BTreeMap` and `HashMap` node allocation is not fallible through their
+//!   safe APIs — inserting can abort on allocation failure and there is no
+//!   `try_insert`. The per-entry overhead is small and bounded by entry count,
+//!   but it is not covered.
+//! * The accounting excludes allocator overhead and padding by design, so real
+//!   process memory is strictly higher than `logical_bytes`.
+//!
+//! So: this prevents unbounded *application-owned* copies driven by block
+//! contents. It is not an allocator-level or process-level memory guarantee,
+//! and must not be presented as one.
+//!
 //! Every mutation is transactional. The complete new total is computed and
 //! validated before any of `logical_bytes`, `preimages` or `writes` is touched,
 //! so a refused operation leaves the overlay byte-identical. Anything less makes
@@ -115,6 +141,43 @@ fn sub(a: u64, b: u64) -> Result<u64> {
                 .to_string(),
         )
     })
+}
+
+/// A mutation described by BORROWED data, for the validation phase.
+///
+/// The owned [`Op`] is built only after the limit has approved it. Constructing
+/// `Op::Put(value.to_vec())` at the call site and validating afterwards would
+/// mean the allocation the limit exists to refuse had already happened.
+#[derive(Debug, Clone, Copy)]
+enum OpRef<'v> {
+    Put(&'v [u8]),
+    Delete,
+}
+
+impl OpRef<'_> {
+    fn value_len(&self) -> usize {
+        match self {
+            OpRef::Put(v) => v.len(),
+            OpRef::Delete => 0,
+        }
+    }
+}
+
+/// Copy `src` into a fresh `Vec` using a fallible reservation.
+///
+/// `to_vec()` aborts the process on allocation failure. Every buffer this
+/// module owns is sized from data whose length it has already approved, so a
+/// failure here should be reported to the caller, not taken as fatal.
+fn try_copy(src: &[u8]) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    out.try_reserve_exact(src.len()).map_err(|e| {
+        StorageError::InvalidData(format!(
+            "overlay could not allocate {} bytes: {e}",
+            src.len()
+        ))
+    })?;
+    out.extend_from_slice(src);
+    Ok(out)
 }
 
 /// Buffered writes over a [`Database`], with overlay-first reads.
@@ -182,20 +245,27 @@ impl<'a> ApplicationOverlay<'a> {
     /// database read for the pre-image, every length conversion, the whole
     /// accounting computation and the limit check. Only once a valid new total
     /// exists are `logical_bytes`, `preimages` and `writes` updated together.
-    fn stage(&mut self, cf: &str, key: &[u8], op: Op) -> Result<()> {
+    fn stage(&mut self, cf: &str, key: &[u8], op: OpRef<'_>) -> Result<()> {
         let needs_preimage = !self.has_preimage(cf, key);
-        let prior = if needs_preimage {
-            Some(self.db.get(cf, key)?)
-        } else {
-            None
-        };
 
         let key_len = to_u64(key.len())?;
         let new_value_len = to_u64(op.value_len())?;
 
+        // Phase 1 — measure and approve, owning nothing.
+        //
+        // The pre-image is read PINNED: `get_pinned` hands back a slice
+        // borrowed from RocksDB's block cache, so its length is known before
+        // any copy of it exists. Reading it with `get` would allocate the whole
+        // value first and only then ask whether it was affordable.
+        let pinned = if needs_preimage {
+            Some(self.db.get_pinned(cf, key)?)
+        } else {
+            None
+        };
+
         let mut next = self.logical_bytes;
-        if let Some(prior) = &prior {
-            let prior_len = to_u64(prior.as_ref().map_or(0, Vec::len))?;
+        if let Some(pin) = &pinned {
+            let prior_len = to_u64(pin.as_ref().map_or(0, |p| p.len()))?;
             next = add(next, add(key_len, prior_len)?)?;
         }
         match self.writes.get(cf).and_then(|m| m.get(key)) {
@@ -215,29 +285,82 @@ impl<'a> ApplicationOverlay<'a> {
             )));
         }
 
-        // ── commit point: nothing above this line mutated the overlay ──
-        if let Some(prior) = prior {
+        // Phase 2 — build every owned buffer fallibly, still mutating nothing.
+        //
+        // All of these can fail; none of them may leave the overlay changed. The
+        // pinned slice is copied here and dropped immediately after, so the
+        // cache block is not held beyond the copy.
+        let owned_preimage: Option<Option<Vec<u8>>> = match &pinned {
+            Some(Some(p)) => Some(Some(try_copy(p)?)),
+            Some(None) => Some(None),
+            None => None,
+        };
+        drop(pinned);
+
+        // Two independently-owned keys, both built fallibly HERE. The commit
+        // section below must not allocate: cloning one key into the second map
+        // would be an infallible, block-sized allocation made after mutation has
+        // already begun, and `or_default()` on the pre-image map would itself
+        // have mutated the map before that clone was even evaluated.
+        let owned_preimage_key = if needs_preimage {
+            Some(try_copy(key)?)
+        } else {
+            None
+        };
+        let owned_write_key = try_copy(key)?;
+        let owned_op = match op {
+            OpRef::Put(v) => Op::Put(try_copy(v)?),
+            OpRef::Delete => Op::Delete,
+        };
+        let owned_cf_for_pre = if owned_preimage.is_some() {
+            Some(try_copy(cf.as_bytes()).and_then(|b| {
+                String::from_utf8(b).map_err(|e| {
+                    StorageError::InvalidData(format!("column family name is not utf-8: {e}"))
+                })
+            })?)
+        } else {
+            None
+        };
+        let owned_cf_for_write = try_copy(cf.as_bytes()).and_then(|b| {
+            String::from_utf8(b).map_err(|e| {
+                StorageError::InvalidData(format!("column family name is not utf-8: {e}"))
+            })
+        })?;
+
+        // ── commit point ───────────────────────────────────────────────────
+        //
+        // Nothing above this line mutated the overlay, and nothing below this
+        // line allocates anything block-sized: every owned buffer was built
+        // fallibly above and is moved into place here. The one allocation that
+        // remains is `BTreeMap`/`HashMap` node insertion, which is not fallible
+        // through their safe APIs — there is no `try_insert`, and insertion can
+        // abort on allocation failure. That overhead is per-entry and bounded by
+        // entry count rather than by block contents, which is the distinction
+        // this ordering is protecting.
+        if let (Some(pre), Some(cf_owned), Some(pre_key)) =
+            (owned_preimage, owned_cf_for_pre, owned_preimage_key)
+        {
             self.preimages
-                .entry(cf.to_string())
+                .entry(cf_owned)
                 .or_default()
-                .insert(key.to_vec(), prior);
+                .insert(pre_key, pre);
         }
         self.writes
-            .entry(cf.to_string())
+            .entry(owned_cf_for_write)
             .or_default()
-            .insert(key.to_vec(), op);
+            .insert(owned_write_key, owned_op);
         self.logical_bytes = next;
         Ok(())
     }
 
     /// Buffer a write.
     pub fn put(&mut self, cf: &str, key: &[u8], value: &[u8]) -> Result<()> {
-        self.stage(cf, key, Op::Put(value.to_vec()))
+        self.stage(cf, key, OpRef::Put(value))
     }
 
     /// Buffer a delete.
     pub fn delete(&mut self, cf: &str, key: &[u8]) -> Result<()> {
-        self.stage(cf, key, Op::Delete)
+        self.stage(cf, key, OpRef::Delete)
     }
 
     /// Overlay-first point read.
@@ -291,6 +414,12 @@ impl<'a> ApplicationOverlay<'a> {
 
     fn merged<'o>(&'o self, cf: &str, start: Option<&[u8]>) -> Result<MergedIter<'o>> {
         let base = self.db.iter_checked_from(cf, start)?;
+        // The closure is NOT redundant, whatever clippy says: `empty_writes`
+        // returns `&'static`, and passing the function item makes
+        // `unwrap_or_else` unify the borrow with `'static`, forcing `'o:
+        // 'static` and failing to compile. The closure lets the `'static`
+        // reference coerce down to `'o`.
+        #[allow(clippy::redundant_closure)]
         let map = self.writes.get(cf).unwrap_or_else(|| empty_writes());
         // Borrowed range — no copy of the buffered write set.
         let overlay = match start {
@@ -347,7 +476,7 @@ impl<'a> ApplicationOverlay<'a> {
 /// it into a short, plausible-looking result. Borrows the overlay's buffered map
 /// rather than copying it.
 pub struct MergedIter<'o> {
-    base: std::iter::Peekable<Box<dyn Iterator<Item = Result<(Box<[u8]>, Box<[u8]>)>> + 'o>>,
+    base: std::iter::Peekable<crate::db::CheckedIter<'o>>,
     overlay: std::iter::Peekable<btree_map::Range<'o, Vec<u8>, Op>>,
     done: bool,
 }
@@ -749,5 +878,83 @@ mod tests {
             None,
             "an unrelated database must be untouched"
         );
+    }
+
+    // ── Allocation refusal: measure before owning ─────────────────────────
+    //
+    // The point of these is the ORDER of operations. An implementation that
+    // builds `Op::Put(value.to_vec())` at the call site, or reads the pre-image
+    // with `get` instead of `get_pinned`, has already made the allocation by
+    // the time the limit refuses the write — so the limit bounds nothing.
+
+    /// End-state guard only. This asserts the overlay is unchanged after a
+    /// refusal; it does NOT prove the value went unmeasured-before-copied — a
+    /// copy-then-discard implementation passes it unchanged. The ordering is
+    /// instrumented in `tests/overlay_allocation.rs`, which counts allocations.
+    #[test]
+    fn an_oversized_new_value_is_refused() {
+        let (d, _g) = db();
+        let mut ov = ApplicationOverlay::new(&d, 128);
+        let before = snapshot(&ov);
+
+        // Far beyond the ceiling. Refused on measurement of the borrowed slice.
+        let huge = vec![0u8; 8 * 1024 * 1024];
+        let err = ov
+            .put(cf::STATE, b"k", &huge)
+            .expect_err("must be refused, not copied then refused");
+        assert!(err.to_string().contains("limit"), "{err}");
+
+        assert_eq!(
+            snapshot(&ov),
+            before,
+            "a refused oversized write must leave the overlay byte-identical"
+        );
+        assert!(ov.is_empty());
+    }
+
+    /// End-state guard only, as above; the pinned read is instrumented in
+    /// `tests/overlay_allocation.rs`.
+    #[test]
+    fn an_oversized_persisted_preimage_is_refused() {
+        let (d, _g) = db();
+        // A large value already on disk; writing over it must charge its length
+        // as the pre-image, and be refused before that pre-image is copied out.
+        let big = vec![7u8; 4 * 1024 * 1024];
+        d.put(cf::STATE, b"k", &big).unwrap();
+
+        let mut ov = ApplicationOverlay::new(&d, 1024);
+        let before = snapshot(&ov);
+
+        let err = ov
+            .put(cf::STATE, b"k", b"tiny")
+            .expect_err("the pre-image alone exceeds the ceiling");
+        assert!(err.to_string().contains("limit"), "{err}");
+
+        assert_eq!(snapshot(&ov), before, "overlay must be byte-identical");
+        assert_eq!(
+            ov.preimage(cf::STATE, b"k"),
+            None,
+            "no pre-image may be retained for a refused write"
+        );
+        assert_eq!(
+            d.get(cf::STATE, b"k").unwrap().unwrap().len(),
+            big.len(),
+            "and the database is untouched"
+        );
+    }
+
+    #[test]
+    fn a_refused_write_does_not_abort_the_process() {
+        // Both refusals above return `Err`. That they are errors rather than
+        // aborts is the property `try_reserve_exact` buys over `to_vec`: the
+        // node reports that a candidate branch is too large and keeps running,
+        // instead of dying and taking the canonical chain's availability with
+        // it.
+        let (d, _g) = db();
+        let mut ov = ApplicationOverlay::new(&d, 64);
+        assert!(ov.put(cf::STATE, b"k", &vec![0u8; 1 << 20]).is_err());
+        // Still usable afterwards.
+        ov.put(cf::STATE, b"s", b"ok").unwrap();
+        assert_eq!(ov.get(cf::STATE, b"s").unwrap().unwrap(), b"ok".to_vec());
     }
 }

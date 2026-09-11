@@ -1287,6 +1287,26 @@ impl Database {
         Ok(self.db.iterator_cf(cf, rocksdb::IteratorMode::Start).filter_map(|r| r.ok()))
     }
 
+    /// Read a value WITHOUT copying it out of RocksDB's block cache.
+    ///
+    /// [`Self::get`] materialises the value into a `Vec` before the caller can
+    /// see how big it is, which is useless to anything that needs to decide
+    /// whether it can afford the value first. `get_pinned_cf` returns a slice
+    /// borrowed from the cache, so the length can be measured and a limit
+    /// enforced BEFORE any application-owned copy exists.
+    ///
+    /// Crate-private: the returned slice pins a block in the cache for as long
+    /// as it lives, so holding one across unrelated work is a way to pin memory
+    /// by accident. Callers here take a length, decide, and drop it.
+    pub(crate) fn get_pinned<'a>(
+        &'a self,
+        cf_name: &str,
+        key: &[u8],
+    ) -> Result<Option<rocksdb::DBPinnableSlice<'a>>> {
+        let cf = self.cf(cf_name)?;
+        Ok(self.db.get_pinned_cf(cf, key)?)
+    }
+
     /// Forward iteration that PROPAGATES read errors.
     ///
     /// [`Self::iter`] and its siblings end in `.filter_map(|r| r.ok())`, which
@@ -1298,7 +1318,7 @@ impl Database {
         &'a self,
         cf_name: &str,
         start: Option<&[u8]>,
-    ) -> Result<Box<dyn Iterator<Item = Result<(Box<[u8]>, Box<[u8]>)>> + 'a>> {
+    ) -> Result<CheckedIter<'a>> {
         let cf = self.cf(cf_name)?;
         let mode = match start {
             Some(s) => rocksdb::IteratorMode::From(s, rocksdb::Direction::Forward),
@@ -1307,7 +1327,7 @@ impl Database {
         Ok(Box::new(
             self.db
                 .iterator_cf(cf, mode)
-                .map(|r| r.map_err(|e| StorageError::RocksDb(e))),
+                .map(|r| r.map_err(StorageError::RocksDb)),
         ))
     }
 
@@ -1318,12 +1338,12 @@ impl Database {
         &'a self,
         cf_name: &str,
         prefix: &[u8],
-    ) -> Result<Box<dyn Iterator<Item = Result<(Box<[u8]>, Box<[u8]>)>> + 'a>> {
+    ) -> Result<CheckedIter<'a>> {
         let cf = self.cf(cf_name)?;
         Ok(Box::new(
             self.db
                 .prefix_iterator_cf(cf, prefix)
-                .map(|r| r.map_err(|e| StorageError::RocksDb(e))),
+                .map(|r| r.map_err(StorageError::RocksDb)),
         ))
     }
 
@@ -1349,7 +1369,7 @@ impl Database {
                 .iterator_cf(cf, rocksdb::IteratorMode::Start)
                 .map(|r| {
                     r.map(|(k, _)| k)
-                        .map_err(|e| StorageError::RocksDb(e))
+                        .map_err(StorageError::RocksDb)
                 })
                 .collect::<Result<Vec<_>>>()?;
 
@@ -1373,6 +1393,13 @@ impl Database {
         Ok(total_deleted)
     }
 }
+
+/// One entry from a fallible scan: the key and value, or the read error that
+/// ended the scan.
+pub type CheckedEntry = Result<(Box<[u8]>, Box<[u8]>)>;
+
+/// A scan that reports read errors instead of silently truncating.
+pub type CheckedIter<'a> = Box<dyn Iterator<Item = CheckedEntry> + 'a>;
 
 /// Atomic write batch
 pub struct WriteBatch<'a> {
