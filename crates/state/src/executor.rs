@@ -11,6 +11,8 @@ use sumchain_primitives::{
     NodeRegistryOperation, Receipt, SignedTransaction, StorageMetadataOperationV2, TransactionV2,
     TxPayload, TxStatus, CHALLENGE_INTERVAL_BLOCKS, SLASH_PERCENTAGE,
 };
+use sumchain_storage::candidate::CandidateExecution;
+use sumchain_storage::exec_view::ExecutionView;
 use sumchain_storage::schema::{ContractStateDiff, StateDiff};
 use sumchain_storage::Database;
 use tracing::{debug, info, warn};
@@ -241,6 +243,15 @@ pub struct BlockExecutor {
     beacon_block: parking_lot::Mutex<Option<crate::beacon_manager::BeaconBlockState>>,
 }
 
+/// Stand-in ceiling for a block's logical write set, in bytes.
+///
+/// SCAFFOLDING. The real ceiling is a versioned consensus parameter derived from
+/// measured write sets: a limit that can refuse a write helps decide whether a
+/// block is applicable, which makes it consensus-relevant and not a number a
+/// storage or executor module may invent. This exists only so the migration can
+/// proceed locally, and must be replaced before publication.
+const CANDIDATE_LIMIT_SCAFFOLD: u64 = 1 << 30;
+
 impl BlockExecutor {
     /// Create a new block executor
     pub fn new(state: Arc<StateManager>, db: Arc<Database>, params: ChainParams) -> Self {
@@ -355,12 +366,13 @@ impl BlockExecutor {
     /// active PoA set for the height.
     pub fn execute_tx(
         &self,
+        view: &mut ExecutionView<'_, '_>,
         tx: &SignedTransaction,
         proposer: &Address,
         block_height: u64,
         block_timestamp: u64,
     ) -> Result<TxExecutionResult> {
-        self.execute_tx_with_validators(tx, proposer, block_height, block_timestamp, &[])
+        self.execute_tx_with_validators(view, tx, proposer, block_height, block_timestamp, &[])
     }
 
     /// Execute a single transaction, authorizing validator-quorum actions against
@@ -369,6 +381,7 @@ impl BlockExecutor {
     /// `ValidatorSetStore` for authority.
     pub fn execute_tx_with_validators(
         &self,
+        view: &mut ExecutionView<'_, '_>,
         tx: &SignedTransaction,
         proposer: &Address,
         block_height: u64,
@@ -2957,6 +2970,18 @@ impl BlockExecutor {
         // stateful runtime across this block's beacon txs. No-op under the None gate.
         self.init_beacon_block(block.height(), active_validator_pubkeys)?;
 
+        // One candidate per block. Every transaction executes against a view of
+        // it, so a block that turns out to be invalid can be abandoned without
+        // having reached canonical state.
+        //
+        // TEMPORARY LIMIT — scaffolding, not the final value. The ceiling is a
+        // versioned consensus parameter derived from measured write sets,
+        // because a limit that can refuse a write participates in deciding
+        // whether a block is applicable. It is not defined yet, so this constant
+        // stands in while the migration proceeds locally and MUST be replaced by
+        // the parameter before any of this is proposed for publication.
+        let mut candidate = CandidateExecution::new(&self.db, CANDIDATE_LIMIT_SCAFFOLD);
+
         for (idx, tx) in block.transactions.iter().enumerate() {
             // Record pre-execution state for diff
             let sender = tx.sender();
@@ -2976,13 +3001,17 @@ impl BlockExecutor {
                 };
             let proposer_before = self.state.get_account_opt(&proposer)?;
 
-            let result = self.execute_tx_with_validators(
-                tx,
-                &proposer,
-                block.height(),
-                block.header.timestamp,
-                active_validator_pubkeys,
-            )?;
+            let result = {
+                let mut view = candidate.view();
+                self.execute_tx_with_validators(
+                    &mut view,
+                    tx,
+                    &proposer,
+                    block.height(),
+                    block.header.timestamp,
+                    active_validator_pubkeys,
+                )?
+            };
 
             // Record post-execution state for diff
             let sender_after = self.state.get_account(&sender)?;
