@@ -31,12 +31,36 @@
 //! would disagree within a single block, so code that lists a set and then reads
 //! its members would observe a state no instant ever held.
 //!
+//! Iteration BORROWS the buffered map. It does not copy it: materialising the
+//! overlay into a temporary would double its footprint behind the accounting's
+//! back, and would do so infallibly — the one allocation the ceiling could not
+//! refuse.
+//!
 //! Errors are propagated, never dropped. The database's own iterators end in
 //! `.filter_map(|r| r.ok())`, which silently truncates a scan at the first read
 //! error and is indistinguishable from a short collection; this module iterates
 //! over `Result` and surfaces the failure.
+//!
+//! # Accounting
+//!
+//! [`ApplicationOverlay::logical_bytes`] is **deterministic logical write-set
+//! accounting**: the key and value bytes of buffered writes plus captured
+//! pre-images, and nothing else. It deliberately excludes allocator overhead,
+//! `BTreeMap` node overhead, and per-allocation padding, so it is a pure
+//! function of what was written and two nodes executing one block compute the
+//! same number. It is therefore **not** a residency or RSS bound, and must not
+//! be described as one — real memory use is strictly higher by an amount this
+//! module does not attempt to model.
+//!
+//! Every mutation is transactional. The complete new total is computed and
+//! validated before any of `logical_bytes`, `preimages` or `writes` is touched,
+//! so a refused operation leaves the overlay byte-identical. Anything less makes
+//! the ceiling itself a source of corruption: a write rejected halfway would
+//! leave the accounting short, or a pre-image captured for a write that never
+//! happened.
 
 use std::collections::{btree_map, BTreeMap, HashMap};
+use std::sync::OnceLock;
 
 use crate::db::{Database, WriteBatch};
 use crate::{Result, StorageError};
@@ -58,6 +82,41 @@ impl Op {
     }
 }
 
+/// Shared empty map, so iterating a column family with no buffered writes needs
+/// neither an allocation nor a special case in the merge loop.
+fn empty_writes() -> &'static BTreeMap<Vec<u8>, Op> {
+    static EMPTY: OnceLock<BTreeMap<Vec<u8>, Op>> = OnceLock::new();
+    EMPTY.get_or_init(BTreeMap::new)
+}
+
+fn to_u64(n: usize) -> Result<u64> {
+    u64::try_from(n).map_err(|_| {
+        StorageError::InvalidData("overlay accounting: length exceeds u64".to_string())
+    })
+}
+
+fn add(a: u64, b: u64) -> Result<u64> {
+    a.checked_add(b).ok_or_else(|| {
+        StorageError::InvalidData("overlay accounting: addition overflowed u64".to_string())
+    })
+}
+
+/// Subtraction that treats underflow as the invariant violation it is.
+///
+/// Reaching this means the accounted total disagrees with the buffered writes,
+/// which is a bug in this module — not a condition to paper over with a
+/// saturating subtract that would silently desynchronise the counter from
+/// reality and leave the ceiling meaningless.
+fn sub(a: u64, b: u64) -> Result<u64> {
+    a.checked_sub(b).ok_or_else(|| {
+        StorageError::InvalidData(
+            "overlay accounting invariant violated: charged total is smaller than the \
+             entry being replaced"
+                .to_string(),
+        )
+    })
+}
+
 /// Buffered writes over a [`Database`], with overlay-first reads.
 pub struct ApplicationOverlay<'a> {
     db: &'a Database,
@@ -71,34 +130,33 @@ pub struct ApplicationOverlay<'a> {
     /// rows. Captured once: a second write to the same key must not overwrite
     /// the original pre-image with an intermediate value.
     preimages: HashMap<String, BTreeMap<Vec<u8>, Option<Vec<u8>>>>,
-    /// Deterministic byte accounting. Counts key and value bytes of buffered
-    /// writes plus captured pre-images, so the number depends only on what was
-    /// written — never on allocator behaviour or map capacity.
-    bytes: u64,
+    /// See the module's Accounting section. Logical write-set bytes only.
+    logical_bytes: u64,
     limit: u64,
 }
 
-/// Default ceiling on overlay residency: 512 MiB.
-pub const DEFAULT_OVERLAY_LIMIT_BYTES: u64 = 512 * 1024 * 1024;
-
 impl<'a> ApplicationOverlay<'a> {
-    pub fn new(db: &'a Database) -> Self {
-        Self::with_limit(db, DEFAULT_OVERLAY_LIMIT_BYTES)
-    }
-
-    pub fn with_limit(db: &'a Database, limit: u64) -> Self {
+    /// Create an overlay bounded by `limit` logical write-set bytes.
+    ///
+    /// `limit` has no default on purpose. A ceiling that can refuse a write
+    /// participates in deciding whether a block is applicable, so it belongs to
+    /// the versioned consensus parameters and must be derived from measured
+    /// write sets — not invented here. Production construction must pass the
+    /// consensus value; tests pass an explicit fixture.
+    pub fn new(db: &'a Database, limit: u64) -> Self {
         Self {
             db,
             writes: HashMap::new(),
             preimages: HashMap::new(),
-            bytes: 0,
+            logical_bytes: 0,
             limit,
         }
     }
 
-    /// Bytes currently accounted to this overlay.
-    pub fn bytes_used(&self) -> u64 {
-        self.bytes
+    /// Deterministic logical write-set bytes. NOT a residency or RSS bound —
+    /// see the module's Accounting section.
+    pub fn logical_bytes(&self) -> u64 {
+        self.logical_bytes
     }
 
     pub fn limit(&self) -> u64 {
@@ -114,81 +172,72 @@ impl<'a> ApplicationOverlay<'a> {
         self.len() == 0
     }
 
-    /// Add `n` to the accounted total, failing closed on overflow or over-limit.
+    fn has_preimage(&self, cf: &str, key: &[u8]) -> bool {
+        self.preimages.get(cf).is_some_and(|m| m.contains_key(key))
+    }
+
+    /// Stage one buffered mutation transactionally.
     ///
-    /// `checked_add` rather than saturating: a saturating counter silently stops
-    /// growing and the ceiling stops meaning anything, which is the failure mode
-    /// this accounting exists to prevent.
-    fn charge(&mut self, n: usize) -> Result<()> {
-        let n = n as u64;
-        let next = self.bytes.checked_add(n).ok_or_else(|| {
-            StorageError::InvalidData("overlay byte accounting overflowed u64".to_string())
-        })?;
+    /// Everything fallible happens before anything observable changes: the
+    /// database read for the pre-image, every length conversion, the whole
+    /// accounting computation and the limit check. Only once a valid new total
+    /// exists are `logical_bytes`, `preimages` and `writes` updated together.
+    fn stage(&mut self, cf: &str, key: &[u8], op: Op) -> Result<()> {
+        let needs_preimage = !self.has_preimage(cf, key);
+        let prior = if needs_preimage {
+            Some(self.db.get(cf, key)?)
+        } else {
+            None
+        };
+
+        let key_len = to_u64(key.len())?;
+        let new_value_len = to_u64(op.value_len())?;
+
+        let mut next = self.logical_bytes;
+        if let Some(prior) = &prior {
+            let prior_len = to_u64(prior.as_ref().map_or(0, Vec::len))?;
+            next = add(next, add(key_len, prior_len)?)?;
+        }
+        match self.writes.get(cf).and_then(|m| m.get(key)) {
+            Some(existing) => {
+                // Replacing a buffered entry: the key is already charged.
+                next = sub(next, to_u64(existing.value_len())?)?;
+                next = add(next, new_value_len)?;
+            }
+            None => next = add(next, add(key_len, new_value_len)?)?,
+        }
+
         if next > self.limit {
             return Err(StorageError::InvalidData(format!(
-                "overlay exceeded its {} byte limit (would reach {next}); \
+                "overlay exceeded its {} logical byte limit (would reach {next}); \
                  the candidate branch is too large to evaluate in memory",
                 self.limit
             )));
         }
-        self.bytes = next;
-        Ok(())
-    }
 
-    /// Capture the pre-image for `key` if this is its first write in the overlay.
-    fn capture_preimage(&mut self, cf: &str, key: &[u8]) -> Result<()> {
-        if self
-            .preimages
-            .get(cf)
-            .is_some_and(|m| m.contains_key(key))
-        {
-            return Ok(()); // already captured; keep the ORIGINAL
+        // ── commit point: nothing above this line mutated the overlay ──
+        if let Some(prior) = prior {
+            self.preimages
+                .entry(cf.to_string())
+                .or_default()
+                .insert(key.to_vec(), prior);
         }
-        let prior = self.db.get(cf, key)?;
-        let charge = key.len() + prior.as_ref().map_or(0, Vec::len);
-        self.charge(charge)?;
-        self.preimages
+        self.writes
             .entry(cf.to_string())
             .or_default()
-            .insert(key.to_vec(), prior);
+            .insert(key.to_vec(), op);
+        self.logical_bytes = next;
         Ok(())
     }
 
     /// Buffer a write.
     pub fn put(&mut self, cf: &str, key: &[u8], value: &[u8]) -> Result<()> {
-        self.capture_preimage(cf, key)?;
-        let entry = self.writes.entry(cf.to_string()).or_default();
-        // A repeated overwrite replaces the buffered value; charge only the
-        // delta so repeatedly writing one key cannot inflate the total.
-        let previous_len = entry.get(key).map(Op::value_len);
-        match previous_len {
-            Some(prev) => {
-                self.bytes = self.bytes.saturating_sub(prev as u64);
-                self.charge(value.len())?;
-            }
-            None => self.charge(key.len() + value.len())?,
-        }
-        self.writes
-            .get_mut(cf)
-            .expect("entry just inserted")
-            .insert(key.to_vec(), Op::Put(value.to_vec()));
-        Ok(())
+        self.stage(cf, key, Op::Put(value.to_vec()))
     }
 
     /// Buffer a delete.
     pub fn delete(&mut self, cf: &str, key: &[u8]) -> Result<()> {
-        self.capture_preimage(cf, key)?;
-        let entry = self.writes.entry(cf.to_string()).or_default();
-        if let Some(prev) = entry.get(key).map(Op::value_len) {
-            self.bytes = self.bytes.saturating_sub(prev as u64);
-        } else {
-            self.charge(key.len())?;
-        }
-        self.writes
-            .get_mut(cf)
-            .expect("entry just inserted")
-            .insert(key.to_vec(), Op::Delete);
-        Ok(())
+        self.stage(cf, key, Op::Delete)
     }
 
     /// Overlay-first point read.
@@ -225,7 +274,7 @@ impl<'a> ApplicationOverlay<'a> {
 
     /// Merged forward iteration from the first key `>= start`.
     pub fn iter_from<'o>(&'o self, cf: &str, start: &[u8]) -> Result<MergedIter<'o>> {
-        self.merged(cf, Some(start.to_vec()))
+        self.merged(cf, Some(start))
     }
 
     /// Merged prefix iteration.
@@ -237,36 +286,43 @@ impl<'a> ApplicationOverlay<'a> {
     /// starts at `prefix` and continues, so both sides overrun identically and
     /// adding the overlay does not silently change any existing caller's result.
     pub fn prefix_iter<'o>(&'o self, cf: &str, prefix: &[u8]) -> Result<MergedIter<'o>> {
-        self.merged(cf, Some(prefix.to_vec()))
+        self.merged(cf, Some(prefix))
     }
 
-    fn merged<'o>(&'o self, cf: &str, start: Option<Vec<u8>>) -> Result<MergedIter<'o>> {
-        let base = self.db.iter_checked_from(cf, start.as_deref())?;
-        let overlay: Vec<(Vec<u8>, Op)> = match self.writes.get(cf) {
-            Some(m) => match &start {
-                Some(s) => m
-                    .range::<[u8], _>((std::ops::Bound::Included(s.as_slice()), std::ops::Bound::Unbounded))
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect(),
-                None => m.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-            },
-            None => Vec::new(),
+    fn merged<'o>(&'o self, cf: &str, start: Option<&[u8]>) -> Result<MergedIter<'o>> {
+        let base = self.db.iter_checked_from(cf, start)?;
+        let map = self.writes.get(cf).unwrap_or_else(|| empty_writes());
+        // Borrowed range — no copy of the buffered write set.
+        let overlay = match start {
+            Some(s) => map.range::<[u8], _>((
+                std::ops::Bound::Included(s),
+                std::ops::Bound::Unbounded,
+            )),
+            None => map.range::<[u8], _>((
+                std::ops::Bound::Unbounded,
+                std::ops::Bound::Unbounded,
+            )),
         };
         Ok(MergedIter {
             base: base.peekable(),
-            overlay: overlay.into_iter().peekable(),
+            overlay: overlay.peekable(),
             done: false,
         })
     }
 
     /// Convert the buffered writes into one ordinary atomic [`WriteBatch`].
     ///
+    /// Consumes the overlay and targets the database the overlay read from.
+    /// Taking a `&Database` argument here would let a caller build a batch for
+    /// one database out of pre-images read from another — the resulting writes
+    /// would be internally consistent and completely wrong.
+    ///
     /// Call this ONLY after execution and root verification have both succeeded.
     /// Until it is called — and until the batch is committed — nothing this
     /// overlay buffered has touched canonical state, so abandoning the overlay
     /// is a complete and side-effect-free rollback of the candidate branch.
-    pub fn into_batch(self, db: &'a Database) -> Result<WriteBatch<'a>> {
-        let mut batch = db.batch();
+    pub fn into_batch(self) -> Result<WriteBatch<'a>> {
+        let mut batch = self.db.batch();
         // Deterministic order: column families sorted by name, keys in order
         // within each. The resulting batch is then a pure function of the
         // buffered writes, so two nodes applying the same block emit the same
@@ -288,10 +344,11 @@ impl<'a> ApplicationOverlay<'a> {
 /// Merged overlay + database iterator.
 ///
 /// Yields `Result`, so a read error stops the scan loudly instead of truncating
-/// it into a short, plausible-looking result.
+/// it into a short, plausible-looking result. Borrows the overlay's buffered map
+/// rather than copying it.
 pub struct MergedIter<'o> {
     base: std::iter::Peekable<Box<dyn Iterator<Item = Result<(Box<[u8]>, Box<[u8]>)>> + 'o>>,
-    overlay: std::iter::Peekable<std::vec::IntoIter<(Vec<u8>, Op)>>,
+    overlay: std::iter::Peekable<btree_map::Range<'o, Vec<u8>, Op>>,
     done: bool,
 }
 
@@ -313,58 +370,51 @@ impl Iterator for MergedIter<'_> {
                 };
             }
 
-            let base_key = self.base.peek().and_then(|r| match r {
-                Ok((k, _)) => Some(k.as_ref().to_vec()),
-                Err(_) => None,
-            });
-            let ov_key = self.overlay.peek().map(|(k, _)| k.clone());
+            let base_key: Option<&[u8]> = match self.base.peek() {
+                Some(Ok((k, _))) => Some(k.as_ref()),
+                _ => None,
+            };
+            let ov_key: Option<&[u8]> = self.overlay.peek().map(|(k, _)| k.as_slice());
 
-            match (base_key, ov_key) {
-                (None, None) => {
+            enum Take {
+                Base,
+                Overlay,
+                Both,
+                Stop,
+            }
+            let take = match (base_key, ov_key) {
+                (None, None) => Take::Stop,
+                (Some(_), None) => Take::Base,
+                (None, Some(_)) => Take::Overlay,
+                (Some(bk), Some(ok)) => match ok.cmp(bk) {
+                    std::cmp::Ordering::Less => Take::Overlay,
+                    std::cmp::Ordering::Equal => Take::Both,
+                    std::cmp::Ordering::Greater => Take::Base,
+                },
+            };
+
+            match take {
+                Take::Stop => {
                     self.done = true;
                     return None;
                 }
-                (Some(_), None) => {
-                    let (k, v) = match self.base.next() {
-                        Some(Ok(kv)) => kv,
+                Take::Base => {
+                    return match self.base.next() {
+                        Some(Ok((k, v))) => Some(Ok((k.into_vec(), v.into_vec()))),
                         _ => {
                             self.done = true;
-                            return None;
+                            None
                         }
-                    };
-                    return Some(Ok((k.into_vec(), v.into_vec())));
-                }
-                (None, Some(_)) => {
-                    let (k, op) = self.overlay.next().expect("peeked");
-                    match op {
-                        Op::Put(v) => return Some(Ok((k, v))),
-                        Op::Delete => continue, // deleted: skip, do not emit
                     }
                 }
-                (Some(bk), Some(ok)) => {
-                    if ok < bk {
-                        let (k, op) = self.overlay.next().expect("peeked");
-                        match op {
-                            Op::Put(v) => return Some(Ok((k, v))),
-                            Op::Delete => continue,
-                        }
-                    } else if ok == bk {
-                        // Overlay shadows the database row.
-                        let _ = self.base.next();
-                        let (k, op) = self.overlay.next().expect("peeked");
-                        match op {
-                            Op::Put(v) => return Some(Ok((k, v))),
-                            Op::Delete => continue,
-                        }
-                    } else {
-                        let (k, v) = match self.base.next() {
-                            Some(Ok(kv)) => kv,
-                            _ => {
-                                self.done = true;
-                                return None;
-                            }
-                        };
-                        return Some(Ok((k.into_vec(), v.into_vec())));
+                Take::Overlay | Take::Both => {
+                    if matches!(take, Take::Both) {
+                        let _ = self.base.next(); // overlay shadows the row
+                    }
+                    let (k, op) = self.overlay.next().expect("peeked");
+                    match op {
+                        Op::Put(v) => return Some(Ok((k.clone(), v.clone()))),
+                        Op::Delete => continue, // deleted: skip, do not emit
                     }
                 }
             }
@@ -377,6 +427,10 @@ mod tests {
     use super::*;
     use crate::db::cf;
     use tempfile::TempDir;
+
+    /// Fixture ceiling. Deliberately a test constant: the production limit is a
+    /// versioned consensus parameter and this module invents no default.
+    const TEST_LIMIT: u64 = 1 << 20;
 
     fn db() -> (Database, TempDir) {
         let dir = TempDir::new().expect("tempdir");
@@ -391,7 +445,7 @@ mod tests {
     #[test]
     fn a_buffered_write_is_visible_to_reads_but_not_to_the_database() {
         let (d, _g) = db();
-        let mut ov = ApplicationOverlay::new(&d);
+        let mut ov = ApplicationOverlay::new(&d, TEST_LIMIT);
         ov.put(cf::STATE, b"k", b"v").unwrap();
 
         assert_eq!(ov.get(cf::STATE, b"k").unwrap().as_deref(), Some(&b"v"[..]));
@@ -406,7 +460,7 @@ mod tests {
     fn a_buffered_delete_hides_a_row_that_is_still_on_disk() {
         let (d, _g) = db();
         d.put(cf::STATE, b"k", b"v").unwrap();
-        let mut ov = ApplicationOverlay::new(&d);
+        let mut ov = ApplicationOverlay::new(&d, TEST_LIMIT);
         ov.delete(cf::STATE, b"k").unwrap();
 
         assert_eq!(ov.get(cf::STATE, b"k").unwrap(), None);
@@ -425,7 +479,7 @@ mod tests {
         d.put(cf::STATE, b"b", b"2").unwrap();
         d.put(cf::STATE, b"d", b"4").unwrap();
 
-        let mut ov = ApplicationOverlay::new(&d);
+        let mut ov = ApplicationOverlay::new(&d, TEST_LIMIT);
         ov.put(cf::STATE, b"b", b"overwritten").unwrap(); // shadow
         ov.delete(cf::STATE, b"d").unwrap(); // hide
         ov.put(cf::STATE, b"c", b"3").unwrap(); // insert between
@@ -446,7 +500,7 @@ mod tests {
     fn repeated_overwrites_keep_the_first_preimage() {
         let (d, _g) = db();
         d.put(cf::STATE, b"k", b"original").unwrap();
-        let mut ov = ApplicationOverlay::new(&d);
+        let mut ov = ApplicationOverlay::new(&d, TEST_LIMIT);
         ov.put(cf::STATE, b"k", b"first").unwrap();
         ov.put(cf::STATE, b"k", b"second").unwrap();
 
@@ -462,7 +516,7 @@ mod tests {
     fn a_preimage_records_absence_distinctly_from_an_empty_value() {
         let (d, _g) = db();
         d.put(cf::STATE, b"present", b"").unwrap(); // present, zero-length
-        let mut ov = ApplicationOverlay::new(&d);
+        let mut ov = ApplicationOverlay::new(&d, TEST_LIMIT);
         ov.put(cf::STATE, b"present", b"x").unwrap();
         ov.put(cf::STATE, b"absent", b"x").unwrap();
 
@@ -480,7 +534,7 @@ mod tests {
         for k in [b"a", b"c", b"e"] {
             d.put(cf::STATE, k, b"db").unwrap();
         }
-        let mut ov = ApplicationOverlay::new(&d);
+        let mut ov = ApplicationOverlay::new(&d, TEST_LIMIT);
         ov.put(cf::STATE, b"b", b"ov").unwrap();
         ov.put(cf::STATE, b"d", b"ov").unwrap();
 
@@ -500,13 +554,13 @@ mod tests {
         let (d, _g) = db();
         d.put(cf::STATE, b"k", b"0123456789").unwrap(); // 10-byte pre-image
 
-        let mut a = ApplicationOverlay::new(&d);
+        let mut a = ApplicationOverlay::new(&d, TEST_LIMIT);
         a.put(cf::STATE, b"k", b"xy").unwrap();
-        let first = a.bytes_used();
+        let first = a.logical_bytes();
 
-        let mut b = ApplicationOverlay::new(&d);
+        let mut b = ApplicationOverlay::new(&d, TEST_LIMIT);
         b.put(cf::STATE, b"k", b"xy").unwrap();
-        assert_eq!(first, b.bytes_used(), "same writes must charge the same");
+        assert_eq!(first, b.logical_bytes(), "same writes must charge the same");
 
         // key(1) + preimage(10) + key(1) + value(2)
         assert_eq!(first, 14);
@@ -515,7 +569,7 @@ mod tests {
     #[test]
     fn the_limit_is_enforced_rather_than_saturating() {
         let (d, _g) = db();
-        let mut ov = ApplicationOverlay::with_limit(&d, 16);
+        let mut ov = ApplicationOverlay::new(&d, 16);
         ov.put(cf::STATE, b"k", &[0u8; 8]).unwrap();
         let err = ov
             .put(cf::STATE, b"k2", &[0u8; 64])
@@ -530,12 +584,12 @@ mod tests {
     fn into_batch_is_the_only_thing_that_reaches_the_database() {
         let (d, _g) = db();
         d.put(cf::STATE, b"gone", b"v").unwrap();
-        let mut ov = ApplicationOverlay::new(&d);
+        let mut ov = ApplicationOverlay::new(&d, TEST_LIMIT);
         ov.put(cf::STATE, b"new", b"v").unwrap();
         ov.delete(cf::STATE, b"gone").unwrap();
 
         assert_eq!(d.get(cf::STATE, b"new").unwrap(), None);
-        ov.into_batch(&d).unwrap().commit().unwrap();
+        ov.into_batch().unwrap().commit().unwrap();
 
         assert_eq!(d.get(cf::STATE, b"new").unwrap().as_deref(), Some(&b"v"[..]));
         assert_eq!(d.get(cf::STATE, b"gone").unwrap(), None);
@@ -546,7 +600,7 @@ mod tests {
         let (d, _g) = db();
         d.put(cf::STATE, b"k", b"canonical").unwrap();
         {
-            let mut ov = ApplicationOverlay::new(&d);
+            let mut ov = ApplicationOverlay::new(&d, TEST_LIMIT);
             ov.put(cf::STATE, b"k", b"candidate").unwrap();
             ov.put(cf::STATE, b"other", b"candidate").unwrap();
             ov.delete(cf::STATE, b"k").unwrap();
@@ -558,5 +612,142 @@ mod tests {
             "abandoning a candidate must leave canonical state byte-identical"
         );
         assert_eq!(d.get(cf::STATE, b"other").unwrap(), None);
+    }
+
+    // ── Transactionality: a refused operation must change nothing ──────────
+    //
+    // These exist because the first version of this module mutated as it went:
+    // it subtracted the previous charge before adding the replacement, and it
+    // inserted the pre-image before the write was charged. Both left the
+    // overlay altered by an operation that returned `Err` — the ceiling itself
+    // becoming a source of corruption.
+
+    /// A snapshot of everything externally observable, for exact comparison.
+    fn snapshot(ov: &ApplicationOverlay<'_>) -> (u64, usize, Vec<(String, Vec<u8>)>) {
+        let mut pre: Vec<(String, Vec<u8>)> = ov
+            .preimages
+            .iter()
+            .flat_map(|(cf, m)| m.keys().map(move |k| (cf.clone(), k.clone())))
+            .collect();
+        pre.sort();
+        (ov.logical_bytes(), ov.len(), pre)
+    }
+
+    #[test]
+    fn a_rejected_repeated_overwrite_leaves_accounting_untouched() {
+        let (d, _g) = db();
+        // Room for the first write, not for a much larger replacement.
+        let mut ov = ApplicationOverlay::new(&d, 64);
+        ov.put(cf::STATE, b"k", &[0u8; 32]).unwrap();
+        let before = snapshot(&ov);
+
+        ov.put(cf::STATE, b"k", &[0u8; 4096])
+            .expect_err("replacement must be refused");
+
+        assert_eq!(
+            snapshot(&ov),
+            before,
+            "a refused overwrite must leave the overlay byte-identical; \
+             subtracting the old charge before the new one is accepted loses bytes"
+        );
+        assert_eq!(
+            ov.get(cf::STATE, b"k").unwrap().unwrap().len(),
+            32,
+            "the original buffered value must survive"
+        );
+    }
+
+    #[test]
+    fn a_rejected_first_write_leaves_no_captured_preimage() {
+        let (d, _g) = db();
+        d.put(cf::STATE, b"k", b"original").unwrap();
+        let mut ov = ApplicationOverlay::new(&d, 8);
+        let before = snapshot(&ov);
+
+        ov.put(cf::STATE, b"k", &[0u8; 4096])
+            .expect_err("write must be refused");
+
+        assert_eq!(
+            snapshot(&ov),
+            before,
+            "a refused first write must not leave a pre-image behind"
+        );
+        assert_eq!(
+            ov.preimage(cf::STATE, b"k"),
+            None,
+            "no pre-image may be recorded for a write that did not happen"
+        );
+    }
+
+    #[test]
+    fn combined_length_arithmetic_cannot_overflow_silently() {
+        // `to_u64`/`add` are the guards; exercise them directly, since
+        // allocating usize::MAX bytes to test through `put` is impossible.
+        assert!(add(u64::MAX, 1).is_err(), "addition must be checked");
+        assert!(add(u64::MAX - 1, 2).is_err());
+        assert_eq!(add(2, 3).unwrap(), 5);
+        assert!(
+            sub(1, 2).is_err(),
+            "underflow is an invariant violation, not something to saturate"
+        );
+        assert_eq!(sub(5, 2).unwrap(), 3);
+        assert_eq!(to_u64(7).unwrap(), 7);
+    }
+
+    /// Regression guard, not a detector — and the distinction is worth stating.
+    ///
+    /// A cloning implementation would still pass this: copying the write set
+    /// changes neither the entry count nor the accounting field. What actually
+    /// prevents the copy is the type — [`MergedIter`] holds a
+    /// `btree_map::Range<'o, _, _>`, a borrow of the overlay's own map, so a
+    /// whole-overlay duplicate cannot be constructed without changing that
+    /// field. This test pins the observable behaviour around it.
+    #[test]
+    fn iterator_construction_does_not_duplicate_the_overlay() {
+        let (d, _g) = db();
+        let mut ov = ApplicationOverlay::new(&d, TEST_LIMIT);
+        for i in 0..64u8 {
+            ov.put(cf::STATE, &[i], &[i; 64]).unwrap();
+        }
+        let charged = ov.logical_bytes();
+        let buffered = ov.len();
+
+        // Constructing (and draining) iterators must not allocate a second copy
+        // of the write set, and must not disturb the accounting.
+        for _ in 0..8 {
+            let n = ov.iter(cf::STATE).unwrap().count();
+            assert_eq!(n, buffered);
+            let _ = ov.iter_from(cf::STATE, &[32]).unwrap().count();
+            let _ = ov.prefix_iter(cf::STATE, &[0]).unwrap().count();
+        }
+        assert_eq!(ov.logical_bytes(), charged, "iteration must not charge");
+        assert_eq!(ov.len(), buffered);
+    }
+
+    /// Also structural rather than detected: `into_batch(self)` takes no
+    /// database, so there is no expression that aims an overlay's writes at a
+    /// database other than the one its pre-images were read from. This test
+    /// pins that the signature keeps that property.
+    #[test]
+    fn a_batch_targets_the_overlays_own_database() {
+        let (d1, _g1) = db();
+        let (d2, _g2) = db();
+        d1.put(cf::STATE, b"k", b"from-d1").unwrap();
+
+        let mut ov = ApplicationOverlay::new(&d1, TEST_LIMIT);
+        ov.put(cf::STATE, b"k", b"candidate").unwrap();
+        // `into_batch` takes no database argument, so there is no way to aim
+        // these writes at d2. It commits where the pre-images came from.
+        ov.into_batch().unwrap().commit().unwrap();
+
+        assert_eq!(
+            d1.get(cf::STATE, b"k").unwrap().as_deref(),
+            Some(&b"candidate"[..])
+        );
+        assert_eq!(
+            d2.get(cf::STATE, b"k").unwrap(),
+            None,
+            "an unrelated database must be untouched"
+        );
     }
 }
