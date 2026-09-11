@@ -82,6 +82,15 @@ impl StateManager {
     }
 
     /// Get full account state
+    /// Account state, distinguishing absent from present-and-zero. See
+    /// [`sumchain_storage::schema::StateStore::get_account_opt`]; used when
+    /// capturing an undo journal's `old` value, where the difference decides
+    /// whether a revert deletes the row or writes a zero row.
+    pub fn get_account_opt(&self, address: &Address) -> Result<Option<AccountState>> {
+        let store = StateStore::new(&self.db);
+        Ok(store.get_account_opt(address)?)
+    }
+
     pub fn get_account(&self, address: &Address) -> Result<AccountState> {
         let store = StateStore::new(&self.db);
         Ok(store.get_account(address)?)
@@ -200,18 +209,19 @@ impl StateManager {
     pub fn save_state_diff(
         &self,
         height: BlockHeight,
+        block_hash: &Hash,
         diff: sumchain_storage::schema::StateDiff,
     ) -> Result<()> {
         let store = StateStore::new(&self.db);
-        store.put_state_diff(height, &diff)?;
+        store.put_state_diff(height, block_hash, &diff)?;
         Ok(())
     }
 
     /// Revert state using a saved diff
-    pub fn revert_state_diff(&self, height: BlockHeight) -> Result<()> {
+    pub fn revert_state_diff(&self, height: BlockHeight, block_hash: &Hash) -> Result<()> {
         let store = StateStore::new(&self.db);
 
-        if let Some(diff) = store.get_state_diff(height)? {
+        if let Some(diff) = store.get_state_diff(height, block_hash)? {
             // Apply changes in reverse (old_state replaces new_state)
             for (addr, old_state, _new_state) in diff.changes {
                 match old_state {
@@ -222,7 +232,7 @@ impl StateManager {
                     }
                 }
             }
-            store.delete_state_diff(height)?;
+            store.delete_state_diff(height, block_hash)?;
         }
 
         Ok(())
@@ -232,10 +242,11 @@ impl StateManager {
     pub fn save_contract_state_diff(
         &self,
         height: BlockHeight,
+        block_hash: &Hash,
         diff: sumchain_storage::schema::ContractStateDiff,
     ) -> Result<()> {
         let store = StateStore::new(&self.db);
-        store.put_contract_state_diff(height, &diff)?;
+        store.put_contract_state_diff(height, block_hash, &diff)?;
         Ok(())
     }
 
@@ -248,17 +259,26 @@ impl StateManager {
     /// error (e.g. an unknown `cf_kind`) returns before commit, so nothing is
     /// applied and both diffs remain intact for a clean retry. This avoids the
     /// inconsistent state where accounts revert but contract state is orphaned.
-    pub fn revert_block_state_diffs(&self, height: BlockHeight) -> Result<()> {
+    pub fn revert_block_state_diffs(&self, height: BlockHeight, block_hash: &Hash) -> Result<()> {
         use sumchain_storage::{cf, ContractStateDiff};
         let store = StateStore::new(&self.db);
-        let account_diff = store.get_state_diff(height)?;
-        let contract_diff = store.get_contract_state_diff(height)?;
+        let account_diff = store.get_state_diff(height, block_hash)?;
+        let contract_diff = store.get_contract_state_diff(height, block_hash)?;
         // Dormant C1 compute-pool subsystem (issue #130): the block-rollback
         // revert of C1 rows is folded into THIS same batch so account, contract,
         // AND compute-pool state revert atomically (all-or-none). The C1 branch is
         // driven purely by journal PRESENCE, not by the activation gate: under the
         // production `None` gate no C1 journal is ever written, so there is nothing
         // to revert and the dormant path is byte-for-byte unchanged.
+        // The C1 and beacon journals remain keyed by height alone, deliberately.
+        // They are written inside `execute_block`, and at that point the block
+        // hash is not yet final: the produce path builds the header with
+        // `state_root: Hash::ZERO` ("Will be updated"), runs `execute_block` to
+        // obtain the root, and only then fills the root in and signs. Keying
+        // those journals by `block.hash()` there would key them by a hash no
+        // reader can reconstruct. Sound today because both gates are `None`, so
+        // neither journal is ever written; resolving this is a prerequisite for
+        // opening either gate, not optional cleanup.
         let cp_store = crate::compute_pool_store::ComputePoolStore::new(&self.db);
         let has_cp_journal = cp_store.has_journal(height)?;
         // Dormant BR1 beacon subsystem (issue #127): its block-rollback revert folds
@@ -278,16 +298,36 @@ impl StateManager {
 
         let mut batch = self.db.batch();
 
-        // Account restores (old state, or default if the account didn't exist).
+        // Account restores. An account that did not exist before the block is
+        // DELETED, not written back as a default row.
+        //
+        // `put`ting `AccountState::default()` reads the same through
+        // `get_account`, which returns the default for a missing key — so the
+        // two are indistinguishable today and the bug is invisible. They are not
+        // the same on disk: one leaves a `{balance: 0, nonce: 0}` row where the
+        // other leaves no row. `sum-node rollback`
+        // (`crates/node/src/main.rs:874-883`) already deletes in this case, so
+        // the two rollback paths disagreed byte-for-byte on identical input.
+        //
+        // That difference becomes a fork the moment anything hashes stored rows
+        // — which is exactly what a real state commitment must do. Reverting the
+        // difference now, while nothing hashes rows, costs nothing; discovering
+        // it after activation would mean two honest nodes computing different
+        // commitments from the same history.
         if let Some(diff) = &account_diff {
             for (addr, old_state, _new) in &diff.changes {
                 let mut key = Vec::with_capacity(4 + 20);
                 key.extend_from_slice(b"acct");
                 key.extend_from_slice(addr.as_bytes());
-                let state = old_state.clone().unwrap_or_default();
-                let bytes = bincode::serialize(&state)
-                    .map_err(|e| StateError::InvalidOperation(format!("account encode: {}", e)))?;
-                batch.put(cf::STATE, &key, &bytes)?;
+                match old_state {
+                    Some(state) => {
+                        let bytes = bincode::serialize(state).map_err(|e| {
+                            StateError::InvalidOperation(format!("account encode: {}", e))
+                        })?;
+                        batch.put(cf::STATE, &key, &bytes)?;
+                    }
+                    None => batch.delete(cf::STATE, &key)?,
+                }
             }
         }
 
@@ -324,12 +364,18 @@ impl StateManager {
         beacon_store.stage_block_revert(&mut batch, height)?;
 
         // Delete both diff records in the SAME batch — applied only on commit.
-        let hkey = height.to_be_bytes();
+        // Both the #253 key and the pre-#253 height-only key are removed, so a
+        // journal written by an older binary cannot survive the revert that
+        // consumed it.
+        let hkey = sumchain_storage::schema::journal_key(height, block_hash);
+        let legacy = height.to_be_bytes();
         if account_diff.is_some() {
             batch.delete(cf::STATE_DIFFS, &hkey)?;
+            batch.delete(cf::STATE_DIFFS, &legacy)?;
         }
         if contract_diff.is_some() {
             batch.delete(cf::CONTRACT_STATE_DIFFS, &hkey)?;
+            batch.delete(cf::CONTRACT_STATE_DIFFS, &legacy)?;
         }
 
         batch.commit()?;

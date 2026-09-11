@@ -2961,13 +2961,20 @@ impl BlockExecutor {
             // Record pre-execution state for diff
             let sender = tx.sender();
             let recipient = tx.recipient();
-            let sender_before = self.state.get_account(&sender)?;
-            let recipient_before = if let Some(ref r) = recipient {
-                Some(self.state.get_account(r)?)
-            } else {
-                None
-            };
-            let proposer_before = self.state.get_account(&proposer)?;
+            // Presence-aware: a block that CREATES an account must journal
+            // `old = None`, so the revert deletes the row instead of writing a
+            // zero row back. `get_account` cannot express that distinction.
+            let sender_before = self.state.get_account_opt(&sender)?;
+            // Nested deliberately: the OUTER option is "this tx has a
+            // recipient", the INNER is "that account already exists". Collapsing
+            // them is what loses the creation case.
+            let recipient_before: Option<Option<sumchain_storage::schema::AccountState>> =
+                if let Some(ref r) = recipient {
+                    Some(self.state.get_account_opt(r)?)
+                } else {
+                    None
+                };
+            let proposer_before = self.state.get_account_opt(&proposer)?;
 
             let result = self.execute_tx_with_validators(
                 tx,
@@ -2987,17 +2994,17 @@ impl BlockExecutor {
             let proposer_after = self.state.get_account(&proposer)?;
 
             // Add to state diff
-            state_diff.add_change(sender, Some(sender_before), sender_after);
+            state_diff.add_change(sender, sender_before, sender_after);
             if let (Some(r), Some(before), Some(after)) =
                 (recipient, recipient_before, recipient_after)
             {
-                state_diff.add_change(r, Some(before), after);
+                state_diff.add_change(r, before, after);
             }
             if !proposer.is_zero()
                 && proposer != sender
                 && recipient.map_or(true, |r| proposer != r)
             {
-                state_diff.add_change(proposer, Some(proposer_before), proposer_after);
+                state_diff.add_change(proposer, proposer_before, proposer_after);
             }
 
             let receipt = Receipt::new(
@@ -7114,7 +7121,7 @@ mod tests {
 
         // The unified reorg-revert path is a clean no-op under the dormant gate
         // (no account/contract/C1 diff at this height).
-        state.revert_block_state_diffs(1).unwrap();
+        state.revert_block_state_diffs(1, &Hash::ZERO).unwrap();
         assert!(
             store.load_state_map().unwrap().is_empty(),
             "dormant reorg-revert must touch nothing"
@@ -7192,7 +7199,7 @@ mod tests {
 
         // REORG-REVERT: the unified atomic reorg path (account+contract+C1 in one
         // batch) rolls this block's C1 state back.
-        state.revert_block_state_diffs(height).unwrap();
+        state.revert_block_state_diffs(height, &Hash::ZERO).unwrap();
         assert!(
             store.get_job(&job).unwrap().is_none(),
             "job reverted on reorg"
@@ -7207,7 +7214,7 @@ mod tests {
         );
 
         // Idempotent: reverting an already-consumed height is a clean no-op.
-        state.revert_block_state_diffs(height).unwrap();
+        state.revert_block_state_diffs(height, &Hash::ZERO).unwrap();
     }
 
     /// Helper: apply a one-job C1 transition at `height` through the gated apply
@@ -7706,7 +7713,7 @@ mod tests {
 
         // Reorg: revert height 1 → beacon rows (key + boundary membership) + journal all
         // roll back atomically.
-        state.revert_block_state_diffs(1).unwrap();
+        state.revert_block_state_diffs(1, &Hash::ZERO).unwrap();
         assert!(
             store.load_state_map().unwrap().is_empty(),
             "beacon state reverted"
@@ -7779,7 +7786,7 @@ mod tests {
             .unwrap();
         assert!(r1[0].is_success());
 
-        state.revert_block_state_diffs(1).unwrap();
+        state.revert_block_state_diffs(1, &Hash::ZERO).unwrap();
         // A fresh executor replays the identical block.
         let ex2 = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
         let (r2, _root2, _, _) = ex2.execute_block(&blk, Hash::ZERO, &pubs).unwrap();
@@ -8071,7 +8078,7 @@ mod tests {
             let store = crate::beacon_store::BeaconStore::new(&db);
             let snap = store.get_membership(0).unwrap();
             assert_eq!(snap, Some(pubs.clone()));
-            state.revert_block_state_diffs(1).unwrap();
+            state.revert_block_state_diffs(1, &Hash::ZERO).unwrap();
             assert_eq!(
                 store.get_membership(0).unwrap(),
                 None,
@@ -8178,7 +8185,7 @@ mod tests {
                 nonce: 1,
             },
         );
-        state.save_state_diff(height, sd).unwrap();
+        state.save_state_diff(height, &Hash::ZERO, sd).unwrap();
         apply_one_job(&executor, height, 0x44);
 
         let store = ComputePoolStore::new(&db);
@@ -8189,7 +8196,7 @@ mod tests {
         assert!(store.has_journal(height).unwrap());
 
         // ONE call reverts BOTH families atomically.
-        state.revert_block_state_diffs(height).unwrap();
+        state.revert_block_state_diffs(height, &Hash::ZERO).unwrap();
 
         assert_eq!(
             state.get_balance(&acct).unwrap(),
@@ -8252,7 +8259,7 @@ mod tests {
                 nonce: 1,
             },
         );
-        state.save_state_diff(height, sd).unwrap();
+        state.save_state_diff(height, &Hash::ZERO, sd).unwrap();
         apply_one_job(&executor, height, 0x44);
         let store = ComputePoolStore::new(&db);
         assert!(store.has_journal(height).unwrap());
@@ -8269,7 +8276,7 @@ mod tests {
 
         // The unified revert MUST abort — nothing committed.
         assert!(
-            state.revert_block_state_diffs(height).is_err(),
+            state.revert_block_state_diffs(height, &Hash::ZERO).is_err(),
             "corrupt C1 journal aborts the unified revert before commit"
         );
 

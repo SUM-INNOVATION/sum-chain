@@ -22,6 +22,35 @@ pub mod meta_keys {
     pub const FINALIZED_HASH: &[u8] = b"finalized_hash";
 }
 
+/// Key for a per-block undo journal: height big-endian, then the block hash.
+///
+/// The height prefix is load-bearing. [`crate::pruner`] parses `key[..8]` as the
+/// height so it can prune journals below a watermark by range scan; prefixing
+/// keeps that working byte-for-byte. The hash suffix is the fix for issue #253:
+/// keyed by height alone, two siblings at one height name the SAME journal, so
+/// importing the second overwrites the first's undo record before a reorg can
+/// read it — the revert then undoes the wrong block and deletes the row.
+///
+/// These journals are node-local undo data. They are never hashed into a block,
+/// so changing this key is a storage-format change, not a consensus change, and
+/// needs no activation height.
+pub fn journal_key(height: BlockHeight, block_hash: &Hash) -> Vec<u8> {
+    let mut key = Vec::with_capacity(8 + 32);
+    key.extend_from_slice(&height.to_be_bytes());
+    key.extend_from_slice(block_hash.as_bytes());
+    key
+}
+
+/// Pre-#253 journal key: height alone.
+///
+/// Reads fall back to this so a node upgrading mid-chain can still revert a
+/// block whose journal was written by the old binary; deletes remove both forms.
+/// Legacy rows therefore drain as blocks are reverted or pruned, and nothing
+/// re-creates them. Writes always use [`journal_key`].
+fn legacy_journal_key(height: BlockHeight) -> [u8; 8] {
+    height.to_be_bytes()
+}
+
 /// Block storage operations
 pub struct BlockStore<'a> {
     db: &'a Database,
@@ -228,6 +257,27 @@ impl<'a> StateStore<'a> {
         }
     }
 
+    /// Account state, distinguishing "absent" from "present and zero".
+    ///
+    /// [`Self::get_account`] flattens the two: a missing key returns
+    /// `AccountState::default()`, which is indistinguishable from a stored
+    /// `{balance: 0, nonce: 0}` row. That flattening is fine for execution,
+    /// which only needs a balance to debit, but it destroys information an undo
+    /// journal needs: reverting a block that CREATED an account must delete the
+    /// row, and a journal whose `old` was captured through `get_account` says
+    /// `Some(default)` and can only write a zero row back.
+    pub fn get_account_opt(&self, address: &Address) -> Result<Option<AccountState>> {
+        let key = Self::account_key(address);
+        match self.db.get(cf::STATE, &key)? {
+            Some(bytes) => {
+                let state: AccountState = bincode::deserialize(&bytes)
+                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                Ok(Some(state))
+            }
+            None => Ok(None),
+        }
+    }
+
     /// Set account state
     pub fn put_account(&self, address: &Address, state: &AccountState) -> Result<()> {
         let key = Self::account_key(address);
@@ -247,17 +297,30 @@ impl<'a> StateStore<'a> {
     }
 
     /// Store a state diff for a block (for reorgs)
-    pub fn put_state_diff(&self, height: BlockHeight, diff: &StateDiff) -> Result<()> {
-        let key = height.to_be_bytes();
+    pub fn put_state_diff(
+        &self,
+        height: BlockHeight,
+        block_hash: &Hash,
+        diff: &StateDiff,
+    ) -> Result<()> {
+        let key = journal_key(height, block_hash);
         let bytes = bincode::serialize(diff)
             .map_err(|e| StorageError::Serialization(e.to_string()))?;
         self.db.put(cf::STATE_DIFFS, &key, &bytes)
     }
 
     /// Get a state diff for a block
-    pub fn get_state_diff(&self, height: BlockHeight) -> Result<Option<StateDiff>> {
-        let key = height.to_be_bytes();
-        match self.db.get(cf::STATE_DIFFS, &key)? {
+    pub fn get_state_diff(
+        &self,
+        height: BlockHeight,
+        block_hash: &Hash,
+    ) -> Result<Option<StateDiff>> {
+        let key = journal_key(height, block_hash);
+        let found = match self.db.get(cf::STATE_DIFFS, &key)? {
+            Some(bytes) => Some(bytes),
+            None => self.db.get(cf::STATE_DIFFS, &legacy_journal_key(height))?,
+        };
+        match found {
             Some(bytes) => {
                 let diff: StateDiff = bincode::deserialize(&bytes)
                     .map_err(|e| StorageError::Serialization(e.to_string()))?;
@@ -268,18 +331,21 @@ impl<'a> StateStore<'a> {
     }
 
     /// Delete a state diff
-    pub fn delete_state_diff(&self, height: BlockHeight) -> Result<()> {
-        let key = height.to_be_bytes();
-        self.db.delete(cf::STATE_DIFFS, &key)
+    pub fn delete_state_diff(&self, height: BlockHeight, block_hash: &Hash) -> Result<()> {
+        self.db
+            .delete(cf::STATE_DIFFS, &journal_key(height, block_hash))?;
+        self.db
+            .delete(cf::STATE_DIFFS, &legacy_journal_key(height))
     }
 
     /// Store the per-block contract-state diff (for reorg revert).
     pub fn put_contract_state_diff(
         &self,
         height: BlockHeight,
+        block_hash: &Hash,
         diff: &ContractStateDiff,
     ) -> Result<()> {
-        let key = height.to_be_bytes();
+        let key = journal_key(height, block_hash);
         let bytes = bincode::serialize(diff)
             .map_err(|e| StorageError::Serialization(e.to_string()))?;
         self.db.put(cf::CONTRACT_STATE_DIFFS, &key, &bytes)
@@ -289,9 +355,16 @@ impl<'a> StateStore<'a> {
     pub fn get_contract_state_diff(
         &self,
         height: BlockHeight,
+        block_hash: &Hash,
     ) -> Result<Option<ContractStateDiff>> {
-        let key = height.to_be_bytes();
-        match self.db.get(cf::CONTRACT_STATE_DIFFS, &key)? {
+        let key = journal_key(height, block_hash);
+        let found = match self.db.get(cf::CONTRACT_STATE_DIFFS, &key)? {
+            Some(bytes) => Some(bytes),
+            None => self
+                .db
+                .get(cf::CONTRACT_STATE_DIFFS, &legacy_journal_key(height))?,
+        };
+        match found {
             Some(bytes) => {
                 let diff: ContractStateDiff = bincode::deserialize(&bytes)
                     .map_err(|e| StorageError::Serialization(e.to_string()))?;
@@ -302,9 +375,15 @@ impl<'a> StateStore<'a> {
     }
 
     /// Delete the per-block contract-state diff.
-    pub fn delete_contract_state_diff(&self, height: BlockHeight) -> Result<()> {
-        let key = height.to_be_bytes();
-        self.db.delete(cf::CONTRACT_STATE_DIFFS, &key)
+    pub fn delete_contract_state_diff(
+        &self,
+        height: BlockHeight,
+        block_hash: &Hash,
+    ) -> Result<()> {
+        self.db
+            .delete(cf::CONTRACT_STATE_DIFFS, &journal_key(height, block_hash))?;
+        self.db
+            .delete(cf::CONTRACT_STATE_DIFFS, &legacy_journal_key(height))
     }
 
     /// Iterate over all accounts in state

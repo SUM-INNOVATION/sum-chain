@@ -162,22 +162,30 @@ impl ProbeNode {
         out
     }
 
-    /// The raw, undecoded `cf::STATE_DIFFS` row for `height`. `put_state_diff`
-    /// keys this CF by `height.to_be_bytes()` **and nothing else** — no block
-    /// hash — which is why two siblings at the same height contend for one row.
-    fn raw_state_diff_row(&self, height: u64) -> Option<Vec<u8>> {
+    /// The raw, undecoded `cf::STATE_DIFFS` row for one specific block.
+    ///
+    /// `put_state_diff` keys this CF by `(height, block_hash)`. Before the #253
+    /// fix it keyed by `height.to_be_bytes()` and nothing else, so two siblings
+    /// at one height contended for a single row and the second import silently
+    /// destroyed the first's undo journal. Asking by block hash is what lets
+    /// this probe distinguish "A's journal is intact" from "A's journal was
+    /// overwritten by B's".
+    fn raw_state_diff_row(&self, height: u64, block_hash: &Hash) -> Option<Vec<u8>> {
         self.db()
-            .get(cf::STATE_DIFFS, &height.to_be_bytes())
+            .get(
+                cf::STATE_DIFFS,
+                &sumchain_storage::schema::journal_key(height, block_hash),
+            )
             .expect("read cf::STATE_DIFFS")
     }
 
-    /// The decoded height-`height` undo journal, as the set of addresses it
-    /// covers. Used to tell "the journal describes A's block" from "the journal
-    /// was overwritten to describe B's block".
-    fn state_diff_addresses(&self, height: u64) -> Option<BTreeSet<String>> {
+    /// The decoded undo journal for one specific block, as the set of addresses
+    /// it covers. Used to tell "the journal describes A's block" from "the
+    /// journal was overwritten to describe B's block".
+    fn state_diff_addresses(&self, height: u64, block_hash: &Hash) -> Option<BTreeSet<String>> {
         let store = StateStore::new(self.db());
         store
-            .get_state_diff(height)
+            .get_state_diff(height, block_hash)
             .expect("decode state diff")
             .map(|d| d.changes.iter().map(|(a, _, _)| a.to_base58()).collect())
     }
@@ -448,8 +456,9 @@ async fn run_probe() -> Evidence {
 
         // ── 6. Snapshot A: every account, plus the raw STATE_DIFFS[1] row ───
         let accounts_a_before = node_a.account_snapshot();
-        let diff_row_before = node_a.raw_state_diff_row(1);
-        let diff_addrs_before = node_a.state_diff_addresses(1);
+        let a_hash = block_a.hash();
+        let diff_row_before = node_a.raw_state_diff_row(1, &a_hash);
+        let diff_addrs_before = node_a.state_diff_addresses(1, &a_hash);
         assert!(
             diff_row_before.is_some(),
             "A must have written an undo journal for its own height-1 block"
@@ -491,8 +500,8 @@ async fn run_probe() -> Evidence {
 
         let head_after = node_a.consensus.best_block_hash();
         let accounts_a_after = node_a.account_snapshot();
-        let diff_row_after = node_a.raw_state_diff_row(1);
-        let diff_addrs_after = node_a.state_diff_addresses(1);
+        let diff_row_after = node_a.raw_state_diff_row(1, &a_hash);
+        let diff_addrs_after = node_a.state_diff_addresses(1, &a_hash);
 
         let import_result_str = match &import_result {
             Ok(()) => "Ok(())".to_string(),

@@ -470,11 +470,16 @@ impl PoAEngine {
             receipt_store.put(receipt)?;
         }
 
-        // Store state diff for potential reorg
-        self.state.save_state_diff(height, state_diff)?;
+        // Store state diff for potential reorg, keyed by (height, block hash).
+        // Keyed by height alone, a sibling at this height would overwrite this
+        // journal and a later reorg would revert the wrong block (issue #253).
+        let block_hash = block.hash();
+        self.state
+            .save_state_diff(height, &block_hash, state_diff)?;
         // Persist the contract-state diff alongside the account diff, with
         // identical timing, so a reorg reverts both together.
-        self.state.save_contract_state_diff(height, contract_diff)?;
+        self.state
+            .save_contract_state_diff(height, &block_hash, contract_diff)?;
 
         // Store the block
         let block_store = BlockStore::new(&self.db);
@@ -588,11 +593,16 @@ impl PoAEngine {
             receipt_store.put(receipt)?;
         }
 
-        // Store state diff
-        self.state.save_state_diff(height, state_diff)?;
+        // Store state diff, keyed by (height, block hash) so importing a sibling
+        // at this height cannot overwrite another branch's undo journal — the
+        // exact mechanism behind issue #253.
+        let block_hash = block.hash();
+        self.state
+            .save_state_diff(height, &block_hash, state_diff)?;
         // Persist the contract-state diff alongside the account diff, with
         // identical timing, so a reorg reverts both together.
-        self.state.save_contract_state_diff(height, contract_diff)?;
+        self.state
+            .save_contract_state_diff(height, &block_hash, contract_diff)?;
 
         // Update best block if this extends the chain
         let current_best = self.best_block.read().clone();
@@ -680,7 +690,8 @@ impl PoAEngine {
             // cannot leave any one family behind while another rolls back. Under
             // the production `None` gate no C1 journal exists, so the C1 revert is
             // an inert no-op inside the same batch.
-            self.state.revert_block_state_diffs(block.height())?;
+            self.state
+                .revert_block_state_diffs(block.height(), &block.hash())?;
 
             // Return transactions to mempool
             for tx in &block.transactions {
