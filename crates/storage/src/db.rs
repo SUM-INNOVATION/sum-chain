@@ -1287,6 +1287,46 @@ impl Database {
         Ok(self.db.iterator_cf(cf, rocksdb::IteratorMode::Start).filter_map(|r| r.ok()))
     }
 
+    /// Forward iteration that PROPAGATES read errors.
+    ///
+    /// [`Self::iter`] and its siblings end in `.filter_map(|r| r.ok())`, which
+    /// turns a mid-scan read failure into a silent early stop: the caller
+    /// receives a short result that is indistinguishable from a genuinely short
+    /// column family. Anything computing consensus state from a scan must not
+    /// use those. `start` of `None` begins at the first key.
+    pub fn iter_checked_from<'a>(
+        &'a self,
+        cf_name: &str,
+        start: Option<&[u8]>,
+    ) -> Result<Box<dyn Iterator<Item = Result<(Box<[u8]>, Box<[u8]>)>> + 'a>> {
+        let cf = self.cf(cf_name)?;
+        let mode = match start {
+            Some(s) => rocksdb::IteratorMode::From(s, rocksdb::Direction::Forward),
+            None => rocksdb::IteratorMode::Start,
+        };
+        Ok(Box::new(
+            self.db
+                .iterator_cf(cf, mode)
+                .map(|r| r.map_err(|e| StorageError::RocksDb(e))),
+        ))
+    }
+
+    /// Prefix iteration that PROPAGATES read errors. Mirrors
+    /// [`Self::prefix_iter`]'s overrun behaviour: RocksDB seeks to `prefix` and
+    /// keeps going, so keys beyond the prefix can be yielded.
+    pub fn prefix_iter_checked<'a>(
+        &'a self,
+        cf_name: &str,
+        prefix: &[u8],
+    ) -> Result<Box<dyn Iterator<Item = Result<(Box<[u8]>, Box<[u8]>)>> + 'a>> {
+        let cf = self.cf(cf_name)?;
+        Ok(Box::new(
+            self.db
+                .prefix_iterator_cf(cf, prefix)
+                .map(|r| r.map_err(|e| StorageError::RocksDb(e))),
+        ))
+    }
+
     /// Wipe all data from specified column families
     ///
     /// This deletes all key-value pairs from the given column families.
@@ -1299,12 +1339,19 @@ impl Database {
             let cf = self.cf(cf_name)?;
 
             // Collect all keys first to avoid iterator invalidation
+            // Errors propagate. Dropping them here would silently shorten the
+            // key list and report a wipe that left rows behind — the one
+            // outcome a caller of `wipe_column_families` must be able to rule
+            // out. This is the fifth error-dropping conversion in this file and
+            // the only one not inside a bare iterator constructor.
             let keys: Vec<Box<[u8]>> = self
                 .db
                 .iterator_cf(cf, rocksdb::IteratorMode::Start)
-                .filter_map(|r| r.ok())
-                .map(|(k, _)| k)
-                .collect();
+                .map(|r| {
+                    r.map(|(k, _)| k)
+                        .map_err(|e| StorageError::RocksDb(e))
+                })
+                .collect::<Result<Vec<_>>>()?;
 
             let count = keys.len();
             for key in keys {

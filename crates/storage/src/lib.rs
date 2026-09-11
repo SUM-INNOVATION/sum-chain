@@ -13,6 +13,7 @@ pub mod governance_store;
 pub mod healthcare_store;
 pub mod legal_store;
 pub mod messaging_store;
+pub mod overlay;
 pub mod policy_account_store;
 pub mod property_store;
 pub mod pruner;
