@@ -69,8 +69,14 @@
 //!   and is not prevented by refusing the write afterwards.
 //! * `BTreeMap` and `HashMap` node allocation is not fallible through their
 //!   safe APIs — inserting can abort on allocation failure and there is no
-//!   `try_insert`. The per-entry overhead is small and bounded by entry count,
-//!   but it is not covered.
+//!   `try_insert`. This overhead IS influenced by block contents, through the
+//!   number of distinct keys a block writes, so it is not independent of the
+//!   input. It is uncounted, but it is indirectly bounded: every distinct key
+//!   charges at least its own length plus its pre-image against the logical
+//!   limit, so the limit caps how many entries can exist, and the column-family
+//!   set is fixed at open time and cannot grow with block contents. Node
+//!   overhead is therefore a bounded multiple of an already-bounded entry
+//!   count — not an independent quantity, and not an unbounded one.
 //! * The accounting excludes allocator overhead and padding by design, so real
 //!   process memory is strictly higher than `logical_bytes`.
 //!
@@ -334,9 +340,14 @@ impl<'a> ApplicationOverlay<'a> {
         // fallibly above and is moved into place here. The one allocation that
         // remains is `BTreeMap`/`HashMap` node insertion, which is not fallible
         // through their safe APIs — there is no `try_insert`, and insertion can
-        // abort on allocation failure. That overhead is per-entry and bounded by
-        // entry count rather than by block contents, which is the distinction
-        // this ordering is protecting.
+        // abort on allocation failure.
+        //
+        // That overhead is per-entry, and entry count does depend on block
+        // contents. It is bounded only indirectly: each distinct key charges at
+        // least its length plus its pre-image against the logical limit, so the
+        // limit caps the entry count, and the CF set is fixed at open time. What
+        // this ordering protects against is the direct, unbounded case — a copy
+        // sized by a single value the block chose.
         if let (Some(pre), Some(cf_owned), Some(pre_key)) =
             (owned_preimage, owned_cf_for_pre, owned_preimage_key)
         {
