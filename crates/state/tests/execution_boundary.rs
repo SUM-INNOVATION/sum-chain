@@ -69,22 +69,70 @@ fn state_src() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
 }
 
+/// Every `.rs` file under `src/`, RECURSIVELY.
+///
+/// The first version of this read only the top level. `crates/state/src` happens
+/// to be flat today, so nothing was actually hidden and the recorded counts were
+/// accurate — but the hole was real: the moment anyone added `src/foo/bar.rs`,
+/// it would have been unguarded, and the guard would have kept passing while the
+/// boundary eroded. A guard with a blind spot is worse than no guard, because it
+/// is trusted.
+///
+/// Names are returned relative to `src/`, so a nested file appears as
+/// `foo/bar.rs` and cannot collide with a top-level entry in the budget.
 fn rust_files() -> Vec<(String, String)> {
-    let dir = state_src().join("src");
-    let mut out = Vec::new();
-    for entry in std::fs::read_dir(&dir).expect("read src/") {
-        let path = entry.expect("dir entry").path();
-        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-            continue;
+    fn walk(dir: &Path, prefix: &str, out: &mut Vec<(String, String)>) {
+        for entry in std::fs::read_dir(dir).expect("read source directory") {
+            let path = entry.expect("dir entry").path();
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .expect("utf-8 filename")
+                .to_string();
+            let rel = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}/{name}")
+            };
+            if path.is_dir() {
+                walk(&path, &rel, out);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                let src = std::fs::read_to_string(&path).expect("read source");
+                out.push((rel, src));
+            }
         }
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .expect("utf-8 filename")
-            .to_string();
-        let src = std::fs::read_to_string(&path).expect("read source");
-        out.push((name, src));
     }
+    rust_files_in(&state_src().join("src"))
+}
+
+/// The scan, over an arbitrary root. Split out so the recursion can be tested
+/// against a temporary tree — a probe file written into the real `src/` would be
+/// visible to the other tests in this file while they run, which is a race, not
+/// a test.
+fn rust_files_in(root: &Path) -> Vec<(String, String)> {
+    fn walk(dir: &Path, prefix: &str, out: &mut Vec<(String, String)>) {
+        for entry in std::fs::read_dir(dir).expect("read source directory") {
+            let path = entry.expect("dir entry").path();
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .expect("utf-8 filename")
+                .to_string();
+            let rel = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}/{name}")
+            };
+            if path.is_dir() {
+                walk(&path, &rel, out);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                let src = std::fs::read_to_string(&path).expect("read source");
+                out.push((rel, src));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, "", &mut out);
     out
 }
 
@@ -144,6 +192,40 @@ fn no_unlisted_file_mutates_the_database_directly() {
          database directly:\n{}\n\nWrite through `ExecutionView` instead.",
         offenders.join("\n")
     );
+}
+
+/// The scan must reach nested files.
+///
+/// Run against a temporary tree, never the real `src/`: writing a probe file
+/// into the crate's own sources would be visible to the other tests in this file
+/// while they run in parallel, and they would fail on it. That is a race
+/// masquerading as a test, and it happened on the first attempt.
+#[test]
+fn the_scan_recurses_into_subdirectories() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let nested = tmp.path().join("a").join("b");
+    std::fs::create_dir_all(&nested).expect("create nested dirs");
+    std::fs::write(nested.join("deep.rs"), "fn f(db: &D) { let _ = db.batch(); }\n")
+        .expect("write nested source");
+    std::fs::write(tmp.path().join("top.rs"), "fn g() {}\n").expect("write top source");
+    std::fs::write(nested.join("ignored.txt"), "db.batch()\n").expect("write non-rust");
+
+    let files = rust_files_in(tmp.path());
+    let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
+
+    assert!(
+        names.contains(&"a/b/deep.rs"),
+        "a nested .rs file was not scanned — the guard would pass while the \
+         boundary eroded in a subdirectory. Saw: {names:?}"
+    );
+    assert!(names.contains(&"top.rs"));
+    assert!(
+        !names.iter().any(|n| n.ends_with(".txt")),
+        "only Rust sources should be scanned"
+    );
+
+    let (_, deep) = files.iter().find(|(n, _)| n == "a/b/deep.rs").unwrap();
+    assert_eq!(count_direct_mutations(deep), 1);
 }
 
 #[test]

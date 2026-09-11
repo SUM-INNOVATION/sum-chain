@@ -461,7 +461,7 @@ impl<'a> ApplicationOverlay<'a> {
     /// Until it is called — and until the batch is committed — nothing this
     /// overlay buffered has touched canonical state, so abandoning the overlay
     /// is a complete and side-effect-free rollback of the candidate branch.
-    pub fn into_batch(self) -> Result<WriteBatch<'a>> {
+    pub(crate) fn into_batch(self) -> Result<WriteBatch<'a>> {
         let mut batch = self.db.batch();
         // Deterministic order: column families sorted by name, keys in order
         // within each. The resulting batch is then a pure function of the

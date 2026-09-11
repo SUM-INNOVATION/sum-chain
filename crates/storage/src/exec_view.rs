@@ -27,7 +27,6 @@
 //! execution finishes, the caller still holds the overlay and decides — after
 //! verifying the state root — whether to convert it into a batch or drop it.
 
-use crate::db::WriteBatch;
 use crate::overlay::{ApplicationOverlay, MergedIter};
 use crate::Result;
 
@@ -105,15 +104,4 @@ impl<'v, 'db> ExecutionView<'v, 'db> {
     pub fn is_empty(&self) -> bool {
         self.overlay.is_empty()
     }
-}
-
-/// Turn a finished overlay into the single batch that publishes it.
-///
-/// Free function rather than a method on [`ExecutionView`]: publication is not
-/// something execution may do. The view borrows the overlay, so this cannot even
-/// be called while a view is open — the borrow must be released first, which
-/// happens when execution returns. The caller then verifies the state root and
-/// decides whether to commit the batch or drop the overlay.
-pub fn publish<'db>(overlay: ApplicationOverlay<'db>) -> Result<WriteBatch<'db>> {
-    overlay.into_batch()
 }
