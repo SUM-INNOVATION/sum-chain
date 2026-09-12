@@ -45,14 +45,22 @@ use std::path::Path;
 /// ONLY EVER DECREASE THESE. Raising a number to make this test pass defeats
 /// its entire purpose: the point is that the boundary cannot erode while the
 /// migration is in progress.
+///
+/// These numbers went UP once, when `count_direct_mutations` learned to see a
+/// write split across lines. That is the one legitimate reason to raise them:
+/// not a single write was added, and the corrected totals are what was always
+/// in the tree. Every file's count rose to exactly its pre-existing multi-line
+/// sites, which is checkable against any commit before the fix. Do not treat
+/// this as precedent — a raise for any other reason is the erosion this guard
+/// exists to catch.
 fn budget() -> BTreeMap<&'static str, usize> {
     BTreeMap::from([
-        ("storage_metadata.rs", 9),
-        ("supply.rs", 8),
-        ("executor.rs", 6),
+        ("storage_metadata.rs", 15),
+        ("supply.rs", 9),
+        ("executor.rs", 7),
+        ("node_registry.rs", 6),
         ("compute_pool_store.rs", 4),
-        ("node_registry.rs", 2),
-        ("inference_settlement_executor.rs", 2),
+        ("inference_settlement_executor.rs", 4),
         ("beacon_store.rs", 2),
         ("state.rs", 1),
         ("inference_attestation_executor.rs", 1),
@@ -63,22 +71,32 @@ fn budget() -> BTreeMap<&'static str, usize> {
 /// `db.batch()` and so on. Deliberately narrow and literal — a regex that tried
 /// to catch every indirect route would produce false positives and get muted,
 /// which is worse than a guard with a stated scope.
+///
+/// Line comments are dropped and the remaining source is stripped of ALL
+/// whitespace before matching. The first version matched within single lines,
+/// which meant rustfmt decided whether a write was counted: the extremely
+/// common
+///
+/// ```ignore
+/// self.db
+///     .put(cf::X, &key, &bytes)?;
+/// ```
+///
+/// was invisible to it, and 14 mutation sites across five files — two fifths of
+/// the recorded total — were never in the budget at all. A ratchet that a line
+/// break can defeat is not a ratchet.
 fn count_direct_mutations(src: &str) -> usize {
-    let mut n = 0;
-    for line in src.lines() {
-        let line = line.trim_start();
-        if line.starts_with("//") || line.starts_with("///") || line.starts_with("//!") {
-            continue;
-        }
-        for pat in [
-            "db.put(",
-            "db.delete(",
-            "db.batch()",
-        ] {
-            n += line.matches(pat).count();
-        }
-    }
-    n
+    let code: String = src
+        .lines()
+        .map(|l| l.trim_start())
+        .filter(|l| !l.starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let flat: String = code.chars().filter(|c| !c.is_whitespace()).collect();
+    ["db.put(", "db.delete(", "db.batch("]
+        .iter()
+        .map(|pat| flat.matches(pat).count())
+        .sum()
 }
 
 fn state_src() -> &'static Path {
@@ -235,6 +253,29 @@ fn the_guard_actually_detects_a_direct_mutation() {
     // Overlay and view writes are not direct mutations.
     assert_eq!(count_direct_mutations("view.put(cf, &k, &v)?;"), 0);
     assert_eq!(count_direct_mutations("overlay.delete(cf, &k)?;"), 0);
+
+    // A line break must not hide a write. This is the form rustfmt produces
+    // for a long call, and it is what the first version of this counter
+    // missed across five files.
+    assert_eq!(
+        count_direct_mutations("self.db\n    .put(cf::INFERENCE_CLAIMS, &key, &bytes)?;"),
+        1,
+        "a write split across lines is still a write"
+    );
+    assert_eq!(
+        count_direct_mutations("self\n    .db\n    .delete(cf, &k)?;"),
+        1
+    );
+    // Still not code when the split line is commented out.
+    assert_eq!(
+        count_direct_mutations("// self.db\n//     .put(cf, &k, &v)?;"),
+        0
+    );
+    // Several on one line are all counted.
+    assert_eq!(
+        count_direct_mutations("db.put(a, b, c)?; db.delete(a, b)?;"),
+        2
+    );
 }
 
 // ── The execution-completion binding ───────────────────────────────────────
