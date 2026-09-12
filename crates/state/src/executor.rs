@@ -255,7 +255,6 @@ pub struct BlockExecutor {
     inference_attestation_executor: InferenceAttestationExecutor,
     inference_settlement_executor:
         crate::inference_settlement_executor::InferenceSettlementExecutor,
-    education_executor: crate::education_executor::EducationExecutor,
     /// BR1 beacon (#127) per-block accumulator. Interior-mutable (`parking_lot::Mutex`
     /// so `BlockExecutor` stays `Send + Sync`) so the per-tx dispatch (`&self`) can
     /// drive the stateful beacon runtime across a block's beacon txs; built once at
@@ -335,7 +334,6 @@ impl BlockExecutor {
         let inference_attestation_executor = InferenceAttestationExecutor::new(db.clone());
         let inference_settlement_executor =
             crate::inference_settlement_executor::InferenceSettlementExecutor::new(db.clone());
-        let education_executor = crate::education_executor::EducationExecutor::new(db.clone());
         Self {
             state,
             db,
@@ -359,7 +357,6 @@ impl BlockExecutor {
             storage_metadata_executor,
             inference_attestation_executor,
             inference_settlement_executor,
-            education_executor,
             beacon_block: parking_lot::Mutex::new(None),
         }
     }
@@ -1771,8 +1768,11 @@ impl BlockExecutor {
                             });
                         }
 
-                        // 4. Semantic validation (pure DB reads).
-                        let outcome = self.education_executor.validate(
+                        // 4. Semantic validation (pure reads, through the
+                        //    candidate: it must see this block's own earlier
+                        //    education writes, not just the parent's state).
+                        let outcome = crate::education_executor::EducationExecutor::validate(
+                            view,
                             &parsed,
                             &v2_tx.from,
                             block_height,
@@ -1798,7 +1798,9 @@ impl BlockExecutor {
                                 self.state.deduct(&v2_tx.from, fee)?;
                                 self.state.credit(proposer, fee)?;
                                 self.state.increment_nonce(&v2_tx.from)?;
-                                self.education_executor.commit(prepared)?;
+                                crate::education_executor::EducationExecutor::stage(
+                                    view, prepared,
+                                )?;
                                 Ok(TxExecutionResult {
                                     tx_hash,
                                     status: TxStatus::Success,

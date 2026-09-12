@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use sumchain_primitives::education::*;
 use sumchain_primitives::hash::Hash;
 use sumchain_primitives::Address;
+use sumchain_storage::exec_view::ExecutionView;
 use sumchain_storage::{cf, Database};
 
 use crate::{Result, StateError};
@@ -515,7 +516,27 @@ impl EducationExecutor {
         assessment_id: &[u8; 32],
         student_commitment: &[u8; 32],
     ) -> Result<u16> {
-        self.count_attempts(offering_id, assessment_id, student_commitment)
+        // Committed-state count, for RPC and mempool admission. The execution
+        // path uses `v_count_attempts`, which also sees the block's own staged
+        // submissions; admission must not, or it would count attempts that a
+        // rejected block never publishes.
+        let mut prefix = Vec::with_capacity(96);
+        prefix.extend_from_slice(offering_id);
+        prefix.extend_from_slice(assessment_id);
+        prefix.extend_from_slice(student_commitment);
+        let mut n: u16 = 0;
+        match self.db.prefix_iter(cf::EDU_SUBMISSIONS, &prefix) {
+            Ok(it) => {
+                for (k, _) in it {
+                    if k.len() == 98 && k[..96] == prefix[..] {
+                        n = n.saturating_add(1);
+                    }
+                }
+            }
+            Err(sumchain_storage::StorageError::NotFound(_)) => {}
+            Err(e) => return Err(e.into()),
+        }
+        Ok(n)
     }
 
     // ── Read-only list/get helpers (Phase 4 RPC) ──
@@ -753,8 +774,61 @@ impl EducationExecutor {
         }
     }
 
-    fn count_attempts(
-        &self,
+    // ── Execution-path reads (view-based) ──
+    //
+    // These mirror the `&self` accessors above, but read through the block's
+    // `ExecutionView` instead of the committed database, so validation sees
+    // writes staged earlier in the same block.
+    //
+    // The duplication is deliberate. A shared read trait over `Database` and
+    // the overlay would make `&self.db` a well-typed substitute for the view at
+    // every one of these call sites, which is the mistake `ExecutionView`
+    // exists to make inexpressible. The `&self` versions stay for RPC and
+    // mempool admission, which must answer about published state.
+
+    fn v_de<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
+        bincode::deserialize(bytes)
+            .map_err(|e| StateError::SerializationError(e.to_string()))
+    }
+
+    fn v_get_catalog(
+        view: &ExecutionView<'_, '_>,
+        id: &[u8; 32],
+    ) -> Result<Option<StoredCatalogEntry>> {
+        match view.get(cf::EDU_CATALOG_ENTRIES, id)? {
+            None => Ok(None),
+            Some(b) => Ok(Some(Self::v_de(&b)?)),
+        }
+    }
+
+    fn v_get_offering(
+        view: &ExecutionView<'_, '_>,
+        id: &[u8; 32],
+    ) -> Result<Option<StoredOffering>> {
+        match view.get(cf::EDU_OFFERINGS, id)? {
+            None => Ok(None),
+            Some(b) => Ok(Some(Self::v_de(&b)?)),
+        }
+    }
+
+    fn v_get_assessment(
+        view: &ExecutionView<'_, '_>,
+        offering_id: &[u8; 32],
+        assessment_id: &[u8; 32],
+    ) -> Result<Option<StoredAssessment>> {
+        let k = cat2(offering_id, assessment_id);
+        match view.get(cf::EDU_ASSESSMENTS, &k)? {
+            None => Ok(None),
+            Some(b) => Ok(Some(Self::v_de(&b)?)),
+        }
+    }
+
+    fn v_exists(view: &ExecutionView<'_, '_>, cf_name: &str, key: &[u8]) -> Result<bool> {
+        Ok(view.contains(cf_name, key)?)
+    }
+
+    fn v_count_attempts(
+        view: &ExecutionView<'_, '_>,
         offering_id: &[u8; 32],
         assessment_id: &[u8; 32],
         sc: &[u8; 32],
@@ -765,9 +839,13 @@ impl EducationExecutor {
         prefix.extend_from_slice(assessment_id);
         prefix.extend_from_slice(sc);
         let mut n: u16 = 0;
-        match self.db.prefix_iter(cf::EDU_SUBMISSIONS, &prefix) {
+        match view.prefix_iter(cf::EDU_SUBMISSIONS, &prefix) {
             Ok(it) => {
-                for (k, _) in it {
+                // The merged scan is fallible: a read error ends it loudly
+                // rather than returning a short count, which would silently
+                // re-open an exhausted attempt budget.
+                for entry in it {
+                    let (k, _) = entry?;
                     if k.len() == 98 && k[..96] == prefix[..] {
                         n = n.saturating_add(1);
                     }
@@ -783,17 +861,17 @@ impl EducationExecutor {
     /// `commit` after Policy B fee/nonce. `Err(code)` = semantic reject
     /// (dispatcher still charges fee + advances nonce under Policy B).
     pub fn validate(
-        &self,
+        view: &ExecutionView<'_, '_>,
         op: &EduParsed,
         sponsor: &Address,
         height: u64,
         ts: u64,
     ) -> Result<std::result::Result<PreparedBatch, u8>> {
-        Ok(self.validate_inner(op, sponsor, height, ts)?)
+        Ok(Self::validate_inner(view, op, sponsor, height, ts)?)
     }
 
     fn validate_inner(
-        &self,
+        view: &ExecutionView<'_, '_>,
         op: &EduParsed,
         sponsor: &Address,
         height: u64,
@@ -808,7 +886,7 @@ impl EducationExecutor {
 
         match op {
             EduParsed::CreateCatalog(d) => {
-                if self.exists(cf::EDU_CATALOG_ENTRIES, &d.catalog_id)? {
+                if Self::v_exists(view, cf::EDU_CATALOG_ENTRIES, &d.catalog_id)? {
                     reject!(F_DUPLICATE);
                 }
                 let rec = StoredCatalogEntry {
@@ -853,7 +931,7 @@ impl EducationExecutor {
             }
 
             EduParsed::UpdateCatalog(d) => {
-                let mut rec = match self.get_catalog(&d.catalog_id)? {
+                let mut rec = match Self::v_get_catalog(view, &d.catalog_id)? {
                     Some(r) => r,
                     None => reject!(F_CATALOG_NOT_FOUND),
                 };
@@ -883,7 +961,7 @@ impl EducationExecutor {
             }
 
             EduParsed::PublishCatalogContent(d) => {
-                let mut rec = match self.get_catalog(&d.catalog_id)? {
+                let mut rec = match Self::v_get_catalog(view, &d.catalog_id)? {
                     Some(r) => r,
                     None => reject!(F_CATALOG_NOT_FOUND),
                 };
@@ -931,7 +1009,7 @@ impl EducationExecutor {
             }
 
             EduParsed::DeprecateCatalog(d) => {
-                let mut rec = match self.get_catalog(&d.catalog_id)? {
+                let mut rec = match Self::v_get_catalog(view, &d.catalog_id)? {
                     Some(r) => r,
                     None => reject!(F_CATALOG_NOT_FOUND),
                 };
@@ -956,7 +1034,7 @@ impl EducationExecutor {
             }
 
             EduParsed::SupersedeCatalog(d) => {
-                let mut old = match self.get_catalog(&d.old_catalog_id)? {
+                let mut old = match Self::v_get_catalog(view, &d.old_catalog_id)? {
                     Some(r) => r,
                     None => reject!(F_CATALOG_NOT_FOUND),
                 };
@@ -966,7 +1044,7 @@ impl EducationExecutor {
                 if old.status == CAT_ARCHIVED {
                     reject!(F_CATALOG_WRONG_STATE);
                 }
-                if !self.exists(cf::EDU_CATALOG_ENTRIES, &d.new_catalog_id)? {
+                if !Self::v_exists(view, cf::EDU_CATALOG_ENTRIES, &d.new_catalog_id)? {
                     reject!(F_INVALID_REFERENCE);
                 }
                 old.superseded_by = Some(d.new_catalog_id);
@@ -979,7 +1057,7 @@ impl EducationExecutor {
             }
 
             EduParsed::ArchiveCatalog(d) => {
-                let mut rec = match self.get_catalog(&d.catalog_id)? {
+                let mut rec = match Self::v_get_catalog(view, &d.catalog_id)? {
                     Some(r) => r,
                     None => reject!(F_CATALOG_NOT_FOUND),
                 };
@@ -1005,10 +1083,10 @@ impl EducationExecutor {
             }
 
             EduParsed::CreateOffering(d) => {
-                if self.exists(cf::EDU_OFFERINGS, &d.offering_id)? {
+                if Self::v_exists(view, cf::EDU_OFFERINGS, &d.offering_id)? {
                     reject!(F_DUPLICATE);
                 }
-                let cat = match self.get_catalog(&d.catalog_id)? {
+                let cat = match Self::v_get_catalog(view, &d.catalog_id)? {
                     Some(c) => c,
                     None => reject!(F_CATALOG_NOT_FOUND),
                 };
@@ -1054,7 +1132,7 @@ impl EducationExecutor {
             }
 
             EduParsed::UpdateOffering(d) => {
-                let mut rec = match self.get_offering(&d.offering_id)? {
+                let mut rec = match Self::v_get_offering(view, &d.offering_id)? {
                     Some(r) => r,
                     None => reject!(F_OFFERING_NOT_FOUND),
                 };
@@ -1084,7 +1162,7 @@ impl EducationExecutor {
             }
 
             EduParsed::PublishContent(d) => {
-                let mut off = match self.get_offering(&d.offering_id)? {
+                let mut off = match Self::v_get_offering(view, &d.offering_id)? {
                     Some(o) => o,
                     None => reject!(F_OFFERING_NOT_FOUND),
                 };
@@ -1095,7 +1173,7 @@ impl EducationExecutor {
                     reject!(F_OFFERING_WRONG_STATE);
                 }
                 let ck = cat2(&d.offering_id, &d.content_id);
-                if self.exists(cf::EDU_CONTENT_ITEMS, &ck)? {
+                if Self::v_exists(view, cf::EDU_CONTENT_ITEMS, &ck)? {
                     reject!(F_DUPLICATE);
                 }
                 let item = StoredContentItem {
@@ -1114,7 +1192,7 @@ impl EducationExecutor {
             }
 
             EduParsed::AddAssessment(d) => {
-                let mut off = match self.get_offering(&d.offering_id)? {
+                let mut off = match Self::v_get_offering(view, &d.offering_id)? {
                     Some(o) => o,
                     None => reject!(F_OFFERING_NOT_FOUND),
                 };
@@ -1125,7 +1203,7 @@ impl EducationExecutor {
                     reject!(F_OFFERING_WRONG_STATE);
                 }
                 let ak = cat2(&d.offering_id, &d.assessment_id);
-                if self.exists(cf::EDU_ASSESSMENTS, &ak)? {
+                if Self::v_exists(view, cf::EDU_ASSESSMENTS, &ak)? {
                     reject!(F_DUPLICATE);
                 }
                 let a = StoredAssessment {
@@ -1152,7 +1230,7 @@ impl EducationExecutor {
             }
 
             EduParsed::UpdateAssessment(d) => {
-                let off = match self.get_offering(&d.offering_id)? {
+                let off = match Self::v_get_offering(view, &d.offering_id)? {
                     Some(o) => o,
                     None => reject!(F_OFFERING_NOT_FOUND),
                 };
@@ -1162,7 +1240,7 @@ impl EducationExecutor {
                 if !offering_mutable(off.status) {
                     reject!(F_OFFERING_WRONG_STATE);
                 }
-                let mut a = match self.get_assessment(&d.offering_id, &d.assessment_id)? {
+                let mut a = match Self::v_get_assessment(view, &d.offering_id, &d.assessment_id)? {
                     Some(a) => a,
                     None => reject!(F_ASSESSMENT_NOT_FOUND),
                 };
@@ -1189,7 +1267,7 @@ impl EducationExecutor {
             }
 
             EduParsed::OpenEnrollment(d) => {
-                let s = self.set_offering_status(
+                let s = Self::v_set_offering_status(view, 
                     &d.offering_id,
                     sponsor,
                     &[OFF_DRAFT, OFF_ACTIVE, OFF_ENROLLMENT_CLOSED],
@@ -1202,7 +1280,7 @@ impl EducationExecutor {
                 }
             }
             EduParsed::CloseEnrollment(d) => {
-                let s = self.set_offering_status(
+                let s = Self::v_set_offering_status(view, 
                     &d.offering_id,
                     sponsor,
                     &[OFF_ACTIVE],
@@ -1215,7 +1293,7 @@ impl EducationExecutor {
                 }
             }
             EduParsed::FinalizeCourse(d) => {
-                let s = self.set_offering_status(
+                let s = Self::v_set_offering_status(view, 
                     &d.offering_id,
                     sponsor,
                     &[OFF_ENROLLMENT_CLOSED],
@@ -1228,7 +1306,7 @@ impl EducationExecutor {
                 }
             }
             EduParsed::ArchiveOffering(d) => {
-                let s = self.set_offering_status(
+                let s = Self::v_set_offering_status(view, 
                     &d.offering_id,
                     sponsor,
                     &[OFF_COMPLETED],
@@ -1251,7 +1329,7 @@ impl EducationExecutor {
                     }
                     _ => reject!(F_MALFORMED),
                 };
-                let s = self.set_offering_status(
+                let s = Self::v_set_offering_status(view, 
                     &d.offering_id,
                     sponsor,
                     allowed,
@@ -1265,7 +1343,7 @@ impl EducationExecutor {
             }
 
             EduParsed::LinkEnrollment(d) => {
-                let off = match self.get_offering(&d.offering_id)? {
+                let off = match Self::v_get_offering(view, &d.offering_id)? {
                     Some(o) => o,
                     None => reject!(F_OFFERING_NOT_FOUND),
                 };
@@ -1283,7 +1361,7 @@ impl EducationExecutor {
                     reject!(F_INVALID_REFERENCE);
                 }
                 let lk = cat2(&d.offering_id, &d.student_commitment);
-                if self.exists(cf::EDU_ENROLLMENT_LINKS, &lk)? {
+                if Self::v_exists(view, cf::EDU_ENROLLMENT_LINKS, &lk)? {
                     reject!(F_DUPLICATE);
                 }
                 let link = StoredEnrollmentLink {
@@ -1301,7 +1379,7 @@ impl EducationExecutor {
             }
 
             EduParsed::Submit(d, is_exam) => {
-                let off = match self.get_offering(&d.offering_id)? {
+                let off = match Self::v_get_offering(view, &d.offering_id)? {
                     Some(o) => o,
                     None => reject!(F_OFFERING_NOT_FOUND),
                 };
@@ -1312,7 +1390,7 @@ impl EducationExecutor {
                 if off.status != OFF_ACTIVE && off.status != OFF_ENROLLMENT_CLOSED {
                     reject!(F_OFFERING_WRONG_STATE);
                 }
-                let a = match self.get_assessment(&d.offering_id, &d.assessment_id)? {
+                let a = match Self::v_get_assessment(view, &d.offering_id, &d.assessment_id)? {
                     Some(a) => a,
                     None => reject!(F_ASSESSMENT_NOT_FOUND),
                 };
@@ -1326,7 +1404,7 @@ impl EducationExecutor {
                 }
                 // Enrollment: student_commitment must have a link.
                 let lk = cat2(&d.offering_id, &d.student_commitment);
-                if !self.exists(cf::EDU_ENROLLMENT_LINKS, &lk)? {
+                if !Self::v_exists(view, cf::EDU_ENROLLMENT_LINKS, &lk)? {
                     reject!(F_NOT_ENROLLED);
                 }
                 if d.enrollment_ref == [0u8; 32] {
@@ -1338,7 +1416,7 @@ impl EducationExecutor {
                 }
                 let late = ts > a.due_at;
                 // Attempts.
-                let used = self.count_attempts(
+                let used = Self::v_count_attempts(view, 
                     &d.offering_id,
                     &d.assessment_id,
                     &d.student_commitment,
@@ -1352,7 +1430,7 @@ impl EducationExecutor {
                 subk.extend_from_slice(&d.assessment_id);
                 subk.extend_from_slice(&d.student_commitment);
                 subk.extend_from_slice(&attempt.to_be_bytes());
-                if self.exists(cf::EDU_SUBMISSIONS, &subk)? {
+                if Self::v_exists(view, cf::EDU_SUBMISSIONS, &subk)? {
                     reject!(F_DUPLICATE);
                 }
                 let rec = StoredSubmissionReceipt {
@@ -1380,7 +1458,7 @@ impl EducationExecutor {
             }
 
             EduParsed::Grade(d) => {
-                let off = match self.get_offering(&d.offering_id)? {
+                let off = match Self::v_get_offering(view, &d.offering_id)? {
                     Some(o) => o,
                     None => reject!(F_OFFERING_NOT_FOUND),
                 };
@@ -1391,14 +1469,12 @@ impl EducationExecutor {
                 if off.owner != *sponsor {
                     reject!(F_NOT_AUTHORIZED);
                 }
-                if self
-                    .get_assessment(&d.offering_id, &d.assessment_id)?
-                    .is_none()
+                if Self::v_get_assessment(view, &d.offering_id, &d.assessment_id)?.is_none()
                 {
                     reject!(F_ASSESSMENT_NOT_FOUND);
                 }
                 let lk = cat2(&d.offering_id, &d.student_commitment);
-                if !self.exists(cf::EDU_ENROLLMENT_LINKS, &lk)? {
+                if !Self::v_exists(view, cf::EDU_ENROLLMENT_LINKS, &lk)? {
                     reject!(F_NOT_ENROLLED);
                 }
                 let mut gk = Vec::with_capacity(96);
@@ -1406,7 +1482,7 @@ impl EducationExecutor {
                 gk.extend_from_slice(&d.assessment_id);
                 gk.extend_from_slice(&d.student_commitment);
                 // Re-grade allowed unless finalized.
-                if let Some(b) = self.db.get(cf::EDU_GRADES, &gk)? {
+                if let Some(b) = view.get(cf::EDU_GRADES, &gk)? {
                     let prev: StoredGradeRecord = bincode::deserialize(&b)
                         .map_err(|e| StateError::SerializationError(e.to_string()))?;
                     if prev.finalized {
@@ -1430,7 +1506,7 @@ impl EducationExecutor {
 
             EduParsed::FinalizeGrade(d) => {
                 // Owner-gated, fail-closed (same as Grade).
-                let off = match self.get_offering(&d.offering_id)? {
+                let off = match Self::v_get_offering(view, &d.offering_id)? {
                     Some(o) => o,
                     None => reject!(F_OFFERING_NOT_FOUND),
                 };
@@ -1441,7 +1517,7 @@ impl EducationExecutor {
                 gk.extend_from_slice(&d.offering_id);
                 gk.extend_from_slice(&d.assessment_id);
                 gk.extend_from_slice(&d.student_commitment);
-                let mut rec: StoredGradeRecord = match self.db.get(cf::EDU_GRADES, &gk)? {
+                let mut rec: StoredGradeRecord = match view.get(cf::EDU_GRADES, &gk)? {
                     Some(b) => bincode::deserialize(&b)
                         .map_err(|e| StateError::SerializationError(e.to_string()))?,
                     None => reject!(F_ASSESSMENT_NOT_FOUND),
@@ -1458,8 +1534,8 @@ impl EducationExecutor {
         Ok(Ok(pb))
     }
 
-    fn set_offering_status(
-        &self,
+    fn v_set_offering_status(
+        view: &ExecutionView<'_, '_>,
         id: &[u8; 32],
         sponsor: &Address,
         allowed: &[u8],
@@ -1467,7 +1543,7 @@ impl EducationExecutor {
         height: u64,
         pb: &mut PreparedBatch,
     ) -> Result<std::result::Result<(), u8>> {
-        let mut rec = match self.get_offering(id)? {
+        let mut rec = match Self::v_get_offering(view, id)? {
             Some(r) => r,
             None => return Ok(Err(F_OFFERING_NOT_FOUND)),
         };
@@ -1490,17 +1566,24 @@ impl EducationExecutor {
         Ok(Ok(()))
     }
 
-    /// Apply a validated write set atomically. Called by the dispatcher
-    /// AFTER Policy B fee/nonce mutation on the success path.
-    pub fn commit(&self, pb: PreparedBatch) -> Result<()> {
-        let mut batch = self.db.batch();
+    /// Stage a validated write set into the block's candidate. Called by the
+    /// dispatcher AFTER Policy B fee/nonce mutation on the success path.
+    ///
+    /// Takes an `ExecutionView`, not `&self`: this write set belongs to the
+    /// block being executed, so a block that is later rejected leaves none of
+    /// it behind. Nothing here touches the committed database.
+    ///
+    /// Atomicity is now the candidate's rather than a private batch's. The
+    /// whole write set still applies or does not — it simply does so as part of
+    /// the one canonical batch the publisher commits, instead of as a separate
+    /// batch that could succeed while the block around it failed.
+    pub fn stage(view: &mut ExecutionView<'_, '_>, pb: PreparedBatch) -> Result<()> {
         for (cf_name, k) in &pb.dels {
-            batch.delete(cf_name, k)?;
+            view.delete(cf_name, k)?;
         }
         for (cf_name, k, v) in &pb.puts {
-            batch.put(cf_name, k, v)?;
+            view.put(cf_name, k, v)?;
         }
-        batch.commit()?;
         Ok(())
     }
 }

@@ -19,6 +19,23 @@
 //! proof: code could still reach the database through a helper this pattern does
 //! not name. What makes the boundary real is threading `ExecutionView` through
 //! execution; this keeps the gap from widening while that happens.
+//!
+//! # The budget counts writes only
+//!
+//! `db.put`/`db.delete`/`db.batch` are what the ratchet can see, so a file can
+//! reach zero here while its execution path still *reads* the committed
+//! database. That is not a cosmetic gap. A subsystem whose writes are buffered
+//! into the overlay but whose reads still go to `Database` no longer sees its
+//! own earlier writes within a block: read-your-own-writes breaks, and the
+//! block computes a state root against the parent's state instead of the
+//! candidate's. Migrating writes without reads is therefore a correctness
+//! regression, not a partial improvement — reads and writes must move together.
+//!
+//! Nothing in a *count* can express that, so it is enforced by type instead:
+//! `migrated_execution_paths_take_no_self_receiver` below requires the
+//! execution-path functions of a migrated subsystem to be associated functions.
+//! Without a `self` receiver there is no `self.db` to reach, so the compiler,
+//! not a regex, rules out a committed read on those paths.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -38,7 +55,6 @@ fn budget() -> BTreeMap<&'static str, usize> {
         ("inference_settlement_executor.rs", 2),
         ("beacon_store.rs", 2),
         ("state.rs", 1),
-        ("education_executor.rs", 1),
         ("inference_attestation_executor.rs", 1),
     ])
 }
@@ -81,27 +97,6 @@ fn state_src() -> &'static Path {
 /// Names are returned relative to `src/`, so a nested file appears as
 /// `foo/bar.rs` and cannot collide with a top-level entry in the budget.
 fn rust_files() -> Vec<(String, String)> {
-    fn walk(dir: &Path, prefix: &str, out: &mut Vec<(String, String)>) {
-        for entry in std::fs::read_dir(dir).expect("read source directory") {
-            let path = entry.expect("dir entry").path();
-            let name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .expect("utf-8 filename")
-                .to_string();
-            let rel = if prefix.is_empty() {
-                name.clone()
-            } else {
-                format!("{prefix}/{name}")
-            };
-            if path.is_dir() {
-                walk(&path, &rel, out);
-            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-                let src = std::fs::read_to_string(&path).expect("read source");
-                out.push((rel, src));
-            }
-        }
-    }
     rust_files_in(&state_src().join("src"))
 }
 
@@ -327,4 +322,127 @@ fn acceptance_takes_no_hash_from_its_caller() {
             "{name} must take the block:\n{sig}"
         );
     }
+}
+
+/// Execution-path functions of a migrated subsystem take no `self` receiver.
+///
+/// This is the read half of the migration, which the write budget cannot see.
+/// The subsystem type stays alive for RPC — `EducationExecutor::get_offering`
+/// and friends must keep reading committed state, because admission and RPC
+/// answer about the published chain, not about a candidate block. What must not
+/// survive is a `&self` on the block-execution path: that receiver carries
+/// `Arc<Database>`, and any read through it silently bypasses the block's own
+/// staged writes.
+///
+/// Dropping the receiver is what makes that unreachable rather than merely
+/// discouraged — an associated function has no `self` to read from, so the
+/// remaining way in is an `ExecutionView` parameter.
+/// The parameter list of `sig` in `src`, from the opening paren to its match.
+fn params_of<'a>(src: &'a str, sig: &str) -> Option<&'a str> {
+    let at = src.find(sig)?;
+    let open = at + sig.len() - 1;
+    let mut depth = 0usize;
+    for (i, c) in src[open..].char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&src[open + 1..open + i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn takes_self_receiver(params: &str) -> bool {
+    params
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .any(|t| t == "self")
+}
+
+#[test]
+fn migrated_execution_paths_take_no_self_receiver() {
+    /// `(file under src/, function signature prefix)` for every function that
+    /// runs during block execution in a subsystem whose writes are migrated.
+    /// Add a row here whenever a subsystem's writes move to the overlay.
+    const EXECUTION_FNS: &[(&str, &str)] = &[
+        ("education_executor.rs", "fn validate("),
+        ("education_executor.rs", "fn validate_inner("),
+        ("education_executor.rs", "fn v_set_offering_status("),
+        ("education_executor.rs", "fn stage("),
+    ];
+
+    let files = rust_files();
+    for (file, sig) in EXECUTION_FNS {
+        let (_, src) = files
+            .iter()
+            .find(|(name, _)| name == file)
+            .unwrap_or_else(|| panic!("{file} is listed in EXECUTION_FNS but is not under src/"));
+
+        let params = params_of(src, sig).unwrap_or_else(|| {
+            panic!(
+                "{file} no longer defines `{sig}`. If it was renamed, update this \
+                 list; do not delete the row — that would drop the only check \
+                 that this path cannot read committed state."
+            )
+        });
+
+        assert!(
+            !takes_self_receiver(params),
+            "{file} `{sig}` takes a `self` receiver. That receiver holds \
+             `Arc<Database>`, so this execution path can read committed state \
+             and miss the block's own staged writes. Take \
+             `&ExecutionView<'_, '_>` instead and leave the `&self` accessor \
+             for RPC.\n  parameters: {params}"
+        );
+        assert!(
+            params.contains("ExecutionView"),
+            "{file} `{sig}` runs during block execution but takes no \
+             `ExecutionView`. Its reads and writes cannot be attributed to the \
+             candidate block.\n  parameters: {params}"
+        );
+    }
+}
+
+/// The receiver check is only worth having if it fires. A guard that has never
+/// been shown to fail is an assertion about itself.
+#[test]
+fn the_receiver_check_detects_a_self_receiver() {
+    const MIGRATED: &str = r#"
+    fn validate(
+        view: &ExecutionView<'_, '_>,
+        op: &EduParsed,
+    ) -> Result<()> { }
+"#;
+    const NOT_MIGRATED: &str = r#"
+    fn validate(
+        &self,
+        op: &EduParsed,
+    ) -> Result<()> { }
+"#;
+    // A nested paren in the parameter list must not end the scan early.
+    const NESTED: &str = "fn stage(view: &mut ExecutionView<'_, '_>, f: fn(&self) -> u8) {}";
+
+    let migrated = params_of(MIGRATED, "fn validate(").expect("signature found");
+    assert!(!takes_self_receiver(migrated));
+    assert!(migrated.contains("ExecutionView"));
+
+    let not_migrated = params_of(NOT_MIGRATED, "fn validate(").expect("signature found");
+    assert!(
+        takes_self_receiver(not_migrated),
+        "the check missed a `&self` receiver: {not_migrated}"
+    );
+    assert!(!not_migrated.contains("ExecutionView"));
+
+    assert!(takes_self_receiver(
+        params_of(NESTED, "fn stage(").expect("signature found")
+    ));
+
+    // `self_id` is not a receiver.
+    assert!(!takes_self_receiver("self_id: u64, myself: u8"));
+
+    assert!(params_of("fn other() {}", "fn validate(").is_none());
 }
