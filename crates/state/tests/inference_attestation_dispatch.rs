@@ -56,6 +56,7 @@ fn dispatch_pre_activation_rejects() {
     // arm must return Failed(50), fee_paid: 0, and leave sender balance,
     // sender nonce, and the CF untouched.
     let (state, db, _dir, executor) = setup_with_params(ChainParams::with_v2_enabled());
+    let mut candidate = common::candidate(&db);
     let sender = KeyPair::generate();
     let proposer = KeyPair::generate();
     fund(&state, &sender, 1_000_000_000);
@@ -65,7 +66,7 @@ fn dispatch_pre_activation_rejects() {
     let digest = sample_digest("pre-activation-vec");
     let tx = build_signed_attestation_tx(&sender, 0, 1_000_000, digest.clone(), false);
     let result = executor
-        .execute_tx(&tx, &proposer.address(), 1, 0)
+        .execute_tx(&mut candidate.view(), &tx, &proposer.address(), 1, 0)
         .expect("execute_tx returned Err");
 
     assert!(matches!(result.status, TxStatus::Failed(50)));
@@ -83,6 +84,7 @@ fn dispatch_pre_activation_rejects() {
 #[test]
 fn dispatch_success_path() {
     let (state, db, _dir, executor) = setup_with_params(params_omninode_enabled());
+    let mut candidate = common::candidate(&db);
     let sender = KeyPair::generate();
     let proposer = KeyPair::generate();
     let fee: u128 = 1_000_000;
@@ -91,7 +93,7 @@ fn dispatch_success_path() {
     let digest = sample_digest("success-vec");
     let tx = build_signed_attestation_tx(&sender, 0, fee, digest.clone(), false);
     let result = executor
-        .execute_tx(&tx, &proposer.address(), 1, 0)
+        .execute_tx(&mut candidate.view(), &tx, &proposer.address(), 1, 0)
         .expect("execute_tx returned Err");
 
     assert!(
@@ -128,6 +130,7 @@ fn dispatch_success_path() {
 #[test]
 fn dispatch_duplicate_after_success_rejects() {
     let (state, db, _dir, executor) = setup_with_params(params_omninode_enabled());
+    let mut candidate = common::candidate(&db);
     let sender = KeyPair::generate();
     let proposer = KeyPair::generate();
     let fee: u128 = 1_000_000;
@@ -137,7 +140,7 @@ fn dispatch_duplicate_after_success_rejects() {
 
     // First submission succeeds.
     let tx1 = build_signed_attestation_tx(&sender, 0, fee, digest.clone(), false);
-    let r1 = executor.execute_tx(&tx1, &proposer.address(), 1, 0).unwrap();
+    let r1 = executor.execute_tx(&mut candidate.view(), &tx1, &proposer.address(), 1, 0).unwrap();
     assert!(matches!(r1.status, TxStatus::Success));
     let post_success_balance = state.get_balance(&sender.address()).unwrap();
     let post_success_nonce = state.get_nonce(&sender.address()).unwrap();
@@ -149,7 +152,7 @@ fn dispatch_duplicate_after_success_rejects() {
     // rejected at the CF dedup step with Failed(51), no further fee or
     // nonce mutation, no CF overwrite.
     let tx2 = build_signed_attestation_tx(&sender, 1, fee, digest.clone(), false);
-    let r2 = executor.execute_tx(&tx2, &proposer.address(), 2, 0).unwrap();
+    let r2 = executor.execute_tx(&mut candidate.view(), &tx2, &proposer.address(), 2, 0).unwrap();
     assert!(
         matches!(r2.status, TxStatus::Failed(51)),
         "expected Failed(51) DuplicateAttestation, got {:?}",
@@ -166,6 +169,7 @@ fn dispatch_duplicate_after_success_rejects() {
 #[test]
 fn dispatch_invalid_inner_signature_rejects() {
     let (state, db, _dir, executor) = setup_with_params(params_omninode_enabled());
+    let mut candidate = common::candidate(&db);
     let sender = KeyPair::generate();
     let proposer = KeyPair::generate();
     let fee: u128 = 1_000_000;
@@ -178,7 +182,7 @@ fn dispatch_invalid_inner_signature_rejects() {
     // the corrupted inner sig as a payload byte), but the inner Stage 6
     // verify under DOMAIN_TAG must reject.
     let tx = build_signed_attestation_tx(&sender, 0, fee, digest.clone(), true);
-    let result = executor.execute_tx(&tx, &proposer.address(), 1, 0).unwrap();
+    let result = executor.execute_tx(&mut candidate.view(), &tx, &proposer.address(), 1, 0).unwrap();
 
     assert!(
         matches!(result.status, TxStatus::Failed(52)),
@@ -195,6 +199,7 @@ fn dispatch_invalid_inner_signature_rejects() {
 #[test]
 fn dispatch_insufficient_balance_for_fee() {
     let (state, db, _dir, executor) = setup_with_params(params_omninode_enabled());
+    let mut candidate = common::candidate(&db);
     let sender = KeyPair::generate();
     let proposer = KeyPair::generate();
     let fee: u128 = 1_000_000;
@@ -206,7 +211,7 @@ fn dispatch_insufficient_balance_for_fee() {
 
     let digest = sample_digest("balance-vec");
     let tx = build_signed_attestation_tx(&sender, 0, fee, digest.clone(), false);
-    let result = executor.execute_tx(&tx, &proposer.address(), 1, 0).unwrap();
+    let result = executor.execute_tx(&mut candidate.view(), &tx, &proposer.address(), 1, 0).unwrap();
 
     // Outer balance validation at executor.rs:1108-1114 returns
     // `InsufficientBalance` for transfers; for fee-only attestations the
@@ -233,7 +238,8 @@ fn dispatch_stored_record_uses_omninode_domain_tag() {
     // assertion for the storage layer, separate from the Phase 1
     // fixture parity tests which lock the bytes against OmniNode's
     // reference vectors.
-    let (state, _db, _dir, executor) = setup_with_params(params_omninode_enabled());
+    let (state, db, _dir, executor) = setup_with_params(params_omninode_enabled());
+    let mut candidate = common::candidate(&db);
     let sender = KeyPair::generate();
     let proposer = KeyPair::generate();
     let fee: u128 = 1_000_000;
@@ -241,7 +247,7 @@ fn dispatch_stored_record_uses_omninode_domain_tag() {
 
     let digest = sample_digest("domain-tag-roundtrip");
     let tx = build_signed_attestation_tx(&sender, 0, fee, digest.clone(), false);
-    let result = executor.execute_tx(&tx, &proposer.address(), 1, 0).unwrap();
+    let result = executor.execute_tx(&mut candidate.view(), &tx, &proposer.address(), 1, 0).unwrap();
     assert!(matches!(result.status, TxStatus::Success));
 
     // Recompute the signing input from the digest the chain stored and
@@ -262,6 +268,7 @@ fn dispatch_populates_session_index() {
     // verifiers for a session. Prove the dispatcher actually maintains
     // that index by querying it after execute_tx.
     let (state, db, _dir, executor) = setup_with_params(params_omninode_enabled());
+    let mut candidate = common::candidate(&db);
 
     let sender_a = KeyPair::generate();
     let sender_b = KeyPair::generate();
@@ -274,8 +281,8 @@ fn dispatch_populates_session_index() {
     let tx_a = build_signed_attestation_tx(&sender_a, 0, fee, sample_digest(session_id), false);
     let tx_b = build_signed_attestation_tx(&sender_b, 0, fee, sample_digest(session_id), false);
 
-    let r_a = executor.execute_tx(&tx_a, &proposer.address(), 1, 0).unwrap();
-    let r_b = executor.execute_tx(&tx_b, &proposer.address(), 2, 0).unwrap();
+    let r_a = executor.execute_tx(&mut candidate.view(), &tx_a, &proposer.address(), 1, 0).unwrap();
+    let r_b = executor.execute_tx(&mut candidate.view(), &tx_b, &proposer.address(), 2, 0).unwrap();
     assert!(matches!(r_a.status, TxStatus::Success));
     assert!(matches!(r_b.status, TxStatus::Success));
 
@@ -340,6 +347,7 @@ fn build_sponsored_tx(
 #[test]
 fn v2_sponsored_succeeds_and_stores_under_verifier_not_sponsor() {
     let (state, db, _dir, executor) = setup_with_params(params_sponsored_enabled());
+    let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let verifier = KeyPair::generate();
     let proposer = KeyPair::generate();
@@ -350,7 +358,7 @@ fn v2_sponsored_succeeds_and_stores_under_verifier_not_sponsor() {
 
     let digest = sample_digest("sponsored-vec");
     let tx = build_sponsored_tx(&sponsor, &verifier, 0, 1_000, digest.clone(), false, None);
-    let r = executor.execute_tx(&tx, &proposer.address(), 1, 0).unwrap();
+    let r = executor.execute_tx(&mut candidate.view(), &tx, &proposer.address(), 1, 0).unwrap();
     assert!(r.status.is_success(), "sponsored attestation should succeed: {:?}", r.status);
 
     // Sponsor paid the fee + nonce; verifier untouched.
@@ -375,6 +383,7 @@ fn v2_sponsored_succeeds_and_stores_under_verifier_not_sponsor() {
 fn v2_gate_closed_is_free_no_mutation() {
     // omninode ON, sponsored sub-gate OFF → Failed(54), free, nothing written.
     let (state, db, _dir, executor) = setup_with_params(params_omninode_enabled());
+    let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let verifier = KeyPair::generate();
     let proposer = KeyPair::generate();
@@ -383,7 +392,7 @@ fn v2_gate_closed_is_free_no_mutation() {
 
     let digest = sample_digest("gate-closed-vec");
     let tx = build_sponsored_tx(&sponsor, &verifier, 0, 1_000, digest.clone(), false, None);
-    let r = executor.execute_tx(&tx, &proposer.address(), 1, 0).unwrap();
+    let r = executor.execute_tx(&mut candidate.view(), &tx, &proposer.address(), 1, 0).unwrap();
     assert!(matches!(r.status, TxStatus::Failed(54)), "got {:?}", r.status);
     assert_eq!(r.fee_paid, 0, "sponsored gate-closed is free");
     assert_eq!(state.get_balance(&sponsor.address()).unwrap(), bal0, "no fee");
@@ -394,7 +403,8 @@ fn v2_gate_closed_is_free_no_mutation() {
 
 #[test]
 fn v2_bad_verifier_signature_52() {
-    let (state, _db, _dir, executor) = setup_with_params(params_sponsored_enabled());
+    let (state, db, _dir, executor) = setup_with_params(params_sponsored_enabled());
+    let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let verifier = KeyPair::generate();
     let other = KeyPair::generate();
@@ -404,17 +414,18 @@ fn v2_bad_verifier_signature_52() {
 
     // Tampered inner signature → 52.
     let t = build_sponsored_tx(&sponsor, &verifier, 0, 1_000, digest.clone(), true, None);
-    assert!(matches!(executor.execute_tx(&t, &proposer.address(), 1, 0).unwrap().status, TxStatus::Failed(52)));
+    assert!(matches!(executor.execute_tx(&mut candidate.view(), &t, &proposer.address(), 1, 0).unwrap().status, TxStatus::Failed(52)));
 
     // Valid sig by `verifier` but envelope claims a DIFFERENT (valid) pubkey →
     // the sponsor cannot swap in another verifier: sig no longer matches → 52.
     let m = build_sponsored_tx(&sponsor, &verifier, 0, 1_000, digest, false, Some(*other.public_key().as_bytes()));
-    assert!(matches!(executor.execute_tx(&m, &proposer.address(), 1, 0).unwrap().status, TxStatus::Failed(52)));
+    assert!(matches!(executor.execute_tx(&mut candidate.view(), &m, &proposer.address(), 1, 0).unwrap().status, TxStatus::Failed(52)));
 }
 
 #[test]
 fn v2_malformed_envelope_oversize_session_55() {
-    let (state, _db, _dir, executor) = setup_with_params(params_sponsored_enabled());
+    let (state, db, _dir, executor) = setup_with_params(params_sponsored_enabled());
+    let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let verifier = KeyPair::generate();
     let proposer = KeyPair::generate();
@@ -424,14 +435,15 @@ fn v2_malformed_envelope_oversize_session_55() {
     let mut digest = sample_digest("x");
     digest.session_id = "a".repeat(300);
     let tx = build_sponsored_tx(&sponsor, &verifier, 0, 1_000, digest, false, None);
-    let r = executor.execute_tx(&tx, &proposer.address(), 1, 0).unwrap();
+    let r = executor.execute_tx(&mut candidate.view(), &tx, &proposer.address(), 1, 0).unwrap();
     assert!(matches!(r.status, TxStatus::Failed(55)), "got {:?}", r.status);
     assert_eq!(r.fee_paid, 0, "malformed envelope pays nothing");
 }
 
 #[test]
 fn v2_duplicate_and_cross_version_dedup_51() {
-    let (state, _db, _dir, executor) = setup_with_params(params_sponsored_enabled());
+    let (state, db, _dir, executor) = setup_with_params(params_sponsored_enabled());
+    let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let verifier = KeyPair::generate();
     let proposer = KeyPair::generate();
@@ -441,13 +453,13 @@ fn v2_duplicate_and_cross_version_dedup_51() {
 
     // First v2 submission succeeds.
     let a = build_sponsored_tx(&sponsor, &verifier, 0, 1_000, digest.clone(), false, None);
-    assert!(executor.execute_tx(&a, &proposer.address(), 1, 0).unwrap().status.is_success());
+    assert!(executor.execute_tx(&mut candidate.view(), &a, &proposer.address(), 1, 0).unwrap().status.is_success());
     // Second v2 for the same (session, verifier) → 51.
     let b = build_sponsored_tx(&sponsor, &verifier, 1, 1_000, digest.clone(), false, None);
-    assert!(matches!(executor.execute_tx(&b, &proposer.address(), 2, 0).unwrap().status, TxStatus::Failed(51)));
+    assert!(matches!(executor.execute_tx(&mut candidate.view(), &b, &proposer.address(), 2, 0).unwrap().status, TxStatus::Failed(51)));
     // A v1 self-submission by the verifier for the SAME pair also → 51 (shared keyspace).
     let v1 = build_signed_attestation_tx(&verifier, 0, 1_000, digest, false);
-    assert!(matches!(executor.execute_tx(&v1, &proposer.address(), 3, 0).unwrap().status, TxStatus::Failed(51)));
+    assert!(matches!(executor.execute_tx(&mut candidate.view(), &v1, &proposer.address(), 3, 0).unwrap().status, TxStatus::Failed(51)));
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -457,6 +469,7 @@ fn v2_duplicate_and_cross_version_dedup_51() {
 #[test]
 fn v2_sponsored_writes_sponsor_metadata() {
     let (state, db, _dir, executor) = setup_with_params(params_sponsored_enabled());
+    let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let verifier = KeyPair::generate();
     let proposer = KeyPair::generate();
@@ -464,7 +477,7 @@ fn v2_sponsored_writes_sponsor_metadata() {
 
     let digest = sample_digest("sponsor-meta-vec");
     let tx = build_sponsored_tx(&sponsor, &verifier, 0, 1_000, digest.clone(), false, None);
-    let r = executor.execute_tx(&tx, &proposer.address(), 7, 0).unwrap();
+    let r = executor.execute_tx(&mut candidate.view(), &tx, &proposer.address(), 7, 0).unwrap();
     assert!(r.status.is_success(), "sponsored attestation should succeed: {:?}", r.status);
 
     // Sponsor metadata is keyed by the VERIFIER key (same as the record), and
@@ -486,13 +499,14 @@ fn v2_sponsored_writes_sponsor_metadata() {
 #[test]
 fn v1_direct_leaves_sponsor_metadata_absent() {
     let (state, db, _dir, executor) = setup_with_params(params_omninode_enabled());
+    let mut candidate = common::candidate(&db);
     let verifier = KeyPair::generate();
     let proposer = KeyPair::generate();
     fund(&state, &verifier, 1_000_000_000);
 
     let digest = sample_digest("v1-no-sponsor-vec");
     let tx = build_signed_attestation_tx(&verifier, 0, 1_000, digest.clone(), false);
-    let r = executor.execute_tx(&tx, &proposer.address(), 1, 0).unwrap();
+    let r = executor.execute_tx(&mut candidate.view(), &tx, &proposer.address(), 1, 0).unwrap();
     assert!(r.status.is_success(), "v1 direct attestation should succeed: {:?}", r.status);
 
     // The record exists but no sponsor metadata is written for a direct submission.
@@ -507,6 +521,7 @@ fn v1_direct_leaves_sponsor_metadata_absent() {
 #[test]
 fn v2_duplicate_does_not_overwrite_sponsor_metadata() {
     let (state, db, _dir, executor) = setup_with_params(params_sponsored_enabled());
+    let mut candidate = common::candidate(&db);
     let sponsor_a = KeyPair::generate();
     let sponsor_b = KeyPair::generate();
     let verifier = KeyPair::generate();
@@ -517,7 +532,7 @@ fn v2_duplicate_does_not_overwrite_sponsor_metadata() {
     let digest = sample_digest("dup-sponsor-vec");
     // First sponsored submission by sponsor A succeeds and records A.
     let a = build_sponsored_tx(&sponsor_a, &verifier, 0, 1_000, digest.clone(), false, None);
-    assert!(executor.execute_tx(&a, &proposer.address(), 1, 0).unwrap().status.is_success());
+    assert!(executor.execute_tx(&mut candidate.view(), &a, &proposer.address(), 1, 0).unwrap().status.is_success());
     let vkey = inference_attestation_key(&digest.session_id, &verifier.address());
     assert_eq!(
         InferenceAttestationExecutor::new(db.clone()).get_sponsor(&vkey).unwrap().unwrap().sponsor,
@@ -527,7 +542,7 @@ fn v2_duplicate_does_not_overwrite_sponsor_metadata() {
     // A second sponsored submission for the same (session, verifier) by sponsor B
     // is rejected (51) and MUST NOT overwrite the recorded sponsor.
     let b = build_sponsored_tx(&sponsor_b, &verifier, 0, 1_000, digest, false, None);
-    assert!(matches!(executor.execute_tx(&b, &proposer.address(), 2, 0).unwrap().status, TxStatus::Failed(51)));
+    assert!(matches!(executor.execute_tx(&mut candidate.view(), &b, &proposer.address(), 2, 0).unwrap().status, TxStatus::Failed(51)));
     assert_eq!(
         InferenceAttestationExecutor::new(db.clone()).get_sponsor(&vkey).unwrap().unwrap().sponsor,
         sponsor_a.address(),
@@ -544,6 +559,7 @@ fn sponsored_attestation_settlement_identity_is_verifier_only() {
     // cannot, regardless of the additive sponsor metadata. The sponsor CF is a
     // separate keyspace settlement never reads.
     let (state, db, _dir, executor) = setup_with_params(params_sponsored_enabled());
+    let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let verifier = KeyPair::generate();
     let proposer = KeyPair::generate();
@@ -551,7 +567,7 @@ fn sponsored_attestation_settlement_identity_is_verifier_only() {
 
     let digest = sample_digest("settlement-identity-vec");
     let tx = build_sponsored_tx(&sponsor, &verifier, 0, 1_000, digest.clone(), false, None);
-    assert!(executor.execute_tx(&tx, &proposer.address(), 1, 0).unwrap().status.is_success());
+    assert!(executor.execute_tx(&mut candidate.view(), &tx, &proposer.address(), 1, 0).unwrap().status.is_success());
 
     let verifier_key = inference_attestation_key(&digest.session_id, &verifier.address());
     let sponsor_key = inference_attestation_key(&digest.session_id, &sponsor.address());

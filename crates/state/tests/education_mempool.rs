@@ -262,10 +262,20 @@ fn committed_duplicate_rejected() {
     fund(&state, &sponsor, 100 * FEE);
     let (_c, data) = mk_catalog([2u8; 32], "CS", "201", 1);
     let commit_tx = edu_tx(&sponsor, 0, EducationStandard::CourseCatalog, catalog_op::CREATE_CATALOG_ENTRY, data.clone());
-    assert!(matches!(
-        ex.execute_tx(&commit_tx, &proposer.address(), 1, 0).unwrap().status,
-        TxStatus::Success
-    ));
+    // PUBLISHED, not merely executed. Education writes go to the block's
+    // candidate now, and admission answers about the published chain — so a
+    // catalog that only ever existed in a candidate is one admission must still
+    // accept. Executing without publishing here would make this test pass while
+    // asserting nothing.
+    let receipts = common::publish_block(
+        &state,
+        &ex,
+        1,
+        proposer.public_key().as_bytes(),
+        vec![commit_tx],
+        &[],
+    );
+    assert!(matches!(receipts[0].status, TxStatus::Success));
 
     let (mp, _h) = mempool_with(db, params, 5);
     let dup = edu_tx(&sponsor, 1, EducationStandard::CourseCatalog, catalog_op::CREATE_CATALOG_ENTRY, data);
@@ -314,9 +324,17 @@ fn submit_not_enrolled_rejected() {
     let mut hh = 1u64;
     macro_rules! run {
         ($std:expr, $op:expr, $d:expr) => {{
-            let r = ex
-                .execute_tx(&edu_tx(&sponsor, n, $std, $op, $d), &proposer.address(), hh, 50)
-                .unwrap();
+            // One published block per step: this chain is the COMMITTED state
+            // admission reads, so each step has to reach canonical storage.
+            let rs = common::publish_block(
+                &state,
+                &ex,
+                hh,
+                proposer.public_key().as_bytes(),
+                vec![edu_tx(&sponsor, n, $std, $op, $d)],
+                &[],
+            );
+            let r = rs[0].clone();
             n += 1;
             hh += 1;
             assert!(matches!(r.status, TxStatus::Success), "{:?}", r.status);
@@ -477,9 +495,17 @@ fn commit_chain(
     let mut hh = 1u64;
     macro_rules! run {
         ($std:expr, $op:expr, $d:expr) => {{
-            let r = ex
-                .execute_tx(&edu_tx(&sponsor, n, $std, $op, $d), &proposer.address(), hh, 50)
-                .unwrap();
+            // `commit_chain` builds the COMMITTED chain admission reads, so
+            // every step is a published block, not a candidate.
+            let rs = common::publish_block(
+                &state,
+                &ex,
+                hh,
+                proposer.public_key().as_bytes(),
+                vec![edu_tx(&sponsor, n, $std, $op, $d)],
+                &[],
+            );
+            let r = rs[0].clone();
             n += 1;
             hh += 1;
             assert!(matches!(r.status, TxStatus::Success), "setup step failed: {:?}", r.status);

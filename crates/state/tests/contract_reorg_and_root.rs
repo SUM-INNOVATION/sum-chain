@@ -70,7 +70,9 @@ fn deploy_diff_captured_and_reverted() {
     fund(&state, &deployer, 10_000_000);
 
     let blk = block(1, &proposer, vec![deploy_tx(&deployer, 0, wat::parse_str(WAT_INIT_WRITES).unwrap())]);
-    let (receipts, _root, state_diff, contract_diff) = executor.execute_block(&blk, Hash::ZERO, &[]).unwrap();
+    let exec = executor.execute_block(&blk, Hash::ZERO, &[]).unwrap();
+    let (executed, state_diff, contract_diff) = exec.into_parts();
+    let receipts = executed.receipts().to_vec();
     assert!(matches!(receipts[0].status, TxStatus::Success), "deploy should succeed: {:?}", receipts[0].status);
 
     // Diff has code + metadata + the init storage write. Clone the keys we
@@ -109,18 +111,26 @@ fn root_committed_above_gate_only() {
     // Gate OPEN: deploy succeeds, contract diff non-empty, digest folded.
     let (s1, _d1, _dir1, ex1) = setup_with_params(ChainParams::with_contracts_enabled());
     fund(&s1, &deployer, 10_000_000);
-    let (r1, root_open, _sd1, cd1) = ex1
+    let exec1 = ex1
         .execute_block(&block(1, &proposer, vec![deploy_tx(&deployer, 0, code.clone())]), Hash::ZERO, &[])
         .unwrap();
+    // The root is read from the candidate it was bound to, not from a tuple
+    // element a caller could have swapped.
+    let root_open = exec1.computed_root();
+    let (executed1, _sd1, cd1) = exec1.into_parts();
+    let r1 = executed1.receipts().to_vec();
     assert!(matches!(r1[0].status, TxStatus::Success));
     assert!(!cd1.records.is_empty());
 
     // Gate CLOSED: same block, contract tx rejected free, empty diff, no digest.
     let (s2, _d2, _dir2, ex2) = setup_with_params(ChainParams::with_v2_enabled());
     fund(&s2, &deployer, 10_000_000);
-    let (r2, root_closed, _sd2, cd2) = ex2
+    let exec2 = ex2
         .execute_block(&block(1, &proposer, vec![deploy_tx(&deployer, 0, code)]), Hash::ZERO, &[])
         .unwrap();
+    let root_closed = exec2.computed_root();
+    let (executed2, _sd2, cd2) = exec2.into_parts();
+    let r2 = executed2.receipts().to_vec();
     assert!(matches!(r2[0].status, TxStatus::Failed(60)), "rejected below gate: {:?}", r2[0].status);
     assert!(cd2.records.is_empty(), "no contract diff below gate");
 
@@ -135,7 +145,9 @@ fn failed_deploy_leaves_no_diff_or_state() {
     fund(&state, &deployer, 10_000_000);
 
     let blk = block(1, &proposer, vec![deploy_tx(&deployer, 0, wat::parse_str(WAT_INIT_TRAPS).unwrap())]);
-    let (receipts, _root, _sd, contract_diff) = executor.execute_block(&blk, Hash::ZERO, &[]).unwrap();
+    let exec = executor.execute_block(&blk, Hash::ZERO, &[]).unwrap();
+    let (executed, _sd, contract_diff) = exec.into_parts();
+    let receipts = executed.receipts().to_vec();
     assert!(!matches!(receipts[0].status, TxStatus::Success), "trapping init must fail");
     assert!(contract_diff.records.is_empty(), "failed deploy must produce no diff");
     // No contract CFs written.

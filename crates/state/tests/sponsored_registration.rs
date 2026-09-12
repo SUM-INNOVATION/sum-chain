@@ -103,6 +103,7 @@ fn has_key(db: &Database, addr: &Address) -> bool {
 #[test]
 fn valid_registers_registrant_not_sponsor_and_sponsor_pays() {
     let (state, db, _dir, executor) = setup_with_params(params_gate_open());
+    let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let registrant = KeyPair::generate();
     let proposer = KeyPair::generate();
@@ -110,7 +111,7 @@ fn valid_registers_registrant_not_sponsor_and_sponsor_pays() {
 
     let tx = honest_tx(&sponsor, &registrant, 0);
     let res = executor
-        .execute_tx(&tx, &proposer.address(), 1, 123)
+        .execute_tx(&mut candidate.view(), &tx, &proposer.address(), 1, 123)
         .unwrap();
 
     assert!(
@@ -166,6 +167,7 @@ fn valid_registers_registrant_not_sponsor_and_sponsor_pays() {
 #[test]
 fn wrong_registrant_signature_rejects_no_write_no_fee() {
     let (state, db, _dir, executor) = setup_with_params(params_gate_open());
+    let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let registrant = KeyPair::generate();
     let proposer = KeyPair::generate();
@@ -176,7 +178,7 @@ fn wrong_registrant_signature_rejects_no_write_no_fee() {
     let tx = build_tx(&sponsor, &registrant, 0, CHAIN_ID, &sponsor_addr, |d| {
         d.registrant_signature[0] ^= 0xff;
     });
-    let res = executor.execute_tx(&tx, &proposer.address(), 1, 0).unwrap();
+    let res = executor.execute_tx(&mut candidate.view(), &tx, &proposer.address(), 1, 0).unwrap();
 
     assert!(
         matches!(res.status, TxStatus::Failed(391)),
@@ -203,6 +205,7 @@ fn wrong_registrant_signature_rejects_no_write_no_fee() {
 #[test]
 fn public_key_substitution_rejects() {
     let (state, db, _dir, executor) = setup_with_params(params_gate_open());
+    let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let registrant = KeyPair::generate();
     let attacker = KeyPair::generate();
@@ -214,7 +217,7 @@ fn public_key_substitution_rejects() {
     let tx = build_tx(&sponsor, &registrant, 0, CHAIN_ID, &sponsor_addr, |d| {
         d.registrant_public_key = *attacker.public_key().as_bytes();
     });
-    let res = executor.execute_tx(&tx, &proposer.address(), 1, 0).unwrap();
+    let res = executor.execute_tx(&mut candidate.view(), &tx, &proposer.address(), 1, 0).unwrap();
 
     assert!(
         matches!(res.status, TxStatus::Failed(391)),
@@ -229,6 +232,7 @@ fn public_key_substitution_rejects() {
 #[test]
 fn sponsor_substitution_rejects() {
     let (state, db, _dir, executor) = setup_with_params(params_gate_open());
+    let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let other_sponsor = KeyPair::generate();
     let registrant = KeyPair::generate();
@@ -240,7 +244,7 @@ fn sponsor_substitution_rejects() {
     // from tx.from = sponsor, so verification fails.
     let other_addr = other_sponsor.address();
     let tx = build_tx(&sponsor, &registrant, 0, CHAIN_ID, &other_addr, |_| {});
-    let res = executor.execute_tx(&tx, &proposer.address(), 1, 0).unwrap();
+    let res = executor.execute_tx(&mut candidate.view(), &tx, &proposer.address(), 1, 0).unwrap();
 
     assert!(
         matches!(res.status, TxStatus::Failed(391)),
@@ -255,6 +259,7 @@ fn sponsor_substitution_rejects() {
 #[test]
 fn cross_chain_replay_rejects() {
     let (state, db, _dir, executor) = setup_with_params(params_gate_open());
+    let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let registrant = KeyPair::generate();
     let proposer = KeyPair::generate();
@@ -263,7 +268,7 @@ fn cross_chain_replay_rejects() {
     // Registrant signed a preimage bound to chain_id 999; this chain is CHAIN_ID.
     let sponsor_addr = sponsor.address();
     let tx = build_tx(&sponsor, &registrant, 0, 999, &sponsor_addr, |_| {});
-    let res = executor.execute_tx(&tx, &proposer.address(), 1, 0).unwrap();
+    let res = executor.execute_tx(&mut candidate.view(), &tx, &proposer.address(), 1, 0).unwrap();
 
     assert!(
         matches!(res.status, TxStatus::Failed(391)),
@@ -276,7 +281,8 @@ fn cross_chain_replay_rejects() {
 
 #[test]
 fn invalid_registrant_public_key_rejects_393() {
-    let (state, _db, _dir, executor) = setup_with_params(params_gate_open());
+    let (state, db, _dir, executor) = setup_with_params(params_gate_open());
+    let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let registrant = KeyPair::generate();
     let proposer = KeyPair::generate();
@@ -287,7 +293,7 @@ fn invalid_registrant_public_key_rejects_393() {
     let tx = build_tx(&sponsor, &registrant, 0, CHAIN_ID, &sponsor_addr, |d| {
         d.registrant_public_key = [0x02; 32];
     });
-    let res = executor.execute_tx(&tx, &proposer.address(), 1, 0).unwrap();
+    let res = executor.execute_tx(&mut candidate.view(), &tx, &proposer.address(), 1, 0).unwrap();
     assert!(
         matches!(res.status, TxStatus::Failed(393)),
         "got {:?}",
@@ -298,7 +304,8 @@ fn invalid_registrant_public_key_rejects_393() {
 
 #[test]
 fn malformed_payload_rejects_392() {
-    let (state, _db, _dir, executor) = setup_with_params(params_gate_open());
+    let (state, db, _dir, executor) = setup_with_params(params_gate_open());
+    let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let proposer = KeyPair::generate();
     fund(&state, &sponsor, 100 * FEE);
@@ -315,7 +322,7 @@ fn malformed_payload_rejects_392() {
         SignedTransaction::new_v2(tx, *outer_sig.as_bytes(), *sponsor.public_key().as_bytes());
 
     let res = executor
-        .execute_tx(&signed, &proposer.address(), 1, 0)
+        .execute_tx(&mut candidate.view(), &signed, &proposer.address(), 1, 0)
         .unwrap();
     assert!(
         matches!(res.status, TxStatus::Failed(392)),
@@ -328,7 +335,8 @@ fn malformed_payload_rejects_392() {
 #[test]
 fn trailing_bytes_payload_rejects_392() {
     // The strict decoder rejects trailing bytes — a distinct malformed case.
-    let (state, _db, _dir, executor) = setup_with_params(params_gate_open());
+    let (state, db, _dir, executor) = setup_with_params(params_gate_open());
+    let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let registrant = KeyPair::generate();
     let proposer = KeyPair::generate();
@@ -356,7 +364,7 @@ fn trailing_bytes_payload_rejects_392() {
         SignedTransaction::new_v2(tx, *outer_sig.as_bytes(), *sponsor.public_key().as_bytes());
 
     let res = executor
-        .execute_tx(&signed, &proposer.address(), 1, 0)
+        .execute_tx(&mut candidate.view(), &signed, &proposer.address(), 1, 0)
         .unwrap();
     assert!(
         matches!(res.status, TxStatus::Failed(392)),
@@ -370,13 +378,14 @@ fn trailing_bytes_payload_rejects_392() {
 fn closed_gate_rejects_free_390() {
     // Default params: gate is None → closed at every height.
     let (state, db, _dir, executor) = setup_with_params(ChainParams::with_v2_enabled());
+    let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let registrant = KeyPair::generate();
     let proposer = KeyPair::generate();
     fund(&state, &sponsor, 100 * FEE);
 
     let tx = honest_tx(&sponsor, &registrant, 0);
-    let res = executor.execute_tx(&tx, &proposer.address(), 1, 0).unwrap();
+    let res = executor.execute_tx(&mut candidate.view(), &tx, &proposer.address(), 1, 0).unwrap();
 
     assert!(
         matches!(res.status, TxStatus::Failed(390)),
@@ -392,6 +401,7 @@ fn closed_gate_rejects_free_390() {
 #[test]
 fn pre_activation_height_rejects_free_390() {
     let (state, db, _dir, executor) = setup_with_params(params_gate_from(100));
+    let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let registrant = KeyPair::generate();
     let proposer = KeyPair::generate();
@@ -400,7 +410,7 @@ fn pre_activation_height_rejects_free_390() {
     let tx = honest_tx(&sponsor, &registrant, 0);
     // Height 50 < activation 100.
     let res = executor
-        .execute_tx(&tx, &proposer.address(), 50, 0)
+        .execute_tx(&mut candidate.view(), &tx, &proposer.address(), 50, 0)
         .unwrap();
     assert!(
         matches!(res.status, TxStatus::Failed(390)),
@@ -415,6 +425,7 @@ fn pre_activation_height_rejects_free_390() {
 #[test]
 fn activation_height_boundary_succeeds() {
     let (state, db, _dir, executor) = setup_with_params(params_gate_from(100));
+    let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let registrant = KeyPair::generate();
     let proposer = KeyPair::generate();
@@ -423,7 +434,7 @@ fn activation_height_boundary_succeeds() {
     let tx = honest_tx(&sponsor, &registrant, 0);
     // Height exactly at activation 100 → open.
     let res = executor
-        .execute_tx(&tx, &proposer.address(), 100, 0)
+        .execute_tx(&mut candidate.view(), &tx, &proposer.address(), 100, 0)
         .unwrap();
     assert!(
         matches!(res.status, TxStatus::Success),
@@ -436,6 +447,7 @@ fn activation_height_boundary_succeeds() {
 #[test]
 fn duplicate_registration_rejects_394() {
     let (state, db, _dir, executor) = setup_with_params(params_gate_open());
+    let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let registrant = KeyPair::generate();
     let proposer = KeyPair::generate();
@@ -445,7 +457,7 @@ fn duplicate_registration_rejects_394() {
     let tx0 = honest_tx(&sponsor, &registrant, 0);
     assert!(matches!(
         executor
-            .execute_tx(&tx0, &proposer.address(), 1, 0)
+            .execute_tx(&mut candidate.view(), &tx0, &proposer.address(), 1, 0)
             .unwrap()
             .status,
         TxStatus::Success
@@ -455,7 +467,7 @@ fn duplicate_registration_rejects_394() {
     // Second registration of the SAME registrant (nonce 1) → duplicate, free.
     let tx1 = honest_tx(&sponsor, &registrant, 1);
     let res = executor
-        .execute_tx(&tx1, &proposer.address(), 2, 0)
+        .execute_tx(&mut candidate.view(), &tx1, &proposer.address(), 2, 0)
         .unwrap();
     assert!(
         matches!(res.status, TxStatus::Failed(394)),
@@ -486,9 +498,10 @@ fn two_validators_identical_tx_produce_identical_receipts_and_poststate() {
 
     let run = || {
         let (state, db, dir, executor) = setup_with_params(params_gate_open());
+        let mut candidate = common::candidate(&db);
         fund(&state, &sponsor, 100 * FEE);
         let res = executor
-            .execute_tx(&tx, &proposer.address(), 7, 999)
+            .execute_tx(&mut candidate.view(), &tx, &proposer.address(), 7, 999)
             .unwrap();
         // Raw on-disk CF bytes are the strongest post-state evidence.
         let record_bytes = db
@@ -562,8 +575,13 @@ fn regression_node_local_write_forks_but_consensus_path_converges() {
                     state: &Arc<StateManager>,
                     executor: &sumchain_state::executor::BlockExecutor| {
         fund(state, &sponsor, 100 * FEE);
+        // One candidate per validator, since each runs the transaction as its
+        // own block. The point of the test is that both converge on identical
+        // registrant bytes, which is a property of the two runs, not of one
+        // block seeing the other's writes.
+        let mut candidate = common::candidate(db);
         let res = executor
-            .execute_tx(&tx, &proposer.address(), 1, 42)
+            .execute_tx(&mut candidate.view(), &tx, &proposer.address(), 1, 42)
             .unwrap();
         assert!(matches!(res.status, TxStatus::Success));
         bincode::serialize(&stored_key(db, &registrant.address()).unwrap()).unwrap()

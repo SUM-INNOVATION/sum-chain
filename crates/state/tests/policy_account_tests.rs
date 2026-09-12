@@ -383,6 +383,7 @@ fn modify_policy_executes_with_fee_charged_once() {
     // execute it via `execute_tx` so submitter fee/nonce accounting runs
     // alongside the policy update + policy-nonce advance.
     let (state, db, _dir, executor) = setup_with_params(ChainParams::with_v2_enabled());
+    let mut candidate = common::candidate(&db);
     let pe = PolicyAccountExecutor::new(db.clone());
     let m = kp();
     let account = put_account(&db, &state, &m, 0);
@@ -406,7 +407,7 @@ fn modify_policy_executes_with_fee_charged_once() {
     let sig = sign(h.as_bytes(), m.private_key());
     let signed = SignedTransaction::new_v2(tx, *sig.as_bytes(), *m.public_key().as_bytes());
     let proposer = kp();
-    let res = executor.execute_tx(&signed, &proposer.address(), 2, 2000).unwrap();
+    let res = executor.execute_tx(&mut candidate.view(), &signed, &proposer.address(), 2, 2000).unwrap();
     assert!(matches!(res.status, TxStatus::Success), "got {:?}", res.status);
 
     // Policy updated + policy nonce advanced.
@@ -500,13 +501,14 @@ fn create_tx(sender: &KeyPair, nonce: u64, fee: u128) -> SignedTransaction {
 
 #[test]
 fn fee_and_submitter_nonce_charged_once_on_success() {
-    let (state, _db, _dir, executor) = setup_with_params(ChainParams::with_v2_enabled());
+    let (state, db, _dir, executor) = setup_with_params(ChainParams::with_v2_enabled());
+    let mut candidate = common::candidate(&db);
     let sender = kp();
     let proposer = kp();
     let fee = 1_000u128;
     fund(&state, &sender, 10_000);
     let tx = create_tx(&sender, 0, fee);
-    let res = executor.execute_tx(&tx, &proposer.address(), 1, 1000).unwrap();
+    let res = executor.execute_tx(&mut candidate.view(), &tx, &proposer.address(), 1, 1000).unwrap();
     assert!(matches!(res.status, TxStatus::Success), "expected success, got {:?}", res.status);
     assert_eq!(state.get_balance(&sender.address()).unwrap(), 10_000 - fee, "fee charged exactly once");
     assert_eq!(state.get_nonce(&sender.address()).unwrap(), 1, "submitter nonce +1");
@@ -515,13 +517,14 @@ fn fee_and_submitter_nonce_charged_once_on_success() {
 
 #[test]
 fn insufficient_balance_is_free_no_nonce() {
-    let (state, _db, _dir, executor) = setup_with_params(ChainParams::with_v2_enabled());
+    let (state, db, _dir, executor) = setup_with_params(ChainParams::with_v2_enabled());
+    let mut candidate = common::candidate(&db);
     let sender = kp();
     let proposer = kp();
     let fee = 1_000u128;
     fund(&state, &sender, 10); // less than fee
     let tx = create_tx(&sender, 0, fee);
-    let res = executor.execute_tx(&tx, &proposer.address(), 1, 1000).unwrap();
+    let res = executor.execute_tx(&mut candidate.view(), &tx, &proposer.address(), 1, 1000).unwrap();
     assert!(matches!(res.status, TxStatus::InsufficientBalance), "got {:?}", res.status);
     assert_eq!(res.fee_paid, 0, "no fee on insufficient balance");
     assert_eq!(state.get_balance(&sender.address()).unwrap(), 10, "balance unchanged");

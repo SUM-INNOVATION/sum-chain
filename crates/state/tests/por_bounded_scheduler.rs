@@ -8,6 +8,7 @@
 //! of being slashed.
 
 mod common;
+use sumchain_storage::exec_view::ExecutionView;
 use common::{fund, setup_with_params, CHAIN_ID};
 
 use std::sync::Arc;
@@ -89,22 +90,22 @@ fn executors(db: &Arc<Database>) -> (StorageMetadataExecutor, NodeRegistryExecut
 
 /// Register `k` archives at height 1. Returns keypairs + a per-archive nonce
 /// vector (each starts at 1, after the register at nonce 0).
-fn register_archives(state: &StateManager, executor: &BlockExecutor, k: usize) -> (Vec<KeyPair>, Vec<u64>) {
+fn register_archives(view: &mut ExecutionView<'_, '_>, state: &StateManager, executor: &BlockExecutor, k: usize) -> (Vec<KeyPair>, Vec<u64>) {
     let proposer = KeyPair::generate();
     let archives: Vec<KeyPair> = (0..k).map(|_| KeyPair::generate()).collect();
     for a in &archives {
         fund(state, a, (STAKE as u128) + 1_000_000);
-        executor.execute_tx(&signed(a, FEE, 0, nr(register_archive_op())), &proposer.address(), 1, 1000).unwrap();
+        executor.execute_tx(view, &signed(a, FEE, 0, nr(register_archive_op())), &proposer.address(), 1, 1000).unwrap();
     }
     (archives, vec![1u64; k])
 }
 
 /// Fund a fresh sender and set `target`'s node status to `Slashed` at `height`.
-fn slash_node(state: &StateManager, executor: &BlockExecutor, target: Address, height: u64) {
+fn slash_node(view: &mut ExecutionView<'_, '_>, state: &StateManager, executor: &BlockExecutor, target: Address, height: u64) {
     let admin = KeyPair::generate();
     fund(state, &admin, 1_000_000);
     let r = executor
-        .execute_tx(&signed(&admin, FEE, 0, nr(NodeRegistryOperation::UpdateStatus { target, new_status: NodeStatus::Slashed })), &KeyPair::generate().address(), height, 1000)
+        .execute_tx(view, &signed(&admin, FEE, 0, nr(NodeRegistryOperation::UpdateStatus { target, new_status: NodeStatus::Slashed })), &KeyPair::generate().address(), height, 1000)
         .unwrap();
     assert!(r.status.is_success(), "slash: {:?}", r.status);
 }
@@ -114,6 +115,7 @@ fn slash_node(state: &StateManager, executor: &BlockExecutor, target: Address, h
 /// Returns the file owner keypair (owner nonce is at 2 afterwards).
 #[allow(clippy::too_many_arguments)]
 fn make_active_funded_file(
+    view: &mut ExecutionView<'_, '_>,
     state: &StateManager,
     executor: &BlockExecutor,
     db: &Arc<Database>,
@@ -127,7 +129,7 @@ fn make_active_funded_file(
     let proposer = KeyPair::generate();
     let owner = KeyPair::generate();
     fund(state, &owner, (fee_deposit as u128) + 5_000_000);
-    let rv = executor.execute_tx(&signed(&owner, FEE, 0, sm_v2(v2_register_op(root, chunk_count, fee_deposit))), &proposer.address(), 2, 1000).unwrap();
+    let rv = executor.execute_tx(view, &signed(&owner, FEE, 0, sm_v2(v2_register_op(root, chunk_count, fee_deposit))), &proposer.address(), 2, 1000).unwrap();
     assert!(rv.status.is_success(), "v2 register: {:?}", rv.status);
 
     let registry = NodeRegistryExecutor::new(db.clone());
@@ -137,12 +139,12 @@ fn make_active_funded_file(
             .filter(|c| assigned(&root, &snapshot, *c, r).iter().any(|a| a.as_bytes() == kp.address().as_bytes()))
             .collect();
         if !my_chunks.is_empty() {
-            let acc = executor.execute_tx(&signed(kp, FEE, arch_nonces[idx], sm_v2(StorageMetadataOperationV2::AcceptAssignmentV2 { merkle_root: root, chunk_indices: my_chunks })), &proposer.address(), 3, 1000).unwrap();
+            let acc = executor.execute_tx(view, &signed(kp, FEE, arch_nonces[idx], sm_v2(StorageMetadataOperationV2::AcceptAssignmentV2 { merkle_root: root, chunk_indices: my_chunks })), &proposer.address(), 3, 1000).unwrap();
             assert!(acc.status.is_success(), "accept: {:?}", acc.status);
             arch_nonces[idx] += 1;
         }
     }
-    let act = executor.execute_tx(&signed(&owner, FEE, 1, sm_v2(StorageMetadataOperationV2::ActivateFileV2 { merkle_root: root })), &proposer.address(), 4, 1000).unwrap();
+    let act = executor.execute_tx(view, &signed(&owner, FEE, 1, sm_v2(StorageMetadataOperationV2::ActivateFileV2 { merkle_root: root })), &proposer.address(), 4, 1000).unwrap();
     assert!(act.status.is_success(), "activate: {:?}", act.status);
     owner
 }
@@ -167,10 +169,11 @@ fn v2_proof_settlement_pays_from_v2_fee_pool_no_slash() {
     // PAID from V2 fee_pool — not slashed.
     let r = 1u32;
     let (state, db, _dir, executor) = setup_with_params(params_scheduler(r, 8, 4, 16));
-    let (archives, mut nonces) = register_archives(&state, &executor, 2);
+    let mut candidate = common::candidate(&db);
+    let (archives, mut nonces) = register_archives(&mut candidate.view(), &state, &executor, 2);
     let root = Hash::hash(b"settle-file");
     let deposit = CHALLENGE_REWARD * 3;
-    make_active_funded_file(&state, &executor, &db, &archives, &mut nonces, r, root, 1, deposit);
+    make_active_funded_file(&mut candidate.view(), &state, &executor, &db, &archives, &mut nonces, r, root, 1, deposit);
 
     let (storage, registry) = executors(&db);
     let emitted = storage
@@ -190,7 +193,7 @@ fn v2_proof_settlement_pays_from_v2_fee_pool_no_slash() {
     let proof = StorageMetadataOperation::SubmitStorageProof {
         challenge_id: ch.challenge_id, merkle_root: root, chunk_index: 0, chunk_hash: root, merkle_path: vec![],
     };
-    let res = executor.execute_tx(&signed(target_kp, FEE, tgt_nonce, sm_v1(proof)), &KeyPair::generate().address(), 100, 1000).unwrap();
+    let res = executor.execute_tx(&mut candidate.view(), &signed(target_kp, FEE, tgt_nonce, sm_v1(proof)), &KeyPair::generate().address(), 100, 1000).unwrap();
     assert!(res.status.is_success(), "V2 proof must succeed: {:?}", res.status);
 
     // Paid CHALLENGE_REWARD from V2 fee_pool (archive also pays the proof-tx FEE);
@@ -206,9 +209,10 @@ fn v2_proof_settlement_pays_from_v2_fee_pool_no_slash() {
 fn v2_payout_to_zero_removes_index_entry() {
     let r = 1u32;
     let (state, db, _dir, executor) = setup_with_params(params_scheduler(r, 8, 4, 16));
-    let (archives, mut nonces) = register_archives(&state, &executor, 2);
+    let mut candidate = common::candidate(&db);
+    let (archives, mut nonces) = register_archives(&mut candidate.view(), &state, &executor, 2);
     let root = Hash::hash(b"drain-file");
-    make_active_funded_file(&state, &executor, &db, &archives, &mut nonces, r, root, 1, CHALLENGE_REWARD); // exactly one payout drains it
+    make_active_funded_file(&mut candidate.view(), &state, &executor, &db, &archives, &mut nonces, r, root, 1, CHALLENGE_REWARD); // exactly one payout drains it
 
     let (storage, registry) = executors(&db);
     assert!(db.get(CF_CHALLENGEABLE_FILES_V2, root.as_bytes()).unwrap().is_some(), "activated funded file indexed");
@@ -219,7 +223,7 @@ fn v2_payout_to_zero_removes_index_entry() {
     let proof = StorageMetadataOperation::SubmitStorageProof {
         challenge_id: ch.challenge_id, merkle_root: root, chunk_index: 0, chunk_hash: root, merkle_path: vec![],
     };
-    executor.execute_tx(&signed(target_kp, FEE, tgt_nonce, sm_v1(proof)), &KeyPair::generate().address(), 100, 1000).unwrap();
+    executor.execute_tx(&mut candidate.view(), &signed(target_kp, FEE, tgt_nonce, sm_v1(proof)), &KeyPair::generate().address(), 100, 1000).unwrap();
 
     assert_eq!(storage.get_metadata_v2(&root).unwrap().unwrap().fee_pool, 0, "fee_pool drained");
     assert!(db.get(CF_CHALLENGEABLE_FILES_V2, root.as_bytes()).unwrap().is_none(), "drained file removed from challengeable index");
@@ -231,9 +235,10 @@ fn v2_payout_to_zero_removes_index_entry() {
 fn backfill_populates_preupgrade_files_and_marker_prevents_repeat() {
     let r = 1u32;
     let (state, db, _dir, executor) = setup_with_params(params_scheduler(r, 8, 4, 16));
-    let (archives, mut nonces) = register_archives(&state, &executor, 2);
+    let mut candidate = common::candidate(&db);
+    let (archives, mut nonces) = register_archives(&mut candidate.view(), &state, &executor, 2);
     let root = Hash::hash(b"preupgrade-file");
-    make_active_funded_file(&state, &executor, &db, &archives, &mut nonces, r, root, 1, SMALL_DEPOSIT);
+    make_active_funded_file(&mut candidate.view(), &state, &executor, &db, &archives, &mut nonces, r, root, 1, SMALL_DEPOSIT);
 
     let (storage, _registry) = executors(&db);
     // Simulate a pre-upgrade file: index entry absent though the file is Active+funded.
@@ -258,10 +263,11 @@ fn scheduler_emits_within_caps() {
     // 6 single-chunk files, cap emit=3 ⇒ at most 3 challenges, ≤ max_files distinct.
     let r = 2u32;
     let (state, db, _dir, executor) = setup_with_params(params_scheduler(r, 4, 4, 3));
-    let (archives, mut nonces) = register_archives(&state, &executor, 4);
+    let mut candidate = common::candidate(&db);
+    let (archives, mut nonces) = register_archives(&mut candidate.view(), &state, &executor, 4);
     for i in 0..6u32 {
         let root = Hash::hash(format!("capfile-{i}").as_bytes());
-        make_active_funded_file(&state, &executor, &db, &archives, &mut nonces, r, root, 1, SMALL_DEPOSIT);
+        make_active_funded_file(&mut candidate.view(), &state, &executor, &db, &archives, &mut nonces, r, root, 1, SMALL_DEPOSIT);
     }
     let (storage, registry) = executors(&db);
     let emitted = storage.generate_challenge_schedule(&Hash::hash(b"parent"), 100, &registry, r, 4, 4, 3).unwrap();
@@ -275,9 +281,10 @@ fn scheduler_respects_chunk_cap_per_file() {
     // One 8-chunk file, max_chunks=3 ⇒ ≤3 challenges for it.
     let r = 2u32;
     let (state, db, _dir, executor) = setup_with_params(params_scheduler(r, 4, 3, 16));
-    let (archives, mut nonces) = register_archives(&state, &executor, 3);
+    let mut candidate = common::candidate(&db);
+    let (archives, mut nonces) = register_archives(&mut candidate.view(), &state, &executor, 3);
     let root = Hash::hash(b"multichunk");
-    make_active_funded_file(&state, &executor, &db, &archives, &mut nonces, r, root, 8, SMALL_DEPOSIT);
+    make_active_funded_file(&mut candidate.view(), &state, &executor, &db, &archives, &mut nonces, r, root, 8, SMALL_DEPOSIT);
     let (storage, registry) = executors(&db);
     let emitted = storage.generate_challenge_schedule(&Hash::hash(b"parent"), 100, &registry, r, 4, 3, 16).unwrap();
     let for_file = emitted.iter().filter(|c| c.merkle_root == root).count();
@@ -290,9 +297,10 @@ fn scheduler_respects_chunk_cap_per_file() {
 fn scheduler_deterministic_replay_conformance() {
     let r = 2u32;
     let (state, db, _dir, executor) = setup_with_params(params_scheduler(r, 4, 4, 8));
-    let (archives, mut nonces) = register_archives(&state, &executor, 4);
+    let mut candidate = common::candidate(&db);
+    let (archives, mut nonces) = register_archives(&mut candidate.view(), &state, &executor, 4);
     for i in 0..4u32 {
-        make_active_funded_file(&state, &executor, &db, &archives, &mut nonces, r, Hash::hash(format!("detfile-{i}").as_bytes()), 2, SMALL_DEPOSIT);
+        make_active_funded_file(&mut candidate.view(), &state, &executor, &db, &archives, &mut nonces, r, Hash::hash(format!("detfile-{i}").as_bytes()), 2, SMALL_DEPOSIT);
     }
     let (storage, registry) = executors(&db);
     let parent = Hash::hash(b"det-parent");
@@ -309,9 +317,10 @@ fn scheduler_deterministic_replay_conformance() {
 fn scheduler_target_is_always_assigned_active() {
     let r = 2u32;
     let (state, db, _dir, executor) = setup_with_params(params_scheduler(r, 6, 4, 16));
-    let (archives, mut nonces) = register_archives(&state, &executor, 5); // >R ⇒ some active unassigned
+    let mut candidate = common::candidate(&db);
+    let (archives, mut nonces) = register_archives(&mut candidate.view(), &state, &executor, 5); // >R ⇒ some active unassigned
     for i in 0..4u32 {
-        make_active_funded_file(&state, &executor, &db, &archives, &mut nonces, r, Hash::hash(format!("tgtfile-{i}").as_bytes()), 3, SMALL_DEPOSIT);
+        make_active_funded_file(&mut candidate.view(), &state, &executor, &db, &archives, &mut nonces, r, Hash::hash(format!("tgtfile-{i}").as_bytes()), 3, SMALL_DEPOSIT);
     }
     let (storage, registry) = executors(&db);
     let snapshot = registry.get_active_archive_nodes_at_height(2).unwrap();
@@ -329,7 +338,8 @@ fn scheduler_target_is_always_assigned_active() {
 fn scheduler_skips_stale_index_entry() {
     let r = 1u32;
     let (state, db, _dir, executor) = setup_with_params(params_scheduler(r, 8, 4, 16));
-    register_archives(&state, &executor, 2);
+    let mut candidate = common::candidate(&db);
+    register_archives(&mut candidate.view(), &state, &executor, 2);
     let (storage, registry) = executors(&db);
     // Insert a stale entry: a root with no V2 row at all.
     let bogus = Hash::hash(b"bogus-root");
@@ -343,15 +353,16 @@ fn scheduler_skips_stale_index_entry() {
 fn scheduler_skips_pair_with_no_assigned_active() {
     let r = 1u32;
     let (state, db, _dir, executor) = setup_with_params(params_scheduler(r, 8, 4, 16));
-    let (archives, mut nonces) = register_archives(&state, &executor, 2);
+    let mut candidate = common::candidate(&db);
+    let (archives, mut nonces) = register_archives(&mut candidate.view(), &state, &executor, 2);
     let root = Hash::hash(b"noactive-file");
-    make_active_funded_file(&state, &executor, &db, &archives, &mut nonces, r, root, 1, SMALL_DEPOSIT);
+    make_active_funded_file(&mut candidate.view(), &state, &executor, &db, &archives, &mut nonces, r, root, 1, SMALL_DEPOSIT);
 
     let (storage, registry) = executors(&db);
     let snapshot = registry.get_active_archive_nodes_at_height(2).unwrap();
     let assignee = assigned(&root, &snapshot, 0, r)[0];
     // Slash the sole assignee ⇒ no assigned-active target for chunk 0.
-    slash_node(&state, &executor, assignee, 5);
+    slash_node(&mut candidate.view(), &state, &executor, assignee, 5);
     let emitted = storage.generate_challenge_schedule(&Hash::hash(b"parent"), 100, &registry, r, 8, 4, 16).unwrap();
     assert!(emitted.is_empty(), "no assigned-active archive ⇒ skip, no bystander");
 }
@@ -362,9 +373,10 @@ fn scheduler_uses_latest_epoch() {
     let mut params = params_scheduler(r, 8, 4, 16);
     params.archive_reassignment_enabled_from_height = Some(0);
     let (state, db, _dir, executor) = setup_with_params(params);
-    let (archives, mut nonces) = register_archives(&state, &executor, 2);
+    let mut candidate = common::candidate(&db);
+    let (archives, mut nonces) = register_archives(&mut candidate.view(), &state, &executor, 2);
     let root = Hash::hash(b"reassign-sched");
-    let owner = make_active_funded_file(&state, &executor, &db, &archives, &mut nonces, r, root, 1, SMALL_DEPOSIT);
+    let owner = make_active_funded_file(&mut candidate.view(), &state, &executor, &db, &archives, &mut nonces, r, root, 1, SMALL_DEPOSIT);
 
     let (storage, registry) = executors(&db);
     let snap0 = registry.get_active_archive_nodes_at_height(2).unwrap();
@@ -373,8 +385,8 @@ fn scheduler_uses_latest_epoch() {
 
     // Slash epoch-0 assignee (height 5), owner reassigns (height 6) → epoch 1
     // snapshot excludes the slashed archive; survivor becomes the assignee.
-    slash_node(&state, &executor, assignee0, 5);
-    let re = executor.execute_tx(&signed(&owner, FEE, 2, sm_v2(StorageMetadataOperationV2::ReassignChunksV2 { merkle_root: root })), &KeyPair::generate().address(), 6, 1000).unwrap();
+    slash_node(&mut candidate.view(), &state, &executor, assignee0, 5);
+    let re = executor.execute_tx(&mut candidate.view(), &signed(&owner, FEE, 2, sm_v2(StorageMetadataOperationV2::ReassignChunksV2 { merkle_root: root })), &KeyPair::generate().address(), 6, 1000).unwrap();
     assert!(re.status.is_success(), "reassign: {:?}", re.status);
     assert_eq!(storage.get_file_reassignments(&root).unwrap(), vec![6], "epoch 1 recorded");
 
@@ -394,9 +406,10 @@ fn gate_closed_uses_single_challenge_path() {
     p.por_assignment_targeting_enabled_from_height = Some(0);
     p.assignment_replication_factor = 1;
     let (state, db, _dir, executor) = setup_with_params(p);
-    let (archives, mut nonces) = register_archives(&state, &executor, 2);
+    let mut candidate = common::candidate(&db);
+    let (archives, mut nonces) = register_archives(&mut candidate.view(), &state, &executor, 2);
     let root = Hash::hash(b"single-file");
-    make_active_funded_file(&state, &executor, &db, &archives, &mut nonces, 1, root, 1, SMALL_DEPOSIT);
+    make_active_funded_file(&mut candidate.view(), &state, &executor, &db, &archives, &mut nonces, 1, root, 1, SMALL_DEPOSIT);
 
     let (storage, registry) = executors(&db);
     // Single-challenge path still selects the funded+Active V2 file via #101.

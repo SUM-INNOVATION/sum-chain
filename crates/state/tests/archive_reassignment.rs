@@ -124,6 +124,7 @@ fn defaults_leave_reassignment_dormant() {
 #[test]
 fn gate_closed_reassign_rejects_330_no_mutation() {
     let (state, db, _dir, executor) = setup_with_params(params_reassign_dormant());
+    let mut candidate = common::candidate(&db);
     let archive = KeyPair::generate();
     let owner = KeyPair::generate();
     let proposer = KeyPair::generate();
@@ -132,15 +133,16 @@ fn gate_closed_reassign_rejects_330_no_mutation() {
     let root = Hash::hash(b"gate-closed-reassign");
 
     executor
-        .execute_tx(&signed(&archive, FEE, 0, nr(register_archive_op())), &proposer.address(), 1, 1000)
+        .execute_tx(&mut candidate.view(), &signed(&archive, FEE, 0, nr(register_archive_op())), &proposer.address(), 1, 1000)
         .unwrap();
     executor
-        .execute_tx(&signed(&owner, FEE, 0, sm(register_file_op(root))), &proposer.address(), 2, 1000)
+        .execute_tx(&mut candidate.view(), &signed(&owner, FEE, 0, sm(register_file_op(root))), &proposer.address(), 2, 1000)
         .unwrap();
     let owner_bal = state.get_balance(&owner.address()).unwrap();
 
     let res = executor
         .execute_tx(
+            &mut candidate.view(),
             &signed(&owner, FEE, 1, sm(StorageMetadataOperationV2::ReassignChunksV2 { merkle_root: root })),
             &proposer.address(),
             3,
@@ -161,12 +163,14 @@ fn gate_closed_reassign_rejects_330_no_mutation() {
 
 #[test]
 fn reassign_file_missing_331() {
-    let (state, _db, _dir, executor) = setup_with_params(params_reassign_enabled());
+    let (state, db, _dir, executor) = setup_with_params(params_reassign_enabled());
+    let mut candidate = common::candidate(&db);
     let owner = KeyPair::generate();
     let proposer = KeyPair::generate();
     fund(&state, &owner, 1_000_000);
     let res = executor
         .execute_tx(
+            &mut candidate.view(),
             &signed(&owner, FEE, 0, sm(StorageMetadataOperationV2::ReassignChunksV2 { merkle_root: Hash::hash(b"nope") })),
             &proposer.address(),
             1,
@@ -178,7 +182,8 @@ fn reassign_file_missing_331() {
 
 #[test]
 fn reassign_non_owner_332() {
-    let (state, _db, _dir, executor) = setup_with_params(params_reassign_enabled());
+    let (state, db, _dir, executor) = setup_with_params(params_reassign_enabled());
+    let mut candidate = common::candidate(&db);
     let owner = KeyPair::generate();
     let stranger = KeyPair::generate();
     let proposer = KeyPair::generate();
@@ -186,10 +191,11 @@ fn reassign_non_owner_332() {
     fund(&state, &stranger, 1_000_000);
     let root = Hash::hash(b"non-owner");
     executor
-        .execute_tx(&signed(&owner, FEE, 0, sm(register_file_op(root))), &proposer.address(), 1, 1000)
+        .execute_tx(&mut candidate.view(), &signed(&owner, FEE, 0, sm(register_file_op(root))), &proposer.address(), 1, 1000)
         .unwrap();
     let res = executor
         .execute_tx(
+            &mut candidate.view(),
             &signed(&stranger, FEE, 0, sm(StorageMetadataOperationV2::ReassignChunksV2 { merkle_root: root })),
             &proposer.address(),
             2,
@@ -202,7 +208,8 @@ fn reassign_non_owner_332() {
 #[test]
 fn reassign_no_gap_334() {
     // Archive is active and never leaves → no gap → 334.
-    let (state, _db, _dir, executor) = setup_with_params(params_reassign_enabled());
+    let (state, db, _dir, executor) = setup_with_params(params_reassign_enabled());
+    let mut candidate = common::candidate(&db);
     let archive = KeyPair::generate();
     let owner = KeyPair::generate();
     let proposer = KeyPair::generate();
@@ -210,13 +217,14 @@ fn reassign_no_gap_334() {
     fund(&state, &owner, 1_000_000);
     let root = Hash::hash(b"no-gap");
     executor
-        .execute_tx(&signed(&archive, FEE, 0, nr(register_archive_op())), &proposer.address(), 1, 1000)
+        .execute_tx(&mut candidate.view(), &signed(&archive, FEE, 0, nr(register_archive_op())), &proposer.address(), 1, 1000)
         .unwrap();
     executor
-        .execute_tx(&signed(&owner, FEE, 0, sm(register_file_op(root))), &proposer.address(), 2, 1000)
+        .execute_tx(&mut candidate.view(), &signed(&owner, FEE, 0, sm(register_file_op(root))), &proposer.address(), 2, 1000)
         .unwrap();
     let res = executor
         .execute_tx(
+            &mut candidate.view(),
             &signed(&owner, FEE, 1, sm(StorageMetadataOperationV2::ReassignChunksV2 { merkle_root: root })),
             &proposer.address(),
             3,
@@ -228,17 +236,19 @@ fn reassign_no_gap_334() {
 
 #[test]
 fn reassign_abandoned_333() {
-    let (state, _db, _dir, executor) = setup_with_params(params_reassign_enabled());
+    let (state, db, _dir, executor) = setup_with_params(params_reassign_enabled());
+    let mut candidate = common::candidate(&db);
     let owner = KeyPair::generate();
     let proposer = KeyPair::generate();
     fund(&state, &owner, 1_000_000);
     let root = Hash::hash(b"abandoned");
     // Register at height 2, abandon after the 50-block grace window.
     executor
-        .execute_tx(&signed(&owner, FEE, 0, sm(register_file_op(root))), &proposer.address(), 2, 1000)
+        .execute_tx(&mut candidate.view(), &signed(&owner, FEE, 0, sm(register_file_op(root))), &proposer.address(), 2, 1000)
         .unwrap();
     let ab = executor
         .execute_tx(
+            &mut candidate.view(),
             &signed(&owner, FEE, 1, sm(StorageMetadataOperationV2::AbandonFileV2 { merkle_root: root })),
             &proposer.address(),
             200,
@@ -248,6 +258,7 @@ fn reassign_abandoned_333() {
     assert!(ab.status.is_success(), "abandon got {:?}", ab.status);
     let res = executor
         .execute_tx(
+            &mut candidate.view(),
             &signed(&owner, FEE, 2, sm(StorageMetadataOperationV2::ReassignChunksV2 { merkle_root: root })),
             &proposer.address(),
             201,
@@ -262,6 +273,7 @@ fn reassign_abandoned_333() {
 #[test]
 fn active_file_reassignment_recovers_coverage_with_epoch_cf_separation() {
     let (state, db, _dir, executor) = setup_with_params(params_reassign_enabled());
+    let mut candidate = common::candidate(&db);
     let a = KeyPair::generate();
     let b = KeyPair::generate();
     let owner = KeyPair::generate();
@@ -273,15 +285,15 @@ fn active_file_reassignment_recovers_coverage_with_epoch_cf_separation() {
 
     // Register both archives at height 1 → epoch-0 snapshot {A,B}.
     executor
-        .execute_tx(&signed(&a, FEE, 0, nr(register_archive_op())), &proposer.address(), 1, 1000)
+        .execute_tx(&mut candidate.view(), &signed(&a, FEE, 0, nr(register_archive_op())), &proposer.address(), 1, 1000)
         .unwrap();
     executor
-        .execute_tx(&signed(&b, FEE, 0, nr(register_archive_op())), &proposer.address(), 1, 1000)
+        .execute_tx(&mut candidate.view(), &signed(&b, FEE, 0, nr(register_archive_op())), &proposer.address(), 1, 1000)
         .unwrap();
 
     // Register file at height 2 (assignment_height = 2).
     executor
-        .execute_tx(&signed(&owner, FEE, 0, sm(register_file_op(root))), &proposer.address(), 2, 1000)
+        .execute_tx(&mut candidate.view(), &signed(&owner, FEE, 0, sm(register_file_op(root))), &proposer.address(), 2, 1000)
         .unwrap();
 
     // Discover the epoch-0 assignee for chunk 0 and accept from it.
@@ -289,6 +301,7 @@ fn active_file_reassignment_recovers_coverage_with_epoch_cf_separation() {
     let (assignee_kp, other_kp) = if assignee0 == a.address() { (&a, &b) } else { (&b, &a) };
     let acc = executor
         .execute_tx(
+            &mut candidate.view(),
             &signed(assignee_kp, FEE, 1, sm(StorageMetadataOperationV2::AcceptAssignmentV2 { merkle_root: root, chunk_indices: vec![0] })),
             &proposer.address(),
             3,
@@ -300,6 +313,7 @@ fn active_file_reassignment_recovers_coverage_with_epoch_cf_separation() {
     // Activate (coverage complete via the assignee).
     let act = executor
         .execute_tx(
+            &mut candidate.view(),
             &signed(&owner, FEE, 1, sm(StorageMetadataOperationV2::ActivateFileV2 { merkle_root: root })),
             &proposer.address(),
             4,
@@ -311,6 +325,7 @@ fn active_file_reassignment_recovers_coverage_with_epoch_cf_separation() {
     // The epoch-0 assignee leaves the active set (Slashed) at height 5.
     let slash = executor
         .execute_tx(
+            &mut candidate.view(),
             &signed(&owner, FEE, 2, nr(NodeRegistryOperation::UpdateStatus { target: assignee_kp.address(), new_status: NodeStatus::Slashed })),
             &proposer.address(),
             5,
@@ -328,6 +343,7 @@ fn active_file_reassignment_recovers_coverage_with_epoch_cf_separation() {
     // Owner reassigns at height 6 → epoch 1 (snapshot excludes the departed one).
     let re = executor
         .execute_tx(
+            &mut candidate.view(),
             &signed(&owner, FEE, 3, sm(StorageMetadataOperationV2::ReassignChunksV2 { merkle_root: root })),
             &proposer.address(),
             6,
@@ -344,6 +360,7 @@ fn active_file_reassignment_recovers_coverage_with_epoch_cf_separation() {
     // (Active file, gate open, reassignment epoch exists).
     let acc2 = executor
         .execute_tx(
+            &mut candidate.view(),
             &signed(other_kp, FEE, 1, sm(StorageMetadataOperationV2::AcceptAssignmentV2 { merkle_root: root, chunk_indices: vec![0] })),
             &proposer.address(),
             7,
@@ -383,6 +400,7 @@ fn active_file_reassignment_recovers_coverage_with_epoch_cf_separation() {
     // A second reassignment now is a no-op (anti-churn).
     let re2 = executor
         .execute_tx(
+            &mut candidate.view(),
             &signed(&owner, FEE, 4, sm(StorageMetadataOperationV2::ReassignChunksV2 { merkle_root: root })),
             &proposer.address(),
             8,
@@ -397,7 +415,8 @@ fn active_file_reassignment_recovers_coverage_with_epoch_cf_separation() {
 #[test]
 fn active_reattest_without_reassignment_epoch_335() {
     // Gate OPEN, Active file, no reassignment epoch → 335 (not 33).
-    let (state, _db, _dir, executor) = setup_with_params(params_reassign_enabled());
+    let (state, db, _dir, executor) = setup_with_params(params_reassign_enabled());
+    let mut candidate = common::candidate(&db);
     let archive = KeyPair::generate();
     let owner = KeyPair::generate();
     let proposer = KeyPair::generate();
@@ -405,20 +424,20 @@ fn active_reattest_without_reassignment_epoch_335() {
     fund(&state, &owner, 1_000_000);
     let root = Hash::hash(b"reattest-335");
     executor
-        .execute_tx(&signed(&archive, FEE, 0, nr(register_archive_op())), &proposer.address(), 1, 1000)
+        .execute_tx(&mut candidate.view(), &signed(&archive, FEE, 0, nr(register_archive_op())), &proposer.address(), 1, 1000)
         .unwrap();
     executor
-        .execute_tx(&signed(&owner, FEE, 0, sm(register_file_op(root))), &proposer.address(), 2, 1000)
+        .execute_tx(&mut candidate.view(), &signed(&owner, FEE, 0, sm(register_file_op(root))), &proposer.address(), 2, 1000)
         .unwrap();
     executor
-        .execute_tx(&signed(&archive, FEE, 1, sm(StorageMetadataOperationV2::AcceptAssignmentV2 { merkle_root: root, chunk_indices: vec![0] })), &proposer.address(), 3, 1000)
+        .execute_tx(&mut candidate.view(), &signed(&archive, FEE, 1, sm(StorageMetadataOperationV2::AcceptAssignmentV2 { merkle_root: root, chunk_indices: vec![0] })), &proposer.address(), 3, 1000)
         .unwrap();
     executor
-        .execute_tx(&signed(&owner, FEE, 1, sm(StorageMetadataOperationV2::ActivateFileV2 { merkle_root: root })), &proposer.address(), 4, 1000)
+        .execute_tx(&mut candidate.view(), &signed(&owner, FEE, 1, sm(StorageMetadataOperationV2::ActivateFileV2 { merkle_root: root })), &proposer.address(), 4, 1000)
         .unwrap();
 
     let res = executor
-        .execute_tx(&signed(&archive, FEE, 2, sm(StorageMetadataOperationV2::AcceptAssignmentV2 { merkle_root: root, chunk_indices: vec![0] })), &proposer.address(), 5, 1000)
+        .execute_tx(&mut candidate.view(), &signed(&archive, FEE, 2, sm(StorageMetadataOperationV2::AcceptAssignmentV2 { merkle_root: root, chunk_indices: vec![0] })), &proposer.address(), 5, 1000)
         .unwrap();
     assert!(matches!(res.status, TxStatus::Failed(335)), "got {:?}", res.status);
 }
@@ -426,7 +445,8 @@ fn active_reattest_without_reassignment_epoch_335() {
 #[test]
 fn active_reattest_gate_dormant_stays_33() {
     // Gate DORMANT → pre-#62 behavior preserved: Active re-attest → 33.
-    let (state, _db, _dir, executor) = setup_with_params(params_reassign_dormant());
+    let (state, db, _dir, executor) = setup_with_params(params_reassign_dormant());
+    let mut candidate = common::candidate(&db);
     let archive = KeyPair::generate();
     let owner = KeyPair::generate();
     let proposer = KeyPair::generate();
@@ -434,20 +454,20 @@ fn active_reattest_gate_dormant_stays_33() {
     fund(&state, &owner, 1_000_000);
     let root = Hash::hash(b"reattest-33");
     executor
-        .execute_tx(&signed(&archive, FEE, 0, nr(register_archive_op())), &proposer.address(), 1, 1000)
+        .execute_tx(&mut candidate.view(), &signed(&archive, FEE, 0, nr(register_archive_op())), &proposer.address(), 1, 1000)
         .unwrap();
     executor
-        .execute_tx(&signed(&owner, FEE, 0, sm(register_file_op(root))), &proposer.address(), 2, 1000)
+        .execute_tx(&mut candidate.view(), &signed(&owner, FEE, 0, sm(register_file_op(root))), &proposer.address(), 2, 1000)
         .unwrap();
     executor
-        .execute_tx(&signed(&archive, FEE, 1, sm(StorageMetadataOperationV2::AcceptAssignmentV2 { merkle_root: root, chunk_indices: vec![0] })), &proposer.address(), 3, 1000)
+        .execute_tx(&mut candidate.view(), &signed(&archive, FEE, 1, sm(StorageMetadataOperationV2::AcceptAssignmentV2 { merkle_root: root, chunk_indices: vec![0] })), &proposer.address(), 3, 1000)
         .unwrap();
     executor
-        .execute_tx(&signed(&owner, FEE, 1, sm(StorageMetadataOperationV2::ActivateFileV2 { merkle_root: root })), &proposer.address(), 4, 1000)
+        .execute_tx(&mut candidate.view(), &signed(&owner, FEE, 1, sm(StorageMetadataOperationV2::ActivateFileV2 { merkle_root: root })), &proposer.address(), 4, 1000)
         .unwrap();
 
     let res = executor
-        .execute_tx(&signed(&archive, FEE, 2, sm(StorageMetadataOperationV2::AcceptAssignmentV2 { merkle_root: root, chunk_indices: vec![0] })), &proposer.address(), 5, 1000)
+        .execute_tx(&mut candidate.view(), &signed(&archive, FEE, 2, sm(StorageMetadataOperationV2::AcceptAssignmentV2 { merkle_root: root, chunk_indices: vec![0] })), &proposer.address(), 5, 1000)
         .unwrap();
     assert!(matches!(res.status, TxStatus::Failed(33)), "pre-#62 behavior expected, got {:?}", res.status);
 }
@@ -457,6 +477,7 @@ fn active_reattest_gate_dormant_stays_33() {
 #[test]
 fn pending_file_reassignment_flow() {
     let (state, db, _dir, executor) = setup_with_params(params_reassign_enabled());
+    let mut candidate = common::candidate(&db);
     let a = KeyPair::generate();
     let b = KeyPair::generate();
     let owner = KeyPair::generate();
@@ -466,25 +487,25 @@ fn pending_file_reassignment_flow() {
     fund(&state, &owner, 1_000_000);
     let root = Hash::hash(b"pending-reassign");
 
-    executor.execute_tx(&signed(&a, FEE, 0, nr(register_archive_op())), &proposer.address(), 1, 1000).unwrap();
-    executor.execute_tx(&signed(&b, FEE, 0, nr(register_archive_op())), &proposer.address(), 1, 1000).unwrap();
-    executor.execute_tx(&signed(&owner, FEE, 0, sm(register_file_op(root))), &proposer.address(), 2, 1000).unwrap();
+    executor.execute_tx(&mut candidate.view(), &signed(&a, FEE, 0, nr(register_archive_op())), &proposer.address(), 1, 1000).unwrap();
+    executor.execute_tx(&mut candidate.view(), &signed(&b, FEE, 0, nr(register_archive_op())), &proposer.address(), 1, 1000).unwrap();
+    executor.execute_tx(&mut candidate.view(), &signed(&owner, FEE, 0, sm(register_file_op(root))), &proposer.address(), 2, 1000).unwrap();
 
     // The epoch-0 assignee leaves BEFORE the file activates.
     let assignee0 = assigned_to_chunk0(&root, &[a.address(), b.address()]);
     let (assignee_kp, other_kp) = if assignee0 == a.address() { (&a, &b) } else { (&b, &a) };
     executor
-        .execute_tx(&signed(&owner, FEE, 1, nr(NodeRegistryOperation::UpdateStatus { target: assignee_kp.address(), new_status: NodeStatus::Slashed })), &proposer.address(), 3, 1000)
+        .execute_tx(&mut candidate.view(), &signed(&owner, FEE, 1, nr(NodeRegistryOperation::UpdateStatus { target: assignee_kp.address(), new_status: NodeStatus::Slashed })), &proposer.address(), 3, 1000)
         .unwrap();
 
     // Reassign the still-Pending file, then the survivor accepts + activates.
     let re = executor
-        .execute_tx(&signed(&owner, FEE, 2, sm(StorageMetadataOperationV2::ReassignChunksV2 { merkle_root: root })), &proposer.address(), 4, 1000)
+        .execute_tx(&mut candidate.view(), &signed(&owner, FEE, 2, sm(StorageMetadataOperationV2::ReassignChunksV2 { merkle_root: root })), &proposer.address(), 4, 1000)
         .unwrap();
     assert!(re.status.is_success(), "pending reassign got {:?}", re.status);
 
     let acc = executor
-        .execute_tx(&signed(other_kp, FEE, 1, sm(StorageMetadataOperationV2::AcceptAssignmentV2 { merkle_root: root, chunk_indices: vec![0] })), &proposer.address(), 5, 1000)
+        .execute_tx(&mut candidate.view(), &signed(other_kp, FEE, 1, sm(StorageMetadataOperationV2::AcceptAssignmentV2 { merkle_root: root, chunk_indices: vec![0] })), &proposer.address(), 5, 1000)
         .unwrap();
     assert!(acc.status.is_success(), "survivor accept got {:?}", acc.status);
     // Replacement bit is in the epoch CF, not epoch-0 CF.
@@ -495,7 +516,7 @@ fn pending_file_reassignment_flow() {
     assert_eq!(cov.lifecycle, sumchain_primitives::FileLifecycleV2::Pending);
 
     let act = executor
-        .execute_tx(&signed(&owner, FEE, 3, sm(StorageMetadataOperationV2::ActivateFileV2 { merkle_root: root })), &proposer.address(), 6, 1000)
+        .execute_tx(&mut candidate.view(), &signed(&owner, FEE, 3, sm(StorageMetadataOperationV2::ActivateFileV2 { merkle_root: root })), &proposer.address(), 6, 1000)
         .unwrap();
     assert!(act.status.is_success(), "activate got {:?}", act.status);
 }
@@ -507,6 +528,7 @@ fn insufficient_active_archives_incomplete() {
     // A single archive covers, then leaves; no replacement exists → after
     // reassignment there is no active archive to attest, so coverage stays 0.
     let (state, db, _dir, executor) = setup_with_params(params_reassign_enabled());
+    let mut candidate = common::candidate(&db);
     let a = KeyPair::generate();
     let owner = KeyPair::generate();
     let proposer = KeyPair::generate();
@@ -514,19 +536,19 @@ fn insufficient_active_archives_incomplete() {
     fund(&state, &owner, 1_000_000);
     let root = Hash::hash(b"insufficient");
 
-    executor.execute_tx(&signed(&a, FEE, 0, nr(register_archive_op())), &proposer.address(), 1, 1000).unwrap();
-    executor.execute_tx(&signed(&owner, FEE, 0, sm(register_file_op(root))), &proposer.address(), 2, 1000).unwrap();
-    executor.execute_tx(&signed(&a, FEE, 1, sm(StorageMetadataOperationV2::AcceptAssignmentV2 { merkle_root: root, chunk_indices: vec![0] })), &proposer.address(), 3, 1000).unwrap();
-    executor.execute_tx(&signed(&owner, FEE, 1, sm(StorageMetadataOperationV2::ActivateFileV2 { merkle_root: root })), &proposer.address(), 4, 1000).unwrap();
+    executor.execute_tx(&mut candidate.view(), &signed(&a, FEE, 0, nr(register_archive_op())), &proposer.address(), 1, 1000).unwrap();
+    executor.execute_tx(&mut candidate.view(), &signed(&owner, FEE, 0, sm(register_file_op(root))), &proposer.address(), 2, 1000).unwrap();
+    executor.execute_tx(&mut candidate.view(), &signed(&a, FEE, 1, sm(StorageMetadataOperationV2::AcceptAssignmentV2 { merkle_root: root, chunk_indices: vec![0] })), &proposer.address(), 3, 1000).unwrap();
+    executor.execute_tx(&mut candidate.view(), &signed(&owner, FEE, 1, sm(StorageMetadataOperationV2::ActivateFileV2 { merkle_root: root })), &proposer.address(), 4, 1000).unwrap();
     // The only archive leaves.
-    executor.execute_tx(&signed(&owner, FEE, 2, nr(NodeRegistryOperation::UpdateStatus { target: a.address(), new_status: NodeStatus::Slashed })), &proposer.address(), 5, 1000).unwrap();
+    executor.execute_tx(&mut candidate.view(), &signed(&owner, FEE, 2, nr(NodeRegistryOperation::UpdateStatus { target: a.address(), new_status: NodeStatus::Slashed })), &proposer.address(), 5, 1000).unwrap();
 
     let cov = coverage(&db, &root);
     assert_eq!(cov.covered_count, 0);
     assert!(cov.reassignment_needed);
 
     // Reassign — but there is no active archive, so coverage cannot recover.
-    let re = executor.execute_tx(&signed(&owner, FEE, 3, sm(StorageMetadataOperationV2::ReassignChunksV2 { merkle_root: root })), &proposer.address(), 6, 1000).unwrap();
+    let re = executor.execute_tx(&mut candidate.view(), &signed(&owner, FEE, 3, sm(StorageMetadataOperationV2::ReassignChunksV2 { merkle_root: root })), &proposer.address(), 6, 1000).unwrap();
     assert!(re.status.is_success(), "reassign got {:?}", re.status);
     let cov2 = coverage(&db, &root);
     assert_eq!(cov2.covered_count, 0, "no active archive → still incomplete");
@@ -537,15 +559,16 @@ fn insufficient_active_archives_incomplete() {
 #[test]
 fn file_without_reassignment_is_epoch_zero_only() {
     let (state, db, _dir, executor) = setup_with_params(params_reassign_enabled());
+    let mut candidate = common::candidate(&db);
     let archive = KeyPair::generate();
     let owner = KeyPair::generate();
     let proposer = KeyPair::generate();
     fund(&state, &archive, (STAKE as u128) + 1_000_000);
     fund(&state, &owner, 1_000_000);
     let root = Hash::hash(b"epoch0-only");
-    executor.execute_tx(&signed(&archive, FEE, 0, nr(register_archive_op())), &proposer.address(), 1, 1000).unwrap();
-    executor.execute_tx(&signed(&owner, FEE, 0, sm(register_file_op(root))), &proposer.address(), 2, 1000).unwrap();
-    executor.execute_tx(&signed(&archive, FEE, 1, sm(StorageMetadataOperationV2::AcceptAssignmentV2 { merkle_root: root, chunk_indices: vec![0] })), &proposer.address(), 3, 1000).unwrap();
+    executor.execute_tx(&mut candidate.view(), &signed(&archive, FEE, 0, nr(register_archive_op())), &proposer.address(), 1, 1000).unwrap();
+    executor.execute_tx(&mut candidate.view(), &signed(&owner, FEE, 0, sm(register_file_op(root))), &proposer.address(), 2, 1000).unwrap();
+    executor.execute_tx(&mut candidate.view(), &signed(&archive, FEE, 1, sm(StorageMetadataOperationV2::AcceptAssignmentV2 { merkle_root: root, chunk_indices: vec![0] })), &proposer.address(), 3, 1000).unwrap();
 
     let cov = coverage(&db, &root);
     assert_eq!(cov.assignment_epochs, vec![2], "single epoch = assignment_height");
@@ -573,19 +596,20 @@ fn reassignment_state_survives_restart() {
         let db = Arc::new(Database::open_default(dir.path()).unwrap());
         let state = Arc::new(sumchain_state::StateManager::new(db.clone(), CHAIN_ID));
         let executor = sumchain_state::executor::BlockExecutor::new(state.clone(), db.clone(), params_reassign_enabled());
+        let mut candidate = common::candidate(&db);
         fund(&state, &a, (STAKE as u128) + 1_000_000);
         fund(&state, &b, (STAKE as u128) + 1_000_000);
         fund(&state, &owner, 1_000_000);
 
-        executor.execute_tx(&signed(&a, FEE, 0, nr(register_archive_op())), &proposer.address(), 1, 1000).unwrap();
-        executor.execute_tx(&signed(&b, FEE, 0, nr(register_archive_op())), &proposer.address(), 1, 1000).unwrap();
-        executor.execute_tx(&signed(&owner, FEE, 0, sm(register_file_op(root))), &proposer.address(), 2, 1000).unwrap();
+        executor.execute_tx(&mut candidate.view(), &signed(&a, FEE, 0, nr(register_archive_op())), &proposer.address(), 1, 1000).unwrap();
+        executor.execute_tx(&mut candidate.view(), &signed(&b, FEE, 0, nr(register_archive_op())), &proposer.address(), 1, 1000).unwrap();
+        executor.execute_tx(&mut candidate.view(), &signed(&owner, FEE, 0, sm(register_file_op(root))), &proposer.address(), 2, 1000).unwrap();
         let assignee0 = assigned_to_chunk0(&root, &[a.address(), b.address()]);
         let assignee_kp = if assignee0 == a.address() { &a } else { &b };
-        executor.execute_tx(&signed(assignee_kp, FEE, 1, sm(StorageMetadataOperationV2::AcceptAssignmentV2 { merkle_root: root, chunk_indices: vec![0] })), &proposer.address(), 3, 1000).unwrap();
-        executor.execute_tx(&signed(&owner, FEE, 1, sm(StorageMetadataOperationV2::ActivateFileV2 { merkle_root: root })), &proposer.address(), 4, 1000).unwrap();
-        executor.execute_tx(&signed(&owner, FEE, 2, nr(NodeRegistryOperation::UpdateStatus { target: assignee_kp.address(), new_status: NodeStatus::Slashed })), &proposer.address(), 5, 1000).unwrap();
-        executor.execute_tx(&signed(&owner, FEE, 3, sm(StorageMetadataOperationV2::ReassignChunksV2 { merkle_root: root })), &proposer.address(), 6, 1000).unwrap();
+        executor.execute_tx(&mut candidate.view(), &signed(assignee_kp, FEE, 1, sm(StorageMetadataOperationV2::AcceptAssignmentV2 { merkle_root: root, chunk_indices: vec![0] })), &proposer.address(), 3, 1000).unwrap();
+        executor.execute_tx(&mut candidate.view(), &signed(&owner, FEE, 1, sm(StorageMetadataOperationV2::ActivateFileV2 { merkle_root: root })), &proposer.address(), 4, 1000).unwrap();
+        executor.execute_tx(&mut candidate.view(), &signed(&owner, FEE, 2, nr(NodeRegistryOperation::UpdateStatus { target: assignee_kp.address(), new_status: NodeStatus::Slashed })), &proposer.address(), 5, 1000).unwrap();
+        executor.execute_tx(&mut candidate.view(), &signed(&owner, FEE, 3, sm(StorageMetadataOperationV2::ReassignChunksV2 { merkle_root: root })), &proposer.address(), 6, 1000).unwrap();
     }
 
     // Reopen the same RocksDB path.

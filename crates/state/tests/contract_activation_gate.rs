@@ -40,13 +40,14 @@ fn call_payload() -> TxPayload {
 #[test]
 fn deploy_rejected_free_when_gate_closed() {
     // v2 enabled but contracts dormant (None).
-    let (state, _db, _dir, executor) = setup_with_params(ChainParams::with_v2_enabled());
+    let (state, db, _dir, executor) = setup_with_params(ChainParams::with_v2_enabled());
+    let mut candidate = common::candidate(&db);
     let sender = KeyPair::generate();
     let proposer = KeyPair::generate();
     fund(&state, &sender, 10_000);
 
     let tx = signed(&sender, 1_000, 0, deploy_payload());
-    let res = executor.execute_tx(&tx, &proposer.address(), 1, 1000).unwrap();
+    let res = executor.execute_tx(&mut candidate.view(), &tx, &proposer.address(), 1, 1000).unwrap();
 
     assert!(matches!(res.status, TxStatus::Failed(60)), "got {:?}", res.status);
     assert_eq!(res.fee_paid, 0, "no fee below the gate");
@@ -57,13 +58,14 @@ fn deploy_rejected_free_when_gate_closed() {
 
 #[test]
 fn call_rejected_free_when_gate_closed() {
-    let (state, _db, _dir, executor) = setup_with_params(ChainParams::with_v2_enabled());
+    let (state, db, _dir, executor) = setup_with_params(ChainParams::with_v2_enabled());
+    let mut candidate = common::candidate(&db);
     let sender = KeyPair::generate();
     let proposer = KeyPair::generate();
     fund(&state, &sender, 10_000);
 
     let tx = signed(&sender, 1_000, 0, call_payload());
-    let res = executor.execute_tx(&tx, &proposer.address(), 1, 1000).unwrap();
+    let res = executor.execute_tx(&mut candidate.view(), &tx, &proposer.address(), 1, 1000).unwrap();
 
     assert!(matches!(res.status, TxStatus::Failed(60)), "got {:?}", res.status);
     assert_eq!(res.fee_paid, 0);
@@ -107,12 +109,13 @@ fn execute_tx_v2_path_also_gated() {
 fn not_gate_rejected_when_enabled() {
     // With the gate open, the contract path runs; the outcome may be success or
     // an execution failure, but it must NOT be the gate rejection Failed(60).
-    let (state, _db, _dir, executor) = setup_with_params(ChainParams::with_contracts_enabled());
+    let (state, db, _dir, executor) = setup_with_params(ChainParams::with_contracts_enabled());
+    let mut candidate = common::candidate(&db);
     let sender = KeyPair::generate();
     let proposer = KeyPair::generate();
     fund(&state, &sender, 10_000);
 
     let tx = signed(&sender, 1_000, 0, deploy_payload());
-    let res = executor.execute_tx(&tx, &proposer.address(), 1, 1000).unwrap();
+    let res = executor.execute_tx(&mut candidate.view(), &tx, &proposer.address(), 1, 1000).unwrap();
     assert!(!matches!(res.status, TxStatus::Failed(60)), "gate should be open");
 }

@@ -116,6 +116,7 @@ fn create_req(class: GovProposalClass, asset: GovAssetKind, to: Address, amount:
 #[test]
 fn monetary_classes_dormant_by_default_387_at_creation() {
     let (state, db, _dir, exec) = setup_with_params(params(false));
+    let mut candidate = common::candidate(&db);
     migrate(&state, &db);
     let proposer = KeyPair::generate();
     fund(&state, &proposer, 100_000);
@@ -130,7 +131,7 @@ fn monetary_classes_dormant_by_default_387_at_creation() {
         // 387 is a fee-paid semantic failure (Policy-B) → the nonce advances.
         let req = create_req(class, GovAssetKind::NativeEligibility, Address::new([7; 20]), 1_000);
         let r = exec
-            .execute_tx(&signed(&proposer, i as u64, gov(GovernanceOperation::CreateProposal, req)), &Address::new([9; 20]), 5, 1000)
+            .execute_tx(&mut candidate.view(), &signed(&proposer, i as u64, gov(GovernanceOperation::CreateProposal, req)), &Address::new([9; 20]), 5, 1000)
             .unwrap();
         assert!(matches!(r.status, TxStatus::Failed(387)), "dormant monetary gate: {:?}", r.status);
     }
@@ -141,6 +142,7 @@ fn monetary_classes_reject_non_native_assets_388() {
     // SRC-20 (and by the same check equity) governance can NEVER carry a
     // monetary-policy class — rejected 388 at creation before any registry work.
     let (state, db, _dir, exec) = setup_with_params(params(true));
+    let mut candidate = common::candidate(&db);
     migrate(&state, &db);
     let proposer = KeyPair::generate();
     fund(&state, &proposer, 100_000);
@@ -151,7 +153,7 @@ fn monetary_classes_reject_non_native_assets_388() {
         1_000,
     );
     let r = exec
-        .execute_tx(&signed(&proposer, 0, gov(GovernanceOperation::CreateProposal, req)), &Address::new([9; 20]), 5, 1000)
+        .execute_tx(&mut candidate.view(), &signed(&proposer, 0, gov(GovernanceOperation::CreateProposal, req)), &Address::new([9; 20]), 5, 1000)
         .unwrap();
     assert!(matches!(r.status, TxStatus::Failed(388)), "SRC-20 cannot mint: {:?}", r.status);
 }
@@ -167,6 +169,7 @@ fn run_native_proposal(
     amount: u128,
 ) -> (Arc<StateManager>, Arc<Database>) {
     let (state, db, _dir, exec) = setup_with_params(params(true));
+    let mut candidate = common::candidate(&db);
     migrate(&state, &db);
     let validator = KeyPair::generate();
     let vset = [*validator.public_key().as_bytes()];
@@ -185,14 +188,14 @@ fn run_native_proposal(
     })
     .unwrap();
     let r = exec
-        .execute_tx_with_validators(&signed(&submitter, 0, gov(GovernanceOperation::RegisterQualifyingAsset, req)), &Address::new([9; 20]), 101, 1000, &vset)
+        .execute_tx_with_validators(&mut candidate.view(), &signed(&submitter, 0, gov(GovernanceOperation::RegisterQualifyingAsset, req)), &Address::new([9; 20]), 101, 1000, &vset)
         .unwrap();
     assert!(matches!(r.status, TxStatus::Success), "register qualifying: {:?}", r.status);
 
     // Create the monetary proposal under NativeEligibility (voter is eligible).
     let creq = create_req(class, GovAssetKind::NativeEligibility, recipient, amount);
     let r = exec
-        .execute_tx(&signed(&voter, 0, gov(GovernanceOperation::CreateProposal, creq)), &Address::new([9; 20]), 105, 1000)
+        .execute_tx(&mut candidate.view(), &signed(&voter, 0, gov(GovernanceOperation::CreateProposal, creq)), &Address::new([9; 20]), 105, 1000)
         .unwrap();
     assert!(matches!(r.status, TxStatus::Success), "create: {:?}", r.status);
     let pid = generate_proposal_id(&voter.address(), &GovAssetKind::NativeEligibility, &[0xAB; 32], 105, 0);
@@ -200,14 +203,14 @@ fn run_native_proposal(
     // Vote yes (weight 1 of snapshot 1 ⇒ 100% ≥ 6667 bps).
     let vreq = bincode::serialize(&CastVoteRequest { proposal_id: pid, choice: VoteChoice::Yes }).unwrap();
     let r = exec
-        .execute_tx(&signed(&voter, 1, gov(GovernanceOperation::CastVote, vreq)), &Address::new([9; 20]), 110, 1000)
+        .execute_tx(&mut candidate.view(), &signed(&voter, 1, gov(GovernanceOperation::CastVote, vreq)), &Address::new([9; 20]), 110, 1000)
         .unwrap();
     assert!(matches!(r.status, TxStatus::Success), "vote: {:?}", r.status);
 
     // Execute after the voting window closes (105 + 100 < 300).
     let ereq = bincode::serialize(&ExecuteProposalRequest { proposal_id: pid }).unwrap();
     let r = exec
-        .execute_tx(&signed(&submitter, 1, gov(GovernanceOperation::ExecuteProposal, ereq)), &Address::new([9; 20]), 300, 1000)
+        .execute_tx(&mut candidate.view(), &signed(&submitter, 1, gov(GovernanceOperation::ExecuteProposal, ereq)), &Address::new([9; 20]), 300, 1000)
         .unwrap();
     assert!(matches!(r.status, TxStatus::Success), "execute: {:?}", r.status);
     (state, db)
@@ -259,6 +262,7 @@ fn release_exceeding_pool_fails_385_and_moves_nothing() {
     let recipient = Address::new([0x79; 20]);
     // Amount larger than the whole ecosystem pool → the execute tx fails 385.
     let (state, db, _dir, exec) = setup_with_params(params(true));
+    let mut candidate = common::candidate(&db);
     migrate(&state, &db);
     let validator = KeyPair::generate();
     let vset = [*validator.public_key().as_bytes()];
@@ -271,14 +275,14 @@ fn release_exceeding_pool_fails_385_and_moves_nothing() {
         token_id: QTOKEN, min_balance: 50, effective_height: 0,
         approvals: vec![qualify_approval(&validator, 50, 0)],
     }).unwrap();
-    exec.execute_tx_with_validators(&signed(&submitter, 0, gov(GovernanceOperation::RegisterQualifyingAsset, req)), &Address::new([9; 20]), 101, 1000, &vset).unwrap();
+    exec.execute_tx_with_validators(&mut candidate.view(), &signed(&submitter, 0, gov(GovernanceOperation::RegisterQualifyingAsset, req)), &Address::new([9; 20]), 101, 1000, &vset).unwrap();
     let creq = create_req(GovProposalClass::ReserveReleaseEcosystem, GovAssetKind::NativeEligibility, recipient, POOL_ECOSYSTEM + 1);
-    exec.execute_tx(&signed(&voter, 0, gov(GovernanceOperation::CreateProposal, creq)), &Address::new([9; 20]), 105, 1000).unwrap();
+    exec.execute_tx(&mut candidate.view(), &signed(&voter, 0, gov(GovernanceOperation::CreateProposal, creq)), &Address::new([9; 20]), 105, 1000).unwrap();
     let pid = generate_proposal_id(&voter.address(), &GovAssetKind::NativeEligibility, &[0xAB; 32], 105, 0);
     let vreq = bincode::serialize(&CastVoteRequest { proposal_id: pid, choice: VoteChoice::Yes }).unwrap();
-    exec.execute_tx(&signed(&voter, 1, gov(GovernanceOperation::CastVote, vreq)), &Address::new([9; 20]), 110, 1000).unwrap();
+    exec.execute_tx(&mut candidate.view(), &signed(&voter, 1, gov(GovernanceOperation::CastVote, vreq)), &Address::new([9; 20]), 110, 1000).unwrap();
     let ereq = bincode::serialize(&ExecuteProposalRequest { proposal_id: pid }).unwrap();
-    let r = exec.execute_tx(&signed(&submitter, 1, gov(GovernanceOperation::ExecuteProposal, ereq)), &Address::new([9; 20]), 300, 1000).unwrap();
+    let r = exec.execute_tx(&mut candidate.view(), &signed(&submitter, 1, gov(GovernanceOperation::ExecuteProposal, ereq)), &Address::new([9; 20]), 300, 1000).unwrap();
     assert!(matches!(r.status, TxStatus::Failed(385)), "over-pool release: {:?}", r.status);
     // Nothing moved.
     assert_eq!(state.get_balance(&recipient).unwrap(), 0);

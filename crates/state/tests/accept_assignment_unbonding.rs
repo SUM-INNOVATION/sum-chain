@@ -44,7 +44,8 @@ fn sm(op: StorageMetadataOperationV2) -> TxPayload {
 
 #[test]
 fn accept_assignment_v2_rejected_once_archive_unbonding() {
-    let (state, _db, _dir, executor) = setup_with_params(params_enabled());
+    let (state, db, _dir, executor) = setup_with_params(params_enabled());
+    let mut candidate = common::candidate(&db);
     let archive = KeyPair::generate();
     let owner = KeyPair::generate();
     let proposer = KeyPair::generate();
@@ -57,6 +58,7 @@ fn accept_assignment_v2_rejected_once_archive_unbonding() {
     // captures it in the active-archive set.
     let r = executor
         .execute_tx(
+            &mut candidate.view(),
             &signed(&archive, FEE, 0, nr(NodeRegistryOperation::Register {
                 role: NodeRole::ArchiveNode,
                 stake: STAKE,
@@ -72,6 +74,7 @@ fn accept_assignment_v2_rejected_once_archive_unbonding() {
     // whose snapshot (≤2) includes the Active archive.
     let r = executor
         .execute_tx(
+            &mut candidate.view(),
             &signed(&owner, FEE, 0, sm(StorageMetadataOperationV2::RegisterFilePendingV2 {
                 merkle_root,
                 plaintext_size_bytes: 500,
@@ -91,6 +94,7 @@ fn accept_assignment_v2_rejected_once_archive_unbonding() {
     // Height 3: while Active, the archive can accept the assignment.
     let ok = executor
         .execute_tx(
+            &mut candidate.view(),
             &signed(&archive, FEE, 1, sm(StorageMetadataOperationV2::AcceptAssignmentV2 {
                 merkle_root,
                 chunk_indices: vec![0],
@@ -105,6 +109,7 @@ fn accept_assignment_v2_rejected_once_archive_unbonding() {
     // Height 4: the archive begins unbonding (full exit) → Unbonding.
     let b = executor
         .execute_tx(
+            &mut candidate.view(),
             &signed(&archive, FEE, 2, nr(NodeRegistryOperation::BeginUnstake { amount: STAKE })),
             &proposer.address(),
             4,
@@ -119,6 +124,7 @@ fn accept_assignment_v2_rejected_once_archive_unbonding() {
     // transition.
     let rejected = executor
         .execute_tx(
+            &mut candidate.view(),
             &signed(&archive, FEE, 3, sm(StorageMetadataOperationV2::AcceptAssignmentV2 {
                 merkle_root,
                 chunk_indices: vec![0],

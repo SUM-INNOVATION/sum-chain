@@ -106,13 +106,14 @@ fn defaults_leave_archive_unbonding_dormant() {
 fn gate_closed_begin_unstake_rejects_320_no_mutation() {
     // v2 on, archive unbonding dormant (None).
     let (state, db, _dir, executor) = setup_with_params(ChainParams::with_v2_enabled());
+    let mut candidate = common::candidate(&db);
     let node = KeyPair::generate();
     let proposer = KeyPair::generate();
     fund(&state, &node, (STAKE as u128) + 1_000_000);
 
     // Register succeeds (registration is not gated).
     let r = executor
-        .execute_tx(&register_tx(&node, 0), &proposer.address(), 1, 1000)
+        .execute_tx(&mut candidate.view(), &register_tx(&node, 0), &proposer.address(), 1, 1000)
         .unwrap();
     assert!(r.status.is_success());
     let bal_after_reg = state.get_balance(&node.address()).unwrap();
@@ -121,6 +122,7 @@ fn gate_closed_begin_unstake_rejects_320_no_mutation() {
     // BeginUnstake with the gate closed → 320, no fee, nothing mutated.
     let res = executor
         .execute_tx(
+            &mut candidate.view(),
             &nr_signed(&node, FEE, 1, NodeRegistryOperation::BeginUnstake { amount: STAKE }),
             &proposer.address(),
             2,
@@ -137,13 +139,15 @@ fn gate_closed_begin_unstake_rejects_320_no_mutation() {
 
 #[test]
 fn gate_closed_withdraw_rejects_320_no_mutation() {
-    let (state, _db, _dir, executor) = setup_with_params(ChainParams::with_v2_enabled());
+    let (state, db, _dir, executor) = setup_with_params(ChainParams::with_v2_enabled());
+    let mut candidate = common::candidate(&db);
     let node = KeyPair::generate();
     let proposer = KeyPair::generate();
     fund(&state, &node, 10_000);
 
     let res = executor
         .execute_tx(
+            &mut candidate.view(),
             &nr_signed(&node, FEE, 0, NodeRegistryOperation::WithdrawUnbonded),
             &proposer.address(),
             1,
@@ -164,13 +168,14 @@ fn full_lifecycle_register_begin_withdraw() {
     let period = 10u64;
     let funded: u128 = (STAKE as u128) + 1_000_000;
     let (state, db, _dir, executor) = setup_with_params(params_enabled(period));
+    let mut candidate = common::candidate(&db);
     let node = KeyPair::generate();
     let proposer = KeyPair::generate();
     fund(&state, &node, funded);
 
     // 1. Register.
     let r = executor
-        .execute_tx(&register_tx(&node, 0), &proposer.address(), 1, 1000)
+        .execute_tx(&mut candidate.view(), &register_tx(&node, 0), &proposer.address(), 1, 1000)
         .unwrap();
     assert!(r.status.is_success());
     let rec = node_of(&db, &node.address()).unwrap();
@@ -181,6 +186,7 @@ fn full_lifecycle_register_begin_withdraw() {
     let begin_h = 5u64;
     let r = executor
         .execute_tx(
+            &mut candidate.view(),
             &nr_signed(&node, FEE, 1, NodeRegistryOperation::BeginUnstake { amount: STAKE }),
             &proposer.address(),
             begin_h,
@@ -209,6 +215,7 @@ fn full_lifecycle_register_begin_withdraw() {
     // 3. Withdraw before unlock → Failed(326), fee charged.
     let early = executor
         .execute_tx(
+            &mut candidate.view(),
             &nr_signed(&node, FEE, 2, NodeRegistryOperation::WithdrawUnbonded),
             &proposer.address(),
             begin_h + period - 1,
@@ -225,6 +232,7 @@ fn full_lifecycle_register_begin_withdraw() {
     let bal_before = state.get_balance(&node.address()).unwrap();
     let w = executor
         .execute_tx(
+            &mut candidate.view(),
             &nr_signed(&node, FEE, 3, NodeRegistryOperation::WithdrawUnbonded),
             &proposer.address(),
             begin_h + period,
@@ -252,12 +260,13 @@ fn full_lifecycle_register_begin_withdraw() {
 #[test]
 fn begin_unstake_partial_amount_rejects_323_fee_charged() {
     let (state, db, _dir, executor) = setup_with_params(params_enabled(10));
+    let mut candidate = common::candidate(&db);
     let node = KeyPair::generate();
     let proposer = KeyPair::generate();
     fund(&state, &node, (STAKE as u128) + 1_000_000);
 
     executor
-        .execute_tx(&register_tx(&node, 0), &proposer.address(), 1, 1000)
+        .execute_tx(&mut candidate.view(), &register_tx(&node, 0), &proposer.address(), 1, 1000)
         .unwrap();
     let bal_after_reg = state.get_balance(&node.address()).unwrap();
 
@@ -265,6 +274,7 @@ fn begin_unstake_partial_amount_rejects_323_fee_charged() {
     // policy deducts fee upfront before semantic checks).
     let res = executor
         .execute_tx(
+            &mut candidate.view(),
             &nr_signed(
                 &node,
                 FEE,
@@ -285,7 +295,8 @@ fn begin_unstake_partial_amount_rejects_323_fee_charged() {
 
 #[test]
 fn begin_unstake_not_archive_rejects_321() {
-    let (state, _db, _dir, executor) = setup_with_params(params_enabled(10));
+    let (state, db, _dir, executor) = setup_with_params(params_enabled(10));
+    let mut candidate = common::candidate(&db);
     let stranger = KeyPair::generate();
     let proposer = KeyPair::generate();
     fund(&state, &stranger, 1_000_000);
@@ -293,6 +304,7 @@ fn begin_unstake_not_archive_rejects_321() {
     // Never registered as any node.
     let res = executor
         .execute_tx(
+            &mut candidate.view(),
             &nr_signed(&stranger, FEE, 0, NodeRegistryOperation::BeginUnstake { amount: STAKE }),
             &proposer.address(),
             1,
@@ -304,18 +316,20 @@ fn begin_unstake_not_archive_rejects_321() {
 
 #[test]
 fn withdraw_no_record_rejects_325() {
-    let (state, _db, _dir, executor) = setup_with_params(params_enabled(10));
+    let (state, db, _dir, executor) = setup_with_params(params_enabled(10));
+    let mut candidate = common::candidate(&db);
     let node = KeyPair::generate();
     let proposer = KeyPair::generate();
     fund(&state, &node, (STAKE as u128) + 1_000_000);
 
     executor
-        .execute_tx(&register_tx(&node, 0), &proposer.address(), 1, 1000)
+        .execute_tx(&mut candidate.view(), &register_tx(&node, 0), &proposer.address(), 1, 1000)
         .unwrap();
 
     // Active archive, but no unbonding started.
     let res = executor
         .execute_tx(
+            &mut candidate.view(),
             &nr_signed(&node, FEE, 1, NodeRegistryOperation::WithdrawUnbonded),
             &proposer.address(),
             2,
@@ -328,12 +342,13 @@ fn withdraw_no_record_rejects_325() {
 #[test]
 fn begin_unstake_open_challenge_rejects_324() {
     let (state, db, _dir, executor) = setup_with_params(params_enabled(10));
+    let mut candidate = common::candidate(&db);
     let node = KeyPair::generate();
     let proposer = KeyPair::generate();
     fund(&state, &node, (STAKE as u128) + 1_000_000);
 
     executor
-        .execute_tx(&register_tx(&node, 0), &proposer.address(), 1, 1000)
+        .execute_tx(&mut candidate.view(), &register_tx(&node, 0), &proposer.address(), 1, 1000)
         .unwrap();
 
     // Inject an open challenge targeting this archive.
@@ -351,6 +366,7 @@ fn begin_unstake_open_challenge_rejects_324() {
 
     let res = executor
         .execute_tx(
+            &mut candidate.view(),
             &nr_signed(&node, FEE, 1, NodeRegistryOperation::BeginUnstake { amount: STAKE }),
             &proposer.address(),
             2,
@@ -368,15 +384,17 @@ fn begin_unstake_open_challenge_rejects_324() {
 fn slash_during_unbonding_keeps_status_and_reduces_remaining() {
     let period = 100u64;
     let (state, db, _dir, executor) = setup_with_params(params_enabled(period));
+    let mut candidate = common::candidate(&db);
     let node = KeyPair::generate();
     let proposer = KeyPair::generate();
     fund(&state, &node, (STAKE as u128) + 1_000_000);
 
     executor
-        .execute_tx(&register_tx(&node, 0), &proposer.address(), 1, 1000)
+        .execute_tx(&mut candidate.view(), &register_tx(&node, 0), &proposer.address(), 1, 1000)
         .unwrap();
     executor
         .execute_tx(
+            &mut candidate.view(),
             &nr_signed(&node, FEE, 1, NodeRegistryOperation::BeginUnstake { amount: STAKE }),
             &proposer.address(),
             2,
@@ -415,6 +433,7 @@ fn slash_during_unbonding_keeps_status_and_reduces_remaining() {
     let bal_before = state.get_balance(&node.address()).unwrap();
     let w = executor
         .execute_tx(
+            &mut candidate.view(),
             &nr_signed(&node, FEE, 2, NodeRegistryOperation::WithdrawUnbonded),
             &proposer.address(),
             2 + period,
@@ -435,15 +454,17 @@ fn withdrawn_node_skipped_by_expired_challenge() {
     // not slash (nothing to slash) — it's just cleaned up.
     let period = 5u64;
     let (state, db, _dir, executor) = setup_with_params(params_enabled(period));
+    let mut candidate = common::candidate(&db);
     let node = KeyPair::generate();
     let proposer = KeyPair::generate();
     fund(&state, &node, (STAKE as u128) + 1_000_000);
 
     executor
-        .execute_tx(&register_tx(&node, 0), &proposer.address(), 1, 1000)
+        .execute_tx(&mut candidate.view(), &register_tx(&node, 0), &proposer.address(), 1, 1000)
         .unwrap();
     executor
         .execute_tx(
+            &mut candidate.view(),
             &nr_signed(&node, FEE, 1, NodeRegistryOperation::BeginUnstake { amount: STAKE }),
             &proposer.address(),
             1,
@@ -452,6 +473,7 @@ fn withdrawn_node_skipped_by_expired_challenge() {
         .unwrap();
     executor
         .execute_tx(
+            &mut candidate.view(),
             &nr_signed(&node, FEE, 2, NodeRegistryOperation::WithdrawUnbonded),
             &proposer.address(),
             1 + period,
@@ -499,12 +521,14 @@ fn unbonding_record_survives_restart() {
         let state = Arc::new(sumchain_state::StateManager::new(db.clone(), CHAIN_ID));
         let executor =
             sumchain_state::executor::BlockExecutor::new(state.clone(), db.clone(), params_enabled(period));
+        let mut candidate = common::candidate(&db);
         fund(&state, &node, (STAKE as u128) + 1_000_000);
         executor
-            .execute_tx(&register_tx(&node, 0), &proposer.address(), 1, 1000)
+            .execute_tx(&mut candidate.view(), &register_tx(&node, 0), &proposer.address(), 1, 1000)
             .unwrap();
         executor
             .execute_tx(
+                &mut candidate.view(),
                 &nr_signed(&node, FEE, 1, NodeRegistryOperation::BeginUnstake { amount: STAKE }),
                 &proposer.address(),
                 begin_h,

@@ -45,13 +45,14 @@ fn assert_no_mutation(state: &sumchain_state::StateManager, sender: &Address, pr
 #[test]
 fn gate_closed_rejects_300_no_mutation() {
     // v2 enabled but governance dormant (None) and unconfigured.
-    let (state, _db, _dir, executor) = setup_with_params(ChainParams::with_v2_enabled());
+    let (state, db, _dir, executor) = setup_with_params(ChainParams::with_v2_enabled());
+    let mut candidate = common::candidate(&db);
     let sender = KeyPair::generate();
     let proposer = KeyPair::generate();
     fund(&state, &sender, 10_000);
 
     let tx = signed(&sender, 1_000, 0, gov_payload(GovernanceOperation::CreateProposal));
-    let res = executor.execute_tx(&tx, &proposer.address(), 1, 1000).unwrap();
+    let res = executor.execute_tx(&mut candidate.view(), &tx, &proposer.address(), 1, 1000).unwrap();
 
     assert!(matches!(res.status, TxStatus::Failed(300)), "gate closed, got {:?}", res.status);
     assert_eq!(res.fee_paid, 0);
@@ -64,13 +65,14 @@ fn gate_open_but_params_absent_rejects_301() {
     let mut params = ChainParams::with_v2_enabled();
     params.governance_enabled_from_height = Some(0);
     // params.governance stays None.
-    let (state, _db, _dir, executor) = setup_with_params(params);
+    let (state, db, _dir, executor) = setup_with_params(params);
+    let mut candidate = common::candidate(&db);
     let sender = KeyPair::generate();
     let proposer = KeyPair::generate();
     fund(&state, &sender, 10_000);
 
     let tx = signed(&sender, 1_000, 0, gov_payload(GovernanceOperation::CreateProposal));
-    let res = executor.execute_tx(&tx, &proposer.address(), 1, 1000).unwrap();
+    let res = executor.execute_tx(&mut candidate.view(), &tx, &proposer.address(), 1, 1000).unwrap();
 
     assert!(matches!(res.status, TxStatus::Failed(301)), "params absent, got {:?}", res.status);
     assert_eq!(res.fee_paid, 0);
@@ -84,7 +86,8 @@ fn gate_open_and_configured_op_unsupported_in_p3a_302() {
     let mut params = ChainParams::with_v2_enabled();
     params.governance_enabled_from_height = Some(0);
     params.governance = Some(test_gov_params());
-    let (state, _db, _dir, executor) = setup_with_params(params);
+    let (state, db, _dir, executor) = setup_with_params(params);
+    let mut candidate = common::candidate(&db);
     let sender = KeyPair::generate();
     let proposer = KeyPair::generate();
     fund(&state, &sender, 10_000);
@@ -97,7 +100,7 @@ fn gate_open_and_configured_op_unsupported_in_p3a_302() {
         GovernanceOperation::CancelProposal,
     ] {
         let tx = signed(&sender, 1_000, 0, gov_payload(op));
-        let res = executor.execute_tx(&tx, &proposer.address(), 1, 1000).unwrap();
+        let res = executor.execute_tx(&mut candidate.view(), &tx, &proposer.address(), 1, 1000).unwrap();
         assert!(matches!(res.status, TxStatus::Failed(302)), "op {:?} => {:?}", op, res.status);
         assert_eq!(res.fee_paid, 0);
     }

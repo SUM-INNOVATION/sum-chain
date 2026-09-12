@@ -127,3 +127,111 @@ pub fn build_signed_attestation_tx(
     let outer_sig = sign(outer_hash.as_bytes(), sender.private_key());
     SignedTransaction::new_v2(tx, *outer_sig.as_bytes(), *sender.public_key().as_bytes())
 }
+
+// ── Executing transactions against a candidate ───────────────────────────────
+//
+// `execute_tx` takes an `ExecutionView`, the handle onto one block's candidate.
+// Nothing it writes reaches the database until that candidate is published, so
+// a test that executes transactions has to decide which block they belong to.
+
+/// The per-block write-set ceiling these tests run under.
+///
+/// Mirrors the executor's own scaffolding constant, which is private. Both are
+/// stand-ins for the versioned consensus parameter that has to replace them
+/// before any of this is proposed for publication; a test that wanted to
+/// exercise the limit would set its own, not read this.
+pub const TEST_CANDIDATE_LIMIT: u64 = 1 << 30;
+
+/// One candidate for one block.
+///
+/// Every transaction in a same-block scenario must execute against the SAME
+/// candidate. A fresh candidate per transaction is a fresh block per
+/// transaction: the second transaction would not see what the first staged, so
+/// read-your-own-writes would silently not hold and a test that depends on it
+/// would pass for the wrong reason — or fail in a way that looks like a bug in
+/// the code under test.
+#[allow(dead_code)]
+pub fn candidate(db: &Database) -> sumchain_storage::candidate::CandidateExecution<'_> {
+    sumchain_storage::candidate::CandidateExecution::new(db, TEST_CANDIDATE_LIMIT)
+}
+
+/// The receipts one block's execution produced.
+///
+/// `execute_block` returns a `BlockExecution` whose candidate carries the
+/// receipts already bound to the accumulator that produced them, rather than a
+/// loose list a caller could substitute. This reads them back out; nothing is
+/// published.
+#[allow(dead_code)]
+pub fn receipts_of(
+    exec: sumchain_state::executor::BlockExecution<'_>,
+) -> Vec<sumchain_primitives::Receipt> {
+    let (executed, _state_diff, _contract_diff) = exec.into_parts();
+    executed.receipts().to_vec()
+}
+
+/// Execute `txs` as one block at `height` and PUBLISH it, the way a proposer
+/// does: `execute_block` -> fill in the computed root -> `accept_produced` ->
+/// `publish`.
+///
+/// This is the real publication path, not a shortcut around it. There is no way
+/// to turn a candidate into canonical state from outside `sumchain-storage`
+/// except through `AcceptedCandidate::publish`, and that is the point — a test
+/// fixture that could commit an overlay directly would be the escape hatch this
+/// work removes.
+///
+/// Use it where the SUBJECT is canonical state: a later block reading what an
+/// earlier one published, or mempool admission, which answers about the
+/// published chain rather than about a candidate. A same-block scenario wants
+/// [`candidate`] instead — publishing between transactions would make each one
+/// its own block and hide exactly the read-your-own-writes behaviour under
+/// test.
+///
+/// The root is written into the header AFTER execution and BEFORE acceptance,
+/// which is the producer's own order (`poa.rs`): the header cannot carry a root
+/// that has not been computed yet, and `accept_produced` refuses a block whose
+/// header root disagrees with what its execution produced. Filling it in is
+/// sound because `ExecutionSubject` binds height, parent, timestamp, tx root,
+/// proposer and transactions — everything except the root, which is the one
+/// field the producer is still allowed to set.
+///
+/// `accept_produced` is the honest acceptance here: a proposer writes the root
+/// it computed into the header it is about to sign, so there is no independent
+/// value to check it against.
+#[allow(dead_code)]
+pub fn publish_block(
+    state: &Arc<sumchain_state::state::StateManager>,
+    executor: &BlockExecutor,
+    height: u64,
+    proposer_pubkey: &[u8; 32],
+    txs: Vec<SignedTransaction>,
+    validators: &[[u8; 32]],
+) -> Vec<sumchain_primitives::Receipt> {
+    use sumchain_primitives::{Block, BlockHeader, Hash};
+
+    let header = BlockHeader::new(
+        Hash::ZERO,
+        height,
+        1000,
+        Hash::ZERO,
+        Hash::ZERO,
+        *proposer_pubkey,
+    );
+    let mut block = Block::new(header, txs);
+
+    let exec = executor
+        .execute_block(&block, state.state_root(), validators)
+        .expect("execute_block");
+    block.header.state_root = exec.computed_root();
+
+    let (executed, _state_diff, _contract_diff) = exec.into_parts();
+    let receipts = executed.receipts().to_vec();
+    let accepted = executed.accept_produced(&block).expect("accept_produced");
+    let accumulator = accepted.accumulator();
+    accepted.publish().expect("publish");
+
+    // The in-memory accumulator advances only after the commit is durable,
+    // which is what the producer does — and it must, or the next block chains
+    // from a root that was never published.
+    state.set_state_root(accumulator);
+    receipts
+}
