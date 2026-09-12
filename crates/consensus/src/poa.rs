@@ -446,7 +446,7 @@ impl PoAEngine {
             .executor
             .execute_block(&block, self.state.state_root(), &active_validators)?;
         let state_root = execution.computed_root();
-        let (executed, receipts, state_diff, contract_diff) = execution.into_parts();
+        let (executed, state_diff, contract_diff) = execution.into_parts();
 
         // Update state root in header
         block.header.state_root = state_root;
@@ -468,7 +468,7 @@ impl PoAEngine {
                 warn!("Failed to index transaction {}: {}", tx.hash(), e);
             }
         }
-        for receipt in &receipts {
+        for receipt in executed.receipts() {
             receipt_store.put(receipt)?;
         }
 
@@ -545,7 +545,7 @@ impl PoAEngine {
             .executor
             .execute_block(&block, self.state.state_root(), &active_validators)?;
         let state_root = execution.computed_root();
-        let (executed, receipts, state_diff, contract_diff) = execution.into_parts();
+        let (executed, state_diff, contract_diff) = execution.into_parts();
 
         // Verify state root matches
         //
@@ -593,7 +593,7 @@ impl PoAEngine {
                 warn!("Failed to index transaction {}: {}", tx.hash(), e);
             }
         }
-        for receipt in &receipts {
+        for receipt in executed.receipts() {
             receipt_store.put(receipt)?;
         }
 

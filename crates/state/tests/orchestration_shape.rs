@@ -44,7 +44,7 @@ fn acceptance_takes_only_the_block() {
     for name in ["accept_produced", "accept_imported"] {
         let sig = signature(&src, name);
         assert!(
-            sig.contains("block: &Block"),
+            sig.contains("block: &Block") || sig.contains("block: &'a Block"),
             "{name} must accept the block itself:\n{sig}"
         );
         assert!(
@@ -141,5 +141,39 @@ fn exactly_one_publication_function_exists() {
         overlay.matches("pub fn into_batch").count(),
         0,
         "no public batch escape may exist on the overlay"
+    );
+}
+
+/// The legacy-adoption warning must follow the commit, not precede it.
+///
+/// A warning emitted at acceptance says a block's header root WAS adopted, and
+/// would say it even when staging or the commit then failed and nothing
+/// published. An operator reading logs would believe unverified state had
+/// entered the chain when it had not.
+///
+/// This is a source-position guard, and that is what it can be: asserting "no
+/// log line was emitted" needs a capturing subscriber, which this crate has no
+/// reason to install. The behavioural half — that a failed publication writes
+/// nothing — is covered by `a_failed_publication_emits_no_adoption_message` in
+/// the storage crate.
+#[test]
+fn the_legacy_warning_is_emitted_only_after_the_commit() {
+    let src = candidate_src();
+    let commit = src
+        .find("self.overlay.into_batch()?.commit()?;")
+        .expect("publish must end in a commit");
+    let warning = src
+        .find("historical compatibility allowance")
+        .expect("the legacy adoption warning must exist");
+    assert!(
+        warning > commit,
+        "the legacy warning appears BEFORE the commit, so it would announce an \
+         adoption that a later staging or commit failure prevented"
+    );
+
+    // And it must describe a completed action, not a pending one.
+    assert!(
+        src.contains("published a block whose computed root"),
+        "the warning must read as a report of what happened, not an intention"
     );
 }

@@ -585,7 +585,7 @@ impl<'a> TxIndexStore<'a> {
     }
 
     /// Create key for sender index: sender (20 bytes) + height (8 bytes BE) + tx_index (4 bytes BE)
-    fn sender_key(sender: &Address, height: BlockHeight, tx_index: u32) -> Vec<u8> {
+    pub(crate) fn sender_key(sender: &Address, height: BlockHeight, tx_index: u32) -> Vec<u8> {
         let mut key = Vec::with_capacity(32);
         key.extend_from_slice(sender.as_bytes());
         key.extend_from_slice(&height.to_be_bytes());
@@ -594,7 +594,7 @@ impl<'a> TxIndexStore<'a> {
     }
 
     /// Create key for recipient index: recipient (20 bytes) + height (8 bytes BE) + tx_index (4 bytes BE)
-    fn recipient_key(recipient: &Address, height: BlockHeight, tx_index: u32) -> Vec<u8> {
+    pub(crate) fn recipient_key(recipient: &Address, height: BlockHeight, tx_index: u32) -> Vec<u8> {
         let mut key = Vec::with_capacity(32);
         key.extend_from_slice(recipient.as_bytes());
         key.extend_from_slice(&height.to_be_bytes());

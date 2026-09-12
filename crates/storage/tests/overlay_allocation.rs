@@ -218,3 +218,76 @@ fn a_post_commit_clone_would_abort_instead_of_erroring() {
          part of the write."
     );
 }
+
+// ── The execution subject keeps no copy of the block's payload ─────────────
+
+use sumchain_primitives::{Address, Block, BlockHeader, Hash, SignedTransaction, Transaction};
+use sumchain_storage::candidate::ExecutionSubject;
+
+fn big_tx(seed: u8, payload: usize) -> SignedTransaction {
+    // Memo-sized payload lives in the signature and pubkey arrays only, so grow
+    // the transaction count instead to make the serialized vector large.
+    let _ = payload;
+    let t = Transaction::new(
+        1,
+        Address::new([seed; 20]),
+        Address::new([seed.wrapping_add(1); 20]),
+        100,
+        7,
+        seed as u64,
+    );
+    SignedTransaction::new(t, [seed; 64], [seed; 32])
+}
+
+/// A block whose serialized transaction vector is comfortably larger than any
+/// incidental allocation the hasher makes.
+fn heavy_block(n: usize) -> Block {
+    let header = BlockHeader::new(
+        Hash::hash(b"parent"),
+        9,
+        1_000,
+        Hash::hash(b"txroot"),
+        Hash::hash(b"root"),
+        [7u8; 32],
+    );
+    let txs: Vec<SignedTransaction> = (0..n).map(|i| big_tx((i % 251) as u8, 0)).collect();
+    Block::new(header, txs)
+}
+
+#[test]
+fn capturing_a_subject_does_not_copy_the_transaction_payload() {
+    // Roughly 150 bytes per serialized transaction; 4000 of them is several
+    // hundred KB. An implementation that collected `Vec<Vec<u8>>` would show a
+    // single allocation on that order, plus one per transaction.
+    let block = heavy_block(4_000);
+    let serialized = bincode::serialize(&block.transactions).expect("serialize");
+    let payload = serialized.len();
+    assert!(payload > 100_000, "fixture payload too small: {payload}");
+    drop(serialized);
+
+    let (subject, peak) = peak_alloc_during(|| ExecutionSubject::of(&block).expect("subject"));
+    // The subject is produced; what matters is what capturing it cost.
+    let _ = subject;
+
+    assert!(
+        peak < payload / 8,
+        "capturing the subject allocated {peak} bytes against a {payload}-byte \
+         transaction payload — it is buffering the block's transactions instead \
+         of streaming them into the hasher, which puts a second copy of the \
+         payload outside the overlay's checked limit"
+    );
+}
+
+#[test]
+fn the_subject_is_fixed_size_regardless_of_block_size() {
+    // Same structural point from the other direction: a small and a large block
+    // produce subjects of identical size.
+    let small = ExecutionSubject::of(&heavy_block(1)).unwrap();
+    let large = ExecutionSubject::of(&heavy_block(4_000)).unwrap();
+    assert_eq!(
+        std::mem::size_of_val(&small),
+        std::mem::size_of_val(&large),
+        "ExecutionSubject must not grow with the block"
+    );
+    assert_ne!(small, large, "and must still distinguish them");
+}

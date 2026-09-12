@@ -11,7 +11,29 @@ use sumchain_primitives::{
     NodeRegistryOperation, Receipt, SignedTransaction, StorageMetadataOperationV2, TransactionV2,
     TxPayload, TxStatus, CHALLENGE_INTERVAL_BLOCKS, SLASH_PERCENTAGE,
 };
-use sumchain_storage::candidate::{CandidateExecution, ExecutedCandidate};
+use sumchain_storage::candidate::{
+    CandidateExecution, ExecutedCandidate, BlockJournals, ExecutionSubject, JournalRecord,
+};
+
+/// Encode an account undo journal, or state that there is nothing to undo.
+fn encode_journal(diff: &StateDiff) -> Result<JournalRecord> {
+    if diff.changes.is_empty() {
+        return Ok(JournalRecord::NothingToUndo);
+    }
+    Ok(JournalRecord::Recorded(bincode::serialize(diff).map_err(
+        |e| StateError::SerializationError(e.to_string()),
+    )?))
+}
+
+/// Encode a contract undo journal, or state that there is nothing to undo.
+fn encode_contract_journal(diff: &ContractStateDiff) -> Result<JournalRecord> {
+    if diff.records.is_empty() {
+        return Ok(JournalRecord::NothingToUndo);
+    }
+    Ok(JournalRecord::Recorded(bincode::serialize(diff).map_err(
+        |e| StateError::SerializationError(e.to_string()),
+    )?))
+}
 use sumchain_storage::exec_view::ExecutionView;
 use sumchain_storage::schema::{ContractStateDiff, StateDiff};
 use sumchain_storage::Database;
@@ -266,10 +288,10 @@ const CANDIDATE_LIMIT_SCAFFOLD: u64 = 1 << 30;
 /// the rollback, and is why a rejected block leaves no trace once the remaining
 /// direct writes are migrated.
 pub struct BlockExecution<'db> {
-    receipts: Vec<Receipt>,
     state_diff: StateDiff,
     contract_diff: ContractStateDiff,
-    /// Buffered writes with the computed accumulator already bound to them.
+    /// Buffered writes with the accumulator, receipts and journals this
+    /// execution produced already bound to them.
     executed: ExecutedCandidate<'db>,
 }
 
@@ -280,22 +302,13 @@ impl<'db> BlockExecution<'db> {
         self.executed.computed_root()
     }
 
-    pub fn receipts(&self) -> &[Receipt] {
-        &self.receipts
-    }
-
     /// Take the parts apart for publication.
     ///
     /// Fields are private and there is no public constructor, so a
     /// `BlockExecution` can only come from `execute_block` — a caller cannot
     /// assemble one around a candidate whose root it chose.
-    pub fn into_parts(self) -> (ExecutedCandidate<'db>, Vec<Receipt>, StateDiff, ContractStateDiff) {
-        (
-            self.executed,
-            self.receipts,
-            self.state_diff,
-            self.contract_diff,
-        )
+    pub fn into_parts(self) -> (ExecutedCandidate<'db>, StateDiff, ContractStateDiff) {
+        (self.executed, self.state_diff, self.contract_diff)
     }
 }
 
@@ -3029,6 +3042,14 @@ impl BlockExecutor {
         // the parameter before any of this is proposed for publication.
         let mut candidate = CandidateExecution::new(&self.db, CANDIDATE_LIMIT_SCAFFOLD);
 
+        // Capture WHICH block this execution is for, before executing it. The
+        // accumulator and receipts prove artifacts came from an execution; the
+        // subject proves they came from an execution of this block, so a
+        // candidate cannot later be accepted against a block that kept the
+        // transactions and root but changed its height, parent, timestamp or
+        // proposer.
+        let subject = ExecutionSubject::of(block)?;
+
         for (idx, tx) in block.transactions.iter().enumerate() {
             // Record pre-execution state for diff
             let sender = tx.sender();
@@ -3158,7 +3179,16 @@ impl BlockExecutor {
         // contracts gate is open, and the C1 state digest once the compute-pool
         // gate is open — see compute_block_state_root).
         let state_root = self.compute_block_state_root(block, &receipts, &contract_diff)?;
-        self.state.set_state_root(state_root);
+
+        // The in-memory accumulator is NOT advanced here.
+        //
+        // `execute_block` runs before the block has been accepted, so a block
+        // that is about to be rejected — a root mismatch above the compatibility
+        // cutoff, or a side block that loses fork choice — would otherwise have
+        // already moved the accumulator the NEXT execution chains from. The
+        // update belongs after the canonical batch commits, taken from
+        // `AcceptedCandidate::accumulator()`, which is the value actually
+        // published and which differs from this one on the legacy branch.
 
         info!(
             "Block {} executed, new state root: {}",
@@ -3170,11 +3200,29 @@ impl BlockExecutor {
         // execution produced to the buffered writes, and is called nowhere else —
         // `execution_boundary.rs` pins that. From here the root travels with the
         // candidate, so acceptance cannot be handed a different value.
+        // Journals are encoded here, where the diffs are produced, and bound to
+        // the candidate alongside the accumulator and receipts. Supplying them
+        // separately at publication time would let a caller substitute an undo
+        // record for a block it did not execute.
+        let account_journal = encode_journal(&state_diff)?;
+        let contract_journal = encode_contract_journal(&contract_diff)?;
+
         Ok(BlockExecution {
-            receipts,
             state_diff,
             contract_diff,
-            executed: candidate.finish_execution(state_root),
+            executed: candidate.finish_execution(
+                subject,
+                state_root,
+                receipts,
+                BlockJournals {
+                    account: account_journal,
+                    contract: contract_journal,
+                    // Both gates are `None` in production, so neither journal is
+                    // ever written; presence, not the gate, drives the revert.
+                    compute_pool: JournalRecord::NothingToUndo,
+                    beacon: JournalRecord::NothingToUndo,
+                },
+            ),
         })
     }
 

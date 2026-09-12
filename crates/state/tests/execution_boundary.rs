@@ -244,13 +244,20 @@ fn the_guard_actually_detects_a_direct_mutation() {
 
 // ── The execution-completion binding ───────────────────────────────────────
 //
-// `finish_execution` is what ties the accumulator execution produced to the
-// buffered writes. Acceptance then has no `Hash` parameter, so a caller cannot
-// hand it the header's own root — which is how an earlier version of this API
-// could be made to accept anything.
+// `finish_execution` ties the execution subject, accumulator, receipts and
+// journals to the buffered writes. Acceptance then takes only `&Block`, so a
+// caller cannot hand it a root, a receipt set, or a journal.
 //
-// That binding is only worth anything if it happens exactly once, at the point
-// execution actually finishes. A second call site could bind a different value.
+// `finish_execution` is PUBLIC, and has to be: `sumchain-state` calls it across
+// a crate boundary, so Rust visibility cannot restrict it to one call site.
+// Provenance rests on two things instead — `BlockExecution` is opaque, with
+// private fields and no public constructor, so a candidate can only reach a
+// caller by way of `execute_block`; and this guard pins the binding to exactly
+// one call site, so a second one cannot appear without a test failing.
+//
+// Neither is Rust-enforced globally. Stating that plainly matters more than the
+// guard reading stronger than it is: a reviewer who believes visibility is doing
+// the work will not notice when the guard is deleted.
 
 /// Every `.rs` file in the workspace's state and consensus crates.
 fn workspace_sources() -> Vec<(String, String)> {
@@ -315,6 +322,9 @@ fn acceptance_takes_no_hash_from_its_caller() {
             "{name} must take only &Block — a Hash parameter would let a caller \
              supply the value acceptance is supposed to check against:\n{sig}"
         );
-        assert!(sig.contains("block: &Block"), "{name} must take the block:\n{sig}");
+        assert!(
+            sig.contains("block: &Block") || sig.contains("block: &'a Block"),
+            "{name} must take the block:\n{sig}"
+        );
     }
 }
