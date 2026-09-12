@@ -16,6 +16,7 @@ use std::sync::Arc;
 use sumchain_genesis::ChainParams;
 use sumchain_primitives::inference_attestation::inference_attestation_key;
 use sumchain_primitives::inference_attestation::InferenceAttestationDigest;
+use sumchain_primitives::inference_attestation::InferenceAttestationRecord;
 use sumchain_primitives::inference_settlement::{
     session_key, session_prefix, settlement_entry_key, verifier_key, InferenceClaim,
     InferenceClaimStatus, InferenceConsistencyConfig, InferenceDispute, InferenceDisputeStatus,
@@ -88,6 +89,89 @@ pub struct InferenceSettlementExecutor {
     db: Arc<Database>,
 }
 
+/// Whether one attestation lends consistency weight to `target`.
+///
+/// The rule, shared by the candidate and committed counts so they cannot
+/// disagree — a group size decides a payout, and two copies that drift would
+/// decide it differently depending on who asked.
+fn counts_toward_group(
+    att: &InferenceAttestationRecord,
+    target: &InferenceAttestationDigest,
+    claim_height: u64,
+    finality_depth: u64,
+    dispute: Option<InferenceDisputeStatus>,
+) -> bool {
+    // Full-tuple equality — the four digest commitments, not response_hash
+    // alone. (session_id is constant across the group, so it is excluded.)
+    if att.digest.model_hash != target.model_hash
+        || att.digest.manifest_root != target.manifest_root
+        || att.digest.response_hash != target.response_hash
+        || att.digest.proof_root != target.proof_root
+    {
+        return false;
+    }
+    // Only finalized attestations count — prevents a flash of not-yet-final
+    // attestations from manufacturing a plurality in the same block.
+    if att.included_at_height.saturating_add(finality_depth) > claim_height {
+        return false;
+    }
+    // A disputed (open) or denied attestation lends no consistency weight.
+    !matches!(
+        dispute,
+        Some(InferenceDisputeStatus::Open) | Some(InferenceDisputeStatus::ResolvedDenyClaim)
+    )
+}
+
+/// Σ `remaining_escrow` over a session-row stream.
+///
+/// Shared by the committed and candidate totals so the two cannot decode or
+/// accumulate differently — this feeds the supply correction's reserve delta,
+/// and a divergence between the value a block mints against and the value a
+/// diagnostic reports is precisely the kind that goes unnoticed.
+///
+/// The stream is fallible because the candidate's merged scan is: a read error
+/// ends the sum loudly rather than producing a short total that would mint too
+/// large a delta.
+fn sum_escrow<I>(rows: I) -> Result<u128>
+where
+    I: Iterator<Item = Result<(Vec<u8>, Vec<u8>)>>,
+{
+    let mut sum: u128 = 0;
+    for row in rows {
+        let (key, value) = row?;
+        if key.len() != 32 {
+            continue;
+        }
+        let s: InferenceSession = bincode::deserialize(&value)
+            .map_err(|e| StateError::SerializationError(e.to_string()))?;
+        sum = sum.checked_add(s.remaining_escrow).ok_or_else(|| {
+            StateError::BlockValidation("inference escrow sum overflow".to_string())
+        })?;
+    }
+    Ok(sum)
+}
+
+/// Σ verifier `bond` over a verifier-row stream. Shared for the same reason as
+/// [`sum_escrow`].
+fn sum_bonds<I>(rows: I) -> Result<u128>
+where
+    I: Iterator<Item = Result<(Vec<u8>, Vec<u8>)>>,
+{
+    let mut sum: u128 = 0;
+    for row in rows {
+        let (key, value) = row?;
+        if key.len() != 32 {
+            continue;
+        }
+        let r: InferenceVerifierRecord = bincode::deserialize(&value)
+            .map_err(|e| StateError::SerializationError(e.to_string()))?;
+        sum = sum.checked_add(r.bond).ok_or_else(|| {
+            StateError::BlockValidation("inference verifier bond sum overflow".to_string())
+        })?;
+    }
+    Ok(sum)
+}
+
 impl InferenceSettlementExecutor {
     pub fn new(db: Arc<Database>) -> Self {
         Self { db }
@@ -144,16 +228,16 @@ impl InferenceSettlementExecutor {
 
         match operation {
             InferenceSettlementOperation::OpenSession(req) => {
-                self.open_session(sender, req, state, block_height, chain_params)
+                self.open_session(view, sender, req, state, block_height, chain_params)
             }
             InferenceSettlementOperation::FundSession(req) => {
-                self.fund_session(sender, &req.session_id, req.amount, state)
+                self.fund_session(view, sender, &req.session_id, req.amount, state)
             }
             InferenceSettlementOperation::ClaimReward(req) => {
                 self.claim_reward(view, sender, &req.session_id, state, block_height, chain_params)
             }
             InferenceSettlementOperation::OpenDispute(req) => {
-                self.open_dispute(sender, req, block_height, chain_params)
+                self.open_dispute(view, sender, req, block_height, chain_params)
             }
             InferenceSettlementOperation::ResolveDispute(req) => {
                 self.resolve_dispute(
@@ -167,20 +251,20 @@ impl InferenceSettlementExecutor {
                 )
             }
             InferenceSettlementOperation::RefundSession(req) => {
-                self.refund_session(sender, &req.session_id, state, block_height, chain_params)
+                self.refund_session(view, sender, &req.session_id, state, block_height, chain_params)
             }
             // ── Verifier bonding (issue #78) ──
             InferenceSettlementOperation::RegisterVerifier(req) => {
-                self.register_verifier(sender, req.bond, state, block_height, chain_params)
+                self.register_verifier(view, sender, req.bond, state, block_height, chain_params)
             }
             InferenceSettlementOperation::AddVerifierBond(req) => {
-                self.add_verifier_bond(sender, req.amount, state, block_height, chain_params)
+                self.add_verifier_bond(view, sender, req.amount, state, block_height, chain_params)
             }
             InferenceSettlementOperation::BeginVerifierUnbond => {
-                self.begin_verifier_unbond(sender, block_height, chain_params)
+                self.begin_verifier_unbond(view, sender, block_height, chain_params)
             }
             InferenceSettlementOperation::WithdrawVerifierBond => {
-                self.withdraw_verifier_bond(sender, state, block_height, chain_params)
+                self.withdraw_verifier_bond(view, sender, state, block_height, chain_params)
             }
         }
     }
@@ -197,13 +281,14 @@ impl InferenceSettlementExecutor {
 
     fn open_session(
         &self,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         req: &OpenInferenceSessionRequest,
         state: &StateManager,
         block_height: u64,
         chain_params: &ChainParams,
     ) -> Result<InferenceSettlementExecutionResult> {
-        if self.get_session(&req.session_id)?.is_some() {
+        if Self::v_get_session(view, &req.session_id)?.is_some() {
             return Ok(InferenceSettlementExecutionResult::fail(
                 352,
                 "inference session already exists",
@@ -315,7 +400,7 @@ impl InferenceSettlementExecutor {
             consistency: req.consistency,
             bond_requirement: req.bond_requirement,
         };
-        self.put_session(&session)?;
+        Self::v_put_session(view, &session)?;
         info!(
             "InferenceSettlement OpenSession {} funder={} deposit={}",
             req.session_id, sender, req.deposit
@@ -325,12 +410,13 @@ impl InferenceSettlementExecutor {
 
     fn fund_session(
         &self,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         session_id: &str,
         amount: u128,
         state: &StateManager,
     ) -> Result<InferenceSettlementExecutionResult> {
-        let mut session = match self.get_session(session_id)? {
+        let mut session = match Self::v_get_session(view, session_id)? {
             Some(s) => s,
             None => return Ok(InferenceSettlementExecutionResult::fail(352, "session not found")),
         };
@@ -354,7 +440,7 @@ impl InferenceSettlementExecutor {
         }
         state.deduct(sender, amount)?;
         session.remaining_escrow = session.remaining_escrow.saturating_add(amount);
-        self.put_session(&session)?;
+        Self::v_put_session(view, &session)?;
         Ok(InferenceSettlementExecutionResult::ok())
     }
 
@@ -367,7 +453,7 @@ impl InferenceSettlementExecutor {
         block_height: u64,
         chain_params: &ChainParams,
     ) -> Result<InferenceSettlementExecutionResult> {
-        let mut session = match self.get_session(session_id)? {
+        let mut session = match Self::v_get_session(view, session_id)? {
             Some(s) => s,
             None => return Ok(InferenceSettlementExecutionResult::fail(352, "session not found")),
         };
@@ -376,7 +462,7 @@ impl InferenceSettlementExecutor {
         }
         // The signer must be the verifier of an existing attestation for this session.
         let att_key = inference_attestation_key(session_id, sender);
-        let att = match InferenceAttestationExecutor::new(self.db.clone()).get(&att_key)? {
+        let att = match InferenceAttestationExecutor::v_get(view, &att_key)? {
             Some(a) => a,
             None => {
                 return Ok(InferenceSettlementExecutionResult::fail(
@@ -400,7 +486,7 @@ impl InferenceSettlementExecutor {
         }
         // A dispute against this verifier blocks the claim (open = pending,
         // denied = withheld). Only an allow-claim resolution or no dispute passes.
-        if let Some(d) = self.get_dispute(session_id, sender)? {
+        if let Some(d) = Self::v_get_dispute(view, session_id, sender)? {
             match d.status {
                 InferenceDisputeStatus::Open | InferenceDisputeStatus::ResolvedDenyClaim => {
                     return Ok(InferenceSettlementExecutionResult::fail(
@@ -411,7 +497,7 @@ impl InferenceSettlementExecutor {
                 InferenceDisputeStatus::ResolvedAllowClaim => {}
             }
         }
-        if self.get_claim(session_id, sender)?.is_some() {
+        if Self::v_get_claim(view, session_id, sender)?.is_some() {
             return Ok(InferenceSettlementExecutionResult::fail(358, "reward already claimed"));
         }
         // Consistency/plurality rule (issue #77). Only when the session opted in.
@@ -419,7 +505,8 @@ impl InferenceSettlementExecutor {
         // qualifying claimant is by construction a member of the winning group — a
         // divergent-digest verifier can never ride another group's plurality.
         if let Some(cfg) = session.consistency {
-            let matching = self.consistency_group_size(
+            let matching = Self::v_consistency_group_size(
+                view,
                 session_id,
                 &att.digest,
                 block_height,
@@ -435,7 +522,7 @@ impl InferenceSettlementExecutor {
         // Verifier-bond gating (issue #78). Only for bond-required sessions.
         // Deterministic order: missing record (367) → not Active (368) → too low (370).
         if let Some(bond_req) = session.bond_requirement {
-            let record = self.get_verifier(sender)?;
+            let record = Self::v_get_verifier(view, sender)?;
             match record {
                 None => {
                     return Ok(InferenceSettlementExecutionResult::fail(
@@ -488,8 +575,8 @@ impl InferenceSettlementExecutor {
         }
         session.remaining_escrow -= session.reward_per_verifier;
         session.claims_count += 1;
-        self.put_session(&session)?;
-        self.put_claim(&InferenceClaim {
+        Self::v_put_session(view, &session)?;
+        Self::v_put_claim(view, &InferenceClaim {
             session_id: session_id.to_string(),
             verifier: *sender,
             amount: session.reward_per_verifier,
@@ -505,6 +592,7 @@ impl InferenceSettlementExecutor {
 
     fn open_dispute(
         &self,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         req: &OpenInferenceDisputeRequest,
         block_height: u64,
@@ -519,7 +607,7 @@ impl InferenceSettlementExecutor {
                 "disputes disabled: no dispute threshold configured",
             ));
         }
-        let session = match self.get_session(&req.session_id)? {
+        let session = match Self::v_get_session(view, &req.session_id)? {
             Some(s) => s,
             None => return Ok(InferenceSettlementExecutionResult::fail(352, "session not found")),
         };
@@ -533,7 +621,7 @@ impl InferenceSettlementExecutor {
         // Target must have an attestation, and the dispute must be raised BEFORE
         // the claim matures (during the dispute window).
         let att_key = inference_attestation_key(&req.session_id, &req.verifier);
-        let att = match InferenceAttestationExecutor::new(self.db.clone()).get(&att_key)? {
+        let att = match InferenceAttestationExecutor::v_get(view, &att_key)? {
             Some(a) => a,
             None => {
                 return Ok(InferenceSettlementExecutionResult::fail(
@@ -553,10 +641,10 @@ impl InferenceSettlementExecutor {
                 "claim already mature; cannot open dispute",
             ));
         }
-        if self.get_dispute(&req.session_id, &req.verifier)?.is_some() {
+        if Self::v_get_dispute(view, &req.session_id, &req.verifier)?.is_some() {
             return Ok(InferenceSettlementExecutionResult::fail(358, "dispute already exists"));
         }
-        self.put_dispute(&InferenceDispute {
+        Self::v_put_dispute(view, &InferenceDispute {
             session_id: req.session_id.clone(),
             verifier: req.verifier,
             opener: *sender,
@@ -611,11 +699,11 @@ impl InferenceSettlementExecutor {
                 "resolve dispute: validator quorum not met",
             ));
         }
-        let session = match self.get_session(&req.session_id)? {
+        let session = match Self::v_get_session(view, &req.session_id)? {
             Some(s) => s,
             None => return Ok(InferenceSettlementExecutionResult::fail(352, "session not found")),
         };
-        let mut dispute = match self.get_dispute(&req.session_id, &req.verifier)? {
+        let mut dispute = match Self::v_get_dispute(view, &req.session_id, &req.verifier)? {
             Some(d) => d,
             None => return Ok(InferenceSettlementExecutionResult::fail(352, "dispute not found")),
         };
@@ -632,7 +720,7 @@ impl InferenceSettlementExecutor {
         };
         dispute.allow_claim = req.allow_claim;
         dispute.resolved_at_height = Some(block_height);
-        self.put_dispute(&dispute)?;
+        Self::v_put_dispute(view, &dispute)?;
 
         // Slashing (issue #78) happens ONLY here, on a validator-quorum DENIED
         // dispute, and ONLY when the session carries a bond requirement with a
@@ -646,7 +734,7 @@ impl InferenceSettlementExecutor {
         if !req.allow_claim {
             if let Some(bond_req) = session.bond_requirement {
                 if bond_req.slash_bps_on_denied_dispute > 0 {
-                    if let Some(mut record) = self.get_verifier(&req.verifier)? {
+                    if let Some(mut record) = Self::v_get_verifier(view, &req.verifier)? {
                         let slash = record
                             .bond
                             .saturating_mul(bond_req.slash_bps_on_denied_dispute as u128)
@@ -654,7 +742,7 @@ impl InferenceSettlementExecutor {
                         let slash = slash.min(record.bond); // cap at current bond
                         if slash > 0 {
                             record.bond -= slash;
-                            self.put_verifier(&record)?;
+                            Self::v_put_verifier(view, &record)?;
                             state.credit(&Address::ZERO, slash)?; // auditable burn
                             slashed = slash;
                         }
@@ -686,13 +774,14 @@ impl InferenceSettlementExecutor {
 
     fn refund_session(
         &self,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         session_id: &str,
         state: &StateManager,
         block_height: u64,
         chain_params: &ChainParams,
     ) -> Result<InferenceSettlementExecutionResult> {
-        let mut session = match self.get_session(session_id)? {
+        let mut session = match Self::v_get_session(view, session_id)? {
             Some(s) => s,
             None => return Ok(InferenceSettlementExecutionResult::fail(352, "session not found")),
         };
@@ -715,7 +804,7 @@ impl InferenceSettlementExecutor {
             ));
         }
         // No unresolved disputes may remain (they must be resolved first).
-        for d in self.list_disputes(session_id)? {
+        for d in Self::v_list_disputes(view, session_id)? {
             if d.status == InferenceDisputeStatus::Open {
                 return Ok(InferenceSettlementExecutionResult::fail(
                     359,
@@ -729,11 +818,11 @@ impl InferenceSettlementExecutor {
         // claim (maturity not yet elapsed, not already claimed, not denied).
         // This guards against parameter/record edge cases where a late
         // attestation matures after `expires_at_height`.
-        let aexec = InferenceAttestationExecutor::new(self.db.clone());
-        for verifier in aexec.list_verifiers_by_session(session_id)? {
-            let att = match aexec
-                .get(&inference_attestation_key(session_id, &verifier))?
-            {
+                for verifier in InferenceAttestationExecutor::v_list_verifiers_by_session(view, session_id)? {
+            let att = match InferenceAttestationExecutor::v_get(
+                view,
+                &inference_attestation_key(session_id, &verifier),
+            )? {
                 Some(a) => a,
                 None => continue,
             };
@@ -745,9 +834,9 @@ impl InferenceSettlementExecutor {
             if block_height >= maturity {
                 continue; // matured — the claim window has closed for this verifier
             }
-            let already_claimed = self.get_claim(session_id, &verifier)?.is_some();
+            let already_claimed = Self::v_get_claim(view, session_id, &verifier)?.is_some();
             let denied = matches!(
-                self.get_dispute(session_id, &verifier)?.map(|d| d.status),
+                Self::v_get_dispute(view, session_id, &verifier)?.map(|d| d.status),
                 Some(InferenceDisputeStatus::ResolvedDenyClaim)
             );
             if !already_claimed && !denied {
@@ -764,7 +853,7 @@ impl InferenceSettlementExecutor {
         }
         session.remaining_escrow = 0;
         session.status = InferenceSessionStatus::Refunded;
-        self.put_session(&session)?;
+        Self::v_put_session(view, &session)?;
         info!(
             "InferenceSettlement RefundSession {} funder={} refunded={}",
             session_id, sender, refund
@@ -780,6 +869,7 @@ impl InferenceSettlementExecutor {
     /// outer settlement gate).
     fn register_verifier(
         &self,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         bond: u128,
         state: &StateManager,
@@ -797,7 +887,7 @@ impl InferenceSettlementExecutor {
         }
         // An Active/Unbonding record blocks re-registration; a Withdrawn record is
         // cleanly reinitialized.
-        if let Some(existing) = self.get_verifier(sender)? {
+        if let Some(existing) = Self::v_get_verifier(view, sender)? {
             if existing.status != InferenceVerifierStatus::Withdrawn {
                 return Ok(InferenceSettlementExecutionResult::fail(
                     366,
@@ -812,7 +902,7 @@ impl InferenceSettlementExecutor {
             ));
         }
         state.deduct(sender, bond)?;
-        self.put_verifier(&InferenceVerifierRecord {
+        Self::v_put_verifier(view, &InferenceVerifierRecord {
             verifier: *sender,
             bond,
             status: InferenceVerifierStatus::Active,
@@ -827,6 +917,7 @@ impl InferenceSettlementExecutor {
     /// Top up an `Active` verifier's bond.
     fn add_verifier_bond(
         &self,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         amount: u128,
         state: &StateManager,
@@ -842,7 +933,7 @@ impl InferenceSettlementExecutor {
         if amount == 0 {
             return Ok(InferenceSettlementExecutionResult::fail(365, "amount must be > 0"));
         }
-        let mut record = match self.get_verifier(sender)? {
+        let mut record = match Self::v_get_verifier(view, sender)? {
             Some(r) => r,
             None => return Ok(InferenceSettlementExecutionResult::fail(367, "verifier not registered")),
         };
@@ -860,7 +951,7 @@ impl InferenceSettlementExecutor {
         }
         state.deduct(sender, amount)?;
         record.bond = record.bond.saturating_add(amount);
-        self.put_verifier(&record)?;
+        Self::v_put_verifier(view, &record)?;
         Ok(InferenceSettlementExecutionResult::ok())
     }
 
@@ -868,6 +959,7 @@ impl InferenceSettlementExecutor {
     /// no withdrawable bond (365) rather than creating a pointless unbonding state.
     fn begin_verifier_unbond(
         &self,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         block_height: u64,
         chain_params: &ChainParams,
@@ -878,7 +970,7 @@ impl InferenceSettlementExecutor {
                 "inference verifier bonding not enabled at this block height",
             ));
         }
-        let mut record = match self.get_verifier(sender)? {
+        let mut record = match Self::v_get_verifier(view, sender)? {
             Some(r) => r,
             None => return Ok(InferenceSettlementExecutionResult::fail(367, "verifier not registered")),
         };
@@ -898,7 +990,7 @@ impl InferenceSettlementExecutor {
         record.status = InferenceVerifierStatus::Unbonding;
         record.unbonding_started_height = Some(block_height);
         record.unlock_height = Some(unlock);
-        self.put_verifier(&record)?;
+        Self::v_put_verifier(view, &record)?;
         info!("InferenceSettlement BeginVerifierUnbond {} unlock={}", sender, unlock);
         Ok(InferenceSettlementExecutionResult::ok())
     }
@@ -908,6 +1000,7 @@ impl InferenceSettlementExecutor {
     /// `Withdrawn` with zero bond.
     fn withdraw_verifier_bond(
         &self,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         state: &StateManager,
         block_height: u64,
@@ -919,7 +1012,7 @@ impl InferenceSettlementExecutor {
                 "inference verifier bonding not enabled at this block height",
             ));
         }
-        let mut record = match self.get_verifier(sender)? {
+        let mut record = match Self::v_get_verifier(view, sender)? {
             Some(r) => r,
             None => return Ok(InferenceSettlementExecutionResult::fail(367, "verifier not registered")),
         };
@@ -942,7 +1035,7 @@ impl InferenceSettlementExecutor {
         }
         record.bond = 0;
         record.status = InferenceVerifierStatus::Withdrawn;
-        self.put_verifier(&record)?;
+        Self::v_put_verifier(view, &record)?;
         info!("InferenceSettlement WithdrawVerifierBond {} refund={}", sender, refund);
         Ok(InferenceSettlementExecutionResult::ok())
     }
@@ -958,6 +1051,43 @@ impl InferenceSettlementExecutor {
     /// match. The claimant is naturally included when its own tuple is `target`.
     ///
     /// Reads only attestation + dispute records; never mutates attestation storage.
+    /// The consistency group for `target`, as this block sees it.
+    ///
+    /// Execution counts through the candidate: an attestation staged earlier in
+    /// the same block belongs in the group, and a dispute opened earlier in it
+    /// must remove one. Counting the parent would let a block reach a verdict
+    /// the state it publishes does not support.
+    pub fn v_consistency_group_size(
+        view: &ExecutionView<'_, '_>,
+        session_id: &str,
+        target: &InferenceAttestationDigest,
+        claim_height: u64,
+        finality_depth: u64,
+    ) -> Result<u32> {
+        let verifiers =
+            InferenceAttestationExecutor::v_list_verifiers_by_session(view, session_id)?;
+        let mut count: u32 = 0;
+        for verifier in verifiers {
+            let att = match InferenceAttestationExecutor::v_get(
+                view,
+                &inference_attestation_key(session_id, &verifier),
+            )? {
+                Some(a) => a,
+                None => continue,
+            };
+            let dispute = Self::v_get_dispute(view, session_id, &verifier)?.map(|d| d.status);
+            if counts_toward_group(&att, target, claim_height, finality_depth, dispute) {
+                count = count.saturating_add(1);
+            }
+        }
+        Ok(count)
+    }
+
+    /// The same count over COMMITTED state, for RPC.
+    ///
+    /// RPC answers about the published chain, so it reads it. Both paths share
+    /// [`counts_toward_group`], which is the rule; only the source of the rows
+    /// differs.
     pub fn consistency_group_size(
         &self,
         session_id: &str,
@@ -972,28 +1102,10 @@ impl InferenceSettlementExecutor {
                 Some(a) => a,
                 None => continue,
             };
-            // Full-tuple equality — the four digest commitments, not response_hash
-            // alone. (session_id is constant across the group, so it is excluded.)
-            if att.digest.model_hash != target.model_hash
-                || att.digest.manifest_root != target.manifest_root
-                || att.digest.response_hash != target.response_hash
-                || att.digest.proof_root != target.proof_root
-            {
-                continue;
+            let dispute = self.get_dispute(session_id, &verifier)?.map(|d| d.status);
+            if counts_toward_group(&att, target, claim_height, finality_depth, dispute) {
+                count = count.saturating_add(1);
             }
-            // Only finalized attestations count — prevents a flash of not-yet-final
-            // attestations from manufacturing a plurality in the same block.
-            if att.included_at_height.saturating_add(finality_depth) > claim_height {
-                continue;
-            }
-            // A disputed (open) or denied attestation lends no consistency weight.
-            if matches!(
-                self.get_dispute(session_id, &verifier)?.map(|d| d.status),
-                Some(InferenceDisputeStatus::Open) | Some(InferenceDisputeStatus::ResolvedDenyClaim)
-            ) {
-                continue;
-            }
-            count = count.saturating_add(1);
         }
         Ok(count)
     }
@@ -1010,11 +1122,112 @@ impl InferenceSettlementExecutor {
         }
     }
 
-    fn put_session(&self, s: &InferenceSession) -> Result<()> {
+    // ── Execution-path reads (candidate-scoped) ─────────────────────────────
+    //
+    // The `&self` readers stay for RPC, which answers about the published
+    // chain. These read the candidate, because a block settles what it has just
+    // recorded: an escrow drawn down by an earlier claim, a dispute opened
+    // earlier in the block, an attestation from the same block. Reading the
+    // parent would let one block pay the same escrow twice.
+
+    pub fn v_get_session(
+        view: &ExecutionView<'_, '_>,
+        session_id: &str,
+    ) -> Result<Option<InferenceSession>> {
+        match view.get(cf::INFERENCE_SESSIONS, &session_key(session_id))? {
+            Some(bytes) => Ok(Some(
+                bincode::deserialize(&bytes)
+                    .map_err(|e| StateError::SerializationError(e.to_string()))?,
+            )),
+            None => Ok(None),
+        }
+    }
+
+    pub fn v_get_verifier(
+        view: &ExecutionView<'_, '_>,
+        verifier: &Address,
+    ) -> Result<Option<InferenceVerifierRecord>> {
+        match view.get(cf::INFERENCE_VERIFIERS, &verifier_key(verifier))? {
+            Some(bytes) => Ok(Some(
+                bincode::deserialize(&bytes)
+                    .map_err(|e| StateError::SerializationError(e.to_string()))?,
+            )),
+            None => Ok(None),
+        }
+    }
+
+    pub fn v_get_claim(
+        view: &ExecutionView<'_, '_>,
+        session_id: &str,
+        verifier: &Address,
+    ) -> Result<Option<InferenceClaim>> {
+        match view.get(
+            cf::INFERENCE_CLAIMS,
+            &settlement_entry_key(session_id, verifier),
+        )? {
+            Some(bytes) => Ok(Some(
+                bincode::deserialize(&bytes)
+                    .map_err(|e| StateError::SerializationError(e.to_string()))?,
+            )),
+            None => Ok(None),
+        }
+    }
+
+    pub fn v_get_dispute(
+        view: &ExecutionView<'_, '_>,
+        session_id: &str,
+        verifier: &Address,
+    ) -> Result<Option<InferenceDispute>> {
+        match view.get(
+            cf::INFERENCE_DISPUTES,
+            &settlement_entry_key(session_id, verifier),
+        )? {
+            Some(bytes) => Ok(Some(
+                bincode::deserialize(&bytes)
+                    .map_err(|e| StateError::SerializationError(e.to_string()))?,
+            )),
+            None => Ok(None),
+        }
+    }
+
+    pub fn v_list_disputes(
+        view: &ExecutionView<'_, '_>,
+        session_id: &str,
+    ) -> Result<Vec<InferenceDispute>> {
+        Self::v_list_by_prefix(view, cf::INFERENCE_DISPUTES, session_id)
+    }
+
+    fn v_list_by_prefix<T: serde::de::DeserializeOwned>(
+        view: &ExecutionView<'_, '_>,
+        cf_name: &str,
+        session_id: &str,
+    ) -> Result<Vec<T>> {
+        let prefix = session_prefix(session_id);
+        let mut out = Vec::new();
+        let iter = match view.prefix_iter(cf_name, &prefix) {
+            Ok(it) => it,
+            Err(sumchain_storage::StorageError::NotFound(_)) => return Ok(out),
+            Err(e) => return Err(e.into()),
+        };
+        // The merged scan is fallible: a read error must end it rather than
+        // return a short list a payout decision would then trust.
+        for entry in iter {
+            let (key, value) = entry?;
+            if key.len() != 36 || key[..prefix.len()] != prefix[..] {
+                continue;
+            }
+            out.push(
+                bincode::deserialize(&value)
+                    .map_err(|e| StateError::SerializationError(e.to_string()))?,
+            );
+        }
+        Ok(out)
+    }
+
+    pub fn v_put_session(view: &mut ExecutionView<'_, '_>, s: &InferenceSession) -> Result<()> {
         let bytes =
             bincode::serialize(s).map_err(|e| StateError::SerializationError(e.to_string()))?;
-        self.db.put(cf::INFERENCE_SESSIONS, &session_key(&s.session_id), &bytes)?;
-        Ok(())
+        Ok(view.put(cf::INFERENCE_SESSIONS, &session_key(&s.session_id), &bytes)?)
     }
 
     /// Fetch a verifier bond record (issue #78) by verifier address.
@@ -1028,11 +1241,10 @@ impl InferenceSettlementExecutor {
         }
     }
 
-    fn put_verifier(&self, r: &InferenceVerifierRecord) -> Result<()> {
+    pub fn v_put_verifier(view: &mut ExecutionView<'_, '_>, r: &InferenceVerifierRecord) -> Result<()> {
         let bytes =
             bincode::serialize(r).map_err(|e| StateError::SerializationError(e.to_string()))?;
-        self.db.put(cf::INFERENCE_VERIFIERS, &verifier_key(&r.verifier), &bytes)?;
-        Ok(())
+        Ok(view.put(cf::INFERENCE_VERIFIERS, &verifier_key(&r.verifier), &bytes)?)
     }
 
     /// Σ `remaining_escrow` across all inference sessions, with checked u128
@@ -1044,18 +1256,27 @@ impl InferenceSettlementExecutor {
     /// length are skipped defensively. Deterministic full scan, tolerates an
     /// empty CF. One-time supply census + `chain_getSupplyInfo` only.
     pub fn total_session_remaining_escrow(&self) -> Result<u128> {
-        let mut sum: u128 = 0;
-        for (key, value) in self.db.iter(cf::INFERENCE_SESSIONS).map_err(StateError::Storage)? {
-            if key.len() != 32 {
-                continue;
-            }
-            let s: InferenceSession = bincode::deserialize(&value)
-                .map_err(|e| StateError::SerializationError(e.to_string()))?;
-            sum = sum.checked_add(s.remaining_escrow).ok_or_else(|| {
-                StateError::BlockValidation("inference escrow sum overflow".to_string())
-            })?;
+        sum_escrow(
+            self.db
+                .iter(cf::INFERENCE_SESSIONS)
+                .map_err(StateError::Storage)?
+                .map(|(k, v)| Ok((k.to_vec(), v.to_vec()))),
+        )
+    }
+
+    /// Σ `remaining_escrow` as THIS BLOCK sees it.
+    ///
+    /// The supply census folds this into the correction's reserve delta, and a
+    /// block can open, fund, claim from or refund a session before the
+    /// correction runs. Reading committed state would measure an escrow the
+    /// block has already changed and mint a delta that does not reconcile with
+    /// what it publishes.
+    pub fn v_total_session_remaining_escrow(view: &ExecutionView<'_, '_>) -> Result<u128> {
+        match view.prefix_iter(cf::INFERENCE_SESSIONS, &[]) {
+            Ok(it) => sum_escrow(it.map(|e| e.map_err(Into::into))),
+            Err(sumchain_storage::StorageError::NotFound(_)) => Ok(0),
+            Err(e) => Err(e.into()),
         }
-        Ok(sum)
     }
 
     /// Σ `bond` across all inference-verifier records, with checked u128
@@ -1067,18 +1288,24 @@ impl InferenceSettlementExecutor {
     /// are skipped defensively. Deterministic full scan, tolerates an empty CF.
     /// One-time supply census + `chain_getSupplyInfo` only.
     pub fn total_verifier_bonds(&self) -> Result<u128> {
-        let mut sum: u128 = 0;
-        for (key, value) in self.db.iter(cf::INFERENCE_VERIFIERS).map_err(StateError::Storage)? {
-            if key.len() != 32 {
-                continue;
-            }
-            let r: InferenceVerifierRecord = bincode::deserialize(&value)
-                .map_err(|e| StateError::SerializationError(e.to_string()))?;
-            sum = sum.checked_add(r.bond).ok_or_else(|| {
-                StateError::BlockValidation("inference verifier bond sum overflow".to_string())
-            })?;
+        sum_bonds(
+            self.db
+                .iter(cf::INFERENCE_VERIFIERS)
+                .map_err(StateError::Storage)?
+                .map(|(k, v)| Ok((k.to_vec(), v.to_vec()))),
+        )
+    }
+
+    /// Σ verifier `bond` as THIS BLOCK sees it. See
+    /// [`v_total_session_remaining_escrow`](Self::v_total_session_remaining_escrow):
+    /// a registration, top-up, unbond or slash earlier in the block moves this,
+    /// and the census has to measure what the block will publish.
+    pub fn v_total_verifier_bonds(view: &ExecutionView<'_, '_>) -> Result<u128> {
+        match view.prefix_iter(cf::INFERENCE_VERIFIERS, &[]) {
+            Ok(it) => sum_bonds(it.map(|e| e.map_err(Into::into))),
+            Err(sumchain_storage::StorageError::NotFound(_)) => Ok(0),
+            Err(e) => Err(e.into()),
         }
-        Ok(sum)
     }
 
     pub fn get_claim(&self, session_id: &str, verifier: &Address) -> Result<Option<InferenceClaim>> {
@@ -1094,12 +1321,14 @@ impl InferenceSettlementExecutor {
         }
     }
 
-    fn put_claim(&self, c: &InferenceClaim) -> Result<()> {
+    pub fn v_put_claim(view: &mut ExecutionView<'_, '_>, c: &InferenceClaim) -> Result<()> {
         let bytes =
             bincode::serialize(c).map_err(|e| StateError::SerializationError(e.to_string()))?;
-        self.db
-            .put(cf::INFERENCE_CLAIMS, &settlement_entry_key(&c.session_id, &c.verifier), &bytes)?;
-        Ok(())
+        Ok(view.put(
+            cf::INFERENCE_CLAIMS,
+            &settlement_entry_key(&c.session_id, &c.verifier),
+            &bytes,
+        )?)
     }
 
     pub fn get_dispute(
@@ -1119,12 +1348,14 @@ impl InferenceSettlementExecutor {
         }
     }
 
-    fn put_dispute(&self, d: &InferenceDispute) -> Result<()> {
+    pub fn v_put_dispute(view: &mut ExecutionView<'_, '_>, d: &InferenceDispute) -> Result<()> {
         let bytes =
             bincode::serialize(d).map_err(|e| StateError::SerializationError(e.to_string()))?;
-        self.db
-            .put(cf::INFERENCE_DISPUTES, &settlement_entry_key(&d.session_id, &d.verifier), &bytes)?;
-        Ok(())
+        Ok(view.put(
+            cf::INFERENCE_DISPUTES,
+            &settlement_entry_key(&d.session_id, &d.verifier),
+            &bytes,
+        )?)
     }
 
     /// All paid claims for a session (prefix scan).

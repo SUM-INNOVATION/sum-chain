@@ -252,7 +252,6 @@ pub struct BlockExecutor {
     policy_account_executor: PolicyAccountExecutor,
     node_registry_executor: NodeRegistryExecutor,
     storage_metadata_executor: StorageMetadataExecutor,
-    inference_attestation_executor: InferenceAttestationExecutor,
     inference_settlement_executor:
         crate::inference_settlement_executor::InferenceSettlementExecutor,
     /// BR1 beacon (#127) per-block accumulator. Interior-mutable (`parking_lot::Mutex`
@@ -331,7 +330,6 @@ impl BlockExecutor {
         let policy_account_executor = PolicyAccountExecutor::new(db.clone());
         let node_registry_executor = NodeRegistryExecutor::new(db.clone());
         let storage_metadata_executor = StorageMetadataExecutor::new(db.clone());
-        let inference_attestation_executor = InferenceAttestationExecutor::new(db.clone());
         let inference_settlement_executor =
             crate::inference_settlement_executor::InferenceSettlementExecutor::new(db.clone());
         Self {
@@ -355,7 +353,6 @@ impl BlockExecutor {
             policy_account_executor,
             node_registry_executor,
             storage_metadata_executor,
-            inference_attestation_executor,
             inference_settlement_executor,
             beacon_block: parking_lot::Mutex::new(None),
         }
@@ -1477,7 +1474,7 @@ impl BlockExecutor {
                                 &attestation_data.digest.session_id,
                                 &v2_tx.from,
                             );
-                        if self.inference_attestation_executor.exists(&cf_key)? {
+                        if InferenceAttestationExecutor::v_exists(view, &cf_key)? {
                             return Ok(TxExecutionResult {
                                 tx_hash,
                                 status: TxStatus::Failed(51), // DuplicateAttestation
@@ -1515,7 +1512,8 @@ impl BlockExecutor {
                         // v1 direct submission (sender == verifier): no sponsor
                         // metadata is written (issue #95 — absence means "not
                         // sponsored").
-                        self.inference_attestation_executor.put(
+                        InferenceAttestationExecutor::stage(
+                            view,
                             &cf_key,
                             &record,
                             &v2_tx.from,
@@ -1597,7 +1595,7 @@ impl BlockExecutor {
                                 &v2_att.digest.session_id,
                                 &verifier_address,
                             );
-                        if self.inference_attestation_executor.exists(&cf_key)? {
+                        if InferenceAttestationExecutor::v_exists(view, &cf_key)? {
                             return Ok(TxExecutionResult {
                                 tx_hash,
                                 status: TxStatus::Failed(51), // DuplicateAttestation
@@ -1637,7 +1635,8 @@ impl BlockExecutor {
                             submitted_at_height: block_height,
                             tx_hash,
                         };
-                        self.inference_attestation_executor.put(
+                        InferenceAttestationExecutor::stage(
+                            view,
                             &cf_key,
                             &record,
                             &verifier_address,
@@ -3173,12 +3172,16 @@ impl BlockExecutor {
         // (halts this block) on any guard violation rather than diverging. Its
         // ledger is folded into the state root below.
         // The reserve and ledger it writes are staged into this block's
-        // candidate. The census it runs to DECIDE still reads committed state
-        // through `&self.db`: it sums accounts, staking, delegations, the node
-        // registry and the fee pools, none of which have migrated, so committed
-        // is where their rows are. That asymmetry is tracked in
-        // `partially_migrated_execution_paths_are_declared` and closes when
-        // those subsystems move.
+        // candidate, and so are the INFERENCE buckets of the census it runs to
+        // decide — escrow and verifier bonds moved with that cluster, so a
+        // block that opens or claims a session measures what it will publish.
+        //
+        // The rest of the census still reads committed state through
+        // `&self.db`: accounts, validator self-stake, active delegations,
+        // archive stake and the storage fee pools have not migrated, so
+        // committed IS where their rows are. That remaining asymmetry is
+        // tracked in `partially_migrated_execution_paths_are_declared` and
+        // closes as those subsystems move.
         {
             let mut view = candidate.view();
             crate::supply::apply_supply_correction_if_needed(

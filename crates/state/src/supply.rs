@@ -714,6 +714,49 @@ pub fn accounted_account_supply(db: &Arc<Database>) -> Result<u128> {
 /// mirrors, governance/policy account balances (already in accounts),
 /// `validator.total_delegated`, and pending/unmaterialized rewards.
 pub fn native_supply_snapshot(db: &Arc<Database>) -> Result<NativeSupplySnapshot> {
+    let inference =
+        crate::inference_settlement_executor::InferenceSettlementExecutor::new(db.clone());
+    let totals = (|| {
+        Ok((
+            inference.total_session_remaining_escrow()?,
+            inference.total_verifier_bonds()?,
+        ))
+    })();
+    native_supply_snapshot_with_inference(db, totals)
+}
+
+/// The census as THIS BLOCK sees it: every bucket except inference from
+/// committed state, and the inference buckets from the candidate.
+///
+/// The asymmetry is exact, not approximate. Accounts, staking, delegations, the
+/// node registry and the storage fee pools have not migrated, so committed IS
+/// where their rows are. Inference HAS, so committed is where its rows are not.
+///
+/// The inference totals are computed from the candidate DIRECTLY rather than
+/// taken from a committed snapshot and adjusted. A committed-first census would
+/// have to decode the parent's inference rows on the way, and a block is
+/// entitled to delete or replace a malformed one — so a row this block is
+/// removing could fail the census and withhold a correction that should apply.
+pub fn v_native_supply_snapshot(
+    view: &ExecutionView<'_, '_>,
+    db: &Arc<Database>,
+) -> Result<NativeSupplySnapshot> {
+    use crate::inference_settlement_executor::InferenceSettlementExecutor as Settle;
+    let totals = (|| {
+        Ok((
+            Settle::v_total_session_remaining_escrow(view)?,
+            Settle::v_total_verifier_bonds(view)?,
+        ))
+    })();
+    native_supply_snapshot_with_inference(db, totals)
+}
+
+/// The census core, shared by both handles: every non-inference bucket from
+/// `db`, with the inference buckets supplied by the caller.
+fn native_supply_snapshot_with_inference(
+    db: &Arc<Database>,
+    inference: Result<(u128, u128)>,
+) -> Result<NativeSupplySnapshot> {
     // Account balances incl. Address::ZERO (INCLUDE); ZERO is also captured as
     // the report-only burn subset in the same single scan.
     let state = StateStore::new(db);
@@ -740,11 +783,8 @@ pub fn native_supply_snapshot(db: &Arc<Database>) -> Result<NativeSupplySnapshot
     let (storage_v1_fee_pool, storage_v2_fee_pool) =
         crate::storage_metadata::StorageMetadataExecutor::new(db.clone()).total_fee_pools()?;
 
-    // Inference escrow + verifier bonds (INCLUDE).
-    let inference =
-        crate::inference_settlement_executor::InferenceSettlementExecutor::new(db.clone());
-    let inference_escrow = inference.total_session_remaining_escrow()?;
-    let inference_verifier_bonds = inference.total_verifier_bonds()?;
+    // Inference escrow + verifier bonds (INCLUDE), from the caller's handle.
+    let (inference_escrow, inference_verifier_bonds) = inference?;
 
     Ok(NativeSupplySnapshot {
         account_balances_incl_zero,
@@ -791,10 +831,46 @@ pub fn assess_supply_correction(
     migration_applied: bool,
     ledger_migration_id: Hash,
 ) -> SupplyCorrectionAssessment {
+    assess_from_snapshot(
+        native_supply_snapshot(db),
+        chain_id,
+        migration_applied,
+        ledger_migration_id,
+    )
+}
+
+/// The assessment as THIS BLOCK sees it.
+///
+/// Same decision, censused through [`v_native_supply_snapshot`] — so the reserve
+/// delta a block mints reconciles with the state that block publishes, including
+/// inference escrow and bonds it moved itself.
+pub fn v_assess_supply_correction(
+    view: &ExecutionView<'_, '_>,
+    db: &Arc<Database>,
+    chain_id: u64,
+    migration_applied: bool,
+    ledger_migration_id: Hash,
+) -> SupplyCorrectionAssessment {
+    assess_from_snapshot(
+        v_native_supply_snapshot(view, db),
+        chain_id,
+        migration_applied,
+        ledger_migration_id,
+    )
+}
+
+/// The decision itself, over an already-taken census. Shared so the execution
+/// and diagnostic paths cannot decide differently about the same numbers.
+fn assess_from_snapshot(
+    census: Result<NativeSupplySnapshot>,
+    chain_id: u64,
+    migration_applied: bool,
+    ledger_migration_id: Hash,
+) -> SupplyCorrectionAssessment {
     use MigrationWithheldReason as R;
 
     // The census is the only fallible step; a failure is fail-closed → SnapshotError.
-    let snapshot = match native_supply_snapshot(db) {
+    let snapshot = match census {
         Ok(s) => s,
         Err(_) => {
             return SupplyCorrectionAssessment {
@@ -892,8 +968,13 @@ pub fn apply_supply_correction_if_needed(
         return Ok(false);
     }
 
-    let assessment =
-        assess_supply_correction(db, chain_id, ledger.migration_applied, ledger.migration_id);
+    let assessment = v_assess_supply_correction(
+        view,
+        db,
+        chain_id,
+        ledger.migration_applied,
+        ledger.migration_id,
+    );
 
     match assessment.reason {
         MigrationWithheldReason::NotWithheld => {

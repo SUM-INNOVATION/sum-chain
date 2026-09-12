@@ -61,17 +61,15 @@ use std::path::Path;
 ///
 /// Production-only totals so far: 42 before the education subsystem, 41 after
 /// it, 40 after the compute-pool cluster, 39 after the beacon cluster, 30 after
-/// supply.
+/// supply, 25 after attestation and settlement.
 fn budget() -> BTreeMap<&'static str, usize> {
     BTreeMap::from([
         ("storage_metadata.rs", 15),
         ("node_registry.rs", 6),
-        ("inference_settlement_executor.rs", 4),
         ("beacon_store.rs", 1),
         ("compute_pool_store.rs", 1),
         ("executor.rs", 1),
         ("state.rs", 1),
-        ("inference_attestation_executor.rs", 1),
     ])
 }
 
@@ -920,6 +918,20 @@ fn migrated_execution_paths_take_no_self_receiver() {
         ("supply.rs", "fn apply_reserve_release("),
         ("supply.rs", "fn apply_monetary_mint("),
         ("supply.rs", "fn apply_supply_correction_if_needed("),
+        ("inference_attestation_executor.rs", "fn stage("),
+        ("inference_attestation_executor.rs", "fn v_exists("),
+        ("inference_attestation_executor.rs", "fn v_get("),
+        ("inference_attestation_executor.rs", "fn v_list_verifiers_by_session("),
+        ("inference_settlement_executor.rs", "fn v_get_session("),
+        ("inference_settlement_executor.rs", "fn v_get_verifier("),
+        ("inference_settlement_executor.rs", "fn v_get_claim("),
+        ("inference_settlement_executor.rs", "fn v_get_dispute("),
+        ("inference_settlement_executor.rs", "fn v_list_disputes("),
+        ("inference_settlement_executor.rs", "fn v_put_session("),
+        ("inference_settlement_executor.rs", "fn v_put_verifier("),
+        ("inference_settlement_executor.rs", "fn v_put_claim("),
+        ("inference_settlement_executor.rs", "fn v_put_dispute("),
+        ("inference_settlement_executor.rs", "fn v_consistency_group_size("),
     ];
 
     let files = rust_files();
@@ -1633,11 +1645,20 @@ fn partially_migrated_execution_paths_are_declared() {
         (
             "supply.rs",
             "fn apply_supply_correction_if_needed(",
-            "the whole-ledger census — accounts, validator self-stake, active \
-             delegations, archive stake, fee pools, inference escrow and bonds \
-             — through `&Arc<Database>`. Those subsystems have not migrated, so \
-             committed IS where their rows are; this closes when they move. The \
-             reserve and ledger it WRITES are staged.",
+            "the non-inference census buckets — accounts, validator self-stake, \
+             active delegations, archive stake and the storage fee pools — \
+             through `&Arc<Database>`. Those subsystems have not migrated, so \
+             committed IS where their rows are; this closes as they move. The \
+             INFERENCE buckets are read from the candidate, as are the reserve \
+             and ledger it writes.",
+        ),
+        (
+            "supply.rs",
+            "fn v_native_supply_snapshot(",
+            "the same non-inference buckets, for the same reason. It takes both \
+             handles deliberately: inference from the candidate, everything \
+             else from committed, with no committed-first pass that a \
+             candidate's deletion would have to undo.",
         ),
     ];
 

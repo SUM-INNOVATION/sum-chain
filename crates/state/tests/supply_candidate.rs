@@ -282,3 +282,186 @@ fn a_reserve_release_is_visible_to_a_later_release_in_the_same_block() {
         "the second release must draw from the pool the first left behind"
     );
 }
+
+/// A same-block inference mutation must move the correction's reserve delta by
+/// exactly that amount.
+///
+/// The census sums inference escrow and verifier bonds into economic supply,
+/// and the delta minted is `TARGET - economic_supply`. Inference migrated to the
+/// candidate, so a session opened — or an escrow drawn down — earlier in the
+/// block changes what the census must measure. Reading committed inference
+/// totals here would mint a delta that does not reconcile with the state the
+/// same block publishes: the reserve would be wrong by exactly the escrow the
+/// block moved.
+///
+/// The assertion is on the EXACT delta, not merely that it differs: an
+/// off-by-anything here is a supply error.
+#[test]
+fn a_same_block_inference_mutation_moves_the_reserve_delta_exactly() {
+    use sumchain_primitives::inference_settlement::{
+        InferenceSession, InferenceSessionStatus, InferenceVerifierRecord, InferenceVerifierStatus,
+    };
+    use sumchain_state::inference_settlement_executor::InferenceSettlementExecutor;
+    use sumchain_state::supply::v_assess_supply_correction;
+
+    const ESCROW: u128 = 12_345;
+    const BOND: u128 = 6_789;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = Arc::new(Database::open_default(dir.path()).unwrap());
+    let state = Arc::new(StateManager::new(db.clone(), 1));
+    let half = GENESIS_ACCOUNTED_SUPPLY / 2;
+    state.credit(&Address::new([0xE1; 20]), half).unwrap();
+    state.credit(&Address::new([0xE2; 20]), half).unwrap();
+
+    let mid = sumchain_primitives::supply::supply_correction_migration_id();
+
+    // Baseline: an empty candidate over this parent.
+    let mut overlay = ApplicationOverlay::new(&db, LIMIT);
+    let baseline = {
+        let view = ExecutionView::new(&mut overlay);
+        v_assess_supply_correction(&view, &db, 1, false, mid)
+    };
+    assert_eq!(
+        baseline.reason,
+        sumchain_primitives::supply::MigrationWithheldReason::NotWithheld,
+        "the correction must apply on this parent, or the delta below is not \
+         the thing under test"
+    );
+    drop(overlay);
+
+    // The same parent, with a session opened EARLIER IN THE BLOCK holding
+    // `ESCROW`. Economic supply rises by exactly that, so the delta falls by it.
+    let mut overlay = ApplicationOverlay::new(&db, LIMIT);
+    let with_session = {
+        let mut view = ExecutionView::new(&mut overlay);
+        InferenceSettlementExecutor::v_put_session(
+            &mut view,
+            &InferenceSession {
+                session_id: "opened-in-this-block".to_string(),
+                funder: Address::new([0xF1; 20]),
+                reward_per_verifier: 1,
+                max_verifiers: 1,
+                remaining_escrow: ESCROW,
+                claims_count: 0,
+                dispute_window_blocks: 1,
+                status: InferenceSessionStatus::Open,
+                created_at_height: 1,
+                expires_at_height: 1000,
+                consistency: None,
+                bond_requirement: None,
+            },
+        )
+        .unwrap();
+        // ...and a verifier bond posted in the same block. Both buckets are
+        // INCLUDE, and each total has its own reader — covering only one would
+        // leave the other free to read committed state unnoticed.
+        InferenceSettlementExecutor::v_put_verifier(
+            &mut view,
+            &InferenceVerifierRecord {
+                verifier: Address::new([0xF2; 20]),
+                bond: BOND,
+                status: InferenceVerifierStatus::Active,
+                registered_at_height: 1,
+                unbonding_started_height: None,
+                unlock_height: None,
+            },
+        )
+        .unwrap();
+        v_assess_supply_correction(&view, &db, 1, false, mid)
+    };
+
+    assert_eq!(
+        with_session.economic_supply,
+        baseline.economic_supply + ESCROW + BOND,
+        "the escrow AND the bond staged in this block must both be counted"
+    );
+    assert_eq!(
+        with_session.reserve_delta,
+        baseline.reserve_delta - ESCROW - BOND,
+        "the reserve delta must fall by exactly what the block created"
+    );
+    assert_eq!(
+        with_session.reason,
+        sumchain_primitives::supply::MigrationWithheldReason::NotWithheld
+    );
+
+    // And the committed census is unmoved: nothing was published.
+    let committed = sumchain_state::supply::native_supply_snapshot(&db).unwrap();
+    assert_eq!(committed.inference_escrow, 0);
+    assert_eq!(committed.inference_verifier_bonds, 0);
+    drop(overlay);
+
+    // ── The production call, not just the reader ────────────────────────────
+    //
+    // Everything above exercises `v_assess_supply_correction` directly. That
+    // proves the readers, and would keep passing if
+    // `apply_supply_correction_if_needed` — the function a block actually runs
+    // — were wired back to the committed `assess_supply_correction`. So drive
+    // the real entry point and assert on what it STAGES.
+    let expected_delta = baseline.reserve_delta - ESCROW - BOND;
+
+    let mut overlay = ApplicationOverlay::new(&db, LIMIT);
+    let mut view = ExecutionView::new(&mut overlay);
+
+    // Same block: the session and bond are staged BEFORE the correction runs,
+    // which is the production order — block-level effects run after the
+    // transactions that moved those rows.
+    InferenceSettlementExecutor::v_put_session(
+        &mut view,
+        &InferenceSession {
+            session_id: "opened-in-this-block".to_string(),
+            funder: Address::new([0xF1; 20]),
+            reward_per_verifier: 1,
+            max_verifiers: 1,
+            remaining_escrow: ESCROW,
+            claims_count: 0,
+            dispute_window_blocks: 1,
+            status: InferenceSessionStatus::Open,
+            created_at_height: 1,
+            expires_at_height: 1000,
+            consistency: None,
+            bond_requirement: None,
+        },
+    )
+    .unwrap();
+    InferenceSettlementExecutor::v_put_verifier(
+        &mut view,
+        &InferenceVerifierRecord {
+            verifier: Address::new([0xF2; 20]),
+            bond: BOND,
+            status: InferenceVerifierStatus::Active,
+            registered_at_height: 1,
+            unbonding_started_height: None,
+            unlock_height: None,
+        },
+    )
+    .unwrap();
+
+    let applied =
+        sumchain_state::supply::apply_supply_correction_if_needed(&mut view, &db, 1, 8_900_000)
+            .unwrap();
+    assert!(applied, "the correction must apply on this parent");
+
+    // Read the ledger and reserve back through the SAME view: they are staged,
+    // not published, and the delta they carry must be the candidate-derived one.
+    let ledger = SupplyStore::v_get_ledger(&view).unwrap();
+    assert_eq!(
+        ledger.total_minted_by_migration, expected_delta,
+        "the staged ledger must record the delta measured against THIS block's \
+         inference rows, not the parent's"
+    );
+    let reserve = SupplyStore::v_get_reserve(&view).unwrap().unwrap();
+    assert_eq!(
+        reserve.total_remaining(),
+        expected_delta,
+        "the staged reserve must hold exactly that delta"
+    );
+    assert!(ledger.migration_applied);
+    assert_eq!(ledger.migration_activation_height, 8_900_000);
+
+    // Nothing published: the correction is the block's to publish or abandon.
+    drop(overlay);
+    assert!(!SupplyStore::new(db.clone()).is_migration_applied().unwrap());
+    assert!(SupplyStore::new(db.clone()).get_reserve().unwrap().is_none());
+}

@@ -161,7 +161,6 @@ fn admission_rejects_permanent_cf_duplicate() {
     // previously-mined attestation), then try to admit the same
     // (session_id, verifier) to mempool. Must reject.
     let (state, db, _dir, executor) = setup_with_params(params_omninode_enabled());
-    let mut candidate = common::candidate(&db);
     let mempool = fresh_mempool_with_admission(db.clone(), params_omninode_enabled(), 1);
 
     let sender = KeyPair::generate();
@@ -170,13 +169,21 @@ fn admission_rejects_permanent_cf_duplicate() {
 
     let digest = sample_digest("perm-vec");
     let tx_first = build_signed_attestation_tx(&sender, 0, 1_000_000, digest.clone(), false);
-    let result = executor
-        .execute_tx(&mut candidate.view(), &tx_first, &proposer.address(), 1, 0)
-        .expect("execute_tx");
+    // PUBLISHED, not merely executed. Admission answers about the chain, so
+    // "previously mined" has to mean a block that was actually published — an
+    // attestation left in a candidate is one admission must still accept.
+    let receipts = common::publish_block(
+        &state,
+        &executor,
+        1,
+        proposer.public_key().as_bytes(),
+        vec![tx_first],
+        &[],
+    );
     assert!(
-        matches!(result.status, TxStatus::Success),
+        matches!(receipts[0].status, TxStatus::Success),
         "first attestation must persist; got {:?}",
-        result.status
+        receipts[0].status
     );
 
     // Now try to admit a NEW signed tx with the same (session_id, verifier).
@@ -197,7 +204,6 @@ fn rejected_mempool_duplicate_never_reaches_executor() {
     // then confirm the executor is never invoked. We simulate "never
     // invoked" by asserting the executor's CF row count is unchanged.
     let (state, db, _dir, executor) = setup_with_params(params_omninode_enabled());
-    let mut candidate = common::candidate(&db);
     let mempool = fresh_mempool_with_admission(db.clone(), params_omninode_enabled(), 1);
 
     let sender = KeyPair::generate();
@@ -206,11 +212,17 @@ fn rejected_mempool_duplicate_never_reaches_executor() {
 
     let digest = sample_digest("e2e-vec");
 
-    // First tx: persist via executor.
+    // First tx: PUBLISHED, so admission can see it. A candidate would not be
+    // the chain, and the duplicate below would be admitted.
     let first = build_signed_attestation_tx(&sender, 0, 1_000_000, digest.clone(), false);
-    executor
-        .execute_tx(&mut candidate.view(), &first, &proposer.address(), 1, 0)
-        .expect("first execute");
+    common::publish_block(
+        &state,
+        &executor,
+        1,
+        proposer.public_key().as_bytes(),
+        vec![first],
+        &[],
+    );
     let cf_key = sumchain_primitives::inference_attestation::inference_attestation_key(
         &digest.session_id,
         &sender.address(),

@@ -191,7 +191,7 @@ fn gate_closed_open_session_rejects_350_no_mutation() {
     assert!(matches!(res.status, TxStatus::Failed(350)), "got {:?}", res.status);
     assert_eq!(res.fee_paid, 0);
     assert_eq!(state.get_balance(&funder.address()).unwrap(), bal);
-    assert!(sexec(&db).get_session("s").unwrap().is_none());
+    assert!(InferenceSettlementExecutor::v_get_session(&candidate.view(), "s").unwrap().is_none());
 }
 
 // ── Open / fund escrow ───────────────────────────────────────────────────────
@@ -210,7 +210,7 @@ fn open_session_deducts_escrow_and_duplicate_rejected() {
     assert!(r.status.is_success(), "got {:?}", r.status);
     // funder debited deposit + fee.
     assert_eq!(state.get_balance(&funder.address()).unwrap(), 10_000_000 - 2 * REWARD - FEE);
-    let s = sexec(&db).get_session("s").unwrap().unwrap();
+    let s = InferenceSettlementExecutor::v_get_session(&candidate.view(), "s").unwrap().unwrap();
     assert_eq!(s.funder, funder.address());
     assert_eq!(s.remaining_escrow, 2 * REWARD);
     assert_eq!(s.status, InferenceSessionStatus::Open);
@@ -310,10 +310,10 @@ fn claim_requires_attestation_then_pays_after_maturity() {
         .unwrap();
     assert!(paid.status.is_success(), "got {:?}", paid.status);
     assert_eq!(state.get_balance(&verifier.address()).unwrap(), vbal - FEE + REWARD);
-    let s = sexec(&db).get_session("s").unwrap().unwrap();
+    let s = InferenceSettlementExecutor::v_get_session(&candidate.view(), "s").unwrap().unwrap();
     assert_eq!(s.remaining_escrow, REWARD);
     assert_eq!(s.claims_count, 1);
-    assert!(sexec(&db).get_claim("s", &verifier.address()).unwrap().is_some());
+    assert!(InferenceSettlementExecutor::v_get_claim(&candidate.view(), "s", &verifier.address()).unwrap().is_some());
 
     // Duplicate claim → 358.
     let dup = executor
@@ -361,7 +361,7 @@ fn fund_top_up_increases_escrow() {
         .execute_tx(&mut candidate.view(), &settlement_tx(&funder, 1, InferenceSettlementOperation::FundSession(FundInferenceSessionRequest { session_id: "s".into(), amount: 2 * REWARD })), &proposer.address(), 2, 1000)
         .unwrap();
     assert!(r.status.is_success(), "got {:?}", r.status);
-    assert_eq!(sexec(&db).get_session("s").unwrap().unwrap().remaining_escrow, 3 * REWARD);
+    assert_eq!(InferenceSettlementExecutor::v_get_session(&candidate.view(), "s").unwrap().unwrap().remaining_escrow, 3 * REWARD);
 }
 
 // ── Refund ───────────────────────────────────────────────────────────────────
@@ -388,7 +388,7 @@ fn refund_after_expiry_credits_funder() {
         .unwrap();
     assert!(r.status.is_success(), "got {:?}", r.status);
     assert_eq!(state.get_balance(&funder.address()).unwrap(), bal - FEE + 2 * REWARD);
-    let s = sexec(&db).get_session("s").unwrap().unwrap();
+    let s = InferenceSettlementExecutor::v_get_session(&candidate.view(), "s").unwrap().unwrap();
     assert_eq!(s.status, InferenceSessionStatus::Refunded);
     assert_eq!(s.remaining_escrow, 0);
 }
@@ -438,7 +438,7 @@ fn refund_blocked_while_attestation_within_maturity_then_succeeds() {
         .execute_tx(&mut candidate.view(), &settlement_tx(&funder, 2, InferenceSettlementOperation::RefundSession(RefundInferenceSessionRequest { session_id: "s".into() })), &proposer.address(), 32, 1000)
         .unwrap();
     assert!(ok.status.is_success(), "got {:?}", ok.status);
-    assert_eq!(sexec(&db).get_session("s").unwrap().unwrap().remaining_escrow, 0);
+    assert_eq!(InferenceSettlementExecutor::v_get_session(&candidate.view(), "s").unwrap().unwrap().remaining_escrow, 0);
 }
 
 // ── Fee accounting ───────────────────────────────────────────────────────────
@@ -555,7 +555,7 @@ fn dispute_deny_blocks_claim_and_allows_refund() {
         .execute_tx(&mut candidate.view(), &settlement_tx(&funder, 3, InferenceSettlementOperation::RefundSession(RefundInferenceSessionRequest { session_id: "s".into() })), &proposer.address(), 102, 1000)
         .unwrap();
     assert!(refund.status.is_success(), "refund: {:?}", refund.status);
-    assert_eq!(sexec(&db).get_session("s").unwrap().unwrap().remaining_escrow, 0);
+    assert_eq!(InferenceSettlementExecutor::v_get_session(&candidate.view(), "s").unwrap().unwrap().remaining_escrow, 0);
 }
 
 #[test]
@@ -633,13 +633,18 @@ fn settlement_never_mutates_attestation_record() {
     fund(&state, &verifier, 10_000_000);
 
     attest(&mut candidate.view(), &executor, &proposer.address(), &verifier, "s", 5, 0);
-    let aexec = sumchain_state::inference_attestation_executor::InferenceAttestationExecutor::new(db.clone());
-    let before = aexec.get(&inference_attestation_key("s", &verifier.address())).unwrap().unwrap();
+    // Through the candidate: the attestation was staged by `attest` above.
+    let before = sumchain_state::inference_attestation_executor::InferenceAttestationExecutor::v_get(
+        &candidate.view(),
+        &inference_attestation_key("s", &verifier.address()),
+    )
+    .unwrap()
+    .unwrap();
 
     executor.execute_tx(&mut candidate.view(), &settlement_tx(&funder, 0, open_op("s", 2, 2 * REWARD, 10, 1000)), &proposer.address(), 6, 1000).unwrap();
     executor.execute_tx(&mut candidate.view(), &settlement_tx(&verifier, 1, InferenceSettlementOperation::ClaimReward(ClaimInferenceRewardRequest { session_id: "s".into() })), &proposer.address(), 20, 1000).unwrap();
 
-    let after = aexec.get(&inference_attestation_key("s", &verifier.address())).unwrap().unwrap();
+    let after = sumchain_state::inference_attestation_executor::InferenceAttestationExecutor::v_get(&candidate.view(), &inference_attestation_key("s", &verifier.address())).unwrap().unwrap();
     assert_eq!(before, after, "settlement must not mutate the attestation record");
 }
 
@@ -652,9 +657,19 @@ fn settlement_state_survives_restart() {
         let db = Arc::new(Database::open_default(dir.path()).unwrap());
         let state = Arc::new(sumchain_state::StateManager::new(db.clone(), CHAIN_ID));
         let executor = sumchain_state::executor::BlockExecutor::new(state.clone(), db.clone(), params_enabled(None));
-        let mut candidate = common::candidate(&db);
         fund(&state, &funder, 10_000_000);
-        executor.execute_tx(&mut candidate.view(), &settlement_tx(&funder, 0, open_op("s", 2, 2 * REWARD, 10, 1000)), &proposer.address(), 1, 1000).unwrap();
+        // PUBLISHED: "survives restart" means survives in canonical storage, so
+        // the block that opened the session has to be published. A candidate is
+        // dropped when this scope ends, and nothing would survive.
+        let receipts = common::publish_block(
+            &state,
+            &executor,
+            1,
+            proposer.public_key().as_bytes(),
+            vec![settlement_tx(&funder, 0, open_op("s", 2, 2 * REWARD, 10, 1000))],
+            &[],
+        );
+        assert!(receipts[0].is_success(), "{:?}", receipts[0].status);
     }
     let db = Arc::new(Database::open_default(dir.path()).unwrap());
     let s = InferenceSettlementExecutor::new(db.clone()).get_session("s").unwrap();
@@ -706,7 +721,7 @@ fn consistency_gate_closed_open_rejects_361_no_session() {
         .unwrap();
     assert!(matches!(r.status, TxStatus::Failed(361)), "got {:?}", r.status);
     assert_eq!(r.fee_paid, FEE, "consistency-gate-closed is a gate-open semantic failure; fee paid");
-    assert!(sexec(&db).get_session("s").unwrap().is_none(), "no session written");
+    assert!(InferenceSettlementExecutor::v_get_session(&candidate.view(), "s").unwrap().is_none(), "no session written");
 
     // A session WITHOUT consistency still opens fine while the consistency gate is closed.
     let ok = executor
@@ -927,7 +942,7 @@ fn consistency_gate_open_but_no_config_keeps_v1_behavior() {
     let p = proposer.address();
 
     executor.execute_tx(&mut candidate.view(), &settlement_tx(&funder, 0, open_op("s", 2, 2 * REWARD, 0, 1000)), &p, 1, 1000).unwrap();
-    assert!(sexec(&db).get_session("s").unwrap().unwrap().consistency.is_none(), "no config stored");
+    assert!(InferenceSettlementExecutor::v_get_session(&candidate.view(), "s").unwrap().unwrap().consistency.is_none(), "no config stored");
     attest_digest(&mut candidate.view(), &executor, &p, &v1, "s", 5, 0, (1, 2, 3, 4));
     assert!(claim_status(&mut candidate.view(), &executor, &p, &v1, "s", 1, 8).is_success(), "v1 single-verifier claim unaffected");
 }
@@ -980,7 +995,7 @@ fn register_locks_bond_and_add_increases_it() {
     assert!(r.status.is_success(), "register: {:?}", r.status);
     // Bond leaves the balance (accounting-in-record) plus the fee.
     assert_eq!(state.get_balance(&v.address()).unwrap(), start - BOND - FEE);
-    let rec = sexec(&db).get_verifier(&v.address()).unwrap().unwrap();
+    let rec = InferenceSettlementExecutor::v_get_verifier(&candidate.view(), &v.address()).unwrap().unwrap();
     assert_eq!(rec.bond, BOND);
     assert_eq!(rec.status, InferenceVerifierStatus::Active);
 
@@ -991,7 +1006,7 @@ fn register_locks_bond_and_add_increases_it() {
     // AddBond increases the locked bond.
     let a = executor.execute_tx(&mut candidate.view(), &settlement_tx(&v, 2, add_bond_op(BOND)), &p, 3, 1000).unwrap();
     assert!(a.status.is_success(), "add: {:?}", a.status);
-    assert_eq!(sexec(&db).get_verifier(&v.address()).unwrap().unwrap().bond, 2 * BOND);
+    assert_eq!(InferenceSettlementExecutor::v_get_verifier(&candidate.view(), &v.address()).unwrap().unwrap().bond, 2 * BOND);
 }
 
 #[test]
@@ -1007,7 +1022,7 @@ fn unbond_lifecycle_withdraw_before_and_after_unlock() {
     // Begin unbond at height 5 → unlock = 15.
     let b = executor.execute_tx(&mut candidate.view(), &settlement_tx(&v, 1, InferenceSettlementOperation::BeginVerifierUnbond), &p, 5, 1000).unwrap();
     assert!(b.status.is_success(), "begin: {:?}", b.status);
-    let rec = sexec(&db).get_verifier(&v.address()).unwrap().unwrap();
+    let rec = InferenceSettlementExecutor::v_get_verifier(&candidate.view(), &v.address()).unwrap().unwrap();
     assert_eq!(rec.status, InferenceVerifierStatus::Unbonding);
     assert_eq!(rec.unlock_height, Some(15));
 
@@ -1020,14 +1035,14 @@ fn unbond_lifecycle_withdraw_before_and_after_unlock() {
     let w = executor.execute_tx(&mut candidate.view(), &settlement_tx(&v, 3, InferenceSettlementOperation::WithdrawVerifierBond), &p, 15, 1000).unwrap();
     assert!(w.status.is_success(), "withdraw: {:?}", w.status);
     assert_eq!(state.get_balance(&v.address()).unwrap(), bal - FEE + BOND, "bond returned");
-    let rec = sexec(&db).get_verifier(&v.address()).unwrap().unwrap();
+    let rec = InferenceSettlementExecutor::v_get_verifier(&candidate.view(), &v.address()).unwrap().unwrap();
     assert_eq!(rec.status, InferenceVerifierStatus::Withdrawn);
     assert_eq!(rec.bond, 0);
 
     // A Withdrawn verifier may re-register with a fresh bond.
     let re = executor.execute_tx(&mut candidate.view(), &settlement_tx(&v, 4, register_op(BOND)), &p, 16, 1000).unwrap();
     assert!(re.status.is_success(), "re-register: {:?}", re.status);
-    let rec = sexec(&db).get_verifier(&v.address()).unwrap().unwrap();
+    let rec = InferenceSettlementExecutor::v_get_verifier(&candidate.view(), &v.address()).unwrap().unwrap();
     assert_eq!(rec.status, InferenceVerifierStatus::Active);
     assert_eq!(rec.bond, BOND);
     assert_eq!(rec.registered_at_height, 16);
@@ -1101,7 +1116,7 @@ fn denied_dispute_denies_reward_and_slashes_bond() {
 
     // Bond slashed by 25%; slashed amount burned to ZERO.
     let expected_slash = BOND * 2500 / 10_000;
-    let rec = sexec(&db).get_verifier(&v.address()).unwrap().unwrap();
+    let rec = InferenceSettlementExecutor::v_get_verifier(&candidate.view(), &v.address()).unwrap().unwrap();
     assert_eq!(rec.bond, BOND - expected_slash, "bond reduced by slash");
     assert_eq!(state.get_balance(&Address::ZERO).unwrap(), expected_slash, "slash burned to ZERO");
 
@@ -1126,7 +1141,7 @@ fn allowed_dispute_does_not_slash() {
     executor.execute_tx(&mut candidate.view(), &settlement_tx(&funder, 1, open_dispute_op("s", &v.address())), &p, 8, 1000).unwrap();
     let ap = resolve_approval(&resolver, "s", &v.address(), true);
     executor.execute_tx_with_validators(&mut candidate.view(), &settlement_tx(&resolver, 0, InferenceSettlementOperation::ResolveDispute(ResolveInferenceDisputeRequest { session_id: "s".into(), verifier: v.address(), allow_claim: true, approvals: vec![ap] })), &p, 9, 1000, &vset).unwrap();
-    assert_eq!(sexec(&db).get_verifier(&v.address()).unwrap().unwrap().bond, BOND, "allow → no slash");
+    assert_eq!(InferenceSettlementExecutor::v_get_verifier(&candidate.view(), &v.address()).unwrap().unwrap().bond, BOND, "allow → no slash");
     assert_eq!(state.get_balance(&Address::ZERO).unwrap(), 0, "nothing burned");
 }
 
@@ -1148,7 +1163,7 @@ fn denied_dispute_with_no_or_zero_bond_slashes_zero_no_underflow() {
     let ap = resolve_approval(&resolver, "s", &v.address(), false);
     let rd = executor.execute_tx_with_validators(&mut candidate.view(), &settlement_tx(&resolver, 0, InferenceSettlementOperation::ResolveDispute(ResolveInferenceDisputeRequest { session_id: "s".into(), verifier: v.address(), allow_claim: false, approvals: vec![ap] })), &p, 9, 1000, &vset).unwrap();
     assert!(rd.status.is_success(), "resolve succeeds even with no bond: {:?}", rd.status);
-    assert!(sexec(&db).get_verifier(&v.address()).unwrap().is_none(), "no verifier record created");
+    assert!(InferenceSettlementExecutor::v_get_verifier(&candidate.view(), &v.address()).unwrap().is_none(), "no verifier record created");
     assert_eq!(state.get_balance(&Address::ZERO).unwrap(), 0, "no burn, no mint, no underflow");
 }
 
@@ -1173,7 +1188,7 @@ fn slash_during_unbonding_reduces_withdrawal() {
     let ap = resolve_approval(&resolver, "s", &v.address(), false);
     executor.execute_tx_with_validators(&mut candidate.view(), &settlement_tx(&resolver, 0, InferenceSettlementOperation::ResolveDispute(ResolveInferenceDisputeRequest { session_id: "s".into(), verifier: v.address(), allow_claim: false, approvals: vec![ap] })), &p, 8, 1000, &vset).unwrap();
     let slash = BOND * 4000 / 10_000;
-    assert_eq!(sexec(&db).get_verifier(&v.address()).unwrap().unwrap().bond, BOND - slash);
+    assert_eq!(InferenceSettlementExecutor::v_get_verifier(&candidate.view(), &v.address()).unwrap().unwrap().bond, BOND - slash);
 
     // Withdraw after unlock returns the REDUCED bond.
     let bal = state.get_balance(&v.address()).unwrap();
@@ -1215,7 +1230,7 @@ fn consistency_failure_alone_does_not_slash() {
 
     assert!(matches!(claim_status(&mut candidate.view(), &executor, &p, &v, "s", 2, 8), TxStatus::Failed(362)), "consistency blocks reward");
     // Bond is fully intact — consistency failure never slashes.
-    assert_eq!(sexec(&db).get_verifier(&v.address()).unwrap().unwrap().bond, BOND, "no slash from consistency failure");
+    assert_eq!(InferenceSettlementExecutor::v_get_verifier(&candidate.view(), &v.address()).unwrap().unwrap().bond, BOND, "no slash from consistency failure");
     assert_eq!(state.get_balance(&Address::ZERO).unwrap(), 0, "nothing burned");
 }
 
@@ -1242,7 +1257,7 @@ fn bonding_gate_closed_and_invalid_config() {
     assert_eq!(r.fee_paid, 0, "bonding gate-closed is free");
     assert_eq!(state.get_balance(&v.address()).unwrap(), bal, "no fee charged");
     assert_eq!(state.get_nonce(&v.address()).unwrap(), nonce, "no nonce bump");
-    assert!(sexec(&db).get_verifier(&v.address()).unwrap().is_none(), "no record on gate-closed");
+    assert!(InferenceSettlementExecutor::v_get_verifier(&candidate.view(), &v.address()).unwrap().is_none(), "no record on gate-closed");
 
     // The other three registry ops are likewise free when the gate is closed.
     // (The free path never bumps the nonce, so each still uses nonce 0.)
@@ -1259,7 +1274,7 @@ fn bonding_gate_closed_and_invalid_config() {
     // OpenSession requesting a bond requirement while bonding closed → 364, no session.
     let os = executor.execute_tx(&mut candidate.view(), &settlement_tx(&funder, 0, open_op_bond("s", 2, 2 * REWARD, 0, 1000, BOND, 0)), &pr, 1, 1000).unwrap();
     assert!(matches!(os.status, TxStatus::Failed(364)), "open bond gate-closed: {:?}", os.status);
-    assert!(sexec(&db).get_session("s").unwrap().is_none(), "no session on gate-closed");
+    assert!(InferenceSettlementExecutor::v_get_session(&candidate.view(), "s").unwrap().is_none(), "no session on gate-closed");
 
     // Bonding OPEN: invalid config (min_bond = 0) → 365.
     let (state2, _db2, _dir2, exec2) = setup_with_params(params_bonding(None));
@@ -1286,25 +1301,35 @@ fn supply_conserved_across_register_open_slash_withdraw() {
     let vset = [*resolver.public_key().as_bytes()];
     // Fees flow sender→proposer, so include proposer + ZERO in the balance set.
     let accts = [funder.address(), v.address(), resolver.address(), p, Address::ZERO];
-    let reconcile = |st: &sumchain_state::StateManager, db: &Arc<Database>| -> u128 {
-        let s = sexec(db).get_session("s").unwrap().map(|s| s.remaining_escrow).unwrap_or(0);
-        let b = sexec(db).get_verifier(&v.address()).unwrap().map(|r| r.bond).unwrap_or(0);
+    // Escrow and bond live in the CANDIDATE until the block is published, so the
+    // conservation check has to look where the value actually is.
+    let reconcile = |st: &sumchain_state::StateManager,
+                     candidate: &mut sumchain_storage::candidate::CandidateExecution<'_>|
+     -> u128 {
+        let s = InferenceSettlementExecutor::v_get_session(&candidate.view(), "s")
+            .unwrap()
+            .map(|s| s.remaining_escrow)
+            .unwrap_or(0);
+        let b = InferenceSettlementExecutor::v_get_verifier(&candidate.view(), &v.address())
+            .unwrap()
+            .map(|r| r.bond)
+            .unwrap_or(0);
         sum_balances(st, &accts) + s + b
     };
 
     executor.execute_tx(&mut candidate.view(), &settlement_tx(&funder, 0, open_op_bond("s", 2, 2 * REWARD, 50, 100, BOND, 3000)), &p, 1, 1000).unwrap();
-    assert_eq!(reconcile(&state, &db), funded, "after open");
+    assert_eq!(reconcile(&state, &mut candidate), funded, "after open");
     executor.execute_tx(&mut candidate.view(), &settlement_tx(&v, 0, register_op(BOND)), &p, 2, 1000).unwrap();
-    assert_eq!(reconcile(&state, &db), funded, "after register");
+    assert_eq!(reconcile(&state, &mut candidate), funded, "after register");
     attest_digest(&mut candidate.view(), &executor, &p, &v, "s", 5, 1, (1, 2, 3, 4));
     executor.execute_tx(&mut candidate.view(), &settlement_tx(&funder, 1, open_dispute_op("s", &v.address())), &p, 8, 1000).unwrap();
     let ap = resolve_approval(&resolver, "s", &v.address(), false);
     executor.execute_tx_with_validators(&mut candidate.view(), &settlement_tx(&resolver, 0, InferenceSettlementOperation::ResolveDispute(ResolveInferenceDisputeRequest { session_id: "s".into(), verifier: v.address(), allow_claim: false, approvals: vec![ap] })), &p, 9, 1000, &vset).unwrap();
-    assert_eq!(reconcile(&state, &db), funded, "after slash (burn to ZERO conserves supply)");
+    assert_eq!(reconcile(&state, &mut candidate), funded, "after slash (burn to ZERO conserves supply)");
     // Unbond + withdraw the reduced bond.
     executor.execute_tx(&mut candidate.view(), &settlement_tx(&v, 2, InferenceSettlementOperation::BeginVerifierUnbond), &p, 60, 1000).unwrap();
     executor.execute_tx(&mut candidate.view(), &settlement_tx(&v, 3, InferenceSettlementOperation::WithdrawVerifierBond), &p, 60 + UNBOND_PERIOD, 1000).unwrap();
-    assert_eq!(reconcile(&state, &db), funded, "after withdraw");
+    assert_eq!(reconcile(&state, &mut candidate), funded, "after withdraw");
 }
 
 // ── Sponsored attestation × settlement (issue #79) ───────────────────────────

@@ -76,7 +76,7 @@ fn dispatch_pre_activation_rejects() {
 
     let cf_key = inference_attestation_key(&digest.session_id, &sender.address());
     assert!(
-        db.get(cf::INFERENCE_ATTESTATIONS, &cf_key).unwrap().is_none(),
+        candidate.view().get(cf::INFERENCE_ATTESTATIONS, &cf_key).unwrap().is_none(),
         "no CF row should be written on Failed(50)"
     );
 }
@@ -111,7 +111,8 @@ fn dispatch_success_path() {
     assert_eq!(state.get_nonce(&sender.address()).unwrap(), 1, "nonce must advance");
 
     let cf_key = inference_attestation_key(&digest.session_id, &sender.address());
-    let row = db
+    let row = candidate
+        .view()
         .get(cf::INFERENCE_ATTESTATIONS, &cf_key)
         .unwrap()
         .expect("CF row must exist on Success");
@@ -146,7 +147,7 @@ fn dispatch_duplicate_after_success_rejects() {
     let post_success_nonce = state.get_nonce(&sender.address()).unwrap();
     let post_success_proposer = state.get_balance(&proposer.address()).unwrap();
     let cf_key = inference_attestation_key(&digest.session_id, &sender.address());
-    let first_row = db.get(cf::INFERENCE_ATTESTATIONS, &cf_key).unwrap().expect("row");
+    let first_row = candidate.view().get(cf::INFERENCE_ATTESTATIONS, &cf_key).unwrap().expect("row");
 
     // Second submission of the SAME (session_id, verifier) — must be
     // rejected at the CF dedup step with Failed(51), no further fee or
@@ -162,7 +163,7 @@ fn dispatch_duplicate_after_success_rejects() {
     assert_eq!(state.get_balance(&sender.address()).unwrap(), post_success_balance);
     assert_eq!(state.get_nonce(&sender.address()).unwrap(), post_success_nonce);
     assert_eq!(state.get_balance(&proposer.address()).unwrap(), post_success_proposer);
-    let second_row = db.get(cf::INFERENCE_ATTESTATIONS, &cf_key).unwrap().expect("row");
+    let second_row = candidate.view().get(cf::INFERENCE_ATTESTATIONS, &cf_key).unwrap().expect("row");
     assert_eq!(first_row, second_row, "CF row must not change on duplicate");
 }
 
@@ -193,7 +194,7 @@ fn dispatch_invalid_inner_signature_rejects() {
     assert_eq!(state.get_balance(&sender.address()).unwrap(), initial_balance);
     assert_eq!(state.get_nonce(&sender.address()).unwrap(), 0);
     let cf_key = inference_attestation_key(&digest.session_id, &sender.address());
-    assert!(db.get(cf::INFERENCE_ATTESTATIONS, &cf_key).unwrap().is_none());
+    assert!(candidate.view().get(cf::INFERENCE_ATTESTATIONS, &cf_key).unwrap().is_none());
 }
 
 #[test]
@@ -227,7 +228,7 @@ fn dispatch_insufficient_balance_for_fee() {
     assert_eq!(state.get_balance(&sender.address()).unwrap(), fee - 1);
     assert_eq!(state.get_nonce(&sender.address()).unwrap(), 0);
     let cf_key = inference_attestation_key(&digest.session_id, &sender.address());
-    assert!(db.get(cf::INFERENCE_ATTESTATIONS, &cf_key).unwrap().is_none());
+    assert!(candidate.view().get(cf::INFERENCE_ATTESTATIONS, &cf_key).unwrap().is_none());
 }
 
 #[test]
@@ -286,11 +287,12 @@ fn dispatch_populates_session_index() {
     assert!(matches!(r_a.status, TxStatus::Success));
     assert!(matches!(r_b.status, TxStatus::Success));
 
-    // Read the session index via the same path RPC uses.
-    let read_executor = InferenceAttestationExecutor::new(Arc::clone(&db));
-    let mut verifiers = read_executor
-        .list_verifiers_by_session(session_id)
-        .expect("index lookup");
+    // Read the session index through the CANDIDATE both dispatches staged into:
+    // the rows are buffered, so the committed path RPC uses would find nothing
+    // until this block is published.
+    let mut verifiers =
+        InferenceAttestationExecutor::v_list_verifiers_by_session(&candidate.view(), session_id)
+            .expect("index lookup");
     verifiers.sort();
     let mut expected = vec![sender_a.address(), sender_b.address()];
     expected.sort();
@@ -370,11 +372,12 @@ fn v2_sponsored_succeeds_and_stores_under_verifier_not_sponsor() {
     // Record stored under the VERIFIER key, not the sponsor key.
     let vkey = inference_attestation_key(&digest.session_id, &verifier.address());
     let skey = inference_attestation_key(&digest.session_id, &sponsor.address());
-    assert!(db.get(cf::INFERENCE_ATTESTATIONS, &vkey).unwrap().is_some(), "stored under verifier");
-    assert!(db.get(cf::INFERENCE_ATTESTATIONS, &skey).unwrap().is_none(), "NOT stored under sponsor");
+    assert!(candidate.view().get(cf::INFERENCE_ATTESTATIONS, &vkey).unwrap().is_some(), "stored under verifier");
+    assert!(candidate.view().get(cf::INFERENCE_ATTESTATIONS, &skey).unwrap().is_none(), "NOT stored under sponsor");
     // Session index lists the verifier, not the sponsor.
-    let verifiers = InferenceAttestationExecutor::new(db.clone())
-        .list_verifiers_by_session(&digest.session_id)
+    let verifiers = InferenceAttestationExecutor::v_list_verifiers_by_session(
+        &candidate.view(),
+        &digest.session_id)
         .unwrap();
     assert_eq!(verifiers, vec![verifier.address()], "index attributes to verifier");
 }
@@ -398,7 +401,7 @@ fn v2_gate_closed_is_free_no_mutation() {
     assert_eq!(state.get_balance(&sponsor.address()).unwrap(), bal0, "no fee");
     assert_eq!(state.get_nonce(&sponsor.address()).unwrap(), 0, "no nonce bump");
     let vkey = inference_attestation_key(&digest.session_id, &verifier.address());
-    assert!(db.get(cf::INFERENCE_ATTESTATIONS, &vkey).unwrap().is_none(), "no CF write");
+    assert!(candidate.view().get(cf::INFERENCE_ATTESTATIONS, &vkey).unwrap().is_none(), "no CF write");
 }
 
 #[test]
@@ -483,8 +486,7 @@ fn v2_sponsored_writes_sponsor_metadata() {
     // Sponsor metadata is keyed by the VERIFIER key (same as the record), and
     // records sponsor address, inclusion height, and outer tx hash.
     let vkey = inference_attestation_key(&digest.session_id, &verifier.address());
-    let sp = InferenceAttestationExecutor::new(db.clone())
-        .get_sponsor(&vkey)
+    let sp = InferenceAttestationExecutor::v_get_sponsor(&candidate.view(), &vkey)
         .unwrap()
         .expect("sponsor metadata present for a sponsored attestation");
     assert_eq!(sp.sponsor, sponsor.address(), "sponsor is the outer sender");
@@ -493,7 +495,7 @@ fn v2_sponsored_writes_sponsor_metadata() {
 
     // Not keyed under the sponsor address.
     let skey = inference_attestation_key(&digest.session_id, &sponsor.address());
-    assert!(db.get(cf::INFERENCE_ATTESTATION_SPONSORS, &skey).unwrap().is_none());
+    assert!(candidate.view().get(cf::INFERENCE_ATTESTATION_SPONSORS, &skey).unwrap().is_none());
 }
 
 #[test]
@@ -511,9 +513,9 @@ fn v1_direct_leaves_sponsor_metadata_absent() {
 
     // The record exists but no sponsor metadata is written for a direct submission.
     let key = inference_attestation_key(&digest.session_id, &verifier.address());
-    assert!(db.get(cf::INFERENCE_ATTESTATIONS, &key).unwrap().is_some(), "record present");
+    assert!(candidate.view().get(cf::INFERENCE_ATTESTATIONS, &key).unwrap().is_some(), "record present");
     assert!(
-        InferenceAttestationExecutor::new(db.clone()).get_sponsor(&key).unwrap().is_none(),
+        InferenceAttestationExecutor::v_get_sponsor(&candidate.view(), &key).unwrap().is_none(),
         "v1 direct submission writes no sponsor metadata"
     );
 }
@@ -535,7 +537,7 @@ fn v2_duplicate_does_not_overwrite_sponsor_metadata() {
     assert!(executor.execute_tx(&mut candidate.view(), &a, &proposer.address(), 1, 0).unwrap().status.is_success());
     let vkey = inference_attestation_key(&digest.session_id, &verifier.address());
     assert_eq!(
-        InferenceAttestationExecutor::new(db.clone()).get_sponsor(&vkey).unwrap().unwrap().sponsor,
+        InferenceAttestationExecutor::v_get_sponsor(&candidate.view(), &vkey).unwrap().unwrap().sponsor,
         sponsor_a.address()
     );
 
@@ -544,7 +546,7 @@ fn v2_duplicate_does_not_overwrite_sponsor_metadata() {
     let b = build_sponsored_tx(&sponsor_b, &verifier, 0, 1_000, digest, false, None);
     assert!(matches!(executor.execute_tx(&mut candidate.view(), &b, &proposer.address(), 2, 0).unwrap().status, TxStatus::Failed(51)));
     assert_eq!(
-        InferenceAttestationExecutor::new(db.clone()).get_sponsor(&vkey).unwrap().unwrap().sponsor,
+        InferenceAttestationExecutor::v_get_sponsor(&candidate.view(), &vkey).unwrap().unwrap().sponsor,
         sponsor_a.address(),
         "duplicate v2 must not overwrite existing sponsor metadata"
     );
@@ -572,6 +574,6 @@ fn sponsored_attestation_settlement_identity_is_verifier_only() {
     let verifier_key = inference_attestation_key(&digest.session_id, &verifier.address());
     let sponsor_key = inference_attestation_key(&digest.session_id, &sponsor.address());
     // The settlement-relevant record is under the verifier, not the sponsor.
-    assert!(db.get(cf::INFERENCE_ATTESTATIONS, &verifier_key).unwrap().is_some(), "claimable by verifier");
-    assert!(db.get(cf::INFERENCE_ATTESTATIONS, &sponsor_key).unwrap().is_none(), "sponsor has no claimable record");
+    assert!(candidate.view().get(cf::INFERENCE_ATTESTATIONS, &verifier_key).unwrap().is_some(), "claimable by verifier");
+    assert!(candidate.view().get(cf::INFERENCE_ATTESTATIONS, &sponsor_key).unwrap().is_none(), "sponsor has no claimable record");
 }

@@ -26,6 +26,7 @@ use sumchain_primitives::inference_attestation::{
     InferenceAttestationSponsor, SESSION_ID_HASH_BYTES,
 };
 use sumchain_primitives::Address;
+use sumchain_storage::exec_view::ExecutionView;
 use sumchain_storage::{cf, Database};
 
 use crate::{Result, StateError};
@@ -89,8 +90,23 @@ impl InferenceAttestationExecutor {
     /// sponsor entry. The dispatch's `exists` dedup guarantees this `put` is only
     /// reached on a first, non-duplicate submission, so sponsor metadata is never
     /// overwritten.
-    pub fn put(
-        &self,
+    /// Stage an attestation record AND its session-id index entry into the
+    /// block's candidate, plus the sponsor row on the sponsored (v2) path.
+    ///
+    /// This replaces `put`, which opened its own `WriteBatch`. The atomicity it
+    /// guaranteed is unchanged in substance — record, index and sponsor still
+    /// apply together or not at all — but it is now the candidate's, so a block
+    /// that is rejected leaves none of them behind. A partial write was always
+    /// the hazard here: the canonical row present without its index makes a
+    /// finalized attestation invisible to `sum_listInferenceAttestations` while
+    /// still findable by point lookup.
+    ///
+    /// Issue #95: `sponsor` is `Some` only on the sponsored v2 path; v1 direct
+    /// submissions write no sponsor row. The dispatch's `exists` dedup
+    /// guarantees this is reached only on a first submission, so sponsor
+    /// metadata is never overwritten.
+    pub fn stage(
+        view: &mut ExecutionView<'_, '_>,
         key: &[u8; 32],
         record: &InferenceAttestationRecord,
         verifier_address: &Address,
@@ -99,18 +115,99 @@ impl InferenceAttestationExecutor {
         let value = bincode::serialize(record)
             .map_err(|e| StateError::SerializationError(e.to_string()))?;
         let index_key = session_index_key(&record.digest.session_id, verifier_address);
+        // Everything fallible that does not touch the view happens first, so a
+        // serialization failure leaves the candidate untouched.
+        let sponsor_value = match sponsor {
+            Some(sp) => Some(
+                bincode::serialize(sp)
+                    .map_err(|e| StateError::SerializationError(e.to_string()))?,
+            ),
+            None => None,
+        };
 
-        let mut batch = self.db.batch();
-        batch.put(cf::INFERENCE_ATTESTATIONS, key, &value)?;
+        view.put(cf::INFERENCE_ATTESTATIONS, key, &value)?;
         // Session-id index — empty value, presence is the signal.
-        batch.put(cf::INFERENCE_ATTESTATIONS_BY_SESSION, &index_key, &[])?;
-        if let Some(sp) = sponsor {
-            let sp_value = bincode::serialize(sp)
-                .map_err(|e| StateError::SerializationError(e.to_string()))?;
-            batch.put(cf::INFERENCE_ATTESTATION_SPONSORS, key, &sp_value)?;
+        view.put(cf::INFERENCE_ATTESTATIONS_BY_SESSION, &index_key, &[])?;
+        if let Some(sp) = sponsor_value {
+            view.put(cf::INFERENCE_ATTESTATION_SPONSORS, key, &sp)?;
         }
-        batch.commit()?;
         Ok(())
+    }
+
+    // ── Execution-path reads (candidate-scoped) ─────────────────────────────
+    //
+    // The `&self` readers above stay for RPC and for mempool admission, which
+    // answer about the published chain. These read the candidate, because
+    // settlement consumes attestations from the SAME block: a claim whose
+    // attestation arrived earlier in the block must find it.
+
+    /// Whether a record exists at `key`, as this block sees it.
+    pub fn v_exists(view: &ExecutionView<'_, '_>, key: &[u8; 32]) -> Result<bool> {
+        Ok(view.contains(cf::INFERENCE_ATTESTATIONS, key)?)
+    }
+
+    /// Sponsor metadata as this block sees it.
+    ///
+    /// Staged in the same call as the record it belongs to, so a block that
+    /// records a sponsored attestation can read its own sponsor row back.
+    pub fn v_get_sponsor(
+        view: &ExecutionView<'_, '_>,
+        key: &[u8; 32],
+    ) -> Result<Option<InferenceAttestationSponsor>> {
+        match view.get(cf::INFERENCE_ATTESTATION_SPONSORS, key)? {
+            None => Ok(None),
+            Some(bytes) => Ok(Some(
+                bincode::deserialize(&bytes)
+                    .map_err(|e| StateError::SerializationError(e.to_string()))?,
+            )),
+        }
+    }
+
+    /// Fetch a record, as this block sees it.
+    pub fn v_get(
+        view: &ExecutionView<'_, '_>,
+        key: &[u8; 32],
+    ) -> Result<Option<InferenceAttestationRecord>> {
+        match view.get(cf::INFERENCE_ATTESTATIONS, key)? {
+            None => Ok(None),
+            Some(bytes) => Ok(Some(
+                bincode::deserialize(&bytes)
+                    .map_err(|e| StateError::SerializationError(e.to_string()))?,
+            )),
+        }
+    }
+
+    /// Verifier addresses that have attested to `session_id`, as this block
+    /// sees them.
+    ///
+    /// Consistency and plurality decisions count these, so an attestation
+    /// staged earlier in the block has to be included: counting the parent's
+    /// set would let a block reach a different verdict than the state it
+    /// publishes supports.
+    pub fn v_list_verifiers_by_session(
+        view: &ExecutionView<'_, '_>,
+        session_id: &str,
+    ) -> Result<Vec<Address>> {
+        let prefix = session_index_prefix(session_id);
+        let mut out = Vec::new();
+        match view.prefix_iter(cf::INFERENCE_ATTESTATIONS_BY_SESSION, &prefix) {
+            Ok(it) => {
+                // The merged scan is fallible: a read error must end it rather
+                // than return a short verifier set a quorum check would trust.
+                for entry in it {
+                    let (key, _value) = entry?;
+                    if key.len() != 36 || key[..SESSION_ID_HASH_BYTES] != prefix[..] {
+                        continue;
+                    }
+                    let mut addr = [0u8; 20];
+                    addr.copy_from_slice(&key[SESSION_ID_HASH_BYTES..]);
+                    out.push(Address::new(addr));
+                }
+            }
+            Err(sumchain_storage::StorageError::NotFound(_)) => {}
+            Err(e) => return Err(e.into()),
+        }
+        Ok(out)
     }
 
     /// Fetch the additive sponsor metadata for `(session_id, verifier)` keyed
@@ -179,6 +276,7 @@ impl InferenceAttestationExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sumchain_storage::overlay::ApplicationOverlay;
     use sumchain_primitives::inference_attestation::InferenceAttestationDigest;
     use sumchain_primitives::Hash;
     use tempfile::TempDir;
@@ -207,40 +305,40 @@ mod tests {
     #[test]
     fn exists_returns_false_for_missing_key() {
         let (db, _dir) = setup();
-        let executor = InferenceAttestationExecutor::new(db);
+        let mut overlay = ApplicationOverlay::new(&db, 1 << 30);
         let key = [0u8; 32];
-        assert_eq!(executor.exists(&key).unwrap(), false);
+        assert_eq!(InferenceAttestationExecutor::v_exists(&ExecutionView::new(&mut overlay), &key).unwrap(), false);
     }
 
     #[test]
     fn put_then_exists_round_trip() {
         let (db, _dir) = setup();
-        let executor = InferenceAttestationExecutor::new(db);
+        let mut overlay = ApplicationOverlay::new(&db, 1 << 30);
         let key = [11u8; 32];
-        executor.put(&key, &sample_record(), &Address::new([42u8; 20]), None).unwrap();
-        assert!(executor.exists(&key).unwrap());
+        InferenceAttestationExecutor::stage(&mut ExecutionView::new(&mut overlay), &key, &sample_record(), &Address::new([42u8; 20]), None).unwrap();
+        assert!(InferenceAttestationExecutor::v_exists(&ExecutionView::new(&mut overlay), &key).unwrap());
     }
 
     #[test]
     fn put_then_get_preserves_record_bytes() {
         let (db, _dir) = setup();
-        let executor = InferenceAttestationExecutor::new(db);
+        let mut overlay = ApplicationOverlay::new(&db, 1 << 30);
         let key = [22u8; 32];
         let record = sample_record();
-        executor.put(&key, &record, &Address::new([42u8; 20]), None).unwrap();
-        let loaded = executor.get(&key).unwrap().expect("present");
+        InferenceAttestationExecutor::stage(&mut ExecutionView::new(&mut overlay), &key, &record, &Address::new([42u8; 20]), None).unwrap();
+        let loaded = InferenceAttestationExecutor::v_get(&ExecutionView::new(&mut overlay), &key).unwrap().expect("present");
         assert_eq!(loaded, record);
     }
 
     #[test]
     fn distinct_keys_do_not_collide() {
         let (db, _dir) = setup();
-        let executor = InferenceAttestationExecutor::new(db);
+        let mut overlay = ApplicationOverlay::new(&db, 1 << 30);
         let k1 = [1u8; 32];
         let k2 = [2u8; 32];
-        executor.put(&k1, &sample_record(), &Address::new([42u8; 20]), None).unwrap();
-        assert!(executor.exists(&k1).unwrap());
-        assert!(!executor.exists(&k2).unwrap());
+        InferenceAttestationExecutor::stage(&mut ExecutionView::new(&mut overlay), &k1, &sample_record(), &Address::new([42u8; 20]), None).unwrap();
+        assert!(InferenceAttestationExecutor::v_exists(&ExecutionView::new(&mut overlay), &k1).unwrap());
+        assert!(!InferenceAttestationExecutor::v_exists(&ExecutionView::new(&mut overlay), &k2).unwrap());
     }
 
     #[test]
@@ -251,29 +349,29 @@ mod tests {
         // existing key overwrites without complaint. Don't change this
         // without auditing every dispatch caller for a pre-`exists` check.
         let (db, _dir) = setup();
-        let executor = InferenceAttestationExecutor::new(db);
+        let mut overlay = ApplicationOverlay::new(&db, 1 << 30);
         let key = [33u8; 32];
-        executor.put(&key, &sample_record(), &Address::new([42u8; 20]), None).unwrap();
+        InferenceAttestationExecutor::stage(&mut ExecutionView::new(&mut overlay), &key, &sample_record(), &Address::new([42u8; 20]), None).unwrap();
 
         let mut second = sample_record();
         second.included_at_height = 99;
-        executor.put(&key, &second, &Address::new([42u8; 20]), None).unwrap();
-        let loaded = executor.get(&key).unwrap().expect("present");
+        InferenceAttestationExecutor::stage(&mut ExecutionView::new(&mut overlay), &key, &second, &Address::new([42u8; 20]), None).unwrap();
+        let loaded = InferenceAttestationExecutor::v_get(&ExecutionView::new(&mut overlay), &key).unwrap().expect("present");
         assert_eq!(loaded.included_at_height, 99);
     }
 
     #[test]
     fn list_verifiers_returns_empty_for_unknown_session() {
         let (db, _dir) = setup();
-        let executor = InferenceAttestationExecutor::new(db);
-        let v = executor.list_verifiers_by_session("never-attested").unwrap();
+        let mut overlay = ApplicationOverlay::new(&db, 1 << 30);
+        let v = InferenceAttestationExecutor::v_list_verifiers_by_session(&ExecutionView::new(&mut overlay), "never-attested").unwrap();
         assert!(v.is_empty());
     }
 
     #[test]
     fn list_verifiers_returns_all_attesters_for_session() {
         let (db, _dir) = setup();
-        let executor = InferenceAttestationExecutor::new(db);
+        let mut overlay = ApplicationOverlay::new(&db, 1 << 30);
         let session_id = "multi-verifier-session";
 
         let v1 = Address::new([0x11u8; 20]);
@@ -306,11 +404,11 @@ mod tests {
         let (k1, r1, a1) = mk(&v1, 1);
         let (k2, r2, a2) = mk(&v2, 2);
         let (k3, r3, a3) = mk(&v3, 3);
-        executor.put(&k1, &r1, &a1, None).unwrap();
-        executor.put(&k2, &r2, &a2, None).unwrap();
-        executor.put(&k3, &r3, &a3, None).unwrap();
+        InferenceAttestationExecutor::stage(&mut ExecutionView::new(&mut overlay), &k1, &r1, &a1, None).unwrap();
+        InferenceAttestationExecutor::stage(&mut ExecutionView::new(&mut overlay), &k2, &r2, &a2, None).unwrap();
+        InferenceAttestationExecutor::stage(&mut ExecutionView::new(&mut overlay), &k3, &r3, &a3, None).unwrap();
 
-        let mut returned = executor.list_verifiers_by_session(session_id).unwrap();
+        let mut returned = InferenceAttestationExecutor::v_list_verifiers_by_session(&ExecutionView::new(&mut overlay), session_id).unwrap();
         returned.sort();
         let mut expected = vec![v1, v2, v3];
         expected.sort();
@@ -329,19 +427,20 @@ mod tests {
         // intended to land together — a future regression that drops
         // one of them would fail this test.
         let (db, _dir) = setup();
-        let executor = InferenceAttestationExecutor::new(db);
+        let mut overlay = ApplicationOverlay::new(&db, 1 << 30);
         let key = [77u8; 32];
         let verifier = Address::new([0xabu8; 20]);
         let record = sample_record();
-        executor.put(&key, &record, &verifier, None).unwrap();
+        InferenceAttestationExecutor::stage(&mut ExecutionView::new(&mut overlay), &key, &record, &verifier, None).unwrap();
 
         // Canonical CF: point lookup hits.
-        assert!(executor.exists(&key).unwrap());
-        assert_eq!(executor.get(&key).unwrap().unwrap(), record);
+        assert!(InferenceAttestationExecutor::v_exists(&ExecutionView::new(&mut overlay), &key).unwrap());
+        assert_eq!(InferenceAttestationExecutor::v_get(&ExecutionView::new(&mut overlay), &key).unwrap().unwrap(), record);
 
         // Index CF: list returns the verifier.
-        let v = executor
-            .list_verifiers_by_session(&record.digest.session_id)
+        let v = InferenceAttestationExecutor::v_list_verifiers_by_session(
+            &ExecutionView::new(&mut overlay),
+            &record.digest.session_id)
             .unwrap();
         assert_eq!(v, vec![verifier]);
     }
@@ -353,7 +452,7 @@ mod tests {
         // collision on the first 16 bytes is statistically impossible but
         // a buggy keying scheme could leak across sessions.
         let (db, _dir) = setup();
-        let executor = InferenceAttestationExecutor::new(db);
+        let mut overlay = ApplicationOverlay::new(&db, 1 << 30);
 
         let verifier = Address::new([0x55u8; 20]);
         let mk = |session: &str, key: u8| {
@@ -378,12 +477,12 @@ mod tests {
 
         let (ka, ra) = mk("session-A", 10);
         let (kb, rb) = mk("session-B", 11);
-        executor.put(&ka, &ra, &verifier, None).unwrap();
-        executor.put(&kb, &rb, &verifier, None).unwrap();
+        InferenceAttestationExecutor::stage(&mut ExecutionView::new(&mut overlay), &ka, &ra, &verifier, None).unwrap();
+        InferenceAttestationExecutor::stage(&mut ExecutionView::new(&mut overlay), &kb, &rb, &verifier, None).unwrap();
 
-        let a_verifiers = executor.list_verifiers_by_session("session-A").unwrap();
-        let b_verifiers = executor.list_verifiers_by_session("session-B").unwrap();
-        let c_verifiers = executor.list_verifiers_by_session("session-C").unwrap();
+        let a_verifiers = InferenceAttestationExecutor::v_list_verifiers_by_session(&ExecutionView::new(&mut overlay), "session-A").unwrap();
+        let b_verifiers = InferenceAttestationExecutor::v_list_verifiers_by_session(&ExecutionView::new(&mut overlay), "session-B").unwrap();
+        let c_verifiers = InferenceAttestationExecutor::v_list_verifiers_by_session(&ExecutionView::new(&mut overlay), "session-C").unwrap();
 
         assert_eq!(a_verifiers, vec![verifier]);
         assert_eq!(b_verifiers, vec![verifier]);
