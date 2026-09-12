@@ -868,9 +868,12 @@ impl<'a> ComputePoolStore<'a> {
     /// [`sumchain_storage::schema::journal_key`], the same `(height,
     /// block_hash)` key the account and contract families use. This reader was
     /// left on the height-only key when those were re-keyed, so it could not
-    /// find a journal the publisher had written — `stage_block_revert` returned
-    /// "nothing to revert" for every block, and a reorg silently kept the losing
-    /// branch's compute-pool rows.
+    /// find a journal the publisher had written. Reachable in the integration
+    /// stack: with the gate open, `stage_block_revert` returns "nothing to
+    /// revert" for every block and a reorg keeps the losing branch's compute-pool
+    /// rows. Not reachable on a deployed chain, where the gate is `None` and no
+    /// journal is written at all — so this is a defect the local stack can
+    /// execute, not an observed failure of a running network.
     ///
     /// # A pre-#253 row fails closed
     ///

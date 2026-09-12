@@ -270,22 +270,20 @@ impl StateManager {
         // driven purely by journal PRESENCE, not by the activation gate: under the
         // production `None` gate no C1 journal is ever written, so there is nothing
         // to revert and the dormant path is byte-for-byte unchanged.
-        // The C1 journal is keyed by `(height, block_hash)`, like account and
-        // contract. It could not be, while `execute_block` wrote it: at that
+        // The C1 and beacon journals are keyed by `(height, block_hash)`, like
+        // account and contract. Neither could be, while `execute_block` wrote
+        // them: at that
         // point the block hash is not final — the produce path builds the header
         // with `state_root: Hash::ZERO`, runs `execute_block` to obtain the
         // root, and only then fills the root in and signs — so keying by
         // `block.hash()` there would key by a hash no reader can reconstruct.
         // That was recorded here as a prerequisite for opening the gate.
         //
-        // It is resolved. `execute_block` now returns the C1 journal as an
-        // artifact bound to the candidate, and the PUBLISHER writes it, after
-        // the root is filled in and the block hash is final. The hash is
-        // therefore reconstructible by every reader, and two blocks at the same
-        // height no longer share one journal row.
-        //
-        // The beacon journal is still height-keyed; that is the same migration,
-        // not yet done.
+        // It is resolved. `execute_block` now returns both journals as artifacts
+        // bound to the candidate, and the PUBLISHER writes them, after the root
+        // is filled in and the block hash is final. The hash is therefore
+        // reconstructible by every reader, and two blocks at the same height no
+        // longer share one journal row.
         let cp_store = crate::compute_pool_store::ComputePoolStore::new(&self.db);
         let has_cp_journal = cp_store.has_journal(height, block_hash)?;
         // Dormant BR1 beacon subsystem (issue #127): its block-rollback revert folds
@@ -294,7 +292,7 @@ impl StateManager {
         // under the production `None` gate no beacon journal is ever written, so
         // there is nothing to revert and the dormant path is byte-for-byte unchanged.
         let beacon_store = crate::beacon_store::BeaconStore::new(&self.db);
-        let has_beacon_journal = beacon_store.has_journal(height)?;
+        let has_beacon_journal = beacon_store.has_journal(height, block_hash)?;
         if account_diff.is_none()
             && contract_diff.is_none()
             && !has_cp_journal
@@ -363,12 +361,12 @@ impl StateManager {
         // like the unknown-`cf_kind` guard above. No-op when no C1 journal exists.
         cp_store.stage_block_revert(&mut batch, height, block_hash)?;
 
-        // BR1 beacon restores (reverse-replay of the per-height journal) + the
+        // BR1 beacon restores (reverse-replay of this block's journal) + the
         // journal's own deletion, staged into the SAME batch. Domain prefixes are
         // validated BEFORE commit, so a corrupt beacon journal aborts the WHOLE
         // revert (nothing applied, every diff preserved for retry). No-op when no
         // beacon journal exists (always, under the dormant gate).
-        beacon_store.stage_block_revert(&mut batch, height)?;
+        beacon_store.stage_block_revert(&mut batch, height, block_hash)?;
 
         // Delete both diff records in the SAME batch — applied only on commit.
         // Both the #253 key and the pre-#253 height-only key are removed, so a

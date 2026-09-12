@@ -3027,14 +3027,12 @@ impl BlockExecutor {
         // last-second proof and a withdrawal in the same block.
         self.process_expired_challenges(block.height())?;
 
-        // ── BR1 beacon (#127): build the per-block accumulator (rehydrated from the
-        // store) when the gate is open, so the per-tx beacon dispatch drives the
-        // stateful runtime across this block's beacon txs. No-op under the None gate.
-        self.init_beacon_block(block.height(), active_validator_pubkeys)?;
-
         // One candidate per block. Every transaction executes against a view of
         // it, so a block that turns out to be invalid can be abandoned without
         // having reached canonical state.
+        //
+        // Built BEFORE the beacon accumulator, which now rehydrates from this
+        // candidate rather than from committed state — see below.
         //
         // TEMPORARY LIMIT — scaffolding, not the final value. The ceiling is a
         // versioned consensus parameter derived from measured write sets,
@@ -3043,6 +3041,15 @@ impl BlockExecutor {
         // stands in while the migration proceeds locally and MUST be replaced by
         // the parameter before any of this is proposed for publication.
         let mut candidate = CandidateExecution::new(&self.db, CANDIDATE_LIMIT_SCAFFOLD);
+
+        // ── BR1 beacon (#127): build the per-block accumulator when the gate is
+        // open, so the per-tx beacon dispatch drives the stateful runtime across
+        // this block's beacon txs. Rehydrated from THIS BLOCK'S CANDIDATE, and
+        // its membership snapshot read from there too. No-op under the None gate.
+        {
+            let view = candidate.view();
+            self.init_beacon_block(&view, block.height(), active_validator_pubkeys)?;
+        }
 
         // Capture WHICH block this execution is for, before executing it. The
         // accumulator and receipts prove artifacts came from an execution; the
@@ -3181,7 +3188,10 @@ impl BlockExecutor {
         // (`beacon_enabled_from_height == None`) the manager is never constructed,
         // nothing is applied, and the root fold below is skipped — inert, dormant
         // block roots byte-for-byte unchanged.
-        self.apply_beacon_transitions(block.height())?;
+        let beacon_journal = {
+            let mut view = candidate.view();
+            self.apply_beacon_transitions(&mut view, block.height())?
+        };
 
         // Compute new state root (folds the contract-state digest once the
         // contracts gate is open, and the C1 state digest once the compute-pool
@@ -3231,7 +3241,7 @@ impl BlockExecutor {
                     // Both gates are `None` in production, so neither journal is
                     // ever written; presence, not the gate, drives the revert.
                     compute_pool: compute_pool_journal,
-                    beacon: JournalRecord::NothingToUndo,
+                    beacon: beacon_journal,
                 },
             ),
         })
@@ -3310,6 +3320,7 @@ impl BlockExecutor {
     /// clears the slot: no accumulator, byte/state-identical dormant path.
     fn init_beacon_block(
         &self,
+        view: &ExecutionView<'_, '_>,
         height: BlockHeight,
         active_validator_pubkeys: &[[u8; 32]],
     ) -> Result<()> {
@@ -3356,6 +3367,7 @@ impl BlockExecutor {
         // MEMBERSHIP AT THE EPOCH BOUNDARY (Correction 1): membership for epoch E is the
         // active validator set AS OF `epoch_start(E)`, frozen for the whole epoch.
         let membership = match self.beacon_epoch_membership(
+            view,
             point.epoch,
             point.epoch_start,
             height,
@@ -3370,8 +3382,8 @@ impl BlockExecutor {
         // Genesis seed binds chain_id (draft §12.1); the round/output/ECIES domains
         // bind the DERIVED epoch via `cfg.epoch`.
         let genesis = genesis_seed(cfg.chain_id, &[0u8; 32]);
-        let acc = crate::beacon_manager::BeaconBlockState::load_from_store(
-            &self.db, cfg, membership, phase, genesis,
+        let acc = crate::beacon_manager::BeaconBlockState::load_from_candidate(
+            view, cfg, membership, phase, genesis,
         )?;
         *self.beacon_block.lock() = Some(acc);
         Ok(())
@@ -3393,14 +3405,33 @@ impl BlockExecutor {
     /// Returns `None` for the fail-closed case or an empty/invalid snapshot.
     fn beacon_epoch_membership(
         &self,
+        view: &ExecutionView<'_, '_>,
         epoch: u64,
         epoch_start: u64,
         height: u64,
         active_validator_pubkeys: &[[u8; 32]],
     ) -> Result<Option<sumchain_beacon_runtime::context::EpochMembership>> {
         use sumchain_beacon_runtime::context::{EpochMembership, ValidatorId};
-        let store = crate::beacon_store::BeaconStore::new(&self.db);
-        let members: Vec<[u8; 32]> = match store.get_membership(epoch)? {
+        // Through the candidate, for surface consistency rather than because
+        // this call site needs it today.
+        //
+        // At the boundary this lookup MISSES either way: the membership row is
+        // staged during finalization, after this runs, so `get_membership` and
+        // `v_get_membership` both return `None` here and the `height ==
+        // epoch_start` arm below supplies the active set directly. Past the
+        // boundary the row has been published by an earlier block, so a
+        // committed read finds it too.
+        //
+        // It reads the view regardless because leaving one beacon read on the
+        // committed handle is how the two diverge later: any change that stages
+        // a membership row before this point — an earlier finalization, a
+        // second epoch boundary inside one block — would be visible to every
+        // other beacon read and invisible to this one. `v_get_membership` is
+        // pinned by `v_get_membership_sees_a_row_staged_in_the_same_block`,
+        // which stages a row and reads it back; the boundary tests below do not
+        // discriminate between the two handles and are not evidence for this.
+        let members: Vec<[u8; 32]> =
+            match crate::beacon_store::BeaconStore::v_get_membership(view, epoch)? {
             Some(persisted) => persisted, // LOAD the frozen snapshot (never re-sample)
             None if height == epoch_start => active_validator_pubkeys.to_vec(), // boundary snapshot
             None => return Ok(None),      // past the boundary, no snapshot ⇒ fail closed
@@ -3482,15 +3513,23 @@ impl BlockExecutor {
         }
     }
 
-    /// Persist the block's accumulated beacon transition as EXACTLY ONE per-height
-    /// journal, then clear the accumulator. No-op (and no accumulator) under the
-    /// `None` gate — byte/state/root-identical dormant path.
-    fn apply_beacon_transitions(&self, height: BlockHeight) -> Result<()> {
+    /// Stage the block's accumulated beacon transition into its candidate and
+    /// return the undo journal, then clear the accumulator. No-op (and no
+    /// accumulator) under the `None` gate — byte/state/root-identical dormant
+    /// path, and `NothingToUndo` rather than an unnamed family.
+    fn apply_beacon_transitions(
+        &self,
+        view: &mut ExecutionView<'_, '_>,
+        _height: BlockHeight,
+    ) -> Result<JournalRecord> {
         let acc = self.beacon_block.lock().take();
-        if let Some(acc) = acc {
-            acc.persist(&self.db, height)?;
+        match acc {
+            Some(acc) => {
+                let (_mutated, journal) = acc.stage(view)?;
+                Ok(journal)
+            }
+            None => Ok(JournalRecord::NothingToUndo),
         }
-        Ok(())
     }
 
     /// Compute state root after block execution
@@ -3563,7 +3602,7 @@ impl BlockExecutor {
         // roots match un-upgraded nodes; beacon state cannot affect consensus while
         // dormant. Mirrors the contracts/supply/C1 gated folds above.
         if crate::beacon_executor::beacon_gate_open(&self.params, block.height()) {
-            let beacon_digest = crate::beacon_store::BeaconStore::new(&self.db).state_digest()?;
+            let beacon_digest = crate::beacon_store::BeaconStore::v_state_digest(view)?;
             data.extend_from_slice(beacon_digest.as_bytes());
         }
 
@@ -7402,7 +7441,7 @@ mod tests {
 
         // Apply a block through the REAL block-application path.
         let proposer = KeyPair::generate();
-        let blk = compute_pool_test_block(1, &proposer);
+        let mut blk = compute_pool_test_block(1, &proposer);
         executor.execute_block(&blk, Hash::ZERO, &[]).unwrap();
 
         // The apply seam touched nothing: both C1 column families are empty.
@@ -7541,6 +7580,44 @@ mod tests {
             .unwrap()
     }
 
+    /// Execute one block and PUBLISH it, the way a proposer does:
+    /// `execute_block` -> fill in the computed root -> `accept_produced` ->
+    /// `publish`.
+    ///
+    /// The real path, not a shortcut around it. Execution no longer commits, so
+    /// a test whose subject is persisted state — a reorg revert, a restart —
+    /// has to publish. The root is written into the header after execution and
+    /// before acceptance, which is the producer's own order: `accept_produced`
+    /// refuses a header root that disagrees with what execution produced, and
+    /// `ExecutionSubject` binds every header field EXCEPT the root, the one
+    /// field a producer is still allowed to set.
+    ///
+    /// Takes the block by `&mut` and writes the root into it, exactly as the
+    /// producer does — so the caller's block IS the published block and
+    /// `block.hash()` afterwards is the hash the journal was keyed by. Filling
+    /// in a clone instead would leave the test holding a hash that was never
+    /// published.
+    fn execute_and_publish(
+        executor: &BlockExecutor,
+        state: &Arc<StateManager>,
+        block: &mut Block,
+        validators: &[[u8; 32]],
+    ) -> Vec<Receipt> {
+        let exec = executor
+            .execute_block(block, state.state_root(), validators)
+            .expect("execute_block");
+        block.header.state_root = exec.computed_root();
+        let (executed, _sd, _cd) = exec.into_parts();
+        let receipts = executed.receipts().to_vec();
+        let accepted = executed.accept_produced(block).expect("accept_produced");
+        let accumulator = accepted.accumulator();
+        accepted.publish().expect("publish");
+        // After the commit, as the producer does, so a following block chains
+        // from a root that was actually published.
+        state.set_state_root(accumulator);
+        receipts
+    }
+
     /// Drive one C1 transition through the executor's apply seam and publish
     /// what it staged: the journal's rows and the journal itself, under the
     /// publisher's `(height, block_hash)` key.
@@ -7648,7 +7725,7 @@ mod tests {
         let executor = BlockExecutor::new(state.clone(), db.clone(), ChainParams::default());
 
         let proposer = KeyPair::generate();
-        let blk = compute_pool_test_block(1, &proposer);
+        let mut blk = compute_pool_test_block(1, &proposer);
         let empty_diff = ContractStateDiff::new();
 
         let root_before = root_over_empty_candidate(&executor, &db, &blk, &[], &empty_diff);
@@ -7683,7 +7760,7 @@ mod tests {
         let executor = BlockExecutor::new(state.clone(), db.clone(), params);
 
         let proposer = KeyPair::generate();
-        let blk = compute_pool_test_block(1, &proposer);
+        let mut blk = compute_pool_test_block(1, &proposer);
         let empty_diff = ContractStateDiff::new();
 
         let root_empty = root_over_empty_candidate(&executor, &db, &blk, &[], &empty_diff);
@@ -7727,7 +7804,7 @@ mod tests {
         );
 
         let proposer = KeyPair::generate();
-        let blk = compute_pool_test_block(1, &proposer);
+        let mut blk = compute_pool_test_block(1, &proposer);
         let empty_contract = ContractStateDiff::new();
 
         // A known C1 row so the committed digest is non-trivial.
@@ -7799,7 +7876,7 @@ mod tests {
         );
 
         let proposer = KeyPair::generate();
-        let blk = compute_pool_test_block(1, &proposer);
+        let mut blk = compute_pool_test_block(1, &proposer);
         let empty_contract = ContractStateDiff::new();
 
         // A known beacon row so the committed digest is non-trivial.
@@ -7944,8 +8021,8 @@ mod tests {
         fund(&state, &vs[0].address(), fee + 1000);
 
         let tx = beacon_reg_tx(&vs[0], 7, false, fee);
-        let blk = beacon_block_with(1, vs[0].public_key().as_bytes(), vec![tx]);
-        let receipts = receipts_of(executor.execute_block(&blk, Hash::ZERO, &pubs).unwrap());
+        let mut blk = beacon_block_with(1, vs[0].public_key().as_bytes(), vec![tx]);
+        let receipts = execute_and_publish(&executor, &state, &mut blk, &pubs);
 
         assert_eq!(receipts.len(), 1);
         assert!(
@@ -7963,7 +8040,7 @@ mod tests {
             "registrant key persisted at membership index 0"
         );
         assert!(
-            store.has_journal(1).unwrap(),
+            store.has_journal(1, &blk.hash()).unwrap(),
             "one beacon journal at the block height"
         );
     }
@@ -7979,8 +8056,8 @@ mod tests {
 
         // A registration with a WRONG PoP → runtime PopInvalid → FAIL CLOSED.
         let tx = beacon_reg_tx(&vs[0], 7, true, fee);
-        let blk = beacon_block_with(1, vs[0].public_key().as_bytes(), vec![tx]);
-        let receipts = receipts_of(executor.execute_block(&blk, Hash::ZERO, &pubs).unwrap());
+        let mut blk = beacon_block_with(1, vs[0].public_key().as_bytes(), vec![tx]);
+        let receipts = execute_and_publish(&executor, &state, &mut blk, &pubs);
 
         assert!(!receipts[0].is_success(), "invalid beacon tx fails closed");
         // The invalid op wrote NO DKG state (no key row). Height 1 IS the epoch boundary,
@@ -8013,8 +8090,8 @@ mod tests {
         // failure receipt and writes NO beacon state/journal — byte/state-identical to
         // the pre-per-tx-wiring fail-closed seam.
         let tx = beacon_reg_tx(&vs[0], 7, false, fee);
-        let blk = beacon_block_with(1, vs[0].public_key().as_bytes(), vec![tx]);
-        let receipts = receipts_of(executor.execute_block(&blk, Hash::ZERO, &pubs).unwrap());
+        let mut blk = beacon_block_with(1, vs[0].public_key().as_bytes(), vec![tx]);
+        let receipts = execute_and_publish(&executor, &state, &mut blk, &pubs);
 
         assert!(
             !receipts[0].is_success(),
@@ -8026,7 +8103,7 @@ mod tests {
             "None gate: no beacon state"
         );
         assert!(
-            !store.has_journal(1).unwrap(),
+            !store.has_journal(1, &blk.hash()).unwrap(),
             "None gate: no beacon journal"
         );
     }
@@ -8044,8 +8121,8 @@ mod tests {
         // Signer index 0: valid registration. Signer index 1: bad PoP → fail closed.
         let good = beacon_reg_tx(&vs[0], 7, false, fee);
         let bad = beacon_reg_tx(&vs[1], 9, true, fee);
-        let blk = beacon_block_with(1, vs[0].public_key().as_bytes(), vec![good, bad]);
-        let receipts = receipts_of(executor.execute_block(&blk, Hash::ZERO, &pubs).unwrap());
+        let mut blk = beacon_block_with(1, vs[0].public_key().as_bytes(), vec![good, bad]);
+        let receipts = execute_and_publish(&executor, &state, &mut blk, &pubs);
 
         assert!(receipts[0].is_success(), "valid op succeeds");
         assert!(!receipts[1].is_success(), "invalid op fails closed");
@@ -8066,23 +8143,25 @@ mod tests {
         fund(&state, &vs[0].address(), fee + 1000);
 
         let tx = beacon_reg_tx(&vs[0], 7, false, fee);
-        let blk = beacon_block_with(1, vs[0].public_key().as_bytes(), vec![tx]);
-        executor.execute_block(&blk, Hash::ZERO, &pubs).unwrap();
+        let mut blk = beacon_block_with(1, vs[0].public_key().as_bytes(), vec![tx]);
+        execute_and_publish(&executor, &state, &mut blk, &pubs);
         let store = crate::beacon_store::BeaconStore::new(&db);
         assert!(
             !store.load_state_map().unwrap().is_empty(),
             "beacon state persisted"
         );
-        assert!(store.has_journal(1).unwrap());
+        assert!(store.has_journal(1, &blk.hash()).unwrap());
 
         // Reorg: revert height 1 → beacon rows (key + boundary membership) + journal all
         // roll back atomically.
-        state.revert_block_state_diffs(1, &Hash::ZERO).unwrap();
+        // The journal is keyed by the PUBLISHED block, so the revert must name it.
+        // `Hash::ZERO` was the pre-publication header root, not a block hash.
+        state.revert_block_state_diffs(1, &blk.hash()).unwrap();
         assert!(
             store.load_state_map().unwrap().is_empty(),
             "beacon state reverted"
         );
-        assert!(!store.has_journal(1).unwrap(), "beacon journal consumed");
+        assert!(!store.has_journal(1, &blk.hash()).unwrap(), "beacon journal consumed");
     }
 
     /// RESTART between blocks reproduces the same beacon state as uninterrupted
@@ -8100,12 +8179,12 @@ mod tests {
             fund(&state, &vs[1].address(), fee + 1000);
             let ex = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
             // Block 1: reg from vs[0].
-            let b1 = beacon_block_with(
+            let mut b1 = beacon_block_with(
                 1,
                 vs[0].public_key().as_bytes(),
                 vec![beacon_reg_tx(&vs[0], 7, false, fee)],
             );
-            ex.execute_block(&b1, Hash::ZERO, &pubs).unwrap();
+            execute_and_publish(&ex, &state, &mut b1, &pubs);
             // Optionally simulate a restart with a brand-new executor over the same db.
             let ex2 = if restart {
                 BlockExecutor::new(state.clone(), db.clone(), beacon_open_params())
@@ -8113,12 +8192,12 @@ mod tests {
                 ex
             };
             // Block 2: reg from vs[1] (must rehydrate vs[0]'s key first).
-            let b2 = beacon_block_with(
+            let mut b2 = beacon_block_with(
                 2,
                 vs[1].public_key().as_bytes(),
                 vec![beacon_reg_tx(&vs[1], 8, false, fee)],
             );
-            ex2.execute_block(&b2, Hash::ZERO, &pubs).unwrap();
+            execute_and_publish(&ex2, &state, &mut b2, &pubs);
             crate::beacon_store::BeaconStore::new(&db)
                 .state_digest()
                 .unwrap()
@@ -8138,22 +8217,22 @@ mod tests {
         let fee = beacon_open_params().min_fee;
         fund(&state, &vs[0].address(), fee + 1000);
         let ex = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
-        let blk = beacon_block_with(
+        let mut blk = beacon_block_with(
             1,
             vs[0].public_key().as_bytes(),
             vec![beacon_reg_tx(&vs[0], 7, false, fee)],
         );
 
-        let r1 = receipts_of(ex.execute_block(&blk, Hash::ZERO, &pubs).unwrap());
+        let r1 = execute_and_publish(&ex, &state, &mut blk, &pubs);
         let digest1 = crate::beacon_store::BeaconStore::new(&db)
             .state_digest()
             .unwrap();
         assert!(r1[0].is_success());
 
-        state.revert_block_state_diffs(1, &Hash::ZERO).unwrap();
+        state.revert_block_state_diffs(1, &blk.hash()).unwrap();
         // A fresh executor replays the identical block.
         let ex2 = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
-        let r2 = receipts_of(ex2.execute_block(&blk, Hash::ZERO, &pubs).unwrap());
+        let r2 = execute_and_publish(&ex2, &state, &mut blk, &pubs);
         let digest2 = crate::beacon_store::BeaconStore::new(&db)
             .state_digest()
             .unwrap();
@@ -8175,7 +8254,7 @@ mod tests {
         fund(&state, &vs[1].address(), fee + 1000);
         let ex = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
         // valid reg (vs[0]) THEN invalid reg (vs[1], bad PoP).
-        let blk = beacon_block_with(
+        let mut blk = beacon_block_with(
             1,
             vs[0].public_key().as_bytes(),
             vec![
@@ -8183,7 +8262,7 @@ mod tests {
                 beacon_reg_tx(&vs[1], 9, true, fee),
             ],
         );
-        let r = receipts_of(ex.execute_block(&blk, Hash::ZERO, &pubs).unwrap());
+        let r = execute_and_publish(&ex, &state, &mut blk, &pubs);
         assert!(r[0].is_success(), "valid op1 succeeds");
         assert!(!r[1].is_success(), "invalid op2 fails closed");
         let store = crate::beacon_store::BeaconStore::new(&db);
@@ -8208,7 +8287,7 @@ mod tests {
         fund(&state, &vs[0].address(), fee + 1000);
         let ex = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
         // Block 1: vs[0] registers key A (seed 7) then key B (seed 8) → equivocation.
-        let blk = beacon_block_with(
+        let mut blk = beacon_block_with(
             1,
             vs[0].public_key().as_bytes(),
             vec![
@@ -8216,7 +8295,7 @@ mod tests {
                 beacon_reg_tx(&vs[0], 8, false, fee),
             ],
         );
-        ex.execute_block(&blk, Hash::ZERO, &pubs).unwrap();
+        execute_and_publish(&ex, &state, &mut blk, &pubs);
         let has_equiv = |db: &Database| {
             crate::beacon_store::BeaconStore::new(db)
                 .load_state_map()
@@ -8228,13 +8307,13 @@ mod tests {
 
         // Restart: a fresh executor runs a later block; the evidence must survive.
         let ex2 = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
-        let blk2 = beacon_block_with(
+        let mut blk2 = beacon_block_with(
             2,
             vs[0].public_key().as_bytes(),
             vec![beacon_reg_tx(&vs[1], 9, false, fee)],
         );
         fund(&state, &vs[1].address(), fee + 1000);
-        ex2.execute_block(&blk2, Hash::ZERO, &pubs).unwrap();
+        execute_and_publish(&ex2, &state, &mut blk2, &pubs);
         assert!(has_equiv(&db), "equivocation evidence survives restart");
     }
 
@@ -8246,23 +8325,27 @@ mod tests {
         let (vs, pubs) = beacon_validators();
         let fee = beacon_open_params().min_fee;
         fund(&state, &vs[0].address(), fee + 1000);
-        // Pre-write a journal at height 1 so `persist_transition`'s duplicate-height
-        // guard makes the block's beacon persist FAIL.
-        db.put(
-            sumchain_storage::cf::BEACON_STATE_DIFFS,
-            &1u64.to_be_bytes(),
-            b"x",
-        )
-        .unwrap();
+        // Make the block's beacon STAGING fail. The old trigger was a
+        // pre-written height-keyed journal tripping a duplicate-height guard;
+        // that guard is gone, because two blocks at one height are legitimate
+        // and it refused the second one rather than protecting the first.
+        //
+        // This trigger is the domain check, which survives: a committed row
+        // whose key carries no recognized beacon domain is picked up as part of
+        // the predecessor, and `stage_transition` refuses to derive a transition
+        // over it. The subject is unchanged — a failure on the persistence path
+        // aborts the whole block and leaves nothing behind.
+        db.put(sumchain_storage::cf::BEACON_STATE, &[0xFFu8, 1, 2, 3], b"x")
+            .unwrap();
         let ex = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
-        let blk = beacon_block_with(
+        let mut blk = beacon_block_with(
             1,
             vs[0].public_key().as_bytes(),
             vec![beacon_reg_tx(&vs[0], 7, false, fee)],
         );
         assert!(
-            ex.execute_block(&blk, Hash::ZERO, &pubs).is_err(),
-            "persist failure aborts the block"
+            ex.execute_block(&blk, state.state_root(), &pubs).is_err(),
+            "a staging failure aborts the block"
         );
         // No beacon KEY row was committed (the atomic batch never ran).
         let rows = crate::beacon_store::BeaconStore::new(&db)
@@ -8286,8 +8369,8 @@ mod tests {
         let (state, db, _dir) = setup();
         let (vs, pubs) = beacon_validators();
         let ex = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
-        let blk = beacon_block_with(1, vs[0].public_key().as_bytes(), vec![]);
-        ex.execute_block(&blk, Hash::ZERO, &pubs).unwrap();
+        let mut blk = beacon_block_with(1, vs[0].public_key().as_bytes(), vec![]);
+        execute_and_publish(&ex, &state, &mut blk, &pubs);
         assert_eq!(
             crate::beacon_store::BeaconStore::new(&db)
                 .get_membership(0)
@@ -8309,23 +8392,12 @@ mod tests {
         fund(&state, &vs[0].address(), fee + 1000);
         let ex = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
         // Boundary (height 1): snapshot the active set for epoch 0.
-        ex.execute_block(
-            &beacon_block_with(1, vs[0].public_key().as_bytes(), vec![]),
-            Hash::ZERO,
-            &pubs,
-        )
-        .unwrap();
+        execute_and_publish(&ex, &state, &mut beacon_block_with(1, vs[0].public_key().as_bytes(), vec![]), &pubs);
         // Height 2 (same epoch, key window) with a DIFFERENT active set that DROPS vs[0].
         let churned: Vec<[u8; 32]> =
             vec![[0x51; 32], [0x52; 32], [0x53; 32], [0x54; 32], [0x55; 32]];
         let reg = beacon_reg_tx(&vs[0], 7, false, fee);
-        let r = receipts_of(ex
-            .execute_block(
-                &beacon_block_with(2, vs[1].public_key().as_bytes(), vec![reg]),
-                Hash::ZERO,
-                &churned,
-            )
-            .unwrap());
+        let r = execute_and_publish(&ex, &state, &mut beacon_block_with(2, vs[1].public_key().as_bytes(), vec![reg]), &churned);
         assert!(
             r[0].is_success(),
             "a member of the FROZEN epoch_start set registers despite active-set churn"
@@ -8350,23 +8422,12 @@ mod tests {
         fund(&state, &vs[0].address(), fee + 1000);
         let ex = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
         // Boundary block with NO beacon op.
-        ex.execute_block(
-            &beacon_block_with(1, vs[0].public_key().as_bytes(), vec![]),
-            Hash::ZERO,
-            &pubs,
-        )
-        .unwrap();
+        execute_and_publish(&ex, &state, &mut beacon_block_with(1, vs[0].public_key().as_bytes(), vec![]), &pubs);
         // The FIRST op arrives at height 50 (still epoch 0's key window) under a churned set.
         let churned: Vec<[u8; 32]> =
             vec![[0x61; 32], [0x62; 32], [0x63; 32], [0x64; 32], [0x65; 32]];
         let reg = beacon_reg_tx(&vs[0], 7, false, fee);
-        let r = receipts_of(ex
-            .execute_block(
-                &beacon_block_with(50, vs[0].public_key().as_bytes(), vec![reg]),
-                Hash::ZERO,
-                &churned,
-            )
-            .unwrap());
+        let r = execute_and_publish(&ex, &state, &mut beacon_block_with(50, vs[0].public_key().as_bytes(), vec![reg]), &churned);
         assert!(
             r[0].is_success(),
             "late first op keyed against the epoch_start membership"
@@ -8394,27 +8455,17 @@ mod tests {
             let fee = beacon_open_params().min_fee;
             fund(&state, &vs[0].address(), fee + 1000);
             let ex = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
-            ex.execute_block(
-                &beacon_block_with(
+            execute_and_publish(&ex, &state, &mut beacon_block_with(
                     1,
                     vs[0].public_key().as_bytes(),
                     vec![beacon_reg_tx(&vs[0], 7, false, fee)],
-                ),
-                Hash::ZERO,
-                &pubs,
-            )
-            .unwrap();
+                ), &pubs);
             let store = crate::beacon_store::BeaconStore::new(&db);
             let snap = store.get_membership(0).unwrap();
             assert_eq!(snap, Some(pubs.clone()));
             let ex2 = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
             let churn: Vec<[u8; 32]> = vec![[9u8; 32]; 5];
-            ex2.execute_block(
-                &beacon_block_with(2, vs[0].public_key().as_bytes(), vec![]),
-                Hash::ZERO,
-                &churn,
-            )
-            .unwrap();
+            execute_and_publish(&ex2, &state, &mut beacon_block_with(2, vs[0].public_key().as_bytes(), vec![]), &churn);
             assert_eq!(
                 store.get_membership(0).unwrap(),
                 snap,
@@ -8429,36 +8480,29 @@ mod tests {
             let fee = beacon_open_params().min_fee;
             fund(&state, &vs[0].address(), fee + 1000);
             let ex = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
-            ex.execute_block(
-                &beacon_block_with(
-                    1,
-                    vs[0].public_key().as_bytes(),
-                    vec![beacon_reg_tx(&vs[0], 7, false, fee)],
-                ),
-                Hash::ZERO,
-                &pubs,
-            )
-            .unwrap();
+            let mut boundary = beacon_block_with(
+                1,
+                vs[0].public_key().as_bytes(),
+                vec![beacon_reg_tx(&vs[0], 7, false, fee)],
+            );
+            execute_and_publish(&ex, &state, &mut boundary, &pubs);
             let store = crate::beacon_store::BeaconStore::new(&db);
             let snap = store.get_membership(0).unwrap();
             assert_eq!(snap, Some(pubs.clone()));
-            state.revert_block_state_diffs(1, &Hash::ZERO).unwrap();
+            state
+                .revert_block_state_diffs(1, &boundary.hash())
+                .unwrap();
             assert_eq!(
                 store.get_membership(0).unwrap(),
                 None,
                 "boundary revert removed the snapshot"
             );
             let ex2 = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
-            ex2.execute_block(
-                &beacon_block_with(
+            execute_and_publish(&ex2, &state, &mut beacon_block_with(
                     1,
                     vs[0].public_key().as_bytes(),
                     vec![beacon_reg_tx(&vs[0], 7, false, fee)],
-                ),
-                Hash::ZERO,
-                &pubs,
-            )
-            .unwrap();
+                ), &pubs);
             assert_eq!(
                 store.get_membership(0).unwrap(),
                 snap,
@@ -8478,22 +8522,11 @@ mod tests {
         fund(&state, &vs[0].address(), fee + 1000);
         let ex = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
         // Boundary block establishes the epoch-0 membership snapshot.
-        ex.execute_block(
-            &beacon_block_with(1, vs[0].public_key().as_bytes(), vec![]),
-            Hash::ZERO,
-            &pubs,
-        )
-        .unwrap();
+        execute_and_publish(&ex, &state, &mut beacon_block_with(1, vs[0].public_key().as_bytes(), vec![]), &pubs);
         // Height 250 (position 249) is in the DEAL window; a registration is out of its
         // KeyRegistration window there and is rejected.
         let reg = beacon_reg_tx(&vs[0], 7, false, fee);
-        let r = receipts_of(ex
-            .execute_block(
-                &beacon_block_with(250, vs[0].public_key().as_bytes(), vec![reg]),
-                Hash::ZERO,
-                &pubs,
-            )
-            .unwrap());
+        let r = execute_and_publish(&ex, &state, &mut beacon_block_with(250, vs[0].public_key().as_bytes(), vec![reg]), &pubs);
         assert!(
             !r[0].is_success(),
             "registration outside its window fails closed"
@@ -8684,7 +8717,7 @@ mod tests {
         let executor = BlockExecutor::new(state.clone(), db.clone(), params);
 
         let proposer = KeyPair::generate();
-        let blk = compute_pool_test_block(1, &proposer);
+        let mut blk = compute_pool_test_block(1, &proposer);
         executor.execute_block(&blk, Hash::ZERO, &[]).unwrap();
 
         let store = ComputePoolStore::new(&db);

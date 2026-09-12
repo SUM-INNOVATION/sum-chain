@@ -60,6 +60,8 @@ fn from_stored_ref(s: &StoredSignedRef) -> SignedRecordRef {
     }
 }
 use sumchain_primitives::{BlockHeight, Hash};
+use sumchain_storage::candidate::JournalRecord;
+use sumchain_storage::exec_view::ExecutionView;
 use sumchain_storage::{cf, Database};
 
 use crate::{Result, StateError};
@@ -516,6 +518,17 @@ pub struct BeaconStateDiff {
 }
 
 impl BeaconStateDiff {
+    /// Decode a journal produced by
+    /// [`BeaconStore::stage_transition`](BeaconStore::stage_transition).
+    ///
+    /// Public because the journal is now an artifact that travels out of
+    /// execution — bound to the candidate, written by the publisher, and read
+    /// back by the reorg driver. A type whose bytes leave the module needs a way
+    /// back in that is not every reader re-deriving the codec.
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        beacon_decode(bytes)
+    }
+
     /// Whether the journal is empty.
     pub fn is_empty(&self) -> bool {
         self.records.is_empty()
@@ -694,7 +707,32 @@ impl<'a> BeaconStore<'a> {
         &self,
         epoch: u64,
     ) -> Result<(RehydrateInput, Vec<(u64, [u8; G2_LEN], [u8; OUT_LEN])>)> {
-        let rows = self.load_state_map()?;
+        Self::materialized_from(&self.load_state_map()?, epoch)
+    }
+
+    /// De-materialize the rows THIS BLOCK sees, so the accumulator is rehydrated
+    /// from the candidate rather than from the parent.
+    ///
+    /// Rehydration is how the block accumulator learns what the epoch already
+    /// contains. Reading committed state here would rebuild it from the
+    /// parent's rows, so a second beacon op in a block would be validated
+    /// against a state missing the first one's — a duplicate key registration
+    /// or deal would look novel and be accepted twice.
+    #[allow(clippy::type_complexity)]
+    pub fn v_load_materialized(
+        view: &ExecutionView<'_, '_>,
+        epoch: u64,
+    ) -> Result<(RehydrateInput, Vec<(u64, [u8; G2_LEN], [u8; OUT_LEN])>)> {
+        Self::materialized_from(&Self::v_load_state_map(view)?, epoch)
+    }
+
+    /// The de-materialization itself, over an already-loaded row set. Shared, so
+    /// the committed and candidate paths cannot decode the same rows differently.
+    #[allow(clippy::type_complexity)]
+    fn materialized_from(
+        rows: &BTreeMap<Vec<u8>, Vec<u8>>,
+        epoch: u64,
+    ) -> Result<(RehydrateInput, Vec<(u64, [u8; G2_LEN], [u8; OUT_LEN])>)> {
         let mut input = RehydrateInput::default();
         let mut round_sig: BTreeMap<u64, [u8; G2_LEN]> = BTreeMap::new();
         let mut round_out: BTreeMap<u64, [u8; OUT_LEN]> = BTreeMap::new();
@@ -713,7 +751,7 @@ impl<'a> BeaconStore<'a> {
             Ok(a)
         };
 
-        for (k, v) in &rows {
+        for (k, v) in rows {
             // Only this epoch's rows (epoch is bytes [1..9] of every key).
             if key_epoch(k) != Some(epoch) {
                 continue;
@@ -803,10 +841,20 @@ impl<'a> BeaconStore<'a> {
     /// state root **only when the beacon gate is open**; while dormant it is never
     /// folded, so dormant roots are byte-for-byte unchanged.
     pub fn state_digest(&self) -> Result<Hash> {
-        let rows = self.load_state_map()?;
+        Self::digest_of(&self.load_state_map()?)
+    }
+
+    /// The digest encoder itself, over an already-loaded row set.
+    ///
+    /// Both [`state_digest`](Self::state_digest) and
+    /// [`v_state_digest`](Self::v_state_digest) call this, so the committed and
+    /// candidate digests cannot drift apart: the rows differ, the encoding
+    /// cannot. The fold is part of the block state root, so two encoders that
+    /// disagree by one byte split the network.
+    fn digest_of(rows: &BTreeMap<Vec<u8>, Vec<u8>>) -> Result<Hash> {
         let mut buf: Vec<u8> = Vec::with_capacity(BEACON_STATE_DIGEST_DOMAIN.len());
         buf.extend_from_slice(BEACON_STATE_DIGEST_DOMAIN);
-        for (k, v) in &rows {
+        for (k, v) in rows {
             buf.extend_from_slice(&frame_len(k.len())?);
             buf.extend_from_slice(k);
             buf.extend_from_slice(&frame_len(v.len())?);
@@ -815,34 +863,160 @@ impl<'a> BeaconStore<'a> {
         Ok(Hash::hash(&buf))
     }
 
-    /// Whether a per-block beacon journal exists for `height`.
-    pub fn has_journal(&self, height: BlockHeight) -> Result<bool> {
-        Ok(self
-            .db
-            .contains(cf::BEACON_STATE_DIFFS, &height.to_be_bytes())?)
+    // ── Execution-path API (candidate-scoped) ───────────────────────────────
+    //
+    // Block execution reads and writes beacon rows only through these. They take
+    // an `ExecutionView`, never `&self`: without a receiver there is no
+    // `self.db` to reach, so a committed read on the execution path is not
+    // expressible.
+    //
+    // The `&self` methods stay, and stay committed-state, for RPC and for the
+    // reorg driver — which answer about the published chain.
+
+    /// The live beacon row set as this block sees it: the parent's rows,
+    /// overlaid with everything this block has already staged.
+    pub fn v_load_state_map(
+        view: &ExecutionView<'_, '_>,
+    ) -> Result<BTreeMap<Vec<u8>, Vec<u8>>> {
+        let mut map = BTreeMap::new();
+        // The merged scan is fallible. A read error must end it, not truncate
+        // it: a short row set produces a different digest, and that digest is
+        // folded into the block state root.
+        for entry in view.iter(cf::BEACON_STATE)? {
+            let (k, v) = entry?;
+            map.insert(k, v);
+        }
+        Ok(map)
     }
 
-    /// Load + canonically decode the per-height revert journal (`None` if absent —
-    /// e.g. always under the dormant gate, which writes no journal).
-    pub fn load_journal(&self, height: BlockHeight) -> Result<Option<BeaconStateDiff>> {
-        match self.db.get(cf::BEACON_STATE_DIFFS, &height.to_be_bytes())? {
+    /// The beacon state digest over the candidate's rows.
+    ///
+    /// Reading committed state here would commit the root to the PARENT's beacon
+    /// state while publishing the child's rows, so every validator would compute
+    /// a root that disagrees with the state it stores.
+    pub fn v_state_digest(view: &ExecutionView<'_, '_>) -> Result<Hash> {
+        Self::digest_of(&Self::v_load_state_map(view)?)
+    }
+
+    /// The FIXED membership snapshot for `epoch`, as this block sees it.
+    ///
+    /// The membership row is staged during block finalization, so the executor's
+    /// only current caller — `beacon_epoch_membership`, which runs at block
+    /// START — cannot observe a difference between this and the committed read:
+    /// at the boundary neither finds a row and the active set is used directly,
+    /// and past the boundary an earlier block has already published one.
+    ///
+    /// This exists so that the whole beacon read surface goes through the view,
+    /// not because that call site needs it. A subsystem with one read left on
+    /// the committed handle is a subsystem whose reads can disagree: the moment
+    /// anything stages a membership row mid-block, every other beacon read would
+    /// see it and that one would not. Keeping the surface uniform is what makes
+    /// "beacon execution reads the candidate" a property rather than a habit.
+    pub fn v_get_membership(
+        view: &ExecutionView<'_, '_>,
+        epoch: u64,
+    ) -> Result<Option<Vec<[u8; 32]>>> {
+        match view.get(cf::BEACON_STATE, &membership_row_key(epoch))? {
+            Some(bytes) => Ok(Some(decode_membership(&bytes)?.members)),
+            None => Ok(None),
+        }
+    }
+
+    /// Whether this block published a beacon journal.
+    pub fn has_journal(&self, height: BlockHeight, block_hash: &Hash) -> Result<bool> {
+        Ok(self.journal_bytes(height, block_hash)?.is_some())
+    }
+
+    /// Load + canonically decode the revert journal published for
+    /// `(height, block_hash)` (`None` if absent — always under the dormant gate,
+    /// which produces no journal).
+    pub fn load_journal(
+        &self,
+        height: BlockHeight,
+        block_hash: &Hash,
+    ) -> Result<Option<BeaconStateDiff>> {
+        match self.journal_bytes(height, block_hash)? {
             Some(bytes) => Ok(Some(beacon_decode(&bytes)?)),
             None => Ok(None),
         }
     }
 
-    /// Persist a single **epoch's** transition atomically: replace exactly the rows of
-    /// `epoch` (all other epochs' rows are carried forward unchanged) with
-    /// `current_epoch_rows`, journaling the delta at `height`. Wraps
-    /// [`persist_transition`](Self::persist_transition) so the atomic single-batch +
-    /// duplicate-height + stale-predecessor guarantees all apply.
-    pub fn persist_epoch_transition(
+    /// The raw journal row published for `(height, block_hash)`.
+    ///
+    /// Beacon journals are written by the publisher under
+    /// [`sumchain_storage::schema::journal_key`], the same `(height,
+    /// block_hash)` key the account and contract families use. This reader was
+    /// left on the height-only key when those were re-keyed, so it could not
+    /// find a journal the publisher had written. Reachable in the integration
+    /// stack: with the gate open, `stage_block_revert` returns "nothing to
+    /// revert" for every block and a reorg keeps the losing branch's beacon
+    /// rows. Not reachable on a deployed chain, where the gate is `None` and no
+    /// journal is written at all — so this is a defect the local stack can
+    /// execute, not an observed failure of a running network.
+    ///
+    /// # A pre-#253 row fails closed
+    ///
+    /// The account and contract families fall back to the height-only key so an
+    /// upgrading node can still revert a block an older binary wrote. Beacon
+    /// does not, for the same reason compute-pool does not.
+    ///
+    /// A height-only row names a height and nothing else. Where two blocks
+    /// competed at that height it cannot say which one it undoes, and applying
+    /// the wrong block's undo record writes a predecessor that never existed
+    /// into canonical state — silently, since every mutation in it decodes
+    /// cleanly. Beacon has no history to preserve: the gate is `None` in
+    /// production, so no beacon journal has ever been written at any height by
+    /// any binary. A height-only row here cannot be a legitimate legacy journal.
+    ///
+    /// So it refuses, names the height, and requires the row to be removed or
+    /// re-keyed offline where an operator can establish which block it came
+    /// from — including when this block's own journal is present, since a stray
+    /// row left behind would mislead the next reader. The row is never deleted:
+    /// it is the only evidence of what it belonged to.
+    fn journal_bytes(
         &self,
+        height: BlockHeight,
+        block_hash: &Hash,
+    ) -> Result<Option<Vec<u8>>> {
+        if self
+            .db
+            .contains(cf::BEACON_STATE_DIFFS, &height.to_be_bytes())?
+        {
+            return Err(StateError::InvalidOperation(format!(
+                "beacon journal at height {height} is keyed by height alone. No \
+                 beacon journal is written under the dormant gate, so this row \
+                 cannot be identified with a block, and applying it could undo a \
+                 different block's transition. Remove or re-key it offline \
+                 before reverting."
+            )));
+        }
+        self.db
+            .get(
+                cf::BEACON_STATE_DIFFS,
+                &sumchain_storage::schema::journal_key(height, block_hash),
+            )
+            .map_err(Into::into)
+    }
+
+    // `persist_epoch_transition` and `persist_transition` are gone. Both
+    // committed their own `WriteBatch` — beacon rows and a height-keyed journal
+    // reaching canonical storage during execution, before anything had checked
+    // the block's root. `stage_epoch_transition` and `stage_transition` replace
+    // them. Keeping either as a convenience would have preserved exactly the
+    // escape hatch this work removes.
+
+    /// Stage a single **epoch's** transition into the block's candidate:
+    /// replace exactly the rows of `epoch` (all other epochs' rows carried
+    /// forward unchanged) with `current_epoch_rows`.
+    ///
+    /// The predecessor is read from the CANDIDATE, so the carried-forward rows
+    /// are what this block sees rather than what its parent published.
+    pub fn stage_epoch_transition(
+        view: &mut ExecutionView<'_, '_>,
         epoch: u64,
         current_epoch_rows: BTreeMap<Vec<u8>, Vec<u8>>,
-        height: BlockHeight,
-    ) -> Result<usize> {
-        let before = self.load_state_map()?;
+    ) -> Result<(usize, JournalRecord)> {
+        let before = Self::v_load_state_map(view)?;
         // after = (live rows NOT in this epoch) ∪ (this epoch's fresh materialization).
         let mut after: BTreeMap<Vec<u8>, Vec<u8>> = before
             .iter()
@@ -850,38 +1024,68 @@ impl<'a> BeaconStore<'a> {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         after.extend(current_epoch_rows);
-        self.persist_transition(&before, &after, height)
+        Self::stage_transition(view, &before, &after)
     }
 
-    /// Persist the transition `before -> after` for `height` **atomically** (one
-    /// finalized beacon transition per block). Two hard preconditions checked BEFORE
-    /// any write: a duplicate-height journal is rejected, and the claimed `before`
-    /// row set must byte-for-byte equal the live persisted state (stale-predecessor
-    /// rejection). All record writes/deletes + the journal write go into one
-    /// [`Database::batch`] committed once. Returns the number of mutated rows.
-    pub fn persist_transition(
-        &self,
+    /// Stage the transition `before -> after` into the block's candidate and
+    /// return its undo journal as an artifact.
+    ///
+    /// This replaces the removed `persist_transition` on the execution path, and
+    /// differs from it in three ways that matter.
+    ///
+    /// **Nothing is committed.** Row writes and deletes are buffered into the
+    /// view, so a block that is rejected or loses fork choice leaves no beacon
+    /// row behind.
+    ///
+    /// **The journal is returned, not written.** It travels back to
+    /// `execute_block`, is bound to the candidate at `finish_execution`, and is
+    /// written by the publisher under `(height, block_hash)`. There is
+    /// deliberately no `height` parameter: the old code keyed the journal by
+    /// height alone, which two blocks at the same height share, so a side
+    /// branch's journal overwrote the canonical one — and the duplicate-height
+    /// guard meant to prevent that instead REFUSED the side branch's legitimate
+    /// transition. Removing the parameter makes both mistakes unrepresentable.
+    ///
+    /// **The predecessor is the candidate's state, not the chain's.**
+    ///
+    /// Returns the number of mutated rows and the journal (`NothingToUndo` for a
+    /// genuine no-op, which stages nothing).
+    pub fn stage_transition(
+        view: &mut ExecutionView<'_, '_>,
         before: &BTreeMap<Vec<u8>, Vec<u8>>,
         after: &BTreeMap<Vec<u8>, Vec<u8>>,
-        height: BlockHeight,
-    ) -> Result<usize> {
-        if self.has_journal(height)? {
-            return Err(StateError::InvalidOperation(format!(
-                "beacon transition already finalized at height {height}; refusing to overwrite"
-            )));
+    ) -> Result<(usize, JournalRecord)> {
+        // One beacon transition per block. The old guard asked the committed
+        // store whether a journal existed at this height, which conflated two
+        // blocks at the same height; this asks the candidate whether it has
+        // already staged beacon rows, which is the question that was meant.
+        //
+        // A transition that mutated nothing stages nothing and so is not
+        // detected here — correctly: it produced no journal either, and there is
+        // nothing for a second call to overwrite.
+        if view.preimages_for(cf::BEACON_STATE).next().is_some() {
+            return Err(StateError::InvalidOperation(
+                "beacon transition already staged for this block; refusing to \
+                 stage a second one over it"
+                    .into(),
+            ));
         }
+
         // Every row key must carry a recognized beacon domain prefix.
         for k in before.keys().chain(after.keys()) {
             if !is_beacon_domain(k) {
                 return Err(StateError::InvalidOperation(
-                    "beacon persist_transition: row key has no recognized domain prefix".into(),
+                    "beacon stage_transition: row key has no recognized domain prefix".into(),
                 ));
             }
         }
-        let live = self.load_state_map()?;
+
+        // Stale-predecessor guard, against the candidate.
+        let live = Self::v_load_state_map(view)?;
         if *before != live {
             return Err(StateError::InvalidOperation(
-                "beacon persist_transition: stale `before` snapshot does not match live state"
+                "beacon stage_transition: stale `before` snapshot does not match \
+                 the candidate's live state"
                     .into(),
             ));
         }
@@ -892,16 +1096,11 @@ impl<'a> BeaconStore<'a> {
         }
 
         let mut diff = BeaconStateDiff::default();
-        let mut batch = self.db.batch();
         for key in keys.keys() {
             let new = after.get(key).cloned();
             let old = live.get(key).cloned();
             if old == new {
                 continue;
-            }
-            match &new {
-                Some(v) => batch.put(cf::BEACON_STATE, key, v)?,
-                None => batch.delete(cf::BEACON_STATE, key)?,
             }
             diff.records.push(BeaconMutation {
                 key: key.clone(),
@@ -910,14 +1109,21 @@ impl<'a> BeaconStore<'a> {
             });
         }
         if diff.is_empty() {
-            return Ok(0);
+            return Ok((0, JournalRecord::NothingToUndo));
         }
         diff.sort();
+        // Everything fallible that does not touch the view happens first: the
+        // journal is encoded before a single row is staged, so an encoding
+        // failure leaves the candidate untouched rather than half-written.
         let journal = beacon_encode(&diff)?;
-        batch.put(cf::BEACON_STATE_DIFFS, &height.to_be_bytes(), &journal)?;
-        let mutated = diff.records.len();
-        batch.commit()?;
-        Ok(mutated)
+
+        for record in &diff.records {
+            match &record.new {
+                Some(v) => view.put(cf::BEACON_STATE, &record.key, v)?,
+                None => view.delete(cf::BEACON_STATE, &record.key)?,
+            }
+        }
+        Ok((diff.records.len(), JournalRecord::Recorded(journal)))
     }
 
     /// Stage the reverse-replay of the per-height beacon journal (and the journal's
@@ -931,9 +1137,9 @@ impl<'a> BeaconStore<'a> {
         &self,
         batch: &mut sumchain_storage::db::WriteBatch<'_>,
         height: BlockHeight,
+        block_hash: &Hash,
     ) -> Result<bool> {
-        let hkey = height.to_be_bytes();
-        let Some(bytes) = self.db.get(cf::BEACON_STATE_DIFFS, &hkey)? else {
+        let Some(bytes) = self.journal_bytes(height, block_hash)? else {
             return Ok(false);
         };
         let diff: BeaconStateDiff = beacon_decode(&bytes)?;
@@ -948,7 +1154,13 @@ impl<'a> BeaconStore<'a> {
                 None => batch.delete(cf::BEACON_STATE, &record.key)?,
             }
         }
-        batch.delete(cf::BEACON_STATE_DIFFS, &hkey)?;
+        // Only this block's key. A height-only row is never reached here —
+        // `journal_bytes` refuses before returning — and deleting one silently
+        // would destroy the evidence an operator needs to attribute it.
+        batch.delete(
+            cf::BEACON_STATE_DIFFS,
+            &sumchain_storage::schema::journal_key(height, block_hash),
+        )?;
         Ok(true)
     }
 
@@ -956,9 +1168,9 @@ impl<'a> BeaconStore<'a> {
     /// (its own [`Database::batch`]). Thin wrapper over [`stage_block_revert`](Self::
     /// stage_block_revert); retained for the standalone store tests. The LIVE reorg
     /// path drives `stage_block_revert` into the unified batch instead.
-    pub fn revert_block(&self, height: BlockHeight) -> Result<()> {
+    pub fn revert_block(&self, height: BlockHeight, block_hash: &Hash) -> Result<()> {
         let mut batch = self.db.batch();
-        if self.stage_block_revert(&mut batch, height)? {
+        if self.stage_block_revert(&mut batch, height, block_hash)? {
             batch.commit()?;
         }
         Ok(())
@@ -968,8 +1180,62 @@ impl<'a> BeaconStore<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sumchain_storage::overlay::ApplicationOverlay;
     use sumchain_storage::Database;
     use tempfile::TempDir;
+
+    /// A stand-in block hash for `height`, distinct per `variant` where a test
+    /// needs two blocks at one height.
+    fn bh(height: BlockHeight, variant: u8) -> Hash {
+        let mut b = [0u8; 32];
+        b[..8].copy_from_slice(&height.to_be_bytes());
+        b[31] = variant;
+        Hash::new(b)
+    }
+
+    /// Publish one transition, standing in for the block pipeline: stage it into
+    /// a candidate, then commit the journal's rows and the journal itself under
+    /// the publisher's `(height, block_hash)` key.
+    ///
+    /// TEST FIXTURE, not an API. `ApplicationOverlay::into_batch` is
+    /// crate-private to `sumchain-storage` — deliberately, so that outside that
+    /// crate only `AcceptedCandidate::publish` turns a candidate into canonical
+    /// state. These are storage-codec unit tests that need committed rows to
+    /// exercise revert and cross-block sequences; driving a real block through
+    /// acceptance to set them up would couple them to consensus for nothing.
+    /// Rows are replayed from the journal the staging produced, so the fixture
+    /// cannot publish rows the candidate did not stage.
+    fn publish_transition(
+        db: &Database,
+        before: &BTreeMap<Vec<u8>, Vec<u8>>,
+        after: &BTreeMap<Vec<u8>, Vec<u8>>,
+        height: BlockHeight,
+        block_hash: &Hash,
+    ) -> Result<usize> {
+        let mut overlay = ApplicationOverlay::new(db, 1 << 30);
+        let (mutated, journal) = {
+            let mut view = ExecutionView::new(&mut overlay);
+            BeaconStore::stage_transition(&mut view, before, after)?
+        };
+        drop(overlay);
+        if let JournalRecord::Recorded(bytes) = &journal {
+            let diff = BeaconStateDiff::decode(bytes)?;
+            let mut batch = db.batch();
+            for r in &diff.records {
+                match &r.new {
+                    Some(v) => batch.put(cf::BEACON_STATE, &r.key, v)?,
+                    None => batch.delete(cf::BEACON_STATE, &r.key)?,
+                }
+            }
+            batch.put(
+                cf::BEACON_STATE_DIFFS,
+                &sumchain_storage::schema::journal_key(height, block_hash),
+                bytes,
+            )?;
+            batch.commit()?;
+        }
+        Ok(mutated)
+    }
 
     fn open_db() -> (Database, TempDir) {
         let dir = TempDir::new().unwrap();
@@ -1037,22 +1303,22 @@ mod tests {
         after.insert(k2.clone(), v2.clone());
         let before = BTreeMap::new();
 
-        let n = store.persist_transition(&before, &after, 1).unwrap();
+        let n = publish_transition(&db, &before, &after, 1, &bh(1, 0)).unwrap();
         assert_eq!(n, 2);
         assert_eq!(store.load_state_map().unwrap(), after);
         let committed = store.state_digest().unwrap();
 
         // Revert restores the empty predecessor.
-        store.revert_block(1).unwrap();
+        store.revert_block(1, &bh(1, 0)).unwrap();
         assert!(store.load_state_map().unwrap().is_empty());
         assert_eq!(
             store.state_digest().unwrap(),
             Hash::hash(BEACON_STATE_DIGEST_DOMAIN)
         );
-        assert!(!store.has_journal(1).unwrap());
+        assert!(!store.has_journal(1, &bh(1, 0)).unwrap());
 
         // Reapply reproduces the identical committed state.
-        store.persist_transition(&before, &after, 1).unwrap();
+        publish_transition(&db, &before, &after, 1, &bh(1, 0)).unwrap();
         assert_eq!(store.state_digest().unwrap(), committed);
     }
 
@@ -1064,14 +1330,13 @@ mod tests {
         let mut after = BTreeMap::new();
         after.insert(k1, v1);
         let before = BTreeMap::new();
-        store.persist_transition(&before, &after, 1).unwrap();
+        publish_transition(&db, &before, &after, 1, &bh(1, 0)).unwrap();
 
         // Duplicate height rejected.
-        assert!(store.persist_transition(&before, &after, 1).is_err());
+        assert!(publish_transition(&db, &before, &after, 1, &bh(1, 0)).is_err());
         // Stale predecessor (claims empty but live is non-empty) rejected at height 2.
         let after2 = after.clone();
-        assert!(store
-            .persist_transition(&BTreeMap::new(), &after2, 2)
+        assert!(publish_transition(&db, &BTreeMap::new(), &after2, 2, &bh(2, 0))
             .is_err());
     }
 
@@ -1081,8 +1346,7 @@ mod tests {
         let store = BeaconStore::new(&db);
         let mut after = BTreeMap::new();
         after.insert(vec![0xFF, 0x00], b"x".to_vec()); // 0xFF is not a beacon domain
-        assert!(store
-            .persist_transition(&BTreeMap::new(), &after, 1)
+        assert!(publish_transition(&db, &BTreeMap::new(), &after, 1, &bh(1, 0))
             .is_err());
     }
 

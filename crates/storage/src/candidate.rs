@@ -146,6 +146,13 @@ impl<'db> ExecutedCandidate<'db> {
         self.overlay.logical_bytes()
     }
 
+    /// The journals execution produced. READ-ONLY, like [`receipts`](Self::receipts):
+    /// a shared reference can be inspected but not substituted, so a caller
+    /// cannot swap in an undo record for a block it did not execute.
+    pub fn journals(&self) -> &BlockJournals {
+        &self.journals
+    }
+
     /// The receipts execution produced. READ-ONLY: a shared slice cannot be
     /// substituted, only inspected. Exists so the not-yet-migrated PoA paths can
     /// still write receipts directly until publication is wired.

@@ -60,14 +60,14 @@ use std::path::Path;
 /// erosion this guard exists to catch.
 ///
 /// Production-only totals so far: 42 before the education subsystem, 41 after
-/// it, 40 after the compute-pool cluster.
+/// it, 40 after the compute-pool cluster, 39 after the beacon cluster.
 fn budget() -> BTreeMap<&'static str, usize> {
     BTreeMap::from([
         ("storage_metadata.rs", 15),
         ("supply.rs", 9),
         ("node_registry.rs", 6),
         ("inference_settlement_executor.rs", 4),
-        ("beacon_store.rs", 2),
+        ("beacon_store.rs", 1),
         ("compute_pool_store.rs", 1),
         ("executor.rs", 1),
         ("state.rs", 1),
@@ -898,6 +898,13 @@ fn migrated_execution_paths_take_no_self_receiver() {
         ("compute_pool_store.rs", "fn v_load_state_map("),
         ("compute_pool_store.rs", "fn v_state_digest("),
         ("compute_pool_store.rs", "fn stage_transition("),
+        ("beacon_store.rs", "fn v_load_state_map("),
+        ("beacon_store.rs", "fn v_state_digest("),
+        ("beacon_store.rs", "fn v_get_membership("),
+        ("beacon_store.rs", "fn v_load_materialized("),
+        ("beacon_store.rs", "fn stage_transition("),
+        ("beacon_store.rs", "fn stage_epoch_transition("),
+        ("beacon_manager.rs", "fn load_from_candidate("),
     ];
 
     let files = rust_files();
@@ -932,6 +939,61 @@ fn migrated_execution_paths_take_no_self_receiver() {
     }
 }
 
+/// A `self` receiver is allowed on an execution path only where the receiving
+/// type provably holds no database.
+///
+/// `BeaconBlockState` is the case. It is the per-block beacon accumulator: it
+/// owns the runtime working state and nothing else, deliberately, so it can live
+/// in the executor's interior-mutable slot across the per-transaction dispatch
+/// loop without borrowing the database. `&self` on `stage` therefore cannot
+/// reach committed state, and the blanket rule above would be forbidding a
+/// receiver that carries no hazard.
+///
+/// The exemption is not taken on trust: the struct definition is checked to hold
+/// no `Database`. Add a field of that type and this test fails, which is the
+/// point — the exemption is only valid while the premise holds.
+#[test]
+fn a_self_receiver_is_allowed_only_where_the_type_holds_no_database() {
+    /// `(file, receiver type, execution-path signature)`.
+    const EXEMPT: &[(&str, &str, &str)] = &[(
+        "beacon_manager.rs",
+        "pub struct BeaconBlockState {",
+        "fn stage(",
+    )];
+
+    let files = rust_files();
+    for (file, type_decl, sig) in EXEMPT {
+        let (_, src) = files
+            .iter()
+            .find(|(name, _)| name == file)
+            .unwrap_or_else(|| panic!("{file} is listed in EXEMPT but is not under src/"));
+
+        let at = src
+            .find(type_decl)
+            .unwrap_or_else(|| panic!("{file} no longer declares `{type_decl}`"));
+        let body_start = at + type_decl.len();
+        let body_end = body_start
+            + src[body_start..]
+                .find("\n}")
+                .unwrap_or_else(|| panic!("unterminated struct in {file}"));
+        let body = &src[body_start..body_end];
+        assert!(
+            !body.contains("Database"),
+            "{file} `{type_decl}` now holds a database, so a `self` receiver on \
+             its execution path can read committed state. Either drop the field \
+             or drop this exemption.\n  fields: {body}"
+        );
+
+        let params = params_of(src, sig)
+            .unwrap_or_else(|| panic!("{file} no longer defines `{sig}`; update this list"));
+        assert!(
+            params.contains("ExecutionView"),
+            "{file} `{sig}` is an execution path and must take an \
+             `ExecutionView`.\n  parameters: {params}"
+        );
+    }
+}
+
 /// Execution-path functions of `BlockExecutor` that still carry a `self`
 /// receiver, with what each still reads from committed state.
 ///
@@ -962,9 +1024,25 @@ fn partially_migrated_execution_paths_are_declared() {
         (
             "executor.rs",
             "fn compute_block_state_root(",
-            "SupplyStore::new(self.db.clone()).state_digest() and \
-             BeaconStore::new(&self.db).state_digest() — both folded into the \
-             consensus root, both still reading the PARENT's state",
+            "SupplyStore::new(self.db.clone()).state_digest(), folded into the \
+             consensus root and still reading the PARENT's supply state",
+        ),
+        (
+            "executor.rs",
+            "fn init_beacon_block(",
+            "nothing — it reads the candidate throughout; the receiver remains \
+             only for self.params and self.state.chain_id()",
+        ),
+        (
+            "executor.rs",
+            "fn beacon_epoch_membership(",
+            "nothing — the membership snapshot comes from the candidate",
+        ),
+        (
+            "executor.rs",
+            "fn apply_beacon_transitions(",
+            "nothing — it stages through the view; the receiver holds the \
+             per-block accumulator slot",
         ),
     ];
 

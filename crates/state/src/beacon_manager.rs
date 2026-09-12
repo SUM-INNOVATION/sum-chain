@@ -37,6 +37,9 @@ use sumchain_beacon_runtime::signing::QualifiedEpoch;
 use sumchain_genesis::ChainParams;
 use sumchain_primitives::beacon_wire::BeaconOperation;
 use sumchain_primitives::BlockHeight;
+use sumchain_primitives::Hash;
+use sumchain_storage::candidate::JournalRecord;
+use sumchain_storage::exec_view::ExecutionView;
 use sumchain_storage::Database;
 
 use crate::beacon_executor::beacon_gate_open;
@@ -124,14 +127,20 @@ impl<'a> BeaconManager<'a> {
     /// `apply` runs the caller's sequence of ratified runtime transitions
     /// (`register_key`, `submit_deal`, `apply_complaint`, finalize/round drives)
     /// against a throwaway working copy — so a failing op leaves the state untouched.
-    /// Only on success is the resulting state materialized and persisted via
-    /// [`BeaconStore::persist_transition`] (one atomic batch + one per-height revert
-    /// journal). The in-memory state is committed only after persistence; the
-    /// pre-state is retained as the undo entry (only when a journal was written).
+    /// Only on success is the resulting state materialized and STAGED into the
+    /// block's candidate via [`BeaconStore::stage_transition`], which buffers the
+    /// delta and hands back the undo journal for the caller to bind. Nothing is
+    /// committed. The in-memory state is updated only after staging; the
+    /// pre-state is retained as the undo entry (only when a journal was produced).
     ///
-    /// Returns the number of mutated rows (`0` for a genuine no-op — no journal, no
-    /// undo). Rejects if the gate is closed at `height`.
-    pub fn apply_block<F>(&mut self, height: BlockHeight, apply: F) -> Result<usize>
+    /// Returns the number of mutated rows (`0` for a genuine no-op — no journal,
+    /// no undo) and the journal itself. Rejects if the gate is closed at `height`.
+    pub fn apply_block<F>(
+        &mut self,
+        view: &mut ExecutionView<'_, '_>,
+        height: BlockHeight,
+        apply: F,
+    ) -> Result<(usize, JournalRecord)>
     where
         F: FnOnce(&mut BeaconWorking) -> Result<()>,
     {
@@ -151,25 +160,22 @@ impl<'a> BeaconManager<'a> {
         let ep = before.epoch.config().epoch;
         let before_rows = BeaconStore::materialize(ep, &before.epoch, before.chain.as_ref(), &[])?;
         let after_rows = BeaconStore::materialize(ep, &working.epoch, working.chain.as_ref(), &[])?;
-        let mutated = {
-            let store = BeaconStore::new(self.db);
-            store.persist_transition(&before_rows, &after_rows, height)?
-        };
+        let (mutated, journal) = BeaconStore::stage_transition(view, &before_rows, &after_rows)?;
 
         if mutated > 0 {
             self.undo.insert(height, before);
         }
         self.working = working;
-        Ok(mutated)
+        Ok((mutated, journal))
     }
 
     /// Revert the beacon state finalized at `height`, rolling back BOTH the persisted
     /// rows and the in-memory runtime state to the exact prior state. Reverts must be
     /// issued tip-first (descending height), matching a real reorg.
-    pub fn revert_block(&mut self, height: BlockHeight) -> Result<()> {
+    pub fn revert_block(&mut self, height: BlockHeight, block_hash: &Hash) -> Result<()> {
         {
             let store = BeaconStore::new(self.db);
-            store.revert_block(height)?;
+            store.revert_block(height, block_hash)?;
         }
         if let Some(prev) = self.undo.remove(&height) {
             self.working = prev;
@@ -201,15 +207,14 @@ pub struct BeaconBlockState {
 
 impl BeaconBlockState {
     /// Rehydrate the accumulator from the persisted store (rows → runtime).
-    pub fn load_from_store(
-        db: &Database,
+    pub fn load_from_candidate(
+        view: &ExecutionView<'_, '_>,
         cfg: DkgConfig,
         membership: EpochMembership,
         phase: Option<BeaconPhase>,
         genesis: [u8; 32],
     ) -> Result<Self> {
-        let store = BeaconStore::new(db);
-        let (input, rounds) = store.load_materialized(cfg.epoch)?;
+        let (input, rounds) = BeaconStore::v_load_materialized(view, cfg.epoch)?;
         let epoch = DkgEpoch::rehydrate(cfg, input)
             .map_err(|e| StateError::DeserializationError(format!("beacon rehydrate: {e:?}")))?;
         let chain = if rounds.is_empty() {
@@ -319,12 +324,15 @@ impl BeaconBlockState {
         }
     }
 
-    /// Materialize + persist this block's whole accumulated transition for THIS epoch
-    /// into the store as EXACTLY ONE per-height journal (delta against the live
-    /// pre-block state; other epochs' rows are untouched). Includes the fixed
-    /// membership snapshot. Returns the number of mutated rows (`0` for a no-op block).
-    pub fn persist(&self, db: &Database, height: BlockHeight) -> Result<usize> {
-        let store = BeaconStore::new(db);
+    /// Materialize + STAGE this block's whole accumulated transition for THIS
+    /// epoch into the block's candidate as exactly one journal (delta against
+    /// the state this block sees; other epochs' rows are untouched). Includes
+    /// the fixed membership snapshot.
+    ///
+    /// Returns the number of mutated rows (`0` for a no-op block) and the undo
+    /// journal, which the caller binds to the candidate. Nothing is committed
+    /// here; the publisher writes the journal once the block hash is final.
+    pub fn stage(&self, view: &mut ExecutionView<'_, '_>) -> Result<(usize, JournalRecord)> {
         let members: Vec<[u8; 32]> = self
             .membership
             .members()
@@ -337,7 +345,7 @@ impl BeaconBlockState {
             self.working.chain.as_ref(),
             &members,
         )?;
-        store.persist_epoch_transition(self.cfg.epoch, current, height)
+        BeaconStore::stage_epoch_transition(view, self.cfg.epoch, current)
     }
 }
 
@@ -351,11 +359,79 @@ mod tests {
     use sumchain_beacon_runtime::dkg::{DealOutcome, RegistrationOutcome};
     use sumchain_beacon_runtime::params::BeaconParams;
     use sumchain_primitives::beacon_wire::{DkgDealV1, RegisterBeaconKeyV1};
+    use sumchain_storage::overlay::ApplicationOverlay;
+    use crate::beacon_store::BeaconStateDiff;
+    use sumchain_storage::cf;
     use tempfile::TempDir;
 
     const CHAIN_ID: u64 = 0x0102_0304_0506_0708;
     const EPOCH: u64 = 7;
     const N: u32 = 5;
+
+    /// A stand-in block hash for `height`.
+    fn bh(height: BlockHeight) -> Hash {
+        let mut b = [0u8; 32];
+        b[..8].copy_from_slice(&height.to_be_bytes());
+        Hash::new(b)
+    }
+
+    /// Apply one block through the manager into a throwaway candidate.
+    ///
+    /// Staging only — nothing is committed, which is what the tests expecting a
+    /// REJECTION want: they assert the store is untouched, and now it cannot be
+    /// touched at all.
+    fn apply_only<F>(
+        db: &Database,
+        mgr: &mut BeaconManager<'_>,
+        height: BlockHeight,
+        apply: F,
+    ) -> Result<(usize, JournalRecord)>
+    where
+        F: FnOnce(&mut BeaconWorking) -> Result<()>,
+    {
+        let mut overlay = ApplicationOverlay::new(db, 1 << 30);
+        let mut view = ExecutionView::new(&mut overlay);
+        mgr.apply_block(&mut view, height, apply)
+    }
+
+    /// Apply one block and publish what it staged, standing in for the block
+    /// pipeline: the staged rows and the returned journal, committed together
+    /// under the publisher's `(height, block_hash)` key.
+    ///
+    /// TEST FIXTURE. `ApplicationOverlay::into_batch` is crate-private to
+    /// `sumchain-storage`, so outside that crate only `AcceptedCandidate::
+    /// publish` makes a candidate canonical; these are manager unit tests and
+    /// driving a real block through acceptance would couple them to consensus.
+    /// The rows are replayed from the returned journal rather than re-derived,
+    /// so the fixture cannot publish something the candidate did not stage.
+    fn apply_and_publish<F>(
+        db: &Database,
+        mgr: &mut BeaconManager<'_>,
+        height: BlockHeight,
+        apply: F,
+    ) -> Result<usize>
+    where
+        F: FnOnce(&mut BeaconWorking) -> Result<()>,
+    {
+        let (mutated, journal) = apply_only(db, mgr, height, apply)?;
+        if let JournalRecord::Recorded(bytes) = &journal {
+            let diff = BeaconStateDiff::decode(bytes)?;
+            let mut batch = db.batch();
+            for r in &diff.records {
+                match &r.new {
+                    Some(v) => batch.put(cf::BEACON_STATE, &r.key, v)?,
+                    None => batch.delete(cf::BEACON_STATE, &r.key)?,
+                }
+            }
+            batch.put(
+                cf::BEACON_STATE_DIFFS,
+                &sumchain_storage::schema::journal_key(height, &bh(height)),
+                bytes,
+            )?;
+            batch.commit()?;
+        }
+        Ok(mutated)
+    }
 
     fn open_db() -> (Database, TempDir) {
         let dir = TempDir::new().unwrap();
@@ -467,7 +543,7 @@ mod tests {
         assert!(BeaconManager::new_enabled(&db, &params, 100, cfg()).is_none());
         let store = BeaconStore::new(&db);
         assert!(store.load_state_map().unwrap().is_empty());
-        assert!(!store.has_journal(100).unwrap());
+        assert!(!store.has_journal(100, &bh(100)).unwrap());
     }
 
     /// Correction 3: genesis `BeaconParamsConfig::validate` and runtime
@@ -509,7 +585,7 @@ mod tests {
         let m = membership();
         // Build a runtime state (key + deal), materialize + persist it.
         let mut mgr = BeaconManager::new_enabled(&db, &params_enabled_from(5), 5, cfg()).unwrap();
-        mgr.apply_block(5, |w| {
+        apply_and_publish(&db, &mut mgr, 5, |w| {
             w.epoch
                 .register_key(
                     &ctx(&m, 0, BeaconPhase::KeyRegistration, [1u8; 32]),
@@ -542,8 +618,7 @@ mod tests {
         let mut mgr = BeaconManager::new_enabled(&db, &params_enabled_from(5), 5, cfg()).unwrap();
 
         // Height 5: register key j=0 + a deal 0->0 (VALID ops → succeed → materialize).
-        let mutated = mgr
-            .apply_block(5, |w| {
+        let mutated = apply_and_publish(&db, &mut mgr, 5, |w| {
                 assert_eq!(
                     w.epoch
                         .register_key(
@@ -587,12 +662,12 @@ mod tests {
             crate::beacon_store::decode_deal(deal_row).unwrap().dealer_i,
             0
         );
-        assert!(store.has_journal(5).unwrap());
+        assert!(store.has_journal(5, &bh(5)).unwrap());
         assert!(mgr.has_pending_undo(5));
         let digest_after_5 = store.state_digest().unwrap();
 
         // Height 6: a second deal 1->0 on top.
-        mgr.apply_block(6, |w| {
+        apply_and_publish(&db, &mut mgr, 6, |w| {
             w.epoch
                 .submit_deal(&ctx(&m, 1, BeaconPhase::Deal, [3u8; 32]), &deal(1, 0))
                 .map_err(|e| StateError::InvalidOperation(format!("{e:?}")))?;
@@ -606,18 +681,18 @@ mod tests {
         );
 
         // Revert height 6 → back to post-height-5 (rows + in-memory + digest).
-        mgr.revert_block(6).unwrap();
+        mgr.revert_block(6, &bh(6)).unwrap();
         assert_eq!(
             store.state_digest().unwrap(),
             digest_after_5,
             "reverted to post-5"
         );
-        assert!(!store.has_journal(6).unwrap());
+        assert!(!store.has_journal(6, &bh(6)).unwrap());
         assert!(mgr.working().epoch.registered_key(0).is_some());
 
         // Reapply height 6 reproduces the identical committed state (determinism).
         let d6_first = {
-            mgr.apply_block(6, |w| {
+            apply_and_publish(&db, &mut mgr, 6, |w| {
                 w.epoch
                     .submit_deal(&ctx(&m, 1, BeaconPhase::Deal, [3u8; 32]), &deal(1, 0))
                     .map_err(|e| StateError::InvalidOperation(format!("{e:?}")))?;
@@ -626,8 +701,8 @@ mod tests {
             .unwrap();
             store.state_digest().unwrap()
         };
-        mgr.revert_block(6).unwrap();
-        mgr.apply_block(6, |w| {
+        mgr.revert_block(6, &bh(6)).unwrap();
+        apply_and_publish(&db, &mut mgr, 6, |w| {
             w.epoch
                 .submit_deal(&ctx(&m, 1, BeaconPhase::Deal, [3u8; 32]), &deal(1, 0))
                 .map_err(|e| StateError::InvalidOperation(format!("{e:?}")))?;
@@ -641,8 +716,8 @@ mod tests {
         );
 
         // Height 5 still reverts cleanly to empty afterwards.
-        mgr.revert_block(6).unwrap();
-        mgr.revert_block(5).unwrap();
+        mgr.revert_block(6, &bh(6)).unwrap();
+        mgr.revert_block(5, &bh(5)).unwrap();
         assert!(store.load_state_map().unwrap().is_empty());
     }
 
@@ -653,7 +728,7 @@ mod tests {
         let mut mgr = BeaconManager::new_enabled(&db, &params_enabled_from(5), 5, cfg()).unwrap();
         // A deal whose signer != dealer_i is an authenticated-binding failure ⇒ the
         // whole transition errors and nothing is persisted.
-        let err = mgr.apply_block(5, |w| {
+        let err = apply_and_publish(&db, &mut mgr, 5, |w| {
             w.epoch
                 .submit_deal(&ctx(&m, 1, BeaconPhase::Deal, [9u8; 32]), &deal(0, 0)) // signer 1, dealer 0
                 .map_err(|e| StateError::InvalidOperation(format!("{e:?}")))?;
@@ -661,6 +736,6 @@ mod tests {
         });
         assert!(err.is_err());
         assert!(BeaconStore::new(&db).load_state_map().unwrap().is_empty());
-        assert!(!BeaconStore::new(&db).has_journal(5).unwrap());
+        assert!(!BeaconStore::new(&db).has_journal(5, &bh(5)).unwrap());
     }
 }
