@@ -46,22 +46,30 @@ use std::path::Path;
 /// its entire purpose: the point is that the boundary cannot erode while the
 /// migration is in progress.
 ///
-/// These numbers went UP once, when `count_direct_mutations` learned to see a
-/// write split across lines. That is the one legitimate reason to raise them:
-/// not a single write was added, and the corrected totals are what was always
-/// in the tree. Every file's count rose to exactly its pre-existing multi-line
-/// sites, which is checkable against any commit before the fix. Do not treat
-/// this as precedent — a raise for any other reason is the erosion this guard
-/// exists to catch.
+/// These numbers have been recalibrated twice, both times because the counter
+/// was measuring the wrong thing, and never to accommodate a new write:
+///
+/// * UP, when `count_direct_mutations` learned to see a write split across
+///   lines — 35 recorded, 49 actually present.
+/// * DOWN, when it stopped counting `#[cfg(test)]` modules — 49 counted, 42
+///   reachable from block execution. See `strip_test_modules` for why counting
+///   fixtures actively worked against finishing a migration.
+///
+/// Those are the only two legitimate reasons a number here may move for any
+/// cause other than migration, and both are spent. A raise from here is the
+/// erosion this guard exists to catch.
+///
+/// Production-only totals so far: 42 before the education subsystem, 41 after
+/// it, 40 after the compute-pool cluster.
 fn budget() -> BTreeMap<&'static str, usize> {
     BTreeMap::from([
         ("storage_metadata.rs", 15),
         ("supply.rs", 9),
-        ("executor.rs", 7),
         ("node_registry.rs", 6),
-        ("compute_pool_store.rs", 4),
         ("inference_settlement_executor.rs", 4),
         ("beacon_store.rs", 2),
+        ("compute_pool_store.rs", 1),
+        ("executor.rs", 1),
         ("state.rs", 1),
         ("inference_attestation_executor.rs", 1),
     ])
@@ -92,11 +100,279 @@ fn count_direct_mutations(src: &str) -> usize {
         .filter(|l| !l.starts_with("//"))
         .collect::<Vec<_>>()
         .join("\n");
+    let code = strip_test_modules(&code);
     let flat: String = code.chars().filter(|c| !c.is_whitespace()).collect();
     ["db.put(", "db.delete(", "db.batch("]
         .iter()
         .map(|pat| flat.matches(pat).count())
         .sum()
+}
+
+/// Drop `#[cfg(test)] mod … { … }` bodies, and nothing else.
+///
+/// The guard's claim is about BLOCK EXECUTION, and a unit test is not block
+/// execution. Counting test code made the number measure something other than
+/// what it says, and pushed in the wrong direction: once a subsystem's
+/// production writes move to the overlay, its tests still need committed rows to
+/// set up a revert or a cross-block sequence, and the only way to get them —
+/// `ApplicationOverlay::into_batch` being crate-private to `sumchain-storage`,
+/// so that outside it only `AcceptedCandidate::publish` makes state canonical —
+/// is a `db.batch()` fixture. Counting those made finishing a migration LOOK
+/// like eroding the boundary, which is an incentive to leave the production
+/// write in place instead.
+///
+/// A test fixture that writes directly is not a hole in the execution boundary:
+/// it cannot be reached from a block. A production path that does is, and that
+/// is what the budget now counts.
+///
+/// # Why this is strict rather than convenient
+///
+/// Anything this function removes stops being counted, so a loose match here is
+/// a way to hide a production write. Two rules keep it narrow.
+///
+/// **Only `mod` is stripped.** `#[cfg(test)]` also attaches to functions, `use`
+/// items, consts and impls. A `#[cfg(test)] fn helper() { db.put(..) }` sits in
+/// the middle of production code and a naive "skip to the next balanced brace"
+/// would remove it — and a `#[cfg(test)] use …;` has no brace at all, so the
+/// same rule would swallow whatever block came next. The attribute must be
+/// followed by an optional visibility, the keyword `mod`, a name, and `{`;
+/// anything else is left in place and counted.
+///
+/// **Braces are matched by a lexer, not by counting characters.** A `{` inside
+/// a string, a char literal, or a comment is not a block. Miscounting one ends
+/// the module early and returns the rest of the file to the count (noisy but
+/// safe) or late and swallows production code (silent and not safe).
+fn strip_test_modules(src: &str) -> String {
+    let b = src.as_bytes();
+    let mut out = String::with_capacity(src.len());
+    let mut i = 0usize;
+    const ATTR: &str = "#[cfg(test)]";
+
+    while i < b.len() {
+        if src[i..].starts_with(ATTR) {
+            match test_mod_body_start(src, i + ATTR.len()) {
+                Some(brace) => match matching_brace(src, brace) {
+                    Some(end) => {
+                        i = end;
+                        continue;
+                    }
+                    // Unbalanced: keep everything from the attribute on, so a
+                    // truncated or malformed file cannot hide a write.
+                    None => {
+                        out.push_str(&src[i..]);
+                        return out;
+                    }
+                },
+                // `#[cfg(test)]` on something that is not a module. Keep it and
+                // keep scanning from just after the attribute.
+                None => {
+                    out.push_str(ATTR);
+                    i += ATTR.len();
+                    continue;
+                }
+            }
+        }
+        let ch = src[i..].chars().next().expect("char boundary");
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// Byte offset of the `{` opening a `[pub…] mod NAME {` that starts at `from`
+/// (after leading whitespace), or `None` if what follows is not a module.
+fn test_mod_body_start(src: &str, from: usize) -> Option<usize> {
+    let mut i = skip_ws(src, from);
+
+    // Optional visibility: `pub`, `pub(crate)`, `pub(super)`, …
+    if src[i..].starts_with("pub") {
+        let j = i + 3;
+        let mut k = skip_ws(src, j);
+        if src[k..].starts_with('(') {
+            k = matching_delim(src, k, b'(', b')')?;
+        }
+        // `pub` must be a whole word — `public_thing` is not a visibility.
+        let next = src[j..].chars().next();
+        if k > j || next.is_none_or(|c| c.is_whitespace() || c == '(') {
+            i = skip_ws(src, k);
+        }
+    }
+
+    if !src[i..].starts_with("mod") {
+        return None;
+    }
+    let after_kw = i + 3;
+    // `mod` must be a whole word, or `module_name` would match.
+    if !src[after_kw..]
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_whitespace())
+    {
+        return None;
+    }
+
+    let name = skip_ws(src, after_kw);
+    let mut j = name;
+    while src[j..]
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_alphanumeric() || c == '_')
+    {
+        j += 1;
+    }
+    if j == name {
+        return None; // no name
+    }
+    let brace = skip_ws(src, j);
+    // `mod foo;` — a declaration, not an inline body.
+    if src[brace..].starts_with('{') {
+        Some(brace)
+    } else {
+        None
+    }
+}
+
+fn skip_ws(src: &str, mut i: usize) -> usize {
+    while src[i..].chars().next().is_some_and(char::is_whitespace) {
+        i += src[i..].chars().next().expect("checked").len_utf8();
+    }
+    i
+}
+
+/// Byte offset just past the `}` matching the `{` at `open`, skipping braces
+/// that appear inside strings, char literals and comments.
+fn matching_brace(src: &str, open: usize) -> Option<usize> {
+    matching_delim(src, open, b'{', b'}')
+}
+
+fn matching_delim(src: &str, open: usize, o: u8, c: u8) -> Option<usize> {
+    let b = src.as_bytes();
+    let mut depth = 0usize;
+    let mut i = open;
+    while i < b.len() {
+        match b[i] {
+            b'/' if b.get(i + 1) == Some(&b'/') => {
+                i += 2;
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if b.get(i + 1) == Some(&b'*') => {
+                i += 2;
+                // Rust block comments nest.
+                let mut n = 1usize;
+                while i < b.len() && n > 0 {
+                    if b[i] == b'/' && b.get(i + 1) == Some(&b'*') {
+                        n += 1;
+                        i += 2;
+                    } else if b[i] == b'*' && b.get(i + 1) == Some(&b'/') {
+                        n -= 1;
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                if n > 0 {
+                    return None; // unterminated
+                }
+            }
+            b'r' if matches!(b.get(i + 1), Some(&b'"') | Some(&b'#')) => {
+                match skip_raw_string(b, i) {
+                    Some(next) => i = next,
+                    // Not a raw string after all (an identifier such as `r#type`,
+                    // or unterminated). Step one byte and carry on.
+                    None => i += 1,
+                }
+            }
+            b'"' => {
+                i += 1;
+                loop {
+                    if i >= b.len() {
+                        return None; // unterminated
+                    }
+                    match b[i] {
+                        b'\\' => i += 2,
+                        b'"' => {
+                            i += 1;
+                            break;
+                        }
+                        _ => i += 1,
+                    }
+                }
+            }
+            b'\'' => {
+                // A char literal, or a lifetime (`'a`), which has no closing
+                // quote. Only treat it as a literal when one is actually there.
+                match skip_char_literal(b, i) {
+                    Some(next) => i = next,
+                    None => i += 1,
+                }
+            }
+            x if x == o => {
+                depth += 1;
+                i += 1;
+            }
+            x if x == c => {
+                depth -= 1;
+                i += 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// `r"…"`, `r#"…"#`, `r##"…"##`, … Returns the offset just past the close.
+fn skip_raw_string(b: &[u8], at: usize) -> Option<usize> {
+    let mut i = at + 1;
+    let mut hashes = 0usize;
+    while b.get(i) == Some(&b'#') {
+        hashes += 1;
+        i += 1;
+    }
+    if b.get(i) != Some(&b'"') {
+        return None; // `r#ident`, not a raw string
+    }
+    i += 1;
+    while i < b.len() {
+        if b[i] == b'"' {
+            let close = i + 1;
+            if b[close..].iter().take(hashes).filter(|&&x| x == b'#').count() == hashes {
+                return Some(close + hashes);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// `'x'`, `'\n'`, `'\u{1F600}'`. `None` for a lifetime.
+fn skip_char_literal(b: &[u8], at: usize) -> Option<usize> {
+    let mut i = at + 1;
+    if b.get(i) == Some(&b'\\') {
+        i += 2;
+        // `'\u{...}'`
+        if b.get(i) == Some(&b'{') {
+            while i < b.len() && b[i] != b'}' {
+                i += 1;
+            }
+            i += 1;
+        }
+    } else if i < b.len() {
+        // One char, which may be multi-byte.
+        i += 1;
+        while i < b.len() && (b[i] & 0xC0) == 0x80 {
+            i += 1;
+        }
+    }
+    if b.get(i) == Some(&b'\'') {
+        Some(i + 1)
+    } else {
+        None
+    }
 }
 
 fn state_src() -> &'static Path {
@@ -278,6 +554,211 @@ fn the_guard_actually_detects_a_direct_mutation() {
     );
 }
 
+#[test]
+fn test_module_writes_are_not_counted_but_production_writes_around_them_are() {
+    const SRC: &str = "\
+fn production(db: &D) { db.put(cf, &k, &v).unwrap(); }
+
+#[cfg(test)]
+mod tests {
+    fn fixture(db: &D) {
+        let mut b = db.batch();
+        b.put(cf, &k, &v).unwrap();
+        db.delete(cf, &k).unwrap();
+    }
+}
+
+fn also_production(db: &D) { db.delete(cf, &k).unwrap(); }
+";
+    assert_eq!(
+        count_direct_mutations(SRC),
+        2,
+        "the two production writes count; the three inside `mod tests` do not"
+    );
+
+    // A nested brace inside the test module must not end it early, or the code
+    // after it would be counted as production when it is not.
+    const NESTED: &str = "\
+#[cfg(test)]
+mod tests {
+    fn f() { if x { db.put(a, b, c); } }
+    fn g() { db.batch(); }
+}
+";
+    assert_eq!(count_direct_mutations(NESTED), 0);
+
+    // A file with no test module is unaffected.
+    assert_eq!(count_direct_mutations("db.put(a, b, c);"), 1);
+
+    // Unbalanced braces must FAIL OPEN — keep counting — so a truncated or
+    // malformed file cannot hide a write behind an unclosed `mod tests {`.
+    assert_eq!(
+        count_direct_mutations("#[cfg(test)]\nmod tests {\n    db.put(a, b, c);\n"),
+        1,
+        "an unbalanced test module must not swallow the rest of the file"
+    );
+}
+
+/// Everything `strip_test_modules` removes stops being counted, so a loose match
+/// is a way to hide a production write. These are the ways it could be loose.
+#[test]
+fn only_a_cfg_test_module_is_stripped() {
+    // `#[cfg(test)]` on a FUNCTION is not a module. Its body must still count:
+    // it sits among production code, and a "skip to the next balanced brace"
+    // rule would remove it.
+    assert_eq!(
+        count_direct_mutations("#[cfg(test)]\nfn helper(db: &D) { db.put(a, b, c); }"),
+        1,
+        "a cfg-test function is not a module"
+    );
+
+    // `#[cfg(test)] use …;` has no brace at all. A rule that skipped to the next
+    // balanced brace would swallow the following production block.
+    assert_eq!(
+        count_direct_mutations("#[cfg(test)]\nuse foo::bar;\nfn prod(db: &D) { db.put(a, b, c); }"),
+        1,
+        "a cfg-test use item must not swallow the item after it"
+    );
+
+    // Same for a cfg-test `impl` and a cfg-test `const`.
+    assert_eq!(
+        count_direct_mutations("#[cfg(test)]\nimpl T { fn f(db: &D) { db.batch(); } }"),
+        1
+    );
+    assert_eq!(
+        count_direct_mutations("#[cfg(test)]\nconst K: u8 = 1;\nfn p(db: &D) { db.delete(a, b); }"),
+        1
+    );
+
+    // `mod` must be a whole word, and the module must have an inline body.
+    assert_eq!(
+        count_direct_mutations("#[cfg(test)]\nmodule_helper! { db.put(a, b, c); }"),
+        1,
+        "`module_helper` is not the `mod` keyword"
+    );
+    assert_eq!(
+        count_direct_mutations("#[cfg(test)]\nmod other;\nfn p(db: &D) { db.put(a, b, c); }"),
+        1,
+        "a `mod foo;` declaration has no body to strip"
+    );
+
+    // Visibility is allowed before `mod`.
+    assert_eq!(
+        count_direct_mutations("#[cfg(test)]\npub mod tests { fn f(db: &D) { db.put(a, b, c); } }"),
+        0
+    );
+    assert_eq!(
+        count_direct_mutations(
+            "#[cfg(test)]\npub(crate) mod tests { fn f(db: &D) { db.put(a, b, c); } }"
+        ),
+        0
+    );
+
+    // The module name is not fixed to `tests`.
+    assert_eq!(
+        count_direct_mutations("#[cfg(test)]\nmod fixtures { fn f(db: &D) { db.batch(); } }"),
+        0
+    );
+
+    // Two test modules, with production code between and after them.
+    let src = "\
+fn a(db: &D) { db.put(x, y, z); }
+#[cfg(test)]
+mod t1 { fn f(db: &D) { db.batch(); } }
+fn b(db: &D) { db.delete(x, y); }
+#[cfg(test)]
+mod t2 { fn g(db: &D) { db.put(x, y, z); } }
+fn c(db: &D) { db.batch(); }
+";
+    assert_eq!(count_direct_mutations(src), 3);
+}
+
+/// A brace inside a string, a char literal or a comment is not a block. Getting
+/// this wrong ends the module early — returning test code to the count, which is
+/// merely noisy — or late, swallowing production code, which is not.
+#[test]
+fn braces_in_strings_and_comments_do_not_end_a_test_module() {
+    // An unbalanced `{` in a string literal inside the module.
+    let unbalanced_open = "\
+#[cfg(test)]
+mod tests {
+    fn f() { let s = \"{\"; }
+}
+fn prod(db: &D) { db.put(a, b, c); }
+";
+    assert_eq!(
+        count_direct_mutations(unbalanced_open),
+        1,
+        "a `{{` in a string must not open a block"
+    );
+
+    // An unbalanced `}` in a string would end the module early, returning the
+    // module's own writes to the count.
+    let unbalanced_close = "\
+#[cfg(test)]
+mod tests {
+    fn f(db: &D) { let s = \"}\"; db.put(a, b, c); }
+}
+";
+    assert_eq!(
+        count_direct_mutations(unbalanced_close),
+        0,
+        "a `}}` in a string must not close the module"
+    );
+
+    // Escaped quote: the string does not end at `\\\"`, so the `}` after it is
+    // still inside the literal.
+    let escaped = "\
+#[cfg(test)]
+mod tests {
+    fn f(db: &D) { let s = \"a\\\"}\"; db.batch(); }
+}
+";
+    assert_eq!(count_direct_mutations(escaped), 0);
+
+    // Raw strings, including hashed forms that contain a quote.
+    let raw = "\
+#[cfg(test)]
+mod tests {
+    fn f(db: &D) { let s = r#\"}\"#; let t = r\"}\"; db.put(a, b, c); }
+}
+";
+    assert_eq!(count_direct_mutations(raw), 0);
+
+    // A trailing line comment survives `count_direct_mutations`'s line filter,
+    // which only drops lines that START with `//`.
+    let trailing = "\
+#[cfg(test)]
+mod tests {
+    fn f(db: &D) { db.batch(); } // }
+}
+fn prod(db: &D) { db.delete(a, b); }
+";
+    assert_eq!(count_direct_mutations(trailing), 1);
+
+    // Block comments, including nested ones, and a brace inside them.
+    let block = "\
+#[cfg(test)]
+mod tests {
+    /* } /* nested } */ } */
+    fn f(db: &D) { db.put(a, b, c); }
+}
+fn prod(db: &D) { db.batch(); }
+";
+    assert_eq!(count_direct_mutations(block), 1);
+
+    // A char literal holding a brace, and a lifetime, which has no closing
+    // quote and must not be read as one.
+    let chars = "\
+#[cfg(test)]
+mod tests {
+    fn f<'a>(db: &'a D) { let c = '}'; let d = '{'; db.put(a, b, c); }
+}
+fn prod(db: &D) { db.batch(); }
+";
+    assert_eq!(count_direct_mutations(chars), 1);
+}
+
 // ── The execution-completion binding ───────────────────────────────────────
 //
 // `finish_execution` ties the execution subject, accumulator, receipts and
@@ -414,6 +895,9 @@ fn migrated_execution_paths_take_no_self_receiver() {
         ("education_executor.rs", "fn validate_inner("),
         ("education_executor.rs", "fn v_set_offering_status("),
         ("education_executor.rs", "fn stage("),
+        ("compute_pool_store.rs", "fn v_load_state_map("),
+        ("compute_pool_store.rs", "fn v_state_digest("),
+        ("compute_pool_store.rs", "fn stage_transition("),
     ];
 
     let files = rust_files();
@@ -444,6 +928,65 @@ fn migrated_execution_paths_take_no_self_receiver() {
             "{file} `{sig}` runs during block execution but takes no \
              `ExecutionView`. Its reads and writes cannot be attributed to the \
              candidate block.\n  parameters: {params}"
+        );
+    }
+}
+
+/// Execution-path functions of `BlockExecutor` that still carry a `self`
+/// receiver, with what each still reads from committed state.
+///
+/// `BlockExecutor` holds `Arc<Database>`, so `&self` on these is the same
+/// hazard the check above forbids — the difference is only that they are not
+/// finished. Listing them here keeps that visible and countable instead of
+/// letting an omission from `EXECUTION_FNS` read as "already migrated".
+///
+/// Each row asserts BOTH that the function still takes `self` AND that it
+/// already takes an `ExecutionView`: half-migrated, and known to be. A row
+/// cannot rot — when the last committed read goes, the `self` assertion fails
+/// and the row moves to `EXECUTION_FNS`.
+#[test]
+fn partially_migrated_execution_paths_are_declared() {
+    /// `(file, signature prefix, what it still reads from committed state)`.
+    const PARTIAL: &[(&str, &str, &str)] = &[
+        (
+            "executor.rs",
+            "fn apply_compute_pool_transitions(",
+            "nothing — it only forwards; the receiver goes when apply_compute_pool_ops does",
+        ),
+        (
+            "executor.rs",
+            "fn apply_compute_pool_ops<F>(",
+            "ComputePoolManager::new_enabled(&self.db, ..), which the manager uses for \
+             typed point reads and for the reorg-path revert",
+        ),
+        (
+            "executor.rs",
+            "fn compute_block_state_root(",
+            "SupplyStore::new(self.db.clone()).state_digest() and \
+             BeaconStore::new(&self.db).state_digest() — both folded into the \
+             consensus root, both still reading the PARENT's state",
+        ),
+    ];
+
+    let files = rust_files();
+    for (file, sig, reads) in PARTIAL {
+        let (_, src) = files
+            .iter()
+            .find(|(name, _)| name == file)
+            .unwrap_or_else(|| panic!("{file} is listed in PARTIAL but is not under src/"));
+        let params = params_of(src, sig)
+            .unwrap_or_else(|| panic!("{file} no longer defines `{sig}`; update this list"));
+
+        assert!(
+            params.contains("ExecutionView"),
+            "{file} `{sig}` is listed as partially migrated but takes no \
+             `ExecutionView` at all.\n  parameters: {params}"
+        );
+        assert!(
+            takes_self_receiver(params),
+            "{file} `{sig}` no longer takes a `self` receiver — it is fully \
+             migrated. Move it to EXECUTION_FNS and delete this row.\n  it was \
+             listed as still reading: {reads}"
         );
     }
 }

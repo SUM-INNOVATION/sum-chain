@@ -61,6 +61,8 @@ use bincode::Options;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sumchain_primitives::{Address, BlockHeight, Hash};
+use sumchain_storage::candidate::JournalRecord;
+use sumchain_storage::exec_view::ExecutionView;
 use sumchain_storage::{cf, Database};
 
 use crate::compute_pool::{
@@ -658,6 +660,17 @@ pub struct ComputePoolStateDiff {
 }
 
 impl ComputePoolStateDiff {
+    /// Decode a journal produced by
+    /// [`ComputePoolStore::stage_transition`](ComputePoolStore::stage_transition).
+    ///
+    /// Public because the journal is now an artifact that travels out of
+    /// execution — bound to the candidate, written by the publisher, and read
+    /// back by the reorg driver. A type whose bytes leave the module needs a way
+    /// back in, and the alternative is every reader re-deriving the codec.
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        c1_decode(bytes)
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -775,10 +788,21 @@ impl<'a> ComputePoolStore<'a> {
     /// val_len(u32 LE) ‖ value`. Length prefixes make the concatenation
     /// unambiguous; the empty state hashes to the domain-only digest.
     pub fn state_digest(&self) -> Result<Hash> {
-        let rows = self.load_state_map()?;
+        Self::digest_of(&self.load_state_map()?)
+    }
+
+    /// The digest encoder itself, over an already-loaded row set.
+    ///
+    /// Both [`state_digest`](Self::state_digest) and
+    /// [`v_state_digest`](Self::v_state_digest) call this, so the committed and
+    /// candidate digests cannot drift apart: the rows differ, the encoding
+    /// cannot. A second copy of this loop would be a consensus divergence
+    /// waiting to happen — the fold is part of the block state root, so two
+    /// encoders that disagree by one byte split the network.
+    fn digest_of(rows: &BTreeMap<Vec<u8>, Vec<u8>>) -> Result<Hash> {
         let mut buf: Vec<u8> = Vec::with_capacity(C1_STATE_DIGEST_DOMAIN.len());
         buf.extend_from_slice(C1_STATE_DIGEST_DOMAIN);
-        for (k, v) in &rows {
+        for (k, v) in rows {
             buf.extend_from_slice(&frame_len(k.len())?);
             buf.extend_from_slice(k);
             buf.extend_from_slice(&frame_len(v.len())?);
@@ -787,94 +811,137 @@ impl<'a> ComputePoolStore<'a> {
         Ok(Hash::hash(&buf))
     }
 
-    /// Load + canonically decode the per-height revert journal (`None` if absent,
-    /// e.g. always under the dormant gate, which writes no journal).
-    pub fn load_journal(&self, height: BlockHeight) -> Result<Option<ComputePoolStateDiff>> {
-        match self
-            .db
-            .get(cf::COMPUTE_POOL_STATE_DIFFS, &height.to_be_bytes())?
-        {
+    // ── Execution-path API (candidate-scoped) ───────────────────────────────
+    //
+    // Block execution reads and writes C1 rows only through these. They take an
+    // `ExecutionView`, never `&self`: without a receiver there is no `self.db`
+    // to reach, so a committed read on the execution path is not expressible.
+    //
+    // The `&self` methods above stay, and stay committed-state, for RPC and for
+    // the reorg driver — which answers about the published chain, not about a
+    // candidate.
+
+    /// The live C1 row set as this block sees it: the parent's rows, overlaid
+    /// with everything this block has already staged.
+    pub fn v_load_state_map(
+        view: &ExecutionView<'_, '_>,
+    ) -> Result<BTreeMap<Vec<u8>, Vec<u8>>> {
+        let mut map = BTreeMap::new();
+        // The merged scan is fallible. A read error must end it, not truncate
+        // it: a short row set produces a different digest, and that digest is
+        // folded into the block state root.
+        for entry in view.iter(cf::COMPUTE_POOL_STATE)? {
+            let (k, v) = entry?;
+            map.insert(k, v);
+        }
+        Ok(map)
+    }
+
+    /// The C1 state digest over the candidate's rows.
+    ///
+    /// This is the value the block state root folds once the gate is open, so it
+    /// must see this block's own transition. Reading committed state here would
+    /// commit the root to the PARENT's C1 state while publishing the child's
+    /// rows — every validator would compute a root that disagrees with the state
+    /// it stores.
+    pub fn v_state_digest(view: &ExecutionView<'_, '_>) -> Result<Hash> {
+        Self::digest_of(&Self::v_load_state_map(view)?)
+    }
+
+    /// Load + canonically decode the revert journal published for
+    /// `(height, block_hash)` (`None` if absent — always under the dormant gate,
+    /// which produces no journal).
+    pub fn load_journal(
+        &self,
+        height: BlockHeight,
+        block_hash: &Hash,
+    ) -> Result<Option<ComputePoolStateDiff>> {
+        match self.journal_bytes(height, block_hash)? {
             Some(bytes) => Ok(Some(c1_decode(&bytes)?)),
             None => Ok(None),
         }
     }
 
-    /// Persist the transition `before -> after` for `height` **atomically**.
+    /// The raw journal row published for `(height, block_hash)`.
     ///
-    /// Exactly ONE finalized C1 transition may commit per block height. This is
-    /// enforced with two hard preconditions checked BEFORE any write:
+    /// C1 journals are written by the publisher under
+    /// [`sumchain_storage::schema::journal_key`], the same `(height,
+    /// block_hash)` key the account and contract families use. This reader was
+    /// left on the height-only key when those were re-keyed, so it could not
+    /// find a journal the publisher had written — `stage_block_revert` returned
+    /// "nothing to revert" for every block, and a reorg silently kept the losing
+    /// branch's compute-pool rows.
     ///
-    /// * **Duplicate-height rejection** — if a journal already exists at
-    ///   `height`, the call is rejected ([`StateError::InvalidOperation`]) so a
-    ///   later transition can never overwrite an earlier journal (which would
-    ///   silently drop the earlier block's mutations and make block-rollback
-    ///   revert incomplete).
-    /// * **Stale-predecessor rejection** — the caller's claimed predecessor
-    ///   (`before`, materialized; `None` = empty) must byte-for-byte match the
-    ///   live persisted C1 state. If it does not, the call is rejected rather
-    ///   than silently deriving a transition against a different live state.
+    /// # A pre-#253 row fails closed
     ///
-    /// The delta is every key whose value differs between the two model
-    /// snapshots. Because `before` is verified equal to the live state, the
-    /// captured `old` (from the live state) is exactly the claimed predecessor,
-    /// so a later [`revert_block`] restores precisely what was there. ALL record
-    /// writes/deletes and the journal write are staged into a single
-    /// [`Database::batch`] and committed once: any error returns before `commit`,
-    /// so a rejected/failed transition writes nothing (no partial state).
+    /// The account and contract families fall back to the height-only key, so a
+    /// node upgrading mid-chain can still revert a block an older binary wrote.
+    /// C1 does NOT, and the difference is not an oversight.
     ///
-    /// Returns the number of mutated rows.
-    pub fn persist_transition(
+    /// A height-only row names a height and nothing else. Where two blocks
+    /// competed at that height it cannot say which one it undoes, and applying
+    /// the wrong block's undo record writes a predecessor that never existed
+    /// into canonical state — silently, since every mutation in it decodes
+    /// cleanly. For account and contract that fallback buys real continuity for
+    /// chains with existing history, at a risk the families were already
+    /// carrying.
+    ///
+    /// C1 has no such history to preserve. The gate is `None` in production, so
+    /// no compute-pool journal has ever been written by any binary, at any
+    /// height. A height-only row here therefore cannot be a legitimate legacy
+    /// journal — it is a corrupted, hand-written, or foreign row, and guessing
+    /// that it belongs to the block being reverted is exactly the guess that
+    /// would corrupt state. So it refuses, names the height, and requires the
+    /// row to be removed or re-keyed offline where an operator can establish
+    /// which block it came from.
+    ///
+    /// The check runs even when the correct key IS present: a stray legacy row
+    /// alongside a valid one is still an anomaly, and reverting past it would
+    /// leave it to mislead the next reader.
+    fn journal_bytes(
         &self,
-        before: Option<&ComputePoolModel>,
-        after: &ComputePoolModel,
         height: BlockHeight,
-    ) -> Result<usize> {
-        // (1) Duplicate-height guard: one finalized transition per block. Checked
-        // first, before any computation or write.
-        if self.has_journal(height)? {
+        block_hash: &Hash,
+    ) -> Result<Option<Vec<u8>>> {
+        if self
+            .db
+            .contains(cf::COMPUTE_POOL_STATE_DIFFS, &height.to_be_bytes())?
+        {
             return Err(StateError::InvalidOperation(format!(
-                "C1 transition already finalized at height {height}; refusing to \
-                 overwrite the existing journal"
+                "C1 journal at height {height} is keyed by height alone. No \
+                 compute-pool journal is written under the dormant gate, so this \
+                 row cannot be identified with a block, and applying it could \
+                 undo a different block's transition. Remove or re-key it \
+                 offline before reverting."
             )));
         }
+        let key = sumchain_storage::schema::journal_key(height, block_hash);
+        self.db
+            .get(cf::COMPUTE_POOL_STATE_DIFFS, &key)
+            .map_err(Into::into)
+    }
 
-        let before_rows = match before {
-            Some(m) => Self::materialize(m)?,
-            None => BTreeMap::new(),
-        };
+    // `persist_transition` is gone. It committed its own `WriteBatch` — C1 rows
+    // and a height-keyed journal reaching canonical storage during execution,
+    // before anything had checked the block's root. `stage_transition` below
+    // replaces it. Keeping it as a convenience would have preserved exactly the
+    // escape hatch this work removes: one call and a candidate's compute-pool
+    // rows are canonical again, with nothing at the type level to notice.
 
-        // (2) Stale-predecessor guard: the claimed `before` must match live state.
-        let live = self.load_state_map()?;
-        if before_rows != live {
-            return Err(StateError::InvalidOperation(
-                "C1 persist_transition: stale `before` snapshot does not match the \
-                 live persisted state; refusing to derive a transition from a \
-                 different predecessor"
-                    .to_string(),
-            ));
-        }
-
-        let after_rows = Self::materialize(after)?;
-
-        // Union of touched keys (BTreeSet-like via BTreeMap keys), canonical order.
-        let mut keys: BTreeMap<Vec<u8>, ()> = BTreeMap::new();
-        for k in before_rows.keys().chain(after_rows.keys()) {
-            keys.insert(k.clone(), ());
-        }
-
-        // --- validate-all / build the whole batch BEFORE committing anything ---
+    /// The `before -> after` delta over the union of touched keys, in canonical
+    /// order. `live` supplies the `old` value, which the caller has already
+    /// verified equals the claimed predecessor.
+    fn delta(
+        keys: &BTreeMap<Vec<u8>, ()>,
+        after_rows: &BTreeMap<Vec<u8>, Vec<u8>>,
+        live: &BTreeMap<Vec<u8>, Vec<u8>>,
+    ) -> ComputePoolStateDiff {
         let mut diff = ComputePoolStateDiff::new();
-        let mut batch = self.db.batch();
         for key in keys.keys() {
             let new = after_rows.get(key).cloned();
-            // `old` is the verified predecessor value (live == before_rows).
             let old = live.get(key).cloned();
             if old == new {
                 continue; // unchanged; nothing to journal
-            }
-            match &new {
-                Some(v) => batch.put(cf::COMPUTE_POOL_STATE, key, v)?,
-                None => batch.delete(cf::COMPUTE_POOL_STATE, key)?,
             }
             diff.records.push(ComputePoolMutation {
                 key: key.clone(),
@@ -882,35 +949,109 @@ impl<'a> ComputePoolStore<'a> {
                 new,
             });
         }
-
-        if diff.is_empty() {
-            return Ok(0); // no-op; do not write an empty journal
-        }
         diff.sort();
-        let journal = c1_encode(&diff)?;
-        batch.put(
-            cf::COMPUTE_POOL_STATE_DIFFS,
-            &height.to_be_bytes(),
-            &journal,
-        )?;
+        diff
+    }
 
-        let mutated = diff.records.len();
-        batch.commit()?; // single atomic commit — all-or-nothing
-        Ok(mutated)
+    /// Stage the transition `before -> after` into the block's candidate and
+    /// return its undo journal as an artifact.
+    ///
+    /// This replaces the removed `persist_transition` on the execution path,
+    /// and differs from it in three ways that matter.
+    ///
+    /// **Nothing is committed.** Row writes and deletes are buffered into the
+    /// view, so a block that is rejected or loses fork choice leaves no C1 row
+    /// behind. `persist_transition` committed its own batch, which meant a
+    /// candidate's compute-pool rows reached canonical storage before anyone had
+    /// checked the block's root.
+    ///
+    /// **The journal is returned, not written.** It travels back to
+    /// `execute_block`, is bound to the candidate at `finish_execution`
+    /// alongside the accumulator and receipts, and is written by the publisher
+    /// under `(height, block_hash)`. There is deliberately no `height`
+    /// parameter: the old code keyed the journal by height alone, which two
+    /// blocks at the same height share, so a side branch's journal overwrote the
+    /// canonical one — and the duplicate-height guard that tried to prevent that
+    /// instead REFUSED the side branch's legitimate transition. Removing the
+    /// parameter makes both mistakes unrepresentable here.
+    ///
+    /// **The predecessor is the candidate's state, not the chain's.** `before`
+    /// is checked against the rows this block sees, so a second transition in
+    /// one block is compared against the first one's output rather than against
+    /// the parent.
+    ///
+    /// Returns the number of mutated rows and the journal
+    /// (`NothingToUndo` for a genuine no-op, which stages nothing).
+    pub fn stage_transition(
+        view: &mut ExecutionView<'_, '_>,
+        before: Option<&ComputePoolModel>,
+        after: &ComputePoolModel,
+    ) -> Result<(usize, JournalRecord)> {
+        // One C1 transition per block. The old guard asked the committed store
+        // whether a journal existed at this height, which conflated two blocks
+        // at the same height; this asks the candidate whether it has already
+        // staged C1 rows, which is the question that was actually meant.
+        //
+        // A transition that mutated nothing stages nothing and so is not
+        // detected here — correctly: it produced no journal either, and there is
+        // nothing for a second call to overwrite.
+        if view.preimages_for(cf::COMPUTE_POOL_STATE).next().is_some() {
+            return Err(StateError::InvalidOperation(
+                "C1 transition already staged for this block; refusing to stage a                  second one over it"
+                    .to_string(),
+            ));
+        }
+
+        let before_rows = match before {
+            Some(m) => Self::materialize(m)?,
+            None => BTreeMap::new(),
+        };
+
+        // Stale-predecessor guard, against the candidate.
+        let live = Self::v_load_state_map(view)?;
+        if before_rows != live {
+            return Err(StateError::InvalidOperation(
+                "C1 stage_transition: stale `before` snapshot does not match the                  candidate's live state; refusing to derive a transition from a                  different predecessor"
+                    .to_string(),
+            ));
+        }
+
+        let after_rows = Self::materialize(after)?;
+
+        let mut keys: BTreeMap<Vec<u8>, ()> = BTreeMap::new();
+        for k in before_rows.keys().chain(after_rows.keys()) {
+            keys.insert(k.clone(), ());
+        }
+
+        // Everything fallible that does not touch the view happens first: the
+        // journal is encoded before a single row is staged, so an encoding
+        // failure leaves the candidate untouched rather than half-written.
+        let diff = Self::delta(&keys, &after_rows, &live);
+        if diff.is_empty() {
+            return Ok((0, JournalRecord::NothingToUndo));
+        }
+        let journal = c1_encode(&diff)?;
+
+        for record in &diff.records {
+            match &record.new {
+                Some(v) => view.put(cf::COMPUTE_POOL_STATE, &record.key, v)?,
+                None => view.delete(cf::COMPUTE_POOL_STATE, &record.key)?,
+            }
+        }
+
+        Ok((diff.records.len(), JournalRecord::Recorded(journal)))
     }
 
     /// Whether a per-block C1 journal exists for `height`.
-    pub fn has_journal(&self, height: BlockHeight) -> Result<bool> {
-        Ok(self
-            .db
-            .contains(cf::COMPUTE_POOL_STATE_DIFFS, &height.to_be_bytes())?)
+    pub fn has_journal(&self, height: BlockHeight, block_hash: &Hash) -> Result<bool> {
+        Ok(self.journal_bytes(height, block_hash)?.is_some())
     }
 
-    /// Stage the reverse-replay of the per-height C1 journal (and the journal's
-    /// own deletion) into a caller-provided
-    /// [`WriteBatch`](sumchain_storage::db::WriteBatch), returning whether
-    /// anything was staged (`false` when no journal exists at `height` — e.g.
-    /// ALWAYS under the dormant gate, which writes no journal).
+    /// Stage the reverse-replay of the C1 journal published for
+    /// `(height, block_hash)` (and the journal's own deletion) into a
+    /// caller-provided [`WriteBatch`](sumchain_storage::db::WriteBatch),
+    /// returning whether anything was staged (`false` when that block published
+    /// no journal — ALWAYS under the dormant gate, which produces none).
     ///
     /// This is the seam that lets the C1 revert compose into the SAME atomic
     /// write as the account + contract revert: the live reorg driver
@@ -927,9 +1068,9 @@ impl<'a> ComputePoolStore<'a> {
         &self,
         batch: &mut sumchain_storage::db::WriteBatch<'_>,
         height: BlockHeight,
+        block_hash: &Hash,
     ) -> Result<bool> {
-        let hkey = height.to_be_bytes();
-        let Some(bytes) = self.db.get(cf::COMPUTE_POOL_STATE_DIFFS, &hkey)? else {
+        let Some(bytes) = self.journal_bytes(height, block_hash)? else {
             return Ok(false); // nothing to revert
         };
         let diff: ComputePoolStateDiff = c1_decode(&bytes)?;
@@ -958,7 +1099,14 @@ impl<'a> ComputePoolStore<'a> {
                 None => batch.delete(cf::COMPUTE_POOL_STATE, &record.key)?,
             }
         }
-        batch.delete(cf::COMPUTE_POOL_STATE_DIFFS, &hkey)?;
+        // Only this block's key. A height-only row is never reached here —
+        // `journal_bytes` refuses before returning — and deleting one silently
+        // would destroy the evidence an operator needs to work out which block
+        // it belonged to.
+        batch.delete(
+            cf::COMPUTE_POOL_STATE_DIFFS,
+            &sumchain_storage::schema::journal_key(height, block_hash),
+        )?;
         Ok(true)
     }
 
@@ -971,9 +1119,9 @@ impl<'a> ComputePoolStore<'a> {
     /// retry. Retained for the standalone store/manager tests; the LIVE reorg
     /// path drives `stage_block_revert` into the unified account+contract+C1
     /// batch instead (one commit, crash-consistent across all families).
-    pub fn revert_block(&self, height: BlockHeight) -> Result<()> {
+    pub fn revert_block(&self, height: BlockHeight, block_hash: &Hash) -> Result<()> {
         let mut batch = self.db.batch();
-        if self.stage_block_revert(&mut batch, height)? {
+        if self.stage_block_revert(&mut batch, height, block_hash)? {
             batch.commit()?; // single atomic commit
         }
         Ok(())
@@ -1091,12 +1239,88 @@ mod tests {
         BondedOffer, CommitBondId, ComputePoolModel, EntitlementKind, EntitlementRecord,
         ExposureInputs, UnitSizing, WorkUnit,
     };
+    use sumchain_storage::overlay::ApplicationOverlay;
     use sumchain_storage::Database;
     use tempfile::TempDir;
 
     fn open_db() -> (Database, TempDir) {
         let dir = TempDir::new().unwrap();
         (Database::open_default(dir.path()).unwrap(), dir)
+    }
+
+    /// A stand-in block hash for `height`. Distinct per height, and — where a
+    /// test needs two blocks at one height — per `variant`.
+    fn bh(height: BlockHeight, variant: u8) -> Hash {
+        let mut b = [0u8; 32];
+        b[..8].copy_from_slice(&height.to_be_bytes());
+        b[31] = variant;
+        Hash::new(b)
+    }
+
+    /// Publish one transition, standing in for the block pipeline: stage it into
+    /// a candidate, then commit the staged rows and the returned journal in one
+    /// batch under the publisher's `(height, block_hash)` key.
+    ///
+    /// THIS IS A TEST FIXTURE, not an API. It is the only direct write left in
+    /// this file besides the reorg-path `revert_block`, and it exists because
+    /// `ApplicationOverlay::into_batch` is crate-private to `sumchain-storage`
+    /// — deliberately, so that outside that crate only `AcceptedCandidate::
+    /// publish` can turn a candidate into canonical state. The tests below need
+    /// committed rows to exercise revert and cross-block sequences, and they are
+    /// storage-codec unit tests: driving a real block through acceptance and
+    /// publication to set them up would couple them to consensus for nothing.
+    ///
+    /// It writes exactly what `publish` writes for this family — the staged rows
+    /// and the journal at `journal_key(height, block_hash)` — in one batch, so a
+    /// test set up through it sees what a published block would leave behind.
+    fn publish_transition(
+        db: &Database,
+        before: Option<&ComputePoolModel>,
+        after: &ComputePoolModel,
+        height: BlockHeight,
+        block_hash: &Hash,
+    ) -> Result<usize> {
+        let mut overlay = ApplicationOverlay::new(db, 1 << 30);
+        let (mutated, journal) = {
+            let mut view = ExecutionView::new(&mut overlay);
+            ComputePoolStore::stage_transition(&mut view, before, after)?
+        };
+        // Replay the journal the staging produced. Using the journal rather than
+        // re-deriving the delta keeps the fixture honest: it applies exactly the
+        // rows the candidate staged, so a bug in `stage_transition` shows up as a
+        // failing test rather than being papered over by the fixture computing
+        // the right answer independently.
+        let mut batch = db.batch();
+        if let JournalRecord::Recorded(bytes) = &journal {
+            let diff: ComputePoolStateDiff = c1_decode(bytes)?;
+            for record in &diff.records {
+                match &record.new {
+                    Some(v) => batch.put(cf::COMPUTE_POOL_STATE, &record.key, v)?,
+                    None => batch.delete(cf::COMPUTE_POOL_STATE, &record.key)?,
+                }
+            }
+        }
+        drop(overlay);
+        if let JournalRecord::Recorded(bytes) = &journal {
+            batch.put(
+                cf::COMPUTE_POOL_STATE_DIFFS,
+                &sumchain_storage::schema::journal_key(height, block_hash),
+                bytes,
+            )?;
+        }
+        batch.commit()?;
+        Ok(mutated)
+    }
+
+    /// Stage a transition into a candidate and throw the candidate away.
+    fn stage_only(
+        db: &Database,
+        before: Option<&ComputePoolModel>,
+        after: &ComputePoolModel,
+    ) -> Result<(usize, JournalRecord)> {
+        let mut overlay = ApplicationOverlay::new(db, 1 << 30);
+        let mut view = ExecutionView::new(&mut overlay);
+        ComputePoolStore::stage_transition(&mut view, before, after)
     }
 
     // ── C1 state-commitment golden vectors (issue #163) ──────────────────────
@@ -1333,7 +1557,7 @@ mod tests {
         let store = ComputePoolStore::new(&db);
         let m = full_model();
 
-        let mutated = store.persist_transition(None, &m, 1).unwrap();
+        let mutated = publish_transition(&db, None, &m, 1, &bh(1, 0)).unwrap();
         assert!(mutated > 0);
         assert_eq!(
             store.load_state_map().unwrap(),
@@ -1367,10 +1591,10 @@ mod tests {
         let (db, _d) = open_db();
         let store = ComputePoolStore::new(&db);
         let m = full_model();
-        store.persist_transition(None, &m, 1).unwrap();
+        publish_transition(&db, None, &m, 1, &bh(1, 0)).unwrap();
         // before == after => zero mutations, no journal written.
-        assert_eq!(store.persist_transition(Some(&m), &m, 2).unwrap(), 0);
-        assert!(!store.has_journal(2).unwrap());
+        assert_eq!(publish_transition(&db, Some(&m), &m, 2, &bh(2, 0)).unwrap(), 0);
+        assert!(!store.has_journal(2, &bh(2, 0)).unwrap());
     }
 
     // ---- key identity: collision resistance, generation, prefix/type confusion ----
@@ -1383,7 +1607,7 @@ mod tests {
         let mut m = ComputePoolModel::new();
         add_job(&mut m, jid(1), vec![simple_unit(jid(1), uid(9))]);
         add_job(&mut m, jid(2), vec![simple_unit(jid(2), uid(9))]);
-        store.persist_transition(None, &m, 1).unwrap();
+        publish_transition(&db, None, &m, 1, &bh(1, 0)).unwrap();
 
         assert_ne!(
             unit_key_bytes(&jid(1), &uid(9)),
@@ -1416,7 +1640,7 @@ mod tests {
             })
             .unwrap();
         }
-        store.persist_transition(None, &m, 1).unwrap();
+        publish_transition(&db, None, &m, 1, &bh(1, 0)).unwrap();
         assert!(store.get_accepted_leaf(&g0).unwrap().is_some());
         assert!(store.get_accepted_leaf(&g1).unwrap().is_some());
     }
@@ -1457,7 +1681,7 @@ mod tests {
     fn malformed_version_rejected() {
         let (db, _d) = open_db();
         let store = ComputePoolStore::new(&db);
-        store.persist_transition(None, &full_model(), 1).unwrap();
+        publish_transition(&db, None, &full_model(), 1, &bh(1, 0)).unwrap();
         let mut bytes = db
             .get(cf::COMPUTE_POOL_STATE, &job_key_bytes(&jid(1)))
             .unwrap()
@@ -1583,20 +1807,20 @@ mod tests {
         let target = ComputePoolStore::materialize(&m).unwrap();
 
         // Apply a block that writes many related records atomically.
-        store.persist_transition(None, &m, 10).unwrap();
+        publish_transition(&db, None, &m, 10, &bh(10, 0)).unwrap();
         assert_eq!(store.load_state_map().unwrap(), target);
-        assert!(store.has_journal(10).unwrap());
+        assert!(store.has_journal(10, &bh(10, 0)).unwrap());
 
         // Revert the whole block: every record disappears together.
-        store.revert_block(10).unwrap();
+        store.revert_block(10, &bh(10, 0)).unwrap();
         assert!(store.load_state_map().unwrap().is_empty());
         assert!(
-            !store.has_journal(10).unwrap(),
+            !store.has_journal(10, &bh(10, 0)).unwrap(),
             "journal consumed on revert"
         );
 
         // Reapply: byte-identical to the first application.
-        store.persist_transition(None, &m, 10).unwrap();
+        publish_transition(&db, None, &m, 10, &bh(10, 0)).unwrap();
         assert_eq!(store.load_state_map().unwrap(), target);
     }
 
@@ -1616,7 +1840,7 @@ mod tests {
         })
         .unwrap();
 
-        store.persist_transition(None, &m, 5).unwrap();
+        publish_transition(&db, None, &m, 5, &bh(5, 0)).unwrap();
         assert_eq!(
             store
                 .get_accepted_leaf(&key)
@@ -1625,12 +1849,12 @@ mod tests {
                 .accepted_bytes,
             100
         );
-        store.revert_block(5).unwrap();
+        store.revert_block(5, &bh(5, 0)).unwrap();
         assert!(
             store.get_accepted_leaf(&key).unwrap().is_none(),
             "leaf gone after revert"
         );
-        store.persist_transition(None, &m, 5).unwrap();
+        publish_transition(&db, None, &m, 5, &bh(5, 0)).unwrap();
         assert_eq!(
             store
                 .get_accepted_leaf(&key)
@@ -1651,7 +1875,7 @@ mod tests {
         // Block 1: identity's active offer is A.
         let mut m1 = ComputePoolModel::new();
         m1.publish_offer(active_offer(oid(0xAA), identity)).unwrap();
-        store.persist_transition(None, &m1, 1).unwrap();
+        publish_transition(&db, None, &m1, 1, &bh(1, 0)).unwrap();
         assert_eq!(store.active_offer_of(&identity).unwrap(), Some(oid(0xAA)));
 
         // Block 2: A is retired (inactive) and B becomes the active offer.
@@ -1666,7 +1890,7 @@ mod tests {
             ..active_offer(oid(0xBB), identity)
         })
         .unwrap();
-        store.persist_transition(Some(&m1), &m2, 2).unwrap();
+        publish_transition(&db, Some(&m1), &m2, 2, &bh(2, 0)).unwrap();
         assert_eq!(
             store.active_offer_of(&identity).unwrap(),
             Some(oid(0xBB)),
@@ -1674,7 +1898,7 @@ mod tests {
         );
 
         // Roll back block 2: the one-active-offer index is restored to A.
-        store.revert_block(2).unwrap();
+        store.revert_block(2, &bh(2, 0)).unwrap();
         assert_eq!(
             store.active_offer_of(&identity).unwrap(),
             Some(oid(0xAA)),
@@ -1694,7 +1918,7 @@ mod tests {
         let (db, _d) = open_db();
         let store = ComputePoolStore::new(&db);
         let m = full_model();
-        store.persist_transition(None, &m, 1).unwrap();
+        publish_transition(&db, None, &m, 1, &bh(1, 0)).unwrap();
         let before = store.load_state_map().unwrap();
 
         // Craft a corrupt journal at height 2 with a bad-domain mutation.
@@ -1712,7 +1936,7 @@ mod tests {
         .unwrap();
 
         assert!(
-            store.revert_block(2).is_err(),
+            store.revert_block(2, &bh(2, 0)).is_err(),
             "corrupt journal aborts revert"
         );
         assert_eq!(
@@ -1721,7 +1945,7 @@ mod tests {
             "state unchanged after aborted revert (no partial writes)"
         );
         assert!(
-            store.has_journal(2).unwrap(),
+            store.has_journal(2, &bh(2, 0)).unwrap(),
             "corrupt journal preserved for retry"
         );
     }
@@ -1735,7 +1959,7 @@ mod tests {
 
         // First transition at height 7 commits normally.
         let m1 = full_model();
-        store.persist_transition(None, &m1, 7).unwrap();
+        publish_transition(&db, None, &m1, 7, &bh(7, 0)).unwrap();
         let after_first = store.load_state_map().unwrap();
         let journal_first = db
             .get(cf::COMPUTE_POOL_STATE_DIFFS, &7u64.to_be_bytes())
@@ -1754,7 +1978,7 @@ mod tests {
             amount: 999,
         })
         .unwrap();
-        let err = store.persist_transition(Some(&m1), &m2, 7).unwrap_err();
+        let err = publish_transition(&db, Some(&m1), &m2, 7, &bh(7, 0)).unwrap_err();
         assert!(
             matches!(err, StateError::InvalidOperation(_)),
             "duplicate height must be InvalidOperation, got {err:?}"
@@ -1775,7 +1999,7 @@ mod tests {
         );
 
         // And the preserved journal still rolls the block back exactly.
-        store.revert_block(7).unwrap();
+        store.revert_block(7, &bh(7, 0)).unwrap();
         assert!(store.load_state_map().unwrap().is_empty());
     }
 
@@ -1788,19 +2012,19 @@ mod tests {
 
         // Live state is `full_model()` at height 1.
         let live_model = full_model();
-        store.persist_transition(None, &live_model, 1).unwrap();
+        publish_transition(&db, None, &live_model, 1, &bh(1, 0)).unwrap();
         let live_rows = store.load_state_map().unwrap();
 
         // Caller claims an EMPTY predecessor (before = None) at height 2, but the
         // live state is non-empty => stale => reject, nothing written.
         let target = full_model();
-        let err = store.persist_transition(None, &target, 2).unwrap_err();
+        let err = publish_transition(&db, None, &target, 2, &bh(2, 0)).unwrap_err();
         assert!(
             matches!(err, StateError::InvalidOperation(_)),
             "got {err:?}"
         );
         assert!(
-            !store.has_journal(2).unwrap(),
+            !store.has_journal(2, &bh(2, 0)).unwrap(),
             "no journal on rejected write"
         );
         assert_eq!(
@@ -1814,8 +2038,7 @@ mod tests {
         wrong_before
             .publish_offer(active_offer(oid(0xEE), addr(200)))
             .unwrap();
-        let err2 = store
-            .persist_transition(Some(&wrong_before), &target, 2)
+        let err2 = publish_transition(&db, Some(&wrong_before), &target, 2, &bh(2, 0))
             .unwrap_err();
         assert!(
             matches!(err2, StateError::InvalidOperation(_)),
@@ -1829,8 +2052,7 @@ mod tests {
 
         // The CORRECT predecessor is accepted (control): a genuine no-op here.
         assert_eq!(
-            store
-                .persist_transition(Some(&live_model), &live_model, 2)
+            publish_transition(&db, Some(&live_model), &live_model, 2, &bh(2, 0))
                 .unwrap(),
             0
         );

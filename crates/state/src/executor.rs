@@ -3158,16 +3158,22 @@ impl BlockExecutor {
 
         // ── Dormant C1 compute-pool subprotocol (issue #130) ──
         // Drive this block's compute-pool transitions through the gated
-        // `ComputePoolManager` into the model + persistent store (rows + per-height
-        // revert journal committed atomically in one write batch), BEFORE the state
-        // root so the committed C1 state is folded into the consensus commitment
-        // when the gate is open. On reorg these rows revert atomically with account
-        // + contract state via `StateManager::revert_block_state_diffs`.
+        // `ComputePoolManager` into the model and into THIS BLOCK'S CANDIDATE —
+        // rows buffered, nothing committed — BEFORE the state root, so the fold
+        // below sees this block's own transition rather than the parent's. The
+        // undo journal comes back as an artifact and is bound to the candidate
+        // alongside the accumulator and receipts; the publisher writes it under
+        // `(height, block_hash)` once the root is filled in and the hash is
+        // final. On reorg these rows revert atomically with account + contract
+        // state via `StateManager::revert_block_state_diffs`.
         // GATE-CLOSED: under the production default
         // (`compute_pool_enabled_from_height == None`) the manager is never
         // constructed, nothing is applied, and the root fold below is skipped — the
         // whole path is inert and dormant block roots are byte-for-byte unchanged.
-        self.apply_compute_pool_transitions(block.height())?;
+        let compute_pool_journal = {
+            let mut view = candidate.view();
+            self.apply_compute_pool_transitions(&mut view, block.height())?
+        };
 
         // BR1 beacon (#127): drive + persist this block's beacon transition BEFORE the
         // state root so the committed beacon state is folded into the consensus
@@ -3180,7 +3186,10 @@ impl BlockExecutor {
         // Compute new state root (folds the contract-state digest once the
         // contracts gate is open, and the C1 state digest once the compute-pool
         // gate is open — see compute_block_state_root).
-        let state_root = self.compute_block_state_root(block, &receipts, &contract_diff)?;
+        let state_root = {
+            let view = candidate.view();
+            self.compute_block_state_root(&view, block, &receipts, &contract_diff)?
+        };
 
         // The in-memory accumulator is NOT advanced here.
         //
@@ -3221,7 +3230,7 @@ impl BlockExecutor {
                     contract: contract_journal,
                     // Both gates are `None` in production, so neither journal is
                     // ever written; presence, not the gate, drives the revert.
-                    compute_pool: JournalRecord::NothingToUndo,
+                    compute_pool: compute_pool_journal,
                     beacon: JournalRecord::NothingToUndo,
                 },
             ),
@@ -3242,29 +3251,43 @@ impl BlockExecutor {
     /// mutates no rows and writes no revert journal). The full apply→persist path
     /// is exercised end-to-end by driving [`Self::apply_compute_pool_ops`] with a
     /// real operation source in tests.
-    fn apply_compute_pool_transitions(&self, height: BlockHeight) -> Result<()> {
+    fn apply_compute_pool_transitions(
+        &self,
+        view: &mut ExecutionView<'_, '_>,
+        height: BlockHeight,
+    ) -> Result<JournalRecord> {
         // No live operation source yet (blocked on #125's dispatch) ⇒ the block
         // contributes an empty (no-op) compute-pool transition.
-        self.apply_compute_pool_ops(height, |_model| Ok(()))
+        self.apply_compute_pool_ops(view, height, |_model| Ok(()))
     }
 
     /// The gated compute-pool apply seam, parameterized by the operation source
-    /// `ops` so the end-to-end apply→persist lifecycle is exercisable through the
+    /// `ops` so the end-to-end apply→stage lifecycle is exercisable through the
     /// real gated machinery without a live #125 dispatch.
     ///
     /// Inert under the production `None` gate: `new_enabled` yields `None`, so the
-    /// manager is never constructed and `ops` never runs. When the gate is
-    /// (hypothetically / test-) enabled, `ops` runs against the manager's working
-    /// model and, on success, the transition is persisted atomically into the C1
-    /// store with a per-height revert journal.
-    fn apply_compute_pool_ops<F>(&self, height: BlockHeight, ops: F) -> Result<()>
+    /// manager is never constructed, `ops` never runs, and the returned journal is
+    /// `NothingToUndo`. When the gate is (hypothetically / test-) enabled, `ops`
+    /// runs against the manager's working model and, on success, the transition is
+    /// STAGED into the block's candidate and its undo journal returned. Nothing
+    /// is committed here.
+    fn apply_compute_pool_ops<F>(
+        &self,
+        view: &mut ExecutionView<'_, '_>,
+        height: BlockHeight,
+        ops: F,
+    ) -> Result<JournalRecord>
     where
         F: FnOnce(&mut ComputePoolModel) -> PoolResult<()>,
     {
         if let Some(mut manager) = ComputePoolManager::new_enabled(&self.db, &self.params, height) {
-            manager.apply_block(height, ops)?;
+            let (_mutated, journal) = manager.apply_block(view, height, ops)?;
+            return Ok(journal);
         }
-        Ok(())
+        // Gate closed: the manager is never constructed, so there is no
+        // transition and nothing to undo. `NothingToUndo` states that
+        // positively, rather than leaving the family unnamed.
+        Ok(JournalRecord::NothingToUndo)
     }
 
     /// The BR1 beacon (#127) threshold/fault params for the LIVE producer: the
@@ -3473,6 +3496,7 @@ impl BlockExecutor {
     /// Compute state root after block execution
     fn compute_block_state_root(
         &self,
+        view: &ExecutionView<'_, '_>,
         block: &Block,
         receipts: &[Receipt],
         contract_diff: &ContractStateDiff,
@@ -3528,7 +3552,7 @@ impl BlockExecutor {
         // contracts/supply gated folds above; C1 rows are applied BEFORE this in
         // execute_block, so the digest sees this block's transition.
         if compute_pool_gate_open(&self.params, block.height()) {
-            let cp_digest = ComputePoolStore::new(&self.db).state_digest()?;
+            let cp_digest = ComputePoolStore::v_state_digest(view)?;
             data.extend_from_slice(cp_digest.as_bytes());
         }
 
@@ -7250,7 +7274,7 @@ mod tests {
             "dormant gate must not write any C1 state rows during block-apply"
         );
         assert!(
-            !store.has_journal(1).unwrap(),
+            !store.has_journal(1, &Hash::ZERO).unwrap(),
             "dormant gate must not write any C1 revert journal during block-apply"
         );
 
@@ -7289,8 +7313,12 @@ mod tests {
 
         // APPLY: drive a real compute-pool transition through the gated apply
         // seam (the operation source #125's dispatch will eventually supply).
-        executor
-            .apply_compute_pool_ops(height, |m: &mut ComputePoolModel| {
+        apply_and_publish_c1(
+            &executor,
+            db.as_ref(),
+            height,
+            &Hash::ZERO,
+            |m: &mut ComputePoolModel| {
                 m.create_job(
                     job,
                     Address::new([9; 20]),
@@ -7317,10 +7345,12 @@ mod tests {
                     1_000_000,
                 )
                 .map(|_| ())
-            })
-            .unwrap();
+            },
+        );
 
-        // PERSIST: the transition landed as C1 rows + a per-height revert journal.
+        // PUBLISHED: the fixture committed what the candidate staged — C1 rows,
+        // and the journal under `(height, block_hash)`. Execution itself
+        // committed nothing.
         let store = ComputePoolStore::new(&db);
         assert!(
             store.get_job(&job).unwrap().is_some(),
@@ -7328,8 +7358,8 @@ mod tests {
         );
         assert!(!store.load_state_map().unwrap().is_empty());
         assert!(
-            store.has_journal(height).unwrap(),
-            "per-height revert journal written by the apply seam"
+            store.has_journal(height, &Hash::ZERO).unwrap(),
+            "journal returned by the apply seam and written by publication"
         );
 
         // REORG-REVERT: the unified atomic reorg path (account+contract+C1 in one
@@ -7344,12 +7374,85 @@ mod tests {
             "all C1 rows reverted on reorg"
         );
         assert!(
-            !store.has_journal(height).unwrap(),
+            !store.has_journal(height, &Hash::ZERO).unwrap(),
             "revert journal consumed on reorg"
         );
 
         // Idempotent: reverting an already-consumed height is a clean no-op.
         state.revert_block_state_diffs(height, &Hash::ZERO).unwrap();
+    }
+
+    /// Compute a block's state root against a fresh, EMPTY candidate over `db`.
+    ///
+    /// `compute_block_state_root` now folds the compute-pool digest from the
+    /// candidate, not from committed state, so it needs a view. These tests are
+    /// about the gated folds rather than about a block's own transition, so an
+    /// empty candidate is the right predecessor: the view reads straight through
+    /// to `db`, and rows a test injects there are still seen.
+    fn root_over_empty_candidate(
+        executor: &BlockExecutor,
+        db: &Database,
+        blk: &Block,
+        receipts: &[Receipt],
+        contract_diff: &ContractStateDiff,
+    ) -> Hash {
+        let mut ov = sumchain_storage::overlay::ApplicationOverlay::new(db, 1 << 30);
+        let view = ExecutionView::new(&mut ov);
+        executor
+            .compute_block_state_root(&view, blk, receipts, contract_diff)
+            .unwrap()
+    }
+
+    /// Drive one C1 transition through the executor's apply seam and publish
+    /// what it staged: the journal's rows and the journal itself, under the
+    /// publisher's `(height, block_hash)` key.
+    ///
+    /// TEST FIXTURE, matching the ones in `compute_pool_store` and
+    /// `compute_pool_manager`. The apply seam no longer commits — that is the
+    /// change these tests are here to pin — so a test that wants to exercise the
+    /// reorg revert has to publish the candidate's output itself. Rows are
+    /// replayed from the returned journal rather than re-derived, so the fixture
+    /// cannot publish something the candidate did not stage.
+    fn apply_and_publish_c1<F>(
+        executor: &BlockExecutor,
+        db: &Database,
+        height: u64,
+        block_hash: &Hash,
+        ops: F,
+    ) where
+        F: FnOnce(&mut crate::compute_pool::ComputePoolModel) -> crate::compute_pool::PoolResult<()>,
+    {
+        use crate::compute_pool_store::ComputePoolStateDiff;
+        use sumchain_storage::overlay::ApplicationOverlay;
+        use sumchain_storage::cf;
+
+        let mut overlay = ApplicationOverlay::new(db, 1 << 30);
+        let journal = {
+            let mut view = ExecutionView::new(&mut overlay);
+            executor
+                .apply_compute_pool_ops(&mut view, height, ops)
+                .unwrap()
+        };
+        drop(overlay);
+
+        if let JournalRecord::Recorded(bytes) = &journal {
+            let diff = ComputePoolStateDiff::decode(bytes).unwrap();
+            let mut batch = db.batch();
+            for r in &diff.records {
+                match &r.new {
+                    Some(v) => batch.put(cf::COMPUTE_POOL_STATE, &r.key, v).unwrap(),
+                    None => batch.delete(cf::COMPUTE_POOL_STATE, &r.key).unwrap(),
+                }
+            }
+            batch
+                .put(
+                    cf::COMPUTE_POOL_STATE_DIFFS,
+                    &sumchain_storage::schema::journal_key(height, block_hash),
+                    bytes,
+                )
+                .unwrap();
+            batch.commit().unwrap();
+        }
     }
 
     /// Helper: apply a one-job C1 transition at `height` through the gated apply
@@ -7360,8 +7463,12 @@ mod tests {
         };
         let job = JobId::from_bytes([seed; 32]);
         let unit = UnitId::from_bytes([seed.wrapping_add(1); 32]);
-        executor
-            .apply_compute_pool_ops(height, move |m: &mut ComputePoolModel| {
+        apply_and_publish_c1(
+            executor,
+            executor.db.as_ref(),
+            height,
+            &Hash::ZERO,
+            move |m: &mut ComputePoolModel| {
                 m.create_job(
                     job,
                     Address::new([9; 20]),
@@ -7388,8 +7495,8 @@ mod tests {
                     1_000_000,
                 )
                 .map(|_| ())
-            })
-            .unwrap();
+            },
+        );
     }
 
     /// DORMANT IDENTITY (state commitment): under the production default gate the
@@ -7406,9 +7513,7 @@ mod tests {
         let blk = compute_pool_test_block(1, &proposer);
         let empty_diff = ContractStateDiff::new();
 
-        let root_before = executor
-            .compute_block_state_root(&blk, &[], &empty_diff)
-            .unwrap();
+        let root_before = root_over_empty_candidate(&executor, &db, &blk, &[], &empty_diff);
 
         // Inject arbitrary bytes into the C1 state CF (domain-prefixed junk).
         db.put(
@@ -7418,9 +7523,7 @@ mod tests {
         )
         .unwrap();
 
-        let root_after = executor
-            .compute_block_state_root(&blk, &[], &empty_diff)
-            .unwrap();
+        let root_after = root_over_empty_candidate(&executor, &db, &blk, &[], &empty_diff);
 
         assert_eq!(
             root_before, root_after,
@@ -7445,9 +7548,7 @@ mod tests {
         let blk = compute_pool_test_block(1, &proposer);
         let empty_diff = ContractStateDiff::new();
 
-        let root_empty = executor
-            .compute_block_state_root(&blk, &[], &empty_diff)
-            .unwrap();
+        let root_empty = root_over_empty_candidate(&executor, &db, &blk, &[], &empty_diff);
 
         db.put(
             sumchain_storage::cf::COMPUTE_POOL_STATE,
@@ -7456,9 +7557,7 @@ mod tests {
         )
         .unwrap();
 
-        let root_with_c1 = executor
-            .compute_block_state_root(&blk, &[], &empty_diff)
-            .unwrap();
+        let root_with_c1 = root_over_empty_candidate(&executor, &db, &blk, &[], &empty_diff);
 
         assert_ne!(
             root_empty, root_with_c1,
@@ -7515,9 +7614,7 @@ mod tests {
         // Gate None: byte-for-byte the pre-#163 preimage hash (C1 fold inert),
         // even though a C1 row is present in the DB.
         assert_eq!(
-            ex_none
-                .compute_block_state_root(&blk, &[], &empty_contract)
-                .unwrap(),
+            root_over_empty_candidate(&ex_none, &db, &blk, &[], &empty_contract),
             Hash::hash(&pre163),
             "under None gate the root must equal the pre-#163 preimage hash"
         );
@@ -7533,9 +7630,7 @@ mod tests {
             "open-gate preimage must be the closed preimage plus exactly 32 bytes"
         );
         assert_eq!(
-            ex_open
-                .compute_block_state_root(&blk, &[], &empty_contract)
-                .unwrap(),
+            root_over_empty_candidate(&ex_open, &db, &blk, &[], &empty_contract),
             Hash::hash(&open_preimage),
             "open-gate root must be the closed preimage + the 32-byte C1 digest at the documented offset"
         );
@@ -7590,9 +7685,7 @@ mod tests {
         // Gate None: byte-for-byte the pre-beacon preimage hash (fold inert), even
         // though a beacon row is present in the DB.
         assert_eq!(
-            ex_none
-                .compute_block_state_root(&blk, &[], &empty_contract)
-                .unwrap(),
+            root_over_empty_candidate(&ex_none, &db, &blk, &[], &empty_contract),
             Hash::hash(&pre),
             "under None gate the root must equal the pre-beacon preimage hash"
         );
@@ -7604,9 +7697,7 @@ mod tests {
         open_preimage.extend_from_slice(state.state_root().as_bytes());
         assert_eq!(open_preimage.len(), pre.len() + 32);
         assert_eq!(
-            ex_open
-                .compute_block_state_root(&blk, &[], &empty_contract)
-                .unwrap(),
+            root_over_empty_candidate(&ex_open, &db, &blk, &[], &empty_contract),
             Hash::hash(&open_preimage),
             "open-gate root must be the closed preimage + the 32-byte beacon digest at the documented offset"
         );
@@ -8298,7 +8389,7 @@ mod tests {
         let acct = Address::new([0x33; 20]);
 
         // Post-block state: an account mutation (with a saved StateDiff) AND a C1
-        // transition (with its per-height journal), both finalized at `height`.
+        // transition (with its journal), both finalized at `height`.
         state
             .put_account(
                 &acct,
@@ -8328,7 +8419,7 @@ mod tests {
             .get_job(&JobId::from_bytes([0x44; 32]))
             .unwrap()
             .is_some());
-        assert!(store.has_journal(height).unwrap());
+        assert!(store.has_journal(height, &Hash::ZERO).unwrap());
 
         // ONE call reverts BOTH families atomically.
         state.revert_block_state_diffs(height, &Hash::ZERO).unwrap();
@@ -8349,7 +8440,7 @@ mod tests {
             store.load_state_map().unwrap().is_empty(),
             "all C1 rows reverted"
         );
-        assert!(!store.has_journal(height).unwrap(), "C1 journal consumed");
+        assert!(!store.has_journal(height, &Hash::ZERO).unwrap(), "C1 journal consumed");
     }
 
     /// A forced C1 revert failure (a corrupt journal) must abort the UNIFIED
@@ -8372,7 +8463,7 @@ mod tests {
         let acct = Address::new([0x33; 20]);
 
         // Post-block state: an account mutation (with its StateDiff) AND a C1
-        // transition (with its per-height journal), both finalized at `height`.
+        // transition (with its journal), both finalized at `height`.
         state
             .put_account(
                 &acct,
@@ -8397,7 +8488,7 @@ mod tests {
         state.save_state_diff(height, &Hash::ZERO, sd).unwrap();
         apply_one_job(&executor, height, 0x44);
         let store = ComputePoolStore::new(&db);
-        assert!(store.has_journal(height).unwrap());
+        assert!(store.has_journal(height, &Hash::ZERO).unwrap());
 
         // Force a C1 revert failure: overwrite the journal with undecodable bytes
         // (too short for the fixint length prefix -> c1_decode errors in
@@ -8430,7 +8521,7 @@ mod tests {
             "C1 rows NOT reverted either (the whole revert aborted)"
         );
         assert!(
-            store.has_journal(height).unwrap(),
+            store.has_journal(height, &Hash::ZERO).unwrap(),
             "corrupt C1 journal preserved for retry"
         );
     }
@@ -8461,7 +8552,7 @@ mod tests {
             "no C1 rows: execute_block has no #125 operation source yet"
         );
         assert!(
-            !store.has_journal(1).unwrap(),
+            !store.has_journal(1, &Hash::ZERO).unwrap(),
             "no C1 journal: the empty live transition writes nothing"
         );
     }

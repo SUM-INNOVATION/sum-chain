@@ -5,17 +5,22 @@
 //!
 //! * [`crate::compute_pool::ComputePoolModel`] — the pure in-memory model that
 //!   enforces every C1 invariant validate-before-mutate (#155).
-//! * [`crate::compute_pool_store::ComputePoolStore`] — the persistence + per-height
+//! * [`crate::compute_pool_store::ComputePoolStore`] — the row codec and
 //!   revert-journal adapter (#157).
 //!
 //! Neither piece, on its own, *drives* the other: the model never persists, and
-//! the store's [`ComputePoolStore::persist_transition`] must be handed an explicit
+//! the store's [`ComputePoolStore::stage_transition`] must be handed an explicit
 //! `before`/`after` model pair by some coordinator. [`ComputePoolManager`] is that
 //! coordinator. It owns the authoritative in-memory model and, for each applied
-//! block height, updates BOTH the model AND the persisted rows in lockstep, then
-//! reverts them together on reorg. It composes the two existing pieces exactly the
-//! way [`crate::state::StateManager`] composes an account model with a
-//! `StateStore` + per-height `StateDiff` revert journal — no new architecture.
+//! block, updates the model and stages the row delta into that block's candidate
+//! in lockstep, then reverts them together on reorg. It composes the two existing
+//! pieces the way [`crate::state::StateManager`] composes an account model with a
+//! `StateStore` and a `StateDiff` revert journal — no new architecture.
+//!
+//! Staging, not persisting: the rows go into the block's candidate and the undo
+//! journal comes back as an artifact. Nothing here reaches canonical storage —
+//! `AcceptedCandidate::publish` does that, after the block's root has been
+//! checked.
 //!
 //! ## Strictly dormant / NON-ACTIVATION
 //!
@@ -37,11 +42,13 @@
 //!   model's already-ratified operations, so no new state-transition semantics are
 //!   invented — the manager only *sequences and persists* the ratified ops.
 //!
-//! ## Per-height revert symmetry
+//! ## Per-block revert symmetry
 //!
-//! The store keeps a per-height [`ComputePoolStateDiff`](crate::compute_pool_store::ComputePoolStateDiff)
-//! so a rolled-back block restores the exact persisted bytes. The manager keeps
-//! the model-level analog: a per-height map of the model state *as it was before*
+//! Each published block leaves a [`ComputePoolStateDiff`](crate::compute_pool_store::ComputePoolStateDiff)
+//! keyed by `(height, block_hash)`, so a rolled-back block restores the exact
+//! persisted bytes — and two blocks competing at one height keep separate
+//! journals rather than overwriting each other. The manager keeps the
+//! model-level analog: a per-height map of the model state *as it was before*
 //! that height's transition. A single [`revert_block`](ComputePoolManager::revert_block)
 //! therefore rolls back BOTH the persisted rows (via the store journal) and the
 //! in-memory model (via the retained pre-state) to precisely the prior state.
@@ -49,7 +56,9 @@
 use std::collections::BTreeMap;
 
 use sumchain_genesis::ChainParams;
-use sumchain_primitives::BlockHeight;
+use sumchain_primitives::{BlockHeight, Hash};
+use sumchain_storage::candidate::JournalRecord;
+use sumchain_storage::exec_view::ExecutionView;
 use sumchain_storage::Database;
 
 use crate::compute_pool::{ComputePoolModel, PoolResult};
@@ -143,28 +152,36 @@ impl<'a> ComputePoolManager<'a> {
     }
 
     /// Apply one block's worth of compute-pool state transitions at `height`,
-    /// updating BOTH the in-memory model AND the persisted rows atomically.
+    /// updating the in-memory model and staging the row delta into the block's
+    /// candidate. Nothing is committed.
     ///
     /// `apply` runs the caller's sequence of ratified model operations
     /// (`create_job`, `publish_offer`, `reserve_capacity`, `accept_leaf`,
     /// `put_assignment`, `register_entitlement`, `transition_unit`, `cancel_job`,
     /// `halt_job`, …) against a working copy of the model. Only if it succeeds is
-    /// the transition persisted via [`ComputePoolStore::persist_transition`] (one
-    /// atomic batch + one per-height revert journal). The in-memory model is
-    /// committed only after persistence succeeds; the pre-state is retained as
-    /// the per-height undo entry.
+    /// the transition staged via [`ComputePoolStore::stage_transition`], which
+    /// buffers the delta into the candidate and hands back the undo journal for
+    /// the caller to bind. The in-memory model is updated only after staging
+    /// succeeds; the pre-state is retained as the per-height undo entry.
     ///
     /// Failure isolation:
     /// * gate closed at `height` -> rejected, nothing touched;
     /// * `apply` returns a [`crate::compute_pool::PoolError`] -> mapped to
     ///   [`StateError::InvalidOperation`]; the model, store, and undo journal are
     ///   left byte-for-byte unchanged (the op ran on a throwaway working copy);
-    /// * `persist_transition` rejects (duplicate height / stale predecessor) ->
-    ///   the error propagates and the in-memory model is left unchanged.
+    /// * `stage_transition` rejects (a transition already staged for this block,
+    ///   or a stale predecessor) -> the error propagates, the in-memory model is
+    ///   left unchanged, and the candidate is left byte-identical.
     ///
     /// Returns the number of mutated rows (`0` for a genuine no-op transition,
-    /// which writes no journal and records no undo entry).
-    pub fn apply_block<F>(&mut self, height: BlockHeight, apply: F) -> Result<usize>
+    /// which produces no journal and records no undo entry) and the undo journal
+    /// itself, which the caller binds to the candidate.
+    pub fn apply_block<F>(
+        &mut self,
+        view: &mut ExecutionView<'_, '_>,
+        height: BlockHeight,
+        apply: F,
+    ) -> Result<(usize, JournalRecord)>
     where
         F: FnOnce(&mut ComputePoolModel) -> PoolResult<()>,
     {
@@ -183,21 +200,23 @@ impl<'a> ComputePoolManager<'a> {
         apply(&mut working)
             .map_err(|e| StateError::InvalidOperation(format!("compute-pool transition: {e}")))?;
 
-        // Persist before -> working atomically (delta rows + per-height journal).
-        // `before` is verified equal to live state inside the store.
-        let mutated = {
-            let store = ComputePoolStore::new(self.db);
-            store.persist_transition(Some(&before), &working, height)?
-        };
+        // Stage before -> working into the block's candidate. Nothing is
+        // committed here: the rows are buffered and the journal comes back as an
+        // artifact for the caller to bind, so a block that is rejected or loses
+        // fork choice leaves no compute-pool row and no journal behind.
+        // `before` is verified equal to the CANDIDATE's live state inside the
+        // store, which is what makes a second transition in one block compare
+        // against the first one's output.
+        let (mutated, journal) = ComputePoolStore::stage_transition(view, Some(&before), &working)?;
 
-        // Commit in-memory only after persistence succeeded. Retain the pre-state
-        // as the undo entry ONLY when a journal was actually written, keeping the
+        // Commit in-memory only after staging succeeded. Retain the pre-state as
+        // the undo entry ONLY when a journal was actually produced, keeping the
         // in-memory undo journal in exact correspondence with the store journals.
         if mutated > 0 {
             self.undo.insert(height, before);
         }
         self.model = working;
-        Ok(mutated)
+        Ok((mutated, journal))
     }
 
     /// Revert the compute-pool state finalized at `height`, rolling back BOTH the
@@ -211,10 +230,10 @@ impl<'a> ComputePoolManager<'a> {
     /// Reverts must be issued tip-first (descending height), matching a real
     /// reorg: the retained pre-state for `height` is the model *before* that
     /// height, so restoring it discards exactly that height's transition.
-    pub fn revert_block(&mut self, height: BlockHeight) -> Result<()> {
+    pub fn revert_block(&mut self, height: BlockHeight, block_hash: &Hash) -> Result<()> {
         {
             let store = ComputePoolStore::new(self.db);
-            store.revert_block(height)?;
+            store.revert_block(height, block_hash)?;
         }
         if let Some(prev) = self.undo.remove(&height) {
             self.model = prev;
@@ -232,12 +251,85 @@ mod tests {
         UnitSizing, UnitState, WorkItemKey, WorkUnit,
     };
     use sumchain_primitives::Address;
-    use sumchain_storage::Database;
+    use sumchain_storage::overlay::ApplicationOverlay;
+    use sumchain_storage::{cf, Database};
     use tempfile::TempDir;
 
     fn open_db() -> (Database, TempDir) {
         let dir = TempDir::new().unwrap();
         (Database::open_default(dir.path()).unwrap(), dir)
+    }
+
+    /// A stand-in block hash for `height`.
+    fn bh(height: BlockHeight) -> Hash {
+        let mut b = [0u8; 32];
+        b[..8].copy_from_slice(&height.to_be_bytes());
+        Hash::new(b)
+    }
+
+    /// Apply one block through the manager into a throwaway candidate.
+    ///
+    /// Staging only — nothing is committed, which is what the tests that expect
+    /// a REJECTION want: they assert the store is untouched, and now it cannot
+    /// be touched at all.
+    fn apply_only<F>(
+        db: &Database,
+        mgr: &mut ComputePoolManager<'_>,
+        height: BlockHeight,
+        ops: F,
+    ) -> Result<(usize, JournalRecord)>
+    where
+        F: FnOnce(&mut ComputePoolModel) -> PoolResult<()>,
+    {
+        let mut overlay = ApplicationOverlay::new(db, 1 << 30);
+        let mut view = ExecutionView::new(&mut overlay);
+        mgr.apply_block(&mut view, height, ops)
+    }
+
+    /// Apply one block and publish what it staged, standing in for the block
+    /// pipeline: the staged rows and the returned journal, committed together
+    /// under the publisher's `(height, block_hash)` key.
+    ///
+    /// TEST FIXTURE. `ApplicationOverlay::into_batch` is crate-private to
+    /// `sumchain-storage`, so outside that crate only `AcceptedCandidate::
+    /// publish` makes a candidate canonical; these are manager unit tests and
+    /// driving a real block through acceptance would couple them to consensus.
+    /// The delta is re-derived from the model's own materialization, the same
+    /// source `stage_transition` used, so the fixture cannot publish rows the
+    /// candidate did not stage.
+    fn apply_and_publish<F>(
+        db: &Database,
+        mgr: &mut ComputePoolManager<'_>,
+        height: BlockHeight,
+        ops: F,
+    ) -> Result<usize>
+    where
+        F: FnOnce(&mut ComputePoolModel) -> PoolResult<()>,
+    {
+        let before_rows = ComputePoolStore::materialize(mgr.model())?;
+        let (mutated, journal) = apply_only(db, mgr, height, ops)?;
+        let after_rows = ComputePoolStore::materialize(mgr.model())?;
+
+        let mut batch = db.batch();
+        for (k, v) in &after_rows {
+            if before_rows.get(k) != Some(v) {
+                batch.put(cf::COMPUTE_POOL_STATE, k, v)?;
+            }
+        }
+        for k in before_rows.keys() {
+            if !after_rows.contains_key(k) {
+                batch.delete(cf::COMPUTE_POOL_STATE, k)?;
+            }
+        }
+        if let JournalRecord::Recorded(bytes) = &journal {
+            batch.put(
+                cf::COMPUTE_POOL_STATE_DIFFS,
+                &sumchain_storage::schema::journal_key(height, &bh(height)),
+                bytes,
+            )?;
+        }
+        batch.commit()?;
+        Ok(mutated)
     }
 
     /// Params with the compute-pool gate CLOSED — the production default. This is
@@ -337,7 +429,7 @@ mod tests {
             "gate-off path must not write any C1 state rows"
         );
         assert!(
-            !store.has_journal(100).unwrap(),
+            !store.has_journal(100, &bh(100)).unwrap(),
             "gate-off path must not write any C1 revert journal"
         );
     }
@@ -349,8 +441,7 @@ mod tests {
         let (db, _d) = open_db();
         let mut mgr = ComputePoolManager::new_enabled(&db, &params_enabled_from(5), 5).unwrap();
         assert!(!mgr.is_enabled_at(4));
-        let err = mgr
-            .apply_block(4, |m| add_job(m, jid(1), vec![simple_unit(jid(1), uid(2))]))
+        let err = apply_and_publish(&db, &mut mgr, 4, |m| add_job(m, jid(1), vec![simple_unit(jid(1), uid(2))]))
             .unwrap_err();
         assert!(
             matches!(err, StateError::InvalidOperation(_)),
@@ -367,8 +458,7 @@ mod tests {
         let (db, _d) = open_db();
         let mut mgr = ComputePoolManager::new_enabled(&db, &params_enabled_from(5), 5).unwrap();
 
-        let mutated = mgr
-            .apply_block(5, |m| {
+        let mutated = apply_and_publish(&db, &mut mgr, 5, |m| {
                 add_job(m, jid(1), vec![simple_unit(jid(1), uid(2))])?;
                 m.publish_offer(BondedOffer {
                     offer_bond_id: oid(3),
@@ -425,7 +515,7 @@ mod tests {
             100
         );
         assert_eq!(store.active_offer_of(&addr(8)).unwrap(), Some(oid(3)));
-        assert!(store.has_journal(5).unwrap());
+        assert!(store.has_journal(5, &bh(5)).unwrap());
         assert!(mgr.has_pending_undo(5));
     }
 
@@ -437,13 +527,13 @@ mod tests {
         let mut mgr = ComputePoolManager::new_enabled(&db, &params_enabled_from(5), 5).unwrap();
 
         // Height 5: create job A.
-        mgr.apply_block(5, |m| add_job(m, jid(1), vec![simple_unit(jid(1), uid(2))]))
+        apply_and_publish(&db, &mut mgr, 5, |m| add_job(m, jid(1), vec![simple_unit(jid(1), uid(2))]))
             .unwrap();
         let model_after_5 = mgr.model().clone();
         let rows_after_5 = mgr.store().load_state_map().unwrap();
 
         // Height 6: add an offer + a second job on top.
-        mgr.apply_block(6, |m| {
+        apply_and_publish(&db, &mut mgr, 6, |m| {
             m.publish_offer(BondedOffer {
                 offer_bond_id: oid(3),
                 identity: addr(8),
@@ -461,7 +551,7 @@ mod tests {
 
         // Revert height 6: both the in-memory model and the persisted rows return
         // to exactly the post-height-5 state.
-        mgr.revert_block(6).unwrap();
+        mgr.revert_block(6, &bh(6)).unwrap();
         assert_eq!(
             mgr.model(),
             &model_after_5,
@@ -472,13 +562,13 @@ mod tests {
             rows_after_5,
             "persisted rows restored to post-height-5"
         );
-        assert!(!mgr.store().has_journal(6).unwrap(), "journal consumed");
+        assert!(!mgr.store().has_journal(6, &bh(6)).unwrap(), "journal consumed");
         assert!(!mgr.has_pending_undo(6), "undo entry consumed");
         assert!(mgr.store().get_offer(&oid(3)).unwrap().is_none());
 
         // Height 5's state is untouched and still reverts cleanly afterwards.
         assert!(mgr.model().get_job(&jid(1)).is_some());
-        mgr.revert_block(5).unwrap();
+        mgr.revert_block(5, &bh(5)).unwrap();
         assert_eq!(mgr.model(), &ComputePoolModel::new(), "back to empty");
         assert!(mgr.store().load_state_map().unwrap().is_empty());
     }
@@ -489,15 +579,14 @@ mod tests {
     fn failed_op_leaves_model_store_and_journal_unchanged() {
         let (db, _d) = open_db();
         let mut mgr = ComputePoolManager::new_enabled(&db, &params_enabled_from(5), 5).unwrap();
-        mgr.apply_block(5, |m| add_job(m, jid(1), vec![simple_unit(jid(1), uid(2))]))
+        apply_and_publish(&db, &mut mgr, 5, |m| add_job(m, jid(1), vec![simple_unit(jid(1), uid(2))]))
             .unwrap();
         let model_after_5 = mgr.model().clone();
         let rows_after_5 = mgr.store().load_state_map().unwrap();
 
         // Height 6: attempt a duplicate job — the model op fails (DuplicateJob),
         // so nothing is persisted and nothing in memory changes.
-        let err = mgr
-            .apply_block(6, |m| add_job(m, jid(1), vec![simple_unit(jid(1), uid(7))]))
+        let err = apply_and_publish(&db, &mut mgr, 6, |m| add_job(m, jid(1), vec![simple_unit(jid(1), uid(7))]))
             .unwrap_err();
         match err {
             StateError::InvalidOperation(msg) => {
@@ -515,7 +604,7 @@ mod tests {
         );
         assert_eq!(mgr.store().load_state_map().unwrap(), rows_after_5);
         assert!(
-            !mgr.store().has_journal(6).unwrap(),
+            !mgr.store().has_journal(6, &bh(6)).unwrap(),
             "no journal on failed op"
         );
         assert!(!mgr.has_pending_undo(6), "no undo entry on failed op");
@@ -527,13 +616,13 @@ mod tests {
     fn noop_transition_records_no_journal_or_undo() {
         let (db, _d) = open_db();
         let mut mgr = ComputePoolManager::new_enabled(&db, &params_enabled_from(5), 5).unwrap();
-        mgr.apply_block(5, |m| add_job(m, jid(1), vec![simple_unit(jid(1), uid(2))]))
+        apply_and_publish(&db, &mut mgr, 5, |m| add_job(m, jid(1), vec![simple_unit(jid(1), uid(2))]))
             .unwrap();
 
         // Height 6 applies no mutation => zero mutated rows, no journal, no undo.
-        let mutated = mgr.apply_block(6, |_m| Ok(())).unwrap();
+        let mutated = apply_and_publish(&db, &mut mgr, 6, |_m| Ok(())).unwrap();
         assert_eq!(mutated, 0);
-        assert!(!mgr.store().has_journal(6).unwrap());
+        assert!(!mgr.store().has_journal(6, &bh(6)).unwrap());
         assert!(!mgr.has_pending_undo(6));
     }
 }
