@@ -970,8 +970,11 @@ fn migrated_execution_paths_take_no_self_receiver() {
 /// assert through the candidate and publish nothing.
 #[test]
 fn no_test_publishes_a_candidate_by_hand() {
-    let root = state_src().join("tests");
-    for (name, src) in rust_files_in(&root) {
+    // Both places tests live. The `src/` in-file modules were missed at first
+    // and held five of the six hand-rolled publishers this guard exists for:
+    // a check that only looked at `tests/` was reporting a boundary it was not
+    // actually covering.
+    for (name, src) in scanned_test_sources() {
         // This file names the patterns in order to forbid them, so it matches
         // itself. It holds no fixtures — only guards — so skipping it costs no
         // coverage, and naming it here is clearer than splitting the literals
@@ -979,8 +982,18 @@ fn no_test_publishes_a_candidate_by_hand() {
         if name == "execution_boundary.rs" {
             continue;
         }
-        let code = strip_test_modules(&src);
-        for (fn_name, body) in top_level_fns(&code) {
+        // In `tests/` the whole file is test code; in `src/` only the
+        // `#[cfg(test)]` modules are, and `test_modules_only` has already
+        // narrowed to those.
+        let code = if name.starts_with("src/") {
+            src.clone()
+        } else {
+            strip_test_modules(&src)
+        };
+        // Comments are not code. A commented-out definition would otherwise be
+        // scanned, and whatever followed it read as its body.
+        let code = drop_comment_lines(&code);
+        for (fn_name, body) in fns_at_any_depth(&code) {
             assert!(
                 !publishes_by_hand(&body),
                 "{name} `{fn_name}` reads a candidate and then writes the \
@@ -991,6 +1004,26 @@ fn no_test_publishes_a_candidate_by_hand() {
             );
         }
     }
+}
+
+/// Every source this guard scans, already narrowed to test code.
+///
+/// Both places tests live: every `.rs` under `tests/` whole, and the
+/// `#[cfg(test)]` modules of every `.rs` under `src/`. Five of the six
+/// hand-rolled publishers lived in the second, and a `tests/`-only scan
+/// reported a clean boundary while they existed.
+///
+/// Shared with `the_hand_publication_scan_covers_src_test_modules` on purpose:
+/// a scope test that assembled its own file list would keep passing while this
+/// one narrowed.
+fn scanned_test_sources() -> Vec<(String, String)> {
+    let mut files = rust_files_in(&state_src().join("tests"));
+    files.extend(
+        rust_files_in(&state_src().join("src"))
+            .into_iter()
+            .map(|(name, src)| (format!("src/{name}"), test_modules_only(&src))),
+    );
+    files
 }
 
 /// Whether one function body has the shape of a hand-rolled publisher.
@@ -1018,39 +1051,78 @@ fn no_test_publishes_a_candidate_by_hand() {
 ///   `view`, `overlay` or `batch` is treated as candidate-side. A `Database`
 ///   deliberately named `staging_view` would be missed. The classification is
 ///   by intent, not by type, because a source scan has no types.
-/// * **Indirection is not followed.** A function that reads a candidate and
-///   calls a helper which writes is two functions, and neither matches on its
-///   own. The helper would be caught only if it also read a candidate.
-/// * **Only `crates/state/tests` is scanned**, and only top-level functions in
-///   it — a publisher inside a nested module or in another crate's tests is out
-///   of range.
-/// * **A journal-to-database fixture is not a match.** Replaying a returned
-///   journal into a batch never reads an overlay, so it does not trip this.
-///   Those exist, they publish only what a candidate actually produced, and the
-///   ordering rule is not what governs them.
+/// * **Indirection is only partly followed.** A function that BUILDS a
+///   candidate in a helper and writes here is caught when it names
+///   candidate-produced material — a `JournalRecord`, a decoded journal, bound
+///   artifacts — which the replay fixtures all did. A function that passes raw
+///   bytes through some other intermediary, with no such name in scope, is
+///   still two functions and matches neither.
+/// * **Scope is `crates/state`**, both halves: every `.rs` under `tests/`, and
+///   the `#[cfg(test)]` modules of every `.rs` under `src/`. Functions are
+///   found at any indentation, so a fixture inside a `mod tests` is in range.
+///   Another crate's tests are not.
+/// * **Only `fn` items are scanned**, with `pub`, `pub(crate)`, `pub(super)`,
+///   `async`, `const` and `unsafe` modifiers recognised. A publisher written as
+///   a closure, a macro body, or a trait-impl method is out of range.
 ///
-/// What it does cover is the shape that actually appeared and the rename that
-/// would have hidden it, both pinned by
-/// `the_hand_publication_guard_is_receiver_name_independent`.
+/// An earlier version of this list claimed a journal-to-database fixture was
+/// "not a match" and therefore fine. That was wrong twice over: those fixtures
+/// were the very thing that had to go, and the guard now catches them by the
+/// material they name. The claim is removed rather than corrected, because
+/// there is no category of hand publication this is willing to permit.
+///
+/// Every shape described here is pinned by
+/// `the_hand_publication_guard_is_receiver_name_independent`, including the
+/// journal-replay fixture that was removed and the seed-then-publish ordering
+/// that one `find` would have let through.
 fn publishes_by_hand(body: &str) -> bool {
     let flat: String = body.chars().filter(|c| !c.is_whitespace()).collect();
 
-    let first_read = [
+    // The trigger is a CANDIDATE EXISTING, not a particular read of one. An
+    // earlier version looked for `overlay.get(`/`view.iter(` and so on, and
+    // every fixture that mattered slipped past it: they stage INTO a view and
+    // take the journal `stage_transition` hands back, without reading the
+    // overlay at all. You cannot obtain candidate-produced material without a
+    // candidate, so the candidate's construction is the signal that cannot be
+    // avoided.
+    let first_candidate = [
+        // A candidate constructed here.
+        "ApplicationOverlay::new(",
+        "ExecutionView::new(",
+        "candidate.view(",
+        ".view()",
         "preimages_for(",
         "overlay.get(",
         "overlay.iter(",
         "view.get(",
         "view.iter(",
+        // Or candidate-produced MATERIAL obtained here, which a function can
+        // hold without having built the candidate itself. `apply_and_publish`
+        // fixtures did exactly that: a helper opened the overlay, and they
+        // replayed the `JournalRecord` it returned into a raw batch. Following
+        // the call would need a call graph; naming the material does not.
+        "JournalRecord",
+        "StateDiff::decode(",
+        ".journals(",
+        "into_parts(",
     ]
     .iter()
     .filter_map(|p| flat.find(p))
     .min();
-    let Some(first_read) = first_read else {
+    let Some(first_read) = first_candidate else {
         return false;
     };
 
-    // Any `.batch(`, whatever the handle is called.
-    if let Some(at) = flat.find(".batch(") {
+    // EVERY `.batch(`, whatever the handle is called — not just the first.
+    //
+    // A fixture that seeds a parent with one batch and then publishes with
+    // another has its first `.batch(` before the candidate and its second
+    // after; matching only the first reports the seeding and misses the
+    // publication, which is the exact inversion of what this is for.
+    let mut from = 0usize;
+    while let Some(rel) = flat[from..].find(".batch(") {
+        let at = from + rel;
+        from = at + ".batch(".len();
         if at > first_read {
             return true;
         }
@@ -1137,6 +1209,278 @@ fn the_hand_publication_guard_is_receiver_name_independent() {
         batch.commit().unwrap();
     }";
     assert!(!publishes_by_hand(NO_CANDIDATE_READ));
+
+    // The journal-replay fixture that was removed, in the shape it actually
+    // had: a helper builds the candidate, so this function names no overlay —
+    // only the `JournalRecord` it got back, which it replays into a raw batch.
+    // Six of these existed; a check that looked for overlay reads saw none of
+    // them.
+    const JOURNAL_REPLAY: &str = "{
+        let (mutated, journal) = apply_only(db, mgr, height, ops)?;
+        if let JournalRecord::Recorded(bytes) = &journal {
+            let diff = BeaconStateDiff::decode(bytes)?;
+            let mut batch = db.batch();
+            for r in &diff.records {
+                batch.put(cf::BEACON_STATE, &r.key, r.new.as_ref().unwrap())?;
+            }
+            batch.commit()?;
+        }
+        Ok(mutated)
+    }";
+    assert!(
+        publishes_by_hand(JOURNAL_REPLAY),
+        "replaying a returned journal into a raw batch is publication"
+    );
+
+    // The same shape with no decode call, so `JournalRecord` alone is what has
+    // to catch it. Without that name in the trigger list this passes unnoticed.
+    const JOURNAL_ONLY: &str = "{
+        let (mutated, journal) = apply_only(db, mgr, height, ops)?;
+        if let JournalRecord::Recorded(bytes) = &journal {
+            let mut batch = db.batch();
+            batch.put(cf::BEACON_STATE_DIFFS, &key, bytes)?;
+            batch.commit()?;
+        }
+        Ok(mutated)
+    }";
+    assert!(
+        publishes_by_hand(JOURNAL_ONLY),
+        "holding a JournalRecord and writing the database is publication even \
+         when nothing is decoded"
+    );
+
+    // Seed with one batch BEFORE the candidate, publish with another AFTER it.
+    // Matching only the first `.batch(` reports the seeding and misses the
+    // publication — the exact inversion of what this is for.
+    //
+    // Every post-candidate write here goes through a binding named `batch`,
+    // which the receiver-name rule treats as candidate-side — so the `.batch(`
+    // scan is the ONLY thing that can catch it, and the case isolates it.
+    const SEED_THEN_PUBLISH: &str = "{
+        let mut batch = db.batch();
+        batch.put(cf, &k, &parent).unwrap();
+        batch.commit().unwrap();
+
+        let mut overlay = ApplicationOverlay::new(&db, LIMIT);
+        let rows = { let view = ExecutionView::new(&mut overlay); view.iter(cf).unwrap() };
+
+        let mut batch = db.batch();
+        for r in rows { batch.put(cf, &r.0, &r.1).unwrap(); }
+        batch.commit().unwrap();
+    }";
+    assert!(
+        publishes_by_hand(SEED_THEN_PUBLISH),
+        "a publication batch after the candidate must be caught even when a \
+         seeding batch preceded it"
+    );
+}
+
+/// The scan must actually reach the `#[cfg(test)]` modules under `src/`.
+///
+/// Five of the six hand-rolled publishers lived there, and a `tests/`-only scan
+/// reported a clean boundary while they existed. They are gone now, so nothing
+/// in the tree fails the guard — which means the SCOPE itself has to be
+/// asserted directly, or narrowing it back would go unnoticed.
+#[test]
+fn the_hand_publication_scan_covers_src_test_modules() {
+    // The guard's OWN file list, not a second one assembled here.
+    let scanned = scanned_test_sources();
+    assert!(
+        scanned.iter().any(|(n, _)| n.starts_with("tests/") || !n.starts_with("src/")),
+        "no sources from tests/ were scanned"
+    );
+
+    // A file known to carry an in-file test module with fixtures in it.
+    let (_, modules) = scanned
+        .iter()
+        .find(|(n, _)| n == "src/beacon_store.rs")
+        .expect("src/beacon_store.rs was not scanned at all");
+    assert!(
+        !modules.is_empty(),
+        "the #[cfg(test)] body of beacon_store.rs reached the scan as empty"
+    );
+    let fns: Vec<String> = fns_at_any_depth(&drop_comment_lines(modules))
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    assert!(
+        fns.iter().any(|n| n == "seed_transition"),
+        "the scan did not reach the fixtures inside the module.\n  found: {fns:?}"
+    );
+
+    // And production code is NOT scanned: the write ratchet covers that half,
+    // and this one must not double-report it.
+    let (_, whole) = rust_files_in(&state_src().join("src"))
+        .into_iter()
+        .find(|(n, _)| n == "beacon_store.rs")
+        .expect("beacon_store.rs");
+    let production = strip_test_modules(&whole);
+    assert!(
+        !production.contains("fn seed_transition"),
+        "strip_test_modules left test code in the production half"
+    );
+}
+
+/// The scanner must find definitions whatever modifiers they carry. Matching
+/// only `fn` and `pub fn` would mean one word in front of a publisher hid it.
+#[test]
+fn the_scanner_finds_functions_under_common_modifiers() {
+    const SRC: &str = "\
+fn plain() { a }
+pub fn public() { b }
+pub(crate) fn crate_visible() { c }
+pub(super) fn super_visible() { d }
+async fn asynchronous() { e }
+pub async fn public_async() { f }
+pub(crate) async fn crate_async() { g }
+const fn constant() { h }
+unsafe fn unsafely() { i }
+    fn indented() { j }
+";
+    let found: Vec<String> = fns_at_any_depth(SRC).into_iter().map(|(n, _)| n).collect();
+    for expected in [
+        "plain",
+        "public",
+        "crate_visible",
+        "super_visible",
+        "asynchronous",
+        "public_async",
+        "crate_async",
+        "constant",
+        "unsafely",
+        "indented",
+    ] {
+        assert!(
+            found.iter().any(|n| n == expected),
+            "`{expected}` was not found; the scan missed a definition and \
+             anything inside it.\n  found: {found:?}"
+        );
+    }
+
+    // And a publisher written with each modifier is still caught end to end.
+    for decl in [
+        "pub(crate) fn",
+        "pub(super) fn",
+        "async fn",
+        "pub async fn",
+        "const fn",
+        "unsafe fn",
+    ] {
+        let src = format!(
+            "{decl} sneaky() {{
+                let view = ExecutionView::new(&mut overlay);
+                let rows = view.iter(cf).unwrap();
+                let mut b = db.batch();
+                for r in rows {{ b.put(cf, &r.0, &r.1).unwrap(); }}
+                b.commit().unwrap();
+            }}"
+        );
+        let fns = fns_at_any_depth(&src);
+        assert_eq!(fns.len(), 1, "`{decl}` was not recognised as a definition");
+        assert!(
+            publishes_by_hand(&fns[0].1),
+            "`{decl}` must not hide a hand-rolled publisher"
+        );
+    }
+
+    // Things that are NOT definitions must not be read as one.
+    const NOT_FNS: &str = "\
+let transfer_fn = 1;
+// fn commented_out() { x }
+struct S { fn_like: u8 }
+";
+    let names: Vec<String> = fns_at_any_depth(&drop_comment_lines(NOT_FNS))
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    assert!(names.is_empty(), "false definitions found: {names:?}");
+}
+
+/// The inverse of [`strip_test_modules`]: only the `#[cfg(test)] mod … { … }`
+/// bodies, concatenated.
+///
+/// Production code in `src/` is covered by the write ratchet; this guard is
+/// about test fixtures, so in `src/` it looks at exactly the part the ratchet
+/// deliberately ignores.
+fn test_modules_only(src: &str) -> String {
+    let mut out = String::new();
+    let mut i = 0usize;
+    const ATTR: &str = "#[cfg(test)]";
+    while let Some(at) = src[i..].find(ATTR).map(|k| i + k) {
+        let after = at + ATTR.len();
+        match test_mod_body_start(src, after).and_then(|b| matching_brace(src, b).map(|e| (b, e))) {
+            Some((b, e)) => {
+                out.push_str(&src[b..e]);
+                out.push('\n');
+                i = e;
+            }
+            None => i = after,
+        }
+    }
+    out
+}
+
+/// Drop whole-line comments, the same rule `count_direct_mutations` uses.
+///
+/// Deliberately only lines that START with `//`: a `//` inside a string literal
+/// is content, and removing it would corrupt the source being scanned.
+fn drop_comment_lines(src: &str) -> String {
+    src.lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// `fn NAME(...) { ... }` items at ANY indentation, and their bodies.
+///
+/// Test fixtures inside a `#[cfg(test)] mod` are indented, so a top-level-only
+/// scan would walk straight past every one of them.
+///
+/// Modifiers need no special handling, and it is worth saying WHY rather than
+/// leaving it to luck: this scans every position for the `fn` token itself, so
+/// whatever precedes it — `pub`, `pub(crate)`, `pub(super)`, `async`, `const`,
+/// `unsafe`, in any order — is simply text before the match. An earlier draft
+/// added an explicit modifier walk; mutating it away changed nothing, which is
+/// how the redundancy was found. `the_scanner_finds_functions_under_common_modifiers`
+/// pins the coverage so a future rewrite that IS order-sensitive cannot quietly
+/// lose it.
+fn fns_at_any_depth(src: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let b = src.as_bytes();
+    let mut i = 0usize;
+    while i < b.len() {
+        let rest = &src[i..];
+        // A definition begins at a line start or after indentation only.
+        let at_line_start = i == 0 || b[i - 1] == b'\n' || b[i - 1] == b' ' || b[i - 1] == b'\t';
+        let word_start = i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_');
+        let starts_fn = rest.starts_with("fn ") || rest.starts_with("fn\t");
+        if !(starts_fn && at_line_start && word_start) {
+            i += rest.chars().next().map(char::len_utf8).unwrap_or(1);
+            continue;
+        }
+        let name_start = skip_ws(src, i + 2);
+        let name_end = src[name_start..]
+            .char_indices()
+            .find(|(_, c)| !(c.is_alphanumeric() || *c == '_'))
+            .map(|(k, _)| name_start + k)
+            .unwrap_or(src.len());
+        let name = src[name_start..name_end].to_string();
+        if name.is_empty() {
+            i += 1;
+            continue;
+        }
+        match src[name_end..].find('{').map(|k| name_end + k) {
+            Some(open) => match matching_brace(src, open) {
+                Some(end) => {
+                    out.push((name, src[open..end].to_string()));
+                    i = end;
+                }
+                None => break,
+            },
+            None => break,
+        }
+    }
+    out
 }
 
 /// Top-level `fn NAME(...) { ... }` items and their bodies.

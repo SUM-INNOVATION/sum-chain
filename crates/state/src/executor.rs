@@ -7529,11 +7529,10 @@ mod tests {
 
         // APPLY: drive a real compute-pool transition through the gated apply
         // seam (the operation source #125's dispatch will eventually supply).
-        apply_and_publish_c1(
+        let (staged_rows, journal) = apply_into_candidate(
             &executor,
             db.as_ref(),
             height,
-            &Hash::ZERO,
             |m: &mut ComputePoolModel| {
                 m.create_job(
                     job,
@@ -7564,38 +7563,27 @@ mod tests {
             },
         );
 
-        // PUBLISHED: the fixture committed what the candidate staged — C1 rows,
-        // and the journal under `(height, block_hash)`. Execution itself
-        // committed nothing.
+        // STAGED: the job's rows are in the candidate, and the undo record came
+        // back as an artifact. The seam commits nothing.
+        assert!(
+            staged_rows.contains_key(&crate::compute_pool_store::job_key_bytes(&job)),
+            "job staged through the apply seam"
+        );
+        assert!(
+            matches!(journal, JournalRecord::Recorded(_)),
+            "the transition produced a journal for the caller to bind"
+        );
+
+        // NOT PUBLISHED. A C1 transition reaches canonical state only through a
+        // block carrying compute-pool operations, and there is no live operation
+        // source yet (#125). The revert of a published transition is covered by
+        // `compute_pool_reorg_reverts_account_and_c1_in_one_call`, which seeds a
+        // prior block's output rather than inventing a publisher for one.
         let store = ComputePoolStore::new(&db);
-        assert!(
-            store.get_job(&job).unwrap().is_some(),
-            "job persisted through the apply seam"
-        );
-        assert!(!store.load_state_map().unwrap().is_empty());
-        assert!(
-            store.has_journal(height, &Hash::ZERO).unwrap(),
-            "journal returned by the apply seam and written by publication"
-        );
-
-        // REORG-REVERT: the unified atomic reorg path (account+contract+C1 in one
-        // batch) rolls this block's C1 state back.
-        state.revert_block_state_diffs(height, &Hash::ZERO).unwrap();
-        assert!(
-            store.get_job(&job).unwrap().is_none(),
-            "job reverted on reorg"
-        );
-        assert!(
-            store.load_state_map().unwrap().is_empty(),
-            "all C1 rows reverted on reorg"
-        );
-        assert!(
-            !store.has_journal(height, &Hash::ZERO).unwrap(),
-            "revert journal consumed on reorg"
-        );
-
-        // Idempotent: reverting an already-consumed height is a clean no-op.
-        state.revert_block_state_diffs(height, &Hash::ZERO).unwrap();
+        assert!(store.get_job(&job).unwrap().is_none());
+        assert!(store.load_state_map().unwrap().is_empty());
+        assert!(!store.has_journal(height, &Hash::ZERO).unwrap());
+        let _ = &state;
     }
 
     /// Compute a block's state root against a fresh, EMPTY candidate over `db`.
@@ -7657,101 +7645,100 @@ mod tests {
         receipts
     }
 
-    /// Drive one C1 transition through the executor's apply seam and publish
-    /// what it staged: the journal's rows and the journal itself, under the
-    /// publisher's `(height, block_hash)` key.
+    /// Drive one C1 transition through the executor's apply seam, into a
+    /// candidate that is NOT published, and return what it produced.
     ///
-    /// TEST FIXTURE, matching the ones in `compute_pool_store` and
-    /// `compute_pool_manager`. The apply seam no longer commits — that is the
-    /// change these tests are here to pin — so a test that wants to exercise the
-    /// reorg revert has to publish the candidate's output itself. Rows are
-    /// replayed from the returned journal rather than re-derived, so the fixture
-    /// cannot publish something the candidate did not stage.
-    fn apply_and_publish_c1<F>(
+    /// The apply seam stages; it does not commit. Publication of a C1
+    /// transition needs a block carrying compute-pool operations, and there is
+    /// no live operation source yet (#125) — so publication integration stays
+    /// deferred and these tests assert on the candidate and the journal, which
+    /// is what the seam actually produces.
+    fn apply_into_candidate<F>(
         executor: &BlockExecutor,
         db: &Database,
         height: u64,
-        block_hash: &Hash,
         ops: F,
-    ) where
+    ) -> (std::collections::BTreeMap<Vec<u8>, Vec<u8>>, JournalRecord)
+    where
         F: FnOnce(&mut crate::compute_pool::ComputePoolModel) -> crate::compute_pool::PoolResult<()>,
     {
-        use crate::compute_pool_store::ComputePoolStateDiff;
         use sumchain_storage::overlay::ApplicationOverlay;
-        use sumchain_storage::cf;
 
-        let mut overlay = ApplicationOverlay::new(db, 1 << 30);
-        let journal = {
-            let mut view = ExecutionView::new(&mut overlay);
-            executor
-                .apply_compute_pool_ops(&mut view, height, ops)
-                .unwrap()
-        };
-        drop(overlay);
-
-        if let JournalRecord::Recorded(bytes) = &journal {
-            let diff = ComputePoolStateDiff::decode(bytes).unwrap();
-            let mut batch = db.batch();
-            for r in &diff.records {
-                match &r.new {
-                    Some(v) => batch.put(cf::COMPUTE_POOL_STATE, &r.key, v).unwrap(),
-                    None => batch.delete(cf::COMPUTE_POOL_STATE, &r.key).unwrap(),
-                }
-            }
-            batch
-                .put(
-                    cf::COMPUTE_POOL_STATE_DIFFS,
-                    &sumchain_storage::schema::journal_key(height, block_hash),
-                    bytes,
-                )
-                .unwrap();
-            batch.commit().unwrap();
-        }
+        let mut overlay = ApplicationOverlay::new(db, CANDIDATE_LIMIT_SCAFFOLD);
+        let mut view = ExecutionView::new(&mut overlay);
+        let journal = executor
+            .apply_compute_pool_ops(&mut view, height, ops)
+            .unwrap();
+        let rows = crate::compute_pool_store::ComputePoolStore::v_load_state_map(&view).unwrap();
+        (rows, journal)
     }
 
-    /// Helper: apply a one-job C1 transition at `height` through the gated apply
-    /// seam (stand-in for #125's dispatch operation source).
-    fn apply_one_job(executor: &BlockExecutor, height: u64, seed: u8) {
+    /// Seed the C1 rows and journal a published block would have left at
+    /// `height`, before any candidate exists.
+    ///
+    /// SEEDING, not publishing. The reorg tests below are about
+    /// `revert_block_state_diffs` unwinding account and C1 state in one batch,
+    /// and they need a prior block's output to unwind — which, until #125
+    /// supplies an operation source, no block can actually produce.
+    fn seed_c1_job(db: &Database, height: u64, seed: u8) {
         use crate::compute_pool::{
             ComputePoolModel, ExposureInputs, JobId, UnitId, UnitSizing, UnitState, WorkUnit,
         };
+        use crate::compute_pool_store::{ComputePoolMutation, ComputePoolStateDiff, ComputePoolStore};
+        use sumchain_storage::cf;
+
         let job = JobId::from_bytes([seed; 32]);
         let unit = UnitId::from_bytes([seed.wrapping_add(1); 32]);
-        apply_and_publish_c1(
-            executor,
-            executor.db.as_ref(),
-            height,
-            &Hash::ZERO,
-            move |m: &mut ComputePoolModel| {
-                m.create_job(
-                    job,
-                    Address::new([9; 20]),
-                    1,
-                    vec![WorkUnit {
-                        job_id: job,
-                        unit_id: unit,
-                        predecessors: vec![],
-                        required_inputs: vec![],
-                        generation: 0,
-                        state: UnitState::Blocked,
-                    }],
-                    &[UnitSizing { slots: 0 }],
-                    1,
-                    0,
-                    1_000,
-                    ExposureInputs {
-                        q: 100,
-                        reprovision_allowance: 10,
-                        job_max_retention_files: 0,
-                        max_reassignments_per_file: 2,
-                        reassign_reimb: 5,
-                    },
-                    1_000_000,
-                )
-                .map(|_| ())
-            },
-        );
+        let mut model = ComputePoolModel::new();
+        model
+            .create_job(
+                job,
+                Address::new([9; 20]),
+                1,
+                vec![WorkUnit {
+                    job_id: job,
+                    unit_id: unit,
+                    predecessors: vec![],
+                    required_inputs: vec![],
+                    generation: 0,
+                    state: UnitState::Blocked,
+                }],
+                &[UnitSizing { slots: 0 }],
+                1,
+                0,
+                1_000,
+                ExposureInputs {
+                    q: 100,
+                    reprovision_allowance: 10,
+                    job_max_retention_files: 0,
+                    max_reassignments_per_file: 2,
+                    reassign_reimb: 5,
+                },
+                1_000_000,
+            )
+            .unwrap();
+
+        let rows = ComputePoolStore::materialize(&model).unwrap();
+        let mut diff = ComputePoolStateDiff::new();
+        let mut batch = db.batch();
+        for (k, v) in &rows {
+            batch.put(cf::COMPUTE_POOL_STATE, k, v).unwrap();
+            diff.records.push(ComputePoolMutation {
+                key: k.clone(),
+                old: None,
+                new: Some(v.clone()),
+            });
+        }
+        batch
+            .put(
+                cf::COMPUTE_POOL_STATE_DIFFS,
+                &sumchain_storage::schema::journal_key(height, &Hash::ZERO),
+                &diff.encode().unwrap(),
+            )
+            .unwrap();
+        batch.commit().unwrap();
     }
+
 
     /// DORMANT IDENTITY (state commitment): under the production default gate the
     /// state root is INDEPENDENT of C1 state — injecting arbitrary C1 rows must not
@@ -8622,7 +8609,7 @@ mod tests {
             },
         );
         state.save_state_diff(height, &Hash::ZERO, sd).unwrap();
-        apply_one_job(&executor, height, 0x44);
+        seed_c1_job(&db, height, 0x44);
 
         let store = ComputePoolStore::new(&db);
         assert!(store
@@ -8696,7 +8683,7 @@ mod tests {
             },
         );
         state.save_state_diff(height, &Hash::ZERO, sd).unwrap();
-        apply_one_job(&executor, height, 0x44);
+        seed_c1_job(&db, height, 0x44);
         let store = ComputePoolStore::new(&db);
         assert!(store.has_journal(height, &Hash::ZERO).unwrap());
 

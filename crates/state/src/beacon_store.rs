@@ -529,6 +529,15 @@ impl BeaconStateDiff {
         beacon_decode(bytes)
     }
 
+    /// Encode a journal, the inverse of [`decode`](Self::decode).
+    ///
+    /// Symmetric with it for the same reason: the bytes leave the module, so a
+    /// reader that must reconstruct or a test that must state one declaratively
+    /// needs the codec rather than a second copy of it.
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        beacon_encode(self)
+    }
+
     /// Whether the journal is empty.
     pub fn is_empty(&self) -> bool {
         self.records.is_empty()
@@ -1193,47 +1202,59 @@ mod tests {
         Hash::new(b)
     }
 
-    /// Publish one transition, standing in for the block pipeline: stage it into
-    /// a candidate, then commit the journal's rows and the journal itself under
-    /// the publisher's `(height, block_hash)` key.
+    /// Seed a database that already holds `after`, with the journal a block
+    /// producing `before -> after` would have published.
     ///
-    /// TEST FIXTURE, not an API. `ApplicationOverlay::into_batch` is
-    /// crate-private to `sumchain-storage` — deliberately, so that outside that
-    /// crate only `AcceptedCandidate::publish` turns a candidate into canonical
-    /// state. These are storage-codec unit tests that need committed rows to
-    /// exercise revert and cross-block sequences; driving a real block through
-    /// acceptance to set them up would couple them to consensus for nothing.
-    /// Rows are replayed from the journal the staging produced, so the fixture
-    /// cannot publish rows the candidate did not stage.
-    fn publish_transition(
+    /// SEEDING, not publishing: no candidate is created here, so nothing is
+    /// copied out of one. It writes the rows a prior block left behind and the
+    /// undo record for that block, stated independently — which is what a revert
+    /// test wants anyway, since the journal is then the test's own claim about
+    /// what should be undone rather than an echo of the code under test.
+    ///
+    /// A real publication would run `execute_block` -> `accept_produced` ->
+    /// `publish`; the beacon executor tests do exactly that. These are
+    /// storage-codec tests, and a block is not what they are about.
+    fn seed_transition(
         db: &Database,
         before: &BTreeMap<Vec<u8>, Vec<u8>>,
         after: &BTreeMap<Vec<u8>, Vec<u8>>,
         height: BlockHeight,
         block_hash: &Hash,
     ) -> Result<usize> {
-        let mut overlay = ApplicationOverlay::new(db, 1 << 30);
-        let (mutated, journal) = {
-            let mut view = ExecutionView::new(&mut overlay);
-            BeaconStore::stage_transition(&mut view, before, after)?
-        };
-        drop(overlay);
-        if let JournalRecord::Recorded(bytes) = &journal {
-            let diff = BeaconStateDiff::decode(bytes)?;
-            let mut batch = db.batch();
-            for r in &diff.records {
-                match &r.new {
-                    Some(v) => batch.put(cf::BEACON_STATE, &r.key, v)?,
-                    None => batch.delete(cf::BEACON_STATE, &r.key)?,
-                }
-            }
-            batch.put(
-                cf::BEACON_STATE_DIFFS,
-                &sumchain_storage::schema::journal_key(height, block_hash),
-                bytes,
-            )?;
-            batch.commit()?;
+        let mut keys: BTreeMap<Vec<u8>, ()> = BTreeMap::new();
+        for k in before.keys().chain(after.keys()) {
+            keys.insert(k.clone(), ());
         }
+        let mut diff = BeaconStateDiff::default();
+        let mut batch = db.batch();
+        for key in keys.keys() {
+            let new = after.get(key).cloned();
+            let old = before.get(key).cloned();
+            if old == new {
+                continue;
+            }
+            match &new {
+                Some(v) => batch.put(cf::BEACON_STATE, key, v)?,
+                None => batch.delete(cf::BEACON_STATE, key)?,
+            }
+            diff.records.push(BeaconMutation {
+                key: key.clone(),
+                old,
+                new,
+            });
+        }
+        if diff.records.is_empty() {
+            batch.commit()?;
+            return Ok(0);
+        }
+        diff.records.sort_by(|a, b| a.key.cmp(&b.key));
+        batch.put(
+            cf::BEACON_STATE_DIFFS,
+            &sumchain_storage::schema::journal_key(height, block_hash),
+            &diff.encode()?,
+        )?;
+        let mutated = diff.records.len();
+        batch.commit()?;
         Ok(mutated)
     }
 
@@ -1303,7 +1324,7 @@ mod tests {
         after.insert(k2.clone(), v2.clone());
         let before = BTreeMap::new();
 
-        let n = publish_transition(&db, &before, &after, 1, &bh(1, 0)).unwrap();
+        let n = seed_transition(&db, &before, &after, 1, &bh(1, 0)).unwrap();
         assert_eq!(n, 2);
         assert_eq!(store.load_state_map().unwrap(), after);
         let committed = store.state_digest().unwrap();
@@ -1318,26 +1339,54 @@ mod tests {
         assert!(!store.has_journal(1, &bh(1, 0)).unwrap());
 
         // Reapply reproduces the identical committed state.
-        publish_transition(&db, &before, &after, 1, &bh(1, 0)).unwrap();
+        seed_transition(&db, &before, &after, 1, &bh(1, 0)).unwrap();
         assert_eq!(store.state_digest().unwrap(), committed);
     }
 
     #[test]
     fn duplicate_height_and_stale_predecessor_rejected() {
+        // Both guards belong to `stage_transition`, so both are exercised
+        // against a real candidate. Nothing is published: a rejected transition
+        // has nothing to publish, which is part of what is asserted.
+        //
+        // The duplicate-HEIGHT guard is gone and did not survive review: two
+        // blocks at one height are legitimate competing branches, and asking the
+        // committed store refused the second one while failing to protect the
+        // first. What replaced it is one transition per BLOCK, which is what
+        // this now checks.
         let (db, _d) = open_db();
         let store = BeaconStore::new(&db);
         let (k1, v1) = row(domain::KEY, b"v0", b"ek0");
         let mut after = BTreeMap::new();
         after.insert(k1, v1);
         let before = BTreeMap::new();
-        publish_transition(&db, &before, &after, 1, &bh(1, 0)).unwrap();
+        seed_transition(&db, &before, &after, 1, &bh(1, 0)).unwrap();
+        let live = store.load_state_map().unwrap();
 
-        // Duplicate height rejected.
-        assert!(publish_transition(&db, &before, &after, 1, &bh(1, 0)).is_err());
-        // Stale predecessor (claims empty but live is non-empty) rejected at height 2.
-        let after2 = after.clone();
-        assert!(publish_transition(&db, &BTreeMap::new(), &after2, 2, &bh(2, 0))
-            .is_err());
+        let mut overlay = ApplicationOverlay::new(&db, 1 << 30);
+        let mut view = ExecutionView::new(&mut overlay);
+
+        // A first transition in this block, against the correct predecessor.
+        let (k2, v2) = row(domain::KEY, b"v1", b"ek1");
+        let mut after2 = after.clone();
+        after2.insert(k2, v2);
+        BeaconStore::stage_transition(&mut view, &live, &after2).unwrap();
+        let staged = BeaconStore::v_load_state_map(&view).unwrap();
+
+        // A SECOND transition in the same block is refused, candidate intact.
+        assert!(BeaconStore::stage_transition(&mut view, &after2, &after).is_err());
+        assert_eq!(BeaconStore::v_load_state_map(&view).unwrap(), staged);
+        drop(overlay);
+
+        // Stale predecessor: claims empty while the candidate's state is not.
+        let mut overlay = ApplicationOverlay::new(&db, 1 << 30);
+        let mut view = ExecutionView::new(&mut overlay);
+        assert!(BeaconStore::stage_transition(&mut view, &BTreeMap::new(), &after).is_err());
+        assert_eq!(BeaconStore::v_load_state_map(&view).unwrap(), live);
+        drop(overlay);
+
+        // Canonical storage never moved.
+        assert_eq!(store.load_state_map().unwrap(), live);
     }
 
     #[test]
@@ -1346,8 +1395,13 @@ mod tests {
         let store = BeaconStore::new(&db);
         let mut after = BTreeMap::new();
         after.insert(vec![0xFF, 0x00], b"x".to_vec()); // 0xFF is not a beacon domain
-        assert!(publish_transition(&db, &BTreeMap::new(), &after, 1, &bh(1, 0))
-            .is_err());
+
+        let mut overlay = ApplicationOverlay::new(&db, 1 << 30);
+        let mut view = ExecutionView::new(&mut overlay);
+        assert!(BeaconStore::stage_transition(&mut view, &BTreeMap::new(), &after).is_err());
+        assert!(BeaconStore::v_load_state_map(&view).unwrap().is_empty());
+        drop(overlay);
+        assert!(store.load_state_map().unwrap().is_empty());
     }
 
     // ── Item 2: frozen typed-record codec + key layouts + strict decode ──────

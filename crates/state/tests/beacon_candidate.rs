@@ -383,13 +383,16 @@ fn a_height_only_journal_refuses_rather_than_guessing_which_block_it_undoes() {
         vs[0].public_key().as_bytes(),
         vec![reg_tx(&vs[0], 7, 0, fee)],
     );
-    let (_root, journal) = execute_only(&executor, &state, &blk, &pubs);
-    let JournalRecord::Recorded(bytes) = &journal else {
-        panic!("expected a journal");
-    };
-    // A well-formed journal, written under the height alone.
-    db.put(cf::BEACON_STATE_DIFFS, &BOUNDARY.to_be_bytes(), bytes)
-        .unwrap();
+    // A row under the height alone, seeded before any candidate exists. The
+    // reader refuses on the KEY, before it decodes anything, so the bytes need
+    // only be present — and seeding them keeps this test free of a candidate it
+    // would then have to publish.
+    db.put(
+        cf::BEACON_STATE_DIFFS,
+        &BOUNDARY.to_be_bytes(),
+        b"a-journal-under-the-height-alone",
+    )
+    .unwrap();
 
     let store = BeaconStore::new(&db);
     for (label, err) in [

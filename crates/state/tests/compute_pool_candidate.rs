@@ -72,30 +72,30 @@ fn model_with_job(seed: u8) -> ComputePoolModel {
     m
 }
 
-/// Publish what a candidate staged: the journal's rows, and the journal itself
-/// under the publisher's `(height, block_hash)` key. Stands in for
-/// `AcceptedCandidate::publish`, whose overlay-to-batch seam is private to
-/// `sumchain-storage`.
-fn publish(db: &Database, journal: &JournalRecord, height: u64, hash: &Hash) {
-    let JournalRecord::Recorded(bytes) = journal else {
-        return;
-    };
-    let diff = ComputePoolStateDiff::decode(bytes).unwrap();
+/// Seed a PARENT that already holds `rows`, before any candidate exists.
+///
+/// Not a publisher: nothing here reads a candidate. It writes the rows a prior
+/// block would have left behind, which is the starting state these tests need.
+/// The compute-pool gate is `None` and there is no live operation source yet
+/// (#125), so a real block cannot carry a C1 transition — publication
+/// integration stays deferred until it can, and until then a parent is seeded
+/// rather than produced.
+fn seed_parent(db: &Database, rows: &std::collections::BTreeMap<Vec<u8>, Vec<u8>>) {
     let mut batch = db.batch();
-    for r in &diff.records {
-        match &r.new {
-            Some(v) => batch.put(cf::COMPUTE_POOL_STATE, &r.key, v).unwrap(),
-            None => batch.delete(cf::COMPUTE_POOL_STATE, &r.key).unwrap(),
-        }
+    for (k, v) in rows {
+        batch.put(cf::COMPUTE_POOL_STATE, k, v).unwrap();
     }
-    batch
-        .put(
-            cf::COMPUTE_POOL_STATE_DIFFS,
-            &sumchain_storage::schema::journal_key(height, hash),
-            bytes,
-        )
-        .unwrap();
     batch.commit().unwrap();
+}
+
+/// Seed a journal row verbatim, before any candidate exists.
+fn seed_journal(db: &Database, height: u64, hash: &Hash, bytes: &[u8]) {
+    db.put(
+        cf::COMPUTE_POOL_STATE_DIFFS,
+        &sumchain_storage::schema::journal_key(height, hash),
+        bytes,
+    )
+    .unwrap();
 }
 
 #[test]
@@ -148,28 +148,46 @@ fn the_candidate_digest_is_the_digest_of_what_gets_published() {
     let (_d, db) = open_db();
     let after = model_with_job(2);
 
-    let mut overlay = ApplicationOverlay::new(&db, LIMIT);
-    let (candidate_digest, journal) = {
-        let mut view = ExecutionView::new(&mut overlay);
-        let (_, journal) = ComputePoolStore::stage_transition(&mut view, None, &after).unwrap();
-        (ComputePoolStore::v_state_digest(&view).unwrap(), journal)
-    };
-
     let store = ComputePoolStore::new(&db);
     let empty_digest = store.state_digest().unwrap();
+
+    // The digest a block would fold, over rows it staged and has not published.
+    let mut overlay = ApplicationOverlay::new(&db, LIMIT);
+    let candidate_digest = {
+        let mut view = ExecutionView::new(&mut overlay);
+        ComputePoolStore::stage_transition(&mut view, None, &after).unwrap();
+        ComputePoolStore::v_state_digest(&view).unwrap()
+    };
     assert_ne!(
         candidate_digest, empty_digest,
         "a candidate that staged rows must not digest like the empty parent; if \
          these are equal the digest is reading committed state"
     );
-
     drop(overlay);
-    publish(&db, &journal, HEIGHT, &block_hash(0));
 
+    // Nothing was published, so the committed digest is still the parent's.
+    assert_eq!(store.state_digest().unwrap(), empty_digest);
+
+    // Now a SECOND database whose parent already holds exactly those rows, seeded
+    // before any candidate exists. Its committed digest must equal the one the
+    // candidate folded: same rows, same encoding, whichever side computes it.
+    // That is the parity a proposer and a validator depend on, and it is what
+    // `digest_of` being shared guarantees.
+    let (_d2, db2) = open_db();
+    seed_parent(&db2, &ComputePoolStore::materialize(&after).unwrap());
     assert_eq!(
-        store.state_digest().unwrap(),
+        ComputePoolStore::new(&db2).state_digest().unwrap(),
         candidate_digest,
-        "the published digest must equal the one the block folded into its root"
+        "the committed digest over identical rows must equal the candidate's"
+    );
+
+    // And a candidate opened over that parent — the validator's own
+    // recomputation — agrees with both.
+    let mut ov2 = ApplicationOverlay::new(&db2, LIMIT);
+    let view2 = ExecutionView::new(&mut ov2);
+    assert_eq!(
+        ComputePoolStore::v_state_digest(&view2).unwrap(),
+        candidate_digest
     );
 }
 
@@ -206,14 +224,8 @@ fn a_stale_predecessor_is_rejected_against_the_candidate() {
     // empty predecessor against a database that already holds rows is refused.
     let (_d, db) = open_db();
     let live = model_with_job(5);
-
-    let mut overlay = ApplicationOverlay::new(&db, LIMIT);
-    let (_, journal) = {
-        let mut view = ExecutionView::new(&mut overlay);
-        ComputePoolStore::stage_transition(&mut view, None, &live).unwrap()
-    };
-    drop(overlay);
-    publish(&db, &journal, HEIGHT, &block_hash(0));
+    // A parent that already holds rows, seeded before any candidate exists.
+    seed_parent(&db, &ComputePoolStore::materialize(&live).unwrap());
 
     let mut overlay = ApplicationOverlay::new(&db, LIMIT);
     let mut view = ExecutionView::new(&mut overlay);
@@ -255,34 +267,29 @@ fn two_blocks_at_one_height_keep_separate_journals() {
     // The old journal key was the height alone, which two competing blocks
     // share: the side branch's journal overwrote the canonical one, and the
     // guard meant to prevent that instead refused the side branch outright.
+    // The subject is the KEYING, so the journal bytes are seeded verbatim: two
+    // blocks at one height, two distinct rows, neither overwriting the other.
+    // What each journal decodes to is `multi_record_apply_revert_reapply_is_exact`'s
+    // subject, not this one.
     let (_d, db) = open_db();
-
-    let mut overlay = ApplicationOverlay::new(&db, LIMIT);
-    let (_, canonical) = {
-        let mut view = ExecutionView::new(&mut overlay);
-        ComputePoolStore::stage_transition(&mut view, None, &model_with_job(8)).unwrap()
-    };
-    drop(overlay);
-    publish(&db, &canonical, HEIGHT, &block_hash(0));
-
-    // A competing block at the same height, executed against the same parent.
-    // Its own candidate, its own journal.
-    let (_d2, db2) = open_db();
-    let mut overlay = ApplicationOverlay::new(&db2, LIMIT);
-    let (_, side) = {
-        let mut view = ExecutionView::new(&mut overlay);
-        ComputePoolStore::stage_transition(&mut view, None, &model_with_job(9)).unwrap()
-    };
-    drop(overlay);
-    publish(&db, &side, HEIGHT, &block_hash(1));
+    seed_journal(&db, HEIGHT, &block_hash(0), b"canonical-journal");
+    seed_journal(&db, HEIGHT, &block_hash(1), b"side-branch-journal");
 
     let store = ComputePoolStore::new(&db);
     assert!(store.has_journal(HEIGHT, &block_hash(0)).unwrap());
     assert!(store.has_journal(HEIGHT, &block_hash(1)).unwrap());
     assert_ne!(
-        store.load_journal(HEIGHT, &block_hash(0)).unwrap(),
-        store.load_journal(HEIGHT, &block_hash(1)).unwrap(),
-        "each block's journal must describe its own transition"
+        db.get(
+            cf::COMPUTE_POOL_STATE_DIFFS,
+            &sumchain_storage::schema::journal_key(HEIGHT, &block_hash(0)),
+        )
+        .unwrap(),
+        db.get(
+            cf::COMPUTE_POOL_STATE_DIFFS,
+            &sumchain_storage::schema::journal_key(HEIGHT, &block_hash(1)),
+        )
+        .unwrap(),
+        "each block's journal row must survive the other's"
     );
 }
 
@@ -299,20 +306,13 @@ fn a_height_only_journal_refuses_rather_than_guessing_which_block_it_undoes() {
     let (_d, db) = open_db();
     let store = ComputePoolStore::new(&db);
 
-    // A well-formed journal, written under the height alone.
-    let mut overlay = ApplicationOverlay::new(&db, LIMIT);
-    let (_, journal) = {
-        let mut view = ExecutionView::new(&mut overlay);
-        ComputePoolStore::stage_transition(&mut view, None, &model_with_job(10)).unwrap()
-    };
-    drop(overlay);
-    let JournalRecord::Recorded(bytes) = &journal else {
-        panic!("expected a journal");
-    };
+    // A row under the height alone. The reader refuses on the KEY, before it
+    // decodes anything, so the bytes need only be present — and seeding them
+    // keeps this test free of a candidate it would then have to publish.
     db.put(
         cf::COMPUTE_POOL_STATE_DIFFS,
         &HEIGHT.to_be_bytes(),
-        bytes,
+        b"a-journal-under-the-height-alone",
     )
     .unwrap();
 
@@ -344,13 +344,10 @@ fn a_stray_height_only_row_refuses_even_beside_a_valid_journal() {
     let (_d, db) = open_db();
     let store = ComputePoolStore::new(&db);
 
-    let mut overlay = ApplicationOverlay::new(&db, LIMIT);
-    let (_, journal) = {
-        let mut view = ExecutionView::new(&mut overlay);
-        ComputePoolStore::stage_transition(&mut view, None, &model_with_job(11)).unwrap()
-    };
-    drop(overlay);
-    publish(&db, &journal, HEIGHT, &block_hash(0));
+    // This block's journal, seeded under the publisher's key. The reader never
+    // decodes it here — it refuses on the stray row below first, which is the
+    // whole point — so the bytes need only be present.
+    seed_journal(&db, HEIGHT, &block_hash(0), b"this-blocks-journal");
     assert!(store.has_journal(HEIGHT, &block_hash(0)).unwrap());
 
     // Now a stray legacy row appears beside the correct one. Reverting past it

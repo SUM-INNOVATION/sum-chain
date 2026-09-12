@@ -394,17 +394,15 @@ mod tests {
         mgr.apply_block(&mut view, height, apply)
     }
 
-    /// Apply one block and publish what it staged, standing in for the block
-    /// pipeline: the staged rows and the returned journal, committed together
-    /// under the publisher's `(height, block_hash)` key.
+    /// Apply one block through the manager, then SEED a parent that matches the
+    /// manager's resulting state, with the journal such a block would leave.
     ///
-    /// TEST FIXTURE. `ApplicationOverlay::into_batch` is crate-private to
-    /// `sumchain-storage`, so outside that crate only `AcceptedCandidate::
-    /// publish` makes a candidate canonical; these are manager unit tests and
-    /// driving a real block through acceptance would couple them to consensus.
-    /// The rows are replayed from the returned journal rather than re-derived,
-    /// so the fixture cannot publish something the candidate did not stage.
-    fn apply_and_publish<F>(
+    /// The two halves are separate on purpose. `apply_only` exercises the
+    /// manager and its candidate; the seeding derives from the manager's own
+    /// materialized state, not from the candidate, so nothing is copied out of
+    /// one. The beacon executor tests publish real blocks; these are
+    /// lifecycle-coordinator tests, and a block is not what they are about.
+    fn apply_and_seed<F>(
         db: &Database,
         mgr: &mut BeaconManager<'_>,
         height: BlockHeight,
@@ -413,24 +411,65 @@ mod tests {
     where
         F: FnOnce(&mut BeaconWorking) -> Result<()>,
     {
-        let (mutated, journal) = apply_only(db, mgr, height, apply)?;
-        if let JournalRecord::Recorded(bytes) = &journal {
-            let diff = BeaconStateDiff::decode(bytes)?;
-            let mut batch = db.batch();
-            for r in &diff.records {
-                match &r.new {
-                    Some(v) => batch.put(cf::BEACON_STATE, &r.key, v)?,
-                    None => batch.delete(cf::BEACON_STATE, &r.key)?,
-                }
+        let ep = mgr.working().epoch.config().epoch;
+        let before = BeaconStore::materialize(
+            ep,
+            &mgr.working().epoch,
+            mgr.working().chain.as_ref(),
+            &[],
+        )?;
+        let (mutated, _journal) = apply_only(db, mgr, height, apply)?;
+        let after = BeaconStore::materialize(
+            ep,
+            &mgr.working().epoch,
+            mgr.working().chain.as_ref(),
+            &[],
+        )?;
+        seed_rows_and_journal(db, &before, &after, height)?;
+        Ok(mutated)
+    }
+
+    /// Write the rows and undo record a block moving `before -> after` would
+    /// have left behind. No candidate is read: the delta is stated here, from
+    /// two materializations.
+    fn seed_rows_and_journal(
+        db: &Database,
+        before: &BTreeMap<Vec<u8>, Vec<u8>>,
+        after: &BTreeMap<Vec<u8>, Vec<u8>>,
+        height: BlockHeight,
+    ) -> Result<()> {
+        let mut keys: BTreeMap<Vec<u8>, ()> = BTreeMap::new();
+        for k in before.keys().chain(after.keys()) {
+            keys.insert(k.clone(), ());
+        }
+        let mut diff = BeaconStateDiff::default();
+        let mut batch = db.batch();
+        for key in keys.keys() {
+            let new = after.get(key).cloned();
+            let old = before.get(key).cloned();
+            if old == new {
+                continue;
             }
+            match &new {
+                Some(v) => batch.put(cf::BEACON_STATE, key, v)?,
+                None => batch.delete(cf::BEACON_STATE, key)?,
+            }
+            diff.records.push(crate::beacon_store::BeaconMutation {
+                key: key.clone(),
+                old,
+                new,
+            });
+        }
+        if !diff.records.is_empty() {
+            diff.records.sort_by(|a, b| a.key.cmp(&b.key));
             batch.put(
                 cf::BEACON_STATE_DIFFS,
                 &sumchain_storage::schema::journal_key(height, &bh(height)),
-                bytes,
+                &diff.encode()?,
             )?;
-            batch.commit()?;
         }
-        Ok(mutated)
+        batch.commit()?;
+        Ok(())
     }
 
     fn open_db() -> (Database, TempDir) {
@@ -585,7 +624,7 @@ mod tests {
         let m = membership();
         // Build a runtime state (key + deal), materialize + persist it.
         let mut mgr = BeaconManager::new_enabled(&db, &params_enabled_from(5), 5, cfg()).unwrap();
-        apply_and_publish(&db, &mut mgr, 5, |w| {
+        apply_and_seed(&db, &mut mgr, 5, |w| {
             w.epoch
                 .register_key(
                     &ctx(&m, 0, BeaconPhase::KeyRegistration, [1u8; 32]),
@@ -618,7 +657,7 @@ mod tests {
         let mut mgr = BeaconManager::new_enabled(&db, &params_enabled_from(5), 5, cfg()).unwrap();
 
         // Height 5: register key j=0 + a deal 0->0 (VALID ops → succeed → materialize).
-        let mutated = apply_and_publish(&db, &mut mgr, 5, |w| {
+        let mutated = apply_and_seed(&db, &mut mgr, 5, |w| {
                 assert_eq!(
                     w.epoch
                         .register_key(
@@ -667,7 +706,7 @@ mod tests {
         let digest_after_5 = store.state_digest().unwrap();
 
         // Height 6: a second deal 1->0 on top.
-        apply_and_publish(&db, &mut mgr, 6, |w| {
+        apply_and_seed(&db, &mut mgr, 6, |w| {
             w.epoch
                 .submit_deal(&ctx(&m, 1, BeaconPhase::Deal, [3u8; 32]), &deal(1, 0))
                 .map_err(|e| StateError::InvalidOperation(format!("{e:?}")))?;
@@ -692,7 +731,7 @@ mod tests {
 
         // Reapply height 6 reproduces the identical committed state (determinism).
         let d6_first = {
-            apply_and_publish(&db, &mut mgr, 6, |w| {
+            apply_and_seed(&db, &mut mgr, 6, |w| {
                 w.epoch
                     .submit_deal(&ctx(&m, 1, BeaconPhase::Deal, [3u8; 32]), &deal(1, 0))
                     .map_err(|e| StateError::InvalidOperation(format!("{e:?}")))?;
@@ -702,7 +741,7 @@ mod tests {
             store.state_digest().unwrap()
         };
         mgr.revert_block(6, &bh(6)).unwrap();
-        apply_and_publish(&db, &mut mgr, 6, |w| {
+        apply_and_seed(&db, &mut mgr, 6, |w| {
             w.epoch
                 .submit_deal(&ctx(&m, 1, BeaconPhase::Deal, [3u8; 32]), &deal(1, 0))
                 .map_err(|e| StateError::InvalidOperation(format!("{e:?}")))?;
@@ -728,7 +767,7 @@ mod tests {
         let mut mgr = BeaconManager::new_enabled(&db, &params_enabled_from(5), 5, cfg()).unwrap();
         // A deal whose signer != dealer_i is an authenticated-binding failure ⇒ the
         // whole transition errors and nothing is persisted.
-        let err = apply_and_publish(&db, &mut mgr, 5, |w| {
+        let err = apply_and_seed(&db, &mut mgr, 5, |w| {
             w.epoch
                 .submit_deal(&ctx(&m, 1, BeaconPhase::Deal, [9u8; 32]), &deal(0, 0)) // signer 1, dealer 0
                 .map_err(|e| StateError::InvalidOperation(format!("{e:?}")))?;

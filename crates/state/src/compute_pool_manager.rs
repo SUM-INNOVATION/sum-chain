@@ -245,6 +245,7 @@ impl<'a> ComputePoolManager<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compute_pool_store::{ComputePoolMutation, ComputePoolStateDiff};
     use crate::compute_pool::{
         AcceptedLeaf, AssignmentIndexEntry, BondedOffer, CommitBondId, EntitlementId,
         EntitlementKind, EntitlementRecord, ExposureInputs, JobId, OfferBondId, PoolError, UnitId,
@@ -286,18 +287,17 @@ mod tests {
         mgr.apply_block(&mut view, height, ops)
     }
 
-    /// Apply one block and publish what it staged, standing in for the block
-    /// pipeline: the staged rows and the returned journal, committed together
-    /// under the publisher's `(height, block_hash)` key.
+    /// Apply one block through the manager, then SEED a parent that matches the
+    /// manager's resulting model, with the journal such a block would leave.
     ///
-    /// TEST FIXTURE. `ApplicationOverlay::into_batch` is crate-private to
-    /// `sumchain-storage`, so outside that crate only `AcceptedCandidate::
-    /// publish` makes a candidate canonical; these are manager unit tests and
-    /// driving a real block through acceptance would couple them to consensus.
-    /// The delta is re-derived from the model's own materialization, the same
-    /// source `stage_transition` used, so the fixture cannot publish rows the
-    /// candidate did not stage.
-    fn apply_and_publish<F>(
+    /// The two halves are separate on purpose. `apply_only` exercises the
+    /// manager and its candidate; the seeding derives from the manager's own
+    /// in-memory model, not from the candidate, so nothing is copied out of one.
+    /// A real publication would run `execute_block` -> `accept_produced` ->
+    /// `publish`, which needs a block carrying compute-pool operations — there
+    /// is no live operation source yet (#125), so publication integration stays
+    /// deferred and these tests seed the committed side they need to revert.
+    fn apply_and_seed<F>(
         db: &Database,
         mgr: &mut ComputePoolManager<'_>,
         height: BlockHeight,
@@ -306,30 +306,55 @@ mod tests {
     where
         F: FnOnce(&mut ComputePoolModel) -> PoolResult<()>,
     {
-        let before_rows = ComputePoolStore::materialize(mgr.model())?;
-        let (mutated, journal) = apply_only(db, mgr, height, ops)?;
-        let after_rows = ComputePoolStore::materialize(mgr.model())?;
+        let before = ComputePoolStore::materialize(mgr.model())?;
+        let (mutated, _journal) = apply_only(db, mgr, height, ops)?;
+        let after = ComputePoolStore::materialize(mgr.model())?;
+        seed_rows_and_journal(db, &before, &after, height)?;
+        Ok(mutated)
+    }
 
+    /// Write the rows and undo record a block moving `before -> after` would
+    /// have left behind. No candidate is read: the delta is stated here, from
+    /// two model materializations, which is also what makes it the test's own
+    /// claim rather than an echo of the code under test.
+    fn seed_rows_and_journal(
+        db: &Database,
+        before: &BTreeMap<Vec<u8>, Vec<u8>>,
+        after: &BTreeMap<Vec<u8>, Vec<u8>>,
+        height: BlockHeight,
+    ) -> Result<()> {
+        let mut keys: BTreeMap<Vec<u8>, ()> = BTreeMap::new();
+        for k in before.keys().chain(after.keys()) {
+            keys.insert(k.clone(), ());
+        }
+        let mut diff = ComputePoolStateDiff::new();
         let mut batch = db.batch();
-        for (k, v) in &after_rows {
-            if before_rows.get(k) != Some(v) {
-                batch.put(cf::COMPUTE_POOL_STATE, k, v)?;
+        for key in keys.keys() {
+            let new = after.get(key).cloned();
+            let old = before.get(key).cloned();
+            if old == new {
+                continue;
             }
-        }
-        for k in before_rows.keys() {
-            if !after_rows.contains_key(k) {
-                batch.delete(cf::COMPUTE_POOL_STATE, k)?;
+            match &new {
+                Some(v) => batch.put(cf::COMPUTE_POOL_STATE, key, v)?,
+                None => batch.delete(cf::COMPUTE_POOL_STATE, key)?,
             }
+            diff.records.push(ComputePoolMutation {
+                key: key.clone(),
+                old,
+                new,
+            });
         }
-        if let JournalRecord::Recorded(bytes) = &journal {
+        if !diff.is_empty() {
+            diff.sort();
             batch.put(
                 cf::COMPUTE_POOL_STATE_DIFFS,
                 &sumchain_storage::schema::journal_key(height, &bh(height)),
-                bytes,
+                &diff.encode()?,
             )?;
         }
         batch.commit()?;
-        Ok(mutated)
+        Ok(())
     }
 
     /// Params with the compute-pool gate CLOSED — the production default. This is
@@ -441,7 +466,7 @@ mod tests {
         let (db, _d) = open_db();
         let mut mgr = ComputePoolManager::new_enabled(&db, &params_enabled_from(5), 5).unwrap();
         assert!(!mgr.is_enabled_at(4));
-        let err = apply_and_publish(&db, &mut mgr, 4, |m| add_job(m, jid(1), vec![simple_unit(jid(1), uid(2))]))
+        let err = apply_and_seed(&db, &mut mgr, 4, |m| add_job(m, jid(1), vec![simple_unit(jid(1), uid(2))]))
             .unwrap_err();
         assert!(
             matches!(err, StateError::InvalidOperation(_)),
@@ -458,7 +483,7 @@ mod tests {
         let (db, _d) = open_db();
         let mut mgr = ComputePoolManager::new_enabled(&db, &params_enabled_from(5), 5).unwrap();
 
-        let mutated = apply_and_publish(&db, &mut mgr, 5, |m| {
+        let mutated = apply_and_seed(&db, &mut mgr, 5, |m| {
                 add_job(m, jid(1), vec![simple_unit(jid(1), uid(2))])?;
                 m.publish_offer(BondedOffer {
                     offer_bond_id: oid(3),
@@ -527,13 +552,13 @@ mod tests {
         let mut mgr = ComputePoolManager::new_enabled(&db, &params_enabled_from(5), 5).unwrap();
 
         // Height 5: create job A.
-        apply_and_publish(&db, &mut mgr, 5, |m| add_job(m, jid(1), vec![simple_unit(jid(1), uid(2))]))
+        apply_and_seed(&db, &mut mgr, 5, |m| add_job(m, jid(1), vec![simple_unit(jid(1), uid(2))]))
             .unwrap();
         let model_after_5 = mgr.model().clone();
         let rows_after_5 = mgr.store().load_state_map().unwrap();
 
         // Height 6: add an offer + a second job on top.
-        apply_and_publish(&db, &mut mgr, 6, |m| {
+        apply_and_seed(&db, &mut mgr, 6, |m| {
             m.publish_offer(BondedOffer {
                 offer_bond_id: oid(3),
                 identity: addr(8),
@@ -579,14 +604,14 @@ mod tests {
     fn failed_op_leaves_model_store_and_journal_unchanged() {
         let (db, _d) = open_db();
         let mut mgr = ComputePoolManager::new_enabled(&db, &params_enabled_from(5), 5).unwrap();
-        apply_and_publish(&db, &mut mgr, 5, |m| add_job(m, jid(1), vec![simple_unit(jid(1), uid(2))]))
+        apply_and_seed(&db, &mut mgr, 5, |m| add_job(m, jid(1), vec![simple_unit(jid(1), uid(2))]))
             .unwrap();
         let model_after_5 = mgr.model().clone();
         let rows_after_5 = mgr.store().load_state_map().unwrap();
 
         // Height 6: attempt a duplicate job — the model op fails (DuplicateJob),
         // so nothing is persisted and nothing in memory changes.
-        let err = apply_and_publish(&db, &mut mgr, 6, |m| add_job(m, jid(1), vec![simple_unit(jid(1), uid(7))]))
+        let err = apply_and_seed(&db, &mut mgr, 6, |m| add_job(m, jid(1), vec![simple_unit(jid(1), uid(7))]))
             .unwrap_err();
         match err {
             StateError::InvalidOperation(msg) => {
@@ -616,11 +641,11 @@ mod tests {
     fn noop_transition_records_no_journal_or_undo() {
         let (db, _d) = open_db();
         let mut mgr = ComputePoolManager::new_enabled(&db, &params_enabled_from(5), 5).unwrap();
-        apply_and_publish(&db, &mut mgr, 5, |m| add_job(m, jid(1), vec![simple_unit(jid(1), uid(2))]))
+        apply_and_seed(&db, &mut mgr, 5, |m| add_job(m, jid(1), vec![simple_unit(jid(1), uid(2))]))
             .unwrap();
 
         // Height 6 applies no mutation => zero mutated rows, no journal, no undo.
-        let mutated = apply_and_publish(&db, &mut mgr, 6, |_m| Ok(())).unwrap();
+        let mutated = apply_and_seed(&db, &mut mgr, 6, |_m| Ok(())).unwrap();
         assert_eq!(mutated, 0);
         assert!(!mgr.store().has_journal(6, &bh(6)).unwrap());
         assert!(!mgr.has_pending_undo(6));

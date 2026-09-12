@@ -671,6 +671,15 @@ impl ComputePoolStateDiff {
         c1_decode(bytes)
     }
 
+    /// Encode a journal, the inverse of [`decode`](Self::decode).
+    ///
+    /// Symmetric with it for the same reason: the bytes leave the module, so a
+    /// reader that must reconstruct or a test that must state one declaratively
+    /// needs the codec rather than a second copy of it.
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        c1_encode(self)
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -1260,57 +1269,65 @@ mod tests {
         Hash::new(b)
     }
 
-    /// Publish one transition, standing in for the block pipeline: stage it into
-    /// a candidate, then commit the staged rows and the returned journal in one
-    /// batch under the publisher's `(height, block_hash)` key.
+    /// Seed a database that already holds `after`, with the journal a block
+    /// producing `before -> after` would have published.
     ///
-    /// THIS IS A TEST FIXTURE, not an API. It is the only direct write left in
-    /// this file besides the reorg-path `revert_block`, and it exists because
-    /// `ApplicationOverlay::into_batch` is crate-private to `sumchain-storage`
-    /// — deliberately, so that outside that crate only `AcceptedCandidate::
-    /// publish` can turn a candidate into canonical state. The tests below need
-    /// committed rows to exercise revert and cross-block sequences, and they are
-    /// storage-codec unit tests: driving a real block through acceptance and
-    /// publication to set them up would couple them to consensus for nothing.
+    /// SEEDING, not publishing: no candidate is created here, so nothing is
+    /// copied out of one. It writes the rows a prior block left behind and the
+    /// undo record for that block, stated independently — which is what a revert
+    /// test wants anyway, since the journal is then the test's own claim about
+    /// what should be undone rather than an echo of the code under test.
     ///
-    /// It writes exactly what `publish` writes for this family — the staged rows
-    /// and the journal at `journal_key(height, block_hash)` — in one batch, so a
-    /// test set up through it sees what a published block would leave behind.
-    fn publish_transition(
+    /// A real publication would run `execute_block` -> `accept_produced` ->
+    /// `publish`. The compute-pool gate is `None` and there is no live operation
+    /// source yet (#125), so no block can carry a C1 transition; publication
+    /// integration stays deferred until one can.
+    fn seed_transition(
         db: &Database,
         before: Option<&ComputePoolModel>,
         after: &ComputePoolModel,
         height: BlockHeight,
         block_hash: &Hash,
     ) -> Result<usize> {
-        let mut overlay = ApplicationOverlay::new(db, 1 << 30);
-        let (mutated, journal) = {
-            let mut view = ExecutionView::new(&mut overlay);
-            ComputePoolStore::stage_transition(&mut view, before, after)?
+        let before_rows = match before {
+            Some(m) => ComputePoolStore::materialize(m)?,
+            None => BTreeMap::new(),
         };
-        // Replay the journal the staging produced. Using the journal rather than
-        // re-deriving the delta keeps the fixture honest: it applies exactly the
-        // rows the candidate staged, so a bug in `stage_transition` shows up as a
-        // failing test rather than being papered over by the fixture computing
-        // the right answer independently.
+        let after_rows = ComputePoolStore::materialize(after)?;
+
+        let mut keys: BTreeMap<Vec<u8>, ()> = BTreeMap::new();
+        for k in before_rows.keys().chain(after_rows.keys()) {
+            keys.insert(k.clone(), ());
+        }
+        let mut diff = ComputePoolStateDiff::new();
         let mut batch = db.batch();
-        if let JournalRecord::Recorded(bytes) = &journal {
-            let diff: ComputePoolStateDiff = c1_decode(bytes)?;
-            for record in &diff.records {
-                match &record.new {
-                    Some(v) => batch.put(cf::COMPUTE_POOL_STATE, &record.key, v)?,
-                    None => batch.delete(cf::COMPUTE_POOL_STATE, &record.key)?,
-                }
+        for key in keys.keys() {
+            let new = after_rows.get(key).cloned();
+            let old = before_rows.get(key).cloned();
+            if old == new {
+                continue;
             }
+            match &new {
+                Some(v) => batch.put(cf::COMPUTE_POOL_STATE, key, v)?,
+                None => batch.delete(cf::COMPUTE_POOL_STATE, key)?,
+            }
+            diff.records.push(ComputePoolMutation {
+                key: key.clone(),
+                old,
+                new,
+            });
         }
-        drop(overlay);
-        if let JournalRecord::Recorded(bytes) = &journal {
-            batch.put(
-                cf::COMPUTE_POOL_STATE_DIFFS,
-                &sumchain_storage::schema::journal_key(height, block_hash),
-                bytes,
-            )?;
+        if diff.is_empty() {
+            batch.commit()?;
+            return Ok(0);
         }
+        diff.sort();
+        batch.put(
+            cf::COMPUTE_POOL_STATE_DIFFS,
+            &sumchain_storage::schema::journal_key(height, block_hash),
+            &diff.encode()?,
+        )?;
+        let mutated = diff.records.len();
         batch.commit()?;
         Ok(mutated)
     }
@@ -1560,7 +1577,7 @@ mod tests {
         let store = ComputePoolStore::new(&db);
         let m = full_model();
 
-        let mutated = publish_transition(&db, None, &m, 1, &bh(1, 0)).unwrap();
+        let mutated = seed_transition(&db, None, &m, 1, &bh(1, 0)).unwrap();
         assert!(mutated > 0);
         assert_eq!(
             store.load_state_map().unwrap(),
@@ -1594,9 +1611,9 @@ mod tests {
         let (db, _d) = open_db();
         let store = ComputePoolStore::new(&db);
         let m = full_model();
-        publish_transition(&db, None, &m, 1, &bh(1, 0)).unwrap();
+        seed_transition(&db, None, &m, 1, &bh(1, 0)).unwrap();
         // before == after => zero mutations, no journal written.
-        assert_eq!(publish_transition(&db, Some(&m), &m, 2, &bh(2, 0)).unwrap(), 0);
+        assert_eq!(seed_transition(&db, Some(&m), &m, 2, &bh(2, 0)).unwrap(), 0);
         assert!(!store.has_journal(2, &bh(2, 0)).unwrap());
     }
 
@@ -1610,7 +1627,7 @@ mod tests {
         let mut m = ComputePoolModel::new();
         add_job(&mut m, jid(1), vec![simple_unit(jid(1), uid(9))]);
         add_job(&mut m, jid(2), vec![simple_unit(jid(2), uid(9))]);
-        publish_transition(&db, None, &m, 1, &bh(1, 0)).unwrap();
+        seed_transition(&db, None, &m, 1, &bh(1, 0)).unwrap();
 
         assert_ne!(
             unit_key_bytes(&jid(1), &uid(9)),
@@ -1643,7 +1660,7 @@ mod tests {
             })
             .unwrap();
         }
-        publish_transition(&db, None, &m, 1, &bh(1, 0)).unwrap();
+        seed_transition(&db, None, &m, 1, &bh(1, 0)).unwrap();
         assert!(store.get_accepted_leaf(&g0).unwrap().is_some());
         assert!(store.get_accepted_leaf(&g1).unwrap().is_some());
     }
@@ -1684,7 +1701,7 @@ mod tests {
     fn malformed_version_rejected() {
         let (db, _d) = open_db();
         let store = ComputePoolStore::new(&db);
-        publish_transition(&db, None, &full_model(), 1, &bh(1, 0)).unwrap();
+        seed_transition(&db, None, &full_model(), 1, &bh(1, 0)).unwrap();
         let mut bytes = db
             .get(cf::COMPUTE_POOL_STATE, &job_key_bytes(&jid(1)))
             .unwrap()
@@ -1810,7 +1827,7 @@ mod tests {
         let target = ComputePoolStore::materialize(&m).unwrap();
 
         // Apply a block that writes many related records atomically.
-        publish_transition(&db, None, &m, 10, &bh(10, 0)).unwrap();
+        seed_transition(&db, None, &m, 10, &bh(10, 0)).unwrap();
         assert_eq!(store.load_state_map().unwrap(), target);
         assert!(store.has_journal(10, &bh(10, 0)).unwrap());
 
@@ -1823,7 +1840,7 @@ mod tests {
         );
 
         // Reapply: byte-identical to the first application.
-        publish_transition(&db, None, &m, 10, &bh(10, 0)).unwrap();
+        seed_transition(&db, None, &m, 10, &bh(10, 0)).unwrap();
         assert_eq!(store.load_state_map().unwrap(), target);
     }
 
@@ -1843,7 +1860,7 @@ mod tests {
         })
         .unwrap();
 
-        publish_transition(&db, None, &m, 5, &bh(5, 0)).unwrap();
+        seed_transition(&db, None, &m, 5, &bh(5, 0)).unwrap();
         assert_eq!(
             store
                 .get_accepted_leaf(&key)
@@ -1857,7 +1874,7 @@ mod tests {
             store.get_accepted_leaf(&key).unwrap().is_none(),
             "leaf gone after revert"
         );
-        publish_transition(&db, None, &m, 5, &bh(5, 0)).unwrap();
+        seed_transition(&db, None, &m, 5, &bh(5, 0)).unwrap();
         assert_eq!(
             store
                 .get_accepted_leaf(&key)
@@ -1878,7 +1895,7 @@ mod tests {
         // Block 1: identity's active offer is A.
         let mut m1 = ComputePoolModel::new();
         m1.publish_offer(active_offer(oid(0xAA), identity)).unwrap();
-        publish_transition(&db, None, &m1, 1, &bh(1, 0)).unwrap();
+        seed_transition(&db, None, &m1, 1, &bh(1, 0)).unwrap();
         assert_eq!(store.active_offer_of(&identity).unwrap(), Some(oid(0xAA)));
 
         // Block 2: A is retired (inactive) and B becomes the active offer.
@@ -1893,7 +1910,7 @@ mod tests {
             ..active_offer(oid(0xBB), identity)
         })
         .unwrap();
-        publish_transition(&db, Some(&m1), &m2, 2, &bh(2, 0)).unwrap();
+        seed_transition(&db, Some(&m1), &m2, 2, &bh(2, 0)).unwrap();
         assert_eq!(
             store.active_offer_of(&identity).unwrap(),
             Some(oid(0xBB)),
@@ -1921,7 +1938,7 @@ mod tests {
         let (db, _d) = open_db();
         let store = ComputePoolStore::new(&db);
         let m = full_model();
-        publish_transition(&db, None, &m, 1, &bh(1, 0)).unwrap();
+        seed_transition(&db, None, &m, 1, &bh(1, 0)).unwrap();
         let before = store.load_state_map().unwrap();
 
         // Craft a corrupt journal at height 2 with a bad-domain mutation.
@@ -1973,7 +1990,7 @@ mod tests {
 
         // Block A at height 7.
         let m1 = full_model();
-        publish_transition(&db, None, &m1, 7, &bh(7, 0)).unwrap();
+        seed_transition(&db, None, &m1, 7, &bh(7, 0)).unwrap();
         let after_first = store.load_state_map().unwrap();
         let journal_first = store.load_journal(7, &bh(7, 0)).unwrap().unwrap();
 
@@ -2027,7 +2044,7 @@ mod tests {
             amount: 111,
         })
         .unwrap();
-        publish_transition(&db, Some(&m1), &m3, 7, &bh(7, 1)).unwrap();
+        seed_transition(&db, Some(&m1), &m3, 7, &bh(7, 1)).unwrap();
         assert_eq!(
             store.load_journal(7, &bh(7, 0)).unwrap().unwrap(),
             journal_first,
@@ -2050,52 +2067,57 @@ mod tests {
         let (db, _d) = open_db();
         let store = ComputePoolStore::new(&db);
 
-        // Live state is `full_model()` at height 1.
+        // Live state is `full_model()`, seeded as a prior block's output.
         let live_model = full_model();
-        publish_transition(&db, None, &live_model, 1, &bh(1, 0)).unwrap();
+        seed_transition(&db, None, &live_model, 1, &bh(1, 0)).unwrap();
         let live_rows = store.load_state_map().unwrap();
 
-        // Caller claims an EMPTY predecessor (before = None) at height 2, but the
-        // live state is non-empty => stale => reject, nothing written.
+        // The rejection is `stage_transition`'s, so it is exercised against a
+        // real candidate. Nothing is published: a rejected transition has
+        // nothing to publish, and that is precisely what is being asserted.
+        let mut overlay = ApplicationOverlay::new(&db, 1 << 30);
+        let mut view = ExecutionView::new(&mut overlay);
+
+        // Caller claims an EMPTY predecessor, but the candidate's live state is
+        // non-empty => stale => reject.
         let target = full_model();
-        let err = publish_transition(&db, None, &target, 2, &bh(2, 0)).unwrap_err();
+        let err = ComputePoolStore::stage_transition(&mut view, None, &target).unwrap_err();
         assert!(
             matches!(err, StateError::InvalidOperation(_)),
             "got {err:?}"
         );
-        assert!(
-            !store.has_journal(2, &bh(2, 0)).unwrap(),
-            "no journal on rejected write"
-        );
         assert_eq!(
-            store.load_state_map().unwrap(),
+            ComputePoolStore::v_load_state_map(&view).unwrap(),
             live_rows,
-            "state untouched"
+            "candidate untouched"
         );
 
-        // Caller claims a DIFFERENT non-empty predecessor => also stale => reject.
+        // Caller claims a DIFFERENT non-empty predecessor => also stale.
         let mut wrong_before = ComputePoolModel::new();
         wrong_before
             .publish_offer(active_offer(oid(0xEE), addr(200)))
             .unwrap();
-        let err2 = publish_transition(&db, Some(&wrong_before), &target, 2, &bh(2, 0))
-            .unwrap_err();
+        let err2 =
+            ComputePoolStore::stage_transition(&mut view, Some(&wrong_before), &target).unwrap_err();
         assert!(
             matches!(err2, StateError::InvalidOperation(_)),
             "got {err2:?}"
         );
         assert_eq!(
-            store.load_state_map().unwrap(),
+            ComputePoolStore::v_load_state_map(&view).unwrap(),
             live_rows,
-            "state untouched"
+            "candidate untouched"
         );
 
         // The CORRECT predecessor is accepted (control): a genuine no-op here.
-        assert_eq!(
-            publish_transition(&db, Some(&live_model), &live_model, 2, &bh(2, 0))
-                .unwrap(),
-            0
-        );
+        let (mutated, journal) =
+            ComputePoolStore::stage_transition(&mut view, Some(&live_model), &live_model).unwrap();
+        assert_eq!(mutated, 0);
+        assert!(matches!(journal, JournalRecord::NothingToUndo));
+
+        // And canonical storage never moved.
+        drop(overlay);
+        assert_eq!(store.load_state_map().unwrap(), live_rows);
     }
 
     // ---- codec byte-stability: committed golden vector ----
