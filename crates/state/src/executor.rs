@@ -3890,6 +3890,19 @@ impl BlockExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The receipts one block's execution produced.
+    ///
+    /// `execute_block` used to return a `(receipts, root, state_diff,
+    /// contract_diff)` tuple. It now returns a `BlockExecution` whose candidate
+    /// carries the receipts already bound to the accumulator that produced
+    /// them, so there is no longer a loose receipt list a caller could swap. The
+    /// copy here is the same receipts, read through the candidate's read-only
+    /// accessor; nothing is published.
+    fn receipts_of(exec: BlockExecution<'_>) -> Vec<Receipt> {
+        let (executed, _state_diff, _contract_diff) = exec.into_parts();
+        executed.receipts().to_vec()
+    }
     use sumchain_crypto::{sign, KeyPair};
     use sumchain_primitives::Transaction;
     use sumchain_storage::Database;
@@ -3994,7 +4007,8 @@ mod tests {
     #[test]
     fn test_execute_tx() {
         let (state, db, _dir) = setup();
-        let executor = BlockExecutor::new(state.clone(), db, ChainParams::with_v2_enabled());
+        let executor = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
 
         let sender = KeyPair::generate();
         let recipient = KeyPair::generate();
@@ -4012,7 +4026,7 @@ mod tests {
 
         let tx = create_signed_tx(&sender, recipient.address(), 100, 10, 0);
         let result = executor
-            .execute_tx(&tx, &proposer.address(), 1, 1000000000)
+            .execute_tx(&mut candidate.view(), &tx, &proposer.address(), 1, 1000000000)
             .unwrap();
 
         assert!(result.status.is_success());
@@ -4030,6 +4044,7 @@ mod tests {
         };
 
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
 
@@ -4065,7 +4080,7 @@ mod tests {
             SignedTransaction::new_v2(tx_v2, *sig.as_bytes(), *sender.public_key().as_bytes());
 
         let result = executor
-            .execute_tx(&signed, &proposer.address(), 1, 1_000_000_000)
+            .execute_tx(&mut candidate.view(), &signed, &proposer.address(), 1, 1_000_000_000)
             .unwrap();
         assert!(result.status.is_success(), "tx failed: {:?}", result.status);
 
@@ -4087,6 +4102,7 @@ mod tests {
         };
 
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
 
@@ -4125,12 +4141,12 @@ mod tests {
         let pk2 = [2u8; 32];
 
         let r1 = executor
-            .execute_tx(&mk_signed(0, pk1), &proposer.address(), 1, 0)
+            .execute_tx(&mut candidate.view(), &mk_signed(0, pk1), &proposer.address(), 1, 0)
             .unwrap();
         assert!(r1.status.is_success());
 
         let r2 = executor
-            .execute_tx(&mk_signed(1, pk2), &proposer.address(), 2, 0)
+            .execute_tx(&mut candidate.view(), &mk_signed(1, pk2), &proposer.address(), 2, 0)
             .unwrap();
         assert!(r2.status.is_success());
 
@@ -4151,6 +4167,7 @@ mod tests {
     /// and submits the tx; returns the receipt status.
     #[allow(clippy::too_many_arguments)]
     fn register_v2_file(
+        view: &mut ExecutionView<'_, '_>,
         executor: &BlockExecutor,
         state: &Arc<StateManager>,
         owner: &KeyPair,
@@ -4204,7 +4221,7 @@ mod tests {
         let s = sign(h.as_bytes(), owner.private_key());
         let signed = SignedTransaction::new_v2(tx, *s.as_bytes(), *owner.public_key().as_bytes());
         executor
-            .execute_tx(&signed, proposer, block_height, 0)
+            .execute_tx(view, &signed, proposer, block_height, 0)
             .unwrap()
             .status
     }
@@ -4217,6 +4234,7 @@ mod tests {
         use sumchain_primitives::{FileLifecycleV2, FileVisibilityV2, Hash};
 
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let owner = KeyPair::generate();
@@ -4226,6 +4244,7 @@ mod tests {
         let deposit: u64 = 5_000_000;
 
         let status = register_v2_file(
+            &mut candidate.view(),
             &executor,
             &state,
             &owner,
@@ -4261,12 +4280,14 @@ mod tests {
         use sumchain_primitives::{Hash, TxStatus};
 
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let owner = KeyPair::generate();
         let proposer = KeyPair::generate();
 
         let status = register_v2_file(
+            &mut candidate.view(),
             &executor,
             &state,
             &owner,
@@ -4288,12 +4309,14 @@ mod tests {
         use sumchain_primitives::{Hash, TxStatus};
 
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let owner = KeyPair::generate();
         let proposer = KeyPair::generate();
 
         let status = register_v2_file(
+            &mut candidate.view(),
             &executor,
             &state,
             &owner,
@@ -4315,6 +4338,7 @@ mod tests {
         use sumchain_primitives::{AccessEntryV2, EncryptedKeyBundleV2, Hash, TxStatus};
 
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let owner = KeyPair::generate();
@@ -4327,6 +4351,7 @@ mod tests {
             expires_at: None,
         };
         let status = register_v2_file(
+            &mut candidate.view(),
             &executor,
             &state,
             &owner,
@@ -4349,6 +4374,7 @@ mod tests {
         use sumchain_primitives::{AccessEntryV2, EncryptedKeyBundleV2, Hash, TxStatus};
 
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let owner = KeyPair::generate();
@@ -4360,6 +4386,7 @@ mod tests {
             expires_at: None,
         };
         let status = register_v2_file(
+            &mut candidate.view(),
             &executor,
             &state,
             &owner,
@@ -4385,6 +4412,7 @@ mod tests {
         };
 
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let owner = KeyPair::generate();
@@ -4394,6 +4422,7 @@ mod tests {
 
         // Register at h=10.
         assert!(register_v2_file(
+            &mut candidate.view(),
             &executor,
             &state,
             &owner,
@@ -4441,7 +4470,7 @@ mod tests {
         let signed =
             SignedTransaction::new_v2(abandon_tx, *s.as_bytes(), *owner.public_key().as_bytes());
         let r = executor
-            .execute_tx(&signed, &proposer.address(), abandon_height, 0)
+            .execute_tx(&mut candidate.view(), &signed, &proposer.address(), abandon_height, 0)
             .unwrap();
         assert_eq!(r.status, TxStatus::Success);
 
@@ -4478,6 +4507,7 @@ mod tests {
         let mut params = ChainParams::with_v2_enabled();
         params.max_chunk_count_per_file = 4;
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let executor = BlockExecutor::new(state.clone(), db.clone(), params);
 
         let owner = KeyPair::generate();
@@ -4516,7 +4546,7 @@ mod tests {
         let s = sign(h.as_bytes(), owner.private_key());
         let signed = SignedTransaction::new_v2(tx, *s.as_bytes(), *owner.public_key().as_bytes());
         let r = executor
-            .execute_tx(&signed, &proposer.address(), 1, 0)
+            .execute_tx(&mut candidate.view(), &signed, &proposer.address(), 1, 0)
             .unwrap();
         assert_eq!(r.status, TxStatus::Failed(30));
     }
@@ -4531,6 +4561,7 @@ mod tests {
         };
 
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let owner = KeyPair::generate();
@@ -4568,7 +4599,7 @@ mod tests {
         let s = sign(h.as_bytes(), owner.private_key());
         let signed = SignedTransaction::new_v2(tx, *s.as_bytes(), *owner.public_key().as_bytes());
         let r = executor
-            .execute_tx(&signed, &proposer.address(), 1, 0)
+            .execute_tx(&mut candidate.view(), &signed, &proposer.address(), 1, 0)
             .unwrap();
         assert_eq!(r.status, TxStatus::Failed(30));
     }
@@ -4587,6 +4618,7 @@ mod tests {
         };
 
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let owner = KeyPair::generate();
@@ -4626,7 +4658,7 @@ mod tests {
         // Must not panic in debug, must not wrap in release; resolves to a
         // clean Failed(30) via the chunk-count-mismatch branch.
         let r = executor
-            .execute_tx(&signed, &proposer.address(), 1, 0)
+            .execute_tx(&mut candidate.view(), &signed, &proposer.address(), 1, 0)
             .unwrap();
         assert_eq!(r.status, TxStatus::Failed(30));
     }
@@ -4664,6 +4696,7 @@ mod tests {
 
     /// Helper: register an ArchiveNode + return its KeyPair. Pre-funds.
     fn setup_archive(
+        view: &mut ExecutionView<'_, '_>,
         executor: &BlockExecutor,
         state: &Arc<StateManager>,
         proposer: &Address,
@@ -4699,7 +4732,7 @@ mod tests {
         let s = sign(h.as_bytes(), kp.private_key());
         let signed = SignedTransaction::new_v2(tx, *s.as_bytes(), *kp.public_key().as_bytes());
         let r = executor
-            .execute_tx(&signed, proposer, block_height, 0)
+            .execute_tx(view, &signed, proposer, block_height, 0)
             .unwrap();
         assert!(r.status.is_success(), "archive registration failed");
         kp
@@ -4707,6 +4740,7 @@ mod tests {
 
     /// Helper: submit an AcceptAssignmentV2 tx and return the receipt status.
     fn submit_accept(
+        view: &mut ExecutionView<'_, '_>,
         executor: &BlockExecutor,
         state: &Arc<StateManager>,
         archive: &KeyPair,
@@ -4747,13 +4781,14 @@ mod tests {
         let s = sign(h.as_bytes(), archive.private_key());
         let signed = SignedTransaction::new_v2(tx, *s.as_bytes(), *archive.public_key().as_bytes());
         executor
-            .execute_tx(&signed, proposer, block_height, 0)
+            .execute_tx(view, &signed, proposer, block_height, 0)
             .unwrap()
             .status
     }
 
     /// Helper: submit ActivateFileV2 from owner, return receipt status.
     fn submit_activate(
+        view: &mut ExecutionView<'_, '_>,
         executor: &BlockExecutor,
         state: &Arc<StateManager>,
         owner: &KeyPair,
@@ -4790,7 +4825,7 @@ mod tests {
         let s = sign(h.as_bytes(), owner.private_key());
         let signed = SignedTransaction::new_v2(tx, *s.as_bytes(), *owner.public_key().as_bytes());
         executor
-            .execute_tx(&signed, proposer, block_height, 0)
+            .execute_tx(view, &signed, proposer, block_height, 0)
             .unwrap()
             .status
     }
@@ -4802,16 +4837,18 @@ mod tests {
         use sumchain_primitives::{Hash, TxStatus};
 
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
 
-        let archive = setup_archive(&executor, &state, &proposer.address(), 1);
+        let archive = setup_archive(&mut candidate.view(), &executor, &state, &proposer.address(), 1);
         let owner = KeyPair::generate();
         let merkle_root = Hash::hash(b"matrix-1");
 
         // chunk_count = 4 — a couple chunks, all assigned to the single archive.
         let status = register_v2_file(
+            &mut candidate.view(),
             &executor,
             &state,
             &owner,
@@ -4828,6 +4865,7 @@ mod tests {
 
         // Submit with [0, 2, 0, 2] — duplicates should collapse to set {0, 2}.
         let s = submit_accept(
+            &mut candidate.view(),
             &executor,
             &state,
             &archive,
@@ -4855,14 +4893,16 @@ mod tests {
         use sumchain_primitives::{Hash, TxStatus};
 
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
 
-        let archive = setup_archive(&executor, &state, &proposer.address(), 1);
+        let archive = setup_archive(&mut candidate.view(), &executor, &state, &proposer.address(), 1);
         let owner = KeyPair::generate();
         let merkle_root = Hash::hash(b"matrix-2");
         assert!(register_v2_file(
+            &mut candidate.view(),
             &executor,
             &state,
             &owner,
@@ -4880,6 +4920,7 @@ mod tests {
         // First: {0, 1, 2}
         assert_eq!(
             submit_accept(
+                &mut candidate.view(),
                 &executor,
                 &state,
                 &archive,
@@ -4894,6 +4935,7 @@ mod tests {
         // Second: {2, 3, 4} — overlaps at 2, idempotent on it.
         assert_eq!(
             submit_accept(
+                &mut candidate.view(),
                 &executor,
                 &state,
                 &archive,
@@ -4921,14 +4963,16 @@ mod tests {
         use sumchain_primitives::{Hash, TxStatus};
 
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
 
-        let archive = setup_archive(&executor, &state, &proposer.address(), 1);
+        let archive = setup_archive(&mut candidate.view(), &executor, &state, &proposer.address(), 1);
         let owner = KeyPair::generate();
         let merkle_root = Hash::hash(b"matrix-3");
         assert!(register_v2_file(
+            &mut candidate.view(),
             &executor,
             &state,
             &owner,
@@ -4946,6 +4990,7 @@ mod tests {
         // First, a valid attestation of {0, 1}.
         assert_eq!(
             submit_accept(
+                &mut candidate.view(),
                 &executor,
                 &state,
                 &archive,
@@ -4962,6 +5007,7 @@ mod tests {
         // No partial application: bitmap stays at {0, 1}.
         assert_eq!(
             submit_accept(
+                &mut candidate.view(),
                 &executor,
                 &state,
                 &archive,
@@ -4998,15 +5044,17 @@ mod tests {
         let mut params = ChainParams::with_v2_enabled();
         params.assignment_replication_factor = 1; // each chunk has exactly one assigned archive
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let executor = BlockExecutor::new(state.clone(), db.clone(), params.clone());
         let proposer = KeyPair::generate();
 
-        let archive_a = setup_archive(&executor, &state, &proposer.address(), 1);
-        let archive_b = setup_archive(&executor, &state, &proposer.address(), 2);
+        let archive_a = setup_archive(&mut candidate.view(), &executor, &state, &proposer.address(), 1);
+        let archive_b = setup_archive(&mut candidate.view(), &executor, &state, &proposer.address(), 2);
 
         let owner = KeyPair::generate();
         let merkle_root = Hash::hash(b"matrix-4");
         assert!(register_v2_file(
+            &mut candidate.view(),
             &executor,
             &state,
             &owner,
@@ -5043,6 +5091,7 @@ mod tests {
 
         assert_eq!(
             submit_accept(
+                &mut candidate.view(),
                 &executor,
                 &state,
                 unassigned_signer,
@@ -5066,13 +5115,15 @@ mod tests {
         params.max_chunk_indices_per_tx = 4;
 
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let executor = BlockExecutor::new(state.clone(), db.clone(), params);
         let proposer = KeyPair::generate();
 
-        let archive = setup_archive(&executor, &state, &proposer.address(), 1);
+        let archive = setup_archive(&mut candidate.view(), &executor, &state, &proposer.address(), 1);
         let owner = KeyPair::generate();
         let merkle_root = Hash::hash(b"matrix-5");
         assert!(register_v2_file(
+            &mut candidate.view(),
             &executor,
             &state,
             &owner,
@@ -5090,6 +5141,7 @@ mod tests {
         // 5 indices > cap of 4.
         assert_eq!(
             submit_accept(
+                &mut candidate.view(),
                 &executor,
                 &state,
                 &archive,
@@ -5109,14 +5161,16 @@ mod tests {
         use sumchain_primitives::{Hash, TxStatus};
 
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
 
-        let archive = setup_archive(&executor, &state, &proposer.address(), 1);
+        let archive = setup_archive(&mut candidate.view(), &executor, &state, &proposer.address(), 1);
         let owner = KeyPair::generate();
         let merkle_root = Hash::hash(b"matrix-8");
         assert!(register_v2_file(
+            &mut candidate.view(),
             &executor,
             &state,
             &owner,
@@ -5134,6 +5188,7 @@ mod tests {
         // Activate before any accept → fail.
         assert_eq!(
             submit_activate(
+                &mut candidate.view(),
                 &executor,
                 &state,
                 &owner,
@@ -5148,6 +5203,7 @@ mod tests {
         // Accept partial coverage {0, 1} → activation still fails.
         assert_eq!(
             submit_accept(
+                &mut candidate.view(),
                 &executor,
                 &state,
                 &archive,
@@ -5161,6 +5217,7 @@ mod tests {
         );
         assert_eq!(
             submit_activate(
+                &mut candidate.view(),
                 &executor,
                 &state,
                 &owner,
@@ -5175,6 +5232,7 @@ mod tests {
         // Cover the rest {2, 3} → activation succeeds.
         assert_eq!(
             submit_accept(
+                &mut candidate.view(),
                 &executor,
                 &state,
                 &archive,
@@ -5188,6 +5246,7 @@ mod tests {
         );
         assert_eq!(
             submit_activate(
+                &mut candidate.view(),
                 &executor,
                 &state,
                 &owner,
@@ -5217,17 +5276,19 @@ mod tests {
         };
 
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
 
         // Two archives — both register before the file (both in snapshot, both assigned at default R=3).
-        let archive_a = setup_archive(&executor, &state, &proposer.address(), 1);
-        let archive_b = setup_archive(&executor, &state, &proposer.address(), 2);
+        let archive_a = setup_archive(&mut candidate.view(), &executor, &state, &proposer.address(), 1);
+        let archive_b = setup_archive(&mut candidate.view(), &executor, &state, &proposer.address(), 2);
 
         let owner = KeyPair::generate();
         let merkle_root = Hash::hash(b"matrix-9");
         assert!(register_v2_file(
+            &mut candidate.view(),
             &executor,
             &state,
             &owner,
@@ -5246,6 +5307,7 @@ mod tests {
         for (kp, nonce) in [(&archive_a, 1u64), (&archive_b, 1u64)] {
             assert_eq!(
                 submit_accept(
+                    &mut candidate.view(),
                     &executor,
                     &state,
                     kp,
@@ -5287,13 +5349,14 @@ mod tests {
         let signed =
             SignedTransaction::new_v2(update_tx, *s.as_bytes(), *archive_a.public_key().as_bytes());
         let r = executor
-            .execute_tx(&signed, &proposer.address(), 12, 0)
+            .execute_tx(&mut candidate.view(), &signed, &proposer.address(), 12, 0)
             .unwrap();
         assert!(r.status.is_success());
 
         // archive_a is Slashed but archive_b still covers all chunks → activation succeeds.
         assert_eq!(
             submit_activate(
+                &mut candidate.view(),
                 &executor,
                 &state,
                 &owner,
@@ -5312,14 +5375,16 @@ mod tests {
         use sumchain_primitives::{Hash, TxStatus};
 
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
 
-        let archive = setup_archive(&executor, &state, &proposer.address(), 1);
+        let archive = setup_archive(&mut candidate.view(), &executor, &state, &proposer.address(), 1);
         let owner = KeyPair::generate();
         let merkle_root = Hash::hash(b"matrix-10");
         assert!(register_v2_file(
+            &mut candidate.view(),
             &executor,
             &state,
             &owner,
@@ -5337,6 +5402,7 @@ mod tests {
         // Cover and activate.
         assert_eq!(
             submit_accept(
+                &mut candidate.view(),
                 &executor,
                 &state,
                 &archive,
@@ -5350,6 +5416,7 @@ mod tests {
         );
         assert_eq!(
             submit_activate(
+                &mut candidate.view(),
                 &executor,
                 &state,
                 &owner,
@@ -5364,6 +5431,7 @@ mod tests {
         // Re-attest after activation → reject.
         assert_eq!(
             submit_accept(
+                &mut candidate.view(),
                 &executor,
                 &state,
                 &archive,
@@ -5394,20 +5462,22 @@ mod tests {
         let r = params.assignment_replication_factor;
 
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let executor = BlockExecutor::new(state.clone(), db.clone(), params.clone());
         let proposer = KeyPair::generate();
         let storage = crate::storage_metadata::StorageMetadataExecutor::new(db.clone());
         let registry = crate::node_registry::NodeRegistryExecutor::new(db.clone());
 
         // Three archives — with R=1 each chunk is owned by exactly one.
-        let a = setup_archive(&executor, &state, &proposer.address(), 1);
-        let b = setup_archive(&executor, &state, &proposer.address(), 2);
-        let c = setup_archive(&executor, &state, &proposer.address(), 3);
+        let a = setup_archive(&mut candidate.view(), &executor, &state, &proposer.address(), 1);
+        let b = setup_archive(&mut candidate.view(), &executor, &state, &proposer.address(), 2);
+        let c = setup_archive(&mut candidate.view(), &executor, &state, &proposer.address(), 3);
 
         let owner = KeyPair::generate();
         let merkle_root = Hash::hash(b"r1-coverage");
         let chunk_count: u32 = 8;
         assert!(register_v2_file(
+            &mut candidate.view(),
             &executor,
             &state,
             &owner,
@@ -5442,6 +5512,7 @@ mod tests {
                 let n = nonces.entry(key).or_insert(0u64);
                 *n += 1;
                 let s = submit_accept(
+                    &mut candidate.view(),
                     &executor,
                     &state,
                     kp,
@@ -5483,6 +5554,7 @@ mod tests {
 
         // And full coverage means activation must succeed.
         assert!(submit_activate(
+            &mut candidate.view(),
             &executor,
             &state,
             &owner,
@@ -5502,16 +5574,18 @@ mod tests {
         use sumchain_primitives::Hash;
 
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
         let registry = crate::node_registry::NodeRegistryExecutor::new(db.clone());
         let storage = crate::storage_metadata::StorageMetadataExecutor::new(db.clone());
 
-        let archive = setup_archive(&executor, &state, &proposer.address(), 1);
+        let archive = setup_archive(&mut candidate.view(), &executor, &state, &proposer.address(), 1);
         let owner = KeyPair::generate();
         let merkle_root = Hash::hash(b"matrix-11");
         assert!(register_v2_file(
+            &mut candidate.view(),
             &executor,
             &state,
             &owner,
@@ -5556,6 +5630,7 @@ mod tests {
         // outside-window changes (those drop from missing without affecting
         // ordering of indices < the new offset).
         assert!(submit_accept(
+            &mut candidate.view(),
             &executor,
             &state,
             &archive,
@@ -5594,15 +5669,17 @@ mod tests {
     /// 1 chunk and one archive. Returns (owner, archive, merkle_root) so 1c
     /// tests can mutate access lists on a known-Active file.
     fn setup_active_public_file(
+        view: &mut ExecutionView<'_, '_>,
         executor: &BlockExecutor,
         state: &Arc<StateManager>,
         proposer: &Address,
         file_label: &[u8],
     ) -> (KeyPair, KeyPair, Hash) {
-        let archive = setup_archive(executor, state, proposer, 1);
+        let archive = setup_archive(view, executor, state, proposer, 1);
         let owner = KeyPair::generate();
         let merkle_root = Hash::hash(file_label);
         assert!(register_v2_file(
+            view,
             executor,
             state,
             &owner,
@@ -5618,6 +5695,7 @@ mod tests {
         .is_success());
         assert_eq!(
             submit_accept(
+                view,
                 executor,
                 state,
                 &archive,
@@ -5630,13 +5708,14 @@ mod tests {
             sumchain_primitives::TxStatus::Success
         );
         assert_eq!(
-            submit_activate(executor, state, &owner, proposer, 12, 1, merkle_root),
+            submit_activate(view, executor, state, &owner, proposer, 12, 1, merkle_root),
             sumchain_primitives::TxStatus::Success
         );
         (owner, archive, merkle_root)
     }
 
     fn submit_add_access(
+        view: &mut ExecutionView<'_, '_>,
         executor: &BlockExecutor,
         state: &Arc<StateManager>,
         owner: &KeyPair,
@@ -5673,12 +5752,13 @@ mod tests {
         let s = sign(h.as_bytes(), owner.private_key());
         let signed = SignedTransaction::new_v2(tx, *s.as_bytes(), *owner.public_key().as_bytes());
         executor
-            .execute_tx(&signed, proposer, block_height, 0)
+            .execute_tx(view, &signed, proposer, block_height, 0)
             .unwrap()
             .status
     }
 
     fn submit_remove_access(
+        view: &mut ExecutionView<'_, '_>,
         executor: &BlockExecutor,
         state: &Arc<StateManager>,
         owner: &KeyPair,
@@ -5718,7 +5798,7 @@ mod tests {
         let s = sign(h.as_bytes(), owner.private_key());
         let signed = SignedTransaction::new_v2(tx, *s.as_bytes(), *owner.public_key().as_bytes());
         executor
-            .execute_tx(&signed, proposer, block_height, 0)
+            .execute_tx(view, &signed, proposer, block_height, 0)
             .unwrap()
             .status
     }
@@ -5730,12 +5810,13 @@ mod tests {
         use sumchain_primitives::{AccessEntryV2, TxStatus};
 
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
 
         let (owner, _archive, root) =
-            setup_active_public_file(&executor, &state, &proposer.address(), b"1c-add");
+            setup_active_public_file(&mut candidate.view(), &executor, &state, &proposer.address(), b"1c-add");
 
         let new_recipient = KeyPair::generate();
         let entry = AccessEntryV2 {
@@ -5744,6 +5825,7 @@ mod tests {
             expires_at: None,
         };
         let status = submit_add_access(
+            &mut candidate.view(),
             &executor,
             &state,
             &owner,
@@ -5767,12 +5849,13 @@ mod tests {
         use sumchain_primitives::{AccessEntryV2, TxStatus};
 
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
 
         let (_owner, _archive, root) =
-            setup_active_public_file(&executor, &state, &proposer.address(), b"1c-add-non-owner");
+            setup_active_public_file(&mut candidate.view(), &executor, &state, &proposer.address(), b"1c-add-non-owner");
         let intruder = KeyPair::generate();
         let new_recipient = KeyPair::generate();
         let entry = AccessEntryV2 {
@@ -5781,6 +5864,7 @@ mod tests {
             expires_at: None,
         };
         let status = submit_add_access(
+            &mut candidate.view(),
             &executor,
             &state,
             &intruder,
@@ -5800,12 +5884,13 @@ mod tests {
         use sumchain_primitives::{AccessEntryV2, TxStatus};
 
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
 
         let (owner, _archive, root) =
-            setup_active_public_file(&executor, &state, &proposer.address(), b"1c-add-dup");
+            setup_active_public_file(&mut candidate.view(), &executor, &state, &proposer.address(), b"1c-add-dup");
         let r = KeyPair::generate();
         let entry = AccessEntryV2 {
             address: r.address(),
@@ -5814,6 +5899,7 @@ mod tests {
         };
         assert_eq!(
             submit_add_access(
+                &mut candidate.view(),
                 &executor,
                 &state,
                 &owner,
@@ -5828,6 +5914,7 @@ mod tests {
         // Re-add same address → reject.
         assert_eq!(
             submit_add_access(
+                &mut candidate.view(),
                 &executor,
                 &state,
                 &owner,
@@ -5847,12 +5934,13 @@ mod tests {
         use sumchain_primitives::{AccessEntryV2, EncryptedKeyBundleV2, TxStatus};
 
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
 
         let (owner, _archive, root) =
-            setup_active_public_file(&executor, &state, &proposer.address(), b"1c-add-pub-bundle");
+            setup_active_public_file(&mut candidate.view(), &executor, &state, &proposer.address(), b"1c-add-pub-bundle");
         let bad = AccessEntryV2 {
             address: KeyPair::generate().address(),
             encrypted_key_bundle: Some(EncryptedKeyBundleV2([1u8; 80])),
@@ -5860,6 +5948,7 @@ mod tests {
         };
         assert_eq!(
             submit_add_access(
+                &mut candidate.view(),
                 &executor,
                 &state,
                 &owner,
@@ -5880,12 +5969,13 @@ mod tests {
         use sumchain_primitives::{AccessEntryV2, TxStatus};
 
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
 
         let (owner, _archive, root) =
-            setup_active_public_file(&executor, &state, &proposer.address(), b"1c-rm");
+            setup_active_public_file(&mut candidate.view(), &executor, &state, &proposer.address(), b"1c-rm");
         let r = KeyPair::generate();
         let entry = AccessEntryV2 {
             address: r.address(),
@@ -5894,6 +5984,7 @@ mod tests {
         };
         assert_eq!(
             submit_add_access(
+                &mut candidate.view(),
                 &executor,
                 &state,
                 &owner,
@@ -5908,6 +5999,7 @@ mod tests {
         // Happy: remove that recipient.
         assert_eq!(
             submit_remove_access(
+                &mut candidate.view(),
                 &executor,
                 &state,
                 &owner,
@@ -5926,6 +6018,7 @@ mod tests {
         // Same recipient again — now missing → Failed(35).
         assert_eq!(
             submit_remove_access(
+                &mut candidate.view(),
                 &executor,
                 &state,
                 &owner,
@@ -5945,6 +6038,7 @@ mod tests {
         use sumchain_primitives::{AccessEntryV2, Hash, TxStatus};
 
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
@@ -5953,6 +6047,7 @@ mod tests {
         let root = Hash::hash(b"1c-pending");
         // Pending — never activate.
         assert!(register_v2_file(
+            &mut candidate.view(),
             &executor,
             &state,
             &owner,
@@ -5975,6 +6070,7 @@ mod tests {
         };
         assert_eq!(
             submit_add_access(
+                &mut candidate.view(),
                 &executor,
                 &state,
                 &owner,
@@ -5988,6 +6084,7 @@ mod tests {
         );
         assert_eq!(
             submit_remove_access(
+                &mut candidate.view(),
                 &executor,
                 &state,
                 &owner,
@@ -6003,6 +6100,7 @@ mod tests {
     }
 
     fn submit_update_access(
+        view: &mut ExecutionView<'_, '_>,
         executor: &BlockExecutor,
         state: &Arc<StateManager>,
         owner: &KeyPair,
@@ -6044,7 +6142,7 @@ mod tests {
         let s = sign(h.as_bytes(), owner.private_key());
         let signed = SignedTransaction::new_v2(tx, *s.as_bytes(), *owner.public_key().as_bytes());
         executor
-            .execute_tx(&signed, proposer, block_height, 0)
+            .execute_tx(view, &signed, proposer, block_height, 0)
             .unwrap()
             .status
     }
@@ -6053,6 +6151,7 @@ mod tests {
     /// owner), so UpdateAccessV2 tests can exercise the Private-bundle and
     /// X25519 validations.
     fn setup_active_private_file(
+        view: &mut ExecutionView<'_, '_>,
         executor: &BlockExecutor,
         state: &Arc<StateManager>,
         proposer: &Address,
@@ -6063,7 +6162,7 @@ mod tests {
             TransactionV2, TxPayload,
         };
 
-        let archive = setup_archive(executor, state, proposer, 1);
+        let archive = setup_archive(view, executor, state, proposer, 1);
         let owner = KeyPair::generate();
 
         // Owner needs an X25519 pubkey on chain (Private-recipient invariant).
@@ -6094,7 +6193,7 @@ mod tests {
         let signed =
             SignedTransaction::new_v2(reg_tx, *s.as_bytes(), *owner.public_key().as_bytes());
         assert!(executor
-            .execute_tx(&signed, proposer, 5, 0)
+            .execute_tx(view, &signed, proposer, 5, 0)
             .unwrap()
             .status
             .is_success());
@@ -6107,6 +6206,7 @@ mod tests {
             expires_at: None,
         };
         assert!(register_v2_file(
+            view,
             executor,
             state,
             &owner,
@@ -6124,6 +6224,7 @@ mod tests {
         // Cover and activate.
         assert_eq!(
             submit_accept(
+                view,
                 executor,
                 state,
                 &archive,
@@ -6136,7 +6237,7 @@ mod tests {
             sumchain_primitives::TxStatus::Success
         );
         assert_eq!(
-            submit_activate(executor, state, &owner, proposer, 12, 2, merkle_root),
+            submit_activate(view, executor, state, &owner, proposer, 12, 2, merkle_root),
             sumchain_primitives::TxStatus::Success
         );
         (owner, merkle_root)
@@ -6149,12 +6250,13 @@ mod tests {
         use sumchain_primitives::{AccessEntryV2, TxStatus};
 
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
 
         let (owner, _archive, root) =
-            setup_active_public_file(&executor, &state, &proposer.address(), b"1c-update-pub");
+            setup_active_public_file(&mut candidate.view(), &executor, &state, &proposer.address(), b"1c-update-pub");
         let r = KeyPair::generate();
         let initial = AccessEntryV2 {
             address: r.address(),
@@ -6163,6 +6265,7 @@ mod tests {
         };
         assert_eq!(
             submit_add_access(
+                &mut candidate.view(),
                 &executor,
                 &state,
                 &owner,
@@ -6183,6 +6286,7 @@ mod tests {
         };
         assert_eq!(
             submit_update_access(
+                &mut candidate.view(),
                 &executor,
                 &state,
                 &owner,
@@ -6209,12 +6313,13 @@ mod tests {
         use sumchain_primitives::{AccessEntryV2, TxStatus};
 
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
 
         let (owner, _archive, root) =
-            setup_active_public_file(&executor, &state, &proposer.address(), b"1c-update-missing");
+            setup_active_public_file(&mut candidate.view(), &executor, &state, &proposer.address(), b"1c-update-missing");
         let absent = KeyPair::generate();
         let new_entry = AccessEntryV2 {
             address: absent.address(),
@@ -6223,6 +6328,7 @@ mod tests {
         };
         assert_eq!(
             submit_update_access(
+                &mut candidate.view(),
                 &executor,
                 &state,
                 &owner,
@@ -6244,11 +6350,13 @@ mod tests {
         use sumchain_primitives::{AccessEntryV2, TxStatus};
 
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
 
         let (owner, _archive, root) = setup_active_public_file(
+            &mut candidate.view(),
             &executor,
             &state,
             &proposer.address(),
@@ -6262,6 +6370,7 @@ mod tests {
         };
         assert_eq!(
             submit_add_access(
+                &mut candidate.view(),
                 &executor,
                 &state,
                 &owner,
@@ -6277,6 +6386,7 @@ mod tests {
         let intruder = KeyPair::generate();
         assert_eq!(
             submit_update_access(
+                &mut candidate.view(),
                 &executor,
                 &state,
                 &intruder,
@@ -6298,11 +6408,13 @@ mod tests {
         use sumchain_primitives::{AccessEntryV2, TxStatus};
 
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
 
         let (owner, _archive, root) = setup_active_public_file(
+            &mut candidate.view(),
             &executor,
             &state,
             &proposer.address(),
@@ -6317,6 +6429,7 @@ mod tests {
         };
         assert_eq!(
             submit_add_access(
+                &mut candidate.view(),
                 &executor,
                 &state,
                 &owner,
@@ -6337,6 +6450,7 @@ mod tests {
         };
         assert_eq!(
             submit_update_access(
+                &mut candidate.view(),
                 &executor,
                 &state,
                 &owner,
@@ -6358,11 +6472,13 @@ mod tests {
         use sumchain_primitives::{AccessEntryV2, EncryptedKeyBundleV2, TxStatus};
 
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
 
         let (owner, _archive, root) = setup_active_public_file(
+            &mut candidate.view(),
             &executor,
             &state,
             &proposer.address(),
@@ -6376,6 +6492,7 @@ mod tests {
         };
         assert_eq!(
             submit_add_access(
+                &mut candidate.view(),
                 &executor,
                 &state,
                 &owner,
@@ -6394,6 +6511,7 @@ mod tests {
         };
         assert_eq!(
             submit_update_access(
+                &mut candidate.view(),
                 &executor,
                 &state,
                 &owner,
@@ -6420,13 +6538,14 @@ mod tests {
         use sumchain_primitives::{AccessEntryV2, EncryptedKeyBundleV2, TxStatus};
 
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
 
         // Active Private file with owner already in the access list.
         let (owner, root) =
-            setup_active_private_file(&executor, &state, &proposer.address(), b"1c-update-priv");
+            setup_active_private_file(&mut candidate.view(), &executor, &state, &proposer.address(), b"1c-update-priv");
 
         // Add a recipient who DOES have a pubkey, then try to update with
         // a new_entry where the address is one without a pubkey is impossible
@@ -6450,6 +6569,7 @@ mod tests {
         };
         assert_eq!(
             submit_update_access(
+                &mut candidate.view(),
                 &executor,
                 &state,
                 &owner,
@@ -6474,6 +6594,7 @@ mod tests {
         };
         assert_eq!(
             submit_add_access(
+                &mut candidate.view(),
                 &executor,
                 &state,
                 &owner,
@@ -6497,6 +6618,7 @@ mod tests {
         };
 
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
@@ -6506,6 +6628,7 @@ mod tests {
         let owner_p = KeyPair::generate();
         let root_p = Hash::hash(b"pushable-pending");
         assert!(register_v2_file(
+            &mut candidate.view(),
             &executor,
             &state,
             &owner_p,
@@ -6522,12 +6645,13 @@ mod tests {
 
         // Active file
         let (_, _, root_a) =
-            setup_active_public_file(&executor, &state, &proposer.address(), b"pushable-active");
+            setup_active_public_file(&mut candidate.view(), &executor, &state, &proposer.address(), b"pushable-active");
 
         // Abandoned file: register a Pending then abandon after grace.
         let owner_b = KeyPair::generate();
         let root_b = Hash::hash(b"pushable-abandoned");
         assert!(register_v2_file(
+            &mut candidate.view(),
             &executor,
             &state,
             &owner_b,
@@ -6569,7 +6693,7 @@ mod tests {
         // grace = 50 → abandon at h=61.
         assert_eq!(
             executor
-                .execute_tx(&signed, &proposer.address(), 61, 0)
+                .execute_tx(&mut candidate.view(), &signed, &proposer.address(), 61, 0)
                 .unwrap()
                 .status,
             TxStatus::Success
@@ -6601,6 +6725,7 @@ mod tests {
         };
 
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let owner = KeyPair::generate();
@@ -6609,6 +6734,7 @@ mod tests {
         let deposit: u64 = 1_000_000;
 
         assert!(register_v2_file(
+            &mut candidate.view(),
             &executor,
             &state,
             &owner,
@@ -6650,7 +6776,7 @@ mod tests {
         let signed =
             SignedTransaction::new_v2(abandon_tx, *s.as_bytes(), *owner.public_key().as_bytes());
         let r = executor
-            .execute_tx(&signed, &proposer.address(), 30, 0)
+            .execute_tx(&mut candidate.view(), &signed, &proposer.address(), 30, 0)
             .unwrap();
         assert_eq!(r.status, TxStatus::Failed(31));
 
@@ -6669,6 +6795,7 @@ mod tests {
     /// Uses raw NodeRegistryOperation::Register, threaded through execute_tx
     /// with the supplied `block_height`. Returns the receipt status.
     fn register_archive(
+        view: &mut ExecutionView<'_, '_>,
         executor: &BlockExecutor,
         state: &Arc<StateManager>,
         kp: &KeyPair,
@@ -6708,7 +6835,7 @@ mod tests {
         let s = sign(h.as_bytes(), kp.private_key());
         let signed = SignedTransaction::new_v2(tx, *s.as_bytes(), *kp.public_key().as_bytes());
         executor
-            .execute_tx(&signed, proposer, block_height, 0)
+            .execute_tx(view, &signed, proposer, block_height, 0)
             .unwrap()
             .status
     }
@@ -6742,13 +6869,14 @@ mod tests {
     #[test]
     fn test_register_archive_writes_snapshot_at_block_height() {
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
         let registry = crate::node_registry::NodeRegistryExecutor::new(db.clone());
 
         let archive = KeyPair::generate();
-        let status = register_archive(&executor, &state, &archive, &proposer.address(), 10, 0);
+        let status = register_archive(&mut candidate.view(), &executor, &state, &archive, &proposer.address(), 10, 0);
         assert!(status.is_success(), "register failed: {:?}", status);
 
         // Snapshot at H=10 has the new node; H=9 is empty (pre-registration).
@@ -6765,6 +6893,7 @@ mod tests {
     #[test]
     fn test_get_active_nodes_at_height_walks_back_to_nearest_snapshot() {
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
@@ -6773,8 +6902,8 @@ mod tests {
         // Register A at h=5, B at h=20.
         let a = KeyPair::generate();
         let b = KeyPair::generate();
-        assert!(register_archive(&executor, &state, &a, &proposer.address(), 5, 0).is_success());
-        assert!(register_archive(&executor, &state, &b, &proposer.address(), 20, 0).is_success());
+        assert!(register_archive(&mut candidate.view(), &executor, &state, &a, &proposer.address(), 5, 0).is_success());
+        assert!(register_archive(&mut candidate.view(), &executor, &state, &b, &proposer.address(), 20, 0).is_success());
 
         // h=4: no snapshot, empty.
         assert!(registry
@@ -6809,6 +6938,7 @@ mod tests {
         };
 
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
@@ -6817,7 +6947,7 @@ mod tests {
         // Register an archive at h=10.
         let archive = KeyPair::generate();
         assert!(
-            register_archive(&executor, &state, &archive, &proposer.address(), 10, 0).is_success()
+            register_archive(&mut candidate.view(), &executor, &state, &archive, &proposer.address(), 10, 0).is_success()
         );
 
         // Submit UpdateStatus(Slashed) at h=15 from the same account.
@@ -6853,6 +6983,7 @@ mod tests {
 
         let r = executor
             .execute_tx(
+                &mut candidate.view(),
                 &update_tx(1, NodeStatus::Slashed),
                 &proposer.address(),
                 15,
@@ -6880,6 +7011,7 @@ mod tests {
         // didn't grow — which the dedup guard ensures by short-circuiting.
         let r2 = executor
             .execute_tx(
+                &mut candidate.view(),
                 &update_tx(2, NodeStatus::Slashed),
                 &proposer.address(),
                 20,
@@ -6904,6 +7036,7 @@ mod tests {
         };
 
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
@@ -6952,7 +7085,7 @@ mod tests {
                 SignedTransaction::new_v2(tx_v2, *s.as_bytes(), *sender.public_key().as_bytes());
 
             let result = executor
-                .execute_tx(&signed, &proposer.address(), 1, 0)
+                .execute_tx(&mut candidate.view(), &signed, &proposer.address(), 1, 0)
                 .unwrap();
 
             // Must surface Failed(22) so chain_getTransactionStatus reports the
@@ -7008,6 +7141,7 @@ mod tests {
         };
 
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
 
@@ -7046,7 +7180,7 @@ mod tests {
 
         const EXPECTED_HEIGHT: u64 = 42;
         let result = executor
-            .execute_tx(&signed, &proposer.address(), EXPECTED_HEIGHT, 1_000_000_000)
+            .execute_tx(&mut candidate.view(), &signed, &proposer.address(), EXPECTED_HEIGHT, 1_000_000_000)
             .unwrap();
         assert!(result.status.is_success(), "tx failed: {:?}", result.status);
 
@@ -7111,12 +7245,13 @@ mod tests {
     #[test]
     fn test_active_file_v2_has_no_abandoned_at_height() {
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
 
         let (_owner, _archive, merkle_root) =
-            setup_active_public_file(&executor, &state, &proposer.address(), b"active-no-abandon");
+            setup_active_public_file(&mut candidate.view(), &executor, &state, &proposer.address(), b"active-no-abandon");
 
         let store = crate::storage_metadata::StorageMetadataExecutor::new(db.clone());
         let row = store.get_metadata_v2(&merkle_root).unwrap().expect("row");
@@ -7144,6 +7279,7 @@ mod tests {
     #[test]
     fn test_v2_gate_rejects_when_disabled() {
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let mut params = ChainParams::default();
         params.v2_enabled_from_height = None; // explicit; matches Default
         let executor = BlockExecutor::new(state.clone(), db.clone(), params);
@@ -7153,7 +7289,7 @@ mod tests {
         let signed = build_register_encryption_key_v2(&state, &sender);
 
         let result = executor
-            .execute_tx(&signed, &proposer.address(), 100, 0)
+            .execute_tx(&mut candidate.view(), &signed, &proposer.address(), 100, 0)
             .unwrap();
         assert_eq!(
             result.status,
@@ -7181,6 +7317,7 @@ mod tests {
     #[test]
     fn test_v2_gate_rejects_before_activation_height() {
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let mut params = ChainParams::default();
         const ACTIVATION_HEIGHT: u64 = 1_000_000;
         params.v2_enabled_from_height = Some(ACTIVATION_HEIGHT);
@@ -7191,7 +7328,7 @@ mod tests {
         let signed = build_register_encryption_key_v2(&state, &sender);
 
         let result = executor
-            .execute_tx(&signed, &proposer.address(), ACTIVATION_HEIGHT - 1, 0)
+            .execute_tx(&mut candidate.view(), &signed, &proposer.address(), ACTIVATION_HEIGHT - 1, 0)
             .unwrap();
         assert_eq!(result.status, TxStatus::Failed(40));
         assert_eq!(result.fee_paid, 0);
@@ -7203,6 +7340,7 @@ mod tests {
     #[test]
     fn test_v2_gate_accepts_at_activation_height() {
         let (state, db, _dir) = setup();
+        let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let mut params = ChainParams::default();
         const ACTIVATION_HEIGHT: u64 = 1_000_000;
         params.v2_enabled_from_height = Some(ACTIVATION_HEIGHT);
@@ -7213,7 +7351,7 @@ mod tests {
         let signed = build_register_encryption_key_v2(&state, &sender);
 
         let result = executor
-            .execute_tx(&signed, &proposer.address(), ACTIVATION_HEIGHT, 0)
+            .execute_tx(&mut candidate.view(), &signed, &proposer.address(), ACTIVATION_HEIGHT, 0)
             .unwrap();
         assert!(
             result.status.is_success(),
@@ -7807,7 +7945,7 @@ mod tests {
 
         let tx = beacon_reg_tx(&vs[0], 7, false, fee);
         let blk = beacon_block_with(1, vs[0].public_key().as_bytes(), vec![tx]);
-        let (receipts, _root, _sd, _cd) = executor.execute_block(&blk, Hash::ZERO, &pubs).unwrap();
+        let receipts = receipts_of(executor.execute_block(&blk, Hash::ZERO, &pubs).unwrap());
 
         assert_eq!(receipts.len(), 1);
         assert!(
@@ -7842,7 +7980,7 @@ mod tests {
         // A registration with a WRONG PoP → runtime PopInvalid → FAIL CLOSED.
         let tx = beacon_reg_tx(&vs[0], 7, true, fee);
         let blk = beacon_block_with(1, vs[0].public_key().as_bytes(), vec![tx]);
-        let (receipts, _root, _sd, _cd) = executor.execute_block(&blk, Hash::ZERO, &pubs).unwrap();
+        let receipts = receipts_of(executor.execute_block(&blk, Hash::ZERO, &pubs).unwrap());
 
         assert!(!receipts[0].is_success(), "invalid beacon tx fails closed");
         // The invalid op wrote NO DKG state (no key row). Height 1 IS the epoch boundary,
@@ -7876,7 +8014,7 @@ mod tests {
         // the pre-per-tx-wiring fail-closed seam.
         let tx = beacon_reg_tx(&vs[0], 7, false, fee);
         let blk = beacon_block_with(1, vs[0].public_key().as_bytes(), vec![tx]);
-        let (receipts, _root, _sd, _cd) = executor.execute_block(&blk, Hash::ZERO, &pubs).unwrap();
+        let receipts = receipts_of(executor.execute_block(&blk, Hash::ZERO, &pubs).unwrap());
 
         assert!(
             !receipts[0].is_success(),
@@ -7907,7 +8045,7 @@ mod tests {
         let good = beacon_reg_tx(&vs[0], 7, false, fee);
         let bad = beacon_reg_tx(&vs[1], 9, true, fee);
         let blk = beacon_block_with(1, vs[0].public_key().as_bytes(), vec![good, bad]);
-        let (receipts, _root, _sd, _cd) = executor.execute_block(&blk, Hash::ZERO, &pubs).unwrap();
+        let receipts = receipts_of(executor.execute_block(&blk, Hash::ZERO, &pubs).unwrap());
 
         assert!(receipts[0].is_success(), "valid op succeeds");
         assert!(!receipts[1].is_success(), "invalid op fails closed");
@@ -8006,7 +8144,7 @@ mod tests {
             vec![beacon_reg_tx(&vs[0], 7, false, fee)],
         );
 
-        let (r1, _root1, _, _) = ex.execute_block(&blk, Hash::ZERO, &pubs).unwrap();
+        let r1 = receipts_of(ex.execute_block(&blk, Hash::ZERO, &pubs).unwrap());
         let digest1 = crate::beacon_store::BeaconStore::new(&db)
             .state_digest()
             .unwrap();
@@ -8015,7 +8153,7 @@ mod tests {
         state.revert_block_state_diffs(1, &Hash::ZERO).unwrap();
         // A fresh executor replays the identical block.
         let ex2 = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
-        let (r2, _root2, _, _) = ex2.execute_block(&blk, Hash::ZERO, &pubs).unwrap();
+        let r2 = receipts_of(ex2.execute_block(&blk, Hash::ZERO, &pubs).unwrap());
         let digest2 = crate::beacon_store::BeaconStore::new(&db)
             .state_digest()
             .unwrap();
@@ -8045,7 +8183,7 @@ mod tests {
                 beacon_reg_tx(&vs[1], 9, true, fee),
             ],
         );
-        let (r, _root, _, _) = ex.execute_block(&blk, Hash::ZERO, &pubs).unwrap();
+        let r = receipts_of(ex.execute_block(&blk, Hash::ZERO, &pubs).unwrap());
         assert!(r[0].is_success(), "valid op1 succeeds");
         assert!(!r[1].is_success(), "invalid op2 fails closed");
         let store = crate::beacon_store::BeaconStore::new(&db);
@@ -8181,13 +8319,13 @@ mod tests {
         let churned: Vec<[u8; 32]> =
             vec![[0x51; 32], [0x52; 32], [0x53; 32], [0x54; 32], [0x55; 32]];
         let reg = beacon_reg_tx(&vs[0], 7, false, fee);
-        let (r, _, _, _) = ex
+        let r = receipts_of(ex
             .execute_block(
                 &beacon_block_with(2, vs[1].public_key().as_bytes(), vec![reg]),
                 Hash::ZERO,
                 &churned,
             )
-            .unwrap();
+            .unwrap());
         assert!(
             r[0].is_success(),
             "a member of the FROZEN epoch_start set registers despite active-set churn"
@@ -8222,13 +8360,13 @@ mod tests {
         let churned: Vec<[u8; 32]> =
             vec![[0x61; 32], [0x62; 32], [0x63; 32], [0x64; 32], [0x65; 32]];
         let reg = beacon_reg_tx(&vs[0], 7, false, fee);
-        let (r, _, _, _) = ex
+        let r = receipts_of(ex
             .execute_block(
                 &beacon_block_with(50, vs[0].public_key().as_bytes(), vec![reg]),
                 Hash::ZERO,
                 &churned,
             )
-            .unwrap();
+            .unwrap());
         assert!(
             r[0].is_success(),
             "late first op keyed against the epoch_start membership"
@@ -8349,13 +8487,13 @@ mod tests {
         // Height 250 (position 249) is in the DEAL window; a registration is out of its
         // KeyRegistration window there and is rejected.
         let reg = beacon_reg_tx(&vs[0], 7, false, fee);
-        let (r, _, _, _) = ex
+        let r = receipts_of(ex
             .execute_block(
                 &beacon_block_with(250, vs[0].public_key().as_bytes(), vec![reg]),
                 Hash::ZERO,
                 &pubs,
             )
-            .unwrap();
+            .unwrap());
         assert!(
             !r[0].is_success(),
             "registration outside its window fails closed"
@@ -8492,10 +8630,13 @@ mod tests {
 
         // Force a C1 revert failure: overwrite the journal with undecodable bytes
         // (too short for the fixint length prefix -> c1_decode errors in
-        // stage_block_revert, before anything is committed).
+        // stage_block_revert, before anything is committed). Under the
+        // publisher's key, so the DECODE failure is what aborts the revert — a
+        // height-only key is refused earlier, and this test would then pass for
+        // a reason it is not about.
         db.put(
             cf::COMPUTE_POOL_STATE_DIFFS,
-            &height.to_be_bytes(),
+            &sumchain_storage::schema::journal_key(height, &Hash::ZERO),
             &[0xFFu8; 4],
         )
         .unwrap();

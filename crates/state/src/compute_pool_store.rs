@@ -1928,9 +1928,12 @@ mod tests {
             old: Some(vec![9, 9, 9]),
             new: None,
         });
+        // Under the publisher's key, so the CORRUPTION is what the revert
+        // trips over. A height-only key would be refused first, and the test
+        // would pass for the wrong reason.
         db.put(
             cf::COMPUTE_POOL_STATE_DIFFS,
-            &2u64.to_be_bytes(),
+            &sumchain_storage::schema::journal_key(2, &bh(2, 0)),
             &c1_encode(&diff).unwrap(),
         )
         .unwrap();
@@ -1950,26 +1953,30 @@ mod tests {
         );
     }
 
-    // ---- one finalized transition per height (duplicate-height rejection) ----
+    // ---- one transition per BLOCK, not per height ----
 
+    /// Two blocks at one height are legitimate — they are competing branches —
+    /// and each keeps its own journal. What must never happen is one
+    /// transition's journal overwriting another's, which is what the old
+    /// height-keyed store did while its duplicate-height guard refused the
+    /// second block outright.
+    ///
+    /// The rejection that remains is candidate-scoped: a second transition
+    /// staged into the SAME block is refused, leaving that candidate untouched.
     #[test]
     fn second_transition_at_same_height_is_hard_rejected_state_intact() {
         let (db, _d) = open_db();
         let store = ComputePoolStore::new(&db);
 
-        // First transition at height 7 commits normally.
+        // Block A at height 7.
         let m1 = full_model();
         publish_transition(&db, None, &m1, 7, &bh(7, 0)).unwrap();
         let after_first = store.load_state_map().unwrap();
-        let journal_first = db
-            .get(cf::COMPUTE_POOL_STATE_DIFFS, &7u64.to_be_bytes())
-            .unwrap()
-            .unwrap();
+        let journal_first = store.load_journal(7, &bh(7, 0)).unwrap().unwrap();
 
-        // A DIFFERENT transition at the SAME height must be hard-rejected so it
-        // cannot overwrite the first journal (which would lose block 7's undo
-        // information). Use the correct predecessor so ONLY the duplicate-height
-        // guard can be responsible for the rejection.
+        // A second transition staged into the SAME candidate is rejected, and
+        // leaves that candidate byte-identical. Correct predecessor, so only the
+        // one-transition-per-block guard can be responsible.
         let mut m2 = m1.clone();
         m2.register_entitlement(EntitlementRecord {
             entitlement_id: EntitlementId::from_bytes([0x77; 32]),
@@ -1978,29 +1985,59 @@ mod tests {
             amount: 999,
         })
         .unwrap();
-        let err = publish_transition(&db, Some(&m1), &m2, 7, &bh(7, 0)).unwrap_err();
+
+        let mut overlay = ApplicationOverlay::new(&db, 1 << 30);
+        let mut view = ExecutionView::new(&mut overlay);
+        ComputePoolStore::stage_transition(&mut view, Some(&m1), &m2).unwrap();
+        let staged = ComputePoolStore::v_load_state_map(&view).unwrap();
+        let err = ComputePoolStore::stage_transition(&mut view, Some(&m2), &m1).unwrap_err();
         assert!(
             matches!(err, StateError::InvalidOperation(_)),
-            "duplicate height must be InvalidOperation, got {err:?}"
+            "a second transition in one block must be InvalidOperation, got {err:?}"
         );
+        assert_eq!(
+            ComputePoolStore::v_load_state_map(&view).unwrap(),
+            staged,
+            "a rejected second transition must leave the candidate byte-identical"
+        );
+        drop(overlay);
 
-        // State AND journal are exactly the first transition's (nothing written).
+        // Nothing published: committed state and block A's journal are intact.
         assert_eq!(
             store.load_state_map().unwrap(),
             after_first,
-            "rejected duplicate-height transition must not mutate state"
+            "a rejected transition must not mutate canonical state"
         );
         assert_eq!(
-            db.get(cf::COMPUTE_POOL_STATE_DIFFS, &7u64.to_be_bytes())
-                .unwrap()
-                .unwrap(),
+            store.load_journal(7, &bh(7, 0)).unwrap().unwrap(),
             journal_first,
-            "the original journal for the height is preserved intact"
+            "block A's journal is preserved intact"
         );
 
-        // And the preserved journal still rolls the block back exactly.
+        // Block B, a competing block at the SAME height, publishes its own
+        // transition and its own journal. Neither overwrites the other.
+        let mut m3 = m1.clone();
+        m3.register_entitlement(EntitlementRecord {
+            entitlement_id: EntitlementId::from_bytes([0x88; 32]),
+            beneficiary: addr(2),
+            kind: EntitlementKind::ReassignReimb,
+            amount: 111,
+        })
+        .unwrap();
+        publish_transition(&db, Some(&m1), &m3, 7, &bh(7, 1)).unwrap();
+        assert_eq!(
+            store.load_journal(7, &bh(7, 0)).unwrap().unwrap(),
+            journal_first,
+            "block B must not overwrite block A's journal"
+        );
+        assert_ne!(
+            store.load_journal(7, &bh(7, 1)).unwrap().unwrap(),
+            journal_first,
+            "block B's journal describes its own transition"
+        );
+
+        // And block A's preserved journal still rolls block A back exactly.
         store.revert_block(7, &bh(7, 0)).unwrap();
-        assert!(store.load_state_map().unwrap().is_empty());
     }
 
     // ---- stale-predecessor rejection ----
