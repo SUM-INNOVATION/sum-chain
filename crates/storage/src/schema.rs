@@ -62,6 +62,14 @@ impl<'a> BlockStore<'a> {
     }
 
     /// Store a block by its hash
+    /// The stored bytes for a block hash, undecoded.
+    ///
+    /// For comparing what is already stored against what is about to be written,
+    /// without a decode/re-encode round trip that could mask a difference.
+    pub fn get_raw(&self, hash: &Hash) -> Result<Option<Vec<u8>>> {
+        self.db.get(cf::BLOCKS, hash.as_bytes())
+    }
+
     pub fn put(&self, block: &Block) -> Result<()> {
         let hash = block.hash();
         let bytes = block.to_bytes();
@@ -546,6 +554,15 @@ impl<'a> TxStore<'a> {
         let hash = tx.hash();
         let bytes = tx.to_bytes();
         self.db.put(cf::TRANSACTIONS, hash.as_bytes(), &bytes)
+    }
+
+    /// The stored bytes for a transaction hash, undecoded.
+    ///
+    /// For comparing what is already stored against what is about to be
+    /// written, without a decode/re-encode round trip that could mask a
+    /// difference.
+    pub fn get_raw(&self, hash: &Hash) -> Result<Option<Vec<u8>>> {
+        self.db.get(cf::TRANSACTIONS, hash.as_bytes())
     }
 
     /// Get a transaction by hash

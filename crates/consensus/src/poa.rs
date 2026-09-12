@@ -29,6 +29,22 @@ use crate::engine::{ConsensusEngine, ConsensusEvent, ForkChoice, LongestChainFor
 use crate::{ConsensusError, Result};
 
 /// Proof of Authority consensus engine
+/// How a block relates to the current chain, decided BEFORE it is executed.
+///
+/// Classifying first is the point: deciding afterwards is what let a block that
+/// loses fork choice write its state, journals and indexes and only then be
+/// rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Admission {
+    /// Extends the current head and wins fork choice. Publishes.
+    DirectExtension,
+    /// Loses fork choice. Never reaches the canonical publisher.
+    SideBranch,
+    /// Wins fork choice but does not extend the current head. Needs
+    /// ancestor-based whole-branch execution, not the one-block publisher.
+    Reorg,
+}
+
 pub struct PoAEngine {
     /// Database
     db: Arc<Database>,
@@ -446,7 +462,10 @@ impl PoAEngine {
             .executor
             .execute_block(&block, self.state.state_root(), &active_validators)?;
         let state_root = execution.computed_root();
-        let (executed, state_diff, contract_diff) = execution.into_parts();
+        // The diffs are no longer needed here: the journals they encode were
+        // bound to the candidate at execution completion and are written by the
+        // publisher, in the same batch as the state they invert.
+        let (executed, _state_diff, _contract_diff) = execution.into_parts();
 
         // Update state root in header
         block.header.state_root = state_root;
@@ -456,38 +475,35 @@ impl PoAEngine {
         let signature = sign(signing_hash.as_bytes(), validator_key.private_key());
         block.header.set_signature(*signature.as_bytes());
 
-        // Store receipts and transactions
-        let tx_store = TxStore::new(&self.db);
-        let receipt_store = ReceiptStore::new(&self.db);
-        let tx_index_store = TxIndexStore::new(&self.db);
+        // ── accept, then publish, then announce ─────────────────────────────
+        //
+        // Signing precedes the PUBLISHER, so a signing failure publishes nothing
+        // — no block record, no journals, no head. It does NOT precede every
+        // persistent write: `execute_block` above already wrote canonical state
+        // through the 36 unmigrated sites, and those are not undone by failing
+        // here. An earlier version of this comment claimed the stronger
+        // property, which is false until the ratchet reaches zero.
+        //
+        // Publication precedes every in-memory update and every event, so a
+        // publication failure announces nothing: a block the network hears about
+        // is a block that is durably on disk.
+        let accepted = executed.accept_produced(&block).map_err(|e| {
+            ConsensusError::InvalidBlock(format!(
+                "produced block {} at height {height} rejected: {e}",
+                block.hash()
+            ))
+        })?;
+        let accumulator = accepted.accumulator();
 
-        for (tx_index, tx) in block.transactions.iter().enumerate() {
-            tx_store.put(tx)?;
-            // Index transaction by sender and recipient for history queries
-            if let Err(e) = tx_index_store.index_transaction(tx, height, tx_index as u32) {
-                warn!("Failed to index transaction {}: {}", tx.hash(), e);
-            }
-        }
-        for receipt in executed.receipts() {
-            receipt_store.put(receipt)?;
-        }
+        accepted.publish().map_err(|e| {
+            ConsensusError::InvalidBlock(format!(
+                "publishing produced block {} at height {height} failed: {e}",
+                block.hash()
+            ))
+        })?;
 
-        // Store state diff for potential reorg, keyed by (height, block hash).
-        // Keyed by height alone, a sibling at this height would overwrite this
-        // journal and a later reorg would revert the wrong block (issue #253).
-        let block_hash = block.hash();
-        self.state
-            .save_state_diff(height, &block_hash, state_diff)?;
-        // Persist the contract-state diff alongside the account diff, with
-        // identical timing, so a reorg reverts both together.
-        self.state
-            .save_contract_state_diff(height, &block_hash, contract_diff)?;
-
-        // Store the block
-        let block_store = BlockStore::new(&self.db);
-        block_store.put(&block)?;
-        block_store.set_latest_hash(&block.hash())?;
-        block_store.set_latest_height(height)?;
+        // ── only after a durable commit ─────────────────────────────────────
+        self.state.set_state_root(accumulator);
 
         // Update best block
         *self.best_block.write() = Some(block.clone());
@@ -539,29 +555,217 @@ impl PoAEngine {
         self.executor
             .validate_block(&block, parent.as_ref(), &active_validators)?;
 
-        // Execute block. Authorize validator-quorum actions against the same
-        // active set used to validate/produce this block (not the node tip).
-        let execution = self
-            .executor
-            .execute_block(&block, self.state.state_root(), &active_validators)?;
+        // ── classify BEFORE executing ───────────────────────────────────────
+        //
+        // Fork choice is a decision about the block, not about its execution, so
+        // it can be made first — and must be. Deciding afterwards is what let a
+        // losing side block write its state, journals and indexes before being
+        // rejected.
+        let current_best = self.best_block.read().clone();
+        let admission = match &current_best {
+            None => Admission::DirectExtension,
+            Some(best) => {
+                if !self.fork_choice.should_switch(best, &block) {
+                    Admission::SideBranch
+                } else if block.header.parent_hash == best.hash() {
+                    Admission::DirectExtension
+                } else {
+                    Admission::Reorg
+                }
+            }
+        };
+
+        match admission {
+            Admission::DirectExtension => {
+                let execution = self.executor.execute_block(
+                    &block,
+                    self.state.state_root(),
+                    &active_validators,
+                )?;
+                let (executed, _state_diff, _contract_diff) = execution.into_parts();
+
+                // Acceptance owns the root comparison AND the historical
+                // compatibility window; the cutoff lives inside
+                // `accept_imported` so no call site can widen it.
+                let accepted = executed.accept_imported(&block).map_err(|e| {
+                    ConsensusError::InvalidBlock(format!(
+                        "block {hash} at height {height} rejected: {e}"
+                    ))
+                })?;
+                let accumulator = accepted.accumulator();
+
+                // One batch: state, block by hash and height, transactions,
+                // receipts, both indexes, all journals, latest head.
+                accepted.publish().map_err(|e| {
+                    ConsensusError::InvalidBlock(format!(
+                        "publishing block {hash} at height {height} failed: {e}"
+                    ))
+                })?;
+
+                // ── only after a durable commit ─────────────────────────────
+                self.state.set_state_root(accumulator);
+                *self.best_block.write() = Some(block.clone());
+                let tx_hashes: Vec<Hash> = block.transactions.iter().map(|tx| tx.hash()).collect();
+                self.mempool.remove_batch(&tx_hashes);
+                let _ = self.event_tx.send(ConsensusEvent::BlockImported(block));
+            }
+
+            Admission::SideBranch => {
+                // A block that loses fork choice must not reach the canonical
+                // publisher: no state, no journals, no height index, no head.
+                //
+                // It is still executed, because validity is not yet decidable
+                // without executing — and that execution still writes canonical
+                // state directly through the 36 unmigrated sites. That is a
+                // KNOWN and UNFIXED hole: until the ratchet reaches zero, a side
+                // block dirties canonical state even though it publishes
+                // nothing. Recording it here rather than implying the publisher
+                // closes it.
+                let execution = self.executor.execute_block(
+                    &block,
+                    self.state.state_root(),
+                    &active_validators,
+                )?;
+                let (executed, _state_diff, _contract_diff) = execution.into_parts();
+                // Acceptance still runs, so an invalid side block is refused on
+                // the same terms as a canonical one.
+                let _ = executed.accept_imported(&block).map_err(|e| {
+                    ConsensusError::InvalidBlock(format!(
+                        "side block {hash} at height {height} rejected: {e}"
+                    ))
+                })?;
+
+                self.archive_noncanonical(&block)?;
+                debug!(
+                    "Block {} at height {} lost fork choice; archived without publishing",
+                    hash, height
+                );
+            }
+
+            Admission::Reorg => {
+                // NOT the one-block publisher. A reorg is one decision over a
+                // whole branch: the candidate must be built by executing every
+                // block from the common ancestor and committed once. Publishing
+                // the new head alone would leave the abandoned branch's state
+                // applied beneath it.
+                //
+                // Until that package lands, the pre-existing sequence is kept
+                // verbatim. It is not atomic and does not become so by sitting
+                // next to code that is.
+                self.import_reorg_legacy(block, &block_store, height, hash, &active_validators)
+                    .await?;
+            }
+        }
+
+        info!("Imported block {} at height {}", hash, height);
+
+        // Check if any blocks can be finalized
+        self.check_finality();
+
+        // Check if we need to update the validator set (epoch boundary)
+        self.maybe_update_validator_set(height, &hash);
+
+        Ok(())
+    }
+
+    /// Retain a block that lost fork choice, without touching canonical state.
+    ///
+    /// Only branch-safe rows: `BLOCKS[block_hash]` is keyed by the block's own
+    /// hash, and `TRANSACTIONS[tx_hash]` by the transaction's, so neither can
+    /// overwrite a different branch's row — and a transaction present on both
+    /// branches serializes identically, which is checked rather than assumed.
+    ///
+    /// Deliberately NOT archived: `BLOCK_HEIGHT`, which is keyed by height alone
+    /// and would point the canonical height index at an abandoned block;
+    /// receipts, keyed by transaction hash but whose contents are branch
+    /// -specific, so a side branch's receipt would overwrite the canonical one
+    /// for the same transaction; the address indexes, keyed by
+    /// `(address, height, tx_index)` with no branch identity; and state,
+    /// journals and latest-head metadata, none of which a non-canonical block
+    /// may touch at all.
+    fn archive_noncanonical(&self, block: &Block) -> Result<()> {
+        let block_hash = block.hash();
+        let block_store = BlockStore::new(&self.db);
+        let tx_store = TxStore::new(&self.db);
+
+        // ── pass 1: preflight, retaining nothing ────────────────────────────
+        //
+        // Every row is compared against freshly-computed bytes and the bytes are
+        // dropped immediately. An earlier version kept the serialized payload of
+        // every missing transaction in a `Vec` between the two passes — a second
+        // copy of the block's payload, held outside any accounting, which is the
+        // same unaccounted duplication removed from the publication path and
+        // from the execution subject. Serializing twice is the cost; retaining a
+        // block-sized buffer is not.
+        //
+        // These rows are content-addressed — the key IS the hash of the value —
+        // so differing bytes under one key mean a collision or an encoding
+        // change, not a legitimate update. Refusing is the only safe answer,
+        // and it must happen before anything is written.
+        if let Some(existing) = block_store.get_raw(&block_hash)? {
+            if existing != block.to_bytes() {
+                return Err(ConsensusError::InvalidBlock(format!(
+                    "archiving side block {block_hash}: a different block is already \
+                     stored under that hash; refusing to overwrite"
+                )));
+            }
+        }
+        for tx in &block.transactions {
+            let tx_hash = tx.hash();
+            if let Some(existing) = tx_store.get_raw(&tx_hash)? {
+                if existing != tx.to_bytes() {
+                    return Err(ConsensusError::InvalidBlock(format!(
+                        "archiving side block {block_hash}: transaction {tx_hash} is \
+                         already stored with different bytes; refusing to overwrite"
+                    )));
+                }
+            }
+        }
+
+        // ── pass 2: stage everything into one batch ─────────────────────────
+        //
+        // Rows that already exist are written again rather than skipped. They
+        // are content-addressed and pass 1 proved them byte-identical, so the
+        // rewrite is a no-op in content — and not tracking which were missing is
+        // precisely what lets pass 1 keep nothing.
+        let mut batch = self.db.batch();
+        batch.put(
+            sumchain_storage::db::cf::BLOCKS,
+            block_hash.as_bytes(),
+            &block.to_bytes(),
+        )?;
+        for tx in &block.transactions {
+            batch.put(
+                sumchain_storage::db::cf::TRANSACTIONS,
+                tx.hash().as_bytes(),
+                &tx.to_bytes(),
+            )?;
+        }
+        batch.commit()?;
+        Ok(())
+    }
+
+    /// The pre-existing reorg import sequence, preserved verbatim.
+    ///
+    /// Not atomic, and it does not become atomic by sitting beside code that is.
+    /// A reorg is one decision over a whole branch — the candidate must be built
+    /// by executing every block from the common ancestor and committed once —
+    /// and the one-block publisher cannot express that. Replaced by the
+    /// ancestor-based package.
+    async fn import_reorg_legacy(
+        &self,
+        block: Block,
+        block_store: &BlockStore<'_>,
+        height: BlockHeight,
+        hash: Hash,
+        active_validators: &[[u8; 32]],
+    ) -> Result<()> {
+        let execution =
+            self.executor
+                .execute_block(&block, self.state.state_root(), active_validators)?;
         let state_root = execution.computed_root();
         let (executed, state_diff, contract_diff) = execution.into_parts();
 
-        // Verify state root matches
-        //
-        // HISTORICAL EXCEPTION (height <= 496720):
-        // A state root cache bug caused Hash::ZERO to be mixed into
-        // compute_block_state_root() after node restarts during this era.
-        // Some blocks in this range carry incorrect state roots permanently
-        // committed in their headers. A fresh-syncing node computes the
-        // *correct* root which won't match, so we skip verification and
-        // force-adopt the header's root to keep the accumulator aligned
-        // for the next block.
-        //
-        // ROOT CAUSE FIX: load_chain() now calls
-        //   self.state.set_state_root(block.header.state_root)
-        // on startup (line ~301), preventing the bug for all new blocks.
-        // Strict enforcement applies for height > 496720.
         if block.header.state_root != state_root {
             if height <= 496720 {
                 warn!(
@@ -578,17 +782,13 @@ impl PoAEngine {
             }
         }
 
-        // Store block
         block_store.put(&block)?;
 
-        // Store receipts and transactions
         let tx_store = TxStore::new(&self.db);
         let receipt_store = ReceiptStore::new(&self.db);
         let tx_index_store = TxIndexStore::new(&self.db);
-
         for (tx_index, tx) in block.transactions.iter().enumerate() {
             tx_store.put(tx)?;
-            // Index transaction by sender and recipient for history queries
             if let Err(e) = tx_index_store.index_transaction(tx, height, tx_index as u32) {
                 warn!("Failed to index transaction {}: {}", tx.hash(), e);
             }
@@ -597,57 +797,30 @@ impl PoAEngine {
             receipt_store.put(receipt)?;
         }
 
-        // Store state diff, keyed by (height, block hash) so importing a sibling
-        // at this height cannot overwrite another branch's undo journal — the
-        // exact mechanism behind issue #253.
         let block_hash = block.hash();
         self.state
             .save_state_diff(height, &block_hash, state_diff)?;
-        // Persist the contract-state diff alongside the account diff, with
-        // identical timing, so a reorg reverts both together.
         self.state
             .save_contract_state_diff(height, &block_hash, contract_diff)?;
 
-        // Update best block if this extends the chain
         let current_best = self.best_block.read().clone();
-        let should_update = match &current_best {
-            Some(best) => self.fork_choice.should_switch(best, &block),
-            None => true,
-        };
-
-        if should_update {
-            // Handle reorg if needed
-            if let Some(old_best) = &current_best {
-                if block.header.parent_hash != old_best.hash() {
-                    // This is a reorg
-                    let reorg_depth = self.handle_reorg(old_best, &block).await?;
-                    let _ = self.event_tx.send(ConsensusEvent::Reorg {
-                        old_head: old_best.hash(),
-                        new_head: block.hash(),
-                        depth: reorg_depth,
-                    });
-                }
-            }
-
-            block_store.set_latest_hash(&hash)?;
-            block_store.set_latest_height(height)?;
-            *self.best_block.write() = Some(block.clone());
-
-            // Remove included transactions from mempool
-            let tx_hashes: Vec<Hash> = block.transactions.iter().map(|tx| tx.hash()).collect();
-            self.mempool.remove_batch(&tx_hashes);
-
-            let _ = self.event_tx.send(ConsensusEvent::BlockImported(block));
+        if let Some(old_best) = &current_best {
+            let reorg_depth = self.handle_reorg(old_best, &block).await?;
+            let _ = self.event_tx.send(ConsensusEvent::Reorg {
+                old_head: old_best.hash(),
+                new_head: block.hash(),
+                depth: reorg_depth,
+            });
         }
 
-        info!("Imported block {} at height {}", hash, height);
+        block_store.set_latest_hash(&hash)?;
+        block_store.set_latest_height(height)?;
+        *self.best_block.write() = Some(block.clone());
 
-        // Check if any blocks can be finalized
-        self.check_finality();
+        let tx_hashes: Vec<Hash> = block.transactions.iter().map(|tx| tx.hash()).collect();
+        self.mempool.remove_batch(&tx_hashes);
 
-        // Check if we need to update the validator set (epoch boundary)
-        self.maybe_update_validator_set(height, &hash);
-
+        let _ = self.event_tx.send(ConsensusEvent::BlockImported(block));
         Ok(())
     }
 
