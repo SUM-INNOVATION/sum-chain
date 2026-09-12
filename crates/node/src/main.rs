@@ -870,7 +870,7 @@ async fn main() -> Result<()> {
                 let block_hash = block.hash();
 
                 // 1. Revert account state using the stored state diff.
-                if let Some(diff) = state_store.get_state_diff(height)? {
+                if let Some(diff) = state_store.get_state_diff(height, &block_hash)? {
                     for (address, old_state, _new_state) in diff.changes.iter().rev() {
                         match old_state {
                             Some(prev) => state_store.put_account(address, prev)?,
@@ -893,7 +893,7 @@ async fn main() -> Result<()> {
                 }
 
                 // 3. Delete the state diff.
-                state_store.delete_state_diff(height)?;
+                state_store.delete_state_diff(height, &block_hash)?;
 
                 // 4. Delete the height -> hash index entry.
                 db.delete(cf::BLOCK_HEIGHT, &height.to_be_bytes())?;
