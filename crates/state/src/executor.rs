@@ -252,6 +252,29 @@ pub struct BlockExecutor {
 /// proceed locally, and must be replaced before publication.
 const CANDIDATE_LIMIT_SCAFFOLD: u64 = 1 << 30;
 
+/// Everything one block's execution produced, INCLUDING the unpublished
+/// candidate that holds its buffered writes.
+///
+/// The candidate is returned rather than published here on purpose. Executing a
+/// block and deciding it is canonical are different decisions made by different
+/// layers: the executor computes, consensus decides. Publishing inside
+/// `execute_block` would mean a block reaches canonical state before its root
+/// has been checked against its own header, which is the situation this whole
+/// package exists to remove.
+///
+/// Dropping this without publishing discards every buffered write — which is
+/// the rollback, and is why a rejected block leaves no trace once the remaining
+/// direct writes are migrated.
+pub struct BlockExecution<'db> {
+    pub receipts: Vec<Receipt>,
+    /// The accumulator this execution computed. NOT read from the header.
+    pub computed_root: Hash,
+    pub state_diff: StateDiff,
+    pub contract_diff: ContractStateDiff,
+    /// Buffered writes, unpublished and unverified.
+    pub candidate: CandidateExecution<'db>,
+}
+
 impl BlockExecutor {
     /// Create a new block executor
     pub fn new(state: Arc<StateManager>, db: Arc<Database>, params: ChainParams) -> Self {
@@ -2945,7 +2968,7 @@ impl BlockExecutor {
         // Active PoA validator set for THIS block's height (threaded from the
         // consensus engine). Forwarded per-tx to the validator-quorum authority.
         active_validator_pubkeys: &[[u8; 32]],
-    ) -> Result<(Vec<Receipt>, Hash, StateDiff, ContractStateDiff)> {
+    ) -> Result<BlockExecution<'_>> {
         info!(
             "Executing block {} with {} transactions",
             block.height(),
@@ -3119,7 +3142,13 @@ impl BlockExecutor {
             state_root
         );
 
-        Ok((receipts, state_root, state_diff, contract_diff))
+        Ok(BlockExecution {
+            receipts,
+            computed_root: state_root,
+            state_diff,
+            contract_diff,
+            candidate,
+        })
     }
 
     /// Gated compute-pool APPLY seam (issue #130).

@@ -442,9 +442,16 @@ impl PoAEngine {
         // Execute block to get state root. Authorize validator-quorum actions
         // against the same active set used to select this height's proposer.
         let active_validators = self.get_active_validator_set();
-        let (receipts, state_root, state_diff, contract_diff) = self
+        let execution = self
             .executor
             .execute_block(&block, self.state.state_root(), &active_validators)?;
+        let (receipts, state_root, state_diff, contract_diff, candidate) = (
+            execution.receipts,
+            execution.computed_root,
+            execution.state_diff,
+            execution.contract_diff,
+            execution.candidate,
+        );
 
         // Update state root in header
         block.header.state_root = state_root;
@@ -539,9 +546,16 @@ impl PoAEngine {
 
         // Execute block. Authorize validator-quorum actions against the same
         // active set used to validate/produce this block (not the node tip).
-        let (receipts, state_root, state_diff, contract_diff) = self
+        let execution = self
             .executor
             .execute_block(&block, self.state.state_root(), &active_validators)?;
+        let (receipts, state_root, state_diff, contract_diff, candidate) = (
+            execution.receipts,
+            execution.computed_root,
+            execution.state_diff,
+            execution.contract_diff,
+            execution.candidate,
+        );
 
         // Verify state root matches
         //

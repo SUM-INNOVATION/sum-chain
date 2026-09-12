@@ -34,8 +34,7 @@
 //! reach it.
 
 use sumchain_primitives::{Block, Hash};
-use sumchain_storage::candidate::{CandidateExecution, VerifiedCandidate};
-use sumchain_storage::db::Database;
+use sumchain_storage::candidate::VerifiedCandidate;
 
 use crate::executor::BlockExecutor;
 use crate::{Result, StateError};
@@ -43,32 +42,27 @@ use crate::{Result, StateError};
 /// Execute `block` as a candidate and verify its accumulator against its own
 /// header.
 ///
-/// `limit` is the logical write-set ceiling for the candidate. It is explicit
-/// because it is a versioned consensus parameter derived from measured write
-/// sets — a ceiling that can refuse a write helps decide whether a block is
-/// applicable — and is not defaulted anywhere.
+/// The candidate's write-set ceiling is owned by `execute_block`, which creates
+/// the candidate. It is currently a scaffold constant and must become the
+/// versioned consensus parameter before publication.
 ///
 /// Returns a [`VerifiedCandidate`], the only type from which canonical
 /// publication can begin.
 pub(crate) fn execute_candidate_block<'db>(
-    executor: &BlockExecutor,
-    db: &'db Database,
-    limit: u64,
+    executor: &'db BlockExecutor,
     block: &Block,
     parent_state_root: Hash,
     active_validator_pubkeys: &[[u8; 32]],
 ) -> Result<VerifiedCandidate<'db>> {
-    let candidate = CandidateExecution::new(db, limit);
-
     // Execution produces the accumulator. It is never supplied by the caller,
     // and the caller never sees it before the comparison.
-    let (_receipts, computed_root, _state_diff, _contract_diff) =
-        executor.execute_block(block, parent_state_root, active_validator_pubkeys)?;
+    let execution = executor.execute_block(block, parent_state_root, active_validator_pubkeys)?;
 
     // The expected root is read from the header inside `verify_for_block`, so
     // it is never a value this function could substitute.
-    candidate
-        .verify_for_block(block, computed_root)
+    execution
+        .candidate
+        .verify_for_block(block, execution.computed_root)
         .map_err(|e| {
             StateError::InvalidOperation(format!(
                 "candidate block {} at height {} rejected: {e}",
