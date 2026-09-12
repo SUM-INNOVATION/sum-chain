@@ -5,7 +5,12 @@
 //! closed on a bad pre-state, credits no account, and lands canonical supply at
 //! 800B while account balances stay 1B (the 799B lives in the reserve ledger).
 
+mod common;
+
 use std::sync::Arc;
+
+use sumchain_genesis::ChainParams;
+use sumchain_state::executor::BlockExecutor;
 
 use sumchain_primitives::staking::DelegationInfo;
 use sumchain_primitives::supply::{
@@ -27,19 +32,43 @@ const MAINNET_SHORTFALL: u128 = 1_003 * KOPPA;
 
 /// Fresh db + state on the mainnet chain (id 1), pre-funded so accounted supply
 /// == exactly 1B (two accounts of 500M, mirroring the two genesis validators).
-fn mainnet_1b() -> (Arc<Database>, Arc<StateManager>, TempDir) {
+fn mainnet_1b() -> (Arc<Database>, Arc<StateManager>, TempDir, BlockExecutor) {
+    mainnet_1b_on(1)
+}
+
+/// As [`mainnet_1b`], on an arbitrary chain id.
+fn mainnet_1b_on(chain_id: u64) -> (Arc<Database>, Arc<StateManager>, TempDir, BlockExecutor) {
     let dir = TempDir::new().unwrap();
     let db = Arc::new(Database::open_default(dir.path()).unwrap());
-    let state = Arc::new(StateManager::new(db.clone(), 1));
+    let state = Arc::new(StateManager::new(db.clone(), chain_id));
+    let exec = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
     let half = GENESIS_ACCOUNTED_SUPPLY / 2;
     state.credit(&Address::new([1u8; 20]), half).unwrap();
     state.credit(&Address::new([2u8; 20]), half).unwrap();
-    (db, state, dir)
+    (db, state, dir, exec)
+}
+
+/// A fixed proposer key for the blocks these tests publish.
+fn proposer() -> [u8; 32] {
+    [0x5Au8; 32]
+}
+
+/// Run the correction the way the chain does: publish a block at `height`.
+///
+/// The correction is a block-level effect inside `execute_block`, so this is
+/// the real path — execute, accept, publish — and not a fixture that commits
+/// what a candidate staged.
+fn publish_at(
+    state: &Arc<StateManager>,
+    exec: &BlockExecutor,
+    height: u64,
+) {
+    common::publish_empty_block(state, exec, height, &proposer());
 }
 
 #[test]
 fn migration_applies_once_and_lands_800b_with_accounts_unchanged() {
-    let (db, _state, _dir) = mainnet_1b();
+    let (db, state, _dir, exec) = mainnet_1b();
     let store = SupplyStore::new(db.clone());
 
     // Pre: dormant, canonical == accounted == 1B, no reserve.
@@ -47,7 +76,8 @@ fn migration_applies_once_and_lands_800b_with_accounts_unchanged() {
     assert_eq!(accounted_account_supply(&db).unwrap(), GENESIS_ACCOUNTED_SUPPLY);
     assert!(store.get_reserve().unwrap().is_none());
 
-    let applied = apply_supply_correction_if_needed(&db, 1, 8_900_000).unwrap();
+    publish_at(&state, &exec, 8_900_000);
+    let applied = SupplyStore::new(db.clone()).is_migration_applied().unwrap();
     assert!(applied, "correction applies on first eligible block");
 
     // Canonical supply is now 800B; the 799B delta is in the reserve ledger.
@@ -70,10 +100,12 @@ fn migration_applies_once_and_lands_800b_with_accounts_unchanged() {
         "reserve is a ledger, not an account; balances must stay 1B"
     );
     // The reserve is NOT an account balance.
-    assert_eq!(_state.get_balance(&Address::ZERO).unwrap(), 0, "Address::ZERO untouched");
+    assert_eq!(state.get_balance(&Address::ZERO).unwrap(), 0, "Address::ZERO untouched");
 
     // Idempotent / replay-safe: a second call is a no-op and mutates nothing.
-    let again = apply_supply_correction_if_needed(&db, 1, 8_900_001).unwrap();
+    let before = SupplyStore::new(db.clone()).get_ledger().unwrap();
+    publish_at(&state, &exec, 8_900_001);
+    let again = SupplyStore::new(db.clone()).get_ledger().unwrap() != before;
     assert!(!again, "marker prevents re-application");
     let ledger2 = store.get_ledger().unwrap();
     assert_eq!(ledger2.migration_activation_height, 8_900_000, "height not overwritten");
@@ -82,8 +114,8 @@ fn migration_applies_once_and_lands_800b_with_accounts_unchanged() {
 
 #[test]
 fn canonical_equals_accounts_plus_reserve_invariant() {
-    let (db, _state, _dir) = mainnet_1b();
-    apply_supply_correction_if_needed(&db, 1, 1).unwrap();
+    let (db, state, _dir, exec) = mainnet_1b();
+    publish_at(&state, &exec, 1);
     let store = SupplyStore::new(db.clone());
     let accounts = accounted_account_supply(&db).unwrap();
     let reserve = store.get_reserve().unwrap().unwrap().total_remaining();
@@ -103,6 +135,7 @@ fn applies_when_shortfall_is_held_in_an_included_ledger() {
     let dir = TempDir::new().unwrap();
     let db = Arc::new(Database::open_default(dir.path()).unwrap());
     let state = Arc::new(StateManager::new(db.clone(), 1));
+    let exec = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
     // Accounts hold 1B − 1,003 Koppa (mirrors live accounted_account_supply).
     state
         .credit(&Address::new([1u8; 20]), GENESIS_ACCOUNTED_SUPPLY - MAINNET_SHORTFALL)
@@ -121,7 +154,8 @@ fn applies_when_shortfall_is_held_in_an_included_ledger() {
     assert_eq!(snap.active_delegations, MAINNET_SHORTFALL);
     assert_eq!(snap.economic_supply().unwrap(), GENESIS_ACCOUNTED_SUPPLY);
 
-    let applied = apply_supply_correction_if_needed(&db, 1, 1).unwrap();
+    publish_at(&state, &exec, 1);
+    let applied = SupplyStore::new(db.clone()).is_migration_applied().unwrap();
     assert!(applied, "measured economic supply == 1B → correction applies");
 
     let store = SupplyStore::new(db.clone());
@@ -149,6 +183,7 @@ fn applies_and_restores_a_truly_leaked_shortfall_via_a_larger_reserve() {
     let dir = TempDir::new().unwrap();
     let db = Arc::new(Database::open_default(dir.path()).unwrap());
     let state = Arc::new(StateManager::new(db.clone(), 1));
+    let exec = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
     state
         .credit(&Address::new([1u8; 20]), GENESIS_ACCOUNTED_SUPPLY - MAINNET_SHORTFALL)
         .unwrap();
@@ -156,7 +191,11 @@ fn applies_and_restores_a_truly_leaked_shortfall_via_a_larger_reserve() {
     let econ_before = native_supply_snapshot(&db).unwrap().economic_supply().unwrap();
     assert_eq!(econ_before, GENESIS_ACCOUNTED_SUPPLY - MAINNET_SHORTFALL);
 
-    assert!(apply_supply_correction_if_needed(&db, 1, 1).unwrap(), "still applies");
+    publish_at(&state, &exec, 1);
+    assert!(
+        SupplyStore::new(db.clone()).is_migration_applied().unwrap(),
+        "still applies"
+    );
 
     let store = SupplyStore::new(db.clone());
     let ledger = store.get_ledger().unwrap();
@@ -190,9 +229,11 @@ fn withholds_when_economic_supply_is_zero() {
     // nothing). Deterministic skip, nothing mutated.
     let dir = TempDir::new().unwrap();
     let db = Arc::new(Database::open_default(dir.path()).unwrap());
-    let _state = Arc::new(StateManager::new(db.clone(), 1));
+    let state = Arc::new(StateManager::new(db.clone(), 1));
+    let exec = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
 
-    let applied = apply_supply_correction_if_needed(&db, 1, 1).unwrap();
+    publish_at(&state, &exec, 1);
+    let applied = SupplyStore::new(db.clone()).is_migration_applied().unwrap();
     assert!(!applied, "must withhold on zero economic supply");
     assert!(!SupplyStore::new(db.clone()).is_migration_applied().unwrap());
     assert!(SupplyStore::new(db.clone()).get_reserve().unwrap().is_none());
@@ -208,9 +249,11 @@ fn withholds_when_economic_supply_exceeds_target() {
     let dir = TempDir::new().unwrap();
     let db = Arc::new(Database::open_default(dir.path()).unwrap());
     let state = Arc::new(StateManager::new(db.clone(), 1));
+    let exec = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
     state.credit(&Address::new([1u8; 20]), TARGET_CANONICAL_SUPPLY + KOPPA).unwrap();
 
-    let applied = apply_supply_correction_if_needed(&db, 1, 1).unwrap();
+    publish_at(&state, &exec, 1);
+    let applied = SupplyStore::new(db.clone()).is_migration_applied().unwrap();
     assert!(!applied, "must withhold when economic supply exceeds target");
     assert!(!SupplyStore::new(db.clone()).is_migration_applied().unwrap());
     let a = assess_supply_correction(&db, 1, false, sumchain_primitives::supply::supply_correction_migration_id());
@@ -221,7 +264,7 @@ fn withholds_when_economic_supply_exceeds_target() {
 fn assess_reports_precise_reasons() {
     let mid = sumchain_primitives::supply::supply_correction_migration_id();
     // Would-apply (mainnet, pre-migration, economic == 1B).
-    let (db, _state, _dir) = mainnet_1b();
+    let (db, state, _dir, exec) = mainnet_1b();
     let a = assess_supply_correction(&db, 1, false, mid);
     assert_eq!(a.reason, MigrationWithheldReason::NotWithheld);
     assert_eq!(a.economic_supply, GENESIS_ACCOUNTED_SUPPLY);
@@ -232,7 +275,7 @@ fn assess_reports_precise_reasons() {
         MigrationWithheldReason::WrongChainId
     );
     // Already applied.
-    apply_supply_correction_if_needed(&db, 1, 1).unwrap();
+    publish_at(&state, &exec, 1);
     let a2 = assess_supply_correction(&db, 1, true, mid);
     assert_eq!(a2.reason, MigrationWithheldReason::AlreadyApplied);
     assert_eq!(a2.reserve_delta, 0);
@@ -243,20 +286,22 @@ fn skips_on_non_mainnet_chain() {
     let dir = TempDir::new().unwrap();
     let db = Arc::new(Database::open_default(dir.path()).unwrap());
     let state = Arc::new(StateManager::new(db.clone(), 1337));
+    let exec = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
     state.credit(&Address::new([1u8; 20]), GENESIS_ACCOUNTED_SUPPLY).unwrap();
 
     // chain_id 1337 ≠ mainnet → not applicable, no error, no mutation.
-    let applied = apply_supply_correction_if_needed(&db, 1337, 1).unwrap();
+    publish_at(&state, &exec, 1);
+    let applied = SupplyStore::new(db.clone()).is_migration_applied().unwrap();
     assert!(!applied);
     assert!(!SupplyStore::new(db).is_migration_applied().unwrap());
 }
 
 #[test]
 fn state_digest_none_while_dormant_some_after() {
-    let (db, _state, _dir) = mainnet_1b();
+    let (db, state, _dir, exec) = mainnet_1b();
     let store = SupplyStore::new(db.clone());
     assert!(store.state_digest().unwrap().is_none(), "no fold before correction");
-    apply_supply_correction_if_needed(&db, 1, 1).unwrap();
+    publish_at(&state, &exec, 1);
     assert!(store.state_digest().unwrap().is_some(), "folded after correction");
 }
 
@@ -270,16 +315,29 @@ fn restart_replay_preserves_marker_and_digest() {
     {
         let db = Arc::new(Database::open_default(dir.path()).unwrap());
         let state = Arc::new(StateManager::new(db.clone(), 1));
+        let exec =
+            BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let half = GENESIS_ACCOUNTED_SUPPLY / 2;
         state.credit(&Address::new([1u8; 20]), half).unwrap();
         state.credit(&Address::new([2u8; 20]), half).unwrap();
-        assert!(apply_supply_correction_if_needed(&db, 1, 8_900_000).unwrap());
+        publish_at(&state, &exec, 8_900_000);
+        assert!(SupplyStore::new(db.clone()).is_migration_applied().unwrap());
         digest_before = SupplyStore::new(db.clone()).state_digest().unwrap().unwrap();
     } // drop → close the DB
+    // A fresh handle on the same directory, and a fresh executor: the restart
+    // must reconstruct everything from what was published, which is the point.
     let db = Arc::new(Database::open_default(dir.path()).unwrap());
+    let state = Arc::new(StateManager::new(db.clone(), 1));
+    let exec = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
     let store = SupplyStore::new(db.clone());
     assert!(store.is_migration_applied().unwrap(), "marker survives restart");
-    assert!(!apply_supply_correction_if_needed(&db, 1, 8_900_001).unwrap(), "no rerun after restart");
+    let before = SupplyStore::new(db.clone()).get_ledger().unwrap();
+    publish_at(&state, &exec, 8_900_001);
+    assert_eq!(
+        SupplyStore::new(db.clone()).get_ledger().unwrap(),
+        before,
+        "no rerun after restart"
+    );
     assert_eq!(
         store.state_digest().unwrap().unwrap(),
         digest_before,

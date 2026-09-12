@@ -25,6 +25,7 @@ use sumchain_primitives::inference_settlement::{
 };
 use sumchain_primitives::{Address, Balance};
 use sumchain_storage::db::cf;
+use sumchain_storage::exec_view::ExecutionView;
 use sumchain_storage::Database;
 use tracing::info;
 
@@ -126,6 +127,7 @@ impl InferenceSettlementExecutor {
     #[allow(clippy::too_many_arguments)]
     pub fn execute(
         &self,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         operation: &InferenceSettlementOperation,
         state: &StateManager,
@@ -148,13 +150,14 @@ impl InferenceSettlementExecutor {
                 self.fund_session(sender, &req.session_id, req.amount, state)
             }
             InferenceSettlementOperation::ClaimReward(req) => {
-                self.claim_reward(sender, &req.session_id, state, block_height, chain_params)
+                self.claim_reward(view, sender, &req.session_id, state, block_height, chain_params)
             }
             InferenceSettlementOperation::OpenDispute(req) => {
                 self.open_dispute(sender, req, block_height, chain_params)
             }
             InferenceSettlementOperation::ResolveDispute(req) => {
                 self.resolve_dispute(
+                    view,
                     req,
                     state,
                     block_height,
@@ -357,6 +360,7 @@ impl InferenceSettlementExecutor {
 
     fn claim_reward(
         &self,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         session_id: &str,
         state: &StateManager,
@@ -473,13 +477,14 @@ impl InferenceSettlementExecutor {
         // advance the verifier milestone counter. No-ops until the supply
         // correction is applied.
         {
-            let supply = crate::supply::SupplyStore::new(self.db.clone());
-            supply.accrue_earned_credit(
+            use crate::supply::SupplyStore;
+            SupplyStore::accrue_earned_credit(
+                view,
                 sender,
                 sumchain_primitives::supply::ServiceKind::Compute,
                 session.reward_per_verifier,
             )?;
-            supply.record_settlement_claim(sender)?;
+            SupplyStore::record_settlement_claim(view, sender)?;
         }
         session.remaining_escrow -= session.reward_per_verifier;
         session.claims_count += 1;
@@ -567,6 +572,7 @@ impl InferenceSettlementExecutor {
     #[allow(clippy::too_many_arguments)]
     fn resolve_dispute(
         &self,
+        view: &mut ExecutionView<'_, '_>,
         req: &ResolveInferenceDisputeRequest,
         state: &StateManager,
         block_height: u64,
@@ -662,9 +668,10 @@ impl InferenceSettlementExecutor {
             // failure alone never reaches this branch — only an explicit denied
             // dispute does.
             {
-                let supply = crate::supply::SupplyStore::new(self.db.clone());
-                supply.record_denied_dispute(&req.verifier)?;
-                supply.forfeit_locked_grant(
+                use crate::supply::SupplyStore;
+                SupplyStore::record_denied_dispute(view, &req.verifier)?;
+                SupplyStore::forfeit_locked_grant(
+                    view,
                     &req.verifier,
                     sumchain_primitives::supply::ServiceKind::Compute,
                 )?;

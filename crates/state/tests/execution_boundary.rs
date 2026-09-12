@@ -60,11 +60,11 @@ use std::path::Path;
 /// erosion this guard exists to catch.
 ///
 /// Production-only totals so far: 42 before the education subsystem, 41 after
-/// it, 40 after the compute-pool cluster, 39 after the beacon cluster.
+/// it, 40 after the compute-pool cluster, 39 after the beacon cluster, 30 after
+/// supply.
 fn budget() -> BTreeMap<&'static str, usize> {
     BTreeMap::from([
         ("storage_metadata.rs", 15),
-        ("supply.rs", 9),
         ("node_registry.rs", 6),
         ("inference_settlement_executor.rs", 4),
         ("beacon_store.rs", 1),
@@ -905,6 +905,21 @@ fn migrated_execution_paths_take_no_self_receiver() {
         ("beacon_store.rs", "fn stage_transition("),
         ("beacon_store.rs", "fn stage_epoch_transition("),
         ("beacon_manager.rs", "fn load_from_candidate("),
+        ("supply.rs", "fn v_get_ledger("),
+        ("supply.rs", "fn v_get_reserve("),
+        ("supply.rs", "fn v_state_digest("),
+        ("supply.rs", "fn accrue_earned_credit("),
+        ("supply.rs", "fn record_por_proof("),
+        ("supply.rs", "fn record_settlement_claim("),
+        ("supply.rs", "fn record_denied_dispute("),
+        ("supply.rs", "fn award_grant("),
+        ("supply.rs", "fn claim_validator_grant("),
+        ("supply.rs", "fn claim_milestone_grants("),
+        ("supply.rs", "fn unlock_grant("),
+        ("supply.rs", "fn forfeit_locked_grant("),
+        ("supply.rs", "fn apply_reserve_release("),
+        ("supply.rs", "fn apply_monetary_mint("),
+        ("supply.rs", "fn apply_supply_correction_if_needed("),
     ];
 
     let files = rust_files();
@@ -937,6 +952,230 @@ fn migrated_execution_paths_take_no_self_receiver() {
              candidate block.\n  parameters: {params}"
         );
     }
+}
+
+/// No test may publish a candidate by writing its rows to the database itself.
+///
+/// `AcceptedCandidate::publish` is the only way state becomes canonical, and
+/// `ApplicationOverlay::into_batch` is crate-private to `sumchain-storage` to
+/// keep it that way. A test fixture that reads an overlay and commits what it
+/// finds is a SECOND publisher: it decides what reaches canonical storage
+/// without executing, accepting, or binding to a block, and nothing about it
+/// stays in step when the real publisher changes.
+///
+/// This existed briefly, as `publish_staged_cf`, and it hid a real problem —
+/// one overlay was standing in for governance operations at four different
+/// heights, which cannot be one block. A test whose subject is committed state
+/// must publish a block; a test whose subject is same-block behaviour must
+/// assert through the candidate and publish nothing.
+#[test]
+fn no_test_publishes_a_candidate_by_hand() {
+    let root = state_src().join("tests");
+    for (name, src) in rust_files_in(&root) {
+        // This file names the patterns in order to forbid them, so it matches
+        // itself. It holds no fixtures — only guards — so skipping it costs no
+        // coverage, and naming it here is clearer than splitting the literals
+        // to evade the scan.
+        if name == "execution_boundary.rs" {
+            continue;
+        }
+        let code = strip_test_modules(&src);
+        for (fn_name, body) in top_level_fns(&code) {
+            assert!(
+                !publishes_by_hand(&body),
+                "{name} `{fn_name}` reads a candidate and then writes the \
+                 database, which makes it a second publisher. Publish a block \
+                 through `common::publish_block` (execute -> accept -> publish) \
+                 when the subject is committed state, or assert through the \
+                 candidate and publish nothing when it is not."
+            );
+        }
+    }
+}
+
+/// Whether one function body has the shape of a hand-rolled publisher.
+///
+/// # What it looks for
+///
+/// ORDER is the whole distinction. Writing the database and THEN opening a
+/// candidate is seeding a parent, which every test may do. Reading a candidate
+/// and then writing the database is copying staged rows into canonical storage,
+/// which is publishing.
+///
+/// The write side is receiver-NAME independent. An earlier version matched the
+/// literal `db.put(`, so renaming the binding to `database` walked straight
+/// past it — the identical fixture, one identifier different. A write is now any
+/// `.batch(`, or any `.put(`/`.delete(` whose receiver is not candidate-side.
+/// `Database::batch` is the only way to obtain a `WriteBatch`, so the first
+/// alone catches the whole batch-and-commit shape whatever the handle is called.
+///
+/// # What it does NOT catch
+///
+/// This is a source-level check with no type information, and its limits are
+/// worth stating rather than discovering:
+///
+/// * **Receivers are classified by NAME.** A binding whose name contains
+///   `view`, `overlay` or `batch` is treated as candidate-side. A `Database`
+///   deliberately named `staging_view` would be missed. The classification is
+///   by intent, not by type, because a source scan has no types.
+/// * **Indirection is not followed.** A function that reads a candidate and
+///   calls a helper which writes is two functions, and neither matches on its
+///   own. The helper would be caught only if it also read a candidate.
+/// * **Only `crates/state/tests` is scanned**, and only top-level functions in
+///   it — a publisher inside a nested module or in another crate's tests is out
+///   of range.
+/// * **A journal-to-database fixture is not a match.** Replaying a returned
+///   journal into a batch never reads an overlay, so it does not trip this.
+///   Those exist, they publish only what a candidate actually produced, and the
+///   ordering rule is not what governs them.
+///
+/// What it does cover is the shape that actually appeared and the rename that
+/// would have hidden it, both pinned by
+/// `the_hand_publication_guard_is_receiver_name_independent`.
+fn publishes_by_hand(body: &str) -> bool {
+    let flat: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+
+    let first_read = [
+        "preimages_for(",
+        "overlay.get(",
+        "overlay.iter(",
+        "view.get(",
+        "view.iter(",
+    ]
+    .iter()
+    .filter_map(|p| flat.find(p))
+    .min();
+    let Some(first_read) = first_read else {
+        return false;
+    };
+
+    // Any `.batch(`, whatever the handle is called.
+    if let Some(at) = flat.find(".batch(") {
+        if at > first_read {
+            return true;
+        }
+    }
+
+    // A `.put(`/`.delete(` whose receiver is not candidate-side.
+    for method in [".put(", ".delete("] {
+        let mut from = 0usize;
+        while let Some(rel) = flat[from..].find(method) {
+            let at = from + rel;
+            from = at + method.len();
+            if at <= first_read {
+                continue;
+            }
+            let recv_start = flat[..at]
+                .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .map(|k| k + 1)
+                .unwrap_or(0);
+            let receiver = &flat[recv_start..at];
+            let candidate_side = receiver.contains("view")
+                || receiver.contains("overlay")
+                || receiver.contains("batch");
+            if !candidate_side {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// The guard must not key on one identifier. It used to, and the fixture it was
+/// written for slips past under any other name.
+#[test]
+fn the_hand_publication_guard_is_receiver_name_independent() {
+    const NAMED_DB: &str = "{
+        let keys: Vec<Vec<u8>> = overlay.preimages_for(cf).map(|(k, _)| k.clone()).collect();
+        let mut batch = db.batch();
+        for k in &keys { batch.put(cf, k, b\"v\").unwrap(); }
+        batch.commit().unwrap();
+    }";
+    // The SAME fixture, one identifier different.
+    const NAMED_DATABASE: &str = "{
+        let keys: Vec<Vec<u8>> = overlay.preimages_for(cf).map(|(k, _)| k.clone()).collect();
+        let mut batch = database.batch();
+        for k in &keys { batch.put(cf, k, b\"v\").unwrap(); }
+        batch.commit().unwrap();
+    }";
+    const NAMED_HANDLE: &str = "{
+        let rows = view.iter(cf).unwrap();
+        for r in rows { handle.put(cf, &r.0, &r.1).unwrap(); }
+    }";
+    assert!(publishes_by_hand(NAMED_DB));
+    assert!(
+        publishes_by_hand(NAMED_DATABASE),
+        "renaming the handle must not hide a hand-rolled publisher"
+    );
+    assert!(publishes_by_hand(NAMED_HANDLE));
+
+    // Seeding a parent BEFORE any candidate exists is not publishing, whatever
+    // the handle is called.
+    const SEED_FIRST: &str = "{
+        database.put(cf, &k, b\"committed\").unwrap();
+        let mut overlay = ApplicationOverlay::new(&database, LIMIT);
+        let view = ExecutionView::new(&mut overlay);
+        assert!(view.get(cf, &k).unwrap().is_some());
+    }";
+    assert!(!publishes_by_hand(SEED_FIRST));
+
+    // Writes into a candidate are not database writes, and neither is filling a
+    // `WriteBatch` that was obtained before any candidate read.
+    const CANDIDATE_ONLY: &str = "{
+        let rows = view.iter(cf).unwrap();
+        view.put(cf, &k, &v).unwrap();
+        my_overlay.delete(cf, &k).unwrap();
+        let _ = rows;
+    }";
+    assert!(!publishes_by_hand(CANDIDATE_ONLY));
+
+    // A function that never reads a candidate is not publishing one, however
+    // much it writes.
+    const NO_CANDIDATE_READ: &str = "{
+        let mut batch = db.batch();
+        batch.put(cf, &k, &v).unwrap();
+        batch.commit().unwrap();
+    }";
+    assert!(!publishes_by_hand(NO_CANDIDATE_READ));
+}
+
+/// Top-level `fn NAME(...) { ... }` items and their bodies.
+fn top_level_fns(src: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let b = src.as_bytes();
+    let mut i = 0usize;
+    while i < b.len() {
+        let rest = &src[i..];
+        let is_start = (i == 0 || b[i - 1] == b'\n')
+            && (rest.starts_with("fn ") || rest.starts_with("pub fn "));
+        if !is_start {
+            // Step by CHARACTERS, not bytes, so a multi-byte character in a
+            // comment cannot leave `i` inside one.
+            i += rest.chars().next().map(char::len_utf8).unwrap_or(1);
+            continue;
+        }
+        let after_kw = i + if rest.starts_with("pub ") { 7 } else { 3 };
+        // `find` on a &str yields a BYTE offset, and the source is UTF-8: an em
+        // dash in a doc comment is three bytes, so slicing by a character count
+        // would land mid-character and panic.
+        let name_end = src[after_kw..]
+            .char_indices()
+            .find(|(_, c)| !(c.is_alphanumeric() || *c == '_'))
+            .map(|(k, _)| after_kw + k)
+            .unwrap_or(src.len());
+        let name = src[after_kw..name_end].to_string();
+        match src[name_end..].find('{').map(|k| name_end + k) {
+            Some(open) => match matching_brace(src, open) {
+                Some(end) => {
+                    out.push((name, src[open..end].to_string()));
+                    i = end;
+                }
+                None => break,
+            },
+            None => break,
+        }
+    }
+    out
 }
 
 /// A `self` receiver is allowed on an execution path only where the receiving
@@ -994,18 +1233,20 @@ fn a_self_receiver_is_allowed_only_where_the_type_holds_no_database() {
     }
 }
 
-/// Execution-path functions of `BlockExecutor` that still carry a `self`
-/// receiver, with what each still reads from committed state.
+/// Execution-path functions that still hold a committed database handle, with
+/// what each still reads through it.
 ///
-/// `BlockExecutor` holds `Arc<Database>`, so `&self` on these is the same
-/// hazard the check above forbids — the difference is only that they are not
-/// finished. Listing them here keeps that visible and countable instead of
-/// letting an omission from `EXECUTION_FNS` read as "already migrated".
+/// The handle takes two forms and both are the same hazard: a `self` receiver
+/// on a type that owns `Arc<Database>`, or an explicit `&Arc<Database>`
+/// parameter. Either way the function can read committed state, which is what
+/// the check above forbids for a finished path. Listing them here keeps that
+/// visible and countable instead of letting an omission from `EXECUTION_FNS`
+/// read as "already migrated".
 ///
-/// Each row asserts BOTH that the function still takes `self` AND that it
+/// Each row asserts BOTH that the function still has such a handle AND that it
 /// already takes an `ExecutionView`: half-migrated, and known to be. A row
-/// cannot rot — when the last committed read goes, the `self` assertion fails
-/// and the row moves to `EXECUTION_FNS`.
+/// cannot rot — when the last committed read goes, the handle assertion fails
+/// and the row must move to `EXECUTION_FNS`.
 #[test]
 fn partially_migrated_execution_paths_are_declared() {
     /// `(file, signature prefix, what it still reads from committed state)`.
@@ -1024,8 +1265,9 @@ fn partially_migrated_execution_paths_are_declared() {
         (
             "executor.rs",
             "fn compute_block_state_root(",
-            "SupplyStore::new(self.db.clone()).state_digest(), folded into the \
-             consensus root and still reading the PARENT's supply state",
+            "nothing — the contract, supply, compute-pool and beacon folds all \
+             read the candidate now; the receiver remains for self.params and \
+             self.state",
         ),
         (
             "executor.rs",
@@ -1044,6 +1286,15 @@ fn partially_migrated_execution_paths_are_declared() {
             "nothing — it stages through the view; the receiver holds the \
              per-block accumulator slot",
         ),
+        (
+            "supply.rs",
+            "fn apply_supply_correction_if_needed(",
+            "the whole-ledger census — accounts, validator self-stake, active \
+             delegations, archive stake, fee pools, inference escrow and bonds \
+             — through `&Arc<Database>`. Those subsystems have not migrated, so \
+             committed IS where their rows are; this closes when they move. The \
+             reserve and ledger it WRITES are staged.",
+        ),
     ];
 
     let files = rust_files();
@@ -1061,8 +1312,9 @@ fn partially_migrated_execution_paths_are_declared() {
              `ExecutionView` at all.\n  parameters: {params}"
         );
         assert!(
-            takes_self_receiver(params),
-            "{file} `{sig}` no longer takes a `self` receiver — it is fully \
+            takes_self_receiver(params) || params.contains("Database"),
+            "{file} `{sig}` no longer holds a committed database handle — no \
+             `self` receiver and no `Database` parameter — so it is fully \
              migrated. Move it to EXECUTION_FNS and delete this row.\n  it was \
              listed as still reading: {reads}"
         );

@@ -53,6 +53,7 @@ use sumchain_primitives::governance::{
     RegisterQualifyingAssetRequest, VoteChoice, WeightRule,
 };
 use sumchain_primitives::{Address, Balance, Hash, TxStatus};
+use sumchain_storage::exec_view::ExecutionView;
 use sumchain_storage::{
     equity_balances_root, equity_merkle_verify, Database, EquityClassRoot, EquityStore, GovStore,
     QualifyingAsset, TokenStore,
@@ -158,6 +159,7 @@ enum Prepared {
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 pub fn execute(
+    view: &mut ExecutionView<'_, '_>,
     state: &Arc<StateManager>,
     db: &Arc<Database>,
     params: &ChainParams,
@@ -297,8 +299,10 @@ pub fn execute(
                 ..
             } = &prepared
             {
-                let reserve = crate::supply::SupplyStore::new(db.clone())
-                    .get_reserve()
+                // The candidate's reserve: a release earlier in this block has
+                // already drawn the pool down, and the bound check below must
+                // see that.
+                let reserve = crate::supply::SupplyStore::v_get_reserve(view)
                     .ok()
                     .flatten();
                 let remaining = match (reserve, pool) {
@@ -318,7 +322,7 @@ pub fn execute(
             charge(state, from, proposer, fee)?;
             apply_bond(state, &prepared)?;
             apply_treasury(state, &prepared)?;
-            apply_monetary(state, db, &prepared, block_height)?;
+            apply_monetary(view, state, &prepared, block_height)?;
             apply(db, prepared)?;
             Ok(result(tx_hash, TxStatus::Success, fee))
         }
@@ -370,20 +374,23 @@ fn apply_treasury(state: &Arc<StateManager>, prepared: &Prepared) -> Result<()> 
 /// passed `OnChain + NativeEligibility` proposal (enforced at creation AND
 /// execution) with the monetary-policy gate open.
 fn apply_monetary(
+    view: &mut ExecutionView<'_, '_>,
     state: &Arc<StateManager>,
-    db: &Arc<Database>,
     prepared: &Prepared,
     height: u64,
 ) -> Result<()> {
     if let Prepared::ProposalUpdate { monetary: Some(action), .. } = prepared {
-        let supply = crate::supply::SupplyStore::new(db.clone());
-        match action {
+            match action {
             MonetaryAction::Release { pool, to, amount, proposal_id, reason_hash } => {
-                supply.apply_reserve_release(*pool, to, *amount, *proposal_id, *reason_hash, height)?;
+                crate::supply::SupplyStore::apply_reserve_release(
+                    view, *pool, to, *amount, *proposal_id, *reason_hash, height,
+                )?;
                 state.credit(to, *amount)?;
             }
             MonetaryAction::Mint { to, amount, proposal_id, reason_hash } => {
-                supply.apply_monetary_mint(to, *amount, *proposal_id, *reason_hash, height)?;
+                crate::supply::SupplyStore::apply_monetary_mint(
+                    view, to, *amount, *proposal_id, *reason_hash, height,
+                )?;
                 state.credit(to, *amount)?;
             }
         }

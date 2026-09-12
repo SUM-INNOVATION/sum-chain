@@ -51,11 +51,21 @@ fn unlock(kind: ServiceKind) -> TxPayload {
 /// Fund exactly the 1B genesis supply (2×500M), apply the correction, then the
 /// reserve exists and accrual/claims can operate. Extra funding AFTER this is
 /// fine (the 1B guard is checked only at migration time).
-fn migrate(state: &StateManager, db: &Arc<Database>) {
+/// Fund the 1B genesis supply, then publish the block that applies the
+/// correction — the correction is a block-level effect, so this is a block.
+fn migrate(
+    state: &Arc<StateManager>,
+    db: &Arc<Database>,
+    exec: &BlockExecutor,
+) {
     let half = GENESIS_ACCOUNTED_SUPPLY / 2;
     state.credit(&Address::new([0xE1; 20]), half).unwrap();
     state.credit(&Address::new([0xE2; 20]), half).unwrap();
-    assert!(apply_supply_correction_if_needed(db, 1, 100).unwrap());
+    common::publish_empty_block(state, exec, 100, &[0x5Au8; 32]);
+    assert!(
+        SupplyStore::new(db.clone()).is_migration_applied().unwrap(),
+        "the correction block must apply it"
+    );
 }
 
 /// Register an Active staking validator whose derived address is `kp`'s.
@@ -69,7 +79,7 @@ fn setup_migrated(
     params: ChainParams,
 ) -> (Arc<StateManager>, Arc<Database>, TempDir, BlockExecutor) {
     let (state, db, dir, exec) = setup_with_params(params);
-    migrate(&state, &db);
+    migrate(&state, &db, &exec);
     (state, db, dir, exec)
 }
 
@@ -90,7 +100,7 @@ fn gate_closed_claim_and_unlock_rejected_free_380() {
         assert_eq!(r.fee_paid, 0, "gate-closed is free");
     }
     assert_eq!(state.get_balance(&v.address()).unwrap(), bal0, "no fee, no mutation");
-    assert!(SupplyStore::new(db.clone()).get_grant(&v.address(), ServiceKind::Validator).unwrap().is_none());
+    assert!(SupplyStore::v_get_grant(&candidate.view(), &v.address(), ServiceKind::Validator).unwrap().is_none());
 }
 
 // ── Validator bootstrap grants ───────────────────────────────────────────────
@@ -112,18 +122,16 @@ fn validator_claim_splits_10_90_and_is_once_per_identity() {
     let (liquid, locked) = split_grant(total);
     assert_eq!(liquid, 500_000 * KOPPA);
     assert_eq!(state.get_balance(&v.address()).unwrap(), bal0 - 100 + liquid, "liquid credited (minus fee)");
-
-    let store = SupplyStore::new(db.clone());
-    let g = store.get_grant(&v.address(), ServiceKind::Validator).unwrap().unwrap();
+    let g = SupplyStore::v_get_grant(&candidate.view(), &v.address(), ServiceKind::Validator).unwrap().unwrap();
     assert_eq!(g.total_grant, total);
     assert_eq!(g.liquid_claimed, liquid);
     assert_eq!(g.locked_remaining, locked);
     assert_eq!(g.status, GrantStatus::Active);
 
     // Pool decremented exactly; aggregate tracks the locked outstanding.
-    let reserve = store.get_reserve().unwrap().unwrap();
+    let reserve = SupplyStore::v_get_reserve(&candidate.view()).unwrap().unwrap();
     assert_eq!(reserve.validator_pool_remaining, POOL_VALIDATOR - total);
-    assert_eq!(store.get_aggregate().unwrap().outstanding_grant_unclaimed, locked);
+    assert_eq!(SupplyStore::v_get_aggregate(&candidate.view()).unwrap().outstanding_grant_unclaimed, locked);
 
     // Second claim by the same identity → 383, fee-paid, nothing awarded.
     let r2 = exec.execute_tx(&mut candidate.view(), &signed(&v, 1, claim(ServiceKind::Validator)), &Address::new([9; 20]), 11, 1000).unwrap();
@@ -133,13 +141,13 @@ fn validator_claim_splits_10_90_and_is_once_per_identity() {
 #[test]
 fn genesis_validators_excluded_from_bootstrap_grants() {
     let (_state, db, _dir, _exec) = setup_migrated(params_grants_open());
-    let store = SupplyStore::new(db.clone());
+    let mut candidate = common::candidate(&db);
     // Both identity forms (accounts + pubkey-derived addresses) → 382, even if
     // they were somehow registered as staking validators.
     let excluded = genesis_validator_excluded_addresses();
     assert_eq!(excluded.len(), 4, "2 accounts + 2 pubkey-derived");
     for addr in excluded {
-        assert_eq!(store.claim_validator_grant(&db, &addr, 10), Err(382));
+        assert_eq!(SupplyStore::claim_validator_grant(&mut candidate.view(), &db, &addr, 10), Err(382));
     }
 }
 
@@ -174,7 +182,6 @@ fn validator_cohort_boundaries_exact() {
 fn cohort_counter_advances_per_distinct_validator() {
     let (state, db, _dir, exec) = setup_migrated(params_grants_open());
     let mut candidate = common::candidate(&db);
-    let store = SupplyStore::new(db.clone());
     for i in 0..3u64 {
         let v = KeyPair::generate();
         seed_validator(&db, &v);
@@ -182,7 +189,7 @@ fn cohort_counter_advances_per_distinct_validator() {
         let r = exec.execute_tx(&mut candidate.view(), &signed(&v, 0, claim(ServiceKind::Validator)), &Address::new([9; 20]), 10 + i, 1000).unwrap();
         assert!(matches!(r.status, TxStatus::Success));
     }
-    assert_eq!(store.validator_cohort_count().unwrap(), 3);
+    assert_eq!(SupplyStore::v_validator_cohort_count(&candidate.view()).unwrap(), 3);
 }
 
 // ── Unlock: 1:1 against protocol-earned credit ONLY ──────────────────────────
@@ -206,15 +213,14 @@ fn unlock_requires_protocol_earned_credit_transfers_never_count() {
     fund(&state, &friend, 5_000_000);
     state.transfer(&friend.address(), &v.address(), 1_000_000, 0, &Address::new([9; 20])).unwrap();
     state.transfer(&v.address(), &v.address(), 500_000, 0, &Address::new([9; 20])).unwrap(); // self
-    let store = SupplyStore::new(db.clone());
-    assert_eq!(store.get_earned_credit(&v.address(), ServiceKind::Validator).unwrap(), 0);
+    assert_eq!(SupplyStore::v_get_earned_credit(&candidate.view(), &v.address(), ServiceKind::Validator).unwrap(), 0);
     // (the self-transfer advanced v's nonce by 1 → next tx nonce is 3)
     let r2 = exec.execute_tx(&mut candidate.view(), &signed(&v, 3, unlock(ServiceKind::Validator)), &Address::new([9; 20]), 12, 1000).unwrap();
     assert!(matches!(r2.status, TxStatus::Failed(384)), "transfers must not unlock: {:?}", r2.status);
 
     // Real protocol-earned credit (accrued at the block-fee reward site)
     // unlocks exactly 1:1, capped by earned.
-    store.accrue_earned_credit(&v.address(), ServiceKind::Validator, 700 * KOPPA).unwrap();
+    SupplyStore::accrue_earned_credit(&mut candidate.view(), &v.address(), ServiceKind::Validator, 700 * KOPPA).unwrap();
     let bal_before = state.get_balance(&v.address()).unwrap();
     let r3 = exec.execute_tx(&mut candidate.view(), &signed(&v, 4, unlock(ServiceKind::Validator)), &Address::new([9; 20]), 13, 1000).unwrap();
     assert!(matches!(r3.status, TxStatus::Success), "unlock: {:?}", r3.status);
@@ -223,7 +229,7 @@ fn unlock_requires_protocol_earned_credit_transfers_never_count() {
         bal_before - 100 + 700 * KOPPA,
         "unlocked exactly the earned amount (minus fee)"
     );
-    let g = store.get_grant(&v.address(), ServiceKind::Validator).unwrap().unwrap();
+    let g = SupplyStore::v_get_grant(&candidate.view(), &v.address(), ServiceKind::Validator).unwrap().unwrap();
     assert_eq!(g.earned_credit_used_for_unlock, 700 * KOPPA);
     // Re-unlock without new credit → 384 (credit is consumed, not reusable).
     let r4 = exec.execute_tx(&mut candidate.view(), &signed(&v, 5, unlock(ServiceKind::Validator)), &Address::new([9; 20]), 14, 1000).unwrap();
@@ -236,11 +242,11 @@ fn validator_block_fee_accrual_goes_to_proposer_after_migration() {
     // the proposer's Validator earned credit — but ONLY once the correction is
     // applied. (Direct store-level proof of the accrual gating.)
     let (_state, db, _dir, _exec) = setup_with_params(params_grants_open());
-    let store = SupplyStore::new(db.clone());
+    let mut candidate = common::candidate(&db);
     let p = Address::new([0xAA; 20]);
     // Dormant: accrual is a no-op.
-    store.accrue_earned_credit(&p, ServiceKind::Validator, 1_000).unwrap();
-    assert_eq!(store.get_earned_credit(&p, ServiceKind::Validator).unwrap(), 0, "no accrual pre-migration");
+    SupplyStore::accrue_earned_credit(&mut candidate.view(), &p, ServiceKind::Validator, 1_000).unwrap();
+    assert_eq!(SupplyStore::v_get_earned_credit(&candidate.view(), &p, ServiceKind::Validator).unwrap(), 0, "no accrual pre-migration");
 }
 
 // ── Archive milestones (pre-existing nodes ELIGIBLE, nothing retroactive) ────
@@ -282,9 +288,8 @@ fn archive_proof_milestone_pays_after_evidence_and_only_once() {
 
     // Record 100 successful PoR proofs (the instrumented proof-payout site
     // calls exactly this, and only after the correction).
-    let store = SupplyStore::new(db.clone());
     for _ in 0..ARCHIVE_PROOFS_MILESTONE_1 {
-        store.record_por_proof(&a.address()).unwrap();
+        SupplyStore::record_por_proof(&mut candidate.view(), &a.address()).unwrap();
     }
     // Claim right after registration (active-duration milestone NOT reached —
     // only the 100-proof milestone pays).
@@ -293,7 +298,7 @@ fn archive_proof_milestone_pays_after_evidence_and_only_once() {
     assert!(matches!(r.status, TxStatus::Success), "milestone claim: {:?}", r.status);
     let (liquid, locked) = split_grant(ARCHIVE_PROOFS_GRANT_1);
     assert_eq!(state.get_balance(&a.address()).unwrap(), bal0 - 100 + liquid);
-    let g = store.get_grant(&a.address(), ServiceKind::Archive).unwrap().unwrap();
+    let g = SupplyStore::v_get_grant(&candidate.view(), &a.address(), ServiceKind::Archive).unwrap().unwrap();
     assert_eq!(g.locked_remaining, locked);
 
     // Claiming again with no NEW milestone → 383 (milestones pay exactly once).
@@ -317,13 +322,11 @@ fn preexisting_archive_node_eligible_but_nothing_retroactive() {
         },
     });
     exec.execute_tx(&mut candidate.view(), &signed(&a, 0, reg), &Address::new([9; 20]), 5, 1000).unwrap();
-
-    let store = SupplyStore::new(db.clone());
     // Pre-correction proofs are NOT counted (no retroactive fabrication).
     for _ in 0..50 {
-        store.record_por_proof(&a.address()).unwrap();
+        SupplyStore::record_por_proof(&mut candidate.view(), &a.address()).unwrap();
     }
-    assert_eq!(store.get_milestones(&a.address(), ServiceKind::Archive).unwrap().por_proofs, 0);
+    assert_eq!(SupplyStore::v_get_milestones(&candidate.view(), &a.address(), ServiceKind::Archive).unwrap().por_proofs, 0);
 
     // Correction applies (accounted must be exactly 1B: the archive's funding
     // breaks the 1B guard, so seed a fresh chain state instead).
@@ -345,10 +348,9 @@ fn compute_milestone_and_denied_dispute_blocks_386() {
     let mut candidate = common::candidate(&db);
     let vfr = KeyPair::generate();
     fund(&state, &vfr, 1_000_000);
-    let store = SupplyStore::new(db.clone());
 
     // One valid settlement claim (instrumented at the claim-payout site).
-    store.record_settlement_claim(&vfr.address()).unwrap();
+    SupplyStore::record_settlement_claim(&mut candidate.view(), &vfr.address()).unwrap();
     let bal0 = state.get_balance(&vfr.address()).unwrap();
     let r = exec.execute_tx(&mut candidate.view(), &signed(&vfr, 0, claim(ServiceKind::Compute)), &Address::new([9; 20]), 102, 1000).unwrap();
     assert!(matches!(r.status, TxStatus::Success), "compute milestone: {:?}", r.status);
@@ -357,16 +359,16 @@ fn compute_milestone_and_denied_dispute_blocks_386() {
 
     // A denied dispute blocks further milestone claims (386) and forfeits the
     // locked remainder back to the compute pool.
-    let locked_before = store.get_grant(&vfr.address(), ServiceKind::Compute).unwrap().unwrap().locked_remaining;
-    let pool_before = store.get_reserve().unwrap().unwrap().compute_pool_remaining;
-    store.record_denied_dispute(&vfr.address()).unwrap();
-    store.forfeit_locked_grant(&vfr.address(), ServiceKind::Compute).unwrap();
+    let locked_before = SupplyStore::v_get_grant(&candidate.view(), &vfr.address(), ServiceKind::Compute).unwrap().unwrap().locked_remaining;
+    let pool_before = SupplyStore::v_get_reserve(&candidate.view()).unwrap().unwrap().compute_pool_remaining;
+    SupplyStore::record_denied_dispute(&mut candidate.view(), &vfr.address()).unwrap();
+    SupplyStore::forfeit_locked_grant(&mut candidate.view(), &vfr.address(), ServiceKind::Compute).unwrap();
 
-    let g = store.get_grant(&vfr.address(), ServiceKind::Compute).unwrap().unwrap();
+    let g = SupplyStore::v_get_grant(&candidate.view(), &vfr.address(), ServiceKind::Compute).unwrap().unwrap();
     assert_eq!(g.status, GrantStatus::Forfeited);
     assert_eq!(g.locked_remaining, 0);
     assert_eq!(
-        store.get_reserve().unwrap().unwrap().compute_pool_remaining,
+        SupplyStore::v_get_reserve(&candidate.view()).unwrap().unwrap().compute_pool_remaining,
         pool_before + locked_before,
         "forfeited locked stake returns to the pool"
     );
@@ -386,25 +388,24 @@ fn canonical_invariant_holds_through_claim_and_unlock() {
     // invariant we assert is reserve+outstanding movement matching the account
     // credits from GRANT operations exactly.
     fund(&state, &v, 1_000_000);
-    let store = SupplyStore::new(db.clone());
-    let ledger = store.get_ledger().unwrap();
-    let r0 = store.get_reserve().unwrap().unwrap().total_remaining();
-    let a0 = store.get_aggregate().unwrap().outstanding_grant_unclaimed;
+    let ledger = SupplyStore::v_get_ledger(&candidate.view()).unwrap();
+    let r0 = SupplyStore::v_get_reserve(&candidate.view()).unwrap().unwrap().total_remaining();
+    let a0 = SupplyStore::v_get_aggregate(&candidate.view()).unwrap().outstanding_grant_unclaimed;
 
     exec.execute_tx(&mut candidate.view(), &signed(&v, 0, claim(ServiceKind::Validator)), &Address::new([9; 20]), 10, 1000).unwrap();
-    store.accrue_earned_credit(&v.address(), ServiceKind::Validator, 1_000 * KOPPA).unwrap();
+    SupplyStore::accrue_earned_credit(&mut candidate.view(), &v.address(), ServiceKind::Validator, 1_000 * KOPPA).unwrap();
     exec.execute_tx(&mut candidate.view(), &signed(&v, 1, unlock(ServiceKind::Validator)), &Address::new([9; 20]), 11, 1000).unwrap();
 
     let total = validator_cohort_grant(0).unwrap();
     let (liquid, locked) = split_grant(total);
     let unlocked = 1_000 * KOPPA; // earned credit, all consumed by the unlock
-    let r1 = store.get_reserve().unwrap().unwrap().total_remaining();
-    let a1 = store.get_aggregate().unwrap().outstanding_grant_unclaimed;
+    let r1 = SupplyStore::v_get_reserve(&candidate.view()).unwrap().unwrap().total_remaining();
+    let a1 = SupplyStore::v_get_aggregate(&candidate.view()).unwrap().outstanding_grant_unclaimed;
 
     // Reserve lost exactly the grant; outstanding = locked - unlocked; the
     // account gained liquid + unlocked. canonical_supply is unchanged by any
     // of this (grants move supply between ledger and accounts, never create it).
     assert_eq!(r0 - r1, total);
     assert_eq!(a1 - a0, locked - unlocked);
-    assert_eq!(ledger.current_canonical_supply(), store.get_ledger().unwrap().current_canonical_supply());
+    assert_eq!(ledger.current_canonical_supply(), SupplyStore::v_get_ledger(&candidate.view()).unwrap().current_canonical_supply());
 }

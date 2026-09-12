@@ -671,6 +671,7 @@ impl BlockExecutor {
                     TxPayload::Staking(staking_data) => {
                         // Execute staking operation
                         let result = self.staking_executor.execute(
+                            view,
                             &v2_tx.from,
                             &staking_data,
                             &self.state,
@@ -1258,6 +1259,7 @@ impl BlockExecutor {
                     }
                     TxPayload::StorageMetadata(storage_data) => {
                         let result = self.storage_metadata_executor.execute(
+                            view,
                             &v2_tx.from,
                             &storage_data,
                             &self.state,
@@ -1688,6 +1690,7 @@ impl BlockExecutor {
                             }
                         }
                         let result = self.inference_settlement_executor.execute(
+                            view,
                             &v2_tx.from,
                             &settlement_data.operation,
                             &self.state,
@@ -1815,6 +1818,7 @@ impl BlockExecutor {
                         // See crate::governance_executor and
                         // docs/specs/GOVERNANCE-V1.md.
                         crate::governance_executor::execute(
+                            view,
                             &self.state,
                             &self.db,
                             &self.params,
@@ -1854,27 +1858,34 @@ impl BlockExecutor {
                         self.state.credit(proposer, v2_tx.fee)?;
                         self.state.increment_nonce(&v2_tx.from)?;
 
-                        let store = crate::supply::SupplyStore::new(self.db.clone());
+                        use crate::supply::SupplyStore;
                         use sumchain_primitives::supply::{ServiceKind, SupplyOperation};
+                        // Grants are staged into this block's candidate. The
+                        // eligibility census still reads committed state through
+                        // `&self.db` — staking, delegation and the node registry
+                        // have not migrated, so that is where their rows are.
                         let outcome: std::result::Result<u128, u32> = match &supply_data.operation {
                             SupplyOperation::ClaimServiceGrant { service_kind } => {
                                 match service_kind {
-                                    ServiceKind::Validator => store.claim_validator_grant(
+                                    ServiceKind::Validator => SupplyStore::claim_validator_grant(
+                                        view,
                                         &self.db,
                                         &v2_tx.from,
                                         block_height,
                                     ),
-                                    ServiceKind::Archive | ServiceKind::Compute => store
-                                        .claim_milestone_grants(
+                                    ServiceKind::Archive | ServiceKind::Compute => {
+                                        SupplyStore::claim_milestone_grants(
+                                            view,
                                             &self.db,
                                             &v2_tx.from,
                                             *service_kind,
                                             block_height,
-                                        ),
+                                        )
+                                    }
                                 }
                             }
                             SupplyOperation::UnlockServiceGrant { service_kind } => {
-                                store.unlock_grant(&v2_tx.from, *service_kind)
+                                SupplyStore::unlock_grant(view, &v2_tx.from, *service_kind)
                             }
                         };
                         match outcome {
@@ -2082,6 +2093,7 @@ impl BlockExecutor {
     /// Execute a V2 transaction (supports both transfers and NFT operations)
     pub fn execute_tx_v2(
         &self,
+        view: &mut ExecutionView<'_, '_>,
         tx: &TransactionV2,
         signature: &[u8; 64],
         public_key: &[u8; 32],
@@ -2381,6 +2393,7 @@ impl BlockExecutor {
 
                 // Execute staking operation
                 let result = self.staking_executor.execute(
+                    view,
                     &tx.from,
                     staking_data,
                     &self.state,
@@ -3025,14 +3038,12 @@ impl BlockExecutor {
         // ── PoR Phase: Slash expired challenges BEFORE user transactions ─────
         // This prevents a node from front-running a slash by submitting a
         // last-second proof and a withdrawal in the same block.
-        self.process_expired_challenges(block.height())?;
-
         // One candidate per block. Every transaction executes against a view of
         // it, so a block that turns out to be invalid can be abandoned without
         // having reached canonical state.
         //
-        // Built BEFORE the beacon accumulator, which now rehydrates from this
-        // candidate rather than from committed state — see below.
+        // Built FIRST: expired-challenge slashing and the beacon accumulator
+        // both need it, and both run before the transaction loop.
         //
         // TEMPORARY LIMIT — scaffolding, not the final value. The ceiling is a
         // versioned consensus parameter derived from measured write sets,
@@ -3041,6 +3052,14 @@ impl BlockExecutor {
         // stands in while the migration proceeds locally and MUST be replaced by
         // the parameter before any of this is proposed for publication.
         let mut candidate = CandidateExecution::new(&self.db, CANDIDATE_LIMIT_SCAFFOLD);
+
+        {
+            // Slashing here forfeits locked grants, which are supply writes and
+            // therefore belong to this block's candidate.
+            let mut view = candidate.view();
+            self.process_expired_challenges(&mut view, block.height())?;
+        }
+
 
         // ── BR1 beacon (#127): build the per-block accumulator when the gate is
         // open, so the per-tx beacon dispatch drives the stateful runtime across
@@ -3133,7 +3152,9 @@ impl BlockExecutor {
         // proposer-selection weight — consensus rotation is untouched.
         {
             let block_fees: u128 = receipts.iter().map(|r| r.fee_paid).sum();
-            crate::supply::SupplyStore::new(self.db.clone()).accrue_earned_credit(
+            let mut view = candidate.view();
+            crate::supply::SupplyStore::accrue_earned_credit(
+                &mut view,
                 &proposer,
                 sumchain_primitives::supply::ServiceKind::Validator,
                 block_fees,
@@ -3151,11 +3172,22 @@ impl BlockExecutor {
         // ProtocolReserve ledger and sets canonical supply to 800B. Fails closed
         // (halts this block) on any guard violation rather than diverging. Its
         // ledger is folded into the state root below.
-        crate::supply::apply_supply_correction_if_needed(
-            &self.db,
-            self.state.chain_id(),
-            block.height(),
-        )?;
+        // The reserve and ledger it writes are staged into this block's
+        // candidate. The census it runs to DECIDE still reads committed state
+        // through `&self.db`: it sums accounts, staking, delegations, the node
+        // registry and the fee pools, none of which have migrated, so committed
+        // is where their rows are. That asymmetry is tracked in
+        // `partially_migrated_execution_paths_are_declared` and closes when
+        // those subsystems move.
+        {
+            let mut view = candidate.view();
+            crate::supply::apply_supply_correction_if_needed(
+                &mut view,
+                &self.db,
+                self.state.chain_id(),
+                block.height(),
+            )?;
+        }
 
         // Build this block's contract-state diff from the committed journal,
         // sorted deterministically by (cf_kind, key) for revert + digest.
@@ -3576,7 +3608,7 @@ impl BlockExecutor {
         // root would otherwise miss it — this makes the correction consensus-
         // committed. `None` while dormant, so pre-correction roots are byte-for-
         // byte unchanged (like the contracts gate above).
-        if let Some(digest) = crate::supply::SupplyStore::new(self.db.clone()).state_digest()? {
+        if let Some(digest) = crate::supply::SupplyStore::v_state_digest(view)? {
             data.extend_from_slice(digest.as_bytes());
         }
 
@@ -3618,7 +3650,11 @@ impl BlockExecutor {
 
     /// Slash all ArchiveNodes with expired challenges.
     /// Called at the START of execute_block, before user transactions.
-    fn process_expired_challenges(&self, current_height: u64) -> Result<()> {
+    fn process_expired_challenges(
+        &self,
+        view: &mut ExecutionView<'_, '_>,
+        current_height: u64,
+    ) -> Result<()> {
         let expired = self
             .storage_metadata_executor
             .get_expired_challenges(current_height)?;
@@ -3690,8 +3726,11 @@ impl BlockExecutor {
                                 sumchain_primitives::supply::ServiceKind::Validator
                             }
                         };
-                        crate::supply::SupplyStore::new(self.db.clone())
-                            .forfeit_locked_grant(&record.address, kind)?;
+                        crate::supply::SupplyStore::forfeit_locked_grant(
+                            view,
+                            &record.address,
+                            kind,
+                        )?;
                     }
 
                     // Write updated node record (reuse put_node via the executor)

@@ -56,11 +56,24 @@ fn gov(op: GovernanceOperation, data: Vec<u8>) -> TxPayload {
     TxPayload::Governance(sumchain_primitives::governance::GovernanceTxData { operation: op, data })
 }
 
-fn migrate(state: &StateManager, db: &Arc<Database>) {
+/// Fund the 1B genesis supply, then publish the block that applies the
+/// correction — the correction is a block-level effect, so this is a block.
+fn migrate(
+    state: &Arc<StateManager>,
+    db: &Arc<Database>,
+    exec: &sumchain_state::executor::BlockExecutor,
+    proposer_pubkey: &[u8; 32],
+) {
     let half = GENESIS_ACCOUNTED_SUPPLY / 2;
     state.credit(&Address::new([0xE1; 20]), half).unwrap();
     state.credit(&Address::new([0xE2; 20]), half).unwrap();
-    assert!(apply_supply_correction_if_needed(db, 1, 100).unwrap());
+    common::publish_empty_block(state, exec, 100, proposer_pubkey);
+    assert!(
+        sumchain_state::supply::SupplyStore::new(db.clone())
+            .is_migration_applied()
+            .unwrap(),
+        "the correction block must apply it"
+    );
 }
 
 fn seed_qualifying_token(db: &Arc<Database>, holders: &[(Address, u128)]) {
@@ -116,9 +129,9 @@ fn create_req(class: GovProposalClass, asset: GovAssetKind, to: Address, amount:
 #[test]
 fn monetary_classes_dormant_by_default_387_at_creation() {
     let (state, db, _dir, exec) = setup_with_params(params(false));
-    let mut candidate = common::candidate(&db);
-    migrate(&state, &db);
     let proposer = KeyPair::generate();
+    migrate(&state, &db, &exec, proposer.public_key().as_bytes());
+    let mut candidate = common::candidate(&db);
     fund(&state, &proposer, 100_000);
     for (i, class) in [
         GovProposalClass::ReserveReleaseEcosystem,
@@ -142,9 +155,9 @@ fn monetary_classes_reject_non_native_assets_388() {
     // SRC-20 (and by the same check equity) governance can NEVER carry a
     // monetary-policy class — rejected 388 at creation before any registry work.
     let (state, db, _dir, exec) = setup_with_params(params(true));
-    let mut candidate = common::candidate(&db);
-    migrate(&state, &db);
     let proposer = KeyPair::generate();
+    migrate(&state, &db, &exec, proposer.public_key().as_bytes());
+    let mut candidate = common::candidate(&db);
     fund(&state, &proposer, 100_000);
     let req = create_req(
         GovProposalClass::MonetaryPolicyMint,
@@ -169,8 +182,18 @@ fn run_native_proposal(
     amount: u128,
 ) -> (Arc<StateManager>, Arc<Database>) {
     let (state, db, _dir, exec) = setup_with_params(params(true));
-    let mut candidate = common::candidate(&db);
-    migrate(&state, &db);
+    // FOUR BLOCKS, at four heights. An earlier version ran all of this through
+    // one overlay and then published it, which claimed that operations at
+    // heights 101, 105, 110 and 300 were one block — they are not, and the
+    // proposal lifecycle depends on them being separate: the voting window only
+    // closes because 300 is a later block than 105.
+    //
+    // Each is published through the real path (execute -> accept -> publish),
+    // so what the next block reads is what the previous one actually committed.
+    let proposer = KeyPair::generate();
+    let ppub = *proposer.public_key().as_bytes();
+
+    migrate(&state, &db, &exec, &ppub);
     let validator = KeyPair::generate();
     let vset = [*validator.public_key().as_bytes()];
     let submitter = KeyPair::generate();
@@ -187,32 +210,52 @@ fn run_native_proposal(
         approvals: vec![qualify_approval(&validator, 50, 0)],
     })
     .unwrap();
-    let r = exec
-        .execute_tx_with_validators(&mut candidate.view(), &signed(&submitter, 0, gov(GovernanceOperation::RegisterQualifyingAsset, req)), &Address::new([9; 20]), 101, 1000, &vset)
-        .unwrap();
-    assert!(matches!(r.status, TxStatus::Success), "register qualifying: {:?}", r.status);
+    let r = common::publish_block(
+        &state,
+        &exec,
+        101,
+        &ppub,
+        vec![signed(&submitter, 0, gov(GovernanceOperation::RegisterQualifyingAsset, req))],
+        &vset,
+    );
+    assert!(matches!(r[0].status, TxStatus::Success), "register qualifying: {:?}", r[0].status);
 
     // Create the monetary proposal under NativeEligibility (voter is eligible).
     let creq = create_req(class, GovAssetKind::NativeEligibility, recipient, amount);
-    let r = exec
-        .execute_tx(&mut candidate.view(), &signed(&voter, 0, gov(GovernanceOperation::CreateProposal, creq)), &Address::new([9; 20]), 105, 1000)
-        .unwrap();
-    assert!(matches!(r.status, TxStatus::Success), "create: {:?}", r.status);
+    let r = common::publish_block(
+        &state,
+        &exec,
+        105,
+        &ppub,
+        vec![signed(&voter, 0, gov(GovernanceOperation::CreateProposal, creq))],
+        &vset,
+    );
+    assert!(matches!(r[0].status, TxStatus::Success), "create: {:?}", r[0].status);
     let pid = generate_proposal_id(&voter.address(), &GovAssetKind::NativeEligibility, &[0xAB; 32], 105, 0);
 
     // Vote yes (weight 1 of snapshot 1 ⇒ 100% ≥ 6667 bps).
     let vreq = bincode::serialize(&CastVoteRequest { proposal_id: pid, choice: VoteChoice::Yes }).unwrap();
-    let r = exec
-        .execute_tx(&mut candidate.view(), &signed(&voter, 1, gov(GovernanceOperation::CastVote, vreq)), &Address::new([9; 20]), 110, 1000)
-        .unwrap();
-    assert!(matches!(r.status, TxStatus::Success), "vote: {:?}", r.status);
+    let r = common::publish_block(
+        &state,
+        &exec,
+        110,
+        &ppub,
+        vec![signed(&voter, 1, gov(GovernanceOperation::CastVote, vreq))],
+        &vset,
+    );
+    assert!(matches!(r[0].status, TxStatus::Success), "vote: {:?}", r[0].status);
 
     // Execute after the voting window closes (105 + 100 < 300).
     let ereq = bincode::serialize(&ExecuteProposalRequest { proposal_id: pid }).unwrap();
-    let r = exec
-        .execute_tx(&mut candidate.view(), &signed(&submitter, 1, gov(GovernanceOperation::ExecuteProposal, ereq)), &Address::new([9; 20]), 300, 1000)
-        .unwrap();
-    assert!(matches!(r.status, TxStatus::Success), "execute: {:?}", r.status);
+    let r = common::publish_block(
+        &state,
+        &exec,
+        300,
+        &ppub,
+        vec![signed(&submitter, 1, gov(GovernanceOperation::ExecuteProposal, ereq))],
+        &vset,
+    );
+    assert!(matches!(r[0].status, TxStatus::Success), "execute: {:?}", r[0].status);
     (state, db)
 }
 
@@ -262,8 +305,9 @@ fn release_exceeding_pool_fails_385_and_moves_nothing() {
     let recipient = Address::new([0x79; 20]);
     // Amount larger than the whole ecosystem pool → the execute tx fails 385.
     let (state, db, _dir, exec) = setup_with_params(params(true));
+    let mig_proposer = KeyPair::generate();
+    migrate(&state, &db, &exec, mig_proposer.public_key().as_bytes());
     let mut candidate = common::candidate(&db);
-    migrate(&state, &db);
     let validator = KeyPair::generate();
     let vset = [*validator.public_key().as_bytes()];
     let submitter = KeyPair::generate();

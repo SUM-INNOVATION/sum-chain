@@ -235,3 +235,20 @@ pub fn publish_block(
     state.set_state_root(accumulator);
     receipts
 }
+
+/// Publish one EMPTY block at `height`, the way a proposer does.
+///
+/// The block-level effects that run regardless of transactions — the one-time
+/// supply correction, the beacon boundary snapshot, expired-challenge slashing
+/// — happen inside `execute_block`, so a test whose subject is one of those
+/// drives it by publishing a block at the right height, not by calling the
+/// function and committing what it staged.
+#[allow(dead_code)]
+pub fn publish_empty_block(
+    state: &Arc<sumchain_state::state::StateManager>,
+    executor: &BlockExecutor,
+    height: u64,
+    proposer_pubkey: &[u8; 32],
+) {
+    publish_block(state, executor, height, proposer_pubkey, Vec::new(), &[]);
+}

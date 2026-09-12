@@ -23,6 +23,7 @@ use sumchain_primitives::{
     UndelegateData, UnstakeData, UpdateValidatorData, ValidatorInfo, ValidatorStatus,
     WithdrawUnbondedData,
 };
+use sumchain_storage::exec_view::ExecutionView;
 use sumchain_storage::{Database, DelegationStore, SlashingStore, StakingStore};
 use tracing::{debug, info, warn};
 
@@ -80,6 +81,7 @@ impl StakingExecutor {
     /// Execute a staking operation from transaction data
     pub fn execute(
         &self,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         staking_data: &StakingTxData,
         state: &StateManager,
@@ -128,7 +130,7 @@ impl StakingExecutor {
             }
             // Slashing operations
             StakingOperation::SubmitEvidence => {
-                self.execute_submit_evidence(&store, &delegation_store, &slashing_store, sender, &staking_data.data, state, block_height)
+                self.execute_submit_evidence(view, &store, &delegation_store, &slashing_store, sender, &staking_data.data, state, block_height)
             }
         }
     }
@@ -830,6 +832,7 @@ impl StakingExecutor {
     /// Execute SubmitEvidence operation
     fn execute_submit_evidence(
         &self,
+        view: &mut ExecutionView<'_, '_>,
         staking_store: &StakingStore,
         delegation_store: &DelegationStore,
         slashing_store: &SlashingStore,
@@ -845,6 +848,7 @@ impl StakingExecutor {
         match evidence_data.evidence_type {
             EvidenceType::DoubleSign => {
                 self.handle_double_sign_evidence(
+                    view,
                     staking_store,
                     delegation_store,
                     slashing_store,
@@ -856,6 +860,7 @@ impl StakingExecutor {
             }
             EvidenceType::Downtime => {
                 self.handle_downtime_evidence(
+                    view,
                     staking_store,
                     delegation_store,
                     slashing_store,
@@ -869,6 +874,7 @@ impl StakingExecutor {
     /// Handle double sign evidence
     fn handle_double_sign_evidence(
         &self,
+        view: &mut ExecutionView<'_, '_>,
         staking_store: &StakingStore,
         delegation_store: &DelegationStore,
         slashing_store: &SlashingStore,
@@ -970,7 +976,9 @@ impl StakingExecutor {
         // (grant money is public reserve money — misbehaviour returns it).
         // Self-funded stake follows the normal staking rules above. No-op if
         // no active grant / correction dormant.
-        crate::supply::SupplyStore::new(self.db.clone()).forfeit_locked_grant(
+        crate::supply::SupplyStore::forfeit_locked_grant(
+            view,
+            
             &sumchain_primitives::Address::from_public_key(&evidence.validator_pubkey),
             sumchain_primitives::supply::ServiceKind::Validator,
         )?;
@@ -993,6 +1001,7 @@ impl StakingExecutor {
     /// Handle downtime evidence
     fn handle_downtime_evidence(
         &self,
+        view: &mut ExecutionView<'_, '_>,
         staking_store: &StakingStore,
         delegation_store: &DelegationStore,
         slashing_store: &SlashingStore,
@@ -1086,7 +1095,9 @@ impl StakingExecutor {
         // (grant money is public reserve money — misbehaviour returns it).
         // Self-funded stake follows the normal staking rules above. No-op if
         // no active grant / correction dormant.
-        crate::supply::SupplyStore::new(self.db.clone()).forfeit_locked_grant(
+        crate::supply::SupplyStore::forfeit_locked_grant(
+            view,
+            
             &sumchain_primitives::Address::from_public_key(&evidence.validator_pubkey),
             sumchain_primitives::supply::ServiceKind::Validator,
         )?;
@@ -1106,6 +1117,7 @@ impl StakingExecutor {
     /// Slash a validator directly (called by consensus when misbehavior is detected)
     pub fn slash_validator(
         &self,
+        view: &mut ExecutionView<'_, '_>,
         validator_pubkey: &[u8; 32],
         evidence_type: EvidenceType,
         block_height: BlockHeight,
@@ -1178,7 +1190,9 @@ impl StakingExecutor {
         // (grant money is public reserve money — misbehaviour returns it).
         // Self-funded stake follows the normal staking rules above. No-op if
         // no active grant / correction dormant.
-        crate::supply::SupplyStore::new(self.db.clone()).forfeit_locked_grant(
+        crate::supply::SupplyStore::forfeit_locked_grant(
+            view,
+            
             &sumchain_primitives::Address::from_public_key(validator_pubkey),
             sumchain_primitives::supply::ServiceKind::Validator,
         )?;

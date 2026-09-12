@@ -20,6 +20,7 @@ use sumchain_primitives::{
     StorageMetadata, StorageMetadataOperation, StorageMetadataOperationV2, StorageMetadataTxData,
     StorageMetadataV2, StorageMetadataV2TxData, CHALLENGE_REWARD, CHALLENGE_TTL_BLOCKS, CHUNK_SIZE,
 };
+use sumchain_storage::exec_view::ExecutionView;
 use sumchain_storage::Database;
 use sumchain_genesis::ChainParams;
 use tracing::{debug, info, warn};
@@ -461,6 +462,7 @@ impl StorageMetadataExecutor {
 
     pub fn execute(
         &self,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &StorageMetadataTxData,
         state: &StateManager,
@@ -503,6 +505,7 @@ impl StorageMetadataExecutor {
                 chunk_hash,
                 merkle_path,
             } => self.execute_submit_proof(
+                view,
                 sender, challenge_id, merkle_root, *chunk_index, chunk_hash, merkle_path,
                 state, block_height,
             ),
@@ -687,6 +690,7 @@ impl StorageMetadataExecutor {
 
     fn execute_submit_proof(
         &self,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         challenge_id: &Hash,
         merkle_root: &Hash,
@@ -816,13 +820,14 @@ impl StorageMetadataExecutor {
         // unlock, and advances the archive milestone counter. Both are no-ops
         // until the supply correction is applied; nothing retroactive.
         {
-            let supply = crate::supply::SupplyStore::new(self.db.clone());
-            supply.accrue_earned_credit(
+            use crate::supply::SupplyStore;
+            SupplyStore::accrue_earned_credit(
+                view,
                 &challenge.target_node,
                 sumchain_primitives::supply::ServiceKind::Archive,
                 payout as u128,
             )?;
-            supply.record_por_proof(&challenge.target_node)?;
+            SupplyStore::record_por_proof(view, &challenge.target_node)?;
         }
 
         // 9. Delete the challenge from state

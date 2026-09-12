@@ -21,6 +21,7 @@ use sumchain_primitives::supply::{
     COMPUTE_CLAIMS_MILESTONE_1, COMPUTE_CLAIMS_MILESTONE_2, MAINNET_CHAIN_ID, TARGET_CANONICAL_SUPPLY,
 };
 use sumchain_primitives::{Address, Hash, NodeRole, NodeStatus};
+use sumchain_storage::exec_view::ExecutionView;
 use sumchain_storage::{cf, Database, DelegationStore, StakingStore, StateStore};
 
 use crate::{Result, StateError};
@@ -89,11 +90,6 @@ impl SupplyStore {
         }
     }
 
-    fn put_ledger(&self, ledger: &SupplyLedger) -> Result<()> {
-        let bytes =
-            bincode::serialize(ledger).map_err(|e| StateError::SerializationError(e.to_string()))?;
-        self.db.put(cf::SUPPLY, LEDGER_KEY, &bytes).map_err(StateError::Storage)
-    }
 
     /// The protocol reserve, or `None` before the correction is applied.
     pub fn get_reserve(&self) -> Result<Option<ProtocolReserve>> {
@@ -105,10 +101,162 @@ impl SupplyStore {
         }
     }
 
-    fn put_reserve(&self, reserve: &ProtocolReserve) -> Result<()> {
+
+    // The committed `put_*` helpers are gone. Nothing outside block execution
+    // mutates supply, so a writer that reaches the database directly has no
+    // legitimate caller — and leaving one would mean the supply correction, or
+    // any future path, could still publish supply rows mid-block.
+    //
+    // ── Execution-path API (candidate-scoped) ───────────────────────────────
+    //
+    // Every supply MUTATOR lives here, taking `&mut ExecutionView`. None has a
+    // `&self` twin, and none needs one: nothing outside block execution mutates
+    // supply. RPC reads it, and the `&self` readers below stay for that.
+    //
+    // The readers ARE duplicated, because both sides need them. They are four
+    // lines each; the mutators, which carry the logic, are not duplicated at
+    // all, so there is no second copy of a rule that could drift.
+
+    pub fn v_get_ledger(view: &ExecutionView<'_, '_>) -> Result<SupplyLedger> {
+        match view.get(cf::SUPPLY, LEDGER_KEY)? {
+            None => Ok(SupplyLedger::pre_migration()),
+            Some(bytes) => bincode::deserialize(&bytes)
+                .map_err(|e| StateError::DeserializationError(e.to_string())),
+        }
+    }
+
+    fn v_put_ledger(view: &mut ExecutionView<'_, '_>, ledger: &SupplyLedger) -> Result<()> {
+        let bytes =
+            bincode::serialize(ledger).map_err(|e| StateError::SerializationError(e.to_string()))?;
+        Ok(view.put(cf::SUPPLY, LEDGER_KEY, &bytes)?)
+    }
+
+    pub fn v_get_reserve(view: &ExecutionView<'_, '_>) -> Result<Option<ProtocolReserve>> {
+        match view.get(cf::SUPPLY, RESERVE_KEY)? {
+            None => Ok(None),
+            Some(bytes) => bincode::deserialize(&bytes)
+                .map(Some)
+                .map_err(|e| StateError::DeserializationError(e.to_string())),
+        }
+    }
+
+    fn v_put_reserve(view: &mut ExecutionView<'_, '_>, reserve: &ProtocolReserve) -> Result<()> {
         let bytes = bincode::serialize(reserve)
             .map_err(|e| StateError::SerializationError(e.to_string()))?;
-        self.db.put(cf::SUPPLY, RESERVE_KEY, &bytes).map_err(StateError::Storage)
+        Ok(view.put(cf::SUPPLY, RESERVE_KEY, &bytes)?)
+    }
+
+    pub fn v_is_migration_applied(view: &ExecutionView<'_, '_>) -> Result<bool> {
+        Ok(Self::v_get_ledger(view)?.migration_applied)
+    }
+
+    pub fn v_get_aggregate(view: &ExecutionView<'_, '_>) -> Result<GrantsAggregate> {
+        match view.get(cf::SUPPLY, AGGREGATE_KEY)? {
+            None => Ok(GrantsAggregate::default()),
+            Some(bytes) => bincode::deserialize(&bytes)
+                .map_err(|e| StateError::DeserializationError(e.to_string())),
+        }
+    }
+
+    fn v_put_aggregate(view: &mut ExecutionView<'_, '_>, agg: &GrantsAggregate) -> Result<()> {
+        let bytes =
+            bincode::serialize(agg).map_err(|e| StateError::SerializationError(e.to_string()))?;
+        Ok(view.put(cf::SUPPLY, AGGREGATE_KEY, &bytes)?)
+    }
+
+    pub fn v_get_grant(
+        view: &ExecutionView<'_, '_>,
+        addr: &Address,
+        kind: ServiceKind,
+    ) -> Result<Option<ServiceGrant>> {
+        match view.get(cf::SUPPLY, &grant_key(addr, kind))? {
+            None => Ok(None),
+            Some(bytes) => bincode::deserialize(&bytes)
+                .map(Some)
+                .map_err(|e| StateError::DeserializationError(e.to_string())),
+        }
+    }
+
+    fn v_put_grant(view: &mut ExecutionView<'_, '_>, grant: &ServiceGrant) -> Result<()> {
+        let bytes =
+            bincode::serialize(grant).map_err(|e| StateError::SerializationError(e.to_string()))?;
+        Ok(view.put(
+            cf::SUPPLY,
+            &grant_key(&grant.recipient, grant.service_kind),
+            &bytes,
+        )?)
+    }
+
+    pub fn v_get_earned_credit(
+        view: &ExecutionView<'_, '_>,
+        addr: &Address,
+        kind: ServiceKind,
+    ) -> Result<u128> {
+        match view.get(cf::SUPPLY, &credit_key(addr, kind))? {
+            None => Ok(0),
+            Some(bytes) => bincode::deserialize(&bytes)
+                .map_err(|e| StateError::DeserializationError(e.to_string())),
+        }
+    }
+
+    pub fn v_get_milestones(
+        view: &ExecutionView<'_, '_>,
+        addr: &Address,
+        kind: ServiceKind,
+    ) -> Result<ServiceMilestones> {
+        match view.get(cf::SUPPLY, &milestone_key(addr, kind))? {
+            None => Ok(ServiceMilestones::default()),
+            Some(bytes) => bincode::deserialize(&bytes)
+                .map_err(|e| StateError::DeserializationError(e.to_string())),
+        }
+    }
+
+    fn v_put_milestones(
+        view: &mut ExecutionView<'_, '_>,
+        addr: &Address,
+        kind: ServiceKind,
+        m: &ServiceMilestones,
+    ) -> Result<()> {
+        let bytes =
+            bincode::serialize(m).map_err(|e| StateError::SerializationError(e.to_string()))?;
+        Ok(view.put(cf::SUPPLY, &milestone_key(addr, kind), &bytes)?)
+    }
+
+    pub fn v_validator_cohort_count(view: &ExecutionView<'_, '_>) -> Result<u32> {
+        match view.get(cf::SUPPLY, COHORT_KEY)? {
+            None => Ok(0),
+            Some(bytes) => bincode::deserialize(&bytes)
+                .map_err(|e| StateError::DeserializationError(e.to_string())),
+        }
+    }
+
+    /// The supply digest over the candidate's rows — the value the block state
+    /// root folds once the correction is applied.
+    pub fn v_state_digest(view: &ExecutionView<'_, '_>) -> Result<Option<Hash>> {
+        let ledger = Self::v_get_ledger(view)?;
+        if !ledger.migration_applied {
+            return Ok(None);
+        }
+        Ok(Some(Self::digest_of(
+            &ledger,
+            &Self::v_get_reserve(view)?.unwrap_or_else(ProtocolReserve::initial),
+            &Self::v_get_aggregate(view)?,
+        )))
+    }
+
+    /// The digest encoder, shared by the committed and candidate paths so the
+    /// two cannot drift apart. The fold is part of the block state root.
+    fn digest_of(
+        ledger: &SupplyLedger,
+        reserve: &ProtocolReserve,
+        aggregate: &GrantsAggregate,
+    ) -> Hash {
+        Hash::hash_many(&[
+            b"sumchain.supply.v1",
+            ledger.digest().as_bytes(),
+            reserve.digest().as_bytes(),
+            aggregate.digest().as_bytes(),
+        ])
     }
 
     pub fn is_migration_applied(&self) -> Result<bool> {
@@ -124,14 +272,11 @@ impl SupplyStore {
         if !ledger.migration_applied {
             return Ok(None);
         }
-        let reserve = self.get_reserve()?.unwrap_or_else(ProtocolReserve::initial);
-        let aggregate = self.get_aggregate()?;
-        Ok(Some(Hash::hash_many(&[
-            b"sumchain.supply.v1",
-            ledger.digest().as_bytes(),
-            reserve.digest().as_bytes(),
-            aggregate.digest().as_bytes(),
-        ])))
+        Ok(Some(Self::digest_of(
+            &ledger,
+            &self.get_reserve()?.unwrap_or_else(ProtocolReserve::initial),
+            &self.get_aggregate()?,
+        )))
     }
 
     // ── Grants aggregate (singleton, digest-folded) ──────────────────────────
@@ -144,11 +289,6 @@ impl SupplyStore {
         }
     }
 
-    fn put_aggregate(&self, agg: &GrantsAggregate) -> Result<()> {
-        let bytes =
-            bincode::serialize(agg).map_err(|e| StateError::SerializationError(e.to_string()))?;
-        self.db.put(cf::SUPPLY, AGGREGATE_KEY, &bytes).map_err(StateError::Storage)
-    }
 
     // ── Per-address records ──────────────────────────────────────────────────
 
@@ -161,13 +301,6 @@ impl SupplyStore {
         }
     }
 
-    fn put_grant(&self, grant: &ServiceGrant) -> Result<()> {
-        let bytes =
-            bincode::serialize(grant).map_err(|e| StateError::SerializationError(e.to_string()))?;
-        self.db
-            .put(cf::SUPPLY, &grant_key(&grant.recipient, grant.service_kind), &bytes)
-            .map_err(StateError::Storage)
-    }
 
     pub fn get_earned_credit(&self, addr: &Address, kind: ServiceKind) -> Result<u128> {
         match self.db.get(cf::SUPPLY, &credit_key(addr, kind))? {
@@ -185,11 +318,6 @@ impl SupplyStore {
         }
     }
 
-    fn put_milestones(&self, addr: &Address, kind: ServiceKind, m: &ServiceMilestones) -> Result<()> {
-        let bytes =
-            bincode::serialize(m).map_err(|e| StateError::SerializationError(e.to_string()))?;
-        self.db.put(cf::SUPPLY, &milestone_key(addr, kind), &bytes).map_err(StateError::Storage)
-    }
 
     pub fn validator_cohort_count(&self) -> Result<u32> {
         match self.db.get(cf::SUPPLY, COHORT_KEY)? {
@@ -209,57 +337,62 @@ impl SupplyStore {
 
     /// Accrue protocol-earned credit for `addr` under `kind`. No-op while the
     /// correction is dormant (deterministic across the coordinated upgrade).
-    pub fn accrue_earned_credit(&self, addr: &Address, kind: ServiceKind, amount: u128) -> Result<()> {
-        if amount == 0 || !self.is_migration_applied()? {
+    pub fn accrue_earned_credit(
+        view: &mut ExecutionView<'_, '_>,
+        addr: &Address,
+        kind: ServiceKind,
+        amount: u128,
+    ) -> Result<()> {
+        if amount == 0 || !Self::v_is_migration_applied(view)? {
             return Ok(());
         }
-        let cur = self.get_earned_credit(addr, kind)?;
+        let cur = Self::v_get_earned_credit(view, addr, kind)?;
         let new = cur
             .checked_add(amount)
             .ok_or_else(|| StateError::BlockValidation("earned credit overflow".into()))?;
         let bytes =
             bincode::serialize(&new).map_err(|e| StateError::SerializationError(e.to_string()))?;
-        self.db.put(cf::SUPPLY, &credit_key(addr, kind), &bytes).map_err(StateError::Storage)?;
+        view.put(cf::SUPPLY, &credit_key(addr, kind), &bytes)?;
 
-        let mut agg = self.get_aggregate()?;
+        let mut agg = Self::v_get_aggregate(view)?;
         match kind {
             ServiceKind::Validator => agg.total_earned_validator = agg.total_earned_validator.saturating_add(amount),
             ServiceKind::Archive => agg.total_earned_archive = agg.total_earned_archive.saturating_add(amount),
             ServiceKind::Compute => agg.total_earned_compute = agg.total_earned_compute.saturating_add(amount),
         }
-        self.put_aggregate(&agg)
+        Self::v_put_aggregate(view, &agg)
     }
 
     /// Record one successful archive PoR proof (milestone counter). No-op while
     /// dormant — counting starts at the correction height, never retroactively.
-    pub fn record_por_proof(&self, addr: &Address) -> Result<()> {
-        if !self.is_migration_applied()? {
+    pub fn record_por_proof(view: &mut ExecutionView<'_, '_>, addr: &Address) -> Result<()> {
+        if !Self::v_is_migration_applied(view)? {
             return Ok(());
         }
-        let mut m = self.get_milestones(addr, ServiceKind::Archive)?;
+        let mut m = Self::v_get_milestones(view, addr, ServiceKind::Archive)?;
         m.por_proofs = m.por_proofs.saturating_add(1);
-        self.put_milestones(addr, ServiceKind::Archive, &m)
+        Self::v_put_milestones(view, addr, ServiceKind::Archive, &m)
     }
 
     /// Record one valid settlement claim (compute milestone counter).
-    pub fn record_settlement_claim(&self, addr: &Address) -> Result<()> {
-        if !self.is_migration_applied()? {
+    pub fn record_settlement_claim(view: &mut ExecutionView<'_, '_>, addr: &Address) -> Result<()> {
+        if !Self::v_is_migration_applied(view)? {
             return Ok(());
         }
-        let mut m = self.get_milestones(addr, ServiceKind::Compute)?;
+        let mut m = Self::v_get_milestones(view, addr, ServiceKind::Compute)?;
         m.settlement_claims = m.settlement_claims.saturating_add(1);
-        self.put_milestones(addr, ServiceKind::Compute, &m)
+        Self::v_put_milestones(view, addr, ServiceKind::Compute, &m)
     }
 
     /// Record a denied dispute against a verifier — blocks further compute
     /// milestone claims.
-    pub fn record_denied_dispute(&self, addr: &Address) -> Result<()> {
-        if !self.is_migration_applied()? {
+    pub fn record_denied_dispute(view: &mut ExecutionView<'_, '_>, addr: &Address) -> Result<()> {
+        if !Self::v_is_migration_applied(view)? {
             return Ok(());
         }
-        let mut m = self.get_milestones(addr, ServiceKind::Compute)?;
+        let mut m = Self::v_get_milestones(view, addr, ServiceKind::Compute)?;
         m.denied_disputes = m.denied_disputes.saturating_add(1);
-        self.put_milestones(addr, ServiceKind::Compute, &m)
+        Self::v_put_milestones(view, addr, ServiceKind::Compute, &m)
     }
 
     // ── Grant award / claim / unlock / forfeit ───────────────────────────────
@@ -268,15 +401,14 @@ impl SupplyStore {
     /// Splits 10% liquid (returned for immediate account credit) / 90% locked.
     /// Checked against the pool: a grant can never exceed the remaining pool.
     fn award_grant(
-        &self,
+        view: &mut ExecutionView<'_, '_>,
         addr: &Address,
         kind: ServiceKind,
         amount: u128,
         height: u64,
     ) -> Result<u128> {
         // Decrement the pool (checked — fail if insufficient).
-        let mut reserve = self
-            .get_reserve()?
+        let mut reserve = Self::v_get_reserve(view)?
             .ok_or_else(|| StateError::InvalidOperation("protocol reserve not initialized".into()))?;
         let pool = match kind {
             ServiceKind::Validator => &mut reserve.validator_pool_remaining,
@@ -286,10 +418,10 @@ impl SupplyStore {
         *pool = pool
             .checked_sub(amount)
             .ok_or_else(|| StateError::InvalidOperation("grant exceeds remaining pool".into()))?;
-        self.put_reserve(&reserve)?;
+        Self::v_put_reserve(view, &reserve)?;
 
         let (liquid, locked) = split_grant(amount);
-        let mut grant = self.get_grant(addr, kind)?.unwrap_or(ServiceGrant {
+        let mut grant = Self::v_get_grant(view, addr, kind)?.unwrap_or(ServiceGrant {
             recipient: *addr,
             service_kind: kind,
             total_grant: 0,
@@ -302,14 +434,14 @@ impl SupplyStore {
         grant.total_grant = grant.total_grant.saturating_add(amount);
         grant.liquid_claimed = grant.liquid_claimed.saturating_add(liquid);
         grant.locked_remaining = grant.locked_remaining.saturating_add(locked);
-        self.put_grant(&grant)?;
+        Self::v_put_grant(view, &grant)?;
 
         // Aggregate: pool → (liquid leaves reserve+grants entirely: it is
         // credited to the account by the caller; locked stays outstanding).
-        let mut agg = self.get_aggregate()?;
+        let mut agg = Self::v_get_aggregate(view)?;
         agg.total_granted = agg.total_granted.saturating_add(amount);
         agg.outstanding_grant_unclaimed = agg.outstanding_grant_unclaimed.saturating_add(locked);
-        self.put_aggregate(&agg)?;
+        Self::v_put_aggregate(view, &agg)?;
         Ok(liquid)
     }
 
@@ -322,7 +454,7 @@ impl SupplyStore {
     /// staking validator set, which is bounded by consensus size — not a
     /// files×anything scan. Returns the liquid amount to credit.
     pub fn claim_validator_grant(
-        &self,
+        view: &mut ExecutionView<'_, '_>,
         db: &Arc<Database>,
         addr: &Address,
         height: u64,
@@ -344,15 +476,15 @@ impl SupplyStore {
             return Err(381);
         }
         // One grant per identity → 383.
-        if matches!(self.get_grant(addr, ServiceKind::Validator), Ok(Some(_))) {
+        if matches!(Self::v_get_grant(view, addr, ServiceKind::Validator), Ok(Some(_))) {
             return Err(383);
         }
         // Declining cohort schedule; beyond the schedule → 385.
-        let index = self.validator_cohort_count().map_err(|_| 385u32)?;
+        let index = Self::v_validator_cohort_count(view).map_err(|_| 385u32)?;
         let amount = validator_cohort_grant(index).ok_or(385u32)?;
-        let liquid = self.award_grant(addr, ServiceKind::Validator, amount, height).map_err(|_| 385u32)?;
+        let liquid = Self::award_grant(view, addr, ServiceKind::Validator, amount, height).map_err(|_| 385u32)?;
         let bytes = bincode::serialize(&(index + 1)).map_err(|_| 385u32)?;
-        self.db.put(cf::SUPPLY, COHORT_KEY, &bytes).map_err(|_| 385u32)?;
+        view.put(cf::SUPPLY, COHORT_KEY, &bytes).map_err(|_| 385u32)?;
         Ok(liquid)
     }
 
@@ -361,7 +493,7 @@ impl SupplyStore {
     /// forfeited grant cannot claim; compute claims are blocked by any denied
     /// dispute. Returns the liquid amount to credit (0 ⇒ nothing new → 383).
     pub fn claim_milestone_grants(
-        &self,
+        view: &mut ExecutionView<'_, '_>,
         db: &Arc<Database>,
         addr: &Address,
         kind: ServiceKind,
@@ -371,12 +503,12 @@ impl SupplyStore {
             return Err(381); // validator uses the bootstrap cohort path
         }
         // Grant must not be suspended/forfeited.
-        if let Ok(Some(g)) = self.get_grant(addr, kind) {
+        if let Ok(Some(g)) = Self::v_get_grant(view, addr, kind) {
             if g.status != GrantStatus::Active {
                 return Err(386);
             }
         }
-        let m = self.get_milestones(addr, kind).map_err(|_| 381u32)?;
+        let m = Self::v_get_milestones(view, addr, kind).map_err(|_| 381u32)?;
         let registry = crate::node_registry::NodeRegistryExecutor::new(db.clone());
         let node = registry.get_node(addr).ok().flatten();
 
@@ -390,7 +522,7 @@ impl SupplyStore {
                 };
                 // Active-duration milestone counts from the LATER of registration
                 // and the correction height — nothing retroactive is fabricated.
-                let ledger = self.get_ledger().map_err(|_| 381u32)?;
+                let ledger = Self::v_get_ledger(view).map_err(|_| 381u32)?;
                 let active_since = rec.registered_at.max(ledger.migration_activation_height);
                 if height.saturating_sub(active_since) >= ARCHIVE_ACTIVE_BLOCKS_MILESTONE {
                     reached = reached.saturating_add(ARCHIVE_ACTIVE_GRANT);
@@ -420,24 +552,28 @@ impl SupplyStore {
         if newly == 0 {
             return Err(383);
         }
-        let liquid = self.award_grant(addr, kind, newly, height).map_err(|_| 385u32)?;
+        let liquid = Self::award_grant(view, addr, kind, newly, height).map_err(|_| 385u32)?;
         let mut m2 = m;
         m2.awarded = reached;
-        self.put_milestones(addr, kind, &m2).map_err(|_| 385u32)?;
+        Self::v_put_milestones(view, addr, kind, &m2).map_err(|_| 385u32)?;
         Ok(liquid)
     }
 
     /// Unlock locked grant stake 1:1 against protocol-earned credit. Returns
     /// the unlocked amount to credit (Err(384) when nothing is unlockable).
-    pub fn unlock_grant(&self, addr: &Address, kind: ServiceKind) -> std::result::Result<u128, u32> {
-        let mut grant = match self.get_grant(addr, kind) {
+    pub fn unlock_grant(
+        view: &mut ExecutionView<'_, '_>,
+        addr: &Address,
+        kind: ServiceKind,
+    ) -> std::result::Result<u128, u32> {
+        let mut grant = match Self::v_get_grant(view, addr, kind) {
             Ok(Some(g)) => g,
             _ => return Err(383),
         };
         if grant.status != GrantStatus::Active {
             return Err(386);
         }
-        let earned = self.get_earned_credit(addr, kind).map_err(|_| 384u32)?;
+        let earned = Self::v_get_earned_credit(view, addr, kind).map_err(|_| 384u32)?;
         let available_credit = earned.saturating_sub(grant.earned_credit_used_for_unlock);
         let unlockable = grant.locked_remaining.min(available_credit);
         if unlockable == 0 {
@@ -449,10 +585,10 @@ impl SupplyStore {
         if grant.locked_remaining == 0 {
             grant.status = GrantStatus::Completed;
         }
-        self.put_grant(&grant).map_err(|_| 384u32)?;
-        let mut agg = self.get_aggregate().map_err(|_| 384u32)?;
+        Self::v_put_grant(view, &grant).map_err(|_| 384u32)?;
+        let mut agg = Self::v_get_aggregate(view).map_err(|_| 384u32)?;
         agg.outstanding_grant_unclaimed = agg.outstanding_grant_unclaimed.saturating_sub(unlockable);
-        self.put_aggregate(&agg).map_err(|_| 384u32)?;
+        Self::v_put_aggregate(view, &agg).map_err(|_| 384u32)?;
         Ok(unlockable)
     }
 
@@ -460,19 +596,22 @@ impl SupplyStore {
     /// (slashing / service failure). Grant-derived locked stake is public
     /// reserve money — an operator cannot claim it and exit. No-op if no
     /// active grant or nothing locked.
-    pub fn forfeit_locked_grant(&self, addr: &Address, kind: ServiceKind) -> Result<()> {
-        let mut grant = match self.get_grant(addr, kind)? {
+    pub fn forfeit_locked_grant(
+        view: &mut ExecutionView<'_, '_>,
+        addr: &Address,
+        kind: ServiceKind,
+    ) -> Result<()> {
+        let mut grant = match Self::v_get_grant(view, addr, kind)? {
             Some(g) if g.status == GrantStatus::Active && g.locked_remaining > 0 => g,
             _ => return Ok(()),
         };
         let forfeited = grant.locked_remaining;
         grant.locked_remaining = 0;
         grant.status = GrantStatus::Forfeited;
-        self.put_grant(&grant)?;
+        Self::v_put_grant(view, &grant)?;
 
         // Return the locked portion to the originating pool.
-        let mut reserve = self
-            .get_reserve()?
+        let mut reserve = Self::v_get_reserve(view)?
             .ok_or_else(|| StateError::InvalidOperation("protocol reserve not initialized".into()))?;
         match kind {
             ServiceKind::Validator => {
@@ -485,12 +624,12 @@ impl SupplyStore {
                 reserve.compute_pool_remaining = reserve.compute_pool_remaining.saturating_add(forfeited)
             }
         }
-        self.put_reserve(&reserve)?;
+        Self::v_put_reserve(view, &reserve)?;
 
-        let mut agg = self.get_aggregate()?;
+        let mut agg = Self::v_get_aggregate(view)?;
         agg.outstanding_grant_unclaimed = agg.outstanding_grant_unclaimed.saturating_sub(forfeited);
         agg.total_forfeited_to_reserve = agg.total_forfeited_to_reserve.saturating_add(forfeited);
-        self.put_aggregate(&agg)
+        Self::v_put_aggregate(view, &agg)
     }
 
     // ── Governance reserve release / monetary mint (executor-called only) ────
@@ -498,7 +637,7 @@ impl SupplyStore {
     /// Apply a passed NativeEligibility `ReserveRelease` proposal: pool →
     /// recipient account. Canonical supply unchanged. Records an audit event.
     pub fn apply_reserve_release(
-        &self,
+        view: &mut ExecutionView<'_, '_>,
         pool: ReservePool,
         recipient: &Address,
         amount: u128,
@@ -506,8 +645,7 @@ impl SupplyStore {
         reason_hash: Hash,
         height: u64,
     ) -> Result<()> {
-        let mut reserve = self
-            .get_reserve()?
+        let mut reserve = Self::v_get_reserve(view)?
             .ok_or_else(|| StateError::InvalidOperation("protocol reserve not initialized".into()))?;
         let slot = match pool {
             ReservePool::Ecosystem => &mut reserve.ecosystem_pool_remaining,
@@ -516,24 +654,24 @@ impl SupplyStore {
         *slot = slot
             .checked_sub(amount)
             .ok_or_else(|| StateError::InvalidOperation("release exceeds remaining pool".into()))?;
-        self.put_reserve(&reserve)?;
+        Self::v_put_reserve(view, &reserve)?;
         let ev = ReserveReleaseEvent { proposal_id, pool, recipient: *recipient, amount, reason_hash, height };
         let bytes = bincode::serialize(&ev).map_err(|e| StateError::SerializationError(e.to_string()))?;
-        self.db.put(cf::SUPPLY, &release_event_key(&proposal_id), &bytes).map_err(StateError::Storage)
+        Ok(view.put(cf::SUPPLY, &release_event_key(&proposal_id), &bytes)?)
     }
 
     /// Apply a passed NativeEligibility `MonetaryPolicyMint` proposal: canonical
     /// supply grows by `amount`; recipient is credited by the caller. Records an
     /// audit event. The ONLY path that increases canonical supply beyond 800B.
     pub fn apply_monetary_mint(
-        &self,
+        view: &mut ExecutionView<'_, '_>,
         recipient: &Address,
         amount: u128,
         proposal_id: [u8; 32],
         reason_hash: Hash,
         height: u64,
     ) -> Result<()> {
-        let mut ledger = self.get_ledger()?;
+        let mut ledger = Self::v_get_ledger(view)?;
         if !ledger.migration_applied {
             return Err(StateError::InvalidOperation("supply correction not applied".into()));
         }
@@ -541,10 +679,10 @@ impl SupplyStore {
             .total_minted_by_governance
             .checked_add(amount)
             .ok_or_else(|| StateError::BlockValidation("governance mint overflow".into()))?;
-        self.put_ledger(&ledger)?;
+        Self::v_put_ledger(view, &ledger)?;
         let ev = MonetaryPolicyEvent { proposal_id, recipient: *recipient, amount, reason_hash, height };
         let bytes = bincode::serialize(&ev).map_err(|e| StateError::SerializationError(e.to_string()))?;
-        self.db.put(cf::SUPPLY, &mint_event_key(&proposal_id), &bytes).map_err(StateError::Storage)
+        Ok(view.put(cf::SUPPLY, &mint_event_key(&proposal_id), &bytes)?)
     }
 }
 
@@ -741,12 +879,12 @@ fn log_withheld_anomaly(height: u64, a: &SupplyCorrectionAssessment) {
 /// chain keeps producing blocks) and logs once per ~600 blocks. Runs before the
 /// block state root; the applied ledger + reserve are folded into that root.
 pub fn apply_supply_correction_if_needed(
+    view: &mut ExecutionView<'_, '_>,
     db: &Arc<Database>,
     chain_id: u64,
     height: u64,
 ) -> Result<bool> {
-    let store = SupplyStore::new(db.clone());
-    let ledger = store.get_ledger()?;
+    let ledger = SupplyStore::v_get_ledger(view)?;
 
     // Hot-path short-circuits BEFORE any scan: steady state (already applied) or
     // a non-mainnet chain never runs the census.
@@ -770,8 +908,8 @@ pub fn apply_supply_correction_if_needed(
             }
             // Write reserve FIRST, marker (ledger) LAST — so a crash between the
             // two puts leaves the marker unset and the block retries cleanly.
-            store.put_reserve(&reserve)?;
-            store.put_ledger(&SupplyLedger {
+            SupplyStore::v_put_reserve(view, &reserve)?;
+            SupplyStore::v_put_ledger(view, &SupplyLedger {
                 initial_canonical_supply: TARGET_CANONICAL_SUPPLY,
                 total_minted_by_migration: assessment.reserve_delta,
                 total_minted_by_governance: 0,

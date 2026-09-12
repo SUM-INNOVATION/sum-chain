@@ -427,6 +427,14 @@ fn a_merged_scan_error_is_not_a_short_row_set() {
     // collecting what it managed to read.
     let dir = tempfile::TempDir::new().unwrap();
     let db = Database::open_default(dir.path()).unwrap();
+
+    // Seed the PARENT first, before any candidate exists. Writing the database
+    // after reading a candidate is the shape of a hand-rolled publisher, and
+    // `no_test_publishes_a_candidate_by_hand` refuses it.
+    let a = sumchain_state::beacon_store::membership_row_key(0);
+    let b = sumchain_state::beacon_store::key_row_key(0, 0);
+    db.put(cf::BEACON_STATE, &a, b"committed").unwrap();
+
     let mut overlay = ApplicationOverlay::new(&db, LIMIT);
 
     // A scan that cannot START is an error, not an empty result.
@@ -440,10 +448,6 @@ fn a_merged_scan_error_is_not_a_short_row_set() {
 
     // And a scan that CAN start returns both sides. A merged scan that dropped
     // either one would shorten the row set exactly as silently.
-    let a = sumchain_state::beacon_store::membership_row_key(0);
-    let b = sumchain_state::beacon_store::key_row_key(0, 0);
-    db.put(cf::BEACON_STATE, &a, b"committed").unwrap();
-
     let mut overlay = ApplicationOverlay::new(&db, LIMIT);
     {
         let mut view = ExecutionView::new(&mut overlay);

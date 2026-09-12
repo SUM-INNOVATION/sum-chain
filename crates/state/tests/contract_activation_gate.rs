@@ -76,7 +76,8 @@ fn call_rejected_free_when_gate_closed() {
 fn execute_tx_v2_path_also_gated() {
     // Defensive: the (currently unreached) public execute_tx_v2 path must also
     // reject contract txs free when the gate is closed.
-    let (state, _db, _dir, executor) = setup_with_params(ChainParams::with_v2_enabled());
+    let (state, db, _dir, executor) = setup_with_params(ChainParams::with_v2_enabled());
+    let mut candidate = common::candidate(&db);
     let sender = KeyPair::generate();
     let proposer = KeyPair::generate();
     fund(&state, &sender, 10_000);
@@ -92,6 +93,7 @@ fn execute_tx_v2_path_also_gated() {
     let sig = sign(h.as_bytes(), sender.private_key());
     let res = executor
         .execute_tx_v2(
+            &mut candidate.view(),
             &tx,
             sig.as_bytes(),
             sender.public_key().as_bytes(),
