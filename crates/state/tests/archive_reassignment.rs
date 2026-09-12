@@ -273,65 +273,35 @@ fn reassign_abandoned_333() {
 #[test]
 fn active_file_reassignment_recovers_coverage_with_epoch_cf_separation() {
     let (state, db, _dir, executor) = setup_with_params(params_reassign_enabled());
-    let mut candidate = common::candidate(&db);
     let a = KeyPair::generate();
     let b = KeyPair::generate();
     let owner = KeyPair::generate();
     let proposer = KeyPair::generate();
+    let pk = *proposer.public_key().as_bytes();
     fund(&state, &a, (STAKE as u128) + 1_000_000);
     fund(&state, &b, (STAKE as u128) + 1_000_000);
     fund(&state, &owner, 1_000_000);
     let root = Hash::hash(b"active-reassign");
 
     // Register both archives at height 1 → epoch-0 snapshot {A,B}.
-    executor
-        .execute_tx(&mut candidate.view(), &signed(&a, FEE, 0, nr(register_archive_op())), &proposer.address(), 1, 1000)
-        .unwrap();
-    executor
-        .execute_tx(&mut candidate.view(), &signed(&b, FEE, 0, nr(register_archive_op())), &proposer.address(), 1, 1000)
-        .unwrap();
+    common::publish_block(&state, &executor, 1, &pk, vec![signed(&a, FEE, 0, nr(register_archive_op()))], &[]).remove(0);
+    common::publish_block(&state, &executor, 1, &pk, vec![signed(&b, FEE, 0, nr(register_archive_op()))], &[]).remove(0);
 
     // Register file at height 2 (assignment_height = 2).
-    executor
-        .execute_tx(&mut candidate.view(), &signed(&owner, FEE, 0, sm(register_file_op(root))), &proposer.address(), 2, 1000)
-        .unwrap();
+    common::publish_block(&state, &executor, 2, &pk, vec![signed(&owner, FEE, 0, sm(register_file_op(root)))], &[]).remove(0);
 
     // Discover the epoch-0 assignee for chunk 0 and accept from it.
     let assignee0 = assigned_to_chunk0(&root, &[a.address(), b.address()]);
     let (assignee_kp, other_kp) = if assignee0 == a.address() { (&a, &b) } else { (&b, &a) };
-    let acc = executor
-        .execute_tx(
-            &mut candidate.view(),
-            &signed(assignee_kp, FEE, 1, sm(StorageMetadataOperationV2::AcceptAssignmentV2 { merkle_root: root, chunk_indices: vec![0] })),
-            &proposer.address(),
-            3,
-            1000,
-        )
-        .unwrap();
+    let acc = common::publish_block(&state, &executor, 3, &pk, vec![signed(assignee_kp, FEE, 1, sm(StorageMetadataOperationV2::AcceptAssignmentV2 { merkle_root: root, chunk_indices: vec![0] }))], &[]).remove(0);
     assert!(acc.status.is_success(), "epoch-0 accept got {:?}", acc.status);
 
     // Activate (coverage complete via the assignee).
-    let act = executor
-        .execute_tx(
-            &mut candidate.view(),
-            &signed(&owner, FEE, 1, sm(StorageMetadataOperationV2::ActivateFileV2 { merkle_root: root })),
-            &proposer.address(),
-            4,
-            1000,
-        )
-        .unwrap();
+    let act = common::publish_block(&state, &executor, 4, &pk, vec![signed(&owner, FEE, 1, sm(StorageMetadataOperationV2::ActivateFileV2 { merkle_root: root }))], &[]).remove(0);
     assert!(act.status.is_success(), "activate got {:?}", act.status);
 
     // The epoch-0 assignee leaves the active set (Slashed) at height 5.
-    let slash = executor
-        .execute_tx(
-            &mut candidate.view(),
-            &signed(&owner, FEE, 2, nr(NodeRegistryOperation::UpdateStatus { target: assignee_kp.address(), new_status: NodeStatus::Slashed })),
-            &proposer.address(),
-            5,
-            1000,
-        )
-        .unwrap();
+    let slash = common::publish_block(&state, &executor, 5, &pk, vec![signed(&owner, FEE, 2, nr(NodeRegistryOperation::UpdateStatus { target: assignee_kp.address(), new_status: NodeStatus::Slashed }))], &[]).remove(0);
     assert!(slash.status.is_success(), "slash got {:?}", slash.status);
 
     // Coverage now shows a gap: the assignee's bitmap no longer counts.
@@ -341,15 +311,7 @@ fn active_file_reassignment_recovers_coverage_with_epoch_cf_separation() {
     assert_eq!(cov.assignment_epochs, vec![2]);
 
     // Owner reassigns at height 6 → epoch 1 (snapshot excludes the departed one).
-    let re = executor
-        .execute_tx(
-            &mut candidate.view(),
-            &signed(&owner, FEE, 3, sm(StorageMetadataOperationV2::ReassignChunksV2 { merkle_root: root })),
-            &proposer.address(),
-            6,
-            1000,
-        )
-        .unwrap();
+    let re = common::publish_block(&state, &executor, 6, &pk, vec![signed(&owner, FEE, 3, sm(StorageMetadataOperationV2::ReassignChunksV2 { merkle_root: root }))], &[]).remove(0);
     assert!(re.status.is_success(), "reassign got {:?}", re.status);
     assert_eq!(
         StorageMetadataExecutor::new(db.clone()).get_file_reassignments(&root).unwrap(),
@@ -358,15 +320,7 @@ fn active_file_reassignment_recovers_coverage_with_epoch_cf_separation() {
 
     // The surviving archive is assigned chunk 0 in epoch 1; it re-attests
     // (Active file, gate open, reassignment epoch exists).
-    let acc2 = executor
-        .execute_tx(
-            &mut candidate.view(),
-            &signed(other_kp, FEE, 1, sm(StorageMetadataOperationV2::AcceptAssignmentV2 { merkle_root: root, chunk_indices: vec![0] })),
-            &proposer.address(),
-            7,
-            1000,
-        )
-        .unwrap();
+    let acc2 = common::publish_block(&state, &executor, 7, &pk, vec![signed(other_kp, FEE, 1, sm(StorageMetadataOperationV2::AcceptAssignmentV2 { merkle_root: root, chunk_indices: vec![0] }))], &[]).remove(0);
     assert!(acc2.status.is_success(), "epoch-1 re-accept got {:?}", acc2.status);
 
     // Epoch-CF separation: the replacement bit lives in the epoch CF; the
@@ -398,15 +352,7 @@ fn active_file_reassignment_recovers_coverage_with_epoch_cf_separation() {
     assert_eq!(cov2.per_epoch[1].epoch_height, 6);
 
     // A second reassignment now is a no-op (anti-churn).
-    let re2 = executor
-        .execute_tx(
-            &mut candidate.view(),
-            &signed(&owner, FEE, 4, sm(StorageMetadataOperationV2::ReassignChunksV2 { merkle_root: root })),
-            &proposer.address(),
-            8,
-            1000,
-        )
-        .unwrap();
+    let re2 = common::publish_block(&state, &executor, 8, &pk, vec![signed(&owner, FEE, 4, sm(StorageMetadataOperationV2::ReassignChunksV2 { merkle_root: root }))], &[]).remove(0);
     assert!(matches!(re2.status, TxStatus::Failed(334)), "no-op churn should 334, got {:?}", re2.status);
 }
 
@@ -477,36 +423,30 @@ fn active_reattest_gate_dormant_stays_33() {
 #[test]
 fn pending_file_reassignment_flow() {
     let (state, db, _dir, executor) = setup_with_params(params_reassign_enabled());
-    let mut candidate = common::candidate(&db);
     let a = KeyPair::generate();
     let b = KeyPair::generate();
     let owner = KeyPair::generate();
     let proposer = KeyPair::generate();
+    let pk = *proposer.public_key().as_bytes();
     fund(&state, &a, (STAKE as u128) + 1_000_000);
     fund(&state, &b, (STAKE as u128) + 1_000_000);
     fund(&state, &owner, 1_000_000);
     let root = Hash::hash(b"pending-reassign");
 
-    executor.execute_tx(&mut candidate.view(), &signed(&a, FEE, 0, nr(register_archive_op())), &proposer.address(), 1, 1000).unwrap();
-    executor.execute_tx(&mut candidate.view(), &signed(&b, FEE, 0, nr(register_archive_op())), &proposer.address(), 1, 1000).unwrap();
-    executor.execute_tx(&mut candidate.view(), &signed(&owner, FEE, 0, sm(register_file_op(root))), &proposer.address(), 2, 1000).unwrap();
+    common::publish_block(&state, &executor, 1, &pk, vec![signed(&a, FEE, 0, nr(register_archive_op()))], &[]).remove(0);
+    common::publish_block(&state, &executor, 1, &pk, vec![signed(&b, FEE, 0, nr(register_archive_op()))], &[]).remove(0);
+    common::publish_block(&state, &executor, 2, &pk, vec![signed(&owner, FEE, 0, sm(register_file_op(root)))], &[]).remove(0);
 
     // The epoch-0 assignee leaves BEFORE the file activates.
     let assignee0 = assigned_to_chunk0(&root, &[a.address(), b.address()]);
     let (assignee_kp, other_kp) = if assignee0 == a.address() { (&a, &b) } else { (&b, &a) };
-    executor
-        .execute_tx(&mut candidate.view(), &signed(&owner, FEE, 1, nr(NodeRegistryOperation::UpdateStatus { target: assignee_kp.address(), new_status: NodeStatus::Slashed })), &proposer.address(), 3, 1000)
-        .unwrap();
+    common::publish_block(&state, &executor, 3, &pk, vec![signed(&owner, FEE, 1, nr(NodeRegistryOperation::UpdateStatus { target: assignee_kp.address(), new_status: NodeStatus::Slashed }))], &[]).remove(0);
 
     // Reassign the still-Pending file, then the survivor accepts + activates.
-    let re = executor
-        .execute_tx(&mut candidate.view(), &signed(&owner, FEE, 2, sm(StorageMetadataOperationV2::ReassignChunksV2 { merkle_root: root })), &proposer.address(), 4, 1000)
-        .unwrap();
+    let re = common::publish_block(&state, &executor, 4, &pk, vec![signed(&owner, FEE, 2, sm(StorageMetadataOperationV2::ReassignChunksV2 { merkle_root: root }))], &[]).remove(0);
     assert!(re.status.is_success(), "pending reassign got {:?}", re.status);
 
-    let acc = executor
-        .execute_tx(&mut candidate.view(), &signed(other_kp, FEE, 1, sm(StorageMetadataOperationV2::AcceptAssignmentV2 { merkle_root: root, chunk_indices: vec![0] })), &proposer.address(), 5, 1000)
-        .unwrap();
+    let acc = common::publish_block(&state, &executor, 5, &pk, vec![signed(other_kp, FEE, 1, sm(StorageMetadataOperationV2::AcceptAssignmentV2 { merkle_root: root, chunk_indices: vec![0] }))], &[]).remove(0);
     assert!(acc.status.is_success(), "survivor accept got {:?}", acc.status);
     // Replacement bit is in the epoch CF, not epoch-0 CF.
     assert!(db.get(CF_ASSIGNMENT_ATTESTATIONS_V2_EPOCH, &epoch_key(&root, 4, &other_kp.address())).unwrap().is_some());
@@ -515,9 +455,7 @@ fn pending_file_reassignment_flow() {
     assert_eq!(cov.covered_count, cov.chunk_count, "aggregate coverage complete");
     assert_eq!(cov.lifecycle, sumchain_primitives::FileLifecycleV2::Pending);
 
-    let act = executor
-        .execute_tx(&mut candidate.view(), &signed(&owner, FEE, 3, sm(StorageMetadataOperationV2::ActivateFileV2 { merkle_root: root })), &proposer.address(), 6, 1000)
-        .unwrap();
+    let act = common::publish_block(&state, &executor, 6, &pk, vec![signed(&owner, FEE, 3, sm(StorageMetadataOperationV2::ActivateFileV2 { merkle_root: root }))], &[]).remove(0);
     assert!(act.status.is_success(), "activate got {:?}", act.status);
 }
 
@@ -528,27 +466,27 @@ fn insufficient_active_archives_incomplete() {
     // A single archive covers, then leaves; no replacement exists → after
     // reassignment there is no active archive to attest, so coverage stays 0.
     let (state, db, _dir, executor) = setup_with_params(params_reassign_enabled());
-    let mut candidate = common::candidate(&db);
     let a = KeyPair::generate();
     let owner = KeyPair::generate();
     let proposer = KeyPair::generate();
+    let pk = *proposer.public_key().as_bytes();
     fund(&state, &a, (STAKE as u128) + 1_000_000);
     fund(&state, &owner, 1_000_000);
     let root = Hash::hash(b"insufficient");
 
-    executor.execute_tx(&mut candidate.view(), &signed(&a, FEE, 0, nr(register_archive_op())), &proposer.address(), 1, 1000).unwrap();
-    executor.execute_tx(&mut candidate.view(), &signed(&owner, FEE, 0, sm(register_file_op(root))), &proposer.address(), 2, 1000).unwrap();
-    executor.execute_tx(&mut candidate.view(), &signed(&a, FEE, 1, sm(StorageMetadataOperationV2::AcceptAssignmentV2 { merkle_root: root, chunk_indices: vec![0] })), &proposer.address(), 3, 1000).unwrap();
-    executor.execute_tx(&mut candidate.view(), &signed(&owner, FEE, 1, sm(StorageMetadataOperationV2::ActivateFileV2 { merkle_root: root })), &proposer.address(), 4, 1000).unwrap();
+    common::publish_block(&state, &executor, 1, &pk, vec![signed(&a, FEE, 0, nr(register_archive_op()))], &[]).remove(0);
+    common::publish_block(&state, &executor, 2, &pk, vec![signed(&owner, FEE, 0, sm(register_file_op(root)))], &[]).remove(0);
+    common::publish_block(&state, &executor, 3, &pk, vec![signed(&a, FEE, 1, sm(StorageMetadataOperationV2::AcceptAssignmentV2 { merkle_root: root, chunk_indices: vec![0] }))], &[]).remove(0);
+    common::publish_block(&state, &executor, 4, &pk, vec![signed(&owner, FEE, 1, sm(StorageMetadataOperationV2::ActivateFileV2 { merkle_root: root }))], &[]).remove(0);
     // The only archive leaves.
-    executor.execute_tx(&mut candidate.view(), &signed(&owner, FEE, 2, nr(NodeRegistryOperation::UpdateStatus { target: a.address(), new_status: NodeStatus::Slashed })), &proposer.address(), 5, 1000).unwrap();
+    common::publish_block(&state, &executor, 5, &pk, vec![signed(&owner, FEE, 2, nr(NodeRegistryOperation::UpdateStatus { target: a.address(), new_status: NodeStatus::Slashed }))], &[]).remove(0);
 
     let cov = coverage(&db, &root);
     assert_eq!(cov.covered_count, 0);
     assert!(cov.reassignment_needed);
 
     // Reassign — but there is no active archive, so coverage cannot recover.
-    let re = executor.execute_tx(&mut candidate.view(), &signed(&owner, FEE, 3, sm(StorageMetadataOperationV2::ReassignChunksV2 { merkle_root: root })), &proposer.address(), 6, 1000).unwrap();
+    let re = common::publish_block(&state, &executor, 6, &pk, vec![signed(&owner, FEE, 3, sm(StorageMetadataOperationV2::ReassignChunksV2 { merkle_root: root }))], &[]).remove(0);
     assert!(re.status.is_success(), "reassign got {:?}", re.status);
     let cov2 = coverage(&db, &root);
     assert_eq!(cov2.covered_count, 0, "no active archive → still incomplete");
@@ -559,16 +497,16 @@ fn insufficient_active_archives_incomplete() {
 #[test]
 fn file_without_reassignment_is_epoch_zero_only() {
     let (state, db, _dir, executor) = setup_with_params(params_reassign_enabled());
-    let mut candidate = common::candidate(&db);
     let archive = KeyPair::generate();
     let owner = KeyPair::generate();
     let proposer = KeyPair::generate();
+    let pk = *proposer.public_key().as_bytes();
     fund(&state, &archive, (STAKE as u128) + 1_000_000);
     fund(&state, &owner, 1_000_000);
     let root = Hash::hash(b"epoch0-only");
-    executor.execute_tx(&mut candidate.view(), &signed(&archive, FEE, 0, nr(register_archive_op())), &proposer.address(), 1, 1000).unwrap();
-    executor.execute_tx(&mut candidate.view(), &signed(&owner, FEE, 0, sm(register_file_op(root))), &proposer.address(), 2, 1000).unwrap();
-    executor.execute_tx(&mut candidate.view(), &signed(&archive, FEE, 1, sm(StorageMetadataOperationV2::AcceptAssignmentV2 { merkle_root: root, chunk_indices: vec![0] })), &proposer.address(), 3, 1000).unwrap();
+    common::publish_block(&state, &executor, 1, &pk, vec![signed(&archive, FEE, 0, nr(register_archive_op()))], &[]).remove(0);
+    common::publish_block(&state, &executor, 2, &pk, vec![signed(&owner, FEE, 0, sm(register_file_op(root)))], &[]).remove(0);
+    common::publish_block(&state, &executor, 3, &pk, vec![signed(&archive, FEE, 1, sm(StorageMetadataOperationV2::AcceptAssignmentV2 { merkle_root: root, chunk_indices: vec![0] }))], &[]).remove(0);
 
     let cov = coverage(&db, &root);
     assert_eq!(cov.assignment_epochs, vec![2], "single epoch = assignment_height");
@@ -590,26 +528,26 @@ fn reassignment_state_survives_restart() {
     let b = KeyPair::generate();
     let owner = KeyPair::generate();
     let proposer = KeyPair::generate();
+    let pk = *proposer.public_key().as_bytes();
     let root = Hash::hash(b"restart");
 
     {
         let db = Arc::new(Database::open_default(dir.path()).unwrap());
         let state = Arc::new(sumchain_state::StateManager::new(db.clone(), CHAIN_ID));
         let executor = sumchain_state::executor::BlockExecutor::new(state.clone(), db.clone(), params_reassign_enabled());
-        let mut candidate = common::candidate(&db);
-        fund(&state, &a, (STAKE as u128) + 1_000_000);
+            fund(&state, &a, (STAKE as u128) + 1_000_000);
         fund(&state, &b, (STAKE as u128) + 1_000_000);
         fund(&state, &owner, 1_000_000);
 
-        executor.execute_tx(&mut candidate.view(), &signed(&a, FEE, 0, nr(register_archive_op())), &proposer.address(), 1, 1000).unwrap();
-        executor.execute_tx(&mut candidate.view(), &signed(&b, FEE, 0, nr(register_archive_op())), &proposer.address(), 1, 1000).unwrap();
-        executor.execute_tx(&mut candidate.view(), &signed(&owner, FEE, 0, sm(register_file_op(root))), &proposer.address(), 2, 1000).unwrap();
+        common::publish_block(&state, &executor, 1, &pk, vec![signed(&a, FEE, 0, nr(register_archive_op()))], &[]).remove(0);
+        common::publish_block(&state, &executor, 1, &pk, vec![signed(&b, FEE, 0, nr(register_archive_op()))], &[]).remove(0);
+        common::publish_block(&state, &executor, 2, &pk, vec![signed(&owner, FEE, 0, sm(register_file_op(root)))], &[]).remove(0);
         let assignee0 = assigned_to_chunk0(&root, &[a.address(), b.address()]);
         let assignee_kp = if assignee0 == a.address() { &a } else { &b };
-        executor.execute_tx(&mut candidate.view(), &signed(assignee_kp, FEE, 1, sm(StorageMetadataOperationV2::AcceptAssignmentV2 { merkle_root: root, chunk_indices: vec![0] })), &proposer.address(), 3, 1000).unwrap();
-        executor.execute_tx(&mut candidate.view(), &signed(&owner, FEE, 1, sm(StorageMetadataOperationV2::ActivateFileV2 { merkle_root: root })), &proposer.address(), 4, 1000).unwrap();
-        executor.execute_tx(&mut candidate.view(), &signed(&owner, FEE, 2, nr(NodeRegistryOperation::UpdateStatus { target: assignee_kp.address(), new_status: NodeStatus::Slashed })), &proposer.address(), 5, 1000).unwrap();
-        executor.execute_tx(&mut candidate.view(), &signed(&owner, FEE, 3, sm(StorageMetadataOperationV2::ReassignChunksV2 { merkle_root: root })), &proposer.address(), 6, 1000).unwrap();
+        common::publish_block(&state, &executor, 3, &pk, vec![signed(assignee_kp, FEE, 1, sm(StorageMetadataOperationV2::AcceptAssignmentV2 { merkle_root: root, chunk_indices: vec![0] }))], &[]).remove(0);
+        common::publish_block(&state, &executor, 4, &pk, vec![signed(&owner, FEE, 1, sm(StorageMetadataOperationV2::ActivateFileV2 { merkle_root: root }))], &[]).remove(0);
+        common::publish_block(&state, &executor, 5, &pk, vec![signed(&owner, FEE, 2, nr(NodeRegistryOperation::UpdateStatus { target: assignee_kp.address(), new_status: NodeStatus::Slashed }))], &[]).remove(0);
+        common::publish_block(&state, &executor, 6, &pk, vec![signed(&owner, FEE, 3, sm(StorageMetadataOperationV2::ReassignChunksV2 { merkle_root: root }))], &[]).remove(0);
     }
 
     // Reopen the same RocksDB path.

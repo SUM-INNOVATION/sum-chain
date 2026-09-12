@@ -250,8 +250,10 @@ pub struct BlockExecutor {
     employment_executor: EmploymentExecutor,
     finance_executor: FinanceExecutor,
     policy_account_executor: PolicyAccountExecutor,
-    node_registry_executor: NodeRegistryExecutor,
-    storage_metadata_executor: StorageMetadataExecutor,
+    // No `NodeRegistryExecutor` / `StorageMetadataExecutor` field: both
+    // subsystems execute through `ExecutionView`, so the executor has no reason
+    // to hold a committed handle to either. Keeping one would put a committed
+    // read back within `self.`'s reach on every path in this file.
     inference_settlement_executor:
         crate::inference_settlement_executor::InferenceSettlementExecutor,
     /// BR1 beacon (#127) per-block accumulator. Interior-mutable (`parking_lot::Mutex`
@@ -328,8 +330,6 @@ impl BlockExecutor {
         let employment_executor = EmploymentExecutor::new(db.clone(), params.clone());
         let finance_executor = FinanceExecutor::new(db.clone(), params.clone());
         let policy_account_executor = PolicyAccountExecutor::new(db.clone());
-        let node_registry_executor = NodeRegistryExecutor::new(db.clone());
-        let storage_metadata_executor = StorageMetadataExecutor::new(db.clone());
         let inference_settlement_executor =
             crate::inference_settlement_executor::InferenceSettlementExecutor::new(db.clone());
         Self {
@@ -351,8 +351,6 @@ impl BlockExecutor {
             employment_executor,
             finance_executor,
             policy_account_executor,
-            node_registry_executor,
-            storage_metadata_executor,
             inference_settlement_executor,
             beacon_block: parking_lot::Mutex::new(None),
         }
@@ -1186,11 +1184,14 @@ impl BlockExecutor {
                                         fee_paid: 0,
                                     });
                                 }
-                                let has_open_challenge = !self
-                                    .storage_metadata_executor
-                                    .get_challenges_by_node(&v2_tx.from)?
+                                let has_open_challenge =
+                                    !StorageMetadataExecutor::v_get_challenges_by_node(
+                                        view,
+                                        &v2_tx.from,
+                                    )?
                                     .is_empty();
-                                self.node_registry_executor.execute_begin_unstake(
+                                NodeRegistryExecutor::execute_begin_unstake(
+                                    view,
                                     &v2_tx.from,
                                     *amount,
                                     &self.state,
@@ -1209,7 +1210,8 @@ impl BlockExecutor {
                                         fee_paid: 0,
                                     });
                                 }
-                                self.node_registry_executor.execute_withdraw_unbonded(
+                                NodeRegistryExecutor::execute_withdraw_unbonded(
+                                    view,
                                     &v2_tx.from,
                                     &self.state,
                                     proposer,
@@ -1217,7 +1219,8 @@ impl BlockExecutor {
                                     block_height,
                                 )?
                             }
-                            _ => self.node_registry_executor.execute(
+                            _ => NodeRegistryExecutor::execute(
+                                view,
                                 &v2_tx.from,
                                 &registry_data,
                                 &self.state,
@@ -1255,7 +1258,7 @@ impl BlockExecutor {
                         }
                     }
                     TxPayload::StorageMetadata(storage_data) => {
-                        let result = self.storage_metadata_executor.execute(
+                        let result = StorageMetadataExecutor::execute(
                             view,
                             &v2_tx.from,
                             &storage_data,
@@ -1318,10 +1321,11 @@ impl BlockExecutor {
                                     // no epochs — including ordinary Active-file
                                     // re-attest attempts — fall through to the
                                     // unchanged pre-#62 accept path (→ 33).
-                                    !self
-                                        .storage_metadata_executor
-                                        .get_file_reassignments(merkle_root)?
-                                        .is_empty()
+                                    !StorageMetadataExecutor::v_get_file_reassignments(
+                                        view,
+                                        merkle_root,
+                                    )?
+                                    .is_empty()
                                 }
                                 _ => false,
                             };
@@ -1333,7 +1337,8 @@ impl BlockExecutor {
                                 });
                             }
                         }
-                        let result = self.storage_metadata_executor.execute_v2(
+                        let result = StorageMetadataExecutor::execute_v2(
+                            view,
                             &v2_tx.from,
                             &storage_v2_data,
                             &self.state,
@@ -1342,7 +1347,6 @@ impl BlockExecutor {
                             block_height,
                             block_timestamp,
                             &self.params,
-                            &self.node_registry_executor,
                         )?;
 
                         if result.success {
@@ -1377,7 +1381,8 @@ impl BlockExecutor {
                                 fee_paid: 0,
                             });
                         }
-                        let result = self.node_registry_executor.execute_v2(
+                        let result = NodeRegistryExecutor::execute_v2(
+                            view,
                             &v2_tx.from,
                             &registry_v2_data,
                             &self.state,
@@ -1875,7 +1880,6 @@ impl BlockExecutor {
                                     ServiceKind::Archive | ServiceKind::Compute => {
                                         SupplyStore::claim_milestone_grants(
                                             view,
-                                            &self.db,
                                             &v2_tx.from,
                                             *service_kind,
                                             block_height,
@@ -3056,7 +3060,7 @@ impl BlockExecutor {
             // Slashing here forfeits locked grants, which are supply writes and
             // therefore belong to this block's candidate.
             let mut view = candidate.view();
-            self.process_expired_challenges(&mut view, block.height())?;
+            Self::process_expired_challenges(&mut view, block.height())?;
         }
 
 
@@ -3162,7 +3166,10 @@ impl BlockExecutor {
 
         // ── PoR Phase: Generate challenge AFTER transactions, BEFORE state root ──
         // This ensures the challenge write is captured in the state root.
-        self.generate_storage_challenge_if_due(block)?;
+        {
+            let mut view = candidate.view();
+            self.generate_storage_challenge_if_due(&mut view, block)?;
+        }
 
         // ── One-time mainnet 800B supply correction, BEFORE the state root ──
         // Applies at most once (persisted marker → replay/restart-safe), only on
@@ -3653,14 +3660,18 @@ impl BlockExecutor {
 
     /// Slash all ArchiveNodes with expired challenges.
     /// Called at the START of execute_block, before user transactions.
+    ///
+    /// Associated, not a method: everything it reads and writes — the expiry
+    /// index, the node records, the unbonding rows, the active-archive snapshot
+    /// — belongs to this block's candidate. The transactions that follow it in
+    /// the same block resolve their assignment snapshot from what this staged,
+    /// so a committed read here would compute one archive set while every other
+    /// node computed another.
     fn process_expired_challenges(
-        &self,
         view: &mut ExecutionView<'_, '_>,
         current_height: u64,
     ) -> Result<()> {
-        let expired = self
-            .storage_metadata_executor
-            .get_expired_challenges(current_height)?;
+        let expired = StorageMetadataExecutor::v_get_expired_challenges(view, current_height)?;
 
         // Track whether any Active→Slashed transition occurred so we can
         // refresh the active-archive snapshot at the end (Ask 15). Already-Slashed
@@ -3669,10 +3680,7 @@ impl BlockExecutor {
 
         for challenge in &expired {
             // Load the node record
-            match self
-                .node_registry_executor
-                .get_node(&challenge.target_node)?
-            {
+            match NodeRegistryExecutor::v_get_node(view, &challenge.target_node)? {
                 Some(mut record) => {
                     // Skip terminal states (issue #20): an already-`Slashed` node
                     // has nothing more to lose, and a `Withdrawn` node has exited
@@ -3682,7 +3690,7 @@ impl BlockExecutor {
                         sumchain_primitives::NodeStatus::Slashed
                             | sumchain_primitives::NodeStatus::Withdrawn
                     ) {
-                        self.storage_metadata_executor.delete_challenge(challenge)?;
+                        StorageMetadataExecutor::v_delete_challenge(view, challenge)?;
                         continue;
                     }
 
@@ -3700,14 +3708,12 @@ impl BlockExecutor {
                     // slashed remainder. Unbonding nodes are already excluded from
                     // the active set, so no snapshot refresh is needed for them.
                     if record.status == sumchain_primitives::NodeStatus::Unbonding {
-                        if let Some(mut unbonding) = self
-                            .node_registry_executor
-                            .get_archive_unbonding(&record.address)?
+                        if let Some(mut unbonding) =
+                            NodeRegistryExecutor::v_get_archive_unbonding(view, &record.address)?
                         {
                             unbonding.remaining_amount =
                                 unbonding.remaining_amount.saturating_sub(slash_amount);
-                            self.node_registry_executor
-                                .put_archive_unbonding(&unbonding)?;
+                            NodeRegistryExecutor::v_put_archive_unbonding(view, &unbonding)?;
                         }
                     } else {
                         // Active (in-service) node → slashed and removed from the
@@ -3736,19 +3742,15 @@ impl BlockExecutor {
                         )?;
                     }
 
-                    // Write updated node record (reuse put_node via the executor)
-                    // We need to write directly since put_node is private
-                    let node_key = {
-                        let mut k = Vec::with_capacity(21);
-                        k.push(b'N');
-                        k.extend_from_slice(record.address.as_bytes());
-                        k
-                    };
-                    let node_value = bincode::serialize(&record)
-                        .map_err(|e| StateError::SerializationError(e.to_string()))?;
-                    self.db
-                        .put("node_registry", &node_key, &node_value)
-                        .map_err(|e| StateError::Storage(e))?;
+                    // Write the updated node record through the registry's own
+                    // staging function. This used to reach past it — hand-rolling
+                    // the key, the bincode value and the column-family *name*,
+                    // because `put_node` was private — and in doing so it wrote
+                    // the node row without its role-index mirror and committed
+                    // it outside the block's candidate. Both are gone: the
+                    // record and its index are staged together, into this
+                    // block, by the one function that knows how.
+                    NodeRegistryExecutor::v_put_node(view, &record)?;
 
                     warn!(
                         "Slashed node {} ({:?}) for expired challenge {}: -{} stake (remaining: {})",
@@ -3766,15 +3768,14 @@ impl BlockExecutor {
             }
 
             // Delete the expired challenge from state
-            self.storage_metadata_executor.delete_challenge(challenge)?;
+            StorageMetadataExecutor::v_delete_challenge(view, challenge)?;
         }
 
         // Refresh the active-archive snapshot at this height if the set changed
         // (Ask 15). One snapshot covers all slashings within this block — they
         // collapse into a single post-block active set.
         if active_set_changed {
-            self.node_registry_executor
-                .write_active_archive_snapshot(current_height)?;
+            NodeRegistryExecutor::v_write_active_archive_snapshot(view, current_height)?;
         }
 
         Ok(())
@@ -3783,15 +3784,20 @@ impl BlockExecutor {
     /// Generate a deterministic storage challenge if this block height
     /// falls on the challenge interval. Called AFTER user transactions
     /// but BEFORE state root computation.
-    fn generate_storage_challenge_if_due(&self, block: &Block) -> Result<()> {
+    fn generate_storage_challenge_if_due(
+        &self,
+        view: &mut ExecutionView<'_, '_>,
+        block: &Block,
+    ) -> Result<()> {
         let height = block.height();
 
         if height == 0 || height % CHALLENGE_INTERVAL_BLOCKS != 0 {
             return Ok(());
         }
 
-        // Get active ArchiveNodes
-        let archive_nodes = self.node_registry_executor.get_active_archive_nodes()?;
+        // Get active ArchiveNodes — from the candidate, so an archive slashed or
+        // registered earlier in this block is already counted correctly.
+        let archive_nodes = NodeRegistryExecutor::v_get_active_archive_nodes(view)?;
         if archive_nodes.is_empty() {
             return Ok(());
         }
@@ -3808,22 +3814,21 @@ impl BlockExecutor {
             // Fail closed: the seam runs the schedule only if the one-time
             // backfill succeeded; on error it skips (emits nothing) so an
             // incomplete index is never sampled.
-            let emitted = run_scheduler_after_backfill(
-                self.storage_metadata_executor
-                    .backfill_challengeable_index(),
-                height,
-                || {
-                    self.storage_metadata_executor.generate_challenge_schedule(
-                        parent_hash,
-                        height,
-                        &self.node_registry_executor,
-                        self.params.assignment_replication_factor,
-                        self.params.max_files_sampled_per_interval,
-                        self.params.max_chunks_sampled_per_file,
-                        self.params.max_assignment_aware_challenges_per_block,
-                    )
-                },
-            )?;
+            // Bound before the call: the backfill and the schedule both stage
+            // into the view, so the backfill's borrow must end before the
+            // closure takes its own.
+            let backfill = StorageMetadataExecutor::v_backfill_challengeable_index(view);
+            let emitted = run_scheduler_after_backfill(backfill, height, || {
+                StorageMetadataExecutor::generate_challenge_schedule(
+                    view,
+                    parent_hash,
+                    height,
+                    self.params.assignment_replication_factor,
+                    self.params.max_files_sampled_per_interval,
+                    self.params.max_chunks_sampled_per_file,
+                    self.params.max_assignment_aware_challenges_per_block,
+                )
+            })?;
             debug!(
                 "PoR scheduler emitted {} challenge(s) at height {}",
                 emitted.len(),
@@ -3837,11 +3842,11 @@ impl BlockExecutor {
         // target is drawn from all active archives (exact legacy behavior).
         let assignment_targeting = por_assignment_targeting_gate_open(&self.params, height);
 
-        match self.storage_metadata_executor.generate_challenge(
+        match StorageMetadataExecutor::generate_challenge(
+            view,
             parent_hash,
             height,
             &archive_nodes,
-            &self.node_registry_executor,
             assignment_targeting,
             self.params.assignment_replication_factor,
         )? {
@@ -4165,9 +4170,7 @@ mod tests {
             .unwrap();
         assert!(result.status.is_success(), "tx failed: {:?}", result.status);
 
-        let registry = crate::node_registry::NodeRegistryExecutor::new(db.clone());
-        let stored = registry
-            .get_encryption_pubkey(&sender.address())
+        let stored = crate::node_registry::NodeRegistryExecutor::v_get_encryption_pubkey(&candidate.view(), &sender.address())
             .unwrap()
             .expect("encryption pubkey should be persisted");
         assert_eq!(stored, pubkey);
@@ -4231,9 +4234,7 @@ mod tests {
             .unwrap();
         assert!(r2.status.is_success());
 
-        let registry = crate::node_registry::NodeRegistryExecutor::new(db.clone());
-        let stored = registry
-            .get_encryption_pubkey(&sender.address())
+        let stored = crate::node_registry::NodeRegistryExecutor::v_get_encryption_pubkey(&candidate.view(), &sender.address())
             .unwrap()
             .expect("rotated pubkey should still be present");
         assert_eq!(stored, pk2, "rotation must overwrite, not append");
@@ -4340,8 +4341,7 @@ mod tests {
         );
         assert!(status.is_success(), "register failed: {:?}", status);
 
-        let store = crate::storage_metadata::StorageMetadataExecutor::new(db.clone());
-        let row = store.get_metadata_v2(&merkle_root).unwrap().expect("row");
+        let row = crate::storage_metadata::StorageMetadataExecutor::v_get_metadata_v2(&candidate.view(), &merkle_root).unwrap().expect("row");
         assert_eq!(row.owner, owner.address());
         assert_eq!(row.chunk_count, 8);
         assert_eq!(row.fee_pool, deposit);
@@ -4562,9 +4562,7 @@ mod tests {
         assert_eq!(bal_after, bal_before + expected_refund);
 
         // Row state.
-        let store = crate::storage_metadata::StorageMetadataExecutor::new(db.clone());
-        let row = store
-            .get_metadata_v2(&merkle_root)
+        let row = crate::storage_metadata::StorageMetadataExecutor::v_get_metadata_v2(&candidate.view(), &merkle_root)
             .unwrap()
             .expect("row retained");
         assert_eq!(row.lifecycle, FileLifecycleV2::Abandoned);
@@ -4958,9 +4956,7 @@ mod tests {
         );
         assert_eq!(s, TxStatus::Success);
 
-        let store = crate::storage_metadata::StorageMetadataExecutor::new(db.clone());
-        let bm = store
-            .get_attestation_bitmap_v2(&merkle_root, &archive.address())
+        let bm = crate::storage_metadata::StorageMetadataExecutor::v_get_attestation_bitmap_v2(&candidate.view(), &merkle_root, &archive.address())
             .unwrap()
             .expect("bitmap created");
         assert_eq!(bm.len(), 1); // ceil(4/8) = 1 byte
@@ -5029,9 +5025,7 @@ mod tests {
             TxStatus::Success
         );
 
-        let store = crate::storage_metadata::StorageMetadataExecutor::new(db.clone());
-        let bm = store
-            .get_attestation_bitmap_v2(&merkle_root, &archive.address())
+        let bm = crate::storage_metadata::StorageMetadataExecutor::v_get_attestation_bitmap_v2(&candidate.view(), &merkle_root, &archive.address())
             .unwrap()
             .unwrap();
         // Bits 0..=4 set, bits 5..=7 unset.
@@ -5101,9 +5095,7 @@ mod tests {
             TxStatus::Failed(33)
         );
 
-        let store = crate::storage_metadata::StorageMetadataExecutor::new(db.clone());
-        let bm = store
-            .get_attestation_bitmap_v2(&merkle_root, &archive.address())
+        let bm = crate::storage_metadata::StorageMetadataExecutor::v_get_attestation_bitmap_v2(&candidate.view(), &merkle_root, &archive.address())
             .unwrap()
             .unwrap();
         // Still {0, 1} — index 2 should NOT have been written.
@@ -5340,8 +5332,7 @@ mod tests {
         );
 
         // Lifecycle == Active and activated_at_height == 15.
-        let store = crate::storage_metadata::StorageMetadataExecutor::new(db.clone());
-        let row = store.get_metadata_v2(&merkle_root).unwrap().unwrap();
+        let row = crate::storage_metadata::StorageMetadataExecutor::v_get_metadata_v2(&candidate.view(), &merkle_root).unwrap().unwrap();
         assert_eq!(row.lifecycle, sumchain_primitives::FileLifecycleV2::Active);
         assert_eq!(row.activated_at_height, Some(15));
     }
@@ -5546,8 +5537,6 @@ mod tests {
         let mut candidate = CandidateExecution::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
         let executor = BlockExecutor::new(state.clone(), db.clone(), params.clone());
         let proposer = KeyPair::generate();
-        let storage = crate::storage_metadata::StorageMetadataExecutor::new(db.clone());
-        let registry = crate::node_registry::NodeRegistryExecutor::new(db.clone());
 
         // Three archives — with R=1 each chunk is owned by exactly one.
         let a = setup_archive(&mut candidate.view(), &executor, &state, &proposer.address(), 1);
@@ -5613,8 +5602,7 @@ mod tests {
         }
 
         // Now ask compute_coverage_v2 with the same R the executor used.
-        let cov = storage
-            .compute_coverage_v2(&merkle_root, &registry, r)
+        let cov = crate::storage_metadata::StorageMetadataExecutor::v_compute_coverage_v2(&candidate.view(), &merkle_root, r)
             .unwrap()
             .unwrap();
 
@@ -5659,8 +5647,6 @@ mod tests {
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
-        let registry = crate::node_registry::NodeRegistryExecutor::new(db.clone());
-        let storage = crate::storage_metadata::StorageMetadataExecutor::new(db.clone());
 
         let archive = setup_archive(&mut candidate.view(), &executor, &state, &proposer.address(), 1);
         let owner = KeyPair::generate();
@@ -5698,8 +5684,7 @@ mod tests {
             };
 
         // No accepts yet — every index 0..16 is missing.
-        let cov = storage
-            .compute_coverage_v2(&merkle_root, &registry, 3)
+        let cov = crate::storage_metadata::StorageMetadataExecutor::v_compute_coverage_v2(&candidate.view(), &merkle_root, 3)
             .unwrap()
             .unwrap();
         let page1 = extract_missing(&cov.union, cov.chunk_count, 0, 4);
@@ -5723,8 +5708,7 @@ mod tests {
         )
         .is_success());
 
-        let cov2 = storage
-            .compute_coverage_v2(&merkle_root, &registry, 3)
+        let cov2 = crate::storage_metadata::StorageMetadataExecutor::v_compute_coverage_v2(&candidate.view(), &merkle_root, 3)
             .unwrap()
             .unwrap();
         let page2 = extract_missing(&cov2.union, cov2.chunk_count, 4, 4);
@@ -5918,8 +5902,7 @@ mod tests {
         );
         assert_eq!(status, TxStatus::Success);
 
-        let store = crate::storage_metadata::StorageMetadataExecutor::new(db.clone());
-        let row = store.get_metadata_v2(&root).unwrap().unwrap();
+        let row = crate::storage_metadata::StorageMetadataExecutor::v_get_metadata_v2(&candidate.view(), &root).unwrap().unwrap();
         assert_eq!(row.access_list.len(), 1);
         assert_eq!(row.access_list[0].address, new_recipient.address());
     }
@@ -6092,8 +6075,7 @@ mod tests {
             ),
             TxStatus::Success
         );
-        let store = crate::storage_metadata::StorageMetadataExecutor::new(db.clone());
-        let row = store.get_metadata_v2(&root).unwrap().unwrap();
+        let row = crate::storage_metadata::StorageMetadataExecutor::v_get_metadata_v2(&candidate.view(), &root).unwrap().unwrap();
         assert!(row.access_list.is_empty());
 
         // Same recipient again — now missing → Failed(35).
@@ -6381,8 +6363,7 @@ mod tests {
             TxStatus::Success
         );
 
-        let store = crate::storage_metadata::StorageMetadataExecutor::new(db.clone());
-        let row = store.get_metadata_v2(&root).unwrap().unwrap();
+        let row = crate::storage_metadata::StorageMetadataExecutor::v_get_metadata_v2(&candidate.view(), &root).unwrap().unwrap();
         assert_eq!(row.access_list.len(), 1);
         assert_eq!(row.access_list[0].address, r.address());
         assert_eq!(row.access_list[0].expires_at, Some(99));
@@ -6703,7 +6684,6 @@ mod tests {
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
-        let store = crate::storage_metadata::StorageMetadataExecutor::new(db.clone());
 
         // Pending file
         let owner_p = KeyPair::generate();
@@ -6779,11 +6759,11 @@ mod tests {
                 .status,
             TxStatus::Success
         );
-        let row_b = store.get_metadata_v2(&root_b).unwrap().unwrap();
+        let row_b = crate::storage_metadata::StorageMetadataExecutor::v_get_metadata_v2(&candidate.view(), &root_b).unwrap().unwrap();
         assert_eq!(row_b.lifecycle, FileLifecycleV2::Abandoned);
 
         // Pushable list: Pending + Active, no Abandoned.
-        let pushable = store.list_pushable_files_v2().unwrap();
+        let pushable = crate::storage_metadata::StorageMetadataExecutor::v_list_pushable_files_v2(&candidate.view()).unwrap();
         let roots: std::collections::HashSet<_> = pushable.iter().map(|r| r.merkle_root).collect();
         assert!(roots.contains(&root_p));
         assert!(roots.contains(&root_a));
@@ -6862,8 +6842,7 @@ mod tests {
         assert_eq!(r.status, TxStatus::Failed(31));
 
         // Row still Pending, fee_pool intact.
-        let store = crate::storage_metadata::StorageMetadataExecutor::new(db.clone());
-        let row = store.get_metadata_v2(&merkle_root).unwrap().expect("row");
+        let row = crate::storage_metadata::StorageMetadataExecutor::v_get_metadata_v2(&candidate.view(), &merkle_root).unwrap().expect("row");
         assert_eq!(row.lifecycle, FileLifecycleV2::Pending);
         assert_eq!(row.fee_pool, deposit);
     }
@@ -6943,6 +6922,27 @@ mod tests {
         let registry = crate::node_registry::NodeRegistryExecutor::new(db.clone());
         let snap = registry.get_active_archive_nodes_at_height(0).unwrap();
         assert!(snap.is_empty(), "genesis archive set should be empty");
+
+        // The READ above passes whether or not the row exists — the reader
+        // treats a missing snapshot as the empty set. So assert the row itself.
+        //
+        // It matters because this is the one active-archive snapshot written
+        // outside block execution: every other one stages into a candidate, and
+        // this one is committed by `StateStore::init_genesis_archive_snapshot`.
+        // The bytes must be exactly what the registry's own encoder produces, or
+        // the genesis row and a height-`n` snapshot would disagree on format.
+        let row = db
+            .get(
+                sumchain_storage::cf::ACTIVE_ARCHIVE_NODES_HISTORY,
+                &0u64.to_be_bytes(),
+            )
+            .unwrap()
+            .expect("genesis writes the height-0 snapshot row explicitly");
+        assert_eq!(
+            row,
+            crate::node_registry::NodeRegistryExecutor::genesis_archive_snapshot_bytes().unwrap(),
+            "the genesis row must carry the registry's own encoding of the empty set"
+        );
     }
 
     /// Registering an ArchiveNode at height H writes a snapshot at H.
@@ -6954,18 +6954,17 @@ mod tests {
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
-        let registry = crate::node_registry::NodeRegistryExecutor::new(db.clone());
 
         let archive = KeyPair::generate();
         let status = register_archive(&mut candidate.view(), &executor, &state, &archive, &proposer.address(), 10, 0);
         assert!(status.is_success(), "register failed: {:?}", status);
 
         // Snapshot at H=10 has the new node; H=9 is empty (pre-registration).
-        let at_10 = registry.get_active_archive_nodes_at_height(10).unwrap();
+        let at_10 = crate::node_registry::NodeRegistryExecutor::v_get_active_archive_nodes_at_height(&candidate.view(), 10).unwrap();
         assert_eq!(at_10.len(), 1);
         assert_eq!(at_10[0].address, archive.address());
 
-        let at_9 = registry.get_active_archive_nodes_at_height(9).unwrap();
+        let at_9 = crate::node_registry::NodeRegistryExecutor::v_get_active_archive_nodes_at_height(&candidate.view(), 9).unwrap();
         assert!(at_9.is_empty(), "no snapshot before registration");
     }
 
@@ -6978,7 +6977,6 @@ mod tests {
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
-        let registry = crate::node_registry::NodeRegistryExecutor::new(db.clone());
 
         // Register A at h=5, B at h=20.
         let a = KeyPair::generate();
@@ -6987,26 +6985,25 @@ mod tests {
         assert!(register_archive(&mut candidate.view(), &executor, &state, &b, &proposer.address(), 20, 0).is_success());
 
         // h=4: no snapshot, empty.
-        assert!(registry
-            .get_active_archive_nodes_at_height(4)
+        assert!(crate::node_registry::NodeRegistryExecutor::v_get_active_archive_nodes_at_height(&candidate.view(), 4)
             .unwrap()
             .is_empty());
 
         // h=5: has A.
-        let s5 = registry.get_active_archive_nodes_at_height(5).unwrap();
+        let s5 = crate::node_registry::NodeRegistryExecutor::v_get_active_archive_nodes_at_height(&candidate.view(), 5).unwrap();
         assert_eq!(s5.len(), 1);
 
         // h=12: still A only (B not yet registered).
-        let s12 = registry.get_active_archive_nodes_at_height(12).unwrap();
+        let s12 = crate::node_registry::NodeRegistryExecutor::v_get_active_archive_nodes_at_height(&candidate.view(), 12).unwrap();
         assert_eq!(s12.len(), 1);
         assert_eq!(s12[0].address, a.address());
 
         // h=20: A + B.
-        let s20 = registry.get_active_archive_nodes_at_height(20).unwrap();
+        let s20 = crate::node_registry::NodeRegistryExecutor::v_get_active_archive_nodes_at_height(&candidate.view(), 20).unwrap();
         assert_eq!(s20.len(), 2);
 
         // h=999 (past head): returns latest snapshot.
-        let s999 = registry.get_active_archive_nodes_at_height(999).unwrap();
+        let s999 = crate::node_registry::NodeRegistryExecutor::v_get_active_archive_nodes_at_height(&candidate.view(), 999).unwrap();
         assert_eq!(s999.len(), 2);
     }
 
@@ -7023,7 +7020,6 @@ mod tests {
         let executor =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
-        let registry = crate::node_registry::NodeRegistryExecutor::new(db.clone());
 
         // Register an archive at h=10.
         let archive = KeyPair::generate();
@@ -7075,14 +7071,14 @@ mod tests {
 
         // After slashing at h=15, the active set is empty (the only archive
         // was slashed). Snapshot at h=15 reflects this.
-        let s15 = registry.get_active_archive_nodes_at_height(15).unwrap();
+        let s15 = crate::node_registry::NodeRegistryExecutor::v_get_active_archive_nodes_at_height(&candidate.view(), 15).unwrap();
         assert!(
             s15.is_empty(),
             "slashed archive should not be in active set"
         );
 
         // Sanity: snapshot at h=10 still has the archive.
-        let s10 = registry.get_active_archive_nodes_at_height(10).unwrap();
+        let s10 = crate::node_registry::NodeRegistryExecutor::v_get_active_archive_nodes_at_height(&candidate.view(), 10).unwrap();
         assert_eq!(s10.len(), 1);
 
         // No-op: re-issuing UpdateStatus(Slashed) at h=20 must NOT write a
@@ -7100,7 +7096,7 @@ mod tests {
             )
             .unwrap();
         assert!(r2.status.is_success());
-        let s20 = registry.get_active_archive_nodes_at_height(20).unwrap();
+        let s20 = crate::node_registry::NodeRegistryExecutor::v_get_active_archive_nodes_at_height(&candidate.view(), 20).unwrap();
         assert_eq!(s20.len(), 0); // unchanged from h=15
     }
 
@@ -7267,9 +7263,7 @@ mod tests {
 
         // Verify the persisted NodeRecord carries the height we passed,
         // not the old hardcoded 0.
-        let registry = crate::node_registry::NodeRegistryExecutor::new(db.clone());
-        let record = registry
-            .get_node(&sender.address())
+        let record = crate::node_registry::NodeRegistryExecutor::v_get_node(&candidate.view(), &sender.address())
             .unwrap()
             .expect("node should be registered");
         assert_eq!(
@@ -7334,8 +7328,7 @@ mod tests {
         let (_owner, _archive, merkle_root) =
             setup_active_public_file(&mut candidate.view(), &executor, &state, &proposer.address(), b"active-no-abandon");
 
-        let store = crate::storage_metadata::StorageMetadataExecutor::new(db.clone());
-        let row = store.get_metadata_v2(&merkle_root).unwrap().expect("row");
+        let row = crate::storage_metadata::StorageMetadataExecutor::v_get_metadata_v2(&candidate.view(), &merkle_root).unwrap().expect("row");
         assert_eq!(
             row.lifecycle,
             sumchain_primitives::FileLifecycleV2::Active,
@@ -7440,9 +7433,8 @@ mod tests {
             result.status
         );
 
-        let registry = crate::node_registry::NodeRegistryExecutor::new(db.clone());
         assert_eq!(
-            registry.get_encryption_pubkey(&sender.address()).unwrap(),
+            crate::node_registry::NodeRegistryExecutor::v_get_encryption_pubkey(&candidate.view(), &sender.address()).unwrap(),
             Some([7u8; 32]),
             "V2 dispatch should have persisted the encryption pubkey"
         );

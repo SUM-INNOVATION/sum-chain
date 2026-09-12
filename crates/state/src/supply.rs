@@ -494,7 +494,6 @@ impl SupplyStore {
     /// dispute. Returns the liquid amount to credit (0 ⇒ nothing new → 383).
     pub fn claim_milestone_grants(
         view: &mut ExecutionView<'_, '_>,
-        db: &Arc<Database>,
         addr: &Address,
         kind: ServiceKind,
         height: u64,
@@ -509,8 +508,11 @@ impl SupplyStore {
             }
         }
         let m = Self::v_get_milestones(view, addr, kind).map_err(|_| 381u32)?;
-        let registry = crate::node_registry::NodeRegistryExecutor::new(db.clone());
-        let node = registry.get_node(addr).ok().flatten();
+        // From the candidate: an archive slashed earlier in this same block is
+        // no longer Active, and must not collect a milestone grant for it.
+        let node = crate::node_registry::NodeRegistryExecutor::v_get_node(view, addr)
+            .ok()
+            .flatten();
 
         let mut reached: u128 = 0;
         match kind {
@@ -717,45 +719,76 @@ pub fn native_supply_snapshot(db: &Arc<Database>) -> Result<NativeSupplySnapshot
     let inference =
         crate::inference_settlement_executor::InferenceSettlementExecutor::new(db.clone());
     let totals = (|| {
-        Ok((
-            inference.total_session_remaining_escrow()?,
-            inference.total_verifier_bonds()?,
-        ))
+        let (storage_v1_fee_pool, storage_v2_fee_pool) =
+            crate::storage_metadata::StorageMetadataExecutor::new(db.clone()).total_fee_pools()?;
+        Ok(MigratedBuckets {
+            inference_escrow: inference.total_session_remaining_escrow()?,
+            inference_verifier_bonds: inference.total_verifier_bonds()?,
+            archive_staked_balance: crate::node_registry::NodeRegistryExecutor::new(db.clone())
+                .total_archive_staked_balance()?,
+            storage_v1_fee_pool,
+            storage_v2_fee_pool,
+        })
     })();
-    native_supply_snapshot_with_inference(db, totals)
+    native_supply_snapshot_with_migrated(db, totals)
 }
 
-/// The census as THIS BLOCK sees it: every bucket except inference from
-/// committed state, and the inference buckets from the candidate.
+/// The census buckets whose subsystems have migrated to the execution view.
 ///
-/// The asymmetry is exact, not approximate. Accounts, staking, delegations, the
-/// node registry and the storage fee pools have not migrated, so committed IS
-/// where their rows are. Inference HAS, so committed is where its rows are not.
+/// They are read through whichever handle the caller holds — the candidate
+/// during block execution, committed storage for the RPC diagnostic — while
+/// every unmigrated bucket is still read from `db` inside
+/// [`native_supply_snapshot_with_migrated`]. Grouping them makes the boundary a
+/// single, visible list that shrinks as subsystems move, rather than a growing
+/// tuple nobody can read.
+#[derive(Debug, Clone, Copy)]
+struct MigratedBuckets {
+    inference_escrow: u128,
+    inference_verifier_bonds: u128,
+    archive_staked_balance: u128,
+    storage_v1_fee_pool: u128,
+    storage_v2_fee_pool: u128,
+}
+
+/// The census as THIS BLOCK sees it: the migrated buckets from the candidate,
+/// everything else from committed state.
 ///
-/// The inference totals are computed from the candidate DIRECTLY rather than
-/// taken from a committed snapshot and adjusted. A committed-first census would
-/// have to decode the parent's inference rows on the way, and a block is
-/// entitled to delete or replace a malformed one — so a row this block is
-/// removing could fail the census and withhold a correction that should apply.
+/// The asymmetry is exact, not approximate. Accounts, validator self-stake and
+/// active delegations have not migrated, so committed IS where their rows are.
+/// Inference, the node registry and storage metadata HAVE, so committed is
+/// where their rows are not — a block that opens a session, slashes an archive
+/// or drains a fee pool must census what it is about to publish.
+///
+/// Those totals are computed from the candidate DIRECTLY rather than taken from
+/// a committed snapshot and adjusted. A committed-first census would have to
+/// decode the parent's rows on the way, and a block is entitled to delete or
+/// replace a malformed one — so a row this block is removing could fail the
+/// census and withhold a correction that should apply.
 pub fn v_native_supply_snapshot(
     view: &ExecutionView<'_, '_>,
     db: &Arc<Database>,
 ) -> Result<NativeSupplySnapshot> {
     use crate::inference_settlement_executor::InferenceSettlementExecutor as Settle;
+    use crate::node_registry::NodeRegistryExecutor as Registry;
+    use crate::storage_metadata::StorageMetadataExecutor as Storage;
     let totals = (|| {
-        Ok((
-            Settle::v_total_session_remaining_escrow(view)?,
-            Settle::v_total_verifier_bonds(view)?,
-        ))
+        let (storage_v1_fee_pool, storage_v2_fee_pool) = Storage::v_total_fee_pools(view)?;
+        Ok(MigratedBuckets {
+            inference_escrow: Settle::v_total_session_remaining_escrow(view)?,
+            inference_verifier_bonds: Settle::v_total_verifier_bonds(view)?,
+            archive_staked_balance: Registry::v_total_archive_staked_balance(view)?,
+            storage_v1_fee_pool,
+            storage_v2_fee_pool,
+        })
     })();
-    native_supply_snapshot_with_inference(db, totals)
+    native_supply_snapshot_with_migrated(db, totals)
 }
 
-/// The census core, shared by both handles: every non-inference bucket from
-/// `db`, with the inference buckets supplied by the caller.
-fn native_supply_snapshot_with_inference(
+/// The census core, shared by both handles: every unmigrated bucket from `db`,
+/// with the migrated buckets supplied by the caller.
+fn native_supply_snapshot_with_migrated(
     db: &Arc<Database>,
-    inference: Result<(u128, u128)>,
+    migrated: Result<MigratedBuckets>,
 ) -> Result<NativeSupplySnapshot> {
     // Account balances incl. Address::ZERO (INCLUDE); ZERO is also captured as
     // the report-only burn subset in the same single scan.
@@ -775,16 +808,15 @@ fn native_supply_snapshot_with_inference(
     let validator_self_stake = StakingStore::new(db).total_validator_self_stake()?;
     let active_delegations = DelegationStore::new(db).total_active_delegations()?;
 
-    // Archive-node stake (INCLUDE).
-    let archive_staked_balance =
-        crate::node_registry::NodeRegistryExecutor::new(db.clone()).total_archive_staked_balance()?;
-
-    // Storage fee pools V1 + V2 (INCLUDE).
-    let (storage_v1_fee_pool, storage_v2_fee_pool) =
-        crate::storage_metadata::StorageMetadataExecutor::new(db.clone()).total_fee_pools()?;
-
-    // Inference escrow + verifier bonds (INCLUDE), from the caller's handle.
-    let (inference_escrow, inference_verifier_bonds) = inference?;
+    // Archive stake, storage fee pools V1 + V2, inference escrow and verifier
+    // bonds (all INCLUDE) — from the caller's handle.
+    let MigratedBuckets {
+        inference_escrow,
+        inference_verifier_bonds,
+        archive_staked_balance,
+        storage_v1_fee_pool,
+        storage_v2_fee_pool,
+    } = migrated?;
 
     Ok(NativeSupplySnapshot {
         account_balances_incl_zero,

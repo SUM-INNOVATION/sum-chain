@@ -299,6 +299,28 @@ impl<'a> StateStore<'a> {
         Ok(self.get_account(address)?.balance)
     }
 
+    /// Write the genesis active-archive-node snapshot.
+    ///
+    /// Every other write to [`cf::ACTIVE_ARCHIVE_NODES_HISTORY`] happens during
+    /// block execution and is staged into that block's candidate, so it can be
+    /// abandoned with the block. Genesis has no block and no candidate: there is
+    /// nothing to abandon and nothing to accept, so its single row is committed
+    /// directly, alongside the genesis account writes above.
+    ///
+    /// The key is fixed at height 0 and takes no parameter, so this cannot be
+    /// reused to commit a snapshot for an executing block — that is
+    /// `NodeRegistryExecutor::v_write_active_archive_snapshot`, which writes
+    /// through the view. `encoded_empty_set` is produced by
+    /// `NodeRegistryExecutor::genesis_archive_snapshot_bytes`, keeping the
+    /// encoding with the `NodeRecord` type rather than duplicating it here.
+    pub fn init_genesis_archive_snapshot(&self, encoded_empty_set: &[u8]) -> Result<()> {
+        self.db.put(
+            cf::ACTIVE_ARCHIVE_NODES_HISTORY,
+            &0u64.to_be_bytes(),
+            encoded_empty_set,
+        )
+    }
+
     /// Get account nonce
     pub fn get_nonce(&self, address: &Address) -> Result<Nonce> {
         Ok(self.get_account(address)?.nonce)

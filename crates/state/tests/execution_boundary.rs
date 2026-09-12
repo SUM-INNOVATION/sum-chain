@@ -61,14 +61,27 @@ use std::path::Path;
 ///
 /// Production-only totals so far: 42 before the education subsystem, 41 after
 /// it, 40 after the compute-pool cluster, 39 after the beacon cluster, 30 after
-/// supply, 25 after attestation and settlement.
+/// supply, 25 after attestation and settlement, 3 after storage metadata and the
+/// node registry.
+///
+/// The storage-metadata/node-registry cluster took 22 sites, not 21: the
+/// twenty-second was in `executor.rs`, where the expired-challenge slash wrote
+/// a node record with `self.db.put("node_registry", ..)` — hand-rolled key,
+/// hand-rolled value, column family named by string literal — because
+/// `put_node` was private. It belonged to the registry's write set and moved
+/// with it.
+///
+/// What is left is three, and none of them is an unmigrated subsystem:
+///
+/// * `beacon_store.rs`, `compute_pool_store.rs` — one each, the reorg-path
+///   `revert_block`. Reverting is not execution: it is the committed write that
+///   undoes a published block, and it stays a direct write by design until the
+///   ancestor-based reorg replaces it.
+/// * `state.rs` — the reorg revert batch, reserved for that same replacement.
 fn budget() -> BTreeMap<&'static str, usize> {
     BTreeMap::from([
-        ("storage_metadata.rs", 15),
-        ("node_registry.rs", 6),
         ("beacon_store.rs", 1),
         ("compute_pool_store.rs", 1),
-        ("executor.rs", 1),
         ("state.rs", 1),
     ])
 }
@@ -911,13 +924,11 @@ fn migrated_execution_paths_take_no_self_receiver() {
         ("supply.rs", "fn record_settlement_claim("),
         ("supply.rs", "fn record_denied_dispute("),
         ("supply.rs", "fn award_grant("),
-        ("supply.rs", "fn claim_validator_grant("),
         ("supply.rs", "fn claim_milestone_grants("),
         ("supply.rs", "fn unlock_grant("),
         ("supply.rs", "fn forfeit_locked_grant("),
         ("supply.rs", "fn apply_reserve_release("),
         ("supply.rs", "fn apply_monetary_mint("),
-        ("supply.rs", "fn apply_supply_correction_if_needed("),
         ("inference_attestation_executor.rs", "fn stage("),
         ("inference_attestation_executor.rs", "fn v_exists("),
         ("inference_attestation_executor.rs", "fn v_get("),
@@ -932,6 +943,55 @@ fn migrated_execution_paths_take_no_self_receiver() {
         ("inference_settlement_executor.rs", "fn v_put_claim("),
         ("inference_settlement_executor.rs", "fn v_put_dispute("),
         ("inference_settlement_executor.rs", "fn v_consistency_group_size("),
+        ("node_registry.rs", "fn execute_register_encryption_key("),
+        ("node_registry.rs", "fn execute_update_status("),
+        ("node_registry.rs", "fn v_put_node("),
+        ("node_registry.rs", "fn v_get_node("),
+        ("node_registry.rs", "fn v_get_nodes_by_role("),
+        ("node_registry.rs", "fn v_get_active_archive_nodes("),
+        ("node_registry.rs", "fn v_get_active_archive_nodes_at_height("),
+        ("node_registry.rs", "fn v_write_active_archive_snapshot("),
+        ("node_registry.rs", "fn v_get_archive_unbonding("),
+        ("node_registry.rs", "fn v_put_archive_unbonding("),
+        ("node_registry.rs", "fn v_delete_archive_unbonding("),
+        ("node_registry.rs", "fn v_get_encryption_pubkey("),
+        ("node_registry.rs", "fn v_total_archive_staked_balance("),
+        ("storage_metadata.rs", "fn execute_update_access_list("),
+        ("storage_metadata.rs", "fn execute_add_access("),
+        ("storage_metadata.rs", "fn execute_remove_access("),
+        ("storage_metadata.rs", "fn execute_add_access_v2("),
+        ("storage_metadata.rs", "fn execute_remove_access_v2("),
+        ("storage_metadata.rs", "fn execute_update_access_v2("),
+        ("storage_metadata.rs", "fn execute_accept_assignment_v2("),
+        ("storage_metadata.rs", "fn execute_activate_file_v2("),
+        ("storage_metadata.rs", "fn execute_reassign_chunks_v2("),
+        ("storage_metadata.rs", "fn generate_challenge("),
+        ("storage_metadata.rs", "fn generate_challenge_schedule("),
+        ("storage_metadata.rs", "fn v_select_assigned_active_target("),
+        ("storage_metadata.rs", "fn v_put_metadata("),
+        ("storage_metadata.rs", "fn v_get_metadata("),
+        ("storage_metadata.rs", "fn v_put_metadata_v2("),
+        ("storage_metadata.rs", "fn v_get_metadata_v2("),
+        ("storage_metadata.rs", "fn v_put_challenge("),
+        ("storage_metadata.rs", "fn v_get_challenge("),
+        ("storage_metadata.rs", "fn v_delete_challenge("),
+        ("storage_metadata.rs", "fn v_get_challenges_by_node("),
+        ("storage_metadata.rs", "fn v_get_expired_challenges("),
+        ("storage_metadata.rs", "fn v_get_funded_file_roots("),
+        ("storage_metadata.rs", "fn v_funded_active_v2_candidates("),
+        ("storage_metadata.rs", "fn v_total_fee_pools("),
+        ("storage_metadata.rs", "fn v_get_file_reassignments("),
+        ("storage_metadata.rs", "fn v_put_file_reassignments("),
+        ("storage_metadata.rs", "fn v_file_epochs("),
+        ("storage_metadata.rs", "fn v_get_attestation_bitmap("),
+        ("storage_metadata.rs", "fn v_aggregate_coverage_union("),
+        ("storage_metadata.rs", "fn v_reassignment_needed("),
+        ("storage_metadata.rs", "fn v_challengeable_index_insert("),
+        ("storage_metadata.rs", "fn v_challengeable_index_remove("),
+        ("storage_metadata.rs", "fn v_challengeable_index_sync("),
+        ("storage_metadata.rs", "fn v_por_scheduler_backfill_done("),
+        ("storage_metadata.rs", "fn v_backfill_challengeable_index("),
+        ("executor.rs", "fn process_expired_challenges("),
     ];
 
     let files = rust_files();
@@ -963,6 +1023,22 @@ fn migrated_execution_paths_take_no_self_receiver() {
              `ExecutionView`. Its reads and writes cannot be attributed to the \
              candidate block.\n  parameters: {params}"
         );
+        // Dropping the receiver is not enough on its own. A committed handle
+        // passed as a PARAMETER reads exactly the same rows, and the receiver
+        // check cannot see it: `supply.rs` `claim_milestone_grants` sat on this
+        // list while taking `&Arc<Database>` and reading the node registry
+        // through it, which is the case this assertion exists for. A function
+        // that legitimately still needs one belongs in PARTIAL, where it is
+        // declared with what it reads.
+        for handle in ["Database", "StateManager"] {
+            assert!(
+                !params.contains(handle),
+                "{file} `{sig}` is listed as fully migrated but takes a \
+                 `{handle}`, which reads committed state just as a `self` \
+                 receiver would. Move it to PARTIAL and say what it still \
+                 reads, or drop the parameter.\n  parameters: {params}"
+            );
+        }
     }
 }
 
@@ -1592,12 +1668,13 @@ fn a_self_receiver_is_allowed_only_where_the_type_holds_no_database() {
 /// Execution-path functions that still hold a committed database handle, with
 /// what each still reads through it.
 ///
-/// The handle takes two forms and both are the same hazard: a `self` receiver
-/// on a type that owns `Arc<Database>`, or an explicit `&Arc<Database>`
-/// parameter. Either way the function can read committed state, which is what
-/// the check above forbids for a finished path. Listing them here keeps that
-/// visible and countable instead of letting an omission from `EXECUTION_FNS`
-/// read as "already migrated".
+/// The handle takes three forms and all are the same hazard: a `self` receiver
+/// on a type that owns `Arc<Database>`, an explicit `&Arc<Database>` parameter,
+/// or a `&StateManager` — which owns an `Arc<Database>` and whose account
+/// accessors read and write it directly. Any of them can read committed state,
+/// which is what the check above forbids for a finished path. Listing them here
+/// keeps that visible and countable instead of letting an omission from
+/// `EXECUTION_FNS` read as "already migrated".
 ///
 /// Each row asserts BOTH that the function still has such a handle AND that it
 /// already takes an `ExecutionView`: half-migrated, and known to be. A row
@@ -1606,6 +1683,15 @@ fn a_self_receiver_is_allowed_only_where_the_type_holds_no_database() {
 #[test]
 fn partially_migrated_execution_paths_are_declared() {
     /// `(file, signature prefix, what it still reads from committed state)`.
+    /// What every account-touching row below still reads. The storage-metadata
+    /// and node-registry state itself is fully on the view; what remains is the
+    /// ACCOUNT row each of these paths debits or credits.
+    const ACCOUNTS: &str = "the sender, proposer and payee ACCOUNT rows, through \
+         `&StateManager`. Accounts have not migrated — `StateStore` writes them \
+         straight to the database — so committed IS where they are. Every \
+         storage-metadata and node-registry row this path touches goes through \
+         the view.";
+
     const PARTIAL: &[(&str, &str, &str)] = &[
         (
             "executor.rs",
@@ -1645,21 +1731,47 @@ fn partially_migrated_execution_paths_are_declared() {
         (
             "supply.rs",
             "fn apply_supply_correction_if_needed(",
-            "the non-inference census buckets — accounts, validator self-stake, \
-             active delegations, archive stake and the storage fee pools — \
-             through `&Arc<Database>`. Those subsystems have not migrated, so \
-             committed IS where their rows are; this closes as they move. The \
-             INFERENCE buckets are read from the candidate, as are the reserve \
-             and ledger it writes.",
+            "the unmigrated census buckets — accounts, validator self-stake and \
+             active delegations — through `&Arc<Database>`. Those subsystems \
+             have not migrated, so committed IS where their rows are; this \
+             closes as they move. Inference escrow and bonds, archive stake and \
+             the storage fee pools are read from the CANDIDATE, as are the \
+             reserve and ledger it writes.",
         ),
         (
             "supply.rs",
             "fn v_native_supply_snapshot(",
-            "the same non-inference buckets, for the same reason. It takes both \
-             handles deliberately: inference from the candidate, everything \
-             else from committed, with no committed-first pass that a \
-             candidate's deletion would have to undo.",
+            "the same unmigrated buckets, for the same reason. It takes both \
+             handles deliberately: the migrated buckets from the candidate, \
+             everything else from committed, with no committed-first pass that \
+             a candidate's deletion would have to undo.",
         ),
+        (
+            "supply.rs",
+            "fn claim_validator_grant(",
+            "the validator's self-stake, through `StakingStore::new(db)`. \
+             Staking has not migrated; every grant row it reads and writes goes \
+             through the view.",
+        ),
+        (
+            "executor.rs",
+            "fn generate_storage_challenge_if_due(",
+            "nothing — the archive set, the challengeable index and every \
+             challenge it writes go through the view; the receiver remains for \
+             self.params.",
+        ),
+        ("node_registry.rs", "fn execute(", ACCOUNTS),
+        ("node_registry.rs", "fn execute_v2(", ACCOUNTS),
+        ("node_registry.rs", "fn execute_register(", ACCOUNTS),
+        ("node_registry.rs", "fn execute_begin_unstake(", ACCOUNTS),
+        ("node_registry.rs", "fn execute_withdraw_unbonded(", ACCOUNTS),
+        ("storage_metadata.rs", "fn execute(", ACCOUNTS),
+        ("storage_metadata.rs", "fn execute_v2(", ACCOUNTS),
+        ("storage_metadata.rs", "fn execute_register_file(", ACCOUNTS),
+        ("storage_metadata.rs", "fn execute_top_up(", ACCOUNTS),
+        ("storage_metadata.rs", "fn execute_submit_proof(", ACCOUNTS),
+        ("storage_metadata.rs", "fn execute_register_file_pending_v2(", ACCOUNTS),
+        ("storage_metadata.rs", "fn execute_abandon_file_v2(", ACCOUNTS),
     ];
 
     let files = rust_files();
@@ -1677,11 +1789,13 @@ fn partially_migrated_execution_paths_are_declared() {
              `ExecutionView` at all.\n  parameters: {params}"
         );
         assert!(
-            takes_self_receiver(params) || params.contains("Database"),
+            takes_self_receiver(params)
+                || params.contains("Database")
+                || params.contains("StateManager"),
             "{file} `{sig}` no longer holds a committed database handle — no \
-             `self` receiver and no `Database` parameter — so it is fully \
-             migrated. Move it to EXECUTION_FNS and delete this row.\n  it was \
-             listed as still reading: {reads}"
+             `self` receiver and no `Database` or `StateManager` parameter — so \
+             it is fully migrated. Move it to EXECUTION_FNS and delete this \
+             row.\n  it was listed as still reading: {reads}"
         );
     }
 }

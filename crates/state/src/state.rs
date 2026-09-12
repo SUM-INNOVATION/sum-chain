@@ -56,8 +56,15 @@ impl StateManager {
         // is a tx, executed post-genesis), so this is always an empty `Vec`.
         // Writing it explicitly lets `storage_getActiveNodesAtHeight(0)` always
         // resolve, and gives the storage layout a self-describing baseline.
-        let node_registry = crate::node_registry::NodeRegistryExecutor::new(self.db.clone());
-        node_registry.write_active_archive_snapshot(0)?;
+        //
+        // This is the one active-archive snapshot written outside block
+        // execution, so it commits here rather than staging into a candidate:
+        // genesis has no block to abandon. The bytes are encoded by the node
+        // registry, so the genesis row and every height-`n` snapshot share one
+        // encoder.
+        store.init_genesis_archive_snapshot(
+            &crate::node_registry::NodeRegistryExecutor::genesis_archive_snapshot_bytes()?,
+        )?;
 
         let state_root = genesis
             .compute_state_root()

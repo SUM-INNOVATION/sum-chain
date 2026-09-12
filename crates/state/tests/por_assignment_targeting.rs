@@ -16,7 +16,6 @@ mod common;
 use sumchain_storage::exec_view::ExecutionView;
 use common::{fund, setup_with_params, CHAIN_ID};
 
-use std::sync::Arc;
 
 use sumchain_crypto::{sign, KeyPair};
 use sumchain_genesis::ChainParams;
@@ -29,7 +28,6 @@ use sumchain_primitives::{
 use sumchain_state::executor::BlockExecutor;
 use sumchain_state::storage_metadata::StorageMetadataExecutor;
 use sumchain_state::{NodeRegistryExecutor, StateManager};
-use sumchain_storage::Database;
 
 const STAKE: u64 = 1_000_000_000;
 const FEE: u128 = 1_000;
@@ -123,10 +121,6 @@ fn seed_u64(seed: &[u8], from: usize) -> u64 {
     u64::from_be_bytes(seed[from..from + 8].try_into().unwrap())
 }
 
-fn executors(db: &Arc<Database>) -> (StorageMetadataExecutor, NodeRegistryExecutor) {
-    (StorageMetadataExecutor::new(db.clone()), NodeRegistryExecutor::new(db.clone()))
-}
-
 /// Assigned set for chunk 0 of `root` under `snapshot`, replication `r`.
 fn assigned_chunk0(root: &Hash, snapshot: &[NodeRecord], r: u32) -> Vec<Address> {
     assigned_archives_presorted(root, &sorted_addrs(snapshot), 0, r)
@@ -163,7 +157,6 @@ fn setup_v2_active_funded(
     view: &mut ExecutionView<'_, '_>,
     state: &StateManager,
     executor: &BlockExecutor,
-    db: &Arc<Database>,
     root: Hash,
     k: usize,
     r: u32,
@@ -184,9 +177,9 @@ fn setup_v2_active_funded(
         .unwrap();
     assert!(rv.status.is_success(), "v2 register: {:?}", rv.status);
 
-    // Accept chunk 0 from one assigned archive, then activate.
-    let registry = NodeRegistryExecutor::new(db.clone());
-    let snapshot = registry.get_active_archive_nodes_at_height(2).unwrap();
+    // Accept chunk 0 from one assigned archive, then activate. The snapshot
+    // comes from the candidate: the archives above registered into it.
+    let snapshot = NodeRegistryExecutor::v_get_active_archive_nodes_at_height(view, 2).unwrap();
     let assignee = assigned_chunk0(&root, &snapshot, r)[0];
     let assignee_kp = archives.iter().find(|kp| kp.address().as_bytes() == assignee.as_bytes()).unwrap();
     let acc = executor
@@ -233,8 +226,7 @@ fn v1_get_funded_file_roots_ignores_non_f_keys() {
         .execute_tx(&mut candidate.view(), &signed(&owner, FEE, 0, sm_v1(v1_register_op(root))), &proposer.address(), 2, 1000)
         .unwrap();
 
-    let (storage, _registry) = executors(&db);
-    let roots = storage.get_funded_file_roots().unwrap();
+    let roots = StorageMetadataExecutor::v_get_funded_file_roots(&candidate.view()).unwrap();
     assert_eq!(roots, vec![root], "only the funded V1 root, owner-index keys ignored");
 }
 
@@ -254,17 +246,18 @@ fn gate_closed_targets_legacy_global_set() {
     let root = Hash::hash(b"legacy-file");
     executor.execute_tx(&mut candidate.view(), &signed(&owner, FEE, 0, sm_v1(v1_register_op(root))), &proposer.address(), 2, 1000).unwrap();
 
-    let (storage, registry) = executors(&db);
-    let active = registry.get_active_archive_nodes().unwrap();
+    let active = NodeRegistryExecutor::v_get_active_archive_nodes(&candidate.view()).unwrap();
     let parent = Hash::hash(b"parent-legacy");
     let height = 10;
     let seed = challenge_seed(&parent, height);
     let legacy_target = active[(seed_u64(&seed, 12) % active.len() as u64) as usize].address;
 
-    let ch = storage
-        .generate_challenge(&parent, height, &active, &registry, /* assignment_targeting */ false, 2)
-        .unwrap()
-        .expect("legacy challenge generated");
+    let ch = StorageMetadataExecutor::generate_challenge(
+        &mut candidate.view(), &parent, height, &active,
+        /* assignment_targeting */ false, 2,
+    )
+    .unwrap()
+    .expect("legacy challenge generated");
     assert_eq!(ch.merkle_root, root, "gate closed must select the V1 funded file");
     assert_eq!(ch.target_node, legacy_target, "gate closed must match legacy global target");
 }
@@ -277,7 +270,7 @@ fn gate_open_uses_v2_not_v1_files() {
     let (state, db, _dir, executor) = setup_with_params(params_targeting(r));
     let mut candidate = common::candidate(&db);
     let root_v2 = Hash::hash(b"v2-active-file");
-    let (_archives, owner) = setup_v2_active_funded(&mut candidate.view(), &state, &executor, &db, root_v2, 2, r);
+    let (_archives, owner) = setup_v2_active_funded(&mut candidate.view(), &state, &executor, root_v2, 2, r);
 
     // Also register a separate V1 funded file — it must never be selected.
     let root_v1 = Hash::hash(b"v1-decoy-file");
@@ -285,13 +278,12 @@ fn gate_open_uses_v2_not_v1_files() {
         .execute_tx(&mut candidate.view(), &signed(&owner, FEE, 2, sm_v1(v1_register_op(root_v1))), &KeyPair::generate().address(), 5, 1000)
         .unwrap();
 
-    let (storage, registry) = executors(&db);
-    let active = registry.get_active_archive_nodes().unwrap();
+    let active = NodeRegistryExecutor::v_get_active_archive_nodes(&candidate.view()).unwrap();
     for i in 0..15u64 {
         let parent = Hash::hash(format!("p{i}").as_bytes());
-        let ch = storage.generate_challenge(&parent, 20 + i, &active, &registry, true, r).unwrap().expect("challenge");
+        let ch = StorageMetadataExecutor::generate_challenge(&mut candidate.view(), &parent, 20 + i, &active, true, r).unwrap().expect("challenge");
         assert_eq!(ch.merkle_root, root_v2, "gate open must select the V2 file, never the V1 decoy (seed {i})");
-        storage.delete_challenge(&ch).unwrap();
+        StorageMetadataExecutor::v_delete_challenge(&mut candidate.view(), &ch).unwrap();
     }
 }
 
@@ -321,10 +313,9 @@ fn gate_open_excludes_pending_and_unfunded_v2() {
     executor.execute_tx(&mut candidate.view(), &signed(&archive, FEE, 1, sm_v2(StorageMetadataOperationV2::AcceptAssignmentV2 { merkle_root: unfunded, chunk_indices: vec![0] })), &proposer.address(), 3, 1000).unwrap();
     executor.execute_tx(&mut candidate.view(), &signed(&owner, FEE, 2, sm_v2(StorageMetadataOperationV2::ActivateFileV2 { merkle_root: unfunded })), &proposer.address(), 4, 1000).unwrap();
 
-    let (storage, registry) = executors(&db);
-    assert!(storage.funded_active_v2_candidates().unwrap().is_empty(), "pending + unfunded files must be excluded");
-    let active = registry.get_active_archive_nodes().unwrap();
-    let out = storage.generate_challenge(&Hash::hash(b"p"), 30, &active, &registry, true, r).unwrap();
+    assert!(StorageMetadataExecutor::v_funded_active_v2_candidates(&candidate.view()).unwrap().is_empty(), "pending + unfunded files must be excluded");
+    let active = NodeRegistryExecutor::v_get_active_archive_nodes(&candidate.view()).unwrap();
+    let out = StorageMetadataExecutor::generate_challenge(&mut candidate.view(), &Hash::hash(b"p"), 30, &active, true, r).unwrap();
     assert!(out.is_none(), "no funded+Active V2 candidate ⇒ skip");
 }
 
@@ -336,26 +327,24 @@ fn gate_open_target_is_assigned_and_deterministic() {
     let (state, db, _dir, executor) = setup_with_params(params_targeting(r));
     let mut candidate = common::candidate(&db);
     let root = Hash::hash(b"assigned-file");
-    setup_v2_active_funded(&mut candidate.view(), &state, &executor, &db, root, 4, r);
+    setup_v2_active_funded(&mut candidate.view(), &state, &executor, root, 4, r);
 
-    let (storage, registry) = executors(&db);
-    let snapshot = registry.get_active_archive_nodes_at_height(2).unwrap();
-    let active_now: Vec<Address> = registry.get_active_archive_nodes().unwrap().iter().map(|n| n.address).collect();
+    let snapshot = NodeRegistryExecutor::v_get_active_archive_nodes_at_height(&candidate.view(), 2).unwrap();
+    let active_now: Vec<Address> = NodeRegistryExecutor::v_get_active_archive_nodes(&candidate.view()).unwrap().iter().map(|n| n.address).collect();
     let assigned = assigned_chunk0(&root, &snapshot, r);
     let parent = Hash::hash(b"parent-assigned");
     let height = 40;
     let expected = expected_target(&root, &snapshot, &active_now, &parent, height, r).expect("assigned-active");
 
-    let active = registry.get_active_archive_nodes().unwrap();
-    let ch = storage.generate_challenge(&parent, height, &active, &registry, true, r).unwrap().expect("challenge");
+    let active = NodeRegistryExecutor::v_get_active_archive_nodes(&candidate.view()).unwrap();
+    let ch = StorageMetadataExecutor::generate_challenge(&mut candidate.view(), &parent, height, &active, true, r).unwrap().expect("challenge");
     assert_eq!(ch.merkle_root, root);
     assert_eq!(ch.target_node, expected, "conformance vector: exact deterministic assigned pick");
     assert!(assigned.iter().any(|a| a.as_bytes() == ch.target_node.as_bytes()), "target must be assigned to the chunk");
 
-    // Replay on a fresh executor over the same DB ⇒ identical target.
-    let (storage2, registry2) = executors(&db);
-    storage2.delete_challenge(&ch).unwrap();
-    let ch2 = storage2.generate_challenge(&parent, height, &active, &registry2, true, r).unwrap().expect("replay");
+    // Replay against the same candidate ⇒ identical target.
+    StorageMetadataExecutor::v_delete_challenge(&mut candidate.view(), &ch).unwrap();
+    let ch2 = StorageMetadataExecutor::generate_challenge(&mut candidate.view(), &parent, height, &active, true, r).unwrap().expect("replay");
     assert_eq!(ch2.target_node, ch.target_node, "target selection must be replayable");
 }
 
@@ -367,20 +356,19 @@ fn gate_open_unassigned_active_never_targeted() {
     let (state, db, _dir, executor) = setup_with_params(params_targeting(r));
     let mut candidate = common::candidate(&db);
     let root = Hash::hash(b"unassigned-file");
-    setup_v2_active_funded(&mut candidate.view(), &state, &executor, &db, root, 4, r);
+    setup_v2_active_funded(&mut candidate.view(), &state, &executor, root, 4, r);
 
-    let (storage, registry) = executors(&db);
-    let snapshot = registry.get_active_archive_nodes_at_height(2).unwrap();
+    let snapshot = NodeRegistryExecutor::v_get_active_archive_nodes_at_height(&candidate.view(), 2).unwrap();
     let assigned = assigned_chunk0(&root, &snapshot, r);
     assert_eq!(assigned.len(), 1, "R=1 ⇒ single assignee");
     let assignee = assigned[0];
-    let active = registry.get_active_archive_nodes().unwrap();
+    let active = NodeRegistryExecutor::v_get_active_archive_nodes(&candidate.view()).unwrap();
 
     for i in 0..25u64 {
         let parent = Hash::hash(format!("seed-{i}").as_bytes());
-        let ch = storage.generate_challenge(&parent, 50 + i, &active, &registry, true, r).unwrap().expect("challenge");
+        let ch = StorageMetadataExecutor::generate_challenge(&mut candidate.view(), &parent, 50 + i, &active, true, r).unwrap().expect("challenge");
         assert_eq!(ch.target_node.as_bytes(), assignee.as_bytes(), "only the assignee may be targeted (seed {i})");
-        storage.delete_challenge(&ch).unwrap();
+        StorageMetadataExecutor::v_delete_challenge(&mut candidate.view(), &ch).unwrap();
     }
 }
 
@@ -390,10 +378,9 @@ fn gate_open_no_assigned_active_skips_without_slash() {
     let (state, db, _dir, executor) = setup_with_params(params_targeting(r));
     let mut candidate = common::candidate(&db);
     let root = Hash::hash(b"skip-file");
-    let (archives, owner) = setup_v2_active_funded(&mut candidate.view(), &state, &executor, &db, root, 2, r);
+    let (archives, owner) = setup_v2_active_funded(&mut candidate.view(), &state, &executor, root, 2, r);
 
-    let (storage, registry) = executors(&db);
-    let snapshot = registry.get_active_archive_nodes_at_height(2).unwrap();
+    let snapshot = NodeRegistryExecutor::v_get_active_archive_nodes_at_height(&candidate.view(), 2).unwrap();
     let assignee = assigned_chunk0(&root, &snapshot, r)[0];
     let assignee_kp = archives.iter().find(|k| k.address().as_bytes() == assignee.as_bytes()).unwrap();
     let bal_before = state.get_balance(&assignee).unwrap();
@@ -405,11 +392,11 @@ fn gate_open_no_assigned_active_skips_without_slash() {
         .unwrap();
     assert!(sl.status.is_success(), "slash: {:?}", sl.status);
 
-    let active = registry.get_active_archive_nodes().unwrap();
-    let out = storage.generate_challenge(&Hash::hash(b"parent-skip"), 60, &active, &registry, true, r).unwrap();
+    let active = NodeRegistryExecutor::v_get_active_archive_nodes(&candidate.view()).unwrap();
+    let out = StorageMetadataExecutor::generate_challenge(&mut candidate.view(), &Hash::hash(b"parent-skip"), 60, &active, true, r).unwrap();
     assert!(out.is_none(), "no assigned-active archive ⇒ skip");
-    assert!(storage.get_challenges_by_node(&assignee).unwrap().is_empty(), "no challenge written");
-    assert_eq!(registry.get_node(&assignee).unwrap().unwrap().status, NodeStatus::Slashed);
+    assert!(StorageMetadataExecutor::v_get_challenges_by_node(&candidate.view(), &assignee).unwrap().is_empty(), "no challenge written");
+    assert_eq!(NodeRegistryExecutor::v_get_node(&candidate.view(), &assignee).unwrap().unwrap().status, NodeStatus::Slashed);
     assert_eq!(state.get_balance(&assignee).unwrap(), bal_before, "skipped challenge must not move funds");
 }
 
@@ -421,10 +408,9 @@ fn gate_open_reassignment_uses_latest_epoch_target_set() {
     let (state, db, _dir, executor) = setup_with_params(params_targeting_reassign(r));
     let mut candidate = common::candidate(&db);
     let root = Hash::hash(b"reassign-file");
-    let (archives, owner) = setup_v2_active_funded(&mut candidate.view(), &state, &executor, &db, root, 2, r);
+    let (archives, owner) = setup_v2_active_funded(&mut candidate.view(), &state, &executor, root, 2, r);
 
-    let (storage, registry) = executors(&db);
-    let snap0 = registry.get_active_archive_nodes_at_height(2).unwrap();
+    let snap0 = NodeRegistryExecutor::v_get_active_archive_nodes_at_height(&candidate.view(), 2).unwrap();
     let assignee0 = assigned_chunk0(&root, &snap0, r)[0];
     let assignee_kp = archives.iter().find(|k| k.address().as_bytes() == assignee0.as_bytes()).unwrap();
     let survivor_kp = archives.iter().find(|k| k.address().as_bytes() != assignee0.as_bytes()).unwrap();
@@ -433,10 +419,10 @@ fn gate_open_reassignment_uses_latest_epoch_target_set() {
     executor.execute_tx(&mut candidate.view(), &signed(&owner, FEE, 2, nr(NodeRegistryOperation::UpdateStatus { target: assignee0, new_status: NodeStatus::Slashed })), &KeyPair::generate().address(), 5, 1000).unwrap();
     let re = executor.execute_tx(&mut candidate.view(), &signed(&owner, FEE, 3, sm_v2(StorageMetadataOperationV2::ReassignChunksV2 { merkle_root: root })), &KeyPair::generate().address(), 6, 1000).unwrap();
     assert!(re.status.is_success(), "reassign: {:?}", re.status);
-    assert_eq!(storage.get_file_reassignments(&root).unwrap(), vec![6], "epoch 1 recorded");
+    assert_eq!(StorageMetadataExecutor::v_get_file_reassignments(&candidate.view(), &root).unwrap(), vec![6], "epoch 1 recorded");
 
-    let active = registry.get_active_archive_nodes().unwrap();
-    let ch = storage.generate_challenge(&Hash::hash(b"parent-reassign"), 70, &active, &registry, true, r).unwrap().expect("challenge");
+    let active = NodeRegistryExecutor::v_get_active_archive_nodes(&candidate.view()).unwrap();
+    let ch = StorageMetadataExecutor::generate_challenge(&mut candidate.view(), &Hash::hash(b"parent-reassign"), 70, &active, true, r).unwrap().expect("challenge");
     assert_eq!(ch.target_node.as_bytes(), survivor_kp.address().as_bytes(), "target must come from the latest (reassignment) epoch's assigned-active set");
     assert_ne!(ch.target_node.as_bytes(), assignee_kp.address().as_bytes(), "the slashed epoch-0 assignee must never be targeted");
 }

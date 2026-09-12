@@ -10389,16 +10389,27 @@ mod messaging_rpc_tests {
             .unwrap()
             .is_none());
 
-        // Persist a record directly, then read it back through the RPC.
-        sumchain_state::NodeRegistryExecutor::new(db.clone())
-            .put_archive_unbonding(&sumchain_primitives::ArchiveUnbondingRecord {
-                operator: op,
-                amount: 1_000_000_000,
-                started_height: 7,
-                unlock_height: 107,
-                remaining_amount: 950_000_000,
-            })
+        // Seed the committed row this read-shape test is about. The registry's
+        // own writer stages into a block candidate now, and this test has no
+        // block — it is asserting the RPC decode of an already-published row —
+        // so the fixture writes the row directly rather than pretending to
+        // execute one.
+        let mut batch = db.batch();
+        batch
+            .put(
+                sumchain_storage::cf::ARCHIVE_UNBONDING,
+                op.as_bytes(),
+                &bincode::serialize(&sumchain_primitives::ArchiveUnbondingRecord {
+                    operator: op,
+                    amount: 1_000_000_000,
+                    started_height: 7,
+                    unlock_height: 107,
+                    remaining_amount: 950_000_000,
+                })
+                .unwrap(),
+            )
             .unwrap();
+        batch.commit().unwrap();
 
         let info = srv
             .storage_get_archive_unbonding(op.to_base58())

@@ -3,6 +3,21 @@
 //! Manages the registry of network nodes beyond validators.
 //! Supports registering nodes with specific roles (Validator, ArchiveNode)
 //! and tracking their stake and status.
+//!
+//! # Execution reads and writes the candidate, not the database
+//!
+//! Every function on the block-execution path is an associated function taking
+//! an [`ExecutionView`]. There is no `self` receiver for them to reach
+//! `Arc<Database>` through, so a committed read on those paths is a compile
+//! error rather than a silent correctness bug: within one block, a node slashed
+//! by `process_expired_challenges` must be *seen as slashed* by the storage
+//! transactions that follow it, and a snapshot rewritten by `RegisterArchiveNode`
+//! must be *seen* by a later `AcceptAssignmentV2` in the same block.
+//!
+//! The `&self` readers below survive for RPC and for mempool admission, which
+//! answer about the published chain rather than about a candidate. Each is
+//! paired with a `v_` twin over the view, and the two share their decode and
+//! summation helpers so they cannot drift.
 
 use std::sync::Arc;
 
@@ -11,6 +26,7 @@ use sumchain_primitives::{
     Address, ArchiveUnbondingRecord, Balance, NodeRecord, NodeRegistryOperation,
     NodeRegistryOperationV2, NodeRegistryTxData, NodeRegistryV2TxData, NodeRole, NodeStatus,
 };
+use sumchain_storage::exec_view::ExecutionView;
 use sumchain_storage::Database;
 use tracing::{info, warn};
 
@@ -21,20 +37,24 @@ use crate::{Result, StateError, StateManager};
 /// Minimum stake required for an ArchiveNode (1 Koppa = 1_000_000_000 base units)
 const MIN_ARCHIVE_STAKE: u64 = 1_000_000_000;
 
+// The column families are named once, in `sumchain_storage::cf`. These aliases
+// exist so the bodies below stay readable; re-declaring the string literals here
+// would let this file and the storage schema drift apart silently.
+
 /// Column family name
-const CF_NODE_REGISTRY: &str = "node_registry";
+const CF_NODE_REGISTRY: &str = sumchain_storage::cf::NODE_REGISTRY;
 
 /// Column family for per-account X25519 encryption pubkeys (SNIP V2 Ask 3).
-const CF_ACCOUNT_ENCRYPTION_KEYS: &str = "account_encryption_keys";
+const CF_ACCOUNT_ENCRYPTION_KEYS: &str = sumchain_storage::cf::ACCOUNT_ENCRYPTION_KEYS;
 
 /// Column family for height-keyed snapshots of the active-archive-node set
 /// (SNIP V2 Ask 15, Option A). Snapshot-on-change — written on register,
 /// status change to/from Slashed, expired-challenge slashing, and at genesis.
-const CF_ACTIVE_ARCHIVE_NODES_HISTORY: &str = "active_archive_nodes_history";
+const CF_ACTIVE_ARCHIVE_NODES_HISTORY: &str = sumchain_storage::cf::ACTIVE_ARCHIVE_NODES_HISTORY;
 
 /// Column family for pending archive-node stake unbonding records (issue #20),
 /// keyed by operator address -> `ArchiveUnbondingRecord`.
-const CF_ARCHIVE_UNBONDING: &str = "archive_unbonding";
+const CF_ARCHIVE_UNBONDING: &str = sumchain_storage::cf::ARCHIVE_UNBONDING;
 
 // ─── Key helpers ─────────────────────────────────────────────────────────────
 
@@ -51,6 +71,100 @@ fn role_index_key(role: NodeRole, address: &Address) -> Vec<u8> {
     key.push(role as u8);
     key.extend_from_slice(address.as_bytes());
     key
+}
+
+fn role_index_prefix(role: NodeRole) -> Vec<u8> {
+    vec![b'R', role as u8]
+}
+
+// ─── Codec and fold helpers ──────────────────────────────────────────────────
+//
+// Shared by the candidate (`v_`) and committed accessors. The two differ only
+// in where the bytes come from; everything that interprets them lives here once,
+// so a candidate read and an RPC read cannot disagree about what a row means.
+
+fn encode_node(record: &NodeRecord) -> Result<Vec<u8>> {
+    bincode::serialize(record).map_err(|e| StateError::SerializationError(e.to_string()))
+}
+
+fn decode_node(bytes: &[u8]) -> Result<NodeRecord> {
+    bincode::deserialize(bytes).map_err(|e| StateError::DeserializationError(e.to_string()))
+}
+
+fn encode_unbonding(record: &ArchiveUnbondingRecord) -> Result<Vec<u8>> {
+    bincode::serialize(record).map_err(|e| StateError::SerializationError(e.to_string()))
+}
+
+fn decode_unbonding(bytes: &[u8]) -> Result<ArchiveUnbondingRecord> {
+    bincode::deserialize(bytes).map_err(|e| StateError::DeserializationError(e.to_string()))
+}
+
+fn encode_snapshot(nodes: &[NodeRecord]) -> Result<Vec<u8>> {
+    bincode::serialize(&nodes.to_vec())
+        .map_err(|e| StateError::SerializationError(e.to_string()))
+}
+
+fn decode_snapshot(bytes: &[u8]) -> Result<Vec<NodeRecord>> {
+    bincode::deserialize(bytes).map_err(|e| StateError::DeserializationError(e.to_string()))
+}
+
+/// The encryption-pubkey row is a bare 32-byte X25519 key. Anything else — a
+/// short row, a corrupt row — reads as "this account has never registered one",
+/// which is what every caller must do with it anyway.
+fn pubkey_from_row(data: Option<Vec<u8>>) -> Option<[u8; 32]> {
+    match data {
+        Some(bytes) if bytes.len() == 32 => {
+            let mut out = [0u8; 32];
+            out.copy_from_slice(&bytes);
+            Some(out)
+        }
+        _ => None,
+    }
+}
+
+/// Address embedded in a role-index key `[b'R', role, address(20)]`, or `None`
+/// for a key that is too short to be one.
+fn address_from_role_index_key(key: &[u8]) -> Option<Address> {
+    if key.len() < 22 {
+        return None;
+    }
+    let mut addr_bytes = [0u8; 20];
+    addr_bytes.copy_from_slice(&key[2..22]);
+    Some(Address::new(addr_bytes))
+}
+
+fn active_archives(nodes: Vec<NodeRecord>) -> Vec<NodeRecord> {
+    nodes
+        .into_iter()
+        .filter(|n| n.status == NodeStatus::Active)
+        .collect()
+}
+
+/// Σ `staked_balance` with checked u128 addition. Shared so the census total and
+/// the RPC total cannot differ in their overflow behaviour.
+fn sum_archive_stake(nodes: &[NodeRecord]) -> Result<u128> {
+    let mut sum: u128 = 0;
+    for node in nodes {
+        sum = sum.checked_add(node.staked_balance as u128).ok_or_else(|| {
+            StateError::BlockValidation("archive staked_balance sum overflow".to_string())
+        })?;
+    }
+    Ok(sum)
+}
+
+/// One step of the "largest snapshot height ≤ target" forward scan.
+///
+/// Returns `false` once the scan has passed the target — keys are
+/// `[height_be_bytes_8]`, so RocksDB's lexicographic order is numeric order and
+/// no later entry can match. Shared by both scans so the candidate and the
+/// committed read agree on which snapshot a height resolves to.
+fn snapshot_scan_step(best: &mut Option<Vec<u8>>, key: &[u8], value: &[u8], target: &[u8]) -> bool {
+    if key <= target {
+        *best = Some(value.to_vec());
+        true
+    } else {
+        false
+    }
 }
 
 // ─── Executor ────────────────────────────────────────────────────────────────
@@ -93,9 +207,21 @@ impl NodeRegistryExecutor {
         Self { db }
     }
 
+    /// The genesis active-archive snapshot: the empty set, encoded exactly as
+    /// [`Self::v_write_active_archive_snapshot`] would encode it.
+    ///
+    /// Genesis is not block execution — there is no block to abandon and no
+    /// candidate to stage into — so its one row is written by
+    /// [`sumchain_storage::StateStore::init_genesis_archive_snapshot`], next to
+    /// the genesis account writes. The *encoding* stays here, with the type,
+    /// so the genesis row and a height-`n` snapshot can never disagree about
+    /// their format.
+    pub fn genesis_archive_snapshot_bytes() -> Result<Vec<u8>> {
+        encode_snapshot(&[])
+    }
+
     /// Deduct fee from sender and credit to proposer (same pattern as other executors)
     fn deduct_fee(
-        &self,
         state: &StateManager,
         sender: &Address,
         fee: Balance,
@@ -128,8 +254,9 @@ impl NodeRegistryExecutor {
     }
 
     /// Execute a node registry operation.
+    #[allow(clippy::too_many_arguments)]
     pub fn execute(
-        &self,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &NodeRegistryTxData,
         state: &StateManager,
@@ -138,14 +265,14 @@ impl NodeRegistryExecutor {
         block_height: u64,
         _block_timestamp: u64,
     ) -> Result<NodeRegistryExecutionResult> {
-        self.deduct_fee(state, sender, fee, proposer)?;
+        Self::deduct_fee(state, sender, fee, proposer)?;
 
         match &data.operation {
             NodeRegistryOperation::Register { role, stake } => {
-                self.execute_register(sender, *role, *stake, state, block_height)
+                Self::execute_register(view, sender, *role, *stake, state, block_height)
             }
             NodeRegistryOperation::UpdateStatus { target, new_status } => {
-                self.execute_update_status(sender, target, *new_status, block_height)
+                Self::execute_update_status(view, sender, target, *new_status, block_height)
             }
             // Archive-node withdrawal ops (issue #20) are always dispatched via the
             // gated path in `executor.rs` (`execute_begin_unstake` /
@@ -162,8 +289,9 @@ impl NodeRegistryExecutor {
     }
 
     /// Execute a V2 node registry operation. Additive — V1 `execute` unchanged.
+    #[allow(clippy::too_many_arguments)]
     pub fn execute_v2(
-        &self,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &NodeRegistryV2TxData,
         state: &StateManager,
@@ -172,17 +300,17 @@ impl NodeRegistryExecutor {
         _block_height: u64,
         _block_timestamp: u64,
     ) -> Result<NodeRegistryExecutionResult> {
-        self.deduct_fee(state, sender, fee, proposer)?;
+        Self::deduct_fee(state, sender, fee, proposer)?;
 
         match &data.operation {
             NodeRegistryOperationV2::RegisterEncryptionKey { encryption_pubkey } => {
-                self.execute_register_encryption_key(sender, encryption_pubkey)
+                Self::execute_register_encryption_key(view, sender, encryption_pubkey)
             }
         }
     }
 
     fn execute_register_encryption_key(
-        &self,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         encryption_pubkey: &[u8; 32],
     ) -> Result<NodeRegistryExecutionResult> {
@@ -205,8 +333,7 @@ impl NodeRegistryExecutor {
 
         // Overwrite-on-rewrite semantics — rotation is allowed and intentional.
         let key = sender.as_bytes().to_vec();
-        self.db
-            .put(CF_ACCOUNT_ENCRYPTION_KEYS, &key, encryption_pubkey)
+        view.put(CF_ACCOUNT_ENCRYPTION_KEYS, &key, encryption_pubkey)
             .map_err(StateError::Storage)?;
 
         info!(
@@ -223,24 +350,57 @@ impl NodeRegistryExecutor {
     ///
     /// Snapshot-on-change semantics: callers invoke this only after an
     /// operation that may have changed the active set (register, status flip
-    /// to/from Slashed, expired-challenge slashing, genesis init). If the
-    /// caller invokes for a height that already has a snapshot, the new write
-    /// overwrites — last-writer-wins within a block, which yields the
-    /// post-block active set. This is naturally idempotent for the common
-    /// case (one trigger per block).
-    pub fn write_active_archive_snapshot(&self, height: u64) -> Result<()> {
-        let active = self.get_active_archive_nodes()?;
-        let value = bincode::serialize(&active)
-            .map_err(|e| StateError::SerializationError(e.to_string()))?;
-        self.db
-            .put(CF_ACTIVE_ARCHIVE_NODES_HISTORY, &height.to_be_bytes(), &value)
+    /// to/from Slashed, expired-challenge slashing). If the caller invokes for a
+    /// height that already has a snapshot, the new write overwrites —
+    /// last-writer-wins within a block, which yields the post-block active set.
+    /// This is naturally idempotent for the common case (one trigger per block).
+    ///
+    /// The set it captures is read from the *candidate*, so a node slashed
+    /// earlier in this same block is already excluded — which is the ordering
+    /// `process_expired_challenges` (before the transaction loop) depends on.
+    pub fn v_write_active_archive_snapshot(
+        view: &mut ExecutionView<'_, '_>,
+        height: u64,
+    ) -> Result<()> {
+        let active = Self::v_get_active_archive_nodes(view)?;
+        let value = encode_snapshot(&active)?;
+        view.put(CF_ACTIVE_ARCHIVE_NODES_HISTORY, &height.to_be_bytes(), &value)
             .map_err(StateError::Storage)?;
         Ok(())
     }
 
     /// Read the active-archive-node set as snapshotted at the largest stored
+    /// height `≤ height`, from this block's candidate. Returns `Ok(Vec::new())`
+    /// if no snapshot has ever been written (equivalent to the empty genesis
+    /// snapshot).
+    pub fn v_get_active_archive_nodes_at_height(
+        view: &ExecutionView<'_, '_>,
+        height: u64,
+    ) -> Result<Vec<NodeRecord>> {
+        let target = height.to_be_bytes();
+        let mut best: Option<Vec<u8>> = None;
+        for item in view
+            .iter(CF_ACTIVE_ARCHIVE_NODES_HISTORY)
+            .map_err(StateError::Storage)?
+        {
+            // A read error ends the scan with an error. Treating it as the end
+            // of the iterator would silently answer from a truncated history.
+            let (k, v) = item.map_err(StateError::Storage)?;
+            if !snapshot_scan_step(&mut best, &k, &v, &target[..]) {
+                break;
+            }
+        }
+        match best {
+            Some(bytes) => decode_snapshot(&bytes),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Read the active-archive-node set as snapshotted at the largest stored
     /// height `≤ height`. Returns `Ok(Vec::new())` if no snapshot has ever
     /// been written (equivalent to the empty genesis snapshot).
+    ///
+    /// Committed twin of [`Self::v_get_active_archive_nodes_at_height`], for RPC.
     ///
     /// Implementation: forward scan over the CF (RocksDB orders keys lex-asc,
     /// which equals numeric-asc for `[height_be_bytes_8]`). For v1 with
@@ -263,47 +423,52 @@ impl NodeRegistryExecutor {
             .iter(CF_ACTIVE_ARCHIVE_NODES_HISTORY)
             .map_err(StateError::Storage)?
         {
-            if k.as_ref() <= &target[..] {
-                best = Some(v.into_vec());
-            } else {
-                // Sorted ascending — once we pass the target, no later entry can match.
+            if !snapshot_scan_step(&mut best, k.as_ref(), v.as_ref(), &target[..]) {
                 break;
             }
         }
         match best {
-            Some(bytes) => bincode::deserialize(&bytes)
-                .map_err(|e| StateError::DeserializationError(e.to_string())),
+            Some(bytes) => decode_snapshot(&bytes),
             None => Ok(Vec::new()),
         }
+    }
+
+    /// Look up the X25519 encryption pubkey for an account, in this block's
+    /// candidate.
+    pub fn v_get_encryption_pubkey(
+        view: &ExecutionView<'_, '_>,
+        address: &Address,
+    ) -> Result<Option<[u8; 32]>> {
+        let key = address.as_bytes().to_vec();
+        let row = view
+            .get(CF_ACCOUNT_ENCRYPTION_KEYS, &key)
+            .map_err(StateError::Storage)?;
+        Ok(pubkey_from_row(row))
     }
 
     /// Look up the X25519 encryption pubkey for an account.
     ///
     /// Returns `None` if the account has never registered one (or if its row
-    /// is corrupt and bincode decode fails — the caller should treat the two
+    /// is corrupt and the length check fails — the caller should treat the two
     /// cases identically: the account cannot receive encrypted bundles yet).
     pub fn get_encryption_pubkey(&self, address: &Address) -> Result<Option<[u8; 32]>> {
         let key = address.as_bytes().to_vec();
-        match self.db.get(CF_ACCOUNT_ENCRYPTION_KEYS, &key) {
-            Ok(Some(data)) if data.len() == 32 => {
-                let mut out = [0u8; 32];
-                out.copy_from_slice(&data);
-                Ok(Some(out))
-            }
-            Ok(_) => Ok(None),
-            Err(e) => Err(StateError::Storage(e)),
-        }
+        let row = self
+            .db
+            .get(CF_ACCOUNT_ENCRYPTION_KEYS, &key)
+            .map_err(StateError::Storage)?;
+        Ok(pubkey_from_row(row))
     }
 
     fn execute_register(
-        &self,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         role: NodeRole,
         stake: u64,
         state: &StateManager,
         block_height: u64,
     ) -> Result<NodeRegistryExecutionResult> {
-        if self.get_node(sender)?.is_some() {
+        if Self::v_get_node(view, sender)?.is_some() {
             return Ok(NodeRegistryExecutionResult::fail("Node already registered"));
         }
 
@@ -344,14 +509,14 @@ impl NodeRegistryExecutor {
             registered_at: block_height,
         };
 
-        self.put_node(&record)?;
+        Self::v_put_node(view, &record)?;
 
         // Snapshot the active-archive set at this height — Ask 15. Registering
         // a Validator doesn't affect the archive set, so skip in that case.
         // (Validator role currently rejected above, but guard anyway in case
         // future roles are added.)
         if role == NodeRole::ArchiveNode {
-            self.write_active_archive_snapshot(block_height)?;
+            Self::v_write_active_archive_snapshot(view, block_height)?;
         }
 
         info!(
@@ -363,13 +528,13 @@ impl NodeRegistryExecutor {
     }
 
     fn execute_update_status(
-        &self,
+        view: &mut ExecutionView<'_, '_>,
         _sender: &Address,
         target: &Address,
         new_status: NodeStatus,
         block_height: u64,
     ) -> Result<NodeRegistryExecutionResult> {
-        let mut record = match self.get_node(target)? {
+        let mut record = match Self::v_get_node(view, target)? {
             Some(r) => r,
             None => return Ok(NodeRegistryExecutionResult::fail("Node not found")),
         };
@@ -377,13 +542,13 @@ impl NodeRegistryExecutor {
         let old_status = record.status;
         let role = record.role;
         record.status = new_status;
-        self.put_node(&record)?;
+        Self::v_put_node(view, &record)?;
 
         // Active-archive set changes iff this node is an ArchiveNode AND
         // its status actually flipped. Skip the snapshot write otherwise to
         // avoid duplicate rows for no-op updates.
         if role == NodeRole::ArchiveNode && old_status != new_status {
-            self.write_active_archive_snapshot(block_height)?;
+            Self::v_write_active_archive_snapshot(view, block_height)?;
         }
 
         info!("Node {} status updated to {:?}", target, new_status);
@@ -411,7 +576,7 @@ impl NodeRegistryExecutor {
     /// `ArchiveUnbondingRecord` is persisted with the unlock height.
     #[allow(clippy::too_many_arguments)]
     pub fn execute_begin_unstake(
-        &self,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         amount: u64,
         state: &StateManager,
@@ -421,9 +586,9 @@ impl NodeRegistryExecutor {
         period_blocks: u64,
         has_open_challenge: bool,
     ) -> Result<NodeRegistryExecutionResult> {
-        self.deduct_fee(state, sender, fee, proposer)?;
+        Self::deduct_fee(state, sender, fee, proposer)?;
 
-        let mut record = match self.get_node(sender)? {
+        let mut record = match Self::v_get_node(view, sender)? {
             Some(r) if r.role == NodeRole::ArchiveNode => r,
             _ => {
                 return Ok(NodeRegistryExecutionResult::fail_with_code(
@@ -466,13 +631,13 @@ impl NodeRegistryExecutor {
             unlock_height,
             remaining_amount: amount,
         };
-        self.put_archive_unbonding(&unbonding)?;
+        Self::v_put_archive_unbonding(view, &unbonding)?;
 
         record.status = NodeStatus::Unbonding;
-        self.put_node(&record)?;
+        Self::v_put_node(view, &record)?;
 
         // Active -> Unbonding removes the node from the active-archive set.
-        self.write_active_archive_snapshot(block_height)?;
+        Self::v_write_active_archive_snapshot(view, block_height)?;
 
         info!(
             "Archive node {} began unbonding {} (unlock at height {})",
@@ -495,16 +660,16 @@ impl NodeRegistryExecutor {
     /// excluded from the active set, so `Unbonding -> Withdrawn` does not change
     /// it.
     pub fn execute_withdraw_unbonded(
-        &self,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         state: &StateManager,
         proposer: &Address,
         fee: Balance,
         block_height: u64,
     ) -> Result<NodeRegistryExecutionResult> {
-        self.deduct_fee(state, sender, fee, proposer)?;
+        Self::deduct_fee(state, sender, fee, proposer)?;
 
-        let unbonding = match self.get_archive_unbonding(sender)? {
+        let unbonding = match Self::v_get_archive_unbonding(view, sender)? {
             Some(u) => u,
             None => {
                 return Ok(NodeRegistryExecutionResult::fail_with_code(
@@ -530,13 +695,13 @@ impl NodeRegistryExecutor {
 
         // Mark the node fully exited. If the record is somehow missing we still
         // clear the unbonding entry (the balance credit already happened).
-        if let Some(mut record) = self.get_node(sender)? {
+        if let Some(mut record) = Self::v_get_node(view, sender)? {
             record.status = NodeStatus::Withdrawn;
             record.staked_balance = 0;
-            self.put_node(&record)?;
+            Self::v_put_node(view, &record)?;
         }
 
-        self.delete_archive_unbonding(sender)?;
+        Self::v_delete_archive_unbonding(view, sender)?;
 
         info!(
             "Archive node {} withdrew {} unbonded stake and exited",
@@ -548,87 +713,154 @@ impl NodeRegistryExecutor {
 
     // ── Storage operations ───────────────────────────────────────────────────
 
-    fn put_node(&self, record: &NodeRecord) -> Result<()> {
+    /// Stage a node record and its role-index mirror into this block's candidate.
+    ///
+    /// Both writes move together, always. The index is what
+    /// `v_get_nodes_by_role` walks, so a candidate that staged the row without
+    /// the index would compute an archive set — and therefore an assignment set
+    /// — that no other node reproduces.
+    pub fn v_put_node(view: &mut ExecutionView<'_, '_>, record: &NodeRecord) -> Result<()> {
         let key = node_key(&record.address);
-        let value = bincode::serialize(record)
-            .map_err(|e| StateError::SerializationError(e.to_string()))?;
-        self.db.put(CF_NODE_REGISTRY, &key, &value)
-            .map_err(|e| StateError::Storage(e))?;
+        let value = encode_node(record)?;
+        view.put(CF_NODE_REGISTRY, &key, &value)
+            .map_err(StateError::Storage)?;
 
         let idx_key = role_index_key(record.role, &record.address);
-        self.db.put(CF_NODE_REGISTRY, &idx_key, &[1])
-            .map_err(|e| StateError::Storage(e))?;
+        view.put(CF_NODE_REGISTRY, &idx_key, &[1])
+            .map_err(StateError::Storage)?;
 
         Ok(())
     }
 
+    /// A node record as this block's candidate sees it — including one staged
+    /// by an earlier transaction of the same block.
+    pub fn v_get_node(
+        view: &ExecutionView<'_, '_>,
+        address: &Address,
+    ) -> Result<Option<NodeRecord>> {
+        let key = node_key(address);
+        match view.get(CF_NODE_REGISTRY, &key).map_err(StateError::Storage)? {
+            Some(data) => Ok(Some(decode_node(&data)?)),
+            None => Ok(None),
+        }
+    }
+
     pub fn get_node(&self, address: &Address) -> Result<Option<NodeRecord>> {
         let key = node_key(address);
-        match self.db.get(CF_NODE_REGISTRY, &key) {
-            Ok(Some(data)) => {
-                let record: NodeRecord = bincode::deserialize(&data)
-                    .map_err(|e| StateError::DeserializationError(e.to_string()))?;
-                Ok(Some(record))
-            }
-            Ok(None) => Ok(None),
-            Err(e) => Err(StateError::Storage(e)),
+        match self.db.get(CF_NODE_REGISTRY, &key).map_err(StateError::Storage)? {
+            Some(data) => Ok(Some(decode_node(&data)?)),
+            None => Ok(None),
         }
+    }
+
+    /// All active ArchiveNodes as the candidate sees them (used by PoR
+    /// challenge generation and by the snapshot writer).
+    pub fn v_get_active_archive_nodes(
+        view: &ExecutionView<'_, '_>,
+    ) -> Result<Vec<NodeRecord>> {
+        Ok(active_archives(Self::v_get_nodes_by_role(
+            view,
+            NodeRole::ArchiveNode,
+        )?))
     }
 
     /// Get all active ArchiveNodes (used by PoR challenge generation)
     pub fn get_active_archive_nodes(&self) -> Result<Vec<NodeRecord>> {
-        let all = self.get_nodes_by_role(NodeRole::ArchiveNode)?;
-        Ok(all.into_iter().filter(|n| n.status == NodeStatus::Active).collect())
+        Ok(active_archives(self.get_nodes_by_role(NodeRole::ArchiveNode)?))
     }
 
     // ── Archive-unbonding record storage (issue #20) ─────────────────────────
+
+    /// The pending unbonding record for an operator as the candidate sees it.
+    pub fn v_get_archive_unbonding(
+        view: &ExecutionView<'_, '_>,
+        operator: &Address,
+    ) -> Result<Option<ArchiveUnbondingRecord>> {
+        match view
+            .get(CF_ARCHIVE_UNBONDING, operator.as_bytes())
+            .map_err(StateError::Storage)?
+        {
+            Some(data) => Ok(Some(decode_unbonding(&data)?)),
+            None => Ok(None),
+        }
+    }
 
     /// Read the pending unbonding record for an operator, if any.
     pub fn get_archive_unbonding(
         &self,
         operator: &Address,
     ) -> Result<Option<ArchiveUnbondingRecord>> {
-        match self.db.get(CF_ARCHIVE_UNBONDING, operator.as_bytes()) {
-            Ok(Some(data)) => {
-                let record: ArchiveUnbondingRecord = bincode::deserialize(&data)
-                    .map_err(|e| StateError::DeserializationError(e.to_string()))?;
-                Ok(Some(record))
-            }
-            Ok(None) => Ok(None),
-            Err(e) => Err(StateError::Storage(e)),
+        match self
+            .db
+            .get(CF_ARCHIVE_UNBONDING, operator.as_bytes())
+            .map_err(StateError::Storage)?
+        {
+            Some(data) => Ok(Some(decode_unbonding(&data)?)),
+            None => Ok(None),
         }
     }
 
-    /// Insert or overwrite an operator's unbonding record.
-    pub fn put_archive_unbonding(&self, record: &ArchiveUnbondingRecord) -> Result<()> {
-        let value = bincode::serialize(record)
-            .map_err(|e| StateError::SerializationError(e.to_string()))?;
-        self.db
-            .put(CF_ARCHIVE_UNBONDING, record.operator.as_bytes(), &value)
+    /// Insert or overwrite an operator's unbonding record in the candidate.
+    pub fn v_put_archive_unbonding(
+        view: &mut ExecutionView<'_, '_>,
+        record: &ArchiveUnbondingRecord,
+    ) -> Result<()> {
+        let value = encode_unbonding(record)?;
+        view.put(CF_ARCHIVE_UNBONDING, record.operator.as_bytes(), &value)
             .map_err(StateError::Storage)
     }
 
     /// Remove an operator's unbonding record (on full withdrawal).
-    pub fn delete_archive_unbonding(&self, operator: &Address) -> Result<()> {
-        self.db
-            .delete(CF_ARCHIVE_UNBONDING, operator.as_bytes())
+    pub fn v_delete_archive_unbonding(
+        view: &mut ExecutionView<'_, '_>,
+        operator: &Address,
+    ) -> Result<()> {
+        view.delete(CF_ARCHIVE_UNBONDING, operator.as_bytes())
             .map_err(StateError::Storage)
     }
 
+    /// Nodes of a role as the candidate sees them, via the role index.
+    pub fn v_get_nodes_by_role(
+        view: &ExecutionView<'_, '_>,
+        role: NodeRole,
+    ) -> Result<Vec<NodeRecord>> {
+        let prefix = role_index_prefix(role);
+        let mut addrs = Vec::new();
+        for item in view
+            .prefix_iter(CF_NODE_REGISTRY, &prefix)
+            .map_err(StateError::Storage)?
+        {
+            // A read error ends the scan. Silently stopping would under-report
+            // the archive set, and the assignment computed from it is consensus.
+            let (key, _) = item.map_err(StateError::Storage)?;
+            if let Some(addr) = address_from_role_index_key(&key) {
+                addrs.push(addr);
+            }
+        }
+
+        // The borrow of `view` held by the iterator ends before the point reads.
+        let mut nodes = Vec::with_capacity(addrs.len());
+        for addr in addrs {
+            if let Some(record) = Self::v_get_node(view, &addr)? {
+                nodes.push(record);
+            }
+        }
+
+        Ok(nodes)
+    }
+
     pub fn get_nodes_by_role(&self, role: NodeRole) -> Result<Vec<NodeRecord>> {
-        let prefix = vec![b'R', role as u8];
+        let prefix = role_index_prefix(role);
         let mut nodes = Vec::new();
 
-        let entries: Vec<_> = self.db
+        let entries: Vec<_> = self
+            .db
             .prefix_iter(CF_NODE_REGISTRY, &prefix)
-            .map_err(|e| StateError::Storage(e))?
+            .map_err(StateError::Storage)?
             .collect();
 
         for (key, _) in entries {
-            if key.len() >= 22 {
-                let mut addr_bytes = [0u8; 20];
-                addr_bytes.copy_from_slice(&key[2..22]);
-                let addr = Address::new(addr_bytes);
+            if let Some(addr) = address_from_role_index_key(&key) {
                 if let Some(record) = self.get_node(&addr)? {
                     nodes.push(record);
                 }
@@ -638,21 +870,28 @@ impl NodeRegistryExecutor {
         Ok(nodes)
     }
 
+    /// Σ `staked_balance` across all archive nodes as **this block's candidate**
+    /// sees them — the total the supply census must use, because a block that
+    /// registers, slashes or withdraws an archive changes the live archive stake
+    /// it is about to publish.
+    ///
+    /// Same accounting rules as the committed twin below; both fold through
+    /// [`sum_archive_stake`].
+    pub fn v_total_archive_staked_balance(view: &ExecutionView<'_, '_>) -> Result<u128> {
+        sum_archive_stake(&Self::v_get_nodes_by_role(view, NodeRole::ArchiveNode)?)
+    }
+
     /// Σ `staked_balance` across all archive nodes (any status), with checked
     /// u128 addition. This is the live native-Koppa archive stake: `Withdrawn`
     /// nodes carry `staked_balance == 0`, and a node mid-unbond keeps its
     /// `staked_balance` (the mirrored `ARCHIVE_UNBONDING` record is deliberately
     /// NOT counted, to avoid double-counting). Validators cannot register here
     /// (rejected at registration), so this is archive stake only. Deterministic
-    /// (uses the role-index scan), tolerates zero archive nodes. One-time supply
-    /// census + `chain_getSupplyInfo` only.
+    /// (uses the role-index scan), tolerates zero archive nodes.
+    ///
+    /// Committed twin of [`Self::v_total_archive_staked_balance`], for
+    /// `chain_getSupplyInfo` diagnostics.
     pub fn total_archive_staked_balance(&self) -> Result<u128> {
-        let mut sum: u128 = 0;
-        for node in self.get_nodes_by_role(NodeRole::ArchiveNode)? {
-            sum = sum.checked_add(node.staked_balance as u128).ok_or_else(|| {
-                StateError::BlockValidation("archive staked_balance sum overflow".to_string())
-            })?;
-        }
-        Ok(sum)
+        sum_archive_stake(&self.get_nodes_by_role(NodeRole::ArchiveNode)?)
     }
 }
