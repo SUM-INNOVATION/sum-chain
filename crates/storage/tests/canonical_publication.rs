@@ -8,8 +8,8 @@
 
 use sumchain_primitives::{Block, BlockHeader, Hash};
 use sumchain_storage::candidate::{
-    CandidateExecution, CanonicalTransition, JournalRecord, ACCUMULATOR_KEY,
-    ACTIVATION_VERSION_KEY,
+    Acceptance, CandidateExecution, CanonicalTransition, JournalRecord, ACCUMULATOR_KEY,
+    ACTIVATION_VERSION_KEY, LEGACY_ROOT_COMPATIBILITY_HEIGHT,
 };
 use sumchain_storage::db::{cf, Database};
 use sumchain_storage::schema::{journal_key, meta_keys};
@@ -39,13 +39,14 @@ fn block_with_root(root: Hash, height: u64, tag: u64) -> Block {
 fn verified<'a>(
     d: &'a Database,
     block: &Block,
-) -> sumchain_storage::candidate::VerifiedCandidate<'a> {
+) -> sumchain_storage::candidate::AcceptedCandidate<'a> {
     let mut cand = CandidateExecution::new(d, TEST_LIMIT);
     {
         let mut view = cand.view();
         view.put(cf::STATE, b"acct:alice", b"100").unwrap();
     }
-    cand.verify_for_block(block, block.header.state_root)
+    cand.finish_execution(block.header.state_root)
+        .accept_imported(block)
         .expect("roots match")
 }
 
@@ -140,7 +141,7 @@ fn a_transition_at_a_different_height_is_refused() {
 }
 
 #[test]
-fn an_accumulator_that_is_not_the_verified_root_is_refused() {
+fn an_accumulator_that_is_not_the_accepted_one_is_refused() {
     let (d, _g) = db();
     let root = Hash::hash(b"root");
     let block = block_with_root(root, 9, 1);
@@ -148,7 +149,10 @@ fn an_accumulator_that_is_not_the_verified_root_is_refused() {
     let err = verified(&d, &block)
         .publish(transition(&block, Hash::hash(b"something-else"), VERSION))
         .expect_err("must refuse an accumulator that is not the verified root");
-    assert!(err.to_string().contains("does not match the verified root"), "{err}");
+    assert!(
+        err.to_string().contains("does not match the accepted accumulator"),
+        "{err}"
+    );
     assert_eq!(d.get(cf::STATE, b"acct:alice").unwrap(), None);
     assert_eq!(d.get(cf::META, ACCUMULATOR_KEY).unwrap(), None);
 }
@@ -228,4 +232,160 @@ fn journals_are_written_under_the_key_a_reorg_will_look_for() {
         None,
         "not under the pre-#253 height-only key"
     );
+}
+
+// ── Acceptance paths ───────────────────────────────────────────────────────
+//
+// Three ways a candidate becomes publishable, and they are not the same claim.
+// Collapsing them would let a force-adopted mismatch be reported as a verified
+// root, which is exactly what the old `VerifiedCandidate` name did.
+
+#[test]
+fn a_produced_block_is_accepted_by_construction_not_by_comparison() {
+    let (d, _g) = db();
+    let root = Hash::hash(b"computed");
+    let block = block_with_root(root, 9, 1); // header root assigned from execution
+
+    let mut cand = CandidateExecution::new(&d, TEST_LIMIT);
+    {
+        let mut view = cand.view();
+        view.put(cf::STATE, b"acct:alice", b"100").unwrap();
+    }
+    let accepted = cand.finish_execution(root).accept_produced(&block).expect("produced");
+
+    assert_eq!(*accepted.acceptance(), Acceptance::Produced);
+    assert!(
+        !accepted.acceptance().is_verified(),
+        "acceptance by construction must not report as a verified root"
+    );
+    assert_eq!(accepted.accumulator(), root);
+}
+
+#[test]
+fn a_producer_whose_header_disagrees_with_its_own_execution_is_refused() {
+    let (d, _g) = db();
+    let block = block_with_root(Hash::hash(b"header"), 9, 1);
+    let cand = CandidateExecution::new(&d, TEST_LIMIT);
+
+    let err = cand.finish_execution(Hash::hash(b"different")).accept_produced(&block)
+        .expect_err("a producer bug must not publish");
+    assert!(err.to_string().contains("producer bug"), "{err}");
+}
+
+#[test]
+fn an_exact_imported_root_reports_as_verified() {
+    let (d, _g) = db();
+    let root = Hash::hash(b"root");
+    let block = block_with_root(root, 9, 1);
+    let accepted = CandidateExecution::new(&d, TEST_LIMIT)
+        .finish_execution(root)
+        .accept_imported(&block)
+        .expect("exact match");
+
+    assert_eq!(*accepted.acceptance(), Acceptance::ExactRoot);
+    assert!(accepted.acceptance().is_verified());
+    assert_eq!(accepted.accumulator(), root);
+}
+
+#[test]
+fn a_mismatch_above_the_cutoff_publishes_nothing() {
+    let (d, _g) = db();
+    d.put(cf::STATE, b"existing", b"original").unwrap();
+    let header = Hash::hash(b"header");
+    let block = block_with_root(header, LEGACY_ROOT_COMPATIBILITY_HEIGHT + 1, 1);
+
+    let mut cand = CandidateExecution::new(&d, TEST_LIMIT);
+    {
+        let mut view = cand.view();
+        view.put(cf::STATE, b"existing", b"candidate").unwrap();
+    }
+    let err = cand
+        .finish_execution(Hash::hash(b"computed"))
+        .accept_imported(&block)
+        .expect_err("must reject above the cutoff");
+    assert!(err.to_string().contains("state root mismatch"), "{err}");
+
+    assert_eq!(
+        d.get(cf::STATE, b"existing").unwrap().as_deref(),
+        Some(&b"original"[..]),
+        "a rejected candidate must leave canonical storage byte-identical"
+    );
+}
+
+#[test]
+fn a_mismatch_at_the_cutoff_adopts_the_header_root_and_says_so() {
+    let (d, _g) = db();
+    let header = Hash::hash(b"header");
+    let computed = Hash::hash(b"computed");
+    let block = block_with_root(header, LEGACY_ROOT_COMPATIBILITY_HEIGHT, 1);
+
+    let accepted = CandidateExecution::new(&d, TEST_LIMIT)
+        .finish_execution(computed)
+        .accept_imported(&block)
+        .expect("at the cutoff, the legacy allowance applies");
+
+    assert_eq!(
+        *accepted.acceptance(),
+        Acceptance::LegacyCompatibility { computed, header }
+    );
+    assert!(
+        !accepted.acceptance().is_verified(),
+        "a force-adopted mismatch must never report as verified"
+    );
+    assert_eq!(
+        accepted.accumulator(),
+        header,
+        "the HEADER's root is published, exactly as the existing PoA path does"
+    );
+}
+
+#[test]
+fn the_cutoff_boundary_is_inclusive_below_and_exclusive_above() {
+    let (d, _g) = db();
+    let header = Hash::hash(b"header");
+    let computed = Hash::hash(b"computed");
+
+    for (height, ok) in [
+        (LEGACY_ROOT_COMPATIBILITY_HEIGHT - 1, true),
+        (LEGACY_ROOT_COMPATIBILITY_HEIGHT, true),
+        (LEGACY_ROOT_COMPATIBILITY_HEIGHT + 1, false),
+    ] {
+        let block = block_with_root(header, height, 1);
+        let got = CandidateExecution::new(&d, TEST_LIMIT)
+        .finish_execution(computed)
+        .accept_imported(&block)
+            .is_ok();
+        assert_eq!(got, ok, "height {height} acceptance should be {ok}");
+    }
+}
+
+#[test]
+fn both_acceptance_paths_reach_the_same_publisher() {
+    let (d1, _g1) = db();
+    let (d2, _g2) = db();
+    let root = Hash::hash(b"root");
+    let block = block_with_root(root, 9, 1);
+
+    for (d, produced) in [(&d1, true), (&d2, false)] {
+        let mut cand = CandidateExecution::new(d, TEST_LIMIT);
+        {
+            let mut view = cand.view();
+            view.put(cf::STATE, b"acct:alice", b"100").unwrap();
+        }
+        let accepted = if produced {
+            cand.finish_execution(root).accept_produced(&block).unwrap()
+        } else {
+            cand.finish_execution(root).accept_imported(&block).unwrap()
+        };
+        accepted.publish(transition(&block, root, VERSION)).unwrap();
+
+        assert_eq!(
+            d.get(cf::STATE, b"acct:alice").unwrap().as_deref(),
+            Some(&b"100"[..])
+        );
+        assert_eq!(
+            d.get(cf::META, ACCUMULATOR_KEY).unwrap().as_deref(),
+            Some(&root.as_bytes()[..])
+        );
+    }
 }

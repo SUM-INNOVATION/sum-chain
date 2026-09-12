@@ -445,13 +445,8 @@ impl PoAEngine {
         let execution = self
             .executor
             .execute_block(&block, self.state.state_root(), &active_validators)?;
-        let (receipts, state_root, state_diff, contract_diff, candidate) = (
-            execution.receipts,
-            execution.computed_root,
-            execution.state_diff,
-            execution.contract_diff,
-            execution.candidate,
-        );
+        let state_root = execution.computed_root();
+        let (executed, receipts, state_diff, contract_diff) = execution.into_parts();
 
         // Update state root in header
         block.header.state_root = state_root;
@@ -549,13 +544,8 @@ impl PoAEngine {
         let execution = self
             .executor
             .execute_block(&block, self.state.state_root(), &active_validators)?;
-        let (receipts, state_root, state_diff, contract_diff, candidate) = (
-            execution.receipts,
-            execution.computed_root,
-            execution.state_diff,
-            execution.contract_diff,
-            execution.candidate,
-        );
+        let state_root = execution.computed_root();
+        let (executed, receipts, state_diff, contract_diff) = execution.into_parts();
 
         // Verify state root matches
         //

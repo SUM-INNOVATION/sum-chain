@@ -11,7 +11,7 @@ use sumchain_primitives::{
     NodeRegistryOperation, Receipt, SignedTransaction, StorageMetadataOperationV2, TransactionV2,
     TxPayload, TxStatus, CHALLENGE_INTERVAL_BLOCKS, SLASH_PERCENTAGE,
 };
-use sumchain_storage::candidate::CandidateExecution;
+use sumchain_storage::candidate::{CandidateExecution, ExecutedCandidate};
 use sumchain_storage::exec_view::ExecutionView;
 use sumchain_storage::schema::{ContractStateDiff, StateDiff};
 use sumchain_storage::Database;
@@ -266,13 +266,37 @@ const CANDIDATE_LIMIT_SCAFFOLD: u64 = 1 << 30;
 /// the rollback, and is why a rejected block leaves no trace once the remaining
 /// direct writes are migrated.
 pub struct BlockExecution<'db> {
-    pub receipts: Vec<Receipt>,
-    /// The accumulator this execution computed. NOT read from the header.
-    pub computed_root: Hash,
-    pub state_diff: StateDiff,
-    pub contract_diff: ContractStateDiff,
-    /// Buffered writes, unpublished and unverified.
-    pub candidate: CandidateExecution<'db>,
+    receipts: Vec<Receipt>,
+    state_diff: StateDiff,
+    contract_diff: ContractStateDiff,
+    /// Buffered writes with the computed accumulator already bound to them.
+    executed: ExecutedCandidate<'db>,
+}
+
+impl<'db> BlockExecution<'db> {
+    /// The accumulator this execution produced. Read from the bound candidate,
+    /// never from a block header.
+    pub fn computed_root(&self) -> Hash {
+        self.executed.computed_root()
+    }
+
+    pub fn receipts(&self) -> &[Receipt] {
+        &self.receipts
+    }
+
+    /// Take the parts apart for publication.
+    ///
+    /// Fields are private and there is no public constructor, so a
+    /// `BlockExecution` can only come from `execute_block` — a caller cannot
+    /// assemble one around a candidate whose root it chose.
+    pub fn into_parts(self) -> (ExecutedCandidate<'db>, Vec<Receipt>, StateDiff, ContractStateDiff) {
+        (
+            self.executed,
+            self.receipts,
+            self.state_diff,
+            self.contract_diff,
+        )
+    }
 }
 
 impl BlockExecutor {
@@ -3142,12 +3166,15 @@ impl BlockExecutor {
             state_root
         );
 
+        // THE ONE completion site. `finish_execution` binds the accumulator this
+        // execution produced to the buffered writes, and is called nowhere else —
+        // `execution_boundary.rs` pins that. From here the root travels with the
+        // candidate, so acceptance cannot be handed a different value.
         Ok(BlockExecution {
             receipts,
-            computed_root: state_root,
             state_diff,
             contract_diff,
-            candidate,
+            executed: candidate.finish_execution(state_root),
         })
     }
 

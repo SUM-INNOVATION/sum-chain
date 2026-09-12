@@ -120,16 +120,55 @@ fn an_execution_view_cannot_publish() {
 }
 
 #[test]
+fn acceptance_cannot_be_handed_a_root() {
+    // The forgeable calls. Both manufactured acceptance from the header's own
+    // root without using execution's result; neither compiles now, because
+    // acceptance takes no Hash.
+    for call in [
+        "let c = sumchain_storage::candidate::CandidateExecution::new(db, 1024);\n\
+         let b: sumchain_primitives::Block = unimplemented!();\n\
+         let _ = c.accept_imported(&b, b.header.state_root);",
+        "let c = sumchain_storage::candidate::CandidateExecution::new(db, 1024);\n\
+         let b: sumchain_primitives::Block = unimplemented!();\n\
+         let _ = c.accept_produced(&b, b.header.state_root);",
+    ] {
+        let (failed, stderr) = rejected(call);
+        assert!(
+            failed,
+            "acceptance must not take a root from its caller; this compiled:\n{call}\n{stderr}"
+        );
+    }
+}
+
+#[test]
+fn a_block_execution_cannot_be_built_or_destructured_externally() {
+    // Private fields and no public constructor, so a caller cannot assemble a
+    // BlockExecution around a candidate whose root it chose.
+    let (failed, _e) = rejected(
+        "let _x = sumchain_state::executor::BlockExecution { receipts: vec![] };",
+    );
+    assert!(failed, "BlockExecution must not be constructible externally");
+
+    let (failed2, _e2) = rejected(
+        "fn f(x: sumchain_state::executor::BlockExecution<'_>) {\n\
+             let _r = x.receipts;\n\
+         }",
+    );
+    assert!(failed2, "BlockExecution fields must be private");
+}
+
+#[test]
 fn the_two_operand_comparison_does_not_exist() {
     // `verify(h, h)` was the forgeable shape: it proved a comparison occurred
     // and nothing about where either side came from. It is DELETED, not merely
     // hidden — a crate-private version would still be reachable from every
     // future caller inside the crate. The only verification path is
-    // `verify_for_block`, which reads the expected root from the block.
+    // acceptance, which reads the expected root from the block and takes the
+    // computed root from the binding made at execution completion.
     let (failed, stderr) = rejected(
         "let c = sumchain_storage::candidate::CandidateExecution::new(db, 1024);\n\
          let h = sumchain_primitives::Hash::ZERO;\n\
-         let _ = c.verify_computed_root(h, h);",
+         let _ = c.verify(h, h);",
     );
     assert!(
         failed,
@@ -137,7 +176,7 @@ fn the_two_operand_comparison_does_not_exist() {
          the expected root from the block itself"
     );
     assert!(
-        stderr.contains("private") || stderr.contains("verify_computed_root"),
+        stderr.contains("verify") || stderr.contains("no method"),
         "expected a privacy error:\n{stderr}"
     );
 }

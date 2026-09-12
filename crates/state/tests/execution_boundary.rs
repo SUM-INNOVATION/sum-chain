@@ -241,3 +241,80 @@ fn the_guard_actually_detects_a_direct_mutation() {
     assert_eq!(count_direct_mutations("view.put(cf, &k, &v)?;"), 0);
     assert_eq!(count_direct_mutations("overlay.delete(cf, &k)?;"), 0);
 }
+
+// ── The execution-completion binding ───────────────────────────────────────
+//
+// `finish_execution` is what ties the accumulator execution produced to the
+// buffered writes. Acceptance then has no `Hash` parameter, so a caller cannot
+// hand it the header's own root — which is how an earlier version of this API
+// could be made to accept anything.
+//
+// That binding is only worth anything if it happens exactly once, at the point
+// execution actually finishes. A second call site could bind a different value.
+
+/// Every `.rs` file in the workspace's state and consensus crates.
+fn workspace_sources() -> Vec<(String, String)> {
+    let mut out = rust_files_in(&state_src().join("src"));
+    let consensus = state_src().join("../consensus/src");
+    if consensus.is_dir() {
+        for (name, src) in rust_files_in(&consensus) {
+            out.push((format!("consensus/{name}"), src));
+        }
+    }
+    out
+}
+
+#[test]
+fn finish_execution_is_called_exactly_once_and_only_where_execution_completes() {
+    let mut sites = Vec::new();
+    for (name, src) in workspace_sources() {
+        for (i, line) in src.lines().enumerate() {
+            let t = line.trim_start();
+            if t.starts_with("//") {
+                continue;
+            }
+            if t.contains(".finish_execution(") {
+                sites.push(format!("  {name}:{}", i + 1));
+            }
+        }
+    }
+
+    assert_eq!(
+        sites.len(),
+        1,
+        "`finish_execution` must be called exactly once, where `execute_block` \
+         completes. More than one site means the computed accumulator could be \
+         bound somewhere it was not produced, which is the forgery this binding \
+         exists to prevent. Found:\n{}",
+        sites.join("\n")
+    );
+    assert!(
+        sites[0].starts_with("  executor.rs:"),
+        "the single binding must live in executor.rs, at execution completion; \
+         found {}",
+        sites[0]
+    );
+}
+
+/// Acceptance must never regain a root parameter.
+#[test]
+fn acceptance_takes_no_hash_from_its_caller() {
+    let candidate = std::fs::read_to_string(
+        state_src().join("../storage/src/candidate.rs"),
+    )
+    .expect("read candidate.rs");
+
+    for name in ["accept_produced", "accept_imported"] {
+        let start = candidate
+            .find(&format!("pub fn {name}"))
+            .unwrap_or_else(|| panic!("{name} must exist"));
+        let rest = &candidate[start..];
+        let sig = &rest[..rest.find(')').expect("parameter list")];
+        assert!(
+            !sig.contains("Hash"),
+            "{name} must take only &Block — a Hash parameter would let a caller \
+             supply the value acceptance is supposed to check against:\n{sig}"
+        );
+        assert!(sig.contains("block: &Block"), "{name} must take the block:\n{sig}");
+    }
+}

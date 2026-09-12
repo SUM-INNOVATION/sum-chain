@@ -1,138 +1,145 @@
-//! The production entry point must not let a caller supply the comparison.
+//! Acceptance must not be something a caller can forge or widen.
 //!
-//! `verify_computed_root(h, h)` succeeds — that call is a mechanism, and its own
-//! documentation says so. The guarantee lives in the orchestration API, which
-//! must make the forged shape unexpressible rather than merely discouraged.
-//!
-//! These are source-level assertions about the signature. A runtime test cannot
-//! state "there is no way to write this call"; what it can do is pin the shape
-//! that makes it impossible, so a later refactor that reintroduces hash operands
-//! fails here rather than silently restoring the hole.
+//! These are source-level assertions about the acceptance API's shape. A runtime
+//! test cannot say "there is no way to write this call"; what it can do is pin
+//! the signatures that make the forged forms unexpressible, so a later refactor
+//! that reintroduces them fails here rather than silently restoring the hole.
 
 use std::path::Path;
 
-fn source() -> String {
-    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/candidate_block.rs");
-    std::fs::read_to_string(p).expect("read candidate_block.rs")
+fn candidate_src() -> String {
+    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../storage/src/candidate.rs");
+    std::fs::read_to_string(p).expect("read candidate.rs")
 }
 
-/// The signature between `pub fn execute_candidate_block` and its opening brace.
-fn entry_point_signature(src: &str) -> String {
-    let start = src
-        .find("fn execute_candidate_block")
-        .expect("entry point must exist");
+/// The signature between `fn <name>` and its opening brace.
+fn signature(src: &str, name: &str) -> String {
+    let start = src.find(&format!("fn {name}")).unwrap_or_else(|| panic!("{name} must exist"));
     let rest = &src[start..];
-    let end = rest.find("{").expect("signature must end in a brace");
-    rest[..end].to_string()
+    // Stop at the closing paren: everything after it is the return type, which
+    // would otherwise be counted as a parameter.
+    let end = rest.find(')').expect("signature must have a parameter list");
+    rest[..=end].to_string()
 }
 
-#[test]
-fn the_entry_point_takes_the_block_and_no_expected_root() {
-    let src = source();
-    let sig = entry_point_signature(&src);
-
-    assert!(
-        sig.contains("block: &Block"),
-        "the entry point must accept the block itself:\n{sig}"
-    );
-
-    // `parent_state_root` is an input to execution, not an operand of the
-    // comparison — it is what the accumulator chains FROM. Everything else
-    // hash-shaped would be a caller-supplied side of the equality.
-    let hash_params: Vec<&str> = sig
-        .lines()
-        .map(str::trim)
-        .filter(|l| l.contains(": Hash"))
-        .collect();
-    assert_eq!(
-        hash_params,
-        vec!["parent_state_root: Hash,"],
-        "the only Hash parameter may be the parent root that execution chains \
-         from. A `computed` or `expected` parameter would let a caller pass the \
-         header's root as both operands, which is exactly the forgery this \
-         entry point exists to prevent. Found:\n{hash_params:?}"
-    );
-}
-
-#[test]
-fn the_entry_point_reads_the_declared_root_from_the_header_itself() {
-    let src = source();
-    assert!(
-        src.contains("verify_for_block(block, computed_root)"),
-        "the expected root must be read from the block inside verification, not \
-         received as a parameter"
-    );
-    assert!(
-        src.contains("executor.execute_block("),
-        "the computed root must come from execution inside this function"
-    );
-}
-
-/// The entry point must stay crate-private until execution actually runs
-/// through an `ExecutionView`.
-///
-/// Today it creates a candidate and never opens `view()`: it calls the committed
-/// executor, which writes through its own database handles, then verifies an
-/// overlay that is empty because nothing was written to it. Exporting that would
-/// invite callers to read "candidate execution" as meaning a rejected block
-/// leaves no trace, which is false. This fails the moment someone makes it `pub`
-/// without also routing execution.
-#[test]
-fn the_scaffolding_entry_point_is_not_public() {
-    let src = source();
-    assert!(
-        src.contains("pub(crate) fn execute_candidate_block"),
-        "execute_candidate_block must remain pub(crate) while it still bypasses \
-         the ExecutionView"
-    );
-    assert!(
-        !src.contains("\npub fn execute_candidate_block"),
-        "execute_candidate_block must not be exported"
-    );
-    assert!(
-        src.contains("SCAFFOLDING"),
-        "the module must say plainly that isolation is absent"
-    );
-}
-
-/// And when it IS routed, this test is the reminder to re-check the claim.
-#[test]
-fn routing_through_the_view_is_still_outstanding() {
-    let src = source();
-    let routed = src.contains("candidate.view()") || src.contains(".view();");
-    assert!(
-        !routed,
-        "execution now opens a view — good. Update this test and \
-         `the_scaffolding_entry_point_is_not_public` together with whatever \
-         evidence shows every execution path uses it, then the entry point may \
-         become public."
-    );
-}
-
-/// The forgeable comparison must not exist at all — not merely be private.
-///
-/// A `verify(computed, expected)` taking two caller-supplied hashes proves a
-/// comparison occurred and nothing about where either side came from:
-/// `verify(h, h)` succeeds. Making it crate-private would still leave it
-/// reachable from every future caller inside the storage crate, so it was
-/// deleted. Verification reads the expected root from the block.
 #[test]
 fn no_two_operand_root_comparison_exists() {
-    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../storage/src/candidate.rs");
-    let src = std::fs::read_to_string(p).expect("read candidate.rs");
-
+    let src = candidate_src();
     assert!(
         !src.contains("fn verify_computed_root"),
-        "a two-operand root comparison reappeared; verification must take the \
-         block and read the expected root from its header"
-    );
-    assert!(
-        src.contains("pub fn verify_for_block"),
-        "verify_for_block must be the verification path"
-    );
-    assert!(
-        src.contains("let declared = block.header.state_root;"),
-        "the expected root must be read from the block inside verification"
+        "a two-operand root comparison reappeared; acceptance must take the block \
+         and read the expected root from its header"
     );
 }
 
+/// Neither acceptance path may take a root at all.
+///
+/// A single `computed: Hash` parameter was not enough: a caller could pass
+/// `block.header.state_root` and manufacture acceptance without using
+/// execution's result. The accumulator is now BOUND at execution completion, so
+/// acceptance takes only the block and there is nothing for a caller to fill in.
+#[test]
+fn acceptance_takes_only_the_block() {
+    let src = candidate_src();
+    for name in ["accept_produced", "accept_imported"] {
+        let sig = signature(&src, name);
+        assert!(
+            sig.contains("block: &Block"),
+            "{name} must accept the block itself:\n{sig}"
+        );
+        assert!(
+            !sig.contains("Hash"),
+            "{name} must take NO Hash — a root parameter lets a caller supply the \
+             value acceptance is supposed to check against:\n{sig}"
+        );
+    }
+}
+
+/// The binding itself takes the root, exactly once, on the way out of execution.
+#[test]
+fn the_computed_root_is_bound_at_execution_completion() {
+    let src = candidate_src();
+    let sig = signature(&src, "finish_execution");
+    assert!(
+        sig.contains("computed_root: Hash"),
+        "finish_execution must take the accumulator execution produced:\n{sig}"
+    );
+    assert!(
+        sig.contains("self,") || sig.contains("(self"),
+        "finish_execution must CONSUME the candidate, so execution cannot be \
+         concluded twice with different roots:\n{sig}"
+    );
+    assert!(
+        src.contains("pub struct ExecutedCandidate"),
+        "the bound root must live in its own state between execution and acceptance"
+    );
+}
+
+/// The compatibility window must not be reachable from a call site.
+///
+/// A height parameter, or worse a boolean, would let any caller opt into
+/// force-adoption. Keeping the cutoff internal means it cannot be widened from
+/// outside the function that owns it.
+#[test]
+fn the_legacy_cutoff_cannot_be_supplied_by_a_caller() {
+    let src = candidate_src();
+    let sig = signature(&src, "accept_imported");
+    for forbidden in ["bool", "cutoff", "legacy", "allow_", "height:"] {
+        assert!(
+            !sig.contains(forbidden),
+            "accept_imported must not take `{forbidden}` — the compatibility window \
+             is internal and cannot be opened by a caller:\n{sig}"
+        );
+    }
+    assert!(
+        src.contains("pub const LEGACY_ROOT_COMPATIBILITY_HEIGHT: BlockHeight = 496_720;"),
+        "the cutoff must be a single internal constant at its existing value"
+    );
+}
+
+/// Acceptance evidence must distinguish a checked root from a force-adopted one.
+#[test]
+fn acceptance_evidence_does_not_conflate_verified_with_adopted() {
+    let src = candidate_src();
+    assert!(
+        !src.contains("pub struct VerifiedCandidate"),
+        "a force-adopted mismatch must not be described as verified"
+    );
+    for variant in ["Produced", "ExactRoot", "LegacyCompatibility"] {
+        assert!(src.contains(variant), "acceptance evidence must include {variant}");
+    }
+    assert!(
+        src.contains("matches!(self, Acceptance::ExactRoot)"),
+        "only an exact match may report as verified"
+    );
+}
+
+/// One publisher. Both acceptance paths converge on it.
+#[test]
+fn exactly_one_publication_function_exists() {
+    let src = candidate_src();
+    assert_eq!(
+        src.matches("pub fn publish").count(),
+        1,
+        "there must be exactly one publication function"
+    );
+    assert_eq!(
+        src.matches("pub fn into_batch").count(),
+        0,
+        "no public batch escape may exist alongside the publisher"
+    );
+    let overlay = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../storage/src/overlay.rs"),
+    )
+    .expect("read overlay.rs");
+    assert!(
+        overlay.contains("pub(crate) fn into_batch"),
+        "the overlay's batch conversion must stay crate-private, or the single \
+         publisher is bypassable by constructing an overlay directly"
+    );
+    assert_eq!(
+        overlay.matches("pub fn into_batch").count(),
+        0,
+        "no public batch escape may exist on the overlay"
+    );
+}
