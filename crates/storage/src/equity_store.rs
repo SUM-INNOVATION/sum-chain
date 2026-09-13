@@ -21,6 +21,64 @@ use crate::db::{cf, Database};
 use crate::{Result, StorageError};
 
 // =============================================================================
+// Shared codecs
+// =============================================================================
+//
+// Block execution will stage equity rows through `ExecutionView` while the
+// stores below write the same families. A second codec on either side would let
+// a candidate and the chain disagree about bytes that are meant to be
+// identical, and nothing downstream would catch it — the block state root does
+// not commit to equity rows. So there is exactly one of each, and both sides
+// call it.
+//
+// Note what an equity balance is: a bincode `u64`, NOT the 16-byte big-endian
+// `u128` a token balance is. The two subsystems sit next to each other, are
+// migrating in the same package, and encode "a balance" differently; a shared
+// helper that quietly normalised them would corrupt every row it touched while
+// still round-tripping in isolation.
+
+macro_rules! equity_codec {
+    ($enc:ident, $dec:ident, $ty:ty, $what:literal) => {
+        #[doc = concat!("Encode ", $what, ". See the shared-codec note above.")]
+        pub fn $enc(value: &$ty) -> Result<Vec<u8>> {
+            bincode::serialize(value).map_err(|e| StorageError::Serialization(e.to_string()))
+        }
+        #[doc = concat!("Decode ", $what, ". The inverse of [`", stringify!($enc), "`].")]
+        pub fn $dec(bytes: &[u8]) -> Result<$ty> {
+            bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+        }
+    };
+}
+
+equity_codec!(encode_entity_profile, decode_entity_profile, EntityProfile, "an entity profile");
+equity_codec!(
+    encode_governance_action,
+    decode_governance_action,
+    GovernanceAction,
+    "a governance action"
+);
+equity_codec!(
+    encode_action_id_list,
+    decode_action_id_list,
+    Vec<ActionId>,
+    "the action list in `cf::EQUITY_ENTITY_INDEX`"
+);
+equity_codec!(encode_equity_token, decode_equity_token, EquityToken, "an equity token");
+equity_codec!(encode_equity_balance, decode_equity_balance, u64, "an equity balance");
+equity_codec!(
+    encode_class_id_list,
+    decode_class_id_list,
+    Vec<ClassId>,
+    "the class list in `cf::EQUITY_HOLDER_INDEX`"
+);
+equity_codec!(
+    encode_ownership_proof,
+    decode_ownership_proof,
+    OwnershipProofEnvelope,
+    "an ownership proof"
+);
+
+// =============================================================================
 // Entity Profile Storage (SRC-831)
 // =============================================================================
 
@@ -37,7 +95,7 @@ impl<'a> EntityProfileStore<'a> {
     /// Store an entity profile
     pub fn put(&self, entity: &EntityProfile) -> Result<()> {
         let bytes =
-            bincode::serialize(entity).map_err(|e| StorageError::Serialization(e.to_string()))?;
+            encode_entity_profile(entity)?;
         self.db.put(cf::EQUITY_ENTITIES, &entity.subject_id, &bytes)
     }
 
@@ -45,8 +103,7 @@ impl<'a> EntityProfileStore<'a> {
     pub fn get(&self, subject_id: &SubjectId) -> Result<Option<EntityProfile>> {
         match self.db.get(cf::EQUITY_ENTITIES, subject_id)? {
             Some(bytes) => {
-                let entity: EntityProfile = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let entity = decode_entity_profile(&bytes)?;
                 Ok(Some(entity))
             }
             None => Ok(None),
@@ -82,8 +139,7 @@ impl<'a> EntityProfileStore<'a> {
     pub fn get_by_controller(&self, controller: &Address) -> Result<Vec<EntityProfile>> {
         let mut entities = Vec::new();
         for (_, value) in self.db.iter(cf::EQUITY_ENTITIES)? {
-            let entity: EntityProfile = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let entity = decode_entity_profile(&value)?;
             if entity.controllers.contains(controller) {
                 entities.push(entity);
             }
@@ -95,8 +151,7 @@ impl<'a> EntityProfileStore<'a> {
     pub fn list_active(&self) -> Result<Vec<EntityProfile>> {
         let mut entities = Vec::new();
         for (_, value) in self.db.iter(cf::EQUITY_ENTITIES)? {
-            let entity: EntityProfile = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let entity = decode_entity_profile(&value)?;
             if entity.status == EntityStatus::Active {
                 entities.push(entity);
             }
@@ -111,8 +166,7 @@ impl<'a> EntityProfileStore<'a> {
     ) -> Result<Vec<EntityProfile>> {
         let mut entities = Vec::new();
         for (_, value) in self.db.iter(cf::EQUITY_ENTITIES)? {
-            let entity: EntityProfile = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let entity = decode_entity_profile(&value)?;
             if entity.org_type == org_type {
                 entities.push(entity);
             }
@@ -138,7 +192,7 @@ impl<'a> GovernanceActionStore<'a> {
     /// Store a governance action
     pub fn put(&self, action: &GovernanceAction) -> Result<()> {
         let bytes =
-            bincode::serialize(action).map_err(|e| StorageError::Serialization(e.to_string()))?;
+            encode_governance_action(action)?;
         self.db.put(cf::EQUITY_GOVERNANCE, &action.action_id, &bytes)?;
 
         // Index by entity
@@ -151,8 +205,7 @@ impl<'a> GovernanceActionStore<'a> {
     pub fn get(&self, action_id: &ActionId) -> Result<Option<GovernanceAction>> {
         match self.db.get(cf::EQUITY_GOVERNANCE, action_id)? {
             Some(bytes) => {
-                let action: GovernanceAction = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let action = decode_governance_action(&bytes)?;
                 Ok(Some(action))
             }
             None => Ok(None),
@@ -186,8 +239,7 @@ impl<'a> GovernanceActionStore<'a> {
         match self.get(action_id)? {
             Some(mut action) => {
                 action.status = status;
-                let bytes = bincode::serialize(&action)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let bytes = encode_governance_action(&action)?;
                 self.db.put(cf::EQUITY_GOVERNANCE, action_id, &bytes)
             }
             None => Err(StorageError::NotFound(format!(
@@ -206,8 +258,7 @@ impl<'a> GovernanceActionStore<'a> {
         let mut action_ids = self.get_entity_action_ids(entity_subject_id)?;
         if !action_ids.contains(action_id) {
             action_ids.push(*action_id);
-            let bytes = bincode::serialize(&action_ids)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let bytes = encode_action_id_list(&action_ids)?;
             self.db
                 .put(cf::EQUITY_ENTITY_INDEX, entity_subject_id, &bytes)?;
         }
@@ -217,8 +268,7 @@ impl<'a> GovernanceActionStore<'a> {
     fn get_entity_action_ids(&self, entity_subject_id: &SubjectId) -> Result<Vec<ActionId>> {
         match self.db.get(cf::EQUITY_ENTITY_INDEX, entity_subject_id)? {
             Some(bytes) => {
-                let action_ids: Vec<ActionId> = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let action_ids = decode_action_id_list(&bytes)?;
                 Ok(action_ids)
             }
             None => Ok(Vec::new()),
@@ -243,7 +293,7 @@ impl<'a> EquityTokenStore<'a> {
     /// Store an equity token class
     pub fn put(&self, token: &EquityToken) -> Result<()> {
         let bytes =
-            bincode::serialize(token).map_err(|e| StorageError::Serialization(e.to_string()))?;
+            encode_equity_token(token)?;
         self.db.put(cf::EQUITY_TOKENS, &token.class_id, &bytes)
     }
 
@@ -251,8 +301,7 @@ impl<'a> EquityTokenStore<'a> {
     pub fn get(&self, class_id: &ClassId) -> Result<Option<EquityToken>> {
         match self.db.get(cf::EQUITY_TOKENS, class_id)? {
             Some(bytes) => {
-                let token: EquityToken = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let token = decode_equity_token(&bytes)?;
                 Ok(Some(token))
             }
             None => Ok(None),
@@ -288,8 +337,7 @@ impl<'a> EquityTokenStore<'a> {
     pub fn get_by_issuer(&self, issuer_subject: &SubjectId) -> Result<Vec<EquityToken>> {
         let mut tokens = Vec::new();
         for (_, value) in self.db.iter(cf::EQUITY_TOKENS)? {
-            let token: EquityToken = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let token = decode_equity_token(&value)?;
             if token.issuer_subject == *issuer_subject {
                 tokens.push(token);
             }
@@ -301,8 +349,7 @@ impl<'a> EquityTokenStore<'a> {
     pub fn list_active(&self) -> Result<Vec<EquityToken>> {
         let mut tokens = Vec::new();
         for (_, value) in self.db.iter(cf::EQUITY_TOKENS)? {
-            let token: EquityToken = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let token = decode_equity_token(&value)?;
             if token.status == TokenStatus::Active {
                 tokens.push(token);
             }
@@ -350,8 +397,7 @@ impl<'a> EquityBalanceStore<'a> {
         let key = Self::make_key(class_id, holder_commitment);
         match self.db.get(cf::EQUITY_BALANCES, &key)? {
             Some(bytes) => {
-                let balance: u64 = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let balance = decode_equity_balance(&bytes)?;
                 Ok(balance)
             }
             None => Ok(0),
@@ -371,8 +417,7 @@ impl<'a> EquityBalanceStore<'a> {
             self.db.delete(cf::EQUITY_BALANCES, &key)?;
             self.remove_from_holder_index(holder_commitment, class_id)?;
         } else {
-            let bytes = bincode::serialize(&balance)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let bytes = encode_equity_balance(&balance)?;
             self.db.put(cf::EQUITY_BALANCES, &key, &bytes)?;
             self.add_to_holder_index(holder_commitment, class_id)?;
         }
@@ -408,8 +453,7 @@ impl<'a> EquityBalanceStore<'a> {
             if key.len() == 64 {
                 let mut holder = [0u8; 32];
                 holder.copy_from_slice(&key[32..64]);
-                let balance: u64 = bincode::deserialize(&value)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let balance = decode_equity_balance(&value)?;
                 holders.push((holder, balance));
             }
         }
@@ -420,15 +464,18 @@ impl<'a> EquityBalanceStore<'a> {
     pub fn get_holdings(&self, holder_commitment: &[u8; 32]) -> Result<Vec<ClassId>> {
         match self.db.get(cf::EQUITY_HOLDER_INDEX, holder_commitment)? {
             Some(bytes) => {
-                let class_ids: Vec<ClassId> = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let class_ids = decode_class_id_list(&bytes)?;
                 Ok(class_ids)
             }
             None => Ok(Vec::new()),
         }
     }
 
-    fn make_key(class_id: &ClassId, holder_commitment: &[u8; 32]) -> [u8; 64] {
+    /// Public because block execution will stage equity balances through
+    /// `ExecutionView` rather than through this store, and both sides must
+    /// agree byte-for-byte on where a balance lives. A pure function of its
+    /// arguments; it reaches no database.
+    pub fn make_key(class_id: &ClassId, holder_commitment: &[u8; 32]) -> [u8; 64] {
         let mut key = [0u8; 64];
         key[..32].copy_from_slice(class_id);
         key[32..].copy_from_slice(holder_commitment);
@@ -443,8 +490,7 @@ impl<'a> EquityBalanceStore<'a> {
         let mut class_ids = self.get_holdings(holder_commitment)?;
         if !class_ids.contains(class_id) {
             class_ids.push(*class_id);
-            let bytes = bincode::serialize(&class_ids)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let bytes = encode_class_id_list(&class_ids)?;
             self.db
                 .put(cf::EQUITY_HOLDER_INDEX, holder_commitment, &bytes)?;
         }
@@ -462,8 +508,7 @@ impl<'a> EquityBalanceStore<'a> {
             if class_ids.is_empty() {
                 self.db.delete(cf::EQUITY_HOLDER_INDEX, holder_commitment)?;
             } else {
-                let bytes = bincode::serialize(&class_ids)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let bytes = encode_class_id_list(&class_ids)?;
                 self.db
                     .put(cf::EQUITY_HOLDER_INDEX, holder_commitment, &bytes)?;
             }
@@ -860,7 +905,7 @@ impl<'a> OwnershipProofStore<'a> {
     /// Store an ownership proof
     pub fn put(&self, proof: &OwnershipProofEnvelope) -> Result<()> {
         let bytes =
-            bincode::serialize(proof).map_err(|e| StorageError::Serialization(e.to_string()))?;
+            encode_ownership_proof(proof)?;
         self.db.put(cf::EQUITY_PROOFS, &proof.proof_id, &bytes)
     }
 
@@ -868,8 +913,7 @@ impl<'a> OwnershipProofStore<'a> {
     pub fn get(&self, proof_id: &ProofId) -> Result<Option<OwnershipProofEnvelope>> {
         match self.db.get(cf::EQUITY_PROOFS, proof_id)? {
             Some(bytes) => {
-                let proof: OwnershipProofEnvelope = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let proof = decode_ownership_proof(&bytes)?;
                 Ok(Some(proof))
             }
             None => Ok(None),
@@ -894,8 +938,7 @@ impl<'a> OwnershipProofStore<'a> {
     ) -> Result<Vec<OwnershipProofEnvelope>> {
         let mut proofs = Vec::new();
         for (_, value) in self.db.iter(cf::EQUITY_PROOFS)? {
-            let proof: OwnershipProofEnvelope = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let proof = decode_ownership_proof(&value)?;
             if proof.subject_nullifier == *subject_nullifier
                 && (proof.expires_at == 0 || proof.expires_at > current_time)
             {
@@ -909,8 +952,7 @@ impl<'a> OwnershipProofStore<'a> {
     pub fn get_by_profile(&self, profile_id: &str) -> Result<Vec<OwnershipProofEnvelope>> {
         let mut proofs = Vec::new();
         for (_, value) in self.db.iter(cf::EQUITY_PROOFS)? {
-            let proof: OwnershipProofEnvelope = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let proof = decode_ownership_proof(&value)?;
             if proof.profile_id == profile_id {
                 proofs.push(proof);
             }

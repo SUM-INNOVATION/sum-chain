@@ -1342,6 +1342,51 @@ pub struct Src20TokenData {
 }
 
 /// SRC-20 token storage operations
+/// The one codec for each SRC-20 row family.
+///
+/// Block execution will stage token rows through `ExecutionView` while the
+/// store below writes the same families; a second codec on either side would
+/// let a candidate and the chain disagree about bytes that are meant to be
+/// identical, and nothing downstream would catch it.
+///
+/// Balances and allowances are NOT bincode. They are a bare 16-byte big-endian
+/// `u128`, which is why they get named functions rather than a call to the
+/// generic pair: writing `bincode::serialize(&amount)` here would produce a
+/// different, shorter encoding that still round-trips, so the drift would be
+/// invisible to any test that only checked a value survives a write and a read.
+pub fn encode_token_amount(amount: u128) -> [u8; 16] {
+    amount.to_be_bytes()
+}
+
+/// Decode a token balance or allowance. Rejects any length but 16 rather than
+/// padding: a short row is corruption, not a small number.
+pub fn decode_token_amount(bytes: &[u8]) -> Result<u128> {
+    let arr: [u8; 16] = bytes
+        .try_into()
+        .map_err(|_| StorageError::InvalidData("token amount is not 16 bytes".to_string()))?;
+    Ok(u128::from_be_bytes(arr))
+}
+
+/// Encode SRC-20 token metadata.
+pub fn encode_src20_token(data: &Src20TokenData) -> Result<Vec<u8>> {
+    bincode::serialize(data).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+/// Decode SRC-20 token metadata. The inverse of [`encode_src20_token`].
+pub fn decode_src20_token(bytes: &[u8]) -> Result<Src20TokenData> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+/// Encode the token list in `cf::TOKEN_HOLDER_INDEX`.
+pub fn encode_holder_tokens(tokens: &Vec<Vec<u8>>) -> Result<Vec<u8>> {
+    bincode::serialize(tokens).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+/// Decode the token list in `cf::TOKEN_HOLDER_INDEX`.
+pub fn decode_holder_tokens(bytes: &[u8]) -> Result<Vec<Vec<u8>>> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
 pub struct TokenStore<'a> {
     db: &'a Database,
 }
@@ -1357,19 +1402,13 @@ impl<'a> TokenStore<'a> {
 
     /// Store a token
     pub fn put_token(&self, token_id: &[u8; 32], data: &Src20TokenData) -> Result<()> {
-        let bytes = bincode::serialize(data)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::TOKENS, token_id, &bytes)
+        self.db.put(cf::TOKENS, token_id, &encode_src20_token(data)?)
     }
 
     /// Get a token
     pub fn get_token(&self, token_id: &[u8; 32]) -> Result<Option<Src20TokenData>> {
         match self.db.get(cf::TOKENS, token_id)? {
-            Some(bytes) => {
-                let data: Src20TokenData = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(Some(data))
-            }
+            Some(bytes) => Ok(Some(decode_src20_token(&bytes)?)),
             None => Ok(None),
         }
     }
@@ -1383,8 +1422,13 @@ impl<'a> TokenStore<'a> {
     // Balance operations
     // ========================================================================
 
-    /// Create balance key from token_id and owner
-    fn balance_key(token_id: &[u8; 32], owner: &Address) -> Vec<u8> {
+    /// Create balance key from token_id and owner.
+    ///
+    /// Public because block execution will stage token rows through
+    /// `ExecutionView` rather than through this store, and both sides must
+    /// agree byte-for-byte on where a balance lives. A pure function of its
+    /// arguments; it reaches no database.
+    pub fn balance_key(token_id: &[u8; 32], owner: &Address) -> Vec<u8> {
         let mut key = Vec::with_capacity(52);
         key.extend_from_slice(token_id);
         key.extend_from_slice(owner.as_bytes());
@@ -1395,14 +1439,7 @@ impl<'a> TokenStore<'a> {
     pub fn get_balance(&self, token_id: &[u8; 32], owner: &Address) -> Result<u128> {
         let key = Self::balance_key(token_id, owner);
         match self.db.get(cf::TOKEN_BALANCES, &key)? {
-            Some(bytes) => {
-                if bytes.len() != 16 {
-                    return Err(StorageError::InvalidData("Invalid balance bytes".to_string()));
-                }
-                let mut arr = [0u8; 16];
-                arr.copy_from_slice(&bytes);
-                Ok(u128::from_be_bytes(arr))
-            }
+            Some(bytes) => decode_token_amount(&bytes),
             None => Ok(0),
         }
     }
@@ -1416,7 +1453,7 @@ impl<'a> TokenStore<'a> {
             // Also remove from holder index
             self.remove_from_holder_index(owner, token_id)?;
         } else {
-            self.db.put(cf::TOKEN_BALANCES, &key, &balance.to_be_bytes())?;
+            self.db.put(cf::TOKEN_BALANCES, &key, &encode_token_amount(balance))?;
             // Add to holder index if not already there
             self.add_to_holder_index(owner, token_id)?;
         }
@@ -1427,8 +1464,10 @@ impl<'a> TokenStore<'a> {
     // Allowance operations
     // ========================================================================
 
-    /// Create allowance key from token_id, owner, and spender
-    fn allowance_key(token_id: &[u8; 32], owner: &Address, spender: &Address) -> Vec<u8> {
+    /// Create allowance key from token_id, owner, and spender.
+    ///
+    /// Public for the same reason as [`Self::balance_key`].
+    pub fn allowance_key(token_id: &[u8; 32], owner: &Address, spender: &Address) -> Vec<u8> {
         let mut key = Vec::with_capacity(72);
         key.extend_from_slice(token_id);
         key.extend_from_slice(owner.as_bytes());
@@ -1440,14 +1479,7 @@ impl<'a> TokenStore<'a> {
     pub fn get_allowance(&self, token_id: &[u8; 32], owner: &Address, spender: &Address) -> Result<u128> {
         let key = Self::allowance_key(token_id, owner, spender);
         match self.db.get(cf::TOKEN_ALLOWANCES, &key)? {
-            Some(bytes) => {
-                if bytes.len() != 16 {
-                    return Err(StorageError::InvalidData("Invalid allowance bytes".to_string()));
-                }
-                let mut arr = [0u8; 16];
-                arr.copy_from_slice(&bytes);
-                Ok(u128::from_be_bytes(arr))
-            }
+            Some(bytes) => decode_token_amount(&bytes),
             None => Ok(0),
         }
     }
@@ -1458,7 +1490,7 @@ impl<'a> TokenStore<'a> {
         if allowance == 0 {
             self.db.delete(cf::TOKEN_ALLOWANCES, &key)
         } else {
-            self.db.put(cf::TOKEN_ALLOWANCES, &key, &allowance.to_be_bytes())
+            self.db.put(cf::TOKEN_ALLOWANCES, &key, &encode_token_amount(allowance))
         }
     }
 
@@ -1471,8 +1503,7 @@ impl<'a> TokenStore<'a> {
         let mut tokens = self.get_holder_tokens(owner)?;
         if !tokens.iter().any(|t| t == token_id) {
             tokens.push(token_id.to_vec());
-            let bytes = bincode::serialize(&tokens)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let bytes = encode_holder_tokens(&tokens)?;
             self.db.put(cf::TOKEN_HOLDER_INDEX, owner.as_bytes(), &bytes)?;
         }
         Ok(())
@@ -1485,8 +1516,7 @@ impl<'a> TokenStore<'a> {
         if tokens.is_empty() {
             self.db.delete(cf::TOKEN_HOLDER_INDEX, owner.as_bytes())?;
         } else {
-            let bytes = bincode::serialize(&tokens)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let bytes = encode_holder_tokens(&tokens)?;
             self.db.put(cf::TOKEN_HOLDER_INDEX, owner.as_bytes(), &bytes)?;
         }
         Ok(())
@@ -1496,8 +1526,7 @@ impl<'a> TokenStore<'a> {
     pub fn get_holder_tokens(&self, owner: &Address) -> Result<Vec<Vec<u8>>> {
         match self.db.get(cf::TOKEN_HOLDER_INDEX, owner.as_bytes())? {
             Some(bytes) => {
-                let tokens: Vec<Vec<u8>> = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let tokens = decode_holder_tokens(&bytes)?;
                 Ok(tokens)
             }
             None => Ok(Vec::new()),

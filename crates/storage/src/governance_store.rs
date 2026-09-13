@@ -41,10 +41,14 @@ pub struct EquityClassRoot {
     pub frozen_height: u64,
 }
 
-fn ser<T: serde::Serialize>(v: &T) -> Result<Vec<u8>> {
+/// The one governance encoder. Block execution stages governance rows through
+/// `ExecutionView` and the committed store writes the same families; a second
+/// encoder would let a candidate and the chain disagree about the same bytes.
+pub fn ser<T: serde::Serialize>(v: &T) -> Result<Vec<u8>> {
     bincode::serialize(v).map_err(|e| StorageError::Serialization(e.to_string()))
 }
-fn de<T: serde::de::DeserializeOwned>(b: &[u8]) -> Result<T> {
+/// The one governance decoder. See [`ser`].
+pub fn de<T: serde::de::DeserializeOwned>(b: &[u8]) -> Result<T> {
     bincode::deserialize(b).map_err(|e| StorageError::Serialization(e.to_string()))
 }
 
@@ -52,7 +56,10 @@ fn de<T: serde::de::DeserializeOwned>(b: &[u8]) -> Result<T> {
 /// collision-free key namespace (a one-byte tag prevents an SRC-20 `token_id`
 /// from ever aliasing an equity `class_id`). v1 SRC-20 keys keep their bare
 /// 32-byte layout for on-disk compatibility with existing rows.
-fn asset_key(kind: &GovAssetKind) -> Vec<u8> {
+/// Public because block execution stages governance rows through
+/// `ExecutionView` rather than through this store, and both sides must agree
+/// byte-for-byte on where a row lives. Pure functions; they reach no database.
+pub fn asset_key(kind: &GovAssetKind) -> Vec<u8> {
     match kind {
         GovAssetKind::Src20Token(token_id) => token_id.to_vec(),
         GovAssetKind::NativeEligibility => b"native-eligibility".to_vec(),
@@ -66,7 +73,8 @@ fn asset_key(kind: &GovAssetKind) -> Vec<u8> {
 }
 
 /// `proposal_id (32) || addr (20)` composite key (votes and snapshots).
-fn composite_key(proposal_id: &GovProposalId, addr: &Address) -> Vec<u8> {
+/// Public for the same reason as [`asset_key`].
+pub fn composite_key(proposal_id: &GovProposalId, addr: &Address) -> Vec<u8> {
     let mut k = Vec::with_capacity(52);
     k.extend_from_slice(proposal_id);
     k.extend_from_slice(addr.as_bytes());
@@ -74,14 +82,47 @@ fn composite_key(proposal_id: &GovProposalId, addr: &Address) -> Vec<u8> {
 }
 
 /// `proposer (20) || proposal_id (32)` index key.
-fn proposer_index_key(proposer: &Address, proposal_id: &GovProposalId) -> Vec<u8> {
+/// Public for the same reason as [`asset_key`].
+pub fn proposer_index_key(proposer: &Address, proposal_id: &GovProposalId) -> Vec<u8> {
     let mut k = Vec::with_capacity(52);
     k.extend_from_slice(proposer.as_bytes());
     k.extend_from_slice(proposal_id);
     k
 }
 
-fn addr_from_suffix(key: &[u8]) -> Address {
+/// The equity-vote dedup key: `proposal_id || holder_commitment`, 64 bytes.
+///
+/// It was built inline at three call sites, which is two too many for a key the
+/// candidate side also has to produce. Public for the same reason as
+/// [`asset_key`].
+pub fn equity_commitment_key(proposal_id: &GovProposalId, holder_commitment: &[u8; 32]) -> Vec<u8> {
+    let mut k = Vec::with_capacity(64);
+    k.extend_from_slice(proposal_id);
+    k.extend_from_slice(holder_commitment);
+    k
+}
+
+/// A frozen snapshot weight: sixteen big-endian bytes.
+///
+/// This is the THIRD big-endian `u128` amount encoding in the package that
+/// governance, token and equity form, and it is not bincode either. It belongs
+/// with the codecs shared in the preceding commit and was missed there — a
+/// snapshot weight did not look like "a balance" while I was cataloguing
+/// balances, which is exactly how an encoding drifts.
+pub fn encode_snapshot_weight(weight: u128) -> [u8; 16] {
+    weight.to_be_bytes()
+}
+
+/// Decode a frozen snapshot weight. Rejects any length but 16.
+pub fn decode_snapshot_weight(bytes: &[u8]) -> Result<u128> {
+    let arr: [u8; 16] = bytes
+        .try_into()
+        .map_err(|_| StorageError::Serialization("snapshot weight not 16 bytes".into()))?;
+    Ok(u128::from_be_bytes(arr))
+}
+
+/// Public for the same reason as [`asset_key`].
+pub fn addr_from_suffix(key: &[u8]) -> Address {
     let mut a = [0u8; 20];
     a.copy_from_slice(&key[32..52]);
     Address::new(a)
@@ -157,7 +198,7 @@ impl<'a> GovStore<'a> {
         batch.put(cf::GOV_PROPOSALS, &proposal.id, &ser(proposal)?)?;
         batch.put(cf::GOV_PROPOSAL_INDEX, &proposer_index_key(&proposal.proposer, &proposal.id), &[])?;
         for (holder, weight) in snapshot {
-            batch.put(cf::GOV_SNAPSHOTS, &composite_key(&proposal.id, holder), &weight.to_be_bytes())?;
+            batch.put(cf::GOV_SNAPSHOTS, &composite_key(&proposal.id, holder), &encode_snapshot_weight(*weight))?;
         }
         batch.commit()
     }
@@ -172,10 +213,12 @@ impl<'a> GovStore<'a> {
             if !k.starts_with(token_id) || k.len() < 52 {
                 continue;
             }
-            let arr: [u8; 16] = v[..]
-                .try_into()
-                .map_err(|_| StorageError::Serialization("token balance not 16 bytes".into()))?;
-            let bal = u128::from_be_bytes(arr);
+            // A TOKEN balance, decoded with the token decoder. This used to
+            // open-code the 16-byte big-endian read — governance holding a
+            // private copy of another subsystem's codec, which is the drift the
+            // shared helpers exist to prevent, one crate further out than the
+            // places that were caught first.
+            let bal = crate::schema::decode_token_amount(&v)?;
             if bal == 0 {
                 continue;
             }
@@ -256,17 +299,12 @@ impl<'a> GovStore<'a> {
 
     pub fn put_snapshot(&self, proposal_id: &GovProposalId, holder: &Address, weight: u128) -> Result<()> {
         self.db
-            .put(cf::GOV_SNAPSHOTS, &composite_key(proposal_id, holder), &weight.to_be_bytes())
+            .put(cf::GOV_SNAPSHOTS, &composite_key(proposal_id, holder), &encode_snapshot_weight(weight))
     }
 
     pub fn get_snapshot(&self, proposal_id: &GovProposalId, holder: &Address) -> Result<Option<u128>> {
         match self.db.get(cf::GOV_SNAPSHOTS, &composite_key(proposal_id, holder))? {
-            Some(b) => {
-                let arr: [u8; 16] = b[..]
-                    .try_into()
-                    .map_err(|_| StorageError::Serialization("snapshot weight not 16 bytes".into()))?;
-                Ok(Some(u128::from_be_bytes(arr)))
-            }
+            Some(b) => Ok(Some(decode_snapshot_weight(&b)?)),
             None => Ok(None),
         }
     }
@@ -278,10 +316,7 @@ impl<'a> GovStore<'a> {
             if !k.starts_with(proposal_id) {
                 continue;
             }
-            let arr: [u8; 16] = v[..]
-                .try_into()
-                .map_err(|_| StorageError::Serialization("snapshot weight not 16 bytes".into()))?;
-            out.push((addr_from_suffix(&k), u128::from_be_bytes(arr)));
+            out.push((addr_from_suffix(&k), decode_snapshot_weight(&v)?));
         }
         Ok(out)
     }
@@ -344,10 +379,10 @@ impl<'a> GovStore<'a> {
         proposal_id: &GovProposalId,
         holder_commitment: &[u8; 32],
     ) -> Result<bool> {
-        let mut k = Vec::with_capacity(64);
-        k.extend_from_slice(proposal_id);
-        k.extend_from_slice(holder_commitment);
-        self.db.contains(cf::GOV_EQUITY_USED_COMMITMENTS, &k)
+        self.db.contains(
+            cf::GOV_EQUITY_USED_COMMITMENTS,
+            &equity_commitment_key(proposal_id, holder_commitment),
+        )
     }
 
     /// Mark `(proposal_id, holder_commitment)` as used (#92 dedup).
@@ -356,10 +391,11 @@ impl<'a> GovStore<'a> {
         proposal_id: &GovProposalId,
         holder_commitment: &[u8; 32],
     ) -> Result<()> {
-        let mut k = Vec::with_capacity(64);
-        k.extend_from_slice(proposal_id);
-        k.extend_from_slice(holder_commitment);
-        self.db.put(cf::GOV_EQUITY_USED_COMMITMENTS, &k, &[])
+        self.db.put(
+            cf::GOV_EQUITY_USED_COMMITMENTS,
+            &equity_commitment_key(proposal_id, holder_commitment),
+            &[],
+        )
     }
 
     /// Atomically record an equity vote + mark the commitment used (#92). A single
@@ -371,10 +407,11 @@ impl<'a> GovStore<'a> {
     ) -> Result<()> {
         let mut batch = self.db.batch();
         batch.put(cf::GOV_VOTES, &composite_key(&vote.proposal_id, &vote.voter), &ser(vote)?)?;
-        let mut k = Vec::with_capacity(64);
-        k.extend_from_slice(&vote.proposal_id);
-        k.extend_from_slice(holder_commitment);
-        batch.put(cf::GOV_EQUITY_USED_COMMITMENTS, &k, &[])?;
+        batch.put(
+            cf::GOV_EQUITY_USED_COMMITMENTS,
+            &equity_commitment_key(&vote.proposal_id, holder_commitment),
+            &[],
+        )?;
         batch.commit()
     }
 }
