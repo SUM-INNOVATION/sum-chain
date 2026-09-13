@@ -43,8 +43,8 @@ fn open_db() -> (tempfile::TempDir, Arc<Database>) {
 /// state the chain cannot produce.
 fn seed_applied(state: &Arc<StateManager>, db: &Arc<Database>, exec: &BlockExecutor) {
     let half = GENESIS_ACCOUNTED_SUPPLY / 2;
-    state.credit(&Address::new([0xE1; 20]), half).unwrap();
-    state.credit(&Address::new([0xE2; 20]), half).unwrap();
+    common::credit_committed(&db, &Address::new([0xE1; 20]), half);
+    common::credit_committed(&db, &Address::new([0xE2; 20]), half);
     common::publish_empty_block(state, exec, 100, &[0x5Au8; 32]);
     assert!(
         SupplyStore::new(db.clone()).is_migration_applied().unwrap(),
@@ -160,8 +160,7 @@ fn the_candidate_digest_is_the_digest_of_what_gets_published() {
     let before = store.state_digest().unwrap().expect("correction applied");
 
     let payer = KeyPair::generate();
-    state
-        .put_account(
+    sumchain_storage::StateStore::new(&db).put_account(
             &payer.address(),
             &sumchain_storage::schema::AccountState {
                 balance: 1_000_000,
@@ -309,10 +308,10 @@ fn a_same_block_inference_mutation_moves_the_reserve_delta_exactly() {
 
     let dir = tempfile::TempDir::new().unwrap();
     let db = Arc::new(Database::open_default(dir.path()).unwrap());
-    let state = Arc::new(StateManager::new(db.clone(), 1));
+    let _state = Arc::new(StateManager::new(db.clone(), 1));
     let half = GENESIS_ACCOUNTED_SUPPLY / 2;
-    state.credit(&Address::new([0xE1; 20]), half).unwrap();
-    state.credit(&Address::new([0xE2; 20]), half).unwrap();
+    common::credit_committed(&db, &Address::new([0xE1; 20]), half);
+    common::credit_committed(&db, &Address::new([0xE2; 20]), half);
 
     let mid = sumchain_primitives::supply::supply_correction_migration_id();
 

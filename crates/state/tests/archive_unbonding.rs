@@ -11,6 +11,7 @@
 //! `staked_balance`, else `Failed(323)`.
 
 mod common;
+use sumchain_state::state::StateManager;
 use common::{fund, setup_with_params, CHAIN_ID};
 
 use std::sync::Arc;
@@ -154,19 +155,19 @@ fn defaults_leave_archive_unbonding_dormant() {
 #[test]
 fn gate_closed_begin_unstake_rejects_320_no_mutation() {
     // v2 on, archive unbonding dormant (None).
-    let (state, db, _dir, executor) = setup_with_params(ChainParams::with_v2_enabled());
+    let (_state, db, _dir, executor) = setup_with_params(ChainParams::with_v2_enabled());
     let mut candidate = common::candidate(&db);
     let node = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &node, (STAKE as u128) + 1_000_000);
+    fund(&db, &node, (STAKE as u128) + 1_000_000);
 
     // Register succeeds (registration is not gated).
     let r = executor
         .execute_tx(&mut candidate.view(), &register_tx(&node, 0), &proposer.address(), 1, 1000)
         .unwrap();
     assert!(r.status.is_success());
-    let bal_after_reg = state.get_balance(&node.address()).unwrap();
-    let nonce_after_reg = state.get_nonce(&node.address()).unwrap();
+    let bal_after_reg = StateManager::v_get_balance(&candidate.view(), &node.address()).unwrap();
+    let nonce_after_reg = StateManager::v_get_nonce(&candidate.view(), &node.address()).unwrap();
 
     // BeginUnstake with the gate closed → 320, no fee, nothing mutated.
     let res = executor
@@ -180,19 +181,19 @@ fn gate_closed_begin_unstake_rejects_320_no_mutation() {
         .unwrap();
     assert!(matches!(res.status, TxStatus::Failed(320)), "got {:?}", res.status);
     assert_eq!(res.fee_paid, 0);
-    assert_eq!(state.get_balance(&node.address()).unwrap(), bal_after_reg);
-    assert_eq!(state.get_nonce(&node.address()).unwrap(), nonce_after_reg);
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &node.address()).unwrap(), bal_after_reg);
+    assert_eq!(StateManager::v_get_nonce(&candidate.view(), &node.address()).unwrap(), nonce_after_reg);
     assert_eq!(node_of(&candidate.view(), &node.address()).unwrap().status, NodeStatus::Active);
     assert!(unbonding_of(&candidate.view(), &node.address()).is_none());
 }
 
 #[test]
 fn gate_closed_withdraw_rejects_320_no_mutation() {
-    let (state, db, _dir, executor) = setup_with_params(ChainParams::with_v2_enabled());
+    let (_state, db, _dir, executor) = setup_with_params(ChainParams::with_v2_enabled());
     let mut candidate = common::candidate(&db);
     let node = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &node, 10_000);
+    fund(&db, &node, 10_000);
 
     let res = executor
         .execute_tx(
@@ -206,8 +207,8 @@ fn gate_closed_withdraw_rejects_320_no_mutation() {
     assert!(matches!(res.status, TxStatus::Failed(320)), "got {:?}", res.status);
     assert_eq!(res.fee_paid, 0);
     // No fee, no nonce bump.
-    assert_eq!(state.get_balance(&node.address()).unwrap(), 10_000);
-    assert_eq!(state.get_nonce(&node.address()).unwrap(), 0);
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &node.address()).unwrap(), 10_000);
+    assert_eq!(StateManager::v_get_nonce(&candidate.view(), &node.address()).unwrap(), 0);
 }
 
 // ── Happy-path lifecycle ─────────────────────────────────────────────────────
@@ -216,11 +217,11 @@ fn gate_closed_withdraw_rejects_320_no_mutation() {
 fn full_lifecycle_register_begin_withdraw() {
     let period = 10u64;
     let funded: u128 = (STAKE as u128) + 1_000_000;
-    let (state, db, _dir, executor) = setup_with_params(params_enabled(period));
+    let (_state, db, _dir, executor) = setup_with_params(params_enabled(period));
     let mut candidate = common::candidate(&db);
     let node = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &node, funded);
+    fund(&db, &node, funded);
 
     // 1. Register.
     let r = executor
@@ -276,7 +277,7 @@ fn full_lifecycle_register_begin_withdraw() {
 
     // 4. Withdraw at unlock height → success. Nonce is now 3 (register + begin
     //    + failed-but-fee-charged withdraw each bumped it).
-    let bal_before = state.get_balance(&node.address()).unwrap();
+    let bal_before = StateManager::v_get_balance(&candidate.view(), &node.address()).unwrap();
     let w = executor
         .execute_tx(
             &mut candidate.view(),
@@ -294,28 +295,28 @@ fn full_lifecycle_register_begin_withdraw() {
     assert!(unbonding_of(&candidate.view(), &node.address()).is_none(), "record deleted");
     // Balance: minus the withdraw fee, plus the full remaining stake credited.
     assert_eq!(
-        state.get_balance(&node.address()).unwrap(),
+        StateManager::v_get_balance(&candidate.view(), &node.address()).unwrap(),
         bal_before - FEE + STAKE as u128
     );
     // Net over the whole lifecycle: only the four fees left the account (stake
     // deducted at register was credited back at withdrawal).
-    assert_eq!(state.get_balance(&node.address()).unwrap(), funded - 4 * FEE);
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &node.address()).unwrap(), funded - 4 * FEE);
 }
 
 // ── Semantic failures (gate open) charge the fee upfront ─────────────────────
 
 #[test]
 fn begin_unstake_partial_amount_rejects_323_fee_charged() {
-    let (state, db, _dir, executor) = setup_with_params(params_enabled(10));
+    let (_state, db, _dir, executor) = setup_with_params(params_enabled(10));
     let mut candidate = common::candidate(&db);
     let node = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &node, (STAKE as u128) + 1_000_000);
+    fund(&db, &node, (STAKE as u128) + 1_000_000);
 
     executor
         .execute_tx(&mut candidate.view(), &register_tx(&node, 0), &proposer.address(), 1, 1000)
         .unwrap();
-    let bal_after_reg = state.get_balance(&node.address()).unwrap();
+    let bal_after_reg = StateManager::v_get_balance(&candidate.view(), &node.address()).unwrap();
 
     // amount != full staked_balance → 323, fee still consumed (NodeRegistry
     // policy deducts fee upfront before semantic checks).
@@ -334,7 +335,7 @@ fn begin_unstake_partial_amount_rejects_323_fee_charged() {
         )
         .unwrap();
     assert!(matches!(res.status, TxStatus::Failed(323)), "got {:?}", res.status);
-    assert_eq!(state.get_balance(&node.address()).unwrap(), bal_after_reg - FEE);
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &node.address()).unwrap(), bal_after_reg - FEE);
     // Node untouched; still Active, no unbonding record.
     assert_eq!(node_of(&candidate.view(), &node.address()).unwrap().status, NodeStatus::Active);
     assert!(unbonding_of(&candidate.view(), &node.address()).is_none());
@@ -342,11 +343,11 @@ fn begin_unstake_partial_amount_rejects_323_fee_charged() {
 
 #[test]
 fn begin_unstake_not_archive_rejects_321() {
-    let (state, db, _dir, executor) = setup_with_params(params_enabled(10));
+    let (_state, db, _dir, executor) = setup_with_params(params_enabled(10));
     let mut candidate = common::candidate(&db);
     let stranger = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &stranger, 1_000_000);
+    fund(&db, &stranger, 1_000_000);
 
     // Never registered as any node.
     let res = executor
@@ -363,11 +364,11 @@ fn begin_unstake_not_archive_rejects_321() {
 
 #[test]
 fn withdraw_no_record_rejects_325() {
-    let (state, db, _dir, executor) = setup_with_params(params_enabled(10));
+    let (_state, db, _dir, executor) = setup_with_params(params_enabled(10));
     let mut candidate = common::candidate(&db);
     let node = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &node, (STAKE as u128) + 1_000_000);
+    fund(&db, &node, (STAKE as u128) + 1_000_000);
 
     executor
         .execute_tx(&mut candidate.view(), &register_tx(&node, 0), &proposer.address(), 1, 1000)
@@ -388,11 +389,11 @@ fn withdraw_no_record_rejects_325() {
 
 #[test]
 fn begin_unstake_open_challenge_rejects_324() {
-    let (state, db, _dir, executor) = setup_with_params(params_enabled(10));
+    let (_state, db, _dir, executor) = setup_with_params(params_enabled(10));
     let mut candidate = common::candidate(&db);
     let node = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &node, (STAKE as u128) + 1_000_000);
+    fund(&db, &node, (STAKE as u128) + 1_000_000);
 
     executor
         .execute_tx(&mut candidate.view(), &register_tx(&node, 0), &proposer.address(), 1, 1000)
@@ -437,7 +438,7 @@ fn slash_during_unbonding_keeps_status_and_reduces_remaining() {
     let node = KeyPair::generate();
     let proposer = KeyPair::generate();
     let pk = *proposer.public_key().as_bytes();
-    fund(&state, &node, (STAKE as u128) + 1_000_000);
+    fund(&db, &node, (STAKE as u128) + 1_000_000);
 
     // Real blocks, not one shared candidate: the slash pass runs INSIDE
     // `execute_block`, against a candidate that body builds from committed
@@ -512,7 +513,7 @@ fn withdrawn_node_skipped_by_expired_challenge() {
     let node = KeyPair::generate();
     let proposer = KeyPair::generate();
     let pk = *proposer.public_key().as_bytes();
-    fund(&state, &node, (STAKE as u128) + 1_000_000);
+    fund(&db, &node, (STAKE as u128) + 1_000_000);
 
     // Published blocks, for the same reason as the slash test above.
     common::publish_block(&state, &executor, 1, &pk, vec![register_tx(&node, 0)], &[]);
@@ -576,7 +577,7 @@ fn unbonding_record_survives_restart() {
         let executor =
             sumchain_state::executor::BlockExecutor::new(state.clone(), db.clone(), params_enabled(period));
         let pk = *proposer.public_key().as_bytes();
-        fund(&state, &node, (STAKE as u128) + 1_000_000);
+        fund(&db, &node, (STAKE as u128) + 1_000_000);
         // Published, not staged: an unstaged candidate is discarded on drop, so
         // a restart test that never published would be asserting nothing.
         common::publish_block(&state, &executor, 1, &pk, vec![register_tx(&node, 0)], &[]);

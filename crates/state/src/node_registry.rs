@@ -221,8 +221,7 @@ impl NodeRegistryExecutor {
     }
 
     /// Deduct fee from sender and credit to proposer (same pattern as other executors)
-    fn deduct_fee(
-        state: &StateManager,
+    fn deduct_fee(view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         fee: Balance,
         proposer: &Address,
@@ -231,7 +230,7 @@ impl NodeRegistryExecutor {
             return Ok(());
         }
 
-        let sender_balance = state.get_balance(sender)?;
+        let sender_balance = StateManager::v_get_balance(view, sender)?;
         if sender_balance < fee {
             return Err(StateError::InsufficientBalance {
                 required: fee,
@@ -239,15 +238,15 @@ impl NodeRegistryExecutor {
             });
         }
 
-        let mut sender_account = state.get_account(sender)?;
+        let mut sender_account = StateManager::v_get_account(view, sender)?;
         sender_account.balance = sender_account.balance.saturating_sub(fee);
         sender_account.nonce += 1;
-        state.put_account(sender, &sender_account)?;
+        StateManager::v_put_account(view, sender, &sender_account)?;
 
         if !proposer.is_zero() {
-            let mut proposer_account = state.get_account(proposer)?;
+            let mut proposer_account = StateManager::v_get_account(view, proposer)?;
             proposer_account.balance = proposer_account.balance.saturating_add(fee);
-            state.put_account(proposer, &proposer_account)?;
+            StateManager::v_put_account(view, proposer, &proposer_account)?;
         }
 
         Ok(())
@@ -259,17 +258,16 @@ impl NodeRegistryExecutor {
         view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &NodeRegistryTxData,
-        state: &StateManager,
         proposer: &Address,
         fee: Balance,
         block_height: u64,
         _block_timestamp: u64,
     ) -> Result<NodeRegistryExecutionResult> {
-        Self::deduct_fee(state, sender, fee, proposer)?;
+        Self::deduct_fee(view, sender, fee, proposer)?;
 
         match &data.operation {
             NodeRegistryOperation::Register { role, stake } => {
-                Self::execute_register(view, sender, *role, *stake, state, block_height)
+                Self::execute_register(view, sender, *role, *stake, block_height)
             }
             NodeRegistryOperation::UpdateStatus { target, new_status } => {
                 Self::execute_update_status(view, sender, target, *new_status, block_height)
@@ -294,13 +292,12 @@ impl NodeRegistryExecutor {
         view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &NodeRegistryV2TxData,
-        state: &StateManager,
         proposer: &Address,
         fee: Balance,
         _block_height: u64,
         _block_timestamp: u64,
     ) -> Result<NodeRegistryExecutionResult> {
-        Self::deduct_fee(state, sender, fee, proposer)?;
+        Self::deduct_fee(view, sender, fee, proposer)?;
 
         match &data.operation {
             NodeRegistryOperationV2::RegisterEncryptionKey { encryption_pubkey } => {
@@ -465,7 +462,6 @@ impl NodeRegistryExecutor {
         sender: &Address,
         role: NodeRole,
         stake: u64,
-        state: &StateManager,
         block_height: u64,
     ) -> Result<NodeRegistryExecutionResult> {
         if Self::v_get_node(view, sender)?.is_some() {
@@ -488,7 +484,7 @@ impl NodeRegistryExecutor {
             )));
         }
 
-        let balance = state.get_balance(sender)?;
+        let balance = StateManager::v_get_balance(view, sender)?;
         if balance < stake as u128 {
             return Ok(NodeRegistryExecutionResult::fail(format!(
                 "Insufficient balance for stake: need {}, have {}",
@@ -497,9 +493,9 @@ impl NodeRegistryExecutor {
         }
 
         // Deduct stake from sender balance
-        let mut sender_account = state.get_account(sender)?;
+        let mut sender_account = StateManager::v_get_account(view, sender)?;
         sender_account.balance = sender_account.balance.saturating_sub(stake as u128);
-        state.put_account(sender, &sender_account)?;
+        StateManager::v_put_account(view, sender, &sender_account)?;
 
         let record = NodeRecord {
             address: *sender,
@@ -579,14 +575,13 @@ impl NodeRegistryExecutor {
         view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         amount: u64,
-        state: &StateManager,
         proposer: &Address,
         fee: Balance,
         block_height: u64,
         period_blocks: u64,
         has_open_challenge: bool,
     ) -> Result<NodeRegistryExecutionResult> {
-        Self::deduct_fee(state, sender, fee, proposer)?;
+        Self::deduct_fee(view, sender, fee, proposer)?;
 
         let mut record = match Self::v_get_node(view, sender)? {
             Some(r) if r.role == NodeRole::ArchiveNode => r,
@@ -662,12 +657,11 @@ impl NodeRegistryExecutor {
     pub fn execute_withdraw_unbonded(
         view: &mut ExecutionView<'_, '_>,
         sender: &Address,
-        state: &StateManager,
         proposer: &Address,
         fee: Balance,
         block_height: u64,
     ) -> Result<NodeRegistryExecutionResult> {
-        Self::deduct_fee(state, sender, fee, proposer)?;
+        Self::deduct_fee(view, sender, fee, proposer)?;
 
         let unbonding = match Self::v_get_archive_unbonding(view, sender)? {
             Some(u) => u,
@@ -687,11 +681,11 @@ impl NodeRegistryExecutor {
         }
 
         // Credit the (possibly slashed) remaining amount back to the operator.
-        let mut sender_account = state.get_account(sender)?;
+        let mut sender_account = StateManager::v_get_account(view, sender)?;
         sender_account.balance = sender_account
             .balance
             .saturating_add(unbonding.remaining_amount as u128);
-        state.put_account(sender, &sender_account)?;
+        StateManager::v_put_account(view, sender, &sender_account)?;
 
         // Mark the node fully exited. If the record is somehow missing we still
         // clear the unbonding entry (the balance credit already happened).

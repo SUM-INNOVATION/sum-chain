@@ -235,6 +235,22 @@ impl Default for AccountState {
 }
 
 /// State storage operations
+/// Key prefix for account rows inside [`cf::STATE`], which holds other key
+/// families too.
+pub const ACCOUNT_KEY_PREFIX: &[u8] = b"acct";
+
+/// The one account encoder. Block execution stages account rows through
+/// `ExecutionView`, and the committed store writes them here; a second encoder
+/// would let a candidate and the chain disagree about the same bytes.
+pub fn encode_account(state: &AccountState) -> Result<Vec<u8>> {
+    bincode::serialize(state).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+/// The one account decoder. See [`encode_account`].
+pub fn decode_account(bytes: &[u8]) -> Result<AccountState> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
 pub struct StateStore<'a> {
     db: &'a Database,
 }
@@ -244,25 +260,35 @@ impl<'a> StateStore<'a> {
         Self { db }
     }
 
-    /// Create the key for an account
-    fn account_key(address: &Address) -> Vec<u8> {
-        let mut key = Vec::with_capacity(4 + 20);
-        key.extend_from_slice(b"acct");
+    /// Create the key for an account.
+    ///
+    /// Public because block execution stages account rows through
+    /// `ExecutionView` rather than through this store, and both sides must
+    /// agree byte-for-byte on where an account lives. A pure function of the
+    /// address; it reaches no database.
+    pub fn account_key(address: &Address) -> Vec<u8> {
+        let mut key = Vec::with_capacity(ACCOUNT_KEY_PREFIX.len() + 20);
+        key.extend_from_slice(ACCOUNT_KEY_PREFIX);
         key.extend_from_slice(address.as_bytes());
         key
     }
 
+    /// The address in an account key, or `None` if the key is not one.
+    ///
+    /// The inverse of [`Self::account_key`], for scans of [`cf::STATE`] — which
+    /// holds other key families too.
+    pub fn address_in_account_key(key: &[u8]) -> Option<Address> {
+        if key.len() != ACCOUNT_KEY_PREFIX.len() + 20 || !key.starts_with(ACCOUNT_KEY_PREFIX) {
+            return None;
+        }
+        let mut addr = [0u8; 20];
+        addr.copy_from_slice(&key[ACCOUNT_KEY_PREFIX.len()..]);
+        Some(Address::new(addr))
+    }
+
     /// Get account state
     pub fn get_account(&self, address: &Address) -> Result<AccountState> {
-        let key = Self::account_key(address);
-        match self.db.get(cf::STATE, &key)? {
-            Some(bytes) => {
-                let state: AccountState = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(state)
-            }
-            None => Ok(AccountState::default()),
-        }
+        Ok(self.get_account_opt(address)?.unwrap_or_default())
     }
 
     /// Account state, distinguishing "absent" from "present and zero".
@@ -277,11 +303,7 @@ impl<'a> StateStore<'a> {
     pub fn get_account_opt(&self, address: &Address) -> Result<Option<AccountState>> {
         let key = Self::account_key(address);
         match self.db.get(cf::STATE, &key)? {
-            Some(bytes) => {
-                let state: AccountState = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(Some(state))
-            }
+            Some(bytes) => Ok(Some(decode_account(&bytes)?)),
             None => Ok(None),
         }
     }
@@ -289,9 +311,7 @@ impl<'a> StateStore<'a> {
     /// Set account state
     pub fn put_account(&self, address: &Address, state: &AccountState) -> Result<()> {
         let key = Self::account_key(address);
-        let bytes = bincode::serialize(state)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::STATE, &key, &bytes)
+        self.db.put(cf::STATE, &key, &encode_account(state)?)
     }
 
     /// Get account balance
@@ -424,21 +444,10 @@ impl<'a> StateStore<'a> {
 
         // Use iterator to get all keys with "acct" prefix in STATE column family
         for (key, value) in self.db.prefix_iter(cf::STATE, prefix)? {
-            // Skip if key doesn't match expected length (4 byte prefix + 20 byte address)
-            if key.len() != 24 {
+            let Some(address) = Self::address_in_account_key(&key) else {
                 continue;
-            }
-
-            // Extract address from key (skip "acct" prefix)
-            let mut addr_bytes = [0u8; 20];
-            addr_bytes.copy_from_slice(&key[4..24]);
-            let address = Address::new(addr_bytes);
-
-            // Deserialize account state
-            let state: AccountState = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
-
-            accounts.push((address, state));
+            };
+            accounts.push((address, decode_account(&value)?));
         }
 
         Ok(accounts)

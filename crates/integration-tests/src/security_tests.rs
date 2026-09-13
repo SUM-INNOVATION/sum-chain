@@ -43,8 +43,7 @@ impl SecurityTestNode {
         let validator_key = KeyPair::from_bytes(validator_key_bytes);
 
         // Fund the validator generously
-        state
-            .put_account(
+        sumchain_storage::StateStore::new(&db).put_account(
                 &validator_key.address(),
                 &sumchain_storage::schema::AccountState {
                     balance: 1_000_000_000_000_000, // 1M Koppa
@@ -131,12 +130,19 @@ impl SecurityTestNode {
             data: bincode::serialize(&create_data).unwrap(),
         };
 
+        // The NFT executor stages into a block candidate now, so this fixture
+        // opens one. It is never published: this test asserts on the executor's
+        // RESULT, not on committed state.
+        let mut candidate = sumchain_storage::candidate::CandidateExecution::new(
+            &self.db,
+            1 << 30,
+        );
         let result = self
             .nft_executor
             .execute(
+                &mut candidate.view(),
                 &sender,
                 &nft_data,
-                &self.state,
                 &sender,
                 self.params.min_fee,
                 1000000000, // block_timestamp
@@ -187,9 +193,20 @@ impl SecurityTestNode {
             data: bincode::serialize(&mint_data).unwrap(),
         };
 
+        let mut candidate = sumchain_storage::candidate::CandidateExecution::new(
+            &self.db,
+            1 << 30,
+        );
         let result = self
             .nft_executor
-            .execute(&sender, &nft_data, &self.state, &sender, fee, 1000000000 /* block_timestamp */)
+            .execute(
+                &mut candidate.view(),
+                &sender,
+                &nft_data,
+                &sender,
+                fee,
+                1000000000, // block_timestamp
+            )
             .map_err(|e| format!("Failed to mint token: {}", e))?;
 
         if result.success {

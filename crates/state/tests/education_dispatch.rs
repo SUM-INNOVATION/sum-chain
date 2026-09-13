@@ -9,6 +9,8 @@
 
 mod common;
 
+use sumchain_storage::Database;
+use sumchain_state::state::StateManager;
 use sumchain_crypto::KeyPair;
 use sumchain_primitives::education::{
     catalog_op, offering_op, student_commitment, AddAssessmentData, AssessmentKind,
@@ -25,8 +27,8 @@ use common::{params_education_disabled, params_education_enabled, setup_with_par
 const CHAIN_ID: u64 = 1;
 const FEE: u128 = 1_000;
 
-fn fund(state: &sumchain_state::state::StateManager, kp: &KeyPair, bal: u128) {
-    state
+fn fund(db: &Database, kp: &KeyPair, bal: u128) {
+    sumchain_storage::StateStore::new(db)
         .put_account(
             &kp.address(),
             &sumchain_storage::schema::AccountState { balance: bal, nonce: 0 },
@@ -104,11 +106,11 @@ fn mk_catalog(institution: [u8; 32], dept: &str, code: &str, nonce: u64) -> ([u8
 
 #[test]
 fn gate_closed_is_free_failure() {
-    let (state, db, _dir, ex) = setup_with_params(params_education_disabled());
+    let (_state, db, _dir, ex) = setup_with_params(params_education_disabled());
     let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sponsor, 10 * FEE);
+    fund(&db, &sponsor, 10 * FEE);
     let (_cid, data) = mk_catalog([1u8; 32], "CS", "101", 1);
     let tx = edu_tx(
         &sponsor,
@@ -121,17 +123,17 @@ fn gate_closed_is_free_failure() {
     assert!(matches!(r.status, TxStatus::Failed(70)), "{:?}", r.status);
     assert_eq!(r.fee_paid, 0);
     // Pre-semantic: no fee, no nonce.
-    assert_eq!(state.get_balance(&sponsor.address()).unwrap(), 10 * FEE);
-    assert_eq!(state.get_nonce(&sponsor.address()).unwrap(), 0);
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &sponsor.address()).unwrap(), 10 * FEE);
+    assert_eq!(StateManager::v_get_nonce(&candidate.view(), &sponsor.address()).unwrap(), 0);
 }
 
 #[test]
 fn malformed_and_unsupported_are_free_failures() {
-    let (state, db, _dir, ex) = setup_with_params(params_education_enabled());
+    let (_state, db, _dir, ex) = setup_with_params(params_education_enabled());
     let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sponsor, 10 * FEE);
+    fund(&db, &sponsor, 10 * FEE);
 
     // Malformed: garbage bytes for CreateCatalogEntry.
     let tx = edu_tx(
@@ -156,17 +158,17 @@ fn malformed_and_unsupported_are_free_failures() {
     let r = ex.execute_tx(&mut candidate.view(), &tx, &proposer.address(), 1, 0).unwrap();
     assert!(matches!(r.status, TxStatus::Failed(72)), "{:?}", r.status);
     assert_eq!(r.fee_paid, 0);
-    assert_eq!(state.get_balance(&sponsor.address()).unwrap(), 10 * FEE);
-    assert_eq!(state.get_nonce(&sponsor.address()).unwrap(), 0);
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &sponsor.address()).unwrap(), 10 * FEE);
+    assert_eq!(StateManager::v_get_nonce(&candidate.view(), &sponsor.address()).unwrap(), 0);
 }
 
 #[test]
 fn insufficient_balance_is_free_failure() {
-    let (state, db, _dir, ex) = setup_with_params(params_education_enabled());
+    let (_state, db, _dir, ex) = setup_with_params(params_education_enabled());
     let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sponsor, FEE - 1); // cannot cover fee
+    fund(&db, &sponsor, FEE - 1); // cannot cover fee
     let (_cid, data) = mk_catalog([1u8; 32], "CS", "101", 1);
     let tx = edu_tx(
         &sponsor,
@@ -178,17 +180,17 @@ fn insufficient_balance_is_free_failure() {
     let r = ex.execute_tx(&mut candidate.view(), &tx, &proposer.address(), 1, 0).unwrap();
     assert!(matches!(r.status, TxStatus::InsufficientBalance), "{:?}", r.status);
     assert_eq!(r.fee_paid, 0);
-    assert_eq!(state.get_balance(&sponsor.address()).unwrap(), FEE - 1);
-    assert_eq!(state.get_nonce(&sponsor.address()).unwrap(), 0);
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &sponsor.address()).unwrap(), FEE - 1);
+    assert_eq!(StateManager::v_get_nonce(&candidate.view(), &sponsor.address()).unwrap(), 0);
 }
 
 #[test]
 fn create_catalog_success_charges_policy_b() {
-    let (state, db, _dir, ex) = setup_with_params(params_education_enabled());
+    let (_state, db, _dir, ex) = setup_with_params(params_education_enabled());
     let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sponsor, 10 * FEE);
+    fund(&db, &sponsor, 10 * FEE);
     let (_cid, data) = mk_catalog([1u8; 32], "CS", "101", 1);
     let tx = edu_tx(
         &sponsor,
@@ -201,18 +203,18 @@ fn create_catalog_success_charges_policy_b() {
     assert!(matches!(r.status, TxStatus::Success), "{:?}", r.status);
     assert_eq!(r.fee_paid, FEE);
     // Success: fee charged + nonce advanced; proposer credited.
-    assert_eq!(state.get_balance(&sponsor.address()).unwrap(), 10 * FEE - FEE);
-    assert_eq!(state.get_nonce(&sponsor.address()).unwrap(), 1);
-    assert_eq!(state.get_balance(&proposer.address()).unwrap(), FEE);
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &sponsor.address()).unwrap(), 10 * FEE - FEE);
+    assert_eq!(StateManager::v_get_nonce(&candidate.view(), &sponsor.address()).unwrap(), 1);
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &proposer.address()).unwrap(), FEE);
 }
 
 #[test]
 fn duplicate_catalog_is_charged_semantic_failure_policy_b() {
-    let (state, db, _dir, ex) = setup_with_params(params_education_enabled());
+    let (_state, db, _dir, ex) = setup_with_params(params_education_enabled());
     let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sponsor, 10 * FEE);
+    fund(&db, &sponsor, 10 * FEE);
     let (_cid, data) = mk_catalog([1u8; 32], "CS", "101", 1);
     let tx1 = edu_tx(
         &sponsor,
@@ -225,7 +227,7 @@ fn duplicate_catalog_is_charged_semantic_failure_policy_b() {
         ex.execute_tx(&mut candidate.view(), &tx1, &proposer.address(), 1, 0).unwrap().status,
         TxStatus::Success
     ));
-    let bal_after_1 = state.get_balance(&sponsor.address()).unwrap();
+    let bal_after_1 = StateManager::v_get_balance(&candidate.view(), &sponsor.address()).unwrap();
     let tx2 = edu_tx(
         &sponsor,
         1,
@@ -239,19 +241,19 @@ fn duplicate_catalog_is_charged_semantic_failure_policy_b() {
     assert!(matches!(r.status, TxStatus::Failed(81)), "{:?}", r.status);
     assert_eq!(r.fee_paid, FEE);
     assert_eq!(
-        state.get_balance(&sponsor.address()).unwrap(),
+        StateManager::v_get_balance(&candidate.view(), &sponsor.address()).unwrap(),
         bal_after_1 - FEE
     );
-    assert_eq!(state.get_nonce(&sponsor.address()).unwrap(), 2);
+    assert_eq!(StateManager::v_get_nonce(&candidate.view(), &sponsor.address()).unwrap(), 2);
 }
 
 #[test]
 fn create_offering_requires_existing_catalog_policy_b_charged() {
-    let (state, db, _dir, ex) = setup_with_params(params_education_enabled());
+    let (_state, db, _dir, ex) = setup_with_params(params_education_enabled());
     let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sponsor, 10 * FEE);
+    fund(&db, &sponsor, 10 * FEE);
     let oid = sumchain_primitives::education::offering_id(
         &[7u8; 32],
         "2026FA",
@@ -279,7 +281,7 @@ fn create_offering_requires_existing_catalog_policy_b_charged() {
     let r = ex.execute_tx(&mut candidate.view(), &tx, &proposer.address(), 1, 0).unwrap();
     assert!(matches!(r.status, TxStatus::Failed(73)), "{:?}", r.status);
     assert_eq!(r.fee_paid, FEE); // Policy B: charged
-    assert_eq!(state.get_nonce(&sponsor.address()).unwrap(), 1);
+    assert_eq!(StateManager::v_get_nonce(&candidate.view(), &sponsor.address()).unwrap(), 1);
 }
 
 /// Full happy path; asserts the receipt is stored, the submitter is the
@@ -287,11 +289,11 @@ fn create_offering_requires_existing_catalog_policy_b_charged() {
 /// appears in the stored receipt bytes.
 #[test]
 fn full_flow_submission_receipt_privacy() {
-    let (state, db, _dir, ex) = setup_with_params(params_education_enabled());
+    let (_state, db, _dir, ex) = setup_with_params(params_education_enabled());
     let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sponsor, 100 * FEE);
+    fund(&db, &sponsor, 100 * FEE);
     let mut nonce = 0u64;
     let mut h = 1u64;
     macro_rules! run {
@@ -444,11 +446,11 @@ fn full_flow_submission_receipt_privacy() {
 
 #[test]
 fn submit_not_enrolled_is_charged_failure() {
-    let (state, db, _dir, ex) = setup_with_params(params_education_enabled());
+    let (_state, db, _dir, ex) = setup_with_params(params_education_enabled());
     let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sponsor, 100 * FEE);
+    fund(&db, &sponsor, 100 * FEE);
     let mut nonce = 0u64;
     let mut h = 1u64;
     macro_rules! run {
@@ -522,12 +524,12 @@ fn submit_not_enrolled_is_charged_failure() {
         enrollment_ref: [0xEE; 32],
         student_auth_commitment: None,
     };
-    let bal_before = state.get_balance(&sponsor.address()).unwrap();
+    let bal_before = StateManager::v_get_balance(&candidate.view(), &sponsor.address()).unwrap();
     let r = run!(EducationStandard::CourseOffering, offering_op::SUBMIT_ASSIGNMENT, ser(&sub));
     assert!(matches!(r.status, TxStatus::Failed(79)), "{:?}", r.status);
     assert_eq!(r.fee_paid, FEE);
     assert_eq!(
-        state.get_balance(&sponsor.address()).unwrap(),
+        StateManager::v_get_balance(&candidate.view(), &sponsor.address()).unwrap(),
         bal_before - FEE
     );
 }
@@ -535,11 +537,11 @@ fn submit_not_enrolled_is_charged_failure() {
 #[test]
 fn by_code_index_is_length_safe() {
     // ("CS","101") and ("C","S101") must NOT collide.
-    let (state, db, _dir, ex) = setup_with_params(params_education_enabled());
+    let (_state, db, _dir, ex) = setup_with_params(params_education_enabled());
     let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sponsor, 100 * FEE);
+    fund(&db, &sponsor, 100 * FEE);
     let inst = [8u8; 32];
     let (_c1, d1) = mk_catalog(inst, "CS", "101", 1);
     let (_c2, d2) = mk_catalog(inst, "C", "S101", 2);
@@ -599,13 +601,13 @@ fn failure_code_descriptions_present() {
 /// rejected with Failed(83) and STILL charged + nonce-advanced (Policy B).
 #[test]
 fn non_owner_rejected_83_and_charged() {
-    let (state, db, _dir, ex) = setup_with_params(params_education_enabled());
+    let (_state, db, _dir, ex) = setup_with_params(params_education_enabled());
     let mut candidate = common::candidate(&db);
     let owner = KeyPair::generate();
     let attacker = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &owner, 10 * FEE);
-    fund(&state, &attacker, 10 * FEE);
+    fund(&db, &owner, 10 * FEE);
+    fund(&db, &attacker, 10 * FEE);
 
     let (cid, cdata) = mk_catalog([1u8; 32], "CS", "101", 1);
     let t = edu_tx(
@@ -630,7 +632,7 @@ fn non_owner_rejected_83_and_charged() {
         credit_commitment: None,
         nonce: 1,
     };
-    let bal_before = state.get_balance(&attacker.address()).unwrap();
+    let bal_before = StateManager::v_get_balance(&candidate.view(), &attacker.address()).unwrap();
     let t2 = edu_tx(
         &attacker,
         0,
@@ -643,21 +645,21 @@ fn non_owner_rejected_83_and_charged() {
     // Policy B: auth failure is a semantic failure → charged + nonce.
     assert_eq!(r.fee_paid, FEE);
     assert_eq!(
-        state.get_balance(&attacker.address()).unwrap(),
+        StateManager::v_get_balance(&candidate.view(), &attacker.address()).unwrap(),
         bal_before - FEE
     );
-    assert_eq!(state.get_nonce(&attacker.address()).unwrap(), 1);
+    assert_eq!(StateManager::v_get_nonce(&candidate.view(), &attacker.address()).unwrap(), 1);
 }
 
 /// A Deprecated catalog cannot anchor a NEW offering: Failed(74),
 /// charged under Policy B.
 #[test]
 fn create_offering_rejects_deprecated_catalog_charged() {
-    let (state, db, _dir, ex) = setup_with_params(params_education_enabled());
+    let (_state, db, _dir, ex) = setup_with_params(params_education_enabled());
     let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sponsor, 100 * FEE);
+    fund(&db, &sponsor, 100 * FEE);
     let mut nonce = 0u64;
     let mut h = 1u64;
     macro_rules! run {
@@ -709,7 +711,7 @@ fn create_offering_rejects_deprecated_catalog_charged() {
         final_grade_submission_deadline: 200,
         nonce: 1,
     };
-    let bal_before = state.get_balance(&sponsor.address()).unwrap();
+    let bal_before = StateManager::v_get_balance(&candidate.view(), &sponsor.address()).unwrap();
     let tx = edu_tx(
         &sponsor,
         nonce,
@@ -721,7 +723,7 @@ fn create_offering_rejects_deprecated_catalog_charged() {
     assert!(matches!(r.status, TxStatus::Failed(74)), "{:?}", r.status);
     assert_eq!(r.fee_paid, FEE);
     assert_eq!(
-        state.get_balance(&sponsor.address()).unwrap(),
+        StateManager::v_get_balance(&candidate.view(), &sponsor.address()).unwrap(),
         bal_before - FEE
     );
 }
@@ -730,11 +732,11 @@ fn create_offering_rejects_deprecated_catalog_charged() {
 /// `by_status` row is gone and only the Active row remains.
 #[test]
 fn status_index_not_stale_after_transition() {
-    let (state, db, _dir, ex) = setup_with_params(params_education_enabled());
+    let (_state, db, _dir, ex) = setup_with_params(params_education_enabled());
     let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sponsor, 100 * FEE);
+    fund(&db, &sponsor, 100 * FEE);
     let (cid, cdata) = mk_catalog([3u8; 32], "CS", "401", 1);
     let t1 = edu_tx(
         &sponsor,

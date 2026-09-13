@@ -43,8 +43,8 @@ fn mainnet_1b_on(chain_id: u64) -> (Arc<Database>, Arc<StateManager>, TempDir, B
     let state = Arc::new(StateManager::new(db.clone(), chain_id));
     let exec = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
     let half = GENESIS_ACCOUNTED_SUPPLY / 2;
-    state.credit(&Address::new([1u8; 20]), half).unwrap();
-    state.credit(&Address::new([2u8; 20]), half).unwrap();
+    common::credit_committed(&db, &Address::new([1u8; 20]), half);
+    common::credit_committed(&db, &Address::new([2u8; 20]), half);
     (db, state, dir, exec)
 }
 
@@ -137,9 +137,7 @@ fn applies_when_shortfall_is_held_in_an_included_ledger() {
     let state = Arc::new(StateManager::new(db.clone(), 1));
     let exec = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
     // Accounts hold 1B − 1,003 Koppa (mirrors live accounted_account_supply).
-    state
-        .credit(&Address::new([1u8; 20]), GENESIS_ACCOUNTED_SUPPLY - MAINNET_SHORTFALL)
-        .unwrap();
+    common::credit_committed(&db, &Address::new([1u8; 20]), GENESIS_ACCOUNTED_SUPPLY - MAINNET_SHORTFALL);
     // The missing 1,003 Koppa sits in an active delegation (an INCLUDE bucket).
     DelegationStore::new(&db)
         .put_delegation(&DelegationInfo::new([7u8; 32], [9u8; 32], MAINNET_SHORTFALL, 0))
@@ -184,9 +182,7 @@ fn applies_and_restores_a_truly_leaked_shortfall_via_a_larger_reserve() {
     let db = Arc::new(Database::open_default(dir.path()).unwrap());
     let state = Arc::new(StateManager::new(db.clone(), 1));
     let exec = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
-    state
-        .credit(&Address::new([1u8; 20]), GENESIS_ACCOUNTED_SUPPLY - MAINNET_SHORTFALL)
-        .unwrap();
+    common::credit_committed(&db, &Address::new([1u8; 20]), GENESIS_ACCOUNTED_SUPPLY - MAINNET_SHORTFALL);
     // No bucket holds the shortfall → economic < 1B.
     let econ_before = native_supply_snapshot(&db).unwrap().economic_supply().unwrap();
     assert_eq!(econ_before, GENESIS_ACCOUNTED_SUPPLY - MAINNET_SHORTFALL);
@@ -250,7 +246,7 @@ fn withholds_when_economic_supply_exceeds_target() {
     let db = Arc::new(Database::open_default(dir.path()).unwrap());
     let state = Arc::new(StateManager::new(db.clone(), 1));
     let exec = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
-    state.credit(&Address::new([1u8; 20]), TARGET_CANONICAL_SUPPLY + KOPPA).unwrap();
+    common::credit_committed(&db, &Address::new([1u8; 20]), TARGET_CANONICAL_SUPPLY + KOPPA);
 
     publish_at(&state, &exec, 1);
     let applied = SupplyStore::new(db.clone()).is_migration_applied().unwrap();
@@ -287,7 +283,7 @@ fn skips_on_non_mainnet_chain() {
     let db = Arc::new(Database::open_default(dir.path()).unwrap());
     let state = Arc::new(StateManager::new(db.clone(), 1337));
     let exec = BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
-    state.credit(&Address::new([1u8; 20]), GENESIS_ACCOUNTED_SUPPLY).unwrap();
+    common::credit_committed(&db, &Address::new([1u8; 20]), GENESIS_ACCOUNTED_SUPPLY);
 
     // chain_id 1337 ≠ mainnet → not applicable, no error, no mutation.
     publish_at(&state, &exec, 1);
@@ -318,8 +314,8 @@ fn restart_replay_preserves_marker_and_digest() {
         let exec =
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let half = GENESIS_ACCOUNTED_SUPPLY / 2;
-        state.credit(&Address::new([1u8; 20]), half).unwrap();
-        state.credit(&Address::new([2u8; 20]), half).unwrap();
+        common::credit_committed(&db, &Address::new([1u8; 20]), half);
+        common::credit_committed(&db, &Address::new([2u8; 20]), half);
         publish_at(&state, &exec, 8_900_000);
         assert!(SupplyStore::new(db.clone()).is_migration_applied().unwrap());
         digest_before = SupplyStore::new(db.clone()).state_digest().unwrap().unwrap();

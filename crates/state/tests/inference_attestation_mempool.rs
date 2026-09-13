@@ -165,7 +165,7 @@ fn admission_rejects_permanent_cf_duplicate() {
 
     let sender = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sender, 10_000_000);
+    fund(&db, &sender, 10_000_000);
 
     let digest = sample_digest("perm-vec");
     let tx_first = build_signed_attestation_tx(&sender, 0, 1_000_000, digest.clone(), false);
@@ -208,7 +208,7 @@ fn rejected_mempool_duplicate_never_reaches_executor() {
 
     let sender = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sender, 10_000_000);
+    fund(&db, &sender, 10_000_000);
 
     let digest = sample_digest("e2e-vec");
 

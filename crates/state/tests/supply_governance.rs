@@ -65,8 +65,8 @@ fn migrate(
     proposer_pubkey: &[u8; 32],
 ) {
     let half = GENESIS_ACCOUNTED_SUPPLY / 2;
-    state.credit(&Address::new([0xE1; 20]), half).unwrap();
-    state.credit(&Address::new([0xE2; 20]), half).unwrap();
+    common::credit_committed(&db, &Address::new([0xE1; 20]), half);
+    common::credit_committed(&db, &Address::new([0xE2; 20]), half);
     common::publish_empty_block(state, exec, 100, proposer_pubkey);
     assert!(
         sumchain_state::supply::SupplyStore::new(db.clone())
@@ -132,7 +132,7 @@ fn monetary_classes_dormant_by_default_387_at_creation() {
     let proposer = KeyPair::generate();
     migrate(&state, &db, &exec, proposer.public_key().as_bytes());
     let mut candidate = common::candidate(&db);
-    fund(&state, &proposer, 100_000);
+    fund(&db, &proposer, 100_000);
     for (i, class) in [
         GovProposalClass::ReserveReleaseEcosystem,
         GovProposalClass::ReserveReleaseGovernance,
@@ -158,7 +158,7 @@ fn monetary_classes_reject_non_native_assets_388() {
     let proposer = KeyPair::generate();
     migrate(&state, &db, &exec, proposer.public_key().as_bytes());
     let mut candidate = common::candidate(&db);
-    fund(&state, &proposer, 100_000);
+    fund(&db, &proposer, 100_000);
     let req = create_req(
         GovProposalClass::MonetaryPolicyMint,
         GovAssetKind::Src20Token(QTOKEN),
@@ -198,8 +198,8 @@ fn run_native_proposal(
     let vset = [*validator.public_key().as_bytes()];
     let submitter = KeyPair::generate();
     let voter = KeyPair::generate();
-    fund(&state, &submitter, 1_000_000);
-    fund(&state, &voter, 1_000_000); // ≥ min_koppa_for_eligibility (1)
+    fund(&db, &submitter, 1_000_000);
+    fund(&db, &voter, 1_000_000); // ≥ min_koppa_for_eligibility (1)
     seed_qualifying_token(&db, &[(voter.address(), 100)]);
 
     // Register the qualifying SRC-20 via validator quorum (min_balance 50).
@@ -312,8 +312,8 @@ fn release_exceeding_pool_fails_385_and_moves_nothing() {
     let vset = [*validator.public_key().as_bytes()];
     let submitter = KeyPair::generate();
     let voter = KeyPair::generate();
-    fund(&state, &submitter, 1_000_000);
-    fund(&state, &voter, 1_000_000);
+    fund(&db, &submitter, 1_000_000);
+    fund(&db, &voter, 1_000_000);
     seed_qualifying_token(&db, &[(voter.address(), 100)]);
     let req = bincode::serialize(&RegisterQualifyingAssetRequest {
         token_id: QTOKEN, min_balance: 50, effective_height: 0,
@@ -329,6 +329,6 @@ fn release_exceeding_pool_fails_385_and_moves_nothing() {
     let r = exec.execute_tx(&mut candidate.view(), &signed(&submitter, 1, gov(GovernanceOperation::ExecuteProposal, ereq)), &Address::new([9; 20]), 300, 1000).unwrap();
     assert!(matches!(r.status, TxStatus::Failed(385)), "over-pool release: {:?}", r.status);
     // Nothing moved.
-    assert_eq!(state.get_balance(&recipient).unwrap(), 0);
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &recipient).unwrap(), 0);
     assert_eq!(SupplyStore::new(db).get_reserve().unwrap().unwrap().ecosystem_pool_remaining, POOL_ECOSYSTEM);
 }

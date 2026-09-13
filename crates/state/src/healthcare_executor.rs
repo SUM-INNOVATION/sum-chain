@@ -7,6 +7,7 @@
 //! - SRC-875: 87X Proof Profiles
 //! - SRC-876: Prescription Standard (NON-TRANSFERABLE for controlled substances)
 
+use sumchain_storage::exec_view::ExecutionView;
 use std::sync::Arc;
 
 use sumchain_genesis::ChainParams;
@@ -134,11 +135,11 @@ impl HealthcareExecutor {
     }
 
     /// Execute a Healthcare transaction
+    #[allow(clippy::too_many_arguments)]
     pub fn execute(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &HealthcareTxData,
-        state: &StateManager,
         proposer: &Address,
         fee: Balance,
         _block_height: BlockHeight,
@@ -164,9 +165,9 @@ impl HealthcareExecutor {
                     return Ok(HealthcareExecutionResult::failure("Provider already exists"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 let provider_id = provider.provider_id;
                 store.providers().put(&provider)?;
                 debug!("Provider registered: {:?}", provider_id);
@@ -191,9 +192,9 @@ impl HealthcareExecutor {
                     return Ok(HealthcareExecutionResult::failure("Only issuer can update"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.providers().update_status(&update.provider_id, update.status, block_timestamp)?;
                 Ok(HealthcareExecutionResult::success())
             }
@@ -215,9 +216,9 @@ impl HealthcareExecutor {
                     return Ok(HealthcareExecutionResult::failure("Only issuer can suspend"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.providers().update_status(&d.provider_id, ProviderStatus::Suspended, block_timestamp)?;
                 debug!("Provider suspended: {:?}", d.provider_id);
                 Ok(HealthcareExecutionResult::success())
@@ -240,9 +241,9 @@ impl HealthcareExecutor {
                     return Ok(HealthcareExecutionResult::failure("Only issuer can revoke"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.providers().update_status(&d.provider_id, ProviderStatus::Revoked, block_timestamp)?;
                 debug!("Provider revoked: {:?}", d.provider_id);
                 Ok(HealthcareExecutionResult::success())
@@ -269,9 +270,9 @@ impl HealthcareExecutor {
                     return Ok(HealthcareExecutionResult::failure("Provider is not suspended or inactive"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.providers().update_status(&d.provider_id, ProviderStatus::Active, block_timestamp)?;
                 debug!("Provider reactivated: {:?}", d.provider_id);
                 Ok(HealthcareExecutionResult::success())
@@ -290,9 +291,9 @@ impl HealthcareExecutor {
                     return Ok(HealthcareExecutionResult::failure("Provider not found"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.providers().add_network_affiliation(&d.provider_id, &d.plan_id, block_timestamp)?;
                 debug!("Network affiliation added: {:?} -> {:?}", d.provider_id, d.plan_id);
                 Ok(HealthcareExecutionResult::success())
@@ -311,9 +312,9 @@ impl HealthcareExecutor {
                     return Ok(HealthcareExecutionResult::failure("Provider not found"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.providers().remove_network_affiliation(&d.provider_id, &d.plan_id, block_timestamp)?;
                 debug!("Network affiliation removed: {:?} -> {:?}", d.provider_id, d.plan_id);
                 Ok(HealthcareExecutionResult::success())
@@ -339,9 +340,9 @@ impl HealthcareExecutor {
                     return Ok(HealthcareExecutionResult::failure("Membership already exists"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 let membership_id = membership.membership_id;
                 store.memberships().put(&membership)?;
                 debug!("Membership issued: {:?}", membership_id);
@@ -366,9 +367,9 @@ impl HealthcareExecutor {
                     return Ok(HealthcareExecutionResult::failure("Only issuer can update"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.memberships().update_status(&d.membership_id, d.status, block_timestamp)?;
                 debug!("Membership status updated: {:?} -> {:?}", d.membership_id, d.status);
                 Ok(HealthcareExecutionResult::success())
@@ -392,9 +393,9 @@ impl HealthcareExecutor {
                     return Ok(HealthcareExecutionResult::failure("Only issuer can renew"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.memberships().renew(&d.membership_id, d.new_expiry, block_timestamp)?;
                 debug!("Membership renewed: {:?}", d.membership_id);
                 Ok(HealthcareExecutionResult::success())
@@ -417,9 +418,9 @@ impl HealthcareExecutor {
                     return Ok(HealthcareExecutionResult::failure("Only issuer can suspend"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.memberships().update_status(&d.membership_id, MembershipStatus::Suspended, block_timestamp)?;
                 debug!("Membership suspended: {:?}", d.membership_id);
                 Ok(HealthcareExecutionResult::success())
@@ -442,9 +443,9 @@ impl HealthcareExecutor {
                     return Ok(HealthcareExecutionResult::failure("Only issuer can terminate"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.memberships().update_status(&d.membership_id, MembershipStatus::Terminated, block_timestamp)?;
                 debug!("Membership terminated: {:?}", d.membership_id);
                 Ok(HealthcareExecutionResult::success())
@@ -471,9 +472,9 @@ impl HealthcareExecutor {
                     return Ok(HealthcareExecutionResult::failure("Membership is not suspended"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.memberships().update_status(&d.membership_id, MembershipStatus::Active, block_timestamp)?;
                 debug!("Membership reinstated: {:?}", d.membership_id);
                 Ok(HealthcareExecutionResult::success())
@@ -497,9 +498,9 @@ impl HealthcareExecutor {
                     return Ok(HealthcareExecutionResult::failure("Only issuer can add dependent"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.memberships().add_dependent(&d.membership_id, d.dependent_commitment, block_timestamp)?;
                 debug!("Dependent added to membership: {:?}", d.membership_id);
                 Ok(HealthcareExecutionResult::success())
@@ -523,9 +524,9 @@ impl HealthcareExecutor {
                     return Ok(HealthcareExecutionResult::failure("Only issuer can remove dependent"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.memberships().remove_dependent(&d.membership_id, &d.dependent_commitment, block_timestamp)?;
                 debug!("Dependent removed from membership: {:?}", d.membership_id);
                 Ok(HealthcareExecutionResult::success())
@@ -546,9 +547,9 @@ impl HealthcareExecutor {
                     return Ok(HealthcareExecutionResult::failure("Consent already exists"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 let consent_id = consent.consent_id;
                 store.consents().put(&consent)?;
                 debug!("Consent granted: {:?}", consent_id);
@@ -573,9 +574,9 @@ impl HealthcareExecutor {
                     return Ok(HealthcareExecutionResult::failure("Only issuer can update"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.consents().update_status(&d.consent_id, d.status, block_timestamp)?;
                 debug!("Consent status updated: {:?} -> {:?}", d.consent_id, d.status);
                 Ok(HealthcareExecutionResult::success())
@@ -598,9 +599,9 @@ impl HealthcareExecutor {
                     return Ok(HealthcareExecutionResult::failure("Only issuer can revoke"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.consents().update_status(&d.consent_id, ConsentStatus::Revoked, block_timestamp)?;
                 debug!("Consent revoked: {:?}", d.consent_id);
                 Ok(HealthcareExecutionResult::success())
@@ -619,9 +620,9 @@ impl HealthcareExecutor {
                     return Ok(HealthcareExecutionResult::failure("Old consent not found"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
 
                 // Mark old as superseded
                 store.consents().update_status(&d.old_consent_id, ConsentStatus::Superseded, block_timestamp)?;
@@ -653,9 +654,9 @@ impl HealthcareExecutor {
                     return Ok(HealthcareExecutionResult::failure("Prescription already exists"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 let prescription_id = prescription.prescription_id;
                 store.prescriptions().put(&prescription)?;
                 debug!("Prescription issued: {:?}", prescription_id);
@@ -687,9 +688,9 @@ impl HealthcareExecutor {
                     ));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.prescriptions().update_status(&d.prescription_id, d.status, block_timestamp)?;
                 debug!("Prescription status updated: {:?} -> {:?}", d.prescription_id, d.status);
                 Ok(HealthcareExecutionResult::success())
@@ -717,9 +718,9 @@ impl HealthcareExecutor {
                     return Ok(HealthcareExecutionResult::failure("No fills remaining"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.prescriptions().record_fill(&d.prescription_id, d.fill_commitment, block_timestamp)?;
                 debug!("Prescription filled: {:?}", d.prescription_id);
                 Ok(HealthcareExecutionResult::success())
@@ -743,9 +744,9 @@ impl HealthcareExecutor {
                     return Ok(HealthcareExecutionResult::failure("Prescription is not valid"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
 
                 // Record partial fill (doesn't decrement refills)
                 store.prescriptions().add_fill_history(&d.prescription_id, d.fill_commitment, block_timestamp)?;
@@ -771,9 +772,9 @@ impl HealthcareExecutor {
                     return Ok(HealthcareExecutionResult::failure("Only issuer can cancel"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.prescriptions().update_status(&d.prescription_id, PrescriptionStatus::Cancelled, block_timestamp)?;
                 debug!("Prescription cancelled: {:?}", d.prescription_id);
                 Ok(HealthcareExecutionResult::success())
@@ -796,9 +797,9 @@ impl HealthcareExecutor {
                     return Ok(HealthcareExecutionResult::failure("Only issuer can hold"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.prescriptions().update_status(&d.prescription_id, PrescriptionStatus::OnHold, block_timestamp)?;
                 debug!("Prescription on hold: {:?}", d.prescription_id);
                 Ok(HealthcareExecutionResult::success())
@@ -825,9 +826,9 @@ impl HealthcareExecutor {
                     return Ok(HealthcareExecutionResult::failure("Prescription is not on hold"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.prescriptions().update_status(&d.prescription_id, PrescriptionStatus::Active, block_timestamp)?;
                 debug!("Prescription hold released: {:?}", d.prescription_id);
                 Ok(HealthcareExecutionResult::success())
@@ -844,9 +845,9 @@ impl HealthcareExecutor {
                     return Ok(HealthcareExecutionResult::failure("Proof already exists"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 let proof_id = proof.proof_id;
                 store.proofs().put(&proof)?;
                 debug!("Healthcare proof submitted: {:?}", proof_id);
@@ -855,9 +856,9 @@ impl HealthcareExecutor {
 
             HealthcareOperation::VerifyProof => {
                 // Verification is read-only - just record the request
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 debug!("Healthcare proof verification requested by: {}", sender);
                 Ok(HealthcareExecutionResult::success())
             }
@@ -887,13 +888,13 @@ mod tests {
     }
 
     #[test]
-    fn test_register_provider() {
+    fn test_register_provider(view: &mut ExecutionView<'_, '_>) {
         let (db, _dir, state) = setup();
         let executor = HealthcareExecutor::new(db.clone(), ChainParams::default());
 
         let sender = Address::new([1u8; 20]);
         let proposer = Address::new([99u8; 20]);
-        state.credit(&sender, 1_000_000_000_000).unwrap();
+        StateManager::v_credit(view, &sender, 1_000_000_000_000).unwrap();
 
         let provider = ProviderProfile {
             provider_id: [10u8; 32],

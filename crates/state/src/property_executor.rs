@@ -8,6 +8,7 @@
 //! - SRC-865: Insurance Claim Lifecycle
 //! - SRC-866: 86X Proof Profiles
 
+use sumchain_storage::exec_view::ExecutionView;
 use std::sync::Arc;
 
 use sumchain_genesis::ChainParams;
@@ -156,11 +157,11 @@ impl PropertyExecutor {
     }
 
     /// Execute a Property transaction
+    #[allow(clippy::too_many_arguments)]
     pub fn execute(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &PropertyTxData,
-        state: &StateManager,
         proposer: &Address,
         fee: Balance,
         _block_height: BlockHeight,
@@ -186,9 +187,9 @@ impl PropertyExecutor {
                     return Ok(PropertyExecutionResult::failure("Asset already exists"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 let asset_id = asset.asset_id;
                 store.assets().put(&asset)?;
                 debug!("Asset anchored: {:?}", asset_id);
@@ -213,9 +214,9 @@ impl PropertyExecutor {
                     return Ok(PropertyExecutionResult::failure("Only issuer can update"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.assets().update_status(&update.asset_id, update.status, block_timestamp)?;
                 Ok(PropertyExecutionResult::success())
             }
@@ -237,9 +238,9 @@ impl PropertyExecutor {
                     return Ok(PropertyExecutionResult::failure("Only issuer can transfer"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.assets().update_status(&d.asset_id, AssetStatus::PendingTransfer, block_timestamp)?;
                 Ok(PropertyExecutionResult::success())
             }
@@ -260,9 +261,9 @@ impl PropertyExecutor {
                     return Ok(PropertyExecutionResult::failure("Secondary asset not found"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.assets().update_status(&d.secondary_asset_id, AssetStatus::Merged, block_timestamp)?;
                 Ok(PropertyExecutionResult::success())
             }
@@ -284,9 +285,9 @@ impl PropertyExecutor {
                     return Ok(PropertyExecutionResult::failure("Only issuer can subdivide"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.assets().update_status(&d.asset_id, AssetStatus::Subdivided, block_timestamp)?;
                 Ok(PropertyExecutionResult::success())
             }
@@ -308,9 +309,9 @@ impl PropertyExecutor {
                     return Ok(PropertyExecutionResult::failure("Only issuer can deregister"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.assets().update_status(&d.asset_id, AssetStatus::Deregistered, block_timestamp)?;
                 debug!("Asset deregistered: {:?}", d.asset_id);
                 Ok(PropertyExecutionResult::success())
@@ -336,9 +337,9 @@ impl PropertyExecutor {
                     return Ok(PropertyExecutionResult::failure("Title event already exists"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 let event_id = event.event_id;
                 store.title_events().put(&event)?;
                 debug!("Title event recorded: {:?}", event_id);
@@ -363,9 +364,9 @@ impl PropertyExecutor {
                     return Ok(PropertyExecutionResult::failure("Only issuer can update"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.title_events().update_status(&d.event_id, d.status, block_timestamp)?;
                 Ok(PropertyExecutionResult::success())
             }
@@ -383,9 +384,9 @@ impl PropertyExecutor {
                     return Ok(PropertyExecutionResult::failure("Old event not found"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
 
                 // Mark old as superseded
                 store.title_events().update_status(&d.old_event_id, TitleEventStatus::Superseded, block_timestamp)?;
@@ -414,9 +415,9 @@ impl PropertyExecutor {
                     return Ok(PropertyExecutionResult::failure("Only issuer can void"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.title_events().update_status(&d.event_id, TitleEventStatus::Voided, block_timestamp)?;
                 debug!("Title event voided: {:?}", d.event_id);
                 Ok(PropertyExecutionResult::success())
@@ -442,9 +443,9 @@ impl PropertyExecutor {
                     return Ok(PropertyExecutionResult::failure("Encumbrance already exists"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 let encumbrance_id = encumbrance.encumbrance_id;
                 store.encumbrances().put(&encumbrance)?;
                 debug!("Encumbrance recorded: {:?}", encumbrance_id);
@@ -469,9 +470,9 @@ impl PropertyExecutor {
                     return Ok(PropertyExecutionResult::failure("Only issuer can update"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.encumbrances().update_status(&d.encumbrance_id, d.status, block_timestamp)?;
                 Ok(PropertyExecutionResult::success())
             }
@@ -493,9 +494,9 @@ impl PropertyExecutor {
                     return Ok(PropertyExecutionResult::failure("Only issuer can subordinate"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.encumbrances().update_status(&d.encumbrance_id, EncumbranceStatus::Subordinated, block_timestamp)?;
                 debug!("Encumbrance subordinated: {:?}", d.encumbrance_id);
                 Ok(PropertyExecutionResult::success())
@@ -518,9 +519,9 @@ impl PropertyExecutor {
                     return Ok(PropertyExecutionResult::failure("Only issuer can release"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.encumbrances().update_status(&d.encumbrance_id, EncumbranceStatus::Released, block_timestamp)?;
                 debug!("Encumbrance released: {:?}", d.encumbrance_id);
                 Ok(PropertyExecutionResult::success())
@@ -543,9 +544,9 @@ impl PropertyExecutor {
                     return Ok(PropertyExecutionResult::failure("Only issuer can foreclose"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.encumbrances().update_status(&d.encumbrance_id, EncumbranceStatus::Foreclosed, block_timestamp)?;
                 debug!("Encumbrance foreclosed: {:?}", d.encumbrance_id);
                 Ok(PropertyExecutionResult::success())
@@ -571,9 +572,9 @@ impl PropertyExecutor {
                     return Ok(PropertyExecutionResult::failure("Coverage already exists"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 let coverage_id = coverage.coverage_id;
                 store.coverage().put(&coverage)?;
                 debug!("Coverage issued: {:?}", coverage_id);
@@ -598,9 +599,9 @@ impl PropertyExecutor {
                     return Ok(PropertyExecutionResult::failure("Only issuer can update"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.coverage().update_status(&d.coverage_id, d.status, block_timestamp)?;
                 Ok(PropertyExecutionResult::success())
             }
@@ -623,9 +624,9 @@ impl PropertyExecutor {
                     return Ok(PropertyExecutionResult::failure("Only issuer can renew"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.coverage().renew(&d.coverage_id, d.new_expiry, block_timestamp)?;
                 debug!("Coverage renewed: {:?}", d.coverage_id);
                 Ok(PropertyExecutionResult::success())
@@ -648,9 +649,9 @@ impl PropertyExecutor {
                     return Ok(PropertyExecutionResult::failure("Only issuer can cancel"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.coverage().update_status(&d.coverage_id, CoverageStatus::Cancelled, block_timestamp)?;
                 debug!("Coverage cancelled: {:?}", d.coverage_id);
                 Ok(PropertyExecutionResult::success())
@@ -673,9 +674,9 @@ impl PropertyExecutor {
                     return Ok(PropertyExecutionResult::failure("Only issuer can suspend"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.coverage().update_status(&d.coverage_id, CoverageStatus::Suspended, block_timestamp)?;
                 Ok(PropertyExecutionResult::success())
             }
@@ -701,9 +702,9 @@ impl PropertyExecutor {
                     return Ok(PropertyExecutionResult::failure("Coverage is not suspended"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.coverage().update_status(&d.coverage_id, CoverageStatus::Active, block_timestamp)?;
                 Ok(PropertyExecutionResult::success())
             }
@@ -728,9 +729,9 @@ impl PropertyExecutor {
                     return Ok(PropertyExecutionResult::failure("Claim already exists"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 let claim_id = claim.claim_id;
                 store.claims().put(&claim)?;
                 debug!("Claim filed: {:?}", claim_id);
@@ -755,9 +756,9 @@ impl PropertyExecutor {
                     return Ok(PropertyExecutionResult::failure("Only issuer can update"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.claims().update_status(&d.claim_id, d.status, block_timestamp)?;
                 debug!("Claim status updated: {:?} -> {:?}", d.claim_id, d.status);
                 Ok(PropertyExecutionResult::success())
@@ -781,9 +782,9 @@ impl PropertyExecutor {
                     return Ok(PropertyExecutionResult::failure("Only issuer can approve"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.claims().approve(&d.claim_id, d.approved_amount_commitment, block_timestamp)?;
                 debug!("Claim approved: {:?}", d.claim_id);
                 Ok(PropertyExecutionResult::success())
@@ -806,9 +807,9 @@ impl PropertyExecutor {
                     return Ok(PropertyExecutionResult::failure("Only issuer can deny"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.claims().update_status(&d.claim_id, ClaimStatus::Denied, block_timestamp)?;
                 debug!("Claim denied: {:?}", d.claim_id);
                 Ok(PropertyExecutionResult::success())
@@ -836,9 +837,9 @@ impl PropertyExecutor {
                     return Ok(PropertyExecutionResult::failure("Claim not approved"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.claims().pay(&d.claim_id, d.paid_amount_commitment, block_timestamp)?;
                 debug!("Claim paid: {:?}", d.claim_id);
                 Ok(PropertyExecutionResult::success())
@@ -861,9 +862,9 @@ impl PropertyExecutor {
                     return Ok(PropertyExecutionResult::failure("Only issuer can close"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.claims().update_status(&d.claim_id, ClaimStatus::Closed, block_timestamp)?;
                 debug!("Claim closed: {:?}", d.claim_id);
                 Ok(PropertyExecutionResult::success())
@@ -890,9 +891,9 @@ impl PropertyExecutor {
                     return Ok(PropertyExecutionResult::failure("Claim cannot be reopened"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.claims().update_status(&d.claim_id, ClaimStatus::Reopened, block_timestamp)?;
                 debug!("Claim reopened: {:?}", d.claim_id);
                 Ok(PropertyExecutionResult::success())
@@ -915,9 +916,9 @@ impl PropertyExecutor {
                     return Ok(PropertyExecutionResult::failure("Only issuer can withdraw"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.claims().update_status(&d.claim_id, ClaimStatus::Withdrawn, block_timestamp)?;
                 debug!("Claim withdrawn: {:?}", d.claim_id);
                 Ok(PropertyExecutionResult::success())
@@ -934,9 +935,9 @@ impl PropertyExecutor {
                     return Ok(PropertyExecutionResult::failure("Proof already exists"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 let proof_id = proof.proof_id;
                 store.proofs().put(&proof)?;
                 debug!("Property proof submitted: {:?}", proof_id);
@@ -945,9 +946,9 @@ impl PropertyExecutor {
 
             PropertyOperation::VerifyProof => {
                 // Verification is read-only - just record the request
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 debug!("Property proof verification requested by: {}", sender);
                 Ok(PropertyExecutionResult::success())
             }
@@ -977,13 +978,13 @@ mod tests {
     }
 
     #[test]
-    fn test_anchor_asset() {
+    fn test_anchor_asset(view: &mut ExecutionView<'_, '_>) {
         let (db, _dir, state) = setup();
         let executor = PropertyExecutor::new(db.clone(), ChainParams::default());
 
         let sender = Address::new([1u8; 20]);
         let proposer = Address::new([99u8; 20]);
-        state.credit(&sender, 1_000_000_000_000).unwrap();
+        StateManager::v_credit(view, &sender, 1_000_000_000_000).unwrap();
 
         let asset = AssetAnchor {
             asset_id: [10u8; 32],

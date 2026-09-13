@@ -8,6 +8,7 @@
 //! pre-#62 compatibility, and restart persistence of the new CFs.
 
 mod common;
+use sumchain_state::state::StateManager;
 use common::{fund, setup_with_params, CHAIN_ID};
 
 use std::sync::Arc;
@@ -123,13 +124,13 @@ fn defaults_leave_reassignment_dormant() {
 
 #[test]
 fn gate_closed_reassign_rejects_330_no_mutation() {
-    let (state, db, _dir, executor) = setup_with_params(params_reassign_dormant());
+    let (_state, db, _dir, executor) = setup_with_params(params_reassign_dormant());
     let mut candidate = common::candidate(&db);
     let archive = KeyPair::generate();
     let owner = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &archive, (STAKE as u128) + 1_000_000);
-    fund(&state, &owner, 1_000_000);
+    fund(&db, &archive, (STAKE as u128) + 1_000_000);
+    fund(&db, &owner, 1_000_000);
     let root = Hash::hash(b"gate-closed-reassign");
 
     executor
@@ -138,7 +139,7 @@ fn gate_closed_reassign_rejects_330_no_mutation() {
     executor
         .execute_tx(&mut candidate.view(), &signed(&owner, FEE, 0, sm(register_file_op(root))), &proposer.address(), 2, 1000)
         .unwrap();
-    let owner_bal = state.get_balance(&owner.address()).unwrap();
+    let owner_bal = StateManager::v_get_balance(&candidate.view(), &owner.address()).unwrap();
 
     let res = executor
         .execute_tx(
@@ -152,7 +153,7 @@ fn gate_closed_reassign_rejects_330_no_mutation() {
     assert!(matches!(res.status, TxStatus::Failed(330)), "got {:?}", res.status);
     assert_eq!(res.fee_paid, 0);
     // No fee, no nonce bump, no epoch appended.
-    assert_eq!(state.get_balance(&owner.address()).unwrap(), owner_bal);
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &owner.address()).unwrap(), owner_bal);
     assert!(StorageMetadataExecutor::new(db.clone())
         .get_file_reassignments(&root)
         .unwrap()
@@ -163,11 +164,11 @@ fn gate_closed_reassign_rejects_330_no_mutation() {
 
 #[test]
 fn reassign_file_missing_331() {
-    let (state, db, _dir, executor) = setup_with_params(params_reassign_enabled());
+    let (_state, db, _dir, executor) = setup_with_params(params_reassign_enabled());
     let mut candidate = common::candidate(&db);
     let owner = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &owner, 1_000_000);
+    fund(&db, &owner, 1_000_000);
     let res = executor
         .execute_tx(
             &mut candidate.view(),
@@ -182,13 +183,13 @@ fn reassign_file_missing_331() {
 
 #[test]
 fn reassign_non_owner_332() {
-    let (state, db, _dir, executor) = setup_with_params(params_reassign_enabled());
+    let (_state, db, _dir, executor) = setup_with_params(params_reassign_enabled());
     let mut candidate = common::candidate(&db);
     let owner = KeyPair::generate();
     let stranger = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &owner, 1_000_000);
-    fund(&state, &stranger, 1_000_000);
+    fund(&db, &owner, 1_000_000);
+    fund(&db, &stranger, 1_000_000);
     let root = Hash::hash(b"non-owner");
     executor
         .execute_tx(&mut candidate.view(), &signed(&owner, FEE, 0, sm(register_file_op(root))), &proposer.address(), 1, 1000)
@@ -208,13 +209,13 @@ fn reassign_non_owner_332() {
 #[test]
 fn reassign_no_gap_334() {
     // Archive is active and never leaves → no gap → 334.
-    let (state, db, _dir, executor) = setup_with_params(params_reassign_enabled());
+    let (_state, db, _dir, executor) = setup_with_params(params_reassign_enabled());
     let mut candidate = common::candidate(&db);
     let archive = KeyPair::generate();
     let owner = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &archive, (STAKE as u128) + 1_000_000);
-    fund(&state, &owner, 1_000_000);
+    fund(&db, &archive, (STAKE as u128) + 1_000_000);
+    fund(&db, &owner, 1_000_000);
     let root = Hash::hash(b"no-gap");
     executor
         .execute_tx(&mut candidate.view(), &signed(&archive, FEE, 0, nr(register_archive_op())), &proposer.address(), 1, 1000)
@@ -236,11 +237,11 @@ fn reassign_no_gap_334() {
 
 #[test]
 fn reassign_abandoned_333() {
-    let (state, db, _dir, executor) = setup_with_params(params_reassign_enabled());
+    let (_state, db, _dir, executor) = setup_with_params(params_reassign_enabled());
     let mut candidate = common::candidate(&db);
     let owner = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &owner, 1_000_000);
+    fund(&db, &owner, 1_000_000);
     let root = Hash::hash(b"abandoned");
     // Register at height 2, abandon after the 50-block grace window.
     executor
@@ -278,9 +279,9 @@ fn active_file_reassignment_recovers_coverage_with_epoch_cf_separation() {
     let owner = KeyPair::generate();
     let proposer = KeyPair::generate();
     let pk = *proposer.public_key().as_bytes();
-    fund(&state, &a, (STAKE as u128) + 1_000_000);
-    fund(&state, &b, (STAKE as u128) + 1_000_000);
-    fund(&state, &owner, 1_000_000);
+    fund(&db, &a, (STAKE as u128) + 1_000_000);
+    fund(&db, &b, (STAKE as u128) + 1_000_000);
+    fund(&db, &owner, 1_000_000);
     let root = Hash::hash(b"active-reassign");
 
     // Register both archives at height 1 → epoch-0 snapshot {A,B}.
@@ -361,13 +362,13 @@ fn active_file_reassignment_recovers_coverage_with_epoch_cf_separation() {
 #[test]
 fn active_reattest_without_reassignment_epoch_335() {
     // Gate OPEN, Active file, no reassignment epoch → 335 (not 33).
-    let (state, db, _dir, executor) = setup_with_params(params_reassign_enabled());
+    let (_state, db, _dir, executor) = setup_with_params(params_reassign_enabled());
     let mut candidate = common::candidate(&db);
     let archive = KeyPair::generate();
     let owner = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &archive, (STAKE as u128) + 1_000_000);
-    fund(&state, &owner, 1_000_000);
+    fund(&db, &archive, (STAKE as u128) + 1_000_000);
+    fund(&db, &owner, 1_000_000);
     let root = Hash::hash(b"reattest-335");
     executor
         .execute_tx(&mut candidate.view(), &signed(&archive, FEE, 0, nr(register_archive_op())), &proposer.address(), 1, 1000)
@@ -391,13 +392,13 @@ fn active_reattest_without_reassignment_epoch_335() {
 #[test]
 fn active_reattest_gate_dormant_stays_33() {
     // Gate DORMANT → pre-#62 behavior preserved: Active re-attest → 33.
-    let (state, db, _dir, executor) = setup_with_params(params_reassign_dormant());
+    let (_state, db, _dir, executor) = setup_with_params(params_reassign_dormant());
     let mut candidate = common::candidate(&db);
     let archive = KeyPair::generate();
     let owner = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &archive, (STAKE as u128) + 1_000_000);
-    fund(&state, &owner, 1_000_000);
+    fund(&db, &archive, (STAKE as u128) + 1_000_000);
+    fund(&db, &owner, 1_000_000);
     let root = Hash::hash(b"reattest-33");
     executor
         .execute_tx(&mut candidate.view(), &signed(&archive, FEE, 0, nr(register_archive_op())), &proposer.address(), 1, 1000)
@@ -428,9 +429,9 @@ fn pending_file_reassignment_flow() {
     let owner = KeyPair::generate();
     let proposer = KeyPair::generate();
     let pk = *proposer.public_key().as_bytes();
-    fund(&state, &a, (STAKE as u128) + 1_000_000);
-    fund(&state, &b, (STAKE as u128) + 1_000_000);
-    fund(&state, &owner, 1_000_000);
+    fund(&db, &a, (STAKE as u128) + 1_000_000);
+    fund(&db, &b, (STAKE as u128) + 1_000_000);
+    fund(&db, &owner, 1_000_000);
     let root = Hash::hash(b"pending-reassign");
 
     common::publish_block(&state, &executor, 1, &pk, vec![signed(&a, FEE, 0, nr(register_archive_op()))], &[]).remove(0);
@@ -470,8 +471,8 @@ fn insufficient_active_archives_incomplete() {
     let owner = KeyPair::generate();
     let proposer = KeyPair::generate();
     let pk = *proposer.public_key().as_bytes();
-    fund(&state, &a, (STAKE as u128) + 1_000_000);
-    fund(&state, &owner, 1_000_000);
+    fund(&db, &a, (STAKE as u128) + 1_000_000);
+    fund(&db, &owner, 1_000_000);
     let root = Hash::hash(b"insufficient");
 
     common::publish_block(&state, &executor, 1, &pk, vec![signed(&a, FEE, 0, nr(register_archive_op()))], &[]).remove(0);
@@ -501,8 +502,8 @@ fn file_without_reassignment_is_epoch_zero_only() {
     let owner = KeyPair::generate();
     let proposer = KeyPair::generate();
     let pk = *proposer.public_key().as_bytes();
-    fund(&state, &archive, (STAKE as u128) + 1_000_000);
-    fund(&state, &owner, 1_000_000);
+    fund(&db, &archive, (STAKE as u128) + 1_000_000);
+    fund(&db, &owner, 1_000_000);
     let root = Hash::hash(b"epoch0-only");
     common::publish_block(&state, &executor, 1, &pk, vec![signed(&archive, FEE, 0, nr(register_archive_op()))], &[]).remove(0);
     common::publish_block(&state, &executor, 2, &pk, vec![signed(&owner, FEE, 0, sm(register_file_op(root)))], &[]).remove(0);
@@ -535,9 +536,9 @@ fn reassignment_state_survives_restart() {
         let db = Arc::new(Database::open_default(dir.path()).unwrap());
         let state = Arc::new(sumchain_state::StateManager::new(db.clone(), CHAIN_ID));
         let executor = sumchain_state::executor::BlockExecutor::new(state.clone(), db.clone(), params_reassign_enabled());
-            fund(&state, &a, (STAKE as u128) + 1_000_000);
-        fund(&state, &b, (STAKE as u128) + 1_000_000);
-        fund(&state, &owner, 1_000_000);
+            fund(&db, &a, (STAKE as u128) + 1_000_000);
+        fund(&db, &b, (STAKE as u128) + 1_000_000);
+        fund(&db, &owner, 1_000_000);
 
         common::publish_block(&state, &executor, 1, &pk, vec![signed(&a, FEE, 0, nr(register_archive_op()))], &[]).remove(0);
         common::publish_block(&state, &executor, 1, &pk, vec![signed(&b, FEE, 0, nr(register_archive_op()))], &[]).remove(0);

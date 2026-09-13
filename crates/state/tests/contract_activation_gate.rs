@@ -3,6 +3,7 @@
 //! no nonce, no state). At/above the gate they are not gate-rejected.
 
 mod common;
+use sumchain_state::state::StateManager;
 use common::{fund, setup_with_params, CHAIN_ID};
 
 use sumchain_crypto::{sign, KeyPair};
@@ -40,47 +41,47 @@ fn call_payload() -> TxPayload {
 #[test]
 fn deploy_rejected_free_when_gate_closed() {
     // v2 enabled but contracts dormant (None).
-    let (state, db, _dir, executor) = setup_with_params(ChainParams::with_v2_enabled());
+    let (_state, db, _dir, executor) = setup_with_params(ChainParams::with_v2_enabled());
     let mut candidate = common::candidate(&db);
     let sender = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sender, 10_000);
+    fund(&db, &sender, 10_000);
 
     let tx = signed(&sender, 1_000, 0, deploy_payload());
     let res = executor.execute_tx(&mut candidate.view(), &tx, &proposer.address(), 1, 1000).unwrap();
 
     assert!(matches!(res.status, TxStatus::Failed(60)), "got {:?}", res.status);
     assert_eq!(res.fee_paid, 0, "no fee below the gate");
-    assert_eq!(state.get_balance(&sender.address()).unwrap(), 10_000, "balance unchanged");
-    assert_eq!(state.get_nonce(&sender.address()).unwrap(), 0, "nonce unchanged");
-    assert_eq!(state.get_balance(&proposer.address()).unwrap(), 0, "proposer not credited");
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &sender.address()).unwrap(), 10_000, "balance unchanged");
+    assert_eq!(StateManager::v_get_nonce(&candidate.view(), &sender.address()).unwrap(), 0, "nonce unchanged");
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &proposer.address()).unwrap(), 0, "proposer not credited");
 }
 
 #[test]
 fn call_rejected_free_when_gate_closed() {
-    let (state, db, _dir, executor) = setup_with_params(ChainParams::with_v2_enabled());
+    let (_state, db, _dir, executor) = setup_with_params(ChainParams::with_v2_enabled());
     let mut candidate = common::candidate(&db);
     let sender = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sender, 10_000);
+    fund(&db, &sender, 10_000);
 
     let tx = signed(&sender, 1_000, 0, call_payload());
     let res = executor.execute_tx(&mut candidate.view(), &tx, &proposer.address(), 1, 1000).unwrap();
 
     assert!(matches!(res.status, TxStatus::Failed(60)), "got {:?}", res.status);
     assert_eq!(res.fee_paid, 0);
-    assert_eq!(state.get_nonce(&sender.address()).unwrap(), 0);
+    assert_eq!(StateManager::v_get_nonce(&candidate.view(), &sender.address()).unwrap(), 0);
 }
 
 #[test]
 fn execute_tx_v2_path_also_gated() {
     // Defensive: the (currently unreached) public execute_tx_v2 path must also
     // reject contract txs free when the gate is closed.
-    let (state, db, _dir, executor) = setup_with_params(ChainParams::with_v2_enabled());
+    let (_state, db, _dir, executor) = setup_with_params(ChainParams::with_v2_enabled());
     let mut candidate = common::candidate(&db);
     let sender = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sender, 10_000);
+    fund(&db, &sender, 10_000);
 
     let tx = TransactionV2 {
         chain_id: CHAIN_ID,
@@ -104,18 +105,18 @@ fn execute_tx_v2_path_also_gated() {
         .unwrap();
     assert!(matches!(res.status, TxStatus::Failed(60)), "got {:?}", res.status);
     assert_eq!(res.fee_paid, 0);
-    assert_eq!(state.get_nonce(&sender.address()).unwrap(), 0);
+    assert_eq!(StateManager::v_get_nonce(&candidate.view(), &sender.address()).unwrap(), 0);
 }
 
 #[test]
 fn not_gate_rejected_when_enabled() {
     // With the gate open, the contract path runs; the outcome may be success or
     // an execution failure, but it must NOT be the gate rejection Failed(60).
-    let (state, db, _dir, executor) = setup_with_params(ChainParams::with_contracts_enabled());
+    let (_state, db, _dir, executor) = setup_with_params(ChainParams::with_contracts_enabled());
     let mut candidate = common::candidate(&db);
     let sender = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sender, 10_000);
+    fund(&db, &sender, 10_000);
 
     let tx = signed(&sender, 1_000, 0, deploy_payload());
     let res = executor.execute_tx(&mut candidate.view(), &tx, &proposer.address(), 1, 1000).unwrap();

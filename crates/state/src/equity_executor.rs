@@ -2,6 +2,7 @@
 //!
 //! A simplified implementation that handles core equity operations.
 
+use sumchain_storage::exec_view::ExecutionView;
 use std::sync::Arc;
 
 use sumchain_genesis::ChainParams;
@@ -61,11 +62,11 @@ impl EquityExecutor {
     }
 
     /// Execute an Equity transaction
+    #[allow(clippy::too_many_arguments)]
     pub fn execute(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &EquityTxData,
-        state: &StateManager,
         proposer: &Address,
         fee: Balance,
         block_height: BlockHeight,
@@ -78,79 +79,80 @@ impl EquityExecutor {
         match data.operation {
             // Entity operations (SRC-831)
             EquityOperation::CreateEntity => {
-                self.create_entity(sender, &data.data, state, proposer, fee, block_height, tx_index, &store)
+                self.create_entity(view, sender, &data.data, proposer, fee, block_height, tx_index, &store)
             }
             EquityOperation::UpdateEntity => {
-                self.update_entity(sender, &data.data, state, proposer, fee, block_height, tx_index, &store)
+                self.update_entity(view, sender, &data.data, proposer, fee, block_height, tx_index, &store)
             }
             EquityOperation::AddController => {
-                self.add_controller(sender, &data.data, state, proposer, fee, block_height, tx_index, &store)
+                self.add_controller(view, sender, &data.data, proposer, fee, block_height, tx_index, &store)
             }
             EquityOperation::RemoveController => {
-                self.remove_controller(sender, &data.data, state, proposer, fee, block_height, tx_index, &store)
+                self.remove_controller(view, sender, &data.data, proposer, fee, block_height, tx_index, &store)
             }
 
             // Governance operations (SRC-832)
             EquityOperation::ProposeAction => {
-                self.propose_action(sender, &data.data, state, proposer, fee, block_height, block_timestamp, tx_index, &store)
+                self.propose_action(view, sender, &data.data, proposer, fee, block_height, block_timestamp, tx_index, &store)
             }
             EquityOperation::ApproveAction | EquityOperation::ExecuteAction | EquityOperation::RevokeAction => {
-                self.handle_governance(sender, &data.data, data.operation, state, proposer, fee, block_height, tx_index, &store)
+                self.handle_governance(view, sender, &data.data, data.operation, proposer, fee, block_height, tx_index, &store)
             }
 
             // Token operations (SRC-833)
             EquityOperation::CreateToken => {
-                self.create_token(sender, &data.data, state, proposer, fee, block_height, block_timestamp, tx_index, &store)
+                self.create_token(view, sender, &data.data, proposer, fee, block_height, block_timestamp, tx_index, &store)
             }
             EquityOperation::UpdateToken | EquityOperation::PauseToken | EquityOperation::UnpauseToken => {
-                self.handle_token_update(sender, &data.data, data.operation, state, proposer, fee, block_height, tx_index, &store)
+                self.handle_token_update(view, sender, &data.data, data.operation, proposer, fee, block_height, tx_index, &store)
             }
 
             // Transfer operations
             EquityOperation::Transfer => {
-                self.transfer(sender, &data.data, state, proposer, fee, block_height, tx_index, &store)
+                self.transfer(view, sender, &data.data, proposer, fee, block_height, tx_index, &store)
             }
             EquityOperation::Approve | EquityOperation::TransferFrom => {
-                self.default_success(sender, state, proposer, fee)
+                self.default_success(view, sender, proposer, fee)
             }
 
             // Mint/Burn operations
             EquityOperation::Mint => {
-                self.mint(sender, &data.data, state, proposer, fee, block_height, tx_index, &store)
+                self.mint(view, sender, &data.data, proposer, fee, block_height, tx_index, &store)
             }
             EquityOperation::Burn => {
-                self.burn(sender, &data.data, state, proposer, fee, block_height, tx_index, &store)
+                self.burn(view, sender, &data.data, proposer, fee, block_height, tx_index, &store)
             }
 
             // Controller operations
             EquityOperation::UpdateController | EquityOperation::AddToWhitelist | 
             EquityOperation::RemoveFromWhitelist | EquityOperation::SetLockup => {
-                self.default_success(sender, state, proposer, fee)
+                self.default_success(view, sender, proposer, fee)
             }
 
             // Corporate actions (SRC-834)
             EquityOperation::ExecuteStockSplit | EquityOperation::ExecuteReverseSplit |
             EquityOperation::DeclareDividend | EquityOperation::DistributeDividend |
             EquityOperation::ExecuteConversion | EquityOperation::TakeSnapshot => {
-                self.default_success(sender, state, proposer, fee)
+                self.default_success(view, sender, proposer, fee)
             }
 
             // Proof operations (SRC-835)
             EquityOperation::VerifyOwnershipProof => {
-                self.verify_ownership_proof(sender, &data.data, state, proposer, fee, block_height, tx_index, &store)
+                self.verify_ownership_proof(view, sender, &data.data, proposer, fee, block_height, tx_index, &store)
             }
         }
     }
 
-    fn default_success(&self, sender: &Address, state: &StateManager, proposer: &Address, fee: Balance) -> Result<EquityExecutionResult> {
-        state.deduct(sender, fee)?;
-        state.credit(proposer, fee)?;
-        state.increment_nonce(sender)?;
+    fn default_success(&self, view: &mut ExecutionView<'_, '_>, sender: &Address, proposer: &Address, fee: Balance) -> Result<EquityExecutionResult> {
+        StateManager::v_deduct(view, sender, fee)?;
+        StateManager::v_credit(view, proposer, fee)?;
+        StateManager::v_increment_nonce(view, sender)?;
         Ok(EquityExecutionResult::success())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn create_entity(
-        &self, sender: &Address, data: &[u8], state: &StateManager, proposer: &Address,
+        &self, view: &mut ExecutionView<'_, '_>, sender: &Address, data: &[u8], proposer: &Address,
         fee: Balance, _block_height: BlockHeight, _tx_index: u32, store: &EquityStore,
     ) -> Result<EquityExecutionResult> {
         let entity: EntityProfile = bincode::deserialize(data)
@@ -164,9 +166,9 @@ impl EquityExecutor {
             return Ok(EquityExecutionResult::failure("Entity already exists"));
         }
 
-        state.deduct(sender, fee)?;
-        state.credit(proposer, fee)?;
-        state.increment_nonce(sender)?;
+        StateManager::v_deduct(view, sender, fee)?;
+        StateManager::v_credit(view, proposer, fee)?;
+        StateManager::v_increment_nonce(view, sender)?;
 
         let subject_id = entity.subject_id;
         store.entities().put(&entity)?;
@@ -175,8 +177,9 @@ impl EquityExecutor {
         Ok(EquityExecutionResult::success_with_entity(subject_id))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn update_entity(
-        &self, sender: &Address, data: &[u8], state: &StateManager, proposer: &Address,
+        &self, view: &mut ExecutionView<'_, '_>, sender: &Address, data: &[u8], proposer: &Address,
         fee: Balance, _block_height: BlockHeight, _tx_index: u32, store: &EquityStore,
     ) -> Result<EquityExecutionResult> {
         let entity: EntityProfile = bincode::deserialize(data)
@@ -191,9 +194,9 @@ impl EquityExecutor {
             return Ok(EquityExecutionResult::failure("Not authorized"));
         }
 
-        state.deduct(sender, fee)?;
-        state.credit(proposer, fee)?;
-        state.increment_nonce(sender)?;
+        StateManager::v_deduct(view, sender, fee)?;
+        StateManager::v_credit(view, proposer, fee)?;
+        StateManager::v_increment_nonce(view, sender)?;
 
         let subject_id = entity.subject_id;
         store.entities().put(&entity)?;
@@ -202,8 +205,9 @@ impl EquityExecutor {
         Ok(EquityExecutionResult::success_with_entity(subject_id))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn add_controller(
-        &self, sender: &Address, data: &[u8], state: &StateManager, proposer: &Address,
+        &self, view: &mut ExecutionView<'_, '_>, sender: &Address, data: &[u8], proposer: &Address,
         fee: Balance, _block_height: BlockHeight, _tx_index: u32, store: &EquityStore,
     ) -> Result<EquityExecutionResult> {
         #[derive(serde::Deserialize)]
@@ -221,9 +225,9 @@ impl EquityExecutor {
             return Ok(EquityExecutionResult::failure("Not authorized"));
         }
 
-        state.deduct(sender, fee)?;
-        state.credit(proposer, fee)?;
-        state.increment_nonce(sender)?;
+        StateManager::v_deduct(view, sender, fee)?;
+        StateManager::v_credit(view, proposer, fee)?;
+        StateManager::v_increment_nonce(view, sender)?;
 
         if !entity.controllers.contains(&add_data.controller) {
             entity.controllers.push(add_data.controller);
@@ -234,8 +238,9 @@ impl EquityExecutor {
         Ok(EquityExecutionResult::success_with_entity(add_data.subject_id))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn remove_controller(
-        &self, sender: &Address, data: &[u8], state: &StateManager, proposer: &Address,
+        &self, view: &mut ExecutionView<'_, '_>, sender: &Address, data: &[u8], proposer: &Address,
         fee: Balance, _block_height: BlockHeight, _tx_index: u32, store: &EquityStore,
     ) -> Result<EquityExecutionResult> {
         #[derive(serde::Deserialize)]
@@ -257,9 +262,9 @@ impl EquityExecutor {
             return Ok(EquityExecutionResult::failure("Cannot remove last controller"));
         }
 
-        state.deduct(sender, fee)?;
-        state.credit(proposer, fee)?;
-        state.increment_nonce(sender)?;
+        StateManager::v_deduct(view, sender, fee)?;
+        StateManager::v_credit(view, proposer, fee)?;
+        StateManager::v_increment_nonce(view, sender)?;
 
         entity.controllers.retain(|c| c != &remove_data.controller);
         store.entities().put(&entity)?;
@@ -268,8 +273,9 @@ impl EquityExecutor {
         Ok(EquityExecutionResult::success_with_entity(remove_data.subject_id))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn propose_action(
-        &self, sender: &Address, data: &[u8], state: &StateManager, proposer: &Address,
+        &self, view: &mut ExecutionView<'_, '_>, sender: &Address, data: &[u8], proposer: &Address,
         fee: Balance, block_height: BlockHeight, block_timestamp: Timestamp, _tx_index: u32, store: &EquityStore,
     ) -> Result<EquityExecutionResult> {
         let mut action: GovernanceAction = bincode::deserialize(data)
@@ -284,9 +290,9 @@ impl EquityExecutor {
             return Ok(EquityExecutionResult::failure("Not authorized to propose"));
         }
 
-        state.deduct(sender, fee)?;
-        state.credit(proposer, fee)?;
-        state.increment_nonce(sender)?;
+        StateManager::v_deduct(view, sender, fee)?;
+        StateManager::v_credit(view, proposer, fee)?;
+        StateManager::v_increment_nonce(view, sender)?;
 
         action.status = GovernanceActionStatus::Pending;
         action.created_at = block_timestamp;
@@ -300,18 +306,19 @@ impl EquityExecutor {
         Ok(EquityExecutionResult::success_with_action(action_id))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn handle_governance(
-        &self, sender: &Address, _data: &[u8], _operation: EquityOperation, state: &StateManager, 
-        proposer: &Address, fee: Balance, _block_height: BlockHeight, _tx_index: u32, _store: &EquityStore,
+        &self, view: &mut ExecutionView<'_, '_>, sender: &Address, _data: &[u8], _operation: EquityOperation, proposer: &Address, fee: Balance, _block_height: BlockHeight, _tx_index: u32, _store: &EquityStore,
     ) -> Result<EquityExecutionResult> {
-        state.deduct(sender, fee)?;
-        state.credit(proposer, fee)?;
-        state.increment_nonce(sender)?;
+        StateManager::v_deduct(view, sender, fee)?;
+        StateManager::v_credit(view, proposer, fee)?;
+        StateManager::v_increment_nonce(view, sender)?;
         Ok(EquityExecutionResult::success())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn create_token(
-        &self, sender: &Address, data: &[u8], state: &StateManager, proposer: &Address,
+        &self, view: &mut ExecutionView<'_, '_>, sender: &Address, data: &[u8], proposer: &Address,
         fee: Balance, _block_height: BlockHeight, block_timestamp: Timestamp, _tx_index: u32, store: &EquityStore,
     ) -> Result<EquityExecutionResult> {
         let mut token: EquityToken = bincode::deserialize(data)
@@ -329,9 +336,9 @@ impl EquityExecutor {
             return Ok(EquityExecutionResult::failure("Sender must be controller"));
         }
 
-        state.deduct(sender, fee)?;
-        state.credit(proposer, fee)?;
-        state.increment_nonce(sender)?;
+        StateManager::v_deduct(view, sender, fee)?;
+        StateManager::v_credit(view, proposer, fee)?;
+        StateManager::v_increment_nonce(view, sender)?;
 
         token.created_at = block_timestamp;
         token.updated_at = block_timestamp;
@@ -344,18 +351,19 @@ impl EquityExecutor {
         Ok(EquityExecutionResult::success_with_token(class_id))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn handle_token_update(
-        &self, sender: &Address, _data: &[u8], _operation: EquityOperation, state: &StateManager,
-        proposer: &Address, fee: Balance, _block_height: BlockHeight, _tx_index: u32, _store: &EquityStore,
+        &self, view: &mut ExecutionView<'_, '_>, sender: &Address, _data: &[u8], _operation: EquityOperation, proposer: &Address, fee: Balance, _block_height: BlockHeight, _tx_index: u32, _store: &EquityStore,
     ) -> Result<EquityExecutionResult> {
-        state.deduct(sender, fee)?;
-        state.credit(proposer, fee)?;
-        state.increment_nonce(sender)?;
+        StateManager::v_deduct(view, sender, fee)?;
+        StateManager::v_credit(view, proposer, fee)?;
+        StateManager::v_increment_nonce(view, sender)?;
         Ok(EquityExecutionResult::success())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn transfer(
-        &self, sender: &Address, data: &[u8], state: &StateManager, proposer: &Address,
+        &self, view: &mut ExecutionView<'_, '_>, sender: &Address, data: &[u8], proposer: &Address,
         fee: Balance, _block_height: BlockHeight, _tx_index: u32, store: &EquityStore,
     ) -> Result<EquityExecutionResult> {
         #[derive(serde::Deserialize)]
@@ -378,9 +386,9 @@ impl EquityExecutor {
             return Ok(EquityExecutionResult::failure("Token not active"));
         }
 
-        state.deduct(sender, fee)?;
-        state.credit(proposer, fee)?;
-        state.increment_nonce(sender)?;
+        StateManager::v_deduct(view, sender, fee)?;
+        StateManager::v_credit(view, proposer, fee)?;
+        StateManager::v_increment_nonce(view, sender)?;
 
         store.balances().transfer(
             &transfer.class_id,
@@ -393,8 +401,9 @@ impl EquityExecutor {
         Ok(EquityExecutionResult::success())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn mint(
-        &self, sender: &Address, data: &[u8], state: &StateManager, proposer: &Address,
+        &self, view: &mut ExecutionView<'_, '_>, sender: &Address, data: &[u8], proposer: &Address,
         fee: Balance, _block_height: BlockHeight, _tx_index: u32, store: &EquityStore,
     ) -> Result<EquityExecutionResult> {
         #[derive(serde::Deserialize)]
@@ -420,9 +429,9 @@ impl EquityExecutor {
             return Ok(EquityExecutionResult::failure("Exceeds authorized shares"));
         }
 
-        state.deduct(sender, fee)?;
-        state.credit(proposer, fee)?;
-        state.increment_nonce(sender)?;
+        StateManager::v_deduct(view, sender, fee)?;
+        StateManager::v_credit(view, proposer, fee)?;
+        StateManager::v_increment_nonce(view, sender)?;
 
         token.issued_shares = token.issued_shares.saturating_add(mint.amount as u128);
         store.tokens().put(&token)?;
@@ -435,8 +444,9 @@ impl EquityExecutor {
         Ok(EquityExecutionResult::success_with_token(mint.class_id))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn burn(
-        &self, sender: &Address, data: &[u8], state: &StateManager, proposer: &Address,
+        &self, view: &mut ExecutionView<'_, '_>, sender: &Address, data: &[u8], proposer: &Address,
         fee: Balance, _block_height: BlockHeight, _tx_index: u32, store: &EquityStore,
     ) -> Result<EquityExecutionResult> {
         #[derive(serde::Deserialize)]
@@ -454,9 +464,9 @@ impl EquityExecutor {
             None => return Ok(EquityExecutionResult::failure("Token not found")),
         };
 
-        state.deduct(sender, fee)?;
-        state.credit(proposer, fee)?;
-        state.increment_nonce(sender)?;
+        StateManager::v_deduct(view, sender, fee)?;
+        StateManager::v_credit(view, proposer, fee)?;
+        StateManager::v_increment_nonce(view, sender)?;
 
         // Get current balance and subtract burn amount
         let current = store.balances().get_balance(&burn.class_id, &burn.holder_commitment)?;
@@ -472,16 +482,17 @@ impl EquityExecutor {
         Ok(EquityExecutionResult::success_with_token(burn.class_id))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn verify_ownership_proof(
-        &self, sender: &Address, data: &[u8], state: &StateManager, proposer: &Address,
+        &self, view: &mut ExecutionView<'_, '_>, sender: &Address, data: &[u8], proposer: &Address,
         fee: Balance, _block_height: BlockHeight, _tx_index: u32, store: &EquityStore,
     ) -> Result<EquityExecutionResult> {
         let proof: OwnershipProofEnvelope = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid proof data: {}", e)))?;
 
-        state.deduct(sender, fee)?;
-        state.credit(proposer, fee)?;
-        state.increment_nonce(sender)?;
+        StateManager::v_deduct(view, sender, fee)?;
+        StateManager::v_credit(view, proposer, fee)?;
+        StateManager::v_increment_nonce(view, sender)?;
 
         store.proofs().put(&proof)?;
 
@@ -512,7 +523,7 @@ mod tests {
     }
 
     #[test]
-    fn test_create_entity() {
+    fn test_create_entity(view: &mut ExecutionView<'_, '_>) {
         use sumchain_primitives::{ControllerModel, EntityStatus};
 
         let (db, _dir, state) = setup();
@@ -520,7 +531,7 @@ mod tests {
 
         let controller = Address::new([1u8; 20]);
         let proposer = Address::new([99u8; 20]);
-        state.credit(&controller, 1_000_000_000_000).unwrap();
+        StateManager::v_credit(view, &controller, 1_000_000_000_000).unwrap();
 
         let entity = EntityProfile {
             subject_id: [42u8; 32],

@@ -42,8 +42,7 @@ impl NftTestNode {
         let validator_key = KeyPair::from_bytes(validator_key_bytes);
 
         // Fund the validator
-        state
-            .put_account(
+        sumchain_storage::StateStore::new(&db).put_account(
                 &validator_key.address(),
                 &sumchain_storage::schema::AccountState {
                     balance: 1_000_000_000_000_000, // 1M Koppa
@@ -108,12 +107,19 @@ impl NftTestNode {
             data: serialized,
         };
 
+        // The NFT executor stages into a block candidate now, so this fixture
+        // opens one. It is never published: these tests assert on the executor's
+        // RESULT, not on committed state.
+        let mut candidate = sumchain_storage::candidate::CandidateExecution::new(
+            &self.db,
+            1 << 30,
+        );
         let result = self
             .nft_executor
             .execute(
+                &mut candidate.view(),
                 &self.validator_address(),
                 &nft_data,
-                &self.state,
                 &Address::ZERO,
                 0,
                 1000000000, // block_timestamp
@@ -161,12 +167,19 @@ impl NftTestNode {
         // Calculate the required storage fee for the metadata
         let storage_fee = self.params.calculate_nft_storage_fee(metadata.len());
 
+        // The NFT executor stages into a block candidate now, so this fixture
+        // opens one. It is never published: these tests assert on the executor's
+        // RESULT, not on committed state.
+        let mut candidate = sumchain_storage::candidate::CandidateExecution::new(
+            &self.db,
+            1 << 30,
+        );
         let result = self
             .nft_executor
             .execute(
+                &mut candidate.view(),
                 &self.validator_address(),
                 &nft_data,
-                &self.state,
                 &Address::ZERO,
                 storage_fee,
                 1000000000, // block_timestamp
@@ -202,12 +215,19 @@ impl NftTestNode {
             data: serialized,
         };
 
+        // The NFT executor stages into a block candidate now, so this fixture
+        // opens one. It is never published: these tests assert on the executor's
+        // RESULT, not on committed state.
+        let mut candidate = sumchain_storage::candidate::CandidateExecution::new(
+            &self.db,
+            1 << 30,
+        );
         let result = self
             .nft_executor
             .execute(
+                &mut candidate.view(),
                 &self.validator_address(),
                 &nft_data,
-                &self.state,
                 &Address::ZERO,
                 0,
                 1000000000, // block_timestamp
@@ -230,12 +250,19 @@ impl NftTestNode {
             data: vec![],
         };
 
+        // The NFT executor stages into a block candidate now, so this fixture
+        // opens one. It is never published: these tests assert on the executor's
+        // RESULT, not on committed state.
+        let mut candidate = sumchain_storage::candidate::CandidateExecution::new(
+            &self.db,
+            1 << 30,
+        );
         let result = self
             .nft_executor
             .execute(
+                &mut candidate.view(),
                 &self.validator_address(),
                 &nft_data,
-                &self.state,
                 &Address::ZERO,
                 0,
                 1000000000, // block_timestamp

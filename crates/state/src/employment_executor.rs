@@ -6,6 +6,7 @@
 //! - SRC-883: Income / Payroll Attestation
 //! - SRC-885: 88X Proof Profiles
 
+use sumchain_storage::exec_view::ExecutionView;
 use std::sync::Arc;
 
 use sumchain_genesis::ChainParams;
@@ -118,11 +119,11 @@ impl EmploymentExecutor {
     }
 
     /// Execute an Employment transaction
+    #[allow(clippy::too_many_arguments)]
     pub fn execute(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &EmploymentTxData,
-        state: &StateManager,
         proposer: &Address,
         fee: Balance,
         _block_height: BlockHeight,
@@ -157,9 +158,9 @@ impl EmploymentExecutor {
                     )));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 let issuer_addr = issuer.issuer_address;
                 store.issuers().put(&issuer)?;
                 debug!("Employment issuer registered: {}", issuer_addr);
@@ -183,9 +184,9 @@ impl EmploymentExecutor {
                     return Ok(EmploymentExecutionResult::failure("Only issuer can update"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.issuers().update_status(sender, update.status, block_timestamp)?;
                 Ok(EmploymentExecutionResult::success())
             }
@@ -195,9 +196,9 @@ impl EmploymentExecutor {
                     return Ok(EmploymentExecutionResult::failure("Issuer not found"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.issuers().update_status(sender, IssuerStatus::Suspended, block_timestamp)?;
                 debug!("Employment issuer suspended: {}", sender);
                 Ok(EmploymentExecutionResult::success())
@@ -208,9 +209,9 @@ impl EmploymentExecutor {
                     return Ok(EmploymentExecutionResult::failure("Issuer not found"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.issuers().update_status(sender, IssuerStatus::Revoked, block_timestamp)?;
                 debug!("Employment issuer revoked: {}", sender);
                 Ok(EmploymentExecutionResult::success())
@@ -226,9 +227,9 @@ impl EmploymentExecutor {
                     return Ok(EmploymentExecutionResult::failure("Issuer is not suspended"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.issuers().update_status(sender, IssuerStatus::Active, block_timestamp)?;
                 debug!("Employment issuer reactivated: {}", sender);
                 Ok(EmploymentExecutionResult::success())
@@ -275,9 +276,9 @@ impl EmploymentExecutor {
                     }
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 let employment_id = credential.employment_id;
                 store.credentials().put(&credential)?;
                 debug!("Employment credential created: {:?}", employment_id);
@@ -302,9 +303,9 @@ impl EmploymentExecutor {
                     return Ok(EmploymentExecutionResult::failure("Only issuer can update"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.credentials().update_status(&d.employment_id, d.status, block_timestamp)?;
                 debug!("Employment credential updated: {:?}", d.employment_id);
                 Ok(EmploymentExecutionResult::success())
@@ -327,9 +328,9 @@ impl EmploymentExecutor {
                     return Ok(EmploymentExecutionResult::failure("Only issuer can suspend"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.credentials().update_status(&d.employment_id, EmploymentStatus::Suspended, block_timestamp)?;
                 debug!("Employment credential suspended: {:?}", d.employment_id);
                 Ok(EmploymentExecutionResult::success())
@@ -352,9 +353,9 @@ impl EmploymentExecutor {
                     return Ok(EmploymentExecutionResult::failure("Only issuer can end"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.credentials().update_status(&d.employment_id, EmploymentStatus::Ended, block_timestamp)?;
                 debug!("Employment ended: {:?}", d.employment_id);
                 Ok(EmploymentExecutionResult::success())
@@ -378,9 +379,9 @@ impl EmploymentExecutor {
                     return Ok(EmploymentExecutionResult::failure("Only issuer can revoke"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.credentials().revoke(&d.employment_id, d.revocation_ref, block_timestamp)?;
                 debug!("Employment credential revoked: {:?}", d.employment_id);
                 Ok(EmploymentExecutionResult::success())
@@ -411,9 +412,9 @@ impl EmploymentExecutor {
                     return Ok(EmploymentExecutionResult::failure("Income attestation already exists"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 let attestation_id = attestation.attestation_id;
                 store.income_attestations().put(&attestation)?;
                 debug!("Income attestation created: {:?}", attestation_id);
@@ -443,9 +444,9 @@ impl EmploymentExecutor {
                     return Ok(EmploymentExecutionResult::failure("Only issuer can revoke"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.income_attestations().revoke(&d.attestation_id, d.revocation_ref, block_timestamp)?;
                 debug!("Income attestation revoked: {:?}", d.attestation_id);
                 Ok(EmploymentExecutionResult::success())
@@ -462,9 +463,9 @@ impl EmploymentExecutor {
                     return Ok(EmploymentExecutionResult::failure("Proof already exists"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 let proof_id = proof.proof_id;
                 store.proofs().put(&proof)?;
                 debug!("Employment proof submitted: {:?}", proof_id);
@@ -473,9 +474,9 @@ impl EmploymentExecutor {
 
             EmploymentOperation::VerifyProof => {
                 // Verification is read-only - just record the request
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 debug!("Employment proof verification requested by: {}", sender);
                 Ok(EmploymentExecutionResult::success())
             }
@@ -505,13 +506,13 @@ mod tests {
     }
 
     #[test]
-    fn test_register_issuer() {
+    fn test_register_issuer(view: &mut ExecutionView<'_, '_>) {
         let (db, _dir, state) = setup();
         let executor = EmploymentExecutor::new(db.clone(), ChainParams::default());
 
         let sender = Address::new([1u8; 20]);
         let proposer = Address::new([99u8; 20]);
-        state.credit(&sender, 1_000_000_000_000).unwrap();
+        StateManager::v_credit(view, &sender, 1_000_000_000_000).unwrap();
 
         let issuer = EmploymentIssuerProfile {
             issuer_address: sender,
@@ -544,13 +545,13 @@ mod tests {
     }
 
     #[test]
-    fn test_create_employment_credential() {
+    fn test_create_employment_credential(view: &mut ExecutionView<'_, '_>) {
         let (db, _dir, state) = setup();
         let executor = EmploymentExecutor::new(db.clone(), ChainParams::default());
 
         let sender = Address::new([1u8; 20]);
         let proposer = Address::new([99u8; 20]);
-        state.credit(&sender, 1_000_000_000_000).unwrap();
+        StateManager::v_credit(view, &sender, 1_000_000_000_000).unwrap();
 
         // First register issuer
         let issuer = EmploymentIssuerProfile {

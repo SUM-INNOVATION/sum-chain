@@ -2,6 +2,7 @@
 //!
 //! Bridges the WASM runtime (sumc-runtime) with the state layer.
 
+use sumchain_storage::exec_view::ExecutionView;
 use std::sync::Arc;
 
 use sumchain_genesis::ChainParams;
@@ -90,8 +91,9 @@ impl ContractExecutorState {
     }
 
     /// Deploy a contract
+    #[allow(clippy::too_many_arguments)]
     pub fn deploy(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         from: &Address,
         deploy_data: &ContractDeployData,
         state: &StateManager,
@@ -135,7 +137,7 @@ impl ContractExecutorState {
 
         // Check sender has enough balance for fee + value
         let total_cost = fee.saturating_add(deploy_data.value);
-        let balance = state.get_balance(from)?;
+        let balance = StateManager::v_get_balance(view, from)?;
         if balance < total_cost {
             return Ok(ContractDeployResult {
                 contract_address: Address::ZERO,
@@ -150,7 +152,7 @@ impl ContractExecutorState {
         }
 
         // Get current nonce for address computation
-        let nonce = state.get_nonce(from)?;
+        let nonce = StateManager::v_get_nonce(view, from)?;
 
         // Create execution context
         let ctx = ExecutionContext {
@@ -178,18 +180,18 @@ impl ContractExecutorState {
                 );
 
                 // Deduct value and fee from sender
-                state.deduct(from, total_cost)?;
+                StateManager::v_deduct(view, from, total_cost)?;
 
                 // Credit value to contract
                 if deploy_data.value > 0 {
-                    state.credit(&result.contract_address, deploy_data.value)?;
+                    StateManager::v_credit(view, &result.contract_address, deploy_data.value)?;
                 }
 
                 // Credit fee to proposer
-                state.credit(proposer, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
 
                 // Increment nonce
-                state.increment_nonce(from)?;
+                StateManager::v_increment_nonce(view, from)?;
 
                 Ok(ContractDeployResult {
                     contract_address: result.contract_address,
@@ -203,9 +205,9 @@ impl ContractExecutorState {
                 warn!("Contract deployment failed: {}", e);
 
                 // Still charge fee on failure
-                state.deduct(from, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(from)?;
+                StateManager::v_deduct(view, from, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, from)?;
 
                 Ok(ContractDeployResult {
                     contract_address: Address::ZERO,
@@ -219,8 +221,9 @@ impl ContractExecutorState {
     }
 
     /// Call a contract method
+    #[allow(clippy::too_many_arguments)]
     pub fn call(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         from: &Address,
         call_data: &ContractCallData,
         state: &StateManager,
@@ -274,7 +277,7 @@ impl ContractExecutorState {
 
         // Check sender has enough balance for fee + value
         let total_cost = fee.saturating_add(call_data.value);
-        let balance = state.get_balance(from)?;
+        let balance = StateManager::v_get_balance(view, from)?;
         if balance < total_cost {
             return Ok(ContractCallResult {
                 return_data: Vec::new(),
@@ -314,18 +317,18 @@ impl ContractExecutorState {
                     );
 
                     // Deduct value and fee from sender
-                    state.deduct(from, total_cost)?;
+                    StateManager::v_deduct(view, from, total_cost)?;
 
                     // Credit value to contract
                     if call_data.value > 0 {
-                        state.credit(&call_data.contract, call_data.value)?;
+                        StateManager::v_credit(view, &call_data.contract, call_data.value)?;
                     }
 
                     // Credit fee to proposer
-                    state.credit(proposer, fee)?;
+                    StateManager::v_credit(view, proposer, fee)?;
 
                     // Increment nonce
-                    state.increment_nonce(from)?;
+                    StateManager::v_increment_nonce(view, from)?;
 
                     // Convert events
                     let events = result
@@ -352,9 +355,9 @@ impl ContractExecutorState {
                     );
 
                     // Still charge fee on failure
-                    state.deduct(from, fee)?;
-                    state.credit(proposer, fee)?;
-                    state.increment_nonce(from)?;
+                    StateManager::v_deduct(view, from, fee)?;
+                    StateManager::v_credit(view, proposer, fee)?;
+                    StateManager::v_increment_nonce(view, from)?;
 
                     Ok(ContractCallResult {
                         return_data: Vec::new(),
@@ -369,9 +372,9 @@ impl ContractExecutorState {
                 warn!("Contract call error: {}", e);
 
                 // Charge fee on error
-                state.deduct(from, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(from)?;
+                StateManager::v_deduct(view, from, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, from)?;
 
                 Ok(ContractCallResult {
                     return_data: Vec::new(),
@@ -385,6 +388,7 @@ impl ContractExecutorState {
     }
 
     /// View call (read-only, no state changes)
+    #[allow(clippy::too_many_arguments)]
     pub fn view_call(
         &self,
         contract: &Address,
@@ -415,6 +419,7 @@ impl ContractExecutorState {
     /// Estimate gas for a call via a metered dry-run (executed up to the chain's
     /// `max_contract_gas`, then rolled back). Returns gas used, or `Err` on
     /// execution failure / out-of-gas.
+    #[allow(clippy::too_many_arguments)]
     pub fn estimate_gas(
         &self,
         contract: &Address,

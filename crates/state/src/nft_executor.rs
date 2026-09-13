@@ -12,6 +12,7 @@
 //! - **Issuer registry**: Only registered issuers can mint certified document NFTs
 //! - **Metadata size limits**: Maximum metadata size enforced per chain params
 
+use sumchain_storage::exec_view::ExecutionView;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -96,11 +97,11 @@ impl NftExecutor {
     }
 
     /// Execute an NFT operation from transaction data
+    #[allow(clippy::too_many_arguments)]
     pub fn execute(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         nft_data: &NftTxData,
-        state: &StateManager,
         proposer: &Address,
         fee: Balance,
         block_timestamp: u64,
@@ -108,7 +109,7 @@ impl NftExecutor {
         let store = NftStore::new(&self.db);
 
         // Deduct fee from sender
-        self.deduct_fee(state, sender, fee, proposer)?;
+        self.deduct_fee(view, sender, fee, proposer)?;
 
         match nft_data.operation {
             NftOperation::CreateCollection => {
@@ -179,8 +180,7 @@ impl NftExecutor {
 
     /// Deduct fee from sender and credit to proposer
     fn deduct_fee(
-        &self,
-        state: &StateManager,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         fee: Balance,
         proposer: &Address,
@@ -189,7 +189,7 @@ impl NftExecutor {
             return Ok(());
         }
 
-        let sender_balance = state.get_balance(sender)?;
+        let sender_balance = StateManager::v_get_balance(view, sender)?;
         if sender_balance < fee {
             return Err(StateError::InsufficientBalance {
                 required: fee,
@@ -198,16 +198,16 @@ impl NftExecutor {
         }
 
         // Debit sender
-        let mut sender_account = state.get_account(sender)?;
+        let mut sender_account = StateManager::v_get_account(view, sender)?;
         sender_account.balance = sender_account.balance.saturating_sub(fee);
         sender_account.nonce += 1;
-        state.put_account(sender, &sender_account)?;
+        StateManager::v_put_account(view, sender, &sender_account)?;
 
         // Credit proposer
         if !proposer.is_zero() {
-            let mut proposer_account = state.get_account(proposer)?;
+            let mut proposer_account = StateManager::v_get_account(view, proposer)?;
             proposer_account.balance = proposer_account.balance.saturating_add(fee);
-            state.put_account(proposer, &proposer_account)?;
+            StateManager::v_put_account(view, proposer, &proposer_account)?;
         }
 
         Ok(())
@@ -279,6 +279,7 @@ impl NftExecutor {
     }
 
     /// Mint a new token
+    #[allow(clippy::too_many_arguments)]
     fn execute_mint(
         &self,
         store: &NftStore,

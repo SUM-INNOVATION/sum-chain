@@ -6,6 +6,7 @@
 //! restart persistence of the new CFs.
 
 mod common;
+use sumchain_state::state::StateManager;
 use common::{build_signed_attestation_tx, fund, params_omninode_enabled, sample_digest,
     setup_with_params, stage6_sign, CHAIN_ID};
 
@@ -133,6 +134,7 @@ fn open_op_consistency(
 /// (session, verifier) at `height`. Lets a test craft split groups and
 /// response_hash-only-matches. `tuple` = (model_hash, manifest_root,
 /// response_hash, proof_root) fill bytes.
+#[allow(clippy::too_many_arguments)]
 fn attest_digest(
     view: &mut ExecutionView<'_, '_>,
     executor: &sumchain_state::executor::BlockExecutor,
@@ -178,19 +180,19 @@ fn gate_closed_open_session_rejects_350_no_mutation() {
     // omninode on, settlement dormant.
     let mut p = params_omninode_enabled();
     p.inference_settlement_enabled_from_height = None;
-    let (state, db, _dir, executor) = setup_with_params(p);
+    let (_state, db, _dir, executor) = setup_with_params(p);
     let mut candidate = common::candidate(&db);
     let funder = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &funder, 10_000_000);
-    let bal = state.get_balance(&funder.address()).unwrap();
+    fund(&db, &funder, 10_000_000);
+    let bal = StateManager::v_get_balance(&candidate.view(), &funder.address()).unwrap();
 
     let res = executor
         .execute_tx(&mut candidate.view(), &settlement_tx(&funder, 0, open_op("s", 2, 2 * REWARD, 10, 1000)), &proposer.address(), 1, 1000)
         .unwrap();
     assert!(matches!(res.status, TxStatus::Failed(350)), "got {:?}", res.status);
     assert_eq!(res.fee_paid, 0);
-    assert_eq!(state.get_balance(&funder.address()).unwrap(), bal);
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &funder.address()).unwrap(), bal);
     assert!(InferenceSettlementExecutor::v_get_session(&candidate.view(), "s").unwrap().is_none());
 }
 
@@ -198,18 +200,18 @@ fn gate_closed_open_session_rejects_350_no_mutation() {
 
 #[test]
 fn open_session_deducts_escrow_and_duplicate_rejected() {
-    let (state, db, _dir, executor) = setup_with_params(params_enabled(None));
+    let (_state, db, _dir, executor) = setup_with_params(params_enabled(None));
     let mut candidate = common::candidate(&db);
     let funder = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &funder, 10_000_000);
+    fund(&db, &funder, 10_000_000);
 
     let r = executor
         .execute_tx(&mut candidate.view(), &settlement_tx(&funder, 0, open_op("s", 2, 2 * REWARD, 10, 1000)), &proposer.address(), 1, 1000)
         .unwrap();
     assert!(r.status.is_success(), "got {:?}", r.status);
     // funder debited deposit + fee.
-    assert_eq!(state.get_balance(&funder.address()).unwrap(), 10_000_000 - 2 * REWARD - FEE);
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &funder.address()).unwrap(), 10_000_000 - 2 * REWARD - FEE);
     let s = InferenceSettlementExecutor::v_get_session(&candidate.view(), "s").unwrap().unwrap();
     assert_eq!(s.funder, funder.address());
     assert_eq!(s.remaining_escrow, 2 * REWARD);
@@ -224,11 +226,11 @@ fn open_session_deducts_escrow_and_duplicate_rejected() {
 
 #[test]
 fn open_session_invalid_terms_354() {
-    let (state, db, _dir, executor) = setup_with_params(params_enabled(None));
+    let (_state, db, _dir, executor) = setup_with_params(params_enabled(None));
     let mut candidate = common::candidate(&db);
     let funder = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &funder, 10_000_000);
+    fund(&db, &funder, 10_000_000);
 
     // reward=0 via a hand-built op (open_op uses REWARD; build a zero-reward op).
     let zero = InferenceSettlementOperation::OpenSession(OpenInferenceSessionRequest {
@@ -252,11 +254,11 @@ fn open_session_invalid_terms_354() {
 
 #[test]
 fn open_session_deposit_bounds_355() {
-    let (state, db, _dir, executor) = setup_with_params(params_enabled(None));
+    let (_state, db, _dir, executor) = setup_with_params(params_enabled(None));
     let mut candidate = common::candidate(&db);
     let funder = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &funder, 10_000_000);
+    fund(&db, &funder, 10_000_000);
     // deposit below one reward → 355.
     let low = open_op("s", 2, REWARD - 1, 10, 1000);
     let r = executor.execute_tx(&mut candidate.view(), &settlement_tx(&funder, 0, low), &proposer.address(), 1, 1000).unwrap();
@@ -278,13 +280,13 @@ fn attest(view: &mut ExecutionView<'_, '_>, executor: &sumchain_state::executor:
 
 #[test]
 fn claim_requires_attestation_then_pays_after_maturity() {
-    let (state, db, _dir, executor) = setup_with_params(params_enabled(None));
+    let (_state, db, _dir, executor) = setup_with_params(params_enabled(None));
     let mut candidate = common::candidate(&db);
     let funder = KeyPair::generate();
     let verifier = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &funder, 10_000_000);
-    fund(&state, &verifier, 10_000_000);
+    fund(&db, &funder, 10_000_000);
+    fund(&db, &verifier, 10_000_000);
 
     executor.execute_tx(&mut candidate.view(), &settlement_tx(&funder, 0, open_op("s", 2, 2 * REWARD, 10, 1000)), &proposer.address(), 1, 1000).unwrap();
 
@@ -304,12 +306,12 @@ fn claim_requires_attestation_then_pays_after_maturity() {
     assert!(matches!(early.status, TxStatus::Failed(357)), "got {:?}", early.status);
 
     // Claim at maturity (height 20) → paid.
-    let vbal = state.get_balance(&verifier.address()).unwrap();
+    let vbal = StateManager::v_get_balance(&candidate.view(), &verifier.address()).unwrap();
     let paid = executor
         .execute_tx(&mut candidate.view(), &settlement_tx(&verifier, 3, InferenceSettlementOperation::ClaimReward(ClaimInferenceRewardRequest { session_id: "s".into() })), &proposer.address(), 20, 1000)
         .unwrap();
     assert!(paid.status.is_success(), "got {:?}", paid.status);
-    assert_eq!(state.get_balance(&verifier.address()).unwrap(), vbal - FEE + REWARD);
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &verifier.address()).unwrap(), vbal - FEE + REWARD);
     let s = InferenceSettlementExecutor::v_get_session(&candidate.view(), "s").unwrap().unwrap();
     assert_eq!(s.remaining_escrow, REWARD);
     assert_eq!(s.claims_count, 1);
@@ -325,13 +327,13 @@ fn claim_requires_attestation_then_pays_after_maturity() {
 #[test]
 fn claim_maturity_requires_finality_and_dispute_window() {
     // Attest at height 5, dispute_window 10, finality 3 → maturity = 5+3+10 = 18.
-    let (state, db, _dir, executor) = setup_with_params(params_enabled(None));
+    let (_state, db, _dir, executor) = setup_with_params(params_enabled(None));
     let mut candidate = common::candidate(&db);
     let funder = KeyPair::generate();
     let verifier = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &funder, 10_000_000);
-    fund(&state, &verifier, 10_000_000);
+    fund(&db, &funder, 10_000_000);
+    fund(&db, &verifier, 10_000_000);
     executor.execute_tx(&mut candidate.view(), &settlement_tx(&funder, 0, open_op("s", 2, 2 * REWARD, 10, 1000)), &proposer.address(), 1, 1000).unwrap();
     attest(&mut candidate.view(), &executor, &proposer.address(), &verifier, "s", 5, 0);
 
@@ -351,11 +353,11 @@ fn claim_maturity_requires_finality_and_dispute_window() {
 
 #[test]
 fn fund_top_up_increases_escrow() {
-    let (state, db, _dir, executor) = setup_with_params(params_enabled(None));
+    let (_state, db, _dir, executor) = setup_with_params(params_enabled(None));
     let mut candidate = common::candidate(&db);
     let funder = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &funder, 10_000_000);
+    fund(&db, &funder, 10_000_000);
     executor.execute_tx(&mut candidate.view(), &settlement_tx(&funder, 0, open_op("s", 3, REWARD, 10, 1000)), &proposer.address(), 1, 1000).unwrap();
     let r = executor
         .execute_tx(&mut candidate.view(), &settlement_tx(&funder, 1, InferenceSettlementOperation::FundSession(FundInferenceSessionRequest { session_id: "s".into(), amount: 2 * REWARD })), &proposer.address(), 2, 1000)
@@ -368,11 +370,11 @@ fn fund_top_up_increases_escrow() {
 
 #[test]
 fn refund_after_expiry_credits_funder() {
-    let (state, db, _dir, executor) = setup_with_params(params_enabled(None));
+    let (_state, db, _dir, executor) = setup_with_params(params_enabled(None));
     let mut candidate = common::candidate(&db);
     let funder = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &funder, 10_000_000);
+    fund(&db, &funder, 10_000_000);
     executor.execute_tx(&mut candidate.view(), &settlement_tx(&funder, 0, open_op("s", 2, 2 * REWARD, 10, 100)), &proposer.address(), 1, 1000).unwrap();
 
     // Before expiry (height 50 < 100), not fully claimed → 360.
@@ -382,12 +384,12 @@ fn refund_after_expiry_credits_funder() {
     assert!(matches!(early.status, TxStatus::Failed(360)), "got {:?}", early.status);
 
     // After expiry (height 101) → refund.
-    let bal = state.get_balance(&funder.address()).unwrap();
+    let bal = StateManager::v_get_balance(&candidate.view(), &funder.address()).unwrap();
     let r = executor
         .execute_tx(&mut candidate.view(), &settlement_tx(&funder, 2, InferenceSettlementOperation::RefundSession(RefundInferenceSessionRequest { session_id: "s".into() })), &proposer.address(), 101, 1000)
         .unwrap();
     assert!(r.status.is_success(), "got {:?}", r.status);
-    assert_eq!(state.get_balance(&funder.address()).unwrap(), bal - FEE + 2 * REWARD);
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &funder.address()).unwrap(), bal - FEE + 2 * REWARD);
     let s = InferenceSettlementExecutor::v_get_session(&candidate.view(), "s").unwrap().unwrap();
     assert_eq!(s.status, InferenceSessionStatus::Refunded);
     assert_eq!(s.remaining_escrow, 0);
@@ -396,11 +398,11 @@ fn refund_after_expiry_credits_funder() {
 #[test]
 fn open_session_too_early_expiry_rejected_354() {
     // dispute_window 10, finality 3, created height 1 → min expiry = 14.
-    let (state, db, _dir, executor) = setup_with_params(params_enabled(None));
+    let (_state, db, _dir, executor) = setup_with_params(params_enabled(None));
     let mut candidate = common::candidate(&db);
     let funder = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &funder, 10_000_000);
+    fund(&db, &funder, 10_000_000);
     // expires 13 < 14 → 354.
     let r = executor
         .execute_tx(&mut candidate.view(), &settlement_tx(&funder, 0, open_op("s", 2, 2 * REWARD, 10, 13)), &proposer.address(), 1, 1000)
@@ -415,13 +417,13 @@ fn open_session_too_early_expiry_rejected_354() {
 
 #[test]
 fn refund_blocked_while_attestation_within_maturity_then_succeeds() {
-    let (state, db, _dir, executor) = setup_with_params(params_enabled(None));
+    let (_state, db, _dir, executor) = setup_with_params(params_enabled(None));
     let mut candidate = common::candidate(&db);
     let funder = KeyPair::generate();
     let verifier = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &funder, 10_000_000);
-    fund(&state, &verifier, 10_000_000);
+    fund(&db, &funder, 10_000_000);
+    fund(&db, &verifier, 10_000_000);
     // Open at height 1: dispute_window 10, expires 20 (>= min 14).
     executor.execute_tx(&mut candidate.view(), &settlement_tx(&funder, 0, open_op("s", 2, 2 * REWARD, 10, 20)), &proposer.address(), 1, 1000).unwrap();
     // A LATE attestation at height 18 → maturity = 18+3+10 = 31, past expiry (20).
@@ -447,36 +449,36 @@ fn refund_blocked_while_attestation_within_maturity_then_succeeds() {
 fn gate_closed_failure_charges_no_fee_no_nonce_no_proposer() {
     let mut p = params_omninode_enabled();
     p.inference_settlement_enabled_from_height = None;
-    let (state, db, _dir, executor) = setup_with_params(p);
+    let (_state, db, _dir, executor) = setup_with_params(p);
     let mut candidate = common::candidate(&db);
     let funder = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &funder, 10_000_000);
-    let bal = state.get_balance(&funder.address()).unwrap();
-    let nonce = state.get_nonce(&funder.address()).unwrap();
+    fund(&db, &funder, 10_000_000);
+    let bal = StateManager::v_get_balance(&candidate.view(), &funder.address()).unwrap();
+    let nonce = StateManager::v_get_nonce(&candidate.view(), &funder.address()).unwrap();
 
     let res = executor
         .execute_tx(&mut candidate.view(), &settlement_tx(&funder, 0, open_op("s", 2, 2 * REWARD, 10, 1000)), &proposer.address(), 1, 1000)
         .unwrap();
     assert!(matches!(res.status, TxStatus::Failed(350)));
     assert_eq!(res.fee_paid, 0);
-    assert_eq!(state.get_balance(&funder.address()).unwrap(), bal, "no fee charged");
-    assert_eq!(state.get_nonce(&funder.address()).unwrap(), nonce, "no nonce bump");
-    assert_eq!(state.get_balance(&proposer.address()).unwrap(), 0, "proposer not credited");
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &funder.address()).unwrap(), bal, "no fee charged");
+    assert_eq!(StateManager::v_get_nonce(&candidate.view(), &funder.address()).unwrap(), nonce, "no nonce bump");
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &proposer.address()).unwrap(), 0, "proposer not credited");
 }
 
 #[test]
 fn gate_open_semantic_failure_charges_fee_and_reports_it() {
-    let (state, db, _dir, executor) = setup_with_params(params_enabled(None));
+    let (_state, db, _dir, executor) = setup_with_params(params_enabled(None));
     let mut candidate = common::candidate(&db);
     let funder = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &funder, 10_000_000);
+    fund(&db, &funder, 10_000_000);
     // Open once (success).
     executor.execute_tx(&mut candidate.view(), &settlement_tx(&funder, 0, open_op("s", 2, 2 * REWARD, 10, 1000)), &proposer.address(), 1, 1000).unwrap();
-    let bal = state.get_balance(&funder.address()).unwrap();
-    let nonce = state.get_nonce(&funder.address()).unwrap();
-    let prop_before = state.get_balance(&proposer.address()).unwrap();
+    let bal = StateManager::v_get_balance(&candidate.view(), &funder.address()).unwrap();
+    let nonce = StateManager::v_get_nonce(&candidate.view(), &funder.address()).unwrap();
+    let prop_before = StateManager::v_get_balance(&candidate.view(), &proposer.address()).unwrap();
 
     // Duplicate open (semantic failure 352) — fee is charged and reported.
     let dup = executor
@@ -484,22 +486,22 @@ fn gate_open_semantic_failure_charges_fee_and_reports_it() {
         .unwrap();
     assert!(matches!(dup.status, TxStatus::Failed(352)), "got {:?}", dup.status);
     assert_eq!(dup.fee_paid, FEE, "receipt fee_paid == fee");
-    assert_eq!(state.get_balance(&funder.address()).unwrap(), bal - FEE, "sender debited fee");
-    assert_eq!(state.get_nonce(&funder.address()).unwrap(), nonce + 1, "nonce incremented");
-    assert_eq!(state.get_balance(&proposer.address()).unwrap(), prop_before + FEE, "proposer credited");
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &funder.address()).unwrap(), bal - FEE, "sender debited fee");
+    assert_eq!(StateManager::v_get_nonce(&candidate.view(), &funder.address()).unwrap(), nonce + 1, "nonce incremented");
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &proposer.address()).unwrap(), prop_before + FEE, "proposer credited");
 }
 
 // ── Disputes ─────────────────────────────────────────────────────────────────
 
 #[test]
 fn disputes_disabled_without_resolver_353() {
-    let (state, db, _dir, executor) = setup_with_params(params_enabled(None)); // no resolver
+    let (_state, db, _dir, executor) = setup_with_params(params_enabled(None)); // no resolver
     let mut candidate = common::candidate(&db);
     let funder = KeyPair::generate();
     let verifier = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &funder, 10_000_000);
-    fund(&state, &verifier, 10_000_000);
+    fund(&db, &funder, 10_000_000);
+    fund(&db, &verifier, 10_000_000);
     executor.execute_tx(&mut candidate.view(), &settlement_tx(&funder, 0, open_op("s", 2, 2 * REWARD, 50, 1000)), &proposer.address(), 1, 1000).unwrap();
     attest(&mut candidate.view(), &executor, &proposer.address(), &verifier, "s", 5, 0);
 
@@ -512,14 +514,14 @@ fn disputes_disabled_without_resolver_353() {
 #[test]
 fn dispute_deny_blocks_claim_and_allows_refund() {
     let resolver = KeyPair::generate();
-    let (state, db, _dir, executor) = setup_with_params(params_enabled(Some(5_000)));
+    let (_state, db, _dir, executor) = setup_with_params(params_enabled(Some(5_000)));
     let mut candidate = common::candidate(&db);
     let funder = KeyPair::generate();
     let verifier = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &funder, 10_000_000);
-    fund(&state, &verifier, 10_000_000);
-    fund(&state, &resolver, 10_000_000);
+    fund(&db, &funder, 10_000_000);
+    fund(&db, &verifier, 10_000_000);
+    fund(&db, &resolver, 10_000_000);
     executor.execute_tx(&mut candidate.view(), &settlement_tx(&funder, 0, open_op("s", 2, 2 * REWARD, 50, 100)), &proposer.address(), 1, 1000).unwrap();
     attest(&mut candidate.view(), &executor, &proposer.address(), &verifier, "s", 5, 0); // maturity = 55
 
@@ -561,14 +563,14 @@ fn dispute_deny_blocks_claim_and_allows_refund() {
 #[test]
 fn dispute_allow_lets_claim_proceed() {
     let resolver = KeyPair::generate();
-    let (state, db, _dir, executor) = setup_with_params(params_enabled(Some(5_000)));
+    let (_state, db, _dir, executor) = setup_with_params(params_enabled(Some(5_000)));
     let mut candidate = common::candidate(&db);
     let funder = KeyPair::generate();
     let verifier = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &funder, 10_000_000);
-    fund(&state, &verifier, 10_000_000);
-    fund(&state, &resolver, 10_000_000);
+    fund(&db, &funder, 10_000_000);
+    fund(&db, &verifier, 10_000_000);
+    fund(&db, &resolver, 10_000_000);
     executor.execute_tx(&mut candidate.view(), &settlement_tx(&funder, 0, open_op("s", 2, 2 * REWARD, 50, 1000)), &proposer.address(), 1, 1000).unwrap();
     attest(&mut candidate.view(), &executor, &proposer.address(), &verifier, "s", 5, 0); // maturity = 55
 
@@ -578,26 +580,26 @@ fn dispute_allow_lets_claim_proceed() {
     let ap = resolve_approval(&resolver, "s", &verifier.address(), true);
     executor.execute_tx_with_validators(&mut candidate.view(), &settlement_tx(&resolver, 0, InferenceSettlementOperation::ResolveDispute(ResolveInferenceDisputeRequest { session_id: "s".into(), verifier: verifier.address(), allow_claim: true, approvals: vec![ap] })), &proposer.address(), 9, 1000, &vset).unwrap();
     // claim proceeds after maturity.
-    let vbal = state.get_balance(&verifier.address()).unwrap();
+    let vbal = StateManager::v_get_balance(&candidate.view(), &verifier.address()).unwrap();
     let claim = executor
         .execute_tx(&mut candidate.view(), &settlement_tx(&verifier, 1, InferenceSettlementOperation::ClaimReward(ClaimInferenceRewardRequest { session_id: "s".into() })), &proposer.address(), 60, 1000)
         .unwrap();
     assert!(claim.status.is_success(), "got {:?}", claim.status);
-    assert_eq!(state.get_balance(&verifier.address()).unwrap(), vbal - FEE + REWARD);
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &verifier.address()).unwrap(), vbal - FEE + REWARD);
 }
 
 #[test]
 fn resolve_requires_validator_quorum_353() {
     let validator = KeyPair::generate();
     let vset = [*validator.public_key().as_bytes()];
-    let (state, db, _dir, executor) = setup_with_params(params_enabled(Some(5_000)));
+    let (_state, db, _dir, executor) = setup_with_params(params_enabled(Some(5_000)));
     let mut candidate = common::candidate(&db);
     let funder = KeyPair::generate();
     let verifier = KeyPair::generate();
     let stranger = KeyPair::generate();
     let proposer = KeyPair::generate();
     for kp in [&funder, &verifier, &stranger] {
-        fund(&state, kp, 10_000_000);
+        fund(&db, kp, 10_000_000);
     }
     executor.execute_tx(&mut candidate.view(), &settlement_tx(&funder, 0, open_op("s", 2, 2 * REWARD, 50, 1000)), &proposer.address(), 1, 1000).unwrap();
     attest(&mut candidate.view(), &executor, &proposer.address(), &verifier, "s", 5, 0);
@@ -624,13 +626,13 @@ fn resolve_requires_validator_quorum_353() {
 #[test]
 fn settlement_never_mutates_attestation_record() {
     use sumchain_primitives::inference_attestation::inference_attestation_key;
-    let (state, db, _dir, executor) = setup_with_params(params_enabled(None));
+    let (_state, db, _dir, executor) = setup_with_params(params_enabled(None));
     let mut candidate = common::candidate(&db);
     let funder = KeyPair::generate();
     let verifier = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &funder, 10_000_000);
-    fund(&state, &verifier, 10_000_000);
+    fund(&db, &funder, 10_000_000);
+    fund(&db, &verifier, 10_000_000);
 
     attest(&mut candidate.view(), &executor, &proposer.address(), &verifier, "s", 5, 0);
     // Through the candidate: the attestation was staged by `attest` above.
@@ -657,7 +659,7 @@ fn settlement_state_survives_restart() {
         let db = Arc::new(Database::open_default(dir.path()).unwrap());
         let state = Arc::new(sumchain_state::StateManager::new(db.clone(), CHAIN_ID));
         let executor = sumchain_state::executor::BlockExecutor::new(state.clone(), db.clone(), params_enabled(None));
-        fund(&state, &funder, 10_000_000);
+        fund(&db, &funder, 10_000_000);
         // PUBLISHED: "survives restart" means survives in canonical storage, so
         // the block that opened the session has to be published. A candidate is
         // dropped when this scope ends, and nothing would survive.
@@ -710,11 +712,11 @@ fn consistency_gate_closed_open_rejects_361_no_session() {
     // session written.
     let mut p = params_enabled(None);
     p.inference_settlement_consistency_enabled_from_height = None;
-    let (state, db, _dir, executor) = setup_with_params(p);
+    let (_state, db, _dir, executor) = setup_with_params(p);
     let mut candidate = common::candidate(&db);
     let funder = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &funder, 10_000_000);
+    fund(&db, &funder, 10_000_000);
 
     let r = executor
         .execute_tx(&mut candidate.view(), &settlement_tx(&funder, 0, open_op_consistency("s", 3, 3 * REWARD, 0, 1000, 2, 0)), &proposer.address(), 1, 1000)
@@ -732,11 +734,11 @@ fn consistency_gate_closed_open_rejects_361_no_session() {
 
 #[test]
 fn consistency_invalid_config_363() {
-    let (state, db, _dir, executor) = setup_with_params(params_consistency(None));
+    let (_state, db, _dir, executor) = setup_with_params(params_consistency(None));
     let mut candidate = common::candidate(&db);
     let funder = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &funder, 10_000_000);
+    fund(&db, &funder, 10_000_000);
     // min_matching_verifiers = 0 → 363.
     let zero = executor
         .execute_tx(&mut candidate.view(), &settlement_tx(&funder, 0, open_op_consistency("a", 3, 3 * REWARD, 0, 1000, 0, 0)), &proposer.address(), 1, 1000)
@@ -757,12 +759,12 @@ fn consistency_invalid_config_363() {
 #[test]
 fn consistency_full_tuple_match_passes() {
     // Three verifiers attest the SAME full tuple; min=3 → the claim qualifies.
-    let (state, db, _dir, executor) = setup_with_params(params_consistency(None));
+    let (_state, db, _dir, executor) = setup_with_params(params_consistency(None));
     let mut candidate = common::candidate(&db);
     let funder = KeyPair::generate();
     let (v1, v2, v3) = (KeyPair::generate(), KeyPair::generate(), KeyPair::generate());
     let proposer = KeyPair::generate();
-    for kp in [&funder, &v1, &v2, &v3] { fund(&state, kp, 10_000_000); }
+    for kp in [&funder, &v1, &v2, &v3] { fund(&db, kp, 10_000_000); }
     let p = proposer.address();
 
     executor.execute_tx(&mut candidate.view(), &settlement_tx(&funder, 0, open_op_consistency("s", 3, 3 * REWARD, 0, 1000, 3, 0)), &p, 1, 1000).unwrap();
@@ -779,12 +781,12 @@ fn consistency_full_tuple_match_passes() {
 fn consistency_response_hash_only_match_is_not_enough() {
     // Peer shares response_hash but differs in model/manifest/proof — it must NOT
     // count. Claimant's exact-tuple group is only itself → min=2 fails 362.
-    let (state, db, _dir, executor) = setup_with_params(params_consistency(None));
+    let (_state, db, _dir, executor) = setup_with_params(params_consistency(None));
     let mut candidate = common::candidate(&db);
     let funder = KeyPair::generate();
     let (v1, v2) = (KeyPair::generate(), KeyPair::generate());
     let proposer = KeyPair::generate();
-    for kp in [&funder, &v1, &v2] { fund(&state, kp, 10_000_000); }
+    for kp in [&funder, &v1, &v2] { fund(&db, kp, 10_000_000); }
     let p = proposer.address();
 
     executor.execute_tx(&mut candidate.view(), &settlement_tx(&funder, 0, open_op_consistency("s", 3, 3 * REWARD, 0, 1000, 2, 0)), &p, 1, 1000).unwrap();
@@ -800,12 +802,12 @@ fn consistency_response_hash_only_match_is_not_enough() {
 fn consistency_split_groups_fail_under_min_pass_at_min() {
     // Two groups of two. min=3 → neither group qualifies; min=2 → each group's
     // members qualify within their own group.
-    let (state, db, _dir, executor) = setup_with_params(params_consistency(None));
+    let (_state, db, _dir, executor) = setup_with_params(params_consistency(None));
     let mut candidate = common::candidate(&db);
     let funder = KeyPair::generate();
     let (a1, a2, b1, b2) = (KeyPair::generate(), KeyPair::generate(), KeyPair::generate(), KeyPair::generate());
     let proposer = KeyPair::generate();
-    for kp in [&funder, &a1, &a2, &b1, &b2] { fund(&state, kp, 10_000_000); }
+    for kp in [&funder, &a1, &a2, &b1, &b2] { fund(&db, kp, 10_000_000); }
     let p = proposer.address();
     let (ta, tb) = ((1, 1, 1, 1), (2, 2, 2, 2));
 
@@ -834,12 +836,12 @@ fn consistency_threshold_bps_denominator_is_max_verifiers() {
     // matching*10000 >= 4*6000 = 24000 → 2 fails (20000 < 24000). If the
     // denominator were the LIVE attestation count (2), 2/2 = 100% would pass —
     // so this failure proves the denominator is the fixed max_verifiers.
-    let (state, db, _dir, executor) = setup_with_params(params_consistency(None));
+    let (_state, db, _dir, executor) = setup_with_params(params_consistency(None));
     let mut candidate = common::candidate(&db);
     let funder = KeyPair::generate();
     let (v1, v2) = (KeyPair::generate(), KeyPair::generate());
     let proposer = KeyPair::generate();
-    for kp in [&funder, &v1, &v2] { fund(&state, kp, 10_000_000); }
+    for kp in [&funder, &v1, &v2] { fund(&db, kp, 10_000_000); }
     let p = proposer.address();
     let tuple = (1, 2, 3, 4);
 
@@ -858,12 +860,12 @@ fn consistency_threshold_bps_denominator_is_max_verifiers() {
 
 #[test]
 fn consistency_single_verifier_min1_passes_min2_fails() {
-    let (state, db, _dir, executor) = setup_with_params(params_consistency(None));
+    let (_state, db, _dir, executor) = setup_with_params(params_consistency(None));
     let mut candidate = common::candidate(&db);
     let funder = KeyPair::generate();
     let v1 = KeyPair::generate();
     let proposer = KeyPair::generate();
-    for kp in [&funder, &v1] { fund(&state, kp, 10_000_000); }
+    for kp in [&funder, &v1] { fund(&db, kp, 10_000_000); }
     let p = proposer.address();
     let tuple = (1, 2, 3, 4);
 
@@ -882,12 +884,12 @@ fn consistency_single_verifier_min1_passes_min2_fails() {
 fn consistency_unfinalized_peer_excluded_then_counts() {
     // A matching peer that is not yet finalized at claim height must not count,
     // then counts once it finalizes.
-    let (state, db, _dir, executor) = setup_with_params(params_consistency(None));
+    let (_state, db, _dir, executor) = setup_with_params(params_consistency(None));
     let mut candidate = common::candidate(&db);
     let funder = KeyPair::generate();
     let (v1, v2) = (KeyPair::generate(), KeyPair::generate());
     let proposer = KeyPair::generate();
-    for kp in [&funder, &v1, &v2] { fund(&state, kp, 10_000_000); }
+    for kp in [&funder, &v1, &v2] { fund(&db, kp, 10_000_000); }
     let p = proposer.address();
     let tuple = (1, 2, 3, 4);
 
@@ -905,12 +907,12 @@ fn consistency_unfinalized_peer_excluded_then_counts() {
 fn consistency_open_disputed_peer_excluded() {
     // A matching peer under an OPEN dispute lends no consistency weight.
     let resolver = KeyPair::generate();
-    let (state, db, _dir, executor) = setup_with_params(params_consistency(Some(5_000)));
+    let (_state, db, _dir, executor) = setup_with_params(params_consistency(Some(5_000)));
     let mut candidate = common::candidate(&db);
     let funder = KeyPair::generate();
     let (v1, v2) = (KeyPair::generate(), KeyPair::generate());
     let proposer = KeyPair::generate();
-    for kp in [&funder, &v1, &v2, &resolver] { fund(&state, kp, 10_000_000); }
+    for kp in [&funder, &v1, &v2, &resolver] { fund(&db, kp, 10_000_000); }
     let p = proposer.address();
     let tuple = (1, 2, 3, 4);
 
@@ -933,12 +935,12 @@ fn consistency_open_disputed_peer_excluded() {
 fn consistency_gate_open_but_no_config_keeps_v1_behavior() {
     // Consistency gate OPEN, but a session that does NOT opt in behaves exactly
     // like v1: a single verifier claims after maturity with no plurality check.
-    let (state, db, _dir, executor) = setup_with_params(params_consistency(None));
+    let (_state, db, _dir, executor) = setup_with_params(params_consistency(None));
     let mut candidate = common::candidate(&db);
     let funder = KeyPair::generate();
     let v1 = KeyPair::generate();
     let proposer = KeyPair::generate();
-    for kp in [&funder, &v1] { fund(&state, kp, 10_000_000); }
+    for kp in [&funder, &v1] { fund(&db, kp, 10_000_000); }
     let p = proposer.address();
 
     executor.execute_tx(&mut candidate.view(), &settlement_tx(&funder, 0, open_op("s", 2, 2 * REWARD, 0, 1000)), &p, 1, 1000).unwrap();
@@ -977,24 +979,25 @@ fn open_dispute_op(session: &str, verifier: &Address) -> InferenceSettlementOper
 /// Total native supply held across all accounts (incl. the ZERO burn address).
 /// Bonds and escrow are accounting-in-record, so they are *not* in any balance;
 /// `funded - sum(balances)` therefore equals `escrow_in_records + bond_in_records`.
+#[allow(dead_code)]
 fn sum_balances(state: &sumchain_state::StateManager, accounts: &[Address]) -> u128 {
     accounts.iter().map(|a| state.get_balance(a).unwrap()).sum()
 }
 
 #[test]
 fn register_locks_bond_and_add_increases_it() {
-    let (state, db, _dir, executor) = setup_with_params(params_bonding(None));
+    let (_state, db, _dir, executor) = setup_with_params(params_bonding(None));
     let mut candidate = common::candidate(&db);
     let v = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &v, 100_000_000);
+    fund(&db, &v, 100_000_000);
     let p = proposer.address();
-    let start = state.get_balance(&v.address()).unwrap();
+    let start = StateManager::v_get_balance(&candidate.view(), &v.address()).unwrap();
 
     let r = executor.execute_tx(&mut candidate.view(), &settlement_tx(&v, 0, register_op(BOND)), &p, 1, 1000).unwrap();
     assert!(r.status.is_success(), "register: {:?}", r.status);
     // Bond leaves the balance (accounting-in-record) plus the fee.
-    assert_eq!(state.get_balance(&v.address()).unwrap(), start - BOND - FEE);
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &v.address()).unwrap(), start - BOND - FEE);
     let rec = InferenceSettlementExecutor::v_get_verifier(&candidate.view(), &v.address()).unwrap().unwrap();
     assert_eq!(rec.bond, BOND);
     assert_eq!(rec.status, InferenceVerifierStatus::Active);
@@ -1011,11 +1014,11 @@ fn register_locks_bond_and_add_increases_it() {
 
 #[test]
 fn unbond_lifecycle_withdraw_before_and_after_unlock() {
-    let (state, db, _dir, executor) = setup_with_params(params_bonding(None));
+    let (_state, db, _dir, executor) = setup_with_params(params_bonding(None));
     let mut candidate = common::candidate(&db);
     let v = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &v, 100_000_000);
+    fund(&db, &v, 100_000_000);
     let p = proposer.address();
 
     executor.execute_tx(&mut candidate.view(), &settlement_tx(&v, 0, register_op(BOND)), &p, 1, 1000).unwrap();
@@ -1031,10 +1034,10 @@ fn unbond_lifecycle_withdraw_before_and_after_unlock() {
     assert!(matches!(early.status, TxStatus::Failed(369)), "early: {:?}", early.status);
 
     // Withdraw after unlock (height 15) → returns the bond.
-    let bal = state.get_balance(&v.address()).unwrap();
+    let bal = StateManager::v_get_balance(&candidate.view(), &v.address()).unwrap();
     let w = executor.execute_tx(&mut candidate.view(), &settlement_tx(&v, 3, InferenceSettlementOperation::WithdrawVerifierBond), &p, 15, 1000).unwrap();
     assert!(w.status.is_success(), "withdraw: {:?}", w.status);
-    assert_eq!(state.get_balance(&v.address()).unwrap(), bal - FEE + BOND, "bond returned");
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &v.address()).unwrap(), bal - FEE + BOND, "bond returned");
     let rec = InferenceSettlementExecutor::v_get_verifier(&candidate.view(), &v.address()).unwrap().unwrap();
     assert_eq!(rec.status, InferenceVerifierStatus::Withdrawn);
     assert_eq!(rec.bond, 0);
@@ -1051,12 +1054,12 @@ fn unbond_lifecycle_withdraw_before_and_after_unlock() {
 
 #[test]
 fn bond_required_claim_gating_order_367_368_370() {
-    let (state, db, _dir, executor) = setup_with_params(params_bonding(None));
+    let (_state, db, _dir, executor) = setup_with_params(params_bonding(None));
     let mut candidate = common::candidate(&db);
     let funder = KeyPair::generate();
     let v = KeyPair::generate();
     let proposer = KeyPair::generate();
-    for kp in [&funder, &v] { fund(&state, kp, 100_000_000); }
+    for kp in [&funder, &v] { fund(&db, kp, 100_000_000); }
     let p = proposer.address();
     // Session requires min_bond = BOND, no slashing.
     executor.execute_tx(&mut candidate.view(), &settlement_tx(&funder, 0, open_op_bond("s", 2, 2 * REWARD, 0, 1000, BOND, 0)), &p, 1, 1000).unwrap();
@@ -1077,30 +1080,30 @@ fn bond_required_claim_gating_order_367_368_370() {
 
 #[test]
 fn bond_required_claim_passes_with_active_sufficient_bond() {
-    let (state, db, _dir, executor) = setup_with_params(params_bonding(None));
+    let (_state, db, _dir, executor) = setup_with_params(params_bonding(None));
     let mut candidate = common::candidate(&db);
     let funder = KeyPair::generate();
     let v = KeyPair::generate();
     let proposer = KeyPair::generate();
-    for kp in [&funder, &v] { fund(&state, kp, 100_000_000); }
+    for kp in [&funder, &v] { fund(&db, kp, 100_000_000); }
     let p = proposer.address();
     executor.execute_tx(&mut candidate.view(), &settlement_tx(&funder, 0, open_op_bond("s", 2, 2 * REWARD, 0, 1000, BOND, 0)), &p, 1, 1000).unwrap();
     executor.execute_tx(&mut candidate.view(), &settlement_tx(&v, 0, register_op(BOND)), &p, 2, 1000).unwrap(); // v nonce 0
     attest_digest(&mut candidate.view(), &executor, &p, &v, "s", 5, 1, (1, 2, 3, 4)); // v nonce 1
-    let bal = state.get_balance(&v.address()).unwrap();
+    let bal = StateManager::v_get_balance(&candidate.view(), &v.address()).unwrap();
     assert!(claim_status(&mut candidate.view(), &executor, &p, &v, "s", 2, 8).is_success(), "active sufficient bond claims");
-    assert_eq!(state.get_balance(&v.address()).unwrap(), bal - FEE + REWARD);
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &v.address()).unwrap(), bal - FEE + REWARD);
 }
 
 #[test]
 fn denied_dispute_denies_reward_and_slashes_bond() {
     let resolver = KeyPair::generate();
-    let (state, db, _dir, executor) = setup_with_params(params_bonding(Some(5_000)));
+    let (_state, db, _dir, executor) = setup_with_params(params_bonding(Some(5_000)));
     let mut candidate = common::candidate(&db);
     let funder = KeyPair::generate();
     let v = KeyPair::generate();
     let proposer = KeyPair::generate();
-    for kp in [&funder, &v, &resolver] { fund(&state, kp, 100_000_000); }
+    for kp in [&funder, &v, &resolver] { fund(&db, kp, 100_000_000); }
     let p = proposer.address();
     let vset = [*resolver.public_key().as_bytes()];
     // min_bond = BOND, slash 2500 bps (25%). window 50 → maturity 58; expires 100.
@@ -1118,7 +1121,7 @@ fn denied_dispute_denies_reward_and_slashes_bond() {
     let expected_slash = BOND * 2500 / 10_000;
     let rec = InferenceSettlementExecutor::v_get_verifier(&candidate.view(), &v.address()).unwrap().unwrap();
     assert_eq!(rec.bond, BOND - expected_slash, "bond reduced by slash");
-    assert_eq!(state.get_balance(&Address::ZERO).unwrap(), expected_slash, "slash burned to ZERO");
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &Address::ZERO).unwrap(), expected_slash, "slash burned to ZERO");
 
     // Claim after maturity is denied (359, dispute deny) — reward withheld.
     assert!(matches!(claim_status(&mut candidate.view(), &executor, &p, &v, "s", 2, 58), TxStatus::Failed(359)), "denied dispute blocks claim");
@@ -1127,12 +1130,12 @@ fn denied_dispute_denies_reward_and_slashes_bond() {
 #[test]
 fn allowed_dispute_does_not_slash() {
     let resolver = KeyPair::generate();
-    let (state, db, _dir, executor) = setup_with_params(params_bonding(Some(5_000)));
+    let (_state, db, _dir, executor) = setup_with_params(params_bonding(Some(5_000)));
     let mut candidate = common::candidate(&db);
     let funder = KeyPair::generate();
     let v = KeyPair::generate();
     let proposer = KeyPair::generate();
-    for kp in [&funder, &v, &resolver] { fund(&state, kp, 100_000_000); }
+    for kp in [&funder, &v, &resolver] { fund(&db, kp, 100_000_000); }
     let p = proposer.address();
     let vset = [*resolver.public_key().as_bytes()];
     executor.execute_tx(&mut candidate.view(), &settlement_tx(&funder, 0, open_op_bond("s", 2, 2 * REWARD, 50, 1000, BOND, 2500)), &p, 1, 1000).unwrap();
@@ -1142,18 +1145,18 @@ fn allowed_dispute_does_not_slash() {
     let ap = resolve_approval(&resolver, "s", &v.address(), true);
     executor.execute_tx_with_validators(&mut candidate.view(), &settlement_tx(&resolver, 0, InferenceSettlementOperation::ResolveDispute(ResolveInferenceDisputeRequest { session_id: "s".into(), verifier: v.address(), allow_claim: true, approvals: vec![ap] })), &p, 9, 1000, &vset).unwrap();
     assert_eq!(InferenceSettlementExecutor::v_get_verifier(&candidate.view(), &v.address()).unwrap().unwrap().bond, BOND, "allow → no slash");
-    assert_eq!(state.get_balance(&Address::ZERO).unwrap(), 0, "nothing burned");
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &Address::ZERO).unwrap(), 0, "nothing burned");
 }
 
 #[test]
 fn denied_dispute_with_no_or_zero_bond_slashes_zero_no_underflow() {
     let resolver = KeyPair::generate();
-    let (state, db, _dir, executor) = setup_with_params(params_bonding(Some(5_000)));
+    let (_state, db, _dir, executor) = setup_with_params(params_bonding(Some(5_000)));
     let mut candidate = common::candidate(&db);
     let funder = KeyPair::generate();
     let v = KeyPair::generate();
     let proposer = KeyPair::generate();
-    for kp in [&funder, &v, &resolver] { fund(&state, kp, 100_000_000); }
+    for kp in [&funder, &v, &resolver] { fund(&db, kp, 100_000_000); }
     let p = proposer.address();
     let vset = [*resolver.public_key().as_bytes()];
     // Session requires a bond and slashing, but the verifier NEVER registers.
@@ -1164,18 +1167,18 @@ fn denied_dispute_with_no_or_zero_bond_slashes_zero_no_underflow() {
     let rd = executor.execute_tx_with_validators(&mut candidate.view(), &settlement_tx(&resolver, 0, InferenceSettlementOperation::ResolveDispute(ResolveInferenceDisputeRequest { session_id: "s".into(), verifier: v.address(), allow_claim: false, approvals: vec![ap] })), &p, 9, 1000, &vset).unwrap();
     assert!(rd.status.is_success(), "resolve succeeds even with no bond: {:?}", rd.status);
     assert!(InferenceSettlementExecutor::v_get_verifier(&candidate.view(), &v.address()).unwrap().is_none(), "no verifier record created");
-    assert_eq!(state.get_balance(&Address::ZERO).unwrap(), 0, "no burn, no mint, no underflow");
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &Address::ZERO).unwrap(), 0, "no burn, no mint, no underflow");
 }
 
 #[test]
 fn slash_during_unbonding_reduces_withdrawal() {
     let resolver = KeyPair::generate();
-    let (state, db, _dir, executor) = setup_with_params(params_bonding(Some(5_000)));
+    let (_state, db, _dir, executor) = setup_with_params(params_bonding(Some(5_000)));
     let mut candidate = common::candidate(&db);
     let funder = KeyPair::generate();
     let v = KeyPair::generate();
     let proposer = KeyPair::generate();
-    for kp in [&funder, &v, &resolver] { fund(&state, kp, 100_000_000); }
+    for kp in [&funder, &v, &resolver] { fund(&db, kp, 100_000_000); }
     let p = proposer.address();
     let vset = [*resolver.public_key().as_bytes()];
     executor.execute_tx(&mut candidate.view(), &settlement_tx(&funder, 0, open_op_bond("s", 2, 2 * REWARD, 50, 200, BOND, 4000)), &p, 1, 1000).unwrap();
@@ -1191,10 +1194,10 @@ fn slash_during_unbonding_reduces_withdrawal() {
     assert_eq!(InferenceSettlementExecutor::v_get_verifier(&candidate.view(), &v.address()).unwrap().unwrap().bond, BOND - slash);
 
     // Withdraw after unlock returns the REDUCED bond.
-    let bal = state.get_balance(&v.address()).unwrap();
+    let bal = StateManager::v_get_balance(&candidate.view(), &v.address()).unwrap();
     let w = executor.execute_tx(&mut candidate.view(), &settlement_tx(&v, 3, InferenceSettlementOperation::WithdrawVerifierBond), &p, 16, 1000).unwrap();
     assert!(w.status.is_success(), "withdraw: {:?}", w.status);
-    assert_eq!(state.get_balance(&v.address()).unwrap(), bal - FEE + (BOND - slash), "reduced bond returned");
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &v.address()).unwrap(), bal - FEE + (BOND - slash), "reduced bond returned");
 }
 
 #[test]
@@ -1206,12 +1209,12 @@ fn consistency_failure_alone_does_not_slash() {
     // Bonding + consistency gates both open.
     let mut pr = params_bonding(None);
     pr.inference_settlement_consistency_enabled_from_height = Some(0);
-    let (state, db, _dir, executor) = setup_with_params(pr);
+    let (_state, db, _dir, executor) = setup_with_params(pr);
     let mut candidate = common::candidate(&db);
     let funder = KeyPair::generate();
     let v = KeyPair::generate();
     let proposer = KeyPair::generate();
-    for kp in [&funder, &v] { fund(&state, kp, 100_000_000); }
+    for kp in [&funder, &v] { fund(&db, kp, 100_000_000); }
     let p = proposer.address();
     // Open with a bond+slash requirement AND a consistency rule.
     let op = InferenceSettlementOperation::OpenSession(OpenInferenceSessionRequest {
@@ -1231,7 +1234,7 @@ fn consistency_failure_alone_does_not_slash() {
     assert!(matches!(claim_status(&mut candidate.view(), &executor, &p, &v, "s", 2, 8), TxStatus::Failed(362)), "consistency blocks reward");
     // Bond is fully intact — consistency failure never slashes.
     assert_eq!(InferenceSettlementExecutor::v_get_verifier(&candidate.view(), &v.address()).unwrap().unwrap().bond, BOND, "no slash from consistency failure");
-    assert_eq!(state.get_balance(&Address::ZERO).unwrap(), 0, "nothing burned");
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &Address::ZERO).unwrap(), 0, "nothing burned");
 }
 
 #[test]
@@ -1239,24 +1242,24 @@ fn bonding_gate_closed_and_invalid_config() {
     // Bonding gate CLOSED (settlement still enabled).
     let mut p = params_enabled(None);
     p.inference_verifier_bonding_enabled_from_height = None;
-    let (state, db, _dir, executor) = setup_with_params(p);
+    let (_state, db, _dir, executor) = setup_with_params(p);
     let mut candidate = common::candidate(&db);
     let funder = KeyPair::generate();
     let v = KeyPair::generate();
     let proposer = KeyPair::generate();
-    for kp in [&funder, &v] { fund(&state, kp, 100_000_000); }
+    for kp in [&funder, &v] { fund(&db, kp, 100_000_000); }
     let pr = proposer.address();
 
     // RegisterVerifier while bonding closed → 364, FREE (no fee/nonce/mutation),
     // symmetric with the 350 settlement gate — a dormant entry point, not a
     // semantic error.
-    let bal = state.get_balance(&v.address()).unwrap();
-    let nonce = state.get_nonce(&v.address()).unwrap();
+    let bal = StateManager::v_get_balance(&candidate.view(), &v.address()).unwrap();
+    let nonce = StateManager::v_get_nonce(&candidate.view(), &v.address()).unwrap();
     let r = executor.execute_tx(&mut candidate.view(), &settlement_tx(&v, 0, register_op(BOND)), &pr, 1, 1000).unwrap();
     assert!(matches!(r.status, TxStatus::Failed(364)), "register gate-closed: {:?}", r.status);
     assert_eq!(r.fee_paid, 0, "bonding gate-closed is free");
-    assert_eq!(state.get_balance(&v.address()).unwrap(), bal, "no fee charged");
-    assert_eq!(state.get_nonce(&v.address()).unwrap(), nonce, "no nonce bump");
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &v.address()).unwrap(), bal, "no fee charged");
+    assert_eq!(StateManager::v_get_nonce(&candidate.view(), &v.address()).unwrap(), nonce, "no nonce bump");
     assert!(InferenceSettlementExecutor::v_get_verifier(&candidate.view(), &v.address()).unwrap().is_none(), "no record on gate-closed");
 
     // The other three registry ops are likewise free when the gate is closed.
@@ -1277,10 +1280,13 @@ fn bonding_gate_closed_and_invalid_config() {
     assert!(InferenceSettlementExecutor::v_get_session(&candidate.view(), "s").unwrap().is_none(), "no session on gate-closed");
 
     // Bonding OPEN: invalid config (min_bond = 0) → 365.
-    let (state2, _db2, _dir2, exec2) = setup_with_params(params_bonding(None));
+    // A second environment needs its own candidate: the fee is debited from the
+    // view now, and a view over the FIRST database cannot see `f2`'s funding.
+    let (state2, db2, _dir2, exec2) = setup_with_params(params_bonding(None));
+    let mut candidate2 = common::candidate(&db2);
     let f2 = KeyPair::generate();
-    fund(&state2, &f2, 100_000_000);
-    let bad = exec2.execute_tx(&mut candidate.view(), &settlement_tx(&f2, 0, open_op_bond("s", 2, 2 * REWARD, 0, 1000, 0, 0)), &pr, 1, 1000).unwrap();
+    fund(&db2, &f2, 100_000_000);
+    let bad = exec2.execute_tx(&mut candidate2.view(), &settlement_tx(&f2, 0, open_op_bond("s", 2, 2 * REWARD, 0, 1000, 0, 0)), &pr, 1, 1000).unwrap();
     assert!(matches!(bad.status, TxStatus::Failed(365)), "min_bond=0 → 365: {:?}", bad.status);
 }
 
@@ -1295,14 +1301,16 @@ fn supply_conserved_across_register_open_slash_withdraw() {
     let v = KeyPair::generate();
     let proposer = KeyPair::generate();
     let per = 100_000_000u128;
-    for kp in [&funder, &v, &resolver] { fund(&state, kp, per); }
+    for kp in [&funder, &v, &resolver] { fund(&db, kp, per); }
     let funded = 3 * per; // total native minted into these accounts
     let p = proposer.address();
     let vset = [*resolver.public_key().as_bytes()];
     // Fees flow sender→proposer, so include proposer + ZERO in the balance set.
     let accts = [funder.address(), v.address(), resolver.address(), p, Address::ZERO];
-    // Escrow and bond live in the CANDIDATE until the block is published, so the
-    // conservation check has to look where the value actually is.
+    // Escrow, bond AND the account balances all live in the CANDIDATE until the
+    // block is published, so the conservation check has to look where the value
+    // actually is. Reading balances from committed storage here would count the
+    // funder's pre-escrow balance alongside the escrow it now holds.
     let reconcile = |st: &sumchain_state::StateManager,
                      candidate: &mut sumchain_storage::candidate::CandidateExecution<'_>|
      -> u128 {
@@ -1314,7 +1322,12 @@ fn supply_conserved_across_register_open_slash_withdraw() {
             .unwrap()
             .map(|r| r.bond)
             .unwrap_or(0);
-        sum_balances(st, &accts) + s + b
+        let balances: u128 = accts
+            .iter()
+            .map(|a| StateManager::v_get_balance(&candidate.view(), a).unwrap())
+            .sum();
+        let _ = st;
+        balances + s + b
     };
 
     executor.execute_tx(&mut candidate.view(), &settlement_tx(&funder, 0, open_op_bond("s", 2, 2 * REWARD, 50, 100, BOND, 3000)), &p, 1, 1000).unwrap();
@@ -1341,13 +1354,13 @@ fn settlement_claim_uses_verifier_not_sponsor() {
     // attestation, cannot claim.
     let mut pr = params_enabled(None);
     pr.omninode_sponsored_attestation_enabled_from_height = Some(0);
-    let (state, db, _dir, executor) = setup_with_params(pr);
+    let (_state, db, _dir, executor) = setup_with_params(pr);
     let mut candidate = common::candidate(&db);
     let funder = KeyPair::generate();
     let sponsor = KeyPair::generate();
     let verifier = KeyPair::generate();
     let proposer = KeyPair::generate();
-    for kp in [&funder, &sponsor, &verifier] { fund(&state, kp, 10_000_000); }
+    for kp in [&funder, &sponsor, &verifier] { fund(&db, kp, 10_000_000); }
     let p = proposer.address();
 
     executor.execute_tx(&mut candidate.view(), &settlement_tx(&funder, 0, open_op("s", 2, 2 * REWARD, 0, 1000)), &p, 1, 1000).unwrap();
@@ -1375,7 +1388,7 @@ fn settlement_claim_uses_verifier_not_sponsor() {
     ), "sponsor cannot claim — it is not the verifier");
 
     // Verifier (never paid a fee to submit) can claim the reward.
-    let vbal = state.get_balance(&verifier.address()).unwrap();
+    let vbal = StateManager::v_get_balance(&candidate.view(), &verifier.address()).unwrap();
     assert!(claim_status(&mut candidate.view(), &executor, &p, &verifier, "s", 0, 8).is_success(), "verifier claims");
-    assert_eq!(state.get_balance(&verifier.address()).unwrap(), vbal - FEE + REWARD);
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &verifier.address()).unwrap(), vbal - FEE + REWARD);
 }

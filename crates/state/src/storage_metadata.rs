@@ -599,8 +599,7 @@ impl StorageMetadataExecutor {
     }
 
     /// Deduct fee from sender and credit to proposer
-    fn deduct_fee(
-        state: &StateManager,
+    fn deduct_fee(view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         fee: Balance,
         proposer: &Address,
@@ -609,7 +608,7 @@ impl StorageMetadataExecutor {
             return Ok(());
         }
 
-        let sender_balance = state.get_balance(sender)?;
+        let sender_balance = StateManager::v_get_balance(view, sender)?;
         if sender_balance < fee {
             return Err(StateError::InsufficientBalance {
                 required: fee,
@@ -617,15 +616,15 @@ impl StorageMetadataExecutor {
             });
         }
 
-        let mut sender_account = state.get_account(sender)?;
+        let mut sender_account = StateManager::v_get_account(view, sender)?;
         sender_account.balance = sender_account.balance.saturating_sub(fee);
         sender_account.nonce += 1;
-        state.put_account(sender, &sender_account)?;
+        StateManager::v_put_account(view, sender, &sender_account)?;
 
         if !proposer.is_zero() {
-            let mut proposer_account = state.get_account(proposer)?;
+            let mut proposer_account = StateManager::v_get_account(view, proposer)?;
             proposer_account.balance = proposer_account.balance.saturating_add(fee);
-            state.put_account(proposer, &proposer_account)?;
+            StateManager::v_put_account(view, proposer, &proposer_account)?;
         }
 
         Ok(())
@@ -640,13 +639,12 @@ impl StorageMetadataExecutor {
         view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &StorageMetadataTxData,
-        state: &StateManager,
         proposer: &Address,
         fee: Balance,
         block_height: u64,
         _block_timestamp: u64,
     ) -> Result<StorageMetadataExecutionResult> {
-        Self::deduct_fee(state, sender, fee, proposer)?;
+        Self::deduct_fee(view, sender, fee, proposer)?;
 
         match &data.operation {
             StorageMetadataOperation::RegisterFile {
@@ -655,7 +653,7 @@ impl StorageMetadataExecutor {
                 access_list,
                 fee_deposit,
             } => Self::execute_register_file(
-                view, sender, merkle_root, *total_size_bytes, access_list, *fee_deposit, state,
+                view, sender, merkle_root, *total_size_bytes, access_list, *fee_deposit,
                 block_height,
             ),
             StorageMetadataOperation::UpdateAccessList {
@@ -673,7 +671,7 @@ impl StorageMetadataExecutor {
             StorageMetadataOperation::TopUpFeePool {
                 merkle_root,
                 amount,
-            } => Self::execute_top_up(view, sender, merkle_root, *amount, state),
+            } => Self::execute_top_up(view, sender, merkle_root, *amount),
             StorageMetadataOperation::SubmitStorageProof {
                 challenge_id,
                 merkle_root,
@@ -683,7 +681,7 @@ impl StorageMetadataExecutor {
             } => Self::execute_submit_proof(
                 view,
                 sender, challenge_id, merkle_root, *chunk_index, chunk_hash, merkle_path,
-                state, block_height,
+                block_height,
             ),
         }
     }
@@ -700,7 +698,6 @@ impl StorageMetadataExecutor {
         total_size_bytes: u64,
         access_list: &[Address],
         fee_deposit: u64,
-        state: &StateManager,
         block_height: u64,
     ) -> Result<StorageMetadataExecutionResult> {
         if Self::v_get_metadata(view, merkle_root)?.is_some() {
@@ -713,7 +710,7 @@ impl StorageMetadataExecutor {
             return Ok(StorageMetadataExecutionResult::fail("fee_deposit must be > 0"));
         }
 
-        let balance = state.get_balance(sender)?;
+        let balance = StateManager::v_get_balance(view, sender)?;
         if balance < fee_deposit as u128 {
             return Ok(StorageMetadataExecutionResult::fail(format!(
                 "Insufficient balance for fee deposit: need {}, have {}",
@@ -721,9 +718,9 @@ impl StorageMetadataExecutor {
             )));
         }
 
-        let mut sender_account = state.get_account(sender)?;
+        let mut sender_account = StateManager::v_get_account(view, sender)?;
         sender_account.balance = sender_account.balance.saturating_sub(fee_deposit as u128);
-        state.put_account(sender, &sender_account)?;
+        StateManager::v_put_account(view, sender, &sender_account)?;
 
         let metadata = StorageMetadata {
             merkle_root: *merkle_root,
@@ -831,7 +828,6 @@ impl StorageMetadataExecutor {
         sender: &Address,
         merkle_root: &Hash,
         amount: u64,
-        state: &StateManager,
     ) -> Result<StorageMetadataExecutionResult> {
         let mut meta = match Self::v_get_metadata(view, merkle_root)? {
             Some(m) => m,
@@ -842,7 +838,7 @@ impl StorageMetadataExecutor {
             return Ok(StorageMetadataExecutionResult::fail("Amount must be > 0"));
         }
 
-        let balance = state.get_balance(sender)?;
+        let balance = StateManager::v_get_balance(view, sender)?;
         if balance < amount as u128 {
             return Ok(StorageMetadataExecutionResult::fail(format!(
                 "Insufficient balance: need {}, have {}",
@@ -850,9 +846,9 @@ impl StorageMetadataExecutor {
             )));
         }
 
-        let mut sender_account = state.get_account(sender)?;
+        let mut sender_account = StateManager::v_get_account(view, sender)?;
         sender_account.balance = sender_account.balance.saturating_sub(amount as u128);
-        state.put_account(sender, &sender_account)?;
+        StateManager::v_put_account(view, sender, &sender_account)?;
 
         meta.fee_pool = meta.fee_pool.saturating_add(amount);
         Self::v_put_metadata(view, &meta)?;
@@ -874,7 +870,6 @@ impl StorageMetadataExecutor {
         chunk_index: u32,
         chunk_hash: &Hash,
         merkle_path: &[Hash],
-        state: &StateManager,
         current_height: u64,
     ) -> Result<StorageMetadataExecutionResult> {
         // 1. Load challenge
@@ -991,9 +986,9 @@ impl StorageMetadataExecutor {
         }
 
         if payout > 0 {
-            let mut node_account = state.get_account(&challenge.target_node)?;
+            let mut node_account = StateManager::v_get_account(view, &challenge.target_node)?;
             node_account.balance = node_account.balance.saturating_add(payout as u128);
-            state.put_account(&challenge.target_node, &node_account)?;
+            StateManager::v_put_account(view, &challenge.target_node, &node_account)?;
         }
 
         // 800B correction: a successful PoR proof is REAL archive service — it
@@ -1551,7 +1546,6 @@ impl StorageMetadataExecutor {
         view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &StorageMetadataV2TxData,
-        state: &StateManager,
         proposer: &Address,
         fee: Balance,
         block_height: u64,
@@ -1560,7 +1554,7 @@ impl StorageMetadataExecutor {
     ) -> Result<StorageMetadataV2ExecutionResult> {
         // Fee is deducted up-front so failed validity checks still pay the fee.
         // This matches V1 behavior (deduct_fee, then execute branch).
-        Self::deduct_fee(state, sender, fee, proposer)?;
+        Self::deduct_fee(view, sender, fee, proposer)?;
 
         match &data.operation {
             StorageMetadataOperationV2::RegisterFilePendingV2 {
@@ -1581,7 +1575,6 @@ impl StorageMetadataExecutor {
                 *fee_deposit,
                 *visibility,
                 initial_access,
-                state,
                 block_height,
                 chain_params,
             ),
@@ -1590,7 +1583,6 @@ impl StorageMetadataExecutor {
                     view,
                     sender,
                     merkle_root,
-                    state,
                     block_height,
                     chain_params,
                 )
@@ -2091,7 +2083,6 @@ impl StorageMetadataExecutor {
         fee_deposit: u64,
         visibility_byte: u8,
         initial_access: &[AccessEntryV2],
-        state: &StateManager,
         block_height: u64,
         chain_params: &ChainParams,
     ) -> Result<StorageMetadataV2ExecutionResult> {
@@ -2245,16 +2236,16 @@ impl StorageMetadataExecutor {
         // incremented inside deduct_fee; the deposit is a separate balance
         // movement.
         if fee_deposit > 0 {
-            let sender_balance = state.get_balance(sender)?;
+            let sender_balance = StateManager::v_get_balance(view, sender)?;
             if sender_balance < fee_deposit as u128 {
                 return Ok(StorageMetadataV2ExecutionResult::fail_with_code(
                     30,
                     "insufficient balance for fee_deposit",
                 ));
             }
-            let mut sender_account = state.get_account(sender)?;
+            let mut sender_account = StateManager::v_get_account(view, sender)?;
             sender_account.balance = sender_account.balance.saturating_sub(fee_deposit as u128);
-            state.put_account(sender, &sender_account)?;
+            StateManager::v_put_account(view, sender, &sender_account)?;
         }
 
         // 6. Persist the V2 row. assignment_height = current block height
@@ -2293,7 +2284,6 @@ impl StorageMetadataExecutor {
         view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         merkle_root: &Hash,
-        state: &StateManager,
         block_height: u64,
         chain_params: &ChainParams,
     ) -> Result<StorageMetadataV2ExecutionResult> {
@@ -2333,9 +2323,9 @@ impl StorageMetadataExecutor {
         let refund = row.fee_pool.saturating_sub(retain);
 
         if refund > 0 {
-            let mut owner_account = state.get_account(sender)?;
+            let mut owner_account = StateManager::v_get_account(view, sender)?;
             owner_account.balance = owner_account.balance.saturating_add(refund as u128);
-            state.put_account(sender, &owner_account)?;
+            StateManager::v_put_account(view, sender, &owner_account)?;
         }
 
         // TODO(supply-leak): `retain` is neither credited to any account nor

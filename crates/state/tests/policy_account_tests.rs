@@ -47,7 +47,7 @@ fn zero_addr() -> Address {
 /// A single-member Personal policy account, put directly into storage and its
 /// controlled address funded with `balance`. A single member keeps approval
 /// thresholds trivially satisfiable for execution-path tests.
-fn put_account(db: &Arc<Database>, state: &StateManager, member: &KeyPair, balance: u128) -> PolicyAccount {
+fn put_account(db: &Arc<Database>, member: &KeyPair, balance: u128) -> PolicyAccount {
     let members = vec![PolicyMember::new(member.address())];
     let salt = vec![7u8; 32];
     let id = PolicyAccount::compute_id(&members, &salt);
@@ -64,7 +64,7 @@ fn put_account(db: &Arc<Database>, state: &StateManager, member: &KeyPair, balan
     };
     PolicyAccountStorage::new(db).policy_accounts().put(&account).unwrap();
     if balance > 0 {
-        state.put_account(&address, &AccountState { balance, nonce: 0 }).unwrap();
+        sumchain_storage::StateStore::new(&db).put_account(&address, &AccountState { balance, nonce: 0 }).unwrap();
     }
     account
 }
@@ -101,6 +101,7 @@ fn tx_data(op: PolicyAccountOperation, payload: &impl serde::Serialize) -> Polic
 
 /// Submit `action` as a proposal with the given approvals.
 fn submit(
+    view: &mut sumchain_storage::exec_view::ExecutionView<'_, '_>,
     pe: &PolicyAccountExecutor,
     state: &StateManager,
     account: &PolicyAccount,
@@ -116,10 +117,11 @@ fn submit(
         expires_at: 4_000_000_000_000,
     };
     let data = tx_data(PolicyAccountOperation::SubmitProposal, &req);
-    pe.execute(&sender.address(), &data, state, &zero_addr(), 0, 1, 1000).unwrap()
+    pe.execute(view, &sender.address(), &data, state, &zero_addr(), 0, 1, 1000).unwrap()
 }
 
 fn exec(
+    view: &mut sumchain_storage::exec_view::ExecutionView<'_, '_>,
     pe: &PolicyAccountExecutor,
     state: &StateManager,
     sender: &KeyPair,
@@ -127,7 +129,7 @@ fn exec(
 ) -> PolicyAccountExecutionResult {
     let req = ExecuteProposalRequest { proposal_id };
     let data = tx_data(PolicyAccountOperation::ExecuteProposal, &req);
-    pe.execute(&sender.address(), &data, state, &zero_addr(), 0, 2, 2000).unwrap()
+    pe.execute(view, &sender.address(), &data, state, &zero_addr(), 0, 2, 2000).unwrap()
 }
 
 fn action_hash(action: &TxPayload) -> Hash {
@@ -142,6 +144,9 @@ fn action_hash(action: &TxPayload) -> Hash {
 fn create_policy_account() {
     let (state, db, _dir, _ex) = setup_with_params(ChainParams::with_v2_enabled());
     let pe = PolicyAccountExecutor::new(db.clone());
+    // One candidate per scenario: the policy-account executor stages account
+    // rows now, and every step of a scenario belongs to the same block.
+    let mut candidate = common::candidate(&db);
     let m = kp();
     let req = CreatePolicyAccountRequest {
         members: vec![PolicyMember::new(m.address())],
@@ -149,7 +154,7 @@ fn create_policy_account() {
         salt: vec![1u8; 32],
     };
     let data = tx_data(PolicyAccountOperation::Create, &req);
-    let res = pe.execute(&m.address(), &data, &state, &zero_addr(), 0, 1, 1000).unwrap();
+    let res = pe.execute(&mut candidate.view(), &m.address(), &data, &state, &zero_addr(), 0, 1, 1000).unwrap();
     assert!(res.success, "create failed: {}", res.message);
     let id = PolicyAccount::compute_id(&[PolicyMember::new(m.address())], &[1u8; 32]);
     assert!(PolicyAccountStorage::new(&db).policy_accounts().get(&id).unwrap().is_some());
@@ -159,11 +164,14 @@ fn create_policy_account() {
 fn submit_with_valid_approval_succeeds() {
     let (state, db, _dir, _ex) = setup_with_params(ChainParams::with_v2_enabled());
     let pe = PolicyAccountExecutor::new(db.clone());
+    // One candidate per scenario: the policy-account executor stages account
+    // rows now, and every step of a scenario belongs to the same block.
+    let mut candidate = common::candidate(&db);
     let m = kp();
-    let account = put_account(&db, &state, &m, 0);
+    let account = put_account(&db, &m, 0);
     let action = TxPayload::Transfer { to: zero_addr(), amount: 1 };
     let approval = approve(&account, &action_hash(&action), 0, &m, None, false);
-    let res = submit(&pe, &state, &account, &m, &action, vec![approval]);
+    let res = submit(&mut candidate.view(), &pe, &state, &account, &m, &action, vec![approval]);
     assert!(res.success, "submit failed: {}", res.message);
 }
 
@@ -171,12 +179,15 @@ fn submit_with_valid_approval_succeeds() {
 fn forged_approval_rejected() {
     let (state, db, _dir, _ex) = setup_with_params(ChainParams::with_v2_enabled());
     let pe = PolicyAccountExecutor::new(db.clone());
+    // One candidate per scenario: the policy-account executor stages account
+    // rows now, and every step of a scenario belongs to the same block.
+    let mut candidate = common::candidate(&db);
     let m = kp();
-    let account = put_account(&db, &state, &m, 0);
+    let account = put_account(&db, &m, 0);
     let action = TxPayload::Transfer { to: zero_addr(), amount: 1 };
     // Corrupt the signature.
     let approval = approve(&account, &action_hash(&action), 0, &m, None, true);
-    let res = submit(&pe, &state, &account, &m, &action, vec![approval]);
+    let res = submit(&mut candidate.view(), &pe, &state, &account, &m, &action, vec![approval]);
     assert!(!res.success, "forged approval must be rejected");
 }
 
@@ -184,14 +195,17 @@ fn forged_approval_rejected() {
 fn approval_pubkey_address_mismatch_rejected() {
     let (state, db, _dir, _ex) = setup_with_params(ChainParams::with_v2_enabled());
     let pe = PolicyAccountExecutor::new(db.clone());
+    // One candidate per scenario: the policy-account executor stages account
+    // rows now, and every step of a scenario belongs to the same block.
+    let mut candidate = common::candidate(&db);
     let m = kp();
-    let account = put_account(&db, &state, &m, 0);
+    let account = put_account(&db, &m, 0);
     let action = TxPayload::Transfer { to: zero_addr(), amount: 1 };
     // Valid signature by `m`, but advertise a different (attacker) pubkey that
     // does not hash to the approver address.
     let attacker = kp();
     let approval = approve(&account, &action_hash(&action), 0, &m, Some(*attacker.public_key().as_bytes()), false);
-    let res = submit(&pe, &state, &account, &m, &action, vec![approval]);
+    let res = submit(&mut candidate.view(), &pe, &state, &account, &m, &action, vec![approval]);
     assert!(!res.success, "pubkey/address mismatch must be rejected");
 }
 
@@ -199,18 +213,21 @@ fn approval_pubkey_address_mismatch_rejected() {
 fn transfer_native_executes_from_policy_account() {
     let (state, db, _dir, _ex) = setup_with_params(ChainParams::with_v2_enabled());
     let pe = PolicyAccountExecutor::new(db.clone());
+    // One candidate per scenario: the policy-account executor stages account
+    // rows now, and every step of a scenario belongs to the same block.
+    let mut candidate = common::candidate(&db);
     let m = kp();
-    let account = put_account(&db, &state, &m, 1_000);
+    let account = put_account(&db, &m, 1_000);
     let to = kp().address();
     let action = TxPayload::Transfer { to, amount: 100 };
     let ah = action_hash(&action);
     let approval = approve(&account, &ah, 0, &m, None, false);
-    let sres = submit(&pe, &state, &account, &m, &action, vec![approval]);
+    let sres = submit(&mut candidate.view(), &pe, &state, &account, &m, &action, vec![approval]);
     assert!(sres.success, "submit failed: {}", sres.message);
     let pid = Proposal::compute_id(&account.id, 0, &ah);
-    let eres = exec(&pe, &state, &m, pid);
+    let eres = exec(&mut candidate.view(), &pe, &state, &m, pid);
     assert!(eres.success, "execute failed: {}", eres.message);
-    assert_eq!(state.get_balance(&to).unwrap(), 100, "funds did not move");
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &to).unwrap(), 100, "funds did not move");
     let updated = PolicyAccountStorage::new(&db).policy_accounts().get(&account.id).unwrap().unwrap();
     assert_eq!(updated.nonce, 1, "policy nonce should advance on success");
 }
@@ -253,6 +270,7 @@ fn seed_pa_token(db: &Arc<Database>, owner: Address, paused: bool, minters: Vec<
 /// Submit + execute a wrapped Token op through the policy account. Returns the
 /// execute result.
 fn run_token_op(
+    view: &mut sumchain_storage::exec_view::ExecutionView<'_, '_>,
     pe: &PolicyAccountExecutor,
     state: &StateManager,
     account: &PolicyAccount,
@@ -263,29 +281,32 @@ fn run_token_op(
     let action = TxPayload::Token(TokenTxData { token_id: PA_TOKEN, operation: op, data });
     let ah = action_hash(&action);
     let approval = approve(account, &ah, account.nonce, m, None, false);
-    let sres = submit(pe, state, account, m, &action, vec![approval]);
+    let sres = submit(view, pe, state, account, m, &action, vec![approval]);
     assert!(sres.success, "submit failed: {}", sres.message);
     let pid = Proposal::compute_id(&account.id, account.nonce, &ah);
-    exec(pe, state, m, pid)
+    exec(view, pe, state, m, pid)
 }
 
 #[test]
 fn policy_account_executes_five_token_admin_ops() {
     let (state, db, _dir, _ex) = setup_with_params(ChainParams::with_v2_enabled());
     let pe = PolicyAccountExecutor::new(db.clone());
+    // One candidate per scenario: the policy-account executor stages account
+    // rows now, and every step of a scenario belongs to the same block.
+    let mut candidate = common::candidate(&db);
     let m = kp();
-    let mut account = put_account(&db, &state, &m, 0);
+    let mut account = put_account(&db, &m, 0);
     let ts = TokenStore::new(&db);
 
     // 1) Pause (token owned by the policy account, not paused).
     seed_pa_token(&db, account.address, false, vec![]);
-    let r = run_token_op(&pe, &state, &account, &m, TokenOperation::Pause, vec![]);
+    let r = run_token_op(&mut candidate.view(), &pe, &state, &account, &m, TokenOperation::Pause, vec![]);
     assert!(r.success, "pause: {}", r.message);
     assert!(ts.get_token(&PA_TOKEN).unwrap().unwrap().paused, "token paused");
     account.nonce += 1;
 
     // 2) Unpause.
-    let r = run_token_op(&pe, &state, &account, &m, TokenOperation::Unpause, vec![]);
+    let r = run_token_op(&mut candidate.view(), &pe, &state, &account, &m, TokenOperation::Unpause, vec![]);
     assert!(r.success, "unpause: {}", r.message);
     assert!(!ts.get_token(&PA_TOKEN).unwrap().unwrap().paused, "token unpaused");
     account.nonce += 1;
@@ -293,14 +314,14 @@ fn policy_account_executes_five_token_admin_ops() {
     // 3) AddMinter.
     let minter = kp().address();
     let add = bincode::serialize(&TokenMinterData { minter }).unwrap();
-    let r = run_token_op(&pe, &state, &account, &m, TokenOperation::AddMinter, add);
+    let r = run_token_op(&mut candidate.view(), &pe, &state, &account, &m, TokenOperation::AddMinter, add);
     assert!(r.success, "add_minter: {}", r.message);
     assert!(ts.get_token(&PA_TOKEN).unwrap().unwrap().minters.contains(&minter), "minter added");
     account.nonce += 1;
 
     // 4) RemoveMinter.
     let rem = bincode::serialize(&TokenMinterData { minter }).unwrap();
-    let r = run_token_op(&pe, &state, &account, &m, TokenOperation::RemoveMinter, rem);
+    let r = run_token_op(&mut candidate.view(), &pe, &state, &account, &m, TokenOperation::RemoveMinter, rem);
     assert!(r.success, "remove_minter: {}", r.message);
     assert!(!ts.get_token(&PA_TOKEN).unwrap().unwrap().minters.contains(&minter), "minter removed");
     account.nonce += 1;
@@ -308,7 +329,7 @@ fn policy_account_executes_five_token_admin_ops() {
     // 5) TransferOwnership.
     let new_owner = kp().address();
     let to = bincode::serialize(&TokenTransferOwnershipData { new_owner }).unwrap();
-    let r = run_token_op(&pe, &state, &account, &m, TokenOperation::TransferOwnership, to);
+    let r = run_token_op(&mut candidate.view(), &pe, &state, &account, &m, TokenOperation::TransferOwnership, to);
     assert!(r.success, "transfer_ownership: {}", r.message);
     assert_eq!(ts.get_token(&PA_TOKEN).unwrap().unwrap().owner, new_owner, "ownership transferred");
 }
@@ -319,13 +340,16 @@ fn policy_account_failing_token_op_no_partial_state_no_nonce_advance() {
     // owner can pause"). No token state changes; policy nonce stays put.
     let (state, db, _dir, _ex) = setup_with_params(ChainParams::with_v2_enabled());
     let pe = PolicyAccountExecutor::new(db.clone());
+    // One candidate per scenario: the policy-account executor stages account
+    // rows now, and every step of a scenario belongs to the same block.
+    let mut candidate = common::candidate(&db);
     let m = kp();
-    let account = put_account(&db, &state, &m, 0);
+    let account = put_account(&db, &m, 0);
     let ts = TokenStore::new(&db);
     // Owner is someone else.
     seed_pa_token(&db, kp().address(), false, vec![]);
 
-    let r = run_token_op(&pe, &state, &account, &m, TokenOperation::Pause, vec![]);
+    let r = run_token_op(&mut candidate.view(), &pe, &state, &account, &m, TokenOperation::Pause, vec![]);
     assert!(!r.success, "unauthorized pause must fail");
     // No partial state: token not paused.
     assert!(!ts.get_token(&PA_TOKEN).unwrap().unwrap().paused, "token must not be paused");
@@ -340,14 +364,17 @@ fn policy_account_non_allowlisted_token_op_fail_closed() {
     // → fail-closed (never dispatched), no nonce advance.
     let (state, db, _dir, _ex) = setup_with_params(ChainParams::with_v2_enabled());
     let pe = PolicyAccountExecutor::new(db.clone());
+    // One candidate per scenario: the policy-account executor stages account
+    // rows now, and every step of a scenario belongs to the same block.
+    let mut candidate = common::candidate(&db);
     let m = kp();
-    let account = put_account(&db, &state, &m, 0);
+    let account = put_account(&db, &m, 0);
     seed_pa_token(&db, account.address, false, vec![]);
 
     // Mint payload: TokenMintData { to, amount }. Even well-formed, Mint stays
     // fail-closed.
     let mint = bincode::serialize(&sumchain_primitives::token_ops::TokenMintData { to: kp().address(), amount: 5 }).unwrap();
-    let r = run_token_op(&pe, &state, &account, &m, TokenOperation::Mint, mint);
+    let r = run_token_op(&mut candidate.view(), &pe, &state, &account, &m, TokenOperation::Mint, mint);
     assert!(!r.success, "Mint must be fail-closed via a policy account");
     // No supply minted.
     assert_eq!(TokenStore::new(&db).get_token(&PA_TOKEN).unwrap().unwrap().total_supply, 0, "no mint");
@@ -359,8 +386,11 @@ fn policy_account_non_allowlisted_token_op_fail_closed() {
 fn modify_membership_executes() {
     let (state, db, _dir, _ex) = setup_with_params(ChainParams::with_v2_enabled());
     let pe = PolicyAccountExecutor::new(db.clone());
+    // One candidate per scenario: the policy-account executor stages account
+    // rows now, and every step of a scenario belongs to the same block.
+    let mut candidate = common::candidate(&db);
     let m = kp();
-    let account = put_account(&db, &state, &m, 0);
+    let account = put_account(&db, &m, 0);
     let new_member = kp();
     let modify = ModifyMembershipRequest {
         new_members: vec![PolicyMember::new(m.address()), PolicyMember::new(new_member.address())],
@@ -368,10 +398,10 @@ fn modify_membership_executes() {
     let action = TxPayload::PolicyAccount(tx_data(PolicyAccountOperation::ModifyMembership, &modify));
     let ah = action_hash(&action);
     let approval = approve(&account, &ah, 0, &m, None, false);
-    let sres = submit(&pe, &state, &account, &m, &action, vec![approval]);
+    let sres = submit(&mut candidate.view(), &pe, &state, &account, &m, &action, vec![approval]);
     assert!(sres.success, "submit failed: {}", sres.message);
     let pid = Proposal::compute_id(&account.id, 0, &ah);
-    let eres = exec(&pe, &state, &m, pid);
+    let eres = exec(&mut candidate.view(), &pe, &state, &m, pid);
     assert!(eres.success, "execute failed: {}", eres.message);
     let updated = PolicyAccountStorage::new(&db).policy_accounts().get(&account.id).unwrap().unwrap();
     assert_eq!(updated.members.len(), 2, "membership should be updated");
@@ -383,23 +413,26 @@ fn modify_policy_executes_with_fee_charged_once() {
     // execute it via `execute_tx` so submitter fee/nonce accounting runs
     // alongside the policy update + policy-nonce advance.
     let (state, db, _dir, executor) = setup_with_params(ChainParams::with_v2_enabled());
-    let mut candidate = common::candidate(&db);
+    let mut _candidate = common::candidate(&db);
     let pe = PolicyAccountExecutor::new(db.clone());
+    // One candidate per scenario: the policy-account executor stages account
+    // rows now, and every step of a scenario belongs to the same block.
+    let mut candidate = common::candidate(&db);
     let m = kp();
-    let account = put_account(&db, &state, &m, 0);
+    let account = put_account(&db, &m, 0);
     let modify = ModifyPolicyRequest {
         new_policy: PolicyConfig { profile: PolicyProfile::Company, overrides: vec![] },
     };
     let action = TxPayload::PolicyAccount(tx_data(PolicyAccountOperation::ModifyPolicy, &modify));
     let ah = action_hash(&action);
     let approval = approve(&account, &ah, 0, &m, None, false);
-    let sres = submit(&pe, &state, &account, &m, &action, vec![approval]);
+    let sres = submit(&mut candidate.view(), &pe, &state, &account, &m, &action, vec![approval]);
     assert!(sres.success, "submit failed: {}", sres.message);
     let pid = Proposal::compute_id(&account.id, 0, &ah);
 
     // Execute through the block executor so fee/nonce are charged.
     let fee = 1_000u128;
-    fund(&state, &m, 10_000);
+    fund(&db, &m, 10_000);
     let exec = ExecuteProposalRequest { proposal_id: pid };
     let payload = TxPayload::PolicyAccount(tx_data(PolicyAccountOperation::ExecuteProposal, &exec));
     let tx = TransactionV2 { chain_id: CHAIN_ID, from: m.address(), fee, nonce: 0, payload };
@@ -415,17 +448,20 @@ fn modify_policy_executes_with_fee_charged_once() {
     assert!(matches!(updated.policy.profile, PolicyProfile::Company), "policy not updated");
     assert_eq!(updated.nonce, 1, "policy nonce should advance");
     // Submitter fee charged exactly once + one nonce step.
-    assert_eq!(state.get_balance(&m.address()).unwrap(), 10_000 - fee, "fee charged exactly once");
-    assert_eq!(state.get_nonce(&m.address()).unwrap(), 1, "submitter nonce +1");
-    assert_eq!(state.get_balance(&proposer.address()).unwrap(), fee, "proposer credited fee");
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &m.address()).unwrap(), 10_000 - fee, "fee charged exactly once");
+    assert_eq!(StateManager::v_get_nonce(&candidate.view(), &m.address()).unwrap(), 1, "submitter nonce +1");
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &proposer.address()).unwrap(), fee, "proposer credited fee");
 }
 
 #[test]
 fn unsupported_wrapped_action_fails_closed() {
     let (state, db, _dir, _ex) = setup_with_params(ChainParams::with_v2_enabled());
     let pe = PolicyAccountExecutor::new(db.clone());
+    // One candidate per scenario: the policy-account executor stages account
+    // rows now, and every step of a scenario belongs to the same block.
+    let mut candidate = common::candidate(&db);
     let m = kp();
-    let account = put_account(&db, &state, &m, 0);
+    let account = put_account(&db, &m, 0);
     // A wrapped PolicyAccount(Freeze) classifies as `Other` -> unsupported.
     let wrapped = TxPayload::PolicyAccount(PolicyAccountTxData {
         operation: PolicyAccountOperation::Freeze,
@@ -434,10 +470,10 @@ fn unsupported_wrapped_action_fails_closed() {
     });
     let ah = action_hash(&wrapped);
     let approval = approve(&account, &ah, 0, &m, None, false);
-    let sres = submit(&pe, &state, &account, &m, &wrapped, vec![approval]);
+    let sres = submit(&mut candidate.view(), &pe, &state, &account, &m, &wrapped, vec![approval]);
     assert!(sres.success, "submit validates approvals, not executability: {}", sres.message);
     let pid = Proposal::compute_id(&account.id, 0, &ah);
-    let eres = exec(&pe, &state, &m, pid);
+    let eres = exec(&mut candidate.view(), &pe, &state, &m, pid);
     assert!(!eres.success, "unsupported wrapped action must fail closed");
     // Proposal stays Pending; policy nonce unchanged.
     let prop = PolicyAccountStorage::new(&db).proposals().get(&pid).unwrap().unwrap();
@@ -450,12 +486,15 @@ fn unsupported_wrapped_action_fails_closed() {
 fn cancel_proposal() {
     let (state, db, _dir, _ex) = setup_with_params(ChainParams::with_v2_enabled());
     let pe = PolicyAccountExecutor::new(db.clone());
+    // One candidate per scenario: the policy-account executor stages account
+    // rows now, and every step of a scenario belongs to the same block.
+    let mut candidate = common::candidate(&db);
     let m = kp();
-    let account = put_account(&db, &state, &m, 0);
+    let account = put_account(&db, &m, 0);
     let action = TxPayload::Transfer { to: zero_addr(), amount: 1 };
     let ah = action_hash(&action);
     let approval = approve(&account, &ah, 0, &m, None, false);
-    submit(&pe, &state, &account, &m, &action, vec![approval]);
+    submit(&mut candidate.view(), &pe, &state, &account, &m, &action, vec![approval]);
     let pid = Proposal::compute_id(&account.id, 0, &ah);
     // CancelProposal's payload is a raw ProposalId (matches the RPC builder).
     let cancel = PolicyAccountTxData {
@@ -463,7 +502,7 @@ fn cancel_proposal() {
         data: bincode::serialize(&pid).unwrap(),
         recipient: zero_addr(),
     };
-    let res = pe.execute(&m.address(), &cancel, &state, &zero_addr(), 0, 2, 2000).unwrap();
+    let res = pe.execute(&mut candidate.view(), &m.address(), &cancel, &state, &zero_addr(), 0, 2, 2000).unwrap();
     assert!(res.success, "cancel failed: {}", res.message);
     let prop = PolicyAccountStorage::new(&db).proposals().get(&pid).unwrap().unwrap();
     assert_eq!(prop.status, ProposalStatus::Cancelled);
@@ -473,12 +512,15 @@ fn cancel_proposal() {
 fn pending_proposal_listing() {
     let (state, db, _dir, _ex) = setup_with_params(ChainParams::with_v2_enabled());
     let pe = PolicyAccountExecutor::new(db.clone());
+    // One candidate per scenario: the policy-account executor stages account
+    // rows now, and every step of a scenario belongs to the same block.
+    let mut candidate = common::candidate(&db);
     let m = kp();
-    let account = put_account(&db, &state, &m, 0);
+    let account = put_account(&db, &m, 0);
     for amount in [1u128, 2u128] {
         let action = TxPayload::Transfer { to: zero_addr(), amount };
         let approval = approve(&account, &action_hash(&action), 0, &m, None, false);
-        submit(&pe, &state, &account, &m, &action, vec![approval]);
+        submit(&mut candidate.view(), &pe, &state, &account, &m, &action, vec![approval]);
     }
     let pending = PolicyAccountStorage::new(&db).proposals().list_pending(&account.id).unwrap();
     assert_eq!(pending.len(), 2, "two pending proposals expected");
@@ -501,32 +543,32 @@ fn create_tx(sender: &KeyPair, nonce: u64, fee: u128) -> SignedTransaction {
 
 #[test]
 fn fee_and_submitter_nonce_charged_once_on_success() {
-    let (state, db, _dir, executor) = setup_with_params(ChainParams::with_v2_enabled());
+    let (_state, db, _dir, executor) = setup_with_params(ChainParams::with_v2_enabled());
     let mut candidate = common::candidate(&db);
     let sender = kp();
     let proposer = kp();
     let fee = 1_000u128;
-    fund(&state, &sender, 10_000);
+    fund(&db, &sender, 10_000);
     let tx = create_tx(&sender, 0, fee);
     let res = executor.execute_tx(&mut candidate.view(), &tx, &proposer.address(), 1, 1000).unwrap();
     assert!(matches!(res.status, TxStatus::Success), "expected success, got {:?}", res.status);
-    assert_eq!(state.get_balance(&sender.address()).unwrap(), 10_000 - fee, "fee charged exactly once");
-    assert_eq!(state.get_nonce(&sender.address()).unwrap(), 1, "submitter nonce +1");
-    assert_eq!(state.get_balance(&proposer.address()).unwrap(), fee, "proposer credited fee");
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &sender.address()).unwrap(), 10_000 - fee, "fee charged exactly once");
+    assert_eq!(StateManager::v_get_nonce(&candidate.view(), &sender.address()).unwrap(), 1, "submitter nonce +1");
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &proposer.address()).unwrap(), fee, "proposer credited fee");
 }
 
 #[test]
 fn insufficient_balance_is_free_no_nonce() {
-    let (state, db, _dir, executor) = setup_with_params(ChainParams::with_v2_enabled());
+    let (_state, db, _dir, executor) = setup_with_params(ChainParams::with_v2_enabled());
     let mut candidate = common::candidate(&db);
     let sender = kp();
     let proposer = kp();
     let fee = 1_000u128;
-    fund(&state, &sender, 10); // less than fee
+    fund(&db, &sender, 10); // less than fee
     let tx = create_tx(&sender, 0, fee);
     let res = executor.execute_tx(&mut candidate.view(), &tx, &proposer.address(), 1, 1000).unwrap();
     assert!(matches!(res.status, TxStatus::InsufficientBalance), "got {:?}", res.status);
     assert_eq!(res.fee_paid, 0, "no fee on insufficient balance");
-    assert_eq!(state.get_balance(&sender.address()).unwrap(), 10, "balance unchanged");
-    assert_eq!(state.get_nonce(&sender.address()).unwrap(), 0, "nonce unchanged");
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &sender.address()).unwrap(), 10, "balance unchanged");
+    assert_eq!(StateManager::v_get_nonce(&candidate.view(), &sender.address()).unwrap(), 0, "nonce unchanged");
 }

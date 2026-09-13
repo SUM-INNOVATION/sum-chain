@@ -67,7 +67,7 @@ fn deploy_diff_captured_and_reverted() {
     let (state, db, _dir, executor) = setup_with_params(ChainParams::with_contracts_enabled());
     let deployer = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &deployer, 10_000_000);
+    fund(&db, &deployer, 10_000_000);
 
     let blk = block(1, &proposer, vec![deploy_tx(&deployer, 0, wat::parse_str(WAT_INIT_WRITES).unwrap())]);
     let exec = executor.execute_block(&blk, Hash::ZERO, &[]).unwrap();
@@ -109,8 +109,8 @@ fn root_committed_above_gate_only() {
     let code = wat::parse_str(WAT_INIT_WRITES).unwrap();
 
     // Gate OPEN: deploy succeeds, contract diff non-empty, digest folded.
-    let (s1, _d1, _dir1, ex1) = setup_with_params(ChainParams::with_contracts_enabled());
-    fund(&s1, &deployer, 10_000_000);
+    let (s1, d1, _dir1, ex1) = setup_with_params(ChainParams::with_contracts_enabled());
+    fund(&d1, &deployer, 10_000_000);
     let exec1 = ex1
         .execute_block(&block(1, &proposer, vec![deploy_tx(&deployer, 0, code.clone())]), Hash::ZERO, &[])
         .unwrap();
@@ -123,8 +123,8 @@ fn root_committed_above_gate_only() {
     assert!(!cd1.records.is_empty());
 
     // Gate CLOSED: same block, contract tx rejected free, empty diff, no digest.
-    let (s2, _d2, _dir2, ex2) = setup_with_params(ChainParams::with_v2_enabled());
-    fund(&s2, &deployer, 10_000_000);
+    let (s2, d2, _dir2, ex2) = setup_with_params(ChainParams::with_v2_enabled());
+    fund(&d2, &deployer, 10_000_000);
     let exec2 = ex2
         .execute_block(&block(1, &proposer, vec![deploy_tx(&deployer, 0, code)]), Hash::ZERO, &[])
         .unwrap();
@@ -139,10 +139,10 @@ fn root_committed_above_gate_only() {
 
 #[test]
 fn failed_deploy_leaves_no_diff_or_state() {
-    let (state, db, _dir, executor) = setup_with_params(ChainParams::with_contracts_enabled());
+    let (_state, db, _dir, executor) = setup_with_params(ChainParams::with_contracts_enabled());
     let deployer = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &deployer, 10_000_000);
+    fund(&db, &deployer, 10_000_000);
 
     let blk = block(1, &proposer, vec![deploy_tx(&deployer, 0, wat::parse_str(WAT_INIT_TRAPS).unwrap())]);
     let exec = executor.execute_block(&blk, Hash::ZERO, &[]).unwrap();
@@ -197,11 +197,11 @@ fn unknown_cf_kind_aborts_revert_atomically() {
     // A malformed contract diff (unknown cf_kind) must abort the WHOLE
     // coordinated revert: account state is NOT partially reverted and neither
     // diff record is deleted, leaving a clean retry path.
-    let (state, _db, _dir, _ex) = setup_with_params(ChainParams::with_contracts_enabled());
+    let (state, db, _dir, _ex) = setup_with_params(ChainParams::with_contracts_enabled());
     let addr = KeyPair::generate().address();
 
     // Current account state is the post-block value (balance 50).
-    state.put_account(&addr, &AccountState { balance: 50, nonce: 1 }).unwrap();
+    sumchain_storage::StateStore::new(&db).put_account(&addr, &AccountState { balance: 50, nonce: 1 }).unwrap();
     let mut sd = StateDiff::new();
     sd.add_change(
         addr,

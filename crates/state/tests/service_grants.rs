@@ -59,8 +59,8 @@ fn migrate(
     exec: &BlockExecutor,
 ) {
     let half = GENESIS_ACCOUNTED_SUPPLY / 2;
-    state.credit(&Address::new([0xE1; 20]), half).unwrap();
-    state.credit(&Address::new([0xE2; 20]), half).unwrap();
+    common::credit_committed(&db, &Address::new([0xE1; 20]), half);
+    common::credit_committed(&db, &Address::new([0xE2; 20]), half);
     common::publish_empty_block(state, exec, 100, &[0x5Au8; 32]);
     assert!(
         SupplyStore::new(db.clone()).is_migration_applied().unwrap(),
@@ -87,19 +87,19 @@ fn setup_migrated(
 
 #[test]
 fn gate_closed_claim_and_unlock_rejected_free_380() {
-    let (state, db, _dir, exec) = setup_migrated(params_grants_closed());
+    let (_state, db, _dir, exec) = setup_migrated(params_grants_closed());
     let mut candidate = common::candidate(&db);
     let v = KeyPair::generate();
     seed_validator(&db, &v);
-    fund(&state, &v, 1_000_000);
-    let bal0 = state.get_balance(&v.address()).unwrap();
+    fund(&db, &v, 1_000_000);
+    let bal0 = StateManager::v_get_balance(&candidate.view(), &v.address()).unwrap();
 
     for payload in [claim(ServiceKind::Validator), unlock(ServiceKind::Validator)] {
         let r = exec.execute_tx(&mut candidate.view(), &signed(&v, 0, payload), &Address::new([9; 20]), 10, 1000).unwrap();
         assert!(matches!(r.status, TxStatus::Failed(380)), "dormant gate: {:?}", r.status);
         assert_eq!(r.fee_paid, 0, "gate-closed is free");
     }
-    assert_eq!(state.get_balance(&v.address()).unwrap(), bal0, "no fee, no mutation");
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &v.address()).unwrap(), bal0, "no fee, no mutation");
     assert!(SupplyStore::v_get_grant(&candidate.view(), &v.address(), ServiceKind::Validator).unwrap().is_none());
 }
 
@@ -107,12 +107,12 @@ fn gate_closed_claim_and_unlock_rejected_free_380() {
 
 #[test]
 fn validator_claim_splits_10_90_and_is_once_per_identity() {
-    let (state, db, _dir, exec) = setup_migrated(params_grants_open());
+    let (_state, db, _dir, exec) = setup_migrated(params_grants_open());
     let mut candidate = common::candidate(&db);
     let v = KeyPair::generate();
     seed_validator(&db, &v);
-    fund(&state, &v, 1_000_000);
-    let bal0 = state.get_balance(&v.address()).unwrap();
+    fund(&db, &v, 1_000_000);
+    let bal0 = StateManager::v_get_balance(&candidate.view(), &v.address()).unwrap();
 
     let r = exec.execute_tx(&mut candidate.view(), &signed(&v, 0, claim(ServiceKind::Validator)), &Address::new([9; 20]), 10, 1000).unwrap();
     assert!(matches!(r.status, TxStatus::Success), "claim: {:?}", r.status);
@@ -121,7 +121,7 @@ fn validator_claim_splits_10_90_and_is_once_per_identity() {
     let total = validator_cohort_grant(0).unwrap();
     let (liquid, locked) = split_grant(total);
     assert_eq!(liquid, 500_000 * KOPPA);
-    assert_eq!(state.get_balance(&v.address()).unwrap(), bal0 - 100 + liquid, "liquid credited (minus fee)");
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &v.address()).unwrap(), bal0 - 100 + liquid, "liquid credited (minus fee)");
     let g = SupplyStore::v_get_grant(&candidate.view(), &v.address(), ServiceKind::Validator).unwrap().unwrap();
     assert_eq!(g.total_grant, total);
     assert_eq!(g.liquid_claimed, liquid);
@@ -153,10 +153,10 @@ fn genesis_validators_excluded_from_bootstrap_grants() {
 
 #[test]
 fn non_validator_cannot_claim_381() {
-    let (state, db, _dir, exec) = setup_migrated(params_grants_open());
+    let (_state, db, _dir, exec) = setup_migrated(params_grants_open());
     let mut candidate = common::candidate(&db);
     let nobody = KeyPair::generate();
-    fund(&state, &nobody, 1_000_000);
+    fund(&db, &nobody, 1_000_000);
     let r = exec.execute_tx(&mut candidate.view(), &signed(&nobody, 0, claim(ServiceKind::Validator)), &Address::new([9; 20]), 10, 1000).unwrap();
     assert!(matches!(r.status, TxStatus::Failed(381)), "not a validator: {:?}", r.status);
 }
@@ -180,12 +180,12 @@ fn validator_cohort_boundaries_exact() {
 
 #[test]
 fn cohort_counter_advances_per_distinct_validator() {
-    let (state, db, _dir, exec) = setup_migrated(params_grants_open());
+    let (_state, db, _dir, exec) = setup_migrated(params_grants_open());
     let mut candidate = common::candidate(&db);
     for i in 0..3u64 {
         let v = KeyPair::generate();
         seed_validator(&db, &v);
-        fund(&state, &v, 1_000_000);
+        fund(&db, &v, 1_000_000);
         let r = exec.execute_tx(&mut candidate.view(), &signed(&v, 0, claim(ServiceKind::Validator)), &Address::new([9; 20]), 10 + i, 1000).unwrap();
         assert!(matches!(r.status, TxStatus::Success));
     }
@@ -196,11 +196,11 @@ fn cohort_counter_advances_per_distinct_validator() {
 
 #[test]
 fn unlock_requires_protocol_earned_credit_transfers_never_count() {
-    let (state, db, _dir, exec) = setup_migrated(params_grants_open());
+    let (_state, db, _dir, exec) = setup_migrated(params_grants_open());
     let mut candidate = common::candidate(&db);
     let v = KeyPair::generate();
     seed_validator(&db, &v);
-    fund(&state, &v, 10_000_000);
+    fund(&db, &v, 10_000_000);
     exec.execute_tx(&mut candidate.view(), &signed(&v, 0, claim(ServiceKind::Validator)), &Address::new([9; 20]), 10, 1000).unwrap();
 
     // No earned credit → unlock fails 384.
@@ -210,9 +210,12 @@ fn unlock_requires_protocol_earned_credit_transfers_never_count() {
     // Ordinary transfers (including received and self-transfers) do NOT create
     // earned credit — the accrual sites are the protocol reward paths only.
     let friend = KeyPair::generate();
-    fund(&state, &friend, 5_000_000);
-    state.transfer(&friend.address(), &v.address(), 1_000_000, 0, &Address::new([9; 20])).unwrap();
-    state.transfer(&v.address(), &v.address(), 500_000, 0, &Address::new([9; 20])).unwrap(); // self
+    fund(&db, &friend, 5_000_000);
+    // Through the candidate: `v`'s account is already staged by the failed
+    // unlock above, so a committed transfer would sit behind the staged row and
+    // the nonce this advances would not be there for the next transaction.
+    StateManager::v_transfer(&mut candidate.view(), &friend.address(), &v.address(), 1_000_000, 0, &Address::new([9; 20])).unwrap();
+    StateManager::v_transfer(&mut candidate.view(), &v.address(), &v.address(), 500_000, 0, &Address::new([9; 20])).unwrap(); // self
     assert_eq!(SupplyStore::v_get_earned_credit(&candidate.view(), &v.address(), ServiceKind::Validator).unwrap(), 0);
     // (the self-transfer advanced v's nonce by 1 → next tx nonce is 3)
     let r2 = exec.execute_tx(&mut candidate.view(), &signed(&v, 3, unlock(ServiceKind::Validator)), &Address::new([9; 20]), 12, 1000).unwrap();
@@ -221,11 +224,11 @@ fn unlock_requires_protocol_earned_credit_transfers_never_count() {
     // Real protocol-earned credit (accrued at the block-fee reward site)
     // unlocks exactly 1:1, capped by earned.
     SupplyStore::accrue_earned_credit(&mut candidate.view(), &v.address(), ServiceKind::Validator, 700 * KOPPA).unwrap();
-    let bal_before = state.get_balance(&v.address()).unwrap();
+    let bal_before = StateManager::v_get_balance(&candidate.view(), &v.address()).unwrap();
     let r3 = exec.execute_tx(&mut candidate.view(), &signed(&v, 4, unlock(ServiceKind::Validator)), &Address::new([9; 20]), 13, 1000).unwrap();
     assert!(matches!(r3.status, TxStatus::Success), "unlock: {:?}", r3.status);
     assert_eq!(
-        state.get_balance(&v.address()).unwrap(),
+        StateManager::v_get_balance(&candidate.view(), &v.address()).unwrap(),
         bal_before - 100 + 700 * KOPPA,
         "unlocked exactly the earned amount (minus fee)"
     );
@@ -253,11 +256,11 @@ fn validator_block_fee_accrual_goes_to_proposer_after_migration() {
 
 #[test]
 fn archive_milestones_no_lump_sum_without_evidence() {
-    let (state, db, _dir, exec) = setup_migrated(params_grants_open());
+    let (_state, db, _dir, exec) = setup_migrated(params_grants_open());
     let mut candidate = common::candidate(&db);
     // Register an ACTIVE archive node via the node registry.
     let a = KeyPair::generate();
-    fund(&state, &a, 2_000_000_000);
+    fund(&db, &a, 2_000_000_000);
     let reg = TxPayload::NodeRegistry(sumchain_primitives::NodeRegistryTxData {
         operation: sumchain_primitives::NodeRegistryOperation::Register {
             role: sumchain_primitives::NodeRole::ArchiveNode,
@@ -274,10 +277,10 @@ fn archive_milestones_no_lump_sum_without_evidence() {
 
 #[test]
 fn archive_proof_milestone_pays_after_evidence_and_only_once() {
-    let (state, db, _dir, exec) = setup_migrated(params_grants_open());
+    let (_state, db, _dir, exec) = setup_migrated(params_grants_open());
     let mut candidate = common::candidate(&db);
     let a = KeyPair::generate();
-    fund(&state, &a, 2_000_000_000);
+    fund(&db, &a, 2_000_000_000);
     let reg = TxPayload::NodeRegistry(sumchain_primitives::NodeRegistryTxData {
         operation: sumchain_primitives::NodeRegistryOperation::Register {
             role: sumchain_primitives::NodeRole::ArchiveNode,
@@ -293,11 +296,11 @@ fn archive_proof_milestone_pays_after_evidence_and_only_once() {
     }
     // Claim right after registration (active-duration milestone NOT reached —
     // only the 100-proof milestone pays).
-    let bal0 = state.get_balance(&a.address()).unwrap();
+    let bal0 = StateManager::v_get_balance(&candidate.view(), &a.address()).unwrap();
     let r = exec.execute_tx(&mut candidate.view(), &signed(&a, 1, claim(ServiceKind::Archive)), &Address::new([9; 20]), 102, 1000).unwrap();
     assert!(matches!(r.status, TxStatus::Success), "milestone claim: {:?}", r.status);
     let (liquid, locked) = split_grant(ARCHIVE_PROOFS_GRANT_1);
-    assert_eq!(state.get_balance(&a.address()).unwrap(), bal0 - 100 + liquid);
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &a.address()).unwrap(), bal0 - 100 + liquid);
     let g = SupplyStore::v_get_grant(&candidate.view(), &a.address(), ServiceKind::Archive).unwrap().unwrap();
     assert_eq!(g.locked_remaining, locked);
 
@@ -311,10 +314,10 @@ fn preexisting_archive_node_eligible_but_nothing_retroactive() {
     // Archive registered BEFORE the correction: milestone counters start at the
     // correction (record_por_proof is a no-op while dormant), and the node stays
     // fully eligible afterwards — same rules as future nodes.
-    let (state, db, _dir, exec) = setup_with_params(params_grants_open());
+    let (_state, db, _dir, exec) = setup_with_params(params_grants_open());
     let mut candidate = common::candidate(&db);
     let a = KeyPair::generate();
-    fund(&state, &a, 2_000_000_000);
+    fund(&db, &a, 2_000_000_000);
     let reg = TxPayload::NodeRegistry(sumchain_primitives::NodeRegistryTxData {
         operation: sumchain_primitives::NodeRegistryOperation::Register {
             role: sumchain_primitives::NodeRole::ArchiveNode,
@@ -344,18 +347,18 @@ fn preexisting_archive_node_eligible_but_nothing_retroactive() {
 
 #[test]
 fn compute_milestone_and_denied_dispute_blocks_386() {
-    let (state, db, _dir, exec) = setup_migrated(params_grants_open());
+    let (_state, db, _dir, exec) = setup_migrated(params_grants_open());
     let mut candidate = common::candidate(&db);
     let vfr = KeyPair::generate();
-    fund(&state, &vfr, 1_000_000);
+    fund(&db, &vfr, 1_000_000);
 
     // One valid settlement claim (instrumented at the claim-payout site).
     SupplyStore::record_settlement_claim(&mut candidate.view(), &vfr.address()).unwrap();
-    let bal0 = state.get_balance(&vfr.address()).unwrap();
+    let bal0 = StateManager::v_get_balance(&candidate.view(), &vfr.address()).unwrap();
     let r = exec.execute_tx(&mut candidate.view(), &signed(&vfr, 0, claim(ServiceKind::Compute)), &Address::new([9; 20]), 102, 1000).unwrap();
     assert!(matches!(r.status, TxStatus::Success), "compute milestone: {:?}", r.status);
     let (liquid, _) = split_grant(COMPUTE_CLAIMS_GRANT_1);
-    assert_eq!(state.get_balance(&vfr.address()).unwrap(), bal0 - 100 + liquid);
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &vfr.address()).unwrap(), bal0 - 100 + liquid);
 
     // A denied dispute blocks further milestone claims (386) and forfeits the
     // locked remainder back to the compute pool.
@@ -380,14 +383,14 @@ fn compute_milestone_and_denied_dispute_blocks_386() {
 
 #[test]
 fn canonical_invariant_holds_through_claim_and_unlock() {
-    let (state, db, _dir, exec) = setup_migrated(params_grants_open());
+    let (_state, db, _dir, exec) = setup_migrated(params_grants_open());
     let mut candidate = common::candidate(&db);
     let v = KeyPair::generate();
     seed_validator(&db, &v);
     // Note: fee/funding credits below are test-world external funds; the
     // invariant we assert is reserve+outstanding movement matching the account
     // credits from GRANT operations exactly.
-    fund(&state, &v, 1_000_000);
+    fund(&db, &v, 1_000_000);
     let ledger = SupplyStore::v_get_ledger(&candidate.view()).unwrap();
     let r0 = SupplyStore::v_get_reserve(&candidate.view()).unwrap().unwrap().total_remaining();
     let a0 = SupplyStore::v_get_aggregate(&candidate.view()).unwrap().outstanding_grant_unclaimed;

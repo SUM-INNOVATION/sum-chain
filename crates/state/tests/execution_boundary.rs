@@ -11,7 +11,7 @@
 //!
 //! ```ignore
 //! store.identity_roots().put(&identity)?;   // -> IdentityRootStore::put -> db.put
-//! state.put_account(&addr, &acct)?;         // -> StateStore::put_account -> db.put
+//! store.titles().update_status(&id, st, ts)?;  // -> TitleEventStore::.. -> db.put
 //! ```
 //!
 //! The real inventory lives in `execution_closure.rs`, which follows those
@@ -1017,6 +1017,33 @@ fn migrated_execution_paths_take_no_self_receiver() {
         ("storage_metadata.rs", "fn v_por_scheduler_backfill_done("),
         ("storage_metadata.rs", "fn v_backfill_challengeable_index("),
         ("executor.rs", "fn process_expired_challenges("),
+        ("state.rs", "fn v_get_account_opt("),
+        ("state.rs", "fn v_get_account("),
+        ("state.rs", "fn v_get_balance("),
+        ("state.rs", "fn v_get_nonce("),
+        ("state.rs", "fn v_put_account("),
+        ("state.rs", "fn v_transfer("),
+        ("state.rs", "fn v_increment_nonce("),
+        ("state.rs", "fn v_deduct("),
+        ("state.rs", "fn v_credit("),
+        ("state.rs", "fn v_iter_all_accounts("),
+        // Migrated by the account package: the fee debit, the proposer
+        // credit and the nonce bump these dispatch paths perform all go
+        // through `StateManager::v_*` and stage into the block's candidate.
+        // With the last committed read gone, the `&StateManager` parameter
+        // went with it, so these hold no committed handle at all any more.
+        ("node_registry.rs", "fn execute("),
+        ("node_registry.rs", "fn execute_v2("),
+        ("node_registry.rs", "fn execute_register("),
+        ("node_registry.rs", "fn execute_begin_unstake("),
+        ("node_registry.rs", "fn execute_withdraw_unbonded("),
+        ("storage_metadata.rs", "fn execute("),
+        ("storage_metadata.rs", "fn execute_v2("),
+        ("storage_metadata.rs", "fn execute_register_file("),
+        ("storage_metadata.rs", "fn execute_top_up("),
+        ("storage_metadata.rs", "fn execute_submit_proof("),
+        ("storage_metadata.rs", "fn execute_register_file_pending_v2("),
+        ("storage_metadata.rs", "fn execute_abandon_file_v2("),
     ];
 
     let files = rust_files();
@@ -1708,15 +1735,6 @@ fn a_self_receiver_is_allowed_only_where_the_type_holds_no_database() {
 #[test]
 fn partially_migrated_execution_paths_are_declared() {
     /// `(file, signature prefix, what it still reads from committed state)`.
-    /// What every account-touching row below still reads. The storage-metadata
-    /// and node-registry state itself is fully on the view; what remains is the
-    /// ACCOUNT row each of these paths debits or credits.
-    const ACCOUNTS: &str = "the sender, proposer and payee ACCOUNT rows, through \
-         `&StateManager`. Accounts have not migrated — `StateStore` writes them \
-         straight to the database — so committed IS where they are. Every \
-         storage-metadata and node-registry row this path touches goes through \
-         the view.";
-
     const PARTIAL: &[(&str, &str, &str)] = &[
         (
             "executor.rs",
@@ -1785,18 +1803,6 @@ fn partially_migrated_execution_paths_are_declared() {
              challenge it writes go through the view; the receiver remains for \
              self.params.",
         ),
-        ("node_registry.rs", "fn execute(", ACCOUNTS),
-        ("node_registry.rs", "fn execute_v2(", ACCOUNTS),
-        ("node_registry.rs", "fn execute_register(", ACCOUNTS),
-        ("node_registry.rs", "fn execute_begin_unstake(", ACCOUNTS),
-        ("node_registry.rs", "fn execute_withdraw_unbonded(", ACCOUNTS),
-        ("storage_metadata.rs", "fn execute(", ACCOUNTS),
-        ("storage_metadata.rs", "fn execute_v2(", ACCOUNTS),
-        ("storage_metadata.rs", "fn execute_register_file(", ACCOUNTS),
-        ("storage_metadata.rs", "fn execute_top_up(", ACCOUNTS),
-        ("storage_metadata.rs", "fn execute_submit_proof(", ACCOUNTS),
-        ("storage_metadata.rs", "fn execute_register_file_pending_v2(", ACCOUNTS),
-        ("storage_metadata.rs", "fn execute_abandon_file_v2(", ACCOUNTS),
     ];
 
     let files = rust_files();

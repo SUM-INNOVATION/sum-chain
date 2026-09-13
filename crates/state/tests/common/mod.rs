@@ -60,15 +60,43 @@ pub fn params_education_disabled() -> ChainParams {
     ChainParams::with_v2_enabled()
 }
 
-/// Fund a sender account so it has balance for fees.
+/// Seed a sender's COMMITTED balance: the parent state a block starts from.
+///
+/// Through `StateStore`, not through `StateManager`. The committed account
+/// mutators on `StateManager` are gone — execution stages through
+/// `v_put_account`, and a test-only direct-write convenience on the type
+/// execution holds would be a hole in the boundary, reachable from anything
+/// with a `&StateManager`.
+///
+/// A view read falls through to the database for a key it has not staged, so a
+/// row seeded here is visible to a candidate. Note the direction: seeding
+/// BEFORE the block is fine, and a top-up written here AFTER a transaction has
+/// staged that account is not — the staged row shadows it.
 #[allow(dead_code)]
-pub fn fund(state: &StateManager, kp: &KeyPair, balance: u128) {
-    state
+pub fn fund(db: &Database, kp: &KeyPair, balance: u128) {
+    seed_balance(db, &kp.address(), balance);
+}
+
+/// [`fund`] for a bare address.
+#[allow(dead_code)]
+pub fn seed_balance(db: &Database, address: &sumchain_primitives::Address, balance: u128) {
+    sumchain_storage::StateStore::new(db)
         .put_account(
-            &kp.address(),
+            address,
             &sumchain_storage::schema::AccountState { balance, nonce: 0 },
         )
         .unwrap();
+}
+
+/// Add to a committed balance, preserving the nonce.
+///
+/// Replaces the `StateManager::credit` the seeding fixtures used.
+#[allow(dead_code)]
+pub fn credit_committed(db: &Database, address: &sumchain_primitives::Address, amount: u128) {
+    let store = sumchain_storage::StateStore::new(db);
+    let mut acct = store.get_account(address).unwrap();
+    acct.balance = acct.balance.saturating_add(amount);
+    store.put_account(address, &acct).unwrap();
 }
 
 /// Sample digest. Each test passes a unique `session_id` to keep CF

@@ -2,6 +2,7 @@
 //!
 //! A minimal implementation that handles core tax operations.
 
+use sumchain_storage::exec_view::ExecutionView;
 use std::sync::Arc;
 
 use sumchain_genesis::ChainParams;
@@ -56,11 +57,11 @@ impl TaxExecutor {
     }
 
     /// Execute a Tax transaction
+    #[allow(clippy::too_many_arguments)]
     pub fn execute(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &TaxTxData,
-        state: &StateManager,
         proposer: &Address,
         fee: Balance,
         _block_height: BlockHeight,
@@ -79,9 +80,9 @@ impl TaxExecutor {
                     return Ok(TaxExecutionResult::failure("Already exists"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.claim_types().put(&entry)?;
                 debug!("Claim type registered: {}", entry.claim_type);
                 Ok(TaxExecutionResult::success())
@@ -95,9 +96,9 @@ impl TaxExecutor {
                     return Ok(TaxExecutionResult::failure("Not found"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.claim_types().put(&entry)?;
                 Ok(TaxExecutionResult::success())
             }
@@ -113,9 +114,9 @@ impl TaxExecutor {
                     None => return Ok(TaxExecutionResult::failure("Not found")),
                 };
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 entry.status = ClaimTypeStatus::Deprecated;
                 store.claim_types().put(&entry)?;
                 Ok(TaxExecutionResult::success())
@@ -133,9 +134,9 @@ impl TaxExecutor {
                     return Ok(TaxExecutionResult::failure("Already registered"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.issuers().put(&issuer)?;
                 debug!("Tax issuer registered: {}", issuer.address);
                 Ok(TaxExecutionResult::success())
@@ -153,9 +154,9 @@ impl TaxExecutor {
                     return Ok(TaxExecutionResult::failure("Not registered"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.issuers().put(&issuer)?;
                 Ok(TaxExecutionResult::success())
             }
@@ -175,9 +176,9 @@ impl TaxExecutor {
                     return Ok(TaxExecutionResult::failure("Not authorized"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
 
                 issuer.status = if data.operation == TaxOperation::SuspendIssuer {
                     TaxIssuerStatus::Suspended
@@ -201,9 +202,9 @@ impl TaxExecutor {
                     return Ok(TaxExecutionResult::failure("Already exists"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 let policy_id = policy.policy_id;
                 store.policies().put(&policy)?;
                 debug!("Tax policy created: {:?}", policy_id);
@@ -223,9 +224,9 @@ impl TaxExecutor {
                     return Ok(TaxExecutionResult::failure("Only creator can update"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 let policy_id = policy.policy_id;
                 store.policies().put(&policy)?;
                 Ok(TaxExecutionResult::success_with_policy(policy_id))
@@ -244,9 +245,9 @@ impl TaxExecutor {
                     return Ok(TaxExecutionResult::failure("Not active"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 let proof_id = proof.proof_id;
                 store.proofs().put(&proof)?;
                 debug!("Tax proof issued: {:?}", proof_id);
@@ -272,18 +273,18 @@ impl TaxExecutor {
                     return Ok(TaxExecutionResult::failure("Not found"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.proofs().delete(&d.subject_nullifier)?;
                 Ok(TaxExecutionResult::success())
             }
 
             TaxOperation::VerifyProof => {
                 // Verify a submitted proof - just record verification request
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 debug!("Proof verification requested by: {}", sender);
                 Ok(TaxExecutionResult::success())
             }
@@ -292,9 +293,9 @@ impl TaxExecutor {
                 let disclosure: TaxDisclosureEnvelope = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.disclosures().put(&disclosure)?;
                 debug!("Disclosure attached: {:?}", disclosure.payload_hash);
                 Ok(TaxExecutionResult::success())
@@ -325,13 +326,13 @@ mod tests {
     }
 
     #[test]
-    fn test_register_issuer() {
+    fn test_register_issuer(view: &mut ExecutionView<'_, '_>) {
         let (db, _dir, state) = setup();
         let executor = TaxExecutor::new(db.clone(), ChainParams::default());
 
         let issuer_addr = Address::new([1u8; 20]);
         let proposer = Address::new([99u8; 20]);
-        state.credit(&issuer_addr, 1_000_000_000_000).unwrap();
+        StateManager::v_credit(view, &issuer_addr, 1_000_000_000_000).unwrap();
 
         let issuer = TaxIssuer {
             address: issuer_addr,

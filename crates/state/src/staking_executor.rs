@@ -79,12 +79,12 @@ impl StakingExecutor {
     }
 
     /// Execute a staking operation from transaction data
+    #[allow(clippy::too_many_arguments)]
     pub fn execute(
         &self,
         view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         staking_data: &StakingTxData,
-        state: &StateManager,
         proposer: &Address,
         fee: Balance,
         block_height: BlockHeight,
@@ -94,17 +94,17 @@ impl StakingExecutor {
         let slashing_store = SlashingStore::new(&self.db);
 
         // Deduct fee from sender first
-        self.deduct_fee(state, sender, fee, proposer)?;
+        self.deduct_fee(view, sender, fee, proposer)?;
 
         match staking_data.operation {
             StakingOperation::CreateValidator => {
-                self.execute_create_validator(&store, sender, &staking_data.data, state, block_height)
+                self.execute_create_validator(view, &store, sender, &staking_data.data, block_height)
             }
             StakingOperation::AddStake => {
-                self.execute_add_stake(&store, sender, &staking_data.data, state)
+                self.execute_add_stake(view, &store, sender, &staking_data.data)
             }
             StakingOperation::Unstake => {
-                self.execute_unstake(&store, sender, &staking_data.data, state, block_height)
+                self.execute_unstake(view, &store, sender, &staking_data.data, block_height)
             }
             StakingOperation::UpdateValidator => {
                 self.execute_update_validator(&store, sender, &staking_data.data)
@@ -113,32 +113,31 @@ impl StakingExecutor {
                 self.execute_unjail(&store, sender, block_height)
             }
             StakingOperation::ClaimRewards => {
-                self.execute_claim_rewards(&store, sender, state)
+                self.execute_claim_rewards(view, &store, sender)
             }
             // Delegation operations
             StakingOperation::Delegate => {
-                self.execute_delegate(&store, &delegation_store, sender, &staking_data.data, state, block_height)
+                self.execute_delegate(view, &store, &delegation_store, sender, &staking_data.data, block_height)
             }
             StakingOperation::Undelegate => {
-                self.execute_undelegate(&store, &delegation_store, sender, &staking_data.data, state, block_height)
+                self.execute_undelegate(view, &store, &delegation_store, sender, &staking_data.data, block_height)
             }
             StakingOperation::ClaimDelegationRewards => {
-                self.execute_claim_delegation_rewards(&delegation_store, sender, &staking_data.data, state)
+                self.execute_claim_delegation_rewards(view, &delegation_store, sender, &staking_data.data)
             }
             StakingOperation::WithdrawUnbonded => {
-                self.execute_withdraw_unbonded(&delegation_store, sender, &staking_data.data, state, block_height)
+                self.execute_withdraw_unbonded(&delegation_store, sender, &staking_data.data, block_height)
             }
             // Slashing operations
             StakingOperation::SubmitEvidence => {
-                self.execute_submit_evidence(view, &store, &delegation_store, &slashing_store, sender, &staking_data.data, state, block_height)
+                self.execute_submit_evidence(view, &store, &delegation_store, &slashing_store, sender, &staking_data.data, block_height)
             }
         }
     }
 
     /// Deduct fee from sender and credit to proposer
     fn deduct_fee(
-        &self,
-        state: &StateManager,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         fee: Balance,
         proposer: &Address,
@@ -147,7 +146,7 @@ impl StakingExecutor {
             return Ok(());
         }
 
-        let sender_balance = state.get_balance(sender)?;
+        let sender_balance = StateManager::v_get_balance(view, sender)?;
         if sender_balance < fee {
             return Err(StateError::InsufficientBalance {
                 required: fee,
@@ -156,16 +155,16 @@ impl StakingExecutor {
         }
 
         // Debit sender
-        let mut sender_account = state.get_account(sender)?;
+        let mut sender_account = StateManager::v_get_account(view, sender)?;
         sender_account.balance = sender_account.balance.saturating_sub(fee);
         sender_account.nonce += 1;
-        state.put_account(sender, &sender_account)?;
+        StateManager::v_put_account(view, sender, &sender_account)?;
 
         // Credit proposer
         if !proposer.is_zero() {
-            let mut proposer_account = state.get_account(proposer)?;
+            let mut proposer_account = StateManager::v_get_account(view, proposer)?;
             proposer_account.balance = proposer_account.balance.saturating_add(fee);
-            state.put_account(proposer, &proposer_account)?;
+            StateManager::v_put_account(view, proposer, &proposer_account)?;
         }
 
         Ok(())
@@ -185,11 +184,10 @@ impl StakingExecutor {
 
     /// Execute CreateValidator operation
     fn execute_create_validator(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         store: &StakingStore,
         sender: &Address,
         data: &[u8],
-        state: &StateManager,
         block_height: BlockHeight,
     ) -> Result<StakingExecutionResult> {
         // Deserialize create validator data
@@ -245,7 +243,7 @@ impl StakingExecutor {
         }
 
         // Check sender has enough balance for stake
-        let sender_balance = state.get_balance(sender)?;
+        let sender_balance = StateManager::v_get_balance(view, sender)?;
         if sender_balance < create_data.stake {
             return Ok(StakingExecutionResult::failure(format!(
                 "Insufficient balance: have {}, need {} for stake",
@@ -254,9 +252,9 @@ impl StakingExecutor {
         }
 
         // Deduct stake from sender's balance
-        let mut sender_account = state.get_account(sender)?;
+        let mut sender_account = StateManager::v_get_account(view, sender)?;
         sender_account.balance = sender_account.balance.saturating_sub(create_data.stake);
-        state.put_account(sender, &sender_account)?;
+        StateManager::v_put_account(view, sender, &sender_account)?;
 
         // Create validator info
         let validator = ValidatorInfo::new(
@@ -279,11 +277,10 @@ impl StakingExecutor {
 
     /// Execute AddStake operation
     fn execute_add_stake(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         store: &StakingStore,
         sender: &Address,
         data: &[u8],
-        state: &StateManager,
     ) -> Result<StakingExecutionResult> {
         // Deserialize add stake data
         let add_data: AddStakeData = bincode::deserialize(data)
@@ -306,7 +303,7 @@ impl StakingExecutor {
         };
 
         // Check sender has enough balance
-        let sender_balance = state.get_balance(sender)?;
+        let sender_balance = StateManager::v_get_balance(view, sender)?;
         if sender_balance < add_data.amount {
             return Ok(StakingExecutionResult::failure(format!(
                 "Insufficient balance: have {}, need {}",
@@ -315,9 +312,9 @@ impl StakingExecutor {
         }
 
         // Deduct from sender's balance
-        let mut sender_account = state.get_account(sender)?;
+        let mut sender_account = StateManager::v_get_account(view, sender)?;
         sender_account.balance = sender_account.balance.saturating_sub(add_data.amount);
-        state.put_account(sender, &sender_account)?;
+        StateManager::v_put_account(view, sender, &sender_account)?;
 
         // Add to validator's stake
         validator.stake = validator.stake.saturating_add(add_data.amount);
@@ -333,11 +330,10 @@ impl StakingExecutor {
 
     /// Execute Unstake operation
     fn execute_unstake(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         store: &StakingStore,
         sender: &Address,
         data: &[u8],
-        state: &StateManager,
         block_height: BlockHeight,
     ) -> Result<StakingExecutionResult> {
         // Deserialize unstake data
@@ -401,9 +397,9 @@ impl StakingExecutor {
 
         // For now, immediately return stake to sender (in production, would wait for unbonding)
         // TODO: Implement proper unbonding queue
-        let mut sender_account = state.get_account(sender)?;
+        let mut sender_account = StateManager::v_get_account(view, sender)?;
         sender_account.balance = sender_account.balance.saturating_add(unstake_data.amount);
-        state.put_account(sender, &sender_account)?;
+        StateManager::v_put_account(view, sender, &sender_account)?;
 
         info!(
             "Validator {} unstaked {}, remaining stake: {}",
@@ -511,10 +507,9 @@ impl StakingExecutor {
 
     /// Execute ClaimRewards operation
     fn execute_claim_rewards(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         store: &StakingStore,
         sender: &Address,
-        state: &StateManager,
     ) -> Result<StakingExecutionResult> {
         let pubkey = Self::get_pubkey_from_address(sender);
 
@@ -536,9 +531,9 @@ impl StakingExecutor {
         let rewards = store.claim_rewards(&pubkey)?;
 
         // Credit rewards to sender's balance
-        let mut sender_account = state.get_account(sender)?;
+        let mut sender_account = StateManager::v_get_account(view, sender)?;
         sender_account.balance = sender_account.balance.saturating_add(rewards);
-        state.put_account(sender, &sender_account)?;
+        StateManager::v_put_account(view, sender, &sender_account)?;
 
         info!("Validator {} claimed {} rewards", sender, rewards);
 
@@ -550,13 +545,13 @@ impl StakingExecutor {
     // ========================================================================
 
     /// Execute Delegate operation
+    #[allow(clippy::too_many_arguments)]
     fn execute_delegate(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         staking_store: &StakingStore,
         delegation_store: &DelegationStore,
         sender: &Address,
         data: &[u8],
-        state: &StateManager,
         block_height: BlockHeight,
     ) -> Result<StakingExecutionResult> {
         // Deserialize delegate data
@@ -585,7 +580,7 @@ impl StakingExecutor {
         }
 
         // Check sender has enough balance
-        let sender_balance = state.get_balance(sender)?;
+        let sender_balance = StateManager::v_get_balance(view, sender)?;
         if sender_balance < delegate_data.amount {
             return Ok(StakingExecutionResult::failure(format!(
                 "Insufficient balance: have {}, need {}",
@@ -594,9 +589,9 @@ impl StakingExecutor {
         }
 
         // Deduct from sender's balance
-        let mut sender_account = state.get_account(sender)?;
+        let mut sender_account = StateManager::v_get_account(view, sender)?;
         sender_account.balance = sender_account.balance.saturating_sub(delegate_data.amount);
-        state.put_account(sender, &sender_account)?;
+        StateManager::v_put_account(view, sender, &sender_account)?;
 
         // Get delegator key (using address bytes padded to 32)
         let mut delegator_key = [0u8; 32];
@@ -633,13 +628,13 @@ impl StakingExecutor {
     }
 
     /// Execute Undelegate operation
+    #[allow(clippy::too_many_arguments)]
     fn execute_undelegate(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         staking_store: &StakingStore,
         delegation_store: &DelegationStore,
         sender: &Address,
         data: &[u8],
-        state: &StateManager,
         block_height: BlockHeight,
     ) -> Result<StakingExecutionResult> {
         // Deserialize undelegate data
@@ -703,9 +698,9 @@ impl StakingExecutor {
 
         // For simplicity, immediately return funds (in production would wait for unbonding)
         // TODO: Implement proper unbonding queue processing in block execution
-        let mut sender_account = state.get_account(sender)?;
+        let mut sender_account = StateManager::v_get_account(view, sender)?;
         sender_account.balance = sender_account.balance.saturating_add(undelegate_data.amount);
-        state.put_account(sender, &sender_account)?;
+        StateManager::v_put_account(view, sender, &sender_account)?;
 
         info!(
             "Undelegated {} from validator 0x{}, completion at block {}",
@@ -719,11 +714,10 @@ impl StakingExecutor {
 
     /// Execute ClaimDelegationRewards operation
     fn execute_claim_delegation_rewards(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         delegation_store: &DelegationStore,
         sender: &Address,
         data: &[u8],
-        state: &StateManager,
     ) -> Result<StakingExecutionResult> {
         // Deserialize claim data
         let claim_data: ClaimDelegationRewardsData = bincode::deserialize(data)
@@ -751,9 +745,9 @@ impl StakingExecutor {
         let rewards = delegation_store.claim_delegation_rewards(&delegator_key, &claim_data.validator_pubkey)?;
 
         // Credit rewards to sender's balance
-        let mut sender_account = state.get_account(sender)?;
+        let mut sender_account = StateManager::v_get_account(view, sender)?;
         sender_account.balance = sender_account.balance.saturating_add(rewards);
-        state.put_account(sender, &sender_account)?;
+        StateManager::v_put_account(view, sender, &sender_account)?;
 
         info!(
             "Claimed {} delegation rewards from validator 0x{}",
@@ -770,7 +764,6 @@ impl StakingExecutor {
         delegation_store: &DelegationStore,
         sender: &Address,
         data: &[u8],
-        state: &StateManager,
         block_height: BlockHeight,
     ) -> Result<StakingExecutionResult> {
         // Deserialize withdraw data
@@ -830,6 +823,7 @@ impl StakingExecutor {
     // ========================================================================
 
     /// Execute SubmitEvidence operation
+    #[allow(clippy::too_many_arguments)]
     fn execute_submit_evidence(
         &self,
         view: &mut ExecutionView<'_, '_>,
@@ -838,7 +832,6 @@ impl StakingExecutor {
         slashing_store: &SlashingStore,
         sender: &Address,
         data: &[u8],
-        state: &StateManager,
         block_height: BlockHeight,
     ) -> Result<StakingExecutionResult> {
         // Deserialize evidence data
@@ -854,7 +847,6 @@ impl StakingExecutor {
                     slashing_store,
                     sender,
                     &evidence_data.evidence,
-                    state,
                     block_height,
                 )
             }
@@ -872,6 +864,7 @@ impl StakingExecutor {
     }
 
     /// Handle double sign evidence
+    #[allow(clippy::too_many_arguments)]
     fn handle_double_sign_evidence(
         &self,
         view: &mut ExecutionView<'_, '_>,
@@ -880,7 +873,6 @@ impl StakingExecutor {
         slashing_store: &SlashingStore,
         submitter: &Address,
         evidence_bytes: &[u8],
-        state: &StateManager,
         block_height: BlockHeight,
     ) -> Result<StakingExecutionResult> {
         // Deserialize the evidence

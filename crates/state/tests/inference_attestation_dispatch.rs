@@ -28,6 +28,7 @@
 
 mod common;
 
+use sumchain_state::state::StateManager;
 use sumchain_crypto::KeyPair;
 use sumchain_genesis::ChainParams;
 use sumchain_primitives::{
@@ -55,13 +56,13 @@ fn dispatch_pre_activation_rejects() {
     // so the gate is closed at every block height. The outer dispatch
     // arm must return Failed(50), fee_paid: 0, and leave sender balance,
     // sender nonce, and the CF untouched.
-    let (state, db, _dir, executor) = setup_with_params(ChainParams::with_v2_enabled());
+    let (_state, db, _dir, executor) = setup_with_params(ChainParams::with_v2_enabled());
     let mut candidate = common::candidate(&db);
     let sender = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sender, 1_000_000_000);
-    let initial_balance = state.get_balance(&sender.address()).unwrap();
-    let initial_nonce = state.get_nonce(&sender.address()).unwrap();
+    fund(&db, &sender, 1_000_000_000);
+    let initial_balance = StateManager::v_get_balance(&candidate.view(), &sender.address()).unwrap();
+    let initial_nonce = StateManager::v_get_nonce(&candidate.view(), &sender.address()).unwrap();
 
     let digest = sample_digest("pre-activation-vec");
     let tx = build_signed_attestation_tx(&sender, 0, 1_000_000, digest.clone(), false);
@@ -71,8 +72,8 @@ fn dispatch_pre_activation_rejects() {
 
     assert!(matches!(result.status, TxStatus::Failed(50)));
     assert_eq!(result.fee_paid, 0, "no fee should be charged pre-activation");
-    assert_eq!(state.get_balance(&sender.address()).unwrap(), initial_balance);
-    assert_eq!(state.get_nonce(&sender.address()).unwrap(), initial_nonce);
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &sender.address()).unwrap(), initial_balance);
+    assert_eq!(StateManager::v_get_nonce(&candidate.view(), &sender.address()).unwrap(), initial_nonce);
 
     let cf_key = inference_attestation_key(&digest.session_id, &sender.address());
     assert!(
@@ -83,12 +84,12 @@ fn dispatch_pre_activation_rejects() {
 
 #[test]
 fn dispatch_success_path() {
-    let (state, db, _dir, executor) = setup_with_params(params_omninode_enabled());
+    let (_state, db, _dir, executor) = setup_with_params(params_omninode_enabled());
     let mut candidate = common::candidate(&db);
     let sender = KeyPair::generate();
     let proposer = KeyPair::generate();
     let fee: u128 = 1_000_000;
-    fund(&state, &sender, 10 * fee);
+    fund(&db, &sender, 10 * fee);
 
     let digest = sample_digest("success-vec");
     let tx = build_signed_attestation_tx(&sender, 0, fee, digest.clone(), false);
@@ -102,13 +103,13 @@ fn dispatch_success_path() {
         result.status
     );
     assert_eq!(result.fee_paid, fee);
-    assert_eq!(state.get_balance(&sender.address()).unwrap(), 10 * fee - fee);
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &sender.address()).unwrap(), 10 * fee - fee);
     assert_eq!(
-        state.get_balance(&proposer.address()).unwrap(),
+        StateManager::v_get_balance(&candidate.view(), &proposer.address()).unwrap(),
         fee,
         "proposer must be credited"
     );
-    assert_eq!(state.get_nonce(&sender.address()).unwrap(), 1, "nonce must advance");
+    assert_eq!(StateManager::v_get_nonce(&candidate.view(), &sender.address()).unwrap(), 1, "nonce must advance");
 
     let cf_key = inference_attestation_key(&digest.session_id, &sender.address());
     let row = candidate
@@ -130,12 +131,12 @@ fn dispatch_success_path() {
 
 #[test]
 fn dispatch_duplicate_after_success_rejects() {
-    let (state, db, _dir, executor) = setup_with_params(params_omninode_enabled());
+    let (_state, db, _dir, executor) = setup_with_params(params_omninode_enabled());
     let mut candidate = common::candidate(&db);
     let sender = KeyPair::generate();
     let proposer = KeyPair::generate();
     let fee: u128 = 1_000_000;
-    fund(&state, &sender, 10 * fee);
+    fund(&db, &sender, 10 * fee);
 
     let digest = sample_digest("duplicate-vec");
 
@@ -143,9 +144,9 @@ fn dispatch_duplicate_after_success_rejects() {
     let tx1 = build_signed_attestation_tx(&sender, 0, fee, digest.clone(), false);
     let r1 = executor.execute_tx(&mut candidate.view(), &tx1, &proposer.address(), 1, 0).unwrap();
     assert!(matches!(r1.status, TxStatus::Success));
-    let post_success_balance = state.get_balance(&sender.address()).unwrap();
-    let post_success_nonce = state.get_nonce(&sender.address()).unwrap();
-    let post_success_proposer = state.get_balance(&proposer.address()).unwrap();
+    let post_success_balance = StateManager::v_get_balance(&candidate.view(), &sender.address()).unwrap();
+    let post_success_nonce = StateManager::v_get_nonce(&candidate.view(), &sender.address()).unwrap();
+    let post_success_proposer = StateManager::v_get_balance(&candidate.view(), &proposer.address()).unwrap();
     let cf_key = inference_attestation_key(&digest.session_id, &sender.address());
     let first_row = candidate.view().get(cf::INFERENCE_ATTESTATIONS, &cf_key).unwrap().expect("row");
 
@@ -160,22 +161,22 @@ fn dispatch_duplicate_after_success_rejects() {
         r2.status
     );
     assert_eq!(r2.fee_paid, 0);
-    assert_eq!(state.get_balance(&sender.address()).unwrap(), post_success_balance);
-    assert_eq!(state.get_nonce(&sender.address()).unwrap(), post_success_nonce);
-    assert_eq!(state.get_balance(&proposer.address()).unwrap(), post_success_proposer);
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &sender.address()).unwrap(), post_success_balance);
+    assert_eq!(StateManager::v_get_nonce(&candidate.view(), &sender.address()).unwrap(), post_success_nonce);
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &proposer.address()).unwrap(), post_success_proposer);
     let second_row = candidate.view().get(cf::INFERENCE_ATTESTATIONS, &cf_key).unwrap().expect("row");
     assert_eq!(first_row, second_row, "CF row must not change on duplicate");
 }
 
 #[test]
 fn dispatch_invalid_inner_signature_rejects() {
-    let (state, db, _dir, executor) = setup_with_params(params_omninode_enabled());
+    let (_state, db, _dir, executor) = setup_with_params(params_omninode_enabled());
     let mut candidate = common::candidate(&db);
     let sender = KeyPair::generate();
     let proposer = KeyPair::generate();
     let fee: u128 = 1_000_000;
-    fund(&state, &sender, 10 * fee);
-    let initial_balance = state.get_balance(&sender.address()).unwrap();
+    fund(&db, &sender, 10 * fee);
+    let initial_balance = StateManager::v_get_balance(&candidate.view(), &sender.address()).unwrap();
 
     let digest = sample_digest("bad-sig-vec");
     // corrupt_inner_sig = true: outer tx signature is still valid (the
@@ -191,15 +192,15 @@ fn dispatch_invalid_inner_signature_rejects() {
         result.status
     );
     assert_eq!(result.fee_paid, 0);
-    assert_eq!(state.get_balance(&sender.address()).unwrap(), initial_balance);
-    assert_eq!(state.get_nonce(&sender.address()).unwrap(), 0);
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &sender.address()).unwrap(), initial_balance);
+    assert_eq!(StateManager::v_get_nonce(&candidate.view(), &sender.address()).unwrap(), 0);
     let cf_key = inference_attestation_key(&digest.session_id, &sender.address());
     assert!(candidate.view().get(cf::INFERENCE_ATTESTATIONS, &cf_key).unwrap().is_none());
 }
 
 #[test]
 fn dispatch_insufficient_balance_for_fee() {
-    let (state, db, _dir, executor) = setup_with_params(params_omninode_enabled());
+    let (_state, db, _dir, executor) = setup_with_params(params_omninode_enabled());
     let mut candidate = common::candidate(&db);
     let sender = KeyPair::generate();
     let proposer = KeyPair::generate();
@@ -208,7 +209,7 @@ fn dispatch_insufficient_balance_for_fee() {
     // path may not catch this for InferenceAttestation (amount = 0,
     // so total_cost == fee), so the variant arm's explicit balance
     // check at step 5a is what fires.
-    fund(&state, &sender, fee - 1);
+    fund(&db, &sender, fee - 1);
 
     let digest = sample_digest("balance-vec");
     let tx = build_signed_attestation_tx(&sender, 0, fee, digest.clone(), false);
@@ -225,8 +226,8 @@ fn dispatch_insufficient_balance_for_fee() {
         result.status
     );
     assert_eq!(result.fee_paid, 0);
-    assert_eq!(state.get_balance(&sender.address()).unwrap(), fee - 1);
-    assert_eq!(state.get_nonce(&sender.address()).unwrap(), 0);
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &sender.address()).unwrap(), fee - 1);
+    assert_eq!(StateManager::v_get_nonce(&candidate.view(), &sender.address()).unwrap(), 0);
     let cf_key = inference_attestation_key(&digest.session_id, &sender.address());
     assert!(candidate.view().get(cf::INFERENCE_ATTESTATIONS, &cf_key).unwrap().is_none());
 }
@@ -239,12 +240,12 @@ fn dispatch_stored_record_uses_omninode_domain_tag() {
     // assertion for the storage layer, separate from the Phase 1
     // fixture parity tests which lock the bytes against OmniNode's
     // reference vectors.
-    let (state, db, _dir, executor) = setup_with_params(params_omninode_enabled());
+    let (_state, db, _dir, executor) = setup_with_params(params_omninode_enabled());
     let mut candidate = common::candidate(&db);
     let sender = KeyPair::generate();
     let proposer = KeyPair::generate();
     let fee: u128 = 1_000_000;
-    fund(&state, &sender, 10 * fee);
+    fund(&db, &sender, 10 * fee);
 
     let digest = sample_digest("domain-tag-roundtrip");
     let tx = build_signed_attestation_tx(&sender, 0, fee, digest.clone(), false);
@@ -268,15 +269,15 @@ fn dispatch_populates_session_index() {
     // path reads `INFERENCE_ATTESTATIONS_BY_SESSION` to enumerate the
     // verifiers for a session. Prove the dispatcher actually maintains
     // that index by querying it after execute_tx.
-    let (state, db, _dir, executor) = setup_with_params(params_omninode_enabled());
+    let (_state, db, _dir, executor) = setup_with_params(params_omninode_enabled());
     let mut candidate = common::candidate(&db);
 
     let sender_a = KeyPair::generate();
     let sender_b = KeyPair::generate();
     let proposer = KeyPair::generate();
     let fee: u128 = 1_000_000;
-    fund(&state, &sender_a, 10 * fee);
-    fund(&state, &sender_b, 10 * fee);
+    fund(&db, &sender_a, 10 * fee);
+    fund(&db, &sender_b, 10 * fee);
 
     let session_id = "indexed-session";
     let tx_a = build_signed_attestation_tx(&sender_a, 0, fee, sample_digest(session_id), false);
@@ -348,15 +349,15 @@ fn build_sponsored_tx(
 
 #[test]
 fn v2_sponsored_succeeds_and_stores_under_verifier_not_sponsor() {
-    let (state, db, _dir, executor) = setup_with_params(params_sponsored_enabled());
+    let (_state, db, _dir, executor) = setup_with_params(params_sponsored_enabled());
     let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let verifier = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sponsor, 1_000_000_000);
+    fund(&db, &sponsor, 1_000_000_000);
     // verifier is NOT funded — it never pays.
-    let v_bal0 = state.get_balance(&verifier.address()).unwrap();
-    let s_bal0 = state.get_balance(&sponsor.address()).unwrap();
+    let v_bal0 = StateManager::v_get_balance(&candidate.view(), &verifier.address()).unwrap();
+    let s_bal0 = StateManager::v_get_balance(&candidate.view(), &sponsor.address()).unwrap();
 
     let digest = sample_digest("sponsored-vec");
     let tx = build_sponsored_tx(&sponsor, &verifier, 0, 1_000, digest.clone(), false, None);
@@ -364,10 +365,10 @@ fn v2_sponsored_succeeds_and_stores_under_verifier_not_sponsor() {
     assert!(r.status.is_success(), "sponsored attestation should succeed: {:?}", r.status);
 
     // Sponsor paid the fee + nonce; verifier untouched.
-    assert_eq!(state.get_balance(&sponsor.address()).unwrap(), s_bal0 - 1_000);
-    assert_eq!(state.get_nonce(&sponsor.address()).unwrap(), 1);
-    assert_eq!(state.get_balance(&verifier.address()).unwrap(), v_bal0, "verifier never pays");
-    assert_eq!(state.get_nonce(&verifier.address()).unwrap(), 0, "verifier nonce untouched");
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &sponsor.address()).unwrap(), s_bal0 - 1_000);
+    assert_eq!(StateManager::v_get_nonce(&candidate.view(), &sponsor.address()).unwrap(), 1);
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &verifier.address()).unwrap(), v_bal0, "verifier never pays");
+    assert_eq!(StateManager::v_get_nonce(&candidate.view(), &verifier.address()).unwrap(), 0, "verifier nonce untouched");
 
     // Record stored under the VERIFIER key, not the sponsor key.
     let vkey = inference_attestation_key(&digest.session_id, &verifier.address());
@@ -385,34 +386,34 @@ fn v2_sponsored_succeeds_and_stores_under_verifier_not_sponsor() {
 #[test]
 fn v2_gate_closed_is_free_no_mutation() {
     // omninode ON, sponsored sub-gate OFF → Failed(54), free, nothing written.
-    let (state, db, _dir, executor) = setup_with_params(params_omninode_enabled());
+    let (_state, db, _dir, executor) = setup_with_params(params_omninode_enabled());
     let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let verifier = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sponsor, 1_000_000_000);
-    let bal0 = state.get_balance(&sponsor.address()).unwrap();
+    fund(&db, &sponsor, 1_000_000_000);
+    let bal0 = StateManager::v_get_balance(&candidate.view(), &sponsor.address()).unwrap();
 
     let digest = sample_digest("gate-closed-vec");
     let tx = build_sponsored_tx(&sponsor, &verifier, 0, 1_000, digest.clone(), false, None);
     let r = executor.execute_tx(&mut candidate.view(), &tx, &proposer.address(), 1, 0).unwrap();
     assert!(matches!(r.status, TxStatus::Failed(54)), "got {:?}", r.status);
     assert_eq!(r.fee_paid, 0, "sponsored gate-closed is free");
-    assert_eq!(state.get_balance(&sponsor.address()).unwrap(), bal0, "no fee");
-    assert_eq!(state.get_nonce(&sponsor.address()).unwrap(), 0, "no nonce bump");
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &sponsor.address()).unwrap(), bal0, "no fee");
+    assert_eq!(StateManager::v_get_nonce(&candidate.view(), &sponsor.address()).unwrap(), 0, "no nonce bump");
     let vkey = inference_attestation_key(&digest.session_id, &verifier.address());
     assert!(candidate.view().get(cf::INFERENCE_ATTESTATIONS, &vkey).unwrap().is_none(), "no CF write");
 }
 
 #[test]
 fn v2_bad_verifier_signature_52() {
-    let (state, db, _dir, executor) = setup_with_params(params_sponsored_enabled());
+    let (_state, db, _dir, executor) = setup_with_params(params_sponsored_enabled());
     let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let verifier = KeyPair::generate();
     let other = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sponsor, 1_000_000_000);
+    fund(&db, &sponsor, 1_000_000_000);
     let digest = sample_digest("bad-sig-vec");
 
     // Tampered inner signature → 52.
@@ -427,12 +428,12 @@ fn v2_bad_verifier_signature_52() {
 
 #[test]
 fn v2_malformed_envelope_oversize_session_55() {
-    let (state, db, _dir, executor) = setup_with_params(params_sponsored_enabled());
+    let (_state, db, _dir, executor) = setup_with_params(params_sponsored_enabled());
     let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let verifier = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sponsor, 1_000_000_000);
+    fund(&db, &sponsor, 1_000_000_000);
 
     // session_id > MAX_SESSION_ID_BYTES (256) → malformed envelope → 55.
     let mut digest = sample_digest("x");
@@ -445,13 +446,13 @@ fn v2_malformed_envelope_oversize_session_55() {
 
 #[test]
 fn v2_duplicate_and_cross_version_dedup_51() {
-    let (state, db, _dir, executor) = setup_with_params(params_sponsored_enabled());
+    let (_state, db, _dir, executor) = setup_with_params(params_sponsored_enabled());
     let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let verifier = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sponsor, 1_000_000_000);
-    fund(&state, &verifier, 1_000_000_000);
+    fund(&db, &sponsor, 1_000_000_000);
+    fund(&db, &verifier, 1_000_000_000);
     let digest = sample_digest("dup-vec");
 
     // First v2 submission succeeds.
@@ -471,12 +472,12 @@ fn v2_duplicate_and_cross_version_dedup_51() {
 
 #[test]
 fn v2_sponsored_writes_sponsor_metadata() {
-    let (state, db, _dir, executor) = setup_with_params(params_sponsored_enabled());
+    let (_state, db, _dir, executor) = setup_with_params(params_sponsored_enabled());
     let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let verifier = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sponsor, 1_000_000_000);
+    fund(&db, &sponsor, 1_000_000_000);
 
     let digest = sample_digest("sponsor-meta-vec");
     let tx = build_sponsored_tx(&sponsor, &verifier, 0, 1_000, digest.clone(), false, None);
@@ -500,11 +501,11 @@ fn v2_sponsored_writes_sponsor_metadata() {
 
 #[test]
 fn v1_direct_leaves_sponsor_metadata_absent() {
-    let (state, db, _dir, executor) = setup_with_params(params_omninode_enabled());
+    let (_state, db, _dir, executor) = setup_with_params(params_omninode_enabled());
     let mut candidate = common::candidate(&db);
     let verifier = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &verifier, 1_000_000_000);
+    fund(&db, &verifier, 1_000_000_000);
 
     let digest = sample_digest("v1-no-sponsor-vec");
     let tx = build_signed_attestation_tx(&verifier, 0, 1_000, digest.clone(), false);
@@ -522,14 +523,14 @@ fn v1_direct_leaves_sponsor_metadata_absent() {
 
 #[test]
 fn v2_duplicate_does_not_overwrite_sponsor_metadata() {
-    let (state, db, _dir, executor) = setup_with_params(params_sponsored_enabled());
+    let (_state, db, _dir, executor) = setup_with_params(params_sponsored_enabled());
     let mut candidate = common::candidate(&db);
     let sponsor_a = KeyPair::generate();
     let sponsor_b = KeyPair::generate();
     let verifier = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sponsor_a, 1_000_000_000);
-    fund(&state, &sponsor_b, 1_000_000_000);
+    fund(&db, &sponsor_a, 1_000_000_000);
+    fund(&db, &sponsor_b, 1_000_000_000);
 
     let digest = sample_digest("dup-sponsor-vec");
     // First sponsored submission by sponsor A succeeds and records A.
@@ -560,12 +561,12 @@ fn sponsored_attestation_settlement_identity_is_verifier_only() {
     // ABSENT under the sponsor key — so only the verifier can claim; the sponsor
     // cannot, regardless of the additive sponsor metadata. The sponsor CF is a
     // separate keyspace settlement never reads.
-    let (state, db, _dir, executor) = setup_with_params(params_sponsored_enabled());
+    let (_state, db, _dir, executor) = setup_with_params(params_sponsored_enabled());
     let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let verifier = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sponsor, 1_000_000_000);
+    fund(&db, &sponsor, 1_000_000_000);
 
     let digest = sample_digest("settlement-identity-vec");
     let tx = build_sponsored_tx(&sponsor, &verifier, 0, 1_000, digest.clone(), false, None);

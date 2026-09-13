@@ -7,6 +7,7 @@
 //! - SRC-854: Government Benefit Determinations
 //! - SRC-855: Legal Proofs
 
+use sumchain_storage::exec_view::ExecutionView;
 use std::sync::Arc;
 
 use sumchain_genesis::ChainParams;
@@ -133,11 +134,11 @@ impl LegalExecutor {
     }
 
     /// Execute a Legal transaction
+    #[allow(clippy::too_many_arguments)]
     pub fn execute(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &LegalTxData,
-        state: &StateManager,
         proposer: &Address,
         fee: Balance,
         _block_height: BlockHeight,
@@ -161,9 +162,9 @@ impl LegalExecutor {
                     return Ok(LegalExecutionResult::failure("Case already exists"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 let case_id = case.case_id;
                 store.cases().put(&case)?;
                 debug!("Case anchored: {:?}", case_id);
@@ -188,9 +189,9 @@ impl LegalExecutor {
                     return Ok(LegalExecutionResult::failure("Only issuer can update"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.cases().update_status(&update.case_id, update.status, block_timestamp)?;
                 Ok(LegalExecutionResult::success())
             }
@@ -212,9 +213,9 @@ impl LegalExecutor {
                     return Ok(LegalExecutionResult::failure("Only issuer can close"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.cases().update_status(&d.case_id, CaseStatus::Closed, block_timestamp)?;
                 Ok(LegalExecutionResult::success())
             }
@@ -236,9 +237,9 @@ impl LegalExecutor {
                     return Ok(LegalExecutionResult::failure("Only issuer can seal"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.cases().update_status(&d.case_id, CaseStatus::Sealed, block_timestamp)?;
                 debug!("Case sealed: {:?}", d.case_id);
                 Ok(LegalExecutionResult::success())
@@ -265,9 +266,9 @@ impl LegalExecutor {
                     return Ok(LegalExecutionResult::failure("Only issuer can unseal"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.cases().update_status(&d.case_id, CaseStatus::Active, block_timestamp)?;
                 debug!("Case unsealed: {:?}", d.case_id);
                 Ok(LegalExecutionResult::success())
@@ -289,9 +290,9 @@ impl LegalExecutor {
                     return Ok(LegalExecutionResult::failure("Related case not found"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.cases().add_related_case(&d.case_id, &d.related_case_id, block_timestamp)?;
                 store.cases().update_status(&d.related_case_id, CaseStatus::Consolidated, block_timestamp)?;
                 Ok(LegalExecutionResult::success())
@@ -309,9 +310,9 @@ impl LegalExecutor {
                     return Ok(LegalExecutionResult::failure("Case not found"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.cases().update_status(&d.case_id, CaseStatus::Transferred, block_timestamp)?;
                 Ok(LegalExecutionResult::success())
             }
@@ -334,9 +335,9 @@ impl LegalExecutor {
                     return Ok(LegalExecutionResult::failure("Event already exists"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 let event_id = event.event_id;
                 store.process_events().put(&event)?;
                 debug!("Process event recorded: {:?}", event_id);
@@ -361,9 +362,9 @@ impl LegalExecutor {
                     return Ok(LegalExecutionResult::failure("Only issuer can update"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.process_events().update_status(&d.event_id, d.status)?;
                 Ok(LegalExecutionResult::success())
             }
@@ -381,9 +382,9 @@ impl LegalExecutor {
                     return Ok(LegalExecutionResult::failure("Old event not found"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
 
                 // Mark old as superseded
                 store.process_events().update_status(&d.old_event_id, ProcessEventStatus::Superseded)?;
@@ -412,9 +413,9 @@ impl LegalExecutor {
                     return Ok(LegalExecutionResult::failure("Only issuer can revoke"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.process_events().update_status(&d.event_id, ProcessEventStatus::Revoked)?;
                 Ok(LegalExecutionResult::success())
             }
@@ -437,9 +438,9 @@ impl LegalExecutor {
                     return Ok(LegalExecutionResult::failure("Order already exists"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 let order_id = order.order_id;
                 store.orders().put(&order)?;
                 debug!("Order issued: {:?}", order_id);
@@ -464,9 +465,9 @@ impl LegalExecutor {
                     return Ok(LegalExecutionResult::failure("Only issuer can update"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.orders().update_status(&d.order_id, d.status, block_timestamp)?;
                 debug!("Order status updated: {:?} -> {:?}", d.order_id, d.status);
                 Ok(LegalExecutionResult::success())
@@ -489,9 +490,9 @@ impl LegalExecutor {
                     return Ok(LegalExecutionResult::failure("Only issuer can stay"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.orders().update_status(&d.order_id, OrderStatus::Stayed, block_timestamp)?;
                 debug!("Order stayed: {:?}", d.order_id);
                 Ok(LegalExecutionResult::success())
@@ -514,9 +515,9 @@ impl LegalExecutor {
                     return Ok(LegalExecutionResult::failure("Only issuer can vacate"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.orders().update_status(&d.order_id, OrderStatus::Vacated, block_timestamp)?;
                 debug!("Order vacated: {:?}", d.order_id);
                 Ok(LegalExecutionResult::success())
@@ -535,9 +536,9 @@ impl LegalExecutor {
                     return Ok(LegalExecutionResult::failure("Old order not found"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
 
                 // Mark old as superseded
                 store.orders().update_status(&d.old_order_id, OrderStatus::Superseded, block_timestamp)?;
@@ -566,9 +567,9 @@ impl LegalExecutor {
                     return Ok(LegalExecutionResult::failure("Only issuer can modify"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.orders().update_status(&d.order_id, OrderStatus::Modified, block_timestamp)?;
                 Ok(LegalExecutionResult::success())
             }
@@ -586,9 +587,9 @@ impl LegalExecutor {
                     return Ok(LegalExecutionResult::failure("Benefit already exists"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 let benefit_id = benefit.benefit_id;
                 store.benefits().put(&benefit)?;
                 debug!("Benefit determined: {:?}", benefit_id);
@@ -613,9 +614,9 @@ impl LegalExecutor {
                     return Ok(LegalExecutionResult::failure("Only issuer can update"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.benefits().update_status(&d.benefit_id, d.status, block_timestamp)?;
                 debug!("Benefit status updated: {:?} -> {:?}", d.benefit_id, d.status);
                 Ok(LegalExecutionResult::success())
@@ -638,9 +639,9 @@ impl LegalExecutor {
                     return Ok(LegalExecutionResult::failure("Only issuer can terminate"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.benefits().update_status(&d.benefit_id, BenefitStatus::Terminated, block_timestamp)?;
                 Ok(LegalExecutionResult::success())
             }
@@ -662,9 +663,9 @@ impl LegalExecutor {
                     return Ok(LegalExecutionResult::failure("Only issuer can suspend"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.benefits().update_status(&d.benefit_id, BenefitStatus::Suspended, block_timestamp)?;
                 Ok(LegalExecutionResult::success())
             }
@@ -690,9 +691,9 @@ impl LegalExecutor {
                     return Ok(LegalExecutionResult::failure("Benefit is not suspended"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.benefits().update_status(&d.benefit_id, BenefitStatus::Approved, block_timestamp)?;
                 Ok(LegalExecutionResult::success())
             }
@@ -706,9 +707,9 @@ impl LegalExecutor {
                     return Ok(LegalExecutionResult::failure("Proof already exists"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 let proof_id = proof.proof_id;
                 store.proofs().put(&proof)?;
                 debug!("Legal proof submitted: {:?}", proof_id);
@@ -717,9 +718,9 @@ impl LegalExecutor {
 
             LegalOperation::VerifyProof => {
                 // Verification is read-only - just record the request
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 debug!("Legal proof verification requested by: {}", sender);
                 Ok(LegalExecutionResult::success())
             }
@@ -749,13 +750,13 @@ mod tests {
     }
 
     #[test]
-    fn test_anchor_case() {
+    fn test_anchor_case(view: &mut ExecutionView<'_, '_>) {
         let (db, _dir, state) = setup();
         let executor = LegalExecutor::new(db.clone(), ChainParams::default());
 
         let sender = Address::new([1u8; 20]);
         let proposer = Address::new([99u8; 20]);
-        state.credit(&sender, 1_000_000_000_000).unwrap();
+        StateManager::v_credit(view, &sender, 1_000_000_000_000).unwrap();
 
         let case = CaseAnchor {
             case_id: [10u8; 32],

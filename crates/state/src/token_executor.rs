@@ -12,6 +12,7 @@
 //! - **Overflow protection**: All arithmetic uses checked/saturating operations
 //! - **Pause mechanism**: Token transfers can be paused by owner
 
+use sumchain_storage::exec_view::ExecutionView;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -92,11 +93,11 @@ impl TokenExecutor {
     }
 
     /// Execute a token operation from transaction data
+    #[allow(clippy::too_many_arguments)]
     pub fn execute(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         token_data: &TokenTxData,
-        state: &StateManager,
         proposer: &Address,
         fee: Balance,
         block_height: BlockHeight,
@@ -105,7 +106,7 @@ impl TokenExecutor {
         let store = TokenStore::new(&self.db);
 
         // Deduct fee from sender
-        self.deduct_fee(state, sender, fee, proposer)?;
+        self.deduct_fee(view, sender, fee, proposer)?;
 
         match token_data.operation {
             TokenOperation::Create => {
@@ -184,8 +185,7 @@ impl TokenExecutor {
 
     /// Deduct fee from sender and credit to proposer
     fn deduct_fee(
-        &self,
-        state: &StateManager,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         fee: Balance,
         proposer: &Address,
@@ -194,7 +194,7 @@ impl TokenExecutor {
             return Ok(());
         }
 
-        let sender_balance = state.get_balance(sender)?;
+        let sender_balance = StateManager::v_get_balance(view, sender)?;
         if sender_balance < fee {
             return Err(StateError::InsufficientBalance {
                 required: fee,
@@ -203,16 +203,16 @@ impl TokenExecutor {
         }
 
         // Debit sender
-        let mut sender_account = state.get_account(sender)?;
+        let mut sender_account = StateManager::v_get_account(view, sender)?;
         sender_account.balance = sender_account.balance.saturating_sub(fee);
         sender_account.nonce += 1;
-        state.put_account(sender, &sender_account)?;
+        StateManager::v_put_account(view, sender, &sender_account)?;
 
         // Credit proposer
         if !proposer.is_zero() {
-            let mut proposer_account = state.get_account(proposer)?;
+            let mut proposer_account = StateManager::v_get_account(view, proposer)?;
             proposer_account.balance = proposer_account.balance.saturating_add(fee);
-            state.put_account(proposer, &proposer_account)?;
+            StateManager::v_put_account(view, proposer, &proposer_account)?;
         }
 
         Ok(())

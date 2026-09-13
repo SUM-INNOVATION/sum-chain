@@ -6,6 +6,8 @@
 //! - Executing proposals once threshold is met
 //! - Managing membership and policy changes
 
+use crate::StateManager;
+use sumchain_storage::exec_view::ExecutionView;
 use std::sync::Arc;
 
 use sumchain_primitives::{
@@ -161,8 +163,9 @@ impl PolicyAccountExecutor {
     }
 
     /// Execute a policy account operation
+    #[allow(clippy::too_many_arguments)]
     pub fn execute(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &PolicyAccountTxData,
         state: &State,
@@ -177,7 +180,7 @@ impl PolicyAccountExecutor {
                 self.submit_proposal(sender, &data.data, state, current_height, block_timestamp)
             }
             PolicyAccountOperation::ExecuteProposal => {
-                self.execute_proposal(sender, &data.data, state, proposer, fee, current_height, block_timestamp)
+                self.execute_proposal(view, sender, &data.data, state, proposer, fee, current_height, block_timestamp)
             }
             PolicyAccountOperation::CancelProposal => {
                 self.cancel_proposal(sender, &data.data, state)
@@ -206,7 +209,7 @@ impl PolicyAccountExecutor {
         &self,
         sender: &Address,
         data: &[u8],
-        state: &State,
+        _state: &State,
         current_height: BlockHeight,
         block_timestamp: u64,
     ) -> Result<PolicyAccountExecutionResult> {
@@ -299,7 +302,7 @@ impl PolicyAccountExecutor {
         &self,
         sender: &Address,
         data: &[u8],
-        state: &State,
+        _state: &State,
         current_height: BlockHeight,
         block_timestamp: u64,
     ) -> Result<PolicyAccountExecutionResult> {
@@ -467,11 +470,12 @@ impl PolicyAccountExecutor {
     }
 
     /// Execute a proposal once threshold is met
+    #[allow(clippy::too_many_arguments)]
     fn execute_proposal(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
-        state: &State,
+        _state: &State,
         proposer: &Address,
         fee: Balance,
         current_height: BlockHeight,
@@ -603,7 +607,7 @@ impl PolicyAccountExecutor {
             ActionClass::TransferNative => {
                 // Execute native transfer as policy account
                 if let TxPayload::Transfer { to, amount } = &action_payload {
-                    state.transfer(&policy_account.address, to, *amount, 0, proposer)?;
+                    StateManager::v_transfer(view, &policy_account.address, to, *amount, 0, proposer)?;
                 } else {
                     return Ok(PolicyAccountExecutionResult::failure(
                         "Action payload mismatch for TransferNative".to_string(),
@@ -690,7 +694,7 @@ impl PolicyAccountExecutor {
         &self,
         sender: &Address,
         data: &[u8],
-        state: &State,
+        _state: &State,
     ) -> Result<PolicyAccountExecutionResult> {
         // Deserialize proposal ID
         let proposal_id: ProposalId = bincode::deserialize(data)
@@ -737,7 +741,7 @@ impl PolicyAccountExecutor {
         &self,
         sender: &Address,
         data: &[u8],
-        state: &State,
+        _state: &State,
     ) -> Result<PolicyAccountExecutionResult> {
         let policy_account_id: PolicyAccountId = bincode::deserialize(data)
             .map_err(|e| StateError::DeserializationError(e.to_string()))?;
@@ -775,7 +779,7 @@ impl PolicyAccountExecutor {
         &self,
         sender: &Address,
         data: &[u8],
-        state: &State,
+        _state: &State,
     ) -> Result<PolicyAccountExecutionResult> {
         let policy_account_id: PolicyAccountId = bincode::deserialize(data)
             .map_err(|e| StateError::DeserializationError(e.to_string()))?;

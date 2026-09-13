@@ -8,7 +8,9 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use sumchain_genesis::Genesis;
 use sumchain_primitives::{Address, Balance, BlockHeight, ChainId, Hash, Nonce};
-use sumchain_storage::{schema::AccountState, Database, StateStore};
+use sumchain_storage::exec_view::ExecutionView;
+use sumchain_storage::schema::{decode_account, encode_account, ACCOUNT_KEY_PREFIX};
+use sumchain_storage::{cf, schema::AccountState, Database, StateStore};
 use tracing::{debug, info};
 
 use crate::{Result, StateError};
@@ -76,6 +78,168 @@ impl StateManager {
         Ok(state_root)
     }
 
+    // ── Accounts, as this block's candidate sees them ───────────────────────
+    //
+    // Accounts are the row almost every transaction touches: the fee debit, the
+    // proposer credit and the nonce bump run on 27 of the 30 dispatcher arms,
+    // including nine of the twelve whose own subsystem rows are already on the
+    // overlay. Three arms are explicitly fee-free — ComputePool, BeaconSetup
+    // and BeaconSigning return `fee_paid: 0` on every path — and debit nothing.
+    //
+    // Reading or writing accounts through `StateStore` during execution commits
+    // them immediately, so a block that is never accepted still moves balances.
+    //
+    // These are associated functions. Without a `self` receiver there is no
+    // `Arc<Database>` to reach, so a committed account read on an execution
+    // path is a compile error rather than a silent one. The `&self` accessors
+    // below survive for genesis, snapshots, RPC diagnostics, mempool admission
+    // and the reorg revert — none of which is block execution.
+
+    /// Account state as the candidate sees it, distinguishing ABSENT from
+    /// present-and-zero.
+    ///
+    /// The distinction is why this is the primitive and [`Self::v_get_account`]
+    /// is derived from it. An undo journal reverting a block that CREATED an
+    /// account has to delete the row; a pre-image captured as `Some(default)`
+    /// can only write a zero row back, which is a different chain state.
+    /// `ExecutionView` records the pre-image on first write, and it can only
+    /// record `None` because this read can see absence.
+    pub fn v_get_account_opt(
+        view: &ExecutionView<'_, '_>,
+        address: &Address,
+    ) -> Result<Option<AccountState>> {
+        let key = StateStore::account_key(address);
+        match view.get(cf::STATE, &key).map_err(StateError::Storage)? {
+            Some(bytes) => Ok(Some(decode_account(&bytes)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Account state as the candidate sees it, flattening absent to zero.
+    ///
+    /// Fine for execution, which needs a balance to debit. Not fine for a
+    /// journal pre-image — use [`Self::v_get_account_opt`] there.
+    pub fn v_get_account(
+        view: &ExecutionView<'_, '_>,
+        address: &Address,
+    ) -> Result<AccountState> {
+        Ok(Self::v_get_account_opt(view, address)?.unwrap_or_default())
+    }
+
+    pub fn v_get_balance(view: &ExecutionView<'_, '_>, address: &Address) -> Result<Balance> {
+        Ok(Self::v_get_account(view, address)?.balance)
+    }
+
+    pub fn v_get_nonce(view: &ExecutionView<'_, '_>, address: &Address) -> Result<Nonce> {
+        Ok(Self::v_get_account(view, address)?.nonce)
+    }
+
+    /// Stage an account row into this block's candidate.
+    pub fn v_put_account(
+        view: &mut ExecutionView<'_, '_>,
+        address: &Address,
+        state: &AccountState,
+    ) -> Result<()> {
+        let key = StateStore::account_key(address);
+        view.put(cf::STATE, &key, &encode_account(state)?)
+            .map_err(StateError::Storage)
+    }
+
+    /// Apply a balance transfer (debit from, credit to) into the candidate.
+    pub fn v_transfer(
+        view: &mut ExecutionView<'_, '_>,
+        from: &Address,
+        to: &Address,
+        amount: Balance,
+        fee: Balance,
+        proposer: &Address,
+    ) -> Result<()> {
+        let mut sender_state = Self::v_get_account(view, from)?;
+        let total_cost = amount.saturating_add(fee);
+
+        if sender_state.balance < total_cost {
+            return Err(StateError::InsufficientBalance {
+                required: total_cost,
+                available: sender_state.balance,
+            });
+        }
+
+        sender_state.balance = sender_state.balance.saturating_sub(total_cost);
+        sender_state.nonce += 1;
+        Self::v_put_account(view, from, &sender_state)?;
+
+        // Read AFTER the sender write: a self-transfer must see the debit it
+        // just staged, or the credit restores what the debit removed.
+        let mut recipient_state = Self::v_get_account(view, to)?;
+        recipient_state.balance = recipient_state.balance.saturating_add(amount);
+        Self::v_put_account(view, to, &recipient_state)?;
+
+        if fee > 0 && !proposer.is_zero() {
+            let mut proposer_state = Self::v_get_account(view, proposer)?;
+            proposer_state.balance = proposer_state.balance.saturating_add(fee);
+            Self::v_put_account(view, proposer, &proposer_state)?;
+        }
+
+        Ok(())
+    }
+
+    /// Increment an account's nonce without transfer.
+    pub fn v_increment_nonce(view: &mut ExecutionView<'_, '_>, address: &Address) -> Result<()> {
+        let mut state = Self::v_get_account(view, address)?;
+        state.nonce += 1;
+        Self::v_put_account(view, address, &state)
+    }
+
+    /// Deduct balance from an account.
+    pub fn v_deduct(
+        view: &mut ExecutionView<'_, '_>,
+        address: &Address,
+        amount: Balance,
+    ) -> Result<()> {
+        let mut state = Self::v_get_account(view, address)?;
+        if state.balance < amount {
+            return Err(StateError::InsufficientBalance {
+                required: amount,
+                available: state.balance,
+            });
+        }
+        state.balance = state.balance.saturating_sub(amount);
+        Self::v_put_account(view, address, &state)
+    }
+
+    /// Credit balance to an account.
+    pub fn v_credit(
+        view: &mut ExecutionView<'_, '_>,
+        address: &Address,
+        amount: Balance,
+    ) -> Result<()> {
+        let mut state = Self::v_get_account(view, address)?;
+        state.balance = state.balance.saturating_add(amount);
+        Self::v_put_account(view, address, &state)
+    }
+
+    /// Every account as the candidate sees it, for the supply census.
+    ///
+    /// A read error ends the scan with an error: a short account census
+    /// under-reports economic supply, and the correction would mint the
+    /// difference into the reserve.
+    pub fn v_iter_all_accounts(
+        view: &ExecutionView<'_, '_>,
+    ) -> Result<Vec<(Address, AccountState)>> {
+        let mut accounts = Vec::new();
+        for item in view
+            .prefix_iter(cf::STATE, ACCOUNT_KEY_PREFIX)
+            .map_err(StateError::Storage)?
+        {
+            let (key, value) = item.map_err(StateError::Storage)?;
+            let Some(address) = StateStore::address_in_account_key(&key) else {
+                continue;
+            };
+            accounts.push((address, decode_account(&value)?));
+        }
+        Ok(accounts)
+    }
+
     /// Get account balance
     pub fn get_balance(&self, address: &Address) -> Result<Balance> {
         let store = StateStore::new(&self.db);
@@ -103,13 +267,6 @@ impl StateManager {
         Ok(store.get_account(address)?)
     }
 
-    /// Update account state
-    pub fn put_account(&self, address: &Address, state: &AccountState) -> Result<()> {
-        let store = StateStore::new(&self.db);
-        store.put_account(address, state)?;
-        Ok(())
-    }
-
     /// Get the chain ID
     pub fn chain_id(&self) -> ChainId {
         self.chain_id
@@ -135,81 +292,6 @@ impl StateManager {
         // This is a simplified version - in production you'd iterate all accounts
         // For now, just use the cached root or compute from recent changes
         Ok(self.state_root())
-    }
-
-    /// Apply a balance transfer (debit from, credit to)
-    pub fn transfer(
-        &self,
-        from: &Address,
-        to: &Address,
-        amount: Balance,
-        fee: Balance,
-        proposer: &Address,
-    ) -> Result<()> {
-        let store = StateStore::new(&self.db);
-
-        // Get sender account
-        let mut sender_state = store.get_account(from)?;
-        let total_cost = amount.saturating_add(fee);
-
-        if sender_state.balance < total_cost {
-            return Err(StateError::InsufficientBalance {
-                required: total_cost,
-                available: sender_state.balance,
-            });
-        }
-
-        // Debit sender
-        sender_state.balance = sender_state.balance.saturating_sub(total_cost);
-        sender_state.nonce += 1;
-        store.put_account(from, &sender_state)?;
-
-        // Credit recipient
-        let mut recipient_state = store.get_account(to)?;
-        recipient_state.balance = recipient_state.balance.saturating_add(amount);
-        store.put_account(to, &recipient_state)?;
-
-        // Credit fee to proposer
-        if fee > 0 && !proposer.is_zero() {
-            let mut proposer_state = store.get_account(proposer)?;
-            proposer_state.balance = proposer_state.balance.saturating_add(fee);
-            store.put_account(proposer, &proposer_state)?;
-        }
-
-        Ok(())
-    }
-
-    /// Increment an account's nonce without transfer
-    pub fn increment_nonce(&self, address: &Address) -> Result<()> {
-        let store = StateStore::new(&self.db);
-        let mut state = store.get_account(address)?;
-        state.nonce += 1;
-        store.put_account(address, &state)?;
-        Ok(())
-    }
-
-    /// Deduct balance from an account
-    pub fn deduct(&self, address: &Address, amount: Balance) -> Result<()> {
-        let store = StateStore::new(&self.db);
-        let mut state = store.get_account(address)?;
-        if state.balance < amount {
-            return Err(StateError::InsufficientBalance {
-                required: amount,
-                available: state.balance,
-            });
-        }
-        state.balance = state.balance.saturating_sub(amount);
-        store.put_account(address, &state)?;
-        Ok(())
-    }
-
-    /// Credit balance to an account
-    pub fn credit(&self, address: &Address, amount: Balance) -> Result<()> {
-        let store = StateStore::new(&self.db);
-        let mut state = store.get_account(address)?;
-        state.balance = state.balance.saturating_add(amount);
-        store.put_account(address, &state)?;
-        Ok(())
     }
 
     /// Store a state diff for potential reorg
@@ -409,7 +491,7 @@ mod tests {
     #[test]
     fn test_balance_operations() {
         let (db, _dir) = setup();
-        let state = StateManager::new(db, 1);
+        let state = StateManager::new(db.clone(), 1);
 
         let addr = Address::from_hex("0x0000000000000000000000000000000000000001").unwrap();
 
@@ -417,8 +499,7 @@ mod tests {
         assert_eq!(state.get_balance(&addr).unwrap(), 0);
 
         // Set balance
-        state
-            .put_account(
+        sumchain_storage::StateStore::new(&db).put_account(
                 &addr,
                 &AccountState {
                     balance: 1000,
@@ -430,54 +511,49 @@ mod tests {
         assert_eq!(state.get_balance(&addr).unwrap(), 1000);
     }
 
+    /// A transfer moves balance and bumps the nonce, IN THE CANDIDATE.
+    ///
+    /// The committed `transfer` this replaces is gone: block execution stages,
+    /// and a committed twin on the type execution holds would be reachable from
+    /// anything with a `&StateManager`. The seed below is committed because it
+    /// is the parent state the block starts from.
     #[test]
     fn test_transfer() {
         let (db, _dir) = setup();
-        let state = StateManager::new(db, 1);
 
         let from = Address::from_hex("0x0000000000000000000000000000000000000001").unwrap();
         let to = Address::from_hex("0x0000000000000000000000000000000000000002").unwrap();
         let proposer = Address::from_hex("0x0000000000000000000000000000000000000003").unwrap();
 
         // Fund sender
-        state
-            .put_account(
-                &from,
-                &AccountState {
-                    balance: 1000,
-                    nonce: 0,
-                },
-            )
+        StateStore::new(&db)
+            .put_account(&from, &AccountState { balance: 1000, nonce: 0 })
             .unwrap();
 
-        // Transfer
-        state.transfer(&from, &to, 500, 10, &proposer).unwrap();
+        let mut overlay = sumchain_storage::overlay::ApplicationOverlay::new(&db, 1 << 20);
+        let mut view = ExecutionView::new(&mut overlay);
+        StateManager::v_transfer(&mut view, &from, &to, 500, 10, &proposer).unwrap();
 
-        assert_eq!(state.get_balance(&from).unwrap(), 490); // 1000 - 500 - 10
-        assert_eq!(state.get_balance(&to).unwrap(), 500);
-        assert_eq!(state.get_balance(&proposer).unwrap(), 10);
-        assert_eq!(state.get_nonce(&from).unwrap(), 1);
+        assert_eq!(StateManager::v_get_balance(&view, &from).unwrap(), 490); // 1000 - 500 - 10
+        assert_eq!(StateManager::v_get_balance(&view, &to).unwrap(), 500);
+        assert_eq!(StateManager::v_get_balance(&view, &proposer).unwrap(), 10);
+        assert_eq!(StateManager::v_get_nonce(&view, &from).unwrap(), 1);
     }
 
     #[test]
     fn test_insufficient_balance() {
         let (db, _dir) = setup();
-        let state = StateManager::new(db, 1);
 
         let from = Address::from_hex("0x0000000000000000000000000000000000000001").unwrap();
         let to = Address::from_hex("0x0000000000000000000000000000000000000002").unwrap();
 
-        state
-            .put_account(
-                &from,
-                &AccountState {
-                    balance: 100,
-                    nonce: 0,
-                },
-            )
+        StateStore::new(&db)
+            .put_account(&from, &AccountState { balance: 100, nonce: 0 })
             .unwrap();
 
-        let result = state.transfer(&from, &to, 200, 10, &Address::ZERO);
+        let mut overlay = sumchain_storage::overlay::ApplicationOverlay::new(&db, 1 << 20);
+        let mut view = ExecutionView::new(&mut overlay);
+        let result = StateManager::v_transfer(&mut view, &from, &to, 200, 10, &Address::ZERO);
         assert!(matches!(result, Err(StateError::InsufficientBalance { .. })));
     }
 }

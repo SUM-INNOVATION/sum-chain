@@ -50,15 +50,18 @@ fn direct_tx(message_data: Vec<u8>, recipient_hash: [u8; 32]) -> MessagingTxData
 
 #[test]
 fn direct_send_success_writes_sender_index() {
-    let (db, _dir, state) = setup();
+    let (db, _dir, _state) = setup();
     let executor = MessagingExecutor::new(db.clone(), ChainParams::default());
+    // The messaging executor debits the sender's account, which is staged now.
+    let mut candidate =
+        sumchain_storage::candidate::CandidateExecution::new(&db, 1 << 30);
     let sender = Address::new([5u8; 20]);
     let proposer = Address::new([6u8; 20]);
     let rh = [7u8; 32];
     let tx = direct_tx(valid_message(rh), rh);
 
     let res = executor
-        .execute(&sender, &tx, &state, &proposer, 0, 1, 1000, 0, Hash::hash(b"ok"))
+        .execute(&mut candidate.view(), &sender, &tx, &proposer, 0, 1, 1000, 0, Hash::hash(b"ok"))
         .unwrap();
     assert!(res.success, "expected success: {:?}", res.error);
 
@@ -69,8 +72,11 @@ fn direct_send_success_writes_sender_index() {
 
 #[test]
 fn failed_send_writes_neither_primary_nor_index() {
-    let (db, _dir, state) = setup();
+    let (db, _dir, _state) = setup();
     let executor = MessagingExecutor::new(db.clone(), ChainParams::default());
+    // The messaging executor debits the sender's account, which is staged now.
+    let mut candidate =
+        sumchain_storage::candidate::CandidateExecution::new(&db, 1 << 30);
     let sender = Address::new([5u8; 20]);
     let proposer = Address::new([6u8; 20]);
     let rh = [7u8; 32];
@@ -78,7 +84,7 @@ fn failed_send_writes_neither_primary_nor_index() {
     let tx = direct_tx(vec![0u8; 10], rh);
 
     let res = executor
-        .execute(&sender, &tx, &state, &proposer, 0, 1, 1000, 0, Hash::hash(b"bad"))
+        .execute(&mut candidate.view(), &sender, &tx, &proposer, 0, 1, 1000, 0, Hash::hash(b"bad"))
         .unwrap();
     assert!(!res.success, "expected failure");
 
@@ -88,5 +94,5 @@ fn failed_send_writes_neither_primary_nor_index() {
         store.get_messages_by_recipient(&rh, 0, u64::MAX, 100).unwrap().is_empty(),
         "no primary event"
     );
-    assert_eq!(state.get_nonce(&sender).unwrap(), 0, "no nonce change on failure");
+    assert_eq!(StateManager::v_get_nonce(&candidate.view(), &sender).unwrap(), 0, "no nonce change on failure");
 }

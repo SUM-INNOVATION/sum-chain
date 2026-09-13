@@ -252,6 +252,7 @@ impl RpcServer {
 
     /// Create a new RPC server with auth and rate limit config
     #[allow(dead_code)]
+    #[allow(clippy::too_many_arguments)]
     pub fn with_config(
         db: Arc<Database>,
         state: Arc<StateManager>,
@@ -278,6 +279,7 @@ impl RpcServer {
     }
 
     /// Create a new RPC server with full configuration including metrics
+    #[allow(clippy::too_many_arguments)]
     pub fn with_full_config(
         db: Arc<Database>,
         state: Arc<StateManager>,
@@ -9792,8 +9794,7 @@ mod education_rpc_phase4_tests {
         let ex = BlockExecutor::new(state.clone(), db.clone(), p_enabled());
         let sp = KeyPair::generate();
         let prop = KeyPair::generate();
-        state
-            .put_account(&sp.address(), &sumchain_storage::schema::AccountState { balance: 1_000_000, nonce: 0 })
+        sumchain_storage::StateStore::new(&db).put_account(&sp.address(), &sumchain_storage::schema::AccountState { balance: 1_000_000, nonce: 0 })
             .unwrap();
         let inst = [0x21u8; 32];
         let cid = sumchain_primitives::education::catalog_id(&inst, "CS", "101", 1, 1);
@@ -9898,7 +9899,7 @@ mod education_rpc_phase4_tests {
         let bex = BlockExecutor::new(state.clone(), db.clone(), p_enabled());
         let sp = KeyPair::generate();
         let prop = KeyPair::generate();
-        state.put_account(&sp.address(), &sumchain_storage::schema::AccountState { balance: 1_000_000, nonce: 0 }).unwrap();
+        sumchain_storage::StateStore::new(&db).put_account(&sp.address(), &sumchain_storage::schema::AccountState { balance: 1_000_000, nonce: 0 }).unwrap();
         let inst = [0x31u8; 32];
         for (i, code) in ["A", "B", "C"].iter().enumerate() {
             let cid = sumchain_primitives::education::catalog_id(&inst, "CS", code, 1, 1);
@@ -10903,8 +10904,7 @@ mod contract_rpc_tests {
         let cexec = Arc::new(ContractExecutorState::new(db.clone(), params.clone()));
         let deployer = KeyPair::generate();
         let proposer = KeyPair::generate();
-        state
-            .put_account(
+        sumchain_storage::StateStore::new(&db).put_account(
                 &deployer.address(),
                 &sumchain_storage::schema::AccountState { balance: 10_000_000, nonce: 0 },
             )
@@ -10916,8 +10916,22 @@ mod contract_rpc_tests {
             value: 0,
             gas_limit: 5_000_000,
         };
+        // The contract executor debits the deployer's account, which is staged
+        // now, so this fixture opens a candidate. It is never published: the
+        // test asserts on the deploy RESULT.
+        let mut candidate =
+            sumchain_storage::candidate::CandidateExecution::new(&db, 1 << 30);
         let res = cexec
-            .deploy(&deployer.address(), &deploy_data, &state, &proposer.address(), 1_000, 1, 1000)
+            .deploy(
+                &mut candidate.view(),
+                &deployer.address(),
+                &deploy_data,
+                &state,
+                &proposer.address(),
+                1_000,
+                1,
+                1000,
+            )
             .unwrap();
         assert!(res.success, "deploy failed: {:?}", res.error);
         let addr = res.contract_address;

@@ -6,6 +6,7 @@
 //! - Anti-spam staking
 //! - Recipient controls (filters, contacts, blocks)
 
+use sumchain_storage::exec_view::ExecutionView;
 use std::sync::Arc;
 
 use sumchain_genesis::{ChainParams, MessagingParams};
@@ -66,11 +67,11 @@ impl MessagingExecutor {
     }
 
     /// Execute a messaging transaction
+    #[allow(clippy::too_many_arguments)]
     pub fn execute(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &MessagingTxData,
-        state: &StateManager,
         proposer: &Address,
         fee: Balance,
         block_height: u64,
@@ -82,22 +83,22 @@ impl MessagingExecutor {
 
         match data.operation {
             MessagingOperation::SendMessage => {
-                self.send_message_sponsored(sender, &data.data, state, proposer, block_height, block_timestamp, tx_index, tx_hash, &store)
+                self.send_message_sponsored(sender, &data.data, proposer, block_height, block_timestamp, tx_index, tx_hash, &store)
             }
             MessagingOperation::SendMessageDirect => {
-                self.send_message_direct(sender, &data.data, state, proposer, fee, block_height, block_timestamp, tx_index, tx_hash, &store)
+                self.send_message_direct(view, sender, &data.data, proposer, fee, block_height, block_timestamp, tx_index, tx_hash, &store)
             }
             MessagingOperation::SendMessageWithPayment => {
-                self.send_message_with_payment(sender, &data.data, state, proposer, fee, block_height, block_timestamp, tx_index, tx_hash, &store)
+                self.send_message_with_payment(view, sender, &data.data, proposer, fee, block_height, block_timestamp, tx_index, tx_hash, &store)
             }
             MessagingOperation::ClaimPayment => {
-                self.claim_payment(sender, &data.data, state, block_timestamp, &store)
+                self.claim_payment(view, sender, &data.data, block_timestamp, &store)
             }
             MessagingOperation::StakeForTrust => {
-                self.stake_for_trust(sender, &data.data, state, &store)
+                self.stake_for_trust(view, sender, &data.data, &store)
             }
             MessagingOperation::Unstake => {
-                self.unstake(sender, &data.data, state, &store)
+                self.unstake(view, sender, &data.data, &store)
             }
             MessagingOperation::SetInboxFilter => {
                 self.set_inbox_filter(sender, &data.data, &store)
@@ -134,7 +135,7 @@ impl MessagingExecutor {
                 self.set_sponsorship_enabled(sender, &data.data, &store)
             }
             MessagingOperation::FundRegistry => {
-                self.fund_registry(sender, &data.data, state, &store)
+                self.fund_registry(view, sender, &data.data, &store)
             }
             // Issue #145: sponsored public-key registration is dispatched by the
             // state executor's gated, sponsor-pays, per-code path
@@ -255,11 +256,11 @@ impl MessagingExecutor {
     /// Send message with gas sponsorship
     /// The tx.from is the sponsor address, but the real sender is derived from
     /// SponsoredMessage.sender_pubkey
+    #[allow(clippy::too_many_arguments)]
     fn send_message_sponsored(
         &self,
         _sponsor: &Address, // tx.from is the sponsor, not the message sender
         data: &[u8],
-        state: &StateManager,
         proposer: &Address,
         block_height: u64,
         block_timestamp: u64,
@@ -349,11 +350,11 @@ impl MessagingExecutor {
     }
 
     /// Send message directly (user pays gas)
+    #[allow(clippy::too_many_arguments)]
     fn send_message_direct(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
-        state: &StateManager,
         proposer: &Address,
         fee: Balance,
         block_height: u64,
@@ -387,11 +388,11 @@ impl MessagingExecutor {
         self.check_recipient_filter(sender, &msg_data.recipient_hash, store)?;
 
         // Deduct fee and pay proposer
-        state.deduct(sender, fee)?;
-        state.credit(proposer, fee)?;
+        StateManager::v_deduct(view, sender, fee)?;
+        StateManager::v_credit(view, proposer, fee)?;
 
         // Increment nonce
-        state.increment_nonce(sender)?;
+        StateManager::v_increment_nonce(view, sender)?;
 
         // Increment sender's message nonce and daily count
         store.increment_sender_nonce(sender)?;
@@ -416,11 +417,11 @@ impl MessagingExecutor {
     }
 
     /// Send message with attached Koppa payment
+    #[allow(clippy::too_many_arguments)]
     fn send_message_with_payment(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
-        state: &StateManager,
         proposer: &Address,
         fee: Balance,
         block_height: u64,
@@ -455,14 +456,14 @@ impl MessagingExecutor {
 
         // Calculate total cost
         let total_cost = fee.saturating_add(msg_data.koppa_amount);
-        let balance = state.get_balance(sender)?;
+        let balance = StateManager::v_get_balance(view, sender)?;
         if balance < total_cost {
             return Ok(MessagingExecutionResult::failure("Insufficient balance"));
         }
 
         // Deduct fee and payment
-        state.deduct(sender, total_cost)?;
-        state.credit(proposer, fee)?;
+        StateManager::v_deduct(view, sender, total_cost)?;
+        StateManager::v_credit(view, proposer, fee)?;
 
         // Escrow the payment (store as pending)
         let expiry = block_timestamp + (7 * 24 * 3600); // 7 days expiry
@@ -475,7 +476,7 @@ impl MessagingExecutor {
         store.set_pending_payment(&tx_hash, &pending)?;
 
         // Increment nonce
-        state.increment_nonce(sender)?;
+        StateManager::v_increment_nonce(view, sender)?;
 
         // Increment sender's message nonce and daily count
         store.increment_sender_nonce(sender)?;
@@ -504,10 +505,9 @@ impl MessagingExecutor {
 
     /// Claim payment from a message
     fn claim_payment(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
-        state: &StateManager,
         block_timestamp: u64,
         store: &MessagingStore,
     ) -> Result<MessagingExecutionResult> {
@@ -534,13 +534,13 @@ impl MessagingExecutor {
         // Check expiry (if expired, refund to sender)
         if block_timestamp > pending.expiry {
             // Refund to original sender
-            state.credit(&pending.sender, pending.amount)?;
+            StateManager::v_credit(view, &pending.sender, pending.amount)?;
             store.delete_pending_payment(&claim_data.message_id)?;
             return Ok(MessagingExecutionResult::failure("Payment expired, refunded to sender"));
         }
 
         // Credit recipient
-        state.credit(sender, pending.amount)?;
+        StateManager::v_credit(view, sender, pending.amount)?;
 
         // Delete pending payment
         store.delete_pending_payment(&claim_data.message_id)?;
@@ -552,10 +552,9 @@ impl MessagingExecutor {
 
     /// Stake Koppa for trusted sender tier
     fn stake_for_trust(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
-        state: &StateManager,
         store: &MessagingStore,
     ) -> Result<MessagingExecutionResult> {
         let stake_data: StakeForTrustData = bincode::deserialize(data)
@@ -566,7 +565,7 @@ impl MessagingExecutor {
         }
 
         // Deduct from sender's balance
-        state.deduct(sender, stake_data.amount)?;
+        StateManager::v_deduct(view, sender, stake_data.amount)?;
 
         // Add to stake
         let new_stake = store.add_stake(sender, stake_data.amount)?;
@@ -578,10 +577,9 @@ impl MessagingExecutor {
 
     /// Unstake Koppa
     fn unstake(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
-        state: &StateManager,
         store: &MessagingStore,
     ) -> Result<MessagingExecutionResult> {
         let unstake_data: MessagingUnstakeData = bincode::deserialize(data)
@@ -597,7 +595,7 @@ impl MessagingExecutor {
         store.set_stake_balance(sender, new_stake)?;
 
         // Credit back to sender
-        state.credit(sender, unstake_data.amount)?;
+        StateManager::v_credit(view, sender, unstake_data.amount)?;
 
         debug!("Unstaked: {} withdrew {}, remaining: {}", sender, unstake_data.amount, new_stake);
 
@@ -877,10 +875,9 @@ impl MessagingExecutor {
     }
 
     fn fund_registry(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
-        state: &StateManager,
         store: &MessagingStore,
     ) -> Result<MessagingExecutionResult> {
         let fund_data: FundRegistryData = bincode::deserialize(data)
@@ -891,7 +888,7 @@ impl MessagingExecutor {
         }
 
         // Deduct from sender
-        state.deduct(sender, fund_data.amount)?;
+        StateManager::v_deduct(view, sender, fund_data.amount)?;
 
         // Add to sponsorship fund
         let new_balance = store.add_sponsorship_balance(fund_data.amount)?;

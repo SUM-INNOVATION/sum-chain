@@ -37,8 +37,8 @@ use common::{
 const CHAIN_ID: u64 = 1;
 const FEE: u128 = 1_000;
 
-fn fund(state: &StateManager, kp: &KeyPair, bal: u128) {
-    state
+fn fund(db: &Database, kp: &KeyPair, bal: u128) {
+    sumchain_storage::StateStore::new(db)
         .put_account(
             &kp.address(),
             &sumchain_storage::schema::AccountState { balance: bal, nonce: 0 },
@@ -259,7 +259,7 @@ fn committed_duplicate_rejected() {
         setup_with_params(params_education_enabled());
     let sponsor = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sponsor, 100 * FEE);
+    fund(&db, &sponsor, 100 * FEE);
     let (_c, data) = mk_catalog([2u8; 32], "CS", "201", 1);
     let commit_tx = edu_tx(&sponsor, 0, EducationStandard::CourseCatalog, catalog_op::CREATE_CATALOG_ENTRY, data.clone());
     // PUBLISHED, not merely executed. Education writes go to the block's
@@ -319,7 +319,7 @@ fn submit_not_enrolled_rejected() {
         setup_with_params(params_education_enabled());
     let sponsor = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sponsor, 100 * FEE);
+    fund(&db, &sponsor, 100 * FEE);
     let mut n = 0u64;
     let mut hh = 1u64;
     macro_rules! run {
@@ -490,7 +490,7 @@ fn commit_chain(
     std::mem::forget(dir); // keep the TempDir alive for the test duration
     let sponsor = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sponsor, 1000 * FEE);
+    fund(&db, &sponsor, 1000 * FEE);
     let mut n = 0u64;
     let mut hh = 1u64;
     macro_rules! run {

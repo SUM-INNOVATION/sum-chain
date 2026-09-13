@@ -102,12 +102,12 @@ fn has_key(db: &Database, addr: &Address) -> bool {
 
 #[test]
 fn valid_registers_registrant_not_sponsor_and_sponsor_pays() {
-    let (state, db, _dir, executor) = setup_with_params(params_gate_open());
+    let (_state, db, _dir, executor) = setup_with_params(params_gate_open());
     let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let registrant = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sponsor, 100 * FEE);
+    fund(&db, &sponsor, 100 * FEE);
 
     let tx = honest_tx(&sponsor, &registrant, 0);
     let res = executor
@@ -139,26 +139,26 @@ fn valid_registers_registrant_not_sponsor_and_sponsor_pays() {
 
     // Sponsor pays per established fee/nonce rules; registrant is untouched.
     assert_eq!(
-        state.get_balance(&sponsor.address()).unwrap(),
+        StateManager::v_get_balance(&candidate.view(), &sponsor.address()).unwrap(),
         100 * FEE - FEE
     );
     assert_eq!(
-        state.get_balance(&proposer.address()).unwrap(),
+        StateManager::v_get_balance(&candidate.view(), &proposer.address()).unwrap(),
         FEE,
         "proposer credited"
     );
     assert_eq!(
-        state.get_nonce(&sponsor.address()).unwrap(),
+        StateManager::v_get_nonce(&candidate.view(), &sponsor.address()).unwrap(),
         1,
         "sponsor nonce advances"
     );
     assert_eq!(
-        state.get_nonce(&registrant.address()).unwrap(),
+        StateManager::v_get_nonce(&candidate.view(), &registrant.address()).unwrap(),
         0,
         "registrant nonce untouched"
     );
     assert_eq!(
-        state.get_balance(&registrant.address()).unwrap(),
+        StateManager::v_get_balance(&candidate.view(), &registrant.address()).unwrap(),
         0,
         "registrant balance untouched"
     );
@@ -166,12 +166,12 @@ fn valid_registers_registrant_not_sponsor_and_sponsor_pays() {
 
 #[test]
 fn wrong_registrant_signature_rejects_no_write_no_fee() {
-    let (state, db, _dir, executor) = setup_with_params(params_gate_open());
+    let (_state, db, _dir, executor) = setup_with_params(params_gate_open());
     let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let registrant = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sponsor, 100 * FEE);
+    fund(&db, &sponsor, 100 * FEE);
 
     let sponsor_addr = sponsor.address();
     // Corrupt one byte of the registrant signature.
@@ -191,12 +191,12 @@ fn wrong_registrant_signature_rejects_no_write_no_fee() {
         "no registration on bad sig"
     );
     assert_eq!(
-        state.get_balance(&sponsor.address()).unwrap(),
+        StateManager::v_get_balance(&candidate.view(), &sponsor.address()).unwrap(),
         100 * FEE,
         "no fee charged"
     );
     assert_eq!(
-        state.get_nonce(&sponsor.address()).unwrap(),
+        StateManager::v_get_nonce(&candidate.view(), &sponsor.address()).unwrap(),
         0,
         "no nonce advance"
     );
@@ -204,13 +204,13 @@ fn wrong_registrant_signature_rejects_no_write_no_fee() {
 
 #[test]
 fn public_key_substitution_rejects() {
-    let (state, db, _dir, executor) = setup_with_params(params_gate_open());
+    let (_state, db, _dir, executor) = setup_with_params(params_gate_open());
     let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let registrant = KeyPair::generate();
     let attacker = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sponsor, 100 * FEE);
+    fund(&db, &sponsor, 100 * FEE);
 
     let sponsor_addr = sponsor.address();
     // Registrant signs for its own key; attacker swaps in a different pubkey.
@@ -231,13 +231,13 @@ fn public_key_substitution_rejects() {
 
 #[test]
 fn sponsor_substitution_rejects() {
-    let (state, db, _dir, executor) = setup_with_params(params_gate_open());
+    let (_state, db, _dir, executor) = setup_with_params(params_gate_open());
     let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let other_sponsor = KeyPair::generate();
     let registrant = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sponsor, 100 * FEE);
+    fund(&db, &sponsor, 100 * FEE);
 
     // Registrant signed a preimage bound to `other_sponsor`, but the tx is
     // submitted (and paid) by `sponsor` — the executor rebuilds the preimage
@@ -253,17 +253,17 @@ fn sponsor_substitution_rejects() {
     );
     assert_eq!(res.fee_paid, 0);
     assert!(!has_key(&db, &registrant.address()));
-    assert_eq!(state.get_balance(&sponsor.address()).unwrap(), 100 * FEE);
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &sponsor.address()).unwrap(), 100 * FEE);
 }
 
 #[test]
 fn cross_chain_replay_rejects() {
-    let (state, db, _dir, executor) = setup_with_params(params_gate_open());
+    let (_state, db, _dir, executor) = setup_with_params(params_gate_open());
     let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let registrant = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sponsor, 100 * FEE);
+    fund(&db, &sponsor, 100 * FEE);
 
     // Registrant signed a preimage bound to chain_id 999; this chain is CHAIN_ID.
     let sponsor_addr = sponsor.address();
@@ -281,12 +281,12 @@ fn cross_chain_replay_rejects() {
 
 #[test]
 fn invalid_registrant_public_key_rejects_393() {
-    let (state, db, _dir, executor) = setup_with_params(params_gate_open());
+    let (_state, db, _dir, executor) = setup_with_params(params_gate_open());
     let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let registrant = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sponsor, 100 * FEE);
+    fund(&db, &sponsor, 100 * FEE);
 
     let sponsor_addr = sponsor.address();
     // `[0x02; 32]` is not a valid Ed25519 point → distinct malformed-key code.
@@ -304,11 +304,11 @@ fn invalid_registrant_public_key_rejects_393() {
 
 #[test]
 fn malformed_payload_rejects_392() {
-    let (state, db, _dir, executor) = setup_with_params(params_gate_open());
+    let (_state, db, _dir, executor) = setup_with_params(params_gate_open());
     let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sponsor, 100 * FEE);
+    fund(&db, &sponsor, 100 * FEE);
 
     // Payload is not a valid RegisterPublicKeySponsoredV1Data (too short).
     let messaging_data = MessagingTxData {
@@ -335,12 +335,12 @@ fn malformed_payload_rejects_392() {
 #[test]
 fn trailing_bytes_payload_rejects_392() {
     // The strict decoder rejects trailing bytes — a distinct malformed case.
-    let (state, db, _dir, executor) = setup_with_params(params_gate_open());
+    let (_state, db, _dir, executor) = setup_with_params(params_gate_open());
     let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let registrant = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sponsor, 100 * FEE);
+    fund(&db, &sponsor, 100 * FEE);
 
     let registrant_public_key = *registrant.public_key().as_bytes();
     let sponsor_addr = sponsor.address();
@@ -377,12 +377,12 @@ fn trailing_bytes_payload_rejects_392() {
 #[test]
 fn closed_gate_rejects_free_390() {
     // Default params: gate is None → closed at every height.
-    let (state, db, _dir, executor) = setup_with_params(ChainParams::with_v2_enabled());
+    let (_state, db, _dir, executor) = setup_with_params(ChainParams::with_v2_enabled());
     let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let registrant = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sponsor, 100 * FEE);
+    fund(&db, &sponsor, 100 * FEE);
 
     let tx = honest_tx(&sponsor, &registrant, 0);
     let res = executor.execute_tx(&mut candidate.view(), &tx, &proposer.address(), 1, 0).unwrap();
@@ -394,18 +394,18 @@ fn closed_gate_rejects_free_390() {
     );
     assert_eq!(res.fee_paid, 0, "closed gate is free");
     assert!(!has_key(&db, &registrant.address()));
-    assert_eq!(state.get_balance(&sponsor.address()).unwrap(), 100 * FEE);
-    assert_eq!(state.get_nonce(&sponsor.address()).unwrap(), 0);
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &sponsor.address()).unwrap(), 100 * FEE);
+    assert_eq!(StateManager::v_get_nonce(&candidate.view(), &sponsor.address()).unwrap(), 0);
 }
 
 #[test]
 fn pre_activation_height_rejects_free_390() {
-    let (state, db, _dir, executor) = setup_with_params(params_gate_from(100));
+    let (_state, db, _dir, executor) = setup_with_params(params_gate_from(100));
     let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let registrant = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sponsor, 100 * FEE);
+    fund(&db, &sponsor, 100 * FEE);
 
     let tx = honest_tx(&sponsor, &registrant, 0);
     // Height 50 < activation 100.
@@ -419,17 +419,17 @@ fn pre_activation_height_rejects_free_390() {
     );
     assert_eq!(res.fee_paid, 0);
     assert!(!has_key(&db, &registrant.address()));
-    assert_eq!(state.get_balance(&sponsor.address()).unwrap(), 100 * FEE);
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &sponsor.address()).unwrap(), 100 * FEE);
 }
 
 #[test]
 fn activation_height_boundary_succeeds() {
-    let (state, db, _dir, executor) = setup_with_params(params_gate_from(100));
+    let (_state, db, _dir, executor) = setup_with_params(params_gate_from(100));
     let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let registrant = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sponsor, 100 * FEE);
+    fund(&db, &sponsor, 100 * FEE);
 
     let tx = honest_tx(&sponsor, &registrant, 0);
     // Height exactly at activation 100 → open.
@@ -446,12 +446,12 @@ fn activation_height_boundary_succeeds() {
 
 #[test]
 fn duplicate_registration_rejects_394() {
-    let (state, db, _dir, executor) = setup_with_params(params_gate_open());
+    let (_state, db, _dir, executor) = setup_with_params(params_gate_open());
     let mut candidate = common::candidate(&db);
     let sponsor = KeyPair::generate();
     let registrant = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sponsor, 100 * FEE);
+    fund(&db, &sponsor, 100 * FEE);
 
     // First registration succeeds (nonce 0).
     let tx0 = honest_tx(&sponsor, &registrant, 0);
@@ -462,7 +462,7 @@ fn duplicate_registration_rejects_394() {
             .status,
         TxStatus::Success
     ));
-    let bal_after_first = state.get_balance(&sponsor.address()).unwrap();
+    let bal_after_first = StateManager::v_get_balance(&candidate.view(), &sponsor.address()).unwrap();
 
     // Second registration of the SAME registrant (nonce 1) → duplicate, free.
     let tx1 = honest_tx(&sponsor, &registrant, 1);
@@ -479,7 +479,7 @@ fn duplicate_registration_rejects_394() {
         "duplicate is a free rejection (existing RegisterPublicKey semantics)"
     );
     assert_eq!(
-        state.get_balance(&sponsor.address()).unwrap(),
+        StateManager::v_get_balance(&candidate.view(), &sponsor.address()).unwrap(),
         bal_after_first,
         "no extra fee on duplicate"
     );
@@ -497,9 +497,9 @@ fn two_validators_identical_tx_produce_identical_receipts_and_poststate() {
     let tx = honest_tx(&sponsor, &registrant, 0);
 
     let run = || {
-        let (state, db, dir, executor) = setup_with_params(params_gate_open());
+        let (_state, db, dir, executor) = setup_with_params(params_gate_open());
         let mut candidate = common::candidate(&db);
-        fund(&state, &sponsor, 100 * FEE);
+        fund(&db, &sponsor, 100 * FEE);
         let res = executor
             .execute_tx(&mut candidate.view(), &tx, &proposer.address(), 7, 999)
             .unwrap();
@@ -507,9 +507,9 @@ fn two_validators_identical_tx_produce_identical_receipts_and_poststate() {
         let record_bytes = db
             .get(cf::MESSAGING_PUBLIC_KEYS, registrant.address().as_bytes())
             .unwrap();
-        let sponsor_bal = state.get_balance(&sponsor.address()).unwrap();
-        let proposer_bal = state.get_balance(&proposer.address()).unwrap();
-        let sponsor_nonce = state.get_nonce(&sponsor.address()).unwrap();
+        let sponsor_bal = StateManager::v_get_balance(&candidate.view(), &sponsor.address()).unwrap();
+        let proposer_bal = StateManager::v_get_balance(&candidate.view(), &proposer.address()).unwrap();
+        let sponsor_nonce = StateManager::v_get_nonce(&candidate.view(), &sponsor.address()).unwrap();
         drop(dir);
         (
             res.status,
@@ -572,9 +572,8 @@ fn regression_node_local_write_forks_but_consensus_path_converges() {
     let tx = honest_tx(&sponsor, &registrant, 0);
 
     let converge = |db: &Arc<Database>,
-                    state: &Arc<StateManager>,
                     executor: &sumchain_state::executor::BlockExecutor| {
-        fund(state, &sponsor, 100 * FEE);
+        fund(db, &sponsor, 100 * FEE);
         // One candidate per validator, since each runs the transaction as its
         // own block. The point of the test is that both converge on identical
         // registrant bytes, which is a property of the two runs, not of one
@@ -587,10 +586,10 @@ fn regression_node_local_write_forks_but_consensus_path_converges() {
         bincode::serialize(&stored_key(db, &registrant.address()).unwrap()).unwrap()
     };
 
-    let (sc, db_c, _dc, ec) = setup_with_params(params_gate_open());
-    let (sd, db_d, _dd, ed) = setup_with_params(params_gate_open());
-    let rec_c = converge(&db_c, &sc, &ec);
-    let rec_d = converge(&db_d, &sd, &ed);
+    let (_sc, db_c, _dc, ec) = setup_with_params(params_gate_open());
+    let (_sd, db_d, _dd, ed) = setup_with_params(params_gate_open());
+    let rec_c = converge(&db_c, &ec);
+    let rec_d = converge(&db_d, &ed);
     assert_eq!(
         rec_c, rec_d,
         "consensus execution converges on identical state across validators"
@@ -605,7 +604,7 @@ fn defensive_generic_executor_arm_fails_closed() {
     use sumchain_state::MessagingExecutor;
     let dir = tempfile::TempDir::new().unwrap();
     let db = Arc::new(Database::open_default(dir.path()).unwrap());
-    let state = Arc::new(StateManager::new(db.clone(), CHAIN_ID));
+    let _state = Arc::new(StateManager::new(db.clone(), CHAIN_ID));
     let exec = MessagingExecutor::new(db.clone(), params_gate_open());
 
     let sponsor = KeyPair::generate();
@@ -622,11 +621,13 @@ fn defensive_generic_executor_arm_fails_closed() {
         operation: MessagingOperation::RegisterPublicKeySponsoredV1,
         data: reg.to_bytes(),
     };
+    // The messaging executor debits the sponsor's account, which is staged now.
+    let mut candidate = common::candidate(&db);
     let res = exec
         .execute(
+            &mut candidate.view(),
             &sponsor.address(),
             &data,
-            &state,
             &Address::ZERO,
             FEE,
             1,

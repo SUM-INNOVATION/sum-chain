@@ -100,8 +100,8 @@ fn block_at(height: u64, proposer: &[u8; 32], txs: Vec<SignedTransaction>) -> Bl
     )
 }
 
-fn fund(state: &Arc<StateManager>, kp: &KeyPair, balance: u128) {
-    state
+fn fund(db: &Database, kp: &KeyPair, balance: u128) {
+    sumchain_storage::StateStore::new(db)
         .put_account(
             &kp.address(),
             &sumchain_storage::schema::AccountState { balance, nonce: 0 },
@@ -198,7 +198,7 @@ fn the_boundary_block_snapshots_without_needing_a_staged_row() {
     let (state, db, _dir, executor) = setup_with_params(beacon_params());
     let fee = beacon_params().min_fee;
     let (vs, pubs) = validators();
-    fund(&state, &vs[0], fee + 1_000);
+    fund(&db, &vs[0], fee + 1_000);
 
     let receipts = common::publish_block(
         &state,
@@ -235,7 +235,7 @@ fn the_candidate_digest_is_the_digest_of_what_gets_published() {
     let (state, db, _dir, executor) = setup_with_params(beacon_params());
     let fee = beacon_params().min_fee;
     let (vs, pubs) = validators();
-    fund(&state, &vs[0], fee + 1_000);
+    fund(&db, &vs[0], fee + 1_000);
 
     let store = BeaconStore::new(&db);
     let empty = store.state_digest().unwrap();
@@ -265,7 +265,7 @@ fn the_candidate_digest_is_the_digest_of_what_gets_published() {
 
     // Now publish the same block and compare committed to candidate.
     let (state2, db2, _dir2, executor2) = setup_with_params(beacon_params());
-    fund(&state2, &vs[0], fee + 1_000);
+    fund(&db2, &vs[0], fee + 1_000);
     common::publish_block(
         &state2,
         &executor2,
@@ -297,7 +297,7 @@ fn a_dropped_candidate_leaves_storage_byte_identical() {
     let (state, db, _dir, executor) = setup_with_params(beacon_params());
     let fee = beacon_params().min_fee;
     let (vs, pubs) = validators();
-    fund(&state, &vs[0], fee + 1_000);
+    fund(&db, &vs[0], fee + 1_000);
 
     let store = BeaconStore::new(&db);
     let before_rows = store.load_state_map().unwrap();
@@ -331,7 +331,7 @@ fn two_blocks_at_one_height_keep_separate_journals() {
     let (vs, pubs) = validators();
 
     let (state_a, db_a, _da, ex_a) = setup_with_params(beacon_params());
-    fund(&state_a, &vs[0], fee + 1_000);
+    fund(&db_a, &vs[0], fee + 1_000);
     common::publish_block(
         &state_a,
         &ex_a,
@@ -344,7 +344,7 @@ fn two_blocks_at_one_height_keep_separate_journals() {
     // A competing block at the same height, with a different proposer, so a
     // different block hash and its own journal row.
     let (state_b, db_b, _db2, ex_b) = setup_with_params(beacon_params());
-    fund(&state_b, &vs[1], fee + 1_000);
+    fund(&db_b, &vs[1], fee + 1_000);
     common::publish_block(
         &state_b,
         &ex_b,
@@ -373,10 +373,10 @@ fn two_blocks_at_one_height_keep_separate_journals() {
 
 #[test]
 fn a_height_only_journal_refuses_rather_than_guessing_which_block_it_undoes() {
-    let (state, db, _dir, executor) = setup_with_params(beacon_params());
+    let (_state, db, _dir, executor) = setup_with_params(beacon_params());
     let fee = beacon_params().min_fee;
     let (vs, pubs) = validators();
-    fund(&state, &vs[0], fee + 1_000);
+    fund(&db, &vs[0], fee + 1_000);
 
     let blk = block_at(
         BOUNDARY,
@@ -500,7 +500,7 @@ fn a_dropped_boundary_leaves_the_epoch_without_membership() {
     let (state, db, _dir, executor) = setup_with_params(beacon_params());
     let fee = beacon_params().min_fee;
     let (vs, pubs) = validators();
-    fund(&state, &vs[0], fee + 10_000);
+    fund(&db, &vs[0], fee + 10_000);
 
     // Boundary block, executed and abandoned.
     let boundary = block_at(BOUNDARY, vs[0].public_key().as_bytes(), vec![]);

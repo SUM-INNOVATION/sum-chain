@@ -138,20 +138,20 @@ fn equity_class_approval(v: &KeyPair, class_id: &[u8; 32], create_threshold: u12
 fn native_eligibility_snapshot_is_allowlisted_holders_intersect_koppa() {
     // Floor 500 Koppa. Holders of QTOKEN: A(bal 100, koppa 1000), B(bal 100,
     // koppa 100 → excluded by floor), C(bal 40 < min_balance 50 → excluded).
-    let (state, db, _dir, exec) = setup_with_params(params(500));
+    let (_state, db, _dir, exec) = setup_with_params(params(500));
     let mut candidate = common::candidate(&db);
     let v = KeyPair::generate();
     let vset = [*v.public_key().as_bytes()];
     let submitter = KeyPair::generate();
-    fund(&state, &submitter, 100_000);
+    fund(&db, &submitter, 100_000);
 
     let a = Address::new([0xA1; 20]);
     let b = Address::new([0xB2; 20]);
     let c = Address::new([0xC3; 20]);
     seed_qualifying_token(&db, &[(a, 100), (b, 100), (c, 40)]);
-    state.credit(&a, 1000).unwrap();
-    state.credit(&b, 100).unwrap();
-    state.credit(&c, 1000).unwrap();
+    common::credit_committed(&db, &a, 1000);
+    common::credit_committed(&db, &b, 100);
+    common::credit_committed(&db, &c, 1000);
 
     // Register the qualifying SRC-20 (validator-quorum, min_balance 50).
     let req = bincode::serialize(&RegisterQualifyingAssetRequest {
@@ -162,7 +162,7 @@ fn native_eligibility_snapshot_is_allowlisted_holders_intersect_koppa() {
 
     // Create a native proposal.
     let proposer = KeyPair::generate();
-    fund(&state, &proposer, 100_000);
+    fund(&db, &proposer, 100_000);
     let creq = bincode::serialize(&CreateProposalRequest {
         asset: GovAssetKind::NativeEligibility,
         class: GovProposalClass::RoutineProcess,
@@ -186,10 +186,10 @@ fn native_eligibility_snapshot_is_allowlisted_holders_intersect_koppa() {
 
 #[test]
 fn native_create_without_registry_fails_316() {
-    let (state, db, _dir, exec) = setup_with_params(params(0));
+    let (_state, db, _dir, exec) = setup_with_params(params(0));
     let mut candidate = common::candidate(&db);
     let proposer = KeyPair::generate();
-    fund(&state, &proposer, 100_000);
+    fund(&db, &proposer, 100_000);
     // Manually enable the NativeEligibility asset but leave the qualifying
     // registry empty → 316 at create.
     GovStore::new(&db).put_asset(&sumchain_primitives::governance::GovAsset {
@@ -214,10 +214,10 @@ fn native_create_without_registry_fails_316() {
 #[test]
 fn native_create_mode_not_enabled_fails_313() {
     // No NativeEligibility asset registered at all → mode not enabled → 313.
-    let (state, db, _dir, exec) = setup_with_params(params(0));
+    let (_state, db, _dir, exec) = setup_with_params(params(0));
     let mut candidate = common::candidate(&db);
     let proposer = KeyPair::generate();
-    fund(&state, &proposer, 100_000);
+    fund(&db, &proposer, 100_000);
     let creq = bincode::serialize(&CreateProposalRequest {
         asset: GovAssetKind::NativeEligibility,
         class: GovProposalClass::RoutineProcess,
@@ -233,18 +233,18 @@ fn native_create_mode_not_enabled_fails_313() {
 #[test]
 fn native_no_qualifying_holders_fails_315() {
     // A qualifying asset is registered but its token has zero holders → 315.
-    let (state, db, _dir, exec) = setup_with_params(params(0));
+    let (_state, db, _dir, exec) = setup_with_params(params(0));
     let mut candidate = common::candidate(&db);
     let v = KeyPair::generate();
     let vset = [*v.public_key().as_bytes()];
     let submitter = KeyPair::generate();
-    fund(&state, &submitter, 100_000);
+    fund(&db, &submitter, 100_000);
     seed_qualifying_token(&db, &[]); // token exists, no balances
     let req = bincode::serialize(&RegisterQualifyingAssetRequest { token_id: QTOKEN, min_balance: 1, effective_height: 0, approvals: vec![qualify_approval(&v, &QTOKEN, 1, 0)] }).unwrap();
     assert!(matches!(exec.execute_tx_with_validators(&mut candidate.view(), &signed(&submitter, 0, gov(GovernanceOperation::RegisterQualifyingAsset, req)), &Address::new([9; 20]), 1, 1000, &vset).unwrap().status, TxStatus::Success));
 
     let proposer = KeyPair::generate();
-    fund(&state, &proposer, 100_000);
+    fund(&db, &proposer, 100_000);
     let creq = bincode::serialize(&CreateProposalRequest {
         asset: GovAssetKind::NativeEligibility, class: GovProposalClass::RoutineProcess,
         execution_kind: ExecutionKind::RecordOnly,
@@ -259,20 +259,20 @@ fn native_no_qualifying_holders_fails_315() {
 fn native_all_holders_below_koppa_floor_fails_314() {
     // Qualifying holders exist but none meet the Koppa floor → empty eligible set
     // → 314.
-    let (state, db, _dir, exec) = setup_with_params(params(1_000_000)); // very high floor
+    let (_state, db, _dir, exec) = setup_with_params(params(1_000_000)); // very high floor
     let mut candidate = common::candidate(&db);
     let v = KeyPair::generate();
     let vset = [*v.public_key().as_bytes()];
     let submitter = KeyPair::generate();
-    fund(&state, &submitter, 100_000);
+    fund(&db, &submitter, 100_000);
     let a = Address::new([0xA1; 20]);
     seed_qualifying_token(&db, &[(a, 100)]);
-    state.credit(&a, 500).unwrap(); // < 1_000_000 floor
+    common::credit_committed(&db, &a, 500); // < 1_000_000 floor
     let req = bincode::serialize(&RegisterQualifyingAssetRequest { token_id: QTOKEN, min_balance: 1, effective_height: 0, approvals: vec![qualify_approval(&v, &QTOKEN, 1, 0)] }).unwrap();
     assert!(matches!(exec.execute_tx_with_validators(&mut candidate.view(), &signed(&submitter, 0, gov(GovernanceOperation::RegisterQualifyingAsset, req)), &Address::new([9; 20]), 1, 1000, &vset).unwrap().status, TxStatus::Success));
 
     let proposer = KeyPair::generate();
-    fund(&state, &proposer, 100_000);
+    fund(&db, &proposer, 100_000);
     let creq = bincode::serialize(&CreateProposalRequest {
         asset: GovAssetKind::NativeEligibility, class: GovProposalClass::RoutineProcess,
         execution_kind: ExecutionKind::RecordOnly,
@@ -287,18 +287,18 @@ fn native_all_holders_below_koppa_floor_fails_314() {
 fn native_one_address_one_vote_and_6667_pass() {
     // 3 eligible addresses each weight 1. 2 Yes, 1 No → 2/3 = 6666bps < 6667 →
     // Rejected. Then flip to 3 Yes → pass.
-    let (state, db, _dir, exec) = setup_with_params(params(0));
+    let (_state, db, _dir, exec) = setup_with_params(params(0));
     let mut candidate = common::candidate(&db);
     let v = KeyPair::generate();
     let vset = [*v.public_key().as_bytes()];
     let submitter = KeyPair::generate();
-    fund(&state, &submitter, 100_000);
+    fund(&db, &submitter, 100_000);
 
     // Three eligible voter keypairs (need to sign votes).
     let voters: Vec<KeyPair> = (0..3).map(|_| KeyPair::generate()).collect();
     let bals: Vec<(Address, u128)> = voters.iter().map(|k| (k.address(), 100u128)).collect();
     seed_qualifying_token(&db, &bals);
-    for k in &voters { fund(&state, k, 100_000); }
+    for k in &voters { fund(&db, k, 100_000); }
 
     let req = bincode::serialize(&RegisterQualifyingAssetRequest { token_id: QTOKEN, min_balance: 1, effective_height: 0, approvals: vec![qualify_approval(&v, &QTOKEN, 1, 0)] }).unwrap();
     assert!(matches!(exec.execute_tx_with_validators(&mut candidate.view(), &signed(&submitter, 0, gov(GovernanceOperation::RegisterQualifyingAsset, req)), &Address::new([9; 20]), 1, 1000, &vset).unwrap().status, TxStatus::Success));
@@ -333,22 +333,22 @@ fn native_snapshot_bound_305() {
     // max_snapshot_holders = 1, two eligible holders → 305.
     let mut p = params(0);
     p.governance.as_mut().unwrap().max_snapshot_holders = 1;
-    let (state, db, _dir, exec) = setup_with_params(p);
+    let (_state, db, _dir, exec) = setup_with_params(p);
     let mut candidate = common::candidate(&db);
     let v = KeyPair::generate();
     let vset = [*v.public_key().as_bytes()];
     let submitter = KeyPair::generate();
-    fund(&state, &submitter, 100_000);
+    fund(&db, &submitter, 100_000);
     let a = Address::new([0xA1; 20]);
     let b = Address::new([0xB2; 20]);
     seed_qualifying_token(&db, &[(a, 100), (b, 100)]);
-    state.credit(&a, 1).unwrap();
-    state.credit(&b, 1).unwrap();
+    common::credit_committed(&db, &a, 1);
+    common::credit_committed(&db, &b, 1);
     let req = bincode::serialize(&RegisterQualifyingAssetRequest { token_id: QTOKEN, min_balance: 1, effective_height: 0, approvals: vec![qualify_approval(&v, &QTOKEN, 1, 0)] }).unwrap();
     assert!(matches!(exec.execute_tx_with_validators(&mut candidate.view(), &signed(&submitter, 0, gov(GovernanceOperation::RegisterQualifyingAsset, req)), &Address::new([9; 20]), 1, 1000, &vset).unwrap().status, TxStatus::Success));
 
     let proposer = KeyPair::generate();
-    fund(&state, &proposer, 100_000);
+    fund(&db, &proposer, 100_000);
     let creq = bincode::serialize(&CreateProposalRequest {
         asset: GovAssetKind::NativeEligibility, class: GovProposalClass::RoutineProcess,
         execution_kind: ExecutionKind::RecordOnly,
@@ -385,12 +385,12 @@ fn create_equity_proposal(view: &mut ExecutionView<'_, '_>, exec: &sumchain_stat
 
 #[test]
 fn equity_vote_valid_records_weight_and_root_recomputes() {
-    let (state, db, _dir, exec) = setup_with_params(params(0));
+    let (_state, db, _dir, exec) = setup_with_params(params(0));
     let mut candidate = common::candidate(&db);
     let v = KeyPair::generate();
     let vset = [*v.public_key().as_bytes()];
     let submitter = KeyPair::generate();
-    fund(&state, &submitter, 100_000);
+    fund(&db, &submitter, 100_000);
     let controller = KeyPair::generate();
 
     // Class with votes_per_share = 3; holders H1(10 shares), H2(20), H3(30).
@@ -402,7 +402,7 @@ fn equity_vote_valid_records_weight_and_root_recomputes() {
     assert!(matches!(register_equity(&mut candidate.view(), &exec, &submitter, &v, &vset, 0, 0), TxStatus::Success), "register equity");
 
     let proposer = KeyPair::generate();
-    fund(&state, &proposer, 100_000);
+    fund(&db, &proposer, 100_000);
     let pid = create_equity_proposal(&mut candidate.view(), &exec, &proposer, 0, 5);
 
     // Frozen root must match an independent recompute from EQUITY_BALANCES.
@@ -414,7 +414,7 @@ fn equity_vote_valid_records_weight_and_root_recomputes() {
     // Cast a valid vote for H2 (20 shares) as `voter` (submitter), attested by
     // the controller signature over the frozen root.
     let voter = KeyPair::generate();
-    fund(&state, &voter, 100_000);
+    fund(&db, &voter, 100_000);
     let signing = equity_vote_signing_bytes(CHAIN_ID, &pid, &CLASS, &frozen.balances_root, &h2, 20, &voter.address());
     let controller_sig = sign(&signing, controller.private_key()).to_bytes();
     let vote_req = CastEquityVoteRequest {
@@ -430,7 +430,7 @@ fn equity_vote_valid_records_weight_and_root_recomputes() {
 
     // Duplicate (proposal, holder_commitment) → 309, even from another voter.
     let voter2 = KeyPair::generate();
-    fund(&state, &voter2, 100_000);
+    fund(&db, &voter2, 100_000);
     let signing2 = equity_vote_signing_bytes(CHAIN_ID, &pid, &CLASS, &frozen.balances_root, &h2, 20, &voter2.address());
     let sig2 = sign(&signing2, controller.private_key()).to_bytes();
     let dup = CastEquityVoteRequest {
@@ -443,12 +443,12 @@ fn equity_vote_valid_records_weight_and_root_recomputes() {
 
 #[test]
 fn equity_register_non_voting_class_317() {
-    let (state, db, _dir, exec) = setup_with_params(params(0));
+    let (_state, db, _dir, exec) = setup_with_params(params(0));
     let mut candidate = common::candidate(&db);
     let v = KeyPair::generate();
     let vset = [*v.public_key().as_bytes()];
     let submitter = KeyPair::generate();
-    fund(&state, &submitter, 100_000);
+    fund(&db, &submitter, 100_000);
     // votes_per_share = 0 → non-voting.
     seed_equity_class(&db, KeyPair::generate().address(), 0, &[([0x11; 32], 10)]);
     assert!(matches!(register_equity(&mut candidate.view(), &exec, &submitter, &v, &vset, 0, 0), TxStatus::Failed(317)), "non-voting class");
@@ -457,12 +457,12 @@ fn equity_register_non_voting_class_317() {
 
 #[test]
 fn equity_bad_merkle_bad_sig_and_wrong_signer_all_318() {
-    let (state, db, _dir, exec) = setup_with_params(params(0));
+    let (_state, db, _dir, exec) = setup_with_params(params(0));
     let mut candidate = common::candidate(&db);
     let v = KeyPair::generate();
     let vset = [*v.public_key().as_bytes()];
     let submitter = KeyPair::generate();
-    fund(&state, &submitter, 100_000);
+    fund(&db, &submitter, 100_000);
     let controller = KeyPair::generate();
     let h1 = [0x11; 32];
     let h2 = [0x22; 32];
@@ -470,14 +470,14 @@ fn equity_bad_merkle_bad_sig_and_wrong_signer_all_318() {
     assert!(matches!(register_equity(&mut candidate.view(), &exec, &submitter, &v, &vset, 0, 0), TxStatus::Success));
 
     let proposer = KeyPair::generate();
-    fund(&state, &proposer, 100_000);
+    fund(&db, &proposer, 100_000);
     let pid = create_equity_proposal(&mut candidate.view(), &exec, &proposer, 0, 5);
     let frozen = GovStore::new(&db).get_equity_class_root(&pid).unwrap().unwrap();
     let (_r, proof) = equity_balances_root_and_proof(&db, &CLASS, &h1).unwrap();
     let (_idx, good_path) = proof.unwrap();
 
     let voter = KeyPair::generate();
-    fund(&state, &voter, 100_000);
+    fund(&db, &voter, 100_000);
     let good_sig = sign(&equity_vote_signing_bytes(CHAIN_ID, &pid, &CLASS, &frozen.balances_root, &h1, 10, &voter.address()), controller.private_key()).to_bytes();
 
     // (a) bad merkle path (wrong sibling) → 318.

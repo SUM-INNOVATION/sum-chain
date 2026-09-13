@@ -192,8 +192,7 @@ pub fn execute(
         },
         GovernanceOperation::CreateProposal => match decode::<CreateProposalRequest>(&gov.data) {
             Err(()) => return Ok(result(tx_hash, TxStatus::Failed(302), 0)),
-            Ok(req) => validate_create(
-                state,
+            Ok(req) => validate_create(view,
                 db,
                 gp,
                 from,
@@ -253,12 +252,12 @@ pub fn execute(
     };
 
     // ── Semantic: apply Policy-B fee/nonce ───────────────────────────────────
-    let balance = state.get_balance(from)?;
+    let balance = StateManager::v_get_balance(view, from)?;
     let fee_affordable = balance >= fee;
     match validated {
         Err(code) => {
             if fee_affordable {
-                charge(state, from, proposer, fee)?;
+                charge(view, from, proposer, fee)?;
                 Ok(result(tx_hash, TxStatus::Failed(code), fee))
             } else {
                 // Semantic failure but the sender cannot cover the fee: no charge.
@@ -276,7 +275,7 @@ pub fn execute(
                 if fee_affordable && bond > 0 {
                     // Valid proposal, can pay the fee but not the bond: charge the
                     // fee + advance nonce (Policy-B) and fail with a bond code.
-                    charge(state, from, proposer, fee)?;
+                    charge(view, from, proposer, fee)?;
                     return Ok(result(tx_hash, TxStatus::Failed(311), fee));
                 }
                 // Cannot even cover the fee: reject free.
@@ -286,8 +285,8 @@ pub fn execute(
             // mutation, so an underfunded treasury leaves the proposal live
             // (Voting) with its bond escrowed. Semantic failure ⇒ charge the fee.
             if let Prepared::ProposalUpdate { payout: Some(p), .. } = &prepared {
-                if state.get_balance(&p.from_treasury)? < p.amount {
-                    charge(state, from, proposer, fee)?;
+                if StateManager::v_get_balance(view, &p.from_treasury)? < p.amount {
+                    charge(view, from, proposer, fee)?;
                     return Ok(result(tx_hash, TxStatus::Failed(312), fee));
                 }
             }
@@ -315,14 +314,14 @@ pub fn execute(
                     (None, _) => 0,
                 };
                 if remaining < *amount {
-                    charge(state, from, proposer, fee)?;
+                    charge(view, from, proposer, fee)?;
                     return Ok(result(tx_hash, TxStatus::Failed(385), fee));
                 }
             }
-            charge(state, from, proposer, fee)?;
-            apply_bond(state, &prepared)?;
-            apply_treasury(state, &prepared)?;
-            apply_monetary(view, state, &prepared, block_height)?;
+            charge(view, from, proposer, fee)?;
+            apply_bond(view, &prepared)?;
+            apply_treasury(view, &prepared)?;
+            apply_monetary(view, &prepared, block_height)?;
             apply(db, prepared)?;
             Ok(result(tx_hash, TxStatus::Success, fee))
         }
@@ -332,22 +331,22 @@ pub fn execute(
 /// Apply the bond escrow (proposal create) or settlement (terminal update) to
 /// native balances. Runs after the fee is charged, so `fee + bond` affordability
 /// has already been checked for the create path.
-fn apply_bond(state: &Arc<StateManager>, prepared: &Prepared) -> Result<()> {
+fn apply_bond(view: &mut ExecutionView<'_, '_>, prepared: &Prepared) -> Result<()> {
     let escrow = gov_escrow_address();
     match prepared {
         // Escrow: proposer (== `from` at creation) funds the escrow.
         Prepared::CreateProposal { proposal, .. } if proposal.bond > 0 => {
-            state.deduct(&proposal.proposer, proposal.bond)?;
-            state.credit(&escrow, proposal.bond)?;
+            StateManager::v_deduct(view, &proposal.proposer, proposal.bond)?;
+            StateManager::v_credit(view, &escrow, proposal.bond)?;
         }
         Prepared::ProposalUpdate { proposal, settlement, .. } => match settlement {
             BondSettlement::Return(amount) if *amount > 0 => {
-                state.deduct(&escrow, *amount)?;
-                state.credit(&proposal.proposer, *amount)?;
+                StateManager::v_deduct(view, &escrow, *amount)?;
+                StateManager::v_credit(view, &proposal.proposer, *amount)?;
             }
             BondSettlement::Burn(amount) if *amount > 0 => {
-                state.deduct(&escrow, *amount)?;
-                state.credit(&Address::ZERO, *amount)?;
+                StateManager::v_deduct(view, &escrow, *amount)?;
+                StateManager::v_credit(view, &Address::ZERO, *amount)?;
             }
             _ => {}
         },
@@ -359,10 +358,10 @@ fn apply_bond(state: &Arc<StateManager>, prepared: &Prepared) -> Result<()> {
 /// Apply a staged treasury payout: deduct from the governance treasury and
 /// credit the beneficiary. Runs after the treasury-balance (312) check, so the
 /// deduct cannot underflow. No other account or chain state is touched.
-fn apply_treasury(state: &Arc<StateManager>, prepared: &Prepared) -> Result<()> {
+fn apply_treasury(view: &mut ExecutionView<'_, '_>, prepared: &Prepared) -> Result<()> {
     if let Prepared::ProposalUpdate { payout: Some(p), .. } = prepared {
-        state.deduct(&p.from_treasury, p.amount)?;
-        state.credit(&p.to, p.amount)?;
+        StateManager::v_deduct(view, &p.from_treasury, p.amount)?;
+        StateManager::v_credit(view, &p.to, p.amount)?;
     }
     Ok(())
 }
@@ -375,7 +374,6 @@ fn apply_treasury(state: &Arc<StateManager>, prepared: &Prepared) -> Result<()> 
 /// execution) with the monetary-policy gate open.
 fn apply_monetary(
     view: &mut ExecutionView<'_, '_>,
-    state: &Arc<StateManager>,
     prepared: &Prepared,
     height: u64,
 ) -> Result<()> {
@@ -385,23 +383,23 @@ fn apply_monetary(
                 crate::supply::SupplyStore::apply_reserve_release(
                     view, *pool, to, *amount, *proposal_id, *reason_hash, height,
                 )?;
-                state.credit(to, *amount)?;
+                StateManager::v_credit(view, to, *amount)?;
             }
             MonetaryAction::Mint { to, amount, proposal_id, reason_hash } => {
                 crate::supply::SupplyStore::apply_monetary_mint(
                     view, to, *amount, *proposal_id, *reason_hash, height,
                 )?;
-                state.credit(to, *amount)?;
+                StateManager::v_credit(view, to, *amount)?;
             }
         }
     }
     Ok(())
 }
 
-fn charge(state: &Arc<StateManager>, from: &Address, proposer: &Address, fee: Balance) -> Result<()> {
-    state.deduct(from, fee)?;
-    state.credit(proposer, fee)?;
-    state.increment_nonce(from)?;
+fn charge(view: &mut ExecutionView<'_, '_>, from: &Address, proposer: &Address, fee: Balance) -> Result<()> {
+    StateManager::v_deduct(view, from, fee)?;
+    StateManager::v_credit(view, proposer, fee)?;
+    StateManager::v_increment_nonce(view, from)?;
     Ok(())
 }
 
@@ -690,8 +688,7 @@ fn equity_vote_merkle_ok(
 
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
-fn validate_create(
-    state: &Arc<StateManager>,
+fn validate_create(view: &mut ExecutionView<'_, '_>,
     db: &Arc<Database>,
     gp: &GovernanceParams,
     from: &Address,
@@ -753,11 +750,11 @@ fn validate_create(
             (snap, None)
         }
         GovAssetKind::NativeEligibility => {
-            (build_native_eligibility_snapshot(state, db, gp, height)?, None)
+            (build_native_eligibility_snapshot(view, db, gp, height)?, None)
         }
         GovAssetKind::EquityClass(class_id) => {
             let (snap, root) =
-                build_equity_class_snapshot(state, db, gp, from, height, &class_id, &asset)?;
+                build_equity_class_snapshot(db, gp, from, height, &class_id, &asset)?;
             (snap, Some(root))
         }
     };
@@ -791,8 +788,7 @@ fn validate_create(
 /// >= `gp.min_koppa_for_eligibility`. Deduped; each eligible address weight = 1.
 /// Bounded by `gp.max_snapshot_holders` (305). Codes: 316 empty registry, 315 no
 /// qualifying holders, 314 empty eligible set after the Koppa filter.
-fn build_native_eligibility_snapshot(
-    state: &Arc<StateManager>,
+fn build_native_eligibility_snapshot(view: &mut ExecutionView<'_, '_>,
     db: &Arc<Database>,
     gp: &GovernanceParams,
     height: u64,
@@ -819,7 +815,7 @@ fn build_native_eligibility_snapshot(
             any_holder = true;
             // Native Koppa floor at creation height (current state == creation
             // height, executed in-block).
-            let koppa = state.get_balance(&addr).map_err(|_| 315u32)?;
+            let koppa = StateManager::v_get_balance(view, &addr).map_err(|_| 315u32)?;
             if (koppa as u128) < gp.min_koppa_for_eligibility {
                 continue;
             }
@@ -847,7 +843,6 @@ fn build_native_eligibility_snapshot(
 /// Code 317 if the class is non-voting (votes_per_share == 0) or missing.
 #[allow(clippy::too_many_arguments)]
 fn build_equity_class_snapshot(
-    _state: &Arc<StateManager>,
     db: &Arc<Database>,
     gp: &GovernanceParams,
     _from: &Address,

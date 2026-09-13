@@ -7,6 +7,7 @@
 //! - Academic/Professional Credentials (SRC-810-813)
 //! - Issuer Registry management
 
+use sumchain_storage::exec_view::ExecutionView;
 use std::sync::Arc;
 
 use sumchain_genesis::ChainParams;
@@ -64,11 +65,11 @@ impl DocClassExecutor {
     }
 
     /// Execute a DocClass transaction
+    #[allow(clippy::too_many_arguments)]
     pub fn execute(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &DocClassTxData,
-        state: &StateManager,
         proposer: &Address,
         fee: Balance,
         block_height: BlockHeight,
@@ -81,67 +82,67 @@ impl DocClassExecutor {
         match data.operation {
             // Identity operations (SRC-800)
             DocClassOperation::CreateIdentityRoot => {
-                self.create_identity_root(sender, &data.data, state, proposer, fee, block_height, tx_index, &store)
+                self.create_identity_root(view, sender, &data.data, proposer, fee, block_height, tx_index, &store)
             }
             DocClassOperation::AddKey => {
-                self.identity_add_key(sender, &data.data, state, proposer, fee, block_height, tx_index, &store)
+                self.identity_add_key(view, sender, &data.data, proposer, fee, block_height, tx_index, &store)
             }
             DocClassOperation::RemoveKey => {
-                self.identity_remove_key(sender, &data.data, state, proposer, fee, block_height, tx_index, &store)
+                self.identity_remove_key(view, sender, &data.data, proposer, fee, block_height, tx_index, &store)
             }
             DocClassOperation::RotateKey => {
-                self.identity_rotate_key(sender, &data.data, state, proposer, fee, block_height, tx_index, &store)
+                self.identity_rotate_key(view, sender, &data.data, proposer, fee, block_height, tx_index, &store)
             }
             DocClassOperation::AddController => {
-                self.identity_add_controller(sender, &data.data, state, proposer, fee, block_height, tx_index, &store)
+                self.identity_add_controller(view, sender, &data.data, proposer, fee, block_height, tx_index, &store)
             }
             DocClassOperation::RemoveController => {
-                self.identity_remove_controller(sender, &data.data, state, proposer, fee, block_height, tx_index, &store)
+                self.identity_remove_controller(view, sender, &data.data, proposer, fee, block_height, tx_index, &store)
             }
             DocClassOperation::UpdateService => {
-                self.identity_update_service(sender, &data.data, state, proposer, fee, block_height, tx_index, &store)
+                self.identity_update_service(view, sender, &data.data, proposer, fee, block_height, tx_index, &store)
             }
             DocClassOperation::DeactivateIdentity => {
-                self.deactivate_identity(sender, &data.data, state, proposer, fee, block_height, block_timestamp, tx_index, &store)
+                self.deactivate_identity(view, sender, &data.data, proposer, fee, block_height, block_timestamp, tx_index, &store)
             }
             DocClassOperation::ReactivateIdentity => {
-                self.reactivate_identity(sender, &data.data, state, proposer, fee, block_height, block_timestamp, tx_index, &store)
+                self.reactivate_identity(view, sender, &data.data, proposer, fee, block_height, block_timestamp, tx_index, &store)
             }
 
             // Credential operations (SRC-802, SRC-810-813)
             DocClassOperation::IssueCredential => {
-                self.issue_credential(sender, &data.data, state, proposer, fee, block_height, tx_index, &store)
+                self.issue_credential(view, sender, &data.data, proposer, fee, block_height, tx_index, &store)
             }
             DocClassOperation::UpdateCredential => {
-                self.update_credential(sender, &data.data, state, proposer, fee, &store)
+                self.update_credential(view, sender, &data.data, proposer, fee, &store)
             }
 
             // Revocation operations (SRC-805)
             DocClassOperation::RevokeCredential => {
-                self.revoke_credential(sender, &data.data, state, proposer, fee, block_height, block_timestamp, tx_index, &store)
+                self.revoke_credential(view, sender, &data.data, proposer, fee, block_height, block_timestamp, tx_index, &store)
             }
             DocClassOperation::SuspendCredential => {
-                self.suspend_credential(sender, &data.data, state, proposer, fee, block_height, block_timestamp, tx_index, &store)
+                self.suspend_credential(view, sender, &data.data, proposer, fee, block_height, block_timestamp, tx_index, &store)
             }
             DocClassOperation::ReactivateCredential => {
-                self.reactivate_credential(sender, &data.data, state, proposer, fee, block_height, block_timestamp, tx_index, &store)
+                self.reactivate_credential(view, sender, &data.data, proposer, fee, block_height, block_timestamp, tx_index, &store)
             }
             DocClassOperation::SupersedeCredential => {
-                self.supersede_credential(sender, &data.data, state, proposer, fee, block_height, block_timestamp, tx_index, &store)
+                self.supersede_credential(view, sender, &data.data, proposer, fee, block_height, block_timestamp, tx_index, &store)
             }
 
             // Issuer Registry operations
             DocClassOperation::RegisterIssuer => {
-                self.register_issuer(sender, &data.data, state, proposer, fee, block_height, tx_index, &store)
+                self.register_issuer(view, sender, &data.data, proposer, fee, block_height, tx_index, &store)
             }
             DocClassOperation::UpdateIssuer => {
-                self.update_issuer(sender, &data.data, state, proposer, fee, block_height, tx_index, &store)
+                self.update_issuer(view, sender, &data.data, proposer, fee, block_height, tx_index, &store)
             }
             DocClassOperation::RotateIssuerKey => {
-                self.rotate_issuer_key(sender, &data.data, state, proposer, fee, block_height, tx_index, &store)
+                self.rotate_issuer_key(view, sender, &data.data, proposer, fee, block_height, tx_index, &store)
             }
             DocClassOperation::DeactivateIssuer => {
-                self.deactivate_issuer(sender, &data.data, state, proposer, fee, block_height, block_timestamp, tx_index, &store)
+                self.deactivate_issuer(view, sender, &data.data, proposer, fee, block_height, block_timestamp, tx_index, &store)
             }
         }
     }
@@ -150,11 +151,11 @@ impl DocClassExecutor {
     // Identity Root Operations (SRC-800)
     // ========================================================================
 
+    #[allow(clippy::too_many_arguments)]
     fn create_identity_root(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
-        state: &StateManager,
         proposer: &Address,
         fee: Balance,
         block_height: BlockHeight,
@@ -172,9 +173,9 @@ impl DocClassExecutor {
             return Ok(DocClassExecutionResult::failure("Identity already exists"));
         }
 
-        state.deduct(sender, fee)?;
-        state.credit(proposer, fee)?;
-        state.increment_nonce(sender)?;
+        StateManager::v_deduct(view, sender, fee)?;
+        StateManager::v_credit(view, proposer, fee)?;
+        StateManager::v_increment_nonce(view, sender)?;
 
         store.identity_roots().put(&identity)?;
 
@@ -189,11 +190,11 @@ impl DocClassExecutor {
         Ok(DocClassExecutionResult::success(Some(identity.identity_id)))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn identity_add_key(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
-        state: &StateManager,
         proposer: &Address,
         fee: Balance,
         block_height: BlockHeight,
@@ -218,9 +219,9 @@ impl DocClassExecutor {
             return Ok(DocClassExecutionResult::failure("Not authorized"));
         }
 
-        state.deduct(sender, fee)?;
-        state.credit(proposer, fee)?;
-        state.increment_nonce(sender)?;
+        StateManager::v_deduct(view, sender, fee)?;
+        StateManager::v_credit(view, proposer, fee)?;
+        StateManager::v_increment_nonce(view, sender)?;
 
         identity.keys.push(add_data.key.clone());
         store.identity_roots().put(&identity)?;
@@ -235,11 +236,11 @@ impl DocClassExecutor {
         Ok(DocClassExecutionResult::success(Some(add_data.identity_id)))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn identity_remove_key(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
-        state: &StateManager,
         proposer: &Address,
         fee: Balance,
         block_height: BlockHeight,
@@ -264,9 +265,9 @@ impl DocClassExecutor {
             return Ok(DocClassExecutionResult::failure("Not authorized"));
         }
 
-        state.deduct(sender, fee)?;
-        state.credit(proposer, fee)?;
-        state.increment_nonce(sender)?;
+        StateManager::v_deduct(view, sender, fee)?;
+        StateManager::v_credit(view, proposer, fee)?;
+        StateManager::v_increment_nonce(view, sender)?;
 
         identity.keys.retain(|k| k.key_id != remove_data.key_id);
         store.identity_roots().put(&identity)?;
@@ -280,11 +281,11 @@ impl DocClassExecutor {
         Ok(DocClassExecutionResult::success(Some(remove_data.identity_id)))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn identity_rotate_key(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
-        state: &StateManager,
         proposer: &Address,
         fee: Balance,
         block_height: BlockHeight,
@@ -310,9 +311,9 @@ impl DocClassExecutor {
             return Ok(DocClassExecutionResult::failure("Not authorized"));
         }
 
-        state.deduct(sender, fee)?;
-        state.credit(proposer, fee)?;
-        state.increment_nonce(sender)?;
+        StateManager::v_deduct(view, sender, fee)?;
+        StateManager::v_credit(view, proposer, fee)?;
+        StateManager::v_increment_nonce(view, sender)?;
 
         identity.keys.retain(|k| k.key_id != rotate_data.old_key_id);
         let new_key_id = rotate_data.new_key.key_id.clone();
@@ -329,11 +330,11 @@ impl DocClassExecutor {
         Ok(DocClassExecutionResult::success(Some(rotate_data.identity_id)))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn identity_add_controller(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
-        state: &StateManager,
         proposer: &Address,
         fee: Balance,
         block_height: BlockHeight,
@@ -358,9 +359,9 @@ impl DocClassExecutor {
             return Ok(DocClassExecutionResult::failure("Only primary controller can add"));
         }
 
-        state.deduct(sender, fee)?;
-        state.credit(proposer, fee)?;
-        state.increment_nonce(sender)?;
+        StateManager::v_deduct(view, sender, fee)?;
+        StateManager::v_credit(view, proposer, fee)?;
+        StateManager::v_increment_nonce(view, sender)?;
 
         if !identity.additional_controllers.contains(&add_data.controller) {
             identity.additional_controllers.push(add_data.controller);
@@ -376,11 +377,11 @@ impl DocClassExecutor {
         Ok(DocClassExecutionResult::success(Some(add_data.identity_id)))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn identity_remove_controller(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
-        state: &StateManager,
         proposer: &Address,
         fee: Balance,
         block_height: BlockHeight,
@@ -405,9 +406,9 @@ impl DocClassExecutor {
             return Ok(DocClassExecutionResult::failure("Only primary controller can remove"));
         }
 
-        state.deduct(sender, fee)?;
-        state.credit(proposer, fee)?;
-        state.increment_nonce(sender)?;
+        StateManager::v_deduct(view, sender, fee)?;
+        StateManager::v_credit(view, proposer, fee)?;
+        StateManager::v_increment_nonce(view, sender)?;
 
         identity.additional_controllers.retain(|c| c != &remove_data.controller);
         store.identity_roots().put(&identity)?;
@@ -421,11 +422,11 @@ impl DocClassExecutor {
         Ok(DocClassExecutionResult::success(Some(remove_data.identity_id)))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn identity_update_service(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
-        state: &StateManager,
         proposer: &Address,
         fee: Balance,
         block_height: BlockHeight,
@@ -450,9 +451,9 @@ impl DocClassExecutor {
             return Ok(DocClassExecutionResult::failure("Not authorized"));
         }
 
-        state.deduct(sender, fee)?;
-        state.credit(proposer, fee)?;
-        state.increment_nonce(sender)?;
+        StateManager::v_deduct(view, sender, fee)?;
+        StateManager::v_credit(view, proposer, fee)?;
+        StateManager::v_increment_nonce(view, sender)?;
 
         let service_id = update_data.service.service_id.clone();
         if let Some(s) = identity.services.iter_mut().find(|s| s.service_id == update_data.service.service_id) {
@@ -471,11 +472,11 @@ impl DocClassExecutor {
         Ok(DocClassExecutionResult::success(Some(update_data.identity_id)))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn deactivate_identity(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
-        state: &StateManager,
         proposer: &Address,
         fee: Balance,
         block_height: BlockHeight,
@@ -500,9 +501,9 @@ impl DocClassExecutor {
             return Ok(DocClassExecutionResult::failure("Only controller can deactivate"));
         }
 
-        state.deduct(sender, fee)?;
-        state.credit(proposer, fee)?;
-        state.increment_nonce(sender)?;
+        StateManager::v_deduct(view, sender, fee)?;
+        StateManager::v_credit(view, proposer, fee)?;
+        StateManager::v_increment_nonce(view, sender)?;
 
         store.identity_roots().update_status(&deactivate.identity_id, IdentityStatus::Deactivated, block_timestamp)?;
 
@@ -515,11 +516,11 @@ impl DocClassExecutor {
         Ok(DocClassExecutionResult::success(Some(deactivate.identity_id)))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn reactivate_identity(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
-        state: &StateManager,
         proposer: &Address,
         fee: Balance,
         block_height: BlockHeight,
@@ -544,9 +545,9 @@ impl DocClassExecutor {
             return Ok(DocClassExecutionResult::failure("Only controller can reactivate"));
         }
 
-        state.deduct(sender, fee)?;
-        state.credit(proposer, fee)?;
-        state.increment_nonce(sender)?;
+        StateManager::v_deduct(view, sender, fee)?;
+        StateManager::v_credit(view, proposer, fee)?;
+        StateManager::v_increment_nonce(view, sender)?;
 
         store.identity_roots().update_status(&reactivate.identity_id, IdentityStatus::Active, block_timestamp)?;
 
@@ -563,11 +564,11 @@ impl DocClassExecutor {
     // Credential Operations
     // ========================================================================
 
+    #[allow(clippy::too_many_arguments)]
     fn issue_credential(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
-        state: &StateManager,
         proposer: &Address,
         fee: Balance,
         block_height: BlockHeight,
@@ -576,20 +577,20 @@ impl DocClassExecutor {
     ) -> Result<DocClassExecutionResult> {
         // Try academic credential first
         if let Ok(cred) = bincode::deserialize::<AcademicCredential>(data) {
-            return self.issue_academic_credential(sender, cred, state, proposer, fee, block_height, tx_index, store);
+            return self.issue_academic_credential(view, sender, cred, proposer, fee, block_height, tx_index, store);
         }
         // Try eligibility attestation
         if let Ok(att) = bincode::deserialize::<EligibilityAttestation>(data) {
-            return self.issue_eligibility(sender, att, state, proposer, fee, block_height, tx_index, store);
+            return self.issue_eligibility(view, sender, att, proposer, fee, block_height, tx_index, store);
         }
         Ok(DocClassExecutionResult::failure("Invalid credential data"))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn issue_academic_credential(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         credential: AcademicCredential,
-        state: &StateManager,
         proposer: &Address,
         fee: Balance,
         block_height: BlockHeight,
@@ -626,9 +627,9 @@ impl DocClassExecutor {
             }
         }
 
-        state.deduct(sender, fee)?;
-        state.credit(proposer, fee)?;
-        state.increment_nonce(sender)?;
+        StateManager::v_deduct(view, sender, fee)?;
+        StateManager::v_credit(view, proposer, fee)?;
+        StateManager::v_increment_nonce(view, sender)?;
 
         store.credentials().put(&credential)?;
 
@@ -647,11 +648,11 @@ impl DocClassExecutor {
         Ok(DocClassExecutionResult::success(Some(credential.credential_id)))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn issue_eligibility(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         attestation: EligibilityAttestation,
-        state: &StateManager,
         proposer: &Address,
         fee: Balance,
         block_height: BlockHeight,
@@ -670,9 +671,9 @@ impl DocClassExecutor {
             return Ok(DocClassExecutionResult::failure("Credential exists"));
         }
 
-        state.deduct(sender, fee)?;
-        state.credit(proposer, fee)?;
-        state.increment_nonce(sender)?;
+        StateManager::v_deduct(view, sender, fee)?;
+        StateManager::v_credit(view, proposer, fee)?;
+        StateManager::v_increment_nonce(view, sender)?;
 
         store.eligibility().put(&attestation)?;
 
@@ -691,11 +692,11 @@ impl DocClassExecutor {
         Ok(DocClassExecutionResult::success(Some(attestation.credential_id)))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn update_credential(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
-        state: &StateManager,
         proposer: &Address,
         fee: Balance,
         store: &DocClassStore,
@@ -721,9 +722,9 @@ impl DocClassExecutor {
             return Ok(DocClassExecutionResult::failure("Not authorized"));
         }
 
-        state.deduct(sender, fee)?;
-        state.credit(proposer, fee)?;
-        state.increment_nonce(sender)?;
+        StateManager::v_deduct(view, sender, fee)?;
+        StateManager::v_credit(view, proposer, fee)?;
+        StateManager::v_increment_nonce(view, sender)?;
 
         Ok(DocClassExecutionResult::success(Some(update.credential_id)))
     }
@@ -732,11 +733,11 @@ impl DocClassExecutor {
     // Revocation Operations
     // ========================================================================
 
+    #[allow(clippy::too_many_arguments)]
     fn revoke_credential(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
-        state: &StateManager,
         proposer: &Address,
         fee: Balance,
         block_height: BlockHeight,
@@ -757,9 +758,9 @@ impl DocClassExecutor {
             return Ok(DocClassExecutionResult::failure("Not authorized"));
         }
 
-        state.deduct(sender, fee)?;
-        state.credit(proposer, fee)?;
-        state.increment_nonce(sender)?;
+        StateManager::v_deduct(view, sender, fee)?;
+        StateManager::v_credit(view, proposer, fee)?;
+        StateManager::v_increment_nonce(view, sender)?;
 
         let record = RevocationRecord {
             credential_id: revoke.credential_id,
@@ -791,11 +792,11 @@ impl DocClassExecutor {
         Ok(DocClassExecutionResult::success(Some(revoke.credential_id)))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn suspend_credential(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
-        state: &StateManager,
         proposer: &Address,
         fee: Balance,
         block_height: BlockHeight,
@@ -816,9 +817,9 @@ impl DocClassExecutor {
             return Ok(DocClassExecutionResult::failure("Not authorized"));
         }
 
-        state.deduct(sender, fee)?;
-        state.credit(proposer, fee)?;
-        state.increment_nonce(sender)?;
+        StateManager::v_deduct(view, sender, fee)?;
+        StateManager::v_credit(view, proposer, fee)?;
+        StateManager::v_increment_nonce(view, sender)?;
 
         let record = RevocationRecord {
             credential_id: suspend.credential_id,
@@ -850,11 +851,11 @@ impl DocClassExecutor {
         Ok(DocClassExecutionResult::success(Some(suspend.credential_id)))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn reactivate_credential(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
-        state: &StateManager,
         proposer: &Address,
         fee: Balance,
         block_height: BlockHeight,
@@ -879,9 +880,9 @@ impl DocClassExecutor {
             return Ok(DocClassExecutionResult::failure("Only suspended can be reactivated"));
         }
 
-        state.deduct(sender, fee)?;
-        state.credit(proposer, fee)?;
-        state.increment_nonce(sender)?;
+        StateManager::v_deduct(view, sender, fee)?;
+        StateManager::v_credit(view, proposer, fee)?;
+        StateManager::v_increment_nonce(view, sender)?;
 
         let record = RevocationRecord {
             credential_id: reactivate.credential_id,
@@ -912,11 +913,11 @@ impl DocClassExecutor {
         Ok(DocClassExecutionResult::success(Some(reactivate.credential_id)))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn supersede_credential(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
-        state: &StateManager,
         proposer: &Address,
         fee: Balance,
         block_height: BlockHeight,
@@ -937,9 +938,9 @@ impl DocClassExecutor {
             return Ok(DocClassExecutionResult::failure("Not authorized"));
         }
 
-        state.deduct(sender, fee)?;
-        state.credit(proposer, fee)?;
-        state.increment_nonce(sender)?;
+        StateManager::v_deduct(view, sender, fee)?;
+        StateManager::v_credit(view, proposer, fee)?;
+        StateManager::v_increment_nonce(view, sender)?;
 
         let record = RevocationRecord {
             credential_id: supersede.old_credential_id,
@@ -985,11 +986,11 @@ impl DocClassExecutor {
     // Issuer Registry
     // ========================================================================
 
+    #[allow(clippy::too_many_arguments)]
     fn register_issuer(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
-        state: &StateManager,
         proposer: &Address,
         fee: Balance,
         block_height: BlockHeight,
@@ -1014,9 +1015,9 @@ impl DocClassExecutor {
         }
 
         let total = fee.saturating_add(issuer.stake_amount);
-        state.deduct(sender, total)?;
-        state.credit(proposer, fee)?;
-        state.increment_nonce(sender)?;
+        StateManager::v_deduct(view, sender, total)?;
+        StateManager::v_credit(view, proposer, fee)?;
+        StateManager::v_increment_nonce(view, sender)?;
 
         let subcodes = issuer.authorized_subcodes.clone();
         store.issuers().put(&issuer)?;
@@ -1033,11 +1034,11 @@ impl DocClassExecutor {
         Ok(DocClassExecutionResult::success(None))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn update_issuer(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
-        state: &StateManager,
         proposer: &Address,
         fee: Balance,
         block_height: BlockHeight,
@@ -1055,9 +1056,9 @@ impl DocClassExecutor {
             return Ok(DocClassExecutionResult::failure("Not registered"));
         }
 
-        state.deduct(sender, fee)?;
-        state.credit(proposer, fee)?;
-        state.increment_nonce(sender)?;
+        StateManager::v_deduct(view, sender, fee)?;
+        StateManager::v_credit(view, proposer, fee)?;
+        StateManager::v_increment_nonce(view, sender)?;
 
         store.issuers().put(&updated)?;
 
@@ -1069,11 +1070,11 @@ impl DocClassExecutor {
         Ok(DocClassExecutionResult::success(None))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn rotate_issuer_key(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
-        state: &StateManager,
         proposer: &Address,
         fee: Balance,
         block_height: BlockHeight,
@@ -1094,9 +1095,9 @@ impl DocClassExecutor {
             None => return Ok(DocClassExecutionResult::failure("Not registered")),
         };
 
-        state.deduct(sender, fee)?;
-        state.credit(proposer, fee)?;
-        state.increment_nonce(sender)?;
+        StateManager::v_deduct(view, sender, fee)?;
+        StateManager::v_credit(view, proposer, fee)?;
+        StateManager::v_increment_nonce(view, sender)?;
 
         for key in &mut issuer.keys {
             if key.key_id == rotate.old_key_id {
@@ -1125,11 +1126,11 @@ impl DocClassExecutor {
         Ok(DocClassExecutionResult::success(None))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn deactivate_issuer(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
-        state: &StateManager,
         proposer: &Address,
         fee: Balance,
         block_height: BlockHeight,
@@ -1156,9 +1157,9 @@ impl DocClassExecutor {
             return Ok(DocClassExecutionResult::failure("Not registered"));
         }
 
-        state.deduct(sender, fee)?;
-        state.credit(proposer, fee)?;
-        state.increment_nonce(sender)?;
+        StateManager::v_deduct(view, sender, fee)?;
+        StateManager::v_credit(view, proposer, fee)?;
+        StateManager::v_increment_nonce(view, sender)?;
 
         store.issuers().update_status(&deactivate.issuer_address, DocClassIssuerStatus::Suspended, block_timestamp)?;
 
@@ -1251,7 +1252,7 @@ mod tests {
     }
 
     #[test]
-    fn test_register_issuer() {
+    fn test_register_issuer(view: &mut ExecutionView<'_, '_>) {
         let (db, _dir, state) = setup();
         let params = test_params();
         let executor = DocClassExecutor::new(db.clone(), params);
@@ -1260,7 +1261,7 @@ mod tests {
         let proposer = Address::new([99u8; 20]);
 
         // Fund the issuer account
-        state.credit(&issuer_addr, 1_000_000_000_000).unwrap();
+        StateManager::v_credit(view, &issuer_addr, 1_000_000_000_000).unwrap();
 
         // Create full DocClassIssuer for registration
         let issuer = DocClassIssuer {
@@ -1305,7 +1306,7 @@ mod tests {
     }
 
     #[test]
-    fn test_create_identity_root() {
+    fn test_create_identity_root(view: &mut ExecutionView<'_, '_>) {
         let (db, _dir, state) = setup();
         let params = test_params();
         let executor = DocClassExecutor::new(db.clone(), params);
@@ -1314,7 +1315,7 @@ mod tests {
         let proposer = Address::new([99u8; 20]);
 
         // Fund the controller account
-        state.credit(&controller, 1_000_000_000_000).unwrap();
+        StateManager::v_credit(view, &controller, 1_000_000_000_000).unwrap();
 
         let subject_commitment = [42u8; 32];
         let identity_id = [100u8; 32];
@@ -1362,7 +1363,7 @@ mod tests {
     }
 
     #[test]
-    fn test_issue_eligibility() {
+    fn test_issue_eligibility(view: &mut ExecutionView<'_, '_>) {
         let (db, _dir, state) = setup();
         let params = test_params();
         let executor = DocClassExecutor::new(db.clone(), params);
@@ -1371,7 +1372,7 @@ mod tests {
         let proposer = Address::new([99u8; 20]);
 
         // Fund the issuer account
-        state.credit(&issuer_addr, 1_000_000_000_000).unwrap();
+        StateManager::v_credit(view, &issuer_addr, 1_000_000_000_000).unwrap();
 
         // First register the issuer
         let issuer = DocClassIssuer {
@@ -1459,7 +1460,7 @@ mod tests {
     }
 
     #[test]
-    fn test_revoke_credential() {
+    fn test_revoke_credential(view: &mut ExecutionView<'_, '_>) {
         let (db, _dir, state) = setup();
         let params = test_params();
         let executor = DocClassExecutor::new(db.clone(), params);
@@ -1468,7 +1469,7 @@ mod tests {
         let proposer = Address::new([99u8; 20]);
 
         // Fund the issuer account
-        state.credit(&issuer_addr, 1_000_000_000_000).unwrap();
+        StateManager::v_credit(view, &issuer_addr, 1_000_000_000_000).unwrap();
 
         // Register issuer
         let issuer = DocClassIssuer {
@@ -1548,7 +1549,7 @@ mod tests {
     }
 
     #[test]
-    fn test_unauthorized_issuer_fails() {
+    fn test_unauthorized_issuer_fails(view: &mut ExecutionView<'_, '_>) {
         let (db, _dir, state) = setup();
         let params = test_params();
         let executor = DocClassExecutor::new(db.clone(), params);
@@ -1558,8 +1559,8 @@ mod tests {
         let proposer = Address::new([99u8; 20]);
 
         // Fund accounts
-        state.credit(&issuer_addr, 1_000_000_000_000).unwrap();
-        state.credit(&unauthorized_addr, 1_000_000_000_000).unwrap();
+        StateManager::v_credit(view, &issuer_addr, 1_000_000_000_000).unwrap();
+        StateManager::v_credit(view, &unauthorized_addr, 1_000_000_000_000).unwrap();
 
         // Register issuer for eligibility only
         let issuer = DocClassIssuer {

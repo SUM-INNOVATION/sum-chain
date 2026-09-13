@@ -44,13 +44,13 @@ fn sm(op: StorageMetadataOperationV2) -> TxPayload {
 
 #[test]
 fn accept_assignment_v2_rejected_once_archive_unbonding() {
-    let (state, db, _dir, executor) = setup_with_params(params_enabled());
+    let (_state, db, _dir, executor) = setup_with_params(params_enabled());
     let mut candidate = common::candidate(&db);
     let archive = KeyPair::generate();
     let owner = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &archive, (STAKE as u128) + 1_000_000);
-    fund(&state, &owner, 1_000_000);
+    fund(&db, &archive, (STAKE as u128) + 1_000_000);
+    fund(&db, &owner, 1_000_000);
 
     let merkle_root = Hash::hash(b"accept-unbonding-file");
 

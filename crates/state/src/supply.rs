@@ -721,7 +721,11 @@ pub fn native_supply_snapshot(db: &Arc<Database>) -> Result<NativeSupplySnapshot
     let totals = (|| {
         let (storage_v1_fee_pool, storage_v2_fee_pool) =
             crate::storage_metadata::StorageMetadataExecutor::new(db.clone()).total_fee_pools()?;
+        let (account_balances_incl_zero, burn_at_zero) =
+            sum_accounts(&StateStore::new(db).iter_all_accounts()?)?;
         Ok(MigratedBuckets {
+            account_balances_incl_zero,
+            burn_at_zero,
             inference_escrow: inference.total_session_remaining_escrow()?,
             inference_verifier_bonds: inference.total_verifier_bonds()?,
             archive_staked_balance: crate::node_registry::NodeRegistryExecutor::new(db.clone())
@@ -743,11 +747,36 @@ pub fn native_supply_snapshot(db: &Arc<Database>) -> Result<NativeSupplySnapshot
 /// tuple nobody can read.
 #[derive(Debug, Clone, Copy)]
 struct MigratedBuckets {
+    /// Account balances including `Address::ZERO`, and the ZERO subset on its
+    /// own. Accounts are the widest bucket and the one every transaction
+    /// touches; a census that read them from committed storage would measure
+    /// the parent's balances against a block that had already moved them.
+    account_balances_incl_zero: u128,
+    burn_at_zero: u128,
     inference_escrow: u128,
     inference_verifier_bonds: u128,
     archive_staked_balance: u128,
     storage_v1_fee_pool: u128,
     storage_v2_fee_pool: u128,
+}
+
+/// Σ account balances, and the `Address::ZERO` subset, from an already-read
+/// account set. Shared so the candidate and committed censuses cannot differ in
+/// what they include or in their overflow behaviour.
+fn sum_accounts(
+    accounts: &[(Address, sumchain_storage::schema::AccountState)],
+) -> Result<(u128, u128)> {
+    let mut total: u128 = 0;
+    let mut burn_at_zero: u128 = 0;
+    for (addr, acct) in accounts {
+        total = total.checked_add(acct.balance).ok_or_else(|| {
+            StateError::BlockValidation("account balance sum overflow".to_string())
+        })?;
+        if *addr == Address::ZERO {
+            burn_at_zero = acct.balance;
+        }
+    }
+    Ok((total, burn_at_zero))
 }
 
 /// The census as THIS BLOCK sees it: the migrated buckets from the candidate,
@@ -773,7 +802,11 @@ pub fn v_native_supply_snapshot(
     use crate::storage_metadata::StorageMetadataExecutor as Storage;
     let totals = (|| {
         let (storage_v1_fee_pool, storage_v2_fee_pool) = Storage::v_total_fee_pools(view)?;
+        let (account_balances_incl_zero, burn_at_zero) =
+            sum_accounts(&crate::state::StateManager::v_iter_all_accounts(view)?)?;
         Ok(MigratedBuckets {
+            account_balances_incl_zero,
+            burn_at_zero,
             inference_escrow: Settle::v_total_session_remaining_escrow(view)?,
             inference_verifier_bonds: Settle::v_total_verifier_bonds(view)?,
             archive_staked_balance: Registry::v_total_archive_staked_balance(view)?,
@@ -790,27 +823,17 @@ fn native_supply_snapshot_with_migrated(
     db: &Arc<Database>,
     migrated: Result<MigratedBuckets>,
 ) -> Result<NativeSupplySnapshot> {
-    // Account balances incl. Address::ZERO (INCLUDE); ZERO is also captured as
-    // the report-only burn subset in the same single scan.
-    let state = StateStore::new(db);
-    let mut account_balances_incl_zero: u128 = 0;
-    let mut burn_at_zero: u128 = 0;
-    for (addr, acct) in state.iter_all_accounts()? {
-        account_balances_incl_zero = account_balances_incl_zero
-            .checked_add(acct.balance)
-            .ok_or_else(|| StateError::BlockValidation("account balance sum overflow".to_string()))?;
-        if addr == Address::ZERO {
-            burn_at_zero = acct.balance;
-        }
-    }
-
     // Validator self-stake + active delegations (INCLUDE).
     let validator_self_stake = StakingStore::new(db).total_validator_self_stake()?;
     let active_delegations = DelegationStore::new(db).total_active_delegations()?;
 
-    // Archive stake, storage fee pools V1 + V2, inference escrow and verifier
-    // bonds (all INCLUDE) — from the caller's handle.
+    // Account balances incl. `Address::ZERO`, archive stake, storage fee pools
+    // V1 + V2, inference escrow and verifier bonds (all INCLUDE) — from the
+    // caller's handle. `Address::ZERO` is also carried out as the report-only
+    // burn subset, from the same single scan.
     let MigratedBuckets {
+        account_balances_incl_zero,
+        burn_at_zero,
         inference_escrow,
         inference_verifier_bonds,
         archive_staked_balance,

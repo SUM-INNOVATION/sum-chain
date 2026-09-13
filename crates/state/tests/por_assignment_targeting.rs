@@ -13,6 +13,7 @@
 //! precise, deterministic assertions.
 
 mod common;
+use sumchain_storage::Database;
 use sumchain_storage::exec_view::ExecutionView;
 use common::{fund, setup_with_params, CHAIN_ID};
 
@@ -155,7 +156,7 @@ fn expected_target(
 /// keypairs and the owner keypair (owner nonce is at 2 afterwards).
 fn setup_v2_active_funded(
     view: &mut ExecutionView<'_, '_>,
-    state: &StateManager,
+    db: &Database,
     executor: &BlockExecutor,
     root: Hash,
     k: usize,
@@ -163,11 +164,11 @@ fn setup_v2_active_funded(
 ) -> (Vec<KeyPair>, KeyPair) {
     let proposer = KeyPair::generate();
     let owner = KeyPair::generate();
-    fund(state, &owner, (FEE_DEPOSIT as u128) + 2_000_000);
+    fund(db, &owner, (FEE_DEPOSIT as u128) + 2_000_000);
 
     let archives: Vec<KeyPair> = (0..k).map(|_| KeyPair::generate()).collect();
     for a in &archives {
-        fund(state, a, (STAKE as u128) + 1_000_000);
+        fund(db, a, (STAKE as u128) + 1_000_000);
         executor
             .execute_tx(view, &signed(a, FEE, 0, nr(register_archive_op())), &proposer.address(), 1, 1000)
             .unwrap();
@@ -216,11 +217,11 @@ fn v1_get_funded_file_roots_ignores_non_f_keys() {
     // Registering a V1 file writes both the `F`-row and an `O`-owner-index key
     // into the same CF. The funded scan must return only the file root and must
     // not choke decoding the owner-index marker value (issue #97 guard).
-    let (state, db, _dir, executor) = setup_with_params(params_legacy(1));
+    let (_state, db, _dir, executor) = setup_with_params(params_legacy(1));
     let mut candidate = common::candidate(&db);
     let proposer = KeyPair::generate();
     let owner = KeyPair::generate();
-    fund(&state, &owner, (FEE_DEPOSIT as u128) + 1_000_000);
+    fund(&db, &owner, (FEE_DEPOSIT as u128) + 1_000_000);
     let root = Hash::hash(b"v1-guard-file");
     executor
         .execute_tx(&mut candidate.view(), &signed(&owner, FEE, 0, sm_v1(v1_register_op(root))), &proposer.address(), 2, 1000)
@@ -233,14 +234,14 @@ fn v1_get_funded_file_roots_ignores_non_f_keys() {
 #[test]
 fn gate_closed_targets_legacy_global_set() {
     // Gate dormant ⇒ V1 file source + target drawn from ALL active archives.
-    let (state, db, _dir, executor) = setup_with_params(params_legacy(2));
+    let (_state, db, _dir, executor) = setup_with_params(params_legacy(2));
     let mut candidate = common::candidate(&db);
     let proposer = KeyPair::generate();
     let owner = KeyPair::generate();
-    fund(&state, &owner, (FEE_DEPOSIT as u128) + 1_000_000);
+    fund(&db, &owner, (FEE_DEPOSIT as u128) + 1_000_000);
     let archives: Vec<KeyPair> = (0..4).map(|_| KeyPair::generate()).collect();
     for a in &archives {
-        fund(&state, a, (STAKE as u128) + 1_000_000);
+        fund(&db, a, (STAKE as u128) + 1_000_000);
         executor.execute_tx(&mut candidate.view(), &signed(a, FEE, 0, nr(register_archive_op())), &proposer.address(), 1, 1000).unwrap();
     }
     let root = Hash::hash(b"legacy-file");
@@ -267,10 +268,10 @@ fn gate_closed_targets_legacy_global_set() {
 #[test]
 fn gate_open_uses_v2_not_v1_files() {
     let r = 1u32;
-    let (state, db, _dir, executor) = setup_with_params(params_targeting(r));
+    let (_state, db, _dir, executor) = setup_with_params(params_targeting(r));
     let mut candidate = common::candidate(&db);
     let root_v2 = Hash::hash(b"v2-active-file");
-    let (_archives, owner) = setup_v2_active_funded(&mut candidate.view(), &state, &executor, root_v2, 2, r);
+    let (_archives, owner) = setup_v2_active_funded(&mut candidate.view(), &db, &executor, root_v2, 2, r);
 
     // Also register a separate V1 funded file — it must never be selected.
     let root_v1 = Hash::hash(b"v1-decoy-file");
@@ -290,13 +291,13 @@ fn gate_open_uses_v2_not_v1_files() {
 #[test]
 fn gate_open_excludes_pending_and_unfunded_v2() {
     let r = 1u32;
-    let (state, db, _dir, executor) = setup_with_params(params_targeting(r));
+    let (_state, db, _dir, executor) = setup_with_params(params_targeting(r));
     let mut candidate = common::candidate(&db);
     let proposer = KeyPair::generate();
     let owner = KeyPair::generate();
     let archive = KeyPair::generate();
-    fund(&state, &owner, (FEE_DEPOSIT as u128) + 2_000_000);
-    fund(&state, &archive, (STAKE as u128) + 1_000_000);
+    fund(&db, &owner, (FEE_DEPOSIT as u128) + 2_000_000);
+    fund(&db, &archive, (STAKE as u128) + 1_000_000);
     executor.execute_tx(&mut candidate.view(), &signed(&archive, FEE, 0, nr(register_archive_op())), &proposer.address(), 1, 1000).unwrap();
 
     // (a) Funded but PENDING (never activated) ⇒ excluded.
@@ -324,10 +325,10 @@ fn gate_open_excludes_pending_and_unfunded_v2() {
 #[test]
 fn gate_open_target_is_assigned_and_deterministic() {
     let r = 2u32;
-    let (state, db, _dir, executor) = setup_with_params(params_targeting(r));
+    let (_state, db, _dir, executor) = setup_with_params(params_targeting(r));
     let mut candidate = common::candidate(&db);
     let root = Hash::hash(b"assigned-file");
-    setup_v2_active_funded(&mut candidate.view(), &state, &executor, root, 4, r);
+    setup_v2_active_funded(&mut candidate.view(), &db, &executor, root, 4, r);
 
     let snapshot = NodeRegistryExecutor::v_get_active_archive_nodes_at_height(&candidate.view(), 2).unwrap();
     let active_now: Vec<Address> = NodeRegistryExecutor::v_get_active_archive_nodes(&candidate.view()).unwrap().iter().map(|n| n.address).collect();
@@ -353,10 +354,10 @@ fn gate_open_unassigned_active_never_targeted() {
     // R=1 with 4 archives ⇒ one assignee; the other three are active but
     // unassigned and must never be selected, for any seed.
     let r = 1u32;
-    let (state, db, _dir, executor) = setup_with_params(params_targeting(r));
+    let (_state, db, _dir, executor) = setup_with_params(params_targeting(r));
     let mut candidate = common::candidate(&db);
     let root = Hash::hash(b"unassigned-file");
-    setup_v2_active_funded(&mut candidate.view(), &state, &executor, root, 4, r);
+    setup_v2_active_funded(&mut candidate.view(), &db, &executor, root, 4, r);
 
     let snapshot = NodeRegistryExecutor::v_get_active_archive_nodes_at_height(&candidate.view(), 2).unwrap();
     let assigned = assigned_chunk0(&root, &snapshot, r);
@@ -375,15 +376,15 @@ fn gate_open_unassigned_active_never_targeted() {
 #[test]
 fn gate_open_no_assigned_active_skips_without_slash() {
     let r = 1u32;
-    let (state, db, _dir, executor) = setup_with_params(params_targeting(r));
+    let (_state, db, _dir, executor) = setup_with_params(params_targeting(r));
     let mut candidate = common::candidate(&db);
     let root = Hash::hash(b"skip-file");
-    let (archives, owner) = setup_v2_active_funded(&mut candidate.view(), &state, &executor, root, 2, r);
+    let (archives, owner) = setup_v2_active_funded(&mut candidate.view(), &db, &executor, root, 2, r);
 
     let snapshot = NodeRegistryExecutor::v_get_active_archive_nodes_at_height(&candidate.view(), 2).unwrap();
     let assignee = assigned_chunk0(&root, &snapshot, r)[0];
     let assignee_kp = archives.iter().find(|k| k.address().as_bytes() == assignee.as_bytes()).unwrap();
-    let bal_before = state.get_balance(&assignee).unwrap();
+    let bal_before = StateManager::v_get_balance(&candidate.view(), &assignee).unwrap();
 
     // Slash the sole assignee ⇒ assigned-active set becomes empty.
     let _ = assignee_kp;
@@ -397,7 +398,7 @@ fn gate_open_no_assigned_active_skips_without_slash() {
     assert!(out.is_none(), "no assigned-active archive ⇒ skip");
     assert!(StorageMetadataExecutor::v_get_challenges_by_node(&candidate.view(), &assignee).unwrap().is_empty(), "no challenge written");
     assert_eq!(NodeRegistryExecutor::v_get_node(&candidate.view(), &assignee).unwrap().unwrap().status, NodeStatus::Slashed);
-    assert_eq!(state.get_balance(&assignee).unwrap(), bal_before, "skipped challenge must not move funds");
+    assert_eq!(StateManager::v_get_balance(&candidate.view(), &assignee).unwrap(), bal_before, "skipped challenge must not move funds");
 }
 
 // ── Gate open: reassignment epoch changes the target set (latest epoch used) ──
@@ -405,10 +406,10 @@ fn gate_open_no_assigned_active_skips_without_slash() {
 #[test]
 fn gate_open_reassignment_uses_latest_epoch_target_set() {
     let r = 1u32;
-    let (state, db, _dir, executor) = setup_with_params(params_targeting_reassign(r));
+    let (_state, db, _dir, executor) = setup_with_params(params_targeting_reassign(r));
     let mut candidate = common::candidate(&db);
     let root = Hash::hash(b"reassign-file");
-    let (archives, owner) = setup_v2_active_funded(&mut candidate.view(), &state, &executor, root, 2, r);
+    let (archives, owner) = setup_v2_active_funded(&mut candidate.view(), &db, &executor, root, 2, r);
 
     let snap0 = NodeRegistryExecutor::v_get_active_archive_nodes_at_height(&candidate.view(), 2).unwrap();
     let assignee0 = assigned_chunk0(&root, &snap0, r)[0];

@@ -49,7 +49,7 @@ fn gate_closed_rejects_300_no_mutation() {
     let mut candidate = common::candidate(&db);
     let sender = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sender, 10_000);
+    fund(&db, &sender, 10_000);
 
     let tx = signed(&sender, 1_000, 0, gov_payload(GovernanceOperation::CreateProposal));
     let res = executor.execute_tx(&mut candidate.view(), &tx, &proposer.address(), 1, 1000).unwrap();
@@ -69,7 +69,7 @@ fn gate_open_but_params_absent_rejects_301() {
     let mut candidate = common::candidate(&db);
     let sender = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sender, 10_000);
+    fund(&db, &sender, 10_000);
 
     let tx = signed(&sender, 1_000, 0, gov_payload(GovernanceOperation::CreateProposal));
     let res = executor.execute_tx(&mut candidate.view(), &tx, &proposer.address(), 1, 1000).unwrap();
@@ -90,7 +90,7 @@ fn gate_open_and_configured_op_unsupported_in_p3a_302() {
     let mut candidate = common::candidate(&db);
     let sender = KeyPair::generate();
     let proposer = KeyPair::generate();
-    fund(&state, &sender, 10_000);
+    fund(&db, &sender, 10_000);
 
     for op in [
         GovernanceOperation::RegisterAsset,

@@ -182,8 +182,7 @@ impl InferenceSettlementExecutor {
     /// the other subprotocol executors). The gate-closed (`350`) path is handled
     /// in dispatch before this runs, so it pays nothing.
     fn deduct_fee(
-        &self,
-        state: &StateManager,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         fee: Balance,
         proposer: &Address,
@@ -191,17 +190,17 @@ impl InferenceSettlementExecutor {
         if fee == 0 {
             return Ok(());
         }
-        if state.get_balance(sender)? < fee {
+        if StateManager::v_get_balance(view, sender)? < fee {
             return Err(StateError::InsufficientBalance {
                 required: fee,
-                available: state.get_balance(sender)?,
+                available: StateManager::v_get_balance(view, sender)?,
             });
         }
-        state.deduct(sender, fee)?;
+        StateManager::v_deduct(view, sender, fee)?;
         if !proposer.is_zero() {
-            state.credit(proposer, fee)?;
+            StateManager::v_credit(view, proposer, fee)?;
         }
-        state.increment_nonce(sender)?;
+        StateManager::v_increment_nonce(view, sender)?;
         Ok(())
     }
 
@@ -224,17 +223,17 @@ impl InferenceSettlementExecutor {
         // never StakingStore/ValidatorSetStore.
         active_validator_pubkeys: &[[u8; 32]],
     ) -> Result<InferenceSettlementExecutionResult> {
-        self.deduct_fee(state, sender, fee, proposer)?;
+        self.deduct_fee(view, sender, fee, proposer)?;
 
         match operation {
             InferenceSettlementOperation::OpenSession(req) => {
-                self.open_session(view, sender, req, state, block_height, chain_params)
+                self.open_session(view, sender, req, block_height, chain_params)
             }
             InferenceSettlementOperation::FundSession(req) => {
-                self.fund_session(view, sender, &req.session_id, req.amount, state)
+                self.fund_session(view, sender, &req.session_id, req.amount)
             }
             InferenceSettlementOperation::ClaimReward(req) => {
-                self.claim_reward(view, sender, &req.session_id, state, block_height, chain_params)
+                self.claim_reward(view, sender, &req.session_id, block_height, chain_params)
             }
             InferenceSettlementOperation::OpenDispute(req) => {
                 self.open_dispute(view, sender, req, block_height, chain_params)
@@ -243,7 +242,6 @@ impl InferenceSettlementExecutor {
                 self.resolve_dispute(
                     view,
                     req,
-                    state,
                     block_height,
                     chain_params,
                     state.chain_id(),
@@ -251,20 +249,20 @@ impl InferenceSettlementExecutor {
                 )
             }
             InferenceSettlementOperation::RefundSession(req) => {
-                self.refund_session(view, sender, &req.session_id, state, block_height, chain_params)
+                self.refund_session(view, sender, &req.session_id, block_height, chain_params)
             }
             // ── Verifier bonding (issue #78) ──
             InferenceSettlementOperation::RegisterVerifier(req) => {
-                self.register_verifier(view, sender, req.bond, state, block_height, chain_params)
+                self.register_verifier(view, sender, req.bond, block_height, chain_params)
             }
             InferenceSettlementOperation::AddVerifierBond(req) => {
-                self.add_verifier_bond(view, sender, req.amount, state, block_height, chain_params)
+                self.add_verifier_bond(view, sender, req.amount, block_height, chain_params)
             }
             InferenceSettlementOperation::BeginVerifierUnbond => {
                 self.begin_verifier_unbond(view, sender, block_height, chain_params)
             }
             InferenceSettlementOperation::WithdrawVerifierBond => {
-                self.withdraw_verifier_bond(view, sender, state, block_height, chain_params)
+                self.withdraw_verifier_bond(view, sender, block_height, chain_params)
             }
         }
     }
@@ -284,7 +282,6 @@ impl InferenceSettlementExecutor {
         view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         req: &OpenInferenceSessionRequest,
-        state: &StateManager,
         block_height: u64,
         chain_params: &ChainParams,
     ) -> Result<InferenceSettlementExecutionResult> {
@@ -378,14 +375,14 @@ impl InferenceSettlementExecutor {
                 ));
             }
         }
-        if state.get_balance(sender)? < req.deposit {
+        if StateManager::v_get_balance(view, sender)? < req.deposit {
             return Ok(InferenceSettlementExecutionResult::fail(
                 355,
                 "insufficient balance for session deposit",
             ));
         }
 
-        state.deduct(sender, req.deposit)?;
+        StateManager::v_deduct(view, sender, req.deposit)?;
         let session = InferenceSession {
             session_id: req.session_id.clone(),
             funder: *sender,
@@ -414,7 +411,6 @@ impl InferenceSettlementExecutor {
         sender: &Address,
         session_id: &str,
         amount: u128,
-        state: &StateManager,
     ) -> Result<InferenceSettlementExecutionResult> {
         let mut session = match Self::v_get_session(view, session_id)? {
             Some(s) => s,
@@ -432,13 +428,13 @@ impl InferenceSettlementExecutor {
         if amount == 0 {
             return Ok(InferenceSettlementExecutionResult::fail(354, "amount must be > 0"));
         }
-        if state.get_balance(sender)? < amount {
+        if StateManager::v_get_balance(view, sender)? < amount {
             return Ok(InferenceSettlementExecutionResult::fail(
                 355,
                 "insufficient balance to fund",
             ));
         }
-        state.deduct(sender, amount)?;
+        StateManager::v_deduct(view, sender, amount)?;
         session.remaining_escrow = session.remaining_escrow.saturating_add(amount);
         Self::v_put_session(view, &session)?;
         Ok(InferenceSettlementExecutionResult::ok())
@@ -449,7 +445,6 @@ impl InferenceSettlementExecutor {
         view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         session_id: &str,
-        state: &StateManager,
         block_height: u64,
         chain_params: &ChainParams,
     ) -> Result<InferenceSettlementExecutionResult> {
@@ -558,7 +553,7 @@ impl InferenceSettlementExecutor {
             ));
         }
 
-        state.credit(sender, session.reward_per_verifier)?;
+        StateManager::v_credit(view, sender, session.reward_per_verifier)?;
         // 800B correction: a valid settlement claim is REAL compute service —
         // accrue protocol-earned credit (the reward) for 1:1 grant unlock and
         // advance the verifier milestone counter. No-ops until the supply
@@ -662,7 +657,6 @@ impl InferenceSettlementExecutor {
         &self,
         view: &mut ExecutionView<'_, '_>,
         req: &ResolveInferenceDisputeRequest,
-        state: &StateManager,
         block_height: u64,
         chain_params: &ChainParams,
         chain_id: sumchain_primitives::ChainId,
@@ -743,7 +737,7 @@ impl InferenceSettlementExecutor {
                         if slash > 0 {
                             record.bond -= slash;
                             Self::v_put_verifier(view, &record)?;
-                            state.credit(&Address::ZERO, slash)?; // auditable burn
+                            StateManager::v_credit(view, &Address::ZERO, slash)?; // auditable burn
                             slashed = slash;
                         }
                     }
@@ -777,7 +771,6 @@ impl InferenceSettlementExecutor {
         view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         session_id: &str,
-        state: &StateManager,
         block_height: u64,
         chain_params: &ChainParams,
     ) -> Result<InferenceSettlementExecutionResult> {
@@ -849,7 +842,7 @@ impl InferenceSettlementExecutor {
 
         let refund = session.remaining_escrow;
         if refund > 0 {
-            state.credit(sender, refund)?;
+            StateManager::v_credit(view, sender, refund)?;
         }
         session.remaining_escrow = 0;
         session.status = InferenceSessionStatus::Refunded;
@@ -872,7 +865,6 @@ impl InferenceSettlementExecutor {
         view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         bond: u128,
-        state: &StateManager,
         block_height: u64,
         chain_params: &ChainParams,
     ) -> Result<InferenceSettlementExecutionResult> {
@@ -895,13 +887,13 @@ impl InferenceSettlementExecutor {
                 ));
             }
         }
-        if state.get_balance(sender)? < bond {
+        if StateManager::v_get_balance(view, sender)? < bond {
             return Ok(InferenceSettlementExecutionResult::fail(
                 365,
                 "insufficient balance for verifier bond",
             ));
         }
-        state.deduct(sender, bond)?;
+        StateManager::v_deduct(view, sender, bond)?;
         Self::v_put_verifier(view, &InferenceVerifierRecord {
             verifier: *sender,
             bond,
@@ -920,7 +912,6 @@ impl InferenceSettlementExecutor {
         view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         amount: u128,
-        state: &StateManager,
         block_height: u64,
         chain_params: &ChainParams,
     ) -> Result<InferenceSettlementExecutionResult> {
@@ -943,13 +934,13 @@ impl InferenceSettlementExecutor {
                 "verifier not active (unbonding or withdrawn)",
             ));
         }
-        if state.get_balance(sender)? < amount {
+        if StateManager::v_get_balance(view, sender)? < amount {
             return Ok(InferenceSettlementExecutionResult::fail(
                 365,
                 "insufficient balance to add bond",
             ));
         }
-        state.deduct(sender, amount)?;
+        StateManager::v_deduct(view, sender, amount)?;
         record.bond = record.bond.saturating_add(amount);
         Self::v_put_verifier(view, &record)?;
         Ok(InferenceSettlementExecutionResult::ok())
@@ -1002,7 +993,6 @@ impl InferenceSettlementExecutor {
         &self,
         view: &mut ExecutionView<'_, '_>,
         sender: &Address,
-        state: &StateManager,
         block_height: u64,
         chain_params: &ChainParams,
     ) -> Result<InferenceSettlementExecutionResult> {
@@ -1031,7 +1021,7 @@ impl InferenceSettlementExecutor {
         }
         let refund = record.bond; // already reduced by any slashes during unbonding
         if refund > 0 {
-            state.credit(sender, refund)?;
+            StateManager::v_credit(view, sender, refund)?;
         }
         record.bond = 0;
         record.status = InferenceVerifierStatus::Withdrawn;

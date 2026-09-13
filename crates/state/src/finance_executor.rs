@@ -7,6 +7,7 @@
 //! - SRC-894: KYC / AML Attestation
 //! - SRC-895: 89X Proof Profiles
 
+use sumchain_storage::exec_view::ExecutionView;
 use std::sync::Arc;
 
 use sumchain_genesis::ChainParams;
@@ -134,11 +135,11 @@ impl FinanceExecutor {
     }
 
     /// Execute a Finance transaction
+    #[allow(clippy::too_many_arguments)]
     pub fn execute(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &FinanceTxData,
-        state: &StateManager,
         proposer: &Address,
         fee: Balance,
         _block_height: BlockHeight,
@@ -164,9 +165,9 @@ impl FinanceExecutor {
                     return Ok(FinanceExecutionResult::failure("Issuer already exists"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 let issuer_addr = issuer.issuer_address;
                 store.issuers().put(&issuer)?;
                 debug!("Finance issuer registered: {}", issuer_addr);
@@ -190,9 +191,9 @@ impl FinanceExecutor {
                     return Ok(FinanceExecutionResult::failure("Only issuer can update"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.issuers().update_status(sender, update.status, block_timestamp)?;
                 Ok(FinanceExecutionResult::success())
             }
@@ -202,9 +203,9 @@ impl FinanceExecutor {
                     return Ok(FinanceExecutionResult::failure("Issuer not found"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.issuers().update_status(sender, FinanceIssuerStatus::Suspended, block_timestamp)?;
                 debug!("Finance issuer suspended: {}", sender);
                 Ok(FinanceExecutionResult::success())
@@ -215,9 +216,9 @@ impl FinanceExecutor {
                     return Ok(FinanceExecutionResult::failure("Issuer not found"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.issuers().update_status(sender, FinanceIssuerStatus::Revoked, block_timestamp)?;
                 debug!("Finance issuer revoked: {}", sender);
                 Ok(FinanceExecutionResult::success())
@@ -233,9 +234,9 @@ impl FinanceExecutor {
                     return Ok(FinanceExecutionResult::failure("Issuer is not suspended"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.issuers().update_status(sender, FinanceIssuerStatus::Active, block_timestamp)?;
                 debug!("Finance issuer reactivated: {}", sender);
                 Ok(FinanceExecutionResult::success())
@@ -269,9 +270,9 @@ impl FinanceExecutor {
                     return Ok(FinanceExecutionResult::failure("Address proof already exists"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 let proof_id = proof.proof_id;
                 store.address_proofs().put(&proof)?;
                 debug!("Address proof created: {:?}", proof_id);
@@ -301,9 +302,9 @@ impl FinanceExecutor {
                     return Ok(FinanceExecutionResult::failure("Only issuer can revoke"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.address_proofs().revoke(&d.proof_id, d.revocation_ref, block_timestamp)?;
                 debug!("Address proof revoked: {:?}", d.proof_id);
                 Ok(FinanceExecutionResult::success())
@@ -337,9 +338,9 @@ impl FinanceExecutor {
                     return Ok(FinanceExecutionResult::failure("Bank standing credential already exists"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 let credential_id = credential.credential_id;
                 store.bank_standings().put(&credential)?;
                 debug!("Bank standing credential created: {:?}", credential_id);
@@ -364,9 +365,9 @@ impl FinanceExecutor {
                     return Ok(FinanceExecutionResult::failure("Only issuer can update"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.bank_standings().update_standing(&d.credential_id, d.standing, block_timestamp)?;
                 debug!("Bank standing updated: {:?}", d.credential_id);
                 Ok(FinanceExecutionResult::success())
@@ -390,9 +391,9 @@ impl FinanceExecutor {
                     return Ok(FinanceExecutionResult::failure("Only issuer can revoke"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.bank_standings().revoke(&d.credential_id, d.revocation_ref, block_timestamp)?;
                 debug!("Bank standing credential revoked: {:?}", d.credential_id);
                 Ok(FinanceExecutionResult::success())
@@ -426,9 +427,9 @@ impl FinanceExecutor {
                     return Ok(FinanceExecutionResult::failure("KYC attestation already exists"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 let attestation_id = attestation.attestation_id;
                 store.kyc_attestations().put(&attestation)?;
                 debug!("KYC attestation created: {:?}", attestation_id);
@@ -453,9 +454,9 @@ impl FinanceExecutor {
                     return Ok(FinanceExecutionResult::failure("Only issuer can update"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.kyc_attestations().update_status(&d.attestation_id, d.status, block_timestamp)?;
                 debug!("KYC attestation updated: {:?}", d.attestation_id);
                 Ok(FinanceExecutionResult::success())
@@ -479,9 +480,9 @@ impl FinanceExecutor {
                     return Ok(FinanceExecutionResult::failure("Only issuer can revoke"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.kyc_attestations().revoke(&d.attestation_id, d.revocation_ref, block_timestamp)?;
                 debug!("KYC attestation revoked: {:?}", d.attestation_id);
                 Ok(FinanceExecutionResult::success())
@@ -498,9 +499,9 @@ impl FinanceExecutor {
                     return Ok(FinanceExecutionResult::failure("Proof already exists"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 let proof_id = proof.proof_id;
                 store.proofs().put(&proof)?;
                 debug!("Finance proof submitted: {:?}", proof_id);
@@ -509,9 +510,9 @@ impl FinanceExecutor {
 
             FinanceOperation::VerifyProof => {
                 // Verification is read-only - just record the request
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 debug!("Finance proof verification requested by: {}", sender);
                 Ok(FinanceExecutionResult::success())
             }
@@ -543,13 +544,13 @@ mod tests {
     }
 
     #[test]
-    fn test_register_issuer() {
+    fn test_register_issuer(view: &mut ExecutionView<'_, '_>) {
         let (db, _dir, state) = setup();
         let executor = FinanceExecutor::new(db.clone(), ChainParams::default());
 
         let sender = Address::new([1u8; 20]);
         let proposer = Address::new([99u8; 20]);
-        state.credit(&sender, 1_000_000_000_000).unwrap();
+        StateManager::v_credit(view, &sender, 1_000_000_000_000).unwrap();
 
         let issuer = FinanceIssuerProfile {
             issuer_address: sender,
@@ -582,13 +583,13 @@ mod tests {
     }
 
     #[test]
-    fn test_create_bank_standing() {
+    fn test_create_bank_standing(view: &mut ExecutionView<'_, '_>) {
         let (db, _dir, state) = setup();
         let executor = FinanceExecutor::new(db.clone(), ChainParams::default());
 
         let sender = Address::new([1u8; 20]);
         let proposer = Address::new([99u8; 20]);
-        state.credit(&sender, 1_000_000_000_000).unwrap();
+        StateManager::v_credit(view, &sender, 1_000_000_000_000).unwrap();
 
         // First register issuer
         let issuer = FinanceIssuerProfile {

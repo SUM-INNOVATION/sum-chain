@@ -57,8 +57,8 @@ fn params() -> ChainParams {
     p
 }
 
-fn fund(state: &StateManager, addr: &Address, balance: u128) {
-    state
+fn fund(db: &Database, addr: &Address, balance: u128) {
+    sumchain_storage::StateStore::new(db)
         .put_account(
             addr,
             &sumchain_storage::schema::AccountState { balance, nonce: 0 },
@@ -138,12 +138,12 @@ fn challenge(tag: u8, target: Address, expires: u64) -> StorageChallenge {
 /// snapshot".
 #[test]
 fn an_archive_registered_earlier_in_the_block_can_attest_later_in_it() {
-    let (_dir, db, state) = open_db();
+    let (_dir, db, _state) = open_db();
     let p = params();
     let a = Address::new([0xA1; 20]);
     let owner = Address::new([0x0E; 20]);
-    fund(&state, &a, (STAKE as u128) + 1_000);
-    fund(&state, &owner, 1_000);
+    fund(&db, &a, (STAKE as u128) + 1_000);
+    fund(&db, &owner, 1_000);
     let root = Hash::hash(b"same-block-register-then-attest");
 
     let mut overlay = ApplicationOverlay::new(&db, LIMIT);
@@ -154,7 +154,6 @@ fn an_archive_registered_earlier_in_the_block_can_attest_later_in_it() {
             &mut view,
             &a,
             &register_op(),
-            &state,
             &Address::ZERO,
             0,
             1,
@@ -169,7 +168,6 @@ fn an_archive_registered_earlier_in_the_block_can_attest_later_in_it() {
             &mut view,
             &owner,
             &register_file_op(root),
-            &state,
             &Address::ZERO,
             0,
             1,
@@ -185,7 +183,6 @@ fn an_archive_registered_earlier_in_the_block_can_attest_later_in_it() {
         &mut view,
         &a,
         &accept_op(root),
-        &state,
         &Address::ZERO,
         0,
         1,
@@ -211,26 +208,25 @@ fn an_archive_registered_earlier_in_the_block_can_attest_later_in_it() {
 /// just slashed, and disagree with every node that applied the slash first.
 #[test]
 fn an_archive_slashed_earlier_in_the_block_cannot_attest_later_in_it() {
-    let (_dir, db, state) = open_db();
+    let (_dir, db, _state) = open_db();
     let p = params();
     let a = Address::new([0xA1; 20]);
     let owner = Address::new([0x0E; 20]);
-    fund(&state, &a, (STAKE as u128) + 1_000);
-    fund(&state, &owner, 1_000);
+    fund(&db, &a, (STAKE as u128) + 1_000);
+    fund(&db, &owner, 1_000);
     let root = Hash::hash(b"same-block-slash-then-attest");
 
     let mut overlay = ApplicationOverlay::new(&db, LIMIT);
     let mut view = ExecutionView::new(&mut overlay);
 
     NodeRegistryExecutor::execute(
-        &mut view, &a, &register_op(), &state, &Address::ZERO, 0, 1, 1000,
+        &mut view, &a, &register_op(), &Address::ZERO, 0, 1, 1000,
     )
     .unwrap();
     StorageMetadataExecutor::execute_v2(
         &mut view,
         &owner,
         &register_file_op(root),
-        &state,
         &Address::ZERO,
         0,
         1,
@@ -245,7 +241,6 @@ fn an_archive_slashed_earlier_in_the_block_cannot_attest_later_in_it() {
             &mut view,
             &Address::ZERO,
             &update_status_op(a, NodeStatus::Slashed),
-            &state,
             &Address::ZERO,
             0,
             1,
@@ -259,7 +254,6 @@ fn an_archive_slashed_earlier_in_the_block_cannot_attest_later_in_it() {
         &mut view,
         &a,
         &accept_op(root),
-        &state,
         &Address::ZERO,
         0,
         1,
@@ -386,10 +380,10 @@ fn staging_a_challenge_carries_both_indexes_with_it() {
 /// a challenge is drawn from sees a file this block registered.
 #[test]
 fn a_file_funded_in_this_block_is_challengeable_in_it() {
-    let (_dir, db, state) = open_db();
+    let (_dir, db, _state) = open_db();
     let p = params();
     let owner = Address::new([0x0E; 20]);
-    fund(&state, &owner, 10_000);
+    fund(&db, &owner, 10_000);
     let root = Hash::hash(b"funded-in-this-block");
 
     let mut overlay = ApplicationOverlay::new(&db, LIMIT);
@@ -409,7 +403,6 @@ fn a_file_funded_in_this_block_is_challengeable_in_it() {
                 initial_access: vec![],
             },
         },
-        &state,
         &Address::ZERO,
         0,
         2,
@@ -444,12 +437,12 @@ fn a_file_funded_in_this_block_is_challengeable_in_it() {
 /// start from the parent's bitmap and silently erase the first accept's bits.
 #[test]
 fn two_accepts_in_one_block_or_into_the_same_bitmap() {
-    let (_dir, db, state) = open_db();
+    let (_dir, db, _state) = open_db();
     let mut p = params();
     p.assignment_replication_factor = 1;
     let owner = Address::new([0x0E; 20]);
     let root = Hash::hash(b"two-accepts");
-    fund(&state, &owner, 10_000);
+    fund(&db, &owner, 10_000);
 
     // Four chunks so one archive can attest two disjoint index sets.
     const N: u32 = 4;
@@ -470,13 +463,13 @@ fn two_accepts_in_one_block_or_into_the_same_bitmap() {
 
     // One archive, so replication factor 1 assigns every chunk to it.
     let a = Address::new([0xA1; 20]);
-    fund(&state, &a, (STAKE as u128) + 1_000);
+    fund(&db, &a, (STAKE as u128) + 1_000);
     NodeRegistryExecutor::execute(
-        &mut view, &a, &register_op(), &state, &Address::ZERO, 0, 1, 1000,
+        &mut view, &a, &register_op(), &Address::ZERO, 0, 1, 1000,
     )
     .unwrap();
     assert!(StorageMetadataExecutor::execute_v2(
-        &mut view, &owner, &register, &state, &Address::ZERO, 0, 1, 1000, &p,
+        &mut view, &owner, &register, &Address::ZERO, 0, 1, 1000, &p,
     )
     .unwrap()
     .success);
@@ -492,7 +485,6 @@ fn two_accepts_in_one_block_or_into_the_same_bitmap() {
             &mut view,
             &a,
             &accept(set.clone()),
-            &state,
             &Address::ZERO,
             0,
             1,
@@ -525,26 +517,25 @@ fn two_accepts_in_one_block_or_into_the_same_bitmap() {
 /// the archive snapshots and the challengeable index.
 #[test]
 fn a_dropped_candidate_leaves_storage_and_registry_untouched() {
-    let (_dir, db, state) = open_db();
+    let (_dir, db, _state) = open_db();
     let p = params();
     let a = Address::new([0xA1; 20]);
     let owner = Address::new([0x0E; 20]);
-    fund(&state, &a, (STAKE as u128) + 1_000);
-    fund(&state, &owner, 10_000);
+    fund(&db, &a, (STAKE as u128) + 1_000);
+    fund(&db, &owner, 10_000);
     let root = Hash::hash(b"dropped");
 
     {
         let mut overlay = ApplicationOverlay::new(&db, LIMIT);
         let mut view = ExecutionView::new(&mut overlay);
         NodeRegistryExecutor::execute(
-            &mut view, &a, &register_op(), &state, &Address::ZERO, 0, 1, 1000,
+            &mut view, &a, &register_op(), &Address::ZERO, 0, 1, 1000,
         )
         .unwrap();
         StorageMetadataExecutor::execute_v2(
             &mut view,
             &owner,
             &register_file_op(root),
-            &state,
             &Address::ZERO,
             0,
             1,
@@ -604,11 +595,11 @@ fn a_same_block_archive_stake_or_fee_pool_change_moves_the_reserve_delta_exactly
 
     const FEE_POOL: u64 = 4_242;
 
-    let (_dir, db, state) = open_db();
+    let (_dir, db, _state) = open_db();
     let p = params();
     let half = GENESIS_ACCOUNTED_SUPPLY / 2;
-    state.credit(&Address::new([0xE1; 20]), half).unwrap();
-    state.credit(&Address::new([0xE2; 20]), half).unwrap();
+    common::credit_committed(&db, &Address::new([0xE1; 20]), half);
+    common::credit_committed(&db, &Address::new([0xE2; 20]), half);
 
     let mid = sumchain_primitives::supply::supply_correction_migration_id();
 
@@ -649,8 +640,8 @@ fn a_same_block_archive_stake_or_fee_pool_change_moves_the_reserve_delta_exactly
     // by the transfer itself. Crediting the two senders first keeps the parent's
     // accounted supply at the genesis figure the correction requires, and the
     // buckets then hold value the census must find in the CANDIDATE.
-    state.credit(&a, (STAKE as u128) + 1_000).unwrap();
-    state.credit(&owner, (FEE_POOL as u128) + 1_000).unwrap();
+    common::credit_committed(&db, &a, (STAKE as u128) + 1_000);
+    common::credit_committed(&db, &owner, (FEE_POOL as u128) + 1_000);
     let funded_baseline = {
         let mut overlay = ApplicationOverlay::new(&db, LIMIT);
         let view = ExecutionView::new(&mut overlay);
@@ -660,11 +651,11 @@ fn a_same_block_archive_stake_or_fee_pool_change_moves_the_reserve_delta_exactly
     let mut overlay = ApplicationOverlay::new(&db, LIMIT);
     let mut view = ExecutionView::new(&mut overlay);
     NodeRegistryExecutor::execute(
-        &mut view, &a, &register_op(), &state, &Address::ZERO, 0, 1, 1000,
+        &mut view, &a, &register_op(), &Address::ZERO, 0, 1, 1000,
     )
     .unwrap();
     assert!(StorageMetadataExecutor::execute_v2(
-        &mut view, &owner, &fund_file, &state, &Address::ZERO, 0, 1, 1000, &p,
+        &mut view, &owner, &fund_file, &Address::ZERO, 0, 1, 1000, &p,
     )
     .unwrap()
     .success);

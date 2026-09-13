@@ -8,6 +8,7 @@
 //! - SRC-845: Executor Links
 //! - SRC-846: Agreement Proofs
 
+use sumchain_storage::exec_view::ExecutionView;
 use std::sync::Arc;
 
 use sumchain_genesis::ChainParams;
@@ -156,11 +157,11 @@ impl AgreementExecutor {
     }
 
     /// Execute an Agreement transaction
+    #[allow(clippy::too_many_arguments)]
     pub fn execute(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &AgreementTxData,
-        state: &StateManager,
         proposer: &Address,
         fee: Balance,
         _block_height: BlockHeight,
@@ -180,9 +181,9 @@ impl AgreementExecutor {
                     return Ok(AgreementExecutionResult::failure("Agreement already exists"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 let agreement_id = agreement.agreement_id;
                 store.agreements().put(&agreement)?;
                 debug!("Agreement committed: {:?}", agreement_id);
@@ -202,9 +203,9 @@ impl AgreementExecutor {
                     return Ok(AgreementExecutionResult::failure("Agreement not found"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.agreements().update_status(&update.agreement_id, update.status, block_timestamp)?;
                 Ok(AgreementExecutionResult::success())
             }
@@ -227,9 +228,9 @@ impl AgreementExecutor {
                     AgreementStatus::Voided
                 };
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.agreements().update_status(&d.agreement_id, new_status, block_timestamp)?;
                 Ok(AgreementExecutionResult::success())
             }
@@ -247,9 +248,9 @@ impl AgreementExecutor {
                     return Ok(AgreementExecutionResult::failure("Old agreement not found"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
 
                 // Mark old as superseded
                 store.agreements().update_status(&d.old_agreement_id, AgreementStatus::Superseded, block_timestamp)?;
@@ -275,9 +276,9 @@ impl AgreementExecutor {
                     return Ok(AgreementExecutionResult::failure("Signature already exists"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
 
                 let sig_id = signature.signature_id;
                 let agreement_id = signature.agreement_id;
@@ -302,18 +303,18 @@ impl AgreementExecutor {
                     return Ok(AgreementExecutionResult::failure("Signature not found"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.signatures().delete(&d.signature_id)?;
                 Ok(AgreementExecutionResult::success())
             }
 
             AgreementOperation::AddParty | AgreementOperation::RemoveParty => {
                 // These would require updating agreement parties
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 debug!("Party operation requested by: {}", sender);
                 Ok(AgreementExecutionResult::success())
             }
@@ -331,9 +332,9 @@ impl AgreementExecutor {
                     return Ok(AgreementExecutionResult::failure("Attestation already exists"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 let att_id = attestation.attestation_id;
                 store.attestations().put(&attestation)?;
                 debug!("Attestation created: {:?}", att_id);
@@ -357,9 +358,9 @@ impl AgreementExecutor {
                     return Ok(AgreementExecutionResult::failure("Only issuer can revoke"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.attestations().update_status(&d.attestation_id, AttestationStatus::Revoked)?;
                 Ok(AgreementExecutionResult::success())
             }
@@ -382,9 +383,9 @@ impl AgreementExecutor {
                     return Ok(AgreementExecutionResult::failure("Only issuer can update"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.attestations().update_status(&d.attestation_id, d.status)?;
                 Ok(AgreementExecutionResult::success())
             }
@@ -398,9 +399,9 @@ impl AgreementExecutor {
                     return Ok(AgreementExecutionResult::failure("IP action already exists"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 let action_id = action.action_id;
                 store.ip_actions().put(&action)?;
                 debug!("IP action recorded: {:?}", action_id);
@@ -425,9 +426,9 @@ impl AgreementExecutor {
                     _ => IpActionStatus::Active,
                 };
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.ip_actions().update_status(&d.action_id, new_status)?;
                 Ok(AgreementExecutionResult::success())
             }
@@ -446,9 +447,9 @@ impl AgreementExecutor {
                     return Ok(AgreementExecutionResult::failure("Executor link already exists"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 let link_id = link.link_id;
                 store.executor_links().put(&link)?;
                 debug!("Executor linked: {:?}", link_id);
@@ -472,9 +473,9 @@ impl AgreementExecutor {
                     return Ok(AgreementExecutionResult::failure("Can only activate draft executors"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.executor_links().update_state(&d.link_id, ExecutorState::Active, block_timestamp)?;
                 debug!("Executor activated: {:?}", d.link_id);
                 Ok(AgreementExecutionResult::success())
@@ -492,9 +493,9 @@ impl AgreementExecutor {
                     return Ok(AgreementExecutionResult::failure("Executor link not found"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.executor_links().update_state(&d.link_id, ExecutorState::Paused, block_timestamp)?;
                 Ok(AgreementExecutionResult::success())
             }
@@ -516,9 +517,9 @@ impl AgreementExecutor {
                     return Ok(AgreementExecutionResult::failure("Can only resume paused executors"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.executor_links().update_state(&d.link_id, ExecutorState::Active, block_timestamp)?;
                 Ok(AgreementExecutionResult::success())
             }
@@ -535,9 +536,9 @@ impl AgreementExecutor {
                     return Ok(AgreementExecutionResult::failure("Executor link not found"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.executor_links().update_state(&d.link_id, ExecutorState::Terminated, block_timestamp)?;
                 Ok(AgreementExecutionResult::success())
             }
@@ -554,9 +555,9 @@ impl AgreementExecutor {
                     return Ok(AgreementExecutionResult::failure("Executor link not found"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 store.executor_links().update_state(&d.link_id, ExecutorState::Completed, block_timestamp)?;
                 Ok(AgreementExecutionResult::success())
             }
@@ -570,9 +571,9 @@ impl AgreementExecutor {
                     return Ok(AgreementExecutionResult::failure("Proof already exists"));
                 }
 
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 let proof_id = proof.proof_id;
                 store.proofs().put(&proof)?;
                 debug!("Agreement proof submitted: {:?}", proof_id);
@@ -581,9 +582,9 @@ impl AgreementExecutor {
 
             AgreementOperation::VerifyProof => {
                 // Verification is read-only - just record the request
-                state.deduct(sender, fee)?;
-                state.credit(proposer, fee)?;
-                state.increment_nonce(sender)?;
+                StateManager::v_deduct(view, sender, fee)?;
+                StateManager::v_credit(view, proposer, fee)?;
+                StateManager::v_increment_nonce(view, sender)?;
                 debug!("Agreement proof verification requested by: {}", sender);
                 Ok(AgreementExecutionResult::success())
             }
@@ -615,13 +616,13 @@ mod tests {
     }
 
     #[test]
-    fn test_commit_agreement() {
+    fn test_commit_agreement(view: &mut ExecutionView<'_, '_>) {
         let (db, _dir, state) = setup();
         let executor = AgreementExecutor::new(db.clone(), ChainParams::default());
 
         let sender = Address::new([1u8; 20]);
         let proposer = Address::new([99u8; 20]);
-        state.credit(&sender, 1_000_000_000_000).unwrap();
+        StateManager::v_credit(view, &sender, 1_000_000_000_000).unwrap();
 
         let party1 = PartyBinding {
             party_ref: PartyRef::Commitment([2u8; 32]),

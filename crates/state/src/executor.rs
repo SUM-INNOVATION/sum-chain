@@ -357,7 +357,7 @@ impl BlockExecutor {
     }
 
     /// Validate a transaction without executing it
-    pub fn validate_tx(&self, tx: &SignedTransaction) -> Result<()> {
+    pub fn validate_tx(&self, view: &mut ExecutionView<'_, '_>, tx: &SignedTransaction) -> Result<()> {
         // 1. Verify chain ID
         if tx.chain_id() != self.state.chain_id() {
             return Err(StateError::InvalidChainId {
@@ -380,7 +380,7 @@ impl BlockExecutor {
             .map_err(|_| StateError::InvalidSignature)?;
 
         // 4. Verify nonce
-        let expected_nonce = self.state.get_nonce(&tx.sender())?;
+        let expected_nonce = StateManager::v_get_nonce(view, &tx.sender())?;
         if tx.nonce() != expected_nonce {
             return Err(StateError::InvalidNonce {
                 expected: expected_nonce,
@@ -389,7 +389,7 @@ impl BlockExecutor {
         }
 
         // 5. Verify balance (for legacy transfers, check total_cost; for V2, check fee at minimum)
-        let balance = self.state.get_balance(&tx.sender())?;
+        let balance = StateManager::v_get_balance(view, &tx.sender())?;
         let total_cost = tx.amount().saturating_add(tx.fee());
         if balance < total_cost {
             return Err(StateError::InsufficientBalance {
@@ -443,7 +443,7 @@ impl BlockExecutor {
         let tx_hash = tx.hash();
 
         // Validate first
-        if let Err(e) = self.validate_tx(tx) {
+        if let Err(e) = self.validate_tx(view, tx) {
             debug!("Transaction {} validation failed: {}", tx_hash, e);
 
             let status = match &e {
@@ -465,7 +465,7 @@ impl BlockExecutor {
         match tx.inner() {
             sumchain_primitives::TxInner::Legacy(legacy_tx) => {
                 // Execute legacy transfer
-                self.state.transfer(
+                StateManager::v_transfer(view,
                     &legacy_tx.from,
                     &legacy_tx.to,
                     legacy_tx.amount,
@@ -488,8 +488,7 @@ impl BlockExecutor {
                 // Execute V2 transaction
                 match &v2_tx.payload {
                     TxPayload::Transfer { to, amount } => {
-                        self.state
-                            .transfer(&v2_tx.from, to, *amount, v2_tx.fee, proposer)?;
+                        StateManager::v_transfer(view, &v2_tx.from, to, *amount, v2_tx.fee, proposer)?;
 
                         debug!(
                             "V2 Transfer {} executed: {} -> {} amount={}",
@@ -504,10 +503,9 @@ impl BlockExecutor {
                     }
                     TxPayload::Nft(nft_data) => {
                         // Execute NFT operation
-                        let result = self.nft_executor.execute(
+                        let result = self.nft_executor.execute(view,
                             &v2_tx.from,
                             &nft_data,
-                            &self.state,
                             proposer,
                             v2_tx.fee,
                             block_timestamp,
@@ -537,10 +535,9 @@ impl BlockExecutor {
                     }
                     TxPayload::Token(token_data) => {
                         // Execute Token (SRC-20) operation
-                        let result = self.token_executor.execute(
+                        let result = self.token_executor.execute(view,
                             &v2_tx.from,
                             &token_data,
-                            &self.state,
                             proposer,
                             v2_tx.fee,
                             block_height,
@@ -581,7 +578,7 @@ impl BlockExecutor {
                             });
                         }
                         // Execute contract deployment
-                        let result = self.contract_executor.deploy(
+                        let result = self.contract_executor.deploy(view,
                             &v2_tx.from,
                             &deploy_data,
                             &self.state,
@@ -628,7 +625,7 @@ impl BlockExecutor {
                             });
                         }
                         // Execute contract call
-                        let result = self.contract_executor.call(
+                        let result = self.contract_executor.call(view,
                             &v2_tx.from,
                             &call_data,
                             &self.state,
@@ -669,7 +666,6 @@ impl BlockExecutor {
                             view,
                             &v2_tx.from,
                             &staking_data,
-                            &self.state,
                             proposer,
                             v2_tx.fee,
                             block_height,
@@ -714,7 +710,7 @@ impl BlockExecutor {
                         if messaging_data.operation
                             == MessagingOperation::RegisterPublicKeySponsoredV1
                         {
-                            return self.execute_sponsored_register_v1(
+                            return self.execute_sponsored_register_v1(view,
                                 &v2_tx.from,
                                 &messaging_data.data,
                                 proposer,
@@ -725,10 +721,9 @@ impl BlockExecutor {
                             );
                         }
                         // Execute messaging operation (SRC-201)
-                        let result = self.messaging_executor.execute(
+                        let result = self.messaging_executor.execute(view,
                             &v2_tx.from,
                             &messaging_data,
-                            &self.state,
                             proposer,
                             v2_tx.fee,
                             block_height,
@@ -764,10 +759,9 @@ impl BlockExecutor {
                     }
                     TxPayload::DocClass(docclass_data) => {
                         // Execute DocClass operation (SRC-80X/81X)
-                        let result = self.docclass_executor.execute(
+                        let result = self.docclass_executor.execute(view,
                             &v2_tx.from,
                             &docclass_data,
-                            &self.state,
                             proposer,
                             v2_tx.fee,
                             block_height,
@@ -803,10 +797,9 @@ impl BlockExecutor {
                     }
                     TxPayload::Tax(tax_data) => {
                         // Execute Tax operation (SRC-82X)
-                        let result = self.tax_executor.execute(
+                        let result = self.tax_executor.execute(view,
                             &v2_tx.from,
                             &tax_data,
-                            &self.state,
                             proposer,
                             v2_tx.fee,
                             block_height,
@@ -839,10 +832,9 @@ impl BlockExecutor {
                     }
                     TxPayload::Equity(equity_data) => {
                         // Execute Equity operation (SRC-83X)
-                        let result = self.equity_executor.execute(
+                        let result = self.equity_executor.execute(view,
                             &v2_tx.from,
                             &equity_data,
-                            &self.state,
                             proposer,
                             v2_tx.fee,
                             block_height,
@@ -878,10 +870,9 @@ impl BlockExecutor {
                     }
                     TxPayload::Agreement(agreement_data) => {
                         // Execute Agreement operation (SRC-84X)
-                        let result = self.agreement_executor.execute(
+                        let result = self.agreement_executor.execute(view,
                             &v2_tx.from,
                             &agreement_data,
-                            &self.state,
                             proposer,
                             v2_tx.fee,
                             block_height,
@@ -917,10 +908,9 @@ impl BlockExecutor {
                     }
                     TxPayload::Legal(legal_data) => {
                         // Execute Legal operation (SRC-85X)
-                        let result = self.legal_executor.execute(
+                        let result = self.legal_executor.execute(view,
                             &v2_tx.from,
                             &legal_data,
-                            &self.state,
                             proposer,
                             v2_tx.fee,
                             block_height,
@@ -953,10 +943,9 @@ impl BlockExecutor {
                     }
                     TxPayload::Property(property_data) => {
                         // Execute Property operation (SRC-86X)
-                        let result = self.property_executor.execute(
+                        let result = self.property_executor.execute(view,
                             &v2_tx.from,
                             &property_data,
-                            &self.state,
                             proposer,
                             v2_tx.fee,
                             block_height,
@@ -992,10 +981,9 @@ impl BlockExecutor {
                     }
                     TxPayload::Healthcare(healthcare_data) => {
                         // Execute Healthcare operation (SRC-87X)
-                        let result = self.healthcare_executor.execute(
+                        let result = self.healthcare_executor.execute(view,
                             &v2_tx.from,
                             &healthcare_data,
-                            &self.state,
                             proposer,
                             v2_tx.fee,
                             block_height,
@@ -1031,10 +1019,9 @@ impl BlockExecutor {
                     }
                     TxPayload::Employment(employment_data) => {
                         // Execute Employment operation (SRC-88X)
-                        let result = self.employment_executor.execute(
+                        let result = self.employment_executor.execute(view,
                             &v2_tx.from,
                             &employment_data,
-                            &self.state,
                             proposer,
                             v2_tx.fee,
                             block_height,
@@ -1070,10 +1057,9 @@ impl BlockExecutor {
                     }
                     TxPayload::Finance(finance_data) => {
                         // Execute Finance operation (SRC-89X)
-                        let result = self.finance_executor.execute(
+                        let result = self.finance_executor.execute(view,
                             &v2_tx.from,
                             &finance_data,
-                            &self.state,
                             proposer,
                             v2_tx.fee,
                             block_height,
@@ -1118,7 +1104,7 @@ impl BlockExecutor {
                         // nonce, advanced inside the executor only on a supported,
                         // successful action.
                         let fee = v2_tx.fee;
-                        if self.state.get_balance(&v2_tx.from)? < fee {
+                        if StateManager::v_get_balance(view, &v2_tx.from)? < fee {
                             return Ok(TxExecutionResult {
                                 tx_hash,
                                 status: TxStatus::InsufficientBalance,
@@ -1126,7 +1112,7 @@ impl BlockExecutor {
                             });
                         }
 
-                        let result = self.policy_account_executor.execute(
+                        let result = self.policy_account_executor.execute(view,
                             &v2_tx.from,
                             &policy_data,
                             &self.state,
@@ -1139,9 +1125,9 @@ impl BlockExecutor {
                         // The operation only moves policy-account funds (never the
                         // submitter's balance), so the pre-checked submitter
                         // balance still covers the fee here.
-                        self.state.deduct(&v2_tx.from, fee)?;
-                        self.state.credit(proposer, fee)?;
-                        self.state.increment_nonce(&v2_tx.from)?;
+                        StateManager::v_deduct(view, &v2_tx.from, fee)?;
+                        StateManager::v_credit(view, proposer, fee)?;
+                        StateManager::v_increment_nonce(view, &v2_tx.from)?;
 
                         if result.success {
                             debug!(
@@ -1194,7 +1180,6 @@ impl BlockExecutor {
                                     view,
                                     &v2_tx.from,
                                     *amount,
-                                    &self.state,
                                     proposer,
                                     v2_tx.fee,
                                     block_height,
@@ -1213,7 +1198,6 @@ impl BlockExecutor {
                                 NodeRegistryExecutor::execute_withdraw_unbonded(
                                     view,
                                     &v2_tx.from,
-                                    &self.state,
                                     proposer,
                                     v2_tx.fee,
                                     block_height,
@@ -1223,7 +1207,6 @@ impl BlockExecutor {
                                 view,
                                 &v2_tx.from,
                                 &registry_data,
-                                &self.state,
                                 proposer,
                                 v2_tx.fee,
                                 block_height,
@@ -1262,7 +1245,6 @@ impl BlockExecutor {
                             view,
                             &v2_tx.from,
                             &storage_data,
-                            &self.state,
                             proposer,
                             v2_tx.fee,
                             block_height,
@@ -1341,7 +1323,6 @@ impl BlockExecutor {
                             view,
                             &v2_tx.from,
                             &storage_v2_data,
-                            &self.state,
                             proposer,
                             v2_tx.fee,
                             block_height,
@@ -1385,7 +1366,6 @@ impl BlockExecutor {
                             view,
                             &v2_tx.from,
                             &registry_v2_data,
-                            &self.state,
                             proposer,
                             v2_tx.fee,
                             block_height,
@@ -1491,7 +1471,7 @@ impl BlockExecutor {
                         //     dispatch-level style (see Transfer arm at
                         //     line ~1108) so the failure mode is
                         //     deterministic across executor tests.
-                        let sender_balance = self.state.get_balance(&v2_tx.from)?;
+                        let sender_balance = StateManager::v_get_balance(view, &v2_tx.from)?;
                         if sender_balance < v2_tx.fee {
                             return Ok(TxExecutionResult {
                                 tx_hash,
@@ -1504,9 +1484,9 @@ impl BlockExecutor {
                         //     CF write happens last so an error in
                         //     deduct/credit/nonce doesn't leave a row
                         //     behind with no fee accounting.
-                        self.state.deduct(&v2_tx.from, v2_tx.fee)?;
-                        self.state.credit(proposer, v2_tx.fee)?;
-                        self.state.increment_nonce(&v2_tx.from)?;
+                        StateManager::v_deduct(view, &v2_tx.from, v2_tx.fee)?;
+                        StateManager::v_credit(view, proposer, v2_tx.fee)?;
+                        StateManager::v_increment_nonce(view, &v2_tx.from)?;
 
                         let record = sumchain_primitives::inference_attestation::InferenceAttestationRecord {
                             digest: attestation_data.digest.clone(),
@@ -1609,7 +1589,7 @@ impl BlockExecutor {
                         }
 
                         // 4. Fee is paid by the SPONSOR (outer sender).
-                        let sender_balance = self.state.get_balance(&v2_tx.from)?;
+                        let sender_balance = StateManager::v_get_balance(view, &v2_tx.from)?;
                         if sender_balance < v2_tx.fee {
                             return Ok(TxExecutionResult {
                                 tx_hash,
@@ -1617,9 +1597,9 @@ impl BlockExecutor {
                                 fee_paid: 0,
                             });
                         }
-                        self.state.deduct(&v2_tx.from, v2_tx.fee)?;
-                        self.state.credit(proposer, v2_tx.fee)?;
-                        self.state.increment_nonce(&v2_tx.from)?;
+                        StateManager::v_deduct(view, &v2_tx.from, v2_tx.fee)?;
+                        StateManager::v_credit(view, proposer, v2_tx.fee)?;
+                        StateManager::v_increment_nonce(view, &v2_tx.from)?;
 
                         // 5. Store a verifier-attributed record IDENTICAL to v1 — the
                         //    sponsor is not recorded (record shape is frozen). The
@@ -1767,7 +1747,7 @@ impl BlockExecutor {
                         // 3. Pre-charge balance check (free; cannot charge
                         //    what isn't there).
                         let fee = v2_tx.fee;
-                        if self.state.get_balance(&v2_tx.from)? < fee {
+                        if StateManager::v_get_balance(view, &v2_tx.from)? < fee {
                             return Ok(TxExecutionResult {
                                 tx_hash,
                                 status: TxStatus::InsufficientBalance,
@@ -1790,9 +1770,9 @@ impl BlockExecutor {
                             Err(code) => {
                                 // Policy B: semantic failure after
                                 // activation charges fee + advances nonce.
-                                self.state.deduct(&v2_tx.from, fee)?;
-                                self.state.credit(proposer, fee)?;
-                                self.state.increment_nonce(&v2_tx.from)?;
+                                StateManager::v_deduct(view, &v2_tx.from, fee)?;
+                                StateManager::v_credit(view, proposer, fee)?;
+                                StateManager::v_increment_nonce(view, &v2_tx.from)?;
                                 Ok(TxExecutionResult {
                                     tx_hash,
                                     status: TxStatus::Failed(code as u32),
@@ -1802,9 +1782,9 @@ impl BlockExecutor {
                             Ok(prepared) => {
                                 // Success: charge fee + nonce, THEN atomic
                                 // CF write (cannot partially apply).
-                                self.state.deduct(&v2_tx.from, fee)?;
-                                self.state.credit(proposer, fee)?;
-                                self.state.increment_nonce(&v2_tx.from)?;
+                                StateManager::v_deduct(view, &v2_tx.from, fee)?;
+                                StateManager::v_credit(view, proposer, fee)?;
+                                StateManager::v_increment_nonce(view, &v2_tx.from)?;
                                 crate::education_executor::EducationExecutor::stage(
                                     view, prepared,
                                 )?;
@@ -1850,7 +1830,7 @@ impl BlockExecutor {
                                 fee_paid: 0,
                             });
                         }
-                        let sender_balance = self.state.get_balance(&v2_tx.from)?;
+                        let sender_balance = StateManager::v_get_balance(view, &v2_tx.from)?;
                         if sender_balance < v2_tx.fee {
                             return Ok(TxExecutionResult {
                                 tx_hash,
@@ -1858,9 +1838,9 @@ impl BlockExecutor {
                                 fee_paid: 0,
                             });
                         }
-                        self.state.deduct(&v2_tx.from, v2_tx.fee)?;
-                        self.state.credit(proposer, v2_tx.fee)?;
-                        self.state.increment_nonce(&v2_tx.from)?;
+                        StateManager::v_deduct(view, &v2_tx.from, v2_tx.fee)?;
+                        StateManager::v_credit(view, proposer, v2_tx.fee)?;
+                        StateManager::v_increment_nonce(view, &v2_tx.from)?;
 
                         use crate::supply::SupplyStore;
                         use sumchain_primitives::supply::{ServiceKind, SupplyOperation};
@@ -1897,7 +1877,7 @@ impl BlockExecutor {
                                 // (this is the only way reserve money becomes an
                                 // account balance outside governance release).
                                 if amount > 0 {
-                                    self.state.credit(&v2_tx.from, amount)?;
+                                    StateManager::v_credit(view, &v2_tx.from, amount)?;
                                 }
                                 debug!(
                                     "Supply op executed: sender={} credited={} height={}",
@@ -1978,7 +1958,7 @@ impl BlockExecutor {
     /// converted into a business branch.
     #[allow(clippy::too_many_arguments)]
     fn execute_sponsored_register_v1(
-        &self,
+        &self, view: &mut ExecutionView<'_, '_>,
         sponsor: &Address,
         data: &[u8],
         proposer: &Address,
@@ -2055,16 +2035,16 @@ impl BlockExecutor {
 
         // 6. Sponsor pays. Insufficient balance is a free, pre-success rejection
         //    (checked before any mutation so `deduct` can never error here).
-        if self.state.get_balance(sponsor)? < fee {
+        if StateManager::v_get_balance(view, sponsor)? < fee {
             return Ok(TxExecutionResult {
                 tx_hash,
                 status: TxStatus::InsufficientBalance,
                 fee_paid: 0,
             });
         }
-        self.state.deduct(sponsor, fee)?;
-        self.state.credit(proposer, fee)?;
-        self.state.increment_nonce(sponsor)?;
+        StateManager::v_deduct(view, sponsor, fee)?;
+        StateManager::v_credit(view, proposer, fee)?;
+        StateManager::v_increment_nonce(view, sponsor)?;
 
         // 7. Write the registrant's key record through the block-ordered store.
         //    Reached only after all checks pass, so no partial mutation on any
@@ -2094,6 +2074,7 @@ impl BlockExecutor {
     }
 
     /// Execute a V2 transaction (supports both transfers and NFT operations)
+    #[allow(clippy::too_many_arguments)]
     pub fn execute_tx_v2(
         &self,
         view: &mut ExecutionView<'_, '_>,
@@ -2135,7 +2116,7 @@ impl BlockExecutor {
         }
 
         // 4. Verify nonce
-        let expected_nonce = self.state.get_nonce(&tx.from)?;
+        let expected_nonce = StateManager::v_get_nonce(view, &tx.from)?;
         if tx.nonce != expected_nonce {
             return Ok(TxExecutionResult {
                 tx_hash,
@@ -2158,7 +2139,7 @@ impl BlockExecutor {
             TxPayload::Transfer { to, amount } => {
                 // Check balance for transfer
                 let total_cost = amount.saturating_add(tx.fee);
-                let balance = self.state.get_balance(&tx.from)?;
+                let balance = StateManager::v_get_balance(view, &tx.from)?;
                 if balance < total_cost {
                     return Ok(TxExecutionResult {
                         tx_hash,
@@ -2168,8 +2149,7 @@ impl BlockExecutor {
                 }
 
                 // Execute transfer
-                self.state
-                    .transfer(&tx.from, to, *amount, tx.fee, proposer)?;
+                StateManager::v_transfer(view, &tx.from, to, *amount, tx.fee, proposer)?;
 
                 debug!(
                     "V2 Transfer {} executed: {} -> {} amount={}",
@@ -2184,7 +2164,7 @@ impl BlockExecutor {
             }
             TxPayload::Nft(nft_data) => {
                 // Check balance for fee
-                let balance = self.state.get_balance(&tx.from)?;
+                let balance = StateManager::v_get_balance(view, &tx.from)?;
                 if balance < tx.fee {
                     return Ok(TxExecutionResult {
                         tx_hash,
@@ -2194,10 +2174,9 @@ impl BlockExecutor {
                 }
 
                 // Execute NFT operation
-                let result = self.nft_executor.execute(
+                let result = self.nft_executor.execute(view,
                     &tx.from,
                     nft_data,
-                    &self.state,
                     proposer,
                     tx.fee,
                     block_timestamp,
@@ -2227,7 +2206,7 @@ impl BlockExecutor {
             }
             TxPayload::Token(token_data) => {
                 // Check balance for fee
-                let balance = self.state.get_balance(&tx.from)?;
+                let balance = StateManager::v_get_balance(view, &tx.from)?;
                 if balance < tx.fee {
                     return Ok(TxExecutionResult {
                         tx_hash,
@@ -2237,10 +2216,9 @@ impl BlockExecutor {
                 }
 
                 // Execute Token (SRC-20) operation
-                let result = self.token_executor.execute(
+                let result = self.token_executor.execute(view,
                     &tx.from,
                     token_data,
-                    &self.state,
                     proposer,
                     tx.fee,
                     block_height,
@@ -2281,7 +2259,7 @@ impl BlockExecutor {
                 }
                 // Check balance for fee + value
                 let total_cost = tx.fee.saturating_add(deploy_data.value);
-                let balance = self.state.get_balance(&tx.from)?;
+                let balance = StateManager::v_get_balance(view, &tx.from)?;
                 if balance < total_cost {
                     return Ok(TxExecutionResult {
                         tx_hash,
@@ -2291,7 +2269,7 @@ impl BlockExecutor {
                 }
 
                 // Execute contract deployment
-                let result = self.contract_executor.deploy(
+                let result = self.contract_executor.deploy(view,
                     &tx.from,
                     deploy_data,
                     &self.state,
@@ -2338,7 +2316,7 @@ impl BlockExecutor {
                 }
                 // Check balance for fee + value
                 let total_cost = tx.fee.saturating_add(call_data.value);
-                let balance = self.state.get_balance(&tx.from)?;
+                let balance = StateManager::v_get_balance(view, &tx.from)?;
                 if balance < total_cost {
                     return Ok(TxExecutionResult {
                         tx_hash,
@@ -2348,7 +2326,7 @@ impl BlockExecutor {
                 }
 
                 // Execute contract call
-                let result = self.contract_executor.call(
+                let result = self.contract_executor.call(view,
                     &tx.from,
                     call_data,
                     &self.state,
@@ -2385,7 +2363,7 @@ impl BlockExecutor {
             }
             TxPayload::Staking(staking_data) => {
                 // Check balance for fee
-                let balance = self.state.get_balance(&tx.from)?;
+                let balance = StateManager::v_get_balance(view, &tx.from)?;
                 if balance < tx.fee {
                     return Ok(TxExecutionResult {
                         tx_hash,
@@ -2399,7 +2377,6 @@ impl BlockExecutor {
                     view,
                     &tx.from,
                     staking_data,
-                    &self.state,
                     proposer,
                     tx.fee,
                     block_height,
@@ -2437,7 +2414,7 @@ impl BlockExecutor {
                 // entrypoints behave byte-identically. (Handles its own gate +
                 // sponsor balance/fee/nonce; do not pre-charge here.)
                 if messaging_data.operation == MessagingOperation::RegisterPublicKeySponsoredV1 {
-                    return self.execute_sponsored_register_v1(
+                    return self.execute_sponsored_register_v1(view,
                         &tx.from,
                         &messaging_data.data,
                         proposer,
@@ -2448,7 +2425,7 @@ impl BlockExecutor {
                     );
                 }
                 // Check balance for fee
-                let balance = self.state.get_balance(&tx.from)?;
+                let balance = StateManager::v_get_balance(view, &tx.from)?;
                 if balance < tx.fee {
                     return Ok(TxExecutionResult {
                         tx_hash,
@@ -2458,10 +2435,9 @@ impl BlockExecutor {
                 }
 
                 // Execute messaging operation (SRC-201)
-                let result = self.messaging_executor.execute(
+                let result = self.messaging_executor.execute(view,
                     &tx.from,
                     messaging_data,
-                    &self.state,
                     proposer,
                     tx.fee,
                     block_height,
@@ -2497,7 +2473,7 @@ impl BlockExecutor {
             }
             TxPayload::DocClass(docclass_data) => {
                 // Check balance for fee
-                let balance = self.state.get_balance(&tx.from)?;
+                let balance = StateManager::v_get_balance(view, &tx.from)?;
                 if balance < tx.fee {
                     return Ok(TxExecutionResult {
                         tx_hash,
@@ -2507,10 +2483,9 @@ impl BlockExecutor {
                 }
 
                 // Execute DocClass operation (SRC-80X/81X)
-                let result = self.docclass_executor.execute(
+                let result = self.docclass_executor.execute(view,
                     &tx.from,
                     docclass_data,
-                    &self.state,
                     proposer,
                     tx.fee,
                     block_height,
@@ -2546,7 +2521,7 @@ impl BlockExecutor {
             }
             TxPayload::Tax(tax_data) => {
                 // Check balance for fee
-                let balance = self.state.get_balance(&tx.from)?;
+                let balance = StateManager::v_get_balance(view, &tx.from)?;
                 if balance < tx.fee {
                     return Ok(TxExecutionResult {
                         tx_hash,
@@ -2556,10 +2531,9 @@ impl BlockExecutor {
                 }
 
                 // Execute Tax operation (SRC-82X)
-                let result = self.tax_executor.execute(
+                let result = self.tax_executor.execute(view,
                     &tx.from,
                     tax_data,
-                    &self.state,
                     proposer,
                     tx.fee,
                     block_height,
@@ -2592,7 +2566,7 @@ impl BlockExecutor {
             }
             TxPayload::Equity(equity_data) => {
                 // Check balance for fee
-                let balance = self.state.get_balance(&tx.from)?;
+                let balance = StateManager::v_get_balance(view, &tx.from)?;
                 if balance < tx.fee {
                     return Ok(TxExecutionResult {
                         tx_hash,
@@ -2602,10 +2576,9 @@ impl BlockExecutor {
                 }
 
                 // Execute Equity operation (SRC-83X)
-                let result = self.equity_executor.execute(
+                let result = self.equity_executor.execute(view,
                     &tx.from,
                     equity_data,
-                    &self.state,
                     proposer,
                     tx.fee,
                     block_height,
@@ -2641,7 +2614,7 @@ impl BlockExecutor {
             }
             TxPayload::Agreement(agreement_data) => {
                 // Check balance for fee
-                let balance = self.state.get_balance(&tx.from)?;
+                let balance = StateManager::v_get_balance(view, &tx.from)?;
                 if balance < tx.fee {
                     return Ok(TxExecutionResult {
                         tx_hash,
@@ -2651,10 +2624,9 @@ impl BlockExecutor {
                 }
 
                 // Execute Agreement operation (SRC-84X)
-                let result = self.agreement_executor.execute(
+                let result = self.agreement_executor.execute(view,
                     &tx.from,
                     agreement_data,
-                    &self.state,
                     proposer,
                     tx.fee,
                     block_height,
@@ -2690,7 +2662,7 @@ impl BlockExecutor {
             }
             TxPayload::Legal(legal_data) => {
                 // Check balance for fee
-                let balance = self.state.get_balance(&tx.from)?;
+                let balance = StateManager::v_get_balance(view, &tx.from)?;
                 if balance < tx.fee {
                     return Ok(TxExecutionResult {
                         tx_hash,
@@ -2700,10 +2672,9 @@ impl BlockExecutor {
                 }
 
                 // Execute Legal operation (SRC-85X)
-                let result = self.legal_executor.execute(
+                let result = self.legal_executor.execute(view,
                     &tx.from,
                     legal_data,
-                    &self.state,
                     proposer,
                     tx.fee,
                     block_height,
@@ -2736,7 +2707,7 @@ impl BlockExecutor {
             }
             TxPayload::Property(property_data) => {
                 // Check balance for fee
-                let balance = self.state.get_balance(&tx.from)?;
+                let balance = StateManager::v_get_balance(view, &tx.from)?;
                 if balance < tx.fee {
                     return Ok(TxExecutionResult {
                         tx_hash,
@@ -2746,10 +2717,9 @@ impl BlockExecutor {
                 }
 
                 // Execute Property operation (SRC-86X)
-                let result = self.property_executor.execute(
+                let result = self.property_executor.execute(view,
                     &tx.from,
                     property_data,
-                    &self.state,
                     proposer,
                     tx.fee,
                     block_height,
@@ -2785,7 +2755,7 @@ impl BlockExecutor {
             }
             TxPayload::Healthcare(healthcare_data) => {
                 // Check balance for fee
-                let balance = self.state.get_balance(&tx.from)?;
+                let balance = StateManager::v_get_balance(view, &tx.from)?;
                 if balance < tx.fee {
                     return Ok(TxExecutionResult {
                         tx_hash,
@@ -2795,10 +2765,9 @@ impl BlockExecutor {
                 }
 
                 // Execute Healthcare operation (SRC-87X)
-                let result = self.healthcare_executor.execute(
+                let result = self.healthcare_executor.execute(view,
                     &tx.from,
                     healthcare_data,
-                    &self.state,
                     proposer,
                     tx.fee,
                     block_height,
@@ -2834,7 +2803,7 @@ impl BlockExecutor {
             }
             TxPayload::Employment(employment_data) => {
                 // Check balance for fee
-                let balance = self.state.get_balance(&tx.from)?;
+                let balance = StateManager::v_get_balance(view, &tx.from)?;
                 if balance < tx.fee {
                     return Ok(TxExecutionResult {
                         tx_hash,
@@ -2844,10 +2813,9 @@ impl BlockExecutor {
                 }
 
                 // Execute Employment operation (SRC-88X)
-                let result = self.employment_executor.execute(
+                let result = self.employment_executor.execute(view,
                     &tx.from,
                     employment_data,
-                    &self.state,
                     proposer,
                     tx.fee,
                     block_height,
@@ -2883,7 +2851,7 @@ impl BlockExecutor {
             }
             TxPayload::Finance(finance_data) => {
                 // Check balance for fee
-                let balance = self.state.get_balance(&tx.from)?;
+                let balance = StateManager::v_get_balance(view, &tx.from)?;
                 if balance < tx.fee {
                     return Ok(TxExecutionResult {
                         tx_hash,
@@ -2893,10 +2861,9 @@ impl BlockExecutor {
                 }
 
                 // Execute Finance operation (SRC-89X)
-                let result = self.finance_executor.execute(
+                let result = self.finance_executor.execute(view,
                     &tx.from,
                     finance_data,
-                    &self.state,
                     proposer,
                     tx.fee,
                     block_height,
@@ -3088,17 +3055,28 @@ impl BlockExecutor {
             // Presence-aware: a block that CREATES an account must journal
             // `old = None`, so the revert deletes the row instead of writing a
             // zero row back. `get_account` cannot express that distinction.
-            let sender_before = self.state.get_account_opt(&sender)?;
-            // Nested deliberately: the OUTER option is "this tx has a
-            // recipient", the INNER is "that account already exists". Collapsing
-            // them is what loses the creation case.
-            let recipient_before: Option<Option<sumchain_storage::schema::AccountState>> =
-                if let Some(ref r) = recipient {
-                    Some(self.state.get_account_opt(r)?)
-                } else {
-                    None
-                };
-            let proposer_before = self.state.get_account_opt(&proposer)?;
+            //
+            // Read from THIS BLOCK'S CANDIDATE, in a scope that ends before the
+            // transaction executes. Accounts are staged now, so the value
+            // before this transaction lives in the candidate — which is exactly
+            // what the committed read used to return, because every earlier
+            // transaction in the block had already committed its account rows.
+            // Same value; it is no longer committed on the way.
+            let (sender_before, recipient_before, proposer_before) = {
+                let view = candidate.view();
+                let sender_before = StateManager::v_get_account_opt(&view, &sender)?;
+                // Nested deliberately: the OUTER option is "this tx has a
+                // recipient", the INNER is "that account already exists".
+                // Collapsing them is what loses the creation case.
+                let recipient_before: Option<Option<sumchain_storage::schema::AccountState>> =
+                    if let Some(ref r) = recipient {
+                        Some(StateManager::v_get_account_opt(&view, r)?)
+                    } else {
+                        None
+                    };
+                let proposer_before = StateManager::v_get_account_opt(&view, &proposer)?;
+                (sender_before, recipient_before, proposer_before)
+            };
 
             let result = {
                 let mut view = candidate.view();
@@ -3112,14 +3090,19 @@ impl BlockExecutor {
                 )?
             };
 
-            // Record post-execution state for diff
-            let sender_after = self.state.get_account(&sender)?;
-            let recipient_after = if let Some(ref r) = recipient {
-                Some(self.state.get_account(r)?)
-            } else {
-                None
+            // Record post-execution state for diff, from the candidate the
+            // transaction just staged into.
+            let (sender_after, recipient_after, proposer_after) = {
+                let view = candidate.view();
+                let sender_after = StateManager::v_get_account(&view, &sender)?;
+                let recipient_after = if let Some(ref r) = recipient {
+                    Some(StateManager::v_get_account(&view, r)?)
+                } else {
+                    None
+                };
+                let proposer_after = StateManager::v_get_account(&view, &proposer)?;
+                (sender_after, recipient_after, proposer_after)
             };
-            let proposer_after = self.state.get_account(&proposer)?;
 
             // Add to state diff
             state_diff.add_change(sender, sender_before, sender_after);
@@ -4047,15 +4030,15 @@ mod tests {
     #[test]
     fn test_validate_tx_success() {
         let (state, db, _dir) = setup();
-        let executor = BlockExecutor::new(state.clone(), db, ChainParams::with_v2_enabled());
+        let db2 = db.clone();
+        let executor = BlockExecutor::new(state.clone(), db2.clone(), ChainParams::with_v2_enabled());
+        let db = db2.clone();
 
         let sender = KeyPair::generate();
         let recipient = KeyPair::generate();
 
         // Fund sender
-        state
-            .put_account(
-                &sender.address(),
+        sumchain_storage::StateStore::new(&db).put_account(&sender.address(),
                 &sumchain_storage::schema::AccountState {
                     balance: 1000,
                     nonce: 0,
@@ -4064,20 +4047,21 @@ mod tests {
             .unwrap();
 
         let tx = create_signed_tx(&sender, recipient.address(), 100, 10, 0);
-        assert!(executor.validate_tx(&tx).is_ok());
+        let mut candidate = CandidateExecution::new(&db2, CANDIDATE_LIMIT_SCAFFOLD);
+        assert!(executor.validate_tx(&mut candidate.view(), &tx).is_ok());
     }
 
     #[test]
     fn test_validate_tx_wrong_nonce() {
         let (state, db, _dir) = setup();
-        let executor = BlockExecutor::new(state.clone(), db, ChainParams::with_v2_enabled());
+        let db2 = db.clone();
+        let executor = BlockExecutor::new(state.clone(), db2.clone(), ChainParams::with_v2_enabled());
+        let db = db2.clone();
 
         let sender = KeyPair::generate();
         let recipient = KeyPair::generate();
 
-        state
-            .put_account(
-                &sender.address(),
+        sumchain_storage::StateStore::new(&db).put_account(&sender.address(),
                 &sumchain_storage::schema::AccountState {
                     balance: 1000,
                     nonce: 5, // Nonce is 5
@@ -4086,7 +4070,8 @@ mod tests {
             .unwrap();
 
         let tx = create_signed_tx(&sender, recipient.address(), 100, 10, 0); // But tx has nonce 0
-        let result = executor.validate_tx(&tx);
+        let mut candidate = CandidateExecution::new(&db2, CANDIDATE_LIMIT_SCAFFOLD);
+        let result = executor.validate_tx(&mut candidate.view(), &tx);
         assert!(matches!(result, Err(StateError::InvalidNonce { .. })));
     }
 
@@ -4100,9 +4085,7 @@ mod tests {
         let recipient = KeyPair::generate();
         let proposer = KeyPair::generate();
 
-        state
-            .put_account(
-                &sender.address(),
+        sumchain_storage::StateStore::new(&db).put_account(&sender.address(),
                 &sumchain_storage::schema::AccountState {
                     balance: 1000,
                     nonce: 0,
@@ -4116,9 +4099,9 @@ mod tests {
             .unwrap();
 
         assert!(result.status.is_success());
-        assert_eq!(state.get_balance(&sender.address()).unwrap(), 890);
-        assert_eq!(state.get_balance(&recipient.address()).unwrap(), 100);
-        assert_eq!(state.get_balance(&proposer.address()).unwrap(), 10);
+        assert_eq!(StateManager::v_get_balance(&candidate.view(), &sender.address()).unwrap(), 890);
+        assert_eq!(StateManager::v_get_balance(&candidate.view(), &recipient.address()).unwrap(), 100);
+        assert_eq!(StateManager::v_get_balance(&candidate.view(), &proposer.address()).unwrap(), 10);
     }
 
     /// SNIP V2 Ask 3 — register an X25519 encryption pubkey via the V2 op,
@@ -4138,9 +4121,7 @@ mod tests {
         let proposer = KeyPair::generate();
 
         let fee: u128 = 10;
-        state
-            .put_account(
-                &sender.address(),
+        sumchain_storage::StateStore::new(&db).put_account(&sender.address(),
                 &sumchain_storage::schema::AccountState {
                     balance: fee,
                     nonce: 0,
@@ -4194,9 +4175,7 @@ mod tests {
         let proposer = KeyPair::generate();
 
         // Pre-fund for two registrations (fee=10 each, so balance=100 is plenty).
-        state
-            .put_account(
-                &sender.address(),
+        sumchain_storage::StateStore::new(&db).put_account(&sender.address(),
                 &sumchain_storage::schema::AccountState {
                     balance: 100,
                     nonce: 0,
@@ -4251,7 +4230,6 @@ mod tests {
     fn register_v2_file(
         view: &mut ExecutionView<'_, '_>,
         executor: &BlockExecutor,
-        state: &Arc<StateManager>,
         owner: &KeyPair,
         proposer: &Address,
         block_height: u64,
@@ -4268,9 +4246,7 @@ mod tests {
         };
         let fee: u128 = 10;
         // Top up balance enough for fee + deposit.
-        state
-            .put_account(
-                &owner.address(),
+        StateManager::v_put_account(view, &owner.address(),
                 &sumchain_storage::schema::AccountState {
                     balance: fee + fee_deposit as u128 + 100,
                     nonce,
@@ -4328,7 +4304,6 @@ mod tests {
         let status = register_v2_file(
             &mut candidate.view(),
             &executor,
-            &state,
             &owner,
             &proposer.address(),
             42,
@@ -4370,7 +4345,6 @@ mod tests {
         let status = register_v2_file(
             &mut candidate.view(),
             &executor,
-            &state,
             &owner,
             &proposer.address(),
             10,
@@ -4399,7 +4373,6 @@ mod tests {
         let status = register_v2_file(
             &mut candidate.view(),
             &executor,
-            &state,
             &owner,
             &proposer.address(),
             10,
@@ -4434,7 +4407,6 @@ mod tests {
         let status = register_v2_file(
             &mut candidate.view(),
             &executor,
-            &state,
             &owner,
             &proposer.address(),
             10,
@@ -4469,7 +4441,6 @@ mod tests {
         let status = register_v2_file(
             &mut candidate.view(),
             &executor,
-            &state,
             &owner,
             &proposer.address(),
             10,
@@ -4505,7 +4476,6 @@ mod tests {
         assert!(register_v2_file(
             &mut candidate.view(),
             &executor,
-            &state,
             &owner,
             &proposer.address(),
             10,
@@ -4520,14 +4490,12 @@ mod tests {
 
         // Snapshot the post-registration owner balance (changes with the
         // pre-funding helper, so capture after register).
-        let bal_before = state.get_balance(&owner.address()).unwrap();
+        let bal_before = StateManager::v_get_balance(&candidate.view(), &owner.address()).unwrap();
 
         // Pay an extra fee for the abandon tx; fund it.
         let fee: u128 = 10;
-        let acct = state.get_account(&owner.address()).unwrap();
-        state
-            .put_account(
-                &owner.address(),
+        let acct = StateManager::v_get_account(&candidate.view(), &owner.address()).unwrap();
+        StateManager::v_put_account(&mut candidate.view(), &owner.address(),
                 &sumchain_storage::schema::AccountState {
                     balance: acct.balance + fee,
                     nonce: 1,
@@ -4557,7 +4525,7 @@ mod tests {
 
         // Refund: 90% of deposit (default abandonment_fee_percent = 10).
         // Owner paid `fee` for the abandon tx and gained `0.9 * deposit` from refund.
-        let bal_after = state.get_balance(&owner.address()).unwrap();
+        let bal_after = StateManager::v_get_balance(&candidate.view(), &owner.address()).unwrap();
         let expected_refund = (deposit as u128 * 90) / 100;
         assert_eq!(bal_after, bal_before + expected_refund);
 
@@ -4595,9 +4563,7 @@ mod tests {
         let chunk_count: u32 = 5; // exceeds the tightened cap of 4
         let stored_size_bytes = (chunk_count as u64) * CHUNK_SIZE;
         let fee: u128 = 10;
-        state
-            .put_account(
-                &owner.address(),
+        StateManager::v_put_account(&mut candidate.view(), &owner.address(),
                 &sumchain_storage::schema::AccountState {
                     balance: fee + 1_000_000,
                     nonce: 0,
@@ -4648,9 +4614,7 @@ mod tests {
 
         // Tiny file, claim 4 chunks. Expected ceil(1024/CHUNK_SIZE) == 1.
         let fee: u128 = 10;
-        state
-            .put_account(
-                &owner.address(),
+        StateManager::v_put_account(&mut candidate.view(), &owner.address(),
                 &sumchain_storage::schema::AccountState {
                     balance: fee + 1_000_000,
                     nonce: 0,
@@ -4704,9 +4668,7 @@ mod tests {
         let proposer = KeyPair::generate();
 
         let fee: u128 = 10;
-        state
-            .put_account(
-                &owner.address(),
+        StateManager::v_put_account(&mut candidate.view(), &owner.address(),
                 &sumchain_storage::schema::AccountState {
                     balance: fee + 1_000_000,
                     nonce: 0,
@@ -4777,16 +4739,13 @@ mod tests {
     fn setup_archive(
         view: &mut ExecutionView<'_, '_>,
         executor: &BlockExecutor,
-        state: &Arc<StateManager>,
         proposer: &Address,
         block_height: u64,
     ) -> KeyPair {
         let kp = KeyPair::generate();
         let stake: u64 = 1_000_000_000;
         let fee: u128 = 10;
-        state
-            .put_account(
-                &kp.address(),
+        StateManager::v_put_account(view, &kp.address(),
                 &sumchain_storage::schema::AccountState {
                     balance: (stake as u128) + fee,
                     nonce: 0,
@@ -4818,10 +4777,10 @@ mod tests {
     }
 
     /// Helper: submit an AcceptAssignmentV2 tx and return the receipt status.
+    #[allow(clippy::too_many_arguments)]
     fn submit_accept(
         view: &mut ExecutionView<'_, '_>,
         executor: &BlockExecutor,
-        state: &Arc<StateManager>,
         archive: &KeyPair,
         proposer: &Address,
         block_height: u64,
@@ -4830,11 +4789,9 @@ mod tests {
         chunk_indices: Vec<u32>,
     ) -> sumchain_primitives::TxStatus {
         // Top up balance for the small tx fee.
-        let prior = state.get_account(&archive.address()).unwrap();
+        let prior = StateManager::v_get_account(view, &archive.address()).unwrap();
         let fee: u128 = 1;
-        state
-            .put_account(
-                &archive.address(),
+        StateManager::v_put_account(view, &archive.address(),
                 &sumchain_storage::schema::AccountState {
                     balance: prior.balance + fee,
                     nonce,
@@ -4866,21 +4823,19 @@ mod tests {
     }
 
     /// Helper: submit ActivateFileV2 from owner, return receipt status.
+    #[allow(clippy::too_many_arguments)]
     fn submit_activate(
         view: &mut ExecutionView<'_, '_>,
         executor: &BlockExecutor,
-        state: &Arc<StateManager>,
         owner: &KeyPair,
         proposer: &Address,
         block_height: u64,
         nonce: u64,
         merkle_root: Hash,
     ) -> sumchain_primitives::TxStatus {
-        let prior = state.get_account(&owner.address()).unwrap();
+        let prior = StateManager::v_get_account(view, &owner.address()).unwrap();
         let fee: u128 = 1;
-        state
-            .put_account(
-                &owner.address(),
+        StateManager::v_put_account(view, &owner.address(),
                 &sumchain_storage::schema::AccountState {
                     balance: prior.balance + fee,
                     nonce,
@@ -4921,7 +4876,7 @@ mod tests {
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
 
-        let archive = setup_archive(&mut candidate.view(), &executor, &state, &proposer.address(), 1);
+        let archive = setup_archive(&mut candidate.view(), &executor, &proposer.address(), 1);
         let owner = KeyPair::generate();
         let merkle_root = Hash::hash(b"matrix-1");
 
@@ -4929,7 +4884,6 @@ mod tests {
         let status = register_v2_file(
             &mut candidate.view(),
             &executor,
-            &state,
             &owner,
             &proposer.address(),
             10,
@@ -4946,7 +4900,6 @@ mod tests {
         let s = submit_accept(
             &mut candidate.view(),
             &executor,
-            &state,
             &archive,
             &proposer.address(),
             11,
@@ -4975,13 +4928,12 @@ mod tests {
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
 
-        let archive = setup_archive(&mut candidate.view(), &executor, &state, &proposer.address(), 1);
+        let archive = setup_archive(&mut candidate.view(), &executor, &proposer.address(), 1);
         let owner = KeyPair::generate();
         let merkle_root = Hash::hash(b"matrix-2");
         assert!(register_v2_file(
             &mut candidate.view(),
             &executor,
-            &state,
             &owner,
             &proposer.address(),
             10,
@@ -4999,7 +4951,6 @@ mod tests {
             submit_accept(
                 &mut candidate.view(),
                 &executor,
-                &state,
                 &archive,
                 &proposer.address(),
                 11,
@@ -5014,7 +4965,6 @@ mod tests {
             submit_accept(
                 &mut candidate.view(),
                 &executor,
-                &state,
                 &archive,
                 &proposer.address(),
                 12,
@@ -5043,13 +4993,12 @@ mod tests {
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
 
-        let archive = setup_archive(&mut candidate.view(), &executor, &state, &proposer.address(), 1);
+        let archive = setup_archive(&mut candidate.view(), &executor, &proposer.address(), 1);
         let owner = KeyPair::generate();
         let merkle_root = Hash::hash(b"matrix-3");
         assert!(register_v2_file(
             &mut candidate.view(),
             &executor,
-            &state,
             &owner,
             &proposer.address(),
             10,
@@ -5067,7 +5016,6 @@ mod tests {
             submit_accept(
                 &mut candidate.view(),
                 &executor,
-                &state,
                 &archive,
                 &proposer.address(),
                 11,
@@ -5084,7 +5032,6 @@ mod tests {
             submit_accept(
                 &mut candidate.view(),
                 &executor,
-                &state,
                 &archive,
                 &proposer.address(),
                 12,
@@ -5121,15 +5068,14 @@ mod tests {
         let executor = BlockExecutor::new(state.clone(), db.clone(), params.clone());
         let proposer = KeyPair::generate();
 
-        let archive_a = setup_archive(&mut candidate.view(), &executor, &state, &proposer.address(), 1);
-        let archive_b = setup_archive(&mut candidate.view(), &executor, &state, &proposer.address(), 2);
+        let archive_a = setup_archive(&mut candidate.view(), &executor, &proposer.address(), 1);
+        let archive_b = setup_archive(&mut candidate.view(), &executor, &proposer.address(), 2);
 
         let owner = KeyPair::generate();
         let merkle_root = Hash::hash(b"matrix-4");
         assert!(register_v2_file(
             &mut candidate.view(),
             &executor,
-            &state,
             &owner,
             &proposer.address(),
             10,
@@ -5166,7 +5112,6 @@ mod tests {
             submit_accept(
                 &mut candidate.view(),
                 &executor,
-                &state,
                 unassigned_signer,
                 &proposer.address(),
                 11,
@@ -5192,13 +5137,12 @@ mod tests {
         let executor = BlockExecutor::new(state.clone(), db.clone(), params);
         let proposer = KeyPair::generate();
 
-        let archive = setup_archive(&mut candidate.view(), &executor, &state, &proposer.address(), 1);
+        let archive = setup_archive(&mut candidate.view(), &executor, &proposer.address(), 1);
         let owner = KeyPair::generate();
         let merkle_root = Hash::hash(b"matrix-5");
         assert!(register_v2_file(
             &mut candidate.view(),
             &executor,
-            &state,
             &owner,
             &proposer.address(),
             10,
@@ -5216,7 +5160,6 @@ mod tests {
             submit_accept(
                 &mut candidate.view(),
                 &executor,
-                &state,
                 &archive,
                 &proposer.address(),
                 11,
@@ -5239,13 +5182,12 @@ mod tests {
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
 
-        let archive = setup_archive(&mut candidate.view(), &executor, &state, &proposer.address(), 1);
+        let archive = setup_archive(&mut candidate.view(), &executor, &proposer.address(), 1);
         let owner = KeyPair::generate();
         let merkle_root = Hash::hash(b"matrix-8");
         assert!(register_v2_file(
             &mut candidate.view(),
             &executor,
-            &state,
             &owner,
             &proposer.address(),
             10,
@@ -5263,7 +5205,6 @@ mod tests {
             submit_activate(
                 &mut candidate.view(),
                 &executor,
-                &state,
                 &owner,
                 &proposer.address(),
                 11,
@@ -5278,7 +5219,6 @@ mod tests {
             submit_accept(
                 &mut candidate.view(),
                 &executor,
-                &state,
                 &archive,
                 &proposer.address(),
                 12,
@@ -5292,7 +5232,6 @@ mod tests {
             submit_activate(
                 &mut candidate.view(),
                 &executor,
-                &state,
                 &owner,
                 &proposer.address(),
                 13,
@@ -5307,7 +5246,6 @@ mod tests {
             submit_accept(
                 &mut candidate.view(),
                 &executor,
-                &state,
                 &archive,
                 &proposer.address(),
                 14,
@@ -5321,7 +5259,6 @@ mod tests {
             submit_activate(
                 &mut candidate.view(),
                 &executor,
-                &state,
                 &owner,
                 &proposer.address(),
                 15,
@@ -5354,15 +5291,14 @@ mod tests {
         let proposer = KeyPair::generate();
 
         // Two archives — both register before the file (both in snapshot, both assigned at default R=3).
-        let archive_a = setup_archive(&mut candidate.view(), &executor, &state, &proposer.address(), 1);
-        let archive_b = setup_archive(&mut candidate.view(), &executor, &state, &proposer.address(), 2);
+        let archive_a = setup_archive(&mut candidate.view(), &executor, &proposer.address(), 1);
+        let archive_b = setup_archive(&mut candidate.view(), &executor, &proposer.address(), 2);
 
         let owner = KeyPair::generate();
         let merkle_root = Hash::hash(b"matrix-9");
         assert!(register_v2_file(
             &mut candidate.view(),
             &executor,
-            &state,
             &owner,
             &proposer.address(),
             10,
@@ -5381,7 +5317,6 @@ mod tests {
                 submit_accept(
                     &mut candidate.view(),
                     &executor,
-                    &state,
                     kp,
                     &proposer.address(),
                     11,
@@ -5406,10 +5341,8 @@ mod tests {
                 },
             }),
         };
-        let prior = state.get_account(&archive_a.address()).unwrap();
-        state
-            .put_account(
-                &archive_a.address(),
+        let prior = StateManager::v_get_account(&candidate.view(), &archive_a.address()).unwrap();
+        StateManager::v_put_account(&mut candidate.view(), &archive_a.address(),
                 &sumchain_storage::schema::AccountState {
                     balance: prior.balance + 1,
                     nonce: 2,
@@ -5430,7 +5363,6 @@ mod tests {
             submit_activate(
                 &mut candidate.view(),
                 &executor,
-                &state,
                 &owner,
                 &proposer.address(),
                 13,
@@ -5452,13 +5384,12 @@ mod tests {
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
 
-        let archive = setup_archive(&mut candidate.view(), &executor, &state, &proposer.address(), 1);
+        let archive = setup_archive(&mut candidate.view(), &executor, &proposer.address(), 1);
         let owner = KeyPair::generate();
         let merkle_root = Hash::hash(b"matrix-10");
         assert!(register_v2_file(
             &mut candidate.view(),
             &executor,
-            &state,
             &owner,
             &proposer.address(),
             10,
@@ -5476,7 +5407,6 @@ mod tests {
             submit_accept(
                 &mut candidate.view(),
                 &executor,
-                &state,
                 &archive,
                 &proposer.address(),
                 11,
@@ -5490,7 +5420,6 @@ mod tests {
             submit_activate(
                 &mut candidate.view(),
                 &executor,
-                &state,
                 &owner,
                 &proposer.address(),
                 12,
@@ -5505,7 +5434,6 @@ mod tests {
             submit_accept(
                 &mut candidate.view(),
                 &executor,
-                &state,
                 &archive,
                 &proposer.address(),
                 13,
@@ -5539,9 +5467,9 @@ mod tests {
         let proposer = KeyPair::generate();
 
         // Three archives — with R=1 each chunk is owned by exactly one.
-        let a = setup_archive(&mut candidate.view(), &executor, &state, &proposer.address(), 1);
-        let b = setup_archive(&mut candidate.view(), &executor, &state, &proposer.address(), 2);
-        let c = setup_archive(&mut candidate.view(), &executor, &state, &proposer.address(), 3);
+        let a = setup_archive(&mut candidate.view(), &executor, &proposer.address(), 1);
+        let b = setup_archive(&mut candidate.view(), &executor, &proposer.address(), 2);
+        let c = setup_archive(&mut candidate.view(), &executor, &proposer.address(), 3);
 
         let owner = KeyPair::generate();
         let merkle_root = Hash::hash(b"r1-coverage");
@@ -5549,7 +5477,6 @@ mod tests {
         assert!(register_v2_file(
             &mut candidate.view(),
             &executor,
-            &state,
             &owner,
             &proposer.address(),
             10,
@@ -5584,7 +5511,6 @@ mod tests {
                 let s = submit_accept(
                     &mut candidate.view(),
                     &executor,
-                    &state,
                     kp,
                     &proposer.address(),
                     11,
@@ -5625,7 +5551,6 @@ mod tests {
         assert!(submit_activate(
             &mut candidate.view(),
             &executor,
-            &state,
             &owner,
             &proposer.address(),
             12,
@@ -5648,13 +5573,12 @@ mod tests {
             BlockExecutor::new(state.clone(), db.clone(), ChainParams::with_v2_enabled());
         let proposer = KeyPair::generate();
 
-        let archive = setup_archive(&mut candidate.view(), &executor, &state, &proposer.address(), 1);
+        let archive = setup_archive(&mut candidate.view(), &executor, &proposer.address(), 1);
         let owner = KeyPair::generate();
         let merkle_root = Hash::hash(b"matrix-11");
         assert!(register_v2_file(
             &mut candidate.view(),
             &executor,
-            &state,
             &owner,
             &proposer.address(),
             10,
@@ -5698,7 +5622,6 @@ mod tests {
         assert!(submit_accept(
             &mut candidate.view(),
             &executor,
-            &state,
             &archive,
             &proposer.address(),
             11,
@@ -5736,17 +5659,15 @@ mod tests {
     fn setup_active_public_file(
         view: &mut ExecutionView<'_, '_>,
         executor: &BlockExecutor,
-        state: &Arc<StateManager>,
         proposer: &Address,
         file_label: &[u8],
     ) -> (KeyPair, KeyPair, Hash) {
-        let archive = setup_archive(view, executor, state, proposer, 1);
+        let archive = setup_archive(view, executor, proposer, 1);
         let owner = KeyPair::generate();
         let merkle_root = Hash::hash(file_label);
         assert!(register_v2_file(
             view,
             executor,
-            state,
             &owner,
             proposer,
             10,
@@ -5762,7 +5683,6 @@ mod tests {
             submit_accept(
                 view,
                 executor,
-                state,
                 &archive,
                 proposer,
                 11,
@@ -5773,16 +5693,16 @@ mod tests {
             sumchain_primitives::TxStatus::Success
         );
         assert_eq!(
-            submit_activate(view, executor, state, &owner, proposer, 12, 1, merkle_root),
+            submit_activate(view, executor, &owner, proposer, 12, 1, merkle_root),
             sumchain_primitives::TxStatus::Success
         );
         (owner, archive, merkle_root)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn submit_add_access(
         view: &mut ExecutionView<'_, '_>,
         executor: &BlockExecutor,
-        state: &Arc<StateManager>,
         owner: &KeyPair,
         proposer: &Address,
         block_height: u64,
@@ -5793,11 +5713,9 @@ mod tests {
         use sumchain_primitives::{
             StorageMetadataOperationV2, StorageMetadataV2TxData, TransactionV2, TxPayload,
         };
-        let prior = state.get_account(&owner.address()).unwrap();
+        let prior = StateManager::v_get_account(view, &owner.address()).unwrap();
         let fee: u128 = 1;
-        state
-            .put_account(
-                &owner.address(),
+        StateManager::v_put_account(view, &owner.address(),
                 &sumchain_storage::schema::AccountState {
                     balance: prior.balance + fee,
                     nonce,
@@ -5822,10 +5740,10 @@ mod tests {
             .status
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn submit_remove_access(
         view: &mut ExecutionView<'_, '_>,
         executor: &BlockExecutor,
-        state: &Arc<StateManager>,
         owner: &KeyPair,
         proposer: &Address,
         block_height: u64,
@@ -5836,11 +5754,9 @@ mod tests {
         use sumchain_primitives::{
             StorageMetadataOperationV2, StorageMetadataV2TxData, TransactionV2, TxPayload,
         };
-        let prior = state.get_account(&owner.address()).unwrap();
+        let prior = StateManager::v_get_account(view, &owner.address()).unwrap();
         let fee: u128 = 1;
-        state
-            .put_account(
-                &owner.address(),
+        StateManager::v_put_account(view, &owner.address(),
                 &sumchain_storage::schema::AccountState {
                     balance: prior.balance + fee,
                     nonce,
@@ -5881,7 +5797,7 @@ mod tests {
         let proposer = KeyPair::generate();
 
         let (owner, _archive, root) =
-            setup_active_public_file(&mut candidate.view(), &executor, &state, &proposer.address(), b"1c-add");
+            setup_active_public_file(&mut candidate.view(), &executor, &proposer.address(), b"1c-add");
 
         let new_recipient = KeyPair::generate();
         let entry = AccessEntryV2 {
@@ -5892,7 +5808,6 @@ mod tests {
         let status = submit_add_access(
             &mut candidate.view(),
             &executor,
-            &state,
             &owner,
             &proposer.address(),
             13,
@@ -5919,7 +5834,7 @@ mod tests {
         let proposer = KeyPair::generate();
 
         let (_owner, _archive, root) =
-            setup_active_public_file(&mut candidate.view(), &executor, &state, &proposer.address(), b"1c-add-non-owner");
+            setup_active_public_file(&mut candidate.view(), &executor, &proposer.address(), b"1c-add-non-owner");
         let intruder = KeyPair::generate();
         let new_recipient = KeyPair::generate();
         let entry = AccessEntryV2 {
@@ -5930,7 +5845,6 @@ mod tests {
         let status = submit_add_access(
             &mut candidate.view(),
             &executor,
-            &state,
             &intruder,
             &proposer.address(),
             13,
@@ -5954,7 +5868,7 @@ mod tests {
         let proposer = KeyPair::generate();
 
         let (owner, _archive, root) =
-            setup_active_public_file(&mut candidate.view(), &executor, &state, &proposer.address(), b"1c-add-dup");
+            setup_active_public_file(&mut candidate.view(), &executor, &proposer.address(), b"1c-add-dup");
         let r = KeyPair::generate();
         let entry = AccessEntryV2 {
             address: r.address(),
@@ -5965,7 +5879,6 @@ mod tests {
             submit_add_access(
                 &mut candidate.view(),
                 &executor,
-                &state,
                 &owner,
                 &proposer.address(),
                 13,
@@ -5980,7 +5893,6 @@ mod tests {
             submit_add_access(
                 &mut candidate.view(),
                 &executor,
-                &state,
                 &owner,
                 &proposer.address(),
                 14,
@@ -6004,7 +5916,7 @@ mod tests {
         let proposer = KeyPair::generate();
 
         let (owner, _archive, root) =
-            setup_active_public_file(&mut candidate.view(), &executor, &state, &proposer.address(), b"1c-add-pub-bundle");
+            setup_active_public_file(&mut candidate.view(), &executor, &proposer.address(), b"1c-add-pub-bundle");
         let bad = AccessEntryV2 {
             address: KeyPair::generate().address(),
             encrypted_key_bundle: Some(EncryptedKeyBundleV2([1u8; 80])),
@@ -6014,7 +5926,6 @@ mod tests {
             submit_add_access(
                 &mut candidate.view(),
                 &executor,
-                &state,
                 &owner,
                 &proposer.address(),
                 13,
@@ -6039,7 +5950,7 @@ mod tests {
         let proposer = KeyPair::generate();
 
         let (owner, _archive, root) =
-            setup_active_public_file(&mut candidate.view(), &executor, &state, &proposer.address(), b"1c-rm");
+            setup_active_public_file(&mut candidate.view(), &executor, &proposer.address(), b"1c-rm");
         let r = KeyPair::generate();
         let entry = AccessEntryV2 {
             address: r.address(),
@@ -6050,7 +5961,6 @@ mod tests {
             submit_add_access(
                 &mut candidate.view(),
                 &executor,
-                &state,
                 &owner,
                 &proposer.address(),
                 13,
@@ -6065,7 +5975,6 @@ mod tests {
             submit_remove_access(
                 &mut candidate.view(),
                 &executor,
-                &state,
                 &owner,
                 &proposer.address(),
                 14,
@@ -6083,7 +5992,6 @@ mod tests {
             submit_remove_access(
                 &mut candidate.view(),
                 &executor,
-                &state,
                 &owner,
                 &proposer.address(),
                 15,
@@ -6112,7 +6020,6 @@ mod tests {
         assert!(register_v2_file(
             &mut candidate.view(),
             &executor,
-            &state,
             &owner,
             &proposer.address(),
             10,
@@ -6135,7 +6042,6 @@ mod tests {
             submit_add_access(
                 &mut candidate.view(),
                 &executor,
-                &state,
                 &owner,
                 &proposer.address(),
                 13,
@@ -6149,7 +6055,6 @@ mod tests {
             submit_remove_access(
                 &mut candidate.view(),
                 &executor,
-                &state,
                 &owner,
                 &proposer.address(),
                 14,
@@ -6162,10 +6067,10 @@ mod tests {
         let _ = db;
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn submit_update_access(
         view: &mut ExecutionView<'_, '_>,
         executor: &BlockExecutor,
-        state: &Arc<StateManager>,
         owner: &KeyPair,
         proposer: &Address,
         block_height: u64,
@@ -6177,11 +6082,9 @@ mod tests {
         use sumchain_primitives::{
             StorageMetadataOperationV2, StorageMetadataV2TxData, TransactionV2, TxPayload,
         };
-        let prior = state.get_account(&owner.address()).unwrap();
+        let prior = StateManager::v_get_account(view, &owner.address()).unwrap();
         let fee: u128 = 1;
-        state
-            .put_account(
-                &owner.address(),
+        StateManager::v_put_account(view, &owner.address(),
                 &sumchain_storage::schema::AccountState {
                     balance: prior.balance + fee,
                     nonce,
@@ -6216,7 +6119,6 @@ mod tests {
     fn setup_active_private_file(
         view: &mut ExecutionView<'_, '_>,
         executor: &BlockExecutor,
-        state: &Arc<StateManager>,
         proposer: &Address,
         file_label: &[u8],
     ) -> (KeyPair, Hash) {
@@ -6225,14 +6127,12 @@ mod tests {
             TransactionV2, TxPayload,
         };
 
-        let archive = setup_archive(view, executor, state, proposer, 1);
+        let archive = setup_archive(view, executor, proposer, 1);
         let owner = KeyPair::generate();
 
         // Owner needs an X25519 pubkey on chain (Private-recipient invariant).
         let fee: u128 = 10;
-        state
-            .put_account(
-                &owner.address(),
+        StateManager::v_put_account(view, &owner.address(),
                 &sumchain_storage::schema::AccountState {
                     balance: fee + 1_000_000,
                     nonce: 0,
@@ -6271,7 +6171,6 @@ mod tests {
         assert!(register_v2_file(
             view,
             executor,
-            state,
             &owner,
             proposer,
             10,
@@ -6289,7 +6188,6 @@ mod tests {
             submit_accept(
                 view,
                 executor,
-                state,
                 &archive,
                 proposer,
                 11,
@@ -6300,7 +6198,7 @@ mod tests {
             sumchain_primitives::TxStatus::Success
         );
         assert_eq!(
-            submit_activate(view, executor, state, &owner, proposer, 12, 2, merkle_root),
+            submit_activate(view, executor, &owner, proposer, 12, 2, merkle_root),
             sumchain_primitives::TxStatus::Success
         );
         (owner, merkle_root)
@@ -6319,7 +6217,7 @@ mod tests {
         let proposer = KeyPair::generate();
 
         let (owner, _archive, root) =
-            setup_active_public_file(&mut candidate.view(), &executor, &state, &proposer.address(), b"1c-update-pub");
+            setup_active_public_file(&mut candidate.view(), &executor, &proposer.address(), b"1c-update-pub");
         let r = KeyPair::generate();
         let initial = AccessEntryV2 {
             address: r.address(),
@@ -6330,7 +6228,6 @@ mod tests {
             submit_add_access(
                 &mut candidate.view(),
                 &executor,
-                &state,
                 &owner,
                 &proposer.address(),
                 13,
@@ -6351,7 +6248,6 @@ mod tests {
             submit_update_access(
                 &mut candidate.view(),
                 &executor,
-                &state,
                 &owner,
                 &proposer.address(),
                 14,
@@ -6381,7 +6277,7 @@ mod tests {
         let proposer = KeyPair::generate();
 
         let (owner, _archive, root) =
-            setup_active_public_file(&mut candidate.view(), &executor, &state, &proposer.address(), b"1c-update-missing");
+            setup_active_public_file(&mut candidate.view(), &executor, &proposer.address(), b"1c-update-missing");
         let absent = KeyPair::generate();
         let new_entry = AccessEntryV2 {
             address: absent.address(),
@@ -6392,7 +6288,6 @@ mod tests {
             submit_update_access(
                 &mut candidate.view(),
                 &executor,
-                &state,
                 &owner,
                 &proposer.address(),
                 13,
@@ -6420,7 +6315,6 @@ mod tests {
         let (owner, _archive, root) = setup_active_public_file(
             &mut candidate.view(),
             &executor,
-            &state,
             &proposer.address(),
             b"1c-update-non-owner",
         );
@@ -6434,7 +6328,6 @@ mod tests {
             submit_add_access(
                 &mut candidate.view(),
                 &executor,
-                &state,
                 &owner,
                 &proposer.address(),
                 13,
@@ -6450,7 +6343,6 @@ mod tests {
             submit_update_access(
                 &mut candidate.view(),
                 &executor,
-                &state,
                 &intruder,
                 &proposer.address(),
                 14,
@@ -6478,7 +6370,6 @@ mod tests {
         let (owner, _archive, root) = setup_active_public_file(
             &mut candidate.view(),
             &executor,
-            &state,
             &proposer.address(),
             b"1c-update-addr-mismatch",
         );
@@ -6493,7 +6384,6 @@ mod tests {
             submit_add_access(
                 &mut candidate.view(),
                 &executor,
-                &state,
                 &owner,
                 &proposer.address(),
                 13,
@@ -6514,7 +6404,6 @@ mod tests {
             submit_update_access(
                 &mut candidate.view(),
                 &executor,
-                &state,
                 &owner,
                 &proposer.address(),
                 14,
@@ -6542,7 +6431,6 @@ mod tests {
         let (owner, _archive, root) = setup_active_public_file(
             &mut candidate.view(),
             &executor,
-            &state,
             &proposer.address(),
             b"1c-update-pub-bundle",
         );
@@ -6556,7 +6444,6 @@ mod tests {
             submit_add_access(
                 &mut candidate.view(),
                 &executor,
-                &state,
                 &owner,
                 &proposer.address(),
                 13,
@@ -6575,7 +6462,6 @@ mod tests {
             submit_update_access(
                 &mut candidate.view(),
                 &executor,
-                &state,
                 &owner,
                 &proposer.address(),
                 14,
@@ -6607,7 +6493,7 @@ mod tests {
 
         // Active Private file with owner already in the access list.
         let (owner, root) =
-            setup_active_private_file(&mut candidate.view(), &executor, &state, &proposer.address(), b"1c-update-priv");
+            setup_active_private_file(&mut candidate.view(), &executor, &proposer.address(), b"1c-update-priv");
 
         // Add a recipient who DOES have a pubkey, then try to update with
         // a new_entry where the address is one without a pubkey is impossible
@@ -6633,7 +6519,6 @@ mod tests {
             submit_update_access(
                 &mut candidate.view(),
                 &executor,
-                &state,
                 &owner,
                 &proposer.address(),
                 13,
@@ -6658,7 +6543,6 @@ mod tests {
             submit_add_access(
                 &mut candidate.view(),
                 &executor,
-                &state,
                 &owner,
                 &proposer.address(),
                 14,
@@ -6691,7 +6575,6 @@ mod tests {
         assert!(register_v2_file(
             &mut candidate.view(),
             &executor,
-            &state,
             &owner_p,
             &proposer.address(),
             10,
@@ -6706,7 +6589,7 @@ mod tests {
 
         // Active file
         let (_, _, root_a) =
-            setup_active_public_file(&mut candidate.view(), &executor, &state, &proposer.address(), b"pushable-active");
+            setup_active_public_file(&mut candidate.view(), &executor, &proposer.address(), b"pushable-active");
 
         // Abandoned file: register a Pending then abandon after grace.
         let owner_b = KeyPair::generate();
@@ -6714,7 +6597,6 @@ mod tests {
         assert!(register_v2_file(
             &mut candidate.view(),
             &executor,
-            &state,
             &owner_b,
             &proposer.address(),
             10,
@@ -6726,10 +6608,8 @@ mod tests {
             Vec::new(),
         )
         .is_success());
-        let prior = state.get_account(&owner_b.address()).unwrap();
-        state
-            .put_account(
-                &owner_b.address(),
+        let prior = StateManager::v_get_account(&candidate.view(), &owner_b.address()).unwrap();
+        StateManager::v_put_account(&mut candidate.view(), &owner_b.address(),
                 &sumchain_storage::schema::AccountState {
                     balance: prior.balance + 1,
                     nonce: 1,
@@ -6797,7 +6677,6 @@ mod tests {
         assert!(register_v2_file(
             &mut candidate.view(),
             &executor,
-            &state,
             &owner,
             &proposer.address(),
             10,
@@ -6811,10 +6690,8 @@ mod tests {
         .is_success());
 
         let fee: u128 = 10;
-        let acct = state.get_account(&owner.address()).unwrap();
-        state
-            .put_account(
-                &owner.address(),
+        let acct = StateManager::v_get_account(&candidate.view(), &owner.address()).unwrap();
+        StateManager::v_put_account(&mut candidate.view(), &owner.address(),
                 &sumchain_storage::schema::AccountState {
                     balance: acct.balance + fee,
                     nonce: 1,
@@ -6857,7 +6734,6 @@ mod tests {
     fn register_archive(
         view: &mut ExecutionView<'_, '_>,
         executor: &BlockExecutor,
-        state: &Arc<StateManager>,
         kp: &KeyPair,
         proposer: &Address,
         block_height: u64,
@@ -6870,9 +6746,7 @@ mod tests {
         let fee: u128 = 10;
         // Top up sender balance enough for stake + fee on each call (idempotent
         // since we pass nonce explicitly; balance accumulates).
-        state
-            .put_account(
-                &kp.address(),
+        StateManager::v_put_account(view, &kp.address(),
                 &sumchain_storage::schema::AccountState {
                     balance: (stake as u128) + fee,
                     nonce,
@@ -6956,7 +6830,7 @@ mod tests {
         let proposer = KeyPair::generate();
 
         let archive = KeyPair::generate();
-        let status = register_archive(&mut candidate.view(), &executor, &state, &archive, &proposer.address(), 10, 0);
+        let status = register_archive(&mut candidate.view(), &executor, &archive, &proposer.address(), 10, 0);
         assert!(status.is_success(), "register failed: {:?}", status);
 
         // Snapshot at H=10 has the new node; H=9 is empty (pre-registration).
@@ -6981,8 +6855,8 @@ mod tests {
         // Register A at h=5, B at h=20.
         let a = KeyPair::generate();
         let b = KeyPair::generate();
-        assert!(register_archive(&mut candidate.view(), &executor, &state, &a, &proposer.address(), 5, 0).is_success());
-        assert!(register_archive(&mut candidate.view(), &executor, &state, &b, &proposer.address(), 20, 0).is_success());
+        assert!(register_archive(&mut candidate.view(), &executor, &a, &proposer.address(), 5, 0).is_success());
+        assert!(register_archive(&mut candidate.view(), &executor, &b, &proposer.address(), 20, 0).is_success());
 
         // h=4: no snapshot, empty.
         assert!(crate::node_registry::NodeRegistryExecutor::v_get_active_archive_nodes_at_height(&candidate.view(), 4)
@@ -7024,11 +6898,33 @@ mod tests {
         // Register an archive at h=10.
         let archive = KeyPair::generate();
         assert!(
-            register_archive(&mut candidate.view(), &executor, &state, &archive, &proposer.address(), 10, 0).is_success()
+            register_archive(&mut candidate.view(), &executor, &archive, &proposer.address(), 10, 0).is_success()
         );
 
         // Submit UpdateStatus(Slashed) at h=15 from the same account.
         // (Note: the V1 update_status doesn't restrict who can call it.)
+        // Top up the fee balance THROUGH THE CANDIDATE: the registration above
+        // already staged this account, so a committed write would sit behind
+        // the staged row and the fee would fail. Called explicitly rather than
+        // from inside `update_tx`, which would hold a borrow of the candidate
+        // across the executor call.
+        fn top_up(
+            candidate: &mut CandidateExecution<'_>,
+            who: &Address,
+            nonce: u64,
+        ) {
+            let prior = StateManager::v_get_account(&candidate.view(), who).unwrap();
+            StateManager::v_put_account(
+                &mut candidate.view(),
+                who,
+                &sumchain_storage::schema::AccountState {
+                    balance: prior.balance + 1,
+                    nonce,
+                },
+            )
+            .unwrap();
+        }
+
         let update_tx = |nonce: u64, new_status: NodeStatus| {
             let tx = TransactionV2 {
                 chain_id: 1,
@@ -7042,26 +6938,17 @@ mod tests {
                     },
                 }),
             };
-            // Top up balance for the small fee.
-            let prior = state.get_account(&archive.address()).unwrap();
-            state
-                .put_account(
-                    &archive.address(),
-                    &sumchain_storage::schema::AccountState {
-                        balance: prior.balance + 1,
-                        nonce,
-                    },
-                )
-                .unwrap();
             let h = tx.signing_hash();
             let s = sign(h.as_bytes(), archive.private_key());
             SignedTransaction::new_v2(tx, *s.as_bytes(), *archive.public_key().as_bytes())
         };
 
+        top_up(&mut candidate, &archive.address(), 1);
+        let tx1 = update_tx(1, NodeStatus::Slashed);
         let r = executor
             .execute_tx(
                 &mut candidate.view(),
-                &update_tx(1, NodeStatus::Slashed),
+                &tx1,
                 &proposer.address(),
                 15,
                 0,
@@ -7086,10 +6973,12 @@ mod tests {
         // of a write, but we can assert that h=20 still resolves identically
         // to h=15 (which is true regardless), and that the snapshot count
         // didn't grow — which the dedup guard ensures by short-circuiting.
+        top_up(&mut candidate, &archive.address(), 2);
+        let tx2 = update_tx(2, NodeStatus::Slashed);
         let r2 = executor
             .execute_tx(
                 &mut candidate.view(),
-                &update_tx(2, NodeStatus::Slashed),
+                &tx2,
                 &proposer.address(),
                 20,
                 0,
@@ -7135,9 +7024,7 @@ mod tests {
         for (i, bad_pubkey) in all_keys.iter().enumerate() {
             // Fresh sender per case so we can assert "no key was stored" cleanly.
             let sender = KeyPair::generate();
-            state
-                .put_account(
-                    &sender.address(),
+            sumchain_storage::StateStore::new(&db).put_account(&sender.address(),
                     &sumchain_storage::schema::AccountState {
                         balance: 100,
                         nonce: 0,
@@ -7228,9 +7115,7 @@ mod tests {
         // 1 Koppa stake + 10 base-unit fee
         let stake: u64 = 1_000_000_000;
         let fee: u128 = 10;
-        state
-            .put_account(
-                &sender.address(),
+        sumchain_storage::StateStore::new(&db).put_account(&sender.address(),
                 &sumchain_storage::schema::AccountState {
                     balance: (stake as u128) + fee,
                     nonce: 0,
@@ -7281,16 +7166,14 @@ mod tests {
     /// — only the executor's `params.v2_enabled_from_height` and the
     /// `block_height` argument differ.
     fn build_register_encryption_key_v2(
-        state: &Arc<StateManager>,
+        db: &Arc<Database>,
         sender: &KeyPair,
     ) -> SignedTransaction {
         use sumchain_primitives::{
             NodeRegistryOperationV2, NodeRegistryV2TxData, TransactionV2, TxPayload,
         };
         let fee: u128 = 10;
-        state
-            .put_account(
-                &sender.address(),
+        sumchain_storage::StateStore::new(&db).put_account(&sender.address(),
                 &sumchain_storage::schema::AccountState {
                     balance: fee + 100,
                     nonce: 0,
@@ -7326,7 +7209,7 @@ mod tests {
         let proposer = KeyPair::generate();
 
         let (_owner, _archive, merkle_root) =
-            setup_active_public_file(&mut candidate.view(), &executor, &state, &proposer.address(), b"active-no-abandon");
+            setup_active_public_file(&mut candidate.view(), &executor, &proposer.address(), b"active-no-abandon");
 
         let row = crate::storage_metadata::StorageMetadataExecutor::v_get_metadata_v2(&candidate.view(), &merkle_root).unwrap().expect("row");
         assert_eq!(
@@ -7360,7 +7243,7 @@ mod tests {
 
         let sender = KeyPair::generate();
         let proposer = KeyPair::generate();
-        let signed = build_register_encryption_key_v2(&state, &sender);
+        let signed = build_register_encryption_key_v2(&db, &sender);
 
         let result = executor
             .execute_tx(&mut candidate.view(), &signed, &proposer.address(), 100, 0)
@@ -7399,7 +7282,7 @@ mod tests {
 
         let sender = KeyPair::generate();
         let proposer = KeyPair::generate();
-        let signed = build_register_encryption_key_v2(&state, &sender);
+        let signed = build_register_encryption_key_v2(&db, &sender);
 
         let result = executor
             .execute_tx(&mut candidate.view(), &signed, &proposer.address(), ACTIVATION_HEIGHT - 1, 0)
@@ -7422,7 +7305,7 @@ mod tests {
 
         let sender = KeyPair::generate();
         let proposer = KeyPair::generate();
-        let signed = build_register_encryption_key_v2(&state, &sender);
+        let signed = build_register_encryption_key_v2(&db, &sender);
 
         let result = executor
             .execute_tx(&mut candidate.view(), &signed, &proposer.address(), ACTIVATION_HEIGHT, 0)
@@ -8018,10 +7901,8 @@ mod tests {
         (vs, pubs)
     }
 
-    fn fund(state: &StateManager, addr: &Address, balance: u128) {
-        state
-            .put_account(
-                addr,
+    fn fund(db: &Database, addr: &Address, balance: u128) {
+        sumchain_storage::StateStore::new(&db).put_account(addr,
                 &sumchain_storage::schema::AccountState { balance, nonce: 0 },
             )
             .unwrap();
@@ -8039,7 +7920,7 @@ mod tests {
         let fee = params.min_fee;
         let executor = BlockExecutor::new(state.clone(), db.clone(), params);
         let (vs, pubs) = beacon_validators();
-        fund(&state, &vs[0].address(), fee + 1000);
+        fund(&db, &vs[0].address(), fee + 1000);
 
         let tx = beacon_reg_tx(&vs[0], 7, false, fee);
         let mut blk = beacon_block_with(1, vs[0].public_key().as_bytes(), vec![tx]);
@@ -8073,7 +7954,7 @@ mod tests {
         let fee = params.min_fee;
         let executor = BlockExecutor::new(state.clone(), db.clone(), params);
         let (vs, pubs) = beacon_validators();
-        fund(&state, &vs[0].address(), fee + 1000);
+        fund(&db, &vs[0].address(), fee + 1000);
 
         // A registration with a WRONG PoP → runtime PopInvalid → FAIL CLOSED.
         let tx = beacon_reg_tx(&vs[0], 7, true, fee);
@@ -8105,7 +7986,7 @@ mod tests {
         let fee = params.min_fee;
         let executor = BlockExecutor::new(state.clone(), db.clone(), params);
         let (vs, pubs) = beacon_validators();
-        fund(&state, &vs[0].address(), fee + 1000);
+        fund(&db, &vs[0].address(), fee + 1000);
 
         // Even a well-formed, valid-crypto op is rejected (dormant) with the generic
         // failure receipt and writes NO beacon state/journal — byte/state-identical to
@@ -8136,8 +8017,8 @@ mod tests {
         let fee = params.min_fee;
         let executor = BlockExecutor::new(state.clone(), db.clone(), params);
         let (vs, pubs) = beacon_validators();
-        fund(&state, &vs[0].address(), fee + 1000);
-        fund(&state, &vs[1].address(), fee + 1000);
+        fund(&db, &vs[0].address(), fee + 1000);
+        fund(&db, &vs[1].address(), fee + 1000);
 
         // Signer index 0: valid registration. Signer index 1: bad PoP → fail closed.
         let good = beacon_reg_tx(&vs[0], 7, false, fee);
@@ -8161,7 +8042,7 @@ mod tests {
         let fee = params.min_fee;
         let executor = BlockExecutor::new(state.clone(), db.clone(), params);
         let (vs, pubs) = beacon_validators();
-        fund(&state, &vs[0].address(), fee + 1000);
+        fund(&db, &vs[0].address(), fee + 1000);
 
         let tx = beacon_reg_tx(&vs[0], 7, false, fee);
         let mut blk = beacon_block_with(1, vs[0].public_key().as_bytes(), vec![tx]);
@@ -8196,8 +8077,8 @@ mod tests {
         let run = |restart: bool| -> sumchain_primitives::Hash {
             let (state, db, _dir) = setup();
             let fee = beacon_open_params().min_fee;
-            fund(&state, &vs[0].address(), fee + 1000);
-            fund(&state, &vs[1].address(), fee + 1000);
+            fund(&db, &vs[0].address(), fee + 1000);
+            fund(&db, &vs[1].address(), fee + 1000);
             let ex = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
             // Block 1: reg from vs[0].
             let mut b1 = beacon_block_with(
@@ -8236,7 +8117,7 @@ mod tests {
         let (state, db, _dir) = setup();
         let (vs, pubs) = beacon_validators();
         let fee = beacon_open_params().min_fee;
-        fund(&state, &vs[0].address(), fee + 1000);
+        fund(&db, &vs[0].address(), fee + 1000);
         let ex = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
         let mut blk = beacon_block_with(
             1,
@@ -8271,8 +8152,8 @@ mod tests {
         let (state, db, _dir) = setup();
         let (vs, pubs) = beacon_validators();
         let fee = beacon_open_params().min_fee;
-        fund(&state, &vs[0].address(), fee + 1000);
-        fund(&state, &vs[1].address(), fee + 1000);
+        fund(&db, &vs[0].address(), fee + 1000);
+        fund(&db, &vs[1].address(), fee + 1000);
         let ex = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
         // valid reg (vs[0]) THEN invalid reg (vs[1], bad PoP).
         let mut blk = beacon_block_with(
@@ -8305,7 +8186,7 @@ mod tests {
         let (state, db, _dir) = setup();
         let (vs, pubs) = beacon_validators();
         let fee = beacon_open_params().min_fee;
-        fund(&state, &vs[0].address(), fee + 1000);
+        fund(&db, &vs[0].address(), fee + 1000);
         let ex = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
         // Block 1: vs[0] registers key A (seed 7) then key B (seed 8) → equivocation.
         let mut blk = beacon_block_with(
@@ -8333,7 +8214,7 @@ mod tests {
             vs[0].public_key().as_bytes(),
             vec![beacon_reg_tx(&vs[1], 9, false, fee)],
         );
-        fund(&state, &vs[1].address(), fee + 1000);
+        fund(&db, &vs[1].address(), fee + 1000);
         execute_and_publish(&ex2, &state, &mut blk2, &pubs);
         assert!(has_equiv(&db), "equivocation evidence survives restart");
     }
@@ -8345,7 +8226,7 @@ mod tests {
         let (state, db, _dir) = setup();
         let (vs, pubs) = beacon_validators();
         let fee = beacon_open_params().min_fee;
-        fund(&state, &vs[0].address(), fee + 1000);
+        fund(&db, &vs[0].address(), fee + 1000);
         // Make the block's beacon STAGING fail. The old trigger was a
         // pre-written height-keyed journal tripping a duplicate-height guard;
         // that guard is gone, because two blocks at one height are legitimate
@@ -8410,7 +8291,7 @@ mod tests {
         let (state, db, _dir) = setup();
         let fee = beacon_open_params().min_fee;
         let (vs, pubs) = beacon_validators();
-        fund(&state, &vs[0].address(), fee + 1000);
+        fund(&db, &vs[0].address(), fee + 1000);
         let ex = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
         // Boundary (height 1): snapshot the active set for epoch 0.
         execute_and_publish(&ex, &state, &mut beacon_block_with(1, vs[0].public_key().as_bytes(), vec![]), &pubs);
@@ -8440,7 +8321,7 @@ mod tests {
         let (state, db, _dir) = setup();
         let fee = beacon_open_params().min_fee;
         let (vs, pubs) = beacon_validators();
-        fund(&state, &vs[0].address(), fee + 1000);
+        fund(&db, &vs[0].address(), fee + 1000);
         let ex = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
         // Boundary block with NO beacon op.
         execute_and_publish(&ex, &state, &mut beacon_block_with(1, vs[0].public_key().as_bytes(), vec![]), &pubs);
@@ -8474,7 +8355,7 @@ mod tests {
         {
             let (state, db, _dir) = setup();
             let fee = beacon_open_params().min_fee;
-            fund(&state, &vs[0].address(), fee + 1000);
+            fund(&db, &vs[0].address(), fee + 1000);
             let ex = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
             execute_and_publish(&ex, &state, &mut beacon_block_with(
                     1,
@@ -8499,7 +8380,7 @@ mod tests {
         {
             let (state, db, _dir) = setup();
             let fee = beacon_open_params().min_fee;
-            fund(&state, &vs[0].address(), fee + 1000);
+            fund(&db, &vs[0].address(), fee + 1000);
             let ex = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
             let mut boundary = beacon_block_with(
                 1,
@@ -8540,7 +8421,7 @@ mod tests {
         let (state, db, _dir) = setup();
         let fee = beacon_open_params().min_fee;
         let (vs, pubs) = beacon_validators();
-        fund(&state, &vs[0].address(), fee + 1000);
+        fund(&db, &vs[0].address(), fee + 1000);
         let ex = BlockExecutor::new(state.clone(), db.clone(), beacon_open_params());
         // Boundary block establishes the epoch-0 membership snapshot.
         execute_and_publish(&ex, &state, &mut beacon_block_with(1, vs[0].public_key().as_bytes(), vec![]), &pubs);
@@ -8582,9 +8463,7 @@ mod tests {
 
         // Post-block state: an account mutation (with a saved StateDiff) AND a C1
         // transition (with its journal), both finalized at `height`.
-        state
-            .put_account(
-                &acct,
+        sumchain_storage::StateStore::new(&db).put_account(&acct,
                 &AccountState {
                     balance: 50,
                     nonce: 1,
@@ -8656,9 +8535,7 @@ mod tests {
 
         // Post-block state: an account mutation (with its StateDiff) AND a C1
         // transition (with its journal), both finalized at `height`.
-        state
-            .put_account(
-                &acct,
+        sumchain_storage::StateStore::new(&db).put_account(&acct,
                 &AccountState {
                     balance: 50,
                     nonce: 1,

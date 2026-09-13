@@ -10,7 +10,7 @@
 //!
 //! ```ignore
 //! store.identity_roots().put(&identity)?;   // -> IdentityRootStore::put -> db.put
-//! state.put_account(&addr, &acct)?;         // -> StateStore::put_account -> db.put
+//! store.titles().update_status(&id, st, ts)?;  // -> TitleEventStore::.. -> db.put
 //! ```
 //!
 //! Neither line contains `db.put`, neither is in `crates/state/src`'s syntax
@@ -83,7 +83,20 @@ use std::path::{Path, PathBuf};
 /// and moving a write to a different function does.
 ///
 /// ONLY EVER REMOVE ROWS. Recorded at `1687789`, rooted at
-/// `BlockExecutor::execute_block`.
+/// `BlockExecutor::execute_block`; five `state.rs` rows removed by the account
+/// migration, which is the whole of its effect on this list:
+///
+/// ```text
+///   StateManager::credit           -> StateStore::put_account   (STATE)
+///   StateManager::deduct           -> StateStore::put_account   (STATE)
+///   StateManager::increment_nonce  -> StateStore::put_account   (STATE)
+///   StateManager::put_account      -> StateStore::put_account   (STATE)
+///   StateManager::transfer         -> StateStore::put_account   (STATE)
+/// ```
+///
+/// 311 occurrences over 235 rows becomes 304 over 230, and `cf::STATE` leaves
+/// the execution set entirely — 114 families to 113. Every other row is
+/// untouched: accounts were migrated, nothing else moved.
 const MANIFEST: &[(&str, &str, &str, &str, usize)] = &[
     ("crates/state/src/agreement_executor.rs", "AgreementExecutor::execute", "AgreementCommitmentStore::mark_party_signed", "AGREEMENT_COMMITMENTS", 1),
     ("crates/state/src/agreement_executor.rs", "AgreementExecutor::execute", "AgreementCommitmentStore::put", "AGREEMENT_COMMITMENTS+AGREEMENT_PARTY_INDEX", 2),
@@ -294,11 +307,6 @@ const MANIFEST: &[(&str, &str, &str, &str, usize)] = &[
     ("crates/state/src/staking_executor.rs", "StakingExecutor::handle_downtime_evidence", "SlashingStore::put_signing_info", "VALIDATOR_SIGNING_INFO", 1),
     ("crates/state/src/staking_executor.rs", "StakingExecutor::handle_downtime_evidence", "SlashingStore::put_slashing_record", "SLASHING_RECORDS", 1),
     ("crates/state/src/staking_executor.rs", "StakingExecutor::handle_downtime_evidence", "StakingStore::put_validator", "VALIDATORS", 1),
-    ("crates/state/src/state.rs", "StateManager::credit", "StateStore::put_account", "STATE", 1),
-    ("crates/state/src/state.rs", "StateManager::deduct", "StateStore::put_account", "STATE", 1),
-    ("crates/state/src/state.rs", "StateManager::increment_nonce", "StateStore::put_account", "STATE", 1),
-    ("crates/state/src/state.rs", "StateManager::put_account", "StateStore::put_account", "STATE", 1),
-    ("crates/state/src/state.rs", "StateManager::transfer", "StateStore::put_account", "STATE", 3),
     ("crates/state/src/tax_executor.rs", "TaxExecutor::execute", "TaxClaimTypeStore::put", "TAX_CLAIM_TYPES", 3),
     ("crates/state/src/tax_executor.rs", "TaxExecutor::execute", "TaxDisclosureStore::put", "TAX_DISCLOSURES", 1),
     ("crates/state/src/tax_executor.rs", "TaxExecutor::execute", "TaxIssuerStore::put", "TAX_ISSUERS", 3),
@@ -324,13 +332,13 @@ const MANIFEST: &[(&str, &str, &str, &str, usize)] = &[
 
 /// Occurrences, not rows: a caller reaching the same mutator three times is
 /// three places to fix.
-const MANIFEST_OCCURRENCES: usize = 311;
+const MANIFEST_OCCURRENCES: usize = 304;
 
 /// Application column families a block can still commit to directly.
 ///
 /// ONLY EVER DECREASE. Recorded at `1687789`. Lower than the 116 the unrooted
 /// audit reported, for the reason in [`UNREACHED_MUTATORS`].
-const LEDGER_CF_COUNT: usize = 114;
+const LEDGER_CF_COUNT: usize = 113;
 
 /// Functions that commit application state but that no entry point reaches.
 ///
@@ -424,14 +432,16 @@ const ARMS: &[(&str, ArmKind, &str)] = &[
     ("Supply", ArmKind::Overlay, "supply.rs"),
     ("Tax", ArmKind::Committed, "tax_executor.rs -> TaxStore sub-stores"),
     ("Token", ArmKind::Committed, "token_executor.rs -> TokenStore"),
-    ("Transfer", ArmKind::Committed, "executor.rs fee/transfer -> StateManager::put_account -> cf::STATE"),
+    ("Transfer", ArmKind::Overlay, "executor.rs fee/transfer -> StateManager::v_transfer -> candidate cf::STATE"),
 ];
 
-/// Every arm's fee and nonce path debits an ACCOUNT row through
-/// `StateManager::put_account`, including the twelve that are otherwise
-/// overlay-only. Accounts are the widest single hole and migrate first.
+/// What 27 of the 30 arms do with the account row they debit. The fee debit,
+/// the proposer credit and the nonce bump now stage into the block's candidate;
+/// ComputePool, BeaconSetup and BeaconSigning are `fee_paid: 0` on every path
+/// and debit nothing at all. Accounts were the widest single hole, which is why
+/// they migrated first.
 const ACCOUNT_WRITE_IS_UNIVERSAL: &str =
-    "StateManager::put_account -> StateStore::put_account -> db.put(cf::STATE)";
+    "StateManager::v_put_account stages cf::STATE into the block's candidate";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // THE SCANNER
@@ -1406,6 +1416,10 @@ enum Class {
     ChainStorage,
     /// Fast-sync restore, outside consensus.
     Snapshot,
+    /// RPC and mempool: diagnostics and admission, which answer about the
+    /// PUBLISHED chain. A committed read here is correct, and a committed write
+    /// would not be — there are none.
+    RpcAndMempool,
     /// An operator CLI that changes application state outside consensus.
     OperatorTooling,
     /// Inside the storage or runtime library — these ARE the writes, and
@@ -1421,6 +1435,12 @@ const ROOTS: &[(Class, &str, &str, &str)] = &[
     (Class::Genesis, "crates/state/src/state.rs", "StateManager", "init_from_genesis"),
     (Class::ReorgUndo, "crates/state/src/state.rs", "StateManager", "revert_block_state_diffs"),
     (Class::OperatorTooling, "crates/node/src/main.rs", "", "main"),
+];
+
+/// Whole crates that are an entry surface for RPC and mempool admission.
+const RPC_FILES: &[(Class, &str)] = &[
+    (Class::RpcAndMempool, "crates/rpc/src/"),
+    (Class::RpcAndMempool, "crates/state/src/mempool.rs"),
 ];
 
 /// Whole files that are entry surfaces in their own right: the node's consensus
@@ -1467,7 +1487,7 @@ fn root_indices(idx: &Index, class: Class) -> Vec<usize> {
             }
         }
     }
-    for (c, prefix) in ROOT_FILES {
+    for (c, prefix) in ROOT_FILES.iter().chain(RPC_FILES.iter()) {
         if *c != class {
             continue;
         }
@@ -1500,6 +1520,7 @@ fn classify_all(idx: &Index) -> Vec<Option<Class>> {
         Class::ReorgUndo,
         Class::ChainStorage,
         Class::Snapshot,
+        Class::RpcAndMempool,
         Class::OperatorTooling,
     ] {
         let roots = root_indices(idx, class);
@@ -1971,7 +1992,7 @@ fn every_dispatcher_arm_is_declared() {
     let mixed = ARMS.iter().filter(|(_, k, _)| *k == ArmKind::Mixed).count();
     assert_eq!(
         (overlay, committed, mixed),
-        (12, 17, 1),
+        (13, 16, 1),
         "the overlay/committed/mixed split changed. Moving an arm from \
          Committed to Overlay is progress — update this and the manifest \
          together; any other movement is not."
@@ -1979,19 +2000,148 @@ fn every_dispatcher_arm_is_declared() {
     assert_eq!(ARMS.len(), 30, "arm count changed");
 }
 
-/// Which arms debit an account, measured rather than asserted.
+/// Each arm's declared kind is DERIVED from what that arm can reach.
 ///
-/// The claim this replaces was "every arm's fee path writes `cf::STATE`, so the
-/// twelve overlay-only arms are only overlay-only for their OWN rows". That is
-/// the reason accounts migrate first, so it has to be true — and the test that
-/// carried it sampled two files out of thirty and generalised.
+/// The `Transfer` row rotted exactly the way a hand-written label does. The
+/// account migration moved its only writes onto the candidate and the label
+/// stayed `Committed`, because nothing compared it to the source. The split
+/// assertion above did not notice: a stale row keeps the aggregate
+/// self-consistent whether or not any individual row is true. Counting is not
+/// checking — the same lesson the manifest learned when it went from totals to
+/// identities.
 ///
-/// This resolves each arm's body, walks the calls, and records exactly which
-/// arms reach `StateStore::put_account`. Where the claim does not hold, the
-/// exception is named rather than rounded away.
+/// So the kind is computed. An arm is `Committed` when it can reach a function
+/// the manifest records as committing during execution, and `Overlay` when it
+/// can reach none. `Mixed` says the arm takes BOTH a view and a committed
+/// handle — a statement about its signature, not its reach — so it is checked
+/// like `Committed`.
+///
+/// Both dispatch matches are unioned per payload. Each family appears twice,
+/// once in the V2 dispatch and once as a V1 fail-closed stub that returns an
+/// error and reaches nothing; scoring them separately would call every family
+/// Overlay on the strength of its stub.
 #[test]
-fn the_arms_that_debit_an_account_are_declared() {
-    /// Arms that do NOT reach `StateStore::put_account`, with why.
+fn each_arms_kind_is_derived_from_what_it_can_reach() {
+    /// Arms whose commit the manifest cannot attribute to a state-crate
+    /// caller, with why. Contract state is written by `sumc-runtime`'s
+    /// `RocksDbStorage`, which [`classify_all`] marks `Library` by location, so
+    /// no `Site` is keyed to a function in `crates/state`. The arms DO commit —
+    /// through their own buffer and the `ContractMutation` journal — which is
+    /// why they stay declared `Committed` and why contracts are their own
+    /// migration package rather than a row in this ledger.
+    const COMMITS_OUTSIDE_THE_MANIFEST: &[(&str, &str)] = &[
+        ("ContractCall", "sumc-runtime RocksDbStorage; own buffer + ContractMutation journal"),
+        ("ContractDeploy", "sumc-runtime RocksDbStorage; own buffer + ContractMutation journal"),
+    ];
+
+    let idx = build_index(&production_sources());
+
+    // Every function that commits during block execution, as the manifest
+    // identifies it: `(file, "Owner::name")`.
+    let sites = analyse();
+    let writers: BTreeSet<(String, String)> = execution_of(&sites)
+        .into_iter()
+        .map(|s| (s.file.clone(), s.caller.clone()))
+        .collect();
+    let committing: BTreeSet<usize> = idx
+        .funs
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| writers.contains(&(f.file.clone(), qualified(f))))
+        .map(|(k, _)| k)
+        .collect();
+    assert_eq!(
+        committing.len(),
+        writers.len(),
+        "a committed execution writer did not resolve back to an indexed \
+         function, so the derivation below would under-report reach"
+    );
+
+    let src = prepare(
+        &std::fs::read_to_string(workspace_root().join("crates/state/src/executor.rs"))
+            .expect("read executor.rs"),
+    );
+    let dispatch = idx
+        .funs
+        .iter()
+        .find(|f| {
+            f.file == "crates/state/src/executor.rs" && f.name == "execute_tx_with_validators"
+        })
+        .expect("the dispatch function");
+
+    let mut reached: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (payload, body) in dispatch_arms(&src) {
+        let arm = Fun {
+            file: dispatch.file.clone(),
+            owner: dispatch.owner.clone(),
+            name: format!("arm::{payload}"),
+            params: dispatch.params.clone(),
+            body,
+        };
+        let roots: Vec<usize> = resolved_calls(&idx, &arm).into_iter().map(|(k, _)| k).collect();
+        let seen = reachable(&idx, &roots);
+        let entry = reached.entry(payload).or_default();
+        for k in seen.iter().filter(|k| committing.contains(k)) {
+            entry.insert(qualified(&idx.funs[*k]));
+        }
+    }
+    assert!(
+        !reached.is_empty(),
+        "no arm bodies were analysed — the derivation proved nothing"
+    );
+
+    let excused: BTreeSet<&str> = COMMITS_OUTSIDE_THE_MANIFEST.iter().map(|(a, _)| *a).collect();
+    let mut wrong = Vec::new();
+    for (payload, kind, _) in ARMS {
+        let Some(hits) = reached.get(*payload) else {
+            continue; // every_dispatcher_arm_is_declared owns that failure
+        };
+        let declared_commits = matches!(kind, ArmKind::Committed | ArmKind::Mixed);
+        match (declared_commits, hits.is_empty()) {
+            (true, true) if excused.contains(payload) => {}
+            (true, true) => wrong.push(format!(
+                "  {payload}: declared {kind:?} but reaches no committed write. \
+                 If it stopped committing, make it Overlay and drop its manifest rows."
+            )),
+            (false, false) => wrong.push(format!(
+                "  {payload}: declared {kind:?} but reaches {hits:?}"
+            )),
+            _ => {}
+        }
+    }
+    let unneeded: Vec<&str> = COMMITS_OUTSIDE_THE_MANIFEST
+        .iter()
+        .filter(|(a, _)| reached.get(*a).is_some_and(|h| !h.is_empty()))
+        .map(|(a, _)| *a)
+        .collect();
+    assert!(
+        unneeded.is_empty(),
+        "these arms no longer need their COMMITS_OUTSIDE_THE_MANIFEST excuse — \
+         the manifest attributes their writes now: {unneeded:?}"
+    );
+    assert!(
+        wrong.is_empty(),
+        "an arm's declared kind does not match what it can reach:\n{}",
+        wrong.join("\n")
+    );
+}
+
+/// Every arm debits an account, and no arm commits one.
+///
+/// The claim this replaces was that every arm's fee path writes `cf::STATE`
+/// through `StateManager::put_account` — true before the account migration, and
+/// the reason accounts went first. The write did not go away; it moved. So the
+/// test measures BOTH halves now, which is what makes it a migration proof
+/// rather than a restatement:
+///
+/// * every arm still reaches the account write, now `v_put_account`, which
+///   stages into the block's candidate;
+/// * NO arm reaches `StateStore::put_account`, which commits.
+///
+/// Three arms reach neither, and are declared: they are free.
+#[test]
+fn every_arm_stages_its_account_write_and_none_commits_one() {
+    /// Arms that debit no account at all, with why.
     const NO_ACCOUNT_WRITE: &[(&str, &str)] = &[
         (
             "ComputePool",
@@ -2003,38 +2153,30 @@ fn the_arms_that_debit_an_account_are_declared() {
             "fee_paid 0 on BOTH paths — the dormant fail-closed seam and the \
              gate-open runtime (#127). Beacon ops are never charged.",
         ),
-        (
-            "BeaconSigning",
-            "fee_paid 0 on both paths, as BeaconSetup",
-        ),
+        ("BeaconSigning", "fee_paid 0 on both paths, as BeaconSetup"),
     ];
 
     let idx = build_index(&production_sources());
-    let classes = classify_all(&idx);
-    let account_writer: Vec<usize> = idx
-        .funs
-        .iter()
-        .enumerate()
-        .filter(|(_, f)| {
-            f.file == "crates/storage/src/schema.rs"
-                && f.owner.as_deref() == Some("StateStore")
-                && f.name == "put_account"
-        })
-        .map(|(k, _)| k)
-        .collect();
-    assert_eq!(
-        account_writer.len(),
-        1,
-        "expected exactly one StateStore::put_account"
-    );
-    let _ = &classes;
+    let find = |file: &str, owner: &str, name: &str| -> usize {
+        let hits: Vec<usize> = idx
+            .funs
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| {
+                f.file == file && f.owner.as_deref() == Some(owner) && f.name == name
+            })
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(hits.len(), 1, "expected exactly one {owner}::{name}");
+        hits[0]
+    };
+    let staged = find("crates/state/src/state.rs", "StateManager", "v_put_account");
+    let committed = find("crates/storage/src/schema.rs", "StateStore", "put_account");
 
     let src = prepare(
         &std::fs::read_to_string(workspace_root().join("crates/state/src/executor.rs"))
             .expect("read executor.rs"),
     );
-    // The arm bodies run inside the dispatch function, so they see its
-    // receiver and parameters.
     let dispatch = idx
         .funs
         .iter()
@@ -2043,7 +2185,8 @@ fn the_arms_that_debit_an_account_are_declared() {
         })
         .expect("the dispatch function");
 
-    let mut debits: BTreeSet<String> = BTreeSet::new();
+    let mut stages: BTreeSet<String> = BTreeSet::new();
+    let mut commits: BTreeSet<String> = BTreeSet::new();
     for (payload, body) in dispatch_arms(&src) {
         if body.trim().is_empty() {
             continue;
@@ -2056,29 +2199,39 @@ fn the_arms_that_debit_an_account_are_declared() {
             body,
         };
         let roots: Vec<usize> = resolved_calls(&idx, &arm).into_iter().map(|(k, _)| k).collect();
-        if reachable(&idx, &roots).contains(&account_writer[0]) {
-            debits.insert(payload);
+        let seen = reachable(&idx, &roots);
+        if seen.contains(&staged) {
+            stages.insert(payload.clone());
+        }
+        if seen.contains(&committed) {
+            commits.insert(payload);
         }
     }
 
+    assert!(
+        commits.is_empty(),
+        "these arms can still COMMIT an account row during execution: {commits:?}. \
+         A block that is never accepted would move those balances."
+    );
+
     let all: BTreeSet<String> = ARMS.iter().map(|(n, _, _)| n.to_string()).collect();
-    let declared_exceptions: BTreeSet<String> =
+    let declared: BTreeSet<String> =
         NO_ACCOUNT_WRITE.iter().map(|(n, _)| n.to_string()).collect();
     let silent: Vec<_> = all
-        .difference(&debits)
-        .filter(|n| !declared_exceptions.contains(*n))
+        .difference(&stages)
+        .filter(|n| !declared.contains(*n))
         .collect();
     assert!(
         silent.is_empty(),
-        "{ACCOUNT_WRITE_IS_UNIVERSAL}\n  but these arms do not reach it: \
-         {silent:?}. Either the claim is wrong for them — declare each in \
-         NO_ACCOUNT_WRITE with the reason — or this file cannot resolve their \
-         fee path, and the manifest is short."
+        "{ACCOUNT_WRITE_IS_UNIVERSAL}\n  but these arms reach neither the staged \
+         account write nor a committed one: {silent:?}. Either they are free — \
+         declare each in NO_ACCOUNT_WRITE with the reason — or this file cannot \
+         resolve their fee path."
     );
-    let wrong: Vec<_> = declared_exceptions.intersection(&debits).collect();
+    let wrong: Vec<_> = declared.intersection(&stages).collect();
     assert!(
         wrong.is_empty(),
-        "these arms are declared not to debit an account, but do: {wrong:?}"
+        "these arms are declared to debit no account, but do: {wrong:?}"
     );
 }
 
