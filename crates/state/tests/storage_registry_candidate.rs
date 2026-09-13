@@ -607,7 +607,7 @@ fn a_same_block_archive_stake_or_fee_pool_change_moves_the_reserve_delta_exactly
     let mut overlay = ApplicationOverlay::new(&db, LIMIT);
     let baseline = {
         let view = ExecutionView::new(&mut overlay);
-        v_assess_supply_correction(&view, &db, 1, false, mid)
+        v_assess_supply_correction(&view, 1, false, mid)
     };
     assert_eq!(
         baseline.reason,
@@ -645,7 +645,7 @@ fn a_same_block_archive_stake_or_fee_pool_change_moves_the_reserve_delta_exactly
     let funded_baseline = {
         let mut overlay = ApplicationOverlay::new(&db, LIMIT);
         let view = ExecutionView::new(&mut overlay);
-        v_assess_supply_correction(&view, &db, 1, false, mid)
+        v_assess_supply_correction(&view, 1, false, mid)
     };
 
     let mut overlay = ApplicationOverlay::new(&db, LIMIT);
@@ -660,7 +660,7 @@ fn a_same_block_archive_stake_or_fee_pool_change_moves_the_reserve_delta_exactly
     .unwrap()
     .success);
 
-    let with_rows = v_assess_supply_correction(&view, &db, 1, false, mid);
+    let with_rows = v_assess_supply_correction(&view, 1, false, mid);
     assert_eq!(
         with_rows.snapshot.archive_staked_balance, STAKE as u128,
         "the stake staged in this block must be censused"
@@ -695,7 +695,7 @@ fn a_same_block_archive_stake_or_fee_pool_change_moves_the_reserve_delta_exactly
     // stake and fee pool of zero.
     let expected_delta = with_rows.reserve_delta;
     let applied =
-        sumchain_state::supply::apply_supply_correction_if_needed(&mut view, &db, 1, 8_900_000)
+        sumchain_state::supply::apply_supply_correction_if_needed(&mut view, 1, 8_900_000)
             .unwrap();
     assert!(applied, "the correction must apply on this parent");
 

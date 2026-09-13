@@ -319,7 +319,7 @@ fn a_same_block_inference_mutation_moves_the_reserve_delta_exactly() {
     let mut overlay = ApplicationOverlay::new(&db, LIMIT);
     let baseline = {
         let view = ExecutionView::new(&mut overlay);
-        v_assess_supply_correction(&view, &db, 1, false, mid)
+        v_assess_supply_correction(&view, 1, false, mid)
     };
     assert_eq!(
         baseline.reason,
@@ -367,7 +367,7 @@ fn a_same_block_inference_mutation_moves_the_reserve_delta_exactly() {
             },
         )
         .unwrap();
-        v_assess_supply_correction(&view, &db, 1, false, mid)
+        v_assess_supply_correction(&view, 1, false, mid)
     };
 
     assert_eq!(
@@ -438,7 +438,7 @@ fn a_same_block_inference_mutation_moves_the_reserve_delta_exactly() {
     .unwrap();
 
     let applied =
-        sumchain_state::supply::apply_supply_correction_if_needed(&mut view, &db, 1, 8_900_000)
+        sumchain_state::supply::apply_supply_correction_if_needed(&mut view, 1, 8_900_000)
             .unwrap();
     assert!(applied, "the correction must apply on this parent");
 

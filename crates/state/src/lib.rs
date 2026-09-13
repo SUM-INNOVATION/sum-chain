@@ -33,6 +33,7 @@ pub mod property_executor;
 pub mod schema_validator;
 pub mod snapshot;
 pub mod staking_executor;
+pub mod staking_view;
 pub mod state;
 pub mod storage_metadata;
 pub mod tax_executor;

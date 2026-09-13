@@ -1573,6 +1573,54 @@ impl<'a> TokenStore<'a> {
 // ============================================================================
 
 /// Validator storage operations
+/// The one encoder/decoder pair for each staking row family.
+///
+/// Block execution stages validators, delegations, unbondings, slashing
+/// records and signing info through `ExecutionView`; the committed stores below
+/// write the same families. A second codec on either side would let a candidate
+/// and the chain disagree about bytes that are supposed to be identical, and
+/// nothing downstream would notice — so there is exactly one of each, and both
+/// sides call it.
+macro_rules! staking_codec {
+    ($enc:ident, $dec:ident, $ty:ty, $what:literal) => {
+        #[doc = concat!("Encode ", $what, ". See the module note on shared codecs.")]
+        pub fn $enc(value: &$ty) -> Result<Vec<u8>> {
+            bincode::serialize(value).map_err(|e| StorageError::Serialization(e.to_string()))
+        }
+        #[doc = concat!("Decode ", $what, ". The inverse of [`", stringify!($enc), "`].")]
+        pub fn $dec(bytes: &[u8]) -> Result<$ty> {
+            bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+        }
+    };
+}
+
+staking_codec!(encode_validator, decode_validator, ValidatorInfo, "a validator");
+staking_codec!(encode_delegation, decode_delegation, DelegationInfo, "a delegation");
+staking_codec!(
+    encode_unbonding,
+    decode_unbonding,
+    UnbondingDelegation,
+    "an unbonding delegation"
+);
+staking_codec!(
+    encode_slashing_record,
+    decode_slashing_record,
+    SlashingRecord,
+    "a slashing record"
+);
+staking_codec!(
+    encode_signing_info,
+    decode_signing_info,
+    ValidatorSigningInfo,
+    "a validator's signing info"
+);
+staking_codec!(
+    encode_delegator_list,
+    decode_delegator_list,
+    Vec<[u8; 32]>,
+    "the delegator list in `cf::DELEGATION_VALIDATOR_INDEX`"
+);
+
 pub struct StakingStore<'a> {
     db: &'a Database,
 }
@@ -1588,8 +1636,7 @@ impl<'a> StakingStore<'a> {
 
     /// Store a validator by their public key
     pub fn put_validator(&self, validator: &ValidatorInfo) -> Result<()> {
-        let bytes = bincode::serialize(validator)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let bytes = encode_validator(validator)?;
         self.db.put(cf::VALIDATORS, &validator.pubkey, &bytes)
     }
 
@@ -1597,8 +1644,7 @@ impl<'a> StakingStore<'a> {
     pub fn get_validator(&self, pubkey: &[u8; 32]) -> Result<Option<ValidatorInfo>> {
         match self.db.get(cf::VALIDATORS, pubkey)? {
             Some(bytes) => {
-                let validator: ValidatorInfo = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let validator = decode_validator(&bytes)?;
                 Ok(Some(validator))
             }
             None => Ok(None),
@@ -1619,8 +1665,7 @@ impl<'a> StakingStore<'a> {
     pub fn get_all_validators(&self) -> Result<Vec<ValidatorInfo>> {
         let mut validators = Vec::new();
         for (_, value) in self.db.prefix_iter(cf::VALIDATORS, &[])? {
-            let validator: ValidatorInfo = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let validator = decode_validator(&value)?;
             validators.push(validator);
         }
         Ok(validators)
@@ -1775,7 +1820,11 @@ impl<'a> DelegationStore<'a> {
 
     /// Create delegation key from delegator address and validator pubkey
     /// Format: delegator (32 bytes) + validator_pubkey (32 bytes)
-    fn delegation_key(delegator: &[u8; 32], validator_pubkey: &[u8; 32]) -> Vec<u8> {
+    /// Public because block execution stages delegation rows through
+    /// `ExecutionView` rather than through this store, and both sides must
+    /// agree byte-for-byte on where a delegation lives. A pure function of the
+    /// two pubkeys; it reaches no database.
+    pub fn delegation_key(delegator: &[u8; 32], validator_pubkey: &[u8; 32]) -> Vec<u8> {
         let mut key = Vec::with_capacity(64);
         key.extend_from_slice(delegator);
         key.extend_from_slice(validator_pubkey);
@@ -1784,7 +1833,8 @@ impl<'a> DelegationStore<'a> {
 
     /// Create unbonding delegation key
     /// Format: delegator (32 bytes) + completion_height (8 bytes BE) + validator_pubkey (32 bytes)
-    fn unbonding_key(delegator: &[u8; 32], completion_height: BlockHeight, validator_pubkey: &[u8; 32]) -> Vec<u8> {
+    /// Public for the same reason as [`Self::delegation_key`].
+    pub fn unbonding_key(delegator: &[u8; 32], completion_height: BlockHeight, validator_pubkey: &[u8; 32]) -> Vec<u8> {
         let mut key = Vec::with_capacity(72);
         key.extend_from_slice(delegator);
         key.extend_from_slice(&completion_height.to_be_bytes());
@@ -1799,8 +1849,7 @@ impl<'a> DelegationStore<'a> {
     /// Store a delegation
     pub fn put_delegation(&self, delegation: &DelegationInfo) -> Result<()> {
         let key = Self::delegation_key(&delegation.delegator, &delegation.validator_pubkey);
-        let bytes = bincode::serialize(delegation)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let bytes = encode_delegation(delegation)?;
         self.db.put(cf::DELEGATIONS, &key, &bytes)?;
 
         // Update validator index
@@ -1814,8 +1863,7 @@ impl<'a> DelegationStore<'a> {
         let key = Self::delegation_key(delegator, validator_pubkey);
         match self.db.get(cf::DELEGATIONS, &key)? {
             Some(bytes) => {
-                let delegation: DelegationInfo = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let delegation = decode_delegation(&bytes)?;
                 Ok(Some(delegation))
             }
             None => Ok(None),
@@ -1846,8 +1894,7 @@ impl<'a> DelegationStore<'a> {
         for (key, value) in self.db.prefix_iter(cf::DELEGATIONS, delegator)? {
             // Only match keys that start with this delegator
             if key.len() == 64 && &key[..32] == delegator {
-                let delegation: DelegationInfo = bincode::deserialize(&value)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let delegation = decode_delegation(&value)?;
                 delegations.push(delegation);
             }
         }
@@ -1894,8 +1941,7 @@ impl<'a> DelegationStore<'a> {
             if key.len() != 64 {
                 continue;
             }
-            let delegation: DelegationInfo = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let delegation = decode_delegation(&value)?;
             sum = sum.checked_add(delegation.amount).ok_or_else(|| {
                 StorageError::Serialization("active delegations sum overflow".to_string())
             })?;
@@ -1910,8 +1956,7 @@ impl<'a> DelegationStore<'a> {
     /// Store an unbonding delegation
     pub fn put_unbonding(&self, unbonding: &UnbondingDelegation) -> Result<()> {
         let key = Self::unbonding_key(&unbonding.delegator, unbonding.completion_height, &unbonding.validator_pubkey);
-        let bytes = bincode::serialize(unbonding)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let bytes = encode_unbonding(unbonding)?;
         self.db.put(cf::UNBONDING_DELEGATIONS, &key, &bytes)
     }
 
@@ -1928,8 +1973,7 @@ impl<'a> DelegationStore<'a> {
         for (key, value) in self.db.prefix_iter(cf::UNBONDING_DELEGATIONS, delegator)? {
             // Only match keys that start with this delegator (72 bytes: delegator + height + validator)
             if key.len() == 72 && &key[..32] == delegator {
-                let unbonding: UnbondingDelegation = bincode::deserialize(&value)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let unbonding = decode_unbonding(&value)?;
                 unbondings.push(unbonding);
             }
         }
@@ -1973,8 +2017,7 @@ impl<'a> DelegationStore<'a> {
 
         if !delegators.iter().any(|d| d == delegator) {
             delegators.push(*delegator);
-            let bytes = bincode::serialize(&delegators)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let bytes = encode_delegator_list(&delegators)?;
             self.db.put(cf::DELEGATION_VALIDATOR_INDEX, validator_pubkey, &bytes)?;
         }
 
@@ -1989,8 +2032,7 @@ impl<'a> DelegationStore<'a> {
         if delegators.is_empty() {
             self.db.delete(cf::DELEGATION_VALIDATOR_INDEX, validator_pubkey)?;
         } else {
-            let bytes = bincode::serialize(&delegators)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let bytes = encode_delegator_list(&delegators)?;
             self.db.put(cf::DELEGATION_VALIDATOR_INDEX, validator_pubkey, &bytes)?;
         }
 
@@ -2001,8 +2043,7 @@ impl<'a> DelegationStore<'a> {
     pub fn get_validator_delegators(&self, validator_pubkey: &[u8; 32]) -> Result<Vec<[u8; 32]>> {
         match self.db.get(cf::DELEGATION_VALIDATOR_INDEX, validator_pubkey)? {
             Some(bytes) => {
-                let delegators: Vec<[u8; 32]> = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let delegators = decode_delegator_list(&bytes)?;
                 Ok(delegators)
             }
             None => Ok(Vec::new()),
@@ -2124,7 +2165,8 @@ impl<'a> SlashingStore<'a> {
 
     /// Create slashing record key
     /// Format: validator_pubkey (32 bytes) + slashed_at (8 bytes BE)
-    fn slashing_key(validator_pubkey: &[u8; 32], slashed_at: BlockHeight) -> Vec<u8> {
+    /// Public for the same reason as [`DelegationStore::delegation_key`].
+    pub fn slashing_key(validator_pubkey: &[u8; 32], slashed_at: BlockHeight) -> Vec<u8> {
         let mut key = Vec::with_capacity(40);
         key.extend_from_slice(validator_pubkey);
         key.extend_from_slice(&slashed_at.to_be_bytes());
@@ -2138,8 +2180,7 @@ impl<'a> SlashingStore<'a> {
     /// Store a slashing record
     pub fn put_slashing_record(&self, record: &SlashingRecord) -> Result<()> {
         let key = Self::slashing_key(&record.validator_pubkey, record.slashed_at);
-        let bytes = bincode::serialize(record)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let bytes = encode_slashing_record(record)?;
         self.db.put(cf::SLASHING_RECORDS, &key, &bytes)
     }
 
@@ -2149,8 +2190,7 @@ impl<'a> SlashingStore<'a> {
 
         for (key, value) in self.db.prefix_iter(cf::SLASHING_RECORDS, validator_pubkey)? {
             if key.len() == 40 && &key[..32] == validator_pubkey {
-                let record: SlashingRecord = bincode::deserialize(&value)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let record = decode_slashing_record(&value)?;
                 records.push(record);
             }
         }
@@ -2180,8 +2220,7 @@ impl<'a> SlashingStore<'a> {
 
     /// Store validator signing info
     pub fn put_signing_info(&self, info: &ValidatorSigningInfo) -> Result<()> {
-        let bytes = bincode::serialize(info)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let bytes = encode_signing_info(info)?;
         self.db.put(cf::VALIDATOR_SIGNING_INFO, &info.validator_pubkey, &bytes)
     }
 
@@ -2189,8 +2228,7 @@ impl<'a> SlashingStore<'a> {
     pub fn get_signing_info(&self, validator_pubkey: &[u8; 32]) -> Result<Option<ValidatorSigningInfo>> {
         match self.db.get(cf::VALIDATOR_SIGNING_INFO, validator_pubkey)? {
             Some(bytes) => {
-                let info: ValidatorSigningInfo = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let info = decode_signing_info(&bytes)?;
                 Ok(Some(info))
             }
             None => Ok(None),
@@ -2223,8 +2261,7 @@ impl<'a> SlashingStore<'a> {
         let mut infos = Vec::new();
 
         for (_, value) in self.db.iter(cf::VALIDATOR_SIGNING_INFO)? {
-            let info: ValidatorSigningInfo = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let info = decode_signing_info(&value)?;
             infos.push(info);
         }
 
@@ -2343,8 +2380,7 @@ impl<'a> SlashingStore<'a> {
         let mut all_records = Vec::new();
 
         for (_, value) in self.db.iter(cf::SLASHING_RECORDS)? {
-            let record: SlashingRecord = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let record = decode_slashing_record(&value)?;
             all_records.push(record);
         }
 

@@ -147,7 +147,7 @@ fn genesis_validators_excluded_from_bootstrap_grants() {
     let excluded = genesis_validator_excluded_addresses();
     assert_eq!(excluded.len(), 4, "2 accounts + 2 pubkey-derived");
     for addr in excluded {
-        assert_eq!(SupplyStore::claim_validator_grant(&mut candidate.view(), &db, &addr, 10), Err(382));
+        assert_eq!(SupplyStore::claim_validator_grant(&mut candidate.view(), &addr, 10), Err(382));
     }
 }
 

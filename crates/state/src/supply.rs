@@ -455,7 +455,6 @@ impl SupplyStore {
     /// files×anything scan. Returns the liquid amount to credit.
     pub fn claim_validator_grant(
         view: &mut ExecutionView<'_, '_>,
-        db: &Arc<Database>,
         addr: &Address,
         height: u64,
     ) -> std::result::Result<u128, u32> {
@@ -466,8 +465,13 @@ impl SupplyStore {
         // Eligibility: an Active staking validator whose pubkey derives to the
         // claimer address (one grant per validator identity — the pubkey and
         // its derived address are the same identity).
-        let staking = sumchain_storage::StakingStore::new(db);
-        let validators = staking.get_all_validators().map_err(|_| 381u32)?;
+        //
+        // Read from the CANDIDATE. A validator this block created, or one it
+        // jailed a transaction ago, decides eligibility for a grant in the same
+        // block, and the parent's validator set is the wrong answer to that
+        // question in both directions.
+        let validators = crate::staking_executor::StakingExecutor::v_get_all_validators(view)
+            .map_err(|_| 381u32)?;
         let is_active_validator = validators.iter().any(|v| {
             v.status == sumchain_primitives::ValidatorStatus::Active
                 && Address::from_public_key(&v.pubkey) == *addr
@@ -723,9 +727,11 @@ pub fn native_supply_snapshot(db: &Arc<Database>) -> Result<NativeSupplySnapshot
             crate::storage_metadata::StorageMetadataExecutor::new(db.clone()).total_fee_pools()?;
         let (account_balances_incl_zero, burn_at_zero) =
             sum_accounts(&StateStore::new(db).iter_all_accounts()?)?;
-        Ok(MigratedBuckets {
+        Ok(CensusBuckets {
             account_balances_incl_zero,
             burn_at_zero,
+            validator_self_stake: StakingStore::new(db).total_validator_self_stake()?,
+            active_delegations: DelegationStore::new(db).total_active_delegations()?,
             inference_escrow: inference.total_session_remaining_escrow()?,
             inference_verifier_bonds: inference.total_verifier_bonds()?,
             archive_staked_balance: crate::node_registry::NodeRegistryExecutor::new(db.clone())
@@ -734,25 +740,36 @@ pub fn native_supply_snapshot(db: &Arc<Database>) -> Result<NativeSupplySnapshot
             storage_v2_fee_pool,
         })
     })();
-    native_supply_snapshot_with_migrated(db, totals)
+    native_supply_snapshot_from_buckets(totals)
 }
 
-/// The census buckets whose subsystems have migrated to the execution view.
+/// Every INCLUDE bucket of the native-supply census.
 ///
-/// They are read through whichever handle the caller holds — the candidate
-/// during block execution, committed storage for the RPC diagnostic — while
-/// every unmigrated bucket is still read from `db` inside
-/// [`native_supply_snapshot_with_migrated`]. Grouping them makes the boundary a
-/// single, visible list that shrinks as subsystems move, rather than a growing
-/// tuple nobody can read.
+/// This was `MigratedBuckets`, and it held only the subsystems that had moved
+/// to the execution view while [`native_supply_snapshot_from_buckets`] read
+/// the rest from `db`. That split is gone: with staking and delegation
+/// migrated there is no unmigrated bucket left, the core reads no database at
+/// all, and a name meaning "the migrated subset" now names the whole set. The
+/// name went with the distinction it encoded.
+///
+/// Every bucket here is read through whichever handle the caller holds — the
+/// candidate during block execution, committed storage for the RPC diagnostic.
+/// Both callers fill the same struct, which is what keeps them from differing
+/// on what the census includes.
 #[derive(Debug, Clone, Copy)]
-struct MigratedBuckets {
+struct CensusBuckets {
     /// Account balances including `Address::ZERO`, and the ZERO subset on its
     /// own. Accounts are the widest bucket and the one every transaction
     /// touches; a census that read them from committed storage would measure
     /// the parent's balances against a block that had already moved them.
     account_balances_incl_zero: u128,
     burn_at_zero: u128,
+    /// Validator self-stake (`v.stake`, never `v.total_delegated`) and Σ active
+    /// delegation amounts. A block that bonds, unbonds or slashes moves both
+    /// before it is accepted; a census that read the parent's would mint or
+    /// withhold the difference.
+    validator_self_stake: u128,
+    active_delegations: u128,
     inference_escrow: u128,
     inference_verifier_bonds: u128,
     archive_staked_balance: u128,
@@ -779,34 +796,40 @@ fn sum_accounts(
     Ok((total, burn_at_zero))
 }
 
-/// The census as THIS BLOCK sees it: the migrated buckets from the candidate,
-/// everything else from committed state.
+/// The census as THIS BLOCK sees it: every bucket from the candidate.
 ///
-/// The asymmetry is exact, not approximate. Accounts, validator self-stake and
-/// active delegations have not migrated, so committed IS where their rows are.
-/// Inference, the node registry and storage metadata HAVE, so committed is
-/// where their rows are not — a block that opens a session, slashes an archive
-/// or drains a fee pool must census what it is about to publish.
+/// There is no asymmetry left to describe. Accounts, staking and delegation,
+/// inference, the node registry and storage metadata have all migrated, and
+/// they are the whole INCLUDE set — so committed storage is where none of these
+/// rows are during execution. A block that moves a balance, bonds or slashes
+/// stake, opens a session, slashes an archive or drains a fee pool censuses
+/// what it is about to publish, not what its parent published. Nothing is read
+/// from `db` here or in the shared core.
+///
+/// This paragraph has now been wrong twice, each time one commit behind the
+/// code: first claiming accounts were unmigrated, then claiming "everything
+/// else" was still committed after the last handle had gone. Both read as
+/// descriptions of the boundary and were really descriptions of an older one.
 ///
 /// Those totals are computed from the candidate DIRECTLY rather than taken from
 /// a committed snapshot and adjusted. A committed-first census would have to
 /// decode the parent's rows on the way, and a block is entitled to delete or
 /// replace a malformed one — so a row this block is removing could fail the
 /// census and withhold a correction that should apply.
-pub fn v_native_supply_snapshot(
-    view: &ExecutionView<'_, '_>,
-    db: &Arc<Database>,
-) -> Result<NativeSupplySnapshot> {
+pub fn v_native_supply_snapshot(view: &ExecutionView<'_, '_>) -> Result<NativeSupplySnapshot> {
     use crate::inference_settlement_executor::InferenceSettlementExecutor as Settle;
     use crate::node_registry::NodeRegistryExecutor as Registry;
+    use crate::staking_executor::StakingExecutor as Staking;
     use crate::storage_metadata::StorageMetadataExecutor as Storage;
     let totals = (|| {
         let (storage_v1_fee_pool, storage_v2_fee_pool) = Storage::v_total_fee_pools(view)?;
         let (account_balances_incl_zero, burn_at_zero) =
             sum_accounts(&crate::state::StateManager::v_iter_all_accounts(view)?)?;
-        Ok(MigratedBuckets {
+        Ok(CensusBuckets {
             account_balances_incl_zero,
             burn_at_zero,
+            validator_self_stake: Staking::v_total_validator_self_stake(view)?,
+            active_delegations: Staking::v_total_active_delegations(view)?,
             inference_escrow: Settle::v_total_session_remaining_escrow(view)?,
             inference_verifier_bonds: Settle::v_total_verifier_bonds(view)?,
             archive_staked_balance: Registry::v_total_archive_staked_balance(view)?,
@@ -814,26 +837,31 @@ pub fn v_native_supply_snapshot(
             storage_v2_fee_pool,
         })
     })();
-    native_supply_snapshot_with_migrated(db, totals)
+    native_supply_snapshot_from_buckets(totals)
 }
 
-/// The census core, shared by both handles: every unmigrated bucket from `db`,
-/// with the migrated buckets supplied by the caller.
-fn native_supply_snapshot_with_migrated(
-    db: &Arc<Database>,
-    migrated: Result<MigratedBuckets>,
+/// The census core: it assembles the snapshot from buckets the caller has
+/// already read.
+///
+/// It used to take `&Arc<Database>` and read the unmigrated buckets itself, and
+/// it was called `native_supply_snapshot_with_migrated` because "the migrated
+/// ones" were the subset the caller supplied. There are none left over — every
+/// INCLUDE bucket is candidate-aware — so the handle went, and so did the
+/// distinction the name encoded. What remains is pure assembly, which is why
+/// both callers can share it without either lending the other a way to reach
+/// committed state.
+fn native_supply_snapshot_from_buckets(
+    migrated: Result<CensusBuckets>,
 ) -> Result<NativeSupplySnapshot> {
-    // Validator self-stake + active delegations (INCLUDE).
-    let validator_self_stake = StakingStore::new(db).total_validator_self_stake()?;
-    let active_delegations = DelegationStore::new(db).total_active_delegations()?;
-
     // Account balances incl. `Address::ZERO`, archive stake, storage fee pools
     // V1 + V2, inference escrow and verifier bonds (all INCLUDE) — from the
     // caller's handle. `Address::ZERO` is also carried out as the report-only
     // burn subset, from the same single scan.
-    let MigratedBuckets {
+    let CensusBuckets {
         account_balances_incl_zero,
         burn_at_zero,
+        validator_self_stake,
+        active_delegations,
         inference_escrow,
         inference_verifier_bonds,
         archive_staked_balance,
@@ -901,13 +929,12 @@ pub fn assess_supply_correction(
 /// inference escrow and bonds it moved itself.
 pub fn v_assess_supply_correction(
     view: &ExecutionView<'_, '_>,
-    db: &Arc<Database>,
     chain_id: u64,
     migration_applied: bool,
     ledger_migration_id: Hash,
 ) -> SupplyCorrectionAssessment {
     assess_from_snapshot(
-        v_native_supply_snapshot(view, db),
+        v_native_supply_snapshot(view),
         chain_id,
         migration_applied,
         ledger_migration_id,
@@ -1011,7 +1038,6 @@ fn log_withheld_anomaly(height: u64, a: &SupplyCorrectionAssessment) {
 /// block state root; the applied ledger + reserve are folded into that root.
 pub fn apply_supply_correction_if_needed(
     view: &mut ExecutionView<'_, '_>,
-    db: &Arc<Database>,
     chain_id: u64,
     height: u64,
 ) -> Result<bool> {
@@ -1025,7 +1051,6 @@ pub fn apply_supply_correction_if_needed(
 
     let assessment = v_assess_supply_correction(
         view,
-        db,
         chain_id,
         ledger.migration_applied,
         ledger.migration_id,

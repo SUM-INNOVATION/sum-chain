@@ -13,8 +13,6 @@
 //! - WithdrawUnbonded: Withdraw completed unbonding delegations
 //! - SubmitEvidence: Submit evidence of validator misbehavior (double sign or downtime)
 
-use std::sync::Arc;
-
 use sumchain_genesis::ChainParams;
 use sumchain_primitives::{
     Address, Balance, BlockHeight, ClaimDelegationRewardsData, CreateValidatorData, AddStakeData,
@@ -24,7 +22,6 @@ use sumchain_primitives::{
     WithdrawUnbondedData,
 };
 use sumchain_storage::exec_view::ExecutionView;
-use sumchain_storage::{Database, DelegationStore, SlashingStore, StakingStore};
 use tracing::{debug, info, warn};
 
 use crate::{Result, StateError, StateManager};
@@ -66,78 +63,81 @@ impl StakingExecutionResult {
     }
 }
 
-/// Staking Executor for processing staking transactions
-pub struct StakingExecutor {
-    db: Arc<Database>,
-    params: ChainParams,
-}
+/// Staking, delegation and slashing execution.
+///
+/// A namespace, not a handle. Every function on it is an associated function
+/// taking an `ExecutionView`, and the type holds no `Arc<Database>` for one to
+/// reach — which is what makes a committed staking write on an execution path a
+/// compile error rather than a review comment.
+///
+/// The five committed read accessors that used to live here (`get_validator`,
+/// `get_all_validators`, `get_active_validators`, `get_validators_by_stake`,
+/// `get_total_stake`) are gone with the database they needed. They had no
+/// caller: RPC builds `StakingStore::new(&self.db)` directly at nineteen sites
+/// and never went through this type. Keeping a `Database` field alive to host
+/// unreachable accessors would have left execution code a receiver to reach it
+/// through, for no reader's benefit.
+pub struct StakingExecutor;
 
 impl StakingExecutor {
-    /// Create a new staking executor
-    pub fn new(db: Arc<Database>, params: ChainParams) -> Self {
-        Self { db, params }
-    }
 
     /// Execute a staking operation from transaction data
     #[allow(clippy::too_many_arguments)]
     pub fn execute(
-        &self,
         view: &mut ExecutionView<'_, '_>,
+        params: &ChainParams,
         sender: &Address,
         staking_data: &StakingTxData,
         proposer: &Address,
         fee: Balance,
         block_height: BlockHeight,
     ) -> Result<StakingExecutionResult> {
-        let store = StakingStore::new(&self.db);
-        let delegation_store = DelegationStore::new(&self.db);
-        let slashing_store = SlashingStore::new(&self.db);
 
         // Deduct fee from sender first
-        self.deduct_fee(view, sender, fee, proposer)?;
+        Self::deduct_fee(view, sender, fee, proposer)?;
 
         match staking_data.operation {
             StakingOperation::CreateValidator => {
-                self.execute_create_validator(view, &store, sender, &staking_data.data, block_height)
+                Self::execute_create_validator(view, params, sender, &staking_data.data, block_height)
             }
             StakingOperation::AddStake => {
-                self.execute_add_stake(view, &store, sender, &staking_data.data)
+                Self::execute_add_stake(view, sender, &staking_data.data)
             }
             StakingOperation::Unstake => {
-                self.execute_unstake(view, &store, sender, &staking_data.data, block_height)
+                Self::execute_unstake(view, params, sender, &staking_data.data, block_height)
             }
             StakingOperation::UpdateValidator => {
-                self.execute_update_validator(&store, sender, &staking_data.data)
+                Self::execute_update_validator(view, params, sender, &staking_data.data)
             }
             StakingOperation::Unjail => {
-                self.execute_unjail(&store, sender, block_height)
+                Self::execute_unjail(view, sender, block_height)
             }
             StakingOperation::ClaimRewards => {
-                self.execute_claim_rewards(view, &store, sender)
+                Self::execute_claim_rewards(view, sender)
             }
             // Delegation operations
             StakingOperation::Delegate => {
-                self.execute_delegate(view, &store, &delegation_store, sender, &staking_data.data, block_height)
+                Self::execute_delegate(view, sender, &staking_data.data, block_height)
             }
             StakingOperation::Undelegate => {
-                self.execute_undelegate(view, &store, &delegation_store, sender, &staking_data.data, block_height)
+                Self::execute_undelegate(view, params, sender, &staking_data.data, block_height)
             }
             StakingOperation::ClaimDelegationRewards => {
-                self.execute_claim_delegation_rewards(view, &delegation_store, sender, &staking_data.data)
+                Self::execute_claim_delegation_rewards(view, sender, &staking_data.data)
             }
             StakingOperation::WithdrawUnbonded => {
-                self.execute_withdraw_unbonded(&delegation_store, sender, &staking_data.data, block_height)
+                Self::execute_withdraw_unbonded(view, sender, &staking_data.data, block_height)
             }
             // Slashing operations
             StakingOperation::SubmitEvidence => {
-                self.execute_submit_evidence(view, &store, &delegation_store, &slashing_store, sender, &staking_data.data, block_height)
+                Self::execute_submit_evidence(view, params, &staking_data.data, block_height)
             }
         }
     }
 
     /// Deduct fee from sender and credit to proposer
     fn deduct_fee(
-        &self, view: &mut ExecutionView<'_, '_>,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         fee: Balance,
         proposer: &Address,
@@ -184,8 +184,8 @@ impl StakingExecutor {
 
     /// Execute CreateValidator operation
     fn execute_create_validator(
-        &self, view: &mut ExecutionView<'_, '_>,
-        store: &StakingStore,
+        view: &mut ExecutionView<'_, '_>,
+        params: &ChainParams,
         sender: &Address,
         data: &[u8],
         block_height: BlockHeight,
@@ -195,7 +195,7 @@ impl StakingExecutor {
             .map_err(|e| StateError::BlockValidation(format!("Invalid create validator data: {}", e)))?;
 
         // Validate minimum stake
-        let min_stake = self.params.staking.as_ref()
+        let min_stake = params.staking.as_ref()
             .map(|s| s.min_validator_stake)
             .unwrap_or(1_000_000_000_000_000_000); // 1e18 base units = 1B Koppa default (must match StakingParams::default)
 
@@ -207,7 +207,7 @@ impl StakingExecutor {
         }
 
         // Validate commission rate
-        let max_commission = self.params.staking.as_ref()
+        let max_commission = params.staking.as_ref()
             .map(|s| s.max_commission_bps)
             .unwrap_or(10000);
 
@@ -223,18 +223,18 @@ impl StakingExecutor {
         // In production, the pubkey would be in the transaction
         let pubkey = Self::get_pubkey_from_address(sender);
 
-        if store.validator_exists(&pubkey)? {
+        if Self::v_validator_exists(view, &pubkey)? {
             return Ok(StakingExecutionResult::failure(
                 "Address is already a validator".to_string()
             ));
         }
 
         // Check max validators
-        let max_validators = self.params.staking.as_ref()
+        let max_validators = params.staking.as_ref()
             .map(|s| s.max_validators)
             .unwrap_or(100);
 
-        let current_count = store.get_validator_count()?;
+        let current_count = Self::v_get_validator_count(view)?;
         if current_count >= max_validators as usize {
             return Ok(StakingExecutionResult::failure(format!(
                 "Maximum validator count ({}) reached",
@@ -265,7 +265,7 @@ impl StakingExecutor {
         );
 
         // Store validator
-        store.put_validator(&validator)?;
+        Self::v_put_validator(view, &validator)?;
 
         info!(
             "Created validator {} with stake {} and commission {} bps",
@@ -277,8 +277,7 @@ impl StakingExecutor {
 
     /// Execute AddStake operation
     fn execute_add_stake(
-        &self, view: &mut ExecutionView<'_, '_>,
-        store: &StakingStore,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
     ) -> Result<StakingExecutionResult> {
@@ -295,7 +294,7 @@ impl StakingExecutor {
         let pubkey = Self::get_pubkey_from_address(sender);
 
         // Get validator
-        let mut validator = match store.get_validator(&pubkey)? {
+        let mut validator = match Self::v_get_validator(view, &pubkey)? {
             Some(v) => v,
             None => return Ok(StakingExecutionResult::failure(
                 "Not a registered validator".to_string()
@@ -318,7 +317,7 @@ impl StakingExecutor {
 
         // Add to validator's stake
         validator.stake = validator.stake.saturating_add(add_data.amount);
-        store.put_validator(&validator)?;
+        Self::v_put_validator(view, &validator)?;
 
         debug!(
             "Validator {} added {} stake, new total: {}",
@@ -330,8 +329,8 @@ impl StakingExecutor {
 
     /// Execute Unstake operation
     fn execute_unstake(
-        &self, view: &mut ExecutionView<'_, '_>,
-        store: &StakingStore,
+        view: &mut ExecutionView<'_, '_>,
+        params: &ChainParams,
         sender: &Address,
         data: &[u8],
         block_height: BlockHeight,
@@ -349,7 +348,7 @@ impl StakingExecutor {
         let pubkey = Self::get_pubkey_from_address(sender);
 
         // Get validator
-        let mut validator = match store.get_validator(&pubkey)? {
+        let mut validator = match Self::v_get_validator(view, &pubkey)? {
             Some(v) => v,
             None => return Ok(StakingExecutionResult::failure(
                 "Not a registered validator".to_string()
@@ -365,7 +364,7 @@ impl StakingExecutor {
         }
 
         // Check minimum stake requirement after unstaking
-        let min_stake = self.params.staking.as_ref()
+        let min_stake = params.staking.as_ref()
             .map(|s| s.min_validator_stake)
             .unwrap_or(1_000_000_000_000_000_000); // 1e18 base units = 1B Koppa default (must match StakingParams::default)
 
@@ -384,7 +383,7 @@ impl StakingExecutor {
 
         // If fully unstaking, mark as unbonding
         if validator.stake == 0 {
-            let unbonding_period = self.params.staking.as_ref()
+            let unbonding_period = params.staking.as_ref()
                 .map(|s| s.unbonding_period)
                 .unwrap_or(100_800); // ~7 days default
 
@@ -393,7 +392,7 @@ impl StakingExecutor {
             validator.jailed_until = block_height + unbonding_period;
         }
 
-        store.put_validator(&validator)?;
+        Self::v_put_validator(view, &validator)?;
 
         // For now, immediately return stake to sender (in production, would wait for unbonding)
         // TODO: Implement proper unbonding queue
@@ -411,8 +410,8 @@ impl StakingExecutor {
 
     /// Execute UpdateValidator operation
     fn execute_update_validator(
-        &self,
-        store: &StakingStore,
+        view: &mut ExecutionView<'_, '_>,
+        params: &ChainParams,
         sender: &Address,
         data: &[u8],
     ) -> Result<StakingExecutionResult> {
@@ -423,7 +422,7 @@ impl StakingExecutor {
         let pubkey = Self::get_pubkey_from_address(sender);
 
         // Get validator
-        let mut validator = match store.get_validator(&pubkey)? {
+        let mut validator = match Self::v_get_validator(view, &pubkey)? {
             Some(v) => v,
             None => return Ok(StakingExecutionResult::failure(
                 "Not a registered validator".to_string()
@@ -432,7 +431,7 @@ impl StakingExecutor {
 
         // Update commission if provided
         if let Some(new_commission) = update_data.commission_bps {
-            let max_commission = self.params.staking.as_ref()
+            let max_commission = params.staking.as_ref()
                 .map(|s| s.max_commission_bps)
                 .unwrap_or(10000);
 
@@ -457,7 +456,7 @@ impl StakingExecutor {
             validator.metadata = new_metadata;
         }
 
-        store.put_validator(&validator)?;
+        Self::v_put_validator(view, &validator)?;
 
         debug!("Validator {} updated", sender);
 
@@ -466,15 +465,14 @@ impl StakingExecutor {
 
     /// Execute Unjail operation
     fn execute_unjail(
-        &self,
-        store: &StakingStore,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         block_height: BlockHeight,
     ) -> Result<StakingExecutionResult> {
         let pubkey = Self::get_pubkey_from_address(sender);
 
         // Get validator
-        let mut validator = match store.get_validator(&pubkey)? {
+        let mut validator = match Self::v_get_validator(view, &pubkey)? {
             Some(v) => v,
             None => return Ok(StakingExecutionResult::failure(
                 "Not a registered validator".to_string()
@@ -498,7 +496,7 @@ impl StakingExecutor {
 
         // Unjail
         validator.unjail();
-        store.put_validator(&validator)?;
+        Self::v_put_validator(view, &validator)?;
 
         info!("Validator {} unjailed at block {}", sender, block_height);
 
@@ -507,14 +505,13 @@ impl StakingExecutor {
 
     /// Execute ClaimRewards operation
     fn execute_claim_rewards(
-        &self, view: &mut ExecutionView<'_, '_>,
-        store: &StakingStore,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
     ) -> Result<StakingExecutionResult> {
         let pubkey = Self::get_pubkey_from_address(sender);
 
         // Get validator
-        let validator = match store.get_validator(&pubkey)? {
+        let validator = match Self::v_get_validator(view, &pubkey)? {
             Some(v) => v,
             None => return Ok(StakingExecutionResult::failure(
                 "Not a registered validator".to_string()
@@ -528,7 +525,7 @@ impl StakingExecutor {
         }
 
         // Claim rewards
-        let rewards = store.claim_rewards(&pubkey)?;
+        let rewards = Self::v_claim_rewards(view, &pubkey)?;
 
         // Credit rewards to sender's balance
         let mut sender_account = StateManager::v_get_account(view, sender)?;
@@ -547,9 +544,7 @@ impl StakingExecutor {
     /// Execute Delegate operation
     #[allow(clippy::too_many_arguments)]
     fn execute_delegate(
-        &self, view: &mut ExecutionView<'_, '_>,
-        staking_store: &StakingStore,
-        delegation_store: &DelegationStore,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
         block_height: BlockHeight,
@@ -565,7 +560,7 @@ impl StakingExecutor {
         }
 
         // Check validator exists and is active
-        let mut validator = match staking_store.get_validator(&delegate_data.validator_pubkey)? {
+        let mut validator = match Self::v_get_validator(view, &delegate_data.validator_pubkey)? {
             Some(v) => v,
             None => return Ok(StakingExecutionResult::failure(
                 "Validator not found".to_string()
@@ -598,10 +593,10 @@ impl StakingExecutor {
         delegator_key[..20].copy_from_slice(sender.as_bytes());
 
         // Check if delegation already exists
-        if let Some(mut existing) = delegation_store.get_delegation(&delegator_key, &delegate_data.validator_pubkey)? {
+        if let Some(mut existing) = Self::v_get_delegation(view, &delegator_key, &delegate_data.validator_pubkey)? {
             // Add to existing delegation
             existing.add_stake(delegate_data.amount);
-            delegation_store.put_delegation(&existing)?;
+            Self::v_put_delegation(view, &existing)?;
         } else {
             // Create new delegation
             let delegation = DelegationInfo::new(
@@ -610,12 +605,12 @@ impl StakingExecutor {
                 delegate_data.amount,
                 block_height,
             );
-            delegation_store.put_delegation(&delegation)?;
+            Self::v_put_delegation(view, &delegation)?;
         }
 
         // Update validator's total delegated amount
         validator.add_delegation(delegate_data.amount);
-        staking_store.put_validator(&validator)?;
+        Self::v_put_validator(view, &validator)?;
 
         info!(
             "Delegated {} from {} to validator 0x{}",
@@ -630,9 +625,8 @@ impl StakingExecutor {
     /// Execute Undelegate operation
     #[allow(clippy::too_many_arguments)]
     fn execute_undelegate(
-        &self, view: &mut ExecutionView<'_, '_>,
-        staking_store: &StakingStore,
-        delegation_store: &DelegationStore,
+        view: &mut ExecutionView<'_, '_>,
+        params: &ChainParams,
         sender: &Address,
         data: &[u8],
         block_height: BlockHeight,
@@ -652,7 +646,7 @@ impl StakingExecutor {
         delegator_key[..20].copy_from_slice(sender.as_bytes());
 
         // Get existing delegation
-        let mut delegation = match delegation_store.get_delegation(&delegator_key, &undelegate_data.validator_pubkey)? {
+        let mut delegation = match Self::v_get_delegation(view, &delegator_key, &undelegate_data.validator_pubkey)? {
             Some(d) => d,
             None => return Ok(StakingExecutionResult::failure(
                 "No delegation found for this validator".to_string()
@@ -668,7 +662,7 @@ impl StakingExecutor {
         }
 
         // Get unbonding period
-        let unbonding_period = self.params.staking.as_ref()
+        let unbonding_period = params.staking.as_ref()
             .map(|s| s.unbonding_period)
             .unwrap_or(100_800); // ~7 days default
 
@@ -679,21 +673,21 @@ impl StakingExecutor {
             undelegate_data.amount,
             block_height + unbonding_period,
         );
-        delegation_store.put_unbonding(&unbonding)?;
+        Self::v_put_unbonding(view, &unbonding)?;
 
         // Update delegation
         delegation.remove_stake(undelegate_data.amount);
         if delegation.amount == 0 && delegation.pending_rewards == 0 {
             // Remove empty delegation
-            delegation_store.delete_delegation(&delegator_key, &undelegate_data.validator_pubkey)?;
+            Self::v_delete_delegation(view, &delegator_key, &undelegate_data.validator_pubkey)?;
         } else {
-            delegation_store.put_delegation(&delegation)?;
+            Self::v_put_delegation(view, &delegation)?;
         }
 
         // Update validator's total delegated amount
-        if let Some(mut validator) = staking_store.get_validator(&undelegate_data.validator_pubkey)? {
+        if let Some(mut validator) = Self::v_get_validator(view, &undelegate_data.validator_pubkey)? {
             validator.remove_delegation(undelegate_data.amount);
-            staking_store.put_validator(&validator)?;
+            Self::v_put_validator(view, &validator)?;
         }
 
         // For simplicity, immediately return funds (in production would wait for unbonding)
@@ -714,8 +708,7 @@ impl StakingExecutor {
 
     /// Execute ClaimDelegationRewards operation
     fn execute_claim_delegation_rewards(
-        &self, view: &mut ExecutionView<'_, '_>,
-        delegation_store: &DelegationStore,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
     ) -> Result<StakingExecutionResult> {
@@ -728,7 +721,7 @@ impl StakingExecutor {
         delegator_key[..20].copy_from_slice(sender.as_bytes());
 
         // Get delegation
-        let delegation = match delegation_store.get_delegation(&delegator_key, &claim_data.validator_pubkey)? {
+        let delegation = match Self::v_get_delegation(view, &delegator_key, &claim_data.validator_pubkey)? {
             Some(d) => d,
             None => return Ok(StakingExecutionResult::failure(
                 "No delegation found for this validator".to_string()
@@ -742,7 +735,7 @@ impl StakingExecutor {
         }
 
         // Claim rewards
-        let rewards = delegation_store.claim_delegation_rewards(&delegator_key, &claim_data.validator_pubkey)?;
+        let rewards = Self::v_claim_delegation_rewards(view, &delegator_key, &claim_data.validator_pubkey)?;
 
         // Credit rewards to sender's balance
         let mut sender_account = StateManager::v_get_account(view, sender)?;
@@ -760,8 +753,7 @@ impl StakingExecutor {
 
     /// Execute WithdrawUnbonded operation
     fn execute_withdraw_unbonded(
-        &self,
-        delegation_store: &DelegationStore,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
         block_height: BlockHeight,
@@ -776,13 +768,13 @@ impl StakingExecutor {
 
         // Get completed unbondings
         let completed = if let Some(validator_pubkey) = withdraw_data.validator_pubkey {
-            delegation_store.get_completed_unbondings_for_validator(
+            Self::v_get_completed_unbondings_for_validator(view,
                 &delegator_key,
                 &validator_pubkey,
                 block_height,
             )?
         } else {
-            delegation_store.get_completed_unbondings(&delegator_key, block_height)?
+            Self::v_get_completed_unbondings(view, &delegator_key, block_height)?
         };
 
         if completed.is_empty() {
@@ -797,7 +789,7 @@ impl StakingExecutor {
             total_withdrawn = total_withdrawn.saturating_add(unbonding.amount);
 
             // Delete the unbonding entry
-            delegation_store.delete_unbonding(
+            Self::v_delete_unbonding(view,
                 &unbonding.delegator,
                 unbonding.completion_height,
                 &unbonding.validator_pubkey,
@@ -825,12 +817,8 @@ impl StakingExecutor {
     /// Execute SubmitEvidence operation
     #[allow(clippy::too_many_arguments)]
     fn execute_submit_evidence(
-        &self,
         view: &mut ExecutionView<'_, '_>,
-        staking_store: &StakingStore,
-        delegation_store: &DelegationStore,
-        slashing_store: &SlashingStore,
-        sender: &Address,
+        params: &ChainParams,
         data: &[u8],
         block_height: BlockHeight,
     ) -> Result<StakingExecutionResult> {
@@ -840,22 +828,17 @@ impl StakingExecutor {
 
         match evidence_data.evidence_type {
             EvidenceType::DoubleSign => {
-                self.handle_double_sign_evidence(
+                Self::handle_double_sign_evidence(
                     view,
-                    staking_store,
-                    delegation_store,
-                    slashing_store,
-                    sender,
+                    params,
                     &evidence_data.evidence,
                     block_height,
                 )
             }
             EvidenceType::Downtime => {
-                self.handle_downtime_evidence(
+                Self::handle_downtime_evidence(
                     view,
-                    staking_store,
-                    delegation_store,
-                    slashing_store,
+                    params,
                     &evidence_data.evidence,
                     block_height,
                 )
@@ -866,12 +849,8 @@ impl StakingExecutor {
     /// Handle double sign evidence
     #[allow(clippy::too_many_arguments)]
     fn handle_double_sign_evidence(
-        &self,
         view: &mut ExecutionView<'_, '_>,
-        staking_store: &StakingStore,
-        delegation_store: &DelegationStore,
-        slashing_store: &SlashingStore,
-        submitter: &Address,
+        params: &ChainParams,
         evidence_bytes: &[u8],
         block_height: BlockHeight,
     ) -> Result<StakingExecutionResult> {
@@ -887,7 +866,7 @@ impl StakingExecutor {
         }
 
         // Check if validator exists
-        let mut validator = match staking_store.get_validator(&evidence.validator_pubkey)? {
+        let mut validator = match Self::v_get_validator(view, &evidence.validator_pubkey)? {
             Some(v) => v,
             None => return Ok(StakingExecutionResult::failure(
                 "Validator not found".to_string()
@@ -895,14 +874,14 @@ impl StakingExecutor {
         };
 
         // Check if already slashed at this height
-        if slashing_store.was_slashed_at(&evidence.validator_pubkey, evidence.height)? {
+        if Self::v_was_slashed_at(view, &evidence.validator_pubkey, evidence.height)? {
             return Ok(StakingExecutionResult::failure(
                 "Validator already slashed for this height".to_string()
             ));
         }
 
         // Check if validator is tombstoned
-        if slashing_store.is_tombstoned(&evidence.validator_pubkey)? {
+        if Self::v_is_tombstoned(view, &evidence.validator_pubkey)? {
             return Ok(StakingExecutionResult::failure(
                 "Validator is already tombstoned".to_string()
             ));
@@ -913,11 +892,11 @@ impl StakingExecutor {
         // In production, verify that both signatures are valid for the validator's pubkey
 
         // Get slashing parameters
-        let slash_fraction_bps = self.params.staking.as_ref()
+        let slash_fraction_bps = params.staking.as_ref()
             .map(|s| s.double_sign_slash_bps)
             .unwrap_or(500); // 5% default
 
-        let jail_duration = self.params.staking.as_ref()
+        let jail_duration = params.staking.as_ref()
             .map(|s| s.double_sign_jail_duration)
             .unwrap_or(14400); // ~24 hours default
 
@@ -927,19 +906,19 @@ impl StakingExecutor {
 
         // Jail the validator (tombstone for double signing)
         validator.jail(block_height + jail_duration);
-        staking_store.put_validator(&validator)?;
+        Self::v_put_validator(view, &validator)?;
 
         // Apply slash to delegations
-        let delegation_slash = delegation_store.slash_delegations(
+        let delegation_slash = Self::v_slash_delegations(view,
             &evidence.validator_pubkey,
             slash_fraction_bps,
         )?;
 
         // Tombstone the validator (permanent jail for double signing)
-        if let Some(mut signing_info) = slashing_store.get_signing_info(&evidence.validator_pubkey)? {
+        if let Some(mut signing_info) = Self::v_get_signing_info(view, &evidence.validator_pubkey)? {
             signing_info.tombstone();
             signing_info.jailed_until = block_height + jail_duration;
-            slashing_store.put_signing_info(&signing_info)?;
+            Self::v_put_signing_info(view, &signing_info)?;
         } else {
             let mut signing_info = sumchain_primitives::ValidatorSigningInfo::new(
                 evidence.validator_pubkey,
@@ -947,7 +926,7 @@ impl StakingExecutor {
             );
             signing_info.tombstone();
             signing_info.jailed_until = block_height + jail_duration;
-            slashing_store.put_signing_info(&signing_info)?;
+            Self::v_put_signing_info(view, &signing_info)?;
         }
 
         // Create slashing record
@@ -961,7 +940,7 @@ impl StakingExecutor {
             true, // tombstoned
             slash_fraction_bps,
         );
-        slashing_store.put_slashing_record(&record)?;
+        Self::v_put_slashing_record(view, &record)?;
 
         // 800B correction: evidence-based validator slashing forfeits any
         // remaining grant-derived locked stake back to the ProtocolReserve
@@ -975,7 +954,10 @@ impl StakingExecutor {
             sumchain_primitives::supply::ServiceKind::Validator,
         )?;
 
-        // Reward the evidence submitter (optional: give them a portion of slashed funds)
+        // The evidence submitter is not rewarded. Nothing reads who they were,
+        // so the parameter that carried them is gone; a change that pays them a
+        // portion of the slashed funds would take it again. The downtime
+        // handler never had one, which is what made this one visible as dead.
         // For now, slashed funds are burned (not credited anywhere)
         let total_slashed = validator_slash + delegation_slash;
 
@@ -992,11 +974,8 @@ impl StakingExecutor {
 
     /// Handle downtime evidence
     fn handle_downtime_evidence(
-        &self,
         view: &mut ExecutionView<'_, '_>,
-        staking_store: &StakingStore,
-        delegation_store: &DelegationStore,
-        slashing_store: &SlashingStore,
+        params: &ChainParams,
         evidence_bytes: &[u8],
         block_height: BlockHeight,
     ) -> Result<StakingExecutionResult> {
@@ -1005,7 +984,7 @@ impl StakingExecutor {
             .map_err(|e| StateError::BlockValidation(format!("Invalid downtime evidence: {}", e)))?;
 
         // Get downtime threshold
-        let threshold = self.params.staking.as_ref()
+        let threshold = params.staking.as_ref()
             .map(|s| s.downtime_threshold)
             .unwrap_or(500);
 
@@ -1018,7 +997,7 @@ impl StakingExecutor {
         }
 
         // Check if validator exists
-        let mut validator = match staking_store.get_validator(&evidence.validator_pubkey)? {
+        let mut validator = match Self::v_get_validator(view, &evidence.validator_pubkey)? {
             Some(v) => v,
             None => return Ok(StakingExecutionResult::failure(
                 "Validator not found".to_string()
@@ -1033,18 +1012,18 @@ impl StakingExecutor {
         }
 
         // Check if tombstoned
-        if slashing_store.is_tombstoned(&evidence.validator_pubkey)? {
+        if Self::v_is_tombstoned(view, &evidence.validator_pubkey)? {
             return Ok(StakingExecutionResult::failure(
                 "Validator is tombstoned".to_string()
             ));
         }
 
         // Get slashing parameters
-        let slash_fraction_bps = self.params.staking.as_ref()
+        let slash_fraction_bps = params.staking.as_ref()
             .map(|s| s.downtime_slash_bps)
             .unwrap_or(10); // 0.1% default
 
-        let jail_duration = self.params.staking.as_ref()
+        let jail_duration = params.staking.as_ref()
             .map(|s| s.downtime_jail_duration)
             .unwrap_or(2400); // ~4 hours default
 
@@ -1054,19 +1033,19 @@ impl StakingExecutor {
 
         // Jail the validator
         validator.jail(block_height + jail_duration);
-        staking_store.put_validator(&validator)?;
+        Self::v_put_validator(view, &validator)?;
 
         // Apply slash to delegations
-        let delegation_slash = delegation_store.slash_delegations(
+        let delegation_slash = Self::v_slash_delegations(view,
             &evidence.validator_pubkey,
             slash_fraction_bps,
         )?;
 
         // Update signing info
-        if let Some(mut signing_info) = slashing_store.get_signing_info(&evidence.validator_pubkey)? {
+        if let Some(mut signing_info) = Self::v_get_signing_info(view, &evidence.validator_pubkey)? {
             signing_info.reset_missed();
             signing_info.jailed_until = block_height + jail_duration;
-            slashing_store.put_signing_info(&signing_info)?;
+            Self::v_put_signing_info(view, &signing_info)?;
         }
 
         // Create slashing record
@@ -1080,7 +1059,7 @@ impl StakingExecutor {
             false, // not tombstoned for downtime
             slash_fraction_bps,
         );
-        slashing_store.put_slashing_record(&record)?;
+        Self::v_put_slashing_record(view, &record)?;
 
         // 800B correction: evidence-based validator slashing forfeits any
         // remaining grant-derived locked stake back to the ProtocolReserve
@@ -1106,134 +1085,6 @@ impl StakingExecutor {
         Ok(StakingExecutionResult::success_with_amount(total_slashed))
     }
 
-    /// Slash a validator directly (called by consensus when misbehavior is detected)
-    pub fn slash_validator(
-        &self,
-        view: &mut ExecutionView<'_, '_>,
-        validator_pubkey: &[u8; 32],
-        evidence_type: EvidenceType,
-        block_height: BlockHeight,
-    ) -> Result<Balance> {
-        let staking_store = StakingStore::new(&self.db);
-        let delegation_store = DelegationStore::new(&self.db);
-        let slashing_store = SlashingStore::new(&self.db);
-
-        // Get validator
-        let mut validator = match staking_store.get_validator(validator_pubkey)? {
-            Some(v) => v,
-            None => return Err(StateError::BlockValidation("Validator not found".to_string())),
-        };
-
-        // Get slashing parameters based on evidence type
-        let (slash_fraction_bps, jail_duration, tombstone) = match evidence_type {
-            EvidenceType::DoubleSign => {
-                let slash = self.params.staking.as_ref()
-                    .map(|s| s.double_sign_slash_bps)
-                    .unwrap_or(500);
-                let jail = self.params.staking.as_ref()
-                    .map(|s| s.double_sign_jail_duration)
-                    .unwrap_or(14400);
-                (slash, jail, true)
-            }
-            EvidenceType::Downtime => {
-                let slash = self.params.staking.as_ref()
-                    .map(|s| s.downtime_slash_bps)
-                    .unwrap_or(10);
-                let jail = self.params.staking.as_ref()
-                    .map(|s| s.downtime_jail_duration)
-                    .unwrap_or(2400);
-                (slash, jail, false)
-            }
-        };
-
-        // Apply slash to validator
-        let validator_slash = (validator.stake * slash_fraction_bps as u128) / 10000;
-        validator.apply_slash(slash_fraction_bps);
-        validator.jail(block_height + jail_duration);
-        staking_store.put_validator(&validator)?;
-
-        // Apply slash to delegations
-        let delegation_slash = delegation_store.slash_delegations(validator_pubkey, slash_fraction_bps)?;
-
-        // Update signing info
-        if tombstone {
-            if let Some(mut signing_info) = slashing_store.get_signing_info(validator_pubkey)? {
-                signing_info.tombstone();
-                signing_info.jailed_until = block_height + jail_duration;
-                slashing_store.put_signing_info(&signing_info)?;
-            }
-        }
-
-        // Create slashing record
-        let record = SlashingRecord::new(
-            *validator_pubkey,
-            evidence_type,
-            block_height,
-            validator_slash,
-            delegation_slash,
-            block_height + jail_duration,
-            tombstone,
-            slash_fraction_bps,
-        );
-        slashing_store.put_slashing_record(&record)?;
-
-        // 800B correction: evidence-based validator slashing forfeits any
-        // remaining grant-derived locked stake back to the ProtocolReserve
-        // (grant money is public reserve money — misbehaviour returns it).
-        // Self-funded stake follows the normal staking rules above. No-op if
-        // no active grant / correction dormant.
-        crate::supply::SupplyStore::forfeit_locked_grant(
-            view,
-            
-            &sumchain_primitives::Address::from_public_key(validator_pubkey),
-            sumchain_primitives::supply::ServiceKind::Validator,
-        )?;
-
-        let total_slashed = validator_slash + delegation_slash;
-
-        info!(
-            "Slashed validator 0x{} for {} ({:?})",
-            hex::encode(&validator_pubkey[..8]),
-            total_slashed,
-            evidence_type
-        );
-
-        Ok(total_slashed)
-    }
-
-    // ========================================================================
-    // Query Methods (for RPC)
-    // ========================================================================
-
-    /// Get validator info (for RPC)
-    pub fn get_validator(&self, pubkey: &[u8; 32]) -> Result<Option<ValidatorInfo>> {
-        let store = StakingStore::new(&self.db);
-        store.get_validator(pubkey).map_err(StateError::from)
-    }
-
-    /// Get all validators (for RPC)
-    pub fn get_all_validators(&self) -> Result<Vec<ValidatorInfo>> {
-        let store = StakingStore::new(&self.db);
-        store.get_all_validators().map_err(StateError::from)
-    }
-
-    /// Get active validators (for consensus)
-    pub fn get_active_validators(&self) -> Result<Vec<ValidatorInfo>> {
-        let store = StakingStore::new(&self.db);
-        store.get_active_validators().map_err(StateError::from)
-    }
-
-    /// Get validators sorted by stake
-    pub fn get_validators_by_stake(&self) -> Result<Vec<ValidatorInfo>> {
-        let store = StakingStore::new(&self.db);
-        store.get_validators_by_stake().map_err(StateError::from)
-    }
-
-    /// Get total staked amount
-    pub fn get_total_stake(&self) -> Result<Balance> {
-        let store = StakingStore::new(&self.db);
-        store.get_total_stake().map_err(StateError::from)
-    }
 }
 
 // FIXME: tests reference primitives fields removed during schema migration; gated until updated.

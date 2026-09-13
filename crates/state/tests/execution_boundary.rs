@@ -1044,6 +1044,62 @@ fn migrated_execution_paths_take_no_self_receiver() {
         ("storage_metadata.rs", "fn execute_submit_proof("),
         ("storage_metadata.rs", "fn execute_register_file_pending_v2("),
         ("storage_metadata.rs", "fn execute_abandon_file_v2("),
+        // Staking and delegation. The candidate side lives in staking_view.rs;
+        // the handlers in staking_executor.rs take a view and no receiver, so
+        // `self.db` is not reachable from any of them by construction.
+        ("staking_view.rs", "fn v_get_validator("),
+        ("staking_view.rs", "fn v_put_validator("),
+        ("staking_view.rs", "fn v_validator_exists("),
+        ("staking_view.rs", "fn v_get_all_validators("),
+        ("staking_view.rs", "fn v_get_active_validators("),
+        ("staking_view.rs", "fn v_get_validators_by_stake("),
+        ("staking_view.rs", "fn v_get_validator_count("),
+        ("staking_view.rs", "fn v_get_total_stake("),
+        ("staking_view.rs", "fn v_total_validator_self_stake("),
+        ("staking_view.rs", "fn v_claim_rewards("),
+        ("staking_view.rs", "fn v_get_validator_delegators("),
+        ("staking_view.rs", "fn v_add_to_validator_index("),
+        ("staking_view.rs", "fn v_remove_from_validator_index("),
+        ("staking_view.rs", "fn v_get_delegation("),
+        ("staking_view.rs", "fn v_put_delegation("),
+        ("staking_view.rs", "fn v_delete_delegation("),
+        ("staking_view.rs", "fn v_get_delegations_by_validator("),
+        ("staking_view.rs", "fn v_total_active_delegations("),
+        ("staking_view.rs", "fn v_claim_delegation_rewards("),
+        ("staking_view.rs", "fn v_slash_delegations("),
+        ("staking_view.rs", "fn v_put_unbonding("),
+        ("staking_view.rs", "fn v_delete_unbonding("),
+        ("staking_view.rs", "fn v_get_unbondings_by_delegator("),
+        ("staking_view.rs", "fn v_get_completed_unbondings("),
+        ("staking_view.rs", "fn v_get_completed_unbondings_for_validator("),
+        ("staking_view.rs", "fn v_put_slashing_record("),
+        ("staking_view.rs", "fn v_was_slashed_at("),
+        ("staking_view.rs", "fn v_get_signing_info("),
+        ("staking_view.rs", "fn v_put_signing_info("),
+        ("staking_view.rs", "fn v_is_tombstoned("),
+        ("staking_executor.rs", "fn execute("),
+        ("staking_executor.rs", "fn deduct_fee("),
+        ("staking_executor.rs", "fn execute_create_validator("),
+        ("staking_executor.rs", "fn execute_add_stake("),
+        ("staking_executor.rs", "fn execute_unstake("),
+        ("staking_executor.rs", "fn execute_update_validator("),
+        ("staking_executor.rs", "fn execute_unjail("),
+        ("staking_executor.rs", "fn execute_claim_rewards("),
+        ("staking_executor.rs", "fn execute_delegate("),
+        ("staking_executor.rs", "fn execute_undelegate("),
+        ("staking_executor.rs", "fn execute_claim_delegation_rewards("),
+        ("staking_executor.rs", "fn execute_withdraw_unbonded("),
+        ("staking_executor.rs", "fn execute_submit_evidence("),
+        ("staking_executor.rs", "fn handle_double_sign_evidence("),
+        ("staking_executor.rs", "fn handle_downtime_evidence("),
+        ("supply.rs", "fn claim_validator_grant("),
+        // The census lost its `&Arc<Database>` when the last unmigrated
+        // bucket did: every INCLUDE bucket is candidate-aware, so the core
+        // is pure assembly and neither caller lends the other a committed
+        // handle.
+        ("supply.rs", "fn v_native_supply_snapshot("),
+        ("supply.rs", "fn v_assess_supply_correction("),
+        ("supply.rs", "fn apply_supply_correction_if_needed("),
     ];
 
     let files = rust_files();
@@ -1770,31 +1826,6 @@ fn partially_migrated_execution_paths_are_declared() {
             "fn apply_beacon_transitions(",
             "nothing — it stages through the view; the receiver holds the \
              per-block accumulator slot",
-        ),
-        (
-            "supply.rs",
-            "fn apply_supply_correction_if_needed(",
-            "the unmigrated census buckets — accounts, validator self-stake and \
-             active delegations — through `&Arc<Database>`. Those subsystems \
-             have not migrated, so committed IS where their rows are; this \
-             closes as they move. Inference escrow and bonds, archive stake and \
-             the storage fee pools are read from the CANDIDATE, as are the \
-             reserve and ledger it writes.",
-        ),
-        (
-            "supply.rs",
-            "fn v_native_supply_snapshot(",
-            "the same unmigrated buckets, for the same reason. It takes both \
-             handles deliberately: the migrated buckets from the candidate, \
-             everything else from committed, with no committed-first pass that \
-             a candidate's deletion would have to undo.",
-        ),
-        (
-            "supply.rs",
-            "fn claim_validator_grant(",
-            "the validator's self-stake, through `StakingStore::new(db)`. \
-             Staking has not migrated; every grant row it reads and writes goes \
-             through the view.",
         ),
         (
             "executor.rs",

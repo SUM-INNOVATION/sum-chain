@@ -285,28 +285,6 @@ const MANIFEST: &[(&str, &str, &str, &str, usize)] = &[
     ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "PropertyProofStore::put", "PROPERTY_PROOFS", 1),
     ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "TitleEventStore::put", "PROPERTY_ASSET_TITLE_INDEX+PROPERTY_TITLE_EVENTS", 2),
     ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "TitleEventStore::update_status", "PROPERTY_TITLE_EVENTS", 3),
-    ("crates/state/src/staking_executor.rs", "StakingExecutor::execute_add_stake", "StakingStore::put_validator", "VALIDATORS", 1),
-    ("crates/state/src/staking_executor.rs", "StakingExecutor::execute_claim_delegation_rewards", "DelegationStore::claim_delegation_rewards", "DELEGATIONS+DELEGATION_VALIDATOR_INDEX", 1),
-    ("crates/state/src/staking_executor.rs", "StakingExecutor::execute_claim_rewards", "StakingStore::claim_rewards", "VALIDATORS", 1),
-    ("crates/state/src/staking_executor.rs", "StakingExecutor::execute_create_validator", "StakingStore::put_validator", "VALIDATORS", 1),
-    ("crates/state/src/staking_executor.rs", "StakingExecutor::execute_delegate", "DelegationStore::put_delegation", "DELEGATIONS+DELEGATION_VALIDATOR_INDEX", 2),
-    ("crates/state/src/staking_executor.rs", "StakingExecutor::execute_delegate", "StakingStore::put_validator", "VALIDATORS", 1),
-    ("crates/state/src/staking_executor.rs", "StakingExecutor::execute_undelegate", "DelegationStore::delete_delegation", "DELEGATIONS+DELEGATION_VALIDATOR_INDEX", 1),
-    ("crates/state/src/staking_executor.rs", "StakingExecutor::execute_undelegate", "DelegationStore::put_delegation", "DELEGATIONS+DELEGATION_VALIDATOR_INDEX", 1),
-    ("crates/state/src/staking_executor.rs", "StakingExecutor::execute_undelegate", "DelegationStore::put_unbonding", "UNBONDING_DELEGATIONS", 1),
-    ("crates/state/src/staking_executor.rs", "StakingExecutor::execute_undelegate", "StakingStore::put_validator", "VALIDATORS", 1),
-    ("crates/state/src/staking_executor.rs", "StakingExecutor::execute_unjail", "StakingStore::put_validator", "VALIDATORS", 1),
-    ("crates/state/src/staking_executor.rs", "StakingExecutor::execute_unstake", "StakingStore::put_validator", "VALIDATORS", 1),
-    ("crates/state/src/staking_executor.rs", "StakingExecutor::execute_update_validator", "StakingStore::put_validator", "VALIDATORS", 1),
-    ("crates/state/src/staking_executor.rs", "StakingExecutor::execute_withdraw_unbonded", "DelegationStore::delete_unbonding", "UNBONDING_DELEGATIONS", 1),
-    ("crates/state/src/staking_executor.rs", "StakingExecutor::handle_double_sign_evidence", "DelegationStore::slash_delegations", "DELEGATIONS+DELEGATION_VALIDATOR_INDEX", 1),
-    ("crates/state/src/staking_executor.rs", "StakingExecutor::handle_double_sign_evidence", "SlashingStore::put_signing_info", "VALIDATOR_SIGNING_INFO", 2),
-    ("crates/state/src/staking_executor.rs", "StakingExecutor::handle_double_sign_evidence", "SlashingStore::put_slashing_record", "SLASHING_RECORDS", 1),
-    ("crates/state/src/staking_executor.rs", "StakingExecutor::handle_double_sign_evidence", "StakingStore::put_validator", "VALIDATORS", 1),
-    ("crates/state/src/staking_executor.rs", "StakingExecutor::handle_downtime_evidence", "DelegationStore::slash_delegations", "DELEGATIONS+DELEGATION_VALIDATOR_INDEX", 1),
-    ("crates/state/src/staking_executor.rs", "StakingExecutor::handle_downtime_evidence", "SlashingStore::put_signing_info", "VALIDATOR_SIGNING_INFO", 1),
-    ("crates/state/src/staking_executor.rs", "StakingExecutor::handle_downtime_evidence", "SlashingStore::put_slashing_record", "SLASHING_RECORDS", 1),
-    ("crates/state/src/staking_executor.rs", "StakingExecutor::handle_downtime_evidence", "StakingStore::put_validator", "VALIDATORS", 1),
     ("crates/state/src/tax_executor.rs", "TaxExecutor::execute", "TaxClaimTypeStore::put", "TAX_CLAIM_TYPES", 3),
     ("crates/state/src/tax_executor.rs", "TaxExecutor::execute", "TaxDisclosureStore::put", "TAX_DISCLOSURES", 1),
     ("crates/state/src/tax_executor.rs", "TaxExecutor::execute", "TaxIssuerStore::put", "TAX_ISSUERS", 3),
@@ -332,13 +310,13 @@ const MANIFEST: &[(&str, &str, &str, &str, usize)] = &[
 
 /// Occurrences, not rows: a caller reaching the same mutator three times is
 /// three places to fix.
-const MANIFEST_OCCURRENCES: usize = 304;
+const MANIFEST_OCCURRENCES: usize = 280;
 
 /// Application column families a block can still commit to directly.
 ///
 /// ONLY EVER DECREASE. Recorded at `1687789`. Lower than the 116 the unrooted
 /// audit reported, for the reason in [`UNREACHED_MUTATORS`].
-const LEDGER_CF_COUNT: usize = 113;
+const LEDGER_CF_COUNT: usize = 107;
 
 /// Functions that commit application state but that no entry point reaches.
 ///
@@ -350,11 +328,6 @@ const LEDGER_CF_COUNT: usize = 113;
 /// Both of these are `pub` with no production caller anywhere in the workspace —
 /// verified by grep, not by this resolver — so excluding them is correct.
 const UNREACHED_MUTATORS: &[(&str, &str, &str)] = &[
-    (
-        "crates/state/src/staking_executor.rs",
-        "StakingExecutor::slash_validator",
-        "pub, no production caller: evidence handling calls put_signing_info directly",
-    ),
     (
         "crates/state/src/state.rs",
         "StateManager::revert_state_diff",
@@ -426,7 +399,7 @@ const ARMS: &[(&str, ArmKind, &str)] = &[
     ("NodeRegistryV2", ArmKind::Overlay, "node_registry.rs"),
     ("PolicyAccount", ArmKind::Committed, "policy_account_executor.rs -> PolicyAccountStorage"),
     ("Property", ArmKind::Committed, "property_executor.rs -> PropertyStore sub-stores"),
-    ("Staking", ArmKind::Committed, "staking_executor.rs -> Staking/Delegation/SlashingStore"),
+    ("Staking", ArmKind::Overlay, "staking_executor.rs -> StakingExecutor::v_* -> candidate"),
     ("StorageMetadata", ArmKind::Overlay, "storage_metadata.rs"),
     ("StorageMetadataV2", ArmKind::Overlay, "storage_metadata.rs"),
     ("Supply", ArmKind::Overlay, "supply.rs"),
@@ -1992,7 +1965,7 @@ fn every_dispatcher_arm_is_declared() {
     let mixed = ARMS.iter().filter(|(_, k, _)| *k == ArmKind::Mixed).count();
     assert_eq!(
         (overlay, committed, mixed),
-        (13, 16, 1),
+        (14, 15, 1),
         "the overlay/committed/mixed split changed. Moving an arm from \
          Committed to Overlay is progress — update this and the manifest \
          together; any other movement is not."

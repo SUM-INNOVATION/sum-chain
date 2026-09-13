@@ -238,7 +238,6 @@ pub struct BlockExecutor {
     nft_executor: NftExecutor,
     token_executor: TokenExecutor,
     contract_executor: ContractExecutorState,
-    staking_executor: StakingExecutor,
     messaging_executor: MessagingExecutor,
     docclass_executor: DocClassExecutor,
     tax_executor: TaxExecutor,
@@ -318,7 +317,6 @@ impl BlockExecutor {
         let nft_executor = NftExecutor::new(db.clone(), params.clone());
         let token_executor = TokenExecutor::new(db.clone(), params.clone());
         let contract_executor = ContractExecutorState::new(db.clone(), params.clone());
-        let staking_executor = StakingExecutor::new(db.clone(), params.clone());
         let messaging_executor = MessagingExecutor::new(db.clone(), params.clone());
         let docclass_executor = DocClassExecutor::new(db.clone(), params.clone());
         let tax_executor = TaxExecutor::new(db.clone(), params.clone());
@@ -339,7 +337,6 @@ impl BlockExecutor {
             nft_executor,
             token_executor,
             contract_executor,
-            staking_executor,
             messaging_executor,
             docclass_executor,
             tax_executor,
@@ -662,8 +659,9 @@ impl BlockExecutor {
                     }
                     TxPayload::Staking(staking_data) => {
                         // Execute staking operation
-                        let result = self.staking_executor.execute(
+                        let result = StakingExecutor::execute(
                             view,
+                            &self.params,
                             &v2_tx.from,
                             &staking_data,
                             proposer,
@@ -1844,16 +1842,14 @@ impl BlockExecutor {
 
                         use crate::supply::SupplyStore;
                         use sumchain_primitives::supply::{ServiceKind, SupplyOperation};
-                        // Grants are staged into this block's candidate. The
-                        // eligibility census still reads committed state through
-                        // `&self.db` — staking, delegation and the node registry
-                        // have not migrated, so that is where their rows are.
+                        // Grants are staged into this block's candidate, and
+                        // the eligibility check reads it: a validator this block
+                        // created or jailed decides its own grant.
                         let outcome: std::result::Result<u128, u32> = match &supply_data.operation {
                             SupplyOperation::ClaimServiceGrant { service_kind } => {
                                 match service_kind {
                                     ServiceKind::Validator => SupplyStore::claim_validator_grant(
                                         view,
-                                        &self.db,
                                         &v2_tx.from,
                                         block_height,
                                     ),
@@ -2373,8 +2369,9 @@ impl BlockExecutor {
                 }
 
                 // Execute staking operation
-                let result = self.staking_executor.execute(
+                let result = StakingExecutor::execute(
                     view,
+                    &self.params,
                     &tx.from,
                     staking_data,
                     proposer,
@@ -3166,17 +3163,16 @@ impl BlockExecutor {
         // decide — escrow and verifier bonds moved with that cluster, so a
         // block that opens or claims a session measures what it will publish.
         //
-        // The rest of the census still reads committed state through
-        // `&self.db`: accounts, validator self-stake, active delegations,
-        // archive stake and the storage fee pools have not migrated, so
-        // committed IS where their rows are. That remaining asymmetry is
-        // tracked in `partially_migrated_execution_paths_are_declared` and
-        // closes as those subsystems move.
+        // Accounts, validator self-stake, active delegations, archive stake
+        // and the storage fee pools now read the candidate too, so the census
+        // measures what this block will publish rather than what its parent
+        // did. What still comes from `&self.db` is every bucket whose subsystem
+        // has not migrated; that shrinking asymmetry is tracked in
+        // `partially_migrated_execution_paths_are_declared`.
         {
             let mut view = candidate.view();
             crate::supply::apply_supply_correction_if_needed(
                 &mut view,
-                &self.db,
                 self.state.chain_id(),
                 block.height(),
             )?;
