@@ -22,12 +22,25 @@
 //!
 //! It computes the CLOSURE: every function that can reach a concrete database
 //! mutation, following store constructions, accessor hops, `StateManager`,
-//! struct fields, parameters and the contract flush — then counts the call sites
-//! that block execution can reach, and pins them to a recorded ledger that may
-//! only move down.
+//! struct fields, parameters, module-path and `Self::` calls, and the contract
+//! flush — then walks FORWARD from `BlockExecutor::execute_block` and records
+//! every crossing that block execution can actually reach.
 //!
-//! The ledger is per-file, not a single total, so a write removed from one
-//! subsystem cannot pay for a write added to another.
+//! Two properties make it a guard rather than a survey:
+//!
+//! * **Rooted.** A site counts only if an entry point reaches the function it
+//!   is in. An earlier version scanned every application function and defaulted
+//!   `crates/state/src` to "execution", which counted a `pub fn` nothing calls
+//!   the same as one the dispatcher runs every block — and made deleting dead
+//!   code look like migration progress. A mutating function no root reaches is
+//!   now declared in [`UNREACHED_MUTATORS`], not silently dropped.
+//!
+//! * **Keyed by identity.** [`MANIFEST`] records `(file, caller, callee,
+//!   column families, occurrences)`. A count alone is not a guard: removing one
+//!   write and adding another in the same file leaves a per-file total
+//!   unchanged, and swapping which family a write targets leaves a family total
+//!   unchanged. Both are real changes to what an unaccepted block can commit,
+//!   and both used to pass.
 //!
 //! # What is deliberately NOT counted
 //!
@@ -43,51 +56,304 @@
 //!
 //! A fifth is not legitimate: OPERATOR TOOLING. See
 //! [`operator_tooling_writes_are_declared_deployment_blockers`].
+//!
+//! The one sanctioned committed write — `ApplicationOverlay::into_batch`,
+//! reachable only from `AcceptedCandidate::publish` — is exempt by FUNCTION,
+//! not by file. An earlier version exempted three whole files, which hid any
+//! other direct write in them.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // THE LEDGER
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Committed write sites reachable from block execution, per file.
+/// Every committed write block execution can reach, keyed by IDENTITY.
 ///
-/// ONLY EVER DECREASE THESE. This is the inventory the application journal has
-/// to empty; a number that grows is a new way for an unaccepted block to change
-/// canonical state.
+/// `(file, caller, callee, column families, occurrences)`.
 ///
-/// Recorded at `20544f8a`, the commit that finished the storage-metadata and
-/// node-registry cluster. The subsystems absent from this list — education,
-/// inference attestation, inference settlement, supply, node registry, storage
-/// metadata, compute pool, beacon — write through the overlay and have no entry
-/// to lose.
-fn execution_ledger() -> BTreeMap<&'static str, usize> {
-    BTreeMap::from([
-        ("crates/state/src/agreement_executor.rs", 20),
-        ("crates/state/src/docclass_executor.rs", 46),
-        ("crates/state/src/employment_executor.rs", 13),
-        ("crates/state/src/equity_executor.rs", 12),
-        ("crates/state/src/executor.rs", 1),
-        ("crates/state/src/finance_executor.rs", 14),
-        ("crates/state/src/governance_executor.rs", 9),
-        ("crates/state/src/healthcare_executor.rs", 29),
-        ("crates/state/src/legal_executor.rs", 26),
-        ("crates/state/src/messaging_executor.rs", 26),
-        ("crates/state/src/nft_executor.rs", 17),
-        ("crates/state/src/policy_account_executor.rs", 8),
-        ("crates/state/src/property_executor.rs", 31),
-        ("crates/state/src/staking_executor.rs", 28),
-        ("crates/state/src/state.rs", 9),
-        ("crates/state/src/tax_executor.rs", 11),
-        ("crates/state/src/token_executor.rs", 17),
-    ])
-}
+/// A count is not a guard. With per-file totals, removing one write and adding
+/// another in the same file passed; swapping which family a write targets, while
+/// the family total stayed at 116, passed. Both change what an unaccepted block
+/// can commit. Keying the caller function, the library function it actually
+/// reaches, and the families that reach the database moves a row for either.
+///
+/// The caller is a function NAME, not a line: reformatting does not churn this,
+/// and moving a write to a different function does.
+///
+/// ONLY EVER REMOVE ROWS. Recorded at `1687789`, rooted at
+/// `BlockExecutor::execute_block`.
+const MANIFEST: &[(&str, &str, &str, &str, usize)] = &[
+    ("crates/state/src/agreement_executor.rs", "AgreementExecutor::execute", "AgreementCommitmentStore::mark_party_signed", "AGREEMENT_COMMITMENTS", 1),
+    ("crates/state/src/agreement_executor.rs", "AgreementExecutor::execute", "AgreementCommitmentStore::put", "AGREEMENT_COMMITMENTS+AGREEMENT_PARTY_INDEX", 2),
+    ("crates/state/src/agreement_executor.rs", "AgreementExecutor::execute", "AgreementCommitmentStore::update_status", "AGREEMENT_COMMITMENTS", 3),
+    ("crates/state/src/agreement_executor.rs", "AgreementExecutor::execute", "AgreementProofStore::put", "AGREEMENT_PROOFS", 1),
+    ("crates/state/src/agreement_executor.rs", "AgreementExecutor::execute", "AttestationStore::put", "AGREEMENT_ATTESTATIONS", 1),
+    ("crates/state/src/agreement_executor.rs", "AgreementExecutor::execute", "AttestationStore::update_status", "AGREEMENT_ATTESTATIONS", 2),
+    ("crates/state/src/agreement_executor.rs", "AgreementExecutor::execute", "ExecutorLinkStore::put", "AGREEMENT_EXECUTOR_INDEX+AGREEMENT_EXECUTOR_LINKS", 1),
+    ("crates/state/src/agreement_executor.rs", "AgreementExecutor::execute", "ExecutorLinkStore::update_state", "AGREEMENT_EXECUTOR_LINKS", 5),
+    ("crates/state/src/agreement_executor.rs", "AgreementExecutor::execute", "IpActionStore::put", "AGREEMENT_IP_ACTIONS", 1),
+    ("crates/state/src/agreement_executor.rs", "AgreementExecutor::execute", "IpActionStore::update_status", "AGREEMENT_IP_ACTIONS", 1),
+    ("crates/state/src/agreement_executor.rs", "AgreementExecutor::execute", "SignatureStore::delete", "AGREEMENT_SIGNATURES", 1),
+    ("crates/state/src/agreement_executor.rs", "AgreementExecutor::execute", "SignatureStore::put", "AGREEMENT_SIGNATURES", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::create_identity_root", "DocClassEventStore::put", "DOCCLASS_EVENTS", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::create_identity_root", "IdentityRootStore::put", "DOCCLASS_IDENTITY_ROOTS+DOCCLASS_SUBJECT_INDEX", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::deactivate_identity", "DocClassEventStore::put", "DOCCLASS_EVENTS", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::deactivate_identity", "IdentityRootStore::update_status", "DOCCLASS_IDENTITY_ROOTS+DOCCLASS_SUBJECT_INDEX", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::deactivate_issuer", "DocClassEventStore::put", "DOCCLASS_EVENTS", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::deactivate_issuer", "DocClassIssuerStore::update_status", "DOCCLASS_ISSUERS", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::identity_add_controller", "DocClassEventStore::put", "DOCCLASS_EVENTS", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::identity_add_controller", "IdentityRootStore::put", "DOCCLASS_IDENTITY_ROOTS+DOCCLASS_SUBJECT_INDEX", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::identity_add_key", "DocClassEventStore::put", "DOCCLASS_EVENTS", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::identity_add_key", "IdentityRootStore::put", "DOCCLASS_IDENTITY_ROOTS+DOCCLASS_SUBJECT_INDEX", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::identity_remove_controller", "DocClassEventStore::put", "DOCCLASS_EVENTS", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::identity_remove_controller", "IdentityRootStore::put", "DOCCLASS_IDENTITY_ROOTS+DOCCLASS_SUBJECT_INDEX", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::identity_remove_key", "DocClassEventStore::put", "DOCCLASS_EVENTS", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::identity_remove_key", "IdentityRootStore::put", "DOCCLASS_IDENTITY_ROOTS+DOCCLASS_SUBJECT_INDEX", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::identity_rotate_key", "DocClassEventStore::put", "DOCCLASS_EVENTS", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::identity_rotate_key", "IdentityRootStore::put", "DOCCLASS_IDENTITY_ROOTS+DOCCLASS_SUBJECT_INDEX", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::identity_update_service", "DocClassEventStore::put", "DOCCLASS_EVENTS", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::identity_update_service", "IdentityRootStore::put", "DOCCLASS_IDENTITY_ROOTS+DOCCLASS_SUBJECT_INDEX", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::issue_academic_credential", "CredentialStore::put", "DOCCLASS_CREDENTIALS+DOCCLASS_ISSUER_INDEX+DOCCLASS_SUBJECT_INDEX", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::issue_academic_credential", "DocClassEventStore::put", "DOCCLASS_EVENTS", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::issue_eligibility", "DocClassEventStore::put", "DOCCLASS_EVENTS", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::issue_eligibility", "EligibilityStore::put", "DOCCLASS_ELIGIBILITY+DOCCLASS_ISSUER_INDEX+DOCCLASS_SUBJECT_INDEX", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::reactivate_credential", "CredentialStore::update_revocation", "DOCCLASS_CREDENTIALS+DOCCLASS_ISSUER_INDEX+DOCCLASS_SUBJECT_INDEX", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::reactivate_credential", "DocClassEventStore::put", "DOCCLASS_EVENTS", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::reactivate_credential", "EligibilityStore::update_revocation", "DOCCLASS_ELIGIBILITY+DOCCLASS_ISSUER_INDEX+DOCCLASS_SUBJECT_INDEX", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::reactivate_credential", "RevocationStore::put", "DOCCLASS_REVOCATIONS", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::reactivate_identity", "DocClassEventStore::put", "DOCCLASS_EVENTS", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::reactivate_identity", "IdentityRootStore::update_status", "DOCCLASS_IDENTITY_ROOTS+DOCCLASS_SUBJECT_INDEX", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::register_issuer", "DocClassEventStore::put", "DOCCLASS_EVENTS", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::register_issuer", "DocClassIssuerStore::put", "DOCCLASS_ISSUERS", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::revoke_credential", "CredentialStore::update_revocation", "DOCCLASS_CREDENTIALS+DOCCLASS_ISSUER_INDEX+DOCCLASS_SUBJECT_INDEX", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::revoke_credential", "DocClassEventStore::put", "DOCCLASS_EVENTS", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::revoke_credential", "EligibilityStore::update_revocation", "DOCCLASS_ELIGIBILITY+DOCCLASS_ISSUER_INDEX+DOCCLASS_SUBJECT_INDEX", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::revoke_credential", "RevocationStore::put", "DOCCLASS_REVOCATIONS", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::rotate_issuer_key", "DocClassEventStore::put", "DOCCLASS_EVENTS", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::rotate_issuer_key", "DocClassIssuerStore::put", "DOCCLASS_ISSUERS", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::supersede_credential", "CredentialStore::update_revocation", "DOCCLASS_CREDENTIALS+DOCCLASS_ISSUER_INDEX+DOCCLASS_SUBJECT_INDEX", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::supersede_credential", "DocClassEventStore::put", "DOCCLASS_EVENTS", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::supersede_credential", "EligibilityStore::update_revocation", "DOCCLASS_ELIGIBILITY+DOCCLASS_ISSUER_INDEX+DOCCLASS_SUBJECT_INDEX", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::supersede_credential", "RevocationStore::put", "DOCCLASS_REVOCATIONS", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::suspend_credential", "CredentialStore::update_revocation", "DOCCLASS_CREDENTIALS+DOCCLASS_ISSUER_INDEX+DOCCLASS_SUBJECT_INDEX", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::suspend_credential", "DocClassEventStore::put", "DOCCLASS_EVENTS", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::suspend_credential", "EligibilityStore::update_revocation", "DOCCLASS_ELIGIBILITY+DOCCLASS_ISSUER_INDEX+DOCCLASS_SUBJECT_INDEX", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::suspend_credential", "RevocationStore::put", "DOCCLASS_REVOCATIONS", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::update_issuer", "DocClassEventStore::put", "DOCCLASS_EVENTS", 1),
+    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::update_issuer", "DocClassIssuerStore::put", "DOCCLASS_ISSUERS", 1),
+    ("crates/state/src/employment_executor.rs", "EmploymentExecutor::execute", "EmploymentCredentialStore::put", "EMPLOYMENT_CREDENTIALS+EMPLOYMENT_EMPLOYEE_ADDRESS_INDEX+EMPLOYMENT_EMPLOYEE_INDEX+EMPLOYMENT_EMPLOYER_INDEX", 1),
+    ("crates/state/src/employment_executor.rs", "EmploymentExecutor::execute", "EmploymentCredentialStore::revoke", "EMPLOYMENT_CREDENTIALS", 1),
+    ("crates/state/src/employment_executor.rs", "EmploymentExecutor::execute", "EmploymentCredentialStore::update_status", "EMPLOYMENT_CREDENTIALS", 3),
+    ("crates/state/src/employment_executor.rs", "EmploymentExecutor::execute", "EmploymentIssuerStore::put", "EMPLOYMENT_ISSUERS", 1),
+    ("crates/state/src/employment_executor.rs", "EmploymentExecutor::execute", "EmploymentIssuerStore::update_status", "EMPLOYMENT_ISSUERS", 4),
+    ("crates/state/src/employment_executor.rs", "EmploymentExecutor::execute", "EmploymentProofStore::put", "EMPLOYMENT_PROOFS", 1),
+    ("crates/state/src/employment_executor.rs", "EmploymentExecutor::execute", "IncomeAttestationStore::put", "EMPLOYMENT_INCOME_ATTESTATIONS+EMPLOYMENT_INCOME_HOLDER_ADDRESS_INDEX+EMPLOYMENT_SUBJECT_INCOME_INDEX", 1),
+    ("crates/state/src/employment_executor.rs", "EmploymentExecutor::execute", "IncomeAttestationStore::revoke", "EMPLOYMENT_INCOME_ATTESTATIONS", 1),
+    ("crates/state/src/equity_executor.rs", "EquityExecutor::add_controller", "EntityProfileStore::put", "EQUITY_ENTITIES", 1),
+    ("crates/state/src/equity_executor.rs", "EquityExecutor::burn", "EquityBalanceStore::set_balance", "EQUITY_BALANCES+EQUITY_HOLDER_INDEX", 1),
+    ("crates/state/src/equity_executor.rs", "EquityExecutor::burn", "EquityTokenStore::put", "EQUITY_TOKENS", 1),
+    ("crates/state/src/equity_executor.rs", "EquityExecutor::create_entity", "EntityProfileStore::put", "EQUITY_ENTITIES", 1),
+    ("crates/state/src/equity_executor.rs", "EquityExecutor::create_token", "EquityTokenStore::put", "EQUITY_TOKENS", 1),
+    ("crates/state/src/equity_executor.rs", "EquityExecutor::mint", "EquityBalanceStore::set_balance", "EQUITY_BALANCES+EQUITY_HOLDER_INDEX", 1),
+    ("crates/state/src/equity_executor.rs", "EquityExecutor::mint", "EquityTokenStore::put", "EQUITY_TOKENS", 1),
+    ("crates/state/src/equity_executor.rs", "EquityExecutor::propose_action", "GovernanceActionStore::put", "EQUITY_ENTITY_INDEX+EQUITY_GOVERNANCE", 1),
+    ("crates/state/src/equity_executor.rs", "EquityExecutor::remove_controller", "EntityProfileStore::put", "EQUITY_ENTITIES", 1),
+    ("crates/state/src/equity_executor.rs", "EquityExecutor::transfer", "EquityBalanceStore::transfer", "EQUITY_BALANCES+EQUITY_HOLDER_INDEX", 1),
+    ("crates/state/src/equity_executor.rs", "EquityExecutor::update_entity", "EntityProfileStore::put", "EQUITY_ENTITIES", 1),
+    ("crates/state/src/equity_executor.rs", "EquityExecutor::verify_ownership_proof", "OwnershipProofStore::put", "EQUITY_PROOFS", 1),
+    ("crates/state/src/executor.rs", "BlockExecutor::execute_sponsored_register_v1", "MessagingStore::set_public_key", "MESSAGING_PUBLIC_KEYS", 1),
+    ("crates/state/src/finance_executor.rs", "FinanceExecutor::execute", "AddressProofStore::put", "FINANCE_ADDRESS_PROOFS+FINANCE_SUBJECT_ADDRESS_INDEX", 1),
+    ("crates/state/src/finance_executor.rs", "FinanceExecutor::execute", "AddressProofStore::revoke", "FINANCE_ADDRESS_PROOFS", 1),
+    ("crates/state/src/finance_executor.rs", "FinanceExecutor::execute", "BankStandingStore::put", "FINANCE_BANK_STANDINGS+FINANCE_SUBJECT_BANK_INDEX", 1),
+    ("crates/state/src/finance_executor.rs", "FinanceExecutor::execute", "BankStandingStore::revoke", "FINANCE_BANK_STANDINGS", 1),
+    ("crates/state/src/finance_executor.rs", "FinanceExecutor::execute", "BankStandingStore::update_standing", "FINANCE_BANK_STANDINGS", 1),
+    ("crates/state/src/finance_executor.rs", "FinanceExecutor::execute", "FinanceIssuerStore::put", "FINANCE_ISSUERS+FINANCE_JURISDICTION_INDEX", 1),
+    ("crates/state/src/finance_executor.rs", "FinanceExecutor::execute", "FinanceIssuerStore::update_status", "FINANCE_ISSUERS", 4),
+    ("crates/state/src/finance_executor.rs", "FinanceExecutor::execute", "FinanceProofStore::put", "FINANCE_PROOFS", 1),
+    ("crates/state/src/finance_executor.rs", "FinanceExecutor::execute", "KycAttestationStore::put", "FINANCE_KYC_ATTESTATIONS+FINANCE_SUBJECT_KYC_INDEX", 1),
+    ("crates/state/src/finance_executor.rs", "FinanceExecutor::execute", "KycAttestationStore::revoke", "FINANCE_KYC_ATTESTATIONS", 1),
+    ("crates/state/src/finance_executor.rs", "FinanceExecutor::execute", "KycAttestationStore::update_status", "FINANCE_KYC_ATTESTATIONS", 1),
+    ("crates/state/src/governance_executor.rs", "apply", "GovStore::create_proposal_atomic", "GOV_PROPOSALS+GOV_PROPOSAL_INDEX+GOV_SNAPSHOTS", 1),
+    ("crates/state/src/governance_executor.rs", "apply", "GovStore::put_asset", "GOV_REGISTRY", 2),
+    ("crates/state/src/governance_executor.rs", "apply", "GovStore::put_equity_class_root", "GOV_EQUITY_CLASS_ROOTS", 1),
+    ("crates/state/src/governance_executor.rs", "apply", "GovStore::put_proposal", "GOV_PROPOSALS+GOV_PROPOSAL_INDEX", 1),
+    ("crates/state/src/governance_executor.rs", "apply", "GovStore::put_qualifying_asset", "GOV_QUALIFYING_ASSETS", 1),
+    ("crates/state/src/governance_executor.rs", "apply", "GovStore::put_vote", "GOV_VOTES", 1),
+    ("crates/state/src/governance_executor.rs", "apply", "GovStore::record_equity_vote_atomic", "GOV_EQUITY_USED_COMMITMENTS+GOV_VOTES", 1),
+    ("crates/state/src/governance_executor.rs", "validate_register_qualifying", "GovStore::put_asset", "GOV_REGISTRY", 1),
+    ("crates/state/src/healthcare_executor.rs", "HealthcareExecutor::execute", "ConsentStore::put", "HEALTHCARE_CONSENTS+HEALTHCARE_SUBJECT_CONSENT_INDEX", 2),
+    ("crates/state/src/healthcare_executor.rs", "HealthcareExecutor::execute", "ConsentStore::update_status", "HEALTHCARE_CONSENTS", 3),
+    ("crates/state/src/healthcare_executor.rs", "HealthcareExecutor::execute", "HealthcareProofStore::put", "HEALTHCARE_PROOFS", 1),
+    ("crates/state/src/healthcare_executor.rs", "HealthcareExecutor::execute", "MembershipStore::add_dependent", "HEALTHCARE_MEMBERSHIPS", 1),
+    ("crates/state/src/healthcare_executor.rs", "HealthcareExecutor::execute", "MembershipStore::put", "HEALTHCARE_MEMBERSHIPS+HEALTHCARE_MEMBER_INDEX", 1),
+    ("crates/state/src/healthcare_executor.rs", "HealthcareExecutor::execute", "MembershipStore::remove_dependent", "HEALTHCARE_MEMBERSHIPS", 1),
+    ("crates/state/src/healthcare_executor.rs", "HealthcareExecutor::execute", "MembershipStore::renew", "HEALTHCARE_MEMBERSHIPS", 1),
+    ("crates/state/src/healthcare_executor.rs", "HealthcareExecutor::execute", "MembershipStore::update_status", "HEALTHCARE_MEMBERSHIPS", 4),
+    ("crates/state/src/healthcare_executor.rs", "HealthcareExecutor::execute", "PrescriptionStore::add_fill_history", "HEALTHCARE_PRESCRIPTIONS", 1),
+    ("crates/state/src/healthcare_executor.rs", "HealthcareExecutor::execute", "PrescriptionStore::put", "HEALTHCARE_PATIENT_RX_INDEX+HEALTHCARE_PRESCRIBER_RX_INDEX+HEALTHCARE_PRESCRIPTIONS", 1),
+    ("crates/state/src/healthcare_executor.rs", "HealthcareExecutor::execute", "PrescriptionStore::record_fill", "HEALTHCARE_PRESCRIPTIONS", 1),
+    ("crates/state/src/healthcare_executor.rs", "HealthcareExecutor::execute", "PrescriptionStore::update_status", "HEALTHCARE_PRESCRIPTIONS", 5),
+    ("crates/state/src/healthcare_executor.rs", "HealthcareExecutor::execute", "ProviderStore::add_network_affiliation", "HEALTHCARE_PROVIDERS+HEALTHCARE_PROVIDER_NETWORK_INDEX", 1),
+    ("crates/state/src/healthcare_executor.rs", "HealthcareExecutor::execute", "ProviderStore::put", "HEALTHCARE_PROVIDERS+HEALTHCARE_PROVIDER_NETWORK_INDEX", 1),
+    ("crates/state/src/healthcare_executor.rs", "HealthcareExecutor::execute", "ProviderStore::remove_network_affiliation", "HEALTHCARE_PROVIDERS+HEALTHCARE_PROVIDER_NETWORK_INDEX", 1),
+    ("crates/state/src/healthcare_executor.rs", "HealthcareExecutor::execute", "ProviderStore::update_status", "HEALTHCARE_PROVIDERS", 4),
+    ("crates/state/src/legal_executor.rs", "LegalExecutor::execute", "BenefitStore::put", "LEGAL_BENEFITS+LEGAL_JURISDICTION_INDEX", 1),
+    ("crates/state/src/legal_executor.rs", "LegalExecutor::execute", "BenefitStore::update_status", "LEGAL_BENEFITS", 4),
+    ("crates/state/src/legal_executor.rs", "LegalExecutor::execute", "CaseStore::add_related_case", "LEGAL_CASES", 1),
+    ("crates/state/src/legal_executor.rs", "LegalExecutor::execute", "CaseStore::put", "LEGAL_CASES+LEGAL_JURISDICTION_INDEX", 1),
+    ("crates/state/src/legal_executor.rs", "LegalExecutor::execute", "CaseStore::update_status", "LEGAL_CASES", 6),
+    ("crates/state/src/legal_executor.rs", "LegalExecutor::execute", "LegalProofStore::put", "LEGAL_PROOFS", 1),
+    ("crates/state/src/legal_executor.rs", "LegalExecutor::execute", "OrderStore::put", "LEGAL_CASE_ORDER_INDEX+LEGAL_ORDERS", 2),
+    ("crates/state/src/legal_executor.rs", "LegalExecutor::execute", "OrderStore::update_status", "LEGAL_ORDERS", 5),
+    ("crates/state/src/legal_executor.rs", "LegalExecutor::execute", "ProcessEventStore::put", "LEGAL_CASE_EVENT_INDEX+LEGAL_EVENTS", 2),
+    ("crates/state/src/legal_executor.rs", "LegalExecutor::execute", "ProcessEventStore::update_status", "LEGAL_EVENTS", 3),
+    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::add_contact", "MessagingStore::add_contact", "MESSAGING_CONTACTS", 1),
+    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::block_sender", "MessagingStore::block_sender", "MESSAGING_BLOCKED", 1),
+    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::claim_payment", "MessagingStore::delete_pending_payment", "MESSAGING_PAYMENTS_BY_RECIPIENT+MESSAGING_PENDING_PAYMENTS", 2),
+    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::fund_registry", "MessagingStore::add_sponsorship_balance", "MESSAGING_CONFIG", 1),
+    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::register_public_key", "MessagingStore::set_public_key", "MESSAGING_PUBLIC_KEYS", 1),
+    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::remove_contact", "MessagingStore::remove_contact", "MESSAGING_CONTACTS", 1),
+    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::report_spam", "MessagingStore::increment_spam_score", "MESSAGING_SPAM_SCORES", 1),
+    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::send_message_direct", "MessagingStore::increment_daily_message_count", "MESSAGING_DAILY_COUNTS", 1),
+    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::send_message_direct", "MessagingStore::increment_sender_nonce", "MESSAGING_SENDER_NONCES", 1),
+    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::send_message_direct", "MessagingStore::store_message_event", "MESSAGING_EVENTS+MESSAGING_SENDER_EVENTS", 1),
+    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::send_message_sponsored", "MessagingStore::increment_daily_message_count", "MESSAGING_DAILY_COUNTS", 1),
+    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::send_message_sponsored", "MessagingStore::increment_sender_nonce", "MESSAGING_SENDER_NONCES", 1),
+    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::send_message_sponsored", "MessagingStore::store_message_event", "MESSAGING_EVENTS+MESSAGING_SENDER_EVENTS", 1),
+    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::send_message_with_payment", "MessagingStore::increment_daily_message_count", "MESSAGING_DAILY_COUNTS", 1),
+    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::send_message_with_payment", "MessagingStore::increment_sender_nonce", "MESSAGING_SENDER_NONCES", 1),
+    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::send_message_with_payment", "MessagingStore::set_pending_payment", "MESSAGING_PAYMENTS_BY_RECIPIENT+MESSAGING_PENDING_PAYMENTS", 1),
+    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::send_message_with_payment", "MessagingStore::store_message_event", "MESSAGING_EVENTS+MESSAGING_SENDER_EVENTS", 1),
+    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::set_daily_quota", "MessagingStore::set_daily_quota", "MESSAGING_CONFIG", 1),
+    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::set_inbox_filter", "MessagingStore::set_inbox_filter", "MESSAGING_INBOX_FILTERS", 1),
+    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::set_max_message_size", "MessagingStore::set_max_message_size", "MESSAGING_CONFIG", 1),
+    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::set_min_trust_stake", "MessagingStore::set_min_trust_stake", "MESSAGING_CONFIG", 1),
+    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::set_sponsorship_enabled", "MessagingStore::set_sponsorship_enabled", "MESSAGING_CONFIG", 1),
+    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::stake_for_trust", "MessagingStore::add_stake", "MESSAGING_STAKES", 1),
+    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::unstake", "MessagingStore::set_stake_balance", "MESSAGING_STAKES", 1),
+    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::update_public_key", "MessagingStore::set_public_key", "MESSAGING_PUBLIC_KEYS", 1),
+    ("crates/state/src/nft_executor.rs", "NftExecutor::execute_approve", "NftStore::put_token", "NFT_TOKENS", 1),
+    ("crates/state/src/nft_executor.rs", "NftExecutor::execute_batch_mint", "NftStore::add_to_collection_index", "NFT_COLLECTION_INDEX", 1),
+    ("crates/state/src/nft_executor.rs", "NftExecutor::execute_batch_mint", "NftStore::add_to_owner_index", "NFT_OWNER_INDEX", 1),
+    ("crates/state/src/nft_executor.rs", "NftExecutor::execute_batch_mint", "NftStore::put_collection", "NFT_COLLECTIONS", 1),
+    ("crates/state/src/nft_executor.rs", "NftExecutor::execute_batch_mint", "NftStore::put_token", "NFT_TOKENS", 1),
+    ("crates/state/src/nft_executor.rs", "NftExecutor::execute_burn", "NftStore::burn_token", "NFT_COLLECTIONS+NFT_COLLECTION_INDEX+NFT_OWNER_INDEX+NFT_TOKENS", 1),
+    ("crates/state/src/nft_executor.rs", "NftExecutor::execute_create_collection", "NftStore::put_collection", "NFT_COLLECTIONS", 1),
+    ("crates/state/src/nft_executor.rs", "NftExecutor::execute_lock_token", "NftStore::put_token", "NFT_TOKENS", 1),
+    ("crates/state/src/nft_executor.rs", "NftExecutor::execute_mint", "NftStore::add_to_collection_index", "NFT_COLLECTION_INDEX", 1),
+    ("crates/state/src/nft_executor.rs", "NftExecutor::execute_mint", "NftStore::add_to_owner_index", "NFT_OWNER_INDEX", 1),
+    ("crates/state/src/nft_executor.rs", "NftExecutor::execute_mint", "NftStore::put_collection", "NFT_COLLECTIONS", 1),
+    ("crates/state/src/nft_executor.rs", "NftExecutor::execute_mint", "NftStore::put_token", "NFT_TOKENS", 1),
+    ("crates/state/src/nft_executor.rs", "NftExecutor::execute_transfer", "NftStore::transfer_token", "NFT_OWNER_INDEX+NFT_TOKENS", 1),
+    ("crates/state/src/nft_executor.rs", "NftExecutor::execute_transfer_collection", "NftStore::put_collection", "NFT_COLLECTIONS", 1),
+    ("crates/state/src/nft_executor.rs", "NftExecutor::execute_unlock_token", "NftStore::put_token", "NFT_TOKENS", 1),
+    ("crates/state/src/nft_executor.rs", "NftExecutor::execute_update_collection_config", "NftStore::put_collection", "NFT_COLLECTIONS", 1),
+    ("crates/state/src/nft_executor.rs", "NftExecutor::execute_update_metadata", "NftStore::put_token", "NFT_TOKENS", 1),
+    ("crates/state/src/policy_account_executor.rs", "PolicyAccountExecutor::cancel_proposal", "ProposalStore::put", "POLICY_PROPOSALS", 1),
+    ("crates/state/src/policy_account_executor.rs", "PolicyAccountExecutor::create_policy_account", "PolicyAccountStore::put", "POLICY_ACCOUNTS", 1),
+    ("crates/state/src/policy_account_executor.rs", "PolicyAccountExecutor::execute_proposal", "PolicyAccountStore::put", "POLICY_ACCOUNTS", 1),
+    ("crates/state/src/policy_account_executor.rs", "PolicyAccountExecutor::execute_proposal", "ProposalStore::put", "POLICY_PROPOSALS", 2),
+    ("crates/state/src/policy_account_executor.rs", "PolicyAccountExecutor::freeze_policy_account", "PolicyAccountStore::update_status", "POLICY_ACCOUNTS", 1),
+    ("crates/state/src/policy_account_executor.rs", "PolicyAccountExecutor::submit_proposal", "ProposalStore::put", "POLICY_PROPOSALS", 1),
+    ("crates/state/src/policy_account_executor.rs", "PolicyAccountExecutor::unfreeze_policy_account", "PolicyAccountStore::update_status", "POLICY_ACCOUNTS", 1),
+    ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "AssetStore::put", "PROPERTY_ASSETS+PROPERTY_JURISDICTION_INDEX", 1),
+    ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "AssetStore::update_status", "PROPERTY_ASSETS", 5),
+    ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "ClaimStore::approve", "PROPERTY_CLAIMS", 1),
+    ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "ClaimStore::pay", "PROPERTY_CLAIMS", 1),
+    ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "ClaimStore::put", "PROPERTY_CLAIMS+PROPERTY_COVERAGE_CLAIM_INDEX", 1),
+    ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "ClaimStore::update_status", "PROPERTY_CLAIMS", 5),
+    ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "CoverageStore::put", "PROPERTY_ASSET_COVERAGE_INDEX+PROPERTY_COVERAGE", 1),
+    ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "CoverageStore::renew", "PROPERTY_COVERAGE", 1),
+    ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "CoverageStore::update_status", "PROPERTY_COVERAGE", 4),
+    ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "EncumbranceStore::put", "PROPERTY_ASSET_ENCUMBRANCE_INDEX+PROPERTY_ENCUMBRANCES", 1),
+    ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "EncumbranceStore::update_status", "PROPERTY_ENCUMBRANCES", 4),
+    ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "PropertyProofStore::put", "PROPERTY_PROOFS", 1),
+    ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "TitleEventStore::put", "PROPERTY_ASSET_TITLE_INDEX+PROPERTY_TITLE_EVENTS", 2),
+    ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "TitleEventStore::update_status", "PROPERTY_TITLE_EVENTS", 3),
+    ("crates/state/src/staking_executor.rs", "StakingExecutor::execute_add_stake", "StakingStore::put_validator", "VALIDATORS", 1),
+    ("crates/state/src/staking_executor.rs", "StakingExecutor::execute_claim_delegation_rewards", "DelegationStore::claim_delegation_rewards", "DELEGATIONS+DELEGATION_VALIDATOR_INDEX", 1),
+    ("crates/state/src/staking_executor.rs", "StakingExecutor::execute_claim_rewards", "StakingStore::claim_rewards", "VALIDATORS", 1),
+    ("crates/state/src/staking_executor.rs", "StakingExecutor::execute_create_validator", "StakingStore::put_validator", "VALIDATORS", 1),
+    ("crates/state/src/staking_executor.rs", "StakingExecutor::execute_delegate", "DelegationStore::put_delegation", "DELEGATIONS+DELEGATION_VALIDATOR_INDEX", 2),
+    ("crates/state/src/staking_executor.rs", "StakingExecutor::execute_delegate", "StakingStore::put_validator", "VALIDATORS", 1),
+    ("crates/state/src/staking_executor.rs", "StakingExecutor::execute_undelegate", "DelegationStore::delete_delegation", "DELEGATIONS+DELEGATION_VALIDATOR_INDEX", 1),
+    ("crates/state/src/staking_executor.rs", "StakingExecutor::execute_undelegate", "DelegationStore::put_delegation", "DELEGATIONS+DELEGATION_VALIDATOR_INDEX", 1),
+    ("crates/state/src/staking_executor.rs", "StakingExecutor::execute_undelegate", "DelegationStore::put_unbonding", "UNBONDING_DELEGATIONS", 1),
+    ("crates/state/src/staking_executor.rs", "StakingExecutor::execute_undelegate", "StakingStore::put_validator", "VALIDATORS", 1),
+    ("crates/state/src/staking_executor.rs", "StakingExecutor::execute_unjail", "StakingStore::put_validator", "VALIDATORS", 1),
+    ("crates/state/src/staking_executor.rs", "StakingExecutor::execute_unstake", "StakingStore::put_validator", "VALIDATORS", 1),
+    ("crates/state/src/staking_executor.rs", "StakingExecutor::execute_update_validator", "StakingStore::put_validator", "VALIDATORS", 1),
+    ("crates/state/src/staking_executor.rs", "StakingExecutor::execute_withdraw_unbonded", "DelegationStore::delete_unbonding", "UNBONDING_DELEGATIONS", 1),
+    ("crates/state/src/staking_executor.rs", "StakingExecutor::handle_double_sign_evidence", "DelegationStore::slash_delegations", "DELEGATIONS+DELEGATION_VALIDATOR_INDEX", 1),
+    ("crates/state/src/staking_executor.rs", "StakingExecutor::handle_double_sign_evidence", "SlashingStore::put_signing_info", "VALIDATOR_SIGNING_INFO", 2),
+    ("crates/state/src/staking_executor.rs", "StakingExecutor::handle_double_sign_evidence", "SlashingStore::put_slashing_record", "SLASHING_RECORDS", 1),
+    ("crates/state/src/staking_executor.rs", "StakingExecutor::handle_double_sign_evidence", "StakingStore::put_validator", "VALIDATORS", 1),
+    ("crates/state/src/staking_executor.rs", "StakingExecutor::handle_downtime_evidence", "DelegationStore::slash_delegations", "DELEGATIONS+DELEGATION_VALIDATOR_INDEX", 1),
+    ("crates/state/src/staking_executor.rs", "StakingExecutor::handle_downtime_evidence", "SlashingStore::put_signing_info", "VALIDATOR_SIGNING_INFO", 1),
+    ("crates/state/src/staking_executor.rs", "StakingExecutor::handle_downtime_evidence", "SlashingStore::put_slashing_record", "SLASHING_RECORDS", 1),
+    ("crates/state/src/staking_executor.rs", "StakingExecutor::handle_downtime_evidence", "StakingStore::put_validator", "VALIDATORS", 1),
+    ("crates/state/src/state.rs", "StateManager::credit", "StateStore::put_account", "STATE", 1),
+    ("crates/state/src/state.rs", "StateManager::deduct", "StateStore::put_account", "STATE", 1),
+    ("crates/state/src/state.rs", "StateManager::increment_nonce", "StateStore::put_account", "STATE", 1),
+    ("crates/state/src/state.rs", "StateManager::put_account", "StateStore::put_account", "STATE", 1),
+    ("crates/state/src/state.rs", "StateManager::transfer", "StateStore::put_account", "STATE", 3),
+    ("crates/state/src/tax_executor.rs", "TaxExecutor::execute", "TaxClaimTypeStore::put", "TAX_CLAIM_TYPES", 3),
+    ("crates/state/src/tax_executor.rs", "TaxExecutor::execute", "TaxDisclosureStore::put", "TAX_DISCLOSURES", 1),
+    ("crates/state/src/tax_executor.rs", "TaxExecutor::execute", "TaxIssuerStore::put", "TAX_ISSUERS", 3),
+    ("crates/state/src/tax_executor.rs", "TaxExecutor::execute", "TaxPolicyStore::put", "TAX_POLICIES", 2),
+    ("crates/state/src/tax_executor.rs", "TaxExecutor::execute", "TaxProofStore::delete", "TAX_PROOFS", 1),
+    ("crates/state/src/tax_executor.rs", "TaxExecutor::execute", "TaxProofStore::put", "TAX_PROOFS+TAX_SUBJECT_INDEX", 1),
+    ("crates/state/src/token_executor.rs", "TokenExecutor::execute_add_minter", "TokenStore::put_token", "TOKENS", 1),
+    ("crates/state/src/token_executor.rs", "TokenExecutor::execute_approve", "TokenStore::set_allowance", "TOKEN_ALLOWANCES", 1),
+    ("crates/state/src/token_executor.rs", "TokenExecutor::execute_burn", "TokenStore::put_token", "TOKENS", 1),
+    ("crates/state/src/token_executor.rs", "TokenExecutor::execute_burn", "TokenStore::set_balance", "TOKEN_BALANCES+TOKEN_HOLDER_INDEX", 1),
+    ("crates/state/src/token_executor.rs", "TokenExecutor::execute_create", "TokenStore::put_token", "TOKENS", 1),
+    ("crates/state/src/token_executor.rs", "TokenExecutor::execute_create", "TokenStore::set_balance", "TOKEN_BALANCES+TOKEN_HOLDER_INDEX", 1),
+    ("crates/state/src/token_executor.rs", "TokenExecutor::execute_mint", "TokenStore::put_token", "TOKENS", 1),
+    ("crates/state/src/token_executor.rs", "TokenExecutor::execute_mint", "TokenStore::set_balance", "TOKEN_BALANCES+TOKEN_HOLDER_INDEX", 1),
+    ("crates/state/src/token_executor.rs", "TokenExecutor::execute_pause", "TokenStore::put_token", "TOKENS", 1),
+    ("crates/state/src/token_executor.rs", "TokenExecutor::execute_remove_minter", "TokenStore::put_token", "TOKENS", 1),
+    ("crates/state/src/token_executor.rs", "TokenExecutor::execute_transfer", "TokenStore::set_balance", "TOKEN_BALANCES+TOKEN_HOLDER_INDEX", 2),
+    ("crates/state/src/token_executor.rs", "TokenExecutor::execute_transfer_from", "TokenStore::set_allowance", "TOKEN_ALLOWANCES", 1),
+    ("crates/state/src/token_executor.rs", "TokenExecutor::execute_transfer_from", "TokenStore::set_balance", "TOKEN_BALANCES+TOKEN_HOLDER_INDEX", 2),
+    ("crates/state/src/token_executor.rs", "TokenExecutor::execute_transfer_ownership", "TokenStore::put_token", "TOKENS", 1),
+    ("crates/state/src/token_executor.rs", "TokenExecutor::execute_unpause", "TokenStore::put_token", "TOKENS", 1),
+];
+
+/// Occurrences, not rows: a caller reaching the same mutator three times is
+/// three places to fix.
+const MANIFEST_OCCURRENCES: usize = 311;
 
 /// Application column families a block can still commit to directly.
 ///
-/// ONLY EVER DECREASE. Recorded at `20544f8a`.
-const LEDGER_CF_COUNT: usize = 116;
+/// ONLY EVER DECREASE. Recorded at `1687789`. Lower than the 116 the unrooted
+/// audit reported, for the reason in [`UNREACHED_MUTATORS`].
+const LEDGER_CF_COUNT: usize = 114;
+
+/// Functions that commit application state but that no entry point reaches.
+///
+/// Every one is either dead code or a gap in this file's call resolution, and
+/// both need a human. Pinning them is what stops rooting from becoming a way to
+/// hide a write: a new unreached mutator fails here rather than quietly
+/// dropping out of the manifest.
+///
+/// Both of these are `pub` with no production caller anywhere in the workspace —
+/// verified by grep, not by this resolver — so excluding them is correct.
+const UNREACHED_MUTATORS: &[(&str, &str, &str)] = &[
+    (
+        "crates/state/src/staking_executor.rs",
+        "StakingExecutor::slash_validator",
+        "pub, no production caller: evidence handling calls put_signing_info directly",
+    ),
+    (
+        "crates/state/src/state.rs",
+        "StateManager::revert_state_diff",
+        "pub, no production caller: the reorg path uses revert_block_state_diffs",
+    ),
+];
+
 
 /// Column families declared in `sumchain_storage::cf` that nothing reads or
 /// writes anywhere in the workspace.
@@ -194,18 +460,29 @@ fn workspace_root() -> PathBuf {
 /// `mod`s, not `#[cfg(test)]`, so stripping attributes does not reach them.
 const TEST_ONLY_CRATES: &[&str] = &["crates/integration-tests/"];
 
-/// Files that buffer rather than commit.
+/// The one sanctioned committed write: `(file, owner, fn)`.
 ///
-/// `ApplicationOverlay` ends in a `db.batch()` — but only inside
-/// `into_batch`, which is crate-private to `sumchain-storage` and reachable
-/// only from `AcceptedCandidate::publish`. Treating an overlay write as a
-/// committed write would count every migrated subsystem as unmigrated, which is
-/// the exact opposite of what this ledger measures.
-const BUFFERING_FILES: &[&str] = &[
+/// `ApplicationOverlay::into_batch` turns the block's buffered rows into a
+/// batch. It is crate-private to `sumchain-storage` and reachable only from
+/// `AcceptedCandidate::publish`, which is the whole point of the typestate.
+/// Counting it would mark the sanctioned publisher as the violation and every
+/// migrated subsystem as unmigrated.
+///
+/// Exactly one FUNCTION, not a file and not a directory. An earlier version
+/// exempted `overlay.rs`, `exec_view.rs` and `candidate.rs` wholesale, which
+/// meant a new direct write anywhere in those three files — including one with
+/// nothing to do with publication — was invisible.
+const SANCTIONED_PUBLISHER: &[(&str, &str, &str)] = &[(
     "crates/storage/src/overlay.rs",
-    "crates/storage/src/exec_view.rs",
-    "crates/storage/src/candidate.rs",
-];
+    "ApplicationOverlay",
+    "into_batch",
+)];
+
+fn is_sanctioned_publisher(f: &Fun) -> bool {
+    SANCTIONED_PUBLISHER.iter().any(|(file, owner, name)| {
+        f.file == *file && f.owner.as_deref() == Some(*owner) && f.name == *name
+    })
+}
 
 /// Production `.rs` sources under every crate's `src/`, keyed by workspace-
 /// relative path. `#[cfg(test)]` modules and comment lines are removed first:
@@ -351,8 +628,6 @@ struct Fun {
     name: String,
     params: String,
     body: String,
-    /// Byte offset of the body's opening brace, for line attribution.
-    body_at: usize,
 }
 
 struct Index {
@@ -362,8 +637,6 @@ struct Index {
     /// `impl Type { fn acc(&self) -> Ret }`
     accessors: HashMap<(String, String), String>,
     by_owner: HashMap<(String, String), Vec<usize>>,
-    /// Line-start byte offsets per file, for `line_of`.
-    line_starts: HashMap<String, Vec<usize>>,
 }
 
 fn ident_start(c: u8) -> bool {
@@ -421,15 +694,6 @@ fn type_head(s: &str) -> Option<String> {
 /// Parse one file into functions, struct fields and accessor return types.
 fn index_file(file: &str, src: &str, idx: &mut Index) {
     let b = src.as_bytes();
-
-    // Line starts, for attribution.
-    let mut starts = vec![0usize];
-    for (i, c) in src.char_indices() {
-        if c == '\n' {
-            starts.push(i + 1);
-        }
-    }
-    idx.line_starts.insert(file.to_string(), starts);
 
     // `impl [Trait for] Type { .. }` spans, so a fn can be attributed to its type.
     let mut impls: Vec<(usize, usize, String)> = Vec::new();
@@ -551,7 +815,6 @@ fn index_file(file: &str, src: &str, idx: &mut Index) {
             name: name.clone(),
             params: src[popen + 1..pclose].to_string(),
             body: src[body_at..=bclose].to_string(),
-            body_at,
         };
         let k = idx.funs.len();
         idx.by_owner
@@ -569,7 +832,6 @@ fn build_index(sources: &BTreeMap<String, String>) -> Index {
         fields: HashMap::new(),
         accessors: HashMap::new(),
         by_owner: HashMap::new(),
-        line_starts: HashMap::new(),
     };
     for (file, src) in sources {
         index_file(file, src, &mut idx);
@@ -577,13 +839,6 @@ fn build_index(sources: &BTreeMap<String, String>) -> Index {
     idx
 }
 
-fn line_of(idx: &Index, file: &str, offset: usize) -> usize {
-    let starts = &idx.line_starts[file];
-    match starts.binary_search(&offset) {
-        Ok(k) => k + 1,
-        Err(k) => k,
-    }
-}
 
 // ── Binding resolution ─────────────────────────────────────────────────────
 //
@@ -767,7 +1022,7 @@ const DB_TYPES: &[&str] = &["Database", "WriteBatch"];
 fn raw_sinks(idx: &Index) -> HashMap<usize, BTreeSet<Cf>> {
     let mut out: HashMap<usize, BTreeSet<Cf>> = HashMap::new();
     for (k, f) in idx.funs.iter().enumerate() {
-        if BUFFERING_FILES.contains(&f.file.as_str()) {
+        if is_sanctioned_publisher(f) {
             continue;
         }
         let binds = bindings(idx, f);
@@ -860,7 +1115,7 @@ fn mutator_closure(idx: &Index, sinks: &HashMap<usize, BTreeSet<Cf>>) -> HashMap
         assert!(rounds < 64, "closure did not converge");
         for (k, f) in idx.funs.iter().enumerate() {
             let mut gained: BTreeSet<Cf> = BTreeSet::new();
-            for (target, _) in resolved_calls(idx, f, &cfs) {
+            for (target, _) in resolved_calls(idx, f) {
                 if let Some(t) = cfs.get(&target) {
                     gained.extend(t.iter().cloned());
                 }
@@ -888,11 +1143,7 @@ fn mutator_closure(idx: &Index, sinks: &HashMap<usize, BTreeSet<Cf>>) -> HashMap
 /// * `Type::new(..).method(..)`      — a store constructed inline
 /// * `Type::new(..).accessor().method(..)`
 /// * `Type::method(..)` / `self.method(..)` — associated and inherent calls
-fn resolved_calls(
-    idx: &Index,
-    f: &Fun,
-    known: &HashMap<usize, BTreeSet<Cf>>,
-) -> Vec<(usize, usize)> {
+fn resolved_calls(idx: &Index, f: &Fun) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     let binds = bindings(idx, f);
     let b = f.body.as_bytes();
@@ -900,9 +1151,7 @@ fn resolved_calls(
     let push = |ty: &str, method: &str, at: usize, out: &mut Vec<(usize, usize)>| {
         if let Some(ks) = idx.by_owner.get(&(ty.to_string(), method.to_string())) {
             for &k in ks {
-                if known.contains_key(&k) {
-                    out.push((k, at));
-                }
+                out.push((k, at));
             }
         }
     };
@@ -970,6 +1219,17 @@ fn resolved_calls(
         if b.get(popen) != Some(&b'(') {
             continue;
         }
+        // `Self::helper(..)` is the enclosing type. Every migrated subsystem
+        // calls its fee path this way — `Self::deduct_fee(state, ..)` — so
+        // without this the account debit is unreachable on fourteen arms.
+        let id = if id == "Self" {
+            match &f.owner {
+                Some(o) => o.clone(),
+                None => continue,
+            }
+        } else {
+            id
+        };
         push(&id, &m, j, &mut out);
         // `Type::new(..)` then `.method(` or `.acc().method(`.
         if m == "new" {
@@ -997,6 +1257,80 @@ fn resolved_calls(
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    // `path::to::module::func( .. )` — a free function reached by module path.
+    // `executor.rs` dispatches governance as
+    // `crate::governance_executor::execute(view, ..)`; without this rule the
+    // whole Governance arm is unreachable and its nine committed writes vanish
+    // from the inventory.
+    {
+        let mut i = 0usize;
+        while i < b.len() {
+            let Some((seg, j)) = ident_at(b, i) else {
+                i += 1;
+                continue;
+            };
+            i = j;
+            if !f.body[j..].starts_with("::") {
+                continue;
+            }
+            let Some((name, k)) = ident_at(b, j + 2) else {
+                continue;
+            };
+            if b.get(skip_ws(b, k)) != Some(&b'(') {
+                continue;
+            }
+            // A lowercase penultimate segment is a module, not a type.
+            if seg.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+                continue;
+            }
+            if let Some(ks) = idx.by_owner.get(&(String::new(), name.clone())) {
+                for &k2 in ks {
+                    let stem = idx.funs[k2]
+                        .file
+                        .rsplit('/')
+                        .next()
+                        .and_then(|n| n.strip_suffix(".rs"))
+                        .unwrap_or("");
+                    if stem == seg {
+                        out.push((k2, j));
+                    }
+                }
+            }
+        }
+    }
+
+    // `name( .. )` — a bare call to a free function in the same module.
+    // `governance_executor::apply` is reached only this way, and dropping the
+    // rule silently removes nine committed writes from the inventory.
+    {
+        let mut i = 0usize;
+        while i < b.len() {
+            let Some((id, j)) = ident_at(b, i) else {
+                i += 1;
+                continue;
+            };
+            i = j;
+            // Not a method call, not a path segment, and followed by `(`.
+            let before = b.get(j - id.len() - 1).copied().filter(|_| j > id.len());
+            if before == Some(b'.') || before == Some(b':') {
+                continue;
+            }
+            if f.body[j..].starts_with("::") {
+                continue;
+            }
+            if b.get(skip_ws(b, j)) != Some(&b'(') {
+                continue;
+            }
+            if let Some(ks) = idx.by_owner.get(&(String::new(), id.clone())) {
+                for &k in ks {
+                    if idx.funs[k].file == f.file {
+                        out.push((k, j - id.len()));
                     }
                 }
             }
@@ -1043,109 +1377,220 @@ fn call_offsets_any<'a>(body: &'a str, tok: &'a str) -> impl Iterator<Item = usi
 
 // ── Classification ─────────────────────────────────────────────────────────
 
+// ── Reachability ───────────────────────────────────────────────────────────
+//
+// A source inventory is not an execution surface. The first version of this
+// file scanned every application function and defaulted `crates/state/src` to
+// "execution", which counted a mutating helper nothing calls exactly the same
+// as one the dispatcher reaches on every block. That is a conservative
+// inventory, useful for scoping and wrong for a guard: it cannot tell a write
+// that matters from one that does not, and it would keep passing while dead
+// code was deleted and live code was added.
+//
+// Sites are now rooted. Each class below names ENTRY POINTS, the call graph is
+// walked forward from them, and a write counts only if the function containing
+// it is reachable from a root.
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Class {
-    /// Reachable from a block dispatcher arm or a block-level phase. Counted.
+    /// Reachable from `BlockExecutor::execute_block`. Counted in the ledger.
     Execution,
-    /// No block exists to abandon.
+    /// Reachable only from `StateManager::init_from_genesis` — no block exists
+    /// to abandon.
     Genesis,
-    /// The committed write that unwinds an already-published block.
+    /// Reachable only from `StateManager::revert_block_state_diffs` — the
+    /// committed write that unwinds an already-published block.
     ReorgUndo,
-    /// Blocks, transactions, receipts, their indexes, validator sets, pruning.
-    /// Not application state.
+    /// The node's own storage surface: blocks, transactions, receipts, their
+    /// indexes, validator sets, pruning. Not application state.
     ChainStorage,
     /// Fast-sync restore, outside consensus.
     Snapshot,
     /// An operator CLI that changes application state outside consensus.
     OperatorTooling,
-    /// Inside the storage or runtime library itself — these ARE the sinks, and
-    /// counting their internal calls would double-count every write.
+    /// Inside the storage or runtime library — these ARE the writes, and
+    /// counting their internal calls would double-count every one.
     Library,
-    /// Read-only or write-free surfaces: RPC, mempool, p2p transport, bridge.
-    NotAWriter,
 }
 
-/// Where a function's writes belong. Everything is classified; nothing is
-/// silently dropped.
-fn classify(file: &str, fn_name: &str) -> Class {
-    if file.starts_with("crates/storage/src") || file.starts_with("crates/sumc-runtime/src") {
-        return Class::Library;
-    }
-    match file {
-        "crates/state/src/snapshot.rs" => return Class::Snapshot,
-        "crates/node/src/main.rs" => return Class::OperatorTooling,
-        "crates/state/src/state.rs" => {
-            if fn_name == "init_from_genesis" {
-                return Class::Genesis;
-            }
-            if fn_name.contains("revert") {
-                return Class::ReorgUndo;
-            }
-            return Class::Execution;
+/// `(class, file, owner-or-empty, fn)` entry points. A function is classified
+/// by the FIRST class whose roots reach it, in this order, so a helper shared
+/// between execution and genesis counts as execution.
+const ROOTS: &[(Class, &str, &str, &str)] = &[
+    (Class::Execution, "crates/state/src/executor.rs", "BlockExecutor", "execute_block"),
+    (Class::Genesis, "crates/state/src/state.rs", "StateManager", "init_from_genesis"),
+    (Class::ReorgUndo, "crates/state/src/state.rs", "StateManager", "revert_block_state_diffs"),
+    (Class::OperatorTooling, "crates/node/src/main.rs", "", "main"),
+];
+
+/// Whole files that are entry surfaces in their own right: the node's consensus
+/// and networking layers, the pruner, and fast-sync restore. Rooting these at a
+/// single function would miss the several the binary calls; what matters is
+/// that none of them is execution, which the ordering above already decides.
+const ROOT_FILES: &[(Class, &str)] = &[
+    (Class::ChainStorage, "crates/consensus/src/"),
+    (Class::ChainStorage, "crates/p2p/src/"),
+    (Class::ChainStorage, "crates/storage/src/pruner.rs"),
+    (Class::ChainStorage, "crates/node/src/node.rs"),
+    (Class::Snapshot, "crates/state/src/snapshot.rs"),
+];
+
+/// Functions reachable from `roots`, following every resolvable call.
+fn reachable(idx: &Index, roots: &[usize]) -> HashSet<usize> {
+    let mut seen: HashSet<usize> = HashSet::new();
+    let mut stack: Vec<usize> = roots.to_vec();
+    while let Some(k) = stack.pop() {
+        if !seen.insert(k) {
+            continue;
         }
-        "crates/state/src/beacon_store.rs" | "crates/state/src/compute_pool_store.rs" => {
-            return if fn_name.contains("revert") {
-                Class::ReorgUndo
-            } else {
-                Class::Execution
-            };
+        for (c, _) in resolved_calls(idx, &idx.funs[k]) {
+            if !seen.contains(&c) {
+                stack.push(c);
+            }
         }
-        _ => {}
     }
-    if file.starts_with("crates/consensus/src")
-        || file.starts_with("crates/p2p/src")
-        || file.starts_with("crates/node/src")
-    {
-        return Class::ChainStorage;
-    }
-    if file.starts_with("crates/rpc/src") || file.starts_with("crates/bridge/src") {
-        return Class::NotAWriter;
-    }
-    Class::Execution
+    seen
 }
 
-#[derive(Debug, Clone)]
+fn root_indices(idx: &Index, class: Class) -> Vec<usize> {
+    let mut out = Vec::new();
+    for (c, file, owner, name) in ROOTS {
+        if *c != class {
+            continue;
+        }
+        for (k, f) in idx.funs.iter().enumerate() {
+            if f.file == *file
+                && f.name == *name
+                && f.owner.as_deref().unwrap_or("") == *owner
+            {
+                out.push(k);
+            }
+        }
+    }
+    for (c, prefix) in ROOT_FILES {
+        if *c != class {
+            continue;
+        }
+        for (k, f) in idx.funs.iter().enumerate() {
+            if f.file.starts_with(prefix) {
+                out.push(k);
+            }
+        }
+    }
+    out
+}
+
+/// Classify every function by which entry surface reaches it.
+fn classify_all(idx: &Index) -> Vec<Option<Class>> {
+    let mut out = vec![None; idx.funs.len()];
+    // Library first, by location: those bodies are the writes themselves.
+    for (k, f) in idx.funs.iter().enumerate() {
+        if f.file.starts_with("crates/storage/src") || f.file.starts_with("crates/sumc-runtime/src")
+        {
+            out[k] = Some(Class::Library);
+        }
+    }
+    // Order matters: a helper shared between classes takes the first that
+    // reaches it. Execution first because it is what the ledger is about;
+    // chain storage before operator tooling because `main` also boots the node,
+    // and booting is not tooling.
+    for class in [
+        Class::Execution,
+        Class::Genesis,
+        Class::ReorgUndo,
+        Class::ChainStorage,
+        Class::Snapshot,
+        Class::OperatorTooling,
+    ] {
+        let roots = root_indices(idx, class);
+        for k in reachable(idx, &roots) {
+            if out[k].is_none() {
+                out[k] = Some(class);
+            }
+        }
+    }
+    out
+}
+
+// ── Sites ──────────────────────────────────────────────────────────────────
+
+/// One committed write, keyed by identity rather than by position.
+///
+/// A count alone is not a guard: removing one write and adding another in the
+/// same file leaves the total unchanged, and swapping which column family a
+/// write targets leaves the family count unchanged. Both are real changes to
+/// what an unaccepted block can commit, and both used to pass. The manifest
+/// keys caller, callee and families, so either one moves a row.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct Site {
     file: String,
-    line: usize,
-    class: Class,
+    /// `Owner::name`, or `name` for a free function. Stable across
+    /// reformatting; changes when the write moves to a different function.
+    caller: String,
+    /// The library function actually reached: `StateStore::put_account`.
+    callee: String,
     cfs: BTreeSet<Cf>,
+    class: Class,
+    /// How many times this caller reaches this callee.
+    count: usize,
 }
 
-/// Every call site where APPLICATION code reaches into the storage or runtime
-/// library and commits.
+fn qualified(f: &Fun) -> String {
+    match &f.owner {
+        Some(o) => format!("{o}::{}", f.name),
+        None => f.name.clone(),
+    }
+}
+
+fn cf_list(cfs: &BTreeSet<Cf>) -> String {
+    cfs.iter()
+        .map(|c| match c {
+            Cf::Named(n) => n.clone(),
+            Cf::Variable => "<variable>".to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("+")
+}
+
+/// Every call site where application code reaches into the storage or runtime
+/// library and commits, with the class of entry surface that can reach it.
 ///
-/// The crossing is what counts, not every hop on the way to it. A write moved
-/// behind a private helper is still exactly one site — it just moves to the
-/// helper's line, in the same file — so indirection changes where the work is,
-/// never how much there is.
-///
-/// One site per source line: a line calling two mutators is one place to fix,
-/// and counting it twice would make the ledger drift on reformatting.
+/// The crossing is what counts, not every hop on the way to it: a write moved
+/// behind a private helper is still exactly one site, at the helper's line.
 fn all_sites(idx: &Index, closure: &HashMap<usize, BTreeSet<Cf>>) -> Vec<Site> {
-    let mut per_line: BTreeMap<(String, usize), (Class, BTreeSet<Cf>)> = BTreeMap::new();
-    for f in idx.funs.iter() {
-        let class = classify(&f.file, &f.name);
+    let classes = classify_all(idx);
+    type Key = (String, String, String);
+    type Val = (Class, BTreeSet<Cf>, usize);
+    let mut acc: BTreeMap<Key, Val> = BTreeMap::new();
+    for (k, f) in idx.funs.iter().enumerate() {
+        let Some(class) = classes[k] else { continue };
         if class == Class::Library {
-            continue; // the library's internals ARE the write, not a site
+            continue;
         }
-        for (target, at) in resolved_calls(idx, f, closure) {
-            if classify(&idx.funs[target].file, &idx.funs[target].name) != Class::Library {
+        for (target, _at) in resolved_calls(idx, f) {
+            if classes[target] != Some(Class::Library) {
                 continue; // application-to-application indirection, not a crossing
             }
             let Some(cfs) = closure.get(&target) else {
                 continue;
             };
-            let line = line_of(idx, &f.file, f.body_at + at);
-            let e = per_line
-                .entry((f.file.clone(), line))
-                .or_insert((class, BTreeSet::new()));
+            let key = (f.file.clone(), qualified(f), qualified(&idx.funs[target]));
+            let e = acc
+                .entry(key)
+                .or_insert((class, BTreeSet::new(), 0));
             e.1.extend(cfs.iter().cloned());
+            e.2 += 1;
         }
     }
-    per_line
-        .into_iter()
-        .map(|((file, line), (class, cfs))| Site { file, line, class, cfs })
+    acc.into_iter()
+        .map(|((file, caller, callee), (class, cfs, count))| Site {
+            file,
+            caller,
+            callee,
+            cfs,
+            class,
+            count,
+        })
         .collect()
 }
 
@@ -1163,17 +1608,97 @@ fn analyse_sources(sources: BTreeMap<String, String>) -> Vec<Site> {
 }
 
 fn analyse() -> Vec<Site> {
-    let sources = production_sources();
-    let idx = build_index(&sources);
+    let idx = build_index(&production_sources());
     let sinks = raw_sinks(&idx);
     let closure = mutator_closure(&idx, &sinks);
     all_sites(&idx, &closure)
 }
 
-fn execution_sites(sites: &[Site]) -> BTreeMap<&str, usize> {
-    let mut out: BTreeMap<&str, usize> = BTreeMap::new();
-    for s in sites.iter().filter(|s| s.class == Class::Execution) {
-        *out.entry(s.file.as_str()).or_default() += 1;
+fn execution_of(sites: &[Site]) -> Vec<&Site> {
+    sites.iter().filter(|s| s.class == Class::Execution).collect()
+}
+
+/// Total occurrences, not rows: a caller reaching the same mutator twice is two
+/// places to fix.
+fn execution_total(sites: &[Site]) -> usize {
+    execution_of(sites).iter().map(|s| s.count).sum()
+}
+
+// ── The dispatch match ─────────────────────────────────────────────────────
+
+/// `(payload variant, arm body)` for every arm of every `match` on a
+/// `TxPayload`, in `executor.rs`.
+///
+/// Arm POSITION, not textual occurrence. The first version collected every
+/// `TxPayload::` substring in the file, which meant a mention inside an arm
+/// body, a helper, or a type annotation read as a dispatch arm — and a real arm
+/// could be added without the count moving if some other mention disappeared in
+/// the same commit. Arms are found at brace-depth 1 of a `match` block, which
+/// is the only place a pattern can be.
+fn dispatch_arms(src: &str) -> Vec<(String, String)> {
+    let b = src.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while let Some(rel) = src[i..].find("match") {
+        let at = i + rel;
+        i = at + 5;
+        if at > 0 && ident_char(b[at - 1]) {
+            continue;
+        }
+        if b.get(at + 5).is_some_and(|&c| ident_char(c)) {
+            continue;
+        }
+        let Some(open) = src[at..].find('{').map(|k| at + k) else {
+            continue;
+        };
+        let Some(close) = matching(src, open, b'{', b'}') else {
+            continue;
+        };
+        if !src[open..close].contains("TxPayload::") {
+            continue;
+        }
+        // Walk the match body, tracking depth; a pattern sits at depth 1.
+        let mut depth = 0i32;
+        let mut j = open;
+        while j < close {
+            match b[j] {
+                b'{' | b'(' | b'[' => depth += 1,
+                b'}' | b')' | b']' => depth -= 1,
+                b'"' => {
+                    if let Some(k) = skip_string(b, j) {
+                        j = k;
+                        continue;
+                    }
+                }
+                _ => {}
+            }
+            if depth == 1 && src[j..].starts_with("TxPayload::") {
+                let after = j + "TxPayload::".len();
+                if let Some((name, k)) = ident_at(b, after) {
+                    // The arm's body runs from `=>` to the end of the arm.
+                    let body = src[k..close]
+                        .find("=>")
+                        .map(|d| {
+                            let from = k + d + 2;
+                            let rest = &src[from..close];
+                            let end = rest
+                                .find('{')
+                                .and_then(|o| matching(rest, o, b'{', b'}').map(|e| e + 1))
+                                .unwrap_or_else(|| rest.find(',').map(|c| c + 1).unwrap_or(rest.len()));
+                            rest[..end].to_string()
+                        })
+                        .unwrap_or_default();
+                    out.push((name, body));
+                }
+            }
+            j += 1;
+        }
+        // Continue from just inside this match, not past it: the real V2
+        // dispatch is an INNER match on `v2_tx.payload`, nested one arm deep
+        // inside the outer match on the transaction envelope. Skipping to
+        // `close` found only the legacy V1 arms — thirty declared families,
+        // and the guard was reading the fail-closed stubs.
+        i = open + 1;
     }
     out
 }
@@ -1182,51 +1707,162 @@ fn execution_sites(sites: &[Site]) -> BTreeMap<&str, usize> {
 // THE GUARDS
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// No file grows its committed execution writes.
-///
-/// Per file, not one total: a subsystem that migrates must not silently fund a
-/// new write somewhere else.
 #[test]
-fn no_file_grows_its_committed_execution_writes() {
-    let ledger = execution_ledger();
+#[ignore = "reporting aid: run with --ignored to regenerate MANIFEST"]
+fn dump_manifest() {
     let sites = analyse();
-    let actual = execution_sites(&sites);
+    for s in execution_of(&sites) {
+        println!(
+            "    (\"{}\", \"{}\", \"{}\", \"{}\", {}),",
+            s.file,
+            s.caller,
+            s.callee,
+            cf_list(&s.cfs),
+            s.count
+        );
+    }
+    let mut per_class: BTreeMap<Class, usize> = BTreeMap::new();
+    for s in &sites {
+        *per_class.entry(s.class).or_default() += s.count;
+    }
+    eprintln!("rows={} occurrences={}", execution_of(&sites).len(), execution_total(&sites));
+    let cfs: BTreeSet<&Cf> = execution_of(&sites).iter().flat_map(|s| s.cfs.iter()).collect();
+    eprintln!("cfs={}", cfs.len());
+    for (c, n) in &per_class {
+        eprintln!("  {c:?}: {n}");
+    }
+}
 
-    let mut grew = Vec::new();
-    let mut shrank = Vec::new();
-    for (file, &count) in &actual {
-        match ledger.get(file) {
-            Some(&allowed) if count > allowed => {
-                grew.push(format!("  {file}: {allowed} allowed, {count} found"))
-            }
-            Some(&allowed) if count < allowed => {
-                shrank.push(format!("  {file}: {allowed} allowed, {count} found"))
-            }
-            Some(_) => {}
-            None => grew.push(format!(
-                "  {file}: not on the ledger at all, {count} found"
+/// The manifest is exact: every committed execution write is declared, and
+/// nothing declared has silently moved.
+///
+/// Three ways to fail, each a different mistake:
+///
+/// * a row the manifest does not have — a new committed write, or one that
+///   moved to a different function or a different family;
+/// * a row the manifest has and the tree does not — progress, or a rename;
+/// * the same row with a different occurrence count.
+#[test]
+fn the_committed_write_manifest_is_exact() {
+    let sites = analyse();
+    let found: BTreeMap<(String, String, String), (String, usize)> = execution_of(&sites)
+        .into_iter()
+        .map(|s| {
+            (
+                (s.file.clone(), s.caller.clone(), s.callee.clone()),
+                (cf_list(&s.cfs), s.count),
+            )
+        })
+        .collect();
+    let declared: BTreeMap<(String, String, String), (String, usize)> = MANIFEST
+        .iter()
+        .map(|(f, caller, callee, cfs, n)| {
+            (
+                (f.to_string(), caller.to_string(), callee.to_string()),
+                (cfs.to_string(), *n),
+            )
+        })
+        .collect();
+    assert_eq!(
+        declared.len(),
+        MANIFEST.len(),
+        "the manifest has duplicate (file, caller, callee) keys"
+    );
+
+    let mut added = Vec::new();
+    let mut moved = Vec::new();
+    for (key, (cfs, n)) in &found {
+        match declared.get(key) {
+            None => added.push(format!(
+                "    (\"{}\", \"{}\", \"{}\", \"{cfs}\", {n}),",
+                key.0, key.1, key.2
             )),
+            Some((dcfs, _)) if dcfs != cfs => moved.push(format!(
+                "  {} {} -> {}: families were {dcfs}, are now {cfs}",
+                key.0, key.1, key.2
+            )),
+            Some((_, dn)) if dn != n => moved.push(format!(
+                "  {} {} -> {}: {dn} occurrence(s) declared, {n} found",
+                key.0, key.1, key.2
+            )),
+            Some(_) => {}
         }
     }
-    for (file, &allowed) in &ledger {
-        if !actual.contains_key(file) {
-            shrank.push(format!("  {file}: {allowed} allowed, 0 found"));
-        }
-    }
+    let removed: Vec<String> = declared
+        .keys()
+        .filter(|k| !found.contains_key(*k))
+        .map(|k| format!("  {} {} -> {}", k.0, k.1, k.2))
+        .collect();
 
     assert!(
-        grew.is_empty(),
-        "these files gained committed writes reachable from block execution. A \
-         block that is never accepted can now change canonical state in one more \
-         place. Route the write through `ExecutionView`; do not raise the \
-         ledger:\n{}",
-        grew.join("\n")
+        added.is_empty(),
+        "block execution can commit in places the manifest does not declare. \
+         Each row below is a write an unaccepted block can make. Route it \
+         through `ExecutionView`; do not paste the rows in:\n{}",
+        added.join("\n")
     );
     assert!(
-        shrank.is_empty(),
-        "these files now have FEWER committed execution writes than recorded, \
-         which is the goal — lower the ledger to lock the progress in:\n{}",
-        shrank.join("\n")
+        moved.is_empty(),
+        "declared writes changed shape. A different callee, or a different \
+         column family, is a different write — even when the totals \
+         match:\n{}",
+        moved.join("\n")
+    );
+    assert!(
+        removed.is_empty(),
+        "these declared writes are gone — progress, if they were migrated, or a \
+         rename this file has to follow. Remove the rows:\n{}",
+        removed.join("\n")
+    );
+
+    let total: usize = found.values().map(|(_, n)| *n).sum();
+    assert_eq!(total, MANIFEST_OCCURRENCES, "occurrence total changed");
+}
+
+/// Every mutating function is either reachable from an entry point or declared
+/// unreachable.
+///
+/// Rooting is what makes this an execution surface rather than a source
+/// listing — and it introduces a way to hide: a write the resolver cannot
+/// reach simply vanishes. This closes that.
+#[test]
+fn unreached_mutators_are_declared() {
+    let idx = build_index(&production_sources());
+    let sinks = raw_sinks(&idx);
+    let closure = mutator_closure(&idx, &sinks);
+    let classes = classify_all(&idx);
+
+    let mut unreached = BTreeSet::new();
+    for (k, f) in idx.funs.iter().enumerate() {
+        if classes[k].is_some() {
+            continue;
+        }
+        let crossings = resolved_calls(&idx, f)
+            .into_iter()
+            .filter(|(t, _)| classes[*t] == Some(Class::Library) && closure.contains_key(t))
+            .count();
+        if crossings > 0 {
+            unreached.insert((f.file.clone(), qualified(f)));
+        }
+    }
+    let declared: BTreeSet<(String, String)> = UNREACHED_MUTATORS
+        .iter()
+        .map(|(f, n, _)| (f.to_string(), n.to_string()))
+        .collect();
+
+    let extra: Vec<_> = unreached.difference(&declared).collect();
+    assert!(
+        extra.is_empty(),
+        "these functions commit application state and no entry point reaches \
+         them: {extra:?}. Either they are dead — delete them — or this file \
+         cannot resolve the call that reaches them, and the manifest is short \
+         by exactly that much. Check which before declaring one."
+    );
+    let gone: Vec<_> = declared.difference(&unreached).collect();
+    assert!(
+        gone.is_empty(),
+        "these are declared unreachable but are now reached, or are gone: \
+         {gone:?}. If they became reachable, their writes belong in the manifest."
     );
 }
 
@@ -1263,15 +1899,23 @@ fn non_execution_paths_are_classified() {
     /// `(class, sites, why it is not execution)`
     const EXPECTED: &[(Class, usize, &str)] = &[
         (Class::Genesis, 2, "no block exists to abandon: account prefunding and the empty archive snapshot"),
-        (Class::ReorgUndo, 3, "the committed write that unwinds an already-published block"),
-        (Class::ChainStorage, 16, "blocks, transactions, receipts, their indexes, validator sets, pruning — not application state"),
+        (
+            Class::ReorgUndo,
+            0,
+            "ZERO here on purpose. The revert writes a raw `db.batch()` in \
+             state.rs rather than calling a store, so it is one of the three \
+             sites the RAW guard next door counts and none that this one does. \
+             The two classes are complementary, and this zero says so — it is \
+             not an absence of coverage.",
+        ),
+        (Class::ChainStorage, 18, "blocks, transactions, receipts, their indexes, validator sets, pruning — not application state"),
         (Class::Snapshot, 1, "fast-sync restore, outside consensus"),
         (Class::OperatorTooling, 7, "see operator_tooling_writes_are_declared_deployment_blockers"),
     ];
     let sites = analyse();
     let mut counted: BTreeMap<Class, usize> = BTreeMap::new();
     for s in &sites {
-        *counted.entry(s.class).or_default() += 1;
+        *counted.entry(s.class).or_default() += s.count;
     }
     for (class, expected, why) in EXPECTED {
         let found = counted.get(class).copied().unwrap_or(0);
@@ -1297,30 +1941,19 @@ fn non_execution_paths_are_classified() {
 ///
 /// The executor's `TxPayload` match is the entire transaction surface. A new arm
 /// arrives with a new write surface, and this fails until someone says which
-/// kind it is — so "we forgot to check the new transaction family" cannot
-/// happen quietly.
+/// kind it is.
 #[test]
 fn every_dispatcher_arm_is_declared() {
     let root = workspace_root();
-    let src = std::fs::read_to_string(root.join("crates/state/src/executor.rs"))
-        .expect("read executor.rs");
-    let production = prepare(&src);
-
-    let mut found: BTreeSet<String> = BTreeSet::new();
-    let b = production.as_bytes();
-    let mut i = 0usize;
-    while let Some(rel) = production[i..].find("TxPayload::") {
-        let at = i + rel + "TxPayload::".len();
-        i = at;
-        if let Some((name, _)) = ident_at(b, at) {
-            found.insert(name);
-        }
-    }
-
+    let src = prepare(
+        &std::fs::read_to_string(root.join("crates/state/src/executor.rs"))
+            .expect("read executor.rs"),
+    );
+    let found: BTreeSet<String> = dispatch_arms(&src).into_iter().map(|(n, _)| n).collect();
     let declared: BTreeSet<String> = ARMS.iter().map(|(n, _, _)| n.to_string()).collect();
+
     let missing: Vec<_> = found.difference(&declared).collect();
     let stale: Vec<_> = declared.difference(&found).collect();
-
     assert!(
         missing.is_empty(),
         "the executor dispatches transaction families that are not declared \
@@ -1340,50 +1973,113 @@ fn every_dispatcher_arm_is_declared() {
         (overlay, committed, mixed),
         (12, 17, 1),
         "the overlay/committed/mixed split changed. Moving an arm from \
-         Committed to Overlay is progress — update this and the ledger \
+         Committed to Overlay is progress — update this and the manifest \
          together; any other movement is not."
     );
     assert_eq!(ARMS.len(), 30, "arm count changed");
 }
 
-/// The account write is universal: even the overlay-only arms commit one.
+/// Which arms debit an account, measured rather than asserted.
 ///
-/// Every arm's fee and nonce path debits the sender and credits the proposer
-/// through `StateManager::put_account`, which writes `cf::STATE` immediately.
-/// "Twelve arms are overlay-only" is therefore true of each subsystem's OWN
-/// rows and false of the account row underneath all of them — which is why
-/// accounts migrate first, and why this is stated where the arm split is, not
-/// somewhere a reader has to go looking for it.
+/// The claim this replaces was "every arm's fee path writes `cf::STATE`, so the
+/// twelve overlay-only arms are only overlay-only for their OWN rows". That is
+/// the reason accounts migrate first, so it has to be true — and the test that
+/// carried it sampled two files out of thirty and generalised.
+///
+/// This resolves each arm's body, walks the calls, and records exactly which
+/// arms reach `StateStore::put_account`. Where the claim does not hold, the
+/// exception is named rather than rounded away.
 #[test]
-fn the_account_write_is_universal_even_on_overlay_only_arms() {
-    let sources = production_sources();
-    let ledger = execution_ledger();
-    assert!(
-        ledger.contains_key("crates/state/src/state.rs"),
-        "the account write must be on the ledger: {ACCOUNT_WRITE_IS_UNIVERSAL}"
-    );
+fn the_arms_that_debit_an_account_are_declared() {
+    /// Arms that do NOT reach `StateStore::put_account`, with why.
+    const NO_ACCOUNT_WRITE: &[(&str, &str)] = &[
+        (
+            "ComputePool",
+            "gate-closed seam: Failed(0) with fee_paid 0 and no state mutation, \
+             byte-identical to a chain that never saw the tx (#130)",
+        ),
+        (
+            "BeaconSetup",
+            "fee_paid 0 on BOTH paths — the dormant fail-closed seam and the \
+             gate-open runtime (#127). Beacon ops are never charged.",
+        ),
+        (
+            "BeaconSigning",
+            "fee_paid 0 on both paths, as BeaconSetup",
+        ),
+    ];
 
-    // Two subsystems whose own rows are fully on the overlay, and which still
-    // call `put_account` for the fee.
-    for overlay_only in [
-        "crates/state/src/node_registry.rs",
-        "crates/state/src/storage_metadata.rs",
-    ] {
-        let src = sources
-            .get(overlay_only)
-            .unwrap_or_else(|| panic!("{overlay_only} is not in the source map"));
-        assert!(
-            src.contains("put_account("),
-            "{overlay_only} is listed as overlay-only, which is true of its own \
-             rows — but it debits an account through {ACCOUNT_WRITE_IS_UNIVERSAL}, \
-             and this test exists so that stays visible. If the account write \
-             really is gone, this is progress: update the claim."
-        );
-        assert!(
-            !ledger.contains_key(overlay_only),
-            "{overlay_only} now has committed writes of its own"
-        );
+    let idx = build_index(&production_sources());
+    let classes = classify_all(&idx);
+    let account_writer: Vec<usize> = idx
+        .funs
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| {
+            f.file == "crates/storage/src/schema.rs"
+                && f.owner.as_deref() == Some("StateStore")
+                && f.name == "put_account"
+        })
+        .map(|(k, _)| k)
+        .collect();
+    assert_eq!(
+        account_writer.len(),
+        1,
+        "expected exactly one StateStore::put_account"
+    );
+    let _ = &classes;
+
+    let src = prepare(
+        &std::fs::read_to_string(workspace_root().join("crates/state/src/executor.rs"))
+            .expect("read executor.rs"),
+    );
+    // The arm bodies run inside the dispatch function, so they see its
+    // receiver and parameters.
+    let dispatch = idx
+        .funs
+        .iter()
+        .find(|f| {
+            f.file == "crates/state/src/executor.rs" && f.name == "execute_tx_with_validators"
+        })
+        .expect("the dispatch function");
+
+    let mut debits: BTreeSet<String> = BTreeSet::new();
+    for (payload, body) in dispatch_arms(&src) {
+        if body.trim().is_empty() {
+            continue;
+        }
+        let arm = Fun {
+            file: dispatch.file.clone(),
+            owner: dispatch.owner.clone(),
+            name: format!("arm::{payload}"),
+            params: dispatch.params.clone(),
+            body,
+        };
+        let roots: Vec<usize> = resolved_calls(&idx, &arm).into_iter().map(|(k, _)| k).collect();
+        if reachable(&idx, &roots).contains(&account_writer[0]) {
+            debits.insert(payload);
+        }
     }
+
+    let all: BTreeSet<String> = ARMS.iter().map(|(n, _, _)| n.to_string()).collect();
+    let declared_exceptions: BTreeSet<String> =
+        NO_ACCOUNT_WRITE.iter().map(|(n, _)| n.to_string()).collect();
+    let silent: Vec<_> = all
+        .difference(&debits)
+        .filter(|n| !declared_exceptions.contains(*n))
+        .collect();
+    assert!(
+        silent.is_empty(),
+        "{ACCOUNT_WRITE_IS_UNIVERSAL}\n  but these arms do not reach it: \
+         {silent:?}. Either the claim is wrong for them — declare each in \
+         NO_ACCOUNT_WRITE with the reason — or this file cannot resolve their \
+         fee path, and the manifest is short."
+    );
+    let wrong: Vec<_> = declared_exceptions.intersection(&debits).collect();
+    assert!(
+        wrong.is_empty(),
+        "these arms are declared not to debit an account, but do: {wrong:?}"
+    );
 }
 
 /// Dead column families stay out of the ledger and out of the journal.
@@ -1449,7 +2145,7 @@ fn operator_tooling_writes_are_declared_deployment_blockers() {
             "a second operator-tooling writer appeared at {}:{}. Every one of \
              these changes application state outside consensus and blocks \
              deployment.",
-            s.file, s.line
+            s.file, s.caller
         );
     }
 }
@@ -1481,12 +2177,35 @@ impl<'a> StateStore<'a> {
     )
 }
 
+/// A root, because the inventory is rooted.
+///
+/// Every fixture below needs one: without a `BlockExecutor::execute_block` that
+/// reaches the probe, nothing is execution and every count is zero — which is
+/// exactly the behaviour [`an_unreachable_mutating_helper_is_not_counted`]
+/// depends on.
+const ROOT_HARNESS: &str = r#"
+pub struct BlockExecutor { db: Arc<Database> }
+impl BlockExecutor {
+    pub fn execute_block(&self, db: &Database) -> Result<()> {
+        Probe::execute(db)
+    }
+}
+"#;
+
 fn sources_with(caller: &str) -> BTreeMap<String, String> {
-    let (lib_path, lib) = fake_library();
-    BTreeMap::from([
-        (lib_path, lib),
+    with_root(BTreeMap::from([
+        fake_library(),
         ("crates/state/src/probe_executor.rs".to_string(), caller.to_string()),
-    ])
+    ]))
+}
+
+/// Add the root harness to a synthetic source map.
+fn with_root(mut sources: BTreeMap<String, String>) -> BTreeMap<String, String> {
+    sources.insert(
+        "crates/state/src/executor.rs".to_string(),
+        ROOT_HARNESS.to_string(),
+    );
+    sources
 }
 
 fn execution_count(caller: &str) -> usize {
@@ -1534,7 +2253,7 @@ impl<'a> StateStore<'a> {
     }
 }
 "#;
-    let sources = BTreeMap::from([
+    let sources = with_root(BTreeMap::from([
         ("crates/storage/src/schema.rs".to_string(), library_with_helper.to_string()),
         (
             "crates/state/src/probe_executor.rs".to_string(),
@@ -1548,7 +2267,7 @@ impl Probe {
 "#
             .to_string(),
         ),
-    ]);
+    ]));
     assert_eq!(
         analyse_sources(sources)
             .iter()
@@ -1576,7 +2295,7 @@ impl<'a> StateStore<'a> {
     }
 }
 "#;
-    let sources = BTreeMap::from([
+    let sources = with_root(BTreeMap::from([
         ("crates/storage/src/schema.rs".to_string(), renamed_library.to_string()),
         (
             "crates/state/src/probe_executor.rs".to_string(),
@@ -1590,7 +2309,7 @@ impl Probe {
 "#
             .to_string(),
         ),
-    ]);
+    ]));
     let n = analyse_sources(sources)
         .iter()
         .filter(|s| s.class == Class::Execution)
@@ -1619,7 +2338,7 @@ impl<'a> StateStore<'a> {
     }
 }
 "#;
-    let sources = BTreeMap::from([
+    let sources = with_root(BTreeMap::from([
         ("crates/storage/src/schema.rs".to_string(), multiline_library.to_string()),
         (
             "crates/state/src/probe_executor.rs".to_string(),
@@ -1637,7 +2356,7 @@ impl Probe {
 "#
             .to_string(),
         ),
-    ]);
+    ]));
     let sites = analyse_sources(sources);
     assert_eq!(
         sites.iter().filter(|s| s.class == Class::Execution).count(),
@@ -1665,7 +2384,7 @@ impl<'a> BitmapStore<'a> {
     }
 }
 "#;
-    let sources = BTreeMap::from([
+    let sources = with_root(BTreeMap::from([
         ("crates/storage/src/schema.rs".to_string(), variable_cf_library.to_string()),
         (
             "crates/state/src/probe_executor.rs".to_string(),
@@ -1679,7 +2398,7 @@ impl Probe {
 "#
             .to_string(),
         ),
-    ]);
+    ]));
     let sites = analyse_sources(sources);
     let exec: Vec<&Site> = sites.iter().filter(|s| s.class == Class::Execution).collect();
     assert_eq!(exec.len(), 1, "a runtime-chosen family must not drop the write");
@@ -1706,7 +2425,7 @@ impl<'a> OpaqueStore<'a> {
     }
 }
 "#;
-    let sources = BTreeMap::from([
+    let sources = with_root(BTreeMap::from([
         ("crates/storage/src/schema.rs".to_string(), opaque_library.to_string()),
         (
             "crates/state/src/probe_executor.rs".to_string(),
@@ -1719,7 +2438,7 @@ impl Probe {
 "#
             .to_string(),
         ),
-    ]);
+    ]));
     let sites = analyse_sources(sources);
     let exec: Vec<&Site> = sites.iter().filter(|s| s.class == Class::Execution).collect();
     assert_eq!(exec.len(), 1);
@@ -1744,7 +2463,7 @@ impl<'a> DocClassStore<'a> {
     pub fn identity_roots(&self) -> IdentityRootStore<'_> { IdentityRootStore::new(self.db) }
 }
 "#;
-    let sources = BTreeMap::from([
+    let sources = with_root(BTreeMap::from([
         ("crates/storage/src/docclass_store.rs".to_string(), faceted_library.to_string()),
         (
             "crates/state/src/probe_executor.rs".to_string(),
@@ -1758,7 +2477,7 @@ impl Probe {
 "#
             .to_string(),
         ),
-    ]);
+    ]));
     let sites = analyse_sources(sources);
     let exec: Vec<&Site> = sites.iter().filter(|s| s.class == Class::Execution).collect();
     assert_eq!(exec.len(), 1, "the accessor hop must be followed");
@@ -1769,7 +2488,7 @@ impl Probe {
 #[test]
 fn a_store_held_in_a_field_is_counted() {
     assert_eq!(
-        analyse_sources(BTreeMap::from([
+        analyse_sources(with_root(BTreeMap::from([
             fake_library(),
             (
                 "crates/state/src/probe_executor.rs".to_string(),
@@ -1783,7 +2502,7 @@ impl Probe {
 "#
                 .to_string()
             ),
-        ]))
+        ])))
         .iter()
         .filter(|s| s.class == Class::Execution)
         .count(),
@@ -1792,11 +2511,17 @@ impl Probe {
 }
 
 /// A write inside a `#[cfg(test)]` module is not block execution.
+///
+/// Two things keep it out, and the test asserts both: the module never reaches
+/// the index, and nothing reachable from a root could call it if it did.
+/// Asserting only the count would pass for the second reason alone, and would
+/// keep passing if the stripping broke.
 #[test]
 fn a_cfg_test_module_is_not_counted() {
-    assert_eq!(
-        execution_count(
-            r#"
+    const FIXTURE: &str = r#"
+impl Probe {
+    fn execute(db: &Database) -> Result<()> { Ok(()) }
+}
 #[cfg(test)]
 mod tests {
     fn fixture(db: &Database) -> Result<()> {
@@ -1804,8 +2529,13 @@ mod tests {
         store.put_account(b"k", b"v")
     }
 }
-"#
-        ),
+"#;
+    assert!(
+        !prepare(FIXTURE).contains("put_account"),
+        "the `#[cfg(test)]` module must be removed before indexing"
+    );
+    assert_eq!(
+        execution_count(FIXTURE),
         0,
         "a fixture cannot be reached from a block"
     );
@@ -1826,7 +2556,8 @@ pub struct ApplicationOverlay<'a> { db: &'a Database }
 impl<'a> ApplicationOverlay<'a> {
     pub fn new(db: &'a Database) -> Self { Self { db } }
     pub fn put(&mut self, cf: &str, k: &[u8], v: &[u8]) -> Result<()> { Ok(()) }
-    pub fn publish(self, k: &[u8], v: &[u8]) -> Result<()> {
+    pub fn publish(self, k: &[u8], v: &[u8]) -> Result<()> { self.into_batch(k, v) }
+    fn into_batch(self, k: &[u8], v: &[u8]) -> Result<()> {
         let mut batch = self.db.batch();
         batch.put(cf::STATE, k, v)?;
         batch.commit()
@@ -1843,23 +2574,27 @@ impl Probe {
 }
 "#;
     // As it stands: the overlay file is excluded, so neither line is a site.
-    let excluded = analyse_sources(BTreeMap::from([
+    let excluded = analyse_sources(with_root(BTreeMap::from([
         ("crates/storage/src/overlay.rs".to_string(), overlay.to_string()),
         ("crates/state/src/probe_executor.rs".to_string(), caller.to_string()),
-    ]));
+    ])));
     assert_eq!(
         excluded.iter().filter(|s| s.class == Class::Execution).count(),
         0,
         "staging into the overlay, and publishing it, are the migration target"
     );
 
-    // The same sources with the overlay living somewhere the exclusion does not
-    // cover: now the publish IS counted. That is what the exclusion is for, and
-    // this half is why it is not inert.
-    let not_excluded = analyse_sources(BTreeMap::from([
-        ("crates/storage/src/some_other_store.rs".to_string(), overlay.to_string()),
+    // The same code with the publisher function renamed: the exemption is keyed
+    // to `ApplicationOverlay::into_batch` by name, so a DIFFERENT function in
+    // the very same file is counted. That is what stops the exemption from
+    // covering a whole file, and this half is why it is not inert.
+    let not_excluded = analyse_sources(with_root(BTreeMap::from([
+        (
+            "crates/storage/src/overlay.rs".to_string(),
+            overlay.replace("into_batch", "some_other_write"),
+        ),
         ("crates/state/src/probe_executor.rs".to_string(), caller.to_string()),
-    ]));
+    ])));
     assert_eq!(
         not_excluded.iter().filter(|s| s.class == Class::Execution).count(),
         1,
@@ -1867,12 +2602,28 @@ impl Probe {
     );
 }
 
-/// Genesis, reorg-undo and chain storage are classified away from execution —
-/// and a write in an execution function in the same file still counts.
+/// Genesis, reorg-undo and execution are told apart WITHIN one file.
+///
+/// `state.rs` holds all three: prefunding at genesis, the revert, and the
+/// account debit every transaction makes. A file-level rule cannot separate
+/// them; rooting can, because each is reached from a different entry point.
 #[test]
 fn classification_separates_paths_within_one_file() {
     let sources = BTreeMap::from([
         fake_library(),
+        (
+            // The root reaches only the execution path.
+            "crates/state/src/executor.rs".to_string(),
+            r#"
+pub struct BlockExecutor { db: Arc<Database> }
+impl BlockExecutor {
+    pub fn execute_block(&self, db: &Database) -> Result<()> {
+        StateManager::put_account(db)
+    }
+}
+"#
+            .to_string(),
+        ),
         (
             "crates/state/src/state.rs".to_string(),
             r#"
@@ -1883,7 +2634,7 @@ impl StateManager {
     pub fn revert_block_state_diffs(&self, db: &Database) -> Result<()> {
         StateStore::new(db).put_account(b"k", b"v")
     }
-    pub fn put_account(&self, db: &Database) -> Result<()> {
+    pub fn put_account(db: &Database) -> Result<()> {
         StateStore::new(db).put_account(b"k", b"v")
     }
 }
@@ -1893,11 +2644,197 @@ impl StateManager {
     ]);
     let sites = analyse_sources(sources);
     let by_class = |c: Class| sites.iter().filter(|s| s.class == c).count();
-    assert_eq!(by_class(Class::Genesis), 1);
-    assert_eq!(by_class(Class::ReorgUndo), 1);
+    assert_eq!(by_class(Class::Genesis), 1, "genesis prefunding");
+    assert_eq!(by_class(Class::ReorgUndo), 1, "the revert");
     assert_eq!(
         by_class(Class::Execution),
         1,
-        "three writes in one file, three different classes"
+        "three writes in one file, three entry points, three classes"
+    );
+}
+
+/// A mutating helper nothing reaches is not an execution write.
+///
+/// This is the difference between an inventory and a guard. The first version
+/// of this file defaulted every `crates/state/src` function to "execution", so
+/// a `pub fn` with no caller counted exactly as much as one the dispatcher
+/// runs on every block — and deleting dead code read as migration progress.
+///
+/// The real tree has two such functions, both `pub` with no production caller;
+/// they are named in [`UNREACHED_MUTATORS`] rather than silently dropped.
+#[test]
+fn an_unreachable_mutating_helper_is_not_counted() {
+    const REACHED: &str = r#"
+impl Probe {
+    fn execute(db: &Database) -> Result<()> {
+        StateStore::new(db).put_account(b"k", b"v")
+    }
+}
+"#;
+    const ALSO_AN_ORPHAN: &str = r#"
+impl Probe {
+    fn execute(db: &Database) -> Result<()> {
+        StateStore::new(db).put_account(b"k", b"v")
+    }
+    pub fn orphan(db: &Database) -> Result<()> {
+        StateStore::new(db).put_account(b"orphan", b"v")
+    }
+}
+"#;
+    assert_eq!(execution_count(REACHED), 1);
+    assert_eq!(
+        execution_count(ALSO_AN_ORPHAN),
+        1,
+        "a second write that no entry point reaches must not enter the ledger"
+    );
+}
+
+/// Constant-cardinality substitution: the same totals, a different write.
+///
+/// Both halves below have one site, in one file, touching one column family.
+/// Per-file counts and a family total cannot tell them apart, and both passed
+/// before the manifest keyed identities. They are different writes: a different
+/// caller, a different mutator, a different family.
+#[test]
+fn substituting_one_write_for_another_is_not_invisible() {
+    const BEFORE: &str = r#"
+impl Probe {
+    fn execute(db: &Database) -> Result<()> {
+        StateStore::new(db).put_account(b"k", b"v")
+    }
+}
+"#;
+    // Same file, same count, same number of families — different everything else.
+    const AFTER: &str = r#"
+impl Probe {
+    fn execute(db: &Database) -> Result<()> {
+        NftStore::new(db).put_token(b"k", b"v")
+    }
+}
+"#;
+    let library = r#"
+pub struct StateStore<'a> { db: &'a Database }
+impl<'a> StateStore<'a> {
+    pub fn new(db: &'a Database) -> Self { Self { db } }
+    pub fn put_account(&self, k: &[u8], v: &[u8]) -> Result<()> { self.db.put(cf::STATE, k, v) }
+}
+pub struct NftStore<'a> { db: &'a Database }
+impl<'a> NftStore<'a> {
+    pub fn new(db: &'a Database) -> Self { Self { db } }
+    pub fn put_token(&self, k: &[u8], v: &[u8]) -> Result<()> { self.db.put(cf::NFT_TOKENS, k, v) }
+}
+"#;
+    let run = |probe: &str| {
+        analyse_sources(with_root(BTreeMap::from([
+            ("crates/storage/src/schema.rs".to_string(), library.to_string()),
+            ("crates/state/src/probe_executor.rs".to_string(), probe.to_string()),
+        ])))
+    };
+    let before = run(BEFORE);
+    let after = run(AFTER);
+
+    let count = |v: &[Site]| execution_of(v).iter().map(|s| s.count).sum::<usize>();
+    let families = |v: &[Site]| {
+        execution_of(v)
+            .iter()
+            .flat_map(|s| s.cfs.iter().cloned())
+            .collect::<BTreeSet<Cf>>()
+            .len()
+    };
+    assert_eq!(count(&before), count(&after), "the totals are identical...");
+    assert_eq!(families(&before), families(&after), "...and so is the family count");
+
+    let identity = |v: &[Site]| {
+        execution_of(v)
+            .iter()
+            .map(|s| (s.file.clone(), s.caller.clone(), s.callee.clone(), cf_list(&s.cfs)))
+            .collect::<Vec<_>>()
+    };
+    assert_ne!(
+        identity(&before),
+        identity(&after),
+        "...but the manifest keys callee and families, so the substitution moves \
+         a row. This is the check a count cannot make."
+    );
+}
+
+/// A direct write elsewhere in a buffering file is still a write.
+///
+/// The exemption names one function. A new `db.put` anywhere else in
+/// `overlay.rs` — or in `exec_view.rs` or `candidate.rs`, which are no longer
+/// exempt at all — is a committed write like any other.
+#[test]
+fn a_direct_write_elsewhere_in_a_buffering_file_is_counted() {
+    let overlay_with_a_second_writer = r#"
+pub struct ApplicationOverlay<'a> { db: &'a Database }
+impl<'a> ApplicationOverlay<'a> {
+    pub fn new(db: &'a Database) -> Self { Self { db } }
+    fn into_batch(self, k: &[u8], v: &[u8]) -> Result<()> {
+        let mut batch = self.db.batch();
+        batch.put(cf::STATE, k, v)?;
+        batch.commit()
+    }
+    pub fn shortcut(&self, k: &[u8], v: &[u8]) -> Result<()> {
+        self.db.put(cf::STATE, k, v)
+    }
+}
+"#;
+    let sites = analyse_sources(with_root(BTreeMap::from([
+        (
+            "crates/storage/src/overlay.rs".to_string(),
+            overlay_with_a_second_writer.to_string(),
+        ),
+        (
+            "crates/state/src/probe_executor.rs".to_string(),
+            r#"
+impl Probe {
+    fn execute(db: &Database) -> Result<()> {
+        ApplicationOverlay::new(db).shortcut(b"k", b"v")
+    }
+}
+"#
+            .to_string(),
+        ),
+    ])));
+    assert_eq!(
+        execution_of(&sites).len(),
+        1,
+        "exempting the publisher must not exempt the file it lives in"
+    );
+}
+
+/// A `TxPayload::` mention outside the dispatch match is not an arm.
+///
+/// The first version collected every textual occurrence, so a mention in a
+/// helper, a type annotation or an arm BODY read as a dispatch arm — and a real
+/// arm could be added without the count moving, if some other mention went away
+/// in the same commit.
+#[test]
+fn a_tx_payload_mention_outside_the_dispatch_is_not_an_arm() {
+    const SRC: &str = r#"
+fn describe(p: &TxPayload) -> &'static str {
+    if matches!(p, TxPayload::NotAnArm(_)) { "x" } else { "y" }
+}
+impl BlockExecutor {
+    fn dispatch(&self, p: &TxPayload) -> Result<()> {
+        match p {
+            TxPayload::Real(d) => {
+                // A mention inside an arm BODY, at depth 2.
+                let _ = TxPayload::AlsoNotAnArm(d);
+                Ok(())
+            }
+            TxPayload::AlsoReal(_) => Ok(()),
+        }
+    }
+}
+"#;
+    let arms: BTreeSet<String> = dispatch_arms(&prepare(SRC))
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    assert_eq!(
+        arms,
+        BTreeSet::from(["Real".to_string(), "AlsoReal".to_string()]),
+        "only match-arm patterns are arms"
     );
 }
