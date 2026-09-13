@@ -1,4 +1,24 @@
-//! Structural guard: block execution must not mutate the committed database.
+//! Narrow guard: no RAW database syntax in `crates/state/src`.
+//!
+//! # Read this before trusting the number below
+//!
+//! This file counts the literal text `db.put(` / `db.delete(` / `db.batch(`.
+//! That is ALL it counts, and the number it reports — 3 — is not a measure of
+//! how much block execution can still commit. The cross-crate audit at
+//! `20544f8a` found **317 committed execution write sites across 116
+//! application column families**, none of which this file can see, because they
+//! all go through a store API:
+//!
+//! ```ignore
+//! store.identity_roots().put(&identity)?;   // -> IdentityRootStore::put -> db.put
+//! state.put_account(&addr, &acct)?;         // -> StateStore::put_account -> db.put
+//! ```
+//!
+//! The real inventory lives in `execution_closure.rs`, which follows those
+//! calls across crates and pins them per file. THAT is the ledger the
+//! application journal has to empty. This file stays because the raw syntax is
+//! still worth forbidding — a new `self.db.put(..)` inside an executor is a
+//! regression whatever the closure says — but it must not be read as coverage.
 //!
 //! `ExecutionView` makes the mistake inexpressible *at call sites that take
 //! one*. It cannot retroactively fix the code that still holds an
@@ -40,7 +60,11 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-/// Files that still mutate `Database` directly, with their current counts.
+/// Files containing RAW `Database` syntax, with their current counts.
+///
+/// A syntax budget, not a coverage measure. `execution_closure.rs` holds the
+/// real one; see this file's header for why the two differ by two orders of
+/// magnitude.
 ///
 /// ONLY EVER DECREASE THESE. Raising a number to make this test pass defeats
 /// its entire purpose: the point is that the boundary cannot erode while the
@@ -71,7 +95,8 @@ use std::path::Path;
 /// `put_node` was private. It belonged to the registry's write set and moved
 /// with it.
 ///
-/// What is left is three, and none of them is an unmigrated subsystem:
+/// What is left is three RAW sites, and none of them is an unmigrated
+/// subsystem — which is exactly why three is not a coverage number:
 ///
 /// * `beacon_store.rs`, `compute_pool_store.rs` — one each, the reorg-path
 ///   `revert_block`. Reverting is not execution: it is the committed write that
