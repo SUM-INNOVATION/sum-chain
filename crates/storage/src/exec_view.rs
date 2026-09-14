@@ -94,6 +94,14 @@ impl<'v, 'db> ExecutionView<'v, 'db> {
         self.overlay.preimages_for(cf)
     }
 
+    /// The identity of the candidate behind this view.
+    ///
+    /// For components that cache per-candidate state and must drop it when the
+    /// candidate changes. See `ApplicationOverlay::id`.
+    pub fn candidate_id(&self) -> u64 {
+        self.overlay.id()
+    }
+
     /// Logical write-set bytes buffered so far. Not a residency bound; see
     /// [`crate::overlay`].
     pub fn logical_bytes(&self) -> u64 {

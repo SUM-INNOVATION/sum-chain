@@ -345,8 +345,8 @@ const ARMS: &[(&str, ArmKind, &str)] = &[
     ("BeaconSetup", ArmKind::Overlay, "beacon_store.rs (revert stays direct, by design)"),
     ("BeaconSigning", ArmKind::Overlay, "beacon_store.rs (revert stays direct, by design)"),
     ("ComputePool", ArmKind::Overlay, "compute_pool_store.rs (revert stays direct, by design)"),
-    ("ContractCall", ArmKind::Committed, "sumc-runtime RocksDbStorage; own buffer + ContractMutation journal"),
-    ("ContractDeploy", ArmKind::Committed, "sumc-runtime RocksDbStorage; own buffer + ContractMutation journal"),
+    ("ContractCall", ArmKind::Overlay, "sumc-runtime queues; contract_executor stages into the candidate"),
+    ("ContractDeploy", ArmKind::Overlay, "sumc-runtime queues; contract_executor stages into the candidate"),
     ("DocClass", ArmKind::Committed, "docclass_executor.rs -> DocClassStore sub-stores"),
     ("Education", ArmKind::Overlay, "education_executor.rs"),
     ("Employment", ArmKind::Committed, "employment_executor.rs -> EmploymentStore sub-stores"),
@@ -1930,7 +1930,7 @@ fn every_dispatcher_arm_is_declared() {
     let mixed = ARMS.iter().filter(|(_, k, _)| *k == ArmKind::Mixed).count();
     assert_eq!(
         (overlay, committed, mixed),
-        (17, 13, 0),
+        (19, 11, 0),
         "the overlay/committed/mixed split changed. Moving an arm from \
          Committed to Overlay is progress — update this and the manifest \
          together; any other movement is not."
@@ -1960,17 +1960,22 @@ fn every_dispatcher_arm_is_declared() {
 /// Overlay on the strength of its stub.
 #[test]
 fn each_arms_kind_is_derived_from_what_it_can_reach() {
-    /// Arms whose commit the manifest cannot attribute to a state-crate
-    /// caller, with why. Contract state is written by `sumc-runtime`'s
-    /// `RocksDbStorage`, which [`classify_all`] marks `Library` by location, so
-    /// no `Site` is keyed to a function in `crates/state`. The arms DO commit —
-    /// through their own buffer and the `ContractMutation` journal — which is
-    /// why they stay declared `Committed` and why contracts are their own
-    /// migration package rather than a row in this ledger.
-    const COMMITS_OUTSIDE_THE_MANIFEST: &[(&str, &str)] = &[
-        ("ContractCall", "sumc-runtime RocksDbStorage; own buffer + ContractMutation journal"),
-        ("ContractDeploy", "sumc-runtime RocksDbStorage; own buffer + ContractMutation journal"),
-    ];
+    /// Arms whose commit the manifest cannot attribute to a state-crate caller.
+    ///
+    /// Empty now. It held ContractCall and ContractDeploy, whose rows are
+    /// written from `sumc-runtime` — which [`classify_all`] marks `Library` by
+    /// location, so no `Site` was ever keyed to a function in `crates/state`.
+    ///
+    /// Their migration is real but this file cannot witness it, in either
+    /// direction: the rows were never here to leave, and declaring the arms
+    /// `Overlay` would have passed this guard before the migration as readily
+    /// as after. The proof lives where the seam does —
+    /// `sumc-runtime/tests/contract_commit_point.rs` pins that
+    /// `ContractStorage` calls only the READ half of its backend trait, and
+    /// `contract_reorg_and_root.rs` pins that an abandoned deploy leaves no
+    /// contract row. Emptying this list records that nothing is excused any
+    /// more; it does not, by itself, prove anything.
+    const COMMITS_OUTSIDE_THE_MANIFEST: &[(&str, &str)] = &[];
 
     let idx = build_index(&production_sources());
 

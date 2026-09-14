@@ -202,9 +202,69 @@ pub struct ApplicationOverlay<'a> {
     /// See the module's Accounting section. Logical write-set bytes only.
     logical_bytes: u64,
     limit: u64,
+    /// A process-unique identity for this candidate.
+    ///
+    /// Nothing inside the overlay uses it. It exists so a long-lived component
+    /// that caches per-candidate state can tell one candidate from the next and
+    /// drop what it was holding — the contract runtime does exactly that, and
+    /// without an identity it carried an abandoned block's contract rows into
+    /// the block after it.
+    id: u64,
 }
 
 impl<'a> ApplicationOverlay<'a> {
+    /// Claim the next identity from `counter`, or `None` if there is none left.
+    ///
+    /// `fetch_add` was wrong here: it wraps the counter FIRST and can only be
+    /// checked afterwards, so the counter is already back at a live value by
+    /// the time anything notices, and a panic that unwinds or is caught leaves
+    /// later candidates being handed ids that are still in use. A wrapped id is
+    /// worse than a duplicate: a per-candidate cache reads it as "same
+    /// candidate, keep everything", which is the exact bug the identity exists
+    /// to prevent.
+    ///
+    /// `fetch_update` with a checked add cannot do that. On the last id the
+    /// update returns `None`, the counter stays at `u64::MAX`, and it stays
+    /// there for every subsequent call.
+    fn claim_id(counter: &std::sync::atomic::AtomicU64) -> Option<u64> {
+        use std::sync::atomic::Ordering;
+        counter
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+            .ok()
+    }
+
+    /// Hands out candidate identities: monotonic, process-local, compared for
+    /// equality and never persisted or sent anywhere.
+    ///
+    /// Exhaustion terminates the process, and does so with `abort`, which no
+    /// `catch_unwind` can turn back into "carry on with a repeated id".
+    /// Reaching it needs 2^64 candidates in one process; if it ever happens,
+    /// stopping is the only safe answer, because the alternative is silently
+    /// serving one block's contract rows to another.
+    fn next_id() -> u64 {
+        use std::sync::atomic::AtomicU64;
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        match Self::claim_id(&NEXT) {
+            Some(id) => id,
+            None => {
+                eprintln!(
+                    "candidate identity space exhausted: ids must stay unique \
+                     within a process, and there is no next one to hand out"
+                );
+                std::process::abort();
+            }
+        }
+    }
+
+    /// This candidate's identity.
+    ///
+    /// Unique within this process for the life of the process. Components that
+    /// cache per-candidate state compare it for equality and drop everything
+    /// they hold when it changes.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
     /// Create an overlay bounded by `limit` logical write-set bytes.
     ///
     /// `limit` has no default on purpose. A ceiling that can refuse a write
@@ -219,6 +279,7 @@ impl<'a> ApplicationOverlay<'a> {
             preimages: HashMap::new(),
             logical_bytes: 0,
             limit,
+            id: Self::next_id(),
         }
     }
 
@@ -571,6 +632,53 @@ mod tests {
     /// Fixture ceiling. Deliberately a test constant: the production limit is a
     /// versioned consensus parameter and this module invents no default.
     const TEST_LIMIT: u64 = 1 << 20;
+
+    /// The identity counter stops rather than wrapping, and STAYS stopped.
+    ///
+    /// The counter is the part that can be tested; the `abort` in `next_id`
+    /// cannot be, and is what turns "no id" into "no process". Testing the
+    /// claim against a local counter is what makes the exhaustion path reachable
+    /// at all — a static one would need 2^64 calls.
+    #[test]
+    fn identity_exhaustion_leaves_the_counter_alone_instead_of_wrapping() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        // One short of the end: the last id is handed out normally.
+        let counter = AtomicU64::new(u64::MAX - 1);
+        assert_eq!(
+            ApplicationOverlay::claim_id(&counter),
+            Some(u64::MAX - 1),
+            "the last id is still issued"
+        );
+        assert_eq!(counter.load(Ordering::Relaxed), u64::MAX);
+
+        // And then nothing, repeatedly. `fetch_add` would have returned
+        // u64::MAX here and left the counter at 0, so the call after it would
+        // have handed out 0 and then 1 — ids already in use.
+        for _ in 0..3 {
+            assert_eq!(
+                ApplicationOverlay::claim_id(&counter),
+                None,
+                "no id may be issued once the space is exhausted"
+            );
+            assert_eq!(
+                counter.load(Ordering::Relaxed),
+                u64::MAX,
+                "and the counter must not move, so a caught panic cannot \
+                 resume into a repeated id"
+            );
+        }
+    }
+
+    /// Ids handed out by the real counter are distinct and ascending.
+    #[test]
+    fn candidate_ids_are_distinct() {
+        let (db, _dir) = db();
+        let a = ApplicationOverlay::new(&db, TEST_LIMIT);
+        let b = ApplicationOverlay::new(&db, TEST_LIMIT);
+        assert_ne!(a.id(), b.id(), "two candidates must not share an identity");
+        assert!(b.id() > a.id(), "and the counter only moves forward");
+    }
 
     fn db() -> (Database, TempDir) {
         let dir = TempDir::new().expect("tempdir");

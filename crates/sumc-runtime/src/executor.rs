@@ -595,13 +595,99 @@ impl ContractExecutor {
         Ok(self.storage.get_code(address)?.is_some())
     }
 
+    /// Whether a contract exists in COMMITTED state, ignoring any candidate.
+    ///
+    /// The RPC/diagnostic answer. `contract_exists` above is the one execution
+    /// uses, and it deliberately sees the block's staged rows.
+    pub fn contract_exists_committed(&self, address: &ContractAddress) -> Result<bool> {
+        Ok(self.storage.get_code_committed(address)?.is_some())
+    }
+
     /// Drain the accumulated contract-state journal (committed code/storage/
     /// metadata mutations). Called once per block to build the reorg diff.
     pub fn take_journal(&self) -> Vec<ContractMutation> {
         self.storage.take_journal()
     }
 
-    /// Get contract metadata
+    /// Take the contract-CF writes this block has committed but not staged.
+    ///
+    /// The runtime no longer reaches the database during execution; it queues
+    /// its writes and the caller stages them into the block's candidate. See
+    /// `ContractStorage::take_pending`.
+    pub fn take_pending_writes(&self) -> Vec<crate::storage::PendingWrite> {
+        self.storage.take_pending()
+    }
+
+    /// Stage every queued write through `stage`, clearing the queue only if all
+    /// of them succeed. The entries are borrowed, not copied. See
+    /// `ContractStorage::stage_pending`.
+    pub fn stage_pending<E>(
+        &self,
+        stage: impl FnMut(&crate::storage::PendingWrite) -> std::result::Result<(), E>,
+    ) -> std::result::Result<(), E> {
+        self.storage.stage_pending(stage)
+    }
+
+    /// How many writes are queued, without copying them.
+    pub fn pending_len(&self) -> usize {
+        self.storage.pending_len()
+    }
+
+    /// Whether the contract-state journal is empty, WITHOUT draining it.
+    /// `take_journal` drains, which makes it useless for asking whether
+    /// something was cleared.
+    pub fn journal_is_empty(&self) -> bool {
+        self.storage.journal_is_empty()
+    }
+
+    /// Drop the queue once the caller has staged all of it.
+    pub fn clear_pending_writes(&self) {
+        self.storage.clear_pending()
+    }
+
+    /// Bind this executor to `candidate`, discarding state held for another.
+    ///
+    /// Clears the storage caches AND this executor's address-keyed metadata
+    /// map, which is per-candidate for the same reason: it answers "does this
+    /// contract exist", and a deploy in an abandoned block must not be able to
+    /// answer yes in the block after it.
+    ///
+    /// The compiled-code cache is deliberately kept. It is keyed by code HASH,
+    /// not by address, so it can say what some bytes compile to but never that
+    /// a contract exists — and recompiling every block would be expensive for
+    /// no isolation gained.
+    pub fn begin_candidate(&self, candidate: u64) {
+        if self.storage.begin_candidate(candidate) {
+            self.metadata.write().clear();
+        }
+    }
+
+    /// Drop everything held for the current candidate, and unbind it.
+    ///
+    /// What a block execution calls when it leaves its scope, by either exit.
+    /// `begin_candidate` above is the backstop for callers that have no block
+    /// boundary to hook; this is the one that keeps a finished block's caches
+    /// from sitting in memory until some later block happens to need them.
+    /// Same treatment of the compiled-code cache, for the same reason.
+    pub fn clear_block(&self) {
+        self.storage.end_candidate();
+        self.metadata.write().clear();
+    }
+
+    /// Get contract metadata from COMMITTED state, ignoring any candidate.
+    ///
+    /// The RPC/diagnostic answer. `get_metadata` below consults the
+    /// address-keyed map first, which is per-candidate: a deploy in an
+    /// abandoned block would otherwise keep answering questions that were not
+    /// about that block.
+    pub fn get_metadata_committed(&self, address: &ContractAddress) -> Option<ContractMetadata> {
+        match self.storage.get_metadata_committed(address) {
+            Ok(Some(bytes)) => bincode::deserialize::<ContractMetadata>(&bytes).ok(),
+            _ => None,
+        }
+    }
+
+    /// Get contract metadata as EXECUTION sees it — this block included.
     pub fn get_metadata(&self, address: &ContractAddress) -> Option<ContractMetadata> {
         if let Some(m) = self.metadata.read().get(address).cloned() {
             return Some(m);

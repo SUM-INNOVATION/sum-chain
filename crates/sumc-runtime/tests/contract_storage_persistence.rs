@@ -56,6 +56,38 @@ fn executor(db: &Arc<Database>) -> ContractExecutor {
     ContractExecutor::new(Arc::new(ContractStorage::new(backend)))
 }
 
+/// Apply what the runtime queued, the way `crates/state` stages it into a
+/// block's candidate and publication makes it durable.
+///
+/// The runtime does not reach the database during execution any more: it
+/// queues, and someone holding the block stages. This crate has no candidate,
+/// so a test whose subject is persistence has to close that loop itself —
+/// which is the point, since "what the runtime produces, once applied,
+/// persists" is exactly the claim.
+fn apply_pending(db: &Arc<Database>, exec: &ContractExecutor) {
+    use sumc_runtime::PendingWrite;
+    use sumchain_storage::cf;
+    for w in exec.take_pending_writes() {
+        match w {
+            PendingWrite::Storage { contract, key, value } => {
+                let full = sumc_runtime::storage::storage_cf_key(&contract, &key);
+                match value {
+                    Some(v) => db.put(cf::CONTRACT_STORAGE, &full, &v).unwrap(),
+                    None => db.delete(cf::CONTRACT_STORAGE, &full).unwrap(),
+                }
+            }
+            PendingWrite::Code { contract, value } => match value {
+                Some(v) => db.put(cf::CONTRACT_CODE, contract.as_bytes(), &v).unwrap(),
+                None => db.delete(cf::CONTRACT_CODE, contract.as_bytes()).unwrap(),
+            },
+            PendingWrite::Metadata { contract, value } => match value {
+                Some(v) => db.put(cf::CONTRACT_METADATA, contract.as_bytes(), &v).unwrap(),
+                None => db.delete(cf::CONTRACT_METADATA, contract.as_bytes()).unwrap(),
+            },
+        }
+    }
+}
+
 #[test]
 fn storage_write_read_remove_roundtrip() {
     let dir = TempDir::new().unwrap();
@@ -93,7 +125,9 @@ fn storage_survives_restart() {
         let db = Arc::new(Database::open_default(dir.path()).unwrap());
         let exec = executor(&db);
         let dep = exec.deploy(code, "new", vec![], ctx(caller), 0).unwrap();
+        apply_pending(&db, &exec);
         assert!(exec.call(dep.contract_address, "set", vec![], ctx(caller)).unwrap().success);
+        apply_pending(&db, &exec);
         dep.contract_address
         // db + exec dropped here
     };
@@ -220,4 +254,39 @@ fn missing_init_method_leaves_no_persisted_state() {
     assert!(exec.get_metadata(&addr).is_none(), "no metadata after missing-init deploy");
     // And the contract is not callable afterwards.
     assert!(exec.call(addr, "get", vec![], ctx(caller)).is_err());
+}
+
+/// A new candidate drops the executor's address-keyed metadata map.
+///
+/// That map is separate from `ContractStorage`'s caches and is consulted before
+/// the backend, so a deploy in an abandoned block could answer "here is my
+/// metadata" to a later one.
+///
+/// After the RPC path was moved to committed reads, nothing in the tree calls
+/// the map-reading `get_metadata` any more — it is reached here directly. The
+/// clearing is therefore defence for a future caller rather than a fix for a
+/// live path, and this test exists so that clearing cannot be quietly dropped
+/// on the grounds that nothing currently depends on it.
+#[test]
+fn a_new_candidate_drops_the_executors_metadata_map() {
+    let dir = TempDir::new().unwrap();
+    let db = Arc::new(Database::open_default(dir.path()).unwrap());
+    let exec = executor(&db);
+    let caller = Address::new([7u8; 20]);
+
+    exec.begin_candidate(1);
+    let dep = exec
+        .deploy(wat::parse_str(WAT).unwrap(), "new", vec![], ctx(caller), 0)
+        .unwrap();
+    assert!(
+        exec.get_metadata(&dep.contract_address).is_some(),
+        "the deploy populated the map"
+    );
+
+    // Nothing was published: the candidate is abandoned.
+    exec.begin_candidate(2);
+    assert!(
+        exec.get_metadata(&dep.contract_address).is_none(),
+        "an abandoned candidate's metadata must not answer for the next one"
+    );
 }

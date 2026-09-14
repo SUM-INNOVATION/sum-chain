@@ -309,6 +309,30 @@ impl<'db> BlockExecution<'db> {
     }
 }
 
+/// Clears the contract runtime's per-candidate state when a block execution
+/// leaves its scope — by return, by `?`, or by panic.
+///
+/// Candidate identity alone would be correct but not sufficient. It clears at
+/// the START of the next candidate's first contract operation, which leaves a
+/// finished block's staged rows, code, metadata, pending writes and journal
+/// resident until some later block happens to deploy or call something. For an
+/// abandoned block that interval has no end at all, and what it holds is
+/// block-sized: a deploy's code is in there. This ends it at the block
+/// boundary, which is a place that exists and is reached on every path out.
+///
+/// The identity check stays as the backstop for callers that have no block
+/// boundary to hook — mempool validation and the reorg paths call `execute_tx`
+/// directly.
+struct ContractBlockScope<'a> {
+    contracts: &'a ContractExecutorState,
+}
+
+impl Drop for ContractBlockScope<'_> {
+    fn drop(&mut self) {
+        self.contracts.clear_block();
+    }
+}
+
 impl BlockExecutor {
     /// Create a new block executor
     pub fn new(state: Arc<StateManager>, db: Arc<Database>, params: ChainParams) -> Self {
@@ -2972,6 +2996,32 @@ impl BlockExecutor {
         }
     }
 
+    /// Whether the contract runtime believes `address` exists.
+    ///
+    /// A probe for the block-boundary tests: it reads through the runtime's
+    /// caches rather than the database, which is exactly where an abandoned
+    /// block's state would survive if the session were not scoped.
+    pub fn contract_exists_in_runtime(&self, address: &sumchain_primitives::Address) -> bool {
+        self.contract_executor
+            .contract_exists_in_candidate(address)
+            .unwrap_or(false)
+    }
+
+    /// Whether the contract runtime can produce metadata for `address`.
+    ///
+    /// The companion probe: metadata lives in its own address-keyed map, which
+    /// is per-candidate for the same reason code is.
+    pub fn contract_metadata_in_runtime(&self, address: &sumchain_primitives::Address) -> bool {
+        self.contract_executor.metadata_in_candidate(address)
+    }
+
+    /// Whether the contract runtime still holds writes it could not stage.
+    ///
+    /// For the mid-staging refusal test: a refusal must leave the queue intact.
+    pub fn contract_queue_is_non_empty(&self) -> bool {
+        self.contract_executor.queue_is_non_empty()
+    }
+
     /// Execute a block and return receipts
     pub fn execute_block(
         &self,
@@ -2987,12 +3037,20 @@ impl BlockExecutor {
             block.tx_count()
         );
 
+        // Everything the contract runtime holds for this block goes when this
+        // function returns, whichever way it returns. Declared before any of it
+        // can be created.
+        let _contract_scope = ContractBlockScope {
+            contracts: &self.contract_executor,
+        };
+
         let proposer = Address::from_public_key(&block.header.proposer_pubkey);
         let mut receipts = Vec::new();
         let mut state_diff = StateDiff::new();
 
-        // Start from a clean contract-state journal; mutations from this
-        // block's contract txs accumulate as they commit.
+        // Start from a clean contract-state journal. Redundant against the
+        // scope guard above on any path that went through `execute_block`, and
+        // not redundant for a caller that reached the runtime some other way.
         let _ = self.contract_executor.take_journal();
 
         // ── PoR Phase: Slash expired challenges BEFORE user transactions ─────
@@ -3964,6 +4022,121 @@ mod tests {
     use sumchain_crypto::{sign, KeyPair};
     use sumchain_primitives::Transaction;
     use sumchain_storage::Database;
+
+    // ── Contract block scope ─────────────────────────────────────────────────
+
+    /// The contract scope guard clears when its scope exits with an ERROR.
+    ///
+    /// `execute_block` arms one of these before anything can populate the
+    /// runtime, so the error exit is covered by `Drop` rather than by a cleanup
+    /// call on every failing path. The normal exit is covered end to end by
+    /// `a_finished_block_leaves_nothing_in_the_runtime`; this covers the exit
+    /// that a test cannot reach through `execute_block`, because every failing
+    /// contract transaction inside a block becomes a failed RECEIPT rather than
+    /// an `Err` — the candidate ceiling is the only thing that returns one, and
+    /// it is 1 GiB.
+    #[test]
+    fn a_block_scope_clears_when_its_scope_exits_with_an_error() {
+        use sumchain_primitives::transaction::ContractDeployData;
+        use sumchain_storage::exec_view::ExecutionView;
+        use sumchain_storage::overlay::ApplicationOverlay;
+
+        const WAT: &str = r#"
+(module
+  (import "env" "storage_write" (func $swrite (param i32 i32 i32 i32)))
+  (memory (export "memory") 1)
+  (global $bump (mut i32) (i32.const 1024))
+  (data (i32.const 0) "k")
+  (data (i32.const 8) "VAL")
+  (func (export "alloc") (param i32) (result i32)
+    (local $p i32) (local.set $p (global.get $bump))
+    (global.set $bump (i32.add (global.get $bump) (local.get 0))) (local.get $p))
+  (func (export "new") (param i32 i32) (result i32)
+    (call $swrite (i32.const 0) (i32.const 1) (i32.const 8) (i32.const 3))
+    (i32.const 0)))
+"#;
+
+        let (state, db, _dir) = setup();
+        let params = ChainParams::with_contracts_enabled();
+        let contracts = ContractExecutorState::new(db.clone(), params.clone());
+        let deployer = KeyPair::generate();
+        sumchain_storage::StateStore::new(&db)
+            .put_account(
+                &deployer.address(),
+                &sumchain_storage::schema::AccountState {
+                    balance: 10_000_000,
+                    nonce: 0,
+                },
+            )
+            .unwrap();
+
+        let data = ContractDeployData {
+            code: wat::parse_str(WAT).unwrap(),
+            init_method: "new".to_string(),
+            init_args: vec![],
+            value: 0,
+            gas_limit: 1_000_000,
+        };
+
+        let mut deployed = Address::ZERO;
+        {
+            let mut overlay = ApplicationOverlay::new(&db, CANDIDATE_LIMIT_SCAFFOLD);
+            let mut view = ExecutionView::new(&mut overlay);
+
+            // The same shape `execute_block` has: a scope armed first, work that
+            // populates the runtime, then an early return carrying an error.
+            let outcome: Result<()> = (|| {
+                let _scope = ContractBlockScope {
+                    contracts: &contracts,
+                };
+                let result = contracts.deploy(
+                    &mut view,
+                    &deployer.address(),
+                    &data,
+                    &state,
+                    &Address::new([9; 20]),
+                    1_000,
+                    1,
+                    1000,
+                )?;
+                assert!(result.success, "the deploy must succeed: {:?}", result.error);
+                deployed = result.contract_address;
+                // Inside the scope, the runtime holds this block's state.
+                assert!(
+                    contracts
+                        .contract_exists_in_candidate(&result.contract_address)
+                        .unwrap(),
+                    "the runtime must be holding something for the guard to drop"
+                );
+                assert!(
+                    !contracts.journal_is_empty(),
+                    "and a journal, which is what a surviving guard would leak \
+                     into the next block's reorg diff"
+                );
+                Err(StateError::BlockValidation("forced".into()))
+            })();
+
+            assert!(outcome.is_err(), "the scope must have exited by error");
+        }
+        assert_ne!(deployed, Address::ZERO, "the deploy produced an address");
+
+        assert!(
+            !contracts.contract_exists_in_candidate(&deployed).unwrap(),
+            "the guard must drop the runtime's staged code on the error exit"
+        );
+        assert!(
+            !contracts.metadata_in_candidate(&deployed),
+            "and its metadata"
+        );
+        assert!(
+            !contracts.queue_is_non_empty(),
+            "and the queued writes"
+        );
+        assert!(
+            contracts.journal_is_empty(),
+            "and the journal, so the next block cannot inherit these mutations"
+        );
+    }
 
     // ── Issue #100: scheduler fail-closed seam ───────────────────────────────
 

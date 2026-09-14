@@ -15,7 +15,7 @@ pub mod types;
 pub use error::{RuntimeError, Result};
 pub use executor::{ContractExecutor, ExecutionContext, ExecutionResult};
 pub use gas::{Gas, GasCosts, GasMeter};
-pub use storage::{ContractStorage, MemoryStorage, RocksDbStorage};
+pub use storage::{ContractStorage, MemoryStorage, PendingWrite, RocksDbStorage};
 pub use types::*;
 
 /// Stable identity of the WASM execution engine + backend + ABI major.
