@@ -11,6 +11,8 @@
 //! the PR body as deferred future coverage.
 
 mod common;
+
+use sumchain_state::token_executor::TokenExecutor;
 use common::{fund, setup_with_params, CHAIN_ID};
 
 use std::sync::Arc;
@@ -296,19 +298,18 @@ fn policy_account_executes_five_token_admin_ops() {
     let mut candidate = common::candidate(&db);
     let m = kp();
     let mut account = put_account(&db, &m, 0);
-    let ts = TokenStore::new(&db);
 
     // 1) Pause (token owned by the policy account, not paused).
     seed_pa_token(&db, account.address, false, vec![]);
     let r = run_token_op(&mut candidate.view(), &pe, &state, &account, &m, TokenOperation::Pause, vec![]);
     assert!(r.success, "pause: {}", r.message);
-    assert!(ts.get_token(&PA_TOKEN).unwrap().unwrap().paused, "token paused");
+    assert!(TokenExecutor::v_get_token(&candidate.view(), &PA_TOKEN).unwrap().unwrap().paused, "token paused");
     account.nonce += 1;
 
     // 2) Unpause.
     let r = run_token_op(&mut candidate.view(), &pe, &state, &account, &m, TokenOperation::Unpause, vec![]);
     assert!(r.success, "unpause: {}", r.message);
-    assert!(!ts.get_token(&PA_TOKEN).unwrap().unwrap().paused, "token unpaused");
+    assert!(!TokenExecutor::v_get_token(&candidate.view(), &PA_TOKEN).unwrap().unwrap().paused, "token unpaused");
     account.nonce += 1;
 
     // 3) AddMinter.
@@ -316,14 +317,14 @@ fn policy_account_executes_five_token_admin_ops() {
     let add = bincode::serialize(&TokenMinterData { minter }).unwrap();
     let r = run_token_op(&mut candidate.view(), &pe, &state, &account, &m, TokenOperation::AddMinter, add);
     assert!(r.success, "add_minter: {}", r.message);
-    assert!(ts.get_token(&PA_TOKEN).unwrap().unwrap().minters.contains(&minter), "minter added");
+    assert!(TokenExecutor::v_get_token(&candidate.view(), &PA_TOKEN).unwrap().unwrap().minters.contains(&minter), "minter added");
     account.nonce += 1;
 
     // 4) RemoveMinter.
     let rem = bincode::serialize(&TokenMinterData { minter }).unwrap();
     let r = run_token_op(&mut candidate.view(), &pe, &state, &account, &m, TokenOperation::RemoveMinter, rem);
     assert!(r.success, "remove_minter: {}", r.message);
-    assert!(!ts.get_token(&PA_TOKEN).unwrap().unwrap().minters.contains(&minter), "minter removed");
+    assert!(!TokenExecutor::v_get_token(&candidate.view(), &PA_TOKEN).unwrap().unwrap().minters.contains(&minter), "minter removed");
     account.nonce += 1;
 
     // 5) TransferOwnership.
@@ -331,7 +332,7 @@ fn policy_account_executes_five_token_admin_ops() {
     let to = bincode::serialize(&TokenTransferOwnershipData { new_owner }).unwrap();
     let r = run_token_op(&mut candidate.view(), &pe, &state, &account, &m, TokenOperation::TransferOwnership, to);
     assert!(r.success, "transfer_ownership: {}", r.message);
-    assert_eq!(ts.get_token(&PA_TOKEN).unwrap().unwrap().owner, new_owner, "ownership transferred");
+    assert_eq!(TokenExecutor::v_get_token(&candidate.view(), &PA_TOKEN).unwrap().unwrap().owner, new_owner, "ownership transferred");
 }
 
 #[test]
@@ -345,14 +346,13 @@ fn policy_account_failing_token_op_no_partial_state_no_nonce_advance() {
     let mut candidate = common::candidate(&db);
     let m = kp();
     let account = put_account(&db, &m, 0);
-    let ts = TokenStore::new(&db);
     // Owner is someone else.
     seed_pa_token(&db, kp().address(), false, vec![]);
 
     let r = run_token_op(&mut candidate.view(), &pe, &state, &account, &m, TokenOperation::Pause, vec![]);
     assert!(!r.success, "unauthorized pause must fail");
     // No partial state: token not paused.
-    assert!(!ts.get_token(&PA_TOKEN).unwrap().unwrap().paused, "token must not be paused");
+    assert!(!TokenExecutor::v_get_token(&candidate.view(), &PA_TOKEN).unwrap().unwrap().paused, "token must not be paused");
     // Policy nonce NOT advanced.
     let stored = PolicyAccountStorage::new(&db).policy_accounts().get(&account.id).unwrap().unwrap();
     assert_eq!(stored.nonce, 0, "policy nonce must not advance on failure");

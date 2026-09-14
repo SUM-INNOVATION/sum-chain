@@ -3,6 +3,9 @@
 //! Governance failure codes are the isolated 300-block.
 
 mod common;
+
+use sumchain_state::governance_view as gv;
+use sumchain_state::token_executor::TokenExecutor;
 use common::{fund, setup_with_params, CHAIN_ID};
 
 use sumchain_crypto::{sign, KeyPair};
@@ -209,14 +212,13 @@ fn create_threshold_gates_and_snapshot_is_frozen() {
     assert!(matches!(r.status, TxStatus::Success), "create: {:?}", r.status);
 
     let pid = proposal_id_of(&proposer.address(), 5, 0);
-    let store = GovStore::new(&db);
-    assert_eq!(store.get_proposal(&pid).unwrap().unwrap().status, GovProposalStatus::Voting);
-    assert_eq!(store.get_snapshot(&pid, &proposer.address()).unwrap(), Some(100));
-    assert_eq!(store.get_snapshot(&pid, &holder2).unwrap(), Some(50));
+    assert_eq!(gv::v_get_proposal(&candidate.view(), &pid).unwrap().unwrap().status, GovProposalStatus::Voting);
+    assert_eq!(gv::v_get_snapshot(&candidate.view(), &pid, &proposer.address()).unwrap(), Some(100));
+    assert_eq!(gv::v_get_snapshot(&candidate.view(), &pid, &holder2).unwrap(), Some(50));
 
     // Transfer after snapshot must NOT change the frozen weight.
-    TokenStore::new(&db).set_balance(&TOKEN, &proposer.address(), 0).unwrap();
-    assert_eq!(store.get_snapshot(&pid, &proposer.address()).unwrap(), Some(100), "snapshot frozen");
+    TokenExecutor::v_set_balance(&mut candidate.view(), &TOKEN, &proposer.address(), 0).unwrap();
+    assert_eq!(gv::v_get_snapshot(&candidate.view(), &pid, &proposer.address()).unwrap(), Some(100), "snapshot frozen");
 }
 
 #[test]
@@ -234,9 +236,8 @@ fn snapshot_bound_exceeded_writes_no_rows() {
 
     // No partial rows: proposal absent, snapshot empty.
     let pid = proposal_id_of(&proposer.address(), 5, 0);
-    let store = GovStore::new(&db);
-    assert!(store.get_proposal(&pid).unwrap().is_none(), "no proposal row");
-    assert!(store.list_snapshot(&pid).unwrap().is_empty(), "no snapshot rows");
+    assert!(gv::v_get_proposal(&candidate.view(), &pid).unwrap().is_none(), "no proposal row");
+    assert!(gv::v_list_snapshot(&candidate.view(), &pid).unwrap().is_empty(), "no snapshot rows");
 }
 
 // ── Vote + tally + execute ───────────────────────────────────────────────────
@@ -313,7 +314,7 @@ fn recordonly_passes_and_reaches_recorded() {
     // After the window (start 5 + period 100 = 105): execute → Recorded.
     let r = exec.execute_tx(&mut candidate.view(), &signed(&proposer, 3, gov(GovernanceOperation::ExecuteProposal, ereq)), &Address::new([9; 20]), 200, 1000).unwrap();
     assert!(matches!(r.status, TxStatus::Success), "execute: {:?}", r.status);
-    assert_eq!(GovStore::new(&db).get_proposal(&pid).unwrap().unwrap().status, GovProposalStatus::Recorded);
+    assert_eq!(gv::v_get_proposal(&candidate.view(), &pid).unwrap().unwrap().status, GovProposalStatus::Recorded);
 }
 
 #[test]
@@ -328,7 +329,7 @@ fn onchain_execution_returns_310() {
     let r = exec.execute_tx(&mut candidate.view(), &signed(&proposer, 2, gov(GovernanceOperation::ExecuteProposal, ereq)), &Address::new([9; 20]), 200, 1000).unwrap();
     assert!(matches!(r.status, TxStatus::Failed(310)), "onchain: {:?}", r.status);
     // Proposal not finalized on-chain.
-    assert_eq!(GovStore::new(&db).get_proposal(&pid).unwrap().unwrap().status, GovProposalStatus::Voting);
+    assert_eq!(gv::v_get_proposal(&candidate.view(), &pid).unwrap().unwrap().status, GovProposalStatus::Voting);
 }
 
 #[test]
@@ -340,7 +341,7 @@ fn no_votes_expires_after_window() {
     let ereq = bincode::serialize(&ExecuteProposalRequest { proposal_id: pid }).unwrap();
     let r = exec.execute_tx(&mut candidate.view(), &signed(&proposer, 1, gov(GovernanceOperation::ExecuteProposal, ereq)), &Address::new([9; 20]), 200, 1000).unwrap();
     assert!(matches!(r.status, TxStatus::Success));
-    assert_eq!(GovStore::new(&db).get_proposal(&pid).unwrap().unwrap().status, GovProposalStatus::Expired);
+    assert_eq!(gv::v_get_proposal(&candidate.view(), &pid).unwrap().unwrap().status, GovProposalStatus::Expired);
 }
 
 #[test]
@@ -360,7 +361,7 @@ fn cancel_by_proposer_only() {
     // Proposer cancel → Cancelled.
     let r = exec.execute_tx(&mut candidate.view(), &signed(&proposer, 1, gov(GovernanceOperation::CancelProposal, creq)), &Address::new([9; 20]), 10, 1000).unwrap();
     assert!(matches!(r.status, TxStatus::Success), "cancel: {:?}", r.status);
-    assert_eq!(GovStore::new(&db).get_proposal(&pid).unwrap().unwrap().status, GovProposalStatus::Cancelled);
+    assert_eq!(gv::v_get_proposal(&candidate.view(), &pid).unwrap().unwrap().status, GovProposalStatus::Cancelled);
 }
 
 #[test]
@@ -413,20 +414,20 @@ fn create_escrows_bond_and_requires_fee_plus_bond() {
     assert_eq!(StateManager::v_get_balance(&candidate.view(), &rich.address()).unwrap(), 0, "fee + bond fully spent");
     assert_eq!(StateManager::v_get_balance(&candidate.view(), &escrow).unwrap(), 500, "bond escrowed");
     let pid = proposal_id_of(&rich.address(), 5, 0);
-    let stored = GovStore::new(&db).get_proposal(&pid).unwrap().unwrap();
+    let stored = gv::v_get_proposal(&candidate.view(), &pid).unwrap().unwrap();
     assert_eq!(stored.bond, 500);
     assert_eq!(stored.bond_state, BondState::Escrowed);
 
     // Proposer that can cover the fee but not the bond → 311, fee charged, no proposal.
     let poor = KeyPair::generate();
     fund(&db, &poor, 300); // >= fee(100), < fee+bond(600)
-    TokenStore::new(&db).set_balance(&TOKEN, &poor.address(), 100).unwrap(); // meets threshold
+    TokenExecutor::v_set_balance(&mut candidate.view(), &TOKEN, &poor.address(), 100).unwrap(); // meets threshold
     let r = exec.execute_tx(&mut candidate.view(), &signed(&poor, 0, gov(GovernanceOperation::CreateProposal, create_req(&poor, ExecutionKind::RecordOnly))), &Address::new(BLOCK_PROPOSER), 6, 1000).unwrap();
     assert!(matches!(r.status, TxStatus::Failed(311)), "bond short: {:?}", r.status);
     assert_eq!(r.fee_paid, 100, "311 charges the fee (Policy-B)");
     assert_eq!(StateManager::v_get_balance(&candidate.view(), &poor.address()).unwrap(), 200, "only the fee left");
     assert_eq!(StateManager::v_get_balance(&candidate.view(), &escrow).unwrap(), 500, "no extra bond escrowed");
-    assert!(GovStore::new(&db).get_proposal(&proposal_id_of(&poor.address(), 6, 0)).unwrap().is_none(), "no proposal row");
+    assert!(gv::v_get_proposal(&candidate.view(), &proposal_id_of(&poor.address(), 6, 0)).unwrap().is_none(), "no proposal row");
 }
 
 #[test]
@@ -451,7 +452,7 @@ fn bond_returned_on_recorded() {
     let r = exec.execute_tx(&mut candidate.view(), &signed(&proposer, 2, gov(GovernanceOperation::ExecuteProposal, ereq)), &Address::new(BLOCK_PROPOSER), 200, 1000).unwrap();
     assert!(matches!(r.status, TxStatus::Success));
 
-    let stored = GovStore::new(&db).get_proposal(&pid).unwrap().unwrap();
+    let stored = gv::v_get_proposal(&candidate.view(), &pid).unwrap().unwrap();
     assert_eq!(stored.status, GovProposalStatus::Recorded);
     assert_eq!(stored.bond_state, BondState::Returned);
     assert_eq!(StateManager::v_get_balance(&candidate.view(), &escrow).unwrap(), 0, "escrow drained");
@@ -478,7 +479,7 @@ fn bond_burned_on_expired() {
     let r = exec.execute_tx(&mut candidate.view(), &signed(&proposer, 1, gov(GovernanceOperation::ExecuteProposal, ereq)), &Address::new(BLOCK_PROPOSER), 200, 1000).unwrap();
     assert!(matches!(r.status, TxStatus::Success));
 
-    let stored = GovStore::new(&db).get_proposal(&pid).unwrap().unwrap();
+    let stored = gv::v_get_proposal(&candidate.view(), &pid).unwrap().unwrap();
     assert_eq!(stored.status, GovProposalStatus::Expired);
     assert_eq!(stored.bond_state, BondState::Burned);
     assert_eq!(StateManager::v_get_balance(&candidate.view(), &escrow).unwrap(), 0, "escrow drained");
@@ -504,7 +505,7 @@ fn proposer_cancel_returns_bond() {
     let r = exec.execute_tx(&mut candidate.view(), &signed(&proposer, 1, gov(GovernanceOperation::CancelProposal, creq)), &Address::new(BLOCK_PROPOSER), 10, 1000).unwrap();
     assert!(matches!(r.status, TxStatus::Success), "cancel: {:?}", r.status);
 
-    let stored = GovStore::new(&db).get_proposal(&pid).unwrap().unwrap();
+    let stored = gv::v_get_proposal(&candidate.view(), &pid).unwrap().unwrap();
     assert_eq!(stored.status, GovProposalStatus::Cancelled);
     assert_eq!(stored.bond_state, BondState::Returned);
     assert_eq!(StateManager::v_get_balance(&candidate.view(), &escrow).unwrap(), 0, "escrow drained");
@@ -542,7 +543,7 @@ fn validator_quorum_cancel_burns_bond() {
     let r = exec.execute_tx_with_validators(&mut candidate.view(), &signed(&submitter, 1, gov(GovernanceOperation::CancelProposal, creq)), &Address::new(BLOCK_PROPOSER), 10, 1000, &vset).unwrap();
     assert!(matches!(r.status, TxStatus::Success), "validator cancel: {:?}", r.status);
 
-    let stored = GovStore::new(&db).get_proposal(&pid).unwrap().unwrap();
+    let stored = gv::v_get_proposal(&candidate.view(), &pid).unwrap().unwrap();
     assert_eq!(stored.status, GovProposalStatus::Cancelled);
     assert_eq!(stored.bond_state, BondState::Burned);
     assert_eq!(StateManager::v_get_balance(&candidate.view(), &escrow).unwrap(), 0, "escrow drained");
@@ -605,7 +606,7 @@ fn treasury_spend_onchain_pays_out() {
     let r = exec.execute_tx(&mut candidate.view(), &signed(&proposer, 2, gov(GovernanceOperation::ExecuteProposal, ereq)), &Address::new(BLOCK_PROPOSER), 200, 1000).unwrap();
     assert!(matches!(r.status, TxStatus::Success), "execute: {:?}", r.status);
 
-    assert_eq!(GovStore::new(&db).get_proposal(&pid).unwrap().unwrap().status, GovProposalStatus::Executed);
+    assert_eq!(gv::v_get_proposal(&candidate.view(), &pid).unwrap().unwrap().status, GovProposalStatus::Executed);
     assert_eq!(StateManager::v_get_balance(&candidate.view(), &treasury).unwrap(), 700, "treasury debited");
     assert_eq!(StateManager::v_get_balance(&candidate.view(), &beneficiary).unwrap(), 300, "beneficiary credited");
 }
@@ -626,7 +627,7 @@ fn treasury_insufficient_returns_312_and_leaves_proposal_live() {
     // No funds moved; proposal stays live (Voting) for a retry after funding.
     assert_eq!(StateManager::v_get_balance(&candidate.view(), &treasury).unwrap(), 100);
     assert_eq!(StateManager::v_get_balance(&candidate.view(), &beneficiary).unwrap(), 0);
-    assert_eq!(GovStore::new(&db).get_proposal(&pid).unwrap().unwrap().status, GovProposalStatus::Voting);
+    assert_eq!(gv::v_get_proposal(&candidate.view(), &pid).unwrap().unwrap().status, GovProposalStatus::Voting);
 }
 
 #[test]
@@ -642,7 +643,7 @@ fn treasury_not_configured_returns_310() {
     let r = exec.execute_tx(&mut candidate.view(), &signed(&proposer, 2, gov(GovernanceOperation::ExecuteProposal, ereq)), &Address::new(BLOCK_PROPOSER), 200, 1000).unwrap();
     assert!(matches!(r.status, TxStatus::Failed(310)), "no treasury: {:?}", r.status);
     assert_eq!(StateManager::v_get_balance(&candidate.view(), &beneficiary).unwrap(), 0);
-    assert_eq!(GovStore::new(&db).get_proposal(&pid).unwrap().unwrap().status, GovProposalStatus::Voting);
+    assert_eq!(gv::v_get_proposal(&candidate.view(), &pid).unwrap().unwrap().status, GovProposalStatus::Voting);
 }
 
 #[test]

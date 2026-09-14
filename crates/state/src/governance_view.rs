@@ -195,6 +195,29 @@ pub fn v_get_snapshot(
     }
 }
 
+/// Every frozen snapshot row for a proposal, from the candidate.
+///
+/// The tally divides by this total, so a row short of the real set is a
+/// different outcome, not a smaller one — which is why a read error ends the
+/// scan rather than truncating it.
+pub fn v_list_snapshot(
+    view: &ExecutionView<'_, '_>,
+    proposal_id: &GovProposalId,
+) -> Result<Vec<(Address, u128)>> {
+    let mut out = Vec::new();
+    for item in view
+        .prefix_iter(cf::GOV_SNAPSHOTS, proposal_id)
+        .map_err(StateError::Storage)?
+    {
+        let (k, v) = item.map_err(StateError::Storage)?;
+        if !k.starts_with(proposal_id) {
+            continue;
+        }
+        out.push((addr_from_suffix(&k), decode_snapshot_weight(&v)?));
+    }
+    Ok(out)
+}
+
 // ── Qualifying assets and equity-class roots ────────────────────────────────
 
 pub fn v_put_qualifying_asset(

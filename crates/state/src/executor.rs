@@ -236,12 +236,10 @@ pub struct BlockExecutor {
     db: Arc<Database>,
     params: ChainParams,
     nft_executor: NftExecutor,
-    token_executor: TokenExecutor,
     contract_executor: ContractExecutorState,
     messaging_executor: MessagingExecutor,
     docclass_executor: DocClassExecutor,
     tax_executor: TaxExecutor,
-    equity_executor: EquityExecutor,
     agreement_executor: AgreementExecutor,
     legal_executor: LegalExecutor,
     property_executor: PropertyExecutor,
@@ -315,12 +313,10 @@ impl BlockExecutor {
     /// Create a new block executor
     pub fn new(state: Arc<StateManager>, db: Arc<Database>, params: ChainParams) -> Self {
         let nft_executor = NftExecutor::new(db.clone(), params.clone());
-        let token_executor = TokenExecutor::new(db.clone(), params.clone());
         let contract_executor = ContractExecutorState::new(db.clone(), params.clone());
         let messaging_executor = MessagingExecutor::new(db.clone(), params.clone());
         let docclass_executor = DocClassExecutor::new(db.clone(), params.clone());
         let tax_executor = TaxExecutor::new(db.clone(), params.clone());
-        let equity_executor = EquityExecutor::new(db.clone(), params.clone());
         let agreement_executor = AgreementExecutor::new(db.clone(), params.clone());
         let legal_executor = LegalExecutor::new(db.clone(), params.clone());
         let property_executor = PropertyExecutor::new(db.clone(), params.clone());
@@ -335,12 +331,10 @@ impl BlockExecutor {
             db,
             params,
             nft_executor,
-            token_executor,
             contract_executor,
             messaging_executor,
             docclass_executor,
             tax_executor,
-            equity_executor,
             agreement_executor,
             legal_executor,
             property_executor,
@@ -532,7 +526,7 @@ impl BlockExecutor {
                     }
                     TxPayload::Token(token_data) => {
                         // Execute Token (SRC-20) operation
-                        let result = self.token_executor.execute(view,
+                        let result = TokenExecutor::execute(view,
                             &v2_tx.from,
                             &token_data,
                             proposer,
@@ -830,7 +824,7 @@ impl BlockExecutor {
                     }
                     TxPayload::Equity(equity_data) => {
                         // Execute Equity operation (SRC-83X)
-                        let result = self.equity_executor.execute(view,
+                        let result = EquityExecutor::execute(view,
                             &v2_tx.from,
                             &equity_data,
                             proposer,
@@ -1801,8 +1795,7 @@ impl BlockExecutor {
                         // docs/specs/GOVERNANCE-V1.md.
                         crate::governance_executor::execute(
                             view,
-                            &self.state,
-                            &self.db,
+                            self.state.chain_id(),
                             &self.params,
                             gov,
                             &v2_tx.from,
@@ -2212,7 +2205,7 @@ impl BlockExecutor {
                 }
 
                 // Execute Token (SRC-20) operation
-                let result = self.token_executor.execute(view,
+                let result = TokenExecutor::execute(view,
                     &tx.from,
                     token_data,
                     proposer,
@@ -2573,7 +2566,7 @@ impl BlockExecutor {
                 }
 
                 // Execute Equity operation (SRC-83X)
-                let result = self.equity_executor.execute(view,
+                let result = EquityExecutor::execute(view,
                     &tx.from,
                     equity_data,
                     proposer,

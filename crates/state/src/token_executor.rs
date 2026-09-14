@@ -13,16 +13,14 @@
 //! - **Pause mechanism**: Token transfers can be paused by owner
 
 use sumchain_storage::exec_view::ExecutionView;
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use sumchain_genesis::ChainParams;
 use sumchain_primitives::token_ops::{
     CreateTokenData, TokenApproveData, TokenBurnData, TokenMintData, TokenMinterData,
     TokenTransferData, TokenTransferFromData, TokenTransferOwnershipData,
 };
 use sumchain_primitives::{Address, Balance, BlockHeight, Hash, TokenOperation, TokenTxData};
-use sumchain_storage::{Database, Src20TokenData, TokenStore};
+use sumchain_storage::Src20TokenData;
 use tracing::{debug, info};
 
 use crate::{Result, StateError, StateManager};
@@ -65,17 +63,15 @@ impl TokenExecutionResult {
 }
 
 /// SRC-20 Token Executor for processing token transactions
-pub struct TokenExecutor {
-    db: Arc<Database>,
-    #[allow(dead_code)]
-    params: ChainParams,
-}
+/// Token execution.
+///
+/// A namespace, not a handle. Every function on it is an associated function
+/// taking an `ExecutionView`, and the type holds no `Arc<Database>` for one to
+/// reach — which is what makes a committed write on an execution path a compile
+/// error rather than a review comment.
+pub struct TokenExecutor;
 
 impl TokenExecutor {
-    /// Create a new token executor
-    pub fn new(db: Arc<Database>, params: ChainParams) -> Self {
-        Self { db, params }
-    }
 
     /// Get current timestamp in milliseconds (now uses block timestamp for determinism)
     fn now_ms(block_timestamp: u64) -> u64 {
@@ -95,7 +91,7 @@ impl TokenExecutor {
     /// Execute a token operation from transaction data
     #[allow(clippy::too_many_arguments)]
     pub fn execute(
-        &self, view: &mut ExecutionView<'_, '_>,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         token_data: &TokenTxData,
         proposer: &Address,
@@ -103,44 +99,48 @@ impl TokenExecutor {
         block_height: BlockHeight,
         block_timestamp: u64,
     ) -> Result<TokenExecutionResult> {
-        let store = TokenStore::new(&self.db);
 
         // Deduct fee from sender
-        self.deduct_fee(view, sender, fee, proposer)?;
+        Self::deduct_fee(view, sender, fee, proposer)?;
 
         match token_data.operation {
             TokenOperation::Create => {
-                self.execute_create(&store, sender, &token_data.data, block_height, block_timestamp)
+                Self::execute_create(view, sender, &token_data.data, block_height, block_timestamp)
             }
             TokenOperation::Mint => {
-                self.execute_mint(&store, sender, &token_data.token_id, &token_data.data)
+                Self::execute_mint(view, sender, &token_data.token_id, &token_data.data)
             }
             TokenOperation::Burn => {
-                self.execute_burn(&store, sender, &token_data.token_id, &token_data.data)
+                Self::execute_burn(view, sender, &token_data.token_id, &token_data.data)
             }
             TokenOperation::Transfer => {
-                self.execute_transfer(&store, sender, &token_data.token_id, &token_data.data)
+                Self::execute_transfer(view, sender, &token_data.token_id, &token_data.data)
             }
             TokenOperation::Approve => {
-                self.execute_approve(&store, sender, &token_data.token_id, &token_data.data)
+                Self::execute_approve(view, sender, &token_data.token_id, &token_data.data)
             }
             TokenOperation::TransferFrom => {
-                self.execute_transfer_from(&store, sender, &token_data.token_id, &token_data.data)
+                Self::execute_transfer_from(view, sender, &token_data.token_id, &token_data.data)
             }
             TokenOperation::Pause => {
-                self.execute_pause(&store, sender, &token_data.token_id)
+                Self::execute_pause(view, sender, &token_data.token_id)
             }
             TokenOperation::Unpause => {
-                self.execute_unpause(&store, sender, &token_data.token_id)
+                Self::execute_unpause(view, sender, &token_data.token_id)
             }
             TokenOperation::TransferOwnership => {
-                self.execute_transfer_ownership(&store, sender, &token_data.token_id, &token_data.data)
+                Self::execute_transfer_ownership(
+                    view,
+                    sender,
+                    &token_data.token_id,
+                    &token_data.data,
+                )
             }
             TokenOperation::AddMinter => {
-                self.execute_add_minter(&store, sender, &token_data.token_id, &token_data.data)
+                Self::execute_add_minter(view, sender, &token_data.token_id, &token_data.data)
             }
             TokenOperation::RemoveMinter => {
-                self.execute_remove_minter(&store, sender, &token_data.token_id, &token_data.data)
+                Self::execute_remove_minter(view, sender, &token_data.token_id, &token_data.data)
             }
         }
     }
@@ -156,22 +156,21 @@ impl TokenExecutor {
     /// partial state. Reuses the exact per-op handlers used by the fee-charging
     /// `execute` path (no duplicated logic).
     pub fn apply_policy_admin_op(
-        &self,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         token_data: &TokenTxData,
     ) -> Result<TokenExecutionResult> {
-        let store = TokenStore::new(&self.db);
         match token_data.operation {
-            TokenOperation::Pause => self.execute_pause(&store, sender, &token_data.token_id),
-            TokenOperation::Unpause => self.execute_unpause(&store, sender, &token_data.token_id),
+            TokenOperation::Pause => Self::execute_pause(view, sender, &token_data.token_id),
+            TokenOperation::Unpause => Self::execute_unpause(view, sender, &token_data.token_id),
             TokenOperation::AddMinter => {
-                self.execute_add_minter(&store, sender, &token_data.token_id, &token_data.data)
+                Self::execute_add_minter(view, sender, &token_data.token_id, &token_data.data)
             }
             TokenOperation::RemoveMinter => {
-                self.execute_remove_minter(&store, sender, &token_data.token_id, &token_data.data)
+                Self::execute_remove_minter(view, sender, &token_data.token_id, &token_data.data)
             }
-            TokenOperation::TransferOwnership => self.execute_transfer_ownership(
-                &store,
+            TokenOperation::TransferOwnership => Self::execute_transfer_ownership(
+                view,
                 sender,
                 &token_data.token_id,
                 &token_data.data,
@@ -185,7 +184,7 @@ impl TokenExecutor {
 
     /// Deduct fee from sender and credit to proposer
     fn deduct_fee(
-        &self, view: &mut ExecutionView<'_, '_>,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         fee: Balance,
         proposer: &Address,
@@ -220,8 +219,7 @@ impl TokenExecutor {
 
     /// Create a new SRC-20 token
     fn execute_create(
-        &self,
-        store: &TokenStore,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
         block_height: BlockHeight,
@@ -261,7 +259,7 @@ impl TokenExecutor {
         let token_id = Self::generate_token_id(sender, &create_data.name, nonce);
 
         // Check if token already exists
-        if store.token_exists(&token_id)? {
+        if Self::v_token_exists(view, &token_id)? {
             return Ok(TokenExecutionResult::failure(
                 "Token ID collision - try again".to_string(),
             ));
@@ -285,11 +283,11 @@ impl TokenExecutor {
         };
 
         // Store token
-        store.put_token(&token_id, &token_data)?;
+        Self::v_put_token(view, &token_id, &token_data)?;
 
         // Set initial balance if non-zero
         if create_data.initial_supply > 0 {
-            store.set_balance(&token_id, sender, create_data.initial_supply)?;
+            Self::v_set_balance(view, &token_id, sender, create_data.initial_supply)?;
         }
 
         info!(
@@ -305,14 +303,13 @@ impl TokenExecutor {
 
     /// Mint new tokens
     fn execute_mint(
-        &self,
-        store: &TokenStore,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         token_id: &[u8; 32],
         data: &[u8],
     ) -> Result<TokenExecutionResult> {
         // Get token
-        let mut token = store.get_token(token_id)?.ok_or_else(|| {
+        let mut token = Self::v_get_token(view, token_id)?.ok_or_else(|| {
             StateError::BlockValidation("Token not found".to_string())
         })?;
 
@@ -351,11 +348,16 @@ impl TokenExecutor {
 
         // Update supply
         token.total_supply = new_supply;
-        store.put_token(token_id, &token)?;
+        Self::v_put_token(view, token_id, &token)?;
 
         // Update recipient balance
-        let recipient_balance = store.get_balance(token_id, &mint_data.to)?;
-        store.set_balance(token_id, &mint_data.to, recipient_balance.saturating_add(mint_data.amount))?;
+        let recipient_balance = Self::v_get_balance(view, token_id, &mint_data.to)?;
+        Self::v_set_balance(
+            view,
+            token_id,
+            &mint_data.to,
+            recipient_balance.saturating_add(mint_data.amount),
+        )?;
 
         debug!(
             "Minted {} tokens {} to {}",
@@ -369,14 +371,13 @@ impl TokenExecutor {
 
     /// Burn tokens
     fn execute_burn(
-        &self,
-        store: &TokenStore,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         token_id: &[u8; 32],
         data: &[u8],
     ) -> Result<TokenExecutionResult> {
         // Get token
-        let mut token = store.get_token(token_id)?.ok_or_else(|| {
+        let mut token = Self::v_get_token(view, token_id)?.ok_or_else(|| {
             StateError::BlockValidation("Token not found".to_string())
         })?;
 
@@ -398,7 +399,7 @@ impl TokenExecutor {
         }
 
         // Check sender balance
-        let sender_balance = store.get_balance(token_id, sender)?;
+        let sender_balance = Self::v_get_balance(view, token_id, sender)?;
         if sender_balance < burn_data.amount {
             return Ok(TokenExecutionResult::failure(
                 "Insufficient balance to burn".to_string(),
@@ -407,10 +408,15 @@ impl TokenExecutor {
 
         // Update supply
         token.total_supply = token.total_supply.saturating_sub(burn_data.amount);
-        store.put_token(token_id, &token)?;
+        Self::v_put_token(view, token_id, &token)?;
 
         // Update sender balance
-        store.set_balance(token_id, sender, sender_balance.saturating_sub(burn_data.amount))?;
+        Self::v_set_balance(
+            view,
+            token_id,
+            sender,
+            sender_balance.saturating_sub(burn_data.amount),
+        )?;
 
         debug!(
             "Burned {} tokens {} from {}",
@@ -424,14 +430,13 @@ impl TokenExecutor {
 
     /// Transfer tokens
     fn execute_transfer(
-        &self,
-        store: &TokenStore,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         token_id: &[u8; 32],
         data: &[u8],
     ) -> Result<TokenExecutionResult> {
         // Get token
-        let token = store.get_token(token_id)?.ok_or_else(|| {
+        let token = Self::v_get_token(view, token_id)?.ok_or_else(|| {
             StateError::BlockValidation("Token not found".to_string())
         })?;
 
@@ -453,7 +458,7 @@ impl TokenExecutor {
         }
 
         // Check sender balance
-        let sender_balance = store.get_balance(token_id, sender)?;
+        let sender_balance = Self::v_get_balance(view, token_id, sender)?;
         if sender_balance < transfer_data.amount {
             return Ok(TokenExecutionResult::failure(
                 "Insufficient balance".to_string(),
@@ -461,9 +466,19 @@ impl TokenExecutor {
         }
 
         // Execute transfer
-        store.set_balance(token_id, sender, sender_balance.saturating_sub(transfer_data.amount))?;
-        let recipient_balance = store.get_balance(token_id, &transfer_data.to)?;
-        store.set_balance(token_id, &transfer_data.to, recipient_balance.saturating_add(transfer_data.amount))?;
+        Self::v_set_balance(
+            view,
+            token_id,
+            sender,
+            sender_balance.saturating_sub(transfer_data.amount),
+        )?;
+        let recipient_balance = Self::v_get_balance(view, token_id, &transfer_data.to)?;
+        Self::v_set_balance(
+            view,
+            token_id,
+            &transfer_data.to,
+            recipient_balance.saturating_add(transfer_data.amount),
+        )?;
 
         debug!(
             "Transferred {} tokens {} from {} to {}",
@@ -478,14 +493,13 @@ impl TokenExecutor {
 
     /// Approve spending allowance
     fn execute_approve(
-        &self,
-        store: &TokenStore,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         token_id: &[u8; 32],
         data: &[u8],
     ) -> Result<TokenExecutionResult> {
         // Check token exists
-        if !store.token_exists(token_id)? {
+        if !Self::v_token_exists(view, token_id)? {
             return Ok(TokenExecutionResult::failure(
                 "Token not found".to_string(),
             ));
@@ -496,7 +510,7 @@ impl TokenExecutor {
             .map_err(|e| StateError::BlockValidation(format!("Invalid approve data: {}", e)))?;
 
         // Set allowance
-        store.set_allowance(token_id, sender, &approve_data.spender, approve_data.amount)?;
+        Self::v_set_allowance(view, token_id, sender, &approve_data.spender, approve_data.amount)?;
 
         debug!(
             "Approved {} tokens {} for {} to spend from {}",
@@ -511,14 +525,13 @@ impl TokenExecutor {
 
     /// Transfer tokens using allowance
     fn execute_transfer_from(
-        &self,
-        store: &TokenStore,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         token_id: &[u8; 32],
         data: &[u8],
     ) -> Result<TokenExecutionResult> {
         // Get token
-        let token = store.get_token(token_id)?.ok_or_else(|| {
+        let token = Self::v_get_token(view, token_id)?.ok_or_else(|| {
             StateError::BlockValidation("Token not found".to_string())
         })?;
 
@@ -540,7 +553,7 @@ impl TokenExecutor {
         }
 
         // Check allowance
-        let allowance = store.get_allowance(token_id, &transfer_data.from, sender)?;
+        let allowance = Self::v_get_allowance(view, token_id, &transfer_data.from, sender)?;
         if allowance < transfer_data.amount {
             return Ok(TokenExecutionResult::failure(
                 "Insufficient allowance".to_string(),
@@ -548,7 +561,7 @@ impl TokenExecutor {
         }
 
         // Check balance
-        let from_balance = store.get_balance(token_id, &transfer_data.from)?;
+        let from_balance = Self::v_get_balance(view, token_id, &transfer_data.from)?;
         if from_balance < transfer_data.amount {
             return Ok(TokenExecutionResult::failure(
                 "Insufficient balance".to_string(),
@@ -556,7 +569,7 @@ impl TokenExecutor {
         }
 
         // Update allowance
-        store.set_allowance(
+        Self::v_set_allowance(view,
             token_id,
             &transfer_data.from,
             sender,
@@ -564,9 +577,19 @@ impl TokenExecutor {
         )?;
 
         // Execute transfer
-        store.set_balance(token_id, &transfer_data.from, from_balance.saturating_sub(transfer_data.amount))?;
-        let to_balance = store.get_balance(token_id, &transfer_data.to)?;
-        store.set_balance(token_id, &transfer_data.to, to_balance.saturating_add(transfer_data.amount))?;
+        Self::v_set_balance(
+            view,
+            token_id,
+            &transfer_data.from,
+            from_balance.saturating_sub(transfer_data.amount),
+        )?;
+        let to_balance = Self::v_get_balance(view, token_id, &transfer_data.to)?;
+        Self::v_set_balance(
+            view,
+            token_id,
+            &transfer_data.to,
+            to_balance.saturating_add(transfer_data.amount),
+        )?;
 
         debug!(
             "TransferFrom {} tokens {} from {} to {} by {}",
@@ -582,13 +605,12 @@ impl TokenExecutor {
 
     /// Pause token transfers
     fn execute_pause(
-        &self,
-        store: &TokenStore,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         token_id: &[u8; 32],
     ) -> Result<TokenExecutionResult> {
         // Get token
-        let mut token = store.get_token(token_id)?.ok_or_else(|| {
+        let mut token = Self::v_get_token(view, token_id)?.ok_or_else(|| {
             StateError::BlockValidation("Token not found".to_string())
         })?;
 
@@ -614,7 +636,7 @@ impl TokenExecutor {
         }
 
         token.paused = true;
-        store.put_token(token_id, &token)?;
+        Self::v_put_token(view, token_id, &token)?;
 
         info!("Paused token {}", hex::encode(token_id));
 
@@ -623,13 +645,12 @@ impl TokenExecutor {
 
     /// Unpause token transfers
     fn execute_unpause(
-        &self,
-        store: &TokenStore,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         token_id: &[u8; 32],
     ) -> Result<TokenExecutionResult> {
         // Get token
-        let mut token = store.get_token(token_id)?.ok_or_else(|| {
+        let mut token = Self::v_get_token(view, token_id)?.ok_or_else(|| {
             StateError::BlockValidation("Token not found".to_string())
         })?;
 
@@ -648,7 +669,7 @@ impl TokenExecutor {
         }
 
         token.paused = false;
-        store.put_token(token_id, &token)?;
+        Self::v_put_token(view, token_id, &token)?;
 
         info!("Unpaused token {}", hex::encode(token_id));
 
@@ -657,14 +678,13 @@ impl TokenExecutor {
 
     /// Transfer token ownership
     fn execute_transfer_ownership(
-        &self,
-        store: &TokenStore,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         token_id: &[u8; 32],
         data: &[u8],
     ) -> Result<TokenExecutionResult> {
         // Get token
-        let mut token = store.get_token(token_id)?.ok_or_else(|| {
+        let mut token = Self::v_get_token(view, token_id)?.ok_or_else(|| {
             StateError::BlockValidation("Token not found".to_string())
         })?;
 
@@ -681,7 +701,7 @@ impl TokenExecutor {
 
         // Update owner
         token.owner = transfer_data.new_owner;
-        store.put_token(token_id, &token)?;
+        Self::v_put_token(view, token_id, &token)?;
 
         info!(
             "Transferred ownership of token {} to {}",
@@ -694,14 +714,13 @@ impl TokenExecutor {
 
     /// Add a minter
     fn execute_add_minter(
-        &self,
-        store: &TokenStore,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         token_id: &[u8; 32],
         data: &[u8],
     ) -> Result<TokenExecutionResult> {
         // Get token
-        let mut token = store.get_token(token_id)?.ok_or_else(|| {
+        let mut token = Self::v_get_token(view, token_id)?.ok_or_else(|| {
             StateError::BlockValidation("Token not found".to_string())
         })?;
 
@@ -732,7 +751,7 @@ impl TokenExecutor {
 
         // Add minter
         token.minters.push(minter_data.minter);
-        store.put_token(token_id, &token)?;
+        Self::v_put_token(view, token_id, &token)?;
 
         debug!(
             "Added minter {} to token {}",
@@ -745,14 +764,13 @@ impl TokenExecutor {
 
     /// Remove a minter
     fn execute_remove_minter(
-        &self,
-        store: &TokenStore,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         token_id: &[u8; 32],
         data: &[u8],
     ) -> Result<TokenExecutionResult> {
         // Get token
-        let mut token = store.get_token(token_id)?.ok_or_else(|| {
+        let mut token = Self::v_get_token(view, token_id)?.ok_or_else(|| {
             StateError::BlockValidation("Token not found".to_string())
         })?;
 
@@ -776,7 +794,7 @@ impl TokenExecutor {
 
         // Remove minter
         token.minters.retain(|m| m != &minter_data.minter);
-        store.put_token(token_id, &token)?;
+        Self::v_put_token(view, token_id, &token)?;
 
         debug!(
             "Removed minter {} from token {}",

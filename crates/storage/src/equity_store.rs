@@ -566,7 +566,10 @@ fn equity_merkle_empty_root() -> [u8; 32] {
 }
 
 /// Fold an ordered leaf vector up to a single Merkle root using the rules above.
-fn equity_merkle_root_from_leaves(mut level: Vec<[u8; 32]>) -> [u8; 32] {
+/// Public because the candidate computes the same root from the same leaves.
+/// A pure function of the leaf vector; it reaches no database, and both sides
+/// must agree on it byte-for-byte — a proposal freezes this root for its life.
+pub fn equity_merkle_root_from_leaves(mut level: Vec<[u8; 32]>) -> [u8; 32] {
     if level.is_empty() {
         return equity_merkle_empty_root();
     }

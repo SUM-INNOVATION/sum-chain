@@ -164,18 +164,6 @@ const MANIFEST: &[(&str, &str, &str, &str, usize)] = &[
     ("crates/state/src/employment_executor.rs", "EmploymentExecutor::execute", "EmploymentProofStore::put", "EMPLOYMENT_PROOFS", 1),
     ("crates/state/src/employment_executor.rs", "EmploymentExecutor::execute", "IncomeAttestationStore::put", "EMPLOYMENT_INCOME_ATTESTATIONS+EMPLOYMENT_INCOME_HOLDER_ADDRESS_INDEX+EMPLOYMENT_SUBJECT_INCOME_INDEX", 1),
     ("crates/state/src/employment_executor.rs", "EmploymentExecutor::execute", "IncomeAttestationStore::revoke", "EMPLOYMENT_INCOME_ATTESTATIONS", 1),
-    ("crates/state/src/equity_executor.rs", "EquityExecutor::add_controller", "EntityProfileStore::put", "EQUITY_ENTITIES", 1),
-    ("crates/state/src/equity_executor.rs", "EquityExecutor::burn", "EquityBalanceStore::set_balance", "EQUITY_BALANCES+EQUITY_HOLDER_INDEX", 1),
-    ("crates/state/src/equity_executor.rs", "EquityExecutor::burn", "EquityTokenStore::put", "EQUITY_TOKENS", 1),
-    ("crates/state/src/equity_executor.rs", "EquityExecutor::create_entity", "EntityProfileStore::put", "EQUITY_ENTITIES", 1),
-    ("crates/state/src/equity_executor.rs", "EquityExecutor::create_token", "EquityTokenStore::put", "EQUITY_TOKENS", 1),
-    ("crates/state/src/equity_executor.rs", "EquityExecutor::mint", "EquityBalanceStore::set_balance", "EQUITY_BALANCES+EQUITY_HOLDER_INDEX", 1),
-    ("crates/state/src/equity_executor.rs", "EquityExecutor::mint", "EquityTokenStore::put", "EQUITY_TOKENS", 1),
-    ("crates/state/src/equity_executor.rs", "EquityExecutor::propose_action", "GovernanceActionStore::put", "EQUITY_ENTITY_INDEX+EQUITY_GOVERNANCE", 1),
-    ("crates/state/src/equity_executor.rs", "EquityExecutor::remove_controller", "EntityProfileStore::put", "EQUITY_ENTITIES", 1),
-    ("crates/state/src/equity_executor.rs", "EquityExecutor::transfer", "EquityBalanceStore::transfer", "EQUITY_BALANCES+EQUITY_HOLDER_INDEX", 1),
-    ("crates/state/src/equity_executor.rs", "EquityExecutor::update_entity", "EntityProfileStore::put", "EQUITY_ENTITIES", 1),
-    ("crates/state/src/equity_executor.rs", "EquityExecutor::verify_ownership_proof", "OwnershipProofStore::put", "EQUITY_PROOFS", 1),
     ("crates/state/src/executor.rs", "BlockExecutor::execute_sponsored_register_v1", "MessagingStore::set_public_key", "MESSAGING_PUBLIC_KEYS", 1),
     ("crates/state/src/finance_executor.rs", "FinanceExecutor::execute", "AddressProofStore::put", "FINANCE_ADDRESS_PROOFS+FINANCE_SUBJECT_ADDRESS_INDEX", 1),
     ("crates/state/src/finance_executor.rs", "FinanceExecutor::execute", "AddressProofStore::revoke", "FINANCE_ADDRESS_PROOFS", 1),
@@ -188,14 +176,6 @@ const MANIFEST: &[(&str, &str, &str, &str, usize)] = &[
     ("crates/state/src/finance_executor.rs", "FinanceExecutor::execute", "KycAttestationStore::put", "FINANCE_KYC_ATTESTATIONS+FINANCE_SUBJECT_KYC_INDEX", 1),
     ("crates/state/src/finance_executor.rs", "FinanceExecutor::execute", "KycAttestationStore::revoke", "FINANCE_KYC_ATTESTATIONS", 1),
     ("crates/state/src/finance_executor.rs", "FinanceExecutor::execute", "KycAttestationStore::update_status", "FINANCE_KYC_ATTESTATIONS", 1),
-    ("crates/state/src/governance_executor.rs", "apply", "GovStore::create_proposal_atomic", "GOV_PROPOSALS+GOV_PROPOSAL_INDEX+GOV_SNAPSHOTS", 1),
-    ("crates/state/src/governance_executor.rs", "apply", "GovStore::put_asset", "GOV_REGISTRY", 2),
-    ("crates/state/src/governance_executor.rs", "apply", "GovStore::put_equity_class_root", "GOV_EQUITY_CLASS_ROOTS", 1),
-    ("crates/state/src/governance_executor.rs", "apply", "GovStore::put_proposal", "GOV_PROPOSALS+GOV_PROPOSAL_INDEX", 1),
-    ("crates/state/src/governance_executor.rs", "apply", "GovStore::put_qualifying_asset", "GOV_QUALIFYING_ASSETS", 1),
-    ("crates/state/src/governance_executor.rs", "apply", "GovStore::put_vote", "GOV_VOTES", 1),
-    ("crates/state/src/governance_executor.rs", "apply", "GovStore::record_equity_vote_atomic", "GOV_EQUITY_USED_COMMITMENTS+GOV_VOTES", 1),
-    ("crates/state/src/governance_executor.rs", "validate_register_qualifying", "GovStore::put_asset", "GOV_REGISTRY", 1),
     ("crates/state/src/healthcare_executor.rs", "HealthcareExecutor::execute", "ConsentStore::put", "HEALTHCARE_CONSENTS+HEALTHCARE_SUBJECT_CONSENT_INDEX", 2),
     ("crates/state/src/healthcare_executor.rs", "HealthcareExecutor::execute", "ConsentStore::update_status", "HEALTHCARE_CONSENTS", 3),
     ("crates/state/src/healthcare_executor.rs", "HealthcareExecutor::execute", "HealthcareProofStore::put", "HEALTHCARE_PROOFS", 1),
@@ -291,32 +271,17 @@ const MANIFEST: &[(&str, &str, &str, &str, usize)] = &[
     ("crates/state/src/tax_executor.rs", "TaxExecutor::execute", "TaxPolicyStore::put", "TAX_POLICIES", 2),
     ("crates/state/src/tax_executor.rs", "TaxExecutor::execute", "TaxProofStore::delete", "TAX_PROOFS", 1),
     ("crates/state/src/tax_executor.rs", "TaxExecutor::execute", "TaxProofStore::put", "TAX_PROOFS+TAX_SUBJECT_INDEX", 1),
-    ("crates/state/src/token_executor.rs", "TokenExecutor::execute_add_minter", "TokenStore::put_token", "TOKENS", 1),
-    ("crates/state/src/token_executor.rs", "TokenExecutor::execute_approve", "TokenStore::set_allowance", "TOKEN_ALLOWANCES", 1),
-    ("crates/state/src/token_executor.rs", "TokenExecutor::execute_burn", "TokenStore::put_token", "TOKENS", 1),
-    ("crates/state/src/token_executor.rs", "TokenExecutor::execute_burn", "TokenStore::set_balance", "TOKEN_BALANCES+TOKEN_HOLDER_INDEX", 1),
-    ("crates/state/src/token_executor.rs", "TokenExecutor::execute_create", "TokenStore::put_token", "TOKENS", 1),
-    ("crates/state/src/token_executor.rs", "TokenExecutor::execute_create", "TokenStore::set_balance", "TOKEN_BALANCES+TOKEN_HOLDER_INDEX", 1),
-    ("crates/state/src/token_executor.rs", "TokenExecutor::execute_mint", "TokenStore::put_token", "TOKENS", 1),
-    ("crates/state/src/token_executor.rs", "TokenExecutor::execute_mint", "TokenStore::set_balance", "TOKEN_BALANCES+TOKEN_HOLDER_INDEX", 1),
-    ("crates/state/src/token_executor.rs", "TokenExecutor::execute_pause", "TokenStore::put_token", "TOKENS", 1),
-    ("crates/state/src/token_executor.rs", "TokenExecutor::execute_remove_minter", "TokenStore::put_token", "TOKENS", 1),
-    ("crates/state/src/token_executor.rs", "TokenExecutor::execute_transfer", "TokenStore::set_balance", "TOKEN_BALANCES+TOKEN_HOLDER_INDEX", 2),
-    ("crates/state/src/token_executor.rs", "TokenExecutor::execute_transfer_from", "TokenStore::set_allowance", "TOKEN_ALLOWANCES", 1),
-    ("crates/state/src/token_executor.rs", "TokenExecutor::execute_transfer_from", "TokenStore::set_balance", "TOKEN_BALANCES+TOKEN_HOLDER_INDEX", 2),
-    ("crates/state/src/token_executor.rs", "TokenExecutor::execute_transfer_ownership", "TokenStore::put_token", "TOKENS", 1),
-    ("crates/state/src/token_executor.rs", "TokenExecutor::execute_unpause", "TokenStore::put_token", "TOKENS", 1),
 ];
 
 /// Occurrences, not rows: a caller reaching the same mutator three times is
 /// three places to fix.
-const MANIFEST_OCCURRENCES: usize = 280;
+const MANIFEST_OCCURRENCES: usize = 242;
 
 /// Application column families a block can still commit to directly.
 ///
 /// ONLY EVER DECREASE. Recorded at `1687789`. Lower than the 116 the unrooted
 /// audit reported, for the reason in [`UNREACHED_MUTATORS`].
-const LEDGER_CF_COUNT: usize = 107;
+const LEDGER_CF_COUNT: usize = 88;
 
 /// Functions that commit application state but that no entry point reaches.
 ///
@@ -385,9 +350,9 @@ const ARMS: &[(&str, ArmKind, &str)] = &[
     ("DocClass", ArmKind::Committed, "docclass_executor.rs -> DocClassStore sub-stores"),
     ("Education", ArmKind::Overlay, "education_executor.rs"),
     ("Employment", ArmKind::Committed, "employment_executor.rs -> EmploymentStore sub-stores"),
-    ("Equity", ArmKind::Committed, "equity_executor.rs -> EquityStore sub-stores"),
+    ("Equity", ArmKind::Overlay, "equity_executor.rs -> EquityExecutor::v_* -> candidate"),
     ("Finance", ArmKind::Committed, "finance_executor.rs -> FinanceStore sub-stores"),
-    ("Governance", ArmKind::Mixed, "governance_executor.rs takes a view AND a db; GovStore/TokenStore/EquityStore are committed"),
+    ("Governance", ArmKind::Overlay, "governance_executor.rs -> governance_view + Token/Equity v_* -> candidate"),
     ("Healthcare", ArmKind::Committed, "healthcare_executor.rs -> HealthcareStore sub-stores"),
     ("InferenceAttestation", ArmKind::Overlay, "inference_attestation_executor.rs"),
     ("InferenceAttestationV2", ArmKind::Overlay, "inference_attestation_executor.rs"),
@@ -404,7 +369,7 @@ const ARMS: &[(&str, ArmKind, &str)] = &[
     ("StorageMetadataV2", ArmKind::Overlay, "storage_metadata.rs"),
     ("Supply", ArmKind::Overlay, "supply.rs"),
     ("Tax", ArmKind::Committed, "tax_executor.rs -> TaxStore sub-stores"),
-    ("Token", ArmKind::Committed, "token_executor.rs -> TokenStore"),
+    ("Token", ArmKind::Overlay, "token_executor.rs -> TokenExecutor::v_* -> candidate"),
     ("Transfer", ArmKind::Overlay, "executor.rs fee/transfer -> StateManager::v_transfer -> candidate cf::STATE"),
 ];
 
@@ -1965,7 +1930,7 @@ fn every_dispatcher_arm_is_declared() {
     let mixed = ARMS.iter().filter(|(_, k, _)| *k == ArmKind::Mixed).count();
     assert_eq!(
         (overlay, committed, mixed),
-        (14, 15, 1),
+        (17, 13, 0),
         "the overlay/committed/mixed split changed. Moving an arm from \
          Committed to Overlay is progress — update this and the manifest \
          together; any other movement is not."

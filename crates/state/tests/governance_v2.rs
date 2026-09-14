@@ -8,6 +8,8 @@
 //!   duplicate commitment → 309, no holder table leaks).
 
 mod common;
+
+use sumchain_state::governance_view as gv;
 use sumchain_storage::exec_view::ExecutionView;
 use common::{fund, setup_with_params, CHAIN_ID};
 
@@ -175,13 +177,12 @@ fn native_eligibility_snapshot_is_allowlisted_holders_intersect_koppa() {
     assert!(matches!(r.status, TxStatus::Success), "create native: {:?}", r.status);
 
     let pid = generate_proposal_id(&proposer.address(), &GovAssetKind::NativeEligibility, &[0xAB; 32], 5, 0);
-    let store = GovStore::new(&db);
     // A eligible (weight 1); B/C excluded.
-    assert_eq!(store.get_snapshot(&pid, &a).unwrap(), Some(1), "A eligible weight 1");
-    assert_eq!(store.get_snapshot(&pid, &b).unwrap(), None, "B excluded (koppa floor)");
-    assert_eq!(store.get_snapshot(&pid, &c).unwrap(), None, "C excluded (below min_balance)");
+    assert_eq!(gv::v_get_snapshot(&candidate.view(), &pid, &a).unwrap(), Some(1), "A eligible weight 1");
+    assert_eq!(gv::v_get_snapshot(&candidate.view(), &pid, &b).unwrap(), None, "B excluded (koppa floor)");
+    assert_eq!(gv::v_get_snapshot(&candidate.view(), &pid, &c).unwrap(), None, "C excluded (below min_balance)");
     // Exactly one eligible address.
-    assert_eq!(store.list_snapshot(&pid).unwrap().len(), 1);
+    assert_eq!(gv::v_list_snapshot(&candidate.view(), &pid).unwrap().len(), 1);
 }
 
 #[test]
@@ -325,7 +326,7 @@ fn native_one_address_one_vote_and_6667_pass() {
     // Execute after window: 2 Yes / 3 = 6666 bps < 6667 → Rejected.
     let ereq = bincode::serialize(&ExecuteProposalRequest { proposal_id: pid }).unwrap();
     assert!(matches!(exec.execute_tx(&mut candidate.view(), &signed(&voters[0], 2, gov(GovernanceOperation::ExecuteProposal, ereq)), &Address::new([9; 20]), 200, 1000).unwrap().status, TxStatus::Success));
-    assert_eq!(GovStore::new(&db).get_proposal(&pid).unwrap().unwrap().status, GovProposalStatus::Rejected, "2/3 < 6667 bps");
+    assert_eq!(gv::v_get_proposal(&candidate.view(), &pid).unwrap().unwrap().status, GovProposalStatus::Rejected, "2/3 < 6667 bps");
 }
 
 #[test]
@@ -358,7 +359,7 @@ fn native_snapshot_bound_305() {
     let r = exec.execute_tx(&mut candidate.view(), &signed(&proposer, 0, gov(GovernanceOperation::CreateProposal, creq)), &Address::new([9; 20]), 5, 1000).unwrap();
     assert!(matches!(r.status, TxStatus::Failed(305)), "bound: {:?}", r.status);
     let pid = generate_proposal_id(&proposer.address(), &GovAssetKind::NativeEligibility, &[0xAB; 32], 5, 0);
-    assert!(GovStore::new(&db).get_proposal(&pid).unwrap().is_none(), "no partial rows");
+    assert!(gv::v_get_proposal(&candidate.view(), &pid).unwrap().is_none(), "no partial rows");
 }
 
 // ── #92 SRC-833 controller-attested equity vote ──────────────────────────────
@@ -406,7 +407,7 @@ fn equity_vote_valid_records_weight_and_root_recomputes() {
     let pid = create_equity_proposal(&mut candidate.view(), &exec, &proposer, 0, 5);
 
     // Frozen root must match an independent recompute from EQUITY_BALANCES.
-    let frozen = GovStore::new(&db).get_equity_class_root(&pid).unwrap().unwrap();
+    let frozen = gv::v_get_equity_class_root(&candidate.view(), &pid).unwrap().unwrap();
     let (recomputed, proof) = equity_balances_root_and_proof(&db, &CLASS, &h2).unwrap();
     assert_eq!(frozen.balances_root, recomputed, "on-chain root == independent recompute");
     let (_idx, path) = proof.unwrap();
@@ -425,7 +426,7 @@ fn equity_vote_valid_records_weight_and_root_recomputes() {
     assert!(matches!(r.status, TxStatus::Success), "equity vote: {:?}", r.status);
 
     // Weight = 20 * 3 = 60, tallied.
-    let vote = GovStore::new(&db).get_vote(&pid, &voter.address()).unwrap().unwrap();
+    let vote = gv::v_get_vote(&candidate.view(), &pid, &voter.address()).unwrap().unwrap();
     assert_eq!(vote.weight, 60, "weight = shares * votes_per_share");
 
     // Duplicate (proposal, holder_commitment) → 309, even from another voter.
@@ -472,7 +473,7 @@ fn equity_bad_merkle_bad_sig_and_wrong_signer_all_318() {
     let proposer = KeyPair::generate();
     fund(&db, &proposer, 100_000);
     let pid = create_equity_proposal(&mut candidate.view(), &exec, &proposer, 0, 5);
-    let frozen = GovStore::new(&db).get_equity_class_root(&pid).unwrap().unwrap();
+    let frozen = gv::v_get_equity_class_root(&candidate.view(), &pid).unwrap().unwrap();
     let (_r, proof) = equity_balances_root_and_proof(&db, &CLASS, &h1).unwrap();
     let (_idx, good_path) = proof.unwrap();
 

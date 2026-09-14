@@ -23,7 +23,7 @@ use sumchain_primitives::equity::{
 };
 use sumchain_storage::cf;
 use sumchain_storage::equity_store::{
-    decode_action_id_list, decode_class_id_list, decode_entity_profile, decode_equity_balance,
+    equity_merkle_leaf, equity_merkle_root_from_leaves, decode_action_id_list, decode_class_id_list, decode_entity_profile, decode_equity_balance,
     decode_equity_token, decode_governance_action, decode_ownership_proof, encode_action_id_list,
     encode_class_id_list, encode_entity_profile, encode_equity_balance, encode_equity_token,
     encode_governance_action, encode_ownership_proof, EquityBalanceStore,
@@ -311,6 +311,29 @@ impl EquityExecutor {
             }
         }
         Ok(())
+    }
+
+    /// The chain-derived balances root for a class, from the CANDIDATE.
+    ///
+    /// A proposal freezes this root and keeps it for its whole life, so it has
+    /// to be computed over the shares this block is about to publish. Computed
+    /// from the same leaves, sorted the same way, through the same root builder
+    /// as `equity_balances_root` — a root that differed by one holder would bind
+    /// every later equity vote on that proposal to the wrong set.
+    ///
+    /// It inherits the unbounded prefix scan of [`Self::v_get_equity_holders`],
+    /// deliberately, for the reason recorded there.
+    pub fn v_equity_balances_root(
+        view: &ExecutionView<'_, '_>,
+        class_id: &ClassId,
+    ) -> Result<[u8; 32]> {
+        let mut holders = Self::v_get_equity_holders(view, class_id)?;
+        holders.sort_by(|a, b| a.0.cmp(&b.0));
+        let leaves: Vec<[u8; 32]> = holders
+            .iter()
+            .map(|(hc, shares)| equity_merkle_leaf(hc, *shares))
+            .collect();
+        Ok(equity_merkle_root_from_leaves(leaves))
     }
 
     // ── Ownership proofs ────────────────────────────────────────────────────

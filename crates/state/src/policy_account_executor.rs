@@ -21,7 +21,6 @@ use sumchain_primitives::{
 };
 use sumchain_primitives::{NftOperation, TokenOperation, TokenTxData};
 use sumchain_crypto::verify_bytes;
-use sumchain_genesis::ChainParams;
 use sumchain_storage::{Database, PolicyAccountStorage, Result as StorageResult};
 
 use crate::token_executor::TokenExecutor;
@@ -630,9 +629,16 @@ impl PolicyAccountExecutor {
                 // `put_token` only on success, so a failure leaves NO partial
                 // token state. `sender = policy_account.address` — the policy
                 // account acts as the token owner/authority.
-                let token_exec = TokenExecutor::new(self.db.clone(), ChainParams::default());
-                let token_result =
-                    token_exec.apply_policy_admin_op(&policy_account.address, token_data)?;
+                // Staged into the same candidate as the rest of this action.
+                // The wrapped op used to reach a committed `TokenStore` while
+                // everything around it staged; a policy account administering a
+                // token would then have committed that change even if the block
+                // was abandoned.
+                let token_result = TokenExecutor::apply_policy_admin_op(
+                    view,
+                    &policy_account.address,
+                    token_data,
+                )?;
                 if !token_result.success {
                     // Token op rejected: do NOT mark Executed, do NOT advance the
                     // policy nonce (the code below is skipped), and leave no

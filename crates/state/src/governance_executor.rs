@@ -41,7 +41,6 @@
 //! advances the nonce (when the sender can cover it). Success charges the fee
 //! and advances the nonce exactly once, then persists.
 
-use std::sync::Arc;
 
 use sumchain_genesis::ChainParams;
 use sumchain_primitives::governance::{
@@ -54,16 +53,16 @@ use sumchain_primitives::governance::{
 };
 use sumchain_primitives::{Address, Balance, Hash, TxStatus};
 use sumchain_storage::exec_view::ExecutionView;
-use sumchain_storage::{
-    equity_balances_root, equity_merkle_verify, Database, EquityClassRoot, EquityStore, GovStore,
-    QualifyingAsset, TokenStore,
-};
+use sumchain_storage::{equity_merkle_verify, EquityClassRoot, QualifyingAsset};
 
 /// Fixed pass threshold (bps) for `NativeEligibility` 1-address-1-vote proposals
 /// when no explicit config is present (#91). 6667 bps ≈ two-thirds of yes+no.
 const NATIVE_PASS_THRESHOLD_BPS: u128 = 6667;
 
+use crate::equity_executor::EquityExecutor;
+use crate::token_executor::TokenExecutor;
 use crate::executor::TxExecutionResult;
+use crate::governance_view as gv;
 use crate::{Result, StateManager};
 
 /// Whether the governance activation gate is open at `block_height`.
@@ -157,11 +156,12 @@ enum Prepared {
 /// (mixed into proposal-id derivation); `from` pays the fee, `proposer` is
 /// credited.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
+/// Takes the chain id, not the `&Arc<StateManager>` it used to come from:
+/// that handle reached committed state for a single `chain_id()` call, which
+/// is a constant of the chain rather than block state.
 pub fn execute(
     view: &mut ExecutionView<'_, '_>,
-    state: &Arc<StateManager>,
-    db: &Arc<Database>,
+    chain_id: sumchain_primitives::ChainId,
     params: &ChainParams,
     gov: &GovernanceTxData,
     from: &Address,
@@ -183,17 +183,15 @@ pub fn execute(
     let Some(gp) = params.governance.as_ref() else {
         return Ok(result(tx_hash, TxStatus::Failed(301), 0));
     };
-    let chain_id = state.chain_id();
 
     let validated: std::result::Result<Prepared, u32> = match gov.operation {
         GovernanceOperation::RegisterAsset => match decode::<RegisterAssetRequest>(&gov.data) {
             Err(()) => return Ok(result(tx_hash, TxStatus::Failed(302), 0)),
-            Ok(req) => validate_register(db, gp, &req, chain_id, active_validator_pubkeys),
+            Ok(req) => validate_register(view, gp, &req, chain_id, active_validator_pubkeys),
         },
         GovernanceOperation::CreateProposal => match decode::<CreateProposalRequest>(&gov.data) {
             Err(()) => return Ok(result(tx_hash, TxStatus::Failed(302), 0)),
             Ok(req) => validate_create(view,
-                db,
                 gp,
                 from,
                 nonce,
@@ -205,12 +203,12 @@ pub fn execute(
         },
         GovernanceOperation::CastVote => match decode::<CastVoteRequest>(&gov.data) {
             Err(()) => return Ok(result(tx_hash, TxStatus::Failed(302), 0)),
-            Ok(req) => validate_vote(db, gp, from, block_height, &req),
+            Ok(req) => validate_vote(view, gp, from, block_height, &req),
         },
         GovernanceOperation::ExecuteProposal => match decode::<ExecuteProposalRequest>(&gov.data) {
             Err(()) => return Ok(result(tx_hash, TxStatus::Failed(302), 0)),
             Ok(req) => validate_execute(
-                db,
+                view,
                 gp,
                 block_height,
                 &req,
@@ -219,13 +217,13 @@ pub fn execute(
         },
         GovernanceOperation::CancelProposal => match decode::<CancelProposalRequest>(&gov.data) {
             Err(()) => return Ok(result(tx_hash, TxStatus::Failed(302), 0)),
-            Ok(req) => validate_cancel(db, gp, from, &req, chain_id, active_validator_pubkeys),
+            Ok(req) => validate_cancel(view, gp, from, &req, chain_id, active_validator_pubkeys),
         },
         GovernanceOperation::RegisterQualifyingAsset => {
             match decode::<RegisterQualifyingAssetRequest>(&gov.data) {
                 Err(()) => return Ok(result(tx_hash, TxStatus::Failed(302), 0)),
                 Ok(req) => validate_register_qualifying(
-                    db,
+                    view,
                     gp,
                     &req,
                     chain_id,
@@ -237,7 +235,7 @@ pub fn execute(
             match decode::<RegisterEquityClassRequest>(&gov.data) {
                 Err(()) => return Ok(result(tx_hash, TxStatus::Failed(302), 0)),
                 Ok(req) => validate_register_equity_class(
-                    db,
+                    view,
                     gp,
                     &req,
                     chain_id,
@@ -247,7 +245,7 @@ pub fn execute(
         }
         GovernanceOperation::CastEquityVote => match decode::<CastEquityVoteRequest>(&gov.data) {
             Err(()) => return Ok(result(tx_hash, TxStatus::Failed(302), 0)),
-            Ok(req) => validate_equity_vote(db, gp, from, chain_id, block_height, &req),
+            Ok(req) => validate_equity_vote(view, gp, from, chain_id, block_height, &req),
         },
     };
 
@@ -322,7 +320,7 @@ pub fn execute(
             apply_bond(view, &prepared)?;
             apply_treasury(view, &prepared)?;
             apply_monetary(view, &prepared, block_height)?;
-            apply(db, prepared)?;
+            apply(view, prepared)?;
             Ok(result(tx_hash, TxStatus::Success, fee))
         }
     }
@@ -396,31 +394,35 @@ fn apply_monetary(
     Ok(())
 }
 
-fn charge(view: &mut ExecutionView<'_, '_>, from: &Address, proposer: &Address, fee: Balance) -> Result<()> {
+fn charge(
+    view: &mut ExecutionView<'_, '_>,
+    from: &Address,
+    proposer: &Address,
+    fee: Balance,
+) -> Result<()> {
     StateManager::v_deduct(view, from, fee)?;
     StateManager::v_credit(view, proposer, fee)?;
     StateManager::v_increment_nonce(view, from)?;
     Ok(())
 }
 
-fn apply(db: &Arc<Database>, prepared: Prepared) -> Result<()> {
-    let store = GovStore::new(db);
+fn apply(view: &mut ExecutionView<'_, '_>, prepared: Prepared) -> Result<()> {
     match prepared {
-        Prepared::RegisterAsset(asset) => store.put_asset(&asset)?,
+        Prepared::RegisterAsset(asset) => gv::v_put_asset(view, &asset)?,
         Prepared::CreateProposal { proposal, snapshot, equity_root } => {
-            store.create_proposal_atomic(&proposal, &snapshot)?;
+            gv::v_create_proposal(view, &proposal, &snapshot)?;
             // Freeze the equity-class root for this proposal (#92), if any.
             if let Some(root) = equity_root {
-                store.put_equity_class_root(&proposal.id, &root)?;
+                gv::v_put_equity_class_root(view, &proposal.id, &root)?;
             }
         }
-        Prepared::CastVote(vote) => store.put_vote(&vote)?,
-        Prepared::RegisterQualifyingAsset(asset) => store.put_qualifying_asset(&asset)?,
-        Prepared::RegisterEquityClass(asset) => store.put_asset(&asset)?,
+        Prepared::CastVote(vote) => gv::v_put_vote(view, &vote)?,
+        Prepared::RegisterQualifyingAsset(asset) => gv::v_put_qualifying_asset(view, &asset)?,
+        Prepared::RegisterEquityClass(asset) => gv::v_put_asset(view, &asset)?,
         Prepared::CastEquityVote { vote, holder_commitment } => {
-            store.record_equity_vote_atomic(&vote, &holder_commitment)?
+            gv::v_record_equity_vote(view, &vote, &holder_commitment)?
         }
-        Prepared::ProposalUpdate { proposal, .. } => store.put_proposal(&proposal)?,
+        Prepared::ProposalUpdate { proposal, .. } => gv::v_put_proposal(view, &proposal)?,
     }
     Ok(())
 }
@@ -428,7 +430,7 @@ fn apply(db: &Arc<Database>, prepared: Prepared) -> Result<()> {
 // ── Per-operation validation (returns Err(code) for semantic failures) ───────
 
 fn validate_register(
-    db: &Arc<Database>,
+    view: &ExecutionView<'_, '_>,
     gp: &GovernanceParams,
     req: &RegisterAssetRequest,
     chain_id: sumchain_primitives::ChainId,
@@ -453,8 +455,7 @@ fn validate_register(
         return Err(303);
     }
     // Token must exist and be fixed-supply / non-mintable.
-    let tokens = TokenStore::new(db);
-    match tokens.get_token(&req.token_id).map_err(|_| 303u32)? {
+    match TokenExecutor::v_get_token(view, &req.token_id).map_err(|_| 303u32)? {
         Some(t) if !t.mintable => {}
         _ => return Err(303),
     }
@@ -474,7 +475,10 @@ fn validate_register(
 /// caller) so native proposals can be created. Code 316 on authority/token
 /// failure.
 fn validate_register_qualifying(
-    db: &Arc<Database>,
+    // `&mut`: this validator WRITES. It back-fills the NativeEligibility asset
+    // when the first qualifying asset is registered, which is existing
+    // behaviour and is preserved here rather than tidied into `apply`.
+    view: &mut ExecutionView<'_, '_>,
     gp: &GovernanceParams,
     req: &RegisterQualifyingAssetRequest,
     chain_id: sumchain_primitives::ChainId,
@@ -498,23 +502,23 @@ fn validate_register_qualifying(
     }
     // The SRC-20 token must exist (any supply model — a qualifying asset is an
     // eligibility gate, not a vote-weight token).
-    let tokens = TokenStore::new(db);
-    if tokens.get_token(&req.token_id).map_err(|_| 316u32)?.is_none() {
+    if TokenExecutor::v_get_token(view, &req.token_id).map_err(|_| 316u32)?.is_none() {
         return Err(316);
     }
     // Ensure the NativeEligibility governance asset exists so native proposals
     // can be created. Registering the first qualifying asset enables the mode.
-    let store = GovStore::new(db);
-    if store.get_asset(&GovAssetKind::NativeEligibility).map_err(|_| 316u32)?.is_none() {
-        store
-            .put_asset(&GovAsset {
+    if gv::v_get_asset(view, &GovAssetKind::NativeEligibility).map_err(|_| 316u32)?.is_none() {
+        gv::v_put_asset(
+            view,
+            &GovAsset {
                 asset: GovAssetKind::NativeEligibility,
                 create_threshold: 0,
                 vote_weight_rule: WeightRule::OneAddressOneVote,
                 status: GovAssetStatus::Enabled,
                 effective_height: req.effective_height,
-            })
-            .map_err(|_| 316u32)?;
+            },
+        )
+        .map_err(|_| 316u32)?;
     }
     Ok(Prepared::RegisterQualifyingAsset(QualifyingAsset {
         token_id: req.token_id,
@@ -529,7 +533,7 @@ fn validate_register_qualifying(
 /// `SharesTimesVotesPerShare`. Code 317 for a non-voting/missing class, 303 for
 /// an authority failure (matches the RegisterAsset convention).
 fn validate_register_equity_class(
-    db: &Arc<Database>,
+    view: &ExecutionView<'_, '_>,
     gp: &GovernanceParams,
     req: &RegisterEquityClassRequest,
     chain_id: sumchain_primitives::ChainId,
@@ -551,8 +555,9 @@ fn validate_register_equity_class(
     {
         return Err(303);
     }
-    let equity = EquityStore::new(db);
-    let token = equity.tokens().get(&req.class_id).map_err(|_| 317u32)?.ok_or(317u32)?;
+    let token = EquityExecutor::v_get_equity_token(view, &req.class_id)
+        .map_err(|_| 317u32)?
+        .ok_or(317u32)?;
     if token.votes_per_share == 0 {
         return Err(317);
     }
@@ -575,15 +580,14 @@ fn validate_register_equity_class(
 ///   6. weight = shares * votes_per_share; records a `GovVote` + marks used.
 /// The proposal must be in `Voting` and inside the voting window (306 / 307).
 fn validate_equity_vote(
-    db: &Arc<Database>,
+    view: &ExecutionView<'_, '_>,
     gp: &GovernanceParams,
     from: &Address,
     chain_id: sumchain_primitives::ChainId,
     height: u64,
     req: &CastEquityVoteRequest,
 ) -> std::result::Result<Prepared, u32> {
-    let store = GovStore::new(db);
-    let proposal = match store.get_proposal(&req.proposal_id).map_err(|_| 306u32)? {
+    let proposal = match gv::v_get_proposal(view, &req.proposal_id).map_err(|_| 306u32)? {
         Some(p) if p.status == GovProposalStatus::Voting => p,
         _ => return Err(306),
     };
@@ -598,14 +602,15 @@ fn validate_equity_vote(
     }
 
     // (1) class voting.
-    let equity = EquityStore::new(db);
-    let token = equity.tokens().get(&class_id).map_err(|_| 317u32)?.ok_or(317u32)?;
+    let token = EquityExecutor::v_get_equity_token(view, &class_id)
+        .map_err(|_| 317u32)?
+        .ok_or(317u32)?;
     if token.votes_per_share == 0 {
         return Err(317);
     }
 
     // (2) root frozen for this proposal.
-    let frozen = match store.get_equity_class_root(&req.proposal_id).map_err(|_| 318u32)? {
+    let frozen = match gv::v_get_equity_class_root(view, &req.proposal_id).map_err(|_| 318u32)? {
         Some(r) if r.class_id == class_id => r,
         _ => return Err(318),
     };
@@ -616,7 +621,7 @@ fn validate_equity_vote(
     // static within the vote window in these flows, the on-chain holder ordering
     // matches the frozen root. Recompute the proof deterministically and require
     // it to reproduce the frozen root with the submitted path.
-    if !equity_vote_merkle_ok(db, &class_id, &frozen.balances_root, req) {
+    if !equity_vote_merkle_ok(view, &class_id, &frozen.balances_root, req) {
         return Err(318);
     }
 
@@ -638,8 +643,7 @@ fn validate_equity_vote(
     }
 
     // (5) dedup on (proposal, holder_commitment).
-    if store
-        .is_equity_commitment_used(&req.proposal_id, &req.holder_commitment)
+    if gv::v_is_equity_commitment_used(view, &req.proposal_id, &req.holder_commitment)
         .map_err(|_| 309u32)?
     {
         return Err(309);
@@ -662,13 +666,12 @@ fn validate_equity_vote(
 /// holder set (commitments unique per class); the submitted `merkle_path` must
 /// then fold to the frozen root under the same rules the chain used to build it.
 fn equity_vote_merkle_ok(
-    db: &Arc<Database>,
+    view: &ExecutionView<'_, '_>,
     class_id: &[u8; 32],
     balances_root: &[u8; 32],
     req: &CastEquityVoteRequest,
 ) -> bool {
-    let equity = EquityStore::new(db);
-    let mut holders = match equity.balances().get_holders(class_id) {
+    let mut holders = match EquityExecutor::v_get_equity_holders(view, class_id) {
         Ok(h) => h,
         Err(_) => return false,
     };
@@ -687,9 +690,8 @@ fn equity_vote_merkle_ok(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
-fn validate_create(view: &mut ExecutionView<'_, '_>,
-    db: &Arc<Database>,
+fn validate_create(
+    view: &mut ExecutionView<'_, '_>,
     gp: &GovernanceParams,
     from: &Address,
     nonce: u64,
@@ -698,7 +700,6 @@ fn validate_create(view: &mut ExecutionView<'_, '_>,
     req: &CreateProposalRequest,
     monetary_gate_open: bool,
 ) -> std::result::Result<Prepared, u32> {
-    let store = GovStore::new(db);
 
     // 800B correction: monetary-policy classes are enforced at CREATION as well
     // as execution. They require the monetary-policy gate (387) and the
@@ -727,7 +728,7 @@ fn validate_create(view: &mut ExecutionView<'_, '_>,
         GovAssetKind::EquityClass(_) => 317u32,
         GovAssetKind::Src20Token(_) => 303u32,
     };
-    let asset = match store.get_asset(&req.asset).map_err(|_| not_enabled_code)? {
+    let asset = match gv::v_get_asset(view, &req.asset).map_err(|_| not_enabled_code)? {
         Some(a) if a.status == GovAssetStatus::Enabled && a.effective_height <= height => a,
         _ => return Err(not_enabled_code),
     };
@@ -737,24 +738,23 @@ fn validate_create(view: &mut ExecutionView<'_, '_>,
     let (snapshot, equity_root): (Vec<(Address, u128)>, Option<EquityClassRoot>) = match req.asset {
         GovAssetKind::Src20Token(token_id) => {
             // Proposer must meet the per-asset create threshold (live balance).
-            let tokens = TokenStore::new(db);
-            let bal = tokens.get_balance(&token_id, from).map_err(|_| 304u32)?;
+            let bal = gv::v_token_balance(view, &token_id, from).map_err(|_| 304u32)?;
             if bal < asset.create_threshold {
                 return Err(304);
             }
             let cap = gp.max_snapshot_holders as usize;
-            let snap = store.scan_token_holders(&token_id, cap).map_err(|_| 305u32)?;
+            let snap = gv::v_scan_token_holders(view, &token_id, cap).map_err(|_| 305u32)?;
             if snap.len() > cap {
                 return Err(305);
             }
             (snap, None)
         }
         GovAssetKind::NativeEligibility => {
-            (build_native_eligibility_snapshot(view, db, gp, height)?, None)
+            (build_native_eligibility_snapshot(view, gp, height)?, None)
         }
         GovAssetKind::EquityClass(class_id) => {
             let (snap, root) =
-                build_equity_class_snapshot(db, gp, from, height, &class_id, &asset)?;
+                build_equity_class_snapshot(view, gp, from, height, &class_id, &asset)?;
             (snap, Some(root))
         }
     };
@@ -788,17 +788,15 @@ fn validate_create(view: &mut ExecutionView<'_, '_>,
 /// >= `gp.min_koppa_for_eligibility`. Deduped; each eligible address weight = 1.
 /// Bounded by `gp.max_snapshot_holders` (305). Codes: 316 empty registry, 315 no
 /// qualifying holders, 314 empty eligible set after the Koppa filter.
-fn build_native_eligibility_snapshot(view: &mut ExecutionView<'_, '_>,
-    db: &Arc<Database>,
+fn build_native_eligibility_snapshot(
+    view: &mut ExecutionView<'_, '_>,
     gp: &GovernanceParams,
     height: u64,
 ) -> std::result::Result<Vec<(Address, u128)>, u32> {
-    let store = GovStore::new(db);
-    let qualifying = store.list_effective_qualifying_assets(height).map_err(|_| 316u32)?;
+    let qualifying = gv::v_list_effective_qualifying_assets(view, height).map_err(|_| 316u32)?;
     if qualifying.is_empty() {
         return Err(316);
     }
-    let tokens = TokenStore::new(db);
     let cap = gp.max_snapshot_holders as usize;
 
     // Collect the union of qualifying-asset holders (balance >= min_balance),
@@ -807,7 +805,7 @@ fn build_native_eligibility_snapshot(view: &mut ExecutionView<'_, '_>,
     let mut any_holder = false;
     for qa in &qualifying {
         // scan_token_holders returns up to cap+1 holders with non-zero balance.
-        let holders = store.scan_token_holders(&qa.token_id, cap).map_err(|_| 305u32)?;
+        let holders = gv::v_scan_token_holders(view, &qa.token_id, cap).map_err(|_| 305u32)?;
         for (addr, bal) in holders {
             if bal < qa.min_balance {
                 continue;
@@ -843,23 +841,24 @@ fn build_native_eligibility_snapshot(view: &mut ExecutionView<'_, '_>,
 /// Code 317 if the class is non-voting (votes_per_share == 0) or missing.
 #[allow(clippy::too_many_arguments)]
 fn build_equity_class_snapshot(
-    db: &Arc<Database>,
+    view: &ExecutionView<'_, '_>,
     gp: &GovernanceParams,
     _from: &Address,
     _height: u64,
     class_id: &[u8; 32],
     asset: &GovAsset,
 ) -> std::result::Result<(Vec<(Address, u128)>, EquityClassRoot), u32> {
-    let equity = EquityStore::new(db);
-    let token = equity.tokens().get(class_id).map_err(|_| 317u32)?.ok_or(317u32)?;
+    let token = EquityExecutor::v_get_equity_token(view, class_id)
+        .map_err(|_| 317u32)?
+        .ok_or(317u32)?;
     if token.votes_per_share == 0 {
         return Err(317);
     }
     // Chain-derived root over the class's EQUITY_BALANCES (never client-supplied).
-    let balances_root = equity_balances_root(db, class_id).map_err(|_| 317u32)?;
+    let balances_root = EquityExecutor::v_equity_balances_root(view, class_id).map_err(|_| 317u32)?;
 
     // Total voting weight across the class = sum(shares) * votes_per_share.
-    let holders = equity.balances().get_holders(class_id).map_err(|_| 317u32)?;
+    let holders = EquityExecutor::v_get_equity_holders(view, class_id).map_err(|_| 317u32)?;
     let total_shares: u128 = holders.iter().map(|(_, s)| *s as u128).sum();
     let snapshot_total = total_shares.saturating_mul(token.votes_per_share as u128);
 
@@ -885,14 +884,13 @@ fn build_equity_class_snapshot(
 }
 
 fn validate_vote(
-    db: &Arc<Database>,
+    view: &ExecutionView<'_, '_>,
     gp: &GovernanceParams,
     from: &Address,
     height: u64,
     req: &CastVoteRequest,
 ) -> std::result::Result<Prepared, u32> {
-    let store = GovStore::new(db);
-    let proposal = match store.get_proposal(&req.proposal_id).map_err(|_| 306u32)? {
+    let proposal = match gv::v_get_proposal(view, &req.proposal_id).map_err(|_| 306u32)? {
         Some(p) if p.status == GovProposalStatus::Voting => p,
         _ => return Err(306),
     };
@@ -901,12 +899,12 @@ fn validate_vote(
         return Err(307);
     }
     // Weight comes only from the frozen snapshot, never live balance.
-    let weight = match store.get_snapshot(&req.proposal_id, from).map_err(|_| 308u32)? {
+    let weight = match gv::v_get_snapshot(view, &req.proposal_id, from).map_err(|_| 308u32)? {
         Some(w) if w > 0 => w,
         _ => return Err(308),
     };
     // One vote per (proposal, voter).
-    if store.get_vote(&req.proposal_id, from).map_err(|_| 309u32)?.is_some() {
+    if gv::v_get_vote(view, &req.proposal_id, from).map_err(|_| 309u32)?.is_some() {
         return Err(309);
     }
     Ok(Prepared::CastVote(GovVote {
@@ -919,14 +917,13 @@ fn validate_vote(
 }
 
 fn validate_execute(
-    db: &Arc<Database>,
+    view: &ExecutionView<'_, '_>,
     gp: &GovernanceParams,
     height: u64,
     req: &ExecuteProposalRequest,
     monetary_gate_open: bool,
 ) -> std::result::Result<Prepared, u32> {
-    let store = GovStore::new(db);
-    let mut proposal = match store.get_proposal(&req.proposal_id).map_err(|_| 306u32)? {
+    let mut proposal = match gv::v_get_proposal(view, &req.proposal_id).map_err(|_| 306u32)? {
         Some(p) if p.status == GovProposalStatus::Voting => p,
         _ => return Err(306),
     };
@@ -936,14 +933,13 @@ fn validate_execute(
     }
 
     // Tally over the frozen snapshot + cast votes.
-    let snapshot_total: u128 = store
-        .list_snapshot(&req.proposal_id)
+    let snapshot_total: u128 = gv::v_list_snapshot(view, &req.proposal_id)
         .map_err(|_| 306u32)?
         .iter()
         .map(|(_, w)| *w)
         .sum();
     let (mut yes, mut no, mut abstain): (u128, u128, u128) = (0, 0, 0);
-    for v in store.list_votes(&req.proposal_id).map_err(|_| 306u32)? {
+    for v in gv::v_list_votes(view, &req.proposal_id).map_err(|_| 306u32)? {
         match v.choice {
             VoteChoice::Yes => yes += v.weight,
             VoteChoice::No => no += v.weight,
@@ -1075,15 +1071,14 @@ fn settle_bond(
 }
 
 fn validate_cancel(
-    db: &Arc<Database>,
+    view: &ExecutionView<'_, '_>,
     gp: &GovernanceParams,
     from: &Address,
     req: &CancelProposalRequest,
     chain_id: sumchain_primitives::ChainId,
     active_validator_pubkeys: &[[u8; 32]],
 ) -> std::result::Result<Prepared, u32> {
-    let store = GovStore::new(db);
-    let mut proposal = match store.get_proposal(&req.proposal_id).map_err(|_| 306u32)? {
+    let mut proposal = match gv::v_get_proposal(view, &req.proposal_id).map_err(|_| 306u32)? {
         Some(p) => p,
         None => return Err(306),
     };
