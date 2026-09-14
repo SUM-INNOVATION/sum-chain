@@ -888,8 +888,15 @@ mod tests {
     }
 
     #[test]
-    fn test_register_provider(view: &mut ExecutionView<'_, '_>) {
+    fn test_register_provider() {
         let (db, _dir, state) = setup();
+        // A block's candidate, opened here because a `#[test]` function
+        // cannot take one as a parameter. An earlier scripted signature
+        // rewrite added `view` to the parameter list of every test in this
+        // module, which is not valid Rust; only the `cfg` gate kept it
+        // out of sight.
+        let mut overlay = sumchain_storage::overlay::ApplicationOverlay::new(&db, 1 << 20);
+        let view = &mut sumchain_storage::exec_view::ExecutionView::new(&mut overlay);
         let executor = HealthcareExecutor::new(db.clone(), ChainParams::default());
 
         let sender = Address::new([1u8; 20]);

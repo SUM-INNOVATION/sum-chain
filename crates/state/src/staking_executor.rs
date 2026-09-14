@@ -1091,6 +1091,9 @@ impl StakingExecutor {
 #[cfg(all(test, feature = "legacy_tests"))]
 mod tests {
     use super::*;
+    // Scoped to this module: the production code above holds no
+    // `Arc<Database>` any more, so a file-level import would be unused.
+    use std::sync::Arc;
     use sumchain_storage::Database;
     use tempfile::TempDir;
 

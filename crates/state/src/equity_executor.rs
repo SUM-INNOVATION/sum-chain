@@ -519,6 +519,9 @@ impl EquityExecutor {
 #[cfg(all(test, feature = "legacy_tests"))]
 mod tests {
     use super::*;
+    // Scoped to this module: the production code above holds no
+    // `Arc<Database>` any more, so a file-level import would be unused.
+    use std::sync::Arc;
     use sumchain_primitives::OrgType;
     use sumchain_storage::Database;
     use tempfile::TempDir;
@@ -530,18 +533,23 @@ mod tests {
         (db, dir, state)
     }
 
-    #[test]
-    fn test_equity_executor_creation() {
-        let (db, _dir, _state) = setup();
-        let _executor = EquityExecutor::new(db, ChainParams::default());
-    }
+    // `test_equity_executor_creation` is deleted rather than repaired.
+    // `EquityExecutor::new` no longer exists: the type holds no database and is
+    // a namespace for associated functions, so "can it be constructed" is not a
+    // question about it any more.
 
     #[test]
-    fn test_create_entity(view: &mut ExecutionView<'_, '_>) {
+    fn test_create_entity() {
         use sumchain_primitives::{ControllerModel, EntityStatus};
 
-        let (db, _dir, state) = setup();
-        let executor = EquityExecutor::new(db.clone(), ChainParams::default());
+        let (db, _dir, _state) = setup();
+        // A block's candidate, opened here because a `#[test]` function
+        // cannot take one as a parameter. An earlier scripted signature
+        // rewrite added `view` to the parameter list of every test in this
+        // module, which is not valid Rust; only the `cfg` gate kept it
+        // out of sight.
+        let mut overlay = sumchain_storage::overlay::ApplicationOverlay::new(&db, 1 << 20);
+        let view = &mut sumchain_storage::exec_view::ExecutionView::new(&mut overlay);
 
         let controller = Address::new([1u8; 20]);
         let proposer = Address::new([99u8; 20]);
@@ -568,15 +576,27 @@ mod tests {
             data: bincode::serialize(&entity).unwrap(),
         };
 
-        let result = executor.execute(
-            &controller, &tx_data, &state, &proposer, 1000, 100, 1000000, 0, Hash::default(),
-        ).unwrap();
+        let result = EquityExecutor::execute(
+            view,
+            &controller,
+            &tx_data,
+            &proposer,
+            1000,
+            100,
+            1000000,
+            0,
+            Hash::default(),
+        )
+        .unwrap();
 
         assert!(result.success, "Create entity failed: {:?}", result.error);
         assert!(result.entity_id.is_some());
 
-        let store = EquityStore::new(&db);
-        let retrieved = Self::v_get_entity(view, &entity.subject_id).unwrap().unwrap();
+        // Read the CANDIDATE: the entity this block created is staged, not
+        // committed, so a `EquityStore::new(&db)` read here would find nothing.
+        let retrieved = EquityExecutor::v_get_entity(view, &entity.subject_id)
+            .unwrap()
+            .unwrap();
         assert_eq!(retrieved.org_type, OrgType::Corporation);
     }
 }

@@ -1252,8 +1252,15 @@ mod tests {
     }
 
     #[test]
-    fn test_register_issuer(view: &mut ExecutionView<'_, '_>) {
+    fn test_register_issuer() {
         let (db, _dir, state) = setup();
+        // A block's candidate, opened here because a `#[test]` function
+        // cannot take one as a parameter. An earlier scripted signature
+        // rewrite added `view` to the parameter list of every test in this
+        // module, which is not valid Rust; only the `cfg` gate kept it
+        // out of sight.
+        let mut overlay = sumchain_storage::overlay::ApplicationOverlay::new(&db, 1 << 20);
+        let view = &mut sumchain_storage::exec_view::ExecutionView::new(&mut overlay);
         let params = test_params();
         let executor = DocClassExecutor::new(db.clone(), params);
 
@@ -1306,8 +1313,15 @@ mod tests {
     }
 
     #[test]
-    fn test_create_identity_root(view: &mut ExecutionView<'_, '_>) {
+    fn test_create_identity_root() {
         let (db, _dir, state) = setup();
+        // A block's candidate, opened here because a `#[test]` function
+        // cannot take one as a parameter. An earlier scripted signature
+        // rewrite added `view` to the parameter list of every test in this
+        // module, which is not valid Rust; only the `cfg` gate kept it
+        // out of sight.
+        let mut overlay = sumchain_storage::overlay::ApplicationOverlay::new(&db, 1 << 20);
+        let view = &mut sumchain_storage::exec_view::ExecutionView::new(&mut overlay);
         let params = test_params();
         let executor = DocClassExecutor::new(db.clone(), params);
 
@@ -1363,8 +1377,15 @@ mod tests {
     }
 
     #[test]
-    fn test_issue_eligibility(view: &mut ExecutionView<'_, '_>) {
+    fn test_issue_eligibility() {
         let (db, _dir, state) = setup();
+        // A block's candidate, opened here because a `#[test]` function
+        // cannot take one as a parameter. An earlier scripted signature
+        // rewrite added `view` to the parameter list of every test in this
+        // module, which is not valid Rust; only the `cfg` gate kept it
+        // out of sight.
+        let mut overlay = sumchain_storage::overlay::ApplicationOverlay::new(&db, 1 << 20);
+        let view = &mut sumchain_storage::exec_view::ExecutionView::new(&mut overlay);
         let params = test_params();
         let executor = DocClassExecutor::new(db.clone(), params);
 
@@ -1460,8 +1481,15 @@ mod tests {
     }
 
     #[test]
-    fn test_revoke_credential(view: &mut ExecutionView<'_, '_>) {
+    fn test_revoke_credential() {
         let (db, _dir, state) = setup();
+        // A block's candidate, opened here because a `#[test]` function
+        // cannot take one as a parameter. An earlier scripted signature
+        // rewrite added `view` to the parameter list of every test in this
+        // module, which is not valid Rust; only the `cfg` gate kept it
+        // out of sight.
+        let mut overlay = sumchain_storage::overlay::ApplicationOverlay::new(&db, 1 << 20);
+        let view = &mut sumchain_storage::exec_view::ExecutionView::new(&mut overlay);
         let params = test_params();
         let executor = DocClassExecutor::new(db.clone(), params);
 
@@ -1549,8 +1577,15 @@ mod tests {
     }
 
     #[test]
-    fn test_unauthorized_issuer_fails(view: &mut ExecutionView<'_, '_>) {
+    fn test_unauthorized_issuer_fails() {
         let (db, _dir, state) = setup();
+        // A block's candidate, opened here because a `#[test]` function
+        // cannot take one as a parameter. An earlier scripted signature
+        // rewrite added `view` to the parameter list of every test in this
+        // module, which is not valid Rust; only the `cfg` gate kept it
+        // out of sight.
+        let mut overlay = sumchain_storage::overlay::ApplicationOverlay::new(&db, 1 << 20);
+        let view = &mut sumchain_storage::exec_view::ExecutionView::new(&mut overlay);
         let params = test_params();
         let executor = DocClassExecutor::new(db.clone(), params);
 
