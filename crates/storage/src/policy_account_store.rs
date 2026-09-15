@@ -16,6 +16,64 @@ use crate::db::{cf, Database};
 use crate::{Result, StorageError};
 
 // =============================================================================
+// Shared key layout and codec
+// =============================================================================
+//
+// One builder and one codec per row, used by the committed store below and by
+// the candidate surface in `sumchain_state::policy_account_view`. Two encoders
+// would be free to drift: a candidate that wrote a differently-shaped row would
+// still round-trip through itself and only disagree with the chain.
+
+/// The row key for a policy account: the id, unprefixed.
+///
+/// Returned as a slice of the caller's id rather than a fresh `Vec`, because
+/// that is exactly what the key is — there is no prefix, no separator and no
+/// encoding step to get wrong, and saying so here is what stops one appearing
+/// on one side only.
+pub fn policy_account_key(id: &PolicyAccountId) -> &[u8] {
+    id
+}
+
+/// The row key for a proposal: the id, unprefixed. See
+/// [`policy_account_key`].
+pub fn proposal_key(id: &ProposalId) -> &[u8] {
+    id
+}
+
+/// Encode a policy account, REFUSING an invalid one.
+///
+/// The validity check belongs here rather than in either caller. It was in the
+/// committed `put`, so a candidate path that encoded directly would accept
+/// structures the chain refuses, and the difference would only appear when the
+/// block was published.
+pub fn encode_policy_account(account: &PolicyAccount) -> Result<Vec<u8>> {
+    if !account.is_valid() {
+        return Err(StorageError::InvalidData(
+            "Invalid policy account structure".to_string(),
+        ));
+    }
+    bincode::serialize(account).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_policy_account(bytes: &[u8]) -> Result<PolicyAccount> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+/// Encode a proposal, REFUSING an invalid one. See [`encode_policy_account`].
+pub fn encode_proposal(proposal: &Proposal) -> Result<Vec<u8>> {
+    if !proposal.is_valid() {
+        return Err(StorageError::InvalidData(
+            "Invalid proposal structure".to_string(),
+        ));
+    }
+    bincode::serialize(proposal).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_proposal(bytes: &[u8]) -> Result<Proposal> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+// =============================================================================
 // Policy Account Storage
 // =============================================================================
 
@@ -31,27 +89,17 @@ impl<'a> PolicyAccountStore<'a> {
 
     /// Store a policy account
     pub fn put(&self, policy_account: &PolicyAccount) -> Result<()> {
-        // Validate before storing
-        if !policy_account.is_valid() {
-            return Err(StorageError::InvalidData(
-                "Invalid policy account structure".to_string(),
-            ));
-        }
-
-        let bytes = bincode::serialize(policy_account)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db
-            .put(cf::POLICY_ACCOUNTS, &policy_account.id, &bytes)
+        self.db.put(
+            cf::POLICY_ACCOUNTS,
+            policy_account_key(&policy_account.id),
+            &encode_policy_account(policy_account)?,
+        )
     }
 
     /// Get a policy account by ID
     pub fn get(&self, id: &PolicyAccountId) -> Result<Option<PolicyAccount>> {
-        match self.db.get(cf::POLICY_ACCOUNTS, id)? {
-            Some(bytes) => {
-                let account: PolicyAccount = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(Some(account))
-            }
+        match self.db.get(cf::POLICY_ACCOUNTS, policy_account_key(id))? {
+            Some(bytes) => Ok(Some(decode_policy_account(&bytes)?)),
             None => Ok(None),
         }
     }
@@ -60,8 +108,7 @@ impl<'a> PolicyAccountStore<'a> {
     pub fn get_by_address(&self, address: &Address) -> Result<Option<PolicyAccount>> {
         // Scan all policy accounts to find one with matching address
         for (_, value) in self.db.iter(cf::POLICY_ACCOUNTS)? {
-            let account: PolicyAccount = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let account = decode_policy_account(&value)?;
             if &account.address == address {
                 return Ok(Some(account));
             }
@@ -71,7 +118,7 @@ impl<'a> PolicyAccountStore<'a> {
 
     /// Check if policy account exists
     pub fn exists(&self, id: &PolicyAccountId) -> Result<bool> {
-        self.db.contains(cf::POLICY_ACCOUNTS, id)
+        self.db.contains(cf::POLICY_ACCOUNTS, policy_account_key(id))
     }
 
     /// Check if address is controlled by a policy account
@@ -130,8 +177,7 @@ impl<'a> PolicyAccountStore<'a> {
     pub fn list_all(&self) -> Result<Vec<PolicyAccount>> {
         let mut accounts = Vec::new();
         for (_, value) in self.db.iter(cf::POLICY_ACCOUNTS)? {
-            let account: PolicyAccount = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let account = decode_policy_account(&value)?;
             accounts.push(account);
         }
         Ok(accounts)
@@ -141,8 +187,7 @@ impl<'a> PolicyAccountStore<'a> {
     pub fn list_by_member(&self, member: &Address) -> Result<Vec<PolicyAccount>> {
         let mut accounts = Vec::new();
         for (_, value) in self.db.iter(cf::POLICY_ACCOUNTS)? {
-            let account: PolicyAccount = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let account = decode_policy_account(&value)?;
             if account.is_member(member) {
                 accounts.push(account);
             }
@@ -167,33 +212,24 @@ impl<'a> ProposalStore<'a> {
 
     /// Store a proposal
     pub fn put(&self, proposal: &Proposal) -> Result<()> {
-        // Validate before storing
-        if !proposal.is_valid() {
-            return Err(StorageError::InvalidData(
-                "Invalid proposal structure".to_string(),
-            ));
-        }
-
-        let bytes =
-            bincode::serialize(proposal).map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::POLICY_PROPOSALS, &proposal.id, &bytes)
+        self.db.put(
+            cf::POLICY_PROPOSALS,
+            proposal_key(&proposal.id),
+            &encode_proposal(proposal)?,
+        )
     }
 
     /// Get a proposal by ID
     pub fn get(&self, id: &ProposalId) -> Result<Option<Proposal>> {
-        match self.db.get(cf::POLICY_PROPOSALS, id)? {
-            Some(bytes) => {
-                let proposal: Proposal = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(Some(proposal))
-            }
+        match self.db.get(cf::POLICY_PROPOSALS, proposal_key(id))? {
+            Some(bytes) => Ok(Some(decode_proposal(&bytes)?)),
             None => Ok(None),
         }
     }
 
     /// Check if proposal exists
     pub fn exists(&self, id: &ProposalId) -> Result<bool> {
-        self.db.contains(cf::POLICY_PROPOSALS, id)
+        self.db.contains(cf::POLICY_PROPOSALS, proposal_key(id))
     }
 
     /// Update proposal status
@@ -230,8 +266,7 @@ impl<'a> ProposalStore<'a> {
     ) -> Result<Vec<Proposal>> {
         let mut proposals = Vec::new();
         for (_, value) in self.db.iter(cf::POLICY_PROPOSALS)? {
-            let proposal: Proposal = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let proposal = decode_proposal(&value)?;
             if &proposal.policy_account_id == policy_account_id {
                 proposals.push(proposal);
             }
@@ -243,8 +278,7 @@ impl<'a> ProposalStore<'a> {
     pub fn list_pending(&self, policy_account_id: &PolicyAccountId) -> Result<Vec<Proposal>> {
         let mut proposals = Vec::new();
         for (_, value) in self.db.iter(cf::POLICY_PROPOSALS)? {
-            let proposal: Proposal = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let proposal = decode_proposal(&value)?;
             if &proposal.policy_account_id == policy_account_id && proposal.status.is_pending() {
                 proposals.push(proposal);
             }
@@ -256,8 +290,7 @@ impl<'a> ProposalStore<'a> {
     pub fn list_by_proposer(&self, proposer: &Address) -> Result<Vec<Proposal>> {
         let mut proposals = Vec::new();
         for (_, value) in self.db.iter(cf::POLICY_PROPOSALS)? {
-            let proposal: Proposal = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let proposal = decode_proposal(&value)?;
             if &proposal.proposer == proposer {
                 proposals.push(proposal);
             }
@@ -269,8 +302,7 @@ impl<'a> ProposalStore<'a> {
     pub fn expire_old_proposals(&self, current_time: Timestamp) -> Result<usize> {
         let mut expired_count = 0;
         for (_, value) in self.db.iter(cf::POLICY_PROPOSALS)? {
-            let mut proposal: Proposal = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let mut proposal = decode_proposal(&value)?;
             if proposal.status.is_pending() && proposal.expires_at < current_time {
                 proposal.status = ProposalStatus::Expired;
                 self.put(&proposal)?;

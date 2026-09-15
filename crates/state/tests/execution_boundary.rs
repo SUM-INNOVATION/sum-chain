@@ -1103,6 +1103,21 @@ fn migrated_execution_paths_take_no_self_receiver() {
         // Governance, token and equity. The candidate side lives in the three
         // *_view.rs modules; the executors take a view and no receiver, so
         // neither `self.db` nor a `db` parameter is reachable from any of them.
+        // Policy accounts. Six operations, all of them associated functions
+        // taking the block's view: the executor is a unit struct now, so there
+        // is no `self.db` for a committed write to come from.
+        ("policy_account_view.rs", "fn v_get_policy_account("),
+        ("policy_account_view.rs", "fn v_policy_account_exists("),
+        ("policy_account_view.rs", "fn v_put_policy_account("),
+        ("policy_account_view.rs", "fn v_update_policy_account_status("),
+        ("policy_account_view.rs", "fn v_get_proposal("),
+        ("policy_account_view.rs", "fn v_put_proposal("),
+        ("policy_account_executor.rs", "fn create_policy_account("),
+        ("policy_account_executor.rs", "fn submit_proposal("),
+        ("policy_account_executor.rs", "fn execute_proposal("),
+        ("policy_account_executor.rs", "fn cancel_proposal("),
+        ("policy_account_executor.rs", "fn freeze_policy_account("),
+        ("policy_account_executor.rs", "fn unfreeze_policy_account("),
         ("token_view.rs", "fn v_get_token("),
         ("token_view.rs", "fn v_put_token("),
         ("token_view.rs", "fn v_token_exists("),

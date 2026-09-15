@@ -244,13 +244,6 @@ const MANIFEST: &[(&str, &str, &str, &str, usize)] = &[
     ("crates/state/src/nft_executor.rs", "NftExecutor::execute_unlock_token", "NftStore::put_token", "NFT_TOKENS", 1),
     ("crates/state/src/nft_executor.rs", "NftExecutor::execute_update_collection_config", "NftStore::put_collection", "NFT_COLLECTIONS", 1),
     ("crates/state/src/nft_executor.rs", "NftExecutor::execute_update_metadata", "NftStore::put_token", "NFT_TOKENS", 1),
-    ("crates/state/src/policy_account_executor.rs", "PolicyAccountExecutor::cancel_proposal", "ProposalStore::put", "POLICY_PROPOSALS", 1),
-    ("crates/state/src/policy_account_executor.rs", "PolicyAccountExecutor::create_policy_account", "PolicyAccountStore::put", "POLICY_ACCOUNTS", 1),
-    ("crates/state/src/policy_account_executor.rs", "PolicyAccountExecutor::execute_proposal", "PolicyAccountStore::put", "POLICY_ACCOUNTS", 1),
-    ("crates/state/src/policy_account_executor.rs", "PolicyAccountExecutor::execute_proposal", "ProposalStore::put", "POLICY_PROPOSALS", 2),
-    ("crates/state/src/policy_account_executor.rs", "PolicyAccountExecutor::freeze_policy_account", "PolicyAccountStore::update_status", "POLICY_ACCOUNTS", 1),
-    ("crates/state/src/policy_account_executor.rs", "PolicyAccountExecutor::submit_proposal", "ProposalStore::put", "POLICY_PROPOSALS", 1),
-    ("crates/state/src/policy_account_executor.rs", "PolicyAccountExecutor::unfreeze_policy_account", "PolicyAccountStore::update_status", "POLICY_ACCOUNTS", 1),
     ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "AssetStore::put", "PROPERTY_ASSETS+PROPERTY_JURISDICTION_INDEX", 1),
     ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "AssetStore::update_status", "PROPERTY_ASSETS", 5),
     ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "ClaimStore::approve", "PROPERTY_CLAIMS", 1),
@@ -275,13 +268,13 @@ const MANIFEST: &[(&str, &str, &str, &str, usize)] = &[
 
 /// Occurrences, not rows: a caller reaching the same mutator three times is
 /// three places to fix.
-const MANIFEST_OCCURRENCES: usize = 242;
+const MANIFEST_OCCURRENCES: usize = 234;
 
 /// Application column families a block can still commit to directly.
 ///
 /// ONLY EVER DECREASE. Recorded at `1687789`. Lower than the 116 the unrooted
 /// audit reported, for the reason in [`UNREACHED_MUTATORS`].
-const LEDGER_CF_COUNT: usize = 88;
+const LEDGER_CF_COUNT: usize = 86;
 
 /// Functions that commit application state but that no entry point reaches.
 ///
@@ -362,7 +355,7 @@ const ARMS: &[(&str, ArmKind, &str)] = &[
     ("Nft", ArmKind::Committed, "nft_executor.rs -> NftStore"),
     ("NodeRegistry", ArmKind::Overlay, "node_registry.rs"),
     ("NodeRegistryV2", ArmKind::Overlay, "node_registry.rs"),
-    ("PolicyAccount", ArmKind::Committed, "policy_account_executor.rs -> PolicyAccountStorage"),
+    ("PolicyAccount", ArmKind::Overlay, "policy_account_executor.rs -> policy_account_view"),
     ("Property", ArmKind::Committed, "property_executor.rs -> PropertyStore sub-stores"),
     ("Staking", ArmKind::Overlay, "staking_executor.rs -> StakingExecutor::v_* -> candidate"),
     ("StorageMetadata", ArmKind::Overlay, "storage_metadata.rs"),
@@ -1930,7 +1923,7 @@ fn every_dispatcher_arm_is_declared() {
     let mixed = ARMS.iter().filter(|(_, k, _)| *k == ArmKind::Mixed).count();
     assert_eq!(
         (overlay, committed, mixed),
-        (19, 11, 0),
+        (20, 10, 0),
         "the overlay/committed/mixed split changed. Moving an arm from \
          Committed to Overlay is progress — update this and the manifest \
          together; any other movement is not."

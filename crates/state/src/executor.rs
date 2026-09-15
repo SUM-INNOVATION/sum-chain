@@ -246,7 +246,6 @@ pub struct BlockExecutor {
     healthcare_executor: HealthcareExecutor,
     employment_executor: EmploymentExecutor,
     finance_executor: FinanceExecutor,
-    policy_account_executor: PolicyAccountExecutor,
     // No `NodeRegistryExecutor` / `StorageMetadataExecutor` field: both
     // subsystems execute through `ExecutionView`, so the executor has no reason
     // to hold a committed handle to either. Keeping one would put a committed
@@ -347,7 +346,6 @@ impl BlockExecutor {
         let healthcare_executor = HealthcareExecutor::new(db.clone(), params.clone());
         let employment_executor = EmploymentExecutor::new(db.clone(), params.clone());
         let finance_executor = FinanceExecutor::new(db.clone(), params.clone());
-        let policy_account_executor = PolicyAccountExecutor::new(db.clone());
         let inference_settlement_executor =
             crate::inference_settlement_executor::InferenceSettlementExecutor::new(db.clone());
         Self {
@@ -365,7 +363,6 @@ impl BlockExecutor {
             healthcare_executor,
             employment_executor,
             finance_executor,
-            policy_account_executor,
             inference_settlement_executor,
             beacon_block: parking_lot::Mutex::new(None),
         }
@@ -1128,7 +1125,7 @@ impl BlockExecutor {
                             });
                         }
 
-                        let result = self.policy_account_executor.execute(view,
+                        let result = PolicyAccountExecutor::execute(view,
                             &v2_tx.from,
                             &policy_data,
                             &self.state,

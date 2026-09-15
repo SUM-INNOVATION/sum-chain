@@ -8,7 +8,6 @@
 
 use crate::StateManager;
 use sumchain_storage::exec_view::ExecutionView;
-use std::sync::Arc;
 
 use sumchain_primitives::{
     policy_account::{
@@ -21,7 +20,6 @@ use sumchain_primitives::{
 };
 use sumchain_primitives::{NftOperation, TokenOperation, TokenTxData};
 use sumchain_crypto::verify_bytes;
-use sumchain_storage::{Database, PolicyAccountStorage, Result as StorageResult};
 
 use crate::token_executor::TokenExecutor;
 use crate::{Result, State, StateError};
@@ -152,19 +150,20 @@ pub fn classify_action(payload: &TxPayload) -> ActionClass {
 // Policy Account Executor
 // =============================================================================
 
-pub struct PolicyAccountExecutor {
-    db: Arc<Database>,
-}
+/// No database handle, by construction.
+///
+/// Every operation below takes the block's `ExecutionView` and no `self`, so
+/// `self.db` is not something this file can name any more — a committed write
+/// here is a compile error rather than a review finding. The committed twins
+/// live in `sumchain_storage::policy_account_store` and are still used by the
+/// RPC server, which is asking about the canonical chain.
+pub struct PolicyAccountExecutor;
 
 impl PolicyAccountExecutor {
-    pub fn new(db: Arc<Database>) -> Self {
-        Self { db }
-    }
-
     /// Execute a policy account operation
     #[allow(clippy::too_many_arguments)]
     pub fn execute(
-        &self, view: &mut ExecutionView<'_, '_>,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &PolicyAccountTxData,
         state: &State,
@@ -174,15 +173,27 @@ impl PolicyAccountExecutor {
         block_timestamp: u64,
     ) -> Result<PolicyAccountExecutionResult> {
         match data.operation {
-            PolicyAccountOperation::Create => self.create_policy_account(sender, &data.data, state, current_height, block_timestamp),
-            PolicyAccountOperation::SubmitProposal => {
-                self.submit_proposal(sender, &data.data, state, current_height, block_timestamp)
-            }
-            PolicyAccountOperation::ExecuteProposal => {
-                self.execute_proposal(view, sender, &data.data, state, proposer, fee, current_height, block_timestamp)
-            }
+            PolicyAccountOperation::Create => Self::create_policy_account(
+                view,
+                sender,
+                &data.data,
+                state,
+                current_height,
+                block_timestamp,
+            ),
+            PolicyAccountOperation::SubmitProposal => Self::submit_proposal(
+                view,
+                sender,
+                &data.data,
+                state,
+                current_height,
+                block_timestamp,
+            ),
+            PolicyAccountOperation::ExecuteProposal => Self::execute_proposal(
+                view, sender, &data.data, state, proposer, fee, current_height, block_timestamp,
+            ),
             PolicyAccountOperation::CancelProposal => {
-                self.cancel_proposal(sender, &data.data, state)
+                Self::cancel_proposal(view, sender, &data.data, state)
             }
             PolicyAccountOperation::ModifyMembership => {
                 // This should only be called via ExecuteProposal
@@ -196,16 +207,18 @@ impl PolicyAccountExecutor {
                     "ModifyPolicy must be executed via proposal".to_string(),
                 ))
             }
-            PolicyAccountOperation::Freeze => self.freeze_policy_account(sender, &data.data, state),
+            PolicyAccountOperation::Freeze => {
+                Self::freeze_policy_account(view, sender, &data.data, state)
+            }
             PolicyAccountOperation::Unfreeze => {
-                self.unfreeze_policy_account(sender, &data.data, state)
+                Self::unfreeze_policy_account(view, sender, &data.data, state)
             }
         }
     }
 
     /// Create a new policy account
     fn create_policy_account(
-        &self,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
         _state: &State,
@@ -256,8 +269,7 @@ impl PolicyAccountExecutor {
         let id = PolicyAccount::compute_id(&request.members, &request.salt);
 
         // Check if already exists
-        let storage = PolicyAccountStorage::new(&self.db);
-        if storage.policy_accounts().exists(&id)? {
+        if Self::v_policy_account_exists(view, &id)? {
             return Ok(PolicyAccountExecutionResult::failure(
                 "Policy account already exists".to_string(),
             ));
@@ -279,7 +291,7 @@ impl PolicyAccountExecutor {
         };
 
         // Store
-        storage.policy_accounts().put(&policy_account)?;
+        Self::v_put_policy_account(view, &policy_account)?;
 
         // Build response
         let response = CreatePolicyAccountResponse {
@@ -298,7 +310,7 @@ impl PolicyAccountExecutor {
 
     /// Submit a proposal with approvals
     fn submit_proposal(
-        &self,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
         _state: &State,
@@ -310,8 +322,7 @@ impl PolicyAccountExecutor {
             .map_err(|e| StateError::DeserializationError(e.to_string()))?;
 
         // Get policy account
-        let storage = PolicyAccountStorage::new(&self.db);
-        let policy_account = match storage.policy_accounts().get(&request.policy_account_id)? {
+        let policy_account = match Self::v_get_policy_account(view, &request.policy_account_id)? {
             Some(pa) => pa,
             None => {
                 return Ok(PolicyAccountExecutionResult::failure(
@@ -359,7 +370,7 @@ impl PolicyAccountExecutor {
         );
 
         // Check if proposal already exists
-        if storage.proposals().exists(&proposal_id)? {
+        if Self::v_get_proposal(view, &proposal_id)?.is_some() {
             return Ok(PolicyAccountExecutionResult::failure(
                 "Proposal already exists".to_string(),
             ));
@@ -447,7 +458,7 @@ impl PolicyAccountExecutor {
         }
 
         // Store proposal
-        storage.proposals().put(&proposal)?;
+        Self::v_put_proposal(view, &proposal)?;
 
         // Build response
         let response = SubmitProposalResponse {
@@ -471,7 +482,7 @@ impl PolicyAccountExecutor {
     /// Execute a proposal once threshold is met
     #[allow(clippy::too_many_arguments)]
     fn execute_proposal(
-        &self, view: &mut ExecutionView<'_, '_>,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
         _state: &State,
@@ -485,8 +496,7 @@ impl PolicyAccountExecutor {
             .map_err(|e| StateError::DeserializationError(e.to_string()))?;
 
         // Get proposal
-        let storage = PolicyAccountStorage::new(&self.db);
-        let mut proposal = match storage.proposals().get(&request.proposal_id)? {
+        let mut proposal = match Self::v_get_proposal(view, &request.proposal_id)? {
             Some(p) => p,
             None => {
                 return Ok(PolicyAccountExecutionResult::failure(
@@ -506,16 +516,14 @@ impl PolicyAccountExecutor {
         // Check expiration
         if block_timestamp > proposal.expires_at {
             proposal.status = ProposalStatus::Expired;
-            storage.proposals().put(&proposal)?;
+            Self::v_put_proposal(view, &proposal)?;
             return Ok(PolicyAccountExecutionResult::failure(
                 "Proposal has expired".to_string(),
             ));
         }
 
         // Get policy account
-        let mut policy_account = match storage
-            .policy_accounts()
-            .get(&proposal.policy_account_id)?
+        let mut policy_account = match Self::v_get_policy_account(view, &proposal.policy_account_id)?
         {
             Some(pa) => pa,
             None => {
@@ -673,11 +681,11 @@ impl PolicyAccountExecutor {
         let new_nonce = policy_account.nonce;
 
         // Update policy account
-        storage.policy_accounts().put(&policy_account)?;
+        Self::v_put_policy_account(view, &policy_account)?;
 
         // Mark proposal as executed
         proposal.status = ProposalStatus::Executed;
-        storage.proposals().put(&proposal)?;
+        Self::v_put_proposal(view, &proposal)?;
 
         // Build response
         let response = ExecuteProposalResponse {
@@ -697,7 +705,7 @@ impl PolicyAccountExecutor {
 
     /// Cancel a proposal (proposer only)
     fn cancel_proposal(
-        &self,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
         _state: &State,
@@ -707,8 +715,7 @@ impl PolicyAccountExecutor {
             .map_err(|e| StateError::DeserializationError(e.to_string()))?;
 
         // Get proposal
-        let storage = PolicyAccountStorage::new(&self.db);
-        let mut proposal = match storage.proposals().get(&proposal_id)? {
+        let mut proposal = match Self::v_get_proposal(view, &proposal_id)? {
             Some(p) => p,
             None => {
                 return Ok(PolicyAccountExecutionResult::failure(
@@ -733,7 +740,7 @@ impl PolicyAccountExecutor {
 
         // Mark as cancelled
         proposal.status = ProposalStatus::Cancelled;
-        storage.proposals().put(&proposal)?;
+        Self::v_put_proposal(view, &proposal)?;
 
         Ok(PolicyAccountExecutionResult {
             success: true,
@@ -744,7 +751,7 @@ impl PolicyAccountExecutor {
 
     /// Freeze a policy account
     fn freeze_policy_account(
-        &self,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
         _state: &State,
@@ -752,8 +759,7 @@ impl PolicyAccountExecutor {
         let policy_account_id: PolicyAccountId = bincode::deserialize(data)
             .map_err(|e| StateError::DeserializationError(e.to_string()))?;
 
-        let storage = PolicyAccountStorage::new(&self.db);
-        let policy_account = match storage.policy_accounts().get(&policy_account_id)? {
+        let policy_account = match Self::v_get_policy_account(view, &policy_account_id)? {
             Some(pa) => pa,
             None => {
                 return Ok(PolicyAccountExecutionResult::failure(
@@ -769,9 +775,7 @@ impl PolicyAccountExecutor {
             ));
         }
 
-        storage
-            .policy_accounts()
-            .update_status(&policy_account_id, PolicyAccountStatus::Frozen)?;
+        Self::v_update_policy_account_status(view, &policy_account_id, PolicyAccountStatus::Frozen)?;
 
         Ok(PolicyAccountExecutionResult {
             success: true,
@@ -782,7 +786,7 @@ impl PolicyAccountExecutor {
 
     /// Unfreeze a policy account
     fn unfreeze_policy_account(
-        &self,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
         _state: &State,
@@ -790,8 +794,7 @@ impl PolicyAccountExecutor {
         let policy_account_id: PolicyAccountId = bincode::deserialize(data)
             .map_err(|e| StateError::DeserializationError(e.to_string()))?;
 
-        let storage = PolicyAccountStorage::new(&self.db);
-        let policy_account = match storage.policy_accounts().get(&policy_account_id)? {
+        let policy_account = match Self::v_get_policy_account(view, &policy_account_id)? {
             Some(pa) => pa,
             None => {
                 return Ok(PolicyAccountExecutionResult::failure(
@@ -807,9 +810,7 @@ impl PolicyAccountExecutor {
             ));
         }
 
-        storage
-            .policy_accounts()
-            .update_status(&policy_account_id, PolicyAccountStatus::Active)?;
+        Self::v_update_policy_account_status(view, &policy_account_id, PolicyAccountStatus::Active)?;
 
         Ok(PolicyAccountExecutionResult {
             success: true,
