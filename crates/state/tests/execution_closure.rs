@@ -164,7 +164,6 @@ const MANIFEST: &[(&str, &str, &str, &str, usize)] = &[
     ("crates/state/src/employment_executor.rs", "EmploymentExecutor::execute", "EmploymentProofStore::put", "EMPLOYMENT_PROOFS", 1),
     ("crates/state/src/employment_executor.rs", "EmploymentExecutor::execute", "IncomeAttestationStore::put", "EMPLOYMENT_INCOME_ATTESTATIONS+EMPLOYMENT_INCOME_HOLDER_ADDRESS_INDEX+EMPLOYMENT_SUBJECT_INCOME_INDEX", 1),
     ("crates/state/src/employment_executor.rs", "EmploymentExecutor::execute", "IncomeAttestationStore::revoke", "EMPLOYMENT_INCOME_ATTESTATIONS", 1),
-    ("crates/state/src/executor.rs", "BlockExecutor::execute_sponsored_register_v1", "MessagingStore::set_public_key", "MESSAGING_PUBLIC_KEYS", 1),
     ("crates/state/src/finance_executor.rs", "FinanceExecutor::execute", "AddressProofStore::put", "FINANCE_ADDRESS_PROOFS+FINANCE_SUBJECT_ADDRESS_INDEX", 1),
     ("crates/state/src/finance_executor.rs", "FinanceExecutor::execute", "AddressProofStore::revoke", "FINANCE_ADDRESS_PROOFS", 1),
     ("crates/state/src/finance_executor.rs", "FinanceExecutor::execute", "BankStandingStore::put", "FINANCE_BANK_STANDINGS+FINANCE_SUBJECT_BANK_INDEX", 1),
@@ -202,31 +201,6 @@ const MANIFEST: &[(&str, &str, &str, &str, usize)] = &[
     ("crates/state/src/legal_executor.rs", "LegalExecutor::execute", "OrderStore::update_status", "LEGAL_ORDERS", 5),
     ("crates/state/src/legal_executor.rs", "LegalExecutor::execute", "ProcessEventStore::put", "LEGAL_CASE_EVENT_INDEX+LEGAL_EVENTS", 2),
     ("crates/state/src/legal_executor.rs", "LegalExecutor::execute", "ProcessEventStore::update_status", "LEGAL_EVENTS", 3),
-    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::add_contact", "MessagingStore::add_contact", "MESSAGING_CONTACTS", 1),
-    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::block_sender", "MessagingStore::block_sender", "MESSAGING_BLOCKED", 1),
-    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::claim_payment", "MessagingStore::delete_pending_payment", "MESSAGING_PAYMENTS_BY_RECIPIENT+MESSAGING_PENDING_PAYMENTS", 2),
-    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::fund_registry", "MessagingStore::add_sponsorship_balance", "MESSAGING_CONFIG", 1),
-    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::register_public_key", "MessagingStore::set_public_key", "MESSAGING_PUBLIC_KEYS", 1),
-    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::remove_contact", "MessagingStore::remove_contact", "MESSAGING_CONTACTS", 1),
-    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::report_spam", "MessagingStore::increment_spam_score", "MESSAGING_SPAM_SCORES", 1),
-    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::send_message_direct", "MessagingStore::increment_daily_message_count", "MESSAGING_DAILY_COUNTS", 1),
-    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::send_message_direct", "MessagingStore::increment_sender_nonce", "MESSAGING_SENDER_NONCES", 1),
-    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::send_message_direct", "MessagingStore::store_message_event", "MESSAGING_EVENTS+MESSAGING_SENDER_EVENTS", 1),
-    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::send_message_sponsored", "MessagingStore::increment_daily_message_count", "MESSAGING_DAILY_COUNTS", 1),
-    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::send_message_sponsored", "MessagingStore::increment_sender_nonce", "MESSAGING_SENDER_NONCES", 1),
-    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::send_message_sponsored", "MessagingStore::store_message_event", "MESSAGING_EVENTS+MESSAGING_SENDER_EVENTS", 1),
-    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::send_message_with_payment", "MessagingStore::increment_daily_message_count", "MESSAGING_DAILY_COUNTS", 1),
-    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::send_message_with_payment", "MessagingStore::increment_sender_nonce", "MESSAGING_SENDER_NONCES", 1),
-    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::send_message_with_payment", "MessagingStore::set_pending_payment", "MESSAGING_PAYMENTS_BY_RECIPIENT+MESSAGING_PENDING_PAYMENTS", 1),
-    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::send_message_with_payment", "MessagingStore::store_message_event", "MESSAGING_EVENTS+MESSAGING_SENDER_EVENTS", 1),
-    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::set_daily_quota", "MessagingStore::set_daily_quota", "MESSAGING_CONFIG", 1),
-    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::set_inbox_filter", "MessagingStore::set_inbox_filter", "MESSAGING_INBOX_FILTERS", 1),
-    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::set_max_message_size", "MessagingStore::set_max_message_size", "MESSAGING_CONFIG", 1),
-    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::set_min_trust_stake", "MessagingStore::set_min_trust_stake", "MESSAGING_CONFIG", 1),
-    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::set_sponsorship_enabled", "MessagingStore::set_sponsorship_enabled", "MESSAGING_CONFIG", 1),
-    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::stake_for_trust", "MessagingStore::add_stake", "MESSAGING_STAKES", 1),
-    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::unstake", "MessagingStore::set_stake_balance", "MESSAGING_STAKES", 1),
-    ("crates/state/src/messaging_executor.rs", "MessagingExecutor::update_public_key", "MessagingStore::set_public_key", "MESSAGING_PUBLIC_KEYS", 1),
     ("crates/state/src/nft_executor.rs", "NftExecutor::execute_approve", "NftStore::put_token", "NFT_TOKENS", 1),
     ("crates/state/src/nft_executor.rs", "NftExecutor::execute_batch_mint", "NftStore::add_to_collection_index", "NFT_COLLECTION_INDEX", 1),
     ("crates/state/src/nft_executor.rs", "NftExecutor::execute_batch_mint", "NftStore::add_to_owner_index", "NFT_OWNER_INDEX", 1),
@@ -268,13 +242,13 @@ const MANIFEST: &[(&str, &str, &str, &str, usize)] = &[
 
 /// Occurrences, not rows: a caller reaching the same mutator three times is
 /// three places to fix.
-const MANIFEST_OCCURRENCES: usize = 234;
+const MANIFEST_OCCURRENCES: usize = 207;
 
 /// Application column families a block can still commit to directly.
 ///
 /// ONLY EVER DECREASE. Recorded at `1687789`. Lower than the 116 the unrooted
 /// audit reported, for the reason in [`UNREACHED_MUTATORS`].
-const LEDGER_CF_COUNT: usize = 86;
+const LEDGER_CF_COUNT: usize = 73;
 
 /// Functions that commit application state but that no entry point reaches.
 ///
@@ -342,16 +316,56 @@ const ARMS: &[(&str, ArmKind, &str)] = &[
     ("ContractDeploy", ArmKind::Overlay, "sumc-runtime queues; contract_executor stages into the candidate"),
     ("DocClass", ArmKind::Committed, "docclass_executor.rs -> DocClassStore sub-stores"),
     ("Education", ArmKind::Overlay, "education_executor.rs"),
-    ("Employment", ArmKind::Committed, "employment_executor.rs -> EmploymentStore sub-stores"),
-    ("Equity", ArmKind::Overlay, "equity_executor.rs -> EquityExecutor::v_* -> candidate"),
-    ("Finance", ArmKind::Committed, "finance_executor.rs -> FinanceStore sub-stores"),
-    ("Governance", ArmKind::Overlay, "governance_executor.rs -> governance_view + Token/Equity v_* -> candidate"),
-    ("Healthcare", ArmKind::Committed, "healthcare_executor.rs -> HealthcareStore sub-stores"),
-    ("InferenceAttestation", ArmKind::Overlay, "inference_attestation_executor.rs"),
-    ("InferenceAttestationV2", ArmKind::Overlay, "inference_attestation_executor.rs"),
-    ("InferenceSettlement", ArmKind::Overlay, "inference_settlement_executor.rs"),
-    ("Legal", ArmKind::Committed, "legal_executor.rs -> LegalStore sub-stores"),
-    ("Messaging", ArmKind::Committed, "messaging_executor.rs -> MessagingStore"),
+    (
+        "Employment",
+        ArmKind::Committed,
+        "employment_executor.rs -> EmploymentStore sub-stores",
+    ),
+    (
+        "Equity",
+        ArmKind::Overlay,
+        "equity_executor.rs -> EquityExecutor::v_* -> candidate",
+    ),
+    (
+        "Finance",
+        ArmKind::Committed,
+        "finance_executor.rs -> FinanceStore sub-stores",
+    ),
+    (
+        "Governance",
+        ArmKind::Overlay,
+        "governance_executor.rs -> governance_view + Token/Equity v_* -> candidate",
+    ),
+    (
+        "Healthcare",
+        ArmKind::Committed,
+        "healthcare_executor.rs -> HealthcareStore sub-stores",
+    ),
+    (
+        "InferenceAttestation",
+        ArmKind::Overlay,
+        "inference_attestation_executor.rs",
+    ),
+    (
+        "InferenceAttestationV2",
+        ArmKind::Overlay,
+        "inference_attestation_executor.rs",
+    ),
+    (
+        "InferenceSettlement",
+        ArmKind::Overlay,
+        "inference_settlement_executor.rs",
+    ),
+    (
+        "Legal",
+        ArmKind::Committed,
+        "legal_executor.rs -> LegalStore sub-stores",
+    ),
+    (
+        "Messaging",
+        ArmKind::Overlay,
+        "messaging_executor.rs -> messaging_view",
+    ),
     ("Nft", ArmKind::Committed, "nft_executor.rs -> NftStore"),
     ("NodeRegistry", ArmKind::Overlay, "node_registry.rs"),
     ("NodeRegistryV2", ArmKind::Overlay, "node_registry.rs"),
@@ -1923,7 +1937,7 @@ fn every_dispatcher_arm_is_declared() {
     let mixed = ARMS.iter().filter(|(_, k, _)| *k == ArmKind::Mixed).count();
     assert_eq!(
         (overlay, committed, mixed),
-        (20, 10, 0),
+        (21, 9, 0),
         "the overlay/committed/mixed split changed. Moving an arm from \
          Committed to Overlay is progress — update this and the manifest \
          together; any other movement is not."

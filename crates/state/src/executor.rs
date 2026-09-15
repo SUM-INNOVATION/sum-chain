@@ -237,7 +237,6 @@ pub struct BlockExecutor {
     params: ChainParams,
     nft_executor: NftExecutor,
     contract_executor: ContractExecutorState,
-    messaging_executor: MessagingExecutor,
     docclass_executor: DocClassExecutor,
     tax_executor: TaxExecutor,
     agreement_executor: AgreementExecutor,
@@ -337,7 +336,6 @@ impl BlockExecutor {
     pub fn new(state: Arc<StateManager>, db: Arc<Database>, params: ChainParams) -> Self {
         let nft_executor = NftExecutor::new(db.clone(), params.clone());
         let contract_executor = ContractExecutorState::new(db.clone(), params.clone());
-        let messaging_executor = MessagingExecutor::new(db.clone(), params.clone());
         let docclass_executor = DocClassExecutor::new(db.clone(), params.clone());
         let tax_executor = TaxExecutor::new(db.clone(), params.clone());
         let agreement_executor = AgreementExecutor::new(db.clone(), params.clone());
@@ -354,7 +352,6 @@ impl BlockExecutor {
             params,
             nft_executor,
             contract_executor,
-            messaging_executor,
             docclass_executor,
             tax_executor,
             agreement_executor,
@@ -734,7 +731,9 @@ impl BlockExecutor {
                             );
                         }
                         // Execute messaging operation (SRC-201)
-                        let result = self.messaging_executor.execute(view,
+                        let result = MessagingExecutor::execute(
+                            view,
+                            &self.params,
                             &v2_tx.from,
                             &messaging_data,
                             proposer,
@@ -1981,7 +1980,6 @@ impl BlockExecutor {
             verify_sponsored_registration_v1, SponsoredRegisterError,
         };
         use sumchain_primitives::{RegisterPublicKeySponsoredV1Data, RegisteredPublicKey};
-        use sumchain_storage::MessagingStore;
 
         // 1. Activation gate — fail-closed. Closed → free rejection.
         if !messaging_sponsored_registration_gate_open(&self.params, block_height) {
@@ -2034,8 +2032,11 @@ impl BlockExecutor {
         // 5. Duplicate registration follows existing RegisterPublicKey semantics
         //    (a fresh key only; use UpdatePublicKey to rotate). Error-explicit:
         //    a DB read error propagates via `?`, never `unwrap_or(false)`.
-        let store = MessagingStore::new(&self.db);
-        if store.has_public_key(&registrant)? {
+        // The candidate, not the database: a registration earlier in THIS
+        // block must be visible here, or two sponsored registrations for the
+        // same address both pass their "already registered" check and the
+        // second silently overwrites the first.
+        if MessagingExecutor::v_has_public_key(view, &registrant)? {
             return Ok(TxExecutionResult {
                 tx_hash,
                 status: TxStatus::Failed(394),
@@ -2056,9 +2057,10 @@ impl BlockExecutor {
         StateManager::v_credit(view, proposer, fee)?;
         StateManager::v_increment_nonce(view, sponsor)?;
 
-        // 7. Write the registrant's key record through the block-ordered store.
+        // 7. Stage the registrant's key record into the block's candidate.
         //    Reached only after all checks pass, so no partial mutation on any
-        //    business failure; a DB write error propagates via `?`.
+        //    business failure; a write refused by the candidate's ceiling
+        //    propagates via `?`.
         let registered = RegisteredPublicKey {
             public_key: reg.registrant_public_key,
             address: registrant,
@@ -2066,7 +2068,7 @@ impl BlockExecutor {
             registered_at: block_timestamp,
             updated_at_block: 0,
         };
-        store.set_public_key(&registrant, &registered)?;
+        MessagingExecutor::v_set_public_key(view, &registrant, &registered)?;
 
         debug!(
             "Sponsored registration {}: sponsor={} registrant={} block={}",
@@ -2446,7 +2448,9 @@ impl BlockExecutor {
                 }
 
                 // Execute messaging operation (SRC-201)
-                let result = self.messaging_executor.execute(view,
+                let result = MessagingExecutor::execute(
+                    view,
+                    &self.params,
                     &tx.from,
                     messaging_data,
                     proposer,

@@ -1103,6 +1103,49 @@ fn migrated_execution_paths_take_no_self_receiver() {
         // Governance, token and equity. The candidate side lives in the three
         // *_view.rs modules; the executors take a view and no receiver, so
         // neither `self.db` nor a `db` parameter is reachable from any of them.
+        // Messaging. The whole surface: the read-modify-write counters that
+        // guard replay and quota are here with their writes, because moving
+        // the writes alone would have left the guards reading the parent.
+        ("messaging_view.rs", "fn v_get_sender_nonce("),
+        ("messaging_view.rs", "fn v_increment_sender_nonce("),
+        ("messaging_view.rs", "fn v_get_daily_message_count("),
+        ("messaging_view.rs", "fn v_increment_daily_message_count("),
+        ("messaging_view.rs", "fn v_get_spam_score("),
+        ("messaging_view.rs", "fn v_set_spam_score("),
+        ("messaging_view.rs", "fn v_increment_spam_score("),
+        ("messaging_view.rs", "fn v_get_stake_balance("),
+        ("messaging_view.rs", "fn v_set_stake_balance("),
+        ("messaging_view.rs", "fn v_add_stake("),
+        ("messaging_view.rs", "fn v_get_inbox_filter("),
+        ("messaging_view.rs", "fn v_set_inbox_filter("),
+        ("messaging_view.rs", "fn v_is_contact("),
+        ("messaging_view.rs", "fn v_add_contact("),
+        ("messaging_view.rs", "fn v_remove_contact("),
+        ("messaging_view.rs", "fn v_is_blocked("),
+        ("messaging_view.rs", "fn v_block_sender("),
+        ("messaging_view.rs", "fn v_get_pending_payment("),
+        ("messaging_view.rs", "fn v_set_pending_payment("),
+        ("messaging_view.rs", "fn v_delete_pending_payment("),
+        ("messaging_view.rs", "fn v_store_message_event("),
+        ("messaging_view.rs", "fn v_get_message_event("),
+        ("messaging_view.rs", "fn v_get_public_key("),
+        ("messaging_view.rs", "fn v_has_public_key("),
+        ("messaging_view.rs", "fn v_set_public_key("),
+        ("messaging_view.rs", "fn v_get_registry_admin("),
+        ("messaging_view.rs", "fn v_get_daily_quota("),
+        ("messaging_view.rs", "fn v_set_daily_quota("),
+        ("messaging_view.rs", "fn v_get_max_message_size("),
+        ("messaging_view.rs", "fn v_set_max_message_size("),
+        ("messaging_view.rs", "fn v_get_min_trust_stake("),
+        ("messaging_view.rs", "fn v_set_min_trust_stake("),
+        ("messaging_view.rs", "fn v_is_sponsorship_enabled("),
+        ("messaging_view.rs", "fn v_set_sponsorship_enabled("),
+        ("messaging_view.rs", "fn v_get_sponsorship_balance("),
+        ("messaging_view.rs", "fn v_add_sponsorship_balance("),
+        ("messaging_executor.rs", "fn v_is_admin("),
+        ("messaging_executor.rs", "fn check_rate_limit("),
+        ("messaging_executor.rs", "fn check_spam_restrictions("),
+        ("messaging_executor.rs", "fn check_recipient_filter("),
         // Policy accounts. Six operations, all of them associated functions
         // taking the block's view: the executor is a unit struct now, so there
         // is no `self.db` for a committed write to come from.

@@ -51,7 +51,7 @@ fn direct_tx(message_data: Vec<u8>, recipient_hash: [u8; 32]) -> MessagingTxData
 #[test]
 fn direct_send_success_writes_sender_index() {
     let (db, _dir, _state) = setup();
-    let executor = MessagingExecutor::new(db.clone(), ChainParams::default());
+    let params = ChainParams::default();
     // The messaging executor debits the sender's account, which is staged now.
     let mut candidate =
         sumchain_storage::candidate::CandidateExecution::new(&db, 1 << 30);
@@ -60,20 +60,55 @@ fn direct_send_success_writes_sender_index() {
     let rh = [7u8; 32];
     let tx = direct_tx(valid_message(rh), rh);
 
-    let res = executor
-        .execute(&mut candidate.view(), &sender, &tx, &proposer, 0, 1, 1000, 0, Hash::hash(b"ok"))
-        .unwrap();
+    let res = MessagingExecutor::execute(
+        &mut candidate.view(),
+        &params,
+        &sender,
+        &tx,
+        &proposer,
+        0,
+        1,
+        1000,
+        0,
+        Hash::hash(b"ok"),
+    )
+    .unwrap();
     assert!(res.success, "expected success: {:?}", res.error);
 
-    let listed = MessagingStore::new(&db).get_messages_by_sender(&sender, 100, 0).unwrap();
-    assert_eq!(listed.len(), 1, "sender index must be populated on success");
-    assert_eq!(listed[0].sender, sender);
+    // The index rows are STAGED, not committed: this executor writes into the
+    // block's candidate now. Reading the committed store here would be
+    // asserting the defect the messaging package removed.
+    {
+    let view = candidate.view();
+    let staged: Vec<_> = view
+        .prefix_iter(
+            sumchain_storage::cf::MESSAGING_SENDER_EVENTS,
+            sender.as_bytes(),
+        )
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(staged.len(), 1, "sender index must be staged on success");
+    assert_eq!(
+        sumchain_storage::messaging_store::decode_message_event(&staged[0].1)
+            .unwrap()
+            .sender,
+        sender
+    );
+    }
+    assert!(
+        MessagingStore::new(&db)
+            .get_messages_by_sender(&sender, 100, 0)
+            .unwrap()
+            .is_empty(),
+        "and nothing is committed until the block is"
+    );
 }
 
 #[test]
 fn failed_send_writes_neither_primary_nor_index() {
     let (db, _dir, _state) = setup();
-    let executor = MessagingExecutor::new(db.clone(), ChainParams::default());
+    let params = ChainParams::default();
     // The messaging executor debits the sender's account, which is staged now.
     let mut candidate =
         sumchain_storage::candidate::CandidateExecution::new(&db, 1 << 30);
@@ -83,10 +118,35 @@ fn failed_send_writes_neither_primary_nor_index() {
     // Too-short message_data fails validate_message_format before any write.
     let tx = direct_tx(vec![0u8; 10], rh);
 
-    let res = executor
-        .execute(&mut candidate.view(), &sender, &tx, &proposer, 0, 1, 1000, 0, Hash::hash(b"bad"))
-        .unwrap();
+    let res = MessagingExecutor::execute(
+        &mut candidate.view(),
+        &params,
+        &sender,
+        &tx,
+        &proposer,
+        0,
+        1,
+        1000,
+        0,
+        Hash::hash(b"bad"),
+    )
+    .unwrap();
     assert!(!res.success, "expected failure");
+
+    // Nothing staged either, which is the stronger half now that a failure
+    // leaves the candidate rather than the database untouched.
+    {
+    let view = candidate.view();
+    for family in [
+        sumchain_storage::cf::MESSAGING_EVENTS,
+        sumchain_storage::cf::MESSAGING_SENDER_EVENTS,
+    ] {
+        assert!(
+            view.prefix_iter(family, &[]).unwrap().next().is_none(),
+            "{family} must hold nothing after a refused send"
+        );
+    }
+    }
 
     let store = MessagingStore::new(&db);
     assert!(store.get_messages_by_sender(&sender, 100, 0).unwrap().is_empty(), "no sender index");

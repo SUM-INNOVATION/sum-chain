@@ -201,6 +201,20 @@ pub fn encode_inbox_filter(mode: InboxFilter) -> [u8; 1] {
     [mode as u8]
 }
 
+/// An unknown or empty byte reads as `AcceptAll`, which is what the committed
+/// reader did. Shared so a candidate cannot hand-roll the mapping and then
+/// disagree the day a variant is added.
+pub fn decode_inbox_filter(bytes: &[u8]) -> InboxFilter {
+    InboxFilter::from_byte(bytes.first().copied().unwrap_or(0)).unwrap_or(InboxFilter::AcceptAll)
+}
+
+/// The registry admin is a bare 20-byte address, and a wrong-length value is an
+/// ERROR rather than "no admin" -- silently reading absence there would let a
+/// corrupt row disable the admin checks instead of failing the block.
+pub fn decode_registry_admin(bytes: &[u8]) -> Result<Address> {
+    Address::from_slice(bytes).map_err(|e| StorageError::InvalidData(e.to_string()))
+}
+
 pub fn encode_pending_payment(payment: &PendingPayment) -> Result<Vec<u8>> {
     bincode::serialize(payment).map_err(|e| StorageError::Serialization(e.to_string()))
 }
@@ -346,11 +360,7 @@ impl<'a> MessagingStore<'a> {
     /// Get registry admin address
     pub fn get_registry_admin(&self) -> Result<Option<Address>> {
         match self.db.get(cf::MESSAGING_CONFIG, config_keys::REGISTRY_ADMIN)? {
-            Some(bytes) => {
-                let addr = Address::from_slice(&bytes)
-                    .map_err(|e| StorageError::InvalidData(e.to_string()))?;
-                Ok(Some(addr))
-            }
+            Some(bytes) => Ok(Some(decode_registry_admin(&bytes)?)),
             None => Ok(None),
         }
     }
@@ -493,11 +503,7 @@ impl<'a> MessagingStore<'a> {
             cf::MESSAGING_INBOX_FILTERS,
             inbox_filter_key(recipient_hash),
         )? {
-            Some(bytes) => {
-                let mode = InboxFilter::from_byte(bytes.first().copied().unwrap_or(0))
-                    .unwrap_or(InboxFilter::AcceptAll);
-                Ok(mode)
-            }
+            Some(bytes) => Ok(decode_inbox_filter(&bytes)),
             None => Ok(InboxFilter::AcceptAll),
         }
     }

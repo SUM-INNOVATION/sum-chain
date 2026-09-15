@@ -7,7 +7,6 @@
 //! - Recipient controls (filters, contacts, blocks)
 
 use sumchain_storage::exec_view::ExecutionView;
-use std::sync::Arc;
 
 use sumchain_genesis::{ChainParams, MessagingParams};
 use sumchain_primitives::{
@@ -18,7 +17,6 @@ use sumchain_primitives::{
     SetSponsorshipEnabledData, StakeForTrustData, MessagingUnstakeData, FundRegistryData,
     UpdatePublicKeyData, SponsoredMessage, validate_message_format, DEFAULT_DAILY_QUOTA, DEFAULT_MAX_MESSAGE_SIZE,
 };
-use sumchain_storage::{Database, MessagingStore};
 use sumchain_crypto::recipient_hash;
 use tracing::{debug, warn};
 
@@ -51,25 +49,26 @@ impl MessagingExecutionResult {
 }
 
 /// Messaging executor for SRC-201 transactions
-pub struct MessagingExecutor {
-    db: Arc<Database>,
-    params: ChainParams,
-}
+/// No database handle, by construction.
+///
+/// Every operation takes the block's `ExecutionView` and no `self`, so
+/// `self.db` is not something this file can name: a committed write here is a
+/// compile error rather than a review finding. The committed twins stay in
+/// `sumchain_storage::messaging_store` for the RPC server and for the one-time
+/// index backfill, both of which are asking about canonical state.
+pub struct MessagingExecutor;
 
 impl MessagingExecutor {
-    pub fn new(db: Arc<Database>, params: ChainParams) -> Self {
-        Self { db, params }
-    }
-
     /// Get messaging params (with defaults)
-    fn messaging_params(&self) -> MessagingParams {
-        self.params.messaging.clone().unwrap_or_default()
+    fn messaging_params(params: &ChainParams) -> MessagingParams {
+        params.messaging.clone().unwrap_or_default()
     }
 
     /// Execute a messaging transaction
     #[allow(clippy::too_many_arguments)]
     pub fn execute(
-        &self, view: &mut ExecutionView<'_, '_>,
+        view: &mut ExecutionView<'_, '_>,
+        params: &ChainParams,
         sender: &Address,
         data: &MessagingTxData,
         proposer: &Address,
@@ -79,64 +78,72 @@ impl MessagingExecutor {
         tx_index: u32,
         tx_hash: Hash,
     ) -> Result<MessagingExecutionResult> {
-        let store = MessagingStore::new(&self.db);
-
         match data.operation {
-            MessagingOperation::SendMessage => {
-                self.send_message_sponsored(sender, &data.data, proposer, block_height, block_timestamp, tx_index, tx_hash, &store)
-            }
-            MessagingOperation::SendMessageDirect => {
-                self.send_message_direct(view, sender, &data.data, proposer, fee, block_height, block_timestamp, tx_index, tx_hash, &store)
-            }
-            MessagingOperation::SendMessageWithPayment => {
-                self.send_message_with_payment(view, sender, &data.data, proposer, fee, block_height, block_timestamp, tx_index, tx_hash, &store)
-            }
+            MessagingOperation::SendMessage => Self::send_message_sponsored(
+                view,
+                params,
+                sender,
+                &data.data,
+                proposer,
+                block_height,
+                block_timestamp,
+                tx_index,
+                tx_hash,
+            ),
+            MessagingOperation::SendMessageDirect => Self::send_message_direct(
+                view,
+                params,
+                sender,
+                &data.data,
+                proposer,
+                fee,
+                block_height,
+                block_timestamp,
+                tx_index,
+                tx_hash,
+            ),
+            MessagingOperation::SendMessageWithPayment => Self::send_message_with_payment(
+                view,
+                params,
+                sender,
+                &data.data,
+                proposer,
+                fee,
+                block_height,
+                block_timestamp,
+                tx_index,
+                tx_hash,
+            ),
             MessagingOperation::ClaimPayment => {
-                self.claim_payment(view, sender, &data.data, block_timestamp, &store)
+                Self::claim_payment(view, sender, &data.data, block_timestamp)
             }
-            MessagingOperation::StakeForTrust => {
-                self.stake_for_trust(view, sender, &data.data, &store)
-            }
-            MessagingOperation::Unstake => {
-                self.unstake(view, sender, &data.data, &store)
-            }
-            MessagingOperation::SetInboxFilter => {
-                self.set_inbox_filter(sender, &data.data, &store)
-            }
-            MessagingOperation::AddContact => {
-                self.add_contact(sender, &data.data, &store)
-            }
-            MessagingOperation::RemoveContact => {
-                self.remove_contact(sender, &data.data, &store)
-            }
-            MessagingOperation::BlockSender => {
-                self.block_sender(sender, &data.data, &store)
-            }
-            MessagingOperation::ReportSpam => {
-                self.report_spam(sender, &data.data, &store)
-            }
+            MessagingOperation::StakeForTrust => Self::stake_for_trust(view, sender, &data.data),
+            MessagingOperation::Unstake => Self::unstake(view, sender, &data.data),
+            MessagingOperation::SetInboxFilter => Self::set_inbox_filter(view, sender, &data.data),
+            MessagingOperation::AddContact => Self::add_contact(view, sender, &data.data),
+            MessagingOperation::RemoveContact => Self::remove_contact(view, sender, &data.data),
+            MessagingOperation::BlockSender => Self::block_sender(view, sender, &data.data),
+            MessagingOperation::ReportSpam => Self::report_spam(view, sender, &data.data),
             MessagingOperation::RegisterPublicKey => {
-                self.register_public_key(sender, &data.data, block_height, block_timestamp, &store)
+                Self::register_public_key(view, sender, &data.data, block_height, block_timestamp)
             }
             MessagingOperation::UpdatePublicKey => {
-                self.update_public_key(sender, &data.data, block_height, &store)
+                Self::update_public_key(view, sender, &data.data, block_height)
             }
             // Admin operations
             MessagingOperation::SetDailyQuota => {
-                self.set_daily_quota(sender, &data.data, &store)
+                Self::set_daily_quota(view, params, sender, &data.data)
             }
             MessagingOperation::SetMaxMessageSize => {
-                self.set_max_message_size(sender, &data.data, &store)
+                Self::set_max_message_size(view, params, sender, &data.data)
             }
             MessagingOperation::SetMinTrustStake => {
-                self.set_min_trust_stake(sender, &data.data, &store)
+                Self::set_min_trust_stake(view, params, sender, &data.data)
             }
             MessagingOperation::SetSponsorshipEnabled => {
-                self.set_sponsorship_enabled(sender, &data.data, &store)
+                Self::set_sponsorship_enabled(view, params, sender, &data.data)
             }
-            MessagingOperation::FundRegistry => {
-                self.fund_registry(view, sender, &data.data, &store)
-            }
+            MessagingOperation::FundRegistry => Self::fund_registry(view, sender, &data.data),
             // Issue #145: sponsored public-key registration is dispatched by the
             // state executor's gated, sponsor-pays, per-code path
             // (`BlockExecutor::execute_sponsored_register_v1`) BEFORE this generic
@@ -155,38 +162,57 @@ impl MessagingExecutor {
         }
     }
 
-    /// Check if sender is admin
-    fn is_admin(&self, sender: &Address, store: &MessagingStore) -> bool {
-        if let Ok(Some(admin)) = store.get_registry_admin() {
-            &admin == sender
-        } else {
-            // If no admin set, check genesis params
-            if let Some(ref msg_params) = self.params.messaging {
-                if let Some(ref admin_str) = msg_params.registry_admin {
-                    if let Ok(admin) = Address::from_base58(admin_str)
-                        .or_else(|_| Address::from_hex(admin_str)) {
-                        return &admin == sender;
-                    }
+    /// Whether `sender` is the registry admin, as the CANDIDATE sees it.
+    ///
+    /// Fallible on purpose. The previous shape was `-> bool` around
+    /// `if let Ok(Some(admin))`, which put three different situations in one
+    /// bucket: no admin row, an admin row that failed to decode, and a storage
+    /// error. A malformed row therefore fell through to the GENESIS admin --
+    /// a corrupt twenty-first byte silently moved authority back to the
+    /// configured address, and the caller could not tell.
+    ///
+    /// Now: a decode or storage failure propagates, an admin row present
+    /// decides the answer, and the genesis fallback applies only when there is
+    /// genuinely no row.
+    fn v_is_admin(
+        view: &ExecutionView<'_, '_>,
+        params: &ChainParams,
+        sender: &Address,
+    ) -> Result<bool> {
+        if let Some(admin) = Self::v_get_registry_admin(view)? {
+            return Ok(&admin == sender);
+        }
+        // No row at all: fall back to the genesis-configured admin.
+        if let Some(ref msg_params) = params.messaging {
+            if let Some(ref admin_str) = msg_params.registry_admin {
+                if let Ok(admin) =
+                    Address::from_base58(admin_str).or_else(|_| Address::from_hex(admin_str))
+                {
+                    return Ok(&admin == sender);
                 }
             }
-            false
         }
+        Ok(false)
     }
 
     /// Calculate current day (for rate limiting)
-    fn current_day(&self, timestamp: u64) -> u32 {
+    fn current_day(timestamp: u64) -> u32 {
         (timestamp / 86400) as u32
     }
 
     /// Check rate limit for sender
-    fn check_rate_limit(&self, sender: &Address, timestamp: u64, store: &MessagingStore) -> Result<()> {
-        let day = self.current_day(timestamp);
-        let count = store.get_daily_message_count(sender, day)?;
-        let quota = store.get_daily_quota()?;
+    fn check_rate_limit(
+        view: &ExecutionView<'_, '_>,
+        sender: &Address,
+        timestamp: u64,
+    ) -> Result<()> {
+        let day = Self::current_day(timestamp);
+        let count = Self::v_get_daily_message_count(view, sender, day)?;
+        let quota = Self::v_get_daily_quota(view)?;
 
         // Staked senders get 5x quota
-        let stake = store.get_stake_balance(sender)?;
-        let min_stake = store.get_min_trust_stake()?;
+        let stake = Self::v_get_stake_balance(view, sender)?;
+        let min_stake = Self::v_get_min_trust_stake(view)?;
         let effective_quota = if stake >= min_stake {
             quota.saturating_mul(5)
         } else {
@@ -201,14 +227,18 @@ impl MessagingExecutor {
     }
 
     /// Check spam score restrictions
-    fn check_spam_restrictions(&self, sender: &Address, store: &MessagingStore) -> Result<()> {
-        let score = store.get_spam_score(sender)?;
-        let params = self.messaging_params();
+    fn check_spam_restrictions(
+        view: &ExecutionView<'_, '_>,
+        params: &ChainParams,
+        sender: &Address,
+    ) -> Result<()> {
+        let score = Self::v_get_spam_score(view, sender)?;
+        let params = Self::messaging_params(params);
 
         if score >= params.high_spam_threshold {
             // High spam score requires stake
-            let stake = store.get_stake_balance(sender)?;
-            let min_stake = store.get_min_trust_stake()?;
+            let stake = Self::v_get_stake_balance(view, sender)?;
+            let min_stake = Self::v_get_min_trust_stake(view)?;
             if stake < min_stake {
                 return Err(StateError::NftError("High spam score requires stake".to_string()));
             }
@@ -221,29 +251,28 @@ impl MessagingExecutor {
 
     /// Check recipient filter
     fn check_recipient_filter(
-        &self,
+        view: &ExecutionView<'_, '_>,
         sender: &Address,
         recipient_hash: &[u8; 32],
-        store: &MessagingStore,
     ) -> Result<()> {
-        let filter = store.get_inbox_filter(recipient_hash)?;
+        let filter = Self::v_get_inbox_filter(view, recipient_hash)?;
 
         match filter {
             InboxFilter::AcceptAll => {
                 // Check if blocked
-                if store.is_blocked(recipient_hash, sender)? {
+                if Self::v_is_blocked(view, recipient_hash, sender)? {
                     return Err(StateError::NftError("Sender is blocked".to_string()));
                 }
             }
             InboxFilter::ContactsOnly => {
                 let sender_hash = recipient_hash_for_address(sender);
-                if !store.is_contact(recipient_hash, &sender_hash)? {
+                if !Self::v_is_contact(view, recipient_hash, &sender_hash)? {
                     return Err(StateError::NftError("Sender not in contacts".to_string()));
                 }
             }
             InboxFilter::StakedOnly => {
-                let stake = store.get_stake_balance(sender)?;
-                let min_stake = store.get_min_trust_stake()?;
+                let stake = Self::v_get_stake_balance(view, sender)?;
+                let min_stake = Self::v_get_min_trust_stake(view)?;
                 if stake < min_stake {
                     return Err(StateError::NftError("Recipient requires staked senders".to_string()));
                 }
@@ -258,7 +287,8 @@ impl MessagingExecutor {
     /// SponsoredMessage.sender_pubkey
     #[allow(clippy::too_many_arguments)]
     fn send_message_sponsored(
-        &self,
+        view: &mut ExecutionView<'_, '_>,
+        params: &ChainParams,
         _sponsor: &Address, // tx.from is the sponsor, not the message sender
         data: &[u8],
         proposer: &Address,
@@ -266,10 +296,9 @@ impl MessagingExecutor {
         block_timestamp: u64,
         tx_index: u32,
         tx_hash: Hash,
-        store: &MessagingStore,
     ) -> Result<MessagingExecutionResult> {
         // Check if sponsorship is enabled
-        if !store.is_sponsorship_enabled()? {
+        if !Self::v_is_sponsorship_enabled(view)? {
             return Ok(MessagingExecutionResult::failure("Sponsorship disabled"));
         }
 
@@ -289,7 +318,7 @@ impl MessagingExecutor {
         // failure branch while a healthy node takes the success branch → fork.
         // Propagate the error with `?` so the faulting node halts loudly (and can be
         // recovered) instead of committing a divergent block.
-        if !store.has_public_key(&real_sender)? {
+        if !Self::v_has_public_key(view, &real_sender)? {
             return Ok(MessagingExecutionResult::failure("Sender must register public key first"));
         }
 
@@ -299,7 +328,7 @@ impl MessagingExecutor {
         }
 
         // Check message size
-        let max_size = store.get_max_message_size()?;
+        let max_size = Self::v_get_max_message_size(view)?;
         if sponsored_msg.message_data.len() > max_size as usize {
             return Ok(MessagingExecutionResult::failure("Message too large"));
         }
@@ -310,21 +339,21 @@ impl MessagingExecutor {
         }
 
         // Check rate limit for the real sender
-        self.check_rate_limit(&real_sender, block_timestamp, store)?;
+        Self::check_rate_limit(view, &real_sender, block_timestamp)?;
 
         // Check spam restrictions for the real sender
-        self.check_spam_restrictions(&real_sender, store)?;
+        Self::check_spam_restrictions(view, params, &real_sender)?;
 
         // Check recipient filter (using real sender)
-        self.check_recipient_filter(&real_sender, &sponsored_msg.recipient_hash, store)?;
+        Self::check_recipient_filter(view, &real_sender, &sponsored_msg.recipient_hash)?;
 
         // Credit fee to proposer (fee already deducted from sponsor in tx validation)
         // Note: The sponsor pays the fee via normal tx flow, no sponsorship pool deduction needed
 
         // Increment real sender's nonce and daily count
-        store.increment_sender_nonce(&real_sender)?;
-        let day = self.current_day(block_timestamp);
-        store.increment_daily_message_count(&real_sender, day)?;
+        Self::v_increment_sender_nonce(view, &real_sender)?;
+        let day = Self::current_day(block_timestamp);
+        Self::v_increment_daily_message_count(view, &real_sender, day)?;
 
         // Store message event with real sender
         let event = MessageEvent {
@@ -336,7 +365,7 @@ impl MessagingExecutor {
             block_height,
             timestamp: block_timestamp,
         };
-        store.store_message_event(&event, tx_index)?;
+        Self::v_store_message_event(view, &event, tx_index)?;
 
         tracing::info!(
             "Sponsored message stored: tx={} sender={} recipient_hash=0x{} block={}",
@@ -352,7 +381,8 @@ impl MessagingExecutor {
     /// Send message directly (user pays gas)
     #[allow(clippy::too_many_arguments)]
     fn send_message_direct(
-        &self, view: &mut ExecutionView<'_, '_>,
+        view: &mut ExecutionView<'_, '_>,
+        params: &ChainParams,
         sender: &Address,
         data: &[u8],
         proposer: &Address,
@@ -361,7 +391,6 @@ impl MessagingExecutor {
         block_timestamp: u64,
         tx_index: u32,
         tx_hash: Hash,
-        store: &MessagingStore,
     ) -> Result<MessagingExecutionResult> {
         // Parse message data
         let msg_data: SendMessageData = bincode::deserialize(data)
@@ -373,19 +402,19 @@ impl MessagingExecutor {
         }
 
         // Check message size
-        let max_size = store.get_max_message_size()?;
+        let max_size = Self::v_get_max_message_size(view)?;
         if msg_data.message_data.len() > max_size as usize {
             return Ok(MessagingExecutionResult::failure("Message too large"));
         }
 
         // Check rate limit
-        self.check_rate_limit(sender, block_timestamp, store)?;
+        Self::check_rate_limit(view, sender, block_timestamp)?;
 
         // Check spam restrictions
-        self.check_spam_restrictions(sender, store)?;
+        Self::check_spam_restrictions(view, params, sender)?;
 
         // Check recipient filter
-        self.check_recipient_filter(sender, &msg_data.recipient_hash, store)?;
+        Self::check_recipient_filter(view, sender, &msg_data.recipient_hash)?;
 
         // Deduct fee and pay proposer
         StateManager::v_deduct(view, sender, fee)?;
@@ -395,9 +424,9 @@ impl MessagingExecutor {
         StateManager::v_increment_nonce(view, sender)?;
 
         // Increment sender's message nonce and daily count
-        store.increment_sender_nonce(sender)?;
-        let day = self.current_day(block_timestamp);
-        store.increment_daily_message_count(sender, day)?;
+        Self::v_increment_sender_nonce(view, sender)?;
+        let day = Self::current_day(block_timestamp);
+        Self::v_increment_daily_message_count(view, sender, day)?;
 
         // Store message event
         let event = MessageEvent {
@@ -409,7 +438,7 @@ impl MessagingExecutor {
             block_height,
             timestamp: block_timestamp,
         };
-        store.store_message_event(&event, tx_index)?;
+        Self::v_store_message_event(view, &event, tx_index)?;
 
         debug!("Direct message sent: {} -> {:?}", sender, msg_data.recipient_hash);
 
@@ -419,7 +448,8 @@ impl MessagingExecutor {
     /// Send message with attached Koppa payment
     #[allow(clippy::too_many_arguments)]
     fn send_message_with_payment(
-        &self, view: &mut ExecutionView<'_, '_>,
+        view: &mut ExecutionView<'_, '_>,
+        params: &ChainParams,
         sender: &Address,
         data: &[u8],
         proposer: &Address,
@@ -428,7 +458,6 @@ impl MessagingExecutor {
         block_timestamp: u64,
         tx_index: u32,
         tx_hash: Hash,
-        store: &MessagingStore,
     ) -> Result<MessagingExecutionResult> {
         // Parse message data
         let msg_data: SendMessageWithPaymentData = bincode::deserialize(data)
@@ -440,19 +469,19 @@ impl MessagingExecutor {
         }
 
         // Check message size
-        let max_size = store.get_max_message_size()?;
+        let max_size = Self::v_get_max_message_size(view)?;
         if msg_data.message_data.len() > max_size as usize {
             return Ok(MessagingExecutionResult::failure("Message too large"));
         }
 
         // Check rate limit
-        self.check_rate_limit(sender, block_timestamp, store)?;
+        Self::check_rate_limit(view, sender, block_timestamp)?;
 
         // Check spam restrictions
-        self.check_spam_restrictions(sender, store)?;
+        Self::check_spam_restrictions(view, params, sender)?;
 
         // Check recipient filter
-        self.check_recipient_filter(sender, &msg_data.recipient_hash, store)?;
+        Self::check_recipient_filter(view, sender, &msg_data.recipient_hash)?;
 
         // Calculate total cost
         let total_cost = fee.saturating_add(msg_data.koppa_amount);
@@ -473,15 +502,15 @@ impl MessagingExecutor {
             expiry,
             sender: *sender,
         };
-        store.set_pending_payment(&tx_hash, &pending)?;
+        Self::v_set_pending_payment(view, &tx_hash, &pending)?;
 
         // Increment nonce
         StateManager::v_increment_nonce(view, sender)?;
 
         // Increment sender's message nonce and daily count
-        store.increment_sender_nonce(sender)?;
-        let day = self.current_day(block_timestamp);
-        store.increment_daily_message_count(sender, day)?;
+        Self::v_increment_sender_nonce(view, sender)?;
+        let day = Self::current_day(block_timestamp);
+        Self::v_increment_daily_message_count(view, sender, day)?;
 
         // Store message event
         let event = MessageEvent {
@@ -493,7 +522,7 @@ impl MessagingExecutor {
             block_height,
             timestamp: block_timestamp,
         };
-        store.store_message_event(&event, tx_index)?;
+        Self::v_store_message_event(view, &event, tx_index)?;
 
         debug!(
             "Message with payment sent: {} -> {:?}, amount: {}",
@@ -505,17 +534,16 @@ impl MessagingExecutor {
 
     /// Claim payment from a message
     fn claim_payment(
-        &self, view: &mut ExecutionView<'_, '_>,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
         block_timestamp: u64,
-        store: &MessagingStore,
     ) -> Result<MessagingExecutionResult> {
         let claim_data: ClaimPaymentData = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid claim data: {}", e)))?;
 
         // Get pending payment
-        let pending = match store.get_pending_payment(&claim_data.message_id)? {
+        let pending = match Self::v_get_pending_payment(view, &claim_data.message_id)? {
             Some(p) => p,
             None => return Ok(MessagingExecutionResult::failure("No pending payment")),
         };
@@ -535,7 +563,7 @@ impl MessagingExecutor {
         if block_timestamp > pending.expiry {
             // Refund to original sender
             StateManager::v_credit(view, &pending.sender, pending.amount)?;
-            store.delete_pending_payment(&claim_data.message_id)?;
+            Self::v_delete_pending_payment(view, &claim_data.message_id)?;
             return Ok(MessagingExecutionResult::failure("Payment expired, refunded to sender"));
         }
 
@@ -543,7 +571,7 @@ impl MessagingExecutor {
         StateManager::v_credit(view, sender, pending.amount)?;
 
         // Delete pending payment
-        store.delete_pending_payment(&claim_data.message_id)?;
+        Self::v_delete_pending_payment(view, &claim_data.message_id)?;
 
         debug!("Payment claimed: {} received {}", sender, pending.amount);
 
@@ -552,10 +580,9 @@ impl MessagingExecutor {
 
     /// Stake Koppa for trusted sender tier
     fn stake_for_trust(
-        &self, view: &mut ExecutionView<'_, '_>,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
-        store: &MessagingStore,
     ) -> Result<MessagingExecutionResult> {
         let stake_data: StakeForTrustData = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid stake data: {}", e)))?;
@@ -568,7 +595,7 @@ impl MessagingExecutor {
         StateManager::v_deduct(view, sender, stake_data.amount)?;
 
         // Add to stake
-        let new_stake = store.add_stake(sender, stake_data.amount)?;
+        let new_stake = Self::v_add_stake(view, sender, stake_data.amount)?;
 
         debug!("Staked for trust: {} staked {}, total: {}", sender, stake_data.amount, new_stake);
 
@@ -577,22 +604,21 @@ impl MessagingExecutor {
 
     /// Unstake Koppa
     fn unstake(
-        &self, view: &mut ExecutionView<'_, '_>,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
-        store: &MessagingStore,
     ) -> Result<MessagingExecutionResult> {
         let unstake_data: MessagingUnstakeData = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid unstake data: {}", e)))?;
 
-        let current_stake = store.get_stake_balance(sender)?;
+        let current_stake = Self::v_get_stake_balance(view, sender)?;
         if current_stake < unstake_data.amount {
             return Ok(MessagingExecutionResult::failure("Insufficient stake"));
         }
 
         // Deduct from stake
         let new_stake = current_stake.saturating_sub(unstake_data.amount);
-        store.set_stake_balance(sender, new_stake)?;
+        Self::v_set_stake_balance(view, sender, new_stake)?;
 
         // Credit back to sender
         StateManager::v_credit(view, sender, unstake_data.amount)?;
@@ -604,16 +630,15 @@ impl MessagingExecutor {
 
     /// Set inbox filter mode
     fn set_inbox_filter(
-        &self,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
-        store: &MessagingStore,
     ) -> Result<MessagingExecutionResult> {
         let filter_data: SetInboxFilterData = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid filter data: {}", e)))?;
 
         let sender_hash = recipient_hash_for_address(sender);
-        store.set_inbox_filter(&sender_hash, filter_data.mode)?;
+        Self::v_set_inbox_filter(view, &sender_hash, filter_data.mode)?;
 
         debug!("Inbox filter set: {} -> {:?}", sender, filter_data.mode);
 
@@ -622,16 +647,15 @@ impl MessagingExecutor {
 
     /// Add contact to whitelist
     fn add_contact(
-        &self,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
-        store: &MessagingStore,
     ) -> Result<MessagingExecutionResult> {
         let contact_data: ContactData = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid contact data: {}", e)))?;
 
         let sender_hash = recipient_hash_for_address(sender);
-        store.add_contact(&sender_hash, &contact_data.contact_hash)?;
+        Self::v_add_contact(view, &sender_hash, &contact_data.contact_hash)?;
 
         debug!("Contact added: {} added {:?}", sender, contact_data.contact_hash);
 
@@ -640,16 +664,15 @@ impl MessagingExecutor {
 
     /// Remove contact from whitelist
     fn remove_contact(
-        &self,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
-        store: &MessagingStore,
     ) -> Result<MessagingExecutionResult> {
         let contact_data: ContactData = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid contact data: {}", e)))?;
 
         let sender_hash = recipient_hash_for_address(sender);
-        store.remove_contact(&sender_hash, &contact_data.contact_hash)?;
+        Self::v_remove_contact(view, &sender_hash, &contact_data.contact_hash)?;
 
         debug!("Contact removed: {} removed {:?}", sender, contact_data.contact_hash);
 
@@ -658,16 +681,15 @@ impl MessagingExecutor {
 
     /// Block a sender
     fn block_sender(
-        &self,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
-        store: &MessagingStore,
     ) -> Result<MessagingExecutionResult> {
         let block_data: BlockSenderData = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid block data: {}", e)))?;
 
         let sender_hash = recipient_hash_for_address(sender);
-        store.block_sender(&sender_hash, &block_data.sender)?;
+        Self::v_block_sender(view, &sender_hash, &block_data.sender)?;
 
         debug!("Sender blocked: {} blocked {}", sender, block_data.sender);
 
@@ -676,23 +698,22 @@ impl MessagingExecutor {
 
     /// Report spam
     fn report_spam(
-        &self,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
-        store: &MessagingStore,
     ) -> Result<MessagingExecutionResult> {
         let report_data: ReportSpamData = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid report data: {}", e)))?;
 
         // Reporter must have stake
-        let reporter_stake = store.get_stake_balance(sender)?;
-        let min_stake = store.get_min_trust_stake()?;
+        let reporter_stake = Self::v_get_stake_balance(view, sender)?;
+        let min_stake = Self::v_get_min_trust_stake(view)?;
         if reporter_stake < min_stake {
             return Ok(MessagingExecutionResult::failure("Reporter must have stake"));
         }
 
         // Increment spammer's spam score
-        let new_score = store.increment_spam_score(&report_data.spammer, 5)?;
+        let new_score = Self::v_increment_spam_score(view, &report_data.spammer, 5)?;
 
         warn!(
             "Spam reported: {} reported {} for message {}, new score: {}",
@@ -708,12 +729,11 @@ impl MessagingExecutor {
 
     /// Register Ed25519 public key for messaging
     fn register_public_key(
-        &self,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
         block_height: u64,
         block_timestamp: u64,
-        store: &MessagingStore,
     ) -> Result<MessagingExecutionResult> {
         let key_data: RegisterPublicKeyData = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid key data: {}", e)))?;
@@ -727,7 +747,7 @@ impl MessagingExecutor {
         }
 
         // Check if already registered
-        if store.has_public_key(sender)? {
+        if Self::v_has_public_key(view, sender)? {
             return Ok(MessagingExecutionResult::failure(
                 "Public key already registered. Use UpdatePublicKey to change."
             ));
@@ -741,7 +761,7 @@ impl MessagingExecutor {
             registered_at: block_timestamp,
             updated_at_block: 0,
         };
-        store.set_public_key(sender, &registered)?;
+        Self::v_set_public_key(view, sender, &registered)?;
 
         debug!("Public key registered: {} -> {:?}", sender, key_data.public_key);
 
@@ -750,17 +770,16 @@ impl MessagingExecutor {
 
     /// Update registered public key
     fn update_public_key(
-        &self,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
         block_height: u64,
-        store: &MessagingStore,
     ) -> Result<MessagingExecutionResult> {
         let key_data: UpdatePublicKeyData = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid key data: {}", e)))?;
 
         // Get existing registration
-        let existing = match store.get_public_key(sender)? {
+        let existing = match Self::v_get_public_key(view, sender)? {
             Some(k) => k,
             None => return Ok(MessagingExecutionResult::failure(
                 "No public key registered. Use RegisterPublicKey first."
@@ -783,7 +802,7 @@ impl MessagingExecutor {
             registered_at: existing.registered_at,
             updated_at_block: block_height,
         };
-        store.set_public_key(sender, &updated)?;
+        Self::v_set_public_key(view, sender, &updated)?;
 
         debug!("Public key updated: {} -> {:?}", sender, key_data.new_public_key);
 
@@ -795,19 +814,19 @@ impl MessagingExecutor {
     // ========================================================================
 
     fn set_daily_quota(
-        &self,
+        view: &mut ExecutionView<'_, '_>,
+        params: &ChainParams,
         sender: &Address,
         data: &[u8],
-        store: &MessagingStore,
     ) -> Result<MessagingExecutionResult> {
-        if !self.is_admin(sender, store) {
+        if !Self::v_is_admin(view, params, sender)? {
             return Ok(MessagingExecutionResult::failure("Not admin"));
         }
 
         let quota_data: SetDailyQuotaData = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid quota data: {}", e)))?;
 
-        store.set_daily_quota(quota_data.quota)?;
+        Self::v_set_daily_quota(view, quota_data.quota)?;
 
         debug!("Daily quota set to {} by admin {}", quota_data.quota, sender);
 
@@ -815,19 +834,19 @@ impl MessagingExecutor {
     }
 
     fn set_max_message_size(
-        &self,
+        view: &mut ExecutionView<'_, '_>,
+        params: &ChainParams,
         sender: &Address,
         data: &[u8],
-        store: &MessagingStore,
     ) -> Result<MessagingExecutionResult> {
-        if !self.is_admin(sender, store) {
+        if !Self::v_is_admin(view, params, sender)? {
             return Ok(MessagingExecutionResult::failure("Not admin"));
         }
 
         let size_data: SetMaxMessageSizeData = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid size data: {}", e)))?;
 
-        store.set_max_message_size(size_data.size)?;
+        Self::v_set_max_message_size(view, size_data.size)?;
 
         debug!("Max message size set to {} by admin {}", size_data.size, sender);
 
@@ -835,19 +854,19 @@ impl MessagingExecutor {
     }
 
     fn set_min_trust_stake(
-        &self,
+        view: &mut ExecutionView<'_, '_>,
+        params: &ChainParams,
         sender: &Address,
         data: &[u8],
-        store: &MessagingStore,
     ) -> Result<MessagingExecutionResult> {
-        if !self.is_admin(sender, store) {
+        if !Self::v_is_admin(view, params, sender)? {
             return Ok(MessagingExecutionResult::failure("Not admin"));
         }
 
         let stake_data: SetMinTrustStakeData = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid stake data: {}", e)))?;
 
-        store.set_min_trust_stake(stake_data.amount)?;
+        Self::v_set_min_trust_stake(view, stake_data.amount)?;
 
         debug!("Min trust stake set to {} by admin {}", stake_data.amount, sender);
 
@@ -855,19 +874,19 @@ impl MessagingExecutor {
     }
 
     fn set_sponsorship_enabled(
-        &self,
+        view: &mut ExecutionView<'_, '_>,
+        params: &ChainParams,
         sender: &Address,
         data: &[u8],
-        store: &MessagingStore,
     ) -> Result<MessagingExecutionResult> {
-        if !self.is_admin(sender, store) {
+        if !Self::v_is_admin(view, params, sender)? {
             return Ok(MessagingExecutionResult::failure("Not admin"));
         }
 
         let enabled_data: SetSponsorshipEnabledData = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid enabled data: {}", e)))?;
 
-        store.set_sponsorship_enabled(enabled_data.enabled)?;
+        Self::v_set_sponsorship_enabled(view, enabled_data.enabled)?;
 
         debug!("Sponsorship enabled set to {} by admin {}", enabled_data.enabled, sender);
 
@@ -875,10 +894,9 @@ impl MessagingExecutor {
     }
 
     fn fund_registry(
-        &self, view: &mut ExecutionView<'_, '_>,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
-        store: &MessagingStore,
     ) -> Result<MessagingExecutionResult> {
         let fund_data: FundRegistryData = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid fund data: {}", e)))?;
@@ -891,7 +909,7 @@ impl MessagingExecutor {
         StateManager::v_deduct(view, sender, fund_data.amount)?;
 
         // Add to sponsorship fund
-        let new_balance = store.add_sponsorship_balance(fund_data.amount)?;
+        let new_balance = Self::v_add_sponsorship_balance(view, fund_data.amount)?;
 
         debug!("Registry funded: {} added {}, total: {}", sender, fund_data.amount, new_balance);
 

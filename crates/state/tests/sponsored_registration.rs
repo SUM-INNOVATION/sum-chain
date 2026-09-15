@@ -90,12 +90,29 @@ fn honest_tx(sponsor: &KeyPair, registrant: &KeyPair, nonce: u64) -> SignedTrans
     build_tx(sponsor, registrant, nonce, CHAIN_ID, &sponsor_addr, |_| {})
 }
 
-fn stored_key(db: &Database, addr: &Address) -> Option<RegisteredPublicKey> {
-    MessagingStore::new(db).get_public_key(addr).unwrap()
-}
-
 fn has_key(db: &Database, addr: &Address) -> bool {
     MessagingStore::new(db).has_public_key(addr).unwrap()
+}
+
+/// The same questions, asked of THIS BLOCK'S CANDIDATE.
+///
+/// Sponsored registration stages its key row now rather than writing it as it
+/// executes, so a committed read straight after `execute_tx` is asking about
+/// the parent block. The committed helpers above are still right where the
+/// subject IS canonical state -- the fork-seed simulation below writes
+/// committed on purpose.
+fn staged_key(
+    view: &sumchain_storage::exec_view::ExecutionView<'_, '_>,
+    addr: &Address,
+) -> Option<RegisteredPublicKey> {
+    sumchain_state::MessagingExecutor::v_get_public_key(view, addr).unwrap()
+}
+
+fn staged_has_key(
+    view: &sumchain_storage::exec_view::ExecutionView<'_, '_>,
+    addr: &Address,
+) -> bool {
+    sumchain_state::MessagingExecutor::v_has_public_key(view, addr).unwrap()
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -123,14 +140,20 @@ fn valid_registers_registrant_not_sponsor_and_sponsor_pays() {
 
     // The REGISTRANT is registered — never the sponsor.
     assert!(
-        has_key(&db, &registrant.address()),
+        staged_has_key(&candidate.view(), &registrant.address()),
         "registrant must be registered"
     );
     assert!(
-        !has_key(&db, &sponsor.address()),
+        !staged_has_key(&candidate.view(), &sponsor.address()),
         "sponsor must NOT be registered"
     );
-    let record = stored_key(&db, &registrant.address()).unwrap();
+    // The other half: staged is not committed. The block has not been
+    // published, so the canonical row must still be absent.
+    assert!(
+        !has_key(&db, &registrant.address()),
+        "the registration must not be committed by executing alone"
+    );
+    let record = staged_key(&candidate.view(), &registrant.address()).unwrap();
     assert_eq!(record.public_key, *registrant.public_key().as_bytes());
     assert_eq!(record.address, registrant.address());
     assert_eq!(record.registered_at_block, 1);
@@ -441,7 +464,11 @@ fn activation_height_boundary_succeeds() {
         "got {:?}",
         res.status
     );
-    assert!(has_key(&db, &registrant.address()));
+    assert!(staged_has_key(&candidate.view(), &registrant.address()));
+    assert!(
+        !has_key(&db, &registrant.address()),
+        "and the canonical row stays absent until the block is published"
+    );
 }
 
 #[test]
@@ -484,7 +511,11 @@ fn duplicate_registration_rejects_394() {
         "no extra fee on duplicate"
     );
     // The stored record is unchanged from the first registration.
-    assert!(has_key(&db, &registrant.address()));
+    assert!(staged_has_key(&candidate.view(), &registrant.address()));
+    assert!(
+        !has_key(&db, &registrant.address()),
+        "and the canonical row stays absent until the block is published"
+    );
 }
 
 #[test]
@@ -503,10 +534,19 @@ fn two_validators_identical_tx_produce_identical_receipts_and_poststate() {
         let res = executor
             .execute_tx(&mut candidate.view(), &tx, &proposer.address(), 7, 999)
             .unwrap();
-        // Raw on-disk CF bytes are the strongest post-state evidence.
-        let record_bytes = db
+        // Raw CF bytes are still the strongest post-state evidence; they are
+        // read from the CANDIDATE, because that is where this block's
+        // registration lives until it is published.
+        let record_bytes = candidate
+            .view()
             .get(cf::MESSAGING_PUBLIC_KEYS, registrant.address().as_bytes())
             .unwrap();
+        assert!(
+            db.get(cf::MESSAGING_PUBLIC_KEYS, registrant.address().as_bytes())
+                .unwrap()
+                .is_none(),
+            "the canonical row must stay absent on each validator"
+        );
         let sponsor_bal = StateManager::v_get_balance(&candidate.view(), &sponsor.address()).unwrap();
         let proposer_bal = StateManager::v_get_balance(&candidate.view(), &proposer.address()).unwrap();
         let sponsor_nonce = StateManager::v_get_nonce(&candidate.view(), &sponsor.address()).unwrap();
@@ -583,7 +623,12 @@ fn regression_node_local_write_forks_but_consensus_path_converges() {
             .execute_tx(&mut candidate.view(), &tx, &proposer.address(), 1, 42)
             .unwrap();
         assert!(matches!(res.status, TxStatus::Success));
-        bincode::serialize(&stored_key(db, &registrant.address()).unwrap()).unwrap()
+        assert!(
+            !has_key(db, &registrant.address()),
+            "each validator stages it; neither commits it here"
+        );
+        bincode::serialize(&staged_key(&candidate.view(), &registrant.address()).unwrap())
+            .unwrap()
     };
 
     let (_sc, db_c, _dc, ec) = setup_with_params(params_gate_open());
@@ -605,7 +650,7 @@ fn defensive_generic_executor_arm_fails_closed() {
     let dir = tempfile::TempDir::new().unwrap();
     let db = Arc::new(Database::open_default(dir.path()).unwrap());
     let _state = Arc::new(StateManager::new(db.clone(), CHAIN_ID));
-    let exec = MessagingExecutor::new(db.clone(), params_gate_open());
+    let params = params_gate_open();
 
     let sponsor = KeyPair::generate();
     let registrant = KeyPair::generate();
@@ -623,19 +668,19 @@ fn defensive_generic_executor_arm_fails_closed() {
     };
     // The messaging executor debits the sponsor's account, which is staged now.
     let mut candidate = common::candidate(&db);
-    let res = exec
-        .execute(
-            &mut candidate.view(),
-            &sponsor.address(),
-            &data,
-            &Address::ZERO,
-            FEE,
-            1,
-            0,
-            0,
-            sumchain_primitives::Hash::hash(b"x"),
-        )
-        .unwrap();
+    let res = MessagingExecutor::execute(
+        &mut candidate.view(),
+        &params,
+        &sponsor.address(),
+        &data,
+        &Address::ZERO,
+        FEE,
+        1,
+        0,
+        0,
+        sumchain_primitives::Hash::hash(b"x"),
+    )
+    .unwrap();
     assert!(
         !res.success,
         "generic messaging executor must fail closed for the sponsored op"

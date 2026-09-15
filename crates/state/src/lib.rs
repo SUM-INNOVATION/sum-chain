@@ -28,6 +28,7 @@ pub mod inference_settlement_executor;
 pub mod legal_executor;
 pub mod mempool;
 pub mod messaging_executor;
+pub mod messaging_view;
 pub mod nft_executor;
 pub mod node_registry;
 pub mod policy_account_executor;
