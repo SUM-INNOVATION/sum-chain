@@ -46,8 +46,97 @@ pub struct BackfillStats {
     pub ran: bool,
 }
 
+// =============================================================================
+// Shared key layout and codec
+// =============================================================================
+//
+// One builder per row and one codec per value, called by the committed store
+// below and by the candidate surface in `sumchain_state::messaging_view`. They
+// are `pub` so there is exactly one definition to read and one to change; a
+// second encoder inside either side would round-trip through itself and
+// disagree only about rows the other produced.
+//
+// Three shapes in here are easy to get wrong, and are the reason these are
+// extracted rather than restated:
+//
+//   * Counters and balances are BARE big-endian integers of a fixed width, not
+//     bincode. Nonces and daily counts differ in width (8 and 4).
+//   * Stakes and spam scores DELETE the row at zero instead of storing zero.
+//     Absence and a row of zeroes are different states.
+//   * Contacts, blocks and the payment index are PRESENCE rows. Contacts and
+//     blocks carry the single byte `1`; the payment index carries an EMPTY
+//     value. Writing `[1]` where the chain writes `[]` is a divergence a
+//     round-trip test cannot see.
+
+/// Sender-nonce row key: the address, unprefixed.
+pub fn sender_nonce_key(sender: &Address) -> &[u8] {
+    sender.as_bytes()
+}
+
+/// Daily-count row key: `sender(20) || day(4 BE)`.
+pub fn daily_count_key(sender: &Address, day: u32) -> Vec<u8> {
+    let mut key = Vec::with_capacity(24);
+    key.extend_from_slice(sender.as_bytes());
+    key.extend_from_slice(&day.to_be_bytes());
+    key
+}
+
+/// Stake row key: the address, unprefixed.
+pub fn stake_key(address: &Address) -> &[u8] {
+    address.as_bytes()
+}
+
+/// Spam-score row key: the address, unprefixed.
+pub fn spam_score_key(address: &Address) -> &[u8] {
+    address.as_bytes()
+}
+
+/// Inbox-filter row key: the recipient hash, unprefixed.
+pub fn inbox_filter_key(recipient_hash: &[u8; 32]) -> &[u8] {
+    recipient_hash
+}
+
+/// Contact row key: `recipient_hash(32) || sender_hash(32)`.
+pub fn contact_key(recipient_hash: &[u8; 32], sender_hash: &[u8; 32]) -> Vec<u8> {
+    let mut key = Vec::with_capacity(64);
+    key.extend_from_slice(recipient_hash);
+    key.extend_from_slice(sender_hash);
+    key
+}
+
+/// Block-list row key: `recipient_hash(32) || sender(20)`.
+pub fn blocked_key(recipient_hash: &[u8; 32], sender: &Address) -> Vec<u8> {
+    let mut key = Vec::with_capacity(52);
+    key.extend_from_slice(recipient_hash);
+    key.extend_from_slice(sender.as_bytes());
+    key
+}
+
+/// Pending-payment row key: the message id, unprefixed.
+pub fn pending_payment_key(message_id: &Hash) -> &[u8] {
+    message_id.as_bytes()
+}
+
+/// Recipient-payment index key: `recipient_hash(32) || message_id(32)`.
+pub fn payment_index_key(recipient_hash: &[u8; 32], message_id: &Hash) -> Vec<u8> {
+    let mut key = Vec::with_capacity(64);
+    key.extend_from_slice(recipient_hash);
+    key.extend_from_slice(message_id.as_bytes());
+    key
+}
+
+/// Message-event row key: `recipient_hash(32) || block_height(8 BE) ||
+/// tx_index(4 BE)`.
+pub fn event_key(recipient_hash: &[u8; 32], block_height: u64, tx_index: u32) -> Vec<u8> {
+    let mut key = Vec::with_capacity(44);
+    key.extend_from_slice(recipient_hash);
+    key.extend_from_slice(&block_height.to_be_bytes());
+    key.extend_from_slice(&tx_index.to_be_bytes());
+    key
+}
+
 /// Sender index key: `sender(20) || block_height(8 BE) || tx_index(4 BE)`.
-fn sender_index_key(sender: &Address, block_height: u64, tx_index: u32) -> Vec<u8> {
+pub fn sender_index_key(sender: &Address, block_height: u64, tx_index: u32) -> Vec<u8> {
     let mut key = Vec::with_capacity(32);
     key.extend_from_slice(sender.as_bytes());
     key.extend_from_slice(&block_height.to_be_bytes());
@@ -55,12 +144,85 @@ fn sender_index_key(sender: &Address, block_height: u64, tx_index: u32) -> Vec<u
     key
 }
 
-/// Recipient-payment index key: `recipient_hash(32) || message_id(32)`.
-fn payment_index_key(recipient_hash: &[u8; 32], message_id: &Hash) -> Vec<u8> {
-    let mut key = Vec::with_capacity(64);
-    key.extend_from_slice(recipient_hash);
-    key.extend_from_slice(message_id.as_bytes());
-    key
+/// Public-key row key: the address, unprefixed.
+pub fn public_key_key(address: &Address) -> &[u8] {
+    address.as_bytes()
+}
+
+/// The value a presence row carries in `MESSAGING_CONTACTS` and
+/// `MESSAGING_BLOCKED`.
+pub const PRESENT: &[u8] = &[1];
+
+/// The value the recipient-payment index carries: nothing. The key IS the
+/// fact.
+pub const INDEX_PRESENT: &[u8] = &[];
+
+pub fn encode_u32(v: u32) -> [u8; 4] {
+    v.to_be_bytes()
+}
+
+pub fn decode_u32(bytes: &[u8], what: &str) -> Result<u32> {
+    Ok(u32::from_be_bytes(bytes.try_into().map_err(|_| {
+        StorageError::InvalidData(format!("Invalid {what}"))
+    })?))
+}
+
+pub fn encode_u64(v: u64) -> [u8; 8] {
+    v.to_be_bytes()
+}
+
+pub fn decode_u64(bytes: &[u8], what: &str) -> Result<u64> {
+    Ok(u64::from_be_bytes(bytes.try_into().map_err(|_| {
+        StorageError::InvalidData(format!("Invalid {what}"))
+    })?))
+}
+
+pub fn encode_balance(v: Balance) -> [u8; 16] {
+    v.to_be_bytes()
+}
+
+pub fn decode_balance(bytes: &[u8], what: &str) -> Result<Balance> {
+    Ok(u128::from_be_bytes(bytes.try_into().map_err(|_| {
+        StorageError::InvalidData(format!("Invalid {what}"))
+    })?))
+}
+
+/// A bool is one byte, and anything non-zero reads as true — which is what the
+/// committed reader did, so the candidate must not tighten it.
+pub fn encode_bool(v: bool) -> [u8; 1] {
+    [if v { 1 } else { 0 }]
+}
+
+pub fn decode_bool(bytes: &[u8]) -> bool {
+    bytes.first().copied().unwrap_or(0) != 0
+}
+
+pub fn encode_inbox_filter(mode: InboxFilter) -> [u8; 1] {
+    [mode as u8]
+}
+
+pub fn encode_pending_payment(payment: &PendingPayment) -> Result<Vec<u8>> {
+    bincode::serialize(payment).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_pending_payment(bytes: &[u8]) -> Result<PendingPayment> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_message_event(event: &MessageEvent) -> Result<Vec<u8>> {
+    bincode::serialize(event).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_message_event(bytes: &[u8]) -> Result<MessageEvent> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_public_key(key: &RegisteredPublicKey) -> Result<Vec<u8>> {
+    bincode::serialize(key).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_public_key(bytes: &[u8]) -> Result<RegisteredPublicKey> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
 }
 
 /// Messaging storage operations
@@ -80,55 +242,52 @@ impl<'a> MessagingStore<'a> {
     /// Get daily message quota
     pub fn get_daily_quota(&self) -> Result<u32> {
         match self.db.get(cf::MESSAGING_CONFIG, config_keys::DAILY_QUOTA)? {
-            Some(bytes) => {
-                let quota = u32::from_be_bytes(
-                    bytes.try_into().map_err(|_| StorageError::InvalidData("Invalid quota".into()))?
-                );
-                Ok(quota)
-            }
+            Some(bytes) => Ok(decode_u32(&bytes, "quota")?),
             None => Ok(DEFAULT_DAILY_QUOTA),
         }
     }
 
     /// Set daily message quota
     pub fn set_daily_quota(&self, quota: u32) -> Result<()> {
-        self.db.put(cf::MESSAGING_CONFIG, config_keys::DAILY_QUOTA, &quota.to_be_bytes())
+        self.db.put(
+            cf::MESSAGING_CONFIG,
+            config_keys::DAILY_QUOTA,
+            &encode_u32(quota),
+        )
     }
 
     /// Get maximum message size
     pub fn get_max_message_size(&self) -> Result<u32> {
         match self.db.get(cf::MESSAGING_CONFIG, config_keys::MAX_MESSAGE_SIZE)? {
-            Some(bytes) => {
-                let size = u32::from_be_bytes(
-                    bytes.try_into().map_err(|_| StorageError::InvalidData("Invalid size".into()))?
-                );
-                Ok(size)
-            }
+            Some(bytes) => Ok(decode_u32(&bytes, "size")?),
             None => Ok(DEFAULT_MAX_MESSAGE_SIZE),
         }
     }
 
     /// Set maximum message size
     pub fn set_max_message_size(&self, size: u32) -> Result<()> {
-        self.db.put(cf::MESSAGING_CONFIG, config_keys::MAX_MESSAGE_SIZE, &size.to_be_bytes())
+        self.db.put(
+            cf::MESSAGING_CONFIG,
+            config_keys::MAX_MESSAGE_SIZE,
+            &encode_u32(size),
+        )
     }
 
     /// Get minimum stake for trusted sender tier
     pub fn get_min_trust_stake(&self) -> Result<Balance> {
         match self.db.get(cf::MESSAGING_CONFIG, config_keys::MIN_TRUST_STAKE)? {
-            Some(bytes) => {
-                let amount = u128::from_be_bytes(
-                    bytes.try_into().map_err(|_| StorageError::InvalidData("Invalid stake".into()))?
-                );
-                Ok(amount)
-            }
+            Some(bytes) => Ok(decode_balance(&bytes, "stake")?),
             None => Ok(DEFAULT_MIN_TRUST_STAKE),
         }
     }
 
     /// Set minimum stake for trusted sender tier
     pub fn set_min_trust_stake(&self, amount: Balance) -> Result<()> {
-        self.db.put(cf::MESSAGING_CONFIG, config_keys::MIN_TRUST_STAKE, &amount.to_be_bytes())
+        self.db.put(
+            cf::MESSAGING_CONFIG,
+            config_keys::MIN_TRUST_STAKE,
+            &encode_balance(amount),
+        )
     }
 
     /// Check if gas sponsorship is enabled
@@ -141,25 +300,28 @@ impl<'a> MessagingStore<'a> {
 
     /// Set sponsorship enabled flag
     pub fn set_sponsorship_enabled(&self, enabled: bool) -> Result<()> {
-        self.db.put(cf::MESSAGING_CONFIG, config_keys::SPONSORSHIP_ENABLED, &[if enabled { 1 } else { 0 }])
+        self.db.put(
+            cf::MESSAGING_CONFIG,
+            config_keys::SPONSORSHIP_ENABLED,
+            &encode_bool(enabled),
+        )
     }
 
     /// Get sponsorship fund balance
     pub fn get_sponsorship_balance(&self) -> Result<Balance> {
         match self.db.get(cf::MESSAGING_CONFIG, config_keys::SPONSORSHIP_BALANCE)? {
-            Some(bytes) => {
-                let amount = u128::from_be_bytes(
-                    bytes.try_into().map_err(|_| StorageError::InvalidData("Invalid balance".into()))?
-                );
-                Ok(amount)
-            }
+            Some(bytes) => Ok(decode_balance(&bytes, "balance")?),
             None => Ok(0),
         }
     }
 
     /// Set sponsorship fund balance
     pub fn set_sponsorship_balance(&self, amount: Balance) -> Result<()> {
-        self.db.put(cf::MESSAGING_CONFIG, config_keys::SPONSORSHIP_BALANCE, &amount.to_be_bytes())
+        self.db.put(
+            cf::MESSAGING_CONFIG,
+            config_keys::SPONSORSHIP_BALANCE,
+            &encode_balance(amount),
+        )
     }
 
     /// Add to sponsorship fund
@@ -204,20 +366,22 @@ impl<'a> MessagingStore<'a> {
 
     /// Get sender's message nonce (for replay protection)
     pub fn get_sender_nonce(&self, sender: &Address) -> Result<u64> {
-        match self.db.get(cf::MESSAGING_SENDER_NONCES, sender.as_bytes())? {
-            Some(bytes) => {
-                let nonce = u64::from_be_bytes(
-                    bytes.try_into().map_err(|_| StorageError::InvalidData("Invalid nonce".into()))?
-                );
-                Ok(nonce)
-            }
+        match self
+            .db
+            .get(cf::MESSAGING_SENDER_NONCES, sender_nonce_key(sender))?
+        {
+            Some(bytes) => Ok(decode_u64(&bytes, "nonce")?),
             None => Ok(0),
         }
     }
 
     /// Set sender's message nonce
     pub fn set_sender_nonce(&self, sender: &Address, nonce: u64) -> Result<()> {
-        self.db.put(cf::MESSAGING_SENDER_NONCES, sender.as_bytes(), &nonce.to_be_bytes())
+        self.db.put(
+            cf::MESSAGING_SENDER_NONCES,
+            sender_nonce_key(sender),
+            &encode_u64(nonce),
+        )
     }
 
     /// Increment sender's message nonce
@@ -231,31 +395,25 @@ impl<'a> MessagingStore<'a> {
     /// Get daily message count for sender
     /// `day` is days since Unix epoch (timestamp / 86400)
     pub fn get_daily_message_count(&self, sender: &Address, day: u32) -> Result<u32> {
-        let mut key = Vec::with_capacity(24);
-        key.extend_from_slice(sender.as_bytes());
-        key.extend_from_slice(&day.to_be_bytes());
-
-        match self.db.get(cf::MESSAGING_DAILY_COUNTS, &key)? {
-            Some(bytes) => {
-                let count = u32::from_be_bytes(
-                    bytes.try_into().map_err(|_| StorageError::InvalidData("Invalid count".into()))?
-                );
-                Ok(count)
-            }
+        match self
+            .db
+            .get(cf::MESSAGING_DAILY_COUNTS, &daily_count_key(sender, day))?
+        {
+            Some(bytes) => Ok(decode_u32(&bytes, "count")?),
             None => Ok(0),
         }
     }
 
     /// Increment daily message count for sender
     pub fn increment_daily_message_count(&self, sender: &Address, day: u32) -> Result<u32> {
-        let mut key = Vec::with_capacity(24);
-        key.extend_from_slice(sender.as_bytes());
-        key.extend_from_slice(&day.to_be_bytes());
-
         let current = self.get_daily_message_count(sender, day)?;
         let new_count = current + 1;
 
-        self.db.put(cf::MESSAGING_DAILY_COUNTS, &key, &new_count.to_be_bytes())?;
+        self.db.put(
+            cf::MESSAGING_DAILY_COUNTS,
+            &daily_count_key(sender, day),
+            &encode_u32(new_count),
+        )?;
         Ok(new_count)
     }
 
@@ -265,13 +423,8 @@ impl<'a> MessagingStore<'a> {
 
     /// Get stake balance for anti-spam
     pub fn get_stake_balance(&self, address: &Address) -> Result<Balance> {
-        match self.db.get(cf::MESSAGING_STAKES, address.as_bytes())? {
-            Some(bytes) => {
-                let amount = u128::from_be_bytes(
-                    bytes.try_into().map_err(|_| StorageError::InvalidData("Invalid stake".into()))?
-                );
-                Ok(amount)
-            }
+        match self.db.get(cf::MESSAGING_STAKES, stake_key(address))? {
+            Some(bytes) => Ok(decode_balance(&bytes, "stake")?),
             None => Ok(0),
         }
     }
@@ -279,9 +432,13 @@ impl<'a> MessagingStore<'a> {
     /// Set stake balance
     pub fn set_stake_balance(&self, address: &Address, amount: Balance) -> Result<()> {
         if amount == 0 {
-            self.db.delete(cf::MESSAGING_STAKES, address.as_bytes())
+            self.db.delete(cf::MESSAGING_STAKES, stake_key(address))
         } else {
-            self.db.put(cf::MESSAGING_STAKES, address.as_bytes(), &amount.to_be_bytes())
+            self.db.put(
+                cf::MESSAGING_STAKES,
+                stake_key(address),
+                &encode_balance(amount),
+            )
         }
     }
 
@@ -295,13 +452,11 @@ impl<'a> MessagingStore<'a> {
 
     /// Get spam score for an address
     pub fn get_spam_score(&self, address: &Address) -> Result<u32> {
-        match self.db.get(cf::MESSAGING_SPAM_SCORES, address.as_bytes())? {
-            Some(bytes) => {
-                let score = u32::from_be_bytes(
-                    bytes.try_into().map_err(|_| StorageError::InvalidData("Invalid score".into()))?
-                );
-                Ok(score)
-            }
+        match self
+            .db
+            .get(cf::MESSAGING_SPAM_SCORES, spam_score_key(address))?
+        {
+            Some(bytes) => Ok(decode_u32(&bytes, "score")?),
             None => Ok(0),
         }
     }
@@ -309,9 +464,14 @@ impl<'a> MessagingStore<'a> {
     /// Set spam score for an address
     pub fn set_spam_score(&self, address: &Address, score: u32) -> Result<()> {
         if score == 0 {
-            self.db.delete(cf::MESSAGING_SPAM_SCORES, address.as_bytes())
+            self.db
+                .delete(cf::MESSAGING_SPAM_SCORES, spam_score_key(address))
         } else {
-            self.db.put(cf::MESSAGING_SPAM_SCORES, address.as_bytes(), &score.to_be_bytes())
+            self.db.put(
+                cf::MESSAGING_SPAM_SCORES,
+                spam_score_key(address),
+                &encode_u32(score),
+            )
         }
     }
 
@@ -329,7 +489,10 @@ impl<'a> MessagingStore<'a> {
 
     /// Get inbox filter mode
     pub fn get_inbox_filter(&self, recipient_hash: &[u8; 32]) -> Result<InboxFilter> {
-        match self.db.get(cf::MESSAGING_INBOX_FILTERS, recipient_hash)? {
+        match self.db.get(
+            cf::MESSAGING_INBOX_FILTERS,
+            inbox_filter_key(recipient_hash),
+        )? {
             Some(bytes) => {
                 let mode = InboxFilter::from_byte(bytes.first().copied().unwrap_or(0))
                     .unwrap_or(InboxFilter::AcceptAll);
@@ -341,55 +504,57 @@ impl<'a> MessagingStore<'a> {
 
     /// Set inbox filter mode
     pub fn set_inbox_filter(&self, recipient_hash: &[u8; 32], mode: InboxFilter) -> Result<()> {
-        self.db.put(cf::MESSAGING_INBOX_FILTERS, recipient_hash, &[mode as u8])
+        self.db.put(
+            cf::MESSAGING_INBOX_FILTERS,
+            inbox_filter_key(recipient_hash),
+            &encode_inbox_filter(mode),
+        )
     }
 
     /// Check if sender is in recipient's contacts
     pub fn is_contact(&self, recipient_hash: &[u8; 32], sender_hash: &[u8; 32]) -> Result<bool> {
-        let mut key = Vec::with_capacity(64);
-        key.extend_from_slice(recipient_hash);
-        key.extend_from_slice(sender_hash);
-        self.db.contains(cf::MESSAGING_CONTACTS, &key)
+        self.db.contains(
+            cf::MESSAGING_CONTACTS,
+            &contact_key(recipient_hash, sender_hash),
+        )
     }
 
     /// Add sender to recipient's contacts
     pub fn add_contact(&self, recipient_hash: &[u8; 32], sender_hash: &[u8; 32]) -> Result<()> {
-        let mut key = Vec::with_capacity(64);
-        key.extend_from_slice(recipient_hash);
-        key.extend_from_slice(sender_hash);
-        self.db.put(cf::MESSAGING_CONTACTS, &key, &[1])
+        self.db.put(
+            cf::MESSAGING_CONTACTS,
+            &contact_key(recipient_hash, sender_hash),
+            PRESENT,
+        )
     }
 
     /// Remove sender from recipient's contacts
     pub fn remove_contact(&self, recipient_hash: &[u8; 32], sender_hash: &[u8; 32]) -> Result<()> {
-        let mut key = Vec::with_capacity(64);
-        key.extend_from_slice(recipient_hash);
-        key.extend_from_slice(sender_hash);
-        self.db.delete(cf::MESSAGING_CONTACTS, &key)
+        self.db.delete(
+            cf::MESSAGING_CONTACTS,
+            &contact_key(recipient_hash, sender_hash),
+        )
     }
 
     /// Check if sender is blocked by recipient
     pub fn is_blocked(&self, recipient_hash: &[u8; 32], sender: &Address) -> Result<bool> {
-        let mut key = Vec::with_capacity(52);
-        key.extend_from_slice(recipient_hash);
-        key.extend_from_slice(sender.as_bytes());
-        self.db.contains(cf::MESSAGING_BLOCKED, &key)
+        self.db
+            .contains(cf::MESSAGING_BLOCKED, &blocked_key(recipient_hash, sender))
     }
 
     /// Block a sender
     pub fn block_sender(&self, recipient_hash: &[u8; 32], sender: &Address) -> Result<()> {
-        let mut key = Vec::with_capacity(52);
-        key.extend_from_slice(recipient_hash);
-        key.extend_from_slice(sender.as_bytes());
-        self.db.put(cf::MESSAGING_BLOCKED, &key, &[1])
+        self.db.put(
+            cf::MESSAGING_BLOCKED,
+            &blocked_key(recipient_hash, sender),
+            PRESENT,
+        )
     }
 
     /// Unblock a sender
     pub fn unblock_sender(&self, recipient_hash: &[u8; 32], sender: &Address) -> Result<()> {
-        let mut key = Vec::with_capacity(52);
-        key.extend_from_slice(recipient_hash);
-        key.extend_from_slice(sender.as_bytes());
-        self.db.delete(cf::MESSAGING_BLOCKED, &key)
+        self.db
+            .delete(cf::MESSAGING_BLOCKED, &blocked_key(recipient_hash, sender))
     }
 
     // ========================================================================
@@ -398,12 +563,11 @@ impl<'a> MessagingStore<'a> {
 
     /// Get pending payment by message ID
     pub fn get_pending_payment(&self, message_id: &Hash) -> Result<Option<PendingPayment>> {
-        match self.db.get(cf::MESSAGING_PENDING_PAYMENTS, message_id.as_bytes())? {
-            Some(bytes) => {
-                let payment: PendingPayment = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(Some(payment))
-            }
+        match self.db.get(
+            cf::MESSAGING_PENDING_PAYMENTS,
+            pending_payment_key(message_id),
+        )? {
+            Some(bytes) => Ok(Some(decode_pending_payment(&bytes)?)),
             None => Ok(None),
         }
     }
@@ -411,14 +575,17 @@ impl<'a> MessagingStore<'a> {
     /// Store pending payment, plus the recipient -> payment secondary index,
     /// in one atomic batch so primary and index cannot diverge.
     pub fn set_pending_payment(&self, message_id: &Hash, payment: &PendingPayment) -> Result<()> {
-        let bytes = bincode::serialize(payment)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let bytes = encode_pending_payment(payment)?;
         let mut batch = self.db.batch();
-        batch.put(cf::MESSAGING_PENDING_PAYMENTS, message_id.as_bytes(), &bytes)?;
+        batch.put(
+            cf::MESSAGING_PENDING_PAYMENTS,
+            pending_payment_key(message_id),
+            &bytes,
+        )?;
         batch.put(
             cf::MESSAGING_PAYMENTS_BY_RECIPIENT,
             &payment_index_key(&payment.recipient_hash, message_id),
-            &[],
+            INDEX_PRESENT,
         )?;
         batch.commit()
     }
@@ -435,7 +602,10 @@ impl<'a> MessagingStore<'a> {
                 &payment_index_key(&payment.recipient_hash, message_id),
             )?;
         }
-        batch.delete(cf::MESSAGING_PENDING_PAYMENTS, message_id.as_bytes())?;
+        batch.delete(
+            cf::MESSAGING_PENDING_PAYMENTS,
+            pending_payment_key(message_id),
+        )?;
         batch.commit()
     }
 
@@ -446,13 +616,8 @@ impl<'a> MessagingStore<'a> {
     /// Store a message event for indexing
     /// Key format: recipient_hash (32) + block_height (8) + tx_index (4)
     pub fn store_message_event(&self, event: &MessageEvent, tx_index: u32) -> Result<()> {
-        let mut key = Vec::with_capacity(44);
-        key.extend_from_slice(&event.recipient_hash);
-        key.extend_from_slice(&event.block_height.to_be_bytes());
-        key.extend_from_slice(&tx_index.to_be_bytes());
-
-        let bytes = bincode::serialize(event)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let key = event_key(&event.recipient_hash, event.block_height, tx_index);
+        let bytes = encode_message_event(event)?;
 
         tracing::info!(
             "MessagingStore: storing message event with key prefix 0x{} (block={}, tx_index={})",
@@ -498,7 +663,7 @@ impl<'a> MessagingStore<'a> {
             if out.len() >= cap {
                 break;
             }
-            if let Ok(event) = bincode::deserialize::<MessageEvent>(&value) {
+            if let Ok(event) = decode_message_event(&value) {
                 out.push(event);
             }
         }
@@ -559,8 +724,19 @@ impl<'a> MessagingStore<'a> {
                     key.len()
                 )));
             }
-            let event: MessageEvent = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(format!("backfill: bad MessageEvent: {}", e)))?;
+            // The shared decoder, with the backfill's own context added to the
+            // message rather than around the error. Formatting the error itself
+            // would nest its Display inside a second `Serialization`, so the
+            // text read "Serialization error: backfill: ...: Serialization
+            // error: ..." -- two prefixes where the parent produced one. Any
+            // other variant propagates untouched: only a decode failure is
+            // something this loop has context to add to.
+            let event = decode_message_event(&value).map_err(|e| match e {
+                StorageError::Serialization(msg) => {
+                    StorageError::Serialization(format!("backfill: bad MessageEvent: {msg}"))
+                }
+                other => other,
+            })?;
             let tx_index = u32::from_be_bytes(key[40..44].try_into().unwrap());
             self.db.put(
                 cf::MESSAGING_SENDER_EVENTS,
@@ -578,8 +754,12 @@ impl<'a> MessagingStore<'a> {
                     key.len()
                 )));
             }
-            let payment: PendingPayment = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(format!("backfill: bad PendingPayment: {}", e)))?;
+            let payment = decode_pending_payment(&value).map_err(|e| match e {
+                StorageError::Serialization(msg) => {
+                    StorageError::Serialization(format!("backfill: bad PendingPayment: {msg}"))
+                }
+                other => other,
+            })?;
             let mut id = [0u8; 32];
             id.copy_from_slice(&key);
             let message_id = Hash::new(id);
@@ -625,7 +805,7 @@ impl<'a> MessagingStore<'a> {
                 continue;
             }
 
-            if let Ok(event) = bincode::deserialize::<MessageEvent>(&value) {
+            if let Ok(event) = decode_message_event(&value) {
                 events.push(event);
                 if events.len() >= limit {
                     break;
@@ -674,7 +854,7 @@ impl<'a> MessagingStore<'a> {
         // Scan all events looking for this message_id
         // Note: This is O(n) - consider adding a tx_hash -> event index for production
         for (_key, value) in self.db.full_iter(cf::MESSAGING_EVENTS)? {
-            if let Ok(event) = bincode::deserialize::<MessageEvent>(&value) {
+            if let Ok(event) = decode_message_event(&value) {
                 if event.message_id.as_bytes() == tx_hash {
                     return Ok(Some(event));
                 }
@@ -690,7 +870,7 @@ impl<'a> MessagingStore<'a> {
 
         // Scan all events looking for this block height
         for (_key, value) in self.db.full_iter(cf::MESSAGING_EVENTS)? {
-            if let Ok(event) = bincode::deserialize::<MessageEvent>(&value) {
+            if let Ok(event) = decode_message_event(&value) {
                 if event.block_height == block_height {
                     events.push(event);
                     if events.len() >= limit {
@@ -709,31 +889,32 @@ impl<'a> MessagingStore<'a> {
 
     /// Get registered public key for an address
     pub fn get_public_key(&self, address: &Address) -> Result<Option<RegisteredPublicKey>> {
-        match self.db.get(cf::MESSAGING_PUBLIC_KEYS, address.as_bytes())? {
-            Some(bytes) => {
-                let key: RegisteredPublicKey = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(Some(key))
-            }
+        match self
+            .db
+            .get(cf::MESSAGING_PUBLIC_KEYS, public_key_key(address))?
+        {
+            Some(bytes) => Ok(Some(decode_public_key(&bytes)?)),
             None => Ok(None),
         }
     }
 
     /// Register or update public key for an address
     pub fn set_public_key(&self, address: &Address, registered_key: &RegisteredPublicKey) -> Result<()> {
-        let bytes = bincode::serialize(registered_key)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::MESSAGING_PUBLIC_KEYS, address.as_bytes(), &bytes)
+        let bytes = encode_public_key(registered_key)?;
+        self.db
+            .put(cf::MESSAGING_PUBLIC_KEYS, public_key_key(address), &bytes)
     }
 
     /// Check if an address has a registered public key
     pub fn has_public_key(&self, address: &Address) -> Result<bool> {
-        self.db.contains(cf::MESSAGING_PUBLIC_KEYS, address.as_bytes())
+        self.db
+            .contains(cf::MESSAGING_PUBLIC_KEYS, public_key_key(address))
     }
 
     /// Delete registered public key (for key rotation cleanup if needed)
     pub fn delete_public_key(&self, address: &Address) -> Result<()> {
-        self.db.delete(cf::MESSAGING_PUBLIC_KEYS, address.as_bytes())
+        self.db
+            .delete(cf::MESSAGING_PUBLIC_KEYS, public_key_key(address))
     }
 
     /// Iterate every registered public key in the CF.
@@ -748,8 +929,7 @@ impl<'a> MessagingStore<'a> {
             addr_bytes.copy_from_slice(&key);
             let address = Address::new(addr_bytes);
 
-            let registered: RegisteredPublicKey = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let registered = decode_public_key(&value)?;
 
             out.push((address, registered));
         }

@@ -162,3 +162,60 @@ fn backfill_fails_on_malformed_primary_and_leaves_marker_unset() {
     // Still ungated: a re-run re-attempts and fails again (proves no marker).
     assert!(store.backfill_indexes().is_err());
 }
+
+/// The backfill's context is added to the decode message, not wrapped around
+/// the error.
+///
+/// The parent produced exactly one `Serialization error:` prefix, because it
+/// formatted the BINCODE error. Routing the decode through the shared helper
+/// made the inner value a `StorageError` whose own Display carries that prefix,
+/// so formatting it again nested one inside the other.
+///
+/// The expected text is written out as a LITERAL rather than rebuilt from the
+/// decoder these tests are checking: an expectation derived from the code under
+/// test moves with it, and this one has to stay pinned to what the PARENT
+/// produced. `io error: unexpected end of file` is bincode's message for a
+/// truncated input.
+#[test]
+fn a_malformed_event_row_keeps_the_parent_backfill_message() {
+    let (db, _dir) = temp_db();
+    // A well-FORMED key (44 bytes) with a malformed value: the length checks
+    // pass and the decode is what fails, which is the path under test.
+    db.put(cf::MESSAGING_EVENTS, &[7u8; 44], b"not an event")
+        .unwrap();
+
+    let text = MessagingStore::new(&db)
+        .backfill_indexes()
+        .unwrap_err()
+        .to_string();
+
+    assert_eq!(
+        text, "Serialization error: backfill: bad MessageEvent: io error: unexpected end of file",
+        "the parent's text, unchanged"
+    );
+    assert_eq!(
+        text.matches("Serialization error:").count(),
+        1,
+        "exactly one prefix: nesting the error inside a second Serialization \
+         produced two, which is the regression this pins"
+    );
+}
+
+#[test]
+fn a_malformed_pending_payment_row_keeps_the_parent_backfill_message() {
+    let (db, _dir) = temp_db();
+    // 32 bytes exactly, so the key check passes and the decode fails.
+    db.put(cf::MESSAGING_PENDING_PAYMENTS, &[9u8; 32], b"not a payment")
+        .unwrap();
+
+    let text = MessagingStore::new(&db)
+        .backfill_indexes()
+        .unwrap_err()
+        .to_string();
+
+    assert_eq!(
+        text,
+        "Serialization error: backfill: bad PendingPayment: io error: unexpected end of file"
+    );
+    assert_eq!(text.matches("Serialization error:").count(), 1);
+}
