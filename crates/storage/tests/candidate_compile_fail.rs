@@ -10,6 +10,24 @@ const CONTROL: &str = "let mut c = sumchain_storage::candidate::CandidateExecuti
      let mut v = c.view();\n\
      let _ = v.put(sumchain_storage::db::cf::STATE, b\"k\", b\"v\");";
 
+/// The directory holding this workspace's compiled rlibs.
+///
+/// Derived from THIS TEST BINARY's own path, not from the manifest directory.
+/// An integration test runs from `<target>/debug/deps/`, so its parent is the
+/// deps directory whatever `CARGO_TARGET_DIR` is set to. The previous version
+/// hardcoded `<manifest>/../../target/debug/deps`, which is only correct for
+/// the default target directory: under any isolated target dir it pointed at
+/// an unrelated tree (or nothing), so this test failed for a reason that had
+/// nothing to do with the API under test. Every gate that isolates its target
+/// directory -- which this project does whenever it compares two trees --
+/// tripped over it.
+fn deps_dir() -> std::path::PathBuf {
+    let exe = std::env::current_exe().expect("test binary path");
+    exe.parent()
+        .expect("test binary has a parent directory")
+        .to_path_buf()
+}
+
 /// The rlib to compile probes against.
 ///
 /// Chosen by trying candidates until one compiles [`CONTROL`], newest first —
@@ -20,7 +38,7 @@ const CONTROL: &str = "let mut c = sumchain_storage::candidate::CandidateExecuti
 /// the API under test, which is exactly the failure mode a positive control
 /// exists to catch.
 fn working_rlib() -> String {
-    let deps = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/deps");
+    let deps = deps_dir();
     let mut candidates: Vec<(std::time::SystemTime, String)> = Vec::new();
     for e in std::fs::read_dir(&deps).expect("read deps dir") {
         let path = e.expect("entry").path();
@@ -61,7 +79,7 @@ fn compile_with(body: &str, rlib: &str) -> (bool, String) {
          fn probe(db: &sumchain_storage::db::Database) {{\n{body}\n}}\n"
     );
     std::fs::write(&src, program).expect("write probe");
-    let deps = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/deps");
+    let deps = deps_dir();
 
     let out = std::process::Command::new("rustc")
         .args(["--edition", "2021", "--crate-type", "bin", "-o"])
