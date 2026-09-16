@@ -1146,6 +1146,22 @@ fn migrated_execution_paths_take_no_self_receiver() {
         ("messaging_executor.rs", "fn check_rate_limit("),
         ("messaging_executor.rs", "fn check_spam_restrictions("),
         ("messaging_executor.rs", "fn check_recipient_filter("),
+        // Tax. Six families behind five accessors plus the index append; the
+        // executor is a unit struct, so no operation can reach a database.
+        ("tax_view.rs", "fn v_get_claim_type("),
+        ("tax_view.rs", "fn v_put_claim_type("),
+        ("tax_view.rs", "fn v_get_issuer("),
+        ("tax_view.rs", "fn v_put_issuer("),
+        ("tax_view.rs", "fn v_get_policy("),
+        ("tax_view.rs", "fn v_put_policy("),
+        ("tax_view.rs", "fn v_get_proof("),
+        ("tax_view.rs", "fn v_put_proof("),
+        ("tax_view.rs", "fn v_delete_proof("),
+        ("tax_view.rs", "fn v_get_subject_proof_ids("),
+        ("tax_view.rs", "fn v_add_to_subject_index("),
+        ("tax_view.rs", "fn v_put_disclosure("),
+        ("tax_view.rs", "fn v_get_disclosure("),
+        ("tax_executor.rs", "fn execute("),
         // Policy accounts. Six operations, all of them associated functions
         // taking the block's view: the executor is a unit struct now, so there
         // is no `self.db` for a committed write to come from.

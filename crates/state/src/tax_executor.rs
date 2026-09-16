@@ -3,16 +3,13 @@
 //! A minimal implementation that handles core tax operations.
 
 use sumchain_storage::exec_view::ExecutionView;
-use std::sync::Arc;
 
-use sumchain_genesis::ChainParams;
 use sumchain_primitives::{
     Address, Balance, BlockHeight, Hash, Timestamp,
     TaxClaimTypeEntry, TaxIssuer, TaxIssuerStatus, TaxOperation,
     TaxPolicy, TaxProofEnvelope, TaxDisclosureEnvelope, TaxTxData,
     ClaimTypeStatus,
 };
-use sumchain_storage::{Database, TaxStore};
 use tracing::debug;
 
 use crate::{Result, StateError, StateManager};
@@ -44,22 +41,19 @@ impl TaxExecutionResult {
     }
 }
 
-/// Tax executor for SRC-82X transactions
-pub struct TaxExecutor {
-    db: Arc<Database>,
-    #[allow(dead_code)]
-    params: ChainParams,
-}
+/// Tax executor for SRC-82X transactions.
+///
+/// No database handle, by construction: every operation takes the block's
+/// `ExecutionView` and no `self`, so `self.db` is not something this file can
+/// name. The committed twins stay in `sumchain_storage::tax_store` for the RPC
+/// server.
+pub struct TaxExecutor;
 
 impl TaxExecutor {
-    pub fn new(db: Arc<Database>, params: ChainParams) -> Self {
-        Self { db, params }
-    }
-
     /// Execute a Tax transaction
     #[allow(clippy::too_many_arguments)]
     pub fn execute(
-        &self, view: &mut ExecutionView<'_, '_>,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &TaxTxData,
         proposer: &Address,
@@ -69,21 +63,19 @@ impl TaxExecutor {
         _tx_index: u32,
         _tx_hash: Hash,
     ) -> Result<TaxExecutionResult> {
-        let store = TaxStore::new(&self.db);
-
         match data.operation {
             TaxOperation::RegisterClaimType => {
                 let entry: TaxClaimTypeEntry = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                if store.claim_types().get(&entry.claim_type)?.is_some() {
+                if Self::v_get_claim_type(view, &entry.claim_type)?.is_some() {
                     return Ok(TaxExecutionResult::failure("Already exists"));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.claim_types().put(&entry)?;
+                Self::v_put_claim_type(view, &entry)?;
                 debug!("Claim type registered: {}", entry.claim_type);
                 Ok(TaxExecutionResult::success())
             }
@@ -92,14 +84,14 @@ impl TaxExecutor {
                 let entry: TaxClaimTypeEntry = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                if store.claim_types().get(&entry.claim_type)?.is_none() {
+                if Self::v_get_claim_type(view, &entry.claim_type)?.is_none() {
                     return Ok(TaxExecutionResult::failure("Not found"));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.claim_types().put(&entry)?;
+                Self::v_put_claim_type(view, &entry)?;
                 Ok(TaxExecutionResult::success())
             }
 
@@ -109,7 +101,7 @@ impl TaxExecutor {
                 let d: Data = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let mut entry = match store.claim_types().get(&d.claim_type)? {
+                let mut entry = match Self::v_get_claim_type(view, &d.claim_type)? {
                     Some(e) => e,
                     None => return Ok(TaxExecutionResult::failure("Not found")),
                 };
@@ -118,7 +110,7 @@ impl TaxExecutor {
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
                 entry.status = ClaimTypeStatus::Deprecated;
-                store.claim_types().put(&entry)?;
+                Self::v_put_claim_type(view, &entry)?;
                 Ok(TaxExecutionResult::success())
             }
 
@@ -130,14 +122,14 @@ impl TaxExecutor {
                     return Ok(TaxExecutionResult::failure("Address must be sender"));
                 }
 
-                if store.issuers().get(sender)?.is_some() {
+                if Self::v_get_issuer(view, sender)?.is_some() {
                     return Ok(TaxExecutionResult::failure("Already registered"));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.issuers().put(&issuer)?;
+                Self::v_put_issuer(view, &issuer)?;
                 debug!("Tax issuer registered: {}", issuer.address);
                 Ok(TaxExecutionResult::success())
             }
@@ -150,14 +142,14 @@ impl TaxExecutor {
                     return Ok(TaxExecutionResult::failure("Can only update own"));
                 }
 
-                if store.issuers().get(sender)?.is_none() {
+                if Self::v_get_issuer(view, sender)?.is_none() {
                     return Ok(TaxExecutionResult::failure("Not registered"));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.issuers().put(&issuer)?;
+                Self::v_put_issuer(view, &issuer)?;
                 Ok(TaxExecutionResult::success())
             }
 
@@ -167,7 +159,7 @@ impl TaxExecutor {
                 let d: Data = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let mut issuer = match store.issuers().get(&d.issuer_address)? {
+                let mut issuer = match Self::v_get_issuer(view, &d.issuer_address)? {
                     Some(i) => i,
                     None => return Ok(TaxExecutionResult::failure("Not found")),
                 };
@@ -186,7 +178,7 @@ impl TaxExecutor {
                     TaxIssuerStatus::Revoked
                 };
                 issuer.updated_at = block_timestamp;
-                store.issuers().put(&issuer)?;
+                Self::v_put_issuer(view, &issuer)?;
                 Ok(TaxExecutionResult::success())
             }
 
@@ -198,7 +190,7 @@ impl TaxExecutor {
                     return Ok(TaxExecutionResult::failure("Creator must be sender"));
                 }
 
-                if store.policies().get(&policy.policy_id)?.is_some() {
+                if Self::v_get_policy(view, &policy.policy_id)?.is_some() {
                     return Ok(TaxExecutionResult::failure("Already exists"));
                 }
 
@@ -206,7 +198,7 @@ impl TaxExecutor {
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
                 let policy_id = policy.policy_id;
-                store.policies().put(&policy)?;
+                Self::v_put_policy(view, &policy)?;
                 debug!("Tax policy created: {:?}", policy_id);
                 Ok(TaxExecutionResult::success_with_policy(policy_id))
             }
@@ -215,7 +207,7 @@ impl TaxExecutor {
                 let policy: TaxPolicy = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let existing = match store.policies().get(&policy.policy_id)? {
+                let existing = match Self::v_get_policy(view, &policy.policy_id)? {
                     Some(p) => p,
                     None => return Ok(TaxExecutionResult::failure("Not found")),
                 };
@@ -228,7 +220,7 @@ impl TaxExecutor {
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
                 let policy_id = policy.policy_id;
-                store.policies().put(&policy)?;
+                Self::v_put_policy(view, &policy)?;
                 Ok(TaxExecutionResult::success_with_policy(policy_id))
             }
 
@@ -236,7 +228,7 @@ impl TaxExecutor {
                 let proof: TaxProofEnvelope = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let issuer = match store.issuers().get(sender)? {
+                let issuer = match Self::v_get_issuer(view, sender)? {
                     Some(i) => i,
                     None => return Ok(TaxExecutionResult::failure("Not registered")),
                 };
@@ -249,7 +241,7 @@ impl TaxExecutor {
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
                 let proof_id = proof.proof_id;
-                store.proofs().put(&proof)?;
+                Self::v_put_proof(view, &proof)?;
                 debug!("Tax proof issued: {:?}", proof_id);
                 Ok(TaxExecutionResult::success_with_proof(proof_id))
             }
@@ -260,7 +252,7 @@ impl TaxExecutor {
                 let d: Data = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let issuer = match store.issuers().get(sender)? {
+                let issuer = match Self::v_get_issuer(view, sender)? {
                     Some(i) => i,
                     None => return Ok(TaxExecutionResult::failure("Not registered")),
                 };
@@ -269,14 +261,14 @@ impl TaxExecutor {
                     return Ok(TaxExecutionResult::failure("Not active"));
                 }
 
-                if store.proofs().get(&d.subject_nullifier)?.is_none() {
+                if Self::v_get_proof(view, &d.subject_nullifier)?.is_none() {
                     return Ok(TaxExecutionResult::failure("Not found"));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.proofs().delete(&d.subject_nullifier)?;
+                Self::v_delete_proof(view, &d.subject_nullifier)?;
                 Ok(TaxExecutionResult::success())
             }
 
@@ -296,7 +288,7 @@ impl TaxExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.disclosures().put(&disclosure)?;
+                Self::v_put_disclosure(view, &disclosure)?;
                 debug!("Disclosure attached: {:?}", disclosure.payload_hash);
                 Ok(TaxExecutionResult::success())
             }
@@ -308,6 +300,7 @@ impl TaxExecutor {
 #[cfg(all(test, feature = "legacy_tests"))]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use sumchain_primitives::TaxIssuerClass;
     use sumchain_storage::Database;
     use tempfile::TempDir;
@@ -320,14 +313,8 @@ mod tests {
     }
 
     #[test]
-    fn test_tax_executor_creation() {
-        let (db, _dir, _state) = setup();
-        let _executor = TaxExecutor::new(db, ChainParams::default());
-    }
-
-    #[test]
     fn test_register_issuer() {
-        let (db, _dir, state) = setup();
+        let (db, _dir, _state) = setup();
         // A block's candidate, opened here because a `#[test]` function
         // cannot take one as a parameter. An earlier scripted signature
         // rewrite added `view` to the parameter list of every test in this
@@ -335,7 +322,6 @@ mod tests {
         // out of sight.
         let mut overlay = sumchain_storage::overlay::ApplicationOverlay::new(&db, 1 << 20);
         let view = &mut sumchain_storage::exec_view::ExecutionView::new(&mut overlay);
-        let executor = TaxExecutor::new(db.clone(), ChainParams::default());
 
         let issuer_addr = Address::new([1u8; 20]);
         let proposer = Address::new([99u8; 20]);
@@ -358,14 +344,25 @@ mod tests {
             data: bincode::serialize(&issuer).unwrap(),
         };
 
-        let result = executor.execute(
-            &issuer_addr, &tx_data, &state, &proposer, 1000, 100, 1000000, 0, Hash::default(),
-        ).unwrap();
+        let result = TaxExecutor::execute(
+            view,
+            &issuer_addr,
+            &tx_data,
+            &proposer,
+            1000,
+            100,
+            1000000,
+            0,
+            Hash::default(),
+        )
+        .unwrap();
 
         assert!(result.success, "Register issuer failed: {:?}", result.error);
 
-        let store = TaxStore::new(&db);
-        let retrieved = store.issuers().get(&issuer_addr).unwrap().unwrap();
+        // Read the CANDIDATE: this executor stages now.
+        let retrieved = TaxExecutor::v_get_issuer(view, &issuer_addr)
+            .unwrap()
+            .unwrap();
         assert_eq!(retrieved.tax_class, TaxIssuerClass::TaxAuthority);
     }
 }

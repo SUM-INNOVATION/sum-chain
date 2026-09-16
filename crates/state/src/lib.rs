@@ -41,6 +41,7 @@ pub mod staking_view;
 pub mod state;
 pub mod storage_metadata;
 pub mod tax_executor;
+pub mod tax_view;
 pub mod token_executor;
 pub mod token_view;
 pub mod validator_quorum;

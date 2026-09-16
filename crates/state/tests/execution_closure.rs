@@ -232,23 +232,17 @@ const MANIFEST: &[(&str, &str, &str, &str, usize)] = &[
     ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "PropertyProofStore::put", "PROPERTY_PROOFS", 1),
     ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "TitleEventStore::put", "PROPERTY_ASSET_TITLE_INDEX+PROPERTY_TITLE_EVENTS", 2),
     ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "TitleEventStore::update_status", "PROPERTY_TITLE_EVENTS", 3),
-    ("crates/state/src/tax_executor.rs", "TaxExecutor::execute", "TaxClaimTypeStore::put", "TAX_CLAIM_TYPES", 3),
-    ("crates/state/src/tax_executor.rs", "TaxExecutor::execute", "TaxDisclosureStore::put", "TAX_DISCLOSURES", 1),
-    ("crates/state/src/tax_executor.rs", "TaxExecutor::execute", "TaxIssuerStore::put", "TAX_ISSUERS", 3),
-    ("crates/state/src/tax_executor.rs", "TaxExecutor::execute", "TaxPolicyStore::put", "TAX_POLICIES", 2),
-    ("crates/state/src/tax_executor.rs", "TaxExecutor::execute", "TaxProofStore::delete", "TAX_PROOFS", 1),
-    ("crates/state/src/tax_executor.rs", "TaxExecutor::execute", "TaxProofStore::put", "TAX_PROOFS+TAX_SUBJECT_INDEX", 1),
 ];
 
 /// Occurrences, not rows: a caller reaching the same mutator three times is
 /// three places to fix.
-const MANIFEST_OCCURRENCES: usize = 207;
+const MANIFEST_OCCURRENCES: usize = 196;
 
 /// Application column families a block can still commit to directly.
 ///
 /// ONLY EVER DECREASE. Recorded at `1687789`. Lower than the 116 the unrooted
 /// audit reported, for the reason in [`UNREACHED_MUTATORS`].
-const LEDGER_CF_COUNT: usize = 73;
+const LEDGER_CF_COUNT: usize = 67;
 
 /// Functions that commit application state but that no entry point reaches.
 ///
@@ -375,7 +369,7 @@ const ARMS: &[(&str, ArmKind, &str)] = &[
     ("StorageMetadata", ArmKind::Overlay, "storage_metadata.rs"),
     ("StorageMetadataV2", ArmKind::Overlay, "storage_metadata.rs"),
     ("Supply", ArmKind::Overlay, "supply.rs"),
-    ("Tax", ArmKind::Committed, "tax_executor.rs -> TaxStore sub-stores"),
+    ("Tax", ArmKind::Overlay, "tax_executor.rs -> tax_view"),
     ("Token", ArmKind::Overlay, "token_executor.rs -> TokenExecutor::v_* -> candidate"),
     ("Transfer", ArmKind::Overlay, "executor.rs fee/transfer -> StateManager::v_transfer -> candidate cf::STATE"),
 ];
@@ -1937,7 +1931,7 @@ fn every_dispatcher_arm_is_declared() {
     let mixed = ARMS.iter().filter(|(_, k, _)| *k == ArmKind::Mixed).count();
     assert_eq!(
         (overlay, committed, mixed),
-        (21, 9, 0),
+        (22, 8, 0),
         "the overlay/committed/mixed split changed. Moving an arm from \
          Committed to Overlay is progress — update this and the manifest \
          together; any other movement is not."

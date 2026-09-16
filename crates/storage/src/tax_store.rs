@@ -22,6 +22,95 @@ use crate::{Result, StorageError};
 // Tax Claim Type Registry Storage (SRC-821)
 // =============================================================================
 
+// =============================================================================
+// Shared key layout and codec
+// =============================================================================
+//
+// One builder per row and one codec per value, called by the committed stores
+// below and by the candidate surface in `sumchain_state::tax_view`. Every value
+// here is bincode and every key is the identifier itself, unprefixed -- which
+// is worth saying once, in one place, rather than five times across five
+// stores where one of them could quietly drift.
+
+/// Claim types are keyed by the claim-type STRING's bytes, not by a hash.
+pub fn claim_type_key(claim_type: &str) -> &[u8] {
+    claim_type.as_bytes()
+}
+
+/// Issuers are keyed by address.
+pub fn issuer_key(address: &Address) -> &[u8] {
+    address.as_ref()
+}
+
+/// Policies are keyed by policy id.
+pub fn policy_key(policy_id: &PolicyId) -> &[u8] {
+    policy_id
+}
+
+/// Proofs are keyed by proof id.
+pub fn proof_key(proof_id: &ProofId) -> &[u8] {
+    proof_id
+}
+
+/// The subject index is keyed by subject nullifier, and its VALUE is a bincode
+/// `Vec<ProofId>` -- an accumulating list, not a presence marker.
+pub fn subject_index_key(subject_nullifier: &[u8; 32]) -> &[u8] {
+    subject_nullifier
+}
+
+/// Disclosures are keyed by payload hash.
+pub fn disclosure_key(payload_hash: &[u8; 32]) -> &[u8] {
+    payload_hash
+}
+
+pub fn encode_claim_type(entry: &TaxClaimTypeEntry) -> Result<Vec<u8>> {
+    bincode::serialize(entry).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_claim_type(bytes: &[u8]) -> Result<TaxClaimTypeEntry> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_issuer(issuer: &TaxIssuer) -> Result<Vec<u8>> {
+    bincode::serialize(issuer).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_issuer(bytes: &[u8]) -> Result<TaxIssuer> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_policy(policy: &TaxPolicy) -> Result<Vec<u8>> {
+    bincode::serialize(policy).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_policy(bytes: &[u8]) -> Result<TaxPolicy> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_proof(proof: &TaxProofEnvelope) -> Result<Vec<u8>> {
+    bincode::serialize(proof).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_proof(bytes: &[u8]) -> Result<TaxProofEnvelope> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_proof_ids(ids: &[ProofId]) -> Result<Vec<u8>> {
+    bincode::serialize(ids).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_proof_ids(bytes: &[u8]) -> Result<Vec<ProofId>> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_disclosure(d: &TaxDisclosureEnvelope) -> Result<Vec<u8>> {
+    bincode::serialize(d).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_disclosure(bytes: &[u8]) -> Result<TaxDisclosureEnvelope> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
 /// Storage for Tax Claim Type Registry (SRC-821)
 pub struct TaxClaimTypeStore<'a> {
     db: &'a Database,
@@ -34,35 +123,31 @@ impl<'a> TaxClaimTypeStore<'a> {
 
     /// Register a new claim type
     pub fn put(&self, entry: &TaxClaimTypeEntry) -> Result<()> {
-        let key = entry.claim_type.as_bytes();
-        let bytes =
-            bincode::serialize(entry).map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::TAX_CLAIM_TYPES, key, &bytes)
+        self.db.put(
+            cf::TAX_CLAIM_TYPES,
+            claim_type_key(&entry.claim_type),
+            &encode_claim_type(entry)?,
+        )
     }
 
     /// Get a claim type entry
     pub fn get(&self, claim_type: &TaxClaimType) -> Result<Option<TaxClaimTypeEntry>> {
-        match self.db.get(cf::TAX_CLAIM_TYPES, claim_type.as_bytes())? {
-            Some(bytes) => {
-                let entry: TaxClaimTypeEntry = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(Some(entry))
-            }
+        match self.db.get(cf::TAX_CLAIM_TYPES, claim_type_key(claim_type))? {
+            Some(bytes) => Ok(Some(decode_claim_type(&bytes)?)),
             None => Ok(None),
         }
     }
 
     /// Check if claim type exists
     pub fn exists(&self, claim_type: &TaxClaimType) -> Result<bool> {
-        self.db.contains(cf::TAX_CLAIM_TYPES, claim_type.as_bytes())
+        self.db.contains(cf::TAX_CLAIM_TYPES, claim_type_key(claim_type))
     }
 
     /// List all registered claim types
     pub fn list_all(&self) -> Result<Vec<TaxClaimTypeEntry>> {
         let mut entries = Vec::new();
         for (_, value) in self.db.iter(cf::TAX_CLAIM_TYPES)? {
-            let entry: TaxClaimTypeEntry = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let entry = decode_claim_type(&value)?;
             entries.push(entry);
         }
         Ok(entries)
@@ -72,8 +157,7 @@ impl<'a> TaxClaimTypeStore<'a> {
     pub fn list_by_prefix(&self, prefix: &str) -> Result<Vec<TaxClaimTypeEntry>> {
         let mut entries = Vec::new();
         for (_, value) in self.db.prefix_iter(cf::TAX_CLAIM_TYPES, prefix.as_bytes())? {
-            let entry: TaxClaimTypeEntry = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let entry = decode_claim_type(&value)?;
             entries.push(entry);
         }
         Ok(entries)
@@ -115,19 +199,17 @@ impl<'a> TaxIssuerStore<'a> {
 
     /// Register a tax issuer (keyed by address)
     pub fn put(&self, issuer: &TaxIssuer) -> Result<()> {
-        let bytes =
-            bincode::serialize(issuer).map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::TAX_ISSUERS, issuer.address.as_ref(), &bytes)
+        self.db.put(
+            cf::TAX_ISSUERS,
+            issuer_key(&issuer.address),
+            &encode_issuer(issuer)?,
+        )
     }
 
     /// Get a tax issuer by address
     pub fn get(&self, address: &Address) -> Result<Option<TaxIssuer>> {
-        match self.db.get(cf::TAX_ISSUERS, address.as_ref())? {
-            Some(bytes) => {
-                let issuer: TaxIssuer = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(Some(issuer))
-            }
+        match self.db.get(cf::TAX_ISSUERS, issuer_key(address))? {
+            Some(bytes) => Ok(Some(decode_issuer(&bytes)?)),
             None => Ok(None),
         }
     }
@@ -139,7 +221,7 @@ impl<'a> TaxIssuerStore<'a> {
 
     /// Check if issuer exists
     pub fn exists(&self, address: &Address) -> Result<bool> {
-        self.db.contains(cf::TAX_ISSUERS, address.as_ref())
+        self.db.contains(cf::TAX_ISSUERS, issuer_key(address))
     }
 
     /// Update issuer status
@@ -169,8 +251,7 @@ impl<'a> TaxIssuerStore<'a> {
     ) -> Result<Vec<TaxIssuer>> {
         let mut issuers = Vec::new();
         for (_, value) in self.db.iter(cf::TAX_ISSUERS)? {
-            let issuer: TaxIssuer = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let issuer = decode_issuer(&value)?;
             if issuer.tax_class == class {
                 issuers.push(issuer);
             }
@@ -182,8 +263,7 @@ impl<'a> TaxIssuerStore<'a> {
     pub fn list_active(&self) -> Result<Vec<TaxIssuer>> {
         let mut issuers = Vec::new();
         for (_, value) in self.db.iter(cf::TAX_ISSUERS)? {
-            let issuer: TaxIssuer = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let issuer = decode_issuer(&value)?;
             if issuer.status == TaxIssuerStatus::Active {
                 issuers.push(issuer);
             }
@@ -208,34 +288,31 @@ impl<'a> TaxPolicyStore<'a> {
 
     /// Store a tax policy
     pub fn put(&self, policy: &TaxPolicy) -> Result<()> {
-        let bytes =
-            bincode::serialize(policy).map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::TAX_POLICIES, &policy.policy_id, &bytes)
+        self.db.put(
+            cf::TAX_POLICIES,
+            policy_key(&policy.policy_id),
+            &encode_policy(policy)?,
+        )
     }
 
     /// Get a tax policy by ID
     pub fn get(&self, policy_id: &PolicyId) -> Result<Option<TaxPolicy>> {
-        match self.db.get(cf::TAX_POLICIES, policy_id)? {
-            Some(bytes) => {
-                let policy: TaxPolicy = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(Some(policy))
-            }
+        match self.db.get(cf::TAX_POLICIES, policy_key(policy_id))? {
+            Some(bytes) => Ok(Some(decode_policy(&bytes)?)),
             None => Ok(None),
         }
     }
 
     /// Check if policy exists
     pub fn exists(&self, policy_id: &PolicyId) -> Result<bool> {
-        self.db.contains(cf::TAX_POLICIES, policy_id)
+        self.db.contains(cf::TAX_POLICIES, policy_key(policy_id))
     }
 
     /// List all policies
     pub fn list_all(&self) -> Result<Vec<TaxPolicy>> {
         let mut policies = Vec::new();
         for (_, value) in self.db.iter(cf::TAX_POLICIES)? {
-            let policy: TaxPolicy = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let policy = decode_policy(&value)?;
             policies.push(policy);
         }
         Ok(policies)
@@ -248,8 +325,7 @@ impl<'a> TaxPolicyStore<'a> {
     ) -> Result<Vec<TaxPolicy>> {
         let mut policies = Vec::new();
         for (_, value) in self.db.iter(cf::TAX_POLICIES)? {
-            let policy: TaxPolicy = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let policy = decode_policy(&value)?;
             if policy.template == template {
                 policies.push(policy);
             }
@@ -274,9 +350,8 @@ impl<'a> TaxProofStore<'a> {
 
     /// Store a tax proof envelope
     pub fn put(&self, proof: &TaxProofEnvelope) -> Result<()> {
-        let bytes =
-            bincode::serialize(proof).map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::TAX_PROOFS, &proof.proof_id, &bytes)?;
+        self.db
+            .put(cf::TAX_PROOFS, proof_key(&proof.proof_id), &encode_proof(proof)?)?;
 
         // Index by subject nullifier
         self.add_to_subject_index(&proof.subject_nullifier, &proof.proof_id)?;
@@ -286,24 +361,20 @@ impl<'a> TaxProofStore<'a> {
 
     /// Get a tax proof envelope by ID
     pub fn get(&self, proof_id: &ProofId) -> Result<Option<TaxProofEnvelope>> {
-        match self.db.get(cf::TAX_PROOFS, proof_id)? {
-            Some(bytes) => {
-                let proof: TaxProofEnvelope = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(Some(proof))
-            }
+        match self.db.get(cf::TAX_PROOFS, proof_key(proof_id))? {
+            Some(bytes) => Ok(Some(decode_proof(&bytes)?)),
             None => Ok(None),
         }
     }
 
     /// Check if proof exists
     pub fn exists(&self, proof_id: &ProofId) -> Result<bool> {
-        self.db.contains(cf::TAX_PROOFS, proof_id)
+        self.db.contains(cf::TAX_PROOFS, proof_key(proof_id))
     }
 
     /// Delete a proof
     pub fn delete(&self, proof_id: &ProofId) -> Result<()> {
-        self.db.delete(cf::TAX_PROOFS, proof_id)
+        self.db.delete(cf::TAX_PROOFS, proof_key(proof_id))
     }
 
     /// Get proofs by subject nullifier
@@ -335,8 +406,7 @@ impl<'a> TaxProofStore<'a> {
     pub fn get_by_profile(&self, profile_id: &str) -> Result<Vec<TaxProofEnvelope>> {
         let mut proofs = Vec::new();
         for (_, value) in self.db.iter(cf::TAX_PROOFS)? {
-            let proof: TaxProofEnvelope = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let proof = decode_proof(&value)?;
             if proof.profile_id == profile_id {
                 proofs.push(proof);
             }
@@ -353,21 +423,18 @@ impl<'a> TaxProofStore<'a> {
         let mut proof_ids = self.get_subject_proof_ids(subject_nullifier)?;
         if !proof_ids.contains(proof_id) {
             proof_ids.push(*proof_id);
-            let bytes = bincode::serialize(&proof_ids)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
-            self.db
-                .put(cf::TAX_SUBJECT_INDEX, subject_nullifier, &bytes)?;
+            self.db.put(
+                cf::TAX_SUBJECT_INDEX,
+                subject_index_key(subject_nullifier),
+                &encode_proof_ids(&proof_ids)?,
+            )?;
         }
         Ok(())
     }
 
     fn get_subject_proof_ids(&self, subject_nullifier: &[u8; 32]) -> Result<Vec<ProofId>> {
-        match self.db.get(cf::TAX_SUBJECT_INDEX, subject_nullifier)? {
-            Some(bytes) => {
-                let proof_ids: Vec<ProofId> = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(proof_ids)
-            }
+        match self.db.get(cf::TAX_SUBJECT_INDEX, subject_index_key(subject_nullifier))? {
+            Some(bytes) => Ok(decode_proof_ids(&bytes)?),
             None => Ok(Vec::new()),
         }
     }
@@ -390,40 +457,39 @@ impl<'a> TaxDisclosureStore<'a> {
 
     /// Store a tax disclosure envelope (keyed by payload_hash)
     pub fn put(&self, disclosure: &TaxDisclosureEnvelope) -> Result<()> {
-        let bytes = bincode::serialize(disclosure)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db
-            .put(cf::TAX_DISCLOSURES, &disclosure.payload_hash, &bytes)
+        self.db.put(
+            cf::TAX_DISCLOSURES,
+            disclosure_key(&disclosure.payload_hash),
+            &encode_disclosure(disclosure)?,
+        )
     }
 
     /// Get a disclosure envelope by payload hash
     pub fn get(&self, payload_hash: &[u8; 32]) -> Result<Option<TaxDisclosureEnvelope>> {
-        match self.db.get(cf::TAX_DISCLOSURES, payload_hash)? {
-            Some(bytes) => {
-                let disclosure: TaxDisclosureEnvelope = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(Some(disclosure))
-            }
+        match self
+            .db
+            .get(cf::TAX_DISCLOSURES, disclosure_key(payload_hash))?
+        {
+            Some(bytes) => Ok(Some(decode_disclosure(&bytes)?)),
             None => Ok(None),
         }
     }
 
     /// Check if disclosure exists
     pub fn exists(&self, payload_hash: &[u8; 32]) -> Result<bool> {
-        self.db.contains(cf::TAX_DISCLOSURES, payload_hash)
+        self.db.contains(cf::TAX_DISCLOSURES, disclosure_key(payload_hash))
     }
 
     /// Delete a disclosure
     pub fn delete(&self, payload_hash: &[u8; 32]) -> Result<()> {
-        self.db.delete(cf::TAX_DISCLOSURES, payload_hash)
+        self.db.delete(cf::TAX_DISCLOSURES, disclosure_key(payload_hash))
     }
 
     /// Get disclosures by proof ID
     pub fn get_by_proof(&self, proof_id: &ProofId) -> Result<Vec<TaxDisclosureEnvelope>> {
         let mut disclosures = Vec::new();
         for (_, value) in self.db.iter(cf::TAX_DISCLOSURES)? {
-            let disclosure: TaxDisclosureEnvelope = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let disclosure = decode_disclosure(&value)?;
             if disclosure.proof_id.as_ref() == Some(proof_id) {
                 disclosures.push(disclosure);
             }

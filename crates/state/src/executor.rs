@@ -238,7 +238,6 @@ pub struct BlockExecutor {
     nft_executor: NftExecutor,
     contract_executor: ContractExecutorState,
     docclass_executor: DocClassExecutor,
-    tax_executor: TaxExecutor,
     agreement_executor: AgreementExecutor,
     legal_executor: LegalExecutor,
     property_executor: PropertyExecutor,
@@ -337,7 +336,6 @@ impl BlockExecutor {
         let nft_executor = NftExecutor::new(db.clone(), params.clone());
         let contract_executor = ContractExecutorState::new(db.clone(), params.clone());
         let docclass_executor = DocClassExecutor::new(db.clone(), params.clone());
-        let tax_executor = TaxExecutor::new(db.clone(), params.clone());
         let agreement_executor = AgreementExecutor::new(db.clone(), params.clone());
         let legal_executor = LegalExecutor::new(db.clone(), params.clone());
         let property_executor = PropertyExecutor::new(db.clone(), params.clone());
@@ -353,7 +351,6 @@ impl BlockExecutor {
             nft_executor,
             contract_executor,
             docclass_executor,
-            tax_executor,
             agreement_executor,
             legal_executor,
             property_executor,
@@ -809,7 +806,7 @@ impl BlockExecutor {
                     }
                     TxPayload::Tax(tax_data) => {
                         // Execute Tax operation (SRC-82X)
-                        let result = self.tax_executor.execute(view,
+                        let result = TaxExecutor::execute(view,
                             &v2_tx.from,
                             &tax_data,
                             proposer,
@@ -2546,7 +2543,7 @@ impl BlockExecutor {
                 }
 
                 // Execute Tax operation (SRC-82X)
-                let result = self.tax_executor.execute(view,
+                let result = TaxExecutor::execute(view,
                     &tx.from,
                     tax_data,
                     proposer,
