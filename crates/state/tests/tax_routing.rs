@@ -955,7 +955,14 @@ fn without_the_creation_the_same_policy_update_is_refused() {
 // ── Malformed committed rows ─────────────────────────────────────────────────
 
 /// A malformed row makes the routed transaction ERROR; it is never read as
-/// absence.
+/// absence. Canonical state is untouched; the CANDIDATE is not necessarily
+/// empty.
+///
+/// The name says `commit_nothing`, not `stage_nothing`, because one case
+/// legitimately leaves a staged row: `IssueClaim` writes the proof before it
+/// appends to the subject index, so a malformed index row fails with the proof
+/// already in the candidate. The allowed-set assertion below is what the test
+/// actually proves, and the name now matches it.
 ///
 /// This is the difference between "no issuer registered" and "the issuer row is
 /// corrupt", and the guards branch on exactly that. A candidate reader that
@@ -964,7 +971,7 @@ fn without_the_creation_the_same_policy_update_is_refused() {
 /// whose status could not be read. The `v_get_*` readers propagate, and these
 /// prove it through real dispatch rather than by calling the accessor.
 #[test]
-fn malformed_rows_error_through_dispatch_and_stage_nothing() {
+fn malformed_rows_error_through_dispatch_and_commit_nothing() {
     for (family, key, label) in [
         (cf::TAX_CLAIM_TYPES, b"t.a".to_vec(), "claim type"),
         (cf::TAX_ISSUERS, Vec::new(), "issuer"),
