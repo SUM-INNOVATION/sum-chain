@@ -98,18 +98,6 @@ use std::path::{Path, PathBuf};
 /// the execution set entirely — 114 families to 113. Every other row is
 /// untouched: accounts were migrated, nothing else moved.
 const MANIFEST: &[(&str, &str, &str, &str, usize)] = &[
-    ("crates/state/src/agreement_executor.rs", "AgreementExecutor::execute", "AgreementCommitmentStore::mark_party_signed", "AGREEMENT_COMMITMENTS", 1),
-    ("crates/state/src/agreement_executor.rs", "AgreementExecutor::execute", "AgreementCommitmentStore::put", "AGREEMENT_COMMITMENTS+AGREEMENT_PARTY_INDEX", 2),
-    ("crates/state/src/agreement_executor.rs", "AgreementExecutor::execute", "AgreementCommitmentStore::update_status", "AGREEMENT_COMMITMENTS", 3),
-    ("crates/state/src/agreement_executor.rs", "AgreementExecutor::execute", "AgreementProofStore::put", "AGREEMENT_PROOFS", 1),
-    ("crates/state/src/agreement_executor.rs", "AgreementExecutor::execute", "AttestationStore::put", "AGREEMENT_ATTESTATIONS", 1),
-    ("crates/state/src/agreement_executor.rs", "AgreementExecutor::execute", "AttestationStore::update_status", "AGREEMENT_ATTESTATIONS", 2),
-    ("crates/state/src/agreement_executor.rs", "AgreementExecutor::execute", "ExecutorLinkStore::put", "AGREEMENT_EXECUTOR_INDEX+AGREEMENT_EXECUTOR_LINKS", 1),
-    ("crates/state/src/agreement_executor.rs", "AgreementExecutor::execute", "ExecutorLinkStore::update_state", "AGREEMENT_EXECUTOR_LINKS", 5),
-    ("crates/state/src/agreement_executor.rs", "AgreementExecutor::execute", "IpActionStore::put", "AGREEMENT_IP_ACTIONS", 1),
-    ("crates/state/src/agreement_executor.rs", "AgreementExecutor::execute", "IpActionStore::update_status", "AGREEMENT_IP_ACTIONS", 1),
-    ("crates/state/src/agreement_executor.rs", "AgreementExecutor::execute", "SignatureStore::delete", "AGREEMENT_SIGNATURES", 1),
-    ("crates/state/src/agreement_executor.rs", "AgreementExecutor::execute", "SignatureStore::put", "AGREEMENT_SIGNATURES", 1),
     ("crates/state/src/docclass_executor.rs", "DocClassExecutor::create_identity_root", "DocClassEventStore::put", "DOCCLASS_EVENTS", 1),
     ("crates/state/src/docclass_executor.rs", "DocClassExecutor::create_identity_root", "IdentityRootStore::put", "DOCCLASS_IDENTITY_ROOTS+DOCCLASS_SUBJECT_INDEX", 1),
     ("crates/state/src/docclass_executor.rs", "DocClassExecutor::deactivate_identity", "DocClassEventStore::put", "DOCCLASS_EVENTS", 1),
@@ -236,13 +224,13 @@ const MANIFEST: &[(&str, &str, &str, &str, usize)] = &[
 
 /// Occurrences, not rows: a caller reaching the same mutator three times is
 /// three places to fix.
-const MANIFEST_OCCURRENCES: usize = 196;
+const MANIFEST_OCCURRENCES: usize = 176;
 
 /// Application column families a block can still commit to directly.
 ///
 /// ONLY EVER DECREASE. Recorded at `1687789`. Lower than the 116 the unrooted
 /// audit reported, for the reason in [`UNREACHED_MUTATORS`].
-const LEDGER_CF_COUNT: usize = 67;
+const LEDGER_CF_COUNT: usize = 59;
 
 /// Functions that commit application state but that no entry point reaches.
 ///
@@ -302,13 +290,41 @@ enum ArmKind {
 /// executor gains or loses an arm, so a new transaction family cannot arrive
 /// with an undeclared write surface.
 const ARMS: &[(&str, ArmKind, &str)] = &[
-    ("Agreement", ArmKind::Committed, "agreement_executor.rs -> AgreementStore sub-stores"),
-    ("BeaconSetup", ArmKind::Overlay, "beacon_store.rs (revert stays direct, by design)"),
-    ("BeaconSigning", ArmKind::Overlay, "beacon_store.rs (revert stays direct, by design)"),
-    ("ComputePool", ArmKind::Overlay, "compute_pool_store.rs (revert stays direct, by design)"),
-    ("ContractCall", ArmKind::Overlay, "sumc-runtime queues; contract_executor stages into the candidate"),
-    ("ContractDeploy", ArmKind::Overlay, "sumc-runtime queues; contract_executor stages into the candidate"),
-    ("DocClass", ArmKind::Committed, "docclass_executor.rs -> DocClassStore sub-stores"),
+    (
+        "Agreement",
+        ArmKind::Overlay,
+        "agreement_executor.rs -> agreement_view",
+    ),
+    (
+        "BeaconSetup",
+        ArmKind::Overlay,
+        "beacon_store.rs (revert stays direct, by design)",
+    ),
+    (
+        "BeaconSigning",
+        ArmKind::Overlay,
+        "beacon_store.rs (revert stays direct, by design)",
+    ),
+    (
+        "ComputePool",
+        ArmKind::Overlay,
+        "compute_pool_store.rs (revert stays direct, by design)",
+    ),
+    (
+        "ContractCall",
+        ArmKind::Overlay,
+        "sumc-runtime queues; contract_executor stages into the candidate",
+    ),
+    (
+        "ContractDeploy",
+        ArmKind::Overlay,
+        "sumc-runtime queues; contract_executor stages into the candidate",
+    ),
+    (
+        "DocClass",
+        ArmKind::Committed,
+        "docclass_executor.rs -> DocClassStore sub-stores",
+    ),
     ("Education", ArmKind::Overlay, "education_executor.rs"),
     (
         "Employment",
@@ -1931,7 +1947,7 @@ fn every_dispatcher_arm_is_declared() {
     let mixed = ARMS.iter().filter(|(_, k, _)| *k == ArmKind::Mixed).count();
     assert_eq!(
         (overlay, committed, mixed),
-        (22, 8, 0),
+        (23, 7, 0),
         "the overlay/committed/mixed split changed. Moving an arm from \
          Committed to Overlay is progress — update this and the manifest \
          together; any other movement is not."

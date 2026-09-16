@@ -9,9 +9,7 @@
 //! - SRC-846: Agreement Proofs
 
 use sumchain_storage::exec_view::ExecutionView;
-use std::sync::Arc;
 
-use sumchain_genesis::ChainParams;
 use sumchain_primitives::{
     agreement::{
         AgreementCommitment, AgreementOperation, AgreementProofEnvelope, AgreementStatus,
@@ -20,7 +18,6 @@ use sumchain_primitives::{
     },
     Address, Balance, BlockHeight, Hash, Timestamp,
 };
-use sumchain_storage::{AgreementStore, Database};
 use tracing::debug;
 
 use crate::{Result, StateError, StateManager};
@@ -145,21 +142,20 @@ impl AgreementExecutionResult {
 }
 
 /// Agreement executor for SRC-84X transactions
-pub struct AgreementExecutor {
-    db: Arc<Database>,
-    #[allow(dead_code)]
-    params: ChainParams,
-}
+/// No database handle, by construction.
+///
+/// Every operation takes the block's `ExecutionView` and no `self`, so
+/// `self.db` is not something this file can name: a committed write here is a
+/// compile error rather than a review finding. The committed twins stay in
+/// `sumchain_storage::agreement_store` for the RPC server.
+pub struct AgreementExecutor;
 
 impl AgreementExecutor {
-    pub fn new(db: Arc<Database>, params: ChainParams) -> Self {
-        Self { db, params }
-    }
 
     /// Execute an Agreement transaction
     #[allow(clippy::too_many_arguments)]
     pub fn execute(
-        &self, view: &mut ExecutionView<'_, '_>,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &AgreementTxData,
         proposer: &Address,
@@ -169,15 +165,13 @@ impl AgreementExecutor {
         _tx_index: u32,
         _tx_hash: Hash,
     ) -> Result<AgreementExecutionResult> {
-        let store = AgreementStore::new(&self.db);
-
         match data.operation {
             // SRC-841: Agreement Commitment Operations
             AgreementOperation::CommitAgreement => {
                 let agreement: AgreementCommitment = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                if store.agreements().exists(&agreement.agreement_id)? {
+                if Self::v_agreement_exists(view, &agreement.agreement_id)? {
                     return Ok(AgreementExecutionResult::failure("Agreement already exists"));
                 }
 
@@ -185,7 +179,7 @@ impl AgreementExecutor {
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
                 let agreement_id = agreement.agreement_id;
-                store.agreements().put(&agreement)?;
+                Self::v_put_agreement(view, &agreement)?;
                 debug!("Agreement committed: {:?}", agreement_id);
                 Ok(AgreementExecutionResult::success_with_agreement(agreement_id))
             }
@@ -199,14 +193,19 @@ impl AgreementExecutor {
                 let update: UpdateData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                if store.agreements().get(&update.agreement_id)?.is_none() {
+                if Self::v_get_agreement(view, &update.agreement_id)?.is_none() {
                     return Ok(AgreementExecutionResult::failure("Agreement not found"));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.agreements().update_status(&update.agreement_id, update.status, block_timestamp)?;
+                Self::v_update_agreement_status(
+                    view,
+                    &update.agreement_id,
+                    update.status,
+                    block_timestamp,
+                )?;
                 Ok(AgreementExecutionResult::success())
             }
 
@@ -218,7 +217,7 @@ impl AgreementExecutor {
                 let d: TerminateData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                if store.agreements().get(&d.agreement_id)?.is_none() {
+                if Self::v_get_agreement(view, &d.agreement_id)?.is_none() {
                     return Ok(AgreementExecutionResult::failure("Agreement not found"));
                 }
 
@@ -231,7 +230,12 @@ impl AgreementExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.agreements().update_status(&d.agreement_id, new_status, block_timestamp)?;
+                Self::v_update_agreement_status(
+                    view,
+                    &d.agreement_id,
+                    new_status,
+                    block_timestamp,
+                )?;
                 Ok(AgreementExecutionResult::success())
             }
 
@@ -244,7 +248,7 @@ impl AgreementExecutor {
                 let d: SupersedeData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                if store.agreements().get(&d.old_agreement_id)?.is_none() {
+                if Self::v_get_agreement(view, &d.old_agreement_id)?.is_none() {
                     return Ok(AgreementExecutionResult::failure("Old agreement not found"));
                 }
 
@@ -253,11 +257,16 @@ impl AgreementExecutor {
                 StateManager::v_increment_nonce(view, sender)?;
 
                 // Mark old as superseded
-                store.agreements().update_status(&d.old_agreement_id, AgreementStatus::Superseded, block_timestamp)?;
+                Self::v_update_agreement_status(
+                    view,
+                    &d.old_agreement_id,
+                    AgreementStatus::Superseded,
+                    block_timestamp,
+                )?;
 
                 // Store new agreement
                 let new_id = d.new_agreement.agreement_id;
-                store.agreements().put(&d.new_agreement)?;
+                Self::v_put_agreement(view, &d.new_agreement)?;
                 debug!("Agreement superseded: {:?} -> {:?}", d.old_agreement_id, new_id);
                 Ok(AgreementExecutionResult::success_with_agreement(new_id))
             }
@@ -268,11 +277,11 @@ impl AgreementExecutor {
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
                 // Verify agreement exists
-                if store.agreements().get(&signature.agreement_id)?.is_none() {
+                if Self::v_get_agreement(view, &signature.agreement_id)?.is_none() {
                     return Ok(AgreementExecutionResult::failure("Agreement not found"));
                 }
 
-                if store.signatures().exists(&signature.signature_id)? {
+                if Self::v_signature_exists(view, &signature.signature_id)? {
                     return Ok(AgreementExecutionResult::failure("Signature already exists"));
                 }
 
@@ -284,8 +293,8 @@ impl AgreementExecutor {
                 let agreement_id = signature.agreement_id;
                 let party_hash = signature.party_ref.as_hash();
 
-                store.signatures().put(&signature)?;
-                store.agreements().mark_party_signed(&agreement_id, &party_hash, block_timestamp)?;
+                Self::v_put_signature(view, &signature)?;
+                Self::v_mark_party_signed(view, &agreement_id, &party_hash, block_timestamp)?;
 
                 debug!("Agreement signed: {:?} by party {:?}", agreement_id, party_hash);
                 Ok(AgreementExecutionResult::success_with_signature(sig_id))
@@ -299,14 +308,14 @@ impl AgreementExecutor {
                 let d: RevokeData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                if store.signatures().get(&d.signature_id)?.is_none() {
+                if Self::v_get_signature(view, &d.signature_id)?.is_none() {
                     return Ok(AgreementExecutionResult::failure("Signature not found"));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.signatures().delete(&d.signature_id)?;
+                Self::v_delete_signature(view, &d.signature_id)?;
                 Ok(AgreementExecutionResult::success())
             }
 
@@ -328,7 +337,7 @@ impl AgreementExecutor {
                     return Ok(AgreementExecutionResult::failure("Issuer must be sender"));
                 }
 
-                if store.attestations().exists(&attestation.attestation_id)? {
+                if Self::v_attestation_exists(view, &attestation.attestation_id)? {
                     return Ok(AgreementExecutionResult::failure("Attestation already exists"));
                 }
 
@@ -336,7 +345,7 @@ impl AgreementExecutor {
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
                 let att_id = attestation.attestation_id;
-                store.attestations().put(&attestation)?;
+                Self::v_put_attestation(view, &attestation)?;
                 debug!("Attestation created: {:?}", att_id);
                 Ok(AgreementExecutionResult::success_with_attestation(att_id))
             }
@@ -349,7 +358,7 @@ impl AgreementExecutor {
                 let d: RevokeData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let att = match store.attestations().get(&d.attestation_id)? {
+                let att = match Self::v_get_attestation(view, &d.attestation_id)? {
                     Some(a) => a,
                     None => return Ok(AgreementExecutionResult::failure("Attestation not found")),
                 };
@@ -361,7 +370,11 @@ impl AgreementExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.attestations().update_status(&d.attestation_id, AttestationStatus::Revoked)?;
+                Self::v_update_attestation_status(
+                    view,
+                    &d.attestation_id,
+                    AttestationStatus::Revoked,
+                )?;
                 Ok(AgreementExecutionResult::success())
             }
 
@@ -374,7 +387,7 @@ impl AgreementExecutor {
                 let d: UpdateData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let att = match store.attestations().get(&d.attestation_id)? {
+                let att = match Self::v_get_attestation(view, &d.attestation_id)? {
                     Some(a) => a,
                     None => return Ok(AgreementExecutionResult::failure("Attestation not found")),
                 };
@@ -386,7 +399,7 @@ impl AgreementExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.attestations().update_status(&d.attestation_id, d.status)?;
+                Self::v_update_attestation_status(view, &d.attestation_id, d.status)?;
                 Ok(AgreementExecutionResult::success())
             }
 
@@ -395,7 +408,7 @@ impl AgreementExecutor {
                 let action: IpRightsAction = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                if store.ip_actions().exists(&action.action_id)? {
+                if Self::v_ip_action_exists(view, &action.action_id)? {
                     return Ok(AgreementExecutionResult::failure("IP action already exists"));
                 }
 
@@ -403,7 +416,7 @@ impl AgreementExecutor {
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
                 let action_id = action.action_id;
-                store.ip_actions().put(&action)?;
+                Self::v_put_ip_action(view, &action)?;
                 debug!("IP action recorded: {:?}", action_id);
                 Ok(AgreementExecutionResult::success_with_ip_action(action_id))
             }
@@ -416,7 +429,7 @@ impl AgreementExecutor {
                 let d: UpdateData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                if store.ip_actions().get(&d.action_id)?.is_none() {
+                if Self::v_get_ip_action(view, &d.action_id)?.is_none() {
                     return Ok(AgreementExecutionResult::failure("IP action not found"));
                 }
 
@@ -429,7 +442,7 @@ impl AgreementExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.ip_actions().update_status(&d.action_id, new_status)?;
+                Self::v_update_ip_action_status(view, &d.action_id, new_status)?;
                 Ok(AgreementExecutionResult::success())
             }
 
@@ -439,11 +452,11 @@ impl AgreementExecutor {
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
                 // Verify agreement exists
-                if store.agreements().get(&link.agreement_id)?.is_none() {
+                if Self::v_get_agreement(view, &link.agreement_id)?.is_none() {
                     return Ok(AgreementExecutionResult::failure("Agreement not found"));
                 }
 
-                if store.executor_links().exists(&link.link_id)? {
+                if Self::v_executor_link_exists(view, &link.link_id)? {
                     return Ok(AgreementExecutionResult::failure("Executor link already exists"));
                 }
 
@@ -451,7 +464,7 @@ impl AgreementExecutor {
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
                 let link_id = link.link_id;
-                store.executor_links().put(&link)?;
+                Self::v_put_executor_link(view, &link)?;
                 debug!("Executor linked: {:?}", link_id);
                 Ok(AgreementExecutionResult::success_with_link(link_id))
             }
@@ -464,7 +477,7 @@ impl AgreementExecutor {
                 let d: ActivateData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let link = match store.executor_links().get(&d.link_id)? {
+                let link = match Self::v_get_executor_link(view, &d.link_id)? {
                     Some(l) => l,
                     None => return Ok(AgreementExecutionResult::failure("Executor link not found")),
                 };
@@ -476,7 +489,12 @@ impl AgreementExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.executor_links().update_state(&d.link_id, ExecutorState::Active, block_timestamp)?;
+                Self::v_update_executor_state(
+                    view,
+                    &d.link_id,
+                    ExecutorState::Active,
+                    block_timestamp,
+                )?;
                 debug!("Executor activated: {:?}", d.link_id);
                 Ok(AgreementExecutionResult::success())
             }
@@ -489,14 +507,19 @@ impl AgreementExecutor {
                 let d: PauseData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                if store.executor_links().get(&d.link_id)?.is_none() {
+                if Self::v_get_executor_link(view, &d.link_id)?.is_none() {
                     return Ok(AgreementExecutionResult::failure("Executor link not found"));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.executor_links().update_state(&d.link_id, ExecutorState::Paused, block_timestamp)?;
+                Self::v_update_executor_state(
+                    view,
+                    &d.link_id,
+                    ExecutorState::Paused,
+                    block_timestamp,
+                )?;
                 Ok(AgreementExecutionResult::success())
             }
 
@@ -508,7 +531,7 @@ impl AgreementExecutor {
                 let d: ResumeData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let link = match store.executor_links().get(&d.link_id)? {
+                let link = match Self::v_get_executor_link(view, &d.link_id)? {
                     Some(l) => l,
                     None => return Ok(AgreementExecutionResult::failure("Executor link not found")),
                 };
@@ -520,7 +543,12 @@ impl AgreementExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.executor_links().update_state(&d.link_id, ExecutorState::Active, block_timestamp)?;
+                Self::v_update_executor_state(
+                    view,
+                    &d.link_id,
+                    ExecutorState::Active,
+                    block_timestamp,
+                )?;
                 Ok(AgreementExecutionResult::success())
             }
 
@@ -532,14 +560,19 @@ impl AgreementExecutor {
                 let d: TerminateData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                if store.executor_links().get(&d.link_id)?.is_none() {
+                if Self::v_get_executor_link(view, &d.link_id)?.is_none() {
                     return Ok(AgreementExecutionResult::failure("Executor link not found"));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.executor_links().update_state(&d.link_id, ExecutorState::Terminated, block_timestamp)?;
+                Self::v_update_executor_state(
+                    view,
+                    &d.link_id,
+                    ExecutorState::Terminated,
+                    block_timestamp,
+                )?;
                 Ok(AgreementExecutionResult::success())
             }
 
@@ -551,14 +584,19 @@ impl AgreementExecutor {
                 let d: CompleteData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                if store.executor_links().get(&d.link_id)?.is_none() {
+                if Self::v_get_executor_link(view, &d.link_id)?.is_none() {
                     return Ok(AgreementExecutionResult::failure("Executor link not found"));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.executor_links().update_state(&d.link_id, ExecutorState::Completed, block_timestamp)?;
+                Self::v_update_executor_state(
+                    view,
+                    &d.link_id,
+                    ExecutorState::Completed,
+                    block_timestamp,
+                )?;
                 Ok(AgreementExecutionResult::success())
             }
 
@@ -567,7 +605,7 @@ impl AgreementExecutor {
                 let proof: AgreementProofEnvelope = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                if store.proofs().exists(&proof.proof_id)? {
+                if Self::v_proof_exists(view, &proof.proof_id)? {
                     return Ok(AgreementExecutionResult::failure("Proof already exists"));
                 }
 
@@ -575,7 +613,7 @@ impl AgreementExecutor {
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
                 let proof_id = proof.proof_id;
-                store.proofs().put(&proof)?;
+                Self::v_put_proof(view, &proof)?;
                 debug!("Agreement proof submitted: {:?}", proof_id);
                 Ok(AgreementExecutionResult::success_with_proof(proof_id))
             }
@@ -596,6 +634,10 @@ impl AgreementExecutor {
 #[cfg(all(test, feature = "legacy_tests"))]
 mod tests {
     use super::*;
+    // `Arc` is used only by this module's fixtures. Importing it here rather
+    // than at file scope keeps the normal build free of an unused import while
+    // leaving the gated build exactly as it was.
+    use std::sync::Arc;
     use sumchain_primitives::agreement::{
         AgreementRole, PartyBinding, PartyRef,
     };
@@ -610,14 +652,8 @@ mod tests {
     }
 
     #[test]
-    fn test_agreement_executor_creation() {
-        let (db, _dir, _state) = setup();
-        let _executor = AgreementExecutor::new(db, ChainParams::default());
-    }
-
-    #[test]
     fn test_commit_agreement() {
-        let (db, _dir, state) = setup();
+        let (db, _dir, _state) = setup();
         // A block's candidate, opened here because a `#[test]` function
         // cannot take one as a parameter. An earlier scripted signature
         // rewrite added `view` to the parameter list of every test in this
@@ -625,7 +661,6 @@ mod tests {
         // out of sight.
         let mut overlay = sumchain_storage::overlay::ApplicationOverlay::new(&db, 1 << 20);
         let view = &mut sumchain_storage::exec_view::ExecutionView::new(&mut overlay);
-        let executor = AgreementExecutor::new(db.clone(), ChainParams::default());
 
         let sender = Address::new([1u8; 20]);
         let proposer = Address::new([99u8; 20]);
@@ -659,16 +694,28 @@ mod tests {
             data: bincode::serialize(&agreement).unwrap(),
         };
 
-        let result = executor.execute(
-            &sender, &tx_data, &state, &proposer, 1000, 100, 1000000, 0, Hash::default(),
-        ).unwrap();
+        let result = AgreementExecutor::execute(
+            view,
+            &sender,
+            &tx_data,
+            &proposer,
+            1000,
+            100,
+            1000000,
+            0,
+            Hash::default(),
+        )
+        .unwrap();
 
         assert!(result.success, "Commit agreement failed: {:?}", result.error);
         assert_eq!(result.agreement_id, Some([10u8; 32]));
 
-        // Verify storage
-        let store = AgreementStore::new(&db);
-        let retrieved = store.agreements().get(&[10u8; 32]).unwrap().unwrap();
+        // Read the CANDIDATE: this executor stages now, and a committed read
+        // straight after `execute` would be asserting the defect this package
+        // removed.
+        let retrieved = AgreementExecutor::v_get_agreement(view, &[10u8; 32])
+            .unwrap()
+            .unwrap();
         assert_eq!(retrieved.jurisdiction_code, "US-DE");
     }
 }

@@ -25,6 +25,131 @@ pub type AgreementId = [u8; 32];
 pub type ProofId = [u8; 32];
 
 // =============================================================================
+// Shared key layout and codec
+// =============================================================================
+//
+// One builder per row and one codec per value, called by the committed stores
+// below and by the candidate surface in `sumchain_state::agreement_view`.
+//
+// Two things here are easy to get wrong, and are why these are extracted
+// rather than restated on each side:
+//
+//   * The six primary families are keyed by a bare 32-byte id, and the two
+//     INDEX families are not: the party index is keyed by a 32-byte party-ref
+//     HASH and the executor index by a 20-byte ADDRESS. Same-looking builders,
+//     different inputs.
+//   * Both index VALUES are accumulating `Vec` lists, not presence markers.
+//     Appending is therefore a read-modify-write, and on the candidate side it
+//     has to read the candidate or a second entry in one block overwrites the
+//     first one's list with a single-element one.
+
+/// Commitments are keyed by agreement id.
+pub fn commitment_key(agreement_id: &AgreementId) -> &[u8] {
+    agreement_id
+}
+
+/// The party index is keyed by the party-ref HASH, and its value is a bincode
+/// `Vec<AgreementId>`.
+pub fn party_index_key(party_ref_hash: &[u8; 32]) -> &[u8] {
+    party_ref_hash
+}
+
+/// Signatures are keyed by signature id.
+pub fn signature_key(signature_id: &SignatureId) -> &[u8] {
+    signature_id
+}
+
+/// Attestations are keyed by attestation id.
+pub fn attestation_key(attestation_id: &AttestationId) -> &[u8] {
+    attestation_id
+}
+
+/// IP actions are keyed by action id.
+pub fn ip_action_key(action_id: &IpAssetId) -> &[u8] {
+    action_id
+}
+
+/// Executor links are keyed by link id.
+pub fn executor_link_key(link_id: &ExecutorLinkId) -> &[u8] {
+    link_id
+}
+
+/// The executor index is keyed by the executor ADDRESS -- twenty bytes, not
+/// thirty-two -- and its value is a bincode `Vec<ExecutorLinkId>`.
+pub fn executor_index_key(executor: &Address) -> &[u8] {
+    executor.as_ref()
+}
+
+/// Proofs are keyed by proof id.
+pub fn proof_key(proof_id: &ProofId) -> &[u8] {
+    proof_id
+}
+
+pub fn encode_commitment(c: &AgreementCommitment) -> Result<Vec<u8>> {
+    bincode::serialize(c).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_commitment(bytes: &[u8]) -> Result<AgreementCommitment> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_agreement_ids(ids: &[AgreementId]) -> Result<Vec<u8>> {
+    bincode::serialize(ids).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_agreement_ids(bytes: &[u8]) -> Result<Vec<AgreementId>> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_signature(s: &PartySignature) -> Result<Vec<u8>> {
+    bincode::serialize(s).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_signature(bytes: &[u8]) -> Result<PartySignature> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_attestation(a: &AttestationPacket) -> Result<Vec<u8>> {
+    bincode::serialize(a).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_attestation(bytes: &[u8]) -> Result<AttestationPacket> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_ip_action(a: &IpRightsAction) -> Result<Vec<u8>> {
+    bincode::serialize(a).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_ip_action(bytes: &[u8]) -> Result<IpRightsAction> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_executor_link(l: &ExecutorLink) -> Result<Vec<u8>> {
+    bincode::serialize(l).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_executor_link(bytes: &[u8]) -> Result<ExecutorLink> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_link_ids(ids: &[ExecutorLinkId]) -> Result<Vec<u8>> {
+    bincode::serialize(ids).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_link_ids(bytes: &[u8]) -> Result<Vec<ExecutorLinkId>> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_proof(p: &AgreementProofEnvelope) -> Result<Vec<u8>> {
+    bincode::serialize(p).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_proof(bytes: &[u8]) -> Result<AgreementProofEnvelope> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+// =============================================================================
 // Agreement Commitment Storage (SRC-841)
 // =============================================================================
 
@@ -40,9 +165,12 @@ impl<'a> AgreementCommitmentStore<'a> {
 
     /// Store an agreement commitment
     pub fn put(&self, agreement: &AgreementCommitment) -> Result<()> {
-        let bytes = bincode::serialize(agreement)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::AGREEMENT_COMMITMENTS, &agreement.agreement_id, &bytes)?;
+        let bytes = encode_commitment(agreement)?;
+        self.db.put(
+            cf::AGREEMENT_COMMITMENTS,
+            commitment_key(&agreement.agreement_id),
+            &bytes,
+        )?;
 
         // Update party indexes
         for party in &agreement.parties {
@@ -54,10 +182,12 @@ impl<'a> AgreementCommitmentStore<'a> {
 
     /// Get an agreement by ID
     pub fn get(&self, agreement_id: &AgreementId) -> Result<Option<AgreementCommitment>> {
-        match self.db.get(cf::AGREEMENT_COMMITMENTS, agreement_id)? {
+        match self
+            .db
+            .get(cf::AGREEMENT_COMMITMENTS, commitment_key(agreement_id))?
+        {
             Some(bytes) => {
-                let agreement: AgreementCommitment = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let agreement = decode_commitment(&bytes)?;
                 Ok(Some(agreement))
             }
             None => Ok(None),
@@ -66,7 +196,8 @@ impl<'a> AgreementCommitmentStore<'a> {
 
     /// Check if agreement exists
     pub fn exists(&self, agreement_id: &AgreementId) -> Result<bool> {
-        self.db.contains(cf::AGREEMENT_COMMITMENTS, agreement_id)
+        self.db
+            .contains(cf::AGREEMENT_COMMITMENTS, commitment_key(agreement_id))
     }
 
     /// Update agreement status
@@ -80,9 +211,12 @@ impl<'a> AgreementCommitmentStore<'a> {
             Some(mut agreement) => {
                 agreement.status = status;
                 agreement.updated_at = timestamp;
-                let bytes = bincode::serialize(&agreement)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                self.db.put(cf::AGREEMENT_COMMITMENTS, agreement_id, &bytes)
+                let bytes = encode_commitment(&agreement)?;
+                self.db.put(
+                    cf::AGREEMENT_COMMITMENTS,
+                    commitment_key(agreement_id),
+                    &bytes,
+                )
             }
             None => Err(StorageError::NotFound(format!(
                 "Agreement not found: {:?}",
@@ -107,8 +241,7 @@ impl<'a> AgreementCommitmentStore<'a> {
     pub fn list_active(&self) -> Result<Vec<AgreementCommitment>> {
         let mut agreements = Vec::new();
         for (_, value) in self.db.iter(cf::AGREEMENT_COMMITMENTS)? {
-            let agreement: AgreementCommitment = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let agreement = decode_commitment(&value)?;
             if matches!(
                 agreement.status,
                 AgreementStatus::Active | AgreementStatus::Executed | AgreementStatus::PendingSignatures
@@ -141,9 +274,12 @@ impl<'a> AgreementCommitmentStore<'a> {
                     agreement.status = AgreementStatus::Executed;
                 }
 
-                let bytes = bincode::serialize(&agreement)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                self.db.put(cf::AGREEMENT_COMMITMENTS, agreement_id, &bytes)
+                let bytes = encode_commitment(&agreement)?;
+                self.db.put(
+                    cf::AGREEMENT_COMMITMENTS,
+                    commitment_key(agreement_id),
+                    &bytes,
+                )
             }
             None => Err(StorageError::NotFound(format!(
                 "Agreement not found: {:?}",
@@ -157,18 +293,23 @@ impl<'a> AgreementCommitmentStore<'a> {
         let mut ids = self.get_party_agreement_ids(party_ref_hash)?;
         if !ids.contains(agreement_id) {
             ids.push(*agreement_id);
-            let bytes = bincode::serialize(&ids)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
-            self.db.put(cf::AGREEMENT_PARTY_INDEX, party_ref_hash, &bytes)?;
+            let bytes = encode_agreement_ids(&ids)?;
+            self.db.put(
+                cf::AGREEMENT_PARTY_INDEX,
+                party_index_key(party_ref_hash),
+                &bytes,
+            )?;
         }
         Ok(())
     }
 
     fn get_party_agreement_ids(&self, party_ref_hash: &[u8; 32]) -> Result<Vec<AgreementId>> {
-        match self.db.get(cf::AGREEMENT_PARTY_INDEX, party_ref_hash)? {
+        match self
+            .db
+            .get(cf::AGREEMENT_PARTY_INDEX, party_index_key(party_ref_hash))?
+        {
             Some(bytes) => {
-                let ids: Vec<AgreementId> = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let ids = decode_agreement_ids(&bytes)?;
                 Ok(ids)
             }
             None => Ok(Vec::new()),
@@ -192,17 +333,22 @@ impl<'a> SignatureStore<'a> {
 
     /// Store a signature
     pub fn put(&self, signature: &PartySignature) -> Result<()> {
-        let bytes = bincode::serialize(signature)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::AGREEMENT_SIGNATURES, &signature.signature_id, &bytes)
+        let bytes = encode_signature(signature)?;
+        self.db.put(
+            cf::AGREEMENT_SIGNATURES,
+            signature_key(&signature.signature_id),
+            &bytes,
+        )
     }
 
     /// Get a signature by ID
     pub fn get(&self, signature_id: &SignatureId) -> Result<Option<PartySignature>> {
-        match self.db.get(cf::AGREEMENT_SIGNATURES, signature_id)? {
+        match self
+            .db
+            .get(cf::AGREEMENT_SIGNATURES, signature_key(signature_id))?
+        {
             Some(bytes) => {
-                let sig: PartySignature = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let sig = decode_signature(&bytes)?;
                 Ok(Some(sig))
             }
             None => Ok(None),
@@ -211,20 +357,21 @@ impl<'a> SignatureStore<'a> {
 
     /// Check if signature exists
     pub fn exists(&self, signature_id: &SignatureId) -> Result<bool> {
-        self.db.contains(cf::AGREEMENT_SIGNATURES, signature_id)
+        self.db
+            .contains(cf::AGREEMENT_SIGNATURES, signature_key(signature_id))
     }
 
     /// Delete a signature (for revocation)
     pub fn delete(&self, signature_id: &SignatureId) -> Result<()> {
-        self.db.delete(cf::AGREEMENT_SIGNATURES, signature_id)
+        self.db
+            .delete(cf::AGREEMENT_SIGNATURES, signature_key(signature_id))
     }
 
     /// Get signatures for an agreement
     pub fn get_by_agreement(&self, agreement_id: &AgreementId) -> Result<Vec<PartySignature>> {
         let mut signatures = Vec::new();
         for (_, value) in self.db.iter(cf::AGREEMENT_SIGNATURES)? {
-            let sig: PartySignature = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let sig = decode_signature(&value)?;
             if sig.agreement_id == *agreement_id {
                 signatures.push(sig);
             }
@@ -249,17 +396,22 @@ impl<'a> AttestationStore<'a> {
 
     /// Store an attestation
     pub fn put(&self, attestation: &AttestationPacket) -> Result<()> {
-        let bytes = bincode::serialize(attestation)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::AGREEMENT_ATTESTATIONS, &attestation.attestation_id, &bytes)
+        let bytes = encode_attestation(attestation)?;
+        self.db.put(
+            cf::AGREEMENT_ATTESTATIONS,
+            attestation_key(&attestation.attestation_id),
+            &bytes,
+        )
     }
 
     /// Get an attestation by ID
     pub fn get(&self, attestation_id: &AttestationId) -> Result<Option<AttestationPacket>> {
-        match self.db.get(cf::AGREEMENT_ATTESTATIONS, attestation_id)? {
+        match self
+            .db
+            .get(cf::AGREEMENT_ATTESTATIONS, attestation_key(attestation_id))?
+        {
             Some(bytes) => {
-                let att: AttestationPacket = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let att = decode_attestation(&bytes)?;
                 Ok(Some(att))
             }
             None => Ok(None),
@@ -268,7 +420,8 @@ impl<'a> AttestationStore<'a> {
 
     /// Check if attestation exists
     pub fn exists(&self, attestation_id: &AttestationId) -> Result<bool> {
-        self.db.contains(cf::AGREEMENT_ATTESTATIONS, attestation_id)
+        self.db
+            .contains(cf::AGREEMENT_ATTESTATIONS, attestation_key(attestation_id))
     }
 
     /// Update attestation status
@@ -280,9 +433,12 @@ impl<'a> AttestationStore<'a> {
         match self.get(attestation_id)? {
             Some(mut att) => {
                 att.status = status;
-                let bytes = bincode::serialize(&att)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                self.db.put(cf::AGREEMENT_ATTESTATIONS, attestation_id, &bytes)
+                let bytes = encode_attestation(&att)?;
+                self.db.put(
+                    cf::AGREEMENT_ATTESTATIONS,
+                    attestation_key(attestation_id),
+                    &bytes,
+                )
             }
             None => Err(StorageError::NotFound(format!(
                 "Attestation not found: {:?}",
@@ -295,8 +451,7 @@ impl<'a> AttestationStore<'a> {
     pub fn get_by_issuer(&self, issuer: &Address) -> Result<Vec<AttestationPacket>> {
         let mut attestations = Vec::new();
         for (_, value) in self.db.iter(cf::AGREEMENT_ATTESTATIONS)? {
-            let att: AttestationPacket = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let att = decode_attestation(&value)?;
             if att.issuer_address == *issuer {
                 attestations.push(att);
             }
@@ -308,8 +463,7 @@ impl<'a> AttestationStore<'a> {
     pub fn list_active(&self) -> Result<Vec<AttestationPacket>> {
         let mut attestations = Vec::new();
         for (_, value) in self.db.iter(cf::AGREEMENT_ATTESTATIONS)? {
-            let att: AttestationPacket = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let att = decode_attestation(&value)?;
             if att.status == AttestationStatus::Active {
                 attestations.push(att);
             }
@@ -334,17 +488,22 @@ impl<'a> IpActionStore<'a> {
 
     /// Store an IP action
     pub fn put(&self, action: &IpRightsAction) -> Result<()> {
-        let bytes = bincode::serialize(action)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::AGREEMENT_IP_ACTIONS, &action.action_id, &bytes)
+        let bytes = encode_ip_action(action)?;
+        self.db.put(
+            cf::AGREEMENT_IP_ACTIONS,
+            ip_action_key(&action.action_id),
+            &bytes,
+        )
     }
 
     /// Get an IP action by ID
     pub fn get(&self, action_id: &IpAssetId) -> Result<Option<IpRightsAction>> {
-        match self.db.get(cf::AGREEMENT_IP_ACTIONS, action_id)? {
+        match self
+            .db
+            .get(cf::AGREEMENT_IP_ACTIONS, ip_action_key(action_id))?
+        {
             Some(bytes) => {
-                let action: IpRightsAction = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let action = decode_ip_action(&bytes)?;
                 Ok(Some(action))
             }
             None => Ok(None),
@@ -353,7 +512,8 @@ impl<'a> IpActionStore<'a> {
 
     /// Check if IP action exists
     pub fn exists(&self, action_id: &IpAssetId) -> Result<bool> {
-        self.db.contains(cf::AGREEMENT_IP_ACTIONS, action_id)
+        self.db
+            .contains(cf::AGREEMENT_IP_ACTIONS, ip_action_key(action_id))
     }
 
     /// Update IP action status
@@ -365,9 +525,9 @@ impl<'a> IpActionStore<'a> {
         match self.get(action_id)? {
             Some(mut action) => {
                 action.status = status;
-                let bytes = bincode::serialize(&action)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                self.db.put(cf::AGREEMENT_IP_ACTIONS, action_id, &bytes)
+                let bytes = encode_ip_action(&action)?;
+                self.db
+                    .put(cf::AGREEMENT_IP_ACTIONS, ip_action_key(action_id), &bytes)
             }
             None => Err(StorageError::NotFound(format!(
                 "IP action not found: {:?}",
@@ -380,8 +540,7 @@ impl<'a> IpActionStore<'a> {
     pub fn get_by_rightsholder(&self, rightsholder_hash: &[u8; 32]) -> Result<Vec<IpRightsAction>> {
         let mut actions = Vec::new();
         for (_, value) in self.db.iter(cf::AGREEMENT_IP_ACTIONS)? {
-            let action: IpRightsAction = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let action = decode_ip_action(&value)?;
             if action.rightsholder_ref.as_hash() == *rightsholder_hash {
                 actions.push(action);
             }
@@ -393,8 +552,7 @@ impl<'a> IpActionStore<'a> {
     pub fn list_active(&self) -> Result<Vec<IpRightsAction>> {
         let mut actions = Vec::new();
         for (_, value) in self.db.iter(cf::AGREEMENT_IP_ACTIONS)? {
-            let action: IpRightsAction = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let action = decode_ip_action(&value)?;
             if action.status == IpActionStatus::Active {
                 actions.push(action);
             }
@@ -419,9 +577,12 @@ impl<'a> ExecutorLinkStore<'a> {
 
     /// Store an executor link
     pub fn put(&self, link: &ExecutorLink) -> Result<()> {
-        let bytes = bincode::serialize(link)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::AGREEMENT_EXECUTOR_LINKS, &link.link_id, &bytes)?;
+        let bytes = encode_executor_link(link)?;
+        self.db.put(
+            cf::AGREEMENT_EXECUTOR_LINKS,
+            executor_link_key(&link.link_id),
+            &bytes,
+        )?;
 
         // Update executor index
         self.add_to_executor_index(&link.executor_contract, &link.link_id)?;
@@ -431,10 +592,12 @@ impl<'a> ExecutorLinkStore<'a> {
 
     /// Get an executor link by ID
     pub fn get(&self, link_id: &ExecutorLinkId) -> Result<Option<ExecutorLink>> {
-        match self.db.get(cf::AGREEMENT_EXECUTOR_LINKS, link_id)? {
+        match self
+            .db
+            .get(cf::AGREEMENT_EXECUTOR_LINKS, executor_link_key(link_id))?
+        {
             Some(bytes) => {
-                let link: ExecutorLink = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let link = decode_executor_link(&bytes)?;
                 Ok(Some(link))
             }
             None => Ok(None),
@@ -443,7 +606,8 @@ impl<'a> ExecutorLinkStore<'a> {
 
     /// Check if executor link exists
     pub fn exists(&self, link_id: &ExecutorLinkId) -> Result<bool> {
-        self.db.contains(cf::AGREEMENT_EXECUTOR_LINKS, link_id)
+        self.db
+            .contains(cf::AGREEMENT_EXECUTOR_LINKS, executor_link_key(link_id))
     }
 
     /// Update executor link state
@@ -457,9 +621,12 @@ impl<'a> ExecutorLinkStore<'a> {
             Some(mut link) => {
                 link.state = state;
                 link.updated_at = timestamp;
-                let bytes = bincode::serialize(&link)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                self.db.put(cf::AGREEMENT_EXECUTOR_LINKS, link_id, &bytes)
+                let bytes = encode_executor_link(&link)?;
+                self.db.put(
+                    cf::AGREEMENT_EXECUTOR_LINKS,
+                    executor_link_key(link_id),
+                    &bytes,
+                )
             }
             None => Err(StorageError::NotFound(format!(
                 "Executor link not found: {:?}",
@@ -472,8 +639,7 @@ impl<'a> ExecutorLinkStore<'a> {
     pub fn get_by_agreement(&self, agreement_id: &AgreementId) -> Result<Vec<ExecutorLink>> {
         let mut links = Vec::new();
         for (_, value) in self.db.iter(cf::AGREEMENT_EXECUTOR_LINKS)? {
-            let link: ExecutorLink = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let link = decode_executor_link(&value)?;
             if link.agreement_id == *agreement_id {
                 links.push(link);
             }
@@ -497,8 +663,7 @@ impl<'a> ExecutorLinkStore<'a> {
     pub fn list_active(&self) -> Result<Vec<ExecutorLink>> {
         let mut links = Vec::new();
         for (_, value) in self.db.iter(cf::AGREEMENT_EXECUTOR_LINKS)? {
-            let link: ExecutorLink = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let link = decode_executor_link(&value)?;
             if link.state == ExecutorState::Active {
                 links.push(link);
             }
@@ -511,18 +676,23 @@ impl<'a> ExecutorLinkStore<'a> {
         let mut ids = self.get_executor_link_ids(executor)?;
         if !ids.contains(link_id) {
             ids.push(*link_id);
-            let bytes = bincode::serialize(&ids)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
-            self.db.put(cf::AGREEMENT_EXECUTOR_INDEX, executor.as_ref(), &bytes)?;
+            let bytes = encode_link_ids(&ids)?;
+            self.db.put(
+                cf::AGREEMENT_EXECUTOR_INDEX,
+                executor_index_key(executor),
+                &bytes,
+            )?;
         }
         Ok(())
     }
 
     fn get_executor_link_ids(&self, executor: &Address) -> Result<Vec<ExecutorLinkId>> {
-        match self.db.get(cf::AGREEMENT_EXECUTOR_INDEX, executor.as_ref())? {
+        match self
+            .db
+            .get(cf::AGREEMENT_EXECUTOR_INDEX, executor_index_key(executor))?
+        {
             Some(bytes) => {
-                let ids: Vec<ExecutorLinkId> = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let ids = decode_link_ids(&bytes)?;
                 Ok(ids)
             }
             None => Ok(Vec::new()),
@@ -546,17 +716,16 @@ impl<'a> AgreementProofStore<'a> {
 
     /// Store a proof
     pub fn put(&self, proof: &AgreementProofEnvelope) -> Result<()> {
-        let bytes = bincode::serialize(proof)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::AGREEMENT_PROOFS, &proof.proof_id, &bytes)
+        let bytes = encode_proof(proof)?;
+        self.db
+            .put(cf::AGREEMENT_PROOFS, proof_key(&proof.proof_id), &bytes)
     }
 
     /// Get a proof by ID
     pub fn get(&self, proof_id: &ProofId) -> Result<Option<AgreementProofEnvelope>> {
-        match self.db.get(cf::AGREEMENT_PROOFS, proof_id)? {
+        match self.db.get(cf::AGREEMENT_PROOFS, proof_key(proof_id))? {
             Some(bytes) => {
-                let proof: AgreementProofEnvelope = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let proof = decode_proof(&bytes)?;
                 Ok(Some(proof))
             }
             None => Ok(None),
@@ -565,12 +734,12 @@ impl<'a> AgreementProofStore<'a> {
 
     /// Check if proof exists
     pub fn exists(&self, proof_id: &ProofId) -> Result<bool> {
-        self.db.contains(cf::AGREEMENT_PROOFS, proof_id)
+        self.db.contains(cf::AGREEMENT_PROOFS, proof_key(proof_id))
     }
 
     /// Delete a proof
     pub fn delete(&self, proof_id: &ProofId) -> Result<()> {
-        self.db.delete(cf::AGREEMENT_PROOFS, proof_id)
+        self.db.delete(cf::AGREEMENT_PROOFS, proof_key(proof_id))
     }
 
     /// Get valid proofs for subject (not expired)
@@ -581,8 +750,7 @@ impl<'a> AgreementProofStore<'a> {
     ) -> Result<Vec<AgreementProofEnvelope>> {
         let mut proofs = Vec::new();
         for (_, value) in self.db.iter(cf::AGREEMENT_PROOFS)? {
-            let proof: AgreementProofEnvelope = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let proof = decode_proof(&value)?;
             if proof.subject_nullifier == *subject_nullifier
                 && (proof.expires_at == 0 || proof.expires_at > current_time)
             {
@@ -596,8 +764,7 @@ impl<'a> AgreementProofStore<'a> {
     pub fn get_by_profile(&self, profile_id: &str) -> Result<Vec<AgreementProofEnvelope>> {
         let mut proofs = Vec::new();
         for (_, value) in self.db.iter(cf::AGREEMENT_PROOFS)? {
-            let proof: AgreementProofEnvelope = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let proof = decode_proof(&value)?;
             if proof.profile_id == profile_id {
                 proofs.push(proof);
             }

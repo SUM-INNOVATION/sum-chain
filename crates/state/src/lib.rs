@@ -4,6 +4,7 @@
 //! Handles account balances, nonces, and transaction application.
 
 pub mod agreement_executor;
+pub mod agreement_view;
 pub mod beacon_executor;
 pub mod beacon_manager;
 pub mod beacon_store;

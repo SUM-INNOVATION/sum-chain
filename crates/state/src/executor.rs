@@ -238,7 +238,6 @@ pub struct BlockExecutor {
     nft_executor: NftExecutor,
     contract_executor: ContractExecutorState,
     docclass_executor: DocClassExecutor,
-    agreement_executor: AgreementExecutor,
     legal_executor: LegalExecutor,
     property_executor: PropertyExecutor,
     healthcare_executor: HealthcareExecutor,
@@ -336,7 +335,6 @@ impl BlockExecutor {
         let nft_executor = NftExecutor::new(db.clone(), params.clone());
         let contract_executor = ContractExecutorState::new(db.clone(), params.clone());
         let docclass_executor = DocClassExecutor::new(db.clone(), params.clone());
-        let agreement_executor = AgreementExecutor::new(db.clone(), params.clone());
         let legal_executor = LegalExecutor::new(db.clone(), params.clone());
         let property_executor = PropertyExecutor::new(db.clone(), params.clone());
         let healthcare_executor = HealthcareExecutor::new(db.clone(), params.clone());
@@ -351,7 +349,6 @@ impl BlockExecutor {
             nft_executor,
             contract_executor,
             docclass_executor,
-            agreement_executor,
             legal_executor,
             property_executor,
             healthcare_executor,
@@ -879,7 +876,8 @@ impl BlockExecutor {
                     }
                     TxPayload::Agreement(agreement_data) => {
                         // Execute Agreement operation (SRC-84X)
-                        let result = self.agreement_executor.execute(view,
+                        let result = AgreementExecutor::execute(
+                            view,
                             &v2_tx.from,
                             &agreement_data,
                             proposer,
@@ -2636,7 +2634,8 @@ impl BlockExecutor {
                 }
 
                 // Execute Agreement operation (SRC-84X)
-                let result = self.agreement_executor.execute(view,
+                let result = AgreementExecutor::execute(
+                    view,
                     &tx.from,
                     agreement_data,
                     proposer,
