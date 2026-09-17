@@ -13,17 +13,15 @@
 //! - **Metadata size limits**: Maximum metadata size enforced per chain params
 
 use sumchain_storage::exec_view::ExecutionView;
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use sumchain_genesis::ChainParams;
-use sumchain_nft::collection::{CollectionConfig, CollectionId};
+use sumchain_nft::collection::CollectionId;
 use sumchain_nft::ops::{
     CreateCollectionData, NftApproveData, NftBatchMintData, NftMintData,
     NftTransferCollectionOwnershipData, NftTransferData, NftUpdateCollectionConfigData,
 };
 use sumchain_primitives::{Address, Balance, NftOperation, NftTxData};
-use sumchain_storage::{Database, IssuerStore, NftCollectionData, NftStore, NftTokenData};
+use sumchain_storage::{NftCollectionData, NftTokenData};
 use tracing::{debug, info, warn};
 
 use crate::{Result, StateError, StateManager};
@@ -79,18 +77,20 @@ impl NftExecutionResult {
     }
 }
 
-/// NFT Executor for processing NFT transactions
-pub struct NftExecutor {
-    db: Arc<Database>,
-    params: ChainParams,
-}
+/// NFT Executor for processing NFT transactions.
+/// No database handle, by construction.
+///
+/// Every operation takes the block's `ExecutionView` and no `self`, so
+/// `self.db` is not something this file can name: a committed write here is a
+/// compile error rather than a review finding. The committed twins stay in
+/// `sumchain_storage::schema` for the RPC server.
+///
+/// `ChainParams` travels as a parameter for the same reason. It used to ride on
+/// the receiver beside the database handle, and the only way to be sure the
+/// handle is gone is for there to be no receiver at all.
+pub struct NftExecutor;
 
 impl NftExecutor {
-    /// Create a new NFT executor
-    pub fn new(db: Arc<Database>, params: ChainParams) -> Self {
-        Self { db, params }
-    }
-
     /// Get current timestamp in milliseconds (now uses block timestamp for determinism)
     fn now_ms(block_timestamp: u64) -> u64 {
         block_timestamp
@@ -99,40 +99,57 @@ impl NftExecutor {
     /// Execute an NFT operation from transaction data
     #[allow(clippy::too_many_arguments)]
     pub fn execute(
-        &self, view: &mut ExecutionView<'_, '_>,
+        view: &mut ExecutionView<'_, '_>,
+        params: &ChainParams,
         sender: &Address,
         nft_data: &NftTxData,
         proposer: &Address,
         fee: Balance,
         block_timestamp: u64,
     ) -> Result<NftExecutionResult> {
-        let store = NftStore::new(&self.db);
-
         // Deduct fee from sender
-        self.deduct_fee(view, sender, fee, proposer)?;
+        Self::deduct_fee(view, sender, fee, proposer)?;
 
         match nft_data.operation {
             NftOperation::CreateCollection => {
-                self.execute_create_collection(&store, sender, &nft_data.data, block_timestamp)
+                Self::execute_create_collection(view, sender, &nft_data.data, block_timestamp)
             }
-            NftOperation::Mint => {
-                self.execute_mint(&store, sender, &nft_data.collection_id, &nft_data.data, false, fee, block_timestamp)
-            }
-            NftOperation::MintDocument => {
-                self.execute_mint(&store, sender, &nft_data.collection_id, &nft_data.data, true, fee, block_timestamp)
-            }
-            NftOperation::BatchMint => {
-                self.execute_batch_mint(&store, sender, &nft_data.collection_id, &nft_data.data, block_timestamp)
-            }
-            NftOperation::Transfer => self.execute_transfer(
-                &store,
+            NftOperation::Mint => Self::execute_mint(
+                view,
+                params,
+                sender,
+                &nft_data.collection_id,
+                &nft_data.data,
+                false,
+                fee,
+                block_timestamp,
+            ),
+            NftOperation::MintDocument => Self::execute_mint(
+                view,
+                params,
+                sender,
+                &nft_data.collection_id,
+                &nft_data.data,
+                true,
+                fee,
+                block_timestamp,
+            ),
+            NftOperation::BatchMint => Self::execute_batch_mint(
+                view,
+                sender,
+                &nft_data.collection_id,
+                &nft_data.data,
+                block_timestamp,
+            ),
+            NftOperation::Transfer => Self::execute_transfer(
+                view,
                 sender,
                 &nft_data.collection_id,
                 nft_data.token_id,
                 &nft_data.data,
             ),
-            NftOperation::Approve => self.execute_approve(
-                &store,
+            NftOperation::Approve => Self::execute_approve(
+                view,
                 sender,
                 &nft_data.collection_id,
                 nft_data.token_id,
@@ -145,42 +162,39 @@ impl NftExecutor {
                 ))
             }
             NftOperation::Burn => {
-                self.execute_burn(&store, sender, &nft_data.collection_id, nft_data.token_id)
+                Self::execute_burn(view, sender, &nft_data.collection_id, nft_data.token_id)
             }
-            NftOperation::UpdateMetadata => self.execute_update_metadata(
-                &store,
+            NftOperation::UpdateMetadata => Self::execute_update_metadata(
+                view,
                 sender,
                 &nft_data.collection_id,
                 nft_data.token_id,
                 &nft_data.data,
             ),
-            NftOperation::TransferCollectionOwnership => self.execute_transfer_collection(
-                &store,
+            NftOperation::TransferCollectionOwnership => Self::execute_transfer_collection(
+                view,
                 sender,
                 &nft_data.collection_id,
                 &nft_data.data,
             ),
-            NftOperation::UpdateCollectionConfig => self.execute_update_collection_config(
-                &store,
+            NftOperation::UpdateCollectionConfig => Self::execute_update_collection_config(
+                view,
                 sender,
                 &nft_data.collection_id,
                 &nft_data.data,
             ),
             NftOperation::LockToken => {
-                self.execute_lock_token(&store, sender, &nft_data.collection_id, nft_data.token_id)
+                Self::execute_lock_token(view, sender, &nft_data.collection_id, nft_data.token_id)
             }
-            NftOperation::UnlockToken => self.execute_unlock_token(
-                &store,
-                sender,
-                &nft_data.collection_id,
-                nft_data.token_id,
-            ),
+            NftOperation::UnlockToken => {
+                Self::execute_unlock_token(view, sender, &nft_data.collection_id, nft_data.token_id)
+            }
         }
     }
 
     /// Deduct fee from sender and credit to proposer
     fn deduct_fee(
-        &self, view: &mut ExecutionView<'_, '_>,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         fee: Balance,
         proposer: &Address,
@@ -215,8 +229,7 @@ impl NftExecutor {
 
     /// Create a new NFT collection
     fn execute_create_collection(
-        &self,
-        store: &NftStore,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
         block_timestamp: u64,
@@ -237,7 +250,7 @@ impl NftExecutor {
         let collection_id = CollectionId::new(sender, &create_data.name, nonce);
 
         // Check if collection already exists
-        if store.collection_exists(collection_id.as_bytes())? {
+        if Self::v_collection_exists(view, collection_id.as_bytes())? {
             return Ok(NftExecutionResult::failure(
                 "Collection already exists".to_string(),
             ));
@@ -266,7 +279,7 @@ impl NftExecutor {
             created_at: Self::now_ms(block_timestamp),
         };
 
-        store.put_collection(collection_id.as_bytes(), &collection_data)?;
+        Self::v_put_collection(view, collection_id.as_bytes(), &collection_data)?;
 
         info!(
             "Created NFT collection '{}' with ID {}",
@@ -281,8 +294,8 @@ impl NftExecutor {
     /// Mint a new token
     #[allow(clippy::too_many_arguments)]
     fn execute_mint(
-        &self,
-        store: &NftStore,
+        view: &mut ExecutionView<'_, '_>,
+        params: &ChainParams,
         sender: &Address,
         collection_id: &[u8; 32],
         data: &[u8],
@@ -291,9 +304,8 @@ impl NftExecutor {
         block_timestamp: u64,
     ) -> Result<NftExecutionResult> {
         // Get collection
-        let mut collection = store.get_collection(collection_id)?.ok_or_else(|| {
-            StateError::BlockValidation("Collection not found".to_string())
-        })?;
+        let mut collection = Self::v_get_collection(view, collection_id)?
+            .ok_or_else(|| StateError::BlockValidation("Collection not found".to_string()))?;
 
         // Check minting permission
         if collection.owner_only_minting && collection.owner != *sender {
@@ -314,15 +326,15 @@ impl NftExecutor {
 
         // Security: Validate metadata size
         let metadata_size = mint_data.metadata.len();
-        if !self.params.validate_metadata_size(metadata_size) {
+        if !params.validate_metadata_size(metadata_size) {
             return Ok(NftExecutionResult::failure(format!(
                 "Metadata too large: {} bytes exceeds maximum of {} bytes",
-                metadata_size, self.params.max_metadata_bytes
+                metadata_size, params.max_metadata_bytes
             )));
         }
 
         // Security: Validate storage fee (per-byte pricing)
-        let required_fee = self.params.calculate_nft_storage_fee(metadata_size);
+        let required_fee = params.calculate_nft_storage_fee(metadata_size);
         if fee < required_fee {
             return Ok(NftExecutionResult::failure(format!(
                 "Insufficient storage fee: {} required for {} bytes of metadata, got {}",
@@ -332,10 +344,9 @@ impl NftExecutor {
 
         // Security: For document minting, verify issuer is registered
         if is_document {
-            let issuer_store = IssuerStore::new(&self.db);
             let current_time = Self::now_ms(block_timestamp);
 
-            if !issuer_store.can_mint_documents(sender, None, current_time)? {
+            if !Self::v_can_mint_documents(view, sender, None, current_time)? {
                 warn!(
                     "Unauthorized document minting attempt by {} - not a registered issuer",
                     sender
@@ -370,16 +381,16 @@ impl NftExecutor {
         };
 
         // Store token
-        store.put_token(collection_id, token_id, &token_data)?;
+        Self::v_put_token(view, collection_id, token_id, &token_data)?;
 
         // Update indices
-        store.add_to_owner_index(&mint_data.to, collection_id, token_id)?;
-        store.add_to_collection_index(collection_id, token_id)?;
+        Self::v_add_to_owner_index(view, &mint_data.to, collection_id, token_id)?;
+        Self::v_add_to_collection_index(view, collection_id, token_id)?;
 
         // Update collection
         collection.total_supply += 1;
         collection.next_token_id += 1;
-        store.put_collection(collection_id, &collection)?;
+        Self::v_put_collection(view, collection_id, &collection)?;
 
         debug!(
             "Minted token {} in collection {:?} to {} (metadata: {} bytes, fee: {})",
@@ -395,17 +406,15 @@ impl NftExecutor {
 
     /// Batch mint tokens
     fn execute_batch_mint(
-        &self,
-        store: &NftStore,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         collection_id: &[u8; 32],
         data: &[u8],
         block_timestamp: u64,
     ) -> Result<NftExecutionResult> {
         // Get collection
-        let mut collection = store.get_collection(collection_id)?.ok_or_else(|| {
-            StateError::BlockValidation("Collection not found".to_string())
-        })?;
+        let mut collection = Self::v_get_collection(view, collection_id)?
+            .ok_or_else(|| StateError::BlockValidation("Collection not found".to_string()))?;
 
         // Check minting permission
         if collection.owner_only_minting && collection.owner != *sender {
@@ -448,15 +457,15 @@ impl NftExecutor {
                 minted_at: Self::now_ms(block_timestamp),
             };
 
-            store.put_token(collection_id, token_id, &token_data)?;
-            store.add_to_owner_index(&request.to, collection_id, token_id)?;
-            store.add_to_collection_index(collection_id, token_id)?;
+            Self::v_put_token(view, collection_id, token_id, &token_data)?;
+            Self::v_add_to_owner_index(view, &request.to, collection_id, token_id)?;
+            Self::v_add_to_collection_index(view, collection_id, token_id)?;
         }
 
         // Update collection
         collection.total_supply += count;
         collection.next_token_id += count;
-        store.put_collection(collection_id, &collection)?;
+        Self::v_put_collection(view, collection_id, &collection)?;
 
         info!(
             "Batch minted {} tokens in collection {:?}",
@@ -472,17 +481,15 @@ impl NftExecutor {
 
     /// Transfer a token
     fn execute_transfer(
-        &self,
-        store: &NftStore,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         collection_id: &[u8; 32],
         token_id: u64,
         data: &[u8],
     ) -> Result<NftExecutionResult> {
         // Get collection
-        let collection = store.get_collection(collection_id)?.ok_or_else(|| {
-            StateError::BlockValidation("Collection not found".to_string())
-        })?;
+        let collection = Self::v_get_collection(view, collection_id)?
+            .ok_or_else(|| StateError::BlockValidation("Collection not found".to_string()))?;
 
         if !collection.transferable {
             return Ok(NftExecutionResult::failure(
@@ -491,9 +498,8 @@ impl NftExecutor {
         }
 
         // Get token
-        let token = store.get_token(collection_id, token_id)?.ok_or_else(|| {
-            StateError::BlockValidation("Token not found".to_string())
-        })?;
+        let token = Self::v_get_token(view, collection_id, token_id)?
+            .ok_or_else(|| StateError::BlockValidation("Token not found".to_string()))?;
 
         // Check ownership or approval
         let is_owner = token.owner == *sender;
@@ -516,7 +522,13 @@ impl NftExecutor {
             .map_err(|e| StateError::BlockValidation(format!("Invalid transfer data: {}", e)))?;
 
         // Execute transfer
-        store.transfer_token(collection_id, token_id, &token.owner, &transfer_data.to)?;
+        Self::v_transfer_token(
+            view,
+            collection_id,
+            token_id,
+            &token.owner,
+            &transfer_data.to,
+        )?;
 
         debug!(
             "Transferred token {}:{} from {} to {}",
@@ -531,17 +543,15 @@ impl NftExecutor {
 
     /// Approve an address to transfer a token
     fn execute_approve(
-        &self,
-        store: &NftStore,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         collection_id: &[u8; 32],
         token_id: u64,
         data: &[u8],
     ) -> Result<NftExecutionResult> {
         // Get token
-        let mut token = store.get_token(collection_id, token_id)?.ok_or_else(|| {
-            StateError::BlockValidation("Token not found".to_string())
-        })?;
+        let mut token = Self::v_get_token(view, collection_id, token_id)?
+            .ok_or_else(|| StateError::BlockValidation("Token not found".to_string()))?;
 
         // Check ownership
         if token.owner != *sender {
@@ -554,7 +564,7 @@ impl NftExecutor {
             .map_err(|e| StateError::BlockValidation(format!("Invalid approve data: {}", e)))?;
 
         token.approved = approve_data.approved;
-        store.put_token(collection_id, token_id, &token)?;
+        Self::v_put_token(view, collection_id, token_id, &token)?;
 
         debug!(
             "Set approval for token {}:{} to {:?}",
@@ -568,16 +578,14 @@ impl NftExecutor {
 
     /// Burn a token
     fn execute_burn(
-        &self,
-        store: &NftStore,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         collection_id: &[u8; 32],
         token_id: u64,
     ) -> Result<NftExecutionResult> {
         // Get collection
-        let collection = store.get_collection(collection_id)?.ok_or_else(|| {
-            StateError::BlockValidation("Collection not found".to_string())
-        })?;
+        let collection = Self::v_get_collection(view, collection_id)?
+            .ok_or_else(|| StateError::BlockValidation("Collection not found".to_string()))?;
 
         if !collection.burnable {
             return Ok(NftExecutionResult::failure(
@@ -586,9 +594,8 @@ impl NftExecutor {
         }
 
         // Get token
-        let token = store.get_token(collection_id, token_id)?.ok_or_else(|| {
-            StateError::BlockValidation("Token not found".to_string())
-        })?;
+        let token = Self::v_get_token(view, collection_id, token_id)?
+            .ok_or_else(|| StateError::BlockValidation("Token not found".to_string()))?;
 
         // Check ownership
         if token.owner != *sender {
@@ -601,7 +608,7 @@ impl NftExecutor {
         }
 
         // Burn token
-        store.burn_token(collection_id, token_id, &token.owner)?;
+        Self::v_burn_token(view, collection_id, token_id, &token.owner)?;
 
         info!(
             "Burned token {}:{}",
@@ -614,17 +621,15 @@ impl NftExecutor {
 
     /// Update token metadata
     fn execute_update_metadata(
-        &self,
-        store: &NftStore,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         collection_id: &[u8; 32],
         token_id: u64,
         data: &[u8],
     ) -> Result<NftExecutionResult> {
         // Get collection
-        let collection = store.get_collection(collection_id)?.ok_or_else(|| {
-            StateError::BlockValidation("Collection not found".to_string())
-        })?;
+        let collection = Self::v_get_collection(view, collection_id)?
+            .ok_or_else(|| StateError::BlockValidation("Collection not found".to_string()))?;
 
         if !collection.metadata_updatable {
             return Ok(NftExecutionResult::failure(
@@ -633,9 +638,8 @@ impl NftExecutor {
         }
 
         // Get token
-        let mut token = store.get_token(collection_id, token_id)?.ok_or_else(|| {
-            StateError::BlockValidation("Token not found".to_string())
-        })?;
+        let mut token = Self::v_get_token(view, collection_id, token_id)?
+            .ok_or_else(|| StateError::BlockValidation("Token not found".to_string()))?;
 
         // Only owner or creator can update
         if token.owner != *sender && token.creator != *sender {
@@ -646,7 +650,7 @@ impl NftExecutor {
 
         // Update metadata
         token.metadata = data.to_vec();
-        store.put_token(collection_id, token_id, &token)?;
+        Self::v_put_token(view, collection_id, token_id, &token)?;
 
         debug!(
             "Updated metadata for token {}:{}",
@@ -659,16 +663,14 @@ impl NftExecutor {
 
     /// Transfer collection ownership
     fn execute_transfer_collection(
-        &self,
-        store: &NftStore,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         collection_id: &[u8; 32],
         data: &[u8],
     ) -> Result<NftExecutionResult> {
         // Get collection
-        let mut collection = store.get_collection(collection_id)?.ok_or_else(|| {
-            StateError::BlockValidation("Collection not found".to_string())
-        })?;
+        let mut collection = Self::v_get_collection(view, collection_id)?
+            .ok_or_else(|| StateError::BlockValidation("Collection not found".to_string()))?;
 
         // Check ownership
         if collection.owner != *sender {
@@ -683,7 +685,7 @@ impl NftExecutor {
             .map_err(|e| StateError::BlockValidation(format!("Invalid transfer data: {}", e)))?;
 
         collection.owner = transfer_data.new_owner;
-        store.put_collection(collection_id, &collection)?;
+        Self::v_put_collection(view, collection_id, &collection)?;
 
         info!(
             "Transferred collection {:?} ownership to {}",
@@ -696,16 +698,14 @@ impl NftExecutor {
 
     /// Update collection config
     fn execute_update_collection_config(
-        &self,
-        store: &NftStore,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         collection_id: &[u8; 32],
         data: &[u8],
     ) -> Result<NftExecutionResult> {
         // Get collection
-        let mut collection = store.get_collection(collection_id)?.ok_or_else(|| {
-            StateError::BlockValidation("Collection not found".to_string())
-        })?;
+        let mut collection = Self::v_get_collection(view, collection_id)?
+            .ok_or_else(|| StateError::BlockValidation("Collection not found".to_string()))?;
 
         // Check ownership
         if collection.owner != *sender {
@@ -726,7 +726,7 @@ impl NftExecutor {
             collection.base_uri = Some(uri);
         }
 
-        store.put_collection(collection_id, &collection)?;
+        Self::v_put_collection(view, collection_id, &collection)?;
 
         debug!(
             "Updated config for collection {:?}",
@@ -738,16 +738,14 @@ impl NftExecutor {
 
     /// Lock a token
     fn execute_lock_token(
-        &self,
-        store: &NftStore,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         collection_id: &[u8; 32],
         token_id: u64,
     ) -> Result<NftExecutionResult> {
         // Get token
-        let mut token = store.get_token(collection_id, token_id)?.ok_or_else(|| {
-            StateError::BlockValidation("Token not found".to_string())
-        })?;
+        let mut token = Self::v_get_token(view, collection_id, token_id)?
+            .ok_or_else(|| StateError::BlockValidation("Token not found".to_string()))?;
 
         // Check ownership
         if token.owner != *sender {
@@ -761,7 +759,7 @@ impl NftExecutor {
         }
 
         token.locked = true;
-        store.put_token(collection_id, token_id, &token)?;
+        Self::v_put_token(view, collection_id, token_id, &token)?;
 
         debug!(
             "Locked token {}:{}",
@@ -774,16 +772,14 @@ impl NftExecutor {
 
     /// Unlock a token
     fn execute_unlock_token(
-        &self,
-        store: &NftStore,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         collection_id: &[u8; 32],
         token_id: u64,
     ) -> Result<NftExecutionResult> {
         // Get token
-        let mut token = store.get_token(collection_id, token_id)?.ok_or_else(|| {
-            StateError::BlockValidation("Token not found".to_string())
-        })?;
+        let mut token = Self::v_get_token(view, collection_id, token_id)?
+            .ok_or_else(|| StateError::BlockValidation("Token not found".to_string()))?;
 
         // Check ownership
         if token.owner != *sender {
@@ -795,7 +791,7 @@ impl NftExecutor {
         }
 
         token.locked = false;
-        store.put_token(collection_id, token_id, &token)?;
+        Self::v_put_token(view, collection_id, token_id, &token)?;
 
         debug!(
             "Unlocked token {}:{}",
@@ -811,21 +807,21 @@ impl NftExecutor {
 #[cfg(all(test, feature = "legacy_tests"))]
 mod tests {
     use super::*;
+    use sumchain_nft::collection::CollectionConfig;
+    use sumchain_storage::candidate::CandidateExecution;
     use sumchain_storage::Database;
     use tempfile::TempDir;
 
-    fn setup() -> (Arc<Database>, ChainParams, TempDir) {
+    fn setup() -> (Database, ChainParams, TempDir) {
         let dir = TempDir::new().unwrap();
-        let db = Arc::new(Database::open_default(dir.path()).unwrap());
+        let db = Database::open_default(dir.path()).unwrap();
         let params = ChainParams::default();
         (db, params, dir)
     }
 
     #[test]
     fn test_create_collection() {
-        let (db, params, _dir) = setup();
-        let executor = NftExecutor::new(db.clone(), params);
-        let store = NftStore::new(&db);
+        let (db, _params, _dir) = setup();
 
         let sender = Address::from_hex("0x0000000000000000000000000000000000000001").unwrap();
 
@@ -849,16 +845,23 @@ mod tests {
 
         let data = bincode::serialize(&create_data).unwrap();
 
-        let result = executor
-            .execute_create_collection(&store, &sender, &data)
-            .unwrap();
+        // The executor stages into a block candidate, so this opens one. It is
+        // never published: the collection is read back through the candidate.
+        let mut candidate = CandidateExecution::new(&db, 1 << 30);
+        let mut view = candidate.view();
+
+        let result =
+            NftExecutor::execute_create_collection(&mut view, &sender, &data, 1_000_000_000)
+                .unwrap();
 
         assert!(result.success);
         assert!(result.collection_id.is_some());
 
         // Verify collection exists
         let collection_id = result.collection_id.unwrap();
-        let collection = store.get_collection(&collection_id).unwrap().unwrap();
+        let collection = NftExecutor::v_get_collection(&view, &collection_id)
+            .unwrap()
+            .unwrap();
         assert_eq!(collection.name, "Test Collection");
         assert_eq!(collection.symbol, "TEST");
         assert_eq!(collection.owner, sender);

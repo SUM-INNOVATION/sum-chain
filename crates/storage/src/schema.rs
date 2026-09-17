@@ -10,6 +10,12 @@ use sumchain_primitives::{
 };
 
 use crate::db::{cf, Database};
+use crate::nft_store::{
+    collection_index_key, collection_key, decode_collection, decode_collection_tokens,
+    decode_issuer, decode_owner_tokens, decode_token, encode_collection, encode_collection_tokens,
+    encode_issuer, encode_owner_tokens, encode_token, issuer_key, owner_index_key, token_key,
+    OwnerTokenEntry,
+};
 use crate::{Result, StorageError};
 
 /// Keys for metadata storage
@@ -983,17 +989,19 @@ impl<'a> NftStore<'a> {
 
     /// Store a collection
     pub fn put_collection(&self, collection_id: &[u8; 32], data: &NftCollectionData) -> Result<()> {
-        let bytes = bincode::serialize(data)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::NFT_COLLECTIONS, collection_id, &bytes)
+        let bytes = encode_collection(data)?;
+        self.db
+            .put(cf::NFT_COLLECTIONS, collection_key(collection_id), &bytes)
     }
 
     /// Get a collection
     pub fn get_collection(&self, collection_id: &[u8; 32]) -> Result<Option<NftCollectionData>> {
-        match self.db.get(cf::NFT_COLLECTIONS, collection_id)? {
+        match self
+            .db
+            .get(cf::NFT_COLLECTIONS, collection_key(collection_id))?
+        {
             Some(bytes) => {
-                let data: NftCollectionData = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let data = decode_collection(&bytes)?;
                 Ok(Some(data))
             }
             None => Ok(None),
@@ -1002,36 +1010,27 @@ impl<'a> NftStore<'a> {
 
     /// Check if collection exists
     pub fn collection_exists(&self, collection_id: &[u8; 32]) -> Result<bool> {
-        self.db.contains(cf::NFT_COLLECTIONS, collection_id)
+        self.db
+            .contains(cf::NFT_COLLECTIONS, collection_key(collection_id))
     }
 
     // ========================================================================
     // Token operations
     // ========================================================================
 
-    /// Create token key from collection_id and token_id
-    fn token_key(collection_id: &[u8; 32], token_id: u64) -> Vec<u8> {
-        let mut key = Vec::with_capacity(40);
-        key.extend_from_slice(collection_id);
-        key.extend_from_slice(&token_id.to_be_bytes());
-        key
-    }
-
     /// Store a token
     pub fn put_token(&self, collection_id: &[u8; 32], token_id: u64, data: &NftTokenData) -> Result<()> {
-        let key = Self::token_key(collection_id, token_id);
-        let bytes = bincode::serialize(data)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let key = token_key(collection_id, token_id);
+        let bytes = encode_token(data)?;
         self.db.put(cf::NFT_TOKENS, &key, &bytes)
     }
 
     /// Get a token
     pub fn get_token(&self, collection_id: &[u8; 32], token_id: u64) -> Result<Option<NftTokenData>> {
-        let key = Self::token_key(collection_id, token_id);
+        let key = token_key(collection_id, token_id);
         match self.db.get(cf::NFT_TOKENS, &key)? {
             Some(bytes) => {
-                let data: NftTokenData = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let data = decode_token(&bytes)?;
                 Ok(Some(data))
             }
             None => Ok(None),
@@ -1040,13 +1039,13 @@ impl<'a> NftStore<'a> {
 
     /// Check if token exists
     pub fn token_exists(&self, collection_id: &[u8; 32], token_id: u64) -> Result<bool> {
-        let key = Self::token_key(collection_id, token_id);
+        let key = token_key(collection_id, token_id);
         self.db.contains(cf::NFT_TOKENS, &key)
     }
 
     /// Delete a token (for burns)
     pub fn delete_token(&self, collection_id: &[u8; 32], token_id: u64) -> Result<()> {
-        let key = Self::token_key(collection_id, token_id);
+        let key = token_key(collection_id, token_id);
         self.db.delete(cf::NFT_TOKENS, &key)
     }
 
@@ -1063,9 +1062,9 @@ impl<'a> NftStore<'a> {
             tokens.push(entry);
         }
 
-        let bytes = bincode::serialize(&tokens)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::NFT_OWNER_INDEX, owner.as_bytes(), &bytes)
+        let bytes = encode_owner_tokens(&tokens)?;
+        self.db
+            .put(cf::NFT_OWNER_INDEX, owner_index_key(owner), &bytes)
     }
 
     /// Remove token from owner index
@@ -1074,21 +1073,21 @@ impl<'a> NftStore<'a> {
         tokens.retain(|(c, t)| !(c.as_slice() == collection_id && *t == token_id));
 
         if tokens.is_empty() {
-            self.db.delete(cf::NFT_OWNER_INDEX, owner.as_bytes())?;
+            self.db
+                .delete(cf::NFT_OWNER_INDEX, owner_index_key(owner))?;
         } else {
-            let bytes = bincode::serialize(&tokens)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
-            self.db.put(cf::NFT_OWNER_INDEX, owner.as_bytes(), &bytes)?;
+            let bytes = encode_owner_tokens(&tokens)?;
+            self.db
+                .put(cf::NFT_OWNER_INDEX, owner_index_key(owner), &bytes)?;
         }
         Ok(())
     }
 
     /// Get all tokens owned by an address
-    pub fn get_owner_tokens(&self, owner: &Address) -> Result<Vec<(Vec<u8>, u64)>> {
-        match self.db.get(cf::NFT_OWNER_INDEX, owner.as_bytes())? {
+    pub fn get_owner_tokens(&self, owner: &Address) -> Result<Vec<OwnerTokenEntry>> {
+        match self.db.get(cf::NFT_OWNER_INDEX, owner_index_key(owner))? {
             Some(bytes) => {
-                let tokens: Vec<(Vec<u8>, u64)> = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let tokens = decode_owner_tokens(&bytes)?;
                 Ok(tokens)
             }
             None => Ok(Vec::new()),
@@ -1107,9 +1106,12 @@ impl<'a> NftStore<'a> {
             tokens.push(token_id);
         }
 
-        let bytes = bincode::serialize(&tokens)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::NFT_COLLECTION_INDEX, collection_id, &bytes)
+        let bytes = encode_collection_tokens(&tokens)?;
+        self.db.put(
+            cf::NFT_COLLECTION_INDEX,
+            collection_index_key(collection_id),
+            &bytes,
+        )
     }
 
     /// Remove token from collection index
@@ -1117,17 +1119,22 @@ impl<'a> NftStore<'a> {
         let mut tokens = self.get_collection_tokens(collection_id)?;
         tokens.retain(|t| *t != token_id);
 
-        let bytes = bincode::serialize(&tokens)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::NFT_COLLECTION_INDEX, collection_id, &bytes)
+        let bytes = encode_collection_tokens(&tokens)?;
+        self.db.put(
+            cf::NFT_COLLECTION_INDEX,
+            collection_index_key(collection_id),
+            &bytes,
+        )
     }
 
     /// Get all token IDs in a collection
     pub fn get_collection_tokens(&self, collection_id: &[u8; 32]) -> Result<Vec<u64>> {
-        match self.db.get(cf::NFT_COLLECTION_INDEX, collection_id)? {
+        match self.db.get(
+            cf::NFT_COLLECTION_INDEX,
+            collection_index_key(collection_id),
+        )? {
             Some(bytes) => {
-                let tokens: Vec<u64> = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let tokens = decode_collection_tokens(&bytes)?;
                 Ok(tokens)
             }
             None => Ok(Vec::new()),
@@ -1247,17 +1254,16 @@ impl<'a> IssuerStore<'a> {
 
     /// Register a new issuer
     pub fn put_issuer(&self, address: &Address, data: &IssuerData) -> Result<()> {
-        let bytes = bincode::serialize(data)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::ISSUER_REGISTRY, address.as_bytes(), &bytes)
+        let bytes = encode_issuer(data)?;
+        self.db
+            .put(cf::ISSUER_REGISTRY, issuer_key(address), &bytes)
     }
 
     /// Get an issuer by address
     pub fn get_issuer(&self, address: &Address) -> Result<Option<IssuerData>> {
-        match self.db.get(cf::ISSUER_REGISTRY, address.as_bytes())? {
+        match self.db.get(cf::ISSUER_REGISTRY, issuer_key(address))? {
             Some(bytes) => {
-                let data: IssuerData = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let data = decode_issuer(&bytes)?;
                 Ok(Some(data))
             }
             None => Ok(None),
@@ -1266,7 +1272,7 @@ impl<'a> IssuerStore<'a> {
 
     /// Check if an address is a registered issuer
     pub fn is_registered(&self, address: &Address) -> Result<bool> {
-        self.db.contains(cf::ISSUER_REGISTRY, address.as_bytes())
+        self.db.contains(cf::ISSUER_REGISTRY, issuer_key(address))
     }
 
     /// Check if an address can mint certified documents
@@ -1285,15 +1291,14 @@ impl<'a> IssuerStore<'a> {
 
     /// Delete an issuer (for complete removal)
     pub fn delete_issuer(&self, address: &Address) -> Result<()> {
-        self.db.delete(cf::ISSUER_REGISTRY, address.as_bytes())
+        self.db.delete(cf::ISSUER_REGISTRY, issuer_key(address))
     }
 
     /// Get all registered issuers
     pub fn get_all_issuers(&self) -> Result<Vec<IssuerData>> {
         let mut issuers = Vec::new();
         for (_, value) in self.db.prefix_iter(cf::ISSUER_REGISTRY, &[])? {
-            let issuer: IssuerData = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let issuer = decode_issuer(&value)?;
             issuers.push(issuer);
         }
         Ok(issuers)

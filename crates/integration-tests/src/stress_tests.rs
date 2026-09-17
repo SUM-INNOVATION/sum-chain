@@ -306,9 +306,8 @@ fn stress_nft_minting() {
     let validator_bytes = *KeyPair::generate().private_key().as_bytes();
     let data_dir = TempDir::new().expect("Failed to create temp dir");
     let db = Arc::new(Database::open_default(data_dir.path()).expect("Failed to open database"));
-    let state = Arc::new(StateManager::new(db.clone(), 1));
+    let _state = Arc::new(StateManager::new(db.clone(), 1));
     let params = ChainParams::default();
-    let nft_executor = NftExecutor::new(db.clone(), params.clone());
 
     let validator_key = KeyPair::from_bytes(validator_bytes);
     let validator_addr = validator_key.address();
@@ -349,9 +348,24 @@ fn stress_nft_minting() {
         data: serialized,
     };
 
-    let result = nft_executor
-        .execute(&validator_addr, &nft_data, &state, &Address::ZERO, params.min_fee)
-        .expect("Should create collection");
+    // The executor stages into a block candidate now, so this benchmark opens
+    // ONE and threads it through the creation and every mint. A fresh candidate
+    // per operation would be a fresh block per operation: the mints would not
+    // see the collection, and each would allocate token id 1. Nothing is
+    // published; the subject is throughput, not committed state.
+    let mut candidate = sumchain_storage::candidate::CandidateExecution::new(&db, 1 << 30);
+    let mut view = candidate.view();
+
+    let result = NftExecutor::execute(
+        &mut view,
+        &params,
+        &validator_addr,
+        &nft_data,
+        &Address::ZERO,
+        params.min_fee,
+        1_000_000_000, // block_timestamp
+    )
+    .expect("Should create collection");
     let collection_id = result.collection_id.unwrap();
 
     // Mint many tokens
@@ -386,9 +400,16 @@ fn stress_nft_minting() {
             data: serialized,
         };
 
-        let result = nft_executor
-            .execute(&validator_addr, &nft_data, &state, &Address::ZERO, fee)
-            .expect("Should mint");
+        let result = NftExecutor::execute(
+            &mut view,
+            &params,
+            &validator_addr,
+            &nft_data,
+            &Address::ZERO,
+            fee,
+            1_000_000_000, // block_timestamp
+        )
+        .expect("Should mint");
         assert!(result.success, "Mint failed: {:?}", result.error);
     }
     let elapsed = start.elapsed();

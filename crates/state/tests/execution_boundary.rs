@@ -1259,6 +1259,41 @@ fn migrated_execution_paths_take_no_self_receiver() {
         ("healthcare_view.rs", "fn v_healthcare_proof_exists("),
         ("healthcare_view.rs", "fn v_put_healthcare_proof("),
         ("healthcare_executor.rs", "fn execute("),
+        // NFTs. Four families plus the read-only issuer registry, behind a
+        // unit-struct executor: every operation takes the view and no
+        // receiver, so `self.db` cannot be named. The two index appends are
+        // `pub` rather than private because the executor calls them directly
+        // from a different module, which is why they are listed here too.
+        ("nft_view.rs", "fn v_put_collection("),
+        ("nft_view.rs", "fn v_get_collection("),
+        ("nft_view.rs", "fn v_collection_exists("),
+        ("nft_view.rs", "fn v_put_token("),
+        ("nft_view.rs", "fn v_get_token("),
+        ("nft_view.rs", "fn v_token_exists("),
+        ("nft_view.rs", "fn v_delete_token("),
+        ("nft_view.rs", "fn v_get_owner_tokens("),
+        ("nft_view.rs", "fn v_add_to_owner_index("),
+        ("nft_view.rs", "fn v_remove_from_owner_index("),
+        ("nft_view.rs", "fn v_get_collection_tokens("),
+        ("nft_view.rs", "fn v_add_to_collection_index("),
+        ("nft_view.rs", "fn v_remove_from_collection_index("),
+        ("nft_view.rs", "fn v_transfer_token("),
+        ("nft_view.rs", "fn v_burn_token("),
+        ("nft_view.rs", "fn v_get_issuer("),
+        ("nft_view.rs", "fn v_can_mint_documents("),
+        ("nft_executor.rs", "fn execute("),
+        ("nft_executor.rs", "fn deduct_fee("),
+        ("nft_executor.rs", "fn execute_create_collection("),
+        ("nft_executor.rs", "fn execute_mint("),
+        ("nft_executor.rs", "fn execute_batch_mint("),
+        ("nft_executor.rs", "fn execute_transfer("),
+        ("nft_executor.rs", "fn execute_approve("),
+        ("nft_executor.rs", "fn execute_burn("),
+        ("nft_executor.rs", "fn execute_update_metadata("),
+        ("nft_executor.rs", "fn execute_transfer_collection("),
+        ("nft_executor.rs", "fn execute_update_collection_config("),
+        ("nft_executor.rs", "fn execute_lock_token("),
+        ("nft_executor.rs", "fn execute_unlock_token("),
         // Tax. Six families behind five accessors plus the index append; the
         // executor is a unit struct, so no operation can reach a database.
         ("tax_view.rs", "fn v_get_claim_type("),

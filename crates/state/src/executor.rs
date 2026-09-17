@@ -235,7 +235,6 @@ pub struct BlockExecutor {
     state: Arc<StateManager>,
     db: Arc<Database>,
     params: ChainParams,
-    nft_executor: NftExecutor,
     contract_executor: ContractExecutorState,
     docclass_executor: DocClassExecutor,
     legal_executor: LegalExecutor,
@@ -330,7 +329,6 @@ impl Drop for ContractBlockScope<'_> {
 impl BlockExecutor {
     /// Create a new block executor
     pub fn new(state: Arc<StateManager>, db: Arc<Database>, params: ChainParams) -> Self {
-        let nft_executor = NftExecutor::new(db.clone(), params.clone());
         let contract_executor = ContractExecutorState::new(db.clone(), params.clone());
         let docclass_executor = DocClassExecutor::new(db.clone(), params.clone());
         let legal_executor = LegalExecutor::new(db.clone(), params.clone());
@@ -342,7 +340,6 @@ impl BlockExecutor {
             state,
             db,
             params,
-            nft_executor,
             contract_executor,
             docclass_executor,
             legal_executor,
@@ -500,9 +497,11 @@ impl BlockExecutor {
                     }
                     TxPayload::Nft(nft_data) => {
                         // Execute NFT operation
-                        let result = self.nft_executor.execute(view,
+                        let result = NftExecutor::execute(
+                            view,
+                            &self.params,
                             &v2_tx.from,
-                            &nft_data,
+                            nft_data,
                             proposer,
                             v2_tx.fee,
                             block_timestamp,
@@ -2177,7 +2176,9 @@ impl BlockExecutor {
                 }
 
                 // Execute NFT operation
-                let result = self.nft_executor.execute(view,
+                let result = NftExecutor::execute(
+                    view,
+                    &self.params,
                     &tx.from,
                     nft_data,
                     proposer,

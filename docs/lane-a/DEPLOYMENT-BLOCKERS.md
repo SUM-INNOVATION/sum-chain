@@ -37,6 +37,12 @@ Only agreement and healthcare are transcribed here so far. The earlier
 inventories are recorded in their own commit messages and have not been copied
 into this file; a pointer is not a transcription, and listing them here from
 memory would be worse than listing them not at all.
+| NFT (SUM-721) | this commit | transcribed in full below |
+
+Only agreement and NFT are transcribed here so far. The earlier inventories are
+recorded in their own commit messages and have not been copied into this file; a
+pointer is not a transcription, and listing them here from memory would be worse
+than listing them not at all.
 
 ## Agreement (SRC-84X)
 
@@ -195,6 +201,40 @@ filled by anyone at all.
 SEVEN accumulating structures, not two. Five are index families whose values are
 `Vec` lists; two accumulate INSIDE a primary row, so the buffer that gets built
 is the entire record. Every one serializes its whole contents before `view.put`
+## NFT (SUM-721)
+
+Sixteen items. Every one is inherited, reproduced deliberately, and pinned by
+the named test.
+
+### Block-level denial of service: absence is an error, not a failed receipt
+
+Every other guard in `nft_executor.rs` returns
+`NftExecutionResult::failure(..)`, which becomes a `Failed(2)` receipt. Four
+paths instead use `?` on a `StateError::BlockValidation`, and
+`BlockExecutor::execute_block` propagates that with `?` too — so ONE such
+transaction makes the whole block unexecutable, for the producer and for every
+importer. Any sender can submit one, for the minimum fee, naming a collection id
+that does not exist.
+
+  * `Collection not found`, from mint, batch mint, transfer, burn, metadata
+    update, collection-ownership transfer and config update.
+    -- a_transaction_naming_an_absent_collection_aborts_the_whole_block
+  * `Token not found`, from transfer, approve, burn, metadata update, lock and
+    unlock. Reachable inside one block by burning a token and then using it.
+    -- burning_a_token_and_then_using_it_in_one_block_aborts_the_block
+  * `Invalid config`, from a royalty above 2500bps in the payload.
+    -- an_invalid_collection_config_aborts_the_whole_block
+  * `Invalid collection data` / `Invalid mint data` / `Invalid transfer data` /
+    `Invalid approve data` / `Invalid batch data` / `Invalid config data`, from
+    any payload bincode cannot decode. Same shape; not separately pinned.
+
+This is the item that most obviously has to be fixed before deployment, and it
+cannot be fixed here: turning those into failed receipts changes which blocks
+are valid.
+
+### Unrestricted allocation from untrusted input
+
+Both accumulating indexes serialize their entire value before `view.put`
 accounts for a single byte, so the candidate's byte ceiling bounds what a block
 may COMMIT and not what one refused transaction may ALLOCATE. Measured at 20,000
 entries with the ceiling set to 4,096 B:
@@ -401,3 +441,98 @@ assertions inside the two `any_sender_*` tests above.
     executor reads the same row a moment earlier and refuses first. It is
     reproduced verbatim on the candidate surface anyway -- the store is public,
     and the candidate side must not be the laxer of the two.
+owner index       row 960,008 B, allocated 4,484,318 B, largest single 1,280,000 B, accounted 367 B
+collection index  row 160,008 B, allocated   805,676 B, largest single   320,000 B, accounted 463 B
+```
+
+The million-byte single allocations are the `Vec` doubling its capacity before
+the encode runs. This is one measured size, not a bound for arbitrary input. NFT
+cannot be described as memory bounded or OOM safe. A deterministic activated
+bound, or a bounded storage structure, is required before deployment.
+
+  -- both_accumulating_indexes_allocate_their_whole_value_before_the_ceiling_refuses
+
+Neither index is ever compacted. The owner index grows by one
+`(collection id, token id)` pair per token an address holds; the collection
+index grows by one `u64` per token ever minted into a collection. Every NFT
+payload is `bincode::deserialize`d from transaction data with no size or shape
+limit ahead of it, so the same exposure applies at the decode boundary.
+
+### Fee accounting
+
+  * `deduct_fee` runs BEFORE the dispatch match, so every guard below it refuses
+    a transaction whose fee is already spent and whose nonce has already
+    advanced — while the receipt reports `fee_paid: 0`. The receipt and the
+    state disagree on every failed NFT transaction.
+    -- a_refused_nft_operation_has_already_charged_the_fee
+  * `SetApprovalForAll` is unimplemented. It charges the fee, advances the nonce
+    and returns a failure. Operator approvals do not exist at all.
+    -- set_approval_for_all_charges_a_fee_and_does_nothing
+
+### Metadata size and storage pricing are enforced on one path only
+
+`execute_mint` enforces `max_metadata_bytes` and
+`calculate_nft_storage_fee`. Two other paths write metadata and enforce neither:
+
+  * `UpdateMetadata` takes the transaction payload VERBATIM as the new metadata,
+    undecoded, with no size limit and no per-byte fee. 32 KB — twice the mint
+    limit — costs the flat minimum fee.
+    -- update_metadata_accepts_any_size_and_charges_no_storage_fee
+  * `BatchMint` checks neither, for any number of requests.
+    -- batch_mint_ignores_the_metadata_size_limit_and_the_storage_fee
+
+### Authority
+
+  * The CREATOR may rewrite the metadata of a token it no longer owns, for the
+    life of the token. `creator` never changes, and the guard is
+    `owner == sender || creator == sender`.
+    -- the_creator_can_rewrite_metadata_of_a_token_it_no_longer_owns
+  * The `locked` flag is consulted by transfer and burn only. A locked token can
+    still be approved and have its metadata rewritten.
+    -- a_locked_token_can_still_be_approved_and_rewritten
+  * `Approve` never reads the collection, so an approval can be recorded on a
+    token in a non-transferable collection — an approval that can never be
+    exercised.
+    -- approve_never_reads_the_collection
+
+### Collection identity
+
+`CollectionId::new(sender, name, block_timestamp)` — the block timestamp is the
+only nonce. Two blocks that share a timestamp, which nothing forbids, give the
+same sender the same id for the same name, and the later creation is refused as
+a duplicate. The id is not unique per creation; it is unique per
+`(sender, name, timestamp)`.
+
+  -- the_block_timestamp_is_the_only_nonce_in_a_collection_id
+
+### Royalties and config
+
+  * `royalty_bps` and `royalty_recipient` are stored, returned by the RPC
+    readers, and consulted by no execution path. A transfer pays the recipient
+    nothing.
+    -- royalties_are_recorded_and_never_paid
+  * Creation zeroes `royalty_recipient` when `royalty_bps == 0`;
+    `UpdateCollectionConfig` has no such rule and sets one anyway, and has no
+    field for `royalty_bps` at all, so a royalty can never be changed after
+    creation.
+    -- a_royalty_recipient_can_be_set_on_a_collection_that_pays_no_royalty
+  * Transferring a collection moves no token, and hands the new owner
+    `owner_only_minting` rights over every future token in it.
+    -- transferring_a_collection_moves_no_token
+
+### Index shape and corruption handling
+
+  * Removal is asymmetric: emptying an owner's list DELETES the row, emptying a
+    collection's list WRITES an empty list. Both are reproduced exactly on both
+    sides.
+    -- removal_is_asymmetric_between_the_two_indexes
+    -- burning_the_last_token_deletes_one_index_row_and_writes_the_other_empty
+  * The existence guards use `contains`, never `get`, so a CORRUPT row reads as
+    present and refuses rather than erroring. This is the safe direction and is
+    preserved for that reason: upgrading it would turn today's refusals into the
+    block-level errors described at the top of this section.
+    -- a_malformed_row_is_an_error_from_every_decoding_reader
+  * `next_token_id` never goes back. A burn decrements `total_supply` with
+    `saturating_sub` and leaves `next_token_id` where it was, so a collection
+    with `max_supply` can be permanently exhausted by minting and burning.
+    -- a_burn_after_a_mint_in_one_block_moves_every_mirror_row_together

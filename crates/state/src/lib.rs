@@ -32,6 +32,7 @@ pub mod mempool;
 pub mod messaging_executor;
 pub mod messaging_view;
 pub mod nft_executor;
+pub mod nft_view;
 pub mod node_registry;
 pub mod policy_account_executor;
 pub mod policy_account_view;

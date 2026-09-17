@@ -11,7 +11,9 @@ use sumchain_genesis::ChainParams;
 use sumchain_nft::collection::CollectionConfig;
 use sumchain_primitives::{Address, NftOperation, NftTxData};
 use sumchain_state::{NftExecutor, StateManager};
-use sumchain_storage::{Database, IssuerData, IssuerStore, NftStore};
+use sumchain_storage::candidate::CandidateExecution;
+use sumchain_storage::exec_view::ExecutionView;
+use sumchain_storage::{Database, IssuerData, IssuerStore};
 use tempfile::TempDir;
 
 /// Helper to generate key bytes for tests
@@ -23,7 +25,6 @@ fn generate_key_bytes() -> [u8; 32] {
 struct SecurityTestNode {
     db: Arc<Database>,
     state: Arc<StateManager>,
-    nft_executor: NftExecutor,
     validator_key_bytes: [u8; 32],
     params: ChainParams,
     chain_id: u64,
@@ -37,7 +38,6 @@ impl SecurityTestNode {
         let db = Arc::new(Database::open_default(data_dir.path()).expect("Failed to open database"));
         let state = Arc::new(StateManager::new(db.clone(), chain_id));
         let params = ChainParams::default();
-        let nft_executor = NftExecutor::new(db.clone(), params.clone());
 
         // Create validator key from bytes
         let validator_key = KeyPair::from_bytes(validator_key_bytes);
@@ -55,7 +55,6 @@ impl SecurityTestNode {
         Self {
             db,
             state,
-            nft_executor,
             validator_key_bytes,
             params,
             chain_id,
@@ -71,8 +70,16 @@ impl SecurityTestNode {
         self.validator_key().address()
     }
 
-    fn nft_store(&self) -> NftStore<'_> {
-        NftStore::new(&self.db)
+    /// One candidate for one block.
+    ///
+    /// The executor stages into the block's candidate now, so a scenario that
+    /// creates a collection and then mints into it has to thread ONE candidate
+    /// through both: a fresh candidate per operation would be a fresh block per
+    /// operation, and the mint would not see the collection. Nothing here is
+    /// ever published — the issuer registry, which execution only reads, is
+    /// seeded committed before the candidate opens.
+    fn candidate(&self) -> CandidateExecution<'_> {
+        CandidateExecution::new(&self.db, 1 << 30)
     }
 
     fn issuer_store(&self) -> IssuerStore<'_> {
@@ -102,8 +109,11 @@ impl SecurityTestNode {
     }
 
     /// Create a collection for testing
-    fn create_collection(&self, config: CollectionConfig) -> Result<[u8; 32], String> {
-        let store = self.nft_store();
+    fn create_collection(
+        &self,
+        view: &mut ExecutionView<'_, '_>,
+        config: CollectionConfig,
+    ) -> Result<[u8; 32], String> {
         let sender = self.validator_address();
 
         #[derive(serde::Serialize)]
@@ -130,24 +140,16 @@ impl SecurityTestNode {
             data: bincode::serialize(&create_data).unwrap(),
         };
 
-        // The NFT executor stages into a block candidate now, so this fixture
-        // opens one. It is never published: this test asserts on the executor's
-        // RESULT, not on committed state.
-        let mut candidate = sumchain_storage::candidate::CandidateExecution::new(
-            &self.db,
-            1 << 30,
-        );
-        let result = self
-            .nft_executor
-            .execute(
-                &mut candidate.view(),
-                &sender,
-                &nft_data,
-                &sender,
-                self.params.min_fee,
-                1000000000, // block_timestamp
-            )
-            .map_err(|e| format!("Failed to create collection: {}", e))?;
+        let result = NftExecutor::execute(
+            view,
+            &self.params,
+            &sender,
+            &nft_data,
+            &sender,
+            self.params.min_fee,
+            1000000000, // block_timestamp
+        )
+        .map_err(|e| format!("Failed to create collection: {}", e))?;
 
         if result.success {
             Ok(result.collection_id.expect("Missing collection ID"))
@@ -159,12 +161,12 @@ impl SecurityTestNode {
     /// Attempt to mint a token with specific fee and metadata size
     fn mint_token_with_fee(
         &self,
+        view: &mut ExecutionView<'_, '_>,
         collection_id: &[u8; 32],
         metadata_size: usize,
         fee: u128,
         is_document: bool,
     ) -> Result<u64, String> {
-        let store = self.nft_store();
         let sender = self.validator_address();
 
         #[derive(serde::Serialize)]
@@ -193,21 +195,16 @@ impl SecurityTestNode {
             data: bincode::serialize(&mint_data).unwrap(),
         };
 
-        let mut candidate = sumchain_storage::candidate::CandidateExecution::new(
-            &self.db,
-            1 << 30,
-        );
-        let result = self
-            .nft_executor
-            .execute(
-                &mut candidate.view(),
-                &sender,
-                &nft_data,
-                &sender,
-                fee,
-                1000000000, // block_timestamp
-            )
-            .map_err(|e| format!("Failed to mint token: {}", e))?;
+        let result = NftExecutor::execute(
+            view,
+            &self.params,
+            &sender,
+            &nft_data,
+            &sender,
+            fee,
+            1000000000, // block_timestamp
+        )
+        .map_err(|e| format!("Failed to mint token: {}", e))?;
 
         if result.success {
             Ok(result.token_id.expect("Missing token ID"))
@@ -258,14 +255,24 @@ fn test_mint_with_insufficient_fee_fails() {
     let node = SecurityTestNode::new(key_bytes, 1);
 
     // Create a collection
-    let collection_id = node.create_collection(CollectionConfig::default()).unwrap();
+    let mut candidate = node.candidate();
+    let mut view = candidate.view();
+    let collection_id = node
+        .create_collection(&mut view, CollectionConfig::default())
+        .unwrap();
 
     // Calculate required fee for 1000 bytes of metadata
     let metadata_size = 1000;
     let required_fee = node.params.calculate_nft_storage_fee(metadata_size);
 
     // Try to mint with insufficient fee (below minimum)
-    let result = node.mint_token_with_fee(&collection_id, metadata_size, required_fee - 1, false);
+    let result = node.mint_token_with_fee(
+        &mut view,
+        &collection_id,
+        metadata_size,
+        required_fee - 1,
+        false,
+    );
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("Insufficient storage fee"));
 }
@@ -276,18 +283,34 @@ fn test_mint_with_sufficient_fee_succeeds() {
     let node = SecurityTestNode::new(key_bytes, 1);
 
     // Create a collection
-    let collection_id = node.create_collection(CollectionConfig::default()).unwrap();
+    let mut candidate = node.candidate();
+    let mut view = candidate.view();
+    let collection_id = node
+        .create_collection(&mut view, CollectionConfig::default())
+        .unwrap();
 
     // Calculate required fee for 1000 bytes of metadata
     let metadata_size = 1000;
     let required_fee = node.params.calculate_nft_storage_fee(metadata_size);
 
     // Mint with exact required fee
-    let result = node.mint_token_with_fee(&collection_id, metadata_size, required_fee, false);
+    let result = node.mint_token_with_fee(
+        &mut view,
+        &collection_id,
+        metadata_size,
+        required_fee,
+        false,
+    );
     assert!(result.is_ok());
 
     // Mint with more than required fee
-    let result2 = node.mint_token_with_fee(&collection_id, metadata_size, required_fee * 2, false);
+    let result2 = node.mint_token_with_fee(
+        &mut view,
+        &collection_id,
+        metadata_size,
+        required_fee * 2,
+        false,
+    );
     assert!(result2.is_ok());
 }
 
@@ -297,13 +320,17 @@ fn test_mint_with_oversized_metadata_fails() {
     let node = SecurityTestNode::new(key_bytes, 1);
 
     // Create a collection
-    let collection_id = node.create_collection(CollectionConfig::default()).unwrap();
+    let mut candidate = node.candidate();
+    let mut view = candidate.view();
+    let collection_id = node
+        .create_collection(&mut view, CollectionConfig::default())
+        .unwrap();
 
     // Try to mint with oversized metadata (> 16KB default)
     let oversized = 20_000; // 20KB
     let fee = node.params.calculate_nft_storage_fee(oversized);
 
-    let result = node.mint_token_with_fee(&collection_id, oversized, fee, false);
+    let result = node.mint_token_with_fee(&mut view, &collection_id, oversized, fee, false);
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("Metadata too large"));
 }
@@ -320,13 +347,15 @@ fn test_document_mint_by_unregistered_issuer_fails() {
     // Create a certified document collection
     let mut config = CollectionConfig::certified_document();
     config.royalty_recipient = node.validator_address();
-    let collection_id = node.create_collection(config).unwrap();
+    let mut candidate = node.candidate();
+    let mut view = candidate.view();
+    let collection_id = node.create_collection(&mut view, config).unwrap();
 
     // Try to mint a document WITHOUT being registered as an issuer
     let metadata_size = 100;
     let fee = node.params.calculate_nft_storage_fee(metadata_size) * 2; // More than enough
 
-    let result = node.mint_token_with_fee(&collection_id, metadata_size, fee, true);
+    let result = node.mint_token_with_fee(&mut view, &collection_id, metadata_size, fee, true);
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("not a registered document issuer"));
 }
@@ -344,13 +373,15 @@ fn test_document_mint_by_registered_issuer_succeeds() {
     // Create a certified document collection
     let mut config = CollectionConfig::certified_document();
     config.royalty_recipient = validator_addr;
-    let collection_id = node.create_collection(config).unwrap();
+    let mut candidate = node.candidate();
+    let mut view = candidate.view();
+    let collection_id = node.create_collection(&mut view, config).unwrap();
 
     // Now minting a document should succeed
     let metadata_size = 100;
     let fee = node.params.calculate_nft_storage_fee(metadata_size) * 2;
 
-    let result = node.mint_token_with_fee(&collection_id, metadata_size, fee, true);
+    let result = node.mint_token_with_fee(&mut view, &collection_id, metadata_size, fee, true);
     assert!(result.is_ok());
 }
 
@@ -360,13 +391,17 @@ fn test_regular_mint_does_not_require_issuer_registration() {
     let node = SecurityTestNode::new(key_bytes, 1);
 
     // Create a regular (non-document) collection
-    let collection_id = node.create_collection(CollectionConfig::default()).unwrap();
+    let mut candidate = node.candidate();
+    let mut view = candidate.view();
+    let collection_id = node
+        .create_collection(&mut view, CollectionConfig::default())
+        .unwrap();
 
     // Minting regular NFTs should NOT require issuer registration
     let metadata_size = 100;
     let fee = node.params.calculate_nft_storage_fee(metadata_size) * 2;
 
-    let result = node.mint_token_with_fee(&collection_id, metadata_size, fee, false);
+    let result = node.mint_token_with_fee(&mut view, &collection_id, metadata_size, fee, false);
     assert!(result.is_ok());
 }
 

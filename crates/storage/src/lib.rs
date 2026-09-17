@@ -13,6 +13,7 @@ pub mod governance_store;
 pub mod healthcare_store;
 pub mod legal_store;
 pub mod messaging_store;
+pub mod nft_store;
 pub mod candidate;
 pub mod exec_view;
 pub mod overlay;
