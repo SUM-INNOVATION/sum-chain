@@ -239,7 +239,6 @@ pub struct BlockExecutor {
     contract_executor: ContractExecutorState,
     docclass_executor: DocClassExecutor,
     legal_executor: LegalExecutor,
-    healthcare_executor: HealthcareExecutor,
     employment_executor: EmploymentExecutor,
     finance_executor: FinanceExecutor,
     // No `NodeRegistryExecutor` / `StorageMetadataExecutor` field: both
@@ -335,7 +334,6 @@ impl BlockExecutor {
         let contract_executor = ContractExecutorState::new(db.clone(), params.clone());
         let docclass_executor = DocClassExecutor::new(db.clone(), params.clone());
         let legal_executor = LegalExecutor::new(db.clone(), params.clone());
-        let healthcare_executor = HealthcareExecutor::new(db.clone(), params.clone());
         let employment_executor = EmploymentExecutor::new(db.clone(), params.clone());
         let finance_executor = FinanceExecutor::new(db.clone(), params.clone());
         let inference_settlement_executor =
@@ -348,7 +346,6 @@ impl BlockExecutor {
             contract_executor,
             docclass_executor,
             legal_executor,
-            healthcare_executor,
             employment_executor,
             finance_executor,
             inference_settlement_executor,
@@ -986,7 +983,8 @@ impl BlockExecutor {
                     }
                     TxPayload::Healthcare(healthcare_data) => {
                         // Execute Healthcare operation (SRC-87X)
-                        let result = self.healthcare_executor.execute(view,
+                        let result = HealthcareExecutor::execute(
+                            view,
                             &v2_tx.from,
                             &healthcare_data,
                             proposer,
@@ -2775,7 +2773,8 @@ impl BlockExecutor {
                 }
 
                 // Execute Healthcare operation (SRC-87X)
-                let result = self.healthcare_executor.execute(view,
+                let result = HealthcareExecutor::execute(
+                    view,
                     &tx.from,
                     healthcare_data,
                     proposer,

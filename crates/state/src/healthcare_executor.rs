@@ -8,9 +8,7 @@
 //! - SRC-876: Prescription Standard (NON-TRANSFERABLE for controlled substances)
 
 use sumchain_storage::exec_view::ExecutionView;
-use std::sync::Arc;
 
-use sumchain_genesis::ChainParams;
 use sumchain_primitives::{
     healthcare::{
         ConsentEnvelope, ConsentStatus, HealthcareOperation, HealthcareProofEnvelope,
@@ -19,7 +17,6 @@ use sumchain_primitives::{
     },
     Address, Balance, BlockHeight, Hash, Timestamp,
 };
-use sumchain_storage::{Database, HealthcareStore};
 use tracing::debug;
 
 use crate::{Result, StateError, StateManager};
@@ -123,21 +120,23 @@ impl HealthcareExecutionResult {
 }
 
 /// Healthcare executor for SRC-87X transactions
-pub struct HealthcareExecutor {
-    db: Arc<Database>,
-    #[allow(dead_code)]
-    params: ChainParams,
-}
+/// No database handle, by construction.
+///
+/// Every operation takes the block's `ExecutionView` and no `self`, so
+/// `self.db` is not something this file can name: a committed write here is a
+/// compile error rather than a review finding. The committed twins stay in
+/// `sumchain_storage::healthcare_store` for the RPC server, which answers about
+/// the canonical chain.
+///
+/// The `ChainParams` the old constructor took was `#[allow(dead_code)]` and
+/// consulted by nothing; it left with the database handle.
+pub struct HealthcareExecutor;
 
 impl HealthcareExecutor {
-    pub fn new(db: Arc<Database>, params: ChainParams) -> Self {
-        Self { db, params }
-    }
-
     /// Execute a Healthcare transaction
     #[allow(clippy::too_many_arguments)]
     pub fn execute(
-        &self, view: &mut ExecutionView<'_, '_>,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &HealthcareTxData,
         proposer: &Address,
@@ -147,8 +146,6 @@ impl HealthcareExecutor {
         _tx_index: u32,
         _tx_hash: Hash,
     ) -> Result<HealthcareExecutionResult> {
-        let store = HealthcareStore::new(&self.db);
-
         match data.operation {
             // =================================================================
             // SRC-871: Provider Registry Operations
@@ -161,7 +158,7 @@ impl HealthcareExecutor {
                     return Ok(HealthcareExecutionResult::failure("Issuer must be sender"));
                 }
 
-                if store.providers().exists(&provider.provider_id)? {
+                if Self::v_provider_exists(view, &provider.provider_id)? {
                     return Ok(HealthcareExecutionResult::failure("Provider already exists"));
                 }
 
@@ -169,7 +166,7 @@ impl HealthcareExecutor {
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
                 let provider_id = provider.provider_id;
-                store.providers().put(&provider)?;
+                Self::v_put_provider(view, &provider)?;
                 debug!("Provider registered: {:?}", provider_id);
                 Ok(HealthcareExecutionResult::success_with_provider(provider_id))
             }
@@ -183,7 +180,7 @@ impl HealthcareExecutor {
                 let update: UpdateData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let provider = match store.providers().get(&update.provider_id)? {
+                let provider = match Self::v_get_provider(view, &update.provider_id)? {
                     Some(p) => p,
                     None => return Ok(HealthcareExecutionResult::failure("Provider not found")),
                 };
@@ -195,7 +192,12 @@ impl HealthcareExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.providers().update_status(&update.provider_id, update.status, block_timestamp)?;
+                Self::v_update_provider_status(
+                    view,
+                    &update.provider_id,
+                    update.status,
+                    block_timestamp,
+                )?;
                 Ok(HealthcareExecutionResult::success())
             }
 
@@ -207,7 +209,7 @@ impl HealthcareExecutor {
                 let d: SuspendData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let provider = match store.providers().get(&d.provider_id)? {
+                let provider = match Self::v_get_provider(view, &d.provider_id)? {
                     Some(p) => p,
                     None => return Ok(HealthcareExecutionResult::failure("Provider not found")),
                 };
@@ -219,7 +221,12 @@ impl HealthcareExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.providers().update_status(&d.provider_id, ProviderStatus::Suspended, block_timestamp)?;
+                Self::v_update_provider_status(
+                    view,
+                    &d.provider_id,
+                    ProviderStatus::Suspended,
+                    block_timestamp,
+                )?;
                 debug!("Provider suspended: {:?}", d.provider_id);
                 Ok(HealthcareExecutionResult::success())
             }
@@ -232,7 +239,7 @@ impl HealthcareExecutor {
                 let d: RevokeData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let provider = match store.providers().get(&d.provider_id)? {
+                let provider = match Self::v_get_provider(view, &d.provider_id)? {
                     Some(p) => p,
                     None => return Ok(HealthcareExecutionResult::failure("Provider not found")),
                 };
@@ -244,7 +251,12 @@ impl HealthcareExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.providers().update_status(&d.provider_id, ProviderStatus::Revoked, block_timestamp)?;
+                Self::v_update_provider_status(
+                    view,
+                    &d.provider_id,
+                    ProviderStatus::Revoked,
+                    block_timestamp,
+                )?;
                 debug!("Provider revoked: {:?}", d.provider_id);
                 Ok(HealthcareExecutionResult::success())
             }
@@ -257,7 +269,7 @@ impl HealthcareExecutor {
                 let d: ReactivateData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let provider = match store.providers().get(&d.provider_id)? {
+                let provider = match Self::v_get_provider(view, &d.provider_id)? {
                     Some(p) => p,
                     None => return Ok(HealthcareExecutionResult::failure("Provider not found")),
                 };
@@ -273,7 +285,12 @@ impl HealthcareExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.providers().update_status(&d.provider_id, ProviderStatus::Active, block_timestamp)?;
+                Self::v_update_provider_status(
+                    view,
+                    &d.provider_id,
+                    ProviderStatus::Active,
+                    block_timestamp,
+                )?;
                 debug!("Provider reactivated: {:?}", d.provider_id);
                 Ok(HealthcareExecutionResult::success())
             }
@@ -287,15 +304,18 @@ impl HealthcareExecutor {
                 let d: AffiliationData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                if store.providers().get(&d.provider_id)?.is_none() {
+                if Self::v_get_provider(view, &d.provider_id)?.is_none() {
                     return Ok(HealthcareExecutionResult::failure("Provider not found"));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.providers().add_network_affiliation(&d.provider_id, &d.plan_id, block_timestamp)?;
-                debug!("Network affiliation added: {:?} -> {:?}", d.provider_id, d.plan_id);
+                Self::v_add_network_affiliation(view, &d.provider_id, &d.plan_id, block_timestamp)?;
+                debug!(
+                    "Network affiliation added: {:?} -> {:?}",
+                    d.provider_id, d.plan_id
+                );
                 Ok(HealthcareExecutionResult::success())
             }
 
@@ -308,14 +328,19 @@ impl HealthcareExecutor {
                 let d: AffiliationData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                if store.providers().get(&d.provider_id)?.is_none() {
+                if Self::v_get_provider(view, &d.provider_id)?.is_none() {
                     return Ok(HealthcareExecutionResult::failure("Provider not found"));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.providers().remove_network_affiliation(&d.provider_id, &d.plan_id, block_timestamp)?;
+                Self::v_remove_network_affiliation(
+                    view,
+                    &d.provider_id,
+                    &d.plan_id,
+                    block_timestamp,
+                )?;
                 debug!("Network affiliation removed: {:?} -> {:?}", d.provider_id, d.plan_id);
                 Ok(HealthcareExecutionResult::success())
             }
@@ -332,11 +357,11 @@ impl HealthcareExecutor {
                 }
 
                 // Verify provider exists
-                if store.providers().get(&membership.provider_id)?.is_none() {
+                if Self::v_get_provider(view, &membership.provider_id)?.is_none() {
                     return Ok(HealthcareExecutionResult::failure("Provider not found"));
                 }
 
-                if store.memberships().exists(&membership.membership_id)? {
+                if Self::v_membership_exists(view, &membership.membership_id)? {
                     return Ok(HealthcareExecutionResult::failure("Membership already exists"));
                 }
 
@@ -344,7 +369,7 @@ impl HealthcareExecutor {
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
                 let membership_id = membership.membership_id;
-                store.memberships().put(&membership)?;
+                Self::v_put_membership(view, &membership)?;
                 debug!("Membership issued: {:?}", membership_id);
                 Ok(HealthcareExecutionResult::success_with_membership(membership_id))
             }
@@ -358,7 +383,7 @@ impl HealthcareExecutor {
                 let d: UpdateData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let membership = match store.memberships().get(&d.membership_id)? {
+                let membership = match Self::v_get_membership(view, &d.membership_id)? {
                     Some(m) => m,
                     None => return Ok(HealthcareExecutionResult::failure("Membership not found")),
                 };
@@ -370,8 +395,16 @@ impl HealthcareExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.memberships().update_status(&d.membership_id, d.status, block_timestamp)?;
-                debug!("Membership status updated: {:?} -> {:?}", d.membership_id, d.status);
+                Self::v_update_membership_status(
+                    view,
+                    &d.membership_id,
+                    d.status,
+                    block_timestamp,
+                )?;
+                debug!(
+                    "Membership status updated: {:?} -> {:?}",
+                    d.membership_id, d.status
+                );
                 Ok(HealthcareExecutionResult::success())
             }
 
@@ -384,7 +417,7 @@ impl HealthcareExecutor {
                 let d: RenewData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let membership = match store.memberships().get(&d.membership_id)? {
+                let membership = match Self::v_get_membership(view, &d.membership_id)? {
                     Some(m) => m,
                     None => return Ok(HealthcareExecutionResult::failure("Membership not found")),
                 };
@@ -396,7 +429,7 @@ impl HealthcareExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.memberships().renew(&d.membership_id, d.new_expiry, block_timestamp)?;
+                Self::v_renew_membership(view, &d.membership_id, d.new_expiry, block_timestamp)?;
                 debug!("Membership renewed: {:?}", d.membership_id);
                 Ok(HealthcareExecutionResult::success())
             }
@@ -409,7 +442,7 @@ impl HealthcareExecutor {
                 let d: SuspendData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let membership = match store.memberships().get(&d.membership_id)? {
+                let membership = match Self::v_get_membership(view, &d.membership_id)? {
                     Some(m) => m,
                     None => return Ok(HealthcareExecutionResult::failure("Membership not found")),
                 };
@@ -421,7 +454,12 @@ impl HealthcareExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.memberships().update_status(&d.membership_id, MembershipStatus::Suspended, block_timestamp)?;
+                Self::v_update_membership_status(
+                    view,
+                    &d.membership_id,
+                    MembershipStatus::Suspended,
+                    block_timestamp,
+                )?;
                 debug!("Membership suspended: {:?}", d.membership_id);
                 Ok(HealthcareExecutionResult::success())
             }
@@ -434,7 +472,7 @@ impl HealthcareExecutor {
                 let d: TerminateData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let membership = match store.memberships().get(&d.membership_id)? {
+                let membership = match Self::v_get_membership(view, &d.membership_id)? {
                     Some(m) => m,
                     None => return Ok(HealthcareExecutionResult::failure("Membership not found")),
                 };
@@ -446,7 +484,12 @@ impl HealthcareExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.memberships().update_status(&d.membership_id, MembershipStatus::Terminated, block_timestamp)?;
+                Self::v_update_membership_status(
+                    view,
+                    &d.membership_id,
+                    MembershipStatus::Terminated,
+                    block_timestamp,
+                )?;
                 debug!("Membership terminated: {:?}", d.membership_id);
                 Ok(HealthcareExecutionResult::success())
             }
@@ -459,7 +502,7 @@ impl HealthcareExecutor {
                 let d: ReinstateData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let membership = match store.memberships().get(&d.membership_id)? {
+                let membership = match Self::v_get_membership(view, &d.membership_id)? {
                     Some(m) => m,
                     None => return Ok(HealthcareExecutionResult::failure("Membership not found")),
                 };
@@ -475,7 +518,12 @@ impl HealthcareExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.memberships().update_status(&d.membership_id, MembershipStatus::Active, block_timestamp)?;
+                Self::v_update_membership_status(
+                    view,
+                    &d.membership_id,
+                    MembershipStatus::Active,
+                    block_timestamp,
+                )?;
                 debug!("Membership reinstated: {:?}", d.membership_id);
                 Ok(HealthcareExecutionResult::success())
             }
@@ -489,7 +537,7 @@ impl HealthcareExecutor {
                 let d: DependentData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let membership = match store.memberships().get(&d.membership_id)? {
+                let membership = match Self::v_get_membership(view, &d.membership_id)? {
                     Some(m) => m,
                     None => return Ok(HealthcareExecutionResult::failure("Membership not found")),
                 };
@@ -501,7 +549,12 @@ impl HealthcareExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.memberships().add_dependent(&d.membership_id, d.dependent_commitment, block_timestamp)?;
+                Self::v_add_dependent(
+                    view,
+                    &d.membership_id,
+                    d.dependent_commitment,
+                    block_timestamp,
+                )?;
                 debug!("Dependent added to membership: {:?}", d.membership_id);
                 Ok(HealthcareExecutionResult::success())
             }
@@ -515,7 +568,7 @@ impl HealthcareExecutor {
                 let d: DependentData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let membership = match store.memberships().get(&d.membership_id)? {
+                let membership = match Self::v_get_membership(view, &d.membership_id)? {
                     Some(m) => m,
                     None => return Ok(HealthcareExecutionResult::failure("Membership not found")),
                 };
@@ -527,7 +580,12 @@ impl HealthcareExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.memberships().remove_dependent(&d.membership_id, &d.dependent_commitment, block_timestamp)?;
+                Self::v_remove_dependent(
+                    view,
+                    &d.membership_id,
+                    &d.dependent_commitment,
+                    block_timestamp,
+                )?;
                 debug!("Dependent removed from membership: {:?}", d.membership_id);
                 Ok(HealthcareExecutionResult::success())
             }
@@ -543,7 +601,7 @@ impl HealthcareExecutor {
                     return Ok(HealthcareExecutionResult::failure("Issuer must be sender"));
                 }
 
-                if store.consents().exists(&consent.consent_id)? {
+                if Self::v_consent_exists(view, &consent.consent_id)? {
                     return Ok(HealthcareExecutionResult::failure("Consent already exists"));
                 }
 
@@ -551,7 +609,7 @@ impl HealthcareExecutor {
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
                 let consent_id = consent.consent_id;
-                store.consents().put(&consent)?;
+                Self::v_put_consent(view, &consent)?;
                 debug!("Consent granted: {:?}", consent_id);
                 Ok(HealthcareExecutionResult::success_with_consent(consent_id))
             }
@@ -565,7 +623,7 @@ impl HealthcareExecutor {
                 let d: UpdateData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let consent = match store.consents().get(&d.consent_id)? {
+                let consent = match Self::v_get_consent(view, &d.consent_id)? {
                     Some(c) => c,
                     None => return Ok(HealthcareExecutionResult::failure("Consent not found")),
                 };
@@ -577,7 +635,7 @@ impl HealthcareExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.consents().update_status(&d.consent_id, d.status, block_timestamp)?;
+                Self::v_update_consent_status(view, &d.consent_id, d.status, block_timestamp)?;
                 debug!("Consent status updated: {:?} -> {:?}", d.consent_id, d.status);
                 Ok(HealthcareExecutionResult::success())
             }
@@ -590,7 +648,7 @@ impl HealthcareExecutor {
                 let d: RevokeData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let consent = match store.consents().get(&d.consent_id)? {
+                let consent = match Self::v_get_consent(view, &d.consent_id)? {
                     Some(c) => c,
                     None => return Ok(HealthcareExecutionResult::failure("Consent not found")),
                 };
@@ -602,7 +660,12 @@ impl HealthcareExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.consents().update_status(&d.consent_id, ConsentStatus::Revoked, block_timestamp)?;
+                Self::v_update_consent_status(
+                    view,
+                    &d.consent_id,
+                    ConsentStatus::Revoked,
+                    block_timestamp,
+                )?;
                 debug!("Consent revoked: {:?}", d.consent_id);
                 Ok(HealthcareExecutionResult::success())
             }
@@ -616,7 +679,7 @@ impl HealthcareExecutor {
                 let d: SupersedeData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                if store.consents().get(&d.old_consent_id)?.is_none() {
+                if Self::v_get_consent(view, &d.old_consent_id)?.is_none() {
                     return Ok(HealthcareExecutionResult::failure("Old consent not found"));
                 }
 
@@ -625,11 +688,16 @@ impl HealthcareExecutor {
                 StateManager::v_increment_nonce(view, sender)?;
 
                 // Mark old as superseded
-                store.consents().update_status(&d.old_consent_id, ConsentStatus::Superseded, block_timestamp)?;
+                Self::v_update_consent_status(
+                    view,
+                    &d.old_consent_id,
+                    ConsentStatus::Superseded,
+                    block_timestamp,
+                )?;
 
                 // Store new consent
                 let new_id = d.new_consent.consent_id;
-                store.consents().put(&d.new_consent)?;
+                Self::v_put_consent(view, &d.new_consent)?;
                 debug!("Consent superseded: {:?} -> {:?}", d.old_consent_id, new_id);
                 Ok(HealthcareExecutionResult::success_with_consent(new_id))
             }
@@ -646,11 +714,11 @@ impl HealthcareExecutor {
                 }
 
                 // Verify prescriber provider exists
-                if store.providers().get(&prescription.prescriber_provider_id)?.is_none() {
+                if Self::v_get_provider(view, &prescription.prescriber_provider_id)?.is_none() {
                     return Ok(HealthcareExecutionResult::failure("Prescriber provider not found"));
                 }
 
-                if store.prescriptions().exists(&prescription.prescription_id)? {
+                if Self::v_prescription_exists(view, &prescription.prescription_id)? {
                     return Ok(HealthcareExecutionResult::failure("Prescription already exists"));
                 }
 
@@ -658,7 +726,7 @@ impl HealthcareExecutor {
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
                 let prescription_id = prescription.prescription_id;
-                store.prescriptions().put(&prescription)?;
+                Self::v_put_prescription(view, &prescription)?;
                 debug!("Prescription issued: {:?}", prescription_id);
                 Ok(HealthcareExecutionResult::success_with_prescription(prescription_id))
             }
@@ -672,7 +740,7 @@ impl HealthcareExecutor {
                 let d: UpdateData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let prescription = match store.prescriptions().get(&d.prescription_id)? {
+                let prescription = match Self::v_get_prescription(view, &d.prescription_id)? {
                     Some(p) => p,
                     None => return Ok(HealthcareExecutionResult::failure("Prescription not found")),
                 };
@@ -691,7 +759,12 @@ impl HealthcareExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.prescriptions().update_status(&d.prescription_id, d.status, block_timestamp)?;
+                Self::v_update_prescription_status(
+                    view,
+                    &d.prescription_id,
+                    d.status,
+                    block_timestamp,
+                )?;
                 debug!("Prescription status updated: {:?} -> {:?}", d.prescription_id, d.status);
                 Ok(HealthcareExecutionResult::success())
             }
@@ -705,7 +778,7 @@ impl HealthcareExecutor {
                 let d: FillData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let prescription = match store.prescriptions().get(&d.prescription_id)? {
+                let prescription = match Self::v_get_prescription(view, &d.prescription_id)? {
                     Some(p) => p,
                     None => return Ok(HealthcareExecutionResult::failure("Prescription not found")),
                 };
@@ -721,7 +794,7 @@ impl HealthcareExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.prescriptions().record_fill(&d.prescription_id, d.fill_commitment, block_timestamp)?;
+                Self::v_record_fill(view, &d.prescription_id, d.fill_commitment, block_timestamp)?;
                 debug!("Prescription filled: {:?}", d.prescription_id);
                 Ok(HealthcareExecutionResult::success())
             }
@@ -735,7 +808,7 @@ impl HealthcareExecutor {
                 let d: PartialFillData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let prescription = match store.prescriptions().get(&d.prescription_id)? {
+                let prescription = match Self::v_get_prescription(view, &d.prescription_id)? {
                     Some(p) => p,
                     None => return Ok(HealthcareExecutionResult::failure("Prescription not found")),
                 };
@@ -749,8 +822,18 @@ impl HealthcareExecutor {
                 StateManager::v_increment_nonce(view, sender)?;
 
                 // Record partial fill (doesn't decrement refills)
-                store.prescriptions().add_fill_history(&d.prescription_id, d.fill_commitment, block_timestamp)?;
-                store.prescriptions().update_status(&d.prescription_id, PrescriptionStatus::PartiallyFilled, block_timestamp)?;
+                Self::v_add_fill_history(
+                    view,
+                    &d.prescription_id,
+                    d.fill_commitment,
+                    block_timestamp,
+                )?;
+                Self::v_update_prescription_status(
+                    view,
+                    &d.prescription_id,
+                    PrescriptionStatus::PartiallyFilled,
+                    block_timestamp,
+                )?;
                 debug!("Prescription partially filled: {:?}", d.prescription_id);
                 Ok(HealthcareExecutionResult::success())
             }
@@ -763,7 +846,7 @@ impl HealthcareExecutor {
                 let d: CancelData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let prescription = match store.prescriptions().get(&d.prescription_id)? {
+                let prescription = match Self::v_get_prescription(view, &d.prescription_id)? {
                     Some(p) => p,
                     None => return Ok(HealthcareExecutionResult::failure("Prescription not found")),
                 };
@@ -775,7 +858,12 @@ impl HealthcareExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.prescriptions().update_status(&d.prescription_id, PrescriptionStatus::Cancelled, block_timestamp)?;
+                Self::v_update_prescription_status(
+                    view,
+                    &d.prescription_id,
+                    PrescriptionStatus::Cancelled,
+                    block_timestamp,
+                )?;
                 debug!("Prescription cancelled: {:?}", d.prescription_id);
                 Ok(HealthcareExecutionResult::success())
             }
@@ -788,7 +876,7 @@ impl HealthcareExecutor {
                 let d: HoldData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let prescription = match store.prescriptions().get(&d.prescription_id)? {
+                let prescription = match Self::v_get_prescription(view, &d.prescription_id)? {
                     Some(p) => p,
                     None => return Ok(HealthcareExecutionResult::failure("Prescription not found")),
                 };
@@ -800,7 +888,12 @@ impl HealthcareExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.prescriptions().update_status(&d.prescription_id, PrescriptionStatus::OnHold, block_timestamp)?;
+                Self::v_update_prescription_status(
+                    view,
+                    &d.prescription_id,
+                    PrescriptionStatus::OnHold,
+                    block_timestamp,
+                )?;
                 debug!("Prescription on hold: {:?}", d.prescription_id);
                 Ok(HealthcareExecutionResult::success())
             }
@@ -813,7 +906,7 @@ impl HealthcareExecutor {
                 let d: ReleaseData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let prescription = match store.prescriptions().get(&d.prescription_id)? {
+                let prescription = match Self::v_get_prescription(view, &d.prescription_id)? {
                     Some(p) => p,
                     None => return Ok(HealthcareExecutionResult::failure("Prescription not found")),
                 };
@@ -829,7 +922,12 @@ impl HealthcareExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.prescriptions().update_status(&d.prescription_id, PrescriptionStatus::Active, block_timestamp)?;
+                Self::v_update_prescription_status(
+                    view,
+                    &d.prescription_id,
+                    PrescriptionStatus::Active,
+                    block_timestamp,
+                )?;
                 debug!("Prescription hold released: {:?}", d.prescription_id);
                 Ok(HealthcareExecutionResult::success())
             }
@@ -841,7 +939,7 @@ impl HealthcareExecutor {
                 let proof: HealthcareProofEnvelope = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                if store.proofs().exists(&proof.proof_id)? {
+                if Self::v_healthcare_proof_exists(view, &proof.proof_id)? {
                     return Ok(HealthcareExecutionResult::failure("Proof already exists"));
                 }
 
@@ -849,7 +947,7 @@ impl HealthcareExecutor {
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
                 let proof_id = proof.proof_id;
-                store.proofs().put(&proof)?;
+                Self::v_put_healthcare_proof(view, &proof)?;
                 debug!("Healthcare proof submitted: {:?}", proof_id);
                 Ok(HealthcareExecutionResult::success_with_proof(proof_id))
             }
@@ -870,6 +968,10 @@ impl HealthcareExecutor {
 #[cfg(all(test, feature = "legacy_tests"))]
 mod tests {
     use super::*;
+    // `Arc` is used only by this module's fixtures. Importing it here rather
+    // than at file scope keeps the normal build free of an unused import while
+    // leaving the gated build exactly as it was.
+    use std::sync::Arc;
     use sumchain_primitives::healthcare::{HealthcareIssuerClass, ProviderType};
     use sumchain_storage::Database;
     use tempfile::TempDir;
@@ -882,14 +984,8 @@ mod tests {
     }
 
     #[test]
-    fn test_healthcare_executor_creation() {
-        let (db, _dir, _state) = setup();
-        let _executor = HealthcareExecutor::new(db, ChainParams::default());
-    }
-
-    #[test]
     fn test_register_provider() {
-        let (db, _dir, state) = setup();
+        let (db, _dir, _state) = setup();
         // A block's candidate, opened here because a `#[test]` function
         // cannot take one as a parameter. An earlier scripted signature
         // rewrite added `view` to the parameter list of every test in this
@@ -897,7 +993,6 @@ mod tests {
         // out of sight.
         let mut overlay = sumchain_storage::overlay::ApplicationOverlay::new(&db, 1 << 20);
         let view = &mut sumchain_storage::exec_view::ExecutionView::new(&mut overlay);
-        let executor = HealthcareExecutor::new(db.clone(), ChainParams::default());
 
         let sender = Address::new([1u8; 20]);
         let proposer = Address::new([99u8; 20]);
@@ -927,16 +1022,28 @@ mod tests {
             data: bincode::serialize(&provider).unwrap(),
         };
 
-        let result = executor.execute(
-            &sender, &tx_data, &state, &proposer, 1000, 100, 1000000, 0, Hash::default(),
-        ).unwrap();
+        let result = HealthcareExecutor::execute(
+            view,
+            &sender,
+            &tx_data,
+            &proposer,
+            1000,
+            100,
+            1000000,
+            0,
+            Hash::default(),
+        )
+        .unwrap();
 
         assert!(result.success, "Register provider failed: {:?}", result.error);
         assert_eq!(result.provider_id, Some([10u8; 32]));
 
-        // Verify storage
-        let store = HealthcareStore::new(&db);
-        let retrieved = store.providers().get(&[10u8; 32]).unwrap().unwrap();
+        // Read the CANDIDATE: this executor stages now, and a committed read
+        // straight after `execute` would be asserting the defect this package
+        // removed.
+        let retrieved = HealthcareExecutor::v_get_provider(view, &[10u8; 32])
+            .unwrap()
+            .unwrap();
         assert_eq!(retrieved.jurisdiction_code, "US-CA");
     }
 }

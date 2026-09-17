@@ -97,6 +97,11 @@ use std::path::{Path, PathBuf};
 /// 311 occurrences over 235 rows becomes 304 over 230, and `cf::STATE` leaves
 /// the execution set entirely — 114 families to 113. Every other row is
 /// untouched: accounts were migrated, nothing else moved.
+///
+/// The SRC-87X healthcare migration removes sixteen `healthcare_executor.rs`
+/// rows carrying twenty-nine occurrences, and takes all ten healthcare
+/// application families out of the execution set with them. Nothing else moves:
+/// no other subsystem's rows name a `HEALTHCARE_*` family.
 const MANIFEST: &[(&str, &str, &str, &str, usize)] = &[
     ("crates/state/src/docclass_executor.rs", "DocClassExecutor::create_identity_root", "DocClassEventStore::put", "DOCCLASS_EVENTS", 1),
     ("crates/state/src/docclass_executor.rs", "DocClassExecutor::create_identity_root", "IdentityRootStore::put", "DOCCLASS_IDENTITY_ROOTS+DOCCLASS_SUBJECT_INDEX", 1),
@@ -163,22 +168,6 @@ const MANIFEST: &[(&str, &str, &str, &str, usize)] = &[
     ("crates/state/src/finance_executor.rs", "FinanceExecutor::execute", "KycAttestationStore::put", "FINANCE_KYC_ATTESTATIONS+FINANCE_SUBJECT_KYC_INDEX", 1),
     ("crates/state/src/finance_executor.rs", "FinanceExecutor::execute", "KycAttestationStore::revoke", "FINANCE_KYC_ATTESTATIONS", 1),
     ("crates/state/src/finance_executor.rs", "FinanceExecutor::execute", "KycAttestationStore::update_status", "FINANCE_KYC_ATTESTATIONS", 1),
-    ("crates/state/src/healthcare_executor.rs", "HealthcareExecutor::execute", "ConsentStore::put", "HEALTHCARE_CONSENTS+HEALTHCARE_SUBJECT_CONSENT_INDEX", 2),
-    ("crates/state/src/healthcare_executor.rs", "HealthcareExecutor::execute", "ConsentStore::update_status", "HEALTHCARE_CONSENTS", 3),
-    ("crates/state/src/healthcare_executor.rs", "HealthcareExecutor::execute", "HealthcareProofStore::put", "HEALTHCARE_PROOFS", 1),
-    ("crates/state/src/healthcare_executor.rs", "HealthcareExecutor::execute", "MembershipStore::add_dependent", "HEALTHCARE_MEMBERSHIPS", 1),
-    ("crates/state/src/healthcare_executor.rs", "HealthcareExecutor::execute", "MembershipStore::put", "HEALTHCARE_MEMBERSHIPS+HEALTHCARE_MEMBER_INDEX", 1),
-    ("crates/state/src/healthcare_executor.rs", "HealthcareExecutor::execute", "MembershipStore::remove_dependent", "HEALTHCARE_MEMBERSHIPS", 1),
-    ("crates/state/src/healthcare_executor.rs", "HealthcareExecutor::execute", "MembershipStore::renew", "HEALTHCARE_MEMBERSHIPS", 1),
-    ("crates/state/src/healthcare_executor.rs", "HealthcareExecutor::execute", "MembershipStore::update_status", "HEALTHCARE_MEMBERSHIPS", 4),
-    ("crates/state/src/healthcare_executor.rs", "HealthcareExecutor::execute", "PrescriptionStore::add_fill_history", "HEALTHCARE_PRESCRIPTIONS", 1),
-    ("crates/state/src/healthcare_executor.rs", "HealthcareExecutor::execute", "PrescriptionStore::put", "HEALTHCARE_PATIENT_RX_INDEX+HEALTHCARE_PRESCRIBER_RX_INDEX+HEALTHCARE_PRESCRIPTIONS", 1),
-    ("crates/state/src/healthcare_executor.rs", "HealthcareExecutor::execute", "PrescriptionStore::record_fill", "HEALTHCARE_PRESCRIPTIONS", 1),
-    ("crates/state/src/healthcare_executor.rs", "HealthcareExecutor::execute", "PrescriptionStore::update_status", "HEALTHCARE_PRESCRIPTIONS", 5),
-    ("crates/state/src/healthcare_executor.rs", "HealthcareExecutor::execute", "ProviderStore::add_network_affiliation", "HEALTHCARE_PROVIDERS+HEALTHCARE_PROVIDER_NETWORK_INDEX", 1),
-    ("crates/state/src/healthcare_executor.rs", "HealthcareExecutor::execute", "ProviderStore::put", "HEALTHCARE_PROVIDERS+HEALTHCARE_PROVIDER_NETWORK_INDEX", 1),
-    ("crates/state/src/healthcare_executor.rs", "HealthcareExecutor::execute", "ProviderStore::remove_network_affiliation", "HEALTHCARE_PROVIDERS+HEALTHCARE_PROVIDER_NETWORK_INDEX", 1),
-    ("crates/state/src/healthcare_executor.rs", "HealthcareExecutor::execute", "ProviderStore::update_status", "HEALTHCARE_PROVIDERS", 4),
     ("crates/state/src/legal_executor.rs", "LegalExecutor::execute", "BenefitStore::put", "LEGAL_BENEFITS+LEGAL_JURISDICTION_INDEX", 1),
     ("crates/state/src/legal_executor.rs", "LegalExecutor::execute", "BenefitStore::update_status", "LEGAL_BENEFITS", 4),
     ("crates/state/src/legal_executor.rs", "LegalExecutor::execute", "CaseStore::add_related_case", "LEGAL_CASES", 1),
@@ -210,13 +199,13 @@ const MANIFEST: &[(&str, &str, &str, &str, usize)] = &[
 
 /// Occurrences, not rows: a caller reaching the same mutator three times is
 /// three places to fix.
-const MANIFEST_OCCURRENCES: usize = 145;
+const MANIFEST_OCCURRENCES: usize = 0;
 
 /// Application column families a block can still commit to directly.
 ///
 /// ONLY EVER DECREASE. Recorded at `1687789`. Lower than the 116 the unrooted
 /// audit reported, for the reason in [`UNREACHED_MUTATORS`].
-const LEDGER_CF_COUNT: usize = 48;
+const LEDGER_CF_COUNT: usize = 0;
 
 /// Functions that commit application state but that no entry point reaches.
 ///
@@ -334,8 +323,8 @@ const ARMS: &[(&str, ArmKind, &str)] = &[
     ),
     (
         "Healthcare",
-        ArmKind::Committed,
-        "healthcare_executor.rs -> HealthcareStore sub-stores",
+        ArmKind::Overlay,
+        "healthcare_executor.rs -> healthcare_view",
     ),
     (
         "InferenceAttestation",

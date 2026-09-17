@@ -31,6 +31,12 @@ Agreement and property are transcribed here. The earlier inventories are
 recorded in their own commit messages and have not been copied into this file; a
 pointer is not a transcription, and listing them here from memory would be worse
 than listing them not at all.
+| Healthcare (SRC-87X) | this commit | transcribed in full below |
+
+Only agreement and healthcare are transcribed here so far. The earlier
+inventories are recorded in their own commit messages and have not been copied
+into this file; a pointer is not a transcription, and listing them here from
+memory would be worse than listing them not at all.
 
 ## Agreement (SRC-84X)
 
@@ -177,6 +183,77 @@ number of distinct keys in the family.
   * `SubmitProof` checks nothing about the sender and verifies nothing about the
     proof: the only guard is a duplicate-id check.
     -- three_operations_check_no_authority_at_all
+## Healthcare (SRC-87X)
+
+Twenty-two items. Healthcare is the subsystem where an authorization defect is
+least tolerable, and it has the weakest authorization in the lane so far: the
+consent lifecycle can be taken over by any sender, and a prescription can be
+filled by anyone at all.
+
+### Unrestricted allocation from untrusted input
+
+SEVEN accumulating structures, not two. Five are index families whose values are
+`Vec` lists; two accumulate INSIDE a primary row, so the buffer that gets built
+is the entire record. Every one serializes its whole contents before `view.put`
+accounts for a single byte, so the candidate's byte ceiling bounds what a block
+may COMMIT and not what one refused transaction may ALLOCATE. Measured at 20,000
+entries with the ceiling set to 4,096 B:
+
+```
+provider network index            allocated 3,204,738 B, largest single 1,280,000 B, accounted 448 B
+member index                      allocated 3,205,282 B, largest single 1,280,000 B, accounted 545 B
+subject consent index             allocated 3,205,195 B, largest single 1,280,000 B, accounted 572 B
+patient prescription index        allocated 3,205,682 B, largest single 1,280,000 B, accounted 644 B
+prescriber prescription index     allocated 3,207,096 B, largest single 1,280,000 B, accounted 748 B
+membership.dependents   (in row)  allocated 4,483,696 B, largest single 1,280,000 B, accounted 168 B
+prescription.fill_history (in row) allocated 4,483,993 B, largest single 1,280,000 B, accounted 168 B
+```
+
+The 1,280,000-byte single allocation is the `Vec` doubling capacity from 20,000
+to 40,000 elements before the encode runs. The two in-row cases allocate about
+40% more than the index cases because the whole record is rebuilt, and
+`PartialFillPrescription` rebuilds it TWICE in one transaction -- once to append
+the fill and once to stamp the status onto the row it just wrote.
+
+This is one measured size, not a bound for arbitrary input. Healthcare cannot be
+described as memory bounded or OOM safe. A deterministic activated bound, or a
+bounded storage structure, is required before deployment.
+
+  -- every_healthcare_accumulator_allocates_its_whole_value_before_the_ceiling_refuses
+
+Every healthcare payload is `bincode::deserialize`d from transaction data with
+no size or shape limit ahead of it, so the same unrestricted-allocation exposure
+applies at the decode boundary and not only at the index append.
+
+### Missing authorization
+
+  * `SupersedeConsent` checks NOTHING about the sender. Every other consent
+    operation requires the sender to be the recorded issuer; this one only
+    checks that the old consent exists, then marks it `Superseded` and stores a
+    replacement whose entire contents come from the payload -- a different
+    subject, a different recipient, a wider disclosure scope, a different
+    issuer. It is a complete bypass of the consent lifecycle's authorization and
+    is the most serious item in this inventory.
+    -- any_sender_can_supersede_any_consent_with_one_of_their_own
+  * A consent's SUBJECT is never consulted in either direction. `GrantConsent`
+    compares the packet's issuer to the sender and compares nothing to
+    `subject_address` or `subject_ref`, so the issuer records a disclosure
+    authorization about someone else without their participation; and
+    `RevokeConsent` requires the issuer, so the subject cannot withdraw it.
+    -- the_subject_of_a_consent_can_neither_grant_nor_revoke_it
+  * `FillPrescription` and `PartialFillPrescription` check no sender at all --
+    not the patient, not the prescriber, not the pharmacy, not the issuer. Every
+    other prescription operation checks the issuer. A stranger can fill anyone's
+    prescription, including a controlled substance.
+    -- any_sender_can_fill_any_prescription
+  * `AddNetworkAffiliation` and `RemoveNetworkAffiliation` are the only provider
+    operations with no issuer check: they verify the provider exists and write.
+    A stranger can move any provider between plan networks.
+    -- any_sender_can_change_a_providers_network_affiliations
+  * `IssuePrescription` requires the packet's issuer to be the sender and the
+    named prescriber provider to EXIST, and never relates the sender to that
+    provider or to the patient. Anyone who can register a provider can issue
+    prescriptions naming any other registered provider as prescriber.
   * `VerifyProof` verifies nothing: it charges the fee, advances the nonce and
     returns success for a proof id that was never submitted, without
     deserializing its payload.
@@ -219,6 +296,53 @@ number of distinct keys in the family.
     superseding an event destroys its recorded creation time.
     -- the_block_timestamp_reaching_property_operations_is_always_zero
   * `PropertyTxData.recipient`, `_tx_index` and `_tx_hash` are accepted and
+  * `proof_data` is stored and never checked against anything, and `policy_id`
+    is carried on providers, memberships, consents and prescriptions, stored,
+    and never consulted by any guard.
+
+The issuer checks that DO exist -- register/update/suspend/revoke/reactivate a
+provider, every membership operation, grant/update/revoke a consent, and
+update/cancel/hold/release a prescription -- are pinned by the contrast
+assertions inside the two `any_sender_*` tests above.
+
+### Invalid-transition and overwrite paths
+
+  * `RenewMembership` sets the status to `Active` unconditionally, with no
+    transition check, so a membership terminated a transaction earlier is active
+    again by the end of the block.
+    -- renewing_a_terminated_membership_makes_it_active_again
+  * The fill guard is `refills_remaining == 0 && status != Active`, so a
+    prescription authorizing ZERO refills whose status is `Active` passes it and
+    is filled once more.
+    -- a_prescription_with_no_refills_but_active_status_can_be_filled_once_more
+  * `is_controlled` is read in exactly one place, and that guard covers exactly
+    one status value: `UpdatePrescription` refuses `TransferRequested`. The same
+    prescription can be filled, held, released and cancelled like any other, and
+    any other status may be set on it directly.
+    -- the_controlled_substance_guard_covers_only_the_transfer_status
+  * `RemoveNetworkAffiliation` writes the network index unconditionally, so
+    removing an affiliation the provider never had CREATES an empty list row
+    where there was none, and rewrites the provider row with a bumped
+    `updated_at`.
+    -- removing_an_affiliation_that_was_never_there_still_writes_an_empty_index
+    -- removing_an_affiliation_that_was_never_there_still_stages_an_empty_index
+  * `RemoveDependent` is likewise unconditional: it rewrites the membership row
+    and bumps `updated_at` even when the dependent was not in the list.
+
+### Untrusted payload metadata, and a block timestamp that is always zero
+
+  * Both dispatch arms pass a literal `0` where the block timestamp belongs, and
+    a literal `0` for the transaction index. Every timestamp the executor itself
+    writes is therefore 0 regardless of the block -- and, worse than cosmetic,
+    `Prescription::is_valid` is evaluated at time zero. An EXPIRED prescription
+    is fillable forever, because `0 >= expiry` is false for every positive
+    expiry; a prescription with a non-zero `effective_from` can never be filled
+    at all.
+    -- the_block_timestamp_reaching_healthcare_operations_is_always_zero
+  * `created_at`, `updated_at`, `effective_from`, `expiry`, `date_written` and
+    `recorded_at_height` are taken from the payload as supplied. Nothing
+    reconciles them with the block.
+  * `HealthcareTxData.recipient`, `_tx_index` and `_tx_hash` are accepted and
     ignored.
 
 ### Unbounded reads and indexes
@@ -239,6 +363,31 @@ number of distinct keys in the family.
     anything writes. There is no undo history and no audit trail: a deregistered
     asset retains no record of who deregistered it or what it held before.
     -- the_property_event_journal_is_never_written
+  * All five index families are unbounded accumulating `Vec<[u8; 32]>` values
+    with a linear `contains` on every append, and two more such lists accumulate
+    inside primary rows.
+  * The committed readers are unpaginated whole-family scans: `list_active`
+    walks every row in its column family and `get_by_network`, `get_by_member`,
+    `get_by_subject`, `get_by_patient` and `get_by_prescriber` resolve a whole
+    index list row by row, each returning one `Vec` with no limit, offset or
+    cursor.
+    -- the_committed_healthcare_readers_return_two_thousand_rows_whole
+
+### Missing history and corruption handling
+
+  * `HealthcareEventStore` exists for `cf::HEALTHCARE_SYSTEM_EVENTS` and no
+    executor operation ever calls it, so the healthcare journal is empty on
+    every chain. There is no undo history and no audit trail: a revoked consent
+    retains no record of who revoked it, and a filled prescription none of who
+    filled it -- which, given that anyone may fill one, is the pair of defects
+    compounding.
+    -- the_healthcare_event_journal_is_never_written
+  * Three declared column families -- `HEALTHCARE_MEMBER_ADDRESS_INDEX`,
+    `HEALTHCARE_SUBJECT_ADDRESS_INDEX` and `HEALTHCARE_PATIENT_ADDRESS_INDEX` --
+    are never written by anything, even though every row carries the address
+    they would be keyed by. `execution_closure` classifies them dead; the same
+    test drives that claim through a real published block.
+    -- the_healthcare_event_journal_is_never_written
   * The duplicate guards use `contains`, never `get`, so a CORRUPT row reads as
     present and refuses rather than erroring. This is the safe direction and is
     preserved for that reason: upgrading it would turn today's refusals into
@@ -247,3 +396,8 @@ number of distinct keys in the family.
   * `PropertyProofStore::is_valid` compares `expires_at` to a caller-supplied
     time and nothing else. No proof in SRC-86X is ever cryptographically
     checked.
+  * `PrescriptionStore::record_fill` carries its own `InvalidData("No refills
+    remaining")` guard, which is unreachable through dispatch because the
+    executor reads the same row a moment earlier and refuses first. It is
+    reproduced verbatim on the candidate surface anyway -- the store is public,
+    and the candidate side must not be the laxer of the two.
