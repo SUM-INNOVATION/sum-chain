@@ -124,67 +124,18 @@ use std::path::{Path, PathBuf};
 /// survives, and no `EMPLOYMENT_*`, `LEGAL_*` or `FINANCE_*` family remains in
 /// the execution set.
 const MANIFEST: &[(&str, &str, &str, &str, usize)] = &[
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::create_identity_root", "DocClassEventStore::put", "DOCCLASS_EVENTS", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::create_identity_root", "IdentityRootStore::put", "DOCCLASS_IDENTITY_ROOTS+DOCCLASS_SUBJECT_INDEX", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::deactivate_identity", "DocClassEventStore::put", "DOCCLASS_EVENTS", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::deactivate_identity", "IdentityRootStore::update_status", "DOCCLASS_IDENTITY_ROOTS+DOCCLASS_SUBJECT_INDEX", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::deactivate_issuer", "DocClassEventStore::put", "DOCCLASS_EVENTS", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::deactivate_issuer", "DocClassIssuerStore::update_status", "DOCCLASS_ISSUERS", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::identity_add_controller", "DocClassEventStore::put", "DOCCLASS_EVENTS", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::identity_add_controller", "IdentityRootStore::put", "DOCCLASS_IDENTITY_ROOTS+DOCCLASS_SUBJECT_INDEX", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::identity_add_key", "DocClassEventStore::put", "DOCCLASS_EVENTS", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::identity_add_key", "IdentityRootStore::put", "DOCCLASS_IDENTITY_ROOTS+DOCCLASS_SUBJECT_INDEX", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::identity_remove_controller", "DocClassEventStore::put", "DOCCLASS_EVENTS", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::identity_remove_controller", "IdentityRootStore::put", "DOCCLASS_IDENTITY_ROOTS+DOCCLASS_SUBJECT_INDEX", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::identity_remove_key", "DocClassEventStore::put", "DOCCLASS_EVENTS", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::identity_remove_key", "IdentityRootStore::put", "DOCCLASS_IDENTITY_ROOTS+DOCCLASS_SUBJECT_INDEX", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::identity_rotate_key", "DocClassEventStore::put", "DOCCLASS_EVENTS", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::identity_rotate_key", "IdentityRootStore::put", "DOCCLASS_IDENTITY_ROOTS+DOCCLASS_SUBJECT_INDEX", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::identity_update_service", "DocClassEventStore::put", "DOCCLASS_EVENTS", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::identity_update_service", "IdentityRootStore::put", "DOCCLASS_IDENTITY_ROOTS+DOCCLASS_SUBJECT_INDEX", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::issue_academic_credential", "CredentialStore::put", "DOCCLASS_CREDENTIALS+DOCCLASS_ISSUER_INDEX+DOCCLASS_SUBJECT_INDEX", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::issue_academic_credential", "DocClassEventStore::put", "DOCCLASS_EVENTS", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::issue_eligibility", "DocClassEventStore::put", "DOCCLASS_EVENTS", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::issue_eligibility", "EligibilityStore::put", "DOCCLASS_ELIGIBILITY+DOCCLASS_ISSUER_INDEX+DOCCLASS_SUBJECT_INDEX", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::reactivate_credential", "CredentialStore::update_revocation", "DOCCLASS_CREDENTIALS+DOCCLASS_ISSUER_INDEX+DOCCLASS_SUBJECT_INDEX", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::reactivate_credential", "DocClassEventStore::put", "DOCCLASS_EVENTS", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::reactivate_credential", "EligibilityStore::update_revocation", "DOCCLASS_ELIGIBILITY+DOCCLASS_ISSUER_INDEX+DOCCLASS_SUBJECT_INDEX", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::reactivate_credential", "RevocationStore::put", "DOCCLASS_REVOCATIONS", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::reactivate_identity", "DocClassEventStore::put", "DOCCLASS_EVENTS", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::reactivate_identity", "IdentityRootStore::update_status", "DOCCLASS_IDENTITY_ROOTS+DOCCLASS_SUBJECT_INDEX", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::register_issuer", "DocClassEventStore::put", "DOCCLASS_EVENTS", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::register_issuer", "DocClassIssuerStore::put", "DOCCLASS_ISSUERS", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::revoke_credential", "CredentialStore::update_revocation", "DOCCLASS_CREDENTIALS+DOCCLASS_ISSUER_INDEX+DOCCLASS_SUBJECT_INDEX", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::revoke_credential", "DocClassEventStore::put", "DOCCLASS_EVENTS", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::revoke_credential", "EligibilityStore::update_revocation", "DOCCLASS_ELIGIBILITY+DOCCLASS_ISSUER_INDEX+DOCCLASS_SUBJECT_INDEX", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::revoke_credential", "RevocationStore::put", "DOCCLASS_REVOCATIONS", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::rotate_issuer_key", "DocClassEventStore::put", "DOCCLASS_EVENTS", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::rotate_issuer_key", "DocClassIssuerStore::put", "DOCCLASS_ISSUERS", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::supersede_credential", "CredentialStore::update_revocation", "DOCCLASS_CREDENTIALS+DOCCLASS_ISSUER_INDEX+DOCCLASS_SUBJECT_INDEX", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::supersede_credential", "DocClassEventStore::put", "DOCCLASS_EVENTS", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::supersede_credential", "EligibilityStore::update_revocation", "DOCCLASS_ELIGIBILITY+DOCCLASS_ISSUER_INDEX+DOCCLASS_SUBJECT_INDEX", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::supersede_credential", "RevocationStore::put", "DOCCLASS_REVOCATIONS", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::suspend_credential", "CredentialStore::update_revocation", "DOCCLASS_CREDENTIALS+DOCCLASS_ISSUER_INDEX+DOCCLASS_SUBJECT_INDEX", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::suspend_credential", "DocClassEventStore::put", "DOCCLASS_EVENTS", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::suspend_credential", "EligibilityStore::update_revocation", "DOCCLASS_ELIGIBILITY+DOCCLASS_ISSUER_INDEX+DOCCLASS_SUBJECT_INDEX", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::suspend_credential", "RevocationStore::put", "DOCCLASS_REVOCATIONS", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::update_issuer", "DocClassEventStore::put", "DOCCLASS_EVENTS", 1),
-    ("crates/state/src/docclass_executor.rs", "DocClassExecutor::update_issuer", "DocClassIssuerStore::put", "DOCCLASS_ISSUERS", 1),
 ];
 
 /// Occurrences, not rows: a caller reaching the same mutator three times is
 /// three places to fix.
-const MANIFEST_OCCURRENCES: usize = 46;
+const MANIFEST_OCCURRENCES: usize = 0;
 
 /// Application column families a block can still commit to directly.
 ///
 /// ONLY EVER DECREASE. Recorded at `1687789`. Lower than the 116 the unrooted
 /// audit reported, for the reason in [`UNREACHED_MUTATORS`].
 ///
-/// Not computed by subtracting the three wave-1 branches' declared values from
-/// each other: this was parked at `0` through the merge and read back off the
-/// ratchet, which reported 8. The eight are the `DOCCLASS_*` families.
-const LEDGER_CF_COUNT: usize = 8;
+const LEDGER_CF_COUNT: usize = 0;
 
 /// Functions that commit application state but that no entry point reaches.
 ///
@@ -276,8 +227,8 @@ const ARMS: &[(&str, ArmKind, &str)] = &[
     ),
     (
         "DocClass",
-        ArmKind::Committed,
-        "docclass_executor.rs -> DocClassStore sub-stores",
+        ArmKind::Overlay,
+        "docclass_executor.rs -> docclass_view",
     ),
     ("Education", ArmKind::Overlay, "education_executor.rs"),
     (
@@ -1901,7 +1852,7 @@ fn every_dispatcher_arm_is_declared() {
     let mixed = ARMS.iter().filter(|(_, k, _)| *k == ArmKind::Mixed).count();
     assert_eq!(
         (overlay, committed, mixed),
-        (29, 1, 0),
+        (0, 0, 0),
         "the overlay/committed/mixed split changed. Moving an arm from \
          Committed to Overlay is progress — update this and the manifest \
          together; any other movement is not."

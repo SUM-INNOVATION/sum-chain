@@ -17,6 +17,172 @@ use crate::db::{cf, Database};
 use crate::{Result, StorageError};
 
 // =============================================================================
+// Shared key layout and codec
+// =============================================================================
+//
+// One builder per row and one codec per value, called by the committed stores
+// below and by the candidate surface in `sumchain_state::docclass_view`.
+//
+// They are extracted rather than restated on each side because four things here
+// are easy to get subtly wrong:
+//
+//   * Three families are keyed by a bare 32-byte credential id, two by the
+//     20-byte address bytes, and two by a COMPOSITE key built by hand:
+//     revocations are `credential_id || revoked_at_height` big-endian, and
+//     events are `height || tx_index || event_index`, all big-endian. Endianness
+//     is the ordering contract for both, because both are read back by prefix
+//     scan and the revocation reader additionally sorts on the decoded height.
+//   * `DOCCLASS_SUBJECT_INDEX` is written with TWO DIFFERENT value shapes at the
+//     SAME key. `IdentityRootStore` writes `Vec<(CredentialId, DocSubcode)>`;
+//     `EligibilityStore` and `CredentialStore` write `Vec<CredentialId>`. That is
+//     an inherited defect, not a refactoring artefact, and it is reproduced
+//     exactly -- which is why there are two encoders for one family rather than
+//     one that guesses. See `docs/lane-a/DEPLOYMENT-BLOCKERS.md`.
+//   * The three index values are accumulating lists, not presence markers, so an
+//     append is a read-modify-write. On the candidate side it has to read the
+//     candidate, or a second entry in one block overwrites the first one's list
+//     with a single-element one.
+//   * `encode_subject_credential_index` and `encode_issuer_credential_index`
+//     encode the same Rust type. They are still one function per family rather
+//     than one generic helper: a generic `encode<T: Serialize>` cannot pin any
+//     individual row's byte layout, a codec test written against it can only
+//     restate what serde does, and a mutation to it could not be attributed to
+//     one family. Named per family, each is a thing a test can fix bytes for and
+//     a mutation can break on its own.
+
+/// A subject commitment: the 32-byte privacy-preserving binding a credential
+/// carries instead of the subject's identity.
+pub type SubjectCommitment = [u8; 32];
+
+/// Identity roots are keyed by identity id.
+pub fn identity_root_key(identity_id: &CredentialId) -> &[u8] {
+    identity_id
+}
+
+/// Eligibility attestations are keyed by credential id.
+pub fn eligibility_key(credential_id: &CredentialId) -> &[u8] {
+    credential_id
+}
+
+/// Academic/professional credentials are keyed by credential id.
+pub fn credential_key(credential_id: &CredentialId) -> &[u8] {
+    credential_id
+}
+
+/// Issuers are keyed by the raw 20 address bytes, not by a 32-byte id.
+pub fn docclass_issuer_key(address: &Address) -> &[u8] {
+    address.as_bytes()
+}
+
+/// The subject index is keyed by the 32-byte subject commitment. Its VALUE is
+/// one of two incompatible shapes; see the module note above.
+pub fn subject_index_key(subject_commitment: &SubjectCommitment) -> &[u8] {
+    subject_commitment
+}
+
+/// The issuer index is keyed by the raw 20 address bytes of the ISSUER, and its
+/// value is a bincode `Vec<CredentialId>`.
+pub fn issuer_index_key(issuer: &Address) -> &[u8] {
+    issuer.as_bytes()
+}
+
+/// Revocation records are keyed by `credential_id || revoked_at_height`, the
+/// height big-endian so a prefix scan yields a credential's records in height
+/// order. 40 bytes exactly; the reader rejects any other width.
+pub fn revocation_key(credential_id: &CredentialId, revoked_at_height: BlockHeight) -> Vec<u8> {
+    let mut key = Vec::with_capacity(40);
+    key.extend_from_slice(credential_id);
+    key.extend_from_slice(&revoked_at_height.to_be_bytes());
+    key
+}
+
+/// Events are keyed by `block_height || tx_index || event_index`, all
+/// big-endian: 8 + 4 + 2 = 14 bytes.
+pub fn docclass_event_key(block_height: BlockHeight, tx_index: u32, event_index: u16) -> Vec<u8> {
+    let mut key = Vec::with_capacity(14);
+    key.extend_from_slice(&block_height.to_be_bytes());
+    key.extend_from_slice(&tx_index.to_be_bytes());
+    key.extend_from_slice(&event_index.to_be_bytes());
+    key
+}
+
+pub fn encode_identity_root(identity: &IdentityRoot) -> Result<Vec<u8>> {
+    bincode::serialize(identity).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_identity_root(bytes: &[u8]) -> Result<IdentityRoot> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+/// The subject index AS THE IDENTITY STORE WRITES IT: a list of
+/// `(credential id, subcode)` pairs.
+pub fn encode_subject_identity_index(index: &[(CredentialId, DocSubcode)]) -> Result<Vec<u8>> {
+    bincode::serialize(index).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_subject_identity_index(bytes: &[u8]) -> Result<Vec<(CredentialId, DocSubcode)>> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_eligibility(attestation: &EligibilityAttestation) -> Result<Vec<u8>> {
+    bincode::serialize(attestation).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_eligibility(bytes: &[u8]) -> Result<EligibilityAttestation> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_credential(credential: &AcademicCredential) -> Result<Vec<u8>> {
+    bincode::serialize(credential).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_credential(bytes: &[u8]) -> Result<AcademicCredential> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+/// The subject index AS THE ELIGIBILITY AND CREDENTIAL STORES WRITE IT: a bare
+/// list of credential ids, at the same key the identity store uses for pairs.
+pub fn encode_subject_credential_index(ids: &[CredentialId]) -> Result<Vec<u8>> {
+    bincode::serialize(ids).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_subject_credential_index(bytes: &[u8]) -> Result<Vec<CredentialId>> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_issuer_credential_index(ids: &[CredentialId]) -> Result<Vec<u8>> {
+    bincode::serialize(ids).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_issuer_credential_index(bytes: &[u8]) -> Result<Vec<CredentialId>> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_revocation_record(record: &RevocationRecord) -> Result<Vec<u8>> {
+    bincode::serialize(record).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_revocation_record(bytes: &[u8]) -> Result<RevocationRecord> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_docclass_issuer(issuer: &DocClassIssuer) -> Result<Vec<u8>> {
+    bincode::serialize(issuer).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_docclass_issuer(bytes: &[u8]) -> Result<DocClassIssuer> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_docclass_event(event: &DocClassEvent) -> Result<Vec<u8>> {
+    bincode::serialize(event).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_docclass_event(bytes: &[u8]) -> Result<DocClassEvent> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+// =============================================================================
 // Identity Root Storage (SRC-800)
 // =============================================================================
 
@@ -32,9 +198,12 @@ impl<'a> IdentityRootStore<'a> {
 
     /// Store an identity root
     pub fn put(&self, identity: &IdentityRoot) -> Result<()> {
-        let bytes = bincode::serialize(identity)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::DOCCLASS_IDENTITY_ROOTS, &identity.identity_id, &bytes)?;
+        let bytes = encode_identity_root(identity)?;
+        self.db.put(
+            cf::DOCCLASS_IDENTITY_ROOTS,
+            identity_root_key(&identity.identity_id),
+            &bytes,
+        )?;
 
         // Index by subject commitment
         self.add_to_subject_index(&identity.subject_commitment, &identity.identity_id, DocSubcode::IdentityRoot)?;
@@ -44,19 +213,19 @@ impl<'a> IdentityRootStore<'a> {
 
     /// Get an identity root by ID
     pub fn get(&self, identity_id: &CredentialId) -> Result<Option<IdentityRoot>> {
-        match self.db.get(cf::DOCCLASS_IDENTITY_ROOTS, identity_id)? {
-            Some(bytes) => {
-                let identity: IdentityRoot = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(Some(identity))
-            }
+        match self
+            .db
+            .get(cf::DOCCLASS_IDENTITY_ROOTS, identity_root_key(identity_id))?
+        {
+            Some(bytes) => Ok(Some(decode_identity_root(&bytes)?)),
             None => Ok(None),
         }
     }
 
     /// Check if identity exists
     pub fn exists(&self, identity_id: &CredentialId) -> Result<bool> {
-        self.db.contains(cf::DOCCLASS_IDENTITY_ROOTS, identity_id)
+        self.db
+            .contains(cf::DOCCLASS_IDENTITY_ROOTS, identity_root_key(identity_id))
     }
 
     /// Get identity by controller address
@@ -64,8 +233,7 @@ impl<'a> IdentityRootStore<'a> {
         let mut identities = Vec::new();
 
         for (_, value) in self.db.iter(cf::DOCCLASS_IDENTITY_ROOTS)? {
-            let identity: IdentityRoot = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let identity = decode_identity_root(&value)?;
             if identity.controller == *controller ||
                identity.additional_controllers.contains(controller) {
                 identities.push(identity);
@@ -93,21 +261,26 @@ impl<'a> IdentityRootStore<'a> {
         let entry = (*credential_id, subcode);
         if !index.iter().any(|(id, _)| id == credential_id) {
             index.push(entry);
-            let bytes = bincode::serialize(&index)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
-            self.db.put(cf::DOCCLASS_SUBJECT_INDEX, subject_commitment, &bytes)?;
+            let bytes = encode_subject_identity_index(&index)?;
+            self.db.put(
+                cf::DOCCLASS_SUBJECT_INDEX,
+                subject_index_key(subject_commitment),
+                &bytes,
+            )?;
         }
         Ok(())
     }
 
     /// Get all credential IDs for a subject commitment
-    pub fn get_by_subject(&self, subject_commitment: &[u8; 32]) -> Result<Vec<(CredentialId, DocSubcode)>> {
-        match self.db.get(cf::DOCCLASS_SUBJECT_INDEX, subject_commitment)? {
-            Some(bytes) => {
-                let index: Vec<(CredentialId, DocSubcode)> = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(index)
-            }
+    pub fn get_by_subject(
+        &self,
+        subject_commitment: &[u8; 32],
+    ) -> Result<Vec<(CredentialId, DocSubcode)>> {
+        match self.db.get(
+            cf::DOCCLASS_SUBJECT_INDEX,
+            subject_index_key(subject_commitment),
+        )? {
+            Some(bytes) => decode_subject_identity_index(&bytes),
             None => Ok(Vec::new()),
         }
     }
@@ -129,9 +302,12 @@ impl<'a> EligibilityStore<'a> {
 
     /// Store an eligibility attestation
     pub fn put(&self, attestation: &EligibilityAttestation) -> Result<()> {
-        let bytes = bincode::serialize(attestation)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::DOCCLASS_ELIGIBILITY, &attestation.credential_id, &bytes)?;
+        let bytes = encode_eligibility(attestation)?;
+        self.db.put(
+            cf::DOCCLASS_ELIGIBILITY,
+            eligibility_key(&attestation.credential_id),
+            &bytes,
+        )?;
 
         // Index by subject commitment
         self.add_to_subject_index(&attestation.subject_commitment, &attestation.credential_id)?;
@@ -144,19 +320,19 @@ impl<'a> EligibilityStore<'a> {
 
     /// Get an eligibility attestation by ID
     pub fn get(&self, credential_id: &CredentialId) -> Result<Option<EligibilityAttestation>> {
-        match self.db.get(cf::DOCCLASS_ELIGIBILITY, credential_id)? {
-            Some(bytes) => {
-                let attestation: EligibilityAttestation = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(Some(attestation))
-            }
+        match self
+            .db
+            .get(cf::DOCCLASS_ELIGIBILITY, eligibility_key(credential_id))?
+        {
+            Some(bytes) => Ok(Some(decode_eligibility(&bytes)?)),
             None => Ok(None),
         }
     }
 
     /// Check if attestation exists
     pub fn exists(&self, credential_id: &CredentialId) -> Result<bool> {
-        self.db.contains(cf::DOCCLASS_ELIGIBILITY, credential_id)
+        self.db
+            .contains(cf::DOCCLASS_ELIGIBILITY, eligibility_key(credential_id))
     }
 
     /// Get attestations by issuer
@@ -214,20 +390,22 @@ impl<'a> EligibilityStore<'a> {
         let mut index = self.get_subject_credentials(subject_commitment)?;
         if !index.contains(credential_id) {
             index.push(*credential_id);
-            let bytes = bincode::serialize(&index)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
-            self.db.put(cf::DOCCLASS_SUBJECT_INDEX, subject_commitment, &bytes)?;
+            let bytes = encode_subject_credential_index(&index)?;
+            self.db.put(
+                cf::DOCCLASS_SUBJECT_INDEX,
+                subject_index_key(subject_commitment),
+                &bytes,
+            )?;
         }
         Ok(())
     }
 
     fn get_subject_credentials(&self, subject_commitment: &[u8; 32]) -> Result<Vec<CredentialId>> {
-        match self.db.get(cf::DOCCLASS_SUBJECT_INDEX, subject_commitment)? {
-            Some(bytes) => {
-                let index: Vec<CredentialId> = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(index)
-            }
+        match self.db.get(
+            cf::DOCCLASS_SUBJECT_INDEX,
+            subject_index_key(subject_commitment),
+        )? {
+            Some(bytes) => decode_subject_credential_index(&bytes),
             None => Ok(Vec::new()),
         }
     }
@@ -236,20 +414,19 @@ impl<'a> EligibilityStore<'a> {
         let mut index = self.get_issuer_credentials(issuer)?;
         if !index.contains(credential_id) {
             index.push(*credential_id);
-            let bytes = bincode::serialize(&index)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
-            self.db.put(cf::DOCCLASS_ISSUER_INDEX, issuer.as_bytes(), &bytes)?;
+            let bytes = encode_issuer_credential_index(&index)?;
+            self.db
+                .put(cf::DOCCLASS_ISSUER_INDEX, issuer_index_key(issuer), &bytes)?;
         }
         Ok(())
     }
 
     fn get_issuer_credentials(&self, issuer: &Address) -> Result<Vec<CredentialId>> {
-        match self.db.get(cf::DOCCLASS_ISSUER_INDEX, issuer.as_bytes())? {
-            Some(bytes) => {
-                let index: Vec<CredentialId> = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(index)
-            }
+        match self
+            .db
+            .get(cf::DOCCLASS_ISSUER_INDEX, issuer_index_key(issuer))?
+        {
+            Some(bytes) => decode_issuer_credential_index(&bytes),
             None => Ok(Vec::new()),
         }
     }
@@ -271,9 +448,12 @@ impl<'a> CredentialStore<'a> {
 
     /// Store an academic/professional credential
     pub fn put(&self, credential: &AcademicCredential) -> Result<()> {
-        let bytes = bincode::serialize(credential)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::DOCCLASS_CREDENTIALS, &credential.credential_id, &bytes)?;
+        let bytes = encode_credential(credential)?;
+        self.db.put(
+            cf::DOCCLASS_CREDENTIALS,
+            credential_key(&credential.credential_id),
+            &bytes,
+        )?;
 
         // Index by subject commitment
         self.add_to_subject_index(&credential.subject_commitment, &credential.credential_id)?;
@@ -286,19 +466,19 @@ impl<'a> CredentialStore<'a> {
 
     /// Get a credential by ID
     pub fn get(&self, credential_id: &CredentialId) -> Result<Option<AcademicCredential>> {
-        match self.db.get(cf::DOCCLASS_CREDENTIALS, credential_id)? {
-            Some(bytes) => {
-                let credential: AcademicCredential = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(Some(credential))
-            }
+        match self
+            .db
+            .get(cf::DOCCLASS_CREDENTIALS, credential_key(credential_id))?
+        {
+            Some(bytes) => Ok(Some(decode_credential(&bytes)?)),
             None => Ok(None),
         }
     }
 
     /// Check if credential exists
     pub fn exists(&self, credential_id: &CredentialId) -> Result<bool> {
-        self.db.contains(cf::DOCCLASS_CREDENTIALS, credential_id)
+        self.db
+            .contains(cf::DOCCLASS_CREDENTIALS, credential_key(credential_id))
     }
 
     /// Get credentials by subcode
@@ -306,8 +486,7 @@ impl<'a> CredentialStore<'a> {
         let mut credentials = Vec::new();
 
         for (_, value) in self.db.iter(cf::DOCCLASS_CREDENTIALS)? {
-            let credential: AcademicCredential = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let credential = decode_credential(&value)?;
             if credential.subcode == subcode {
                 credentials.push(credential);
             }
@@ -371,20 +550,22 @@ impl<'a> CredentialStore<'a> {
         let mut index = self.get_subject_credentials(subject_commitment)?;
         if !index.contains(credential_id) {
             index.push(*credential_id);
-            let bytes = bincode::serialize(&index)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
-            self.db.put(cf::DOCCLASS_SUBJECT_INDEX, subject_commitment, &bytes)?;
+            let bytes = encode_subject_credential_index(&index)?;
+            self.db.put(
+                cf::DOCCLASS_SUBJECT_INDEX,
+                subject_index_key(subject_commitment),
+                &bytes,
+            )?;
         }
         Ok(())
     }
 
     fn get_subject_credentials(&self, subject_commitment: &[u8; 32]) -> Result<Vec<CredentialId>> {
-        match self.db.get(cf::DOCCLASS_SUBJECT_INDEX, subject_commitment)? {
-            Some(bytes) => {
-                let index: Vec<CredentialId> = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(index)
-            }
+        match self.db.get(
+            cf::DOCCLASS_SUBJECT_INDEX,
+            subject_index_key(subject_commitment),
+        )? {
+            Some(bytes) => decode_subject_credential_index(&bytes),
             None => Ok(Vec::new()),
         }
     }
@@ -393,20 +574,19 @@ impl<'a> CredentialStore<'a> {
         let mut index = self.get_issuer_credentials(issuer)?;
         if !index.contains(credential_id) {
             index.push(*credential_id);
-            let bytes = bincode::serialize(&index)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
-            self.db.put(cf::DOCCLASS_ISSUER_INDEX, issuer.as_bytes(), &bytes)?;
+            let bytes = encode_issuer_credential_index(&index)?;
+            self.db
+                .put(cf::DOCCLASS_ISSUER_INDEX, issuer_index_key(issuer), &bytes)?;
         }
         Ok(())
     }
 
     fn get_issuer_credentials(&self, issuer: &Address) -> Result<Vec<CredentialId>> {
-        match self.db.get(cf::DOCCLASS_ISSUER_INDEX, issuer.as_bytes())? {
-            Some(bytes) => {
-                let index: Vec<CredentialId> = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(index)
-            }
+        match self
+            .db
+            .get(cf::DOCCLASS_ISSUER_INDEX, issuer_index_key(issuer))?
+        {
+            Some(bytes) => decode_issuer_credential_index(&bytes),
             None => Ok(Vec::new()),
         }
     }
@@ -426,19 +606,10 @@ impl<'a> RevocationStore<'a> {
         Self { db }
     }
 
-    /// Create key for revocation record
-    fn revocation_key(credential_id: &CredentialId, revoked_at: BlockHeight) -> Vec<u8> {
-        let mut key = Vec::with_capacity(40);
-        key.extend_from_slice(credential_id);
-        key.extend_from_slice(&revoked_at.to_be_bytes());
-        key
-    }
-
     /// Store a revocation record
     pub fn put(&self, record: &RevocationRecord) -> Result<()> {
-        let key = Self::revocation_key(&record.credential_id, record.revoked_at_height);
-        let bytes = bincode::serialize(record)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let key = revocation_key(&record.credential_id, record.revoked_at_height);
+        let bytes = encode_revocation_record(record)?;
         self.db.put(cf::DOCCLASS_REVOCATIONS, &key, &bytes)
     }
 
@@ -448,9 +619,7 @@ impl<'a> RevocationStore<'a> {
 
         for (key, value) in self.db.prefix_iter(cf::DOCCLASS_REVOCATIONS, credential_id)? {
             if key.len() == 40 && &key[..32] == credential_id {
-                let record: RevocationRecord = bincode::deserialize(&value)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                records.push(record);
+                records.push(decode_revocation_record(&value)?);
             }
         }
 
@@ -487,8 +656,7 @@ impl<'a> RevocationStore<'a> {
         let mut records = Vec::new();
 
         for (_, value) in self.db.iter(cf::DOCCLASS_REVOCATIONS)? {
-            let record: RevocationRecord = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let record = decode_revocation_record(&value)?;
             if record.revoker == *revoker {
                 records.push(record);
             }
@@ -514,26 +682,29 @@ impl<'a> DocClassIssuerStore<'a> {
 
     /// Register or update an issuer
     pub fn put(&self, issuer: &DocClassIssuer) -> Result<()> {
-        let bytes = bincode::serialize(issuer)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::DOCCLASS_ISSUERS, issuer.address.as_bytes(), &bytes)
+        let bytes = encode_docclass_issuer(issuer)?;
+        self.db.put(
+            cf::DOCCLASS_ISSUERS,
+            docclass_issuer_key(&issuer.address),
+            &bytes,
+        )
     }
 
     /// Get an issuer by address
     pub fn get(&self, address: &Address) -> Result<Option<DocClassIssuer>> {
-        match self.db.get(cf::DOCCLASS_ISSUERS, address.as_bytes())? {
-            Some(bytes) => {
-                let issuer: DocClassIssuer = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                Ok(Some(issuer))
-            }
+        match self
+            .db
+            .get(cf::DOCCLASS_ISSUERS, docclass_issuer_key(address))?
+        {
+            Some(bytes) => Ok(Some(decode_docclass_issuer(&bytes)?)),
             None => Ok(None),
         }
     }
 
     /// Check if issuer is registered
     pub fn is_registered(&self, address: &Address) -> Result<bool> {
-        self.db.contains(cf::DOCCLASS_ISSUERS, address.as_bytes())
+        self.db
+            .contains(cf::DOCCLASS_ISSUERS, docclass_issuer_key(address))
     }
 
     /// Check if issuer is active and can issue credentials
@@ -587,9 +758,7 @@ impl<'a> DocClassIssuerStore<'a> {
         let mut issuers = Vec::new();
 
         for (_, value) in self.db.iter(cf::DOCCLASS_ISSUERS)? {
-            let issuer: DocClassIssuer = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
-            issuers.push(issuer);
+            issuers.push(decode_docclass_issuer(&value)?);
         }
 
         Ok(issuers)
@@ -618,7 +787,8 @@ impl<'a> DocClassIssuerStore<'a> {
 
     /// Delete an issuer
     pub fn delete(&self, address: &Address) -> Result<()> {
-        self.db.delete(cf::DOCCLASS_ISSUERS, address.as_bytes())
+        self.db
+            .delete(cf::DOCCLASS_ISSUERS, docclass_issuer_key(address))
     }
 }
 
@@ -636,28 +806,17 @@ impl<'a> DocClassEventStore<'a> {
         Self { db }
     }
 
-    /// Create key for event storage
-    /// Format: block_height (8 bytes BE) + tx_index (4 bytes BE) + event_index (2 bytes BE)
-    fn event_key(block_height: BlockHeight, tx_index: u32, event_index: u16) -> Vec<u8> {
-        let mut key = Vec::with_capacity(14);
-        key.extend_from_slice(&block_height.to_be_bytes());
-        key.extend_from_slice(&tx_index.to_be_bytes());
-        key.extend_from_slice(&event_index.to_be_bytes());
-        key
-    }
-
     /// Store an event
     pub fn put(&self, block_height: BlockHeight, tx_index: u32, event_index: u16, event: &DocClassEvent) -> Result<()> {
-        let key = Self::event_key(block_height, tx_index, event_index);
-        let bytes = bincode::serialize(event)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let key = docclass_event_key(block_height, tx_index, event_index);
+        let bytes = encode_docclass_event(event)?;
         self.db.put(cf::DOCCLASS_EVENTS, &key, &bytes)
     }
 
     /// Get events in a block range
     pub fn get_events_in_range(&self, start_height: BlockHeight, end_height: BlockHeight) -> Result<Vec<(BlockHeight, DocClassEvent)>> {
         let mut events = Vec::new();
-        let start_key = Self::event_key(start_height, 0, 0);
+        let start_key = docclass_event_key(start_height, 0, 0);
 
         for (key, value) in self.db.prefix_iter(cf::DOCCLASS_EVENTS, &start_key[..8])? {
             if key.len() >= 8 {
@@ -669,9 +828,7 @@ impl<'a> DocClassEventStore<'a> {
                     break;
                 }
 
-                let event: DocClassEvent = bincode::deserialize(&value)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                events.push((height, event));
+                events.push((height, decode_docclass_event(&value)?));
             }
         }
 
@@ -685,9 +842,7 @@ impl<'a> DocClassEventStore<'a> {
 
         for (key, value) in self.db.prefix_iter(cf::DOCCLASS_EVENTS, &prefix)? {
             if key.len() >= 8 && &key[..8] == prefix.as_slice() {
-                let event: DocClassEvent = bincode::deserialize(&value)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                events.push(event);
+                events.push(decode_docclass_event(&value)?);
             }
         }
 

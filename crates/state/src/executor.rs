@@ -236,13 +236,13 @@ pub struct BlockExecutor {
     db: Arc<Database>,
     params: ChainParams,
     contract_executor: ContractExecutorState,
-    docclass_executor: DocClassExecutor,
-    // No `LegalExecutor` / `EmploymentExecutor` / `FinanceExecutor` field:
-    // SRC-85X, SRC-88X and SRC-89X all execute through `ExecutionView`, so the
-    // block executor has no reason to hold a committed handle for any of them.
-    // Each of the three branches removed its own field; the cumulative answer
-    // removes all three, which is why no `self.<subsystem>_executor` remains
-    // for them below.
+    // No per-subsystem executor field remains for any migrated subsystem:
+    // SRC-83X DocClass, SRC-85X legal, SRC-88X employment and SRC-89X finance
+    // all execute through `ExecutionView`, as do agreement, property,
+    // healthcare, NFT, tax, messaging and policy accounts before them. Each
+    // branch removed its own field, so every conflict side still listed the
+    // others; the cumulative answer removes all of them, which is why no
+    // `self.<subsystem>_executor` survives below.
     //
     // No `NodeRegistryExecutor` / `StorageMetadataExecutor` field: both
     // subsystems execute through `ExecutionView`, so the executor has no reason
@@ -334,7 +334,6 @@ impl BlockExecutor {
     /// Create a new block executor
     pub fn new(state: Arc<StateManager>, db: Arc<Database>, params: ChainParams) -> Self {
         let contract_executor = ContractExecutorState::new(db.clone(), params.clone());
-        let docclass_executor = DocClassExecutor::new(db.clone(), params.clone());
         let inference_settlement_executor =
             crate::inference_settlement_executor::InferenceSettlementExecutor::new(db.clone());
         Self {
@@ -342,7 +341,6 @@ impl BlockExecutor {
             db,
             params,
             contract_executor,
-            docclass_executor,
             inference_settlement_executor,
             beacon_block: parking_lot::Mutex::new(None),
         }
@@ -756,7 +754,9 @@ impl BlockExecutor {
                     }
                     TxPayload::DocClass(docclass_data) => {
                         // Execute DocClass operation (SRC-80X/81X)
-                        let result = self.docclass_executor.execute(view,
+                        let result = DocClassExecutor::execute(
+                            view,
+                            &self.params,
                             &v2_tx.from,
                             &docclass_data,
                             proposer,
@@ -2491,7 +2491,9 @@ impl BlockExecutor {
                 }
 
                 // Execute DocClass operation (SRC-80X/81X)
-                let result = self.docclass_executor.execute(view,
+                let result = DocClassExecutor::execute(
+                    view,
+                    &self.params,
                     &tx.from,
                     docclass_data,
                     proposer,

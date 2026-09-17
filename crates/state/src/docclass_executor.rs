@@ -6,18 +6,23 @@
 //! - Revocations (SRC-805)
 //! - Academic/Professional Credentials (SRC-810-813)
 //! - Issuer Registry management
+//!
+//! Every operation here takes the block's [`ExecutionView`] and NO `self`
+//! receiver. The type is a unit struct: there is no `self.db`, so a committed
+//! read or write is not expressible on any of these paths. The candidate
+//! accessors live in [`crate::docclass_view`]; the committed twins stay in
+//! `sumchain_storage::docclass_store` for RPC, admission and the operator
+//! paths.
 
 use sumchain_storage::exec_view::ExecutionView;
-use std::sync::Arc;
 
 use sumchain_genesis::ChainParams;
 use sumchain_primitives::{
-    Address, AcademicCredential, Balance, BlockHeight, CredentialId, DocClassEvent,
-    DocClassIssuer, DocClassIssuerStatus, DocClassOperation, DocClassTxData, DocSubcode,
-    EligibilityAttestation, Hash, IdentityKey, IdentityRoot, IdentityStatus, IssuerKey,
-    RevocationReason, RevocationRecord, RevocationStatus, ServiceEndpoint, Timestamp,
+    AcademicCredential, Address, Balance, BlockHeight, CredentialId, DocClassEvent, DocClassIssuer,
+    DocClassIssuerStatus, DocClassOperation, DocClassTxData, DocSubcode, EligibilityAttestation,
+    Hash, IdentityKey, IdentityRoot, IdentityStatus, IssuerKey, RevocationReason, RevocationRecord,
+    RevocationStatus, ServiceEndpoint, Timestamp,
 };
-use sumchain_storage::{Database, DocClassStore};
 use tracing::{debug, warn};
 
 use crate::{Result, SchemaValidator, StateError, StateManager};
@@ -48,26 +53,20 @@ impl DocClassExecutionResult {
     }
 }
 
-/// DocClass executor for SRC-80X/81X transactions
-pub struct DocClassExecutor {
-    db: Arc<Database>,
-    params: ChainParams,
-    schema_validator: SchemaValidator,
-}
+/// DocClass executor for SRC-80X/81X transactions.
+///
+/// A unit struct. `ChainParams` arrives as a parameter because two operations
+/// need it -- `RegisterIssuer` reads `min_issuer_stake`, `DeactivateIssuer`
+/// reads `admin` -- and a field holding it would be one more thing on `self`
+/// for a future read to hide behind.
+pub struct DocClassExecutor;
 
 impl DocClassExecutor {
-    pub fn new(db: Arc<Database>, params: ChainParams) -> Self {
-        Self {
-            db,
-            params,
-            schema_validator: SchemaValidator::new(),
-        }
-    }
-
     /// Execute a DocClass transaction
     #[allow(clippy::too_many_arguments)]
     pub fn execute(
-        &self, view: &mut ExecutionView<'_, '_>,
+        view: &mut ExecutionView<'_, '_>,
+        params: &ChainParams,
         sender: &Address,
         data: &DocClassTxData,
         proposer: &Address,
@@ -77,73 +76,188 @@ impl DocClassExecutor {
         tx_index: u32,
         _tx_hash: Hash,
     ) -> Result<DocClassExecutionResult> {
-        let store = DocClassStore::new(&self.db);
-
         match data.operation {
             // Identity operations (SRC-800)
-            DocClassOperation::CreateIdentityRoot => {
-                self.create_identity_root(view, sender, &data.data, proposer, fee, block_height, tx_index, &store)
-            }
-            DocClassOperation::AddKey => {
-                self.identity_add_key(view, sender, &data.data, proposer, fee, block_height, tx_index, &store)
-            }
-            DocClassOperation::RemoveKey => {
-                self.identity_remove_key(view, sender, &data.data, proposer, fee, block_height, tx_index, &store)
-            }
-            DocClassOperation::RotateKey => {
-                self.identity_rotate_key(view, sender, &data.data, proposer, fee, block_height, tx_index, &store)
-            }
-            DocClassOperation::AddController => {
-                self.identity_add_controller(view, sender, &data.data, proposer, fee, block_height, tx_index, &store)
-            }
-            DocClassOperation::RemoveController => {
-                self.identity_remove_controller(view, sender, &data.data, proposer, fee, block_height, tx_index, &store)
-            }
-            DocClassOperation::UpdateService => {
-                self.identity_update_service(view, sender, &data.data, proposer, fee, block_height, tx_index, &store)
-            }
-            DocClassOperation::DeactivateIdentity => {
-                self.deactivate_identity(view, sender, &data.data, proposer, fee, block_height, block_timestamp, tx_index, &store)
-            }
-            DocClassOperation::ReactivateIdentity => {
-                self.reactivate_identity(view, sender, &data.data, proposer, fee, block_height, block_timestamp, tx_index, &store)
-            }
+            DocClassOperation::CreateIdentityRoot => Self::create_identity_root(
+                view,
+                sender,
+                &data.data,
+                proposer,
+                fee,
+                block_height,
+                tx_index,
+            ),
+            DocClassOperation::AddKey => Self::identity_add_key(
+                view,
+                sender,
+                &data.data,
+                proposer,
+                fee,
+                block_height,
+                tx_index,
+            ),
+            DocClassOperation::RemoveKey => Self::identity_remove_key(
+                view,
+                sender,
+                &data.data,
+                proposer,
+                fee,
+                block_height,
+                tx_index,
+            ),
+            DocClassOperation::RotateKey => Self::identity_rotate_key(
+                view,
+                sender,
+                &data.data,
+                proposer,
+                fee,
+                block_height,
+                tx_index,
+            ),
+            DocClassOperation::AddController => Self::identity_add_controller(
+                view,
+                sender,
+                &data.data,
+                proposer,
+                fee,
+                block_height,
+                tx_index,
+            ),
+            DocClassOperation::RemoveController => Self::identity_remove_controller(
+                view,
+                sender,
+                &data.data,
+                proposer,
+                fee,
+                block_height,
+                tx_index,
+            ),
+            DocClassOperation::UpdateService => Self::identity_update_service(
+                view,
+                sender,
+                &data.data,
+                proposer,
+                fee,
+                block_height,
+                tx_index,
+            ),
+            DocClassOperation::DeactivateIdentity => Self::deactivate_identity(
+                view,
+                sender,
+                &data.data,
+                proposer,
+                fee,
+                block_height,
+                block_timestamp,
+                tx_index,
+            ),
+            DocClassOperation::ReactivateIdentity => Self::reactivate_identity(
+                view,
+                sender,
+                &data.data,
+                proposer,
+                fee,
+                block_height,
+                block_timestamp,
+                tx_index,
+            ),
 
             // Credential operations (SRC-802, SRC-810-813)
-            DocClassOperation::IssueCredential => {
-                self.issue_credential(view, sender, &data.data, proposer, fee, block_height, tx_index, &store)
-            }
+            DocClassOperation::IssueCredential => Self::issue_credential(
+                view,
+                sender,
+                &data.data,
+                proposer,
+                fee,
+                block_height,
+                tx_index,
+            ),
             DocClassOperation::UpdateCredential => {
-                self.update_credential(view, sender, &data.data, proposer, fee, &store)
+                Self::update_credential(view, sender, &data.data, proposer, fee)
             }
 
             // Revocation operations (SRC-805)
-            DocClassOperation::RevokeCredential => {
-                self.revoke_credential(view, sender, &data.data, proposer, fee, block_height, block_timestamp, tx_index, &store)
-            }
-            DocClassOperation::SuspendCredential => {
-                self.suspend_credential(view, sender, &data.data, proposer, fee, block_height, block_timestamp, tx_index, &store)
-            }
-            DocClassOperation::ReactivateCredential => {
-                self.reactivate_credential(view, sender, &data.data, proposer, fee, block_height, block_timestamp, tx_index, &store)
-            }
-            DocClassOperation::SupersedeCredential => {
-                self.supersede_credential(view, sender, &data.data, proposer, fee, block_height, block_timestamp, tx_index, &store)
-            }
+            DocClassOperation::RevokeCredential => Self::revoke_credential(
+                view,
+                sender,
+                &data.data,
+                proposer,
+                fee,
+                block_height,
+                block_timestamp,
+                tx_index,
+            ),
+            DocClassOperation::SuspendCredential => Self::suspend_credential(
+                view,
+                sender,
+                &data.data,
+                proposer,
+                fee,
+                block_height,
+                block_timestamp,
+                tx_index,
+            ),
+            DocClassOperation::ReactivateCredential => Self::reactivate_credential(
+                view,
+                sender,
+                &data.data,
+                proposer,
+                fee,
+                block_height,
+                block_timestamp,
+                tx_index,
+            ),
+            DocClassOperation::SupersedeCredential => Self::supersede_credential(
+                view,
+                sender,
+                &data.data,
+                proposer,
+                fee,
+                block_height,
+                block_timestamp,
+                tx_index,
+            ),
 
             // Issuer Registry operations
-            DocClassOperation::RegisterIssuer => {
-                self.register_issuer(view, sender, &data.data, proposer, fee, block_height, tx_index, &store)
-            }
-            DocClassOperation::UpdateIssuer => {
-                self.update_issuer(view, sender, &data.data, proposer, fee, block_height, tx_index, &store)
-            }
-            DocClassOperation::RotateIssuerKey => {
-                self.rotate_issuer_key(view, sender, &data.data, proposer, fee, block_height, tx_index, &store)
-            }
-            DocClassOperation::DeactivateIssuer => {
-                self.deactivate_issuer(view, sender, &data.data, proposer, fee, block_height, block_timestamp, tx_index, &store)
-            }
+            DocClassOperation::RegisterIssuer => Self::register_issuer(
+                view,
+                params,
+                sender,
+                &data.data,
+                proposer,
+                fee,
+                block_height,
+                tx_index,
+            ),
+            DocClassOperation::UpdateIssuer => Self::update_issuer(
+                view,
+                sender,
+                &data.data,
+                proposer,
+                fee,
+                block_height,
+                tx_index,
+            ),
+            DocClassOperation::RotateIssuerKey => Self::rotate_issuer_key(
+                view,
+                sender,
+                &data.data,
+                proposer,
+                fee,
+                block_height,
+                tx_index,
+            ),
+            DocClassOperation::DeactivateIssuer => Self::deactivate_issuer(
+                view,
+                params,
+                sender,
+                &data.data,
+                proposer,
+                fee,
+                block_height,
+                block_timestamp,
+                tx_index,
+            ),
         }
     }
 
@@ -153,14 +267,13 @@ impl DocClassExecutor {
 
     #[allow(clippy::too_many_arguments)]
     fn create_identity_root(
-        &self, view: &mut ExecutionView<'_, '_>,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
         proposer: &Address,
         fee: Balance,
         block_height: BlockHeight,
         tx_index: u32,
-        store: &DocClassStore,
     ) -> Result<DocClassExecutionResult> {
         let identity: IdentityRoot = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid identity data: {}", e)))?;
@@ -169,7 +282,7 @@ impl DocClassExecutor {
             return Ok(DocClassExecutionResult::failure("Controller must be sender"));
         }
 
-        if store.identity_roots().exists(&identity.identity_id)? {
+        if Self::v_identity_root_exists(view, &identity.identity_id)? {
             return Ok(DocClassExecutionResult::failure("Identity already exists"));
         }
 
@@ -177,14 +290,14 @@ impl DocClassExecutor {
         StateManager::v_credit(view, proposer, fee)?;
         StateManager::v_increment_nonce(view, sender)?;
 
-        store.identity_roots().put(&identity)?;
+        Self::v_put_identity_root(view, &identity)?;
 
         let event = DocClassEvent::IdentityRootCreated {
             identity_id: identity.identity_id,
             controller: identity.controller,
             subject_commitment: identity.subject_commitment,
         };
-        store.events().put(block_height, tx_index, 0, &event)?;
+        Self::v_put_docclass_event(view, block_height, tx_index, 0, &event)?;
 
         debug!("Identity root created: {:?}", identity.identity_id);
         Ok(DocClassExecutionResult::success(Some(identity.identity_id)))
@@ -192,14 +305,13 @@ impl DocClassExecutor {
 
     #[allow(clippy::too_many_arguments)]
     fn identity_add_key(
-        &self, view: &mut ExecutionView<'_, '_>,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
         proposer: &Address,
         fee: Balance,
         block_height: BlockHeight,
         tx_index: u32,
-        store: &DocClassStore,
     ) -> Result<DocClassExecutionResult> {
         #[derive(serde::Deserialize)]
         struct AddKeyData {
@@ -210,7 +322,7 @@ impl DocClassExecutor {
         let add_data: AddKeyData = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-        let mut identity = match store.identity_roots().get(&add_data.identity_id)? {
+        let mut identity = match Self::v_get_identity_root(view, &add_data.identity_id)? {
             Some(i) => i,
             None => return Ok(DocClassExecutionResult::failure("Identity not found")),
         };
@@ -224,28 +336,27 @@ impl DocClassExecutor {
         StateManager::v_increment_nonce(view, sender)?;
 
         identity.keys.push(add_data.key.clone());
-        store.identity_roots().put(&identity)?;
+        Self::v_put_identity_root(view, &identity)?;
 
         let event = DocClassEvent::KeyAdded {
             identity_id: add_data.identity_id,
             key_id: add_data.key.key_id,
             key_type: add_data.key.key_type,
         };
-        store.events().put(block_height, tx_index, 0, &event)?;
+        Self::v_put_docclass_event(view, block_height, tx_index, 0, &event)?;
 
         Ok(DocClassExecutionResult::success(Some(add_data.identity_id)))
     }
 
     #[allow(clippy::too_many_arguments)]
     fn identity_remove_key(
-        &self, view: &mut ExecutionView<'_, '_>,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
         proposer: &Address,
         fee: Balance,
         block_height: BlockHeight,
         tx_index: u32,
-        store: &DocClassStore,
     ) -> Result<DocClassExecutionResult> {
         #[derive(serde::Deserialize)]
         struct RemoveKeyData {
@@ -256,7 +367,7 @@ impl DocClassExecutor {
         let remove_data: RemoveKeyData = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-        let mut identity = match store.identity_roots().get(&remove_data.identity_id)? {
+        let mut identity = match Self::v_get_identity_root(view, &remove_data.identity_id)? {
             Some(i) => i,
             None => return Ok(DocClassExecutionResult::failure("Identity not found")),
         };
@@ -270,27 +381,26 @@ impl DocClassExecutor {
         StateManager::v_increment_nonce(view, sender)?;
 
         identity.keys.retain(|k| k.key_id != remove_data.key_id);
-        store.identity_roots().put(&identity)?;
+        Self::v_put_identity_root(view, &identity)?;
 
         let event = DocClassEvent::KeyRemoved {
             identity_id: remove_data.identity_id,
             key_id: remove_data.key_id,
         };
-        store.events().put(block_height, tx_index, 0, &event)?;
+        Self::v_put_docclass_event(view, block_height, tx_index, 0, &event)?;
 
         Ok(DocClassExecutionResult::success(Some(remove_data.identity_id)))
     }
 
     #[allow(clippy::too_many_arguments)]
     fn identity_rotate_key(
-        &self, view: &mut ExecutionView<'_, '_>,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
         proposer: &Address,
         fee: Balance,
         block_height: BlockHeight,
         tx_index: u32,
-        store: &DocClassStore,
     ) -> Result<DocClassExecutionResult> {
         #[derive(serde::Deserialize)]
         struct RotateKeyData {
@@ -302,7 +412,7 @@ impl DocClassExecutor {
         let rotate_data: RotateKeyData = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-        let mut identity = match store.identity_roots().get(&rotate_data.identity_id)? {
+        let mut identity = match Self::v_get_identity_root(view, &rotate_data.identity_id)? {
             Some(i) => i,
             None => return Ok(DocClassExecutionResult::failure("Identity not found")),
         };
@@ -318,28 +428,27 @@ impl DocClassExecutor {
         identity.keys.retain(|k| k.key_id != rotate_data.old_key_id);
         let new_key_id = rotate_data.new_key.key_id.clone();
         identity.keys.push(rotate_data.new_key);
-        store.identity_roots().put(&identity)?;
+        Self::v_put_identity_root(view, &identity)?;
 
         let event = DocClassEvent::KeyRotated {
             identity_id: rotate_data.identity_id,
             old_key_id: rotate_data.old_key_id,
             new_key_id,
         };
-        store.events().put(block_height, tx_index, 0, &event)?;
+        Self::v_put_docclass_event(view, block_height, tx_index, 0, &event)?;
 
         Ok(DocClassExecutionResult::success(Some(rotate_data.identity_id)))
     }
 
     #[allow(clippy::too_many_arguments)]
     fn identity_add_controller(
-        &self, view: &mut ExecutionView<'_, '_>,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
         proposer: &Address,
         fee: Balance,
         block_height: BlockHeight,
         tx_index: u32,
-        store: &DocClassStore,
     ) -> Result<DocClassExecutionResult> {
         #[derive(serde::Deserialize)]
         struct AddControllerData {
@@ -350,7 +459,7 @@ impl DocClassExecutor {
         let add_data: AddControllerData = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-        let mut identity = match store.identity_roots().get(&add_data.identity_id)? {
+        let mut identity = match Self::v_get_identity_root(view, &add_data.identity_id)? {
             Some(i) => i,
             None => return Ok(DocClassExecutionResult::failure("Identity not found")),
         };
@@ -366,27 +475,26 @@ impl DocClassExecutor {
         if !identity.additional_controllers.contains(&add_data.controller) {
             identity.additional_controllers.push(add_data.controller);
         }
-        store.identity_roots().put(&identity)?;
+        Self::v_put_identity_root(view, &identity)?;
 
         let event = DocClassEvent::ControllerAdded {
             identity_id: add_data.identity_id,
             controller: add_data.controller,
         };
-        store.events().put(block_height, tx_index, 0, &event)?;
+        Self::v_put_docclass_event(view, block_height, tx_index, 0, &event)?;
 
         Ok(DocClassExecutionResult::success(Some(add_data.identity_id)))
     }
 
     #[allow(clippy::too_many_arguments)]
     fn identity_remove_controller(
-        &self, view: &mut ExecutionView<'_, '_>,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
         proposer: &Address,
         fee: Balance,
         block_height: BlockHeight,
         tx_index: u32,
-        store: &DocClassStore,
     ) -> Result<DocClassExecutionResult> {
         #[derive(serde::Deserialize)]
         struct RemoveControllerData {
@@ -397,7 +505,7 @@ impl DocClassExecutor {
         let remove_data: RemoveControllerData = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-        let mut identity = match store.identity_roots().get(&remove_data.identity_id)? {
+        let mut identity = match Self::v_get_identity_root(view, &remove_data.identity_id)? {
             Some(i) => i,
             None => return Ok(DocClassExecutionResult::failure("Identity not found")),
         };
@@ -411,27 +519,26 @@ impl DocClassExecutor {
         StateManager::v_increment_nonce(view, sender)?;
 
         identity.additional_controllers.retain(|c| c != &remove_data.controller);
-        store.identity_roots().put(&identity)?;
+        Self::v_put_identity_root(view, &identity)?;
 
         let event = DocClassEvent::ControllerRemoved {
             identity_id: remove_data.identity_id,
             controller: remove_data.controller,
         };
-        store.events().put(block_height, tx_index, 0, &event)?;
+        Self::v_put_docclass_event(view, block_height, tx_index, 0, &event)?;
 
         Ok(DocClassExecutionResult::success(Some(remove_data.identity_id)))
     }
 
     #[allow(clippy::too_many_arguments)]
     fn identity_update_service(
-        &self, view: &mut ExecutionView<'_, '_>,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
         proposer: &Address,
         fee: Balance,
         block_height: BlockHeight,
         tx_index: u32,
-        store: &DocClassStore,
     ) -> Result<DocClassExecutionResult> {
         #[derive(serde::Deserialize)]
         struct UpdateServiceData {
@@ -442,7 +549,7 @@ impl DocClassExecutor {
         let update_data: UpdateServiceData = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-        let mut identity = match store.identity_roots().get(&update_data.identity_id)? {
+        let mut identity = match Self::v_get_identity_root(view, &update_data.identity_id)? {
             Some(i) => i,
             None => return Ok(DocClassExecutionResult::failure("Identity not found")),
         };
@@ -461,20 +568,20 @@ impl DocClassExecutor {
         } else {
             identity.services.push(update_data.service);
         }
-        store.identity_roots().put(&identity)?;
+        Self::v_put_identity_root(view, &identity)?;
 
         let event = DocClassEvent::ServiceUpdated {
             identity_id: update_data.identity_id,
             service_id,
         };
-        store.events().put(block_height, tx_index, 0, &event)?;
+        Self::v_put_docclass_event(view, block_height, tx_index, 0, &event)?;
 
         Ok(DocClassExecutionResult::success(Some(update_data.identity_id)))
     }
 
     #[allow(clippy::too_many_arguments)]
     fn deactivate_identity(
-        &self, view: &mut ExecutionView<'_, '_>,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
         proposer: &Address,
@@ -482,7 +589,6 @@ impl DocClassExecutor {
         block_height: BlockHeight,
         block_timestamp: Timestamp,
         tx_index: u32,
-        store: &DocClassStore,
     ) -> Result<DocClassExecutionResult> {
         #[derive(serde::Deserialize)]
         struct DeactivateData {
@@ -492,7 +598,7 @@ impl DocClassExecutor {
         let deactivate: DeactivateData = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-        let existing = match store.identity_roots().get(&deactivate.identity_id)? {
+        let existing = match Self::v_get_identity_root(view, &deactivate.identity_id)? {
             Some(i) => i,
             None => return Ok(DocClassExecutionResult::failure("Identity not found")),
         };
@@ -505,20 +611,25 @@ impl DocClassExecutor {
         StateManager::v_credit(view, proposer, fee)?;
         StateManager::v_increment_nonce(view, sender)?;
 
-        store.identity_roots().update_status(&deactivate.identity_id, IdentityStatus::Deactivated, block_timestamp)?;
+        Self::v_update_identity_status(
+            view,
+            &deactivate.identity_id,
+            IdentityStatus::Deactivated,
+            block_timestamp,
+        )?;
 
         let event = DocClassEvent::IdentityStatusChanged {
             identity_id: deactivate.identity_id,
             new_status: IdentityStatus::Deactivated,
         };
-        store.events().put(block_height, tx_index, 0, &event)?;
+        Self::v_put_docclass_event(view, block_height, tx_index, 0, &event)?;
 
         Ok(DocClassExecutionResult::success(Some(deactivate.identity_id)))
     }
 
     #[allow(clippy::too_many_arguments)]
     fn reactivate_identity(
-        &self, view: &mut ExecutionView<'_, '_>,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
         proposer: &Address,
@@ -526,7 +637,6 @@ impl DocClassExecutor {
         block_height: BlockHeight,
         block_timestamp: Timestamp,
         tx_index: u32,
-        store: &DocClassStore,
     ) -> Result<DocClassExecutionResult> {
         #[derive(serde::Deserialize)]
         struct ReactivateData {
@@ -536,7 +646,7 @@ impl DocClassExecutor {
         let reactivate: ReactivateData = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-        let existing = match store.identity_roots().get(&reactivate.identity_id)? {
+        let existing = match Self::v_get_identity_root(view, &reactivate.identity_id)? {
             Some(i) => i,
             None => return Ok(DocClassExecutionResult::failure("Identity not found")),
         };
@@ -549,13 +659,18 @@ impl DocClassExecutor {
         StateManager::v_credit(view, proposer, fee)?;
         StateManager::v_increment_nonce(view, sender)?;
 
-        store.identity_roots().update_status(&reactivate.identity_id, IdentityStatus::Active, block_timestamp)?;
+        Self::v_update_identity_status(
+            view,
+            &reactivate.identity_id,
+            IdentityStatus::Active,
+            block_timestamp,
+        )?;
 
         let event = DocClassEvent::IdentityStatusChanged {
             identity_id: reactivate.identity_id,
             new_status: IdentityStatus::Active,
         };
-        store.events().put(block_height, tx_index, 0, &event)?;
+        Self::v_put_docclass_event(view, block_height, tx_index, 0, &event)?;
 
         Ok(DocClassExecutionResult::success(Some(reactivate.identity_id)))
     }
@@ -566,36 +681,50 @@ impl DocClassExecutor {
 
     #[allow(clippy::too_many_arguments)]
     fn issue_credential(
-        &self, view: &mut ExecutionView<'_, '_>,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
         proposer: &Address,
         fee: Balance,
         block_height: BlockHeight,
         tx_index: u32,
-        store: &DocClassStore,
     ) -> Result<DocClassExecutionResult> {
         // Try academic credential first
         if let Ok(cred) = bincode::deserialize::<AcademicCredential>(data) {
-            return self.issue_academic_credential(view, sender, cred, proposer, fee, block_height, tx_index, store);
+            return Self::issue_academic_credential(
+                view,
+                sender,
+                cred,
+                proposer,
+                fee,
+                block_height,
+                tx_index,
+            );
         }
         // Try eligibility attestation
         if let Ok(att) = bincode::deserialize::<EligibilityAttestation>(data) {
-            return self.issue_eligibility(view, sender, att, proposer, fee, block_height, tx_index, store);
+            return Self::issue_eligibility(
+                view,
+                sender,
+                att,
+                proposer,
+                fee,
+                block_height,
+                tx_index,
+            );
         }
         Ok(DocClassExecutionResult::failure("Invalid credential data"))
     }
 
     #[allow(clippy::too_many_arguments)]
     fn issue_academic_credential(
-        &self, view: &mut ExecutionView<'_, '_>,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         credential: AcademicCredential,
         proposer: &Address,
         fee: Balance,
         block_height: BlockHeight,
         tx_index: u32,
-        store: &DocClassStore,
     ) -> Result<DocClassExecutionResult> {
         if credential.issuer != *sender {
             return Ok(DocClassExecutionResult::failure("Issuer must be sender"));
@@ -603,17 +732,18 @@ impl DocClassExecutor {
 
         let jurisdiction = credential.jurisdiction.as_str();
 
-        if !store.issuers().can_issue_subcode(sender, credential.subcode, jurisdiction)? {
+        if !Self::v_can_issue_subcode(view, sender, credential.subcode, jurisdiction)? {
             return Ok(DocClassExecutionResult::failure("Issuer not authorized"));
         }
 
-        if store.credentials().exists(&credential.credential_id)? {
+        if Self::v_credential_exists(view, &credential.credential_id)? {
             return Ok(DocClassExecutionResult::failure("Credential exists"));
         }
 
         // PRIVACY ENFORCEMENT: Validate schema to prevent PII on-chain
         // Hard rejection at consensus level for SRC-81X credentials (810/811/812)
-        let validation_result = self.schema_validator.validate_academic_credential(&credential, block_height);
+        let validation_result =
+            SchemaValidator::new().validate_academic_credential(&credential, block_height);
         if !validation_result.is_valid() {
             if let crate::ValidationResult::Invalid { reason } = validation_result {
                 warn!(
@@ -631,7 +761,7 @@ impl DocClassExecutor {
         StateManager::v_credit(view, proposer, fee)?;
         StateManager::v_increment_nonce(view, sender)?;
 
-        store.credentials().put(&credential)?;
+        Self::v_put_credential(view, &credential)?;
 
         let event = DocClassEvent::CredentialIssued {
             credential_id: credential.credential_id,
@@ -642,7 +772,7 @@ impl DocClassExecutor {
             schema_hash: credential.schema_hash,
             expires_at: credential.expires_at,
         };
-        store.events().put(block_height, tx_index, 0, &event)?;
+        Self::v_put_docclass_event(view, block_height, tx_index, 0, &event)?;
 
         debug!("Credential issued: {:?}", credential.credential_id);
         Ok(DocClassExecutionResult::success(Some(credential.credential_id)))
@@ -650,24 +780,28 @@ impl DocClassExecutor {
 
     #[allow(clippy::too_many_arguments)]
     fn issue_eligibility(
-        &self, view: &mut ExecutionView<'_, '_>,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         attestation: EligibilityAttestation,
         proposer: &Address,
         fee: Balance,
         block_height: BlockHeight,
         tx_index: u32,
-        store: &DocClassStore,
     ) -> Result<DocClassExecutionResult> {
         if attestation.issuer != *sender {
             return Ok(DocClassExecutionResult::failure("Issuer must be sender"));
         }
 
-        if !store.issuers().can_issue_subcode(sender, DocSubcode::EligibilityAttestation, &attestation.jurisdiction)? {
+        if !Self::v_can_issue_subcode(
+            view,
+            sender,
+            DocSubcode::EligibilityAttestation,
+            &attestation.jurisdiction,
+        )? {
             return Ok(DocClassExecutionResult::failure("Issuer not authorized"));
         }
 
-        if store.eligibility().exists(&attestation.credential_id)? {
+        if Self::v_eligibility_exists(view, &attestation.credential_id)? {
             return Ok(DocClassExecutionResult::failure("Credential exists"));
         }
 
@@ -675,7 +809,7 @@ impl DocClassExecutor {
         StateManager::v_credit(view, proposer, fee)?;
         StateManager::v_increment_nonce(view, sender)?;
 
-        store.eligibility().put(&attestation)?;
+        Self::v_put_eligibility(view, &attestation)?;
 
         let event = DocClassEvent::CredentialIssued {
             credential_id: attestation.credential_id,
@@ -686,7 +820,7 @@ impl DocClassExecutor {
             schema_hash: attestation.schema_hash,
             expires_at: attestation.expires_at,
         };
-        store.events().put(block_height, tx_index, 0, &event)?;
+        Self::v_put_docclass_event(view, block_height, tx_index, 0, &event)?;
 
         debug!("Eligibility issued: {:?}", attestation.credential_id);
         Ok(DocClassExecutionResult::success(Some(attestation.credential_id)))
@@ -694,12 +828,11 @@ impl DocClassExecutor {
 
     #[allow(clippy::too_many_arguments)]
     fn update_credential(
-        &self, view: &mut ExecutionView<'_, '_>,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
         proposer: &Address,
         fee: Balance,
-        store: &DocClassStore,
     ) -> Result<DocClassExecutionResult> {
         #[derive(serde::Deserialize)]
         struct UpdateData {
@@ -710,9 +843,9 @@ impl DocClassExecutor {
             .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
         // Just check authorization for now
-        let is_authorized = if let Some(c) = store.credentials().get(&update.credential_id)? {
+        let is_authorized = if let Some(c) = Self::v_get_credential(view, &update.credential_id)? {
             c.issuer == *sender
-        } else if let Some(a) = store.eligibility().get(&update.credential_id)? {
+        } else if let Some(a) = Self::v_get_eligibility(view, &update.credential_id)? {
             a.issuer == *sender
         } else {
             return Ok(DocClassExecutionResult::failure("Credential not found"));
@@ -735,7 +868,7 @@ impl DocClassExecutor {
 
     #[allow(clippy::too_many_arguments)]
     fn revoke_credential(
-        &self, view: &mut ExecutionView<'_, '_>,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
         proposer: &Address,
@@ -743,7 +876,6 @@ impl DocClassExecutor {
         block_height: BlockHeight,
         block_timestamp: Timestamp,
         tx_index: u32,
-        store: &DocClassStore,
     ) -> Result<DocClassExecutionResult> {
         #[derive(serde::Deserialize)]
         struct RevokeData {
@@ -754,7 +886,7 @@ impl DocClassExecutor {
         let revoke: RevokeData = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-        if !self.check_revoke_auth(sender, &revoke.credential_id, store)? {
+        if !Self::check_revoke_auth(view, sender, &revoke.credential_id)? {
             return Ok(DocClassExecutionResult::failure("Not authorized"));
         }
 
@@ -773,12 +905,22 @@ impl DocClassExecutor {
             superseded_by: None,
             signature: [0u8; 64],
         };
-        store.revocations().put(&record)?;
+        Self::v_put_revocation_record(view, &record)?;
 
-        if store.eligibility().exists(&revoke.credential_id)? {
-            store.eligibility().update_revocation(&revoke.credential_id, RevocationStatus::Revoked, None)?;
-        } else if store.credentials().exists(&revoke.credential_id)? {
-            store.credentials().update_revocation(&revoke.credential_id, RevocationStatus::Revoked, None)?;
+        if Self::v_eligibility_exists(view, &revoke.credential_id)? {
+            Self::v_update_eligibility_revocation(
+                view,
+                &revoke.credential_id,
+                RevocationStatus::Revoked,
+                None,
+            )?;
+        } else if Self::v_credential_exists(view, &revoke.credential_id)? {
+            Self::v_update_credential_revocation(
+                view,
+                &revoke.credential_id,
+                RevocationStatus::Revoked,
+                None,
+            )?;
         }
 
         let event = DocClassEvent::CredentialRevoked {
@@ -787,14 +929,14 @@ impl DocClassExecutor {
             reason: revoke.reason,
             timestamp: block_timestamp,
         };
-        store.events().put(block_height, tx_index, 0, &event)?;
+        Self::v_put_docclass_event(view, block_height, tx_index, 0, &event)?;
 
         Ok(DocClassExecutionResult::success(Some(revoke.credential_id)))
     }
 
     #[allow(clippy::too_many_arguments)]
     fn suspend_credential(
-        &self, view: &mut ExecutionView<'_, '_>,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
         proposer: &Address,
@@ -802,7 +944,6 @@ impl DocClassExecutor {
         block_height: BlockHeight,
         block_timestamp: Timestamp,
         tx_index: u32,
-        store: &DocClassStore,
     ) -> Result<DocClassExecutionResult> {
         #[derive(serde::Deserialize)]
         struct SuspendData {
@@ -813,7 +954,7 @@ impl DocClassExecutor {
         let suspend: SuspendData = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-        if !self.check_revoke_auth(sender, &suspend.credential_id, store)? {
+        if !Self::check_revoke_auth(view, sender, &suspend.credential_id)? {
             return Ok(DocClassExecutionResult::failure("Not authorized"));
         }
 
@@ -832,12 +973,22 @@ impl DocClassExecutor {
             superseded_by: None,
             signature: [0u8; 64],
         };
-        store.revocations().put(&record)?;
+        Self::v_put_revocation_record(view, &record)?;
 
-        if store.eligibility().exists(&suspend.credential_id)? {
-            store.eligibility().update_revocation(&suspend.credential_id, RevocationStatus::Suspended, None)?;
-        } else if store.credentials().exists(&suspend.credential_id)? {
-            store.credentials().update_revocation(&suspend.credential_id, RevocationStatus::Suspended, None)?;
+        if Self::v_eligibility_exists(view, &suspend.credential_id)? {
+            Self::v_update_eligibility_revocation(
+                view,
+                &suspend.credential_id,
+                RevocationStatus::Suspended,
+                None,
+            )?;
+        } else if Self::v_credential_exists(view, &suspend.credential_id)? {
+            Self::v_update_credential_revocation(
+                view,
+                &suspend.credential_id,
+                RevocationStatus::Suspended,
+                None,
+            )?;
         }
 
         let event = DocClassEvent::CredentialSuspended {
@@ -846,14 +997,14 @@ impl DocClassExecutor {
             reason: suspend.reason,
             timestamp: block_timestamp,
         };
-        store.events().put(block_height, tx_index, 0, &event)?;
+        Self::v_put_docclass_event(view, block_height, tx_index, 0, &event)?;
 
         Ok(DocClassExecutionResult::success(Some(suspend.credential_id)))
     }
 
     #[allow(clippy::too_many_arguments)]
     fn reactivate_credential(
-        &self, view: &mut ExecutionView<'_, '_>,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
         proposer: &Address,
@@ -861,7 +1012,6 @@ impl DocClassExecutor {
         block_height: BlockHeight,
         block_timestamp: Timestamp,
         tx_index: u32,
-        store: &DocClassStore,
     ) -> Result<DocClassExecutionResult> {
         #[derive(serde::Deserialize)]
         struct ReactivateData {
@@ -871,11 +1021,11 @@ impl DocClassExecutor {
         let reactivate: ReactivateData = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-        if !self.check_revoke_auth(sender, &reactivate.credential_id, store)? {
+        if !Self::check_revoke_auth(view, sender, &reactivate.credential_id)? {
             return Ok(DocClassExecutionResult::failure("Not authorized"));
         }
 
-        let status = store.revocations().get_status(&reactivate.credential_id)?;
+        let status = Self::v_get_revocation_status(view, &reactivate.credential_id)?;
         if status != RevocationStatus::Suspended {
             return Ok(DocClassExecutionResult::failure("Only suspended can be reactivated"));
         }
@@ -895,12 +1045,22 @@ impl DocClassExecutor {
             superseded_by: None,
             signature: [0u8; 64],
         };
-        store.revocations().put(&record)?;
+        Self::v_put_revocation_record(view, &record)?;
 
-        if store.eligibility().exists(&reactivate.credential_id)? {
-            store.eligibility().update_revocation(&reactivate.credential_id, RevocationStatus::Active, None)?;
-        } else if store.credentials().exists(&reactivate.credential_id)? {
-            store.credentials().update_revocation(&reactivate.credential_id, RevocationStatus::Active, None)?;
+        if Self::v_eligibility_exists(view, &reactivate.credential_id)? {
+            Self::v_update_eligibility_revocation(
+                view,
+                &reactivate.credential_id,
+                RevocationStatus::Active,
+                None,
+            )?;
+        } else if Self::v_credential_exists(view, &reactivate.credential_id)? {
+            Self::v_update_credential_revocation(
+                view,
+                &reactivate.credential_id,
+                RevocationStatus::Active,
+                None,
+            )?;
         }
 
         let event = DocClassEvent::CredentialReactivated {
@@ -908,14 +1068,14 @@ impl DocClassExecutor {
             issuer: *sender,
             timestamp: block_timestamp,
         };
-        store.events().put(block_height, tx_index, 0, &event)?;
+        Self::v_put_docclass_event(view, block_height, tx_index, 0, &event)?;
 
         Ok(DocClassExecutionResult::success(Some(reactivate.credential_id)))
     }
 
     #[allow(clippy::too_many_arguments)]
     fn supersede_credential(
-        &self, view: &mut ExecutionView<'_, '_>,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
         proposer: &Address,
@@ -923,7 +1083,6 @@ impl DocClassExecutor {
         block_height: BlockHeight,
         block_timestamp: Timestamp,
         tx_index: u32,
-        store: &DocClassStore,
     ) -> Result<DocClassExecutionResult> {
         #[derive(serde::Deserialize)]
         struct SupersedeData {
@@ -934,7 +1093,7 @@ impl DocClassExecutor {
         let supersede: SupersedeData = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-        if !self.check_revoke_auth(sender, &supersede.old_credential_id, store)? {
+        if !Self::check_revoke_auth(view, sender, &supersede.old_credential_id)? {
             return Ok(DocClassExecutionResult::failure("Not authorized"));
         }
 
@@ -953,12 +1112,22 @@ impl DocClassExecutor {
             superseded_by: Some(supersede.new_credential_id),
             signature: [0u8; 64],
         };
-        store.revocations().put(&record)?;
+        Self::v_put_revocation_record(view, &record)?;
 
-        if store.eligibility().exists(&supersede.old_credential_id)? {
-            store.eligibility().update_revocation(&supersede.old_credential_id, RevocationStatus::Superseded, Some(supersede.new_credential_id))?;
-        } else if store.credentials().exists(&supersede.old_credential_id)? {
-            store.credentials().update_revocation(&supersede.old_credential_id, RevocationStatus::Superseded, Some(supersede.new_credential_id))?;
+        if Self::v_eligibility_exists(view, &supersede.old_credential_id)? {
+            Self::v_update_eligibility_revocation(
+                view,
+                &supersede.old_credential_id,
+                RevocationStatus::Superseded,
+                Some(supersede.new_credential_id),
+            )?;
+        } else if Self::v_credential_exists(view, &supersede.old_credential_id)? {
+            Self::v_update_credential_revocation(
+                view,
+                &supersede.old_credential_id,
+                RevocationStatus::Superseded,
+                Some(supersede.new_credential_id),
+            )?;
         }
 
         let event = DocClassEvent::CredentialSuperseded {
@@ -967,16 +1136,20 @@ impl DocClassExecutor {
             issuer: *sender,
             timestamp: block_timestamp,
         };
-        store.events().put(block_height, tx_index, 0, &event)?;
+        Self::v_put_docclass_event(view, block_height, tx_index, 0, &event)?;
 
         Ok(DocClassExecutionResult::success(Some(supersede.new_credential_id)))
     }
 
-    fn check_revoke_auth(&self, sender: &Address, credential_id: &CredentialId, store: &DocClassStore) -> Result<bool> {
-        if let Some(a) = store.eligibility().get(credential_id)? {
+    fn check_revoke_auth(
+        view: &ExecutionView<'_, '_>,
+        sender: &Address,
+        credential_id: &CredentialId,
+    ) -> Result<bool> {
+        if let Some(a) = Self::v_get_eligibility(view, credential_id)? {
             return Ok(a.issuer == *sender);
         }
-        if let Some(c) = store.credentials().get(credential_id)? {
+        if let Some(c) = Self::v_get_credential(view, credential_id)? {
             return Ok(c.issuer == *sender);
         }
         Ok(false)
@@ -988,14 +1161,14 @@ impl DocClassExecutor {
 
     #[allow(clippy::too_many_arguments)]
     fn register_issuer(
-        &self, view: &mut ExecutionView<'_, '_>,
+        view: &mut ExecutionView<'_, '_>,
+        params: &ChainParams,
         sender: &Address,
         data: &[u8],
         proposer: &Address,
         fee: Balance,
         block_height: BlockHeight,
         tx_index: u32,
-        store: &DocClassStore,
     ) -> Result<DocClassExecutionResult> {
         let issuer: DocClassIssuer = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
@@ -1004,11 +1177,11 @@ impl DocClassExecutor {
             return Ok(DocClassExecutionResult::failure("Address must be sender"));
         }
 
-        if store.issuers().is_registered(sender)? {
+        if Self::v_issuer_is_registered(view, sender)? {
             return Ok(DocClassExecutionResult::failure("Already registered"));
         }
 
-        if let Some(ref p) = self.params.docclass {
+        if let Some(ref p) = params.docclass {
             if p.min_issuer_stake > 0 && issuer.stake_amount < p.min_issuer_stake {
                 return Ok(DocClassExecutionResult::failure("Insufficient stake"));
             }
@@ -1020,7 +1193,7 @@ impl DocClassExecutor {
         StateManager::v_increment_nonce(view, sender)?;
 
         let subcodes = issuer.authorized_subcodes.clone();
-        store.issuers().put(&issuer)?;
+        Self::v_put_docclass_issuer(view, &issuer)?;
 
         let event = DocClassEvent::IssuerRegistered {
             issuer: issuer.address,
@@ -1028,7 +1201,7 @@ impl DocClassExecutor {
             jurisdictions: issuer.jurisdictions,
             subcodes,
         };
-        store.events().put(block_height, tx_index, 0, &event)?;
+        Self::v_put_docclass_event(view, block_height, tx_index, 0, &event)?;
 
         debug!("Issuer registered: {}", issuer.address);
         Ok(DocClassExecutionResult::success(None))
@@ -1036,14 +1209,13 @@ impl DocClassExecutor {
 
     #[allow(clippy::too_many_arguments)]
     fn update_issuer(
-        &self, view: &mut ExecutionView<'_, '_>,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
         proposer: &Address,
         fee: Balance,
         block_height: BlockHeight,
         tx_index: u32,
-        store: &DocClassStore,
     ) -> Result<DocClassExecutionResult> {
         let updated: DocClassIssuer = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
@@ -1052,7 +1224,7 @@ impl DocClassExecutor {
             return Ok(DocClassExecutionResult::failure("Can only update own profile"));
         }
 
-        if !store.issuers().is_registered(sender)? {
+        if !Self::v_issuer_is_registered(view, sender)? {
             return Ok(DocClassExecutionResult::failure("Not registered"));
         }
 
@@ -1060,26 +1232,25 @@ impl DocClassExecutor {
         StateManager::v_credit(view, proposer, fee)?;
         StateManager::v_increment_nonce(view, sender)?;
 
-        store.issuers().put(&updated)?;
+        Self::v_put_docclass_issuer(view, &updated)?;
 
         let event = DocClassEvent::IssuerUpdated {
             issuer: updated.address,
         };
-        store.events().put(block_height, tx_index, 0, &event)?;
+        Self::v_put_docclass_event(view, block_height, tx_index, 0, &event)?;
 
         Ok(DocClassExecutionResult::success(None))
     }
 
     #[allow(clippy::too_many_arguments)]
     fn rotate_issuer_key(
-        &self, view: &mut ExecutionView<'_, '_>,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &[u8],
         proposer: &Address,
         fee: Balance,
         block_height: BlockHeight,
         tx_index: u32,
-        store: &DocClassStore,
     ) -> Result<DocClassExecutionResult> {
         #[derive(serde::Deserialize)]
         struct RotateKeyData {
@@ -1090,7 +1261,7 @@ impl DocClassExecutor {
         let rotate: RotateKeyData = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-        let mut issuer = match store.issuers().get(sender)? {
+        let mut issuer = match Self::v_get_docclass_issuer(view, sender)? {
             Some(i) => i,
             None => return Ok(DocClassExecutionResult::failure("Not registered")),
         };
@@ -1114,21 +1285,22 @@ impl DocClassExecutor {
 
         let new_key_id = rotate.new_key.key_id.clone();
         issuer.keys.push(rotate.new_key);
-        store.issuers().put(&issuer)?;
+        Self::v_put_docclass_issuer(view, &issuer)?;
 
         let event = DocClassEvent::IssuerKeyRotated {
             issuer: *sender,
             old_key_id: rotate.old_key_id,
             new_key_id,
         };
-        store.events().put(block_height, tx_index, 0, &event)?;
+        Self::v_put_docclass_event(view, block_height, tx_index, 0, &event)?;
 
         Ok(DocClassExecutionResult::success(None))
     }
 
     #[allow(clippy::too_many_arguments)]
     fn deactivate_issuer(
-        &self, view: &mut ExecutionView<'_, '_>,
+        view: &mut ExecutionView<'_, '_>,
+        params: &ChainParams,
         sender: &Address,
         data: &[u8],
         proposer: &Address,
@@ -1136,7 +1308,6 @@ impl DocClassExecutor {
         block_height: BlockHeight,
         block_timestamp: Timestamp,
         tx_index: u32,
-        store: &DocClassStore,
     ) -> Result<DocClassExecutionResult> {
         #[derive(serde::Deserialize)]
         struct DeactivateIssuerData {
@@ -1146,14 +1317,14 @@ impl DocClassExecutor {
         let deactivate: DeactivateIssuerData = bincode::deserialize(data)
             .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-        let is_admin = self.is_docclass_admin(sender);
+        let is_admin = Self::is_docclass_admin(params, sender);
         let is_self = deactivate.issuer_address == *sender;
 
         if !is_admin && !is_self {
             return Ok(DocClassExecutionResult::failure("Not authorized"));
         }
 
-        if !store.issuers().is_registered(&deactivate.issuer_address)? {
+        if !Self::v_issuer_is_registered(view, &deactivate.issuer_address)? {
             return Ok(DocClassExecutionResult::failure("Not registered"));
         }
 
@@ -1161,20 +1332,25 @@ impl DocClassExecutor {
         StateManager::v_credit(view, proposer, fee)?;
         StateManager::v_increment_nonce(view, sender)?;
 
-        store.issuers().update_status(&deactivate.issuer_address, DocClassIssuerStatus::Suspended, block_timestamp)?;
+        Self::v_update_docclass_issuer_status(
+            view,
+            &deactivate.issuer_address,
+            DocClassIssuerStatus::Suspended,
+            block_timestamp,
+        )?;
 
         let event = DocClassEvent::IssuerStatusChanged {
             issuer: deactivate.issuer_address,
             new_status: DocClassIssuerStatus::Suspended,
         };
-        store.events().put(block_height, tx_index, 0, &event)?;
+        Self::v_put_docclass_event(view, block_height, tx_index, 0, &event)?;
 
         warn!("Issuer deactivated: {}", deactivate.issuer_address);
         Ok(DocClassExecutionResult::success(None))
     }
 
-    fn is_docclass_admin(&self, sender: &Address) -> bool {
-        if let Some(ref p) = self.params.docclass {
+    fn is_docclass_admin(params: &ChainParams, sender: &Address) -> bool {
+        if let Some(ref p) = params.docclass {
             if let Some(ref admin_str) = p.admin {
                 if let Ok(admin) = Address::from_base58(admin_str)
                     .or_else(|_| Address::from_hex(admin_str)) {
@@ -1190,17 +1366,15 @@ impl DocClassExecutor {
 #[cfg(all(test, feature = "legacy_tests"))]
 mod tests {
     use super::*;
-    use sumchain_primitives::{
-        DocClassIssuerType, EligibilityType, KeyPurpose, KeyType, Hash,
-    };
+    use std::sync::Arc;
+    use sumchain_primitives::{DocClassIssuerType, EligibilityType, Hash, KeyPurpose, KeyType};
     use sumchain_storage::Database;
     use tempfile::TempDir;
 
-    fn setup() -> (Arc<Database>, TempDir, Arc<StateManager>) {
+    fn setup() -> (Arc<Database>, TempDir) {
         let dir = TempDir::new().unwrap();
         let db = Arc::new(Database::open_default(dir.path()).unwrap());
-        let state = Arc::new(StateManager::new(db.clone(), 1));
-        (db, dir, state)
+        (db, dir)
     }
 
     fn test_params() -> ChainParams {
@@ -1246,14 +1420,17 @@ mod tests {
 
     #[test]
     fn test_docclass_executor_creation() {
-        let (db, _dir, _state) = setup();
-        let params = test_params();
-        let _executor = DocClassExecutor::new(db, params);
+        let (db, _dir) = setup();
+        // The executor is a unit struct: there is nothing to construct it
+        // from, and in particular no `Arc<Database>` for an operation to read
+        // committed state through.
+        let _executor = DocClassExecutor;
+        let _ = db;
     }
 
     #[test]
     fn test_register_issuer() {
-        let (db, _dir, state) = setup();
+        let (db, _dir) = setup();
         // A block's candidate, opened here because a `#[test]` function
         // cannot take one as a parameter. An earlier scripted signature
         // rewrite added `view` to the parameter list of every test in this
@@ -1262,7 +1439,6 @@ mod tests {
         let mut overlay = sumchain_storage::overlay::ApplicationOverlay::new(&db, 1 << 20);
         let view = &mut sumchain_storage::exec_view::ExecutionView::new(&mut overlay);
         let params = test_params();
-        let executor = DocClassExecutor::new(db.clone(), params);
 
         let issuer_addr = Address::new([1u8; 20]);
         let proposer = Address::new([99u8; 20]);
@@ -1291,10 +1467,11 @@ mod tests {
             &issuer,
         );
 
-        let result = executor.execute(
+        let result = DocClassExecutor::execute(
+            view,
+            &params,
             &issuer_addr,
             &tx_data,
-            &state,
             &proposer,
             1000,
             100,
@@ -1305,16 +1482,24 @@ mod tests {
 
         assert!(result.success, "Register issuer failed: {:?}", result.error);
 
-        // Verify issuer is registered
-        let store = DocClassStore::new(&db);
-        let retrieved = store.issuers().get(&issuer_addr).unwrap().unwrap();
+        // Verify the issuer is registered IN THE CANDIDATE. Nothing was
+        // published, so a committed reader here would see an empty family.
+        let retrieved = DocClassExecutor::v_get_docclass_issuer(view, &issuer_addr)
+            .unwrap()
+            .unwrap();
         assert_eq!(retrieved.name, "Test University");
-        assert!(store.issuers().can_issue_subcode(&issuer_addr, DocSubcode::Diploma, "US").unwrap());
+        assert!(DocClassExecutor::v_can_issue_subcode(
+            view,
+            &issuer_addr,
+            DocSubcode::Diploma,
+            "US"
+        )
+        .unwrap());
     }
 
     #[test]
     fn test_create_identity_root() {
-        let (db, _dir, state) = setup();
+        let (db, _dir) = setup();
         // A block's candidate, opened here because a `#[test]` function
         // cannot take one as a parameter. An earlier scripted signature
         // rewrite added `view` to the parameter list of every test in this
@@ -1323,7 +1508,6 @@ mod tests {
         let mut overlay = sumchain_storage::overlay::ApplicationOverlay::new(&db, 1 << 20);
         let view = &mut sumchain_storage::exec_view::ExecutionView::new(&mut overlay);
         let params = test_params();
-        let executor = DocClassExecutor::new(db.clone(), params);
 
         let controller = Address::new([2u8; 20]);
         let proposer = Address::new([99u8; 20]);
@@ -1354,10 +1538,11 @@ mod tests {
             &identity,
         );
 
-        let result = executor.execute(
+        let result = DocClassExecutor::execute(
+            view,
+            &params,
             &controller,
             &tx_data,
-            &state,
             &proposer,
             1000,
             100,
@@ -1368,9 +1553,10 @@ mod tests {
 
         assert!(result.success);
 
-        // Verify identity was created
-        let store = DocClassStore::new(&db);
-        let retrieved = store.identity_roots().get(&identity_id).unwrap().unwrap();
+        // Verify the identity was created in the candidate.
+        let retrieved = DocClassExecutor::v_get_identity_root(view, &identity_id)
+            .unwrap()
+            .unwrap();
         assert_eq!(retrieved.controller, controller);
         assert_eq!(retrieved.subject_commitment, subject_commitment);
         assert_eq!(retrieved.keys.len(), 1);
@@ -1378,7 +1564,7 @@ mod tests {
 
     #[test]
     fn test_issue_eligibility() {
-        let (db, _dir, state) = setup();
+        let (db, _dir) = setup();
         // A block's candidate, opened here because a `#[test]` function
         // cannot take one as a parameter. An earlier scripted signature
         // rewrite added `view` to the parameter list of every test in this
@@ -1387,7 +1573,6 @@ mod tests {
         let mut overlay = sumchain_storage::overlay::ApplicationOverlay::new(&db, 1 << 20);
         let view = &mut sumchain_storage::exec_view::ExecutionView::new(&mut overlay);
         let params = test_params();
-        let executor = DocClassExecutor::new(db.clone(), params);
 
         let issuer_addr = Address::new([1u8; 20]);
         let proposer = Address::new([99u8; 20]);
@@ -1416,10 +1601,11 @@ mod tests {
             &issuer,
         );
 
-        let result = executor.execute(
+        let result = DocClassExecutor::execute(
+            view,
+            &params,
             &issuer_addr,
             &tx_data,
-            &state,
             &proposer,
             1000,
             100,
@@ -1459,10 +1645,11 @@ mod tests {
             &eligibility,
         );
 
-        let result = executor.execute(
+        let result = DocClassExecutor::execute(
+            view,
+            &params,
             &issuer_addr,
             &tx_data,
-            &state,
             &proposer,
             1000,
             101,
@@ -1473,16 +1660,17 @@ mod tests {
 
         assert!(result.success);
 
-        // Verify credential was issued
-        let store = DocClassStore::new(&db);
-        let retrieved = store.eligibility().get(&credential_id).unwrap().unwrap();
+        // Verify the credential was issued in the candidate.
+        let retrieved = DocClassExecutor::v_get_eligibility(view, &credential_id)
+            .unwrap()
+            .unwrap();
         assert_eq!(retrieved.subject_commitment, subject_commitment);
         assert_eq!(retrieved.revocation_status, RevocationStatus::Active);
     }
 
     #[test]
     fn test_revoke_credential() {
-        let (db, _dir, state) = setup();
+        let (db, _dir) = setup();
         // A block's candidate, opened here because a `#[test]` function
         // cannot take one as a parameter. An earlier scripted signature
         // rewrite added `view` to the parameter list of every test in this
@@ -1491,7 +1679,6 @@ mod tests {
         let mut overlay = sumchain_storage::overlay::ApplicationOverlay::new(&db, 1 << 20);
         let view = &mut sumchain_storage::exec_view::ExecutionView::new(&mut overlay);
         let params = test_params();
-        let executor = DocClassExecutor::new(db.clone(), params);
 
         let issuer_addr = Address::new([1u8; 20]);
         let proposer = Address::new([99u8; 20]);
@@ -1513,8 +1700,24 @@ mod tests {
             stake_amount: 0,
             metadata: None,
         };
-        let tx_data = make_tx_data(DocClassOperation::RegisterIssuer, DocSubcode::IdentityRoot, &issuer);
-        executor.execute(&issuer_addr, &tx_data, &state, &proposer, 1000, 100, 1000000, 0, Hash::default()).unwrap();
+        let tx_data = make_tx_data(
+            DocClassOperation::RegisterIssuer,
+            DocSubcode::IdentityRoot,
+            &issuer,
+        );
+        DocClassExecutor::execute(
+            view,
+            &params,
+            &issuer_addr,
+            &tx_data,
+            &proposer,
+            1000,
+            100,
+            1000000,
+            0,
+            Hash::default(),
+        )
+        .unwrap();
 
         // Issue credential
         let credential_id = [200u8; 32];
@@ -1537,8 +1740,24 @@ mod tests {
             revocation_status: RevocationStatus::Active,
             superseded_by: None,
         };
-        let tx_data = make_tx_data(DocClassOperation::IssueCredential, DocSubcode::EligibilityAttestation, &eligibility);
-        executor.execute(&issuer_addr, &tx_data, &state, &proposer, 1000, 101, 1000001, 0, Hash::default()).unwrap();
+        let tx_data = make_tx_data(
+            DocClassOperation::IssueCredential,
+            DocSubcode::EligibilityAttestation,
+            &eligibility,
+        );
+        DocClassExecutor::execute(
+            view,
+            &params,
+            &issuer_addr,
+            &tx_data,
+            &proposer,
+            1000,
+            101,
+            1000001,
+            0,
+            Hash::default(),
+        )
+        .unwrap();
 
         // Now revoke the credential using inline struct matching the executor
         #[derive(serde::Serialize)]
@@ -1554,10 +1773,11 @@ mod tests {
 
         let tx_data = make_tx_data(DocClassOperation::RevokeCredential, DocSubcode::IdentityRoot, &revoke);
 
-        let result = executor.execute(
+        let result = DocClassExecutor::execute(
+            view,
+            &params,
             &issuer_addr,
             &tx_data,
-            &state,
             &proposer,
             1000,
             102,
@@ -1568,17 +1788,14 @@ mod tests {
 
         assert!(result.success);
 
-        // Verify credential is revoked
-        let store = DocClassStore::new(&db);
-        assert!(store.revocations().is_revoked(&credential_id).unwrap());
-
-        let status = store.revocations().get_status(&credential_id).unwrap();
+        // Verify the credential is revoked in the candidate.
+        let status = DocClassExecutor::v_get_revocation_status(view, &credential_id).unwrap();
         assert_eq!(status, RevocationStatus::Revoked);
     }
 
     #[test]
     fn test_unauthorized_issuer_fails() {
-        let (db, _dir, state) = setup();
+        let (db, _dir) = setup();
         // A block's candidate, opened here because a `#[test]` function
         // cannot take one as a parameter. An earlier scripted signature
         // rewrite added `view` to the parameter list of every test in this
@@ -1587,7 +1804,6 @@ mod tests {
         let mut overlay = sumchain_storage::overlay::ApplicationOverlay::new(&db, 1 << 20);
         let view = &mut sumchain_storage::exec_view::ExecutionView::new(&mut overlay);
         let params = test_params();
-        let executor = DocClassExecutor::new(db.clone(), params);
 
         let issuer_addr = Address::new([1u8; 20]);
         let unauthorized_addr = Address::new([5u8; 20]);
@@ -1611,8 +1827,24 @@ mod tests {
             stake_amount: 0,
             metadata: None,
         };
-        let tx_data = make_tx_data(DocClassOperation::RegisterIssuer, DocSubcode::IdentityRoot, &issuer);
-        executor.execute(&issuer_addr, &tx_data, &state, &proposer, 1000, 100, 1000000, 0, Hash::default()).unwrap();
+        let tx_data = make_tx_data(
+            DocClassOperation::RegisterIssuer,
+            DocSubcode::IdentityRoot,
+            &issuer,
+        );
+        DocClassExecutor::execute(
+            view,
+            &params,
+            &issuer_addr,
+            &tx_data,
+            &proposer,
+            1000,
+            100,
+            1000000,
+            0,
+            Hash::default(),
+        )
+        .unwrap();
 
         // Try to issue with unregistered address (should fail)
         let eligibility = EligibilityAttestation {
@@ -1637,10 +1869,11 @@ mod tests {
 
         let tx_data = make_tx_data(DocClassOperation::IssueCredential, DocSubcode::EligibilityAttestation, &eligibility);
 
-        let result = executor.execute(
+        let result = DocClassExecutor::execute(
+            view,
+            &params,
             &unauthorized_addr,
             &tx_data,
-            &state,
             &proposer,
             1000,
             101,

@@ -14,6 +14,7 @@ pub mod compute_pool_manager;
 pub mod compute_pool_store;
 pub mod contract_executor;
 pub mod docclass_executor;
+pub mod docclass_view;
 pub mod education_executor;
 pub mod employment_executor;
 pub mod employment_view;
