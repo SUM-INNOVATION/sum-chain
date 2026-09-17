@@ -2830,3 +2830,162 @@ fn every_remaining_status_transition_reads_the_row_the_one_before_it_staged() {
         vec![[0xD3u8; 32]]
     );
 }
+
+/// The PUBLISHED bytes are the byte contract, and this pins them directly.
+///
+/// Every other test here either compares candidate bytes to independent
+/// expectations, or compares published rows to themselves across a restart.
+/// Neither pins what actually lands in canonical storage: the step from
+/// candidate to committed goes through `ApplicationOverlay::into_batch`, which
+/// this commit does not cover. If that step ever reordered a key, dropped a
+/// prefix or re-encoded a value, every existing assertion would still pass.
+///
+/// So: publish a real block through the real publisher, then for all eleven
+/// migrated families read the RAW committed bytes and compare them against a
+/// key written out by hand and a value produced by `bincode::serialize` applied
+/// here in the test. Nothing on the expected side calls a key builder or a
+/// codec from the crate under test. Then close the database, reopen it at the
+/// same path, and compare the same eleven expectations again.
+#[test]
+fn published_property_bytes_match_independently_built_keys_and_values() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let actor = KeyPair::generate();
+    let issuer = actor.address();
+    const ID: u8 = 80;
+
+    // Expectations built here, from the schema, with no help from the crate.
+    let asset_v = asset(ID, issuer);
+    let title_v = title_event(ID.wrapping_add(1), ID, issuer);
+    let enc_v = encumbrance(ID.wrapping_add(2), ID, issuer);
+    let cov_v = coverage(ID.wrapping_add(3), ID, issuer);
+    let claim_v = claim(ID.wrapping_add(4), ID.wrapping_add(3), ID, issuer);
+    let proof_v = proof_envelope(ID.wrapping_add(5));
+
+    // Primary families: a bare 32-byte id key. Index families: the parent's
+    // 32-byte id, except the jurisdiction index, which is the raw UTF-8 of the
+    // jurisdiction string. Index VALUES are bincode `Vec<[u8; 32]>`, not
+    // presence markers.
+    let expected: Vec<(&str, Vec<u8>, Vec<u8>)> = vec![
+        (
+            cf::PROPERTY_ASSETS,
+            vec![ID; 32],
+            bincode::serialize(&asset_v).unwrap(),
+        ),
+        (
+            cf::PROPERTY_JURISDICTION_INDEX,
+            JURISDICTION.as_bytes().to_vec(),
+            bincode::serialize(&vec![[ID; 32]]).unwrap(),
+        ),
+        (
+            cf::PROPERTY_TITLE_EVENTS,
+            vec![ID.wrapping_add(1); 32],
+            bincode::serialize(&title_v).unwrap(),
+        ),
+        (
+            cf::PROPERTY_ASSET_TITLE_INDEX,
+            vec![ID; 32],
+            bincode::serialize(&vec![[ID.wrapping_add(1); 32]]).unwrap(),
+        ),
+        (
+            cf::PROPERTY_ENCUMBRANCES,
+            vec![ID.wrapping_add(2); 32],
+            bincode::serialize(&enc_v).unwrap(),
+        ),
+        (
+            cf::PROPERTY_ASSET_ENCUMBRANCE_INDEX,
+            vec![ID; 32],
+            bincode::serialize(&vec![[ID.wrapping_add(2); 32]]).unwrap(),
+        ),
+        (
+            cf::PROPERTY_COVERAGE,
+            vec![ID.wrapping_add(3); 32],
+            bincode::serialize(&cov_v).unwrap(),
+        ),
+        (
+            cf::PROPERTY_ASSET_COVERAGE_INDEX,
+            vec![ID; 32],
+            bincode::serialize(&vec![[ID.wrapping_add(3); 32]]).unwrap(),
+        ),
+        (
+            cf::PROPERTY_CLAIMS,
+            vec![ID.wrapping_add(4); 32],
+            bincode::serialize(&claim_v).unwrap(),
+        ),
+        (
+            cf::PROPERTY_COVERAGE_CLAIM_INDEX,
+            vec![ID.wrapping_add(3); 32],
+            bincode::serialize(&vec![[ID.wrapping_add(4); 32]]).unwrap(),
+        ),
+        (
+            cf::PROPERTY_PROOFS,
+            vec![ID.wrapping_add(5); 32],
+            bincode::serialize(&proof_v).unwrap(),
+        ),
+    ];
+    assert_eq!(
+        expected.len(),
+        PROPERTY_CFS.len(),
+        "one expectation per migrated family, and the list must not drift"
+    );
+
+    {
+        let db = std::sync::Arc::new(Database::open_default(dir.path()).unwrap());
+        let state = std::sync::Arc::new(StateManager::new(db.clone(), CHAIN_ID));
+        let executor =
+            sumchain_state::executor::BlockExecutor::new(state.clone(), db.clone(), params());
+        fund(&db, &actor, 500_000_000);
+
+        let receipts = common::publish_block(
+            &state,
+            &executor,
+            1,
+            &[9u8; 32],
+            a_block_touching_every_family(&actor, ID),
+            &[],
+        );
+        assert!(
+            receipts
+                .iter()
+                .all(|r| matches!(r.status, TxStatus::Success)),
+            "all six must succeed: {:?}",
+            receipts.iter().map(|r| r.status).collect::<Vec<_>>()
+        );
+
+        for (family, key, value) in &expected {
+            assert_eq!(
+                db.get(family, key).unwrap().as_deref(),
+                Some(&value[..]),
+                "{family}: the published row does not match the bytes built \
+                 independently in this test"
+            );
+        }
+        // And the family holds exactly that one row -- so a publisher that
+        // wrote the right bytes at an extra key would still be caught.
+        for family in PROPERTY_CFS {
+            assert_eq!(
+                db.prefix_iter(family, &[]).unwrap().count(),
+                1,
+                "{family} must hold exactly the one published row"
+            );
+        }
+
+        drop(executor);
+        drop(state);
+        assert_eq!(
+            std::sync::Arc::strong_count(&db),
+            1,
+            "nothing else may hold the database, or the drop below does not \
+             close it and the reopen proves nothing"
+        );
+        drop(db);
+    }
+
+    let db = Database::open_default(dir.path()).unwrap();
+    for (family, key, value) in &expected {
+        assert_eq!(
+            db.get(family, key).unwrap().as_deref(),
+            Some(&value[..]),
+            "{family}: the row changed across a close and reopen"
+        );
+    }
+}
