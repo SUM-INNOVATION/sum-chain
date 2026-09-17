@@ -9,9 +9,7 @@
 //! - SRC-866: 86X Proof Profiles
 
 use sumchain_storage::exec_view::ExecutionView;
-use std::sync::Arc;
 
-use sumchain_genesis::ChainParams;
 use sumchain_primitives::{
     property::{
         AssetAnchor, AssetStatus, ClaimStatus, CoverageStatus, Encumbrance, EncumbranceStatus,
@@ -20,7 +18,6 @@ use sumchain_primitives::{
     },
     Address, Balance, BlockHeight, Hash, Timestamp,
 };
-use sumchain_storage::{Database, PropertyStore};
 use tracing::debug;
 
 use crate::{Result, StateError, StateManager};
@@ -144,22 +141,21 @@ impl PropertyExecutionResult {
     }
 }
 
-/// Property executor for SRC-86X transactions
-pub struct PropertyExecutor {
-    db: Arc<Database>,
-    #[allow(dead_code)]
-    params: ChainParams,
-}
+/// Property executor for SRC-86X transactions.
+/// No database handle, by construction.
+///
+/// Every operation takes the block's `ExecutionView` and no `self`, so
+/// `self.db` is not something this file can name: a committed write here is a
+/// compile error rather than a review finding. The committed twins stay in
+/// `sumchain_storage::property_store` for the RPC server, admission and the
+/// operator paths.
+pub struct PropertyExecutor;
 
 impl PropertyExecutor {
-    pub fn new(db: Arc<Database>, params: ChainParams) -> Self {
-        Self { db, params }
-    }
-
     /// Execute a Property transaction
     #[allow(clippy::too_many_arguments)]
     pub fn execute(
-        &self, view: &mut ExecutionView<'_, '_>,
+        view: &mut ExecutionView<'_, '_>,
         sender: &Address,
         data: &PropertyTxData,
         proposer: &Address,
@@ -169,8 +165,6 @@ impl PropertyExecutor {
         _tx_index: u32,
         _tx_hash: Hash,
     ) -> Result<PropertyExecutionResult> {
-        let store = PropertyStore::new(&self.db);
-
         match data.operation {
             // =================================================================
             // SRC-861: Asset Anchor Operations
@@ -183,7 +177,7 @@ impl PropertyExecutor {
                     return Ok(PropertyExecutionResult::failure("Issuer must be sender"));
                 }
 
-                if store.assets().exists(&asset.asset_id)? {
+                if Self::v_asset_exists(view, &asset.asset_id)? {
                     return Ok(PropertyExecutionResult::failure("Asset already exists"));
                 }
 
@@ -191,7 +185,7 @@ impl PropertyExecutor {
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
                 let asset_id = asset.asset_id;
-                store.assets().put(&asset)?;
+                Self::v_put_asset(view, &asset)?;
                 debug!("Asset anchored: {:?}", asset_id);
                 Ok(PropertyExecutionResult::success_with_asset(asset_id))
             }
@@ -205,7 +199,7 @@ impl PropertyExecutor {
                 let update: UpdateData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let asset = match store.assets().get(&update.asset_id)? {
+                let asset = match Self::v_get_asset(view, &update.asset_id)? {
                     Some(a) => a,
                     None => return Ok(PropertyExecutionResult::failure("Asset not found")),
                 };
@@ -217,7 +211,12 @@ impl PropertyExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.assets().update_status(&update.asset_id, update.status, block_timestamp)?;
+                Self::v_update_asset_status(
+                    view,
+                    &update.asset_id,
+                    update.status,
+                    block_timestamp,
+                )?;
                 Ok(PropertyExecutionResult::success())
             }
 
@@ -229,7 +228,7 @@ impl PropertyExecutor {
                 let d: TransferData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let asset = match store.assets().get(&d.asset_id)? {
+                let asset = match Self::v_get_asset(view, &d.asset_id)? {
                     Some(a) => a,
                     None => return Ok(PropertyExecutionResult::failure("Asset not found")),
                 };
@@ -241,7 +240,12 @@ impl PropertyExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.assets().update_status(&d.asset_id, AssetStatus::PendingTransfer, block_timestamp)?;
+                Self::v_update_asset_status(
+                    view,
+                    &d.asset_id,
+                    AssetStatus::PendingTransfer,
+                    block_timestamp,
+                )?;
                 Ok(PropertyExecutionResult::success())
             }
 
@@ -254,17 +258,22 @@ impl PropertyExecutor {
                 let d: MergeData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                if store.assets().get(&d.primary_asset_id)?.is_none() {
+                if Self::v_get_asset(view, &d.primary_asset_id)?.is_none() {
                     return Ok(PropertyExecutionResult::failure("Primary asset not found"));
                 }
-                if store.assets().get(&d.secondary_asset_id)?.is_none() {
+                if Self::v_get_asset(view, &d.secondary_asset_id)?.is_none() {
                     return Ok(PropertyExecutionResult::failure("Secondary asset not found"));
                 }
 
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.assets().update_status(&d.secondary_asset_id, AssetStatus::Merged, block_timestamp)?;
+                Self::v_update_asset_status(
+                    view,
+                    &d.secondary_asset_id,
+                    AssetStatus::Merged,
+                    block_timestamp,
+                )?;
                 Ok(PropertyExecutionResult::success())
             }
 
@@ -276,7 +285,7 @@ impl PropertyExecutor {
                 let d: SubdivideData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let asset = match store.assets().get(&d.asset_id)? {
+                let asset = match Self::v_get_asset(view, &d.asset_id)? {
                     Some(a) => a,
                     None => return Ok(PropertyExecutionResult::failure("Asset not found")),
                 };
@@ -288,7 +297,12 @@ impl PropertyExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.assets().update_status(&d.asset_id, AssetStatus::Subdivided, block_timestamp)?;
+                Self::v_update_asset_status(
+                    view,
+                    &d.asset_id,
+                    AssetStatus::Subdivided,
+                    block_timestamp,
+                )?;
                 Ok(PropertyExecutionResult::success())
             }
 
@@ -300,7 +314,7 @@ impl PropertyExecutor {
                 let d: DeregisterData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let asset = match store.assets().get(&d.asset_id)? {
+                let asset = match Self::v_get_asset(view, &d.asset_id)? {
                     Some(a) => a,
                     None => return Ok(PropertyExecutionResult::failure("Asset not found")),
                 };
@@ -312,7 +326,12 @@ impl PropertyExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.assets().update_status(&d.asset_id, AssetStatus::Deregistered, block_timestamp)?;
+                Self::v_update_asset_status(
+                    view,
+                    &d.asset_id,
+                    AssetStatus::Deregistered,
+                    block_timestamp,
+                )?;
                 debug!("Asset deregistered: {:?}", d.asset_id);
                 Ok(PropertyExecutionResult::success())
             }
@@ -329,11 +348,11 @@ impl PropertyExecutor {
                 }
 
                 // Verify asset exists
-                if store.assets().get(&event.asset_id)?.is_none() {
+                if Self::v_get_asset(view, &event.asset_id)?.is_none() {
                     return Ok(PropertyExecutionResult::failure("Asset not found"));
                 }
 
-                if store.title_events().exists(&event.event_id)? {
+                if Self::v_title_event_exists(view, &event.event_id)? {
                     return Ok(PropertyExecutionResult::failure("Title event already exists"));
                 }
 
@@ -341,7 +360,7 @@ impl PropertyExecutor {
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
                 let event_id = event.event_id;
-                store.title_events().put(&event)?;
+                Self::v_put_title_event(view, &event)?;
                 debug!("Title event recorded: {:?}", event_id);
                 Ok(PropertyExecutionResult::success_with_title_event(event_id))
             }
@@ -355,7 +374,7 @@ impl PropertyExecutor {
                 let d: UpdateData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let event = match store.title_events().get(&d.event_id)? {
+                let event = match Self::v_get_title_event(view, &d.event_id)? {
                     Some(e) => e,
                     None => return Ok(PropertyExecutionResult::failure("Title event not found")),
                 };
@@ -367,7 +386,7 @@ impl PropertyExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.title_events().update_status(&d.event_id, d.status, block_timestamp)?;
+                Self::v_update_title_event_status(view, &d.event_id, d.status, block_timestamp)?;
                 Ok(PropertyExecutionResult::success())
             }
 
@@ -380,7 +399,7 @@ impl PropertyExecutor {
                 let d: SupersedeData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                if store.title_events().get(&d.old_event_id)?.is_none() {
+                if Self::v_get_title_event(view, &d.old_event_id)?.is_none() {
                     return Ok(PropertyExecutionResult::failure("Old event not found"));
                 }
 
@@ -389,11 +408,16 @@ impl PropertyExecutor {
                 StateManager::v_increment_nonce(view, sender)?;
 
                 // Mark old as superseded
-                store.title_events().update_status(&d.old_event_id, TitleEventStatus::Superseded, block_timestamp)?;
+                Self::v_update_title_event_status(
+                    view,
+                    &d.old_event_id,
+                    TitleEventStatus::Superseded,
+                    block_timestamp,
+                )?;
 
                 // Store new event
                 let new_id = d.new_event.event_id;
-                store.title_events().put(&d.new_event)?;
+                Self::v_put_title_event(view, &d.new_event)?;
                 debug!("Title event superseded: {:?} -> {:?}", d.old_event_id, new_id);
                 Ok(PropertyExecutionResult::success_with_title_event(new_id))
             }
@@ -406,7 +430,7 @@ impl PropertyExecutor {
                 let d: VoidData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let event = match store.title_events().get(&d.event_id)? {
+                let event = match Self::v_get_title_event(view, &d.event_id)? {
                     Some(e) => e,
                     None => return Ok(PropertyExecutionResult::failure("Title event not found")),
                 };
@@ -418,7 +442,12 @@ impl PropertyExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.title_events().update_status(&d.event_id, TitleEventStatus::Voided, block_timestamp)?;
+                Self::v_update_title_event_status(
+                    view,
+                    &d.event_id,
+                    TitleEventStatus::Voided,
+                    block_timestamp,
+                )?;
                 debug!("Title event voided: {:?}", d.event_id);
                 Ok(PropertyExecutionResult::success())
             }
@@ -435,11 +464,11 @@ impl PropertyExecutor {
                 }
 
                 // Verify asset exists
-                if store.assets().get(&encumbrance.asset_id)?.is_none() {
+                if Self::v_get_asset(view, &encumbrance.asset_id)?.is_none() {
                     return Ok(PropertyExecutionResult::failure("Asset not found"));
                 }
 
-                if store.encumbrances().exists(&encumbrance.encumbrance_id)? {
+                if Self::v_encumbrance_exists(view, &encumbrance.encumbrance_id)? {
                     return Ok(PropertyExecutionResult::failure("Encumbrance already exists"));
                 }
 
@@ -447,7 +476,7 @@ impl PropertyExecutor {
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
                 let encumbrance_id = encumbrance.encumbrance_id;
-                store.encumbrances().put(&encumbrance)?;
+                Self::v_put_encumbrance(view, &encumbrance)?;
                 debug!("Encumbrance recorded: {:?}", encumbrance_id);
                 Ok(PropertyExecutionResult::success_with_encumbrance(encumbrance_id))
             }
@@ -461,7 +490,7 @@ impl PropertyExecutor {
                 let d: UpdateData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let encumbrance = match store.encumbrances().get(&d.encumbrance_id)? {
+                let encumbrance = match Self::v_get_encumbrance(view, &d.encumbrance_id)? {
                     Some(e) => e,
                     None => return Ok(PropertyExecutionResult::failure("Encumbrance not found")),
                 };
@@ -473,7 +502,12 @@ impl PropertyExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.encumbrances().update_status(&d.encumbrance_id, d.status, block_timestamp)?;
+                Self::v_update_encumbrance_status(
+                    view,
+                    &d.encumbrance_id,
+                    d.status,
+                    block_timestamp,
+                )?;
                 Ok(PropertyExecutionResult::success())
             }
 
@@ -485,7 +519,7 @@ impl PropertyExecutor {
                 let d: SubordinateData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let encumbrance = match store.encumbrances().get(&d.encumbrance_id)? {
+                let encumbrance = match Self::v_get_encumbrance(view, &d.encumbrance_id)? {
                     Some(e) => e,
                     None => return Ok(PropertyExecutionResult::failure("Encumbrance not found")),
                 };
@@ -497,7 +531,12 @@ impl PropertyExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.encumbrances().update_status(&d.encumbrance_id, EncumbranceStatus::Subordinated, block_timestamp)?;
+                Self::v_update_encumbrance_status(
+                    view,
+                    &d.encumbrance_id,
+                    EncumbranceStatus::Subordinated,
+                    block_timestamp,
+                )?;
                 debug!("Encumbrance subordinated: {:?}", d.encumbrance_id);
                 Ok(PropertyExecutionResult::success())
             }
@@ -510,7 +549,7 @@ impl PropertyExecutor {
                 let d: ReleaseData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let encumbrance = match store.encumbrances().get(&d.encumbrance_id)? {
+                let encumbrance = match Self::v_get_encumbrance(view, &d.encumbrance_id)? {
                     Some(e) => e,
                     None => return Ok(PropertyExecutionResult::failure("Encumbrance not found")),
                 };
@@ -522,7 +561,12 @@ impl PropertyExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.encumbrances().update_status(&d.encumbrance_id, EncumbranceStatus::Released, block_timestamp)?;
+                Self::v_update_encumbrance_status(
+                    view,
+                    &d.encumbrance_id,
+                    EncumbranceStatus::Released,
+                    block_timestamp,
+                )?;
                 debug!("Encumbrance released: {:?}", d.encumbrance_id);
                 Ok(PropertyExecutionResult::success())
             }
@@ -535,7 +579,7 @@ impl PropertyExecutor {
                 let d: ForecloseData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let encumbrance = match store.encumbrances().get(&d.encumbrance_id)? {
+                let encumbrance = match Self::v_get_encumbrance(view, &d.encumbrance_id)? {
                     Some(e) => e,
                     None => return Ok(PropertyExecutionResult::failure("Encumbrance not found")),
                 };
@@ -547,7 +591,12 @@ impl PropertyExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.encumbrances().update_status(&d.encumbrance_id, EncumbranceStatus::Foreclosed, block_timestamp)?;
+                Self::v_update_encumbrance_status(
+                    view,
+                    &d.encumbrance_id,
+                    EncumbranceStatus::Foreclosed,
+                    block_timestamp,
+                )?;
                 debug!("Encumbrance foreclosed: {:?}", d.encumbrance_id);
                 Ok(PropertyExecutionResult::success())
             }
@@ -564,11 +613,11 @@ impl PropertyExecutor {
                 }
 
                 // Verify asset exists
-                if store.assets().get(&coverage.asset_id)?.is_none() {
+                if Self::v_get_asset(view, &coverage.asset_id)?.is_none() {
                     return Ok(PropertyExecutionResult::failure("Asset not found"));
                 }
 
-                if store.coverage().exists(&coverage.coverage_id)? {
+                if Self::v_coverage_exists(view, &coverage.coverage_id)? {
                     return Ok(PropertyExecutionResult::failure("Coverage already exists"));
                 }
 
@@ -576,7 +625,7 @@ impl PropertyExecutor {
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
                 let coverage_id = coverage.coverage_id;
-                store.coverage().put(&coverage)?;
+                Self::v_put_coverage(view, &coverage)?;
                 debug!("Coverage issued: {:?}", coverage_id);
                 Ok(PropertyExecutionResult::success_with_coverage(coverage_id))
             }
@@ -590,7 +639,7 @@ impl PropertyExecutor {
                 let d: UpdateData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let coverage = match store.coverage().get(&d.coverage_id)? {
+                let coverage = match Self::v_get_coverage(view, &d.coverage_id)? {
                     Some(c) => c,
                     None => return Ok(PropertyExecutionResult::failure("Coverage not found")),
                 };
@@ -602,7 +651,7 @@ impl PropertyExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.coverage().update_status(&d.coverage_id, d.status, block_timestamp)?;
+                Self::v_update_coverage_status(view, &d.coverage_id, d.status, block_timestamp)?;
                 Ok(PropertyExecutionResult::success())
             }
 
@@ -615,7 +664,7 @@ impl PropertyExecutor {
                 let d: RenewData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let coverage = match store.coverage().get(&d.coverage_id)? {
+                let coverage = match Self::v_get_coverage(view, &d.coverage_id)? {
                     Some(c) => c,
                     None => return Ok(PropertyExecutionResult::failure("Coverage not found")),
                 };
@@ -627,7 +676,7 @@ impl PropertyExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.coverage().renew(&d.coverage_id, d.new_expiry, block_timestamp)?;
+                Self::v_renew_coverage(view, &d.coverage_id, d.new_expiry, block_timestamp)?;
                 debug!("Coverage renewed: {:?}", d.coverage_id);
                 Ok(PropertyExecutionResult::success())
             }
@@ -640,7 +689,7 @@ impl PropertyExecutor {
                 let d: CancelData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let coverage = match store.coverage().get(&d.coverage_id)? {
+                let coverage = match Self::v_get_coverage(view, &d.coverage_id)? {
                     Some(c) => c,
                     None => return Ok(PropertyExecutionResult::failure("Coverage not found")),
                 };
@@ -652,7 +701,12 @@ impl PropertyExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.coverage().update_status(&d.coverage_id, CoverageStatus::Cancelled, block_timestamp)?;
+                Self::v_update_coverage_status(
+                    view,
+                    &d.coverage_id,
+                    CoverageStatus::Cancelled,
+                    block_timestamp,
+                )?;
                 debug!("Coverage cancelled: {:?}", d.coverage_id);
                 Ok(PropertyExecutionResult::success())
             }
@@ -665,7 +719,7 @@ impl PropertyExecutor {
                 let d: SuspendData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let coverage = match store.coverage().get(&d.coverage_id)? {
+                let coverage = match Self::v_get_coverage(view, &d.coverage_id)? {
                     Some(c) => c,
                     None => return Ok(PropertyExecutionResult::failure("Coverage not found")),
                 };
@@ -677,7 +731,12 @@ impl PropertyExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.coverage().update_status(&d.coverage_id, CoverageStatus::Suspended, block_timestamp)?;
+                Self::v_update_coverage_status(
+                    view,
+                    &d.coverage_id,
+                    CoverageStatus::Suspended,
+                    block_timestamp,
+                )?;
                 Ok(PropertyExecutionResult::success())
             }
 
@@ -689,7 +748,7 @@ impl PropertyExecutor {
                 let d: ReinstateData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let coverage = match store.coverage().get(&d.coverage_id)? {
+                let coverage = match Self::v_get_coverage(view, &d.coverage_id)? {
                     Some(c) => c,
                     None => return Ok(PropertyExecutionResult::failure("Coverage not found")),
                 };
@@ -705,7 +764,12 @@ impl PropertyExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.coverage().update_status(&d.coverage_id, CoverageStatus::Active, block_timestamp)?;
+                Self::v_update_coverage_status(
+                    view,
+                    &d.coverage_id,
+                    CoverageStatus::Active,
+                    block_timestamp,
+                )?;
                 Ok(PropertyExecutionResult::success())
             }
 
@@ -721,11 +785,11 @@ impl PropertyExecutor {
                 }
 
                 // Verify coverage exists
-                if store.coverage().get(&claim.coverage_id)?.is_none() {
+                if Self::v_get_coverage(view, &claim.coverage_id)?.is_none() {
                     return Ok(PropertyExecutionResult::failure("Coverage not found"));
                 }
 
-                if store.claims().exists(&claim.claim_id)? {
+                if Self::v_claim_exists(view, &claim.claim_id)? {
                     return Ok(PropertyExecutionResult::failure("Claim already exists"));
                 }
 
@@ -733,7 +797,7 @@ impl PropertyExecutor {
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
                 let claim_id = claim.claim_id;
-                store.claims().put(&claim)?;
+                Self::v_put_claim(view, &claim)?;
                 debug!("Claim filed: {:?}", claim_id);
                 Ok(PropertyExecutionResult::success_with_claim(claim_id))
             }
@@ -747,7 +811,7 @@ impl PropertyExecutor {
                 let d: UpdateData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let claim = match store.claims().get(&d.claim_id)? {
+                let claim = match Self::v_get_claim(view, &d.claim_id)? {
                     Some(c) => c,
                     None => return Ok(PropertyExecutionResult::failure("Claim not found")),
                 };
@@ -759,7 +823,7 @@ impl PropertyExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.claims().update_status(&d.claim_id, d.status, block_timestamp)?;
+                Self::v_update_claim_status(view, &d.claim_id, d.status, block_timestamp)?;
                 debug!("Claim status updated: {:?} -> {:?}", d.claim_id, d.status);
                 Ok(PropertyExecutionResult::success())
             }
@@ -773,7 +837,7 @@ impl PropertyExecutor {
                 let d: ApproveData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let claim = match store.claims().get(&d.claim_id)? {
+                let claim = match Self::v_get_claim(view, &d.claim_id)? {
                     Some(c) => c,
                     None => return Ok(PropertyExecutionResult::failure("Claim not found")),
                 };
@@ -785,7 +849,12 @@ impl PropertyExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.claims().approve(&d.claim_id, d.approved_amount_commitment, block_timestamp)?;
+                Self::v_approve_claim(
+                    view,
+                    &d.claim_id,
+                    d.approved_amount_commitment,
+                    block_timestamp,
+                )?;
                 debug!("Claim approved: {:?}", d.claim_id);
                 Ok(PropertyExecutionResult::success())
             }
@@ -798,7 +867,7 @@ impl PropertyExecutor {
                 let d: DenyData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let claim = match store.claims().get(&d.claim_id)? {
+                let claim = match Self::v_get_claim(view, &d.claim_id)? {
                     Some(c) => c,
                     None => return Ok(PropertyExecutionResult::failure("Claim not found")),
                 };
@@ -810,7 +879,12 @@ impl PropertyExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.claims().update_status(&d.claim_id, ClaimStatus::Denied, block_timestamp)?;
+                Self::v_update_claim_status(
+                    view,
+                    &d.claim_id,
+                    ClaimStatus::Denied,
+                    block_timestamp,
+                )?;
                 debug!("Claim denied: {:?}", d.claim_id);
                 Ok(PropertyExecutionResult::success())
             }
@@ -824,7 +898,7 @@ impl PropertyExecutor {
                 let d: PayData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let claim = match store.claims().get(&d.claim_id)? {
+                let claim = match Self::v_get_claim(view, &d.claim_id)? {
                     Some(c) => c,
                     None => return Ok(PropertyExecutionResult::failure("Claim not found")),
                 };
@@ -840,7 +914,7 @@ impl PropertyExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.claims().pay(&d.claim_id, d.paid_amount_commitment, block_timestamp)?;
+                Self::v_pay_claim(view, &d.claim_id, d.paid_amount_commitment, block_timestamp)?;
                 debug!("Claim paid: {:?}", d.claim_id);
                 Ok(PropertyExecutionResult::success())
             }
@@ -853,7 +927,7 @@ impl PropertyExecutor {
                 let d: CloseData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let claim = match store.claims().get(&d.claim_id)? {
+                let claim = match Self::v_get_claim(view, &d.claim_id)? {
                     Some(c) => c,
                     None => return Ok(PropertyExecutionResult::failure("Claim not found")),
                 };
@@ -865,7 +939,12 @@ impl PropertyExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.claims().update_status(&d.claim_id, ClaimStatus::Closed, block_timestamp)?;
+                Self::v_update_claim_status(
+                    view,
+                    &d.claim_id,
+                    ClaimStatus::Closed,
+                    block_timestamp,
+                )?;
                 debug!("Claim closed: {:?}", d.claim_id);
                 Ok(PropertyExecutionResult::success())
             }
@@ -878,7 +957,7 @@ impl PropertyExecutor {
                 let d: ReopenData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let claim = match store.claims().get(&d.claim_id)? {
+                let claim = match Self::v_get_claim(view, &d.claim_id)? {
                     Some(c) => c,
                     None => return Ok(PropertyExecutionResult::failure("Claim not found")),
                 };
@@ -894,7 +973,12 @@ impl PropertyExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.claims().update_status(&d.claim_id, ClaimStatus::Reopened, block_timestamp)?;
+                Self::v_update_claim_status(
+                    view,
+                    &d.claim_id,
+                    ClaimStatus::Reopened,
+                    block_timestamp,
+                )?;
                 debug!("Claim reopened: {:?}", d.claim_id);
                 Ok(PropertyExecutionResult::success())
             }
@@ -907,7 +991,7 @@ impl PropertyExecutor {
                 let d: WithdrawData = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                let claim = match store.claims().get(&d.claim_id)? {
+                let claim = match Self::v_get_claim(view, &d.claim_id)? {
                     Some(c) => c,
                     None => return Ok(PropertyExecutionResult::failure("Claim not found")),
                 };
@@ -919,7 +1003,12 @@ impl PropertyExecutor {
                 StateManager::v_deduct(view, sender, fee)?;
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
-                store.claims().update_status(&d.claim_id, ClaimStatus::Withdrawn, block_timestamp)?;
+                Self::v_update_claim_status(
+                    view,
+                    &d.claim_id,
+                    ClaimStatus::Withdrawn,
+                    block_timestamp,
+                )?;
                 debug!("Claim withdrawn: {:?}", d.claim_id);
                 Ok(PropertyExecutionResult::success())
             }
@@ -931,7 +1020,7 @@ impl PropertyExecutor {
                 let proof: PropertyProofEnvelope = bincode::deserialize(&data.data)
                     .map_err(|e| StateError::NftError(format!("Invalid data: {}", e)))?;
 
-                if store.proofs().exists(&proof.proof_id)? {
+                if Self::v_property_proof_exists(view, &proof.proof_id)? {
                     return Ok(PropertyExecutionResult::failure("Proof already exists"));
                 }
 
@@ -939,7 +1028,7 @@ impl PropertyExecutor {
                 StateManager::v_credit(view, proposer, fee)?;
                 StateManager::v_increment_nonce(view, sender)?;
                 let proof_id = proof.proof_id;
-                store.proofs().put(&proof)?;
+                Self::v_put_property_proof(view, &proof)?;
                 debug!("Property proof submitted: {:?}", proof_id);
                 Ok(PropertyExecutionResult::success_with_proof(proof_id))
             }
@@ -960,6 +1049,10 @@ impl PropertyExecutor {
 #[cfg(all(test, feature = "legacy_tests"))]
 mod tests {
     use super::*;
+    // `Arc` is dead in the normal build now that the executor holds no
+    // database handle, and alive here: these fixtures still open one. Imported
+    // inside the gated module so neither build loses.
+    use std::sync::Arc;
     use sumchain_primitives::property::{AssetType, PropertyIssuerClass};
     use sumchain_storage::Database;
     use tempfile::TempDir;
@@ -973,13 +1066,14 @@ mod tests {
 
     #[test]
     fn test_property_executor_creation() {
-        let (db, _dir, _state) = setup();
-        let _executor = PropertyExecutor::new(db, ChainParams::default());
+        let (_db, _dir, _state) = setup();
+        // A unit struct: there is no `new`, and no database to hand it.
+        let _executor = PropertyExecutor;
     }
 
     #[test]
     fn test_anchor_asset() {
-        let (db, _dir, state) = setup();
+        let (db, _dir, _state) = setup();
         // A block's candidate, opened here because a `#[test]` function
         // cannot take one as a parameter. An earlier scripted signature
         // rewrite added `view` to the parameter list of every test in this
@@ -987,7 +1081,6 @@ mod tests {
         // out of sight.
         let mut overlay = sumchain_storage::overlay::ApplicationOverlay::new(&db, 1 << 20);
         let view = &mut sumchain_storage::exec_view::ExecutionView::new(&mut overlay);
-        let executor = PropertyExecutor::new(db.clone(), ChainParams::default());
 
         let sender = Address::new([1u8; 20]);
         let proposer = Address::new([99u8; 20]);
@@ -1015,16 +1108,26 @@ mod tests {
             data: bincode::serialize(&asset).unwrap(),
         };
 
-        let result = executor.execute(
-            &sender, &tx_data, &state, &proposer, 1000, 100, 1000000, 0, Hash::default(),
-        ).unwrap();
+        let result = PropertyExecutor::execute(
+            view,
+            &sender,
+            &tx_data,
+            &proposer,
+            1000,
+            100,
+            1000000,
+            0,
+            Hash::default(),
+        )
+        .unwrap();
 
         assert!(result.success, "Anchor asset failed: {:?}", result.error);
         assert_eq!(result.asset_id, Some([10u8; 32]));
 
-        // Verify storage
-        let store = PropertyStore::new(&db);
-        let retrieved = store.assets().get(&[10u8; 32]).unwrap().unwrap();
+        // Verify the candidate, which is where this now writes.
+        let retrieved = PropertyExecutor::v_get_asset(view, &[10u8; 32])
+            .unwrap()
+            .unwrap();
         assert_eq!(retrieved.jurisdiction_code, "US-CA-LA");
     }
 }

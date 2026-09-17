@@ -239,7 +239,6 @@ pub struct BlockExecutor {
     contract_executor: ContractExecutorState,
     docclass_executor: DocClassExecutor,
     legal_executor: LegalExecutor,
-    property_executor: PropertyExecutor,
     healthcare_executor: HealthcareExecutor,
     employment_executor: EmploymentExecutor,
     finance_executor: FinanceExecutor,
@@ -336,7 +335,6 @@ impl BlockExecutor {
         let contract_executor = ContractExecutorState::new(db.clone(), params.clone());
         let docclass_executor = DocClassExecutor::new(db.clone(), params.clone());
         let legal_executor = LegalExecutor::new(db.clone(), params.clone());
-        let property_executor = PropertyExecutor::new(db.clone(), params.clone());
         let healthcare_executor = HealthcareExecutor::new(db.clone(), params.clone());
         let employment_executor = EmploymentExecutor::new(db.clone(), params.clone());
         let finance_executor = FinanceExecutor::new(db.clone(), params.clone());
@@ -350,7 +348,6 @@ impl BlockExecutor {
             contract_executor,
             docclass_executor,
             legal_executor,
-            property_executor,
             healthcare_executor,
             employment_executor,
             finance_executor,
@@ -950,7 +947,8 @@ impl BlockExecutor {
                     }
                     TxPayload::Property(property_data) => {
                         // Execute Property operation (SRC-86X)
-                        let result = self.property_executor.execute(view,
+                        let result = PropertyExecutor::execute(
+                            view,
                             &v2_tx.from,
                             &property_data,
                             proposer,
@@ -2728,7 +2726,8 @@ impl BlockExecutor {
                 }
 
                 // Execute Property operation (SRC-86X)
-                let result = self.property_executor.execute(view,
+                let result = PropertyExecutor::execute(
+                    view,
                     &tx.from,
                     property_data,
                     proposer,

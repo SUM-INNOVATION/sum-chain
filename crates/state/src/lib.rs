@@ -35,6 +35,7 @@ pub mod node_registry;
 pub mod policy_account_executor;
 pub mod policy_account_view;
 pub mod property_executor;
+pub mod property_view;
 pub mod schema_validator;
 pub mod snapshot;
 pub mod staking_executor;

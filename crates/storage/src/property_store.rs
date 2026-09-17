@@ -29,6 +29,179 @@ pub type ClaimId = [u8; 32];
 pub type ProofId = [u8; 32];
 
 // =============================================================================
+// Shared key layout and codec
+// =============================================================================
+//
+// One builder per row and one codec per value, called by the committed stores
+// below and by the candidate surface in `sumchain_state::property_view`.
+//
+// These are extracted rather than restated on each side because three things
+// here are easy to get subtly wrong:
+//
+//   * Ten of the eleven families are keyed by a bare 32-byte id. The eleventh,
+//     the jurisdiction index, is keyed by the UTF-8 bytes of a free-form
+//     jurisdiction string -- variable width, and not an id at all.
+//   * All five INDEX values are accumulating `Vec<[u8; 32]>` lists, not
+//     presence markers, so an append is a read-modify-write. On the candidate
+//     side it has to read the candidate, or a second entry in one block
+//     overwrites the first one's list with a single-element one.
+//   * The five id-list codecs encode the same Rust type. They are still one
+//     function per family rather than one generic helper: a generic
+//     `encode<T: Serialize>` cannot pin any individual row's byte layout, and a
+//     codec test written against it can only restate what serde does. Named
+//     per family, each one is a thing a test can fix bytes for and a mutation
+//     can break on its own.
+
+/// Asset anchors are keyed by asset id.
+pub fn asset_key(asset_id: &AssetId) -> &[u8] {
+    asset_id
+}
+
+/// The jurisdiction index is keyed by the UTF-8 bytes of the jurisdiction code
+/// -- a variable-width key, not a 32-byte id -- and its value is a bincode
+/// `Vec<AssetId>`.
+pub fn jurisdiction_index_key(jurisdiction: &str) -> &[u8] {
+    jurisdiction.as_bytes()
+}
+
+/// Title events are keyed by event id.
+pub fn title_event_key(event_id: &TitleEventId) -> &[u8] {
+    event_id
+}
+
+/// The asset -> title-event index is keyed by ASSET id, and its value is a
+/// bincode `Vec<TitleEventId>`.
+pub fn asset_title_index_key(asset_id: &AssetId) -> &[u8] {
+    asset_id
+}
+
+/// Encumbrances are keyed by encumbrance id.
+pub fn encumbrance_key(encumbrance_id: &EncumbranceId) -> &[u8] {
+    encumbrance_id
+}
+
+/// The asset -> encumbrance index is keyed by ASSET id, and its value is a
+/// bincode `Vec<EncumbranceId>`.
+pub fn asset_encumbrance_index_key(asset_id: &AssetId) -> &[u8] {
+    asset_id
+}
+
+/// Coverage is keyed by coverage id.
+pub fn coverage_key(coverage_id: &CoverageId) -> &[u8] {
+    coverage_id
+}
+
+/// The asset -> coverage index is keyed by ASSET id, and its value is a bincode
+/// `Vec<CoverageId>`.
+pub fn asset_coverage_index_key(asset_id: &AssetId) -> &[u8] {
+    asset_id
+}
+
+/// Claims are keyed by claim id.
+pub fn claim_key(claim_id: &ClaimId) -> &[u8] {
+    claim_id
+}
+
+/// The coverage -> claim index is keyed by COVERAGE id, and its value is a
+/// bincode `Vec<ClaimId>`.
+pub fn coverage_claim_index_key(coverage_id: &CoverageId) -> &[u8] {
+    coverage_id
+}
+
+/// Property proofs are keyed by proof id.
+pub fn property_proof_key(proof_id: &ProofId) -> &[u8] {
+    proof_id
+}
+
+pub fn encode_asset(a: &AssetAnchor) -> Result<Vec<u8>> {
+    bincode::serialize(a).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_asset(bytes: &[u8]) -> Result<AssetAnchor> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_jurisdiction_asset_ids(ids: &[AssetId]) -> Result<Vec<u8>> {
+    bincode::serialize(ids).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_jurisdiction_asset_ids(bytes: &[u8]) -> Result<Vec<AssetId>> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_title_event(e: &TitleEvent) -> Result<Vec<u8>> {
+    bincode::serialize(e).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_title_event(bytes: &[u8]) -> Result<TitleEvent> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_asset_title_event_ids(ids: &[TitleEventId]) -> Result<Vec<u8>> {
+    bincode::serialize(ids).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_asset_title_event_ids(bytes: &[u8]) -> Result<Vec<TitleEventId>> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_encumbrance(e: &Encumbrance) -> Result<Vec<u8>> {
+    bincode::serialize(e).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_encumbrance(bytes: &[u8]) -> Result<Encumbrance> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_asset_encumbrance_ids(ids: &[EncumbranceId]) -> Result<Vec<u8>> {
+    bincode::serialize(ids).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_asset_encumbrance_ids(bytes: &[u8]) -> Result<Vec<EncumbranceId>> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_coverage(c: &InsuranceCoverage) -> Result<Vec<u8>> {
+    bincode::serialize(c).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_coverage(bytes: &[u8]) -> Result<InsuranceCoverage> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_asset_coverage_ids(ids: &[CoverageId]) -> Result<Vec<u8>> {
+    bincode::serialize(ids).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_asset_coverage_ids(bytes: &[u8]) -> Result<Vec<CoverageId>> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_claim(c: &InsuranceClaim) -> Result<Vec<u8>> {
+    bincode::serialize(c).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_claim(bytes: &[u8]) -> Result<InsuranceClaim> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_coverage_claim_ids(ids: &[ClaimId]) -> Result<Vec<u8>> {
+    bincode::serialize(ids).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_coverage_claim_ids(bytes: &[u8]) -> Result<Vec<ClaimId>> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn encode_property_proof(p: &PropertyProofEnvelope) -> Result<Vec<u8>> {
+    bincode::serialize(p).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+pub fn decode_property_proof(bytes: &[u8]) -> Result<PropertyProofEnvelope> {
+    bincode::deserialize(bytes).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+// =============================================================================
 // Asset Anchor Storage (SRC-861)
 // =============================================================================
 
@@ -44,9 +217,9 @@ impl<'a> AssetStore<'a> {
 
     /// Store an asset anchor
     pub fn put(&self, asset: &AssetAnchor) -> Result<()> {
-        let bytes = bincode::serialize(asset)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::PROPERTY_ASSETS, &asset.asset_id, &bytes)?;
+        let bytes = encode_asset(asset)?;
+        self.db
+            .put(cf::PROPERTY_ASSETS, asset_key(&asset.asset_id), &bytes)?;
 
         // Update jurisdiction index
         self.add_to_jurisdiction_index(&asset.jurisdiction_code, &asset.asset_id)?;
@@ -56,10 +229,9 @@ impl<'a> AssetStore<'a> {
 
     /// Get an asset by ID
     pub fn get(&self, asset_id: &AssetId) -> Result<Option<AssetAnchor>> {
-        match self.db.get(cf::PROPERTY_ASSETS, asset_id)? {
+        match self.db.get(cf::PROPERTY_ASSETS, asset_key(asset_id))? {
             Some(bytes) => {
-                let asset: AssetAnchor = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let asset = decode_asset(&bytes)?;
                 Ok(Some(asset))
             }
             None => Ok(None),
@@ -68,7 +240,7 @@ impl<'a> AssetStore<'a> {
 
     /// Check if asset exists
     pub fn exists(&self, asset_id: &AssetId) -> Result<bool> {
-        self.db.contains(cf::PROPERTY_ASSETS, asset_id)
+        self.db.contains(cf::PROPERTY_ASSETS, asset_key(asset_id))
     }
 
     /// Update asset status
@@ -82,9 +254,9 @@ impl<'a> AssetStore<'a> {
             Some(mut asset) => {
                 asset.status = status;
                 asset.updated_at = timestamp;
-                let bytes = bincode::serialize(&asset)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                self.db.put(cf::PROPERTY_ASSETS, asset_id, &bytes)
+                let bytes = encode_asset(&asset)?;
+                self.db
+                    .put(cf::PROPERTY_ASSETS, asset_key(asset_id), &bytes)
             }
             None => Err(StorageError::NotFound(format!(
                 "Asset not found: {:?}",
@@ -109,8 +281,7 @@ impl<'a> AssetStore<'a> {
     pub fn list_active(&self) -> Result<Vec<AssetAnchor>> {
         let mut assets = Vec::new();
         for (_, value) in self.db.iter(cf::PROPERTY_ASSETS)? {
-            let asset: AssetAnchor = bincode::deserialize(&value)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let asset = decode_asset(&value)?;
             if asset.status == AssetStatus::Active {
                 assets.push(asset);
             }
@@ -130,9 +301,9 @@ impl<'a> AssetStore<'a> {
                 if !asset.related_assets.contains(related_asset_id) {
                     asset.related_assets.push(*related_asset_id);
                     asset.updated_at = timestamp;
-                    let bytes = bincode::serialize(&asset)
-                        .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                    self.db.put(cf::PROPERTY_ASSETS, asset_id, &bytes)?;
+                    let bytes = encode_asset(&asset)?;
+                    self.db
+                        .put(cf::PROPERTY_ASSETS, asset_key(asset_id), &bytes)?;
                 }
                 Ok(())
             }
@@ -148,18 +319,23 @@ impl<'a> AssetStore<'a> {
         let mut ids = self.get_jurisdiction_asset_ids(jurisdiction)?;
         if !ids.contains(id) {
             ids.push(*id);
-            let bytes = bincode::serialize(&ids)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
-            self.db.put(cf::PROPERTY_JURISDICTION_INDEX, jurisdiction.as_bytes(), &bytes)?;
+            let bytes = encode_jurisdiction_asset_ids(&ids)?;
+            self.db.put(
+                cf::PROPERTY_JURISDICTION_INDEX,
+                jurisdiction_index_key(jurisdiction),
+                &bytes,
+            )?;
         }
         Ok(())
     }
 
     fn get_jurisdiction_asset_ids(&self, jurisdiction: &str) -> Result<Vec<AssetId>> {
-        match self.db.get(cf::PROPERTY_JURISDICTION_INDEX, jurisdiction.as_bytes())? {
+        match self.db.get(
+            cf::PROPERTY_JURISDICTION_INDEX,
+            jurisdiction_index_key(jurisdiction),
+        )? {
             Some(bytes) => {
-                let ids: Vec<AssetId> = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let ids = decode_jurisdiction_asset_ids(&bytes)?;
                 Ok(ids)
             }
             None => Ok(Vec::new()),
@@ -183,9 +359,12 @@ impl<'a> TitleEventStore<'a> {
 
     /// Store a title event
     pub fn put(&self, event: &TitleEvent) -> Result<()> {
-        let bytes = bincode::serialize(event)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::PROPERTY_TITLE_EVENTS, &event.event_id, &bytes)?;
+        let bytes = encode_title_event(event)?;
+        self.db.put(
+            cf::PROPERTY_TITLE_EVENTS,
+            title_event_key(&event.event_id),
+            &bytes,
+        )?;
 
         // Update asset title index
         self.add_to_asset_index(&event.asset_id, &event.event_id)?;
@@ -195,10 +374,12 @@ impl<'a> TitleEventStore<'a> {
 
     /// Get a title event by ID
     pub fn get(&self, event_id: &TitleEventId) -> Result<Option<TitleEvent>> {
-        match self.db.get(cf::PROPERTY_TITLE_EVENTS, event_id)? {
+        match self
+            .db
+            .get(cf::PROPERTY_TITLE_EVENTS, title_event_key(event_id))?
+        {
             Some(bytes) => {
-                let event: TitleEvent = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let event = decode_title_event(&bytes)?;
                 Ok(Some(event))
             }
             None => Ok(None),
@@ -207,7 +388,8 @@ impl<'a> TitleEventStore<'a> {
 
     /// Check if title event exists
     pub fn exists(&self, event_id: &TitleEventId) -> Result<bool> {
-        self.db.contains(cf::PROPERTY_TITLE_EVENTS, event_id)
+        self.db
+            .contains(cf::PROPERTY_TITLE_EVENTS, title_event_key(event_id))
     }
 
     /// Update title event status
@@ -221,9 +403,9 @@ impl<'a> TitleEventStore<'a> {
             Some(mut event) => {
                 event.status = status;
                 event.created_at = timestamp; // Note: This is recording the status change
-                let bytes = bincode::serialize(&event)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                self.db.put(cf::PROPERTY_TITLE_EVENTS, event_id, &bytes)
+                let bytes = encode_title_event(&event)?;
+                self.db
+                    .put(cf::PROPERTY_TITLE_EVENTS, title_event_key(event_id), &bytes)
             }
             None => Err(StorageError::NotFound(format!(
                 "Title event not found: {:?}",
@@ -249,18 +431,23 @@ impl<'a> TitleEventStore<'a> {
         let mut ids = self.get_asset_event_ids(asset_id)?;
         if !ids.contains(event_id) {
             ids.push(*event_id);
-            let bytes = bincode::serialize(&ids)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
-            self.db.put(cf::PROPERTY_ASSET_TITLE_INDEX, asset_id, &bytes)?;
+            let bytes = encode_asset_title_event_ids(&ids)?;
+            self.db.put(
+                cf::PROPERTY_ASSET_TITLE_INDEX,
+                asset_title_index_key(asset_id),
+                &bytes,
+            )?;
         }
         Ok(())
     }
 
     fn get_asset_event_ids(&self, asset_id: &AssetId) -> Result<Vec<TitleEventId>> {
-        match self.db.get(cf::PROPERTY_ASSET_TITLE_INDEX, asset_id)? {
+        match self.db.get(
+            cf::PROPERTY_ASSET_TITLE_INDEX,
+            asset_title_index_key(asset_id),
+        )? {
             Some(bytes) => {
-                let ids: Vec<TitleEventId> = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let ids = decode_asset_title_event_ids(&bytes)?;
                 Ok(ids)
             }
             None => Ok(Vec::new()),
@@ -284,9 +471,12 @@ impl<'a> EncumbranceStore<'a> {
 
     /// Store an encumbrance
     pub fn put(&self, encumbrance: &Encumbrance) -> Result<()> {
-        let bytes = bincode::serialize(encumbrance)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::PROPERTY_ENCUMBRANCES, &encumbrance.encumbrance_id, &bytes)?;
+        let bytes = encode_encumbrance(encumbrance)?;
+        self.db.put(
+            cf::PROPERTY_ENCUMBRANCES,
+            encumbrance_key(&encumbrance.encumbrance_id),
+            &bytes,
+        )?;
 
         // Update asset encumbrance index
         self.add_to_asset_index(&encumbrance.asset_id, &encumbrance.encumbrance_id)?;
@@ -296,10 +486,12 @@ impl<'a> EncumbranceStore<'a> {
 
     /// Get an encumbrance by ID
     pub fn get(&self, encumbrance_id: &EncumbranceId) -> Result<Option<Encumbrance>> {
-        match self.db.get(cf::PROPERTY_ENCUMBRANCES, encumbrance_id)? {
+        match self
+            .db
+            .get(cf::PROPERTY_ENCUMBRANCES, encumbrance_key(encumbrance_id))?
+        {
             Some(bytes) => {
-                let encumbrance: Encumbrance = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let encumbrance = decode_encumbrance(&bytes)?;
                 Ok(Some(encumbrance))
             }
             None => Ok(None),
@@ -308,7 +500,8 @@ impl<'a> EncumbranceStore<'a> {
 
     /// Check if encumbrance exists
     pub fn exists(&self, encumbrance_id: &EncumbranceId) -> Result<bool> {
-        self.db.contains(cf::PROPERTY_ENCUMBRANCES, encumbrance_id)
+        self.db
+            .contains(cf::PROPERTY_ENCUMBRANCES, encumbrance_key(encumbrance_id))
     }
 
     /// Update encumbrance status
@@ -322,9 +515,12 @@ impl<'a> EncumbranceStore<'a> {
             Some(mut encumbrance) => {
                 encumbrance.status = status;
                 encumbrance.updated_at = timestamp;
-                let bytes = bincode::serialize(&encumbrance)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                self.db.put(cf::PROPERTY_ENCUMBRANCES, encumbrance_id, &bytes)
+                let bytes = encode_encumbrance(&encumbrance)?;
+                self.db.put(
+                    cf::PROPERTY_ENCUMBRANCES,
+                    encumbrance_key(encumbrance_id),
+                    &bytes,
+                )
             }
             None => Err(StorageError::NotFound(format!(
                 "Encumbrance not found: {:?}",
@@ -356,18 +552,23 @@ impl<'a> EncumbranceStore<'a> {
         let mut ids = self.get_asset_encumbrance_ids(asset_id)?;
         if !ids.contains(encumbrance_id) {
             ids.push(*encumbrance_id);
-            let bytes = bincode::serialize(&ids)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
-            self.db.put(cf::PROPERTY_ASSET_ENCUMBRANCE_INDEX, asset_id, &bytes)?;
+            let bytes = encode_asset_encumbrance_ids(&ids)?;
+            self.db.put(
+                cf::PROPERTY_ASSET_ENCUMBRANCE_INDEX,
+                asset_encumbrance_index_key(asset_id),
+                &bytes,
+            )?;
         }
         Ok(())
     }
 
     fn get_asset_encumbrance_ids(&self, asset_id: &AssetId) -> Result<Vec<EncumbranceId>> {
-        match self.db.get(cf::PROPERTY_ASSET_ENCUMBRANCE_INDEX, asset_id)? {
+        match self.db.get(
+            cf::PROPERTY_ASSET_ENCUMBRANCE_INDEX,
+            asset_encumbrance_index_key(asset_id),
+        )? {
             Some(bytes) => {
-                let ids: Vec<EncumbranceId> = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let ids = decode_asset_encumbrance_ids(&bytes)?;
                 Ok(ids)
             }
             None => Ok(Vec::new()),
@@ -391,9 +592,12 @@ impl<'a> CoverageStore<'a> {
 
     /// Store an insurance coverage
     pub fn put(&self, coverage: &InsuranceCoverage) -> Result<()> {
-        let bytes = bincode::serialize(coverage)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::PROPERTY_COVERAGE, &coverage.coverage_id, &bytes)?;
+        let bytes = encode_coverage(coverage)?;
+        self.db.put(
+            cf::PROPERTY_COVERAGE,
+            coverage_key(&coverage.coverage_id),
+            &bytes,
+        )?;
 
         // Update asset coverage index
         self.add_to_asset_index(&coverage.asset_id, &coverage.coverage_id)?;
@@ -403,10 +607,12 @@ impl<'a> CoverageStore<'a> {
 
     /// Get a coverage by ID
     pub fn get(&self, coverage_id: &CoverageId) -> Result<Option<InsuranceCoverage>> {
-        match self.db.get(cf::PROPERTY_COVERAGE, coverage_id)? {
+        match self
+            .db
+            .get(cf::PROPERTY_COVERAGE, coverage_key(coverage_id))?
+        {
             Some(bytes) => {
-                let coverage: InsuranceCoverage = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let coverage = decode_coverage(&bytes)?;
                 Ok(Some(coverage))
             }
             None => Ok(None),
@@ -415,7 +621,8 @@ impl<'a> CoverageStore<'a> {
 
     /// Check if coverage exists
     pub fn exists(&self, coverage_id: &CoverageId) -> Result<bool> {
-        self.db.contains(cf::PROPERTY_COVERAGE, coverage_id)
+        self.db
+            .contains(cf::PROPERTY_COVERAGE, coverage_key(coverage_id))
     }
 
     /// Update coverage status
@@ -429,9 +636,9 @@ impl<'a> CoverageStore<'a> {
             Some(mut coverage) => {
                 coverage.status = status;
                 coverage.updated_at = timestamp;
-                let bytes = bincode::serialize(&coverage)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                self.db.put(cf::PROPERTY_COVERAGE, coverage_id, &bytes)
+                let bytes = encode_coverage(&coverage)?;
+                self.db
+                    .put(cf::PROPERTY_COVERAGE, coverage_key(coverage_id), &bytes)
             }
             None => Err(StorageError::NotFound(format!(
                 "Coverage not found: {:?}",
@@ -452,9 +659,9 @@ impl<'a> CoverageStore<'a> {
                 coverage.expiry = new_expiry;
                 coverage.status = CoverageStatus::Renewed;
                 coverage.updated_at = timestamp;
-                let bytes = bincode::serialize(&coverage)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                self.db.put(cf::PROPERTY_COVERAGE, coverage_id, &bytes)
+                let bytes = encode_coverage(&coverage)?;
+                self.db
+                    .put(cf::PROPERTY_COVERAGE, coverage_key(coverage_id), &bytes)
             }
             None => Err(StorageError::NotFound(format!(
                 "Coverage not found: {:?}",
@@ -486,18 +693,23 @@ impl<'a> CoverageStore<'a> {
         let mut ids = self.get_asset_coverage_ids(asset_id)?;
         if !ids.contains(coverage_id) {
             ids.push(*coverage_id);
-            let bytes = bincode::serialize(&ids)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
-            self.db.put(cf::PROPERTY_ASSET_COVERAGE_INDEX, asset_id, &bytes)?;
+            let bytes = encode_asset_coverage_ids(&ids)?;
+            self.db.put(
+                cf::PROPERTY_ASSET_COVERAGE_INDEX,
+                asset_coverage_index_key(asset_id),
+                &bytes,
+            )?;
         }
         Ok(())
     }
 
     fn get_asset_coverage_ids(&self, asset_id: &AssetId) -> Result<Vec<CoverageId>> {
-        match self.db.get(cf::PROPERTY_ASSET_COVERAGE_INDEX, asset_id)? {
+        match self.db.get(
+            cf::PROPERTY_ASSET_COVERAGE_INDEX,
+            asset_coverage_index_key(asset_id),
+        )? {
             Some(bytes) => {
-                let ids: Vec<CoverageId> = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let ids = decode_asset_coverage_ids(&bytes)?;
                 Ok(ids)
             }
             None => Ok(Vec::new()),
@@ -521,9 +733,9 @@ impl<'a> ClaimStore<'a> {
 
     /// Store an insurance claim
     pub fn put(&self, claim: &InsuranceClaim) -> Result<()> {
-        let bytes = bincode::serialize(claim)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::PROPERTY_CLAIMS, &claim.claim_id, &bytes)?;
+        let bytes = encode_claim(claim)?;
+        self.db
+            .put(cf::PROPERTY_CLAIMS, claim_key(&claim.claim_id), &bytes)?;
 
         // Update coverage claim index
         self.add_to_coverage_index(&claim.coverage_id, &claim.claim_id)?;
@@ -533,10 +745,9 @@ impl<'a> ClaimStore<'a> {
 
     /// Get a claim by ID
     pub fn get(&self, claim_id: &ClaimId) -> Result<Option<InsuranceClaim>> {
-        match self.db.get(cf::PROPERTY_CLAIMS, claim_id)? {
+        match self.db.get(cf::PROPERTY_CLAIMS, claim_key(claim_id))? {
             Some(bytes) => {
-                let claim: InsuranceClaim = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let claim = decode_claim(&bytes)?;
                 Ok(Some(claim))
             }
             None => Ok(None),
@@ -545,7 +756,7 @@ impl<'a> ClaimStore<'a> {
 
     /// Check if claim exists
     pub fn exists(&self, claim_id: &ClaimId) -> Result<bool> {
-        self.db.contains(cf::PROPERTY_CLAIMS, claim_id)
+        self.db.contains(cf::PROPERTY_CLAIMS, claim_key(claim_id))
     }
 
     /// Update claim status
@@ -559,9 +770,9 @@ impl<'a> ClaimStore<'a> {
             Some(mut claim) => {
                 claim.status = status;
                 claim.updated_at = timestamp;
-                let bytes = bincode::serialize(&claim)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                self.db.put(cf::PROPERTY_CLAIMS, claim_id, &bytes)
+                let bytes = encode_claim(&claim)?;
+                self.db
+                    .put(cf::PROPERTY_CLAIMS, claim_key(claim_id), &bytes)
             }
             None => Err(StorageError::NotFound(format!(
                 "Claim not found: {:?}",
@@ -582,9 +793,9 @@ impl<'a> ClaimStore<'a> {
                 claim.approved_amount_commitment = Some(approved_amount_commitment);
                 claim.status = ClaimStatus::Approved;
                 claim.updated_at = timestamp;
-                let bytes = bincode::serialize(&claim)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                self.db.put(cf::PROPERTY_CLAIMS, claim_id, &bytes)
+                let bytes = encode_claim(&claim)?;
+                self.db
+                    .put(cf::PROPERTY_CLAIMS, claim_key(claim_id), &bytes)
             }
             None => Err(StorageError::NotFound(format!(
                 "Claim not found: {:?}",
@@ -605,9 +816,9 @@ impl<'a> ClaimStore<'a> {
                 claim.paid_amount_commitment = Some(paid_amount_commitment);
                 claim.status = ClaimStatus::Paid;
                 claim.updated_at = timestamp;
-                let bytes = bincode::serialize(&claim)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                self.db.put(cf::PROPERTY_CLAIMS, claim_id, &bytes)
+                let bytes = encode_claim(&claim)?;
+                self.db
+                    .put(cf::PROPERTY_CLAIMS, claim_key(claim_id), &bytes)
             }
             None => Err(StorageError::NotFound(format!(
                 "Claim not found: {:?}",
@@ -639,18 +850,23 @@ impl<'a> ClaimStore<'a> {
         let mut ids = self.get_coverage_claim_ids(coverage_id)?;
         if !ids.contains(claim_id) {
             ids.push(*claim_id);
-            let bytes = bincode::serialize(&ids)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
-            self.db.put(cf::PROPERTY_COVERAGE_CLAIM_INDEX, coverage_id, &bytes)?;
+            let bytes = encode_coverage_claim_ids(&ids)?;
+            self.db.put(
+                cf::PROPERTY_COVERAGE_CLAIM_INDEX,
+                coverage_claim_index_key(coverage_id),
+                &bytes,
+            )?;
         }
         Ok(())
     }
 
     fn get_coverage_claim_ids(&self, coverage_id: &CoverageId) -> Result<Vec<ClaimId>> {
-        match self.db.get(cf::PROPERTY_COVERAGE_CLAIM_INDEX, coverage_id)? {
+        match self.db.get(
+            cf::PROPERTY_COVERAGE_CLAIM_INDEX,
+            coverage_claim_index_key(coverage_id),
+        )? {
             Some(bytes) => {
-                let ids: Vec<ClaimId> = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let ids = decode_coverage_claim_ids(&bytes)?;
                 Ok(ids)
             }
             None => Ok(Vec::new()),
@@ -674,17 +890,22 @@ impl<'a> PropertyProofStore<'a> {
 
     /// Store a property proof
     pub fn put(&self, proof: &PropertyProofEnvelope) -> Result<()> {
-        let bytes = bincode::serialize(proof)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        self.db.put(cf::PROPERTY_PROOFS, &proof.proof_id, &bytes)
+        let bytes = encode_property_proof(proof)?;
+        self.db.put(
+            cf::PROPERTY_PROOFS,
+            property_proof_key(&proof.proof_id),
+            &bytes,
+        )
     }
 
     /// Get a proof by ID
     pub fn get(&self, proof_id: &ProofId) -> Result<Option<PropertyProofEnvelope>> {
-        match self.db.get(cf::PROPERTY_PROOFS, proof_id)? {
+        match self
+            .db
+            .get(cf::PROPERTY_PROOFS, property_proof_key(proof_id))?
+        {
             Some(bytes) => {
-                let proof: PropertyProofEnvelope = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let proof = decode_property_proof(&bytes)?;
                 Ok(Some(proof))
             }
             None => Ok(None),
@@ -693,7 +914,8 @@ impl<'a> PropertyProofStore<'a> {
 
     /// Check if proof exists
     pub fn exists(&self, proof_id: &ProofId) -> Result<bool> {
-        self.db.contains(cf::PROPERTY_PROOFS, proof_id)
+        self.db
+            .contains(cf::PROPERTY_PROOFS, property_proof_key(proof_id))
     }
 
     /// Check if proof is valid (not expired)

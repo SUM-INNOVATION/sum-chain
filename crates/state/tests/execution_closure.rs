@@ -206,31 +206,17 @@ const MANIFEST: &[(&str, &str, &str, &str, usize)] = &[
     ("crates/state/src/nft_executor.rs", "NftExecutor::execute_unlock_token", "NftStore::put_token", "NFT_TOKENS", 1),
     ("crates/state/src/nft_executor.rs", "NftExecutor::execute_update_collection_config", "NftStore::put_collection", "NFT_COLLECTIONS", 1),
     ("crates/state/src/nft_executor.rs", "NftExecutor::execute_update_metadata", "NftStore::put_token", "NFT_TOKENS", 1),
-    ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "AssetStore::put", "PROPERTY_ASSETS+PROPERTY_JURISDICTION_INDEX", 1),
-    ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "AssetStore::update_status", "PROPERTY_ASSETS", 5),
-    ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "ClaimStore::approve", "PROPERTY_CLAIMS", 1),
-    ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "ClaimStore::pay", "PROPERTY_CLAIMS", 1),
-    ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "ClaimStore::put", "PROPERTY_CLAIMS+PROPERTY_COVERAGE_CLAIM_INDEX", 1),
-    ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "ClaimStore::update_status", "PROPERTY_CLAIMS", 5),
-    ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "CoverageStore::put", "PROPERTY_ASSET_COVERAGE_INDEX+PROPERTY_COVERAGE", 1),
-    ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "CoverageStore::renew", "PROPERTY_COVERAGE", 1),
-    ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "CoverageStore::update_status", "PROPERTY_COVERAGE", 4),
-    ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "EncumbranceStore::put", "PROPERTY_ASSET_ENCUMBRANCE_INDEX+PROPERTY_ENCUMBRANCES", 1),
-    ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "EncumbranceStore::update_status", "PROPERTY_ENCUMBRANCES", 4),
-    ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "PropertyProofStore::put", "PROPERTY_PROOFS", 1),
-    ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "TitleEventStore::put", "PROPERTY_ASSET_TITLE_INDEX+PROPERTY_TITLE_EVENTS", 2),
-    ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "TitleEventStore::update_status", "PROPERTY_TITLE_EVENTS", 3),
 ];
 
 /// Occurrences, not rows: a caller reaching the same mutator three times is
 /// three places to fix.
-const MANIFEST_OCCURRENCES: usize = 176;
+const MANIFEST_OCCURRENCES: usize = 145;
 
 /// Application column families a block can still commit to directly.
 ///
 /// ONLY EVER DECREASE. Recorded at `1687789`. Lower than the 116 the unrooted
 /// audit reported, for the reason in [`UNREACHED_MUTATORS`].
-const LEDGER_CF_COUNT: usize = 59;
+const LEDGER_CF_COUNT: usize = 48;
 
 /// Functions that commit application state but that no entry point reaches.
 ///
@@ -380,7 +366,11 @@ const ARMS: &[(&str, ArmKind, &str)] = &[
     ("NodeRegistry", ArmKind::Overlay, "node_registry.rs"),
     ("NodeRegistryV2", ArmKind::Overlay, "node_registry.rs"),
     ("PolicyAccount", ArmKind::Overlay, "policy_account_executor.rs -> policy_account_view"),
-    ("Property", ArmKind::Committed, "property_executor.rs -> PropertyStore sub-stores"),
+    (
+        "Property",
+        ArmKind::Overlay,
+        "property_executor.rs -> property_view",
+    ),
     ("Staking", ArmKind::Overlay, "staking_executor.rs -> StakingExecutor::v_* -> candidate"),
     ("StorageMetadata", ArmKind::Overlay, "storage_metadata.rs"),
     ("StorageMetadataV2", ArmKind::Overlay, "storage_metadata.rs"),
@@ -1947,7 +1937,7 @@ fn every_dispatcher_arm_is_declared() {
     let mixed = ARMS.iter().filter(|(_, k, _)| *k == ArmKind::Mixed).count();
     assert_eq!(
         (overlay, committed, mixed),
-        (23, 7, 0),
+        (24, 6, 0),
         "the overlay/committed/mixed split changed. Moving an arm from \
          Committed to Overlay is progress — update this and the manifest \
          together; any other movement is not."
