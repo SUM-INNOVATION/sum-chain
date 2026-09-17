@@ -28,8 +28,9 @@ purpose.
 | Property (SRC-86X) | this wave | transcribed in full below |
 | Healthcare (SRC-87X) | this wave | transcribed in full below |
 | NFT (SUM-721) | this wave | transcribed in full below |
+| DocClass (SRC-80X/81X) | this wave | transcribed in full below |
 
-Agreement, property, healthcare and NFT are transcribed here. The six earlier
+Agreement, property, healthcare, NFT and DocClass are transcribed here. The six earlier
 inventories are recorded in their own commit messages and have not been copied
 into this file; a pointer is not a transcription, and listing them here from
 memory would be worse than listing them not at all.
@@ -537,3 +538,192 @@ a duplicate. The id is not unique per creation; it is unique per
     `saturating_sub` and leaves `next_token_id` where it was, so a collection
     with `max_supply` can be permanently exhausted by minting and burning.
     -- a_burn_after_a_mint_in_one_block_moves_every_mirror_row_together
+
+## DocClass (SRC-80X/81X)
+
+Twenty items, grouped as the reviewer framed them. DocClass is the identity and
+credential subsystem — identity roots, eligibility attestations, academic and
+professional credentials, revocations and the issuer registry — so the
+authorization and lifecycle entries below are the ones that matter most.
+
+### Unrestricted allocation from untrusted input
+
+SEVEN structures grow without bound, and only three of them are indexes. Each is
+read-modify-write: the whole value is decoded, one entry is pushed, and the whole
+value is re-encoded into a fresh buffer before `view.put` accounts for a single
+byte. So the candidate's byte ceiling bounds what a block may COMMIT and not what
+one refused transaction may ALLOCATE. Measured at 20,000 entries with the ceiling
+set to 8,192 B:
+
+```
+subject index, identity shape        allocated 3,484,922 B, largest single 1,360,000 B, accounted 471 B
+subject index, credential shape      allocated 3,205,443 B, largest single 1,280,000 B, accounted 527 B
+issuer index                         allocated 3,206,847 B, largest single 1,280,000 B, accounted 631 B
+IdentityRoot.keys                    allocated 6,415,479 B, largest single 2,097,056 B, accounted 168 B
+IdentityRoot.additional_controllers  allocated 2,003,318 B, largest single   800,000 B, accounted 168 B
+IdentityRoot.services                allocated 7,475,754 B, largest single 2,097,024 B, accounted 168 B
+DocClassIssuer.keys                  allocated 5,955,495 B, largest single 2,097,120 B, accounted 168 B
+```
+
+The four row-field cases allocate twice over, because the read decodes the whole
+row into owned Rust values before the encode rebuilds it — which is why they cost
+more than the index cases despite smaller fixtures. This is one measured size,
+not a bound for arbitrary input. DocClass cannot be described as memory bounded
+or OOM safe. A deterministic activated bound, or a bounded storage structure, is
+required before deployment.
+
+  -- all_seven_accumulating_structures_allocate_their_whole_value_before_the_ceiling_refuses
+
+None of the seven is ever compacted, and `UpdateService` and `RotateIssuerKey`
+LINEAR-SCAN their list on every append (`RotateIssuerKey` twice). Every DocClass
+payload is `bincode::deserialize`d from transaction data with no size or shape
+limit ahead of it, so the same exposure applies at the decode boundary.
+
+### One column family, two incompatible value shapes
+
+`DOCCLASS_SUBJECT_INDEX` is written with two different values at the same key.
+`IdentityRootStore` writes `Vec<(CredentialId, DocSubcode)>`; `EligibilityStore`
+and `CredentialStore` write `Vec<CredentialId>`. An identity and a credential
+that share a subject commitment therefore write over each other:
+
+  * The credential store decodes the identity's pair list as a bare id list.
+    bincode allows trailing bytes, so this SUCCEEDS, silently dropping the
+    subcode, and rewrites the row in the credential shape.
+    -- an_identity_and_a_credential_sharing_a_subject_commitment_collide
+  * The identity store then cannot decode its own index, so the next identity
+    operation on that subject is a BLOCK-LEVEL ERROR rather than a refusal.
+    -- an_identity_and_a_credential_sharing_a_subject_commitment_break_the_block
+
+Nothing prevents the collision: a subject commitment is an arbitrary 32-byte
+value supplied in the payload, so it can be chosen. Separating the families, or
+tagging the value, changes the bytes at a live key and therefore the state root.
+
+### Missing authorization and signature verification
+
+  * NO SIGNATURE IS EVER VERIFIED. `EligibilityAttestation.issuer_signature`,
+    `AcademicCredential.issuer_signature`, `IdentityKey.public_key`,
+    `IssuerKey.public_key` and `RevocationRecord.signature` are stored and never
+    checked against anything. The revocation record the executor builds sets
+    `signature: [0u8; 64]` on every path.
+  * A registered issuer may rewrite its OWN registry row wholesale — subcodes,
+    jurisdictions, status and the declared stake all come from the payload.
+    `min_issuer_stake` is checked at registration only, so an issuer registers
+    with the minimum and then declares any stake it likes for free; and a
+    SUSPENDED issuer restores itself to `Active` with one `UpdateIssuer`.
+    -- an_issuer_can_grant_itself_any_subcode_and_any_stake_by_updating_itself
+    -- a_suspended_issuer_can_still_revoke_and_update_itself
+  * Nothing binds a `subject_commitment` to anybody. Any funded account may
+    anchor an identity root claiming any subject, with any status, any
+    timestamps and any schema hash, all taken from the payload verbatim.
+    -- an_identity_root_is_stored_exactly_as_the_sender_supplied_it
+  * The revocation family never consults the issuer registry. A suspended or
+    revoked issuer can still revoke, suspend, reactivate and supersede its
+    credentials.
+    -- a_suspended_issuer_can_still_revoke_and_update_itself
+  * `DocClassParams.require_issuer_stake`, `initial_issuers` and
+    `max_credential_validity` are declared, defaulted, and read by no execution
+    path at all. The RPC reports `require_issuer_stake: true` and a ten-year
+    `max_credential_validity` as hardcoded literals, so an operator querying the
+    node is told about rules the chain does not apply.
+  * `DocClassTxData.subcode`, `DocClassTxData.recipient` and the transaction
+    hash are accepted by the dispatch and never read.
+
+Two checks do bite, and they are the whole of the sender binding in the creation
+paths: a registration must name the sender's own address, and an identity root
+must name the sender as its controller.
+    -- registration_and_identity_creation_are_bound_to_the_sender
+So does the revocation authorization: only the credential's recorded issuer may
+revoke it.
+    -- a_third_party_cannot_revoke_someone_elses_credential
+
+### Revocation lifecycle and replay
+
+  * REVOCATION IS REVERSIBLE. Neither `RevokeCredential` nor `SuspendCredential`
+    consults the current status, and `ReactivateCredential` requires only that
+    the LATEST record say `Suspended`. Revoke, then suspend, then reactivate
+    returns a revoked credential to `Active`, and both the record and the
+    mirrored `revocation_status` on the credential row follow.
+    -- a_revoked_credential_can_be_suspended_and_then_reactivated
+  * Revocation records are keyed by `credential_id || revoked_at_height`, so two
+    records for one credential at one height are ONE row and the later write
+    silently replaces the earlier. A revoke and a reactivation in the same block
+    leave a single record.
+    -- two_revocations_at_one_height_are_one_row
+  * `UpdateCredential` charges the fee, advances the nonce and writes nothing at
+    all — not the credential, not an event.
+    -- update_credential_charges_a_fee_and_writes_nothing
+
+### The registration stake
+
+`RegisterIssuer` deducts `fee + stake_amount` from the sender and credits only
+`fee` to the proposer. The stake reaches no account: it is destroyed. Nothing
+returns it — `DeactivateIssuer` charges another fee and refunds nothing — and
+`UpdateIssuer` can raise the recorded `stake_amount` afterwards without moving a
+single unit of balance.
+
+  -- the_registration_stake_is_deducted_from_the_sender_and_paid_to_nobody
+
+### Untrusted payload metadata and missing block context
+
+  * Both dispatch arms pass a literal `0` where the block timestamp belongs and
+    a literal `0` for the transaction index. Every timestamp the executor itself
+    writes is therefore 0: `IdentityRoot.updated_at` after a status change,
+    `DocClassIssuer.updated_at` after a deactivation, and
+    `RevocationRecord.revoked_at` on every revocation record ever written.
+    -- the_block_timestamp_reaching_docclass_operations_is_always_zero
+  * Because `tx_index` is also 0, every DocClass event in a block lands at the
+    same `height || 0 || 0` key. The family holds ONE row per block: the last
+    event. Every earlier event in the block is overwritten.
+    -- every_docclass_event_in_a_block_lands_at_one_key
+  * `issued_at`, `valid_from`, `expires_at`, `created_at`, `updated_at`,
+    `registered_at` and `revocation_status` are taken from the payload as
+    supplied. A credential may be issued already expired, already revoked, or
+    valid from before the chain existed.
+
+### Schema validation does not run
+
+`SchemaValidator` exists to keep PII off-chain and is the only consensus-level
+content check in the subsystem. Its default `activation_height` is 385,000, and
+below that height it returns `Valid` for every credential without looking at it.
+A credential carrying an attribute named `student_ssn` is accepted.
+
+  -- schema_validation_is_inactive_below_its_activation_height
+
+It also validates only three of the SRC-81X subcodes and nothing in SRC-80X:
+eligibility attestations are never schema-checked at any height.
+
+### Family selection by trial decode
+
+`IssueCredential` decides which family a payload belongs to by TRYING to decode
+it as an `AcademicCredential` and, on failure, retrying it as an
+`EligibilityAttestation`. The first decode error is discarded rather than
+reported, so a malformed academic credential is silently refused as "Invalid
+credential data" with no indication of which decode failed or why. The two
+schemas do not currently cross-decode, and nothing enforces that they never will.
+
+  -- issue_credential_picks_its_family_by_trying_to_decode_and_falling_through
+
+### Unbounded reads
+
+The committed readers are unpaginated whole-family scans. `get_all`,
+`get_active` and `get_by_jurisdiction` walk every issuer row; `get_by_controller`
+and `get_by_subcode` walk every identity and credential row; `get_by_revoker`
+walks every revocation record. Each returns one `Vec` with no limit, offset or
+cursor.
+
+  -- the_committed_docclass_readers_return_two_thousand_rows_whole
+
+### Missing history and corruption handling
+
+  * `DOCCLASS_EVENTS` is written by every operation and READ by nothing that
+    block execution can reach. It is an append-only journal with no reader, and
+    the `tx_index` defect above means it keeps one entry per block regardless.
+    -- every_docclass_event_in_a_block_lands_at_one_key
+  * The duplicate guards use `contains`, never `get`, so a CORRUPT row reads as
+    present and refuses rather than erroring. This is the safe direction and is
+    preserved for that reason: upgrading it would turn today's refusals into
+    block-level errors.
+    -- a_corrupt_issuer_row_is_read_as_presence_not_as_corruption
+  * `DocClassStore::verify_credential` checks expiry, validity window,
+    revocation status and whether the issuer may still issue. It checks no
+    signature and no proof, and no execution path calls it.
