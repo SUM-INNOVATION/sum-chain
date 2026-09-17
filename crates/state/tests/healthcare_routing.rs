@@ -2031,7 +2031,7 @@ fn a_refusal_part_way_leaves_canonical_storage_untouched() {
             after_patient += 1;
         }
         assert!(
-            !(patient && !rx) && !(prescriber && !patient),
+            (!patient || rx) && (!prescriber || patient),
             "ceiling {ceiling} staged an index without its predecessor, which \
              the write order cannot produce"
         );

@@ -222,7 +222,7 @@ fn measure_refusal(family: &str, fixture: &[u8]) -> (usize, usize, u64) {
         let mut view = ExecutionView::new(&mut overlay);
         let measured = measure(|| executor.execute_tx(&mut view, &t, &proposer, 1, TS));
 
-        let err = measured.0.as_ref().err().expect("the ceiling must refuse");
+        let err = measured.0.as_ref().expect_err("the ceiling must refuse");
         assert!(
             err.to_string().contains("limit"),
             "refused by the ceiling, not by something else: {err}"
