@@ -178,48 +178,17 @@ const MANIFEST: &[(&str, &str, &str, &str, usize)] = &[
     ("crates/state/src/legal_executor.rs", "LegalExecutor::execute", "OrderStore::update_status", "LEGAL_ORDERS", 5),
     ("crates/state/src/legal_executor.rs", "LegalExecutor::execute", "ProcessEventStore::put", "LEGAL_CASE_EVENT_INDEX+LEGAL_EVENTS", 2),
     ("crates/state/src/legal_executor.rs", "LegalExecutor::execute", "ProcessEventStore::update_status", "LEGAL_EVENTS", 3),
-    ("crates/state/src/nft_executor.rs", "NftExecutor::execute_approve", "NftStore::put_token", "NFT_TOKENS", 1),
-    ("crates/state/src/nft_executor.rs", "NftExecutor::execute_batch_mint", "NftStore::add_to_collection_index", "NFT_COLLECTION_INDEX", 1),
-    ("crates/state/src/nft_executor.rs", "NftExecutor::execute_batch_mint", "NftStore::add_to_owner_index", "NFT_OWNER_INDEX", 1),
-    ("crates/state/src/nft_executor.rs", "NftExecutor::execute_batch_mint", "NftStore::put_collection", "NFT_COLLECTIONS", 1),
-    ("crates/state/src/nft_executor.rs", "NftExecutor::execute_batch_mint", "NftStore::put_token", "NFT_TOKENS", 1),
-    ("crates/state/src/nft_executor.rs", "NftExecutor::execute_burn", "NftStore::burn_token", "NFT_COLLECTIONS+NFT_COLLECTION_INDEX+NFT_OWNER_INDEX+NFT_TOKENS", 1),
-    ("crates/state/src/nft_executor.rs", "NftExecutor::execute_create_collection", "NftStore::put_collection", "NFT_COLLECTIONS", 1),
-    ("crates/state/src/nft_executor.rs", "NftExecutor::execute_lock_token", "NftStore::put_token", "NFT_TOKENS", 1),
-    ("crates/state/src/nft_executor.rs", "NftExecutor::execute_mint", "NftStore::add_to_collection_index", "NFT_COLLECTION_INDEX", 1),
-    ("crates/state/src/nft_executor.rs", "NftExecutor::execute_mint", "NftStore::add_to_owner_index", "NFT_OWNER_INDEX", 1),
-    ("crates/state/src/nft_executor.rs", "NftExecutor::execute_mint", "NftStore::put_collection", "NFT_COLLECTIONS", 1),
-    ("crates/state/src/nft_executor.rs", "NftExecutor::execute_mint", "NftStore::put_token", "NFT_TOKENS", 1),
-    ("crates/state/src/nft_executor.rs", "NftExecutor::execute_transfer", "NftStore::transfer_token", "NFT_OWNER_INDEX+NFT_TOKENS", 1),
-    ("crates/state/src/nft_executor.rs", "NftExecutor::execute_transfer_collection", "NftStore::put_collection", "NFT_COLLECTIONS", 1),
-    ("crates/state/src/nft_executor.rs", "NftExecutor::execute_unlock_token", "NftStore::put_token", "NFT_TOKENS", 1),
-    ("crates/state/src/nft_executor.rs", "NftExecutor::execute_update_collection_config", "NftStore::put_collection", "NFT_COLLECTIONS", 1),
-    ("crates/state/src/nft_executor.rs", "NftExecutor::execute_update_metadata", "NftStore::put_token", "NFT_TOKENS", 1),
-    ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "AssetStore::put", "PROPERTY_ASSETS+PROPERTY_JURISDICTION_INDEX", 1),
-    ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "AssetStore::update_status", "PROPERTY_ASSETS", 5),
-    ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "ClaimStore::approve", "PROPERTY_CLAIMS", 1),
-    ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "ClaimStore::pay", "PROPERTY_CLAIMS", 1),
-    ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "ClaimStore::put", "PROPERTY_CLAIMS+PROPERTY_COVERAGE_CLAIM_INDEX", 1),
-    ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "ClaimStore::update_status", "PROPERTY_CLAIMS", 5),
-    ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "CoverageStore::put", "PROPERTY_ASSET_COVERAGE_INDEX+PROPERTY_COVERAGE", 1),
-    ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "CoverageStore::renew", "PROPERTY_COVERAGE", 1),
-    ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "CoverageStore::update_status", "PROPERTY_COVERAGE", 4),
-    ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "EncumbranceStore::put", "PROPERTY_ASSET_ENCUMBRANCE_INDEX+PROPERTY_ENCUMBRANCES", 1),
-    ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "EncumbranceStore::update_status", "PROPERTY_ENCUMBRANCES", 4),
-    ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "PropertyProofStore::put", "PROPERTY_PROOFS", 1),
-    ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "TitleEventStore::put", "PROPERTY_ASSET_TITLE_INDEX+PROPERTY_TITLE_EVENTS", 2),
-    ("crates/state/src/property_executor.rs", "PropertyExecutor::execute", "TitleEventStore::update_status", "PROPERTY_TITLE_EVENTS", 3),
 ];
 
 /// Occurrences, not rows: a caller reaching the same mutator three times is
 /// three places to fix.
-const MANIFEST_OCCURRENCES: usize = 0;
+const MANIFEST_OCCURRENCES: usize = 99;
 
 /// Application column families a block can still commit to directly.
 ///
 /// ONLY EVER DECREASE. Recorded at `1687789`. Lower than the 116 the unrooted
 /// audit reported, for the reason in [`UNREACHED_MUTATORS`].
-const LEDGER_CF_COUNT: usize = 0;
+const LEDGER_CF_COUNT: usize = 34;
 
 /// Functions that commit application state but that no entry point reaches.
 ///
@@ -1940,7 +1909,7 @@ fn every_dispatcher_arm_is_declared() {
     let mixed = ARMS.iter().filter(|(_, k, _)| *k == ArmKind::Mixed).count();
     assert_eq!(
         (overlay, committed, mixed),
-        (24, 6, 0),
+        (26, 4, 0),
         "the overlay/committed/mixed split changed. Moving an arm from \
          Committed to Overlay is progress — update this and the manifest \
          together; any other movement is not."

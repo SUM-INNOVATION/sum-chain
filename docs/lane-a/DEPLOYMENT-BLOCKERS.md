@@ -25,24 +25,14 @@ purpose.
 | Legal | `026447f` (parallel) | in the commit message |
 | Finance | `0706862` (parallel) | in the commit message |
 | Agreement (SRC-84X) | `2249ca8` | transcribed in full below |
-| Property (SRC-86X) | this commit | transcribed in full below |
+| Property (SRC-86X) | this wave | transcribed in full below |
+| Healthcare (SRC-87X) | this wave | transcribed in full below |
+| NFT (SUM-721) | this wave | transcribed in full below |
 
-Agreement and property are transcribed here. The earlier inventories are
-recorded in their own commit messages and have not been copied into this file; a
-pointer is not a transcription, and listing them here from memory would be worse
-than listing them not at all.
-| Healthcare (SRC-87X) | this commit | transcribed in full below |
-
-Only agreement and healthcare are transcribed here so far. The earlier
+Agreement, property, healthcare and NFT are transcribed here. The six earlier
 inventories are recorded in their own commit messages and have not been copied
 into this file; a pointer is not a transcription, and listing them here from
 memory would be worse than listing them not at all.
-| NFT (SUM-721) | this commit | transcribed in full below |
-
-Only agreement and NFT are transcribed here so far. The earlier inventories are
-recorded in their own commit messages and have not been copied into this file; a
-pointer is not a transcription, and listing them here from memory would be worse
-than listing them not at all.
 
 ## Agreement (SRC-84X)
 
