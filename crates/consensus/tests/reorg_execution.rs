@@ -453,8 +453,18 @@ impl Node {
     /// cannot shadow anything. This is what an arriving side branch looks like
     /// before fork choice has said anything about it, and it is what
     /// `plan_reorg` walks.
+    ///
+    /// Written straight into the family rather than through `BlockStore::put`.
+    /// `put` writes `BLOCK_HEIGHT[height] = hash` beside the content-addressed
+    /// row, and that key carries no branch identity — so retaining a side branch
+    /// through it points the CANONICAL height index at blocks nobody has
+    /// adopted. `PoAEngine::import_reorg` had exactly that bug and no longer
+    /// does; this fixture modelled the bug rather than the fix, which is why
+    /// nothing here ever caught it.
     fn retain(&self, block: &Block) {
-        BlockStore::new(&self.db).put(block).expect("retain block");
+        self.db
+            .put(cf::BLOCKS, block.hash().as_bytes(), &block.to_bytes())
+            .expect("retain block");
     }
 
     fn head(&self) -> Option<Block> {
@@ -4884,16 +4894,20 @@ fn a_real_reorg_at_the_full_production_depth_survives_the_real_retention_floor()
     );
     assert_eq!(fork_point_a.height(), PREFIX);
 
-    // A's branch: `MAX_REORG_WALK - 1` blocks above the fork point, which is the
-    // deepest abandoned branch `plan_reorg` will ever return.
+    // A's branch: `MAX_REORG_WALK - 1` blocks above the fork point.
     //
-    // Not `MAX_REORG_WALK`. The depth check is on the WALK vectors, and each
-    // carries the ancestor as its last element, so a walk of `max_depth` entries
-    // describes a branch of `max_depth - 1` blocks. Asking for 4,096 abandoned
-    // blocks is asking for a 4,097-entry walk and is refused — measured here
-    // rather than assumed, by the assertion below. The consequence is that
-    // `UNDO_RETENTION_FLOOR = 4_096` is conservative by exactly one block, which
-    // is the safe direction.
+    // CORRECTED from an earlier revision of this comment, which said the walk
+    // vectors' ancestor element made the maximum `max_depth - 1`. That is not
+    // the rule. `plan_reorg` refuses when EITHER branch exceeds `max_depth`
+    // blocks, so the abandoned branch may be up to `max_depth` on its own. What
+    // binds here is the OTHER branch: the adopted one has to be longer for fork
+    // choice to want it, so an abandoned branch of `MAX_REORG_WALK` implies an
+    // adopted branch of `MAX_REORG_WALK + 1`, and that is what is refused. The
+    // assertion below measures both directions rather than restating either.
+    //
+    // Either way the consequence is the same and is the safe direction:
+    // `UNDO_RETENTION_FLOOR = 4_096` covers every branch a longest-chain switch
+    // can abandon.
     let mut branch_a = Vec::new();
     let mut parent = fork_point_a.clone();
     for n in 0..walk - 1 {
@@ -5015,7 +5029,9 @@ fn a_real_reorg_at_the_full_production_depth_survives_the_real_retention_floor()
     );
 
     // One block deeper is refused, which is what makes the line above a
-    // MAXIMUM rather than an arbitrary large number.
+    // MAXIMUM rather than an arbitrary large number. The refusal names the
+    // ADOPTED branch, at 4,096 against a budget of 4,095 — the abandoned branch
+    // is 4,095 and would have fitted.
     let deeper = plan_reorg(
         &store,
         branch_a.last().unwrap(),
@@ -5098,5 +5114,212 @@ fn a_real_reorg_at_the_full_production_depth_survives_the_real_retention_floor()
     assert_eq!(
         a.state.state_root(),
         accumulator_of(branch_b.last().unwrap())
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 17. The canonical height index, in BOTH directions
+//
+// Release blocker 11. `import_reorg` used to retain the arriving block through
+// `BlockStore::put`, which writes `BLOCK_HEIGHT[height] = hash` beside the
+// content-addressed `BLOCKS` row; a refused switch then left the canonical
+// height index naming a block that had not been adopted. That is fixed. Only
+// ONE of the two directions was ever wrong, so both are pinned here: a future
+// change that "fixes" the refusal by never writing the index would break
+// adoption, and nothing would have noticed.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Every `BLOCK_HEIGHT` row, as height -> hash.
+fn height_index(node: &Node) -> BTreeMap<u64, Hash> {
+    node.db
+        .iter(cf::BLOCK_HEIGHT)
+        .expect("iterate the height index")
+        .filter_map(|(k, v)| {
+            (k.len() == 8 && v.len() == 32).then(|| {
+                (
+                    u64::from_be_bytes(k[..8].try_into().unwrap()),
+                    Hash::from_slice(&v).expect("32-byte hash"),
+                )
+            })
+        })
+        .collect()
+}
+
+/// A REFUSED switch leaves the height index byte-for-byte unchanged, and a
+/// SUCCESSFUL one moves it to the adopted branch — never before the commit that
+/// adopts each block.
+#[test]
+fn the_height_index_survives_a_refusal_and_follows_an_adoption() {
+    let alice = key(1);
+    let bob = key(2);
+    let carol = key(3);
+    let proposer = key(9);
+    let (a, b, genesis) = two_nodes(
+        ChainParams::with_v2_enabled(),
+        &[(&alice, 10_000_000), (&bob, 10_000_000)],
+    );
+
+    let mut branch_a = Vec::new();
+    let mut parent = genesis.clone();
+    for n in 0..3u64 {
+        let blk = a.produce(
+            Some(&parent),
+            &proposer,
+            vec![transfer(&alice, &carol.address(), 1_000 + n as u128, 500, n)],
+        );
+        parent = blk.clone();
+        branch_a.push(blk);
+    }
+    let mut branch_b = Vec::new();
+    let mut parent = genesis.clone();
+    for n in 0..2u64 {
+        let blk = b.produce(
+            Some(&parent),
+            &proposer,
+            vec![transfer(&bob, &carol.address(), 7_000 + n as u128, 500, n)],
+        );
+        parent = blk.clone();
+        branch_b.push(blk);
+    }
+    for blk in &branch_b {
+        a.retain(blk);
+    }
+
+    // The index names A's branch, and retaining B's blocks did not touch it.
+    let canonical = height_index(&a);
+    assert_eq!(canonical.get(&0), Some(&genesis.hash()));
+    for blk in &branch_a {
+        assert_eq!(
+            canonical.get(&blk.height()),
+            Some(&blk.hash()),
+            "height {} must name A's block before anything is switched",
+            blk.height()
+        );
+    }
+    assert_eq!(canonical.len(), 4, "genesis plus three blocks");
+
+    let store = BlockStore::new(&a.db);
+    let plan = plan_reorg(
+        &store,
+        branch_a.last().unwrap(),
+        branch_b.last().unwrap(),
+        NO_FINALITY,
+        DEEP,
+    )
+    .expect("plan");
+
+    // ── direction 1: a REFUSED switch changes nothing ───────────────────────
+    //
+    // Refused for a reason that has nothing to do with the height index — a
+    // withheld journal — so what is being measured is the index's behaviour
+    // under refusal and not the refusal's own subject.
+    struct Withholding<'a> {
+        inner: &'a ActivatedJournal<'a>,
+        withhold: u64,
+    }
+    impl BranchJournal for Withholding<'_> {
+        fn lookup(&self, h: u64, b: &Hash) -> JournalLookup {
+            if h == self.withhold {
+                JournalLookup::Absent
+            } else {
+                self.inner.lookup(h, b)
+            }
+        }
+        fn rows(&self, h: u64, b: &Hash) -> Vec<(String, Vec<u8>)> {
+            self.inner.rows(h, b)
+        }
+    }
+    let real = a.real_journal();
+    let refused = execute_reorg(
+        &a.db,
+        &a.state,
+        &a.executor,
+        &plan,
+        NO_VALIDATORS,
+        &Withholding {
+            inner: &real,
+            withhold: 3,
+        },
+        JOURNAL_REQUIRED,
+    );
+    assert!(refused.is_err(), "the withheld journal must refuse");
+    assert_eq!(
+        height_index(&a),
+        canonical,
+        "a refused switch must leave the canonical height index exactly as it was"
+    );
+    drop(real);
+
+    // ── direction 2: the index moves with the COMMIT, not before it ─────────
+    //
+    // The switch is run in its two halves so the intermediate state is
+    // observable. The unwind batch de-indexes every abandoned height; until the
+    // apply commits a block, that height has NO row — absent, not stale. A
+    // stale row would name a block on no chain, which is the defect this whole
+    // section is about, and an absent one cannot.
+    let journal = a.real_journal();
+    let mut batch = a.db.batch();
+    stage_branch_unwind(
+        &a.db,
+        &mut batch,
+        &plan.old_branch,
+        &journal,
+        JOURNAL_REQUIRED,
+    )
+    .expect("unwind");
+    for abandoned in &plan.old_branch {
+        sumchain_storage::candidate::stage_deindex(&mut batch, abandoned).expect("deindex");
+    }
+    sumchain_state::reorg_undo::stage_head_reset(&mut batch, &genesis).expect("head");
+    batch.commit().expect("commit the unwind");
+    drop(journal);
+    a.state.set_state_root(accumulator_of(&genesis));
+
+    let after_unwind = height_index(&a);
+    assert_eq!(
+        after_unwind.keys().copied().collect::<Vec<_>>(),
+        vec![0],
+        "after the unwind commits, only genesis is indexed: every abandoned height is \
+         ABSENT rather than stale"
+    );
+
+    // Apply one block and check the index gained exactly that one height.
+    let applied = apply_branch(
+        &a.db,
+        &a.state,
+        &a.executor,
+        &branch_b[..1],
+        NO_VALIDATORS,
+    )
+    .expect("apply the first adopted block");
+    assert_eq!(applied.applied, 1);
+    let after_one = height_index(&a);
+    assert_eq!(
+        after_one.get(&1),
+        Some(&branch_b[0].hash()),
+        "a committed adoption must index its own block"
+    );
+    assert_eq!(
+        after_one.get(&2),
+        None,
+        "and must not index a block it has not committed yet"
+    );
+
+    // Finish, and require the index to name the adopted branch and nothing else.
+    apply_branch(&a.db, &a.state, &a.executor, &branch_b, NO_VALIDATORS).expect("apply the rest");
+    let finished = height_index(&a);
+    assert_eq!(finished.get(&0), Some(&genesis.hash()));
+    assert_eq!(finished.get(&1), Some(&branch_b[0].hash()));
+    assert_eq!(finished.get(&2), Some(&branch_b[1].hash()));
+    assert_eq!(
+        finished.get(&3),
+        None,
+        "the abandoned branch's extra height must be de-indexed, not left naming A's block"
+    );
+    assert_eq!(finished.len(), 3);
+    assert_eq!(
+        height_index(&b),
+        finished,
+        "and the reorged node's index must equal the index of the node it adopted from"
     );
 }
