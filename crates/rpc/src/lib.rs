@@ -41,6 +41,18 @@ pub enum RpcError {
 
     #[error("Transaction rejected: {0}")]
     TxRejected(String),
+
+    /// This node cannot answer for the height it was asked about, because the
+    /// state that would answer it was never on this machine.
+    ///
+    /// Its own error code, deliberately. Every other way of declining a
+    /// historical question — `null` from a block lookup, an empty list, `false`
+    /// from a finality check — is ALSO the answer for a height that simply has
+    /// nothing at it, and a caller cannot tell the two apart. A node seeded from
+    /// a snapshot at height `h` holds no state and no blocks below `h`: "absent"
+    /// and "I cannot know" are different claims, and only one of them is true.
+    #[error("Below this node's state-history floor: {0}")]
+    BelowHistoryFloor(String),
 }
 
 impl From<RpcError> for jsonrpsee::types::ErrorObjectOwned {
@@ -52,6 +64,11 @@ impl From<RpcError> for jsonrpsee::types::ErrorObjectOwned {
             RpcError::NotFound(msg) => jsonrpsee::types::ErrorObject::owned(-32001, msg, None::<()>),
             RpcError::TxRejected(msg) => {
                 jsonrpsee::types::ErrorObject::owned(-32002, msg, None::<()>)
+            }
+            // Distinct from -32001 (Not found) on purpose: -32001 says the thing
+            // is not there, -32003 says this node is not in a position to say.
+            RpcError::BelowHistoryFloor(msg) => {
+                jsonrpsee::types::ErrorObject::owned(-32003, msg, None::<()>)
             }
             _ => jsonrpsee::types::ErrorObject::owned(-32603, e.to_string(), None::<()>),
         }

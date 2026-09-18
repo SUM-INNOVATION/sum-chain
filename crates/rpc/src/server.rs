@@ -831,6 +831,55 @@ impl RpcServer {
             .collect()
     }
 
+    // ── the state-history floor ─────────────────────────────────────────────
+    //
+    // A node seeded from a state snapshot at height `h` holds canonical state at
+    // `h` and nothing below it: the blocks were never on this machine, the undo
+    // records were never transmitted, and replaying the range is the sync the
+    // import existed to avoid. Every historical question below `h` therefore has
+    // two possible honest answers and only one of them is available — and the
+    // dangerous part is that the UNAVAILABLE one looks exactly like the ordinary
+    // "nothing here": `null` from a block lookup, an empty list, `false` from a
+    // finality check.
+    //
+    // These two helpers are the whole mechanism. `history_floor` reads the one
+    // recorded import height that the startup log and `chain_getSyncCapability`
+    // also read, so the three cannot drift. `refuse_below_history_floor` is the
+    // refusal, with its own error code, so a caller can tell "absent" from "I
+    // cannot know" without parsing prose.
+
+    /// The lowest height this node may answer a historical question for, or
+    /// `None` for a node that executed its own chain and is unrestricted.
+    fn history_floor(&self) -> Result<Option<u64>> {
+        sumchain_state::snapshot::imported_at(&self.db)
+            .map_err(|e| RpcError::Internal(e.to_string()))
+    }
+
+    /// Refuse `height` if this node cannot know the answer.
+    ///
+    /// Callers come in two shapes and both are correct:
+    ///
+    /// * **Unconditional** — the path would otherwise produce a WRONG answer
+    ///   rather than no answer. `storage_getActiveNodesAtHeight` walks backwards
+    ///   to the nearest snapshot, so below the floor it returns whatever it finds
+    ///   at the bottom of this node's history, which the caller cannot
+    ///   distinguish from a correct answer. It must refuse before looking.
+    /// * **On absence** — the path produces a real answer when it has the data
+    ///   and an indistinguishable "nothing" when it does not. A block lookup that
+    ///   FOUND the block knows something and should say it; one that found
+    ///   nothing below the floor must say it cannot know rather than `null`.
+    fn refuse_below_history_floor(&self, height: u64) -> Result<()> {
+        match self.history_floor()? {
+            Some(floor) if height < floor => Err(RpcError::BelowHistoryFloor(format!(
+                "height {height} is below this node's state-history floor {floor}: it was \
+                 seeded from a snapshot at {floor} and holds no state or blocks below that \
+                 height. This is not an assertion that nothing exists at {height} — this \
+                 node cannot know. Query a node that replayed this range."
+            ))),
+            _ => Ok(()),
+        }
+    }
+
     /// Parse hash from string
     fn parse_hash(&self, s: &str) -> Result<Hash> {
         Hash::from_hex(s)
@@ -985,6 +1034,14 @@ impl SumChainApiServer for RpcServer {
         let block = block_store
             .get_by_height(height)
             .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        // Found is found: a node that holds the block knows the answer whatever
+        // its floor says. An ABSENCE below the floor is the ambiguous case —
+        // `null` here would claim the chain has no block at this height, which
+        // this node is in no position to claim.
+        if block.is_none() {
+            self.refuse_below_history_floor(height)?;
+        }
 
         Ok(block.map(|b| self.block_to_info(&b)))
     }
@@ -1215,11 +1272,16 @@ impl SumChainApiServer for RpcServer {
         let mut blocks = Vec::new();
 
         for height in from_height..=to_height {
-            if let Some(block) = block_store
+            match block_store
                 .get_by_height(height)
                 .map_err(|e| RpcError::Internal(e.to_string()))?
             {
-                blocks.push(self.block_to_info(&block));
+                Some(block) => blocks.push(self.block_to_info(&block)),
+                // A range is worse than a single lookup: a short list is not
+                // obviously short, so a caller that asked for 100 blocks and got
+                // 40 reads it as "the chain has 40 there". Refuse the whole
+                // range rather than return a truncation that looks complete.
+                None => self.refuse_below_history_floor(height)?,
             }
         }
 
@@ -1272,6 +1334,13 @@ impl SumChainApiServer for RpcServer {
     }
 
     async fn is_block_finalized(&self, height: u64) -> std::result::Result<bool, jsonrpsee::types::ErrorObjectOwned> {
+        // `false` is the answer for "not yet final" AND for "I have no history
+        // here", and the two are opposite in consequence: a caller waiting for
+        // finality on a height below this node's floor would wait forever on a
+        // block that finalised long ago. Unconditional, because the predicate
+        // answers from consensus state rather than from a lookup that can be
+        // observed to have failed.
+        self.refuse_below_history_floor(height)?;
         Ok(self.consensus.is_finalized(height))
     }
 
@@ -3491,6 +3560,12 @@ impl SumChainApiServer for RpcServer {
         let events = store
             .get_messages_in_block(block_height, limit.unwrap_or(100) as usize)
             .map_err(|e| RpcError::Internal(e.to_string()))?;
+
+        // An empty list at a height this node never held is not "no messages in
+        // that block".
+        if events.is_empty() {
+            self.refuse_below_history_floor(block_height)?;
+        }
 
         let results: Vec<MessageEventInfo> = events
             .into_iter()
@@ -8060,19 +8135,10 @@ impl SumChainApiServer for RpcServer {
         // finds there — an answer the caller cannot distinguish from a correct
         // one. Refusing is the only honest response, and the predicate is shared
         // so every historical path applies the same rule.
-        if !sumchain_state::snapshot::can_serve_history_at(&self.db, height)
-            .map_err(|e| RpcError::Internal(e.to_string()))?
-        {
-            let floor = sumchain_state::snapshot::imported_at(&self.db)
-                .map_err(|e| RpcError::Internal(e.to_string()))?
-                .unwrap_or(0);
-            return Err(RpcError::InvalidParams(format!(
-                "height {height} is below this node's state-history floor {floor}: it \
-                 was seeded from a snapshot at {floor} and holds no state below that \
-                 height. Query a node that replayed this range."
-            ))
-            .into());
-        }
+        //
+        // UNCONDITIONAL, unlike the block lookups: this path does not fail
+        // visibly below the floor, it succeeds wrongly.
+        self.refuse_below_history_floor(height)?;
 
         let executor = sumchain_state::NodeRegistryExecutor::new(self.db.clone());
         let records = executor
