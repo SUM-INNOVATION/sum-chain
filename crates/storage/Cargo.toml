@@ -18,5 +18,16 @@ tracing = { workspace = true }
 parking_lot = { workspace = true }
 hex = { workspace = true }
 
+[features]
+# Constructors that fabricate a `JournalActivation` without a database.
+#
+# OFF in every production build, so `JournalActivation::pinned` is not reachable
+# from the node binary at all: the only way production code can obtain an
+# activation is `JournalActivation::resolve`, which reads this database's own
+# undo-history floor and cannot be talked out of it. Enabled through
+# dev-dependencies by the crates whose TESTS need a boundary with no database
+# behind it (`sumchain-state`, `sumchain-consensus`).
+activation-fixtures = []
+
 [dev-dependencies]
 tempfile = "3.10"

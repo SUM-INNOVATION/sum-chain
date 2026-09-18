@@ -960,12 +960,27 @@ Stated because a clearly named gap is worth more than a silence.
   (`state/the_legacy_revert_path_has_no_production_caller_and_the_rollback_cli_has_its_own`)
   stays as a secondary tripwire, not as the guard.
 
-  What that does NOT close: a caller holding a fabricated `JournalActivation` —
-  `JournalActivation::pinned(u64::MAX)`, which the tests themselves use — can
-  still classify everything as pre-activation. Closing that would need a
-  capability the storage layer does not have. What is closed is the case the API
-  was actually exposed to: a caller that did not think about the boundary can no
-  longer reach the function at all.
+  The fabricated-activation hole is now CLOSED too. It was left open on the
+  grounds that the storage layer lacked the capability; the type did, and the
+  BUILD did not. `JournalActivation::pinned` — the only constructor that answers
+  the classification without consulting a database, and the one that returns
+  "pre-activation everywhere" for `u64::MAX` — is behind `cfg(any(test, feature
+  = "activation-fixtures"))`. The feature is enabled only through the
+  dev-dependencies of `sumchain-state` and `sumchain-consensus`, whose tests need
+  a boundary with no database behind it; `sumchain-node` enables it on no edge,
+  so production code that called it would not compile. The only production route
+  to an activation is `JournalActivation::resolve`, which reads the database's
+  own undo-history floor.
+  [PRODUCER, TESTED: `crates/consensus/tests/activation_construction_guard.rs` —
+  a structural guard that strips `cfg(test)` items from every `crates/*/src`
+  file and pins: no production file mentions `pinned`; the gate sits directly
+  above the signature; the feature is enabled only from `[dev-dependencies]` and
+  never by the node; `JournalActivation` has no public fields, so a struct
+  literal is not a second route; the sites that resolve an activation or
+  translate a configured height are exactly four files; and
+  `MissingJournalPolicy::ToleratedEverywhere` has one production construction,
+  reached only from a boundary of `None`, with `stage_branch_unwind` called from
+  one module.]
 * **`sum-node rollback` is FIXED**, and was the real defect of the two. It used
   to revert account rows from `cf::STATE_DIFFS` with its own open-coded loop,
   consulting neither the contract diff nor the generic application journal and
@@ -976,6 +991,20 @@ Stated because a clearly named gap is worth more than a silence.
   classification, the missing-record halt, the activation checkpoint, and the
   refusal to go deeper than this node's undo history reaches. Those live in the
   consensus crate rather than in `main.rs` precisely so tests can reach them.
+  The families are now proven one by one.
+  `reorg/a_rollback_restores_accounts_contracts_supply_and_an_indexed_subsystem`
+  rolls back blocks that write an account row, a contract's code and storage, a
+  supply row, and an INDEXED application subsystem — a primary row plus the
+  secondary index pointing at it, where the index row exists only at and above
+  the target, so the unwind has to DELETE it rather than overwrite it. An index
+  outliving its record is a lookup that returns nothing while the subsystem
+  still believes the record exists, which is the shape the account-only loop
+  produced. Five of those six rows come back wrong under the old behaviour.
+  (`reorg/a_rollback_restores_every_family_the_legacy_diffs_never_covered`
+  compares whole-database snapshots and is kept, but its fixture carries plain
+  transfers, so on its own its claim about contracts and the subsystems is true
+  and vacuous.)
+
   What remains unproven about it is the CLI GLUE: the tests drive
   `plan_rollback`/`execute_rollback` directly, and nothing executes the
   `sum-node rollback` subcommand end to end. The scan in
@@ -1280,10 +1309,38 @@ chain has the four legacy per-subsystem journals to fall back on, and the
 restored node has nothing at all. So the ambiguity is removed by a row rather
 than guessed at.
 
-**`journal::record_undo_history_floor(db, height)` is the one call a restore
-path must make.** It stamps `META[application_journal/undo_history_floor]` with
-the height the snapshot left the database at. It is monotone: a later restore
-may raise the floor, never lower it.
+**`journal::stage_undo_history_floor(db, batch, height)` is the one call a
+restore path must make**, and it must make it in the batch that commits the
+restored rows. It stamps `META[application_journal/undo_history_floor]` with the
+height the snapshot left the database at. It is monotone: a later restore may
+raise the floor, never lower it, because lowering it would claim undo history
+the node never acquired. `record_undo_history_floor(db, height)` is the same
+write as a batch of its own, for a caller with no batch to join.
+
+**One row, and formerly two.** A second `META` key, `snapshot/imported_at`,
+recorded the same fact from a separate module with its own encoding, its own
+decode failure and a last-write-wins rule. Two rows for one fact do not
+conflict, they diverge, and they merge cleanly while being wrong together: a
+restore that writes one and not the other leaves the journal boundary and the
+advertised history depth describing different databases, and neither module can
+detect it because neither knows the other exists. They are collapsed to this
+key. Neither prototype shipped, so there is no dual write, no read fallback and
+no migration — the retired key is one this binary has never written and does not
+read.
+[PRODUCER, TESTED:
+`producer/one_row_records_the_history_floor_under_every_name_that_reaches_it`.]
+
+**Why it must be STAGED and not written afterwards.** A restore that imports
+rows and then records the floor as a second write has a window between the two.
+A crash there leaves restored state at height `h` with no floor recorded — an
+empty journal family, a boundary that reads as unestablished, and a node
+treating every height below `h` as pre-journal history it may unwind from legacy
+diffs it does not have. The restore "succeeded" and the node is wrong about
+itself, with nothing left to notice. In one batch the two facts are exactly as
+durable as each other.
+[PRODUCER, TESTED:
+`producer/the_restore_floor_and_the_restored_state_commit_or_fail_together` —
+which also covers the restart and the startup gate.]
 
 `JournalActivation::resolve` then raises the boundary to `floor + 1` — `+ 1`
 because the restored block is the last one this node did not journal — and takes
@@ -1297,7 +1354,19 @@ follows without further plumbing:
   deeper than that at PLAN time, before the plan is acted on.
 
 `crates/state/src/snapshot.rs` belongs to another workstream and is not changed
-here. The requirement on it is exactly one line of code and these properties:
+here. `sumchain_storage::snapshot_meta` currently re-exports this row's three
+accessors under the names that file already calls (`record_snapshot_import`,
+`snapshot_import_height`, `SNAPSHOT_IMPORT_META_KEY`), so the collapse to one
+row is complete on disk today. The edit that retires the bridge:
+
+* call `journal::stage_undo_history_floor` inside the batch that makes the
+  restored account rows durable, rather than `record_snapshot_import` after the
+  commitment check;
+* read the floor through `journal::undo_history_floor`;
+* drop the `SNAPSHOT_IMPORT_META_KEY` re-export, after which
+  `crates/storage/src/snapshot_meta.rs` has no callers and should be deleted.
+
+The properties required of it are unchanged:
 
 1. A restored node MUST NOT report a reorg depth greater than
    `advertisable_reorg_depth`. Immediately after a restore it is **0**.
@@ -1310,12 +1379,13 @@ here. The requirement on it is exactly one line of code and these properties:
    record the node holds — the same statement §7.3 makes about the activation
    height, for the same reason.
 
-**Until something calls `record_undo_history_floor`, a restored node is
-indistinguishable from a pre-journal chain and is treated as one.** That is
+**Until the restore stages the floor, a restored node is indistinguishable from
+a pre-journal chain and is treated as one.** That is
 stated rather than glossed: the enforcement is complete and tested on this side,
 and it binds on the day the row is written.
 [PRODUCER, TESTED: `producer/a_restore_floor_raises_the_activation_boundary`,
-`producer/a_node_that_was_never_restored_is_unaffected_by_the_floor`.]
+`producer/a_node_that_was_never_restored_is_unaffected_by_the_floor`,
+`producer/a_restored_node_rebuilds_its_usable_depth_one_published_block_at_a_time`.]
 [CONSUMER, DONE: `reorg/a_snapshot_restored_node_refuses_a_switch_below_its_restore_point`,
 `reorg/a_switch_deeper_than_this_nodes_undo_history_is_refused_at_plan_time`,
 `reorg/a_long_catch_up_over_a_shallow_fork_is_not_refused`,

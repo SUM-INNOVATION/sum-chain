@@ -1,115 +1,69 @@
-//! What a state-snapshot import did to this database.
+//! The one row that says what history this node holds — reached by the names a
+//! snapshot restore still calls it by.
 //!
-//! One `META` row, read and written through typed accessors rather than by
-//! hand. It sits beside [`crate::journal::FORMAT_HIGH_WATER_META_KEY`] and
-//! exists for the same reason: the consequences of something that happened once,
-//! outside block execution, have to survive the process that did it.
+//! # What this module used to be, and why it is no longer that
 //!
-//! A node seeded from a state snapshot holds canonical state at some height and
-//! **no undo records at or below it**, and cannot reconstruct historical state
-//! below it either — the blocks are not there, and if they were, replaying them
-//! is the sync the import avoided. Both facts bound what the node may advertise
-//! and what it may serve. Held only in the value an import returned, they would
-//! be lost at the next restart, and the node would go back to claiming a reorg
-//! horizon over blocks it has no records for.
+//! It used to own a second `META` row, `snapshot/imported_at`, with its own
+//! encoding, its own decode failure and its own last-write-wins rule. The
+//! journal owned a first one, `application_journal/undo_history_floor`, with a
+//! different encoding path and a monotone rule. **Both recorded the same fact**:
+//! the earliest height for which this node has usable generic undo history, and
+//! therefore the floor below which it can neither unwind nor serve state.
 //!
-//! # Why this is a module and not a `db.put` at the call site
+//! Two rows for one fact do not conflict — they diverge. A restore path that
+//! writes one and forgets the other, or writes them in two steps and crashes
+//! between, leaves a node whose journal boundary and whose advertised history
+//! depth describe different databases, and neither module can detect it because
+//! neither knows the other exists. A `git merge` cannot detect it either: the
+//! two keys are in two files and merge cleanly while being wrong together.
 //!
-//! The write is not block execution — there is no candidate and no block to
-//! abandon — so it does not belong on an `ExecutionView`. What it does belong in
-//! is the storage layer, with its key, its encoding and its decode failure in
-//! one place. A hand-rolled `db.put(cf::META, b"…", &h.to_be_bytes())` at the
-//! caller spreads the format across two crates and leaves the "what if it is
-//! unreadable" question to whoever reads it next.
+//! So the row is now exactly one:
+//! [`crate::journal::UNDO_HISTORY_FLOOR_META_KEY`], written through
+//! [`crate::journal::stage_undo_history_floor`] (inside the restore's own
+//! batch) or [`crate::journal::record_undo_history_floor`] (standalone), and
+//! read through [`crate::journal::undo_history_floor`]. There is no dual write,
+//! no read fallback and no migration: neither prototype shipped, so
+//! `snapshot/imported_at` is not a legacy format, it is a key this binary has
+//! never written and does not read.
+//!
+//! # Why the old names still resolve
+//!
+//! The call sites are in `crates/state/src/snapshot.rs`, which belongs to
+//! another track and is not edited from here. These three re-exports are the
+//! bridge until it moves, and they are re-exports and not wrappers on purpose:
+//! there is no second key, no second encoding and no second write rule behind
+//! them, so a caller reaching the row by either name reaches the same row with
+//! the same semantics. `crates/storage/tests/application_journal.rs`'s
+//! `one_row_records_the_history_floor_under_every_name_that_reaches_it` pins
+//! that, so the bridge cannot quietly become a second implementation again.
+//!
+//! The required follow-up, stated so it can be checked: `snapshot.rs` should
+//! call `journal::stage_undo_history_floor` inside the batch that makes the
+//! restored account rows durable, drop its `SNAPSHOT_IMPORT_META_KEY`
+//! re-export, and read the floor through `journal::undo_history_floor`. At that
+//! point this module has no callers and should be deleted outright.
 
-use crate::db::cf;
-use crate::db::Database;
-use crate::{Result, StorageError};
-use sumchain_primitives::BlockHeight;
-
-/// `META` key holding the height a state snapshot was imported at.
+/// The single `META` key recording this node's undo-history floor.
 ///
-/// Namespaced like the journal's format watermark, so the `META` family stays
-/// readable as a set of named facts rather than a bag of keys.
-pub const SNAPSHOT_IMPORT_META_KEY: &[u8] = b"snapshot/imported_at";
+/// Identical to [`crate::journal::UNDO_HISTORY_FLOOR_META_KEY`] — the same
+/// constant, not a copy of its bytes.
+pub use crate::journal::UNDO_HISTORY_FLOOR_META_KEY as SNAPSHOT_IMPORT_META_KEY;
 
-/// Record that a snapshot was imported at `height`.
+/// Record a restore at `height`. See
+/// [`crate::journal::record_undo_history_floor`].
 ///
-/// Idempotent, and last-write-wins: a database imported into twice is described
-/// by the most recent import, which is the one that determines what state it now
-/// holds.
-pub fn record_snapshot_import(db: &Database, height: BlockHeight) -> Result<()> {
-    db.put(cf::META, SNAPSHOT_IMPORT_META_KEY, &height.to_be_bytes())
-}
+/// Monotone, where the row this replaced was last-write-wins. Monotone is the
+/// correct rule for the fact being recorded: the floor is "the lowest height
+/// this node can reverse", and no import ever LOWERS that — an import into a
+/// database that already holds deeper history would be claiming undo records it
+/// did not receive, because a snapshot cannot carry any.
+pub use crate::journal::record_undo_history_floor as record_snapshot_import;
 
-/// The height a snapshot was imported at, or `None` if none ever was.
+/// The recorded floor, or `None` if nothing ever set one. See
+/// [`crate::journal::undo_history_floor`].
 ///
 /// `None` is the PERMISSIVE answer — no restriction on history, no restriction
 /// on reorg depth — and it is correct for a node that executed every block it
-/// holds. That is exactly why an unreadable value must not resolve to it: a
-/// database that WAS imported into, whose record cannot be decoded, would
-/// otherwise start claiming history it does not have. So a malformed value is an
-/// error, and the error says what follows from it.
-pub fn snapshot_import_height(db: &Database) -> Result<Option<BlockHeight>> {
-    let Some(raw) = db.get(cf::META, SNAPSHOT_IMPORT_META_KEY)? else {
-        return Ok(None);
-    };
-    let bytes: [u8; 8] = raw.as_slice().try_into().map_err(|_| {
-        StorageError::InvalidData(format!(
-            "the recorded snapshot import height is {} bytes, not 8; this node cannot \
-             establish what history it holds and must not serve any",
-            raw.len()
-        ))
-    })?;
-    Ok(Some(u64::from_be_bytes(bytes)))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::TempDir;
-
-    fn db() -> (Database, TempDir) {
-        let dir = TempDir::new().unwrap();
-        let db = Database::open_default(dir.path()).unwrap();
-        (db, dir)
-    }
-
-    #[test]
-    fn an_untouched_database_reports_no_import() {
-        let (db, _dir) = db();
-        assert_eq!(snapshot_import_height(&db).unwrap(), None);
-    }
-
-    #[test]
-    fn the_height_round_trips_and_the_last_import_wins() {
-        let (db, _dir) = db();
-        record_snapshot_import(&db, 496_721).unwrap();
-        assert_eq!(snapshot_import_height(&db).unwrap(), Some(496_721));
-
-        // A database imported into twice is described by the most recent import:
-        // that is the one that decided what state it now holds.
-        record_snapshot_import(&db, 500_000).unwrap();
-        assert_eq!(snapshot_import_height(&db).unwrap(), Some(500_000));
-    }
-
-    /// A malformed record is an error, not an absence.
-    ///
-    /// Absence means "no restriction", which is the permissive answer. Resolving
-    /// a corrupt value to it would let an imported node serve history it does
-    /// not have — the exact failure this row exists to prevent.
-    #[test]
-    fn a_malformed_record_does_not_read_as_never_imported() {
-        let (db, _dir) = db();
-        for bad in [vec![], vec![0u8; 3], vec![0u8; 9]] {
-            db.put(cf::META, SNAPSHOT_IMPORT_META_KEY, &bad).unwrap();
-            let err = snapshot_import_height(&db)
-                .expect_err("a malformed height must not resolve to `None`")
-                .to_string();
-            assert!(
-                err.contains("must not serve any"),
-                "the error must say what follows from it: {err}"
-            );
-        }
-    }
-}
+/// holds. That is exactly why an unreadable value must not resolve to it, and
+/// does not: a malformed row is an error whose text says what follows from it.
+pub use crate::journal::undo_history_floor as snapshot_import_height;

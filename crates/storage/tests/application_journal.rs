@@ -1496,3 +1496,362 @@ fn the_database_size_estimate_counts_every_family_not_just_the_default() {
     // the number a disk budget is about.
     assert!(flushed < unflushed + 1_000_000);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ONE AUTHORITATIVE HISTORY-FLOOR ROW.
+//
+// Two `META` keys used to record the same fact — the earliest height for which
+// this node has usable generic undo history. `journal`'s
+// `application_journal/undo_history_floor` and `snapshot_meta`'s
+// `snapshot/imported_at`, in two files, with two encodings and two write rules.
+//
+// Two rows for one fact do not conflict, they DIVERGE, and they merge cleanly
+// while being wrong together: a restore that writes one and not the other
+// leaves the journal boundary and the advertised history depth describing
+// different databases, and neither module can detect it because neither knows
+// the other exists.
+//
+// These tests pin the collapse, and the six things the surviving row has to do.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// There is ONE key, and every name that still reaches the fact reaches that
+/// key — not a second row that happens to agree today.
+///
+/// The bridge names in `snapshot_meta` are re-exports, so this is a tautology at
+/// the type level and the test says so deliberately: the assertion that matters
+/// is the one on the database, that writing through either name leaves exactly
+/// one row in `META` and that the retired `snapshot/imported_at` key is never
+/// written at all.
+#[test]
+fn one_row_records_the_history_floor_under_every_name_that_reaches_it() {
+    use sumchain_storage::journal::{
+        record_undo_history_floor, undo_history_floor, UNDO_HISTORY_FLOOR_META_KEY,
+    };
+    use sumchain_storage::snapshot_meta::{
+        record_snapshot_import, snapshot_import_height, SNAPSHOT_IMPORT_META_KEY,
+    };
+
+    /// The key the retired prototype used. Named here and nowhere else in the
+    /// tree: if it reappears in production code this test starts failing for
+    /// the right reason.
+    const RETIRED_KEY: &[u8] = b"snapshot/imported_at";
+
+    assert_eq!(
+        SNAPSHOT_IMPORT_META_KEY, UNDO_HISTORY_FLOOR_META_KEY,
+        "the two names must denote one key"
+    );
+    assert_ne!(
+        UNDO_HISTORY_FLOOR_META_KEY, RETIRED_KEY,
+        "the surviving key is the journal's, and the retired one is gone"
+    );
+
+    let (d, _g) = db();
+
+    // Written through the snapshot-side name, read through the journal-side one.
+    record_snapshot_import(&d, 700).expect("record");
+    assert_eq!(undo_history_floor(&d).unwrap(), Some(700));
+    assert_eq!(snapshot_import_height(&d).unwrap(), Some(700));
+
+    // Written through the journal-side name, read through the snapshot-side one.
+    record_undo_history_floor(&d, 900).expect("record");
+    assert_eq!(snapshot_import_height(&d).unwrap(), Some(900));
+
+    // And the retired row was never touched by either. A dual write is exactly
+    // what this collapse removes, so its absence is the claim.
+    assert_eq!(
+        d.get(cf::META, RETIRED_KEY).unwrap(),
+        None,
+        "the retired key must not be written, mirrored or migrated"
+    );
+    assert_eq!(
+        d.get(cf::META, UNDO_HISTORY_FLOOR_META_KEY).unwrap(),
+        Some(900u64.to_be_bytes().to_vec()),
+        "one row, one encoding"
+    );
+
+    // One write rule too: monotone, under BOTH names. The snapshot-side row used
+    // to be last-write-wins, which would have let a later import lower the floor
+    // and claim undo history no snapshot can carry.
+    record_snapshot_import(&d, 100).expect("record");
+    assert_eq!(
+        undo_history_floor(&d).unwrap(),
+        Some(900),
+        "the surviving rule is monotone under every name that reaches it"
+    );
+
+    // And one decode failure, whose text says what follows from it. The state
+    // crate's `imported_at` surfaces this string to an operator.
+    d.put(cf::META, UNDO_HISTORY_FLOOR_META_KEY, &[0u8; 3])
+        .unwrap();
+    for err in [
+        undo_history_floor(&d).expect_err("malformed").to_string(),
+        snapshot_import_height(&d)
+            .expect_err("malformed")
+            .to_string(),
+    ] {
+        assert!(
+            err.contains("must not serve any"),
+            "a malformed row must be an error that says what follows: {err}"
+        );
+    }
+}
+
+/// The floor and the restored state land in ONE batch, so a crash cannot
+/// separate them.
+///
+/// The bug this rules out: a restore writes rows, then records the floor as a
+/// second write, and the process dies in between. What survives is a database
+/// holding restored state at height `h` with no floor — the journal family is
+/// empty, the boundary resolves to unestablished, and the node treats every
+/// height below `h` as pre-journal history it may unwind from legacy diffs it
+/// does not have. The restore "succeeded" and the node is wrong about itself,
+/// with nothing left to notice.
+#[test]
+fn the_restore_floor_and_the_restored_state_commit_or_fail_together() {
+    use sumchain_storage::journal::{stage_undo_history_floor, undo_history_floor};
+
+    const RESTORED_AT: u64 = 5_000;
+
+    // ── the crash: a batch that is never committed leaves NEITHER ────────────
+    {
+        let (d, _g) = db();
+        let mut batch = d.batch();
+        batch
+            .put(cf::STATE, b"restored-account", b"balance")
+            .unwrap();
+        assert!(
+            stage_undo_history_floor(&d, &mut batch, RESTORED_AT).unwrap(),
+            "a first floor is staged"
+        );
+        drop(batch);
+
+        assert_eq!(
+            d.get(cf::STATE, b"restored-account").unwrap(),
+            None,
+            "no state"
+        );
+        assert_eq!(undo_history_floor(&d).unwrap(), None, "and no floor");
+    }
+
+    // ── the commit: both, atomically ────────────────────────────────────────
+    let (d, dir) = db();
+    let mut batch = d.batch();
+    batch
+        .put(cf::STATE, b"restored-account", b"balance")
+        .unwrap();
+    assert!(stage_undo_history_floor(&d, &mut batch, RESTORED_AT).unwrap());
+    batch.commit().expect("commit");
+
+    assert_eq!(
+        d.get(cf::STATE, b"restored-account").unwrap().as_deref(),
+        Some(&b"balance"[..])
+    );
+    assert_eq!(undo_history_floor(&d).unwrap(), Some(RESTORED_AT));
+
+    // The boundary binds immediately, with no further plumbing: `floor + 1`,
+    // because the restored block itself is the last one this node did not
+    // journal.
+    let act = JournalActivation::resolve(&d, ActivationSource::ObservedFromChain).unwrap();
+    assert_eq!(act.boundary(), Some(RESTORED_AT + 1));
+    assert_eq!(
+        act.advertisable_reorg_depth(RESTORED_AT, 4_096),
+        0,
+        "a node that has just restored can reverse nothing"
+    );
+
+    // Staging is monotone and leaves the batch untouched when it declines, so a
+    // second restore at a lower height cannot smuggle a lower floor into an
+    // otherwise legitimate batch.
+    let mut batch = d.batch();
+    assert!(
+        !stage_undo_history_floor(&d, &mut batch, RESTORED_AT - 1).unwrap(),
+        "a lower floor is declined"
+    );
+    batch.commit().expect("commit");
+    assert_eq!(undo_history_floor(&d).unwrap(), Some(RESTORED_AT));
+
+    // ── restart preserves it ────────────────────────────────────────────────
+    //
+    // The whole reason the fact is a row rather than a return value: held only
+    // in what an import returned, it is lost at the next boot and the node goes
+    // back to claiming a reorg horizon over blocks it has no records for.
+    drop(d);
+    let reopened = Database::open_default(dir.path()).expect("reopen");
+    assert_eq!(undo_history_floor(&reopened).unwrap(), Some(RESTORED_AT));
+
+    // ── and startup READS it ────────────────────────────────────────────────
+    //
+    // `validate_startup` is what `sumchain_node::node::Node::new` and the
+    // `sum-node rollback` tool both call before anything can act on history.
+    let state = sumchain_storage::journal::validate_startup(&reopened).expect("startup gate");
+    assert_eq!(
+        state.undo_history_floor,
+        Some(RESTORED_AT),
+        "the boot gate must read the floor, not discover it at the first reorg"
+    );
+    assert_eq!(
+        state.observed_boundary, None,
+        "the journal family is genuinely empty — which is exactly why the floor \
+         has to be a separate row: an empty family alone cannot tell a restored \
+         database from a pre-journal chain"
+    );
+    assert_eq!(
+        JournalActivation::resolve(&reopened, ActivationSource::ObservedFromChain)
+            .unwrap()
+            .boundary(),
+        Some(RESTORED_AT + 1),
+    );
+}
+
+/// Publishing raises the usable depth honestly: `0` at the floor, `+1` per
+/// published block, capped at `UNDO_RETENTION_FLOOR`.
+///
+/// Driven by real publications through `AcceptedCandidate::publish` rather than
+/// by arithmetic on a fabricated activation, because the claim is that the
+/// journal ROWS are what raise the depth. `UNDO_RETENTION_FLOOR` is a promise
+/// not to DISCARD undo history, never a claim to have it, and this is the test
+/// that the cap never becomes the floor.
+#[test]
+fn a_restored_node_rebuilds_its_usable_depth_one_published_block_at_a_time() {
+    use sumchain_storage::journal::{record_undo_history_floor, undo_history_floor};
+    use sumchain_storage::pruner::UNDO_RETENTION_FLOOR;
+
+    const RESTORED_AT: u64 = 9_000;
+    let (d, _g) = db();
+    record_undo_history_floor(&d, RESTORED_AT).expect("restore");
+
+    let depth = |head: u64| {
+        JournalActivation::resolve(&d, ActivationSource::ObservedFromChain)
+            .unwrap()
+            .advertisable_reorg_depth(head, UNDO_RETENTION_FLOOR)
+    };
+
+    assert_eq!(depth(RESTORED_AT), 0, "0 at the floor");
+
+    // Each published block writes one journal, and is worth exactly one block of
+    // depth — no more.
+    for (published, height) in (RESTORED_AT + 1..=RESTORED_AT + 5).enumerate() {
+        publish_with(&d, &block_at(height, height), TEST_LIMIT, |view| {
+            view.put(cf::STATE, &height.to_be_bytes(), b"v")
+        })
+        .expect("publish");
+        assert_eq!(
+            journal_rows(&d).len(),
+            published + 1,
+            "one journal row per published block"
+        );
+        assert_eq!(
+            depth(height),
+            published as u64 + 1,
+            "the usable depth at head {height} is the number of blocks published \
+             since the restore, and nothing else"
+        );
+    }
+
+    // The floor is untouched by publishing — it records where the restore left
+    // this database, not where the head is.
+    assert_eq!(undo_history_floor(&d).unwrap(), Some(RESTORED_AT));
+
+    // And the cap is a ceiling, never a floor. A head far above the restore is
+    // capped at the retention floor; a head five blocks above it is worth five.
+    assert_eq!(
+        depth(RESTORED_AT + UNDO_RETENTION_FLOOR * 3),
+        UNDO_RETENTION_FLOOR,
+        "capped at the engine's horizon"
+    );
+    assert_eq!(depth(RESTORED_AT + 5), 5);
+}
+
+/// The size estimate is what the capacity brake reads, and on the old
+/// implementation the brake could never have fired.
+///
+/// The sibling test above proves the estimate MOVES. This proves the move is
+/// load-bearing: the two facts that made the old reading a constant, and the
+/// consequence for the one thing in this tree that acts on it.
+///
+/// Kept separate rather than folded in, because it is a different claim. "The
+/// number changes when rows are written" is about `approximate_size`; "the node
+/// stops producing before it runs out of disk" is about
+/// `CapacityGuard::assess`, and a brake wired to a constant reports `Healthy`
+/// at every budget forever — silently, with no error and no metric, which is
+/// exactly how it survived.
+#[test]
+fn the_capacity_brake_could_not_have_fired_on_the_old_size_estimate() {
+    use sumchain_storage::pruner::{CapacityGuard, CapacityVerdict};
+
+    // ── fact one: nothing in this schema lives in the default family ────────
+    //
+    // The old implementation read `rocksdb.estimate-live-data-size` on the
+    // database handle, which is the DEFAULT column family's property. This is
+    // why that was a constant: there is no row in this schema for it to count,
+    // today or ever, because the default family is not among the families the
+    // database opens.
+    assert!(
+        !ALL_CFS.contains(&"default"),
+        "the default column family holds nothing in this schema, which is what \
+         made the old estimate a constant; if it is ever added here, the reason \
+         this regression exists has changed"
+    );
+
+    let (d, _g) = db();
+    let empty = d.approximate_size();
+
+    // ── fact two: the family the brake exists for is a NAMED one ────────────
+    //
+    // `application_journal` is the family that grows without bound when pruning
+    // is disabled, and it is the growth §12.3 forecasts. An estimate that
+    // cannot see it cannot brake on it, so the rows here go there rather than
+    // into `cf::STATE`.
+    for i in 0..6_000u32 {
+        d.put(cf::APPLICATION_JOURNAL, &i.to_be_bytes(), &[9u8; 256])
+            .unwrap();
+    }
+    let loaded = d.approximate_size();
+    assert!(
+        loaded > empty,
+        "the estimate must see the application-journal family, which is the one \
+         the disk budget exists for: {loaded} against an empty {empty}"
+    );
+
+    // ── monotone, not a one-off step ────────────────────────────────────────
+    for i in 6_000..12_000u32 {
+        d.put(cf::APPLICATION_JOURNAL, &i.to_be_bytes(), &[9u8; 256])
+            .unwrap();
+    }
+    let more = d.approximate_size();
+    assert!(
+        more > loaded,
+        "the estimate must keep tracking growth rather than saturating: {more} \
+         against {loaded}"
+    );
+
+    // ── the consequence: the brake actually engages ─────────────────────────
+    //
+    // A budget the database has now exceeded. On the old constant this verdict
+    // was `Healthy` for every budget above the floor, forever — a node with a
+    // recorded budget would have produced blocks straight onto a full disk and
+    // reported nothing.
+    let budget = empty + (more - empty) / 2;
+    let guard = CapacityGuard::new(budget);
+    assert!(
+        guard.assess(more).is_stop(),
+        "a database past its budget must stop producing; got {:?} for {more} \
+         bytes against a budget of {budget}",
+        guard.assess(more)
+    );
+    assert_eq!(
+        guard.assess(empty),
+        CapacityVerdict::Healthy,
+        "and the same guard must have been healthy when the database was empty, \
+         or the fixture proved nothing about the growth in between"
+    );
+
+    // Unbudgeted is still unbounded, which is the shipped default: this build
+    // prunes nothing, and a node with no budget recorded behaves exactly as it
+    // did before any of this existed.
+    assert_eq!(
+        CapacityGuard::unbounded().assess(more),
+        CapacityVerdict::Healthy,
+        "no budget means no brake, which is the default this tree ships"
+    );
+}

@@ -428,3 +428,105 @@ async fn archiving_the_same_block_twice_is_idempotent() {
         "and the content is unchanged"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Archival touches two families, and the canonical height index is not one.
+//
+// `a_block_losing_fork_choice_is_not_published` pins `BLOCK_HEIGHT[1]` at the
+// winner, which is the specific row the old bug repointed. That is one row at
+// one height, and the guarantee is wider: a block that lost fork choice must
+// leave NOTHING outside the two content-addressed families, because every other
+// family in this schema is keyed without branch identity and an abandoned
+// block's row there shadows the canonical one.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Every row of every family.
+fn whole_db(db: &Database) -> std::collections::BTreeMap<(String, Vec<u8>), Vec<u8>> {
+    let mut out = std::collections::BTreeMap::new();
+    for family in sumchain_storage::db::ALL_CFS {
+        for (k, v) in db.iter(family).expect("iterate") {
+            out.insert((family.to_string(), k.into_vec()), v.into_vec());
+        }
+    }
+    out
+}
+
+/// Archiving a losing block writes `BLOCKS` and `TRANSACTIONS` and nothing else
+/// — the canonical height index included.
+#[tokio::test]
+async fn archival_writes_only_the_branch_safe_families_and_never_the_height_index() {
+    let f = fixture();
+    let (winner, loser) = siblings(&f).await;
+
+    let node = Node::new(&f.genesis, f.key);
+    node.consensus
+        .import_block(winner.clone())
+        .await
+        .expect("winner");
+
+    // The canonical database, immediately before a losing sibling arrives.
+    let before = whole_db(&node.db);
+    let height_index_before: std::collections::BTreeMap<_, _> = before
+        .iter()
+        .filter(|((family, _), _)| family == cf::BLOCK_HEIGHT)
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    assert!(
+        !height_index_before.is_empty(),
+        "the fixture must have a canonical height index to protect"
+    );
+
+    node.consensus
+        .import_block(loser.clone())
+        .await
+        .expect("loser");
+    let after = whole_db(&node.db);
+
+    // What changed, as (family, key) pairs — additions and modifications alike.
+    let changed: std::collections::BTreeSet<&String> = after
+        .iter()
+        .filter(|(k, v)| before.get(*k) != Some(*v))
+        .map(|((family, _), _)| family)
+        .collect();
+    let removed: std::collections::BTreeSet<&String> = before
+        .keys()
+        .filter(|k| !after.contains_key(*k))
+        .map(|(family, _)| family)
+        .collect();
+
+    assert!(
+        removed.is_empty(),
+        "archiving a side branch must delete nothing: {removed:?}"
+    );
+    let allowed: std::collections::BTreeSet<String> =
+        [cf::BLOCKS.to_string(), cf::TRANSACTIONS.to_string()]
+            .into_iter()
+            .collect();
+    let disallowed: Vec<&&String> = changed.iter().filter(|c| !allowed.contains(**c)).collect();
+    assert!(
+        disallowed.is_empty(),
+        "a block that lost fork choice wrote outside the two content-addressed \
+         families: {disallowed:?}. Every other family in this schema is keyed \
+         without branch identity, so a side branch's row there shadows the \
+         canonical one — BLOCK_HEIGHT points the chain at a block nobody adopted, \
+         RECEIPTS overwrites a canonical receipt for the same transaction hash, and \
+         the address indexes are keyed by (address, height, tx_index) with no \
+         branch in the key at all"
+    );
+    assert!(
+        changed.contains(&cf::BLOCKS.to_string()),
+        "the losing block must actually have been archived, or this proves nothing"
+    );
+
+    // Said again directly, because it is the row the old bug moved.
+    let height_index_after: std::collections::BTreeMap<_, _> = after
+        .iter()
+        .filter(|((family, _), _)| family == cf::BLOCK_HEIGHT)
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    assert_eq!(
+        height_index_after, height_index_before,
+        "archive_noncanonical must never touch the canonical height index"
+    );
+    assert_ne!(winner.hash(), loser.hash(), "the siblings must differ");
+}

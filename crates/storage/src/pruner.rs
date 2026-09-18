@@ -1,7 +1,37 @@
-//! Database pruning for SUM Chain.
+//! The pruning RULE, and the machinery an operator would need to run it.
 //!
-//! Provides configurable pruning of historical data to manage disk usage
-//! while maintaining chain integrity.
+//! # Nothing in this tree runs a pruner
+//!
+//! Said first because the old sentence here — "provides configurable pruning of
+//! historical data to manage disk usage" — described behaviour this build does
+//! not perform. [`PrunerConfig::enabled`] defaults to `false`, nothing in
+//! `crates/node` constructs a [`Pruner`], and no loop calls one. A reader who
+//! took that sentence at face value would provision disk for a node that prunes
+//! and get a node whose undo families grow for the life of the database.
+//!
+//! That is the SHIPPED DECISION, not an omission (§12.1 of
+//! `docs/lane-a/JOURNAL-CONTRACT.md`): a pruner that never runs cannot delete a
+//! journal a reorg still needs, and the failure it would cause — a self-inflicted
+//! outage mid-switch, with the chain already committed to unwinding — is worse
+//! than the failure it prevents, which is visible in advance, has a metric and
+//! is recoverable.
+//!
+//! # What this module therefore is
+//!
+//! Two things, both real:
+//!
+//! * [`UNDO_RETENTION_FLOOR`] and the retention rule around it — the constraint
+//!   any pruning must satisfy, enforced by [`Pruner::undo_retention`] so an
+//!   operator who turns pruning on cannot configure a window shorter than the
+//!   deepest reorg this engine will plan;
+//! * the CAPACITY machinery below — [`CapacityGuard`], the recorded disk budget,
+//!   and the verdicts the engine consults before producing a block. That part IS
+//!   wired, and it is what gives a node a defined behaviour as it approaches the
+//!   disk it was given instead of discovering the end of it inside a
+//!   `WriteBatch`.
+//!
+//! The disk forecast, the capacity requirement, the alert thresholds and the
+//! fail-safe are §§12.3–12.7 of the contract.
 
 use std::sync::Arc;
 
@@ -194,7 +224,14 @@ pub struct PruneStats {
     pub compacted: bool,
 }
 
-/// Database pruner
+/// A pruner an operator could construct. **Nothing in this tree constructs one.**
+///
+/// The type exists, its retention floor is enforced, and its behaviour is
+/// tested — none of which is the same as pruning running. No `crates/node` code
+/// path builds a `Pruner`, no loop calls [`Pruner::prune`], and
+/// [`PrunerConfig::enabled`] is `false` by default, so on this build the undo
+/// families grow monotonically for the life of the database. See the module
+/// documentation for why that is the shipped decision and what it obliges.
 pub struct Pruner {
     db: Arc<Database>,
     config: PrunerConfig,

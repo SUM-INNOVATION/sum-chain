@@ -1888,14 +1888,36 @@ fn non_execution_paths_are_classified() {
         // up in the ledger, which is what this ledger is for.
         (Class::ChainStorage, 10, "blocks, transactions, receipts, their indexes, validator sets, pruning — not application state"),
 
-        // 1 before the snapshot import recorded what it had done. The two sites
-        // are the account-row import itself and the `META` row saying at which
-        // height it happened — and the second is not bookkeeping about the
-        // first, it is what stops a restart forgetting that this node holds no
-        // undo records at or below that height.
+        // 1 before the snapshot import recorded what it had done; 2 while that
+        // record was a `db.put` of its own; 1 again now. CHANGED DELIBERATELY,
+        // and the direction is the point.
+        //
+        // The vanished site was `snapshot_meta::record_snapshot_import`'s own
+        // `db.put(cf::META, …)`. That module recorded the SAME FACT as
+        // `journal::UNDO_HISTORY_FLOOR_META_KEY` — the earliest height this node
+        // has usable undo history for — under a second key, with its own
+        // encoding, its own decode failure and a last-write-wins rule where the
+        // journal's was monotone. Two rows for one fact do not conflict, they
+        // diverge, and they merge cleanly while being wrong together. They are
+        // collapsed onto the journal's key, and `snapshot_meta` is now three
+        // re-exports with no write of its own, which is why this scan — which
+        // follows resolvable calls and does not resolve a `pub use` rename —
+        // no longer finds a second site here.
+        //
+        // The write still happens, and it is pinned where it now lives:
+        // `storage/one_row_records_the_history_floor_under_every_name_that_reaches_it`
+        // and `storage/the_restore_floor_and_the_restored_state_commit_or_fail_together`.
+        //
+        // And 1 is the END state, not a temporary dip. The production form is
+        // `journal::stage_undo_history_floor`, which stages the floor into the
+        // restore's OWN batch instead of committing a second one — because a
+        // restore that imports rows and then records the floor separately can
+        // crash between the two and leave restored state that does not know its
+        // own floor. When `snapshot.rs` adopts it, this class has exactly one
+        // committed write site: the import batch, carrying both facts.
         (
             Class::Snapshot,
-            2,
+            1,
             "account-family import, outside consensus: no block exists to \
              abandon, so there is no candidate to write through. Note that this \
              class is NOT a fast sync — `restore_snapshot` refuses, because the \
