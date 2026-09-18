@@ -899,3 +899,206 @@ fn sound_activation() -> ChainParams {
     params.application_journal_enabled_from_height = Some(0);
     params
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 8. Cost with a COLD cache
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The per-block cost of the commitment when the data is not already in memory.
+///
+/// `the_cost_of_the_account_commitment_at_a_realistic_account_count` above is
+/// WARM: it writes the account family and immediately scans it, so the rows come
+/// out of the memtable, the block cache and the OS page cache in turn, and the
+/// number it produces is a lower bound on what a running node pays. That
+/// limitation was recorded honestly and never measured. This measures it.
+///
+/// # The three states, and which one a node is actually in
+///
+/// * **warm** — the steady state of a node whose whole account family fits in
+///   memory and is scanned every block. This is what the existing test reports.
+/// * **cold block cache** — RocksDB reopened, its own cache empty, the OS page
+///   cache still holding the SST files. This is a node that has just restarted,
+///   and it is also the floor for a node whose account family is larger than the
+///   block cache but smaller than RAM.
+/// * **cold page cache** — the OS cache evicted too, so the scan reaches the
+///   device. This is a node whose account family does not fit in RAM alongside
+///   everything else the machine is doing, and it is the case that decides
+///   whether the scheme has a ceiling in practice or only in principle.
+///
+/// The first two are measured on every run. The third requires evicting the
+/// page cache, which is not portable and is not cheap — the only reliable way
+/// without privileges is to read enough unrelated data to push the database out
+/// — so it runs only when `ACCOUNT_ROOT_EVICT_PAGE_CACHE` is set to a byte
+/// count. Set it larger than the machine's RAM.
+///
+/// `ACCOUNT_ROOT_COST_ACCOUNTS` sets the account count, default 100,000.
+///
+/// # What is asserted, and what is only reported
+///
+/// The assertion is a tripwire on the SHAPE of the cost — that a cold scan is
+/// still a linear streaming read and has not acquired a per-account seek — not a
+/// benchmark gate. A test machine's absolute timings are not a consensus
+/// parameter and must not become one by being asserted on. The numbers go to
+/// stderr and into the report.
+#[test]
+fn the_cost_of_the_account_commitment_with_a_cold_cache() {
+    let accounts: usize = std::env::var("ACCOUNT_ROOT_COST_ACCOUNTS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(100_000);
+
+    // The directory outlives the database handle, which is the whole mechanism:
+    // "cold" here means a new `Database` over the same files.
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().to_path_buf();
+
+    let (warm, warm_digest) = {
+        let db = Arc::new(Database::open_default(&path).unwrap());
+        // Committed in chunks. One `WriteBatch` holding ten million account rows
+        // is a few hundred megabytes of process memory before a single byte
+        // reaches disk, and a measurement harness that pages the machine is
+        // measuring the machine.
+        const CHUNK: usize = 250_000;
+        let mut batch = db.batch();
+        for i in 0..accounts {
+            let mut raw = [0u8; 20];
+            raw[..8].copy_from_slice(&(i as u64).to_be_bytes());
+            raw[12..].copy_from_slice(&(i as u64).to_be_bytes());
+            let account = AccountState {
+                balance: (i as u128) * 1_000 + 1,
+                nonce: i as u64,
+            };
+            batch
+                .put(
+                    cf::STATE,
+                    &StateStore::account_key(&Address::new(raw)),
+                    &sumchain_storage::schema::encode_account(&account).unwrap(),
+                )
+                .unwrap();
+            if (i + 1) % CHUNK == 0 {
+                batch.commit().unwrap();
+                batch = db.batch();
+            }
+        }
+        batch.commit().unwrap();
+
+        // Onto disk and into one level, so the cold scan below reads SST files
+        // rather than a memtable that survived the reopen in the page cache as
+        // a write-ahead log.
+        db.flush().unwrap();
+        db.compact().unwrap();
+
+        // Two scans; the second is the steady state.
+        let _ = account_state_digest(&db).unwrap();
+        let started = Instant::now();
+        let digest = account_state_digest(&db).unwrap();
+        let elapsed = started.elapsed();
+        (elapsed, digest)
+    };
+
+    // The bytes on disk, summed from the directory rather than from
+    // `Database::approximate_size` — that reads RocksDB's live-data estimate for
+    // the default column family and reports 0 for a database whose rows are all
+    // in `cf::STATE`, which is every database this harness builds.
+    let on_disk: u64 = std::fs::read_dir(&path)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.metadata().ok())
+        .filter(|m| m.is_file())
+        .map(|m| m.len())
+        .sum();
+
+    // Every handle dropped: RocksDB refuses to reopen a directory whose lock is
+    // still held, so a "reopen" that left one alive would be measuring the warm
+    // cache again.
+    let cold_block_cache = {
+        let db = Database::open_default(&path).unwrap();
+        let started = Instant::now();
+        let digest = account_state_digest(&db).unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(
+            digest, warm_digest,
+            "a cold scan must reach the same commitment as a warm one"
+        );
+        elapsed
+    };
+
+    // Optional third state.
+    let cold_page_cache = std::env::var("ACCOUNT_ROOT_EVICT_PAGE_CACHE")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(|bytes| {
+            evict_page_cache(bytes);
+            let db = Database::open_default(&path).unwrap();
+            let started = Instant::now();
+            let digest = account_state_digest(&db).unwrap();
+            let elapsed = started.elapsed();
+            assert_eq!(digest, warm_digest);
+            elapsed
+        });
+
+    let per = |d: std::time::Duration| d.as_secs_f64() * 1e6 / accounts as f64;
+    eprintln!(
+        "ACCOUNT-ROOT COLD COST: {accounts} accounts | on disk {on_disk} B \
+         ({:.1} B/account) | warm {warm:?} ({:.3} us/account) | cold block cache \
+         {cold_block_cache:?} ({:.3} us/account) | cold page cache {} ",
+        on_disk as f64 / accounts as f64,
+        per(warm),
+        per(cold_block_cache),
+        match cold_page_cache {
+            Some(d) => format!("{d:?} ({:.3} us/account)", per(d)),
+            None => "not measured (set ACCOUNT_ROOT_EVICT_PAGE_CACHE=<bytes>)".to_string(),
+        }
+    );
+
+    // The tripwire: a cold scan that had acquired a per-account seek would be
+    // orders of magnitude slower than this, not a small multiple of the warm
+    // number. Deliberately loose — it is a shape check, not a benchmark gate.
+    let cold_per_account = per(cold_block_cache);
+    assert!(
+        cold_per_account < 200.0,
+        "cold per-account fold cost {cold_per_account:.3} us is not a linear \
+         streaming read"
+    );
+}
+
+/// Push the OS page cache out by reading `bytes` of unrelated data.
+///
+/// There is no portable way to drop the page cache: `posix_fadvise(DONTNEED)`
+/// does not exist on macOS, `purge` needs privileges this test does not have,
+/// and `F_NOCACHE` applies to a descriptor this test does not own — RocksDB
+/// opens its own. So the cache is evicted the only way a normal process can,
+/// by making the kernel choose. `bytes` must exceed the machine's RAM for that
+/// choice to reach the database's pages.
+///
+/// This is approximate and it is labelled approximate. It cannot guarantee that
+/// every SST page was evicted, only that far more pressure was applied than the
+/// database occupies, so the resulting number is an upper bound on warm and a
+/// lower bound on a truly cold device read.
+fn evict_page_cache(bytes: u64) {
+    use std::io::{Read, Write};
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("ballast");
+    let chunk = vec![0x5Au8; 64 << 20];
+    {
+        let mut f = std::fs::File::create(&path).unwrap();
+        let mut written = 0u64;
+        while written < bytes {
+            f.write_all(&chunk).unwrap();
+            written += chunk.len() as u64;
+        }
+        f.sync_all().unwrap();
+    }
+    let mut f = std::fs::File::open(&path).unwrap();
+    let mut buf = vec![0u8; 64 << 20];
+    let mut total = 0u64;
+    loop {
+        match f.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => total += n as u64,
+            Err(_) => break,
+        }
+    }
+    eprintln!("page-cache eviction: wrote and read back {total} B of ballast");
+}

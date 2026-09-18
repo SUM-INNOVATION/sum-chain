@@ -684,4 +684,3 @@ fn a_restored_node_has_no_reorg_depth_until_it_has_earned_it() {
     );
     assert_eq!(usable_reorg_depth(result.height, result.height), 0);
 }
-

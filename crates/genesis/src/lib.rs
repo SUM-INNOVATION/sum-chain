@@ -1222,25 +1222,82 @@ impl ChainParams {
     pub fn activation_heights(&self) -> Vec<(&'static str, Option<u64>)> {
         vec![
             ("v2_enabled_from_height", self.v2_enabled_from_height),
-            ("omninode_enabled_from_height", self.omninode_enabled_from_height),
-            ("omninode_sponsored_attestation_enabled_from_height", self.omninode_sponsored_attestation_enabled_from_height),
-            ("education_enabled_from_height", self.education_enabled_from_height),
-            ("contracts_enabled_from_height", self.contracts_enabled_from_height),
-            ("account_root_enabled_from_height", self.account_root_enabled_from_height),
-            ("governance_enabled_from_height", self.governance_enabled_from_height),
-            ("archive_unbonding_enabled_from_height", self.archive_unbonding_enabled_from_height),
-            ("archive_reassignment_enabled_from_height", self.archive_reassignment_enabled_from_height),
-            ("por_assignment_targeting_enabled_from_height", self.por_assignment_targeting_enabled_from_height),
-            ("service_grants_enabled_from_height", self.service_grants_enabled_from_height),
-            ("monetary_policy_enabled_from_height", self.monetary_policy_enabled_from_height),
-            ("assignment_aware_por_scheduler_enabled_from_height", self.assignment_aware_por_scheduler_enabled_from_height),
-            ("inference_settlement_enabled_from_height", self.inference_settlement_enabled_from_height),
-            ("inference_settlement_consistency_enabled_from_height", self.inference_settlement_consistency_enabled_from_height),
-            ("inference_verifier_bonding_enabled_from_height", self.inference_verifier_bonding_enabled_from_height),
-            ("compute_pool_enabled_from_height", self.compute_pool_enabled_from_height),
-            ("application_journal_enabled_from_height", self.application_journal_enabled_from_height),
-            ("beacon_enabled_from_height", self.beacon_enabled_from_height),
-            ("messaging_sponsored_registration_enabled_from_height", self.messaging_sponsored_registration_enabled_from_height),
+            (
+                "omninode_enabled_from_height",
+                self.omninode_enabled_from_height,
+            ),
+            (
+                "omninode_sponsored_attestation_enabled_from_height",
+                self.omninode_sponsored_attestation_enabled_from_height,
+            ),
+            (
+                "education_enabled_from_height",
+                self.education_enabled_from_height,
+            ),
+            (
+                "contracts_enabled_from_height",
+                self.contracts_enabled_from_height,
+            ),
+            (
+                "account_root_enabled_from_height",
+                self.account_root_enabled_from_height,
+            ),
+            (
+                "governance_enabled_from_height",
+                self.governance_enabled_from_height,
+            ),
+            (
+                "archive_unbonding_enabled_from_height",
+                self.archive_unbonding_enabled_from_height,
+            ),
+            (
+                "archive_reassignment_enabled_from_height",
+                self.archive_reassignment_enabled_from_height,
+            ),
+            (
+                "por_assignment_targeting_enabled_from_height",
+                self.por_assignment_targeting_enabled_from_height,
+            ),
+            (
+                "service_grants_enabled_from_height",
+                self.service_grants_enabled_from_height,
+            ),
+            (
+                "monetary_policy_enabled_from_height",
+                self.monetary_policy_enabled_from_height,
+            ),
+            (
+                "assignment_aware_por_scheduler_enabled_from_height",
+                self.assignment_aware_por_scheduler_enabled_from_height,
+            ),
+            (
+                "inference_settlement_enabled_from_height",
+                self.inference_settlement_enabled_from_height,
+            ),
+            (
+                "inference_settlement_consistency_enabled_from_height",
+                self.inference_settlement_consistency_enabled_from_height,
+            ),
+            (
+                "inference_verifier_bonding_enabled_from_height",
+                self.inference_verifier_bonding_enabled_from_height,
+            ),
+            (
+                "compute_pool_enabled_from_height",
+                self.compute_pool_enabled_from_height,
+            ),
+            (
+                "application_journal_enabled_from_height",
+                self.application_journal_enabled_from_height,
+            ),
+            (
+                "beacon_enabled_from_height",
+                self.beacon_enabled_from_height,
+            ),
+            (
+                "messaging_sponsored_registration_enabled_from_height",
+                self.messaging_sponsored_registration_enabled_from_height,
+            ),
         ]
     }
 }

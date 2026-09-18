@@ -75,41 +75,95 @@
 //! order fails the block with [`StateError::AccountScanOutOfOrder`] rather than
 //! producing a plausible-looking root over a differently-ordered fold.
 //!
-//! # Cost, measured
+//! # Cost, measured — on the production account count and with a cold cache
 //!
 //! O(n) in the number of accounts, PER BLOCK, with O(1) memory: no map is
 //! built, no 44·n buffer is materialised, the hasher is fed 44 bytes at a time.
 //! That per-block O(n) is the cost of committing to state rather than to a
 //! write history, and it is the reason the ceiling below matters.
 //!
-//! Measured by `the_cost_of_the_account_commitment_at_a_realistic_account_count`
-//! in `crates/state/tests/account_state_root.rs` (release build, Apple silicon,
-//! warm cache, RocksDB on local SSD):
+//! An earlier version of this note reported warm-cache synthetic figures
+//! against a 2-second block budget and said the scheme was impractical past ten
+//! million accounts. Three things about that were guesses. All three are now
+//! measured, and two of them were wrong.
 //!
-//! | accounts | scan per block | µs/account | share of a 2 s block |
-//! |---------:|---------------:|-----------:|---------------------:|
-//! |     100k |          12 ms |      0.123 |                0.6 % |
-//! |       1M |         117 ms |      0.117 |                5.9 % |
-//! |       5M |         632 ms |      0.126 |               32   % |
-//! |      10M |        1.18 s  |      0.118 |               59   % |
+//! ## The block budget is 1.5 seconds, not 2
 //!
-//! Flat at ~0.12 µs per account across two orders of magnitude, which is the
-//! linear streaming scan the design claims and not an accident of one size.
+//! `block_time_ms` on live mainnet is 3,000, but that is a PROPOSER SLOT. The
+//! chain runs two validators in round-robin, so blocks arrive every 1,506 ms —
+//! measured over 920,593 blocks of real history (heights 12,000,000 to
+//! 12,920,593, 2026-09-17), which is 57,361 blocks per day. Every node executes
+//! every block, so that interval, not the slot, is what this scan has to fit
+//! inside. The budget is TIGHTER than the earlier note assumed.
 //!
-//! **The honest conclusion: this scheme is practical to a few million accounts
-//! and NOT practical past roughly ten million.** At 10M it consumes more than
-//! half a 2-second block budget on every node on every block, which is not a
-//! cost a chain can carry; the replacement at that point is a persistent
-//! authenticated trie whose per-block work is O(touched · log n) rather than
-//! O(n), activated at its own later height under its own domain separator. The
-//! gate and the versioned domain above are what make that replacement a
-//! coordinated upgrade rather than a rewrite.
+//! ## The production account count is 18
 //!
-//! Two limits on the numbers. They are WARM-cache: nothing portable drops the
-//! OS page cache, so a node whose account family does not fit in memory will
-//! pay disk for this scan and these figures are a lower bound. And they are
-//! single-threaded; the fold is order-dependent, so it does not parallelise
-//! without changing the construction.
+//! Not an estimate. Enumerated by walking the transaction graph out from the
+//! two genesis allocations through `sum_getTransactionsByAddress` to closure —
+//! 88 transactions, 18 addresses — and cross-checked against the chain's own
+//! accounting: those 18 balances sum to 999,998,997,000,000,000, which is
+//! `chain_getSupplyInfo.accounted_account_supply` to the base unit. There is no
+//! nineteenth account holding value.
+//!
+//! ## Cold cache costs about 12%, not an order of magnitude
+//!
+//! The account family is small and the scan is sequential, so a cold read is
+//! bandwidth-bound on a contiguous 223 MB at ten million accounts, not
+//! seek-bound. Measured by
+//! `the_cost_of_the_account_commitment_with_a_cold_cache` in
+//! `crates/state/tests/account_state_root.rs` in three states: warm; RocksDB
+//! reopened with an empty block cache; and with the OS page cache evicted by
+//! 24 GiB of ballast on a 16 GiB machine.
+//!
+//! Release build, Apple M5 (10 cores, 16 GiB), RocksDB on local NVMe:
+//!
+//! | accounts | family on disk | warm | cold block cache | cold page cache | µs/account | share of a 1.5 s block |
+//! |---------:|---------------:|-----:|-----------------:|----------------:|-----------:|----------------------:|
+//! |   **18** |        < 1 KiB | 4.6 µs |         29.6 µs |               — |      1.646 |             0.002 % |
+//! |     100k |         3.4 MB | 12.0 ms |        14.7 ms |         15.3 ms |      0.153 |               1.0 % |
+//! |       1M |        23.6 MB | 147 ms |         147 ms |          152 ms |      0.152 |              10   % |
+//! |      10M |         223 MB |  1.45 s |         1.46 s |          1.62 s |      0.162 |             108   % |
+//!
+//! Flat at ~0.15 µs per account from 100k to 10M, cold or warm, which is the
+//! linear streaming scan the design claims. The 18-account row is dominated by
+//! fixed iterator and open cost, not by the fold.
+//!
+//! ## The verdict
+//!
+//! **At the production account count this costs 4.6 microseconds per block —
+//! three millionths of the interval between blocks.** The scheme is not
+//! marginal here; it is free, by nine orders of magnitude.
+//!
+//! **The ceiling is real and it is closer than the old note said.** At ten
+//! million accounts the coldest scan is 1.62 s against a 1,506 ms interval: it
+//! does not fit inside one block at all. Interpolating at 0.16 µs/account, the
+//! scan reaches 10% of the interval at about 940,000 accounts and 50% at about
+//! 4.7 million. So the practical ceiling is a few million, and the replacement
+//! at that point is the persistent authenticated trie rejected above, whose
+//! per-block work is O(touched · log n) rather than O(n), activated at its own
+//! later height under its own domain separator.
+//!
+//! **The distance to that ceiling is the whole argument.** 18 accounts in
+//! 12.9 million blocks is roughly 0.04 new accounts per day. Reaching one
+//! million at that rate takes about 68,000 years; at a thousand times the
+//! historical rate it takes 68 years; at a million times, 25 days. Only the last
+//! of those is a deployment risk, and it is a risk with a warning signal
+//! attached, because the account count is observable and the cost is linear in
+//! it.
+//!
+//! So the trie is not revisited as work to do now. It is revisited as a
+//! TRIGGER: the operational threshold is 500,000 accounts, at which this scan
+//! costs ~80 ms — 5% of the interval, still comfortable, and roughly a year of
+//! warning at any growth rate that reaches it. The gate below and the versioned
+//! domain are what make that replacement a coordinated upgrade rather than a
+//! rewrite.
+//!
+//! Two limits remain on the numbers. The eviction is approximate — there is no
+//! portable way to drop the OS page cache, so the harness applies 24 GiB of
+//! pressure to a 223 MB database rather than proving every page was dropped,
+//! which makes the cold-page figure a lower bound on a truly cold device. And
+//! the fold is single-threaded; it is order-dependent, so it does not
+//! parallelise without changing the construction.
 
 use sumchain_genesis::ChainParams;
 use sumchain_primitives::{Address, Hash};
